@@ -1,0 +1,58 @@
+; fmt/dump.coil — validate the CST reader: print the node tree, indented, with
+; each node's kind, nl-before, and raw text.
+;   ./target/release/coil run fmt/dump.coil <file.coil>
+(module app)
+(import "alloc.coil"     :use *)
+(import "slice.coil"     :use *)
+(import "str.coil"       :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil"        :use *)
+(import "fmt/cst.coil"   :use *)
+
+(extern open  :cc c [(ptr i8) i32] (-> i32))
+(extern close :cc c [i32] (-> i32))
+
+(defn read-file [(a (ptr Allocator)) (path (ptr i8))] (-> (slice u8))
+  (let [fd (open path 0) buf (unwrap-ptr [i8] (raw-alloc a 65536 1)) (mut bytes) (al-new [u8] a)]
+    (loop
+      (let [n (read (cast i64 fd) buf 65536)]
+        (if (icmp-le n 0) (break)
+          (let [(mut i) 0]
+            (loop (if (icmp-ge (load i) n) (break)
+                (do (al-push! (mut bytes) (cast u8 (load (index buf (load i)))))
+                    (store! i (iadd (load i) 1)))))))))
+    (close fd)
+    (al-slice [u8] (load bytes))))
+
+(defn indent [(w (ptr Writer)) (d i64)] (-> i64)
+  (let [(mut i) 0] (loop (if (icmp-ge (load i) d) (break)
+    (do (print-str w "  ") (store! i (iadd (load i) 1)))))) 0)
+
+(defn dump-node [(w (ptr Writer)) (n (ptr Node)) (d i64)] (-> i64)
+  (indent w d)
+  (print-str w "[nl=") (print-int w (node-nl n)) (print-str w "] ")
+  (if (node-comment? n)
+      (do (print-str w "COMMENT ") (print-str w (node-raw n)) (print-str w "\n") 0)
+    (if (node-atom? n)
+        (do (print-str w "ATOM ") (print-str w (node-raw n)) (print-str w "\n") 0)
+      (if (node-list? n)
+          (do (print-str w (if (icmp-eq (node-open n) 40) "( LIST\n" "[ VEC\n"))
+              (let [(mut i) 0 c (node-count n)]
+                (loop (if (icmp-ge (load i) c) (break)
+                  (do (dump-node w (node-nth n (load i)) (iadd d 1))
+                      (store! i (iadd (load i) 1)))))) 0)
+        (do (print-str w "PREFIX\n") 0))))
+  0)
+
+(defn main [(argc :i32) (argv (ptr (ptr i8)))] (-> :i64)
+  (let [a (malloc-allocator) w (stdout)]
+    (if (icmp-lt (cast i64 argc) 2)
+        (do (print-str w "usage: dump <file.coil>\n") 1)
+      (let [src (read-file a (load (index argv 1)))
+            doc (read-doc a src)
+            n (al-len [(ptr Node)] (load doc)) (mut i) 0]
+        (print-str w "forms: ") (print-int w n) (print-str w "\n")
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (dump-node w (al-get [(ptr Node)] (load doc) (load i)) 0)
+              (store! i (iadd (load i) 1)))))
+        0))))

@@ -1,0 +1,296 @@
+; fmt/rules.coil — lower a CST into a Doc, applying Clojure-style layout.
+;
+; The one distinction that drives Lisp layout (per the Clojure style guide):
+;   * function calls    → arguments align under the FIRST argument
+;                           (some-fn arg1
+;                                    arg2)
+;   * macros / bodies   → a fixed 2-space body indent
+;                           (when test
+;                             body)
+; Both are the same shape: keep K leading elements on the head line, then put the
+; rest one-per-line at some indentation. K and the indentation are all that differ,
+; so one `layout` handles lists, vectors, calls, blocks, and defn.
+(module rules)
+(import "alloc.coil"     :use *)
+(import "slice.coil"     :use *)
+(import "str.coil"       :use *)
+(import "arraylist.coil" :use *)
+(import "cst.coil"   :use *)
+(import "doc.coil"   :use *)
+
+; ---- rule table ------------------------------------------------------------
+; style: 0 = CALL (align under first arg), 1 = BLOCK n, 2 = DEFN
+(defstruct Rule [(style i64) (n i64)])
+(defn mk-rule [(style i64) (n i64)] (-> Rule)
+  (let [p (alloc-stack Rule)] (store! (field p style) style) (store! (field p n) n) (load p)))
+
+(defn is [(h (slice u8)) (lit (slice u8))] (-> bool) (str-eq h lit))
+
+; Look up the layout rule for a list whose head symbol is `h`.
+(defn list-rule [(h (slice u8))] (-> Rule)
+  (if (or (is h "defn") (or (is h "defmacro") (is h "defmethod"))) (mk-rule 2 0)
+    (if (is h "do")                                            (mk-rule 1 0)
+      (if (or (is h "let") (or (is h "loop") (or (is h "binding") (is h "let*")))) (mk-rule 1 1)
+        (if (or (is h "when") (or (is h "when-not") (or (is h "unless") (or (is h "while") (is h "when-let"))))) (mk-rule 1 1)
+          (if (is h "if")                                      (mk-rule 1 1)
+            (if (is h "fn")                                    (mk-rule 1 1)
+              (if (or (is h "cond") (or (is h "case") (is h "condp"))) (mk-rule 3 0)
+              (if (is h "match")                                 (mk-rule 1 1)
+                (if (or (is h "defsum") (or (is h "defstruct") (or (is h "deftrait") (is h "defenum")))) (mk-rule 1 1)
+                  (if (is h "impl")                            (mk-rule 1 2)
+                    (mk-rule 0 0))))))))))))   ; default: function call
+
+; ---- predicates over a node ------------------------------------------------
+(defn any-child-multiline [(n (ptr Node))] (-> bool)
+  (let [c (node-count n) (mut i) 1 (mut f) false]   ; child 0 (head) nl is about the list itself
+    (loop (if (icmp-ge (load i) c) (break)
+      (do (if (icmp-gt (node-nl (node-nth n (load i))) 0) (do (store! f true) 0) 0)
+          (store! i (iadd (load i) 1)))))
+    (load f)))
+(defn any-child-comment [(n (ptr Node))] (-> bool)
+  (let [c (node-count n) (mut i) 0 (mut f) false]
+    (loop (if (icmp-ge (load i) c) (break)
+      (do (if (node-comment? (node-nth n (load i))) (do (store! f true) 0) 0)
+          (store! i (iadd (load i) 1)))))
+    (load f)))
+
+; ---- separators ------------------------------------------------------------
+; The doc placed BEFORE a body child, honoring blank lines and trailing comments.
+(defn body-sep [(a (ptr Allocator)) (child (ptr Node))] (-> (ptr Doc))
+  (if (and (node-comment? child) (icmp-eq (node-nl child) 0))
+      (d-text a "  ")                              ; trailing comment: keep on the line
+    (if (icmp-ge (node-nl child) 2)
+        (let [dl (dl-new a)]                       ; preserve one blank line
+          (dl-push! dl (d-hardline a)) (dl-push! dl (d-line a)) (dl-done a dl))
+        (d-line a))))
+
+; ---- core layout -----------------------------------------------------------
+; wrap an assembled child-doc list as a delimited, self-anchoring group.
+(defn seal [(a (ptr Allocator)) (dl (ptr (ArrayList (ptr Doc)))) (forced bool)] (-> (ptr Doc))
+  (let [inner (d-align a 0 (dl-done a dl))]
+    (if forced (d-group-forced a inner) (d-group a inner))))
+
+; push elements [lo, hi) onto dl, each preceded by a single space (stay inline).
+(defn inline-into [(a (ptr Allocator)) (dl (ptr (ArrayList (ptr Doc)))) (n (ptr Node)) (lo i64) (hi i64)] (-> i64)
+  (let [(mut i) lo]
+    (loop (if (icmp-ge (load i) hi) (break)
+      (do (dl-push! dl (d-text a " "))
+          (dl-push! dl (node->doc a (node-nth n (load i))))
+          (store! i (iadd (load i) 1)))))) 0)
+
+; the nested body doc for elements [start, cnt): each on its own line when broken.
+(defn body-doc [(a (ptr Allocator)) (n (ptr Node)) (start i64) (nest-amt i64)] (-> (ptr Doc))
+  (let [cnt (node-count n)]
+    (if (icmp-ge start cnt) (d-nil a)
+      (let [body (dl-new a) (mut j) start]
+        (loop (if (icmp-ge (load j) cnt) (break)
+          (do (dl-push! body (body-sep a (node-nth n (load j))))
+              (dl-push! body (node->doc a (node-nth n (load j))))
+              (store! j (iadd (load j) 1)))))
+        (d-nest a nest-amt (dl-done a body))))))
+
+; The first index in [lo, hi) that is a comment, else hi. Keeps a comment (and
+; everything after it) out of a space-joined inline run, where it would swallow
+; the following code onto its line.
+(defn clamp-before-comment [(n (ptr Node)) (lo i64) (hi i64)] (-> i64)
+  (let [(mut i) lo (mut r) hi]
+    (loop (if (icmp-ge (load i) hi) (break)
+      (if (node-comment? (node-nth n (load i)))
+          (do (store! r (load i)) (break))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; open/close: delimiter bytes. inline-n: how many elements after the head stay on
+; the head line. nest-amt: body indentation past the open delimiter. Element 0 is
+; the "head" (a list's operator, or a vector's first element).
+(defn layout [(a (ptr Allocator)) (n (ptr Node)) (open i64) (close i64)
+              (inline-n i64) (nest-amt i64)] (-> (ptr Doc))
+  (let [cnt (node-count n)]
+    (if (icmp-le cnt 0)
+        (d-text a (if (icmp-eq open 40) "()" "[]"))
+      (let [dl (dl-new a)
+            forced (or (any-child-multiline n) (any-child-comment n))
+            inline-hi (clamp-before-comment n 1 (let [h (iadd 1 inline-n)] (if (icmp-gt h cnt) cnt h)))]
+        (dl-push! dl (d-text a (if (icmp-eq open 40) "(" "[")))
+        (dl-push! dl (node->doc a (node-nth n 0)))                ; head
+        (inline-into a dl n 1 inline-hi)
+        (dl-push! dl (body-doc a n inline-hi nest-amt))
+        (dl-push! dl (d-text a (if (icmp-eq open 40) ")" "]")))
+        (seal a dl forced)))))
+
+; ---- binding-vector layout (let/loop/for/...): elements laid out in PAIRS -----
+; [k1 v1 k2 v2] breaks to
+;   [k1 v1
+;    k2 v2]
+; Comments become their own row; a same-line (trailing) comment sticks to its row.
+(defn layout-binding-vec [(a (ptr Allocator)) (n (ptr Node))] (-> (ptr Doc))
+  (let [cnt (node-count n)]
+    (if (icmp-le cnt 0) (d-text a "[]")
+      (let [rows (build-pair-rows a n 0)
+            forced (or (any-child-multiline n) (any-child-comment n))
+            dl (dl-new a) rn (al-len [(ptr Doc)] (load rows))]
+        ; row 0 on the "[" line, the rest each on their own line at +1
+        (dl-push! dl (d-text a "["))
+        (if (icmp-gt rn 0) (dl-push! dl (al-get [(ptr Doc)] (load rows) 0)) 0)
+        (dl-push! dl (d-nest a 1 (rows-lines a rows 1)))
+        (dl-push! dl (d-text a "]"))
+        (seal a dl forced)))))
+
+; concat of (line row) for rows [start, end) — the "one per line when broken" tail.
+(defn rows-lines [(a (ptr Allocator)) (rows (ptr (ArrayList (ptr Doc)))) (start i64)] (-> (ptr Doc))
+  (let [rn (al-len [(ptr Doc)] (load rows)) rest (dl-new a) (mut k) start]
+    (loop (if (icmp-ge (load k) rn) (break)
+      (do (dl-push! rest (d-line a))
+          (dl-push! rest (al-get [(ptr Doc)] (load rows) (load k)))
+          (store! k (iadd (load k) 1)))))
+    (dl-done a rest)))
+
+; Walk elements [start, cnt) grouping them into PAIR rows ("k v"). Comments form
+; their own row, unless a same-line trailing comment which sticks to its row.
+(defn build-pair-rows [(a (ptr Allocator)) (n (ptr Node)) (start i64)] (-> (ptr (ArrayList (ptr Doc))))
+  (let [cnt (node-count n) rows (dl-new a) (mut cur) (dl-new a)
+        (mut in-row) 0 (mut have) false (mut closed) false]
+    (let [(mut i) start]
+      (loop (if (icmp-ge (load i) cnt) (break)
+        (let [ch (node-nth n (load i))]
+          (if (node-comment? ch)
+              (if (and (load have) (icmp-eq (node-nl ch) 0))
+                  (do (dl-push! (load cur) (d-text a "  "))       ; trailing: stick to row
+                      (dl-push! (load cur) (node->doc a ch))
+                      (store! closed true) 0)                     ; …but nothing else joins this line
+                (do (flush-row a rows (load cur) (load have))     ; standalone comment row
+                    (store! cur (dl-new a)) (store! in-row 0) (store! have false) (store! closed false)
+                    (dl-push! rows (node->doc a ch))))
+            (do
+              (if (or (icmp-ge (load in-row) 2) (load closed))     ; pair complete or line closed → new row
+                  (do (flush-row a rows (load cur) (load have))
+                      (store! cur (dl-new a)) (store! in-row 0) (store! have false) (store! closed false) 0) 0)
+              (if (icmp-eq (load in-row) 0)
+                  (dl-push! (load cur) (node->doc a ch))           ; key
+                (do (dl-push! (load cur) (d-text a " "))           ; value
+                    (dl-push! (load cur) (node->doc a ch))))
+              (store! in-row (iadd (load in-row) 1))
+              (store! have true) 0))
+          (store! i (iadd (load i) 1)))))
+      (flush-row a rows (load cur) (load have)))
+    rows))
+
+; cond / case: clauses laid out in PAIRS, aligned under the first clause.
+;   (cond test1 res1
+;         test2 res2
+;         else)
+(defn layout-clauses [(a (ptr Allocator)) (n (ptr Node))] (-> (ptr Doc))
+  (let [cnt (node-count n)]
+    (if (icmp-le cnt 1) (layout a n 40 41 0 2)
+      (let [rows (build-pair-rows a n 1)
+            forced (or (any-child-multiline n) (any-child-comment n))
+            headlen (slice-len (node-raw-flat a (node-nth n 0)))
+            dl (dl-new a) rn (al-len [(ptr Doc)] (load rows))]
+        (dl-push! dl (d-text a "("))
+        (dl-push! dl (node->doc a (node-nth n 0)))               ; head
+        (if (icmp-gt rn 0)
+            (do (dl-push! dl (d-text a " "))                      ; first clause on head line
+                (dl-push! dl (al-get [(ptr Doc)] (load rows) 0))) 0)
+        (dl-push! dl (d-nest a (iadd headlen 2) (rows-lines a rows 1)))
+        (dl-push! dl (d-text a ")"))
+        (seal a dl forced)))))
+
+(defn flush-row [(a (ptr Allocator)) (rows (ptr (ArrayList (ptr Doc)))) (cur (ptr (ArrayList (ptr Doc)))) (have bool)] (-> i64)
+  (if have (dl-push! rows (dl-done a cur)) 0) 0)
+
+; binding forms: head, a binding vector, then a body indented +2.
+(defn is-binding-form [(h (slice u8))] (-> bool)
+  (or (is h "let") (or (is h "loop") (or (is h "binding") (or (is h "let*")
+      (or (is h "when-let") (or (is h "if-let") (or (is h "for") (is h "doseq")))))))))
+
+(defn layout-binding-form [(a (ptr Allocator)) (n (ptr Node))] (-> (ptr Doc))
+  (let [cnt (node-count n) bv (node-nth n 1)]
+    (if (or (icmp-lt cnt 2) (not (and (node-list? bv) (icmp-eq (node-open bv) 91))))
+        (layout a n 40 41 1 2)                          ; no binding vector: fall back
+      (let [dl (dl-new a)
+            forced (or (any-child-multiline n) (any-child-comment n))]
+        (dl-push! dl (d-text a "("))
+        (dl-push! dl (node->doc a (node-nth n 0)))       ; head (let/loop/…)
+        (dl-push! dl (d-text a " "))
+        (dl-push! dl (layout-binding-vec a bv))          ; PAIR-laid binding vector
+        (dl-push! dl (body-doc a n 2 2))                 ; body +2
+        (dl-push! dl (d-text a ")"))
+        (seal a dl forced)))))
+
+; index (>=1) of the parameter vector in a defn, or -1.
+(defn defn-vec-index [(n (ptr Node))] (-> i64)
+  (let [cnt (node-count n) (mut i) 1 (mut idx) -1]
+    (loop (if (or (icmp-ge (load i) cnt) (icmp-ge (load idx) 0)) (break)
+      (do (let [ch (node-nth n (load i))]
+            (if (and (node-list? ch) (icmp-eq (node-open ch) 91)) (store! idx (load i)) 0))
+          (store! i (iadd (load i) 1)))))
+    (load idx)))
+
+; ---- list dispatch ---------------------------------------------------------
+(defn list->doc [(a (ptr Allocator)) (n (ptr Node))] (-> (ptr Doc))
+  (if (icmp-eq (node-open n) 91)
+      (layout a n 91 93 0 1)                                    ; vector: align under first elem
+    (let [cnt (node-count n)]
+      (if (icmp-le cnt 0) (d-text a "()")
+        (let [h (head-sym n) rp (alloc-stack Rule)]
+          (store! rp (list-rule h))
+          (let [style (load (field rp style)) rn (load (field rp n))]
+          (if (is-binding-form h)
+              (layout-binding-form a n)
+          (if (icmp-eq style 3)
+              (layout-clauses a n)
+          (if (icmp-eq style 0)
+              ; CALL: arg1 inline, rest align under it (nest = headlen + 2)
+              (let [headlen (slice-len (node-raw-flat a (node-nth n 0)))]
+                (layout a n 40 41 1 (iadd headlen 2)))
+            (if (icmp-eq style 2)
+                ; DEFN: signature = up to the param vector (+ optional (-> ...)), body +2
+                (let [vi (defn-vec-index n)]
+                  (if (icmp-lt vi 0)
+                      (layout a n 40 41 1 (iadd (slice-len (node-raw-flat a (node-nth n 0))) 2))
+                    (let [sig-end (if (and (icmp-lt (iadd vi 1) cnt)
+                                           (list-head-is n (iadd vi 1) "->"))
+                                      (iadd vi 1) vi)]
+                      (layout a n 40 41 sig-end 2))))
+              ; BLOCK n
+              (layout a n 40 41 rn 2)))))))))))
+
+; true if child `i` is a list whose head symbol equals `lit`.
+(defn list-head-is [(n (ptr Node)) (i i64) (lit (slice u8))] (-> bool)
+  (let [ch (node-nth n i)]
+    (if (node-list? ch) (str-eq (head-sym ch) lit) false)))
+
+; A flat-text approximation of a node's head, for computing alignment width.
+(defn node-raw-flat [(a (ptr Allocator)) (n (ptr Node))] (-> (slice u8))
+  (if (node-atom? n) (node-raw n) "x"))   ; non-atom head: nominal width 1
+
+; ---- node dispatch ---------------------------------------------------------
+(defn node->doc [(a (ptr Allocator)) (n (ptr Node))] (-> (ptr Doc))
+  (if (node-atom? n) (d-text a (node-raw n))
+    (if (node-comment? n) (d-text a (node-raw n))
+      (if (node-list? n) (list->doc a n)
+        ; prefix: op glued to inner
+        (match (node-kind n)
+          (NPrefix [op inner]
+            (let [dl (dl-new a)]
+              (dl-push! dl (d-text a op)) (dl-push! dl (node->doc a inner)) (dl-done a dl)))
+          (NAtom [_] (d-text a ""))
+          (NList [_ _] (d-text a ""))
+          (NComment [_] (d-text a "")))))))
+
+; ---- document (top level) --------------------------------------------------
+; The whole file: each top-level node on its own line(s), blank lines preserved.
+(defn doc->doc [(a (ptr Allocator)) (nodes (ptr (ArrayList (ptr Node))))] (-> (ptr Doc))
+  (let [cnt (al-len [(ptr Node)] (load nodes)) dl (dl-new a) (mut i) 0]
+    (loop (if (icmp-ge (load i) cnt) (break)
+      (do (let [nd (al-get [(ptr Node)] (load nodes) (load i))]
+            (if (icmp-gt (load i) 0)
+                (if (and (node-comment? nd) (icmp-eq (node-nl nd) 0))
+                    (dl-push! dl (d-text a "  "))            ; trailing comment: same line
+                  (do (dl-push! dl (d-hardline a))
+                      (if (icmp-ge (node-nl nd) 2) (dl-push! dl (d-hardline a)) 0)))
+                0)
+            (dl-push! dl (node->doc a nd)))
+          (store! i (iadd (load i) 1)))))
+    (dl-push! dl (d-hardline a))       ; trailing newline
+    (d-group-forced a (dl-done a dl))))

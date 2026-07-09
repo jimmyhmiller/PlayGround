@@ -1,0 +1,207 @@
+; fmt/cst.coil — Concrete Syntax Tree for the Coil formatter.
+;
+; A byte-level recursive reader that, unlike the compiler's reader, preserves the
+; things a formatter must never lose: comments (as first-class nodes, so they keep
+; their position in a form), blank lines (an nl-before count on every node), and
+; the verbatim text of every atom/string (we never reformat a number or string's
+; insides). Delimiters (), [] are kept distinct. Prefix reader macros ' ` ~ ~@ are
+; nodes that wrap their target so they print glued to it.
+(module cst)
+(import "alloc.coil"     :use *)
+(import "slice.coil"     :use *)
+(import "str.coil"       :use *)
+(import "arraylist.coil" :use *)
+
+; ---- node model ------------------------------------------------------------
+; NAtom    — any verbatim token: int, float, symbol, keyword, "string", c"cstr".
+; NList    — open is the delimiter byte: 40 '(' or 91 '['. items are children in
+;            source order (comments interleaved).
+; NComment — a "; ..." line, verbatim (trailing spaces trimmed, no newline).
+; NPrefix  — a reader-macro glyph glued to the form it wraps.
+(defsum NodeKind
+  (NAtom    [(raw (slice u8))])
+  (NList    [(open i64) (items (ptr (ArrayList (ptr Node))))])
+  (NComment [(raw (slice u8))])
+  (NPrefix  [(op (slice u8)) (inner (ptr Node))]))
+
+; nl-before: count of newlines between the previous token and this node's start.
+;   0   => same line as the previous node
+;   1   => next line
+;   >=2 => blank line(s) before it (we later preserve exactly one)
+(defstruct Node [(kind NodeKind) (nl-before i64)])
+
+(defn box-node [(a (ptr Allocator)) (k NodeKind) (nl i64)] (-> (ptr Node))
+  (let [p (unwrap-ptr [Node] (create [Node] a))]
+    (store! (field p kind) k) (store! (field p nl-before) nl)
+    p))
+
+; ---- reader cursor ---------------------------------------------------------
+(defstruct Rdr [(src (slice u8)) (pos i64) (a (ptr Allocator))])
+
+(defn r-end? [(r (ptr Rdr))] (-> bool)
+  (icmp-ge (load (field r pos)) (slice-len (load (field r src)))))
+(defn r-peek [(r (ptr Rdr))] (-> i64)
+  (if (r-end? r) -1 (cast i64 (slice-get (load (field r src)) (load (field r pos))))))
+(defn r-peek2 [(r (ptr Rdr))] (-> i64)
+  (let [p (iadd (load (field r pos)) 1)]
+    (if (icmp-ge p (slice-len (load (field r src)))) -1
+        (cast i64 (slice-get (load (field r src)) p)))))
+(defn r-adv [(r (ptr Rdr))] (-> i64)
+  (store! (field r pos) (iadd (load (field r pos)) 1)) 0)
+
+; ---- character classes -----------------------------------------------------
+(defn is-ws [(c i64)] (-> bool)
+  (or (icmp-eq c 32) (or (icmp-eq c 9) (or (icmp-eq c 10)
+      (or (icmp-eq c 13) (or (icmp-eq c 11) (icmp-eq c 12)))))))
+
+; a byte that ends an atom run: whitespace, any delimiter, comment, string, or a
+; reader-macro glyph, or EOF.
+(defn is-atom-delim [(c i64)] (-> bool)
+  (if (icmp-eq c -1) true
+    (if (is-ws c) true
+      (or (icmp-eq c 40) (or (icmp-eq c 41) (or (icmp-eq c 91) (or (icmp-eq c 93)
+          (or (icmp-eq c 59) (or (icmp-eq c 34) (or (icmp-eq c 39)
+          (or (icmp-eq c 96) (icmp-eq c 126)))))))))) ))
+
+; ---- whitespace ------------------------------------------------------------
+; skip spaces/tabs/newlines (NOT comments — those are nodes); return newline count.
+(defn skip-ws [(r (ptr Rdr))] (-> i64)
+  (let [(mut nl) 0]
+    (loop
+      (let [c (r-peek r)]
+        (if (is-ws c)
+            (do (if (icmp-eq c 10) (store! nl (iadd (load nl) 1)) 0) (r-adv r))
+            (break))))
+    (load nl)))
+
+; trim trailing spaces/tabs off a slice (used for comment text)
+(defn trim-trailing [(s (slice u8))] (-> (slice u8))
+  (let [(mut n) (slice-len s)]
+    (loop
+      (if (icmp-le (load n) 0) (break)
+        (let [c (cast i64 (slice-get s (isub (load n) 1)))]
+          (if (or (icmp-eq c 32) (icmp-eq c 9)) (store! n (isub (load n) 1)) (break)))))
+    (subslice s 0 (load n))))
+
+; ---- token readers ---------------------------------------------------------
+; a "; ..." comment, verbatim to end of line (newline not consumed).
+(defn read-comment [(r (ptr Rdr))] (-> (slice u8))
+  (let [start (load (field r pos))]
+    (loop
+      (let [c (r-peek r)]
+        (if (or (icmp-eq c -1) (icmp-eq c 10)) (break) (r-adv r))))
+    (trim-trailing (subslice (load (field r src)) start (load (field r pos))))))
+
+; a "..."/c"..." string literal, verbatim INCLUDING the quotes (and any leading c).
+(defn read-string [(r (ptr Rdr)) (start i64)] (-> (slice u8))
+  (r-adv r)  ; consume opening quote
+  (loop
+    (let [c (r-peek r)]
+      (if (icmp-eq c -1) (break)
+        (do (r-adv r)
+            (if (icmp-eq c 92)                       ; backslash: skip escaped char
+                (if (icmp-ne (r-peek r) -1) (r-adv r) 0)
+              (if (icmp-eq c 34) (break) 0))))))       ; closing quote
+  (subslice (load (field r src)) start (load (field r pos))))
+
+; a run of non-delimiter bytes; folds the c"..." case (a lone `c` before a quote).
+(defn read-atom [(r (ptr Rdr))] (-> (slice u8))
+  (let [start (load (field r pos))]
+    (loop (if (is-atom-delim (r-peek r)) (break) (r-adv r)))
+    (let [end (load (field r pos))]
+      (if (and (icmp-eq (isub end start) 1)
+               (and (icmp-eq (cast i64 (slice-get (load (field r src)) start)) 99)
+                    (icmp-eq (r-peek r) 34)))
+          (read-string r start)                        ; c"..." — extend over the string
+          (subslice (load (field r src)) start end)))))
+
+; ---- node reader -----------------------------------------------------------
+; Read one node. Returns a null (ptr Node) at EOF or when the next byte is a close
+; delimiter (the caller consumes the close). nl-before is stamped from the run of
+; whitespace skipped just before the node.
+(defn read-node [(r (ptr Rdr))] (-> (ptr Node))
+  (let [nl (skip-ws r) c (r-peek r) a (load (field r a))]
+    (if (icmp-eq c -1) (cast (ptr Node) 0)
+      (if (or (icmp-eq c 41) (icmp-eq c 93)) (cast (ptr Node) 0)   ; close delim
+        (if (icmp-eq c 59)
+            (box-node a (NComment (read-comment r)) nl)
+          (if (or (icmp-eq c 40) (icmp-eq c 91))
+              (box-node a (read-list r c) nl)
+            (if (or (icmp-eq c 39) (or (icmp-eq c 96) (icmp-eq c 126)))
+                (box-node a (read-prefix r c) nl)
+              (if (icmp-eq c 34)
+                  (box-node a (NAtom (read-string r (load (field r pos)))) nl)
+                (box-node a (NAtom (read-atom r)) nl)))))))))
+
+(defn read-prefix [(r (ptr Rdr)) (c i64)] (-> NodeKind)
+  (let [a (load (field r a))]
+    (r-adv r)
+    (let [op (if (icmp-eq c 39) "'"
+               (if (icmp-eq c 96) "`"
+                 (if (and (icmp-eq c 126) (icmp-eq (r-peek r) 64))
+                     (do (r-adv r) "~@")
+                     "~")))
+          inner (read-node r)]
+      (NPrefix op (if (icmp-eq (cast i64 inner) 0)
+                      (box-node a (NAtom "") 0)   ; dangling prefix (best-effort)
+                      inner)))))
+
+(defn read-list [(r (ptr Rdr)) (open i64)] (-> NodeKind)
+  (let [a (load (field r a)) close (if (icmp-eq open 40) 41 93)
+        (mut items) (al-new [(ptr Node)] a)]
+    (r-adv r)  ; consume open
+    (loop
+      (let [child (read-node r)]
+        (if (icmp-ne (cast i64 child) 0)
+            (al-push! (mut items) child)
+          (let [c (r-peek r)]
+            (if (icmp-eq c close) (do (r-adv r) (break))
+              (if (icmp-eq c -1) (break)            ; unterminated — tolerate
+                (do (r-adv r) (break))))))))          ; mismatched — tolerate
+    (NList open (let [p (unwrap-ptr [(ArrayList (ptr Node))]
+                                    (create [(ArrayList (ptr Node))] a))]
+                  (store! p (load items)) p))))
+
+; ---- entry point -----------------------------------------------------------
+; Parse the whole source into a top-level list of nodes (forms + comments), in
+; order, each carrying nl-before.
+(defn read-doc [(a (ptr Allocator)) (src (slice u8))] (-> (ptr (ArrayList (ptr Node))))
+  (let [r (alloc-stack Rdr) (mut forms) (al-new [(ptr Node)] a)]
+    (store! (field r src) src) (store! (field r pos) 0) (store! (field r a) a)
+    (loop
+      (let [f (read-node r)]
+        (if (icmp-ne (cast i64 f) 0) (al-push! (mut forms) f)
+          (if (icmp-eq (r-peek r) -1) (break)
+            (r-adv r)))))                             ; skip stray close delim
+    (let [p (unwrap-ptr [(ArrayList (ptr Node))] (create [(ArrayList (ptr Node))] a))]
+      (store! p (load forms)) p)))
+
+; ---- accessors -------------------------------------------------------------
+(defn node-kind [(n (ptr Node))] (-> NodeKind) (load (field n kind)))
+(defn node-nl [(n (ptr Node))] (-> i64) (load (field n nl-before)))
+
+(defn node-atom? [(n (ptr Node))] (-> bool)
+  (match (node-kind n) (NAtom [_] true) (NList [_ _] false) (NComment [_] false) (NPrefix [_ _] false)))
+(defn node-list? [(n (ptr Node))] (-> bool)
+  (match (node-kind n) (NList [_ _] true) (NAtom [_] false) (NComment [_] false) (NPrefix [_ _] false)))
+(defn node-comment? [(n (ptr Node))] (-> bool)
+  (match (node-kind n) (NComment [_] true) (NAtom [_] false) (NList [_ _] false) (NPrefix [_ _] false)))
+
+(defn node-raw [(n (ptr Node))] (-> (slice u8))
+  (match (node-kind n) (NAtom [s] s) (NComment [s] s) (NList [_ _] "") (NPrefix [_ _] "")))
+(defn node-items [(n (ptr Node))] (-> (ptr (ArrayList (ptr Node))))
+  (match (node-kind n) (NList [_ items] items)
+    (NAtom [_] (cast (ptr (ArrayList (ptr Node))) 0))
+    (NComment [_] (cast (ptr (ArrayList (ptr Node))) 0))
+    (NPrefix [_ _] (cast (ptr (ArrayList (ptr Node))) 0))))
+(defn node-open [(n (ptr Node))] (-> i64)
+  (match (node-kind n) (NList [o _] o) (NAtom [_] 40) (NComment [_] 40) (NPrefix [_ _] 40)))
+(defn node-count [(n (ptr Node))] (-> i64)
+  (if (node-list? n) (al-len [(ptr Node)] (load (node-items n))) 0))
+(defn node-nth [(n (ptr Node)) (i i64)] (-> (ptr Node))
+  (al-get [(ptr Node)] (load (node-items n)) i))
+
+; head symbol of a list: raw text of item 0 if it is an atom, else "".
+(defn head-sym [(n (ptr Node))] (-> (slice u8))
+  (if (icmp-le (node-count n) 0) ""
+    (let [h (node-nth n 0)] (if (node-atom? h) (node-raw h) ""))))

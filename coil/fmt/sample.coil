@@ -1,0 +1,11 @@
+; a comment at top
+(module app)
+
+(defn add [(a i64) (b i64)] (-> i64)
+  (iadd a b))   ; trailing comment
+
+(defn main [] (-> i64)
+  (let [x 'sym  ; quoted
+        s "a \"str\""
+        cs c"cstr"]
+    (add x (foo [1 2 3] `(a ~b ~@c)))))
