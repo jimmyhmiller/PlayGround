@@ -1,0 +1,255 @@
+; ============================================================================
+; i8080.coil — an Intel 8080 CPU, ported directly from emulator101's 8080emu.c
+; (public domain). Front-end agnostic: the CP/M test harness (cputest.coil) and
+; the Space Invaders machine both drive this core. Faithful to the reference,
+; INCLUDING its quirks (no AC flag; CMC clears rather than complements; RST
+; pushes pc+2) — the oracle is a byte-for-byte match of the C's output.
+;
+; The C's flat 256-case switch collapses here into pattern handlers: register
+; index r = (op>>3)&7 for dst / op&7 for src (6 = memory@HL); pair code, cc code,
+; and RST vector all fall out of the opcode bits.
+; ============================================================================
+
+(module i8080)
+(export Cpu init load-com emulate gen-interrupt
+        reg setr rb wb rpc spc getf pop16)
+
+(import "control.coil" :use *)   ; cond / for / while
+
+(extern open   :cc c [(ptr i8) :i64] (-> :i32))
+(extern read   :cc c [:i64 (ptr i8) :i64] (-> :i64))
+(extern close  :cc c [:i64] (-> :i32))
+(extern memset :cc c [(ptr i8) :i64 :i64] (-> (ptr i8)))
+
+; registers packed by 8080 3-bit encoding: 0=B 1=C 2=D 3=E 4=H 5=L 6=M(unused) 7=A
+; f is the raw PSW flag byte (cy=bit0, p=bit2, ac=bit4, z=bit6, s=bit7).
+(defstruct Cpu
+  [(mem  (array u8 65536))
+   (regs (array u8 8))
+   (sp i64) (pc i64) (f i64) (ie i64)])
+
+; ---- register / memory access ----------------------------------------------
+(defn reg  [(s (ptr Cpu)) (i i64)] (-> i64) (cast :i64 (load (index (field s regs) i))))
+(defn setr [(s (ptr Cpu)) (i i64) (v i64)] (-> i64)
+  (do (store! (index (field s regs) i) (cast :u8 v)) 0))
+(defn rb   [(s (ptr Cpu)) (a i64)] (-> i64) (cast :i64 (load (index (field s mem) (iand a 0xFFFF)))))
+(defn wb   [(s (ptr Cpu)) (a i64) (v i64)] (-> i64)
+  (do (store! (index (field s mem) (iand a 0xFFFF)) (cast :u8 v)) 0))
+(defn hl   [(s (ptr Cpu))] (-> i64) (ior (ishl (reg s 4) 8) (reg s 5)))
+
+; M-aware register read/write: index 6 means the byte at HL.
+(defn getr [(s (ptr Cpu)) (i i64)] (-> i64) (if (icmp-eq i 6) (rb s (hl s)) (reg s i)))
+(defn setr8 [(s (ptr Cpu)) (i i64) (v i64)] (-> i64) (if (icmp-eq i 6) (wb s (hl s) v) (setr s i v)))
+
+; ---- pc / sp ---------------------------------------------------------------
+(defn rpc [(s (ptr Cpu))] (-> i64) (load (field s pc)))
+(defn spc [(s (ptr Cpu)) (v i64)] (-> i64) (do (store! (field s pc) (iand v 0xFFFF)) 0))
+(defn addpc [(s (ptr Cpu)) (n i64)] (-> i64) (spc s (iadd (rpc s) n)))
+
+; ---- 16-bit register pairs (code 0=BC 1=DE 2=HL 3=SP) ----------------------
+(defn pget [(s (ptr Cpu)) (code i64)] (-> i64)
+  (cond (icmp-eq code 0) (ior (ishl (reg s 0) 8) (reg s 1))
+        (icmp-eq code 1) (ior (ishl (reg s 2) 8) (reg s 3))
+        (icmp-eq code 2) (ior (ishl (reg s 4) 8) (reg s 5))
+        (load (field s sp))))
+(defn pset [(s (ptr Cpu)) (code i64) (v i64)] (-> i64)
+  (let [hi (iand (ishr v 8) 0xFF) lo (iand v 0xFF)]
+    (cond (icmp-eq code 0) (do (setr s 0 hi) (setr s 1 lo))
+          (icmp-eq code 1) (do (setr s 2 hi) (setr s 3 lo))
+          (icmp-eq code 2) (do (setr s 4 hi) (setr s 5 lo))
+          (do (store! (field s sp) (iand v 0xFFFF)) 0))))
+
+; ---- stack -----------------------------------------------------------------
+(defn push16 [(s (ptr Cpu)) (v i64)] (-> i64)
+  (let [sp (load (field s sp))]
+    (do (wb s (iand (isub sp 1) 0xFFFF) (iand (ishr v 8) 0xFF))
+        (wb s (iand (isub sp 2) 0xFFFF) (iand v 0xFF))
+        (store! (field s sp) (iand (isub sp 2) 0xFFFF)) 0)))
+(defn pop16 [(s (ptr Cpu))] (-> i64)
+  (let [sp (load (field s sp)) lo (rb s sp) hi (rb s (iadd sp 1))]
+    (do (store! (field s sp) (iand (iadd sp 2) 0xFFFF)) (ior (ishl hi 8) lo))))
+
+; ---- flags (bit positions: CY=0 P=2 AC=4 Z=6 S=7) --------------------------
+(defn getf [(s (ptr Cpu)) (bit i64)] (-> i64) (iand (ishr (load (field s f)) bit) 1))
+(defn setf [(s (ptr Cpu)) (bit i64) (v i64)] (-> i64)
+  (let [cur (load (field s f))]
+    (do (store! (field s f) (ior (iand cur (ixor 0xFF (ishl 1 bit))) (ishl (iand v 1) bit))) 0)))
+
+(defn parity8 [(x i64)] (-> i64)
+  (let [p (alloc-stack i64) y (alloc-stack i64)]
+    (do (store! p 0) (store! y (iand x 0xFF))
+        (for [i 0 8] (do (store! p (iadd (load p) (iand (load y) 1)))
+                         (store! y (ishr (load y) 1))))
+        (if (icmp-eq (iand (load p) 1) 0) 1 0))))
+
+(defn flags-zsp [(s (ptr Cpu)) (val i64)] (-> i64)
+  (let [v (iand val 0xFF)]
+    (do (setf s 6 (if (icmp-eq v 0) 1 0))
+        (setf s 7 (if (icmp-eq (iand v 0x80) 0x80) 1 0))
+        (setf s 2 (parity8 v)) 0)))
+(defn arith-flags [(s (ptr Cpu)) (res i64)] (-> i64)
+  (do (setf s 0 (if (icmp-gt res 0xFF) 1 0))
+      (setf s 6 (if (icmp-eq (iand res 0xFF) 0) 1 0))
+      (setf s 7 (if (icmp-eq (iand res 0x80) 0x80) 1 0))
+      (setf s 2 (parity8 (iand res 0xFF))) 0))
+(defn logic-flags [(s (ptr Cpu))] (-> i64)
+  (let [a (reg s 7)]
+    (do (setf s 0 0) (setf s 4 0)
+        (setf s 6 (if (icmp-eq a 0) 1 0))
+        (setf s 7 (if (icmp-eq (iand a 0x80) 0x80) 1 0))
+        (setf s 2 (parity8 a)) 0)))
+
+; ---- collapsed instruction families ----------------------------------------
+(defn inr [(s (ptr Cpu)) (op i64)] (-> i64)
+  (let [r (iand (ishr op 3) 7) v (iand (iadd (getr s r) 1) 0xFF)]
+    (do (setr8 s r v) (flags-zsp s v))))
+(defn dcr [(s (ptr Cpu)) (op i64)] (-> i64)
+  (let [r (iand (ishr op 3) 7) v (iand (isub (getr s r) 1) 0xFF)]
+    (do (setr8 s r v) (flags-zsp s v))))
+(defn inx [(s (ptr Cpu)) (op i64)] (-> i64)
+  (let [rp (iand (ishr op 4) 3)] (pset s rp (iand (iadd (pget s rp) 1) 0xFFFF))))
+(defn dcx [(s (ptr Cpu)) (op i64)] (-> i64)
+  (let [rp (iand (ishr op 4) 3)] (pset s rp (iand (isub (pget s rp) 1) 0xFFFF))))
+(defn dad [(s (ptr Cpu)) (op i64)] (-> i64)
+  (let [rp (iand (ishr op 4) 3) res (iadd (hl s) (pget s rp))]
+    (do (pset s 2 (iand res 0xFFFF)) (setf s 0 (if (icmp-gt res 0xFFFF) 1 0)))))
+(defn rot [(s (ptr Cpu)) (op i64)] (-> i64)
+  (let [kind (iand (ishr op 3) 3) a (reg s 7)]
+    (cond
+      (icmp-eq kind 0) (do (setr s 7 (iand (ior (ishr a 7) (ishl a 1)) 0xFF))       ; RLC
+                           (setf s 0 (if (icmp-eq (iand a 0x80) 0x80) 1 0)))
+      (icmp-eq kind 1) (do (setr s 7 (iand (ior (ishl (iand a 1) 7) (ishr a 1)) 0xFF)) ; RRC
+                           (setf s 0 (iand a 1)))
+      (icmp-eq kind 2) (do (setr s 7 (iand (ior (getf s 0) (ishl a 1)) 0xFF))        ; RAL
+                           (setf s 0 (if (icmp-eq (iand a 0x80) 0x80) 1 0)))
+      (do (setr s 7 (iand (ior (ishl (getf s 0) 7) (ishr a 1)) 0xFF))               ; RAR
+          (setf s 0 (iand a 1))))))
+(defn daa [(s (ptr Cpu))] (-> i64)
+  (do (if (icmp-gt (iand (reg s 7) 0xF) 9) (setr s 7 (iand (iadd (reg s 7) 6) 0xFF)) 0)
+      (if (icmp-gt (iand (reg s 7) 0xF0) 0x90)
+          (let [res (iadd (reg s 7) 0x60)] (do (setr s 7 (iand res 0xFF)) (arith-flags s res)))
+          0)))
+
+; register ALU A,r  (0x80..0xbf): kind = (op>>3)&7, src = op&7
+(defn alu [(s (ptr Cpu)) (op i64)] (-> i64)
+  (let [kind (iand (ishr op 3) 7) x (getr s (iand op 7)) a (reg s 7)]
+    (cond
+      (icmp-eq kind 0) (let [r (iand (iadd a x) 0xFFFF)] (do (arith-flags s r) (setr s 7 (iand r 0xFF))))
+      (icmp-eq kind 1) (let [r (iand (iadd (iadd a x) (getf s 0)) 0xFFFF)] (do (arith-flags s r) (setr s 7 (iand r 0xFF))))
+      (icmp-eq kind 2) (let [r (iand (isub a x) 0xFFFF)] (do (arith-flags s r) (setr s 7 (iand r 0xFF))))
+      (icmp-eq kind 3) (let [r (iand (isub (isub a x) (getf s 0)) 0xFFFF)] (do (arith-flags s r) (setr s 7 (iand r 0xFF))))
+      (icmp-eq kind 4) (do (setr s 7 (iand a x)) (logic-flags s))
+      (icmp-eq kind 5) (do (setr s 7 (ixor a x)) (logic-flags s))
+      (icmp-eq kind 6) (do (setr s 7 (ior a x)) (logic-flags s))
+      (arith-flags s (iand (isub a x) 0xFFFF)))))       ; CMP: flags only
+
+; conditions for Jcc/Ccc/Rcc: code=(op>>3)&7 → NZ Z NC C PO PE P M
+(defn test-cc [(s (ptr Cpu)) (code i64)] (-> i64)
+  (cond (icmp-eq code 0) (if (icmp-eq (getf s 6) 0) 1 0)
+        (icmp-eq code 1) (getf s 6)
+        (icmp-eq code 2) (if (icmp-eq (getf s 0) 0) 1 0)
+        (icmp-eq code 3) (getf s 0)
+        (icmp-eq code 4) (if (icmp-eq (getf s 2) 0) 1 0)
+        (icmp-eq code 5) (getf s 2)
+        (icmp-eq code 6) (if (icmp-eq (getf s 7) 0) 1 0)
+        (getf s 7)))
+
+(defn call-sub [(s (ptr Cpu)) (addr i64)] (-> i64)
+  (let [ret (iadd (rpc s) 2)] (do (push16 s ret) (spc s addr))))
+
+; ---- decode blocks ---------------------------------------------------------
+(defn lo [(s (ptr Cpu)) (op i64) (b1 i64) (b2 i64)] (-> i64)  ; 0x00..0x3f
+  (cond
+    (icmp-eq (iand op 0xC7) 0x04) (inr s op)
+    (icmp-eq (iand op 0xC7) 0x05) (dcr s op)
+    (icmp-eq (iand op 0xC7) 0x06) (do (setr8 s (iand (ishr op 3) 7) b1) (addpc s 1))   ; MVI
+    (icmp-eq (iand op 0xCF) 0x01) (do (pset s (iand (ishr op 4) 3) (ior (ishl b2 8) b1)) (addpc s 2)) ; LXI
+    (icmp-eq (iand op 0xCF) 0x03) (inx s op)
+    (icmp-eq (iand op 0xCF) 0x0B) (dcx s op)
+    (icmp-eq (iand op 0xCF) 0x09) (dad s op)
+    (icmp-eq (iand op 0xE7) 0x07) (rot s op)
+    (icmp-eq op 0x02) (wb s (pget s 0) (reg s 7))                                       ; STAX B
+    (icmp-eq op 0x0A) (setr s 7 (rb s (pget s 0)))                                      ; LDAX B
+    (icmp-eq op 0x12) (wb s (pget s 1) (reg s 7))                                       ; STAX D
+    (icmp-eq op 0x1A) (setr s 7 (rb s (pget s 1)))                                      ; LDAX D
+    (icmp-eq op 0x22) (let [a (ior (ishl b2 8) b1)]                                     ; SHLD
+                        (do (wb s a (reg s 5)) (wb s (iadd a 1) (reg s 4)) (addpc s 2)))
+    (icmp-eq op 0x2A) (let [a (ior (ishl b2 8) b1)]                                     ; LHLD
+                        (do (setr s 5 (rb s a)) (setr s 4 (rb s (iadd a 1))) (addpc s 2)))
+    (icmp-eq op 0x27) (daa s)                                                           ; DAA
+    (icmp-eq op 0x2F) (setr s 7 (iand (ixor (reg s 7) 0xFF) 0xFF))                      ; CMA
+    (icmp-eq op 0x32) (do (wb s (ior (ishl b2 8) b1) (reg s 7)) (addpc s 2))            ; STA
+    (icmp-eq op 0x37) (setf s 0 1)                                                      ; STC
+    (icmp-eq op 0x3A) (do (setr s 7 (rb s (ior (ishl b2 8) b1))) (addpc s 2))           ; LDA
+    (icmp-eq op 0x3F) (setf s 0 0)                                                      ; CMC (ref sets cy=0)
+    0))                                                                                 ; NOP / undocumented
+
+(defn hi [(s (ptr Cpu)) (op i64) (b1 i64) (b2 i64)] (-> i64)  ; 0xc0..0xff
+  (let [addr (ior (ishl b2 8) b1)]
+    (cond
+      (icmp-eq (iand op 0xCF) 0xC5)                                                     ; PUSH rp (rp3 = PSW)
+        (let [rp (iand (ishr op 4) 3)]
+          (if (icmp-eq rp 3) (push16 s (ior (ishl (reg s 7) 8) (load (field s f)))) (push16 s (pget s rp))))
+      (icmp-eq (iand op 0xCF) 0xC1)                                                     ; POP rp
+        (let [rp (iand (ishr op 4) 3) v (pop16 s)]
+          (if (icmp-eq rp 3) (do (setr s 7 (iand (ishr v 8) 0xFF)) (store! (field s f) (iand v 0xFF)) 0)
+              (pset s rp v)))
+      (icmp-eq (iand op 0xC7) 0xC7) (let [n (iand (ishr op 3) 7) ret (iadd (rpc s) 2)]  ; RST n (ref: pc+2)
+                                      (do (push16 s ret) (spc s (imul n 8))))
+      (icmp-eq (iand op 0xC7) 0xC0) (if (icmp-eq (test-cc s (iand (ishr op 3) 7)) 1) (spc s (pop16 s)) 0) ; Rcc
+      (icmp-eq (iand op 0xC7) 0xC2) (if (icmp-eq (test-cc s (iand (ishr op 3) 7)) 1) (spc s addr) (addpc s 2)) ; Jcc
+      (icmp-eq (iand op 0xC7) 0xC4) (if (icmp-eq (test-cc s (iand (ishr op 3) 7)) 1) (call-sub s addr) (addpc s 2)) ; Ccc
+      (icmp-eq op 0xC3) (spc s addr)                                                    ; JMP
+      (icmp-eq op 0xC9) (spc s (pop16 s))                                               ; RET
+      (icmp-eq op 0xCD) (call-sub s addr)                                                   ; CALL
+      (icmp-eq op 0xC6) (let [x (iadd (reg s 7) b1)]                                    ; ADI
+                          (do (flags-zsp s (iand x 0xFF)) (setf s 0 (if (icmp-gt x 0xFF) 1 0)) (setr s 7 (iand x 0xFF)) (addpc s 1)))
+      (icmp-eq op 0xCE) (let [x (iadd (iadd (reg s 7) b1) (getf s 0))]                  ; ACI
+                          (do (flags-zsp s (iand x 0xFF)) (setf s 0 (if (icmp-gt x 0xFF) 1 0)) (setr s 7 (iand x 0xFF)) (addpc s 1)))
+      (icmp-eq op 0xD6) (let [old (reg s 7) x (iand (isub (reg s 7) b1) 0xFF)]          ; SUI
+                          (do (flags-zsp s x) (setf s 0 (if (icmp-lt old b1) 1 0)) (setr s 7 x) (addpc s 1)))
+      (icmp-eq op 0xDE) (let [x (iand (isub (isub (reg s 7) b1) (getf s 0)) 0xFFFF)]    ; SBI
+                          (do (flags-zsp s (iand x 0xFF)) (setf s 0 (if (icmp-gt x 0xFF) 1 0)) (setr s 7 (iand x 0xFF)) (addpc s 1)))
+      (icmp-eq op 0xE6) (do (setr s 7 (iand (reg s 7) b1)) (logic-flags s) (addpc s 1)) ; ANI
+      (icmp-eq op 0xEE) (let [x (iand (ixor (reg s 7) b1) 0xFF)]                        ; XRI
+                          (do (flags-zsp s x) (setf s 0 0) (setr s 7 x) (addpc s 1)))
+      (icmp-eq op 0xF6) (let [x (iand (ior (reg s 7) b1) 0xFF)]                         ; ORI
+                          (do (flags-zsp s x) (setf s 0 0) (setr s 7 x) (addpc s 1)))
+      (icmp-eq op 0xFE) (let [old (reg s 7) x (iand (isub (reg s 7) b1) 0xFF)]          ; CPI
+                          (do (flags-zsp s x) (setf s 0 (if (icmp-lt old b1) 1 0)) (addpc s 1)))
+      (icmp-eq op 0xE3) (let [sp (load (field s sp)) l (reg s 5) h (reg s 4)]           ; XTHL
+                          (do (setr s 5 (rb s sp)) (setr s 4 (rb s (iadd sp 1))) (wb s sp l) (wb s (iadd sp 1) h)))
+      (icmp-eq op 0xE9) (spc s (hl s))                                                  ; PCHL
+      (icmp-eq op 0xEB) (let [d (reg s 2) e (reg s 3)]                                  ; XCHG
+                          (do (setr s 2 (reg s 4)) (setr s 3 (reg s 5)) (setr s 4 d) (setr s 5 e)))
+      (icmp-eq op 0xF9) (do (store! (field s sp) (hl s)) 0)                             ; SPHL
+      (icmp-eq op 0xF3) (do (store! (field s ie) 0) 0)                                  ; DI
+      (icmp-eq op 0xFB) (do (store! (field s ie) 1) 0)                                  ; EI
+      (icmp-eq op 0xD3) (addpc s 1)                                                     ; OUT (machine intercepts)
+      (icmp-eq op 0xDB) (addpc s 1)                                                     ; IN  (machine intercepts)
+      0)))
+
+; Execute one instruction. Returns an (approximate) cycle count; the real per-
+; opcode table is added with the Space Invaders machine timing (phase 2).
+(defn emulate [(s (ptr Cpu))] (-> i64)
+  (let [pc (rpc s) op (rb s pc) b1 (rb s (iadd pc 1)) b2 (rb s (iadd pc 2))]
+    (do (spc s (iadd pc 1))
+        (cond
+          (icmp-eq (iand op 0xC0) 0x00) (lo s op b1 b2)
+          (icmp-eq (iand op 0xC0) 0x40) (if (icmp-eq op 0x76) 0                          ; HLT = NOP (ref)
+                                            (setr8 s (iand (ishr op 3) 7) (getr s (iand op 7)))) ; MOV
+          (icmp-eq (iand op 0xC0) 0x80) (alu s op)
+          (hi s op b1 b2))
+        4)))
+
+(defn gen-interrupt [(s (ptr Cpu)) (n i64)] (-> i64)
+  (do (push16 s (rpc s)) (spc s (imul n 8)) (store! (field s ie) 0) 0))
+
+; ---- setup -----------------------------------------------------------------
+(defn init [(s (ptr Cpu))] (-> i64) (do (memset s 0 (sizeof Cpu)) 0))
+
+; load a raw image at `at`; returns 0 on success, -1 if the file won't open.
+(defn load-com [(s (ptr Cpu)) (path (ptr i8)) (at i64)] (-> i64)
+  (let [fd (cast :i64 (open path 0))]
+    (if (icmp-lt fd 0) -1
+        (do (read fd (index (field s mem) at) (isub 65536 at)) (close fd) 0))))

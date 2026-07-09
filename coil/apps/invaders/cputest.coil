@@ -1,0 +1,42 @@
+; ============================================================================
+; cputest.coil — run a CP/M .COM diagnostic on the i8080 core and print its
+; BDOS output. Mirrors apps/invaders/ref/cputest.c (the golden harness): load at
+; 0x0100, PC=0x0100, intercept CALL 5 (C_WRITESTR / C_WRITE) and a return to 0.
+;   coil run cputest.coil -- ../../roms/CPUTEST.COM
+; ============================================================================
+(module app)
+(import "i8080.coil"   :use *)
+(import "control.coil" :use *)   ; while / cond
+
+(extern putchar :cc c [:i32] (-> :i32))
+
+; BDOS call at 0x0005: C=9 => print $-terminated string at DE; C=2 => print char E.
+(defn bdos [(s (ptr Cpu))] (-> i64)
+  (let [c (reg s 1)]
+    (cond
+      (icmp-eq c 9)
+        (let [p (alloc-stack i64)]
+          (do (store! p (ior (ishl (reg s 2) 8) (reg s 3)))
+              (while (icmp-ne (rb s (load p)) 0x24)
+                (putchar (cast :i32 (rb s (load p))))
+                (store! p (iadd (load p) 1)))
+              0))
+      (icmp-eq c 2) (do (putchar (cast :i32 (reg s 3))) 0)
+      0)))
+
+(defn run [(s (ptr Cpu))] (-> i64)
+  (do (while (icmp-ne (rpc s) 0)
+        (cond
+          (icmp-eq (rpc s) 5) (do (bdos s) (spc s (pop16 s)))   ; handle + manual RET
+          (emulate s)))
+      (putchar (cast :i32 10))     ; trailing newline, like the C harness
+      0))
+
+(defn main [(argc :i32) (argv (ptr (ptr i8)))] (-> :i64)
+  (let [s (alloc-stack Cpu)]
+    (if (icmp-lt (cast :i64 argc) 2)
+        1
+        (do (init s)
+            (if (icmp-lt (load-com s (load (index argv 1)) 0x100) 0)
+                1
+                (do (spc s 0x100) (run s) 0))))))
