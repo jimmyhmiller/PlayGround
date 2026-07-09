@@ -36,6 +36,8 @@
 ; structural equality — the method is `=` (so `(= a b)` at runtime).
 (deftrait Eq [Self]
   (= [(a Self) (b Self)] (-> bool)))
+; inequality for free on any `Eq` type — `(!= a b)` is `(not (= a b))`.
+(defn != [(T Eq)] [(a T) (b T)] (-> bool) (not (= a b)))
 
 ; a hash of the value (FNV-1a over fields, when derived)
 (deftrait Hash [Self]
@@ -80,6 +82,22 @@
   (<= [(a f64) (b f64)] (-> bool) (fcmp-le a b))
   (>  [(a f64) (b f64)] (-> bool) (fcmp-gt a b))
   (>= [(a f64) (b f64)] (-> bool) (fcmp-ge a b)))
+
+; ---- bitwise, as traits ----------------------------------------------------
+; Rust-style bit operators `& | ^ << >>`, dispatched by type and inlined to the
+; core op — so `(& op 0xC7)` reads like C's `op & 0xC7` with no overhead. (Unary
+; bitwise-not has no operator: `~` is the reader's unquote; use `(^ a -1)`.)
+(deftrait BitAnd [Self] (& [(a Self) (b Self)] (-> Self)))
+(deftrait BitOr  [Self] (| [(a Self) (b Self)] (-> Self)))
+(deftrait BitXor [Self] (^ [(a Self) (b Self)] (-> Self)))
+(deftrait Shl    [Self] (<< [(a Self) (b Self)] (-> Self)))
+(deftrait Shr    [Self] (>> [(a Self) (b Self)] (-> Self)))
+
+(impl BitAnd i64 (& [(a i64) (b i64)] (-> i64) (iand a b)))
+(impl BitOr  i64 (| [(a i64) (b i64)] (-> i64) (ior a b)))
+(impl BitXor i64 (^ [(a i64) (b i64)] (-> i64) (ixor a b)))
+(impl Shl    i64 (<< [(a i64) (b i64)] (-> i64) (ishl a b)))
+(impl Shr    i64 (>> [(a i64) (b i64)] (-> i64) (ishr a b)))
 
 ; ---- collections, as traits -------------------------------------------------
 ; The everyday collection vocabulary — `(len xs)`, `(get xs k)`, `(push! xs v)`
