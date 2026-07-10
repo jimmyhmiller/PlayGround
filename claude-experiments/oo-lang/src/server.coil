@@ -129,6 +129,8 @@
                 (cond
                   (and (node-name-eq callee c"types") (= (arg-count e) 0))
                     (do (reflect-types (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                  (and (node-name-eq callee c"schema") (= (arg-count e) 0))
+                    (do (reflect-schema (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"generation") (= (arg-count e) 0))
                     (do (jb-cstr (load (ev-valbuf)) c"{\"type\":\"Int\",\"value\":") (jb-int (load (ev-valbuf)) (current-generation)) (jb-byte (load (ev-valbuf)) \}) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"fields") (= (arg-count e) 1))
@@ -819,6 +821,33 @@
                   ; park it (request-global-stop waits on every registered thread, this one too).
                   (loop (do (safepoint-poll (vm-main-parked)) (usleep (cast i32 3000)) (continue)))))
             0))))))
+
+; scry inspect: build the program (arenas + type table exist, but EMPTY — main() is never
+; run) and serve the eval channel so the static schema is browsable BEFORE the code runs.
+; This is `scry-serve` MINUS `vm-run p` and MINUS the main-thread safepoint loop: no language
+; thread is ever registered, so request-global-stop acquires instantly (nothing to park) and
+; reflection (types/schema/fields/methods) answers against the empty heap with liveCount 0.
+(defn scry-inspect [(path (ptr i8)) (viewer-dir (ptr i8)) (no-viewer bool)] (-> i64)
+  (ctx-init) (loaded-init) (register-builtins)
+  (if (not (can-open path))
+    (do (w-cstr 2 c"scry inspect: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n") 74)
+    (if (> (typecheck-quiet path) 0) 65
+      (let [p (build-program)]
+        (do
+          (store! (srv-program) p)
+          (store! (srv-viewer-dir) viewer-dir)
+          (store! (srv-readonly) 0)
+          (if no-viewer 0
+            (let [port (bind-server 7357)]
+              (if (< port 0) (do (w-cstr 2 c"scry inspect: could not bind a server port\n") 0)
+                (do
+                  (let [th (cast (ptr Thread) (xalloc (sizeof Thread)))]
+                    (thread-spawn th (fnptr-of server-accept-loop) (cast (ptr i8) (load (srv-listen-fd)))))
+                  (w-cstr 1 c"viewer: http://localhost:") (w-int 1 port) (w-cstr 1 c"\n")
+                  (w-cstr 1 c"  (inspect: schema only, program not running — press Ctrl-C to exit)\n")
+                  ; no language threads to park; just keep the process alive serving evals.
+                  (loop (do (usleep (cast i32 3000)) (continue)))))))
+          0)))))
 
 ; scry eval <file> -e <expr> [-e <expr> ...]: run main() to completion, then evaluate each
 ; expr in sequence against the SAME live process, printing one JSON result line each, exit.

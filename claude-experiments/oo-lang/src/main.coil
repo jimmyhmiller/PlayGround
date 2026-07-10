@@ -35,7 +35,8 @@
   (w-cstr 2 c"usage:\n")
   (w-cstr 2 c"  scry parse-dump <file.scry>   parse and print the AST\n")
   (w-cstr 2 c"  scry check <file.scry>        typecheck (follows imports)\n")
-  (w-cstr 2 c"  scry run <file.scry>          (not implemented until Phase 3)\n")
+  (w-cstr 2 c"  scry run <file.scry>          build, run main(), serve the live viewer\n")
+  (w-cstr 2 c"  scry inspect <file.scry>      serve the static schema WITHOUT running main()\n")
   0)
 
 (defn cmd-check [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
@@ -83,6 +84,23 @@
         (scry-run (load file) true)
         (scry-serve (load file) (resolve-viewer-dir (load (index argv 0))) (load noview) (load ro))))))
 
+; scry inspect [--no-viewer] <file.scry>
+; Typecheck + build the program (arenas/types exist, EMPTY) and serve the eval channel, but
+; never run main(). "See the code before it runs": types()/schema()/fields()/methods() all
+; answer the static schema with liveCount 0. The same graph view becomes the live view once
+; you `scry run` the file.
+(defn cmd-inspect [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (let [(mut file) (cast (ptr i8) 0) (mut noview) false (mut i) 2]
+    (loop (if (< (load i) argc)
+            (let [a (load (index argv (load i)))]
+              (cond
+                (cstr-eq a c"--no-viewer") (do (store! noview true) 0)
+                (do (store! file a) 0))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (if (= (cast i64 (load file)) 0) (do (w-cstr 2 c"scry inspect: expected a file argument\n") 64)
+      (scry-inspect (load file) (resolve-viewer-dir (load (index argv 0))) (load noview)))))
+
 ; scry eval <file.scry> -e "<expr>" [-e "<expr>" ...] [--readonly]
 ; Multiple -e run in sequence against ONE live process (main() runs to completion first),
 ; each printing its own JSON result line — this is the browser-free path for live-change
@@ -118,5 +136,6 @@
           (cstr-eq sub c"dump-types") (cmd-dump-types n argv)
           (cstr-eq sub c"dump-bytecode") (cmd-dump-bytecode n argv)
           (cstr-eq sub c"run") (cmd-run n argv)
+          (cstr-eq sub c"inspect") (cmd-inspect n argv)
           (cstr-eq sub c"eval") (cmd-eval n argv)
           (do (w-cstr 2 c"scry: unknown command\n") (usage) 64))))))

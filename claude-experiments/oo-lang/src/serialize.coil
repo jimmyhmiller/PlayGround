@@ -279,3 +279,158 @@
   (let [m (find-entity-mono-by-name nm0 len)] (if (= (cast i64 m) 0) (jb-cstr b c"{\"type\":\"list\",\"elementType\":\"FieldDescriptor\",\"length\":0,\"truncated\":false,\"items\":[]}") (emit-fields-array b m))))
 (defn reflect-methods [(b (ptr JBuf)) (nm0 (ptr u8)) (len i64)] (-> i64)
   (let [m (find-entity-mono-by-name nm0 len)] (if (= (cast i64 m) 0) (jb-cstr b c"[]") (emit-methods-array b (load (field m base))))))
+
+; ================= schema() : the full static class graph (Phase 9) =================
+; Unlike types() (entity classes only), schema() emits EVERY graph node — classes/objects,
+; interfaces and enums — plus, per field/variant, a `refTypes` array naming the OTHER graph
+; nodes this type references (through List<T>/Map<K,V> element types too). Edges are therefore
+; server-resolved against the real type table, never client-side string-parsed. types() is
+; left byte-for-byte unchanged (the rail + every existing golden still consume it); only the
+; new graph view consumes schema(). liveCount reuses the arena live-count, so it climbs live.
+
+; walk a Type, emitting ,"Name" for every named graph-node it references (classes, objects,
+; interfaces, enums). List/Map are transparent wrappers (recurse into element types, don't emit
+; the wrapper). Scalars (Int/String/Bool/Float/Void) are not TY_NAMED and contribute nothing.
+; `firstp` points at an i64 = 1 while no name has been emitted yet (so the first omits the comma).
+(defn collect-ref-types [(b (ptr JBuf)) (t (ptr Type)) (firstp (ptr i64))] (-> i64)
+  (if (= (ty-kind t) TY_NAMED)
+    (let [nmp (load (field t name)) nml (load (field t name-len)) d (load (field t decl))
+          isList (name-eq nmp nml (cast (ptr u8) c"List") 4)
+          isMap  (name-eq nmp nml (cast (ptr u8) c"Map") 3)]
+      (if (or isList isMap) 0
+        (if (= (cast i64 d) 0) 0
+          (let [dk (load (field d kind))]
+            (if (or (or (= dk DK_CLASS) (= dk DK_OBJECT))
+                    (or (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE)) (= dk DK_ENUM)))
+              (do (if (= (load firstp) 1) (store! firstp 0) (jb-byte b \,)) (jb-str b nmp nml) 0)
+              0))))
+      ; recurse into type arguments regardless (List<Tool> -> Tool, Map<String,JsonValue> -> JsonValue)
+      (let [aa (load (field t args)) n (al-len aa) (mut i) 0]
+        (loop (if (< (load i) n) (do (collect-ref-types b (al-get aa (load i)) firstp) (store! i (+ (load i) 1)) 0) (break))))
+      0)
+    0))
+
+; fields array WITH per-field refTypes (superset of emit-fields-array).
+(defn emit-fields-with-refs [(b (ptr JBuf)) (m (ptr MonoType))] (-> i64)
+  (jb-byte b \[)
+  (let [fs (load (field m fields)) n (al-len fs) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [mf (al-get fs (load i))]
+              (if (> (load i) 0) (jb-byte b \,) 0)
+              (jb-cstr b c"{\"name\":") (jb-str b (load (field mf name)) (load (field mf name-len)))
+              (jb-cstr b c",\"type\":") (ty-schema b (load (field mf ty)))
+              (jb-cstr b c",\"refTypes\":[")
+              (let [(mut rf) 1] (collect-ref-types b (load (field mf ty)) (mut rf)))
+              (jb-cstr b c"]}")
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+
+; enum variants: [{name, payload:[typeStr,...], refTypes:[Name,...]}]
+(defn emit-variants [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-byte b \[)
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0 (mut first) true]
+    (loop (if (< (load i) n)
+            (let [mem (al-get ms (load i))]
+              (if (= (load (field mem kind)) NK_VARIANT)
+                (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                    (jb-cstr b c"{\"name\":") (jb-str b (nm mem) (nlen mem))
+                    (jb-cstr b c",\"payload\":[")
+                    (let [np (kid-count mem) (mut j) 0]
+                      (loop (if (< (load j) np)
+                              (do (if (> (load j) 0) (jb-byte b \,) 0)
+                                  (jb-byte b \") (ast-ty-str b (kid-at mem (load j))) (jb-byte b \")
+                                  (store! j (+ (load j) 1)) 0)
+                              (break))))
+                    (jb-cstr b c"],\"refTypes\":[")
+                    (let [np (kid-count mem) (mut j) 0 (mut rf) 1]
+                      (loop (if (< (load j) np)
+                              (do (collect-ref-types b (resolve-type (kid-at mem (load j)) d) (mut rf))
+                                  (store! j (+ (load j) 1)) 0)
+                              (break))))
+                    (jb-cstr b c"]}") 0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+
+; does class/object decl `d` name interface `iname` in its `implements` clause?
+(defn decl-implements? [(d (ptr Decl)) (iname (ptr u8)) (ilen i64)] (-> bool)
+  (let [cn (load (field d node))]
+    (if (= (cast i64 cn) 0) false
+      (let [impl (load (field cn b))]
+        (if (= (cast i64 impl) 0) false
+          (let [n (kid-count impl) (mut i) 0 (mut r) false]
+            (loop (if (< (load i) n)
+                    (do (let [tn (kid-at impl (load i))] (if (name-eq (nm tn) (nlen tn) iname ilen) (do (store! r true) 0) 0))
+                        (store! i (+ (load i) 1)) 0)
+                    (break)))
+            (load r)))))))
+
+; implementors of interface `d`: the entity monos whose decl implements it, by mono name.
+(defn emit-implementors [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-byte b \[)
+  (let [iname (load (field d name)) ilen (load (field d name-len))
+        ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut first) true]
+    (loop (if (< (load i) n)
+            (let [m (al-get ms (load i))]
+              (if (and (load (field m is-entity)) (decl-implements? (load (field m base)) iname ilen))
+                (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                    (jb-str b (load (field m name)) (load (field m name-len))) 0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+
+(defn emit-schema-class [(b (ptr JBuf)) (m (ptr MonoType)) (ti (ptr TypeInfo))] (-> i64)
+  (let [d (load (field m base))]
+    (jb-cstr b c"{\"name\":") (jb-str b (load (field m name)) (load (field m name-len)))
+    (jb-cstr b c",\"kind\":") (if (= (load (field d kind)) DK_OBJECT) (jb-cstr b c"\"object\"") (jb-cstr b c"\"class\""))
+    (jb-cstr b c",\"builtin\":false")
+    (jb-cstr b c",\"liveCount\":") (jb-int b (if (= (cast i64 ti) 0) 0 (load (field (load (field ti arena)) live-count))))
+    (jb-cstr b c",\"implements\":") (mono-implements b d)
+    (jb-cstr b c",\"fields\":") (emit-fields-with-refs b m)
+    (jb-cstr b c",\"methods\":") (emit-methods-array b d)
+    (jb-byte b \}) 0))
+
+(defn emit-schema-iface [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-cstr b c"{\"name\":") (jb-str b (load (field d name)) (load (field d name-len)))
+  (jb-cstr b c",\"kind\":\"interface\",\"builtin\":") (jb-bool b (if (= (cast i64 (load (field d node))) 0) 1 0))
+  (jb-cstr b c",\"liveCount\":0,\"implements\":[],\"fields\":[]")
+  (jb-cstr b c",\"methods\":") (emit-methods-array b d)
+  (jb-cstr b c",\"implementors\":") (emit-implementors b d)
+  (jb-byte b \}) 0)
+
+(defn emit-schema-enum [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-cstr b c"{\"name\":") (jb-str b (load (field d name)) (load (field d name-len)))
+  (jb-cstr b c",\"kind\":\"enum\",\"builtin\":") (jb-bool b (if (= (cast i64 (load (field d node))) 0) 1 0))
+  (jb-cstr b c",\"liveCount\":0,\"implements\":[],\"fields\":[],\"methods\":[]")
+  (jb-cstr b c",\"variants\":") (emit-variants b d)
+  (jb-byte b \}) 0)
+
+(defn reflect-schema [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+  (jb-cstr b c"{\"type\":\"Schema\",\"nodes\":[")
+  (let [(mut first) true]
+    ; classes/objects — entity monos (index == mono id == TypeInfo index, as in reflect-types)
+    (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0]
+      (loop (if (< (load i) n)
+              (let [m (al-get ms (load i))]
+                (if (load (field m is-entity))
+                  (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                      (emit-schema-class b m (load (index (load (field p types)) (load i)))) 0)
+                  0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    ; interfaces + enums — from the decl table
+    (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+      (loop (if (< (load i) n)
+              (let [d (al-get ds (load i)) dk (load (field d kind))]
+                (cond
+                  (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE))
+                    (do (if (load first) (do (store! first false) 0) (jb-byte b \,)) (emit-schema-iface b d) 0)
+                  (= dk DK_ENUM)
+                    (do (if (load first) (do (store! first false) 0) (jb-byte b \,)) (emit-schema-enum b d) 0)
+                  0)
+                (store! i (+ (load i) 1)) 0)
+              (break)))))
+  (jb-cstr b c"]}") 0)
