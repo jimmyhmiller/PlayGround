@@ -8,6 +8,8 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/raw_ostream.h"
 
+LLD_HAS_DRIVER(wasm)
+
 extern "C" int coil_wasm_link(const char *object_path, const char *output_path) {
   const char *args[] = {
       "wasm-ld",

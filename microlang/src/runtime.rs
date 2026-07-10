@@ -7,8 +7,14 @@
 //! they box a non-immediate category and unbox on the way out, and `allocs`
 //! counts the boxing so the micro-languages can *show* the cost.
 
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::{HashMap, HashSet};
+
+/// Memory ordering for the global-slot array. Reads/writes are `Relaxed`; a
+/// cross-thread global definition is made visible to another thread by the
+/// happens-before edge on whatever channel passes the value (an atom / a join),
+/// not by the slot store itself.
+const GLOBAL_ORDER: Ordering = Ordering::Relaxed;
 use std::hash::BuildHasherDefault;
 
 /// A cheap hasher for `Sym` (a `u32`) keys. The global environment is consulted
@@ -143,7 +149,11 @@ pub struct Runtime<M: ValueModel> {
     /// to `GLOBAL_UNBOUND` (a bit pattern no value model can produce), which the
     /// JIT treats as "fall back to the slow, late-binding lookup". Being one flat
     /// array of `u64` makes it trivial to make atomic for shared-thread access.
-    pub global_slots: Vec<u64>,
+    /// Now `AtomicU64` with a reserved (stable-base) buffer: concurrent readers
+    /// load a slot lock-free, `def`/`set!` store atomically, and the native
+    /// backend's inline raw-pointer read (`AtomicU64` is layout-identical to
+    /// `u64`) is sound across threads.
+    pub global_slots: Vec<AtomicU64>,
     // ── dispatch axis ──
     /// `(method, type) -> impl closure`. The source of truth; a GC root.
     pub(crate) methods: MethodRegistry,
@@ -173,7 +183,7 @@ impl<M: ValueModel> Runtime<M> {
             shadow: Vec::new(),
             sym_names: Vec::new(),
             sym_ids: HashMap::new(),
-            global_slots: Vec::new(),
+            global_slots: Vec::with_capacity(1 << 16),
             methods: HashMap::new(),
             method_names: HashSet::new(),
             dispatch: Box::new(Megamorphic::new()),
@@ -194,7 +204,7 @@ impl<M: ValueModel> Runtime<M> {
         // Keep the dense global mirror sym-sized. Growing it here (analyze time)
         // means it never reallocates during a run, so the native backend can hold
         // a stable base pointer to it across a whole call chain.
-        self.global_slots.push(GLOBAL_UNBOUND);
+        self.global_slots.push(AtomicU64::new(GLOBAL_UNBOUND));
         id
     }
 
@@ -202,29 +212,30 @@ impl<M: ValueModel> Runtime<M> {
     /// dense `global_slots` array IS the store (no separate map), so this is a
     /// single indexed load, and a `Sym` beyond the current slot count is unbound.
     pub fn global(&self, sym: Sym) -> Option<u64> {
-        match self.global_slots.get(sym as usize) {
-            Some(&v) if v != GLOBAL_UNBOUND => Some(v),
+        match self.global_slots.get(sym as usize).map(|a| a.load(GLOBAL_ORDER)) {
+            Some(v) if v != GLOBAL_UNBOUND => Some(v),
             _ => None,
         }
     }
 
     /// Is this global bound? (`set!`/redefinition checks.)
     pub fn global_defined(&self, sym: Sym) -> bool {
-        matches!(self.global_slots.get(sym as usize), Some(&v) if v != GLOBAL_UNBOUND)
+        matches!(self.global_slots.get(sym as usize).map(|a| a.load(GLOBAL_ORDER)), Some(v) if v != GLOBAL_UNBOUND)
     }
 
-    /// Define (or redefine) a global. The dense mirror is the store.
-    pub fn define_global(&mut self, sym: Sym, val: u64) {
-        if let Some(slot) = self.global_slots.get_mut(sym as usize) {
-            *slot = val;
+    /// Define (or redefine) a global. Atomic store, so `&self` suffices — a step
+    /// toward the shared runtime where a thread defines through an `Arc`.
+    pub fn define_global(&self, sym: Sym, val: u64) {
+        if let Some(slot) = self.global_slots.get(sym as usize) {
+            slot.store(val, GLOBAL_ORDER);
         }
     }
 
     /// Assign an existing global's value (`set!`). Returns `false` if unbound.
-    pub fn set_global_val(&mut self, sym: Sym, val: u64) -> bool {
-        match self.global_slots.get_mut(sym as usize) {
-            Some(slot) if *slot != GLOBAL_UNBOUND => {
-                *slot = val;
+    pub fn set_global_val(&self, sym: Sym, val: u64) -> bool {
+        match self.global_slots.get(sym as usize) {
+            Some(slot) if slot.load(GLOBAL_ORDER) != GLOBAL_UNBOUND => {
+                slot.store(val, GLOBAL_ORDER);
                 true
             }
             _ => false,
@@ -232,8 +243,10 @@ impl<M: ValueModel> Runtime<M> {
     }
 
     /// Stable base pointer + length of the dense global mirror (for inline reads).
+    /// `AtomicU64` is layout-identical to `u64`, so the native tier reads slots
+    /// through this `*const u64` directly.
     pub fn global_slots_ptr(&self) -> *const u64 {
-        self.global_slots.as_ptr()
+        self.global_slots.as_ptr() as *const u64
     }
     pub fn global_slots_len(&self) -> usize {
         self.global_slots.len()

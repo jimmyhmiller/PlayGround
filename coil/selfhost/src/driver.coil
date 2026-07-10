@@ -567,8 +567,8 @@
                           (sb-push-str! (mut cmdsb) (al-get [(slice u8)] (load flags) (load k)))
                           (store! k (iadd (load k) 1)))))) 0))
             (let [rc (if (wasm-target? (load trip))
-                          (call-ptr wasm-link-fn obj-cstr (load outp))
-                          (system (slice->cstr a (sb-str (load cmdsb)))))]
+                          (cast i64 (call-ptr wasm-link-fn obj-cstr (load outp)))
+                          (cast i64 (system (slice->cstr a (sb-str (load cmdsb))))))]
               (if (icmp-ne rc 0)
                   (let [w (stderr) code (iand (udiv (cast i64 rc) 256) 255)]
                     (ps w "error: linker/ar failed with exit status: ") (dump-dec w code) (wb w 10) 1)

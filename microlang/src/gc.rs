@@ -103,9 +103,12 @@ impl<M: ValueModel> Runtime<M> {
 
             // 1. Forward the direct roots. The dense global array IS the global
             //    store; forward every bound slot (skip the unbound sentinel).
-            for v in global_slots.iter_mut() {
-                if *v != crate::runtime::GLOBAL_UNBOUND {
-                    *v = fw::<M>(heap, from_len, &mut to, &mut reloc, *v);
+            //    Atomic slots, but the collector runs stop-the-world, so plain
+            //    load/store with the slot ordering is sufficient.
+            for a in global_slots.iter() {
+                let v = a.load(std::sync::atomic::Ordering::Relaxed);
+                if v != crate::runtime::GLOBAL_UNBOUND {
+                    a.store(fw::<M>(heap, from_len, &mut to, &mut reloc, v), std::sync::atomic::Ordering::Relaxed);
                 }
             }
             for s in shadow.iter_mut() {
