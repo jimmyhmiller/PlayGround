@@ -479,3 +479,42 @@ fn lazy_sequences() {
     // keep drops nils.
     assert_eq!(run("(keep (fn [x] (if (even? x) x nil)) (range 6))"), "(0 2 4)");
 }
+
+#[test]
+fn real_os_threads() {
+    // A future runs its thunk on a real std::thread sharing the heap; deref joins.
+    assert_eq!(run("(deref (future (+ 1 2)))"), "3");
+    assert_eq!(run("@(future (* 6 7))"), "42");
+    // The worker calls GLOBALS defined on the main thread (shared env).
+    assert_eq!(
+        run("(defn work [n] (reduce + 0 (range n))) (deref (future (work 100)))"),
+        "4950"
+    );
+    // Two futures run concurrently over the shared heap, then combine.
+    assert_eq!(
+        run("(defn work [n] (reduce + 0 (range n))) (let [a (future (work 100)) b (future (work 200))] (+ @a @b))"),
+        "24850"
+    );
+    // A worker allocates lots of heap (lists) concurrently with the main thread.
+    assert_eq!(
+        run("(let [f (future (count (map inc (range 500))))] (+ @f (count (range 300))))"),
+        "800"
+    );
+    // Nested futures: a worker spawns its own worker.
+    assert_eq!(run("(deref (future (deref (future (+ 10 20)))))"), "30");
+}
+
+#[test]
+fn thread_stress() {
+    // Spawn many workers that each allocate + compute over the shared heap in
+    // parallel; the total must be exact every run (no lost/torn allocations).
+    let src = r#"
+        (defn work [n] (reduce + 0 (map (fn [x] (* x x)) (range n))))
+        (defn spawn-n [k]
+          (if (%num-eq k 0) nil (%cons (%spawn (fn [] (work 60))) (spawn-n (%sub k 1)))))
+        (defn await-all [fs] (if (nil? fs) 0 (%add (%await (%first fs)) (await-all (%rest fs)))))
+        (await-all (spawn-n 16))
+    "#;
+    // work(60) = sum of squares 0..59 = 69570; times 16 workers = 1113120.
+    assert_eq!(run(src), "1113120");
+}

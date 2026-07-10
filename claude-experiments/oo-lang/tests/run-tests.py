@@ -140,6 +140,11 @@ def main():
     up, uf = run_ui_smoke_test(binary, filt)
     passed += up; failed += uf
     if uf: fails.append("ui_smoke")
+    # Phase 8a: real HTTP(S) client via libcurl.
+    hnp, hnf, hnfails = run_http_network_test(binary, filt)
+    passed += hnp; failed += hnf; fails += hnfails
+    hsp, hsf, hsfails = run_http_stw_test(binary, filt)
+    passed += hsp; failed += hsf; fails += hsfails
 
     print(f"\n{passed} passed, {failed} failed ({passed + failed} tests)")
     if fails and not verbose:
@@ -706,6 +711,188 @@ def run_ui_smoke_test(binary, filt):
             print("     " + ln)
         return 0, 1
     return 1, 0
+
+
+HTTP_DIR = os.path.join(HERE, "http")
+
+
+def _net_reachable(host="api.anthropic.com", port=443, timeout=5):
+    import socket
+    try:
+        socket.create_connection((host, port), timeout=timeout).close()
+        return True
+    except Exception:
+        return False
+
+
+def run_http_network_test(binary, filt):
+    """Phase 8a real-network gate. Runs tests/http/get.scry (a real HTTPS GET to the Anthropic
+    API root through libcurl) and asserts it printed a genuine HTTP status (200/401/404 all prove
+    DNS+TLS+parse). Then, ONLY if ANTHROPIC_API_KEY is set, POSTs a minimal /v1/messages request
+    and asserts status 200 + body contains "content". SKIPPED LOUDLY (not failed) when offline.
+    The key is read from the environment at test time and written to a throwaway temp file that is
+    deleted immediately — never hardcoded, never committed."""
+    if filt and "http" not in filt:
+        return 0, 0, []
+    prog = os.path.join(HTTP_DIR, "get.scry")
+    if not os.path.exists(prog):
+        return 0, 0, []
+    if not _net_reachable():
+        print("SKIPPED http_network: api.anthropic.com:443 unreachable (offline)")
+        return 0, 0, []
+    passed = failed = 0
+    fails = []
+    # (1) plain GET -> a real HTTP status code
+    code, out, err = run(binary, ["run", "--no-viewer"], os.path.abspath(prog))
+    status = None
+    for ln in out.splitlines():
+        if ln.startswith("status="):
+            try:
+                status = int(ln.split("=", 1)[1])
+            except ValueError:
+                pass
+    if code != 0 or status not in (200, 401, 403, 404):
+        print(f"FAIL http_network/get\n     expected a real HTTP status, got status={status} "
+              f"exit={code} stderr={err.strip()!r}")
+        failed += 1
+        fails.append("http_network/get")
+    else:
+        passed += 1
+
+    # (2) authenticated POST — only when a real key is present in the environment
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        import json as _json
+        body = _json.dumps({"model": "claude-haiku-4-5-20251001", "max_tokens": 16,
+                            "messages": [{"role": "user", "content": "hi"}]})
+        # Scry has no env access yet (that's Phase 8b), so embed the key + body in a throwaway
+        # temp program. NEVER committed; deleted in finally.
+        import tempfile
+        def sq(s):  # Scry string literal escaping for embedding JSON/headers
+            return s.replace("\\", "\\\\").replace('"', '\\"')
+        prog_src = (
+            'fn main() {\n'
+            '  let h = List<String>()\n'
+            f'  h.push("x-api-key: {sq(key)}")\n'
+            '  h.push("anthropic-version: 2023-06-01")\n'
+            '  h.push("content-type: application/json")\n'
+            f'  let r = Http.request("POST", "https://api.anthropic.com/v1/messages", h, "{sq(body)}")\n'
+            '  Console.log("status=${r.status}")\n'
+            '  Console.log("body=${r.body}")\n'
+            '}\n'
+        )
+        tf = tempfile.NamedTemporaryFile("w", suffix=".scry", delete=False)
+        try:
+            tf.write(prog_src); tf.close()
+            code, out, err = run(binary, ["run", "--no-viewer"], tf.name)
+            got = None
+            for ln in out.splitlines():
+                if ln.startswith("status="):
+                    got = ln.split("=", 1)[1]
+            if got != "200" or '"content"' not in out:
+                print(f"FAIL http_network/post\n     expected 200 + content, got status={got} "
+                      f"exit={code}\n     out={out.strip()!r} err={err.strip()!r}")
+                failed += 1
+                fails.append("http_network/post")
+            else:
+                passed += 1
+        finally:
+            os.unlink(tf.name)
+    else:
+        print("SKIPPED http_network/post: ANTHROPIC_API_KEY not set")
+    return passed, failed, fails
+
+
+def run_http_stw_test(binary, filt):
+    """Phase 8a cooperative-STW gate. Starts `scry run` (with the viewer server) on
+    tests/http/ping_thread.scry — a background OS thread hammering HTTPS requests in a loop — and
+    WHILE requests are in flight POSTs types()/the pinger's count through the eval channel,
+    asserting each answers in well under a second and that HttpPinger.count climbs. A prompt eval
+    reply mid-request proves the HTTP thread parked for the global stop within one 50ms multi-poll
+    slice (it did not block the OS thread in curl_easy_perform). SKIPPED LOUDLY when offline.
+    Offline structural fallback: assert http-perform's loop body calls safepoint-poll."""
+    if filt and "http" not in filt:
+        return 0, 0, []
+    src = os.path.join(os.path.dirname(HERE), "src", "http.coil")
+    # structural invariant (always checked, also the offline proof): the multi loop parks.
+    struct_ok = False
+    if os.path.exists(src):
+        text = open(src).read()
+        # crude but robust: safepoint-poll appears inside http-perform before curl_multi_poll.
+        hp = text.split("defn http-perform", 1)
+        struct_ok = len(hp) == 2 and "safepoint-poll" in hp[1].split("defn ", 1)[0]
+    if not struct_ok:
+        print("FAIL http_stw/structural\n     http-perform loop does not call safepoint-poll")
+        return 0, 1, ["http_stw/structural"]
+
+    prog = os.path.join(HTTP_DIR, "ping_thread.scry")
+    if not os.path.exists(prog):
+        return 1, 0, []
+    if not _net_reachable():
+        print("SKIPPED http_stw/live: api.anthropic.com:443 unreachable (offline); "
+              "structural safepoint-poll check passed")
+        return 1, 0, []
+
+    import time, json, threading, urllib.request
+    proc = subprocess.Popen([binary, "run", os.path.abspath(prog)], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    lines = []
+    threading.Thread(target=lambda: [lines.append(ln) for ln in proc.stdout], daemon=True).start()
+    port = None
+    passed = failed = 0
+    fails = []
+    try:
+        for _ in range(400):
+            for ln in lines:
+                if "viewer: http://localhost:" in ln:
+                    port = int(ln.strip().split(":")[-1]); break
+            if port is not None:
+                break
+            time.sleep(0.05)
+        if port is None:
+            print("FAIL http_stw/live\n     never printed viewer URL")
+            return passed, 1, ["http_stw/live"]
+
+        def ev(src_):
+            body = json.dumps({"id": "H", "source": src_}).encode()
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/eval", data=body,
+                                         headers={"Content-Type": "application/json"})
+            return json.loads(urllib.request.urlopen(req, timeout=10).read())
+
+        problems = []
+        # POST several evals DURING the ping loop; each must answer fast (proves mid-request park).
+        counts = []
+        for _ in range(4):
+            t0 = time.time()
+            r = ev("types()")
+            dt = time.time() - t0
+            names = [t.get("name") for t in r.get("value", {}).get("items", [])]
+            if "HttpPinger" not in names:
+                problems.append(f"types() missing HttpPinger: {names}")
+                break
+            if dt > 1.0:
+                problems.append(f"eval mid-request took {dt:.2f}s (>1s: HTTP thread did not park)")
+            c = ev("HttpPinger.instances()")["value"]["items"]
+            if c:
+                counts.append(int(c[0]["fields"]["count"]["value"]))
+            time.sleep(0.4)
+        if counts and not (counts[-1] > counts[0]):
+            problems.append(f"HttpPinger.count did not climb while running: {counts}")
+        if problems:
+            print("FAIL http_stw/live")
+            for pr in problems:
+                print("     " + pr)
+            failed += 1
+            fails.append("http_stw/live")
+        else:
+            passed += 1
+        return passed, failed, fails
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
 
 
 def _diff(expected, actual):

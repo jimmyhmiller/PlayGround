@@ -37,6 +37,8 @@ impl Compiler {
             // Mutable 1-slot cell backing atoms (a real mutable array, unlike the
             // immutable list-backed clojure `vector`).
             ("%cell", Vector), ("%cell-ref", VectorRef), ("%cell-set!", VectorSet),
+            // Real OS threads: spawn a thunk on a worker; await joins it.
+            ("%spawn", Spawn), ("%await", Await),
         ] {
             prims.insert(rt.intern(name), p);
         }

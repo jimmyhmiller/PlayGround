@@ -1,0 +1,24 @@
+// Phase 8a cooperative-STW gate: a background OS thread hammers HTTPS requests in a loop while
+// main parks in join(). Because http-perform drives libcurl through curl_multi_poll in 50ms
+// slices and calls safepoint-poll every slice, an eval/STW requested by the viewer server WHILE
+// a request is in flight parks this thread within one slice — so types() answers promptly even
+// though a network round-trip is outstanding. The harness POSTs types() during the loop and
+// asserts a sub-second round-trip.
+class HttpPinger implements Runnable {
+  count: Int
+  fn run() -> Void {
+    let headers = List<String>()
+    var i = 0
+    while i < 25 {
+      let resp = Http.request("GET", "https://api.anthropic.com/", headers, "")
+      self.count = self.count + 1
+      i = i + 1
+    }
+  }
+}
+
+fn main() {
+  let pinger = HttpPinger(count: 0)
+  let handle = Thread.spawn(pinger)
+  handle.join()
+}

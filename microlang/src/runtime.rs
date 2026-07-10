@@ -691,6 +691,7 @@ impl<M: ValueModel> Runtime<M> {
                         Obj::Closure { .. } => "Fn",
                         Obj::BigInt(_) | Obj::HugeInt(_) => "Long",
                         Obj::BoxFloat(_) => "Double",
+                        Obj::Future(_) => "Future",
                         _ => "Object",
                     },
                 };
@@ -714,6 +715,27 @@ impl<M: ValueModel> Runtime<M> {
                 };
                 self.encode(Val::Int(n))
             }
+            // Join a future's worker thread and cache its value. No backend
+            // needed — this only blocks and reads a shared slot.
+            Prim::Await => {
+                let id = M::R::as_ref(args[0]);
+                let slot = match &self.heap()[id as usize] {
+                    Obj::Future(s) => s.clone(),
+                    _ => panic!("await: not a future"),
+                };
+                let mut g = slot.lock().unwrap();
+                if let Some(r) = g.result {
+                    return r;
+                }
+                let handle = g.handle.take().expect("future already awaited");
+                drop(g); // release the lock before blocking on the join
+                let r = handle.join().expect("future thread panicked");
+                slot.lock().unwrap().result = Some(r);
+                r
+            }
+            // `spawn` needs to invoke a closure on the child thread, so it is
+            // handled in the backend (like `Gc`/`CallEc`), never here.
+            Prim::Spawn => unreachable!("Prim::Spawn is backend-handled"),
             Prim::Field => {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("field: not a record");
@@ -929,6 +951,7 @@ impl<M: ValueModel> Runtime<M> {
                 Obj::Escape { .. } => "#<continuation>".to_string(),
                 Obj::Cont(_) => "#<continuation>".to_string(),
                 Obj::PartialCont(_) => "#<partial-continuation>".to_string(),
+                Obj::Future(_) => "#<future>".to_string(),
                 Obj::Moved(_) => "#<moved>".to_string(),
             },
         }

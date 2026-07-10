@@ -118,11 +118,24 @@ pub enum Obj {
     /// these. Its captured frames are traced by the moving GC (see `gc.rs`), so
     /// it survives collection like any other heap value.
     PartialCont(Arc<crate::cek::Kont>),
+    /// A FUTURE: the pending result of a thunk running on another OS thread. The
+    /// `Arc<Mutex<..>>` is shared with the worker; `%await` joins the thread and
+    /// caches its value. Cloneable (Arc), so the GC can relocate the enclosing
+    /// object; the contained result is a raw heap id (see the rooting note in the
+    /// spawn handler).
+    Future(Arc<std::sync::Mutex<FutureSlot>>),
     /// Forwarding marker left in from-space by the copying collector: the object
     /// now lives at index `.0` (or `u32::MAX` for reclaimed garbage). Any
     /// attempt to dereference a stale from-space pointer hits this and errors
     /// loudly — the moving-GC analogue of use-after-free.
     Moved(u32),
+}
+
+/// The shared state of a `Future`: the worker's join handle (taken on first
+/// await) and the cached result value once it has finished.
+pub struct FutureSlot {
+    pub handle: Option<std::thread::JoinHandle<u64>>,
+    pub result: Option<u64>,
 }
 
 /// A lexical frame: `AtomicU64` slots (so the GC can rewrite the heap pointers

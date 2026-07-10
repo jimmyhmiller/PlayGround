@@ -146,6 +146,30 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 rt.collect(locals);
                 rt.encode(Val::Nil)
             }
+            // `(%spawn f)` — run the thunk `f` on a fresh OS thread that SHARES
+            // this runtime (heap/globals/interner via the `Arc<Shared>`), with its
+            // own shadow stack. Returns a `Future`. The child runs on the base
+            // `TreeWalk` tier (the only backend guaranteed `Send`). Rooting note:
+            // the future's eventual result is NOT a GC root until awaited, so an
+            // explicit `(gc)` between the worker finishing and `deref` could
+            // reclaim it — fine under this toolkit's explicit-only GC; a safepoint
+            // GC (next phase) must also scan future slots.
+            Ir::Prim(Prim::Spawn, args) => {
+                let f = top.eval_ir(top, rt, &args[0], locals);
+                let child = rt.thread_handle();
+                let slot = std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::value::FutureSlot { handle: None, result: None },
+                ));
+                let slot2 = slot.clone();
+                let handle = std::thread::spawn(move || {
+                    let cs = TreeWalk;
+                    let mut crt = child;
+                    cs.invoke(&cs, &mut crt, f, &[])
+                });
+                slot.lock().unwrap().handle = Some(handle);
+                let id = rt.alloc(Obj::Future(slot2));
+                M::R::enc_ref(id)
+            }
             // `(%callec f)`: call f with a fresh escape continuation. Invoking
             // the continuation unwinds (a panic carrying the tag) back here; f
             // returning normally is the result. Escape-only (one-shot upward);

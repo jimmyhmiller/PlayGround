@@ -357,7 +357,13 @@ pub const CORE: &str = r#"
 ;; layer; this is the identity/state box real clojure code reaches for.)
 (defn atom [x] (record 'Atom (%cell x)))
 (defn atom? [x] (%num-eq (type-of x) 'Atom))
-(defn deref [a] (%cell-ref (field a 0) 0))
+(defn future? [x] (%num-eq (type-of x) 'Future))
+;; deref reads an atom's cell, or joins a future (blocking on its worker thread).
+(defn deref [x] (if (future? x) (%await x) (%cell-ref (field x 0) 0)))
+;; Real OS threads: `(future body...)` runs on a worker sharing the heap.
+(defn future-call [f] (%spawn f))
+(defmacro future (& body) (list 'future-call (%cons 'fn (%cons (vector) body))))
+(defn pcalls-2 [f g] (let [a (%spawn f) b (%spawn g)] (list (%await a) (%await b))))
 (defn reset! [a v] (do (%cell-set! (field a 0) 0 v) v))
 (defn swap! [a f & args]
   (let [old (deref a) s (seq args)]

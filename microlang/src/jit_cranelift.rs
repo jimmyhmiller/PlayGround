@@ -381,6 +381,8 @@ fn prim_tag(p: Prim) -> u32 {
         TypeOf => 23,
         NFields => 24,
         Throw => 25,
+        Await => 26,
+        Spawn => 27,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -424,6 +426,8 @@ fn prim_from_tag(tag: u32) -> Prim {
         23 => TypeOf,
         24 => NFields,
         25 => Throw,
+        26 => Await,
+        27 => Spawn,
         other => panic!("bad prim tag {other}"),
     }
 }
@@ -1926,7 +1930,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
 /// not model: the continuation / `apply` / `gc` prims, or record dispatch.
 pub fn jit_can_compile(ir: &Ir) -> bool {
     match ir {
-        Ir::Prim(Prim::CallCc | Prim::Reset | Prim::Shift | Prim::CallEc | Prim::Gc | Prim::Apply, _) => false,
+        Ir::Prim(Prim::CallCc | Prim::Reset | Prim::Shift | Prim::CallEc | Prim::Gc | Prim::Apply | Prim::Spawn, _) => false,
         Ir::Dispatch { .. } | Ir::DefMethod { .. } => false,
         // try/catch unwinds the native stack; only the TreeWalk tier models it.
         Ir::Try { .. } => false,

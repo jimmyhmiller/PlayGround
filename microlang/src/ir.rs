@@ -46,6 +46,12 @@ pub enum Prim {
     /// `(throw x)` -> abort with `x`'s printed form. (A catchable `try` is a
     /// separate, larger feature; this is the unconditional-abort primitive.)
     Throw,
+    /// `(%spawn f)` -> run the thunk `f` (a 0-arg closure) on a fresh OS thread
+    /// that SHARES this runtime's heap/globals/interner, returning a `Future`.
+    /// Backend-handled (needs to invoke a closure on the child), like `Gc`.
+    Spawn,
+    /// `(%await fut)` -> block until the future's thread finishes; its value.
+    Await,
     /// `(field r i)` -> the i-th field of a record.
     Field,
     /// `(%callec f)` — call `f` with a fresh escape continuation. Backend-handled
