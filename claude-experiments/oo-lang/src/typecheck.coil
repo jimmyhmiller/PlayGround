@@ -434,6 +434,10 @@
     (name-eq mname mlen (cast (ptr u8) c"toInt") 5)
       (do (if (!= (arg-count call) 0) (err-arity call 0 (arg-count call)) 0)
           (ty-option-of (ty-int)))
+    ; Phase 8b: toFloat() -> Option<Float> — strtod parse (ints, decimals, exponents).
+    (name-eq mname mlen (cast (ptr u8) c"toFloat") 7)
+      (do (if (!= (arg-count call) 0) (err-arity call 0 (arg-count call)) 0)
+          (ty-option-of (ty-float)))
     (do (err-no-method-t facc rt mname mlen) (ty-error))))
 
 ; build the Type Option<T> for a builtin method whose return is Option-wrapped.
@@ -1129,7 +1133,8 @@
     (bdm m (bt-fn2 c"set" (bt-param c"key" (bt-type c"K")) (bt-param c"value" (bt-type c"V")) (bt-type c"Void")))
     (bdm m (bt-fn1 c"get" (bt-param c"key" (bt-type c"K")) (bt-type1 c"Option" (bt-type c"V"))))
     (bdm m (bt-fn1 c"containsKey" (bt-param c"key" (bt-type c"K")) (bt-type c"Bool")))
-    (bdm m (bt-fn0 c"len" (bt-type c"Int"))))
+    (bdm m (bt-fn0 c"len" (bt-type c"Int")))
+    (bdm m (bt-fn0 c"keys" (bt-type1 c"List" (bt-type c"K")))))
   ; class Mutex<T> { lock()->Void ; unlock()->Void ; get()->T ; set(value:T)->Void }
   (let [mx (mkbuiltin DK_BUILTIN_GEN c"Mutex")]
     (bdtp mx c"T")
@@ -1158,6 +1163,10 @@
   ; Phase 8b: object Env { get(name: String) -> Option<String> } — read a process env var.
   (let [e (mkbuiltin DK_BUILTIN_OBJ c"Env")]
     (bdm e (bt-fn1 c"get" (bt-param c"name" (bt-type c"String")) (bt-type1 c"Option" (bt-type c"String")))))
+  ; Phase 8b: object Str { fromCharCode(code: Int) -> String } — UTF-8 encode a codepoint (for the
+  ; Json parser's string-escape handling, which rebuilds \" \\ \n \uXXXX into real characters).
+  (let [s (mkbuiltin DK_BUILTIN_OBJ c"Str")]
+    (bdm s (bt-fn1 c"fromCharCode" (bt-param c"code" (bt-type c"Int")) (bt-type c"String"))))
   ; enum Option<T> { None ; Some(T) }
   (let [o (mkbuiltin DK_ENUM c"Option")]
     (bdtp o c"T") (bdv o (bt-variant0 c"None")) (bdv o (bt-variant1 c"Some" (bt-type c"T"))))

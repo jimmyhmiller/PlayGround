@@ -248,6 +248,41 @@
       (enum-some (if (= (load neg) 1) (- 0 (load val)) (load val)))
       (enum-none))))
 
+; String.toFloat() -> Option<Float>. strtod over a NUL-terminated copy: parse fails (None) when no
+; character was consumed OR trailing non-whitespace remains (strict, like toInt). Payload is f64 bits.
+(defn vm-str-tofloat [(s (ptr StringObj))] (-> (ptr i64))
+  (let [n (load (field s len)) cn (str-to-cstr-copy s)
+        endp (alloc-stack (ptr i8))
+        x (strtod cn endp)
+        consumed (- (cast i64 (load endp)) (cast i64 cn))]
+    (if (or (= n 0) (!= consumed n))
+      (enum-none)
+      (let [p (alloc-static i64)]
+        (store! (cast (ptr f64) p) x)
+        (enum-some (load p))))))
+
+; Str.fromCharCode(cp) -> a String holding the UTF-8 encoding of Unicode codepoint cp. Used by the
+; Scry Json parser to rebuild escaped string content (\uXXXX and friends) as real characters.
+(defn vm-str-fromcharcode [(cp i64)] (-> (ptr StringObj))
+  (let [buf (xalloc 5)]
+    (cond
+      (< cp 128)
+        (do (store! (index buf 0) (cast u8 cp)) (str-make buf 1))
+      (< cp 2048)
+        (do (store! (index buf 0) (cast u8 (ior 192 (ishr cp 6))))
+            (store! (index buf 1) (cast u8 (ior 128 (iand cp 63))))
+            (str-make buf 2))
+      (< cp 65536)
+        (do (store! (index buf 0) (cast u8 (ior 224 (ishr cp 12))))
+            (store! (index buf 1) (cast u8 (ior 128 (iand (ishr cp 6) 63))))
+            (store! (index buf 2) (cast u8 (ior 128 (iand cp 63))))
+            (str-make buf 3))
+      (do (store! (index buf 0) (cast u8 (ior 240 (ishr cp 18))))
+          (store! (index buf 1) (cast u8 (ior 128 (iand (ishr cp 12) 63))))
+          (store! (index buf 2) (cast u8 (ior 128 (iand (ishr cp 6) 63))))
+          (store! (index buf 3) (cast u8 (ior 128 (iand cp 63))))
+          (str-make buf 4)))))
+
 ; the builtin dispatch (fixed arities; arg order = pushed order)
 (defn do-builtin [(vt (ptr VMThread)) (blt i64)] (-> i64)
   (cond
@@ -267,6 +302,7 @@
     (= blt BLT_MAP_GET) (let [k (vpop vt) m (vpop vt)] (vpush vt (cast i64 (map-get (cast (ptr MapObj) m) k))))
     (= blt BLT_MAP_HAS) (let [k (vpop vt) m (vpop vt)] (vpush vt (map-has (cast (ptr MapObj) m) k)))
     (= blt BLT_MAP_LEN) (let [m (vpop vt)] (vpush vt (map-len (cast (ptr MapObj) m))))
+    (= blt BLT_MAP_KEYS) (let [m (vpop vt)] (vpush vt (cast i64 (map-keys (cast (ptr MapObj) m)))))
     (= blt BLT_STR_LEN) (let [s (vpop vt)] (vpush vt (str-len (cast (ptr StringObj) s))))
     (= blt BLT_STR_SLICE) (let [hi (vpop vt) lo (vpop vt) s (vpop vt)] (vpush vt (cast i64 (str-slice (cast (ptr StringObj) s) lo hi))))
     (= blt BLT_CLOCK_NOW) (vpush vt (clock-now))
@@ -287,6 +323,8 @@
     ; charCode(i): args pushed (string, i) => pop i then string.
     (= blt BLT_STR_CHARCODE) (let [i (vpop vt) s (vpop vt)] (vpush vt (vm-str-charcode (cast (ptr StringObj) s) i)))
     (= blt BLT_STR_TOINT) (let [s (vpop vt)] (vpush vt (cast i64 (vm-str-toint (cast (ptr StringObj) s)))))
+    (= blt BLT_STR_TOFLOAT) (let [s (vpop vt)] (vpush vt (cast i64 (vm-str-tofloat (cast (ptr StringObj) s)))))
+    (= blt BLT_STR_FROMCHARCODE) (let [cp (vpop vt)] (vpush vt (cast i64 (vm-str-fromcharcode cp))))
     (do (eval-panic0 EK_RUNTIME c"vm: unknown builtin") (exit (cast i32 70)) 0)))
 
 ; spawn a language thread running task.<slot>() (task implements the interface `iface`).

@@ -94,6 +94,9 @@
 (const BLT_ENV_GET 28)           ; pop name(String) -> getenv -> push (ptr Option<String> box): Some(value) / None if unset
 (const BLT_STR_CHARCODE 29)      ; pop i(Int), string -> push the byte at index i as i64 (0..255); OOB => -1
 (const BLT_STR_TOINT 30)         ; pop string -> parse a base-10 signed integer -> push (ptr Option<Int> box): Some(n) / None
+(const BLT_STR_TOFLOAT 31)       ; pop string -> strtod parse -> push (ptr Option<Float> box): Some(x) / None (payload is f64 bits)
+(const BLT_STR_FROMCHARCODE 32)  ; pop code(Int) -> push a String holding the UTF-8 encoding of that Unicode codepoint
+(const BLT_MAP_KEYS 33)          ; pop map -> push (ptr ListObj) of the keys in insertion order
 
 ; ============================ FieldInfo kinds ===============================
 (const FIELD_I64 0) (const FIELD_F64 1) (const FIELD_BOOL 2)

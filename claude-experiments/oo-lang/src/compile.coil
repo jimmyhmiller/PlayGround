@@ -449,6 +449,9 @@
     (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Env") 3)
       ; Env.get(name): push the name String, then the builtin.
       (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_ENV_GET) 0)
+    (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Str") 3)
+      ; Str.fromCharCode(code): push the code Int, then the builtin.
+      (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_STR_FROMCHARCODE) 0)
     (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Thread") 6)
       ; Thread.spawn(task: Runnable) -> spawn a VMThread running task.run() via the itable.
       (let [rd (find-decl (cast (ptr u8) c"Runnable") 8)]
@@ -465,6 +468,8 @@
       (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_STR_CHARCODE) 0)
     (name-eq mname mlen (cast (ptr u8) c"toInt") 5)
       (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_STR_TOINT) 0)
+    (name-eq mname mlen (cast (ptr u8) c"toFloat") 7)
+      (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_STR_TOFLOAT) 0)
     (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_STR_SLICE) 0)))
 
 ; method on a user/builtin named type (List/Map/class/object-through-interface)
@@ -481,6 +486,7 @@
             (cond (name-eq mname mlen (cast (ptr u8) c"set") 3) (cu8 cs BLT_MAP_SET)
                   (name-eq mname mlen (cast (ptr u8) c"get") 3) (cu8 cs BLT_MAP_GET)
                   (name-eq mname mlen (cast (ptr u8) c"containsKey") 11) (cu8 cs BLT_MAP_HAS)
+                  (name-eq mname mlen (cast (ptr u8) c"keys") 4) (cu8 cs BLT_MAP_KEYS)
                   (cu8 cs BLT_MAP_LEN)) 0)
       (name-eq (load (field d name)) (load (field d name-len)) (cast (ptr u8) c"ThreadHandle") 12)
         (do (compile-expr cs recv) (cop cs OP_THREAD_JOIN) 0)

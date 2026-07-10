@@ -153,6 +153,14 @@
     (if (>= idx 0) (enum-some (load (index (load (field m vals)) idx))) (enum-none))))
 (defn map-has [(m (ptr MapObj)) (k i64)] (-> i64) (if (>= (map-find m k) 0) 1 0))
 (defn map-len [(m (ptr MapObj))] (-> i64) (load (field m len)))
+; Phase 8b: keys() -> List<K> in insertion order (the only way to ENUMERATE a Map from Scry;
+; the Json stringifier needs it to re-emit object members). Keys are the raw i64 slots.
+(defn map-keys [(m (ptr MapObj))] (-> (ptr ListObj))
+  (let [l (list-new) n (load (field m len)) (mut i) 0]
+    (loop (if (< (load i) n)
+            (do (list-push l (load (index (load (field m keys)) (load i)))) (store! i (+ (load i) 1)) 0)
+            (break)))
+    l))
 
 ; ============================ Mutex<T> ======================================
 ; A guarded i64 slot + a lock word. `lock`/`unlock` (the safepoint-cooperative CAS spin)
