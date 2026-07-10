@@ -1,11 +1,11 @@
-//! The runtime: heap, symbol table, global environment, reader, macroexpander,
-//! analyzer, and the value-model-aware primitives.
+//! The runtime CORE: heap, moving GC roots, symbol table, global environment,
+//! the dispatch axis, and the value-model-aware primitives. It knows NOTHING
+//! about s-expressions, special forms, or `analyze` — those live in the optional
+//! `sexpr` frontend (or a frontend compiles to `Ir` directly).
 //!
 //! `encode`/`decode` are the seam where the value axis meets everything else:
 //! they box a non-immediate category and unbox on the way out, and `allocs`
-//! counts the boxing so the micro-languages can *show* the cost. The reader
-//! produces `Val` (code is data); `macroexpand` re-enters compiled code
-//! through `CodeSpace::invoke`; `analyze` lowers a macroexpanded `Val` to `Ir`.
+//! counts the boxing so the micro-languages can *show* the cost.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -36,9 +36,8 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::bigint::BigInt;
-use crate::code::CodeSpace;
 use crate::dispatch::{Dispatch, Megamorphic, MethodRegistry};
-use crate::ir::{ConstId, Ir, Prim};
+use crate::ir::{ConstId, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::value::{Cat, Frame, HeapId, Locals, Obj, RawTag, Sym, Val};
 
@@ -47,24 +46,9 @@ use crate::value::{Cat, Frame, HeapId, Locals, Obj, RawTag, Sym, Val};
 /// with a real encoded value — reading it back means "not bound, use slow path".
 pub const GLOBAL_UNBOUND: u64 = u64::MAX;
 
-/// A global binding. `is_macro` is what makes `macroexpand` treat a call head
-/// specially — the single resolution table the compiler and runtime share.
+/// A global binding — the single resolution table the compiler and runtime share.
 pub struct Var {
     pub val: u64,
-    pub is_macro: bool,
-}
-
-struct Specials {
-    quote: Sym,
-    if_: Sym,
-    do_: Sym,
-    def: Sym,
-    defmacro: Sym,
-    defmethod: Sym,
-    fn_: Sym,
-    let_: Sym,
-    set_: Sym,
-    amp: Sym,
 }
 
 pub struct Runtime<M: ValueModel> {
@@ -94,21 +78,19 @@ pub struct Runtime<M: ValueModel> {
     /// `GLOBAL_UNBOUND` (a bit pattern no value model can produce), which the JIT
     /// treats as "fall back to the slow, late-binding lookup".
     pub global_slots: Vec<u64>,
-    sf: Specials,
-    prims: HashMap<Sym, Prim>,
-    /// Compile-time lexical scope, innermost frame last. Used only during
-    /// `analyze` to resolve names to `(up, idx)` slots; empty between forms.
-    scope: Vec<Vec<Sym>>,
     // ── dispatch axis ──
     /// `(method, type) -> impl closure`. The source of truth; a GC root.
     pub(crate) methods: MethodRegistry,
-    /// Symbols known to be method names, so `analyze` turns `(name recv ..)`
+    /// Symbols known to be method names, so a frontend turns `(name recv ..)`
     /// into a `Dispatch` site. Updated when a `defmethod` evaluates.
     method_names: HashSet<Sym>,
     /// The swappable dispatch strategy (megamorphic / mono IC / poly IC).
     pub(crate) dispatch: Box<dyn Dispatch>,
-    /// Monotonic call-site id counter, assigned at analyze time.
-    next_site: usize,
+    /// Optional "apply handler": a frontend may name a global fn that the backend
+    /// invokes when a NON-closure heap object is called (like Python `__call__`),
+    /// e.g. to make Clojure keywords callable. Stored as a `Sym` (re-read from
+    /// `globals`) so it is GC-safe. `None` => calling a non-closure is an error.
+    apply_fn: Option<Sym>,
     /// Monotonic tag for escape continuations.
     escape_tags: u64,
     _pd: PhantomData<fn() -> M>,
@@ -116,7 +98,7 @@ pub struct Runtime<M: ValueModel> {
 
 impl<M: ValueModel> Runtime<M> {
     pub fn new() -> Self {
-        let mut rt = Runtime {
+        Runtime {
             heap: Vec::new(),
             allocs: 0,
             relocated: 0,
@@ -127,83 +109,13 @@ impl<M: ValueModel> Runtime<M> {
             sym_ids: HashMap::new(),
             globals: Default::default(),
             global_slots: Vec::new(),
-            sf: Specials {
-                quote: 0,
-                if_: 0,
-                do_: 0,
-                def: 0,
-                defmacro: 0,
-                defmethod: 0,
-                fn_: 0,
-                let_: 0,
-                set_: 0,
-                amp: 0,
-            },
-            prims: HashMap::new(),
-            scope: Vec::new(),
             methods: HashMap::new(),
             method_names: HashSet::new(),
             dispatch: Box::new(Megamorphic::new()),
-            next_site: 0,
+            apply_fn: None,
             escape_tags: 0,
             _pd: PhantomData,
-        };
-        rt.sf = Specials {
-            quote: rt.intern("quote"),
-            if_: rt.intern("if"),
-            do_: rt.intern("do"),
-            def: rt.intern("def"),
-            defmacro: rt.intern("defmacro"),
-            defmethod: rt.intern("defmethod"),
-            fn_: rt.intern("fn"),
-            let_: rt.intern("let"),
-            set_: rt.intern("set!"),
-            amp: rt.intern("&"),
-        };
-        use Prim::*;
-        for (name, p) in [
-            ("+", Add),
-            ("-", Sub),
-            ("*", Mul),
-            ("<", Lt),
-            ("=", Eq),
-            ("list", List),
-            ("cons", Cons),
-            ("first", First),
-            ("rest", Rest),
-            ("nil?", IsNil),
-            ("println", Println),
-            ("gc", Gc),
-            ("record", Record),
-            ("field", Field),
-            ("%eq", Identical),
-            // Binary aliases so arithmetic/comparison operators can be given
-            // first-class prelude bindings (the surface `+`/`<`/… fold in head
-            // position, but must also be callable values, e.g. `(apply + xs)`).
-            ("%add", Add),
-            ("%sub", Sub),
-            ("%mul", Mul),
-            ("%lt", Lt),
-            ("%num-eq", Eq),
-            ("string-length", StrLen),
-            ("char->integer", CharToInt),
-            ("integer->char", IntToChar),
-            ("vector", Vector),
-            ("vector-ref", VectorRef),
-            ("vector-set!", VectorSet),
-            ("vector-length", VectorLen),
-            ("values", Values),
-            ("%values->list", ValuesToList),
-            ("apply", Apply),
-            ("%callec", CallEc),
-            ("%callcc", CallCc),
-            ("%reset", Reset),
-            ("%shift", Shift),
-        ] {
-            let s = rt.intern(name);
-            rt.prims.insert(s, p);
         }
-        rt
     }
 
     // ── symbols ─────────────────────────────────────────────
@@ -224,8 +136,8 @@ impl<M: ValueModel> Runtime<M> {
     /// Define (or redefine) a global, updating both the map and the dense mirror.
     /// The one place a global binding is created; routing writes through here is
     /// what keeps `global_slots` a faithful cache.
-    pub fn define_global(&mut self, sym: Sym, val: u64, is_macro: bool) {
-        self.globals.insert(sym, Var { val, is_macro });
+    pub fn define_global(&mut self, sym: Sym, val: u64) {
+        self.globals.insert(sym, Var { val });
         if let Some(slot) = self.global_slots.get_mut(sym as usize) {
             *slot = val;
         }
@@ -393,10 +305,37 @@ impl<M: ValueModel> Runtime<M> {
             (Val::Bool(x), Val::Bool(y)) => x == y,
             (Val::Nil, Val::Nil) => true,
             (Val::Sym(x), Val::Sym(y)) => x == y,
-            (Val::Ref(_), Val::Ref(_)) => match (self.as_cons(a), self.as_cons(b)) {
-                (Some((ha, ta)), Some((hb, tb))) => self.equal(ha, hb) && self.equal(ta, tb),
-                _ => a == b, // identity for other objects
-            },
+            (Val::Ref(x), Val::Ref(y)) => {
+                if x == y {
+                    return true; // same object
+                }
+                match (&self.heap[x as usize], &self.heap[y as usize]) {
+                    (Obj::Cons { .. }, Obj::Cons { .. }) => {
+                        let (ha, ta) = self.as_cons(a).unwrap();
+                        let (hb, tb) = self.as_cons(b).unwrap();
+                        self.equal(ha, hb) && self.equal(ta, tb)
+                    }
+                    // Structural equality for aggregates (R7RS `equal?` on
+                    // strings/vectors; ordered field equality for records — the
+                    // general aggregate case). Order-INSENSITIVE collections
+                    // (e.g. a hash-map) are a frontend concern layered on top.
+                    (Obj::Str(sa), Obj::Str(sb)) => sa == sb,
+                    (Obj::Char(ca), Obj::Char(cb)) => ca == cb,
+                    (Obj::Vector(va), Obj::Vector(vb)) => {
+                        va.len() == vb.len()
+                            && va.clone().iter().zip(vb.clone().iter()).all(|(&x, &y)| self.equal(x, y))
+                    }
+                    (
+                        Obj::Record { type_id: ta, fields: fa },
+                        Obj::Record { type_id: tb, fields: fb },
+                    ) => {
+                        ta == tb
+                            && fa.len() == fb.len()
+                            && fa.clone().iter().zip(fb.clone().iter()).all(|(&x, &y)| self.equal(x, y))
+                    }
+                    _ => false, // identity already handled; distinct other objects differ
+                }
+            }
             _ => false,
         }
     }
@@ -573,6 +512,45 @@ impl<M: ValueModel> Runtime<M> {
                 let id = self.alloc(Obj::Record { type_id, fields });
                 M::R::enc_ref(id)
             }
+            Prim::TypeOf => {
+                // A record reports its own type; everything else a built-in tag.
+                let name = match self.decode(args[0]) {
+                    Val::Int(_) => "Long",
+                    Val::Float(_) => "Double",
+                    Val::Bool(_) => "Boolean",
+                    Val::Nil => "nil",
+                    Val::Sym(_) => "Symbol",
+                    Val::Ref(id) => match &self.heap[id as usize] {
+                        Obj::Record { type_id, .. } => {
+                            let s = *type_id;
+                            return M::R::enc_sym(s);
+                        }
+                        Obj::Cons { .. } => "List",
+                        Obj::Vector(_) => "Vector",
+                        Obj::Str(_) => "String",
+                        Obj::Char(_) => "Char",
+                        Obj::Closure { .. } => "Fn",
+                        Obj::BigInt(_) | Obj::HugeInt(_) => "Long",
+                        Obj::BoxFloat(_) => "Double",
+                        _ => "Object",
+                    },
+                };
+                let s = self.intern(name);
+                M::R::enc_sym(s)
+            }
+            Prim::Throw => {
+                panic!("throw: {}", self.print(args[0]));
+            }
+            Prim::NFields => {
+                let n = match self.decode(args[0]) {
+                    Val::Ref(id) => match &self.heap[id as usize] {
+                        Obj::Record { fields, .. } => fields.len() as i128,
+                        _ => 0,
+                    },
+                    _ => 0,
+                };
+                self.encode(Val::Int(n))
+            }
             Prim::Field => {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("field: not a record");
@@ -613,15 +591,25 @@ impl<M: ValueModel> Runtime<M> {
         self.method_names.insert(name);
         self.methods.insert((name, ty), imp);
     }
+    /// Is `name` a registered method (so a frontend should compile `(name recv)`
+    /// to a `Dispatch`)? The dispatch axis's compile-time query.
+    pub fn is_method_name(&self, name: Sym) -> bool {
+        self.method_names.contains(&name)
+    }
+    /// Register the global fn a backend should invoke when a non-closure object
+    /// is called (see `apply_fn`). The frontend sets this to a callable-object
+    /// dispatcher.
+    pub fn set_apply_fn(&mut self, name: Sym) {
+        self.apply_fn = Some(name);
+    }
+    /// The current apply-handler fn value (re-read from `globals`, so GC-safe), if any.
+    pub fn apply_handler(&self) -> Option<u64> {
+        self.apply_fn.and_then(|s| self.globals.get(&s).map(|v| v.val))
+    }
     /// Resolve a call site via the current dispatch strategy (reads registry +
     /// updates the strategy's per-site cache), then invoke happens in the backend.
     pub fn resolve_method(&self, site: usize, method: Sym, ty: Sym) -> Option<u64> {
         self.dispatch.resolve(&self.methods, site, method, ty)
-    }
-    fn fresh_site(&mut self) -> usize {
-        let s = self.next_site;
-        self.next_site += 1;
-        s
     }
 
     /// A fresh tag for an escape continuation.
@@ -778,359 +766,6 @@ impl<M: ValueModel> Runtime<M> {
         }
     }
 
-    // ── reader: &str -> Vec<Val> (code is data) ─────────────
-    pub fn read_all(&mut self, src: &str) -> Vec<u64> {
-        let toks = tokenize(src);
-        let mut p = 0;
-        let mut out = Vec::new();
-        while p < toks.len() {
-            let (v, np) = self.read_form(&toks, p);
-            out.push(v);
-            p = np;
-        }
-        out
-    }
-
-    fn read_form(&mut self, toks: &[Tok], p: usize) -> (u64, usize) {
-        match &toks[p] {
-            Tok::LParen => {
-                let mut items = Vec::new();
-                let mut q = p + 1;
-                while !matches!(toks.get(q), Some(Tok::RParen)) {
-                    if q >= toks.len() {
-                        panic!("unbalanced (");
-                    }
-                    let (v, nq) = self.read_form(toks, q);
-                    items.push(v);
-                    q = nq;
-                }
-                (self.vec_to_list(&items), q + 1)
-            }
-            Tok::RParen => panic!("unexpected )"),
-            Tok::Quote => {
-                let (v, nq) = self.read_form(toks, p + 1);
-                let qs = self.sf.quote;
-                let qsym = self.encode(Val::Sym(qs));
-                let inner = self.vec_to_list(&[qsym, v]);
-                (inner, nq)
-            }
-            Tok::Atom(a) => (self.read_atom(a), p + 1),
-        }
-    }
-
-    fn read_atom(&mut self, a: &str) -> u64 {
-        let v = if a == "nil" {
-            Val::Nil
-        } else if a == "true" {
-            Val::Bool(true)
-        } else if a == "false" {
-            Val::Bool(false)
-        } else if let Ok(i) = a.parse::<i128>() {
-            Val::Int(i)
-        } else if let Ok(f) = a.parse::<f64>() {
-            Val::Float(f)
-        } else {
-            Val::Sym(self.intern(a))
-        };
-        self.encode(v)
-    }
-
-    // ── macroexpand: re-enters compiled code mid-compile ────
-    //
-    // The backend `cs` is passed as a value, not baked into `Runtime`'s type.
-    // `cs` and `self` are disjoint borrows, so `cs.invoke(self, ...)` type-
-    // checks with any backend — including a wrapping one (see `code::Traced`).
-    pub fn macroexpand(&mut self, cs: &dyn CodeSpace<M>, form: u64) -> u64 {
-        // THE FUSION POINT. `invoke` runs a macro mid-compilation; the macro may
-        // allocate and trigger a MOVING collection, which relocates the form we
-        // are expanding. `form` is a bare `u64` the GC cannot see or update, so
-        // we publish it to the shadow stack and re-read it through that root
-        // after every `invoke` (`self.shadow[slot]` is rewritten to the new
-        // address). Using the stale bare `form` instead is the clojure-jvm
-        // form-609 corruption — now a use-after-move, not silent.
-        let slot = self.push_root(form);
-        loop {
-            let f = self.shadow[slot];
-            let Some((head, _)) = self.as_cons(f) else { break };
-            let Val::Sym(hs) = self.decode(head) else { break };
-            let (is_macro, mfn) = match self.globals.get(&hs) {
-                Some(v) => (v.is_macro, v.val),
-                None => break,
-            };
-            if !is_macro {
-                break;
-            }
-            // Args are sublists of the rooted form (kept alive + forwarded);
-            // `invoke` binds them into the macro's call frame before the macro
-            // body runs, so they are read while still valid.
-            let args = self.list_to_vec(self.shadow[slot]);
-            let result = cs.invoke(cs, self, mfn, &args[1..]);
-            self.shadow[slot] = result; // re-root to the expansion
-        }
-        let out = self.shadow[slot];
-        self.pop_root();
-        out
-    }
-
-    // ── analyze: macroexpanded Val -> Ir ────────────────────
-    //
-    // The compiler-side handle discipline: `analyze` roots the form for the
-    // whole of its work, and every child access (`child`) re-derives from that
-    // root rather than caching a bare pointer. So a moving GC inside a nested
-    // macro relocates the form, updates the root, and sibling children are read
-    // at their new addresses. Caching `list_to_vec(form)` up front (as the code
-    // did before this collector) is precisely the form-609 stale-pointer bug.
-    pub fn analyze(&mut self, cs: &dyn CodeSpace<M>, form: u64) -> Ir {
-        let slot = self.push_root(form);
-        self.shadow[slot] = self.macroexpand(cs, self.shadow[slot]);
-        let r = match self.decode(self.shadow[slot]) {
-            Val::Int(_) | Val::Float(_) | Val::Bool(_) | Val::Nil => {
-                let f = self.shadow[slot];
-                Ir::Const(self.intern_const(f))
-            }
-            Val::Sym(s) => match self.resolve_local(s) {
-                Some((up, idx)) => Ir::Local { up, idx },
-                None => Ir::Global(s),
-            },
-            Val::Ref(_) => {
-                if self.as_cons(self.shadow[slot]).is_some() {
-                    self.analyze_list(cs, slot)
-                } else {
-                    let f = self.shadow[slot];
-                    Ir::Const(self.intern_const(f))
-                }
-            }
-        };
-        self.shadow.truncate(slot);
-        r
-    }
-
-    /// Re-derive the k-th child of the rooted form. Cheap (forms are short) and
-    /// always current after a relocation.
-    fn child(&self, slot: usize, k: usize) -> u64 {
-        self.list_to_vec(self.shadow[slot])[k]
-    }
-    fn child_count(&self, slot: usize) -> usize {
-        self.list_to_vec(self.shadow[slot]).len()
-    }
-
-    fn analyze_list(&mut self, cs: &dyn CodeSpace<M>, slot: usize) -> Ir {
-        let head = self.child(slot, 0);
-        if let Val::Sym(hs) = self.decode(head) {
-            if hs == self.sf.quote {
-                let q = self.child(slot, 1);
-                return Ir::Quote(self.intern_const(q));
-            }
-            if hs == self.sf.if_ {
-                let c1 = self.child(slot, 1);
-                let c = self.analyze(cs, c1);
-                let t1 = self.child(slot, 2);
-                let t = self.analyze(cs, t1);
-                let e = if self.child_count(slot) > 3 {
-                    let e1 = self.child(slot, 3);
-                    self.analyze(cs, e1)
-                } else {
-                    let nil = self.enc_nil();
-                    Ir::Const(self.intern_const(nil))
-                };
-                return Ir::If(Box::new(c), Box::new(t), Box::new(e));
-            }
-            if hs == self.sf.do_ {
-                let n = self.child_count(slot);
-                let mut body = Vec::new();
-                for k in 1..n {
-                    let f = self.child(slot, k);
-                    body.push(self.analyze(cs, f));
-                }
-                return Ir::Do(body);
-            }
-            if hs == self.sf.def {
-                let Val::Sym(name) = self.decode(self.child(slot, 1)) else {
-                    panic!("def: name must be a symbol");
-                };
-                let i1 = self.child(slot, 2);
-                let init = self.analyze(cs, i1);
-                return Ir::Def {
-                    name,
-                    init: Box::new(init),
-                    is_macro: false,
-                };
-            }
-            if hs == self.sf.defmacro {
-                let Val::Sym(name) = self.decode(self.child(slot, 1)) else {
-                    panic!("defmacro: name must be a symbol");
-                };
-                let lam = self.analyze_fn(cs, slot, 2, 3);
-                return Ir::Def {
-                    name,
-                    init: Box::new(lam),
-                    is_macro: true,
-                };
-            }
-            if hs == self.sf.defmethod {
-                let Val::Sym(name) = self.decode(self.child(slot, 1)) else {
-                    panic!("defmethod: method name must be a symbol");
-                };
-                let Val::Sym(ty) = self.decode(self.child(slot, 2)) else {
-                    panic!("defmethod: type must be a symbol");
-                };
-                let imp_form = self.child(slot, 3);
-                let imp = self.analyze(cs, imp_form);
-                return Ir::DefMethod {
-                    name,
-                    ty,
-                    imp: Box::new(imp),
-                };
-            }
-            if hs == self.sf.fn_ {
-                return self.analyze_fn(cs, slot, 1, 2);
-            }
-            if hs == self.sf.let_ {
-                return self.analyze_let(cs, slot);
-            }
-            if hs == self.sf.set_ {
-                // (set! name val) — assign an existing local or global binding.
-                let Val::Sym(name) = self.decode(self.child(slot, 1)) else {
-                    panic!("set!: target must be a symbol");
-                };
-                let vform = self.child(slot, 2);
-                let val = Box::new(self.analyze(cs, vform));
-                return match self.resolve_local(name) {
-                    Some((up, idx)) => Ir::SetLocal { up, idx, val },
-                    None => Ir::SetGlobal { name, val },
-                };
-            }
-            if let Some(&p) = self.prims.get(&hs) {
-                let n = self.child_count(slot);
-                let mut a = Vec::new();
-                for k in 1..n {
-                    let f = self.child(slot, k);
-                    a.push(self.analyze(cs, f));
-                }
-                return Ir::Prim(p, a);
-            }
-            // A registered method name -> a polymorphic dispatch site. Checked
-            // after specials/prims so those cannot be shadowed by a method.
-            if self.method_names.contains(&hs) {
-                let site = self.fresh_site();
-                let n = self.child_count(slot);
-                let mut a = Vec::new();
-                for k in 1..n {
-                    let f = self.child(slot, k);
-                    a.push(self.analyze(cs, f));
-                }
-                return Ir::Dispatch {
-                    site,
-                    method: hs,
-                    args: a,
-                };
-            }
-        }
-        let h = self.child(slot, 0);
-        let f = self.analyze(cs, h);
-        let n = self.child_count(slot);
-        let mut a = Vec::new();
-        for k in 1..n {
-            let c = self.child(slot, k);
-            a.push(self.analyze(cs, c));
-        }
-        Ir::Call(Box::new(f), a)
-    }
-
-    fn analyze_let(&mut self, cs: &dyn CodeSpace<M>, slot: usize) -> Ir {
-        // Root the binding list too; its inits can macroexpand-and-GC.
-        let binds_form = self.child(slot, 1);
-        let bslot = self.push_root(binds_form);
-        self.scope.push(Vec::new());
-        let mut inits = Vec::new();
-        let mut i = 0;
-        while i + 1 < self.list_to_vec(self.shadow[bslot]).len() {
-            let bl = self.list_to_vec(self.shadow[bslot]);
-            let Val::Sym(s) = self.decode(bl[i]) else {
-                panic!("let: binding name must be a symbol");
-            };
-            let initform = bl[i + 1];
-            inits.push(self.analyze(cs, initform));
-            self.scope.last_mut().unwrap().push(s);
-            i += 2;
-        }
-        self.shadow.truncate(bslot);
-        let n = self.child_count(slot);
-        let mut body = Vec::new();
-        for k in 2..n {
-            let f = self.child(slot, k);
-            body.push(self.analyze(cs, f));
-        }
-        self.scope.pop();
-        Ir::Let(inits, Box::new(Ir::Do(body)))
-    }
-
-    /// Resolve a name to `(up, idx)` against the compile-time scope, innermost
-    /// frame first (so inner bindings shadow outer). `None` => it is a global.
-    fn resolve_local(&self, sym: Sym) -> Option<(u16, u16)> {
-        for (up, frame) in self.scope.iter().rev().enumerate() {
-            if let Some(idx) = frame.iter().rposition(|&s| s == sym) {
-                return Some((up as u16, idx as u16));
-            }
-        }
-        None
-    }
-
-    /// Analyze an `fn`/`defmacro` body (children `body_start..` of the rooted
-    /// form at `slot`, params at child `params_k`) under a fresh param frame.
-    fn analyze_fn(
-        &mut self,
-        cs: &dyn CodeSpace<M>,
-        slot: usize,
-        params_k: usize,
-        body_start: usize,
-    ) -> Ir {
-        let params_form = self.child(slot, params_k);
-        let (params, variadic) = self.parse_params(params_form);
-        let nparams = params.len();
-        let mut frame = params;
-        if let Some(rest) = variadic {
-            frame.push(rest);
-        }
-        self.scope.push(frame);
-        let n = self.child_count(slot);
-        let mut body = Vec::new();
-        for k in body_start..n {
-            let f = self.child(slot, k);
-            body.push(self.analyze(cs, f));
-        }
-        self.scope.pop();
-        Ir::Lambda {
-            nparams,
-            variadic: variadic.is_some(),
-            body: std::rc::Rc::new(Ir::Do(body)),
-        }
-    }
-
-    fn parse_params(&self, form: u64) -> (Vec<Sym>, Option<Sym>) {
-        let items = self.list_to_vec(form);
-        let mut params = Vec::new();
-        let mut variadic = None;
-        let mut i = 0;
-        while i < items.len() {
-            let Val::Sym(s) = self.decode(items[i]) else {
-                panic!("param must be a symbol");
-            };
-            if s == self.sf.amp {
-                if let Some(&rest) = items.get(i + 1) {
-                    let Val::Sym(r) = self.decode(rest) else {
-                        panic!("variadic param must be a symbol");
-                    };
-                    variadic = Some(r);
-                }
-                break;
-            }
-            params.push(s);
-            i += 1;
-        }
-        (params, variadic)
-    }
-
     /// Build a callee's slot frame from evaluated args. Slots `0..nparams` are
     /// the positional args; a variadic rest arg is the slot after them, holding
     /// the collected list. Shared by every backend so the frame layout has one
@@ -1163,75 +798,4 @@ impl<M: ValueModel> Runtime<M> {
         Some(Rc::new(Frame { slots, parent: env }))
     }
 
-    // ── top-level eval ──────────────────────────────────────
-    pub fn eval_top(&mut self, cs: &dyn CodeSpace<M>, form: u64) -> u64 {
-        let ir = self.analyze(cs, form);
-        cs.eval_ir(cs, self, &ir, &None)
-    }
-
-    pub fn eval_str(&mut self, cs: &dyn CodeSpace<M>, src: &str) -> u64 {
-        let forms = self.read_all(src);
-        // Root the whole read buffer: a GC during an earlier form must not
-        // reclaim (nor leave a stale pointer to) later, not-yet-analyzed source.
-        // Same discipline as the macro case, one level out. The forms are read
-        // BY VALUE into `eval_top`, which re-reads through the shadow slot, so
-        // relocation is handled.
-        let base = self.shadow.len();
-        self.shadow.extend(forms.iter().copied());
-        let mut last = self.enc_nil();
-        for k in 0..forms.len() {
-            let f = self.shadow[base + k];
-            last = self.eval_top(cs, f);
-        }
-        self.shadow.truncate(base);
-        last
-    }
-}
-
-// ── tokenizer ───────────────────────────────────────────────
-enum Tok {
-    LParen,
-    RParen,
-    Quote,
-    Atom(String),
-}
-
-fn tokenize(src: &str) -> Vec<Tok> {
-    let mut out = Vec::new();
-    let chars: Vec<char> = src.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        match c {
-            c if c.is_whitespace() => i += 1,
-            ';' => {
-                while i < chars.len() && chars[i] != '\n' {
-                    i += 1;
-                }
-            }
-            '(' | '[' => {
-                out.push(Tok::LParen);
-                i += 1;
-            }
-            ')' | ']' => {
-                out.push(Tok::RParen);
-                i += 1;
-            }
-            '\'' => {
-                out.push(Tok::Quote);
-                i += 1;
-            }
-            _ => {
-                let start = i;
-                while i < chars.len()
-                    && !chars[i].is_whitespace()
-                    && !matches!(chars[i], '(' | ')' | '[' | ']' | '\'' | ';')
-                {
-                    i += 1;
-                }
-                out.push(Tok::Atom(chars[start..i].iter().collect()));
-            }
-        }
-    }
-    out
 }

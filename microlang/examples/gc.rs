@@ -48,7 +48,7 @@ fn main() {
     // re-derives the sibling `(h)` from the relocated parent — so it works.
     let cs = TreeWalk;
     let mut rt2 = Runtime::<LowBitModel>::new();
-    let r = rt2.eval_str(
+    let r = microlang::sexpr::eval_str(&mut rt2, 
         &cs,
         r#"
         (def h (fn () 99))

@@ -124,17 +124,12 @@ impl<M: ValueModel> ClosureComp<M> {
                     r
                 })
             }
-            Ir::Def {
-                name,
-                init,
-                is_macro,
-            } => {
+            Ir::Def { name, init } => {
                 let name = *name;
-                let im = *is_macro;
                 let ci = self.compile(init);
                 Rc::new(move |rt, env, top| {
                     let v = ci(rt, env, top);
-                    rt.globals.insert(name, Var { val: v, is_macro: im });
+                    rt.globals.insert(name, Var { val: v });
                     rt.encode(Val::Sym(name))
                 })
             }

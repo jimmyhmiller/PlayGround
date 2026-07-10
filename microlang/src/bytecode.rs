@@ -52,7 +52,7 @@ pub enum Op {
         variadic: bool,
         body: Rc<Ir>,
     },
-    DefGlobal(Sym, bool),
+    DefGlobal(Sym),
     Pop,
     Jump(usize),
     BrFalse(usize),
@@ -203,9 +203,9 @@ impl<M: ModelEmit> BytecodeVm<M> {
                 let end = ops.len();
                 ops[jmp] = Op::Jump(end);
             }
-            Ir::Def { name, init, is_macro } => {
+            Ir::Def { name, init } => {
                 Self::compile(init, ops);
-                ops.push(Op::DefGlobal(*name, *is_macro));
+                ops.push(Op::DefGlobal(*name));
             }
             Ir::Lambda { nparams, variadic, body } => ops.push(Op::MakeClosure {
                 nparams: *nparams,
@@ -276,9 +276,9 @@ impl<M: ModelEmit> BytecodeVm<M> {
                     });
                     stack.push(M::R::enc_ref(id));
                 }
-                Op::DefGlobal(name, is_macro) => {
+                Op::DefGlobal(name) => {
                     let v = *stack.last().expect("def: empty stack");
-                    rt.globals.insert(*name, Var { val: v, is_macro: *is_macro });
+                    rt.globals.insert(*name, Var { val: v });
                 }
                 Op::Pop => {
                     stack.pop();
@@ -374,7 +374,7 @@ fn op_name(op: &Op) -> String {
         Op::LoadLocal(u, i) => format!("LoadLocal {u},{i}"),
         Op::LoadGlobal(s) => format!("LoadGlobal ${s}"),
         Op::MakeClosure { nparams, .. } => format!("MakeClosure/{nparams}"),
-        Op::DefGlobal(s, _) => format!("DefGlobal ${s}"),
+        Op::DefGlobal(s) => format!("DefGlobal ${s}"),
         Op::Pop => "Pop".into(),
         Op::Jump(t) => format!("Jump {t}"),
         Op::BrFalse(t) => format!("BrFalse {t}"),

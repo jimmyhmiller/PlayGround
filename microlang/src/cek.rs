@@ -37,7 +37,7 @@ pub enum Kont {
     Done,
     If { then_: Ir, else_: Ir, env: Locals, next: Rc<Kont> },
     Seq { rest: Vec<Ir>, env: Locals, next: Rc<Kont> },
-    Def { name: Sym, is_macro: bool, next: Rc<Kont> },
+    Def { name: Sym, next: Rc<Kont> },
     SetLoc { up: u16, idx: u16, env: Locals, next: Rc<Kont> },
     SetGlob { name: Sym, next: Rc<Kont> },
     // `done` holds already-evaluated argument values. They are raw heap pointers
@@ -125,8 +125,8 @@ fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Rc<Kont
                 }
             }
         }
-        Ir::Def { name, init, is_macro } => {
-            Step::Eval(*init, env, Rc::new(Kont::Def { name, is_macro, next: k }))
+        Ir::Def { name, init } => {
+            Step::Eval(*init, env, Rc::new(Kont::Def { name, next: k }))
         }
         Ir::SetLocal { up, idx, val } => {
             Step::Eval(*val, env.clone(), Rc::new(Kont::SetLoc { up, idx, env, next: k }))
@@ -205,8 +205,8 @@ fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Rc<Kont>) -> Step 
                 Step::Eval(first, env.clone(), Rc::new(Kont::Seq { rest: more, env: env.clone(), next: next.clone() }))
             }
         }
-        Kont::Def { name, is_macro, next } => {
-            rt.globals.insert(*name, Var { val: v, is_macro: *is_macro });
+        Kont::Def { name, next } => {
+            rt.globals.insert(*name, Var { val: v });
             Step::Apply(M::R::enc_sym(*name), next.clone())
         }
         Kont::SetLoc { up, idx, env, next } => {
@@ -383,8 +383,8 @@ fn regraft(k: &Rc<Kont>, new_tail: Rc<Kont>) -> Rc<Kont> {
         Kont::Seq { rest, env, next } => Rc::new(Kont::Seq {
             rest: rest.clone(), env: env.clone(), next: regraft(next, new_tail),
         }),
-        Kont::Def { name, is_macro, next } => Rc::new(Kont::Def {
-            name: *name, is_macro: *is_macro, next: regraft(next, new_tail),
+        Kont::Def { name, next } => Rc::new(Kont::Def {
+            name: *name, next: regraft(next, new_tail),
         }),
         Kont::SetLoc { up, idx, env, next } => Rc::new(Kont::SetLoc {
             up: *up, idx: *idx, env: env.clone(), next: regraft(next, new_tail),

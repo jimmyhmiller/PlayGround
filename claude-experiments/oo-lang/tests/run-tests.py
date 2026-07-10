@@ -19,11 +19,12 @@ import os, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PARSE_DIR = os.path.join(HERE, "parse")
+CHECK_DIR = os.path.join(HERE, "check")
 
 
-def run(binary, scry):
+def run(binary, subcmd, scry):
     try:
-        p = subprocess.run([binary, "parse-dump", scry],
+        p = subprocess.run([binary, subcmd, scry],
                            capture_output=True, text=True, timeout=60)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
@@ -47,51 +48,62 @@ def main():
         print(f"scry binary not found: {binary} (run `coil build` first)")
         sys.exit(2)
 
-    scry_files = sorted(f for f in os.listdir(PARSE_DIR) if f.endswith(".scry"))
     passed = failed = 0
     fails = []
-    for f in scry_files:
-        name = f[:-5]
-        if filt and filt not in name:
-            continue
-        scry = os.path.join(PARSE_DIR, f)
-        out_path = os.path.join(PARSE_DIR, name + ".out")
-        err_path = os.path.join(PARSE_DIR, name + ".err")
-        code, out, err = run(binary, scry)
-        problems = []
-        if os.path.exists(err_path):
-            # error test
-            if code == 0 or code is None:
-                problems.append(f"expected nonzero exit, got {code}")
-            with open(err_path) as fh:
-                for line in fh.read().splitlines():
-                    if line.strip() and line not in err:
-                        problems.append(f"missing expected diagnostic substring: {line!r}\n       actual stderr: {err.strip()!r}")
-        else:
-            # success test
-            if bless:
-                with open(out_path, "w") as fh:
-                    fh.write(out)
-            if code != 0:
-                problems.append(f"expected exit 0, got {code}; stderr: {err.strip()!r}")
-            expected = ""
-            if os.path.exists(out_path):
-                with open(out_path) as fh:
-                    expected = fh.read()
-            elif not bless:
-                problems.append(f"no golden file {name}.out (run with --bless to create)")
-            if not bless and out != expected:
-                problems.append("stdout != golden " + name + ".out")
-                if verbose:
-                    problems.append(_diff(expected, out))
-        if problems:
-            failed += 1
-            fails.append(name)
-            print(f"FAIL {name}")
-            for pr in problems:
-                print("     " + pr)
-        else:
-            passed += 1
+
+    def run_dir(directory, subcmd, golden):
+        nonlocal passed, failed
+        if not os.path.isdir(directory):
+            return
+        for f in sorted(fn for fn in os.listdir(directory) if fn.endswith(".scry")):
+            name = f[:-5]
+            if filt and filt not in name:
+                continue
+            scry = os.path.join(directory, f)
+            out_path = os.path.join(directory, name + ".out")
+            err_path = os.path.join(directory, name + ".err")
+            code, out, err = run(binary, subcmd, scry)
+            problems = []
+            if os.path.exists(err_path):
+                # error test: nonzero exit + each nonblank .err line is a stderr substring
+                if code == 0 or code is None:
+                    problems.append(f"expected nonzero exit, got {code}")
+                with open(err_path) as fh:
+                    for line in fh.read().splitlines():
+                        if line.strip() and line not in err:
+                            problems.append(f"missing expected diagnostic substring: {line!r}\n       actual stderr: {err.strip()!r}")
+            elif golden:
+                # golden-stdout success test (parse-dump)
+                if bless:
+                    with open(out_path, "w") as fh:
+                        fh.write(out)
+                if code != 0:
+                    problems.append(f"expected exit 0, got {code}; stderr: {err.strip()!r}")
+                expected = ""
+                if os.path.exists(out_path):
+                    with open(out_path) as fh:
+                        expected = fh.read()
+                elif not bless:
+                    problems.append(f"no golden file {name}.out (run with --bless to create)")
+                if not bless and out != expected:
+                    problems.append("stdout != golden " + name + ".out")
+                    if verbose:
+                        problems.append(_diff(expected, out))
+            else:
+                # exit-0 success test (check): just require a clean exit
+                if code != 0:
+                    problems.append(f"expected exit 0, got {code}; stderr: {err.strip()!r}")
+            if problems:
+                failed += 1
+                fails.append(name)
+                print(f"FAIL {name}")
+                for pr in problems:
+                    print("     " + pr)
+            else:
+                passed += 1
+
+    run_dir(PARSE_DIR, "parse-dump", True)
+    run_dir(CHECK_DIR, "check", False)
 
     print(f"\n{passed} passed, {failed} failed ({passed + failed} tests)")
     if fails and not verbose:

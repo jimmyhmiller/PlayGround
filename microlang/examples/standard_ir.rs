@@ -11,13 +11,13 @@ fn main() {
     let mut rt = Runtime::<LowBitModel>::new();
 
     // A helper function lives in the global environment.
-    rt.eval_str(&TreeWalk, "(def sq (fn (n) (* n n)))");
+    microlang::sexpr::eval_str(&mut rt, &TreeWalk, "(def sq (fn (n) (* n n)))");
 
     // Lower ONE expression to the standard IR, once. `ir` is axis-neutral: it
     // says (+ (sq 6) (sq 4)) in terms of Call/Global/Prim, committing to no
     // value layout, no dispatch, no execution strategy.
-    let form = rt.read_all("(+ (sq 6) (sq 4))")[0];
-    let ir = rt.analyze(&TreeWalk, form);
+    let form = microlang::sexpr::read_all(&mut rt, "(+ (sq 6) (sq 4))")[0];
+    let ir = microlang::sexpr::analyze(&mut rt, &TreeWalk, form);
 
     let top: Locals = None;
 

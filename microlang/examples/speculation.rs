@@ -24,7 +24,7 @@ fn run(label: &str, policy: impl SpeculationPolicy + 'static, list: &str) {
     let counters = spec.counters();
     rt.set_dispatch(Box::new(spec));
     let cs = TreeWalk;
-    let r = rt.eval_str(&cs, &format!("{DEFS}(total {list})"));
+    let r = microlang::sexpr::eval_str(&mut rt, &cs, &format!("{DEFS}(total {list})"));
     let s = counters.snapshot();
     println!(
         "  [{label:18}] => {}    (spec-hits {}, deopts {}, fallbacks {})",

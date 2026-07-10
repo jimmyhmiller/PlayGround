@@ -11,7 +11,7 @@ use microlang::{ClosureComp, CodeSpace, LowBitModel, Runtime};
 
 fn run(label: &str, cs: &dyn CodeSpace<LowBitModel>, src: &str) -> String {
     let mut rt = Runtime::<LowBitModel>::new();
-    let out = rt.eval_str(cs, src);
+    let out = microlang::sexpr::eval_str(&mut rt, cs, src);
     let s = rt.print(out);
     println!("  [{label:11}] => {s}");
     s
@@ -29,7 +29,7 @@ fn main() {
     println!("\ncompile-once (ClosureComp):");
     let cc = ClosureComp::<LowBitModel>::new();
     let mut rt = Runtime::<LowBitModel>::new();
-    rt.eval_str(&cc, prog);
+    microlang::sexpr::eval_str(&mut rt, &cc, prog);
     println!(
         "  fact recursed 6 deep; {} function body compiled + cached (not per call).",
         cc.compiled_bodies()
@@ -39,7 +39,7 @@ fn main() {
     println!("\nlate binding / forward reference (ClosureComp):");
     let cc2 = ClosureComp::<LowBitModel>::new();
     let mut rt2 = Runtime::<LowBitModel>::new();
-    let r = rt2.eval_str(
+    let r = microlang::sexpr::eval_str(&mut rt2, 
         &cc2,
         r#"
         (def even? (fn (n) (if (= n 0) true  (odd?  (- n 1)))))

@@ -14,11 +14,12 @@ use microlang::{LowBitModel, NanBoxModel, Runtime, TreeWalk, Val, ValueModel};
 fn run<M: ValueModel>(label: &str, src: &str) {
     let mut rt = Runtime::<M>::new();
     let cs = TreeWalk;
-    let forms = rt.read_all(src);
+    let mut sx = microlang::sexpr::Sexpr::new(&mut rt);
+    let forms = microlang::sexpr::read_all(&mut rt, src);
     let before = rt.allocs;
     let mut res = rt.encode(Val::Nil);
     for f in forms {
-        res = rt.eval_top(&cs, f);
+        res = sx.eval_top(&mut rt, &cs, f);
     }
     println!(
         "  [{label:6}] {src:<28} => {:<6}  ({} heap allocs during eval)",

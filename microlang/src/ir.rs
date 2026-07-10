@@ -1,8 +1,9 @@
 //! The High IR: the compiler-internal form a `CodeSpace` executes.
 //!
 //! Crucially, this is *not* the surface syntax. The surface is `Val` (code is
-//! data). `analyze` turns a macroexpanded `Val` into `Ir`. Macros run *before*
-//! analysis and never appear here. Arithmetic primitives get their own node
+//! data). `analyze` lowers a `Val` into `Ir`. The toolkit has no macro system of
+//! its own — a frontend that wants macros expands the `Val` tree before handing
+//! it to `analyze` (see the `mclj` frontend). Arithmetic primitives get their own node
 //! (`Prim`) so the value-model fast path is a first-class lowering, the way
 //! `dyn_add` is in the real toolkit — not a call into an opaque builtin.
 
@@ -31,8 +32,20 @@ pub enum Prim {
     /// Force a garbage collection. A safepoint you can place explicitly, so the
     /// GC-during-macro hazard is deterministic to demonstrate.
     Gc,
+    /// `(type-of x)` -> a symbol naming the runtime type of ANY value: a
+    /// record's own `type_id`, or a built-in tag (`List`/`Vector`/`String`/
+    /// `Char`/`Long`/`Double`/`Boolean`/`Symbol`/`Fn`/`nil`). The general
+    /// reflection hook a dynamic frontend needs to dispatch outside records.
+    TypeOf,
     /// `(record 'Type f0 f1 ...)` -> a record value.
     Record,
+    /// `(nfields r)` -> the number of fields of a record (0 for non-records). A
+    /// reflection hook a frontend uses to store optional trailing data (e.g.
+    /// metadata) on a record without changing how its leading fields read.
+    NFields,
+    /// `(throw x)` -> abort with `x`'s printed form. (A catchable `try` is a
+    /// separate, larger feature; this is the unconditional-abort primitive.)
+    Throw,
     /// `(field r i)` -> the i-th field of a record.
     Field,
     /// `(%callec f)` — call `f` with a fresh escape continuation. Backend-handled
@@ -135,11 +148,10 @@ pub enum Ir {
     SetGlobal { name: Sym, val: Box<Ir> },
     If(Box<Ir>, Box<Ir>, Box<Ir>),
     Do(Vec<Ir>),
-    /// `def` / `defmacro`. The `is_macro` flag rides through to the Var.
+    /// `def`: bind a global to the value of `init`.
     Def {
         name: Sym,
         init: Box<Ir>,
-        is_macro: bool,
     },
     /// `let*`: binding inits in order (each occupies the next slot of a single
     /// frame and can see earlier ones), then the body.

@@ -10,7 +10,7 @@ use microlang::{
 fn eval1<M: ValueModel>(src: &str) -> String {
     let mut rt = Runtime::<M>::new();
     let cs = TreeWalk;
-    let r = rt.eval_str(&cs, src);
+    let r = microlang::sexpr::eval_str(&mut rt, &cs, src);
     rt.print(r)
 }
 
@@ -29,10 +29,11 @@ fn immediacy_decides_allocation() {
     fn allocs_for<M: ValueModel>(src: &str) -> u64 {
         let mut rt = Runtime::<M>::new();
         let cs = TreeWalk;
-        let forms = rt.read_all(src);
+        let mut sx = microlang::sexpr::Sexpr::new(&mut rt);
+        let forms = microlang::sexpr::read_all(&mut rt, src);
         let before = rt.allocs;
         for f in forms {
-            rt.eval_top(&cs, f);
+            sx.eval_top(&mut rt, &cs, f);
         }
         rt.allocs - before
     }
@@ -40,29 +41,6 @@ fn immediacy_decides_allocation() {
     assert!(allocs_for::<NanBoxModel>("(+ (* 2 3) (* 4 5))") > 0);
     assert!(allocs_for::<LowBitModel>("(+ (* 2.0 3.0) (* 4.0 5.0))") > 0);
     assert_eq!(allocs_for::<NanBoxModel>("(+ (* 2.0 3.0) (* 4.0 5.0))"), 0);
-}
-
-/// The eval axis: macros expand, and a macro may run compiled code.
-#[test]
-fn macros_and_reentrancy() {
-    let mut rt = Runtime::<LowBitModel>::new();
-    let cs = TreeWalk;
-    rt.eval_str(
-        &cs,
-        r#"
-        (defmacro unless (c a b) (list 'if c b a))
-        (def inc (fn (n) (+ n 1)))
-        (defmacro add2 (x) (list '+ x (inc 1)))
-        "#,
-    );
-    let f = rt.read_all("(unless false 1 2)");
-    let ex = rt.macroexpand(&cs, f[0]);
-    assert_eq!(rt.print(ex), "(if false 2 1)");
-    let g = rt.read_all("(add2 40)");
-    let ex2 = rt.macroexpand(&cs, g[0]);
-    assert_eq!(rt.print(ex2), "(+ 40 2)");
-    let r = rt.eval_str(&cs, "(add2 40)");
-    assert_eq!(rt.print(r), "42");
 }
 
 #[test]
@@ -96,7 +74,7 @@ fn equality_is_structural() {
 fn backends_compose_with_open_recursion() {
     let traced = Traced::new(TreeWalk);
     let mut rt = Runtime::<LowBitModel>::new();
-    let r = rt.eval_str(
+    let r = microlang::sexpr::eval_str(&mut rt, 
         &traced,
         "(def fact (fn (n) (if (< n 2) 1 (* n (fact (- n 1)))))) (fact 5)",
     );
@@ -109,7 +87,7 @@ fn backends_compose_with_open_recursion() {
 
 fn eval_with<M: ValueModel>(cs: &dyn CodeSpace<M>, src: &str) -> String {
     let mut rt = Runtime::<M>::new();
-    let r = rt.eval_str(cs, src);
+    let r = microlang::sexpr::eval_str(&mut rt, cs, src);
     rt.print(r)
 }
 
@@ -120,7 +98,6 @@ fn tiers_agree() {
     let progs = [
         "(+ (* 2 3) (* 4 5))",
         "(def f (fn (n) (if (< n 2) 1 (* n (f (- n 1)))))) (f 6)",
-        "(defmacro unless (c a b) (list 'if c b a)) (unless false 1 2)",
         "(def m (fn (g xs) (if (nil? xs) xs (cons (g (first xs)) (m g (rest xs))))))
          (def inc (fn (n) (+ n 1)))
          (m inc (list 10 20 30))",
@@ -137,7 +114,7 @@ fn tiers_agree() {
 fn compiles_bodies_once() {
     let cs = ClosureComp::<LowBitModel>::new();
     let mut rt = Runtime::<LowBitModel>::new();
-    rt.eval_str(
+    microlang::sexpr::eval_str(&mut rt, 
         &cs,
         "(def fact (fn (n) (if (< n 2) 1 (* n (fact (- n 1)))))) (fact 6)",
     );
@@ -151,7 +128,7 @@ fn compiles_bodies_once() {
 fn late_binding_forward_reference() {
     let cs = ClosureComp::<LowBitModel>::new();
     let mut rt = Runtime::<LowBitModel>::new();
-    let r = rt.eval_str(
+    let r = microlang::sexpr::eval_str(&mut rt, 
         &cs,
         r#"
         (def even? (fn (n) (if (= n 0) true  (odd?  (- n 1)))))
@@ -168,7 +145,7 @@ fn late_binding_forward_reference() {
 fn traced_wraps_compiler() {
     let traced = Traced::new(ClosureComp::<LowBitModel>::new());
     let mut rt = Runtime::<LowBitModel>::new();
-    let r = rt.eval_str(
+    let r = microlang::sexpr::eval_str(&mut rt, 
         &traced,
         "(def fact (fn (n) (if (< n 2) 1 (* n (fact (- n 1)))))) (fact 5)",
     );
@@ -248,7 +225,7 @@ fn relocation_moves_and_handle_rereads() {
 fn globals_and_env_sound_across_move() {
     let mut rt = Runtime::<LowBitModel>::new();
     let cs = TreeWalk;
-    let r = rt.eval_str(
+    let r = microlang::sexpr::eval_str(&mut rt, 
         &cs,
         r#"
         (def keep (list 1 2 3))
@@ -262,50 +239,10 @@ fn globals_and_env_sound_across_move() {
     assert_eq!(rt.root_depth(), 0, "roots balanced after evaluation");
 }
 
-/// THE fusion point under a MOVING collector: a macro forces a collection that
-/// relocates the very form being compiled. Because `macroexpand`/`analyze`
-/// re-read the form through its root (never a stale bare pointer), and the
-/// nested-form case re-derives siblings from the rooted parent, the program is
-/// correct. Caching `list_to_vec(form)` across the macro would use-after-move —
-/// that is exactly the clojure-jvm form-609 bug, now fixed by construction.
-#[test]
-fn compiler_survives_relocating_macro() {
-    let mut rt = Runtime::<LowBitModel>::new();
-    let cs = TreeWalk;
-    let r = rt.eval_str(
-        &cs,
-        r#"
-        (def h (fn () 99))
-        (def f (fn (a b) (+ a b)))
-        (defmacro firstof (x) (list 1 2 3) (gc) (first x))
-        (f (firstof (40)) (h))
-        "#,
-    );
-    assert_eq!(rt.print(r), "139"); // (f 40 99)
-    assert!(rt.relocated > 0);
-}
-
-/// Same, on the compiling backend — proves both tiers are moving-safe.
-#[test]
-fn compiler_survives_relocating_macro_on_closurecomp() {
-    let mut rt = Runtime::<LowBitModel>::new();
-    let cs = ClosureComp::<LowBitModel>::new();
-    let r = rt.eval_str(
-        &cs,
-        r#"
-        (def h (fn () 99))
-        (def f (fn (a b) (+ a b)))
-        (defmacro firstof (x) (list 1 2 3) (gc) (first x))
-        (f (firstof (40)) (h))
-        "#,
-    );
-    assert_eq!(rt.print(r), "139");
-}
-
 // ── does the value axis actually hold on the HARD paths? ────
 //
-// The macro/GC/slot tests above ran on LowBit only. Everything model-
-// independent (macros, recursion, moving GC, closures capturing across frames)
+// The GC/slot tests above ran on LowBit only. Everything model-independent
+// (recursion, moving GC, closures capturing across frames, structural equality)
 // must give identical results under any conforming representation. Run the
 // whole hard suite generically and instantiate it for each model.
 
@@ -315,26 +252,13 @@ fn hard_suite<M: ValueModel>() {
     // recursion + arithmetic
     {
         let mut rt = Runtime::<M>::new();
-        let r = rt.eval_str(&cs, "(def f (fn (n) (if (< n 2) 1 (* n (f (- n 1)))))) (f 6)");
+        let r = microlang::sexpr::eval_str(&mut rt, &cs, "(def f (fn (n) (if (< n 2) 1 (* n (f (- n 1)))))) (f 6)");
         assert_eq!(rt.print(r), "720");
-    }
-    // macros with re-entrant expansion
-    {
-        let mut rt = Runtime::<M>::new();
-        let r = rt.eval_str(
-            &cs,
-            r#"
-            (def inc (fn (n) (+ n 1)))
-            (defmacro add2 (x) (list '+ x (inc 1)))
-            (add2 40)
-            "#,
-        );
-        assert_eq!(rt.print(r), "42");
     }
     // closures capturing across frames (slot resolution)
     {
         let mut rt = Runtime::<M>::new();
-        let r = rt.eval_str(
+        let r = microlang::sexpr::eval_str(&mut rt, 
             &cs,
             "(def f (fn (a) (let (b (+ a 1) c (+ b 1)) (fn (d) (+ (+ a b) (+ c d)))))) ((f 10) 100)",
         );
@@ -343,7 +267,7 @@ fn hard_suite<M: ValueModel>() {
     // structural equality over heap lists
     {
         let mut rt = Runtime::<M>::new();
-        let r = rt.eval_str(&cs, "(= (list 1 2 3) (list 1 2 3))");
+        let r = microlang::sexpr::eval_str(&mut rt, &cs, "(= (list 1 2 3) (list 1 2 3))");
         assert_eq!(rt.print(r), "true");
     }
     // MOVING GC relocates a survivor; handle re-reads; stale pointer dies
@@ -363,21 +287,6 @@ fn hard_suite<M: ValueModel>() {
         assert_eq!(rt.print(h.get(&rt)), "(1)");
         rt.pop_root();
         assert!(catch_unwind(AssertUnwindSafe(|| rt.as_cons(stale))).is_err());
-    }
-    // the compiler survives a collection that relocates the form mid-analysis
-    {
-        let mut rt = Runtime::<M>::new();
-        let r = rt.eval_str(
-            &cs,
-            r#"
-            (def h (fn () 99))
-            (def f (fn (a b) (+ a b)))
-            (defmacro firstof (x) (list 1 2 3) (gc) (first x))
-            (f (firstof (40)) (h))
-            "#,
-        );
-        assert_eq!(rt.print(r), "139");
-        assert!(rt.relocated > 0);
     }
 }
 
@@ -413,7 +322,7 @@ fn run_dispatch(d: Box<dyn Dispatch>) -> (String, DispatchStats) {
     let mut rt = Runtime::<LowBitModel>::new();
     rt.set_dispatch(d);
     let cs = TreeWalk;
-    let r = rt.eval_str(&cs, SHAPES);
+    let r = microlang::sexpr::eval_str(&mut rt, &cs, SHAPES);
     (rt.print(r), rt.dispatch_stats())
 }
 
@@ -447,7 +356,7 @@ fn dispatch_survives_moving_gc() {
     let mut rt = Runtime::<LowBitModel>::new();
     rt.set_dispatch(Box::new(MonomorphicIc::new()));
     let cs = TreeWalk;
-    let r = rt.eval_str(
+    let r = microlang::sexpr::eval_str(&mut rt, 
         &cs,
         r#"
         (defmethod area Circle (fn (s) (* (field s 0) (field s 0))))
@@ -483,7 +392,7 @@ fn run_spec(policy: impl SpeculationPolicy + 'static, tail: &str) -> (String, Sp
     rt.set_dispatch(Box::new(spec));
     let cs = TreeWalk;
     let prog = format!("{SPEC_DEFS}{tail}");
-    let r = rt.eval_str(&cs, &prog);
+    let r = microlang::sexpr::eval_str(&mut rt, &cs, &prog);
     (rt.print(r), counters.snapshot())
 }
 
@@ -530,7 +439,7 @@ fn speculation_composes_with_closurecomp() {
     rt.set_dispatch(Box::new(spec));
     let cs = ClosureComp::<LowBitModel>::new();
     let prog = format!("{SPEC_DEFS}{SPEC_MONO}");
-    let r = rt.eval_str(&cs, &prog);
+    let r = microlang::sexpr::eval_str(&mut rt, &cs, &prog);
     assert_eq!(rt.print(r), "86");
     assert!(counters.snapshot().spec_hits > 0);
 }
@@ -540,15 +449,15 @@ fn speculation_composes_with_closurecomp() {
 fn run_bc<M: ModelEmit>(src: &str) -> String {
     let mut rt = Runtime::<M>::new();
     let vm = BytecodeVm::<M>::new();
-    let r = rt.eval_str(&vm, src);
+    let r = microlang::sexpr::eval_str(&mut rt, &vm, src);
     rt.print(r)
 }
 
 fn disasm<M: ModelEmit>(src: &str) -> Vec<String> {
     let mut rt = Runtime::<M>::new();
     let vm = BytecodeVm::<M>::new();
-    let forms = rt.read_all(src);
-    let ir = rt.analyze(&vm, forms[0]);
+    let forms = microlang::sexpr::read_all(&mut rt, src);
+    let ir = microlang::sexpr::analyze(&mut rt, &vm, forms[0]);
     BytecodeVm::<M>::disassemble(&ir)
 }
 
@@ -605,7 +514,7 @@ fn grand_matrix_for<M: ModelEmit>() -> usize {
             _ => Box::new(BytecodeVm::<M>::new()),
         };
         let mut rt = Runtime::<M>::new();
-        let r = rt.eval_str(tier.as_ref(), prog_b);
+        let r = microlang::sexpr::eval_str(&mut rt, tier.as_ref(), prog_b);
         assert_eq!(rt.print(r), "720", "arith combo {tier_idx}");
         count += 1;
     }
@@ -637,7 +546,7 @@ fn grand_matrix_for<M: ModelEmit>() -> usize {
             };
             let mut rt = Runtime::<M>::new();
             rt.set_dispatch(make_d());
-            let r = rt.eval_str(tier.as_ref(), prog_a);
+            let r = microlang::sexpr::eval_str(&mut rt, tier.as_ref(), prog_a);
             assert_eq!(rt.print(r), "54", "dispatch combo tier {tier_idx}");
             count += 1;
         }

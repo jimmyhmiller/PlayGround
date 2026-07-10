@@ -56,7 +56,7 @@ fn model<M: ModelEmit>(name: &str, ok: &mut usize) {
     // arithmetic across all three tiers
     for t in 0..3 {
         let mut rt = Runtime::<M>::new();
-        let r = rt.eval_str(tier::<M>(t).as_ref(), ARITH);
+        let r = microlang::sexpr::eval_str(&mut rt, tier::<M>(t).as_ref(), ARITH);
         let s = rt.print(r);
         let pass = s == "720";
         *ok += pass as usize;
@@ -67,7 +67,7 @@ fn model<M: ModelEmit>(name: &str, ok: &mut usize) {
         for d in 0..6 {
             let mut rt = Runtime::<M>::new();
             rt.set_dispatch(dispatch(d));
-            let r = rt.eval_str(tier::<M>(t).as_ref(), FEATURE);
+            let r = microlang::sexpr::eval_str(&mut rt, tier::<M>(t).as_ref(), FEATURE);
             let s = rt.print(r);
             let pass = s == "54";
             *ok += pass as usize;

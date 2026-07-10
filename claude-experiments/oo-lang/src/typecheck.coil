@@ -1,0 +1,1193 @@
+; typecheck.coil — Scry Phase 2 static checker over the Phase 1 AST.
+;
+; Two passes: (1) collect all declarations into the symbol table (types.coil),
+; (2a) resolve field types + interface conformance for every loaded module,
+; (2b) deep-check the bodies of the *entry* module (imported modules contribute
+; signatures only — a separate-compilation boundary, see docs/06-implementation.md).
+;
+; `scry check <file.scry>` follows imports (relative paths) and reports every
+; independent error it can (per-declaration recovery), exiting 65 on any error.
+(module typecheck)
+(import "ioutil.coil" :use *)
+(import "lexer.coil" :use *)
+(import "ast.coil" :use *)
+(import "parser.coil" :use *)
+(import "types.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "alloc.coil" :use *)
+
+; ======================================================================
+; Environment for body checking
+; ======================================================================
+(defstruct VarBind [(name (ptr u8)) (name-len i64) (ty (ptr Type)) (mutable bool)])
+(defstruct Env
+  [(vars (ArrayList (ptr VarBind)))
+   (self-type (ptr Type))     ; null when not in a method
+   (self-decl (ptr Decl))     ; enclosing class/object decl (tparam ctxt), or null
+   (ret-type (ptr Type))
+   (in-init bool)
+   (assigned (ArrayList (ptr Node)))])   ; FIELD nodes assigned to self (definite-assignment)
+
+(defn env-new [(self-ty (ptr Type)) (self-decl (ptr Decl)) (ret (ptr Type)) (in-init bool)] (-> (ptr Env))
+  (let [e (cast (ptr Env) (xalloc (sizeof Env)))]
+    (store! e (zeroed Env))
+    (store! (field e vars) (al-new [(ptr VarBind)] (alc-global)))
+    (store! (field e assigned) (al-new [(ptr Node)] (alc-global)))
+    (store! (field e self-type) self-ty) (store! (field e self-decl) self-decl)
+    (store! (field e ret-type) ret) (store! (field e in-init) in-init)
+    e))
+(defn env-mark [(e (ptr Env))] (-> i64) (al-len (load (field e vars))))
+(defn env-reset [(e (ptr Env)) (mark i64)] (-> i64)
+  (store! (field (field e vars) len) mark) 0)
+(defn env-push [(e (ptr Env)) (name (ptr u8)) (len i64) (ty (ptr Type)) (mutable bool)] (-> i64)
+  (let [v (cast (ptr VarBind) (xalloc (sizeof VarBind)))]
+    (store! (field v name) name) (store! (field v name-len) len)
+    (store! (field v ty) ty) (store! (field v mutable) mutable)
+    (al-push! (mut (field e vars)) v) 0))
+(defn env-lookup [(e (ptr Env)) (name (ptr u8)) (len i64)] (-> (ptr VarBind))
+  (let [vs (load (field e vars)) n (al-len vs) (mut i) (- n 1) (mut f) (cast (ptr VarBind) 0)]
+    (loop
+      (if (and (= (cast i64 (load f)) 0) (>= (load i) 0))
+        (let [v (al-get vs (load i))]
+          (if (name-eq (load (field v name)) (load (field v name-len)) name len) (do (store! f v) 0) 0)
+          (store! i (- (load i) 1)) 0)
+        (break)))
+    (load f)))
+
+(defn null-ty [] (-> (ptr Type)) (cast (ptr Type) 0))
+(defn has-ty [(t (ptr Type))] (-> bool) (!= (cast i64 t) 0))
+
+; ======================================================================
+; small node accessors
+; ======================================================================
+(defn nkind [(n (ptr Node))] (-> i64) (load (field n kind)))
+(defn arg-count [(call (ptr Node))] (-> i64) (kid-count call))
+(defn arg-at [(call (ptr Node)) (i i64)] (-> (ptr Node)) (kid-at call i))
+(defn arg-val [(a (ptr Node))] (-> (ptr Node)) (load (field a a)))
+(defn arg-named [(a (ptr Node))] (-> bool) (> (nlen a) 0))
+
+; method/ctor parameter helpers (FN node: b=PARAMS, c=rettype, d=body)
+(defn fn-params [(fnn (ptr Node))] (-> (ptr Node)) (load (field fnn b)))
+(defn fn-param-count [(fnn (ptr Node))] (-> i64)
+  (let [p (fn-params fnn)] (if (= (cast i64 p) 0) 0 (kid-count p))))
+(defn fn-param-at [(fnn (ptr Node)) (i i64)] (-> (ptr Node)) (kid-at (fn-params fnn) i))
+(defn fn-ret-node [(fnn (ptr Node))] (-> (ptr Node)) (load (field fnn c)))
+(defn fn-body [(fnn (ptr Node))] (-> (ptr Node)) (load (field fnn d)))
+(defn param-type-node [(pn (ptr Node))] (-> (ptr Node)) (load (field pn a)))
+
+; ======================================================================
+; forward: infer / stmt / block are mutually recursive
+; ======================================================================
+
+; ---------- operator checking ----------
+(defn is-numeric [(t (ptr Type))] (-> bool) (or (= (ty-kind t) TY_INT) (= (ty-kind t) TY_FLOAT)))
+(defn eq-comparable [(t (ptr Type))] (-> bool)
+  (let [k (ty-kind t)]
+    (or (or (= k TY_INT) (= k TY_FLOAT)) (or (or (= k TY_BOOL) (= k TY_STRING))
+        (and (= k TY_NAMED) (= (load (field (load (field t decl)) kind)) DK_ENUM))))))
+
+(defn check-binary [(n (ptr Node)) (env (ptr Env))] (-> (ptr Type))
+  (let [op (load (field n ival))
+        lt (infer (load (field n a)) env (null-ty))
+        rt (infer (load (field n b)) env (null-ty))]
+    (if (or (is-err lt) (is-err rt))
+      (ty-error)
+      (cond
+        ; arithmetic + - * / %
+        (or (or (= op TK_PLUS) (= op TK_MINUS)) (or (or (= op TK_STAR) (= op TK_SLASH)) (= op TK_PERCENT)))
+          (cond
+            ; String concatenation with '+'
+            (and (= op TK_PLUS) (= (ty-kind lt) TY_STRING))
+              (if (= (ty-kind rt) TY_STRING) (ty-string)
+                (do (err-exp-found (load (field n b)) c"" (ty-string) rt) (ty-error)))
+            (and (is-numeric lt) (type-eq lt rt))
+              (if (and (= op TK_PERCENT) (= (ty-kind lt) TY_FLOAT))
+                (do (err-msg n c"operator % requires Int operands") (ty-error))
+                lt)
+            (do (err-op n op lt rt) (ty-error)))
+        ; comparison < <= > >=
+        (or (or (= op TK_LT) (= op TK_LE)) (or (= op TK_GT) (= op TK_GE)))
+          (if (and (is-numeric lt) (type-eq lt rt)) (ty-bool)
+            (do (err-op n op lt rt) (ty-error)))
+        ; equality == !=
+        (or (= op TK_EQEQ) (= op TK_NE))
+          (if (and (type-eq lt rt) (eq-comparable lt)) (ty-bool)
+            (do (err-op n op lt rt) (ty-error)))
+        ; boolean && ||
+        (or (= op TK_ANDAND) (= op TK_OROR))
+          (if (and (= (ty-kind lt) TY_BOOL) (= (ty-kind rt) TY_BOOL)) (ty-bool)
+            (do (err-op n op lt rt) (ty-error)))
+        (ty-error)))))
+
+(defn check-unary [(n (ptr Node)) (env (ptr Env))] (-> (ptr Type))
+  (let [op (load (field n ival)) t (infer (load (field n a)) env (null-ty))]
+    (if (is-err t) (ty-error)
+      (cond
+        (= op TK_BANG) (if (= (ty-kind t) TY_BOOL) (ty-bool) (do (err-exp-found n c"" (ty-bool) t) (ty-error)))
+        (= op TK_MINUS) (if (is-numeric t) t (do (err-msg n c"unary '-' requires a numeric operand") (ty-error)))
+        (ty-error)))))
+
+(defn err-op [(n (ptr Node)) (op i64) (lt (ptr Type)) (rt (ptr Type))] (-> i64)
+  (err-head-n n) (w-cstr 2 c"operator '") (w-cstr 2 (op-sym op))
+  (w-cstr 2 c"' cannot be applied to ") (type-write 2 lt) (w-cstr 2 c" and ") (type-write 2 rt) (err-end))
+
+; ---------- interpolation ----------
+(defn check-interp [(n (ptr Node)) (env (ptr Env))] (-> (ptr Type))
+  (let [m (kid-count n) (mut i) 0]
+    (loop
+      (if (< (load i) m)
+        (let [part (kid-at n (load i))]
+          (if (!= (nkind part) NK_STRCHUNK)
+            (let [pt (infer part env (null-ty))]
+              (if (or (is-err pt) (or (is-numeric pt) (or (= (ty-kind pt) TY_BOOL) (= (ty-kind pt) TY_STRING))))
+                0
+                (do (err-head-n part) (w-cstr 2 c"cannot interpolate a value of type ") (type-write 2 pt) (err-end) 0)))
+            0)
+          (store! i (+ (load i) 1)) 0)
+        (break))))
+  (ty-string))
+
+; ======================================================================
+; construction & calls
+; ======================================================================
+
+; constructor "fields": init params if an init exists, else the class fields.
+(defn ctor-fn [(d (ptr Decl))] (-> (ptr Node)) (decl-member-c d c"init"))
+
+; check a user-class construction `C(field: v, ...)` (named args, all required).
+(defn construct-class [(cd (ptr Decl)) (inst (ptr Type)) (call (ptr Node)) (env (ptr Env))] (-> (ptr Type))
+  (let [init (ctor-fn cd) args (load (field inst args))]
+    (if (!= (cast i64 init) 0)
+      (construct-with-params cd inst init call env)
+      (construct-with-fields cd inst call env))))
+
+; construction driven by an init's parameter list (matched by parameter name)
+(defn construct-with-params [(cd (ptr Decl)) (inst (ptr Type)) (init (ptr Node)) (call (ptr Node)) (env (ptr Env))] (-> (ptr Type))
+  (let [np (fn-param-count init) args (load (field inst args)) (mut i) 0]
+    (loop
+      (if (< (load i) np)
+        (let [pn (fn-param-at init (load i))
+              pty (subst-type (resolve-type (param-type-node pn) cd) cd args)
+              av (find-named-arg call (nm pn) (nlen pn))]
+          (if (= (cast i64 av) 0)
+            (do (err-head-n call) (w-cstr 2 c"missing argument '") (w-bytes 2 (nm pn) (nlen pn))
+                (w-cstr 2 c"' in construction of ") (w-bytes 2 (load (field cd name)) (load (field cd name-len))) (err-end) 0)
+            (do (infer (arg-val av) env pty) 0))
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (check-extra-args call cd init env)
+    inst))
+
+; construction driven by the field list (synthesized memberwise constructor)
+(defn construct-with-fields [(cd (ptr Decl)) (inst (ptr Type)) (call (ptr Node)) (env (ptr Env))] (-> (ptr Type))
+  (let [ms (load (field cd members)) n (al-len ms) args (load (field inst args)) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [mem (al-get ms (load i))]
+          (if (= (nkind mem) NK_FIELD)
+            (let [fty (subst-type (resolve-type (load (field mem a)) cd) cd args)
+                  av (find-named-arg call (nm mem) (nlen mem))]
+              (if (= (cast i64 av) 0)
+                (do (err-head-n call) (w-cstr 2 c"missing field '") (w-bytes 2 (nm mem) (nlen mem))
+                    (w-cstr 2 c"' in construction of ") (w-bytes 2 (load (field cd name)) (load (field cd name-len))) (err-end) 0)
+                (do (infer (arg-val av) env fty) 0)) 0)
+            0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (check-extra-args call cd (cast (ptr Node) 0) env)
+    inst))
+
+(defn find-named-arg [(call (ptr Node)) (name (ptr u8)) (len i64)] (-> (ptr Node))
+  (let [n (arg-count call) (mut i) 0 (mut f) (cast (ptr Node) 0)]
+    (loop
+      (if (and (= (cast i64 (load f)) 0) (< (load i) n))
+        (let [a (arg-at call (load i))]
+          (if (and (arg-named a) (name-eq (nm a) (nlen a) name len)) (do (store! f a) 0) 0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (load f)))
+
+; report any argument whose name isn't a valid field/param
+(defn check-extra-args [(call (ptr Node)) (cd (ptr Decl)) (init (ptr Node)) (env (ptr Env))] (-> i64)
+  (let [n (arg-count call) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [a (arg-at call (load i))]
+          (if (not (arg-named a))
+            (do (err-msg a c"construction requires named arguments (name: value)") 0)
+            (if (arg-name-known cd init (nm a) (nlen a)) 0
+              (do (err-head-n a) (w-cstr 2 c"unknown field '") (w-bytes 2 (nm a) (nlen a))
+                  (w-cstr 2 c"' for ") (w-bytes 2 (load (field cd name)) (load (field cd name-len))) (err-end) 0)))
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    0))
+(defn arg-name-known [(cd (ptr Decl)) (init (ptr Node)) (name (ptr u8)) (len i64)] (-> bool)
+  (if (!= (cast i64 init) 0)
+    (let [np (fn-param-count init) (mut i) 0 (mut ok) false]
+      (loop (if (and (not (load ok)) (< (load i) np))
+              (let [pn (fn-param-at init (load i))] (if (name-eq (nm pn) (nlen pn) name len) (do (store! ok true) 0) 0) (store! i (+ (load i) 1)) 0)
+              (break)))
+      (load ok))
+    (!= (cast i64 (decl-member cd name len)) 0)))
+
+; construction from a TYPE-node callee (`List<Tool>()`, `Mutex<AgentStatus>(x)`, `Inventory<Tool>()`)
+(defn construct-type-node [(tn (ptr Node)) (call (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [inst (resolve-type tn (load (field env self-decl)))]
+    (if (is-err inst) (ty-error)
+      (let [d (load (field inst decl))]
+        (cond
+          ; List<T>() / Map<K,V>() — zero-arg positional
+          (or (name-eq (load (field d name)) (load (field d name-len)) (cast (ptr u8) c"List") 4)
+              (name-eq (load (field d name)) (load (field d name-len)) (cast (ptr u8) c"Map") 3))
+            (do (if (> (arg-count call) 0) (err-msg call c"collection constructor takes no arguments") 0) inst)
+          ; Mutex<T>(value) — one positional arg
+          (name-eq (load (field d name)) (load (field d name-len)) (cast (ptr u8) c"Mutex") 5)
+            (do (if (!= (arg-count call) 1)
+                  (do (err-msg call c"Mutex(value) takes exactly one argument") 0)
+                  (do (infer (arg-val (arg-at call 0)) env (al-get (load (field inst args)) 0)) 0))
+                inst)
+          (= (load (field d kind)) DK_ENUM) (do (err-msg call c"cannot construct an enum directly; use a variant") (ty-error))
+          (construct-class d inst call env))))))
+
+; call to a top-level function `f(args...)` (positional)
+(defn call-function [(d (ptr Decl)) (call (ptr Node)) (env (ptr Env))] (-> (ptr Type))
+  (let [fnn (load (field d node)) np (fn-param-count fnn) na (arg-count call)]
+    (if (!= np na)
+      (do (err-arity call np na) (ty-error))
+      (do
+        (let [(mut i) 0]
+          (loop (if (< (load i) na)
+                  (let [pt (resolve-type (param-type-node (fn-param-at fnn (load i))) d)]
+                    (infer (arg-val (arg-at call (load i))) env pt) (store! i (+ (load i) 1)) 0)
+                  (break))))
+        (resolve-type (fn-ret-node fnn) d)))))
+
+(defn err-arity [(n (ptr Node)) (want i64) (got i64)] (-> i64)
+  (err-head-n n) (w-cstr 2 c"expected ") (w-int 2 want) (w-cstr 2 c" argument(s), found ") (w-int 2 got) (err-end))
+
+; ---------- calls ----------
+(defn infer-call [(n (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [callee (load (field n a)) ck (nkind callee)]
+    (cond
+      (= ck NK_TYPE) (construct-type-node callee n env expected)
+      (= ck NK_FIELDACC) (infer-dotted-call callee n env expected)
+      (= ck NK_IDENT) (infer-ident-call callee n env expected)
+      (do (infer callee env (null-ty)) (err-msg n c"expression is not callable") (ty-error)))))
+
+(defn infer-ident-call [(callee (ptr Node)) (n (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [nm0 (nm callee) len0 (nlen callee)]
+    (cond
+      ; built-in print(x)
+      (name-eq nm0 len0 (cast (ptr u8) c"print") 5)
+        (do (if (!= (arg-count n) 1) (err-arity n 1 (arg-count n))
+              (let [t (infer (arg-val (arg-at n 0)) env (null-ty))]
+                (if (or (is-err t) (or (is-numeric t) (or (= (ty-kind t) TY_BOOL) (= (ty-kind t) TY_STRING)))) 0
+                  (do (err-msg n c"print expects an Int, Float, Bool or String") 0)))) (ty-void))
+      (!= (cast i64 (env-lookup env nm0 len0)) 0)
+        (do (err-msg n c"value is not callable") (ty-error))
+        (let [d (find-decl nm0 len0)]
+          (if (!= (cast i64 d) 0)
+            (let [dk (load (field d kind))]
+              (cond
+                (= dk DK_FN) (call-function d n env)
+                (or (= dk DK_CLASS) (= dk DK_OBJECT))
+                  (if (decl-is-generic d)
+                    (do (err-msg-name n c"generic type '" nm0 len0 c"' needs type arguments, e.g. T<...>(...)") (ty-error))
+                    (construct-class d (mk-named d (al-new [(ptr Type)] (alc-global))) n env))
+                (= dk DK_ENUM) (do (err-msg n c"cannot construct an enum directly; use a variant") (ty-error))
+                (do (err-msg-name n c"'" nm0 len0 c"' is not callable") (ty-error))))
+            ; maybe an unqualified enum variant (Some/Ok/Err/Circle/...)
+            (let [vr (find-variant nm0 len0 (expected-enum expected))]
+              (if (!= (cast i64 vr) 0)
+                (construct-variant (load (field vr enum-decl)) (load (field vr vnode)) n env expected)
+                (do (err-msg-name n c"unknown name '" nm0 len0 c"'") (ty-error)))))))))
+
+; receiver.method(args) OR Enum.Variant(args) OR Object.method(args)
+(defn infer-dotted-call [(facc (ptr Node)) (call (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [recv (load (field facc a)) mname (nm facc) mlen (nlen facc)
+        nsd (namespace-decl recv env)]
+    (if (!= (cast i64 nsd) 0)
+      (let [dk (load (field nsd kind))]
+        (cond
+          (= dk DK_ENUM)
+            (let [vn (decl-member nsd mname mlen)]
+              (if (or (= (cast i64 vn) 0) (!= (nkind vn) NK_VARIANT))
+                (do (err-head-n facc) (w-cstr 2 c"enum ") (w-bytes 2 (load (field nsd name)) (load (field nsd name-len)))
+                    (w-cstr 2 c" has no variant '") (w-bytes 2 mname mlen) (w-cstr 2 c"'") (err-end) (ty-error))
+                (construct-variant nsd vn call env expected)))
+          (or (= dk DK_OBJECT) (= dk DK_BUILTIN_OBJ))
+            (call-object-method nsd mname mlen call env)
+          (do (err-head-n facc) (w-cstr 2 c"cannot call '") (w-bytes 2 mname mlen)
+              (w-cstr 2 c"' as a static member") (err-end) (ty-error))))
+      ; value receiver
+      (let [rt (infer recv env (null-ty))]
+        (if (is-err rt) (ty-error)
+          (call-method-on rt facc mname mlen call env))))))
+
+; resolve receiver as a namespace (type/enum/object name, not shadowed by a local)
+(defn namespace-decl [(recv (ptr Node)) (env (ptr Env))] (-> (ptr Decl))
+  (if (!= (nkind recv) NK_IDENT) (cast (ptr Decl) 0)
+    (if (!= (cast i64 (env-lookup env (nm recv) (nlen recv))) 0) (cast (ptr Decl) 0)
+      (find-decl (nm recv) (nlen recv)))))
+
+(defn call-object-method [(od (ptr Decl)) (mname (ptr u8)) (mlen i64) (call (ptr Node)) (env (ptr Env))] (-> (ptr Type))
+  (let [m (decl-member od mname mlen)]
+    (if (or (= (cast i64 m) 0) (!= (nkind m) NK_FN))
+      (do (err-no-method call od mname mlen) (ty-error))
+      (check-method-args od m call env (al-new [(ptr Type)] (alc-global))))))
+
+; method call on a value of type rt
+(defn call-method-on [(rt (ptr Type)) (facc (ptr Node)) (mname (ptr u8)) (mlen i64) (call (ptr Node)) (env (ptr Env))] (-> (ptr Type))
+  (cond
+    (= (ty-kind rt) TY_STRING) (string-method rt facc mname mlen call env)
+    (= (ty-kind rt) TY_NAMED)
+      (let [d (load (field rt decl)) dk (load (field d kind))]
+        (if (= dk DK_ENUM) (do (err-msg-name facc c"enums have no methods (offending call '" mname mlen c"')") (ty-error))
+            (let [m (decl-member d mname mlen)]
+              (if (or (= (cast i64 m) 0) (!= (nkind m) NK_FN))
+                (do (err-no-method-t facc rt mname mlen) (ty-error))
+                (check-method-args d m call env (load (field rt args)))))))
+    (do (err-no-method-t facc rt mname mlen) (ty-error))))
+
+; check positional args of method m (decl d, substituted with type args)
+(defn check-method-args [(d (ptr Decl)) (m (ptr Node)) (call (ptr Node)) (env (ptr Env)) (targs (ArrayList (ptr Type)))] (-> (ptr Type))
+  (let [np (fn-param-count m) na (arg-count call)]
+    (if (!= np na)
+      (do (err-arity call np na) (ty-error))
+      (do
+        (let [(mut i) 0]
+          (loop (if (< (load i) na)
+                  (let [pt (subst-type (resolve-type (param-type-node (fn-param-at m (load i))) d) d targs)]
+                    (infer (arg-val (arg-at call (load i))) env pt) (store! i (+ (load i) 1)) 0)
+                  (break))))
+        (subst-type (resolve-type (fn-ret-node m) d) d targs)))))
+
+(defn string-method [(rt (ptr Type)) (facc (ptr Node)) (mname (ptr u8)) (mlen i64) (call (ptr Node)) (env (ptr Env))] (-> (ptr Type))
+  (cond
+    (name-eq mname mlen (cast (ptr u8) c"len") 3)
+      (do (if (!= (arg-count call) 0) (err-arity call 0 (arg-count call)) 0) (ty-int))
+    (name-eq mname mlen (cast (ptr u8) c"slice") 5)
+      (do (if (!= (arg-count call) 2) (err-arity call 2 (arg-count call))
+            (do (infer (arg-val (arg-at call 0)) env (ty-int)) (infer (arg-val (arg-at call 1)) env (ty-int)) 0))
+          (ty-string))
+    (do (err-no-method-t facc rt mname mlen) (ty-error))))
+
+(defn err-no-method [(n (ptr Node)) (d (ptr Decl)) (mname (ptr u8)) (mlen i64)] (-> i64)
+  (err-head-n n) (w-cstr 2 c"no method '") (w-bytes 2 mname mlen) (w-cstr 2 c"' on ")
+  (w-bytes 2 (load (field d name)) (load (field d name-len))) (err-end))
+(defn err-no-method-t [(n (ptr Node)) (rt (ptr Type)) (mname (ptr u8)) (mlen i64)] (-> i64)
+  (err-head-n n) (w-cstr 2 c"no method '") (w-bytes 2 mname mlen) (w-cstr 2 c"' on type ") (type-write 2 rt) (err-end))
+
+; ======================================================================
+; enum-variant construction (with type-argument inference for generics)
+; ======================================================================
+(defn expected-enum [(expected (ptr Type))] (-> (ptr Decl))
+  (if (and (has-ty expected) (= (ty-kind expected) TY_NAMED))
+    (let [d (load (field expected decl))] (if (= (load (field d kind)) DK_ENUM) d (cast (ptr Decl) 0)))
+    (cast (ptr Decl) 0)))
+
+(defn construct-variant [(ed (ptr Decl)) (vn (ptr Node)) (call (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [arity (variant-arity vn)
+        na (if (= (cast i64 call) 0) 0 (arg-count call))]
+    (if (!= arity na)
+      (do (err-variant-arity (if (= (cast i64 call) 0) vn call) vn arity na) (ty-error))
+      (if (decl-is-generic ed)
+        (construct-generic-variant ed vn call env expected arity)
+        ; non-generic enum: check each payload directly
+        (do
+          (let [(mut i) 0]
+            (loop (if (< (load i) arity)
+                    (do (infer (arg-val (arg-at call (load i))) env (resolve-type (variant-payload-at vn (load i)) ed))
+                        (store! i (+ (load i) 1)) 0)
+                    (break))))
+          (mk-named ed (al-new [(ptr Type)] (alc-global))))))))
+
+(defn construct-generic-variant [(ed (ptr Decl)) (vn (ptr Node)) (call (ptr Node)) (env (ptr Env)) (expected (ptr Type)) (arity i64)] (-> (ptr Type))
+  (let [ntp (decl-tparam-count ed)
+        subst (cast (ptr (array (ptr Type) 8)) (xalloc (sizeof (array (ptr Type) 8))))]
+    (let [(mut i) 0] (loop (if (< (load i) ntp) (do (store! (index subst (load i)) (null-ty)) (store! i (+ (load i) 1)) 0) (break))))
+    ; infer from arguments
+    (let [(mut i) 0]
+      (loop
+        (if (< (load i) arity)
+          (let [at (infer (arg-val (arg-at call (load i))) env (null-ty))
+                pat (resolve-type (variant-payload-at vn (load i)) ed)]
+            (unify-into pat at ed subst) (store! i (+ (load i) 1)) 0)
+          (break))))
+    ; fill unsolved from expected
+    (if (and (and (has-ty expected) (= (ty-kind expected) TY_NAMED)) (= (cast i64 (load (field expected decl))) (cast i64 ed)))
+      (let [ea (load (field expected args)) (mut i) 0]
+        (loop (if (< (load i) ntp)
+                (do (if (and (= (cast i64 (load (index subst (load i)))) 0) (< (load i) (al-len ea))) (do (store! (index subst (load i)) (al-get ea (load i))) 0) 0) (store! i (+ (load i) 1)) 0)
+                (break)))) 0)
+    ; any still unsolved => error
+    (let [(mut args) (al-new [(ptr Type)] (alc-global)) (mut i) 0 (mut bad) false]
+      (loop (if (< (load i) ntp)
+              (do (if (= (cast i64 (load (index subst (load i)))) 0)
+                    (do (store! bad true) (al-push! (mut args) (ty-error)) 0)
+                    (do (al-push! (mut args) (load (index subst (load i)))) 0)) (store! i (+ (load i) 1)) 0)
+              (break)))
+      (if (load bad)
+        (do (err-head-n (if (= (cast i64 call) 0) vn call)) (w-cstr 2 c"cannot infer type arguments for ")
+            (w-bytes 2 (load (field ed name)) (load (field ed name-len)))
+            (w-cstr 2 c" (add a type annotation)") (err-end) 0)
+        0)
+      (mk-named ed (load args)))))
+
+(defn unify-into [(pat (ptr Type)) (act (ptr Type)) (ed (ptr Decl)) (subst (ptr (array (ptr Type) 8)))] (-> i64)
+  (cond
+    (= (ty-kind pat) TY_VAR)
+      (let [ntp (decl-tparam-count ed) (mut i) 0]
+        (loop (if (< (load i) ntp)
+                (let [tp (decl-tparam-at ed (load i))]
+                  (if (and (name-eq (nm tp) (nlen tp) (load (field pat name)) (load (field pat name-len)))
+                           (= (cast i64 (load (index subst (load i)))) 0)) (do (store! (index subst (load i)) act) 0) 0)
+                  (store! i (+ (load i) 1)) 0)
+                (break))) 0)
+    (and (= (ty-kind pat) TY_NAMED) (= (ty-kind act) TY_NAMED))
+      (if (= (cast i64 (load (field pat decl))) (cast i64 (load (field act decl))))
+        (let [pa (load (field pat args)) aa (load (field act args)) n (al-len pa) (mut i) 0]
+          (loop (if (and (< (load i) n) (< (load i) (al-len aa)))
+                  (do (unify-into (al-get pa (load i)) (al-get aa (load i)) ed subst) (store! i (+ (load i) 1)) 0)
+                  (break))) 0)
+        0)
+    0))
+
+(defn err-variant-arity [(n (ptr Node)) (vn (ptr Node)) (want i64) (got i64)] (-> i64)
+  (err-head-n n) (w-cstr 2 c"variant '") (w-bytes 2 (nm vn) (nlen vn)) (w-cstr 2 c"' expects ")
+  (w-int 2 want) (w-cstr 2 c" payload argument(s), found ") (w-int 2 got) (err-end))
+
+; ======================================================================
+; field access, try, match, ternary, and the infer core
+; ======================================================================
+(defn infer-fieldacc [(n (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [recv (load (field n a)) fname (nm n) flen (nlen n) nsd (namespace-decl recv env)]
+    (if (!= (cast i64 nsd) 0)
+      (if (= (load (field nsd kind)) DK_ENUM)
+        (let [vn (decl-member nsd fname flen)]
+          (if (or (= (cast i64 vn) 0) (!= (nkind vn) NK_VARIANT))
+            (do (err-head-n n) (w-cstr 2 c"enum ") (w-bytes 2 (load (field nsd name)) (load (field nsd name-len)))
+                (w-cstr 2 c" has no variant '") (w-bytes 2 fname flen) (w-cstr 2 c"'") (err-end) (ty-error))
+            (construct-variant nsd vn (cast (ptr Node) 0) env expected)))
+        (do (err-msg n c"expected a variant or method call on this name") (ty-error)))
+      (let [rt (infer recv env (null-ty))]
+        (if (is-err rt) (ty-error)
+          (if (= (ty-kind rt) TY_NAMED)
+            (let [d (load (field rt decl)) dk (load (field d kind))]
+              (if (or (= dk DK_CLASS) (= dk DK_OBJECT))
+                (let [fld (decl-member d fname flen)]
+                  (if (or (= (cast i64 fld) 0) (!= (nkind fld) NK_FIELD))
+                    (do (err-head-n n) (w-cstr 2 c"no field '") (w-bytes 2 fname flen) (w-cstr 2 c"' on ")
+                        (type-write 2 rt) (err-end) (ty-error))
+                    (subst-type (resolve-type (load (field fld a)) d) d (load (field rt args)))))
+                (do (err-head-n n) (w-cstr 2 c"no field '") (w-bytes 2 fname flen) (w-cstr 2 c"' on ") (type-write 2 rt) (err-end) (ty-error))))
+            (do (err-head-n n) (w-cstr 2 c"no field '") (w-bytes 2 fname flen) (w-cstr 2 c"' on ") (type-write 2 rt) (err-end) (ty-error))))))))
+
+(defn is-result-type [(t (ptr Type))] (-> bool)
+  (and (= (ty-kind t) TY_NAMED) (name-eq (load (field t name)) (load (field t name-len)) (cast (ptr u8) c"Result") 6)))
+
+(defn infer-try [(n (ptr Node)) (env (ptr Env))] (-> (ptr Type))
+  (let [t (infer (load (field n a)) env (null-ty))]
+    (if (is-err t) (ty-error)
+      (if (not (is-result-type t))
+        (do (err-head-n n) (w-cstr 2 c"the '?' operator requires a Result value, found ") (type-write 2 t) (err-end) (ty-error))
+        (let [ret (load (field env ret-type))]
+          (if (or (= (cast i64 ret) 0) (not (is-result-type ret)))
+            (do (err-msg n c"the '?' operator can only be used in a function that returns Result") (ty-error))
+            (let [errT (al-get (load (field t args)) 1) retErr (al-get (load (field ret args)) 1)]
+              (if (not (assignable errT retErr))
+                (do (err-exp-found n c"'?' error type mismatch: " retErr errT) 0) 0)
+              (al-get (load (field t args)) 0))))))))
+
+(defn infer-ternary [(n (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [c (infer (load (field n a)) env (ty-bool))]
+    (if (and (not (is-err c)) (!= (ty-kind c) TY_BOOL)) (err-exp-found (load (field n a)) c"" (ty-bool) c) 0)
+    (let [tt (infer (load (field n b)) env expected) et (infer (load (field n c)) env expected)]
+      (cond
+        (has-ty expected) expected
+        (type-eq tt et) tt
+        (assignable et tt) tt
+        (assignable tt et) et
+        (do (err-msg n c"branches of '?:' have differing types") (ty-error))))))
+
+(defn infer [(n (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [rt (infer-raw n env expected)]
+    (if (and (and (has-ty expected) (not (is-err rt))) (and (not (is-err expected)) (not (assignable rt expected))))
+      (do (err-exp-found n c"" expected rt) expected)
+      rt)))
+
+(defn infer-raw [(n (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [k (nkind n)]
+    (cond
+      (= k NK_INT) (ty-int)
+      (= k NK_FLOAT) (ty-float)
+      (= k NK_BOOL) (ty-bool)
+      (= k NK_UNIT) (ty-unit)
+      (= k NK_STRING) (check-interp n env)
+      (= k NK_STRCHUNK) (ty-string)
+      (= k NK_SELF)
+        (if (= (cast i64 (load (field env self-type))) 0)
+          (do (err-msg n c"'self' is only valid inside a method") (ty-error))
+          (load (field env self-type)))
+      (= k NK_IDENT) (infer-ident n env expected)
+      (= k NK_BINARY) (check-binary n env)
+      (= k NK_UNARY) (check-unary n env)
+      (= k NK_CALL) (infer-call n env expected)
+      (= k NK_FIELDACC) (infer-fieldacc n env expected)
+      (= k NK_TRY) (infer-try n env)
+      (= k NK_TERNARY) (infer-ternary n env expected)
+      (= k NK_MATCH) (check-match n env expected)
+      (= k NK_IF) (if-value n env expected)
+      (= k NK_INDEX) (do (infer (load (field n a)) env (null-ty)) (err-msg n c"indexing is not supported; use .get(i)") (ty-error))
+      (do (err-msg n c"unsupported expression") (ty-error)))))
+
+(defn infer-ident [(n (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [v (env-lookup env (nm n) (nlen n))]
+    (if (!= (cast i64 v) 0)
+      (load (field v ty))
+      (let [vr (find-variant (nm n) (nlen n) (expected-enum expected))]
+        (if (and (!= (cast i64 vr) 0) (= (variant-arity (load (field vr vnode))) 0))
+          (construct-variant (load (field vr enum-decl)) (load (field vr vnode)) (cast (ptr Node) 0) env expected)
+          (let [d (find-decl (nm n) (nlen n))]
+            (if (!= (cast i64 d) 0)
+              (do (err-msg-name n c"'" (nm n) (nlen n) c"' is a type, not a value") (ty-error))
+              (do (err-msg-name n c"unknown identifier '" (nm n) (nlen n) c"'") (ty-error)))))))))
+
+; ======================================================================
+; match
+; ======================================================================
+; a heap wrapper so a growable node list can be shared by pointer and mutated
+(defstruct PList [(items (ArrayList (ptr Node)))])
+(defn plist-new [] (-> (ptr PList))
+  (let [p (cast (ptr PList) (xalloc (sizeof PList)))] (store! (field p items) (al-new [(ptr Node)] (alc-global))) p))
+(defn plist-add [(p (ptr PList)) (x (ptr Node))] (-> i64) (al-push! (mut (field p items)) x) 0)
+(defn plist-len [(p (ptr PList))] (-> i64) (al-len (load (field p items))))
+(defn plist-get [(p (ptr PList)) (i i64)] (-> (ptr Node)) (al-get (load (field p items)) i))
+
+(defn check-match [(n (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [st (infer (load (field n a)) env (null-ty)) narms (kid-count n)]
+    (if (is-err st) (ty-error)
+      (let [enum-d (if (and (= (ty-kind st) TY_NAMED) (= (load (field (load (field st decl)) kind)) DK_ENUM)) (load (field st decl)) (cast (ptr Decl) 0))
+            covered (plist-new)
+            (mut wild) false (mut result) (null-ty) (mut i) 0]
+        (loop
+          (if (< (load i) narms)
+            (let [arm (kid-at n (load i)) pat (load (field arm a)) body (load (field arm b))
+                  mark (env-mark env)]
+              (cond
+                (= (nkind pat) NK_PAT_WILD) (do (store! wild true) 0)
+                (= (nkind pat) NK_PAT_ENUM)
+                  (if (= (cast i64 enum-d) 0)
+                    (err-msg pat c"enum-variant pattern used on a non-enum value")
+                    (check-enum-pattern pat enum-d st env covered))
+                (= (nkind pat) NK_PAT_LIT)
+                  (if (!= (cast i64 enum-d) 0)
+                    (err-msg pat c"literal pattern used to match an enum")
+                    (let [lt (infer (load (field pat a)) env (null-ty))]
+                      (if (and (not (is-err lt)) (not (type-eq lt st))) (do (err-exp-found pat c"pattern " st lt) 0) 0)))
+                0)
+              (let [bt (trailing body env expected)]
+                (if (not (has-ty expected))
+                  (if (= (cast i64 (load result)) 0) (do (store! result bt) 0)
+                    (if (or (is-err bt) (or (is-err (load result)) (type-eq bt (load result)))) 0
+                      (if (assignable bt (load result)) 0
+                        (if (assignable (load result) bt) (do (store! result bt) 0)
+                          (do (err-msg (load (field arm b)) c"match arms have differing types") 0)))))
+                  0))
+              (env-reset env mark)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+        ; exhaustiveness
+        (if (!= (cast i64 enum-d) 0)
+          (if (load wild) 0 (check-exhaustive n enum-d covered))
+          (if (load wild) 0 (err-msg n c"match on a primitive requires a '_' wildcard arm")))
+        (if (has-ty expected) expected (if (= (cast i64 (load result)) 0) (ty-void) (load result)))))))
+
+(defn check-enum-pattern [(pat (ptr Node)) (ed (ptr Decl)) (st (ptr Type)) (env (ptr Env)) (covered (ptr PList))] (-> i64)
+  (let [vn (decl-member ed (nm pat) (nlen pat))]
+    (if (or (= (cast i64 vn) 0) (!= (nkind vn) NK_VARIANT))
+      (do (err-head-n pat) (w-cstr 2 c"enum ") (w-bytes 2 (load (field ed name)) (load (field ed name-len)))
+          (w-cstr 2 c" has no variant '") (w-bytes 2 (nm pat) (nlen pat)) (w-cstr 2 c"'") (err-end) 0)
+      (let [arity (variant-arity vn) nb (kid-count pat)]
+        (plist-add covered vn)
+        (if (!= arity nb)
+          (do (err-head-n pat) (w-cstr 2 c"variant '") (w-bytes 2 (nm pat) (nlen pat)) (w-cstr 2 c"' binds ")
+              (w-int 2 arity) (w-cstr 2 c" value(s), pattern has ") (w-int 2 nb) (err-end) 0)
+          (let [(mut i) 0]
+            (loop
+              (if (< (load i) nb)
+                (let [bind (kid-at pat (load i))
+                      pty (subst-type (resolve-type (variant-payload-at vn (load i)) ed) ed (load (field st args)))]
+                  (if (not (tok-eq (nm bind) (nlen bind) c"_"))
+                    (do (env-push env (nm bind) (nlen bind) pty false) 0) 0)
+                  (store! i (+ (load i) 1)) 0)
+                (break)))
+            0))))))
+
+(defn check-exhaustive [(n (ptr Node)) (ed (ptr Decl)) (covered (ptr PList))] (-> i64)
+  (let [ms (load (field ed members)) nv (al-len ms) (mut missing) 0 (mut i) 0]
+    (loop
+      (if (< (load i) nv)
+        (let [v (al-get ms (load i))]
+          (if (= (nkind v) NK_VARIANT)
+            (if (covered-has covered v) 0
+              (do
+                (if (= (load missing) 0) (do (err-head-n n) (w-cstr 2 c"non-exhaustive match on ") (w-bytes 2 (load (field ed name)) (load (field ed name-len))) (w-cstr 2 c"; missing: ") 0) (do (w-cstr 2 c", ") 0))
+                (w-bytes 2 (nm v) (nlen v))
+                (store! missing (+ (load missing) 1)) 0)) 0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (if (> (load missing) 0) (err-end) 0)))
+(defn covered-has [(covered (ptr PList)) (v (ptr Node))] (-> bool)
+  (let [n (plist-len covered) (mut i) 0 (mut ok) false]
+    (loop (if (and (not (load ok)) (< (load i) n)) (do (if (= (cast i64 (plist-get covered (load i))) (cast i64 v)) (do (store! ok true) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load ok)))
+
+; ======================================================================
+; statements & blocks
+; ======================================================================
+(defn stmt [(n (ptr Node)) (env (ptr Env))] (-> i64)
+  (let [k (nkind n)]
+    (cond
+      (= k NK_LET) (do (stmt-let n env) 0)
+      (= k NK_ASSIGN) (do (stmt-assign n env) 0)
+      (= k NK_RETURN) (do (stmt-return n env) 0)
+      (= k NK_IF) (do (if-value n env (null-ty)) 0)
+      (= k NK_WHILE) (do (stmt-while n env) 0)
+      (= k NK_FOR) (do (stmt-for n env) 0)
+      (= k NK_EXPRSTMT) (do (infer (load (field n a)) env (null-ty)) 0)
+      (= k NK_BLOCK) (do (block-value n env (null-ty) false) 0)
+      (= k NK_MATCH) (do (check-match n env (null-ty)) 0)
+      (do (infer n env (null-ty)) 0))))
+
+(defn stmt-let [(n (ptr Node)) (env (ptr Env))] (-> i64)
+  (let [ann (load (field n a))
+        declty (if (= (cast i64 ann) 0) (null-ty) (resolve-type ann (load (field env self-decl))))
+        it (infer (load (field n b)) env declty)
+        vty (if (has-ty declty) declty it)]
+    (env-push env (nm n) (nlen n) vty (= (load (field n ival)) 1))
+    0))
+
+(defn stmt-assign [(n (ptr Node)) (env (ptr Env))] (-> i64)
+  (let [target (load (field n a)) val (load (field n b))]
+    (cond
+      (= (nkind target) NK_IDENT)
+        (let [v (env-lookup env (nm target) (nlen target))]
+          (if (= (cast i64 v) 0)
+            (do (err-msg-name target c"assignment to unknown variable '" (nm target) (nlen target) c"'") 0)
+            (if (not (load (field v mutable)))
+              (do (err-msg-name target c"cannot assign to immutable 'let' binding '" (nm target) (nlen target) c"'") 0)
+              (do (infer val env (load (field v ty))) 0))))
+      (= (nkind target) NK_FIELDACC)
+        (let [recv (load (field target a)) fname (nm target) flen (nlen target)
+              rt (infer recv env (null-ty))]
+          (if (is-err rt) 0
+            (if (= (ty-kind rt) TY_NAMED)
+              (let [d (load (field rt decl)) fld (decl-member d fname flen)]
+                (if (or (= (cast i64 fld) 0) (!= (nkind fld) NK_FIELD))
+                  (do (err-head-n target) (w-cstr 2 c"no field '") (w-bytes 2 fname flen) (w-cstr 2 c"' on ") (type-write 2 rt) (err-end) 0)
+                  (do
+                    (infer val env (subst-type (resolve-type (load (field fld a)) d) d (load (field rt args))))
+                    (if (and (load (field env in-init)) (= (nkind recv) NK_SELF)) (al-push! (mut (field env assigned)) fld) 0)
+                    0)))
+              (do (err-msg target c"cannot assign through this expression") 0))))
+      (do (err-msg target c"invalid assignment target") 0))))
+
+(defn stmt-return [(n (ptr Node)) (env (ptr Env))] (-> i64)
+  (let [e (load (field n a)) ret (load (field env ret-type))]
+    (if (= (cast i64 e) 0)
+      (if (or (= (cast i64 ret) 0) (or (= (ty-kind ret) TY_VOID) (= (ty-kind ret) TY_UNIT))) 0
+        (do (err-head-n n) (w-cstr 2 c"return with no value in a function returning ") (type-write 2 ret) (err-end) 0))
+      (do (infer e env (if (= (cast i64 ret) 0) (ty-void) ret)) 0))))
+
+(defn stmt-while [(n (ptr Node)) (env (ptr Env))] (-> i64)
+  (let [c (infer (load (field n a)) env (ty-bool))]
+    (if (and (not (is-err c)) (!= (ty-kind c) TY_BOOL)) (err-exp-found (load (field n a)) c"" (ty-bool) c) 0))
+  (block-value (load (field n b)) env (null-ty) false) 0)
+
+(defn stmt-for [(n (ptr Node)) (env (ptr Env))] (-> i64)
+  (let [it (infer (load (field n a)) env (null-ty))]
+    (if (is-err it) (do (block-value (load (field n b)) env (null-ty) false) 0)
+      (if (and (= (ty-kind it) TY_NAMED) (name-eq (load (field it name)) (load (field it name-len)) (cast (ptr u8) c"List") 4))
+        (let [elem (al-get (load (field it args)) 0) mark (env-mark env)]
+          (env-push env (nm n) (nlen n) elem false)
+          (block-value (load (field n b)) env (null-ty) false)
+          (env-reset env mark) 0)
+        (do (err-head-n n) (w-cstr 2 c"cannot iterate over ") (type-write 2 it) (w-cstr 2 c" (only List<T> is iterable)") (err-end)
+            (block-value (load (field n b)) env (null-ty) false) 0)))))
+
+; block as a value (want-value => the trailing expression is the block's value)
+(defn block-value [(blk (ptr Node)) (env (ptr Env)) (expected (ptr Type)) (want-value bool)] (-> (ptr Type))
+  (let [n (kid-count blk) mark (env-mark env) (mut result) (ty-void)]
+    (if (= n 0) 0
+      (let [(mut i) 0]
+        (loop
+          (if (< (load i) n)
+            (do
+              (if (and want-value (= (load i) (- n 1)))
+                (do (store! result (trailing (kid-at blk (load i)) env expected)) 0)
+                (stmt (kid-at blk (load i)) env))
+              (store! i (+ (load i) 1)) 0)
+            (break)))))
+    (env-reset env mark)
+    (load result)))
+
+; treat a statement node as producing a value (implicit last-expression return)
+(defn trailing [(n (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [k (nkind n)]
+    (cond
+      (= k NK_EXPRSTMT) (infer (load (field n a)) env expected)
+      (= k NK_BLOCK) (block-value n env expected true)
+      (= k NK_IF) (if-value n env expected)
+      (= k NK_MATCH) (check-match n env expected)
+      (= k NK_RETURN) (do (stmt n env) (ty-void))
+      (or (or (= k NK_LET) (= k NK_ASSIGN)) (or (= k NK_WHILE) (= k NK_FOR))) (do (stmt n env) (ty-void))
+      (infer n env expected))))
+
+(defn if-value [(n (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [want (has-ty expected)
+        c (infer (load (field n a)) env (ty-bool))]
+    (if (and (not (is-err c)) (!= (ty-kind c) TY_BOOL)) (err-exp-found (load (field n a)) c"" (ty-bool) c) 0)
+    (let [tt (block-value (load (field n b)) env expected want) els (load (field n c))]
+      (if (= (cast i64 els) 0)
+        (ty-void)
+        (let [et (if (= (nkind els) NK_IF) (if-value els env expected) (block-value els env expected want))]
+          (cond
+            want expected
+            (type-eq tt et) tt
+            (assignable et tt) tt
+            (assignable tt et) et
+            (ty-void)))))))
+
+; ======================================================================
+; declaration-level checks (pass 2)
+; ======================================================================
+(defn check-fn-body [(d (ptr Decl)) (fnn (ptr Node)) (self-ty (ptr Type))] (-> i64)
+  (let [body (fn-body fnn)]
+    (if (= (cast i64 body) 0) 0
+      (let [is-init (node-name-eq fnn c"init")
+            ret (resolve-type (fn-ret-node fnn) d)
+            env (env-new self-ty d ret is-init)]
+        ; bind params
+        (let [np (fn-param-count fnn) (mut i) 0]
+          (loop (if (< (load i) np)
+                  (let [pn (fn-param-at fnn (load i))]
+                    (env-push env (nm pn) (nlen pn) (resolve-type (param-type-node pn) d) false) (store! i (+ (load i) 1)) 0)
+                  (break))))
+        (if is-init
+          (do (block-value body env (null-ty) false) (check-definite-assignment d fnn env))
+          (let [bt (block-value body env ret (and (!= (ty-kind ret) TY_VOID) (!= (ty-kind ret) TY_UNIT)))]
+            (if (and (!= (ty-kind ret) TY_VOID) (!= (ty-kind ret) TY_UNIT))
+              (if (or (is-err bt) (assignable bt ret)) 0
+                (do (err-head-n fnn) (w-cstr 2 c"function '") (w-bytes 2 (nm fnn) (nlen fnn))
+                    (w-cstr 2 c"' must return ") (type-write 2 ret) (w-cstr 2 c", body yields ") (type-write 2 bt) (err-end) 0))
+              0)))
+        0))))
+
+(defn check-definite-assignment [(d (ptr Decl)) (init (ptr Node)) (env (ptr Env))] (-> i64)
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [mem (al-get ms (load i))]
+          (if (= (nkind mem) NK_FIELD)
+            (if (assigned-has env mem) 0
+              (do (err-head-n init) (w-cstr 2 c"field '") (w-bytes 2 (nm mem) (nlen mem))
+                  (w-cstr 2 c"' is not assigned in init of ") (w-bytes 2 (load (field d name)) (load (field d name-len))) (err-end) 0)) 0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    0))
+(defn assigned-has [(env (ptr Env)) (fld (ptr Node))] (-> bool)
+  (let [as (load (field env assigned)) n (al-len as) (mut i) 0 (mut ok) false]
+    (loop (if (and (not (load ok)) (< (load i) n)) (do (if (= (cast i64 (al-get as (load i))) (cast i64 fld)) (do (store! ok true) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load ok)))
+
+(defn check-decl-bodies [(d (ptr Decl))] (-> i64)
+  (set-cur-file (load (field d file)))
+  (let [dk (load (field d kind))]
+    (cond
+      (= dk DK_FN) (check-fn-body d (load (field d node)) (null-ty))
+      (or (or (= dk DK_CLASS) (= dk DK_OBJECT)) false)
+        (let [self-ty (mk-named d (self-args d)) ms (load (field d members)) n (al-len ms) (mut i) 0]
+          (loop
+            (if (< (load i) n)
+              (let [mem (al-get ms (load i))]
+                (if (= (nkind mem) NK_FN) (check-fn-body d mem self-ty) 0)
+                (store! i (+ (load i) 1)) 0)
+              (break)))
+          0)
+      0)))
+
+; self type args: for a generic class, self is C<T,...> with the tparams as vars
+(defn self-args [(d (ptr Decl))] (-> (ArrayList (ptr Type)))
+  (let [n (decl-tparam-count d) (mut args) (al-new [(ptr Type)] (alc-global)) (mut i) 0]
+    (loop (if (< (load i) n) (let [tp (decl-tparam-at d (load i))] (al-push! (mut args) (ty-var (nm tp) (nlen tp))) (store! i (+ (load i) 1)) 0) (break)))
+    (load args)))
+
+; ======================================================================
+; Pass 1b — signatures, field types, interface conformance, mono interning
+; ======================================================================
+(defn check-decl-signatures [(d (ptr Decl))] (-> i64)
+  (set-cur-file (load (field d file)))
+  (let [dk (load (field d kind))]
+    (cond
+      (or (= dk DK_CLASS) (= dk DK_OBJECT))
+        (do
+          (resolve-field-types d)
+          (if (not (decl-is-generic d)) (do (mk-named d (al-new [(ptr Type)] (alc-global))) 0) 0)
+          (if (= dk DK_CLASS) (check-conformance d) 0))
+      (= dk DK_INTERFACE) (check-interface d)
+      (= dk DK_ENUM)
+        (do (resolve-variant-types d)
+            (if (not (decl-is-generic d)) (do (mk-named d (al-new [(ptr Type)] (alc-global))) 0) 0))
+      (= dk DK_FN)
+        (let [fnn (load (field d node)) np (fn-param-count fnn) (mut i) 0]
+          (loop (if (< (load i) np) (do (resolve-type (param-type-node (fn-param-at fnn (load i))) d) (store! i (+ (load i) 1)) 0) (break)))
+          (resolve-type (fn-ret-node fnn) d) 0)
+      0)))
+
+(defn resolve-field-types [(d (ptr Decl))] (-> i64)
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [m (al-get ms (load i))]
+          (if (= (nkind m) NK_FIELD) (do (resolve-type (load (field m a)) d) 0) 0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    0))
+
+(defn resolve-variant-types [(d (ptr Decl))] (-> i64)
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [v (al-get ms (load i))]
+          (if (= (nkind v) NK_VARIANT)
+            (let [np (kid-count v) (mut j) 0]
+              (loop (if (< (load j) np) (do (resolve-type (kid-at v (load j)) d) (store! j (+ (load j) 1)) 0) (break)))) 0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    0))
+
+(defn check-interface [(d (ptr Decl))] (-> i64)
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [m (al-get ms (load i))]
+          (if (= (nkind m) NK_FN)
+            (do
+              (if (!= (cast i64 (fn-body m)) 0)
+                (do (err-msg m c"default interface methods are not implemented in this build") 0) 0)
+              (let [np (fn-param-count m) (mut j) 0]
+                (loop (if (< (load j) np) (do (resolve-type (param-type-node (fn-param-at m (load j))) d) (store! j (+ (load j) 1)) 0) (break))))
+              (resolve-type (fn-ret-node m) d) 0)
+            0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    0))
+
+(defn check-conformance [(d (ptr Decl))] (-> i64)
+  (let [cn (load (field d node)) impl (if (= (cast i64 cn) 0) (cast (ptr Node) 0) (load (field cn b)))]
+    (if (= (cast i64 impl) 0) 0
+      (let [ni (kid-count impl) (mut i) 0]
+        (loop
+          (if (< (load i) ni)
+            (let [tnode (kid-at impl (load i)) id (find-decl (nm tnode) (nlen tnode))]
+              (cond
+                (= (cast i64 id) 0) (err-unknown-type tnode)
+                (and (!= (load (field id kind)) DK_INTERFACE) (!= (load (field id kind)) DK_BUILTIN_IFACE))
+                  (do (err-head-n tnode) (w-cstr 2 c"cannot implement '") (w-bytes 2 (nm tnode) (nlen tnode))
+                      (w-cstr 2 c"': it is not an interface") (err-end) 0)
+                (conform-to d id))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+        0))))
+
+(defn conform-to [(cd (ptr Decl)) (id (ptr Decl))] (-> i64)
+  (let [ms (load (field id members)) n (al-len ms) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [im (al-get ms (load i))]
+          (if (= (nkind im) NK_FN)
+            (let [cm (decl-member cd (nm im) (nlen im))]
+              (if (or (= (cast i64 cm) 0) (!= (nkind cm) NK_FN))
+                (do (err-head-n (load (field cd node))) (w-cstr 2 c"class ") (w-bytes 2 (load (field cd name)) (load (field cd name-len)))
+                    (w-cstr 2 c" does not implement method '") (w-bytes 2 (nm im) (nlen im))
+                    (w-cstr 2 c"' required by interface ") (w-bytes 2 (load (field id name)) (load (field id name-len))) (err-end) 0)
+                (if (sigs-match id im cd cm) 0
+                  (do (err-head-n cm) (w-cstr 2 c"method '") (w-bytes 2 (nm im) (nlen im))
+                      (w-cstr 2 c"' does not match interface ") (w-bytes 2 (load (field id name)) (load (field id name-len)))
+                      (w-cstr 2 c": expected ") (write-sig id im) (w-cstr 2 c", found ") (write-sig cd cm) (err-end) 0)))) 0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    0))
+
+(defn sigs-match [(id (ptr Decl)) (im (ptr Node)) (cd (ptr Decl)) (cm (ptr Node))] (-> bool)
+  (let [ip (fn-param-count im) cp (fn-param-count cm)]
+    (if (!= ip cp) false
+      (let [(mut i) 0 (mut ok) true]
+        (loop
+          (if (and (load ok) (< (load i) ip))
+            (do (if (not (type-eq (resolve-type (param-type-node (fn-param-at im (load i))) id)
+                                  (resolve-type (param-type-node (fn-param-at cm (load i))) cd))) (do (store! ok false) 0) 0)
+                (store! i (+ (load i) 1)) 0)
+            (break)))
+        (if (not (load ok)) false
+          (type-eq (resolve-type (fn-ret-node im) id) (resolve-type (fn-ret-node cm) cd)))))))
+
+(defn write-sig [(d (ptr Decl)) (fnn (ptr Node))] (-> i64)
+  (w-cstr 2 c"(")
+  (let [np (fn-param-count fnn) (mut i) 0]
+    (loop (if (< (load i) np)
+            (do (if (> (load i) 0) (w-cstr 2 c", ") 0)
+                (type-write 2 (resolve-type (param-type-node (fn-param-at fnn (load i))) d)) (store! i (+ (load i) 1)) 0)
+            (break))))
+  (w-cstr 2 c") -> ") (type-write 2 (resolve-type (fn-ret-node fnn) d)) 0)
+
+; ======================================================================
+; Pass 1 — collect declarations
+; ======================================================================
+(defn dkind-of [(nk i64)] (-> i64)
+  (cond (= nk NK_CLASS) DK_CLASS (= nk NK_INTERFACE) DK_INTERFACE (= nk NK_ENUM) DK_ENUM
+        (= nk NK_OBJECT) DK_OBJECT (= nk NK_FN) DK_FN -1))
+
+(defn collect-program [(root (ptr Node)) (file (ptr i8)) (deep bool)] (-> i64)
+  (let [n (kid-count root) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [item (kid-at root (load i)) k (nkind item)]
+          (cond
+            (= k NK_MIGRATE)
+              (do (set-cur-file file) (err-msg item c"migrate blocks are not implemented in this build") 0)
+            (>= (dkind-of k) 0) (do (collect-decl item file deep) 0)
+            0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    0))
+
+(defn decl-is-builtin [(d (ptr Decl))] (-> bool)
+  (let [k (load (field d kind))] (or (or (= k DK_BUILTIN_GEN) (= k DK_BUILTIN_OBJ)) (or (= k DK_BUILTIN_CLASS) (= k DK_BUILTIN_IFACE)))))
+
+(defn collect-decl [(node (ptr Node)) (file (ptr i8)) (deep bool)] (-> i64)
+  (let [dk (dkind-of (nkind node)) existing (find-decl (nm node) (nlen node))
+        override (and (!= (cast i64 existing) 0) (decl-is-builtin existing))]
+    (if (and (!= (cast i64 existing) 0) (not (decl-is-builtin existing)))
+      (do (set-cur-file file) (err-msg-name node c"duplicate declaration '" (nm node) (nlen node) c"'") 0)
+      (let [d (if override existing (new-decl dk (nm node) (nlen node) node file))]
+        (if override
+          (do (store! (field d kind) dk) (store! (field d node) node) (store! (field d file) file)
+              (store! (field d tparams) (al-new [(ptr Node)] (alc-global)))
+              (store! (field d members) (al-new [(ptr Node)] (alc-global))) 0) 0)
+        (store! (field d deep) deep)
+        ; type params (node.a is TYPEPARAMS for class/interface/enum/fn)
+        (let [tps (load (field node a))]
+          (if (and (!= (cast i64 tps) 0) (= (nkind tps) NK_TYPEPARAMS))
+            (let [nt (kid-count tps) (mut j) 0]
+              (loop (if (< (load j) nt)
+                      (let [tp (kid-at tps (load j))]
+                        (if (!= (cast i64 (load (field tp a))) 0)
+                          (do (set-cur-file file) (err-msg-name tp c"generic bound on '" (nm tp) (nlen tp) c"' is not implemented in this build") 0) 0)
+                        (al-push! (mut (field d tparams)) tp) (store! j (+ (load j) 1)) 0)
+                      (break)))) 0))
+        ; members = node.kids
+        (let [nk (kid-count node) (mut j) 0]
+          (loop
+            (if (< (load j) nk)
+              (let [mem (kid-at node (load j))]
+                (al-push! (mut (field d members)) mem)
+                (if (and (= dk DK_ENUM) (= (nkind mem) NK_VARIANT))
+                  (register-variant (nm mem) (nlen mem) d mem) 0)
+                (store! j (+ (load j) 1)) 0)
+              (break))))
+        (if override 0 (register-decl d))
+        0))))
+
+; ======================================================================
+; Built-in types
+; ======================================================================
+(defn scn [(n (ptr Node)) (s (ptr i8))] (-> i64) (set-name! n (cast (ptr u8) s) (strlen s)) 0)
+(defn bt-type [(s (ptr i8))] (-> (ptr Node)) (let [t (mk-node NK_TYPE 0 0)] (scn t s) t))
+(defn bt-type1 [(s (ptr i8)) (a1 (ptr Node))] (-> (ptr Node)) (let [t (bt-type s)] (add-kid! t a1) t))
+(defn bt-type2 [(s (ptr i8)) (a1 (ptr Node)) (a2 (ptr Node))] (-> (ptr Node)) (let [t (bt-type s)] (add-kid! t a1) (add-kid! t a2) t))
+(defn bt-unit [] (-> (ptr Node)) (let [t (mk-node NK_TYPE 0 0)] (store! (field t ival) 1) t))
+(defn bt-param [(s (ptr i8)) (ty (ptr Node))] (-> (ptr Node)) (let [p (mk-node NK_PARAM 0 0)] (scn p s) (store! (field p a) ty) p))
+(defn bt-tparam [(s (ptr i8))] (-> (ptr Node)) (let [t (mk-node NK_TYPEPARAM 0 0)] (scn t s) t))
+(defn bt-variant0 [(s (ptr i8))] (-> (ptr Node)) (let [v (mk-node NK_VARIANT 0 0)] (scn v s) v))
+(defn bt-variant1 [(s (ptr i8)) (ty (ptr Node))] (-> (ptr Node)) (let [v (bt-variant0 s)] (add-kid! v ty) v))
+(defn bt-fn0 [(s (ptr i8)) (ret (ptr Node))] (-> (ptr Node))
+  (let [f (mk-node NK_FN 0 0)] (scn f s) (store! (field f b) (mk-node NK_PARAMS 0 0)) (store! (field f c) ret) f))
+(defn bt-fn1 [(s (ptr i8)) (p1 (ptr Node)) (ret (ptr Node))] (-> (ptr Node))
+  (let [f (bt-fn0 s ret)] (add-kid! (load (field f b)) p1) f))
+(defn bt-fn2 [(s (ptr i8)) (p1 (ptr Node)) (p2 (ptr Node)) (ret (ptr Node))] (-> (ptr Node))
+  (let [f (bt-fn0 s ret)] (add-kid! (load (field f b)) p1) (add-kid! (load (field f b)) p2) f))
+
+(defn mkbuiltin [(kind i64) (name-cstr (ptr i8))] (-> (ptr Decl))
+  (let [d (new-decl kind (cast (ptr u8) name-cstr) (strlen name-cstr) (cast (ptr Node) 0) (cast (ptr i8) c"<builtin>"))]
+    (register-decl d) d))
+(defn bdm [(d (ptr Decl)) (m (ptr Node))] (-> i64) (al-push! (mut (field d members)) m) 0)
+(defn bdtp [(d (ptr Decl)) (s (ptr i8))] (-> i64) (al-push! (mut (field d tparams)) (bt-tparam s)) 0)
+(defn bdv [(d (ptr Decl)) (v (ptr Node))] (-> i64) (bdm d v) (register-variant (nm v) (nlen v) d v) 0)
+
+(defn register-builtins [] (-> i64)
+  ; interface Runnable { fn run() -> Void }
+  (let [r (mkbuiltin DK_BUILTIN_IFACE c"Runnable")] (bdm r (bt-fn0 c"run" (bt-type c"Void"))))
+  ; class ThreadHandle { fn join() -> Void }
+  (let [th (mkbuiltin DK_BUILTIN_CLASS c"ThreadHandle")] (bdm th (bt-fn0 c"join" (bt-type c"Void"))))
+  ; object Thread { fn spawn(task: Runnable) -> ThreadHandle }
+  (let [t (mkbuiltin DK_BUILTIN_OBJ c"Thread")]
+    (bdm t (bt-fn1 c"spawn" (bt-param c"task" (bt-type c"Runnable")) (bt-type c"ThreadHandle"))))
+  ; object Clock { now() -> Int ; sleep(ms: Int) -> Void }
+  (let [c (mkbuiltin DK_BUILTIN_OBJ c"Clock")]
+    (bdm c (bt-fn0 c"now" (bt-type c"Int")))
+    (bdm c (bt-fn1 c"sleep" (bt-param c"ms" (bt-type c"Int")) (bt-type c"Void"))))
+  ; object Console { log(s: String) -> Void }
+  (let [c (mkbuiltin DK_BUILTIN_OBJ c"Console")]
+    (bdm c (bt-fn1 c"log" (bt-param c"s" (bt-type c"String")) (bt-type c"Void"))))
+  ; class List<T> { push(item:T)->Void ; get(i:Int)->T ; len()->Int }
+  (let [l (mkbuiltin DK_BUILTIN_GEN c"List")]
+    (bdtp l c"T")
+    (bdm l (bt-fn1 c"push" (bt-param c"item" (bt-type c"T")) (bt-type c"Void")))
+    (bdm l (bt-fn1 c"get" (bt-param c"i" (bt-type c"Int")) (bt-type c"T")))
+    (bdm l (bt-fn0 c"len" (bt-type c"Int"))))
+  ; class Map<K,V> { set(key:K,value:V)->Void ; get(key:K)->Option<V> ; containsKey(key:K)->Bool ; len()->Int }
+  (let [m (mkbuiltin DK_BUILTIN_GEN c"Map")]
+    (bdtp m c"K") (bdtp m c"V")
+    (bdm m (bt-fn2 c"set" (bt-param c"key" (bt-type c"K")) (bt-param c"value" (bt-type c"V")) (bt-type c"Void")))
+    (bdm m (bt-fn1 c"get" (bt-param c"key" (bt-type c"K")) (bt-type1 c"Option" (bt-type c"V"))))
+    (bdm m (bt-fn1 c"containsKey" (bt-param c"key" (bt-type c"K")) (bt-type c"Bool")))
+    (bdm m (bt-fn0 c"len" (bt-type c"Int"))))
+  ; class Mutex<T> { lock()->Void ; unlock()->Void ; get()->T ; set(value:T)->Void }
+  (let [mx (mkbuiltin DK_BUILTIN_GEN c"Mutex")]
+    (bdtp mx c"T")
+    (bdm mx (bt-fn0 c"lock" (bt-type c"Void")))
+    (bdm mx (bt-fn0 c"unlock" (bt-type c"Void")))
+    (bdm mx (bt-fn0 c"get" (bt-type c"T")))
+    (bdm mx (bt-fn1 c"set" (bt-param c"value" (bt-type c"T")) (bt-type c"Void"))))
+  ; enum Option<T> { None ; Some(T) }
+  (let [o (mkbuiltin DK_ENUM c"Option")]
+    (bdtp o c"T") (bdv o (bt-variant0 c"None")) (bdv o (bt-variant1 c"Some" (bt-type c"T"))))
+  ; enum Result<T,E> { Ok(T) ; Err(E) }
+  (let [rs (mkbuiltin DK_ENUM c"Result")]
+    (bdtp rs c"T") (bdtp rs c"E") (bdv rs (bt-variant1 c"Ok" (bt-type c"T"))) (bdv rs (bt-variant1 c"Err" (bt-type c"E"))))
+  0)
+
+; ======================================================================
+; Module loading & import resolution
+; ======================================================================
+(defstruct Loaded [(paths (ArrayList (ptr i8))) (inited bool)])
+(defn loaded [] (-> (ptr Loaded)) (alloc-static Loaded))
+(defn loaded-init [] (-> i64)
+  (if (load (field (loaded) inited)) 0
+    (do (store! (field (loaded) paths) (al-new [(ptr i8)] (alc-global))) (store! (field (loaded) inited) true) 0)))
+(defn is-loaded [(p (ptr i8))] (-> bool)
+  (let [ps (load (field (loaded) paths)) n (al-len ps) (mut i) 0 (mut ok) false]
+    (loop (if (and (not (load ok)) (< (load i) n)) (do (if (= (cast i64 (strcmp (al-get ps (load i)) p)) 0) (do (store! ok true) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load ok)))
+(defn mark-loaded [(p (ptr i8))] (-> i64) (al-push! (mut (field (loaded) paths)) p) 0)
+
+(defn try-read [(path (ptr i8))] (-> (ptr u8))
+  (let [f (fopen path c"rb")]
+    (if (= (cast i64 f) 0) (cast (ptr u8) 0)
+      (do (fseek f 0 (cast i32 2))
+          (let [sz (ftell f)] (rewind f)
+            (let [buf (xalloc (+ sz 1))]
+              (let [rd (fread (cast (ptr i8) buf) 1 sz f)]
+                (store! (index buf rd) (cast u8 0)) (fclose f) buf)))))))
+(defn can-open [(path (ptr i8))] (-> bool)
+  (let [f (fopen path c"rb")] (if (= (cast i64 f) 0) false (do (fclose f) true))))
+
+(defn dirname [(path (ptr i8))] (-> (ptr i8))
+  (let [n (strlen path) (mut last) -1 (mut i) 0]
+    (loop (if (< (load i) n) (do (if (= (cast i64 (load (index (cast (ptr u8) path) (load i)))) \/) (do (store! last (load i)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (if (< (load last) 0)
+      (cast (ptr i8) c"./")
+      (let [buf (cast (ptr i8) (malloc (+ (load last) 2))) (mut j) 0]
+        (loop (if (<= (load j) (load last)) (do (store! (index (cast (ptr u8) buf) (load j)) (load (index (cast (ptr u8) path) (load j)))) (store! j (+ (load j) 1)) 0) (break)))
+        (store! (index (cast (ptr u8) buf) (+ (load last) 1)) (cast u8 0)) buf))))
+
+; build "dir + mod[start..mlen) (dots->sep) + .scry"
+(defn path-cand [(dir (ptr i8)) (mod (ptr u8)) (start i64) (mlen i64) (sep i64)] (-> (ptr i8))
+  (let [dl (strlen dir) buf (cast (ptr i8) (malloc (+ (+ dl mlen) 16))) (mut k) 0]
+    (let [(mut i) 0] (loop (if (< (load i) dl) (do (store! (index (cast (ptr u8) buf) (load k)) (load (index (cast (ptr u8) dir) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
+    (let [(mut i) start] (loop (if (< (load i) mlen)
+      (let [ch (cast i64 (load (index mod (load i))))]
+        (store! (index (cast (ptr u8) buf) (load k)) (cast u8 (if (= ch \.) sep ch))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
+    (let [suf c".scry" (mut i) 0] (loop (if (< (load i) 5) (do (store! (index (cast (ptr u8) buf) (load k)) (load (index (cast (ptr u8) suf) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
+    (store! (index (cast (ptr u8) buf) (load k)) (cast u8 0))
+    buf))
+
+(defn last-dot [(mod (ptr u8)) (mlen i64)] (-> i64)
+  (let [(mut last) -1 (mut i) 0]
+    (loop (if (< (load i) mlen) (do (if (= (cast i64 (load (index mod (load i)))) \.) (do (store! last (load i)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load last)))
+
+; locate a module file; returns malloc'd path or null
+(defn locate-module [(dir (ptr i8)) (mod (ptr u8)) (mlen i64)] (-> (ptr i8))
+  (let [c1 (path-cand dir mod 0 mlen \/) c2 (path-cand dir mod 0 mlen \-)
+        ld (last-dot mod mlen) c3 (path-cand dir mod (if (< ld 0) 0 (+ ld 1)) mlen \/)]
+    (cond (can-open c1) c1 (can-open c2) c2 (can-open c3) c3 (cast (ptr i8) 0))))
+
+(defn resolve-import [(imp (ptr Node)) (dir (ptr i8)) (file (ptr i8))] (-> i64)
+  (let [name (nm imp) nlen (nlen imp) has-braces (> (kid-count imp) 0)]
+    (let [mlen (if has-braces nlen (let [ld (last-dot name nlen)] (if (< ld 0) nlen ld)))
+          found (locate-module dir name mlen)]
+      (if (!= (cast i64 found) 0)
+        (do (load-file found false)
+            (validate-imports imp name nlen has-braces file) 0)
+        (validate-imports imp name nlen has-braces file)))))
+
+; validate that each imported name is a known decl (builtin or from a loaded module)
+(defn validate-imports [(imp (ptr Node)) (name (ptr u8)) (nlen i64) (has-braces bool) (file (ptr i8))] (-> i64)
+  (set-cur-file file)
+  (if has-braces
+    (let [nk (kid-count imp) (mut i) 0]
+      (loop (if (< (load i) nk)
+              (let [nm0 (kid-at imp (load i))]
+                (if (= (cast i64 (find-decl (nm nm0) (nlen nm0))) 0)
+                  (do (err-msg-name nm0 c"cannot resolve import '" (nm nm0) (nlen nm0) c"' (module not found or name not declared)") 0) 0)
+                (store! i (+ (load i) 1)) 0)
+              (break))) 0)
+    (let [ld (last-dot name nlen)]
+      (if (< ld 0) 0
+        (if (= (cast i64 (find-decl (index name (+ ld 1)) (- nlen (+ ld 1)))) 0)
+          (do (err-head-n imp) (w-cstr 2 c"cannot resolve import '") (w-bytes 2 (index name (+ ld 1)) (- nlen (+ ld 1))) (w-cstr 2 c"'") (err-end) 0)
+          0)))))
+
+(defn load-file [(path (ptr i8)) (deep bool)] (-> i64)
+  (if (is-loaded path) 0
+    (do
+      (mark-loaded path)
+      (let [src (try-read path)]
+        (if (= (cast i64 src) 0)
+          (do (set-cur-file path) (err-head 1 1) (w-cstr 2 c"could not open file") (err-end) 0)
+          (if (= (lex-file src path) 1)
+            (do (store! (field (ctx) nerr) (+ (load (field (ctx) nerr)) 1)) 0)
+            (do
+              (parser-init (lexer-tokens) path)
+              (let [root (parse-program) dir (dirname path)]
+                (collect-program root path deep)
+                (let [n (kid-count root) (mut i) 0]
+                  (loop
+                    (if (< (load i) n)
+                      (let [item (kid-at root (load i))]
+                        (if (= (nkind item) NK_IMPORT) (do (resolve-import item dir path) 0) 0)
+                        (store! i (+ (load i) 1)) 0)
+                      (break))))
+                0))))))))
+
+; ======================================================================
+; Driver
+; ======================================================================
+(defn run-check [(path (ptr i8))] (-> i64)
+  (ctx-init) (loaded-init) (register-builtins)
+  (if (not (can-open path))
+    (do (w-cstr 2 c"scry check: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n") 74)
+    (do
+      (load-file path true)
+      ; pass 1b: signatures + conformance for every loaded decl
+      (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+        (loop (if (< (load i) n) (do (check-decl-signatures (al-get ds (load i))) (store! i (+ (load i) 1)) 0) (break))))
+      ; pass 2: deep-check bodies of the entry module only
+      (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+        (loop (if (< (load i) n) (let [d (al-get ds (load i))] (if (load (field d deep)) (do (check-decl-bodies d) 0) 0) (store! i (+ (load i) 1)) 0) (break))))
+      (if (= (err-count) 0)
+        (do (w-cstr 1 c"ok\n") 0)
+        65))))

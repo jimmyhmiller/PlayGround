@@ -10,12 +10,10 @@
 //!     from strategy. `TreeWalk` is the interpreter tier; a JIT would be a
 //!     second impl over the same `Ir` and the same re-entrant `invoke`.
 //!
-//! `runtime.rs` ties them: reader (code is data), `macroexpand` (re-enters
-//! compiled code mid-compile), `analyze`, and value-model-aware primitives.
-//!
-//! The three micro-languages in `examples/` exercise it:
-//!   * `calc_fixnum` / `calc_float` — same generic engine, two value models.
-//!   * `microlisp` — macros, `defmacro`, incremental eval on the fixnum model.
+//! `runtime.rs` ties them: reader (code is data), `analyze` (`Val` -> `Ir`), and
+//! value-model-aware primitives. The toolkit has NO macro system of its own — a
+//! frontend that wants macros expands the `Val` tree before `analyze` (the
+//! `mclj` frontend does exactly this, procedurally).
 
 pub mod bigint;
 pub mod bytecode;
@@ -30,6 +28,9 @@ pub mod jit_cranelift;
 pub mod model;
 pub mod optimize;
 pub mod runtime;
+/// An OPTIONAL s-expression frontend (reader + a little-Lisp `Val`->`Ir`
+/// compiler). NOT part of the core axes — a convenience a frontend may use.
+pub mod sexpr;
 pub mod speculation;
 pub mod value;
 

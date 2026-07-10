@@ -121,6 +121,9 @@ pub fn run<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, src: &str)
         rt.push_root(f);
     }
     let mut macros: HashMap<u32, SyntaxRules> = HashMap::new();
+    // Scheme has its own reader + syntax-rules expander, but reuses the toolkit's
+    // optional s-expr compiler (`Sexpr`) to lower the desugared core forms to Ir.
+    let mut sx = microlang::sexpr::Sexpr::new(rt);
     let nil = rt.encode(Val::Nil);
     let last_slot = rt.push_root(nil);
     for i in 0..forms.len() {
@@ -134,7 +137,7 @@ pub fn run<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, src: &str)
         }
         let expanded = expand(rt, &macros, f);
         let core = desugar(rt, expanded);
-        let v = rt.eval_top(cs, core);
+        let v = sx.eval_top(rt, cs, core);
         rt.set_root(last_slot, v);
     }
     let last = rt.root_get(last_slot);

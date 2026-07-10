@@ -19,7 +19,7 @@ fn run(label: &str, d: Box<dyn Dispatch>) {
     let mut rt = Runtime::<LowBitModel>::new();
     rt.set_dispatch(d);
     let cs = TreeWalk;
-    let r = rt.eval_str(&cs, SHAPES);
+    let r = microlang::sexpr::eval_str(&mut rt, &cs, SHAPES);
     let s = rt.dispatch_stats();
     println!(
         "  [{label:14}] => {}    (hits {}, misses {})",

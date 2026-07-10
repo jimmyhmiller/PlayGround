@@ -2,7 +2,7 @@
 name = "clojure-stub"
 version = "0.0.1"
 edition = "2021"
-description = "A skeletal second frontend. Its only job is to keep the core library/language split honest by compiling against the same public interfaces."
+description = "A mini-Clojure frontend with its OWN procedural macro expander, built on the toolkit's public API (which has no macro system of its own)."
 
 [dependencies]
 microlang = { path = ".." }

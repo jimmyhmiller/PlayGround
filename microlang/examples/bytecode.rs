@@ -9,13 +9,13 @@ fn show<M: ModelEmit>(name: &str, src: &str) {
     // disassemble the emitted bytecode
     let mut rt = Runtime::<M>::new();
     let vm = BytecodeVm::<M>::new();
-    let forms = rt.read_all(src);
-    let ir = rt.analyze(&vm, forms[0]);
+    let forms = microlang::sexpr::read_all(&mut rt, src);
+    let ir = microlang::sexpr::analyze(&mut rt, &vm, forms[0]);
     let ops = BytecodeVm::<M>::disassemble(&ir);
     // and run it
     let mut rt2 = Runtime::<M>::new();
     let vm2 = BytecodeVm::<M>::new();
-    let r = rt2.eval_str(&vm2, src);
+    let r = microlang::sexpr::eval_str(&mut rt2, &vm2, src);
     println!("  {name:8} => {:<4}  [{}]", rt2.print(r), ops.join("  "));
 }
 
@@ -38,7 +38,7 @@ fn main() {
     println!("\nrecursion under the bytecode VM (fact 6):");
     let mut rt = Runtime::<LowBitModel>::new();
     let vm = BytecodeVm::<LowBitModel>::new();
-    let r = rt.eval_str(
+    let r = microlang::sexpr::eval_str(&mut rt, 
         &vm,
         "(def f (fn (n) (if (< n 2) 1 (* n (f (- n 1)))))) (f 6)",
     );

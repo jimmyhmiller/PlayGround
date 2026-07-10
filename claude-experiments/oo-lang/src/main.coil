@@ -6,6 +6,8 @@
 (import "src/lexer.coil" :use *)
 (import "src/ast.coil" :use *)
 (import "src/parser.coil" :use *)
+(import "src/types.coil" :use *)
+(import "src/typecheck.coil" :use *)
 
 (defn read-file [(path (ptr i8))] (-> (ptr u8))
   (let [file (fopen path c"rb")]
@@ -25,11 +27,17 @@
 (defn cstr-eq [(a (ptr i8)) (b (ptr i8))] (-> bool) (= (cast i64 (strcmp a b)) 0))
 
 (defn usage [] (-> i64)
-  (w-cstr 2 c"scry — the Scry compiler (Phase 1: front end)\n")
+  (w-cstr 2 c"scry — the Scry compiler (Phase 2: front end + typechecker)\n")
   (w-cstr 2 c"usage:\n")
   (w-cstr 2 c"  scry parse-dump <file.scry>   parse and print the AST\n")
+  (w-cstr 2 c"  scry check <file.scry>        typecheck (follows imports)\n")
   (w-cstr 2 c"  scry run <file.scry>          (not implemented until Phase 3)\n")
   0)
+
+(defn cmd-check [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (if (< argc 3)
+    (do (w-cstr 2 c"scry check: expected a file argument\n") 64)
+    (run-check (load (index argv 2)))))
 
 (defn cmd-parse-dump [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
   (if (< argc 3)
@@ -50,6 +58,7 @@
       (let [sub (load (index argv 1))]
         (cond
           (cstr-eq sub c"parse-dump") (cmd-parse-dump n argv)
+          (cstr-eq sub c"check") (cmd-check n argv)
           (cstr-eq sub c"run")
             (do (w-cstr 2 c"scry run: not implemented until Phase 3\n") 2)
           (do (w-cstr 2 c"scry: unknown command\n") (usage) 64))))))

@@ -93,19 +93,9 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 }
                 r
             }
-            Ir::Def {
-                name,
-                init,
-                is_macro,
-            } => {
+            Ir::Def { name, init } => {
                 let v = top.eval_ir(top, rt, init, locals);
-                rt.globals.insert(
-                    *name,
-                    Var {
-                        val: v,
-                        is_macro: *is_macro,
-                    },
-                );
+                rt.globals.insert(*name, Var { val: v });
                 rt.encode(Val::Sym(*name))
             }
             Ir::Let(inits, body) => {
@@ -235,6 +225,17 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
             let Val::Ref(id) = rt.decode(callee) else {
                 panic!("value not callable: {}", rt.print(callee));
             };
+            // Callable-object hook: a non-closure record invoked with a registered
+            // apply handler redirects to `(handler object args…)` (e.g. keywords).
+            if let Obj::Record { .. } = &rt.heap[id as usize] {
+                if let Some(h) = rt.apply_handler() {
+                    let mut new_args = vec![callee];
+                    new_args.extend_from_slice(&args);
+                    callee = h;
+                    args = new_args;
+                    continue;
+                }
+            }
             let (nparams, variadic, body, env) = match &rt.heap[id as usize] {
                 Obj::Closure {
                     nparams,
