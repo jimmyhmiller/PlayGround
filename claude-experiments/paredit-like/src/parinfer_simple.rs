@@ -66,7 +66,77 @@ impl Parinfer {
         }
     }
 
+    /// True when every closer matches the most recent opener (so `([)]` is
+    /// rejected, not merely count-balanced), skipping string literals (with `\`
+    /// escapes) and `;` line comments. Well-formed input has no missing/extra
+    /// parens to repair, so `balance` preserves it verbatim.
+    fn is_well_formed(source: &str) -> bool {
+        let mut stack: Vec<char> = Vec::new();
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut in_comment = false;
+        for ch in source.chars() {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            if ch == '\\' && in_string {
+                escape_next = true;
+                continue;
+            }
+            if ch == '"' && !in_comment {
+                in_string = !in_string;
+                continue;
+            }
+            if in_string {
+                continue;
+            }
+            if ch == ';' {
+                in_comment = true;
+            }
+            if ch == '\n' || ch == '\r' {
+                in_comment = false;
+            }
+            if in_comment {
+                continue;
+            }
+            match ch {
+                '(' | '[' | '{' => stack.push(ch),
+                ')' => {
+                    if stack.pop() != Some('(') {
+                        return false;
+                    }
+                }
+                ']' => {
+                    if stack.pop() != Some('[') {
+                        return false;
+                    }
+                }
+                '}' => {
+                    if stack.pop() != Some('{') {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        !in_string && stack.is_empty()
+    }
+
     pub fn balance(&self) -> Result<String> {
+        // If the input is already well-formed there are no missing/extra parens to
+        // fix, so preserve it verbatim. The indentation-driven balancing below
+        // reflows structure from leading whitespace, which corrupts structurally
+        // valid code whose indentation deliberately doesn't track nesting depth.
+        // This is common in Coil: tail-`if` staircases, `let` bindings aligned with
+        // the body at the same column, and multi-line string literals (e.g.
+        // `llvm-ir` IR blocks) whose lines are dedented below the enclosing form —
+        // the string's leading whitespace was being misread as a dedent that closed
+        // the enclosing paren. Only genuinely broken paren structure falls through.
+        if Self::is_well_formed(&self.source) {
+            return Ok(self.source.clone());
+        }
+
         let lines: Vec<&str> = self.source.lines().collect();
         let mut result_lines = Vec::new();
         let mut delim_stack: Vec<DelimInfo> = Vec::new();
@@ -485,5 +555,59 @@ mod tests {
         let parinfer = Parinfer::new(source);
         let result = parinfer.balance().unwrap();
         assert_eq!(result, source);
+    }
+
+    // ---- Coil regression cases -------------------------------------------
+    // These are valid, already-balanced Coil forms whose indentation does not
+    // track nesting depth. Indentation-driven balancing used to corrupt them;
+    // well-formed input must now round-trip verbatim.
+
+    #[test]
+    fn test_coil_llvm_ir_multiline_string_dedented() {
+        // A multi-line string argument whose lines sit at column 0 — dedented
+        // below the enclosing `(llvm-ir ...)`. The string's leading whitespace
+        // must not be read as a dedent that closes the enclosing paren.
+        let source = "(defn uart-byte [(c i64)] (-> i64)\n  (llvm-ir i64 [c]\n\"%p = inttoptr i64 150994944 to ptr\nret i64 0\"))";
+        let parinfer = Parinfer::new(source);
+        assert_eq!(parinfer.balance().unwrap(), source);
+    }
+
+    #[test]
+    fn test_coil_let_bindings_aligned_with_body() {
+        // `let` binding elements and body forms at the SAME column: the `]`
+        // must stay where it is, not migrate past the body.
+        let source = "(let [sig a\n     fv b]\n     (use sig)\n     (use fv))";
+        let parinfer = Parinfer::new(source);
+        assert_eq!(parinfer.balance().unwrap(), source);
+    }
+
+    #[test]
+    fn test_coil_tail_if_staircase() {
+        // Deeply nested tail `if`s drawn at shallow (back-dented) indentation,
+        // closed by a long run of parens on the last line.
+        let source = "(if a\n    x\n (if b\n     y\n  (if c\n      z\n   w)))";
+        let parinfer = Parinfer::new(source);
+        assert_eq!(parinfer.balance().unwrap(), source);
+    }
+
+    #[test]
+    fn test_coil_trailing_newline_preserved() {
+        // A well-formed file with a trailing newline must keep it (the old
+        // line-join path silently dropped it).
+        let source = "(defn f [] (-> i64) 0)\n";
+        let parinfer = Parinfer::new(source);
+        assert_eq!(parinfer.balance().unwrap(), source);
+    }
+
+    #[test]
+    fn test_coil_broken_input_still_repaired() {
+        // The fix must not disable repair: genuinely unbalanced input still
+        // gets its missing closer synthesized.
+        let source = "(iadd 1 2";
+        let parinfer = Parinfer::new(source);
+        let result = parinfer.balance().unwrap();
+        let opens = result.chars().filter(|&c| c == '(').count();
+        let closes = result.chars().filter(|&c| c == ')').count();
+        assert_eq!(opens, closes, "unbalanced input should be repaired: {result:?}");
     }
 }

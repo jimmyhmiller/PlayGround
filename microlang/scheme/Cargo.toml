@@ -7,9 +7,18 @@ description = "An R7RS-flavored Scheme frontend, built entirely on the core publ
 [dependencies]
 microlang = { path = ".." }
 
+# Opt-in native backend: enables microlang's Cranelift JIT so the Scheme
+# frontend can run on the native tier (and be benchmarked against it).
+[features]
+jit = ["microlang/jit"]
+
 [lib]
 path = "src/lib.rs"
 
 [[bin]]
 name = "scheme"
 path = "src/main.rs"
+
+[[example]]
+name = "bench"
+required-features = ["jit"]

@@ -33,12 +33,10 @@ fn escaped_quote_remains_untouched() {
 }
 
 #[test]
-#[ignore] // parinfer_rust indent_mode has a bug with astral-plane Unicode characters
 fn astral_plane_identifier_is_preserved() {
-    // Known issue: parinfer_rust's indent_mode incorrectly handles astral-plane
-    // Unicode characters (like 𑏌) by removing closing brackets.
-    // Input: "[[𑏌]]" -> Output: "[[𑏌]" (missing one ])
-    // This is a bug in parinfer_rust, not in our code.
+    // parinfer_rust's indent_mode used to mishandle astral-plane Unicode characters
+    // (like 𑏌) by removing a closing bracket. Now that `balance` preserves
+    // already-well-formed input verbatim, this round-trips regardless.
     let input = "[[𑏌]]";
     let output = Parinfer::new(input).balance().expect("expected success with astral-plane identifier");
     assert_eq!(output, input);
@@ -258,7 +256,6 @@ fn scf_if_second_region_at_same_indent_as_parent_bug() {
 }
 
 #[test]
-#[ignore] // Known bug: paredit-like closes scf.if after first region
 fn scf_if_sibling_regions_exact_repro() {
     // Exact reproduction from user report.
     //

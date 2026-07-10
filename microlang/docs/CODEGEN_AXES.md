@@ -216,15 +216,25 @@ data-plane axes (2, 3, 4), plus drawing the full coupling graph.
 Grounding, honestly. microlang's interpreter already funnels through the core
 hooks, so the axis map is visible in its code:
 
-- Value rep (1): `Repr`, three real strategies, emit-half not built (no native JIT).
-- Overflow (2): fixed wrap only (`wrapping_add`); no promotion.
+- Value rep (1): `Repr`, three real strategies; emit-half built BOTH as bytecode
+  (`ModelEmit`) and as native code (`jit_cranelift.rs` lowers the same recipe).
+- Overflow (2): the interpreter promotes to BigInt; the native JIT emits the
+  guarded emit form — fixnum fast path + range check + fall back to the promoting
+  `prim` (`jit_cranelift.rs`, `emit_guarded_arith`), so compiled code has the full
+  tower too. (The bytecode tier still wraps — the emit form lives only in the JIT.)
 - GC (5): moving collector built; roots via shadow stack; **barriers are no-ops
   because the GC is STW non-generational** — correct, but the barrier interface
   isn't a hook yet.
-- Calling convention (6): one, no tail calls / TCO.
+- Calling convention (6): the interpreter and the JIT do proper tail calls (a
+  trampoline reusing the frame); the JIT emits a tail `Call` as a trampoline
+  bounce, so unbounded tail recursion is O(1) native stack. The bytecode and
+  closure tiers still recurse. No non-tail frame reuse / explicit `recur`.
 - Frame/roots (12): shadow stack + `Cell` frames; no stack maps.
 - Var access (11): indirection through the globals table; late binding works.
-- Tiering (14): interpreter + closure-compile, no optimizing tier, no profiling.
+- Tiering (14): interpreter + closure-compile + bytecode + a native Cranelift JIT,
+  and `Tiered` = JIT-with-CEK-fallback picking a strategy per body (the
+  interpreter-fallback the deopt design needs, chosen statically by feature rather
+  than by profile). No profiling-driven reopt/deopt yet.
 - Dispatch (7): `dispatch.rs`, three swappable strategies (megamorphic, mono IC,
   poly IC) over records + `defmethod`; per-site caches; the dispatch⟺GC coupling
   wired (impls are roots, caches invalidate on collect). Emit-half not built.
@@ -244,14 +254,30 @@ each where a real dynamic language spends its performance budget:
 - Exceptions / continuations (9): existed in an earlier revision, removed here.
 - Concurrency (10) and its barriers.
 
-The **emit half** is no longer purely hypothetical: `bytecode.rs` is a real emit
-tier (bytecode compiler + stack VM) where the value model supplies `ModelEmit`
-and the SAME source compiles to representation-specific instruction streams
-(LowBit shifts, HighBit does not, NanBox boxes to slow calls). It demonstrates
-the emit interface on the value axis. What remains is the emit half of the OTHER
-axes (a GC write barrier emitted inline, a dispatch guard chain, a deopt point
-with a frame-state map) and lifting the op stream from these VM ops to a real
-machine ISA — same shape, more engineering.
+The **emit half** is real, and now at two levels. `bytecode.rs` is a bytecode
+emit tier (compiler + stack VM) where the value model supplies `ModelEmit` and
+the SAME source compiles to representation-specific instruction streams (LowBit
+shifts, HighBit does not, NanBox boxes to slow calls). And `jit_cranelift.rs`
+(opt-in `--features jit`) lifts that exact op stream to a real machine ISA: it
+lowers the *same* `ModelEmit` recipe to Cranelift IR and compiles to host machine
+code, proving the value-axis emit interface is ISA-neutral (one recipe →
+bytecode *or* native). Adding it surfaced a latent bug the positive-only matrix
+never hit — HighBit's top-bit tag corrupts under a raw *signed* subtraction whose
+result is negative, so both emit tiers fail there while the re-masking
+interpreter does not. That is precisely the differential-spec payoff this doc
+opened with: a second emit strategy is what catches the first's silent gap.
+
+The JIT has since grown past a demo: `let`/`set!`, proper tail calls (axis #6),
+and guarded overflow→bignum arithmetic (axis #2) make it run **all of Scheme
+except first-class continuations**. `Tiered` composes it with the `CekMachine`
+(the interpreter fallback the tiering design always promised), and the full R7RS
+conformance suite passes on that pairing — 54/61 live cases fully native,
+oracle-checked against Chicken.
+
+What remains is the emit half of the OTHER axes (a GC write barrier emitted
+inline, a dispatch guard chain, a deopt point with a frame-state map) and the
+first coupling to close: making native temporaries GC roots (the frame/roots
+axis) so the JIT tier can model the `(gc)` safepoint the interpreter tiers do.
 
 The through-line: value and GC were the right first two because they are the
 foundation every other axis sits on. Dispatch is the right third — it is where

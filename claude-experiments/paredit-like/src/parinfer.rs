@@ -33,6 +33,62 @@ impl Parinfer {
         }
     }
 
+    /// Stricter than `is_structurally_balanced`: every closer must match the most
+    /// recent opener (so `([)]` is rejected, not just count-balanced). Skips string
+    /// literals (with `\` escapes) and `;` line comments, exactly like the balancer.
+    /// Used to decide whether the input is already correct and should be preserved
+    /// verbatim rather than reflowed by indent-mode.
+    fn is_well_formed(source: &str) -> bool {
+        let mut stack: Vec<char> = Vec::new();
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut in_comment = false;
+        for ch in source.chars() {
+            let was_escaped = escape_next;
+            escape_next = false;
+            if ch == '\\' && in_string && !was_escaped {
+                escape_next = true;
+                continue;
+            }
+            if ch == '"' && !in_comment && !was_escaped {
+                in_string = !in_string;
+                continue;
+            }
+            if in_string {
+                continue;
+            }
+            if ch == ';' {
+                in_comment = true;
+            }
+            if ch == '\n' || ch == '\r' {
+                in_comment = false;
+            }
+            if in_comment {
+                continue;
+            }
+            match ch {
+                '(' | '[' | '{' => stack.push(ch),
+                ')' => {
+                    if stack.pop() != Some('(') {
+                        return false;
+                    }
+                }
+                ']' => {
+                    if stack.pop() != Some('[') {
+                        return false;
+                    }
+                }
+                '}' => {
+                    if stack.pop() != Some('{') {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        !in_string && stack.is_empty()
+    }
+
     fn is_structurally_balanced(output: &str) -> bool {
         let mut in_string = false;
         let mut escape_next = false;
@@ -74,6 +130,19 @@ impl Parinfer {
     }
 
     pub fn balance(&self) -> Result<String> {
+        // If the input is already well-formed there are no missing/extra parens to
+        // fix, so preserve it verbatim. indent-mode reflows structure from
+        // indentation, which corrupts structurally-valid code whose indentation
+        // deliberately doesn't track nesting depth — common in Coil: tail-`if`
+        // staircases, `let` bindings aligned with the body at the same column, and
+        // multi-line string literals (e.g. `llvm-ir` IR blocks) whose lines are
+        // dedented below the enclosing form. This upholds the tool's contract that
+        // balanced input round-trips unchanged; only genuinely broken paren
+        // structure falls through to indent-mode below.
+        if Self::is_well_formed(&self.source) {
+            return Ok(self.source.clone());
+        }
+
         let options = Self::default_options();
         let answer = parinfer::indent_mode(&self.source, &options);
         let success = answer.success;

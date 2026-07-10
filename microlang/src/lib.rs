@@ -25,7 +25,10 @@ pub mod compiled;
 pub mod dispatch;
 pub mod gc;
 pub mod ir;
+#[cfg(feature = "jit")]
+pub mod jit_cranelift;
 pub mod model;
+pub mod optimize;
 pub mod runtime;
 pub mod speculation;
 pub mod value;
@@ -33,7 +36,10 @@ pub mod value;
 pub use bytecode::{BytecodeVm, ModelEmit};
 pub use cek::CekMachine;
 pub use code::{CodeSpace, Traced, TreeWalk};
+pub use optimize::Optimized;
 pub use compiled::ClosureComp;
+#[cfg(feature = "jit")]
+pub use jit_cranelift::{jit_can_compile, JitCranelift, ModelArithJit, Tiered};
 pub use dispatch::{Dispatch, DispatchStats, Megamorphic, MonomorphicIc, PolymorphicIc};
 pub use speculation::{
     AlwaysMonomorphic, BlacklistAfter, Decision, NeverSpeculate, SpecCounters, SpecStats,

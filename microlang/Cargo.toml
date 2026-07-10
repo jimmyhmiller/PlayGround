@@ -7,8 +7,30 @@ description = "Trait sketch for a dynamic-language toolkit re-cut at the value-m
 [lib]
 path = "src/lib.rs"
 
+# The native emit tier is opt-in: the core toolkit stays dependency-free (a
+# deliberate constraint everywhere else), and pulling in a whole codegen backend
+# only to demonstrate the "emit half" of the axes shouldn't tax the interpreter
+# tiers. `--features jit` turns on the Cranelift JIT backend.
+[features]
+jit = ["dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-native"]
+
+[dependencies]
+cranelift-codegen = { version = "0.133", optional = true }
+cranelift-frontend = { version = "0.133", optional = true }
+cranelift-jit = { version = "0.133", optional = true }
+cranelift-module = { version = "0.133", optional = true }
+cranelift-native = { version = "0.133", optional = true }
+
+[[example]]
+name = "jit"
+required-features = ["jit"]
+
 # Detach from the big parent workspace; `microlang` is the reusable CORE, and
 # the frontends (`scheme`, `clojure-stub`) are members that may only use its
 # public API. The live second consumer keeps the library/language split honest.
 [workspace]
 members = ["scheme", "clojure-stub"]
+
+[[example]]
+name = "optbench"
+required-features = ["jit"]

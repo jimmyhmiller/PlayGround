@@ -9,6 +9,29 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasherDefault;
+
+/// A cheap hasher for `Sym` (a `u32`) keys. The global environment is consulted
+/// on every free-variable reference — a hot path in every tier — and the default
+/// `SipHash` is far more than a 32-bit symbol id needs. Fibonacci multiply gives
+/// good spread at a fraction of the cost. (Dep-free, like the rest of the core.)
+#[derive(Default)]
+pub struct SymHasher(u64);
+impl std::hash::Hasher for SymHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+/// A `HashMap` keyed by `Sym` with the fast symbol hasher.
+pub type SymMap<V> = HashMap<Sym, V, BuildHasherDefault<SymHasher>>;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
@@ -18,6 +41,11 @@ use crate::dispatch::{Dispatch, Megamorphic, MethodRegistry};
 use crate::ir::{ConstId, Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::value::{Cat, Frame, HeapId, Locals, Obj, RawTag, Sym, Val};
+
+/// Sentinel for an unbound slot in `global_slots`. `u64::MAX` has an invalid tag
+/// under every value model (`LowBit`/`HighBit`/`NanBox`), so it can never collide
+/// with a real encoded value — reading it back means "not bound, use slow path".
+pub const GLOBAL_UNBOUND: u64 = u64::MAX;
 
 /// A global binding. `is_macro` is what makes `macroexpand` treat a call head
 /// specially — the single resolution table the compiler and runtime share.
@@ -57,7 +85,15 @@ pub struct Runtime<M: ValueModel> {
     pub(crate) shadow: Vec<u64>,
     sym_names: Vec<String>,
     sym_ids: HashMap<String, Sym>,
-    pub globals: HashMap<Sym, Var>,
+    pub globals: SymMap<Var>,
+    /// A dense mirror of global VALUES, indexed by `Sym`, for O(1) pointer-based
+    /// reads. `intern` extends it (so it is always sym-sized and only grows at
+    /// analyze time, never during a run), and `define_global`/`set_global_val`
+    /// keep it current. A native backend loads a global inline from this array's
+    /// stable base instead of an FFI into the hash map. Slots default to
+    /// `GLOBAL_UNBOUND` (a bit pattern no value model can produce), which the JIT
+    /// treats as "fall back to the slow, late-binding lookup".
+    pub global_slots: Vec<u64>,
     sf: Specials,
     prims: HashMap<Sym, Prim>,
     /// Compile-time lexical scope, innermost frame last. Used only during
@@ -89,7 +125,8 @@ impl<M: ValueModel> Runtime<M> {
             shadow: Vec::new(),
             sym_names: Vec::new(),
             sym_ids: HashMap::new(),
-            globals: HashMap::new(),
+            globals: Default::default(),
+            global_slots: Vec::new(),
             sf: Specials {
                 quote: 0,
                 if_: 0,
@@ -177,7 +214,44 @@ impl<M: ValueModel> Runtime<M> {
         let id = self.sym_names.len() as Sym;
         self.sym_names.push(s.to_string());
         self.sym_ids.insert(s.to_string(), id);
+        // Keep the dense global mirror sym-sized. Growing it here (analyze time)
+        // means it never reallocates during a run, so the native backend can hold
+        // a stable base pointer to it across a whole call chain.
+        self.global_slots.push(GLOBAL_UNBOUND);
         id
+    }
+
+    /// Define (or redefine) a global, updating both the map and the dense mirror.
+    /// The one place a global binding is created; routing writes through here is
+    /// what keeps `global_slots` a faithful cache.
+    pub fn define_global(&mut self, sym: Sym, val: u64, is_macro: bool) {
+        self.globals.insert(sym, Var { val, is_macro });
+        if let Some(slot) = self.global_slots.get_mut(sym as usize) {
+            *slot = val;
+        }
+    }
+
+    /// Assign an existing global's value (`set!`), updating the dense mirror too.
+    /// Returns `false` if the global is unbound.
+    pub fn set_global_val(&mut self, sym: Sym, val: u64) -> bool {
+        match self.globals.get_mut(&sym) {
+            Some(var) => {
+                var.val = val;
+                if let Some(slot) = self.global_slots.get_mut(sym as usize) {
+                    *slot = val;
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Stable base pointer + length of the dense global mirror (for inline reads).
+    pub fn global_slots_ptr(&self) -> *const u64 {
+        self.global_slots.as_ptr()
+    }
+    pub fn global_slots_len(&self) -> usize {
+        self.global_slots.len()
     }
     pub fn sym_name(&self, s: Sym) -> &str {
         &self.sym_names[s as usize]
@@ -199,6 +273,13 @@ impl<M: ValueModel> Runtime<M> {
 
     pub fn get_const(&self, id: ConstId) -> u64 {
         self.consts[id as usize]
+    }
+
+    /// Base pointer of the constant pool, for a native backend that loads
+    /// constants inline instead of through a call. Valid until the pool grows
+    /// (which only happens at analyze time, never during execution).
+    pub fn consts_ptr(&self) -> *const u64 {
+        self.consts.as_ptr()
     }
 
     /// Box a non-immediate category, encode an immediate one. THE value-axis
@@ -333,16 +414,27 @@ impl<M: ValueModel> Runtime<M> {
     // ── primitives (value-model fast paths live here) ───────
     pub fn prim(&mut self, op: Prim, args: &[u64]) -> u64 {
         match op {
-            Prim::Add => self.arith(args[0], args[1], i64::checked_add, i128::checked_add, |a, b| a + b, BigInt::add),
-            Prim::Sub => self.arith(args[0], args[1], i64::checked_sub, i128::checked_sub, |a, b| a - b, BigInt::sub),
-            Prim::Mul => self.arith(args[0], args[1], i64::checked_mul, i128::checked_mul, |a, b| a * b, BigInt::mul),
-            Prim::Lt => {
+            // The fixnum-specialized `Fx*` ops are semantically the checked op:
+            // interpreter tiers give them identical meaning (only the JIT reads
+            // the distinction, to skip a tag check). So they share these arms.
+            Prim::Add | Prim::FxAdd => self.arith(args[0], args[1], i64::checked_add, i128::checked_add, |a, b| a + b, BigInt::add),
+            Prim::Sub | Prim::FxSub => self.arith(args[0], args[1], i64::checked_sub, i128::checked_sub, |a, b| a - b, BigInt::sub),
+            Prim::Mul | Prim::FxMul => self.arith(args[0], args[1], i64::checked_mul, i128::checked_mul, |a, b| a * b, BigInt::mul),
+            Prim::Lt | Prim::FxLt => {
                 let r = self.num_lt(args[0], args[1]);
                 self.encode(Val::Bool(r))
             }
-            Prim::Eq => {
+            Prim::Eq | Prim::FxEq => {
                 let r = self.equal(args[0], args[1]);
                 self.encode(Val::Bool(r))
+            }
+            // The specializer's fixnum guard: true iff every arg is an immediate
+            // fixnum. (Only picks between two equivalent bodies, so its exact
+            // value never affects correctness on an interpreter tier.)
+            Prim::AllFixnum => {
+                let all = M::R::is_immediate(Cat::Int)
+                    && args.iter().all(|&a| matches!(self.decode(a), Val::Int(v) if (-(1i128 << 60)..(1i128 << 60)).contains(&v)));
+                self.encode(Val::Bool(all))
             }
             // Identity (`eq?`/`eqv?`): equal encoded bits. Immediates compare by
             // value; heap objects by pointer.

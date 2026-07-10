@@ -65,7 +65,25 @@ Two subtleties make it *compose*, not merely swap:
 | `ClosureComp` | `compiled.rs` | closure compiler | compiles each `Ir` subtree to a Rust closure once; caches bodies |
 | `BytecodeVm` | `bytecode.rs` | emit tier | value model emits model-specific bytecode via `ModelEmit` |
 | `CekMachine` | `cek.rs` | stackless abstract machine | full/delimited multi-shot continuations; GC-survivable |
+| `JitCranelift` | `jit_cranelift.rs` | native emit tier | compiles the `Ir` to host machine code via Cranelift; opt-in `--features jit` |
+| `Tiered` | `jit_cranelift.rs` | tiering wrapper | JIT with an automatic `CekMachine` fallback per body |
 | `Traced` | `code.rs` | wrapper | counts invocations (feeds speculation) |
+
+`JitCranelift` is the machine-code analogue of `BytecodeVm`: per-model arithmetic
+(the same value-axis split `ModelEmit` encodes — LowBit/HighBit shift to untag,
+NanBox boxes so it has no fast path) is emitted inline, while everything
+heap/globals/call-shaped funnels back through the runtime via `extern "C"` shims.
+Beyond the bytecode tier it adds `let`/`set!`, **proper tail calls** (a trampoline,
+so unbounded tail recursion is O(1) stack), and a **guarded fixnum fast path** that
+range-checks and falls back to the runtime's promoting arithmetic — giving it the
+full numeric tower (bignum, floats) the tree-walker has, which the wrapping
+bytecode tier lacks. That is enough to run **all of Scheme except first-class
+continuations**; `Tiered` composes the JIT with the `CekMachine`, running each
+body native when it can and on the stackless machine when it uses `call/cc` /
+`apply`. The full R7RS conformance suite passes on `Tiered` (54/61 live cases
+fully native, oracle-checked). It still does not model the GC safepoint (native
+temporaries are not yet roots — the frame/roots emit axis is the next step). See
+[CODEGEN_AXES.md](CODEGEN_AXES.md).
 
 Some `Ir` nodes are only meaningful under some strategies: `Prim::CallCc` is a
 well-formed node on every tier, but only `CekMachine` can give it meaning; the

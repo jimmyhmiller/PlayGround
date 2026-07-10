@@ -78,9 +78,46 @@ pub enum Prim {
     /// procedure, and apply `f` to it under a re-established prompt. Native
     /// delimited control; `CekMachine` only.
     Shift,
+
+    // ── optimizer-introduced fixnum specializations ──────────────────────────
+    // These are produced ONLY by the `optimize` nanopass (never by `analyze`).
+    // `FxAdd/FxSub/FxMul/FxLt/FxEq` mean "same as `Add/Sub/Mul/Lt/Eq`, but the
+    // operands have been PROVEN to be immediate fixnums" (by a dominating
+    // `AllFixnum` guard the pass inserts). Semantically identical to the checked
+    // op — every interpreter tier lowers them to the very same `prim` — so a
+    // backend that ignores the distinction is still correct. Only the JIT reads
+    // it, to skip the per-op tag check (it still keeps the overflow → promotion
+    // path, since two fixnums can still overflow to a bignum).
+    FxAdd,
+    FxSub,
+    FxMul,
+    FxLt,
+    FxEq,
+    /// `(%all-fixnum? a b ...)` — true iff EVERY argument is an immediate fixnum.
+    /// The guard the specializer places at a lambda's entry; when it holds, the
+    /// body's `Fx*` ops are valid. On the JIT it lowers to a single combined
+    /// tag test; on the interpreter tiers it is a normal predicate (and the
+    /// result only picks between two equivalent bodies, so it can't be wrong).
+    AllFixnum,
 }
 
-#[derive(Clone)]
+impl Prim {
+    /// The checked arithmetic op a fixnum-specialized `Fx*` op stands for
+    /// (identity for everything else). Interpreter tiers use this to give `Fx*`
+    /// exactly the semantics of the base op.
+    pub fn dechecked(self) -> Prim {
+        match self {
+            Prim::FxAdd => Prim::Add,
+            Prim::FxSub => Prim::Sub,
+            Prim::FxMul => Prim::Mul,
+            Prim::FxLt => Prim::Lt,
+            Prim::FxEq => Prim::Eq,
+            other => other,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
 pub enum Ir {
     /// A literal, held in the constant pool (no embedded heap pointer).
     Const(ConstId),
