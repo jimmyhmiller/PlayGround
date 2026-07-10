@@ -39,6 +39,8 @@ impl Compiler {
             ("%cell", Vector), ("%cell-ref", VectorRef), ("%cell-set!", VectorSet),
             // Real OS threads: spawn a thunk on a worker; await joins it.
             ("%spawn", Spawn), ("%await", Await),
+            // Atoms: real cross-thread compare-and-set.
+            ("%atom-new", AtomNew), ("%atom-get", AtomGet), ("%atom-set", AtomSet), ("%atom-cas", AtomCas),
         ] {
             prims.insert(rt.intern(name), p);
         }

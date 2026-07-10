@@ -355,24 +355,32 @@ pub const CORE: &str = r#"
 ;; An atom is a record wrapping a mutable 1-slot cell. `@a`/`(deref a)` reads it;
 ;; `reset!`/`swap!` mutate it. (Threads + compare-and-set semantics are a later
 ;; layer; this is the identity/state box real clojure code reaches for.)
-(defn atom [x] (record 'Atom (%cell x)))
+;; Atoms are a real atomic cell now (Obj::Atom), so cross-thread swap! is a
+;; correct compare-and-set retry loop (not a read-modify-write race).
+(defn atom [x] (%atom-new x))
 (defn atom? [x] (%num-eq (type-of x) 'Atom))
 (defn future? [x] (%num-eq (type-of x) 'Future))
-;; deref reads an atom's cell, or joins a future (blocking on its worker thread).
-(defn deref [x] (if (future? x) (%await x) (%cell-ref (field x 0) 0)))
+;; deref reads an atom (atomic load), or joins a future (blocking on its worker).
+(defn deref [x] (if (future? x) (%await x) (%atom-get x)))
 ;; Real OS threads: `(future body...)` runs on a worker sharing the heap.
 (defn future-call [f] (%spawn f))
 (defmacro future (& body) (list 'future-call (%cons 'fn (%cons (vector) body))))
 (defn pcalls-2 [f g] (let [a (%spawn f) b (%spawn g)] (list (%await a) (%await b))))
-(defn reset! [a v] (do (%cell-set! (field a 0) 0 v) v))
+(defn reset! [a v] (%atom-set a v))
+;; Apply f to the atom's current value and up to 3 extra args.
+(defn -swap-apply [f old s]
+  (cond (nil? s) (f old)
+        (nil? (next s)) (f old (first s))
+        (nil? (next (next s))) (f old (first s) (second s))
+        (nil? (next (next (next s)))) (f old (first s) (second s) (nth s 2))
+        true (throw "swap!: too many args (max 3 beyond the atom)")))
+;; CAS retry: read, compute, compare-and-set; on contention, retry (keeping args).
 (defn swap! [a f & args]
-  (let [old (deref a) s (seq args)]
-    (reset! a
-      (cond (nil? s) (f old)
-            (nil? (next s)) (f old (first s))
-            (nil? (next (next s))) (f old (first s) (second s))
-            (nil? (next (next (next s)))) (f old (first s) (second s) (nth s 2))
-            true (throw "swap!: too many args (max 3 beyond the atom)")))))
+  (let [s (seq args)]
+    (loop []
+      (let [old (%atom-get a)
+            new (-swap-apply f old s)]
+        (if (%atom-cas a old new) new (recur))))))
 
 ;; ─────────────── realization (force a lazy result for printing) ───────────────
 ;; The Rust printer can't invoke thunks, so `run` calls this on the final value

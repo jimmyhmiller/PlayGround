@@ -754,6 +754,7 @@ impl<M: ValueModel> Runtime<M> {
                         Obj::Closure { .. } => "Fn",
                         Obj::BigInt(_) | Obj::HugeInt(_) => "Long",
                         Obj::BoxFloat(_) => "Double",
+                        Obj::Atom(_) => "Atom",
                         Obj::Future(_) => "Future",
                         _ => "Object",
                     },
@@ -799,6 +800,33 @@ impl<M: ValueModel> Runtime<M> {
             // `spawn` needs to invoke a closure on the child thread, so it is
             // handled in the backend (like `Gc`/`CallEc`), never here.
             Prim::Spawn => unreachable!("Prim::Spawn is backend-handled"),
+            // ── atoms: real cross-thread compare-and-set ────────────────
+            Prim::AtomNew => {
+                let id = self.alloc(Obj::Atom(Arc::new(AtomicU64::new(args[0]))));
+                M::R::enc_ref(id)
+            }
+            Prim::AtomGet => {
+                let Obj::Atom(a) = &self.heap()[M::R::as_ref(args[0]) as usize] else {
+                    panic!("atom-get: not an atom");
+                };
+                a.load(Ordering::Acquire)
+            }
+            Prim::AtomSet => {
+                let Obj::Atom(a) = &self.heap()[M::R::as_ref(args[0]) as usize] else {
+                    panic!("atom-set: not an atom");
+                };
+                a.store(args[1], Ordering::Release);
+                args[1]
+            }
+            Prim::AtomCas => {
+                let Obj::Atom(a) = &self.heap()[M::R::as_ref(args[0]) as usize] else {
+                    panic!("atom-cas: not an atom");
+                };
+                let ok = a
+                    .compare_exchange(args[1], args[2], Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok();
+                M::R::enc_bool(ok)
+            }
             Prim::Field => {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("field: not a record");
@@ -1014,6 +1042,7 @@ impl<M: ValueModel> Runtime<M> {
                 Obj::Escape { .. } => "#<continuation>".to_string(),
                 Obj::Cont(_) => "#<continuation>".to_string(),
                 Obj::PartialCont(_) => "#<partial-continuation>".to_string(),
+                Obj::Atom(_) => "#<atom>".to_string(),
                 Obj::Future(_) => "#<future>".to_string(),
                 Obj::Moved(_) => "#<moved>".to_string(),
             },

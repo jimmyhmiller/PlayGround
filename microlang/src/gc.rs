@@ -348,6 +348,14 @@ fn scan_obj<M: ValueModel>(
         }
         return;
     }
+    // Atom: forward the value it currently holds (atomic load/store; the
+    // collector runs stop-the-world, but keep it atomic for tidiness).
+    if let Obj::Atom(a) = &to[i] {
+        let a = a.clone();
+        let v = a.load(std::sync::atomic::Ordering::Relaxed);
+        a.store(fw::<M>(heap, from_len, to, reloc, v), std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
     // Future: forward its cached result (a worker stores the value here before
     // ending, so it stays rooted via the reachable `Future` object).
     if let Obj::Future(slot) = &to[i] {

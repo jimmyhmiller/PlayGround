@@ -1,0 +1,22 @@
+// Phase 8c OFFLINE golden — the full model-driven tool-use loop with ZERO network.
+// A ScriptedModel + the real CalcTool: the model requests `calculate`, the tool does REAL
+// integer arithmetic on the model-chosen args (17 * 23 = 391), the result feeds back, and the
+// final answer INCORPORATES it. Proves model-driven dispatch + result feedback deterministically.
+import std.agent.{Model, Tool, Conversation, ScriptedModel, CalcTool, WeatherTool, runAgentLoop}
+
+fn main() {
+  let tools = List<Tool>()
+  tools.push(CalcTool(label: "calc"))
+  tools.push(WeatherTool(source: "demo"))
+
+  let brain = ScriptedModel(persona: "assistant")
+
+  let convo = Conversation()
+  let ans1 = runAgentLoop(convo, brain, tools, "what is 17 times 23?", 8)
+  Console.log("answer1=" + ans1)
+  Console.log("messages1=${convo.size()}")
+
+  let convo2 = Conversation()
+  let ans2 = runAgentLoop(convo2, brain, tools, "what's the weather in Tokyo?", 8)
+  Console.log("answer2=" + ans2)
+}

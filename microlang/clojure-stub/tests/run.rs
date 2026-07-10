@@ -543,3 +543,19 @@ fn concurrent_gc() {
     // sum of squares 0..39 = 20540; churn(24) = 24*20540 = 492960; x8 = 3943680.
     assert_eq!(run(src), "3943680");
 }
+
+#[test]
+fn atom_cas_concurrent() {
+    // Many worker threads each swap! the SAME shared atom many times. With a real
+    // compare-and-set retry loop, not one increment may be lost: the total is exact.
+    let src = r#"
+        (def counter (atom 0))
+        (defn bump-n [k] (if (%num-eq k 0) nil (do (swap! counter (fn [x] (%add x 1))) (bump-n (%sub k 1)))))
+        (defn spawn-n [k] (if (%num-eq k 0) nil (%cons (%spawn (fn [] (bump-n 250))) (spawn-n (%sub k 1)))))
+        (defn await-all [fs] (if (nil? fs) nil (do (%await (%first fs)) (await-all (%rest fs)))))
+        (await-all (spawn-n 8))
+        (deref counter)
+    "#;
+    // 8 threads * 250 increments = 2000, exact iff no lost updates.
+    assert_eq!(run(src), "2000");
+}

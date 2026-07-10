@@ -1,0 +1,574 @@
+// std/agent.scry — the Phase 8c agent core, written IN Scry (dogfood over 8a Http + 8b Json).
+//
+// This is the reusable "brain + tools + loop" layer shared by examples/assistant.scry (the live
+// app) and tests/run/agent_loop.scry (the offline golden). It contains ZERO app/UI code: no
+// threads, no REPL, no ANSI — just the model-driven tool-use loop and the pieces it needs.
+//
+// The shapes:
+//   interface Model  { complete(prompt) -> String ; respond(convo, tools) -> ModelResponse }
+//   interface Tool   { name() ; description() ; inputSchema() ; run(argsJson) -> String }
+//   class ModelResponse { text ; toolCalls: List<ToolCall> ; stopReason ; contentJson }
+//   class ToolCall      { id ; name ; inputJson }
+//   class Message       { role ; content ; contentJson }   // contentJson = the API "content" field
+//   class Conversation  { messages: List<Message> ; count }
+//
+// THE LOOP (runAgentLoop): append the user task -> ask the Model -> append its assistant turn ->
+// if stop_reason == "tool_use", dispatch each ToolCall to the matching Tool, feed the results
+// back as a tool_result user message, and repeat -> else return the assistant text. Bounded by
+// maxIters (hard stop, never a silent infinite loop). Two Model impls drive the IDENTICAL loop:
+//   - ScriptedModel:  a deterministic keyword brain — emits a REAL tool_use decision offline.
+//   - AnthropicModel: a real /v1/messages tool-use client over Http (8a) + Json (8b).
+
+module std.agent
+
+import std.json.{Json, JsonValue, jget, jindex, jstr, jint, jgetStr, jgetInt}
+
+// ============================ small helpers ============================
+fn strContains(s: String, needle: String) -> Bool {
+  let n = s.len()
+  let m = needle.len()
+  if m == 0 { return true }
+  if m > n { return false }
+  var i = 0
+  while i + m <= n {
+    if s.slice(i, i + m) == needle { return true }
+    i = i + 1
+  }
+  false
+}
+
+fn strStartsWith(s: String, p: String) -> Bool {
+  if s.len() < p.len() { return false }
+  s.slice(0, p.len()) == p
+}
+
+// JSON-quote a raw string into a "..."-delimited JSON string literal (byte-faithful passthrough,
+// same escape set as std.json's serializer). Used to build request bodies + tool inputs by hand.
+fn jq(s: String) -> String {
+  var out = "\""
+  var i = 0
+  let n = s.len()
+  while i < n {
+    let c = s.charCode(i)
+    if c == 34 {
+      out = out + "\\\""
+    } else if c == 92 {
+      out = out + "\\\\"
+    } else if c == 10 {
+      out = out + "\\n"
+    } else if c == 9 {
+      out = out + "\\t"
+    } else if c == 13 {
+      out = out + "\\r"
+    } else {
+      out = out + Str.fromCharCode(c)
+    }
+    i = i + 1
+  }
+  out + "\""
+}
+
+// scan every maximal run of ASCII digits, returning them as integers in order
+fn collectInts(s: String) -> List<Int> {
+  let out = List<Int>()
+  let n = s.len()
+  var i = 0
+  while i < n {
+    let c = s.charCode(i)
+    if c >= 48 && c <= 57 {
+      var v = 0
+      var go = true
+      while go {
+        if i < n {
+          let d = s.charCode(i)
+          if d >= 48 && d <= 57 {
+            v = v * 10 + (d - 48)
+            i = i + 1
+          } else {
+            go = false
+          }
+        } else {
+          go = false
+        }
+      }
+      out.push(v)
+    } else {
+      i = i + 1
+    }
+  }
+  out
+}
+
+fn nthInt(s: String, k: Int) -> Int {
+  let xs = collectInts(s)
+  if k < xs.len() {
+    xs.get(k)
+  } else {
+    if k == 0 { 2 } else { 3 }
+  }
+}
+
+// ============================ entities ============================
+class Message {
+  role: String          // "user" | "assistant"
+  content: String       // human-readable text (what the viewer shows)
+  contentJson: String   // the JSON for the API "content" field: a quoted string OR a block array
+  fn init(role: String, content: String, contentJson: String) {
+    self.role = role
+    self.content = content
+    self.contentJson = contentJson
+  }
+}
+
+class Conversation {
+  messages: List<Message>
+  count: Int
+  fn init() {
+    self.messages = List<Message>()
+    self.count = 0
+  }
+  fn append(m: Message) {
+    self.messages.push(m)
+    self.count = self.count + 1
+  }
+  fn size() -> Int { self.count }
+}
+
+class ToolCall {
+  id: String
+  name: String
+  inputJson: String     // the tool_use input object, serialized
+  fn init(id: String, name: String, inputJson: String) {
+    self.id = id
+    self.name = name
+    self.inputJson = inputJson
+  }
+}
+
+class ModelResponse {
+  text: String                 // concatenated text blocks (the final answer when end_turn)
+  toolCalls: List<ToolCall>    // one per tool_use block the model emitted
+  stopReason: String           // "end_turn" | "tool_use" | "max_tokens" | "error"
+  contentJson: String          // the assistant content-block ARRAY, serialized (replayed next turn)
+  fn init(text: String, toolCalls: List<ToolCall>, stopReason: String, contentJson: String) {
+    self.text = text
+    self.toolCalls = toolCalls
+    self.stopReason = stopReason
+    self.contentJson = contentJson
+  }
+}
+
+// ---- Message + ModelResponse constructors ----
+fn mkTextMessage(role: String, text: String) -> Message {
+  Message(role: role, content: text, contentJson: jq(text))
+}
+
+fn mkAssistantMessage(resp: ModelResponse) -> Message {
+  Message(role: "assistant", content: resp.text, contentJson: resp.contentJson)
+}
+
+fn mkToolResultMessage(blocksJson: String, display: String) -> Message {
+  Message(role: "user", content: display, contentJson: blocksJson)
+}
+
+fn isToolResult(m: Message) -> Bool {
+  strStartsWith(m.contentJson, "[{\"type\":\"tool_result")
+}
+
+fn toolUseResp(id: String, name: String, inputJson: String) -> ModelResponse {
+  let cj = "[{\"type\":\"tool_use\",\"id\":" + jq(id) + ",\"name\":" + jq(name) + ",\"input\":" + inputJson + "}]"
+  let cs = List<ToolCall>()
+  cs.push(ToolCall(id: id, name: name, inputJson: inputJson))
+  ModelResponse(text: "", toolCalls: cs, stopReason: "tool_use", contentJson: cj)
+}
+
+fn finalTextResp(text: String) -> ModelResponse {
+  let cj = "[{\"type\":\"text\",\"text\":" + jq(text) + "}]"
+  ModelResponse(text: text, toolCalls: List<ToolCall>(), stopReason: "end_turn", contentJson: cj)
+}
+
+fn errorResp(msg: String) -> ModelResponse {
+  ModelResponse(text: "[anthropic] " + msg, toolCalls: List<ToolCall>(), stopReason: "error", contentJson: "[]")
+}
+
+// ============================ tools ============================
+interface Tool {
+  fn name() -> String
+  fn description() -> String
+  fn inputSchema() -> String        // a JSON object string (Anthropic input_schema)
+  fn run(argsJson: String) -> String
+}
+
+// pull one string field out of a tool_use input; tolerate a bare non-JSON string (the legacy
+// sub-agent path hands `run` a plain topic, not JSON) by returning it verbatim.
+fn extractArg(argsJson: String, key: String) -> String {
+  match Json.parse(argsJson) {
+    Ok(v) -> match jgetStr(v, key) { Some(s) -> s  None -> argsJson }
+    Err(e) -> argsJson
+  }
+}
+
+class ShellTool implements Tool {
+  command: String
+  fn name() -> String { "shell" }
+  fn description() -> String { "Run a demo shell command (canned; does not actually execute). Args: cmd (string)." }
+  fn inputSchema() -> String { "{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}},\"required\":[\"cmd\"]}" }
+  fn run(argsJson: String) -> String {
+    let cmd = extractArg(argsJson, "cmd")
+    "$ " + self.command + " " + cmd + "  (canned)"
+  }
+}
+
+class SearchTool implements Tool {
+  index: String
+  fn name() -> String { "search" }
+  fn description() -> String { "Search a canned index and return a stub hit. Args: query (string)." }
+  fn inputSchema() -> String { "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}" }
+  fn run(argsJson: String) -> String {
+    let q = extractArg(argsJson, "query")
+    "search(" + self.index + "): " + q
+  }
+}
+
+// The arg-taking tool that a REAL model must pick and fill correctly: genuine integer arithmetic
+// on the a/b/op the model chose. Proves model-driven dispatch (the answer only exists if run ran).
+class CalcTool implements Tool {
+  label: String
+  fn name() -> String { "calculate" }
+  fn description() -> String { "Evaluate integer arithmetic. Args: a (integer), b (integer), op (one of add, sub, mul, div). Use this for any arithmetic question." }
+  fn inputSchema() -> String {
+    "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"integer\"},\"op\":{\"type\":\"string\",\"enum\":[\"add\",\"sub\",\"mul\",\"div\"]}},\"required\":[\"a\",\"b\",\"op\"]}"
+  }
+  fn run(argsJson: String) -> String {
+    match Json.parse(argsJson) {
+      Ok(v) -> {
+        let a = match jgetInt(v, "a") { Some(x) -> x  None -> 0 }
+        let b = match jgetInt(v, "b") { Some(x) -> x  None -> 0 }
+        let op = match jgetStr(v, "op") { Some(s) -> s  None -> "add" }
+        if op == "add" {
+          let r = a + b
+          "${a} + ${b} = ${r}"
+        } else if op == "sub" {
+          let r = a - b
+          "${a} - ${b} = ${r}"
+        } else if op == "mul" {
+          let r = a * b
+          "${a} * ${b} = ${r}"
+        } else if op == "div" {
+          if b == 0 {
+            "error: division by zero"
+          } else {
+            let r = a / b
+            "${a} / ${b} = ${r}"
+          }
+        } else {
+          "error: unknown op '" + op + "'"
+        }
+      }
+      Err(e) -> "error: bad calculate args: " + e
+    }
+  }
+}
+
+// A second arg-taking tool: canned per-location weather so the online model demonstrably passes a
+// location it extracted from the prompt.
+class WeatherTool implements Tool {
+  source: String
+  fn name() -> String { "get_weather" }
+  fn description() -> String { "Get the current weather for a city. Args: location (string, e.g. 'Tokyo')." }
+  fn inputSchema() -> String { "{\"type\":\"object\",\"properties\":{\"location\":{\"type\":\"string\"}},\"required\":[\"location\"]}" }
+  fn run(argsJson: String) -> String {
+    match Json.parse(argsJson) {
+      Ok(v) -> {
+        let loc = match jgetStr(v, "location") { Some(s) -> s  None -> "" }
+        if loc == "" {
+          "error: missing location"
+        } else {
+          let desc = weatherFor(loc)
+          loc + ": " + desc
+        }
+      }
+      Err(e) -> "error: bad get_weather args: " + e
+    }
+  }
+}
+
+fn weatherFor(loc: String) -> String {
+  if strContains(loc, "Tokyo") {
+    "18C, cloudy"
+  } else if strContains(loc, "San Francisco") || strContains(loc, "SF") {
+    "16C, foggy"
+  } else if strContains(loc, "London") {
+    "11C, rainy"
+  } else if strContains(loc, "Cairo") {
+    "33C, sunny"
+  } else {
+    "20C, clear"
+  }
+}
+
+// ============================ models ============================
+interface Model {
+  fn complete(prompt: String) -> String
+  fn respond(convo: Conversation, tools: List<Tool>) -> ModelResponse
+}
+
+// Deterministic offline brain. complete() is the one-shot keyword chat; respond() is a REAL
+// tool-use decision: on a fresh user task it inspects the text and either requests a tool (with
+// args it extracts) or answers directly; after a tool_result comes back it produces the final
+// answer that INCORPORATES the tool output — so the loop is exercised end-to-end with no network.
+class ScriptedModel implements Model {
+  persona: String
+
+  fn complete(prompt: String) -> String {
+    if strContains(prompt, "hello") || strContains(prompt, "hi ") {
+      "Hi there - I'm your assistant. Type 'help' to see what I can do."
+    } else if strContains(prompt, "thanks") {
+      "You're welcome!"
+    } else if strContains(prompt, "?") {
+      self.persona + ": good question - " + prompt
+    } else {
+      self.persona + ": " + prompt
+    }
+  }
+
+  fn respond(convo: Conversation, tools: List<Tool>) -> ModelResponse {
+    let n = convo.size()
+    if n == 0 {
+      finalTextResp("")
+    } else {
+      let last = convo.messages.get(n - 1)
+      if isToolResult(last) {
+        // turn 2+: the tool has answered — fold its output into a final reply
+        finalTextResp("Here you go: " + last.content)
+      } else {
+        let task = convo.messages.get(0)
+        let userText = task.content
+        if strContains(userText, "weather") {
+          let loc = pickCity(userText)
+          let inp = "{\"location\":" + jq(loc) + "}"
+          toolUseResp("call_1", "get_weather", inp)
+        } else if wantsCalc(userText) {
+          let a = nthInt(userText, 0)
+          let b = nthInt(userText, 1)
+          let op = pickOp(userText)
+          let inp = "{\"a\":${a},\"b\":${b},\"op\":" + jq(op) + "}"
+          toolUseResp("call_1", "calculate", inp)
+        } else {
+          finalTextResp(self.complete(userText))
+        }
+      }
+    }
+  }
+}
+
+fn pickCity(s: String) -> String {
+  if strContains(s, "Tokyo") {
+    "Tokyo"
+  } else if strContains(s, "San Francisco") {
+    "San Francisco"
+  } else if strContains(s, "London") {
+    "London"
+  } else if strContains(s, "Cairo") {
+    "Cairo"
+  } else {
+    "Tokyo"
+  }
+}
+
+fn wantsCalc(s: String) -> Bool {
+  strContains(s, "calc") || strContains(s, "times") || strContains(s, "multiply") ||
+  strContains(s, "plus") || strContains(s, "minus") || strContains(s, "divided") ||
+  strContains(s, "sum of") || strContains(s, "product")
+}
+
+fn pickOp(s: String) -> String {
+  if strContains(s, "times") || strContains(s, "multiply") || strContains(s, "product") {
+    "mul"
+  } else if strContains(s, "minus") || strContains(s, "subtract") {
+    "sub"
+  } else if strContains(s, "divided") || strContains(s, "divide") {
+    "div"
+  } else {
+    "add"
+  }
+}
+
+// The REAL brain: POST /v1/messages with the conversation + tool schemas, parse the returned
+// content blocks into text + tool_use calls + stop_reason. Errors are surfaced, never silent.
+class AnthropicModel implements Model {
+  modelId: String
+  apiKey: String
+  systemPrompt: String
+
+  fn init(modelId: String, apiKey: String, systemPrompt: String) {
+    self.modelId = modelId
+    self.apiKey = apiKey
+    self.systemPrompt = systemPrompt
+  }
+
+  // one-shot completion (used by the legacy chat path): a respond() with no tools.
+  fn complete(prompt: String) -> String {
+    let c = Conversation()
+    c.append(mkTextMessage("user", prompt))
+    let noTools = List<Tool>()
+    let r = self.respond(c, noTools)
+    r.text
+  }
+
+  fn buildBody(convo: Conversation, tools: List<Tool>) -> String {
+    var out = "{\"model\":" + jq(self.modelId) + ",\"max_tokens\":1024"
+    if self.systemPrompt.len() > 0 {
+      out = out + ",\"system\":" + jq(self.systemPrompt)
+    }
+    out = out + ",\"messages\":["
+    var i = 0
+    let n = convo.size()
+    while i < n {
+      let m = convo.messages.get(i)
+      if i > 0 { out = out + "," }
+      out = out + "{\"role\":" + jq(m.role) + ",\"content\":" + m.contentJson + "}"
+      i = i + 1
+    }
+    out = out + "]"
+    let nt = tools.len()
+    if nt > 0 {
+      out = out + ",\"tools\":["
+      var j = 0
+      while j < nt {
+        let t = tools.get(j)
+        if j > 0 { out = out + "," }
+        let nm = t.name()
+        let ds = t.description()
+        let sc = t.inputSchema()
+        out = out + "{\"name\":" + jq(nm) + ",\"description\":" + jq(ds) + ",\"input_schema\":" + sc + "}"
+        j = j + 1
+      }
+      out = out + "]"
+    }
+    out + "}"
+  }
+
+  fn respond(convo: Conversation, tools: List<Tool>) -> ModelResponse {
+    let body = self.buildBody(convo, tools)
+    let h = List<String>()
+    h.push("x-api-key: " + self.apiKey)
+    h.push("anthropic-version: 2023-06-01")
+    h.push("content-type: application/json")
+    let resp = Http.request("POST", "https://api.anthropic.com/v1/messages", h, body)
+    if resp.status == 0 {
+      errorResp("transport error: " + resp.body)
+    } else if resp.status < 200 || resp.status >= 300 {
+      errorResp("API error status=${resp.status}: " + resp.body)
+    } else {
+      parseAnthropic(resp.body)
+    }
+  }
+}
+
+// Turn a /v1/messages response body into a ModelResponse: walk the content array collecting text
+// blocks and tool_use blocks, capture stop_reason, and re-serialize the whole content array so it
+// can be replayed verbatim as the assistant turn on the next request (ids preserved).
+fn parseAnthropic(body: String) -> ModelResponse {
+  match Json.parse(body) {
+    Ok(v) -> {
+      let stop = match jgetStr(v, "stop_reason") { Some(s) -> s  None -> "end_turn" }
+      let calls = List<ToolCall>()
+      var text = ""
+      var contentJson = "[]"
+      match jget(v, "content") {
+        Some(content) -> {
+          contentJson = Json.stringify(content)
+          var i = 0
+          var more = true
+          while more {
+            match jindex(content, i) {
+              Some(block) -> {
+                let bt = match jgetStr(block, "type") { Some(s) -> s  None -> "" }
+                if bt == "text" {
+                  let t = match jgetStr(block, "text") { Some(s) -> s  None -> "" }
+                  text = text + t
+                } else if bt == "tool_use" {
+                  let id = match jgetStr(block, "id") { Some(s) -> s  None -> "" }
+                  let nm = match jgetStr(block, "name") { Some(s) -> s  None -> "" }
+                  let inp = match jget(block, "input") { Some(x) -> Json.stringify(x)  None -> "{}" }
+                  calls.push(ToolCall(id: id, name: nm, inputJson: inp))
+                }
+                i = i + 1
+              }
+              None -> { more = false }
+            }
+          }
+        }
+        None -> { }
+      }
+      ModelResponse(text: text, toolCalls: calls, stopReason: stop, contentJson: contentJson)
+    }
+    Err(e) -> errorResp("parse error: " + e)
+  }
+}
+
+// ============================ the loop ============================
+fn findToolByName(tools: List<Tool>, nm: String) -> Int {
+  var i = 0
+  let n = tools.len()
+  while i < n {
+    let t = tools.get(i)
+    let tn = t.name()
+    if tn == nm { return i }
+    i = i + 1
+  }
+  -1
+}
+
+// THE agent loop. Appends the user task, then drives Model <-> Tool turns until the model stops
+// asking for tools (end_turn) or the iteration cap is hit (hard stop). Every turn is appended to
+// `convo` as a Message (browsable in the viewer); each tool dispatch logs its call + result.
+fn runAgentLoop(convo: Conversation, brain: Model, tools: List<Tool>, task: String, maxIters: Int) -> String {
+  convo.append(mkTextMessage("user", task))
+  var iter = 0
+  var result = ""
+  var done = false
+  while !done {
+    if iter >= maxIters {
+      Console.log("[agent] iteration cap ${maxIters} reached - stopping")
+      result = "[agent] stopped: exceeded ${maxIters} iterations without a final answer"
+      done = true
+    } else {
+      let resp = brain.respond(convo, tools)
+      let am = mkAssistantMessage(resp)
+      convo.append(am)
+      if resp.stopReason == "tool_use" {
+        var blocks = "["
+        var display = ""
+        var j = 0
+        let ncalls = resp.toolCalls.len()
+        while j < ncalls {
+          let call = resp.toolCalls.get(j)
+          Console.log("[agent] -> tool_use: " + call.name + "(" + call.inputJson + ")")
+          let idx = findToolByName(tools, call.name)
+          var out = ""
+          if idx < 0 {
+            out = "error: no tool named '" + call.name + "'"
+          } else {
+            let t = tools.get(idx)
+            out = t.run(call.inputJson)
+          }
+          Console.log("[agent] <- tool_result: " + call.name + " => " + out)
+          if j > 0 { blocks = blocks + "," }
+          blocks = blocks + "{\"type\":\"tool_result\",\"tool_use_id\":" + jq(call.id) + ",\"content\":" + jq(out) + "}"
+          if j > 0 { display = display + "; " }
+          display = display + out
+          j = j + 1
+        }
+        blocks = blocks + "]"
+        convo.append(mkToolResultMessage(blocks, display))
+        iter = iter + 1
+      } else {
+        result = resp.text
+        done = true
+      }
+    }
+  }
+  result
+}

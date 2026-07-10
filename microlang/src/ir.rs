@@ -52,6 +52,15 @@ pub enum Prim {
     Spawn,
     /// `(%await fut)` -> block until the future's thread finishes; its value.
     Await,
+    /// `(%atom-new x)` -> a fresh atom holding `x`.
+    AtomNew,
+    /// `(%atom-get a)` -> the atom's current value (atomic load).
+    AtomGet,
+    /// `(%atom-set a v)` -> store `v` unconditionally; returns `v`.
+    AtomSet,
+    /// `(%atom-cas a old new)` -> atomically set to `new` iff current == `old`;
+    /// returns true on success. The primitive `swap!` retries on.
+    AtomCas,
     /// `(field r i)` -> the i-th field of a record.
     Field,
     /// `(%callec f)` — call `f` with a fresh escape continuation. Backend-handled

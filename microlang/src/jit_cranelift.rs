@@ -383,6 +383,10 @@ fn prim_tag(p: Prim) -> u32 {
         Throw => 25,
         Await => 26,
         Spawn => 27,
+        AtomNew => 28,
+        AtomGet => 29,
+        AtomSet => 30,
+        AtomCas => 31,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -428,6 +432,10 @@ fn prim_from_tag(tag: u32) -> Prim {
         25 => Throw,
         26 => Await,
         27 => Spawn,
+        28 => AtomNew,
+        29 => AtomGet,
+        30 => AtomSet,
+        31 => AtomCas,
         other => panic!("bad prim tag {other}"),
     }
 }

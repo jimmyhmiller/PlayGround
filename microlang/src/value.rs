@@ -118,6 +118,11 @@ pub enum Obj {
     /// these. Its captured frames are traced by the moving GC (see `gc.rs`), so
     /// it survives collection like any other heap value.
     PartialCont(Arc<crate::cek::Kont>),
+    /// An ATOM: a single atomically-updated cell holding a value (a heap id or
+    /// immediate). `Arc<AtomicU64>` so `Obj` stays `Clone` (the GC copies objects)
+    /// while the cell itself supports a real cross-thread compare-and-set. The
+    /// collector forwards the contained value under STW (see `scan_obj`).
+    Atom(Arc<AtomicU64>),
     /// A FUTURE: the pending result of a thunk running on another OS thread. The
     /// `Arc<Mutex<..>>` is shared with the worker; `%await` joins the thread and
     /// caches its value. Cloneable (Arc), so the GC can relocate the enclosing
