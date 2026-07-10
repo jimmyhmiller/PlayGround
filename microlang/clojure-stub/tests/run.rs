@@ -283,9 +283,32 @@ fn instance_predicate() {
 }
 
 #[test]
-#[should_panic(expected = "throw")]
+#[should_panic]
 fn throw_aborts() {
+    // An uncaught throw unwinds the whole computation.
     run("(throw \"boom\")");
+}
+
+#[test]
+fn try_catch_finally() {
+    // catch binds the thrown value; the try value is the handler's value.
+    assert_eq!(run("(try (throw \"oops\") (catch Exception e e))"), "\"oops\"");
+    // no throw -> body value; catch is skipped.
+    assert_eq!(run("(try 42 (catch Exception e :never))"), "42");
+    // finally runs for effect on the normal path but doesn't change the value.
+    assert_eq!(run("(let [a (atom 0)] (try 7 (finally (reset! a 1))) @a)"), "1");
+    assert_eq!(run("(try 7 (finally 999))"), "7");
+    // finally runs on the throw path too, then the catch value is returned.
+    assert_eq!(
+        run("(let [a (atom :x)] [(try (throw :bang) (catch Exception e :caught) (finally (reset! a :ran))) @a])"),
+        "[:caught :ran]"
+    );
+    // a thrown record value round-trips through catch.
+    assert_eq!(run("(try (throw {:err 1}) (catch Exception e (:err e)))"), "1");
+    // nested: inner catch handles, outer body continues.
+    assert_eq!(run("(try (+ 1 (try (throw :z) (catch Exception e 9))) (catch Exception e :outer))"), "10");
+    // re-throw from a catch propagates to the outer handler.
+    assert_eq!(run("(try (try (throw :a) (catch Exception e (throw :b))) (catch Exception e e))"), ":b");
 }
 
 #[test]

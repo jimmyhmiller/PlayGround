@@ -177,4 +177,15 @@ pub enum Ir {
         method: Sym,
         args: Vec<Ir>,
     },
+    /// Structured exception handling. Evaluate `body`; if it unwinds with a
+    /// `Throw`, bind the thrown value in a fresh one-slot frame and evaluate
+    /// `catch` (when present). `finally` always runs, for its effect, on both the
+    /// normal and the unwinding path. A general control construct (like `If`), not
+    /// tied to any one frontend; only stack-based tiers (TreeWalk) implement it.
+    Try {
+        body: Box<Ir>,
+        /// The catch handler; its body sees the thrown value at `Local{up:0,idx:0}`.
+        catch: Option<Box<Ir>>,
+        finally: Option<Box<Ir>>,
+    },
 }

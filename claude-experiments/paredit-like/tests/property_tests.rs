@@ -153,7 +153,10 @@ fn count_structural_delimiters(s: &str) -> (usize, usize, usize, usize, usize, u
             continue;
         }
 
-        if ch == '\\' && in_string {
+        // `\` escapes the next char both in strings (`\"`) and in code, where it
+        // introduces a character literal (`\(`, `\"`, `\;`, …). The escaped char is
+        // never a structural delimiter.
+        if ch == '\\' && !in_comment {
             escape_next = true;
             continue;
         }
@@ -227,9 +230,14 @@ proptest! {
                 }
                 ends_in_comment = in_comment;
             }
+            // A trailing `\` leaves an incomplete character literal (`escape_next`
+            // still set) — an unterminated token that, like an unclosed string,
+            // legitimately blocks balancing.
+            let ends_in_dangling_escape = escape_next;
 
-            // If there's an unclosed string or ends in a comment, skip balance check
-            if quote_count % 2 != 0 || ends_in_comment {
+            // If there's an unclosed string, an incomplete char literal, or the
+            // output ends in a comment, skip the balance check.
+            if quote_count % 2 != 0 || ends_in_comment || ends_in_dangling_escape {
                 return Ok(());
             }
 

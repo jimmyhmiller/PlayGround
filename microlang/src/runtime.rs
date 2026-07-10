@@ -51,6 +51,12 @@ pub struct Var {
     pub val: u64,
 }
 
+/// The panic payload of a `(throw v)`: the thrown runtime value, carried up the
+/// stack until an `Ir::Try` catches it. Neutral control-flow, not Clojure-specific.
+pub struct Thrown {
+    pub value: u64,
+}
+
 pub struct Runtime<M: ValueModel> {
     pub heap: Vec<Obj>,
     /// Count of heap allocations. Instrumentation so the value axis is visible.
@@ -539,7 +545,11 @@ impl<M: ValueModel> Runtime<M> {
                 M::R::enc_sym(s)
             }
             Prim::Throw => {
-                panic!("throw: {}", self.print(args[0]));
+                // Unwind with the thrown VALUE as the payload, so an enclosing
+                // `Ir::Try` can catch it (via catch_unwind + downcast). Uncaught,
+                // it aborts like any panic. Neutral: the payload is a raw runtime
+                // value, not a Clojure exception object.
+                std::panic::panic_any(Thrown { value: args[0] });
             }
             Prim::NFields => {
                 let n = match self.decode(args[0]) {

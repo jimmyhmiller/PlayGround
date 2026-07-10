@@ -174,6 +174,45 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                     },
                 }
             }
+            Ir::Try { body, catch, finally } => {
+                let prev = std::panic::take_hook();
+                std::panic::set_hook(Box::new(|_| {})); // a caught throw is not an error
+                let res = {
+                    let rt2 = &mut *rt;
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                        top.eval_ir(top, rt2, body, locals)
+                    }))
+                };
+                std::panic::set_hook(prev);
+                let outcome = match res {
+                    Ok(v) => Ok(v),
+                    Err(payload) => match payload.downcast::<crate::runtime::Thrown>() {
+                        // Our throw: run the catch handler with the value bound in
+                        // a fresh one-slot frame (Local{up:0,idx:0}).
+                        Ok(t) => match catch {
+                            Some(cbody) => {
+                                let frame: Locals = Some(Rc::new(Frame {
+                                    slots: vec![Cell::new(t.value)],
+                                    parent: locals.clone(),
+                                }));
+                                // Root the thrown value across the handler's evals.
+                                Ok(top.eval_ir(top, rt, cbody, &frame))
+                            }
+                            None => Err(Box::new(*t) as Box<dyn std::any::Any + Send>),
+                        },
+                        // Some other unwind (a real panic, an escape signal): after
+                        // running `finally`, re-raise it.
+                        Err(other) => Err(other),
+                    },
+                };
+                if let Some(fbody) = finally {
+                    top.eval_ir(top, rt, fbody, locals);
+                }
+                match outcome {
+                    Ok(v) => v,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            }
             Ir::Prim(op, args) => {
                 let argv: Vec<u64> = args
                     .iter()

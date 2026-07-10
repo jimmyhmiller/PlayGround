@@ -236,6 +236,7 @@ impl<M: ValueModel> ClosureComp<M> {
                     top.invoke(top, rt, imp, &argv)
                 })
             }
+            Ir::Try { .. } => panic!("try/catch is only supported on the TreeWalk tier"),
         }
     }
 

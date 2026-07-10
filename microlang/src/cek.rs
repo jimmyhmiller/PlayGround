@@ -186,6 +186,7 @@ fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Rc<Kont
         Ir::Dispatch { .. } | Ir::DefMethod { .. } => {
             panic!("CekMachine: dispatch not supported; run on the tree-walker")
         }
+        Ir::Try { .. } => panic!("CekMachine: try/catch not supported; run on the tree-walker"),
     }
 }
 

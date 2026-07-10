@@ -145,6 +145,12 @@ impl Parinfer {
         let mut delim_stack: Vec<DelimInfo> = Vec::new();
         let mut in_string = false;
         let mut in_comment = false;
+        // Set when the final line ends on a dangling `\` (an incomplete character
+        // literal). Like an unclosed string, that is an unterminated token we can't
+        // sensibly complete, so it blocks auto-closing at EOF and keeps balancing
+        // idempotent (a synthesized closer would just be eaten as the literal's
+        // char on the next pass).
+        let mut trailing_escape = false;
 
         for (line_idx, line) in lines.iter().enumerate() {
             let line_indent = line.chars().take_while(|c| c.is_whitespace()).count();
@@ -252,9 +258,13 @@ impl Parinfer {
                 }
             }
 
+            // A `\` at end of line leaves a pending char-literal escape; remember it
+            // for the EOF close and don't auto-close past it on this line.
+            trailing_escape = escape_next;
+
             // After processing the line, check if we need to auto-close delimiters
             // based on indentation of the next non-empty line
-            if !in_string && !in_comment {
+            if !in_string && !in_comment && !escape_next {
                 let next_indent = Self::find_next_indent(&lines, line_idx);
 
                 // Check if next line starts with closing delimiters
@@ -294,8 +304,9 @@ impl Parinfer {
 
         // Close any remaining open delimiters at the end of file
         // Add them all to the last line (Lisp convention)
-        // Only if we're not inside a string (unclosed strings leave delimiters unclosed)
-        if !in_string && !in_comment {
+        // Only if we're not inside a string (unclosed strings leave delimiters
+        // unclosed) and not on a dangling char-literal escape.
+        if !in_string && !in_comment && !trailing_escape {
             if let Some(last_line) = result_lines.last_mut() {
                 while let Some(open_info) = delim_stack.pop() {
                     last_line.push(open_info.delim_type.close_char());
@@ -605,6 +616,41 @@ mod tests {
         let source = "(defn f [] (-> i64) 0)\n";
         let parinfer = Parinfer::new(source);
         assert_eq!(parinfer.balance().unwrap(), source);
+    }
+
+    #[test]
+    fn test_char_literal_delimiters_not_structural() {
+        // Lisp/Coil character literals `\(` `\)` `\]` are the *characters*, not
+        // structural delimiters. These forms are already balanced and must be
+        // preserved verbatim.
+        for source in [
+            "(str \\()",           // \( is a char, ) closes (str
+            "[\\\"]",              // \" is a char, brackets balance
+            "(list \\) \\( \\])",  // several delimiter char-literals
+        ] {
+            let out = Parinfer::new(source).balance().unwrap();
+            assert_eq!(out, source, "char literals must be preserved: {source:?}");
+        }
+    }
+
+    #[test]
+    fn test_char_literal_does_not_absorb_real_closer_on_repair() {
+        // `(foo \(` is missing its real closer; the `\(` must not consume the
+        // synthesized `)`. Expect `(foo \()`.
+        assert_eq!(Parinfer::new("(foo \\(").balance().unwrap(), "(foo \\()");
+        // `[\"` — missing `]`; the `\"` is a char literal, not a string opener.
+        assert_eq!(Parinfer::new("[\\\"").balance().unwrap(), "[\\\"]");
+    }
+
+    #[test]
+    fn test_dangling_backslash_is_left_alone() {
+        // A trailing `\` is an incomplete character literal — like an unclosed
+        // string, it can't be sensibly completed, so balancing is a no-op and
+        // stays idempotent.
+        let source = "[\\ \\";
+        let once = Parinfer::new(source).balance().unwrap();
+        assert_eq!(once, source, "dangling backslash left as-is");
+        assert_eq!(Parinfer::new(&once).balance().unwrap(), once, "idempotent");
     }
 
     #[test]

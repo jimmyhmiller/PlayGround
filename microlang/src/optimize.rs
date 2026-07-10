@@ -64,6 +64,16 @@ fn children(ir: &Ir) -> Vec<&Ir> {
         Ir::Prim(_, args) => args.iter().collect(),
         Ir::DefMethod { imp, .. } => vec![imp],
         Ir::Dispatch { args, .. } => args.iter().collect(),
+        Ir::Try { body, catch, finally } => {
+            let mut v = vec![body.as_ref()];
+            if let Some(c) = catch {
+                v.push(c.as_ref());
+            }
+            if let Some(fin) = finally {
+                v.push(fin.as_ref());
+            }
+            v
+        }
     }
 }
 
@@ -87,6 +97,11 @@ fn map_children(ir: &Ir, f: &mut impl FnMut(&Ir) -> Ir) -> Ir {
         Ir::Dispatch { site, method, args } => {
             Ir::Dispatch { site: *site, method: *method, args: args.iter().map(|x| f(x)).collect() }
         }
+        Ir::Try { body, catch, finally } => Ir::Try {
+            body: Box::new(f(body)),
+            catch: catch.as_ref().map(|c| Box::new(f(c))),
+            finally: finally.as_ref().map(|fin| Box::new(f(fin))),
+        },
     }
 }
 
