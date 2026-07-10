@@ -515,6 +515,6 @@ fn thread_stress() {
         (defn await-all [fs] (if (nil? fs) 0 (%add (%await (%first fs)) (await-all (%rest fs)))))
         (await-all (spawn-n 16))
     "#;
-    // work(60) = sum of squares 0..59 = 69570; times 16 workers = 1113120.
-    assert_eq!(run(src), "1113120");
+    // work(60) = sum of squares 0..59 = 70210; times 16 workers = 1123360.
+    assert_eq!(run(src), "1123360");
 }

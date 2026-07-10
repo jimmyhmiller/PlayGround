@@ -62,6 +62,13 @@ pub struct Thrown {
 /// Objects per heap chunk. A power of two so index split is shift/mask.
 const CHUNK_BITS: u32 = 12;
 const CHUNK: usize = 1 << CHUNK_BITS;
+/// Reserved slots in the chunk INDEX. The index Vec must never reallocate: a
+/// lock-free reader traverses `chunks[c]` while another thread (under `heap_lock`)
+/// may be appending a new chunk, and an index realloc would move the chunk
+/// headers out from under the reader. Reserving a large index avoids that
+/// (soft cap = CHUNKS_CAP * CHUNK objects; a lock-free/STW-growable index is the
+/// clean unbounded fix, a later-phase item). Cheap: 24 bytes/slot.
+const CHUNKS_CAP: usize = 1 << 16;
 
 /// A SEGMENTED heap: a vector of fixed-capacity chunks. Appending only ever adds
 /// to (or pushes) a chunk, so the buffer holding any existing object NEVER moves
@@ -78,7 +85,7 @@ pub struct Heap {
 
 impl Heap {
     pub fn new() -> Self {
-        Heap { chunks: Vec::new(), len: 0 }
+        Heap { chunks: Vec::with_capacity(CHUNKS_CAP), len: 0 }
     }
     pub fn len(&self) -> usize {
         self.len
@@ -92,6 +99,7 @@ impl Heap {
         let i = self.len;
         let c = i >> CHUNK_BITS;
         if c >= self.chunks.len() {
+            assert!(c < CHUNKS_CAP, "heap chunk index overflow: raise CHUNKS_CAP");
             self.chunks.push(Vec::with_capacity(CHUNK));
         }
         self.chunks[c].push(o);
