@@ -51,6 +51,24 @@ entry:
   ret i64 %add
 }
 
+define internal i64 @"coil.core.BitAnd$i64$&"(i64 %a, i64 %b) {
+entry:
+  %and = and i64 %a, %b
+  ret i64 %and
+}
+
+define internal i64 @"coil.core.BitOr$i64$|"(i64 %a, i64 %b) {
+entry:
+  %or = or i64 %a, %b
+  ret i64 %or
+}
+
+define internal i64 @"coil.core.BitXor$i64$^"(i64 %a, i64 %b) {
+entry:
+  %xor = xor i64 %a, %b
+  ret i64 %xor
+}
+
 define internal double @"coil.core.Div$f64$/"(double %a, double %b) {
 entry:
   %fdiv = fdiv double %a, %b
@@ -138,6 +156,18 @@ define internal i64 @"coil.core.Rem$i64$%"(i64 %a, i64 %b) {
 entry:
   %rem = srem i64 %a, %b
   ret i64 %rem
+}
+
+define internal i64 @"coil.core.Shl$i64$<<"(i64 %a, i64 %b) {
+entry:
+  %shl = shl i64 %a, %b
+  ret i64 %shl
+}
+
+define internal i64 @"coil.core.Shr$i64$>>"(i64 %a, i64 %b) {
+entry:
+  %shr = ashr i64 %a, %b
+  ret i64 %shr
 }
 
 define internal double @"coil.core.Sub$f64$-"(double %a, double %b) {

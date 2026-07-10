@@ -31,6 +31,7 @@
   (TPrefix [(s (slice u8))])
   (TStr    [(s (slice u8))])
   (TCStr   [(s (slice u8))])
+  (TChar   [(v i64)])
   (TAtom   [(s (slice u8))]))
 
 (defstruct Tok [(kind TokKind) (lo i64) (hi i64)])
@@ -160,6 +161,39 @@
                   (al-push! (mut buf) (cast u8 c)))))))
     (load out)))
 
+; ---- character literals: \a \) \newline \space \tab A -------------------
+; A `\` starts a char literal. A single char after it (\a, \), \") is that byte;
+; an alphabetic run is a name (\newline \space \tab \return \nul \backspace
+; \formfeed) or \uHEX. Lexes to a plain integer literal (KInt), so it is just
+; sugar: `(= (cast i64 byte) \a)` needs no new type machinery.
+(defn sh-is-alpha [(c i64)] (-> bool)
+  (or (and (icmp-ge c 97) (icmp-le c 122)) (and (icmp-ge c 65) (icmp-le c 90))))
+(defn sh-is-alnum [(c i64)] (-> bool)
+  (or (sh-is-alpha c) (and (icmp-ge c 48) (icmp-le c 57))))
+(defn sh-hex-digit [(c i64)] (-> i64)
+  (if (and (icmp-ge c 48) (icmp-le c 57)) (isub c 48)
+    (if (and (icmp-ge c 97) (icmp-le c 102)) (iadd (isub c 97) 10)
+      (if (and (icmp-ge c 65) (icmp-le c 70)) (iadd (isub c 65) 10) -1))))
+(defn char-name-code [(s (slice u8))] (-> i64)
+  (if (str-eq s "space")     32
+    (if (str-eq s "newline")   10
+      (if (str-eq s "tab")       9
+        (if (str-eq s "return")    13
+          (if (str-eq s "nul")       0
+            (if (str-eq s "null")      0
+              (if (str-eq s "backspace") 8
+                (if (str-eq s "formfeed")  12
+                  ; \uHEX
+                  (let [n (slice-len s)]
+                    (if (and (icmp-ge n 2) (icmp-eq (cast i64 (slice-get s 0)) 117))
+                        (let [(mut v) 0 (mut j) 1 (mut ok) true]
+                          (loop (if (icmp-ge (load j) n) (break)
+                              (let [d (sh-hex-digit (cast i64 (slice-get s (load j))))]
+                                (if (icmp-lt d 0) (do (store! ok false) (break))
+                                    (do (store! v (iadd (imul (load v) 16) d)) (store! j (iadd (load j) 1)))))))
+                          (if (load ok) (load v) -1))
+                        -1)))))))))))
+
 (defn tokenize [(a (ptr Allocator)) (src (slice u8))] (-> (Result (ptr (ArrayList Tok)) Diag))
   (let [n (slice-len src) (mut toks) (al-new [Tok] a) (mut i) 0
         (mut out) (zeroed (Result (ptr (ArrayList Tok)) Diag)) (mut done) false]
@@ -186,6 +220,27 @@
                             (if (and (icmp-lt (load i) n) (icmp-eq (cast i64 (slice-get src (load i))) 64))
                                 (do (al-push! (mut toks) (mk-tok (TPrefix "unquote-splicing") istart (iadd (load i) 1))) (store! i (iadd (load i) 1)))
                                 (al-push! (mut toks) (mk-tok (TPrefix "unquote") istart (iadd istart 1)))))
+                        (if (icmp-eq c 92)
+                            (let [cstart (load i)]
+                              (store! i (iadd (load i) 1))
+                              (if (icmp-ge (load i) n)
+                                  (do (store! out (Err (mk-diag cstart n "unterminated character literal"))) (store! done true) (break))
+                                  (let [first (cast i64 (slice-get src (load i)))]
+                                    (store! i (iadd (load i) 1))
+                                    (let [(mut nend) (load i)]
+                                      (if (sh-is-alpha first)
+                                          (loop (if (icmp-ge (load i) n) (break)
+                                              (let [cc (cast i64 (slice-get src (load i)))]
+                                                (if (sh-is-alnum cc)
+                                                    (do (store! i (iadd (load i) 1)) (store! nend (load i)))
+                                                    (break)))))
+                                          0)
+                                      (let [nlen (isub (load nend) (iadd cstart 1))
+                                            v (if (icmp-eq nlen 1) first
+                                                  (char-name-code (subslice src (iadd cstart 1) (load nend))))]
+                                        (if (icmp-lt v 0)
+                                            (do (store! out (Err (mk-diag cstart (load nend) "unknown character literal"))) (store! done true) (break))
+                                            (al-push! (mut toks) (mk-tok (TChar v) cstart (load nend)))))))))
                         (if (icmp-eq c 34)
                             (let [istart (load i)]
                               (store! i (iadd (load i) 1))
@@ -215,7 +270,7 @@
                                               (store! srp sr)
                                               (al-push! (mut toks) (mk-tok (TCStr (load (field srp s))) start (load (field srp end))))
                                               (store! i (load (field srp end)))))))
-                                    (al-push! (mut toks) (mk-tok (TAtom stok) start (load end)))))))))))))))))
+                                    (al-push! (mut toks) (mk-tok (TAtom stok) start (load end))))))))))))))))))
     (if (load done) (load out)
         (Ok (let [bp (unwrap-ptr [(ArrayList Tok)] (create [(ArrayList Tok)] a))] (store! bp (load toks)) bp)))))
 
@@ -229,6 +284,7 @@
             (match (load (field tok kind))
               (TStr  [s] (Ok (mk-sexp (KStr s) tlo thi)))
               (TCStr [s] (Ok (mk-sexp (KCStr s) tlo thi)))
+              (TChar [v] (Ok (mk-sexp (KInt v) tlo thi)))
               (TAtom [s] (Ok (mk-sexp (atom s) tlo thi)))
               (TClose [c]
                 (let [cs (slice-new [u8] (let [cb (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 1 1)))] (store! (index cb 0) (cast u8 c)) cb) 1)
@@ -259,7 +315,7 @@
                             (store! nt (al-get [Tok] (load toks) cpos))
                             (let [cdelim (match (load (field nt kind))
                                            (TClose [cc] cc) (TOpen [_] -1) (TPrefix [_] -1)
-                                           (TStr [_] -1) (TCStr [_] -1) (TAtom [_] -1))]
+                                           (TStr [_] -1) (TCStr [_] -1) (TChar [_] -1) (TAtom [_] -1))]
                               (if (icmp-ge cdelim 0)
                                   (if (icmp-ne cdelim close)
                                       (do (let [os (slice-new [u8] (let [cb (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 1 1)))] (store! (index cb 0) (cast u8 open)) cb) 1)
