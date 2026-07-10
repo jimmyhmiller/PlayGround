@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 # Snapshot the REFERENCE for the FULL integrated pipeline (read -> load ->
 # expand-stage3 -> resolve -> check -> mono -> codegen -> print -> normalize).
-# Reference = Rust `coil dump-ir <RAW f>`, which is exactly `emit_ir` (textual LLVM
-# IR via LLVMPrintModuleToString) run through `normalize_ir::normalize`. The
-# self-host `selfhost/src/main.coil emit-ir` prints with the SAME LLVMPrintModuleToString
-# and the SAME normalization, so a byte-diff gate is meaningful.
+# Reference = the SELF-HOST compiler's `emit-ir <RAW f>` (default `./coil`). The
+# self-host compiler is its own oracle — no Rust dependency. This makes gate-full a
+# golden-IR regression test: regenerate on an intentional change, and the gate flags
+# any unintended drift (paired with the FIXPOINT self-reproduction check).
+# Optional cross-check against the legacy Rust reference (byte-identical output):
+#   COIL_REF_BIN=./target/release/coil COIL_IR_CMD=dump-ir ./selfhost/oracle/snapshot-full.sh
 #
 # UNLIKE the codegen-only gate (snapshot-ir.sh), the corpus here is the RAW,
 # un-expanded source: the merged compiler must EXPAND macros itself before lowering.
 # The corpus starts from the codegen corpus's real .coil seeds + minimal fixtures.
-# Any file whose Rust `dump-ir` errors is SKIPPED (logged); the integration gate
+# Any file whose `$IRCMD` errors is SKIPPED (logged); the integration gate
 # only covers files the whole reference pipeline accepts.
 set -uo pipefail
 cd "$(dirname "$0")/../.."          # repo root
-COIL=${COIL_REF_BIN:-./target/debug/coil}
+COIL=${COIL_REF_BIN:-./coil}
+IRCMD=${COIL_IR_CMD:-emit-ir}
 FULL=selfhost/oracle/full
 REF=$FULL/reference
 LIST=$FULL/corpus.txt
@@ -48,7 +51,7 @@ SEEDS=(
   examples/everything.coil                     # variadic externs + :shim + fastcc + aligned layout
 )
 
-[ -x "$COIL" ] || { echo "reference compiler not found: $COIL (run: cargo build)"; exit 1; }
+[ -x "$COIL" ] || { echo "reference compiler not found: $COIL (build it: ./selfhost/rebootstrap.sh)"; exit 1; }
 
 mkdir -p "$FULL"
 rm -rf "$REF"; mkdir -p "$REF"
@@ -57,8 +60,8 @@ rm -rf "$REF"; mkdir -p "$REF"
 snap() {
   local f="$1"
   [ -e "$f" ] || { echo "MISSING corpus input: $f"; exit 1; }
-  if ! "$COIL" dump-ir "$f" > "$REF/$(echo "$f" | tr '/' '_').dump" 2>/tmp/snap_full_err; then
-    echo "SKIP (dump-ir error) $f: $(head -1 /tmp/snap_full_err)"
+  if ! "$COIL" $IRCMD "$f" > "$REF/$(echo "$f" | tr '/' '_').dump" 2>/tmp/snap_full_err; then
+    echo "SKIP ($IRCMD error) $f: $(head -1 /tmp/snap_full_err)"
     rm -f "$REF/$(echo "$f" | tr '/' '_').dump"
     return
   fi

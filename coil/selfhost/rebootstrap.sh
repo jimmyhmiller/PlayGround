@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # THE EASY BOOTSTRAP — rebuild and VERIFY the self-host Coil compiler with NO Rust toolchain.
 #
-# stage0 is chosen automatically:
+# stage0 is chosen automatically (NO Rust in the default path — the self-host
+# compiler bootstraps and verifies itself):
 #   1. $STAGE0 if you set it explicitly
-#   2. ./target/debug/coil  (the Rust reference, if you happen to have built it)
-#   3. selfhost/seed/coil-seed  (the committed, prebuilt self-host compiler)
-# On a fresh checkout only #3 exists — which is the whole point: you never need cargo/rustc/inkwell.
+#   2. selfhost/seed/coil-seed  (the committed, prebuilt self-host compiler) — DEFAULT
+#   3. ./target/debug/coil  (the legacy Rust reference, only if #2 is somehow absent)
+# You never need cargo/rustc/inkwell; the seed re-derives the whole compiler from source.
 #
 # The seed is NEVER trusted blindly. Every run re-derives the compiler from source and proves
 # the result faithful two independent ways, so a stale or tampered seed cannot slip through:
@@ -26,9 +27,9 @@ SEED=selfhost/seed/coil-seed
 LF=(--link-flag -L/opt/homebrew/opt/llvm/lib --link-flag -lLLVM)
 
 if   [ -n "${STAGE0:-}" ];        then :
-elif [ -x ./target/debug/coil ];  then STAGE0=./target/debug/coil
 elif [ -x "$SEED" ];              then STAGE0="$SEED"
-else echo "no stage0: need ./target/debug/coil (cargo build) or a committed $SEED"; exit 1
+elif [ -x ./target/debug/coil ];  then STAGE0=./target/debug/coil
+else echo "no stage0: need a committed $SEED (or set STAGE0=/path/to/coil)"; exit 1
 fi
 echo "stage0 = $STAGE0"
 
