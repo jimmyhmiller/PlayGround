@@ -3,7 +3,7 @@
 The viewer is not a message-viewer bolted onto the runtime, and it is not consuming a feed.
 **We are in the running program.** The browser is a second interface to the same process
 stdin/stdout is the first — and the only thing that ever crosses the wire between them is an
-`eval`: an expression or definition in oo-lang itself, sent to the live interpreter, run
+`eval`: an expression or definition in Scry itself, sent to the live interpreter, run
 against the live heap at a safepoint, with the result serialized back. Every screen below —
 type index, instance table, instance detail, method invocation, the REPL dock, even live code
 change — is sugar over that one operation. This is `DECISIONS.md` #8, stated as an emphatic
@@ -11,7 +11,9 @@ correction to an earlier draft of this doc that modeled the viewer as a subscrib
 message/delta feed. That model is gone, not simplified — there is no subscribe, no `subId`,
 no sequence numbers, no dirty bitmasks, no server-initiated push of any kind. Examples
 throughout use the agent-TUI demo's types (`Agent`, `Conversation`, `Message`, `Tool`,
-`ToolCall`, `Task`) from `00-vision.md`.
+`ToolCall`, `Task`) from `00-vision.md` — `Tool` is an `interface` (`DECISIONS.md` #4),
+implemented by concrete classes `ShellTool`/`SearchTool`, each with its own arena; `Tool`
+itself has no arena and never carries a `liveCount` of its own (§1, §3.2).
 
 ## 1. Information architecture
 
@@ -24,11 +26,21 @@ Entity-type index  →  Instance table  →  Instance detail  →  (methods, ref
         └──────────── REPL/eval dock (always docked, not a 5th screen) ──┘
 ```
 
-**Entity-type index** (landing screen). One row per class in the schema, live count, and a
-small trend indicator (climbing / falling / flat, computed client-side from the last few
-count deltas it has itself observed — not a stored server-side history). A search box
-filters the type list by name as you type; this is a client-side filter over the schema
-already in hand, not a new eval per keystroke.
+**Entity-type index** (landing screen). One row per **class** in the schema — concrete
+arenas, one per instantiable type, exactly `02-runtime.md` §4's "one arena per concrete
+type" — with a live count and a small trend indicator (climbing / falling / flat, computed
+client-side from the last few count deltas it has itself observed — not a stored
+server-side history). A search box filters the type list by name as you type; this is a
+client-side filter over the schema already in hand, not a new eval per keystroke.
+
+An `interface` (`DECISIONS.md` #4) never gets its own arena — only concrete `class`es do,
+unchanged — but it's cheap to give it a row anyway, grouped with its implementors, because
+the information needed is already sitting in the same `types()` response: each
+`TypeDescriptor` now carries `implements: List<String>` (§3.2), so grouping ShellTool/
+SearchTool under a `Tool` header is a client-side fold over the flat list already in hand —
+`sum of implementor live counts`, no new eval, no arena of its own to enumerate. **Position:
+yes, ship the grouped row** — it's a secondary/aggregate affordance over data already
+fetched, not a new server concept:
 
 ```
 🔍 search types…
@@ -36,11 +48,18 @@ already in hand, not a new eval per keystroke.
 Agent           3 live
 Conversation    3 live
 Message        47 live   ▲
-ShellTool        3 live
-SearchTool       2 live
+▸ Tool (interface)   5 live
+    ShellTool        3 live
+    SearchTool       2 live
 ToolCall        12 live   ▲
 Task             8 live
 ```
+
+Collapsed by default (▸), expanding to show the implementors indented beneath; clicking the
+interface header itself opens an instance table pre-filtered across every implementor
+(§4.2's `instances(...)` called once per implementing type and merged client-side — the same
+trick global search already does in §1's last paragraph). This is a UX affordance only:
+there is no `Tool.instances()` on the runtime, because `Tool` has no arena to walk.
 
 **Instance table** (click a type). Paged, sortable, filterable table. Columns are the
 type's fields in declaration order, plus an `id` column pinned left. The filter bar takes a
@@ -51,16 +70,27 @@ calls), passed as a string argument into the `instances(...)` eval described in 
 separate filter-evaluation code path, it's the same `eval` everything else uses. Reference-
 typed columns (`conversation: Conversation`) render as clickable links showing the target's
 id and a one-line summary (`Conversation#2 (14 messages)`), not a raw pointer — never the
-whole referenced object inlined (§4's depth rule).
+whole referenced object inlined (§4's depth rule). **Interface-typed columns work
+identically, with nothing extra to build:** `Agent.tools: List<Tool>` renders each element
+as a link to its *concrete* implementing instance (`ShellTool#1`, `SearchTool#2`) — a ref
+value always carries its concrete `class`, never the interface name it was declared through
+(§4.1), so the depth rule already handles this. `Tool` only ever shows up as the *declared*
+type of the field (the column header, the static-type text in the detail view's Fields
+list) — never as something a ref has to pretend to be.
 
-**Instance detail** (click a row, or follow a reference link). Three sections:
+**Instance detail** (click a row, or follow a reference link). A type name that implements
+one or more interfaces (`ShellTool implements Tool`) shows that line directly under the
+header — read off `TypeDescriptor.implements` (§3.2), the one bit of schema surface
+interfaces add; a class implementing nothing renders no such line. Below that, three
+sections:
 
 - *Fields* — name, static type, current value, refreshed by re-running the same `at(...)`
   eval that painted the page (§2). Reference fields are links that navigate (pushing a
   breadcrumb: `Agent#7 › conversation › Conversation#2`); collection fields (`List<Tool>`)
   render as an expandable inline list of link chips, not a sub-table, unless the list has
   more than ~20 elements, in which case it's a link to an instance-table view pre-filtered
-  to that collection.
+  to that collection. An interface-typed field's static type column shows `Tool`; each chip
+  in the list is a concrete-class link (`ShellTool#1`), same as the table's column above.
 - *Methods* — every method with its signature (`fn setPriority(p: Int) -> Void`), read off
   the same reflection eval that built the type index (§3.2). Clicking one expands an inline
   invocation form in place (§3) — never a modal, so you can see the instance's current
@@ -122,18 +152,60 @@ between this poll's JSON and last poll's JSON it already has in memory (this is 
 what powers the field-flash in §1's "Recently changed" and §5's motion design — nothing
 new is asked of the runtime for it).
 
-**Safepoint honesty, carried over from the old design because it's still true.** Every eval
-executes only when the single interpreter thread reaches a safepoint (`02-runtime.md` §7 —
-a check at every loop back-edge and call site). Evals arriving concurrently from multiple
-open panes are serialized through the same completion queue viewer requests already share
-with async-I/O completions: each one runs to completion before the next is serviced, so an
-`instances(...)` eval never observes a half-mutated object mid-invoke, and two evals never
-interleave their effects. The cost this buys is the same one the old design named and did
-not hide: if the interpreter is parked inside a blocking foreign call (`02-runtime.md` §7's
-"genuinely hard part"), every pending eval — a poll tick, an invoke, a REPL keystroke —
-queues behind it until the next safepoint. A viewer reading stale counts during that window
-is observing a real, already-acknowledged interpreter-availability gap, not a bug in the
-refresh model.
+**Safepoint honesty, now for N running threads, not one.** `DECISIONS.md` #4b is a real
+divergence from an earlier draft of this doc (and of `02-runtime.md`, which is still
+written around a single interpreter thread and needs to grow to match): the demo app's
+agents each run on their own real OS thread, so an eval no longer waits for *the*
+interpreter to reach a safepoint — it waits for whichever threads its own semantics require
+to be quiesced, and that requirement is different for a read than for a definition:
+
+- **Read-evals** (`instances(...)`, `at(...)`, a field access, a zero-arg method invoke that
+  doesn't mutate cross-thread state) can very likely run at a **partial safepoint**: only
+  the specific agent thread(s) whose arenas the eval touches need to pause at their own next
+  safepoint-poll, not every thread in the process. This is what makes the consistency
+  promise precise, and it's worth stating exactly: **an eval sees a consistent heap** — the
+  arena walk or field read it performs observes state that existed at one real instant, not
+  a torn mix of before-and-after a concurrent mutation — but **two evals see two moments**,
+  not necessarily the same moment, because other agent threads keep running in between them.
+  Polling `Message` counts on a 500ms interval while three agent threads are actively
+  appending is exactly this: each poll is internally consistent; consecutive polls are two
+  different, both-honest snapshots of a heap that moved between them.
+- **Definition-evals** (live redefinition, and the shape migrations `03-live-semantics.md`
+  triggers) need the **full stop-the-world** `DECISIONS.md` #4b already commits to at the
+  allocator/GC level: every thread parked at its own safepoint before a method table swaps
+  or a class's arena migrates strides, for the same reason a single-threaded interpreter
+  needed one at the old design's safepoint — a thread mid-call into the exact method or
+  instance being redefined cannot be allowed to observe half-migrated state. This half of the
+  split is decided, not proposed.
+
+**OPEN, matching `DECISIONS.md`'s Open list verbatim:** the read-eval case's exact
+mechanism — a per-arena lock held only for the walk's duration, an epoch/RCU-style
+consistent-snapshot read, or something else — is not designed here or in `02-runtime.md`
+yet; only the *shape* of the split (partial for reads, full for definitions) is proposed.
+Method-invoke evals sit in between the two cases above and are also OPEN: `Agent#7.resume()`
+mutates one instance's state, so it plausibly needs to serialize specifically with the
+thread that owns `Agent#7` (per-instance, not per-heap) rather than either a bare read's
+partial safepoint or a definition's full stop — this is `DECISIONS.md`'s "thread API
+surface" Open item surfacing here, and belongs in `02-runtime.md`/`01-language.md` alongside
+whatever synchronization primitives the language exposes. What this doc still guarantees
+regardless of how that resolves: every eval, once serviced, produces a well-formed `value`
+or `error` (§4), never a torn read.
+
+**A lightweight thread affordance in the schema — proposed, lean minimal, flag OPEN.** With
+real threads day one, each demo `Agent` owns one; a natural viewer question is "which thread
+is this, is it running or parked." This doc's position: build no dedicated thread-viewer
+screen, and add nothing to this protocol's wire shape for it. If — and only if —
+`01-language.md`/`02-runtime.md` end up modeling an OS thread as an ordinary reflectable
+value (a `Thread` type with a `status` the same shape as `AgentStatus`, discoverable through
+the same `types()`/`TypeDescriptor` machinery §3.2 already defines), then the type index
+gets a `Thread` row and an instance table for free — zero viewer-specific plumbing, because
+`types()`/`instances()` already generalize to any entity the runtime exposes, the same way
+this doc never had to special-case `Agent` versus `Task`. If threads are instead an internal
+runtime concept never reified as a class-shaped value, there is nothing here to build, and
+the schema simply has as many rows as there are `Agent`-authored classes, same as today.
+**OPEN:** whether `01-language.md`/`02-runtime.md` reify `Thread` this way at all is not
+decided by this doc — it's the "thread API surface" Open item again, viewed from the
+schema's side rather than the language's.
 
 ## 3. Method invocation and code change, both just eval
 
@@ -154,7 +226,7 @@ Invoking is inline, not modal, and typed, exactly as before — only the mechani
 - **Reference-typed params** (e.g. `assign(t: Task)`) get a type-ahead picker over
   `Task.instances(...)` (the same eval the instance table uses); picking one splices
   `Task.at(slot, gen)` as that argument's source text — an argument is never anything but
-  more oo-lang source.
+  more Scry source.
 - **Anything the form-builder doesn't have a widget for** falls back to a "raw" toggle: a
   text field whose contents are spliced verbatim into the call expression, typechecked
   server-side (by the ordinary typechecker, on the ordinary eval) before it runs. This is
@@ -195,9 +267,15 @@ never carry a `ref`) — structural metadata, not entities. `types()` alone is e
 the whole landing screen in one eval; `fields`/`methods` exist so a detail pane refreshing
 its method list doesn't have to re-fetch every other type's schema too.
 
+`TypeDescriptor` also carries an `implements: List<String>` field — empty for a plain class,
+one or more interface names for a class that declares `implements` (`DECISIONS.md` #4:
+interfaces are nominal and explicit, so this is just reading off the same declaration the
+typechecker already recorded, not inferred structurally). This is the one piece of schema
+surface interfaces actually add; see §1 and §4.1 for where it's rendered.
+
 **OPEN, flagged here rather than silently decided:** whether `types()`/`fields()`/
 `methods()` (and §4's `instances()`/`at()`) are ordinary language-level stdlib — callable
-from inside a running `.oo` program itself, for self-inspection — or a builtin surface
+from inside a running `.scry` program itself, for self-inspection — or a builtin surface
 reserved to the eval channel only, never visible to ordinary program source. The former is
 more uniform (one mechanism, no privileged namespace) and is what's assumed by default
 throughout this doc; the latter avoids ordinary program logic coming to depend on viewer-
@@ -225,7 +303,7 @@ being real language source and the language already having block-scoped `let`.
 
 Live redefinition (`03-live-semantics.md`) is not a special op either. The `source` sent is
 a class (or, if the language later grows standalone method-target syntax, a method)
-definition — the same text you'd write in a `.oo` file — and the runtime's response is
+definition — the same text you'd write in a `.scry` file — and the runtime's response is
 either the definition's acceptance message as an ordinary `value`, or a rejection as an
 `error` carrying `diagnostics` (§4.3). See §4.4 for concrete request/response pairs.
 
@@ -263,7 +341,7 @@ nothing to discriminate:
 { "id": "e1", "error": { "kind": "...", "message": "...", "trace": [...] } }
 ```
 
-`source` is any expression or definition legal at top level in oo-lang (`01-language.md`).
+`source` is any expression or definition legal at top level in Scry (`01-language.md`).
 `id` is client-chosen and echoed back, so concurrent in-flight requests (several panes
 polling at once) can be matched to their responses — the one piece of request/response
 bookkeeping this protocol needs, and it needs no `subId`/`seq` alongside it because nothing
@@ -281,6 +359,7 @@ Every value carries a `type` tag so the viewer's renderer never has to guess:
 | enum, with payload | `{"type":"Shape","case":"Circle","payload":[{"type":"Float","value":2.0}]}` | payload is positional, per the case's declared fields |
 | entity, **depth 0** | `{"type":"Agent","ref":"Agent#7","generation":3,"fields":{...}}` | full field expansion — see depth rule below |
 | entity, **depth ≥ 1** | `{"type":"ref","class":"Agent","ref":"Agent#7","generation":3,"summary":"researcher"}` | collapsed to a clickable link, never the object graph |
+| interface-typed field/element | `{"type":"ref","class":"ShellTool","ref":"ShellTool#1","generation":1,"summary":"shell"}` | **identical shape to any other depth ≥ 1 ref** — `class` is always the concrete implementing type, never the interface name (`Tool`); an interface value carries no separate serialization form of its own, so `tools: List<Tool>` needs nothing beyond the two rows above |
 | `List<T>`/collection | `{"type":"list","elementType":"Message","length":47,"truncated":true,"items":[...]}` | truncates at ~20 items; `length` is always the true count |
 | `Map<K,V>` | `{"type":"map","keyType":"String","valueType":"Int","length":3,"truncated":false,"entries":[[k,v],...]}` | same truncation rule |
 
@@ -369,15 +448,24 @@ addition to a `trace`, for both flavors `03-live-semantics.md` names:
 → { "id": "e1", "source": "types()" }
 ← { "id": "e1", "value": { "type": "list", "elementType": "TypeDescriptor", "length": 7, "truncated": false,
     "items": [
-      { "type": "TypeDescriptor", "name": "Agent", "liveCount": 3,
+      { "type": "TypeDescriptor", "name": "Agent", "liveCount": 3, "implements": [],
         "fields": [ { "name": "name", "type": "String" }, { "name": "status", "type": "AgentStatus" },
-                    { "name": "conversation", "type": "ref:Conversation" } ],
+                    { "name": "conversation", "type": "ref:Conversation" },
+                    { "name": "tools", "type": "list:Tool" } ],
         "methods": [ { "name": "pause", "params": [], "returns": "Void" },
                      { "name": "resume", "params": [], "returns": "Void" } ] },
-      { "type": "TypeDescriptor", "name": "Conversation", "liveCount": 3, "fields": [...], "methods": [...] },
-      { "type": "TypeDescriptor", "name": "Message", "liveCount": 47, "fields": [...], "methods": [] }
+      { "type": "TypeDescriptor", "name": "Conversation", "liveCount": 3, "implements": [], "fields": [...], "methods": [...] },
+      { "type": "TypeDescriptor", "name": "Message", "liveCount": 47, "implements": [], "fields": [...], "methods": [] },
+      { "type": "TypeDescriptor", "name": "ShellTool", "liveCount": 3, "implements": ["Tool"],
+        "fields": [ { "name": "command", "type": "String" } ],
+        "methods": [ { "name": "run", "params": [ { "name": "input", "type": "String" } ], "returns": "String" } ] }
     ] } }
 ```
+
+`ShellTool`'s `implements: ["Tool"]` is what powers the grouped `Tool (interface)` row in
+§1 — client-side, folding this same array, not a separate query. `SearchTool` (omitted
+above for brevity) carries `"implements": ["Tool"]` too; `Tool` itself never appears as a
+`TypeDescriptor` with its own `liveCount`, because it has no arena (§1).
 
 **Instance table** (§1, filtered):
 
@@ -393,13 +481,17 @@ addition to a `trace`, for both flavors `03-live-semantics.md` names:
                              "generation": 1, "summary": "Conversation#2 (14 messages)" },
           "tools": { "type": "list", "elementType": "Tool", "length": 2, "truncated": false,
             "items": [
-              { "type": "Tool", "case": "Shell", "payload": [
-                  { "type": "ref", "class": "ShellTool", "ref": "ShellTool#1", "generation": 1, "summary": "shell" } ] },
-              { "type": "Tool", "case": "Search", "payload": [
-                  { "type": "ref", "class": "SearchTool", "ref": "SearchTool#4", "generation": 1, "summary": "search" } ] }
+              { "type": "ref", "class": "ShellTool", "ref": "ShellTool#1", "generation": 1, "summary": "shell" },
+              { "type": "ref", "class": "SearchTool", "ref": "SearchTool#4", "generation": 1, "summary": "search" }
             ] } } }
     ] } }
 ```
+
+`elementType` on the list is `Tool` — the field's *declared* type (`tools: List<Tool>`) —
+but each item is an ordinary depth ≥ 1 ref whose `class` is the concrete implementor
+(`ShellTool`, `SearchTool`), per §4.1's interface row. There is no enum-style `case`/
+`payload` wrapper here: that was the old enum-dispatch model `DECISIONS.md` #4 supersedes.
+An interface-typed collection needs nothing beyond the ordinary list-of-refs shape.
 
 **Instance detail, following the `conversation` link** (§1, §4.2):
 
@@ -435,6 +527,13 @@ addition to a `trace`, for both flavors `03-live-semantics.md` names:
 → { "id": "e8", "source": "class Agent {\n  name: String\n  model: String\n  status: AgentStatus\n  conversation: Conversation\n  tools: List<Tool>\n\n  fn pause() { self.status = AgentStatus.Paused }\n  fn resume() { self.status = AgentStatus.Waiting }\n  fn summarize() -> String {\n    \"TL;DR: \" + self.conversation.lastMessage().content\n  }\n}" }
 ← { "id": "e8", "value": { "type": "String", "value": "method Agent.summarize replaced — next call uses new code" } }
 ```
+
+Note that `tools: List<Tool>` here is unchanged syntax from an earlier draft of this doc, but
+`Tool` now names an `interface` (`DECISIONS.md` #4), not an enum — a redefinition of `Agent`
+doesn't need to know or care which, since a field's declared type is just a name to the
+class definition; the difference only shows up in how `ShellTool`/`SearchTool` instances are
+declared (`class ShellTool implements Tool { ... }`) and in the serialization/schema rules
+above, not in this eval's shape.
 
 ### Relationship to `05-milestones.md`'s build order
 
@@ -509,25 +608,43 @@ panel skin:
 
 ## OPEN
 
-- **Safety of the invoke/eval channel while the interpreter is running a turn.** An eval
-  arriving mid-turn needs a precise semantics: does the runtime finish the current
-  bytecode dispatch quantum and run it at the next safepoint, does it require a full
-  stop-the-world, or does it run on its own execution context concurrently with the
-  program's? This is pinned **OPEN** in `DECISIONS.md` and is not decided here — it belongs
-  in `02-runtime.md` alongside the safepoint/GC design. This doc assumes every eval
+- **How the eval channel interleaves with N running agent threads.** `DECISIONS.md` #4b
+  decides real OS threads and decides that definition-evals (redefinition, shape migration)
+  get a full stop-the-world across every thread — that much is no longer open. What's still
+  open, per `DECISIONS.md`'s Open list and §2 above: the exact mechanism for a **read**-eval's
+  "partial safepoint" (lock scope, epoch/snapshot scheme, or something else), and where a
+  **method-invoke** eval falls between the two — plausibly its own case, serializing with
+  the one thread that owns the target instance rather than either extreme. This belongs in
+  `02-runtime.md` alongside the safepoint/GC design, which itself still needs to be extended
+  from its current single-interpreter-thread model to N. This doc assumes every eval
   *eventually* completes and produces either `value` or `error`; it does not assume how
-  quickly, and the `{id, source}`/`{id, value|error}` shape tolerates an arbitrarily
-  delayed answer without changes.
-- **Concurrency model of the interpreted program** (also OPEN per `DECISIONS.md`) directly
-  affects how many evals can be in flight against one arena at once and whether `at`'s
-  generation check needs to become atomic; §2's "cheap by design" argument assumes today's
-  single-writer discipline (`02-runtime.md` §7).
+  quickly, and the `{id, source}`/`{id, value|error}` shape tolerates an arbitrarily delayed
+  answer without changes, regardless of how the split above resolves.
+- **Thread API surface** (`DECISIONS.md`'s Open list): spawn/join shape and what
+  synchronization primitives (mutex? channels? atomics?) `01-language.md` exposes for the
+  PoC. This doc takes a dependent position in §2's "lightweight thread affordance": *if* an
+  OS thread ends up reified as an ordinary reflectable value, the schema gets a `Thread` row
+  for free via the existing `types()`/`instances()` machinery, no viewer-specific code —
+  but whether it's reified at all is this open item's call, not this doc's.
+- **Concurrency model of the interpreted program is no longer open as a yes/no** —
+  `DECISIONS.md` #4b answers it (real OS threads, day one) — but a consequence flows from it
+  that this doc previously assumed away: `at`'s generation check must become atomic once
+  multiple mutator threads can concurrently free and reuse a slot (`DECISIONS.md` #4b's
+  "thread-safe per-type arena allocation" already commits to this at the allocator level).
+  §2's "cheap by design" argument should be re-read as assuming that atomicity, not the
+  single-writer discipline `02-runtime.md` §7 describes today — `02-runtime.md` itself still
+  needs updating to match #4b; this doc only names the consequence on its own surface.
 - **Reflection surface — language-level or eval-channel-only** (§3.2): `types()`,
   `fields()`, `methods()`, `instances()`, `at()` are proposed here as compiler-synthesized
   members in the same family as the synthesized memberwise constructor, but whether
-  ordinary `.oo` program source is allowed to call them too (self-inspection) or they're
+  ordinary `.scry` program source is allowed to call them too (self-inspection) or they're
   reserved to requests arriving over the eval channel is left to `01-language.md`.
 - **Standalone method-target definition syntax** (§3.4): code-change examples here redefine
   a whole class; whether `01-language.md` grows a lighter `fn Agent.summarize() -> ... { }`
   form for a single-method edit, or whole-class redefinition is the only surface the PoC
   ships, is that doc's call, not this one's.
+- **Interface default methods** (`DECISIONS.md`, lean no for PoC): doesn't change anything
+  here even if it lands later — the *Methods* list in §1's instance detail (and the `methods`
+  reflection eval, §3.2) already reads off whatever the type's method table contains,
+  inherited-default or not, so a default method would just be one more row read off the same
+  eval, not a new viewer affordance to design.

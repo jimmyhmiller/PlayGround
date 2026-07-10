@@ -1,6 +1,6 @@
 # 00 — Vision
 
-> Working name: **oo-lang** (directory name, not the name — see [OPEN: Name](#open-name) at the bottom).
+> Name: **Scry** (directory is still `oo-lang`, but the language, CLI, and file extension are Scry — see [Name](#name) at the bottom).
 
 ## The thesis
 
@@ -11,7 +11,7 @@ a JSON log viewer. You cannot ask a running agent system the most basic question
 agents exist right now? what is this one doing? what's in that conversation? what happens
 if I pause it?*
 
-oo-lang is a statically-typed, OO-style language where **runtime observability is the
+Scry is a statically-typed, OO-style language where **runtime observability is the
 product**. Not a debugger you attach when things go wrong. Not tracing you bolt on. The
 runtime is built, from the allocator up, so that every live object is enumerable, browsable,
 searchable, and pokeable — and a good-looking browser viewer that does all of that ships as
@@ -69,7 +69,7 @@ everything the viewer needs:
   evaluating a call expression against the live process.
 
 Concretely, the viewer is a REPL client over the live process. The runtime embeds a server
-whose **only** wire operation is `eval`: send an expression or definition in oo-lang itself,
+whose **only** wire operation is `eval`: send an expression or definition in Scry itself,
 get back its value (or an error), evaluated against the live heap at a safepoint:
 
 ```json
@@ -112,9 +112,10 @@ you X-ray glasses.
 ## Non-goals
 
 - **No inheritance.** Not "discouraged" — absent. No subclassing, no virtual dispatch
-  hierarchies, no diamond problems. Composition and generics. (Interfaces/traits for
-  polymorphism without inheritance are **OPEN** — see `01-language.md`; the PoC may not
-  need them at all.)
+  hierarchies, no diamond problems. Composition and generics. Polymorphism without
+  inheritance comes from **Java-style interfaces**: nominal, explicit `implements`,
+  interface types usable as field/param/return types, dynamic dispatch through them — see
+  `01-language.md`. (Default methods on interfaces: OPEN, lean no for the PoC.)
 - **No image.** Covered above; worth repeating because every "live" feature will tempt
   us toward one. Any design that requires serializing the heap to disk to be useful is
   wrong.
@@ -130,17 +131,20 @@ you X-ray glasses.
 
 ## The demo
 
-The proof-of-concept application is an **agent TUI**: a terminal app, written in oo-lang,
+The proof-of-concept application is an **agent TUI**: a terminal app, written in Scry,
 that runs AI agents against tasks. Entity types: `Agent`, `Conversation`, `Message`,
-`Tool`, `ToolCall`, `Task`. It dogfoods the thesis — the language for understanding AI
-systems, demonstrated on an AI system.
+`Task`, and `interface Tool` implemented by concrete classes `ShellTool`/`SearchTool`
+(so `ToolCall.tool` is typed as the interface, dispatch is dynamic, and each concrete
+tool class still gets its own arena for the viewer to enumerate). Each agent runs on its
+own real OS thread. It dogfoods the thesis — the language for understanding AI systems,
+demonstrated on an AI system.
 
 The demo is one terminal window and one browser window, side by side. Minute by minute:
 
-**0:00 — Start the program.** In the terminal: `oo run agents.oo`. A TUI comes up: three
-agents (`researcher`, `coder`, `reviewer`) working a shared task list. Status lines tick,
-a log pane scrolls tool calls. It looks like any agent runner. Nothing about it suggests
-there's anything to see beyond what it prints.
+**0:00 — Start the program.** In the terminal: `scry run agents.scry`. A TUI comes up:
+three agents (`researcher`, `coder`, `reviewer`), each spun up on its own real OS thread,
+working a shared task list. Status lines tick, a log pane scrolls tool calls. It looks like
+any agent runner. Nothing about it suggests there's anything to see beyond what it prints.
 
 **0:30 — Open the viewer.** The runtime printed `viewer: http://localhost:7357` at startup.
 Open it. The audience sees a clean entity-type index — not programmer-art, an actually
@@ -207,30 +211,24 @@ and live-redefinition semantics (the swap).
 It is explicitly **not** aimed (yet) at people who need a mature general-purpose language.
 The PoC wins by being the best possible way to *watch and steer* one class of program.
 
-## OPEN: Name
+## Name
 
-Five candidates, each pitched at the "lens over a live system" identity. None checked for
-trademark/ecosystem collisions yet; **Lucid** in particular collides with a historical
-dataflow language.
-
-1. **Scry** — divination by gazing into a live surface. Short, verb-able ("scry the
-   process"), `.scry` files, `scry run`. Current favorite for punch.
-2. **Vivarium** — an enclosure built for observing live things. Nails the semantics
-   (the runtime *is* a vivarium for objects); slightly long; risks image connotations
-   we explicitly reject.
-3. **Aperture** — the thing you open to see in. Clean, professional; heavily used name
-   (Portal, Apple's old photo app).
-4. **Plainview** — everything in plain view. Reads well in prose ("run it under
-   Plainview"), zero mysticism, a bit sedate.
-5. **Lucid** — transparent, and "lucid dreaming" = aware inside a running world.
-   Best meaning, worst collision.
+**Scry** (Jimmy ruling) — divination by gazing into a live surface. Short, verb-able
+("scry the process"), `.scry` files, `scry run agents.scry`. Picked over four other
+candidates pitched at the same "lens over a live system" identity, kept here for the
+record: **Vivarium** (nailed the semantics but risked image connotations we explicitly
+reject), **Aperture** (clean but heavily used elsewhere — Portal, Apple's old photo app),
+**Plainview** (zero mysticism, a bit sedate), and **Lucid** (best meaning, worst
+collision — a historical dataflow language already owns it). The directory on disk stays
+`oo-lang`; the language, CLI, and file extension are Scry everywhere else.
 
 ## OPEN: flagged elsewhere, not decided here
 
-- **Interfaces/traits** — needed for the PoC or deferred? Proposed in `01-language.md`.
-- **Concurrency model** — the demo needs concurrent-ish agent turns plus a responsive
-  TUI; proposed in `01-language.md`/`02-runtime.md`.
-- **Safety of the viewer's invoke channel** — invoking `pause()` from the viewer while
-  the interpreter is mid-turn needs a precise mechanism (safepoints vs. stop-the-world on
-  request); proposed in `02-runtime.md`. The demo script above assumes it works; it does
-  not assume how.
+- **How the viewer's eval channel interleaves with running threads** — evals that read
+  can likely run at a partial safepoint; definition evals need full stop-the-world.
+  Proposed in `02-runtime.md`. The demo script above assumes it works; it does not assume
+  how.
+- **Thread API surface** — spawn/join shape, what synchronization primitives (mutex?
+  channels? atomics?) the language exposes for the PoC. Proposed in
+  `01-language.md`/`02-runtime.md`.
+- **Interface default methods** — lean no for the PoC. Proposed in `01-language.md`.

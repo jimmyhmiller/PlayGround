@@ -36,7 +36,8 @@ TypeInfo {
   shape: ShapeId                     // current field layout
   methods: [FnPtr; N]                // indexed by compile-time method slot
                                       // (keyed by shape_id too during a drain — see below)
-  active_frames: u32                 // atomic per §7's concurrency requirement, OPEN below
+  active_frames: u32                 // atomic — real OS threads (DECISIONS.md #4b) can
+                                      // concurrently ENTER_METHOD/RETURN the same class
   pending_shape: Option<ShapeId>
 }
 
@@ -75,14 +76,70 @@ One structural decision worth calling out because it isn't free:
   unchanged across the move.
 - **Method calls are always an indirect call through `methods[slot]`, never inlined.**
   Because there's **no inheritance** (`DECISIONS.md` #4), this indirection is *not*
-  buying polymorphism — a call site's target class is always statically known, there is
-  no subtype to resolve. The only reason it's indirect is so a redefinition is a single
-  pointer swap that reaches every future caller with zero call-site patching. This is a
-  real payoff of the no-inheritance decision: we get vtable-style live patchability
-  with none of the override/diamond-problem baggage a hierarchy would add. (If
-  interfaces/traits land later — **OPEN**, `01-language.md` — an interface-typed call
-  site becomes genuinely polymorphic and needs its own dispatch layer on top of this
-  one. Orthogonal, not yet decided.)
+  buying polymorphism for a concrete-typed call site — a call through `agent.summarize()`
+  where `agent: Agent` always has a statically known target class, no subtype to resolve.
+  The only reason it's indirect *there* is so a redefinition is a single pointer swap that
+  reaches every future caller with zero call-site patching — a real payoff of the
+  no-inheritance decision: vtable-style live patchability with none of the
+  override/diamond-problem baggage a hierarchy would add. **Interfaces are the one place a
+  call site genuinely doesn't know its target class** (`DECISIONS.md` #4, superseding the
+  enum-dispatch fallback): a call through `tool.execute()` where `tool: Tool` resolves at
+  the concrete instance behind that reference, not at compile time. That's a second,
+  separate dispatch layer — an **itable** per (concrete-type, interface) pair,
+  `02-runtime.md §5`'s `OP_CALL_VIRTUAL` — sitting on top of, not replacing, the per-class
+  `methods[slot]` table above. See "Interface changes" below for how itables live-patch
+  the same way method tables do.
+
+## Threads and the generation boundary
+
+`DECISIONS.md` #4b decided real OS threads, day one — the demo's agents each run on their
+own actual thread, not a cooperative scheduler taking turns on one interpreter thread. That
+changes what "swap `current_generation`" and "migrate a shape" have to guarantee: it's no
+longer one interpreter loop reaching one safepoint, it's **every** live thread.
+
+**The invariant:** all threads observe the generation swap at the same global safepoint;
+no thread ever sees a torn class table. Concretely, `current_generation` is one pointer,
+swapped with a single atomic store (as already described above), but an atomic store alone
+only guarantees *that* pointer is consistent — it says nothing about *when* each thread's
+own dispatch loop next reads it. The rule that makes "torn" impossible is the one method
+dispatch already follows: every `CALL` resolves through `methods[slot]` fresh, every time,
+never cached across calls — so the earliest any thread can observe generation N+1 is its
+next `CALL`, and by construction that read is of the *whole* new class table, never a field
+of the old one and a field of the new one mixed together. A thread mid-frame in generation
+N's bytecode keeps running generation N's code for that frame, exactly as the
+single-thread case already specifies ("Method body redefinition," below) — that rule was
+never actually about there being one thread, it's about a frame's code pointer being fixed
+at entry; it holds per-thread, unchanged, now that there are many.
+
+**Shape migration's quiescence gate is the part that actually gets harder.**
+`active_frames` (above) must be a true atomic — many threads can be inside
+`ENTER_METHOD`/`RETURN` for the same class concurrently — and "quiescent" now means *no
+thread anywhere in the process* is executing that class's old-shape bytecode, not just
+"the one interpreter thread isn't." Once that holds, the migration pointer-rewrite pass
+("Field add / remove," below) walks **every thread's stack**, not a single call stack,
+looking for `FIELD_REF`/`FIELD_LIST_REF` pointers into the migrating class's old slab —
+the same `TypeInfo`-driven traversal as before, just fanned out over N stacks instead of
+one. This is why the gate has to be a real safepoint and not merely "wait for
+`active_frames == 0`": between that counter hitting zero and the rewrite pass running, no
+other thread can be allowed to re-enter the class (start a new frame that would see
+mid-rewrite pointers), so the same global-safepoint mechanism that serializes the
+generation swap also brackets the migration's rewrite pass — every thread is parked at a
+safepoint for the pass's duration, not just the one that happened to drop the counter to
+zero.
+
+**A thread blocked in a foreign call is not a threat to this invariant — it's already
+parked-equivalent.** `02-runtime.md`'s foreign-call story requires that a blocking
+`extern` call (the demo's synchronous LLM HTTP request) never touch the Scry heap while
+it's outstanding — the call computes on plain bytes, not Scry objects, and only re-enters
+managed code (allocates the `Message`, resumes the frame) at its *next* safepoint check. A
+thread sitting in that state cannot be executing old bytecode against a class that's
+migrating and cannot observe a torn class table, because it isn't reading either one — it
+is parked exactly as if it had already reached a safepoint and stopped there. So a
+stop-the-world pause (a generation swap, or a shape migration's rewrite pass) never has to
+wait on a thread stuck in a foreign call: that thread is, by the foreign-call contract,
+already out of the way. It only becomes relevant again at the moment it tries to
+re-enter — at which point it takes the *new* generation and the *new* shape, same as any
+other thread's next `CALL`.
 
 ## What can change live
 
@@ -90,6 +147,8 @@ One structural decision worth calling out because it isn't free:
 |---|---|---|---|
 | Method body | no | next call (new frames only) | new body fails typecheck |
 | Method signature | no | next call, at every call site | any call site (old or new) fails typecheck under the new signature |
+| Interface method add | no | next call through the interface, at the itable | any implementing class doesn't define the new method |
+| `implements` add/remove | no | next call, itable rebuilt at the generation boundary | edited class doesn't satisfy every method of an interface it claims to implement |
 | Field add | yes | after class drains | no default and no migration fn, and live instances exist |
 | Field remove | yes | after class drains | never (dropping data is always representable) — but see migration-fn note below |
 | Class add | no | immediately | name collision |
@@ -148,7 +207,7 @@ rejected, not just the signature change — there is no partial application of a
   Agent.summarize(maxLen: Int) -> String
     changed to Agent.summarize(maxLen: Int, tone: Tone) -> String
   1 call site does not typecheck against the new signature:
-    agents.oo:142  self.summarize(20)   — missing argument `tone`
+    agents.scry:142  self.summarize(20)   — missing argument `tone`
   program unaffected — still running the previous generation
 ```
 
@@ -164,6 +223,78 @@ value closes over a signature at the moment it was assigned; redefining the unde
 method changes what future *dispatch-by-name* calls see but does not retroactively
 change an already-captured function value's type. That's a reasonable default but is
 genuinely unresolved until closures are designed.
+
+### Interface changes
+
+Interfaces don't get a fourth kind of special-case machinery — they're folded into the
+same two things this doc already does: whole-program re-typecheck (for methods) and a
+`methods[slot]`-style live pointer swap (for dispatch), just for a different table — the
+itable introduced above, not `TypeInfo.methods`.
+
+**Adding a method to an interface re-typechecks every implementor**, because that's what
+"interface `Tool` gained a method" *means* under whole-program typecheck: every class that
+declares `implements Tool` is now obligated to define it. This is the acceptance
+algorithm's ordinary static-rejection path (`typecheck_whole_program`, below), not a new
+one — it just also has to enumerate implementors of the changed interface:
+
+```
+✗ change rejected
+  interface Tool gained method: cancel() -> Unit
+  2 classes implement Tool and do not define it:
+    ShellTool    (agents.scry:58)
+    SearchTool   (agents.scry:91)
+  program unaffected — still running the previous generation
+```
+
+There is no live-instance angle to this rejection the way field-add has one — it's a pure
+static check against source, so it's accepted or rejected before any generation swap is
+even attempted, same as any other typecheck failure. If every implementor already defines
+`cancel()` (or the edit adds a definition to each one in the same save), the edit is
+accepted with no shape migration at all: gaining a method never touches `ShapeInfo`.
+
+**A class adding or removing `implements Tool` live** is the same shape of change: does
+the class, as edited, actually satisfy every method `Tool` declares? If yes, the edit is
+accepted like any method/signature change — no shape migration, because implementing (or
+dropping) an interface changes what a class can be *called through*, not its field layout
+or stride. If a class drops `implements Tool` while a `List<Tool>` field somewhere in the
+live program still holds instances of it, those existing references already point at a
+concrete instance — same as this doc's "class-typed fields are raw pointers" note above,
+an interface-typed field is the same single raw pointer a class-typed field is, not a fat
+pointer (`02-runtime.md §5` decided against `{ptr, itable}` precisely because the pointee
+can already self-report its concrete type off its own header, `02-runtime.md §3`'s
+`type-id`, making a second stored word redundant). That instance doesn't stop existing or
+change shape because the class's declared interface list changed — the concrete backing
+class and its itable are found by reading `type-id` off the pointee's own header at
+dereference time, not carried alongside the reference. What changes is purely
+forward-looking typecheck: any *new* code trying to pass that class where `Tool` is
+expected is rejected, exactly like the class-removal case below — existing state is never
+retroactively invalidated, only new call sites are checked against the new contract.
+
+**Itables swap at the generation boundary exactly like method tables do.** Per
+`02-runtime.md §5`, a call through an interface-typed value dispatches through an itable —
+a (concrete-type, interface) → method-pointer table, `OP_CALL_VIRTUAL`'s payload — rather
+than the flat `methods[slot]` a concrete-typed call site uses. When generation N+1 swaps
+in, every class's itable(s) are rebuilt as part of `compile_and_link` and become reachable
+the same atomic instant `current_class_table` flips — there is no separate "itable
+generation"; it's one more piece of the same per-type metadata this doc already treats as
+swapped-not-mutated. A stale frame holding an interface-typed value mid-call finishes
+dispatching through the itable it already resolved (same stale-frame rule as a direct
+call, and the same per-thread invariant "Threads and the generation boundary" states
+above); its next dispatch through that value re-resolves against whatever's current, same
+as `methods[slot]`.
+
+**No shape migration is ever needed for an interface change on its own** — `implements`
+membership and interface method sets don't touch `ShapeInfo` at all; they're metadata
+about which itables exist, layered on top of a class's existing field layout. The only way
+an interface change and a shape migration co-occur is if the *same* edit also adds or
+removes a field, in which case the two mechanisms simply run side by side, each gated by
+its own check — static re-typecheck for the interface, quiescence for the shape.
+
+Default methods on interfaces are **OPEN** (`DECISIONS.md`, leaning no for the PoC); if
+added later, redefining a default method's body would need to re-typecheck every
+implementor that doesn't override it, which is a variant of the "add a method" case above
+(the implementor set to check is "everyone not already overriding it" instead of
+"everyone"), not a new mechanism.
 
 ### Field add / remove — shape versioning and the quiescence gate
 
@@ -299,13 +430,14 @@ dead-end, not a bug to paper over. Whether there should be an operator-facing "k
 frame" capability from the viewer to unblock it is undecided; it also needs a "kill a
 frame" primitive that doesn't exist elsewhere in this design yet.
 
-**OPEN: concurrency primitive for `active_frames`.** The increment/decrement above needs
-to be atomic if the concurrency model (OPEN, `DECISIONS.md`) allows more than one OS
-thread inside the interpreter at once. If agent turns are cooperatively scheduled on a
-single interpreter thread, a plain counter suffices and this is a non-issue. Pinning this
-down belongs to `02-runtime.md` / the concurrency doc; the invariant this section depends
-on — "count reaches zero ⇒ safe to migrate" — must hold under whatever is decided, but
-the exact primitive isn't chosen here.
+**Resolved: `active_frames` is a true atomic.** `DECISIONS.md` #4b decided real OS
+threads, day one — the demo's agents each run on their own thread, so more than one thread
+can be inside `ENTER_METHOD`/`RETURN` for the same class at once, and a plain non-atomic
+counter would race and undercount or overcount. See "Threads and the generation boundary"
+above for the full consequence: the invariant this section depends on — "count reaches
+zero ⇒ safe to migrate" — now has to hold across every thread in the process, not one
+interpreter loop, which is why the quiescence gate is a real safepoint bracketing the
+rewrite pass, not a bare counter check.
 
 ### Class add
 
@@ -396,16 +528,28 @@ keeps running, unaffected, exactly as if you'd never hit save. Nothing partially
 2. Method/signature changes: instant, no coordination, because they never touch object
    layout. Stale frames finish on old bytecode; every *new* call, including recursion,
    re-dispatches to whatever's current.
-3. Field changes: gated on a per-class quiescence counter, not a global stop-the-world.
-   Migration is eager and total once safe, with per-instance quarantine as the failure
-   path — not permanent dual-shape coexistence.
+3. Field changes: gated on a per-class quiescence counter (scoped to one class, not the
+   whole process), whose zero-crossing then briefly parks every thread at a safepoint for
+   the pointer-rewrite pass itself. Migration is eager and total once safe, with
+   per-instance quarantine as the failure path — not permanent dual-shape coexistence.
 4. Class table mutation is in-place at rest; shape/version coexistence is a bounded,
    self-collapsing artifact of draining, never a standing multi-version model.
 5. Rejection — static or live-state — is always a full no-op on the running program.
 6. No inheritance removes the hardest part of most live-patching stories (override
    consistency across a hierarchy) before it starts; the method-table indirection this
    doc relies on exists purely for live redefinition, not dispatch.
+7. Interfaces are a second, orthogonal dispatch layer (itables) on top of that
+   no-inheritance method-table indirection, not a variant of it — interface membership
+   and method sets re-typecheck like any other whole-program change and swap at the same
+   generation boundary; they never need shape migration on their own.
+8. Real OS threads (`DECISIONS.md` #4b) mean every invariant above — stale frames finish
+   on old code, `active_frames` gates migration, the generation swap is atomic and
+   torn-free — has to hold across every live thread, not one interpreter loop; a thread
+   parked in a foreign call is already parked-equivalent and never blocks a
+   stop-the-world pause.
 
 **Flagged OPEN** (do not silently resolve elsewhere): stuck-migration operator override;
-the atomicity primitive for `active_frames` under the not-yet-decided concurrency model;
-first-class function values across a signature change.
+interface default methods (leaning no for the PoC); how the viewer's eval channel
+interleaves with running threads (`DECISIONS.md`) — a read-only eval likely doesn't need
+the full stop-the-world a definition eval or a migration does, but this doc doesn't pin
+that down; first-class function values across a signature change.

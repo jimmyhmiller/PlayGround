@@ -1,4 +1,4 @@
-# oo-lang — Pinned Decisions
+# Scry — Pinned Decisions
 
 Source of truth for design docs. If a doc contradicts this file, the doc is wrong.
 The raw project brief is in `../claude.md` — read it first; this file pins what it left open.
@@ -14,8 +14,18 @@ The raw project brief is in `../claude.md` — read it first; this file pins wha
 3. **Execution: bytecode interpreter** (clox port at `coil/apps/clox/` is precedent).
    Optimizing JIT is explicitly deferred; design bytecode so a JIT remains possible.
 4. **Object model:** concrete entity types (classes with data members + methods),
-   **no inheritance** of any kind. Generics yes. Interfaces/traits are the open question
-   (see below), subclassing is not.
+   **no inheritance** of any kind. Generics yes. **Java-style interfaces are IN** (Jimmy
+   ruling): nominal, explicit `implements`, interface types usable as field/param/return
+   types, dynamic dispatch through them. Interfaces are the polymorphism story — the
+   enum-dispatch fallback for `Agent.tools` is superseded. Subclassing remains absent.
+   (Default methods on interfaces: OPEN, lean no for PoC.)
+4b. **Concurrency: real OS threads, day one** (Jimmy ruling: "proper threads"). The
+   language exposes thread spawn/join; the demo app's agents run on real threads.
+   async/await surface syntax comes LATER (post-PoC) — not a cooperative turn-scheduler
+   stopgap, actual threads. Runtime consequences are accepted: multi-threaded mutators
+   over the shared heap, thread-safe per-type arena allocation (per-thread magazines),
+   stop-the-world safepoints that park ALL threads (for GC, migrations, and definition
+   evals). Coil has real pthreads + atomics (lib/thread.coil, lib/atomic.coil).
 5. **Surface syntax: TS/Kotlin-ish braces.**
    ```
    class User {
@@ -48,20 +58,25 @@ The raw project brief is in `../claude.md` — read it first; this file pins wha
 9. **Live change is in scope:** redefine a method/class while the program runs; the design
    must say precisely how that interacts with static types and existing instances.
 10. **PoC demo app: an agent TUI.** A terminal app that runs AI agents — entity types like
-    `Agent`, `Conversation`, `Message`, `Tool`, `ToolCall`, `Task`. Demo moment: agents
-    running in the terminal; in the viewer you browse live `Agent` instances, inspect a
-    `Conversation` mid-run, call a method (pause an agent, edit a task, swap a tool),
-    and the TUI reflects it instantly. Dogfoods the "language for AI" thesis.
+    `Agent`, `Conversation`, `Message`, `Tool`, `ToolCall`, `Task`, with
+    `interface Tool` implemented by `ShellTool`/`SearchTool` and each agent on its own
+    real thread. Demo moment: agents running in the terminal; in the viewer you browse
+    live `Agent` instances, inspect a `Conversation` mid-run, call a method (pause an
+    agent, edit a task, swap a tool), and the TUI reflects it instantly. Dogfoods the
+    "language for AI" thesis.
 11. **Demo-worthiness matters.** The viewer must look genuinely good, not programmer-art.
+
+12. **Name: Scry** (Jimmy ruling). CLI `scry`, so `scry run agents.scry`. The directory
+    stays `oo-lang`; every doc and example uses Scry. (File extension `.scry`: default,
+    flag if a doc has a reason to prefer something shorter.)
 
 ## Open (docs should propose, flag as OPEN, not silently decide)
 
-- **Name.** "oo-lang" is a working directory name, not the name.
-- **Interfaces/traits** for polymorphism without inheritance — needed for PoC or deferred?
-- **Concurrency model** of the interpreted language (the demo app needs at least
-  async-ish agent turns + a responsive TUI).
-- **How the viewer's eval/invoke channel is safe** while the program runs (stop-the-world
-  on request? safepoints?).
+- **How the viewer's eval channel interleaves with running threads** — evals that read
+  can likely run at a partial safepoint; definition evals need full stop-the-world.
+- **Thread API surface** — spawn/join shape, what synchronization primitives (mutex?
+  channels? atomics?) the language exposes for the PoC.
+- **Interface default methods** — lean no for PoC.
 
 ## Document set
 

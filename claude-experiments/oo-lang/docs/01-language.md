@@ -6,8 +6,8 @@ concurrency story to write the demo app. This doc is precise on purpose — `02-
 top of the decisions made here. Where DECISIONS.md lists something as open, this doc takes
 a position and marks it **OPEN** rather than silently deciding it.
 
-Working name for the language throughout code samples: `oo` (`.oo` files, `oo run foo.oo`).
-Actual name is unresolved — see `00-vision.md`.
+The language is named **Scry** (`DECISIONS.md` #12). CLI is `scry`; source files are
+`.scry` (e.g. `scry run agents.scry`).
 
 ## 1. Surface syntax by example
 
@@ -220,7 +220,7 @@ One file is one module; module path mirrors file path from the project root. No 
 global namespace beyond the current module.
 
 ```
-// file: agents/tools/shell.oo
+// file: agents/tools/shell.scry
 module agents.tools
 
 class ShellTool {
@@ -230,7 +230,7 @@ class ShellTool {
 ```
 
 ```
-// file: main.oo
+// file: main.scry
 import std.collections.{List, Map}
 import agents.tools.{ShellTool, SearchTool}
 import agents.tools.ShellTool as Shell
@@ -315,31 +315,31 @@ class Agent {
 }
 ```
 
-### 2.3 Interfaces — OPEN, not needed for the PoC
+### 2.3 Interfaces
 
-DECISIONS.md leaves "interfaces/traits for polymorphism without inheritance" open. Per
-`05-milestones.md`'s actual scope, **the PoC demo does not need this**: the one place the
-demo wants interface-style polymorphism — `Agent.tools: List<Tool>` holding a
-heterogeneous mix of tool kinds — is met by the **enum-dispatch fallback** `05-milestones.md`
-M4 adopts (spelled out at the end of this section), built entirely from §1.3's enums and
-`match`, which ship in M0. "Swap a tool" (DECISIONS.md #10) means replacing a `Tool` enum
-value in that list with a different case. Generic bounds (`T: Comparable`, §1.2) are also
-out of scope for the PoC (05-milestones.md, "What we fake" #3) and hard-error if written.
+**Java-style interfaces are IN the language and IN the PoC (DECISIONS.md #4, Jimmy
+ruling).** This supersedes an earlier draft of this section, which proposed shipping only
+an enum-dispatch fallback for `Agent.tools` and deferring real interfaces past the PoC —
+that fallback is dead. Interfaces are the polymorphism story: nominal, explicit
+`implements`, interface types usable as field/parameter/return types, dispatch resolved
+dynamically. Enums remain exactly what §1.3 says they are (tagged unions, and the
+mechanism behind `Option`/`Result`/`AgentStatus`) — they are just no longer standing in
+for interfaces.
 
-What follows is therefore a **post-PoC extension point**, not a PoC requirement: a
-concrete proposal for the day interfaces/traits do get built, so the design isn't
-speculative when that day comes, and so `interface`/`implements` (which hard-error if
-written in the PoC build) have a real target to hard-error *toward*.
-
-**Proposal (post-PoC):** interfaces are a separate declaration (not a class), classes opt
-in explicitly, dispatch is dynamic but resolved without a per-object vtable pointer:
+An interface is a separate declaration (not a class): a named set of method signatures,
+no fields, no bodies.
 
 ```
 interface Tool {
   fn name() -> String
   fn call(args: Map<String, String>) -> Result<String, ToolError>
 }
+```
 
+A class opts in explicitly with `implements`, and must provide a body for every method the
+interface declares:
+
+```
 class ShellTool implements Tool {
   command: String
   fn name() -> String { "shell" }
@@ -355,44 +355,62 @@ class SearchTool implements Tool {
 
 Deliberately `implements`, not `class ShellTool : Tool` — Kotlin overloads the colon for
 both superclass and interface, and this language has no superclass, ever; reusing that
-syntax would visually suggest inheritance we don't have. An interface-typed reference
-(`Tool` used as a field or parameter type) is a two-word value: `(class-id, instance
-handle)`. The class-id is the same tag every object already carries for the arena/GC
-(§4), so calling `tool.call(args)` is a jump-table lookup keyed on that existing tag —
-no extra pointer stored per object, and the viewer always shows the concrete class
-(`ShellTool#3`), never a bare interface name, even when reached through a `Tool`-typed
-field.
+syntax would visually suggest inheritance we don't have.
 
-Generic bounds (`T: Comparable` in §1.2) use the same `interface` declarations. This is
-the one form of polymorphism-without-inheritance the language has; there is no other.
+**Static conformance checking.** `implements Tool` is checked at the class declaration,
+not at each call site: every method `Tool` declares must be present on `ShellTool` with an
+exactly matching signature (same parameter types, same return type), or the class fails to
+compile with the missing/mismatched method named explicitly. A class may `implements`
+more than one interface; conformance is checked against each independently.
 
-**Resolved for the PoC (per 05-milestones.md): interfaces do not ship in M0–M4.** The
-`interface`/`implements` keywords, if written, are a hard compile error in this build
-("What we fake" #2). The demo's tool heterogeneity is carried instead by the
-**enum-dispatch fallback** `05-milestones.md` M4 adopts — concrete classes wrapped in enum
-cases, dispatched with an ordinary `match`:
+**Interface types in field/parameter/return position.** `Tool` is a real type once
+declared, usable anywhere a class type is:
 
 ```
-enum Tool {
-  Shell(ShellTool)
-  Search(SearchTool)
+class Agent {
+  name: String
+  tools: List<Tool>          // heterogeneous: holds ShellTool and SearchTool values alike
 }
 
-fn callTool(tool: Tool, args: Map<String, String>) -> Result<String, ToolError> {
-  match tool {
-    Shell(t) -> t.call(args)
-    Search(t) -> t.call(args)
-  }
-}
+fn describe(t: Tool) -> String { t.name() }
 ```
 
-The cost, named in `05-milestones.md`: adding a genuinely new kind of tool means editing
-the `Tool` enum itself, not writing an independent class that opts in — acceptable for a
-PoC with two tool kinds. What remains **OPEN** is only the question this section actually
-answers: *when* interfaces are eventually built post-PoC, is the
-jump-table-on-existing-class-tag mechanism above the right design, or does `02-runtime.md`
-want something else once per-type arenas are further along? That question has no bearing
-on M0–M4 and doesn't need resolving before the demo ships.
+`Agent.tools: List<Tool>` is exactly the demo's "swap a tool" beat (DECISIONS.md #10):
+replacing a list element with a different concrete class that also implements `Tool`, no
+enum to edit, no `match` to extend — the actual value of interfaces over the old
+enum-dispatch fallback (the fallback's named cost was that a new tool kind meant editing
+the `Tool` enum itself; a new tool kind is now just a new class that opts in).
+
+**Dispatch.** An interface-typed reference (`Tool` used as a field or parameter type) is a
+two-word value: `(class-id, instance handle)`. The class-id is the same tag every object
+already carries for the arena/GC (§4), so calling `tool.call(args)` is a jump-table lookup
+keyed on that existing tag — no extra vtable pointer stored per object. The viewer always
+shows the concrete class (`ShellTool#3`), never a bare interface name, even when reached
+through a `Tool`-typed field.
+
+**No default methods (DECISIONS.md, OPEN, lean no for the PoC).** Every method an
+interface declares must be implemented by every conforming class; there is no method body
+on the interface declaration itself and no inherited-default mechanism. This is a real
+scope cut, not just a syntax omission: it sidesteps the diamond-shaped questions default
+methods raise (what does a class inherit when it implements two interfaces that default
+the same method?) in a language whose entire pitch is "no inheritance, no diamond
+problem." **Flagged OPEN**: if the PoC's actual interfaces (`Tool`, `ToolError`-adjacent
+helpers) turn out to want shared default behavior, the answer is more likely a plain
+top-level function taking the interface type (`fn describeTool(t: Tool) -> String`) than
+inherited defaults — but that's a proposal, not a ruling.
+
+**Interfaces as generic bounds — lean minimal for the PoC, flag OPEN.** §1.2 already uses
+`fn largest<T: Comparable>(items: List<T>) -> T` with `Comparable` an interface. The
+minimal rule this doc takes a position on: `T: SomeInterface` requires that whatever
+concrete type is substituted for `T` at a given instantiation site has an `implements
+SomeInterface` declaration — checked at monomorphization time (§2.4), the same moment
+every other generic-class instantiation is type-checked, so no new checking phase is
+needed. A type parameter may carry at most one bound in the PoC; there is no `T: A + B`
+bound-combination syntax. **Flagged OPEN**: whether call-site bound checking needs to
+happen anywhere other than at monomorphization, and whether multi-bound type parameters
+are needed before the demo's actual generic code (`Inventory<T>`, `first<T>`,
+`largest<T: Comparable>`) is written — nothing in the demo as scoped so far needs more
+than a single bound.
 
 ### 2.4 Generics: monomorphized, not erased
 
@@ -534,133 +552,176 @@ because the PoC's entity types don't need it and inventing it now is speculative
 it here since the question ("do ALL class instances live in arenas and show in the
 viewer") was asked explicitly and deserves a visible answer rather than a buried one.
 
-## 5. Concurrency — OPEN
+## 5. Concurrency — real OS threads, day one
 
-DECISIONS.md leaves the concurrency model open. Two different things are easy to
-conflate here, so this section keeps them apart: **what M0–M4 actually ship** (no
-concurrency surface syntax at all — see `05-milestones.md`), and **a longer-term
-proposal for the language** that this doc flags as explicitly post-PoC, not built for the
-demo.
+**DECISIONS.md #4b (Jimmy ruling): real OS threads, day one.** This supersedes an earlier
+draft of this section, which proposed a single-threaded cooperative scheduler for the PoC
+and pushed real threads to a post-PoC future. That's inverted now: the demo app's agents
+each run on their own actual OS thread, starting with the PoC, not a scheduling illusion
+on top of one interpreter thread. `async`/`await` surface syntax is the thing pushed
+later — see §5.5 — not threads themselves.
 
-### 5.1 What the PoC actually does (no new syntax)
+### 5.1 Thread API surface
 
-Per `05-milestones.md`, M0 ships "no concurrency of any kind — straight-line
-single-threaded execution, top to bottom," and M2's turn-taking illusion is "a
-cooperative single-threaded turn scheduler... explicitly not a proposed answer for the
-language, only a scheduling trick inside the demo app." Concretely, that trick needs zero
-language features beyond what M0 already has: `agents.oo`'s `main` runs an ordinary,
-single-threaded round-robin loop that calls a plain, synchronous method on each agent in
-turn. There is no `async`, no `await`, no `spawn` anywhere in the source the PoC compiles.
+Minimal proposal for the PoC:
 
 ```
-fn runTurn(agent: Agent) -> Result<(), AgentError> {
-  if agent.status != AgentStatus.Waiting { return Ok(()) }
-  agent.status = AgentStatus.Running
-  let reply = Llm.complete(agent.conversation)?
-  agent.conversation.append(Message(role: "assistant", content: reply))
-  agent.status = AgentStatus.Waiting
-  Ok(())
+interface Runnable {
+  fn run() -> Void
 }
 
-fn main() {
-  let agents = List<Agent>()
-  agents.push(Agent(name: "researcher", ...))
-  agents.push(Agent(name: "coder", ...))
-  agents.push(Agent(name: "reviewer", ...))
+object Thread {
+  fn spawn(task: Runnable) -> ThreadHandle
+}
 
-  while true {
-    for a in agents { runTurn(a) }
-    Tui.render(agents)   // ordinary function call, same thread, same turn
-  }
+class ThreadHandle {
+  fn join() -> Void
 }
 ```
 
-This reads as "concurrent-ish" to an audience watching three status lines tick, but it is
-literally an ordinary loop — `Llm.complete` is `M4`'s `ScriptedModel`, which returns
-synchronously and deterministically (no real network I/O to wait on), so there is nothing
-in the PoC that actually needs to suspend mid-call. The viewer's invoke/eval channel
-(`04-viewer.md`, `02-runtime.md`) stays safe the same way M2 designs it regardless: the
-bytecode compiler emits a safepoint check at every loop back-edge and call site, and a
-pending invoke is serviced at the next one — the program author writes nothing to enable
-that; it's a property of the compiler, not of this section's syntax.
-
-### 5.2 Future direction (explicitly post-PoC, not built for M0–M4)
-
-The rest of this section is a proposal for what a real concurrency model for the language
-could look like once the PoC no longer bounds the scope — not a description of anything
-M0–M4 build. Per `05-milestones.md` ("What we fake" #6), if any `spawn`/`async` primitive
-beyond the cooperative turn-queue above is written, it hard-errors `spawn not implemented
-in this build` rather than silently doing something.
-
-**Proposal: single OS thread, cooperative scheduling, `async`/`await`/`spawn`.** The
-interpreter owns one event loop multiplexing three kinds of work on one thread: agent
-turns awaiting LLM API calls, the TUI's input/render loop, and the embedded viewer's
-HTTP/WebSocket connections (`04-viewer.md`). `spawn` schedules a new cooperative task;
-`await` suspends only the calling task.
+`Thread.spawn` takes a `Runnable` rather than a bare function value: the language has no
+closures/lambdas in the PoC surface, so "the work this thread runs, plus whatever context
+it needs" is an ordinary class that `implements Runnable` and captures that context as
+fields — the same composition-over-inheritance idiom §2.2 already uses everywhere else,
+not a special case invented for threads. `spawn` returns a `ThreadHandle`, not a bare
+`Thread` — the language avoids naming both the spawning namespace and the handle it
+returns identically.
 
 ```
-async fn runTurn(agent: Agent) -> Result<(), AgentError> {
-  agent.status = AgentStatus.Running
-  let reply = await Llm.complete(agent.conversation)
-  agent.conversation.append(Message(role: "assistant", content: reply))
-  agent.status = AgentStatus.Waiting
-}
+class AgentWorker implements Runnable {
+  agent: Agent
 
-fn main() {
-  let agents = List<Agent>()
-  agents.push(Agent(name: "researcher", ...))
-  agents.push(Agent(name: "coder", ...))
-  agents.push(Agent(name: "reviewer", ...))
-
-  for a in agents {
-    spawn {
-      while true {
-        if a.status == AgentStatus.Waiting { runTurn(a) }
-      }
+  fn run() -> Void {
+    while true {
+      agent.runTurn()
     }
   }
+}
 
-  Tui.run(agents)   // drives the terminal render loop on the same thread
+fn main() {
+  let researcher = Agent(name: "researcher", tools: tools)
+  let handle = Thread.spawn(AgentWorker(agent: researcher))
+  // ...
+  handle.join()
 }
 ```
 
-Why single-threaded cooperative rather than OS threads, if/when this gets built:
+**Flagged OPEN (DECISIONS.md's "thread API surface" item):** this is a minimal proposal,
+not a ruling — whether `join()` returns a value, whether spawn failures are represented as
+`Result`, and whether the PoC needs anything beyond spawn/join (e.g. a way to ask "is this
+thread still running" without joining) are all open.
 
-- **No concurrent mutation of arenas.** The per-type-arena GC (`02-runtime.md`) can
-  assume "no other thread is allocating or sweeping right now" — a hugely simpler first
-  GC than anything with cross-thread synchronization, and the arena design itself
-  (contiguous slabs, cheap enumeration) is where the actual novelty of this project
-  lives; concurrent GC is a distraction from that in the PoC.
-- **The demo's concurrency is I/O-bound, not CPU-bound.** Three agents waiting on LLM
-  API responses is exactly what a cooperative event loop is for; nothing in the demo
-  script needs true parallelism.
-- **The viewer's invoke channel gets simpler too.** If everything runs on one thread with
-  explicit `await` suspension points, "pause the world to safely invoke a method from the
-  viewer" (the other OPEN item, safety of the invoke channel — `02-runtime.md`) reduces
-  to "run the invoke between two scheduler turns," not a real stop-the-world across
-  threads.
+### 5.2 Synchronization: `Mutex<T>`
 
-What this defers, on purpose: true OS-thread parallelism for CPU-bound work. If that's
-ever needed, the brief's own "magazine allocator" instinct (thread-local magazines
-refilling from a shared central slab, jemalloc/tcmalloc-style) is exactly the mechanism
-that would let per-type arenas go multi-threaded without abandoning cheap enumeration —
-but building that now, before anything in the PoC needs it, would be speculative. Flagging
-as **OPEN**: whether the PoC ships strictly single-threaded (this proposal) or needs OS
-threads sooner because `02-runtime.md`'s GC design turns out to want them anyway.
+Real threads mean the demo has genuine shared mutable state: each `Agent` is mutated by
+its own worker thread (§5.1) and *read* by the main thread's TUI render loop and by the
+viewer's eval channel (`04-viewer.md`). That's a real cross-thread read/write pattern, not
+a hypothetical one, so the PoC needs at least one synchronization primitive, not zero.
+
+**Proposal: `Mutex<T>`**, a guarded value with explicit lock/unlock (no closures needed,
+consistent with §5.1):
+
+```
+class Mutex<T> {
+  fn init(value: T)
+  fn lock() -> Void     // blocks until this thread holds the mutex
+  fn unlock() -> Void   // releases it
+  fn get() -> T          // read the guarded value — valid only while locked
+  fn set(value: T) -> Void  // replace the guarded value — valid only while locked
+}
+```
+
+`set` exists alongside `get` because the guarded value is often a plain value/enum
+(`AgentStatus`, not a class with in-place-mutating methods) — replacing it wholesale is
+the only way to change it. A guarded *class* value (`Conversation` below) can instead be
+mutated in place by calling its own methods after `get()`, with no `set()` needed.
+
+The `Agent` fields a second thread actually needs to touch are the ones wrapped in
+`Mutex<T>`; everything else on `Agent` is conventionally owned by the agent's own worker
+thread and touched by nobody else:
+
+```
+class Agent {
+  name: String
+  status: Mutex<AgentStatus>
+  conversation: Mutex<Conversation>
+  tools: List<Tool>          // only ever touched by this agent's own thread
+}
+```
+
+`Channel<T>` is not proposed as a PoC primitive on its own merits — nothing in the demo's
+agent-TUI has agents messaging each other directly. It shows up instead as the natural
+generalization of the old single-thread "safepoint queue" idea (`02-runtime.md`, M2) once
+there's more than one real thread: the viewer's eval channel needs *some* thread-safe
+queue to hand a pending eval/invoke request to the thread that owns the target instance
+and get its result back, and a `Channel<T>` is the obvious shape for that. This doc takes
+that as a working assumption, not a ruling — see §5.4.
+
+### 5.3 Data races and the ownership rule — OPEN
+
+**Stated plainly:** a field that is *not* wrapped in `Mutex<T>` and is touched by more
+than one thread is a real data race in the PoC. The language has no borrow checker, no
+`Send`/`Sync`-style trait, and no compiler enforcement that a non-`Mutex` field is only
+ever touched by one thread — that rule above (worker thread owns everything except the
+`Mutex`-wrapped fields) is a **convention the demo's own code follows**, not something the
+type checker verifies. This is a real, named gap, not a silent one: a program that ignores
+the convention and reaches into another agent's non-`Mutex` field from a second thread
+compiles and races.
+
+**Flagged OPEN:** whether the PoC needs the type checker to enforce this (e.g., a field
+attribute or a rule that non-`Mutex<T>` class-typed fields simply cannot be read from a
+`Runnable` that didn't construct the instance) or whether "the demo's own code is written
+correctly by convention" is an acceptable PoC-scoped answer given the alternative is
+building an ownership/borrow system this project doesn't otherwise need. Leaning toward
+the latter for the PoC, but this is a proposal, not a ruling.
+
+### 5.4 Safepoints and stop-the-world, across real threads
+
+DECISIONS.md #4b accepts the runtime consequences of real threads up front: multi-threaded
+mutators over the shared heap, thread-safe per-type arena allocation (per-thread
+magazines refilling from a shared central slab, jemalloc/tcmalloc-style — the same
+mechanism an earlier draft of this section proposed only for a hypothetical
+multi-threaded future), and **stop-the-world safepoints that park ALL threads** for GC, a
+live-edit migration (`03-live-semantics.md`), or a viewer definition-eval
+(`04-viewer.md`). The bytecode compiler still emits a safepoint check at every loop
+back-edge and call site — same mechanism the old single-thread design used — except now
+*every* running thread must reach one before a stop-the-world operation can proceed, not
+just one interpreter loop. Object layout and arena mechanics for this belong to
+`02-runtime.md`, not here; what this doc pins is that the language's threads are real
+enough that a blocking call on one agent's thread (a real network call, say) blocks only
+that thread, not the whole program — one of the actual benefits of real threads over the
+old cooperative design, which needed every blocking operation to explicitly yield at a
+safepoint to avoid stalling every other agent.
+
+**Flagged OPEN (DECISIONS.md's "eval-channel interleaving" item):** whether a read-only
+viewer eval (e.g. `Agent#7`'s field values) can run at a partial safepoint touching only
+the target agent's thread, or whether every eval, read or write, needs the full
+all-threads stop-the-world. Definition evals (redefining a method/class) need the full
+stop-the-world regardless — that much isn't open.
+
+### 5.5 `async`/`await` — explicitly post-PoC
+
+Per DECISIONS.md #4b ("async stuff can come later"), `async`/`await` surface syntax is
+not part of the PoC and this doc does not propose a design for it here. If it's ever
+built, it would most likely sit on top of the real threads in this section (e.g. as sugar
+for a task scheduled onto a thread pool) rather than replace them — but that's speculation
+for a later doc revision, not something this section commits to.
 
 ## 6. Complete example: a slice of the agent TUI
 
-This example is **PoC-legal**: it uses only what `05-milestones.md`'s M0–M4 actually
-build, and it would compile and run under that plan as written. That means no
-`interface`/`implements` (§2.3 — deferred past the PoC) and no `async`/`await`/`spawn`
-(§5.1 — the PoC's turn-taking is an ordinary round-robin loop, not new syntax). For the
-future-direction version of the concurrency part of this same program, see §5.2.
+This is the canonical shape of `agents.scry`, updated for the interfaces and threads
+rulings (DECISIONS.md #4, #4b): real `interface`/`implements` (§2.3) carries the tool
+heterogeneity that an earlier draft gave to an enum-dispatch fallback, and each agent runs
+its own turn loop on its own real OS thread (§5.1), synchronized through `Mutex<T>` (§5.2)
+where the main thread's TUI render loop needs to read it. What it does *not* use is
+`async`/`await` — that stays explicitly post-PoC (§5.5).
 
-Exercises: classes, fields, `init`, generics, enums, `match`, `Option`/`Result`/`?`,
-control flow, modules, `object` singletons, and the PoC's plain synchronous turn loop.
+Exercises: classes, fields, `init`, `interface`/`implements`, generics, enums, `match`,
+`Option`/`Result`/`?`, control flow, modules, `object` singletons, `Thread.spawn`/`.join()`,
+and `Mutex<T>`.
 
 ```
-// file: agents/core.oo
+// file: agents/core.scry
 module agents.core
 
 enum AgentStatus {
@@ -701,11 +762,18 @@ enum ToolError {
   Failed(String)
 }
 
-// Tool heterogeneity via the enum-dispatch fallback (§2.3, adopted by 05-milestones.md
-// M4): concrete classes wrapped in enum cases, dispatched with `match`. No interface,
-// no subclasses.
-class ShellTool {
+// Tool heterogeneity via real interfaces (§2.3 — supersedes an earlier enum-dispatch
+// fallback): any class that implements Tool can live in Agent.tools below, with no
+// enum to edit when a new tool kind is added.
+interface Tool {
+  fn name() -> String
+  fn call(args: Map<String, String>) -> Result<String, ToolError>
+}
+
+class ShellTool implements Tool {
   command: String
+
+  fn name() -> String { "shell" }
 
   fn call(args: Map<String, String>) -> Result<String, ToolError> {
     match args.get("cmd") {
@@ -715,8 +783,10 @@ class ShellTool {
   }
 }
 
-class SearchTool {
+class SearchTool implements Tool {
   index: String
+
+  fn name() -> String { "search" }
 
   fn call(args: Map<String, String>) -> Result<String, ToolError> {
     match args.get("q") {
@@ -726,57 +796,87 @@ class SearchTool {
   }
 }
 
-enum Tool {
-  Shell(ShellTool)
-  Search(SearchTool)
-}
-
-fn toolName(t: Tool) -> String {
-  match t {
-    Shell(_) -> "shell"
-    Search(_) -> "search"
-  }
-}
-
-fn callTool(t: Tool, args: Map<String, String>) -> Result<String, ToolError> {
-  match t {
-    Shell(s) -> s.call(args)
-    Search(s) -> s.call(args)
-  }
-}
-
 class Agent {
   name: String
-  status: AgentStatus
-  conversation: Conversation
+  // Wrapped in Mutex<T> because the main thread's TUI render loop and the viewer's
+  // eval channel both read these fields while this agent's own worker thread (below)
+  // mutates them (§5.2). `tools` is not wrapped: only this agent's own thread ever
+  // touches it, by convention (§5.3, flagged OPEN — not statically enforced).
+  status: Mutex<AgentStatus>
+  conversation: Mutex<Conversation>
   tools: List<Tool>
 
   fn init(name: String, tools: List<Tool>) {
     self.name = name
-    self.status = AgentStatus.Waiting
-    self.conversation = Conversation()
+    self.status = Mutex<AgentStatus>(AgentStatus.Waiting)
+    self.conversation = Mutex<Conversation>(Conversation())
     self.tools = tools
   }
 
-  fn pause() { self.status = AgentStatus.Paused }
-  fn resume() { self.status = AgentStatus.Waiting }
+  // A later live edit adding a field to Agent would ship as a `migrate` block (§1.8)
+  // giving the new field's value for every live instance; this class, as written,
+  // needs none yet.
+
+  fn pause() {
+    self.status.lock()
+    self.status.set(AgentStatus.Paused)
+    self.status.unlock()
+  }
+
+  fn resume() {
+    self.status.lock()
+    self.status.set(AgentStatus.Waiting)
+    self.status.unlock()
+  }
 
   fn findTool(name: String) -> Option<Tool> {
     for t in self.tools {
-      if toolName(t) == name { return Some(t) }
+      if t.name() == name { return Some(t) }
     }
     None
   }
 
-  // Plain, synchronous method — called once per turn by main's round-robin loop
-  // (§5.1). No async/await; ScriptedModel (M4) returns synchronously.
+  // Runs on this agent's own worker thread (§5.1), driven by AgentWorker below.
+  // ScriptedModel (M4) returns synchronously and deterministically in the PoC, so this
+  // never actually blocks yet — but note for when it does: a blocking Llm.complete call
+  // parks this thread somewhere it can't reach a safepoint, so it does NOT cost only this
+  // agent. Per 02-runtime.md §7, request-global-stop then blocks waiting for this thread
+  // specifically, delaying every GC, shape migration, and viewer invoke/definition-eval
+  // process-wide for as long as the call is outstanding — other agents' threads keep
+  // running, but nothing that needs a full stop-the-world can land until this call returns.
   fn runTurn() -> Result<(), AgentError> {
-    if self.status != AgentStatus.Waiting { return Ok(()) }
-    self.status = AgentStatus.Running
-    let reply = Llm.complete(self.conversation)?
-    self.conversation.append(Message(role: "assistant", content: reply))
-    self.status = AgentStatus.Waiting
+    self.status.lock()
+    if self.status.get() != AgentStatus.Waiting {
+      self.status.unlock()
+      return Ok(())
+    }
+    self.status.set(AgentStatus.Running)
+    self.status.unlock()
+
+    self.conversation.lock()
+    let reply = Llm.complete(self.conversation.get())?
+    self.conversation.get().append(Message(role: "assistant", content: reply))
+    self.conversation.unlock()
+
+    self.status.lock()
+    self.status.set(AgentStatus.Waiting)
+    self.status.unlock()
     Ok(())
+  }
+}
+
+// The thread this agent runs on (§5.1): implements Runnable rather than taking a bare
+// function value, since the PoC has no closures — the agent to drive is just a field.
+class AgentWorker implements Runnable {
+  agent: Agent
+
+  fn run() -> Void {
+    while true {
+      match self.agent.runTurn() {
+        Ok(_) -> {}
+        Err(e) -> Console.log("agent " + self.agent.name + " turn failed")
+      }
+    }
   }
 }
 
@@ -786,37 +886,47 @@ object Clock {
 ```
 
 ```
-// file: main.oo
+// file: main.scry
 import std.collections.{List}
-import agents.core.{Agent, Tool, ShellTool, SearchTool}
+import agents.core.{Agent, Tool, ShellTool, SearchTool, AgentWorker}
 import ui.tui.{Tui}
 
 fn main() {
   let tools = List<Tool>()
-  tools.push(Tool.Shell(ShellTool(command: "sh")))
-  tools.push(Tool.Search(SearchTool(index: "docs")))
+  tools.push(ShellTool(command: "sh"))
+  tools.push(SearchTool(index: "docs"))
+  // No enum wrapper needed — ShellTool and SearchTool sit side by side in one
+  // List<Tool> purely because both implement Tool (§2.3).
+
+  let researcher = Agent(name: "researcher", tools: tools)
+  let coder = Agent(name: "coder", tools: tools)
+  let reviewer = Agent(name: "reviewer", tools: tools)
 
   let agents = List<Agent>()
-  agents.push(Agent(name: "researcher", tools: tools))
-  agents.push(Agent(name: "coder", tools: tools))
-  agents.push(Agent(name: "reviewer", tools: tools))
+  agents.push(researcher)
+  agents.push(coder)
+  agents.push(reviewer)
 
-  // Ordinary, single-threaded round-robin loop — this is the PoC's whole
-  // "agents take turns" mechanism (§5.1), not a scheduler primitive.
+  // Each agent runs its own turn loop on its own real OS thread (§5.1, DECISIONS.md
+  // #4b) — no cooperative scheduler, no round-robin loop driving all three from one
+  // thread.
+  let handles = List<ThreadHandle>()
+  handles.push(Thread.spawn(AgentWorker(agent: researcher)))
+  handles.push(Thread.spawn(AgentWorker(agent: coder)))
+  handles.push(Thread.spawn(AgentWorker(agent: reviewer)))
+
+  // Tui.render reads each agent's Mutex-guarded status/conversation fields (§5.2) —
+  // the one place this file's code crosses threads.
   while true {
-    for a in agents {
-      match a.runTurn() {
-        Ok(_) -> {}
-        Err(e) -> Console.log("agent " + a.name + " turn failed")
-      }
-    }
-    Tui.render(agents)   // renders status lines, reflects self.status changes live
+    Tui.render(agents)
   }
 }
 ```
 
-Every entity here — every `Agent`, `Conversation`, `Message`, `ShellTool`, `SearchTool` —
-lives in its own arena the moment it's constructed, with no code in this file doing
-anything to make that true (`Tool` itself is an enum, a value wrapping a reference to the
-concrete tool entity — §1.3, §4). That's the whole thesis, expressed as an
-ordinary-looking program.
+Every entity here — every `Agent`, `Conversation`, `Message`, `ShellTool`, `SearchTool`,
+`AgentWorker` — lives in its own arena the moment it's constructed, with no code in this
+file doing anything to make that true. `Tool` is an interface, not an enum: a
+`Tool`-typed slot in `Agent.tools` holds a real `ShellTool` or `SearchTool` instance
+directly, dispatched through the class-tag jump table §2.3 describes, not through a
+`match`. That's the whole thesis, expressed as an ordinary-looking program that now also
+happens to be genuinely multi-threaded.
