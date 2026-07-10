@@ -43,6 +43,8 @@
 (extern dup        :cc c [i32] (-> i32))
 (extern dup2       :cc c [i32 i32] (-> i32))
 (extern getpid     :cc c [] (-> i32))
+; Phase 8b Env builtin: read a process environment variable. Declared here (the one extern home).
+(extern getenv     :cc c [(ptr i8)] (-> (ptr i8)))
 ; Phase 8a HTTP client: libcurl (system /usr/lib/libcurl.4.dylib). Declared here — the one
 ; extern home — and :use *-imported by http.coil. curl's ABI is stable; the option/info
 ; integers used by http.coil are baked with `; curl.h:` comments there. setopt/getinfo are

@@ -425,7 +425,22 @@
       (do (if (!= (arg-count call) 2) (err-arity call 2 (arg-count call))
             (do (infer (arg-val (arg-at call 0)) env (ty-int)) (infer (arg-val (arg-at call 1)) env (ty-int)) 0))
           (ty-string))
+    ; Phase 8b: charCode(i: Int) -> Int — the byte at index i (OOB => -1).
+    (name-eq mname mlen (cast (ptr u8) c"charCode") 8)
+      (do (if (!= (arg-count call) 1) (err-arity call 1 (arg-count call))
+            (do (infer (arg-val (arg-at call 0)) env (ty-int)) 0))
+          (ty-int))
+    ; Phase 8b: toInt() -> Option<Int> — parse a base-10 signed integer.
+    (name-eq mname mlen (cast (ptr u8) c"toInt") 5)
+      (do (if (!= (arg-count call) 0) (err-arity call 0 (arg-count call)) 0)
+          (ty-option-of (ty-int)))
     (do (err-no-method-t facc rt mname mlen) (ty-error))))
+
+; build the Type Option<T> for a builtin method whose return is Option-wrapped.
+(defn ty-option-of [(inner (ptr Type))] (-> (ptr Type))
+  (let [(mut args) (al-new [(ptr Type)] (alc-global))]
+    (al-push! (mut args) inner)
+    (mk-named (find-decl-c c"Option") (load args))))
 
 (defn err-no-method [(n (ptr Node)) (d (ptr Decl)) (mname (ptr u8)) (mlen i64)] (-> i64)
   (err-head-n n) (w-cstr 2 c"no method '") (w-bytes 2 mname mlen) (w-cstr 2 c"' on ")
@@ -1140,6 +1155,9 @@
              (add-kid! (load (field f b)) (bt-param c"body" (bt-type c"String")))
              (store! (field f c) (bt-type c"HttpResponse"))
              f)))
+  ; Phase 8b: object Env { get(name: String) -> Option<String> } — read a process env var.
+  (let [e (mkbuiltin DK_BUILTIN_OBJ c"Env")]
+    (bdm e (bt-fn1 c"get" (bt-param c"name" (bt-type c"String")) (bt-type1 c"Option" (bt-type c"String")))))
   ; enum Option<T> { None ; Some(T) }
   (let [o (mkbuiltin DK_ENUM c"Option")]
     (bdtp o c"T") (bdv o (bt-variant0 c"None")) (bdv o (bt-variant1 c"Some" (bt-type c"T"))))

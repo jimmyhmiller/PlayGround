@@ -203,6 +203,51 @@
         (store! (field-addr inst (+ (sizeof InstanceHeader) 8)) (cast i64 body))   ; field 1: body (String)
         inst))))
 
+; ---- Phase 8b: Env + String char/number builtins ----------------------------
+; A StringObj is {len,data} and is NOT NUL-terminated; getenv needs a C string, so copy
+; the bytes into a malloc'd buffer and append a NUL.
+(defn str-to-cstr-copy [(s (ptr StringObj))] (-> (ptr i8))
+  (let [n (load (field s len)) buf (xalloc (+ n 1))]
+    (if (> n 0) (do (memcpy (cast (ptr i8) buf) (cast (ptr i8) (load (field s data))) n) 0) 0)
+    (store! (index buf n) (cast u8 0))
+    (cast (ptr i8) buf)))
+
+; Env.get(name) -> Option<String>. getenv returns a pointer into the process environment; copy
+; its bytes into our own buffer (str-make owns {len,data}) so a later setenv/GC can't dangle it.
+(defn vm-env-get [(name (ptr StringObj))] (-> (ptr i64))
+  (let [cn (str-to-cstr-copy name) v (getenv cn)]
+    (if (= (cast i64 v) 0)
+      (enum-none)
+      (let [vl (strlen v) buf (xalloc (+ vl 1))]
+        (if (> vl 0) (do (memcpy (cast (ptr i8) buf) v vl) 0) 0)
+        (store! (index buf vl) (cast u8 0))
+        (enum-some (cast i64 (str-make buf vl)))))))
+
+; String.charCode(i) -> the byte at index i as i64 (0..255); out of bounds => -1 (never traps).
+(defn vm-str-charcode [(s (ptr StringObj)) (i i64)] (-> i64)
+  (if (or (< i 0) (>= i (load (field s len)))) -1
+    (cast i64 (load (index (load (field s data)) i)))))
+
+; String.toInt() -> Option<Int>. Strict base-10 signed parse: optional leading +/-, then one or
+; more ASCII digits and NOTHING else (no whitespace, no trailing junk). Empty or malformed => None.
+(defn vm-str-toint [(s (ptr StringObj))] (-> (ptr i64))
+  (let [n (load (field s len)) d (load (field s data))
+        (mut i) 0 (mut neg) 0 (mut val) 0 (mut ok) 1 (mut any) 0]
+    (if (< (load i) n)
+      (let [c0 (cast i64 (load (index d 0)))]
+        (if (or (= c0 45) (= c0 43))          ; '-' or '+'
+          (do (if (= c0 45) (store! neg 1) 0) (store! i 1) 0) 0)) 0)
+    (loop
+      (if (< (load i) n)
+        (let [c (cast i64 (load (index d (load i))))]
+          (if (and (>= c 48) (<= c 57))       ; '0'..'9'
+            (do (store! val (+ (* (load val) 10) (- c 48))) (store! any 1) (store! i (+ (load i) 1)) 0)
+            (do (store! ok 0) (break))))
+        (break)))
+    (if (and (= (load ok) 1) (= (load any) 1))
+      (enum-some (if (= (load neg) 1) (- 0 (load val)) (load val)))
+      (enum-none))))
+
 ; the builtin dispatch (fixed arities; arg order = pushed order)
 (defn do-builtin [(vt (ptr VMThread)) (blt i64)] (-> i64)
   (cond
@@ -238,6 +283,10 @@
                               (cast (ptr StringObj) method) (cast (ptr StringObj) url)
                               (cast (ptr ListObj) headers) (cast (ptr StringObj) body))]
         (vpush vt (http-alloc-response (load (field res status)) (load (field res body)))))
+    (= blt BLT_ENV_GET) (let [name (vpop vt)] (vpush vt (cast i64 (vm-env-get (cast (ptr StringObj) name)))))
+    ; charCode(i): args pushed (string, i) => pop i then string.
+    (= blt BLT_STR_CHARCODE) (let [i (vpop vt) s (vpop vt)] (vpush vt (vm-str-charcode (cast (ptr StringObj) s) i)))
+    (= blt BLT_STR_TOINT) (let [s (vpop vt)] (vpush vt (cast i64 (vm-str-toint (cast (ptr StringObj) s)))))
     (do (eval-panic0 EK_RUNTIME c"vm: unknown builtin") (exit (cast i32 70)) 0)))
 
 ; spawn a language thread running task.<slot>() (task implements the interface `iface`).

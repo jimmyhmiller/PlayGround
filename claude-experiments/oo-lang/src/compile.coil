@@ -446,6 +446,9 @@
     (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Http") 4)
       ; Http.request(method,url,headers,body): push args left-to-right, then the builtin.
       (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_HTTP_REQUEST) 0)
+    (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Env") 3)
+      ; Env.get(name): push the name String, then the builtin.
+      (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_ENV_GET) 0)
     (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Thread") 6)
       ; Thread.spawn(task: Runnable) -> spawn a VMThread running task.run() via the itable.
       (let [rd (find-decl (cast (ptr u8) c"Runnable") 8)]
@@ -455,8 +458,13 @@
 
 (defn compile-string-method [(cs (ptr CState)) (recv (ptr Node)) (mname (ptr u8)) (mlen i64) (call (ptr Node))] (-> i64)
   (compile-expr cs recv)
-  (if (name-eq mname mlen (cast (ptr u8) c"len") 3)
-    (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_STR_LEN) 0)
+  (cond
+    (name-eq mname mlen (cast (ptr u8) c"len") 3)
+      (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_STR_LEN) 0)
+    (name-eq mname mlen (cast (ptr u8) c"charCode") 8)
+      (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_STR_CHARCODE) 0)
+    (name-eq mname mlen (cast (ptr u8) c"toInt") 5)
+      (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_STR_TOINT) 0)
     (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_STR_SLICE) 0)))
 
 ; method on a user/builtin named type (List/Map/class/object-through-interface)
