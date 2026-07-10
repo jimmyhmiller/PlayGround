@@ -1420,3 +1420,142 @@ repeating loop on a background thread with `pause()`/`resume()` for live inspect
   the `JStr` constructor, a 12-line `jq` (quote + escape `" \ \n \t \r`) plus direct string splicing
   of already-valid JSON (`contentJson`, `inputSchema()`) is simpler and faster than constructing a
   `JsonValue` just to `stringify` it; parsing still uses the full `Json` + `jget*` accessor surface.
+
+# Phase 9 — static schema views: the class graph before it runs (`scry inspect` + graph view)
+
+Per DECISIONS #14. The typechecker already resolves the whole static structure (field-type refs,
+`implements`, generic instantiations, enums, method sigs). Phase 9 exposes that structure two ways
+that **unify into one view**: a `scry inspect` command that serves a program's schema *without
+running it*, and a node-link **class-relationship graph** in the viewer that is the landing view in
+both the inspected (pre-run) and the running state — the same nodes simply gain live instance counts
+and become drillable once `main()` populates the arenas.
+
+## `scry inspect <file>` — see the code before it runs
+
+`scry-inspect` (src/server.coil) is `scry-serve` **minus `vm-run p` and minus the main-thread
+safepoint loop**: it `ctx-init`s, typechecks, `build-program`s (so arenas and the type table exist,
+**empty**), starts the eval server, prints the viewer URL plus `(inspect: schema only, program not
+running …)`, and then just keeps the process alive serving evals. It never runs `main()`.
+
+- **No language thread is ever registered.** `request-global-stop` therefore acquires the global
+  lock instantly (its wait loop iterates over zero registered parked-words) — every eval still runs
+  under the same full-STW coordinator path as `scry run`, it just has nothing to park.
+- **The whole eval channel works against the empty heap.** `types()`/`schema()`/`fields()`/
+  `methods()` return the full static schema with `liveCount: 0`; `Agent.instances()` returns an empty
+  list. Mutating/definition evals are *allowed* (there is no running program to disturb) but not the
+  point of the mode.
+- `scry run` is **unchanged**; `--no-viewer` is accepted by `inspect` too (used by nothing yet, kept
+  symmetric).
+
+CLI: `cmd-inspect` in src/main.coil, dispatched on `cstr-eq sub c"inspect"`; usage text updated.
+
+## Schema enrichment — a new `schema()` reflection op (server-resolved edges)
+
+The graph needs precise edges (which field types point at which entity/interface/enum node, through
+`List<T>`/`Map<K,V>` element types too), plus interface and enum **nodes** that `types()` never
+emitted. Rather than client-side string-parsing of the `ref:`/`list:` type strings — fragile — the
+edges are **resolved on the server against the real type table** and shipped as data.
+
+**`types()` is left byte-for-byte unchanged** (the type rail and every existing golden still consume
+it). A new `schema()` op (src/serialize.coil `reflect-schema`, wired in src/server.coil
+`try-reflection`) returns the full graph in one payload:
+
+```
+{ "type":"Schema", "nodes":[
+  { "name":"Agent", "kind":"class", "builtin":false, "liveCount":1,
+    "implements":[...],
+    "fields":[ {"name":"model","type":"ref:Model","refTypes":["Model"]},
+               {"name":"tools","type":"list:Tool","refTypes":["Tool"]}, ... ],
+    "methods":[ {name,params,returns}, ... ] },
+  { "name":"Tool", "kind":"interface", "builtin":true, "liveCount":0,
+    "methods":[...], "implementors":["ShellTool","SearchTool","CalcTool","WeatherTool"] },
+  { "name":"JsonValue", "kind":"enum", "builtin":false, "liveCount":0,
+    "variants":[ {"name":"JArr","payload":["List<JsonValue>"],"refTypes":["JsonValue"]}, ... ] } ] }
+```
+
+Additions over `types()`:
+- **`kind`** — `class` / `object` / `interface` / `enum` (distinct visual treatment).
+- **`refTypes` per field (and per enum variant)** — the graph-node names this type references.
+  Computed by `collect-ref-types`, which walks the `Type`: `List`/`Map` are transparent wrappers
+  (recurse into element types, don't emit the wrapper), scalars contribute nothing, and any
+  class/object/interface/enum named type is emitted (recursing into generic args too, so
+  `Inventory<Tool>` → `Tool` and `Map<String,JsonValue>` → `JsonValue`). Edges are therefore exact.
+- **interface nodes** (from `DK_INTERFACE`/`DK_BUILTIN_IFACE` decls) with their `methods` and a
+  server-computed **`implementors`** array (scan of entity monos whose decl `implements` it).
+- **enum nodes** (from `DK_ENUM` decls) with `variants` (name + payload type strings + `refTypes`).
+- **`builtin`** (decl has no AST node) — lets the client hide unreferenced stdlib nodes.
+
+`liveCount` reuses the arena live-count (same source as `types()`), so it climbs live in `scry run`
+and is 0 in `scry inspect`.
+
+## The graph view (viewer/app.js + style.css, hand-rolled SVG, no new vendor lib)
+
+A new top-level `GraphPane`, selected by a **Graph | List** toggle in the top bar, **defaulting to
+Graph** (the better first impression). List is the original rail + table + detail, untouched.
+
+- **Nodes** — one per class/object/interface/enum. `deriveGraph()` builds them + typed edges from
+  `schema()`. Distinct treatment per kind: class = blue rounded rect, object = gold (thicker), interface
+  = dashed teal stadium (italic label), enum = purple. Each carries a **live-count badge** (dim `0`
+  pre-run, accent when climbing). `schema()` is polled every 800 ms exactly like the rail polls
+  `types()`.
+- **Edges** — `field` (solid, → the field's entity type, incl. through `List`/`Map`/generic element
+  types), `implements` (dashed teal), `generic` (dotted, parsed from a mono's own `Name<…>`).
+  Arrowheads via SVG markers, clipped to the target node's box (AABB) so the head lands on the border.
+- **Layout — deterministic and stable.** `computeLayout()` is a hand-rolled force sim with **zero
+  RNG**: seed positions from the node index (golden-angle spread) + a per-kind vertical band
+  (interfaces up, classes centre, enums down), then a **fixed 600 iterations** of Fruchterman-Reingold
+  (repulsion + edge springs + band gravity) followed each iteration by a **hard AABB overlap-resolution
+  pass** (separate any two boxes that still intersect along the axis of least penetration). Same input
+  shape ⇒ byte-identical output ⇒ no jitter across reloads. Crucially the layout is `useMemo`'d on a
+  **structural signature** (sorted node names/kinds + edges) — *not* on `liveCount` — so positions
+  never move when counts tick. Pan (drag) + zoom (wheel), auto-fit once per new structure.
+- **Interaction / the unification.** Hover highlights a node's incident edges and dims the rest.
+  **Click**: a class/object with `liveCount > 0` drills straight into its existing instance **table**
+  (`onOpenType` → switch to List mode + `openTable`, reusing `NavContext`); a node with **no live
+  instances** (the inspect state) or an interface/enum shows a **static `NodeCard`** in place — fields,
+  methods, variants, implementors, all straight from the `schema()` payload, and, when live, a
+  `browse →` button. One graph, two states: that is the point.
+
+Dark-first with a `prefers-color-scheme` light path, reusing the existing viewer CSS variables.
+
+## What the portal phase (DECISIONS #13) will wrap
+
+The portal is a reverse-proxy hub where each `scry run`/`scry inspect` registers `{name, pid, port,
+schema, …}` and appears as a card. Phase 9 is built to slot straight in:
+
+- **`schema()` is the registration payload.** A program can hand the portal its `schema()` result at
+  register time; the portal can render the class graph as the card's preview **before the program is
+  even running** (an `inspect`-registered program is exactly a graph with all-zero badges).
+- **The graph is already state-agnostic and self-fetching.** `GraphPane` only needs an eval endpoint
+  that answers `schema()`; the portal routes that per-program (same one wire op it proxies for
+  everything else). Mounting it per program is: point its `evalSource` at the proxied port. No layout
+  recompute on reconnect (structural-signature memo), so a card can poll cheaply for climbing badges.
+- Suggested route: the portal owns `/{program}/` and proxies `/{program}/eval`; the viewer's Graph
+  view becomes each card's default, and clicking a live node deep-links into that program's List view.
+
+## Tests (1 new py gate + graph beats in ui-smoke; 261 total)
+
+- **`inspect` gate (`run_inspect_test`).** Boots `scry inspect examples/assistant.scry`; asserts the
+  schema-only note prints and **`main()` never ran** (no `you> ` prompt, no `delegating`/`goodbye` on
+  stdout); `types()` returns the full class set with **every `liveCount` 0**; `schema()` returns
+  Agent (class) + Tool (interface) + AgentStatus (enum) nodes at count 0 with a resolved
+  Agent→Conversation field `refTypes` edge and the enum's variants; `GET /` serves the viewer HTML and
+  `app.js` contains the graph view. Then kills it.
+- **`ui-smoke` graph beats (headless Chrome, gated/SKIPPED if absent).** On the landing Graph view,
+  asserts nodes for Agent + Conversation, ≥1 interface node and ≥1 enum node, an
+  Agent→Conversation field edge (`data-from`/`data-to` on the SVG `<line>`), and that **clicking the
+  live Agent node navigates to its instance table** — then falls through into the original
+  rail→table→detail→method click-through, still green.
+- All 260 prior tests unchanged and green.
+
+## Coil / JS friction (adds to Phase 1–8c's list)
+
+- **`refTypes` had to be server-side, and it was easy** — `collect-ref-types` reuses the exact same
+  `Type` walk / `List`/`Map`-by-name special-case as `ty-schema`; passing a `(mut rf)` i64 pointer as
+  the "first element?" flag is the same by-reference-local trick used for `al-push!` args.
+- **Enum variant payload types resolve through the decl.** `resolve-type (kid-at variant j) d` (the
+  same call `enum-payload-type` uses) gives the payload `Type`, so `List<JsonValue>` self-edges fall
+  straight out — no special casing for recursive enums.
+- **Deterministic layout means NO `Math.random()` anywhere** — the golden-angle seed + fixed
+  iteration count + AABB separation give a settled, non-overlapping, reload-stable layout; memoizing on
+  a structural signature (never on counts) is what keeps it from jittering when badges tick live.

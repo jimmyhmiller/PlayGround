@@ -221,3 +221,54 @@ rejected as a `TypeError` and the running program is untouched, same strict no-o
 The pitch: a real agent - model-driven tool use over a live API - that you can watch, pause, and
 rewrite while it runs, because it is an ordinary Scry program and the runtime gives every program a
 live, mutable window into itself.
+
+---
+
+# Scry demo, Phase 9 - see the code BEFORE it runs (the class graph)
+
+The same viewer that shows a live heap can show a program's **static structure without running it** -
+and it's literally the same graph, which just fills in once you run it.
+
+## 0. Inspect a program that has never run
+
+```
+./scry inspect examples/assistant.scry
+# viewer: http://localhost:7357
+#   (inspect: schema only, program not running - press Ctrl-C to exit)
+```
+
+`main()` never runs - no `you>` prompt, no agent output. It typechecks, builds the (empty) arenas,
+and serves the schema. Open the URL: the landing view is the **class graph**.
+
+## 1. Read the architecture at a glance
+
+The graph is the whole program's shape, laid out and readable:
+
+- **class** nodes (blue), the **object** `Json` (gold), **interface** nodes (dashed teal: `Tool`,
+  `Model`, `Runnable`) and **enum** nodes (purple: `AgentStatus`, `JsonValue`).
+- **solid edges** = a field references another type - `Agent -> Conversation`, `Agent -> Model`,
+  `Agent -> Tool` (through `List<Tool>`), `Conversation -> Message`.
+- **dashed edges** = `implements` - `ShellTool`/`SearchTool`/`CalcTool`/`WeatherTool -> Tool`,
+  `ScriptedModel`/`AnthropicModel -> Model`.
+- every node has a **live-count badge**: all `0`, because nothing is running yet.
+
+Hover a node to light up its relationships. Click `Tool` (an interface) and a static card shows its
+methods and its four implementors. Click `AgentStatus` and see its variants. This is the typechecker's
+knowledge, browsable - no execution required.
+
+## 2. Now run the SAME file and watch the nodes populate
+
+```
+# Ctrl-C the inspect, then:
+./scry run examples/assistant.scry
+```
+
+Open the viewer - **same graph, same layout** (the positions are computed from the schema shape, so
+nothing jumps). Type `research quantum computing` at the prompt and watch the **badges climb**: the
+`Agent` node ticks 1 -> 3 as sub-agents spawn, `Message` climbs as they work. Now click the `Agent`
+node: because it has live instances, it drills straight into the **instance table** you already know
+from the earlier demos - rows, fields, click through to a detail, invoke a method.
+
+One view, two states: the static schema you inspected and the live heap you're now steering are the
+**same node-link graph**. That's the pitch - the class diagram isn't a separate artifact you keep in
+sync by hand; it IS the running program, before and during the run.
