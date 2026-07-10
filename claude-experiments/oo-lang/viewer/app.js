@@ -326,6 +326,21 @@ async function refreshDetail() {
   const inst = r.value;
   const sc = schemaFor(cls);
   const prev = state.lastDetail;
+  // Preserve interactive state across the poll rebuild: open invoke cards, typed
+  // arguments, visible results, and input focus — otherwise the 750ms refresh
+  // closes the form out from under the user.
+  const saved = { open: new Set(), vals: {}, results: {}, focus: null };
+  for (const card of pane.querySelectorAll(".method")) {
+    const name = card.dataset.method;
+    if (!name) continue;
+    if (card.classList.contains("open")) saved.open.add(name);
+    card.querySelectorAll("input[data-param]").forEach((inp) => {
+      (saved.vals[name] = saved.vals[name] || {})[inp.dataset.param] = inp.value;
+      if (document.activeElement === inp) saved.focus = { method: name, param: inp.dataset.param, s: inp.selectionStart, e: inp.selectionEnd };
+    });
+    const res = card.querySelector(".invoke-result");
+    if (res && res.style.display !== "none") saved.results[name] = { html: res.innerHTML, cls: res.className.replace(/\bflash\b/, "").trim() };
+  }
   pane.innerHTML = "";
   const title = document.createElement("div"); title.className = "pane-title"; title.textContent = inst.ref;
   pane.appendChild(title);
@@ -360,12 +375,19 @@ async function refreshDetail() {
   if (sc && sc.methods.length) {
     const msec = document.createElement("div"); msec.className = "detail-section";
     msec.innerHTML = `<h3>methods</h3>`;
-    for (const m of sc.methods) msec.appendChild(methodCard(cls, slot, gen, m));
+    for (const m of sc.methods) msec.appendChild(methodCard(cls, slot, gen, m, saved));
     pane.appendChild(msec);
+    if (saved.focus) {
+      const inp = msec.querySelector(`.method[data-method="${saved.focus.method}"] input[data-param="${saved.focus.param}"]`);
+      if (inp) { inp.focus(); try { inp.setSelectionRange(saved.focus.s, saved.focus.e); } catch (_) {} }
+    }
   }
 }
-function methodCard(cls, slot, gen, m) {
+function methodCard(cls, slot, gen, m, saved) {
+  saved = saved || { open: new Set(), vals: {}, results: {} };
   const card = document.createElement("div"); card.className = "method";
+  card.dataset.method = m.name;
+  if (saved.open.has(m.name)) card.classList.add("open");
   const head = document.createElement("div"); head.className = "method-head";
   const sig = document.createElement("span"); sig.className = "method-sig";
   const params = m.params.map((p) => `${p.name}: ${p.type}`).join(", ");
@@ -378,10 +400,13 @@ function methodCard(cls, slot, gen, m) {
     const row = document.createElement("div"); row.className = "arg-row";
     const lab = document.createElement("label"); lab.textContent = `${p.name}: ${p.type}`;
     const inp = document.createElement("input"); inp.placeholder = literalHint(p.type);
+    inp.dataset.param = p.name;
+    if (saved.vals[m.name] && saved.vals[m.name][p.name] !== undefined) inp.value = saved.vals[m.name][p.name];
     inputs[p.name] = { inp, type: p.type };
     row.appendChild(lab); row.appendChild(inp); body.appendChild(row);
   }
   const result = document.createElement("div"); result.style.display = "none"; result.className = "invoke-result";
+  if (saved.results[m.name]) { result.style.display = "block"; result.className = saved.results[m.name].cls; result.innerHTML = saved.results[m.name].html; }
   const doInvoke = async () => {
     const args = m.params.map((p) => literalFor(inputs[p.name].inp.value, p.type)).join(", ");
     const src = `${cls}.at(${slot}, ${gen}).${m.name}(${args})`;
