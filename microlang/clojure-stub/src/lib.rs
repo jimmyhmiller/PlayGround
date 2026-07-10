@@ -934,7 +934,7 @@ fn call1<M: ValueModel>(rt: &mut Runtime<M>, f: &str, arg: u64) -> u64 {
 
 fn record_field0<M: ValueModel>(rt: &Runtime<M>, form: u64, tag: &str) -> Option<u64> {
     if let Val::Ref(id) = rt.decode(form) {
-        if let Obj::Record { type_id, fields } = &rt.heap[id as usize] {
+        if let Obj::Record { type_id, fields } = &rt.heap()[id as usize] {
             if rt.sym_name(*type_id) == tag {
                 return fields.first().copied();
             }
@@ -1166,7 +1166,7 @@ fn defmacro_name<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Option<Sym> {
 /// sets, `:kw` keywords, `(..)` lists.
 pub fn clj_str<M: ValueModel>(rt: &Runtime<M>, v: u64) -> String {
     match rt.decode(v) {
-        Val::Ref(id) => match &rt.heap[id as usize] {
+        Val::Ref(id) => match &rt.heap()[id as usize] {
             Obj::Record { type_id, fields } => {
                 let tag = rt.sym_name(*type_id);
                 match tag {

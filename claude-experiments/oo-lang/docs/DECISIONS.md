@@ -69,6 +69,24 @@ The raw project brief is in `../claude.md` — read it first; this file pins wha
 12. **Name: Scry** (Jimmy ruling). CLI `scry`, so `scry run agents.scry`. The directory
     stays `oo-lang`; every doc and example uses Scry. (File extension `.scry`: default,
     flag if a doc has a reason to prefer something shorter.)
+13. **Multi-program portal — reverse-proxy hub** (Jimmy ruling). You launch ONE persistent
+    portal at a fixed URL and sit at it. Each `scry run` binds an ephemeral port and
+    registers {name, pid, port, schema, start-time} with the portal; programs pop up as
+    cards when they start and disappear (or grey out) when they exit. The portal serves the
+    viewer shell and REVERSE-PROXIES the eval channel to the right program (`/p/<id>/eval`)
+    — one origin, no port juggling. Supersedes the one-server-per-program model from
+    decision #8's implementation (the eval channel itself is unchanged — still the only wire
+    op; the portal just routes it). This demos far better than a bare per-program URL.
+14. **Static views — the class graph before it runs** (Jimmy ruling). The typechecker
+    already resolves the full static structure (field-type refs, `implements`, generic
+    instantiations, method sigs — it's in the mono table + itables). Expose it as a schema
+    dump and render a **node-link class-relationship graph** (classes/interfaces/enums as
+    nodes; field/implements/generic edges), clickable to fields/methods/source. Two entry
+    points: `scry inspect <file>` registers the static schema with the portal WITHOUT
+    running (pure "see the code first"); `scry run` registers the schema at startup so the
+    graph is visible immediately, then the SAME nodes gain live instance counts and become
+    drillable once main() populates the arenas. Static graph and live inspector are one
+    unified view, not two.
 
 ## Open (docs should propose, flag as OPEN, not silently decide)
 

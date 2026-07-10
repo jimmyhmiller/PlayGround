@@ -265,7 +265,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
             };
             // Callable-object hook: a non-closure record invoked with a registered
             // apply handler redirects to `(handler object args…)` (e.g. keywords).
-            if let Obj::Record { .. } = &rt.heap[id as usize] {
+            if let Obj::Record { .. } = &rt.heap()[id as usize] {
                 if let Some(h) = rt.apply_handler() {
                     let mut new_args = vec![callee];
                     new_args.extend_from_slice(&args);
@@ -274,7 +274,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                     continue;
                 }
             }
-            let (nparams, variadic, body, env) = match &rt.heap[id as usize] {
+            let (nparams, variadic, body, env) = match &rt.heap()[id as usize] {
                 Obj::Closure {
                     nparams,
                     variadic,

@@ -16,7 +16,7 @@ fn run<M: ValueModel>(label: &str, src: &str) {
     let cs = TreeWalk;
     let mut sx = microlang::sexpr::Sexpr::new(&mut rt);
     let forms = microlang::sexpr::read_all(&mut rt, src);
-    let before = rt.allocs;
+    let before = rt.allocs();
     let mut res = rt.encode(Val::Nil);
     for f in forms {
         res = sx.eval_top(&mut rt, &cs, f);
@@ -24,7 +24,7 @@ fn run<M: ValueModel>(label: &str, src: &str) {
     println!(
         "  [{label:6}] {src:<28} => {:<6}  ({} heap allocs during eval)",
         rt.print(res),
-        rt.allocs - before
+        rt.allocs() - before
     );
 }
 

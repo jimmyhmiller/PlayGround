@@ -258,7 +258,7 @@ fn sym<M: ValueModel>(rt: &mut Runtime<M>, n: &str) -> u64 {
 
 fn field0<M: ValueModel>(rt: &Runtime<M>, v: u64, tag: &str) -> Option<u64> {
     if let Val::Ref(id) = rt.decode(v) {
-        if let Obj::Record { type_id, fields } = &rt.heap[id as usize] {
+        if let Obj::Record { type_id, fields } = &rt.heap()[id as usize] {
             if rt.sym_name(*type_id) == tag {
                 return fields.first().copied();
             }

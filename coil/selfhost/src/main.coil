@@ -36,12 +36,6 @@
 
 ; ---- LLVM backend entry points (the only libLLVM-dependent code) ----
 
-; Link one relocatable LLVM-emitted Wasm object to a standalone module without
-; spawning a linker. The C++/LLD boundary is in selfhost/wasm_link.cpp.
-(defn wasm-link-program [(obj-cstr (ptr i8)) (out-cstr (ptr i8))] (-> i64)
-  (if (icmp-eq (coil_wasm_link obj-cstr out-cstr) 0) 0
-    (do (ps (stderr) "error: in-process Wasm linker failed\n") 1)))
-
 ; Returns 1 if the pipeline succeeded (IR printed), 0 if a diagnostic was reported.
 (defn dump-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (triple (ptr i8)) (path (slice u8))] (-> i64)
   (let [w (stdout)
@@ -61,7 +55,7 @@
         targetout (alloc-stack (ptr i8))
         errout    (alloc-stack (ptr i8))]
     ; AsmPrinter init (targets themselves were initialized inside codegen-module).
-    (LLVMInitializeAArch64AsmPrinter) (LLVMInitializeX86AsmPrinter) (LLVMInitializeWebAssemblyAsmPrinter)
+    (LLVMInitializeAArch64AsmPrinter) (LLVMInitializeX86AsmPrinter)
     (LLVMGetTargetFromTriple triple targetout errout)
     (let [tm  (LLVMCreateTargetMachine (load targetout) triple c"generic" c"" 3 2 0)
           pbo (LLVMCreatePassBuilderOptions)
@@ -106,5 +100,4 @@
                (fnptr-of dump-ir-program)
                (fnptr-of do-normalize)
                (fnptr-of do-cimport)
-               (fnptr-of wasm-link-program)
                1))

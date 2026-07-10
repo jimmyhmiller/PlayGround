@@ -354,7 +354,7 @@ impl<M: ModelEmit> CodeSpace<M> for BytecodeVm<M> {
         let Val::Ref(id) = rt.decode(callee) else {
             panic!("value not callable: {}", rt.print(callee));
         };
-        let (nparams, variadic, body, env) = match &rt.heap[id as usize] {
+        let (nparams, variadic, body, env) = match &rt.heap()[id as usize] {
             Obj::Closure { nparams, variadic, body, env } => {
                 (*nparams, *variadic, body.clone(), env.clone())
             }

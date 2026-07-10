@@ -301,7 +301,7 @@ fn apply_callable<M: ValueModel>(rt: &mut Runtime<M>, callee: u64, args: &[u64],
         PartialCont(Arc<Kont>),
         Bad,
     }
-    let what = match &rt.heap[id as usize] {
+    let what = match &rt.heap()[id as usize] {
         Obj::Closure { nparams, variadic, body, env } => {
             What::Closure(*nparams, *variadic, body.clone(), env.clone())
         }

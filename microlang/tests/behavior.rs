@@ -31,11 +31,11 @@ fn immediacy_decides_allocation() {
         let cs = TreeWalk;
         let mut sx = microlang::sexpr::Sexpr::new(&mut rt);
         let forms = microlang::sexpr::read_all(&mut rt, src);
-        let before = rt.allocs;
+        let before = rt.allocs();
         for f in forms {
             sx.eval_top(&mut rt, &cs, f);
         }
-        rt.allocs - before
+        rt.allocs() - before
     }
     assert_eq!(allocs_for::<LowBitModel>("(+ (* 2 3) (* 4 5))"), 0);
     assert!(allocs_for::<NanBoxModel>("(+ (* 2 3) (* 4 5))") > 0);
@@ -210,7 +210,7 @@ fn relocation_moves_and_handle_rereads() {
     }
     rt.collect(&None);
     let moved = h.get(&rt);
-    assert!(rt.relocated > 0, "the collector should relocate the survivor");
+    assert!(rt.relocated() > 0, "the collector should relocate the survivor");
     assert_ne!(stale, moved, "the object moved to a new address");
     assert_eq!(rt.print(moved), "(1)"); // handle re-read is correct
     rt.pop_root();
@@ -235,7 +235,7 @@ fn globals_and_env_sound_across_move() {
         "#,
     );
     assert_eq!(rt.print(r), "1");
-    assert!(rt.relocated > 0);
+    assert!(rt.relocated() > 0);
     assert_eq!(rt.root_depth(), 0, "roots balanced after evaluation");
 }
 
@@ -283,7 +283,7 @@ fn hard_suite<M: ValueModel>() {
             rt.cons(one, one);
         }
         rt.collect(&None);
-        assert!(rt.relocated > 0);
+        assert!(rt.relocated() > 0);
         assert_eq!(rt.print(h.get(&rt)), "(1)");
         rt.pop_root();
         assert!(catch_unwind(AssertUnwindSafe(|| rt.as_cons(stale))).is_err());
@@ -367,7 +367,7 @@ fn dispatch_survives_moving_gc() {
         "#,
     );
     assert_eq!(rt.print(r), "9");
-    assert!(rt.relocated > 0);
+    assert!(rt.relocated() > 0);
 }
 
 // ── speculation + deopt axis: swappable policies ────────────

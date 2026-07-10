@@ -74,9 +74,9 @@ fn delimited_continuation_survives_moving_gc() {
         (+ (k 5) (k 100))
     ";
 
-    let before = rt.relocated;
+    let before = rt.relocated();
     let got = eval(&mut rt, prog);
-    let moved = rt.relocated - before;
+    let moved = rt.relocated() - before;
 
     // The collection actually relocated objects (not a no-op) ...
     assert!(moved > 0, "expected the collector to relocate objects; moved {moved}");

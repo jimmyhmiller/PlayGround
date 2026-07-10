@@ -24,7 +24,7 @@ fn main() {
     let moved = handle.get(&rt);
     println!(
         "relocation: 0x{stale:x} -> 0x{moved:x}   ({} objects relocated)",
-        rt.relocated
+        rt.relocated()
     );
     println!("  handle re-read : {}", rt.print(moved)); // correct: (1)
 
@@ -60,7 +60,7 @@ fn main() {
     println!(
         "\ncompiler under a relocating macro:\n  (f (firstof (40)) (h)) => {}   [{} objects relocated]",
         rt2.print(r),
-        rt2.relocated
+        rt2.relocated()
     );
     println!(
         "\nThe form moved while being compiled; every access went through a root,\n\

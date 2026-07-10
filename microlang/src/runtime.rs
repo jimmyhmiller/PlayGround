@@ -38,8 +38,9 @@ impl std::hash::Hasher for SymHasher {
 }
 /// A `HashMap` keyed by `Sym` with the fast symbol hasher.
 pub type SymMap<V> = HashMap<Sym, V, BuildHasherDefault<SymHasher>>;
+use std::cell::UnsafeCell;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::bigint::BigInt;
 use crate::dispatch::{Dispatch, Megamorphic, MethodRegistry};
@@ -123,88 +124,136 @@ impl std::ops::IndexMut<usize> for Heap {
     }
 }
 
-pub struct Runtime<M: ValueModel> {
-    pub heap: Heap,
-    /// Count of heap allocations. Instrumentation so the value axis is visible.
-    pub allocs: u64,
-    /// Objects relocated (copied to to-space) by the moving collector so far.
-    pub relocated: u64,
-    /// Objects reclaimed (not carried forward) by the collector so far.
-    pub freed: u64,
-    /// The constant pool: literal/quoted values referenced by `Ir` via a
-    /// `ConstId`. A GC root the collector rewrites — this indirection is why
-    /// `Ir` holds no heap pointers a moving collector could not relocate.
-    pub(crate) consts: Vec<u64>,
-    /// The shadow stack: the GC root set for transient mutator/compiler values.
-    /// `push_root`/`pop_root` (LIFO) manage it; the collector rewrites entries
-    /// here to the relocated address, which is what a `Handle` re-reads.
-    pub(crate) shadow: Vec<u64>,
-    sym_names: Vec<String>,
-    sym_ids: HashMap<String, Sym>,
-    /// The global environment: a dense array of VALUES indexed by `Sym`. This is
-    /// the sole store (there is no parallel hash map). `intern` extends it (so it
-    /// is always sym-sized and only grows at analyze time, never during a run);
-    /// `define_global`/`set_global_val` write it; `global` reads it. A native
-    /// backend loads a global inline from this array's stable base. Slots default
-    /// to `GLOBAL_UNBOUND` (a bit pattern no value model can produce), which the
-    /// JIT treats as "fall back to the slow, late-binding lookup". Being one flat
-    /// array of `u64` makes it trivial to make atomic for shared-thread access.
-    /// Now `AtomicU64` with a reserved (stable-base) buffer: concurrent readers
-    /// load a slot lock-free, `def`/`set!` store atomically, and the native
-    /// backend's inline raw-pointer read (`AtomicU64` is layout-identical to
-    /// `u64`) is sound across threads.
-    pub global_slots: Vec<AtomicU64>,
-    // ── dispatch axis ──
-    /// `(method, type) -> impl closure`. The source of truth; a GC root.
+/// Reserved capacity for the append-only, stable-base tables (`consts`,
+/// `sym_names`, `global_slots`). They must never reallocate, because concurrent
+/// readers hold raw/unsafe references into them (the JIT reads `consts`/globals
+/// through a base pointer; `sym_name` returns a borrowed `&str`). Growth past
+/// this panics loudly rather than dangling — a clear error, not UB.
+const TABLE_CAP: usize = 1 << 20;
+
+/// The mutable dispatch tables, guarded by one lock. `resolve` copies a `u64`
+/// impl out and drops the guard before the caller invokes it, so no lock is held
+/// across a method call (no reentrancy).
+pub(crate) struct Tables {
     pub(crate) methods: MethodRegistry,
-    /// Symbols known to be method names, so a frontend turns `(name recv ..)`
-    /// into a `Dispatch` site. Updated when a `defmethod` evaluates.
     method_names: HashSet<Sym>,
-    /// The swappable dispatch strategy (megamorphic / mono IC / poly IC).
     pub(crate) dispatch: Box<dyn Dispatch>,
-    /// Optional "apply handler": a frontend may name a global fn that the backend
-    /// invokes when a NON-closure heap object is called (like Python `__call__`),
-    /// e.g. to make Clojure keywords callable. Stored as a `Sym` (re-read from
-    /// `globals`) so it is GC-safe. `None` => calling a non-closure is an error.
-    apply_fn: Option<Sym>,
-    /// Monotonic tag for escape continuations.
-    escape_tags: u64,
+}
+
+/// State SHARED by every thread over one `Arc`. Its interior mutability is the
+/// whole game: the heap is read lock-free (stable segmented addresses) and
+/// mutated only under `heap_lock` (alloc / GC / in-place set); the append-only
+/// tables are read lock-free from their reserved, never-reallocated buffers and
+/// appended under a lock; globals are atomic; dispatch is behind a short lock.
+/// No lock is ever held across a callback into the interpreter, so a thread
+/// blocked in `deref` holds nothing another thread needs.
+pub struct Shared<M: ValueModel> {
+    pub(crate) heap: UnsafeCell<Heap>,
+    /// Serializes heap MUTATION (alloc, GC, in-place vector set). Reads are
+    /// lock-free (segmented heap => stable object addresses).
+    pub(crate) heap_lock: Mutex<()>,
+    allocs: AtomicU64,
+    pub(crate) relocated: AtomicU64,
+    pub(crate) freed: AtomicU64,
+    /// Constant pool (reserved, stable base for the JIT's inline reads).
+    pub(crate) consts: UnsafeCell<Vec<u64>>,
+    consts_lock: Mutex<()>,
+    /// Interner: names in a reserved, stable buffer (lock-free `&str` reads);
+    /// the dedup map + append serialized by `sym_lock`.
+    sym_names: UnsafeCell<Vec<String>>,
+    sym_ids: UnsafeCell<HashMap<String, Sym>>,
+    sym_lock: Mutex<()>,
+    /// Global environment: atomic slots, reserved stable base (see `global`).
+    pub global_slots: Vec<AtomicU64>,
+    pub(crate) tables: Mutex<Tables>,
+    apply_fn: AtomicU64, // Sym+1, or 0 for None
+    escape_tags: AtomicU64,
+    _pd: PhantomData<fn() -> M>,
+}
+
+// SAFETY: every field is accessed under the discipline documented on `Shared`:
+// heap/consts/interner reads are to stable addresses that are never freed or
+// moved except under a lock (heap) or never during a run (append-only tables);
+// all mutation is serialized by the corresponding lock; globals/counters are
+// atomic. No `&`/`&mut` into the interior outlives the operation that takes it.
+unsafe impl<M: ValueModel> Send for Shared<M> {}
+unsafe impl<M: ValueModel> Sync for Shared<M> {}
+
+pub struct Runtime<M: ValueModel> {
+    /// State shared with sibling threads (heap, globals, interner, dispatch).
+    pub(crate) shared: Arc<Shared<M>>,
+    /// The shadow stack: this THREAD's GC root set for transient values.
+    /// Per-thread (not shared) — each mutator handle owns its own.
+    pub(crate) shadow: Vec<u64>,
     _pd: PhantomData<fn() -> M>,
 }
 
 impl<M: ValueModel> Runtime<M> {
     pub fn new() -> Self {
-        Runtime {
-            heap: Heap::new(),
-            allocs: 0,
-            relocated: 0,
-            freed: 0,
-            consts: Vec::new(),
-            shadow: Vec::new(),
-            sym_names: Vec::new(),
-            sym_ids: HashMap::new(),
-            global_slots: Vec::with_capacity(1 << 16),
-            methods: HashMap::new(),
-            method_names: HashSet::new(),
-            dispatch: Box::new(Megamorphic::new()),
-            apply_fn: None,
-            escape_tags: 0,
+        let shared = Shared {
+            heap: UnsafeCell::new(Heap::new()),
+            heap_lock: Mutex::new(()),
+            allocs: AtomicU64::new(0),
+            relocated: AtomicU64::new(0),
+            freed: AtomicU64::new(0),
+            consts: UnsafeCell::new(Vec::with_capacity(TABLE_CAP)),
+            consts_lock: Mutex::new(()),
+            sym_names: UnsafeCell::new(Vec::with_capacity(TABLE_CAP)),
+            sym_ids: UnsafeCell::new(HashMap::new()),
+            sym_lock: Mutex::new(()),
+            global_slots: (0..0).map(|_| AtomicU64::new(GLOBAL_UNBOUND)).collect(),
+            tables: Mutex::new(Tables {
+                methods: HashMap::new(),
+                method_names: HashSet::new(),
+                dispatch: Box::new(Megamorphic::new()),
+            }),
+            apply_fn: AtomicU64::new(0),
+            escape_tags: AtomicU64::new(0),
             _pd: PhantomData,
-        }
+        };
+        // Pre-size the global array to its reserved cap so its base is stable and
+        // slots exist for every future symbol (index == Sym).
+        let mut slots = Vec::with_capacity(TABLE_CAP);
+        slots.extend((0..TABLE_CAP).map(|_| AtomicU64::new(GLOBAL_UNBOUND)));
+        let shared = Shared { global_slots: slots, ..shared };
+        Runtime { shared: Arc::new(shared), shadow: Vec::new(), _pd: PhantomData }
+    }
+
+    /// A fresh mutator handle for another OS thread, sharing this runtime's heap,
+    /// globals, interner, and dispatch. The new handle has its OWN (empty) shadow
+    /// stack. This is what `spawn`/`future` hands to a `std::thread`.
+    pub fn thread_handle(&self) -> Self {
+        Runtime { shared: self.shared.clone(), shadow: Vec::new(), _pd: PhantomData }
+    }
+
+    // ── heap access (lock-free reads to stable addresses) ───
+    /// The heap for READING. Object addresses are stable (segmented), so a shared
+    /// reference is sound even while another thread allocates.
+    #[inline]
+    pub fn heap(&self) -> &Heap {
+        unsafe { &*self.shared.heap.get() }
+    }
+    /// The heap for MUTATION. Callers MUST hold `heap_lock` (alloc/GC/set take it).
+    #[inline]
+    fn heap_mut(&self) -> &mut Heap {
+        unsafe { &mut *self.shared.heap.get() }
     }
 
     // ── symbols ─────────────────────────────────────────────
-    pub fn intern(&mut self, s: &str) -> Sym {
-        if let Some(&id) = self.sym_ids.get(s) {
+    pub fn intern(&self, s: &str) -> Sym {
+        let _g = self.shared.sym_lock.lock().unwrap();
+        // SAFETY: the interner is only mutated here, under `sym_lock`; the
+        // reserved buffers never reallocate (TABLE_CAP), so concurrent lock-free
+        // readers of `sym_name` see stable `&str`s.
+        let ids = unsafe { &mut *self.shared.sym_ids.get() };
+        if let Some(&id) = ids.get(s) {
             return id;
         }
-        let id = self.sym_names.len() as Sym;
-        self.sym_names.push(s.to_string());
-        self.sym_ids.insert(s.to_string(), id);
-        // Keep the dense global mirror sym-sized. Growing it here (analyze time)
-        // means it never reallocates during a run, so the native backend can hold
-        // a stable base pointer to it across a whole call chain.
-        self.global_slots.push(AtomicU64::new(GLOBAL_UNBOUND));
+        let names = unsafe { &mut *self.shared.sym_names.get() };
+        let id = names.len() as Sym;
+        assert!(names.len() < TABLE_CAP, "interner overflow: raise TABLE_CAP");
+        names.push(s.to_string());
+        ids.insert(s.to_string(), id);
         id
     }
 
@@ -212,7 +261,7 @@ impl<M: ValueModel> Runtime<M> {
     /// dense `global_slots` array IS the store (no separate map), so this is a
     /// single indexed load, and a `Sym` beyond the current slot count is unbound.
     pub fn global(&self, sym: Sym) -> Option<u64> {
-        match self.global_slots.get(sym as usize).map(|a| a.load(GLOBAL_ORDER)) {
+        match self.shared.global_slots.get(sym as usize).map(|a| a.load(GLOBAL_ORDER)) {
             Some(v) if v != GLOBAL_UNBOUND => Some(v),
             _ => None,
         }
@@ -220,20 +269,20 @@ impl<M: ValueModel> Runtime<M> {
 
     /// Is this global bound? (`set!`/redefinition checks.)
     pub fn global_defined(&self, sym: Sym) -> bool {
-        matches!(self.global_slots.get(sym as usize).map(|a| a.load(GLOBAL_ORDER)), Some(v) if v != GLOBAL_UNBOUND)
+        matches!(self.shared.global_slots.get(sym as usize).map(|a| a.load(GLOBAL_ORDER)), Some(v) if v != GLOBAL_UNBOUND)
     }
 
     /// Define (or redefine) a global. Atomic store, so `&self` suffices — a step
     /// toward the shared runtime where a thread defines through an `Arc`.
     pub fn define_global(&self, sym: Sym, val: u64) {
-        if let Some(slot) = self.global_slots.get(sym as usize) {
+        if let Some(slot) = self.shared.global_slots.get(sym as usize) {
             slot.store(val, GLOBAL_ORDER);
         }
     }
 
     /// Assign an existing global's value (`set!`). Returns `false` if unbound.
     pub fn set_global_val(&self, sym: Sym, val: u64) -> bool {
-        match self.global_slots.get(sym as usize) {
+        match self.shared.global_slots.get(sym as usize) {
             Some(slot) if slot.load(GLOBAL_ORDER) != GLOBAL_UNBOUND => {
                 slot.store(val, GLOBAL_ORDER);
                 true
@@ -246,38 +295,62 @@ impl<M: ValueModel> Runtime<M> {
     /// `AtomicU64` is layout-identical to `u64`, so the native tier reads slots
     /// through this `*const u64` directly.
     pub fn global_slots_ptr(&self) -> *const u64 {
-        self.global_slots.as_ptr() as *const u64
+        self.shared.global_slots.as_ptr() as *const u64
     }
     pub fn global_slots_len(&self) -> usize {
-        self.global_slots.len()
+        self.shared.global_slots.len()
     }
     pub fn sym_name(&self, s: Sym) -> &str {
-        &self.sym_names[s as usize]
+        // SAFETY: `s` was interned (< names.len()), the buffer never reallocates
+        // (TABLE_CAP), and a `String` at an index is never mutated once written,
+        // so this borrow is valid for as long as the `Shared` (and thus `&self`).
+        unsafe { (&*self.shared.sym_names.get()).get_unchecked(s as usize) }
     }
 
     // ── heap ────────────────────────────────────────────────
-    pub fn alloc(&mut self, o: Obj) -> HeapId {
-        self.allocs += 1;
-        self.heap.push(o);
-        (self.heap.len() - 1) as HeapId
+    pub fn alloc(&self, o: Obj) -> HeapId {
+        let _g = self.shared.heap_lock.lock().unwrap();
+        self.shared.allocs.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: heap mutation is serialized by `heap_lock`; the segmented heap
+        // never relocates existing objects on push, so lock-free readers are safe.
+        self.heap_mut().push(o) as HeapId
     }
 
     /// Intern a literal into the constant pool, returning its id. The pool is a
     /// GC root, so the literal survives collection and is rewritten if it moves.
-    pub fn intern_const(&mut self, bits: u64) -> ConstId {
-        self.consts.push(bits);
-        (self.consts.len() - 1) as ConstId
+    pub fn intern_const(&self, bits: u64) -> ConstId {
+        let _g = self.shared.consts_lock.lock().unwrap();
+        // SAFETY: appends serialized by `consts_lock`; reserved buffer never
+        // reallocates, so the JIT's inline base-pointer reads stay valid.
+        let consts = unsafe { &mut *self.shared.consts.get() };
+        assert!(consts.len() < TABLE_CAP, "const pool overflow: raise TABLE_CAP");
+        consts.push(bits);
+        (consts.len() - 1) as ConstId
     }
 
     pub fn get_const(&self, id: ConstId) -> u64 {
-        self.consts[id as usize]
+        // SAFETY: `id` was handed out by `intern_const` (< len); reserved buffer
+        // is never reallocated and the slot is written before the id escapes.
+        unsafe { *(&*self.shared.consts.get()).get_unchecked(id as usize) }
     }
 
     /// Base pointer of the constant pool, for a native backend that loads
     /// constants inline instead of through a call. Valid until the pool grows
     /// (which only happens at analyze time, never during execution).
     pub fn consts_ptr(&self) -> *const u64 {
-        self.consts.as_ptr()
+        // SAFETY: reserved buffer, never reallocated; base is stable for a run.
+        unsafe { (*self.shared.consts.get()).as_ptr() }
+    }
+
+    /// Instrumentation counters (shared across sibling threads).
+    pub fn allocs(&self) -> u64 {
+        self.shared.allocs.load(Ordering::Relaxed)
+    }
+    pub fn relocated(&self) -> u64 {
+        self.shared.relocated.load(Ordering::Relaxed)
+    }
+    pub fn freed(&self) -> u64 {
+        self.shared.freed.load(Ordering::Relaxed)
     }
 
     /// Box a non-immediate category, encode an immediate one. THE value-axis
@@ -320,7 +393,7 @@ impl<M: ValueModel> Runtime<M> {
             RawTag::Sym => Val::Sym(M::R::as_sym(bits)),
             RawTag::Ref => {
                 let id = M::R::as_ref(bits);
-                match &self.heap[id as usize] {
+                match &self.heap()[id as usize] {
                     Obj::BigInt(i) => Val::Int(*i),
                     Obj::BoxFloat(f) => Val::Float(*f),
                     Obj::Moved(_) => panic!(
@@ -351,7 +424,7 @@ impl<M: ValueModel> Runtime<M> {
     }
     pub fn as_cons(&self, bits: u64) -> Option<(u64, u64)> {
         if let RawTag::Ref = M::R::tag_of(bits) {
-            match &self.heap[M::R::as_ref(bits) as usize] {
+            match &self.heap()[M::R::as_ref(bits) as usize] {
                 Obj::Cons { head, tail } => return Some((*head, *tail)),
                 Obj::Moved(_) => panic!(
                     "use-after-move: 0x{bits:x} is a stale pointer into from-space; \
@@ -395,7 +468,7 @@ impl<M: ValueModel> Runtime<M> {
                 if x == y {
                     return true; // same object
                 }
-                match (&self.heap[x as usize], &self.heap[y as usize]) {
+                match (&self.heap()[x as usize], &self.heap()[y as usize]) {
                     (Obj::Cons { .. }, Obj::Cons { .. }) => {
                         let (ha, ta) = self.as_cons(a).unwrap();
                         let (hb, tb) = self.as_cons(b).unwrap();
@@ -471,7 +544,7 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("string-length: not a string");
                 };
-                let Obj::Str(s) = &self.heap[id as usize] else {
+                let Obj::Str(s) = &self.heap()[id as usize] else {
                     panic!("string-length: not a string");
                 };
                 let n = s.chars().count() as i128;
@@ -481,7 +554,7 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("char->integer: not a char");
                 };
-                let Obj::Char(c) = &self.heap[id as usize] else {
+                let Obj::Char(c) = &self.heap()[id as usize] else {
                     panic!("char->integer: not a char");
                 };
                 self.encode(Val::Int(*c as i128))
@@ -506,7 +579,7 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Int(i) = self.decode(args[1]) else {
                     panic!("vector-ref: index must be an int");
                 };
-                let Obj::Vector(elems) = &self.heap[id as usize] else {
+                let Obj::Vector(elems) = &self.heap()[id as usize] else {
                     panic!("vector-ref: not a vector");
                 };
                 *elems
@@ -520,7 +593,7 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Int(i) = self.decode(args[1]) else {
                     panic!("vector-set!: index must be an int");
                 };
-                let Obj::Vector(elems) = &mut self.heap[id as usize] else {
+                let Obj::Vector(elems) = &mut self.heap_mut()[id as usize] else {
                     panic!("vector-set!: not a vector");
                 };
                 let slot = elems
@@ -533,7 +606,7 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("vector-length: not a vector");
                 };
-                let Obj::Vector(elems) = &self.heap[id as usize] else {
+                let Obj::Vector(elems) = &self.heap()[id as usize] else {
                     panic!("vector-length: not a vector");
                 };
                 self.encode(Val::Int(elems.len() as i128))
@@ -546,7 +619,7 @@ impl<M: ValueModel> Runtime<M> {
                 // Unpack a `values` packet into a list; a lone value becomes a
                 // one-element list so single-valued producers work too.
                 if let Val::Ref(id) = self.decode(args[0]) {
-                    if let Obj::Values(vals) = &self.heap[id as usize] {
+                    if let Obj::Values(vals) = &self.heap()[id as usize] {
                         let vals = vals.clone();
                         return self.vec_to_list(&vals);
                     }
@@ -606,7 +679,7 @@ impl<M: ValueModel> Runtime<M> {
                     Val::Bool(_) => "Boolean",
                     Val::Nil => "nil",
                     Val::Sym(_) => "Symbol",
-                    Val::Ref(id) => match &self.heap[id as usize] {
+                    Val::Ref(id) => match &self.heap()[id as usize] {
                         Obj::Record { type_id, .. } => {
                             let s = *type_id;
                             return M::R::enc_sym(s);
@@ -633,7 +706,7 @@ impl<M: ValueModel> Runtime<M> {
             }
             Prim::NFields => {
                 let n = match self.decode(args[0]) {
-                    Val::Ref(id) => match &self.heap[id as usize] {
+                    Val::Ref(id) => match &self.heap()[id as usize] {
                         Obj::Record { fields, .. } => fields.len() as i128,
                         _ => 0,
                     },
@@ -648,7 +721,7 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Int(i) = self.decode(args[1]) else {
                     panic!("field: index must be an int");
                 };
-                match &self.heap[id as usize] {
+                match &self.heap()[id as usize] {
                     Obj::Record { fields, .. } => fields[i as usize],
                     _ => panic!("field: not a record"),
                 }
@@ -662,50 +735,55 @@ impl<M: ValueModel> Runtime<M> {
 
     // ── dispatch axis ───────────────────────────────────────
     /// Swap the dispatch strategy. Nothing else changes — the axis is free.
-    pub fn set_dispatch(&mut self, d: Box<dyn Dispatch>) {
-        self.dispatch = d;
+    pub fn set_dispatch(&self, d: Box<dyn Dispatch>) {
+        self.shared.tables.lock().unwrap().dispatch = d;
     }
     pub fn dispatch_stats(&self) -> crate::dispatch::DispatchStats {
-        self.dispatch.stats()
+        self.shared.tables.lock().unwrap().dispatch.stats()
     }
     /// The receiver's type tag (a record's `type_id`). `None` for non-records.
     pub fn type_of(&self, bits: u64) -> Option<Sym> {
         if let Val::Ref(id) = self.decode(bits) {
-            if let Obj::Record { type_id, .. } = &self.heap[id as usize] {
+            if let Obj::Record { type_id, .. } = &self.heap()[id as usize] {
                 return Some(*type_id);
             }
         }
         None
     }
-    pub fn register_method(&mut self, name: Sym, ty: Sym, imp: u64) {
-        self.method_names.insert(name);
-        self.methods.insert((name, ty), imp);
+    pub fn register_method(&self, name: Sym, ty: Sym, imp: u64) {
+        let mut t = self.shared.tables.lock().unwrap();
+        t.method_names.insert(name);
+        t.methods.insert((name, ty), imp);
     }
     /// Is `name` a registered method (so a frontend should compile `(name recv)`
     /// to a `Dispatch`)? The dispatch axis's compile-time query.
     pub fn is_method_name(&self, name: Sym) -> bool {
-        self.method_names.contains(&name)
+        self.shared.tables.lock().unwrap().method_names.contains(&name)
     }
     /// Register the global fn a backend should invoke when a non-closure object
     /// is called (see `apply_fn`). The frontend sets this to a callable-object
-    /// dispatcher.
-    pub fn set_apply_fn(&mut self, name: Sym) {
-        self.apply_fn = Some(name);
+    /// dispatcher. Stored as `Sym + 1` (0 = None) in an atomic.
+    pub fn set_apply_fn(&self, name: Sym) {
+        self.shared.apply_fn.store(name as u64 + 1, Ordering::Relaxed);
     }
-    /// The current apply-handler fn value (re-read from `globals`, so GC-safe), if any.
+    /// The current apply-handler fn value (re-read from globals, so GC-safe), if any.
     pub fn apply_handler(&self) -> Option<u64> {
-        self.apply_fn.and_then(|s| self.global(s))
+        match self.shared.apply_fn.load(Ordering::Relaxed) {
+            0 => None,
+            v => self.global((v - 1) as Sym),
+        }
     }
     /// Resolve a call site via the current dispatch strategy (reads registry +
     /// updates the strategy's per-site cache), then invoke happens in the backend.
+    /// The impl is copied out and the lock dropped before the caller invokes it.
     pub fn resolve_method(&self, site: usize, method: Sym, ty: Sym) -> Option<u64> {
-        self.dispatch.resolve(&self.methods, site, method, ty)
+        let t = self.shared.tables.lock().unwrap();
+        t.dispatch.resolve(&t.methods, site, method, ty)
     }
 
     /// A fresh tag for an escape continuation.
-    pub fn fresh_escape_tag(&mut self) -> u64 {
-        self.escape_tags += 1;
-        self.escape_tags
+    pub fn fresh_escape_tag(&self) -> u64 {
+        self.shared.escape_tags.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// The generic arithmetic path with a numeric tower. The immediate-int fast
@@ -784,7 +862,7 @@ impl<M: ValueModel> Runtime<M> {
     /// The `BigInt` behind a `HugeInt` heap value, if `bits` is one.
     fn as_huge(&self, bits: u64) -> Option<&BigInt> {
         if let RawTag::Ref = M::R::tag_of(bits) {
-            if let Obj::HugeInt(b) = &self.heap[M::R::as_ref(bits) as usize] {
+            if let Obj::HugeInt(b) = &self.heap()[M::R::as_ref(bits) as usize] {
                 return Some(b);
             }
         }
@@ -824,7 +902,7 @@ impl<M: ValueModel> Runtime<M> {
             Val::Bool(b) => b.to_string(),
             Val::Nil => "nil".to_string(),
             Val::Sym(s) => self.sym_name(s).to_string(),
-            Val::Ref(id) => match &self.heap[id as usize] {
+            Val::Ref(id) => match &self.heap()[id as usize] {
                 Obj::Cons { .. } => {
                     let items = self.list_to_vec(bits);
                     let inner: Vec<String> = items.iter().map(|&x| self.print(x)).collect();

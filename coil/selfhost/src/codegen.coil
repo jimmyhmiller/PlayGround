@@ -94,7 +94,7 @@
    (globals i64) (llvm_seq i64)
    (loops (ArrayList CgLoop))
    (csigs (ArrayList CSigEntry))     ; only struct-by-value callables (Rust `csigs`)
-   (arch i64)                        ; 0 = x86_64, 1 = aarch64, 2 = wasm32 (from the triple)
+   (arch i64)                        ; 0 = x86_64, 1 = aarch64 (from the triple)
    (mach_o bool)                     ; Mach-O (Apple) => asm symbols carry a leading `_`
    (a (ptr Allocator))])
 
@@ -1376,7 +1376,6 @@
     ; init targets so an arbitrary (possibly non-host) triple resolves.
     (LLVMInitializeAArch64TargetInfo) (LLVMInitializeAArch64Target) (LLVMInitializeAArch64TargetMC)
     (LLVMInitializeX86TargetInfo) (LLVMInitializeX86Target) (LLVMInitializeX86TargetMC)
-    (LLVMInitializeWebAssemblyTargetInfo) (LLVMInitializeWebAssemblyTarget) (LLVMInitializeWebAssemblyTargetMC)
     (let [triple (if (icmp-ne (cast i64 triple-override) 0) triple-override (LLVMGetDefaultTargetTriple))
           targetout (alloc-stack (ptr i8)) errout (alloc-stack (ptr i8))]
       (LLVMGetTargetFromTriple triple targetout errout)
@@ -1545,8 +1544,7 @@
     (let [a0 (substr triple 0 (load i))]
       (if (or (str-eq a0 "x86_64") (str-eq a0 "amd64")) 0
         (if (or (str-eq a0 "aarch64") (or (str-eq a0 "arm64") (str-eq a0 "arm64e"))) 1
-          (if (str-eq a0 "wasm32") 2
-            (do (unimplemented "abi: unsupported target architecture") -1)))))))
+          (do (unimplemented "abi: unsupported target architecture") -1))))))
 
 ; smallest power-of-two-byte int width (bits) covering `bytes` data bytes.
 (defn abi-int-bits-for-bytes [(bytes i64)] (-> i64)

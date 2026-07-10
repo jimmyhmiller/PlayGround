@@ -273,7 +273,7 @@ impl<M: ValueModel> CodeSpace<M> for ClosureComp<M> {
         let Val::Ref(id) = rt.decode(callee) else {
             panic!("value not callable: {}", rt.print(callee));
         };
-        let (nparams, variadic, body, env) = match &rt.heap[id as usize] {
+        let (nparams, variadic, body, env) = match &rt.heap()[id as usize] {
             Obj::Closure {
                 nparams,
                 variadic,

@@ -82,77 +82,73 @@ impl<M: ValueModel> Runtime<M> {
     }
 
     fn collect_inner(&mut self, live_env: &Locals, live_kont: Option<&Arc<Kont>>) {
-        let from_len = self.heap.len();
-        let real_before = self
-            .heap
-            .iter()
-            .filter(|o| !matches!(o, Obj::Moved(_)))
-            .count();
+        use std::sync::atomic::Ordering::Relaxed;
+        // Serialize heap mutation. (Under the full safepoint protocol this is where
+        // all mutators are already parked; here it is the single heap-write lock.)
+        let _g = self.shared.heap_lock.lock().unwrap();
+        // SAFETY: exclusive heap access is held via `heap_lock`; the resulting
+        // `&mut Heap` is raw-pointer-derived, so it does not alias the other
+        // `self.shared` field borrows below.
+        let heap: &mut crate::runtime::Heap = unsafe { &mut *self.shared.heap.get() };
+        let from_len = heap.len();
+        let real_before = heap.iter().filter(|o| !matches!(o, Obj::Moved(_))).count();
         let mut to: Vec<Obj> = Vec::new();
         let mut reloc = 0u64;
 
+        // 1. Forward the direct roots. The dense global array IS the global store;
+        //    forward every bound slot (skip the unbound sentinel).
+        for a in self.shared.global_slots.iter() {
+            let v = a.load(Relaxed);
+            if v != crate::runtime::GLOBAL_UNBOUND {
+                a.store(fw::<M>(heap, from_len, &mut to, &mut reloc, v), Relaxed);
+            }
+        }
+        // This thread's shadow stack (its transient roots).
+        for s in self.shadow.iter_mut() {
+            *s = fw::<M>(heap, from_len, &mut to, &mut reloc, *s);
+        }
+        // Constant pool.
+        let consts = unsafe { &mut *self.shared.consts.get() };
+        for c in consts.iter_mut() {
+            *c = fw::<M>(heap, from_len, &mut to, &mut reloc, *c);
+        }
+        // Method impls are roots (the dispatch registry is truth).
         {
-            let Self {
-                heap,
-                global_slots,
-                shadow,
-                consts,
-                methods,
-                ..
-            } = &mut *self;
-
-            // 1. Forward the direct roots. The dense global array IS the global
-            //    store; forward every bound slot (skip the unbound sentinel).
-            //    Atomic slots, but the collector runs stop-the-world, so plain
-            //    load/store with the slot ordering is sufficient.
-            for a in global_slots.iter() {
-                let v = a.load(std::sync::atomic::Ordering::Relaxed);
-                if v != crate::runtime::GLOBAL_UNBOUND {
-                    a.store(fw::<M>(heap, from_len, &mut to, &mut reloc, v), std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-            for s in shadow.iter_mut() {
-                *s = fw::<M>(heap, from_len, &mut to, &mut reloc, *s);
-            }
-            for c in consts.iter_mut() {
-                *c = fw::<M>(heap, from_len, &mut to, &mut reloc, *c);
-            }
-            // Method impls are roots (the dispatch registry is truth).
-            for imp in methods.values_mut() {
+            let mut t = self.shared.tables.lock().unwrap();
+            for imp in t.methods.values_mut() {
                 *imp = fw::<M>(heap, from_len, &mut to, &mut reloc, *imp);
             }
-            // The live environment: rewrite the cells of its frame chain.
-            update_env::<M>(heap, from_len, &mut to, &mut reloc, live_env);
-            // The live continuation, if we are at a CEK safepoint: forward the
-            // `done` cells and captured frames along its whole chain.
-            if let Some(k) = live_kont {
-                walk_kont::<M>(heap, from_len, &mut to, &mut reloc, k);
-            }
+        }
+        // The live environment: rewrite the cells of its frame chain.
+        update_env::<M>(heap, from_len, &mut to, &mut reloc, live_env);
+        // The live continuation, if we are at a CEK safepoint.
+        if let Some(k) = live_kont {
+            walk_kont::<M>(heap, from_len, &mut to, &mut reloc, k);
+        }
 
-            // 2. Cheney scan: forward the internal pointers of copied objects
-            //    (which may copy more), until the scan pointer catches up.
-            let mut scan = 0;
-            while scan < to.len() {
-                scan_obj::<M>(heap, from_len, &mut to, &mut reloc, scan);
-                scan += 1;
-            }
+        // 2. Cheney scan.
+        let mut scan = 0;
+        while scan < to.len() {
+            scan_obj::<M>(heap, from_len, &mut to, &mut reloc, scan);
+            scan += 1;
+        }
 
-            // 3. Commit to-space; poison remaining from-space so any stale
-            //    pointer into it is a loud use-after-move.
-            for o in to.drain(..) { heap.push(o); }
-            for i in 0..from_len {
-                if !matches!(heap[i], Obj::Moved(_)) {
-                    heap[i] = Obj::Moved(u32::MAX);
-                }
+        // 3. Commit to-space; poison remaining from-space.
+        for o in to.drain(..) {
+            heap.push(o);
+        }
+        for i in 0..from_len {
+            if !matches!(heap[i], Obj::Moved(_)) {
+                heap[i] = Obj::Moved(u32::MAX);
             }
         }
 
         // Dispatch caches hold impl pointers that just moved: invalidate them
         // (they refill on the next call). The registry, forwarded above, is truth.
-        self.dispatch.on_gc();
+        self.shared.tables.lock().unwrap().dispatch.on_gc();
 
-        self.relocated += reloc;
-        self.freed += (real_before as u64).saturating_sub(reloc);
+        self.shared.relocated.fetch_add(reloc, Relaxed);
+        self.shared.freed.fetch_add((real_before as u64).saturating_sub(reloc), Relaxed);
     }
 }
 

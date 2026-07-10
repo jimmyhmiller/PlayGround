@@ -876,7 +876,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let Val::Ref(id) = rt.decode(callee) else {
             panic!("value not callable: {}", rt.print(callee));
         };
-        let (nparams, variadic, body, env) = match &rt.heap[id as usize] {
+        let (nparams, variadic, body, env) = match &rt.heap()[id as usize] {
             Obj::Closure { nparams, variadic, body, env } => {
                 (*nparams, *variadic, body.clone(), env.clone())
             }
@@ -1081,7 +1081,7 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
         // never grown, during execution). Doing it here (form start) means no
         // native frame is holding a stale base when it (re)allocates.
         {
-            let n = rt.heap.len();
+            let n = rt.heap().len();
             let mut t = self.fast_targets.borrow_mut();
             if t.len() < n {
                 t.resize(n, FastTarget::default());
@@ -1992,7 +1992,7 @@ impl<M: ModelArithJit> CodeSpace<M> for Tiered<M> {
     fn invoke(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, callee: u64, args: &[u64]) -> u64 {
         // Route on the callee's own body: native if it compiles, CEK if not.
         let native = match rt.decode(callee) {
-            Val::Ref(id) => match &rt.heap[id as usize] {
+            Val::Ref(id) => match &rt.heap()[id as usize] {
                 Obj::Closure { body, .. } => jit_can_compile(body),
                 _ => true, // non-closure callables (escape conts) are the JIT's error path
             },
