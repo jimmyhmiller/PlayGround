@@ -1,7 +1,7 @@
-# Scry demo — the interactive assistant (Phase 7)
+# Scry demo - the interactive assistant (Phase 7)
 
 A ~5-minute sit-down. The thesis: **we run an ordinary interactive program, and for free we get a
-live viewer into it — and we can change its code from the viewer while it runs.** The app
+live viewer into it - and we can change its code from the viewer while it runs.** The app
 (`examples/assistant.scry`) is a Claude-Code-like terminal assistant. It contains zero viewer or
 server code; the runtime injects the eval server for any program (like NREPL).
 
@@ -16,13 +16,13 @@ It prints `viewer: http://localhost:7357` (or the next free port). Open that URL
 put it side-by-side with the terminal. The terminal shows:
 
 ```
-Scry assistant — a Claude-Code-like REPL. Type 'help', or 'research <topic>'.
+Scry assistant - a Claude-Code-like REPL. Type 'help', or 'research <topic>'.
 you>
 ```
 
 Leave it sitting at the prompt.
 
-## 1. It's a real REPL — type at it
+## 1. It's a real REPL - type at it
 
 In the terminal, type each of these and press Enter:
 
@@ -33,7 +33,7 @@ you> what is scry?
 ```
 
 You get canned-but-causal replies (the `ScriptedModel` keys off `hello`, `?`, etc.). Point out:
-this is a genuine `Console.readLine()` loop — the process is really blocked waiting for your input.
+this is a genuine `Console.readLine()` loop - the process is really blocked waiting for your input.
 
 ## 2. …but the viewer is live THE WHOLE TIME (STW works while it waits for input)
 
@@ -54,10 +54,10 @@ Agent.instance(0).conversation.size()
 ```
 
 The last size is +2. **You just mutated the running program from the viewer while its main thread
-sat waiting for keyboard input.** That only works because `readLine` is safepoint-cooperative — it
+sat waiting for keyboard input.** That only works because `readLine` is safepoint-cooperative - it
 never parks in a blocking syscall, so a stop-the-world eval lands within ~20 ms even mid-prompt.
 
-## 3. Sub-agents on real threads — watch them appear and work in the viewer
+## 3. Sub-agents on real threads - watch them appear and work in the viewer
 
 Back in the terminal:
 
@@ -84,7 +84,7 @@ you> thanks
 You get a reply immediately, interleaved with the sub-agents' output. The main loop never blocked
 on the sub-agents.
 
-## 4. THE two-way beat — redefine a method live and a new UI element pops up
+## 4. THE two-way beat - redefine a method live and a new UI element pops up
 
 The app has an intentional extension point: `Session.suggest(input)` ships returning `""` (nothing
 printed after each response). We'll make an autocomplete/suggestions box appear **without
@@ -105,7 +105,7 @@ class Session {
 }
 ```
 
-Hit define. The viewer confirms `✓ Session redefined — now at generation 1`. Now, in the terminal:
+Hit define. The viewer confirms `✓ Session redefined - now at generation 1`. Now, in the terminal:
 
 ```
 you> anything at all
@@ -119,13 +119,13 @@ Under the reply, a suggestions box now appears:
 
 **No restart. The running program grew a new UI element because we changed its code from the
 outside.** Every existing call site to `suggest` reaches the new body (generations, not diffs).
-Optional flourish: redefine again changing `renderPrompt`'s body to return `"assistant> "` — the
+Optional flourish: redefine again changing `renderPrompt`'s body to return `"assistant> "` - the
 prompt itself changes on the next line.
 
-(If you paste a deliberately-broken body — e.g. `self.history + 5` — the viewer rejects it as a
+(If you paste a deliberately-broken body - e.g. `self.history + 5` - the viewer rejects it as a
 `TypeError` and the running program is untouched: a rejected edit is a strict no-op.)
 
-## 5. Exit — and it's still browsable
+## 5. Exit - and it's still browsable
 
 ```
 you> exit
@@ -135,16 +135,16 @@ The orchestrator joins any outstanding sub-agents, prints `goodbye`, and `main` 
 runtime keeps the process alive:
 
 ```
-main() finished — the heap is still live and browsable. Serving evals; press Ctrl-C to exit.
+main() finished - the heap is still live and browsable. Serving evals; press Ctrl-C to exit.
 ```
 
-The viewer still works — every instance, every conversation, every message from the whole session
+The viewer still works - every instance, every conversation, every message from the whole session
 is still there to inspect. Ctrl-C in the terminal ends it.
 
 ---
 
 ### One-line pitch to land
 
-"That was an ordinary command-line program. We never wrote a line of UI or server code in it — the
+"That was an ordinary command-line program. We never wrote a line of UI or server code in it - the
 runtime gives every program a live, mutable window into itself, and we just reached in and changed
 its behavior while it was running."
