@@ -21,6 +21,21 @@
 
 (const MAX_SLOTS 100000)
 
+; Every entity arena reserves this many BYTES of trailing per-slot headroom beyond its
+; declared fields, so a live ADDITIVE field edit (03/05 M4) can be written into every
+; existing instance IN PLACE — no re-strided slab, no instance move, no pointer rewrite,
+; so identity and every raw pointer into the arena survive the edit. 32 bytes = up to 4
+; added i64 fields; exhausting it hard-errors loudly (never silently corrupts). This is
+; the deliberate PoC cut vs 02 §4's full migrate-with-graph-rewrite (deferred past M5).
+(const FIELD_HEADROOM 32)
+
+; ---- generation counter (03-live-semantics "generations, not diffs") ----
+; The initial build is generation 0; each accepted live edit bumps it. `generation()`
+; reflects it; an accepted definition-eval reports the NEW generation in its response.
+(defn gen-cell [] (-> (ptr i64)) (alloc-static i64))
+(defn current-generation [] (-> i64) (load (gen-cell)))
+(defn bump-generation [] (-> i64) (store! (gen-cell) (+ (load (gen-cell)) 1)) (load (gen-cell)))
+
 ; ============================ compile-global state ==========================
 (defstruct CComp
   [(methods (ArrayList (ptr MethodInfo)))
@@ -757,7 +772,9 @@
           (store! i (+ (load i) 1)) 0)
         (break)))
     (store! (field ti instance-size) (+ (sizeof InstanceHeader) (* nf 8)))
-    (store! (field ti arena) (arena-new (load (field m id)) (load (field m name)) (load (field m name-len)) (* nf 8) MAX_SLOTS))
+    ; arena slots carry FIELD_HEADROOM extra bytes so a live additive-field edit lands
+    ; in place (see FIELD_HEADROOM). instance-size above stays the LOGICAL size.
+    (store! (field ti arena) (arena-new (load (field m id)) (load (field m name)) (load (field m name-len)) (+ (* nf 8) FIELD_HEADROOM) MAX_SLOTS))
     (store! (field ti singleton) (cast (ptr u8) 0))
     ti))
 
@@ -828,6 +845,73 @@
         (break)))
     (store! (field p types) tarr) (store! (field p type-count) nmono)
     p))
+
+; ============================ live redefinition (Phase 6, M4) ===============
+; All calls route through method INDICES (never raw code pointers), so a live edit is a
+; single table repoint: keep the method's index, swap the MethodInfo it points at. The
+; server has already parked every language thread (request-global-stop) before calling any
+; of these, so they run with the heap quiescent (03-live-semantics' generation swap).
+
+; Repoint the compiler's node->index map so the NEW body's node resolves to the SAME
+; method index as the OLD one — every existing call site (baked as that index) reaches the
+; new body, and the new body's own self/sibling calls resolve too. Returns the index / -1.
+(defn repoint-method-node! [(old-node (ptr Node)) (new-node (ptr Node))] (-> i64)
+  (let [ns (load (field (cc) method-nodes)) n (al-len ns) (mut i) 0 (mut r) -1]
+    (loop (if (and (< (load r) 0) (< (load i) n))
+            (do (if (= (cast i64 (al-get ns (load i))) (cast i64 old-node)) (do (store! r (load i)) 0) 0) (store! i (+ (load i) 1)) 0)
+            (break)))
+    (if (>= (load r) 0) (do (al-set! (mut (field (cc) method-nodes)) (load r) new-node) 0) 0)
+    (load r)))
+
+; Compile new-node's body into a fresh MethodInfo and repoint index `idx` at it, in both the
+; Program's flat table (what the VM reads) and cc's list (what future edits/build read).
+(defn recompile-method-at! [(p (ptr Program)) (idx i64) (new-node (ptr Node)) (d (ptr Decl)) (self-ty (ptr Type))] (-> i64)
+  (let [mi (cast (ptr MethodInfo) (xalloc (sizeof MethodInfo)))]
+    (store! (field mi name) (nm new-node)) (store! (field mi name-len) (nlen new-node))
+    (store! (field mi arity) 0) (store! (field mi local-count) 0) (store! (field mi is-void) false)
+    (compile-method mi new-node d self-ty)
+    (store! (index (load (field p methods)) idx) mi)
+    (al-set! (mut (field (cc) methods)) idx mi)
+    0))
+
+; Additive field: append one field to a live entity mono and every live instance. Returns 0
+; ok, 1 if the new field would exceed the arena's reserved per-slot headroom (loud reject).
+; Instances are NOT moved — the new field lands at a fixed trailing offset inside each slot's
+; reserved headroom, so identity + all raw pointers survive (see FIELD_HEADROOM).
+(defn add-field-live! [(p (ptr Program)) (m (ptr MonoType)) (fname (ptr u8)) (flen i64) (fty (ptr Type)) (defval i64)] (-> i64)
+  (let [ti (load (index (load (field p types)) (load (field m id))))
+        a (load (field ti arena))
+        old-fc (load (field ti field-count))
+        offset (+ (sizeof InstanceHeader) (* old-fc 8))]
+    (if (> (+ offset 8) (load (field a slot-size))) 1
+      (do
+        ; grow the mono field layout (viewer schema reads this)
+        (let [mf (cast (ptr MonoField) (xalloc (sizeof MonoField)))]
+          (store! (field mf name) fname) (store! (field mf name-len) flen) (store! (field mf ty) fty)
+          (al-push! (mut (field m fields)) mf))
+        ; grow the TypeInfo FieldInfo array (VM field metadata)
+        (let [nfi (cast (ptr FieldInfo) (xalloc (* (sizeof FieldInfo) (+ old-fc 1)))) (mut i) 0]
+          (loop (if (< (load i) old-fc)
+                  (let [src (index (load (field ti fields)) (load i)) dst (index nfi (load i))]
+                    (store! (field dst name) (load (field src name))) (store! (field dst name-len) (load (field src name-len)))
+                    (store! (field dst offset) (load (field src offset))) (store! (field dst kind) (load (field src kind)))
+                    (store! i (+ (load i) 1)) 0)
+                  (break)))
+          (let [dst (index nfi old-fc)]
+            (store! (field dst name) fname) (store! (field dst name-len) flen)
+            (store! (field dst offset) offset) (store! (field dst kind) (ty-field-kind fty)))
+          (store! (field ti fields) nfi)
+          (store! (field ti field-count) (+ old-fc 1))
+          (store! (field ti instance-size) (+ offset 8)))
+        ; write the default into every live instance's new slot (O(live instances) STW pass)
+        (let [hwm (arena-hwm a) (mut i) 0]
+          (loop (if (< (load i) hwm)
+                  (let [ip (cast (ptr InstanceHeader) (arena-slot-ptr a (load i)))]
+                    (if (= (iand (load (field ip flags)) FLAG_LIVE) FLAG_LIVE)
+                      (do (store! (cast (ptr i64) (index (cast (ptr u8) ip) offset)) defval) 0) 0)
+                    (store! i (+ (load i) 1)) 0)
+                  (break))))
+        0))))
 
 ; ============================ CLI drivers ==================================
 ; typecheck quietly (no "ok"); returns the error count.

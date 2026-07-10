@@ -195,6 +195,11 @@ fn expand<M: ValueModel>(
         } else if is_sym(rt, head, "instance?") {
             let d = instance_rewrite(rt, f);
             expand(rt, cs, macros, d)
+        } else if is_sym(rt, head, "try") {
+            // Desugar typed multi-catch into a single catch-all whose body is a
+            // type-dispatch (ClojureScript's model); expand the result.
+            let d = desugar_try(rt, f);
+            expand(rt, cs, macros, d)
         } else if record_field0(rt, head, reader::KEYWORD).is_some() {
             // keyword in head position: (:k m) -> (get m :k)
             let items = rt.list_to_vec(f);
@@ -729,6 +734,17 @@ fn interop_rewrite<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> Option<u64>
         let method = hname[1..].to_string();
         return Some(shim_instance(rt, &method, items[1], &items[2..]));
     }
+    // Constructor `(Class. args…)` -> a record tagged by the class's simple name,
+    // so `type-of` / typed `catch` can identify it (e.g. `(RuntimeException. m)`).
+    if hname.ends_with('.') && hname.len() > 1 && hname != ".." {
+        let simple = last_seg(&hname[..hname.len() - 1]);
+        let rec = sym(rt, "record");
+        let tag = sym(rt, &simple);
+        let tag_q = quote_form(rt, tag);
+        let mut out = vec![rec, tag_q];
+        out.extend_from_slice(&items[1..]);
+        return Some(rt.vec_to_list(&out));
+    }
     None
 }
 
@@ -924,18 +940,11 @@ fn is_sym<M: ValueModel>(rt: &Runtime<M>, bits: u64, name: &str) -> bool {
     matches!(rt.decode(bits), Val::Sym(s) if rt.sym_name(s) == name)
 }
 
-/// `(instance? Class x)` -> `(%num-eq (type-of x) 'Tag)`, mapping the (possibly
-/// package-qualified) Java class name to the runtime tag `type-of` reports.
-/// Panics on an unknown class rather than silently returning a wrong answer.
-fn instance_rewrite<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
-    let items = rt.list_to_vec(form);
-    let Val::Sym(cs) = rt.decode(items[1]) else {
-        panic!("instance?: first argument must be a class symbol");
-    };
-    let cname = rt.sym_name(cs).to_string();
-    // Match on the simple (last) segment of a dotted class name.
-    let simple = cname.rsplit('.').next().unwrap_or(&cname);
-    let tag = match simple {
+/// Map the simple (last dotted segment of a) Java/JS class name to the runtime
+/// tag `type-of` reports, or `None` if we don't model it. Shared by `instance?`
+/// and typed `catch`.
+fn class_to_tag(simple: &str) -> Option<&'static str> {
+    Some(match simple {
         "Symbol" => "Symbol",
         "Keyword" => "Keyword",
         "String" | "CharSequence" => "String",
@@ -948,15 +957,121 @@ fn instance_rewrite<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
         s if s.contains("Set") => "Set",
         s if s.contains("List") || s == "ISeq" || s == "Seqable" || s == "Cons" => "List",
         s if s == "IFn" || s == "AFn" || s == "Fn" => "Fn",
-        _ => panic!("instance?: unmapped class `{cname}` (add it to instance_rewrite)"),
+        _ => return None,
+    })
+}
+
+/// `(instance? Class x)` -> `(%num-eq (type-of x) 'Tag)`, mapping the (possibly
+/// package-qualified) class name to the runtime tag `type-of` reports. Panics on
+/// an unknown class rather than silently returning a wrong answer.
+fn instance_rewrite<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
+    let items = rt.list_to_vec(form);
+    let Val::Sym(cs) = rt.decode(items[1]) else {
+        panic!("instance?: first argument must be a class symbol");
     };
+    let cname = rt.sym_name(cs).to_string();
+    let simple = cname.rsplit('.').next().unwrap_or(&cname);
+    // A deftype/record instance is tagged by its own simple name, so fall back to
+    // that when the class isn't a built-in we map.
+    let tag = class_to_tag(simple).unwrap_or(simple).to_string();
     let numeq = sym(rt, "%num-eq");
     let typeof_sym = sym(rt, "type-of");
     let quote_sym = sym(rt, "quote");
-    let tag_sym = sym(rt, tag);
+    let tag_sym = sym(rt, &tag);
     let tag_quoted = rt.vec_to_list(&[quote_sym, tag_sym]);
     let typeof_call = rt.vec_to_list(&[typeof_sym, items[2]]);
     rt.vec_to_list(&[numeq, typeof_call, tag_quoted])
+}
+
+/// Desugar `(try body… (catch Class e h…)… (catch :default e h…) (finally f…))`
+/// into `(try* (do body…) EXC DISPATCH (do f…))` — a fixed-shape low-level form
+/// the compiler maps to `Ir::Try`. DISPATCH is a nested-`if` that tests the
+/// thrown value's runtime tag against each clause's class (ClojureScript's
+/// `instanceof`-chain model), binds the clause's name, and re-`throw`s on no
+/// match. A `:default` clause, or a base class (`Throwable`/`Exception`/`Error`/
+/// `Object`), matches anything. `try*`/`EXC`/`DISPATCH`/`finally` are `nil` when
+/// the corresponding part is absent.
+fn desugar_try<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
+    let items = rt.list_to_vec(form);
+    let mut body_forms: Vec<u64> = Vec::new();
+    let mut catches: Vec<Vec<u64>> = Vec::new();
+    let mut finally: Option<Vec<u64>> = None;
+    for &f in &items[1..] {
+        let head = rt.as_cons(f).map(|_| rt.list_to_vec(f)[0]);
+        match head {
+            Some(h) if is_sym(rt, h, "catch") => catches.push(rt.list_to_vec(f)),
+            Some(h) if is_sym(rt, h, "finally") => finally = Some(rt.list_to_vec(f)[1..].to_vec()),
+            _ => body_forms.push(f),
+        }
+    }
+    let do_sym = sym(rt, "do");
+    let nil = rt.encode(Val::Nil);
+    let mut body = vec![do_sym];
+    body.extend_from_slice(&body_forms);
+    let body = rt.vec_to_list(&body);
+
+    let (catchbind, dispatch) = if catches.is_empty() {
+        (nil, nil)
+    } else {
+        let exc = gensym(rt, "exc");
+        // Fold clauses back-to-front so the first listed clause is tried first.
+        let throwsym = sym(rt, "throw");
+        let mut chain = rt.vec_to_list(&[throwsym, exc]); // no clause matched -> re-throw
+        for clause in catches.iter().rev() {
+            // clause = (catch <class-or-:default> <bind> body…)
+            let class = clause[1];
+            let bind = clause[2];
+            let test = catch_test(rt, class, exc);
+            // (let (bind exc) body…)
+            let letsym = sym(rt, "let");
+            let bindlist = rt.vec_to_list(&[bind, exc]);
+            let mut letf = vec![letsym, bindlist];
+            letf.extend_from_slice(&clause[3..]);
+            let handler = rt.vec_to_list(&letf);
+            let ifsym = sym(rt, "if");
+            chain = rt.vec_to_list(&[ifsym, test, handler, chain]);
+        }
+        (exc, chain)
+    };
+
+    let finally_form = match finally {
+        Some(fs) => {
+            let mut f = vec![do_sym];
+            f.extend_from_slice(&fs);
+            rt.vec_to_list(&f)
+        }
+        None => nil,
+    };
+
+    let trystar = sym(rt, "try*");
+    rt.vec_to_list(&[trystar, body, catchbind, dispatch, finally_form])
+}
+
+/// The test form for one catch clause: `true` for a catch-all (`:default` or a
+/// base class), else `(%num-eq (type-of exc) 'Tag)`.
+fn catch_test<M: ValueModel>(rt: &mut Runtime<M>, class: u64, exc: u64) -> u64 {
+    let catch_all = if is_keyword(rt, class, "default") {
+        true
+    } else if let Val::Sym(s) = rt.decode(class) {
+        let simple = last_seg(rt.sym_name(s));
+        matches!(simple.as_str(), "Throwable" | "Exception" | "Error" | "Object")
+    } else {
+        false
+    };
+    if catch_all {
+        return rt.encode(Val::Bool(true));
+    }
+    let Val::Sym(s) = rt.decode(class) else {
+        panic!("catch: expected a class symbol or :default");
+    };
+    let simple = last_seg(rt.sym_name(s));
+    let tag = class_to_tag(&simple).unwrap_or(&simple).to_string();
+    let numeq = sym(rt, "%num-eq");
+    let typeof_sym = sym(rt, "type-of");
+    let typeof_call = rt.vec_to_list(&[typeof_sym, exc]);
+    let tag_sym = sym(rt, &tag);
+    let tag_q = quote_form(rt, tag_sym);
+    rt.vec_to_list(&[numeq, typeof_call, tag_q])
 }
 
 /// `(def (-macro-meta name) val…)` -> `(name, (def name val…))`, else None.

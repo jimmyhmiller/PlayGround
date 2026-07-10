@@ -109,7 +109,7 @@ impl Compiler {
                 }
                 "fn" | "fn*" => return self.compile_fn(rt, &items),
                 "let" | "let*" => return self.compile_let(rt, &items),
-                "try" => return self.compile_try(rt, &items),
+                "try*" => return self.compile_try(rt, &items),
                 "set!" => {
                     let n = self.name(rt, items[1]).expect("set!: target must be a symbol");
                     let val = Box::new(self.compile(rt, items[2]));
@@ -171,35 +171,27 @@ impl Compiler {
         Ir::Lambda { nparams, variadic, body: Rc::new(Ir::Do(body)) }
     }
 
-    /// `(try body… (catch Class e handler…) (finally cleanup…))`. Body and finally
-    /// compile in the current scope; the catch handler compiles with its binding in
-    /// a fresh frame (so the thrown value lands at `Local{up:0,idx:0}`, matching
-    /// `Ir::Try`). The catch is catch-ALL — the declared class is accepted but not
-    /// checked (we have no class hierarchy), which is exactly right for the common
-    /// `(catch Exception e …)` and over-broad otherwise.
+    /// `(try* body EXC dispatch finally)` — the fixed shape the expander lowers
+    /// `try`/`catch`/`finally` to (see `desugar_try`). `body`/`finally` compile in
+    /// the current scope; `dispatch` compiles with `EXC` bound in a fresh frame, so
+    /// the thrown value lands at `Local{up:0,idx:0}` (matching `Ir::Try`). A `nil`
+    /// `EXC`/`dispatch` means no catch; a `nil` `finally` means no finally.
     fn compile_try<M: ValueModel>(&mut self, rt: &mut Runtime<M>, items: &[u64]) -> Ir {
-        let mut body_forms: Vec<u64> = Vec::new();
-        let mut catch_clause: Option<Vec<u64>> = None;
-        let mut finally_forms: Option<Vec<u64>> = None;
-        for &f in &items[1..] {
-            let head = rt.as_cons(f).and_then(|_| self.name(rt, rt.list_to_vec(f)[0]));
-            match head.map(|s| rt.sym_name(s).to_string()).as_deref() {
-                Some("catch") => catch_clause = Some(rt.list_to_vec(f)),
-                Some("finally") => finally_forms = Some(rt.list_to_vec(f)[1..].to_vec()),
-                _ => body_forms.push(f),
+        let body = Box::new(self.compile(rt, items[1]));
+        let catch = match self.name(rt, items[2]) {
+            Some(exc) => {
+                self.scope.push(vec![exc]);
+                let handler = self.compile(rt, items[3]);
+                self.scope.pop();
+                Some(Box::new(handler))
             }
-        }
-        let body = Box::new(Ir::Do(body_forms.iter().map(|&f| self.compile(rt, f)).collect()));
-        let catch = catch_clause.map(|clause| {
-            // clause = (catch Class binding handler…)
-            let binding = self.name(rt, clause[2]).expect("catch: binding must be a symbol");
-            self.scope.push(vec![binding]);
-            let handler = Ir::Do(clause[3..].iter().map(|&f| self.compile(rt, f)).collect());
-            self.scope.pop();
-            Box::new(handler)
-        });
-        let finally = finally_forms
-            .map(|fs| Box::new(Ir::Do(fs.iter().map(|&f| self.compile(rt, f)).collect())));
+            None => None, // items[2] is nil -> no catch clause
+        };
+        let finally = if matches!(rt.decode(items[4]), Val::Nil) {
+            None
+        } else {
+            Some(Box::new(self.compile(rt, items[4])))
+        };
         Ir::Try { body, catch, finally }
     }
 

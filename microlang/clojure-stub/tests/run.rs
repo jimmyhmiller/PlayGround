@@ -312,6 +312,40 @@ fn try_catch_finally() {
 }
 
 #[test]
+fn typed_catch() {
+    // A specific class matches only the corresponding runtime tag; the first
+    // matching clause wins (ClojureScript's instanceof-chain model).
+    assert_eq!(
+        run("(try (throw \"s\") (catch clojure.lang.Keyword e :kw) (catch String e :str))"),
+        ":str"
+    );
+    assert_eq!(
+        run("(try (throw :k) (catch clojure.lang.Keyword e :kw) (catch String e :str))"),
+        ":kw"
+    );
+    // :default is the explicit catch-all when no typed clause matches.
+    assert_eq!(
+        run("(try (throw 42) (catch String e :str) (catch :default e [:default e]))"),
+        "[:default 42]"
+    );
+    // A constructor exception carries its class name as a tag, so a typed catch
+    // on that class matches it — and a different class does not.
+    assert_eq!(
+        run("(try (throw (RuntimeException. \"boom\")) (catch RuntimeException e :caught))"),
+        ":caught"
+    );
+    assert_eq!(
+        run("(try (throw (RuntimeException. \"boom\")) (catch clojure.lang.Keyword e :kw) (catch :default e :fell-through))"),
+        ":fell-through"
+    );
+    // No clause matches and there is no catch-all -> the throw propagates out.
+    assert_eq!(
+        run("(try (try (throw :a) (catch String e :str)) (catch :default e :outer))"),
+        ":outer"
+    );
+}
+
+#[test]
 fn real_core_clj_setmacro() {
     // Real core.clj registers a macro via `(. (var name) (setMacro))` after a
     // plain `(def name (fn* name [&form &env ...] ...))`, rather than metadata.

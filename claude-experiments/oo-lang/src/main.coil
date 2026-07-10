@@ -10,6 +10,8 @@
 (import "src/typecheck.coil" :use *)
 (import "src/compile.coil" :use *)
 (import "src/server.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "alloc.coil" :use *)
 
 (defn read-file [(path (ptr i8))] (-> (ptr u8))
   (let [file (fopen path c"rb")]
@@ -81,20 +83,24 @@
         (scry-run (load file) true)
         (scry-serve (load file) (resolve-viewer-dir (load (index argv 0))) (load noview) (load ro))))))
 
-; scry eval <file.scry> -e "<expr>" [--readonly]
+; scry eval <file.scry> -e "<expr>" [-e "<expr>" ...] [--readonly]
+; Multiple -e run in sequence against ONE live process (main() runs to completion first),
+; each printing its own JSON result line — this is the browser-free path for live-change
+; golden tests (define, then call, in the same process).
 (defn cmd-eval [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
-  (let [(mut file) (cast (ptr i8) 0) (mut expr) (cast (ptr i8) 0) (mut ro) false (mut i) 2]
+  (let [(mut file) (cast (ptr i8) 0) (mut ro) false (mut i) 2
+        (mut exprs) (al-new [(ptr i8)] (alc-global))]
     (loop (if (< (load i) argc)
             (let [a (load (index argv (load i)))]
               (cond
-                (cstr-eq a c"-e") (do (store! i (+ (load i) 1)) (if (< (load i) argc) (do (store! expr (load (index argv (load i)))) 0) 0) 0)
+                (cstr-eq a c"-e") (do (store! i (+ (load i) 1)) (if (< (load i) argc) (do (al-push! (mut exprs) (load (index argv (load i)))) 0) 0) 0)
                 (cstr-eq a c"--readonly") (do (store! ro true) 0)
                 (do (store! file a) 0))
               (store! i (+ (load i) 1)) 0)
             (break)))
-    (if (or (= (cast i64 (load file)) 0) (= (cast i64 (load expr)) 0))
-      (do (w-cstr 2 c"usage: scry eval <file.scry> -e \"<expr>\" [--readonly]\n") 64)
-      (scry-eval-cli (load file) (cast (ptr u8) (load expr)) (strlen (load expr)) (load ro)))))
+    (if (or (= (cast i64 (load file)) 0) (= (al-len (load exprs)) 0))
+      (do (w-cstr 2 c"usage: scry eval <file.scry> -e \"<expr>\" [-e ...] [--readonly]\n") 64)
+      (scry-eval-cli (load file) (load exprs) (load ro)))))
 
 (defn cmd-dump-bytecode [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
   (if (< argc 3)

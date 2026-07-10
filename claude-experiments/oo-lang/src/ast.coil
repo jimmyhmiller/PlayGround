@@ -263,7 +263,7 @@
         (do (ws c"(fn ") (wn n)
             (dchild? (load (field n a)) d1) (dchild? (load (field n b)) d1)
             (dchild? (load (field n c)) d1) (dchild? (load (field n d)) d1) (ws c")"))
-      (= k NK_FIELD) (do (ws c"(field ") (wn n) (dchild (load (field n a)) d1) (ws c")"))
+      (= k NK_FIELD) (do (ws c"(field ") (wn n) (dchild (load (field n a)) d1) (dchild? (load (field n b)) d1) (ws c")"))
       (= k NK_VARIANT) (do (ws c"(variant ") (wn n) (dump-kids n d1) (ws c")"))
       (= k NK_PARAM) (do (ws c"(param ") (wn n) (dchild (load (field n a)) d1) (ws c")"))
       (= k NK_PARAMS) (do (ws c"(params") (dump-kids n d1) (ws c")"))

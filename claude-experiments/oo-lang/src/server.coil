@@ -129,6 +129,8 @@
                 (cond
                   (and (node-name-eq callee c"types") (= (arg-count e) 0))
                     (do (reflect-types (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                  (and (node-name-eq callee c"generation") (= (arg-count e) 0))
+                    (do (jb-cstr (load (ev-valbuf)) c"{\"type\":\"Int\",\"value\":") (jb-int (load (ev-valbuf)) (current-generation)) (jb-byte (load (ev-valbuf)) \}) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"fields") (= (arg-count e) 1))
                     (let [s (str-arg e 0)] (if (= (cast i64 s) 0) 0 (do (reflect-fields (load (ev-valbuf)) (load (field s s-name)) (load (field s s-len))) (store! (ev-outcome) 0) 1)))
                   (and (node-name-eq callee c"methods") (= (arg-count e) 1))
@@ -140,6 +142,351 @@
     (if (and (= (load (field v kind)) NK_STRING) (= (kid-count v) 1))
       (let [c (kid-at v 0)] (if (= (load (field c kind)) NK_STRCHUNK) c (cast (ptr Node) 0)))
       (if (= (load (field v kind)) NK_STRCHUNK) v (cast (ptr Node) 0)))))
+
+; ============================ live code change (Phase 6, M4) ============================
+; A definition-eval (class / standalone fn / interface) is live redefinition. This runs on
+; the eval coordinator thread AFTER request-global-stop has parked every language thread
+; (server-eval-stw), so the heap is quiescent: the whole thing is one 03-live-semantics
+; generation swap. Method dispatch is index-based, so a swap repoints Program.methods[] at
+; the same indices — every existing call site reaches the new code, no call-site patching.
+; The cut is exactly 05-milestones M4: method-BODY swap (same signature), whole-class body
+; swap, and ADDITIVE fields with a static default; everything else is a loud rejection.
+
+(defn defbuf [] (-> (ptr i8)) (cast (ptr i8) (alloc-static (array u8 512))))
+(defn shape-offender [] (-> (ptr (ptr Node))) (cast (ptr (ptr Node)) (alloc-static (ptr Node))))
+
+; ---- node/decl field iteration ----
+(defn node-field-count [(node (ptr Node))] (-> i64)
+  (let [n (kid-count node) (mut i) 0 (mut c) 0]
+    (loop (if (< (load i) n) (do (if (= (nkind (kid-at node (load i))) NK_FIELD) (do (store! c (+ (load c) 1)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load c)))
+(defn nth-field-of-node [(node (ptr Node)) (idx i64)] (-> (ptr Node))
+  (let [n (kid-count node) (mut i) 0 (mut c) 0 (mut r) (cast (ptr Node) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [k (kid-at node (load i))]
+              (if (= (nkind k) NK_FIELD) (do (if (= (load c) idx) (do (store! r k) 0) 0) (store! c (+ (load c) 1)) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn nth-field-of-decl [(d (ptr Decl)) (idx i64)] (-> (ptr Node))
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0 (mut c) 0 (mut r) (cast (ptr Node) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [m (al-get ms (load i))]
+              (if (= (nkind m) NK_FIELD) (do (if (= (load c) idx) (do (store! r m) 0) 0) (store! c (+ (load c) 1)) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn node-fn-by-name [(node (ptr Node)) (name (ptr u8)) (len i64)] (-> (ptr Node))
+  (let [n (kid-count node) (mut i) 0 (mut r) (cast (ptr Node) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [k (kid-at node (load i))]
+              (if (and (= (nkind k) NK_FN) (name-eq (nm k) (nlen k) name len)) (do (store! r k) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn node-members-list [(node (ptr Node))] (-> (ArrayList (ptr Node)))
+  (let [(mut lst) (al-new [(ptr Node)] (alc-global)) (mut i) 0 (mut n) (kid-count node)]
+    (loop (if (< (load i) (load n)) (do (al-push! (mut lst) (kid-at node (load i))) (store! i (+ (load i) 1)) 0) (break)))
+    (load lst)))
+
+; total live instances across every mono whose base is d
+(defn class-live-count [(d (ptr Decl))] (-> i64)
+  (let [p (load (srv-program)) ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut total) 0]
+    (loop (if (< (load i) n)
+            (let [m (al-get ms (load i))]
+              (if (and (= (cast i64 (load (field m base))) (cast i64 d)) (load (field m is-entity)))
+                (let [ti (load (index (load (field p types)) (load (field m id))))]
+                  (if (!= (cast i64 ti) 0) (do (store! total (+ (load total) (arena-live-count (load (field ti arena))))) 0) 0)) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load total)))
+
+; if d implements an interface declaring method `mname`, return that interface Decl (for a
+; conformance-flavored rejection message); else null. Uses the OLD class node's implements.
+(defn method-required-iface [(d (ptr Decl)) (mname (ptr u8)) (mlen i64)] (-> (ptr Decl))
+  (let [cn (load (field d node)) impl (if (= (cast i64 cn) 0) (cast (ptr Node) 0) (load (field cn b))) (mut r) (cast (ptr Decl) 0)]
+    (if (= (cast i64 impl) 0) (cast (ptr Decl) 0)
+      (let [ni (kid-count impl) (mut i) 0]
+        (loop (if (and (= (cast i64 (load r)) 0) (< (load i) ni))
+                (let [tn (kid-at impl (load i)) id (find-decl (nm tn) (nlen tn))]
+                  (if (!= (cast i64 id) 0)
+                    (let [mm (decl-member id mname mlen)]
+                      (if (and (!= (cast i64 mm) 0) (= (nkind mm) NK_FN)) (do (store! r id) 0) 0)) 0)
+                  (store! i (+ (load i) 1)) 0)
+                (break)))
+        (load r)))))
+
+; ---- rejection helpers (each leaves the running program untouched) ----
+(defn rej-unknown [(node (ptr Node)) (what (ptr i8))] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"cannot redefine %s '%.*s': no such %s exists in the running program" what (cast i32 (nlen node)) (cast (ptr i8) (nm node)) what)
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-notkind [(node (ptr Node)) (what (ptr i8))] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"cannot redefine '%.*s' as a %s: it is declared as something else" (cast i32 (nlen node)) (cast (ptr i8) (nm node)) what)
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-shape [(d (ptr Decl)) (fname (ptr u8)) (flen i64) (what (ptr i8)) (live i64)] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"redefine %.*s: field '%.*s' %s while %lld live instance(s) exist — not supported in this build, restart the process to apply this change."
+      (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 flen) (cast (ptr i8) fname) what live)
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-nodefault [(d (ptr Decl)) (fname (ptr u8)) (flen i64)] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"redefine %.*s: added field '%.*s' has no static default — an additive live field must carry a `= <default>` (05-milestones M4)"
+      (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 flen) (cast (ptr i8) fname))
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-headroom [(d (ptr Decl)) (fname (ptr u8)) (flen i64)] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"redefine %.*s: adding field '%.*s' exceeds the arena's reserved per-slot field headroom — too many live additive fields; restart the process to apply this change."
+      (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 flen) (cast (ptr i8) fname))
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-sig [(d (ptr Decl)) (mname (ptr u8)) (mlen i64)] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"cannot change the signature of %.*s.%.*s while live (a parameter or the return type differs) — signature changes are not supported in this build (M4); a caller would need re-checking against the new signature"
+      (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 mlen) (cast (ptr i8) mname))
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-addmethod [(d (ptr Decl)) (mname (ptr u8)) (mlen i64)] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"redefine %.*s: cannot add method '%.*s' while live — only method-body swaps and additive fields are supported in this build (M4)"
+      (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 mlen) (cast (ptr i8) mname))
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-rmmethod [(d (ptr Decl)) (mname (ptr u8)) (mlen i64) (iface (ptr Decl))] (-> i64)
+  (let [b (defbuf)]
+    (if (= (cast i64 iface) 0)
+      (snprintf b 512 c"redefine %.*s: method '%.*s' was removed while live — not supported in this build (M4)"
+        (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 mlen) (cast (ptr i8) mname))
+      (snprintf b 512 c"redefine %.*s: it would no longer implement method '%.*s' required by interface %.*s — interface conformance would break, change rejected"
+        (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 mlen) (cast (ptr i8) mname) (cast i32 (load (field iface name-len))) (cast (ptr i8) (load (field iface name)))))
+    (ev-fail EK_TYPE b 0 0)) 0)
+
+; classify the shape delta: 0 = SAME, 1 = ADDITIVE (new trailing fields), 2 = incompatible
+; (a field removed/renamed/retyped/reordered). On 2, shape-offender names the field.
+(defn classify-shape [(d (ptr Decl)) (node (ptr Node))] (-> i64)
+  (let [oldfc (field-count-of d) newfc (node-field-count node)
+        minfc (if (< oldfc newfc) oldfc newfc) (mut i) 0 (mut bad) false]
+    (loop (if (and (not (load bad)) (< (load i) minfc))
+            (let [of (nth-field-of-decl d (load i)) nf (nth-field-of-node node (load i))]
+              (if (or (not (name-eq (nm of) (nlen of) (nm nf) (nlen nf)))
+                      (not (type-eq (resolve-type (load (field of a)) d) (resolve-type (load (field nf a)) d))))
+                (do (store! (shape-offender) of) (store! bad true) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (cond
+      (load bad) 2
+      (< newfc oldfc) (do (store! (shape-offender) (nth-field-of-decl d minfc)) 2)
+      (> newfc oldfc) 1
+      0)))
+
+; method-set validation (returns 1 = ok, 0 = rejected). Uses the OLD (still-live) members.
+(defn check-methods-match [(d (ptr Decl)) (node (ptr Node))] (-> i64)
+  (block :m
+    ; every NEW method must exist in OLD with a matching signature (no adds, no sig changes)
+    (let [n (kid-count node) (mut i) 0]
+      (loop (if (< (load i) n)
+              (let [k (kid-at node (load i))]
+                (if (= (nkind k) NK_FN)
+                  (let [om (decl-member d (nm k) (nlen k))]
+                    (cond
+                      (or (= (cast i64 om) 0) (!= (nkind om) NK_FN)) (do (rej-addmethod d (nm k) (nlen k)) (return-from :m 0))
+                      (not (sigs-match d om d k)) (do (rej-sig d (nm k) (nlen k)) (return-from :m 0))
+                      0)) 0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    ; every OLD method must still be present in NEW (no removals)
+    (let [ms (load (field d members)) n (al-len ms) (mut i) 0]
+      (loop (if (< (load i) n)
+              (let [m (al-get ms (load i))]
+                (if (= (nkind m) NK_FN)
+                  (if (= (cast i64 (node-fn-by-name node (nm m) (nlen m))) 0)
+                    (do (rej-rmmethod d (nm m) (nlen m) (method-required-iface d (nm m) (nlen m))) (return-from :m 0)) 0) 0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    1))
+
+; headroom pre-check for ADDITIVE: every entity mono of d must fit newfc fields in its slot.
+(defn check-headroom [(d (ptr Decl)) (newfc i64) (node (ptr Node)) (oldfc i64)] (-> i64)
+  (let [p (load (srv-program)) ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut ok) 1]
+    (loop (if (and (= (load ok) 1) (< (load i) n))
+            (let [m (al-get ms (load i))]
+              (if (and (= (cast i64 (load (field m base))) (cast i64 d)) (load (field m is-entity)))
+                (let [ti (load (index (load (field p types)) (load (field m id))))
+                      a (load (field ti arena))
+                      need (+ (sizeof InstanceHeader) (* newfc 8))]
+                  (if (> need (load (field a slot-size)))
+                    (do (rej-headroom d (nm (nth-field-of-node node oldfc)) (nlen (nth-field-of-node node oldfc))) (store! ok 0) 0) 0)) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load ok)))
+
+; typecheck all of the new class's method bodies against d (whose members are now the NEW set)
+(defn typecheck-class-bodies [(d (ptr Decl)) (node (ptr Node))] (-> i64)
+  (set-cur-file c"<eval>")
+  (let [self-ty (mk-named d (self-args d)) n (kid-count node) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [k (kid-at node (load i))]
+              (if (= (nkind k) NK_FN) (do (check-fn-body d k self-ty) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  0)
+
+; typecheck the static default of each added field (no self in scope: a static default)
+(defn typecheck-added-defaults [(d (ptr Decl)) (node (ptr Node)) (oldfc i64) (newfc i64)] (-> i64)
+  (set-cur-file c"<eval>")
+  (let [(mut j) oldfc]
+    (loop (if (< (load j) newfc)
+            (let [nf (nth-field-of-node node (load j)) fty (resolve-type (load (field nf a)) d)
+                  expr (load (field nf b))
+                  env (env-new (null-ty) (cast (ptr Decl) 0) fty false)
+                  vt (infer expr env fty)]
+              (if (or (is-err vt) (assignable vt fty)) 0
+                (do (err-head-n expr) (w-cstr 2 c"default value for field '") (w-bytes 2 (nm nf) (nlen nf))
+                    (w-cstr 2 c"' has type ") (type-write 2 vt) (w-cstr 2 c", expected ") (type-write 2 fty) (err-end) 0))
+              (store! j (+ (load j) 1)) 0)
+            (break))))
+  0)
+
+; compile a field's static default into a nullary method and run it -> raw slot value
+(defn run-default [(nf (ptr Node)) (fty (ptr Type))] (-> i64)
+  (let [expr (load (field nf b))
+        chunk (chunk-new)
+        env (env-new (null-ty) (cast (ptr Decl) 0) fty false)
+        cs (make-cstate chunk env (cast (ptr Decl) 0) 0)
+        mi (cast (ptr MethodInfo) (xalloc (sizeof MethodInfo)))]
+    (store! (field mi name) (cast (ptr u8) c"<default>")) (store! (field mi name-len) 9)
+    (store! (field mi chunk) chunk) (store! (field mi is-void) false) (store! (field mi arity) 0)
+    (compile-expr cs expr)
+    (chunk-byte chunk OP_RETURN)
+    (store! (field mi local-count) (load (field cs max-slot)))
+    (vm-eval-invoke mi 0)))
+
+; commit: repoint every method node old->new, then recompile each at its (unchanged) index
+(defn repoint-class-methods [(old-members (ArrayList (ptr Node))) (node (ptr Node))] (-> i64)
+  (let [n (al-len old-members) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [om (al-get old-members (load i))]
+              (if (= (nkind om) NK_FN) (do (repoint-method-node! om (node-fn-by-name node (nm om) (nlen om))) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  0)
+(defn recompile-class-methods [(p (ptr Program)) (d (ptr Decl)) (node (ptr Node)) (self-ty (ptr Type))] (-> i64)
+  (let [n (kid-count node) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [k (kid-at node (load i))]
+              (if (= (nkind k) NK_FN) (do (recompile-method-at! p (method-index-of k) k d self-ty) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  0)
+(defn commit-added-fields [(p (ptr Program)) (d (ptr Decl)) (node (ptr Node)) (oldfc i64) (newfc i64)] (-> i64)
+  (let [(mut j) oldfc]
+    (loop (if (< (load j) newfc)
+            (let [nf (nth-field-of-node node (load j)) fty (resolve-type (load (field nf a)) d)
+                  defval (run-default nf fty)
+                  ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0]
+              (loop (if (< (load i) n)
+                      (let [m (al-get ms (load i))]
+                        (if (and (= (cast i64 (load (field m base))) (cast i64 d)) (load (field m is-entity)))
+                          (do (add-field-live! p m (nm nf) (nlen nf) fty defval) 0) 0)
+                        (store! i (+ (load i) 1)) 0)
+                      (break)))
+              (store! j (+ (load j) 1)) 0)
+            (break))))
+  0)
+
+; emit the accepted-change value: {defined, gen, message}
+(defn ev-defined [(name (ptr u8)) (nln i64) (gen i64)] (-> i64)
+  (let [b (load (ev-valbuf)) mb (defbuf)]
+    (snprintf mb 512 c"%.*s redefined at generation %lld — next call uses the new code" (cast i32 nln) (cast (ptr i8) name) gen)
+    (jb-cstr b c"{\"type\":\"defined\",\"defined\":") (jb-str b name nln)
+    (jb-cstr b c",\"gen\":") (jb-int b gen)
+    (jb-cstr b c",\"message\":") (jb-str b (cast (ptr u8) mb) (strlen mb))
+    (jb-byte b \}))
+  (store! (ev-outcome) 0) 0)
+
+; ---- the three redefinition entries ----
+(defn redefine-class [(errbase i64)] (-> i64)
+  (block :done
+    (let [node (parse-class) d (find-decl (nm node) (nlen node))]
+      (if (= (cast i64 d) 0) (do (rej-unknown node c"class") (return-from :done 0)) 0)
+      (if (!= (load (field d kind)) DK_CLASS) (do (rej-notkind node c"class") (return-from :done 0)) 0)
+      (let [oldfc (field-count-of d) newfc (node-field-count node) sc (classify-shape d node)]
+        (if (= sc 2)
+          (let [off (load (shape-offender))]
+            (rej-shape d (nm off) (nlen off) c"was removed, renamed, retyped, or reordered" (class-live-count d))
+            (return-from :done 0)) 0)
+        (if (= sc 1)
+          (let [(mut j) oldfc]
+            (loop (if (< (load j) newfc)
+                    (let [nf (nth-field-of-node node (load j))]
+                      (if (= (cast i64 (load (field nf b))) 0) (do (rej-nodefault d (nm nf) (nlen nf)) (return-from :done 0)) 0)
+                      (store! j (+ (load j) 1)) 0)
+                    (break)))) 0)
+        (if (= (check-methods-match d node) 0) (return-from :done 0) 0)
+        (if (= sc 1) (if (= (check-headroom d newfc node oldfc) 0) (return-from :done 0) 0) 0)
+        ; swap members, typecheck bodies + defaults; rollback on any type error
+        (let [old-members (load (field d members)) tbase (err-count)]
+          (store! (field d members) (node-members-list node))
+          (typecheck-class-bodies d node)
+          (if (= sc 1) (typecheck-added-defaults d node oldfc newfc) 0)
+          (if (> (err-count) tbase)
+            (do (store! (field d members) old-members) (ev-fail EK_TYPE c"type error" 0 0) (return-from :done 0)) 0)
+          ; COMMIT — every language thread is parked (server-eval-stw); this is the generation swap
+          (let [p (load (srv-program)) self-ty (mk-named d (self-args d))]
+            (repoint-class-methods old-members node)
+            (recompile-class-methods p d node self-ty)
+            (if (= sc 1) (commit-added-fields p d node oldfc newfc) 0)
+            (ev-defined (nm node) (nlen node) (bump-generation))))))))
+
+(defn redefine-fn [(errbase i64)] (-> i64)
+  (block :done
+    (let [node (parse-fn true) d (find-decl (nm node) (nlen node))]
+      (if (= (cast i64 d) 0) (do (rej-unknown node c"function") (return-from :done 0)) 0)
+      (if (!= (load (field d kind)) DK_FN) (do (rej-notkind node c"function") (return-from :done 0)) 0)
+      (let [old (load (field d node))]
+        (if (not (sigs-match d old d node)) (do (rej-sig d (nm node) (nlen node)) (return-from :done 0)) 0)
+        (set-cur-file c"<eval>")
+        (let [tbase (err-count)]
+          (check-fn-body d node (null-ty))
+          (if (> (err-count) tbase) (do (ev-fail EK_TYPE c"type error" 0 0) (return-from :done 0)) 0))
+        (store! (field d node) node)
+        (let [oi (repoint-method-node! old node)]
+          (recompile-method-at! (load (srv-program)) oi node d (null-ty)))
+        (ev-defined (nm node) (nlen node) (bump-generation))))))
+
+(defn redefine-interface [(errbase i64)] (-> i64)
+  (block :done
+    (let [node (parse-interface) d (find-decl (nm node) (nlen node))]
+      (if (= (cast i64 d) 0) (do (rej-unknown node c"interface") (return-from :done 0)) 0)
+      (if (and (!= (load (field d kind)) DK_INTERFACE) (!= (load (field d kind)) DK_BUILTIN_IFACE))
+        (do (rej-notkind node c"interface") (return-from :done 0)) 0)
+      ; temp-install the new interface members, re-check every implementor's conformance,
+      ; then restore — an interface change is never committed in M4 (only rejections matter).
+      (let [old-members (load (field d members)) tbase (err-count)]
+        (store! (field d members) (node-members-list node))
+        (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+          (set-cur-file c"<eval>")
+          (loop (if (< (load i) n)
+                  (let [d2 (al-get ds (load i))]
+                    (if (= (load (field d2 kind)) DK_CLASS) (do (check-conformance d2) 0) 0)
+                    (store! i (+ (load i) 1)) 0)
+                  (break))))
+        (store! (field d members) old-members)
+        (if (> (err-count) tbase)
+          (ev-fail EK_TYPE c"type error" 0 0)
+          (ev-fail EK_NOTIMPL c"interface redefinition is not supported in this build (M4); only method-body swaps and additive class fields are live-editable" 0 0))))))
+
+; classify + dispatch a definition-eval (parser is positioned at the leading keyword)
+(defn eval-definition [(errbase i64)] (-> i64)
+  (let [k (cur-kind)]
+    (cond
+      (= k TK_CLASS) (redefine-class errbase)
+      (= k TK_FN) (redefine-fn errbase)
+      (= k TK_INTERFACE) (redefine-interface errbase)
+      (= k TK_MIGRATE) (ev-fail EK_NOTIMPL c"migrate blocks are not supported in this build" 0 0)
+      (= k TK_ENUM) (ev-fail EK_NOTIMPL c"live enum redefinition is not supported in this build (M4)" 0 0)
+      (= k TK_OBJECT) (ev-fail EK_NOTIMPL c"live object redefinition is not supported in this build (M4)" 0 0)
+      (= k TK_IMPORT) (ev-fail EK_NOTIMPL c"import is not allowed in a live eval" 0 0)
+      (= k TK_MODULE) (ev-fail EK_NOTIMPL c"module is not allowed in a live eval" 0 0)
+      (ev-fail EK_NOTIMPL c"unsupported definition in a live eval" 0 0))))
 
 ; compile a typechecked eval block into a standalone nullary MethodInfo.
 (defn compile-eval-method [(blk (ptr Node)) (vty (ptr Type))] (-> (ptr MethodInfo))
@@ -210,7 +557,7 @@
     (if (= (lex-file src c"<eval>") 1) (do (ev-fail EK_SYNTAX c"syntax error in eval source" 0 0) (return-from :done 0)) 0)
     (parser-init (lexer-tokens) c"<eval>")
     (if (is-def-token (cur-kind))
-      (do (ev-fail EK_NOTIMPL c"live code change: not implemented until Phase 6" 0 0) (return-from :done 0)) 0)
+      (do (eval-definition errbase) (return-from :done 0)) 0)
     (let [blk (parse-eval-block)]
       (if (= (try-reflection blk) 1) (return-from :done 0) 0)
       (set-cur-file c"<eval>")
@@ -473,8 +820,11 @@
                   (loop (do (safepoint-poll (vm-main-parked)) (usleep (cast i32 3000)) (continue)))))
             0))))))
 
-; scry eval <file> -e <expr>: run to completion, evaluate the expr once, print JSON, exit.
-(defn scry-eval-cli [(path (ptr i8)) (expr (ptr u8)) (exprlen i64) (readonly bool)] (-> i64)
+; scry eval <file> -e <expr> [-e <expr> ...]: run main() to completion, then evaluate each
+; expr in sequence against the SAME live process, printing one JSON result line each, exit.
+; A definition-eval (live code change) here does NOT need request-global-stop — main() has
+; already returned, so there are no other language threads running.
+(defn scry-eval-cli [(path (ptr i8)) (exprs (ArrayList (ptr i8))) (readonly bool)] (-> i64)
   (ctx-init) (loaded-init) (register-builtins)
   (if (not (can-open path))
     (do (w-cstr 2 c"scry eval: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n") 74)
@@ -484,10 +834,14 @@
           (do
             (store! (srv-program) p) (store! (srv-readonly) (if readonly 1 0))
             (vm-run p)
-            (let [b (jb-new)]
-              (jb-byte b \{)
-              (eval-core b expr exprlen (if readonly 1 0))
-              (jb-byte b \})
-              (write-all 1 (load (field b data)) (load (field b len)))
-              (w-cstr 1 c"\n"))
+            (let [ne (al-len exprs) (mut i) 0]
+              (loop (if (< (load i) ne)
+                      (let [expr (al-get exprs (load i)) b (jb-new)]
+                        (jb-byte b \{)
+                        (eval-core b (cast (ptr u8) expr) (strlen expr) (if readonly 1 0))
+                        (jb-byte b \})
+                        (write-all 1 (load (field b data)) (load (field b len)))
+                        (w-cstr 1 c"\n")
+                        (store! i (+ (load i) 1)) 0)
+                      (break))))
             0))))))

@@ -174,6 +174,9 @@
     (advance)
     (expect TK_COLON)
     (store! (field nd a) (parse-type))
+    ; optional static default (M4 live additive-field): `name: Type = <expr>`.
+    ; Stored in slot b; null for a plain field. Used only by live redefinition (03/05 M4).
+    (if (check TK_EQ) (do (advance) (store! (field nd b) (parse-expr)) 0) 0)
     nd))
 (defn parse-class [] (-> (ptr Node))
   (advance) ; 'class'

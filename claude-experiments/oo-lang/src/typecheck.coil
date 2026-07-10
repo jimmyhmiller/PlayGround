@@ -845,7 +845,9 @@
       (if (< (load i) n)
         (let [mem (al-get ms (load i))]
           (if (= (nkind mem) NK_FIELD)
-            (if (assigned-has env mem) 0
+            ; a field with a static default (mem.b) is always assigned (to its default)
+            ; unless init overrides it (03/05 M4 additive-field) — so it needs no init store.
+            (if (or (!= (cast i64 (load (field mem b))) 0) (assigned-has env mem)) 0
               (do (err-head-n init) (w-cstr 2 c"field '") (w-bytes 2 (nm mem) (nlen mem))
                   (w-cstr 2 c"' is not assigned in init of ") (w-bytes 2 (load (field d name)) (load (field d name-len))) (err-end) 0)) 0)
           (store! i (+ (load i) 1)) 0)
