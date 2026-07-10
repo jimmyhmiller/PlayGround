@@ -80,7 +80,10 @@ impl Parinfer {
                 escape_next = false;
                 continue;
             }
-            if ch == '\\' && in_string {
+            // `\` escapes the next char: a string escape inside a string, a
+            // character literal (`\(`, `\"`, `\;`, …) in code. The following char
+            // is never structural.
+            if ch == '\\' && !in_comment {
                 escape_next = true;
                 continue;
             }
@@ -168,7 +171,12 @@ impl Parinfer {
                     continue;
                 }
 
-                if ch == '\\' && in_string {
+                // A backslash escapes the next character: inside a string it is a
+                // string escape (`\"`), and in code it introduces a Lisp/Coil
+                // character literal (`\(`, `\)`, `\"`, `\;`, `\space`, …). Either
+                // way the following char is literal and must not be treated as a
+                // structural delimiter, string quote, or comment start.
+                if ch == '\\' && !in_comment {
                     escape_next = true;
                     new_line.push(ch);
                     continue;

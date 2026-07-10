@@ -44,13 +44,17 @@ impl Parinfer {
         let mut escape_next = false;
         let mut in_comment = false;
         for ch in source.chars() {
-            let was_escaped = escape_next;
-            escape_next = false;
-            if ch == '\\' && in_string && !was_escaped {
+            // The char after a `\` is literal — a string escape inside a string, a
+            // character literal (`\(`, `\"`, `\;`, …) in code — never structural.
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            if ch == '\\' && !in_comment {
                 escape_next = true;
                 continue;
             }
-            if ch == '"' && !in_comment && !was_escaped {
+            if ch == '"' && !in_comment {
                 in_string = !in_string;
                 continue;
             }
@@ -97,13 +101,17 @@ impl Parinfer {
         let mut brackets = 0i32;
         let mut braces = 0i32;
         for ch in output.chars() {
-            let was_escaped = escape_next;
-            escape_next = false;
-            if ch == '\\' && in_string && !was_escaped {
+            // The char after a `\` is literal (string escape or character literal)
+            // and is never a structural delimiter.
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            if ch == '\\' && !in_comment {
                 escape_next = true;
                 continue;
             }
-            if ch == '"' && !in_comment && !was_escaped {
+            if ch == '"' && !in_comment {
                 in_string = !in_string;
                 continue;
             }
@@ -113,7 +121,6 @@ impl Parinfer {
             if ch == '\n' || ch == '\r' {
                 in_comment = false;
             }
-            if was_escaped { continue; }
             if in_string || in_comment { continue; }
             match ch {
                 '(' => parens += 1,

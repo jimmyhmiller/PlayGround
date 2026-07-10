@@ -324,7 +324,15 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
                 let iv = int(rt, idx);
                 let rest_expr = call2(rt, "drop", iv, t);
                 binds.extend(destructure(rt, elems[k + 1], rest_expr));
-                break;
+                k += 2;
+                continue;
+            }
+            if is_keyword(rt, elems[k], "as") {
+                // [a b :as whole] -> whole bound to the entire collection.
+                binds.push(elems[k + 1]);
+                binds.push(t);
+                k += 2;
+                continue;
             }
             if !is_sym(rt, elems[k], "_") {
                 let iv = int(rt, idx);
@@ -340,24 +348,69 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
         let kvs = rt.list_to_vec(lst);
         let t = gensym(rt, "map");
         let mut binds = vec![t, init];
+        // First locate `:or` defaults (a `{sym default …}` map) so any binding
+        // can fall back when its key is absent.
+        let mut defaults: Vec<(u64, u64)> = Vec::new();
+        let mut k = 0;
+        while k + 1 < kvs.len() {
+            if is_keyword(rt, kvs[k], "or") {
+                if let Some(dl) = record_field0(rt, kvs[k + 1], reader::MAP) {
+                    let dkvs = rt.list_to_vec(dl);
+                    let mut j = 0;
+                    while j + 1 < dkvs.len() {
+                        defaults.push((dkvs[j], dkvs[j + 1]));
+                        j += 2;
+                    }
+                }
+            }
+            k += 2;
+        }
+        // `get t key`, or `(if (contains? t key) (get t key) default)` if the
+        // symbol has an `:or` default.
+        let get_with_default =
+            |rt: &mut Runtime<M>, name: u64, key: u64| -> u64 {
+                let ge = call2(rt, "get", t, key);
+                for &(dn, dv) in &defaults {
+                    if let (Val::Sym(a), Val::Sym(b)) = (rt.decode(dn), rt.decode(name)) {
+                        if a == b {
+                            let has = call2(rt, "contains?", t, key);
+                            let ifs = sym(rt, "if");
+                            return rt.vec_to_list(&[ifs, has, ge, dv]);
+                        }
+                    }
+                }
+                ge
+            };
         let mut k = 0;
         while k + 1 < kvs.len() {
             let key = kvs[k];
             let val = kvs[k + 1];
             if is_keyword(rt, key, "keys") {
-                // {:keys [x y]} -> x (get t :x), y (get t :y)
+                // {:keys [x y]} -> x (get t :x), y (get t :y)  (honoring :or)
                 if let Some(vl) = record_field0(rt, val, reader::VECTOR) {
                     for s in rt.list_to_vec(vl) {
                         let kw = keyword_expr(rt, s);
-                        let ge = call2(rt, "get", t, kw);
+                        let ge = get_with_default(rt, s, kw);
                         binds.push(s);
                         binds.push(ge);
                     }
                 }
+            } else if is_keyword(rt, key, "as") {
+                // {:as whole} -> whole bound to the entire map.
+                binds.push(val);
+                binds.push(t);
+            } else if is_keyword(rt, key, "or") {
+                // handled above
             } else {
-                // {name :key} -> name (get t :key)
-                let ge = call2(rt, "get", t, val);
-                binds.extend(destructure(rt, key, ge));
+                // {name :key} -> name (get t :key)  (honoring :or when name is a symbol)
+                if matches!(rt.decode(key), Val::Sym(_)) {
+                    let ge = get_with_default(rt, key, val);
+                    binds.push(key);
+                    binds.push(ge);
+                } else {
+                    let ge = call2(rt, "get", t, val);
+                    binds.extend(destructure(rt, key, ge));
+                }
             }
             k += 2;
         }

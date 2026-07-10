@@ -34,6 +34,9 @@ impl Compiler {
             ("%first", First), ("%rest", Rest), ("%cons", Cons),
             ("record", Record), ("field", Field), ("type-of", TypeOf), ("nfields", NFields), ("throw", Throw),
             ("nil?", IsNil), ("list", List), ("println", Println), ("gc", Gc),
+            // Mutable 1-slot cell backing atoms (a real mutable array, unlike the
+            // immutable list-backed clojure `vector`).
+            ("%cell", Vector), ("%cell-ref", VectorRef), ("%cell-set!", VectorSet),
         ] {
             prims.insert(rt.intern(name), p);
         }

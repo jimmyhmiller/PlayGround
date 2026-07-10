@@ -262,4 +262,52 @@ pub const CORE: &str = r#"
                         (thread-last x (%first steps))
                         (list (%first steps) x))
                     (%rest steps)))))
+
+;; ─────────────── more control macros ───────────────
+(defmacro if-not (c then & else) (list 'if c (%first else) then))
+(defmacro while (test & body)
+  `(loop [] (when ~test ~@body (recur))))
+(defmacro dotimes (binding & body)
+  (let [i (first binding) n (second binding)]
+    `(loop [~i 0] (when (< ~i ~n) ~@body (recur (inc ~i))))))
+(defmacro doseq (binding & body)
+  (if (> (count binding) 2)
+      (throw "doseq: only a single [x coll] binding is supported")
+      (let [x (first binding) coll (second binding)]
+        `(loop [s# (seq ~coll)]
+           (when s#
+             (let [~x (first s#)] ~@body)
+             (recur (next s#)))))))
+(defmacro when-first (binding & body)
+  (let [x (first binding) coll (second binding)]
+    `(let [s# (seq ~coll)]
+       (when s# (let [~x (first s#)] ~@body)))))
+;; `case`: constant dispatch, desugared to a `cond` of `=` tests (a trailing odd
+;; clause is the default). Non-hygienic scratch symbol `-case-val`.
+(defn -case-cond [g clauses]
+  (cond (nil? clauses) (list true (list 'throw "no matching case clause"))
+        (nil? (next clauses)) (list true (first clauses))
+        true (%cons (list '= g (first clauses))
+                    (%cons (second clauses)
+                           (-case-cond g (next (next clauses)))))))
+(defmacro case (e & clauses)
+  (list 'let (vector '-case-val e)
+        (%cons 'cond (-case-cond '-case-val clauses))))
+
+;; ─────────────── atoms (the single-threaded state model) ───────────────
+;; An atom is a record wrapping a mutable 1-slot cell. `@a`/`(deref a)` reads it;
+;; `reset!`/`swap!` mutate it. (Threads + compare-and-set semantics are a later
+;; layer; this is the identity/state box real clojure code reaches for.)
+(defn atom [x] (record 'Atom (%cell x)))
+(defn atom? [x] (%num-eq (type-of x) 'Atom))
+(defn deref [a] (%cell-ref (field a 0) 0))
+(defn reset! [a v] (do (%cell-set! (field a 0) 0 v) v))
+(defn swap! [a f & args]
+  (let [old (deref a) s (seq args)]
+    (reset! a
+      (cond (nil? s) (f old)
+            (nil? (next s)) (f old (first s))
+            (nil? (next (next s))) (f old (first s) (second s))
+            (nil? (next (next (next s)))) (f old (first s) (second s) (nth s 2))
+            true (throw "swap!: too many args (max 3 beyond the atom)")))))
 "#;

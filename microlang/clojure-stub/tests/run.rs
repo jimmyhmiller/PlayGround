@@ -371,3 +371,24 @@ fn variadic_arithmetic() {
     assert_eq!(run("(not= 1 1 2)"), "true");
     assert_eq!(run("(reduce + 0 [1 2 3 4 5])"), "15");
 }
+
+#[test]
+fn destructuring_as_or() {
+    assert_eq!(run("(let [[a b :as v] [1 2]] [a b v])"), "[1 2 [1 2]]");
+    assert_eq!(run("(let [{:keys [x y] :as m} {:x 1 :y 2}] [x y m])"), "[1 2 {:x 1, :y 2}]");
+    assert_eq!(run("(let [{:keys [x y] :or {y 9}} {:x 1}] [x y])"), "[1 9]");
+    assert_eq!(run("(let [{a :aa :or {a 0}} {}] a)"), "0");
+    assert_eq!(run("((fn [[a & r]] [a r]) [1 2 3])"), "[1 (2 3)]");
+}
+
+#[test]
+fn control_macros() {
+    assert_eq!(run("(if-not false :yes :no)"), ":yes");
+    assert_eq!(run("(if-not true :yes)"), "nil");
+    assert_eq!(run("(let [a (atom 0)] (dotimes [i 5] (swap! a + i)) @a)"), "10");
+    assert_eq!(run("(let [a (atom 0)] (doseq [x [1 2 3]] (swap! a + x)) @a)"), "6");
+    assert_eq!(run("(case 2 1 :one 2 :two :other)"), ":two");
+    assert_eq!(run("(case 9 1 :one 2 :two :other)"), ":other");
+    assert_eq!(run("(when-first [x [10 20]] x)"), "10");
+    assert_eq!(run("(let [a (atom 0) i (atom 0)] (while (< @i 3) (swap! a + 1) (swap! i + 1)) @a)"), "3");
+}

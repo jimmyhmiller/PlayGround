@@ -41,6 +41,7 @@ enum Tok {
     Backtick,      // `  syntax-quote
     Unquote,       // ~
     UnquoteSplice, // ~@
+    Deref,         // @  -> (deref x)
     Caret,         // ^  metadata (parsed, then discarded for now)
     Str(String),
     Char(char),
@@ -82,6 +83,10 @@ fn tokenize(src: &str) -> Vec<Tok> {
             }
             '`' => {
                 out.push(Tok::Backtick);
+                i += 1;
+            }
+            '@' => {
+                out.push(Tok::Deref);
                 i += 1;
             }
             '~' => {
@@ -189,6 +194,7 @@ impl Parser {
                 }
             }
             Tok::Backtick => self.wrap(rt, "syntax-quote"),
+            Tok::Deref => self.wrap(rt, "deref"),
             Tok::Unquote => self.wrap(rt, "unquote"),
             Tok::UnquoteSplice => self.wrap(rt, "unquote-splice"),
             Tok::Str(s) => alloc(rt, Obj::Str(s)),
