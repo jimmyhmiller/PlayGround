@@ -250,8 +250,8 @@ extern "C" fn shim_let_exit<M: ValueModel>(ctx: *mut JitCtx<M>, _unused: u32) ->
 extern "C" fn shim_load_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &*(*ctx.rc).rt };
-    match rt.globals.get(&(sym as Sym)) {
-        Some(v) => v.val,
+    match rt.global(sym as Sym) {
+        Some(v) => v,
         None => panic!("Unable to resolve symbol: {}", rt.sym_name(sym as Sym)),
     }
 }

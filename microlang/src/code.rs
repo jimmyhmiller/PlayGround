@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
-use crate::runtime::{Runtime, Var};
+use crate::runtime::Runtime;
 use crate::value::{clone_slots, frame_get, frame_set, Frame, Locals, Obj, Val};
 
 pub trait CodeSpace<M: ValueModel> {
@@ -62,8 +62,8 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
         match ir {
             Ir::Const(id) | Ir::Quote(id) => rt.get_const(*id),
             Ir::Local { up, idx } => frame_get(locals, *up, *idx),
-            Ir::Global(s) => match rt.globals.get(s) {
-                Some(v) => v.val,
+            Ir::Global(s) => match rt.global(*s) {
+                Some(v) => v,
                 None => panic!("Unable to resolve symbol: {}", rt.sym_name(*s)),
             },
             Ir::SetLocal { up, idx, val } => {
@@ -73,9 +73,8 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
             }
             Ir::SetGlobal { name, val } => {
                 let v = top.eval_ir(top, rt, val, locals);
-                match rt.globals.get_mut(name) {
-                    Some(var) => var.val = v,
-                    None => panic!("set!: unbound variable: {}", rt.sym_name(*name)),
+                if !rt.set_global_val(*name, v) {
+                    panic!("set!: unbound variable: {}", rt.sym_name(*name));
                 }
                 v
             }
@@ -96,7 +95,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
             }
             Ir::Def { name, init } => {
                 let v = top.eval_ir(top, rt, init, locals);
-                rt.globals.insert(*name, Var { val: v });
+                rt.define_global(*name, v);
                 rt.encode(Val::Sym(*name))
             }
             Ir::Let(inits, body) => {

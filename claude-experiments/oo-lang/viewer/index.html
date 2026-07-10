@@ -7,61 +7,11 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header id="topbar">
-  <div class="brand">scry<span class="brand-sub">live viewer</span></div>
-  <input id="global-search" type="text" placeholder="jump to Agent#7 or search field values…" spellcheck="false" autocomplete="off">
-  <div class="topbar-right">
-    <button id="transcript-toggle" class="ghost-btn" title="eval transcript">transcript</button>
-    <div id="conn" class="conn"><span class="dot"></span><span class="conn-label">connecting…</span></div>
-  </div>
-</header>
-
-<div id="layout">
-  <nav id="rail">
-    <div class="rail-head">
-      <span>types</span>
-      <input id="type-search" type="text" placeholder="filter…" spellcheck="false" autocomplete="off">
-    </div>
-    <ul id="type-list"></ul>
-  </nav>
-
-  <main id="content">
-    <div id="breadcrumbs"></div>
-    <div id="pane"></div>
-  </main>
-</div>
-
-<section id="repl" class="collapsed">
-  <div class="repl-head">
-    <span class="repl-title">repl</span>
-    <span id="repl-context" class="repl-context"></span>
-    <span class="repl-hint">bound to <code>self</code> · press <kbd>`</kbd> to toggle</span>
-  </div>
-  <div id="repl-scroll"></div>
-  <div class="repl-input-row">
-    <span class="repl-prompt">›</span>
-    <input id="repl-input" type="text" spellcheck="false" autocomplete="off" placeholder="self.conversation.size()  —  or any Scry expression">
-  </div>
-</section>
-
-<section id="code-panel" class="collapsed">
-  <div class="code-head">
-    <span class="code-title">redefine <span id="code-cls" class="code-cls"></span></span>
-    <span class="code-hint">live code change — edit a body or add a <code>field: Type = default</code>, then define</span>
-    <button id="code-close" class="ghost-btn">close</button>
-  </div>
-  <textarea id="code-editor" spellcheck="false" autocomplete="off"></textarea>
-  <div class="code-row">
-    <button id="code-define" class="invoke-btn">define</button>
-    <div id="code-result" class="code-result"></div>
-  </div>
-</section>
-
-<aside id="transcript" class="collapsed">
-  <div class="transcript-head"><span>eval transcript</span><button id="transcript-close" class="ghost-btn">close</button></div>
-  <div id="transcript-list"></div>
-</aside>
-
+<div id="app"></div>
+<!-- vendored, no CDN, no build step: React 18 + ReactDOM 18 (production UMD) + htm mini -->
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/htm.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

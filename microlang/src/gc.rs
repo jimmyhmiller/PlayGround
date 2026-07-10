@@ -94,16 +94,19 @@ impl<M: ValueModel> Runtime<M> {
         {
             let Self {
                 heap,
-                globals,
+                global_slots,
                 shadow,
                 consts,
                 methods,
                 ..
             } = &mut *self;
 
-            // 1. Forward the direct roots.
-            for v in globals.values_mut() {
-                v.val = fw::<M>(heap, from_len, &mut to, &mut reloc, v.val);
+            // 1. Forward the direct roots. The dense global array IS the global
+            //    store; forward every bound slot (skip the unbound sentinel).
+            for v in global_slots.iter_mut() {
+                if *v != crate::runtime::GLOBAL_UNBOUND {
+                    *v = fw::<M>(heap, from_len, &mut to, &mut reloc, *v);
+                }
             }
             for s in shadow.iter_mut() {
                 *s = fw::<M>(heap, from_len, &mut to, &mut reloc, *s);

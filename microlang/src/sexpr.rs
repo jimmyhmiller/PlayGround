@@ -200,7 +200,7 @@ impl Sexpr {
                 };
             }
             // A prim is a name's DEFAULT meaning; a local/global binding shadows it.
-            let shadowed = self.resolve_local(hs).is_some() || rt.globals.contains_key(&hs);
+            let shadowed = self.resolve_local(hs).is_some() || rt.global_defined(hs);
             if !shadowed {
                 if let Some(&p) = self.prims.get(&hs) {
                     let n = self.child_count(rt, slot);

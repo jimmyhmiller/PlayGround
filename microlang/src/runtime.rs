@@ -46,11 +46,6 @@ use crate::value::{Cat, Frame, HeapId, Locals, Obj, RawTag, Sym, Val};
 /// with a real encoded value — reading it back means "not bound, use slow path".
 pub const GLOBAL_UNBOUND: u64 = u64::MAX;
 
-/// A global binding — the single resolution table the compiler and runtime share.
-pub struct Var {
-    pub val: u64,
-}
-
 /// The panic payload of a `(throw v)`: the thrown runtime value, carried up the
 /// stack until an `Ir::Try` catches it. Neutral control-flow, not Clojure-specific.
 pub struct Thrown {
@@ -140,14 +135,14 @@ pub struct Runtime<M: ValueModel> {
     pub(crate) shadow: Vec<u64>,
     sym_names: Vec<String>,
     sym_ids: HashMap<String, Sym>,
-    pub globals: SymMap<Var>,
-    /// A dense mirror of global VALUES, indexed by `Sym`, for O(1) pointer-based
-    /// reads. `intern` extends it (so it is always sym-sized and only grows at
-    /// analyze time, never during a run), and `define_global`/`set_global_val`
-    /// keep it current. A native backend loads a global inline from this array's
-    /// stable base instead of an FFI into the hash map. Slots default to
-    /// `GLOBAL_UNBOUND` (a bit pattern no value model can produce), which the JIT
-    /// treats as "fall back to the slow, late-binding lookup".
+    /// The global environment: a dense array of VALUES indexed by `Sym`. This is
+    /// the sole store (there is no parallel hash map). `intern` extends it (so it
+    /// is always sym-sized and only grows at analyze time, never during a run);
+    /// `define_global`/`set_global_val` write it; `global` reads it. A native
+    /// backend loads a global inline from this array's stable base. Slots default
+    /// to `GLOBAL_UNBOUND` (a bit pattern no value model can produce), which the
+    /// JIT treats as "fall back to the slow, late-binding lookup". Being one flat
+    /// array of `u64` makes it trivial to make atomic for shared-thread access.
     pub global_slots: Vec<u64>,
     // ── dispatch axis ──
     /// `(method, type) -> impl closure`. The source of truth; a GC root.
@@ -178,7 +173,6 @@ impl<M: ValueModel> Runtime<M> {
             shadow: Vec::new(),
             sym_names: Vec::new(),
             sym_ids: HashMap::new(),
-            globals: Default::default(),
             global_slots: Vec::new(),
             methods: HashMap::new(),
             method_names: HashSet::new(),
@@ -204,28 +198,36 @@ impl<M: ValueModel> Runtime<M> {
         id
     }
 
-    /// Define (or redefine) a global, updating both the map and the dense mirror.
-    /// The one place a global binding is created; routing writes through here is
-    /// what keeps `global_slots` a faithful cache.
+    /// Read a global's value, or `None` if unbound. THE global read path — the
+    /// dense `global_slots` array IS the store (no separate map), so this is a
+    /// single indexed load, and a `Sym` beyond the current slot count is unbound.
+    pub fn global(&self, sym: Sym) -> Option<u64> {
+        match self.global_slots.get(sym as usize) {
+            Some(&v) if v != GLOBAL_UNBOUND => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Is this global bound? (`set!`/redefinition checks.)
+    pub fn global_defined(&self, sym: Sym) -> bool {
+        matches!(self.global_slots.get(sym as usize), Some(&v) if v != GLOBAL_UNBOUND)
+    }
+
+    /// Define (or redefine) a global. The dense mirror is the store.
     pub fn define_global(&mut self, sym: Sym, val: u64) {
-        self.globals.insert(sym, Var { val });
         if let Some(slot) = self.global_slots.get_mut(sym as usize) {
             *slot = val;
         }
     }
 
-    /// Assign an existing global's value (`set!`), updating the dense mirror too.
-    /// Returns `false` if the global is unbound.
+    /// Assign an existing global's value (`set!`). Returns `false` if unbound.
     pub fn set_global_val(&mut self, sym: Sym, val: u64) -> bool {
-        match self.globals.get_mut(&sym) {
-            Some(var) => {
-                var.val = val;
-                if let Some(slot) = self.global_slots.get_mut(sym as usize) {
-                    *slot = val;
-                }
+        match self.global_slots.get_mut(sym as usize) {
+            Some(slot) if *slot != GLOBAL_UNBOUND => {
+                *slot = val;
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
@@ -679,7 +681,7 @@ impl<M: ValueModel> Runtime<M> {
     }
     /// The current apply-handler fn value (re-read from `globals`, so GC-safe), if any.
     pub fn apply_handler(&self) -> Option<u64> {
-        self.apply_fn.and_then(|s| self.globals.get(&s).map(|v| v.val))
+        self.apply_fn.and_then(|s| self.global(s))
     }
     /// Resolve a call site via the current dispatch strategy (reads registry +
     /// updates the strategy's per-site cache), then invoke happens in the backend.

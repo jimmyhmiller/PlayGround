@@ -29,7 +29,7 @@ use std::sync::Arc;
 use crate::code::CodeSpace;
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
-use crate::runtime::{Runtime, Var};
+use crate::runtime::Runtime;
 use crate::value::{clone_slots, frame_get, frame_set, Frame, Locals, Obj, Val};
 
 /// A compiled expression: run it with the runtime, a lexical frame, and the
@@ -76,8 +76,8 @@ impl<M: ValueModel> ClosureComp<M> {
             Ir::Global(s) => {
                 let s = *s;
                 // Late binding: resolved at call time, not compile time.
-                Arc::new(move |rt, _env, _top| match rt.globals.get(&s) {
-                    Some(v) => v.val,
+                Arc::new(move |rt, _env, _top| match rt.global(s) {
+                    Some(v) => v,
                     None => panic!("Unable to resolve symbol: {}", rt.sym_name(s)),
                 })
             }
@@ -95,9 +95,8 @@ impl<M: ValueModel> ClosureComp<M> {
                 let cv = self.compile(val);
                 Arc::new(move |rt, env, top| {
                     let v = cv(rt, env, top);
-                    match rt.globals.get_mut(&name) {
-                        Some(var) => var.val = v,
-                        None => panic!("set!: unbound variable: {}", rt.sym_name(name)),
+                    if !rt.set_global_val(name, v) {
+                        panic!("set!: unbound variable: {}", rt.sym_name(name));
                     }
                     v
                 })
@@ -130,7 +129,7 @@ impl<M: ValueModel> ClosureComp<M> {
                 let ci = self.compile(init);
                 Arc::new(move |rt, env, top| {
                     let v = ci(rt, env, top);
-                    rt.globals.insert(name, Var { val: v });
+                    rt.define_global(name, v);
                     rt.encode(Val::Sym(name))
                 })
             }

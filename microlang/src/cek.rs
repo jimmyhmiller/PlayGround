@@ -27,7 +27,7 @@ use std::sync::Arc;
 use crate::code::CodeSpace;
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
-use crate::runtime::{Runtime, Var};
+use crate::runtime::Runtime;
 use crate::value::{clone_slots, frame_get, frame_set, slot_load, Frame, Locals, Obj, Sym, Val};
 
 /// The reified continuation: "what to do with the value of the current
@@ -102,10 +102,8 @@ fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Arc<Kon
         Ir::Local { up, idx } => Step::Apply(frame_get(&env, up, idx), k),
         Ir::Global(s) => {
             let v = rt
-                .globals
-                .get(&s)
-                .unwrap_or_else(|| panic!("Unable to resolve symbol: {}", rt.sym_name(s)))
-                .val;
+                .global(s)
+                .unwrap_or_else(|| panic!("Unable to resolve symbol: {}", rt.sym_name(s)));
             Step::Apply(v, k)
         }
         Ir::Lambda { nparams, variadic, body } => {
@@ -207,7 +205,7 @@ fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Arc<Kont>) -> Step
             }
         }
         Kont::Def { name, next } => {
-            rt.globals.insert(*name, Var { val: v });
+            rt.define_global(*name, v);
             Step::Apply(M::R::enc_sym(*name), next.clone())
         }
         Kont::SetLoc { up, idx, env, next } => {
@@ -215,9 +213,8 @@ fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Arc<Kont>) -> Step
             Step::Apply(v, next.clone())
         }
         Kont::SetGlob { name, next } => {
-            match rt.globals.get_mut(name) {
-                Some(var) => var.val = v,
-                None => panic!("set!: unbound variable: {}", rt.sym_name(*name)),
+            if !rt.set_global_val(*name, v) {
+                panic!("set!: unbound variable: {}", rt.sym_name(*name));
             }
             Step::Apply(v, next.clone())
         }

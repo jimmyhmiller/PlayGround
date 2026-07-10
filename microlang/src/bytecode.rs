@@ -35,7 +35,7 @@ use std::sync::Arc;
 use crate::code::CodeSpace;
 use crate::ir::{ConstId, Ir, Prim};
 use crate::model::{Repr, ValueModel};
-use crate::runtime::{Runtime, Var};
+use crate::runtime::Runtime;
 use crate::value::{frame_get, Locals, Obj, Sym, Val};
 
 /// A bytecode instruction. The operand stack holds tagged values; the
@@ -262,10 +262,8 @@ impl<M: ModelEmit> BytecodeVm<M> {
                 Op::LoadLocal(up, idx) => stack.push(frame_get(locals, *up, *idx)),
                 Op::LoadGlobal(s) => {
                     let v = rt
-                        .globals
-                        .get(s)
-                        .unwrap_or_else(|| panic!("Unable to resolve symbol: {}", rt.sym_name(*s)))
-                        .val;
+                        .global(*s)
+                        .unwrap_or_else(|| panic!("Unable to resolve symbol: {}", rt.sym_name(*s)));
                     stack.push(v);
                 }
                 Op::MakeClosure { nparams, variadic, body } => {
@@ -279,7 +277,7 @@ impl<M: ModelEmit> BytecodeVm<M> {
                 }
                 Op::DefGlobal(name) => {
                     let v = *stack.last().expect("def: empty stack");
-                    rt.globals.insert(*name, Var { val: v });
+                    rt.define_global(*name, v);
                 }
                 Op::Pop => {
                     stack.pop();

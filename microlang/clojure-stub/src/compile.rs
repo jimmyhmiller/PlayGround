@@ -127,7 +127,7 @@ impl Compiler {
                 }
                 _ => {
                     // A binding shadows a prim; a prim is otherwise its default.
-                    let shadowed = self.resolve_local(hs).is_some() || rt.globals.contains_key(&hs);
+                    let shadowed = self.resolve_local(hs).is_some() || rt.global_defined(hs);
                     if !shadowed {
                         if let Some(&p) = self.prims.get(&hs) {
                             let args = items[1..].iter().map(|&f| self.compile(rt, f)).collect();

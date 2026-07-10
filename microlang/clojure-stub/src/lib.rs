@@ -44,7 +44,7 @@ pub fn run<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, src: &str)
     // can't invoke thunks) see a fully realized result.
     let slot = rt.push_root(result);
     let realize = rt.intern("-realize");
-    let out = match rt.globals.get(&realize).map(|g| g.val) {
+    let out = match rt.global(realize) {
         Some(rf) => cs.invoke(cs, rt, rf, &[rt.root_get(slot)]),
         None => rt.root_get(slot),
     };
@@ -150,8 +150,8 @@ fn expand<M: ValueModel>(
         if !macros.contains(&hs) {
             break;
         }
-        let mfn = match rt.globals.get(&hs) {
-            Some(v) => v.val,
+        let mfn = match rt.global(hs) {
+            Some(v) => v,
             None => break,
         };
         // Clojure macro convention: (&form &env & args). Pass the whole form and
