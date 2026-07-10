@@ -1042,3 +1042,143 @@ that the viewer can swap it is a runtime property, not something the app knows.
 - **A whole-class Phase-6 redefinition must carry the class's *exact* method set** (M4: no
   add/remove). Keeping `Session` to `init`/`renderPrompt`/`suggest` is what makes the live-edit
   snippet short enough to paste — a design constraint the app honors on purpose.
+
+# Phase 8a — a real HTTP(S) client (`Http`), backed by libcurl
+
+Phase 8a gives Scry a genuine network client: `object Http { request(...) }`, performed over real
+DNS + TLS through **libcurl via FFI** — no `curl` subprocess, no hand-rolled TLS. It is the
+foundation the agent phases build on (8b Env+Json read config/parse responses; 8c AnthropicModel
+becomes a *real* `Model` that calls `/v1/messages` instead of the scripted stub).
+
+## The surface (Scry)
+
+```
+object Http { fn request(method: String, url: String, headers: List<String>, body: String) -> HttpResponse }
+class HttpResponse { status: Int ; body: String }
+```
+
+`headers` is a `List<String>` of `"Key: Value"` lines. Usage:
+
+```
+let h = List<String>()
+h.push("x-api-key: ${key}")
+h.push("anthropic-version: 2023-06-01")
+h.push("content-type: application/json")
+let r = Http.request("POST", "https://api.anthropic.com/v1/messages", h, body)
+// r.status : Int   r.body : String
+```
+
+### Error model — status 0 is the sentinel (documented choice)
+
+A **transport failure** (DNS/TLS/connect/timeout — anything where no HTTP response was received)
+returns `HttpResponse{ status: 0, body: <curl error text> }`. Every real HTTP outcome (200, 401,
+404, 5xx…) returns that status with the response body. We do **not** return `Result<HttpResponse,
+String>`: status-0 is the safe default the orchestrator asked for (the agent layer just checks
+`status == 0`), and it threads through the checker with zero friction since `HttpResponse` is a
+plain value with two fields. A cert failure surfaces as a status-0 transport error with curl's
+message — **never** a silent bypass (`VERIFYPEER`/`VERIFYHOST` stay at curl's secure defaults, so
+the system trust store is authoritative).
+
+## The binding, by file
+
+| file | change |
+|------|--------|
+| `Coil.toml` | new `[link] libs = ["curl"]` → `-lcurl` (system `/usr/lib/libcurl.4.dylib`, 8.7.1; default linker paths find it, no `-L` needed). |
+| `ioutil.coil` | the libcurl externs (the one extern home): `curl_global_init`, `curl_easy_init/setopt/getinfo/cleanup/strerror`, `curl_slist_append/free_all`, `curl_multi_init/add_handle/remove_handle/perform/poll/info_read/cleanup/strerror`. `setopt`/`getinfo` are declared variadic (`...`) — the C option int selects the vararg type; we always pass an 8-byte value. |
+| `http.coil` | **new module.** The whole client: growable `HttpBuf` + write callback, `str-to-cstr`, `http-build-headers` (List<String>→`curl_slist`), the cooperative `http-perform` multi-loop, `http-result-code` (drains the transport CURLcode), and `http-request` → `HttpResult{status,body,err}`. Imports only `ioutil`/`builtins`/`safepoint`, and takes the caller's `(field vt parked)` word directly — so it does **not** import `vm.coil` (no cycle). |
+| `bytecode.coil` | `BLT_HTTP_REQUEST 27`. |
+| `typecheck.coil` | registers `HttpResponse` (a **`DK_CLASS`** builtin with two `NK_FIELD` members — class-kinded so it becomes an arena entity) and `object Http` with the `request` signature. New `bt-field` helper. |
+| `compile.coil` | `compile-builtin-object`'s `Http` branch: push the 4 args left-to-right, emit `OP_CALL_BUILTIN BLT_HTTP_REQUEST`. |
+| `vm.coil` | imports `http.coil`; `do-builtin` pops `(method,url,headers,body)` and calls `http-request((field vt parked), …)`, then `http-alloc-response` turns the result into a real `HttpResponse` entity; `vm-run` does the one-time `curl_global_init` before any thread can race. |
+
+## The cooperative multi-loop — why an in-flight request stays inspectable
+
+The request is driven through libcurl's **`multi`** interface, never `curl_easy_perform` (which
+blocks the whole request and would stall every STW for its full duration). `http-perform` is the
+*exact* safepoint-cooperative shape used by `Clock.sleep` / `vm-readline` / the join-spin, now
+applied a fourth time — reusing the **same `parked` word** the thread registered at spawn:
+
+```
+(loop
+  (safepoint-poll parked)                 ; park here for a global stop, every pass
+  (curl_multi_perform mh &running)
+  (if (= running 0) (break)
+    (do (curl_multi_poll mh NULL 0 50 &numfds) (continue))))   ; wait ≤50ms, then re-poll
+```
+
+So a coordinator that requests a global stop **while a network round-trip is outstanding** sees
+this thread publish `parked=1` within one 50ms poll slice — an eval (`types()`, an instance read,
+a mutation) answers promptly mid-request. This is what makes "browse the heap while an agent is
+waiting on Claude" real rather than aspirational. `NOSIGNAL=1` is set so libcurl never arms
+`SIGALRM` off the main thread; a 30s `TIMEOUT_MS` guards against a hung peer.
+
+curl option/info integers are baked as constants in `http.coil` with `; curl.h:` provenance
+comments (verified against the 8.7.1 headers): `URL=10002`, `WRITEFUNCTION=20011`,
+`WRITEDATA=10001`, `POSTFIELDS=10015`, `POSTFIELDSIZE=60`, `HTTPHEADER=10023`,
+`CUSTOMREQUEST=10036`, `TIMEOUT_MS=155`, `NOSIGNAL=99`, `RESPONSE_CODE=2097154`. The transport
+CURLcode is read from the `CURLMsg` returned by `curl_multi_info_read` at the verified layout
+offset (`result` @ 16).
+
+## `HttpResponse` is a real arena entity (the delightful part)
+
+`HttpResponse` is **not** a special serializer box — it is a first-class arena-backed entity, the
+same machinery as any user `class`. Registered `DK_CLASS`, it gets an entity `MonoType` (fields
+`status: Int`, `body: String`), and `build-program` builds it a `TypeInfo` + `TypeArena` exactly
+like `Agent` or `Conversation`. `do-builtin` allocates each response with `arena-alloc` (stamping
+the header: type-id / slot-index / generation / live) and stores the two fields at their decl
+offsets (`status` @ header+0, `body` @ header+8). Consequences:
+
+- `--dump-arenas` shows an `HttpResponse` arena (`live=N`, `slot-size=80`).
+- Reflection works: `HttpResponse.instances()` returns each response fully serialized —
+  `{ "type":"HttpResponse", "ref":"HttpResponse#0", "fields":{ "status":…, "body":… } }` — so
+  **every HTTP response an agent ever received is browsable in the viewer**, with stable identity.
+- Because `HttpResponse` is registered unconditionally, its arena is always present (like any
+  built-in type) even for programs that never call `Http.request` — two `run-arenas` goldens were
+  updated to include the (`live=0`) line.
+
+`vm.coil` finds the `TypeInfo` by name at request time (`find-typeinfo-by-name` scans the
+program's types once; a local `vm-name-eq` avoids pulling `types.coil` into `vm.coil`).
+
+## Tests (2 new; 251 total)
+
+- **`http_network` (real-network gate, `tests/http/get.scry`)** — a real HTTPS GET to
+  `api.anthropic.com/`; asserts a genuine HTTP status (200/401/403/404 all prove DNS+TLS+parse).
+  Verified live: **status 404**. Then, only if `ANTHROPIC_API_KEY` is set, it writes a throwaway
+  temp `.scry` (key read from env, file deleted immediately — never committed) that POSTs a minimal
+  `/v1/messages` request and asserts **status 200 + body contains `"content"`**. The POST *path*
+  (custom headers + request body + response capture) is verified live against the API returning a
+  real **401** JSON error with a bogus key. **SKIPPED LOUDLY** when offline / no key.
+- **`http_stw` (cooperative-STW gate, `tests/http/ping_thread.scry`)** — a background OS thread
+  hammers HTTPS requests in a loop while `main` parks in `join()`. The harness `POST`s `types()` /
+  `HttpPinger.instances()` through the eval channel *during* the loop and asserts each round-trips
+  in **< 1s** and that `HttpPinger.count` climbs — a prompt reply mid-request proves the HTTP thread
+  parked for the STW within one 50ms slice. Always runs a **structural** check (that
+  `http-perform`'s loop body calls `safepoint-poll`) as the offline fallback + belt-and-suspenders;
+  the live half is SKIPPED LOUDLY when offline.
+
+## What 8b / 8c build on
+
+- **8b Env + Json.** `Env.get("ANTHROPIC_API_KEY")` removes the temp-file dance in tests and lets a
+  real app read its key. A `Json` parser turns `HttpResponse.body` into a navigable value (extract
+  `content[0].text` from a `/v1/messages` reply). Both are pure additions; `Http` is unchanged.
+- **8c AnthropicModel.** Implement the existing `Model` interface (`fn complete(prompt) -> String`)
+  by building the headers/body, calling `Http.request`, checking `status` (0 ⇒ transport error;
+  non-2xx ⇒ API error surfaced honestly), and `Json`-extracting the completion. Because
+  `HttpResponse` is arena-visible, every model call the assistant makes is already browsable in the
+  viewer with zero extra work — the agent's actual network history, live.
+
+## Coil / libcurl friction (adds to Phase 1-7's list)
+
+- **Variadic FFI is the clean way to bind `curl_easy_setopt`/`getinfo`.** Declaring them
+  `[(ptr i8) i32 ...]` and always passing an 8-byte value (a pointer, or a `long` widened to i64)
+  matches curl's `va_arg` dispatch (the option number selects the type) — no per-option wrapper.
+- **`curl_multi` over `curl_easy_perform` is non-negotiable for a cooperative runtime.** The blocking
+  easy call would defeat the entire STW design; the multi loop is the only shape that keeps a
+  network wait as STW-safe as `Clock.sleep`.
+- **A builtin type becomes a real entity for free by kinding it `DK_CLASS` with `NK_FIELD` members.**
+  The intern/`build-typeinfo`/arena pipeline keys off `is-entity` (= class/object), so
+  `HttpResponse` needed no new runtime machinery to be arena-backed and browsable — just the right
+  decl kind. This is the reusable recipe for every future built-in value that should be inspectable.
+- **`http.coil` takes `(field vt parked)`, not the `VMThread`.** Same decoupling seam Phase 5 noted:
+  passing the bare `(ptr i64)` parked word keeps the HTTP module free of a `vm.coil` import, so there
+  is no module cycle even though the VM calls into it and it calls back into the safepoint protocol.
