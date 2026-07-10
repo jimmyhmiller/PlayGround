@@ -1301,10 +1301,11 @@ designing around, not hand-waved:
   actually depend on, while still giving each agent the real-thread simplicity
   `DECISIONS.md` #4b asked for.
 
-### A pacing primitive — the demo needs one and nothing above provides it
+### A pacing primitive — the demo needs one
 
-Nothing in this doc, `01-language.md`, or `05-milestones.md` defines a sleep, timer, or
-delay primitive, and the demo's most emphasized visual beats depend on one existing.
+The language surface for this is `01-language.md` §1.7's `Clock.sleep(ms)`
+(`__builtin_sleep_millis`); this section designs its runtime implementation.
+The demo's most emphasized visual beats depend on it existing.
 `00-vision.md`'s 0:30 beat requires `Message`/`ToolCall` counts "visibly climbing" and
 status lines "ticking" over the ~5-minute script, not completing instantly. M4's agents are
 driven by a synchronous, deterministic `ScriptedModel` with no real network latency, and —

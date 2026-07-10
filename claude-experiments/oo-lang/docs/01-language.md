@@ -246,6 +246,10 @@ Namespaced utility functions (no meaningful instance data, but still entities �
 ```
 object Clock {
   fn now() -> Int { __builtin_epoch_millis() }
+  // Bounded, safepoint-cooperative sleep (02-runtime.md §7's pacing primitive): the
+  // calling thread sleeps in short slices, polling its own safepoint between them, so a
+  // sleeping agent thread never delays a stop-the-world by more than one slice.
+  fn sleep(ms: Int) -> Void { __builtin_sleep_millis(ms) }
 }
 
 object Console {
@@ -876,12 +880,14 @@ class AgentWorker implements Runnable {
         Ok(_) -> {}
         Err(e) -> Console.log("agent " + self.agent.name + " turn failed")
       }
+      Clock.sleep(400)   // pace the demo: turns stay watchable, not instantaneous (§1.7)
     }
   }
 }
 
 object Clock {
   fn now() -> Int { __builtin_epoch_millis() }
+  fn sleep(ms: Int) -> Void { __builtin_sleep_millis(ms) }   // safepoint-cooperative (§1.7)
 }
 ```
 

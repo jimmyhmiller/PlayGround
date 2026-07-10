@@ -596,6 +596,10 @@ terminal is visibly different, with zero restart and all prior `Message` instanc
   Scope it to exactly what the demo script needs: 3 status lines, one scrolling pane.
   Control bytes (cursor-positioning escapes, ESC/`0x1B`) are constructed via the `\xHH`
   raw-byte string escape now specified in `01-language.md` §3.1.
+- **`Clock.sleep(ms)`** (`01-language.md` §1.7, runtime design in `02-runtime.md` §7's
+  pacing subsection): each agent's worker loop sleeps ~400ms between turns so the demo's
+  "counts visibly climbing" beat is watchable instead of finishing in milliseconds. The
+  sleep is safepoint-cooperative — a sleeping agent thread never delays a stop-the-world.
 - A `FakeModel`/`ScriptedModel` class standing in for real LLM calls, so the demo is
   deterministic and doesn't depend on network access or API cost during rehearsal or the
   live take. It must be an honestly-named, ordinary entity — visible in the viewer's type
