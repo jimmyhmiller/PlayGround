@@ -638,45 +638,55 @@ function computeLayout(nodes, edges) {
   const N = nodes.length;
   if (N === 0) return {};
   const idx = new Map(nodes.map((n, i) => [n.name, i]));
-  const bandY = (kind) => kind === "interface" ? -300 : kind === "enum" ? 300 : 0;
+  const bandY = (kind) => kind === "interface" ? -360 : kind === "enum" ? 360 : 0;
+  // per-node half-extents (+ margin) so springs, repulsion and overlap-separation all respect size
+  const hw = nodes.map((n) => nodeWidth(n.name) / 2 + 16);
+  const hh = NODE_H / 2 + 22;
   const px = new Array(N), py = new Array(N);
   for (let i = 0; i < N; i++) {
-    const ang = i * 2.399963229728653;      // golden angle (radians)
-    const r = 60 + i * 9;
+    const ang = i * 2.399963229728653;       // golden angle — deterministic spread, no RNG
+    const r = 90 + i * 14;
     px[i] = Math.cos(ang) * r;
-    py[i] = bandY(nodes[i].kind) + Math.sin(ang) * r * 0.5;
+    py[i] = bandY(nodes[i].kind) + Math.sin(ang) * r * 0.55;
   }
-  const K = 150;                             // ideal spring length
-  const krep = K * K * 1.4;                  // repulsion strength
-  const iters = 420;
+  const K = 230;                             // ideal spring length
+  const krep = 26000;                        // long-range repulsion
+  const iters = 600;
   const adj = edges.map((e) => [idx.get(e.from), idx.get(e.to)]).filter(([a, b]) => a != null && b != null);
   for (let it = 0; it < iters; it++) {
     const dx = new Float64Array(N), dy = new Float64Array(N);
-    // repulsion between every pair
     for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
       let vx = px[i] - px[j], vy = py[i] - py[j];
-      let d2 = vx * vx + vy * vy; if (d2 < 0.01) { vx = (i - j) || 1; vy = (i + 1); d2 = vx * vx + vy * vy; }
+      let d2 = vx * vx + vy * vy; if (d2 < 0.01) { vx = ((i * 31 + 7) % 13) - 6 || 1; vy = ((j * 17 + 3) % 11) - 5 || 1; d2 = vx * vx + vy * vy; }
       const d = Math.sqrt(d2); const f = krep / d2;
       dx[i] += (vx / d) * f; dy[i] += (vy / d) * f;
       dx[j] -= (vx / d) * f; dy[j] -= (vy / d) * f;
     }
-    // attraction along edges
     for (const [a, b] of adj) {
       let vx = px[a] - px[b], vy = py[a] - py[b];
       const d = Math.sqrt(vx * vx + vy * vy) || 0.01; const f = (d * d) / K;
       dx[a] -= (vx / d) * f; dy[a] -= (vy / d) * f;
       dx[b] += (vx / d) * f; dy[b] += (vy / d) * f;
     }
-    // vertical band gravity keeps the kinds in readable rows; mild horizontal centering
     for (let i = 0; i < N; i++) {
-      dy[i] += (bandY(nodes[i].kind) - py[i]) * 0.08;
-      dx[i] += (0 - px[i]) * 0.005;
+      dy[i] += (bandY(nodes[i].kind) - py[i]) * 0.10;   // keep kinds in readable rows
+      dx[i] += (0 - px[i]) * 0.004;                     // gentle horizontal centering
     }
-    const t = 42 * (1 - it / iters) + 2;     // cooling schedule
+    const t = 60 * (1 - it / iters) + 3;                // cooling
     for (let i = 0; i < N; i++) {
       const dl = Math.sqrt(dx[i] * dx[i] + dy[i] * dy[i]) || 1;
       px[i] += (dx[i] / dl) * Math.min(dl, t);
       py[i] += (dy[i] / dl) * Math.min(dl, t);
+    }
+    // hard AABB overlap resolution — separate any two boxes that still intersect, along the
+    // axis of least penetration. Runs every iteration so the settled layout never overlaps.
+    for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
+      const ox = (hw[i] + hw[j]) - Math.abs(px[i] - px[j]);
+      const oy = (hh + hh) - Math.abs(py[i] - py[j]);
+      if (ox > 0 && oy > 0) {
+        if (ox < oy) { const s = (px[i] < px[j] ? -1 : 1) * ox / 2; px[i] += s; px[j] -= s; }
+        else { const s = (py[i] < py[j] ? -1 : 1) * oy / 2; py[i] += s; py[j] -= s; }
+      }
     }
   }
   const pos = {};
