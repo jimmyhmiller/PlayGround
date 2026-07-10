@@ -12,10 +12,16 @@
 //! The only values that go stale on a move are bare `u64`s the mutator holds
 //! directly (the compiler's in-flight form) — which is exactly what handles fix.
 
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::ir::Ir;
+
+/// Memory ordering for frame/cell slot access. Mutators run these single-threaded
+/// between safepoints; cross-thread visibility is established by the acquire/
+/// release fences at the safepoint park/resume boundary (see the GC), so plain
+/// `Relaxed` on the slots themselves is sufficient and cheap.
+const SLOT_ORDER: Ordering = Ordering::Relaxed;
 
 pub type Sym = u32;
 pub type HeapId = u32;
@@ -83,7 +89,7 @@ pub enum Obj {
     Closure {
         nparams: usize,
         variadic: bool,
-        body: Rc<Ir>,
+        body: Arc<Ir>,
         env: Locals,
     },
     /// A user record: a type tag (interned symbol) plus positional fields. The
@@ -103,7 +109,7 @@ pub enum Obj {
     /// Because it is an immutable `Rc`-linked structure, invoking it re-installs
     /// the captured continuation any number of times — enabling generators,
     /// coroutines, and backtracking. Only the stackless machine produces these.
-    Cont(Rc<crate::cek::Kont>),
+    Cont(Arc<crate::cek::Kont>),
     /// A COMPOSABLE (delimited) continuation: the slice of a `CekMachine`
     /// continuation between a `%shift` and its enclosing `%reset`. Unlike `Cont`,
     /// invoking it does NOT abort — it splices the captured slice onto the
@@ -111,7 +117,7 @@ pub enum Obj {
     /// can be invoked any number of times. Only the stackless machine produces
     /// these. Its captured frames are traced by the moving GC (see `gc.rs`), so
     /// it survives collection like any other heap value.
-    PartialCont(Rc<crate::cek::Kont>),
+    PartialCont(Arc<crate::cek::Kont>),
     /// Forwarding marker left in from-space by the copying collector: the object
     /// now lives at index `.0` (or `u32::MAX` for reclaimed garbage). Any
     /// attempt to dereference a stale from-space pointer hits this and errors
@@ -119,32 +125,53 @@ pub enum Obj {
     Moved(u32),
 }
 
-/// A lexical frame: `Cell` slots (so the GC can rewrite the heap pointers they
-/// hold in place) plus a parent. `Rc` so closures capture it cheaply and so the
-/// pointer is stable across a collection.
+/// A lexical frame: `AtomicU64` slots (so the GC can rewrite the heap pointers
+/// they hold in place, and so a frame captured by a closure can be shared across
+/// threads) plus a parent. `Arc` so closures capture it cheaply, the pointer is
+/// stable across a collection, and it is `Send + Sync`.
 pub struct Frame {
-    pub slots: Vec<Cell<u64>>,
+    pub slots: Vec<AtomicU64>,
     pub parent: Locals,
 }
 
-pub type Locals = Option<Rc<Frame>>;
+pub type Locals = Option<Arc<Frame>>;
 
-/// Read slot `idx` in the frame `up` levels out. Reads through the `Cell`, so a
+/// Build a frame's slots from raw values (replaces the old `Cell::new` splat).
+pub fn slots_from(vals: impl IntoIterator<Item = u64>) -> Vec<AtomicU64> {
+    vals.into_iter().map(AtomicU64::new).collect()
+}
+
+/// Snapshot existing slots into fresh atomics (each frame/`done` vector is
+/// immutable-once-shared, so extending it must copy rather than mutate the prefix).
+pub fn clone_slots(slots: &[AtomicU64]) -> Vec<AtomicU64> {
+    slots.iter().map(|c| AtomicU64::new(c.load(SLOT_ORDER))).collect()
+}
+
+/// Read a slot atomic with the frame ordering.
+pub fn slot_load(a: &AtomicU64) -> u64 {
+    a.load(SLOT_ORDER)
+}
+/// Store a slot atomic with the frame ordering.
+pub fn slot_store(a: &AtomicU64, v: u64) {
+    a.store(v, SLOT_ORDER)
+}
+
+/// Read slot `idx` in the frame `up` levels out. Reads through the atomic, so a
 /// value relocated by a prior collection is seen at its new address.
 pub fn frame_get(env: &Locals, up: u16, idx: u16) -> u64 {
     let mut f = env.as_ref().expect("local reference in empty environment");
     for _ in 0..up {
         f = f.parent.as_ref().expect("local reference past root frame");
     }
-    f.slots[idx as usize].get()
+    f.slots[idx as usize].load(SLOT_ORDER)
 }
 
-/// Mutate slot `idx` in the frame `up` levels out. The slots are already `Cell`s
-/// (for GC), so local assignment is just a cell write.
+/// Mutate slot `idx` in the frame `up` levels out. The slots are already atomics
+/// (for GC + sharing), so local assignment is just an atomic store.
 pub fn frame_set(env: &Locals, up: u16, idx: u16, v: u64) {
     let mut f = env.as_ref().expect("assignment in empty environment");
     for _ in 0..up {
         f = f.parent.as_ref().expect("assignment past root frame");
     }
-    f.slots[idx as usize].set(v);
+    f.slots[idx as usize].store(v, SLOT_ORDER);
 }

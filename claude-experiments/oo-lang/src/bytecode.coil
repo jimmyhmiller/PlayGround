@@ -83,6 +83,9 @@
 (const BLT_MUTEX_UNLOCK 22)  ; pop mutex -> release -> push Unit
 (const BLT_MUTEX_GET 23)     ; pop mutex -> push guarded value
 (const BLT_MUTEX_SET 24)     ; pop value, pop mutex -> store guarded value -> push Unit
+; ---- Phase 7: interactive stdin/stdout (01-language.md §DECISIONS #7) ----
+(const BLT_CONSOLE_PRINT 25)     ; pop String -> write to stdout with NO trailing newline (flushed) -> push Unit
+(const BLT_CONSOLE_READLINE 26)  ; (no args) -> safepoint-cooperative line read -> push (ptr Option<String> box): Some(line) / None at EOF
 
 ; ============================ FieldInfo kinds ===============================
 (const FIELD_I64 0) (const FIELD_F64 1) (const FIELD_BOOL 2)

@@ -32,9 +32,9 @@
 //!
 //! ## Calling convention: a frame pool
 //!
-//! Calls used to heap-allocate an `Rc<Frame>` per callee — the dominant cost. Now
+//! Calls used to heap-allocate an `Arc<Frame>` per callee — the dominant cost. Now
 //! a freed frame (uniquely owned, `strong_count == 1`, so provably not captured by
-//! any closure) is returned to a pool and refilled via `Rc::get_mut` on the next
+//! any closure) is returned to a pool and refilled via `Arc::get_mut` on the next
 //! call. Deep recursion converges to ~depth frames; a tail loop reuses one; and
 //! tail args reuse the trampoline's buffer. The `get_mut`/`strong_count` guard is
 //! the exact test for "no other owner", so a captured frame can NEVER be recycled
@@ -56,8 +56,9 @@
 //! the next honest step).
 
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::AtomicU64;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I128, I64, I8};
@@ -104,7 +105,7 @@ pub struct JitCtx<'a, M: ValueModel> {
     rc: *const JitCtx<'a, M>,
     top: &'a dyn CodeSpace<M>,
     rt: *mut Runtime<M>,
-    /// Raw base pointer of the INNERMOST frame's slot array (`Cell<u64>` is
+    /// Raw base pointer of the INNERMOST frame's slot array (`AtomicU64` is
     /// transparent over `u64`). Compiled code reads `up == 0` locals as
     /// `*(cur_slots + idx)` — no call. Kept in sync with `cur` on entry and on
     /// every `let` enter/exit.
@@ -152,7 +153,7 @@ pub struct JitCtx<'a, M: ValueModel> {
 }
 
 /// Raw base pointer of a frame's slot array (null for the empty environment).
-/// `Cell<u64>` is `repr(transparent)` over `u64`, so this doubles as a `*const u64`
+/// `AtomicU64` is `repr(transparent)` over `UnsafeCell<u64>` (same layout as `u64`), so this doubles as a `*const u64`
 /// the compiled code reads and writes slots through.
 fn slots_ptr(l: &Locals) -> *const u64 {
     match l {
@@ -188,7 +189,7 @@ type PtrBuildHasher = std::hash::BuildHasherDefault<PtrHasher>;
 struct ClosureTemplate {
     nparams: usize,
     variadic: bool,
-    body: Rc<Ir>,
+    body: Arc<Ir>,
 }
 
 extern "C" fn shim_load_local<M: ValueModel>(ctx: *mut JitCtx<M>, up: u32, idx: u32) -> u64 {
@@ -222,9 +223,9 @@ extern "C" fn shim_let_enter<M: ValueModel>(ctx: *mut JitCtx<M>, nslots: u32) ->
     let ctx = unsafe { &*ctx };
     let parent = ctx.cur.borrow().clone();
     let nil = M::R::enc_nil();
-    let slots: Vec<std::cell::Cell<u64>> =
-        (0..nslots).map(|_| std::cell::Cell::new(nil)).collect();
-    let frame = Some(Rc::new(crate::value::Frame { slots, parent }));
+    let slots: Vec<AtomicU64> =
+        (0..nslots).map(|_| AtomicU64::new(nil)).collect();
+    let frame = Some(Arc::new(crate::value::Frame { slots, parent }));
     ctx.cur_slots.set(slots_ptr(&frame));
     ctx.saved.borrow_mut().push(ctx.cur.replace(frame));
     0
@@ -233,7 +234,7 @@ extern "C" fn shim_let_enter<M: ValueModel>(ctx: *mut JitCtx<M>, nslots: u32) ->
 /// Set slot `idx` of the current `let` frame during its sequential init.
 extern "C" fn shim_let_set<M: ValueModel>(ctx: *mut JitCtx<M>, idx: u32, val: u64) -> u64 {
     let ctx = unsafe { &*ctx };
-    ctx.cur.borrow().as_ref().unwrap().slots[idx as usize].set(val);
+    ctx.cur.borrow().as_ref().unwrap().slots[idx as usize].store(val, std::sync::atomic::Ordering::Relaxed);
     val
 }
 
@@ -470,10 +471,10 @@ struct ShimRefs {
 struct Compiled {
     code: *const u8,
     templates: Vec<ClosureTemplate>,
-    /// Does this body ever consult `JitCtx::cur` (the `Rc<Frame>` chain)? Only
+    /// Does this body ever consult `JitCtx::cur` (the `Arc<Frame>` chain)? Only
     /// bodies with `let`, a closure (`Lambda`), or an `up > 0` local do. When
     /// false (the common leaf/loop shape — all locals `up == 0`), `run_once`
-    /// skips cloning the frame into `cur`, saving an `Rc` bump per call.
+    /// skips cloning the frame into `cur`, saving an `Arc` bump per call.
     needs_cur: bool,
     /// Is this body callable via the NATIVE fast path (`call_indirect` with a
     /// caller-built stack frame)? True iff it does not need the heap frame chain
@@ -626,21 +627,21 @@ pub struct JitCranelift<M: ModelArithJit> {
     module: RefCell<JITModule>,
     fbctx: RefCell<FunctionBuilderContext>,
     shims: Shims,
-    /// Compiled closure bodies, keyed by the `Rc<Ir>` identity (compile-once,
+    /// Compiled closure bodies, keyed by the `Arc<Ir>` identity (compile-once,
     /// like the bytecode tier's chunk cache).
-    cache: RefCell<HashMap<*const Ir, Rc<Compiled>, PtrBuildHasher>>,
+    cache: RefCell<HashMap<*const Ir, Arc<Compiled>, PtrBuildHasher>>,
     counter: Cell<u32>,
-    /// A free list of `Rc<Frame>` whose call has returned without being captured
-    /// (`strong_count == 1`). Refilled via `Rc::get_mut` on the next call instead
+    /// A free list of `Arc<Frame>` whose call has returned without being captured
+    /// (`strong_count == 1`). Refilled via `Arc::get_mut` on the next call instead
     /// of allocating — so deep recursion converges to ~depth frames and a tail
     /// loop reuses one, cutting the per-call heap traffic that was the gap to a
     /// production compiler. Bounded so it never holds unbounded memory.
-    frame_pool: RefCell<Vec<Rc<Frame>>>,
+    frame_pool: RefCell<Vec<Arc<Frame>>>,
     /// A monomorphic inline cache for the LAST callee resolved. Call sites in the
     /// wild are overwhelmingly monomorphic (a given `(f …)` calls the same `f`
     /// every time), so caching the resolution — decode + heap lookup + compiled
     /// body + captured env, all keyed on the callee's bits — turns the steady
-    /// state into a single compare + a couple of `Rc` bumps, skipping the hash
+    /// state into a single compare + a couple of `Arc` bumps, skipping the hash
     /// lookups entirely. This is the dispatch axis's "resolve once, not per call".
     call_ic: RefCell<Option<CallTarget>>,
     /// Dense, heap-id-indexed table of NATIVE fast-call entries: for a closure
@@ -678,7 +679,7 @@ struct CallTarget {
     callee: u64,
     nparams: usize,
     variadic: bool,
-    compiled: Rc<Compiled>,
+    compiled: Arc<Compiled>,
     env: Locals,
 }
 
@@ -814,7 +815,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         out
     }
 
-    fn compile(&self, ir: &Ir, tail_root: bool, nparams: usize) -> Rc<Compiled> {
+    fn compile(&self, ir: &Ir, tail_root: bool, nparams: usize) -> Arc<Compiled> {
         let mut module = self.module.borrow_mut();
         let mut fbctx = self.fbctx.borrow_mut();
         let mut ctx = module.make_context();
@@ -840,7 +841,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         module.finalize_definitions().expect("finalize");
         let code = module.get_finalized_function(id);
         let needs_cur = body_needs_cur(ir);
-        Rc::new(Compiled {
+        Arc::new(Compiled {
             code,
             templates,
             needs_cur,
@@ -852,8 +853,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
         })
     }
 
-    fn compiled_body(&self, body: &Rc<Ir>, nparams: usize) -> Rc<Compiled> {
-        let key = Rc::as_ptr(body);
+    fn compiled_body(&self, body: &Arc<Ir>, nparams: usize) -> Arc<Compiled> {
+        let key = Arc::as_ptr(body);
         if let Some(c) = self.cache.borrow().get(&key) {
             return c.clone();
         }
@@ -866,7 +867,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
     /// monomorphic inline cache when the callee's bits match the last call — the
     /// common case — and otherwise decoding the closure, compiling its body, and
     /// refilling the cache.
-    fn resolve_call(&self, rt: &mut Runtime<M>, callee: u64) -> (usize, bool, Rc<Compiled>, Locals) {
+    fn resolve_call(&self, rt: &mut Runtime<M>, callee: u64) -> (usize, bool, Arc<Compiled>, Locals) {
         if let Some(t) = self.call_ic.borrow().as_ref() {
             if t.callee == callee {
                 return (t.nparams, t.variadic, t.compiled.clone(), t.env.clone());
@@ -921,7 +922,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             self as *const JitCranelift<M> as *const u8,
         ) as u8;
         let cur_slots = slots_ptr(frame);
-        // `cur` holds a fresh handle to the frame (an `Rc` clone, not an alloc) —
+        // `cur` holds a fresh handle to the frame (an `Arc` clone, not an alloc) —
         // but only for bodies that actually consult the frame chain (let / closures
         // / `up > 0`). Leaf/loop bodies read locals through `cur_slots` alone, so we
         // skip the clone (and keep the frame trivially uniquely-owned for the pool).
@@ -958,9 +959,9 @@ impl<M: ModelArithJit> JitCranelift<M> {
         }
     }
 
-    /// Build a callee frame, reusing a pooled `Rc<Frame>` if one is free (no
+    /// Build a callee frame, reusing a pooled `Arc<Frame>` if one is free (no
     /// allocation) and otherwise falling back to `Runtime::build_call_frame`. The
-    /// pool only ever holds uniquely-owned frames, so `Rc::get_mut` never fails.
+    /// pool only ever holds uniquely-owned frames, so `Arc::get_mut` never fails.
     fn alloc_frame(
         &self,
         rt: &mut Runtime<M>,
@@ -974,28 +975,28 @@ impl<M: ModelArithJit> JitCranelift<M> {
             Some(rc) => rc,
             None => return rt.build_call_frame(nparams, variadic, args, env),
         };
-        let f = Rc::get_mut(&mut rc).expect("pooled frame is uniquely owned");
+        let f = Arc::get_mut(&mut rc).expect("pooled frame is uniquely owned");
         f.slots.clear();
         if variadic {
             assert!(args.len() >= nparams, "arity: expected at least {nparams}, got {}", args.len());
-            f.slots.extend(args[..nparams].iter().map(|&a| Cell::new(a)));
+            f.slots.extend(args[..nparams].iter().map(|&a| AtomicU64::new(a)));
             let rest = rt.vec_to_list(&args[nparams..]);
-            f.slots.push(Cell::new(rest));
+            f.slots.push(AtomicU64::new(rest));
         } else {
             assert!(args.len() == nparams, "arity: expected {nparams}, got {}", args.len());
-            f.slots.extend(args.iter().map(|&a| Cell::new(a)));
+            f.slots.extend(args.iter().map(|&a| AtomicU64::new(a)));
         }
         f.parent = env;
         Some(rc)
     }
 
     /// Return a frame to the pool IF its call did not capture it (a closure that
-    /// escaped would keep `strong_count > 1`). `Rc::get_mut` succeeding is the
+    /// escaped would keep `strong_count > 1`). `Arc::get_mut` succeeding is the
     /// exact, sound test for "no other owner" — a captured frame can never be
     /// recycled, so this cannot corrupt a live closure's environment.
     fn recycle(&self, frame: Locals) {
         if let Some(mut rc) = frame {
-            if let Some(f) = Rc::get_mut(&mut rc) {
+            if let Some(f) = Arc::get_mut(&mut rc) {
                 f.slots.clear();
                 f.parent = None; // don't pin the parent chain alive in the pool
                 let mut pool = self.frame_pool.borrow_mut();
@@ -1015,7 +1016,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         &self,
         top: &dyn CodeSpace<M>,
         rt: &mut Runtime<M>,
-        mut compiled: Rc<Compiled>,
+        mut compiled: Arc<Compiled>,
         mut frame: Locals,
         // The closure being run (0 = none, e.g. a top-level expr), so a tail call
         // back to the SAME closure can take the fast path below.
@@ -1045,10 +1046,10 @@ impl<M: ModelArithJit> JitCranelift<M> {
                 {
                     let f = frame
                         .as_mut()
-                        .and_then(Rc::get_mut)
+                        .and_then(Arc::get_mut)
                         .expect("non-escaping frame is uniquely owned");
                     f.slots.clear();
-                    f.slots.extend(args_buf.iter().map(|&a| Cell::new(a)));
+                    f.slots.extend(args_buf.iter().map(|&a| AtomicU64::new(a)));
                     // parent (env) unchanged: same closure => same environment.
                     // `compiled`, `cur_*` unchanged. `cur_slots` is recomputed in
                     // the next `run_once`.

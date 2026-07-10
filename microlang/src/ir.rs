@@ -7,13 +7,13 @@
 //! (`Prim`) so the value-model fast path is a first-class lowering, the way
 //! `dyn_add` is in the real toolkit — not a call into an opaque builtin.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::value::Sym;
 
 /// Index into the runtime constant pool. Literals are indirected through the
 /// pool (which is a GC root) so `Ir` itself holds NO heap pointers — a moving
-/// collector could not rewrite pointers embedded in an immutable `Rc<Ir>`.
+/// collector could not rewrite pointers embedded in an immutable `Arc<Ir>`.
 pub type ConstId = u32;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -160,7 +160,7 @@ pub enum Ir {
     Lambda {
         nparams: usize,
         variadic: bool,
-        body: Rc<Ir>,
+        body: Arc<Ir>,
     },
     Call(Box<Ir>, Vec<Ir>),
     Prim(Prim, Vec<Ir>),

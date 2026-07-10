@@ -36,7 +36,7 @@
 //! wiring.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::dispatch::{Dispatch, DispatchStats, MethodRegistry};
 use crate::value::Sym;
@@ -148,7 +148,7 @@ pub struct Speculative {
     inner: Box<dyn Dispatch>,
     policy: Box<dyn SpeculationPolicy>,
     sites: RefCell<Vec<SiteState>>,
-    counters: Rc<SpecCounters>,
+    counters: Arc<SpecCounters>,
 }
 
 impl Speculative {
@@ -157,11 +157,11 @@ impl Speculative {
             inner: Box::new(inner),
             policy: Box::new(policy),
             sites: RefCell::new(Vec::new()),
-            counters: Rc::new(SpecCounters::default()),
+            counters: Arc::new(SpecCounters::default()),
         }
     }
     /// A handle to read stats after this has been boxed into the runtime.
-    pub fn counters(&self) -> Rc<SpecCounters> {
+    pub fn counters(&self) -> Arc<SpecCounters> {
         self.counters.clone()
     }
 

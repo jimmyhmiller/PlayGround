@@ -104,6 +104,37 @@
             (do (nanosleep (cast (ptr i8) (index ts 0)) (cast (ptr i8) 0)) (continue))))))
   0)
 
+; Console.readLine(): blocking FROM THE PROGRAM'S VIEW, but never parks the OS thread in a
+; blocking read() — that would stall every STW/eval while the user thinks. Instead poll(fd 0)
+; with a short timeout in a loop that calls safepoint-poll each pass (exactly Clock.sleep's
+; cooperative-slicing shape): a coordinator that requests a global stop while we sit here waiting
+; for input sees us park within one 20ms slice, so evals answer promptly mid-readLine. Returns an
+; Option<String> box: Some(line) for a completed line (newline stripped; an empty line is Some(""))
+; and None at EOF (Ctrl-D / closed pipe) — 01 has no null, so EOF is an honest None.
+(defn vm-readline [(vt (ptr VMThread))] (-> (ptr i64))
+  (let [pfd (alloc-stack i64) chp (alloc-stack u8)
+        (mut cap) 64 (mut len) 0 (mut buf) (xalloc 64) (mut iseof) 0]
+    (store! pfd (<< 1 32))          ; struct pollfd { fd=0; events=POLLIN(1); revents=0 }
+    (loop
+      (do
+        (safepoint-poll (field vt parked))
+        (let [r (cast i64 (poll (cast (ptr i8) pfd) 1 20))]
+          (if (<= r 0) (continue)   ; timeout / EINTR: re-poll after the next safepoint
+            (let [n (read (cast i32 0) (cast (ptr i8) chp) 1)]
+              (if (= n 0) (do (store! iseof 1) (break))            ; EOF
+                (if (< n 0) (continue)                             ; EINTR mid-read
+                  (if (= (cast i64 (load chp)) \newline) (break)   ; end of line
+                    (do
+                      (if (>= (load len) (load cap))
+                        (do (store! cap (* (load cap) 2))
+                            (store! buf (cast (ptr u8) (realloc (cast (ptr i8) (load buf)) (load cap)))) 0) 0)
+                      (store! (index (load buf) (load len)) (load chp))
+                      (store! len (+ (load len) 1))
+                      (continue))))))))))
+    (if (and (= (load iseof) 1) (= (load len) 0))
+      (enum-none)                                   ; EOF with nothing buffered -> None
+      (enum-some (cast i64 (str-make (load buf) (load len)))))))   ; Some(line)
+
 ; Mutex.lock: CAS-acquire, but back off through the safepoint so a waiter still parks for a
 ; global stop (otherwise a spinning waiter would hang request-global-stop). During a global
 ; stop the coordinator has EXCLUSIVE access, so lock/unlock are no-ops for it — this also
@@ -143,6 +174,8 @@
     (= blt BLT_PRINT_BOOL) (do (print-bool (vpop vt)) (vpush vt 0))
     (= blt BLT_PRINT_STR) (do (print-str (cast (ptr StringObj) (vpop vt))) (vpush vt 0))
     (= blt BLT_CONSOLE_LOG) (do (console-log (cast (ptr StringObj) (vpop vt))) (vpush vt 0))
+    (= blt BLT_CONSOLE_PRINT) (do (console-print (cast (ptr StringObj) (vpop vt))) (vpush vt 0))
+    (= blt BLT_CONSOLE_READLINE) (vpush vt (cast i64 (vm-readline vt)))
     (= blt BLT_LIST_NEW) (vpush vt (cast i64 (list-new)))
     (= blt BLT_LIST_PUSH) (let [v (vpop vt) l (vpop vt)] (list-push (cast (ptr ListObj) l) v) (vpush vt 0))
     (= blt BLT_LIST_GET) (let [i (vpop vt) l (vpop vt)] (vpush vt (list-get (cast (ptr ListObj) l) i)))

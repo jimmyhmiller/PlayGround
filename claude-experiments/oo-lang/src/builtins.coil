@@ -60,6 +60,10 @@
 (defn print-bool [(v i64)] (-> i64) (if (= v 0) (w-cstr 1 c"false") (w-cstr 1 c"true")) (w-cstr 1 c"\n") 0)
 (defn print-str [(s (ptr StringObj))] (-> i64) (w-bytes 1 (load (field s data)) (load (field s len))) (w-cstr 1 c"\n") 0)
 (defn console-log [(s (ptr StringObj))] (-> i64) (w-bytes 1 (load (field s data)) (load (field s len))) (w-cstr 1 c"\n") 0)
+; Console.print: no trailing newline (for prompts). fd-1 write is unbuffered at the syscall
+; level, so the prompt reaches the terminal before the following readLine blocks — no flush call needed.
+(defn console-print [(s (ptr StringObj))] (-> i64) (w-bytes 1 (load (field s data)) (load (field s len))) 0)
+; Console.readLine's cooperative body lives in vm.coil (it needs the VMThread to poll the safepoint).
 
 ; ============================ List ==========================================
 (defstruct ListObj [(items (ptr i64)) (len i64) (cap i64)])

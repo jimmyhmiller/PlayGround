@@ -7,7 +7,7 @@
 //! they box a non-immediate category and unbox on the way out, and `allocs`
 //! counts the boxing so the micro-languages can *show* the cost.
 
-use std::cell::Cell;
+use std::sync::atomic::AtomicU64;
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
 
@@ -33,7 +33,7 @@ impl std::hash::Hasher for SymHasher {
 /// A `HashMap` keyed by `Sym` with the fast symbol hasher.
 pub type SymMap<V> = HashMap<Sym, V, BuildHasherDefault<SymHasher>>;
 use std::marker::PhantomData;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::bigint::BigInt;
 use crate::dispatch::{Dispatch, Megamorphic, MethodRegistry};
@@ -787,25 +787,25 @@ impl<M: ValueModel> Runtime<M> {
         args: &[u64],
         env: Locals,
     ) -> Locals {
-        let mut slots: Vec<Cell<u64>> = Vec::with_capacity(nparams + variadic as usize);
+        let mut slots: Vec<AtomicU64> = Vec::with_capacity(nparams + variadic as usize);
         if variadic {
             assert!(
                 args.len() >= nparams,
                 "arity: expected at least {nparams}, got {}",
                 args.len()
             );
-            slots.extend(args[..nparams].iter().map(|&a| Cell::new(a)));
+            slots.extend(args[..nparams].iter().map(|&a| AtomicU64::new(a)));
             let restlist = self.vec_to_list(&args[nparams..]);
-            slots.push(Cell::new(restlist));
+            slots.push(AtomicU64::new(restlist));
         } else {
             assert!(
                 args.len() == nparams,
                 "arity: expected {nparams}, got {}",
                 args.len()
             );
-            slots.extend(args.iter().map(|&a| Cell::new(a)));
+            slots.extend(args.iter().map(|&a| AtomicU64::new(a)));
         }
-        Some(Rc::new(Frame { slots, parent: env }))
+        Some(Arc::new(Frame { slots, parent: env }))
     }
 
 }

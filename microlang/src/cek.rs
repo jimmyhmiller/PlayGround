@@ -3,7 +3,7 @@
 //!
 //! The other tiers evaluate on the host (Rust) call stack, so "the current
 //! continuation" is that native stack — uncapturable, and gone once a call
-//! returns. This machine makes the continuation an explicit, `Rc`-linked,
+//! returns. This machine makes the continuation an explicit, `Arc`-linked,
 //! heap-allocated data structure (`Kont`). Evaluation is a loop over
 //! `Eval`/`Apply` states, no host recursion. `%callcc` reifies the current
 //! `Kont` as a first-class value; invoking it re-installs that `Kont` — any
@@ -21,63 +21,63 @@
 //! those error clearly. It is self-contained (does not compose via `top`),
 //! because it is a machine, not a recursive evaluator.
 
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use crate::code::CodeSpace;
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::runtime::{Runtime, Var};
-use crate::value::{frame_get, frame_set, Frame, Locals, Obj, Sym, Val};
+use crate::value::{clone_slots, frame_get, frame_set, slot_load, Frame, Locals, Obj, Sym, Val};
 
 /// The reified continuation: "what to do with the value of the current
-/// subexpression." An `Rc`-linked stack of frames. Immutable, so re-installable
+/// subexpression." An `Arc`-linked stack of frames. Immutable, so re-installable
 /// (multi-shot). Stores no value-model-specific data, so it is not generic.
 pub enum Kont {
     Done,
-    If { then_: Ir, else_: Ir, env: Locals, next: Rc<Kont> },
-    Seq { rest: Vec<Ir>, env: Locals, next: Rc<Kont> },
-    Def { name: Sym, next: Rc<Kont> },
-    SetLoc { up: u16, idx: u16, env: Locals, next: Rc<Kont> },
-    SetGlob { name: Sym, next: Rc<Kont> },
+    If { then_: Ir, else_: Ir, env: Locals, next: Arc<Kont> },
+    Seq { rest: Vec<Ir>, env: Locals, next: Arc<Kont> },
+    Def { name: Sym, next: Arc<Kont> },
+    SetLoc { up: u16, idx: u16, env: Locals, next: Arc<Kont> },
+    SetGlob { name: Sym, next: Arc<Kont> },
     // `done` holds already-evaluated argument values. They are raw heap pointers
     // the moving GC must be able to relocate WHILE this continuation is live or
-    // captured, so — exactly like a lexical `Frame` slot — each is a `Cell` the
+    // captured, so — exactly like a lexical `Frame` slot — each is an `AtomicU64` the
     // collector rewrites in place. That is what lets a captured continuation
     // survive a collection (see `gc::walk_kont`).
-    CallK { pending: Vec<Ir>, done: Vec<Cell<u64>>, env: Locals, next: Rc<Kont> },
-    PrimK { op: Prim, pending: Vec<Ir>, done: Vec<Cell<u64>>, env: Locals, next: Rc<Kont> },
-    CallCc { next: Rc<Kont> },
-    LetSlot { inits: Vec<Ir>, i: usize, frame: Locals, body: Ir, next: Rc<Kont> },
+    CallK { pending: Vec<Ir>, done: Vec<AtomicU64>, env: Locals, next: Arc<Kont> },
+    PrimK { op: Prim, pending: Vec<Ir>, done: Vec<AtomicU64>, env: Locals, next: Arc<Kont> },
+    CallCc { next: Arc<Kont> },
+    LetSlot { inits: Vec<Ir>, i: usize, frame: Locals, body: Ir, next: Arc<Kont> },
     /// A continuation delimiter, installed by `%reset`. Marks how far a `%shift`
     /// capture reaches; when a value flows into it, the prompt is transparent
     /// (the value passes straight through to `next`).
-    Prompt { next: Rc<Kont> },
+    Prompt { next: Arc<Kont> },
     /// Awaiting the `%shift` receiver closure `f`; once it is a value, capture the
     /// slice up to the nearest `Prompt` and apply `f` to the reified continuation.
-    ShiftK { next: Rc<Kont> },
+    ShiftK { next: Arc<Kont> },
 }
 
-/// Snapshot a `done` vector into fresh `Cell`s (each `Kont` is immutable and may
+/// Snapshot a `done` vector into fresh atomics (each `Kont` is immutable and may
 /// be shared across multi-shot resumptions, so a step that extends `done` must
 /// not mutate the shared prefix).
-fn snapshot(done: &[Cell<u64>]) -> Vec<Cell<u64>> {
-    done.iter().map(|c| Cell::new(c.get())).collect()
+fn snapshot(done: &[AtomicU64]) -> Vec<AtomicU64> {
+    clone_slots(done)
 }
 
 enum Step {
-    Eval(Ir, Locals, Rc<Kont>),
-    Apply(u64, Rc<Kont>),
+    Eval(Ir, Locals, Arc<Kont>),
+    Apply(u64, Arc<Kont>),
 }
 
 pub struct CekMachine;
 
 impl<M: ValueModel> CodeSpace<M> for CekMachine {
     fn eval_ir(&self, _top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, ir: &Ir, locals: &Locals) -> u64 {
-        run(rt, Step::Eval(ir.clone(), locals.clone(), Rc::new(Kont::Done)))
+        run(rt, Step::Eval(ir.clone(), locals.clone(), Arc::new(Kont::Done)))
     }
     fn invoke(&self, _top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, callee: u64, args: &[u64]) -> u64 {
-        let step = apply_callable(rt, callee, args, Rc::new(Kont::Done));
+        let step = apply_callable(rt, callee, args, Arc::new(Kont::Done));
         run(rt, step)
     }
 }
@@ -96,7 +96,7 @@ fn run<M: ValueModel>(rt: &mut Runtime<M>, mut step: Step) -> u64 {
     }
 }
 
-fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Rc<Kont>) -> Step {
+fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Arc<Kont>) -> Step {
     match ir {
         Ir::Const(id) | Ir::Quote(id) => Step::Apply(rt.get_const(id), k),
         Ir::Local { up, idx } => Step::Apply(frame_get(&env, up, idx), k),
@@ -113,7 +113,7 @@ fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Rc<Kont
             Step::Apply(M::R::enc_ref(id), k)
         }
         Ir::If(c, t, e) => {
-            Step::Eval(*c, env.clone(), Rc::new(Kont::If { then_: *t, else_: *e, env, next: k }))
+            Step::Eval(*c, env.clone(), Arc::new(Kont::If { then_: *t, else_: *e, env, next: k }))
         }
         Ir::Do(xs) => {
             let mut it = xs.into_iter();
@@ -121,36 +121,36 @@ fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Rc<Kont
                 None => Step::Apply(M::R::enc_nil(), k),
                 Some(first) => {
                     let rest: Vec<Ir> = it.collect();
-                    Step::Eval(first, env.clone(), Rc::new(Kont::Seq { rest, env, next: k }))
+                    Step::Eval(first, env.clone(), Arc::new(Kont::Seq { rest, env, next: k }))
                 }
             }
         }
         Ir::Def { name, init } => {
-            Step::Eval(*init, env, Rc::new(Kont::Def { name, next: k }))
+            Step::Eval(*init, env, Arc::new(Kont::Def { name, next: k }))
         }
         Ir::SetLocal { up, idx, val } => {
-            Step::Eval(*val, env.clone(), Rc::new(Kont::SetLoc { up, idx, env, next: k }))
+            Step::Eval(*val, env.clone(), Arc::new(Kont::SetLoc { up, idx, env, next: k }))
         }
         Ir::SetGlobal { name, val } => {
-            Step::Eval(*val, env, Rc::new(Kont::SetGlob { name, next: k }))
+            Step::Eval(*val, env, Arc::new(Kont::SetGlob { name, next: k }))
         }
         Ir::Call(f, args) => {
-            Step::Eval(*f, env.clone(), Rc::new(Kont::CallK { pending: args, done: Vec::new(), env, next: k }))
+            Step::Eval(*f, env.clone(), Arc::new(Kont::CallK { pending: args, done: Vec::new(), env, next: k }))
         }
         Ir::Prim(Prim::CallCc, mut args) => {
             let f = args.remove(0);
-            Step::Eval(f, env, Rc::new(Kont::CallCc { next: k }))
+            Step::Eval(f, env, Arc::new(Kont::CallCc { next: k }))
         }
         // `%reset body` — evaluate `body` under a fresh prompt delimiter.
         Ir::Prim(Prim::Reset, mut args) => {
             let body = args.remove(0);
-            Step::Eval(body, env, Rc::new(Kont::Prompt { next: k }))
+            Step::Eval(body, env, Arc::new(Kont::Prompt { next: k }))
         }
         // `%shift f` — evaluate the receiver `f`; the capture happens once it is a
         // value (see the `ShiftK` arm of `apply_step`).
         Ir::Prim(Prim::Shift, mut args) => {
             let f = args.remove(0);
-            Step::Eval(f, env, Rc::new(Kont::ShiftK { next: k }))
+            Step::Eval(f, env, Arc::new(Kont::ShiftK { next: k }))
         }
         // A GC safepoint that composes with captured continuations: the live
         // continuation `k` (its `done` cells and captured frames) is rooted and
@@ -166,21 +166,21 @@ fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Rc<Kont
                 None => Step::Apply(rt.prim(op, &[]), k),
                 Some(first) => {
                     let rest: Vec<Ir> = it.collect();
-                    Step::Eval(first, env.clone(), Rc::new(Kont::PrimK { op, pending: rest, done: Vec::new(), env, next: k }))
+                    Step::Eval(first, env.clone(), Arc::new(Kont::PrimK { op, pending: rest, done: Vec::new(), env, next: k }))
                 }
             }
         }
         Ir::Let(inits, body) => {
             let n = inits.len();
-            let frame: Locals = Some(Rc::new(Frame {
-                slots: (0..n).map(|_| Cell::new(M::R::enc_nil())).collect(),
+            let frame: Locals = Some(Arc::new(Frame {
+                slots: (0..n).map(|_| AtomicU64::new(M::R::enc_nil())).collect(),
                 parent: env,
             }));
             if n == 0 {
                 Step::Eval(*body, frame, k)
             } else {
                 let first = inits[0].clone();
-                Step::Eval(first, frame.clone(), Rc::new(Kont::LetSlot { inits, i: 0, frame, body: *body, next: k }))
+                Step::Eval(first, frame.clone(), Arc::new(Kont::LetSlot { inits, i: 0, frame, body: *body, next: k }))
             }
         }
         Ir::Dispatch { .. } | Ir::DefMethod { .. } => {
@@ -190,7 +190,7 @@ fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Rc<Kont
     }
 }
 
-fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Rc<Kont>) -> Step {
+fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Arc<Kont>) -> Step {
     match &**k {
         Kont::Done => Step::Apply(v, k.clone()), // handled in run; unreachable
         Kont::If { then_, else_, env, next } => {
@@ -203,7 +203,7 @@ fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Rc<Kont>) -> Step 
             } else {
                 let first = rest[0].clone();
                 let more = rest[1..].to_vec();
-                Step::Eval(first, env.clone(), Rc::new(Kont::Seq { rest: more, env: env.clone(), next: next.clone() }))
+                Step::Eval(first, env.clone(), Arc::new(Kont::Seq { rest: more, env: env.clone(), next: next.clone() }))
             }
         }
         Kont::Def { name, next } => {
@@ -223,21 +223,21 @@ fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Rc<Kont>) -> Step 
         }
         Kont::CallK { pending, done, env, next } => {
             let mut done2 = snapshot(done);
-            done2.push(Cell::new(v));
+            done2.push(AtomicU64::new(v));
             if pending.is_empty() {
-                let vals: Vec<u64> = done2.iter().map(|c| c.get()).collect();
+                let vals: Vec<u64> = done2.iter().map(slot_load).collect();
                 apply_callable(rt, vals[0], &vals[1..], next.clone())
             } else {
                 let first = pending[0].clone();
                 let more = pending[1..].to_vec();
-                Step::Eval(first, env.clone(), Rc::new(Kont::CallK { pending: more, done: done2, env: env.clone(), next: next.clone() }))
+                Step::Eval(first, env.clone(), Arc::new(Kont::CallK { pending: more, done: done2, env: env.clone(), next: next.clone() }))
             }
         }
         Kont::PrimK { op, pending, done, env, next } => {
             let mut done2 = snapshot(done);
-            done2.push(Cell::new(v));
+            done2.push(AtomicU64::new(v));
             if pending.is_empty() {
-                let vals: Vec<u64> = done2.iter().map(|c| c.get()).collect();
+                let vals: Vec<u64> = done2.iter().map(slot_load).collect();
                 // `apply` invokes a closure, which the generic `rt.prim` cannot
                 // do — flatten `(apply f a … lst)` and dispatch here instead.
                 if let Prim::Apply = op {
@@ -253,7 +253,7 @@ fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Rc<Kont>) -> Step 
             } else {
                 let first = pending[0].clone();
                 let more = pending[1..].to_vec();
-                Step::Eval(first, env.clone(), Rc::new(Kont::PrimK { op: *op, pending: more, done: done2, env: env.clone(), next: next.clone() }))
+                Step::Eval(first, env.clone(), Arc::new(Kont::PrimK { op: *op, pending: more, done: done2, env: env.clone(), next: next.clone() }))
             }
         }
         // A value reaching a prompt: the delimiter is transparent to normal
@@ -267,7 +267,7 @@ fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Rc<Kont>) -> Step 
             let below = prompt_tail(next);
             let cont_id = rt.alloc(Obj::PartialCont(next.clone()));
             let cref = M::R::enc_ref(cont_id);
-            apply_callable(rt, v, &[cref], Rc::new(Kont::Prompt { next: below }))
+            apply_callable(rt, v, &[cref], Arc::new(Kont::Prompt { next: below }))
         }
         Kont::CallCc { next } => {
             // v is the closure `f`. Reify `next` as a first-class continuation
@@ -278,14 +278,14 @@ fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Rc<Kont>) -> Step 
         }
         Kont::LetSlot { inits, i, frame, body, next } => {
             if let Some(f) = frame {
-                f.slots[*i].set(v);
+                crate::value::slot_store(&f.slots[*i], v);
             }
             let ni = i + 1;
             if ni >= inits.len() {
                 Step::Eval(body.clone(), frame.clone(), next.clone())
             } else {
                 let init = inits[ni].clone();
-                Step::Eval(init, frame.clone(), Rc::new(Kont::LetSlot { inits: inits.clone(), i: ni, frame: frame.clone(), body: body.clone(), next: next.clone() }))
+                Step::Eval(init, frame.clone(), Arc::new(Kont::LetSlot { inits: inits.clone(), i: ni, frame: frame.clone(), body: body.clone(), next: next.clone() }))
             }
         }
     }
@@ -294,14 +294,14 @@ fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Rc<Kont>) -> Step 
 /// Apply a callable to args under continuation `next`. A closure evaluates its
 /// body; a continuation RE-INSTALLS itself with the argument (the multi-shot
 /// jump — it discards `next` and resumes the captured `Kont`).
-fn apply_callable<M: ValueModel>(rt: &mut Runtime<M>, callee: u64, args: &[u64], next: Rc<Kont>) -> Step {
+fn apply_callable<M: ValueModel>(rt: &mut Runtime<M>, callee: u64, args: &[u64], next: Arc<Kont>) -> Step {
     let Val::Ref(id) = rt.decode(callee) else {
         panic!("value not callable: {}", rt.print(callee));
     };
     enum What {
-        Closure(usize, bool, Rc<Ir>, Locals),
-        Cont(Rc<Kont>),
-        PartialCont(Rc<Kont>),
+        Closure(usize, bool, Arc<Ir>, Locals),
+        Cont(Arc<Kont>),
+        PartialCont(Arc<Kont>),
         Bad,
     }
     let what = match &rt.heap[id as usize] {
@@ -337,7 +337,7 @@ fn apply_callable<M: ValueModel>(rt: &mut Runtime<M>, callee: u64, args: &[u64],
 /// The continuation below the nearest enclosing prompt (the `%reset`'s own
 /// continuation). Panics if there is no enclosing prompt (a `%shift` with no
 /// dynamically-enclosing `%reset`).
-fn prompt_tail(k: &Rc<Kont>) -> Rc<Kont> {
+fn prompt_tail(k: &Arc<Kont>) -> Arc<Kont> {
     let mut cur = k.clone();
     loop {
         let next = match &*cur {
@@ -352,7 +352,7 @@ fn prompt_tail(k: &Rc<Kont>) -> Rc<Kont> {
 }
 
 /// The `next` link of a frame (every frame but `Done` has one).
-fn kont_next(k: &Kont) -> Option<&Rc<Kont>> {
+fn kont_next(k: &Kont) -> Option<&Arc<Kont>> {
     match k {
         Kont::Done => None,
         Kont::If { next, .. }
@@ -372,36 +372,36 @@ fn kont_next(k: &Kont) -> Option<&Rc<Kont>> {
 /// Copy the frames of `k` above the nearest prompt, re-terminating the copy with
 /// a fresh `Prompt { next: new_tail }`. This IS the composable graft: the
 /// captured delimited slice, followed by a fresh delimiter, followed by the
-/// caller's continuation. Frames are immutable `Rc`, so the original is untouched
+/// caller's continuation. Frames are immutable `Arc`, so the original is untouched
 /// and reusable (multi-shot).
-fn regraft(k: &Rc<Kont>, new_tail: Rc<Kont>) -> Rc<Kont> {
+fn regraft(k: &Arc<Kont>, new_tail: Arc<Kont>) -> Arc<Kont> {
     match &**k {
-        Kont::Prompt { .. } => Rc::new(Kont::Prompt { next: new_tail }),
+        Kont::Prompt { .. } => Arc::new(Kont::Prompt { next: new_tail }),
         Kont::Done => panic!("%shift: captured slice had no prompt boundary"),
-        Kont::If { then_, else_, env, next } => Rc::new(Kont::If {
+        Kont::If { then_, else_, env, next } => Arc::new(Kont::If {
             then_: then_.clone(), else_: else_.clone(), env: env.clone(), next: regraft(next, new_tail),
         }),
-        Kont::Seq { rest, env, next } => Rc::new(Kont::Seq {
+        Kont::Seq { rest, env, next } => Arc::new(Kont::Seq {
             rest: rest.clone(), env: env.clone(), next: regraft(next, new_tail),
         }),
-        Kont::Def { name, next } => Rc::new(Kont::Def {
+        Kont::Def { name, next } => Arc::new(Kont::Def {
             name: *name, next: regraft(next, new_tail),
         }),
-        Kont::SetLoc { up, idx, env, next } => Rc::new(Kont::SetLoc {
+        Kont::SetLoc { up, idx, env, next } => Arc::new(Kont::SetLoc {
             up: *up, idx: *idx, env: env.clone(), next: regraft(next, new_tail),
         }),
-        Kont::SetGlob { name, next } => Rc::new(Kont::SetGlob {
+        Kont::SetGlob { name, next } => Arc::new(Kont::SetGlob {
             name: *name, next: regraft(next, new_tail),
         }),
-        Kont::CallK { pending, done, env, next } => Rc::new(Kont::CallK {
+        Kont::CallK { pending, done, env, next } => Arc::new(Kont::CallK {
             pending: pending.clone(), done: snapshot(done), env: env.clone(), next: regraft(next, new_tail),
         }),
-        Kont::PrimK { op, pending, done, env, next } => Rc::new(Kont::PrimK {
+        Kont::PrimK { op, pending, done, env, next } => Arc::new(Kont::PrimK {
             op: *op, pending: pending.clone(), done: snapshot(done), env: env.clone(), next: regraft(next, new_tail),
         }),
-        Kont::CallCc { next } => Rc::new(Kont::CallCc { next: regraft(next, new_tail) }),
-        Kont::ShiftK { next } => Rc::new(Kont::ShiftK { next: regraft(next, new_tail) }),
-        Kont::LetSlot { inits, i, frame, body, next } => Rc::new(Kont::LetSlot {
+        Kont::CallCc { next } => Arc::new(Kont::CallCc { next: regraft(next, new_tail) }),
+        Kont::ShiftK { next } => Arc::new(Kont::ShiftK { next: regraft(next, new_tail) }),
+        Kont::LetSlot { inits, i, frame, body, next } => Arc::new(Kont::LetSlot {
             inits: inits.clone(), i: *i, frame: frame.clone(), body: body.clone(), next: regraft(next, new_tail),
         }),
     }

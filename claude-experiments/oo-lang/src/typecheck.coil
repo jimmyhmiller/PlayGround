@@ -1095,9 +1095,11 @@
   (let [c (mkbuiltin DK_BUILTIN_OBJ c"Clock")]
     (bdm c (bt-fn0 c"now" (bt-type c"Int")))
     (bdm c (bt-fn1 c"sleep" (bt-param c"ms" (bt-type c"Int")) (bt-type c"Void"))))
-  ; object Console { log(s: String) -> Void }
+  ; object Console { log(s: String) -> Void ; print(s: String) -> Void ; readLine() -> Option<String> }
   (let [c (mkbuiltin DK_BUILTIN_OBJ c"Console")]
-    (bdm c (bt-fn1 c"log" (bt-param c"s" (bt-type c"String")) (bt-type c"Void"))))
+    (bdm c (bt-fn1 c"log" (bt-param c"s" (bt-type c"String")) (bt-type c"Void")))
+    (bdm c (bt-fn1 c"print" (bt-param c"s" (bt-type c"String")) (bt-type c"Void")))
+    (bdm c (bt-fn0 c"readLine" (bt-type1 c"Option" (bt-type c"String")))))
   ; class List<T> { push(item:T)->Void ; get(i:Int)->T ; len()->Int }
   (let [l (mkbuiltin DK_BUILTIN_GEN c"List")]
     (bdtp l c"T")

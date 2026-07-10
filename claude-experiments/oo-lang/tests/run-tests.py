@@ -25,10 +25,11 @@ RUNERR_DIR = os.path.join(HERE, "run-err")
 ARENAS_DIR = os.path.join(HERE, "run-arenas")
 
 
-def run(binary, subargs, scry):
+def run(binary, subargs, scry, stdin=None):
     try:
         p = subprocess.run([binary] + subargs + [scry],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, timeout=60,
+                           input=stdin)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return None, "", "TIMEOUT"
@@ -65,7 +66,12 @@ def main():
             scry = os.path.join(directory, f)
             out_path = os.path.join(directory, name + ".out")
             err_path = os.path.join(directory, name + ".err")
-            code, out, err = run(binary, subargs, scry)
+            # Phase 7: an optional NAME.stdin file is piped to the program's stdin, so a
+            # Console.readLine()-driven interactive program can be golden-tested by feeding
+            # it a scripted transcript. Absent => empty stdin (immediate EOF).
+            stdin_path = os.path.join(directory, name + ".stdin")
+            stdin = open(stdin_path).read() if os.path.exists(stdin_path) else None
+            code, out, err = run(binary, subargs, scry, stdin=stdin)
             problems = []
             if os.path.exists(err_path):
                 # error test: nonzero exit + each nonblank .err line is a stderr substring
@@ -116,6 +122,9 @@ def main():
     # Phase 4: eval golden tests (tests/eval/*.t) + the server smoke test.
     ep, ef, efails = run_eval_tests(binary, filt)
     passed += ep; failed += ef; fails += efails
+    # Phase 7: interactive-app goldens (tests/app/*.t) — scripted stdin -> stdout substrings.
+    ap, af, afails = run_app_tests(binary, filt)
+    passed += ap; failed += af; fails += afails
     sp, sf = run_smoke_test(binary, filt)
     passed += sp; failed += sf
     if sf: fails.append("smoke")
@@ -139,11 +148,15 @@ def parse_eval_t(path):
     """A .t file: `key: value` lines. Keys: file, expr (may REPEAT — each is a separate
     `-e`, run in sequence against one process for live-change tests), readonly,
     contains (repeat), notcontains (repeat). An `expr` spans until the next `key:` line."""
-    spec = {"file": None, "exprs": [], "readonly": False, "contains": [], "notcontains": []}
+    spec = {"file": None, "exprs": [], "readonly": False, "contains": [], "notcontains": [], "stdin": None}
     cur_key = None
     for raw in open(path).read().splitlines():
         if raw.startswith("file:"):
             spec["file"] = raw[5:].strip(); cur_key = None
+        elif raw.startswith("stdin:"):
+            # a scripted stdin transcript fed to the program's main() before the -e evals run;
+            # \n is a literal newline escape so a transcript fits one line.
+            spec["stdin"] = raw[6:].strip().replace("\\n", "\n"); cur_key = None
         elif raw.startswith("readonly:"):
             spec["readonly"] = raw[9:].strip().lower() in ("yes", "true", "1"); cur_key = None
         elif raw.startswith("contains:"):
@@ -175,7 +188,8 @@ def run_eval_tests(binary, filt):
         if spec["readonly"]:
             sub.append("--readonly")
         try:
-            p = subprocess.run([binary] + sub, capture_output=True, text=True, timeout=60)
+            p = subprocess.run([binary] + sub, capture_output=True, text=True, timeout=60,
+                               input=spec["stdin"])
             # match against the eval RESULT lines only (JSON), never the program's stdout;
             # joined so a multi-expr sequence can be asserted with distinct substrings.
             evlines = [ln for ln in p.stdout.splitlines()
@@ -190,6 +204,51 @@ def run_eval_tests(binary, filt):
         for c in spec["notcontains"]:
             if c in out:
                 problems.append(f"unexpected {c!r}")
+        if problems:
+            failed += 1; fails.append(name)
+            print(f"FAIL {name}")
+            for pr in problems:
+                print("     " + pr)
+        else:
+            passed += 1
+    return passed, failed, fails
+
+
+APP_DIR = os.path.join(HERE, "app")
+
+
+def run_app_tests(binary, filt):
+    """Phase 7 app goldens: run examples/assistant.scry (the flagship interactive app) with a
+    scripted stdin transcript (`scry run --no-viewer`) and assert substrings on its terminal
+    stdout. Substring (not exact) matching keeps the deterministic assertions (prompt/response,
+    help, EOF/exit goodbye, post-join aggregate) robust to the intentionally-nondeterministic
+    interleaving of background sub-agent lines. A .t file: `stdin:` (a \\n-escaped transcript),
+    `contains:`/`notcontains:` (repeatable). `file:` defaults to examples/assistant.scry."""
+    passed = failed = 0
+    fails = []
+    if not os.path.isdir(APP_DIR):
+        return passed, failed, fails
+    for f in sorted(fn for fn in os.listdir(APP_DIR) if fn.endswith(".t")):
+        name = "app/" + f[:-2]
+        if filt and filt not in name and "app" not in (filt or ""):
+            continue
+        spec = parse_eval_t(os.path.join(APP_DIR, f))
+        rel = spec["file"] or "examples/assistant.scry"
+        scry = os.path.abspath(os.path.join(HERE, "..", rel))
+        try:
+            p = subprocess.run([binary, "run", "--no-viewer", scry],
+                               capture_output=True, text=True, timeout=60,
+                               input=spec["stdin"])
+            out = p.stdout
+        except subprocess.TimeoutExpired:
+            out = "TIMEOUT"
+        problems = []
+        for c in spec["contains"]:
+            if c not in out:
+                problems.append(f"missing {c!r}\n       actual: {out!r}")
+        for c in spec["notcontains"]:
+            if c in out:
+                problems.append(f"unexpected {c!r}\n       actual: {out!r}")
         if problems:
             failed += 1; fails.append(name)
             print(f"FAIL {name}")

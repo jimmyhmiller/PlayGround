@@ -23,21 +23,22 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use crate::code::CodeSpace;
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::runtime::{Runtime, Var};
-use crate::value::{frame_get, frame_set, Frame, Locals, Obj, Val};
+use crate::value::{clone_slots, frame_get, frame_set, Frame, Locals, Obj, Val};
 
 /// A compiled expression: run it with the runtime, a lexical frame, and the
 /// outermost backend (for re-entrant, composable calls). Captures only owned
 /// data, so it is `'static`.
-type Compiled<M> = Rc<dyn Fn(&mut Runtime<M>, &Locals, &dyn CodeSpace<M>) -> u64>;
+type Compiled<M> = Arc<dyn Fn(&mut Runtime<M>, &Locals, &dyn CodeSpace<M>) -> u64>;
 
 pub struct ClosureComp<M: ValueModel> {
-    /// Compiled function bodies, keyed by body identity (`Rc<Ir>` address).
+    /// Compiled function bodies, keyed by body identity (`Arc<Ir>` address).
     /// A real tier would key by a stable function id; the heap here never frees
     /// (leak GC), so the pointer is stable for the sketch.
     cache: RefCell<HashMap<*const Ir, Compiled<M>>>,
@@ -66,16 +67,16 @@ impl<M: ValueModel> ClosureComp<M> {
         match ir {
             Ir::Const(id) | Ir::Quote(id) => {
                 let id = *id;
-                Rc::new(move |rt, _env, _top| rt.get_const(id))
+                Arc::new(move |rt, _env, _top| rt.get_const(id))
             }
             Ir::Local { up, idx } => {
                 let (up, idx) = (*up, *idx);
-                Rc::new(move |_rt, env, _top| frame_get(env, up, idx))
+                Arc::new(move |_rt, env, _top| frame_get(env, up, idx))
             }
             Ir::Global(s) => {
                 let s = *s;
                 // Late binding: resolved at call time, not compile time.
-                Rc::new(move |rt, _env, _top| match rt.globals.get(&s) {
+                Arc::new(move |rt, _env, _top| match rt.globals.get(&s) {
                     Some(v) => v.val,
                     None => panic!("Unable to resolve symbol: {}", rt.sym_name(s)),
                 })
@@ -83,7 +84,7 @@ impl<M: ValueModel> ClosureComp<M> {
             Ir::SetLocal { up, idx, val } => {
                 let (up, idx) = (*up, *idx);
                 let cv = self.compile(val);
-                Rc::new(move |rt, env, top| {
+                Arc::new(move |rt, env, top| {
                     let v = cv(rt, env, top);
                     frame_set(env, up, idx, v);
                     v
@@ -92,7 +93,7 @@ impl<M: ValueModel> ClosureComp<M> {
             Ir::SetGlobal { name, val } => {
                 let name = *name;
                 let cv = self.compile(val);
-                Rc::new(move |rt, env, top| {
+                Arc::new(move |rt, env, top| {
                     let v = cv(rt, env, top);
                     match rt.globals.get_mut(&name) {
                         Some(var) => var.val = v,
@@ -105,7 +106,7 @@ impl<M: ValueModel> ClosureComp<M> {
                 let cc = self.compile(c);
                 let ct = self.compile(t);
                 let ce = self.compile(e);
-                Rc::new(move |rt, env, top| {
+                Arc::new(move |rt, env, top| {
                     let cv = cc(rt, env, top);
                     if M::truthy(rt.decode(cv)) {
                         ct(rt, env, top)
@@ -116,7 +117,7 @@ impl<M: ValueModel> ClosureComp<M> {
             }
             Ir::Do(xs) => {
                 let cs: Vec<Compiled<M>> = xs.iter().map(|x| self.compile(x)).collect();
-                Rc::new(move |rt, env, top| {
+                Arc::new(move |rt, env, top| {
                     let mut r = rt.encode(Val::Nil);
                     for c in &cs {
                         r = c(rt, env, top);
@@ -127,7 +128,7 @@ impl<M: ValueModel> ClosureComp<M> {
             Ir::Def { name, init } => {
                 let name = *name;
                 let ci = self.compile(init);
-                Rc::new(move |rt, env, top| {
+                Arc::new(move |rt, env, top| {
                     let v = ci(rt, env, top);
                     rt.globals.insert(name, Var { val: v });
                     rt.encode(Val::Sym(name))
@@ -136,20 +137,19 @@ impl<M: ValueModel> ClosureComp<M> {
             Ir::Let(inits, body) => {
                 let cinits: Vec<Compiled<M>> = inits.iter().map(|ie| self.compile(ie)).collect();
                 let cbody = self.compile(body);
-                Rc::new(move |rt, env, top| {
+                Arc::new(move |rt, env, top| {
                     // Rebuild each frame from the previous frame's current cell
                     // values, so a GC during an init keeps earlier bindings sound.
-                    let mut cur: Locals = Some(Rc::new(Frame {
+                    let mut cur: Locals = Some(Arc::new(Frame {
                         slots: Vec::new(),
                         parent: env.clone(),
                     }));
                     for ci in &cinits {
                         let v = ci(rt, &cur, top);
                         let prev = cur.as_ref().unwrap();
-                        let mut slots: Vec<Cell<u64>> =
-                            prev.slots.iter().map(|c| Cell::new(c.get())).collect();
-                        slots.push(Cell::new(v));
-                        cur = Some(Rc::new(Frame {
+                        let mut slots = clone_slots(&prev.slots);
+                        slots.push(AtomicU64::new(v));
+                        cur = Some(Arc::new(Frame {
                             slots,
                             parent: env.clone(),
                         }));
@@ -165,7 +165,7 @@ impl<M: ValueModel> ClosureComp<M> {
                 let nparams = *nparams;
                 let variadic = *variadic;
                 let body = body.clone();
-                Rc::new(move |rt, env, _top| {
+                Arc::new(move |rt, env, _top| {
                     let id = rt.alloc(Obj::Closure {
                         nparams,
                         variadic,
@@ -178,7 +178,7 @@ impl<M: ValueModel> ClosureComp<M> {
             Ir::Call(f, args) => {
                 let cf = self.compile(f);
                 let cargs: Vec<Compiled<M>> = args.iter().map(|a| self.compile(a)).collect();
-                Rc::new(move |rt, env, top| {
+                Arc::new(move |rt, env, top| {
                     let callee = cf(rt, env, top);
                     let mut argv: Vec<u64> = Vec::with_capacity(cargs.len());
                     for c in &cargs {
@@ -190,7 +190,7 @@ impl<M: ValueModel> ClosureComp<M> {
             }
             Ir::Prim(Prim::Gc, _) => {
                 // Safepoint: pass the live env (this closure's `env`) to collect.
-                Rc::new(move |rt: &mut Runtime<M>, env: &Locals, _top| {
+                Arc::new(move |rt: &mut Runtime<M>, env: &Locals, _top| {
                     rt.collect(env);
                     rt.encode(Val::Nil)
                 })
@@ -198,7 +198,7 @@ impl<M: ValueModel> ClosureComp<M> {
             Ir::Prim(op, args) => {
                 let op = *op;
                 let cargs: Vec<Compiled<M>> = args.iter().map(|a| self.compile(a)).collect();
-                Rc::new(move |rt, env, top| {
+                Arc::new(move |rt, env, top| {
                     let mut argv: Vec<u64> = Vec::with_capacity(cargs.len());
                     for c in &cargs {
                         argv.push(c(rt, env, top));
@@ -209,7 +209,7 @@ impl<M: ValueModel> ClosureComp<M> {
             Ir::DefMethod { name, ty, imp } => {
                 let (name, ty) = (*name, *ty);
                 let ci = self.compile(imp);
-                Rc::new(move |rt, env, top| {
+                Arc::new(move |rt, env, top| {
                     let c = ci(rt, env, top);
                     rt.register_method(name, ty, c);
                     rt.encode(Val::Nil)
@@ -218,7 +218,7 @@ impl<M: ValueModel> ClosureComp<M> {
             Ir::Dispatch { site, method, args } => {
                 let (site, method) = (*site, *method);
                 let cargs: Vec<Compiled<M>> = args.iter().map(|a| self.compile(a)).collect();
-                Rc::new(move |rt, env, top| {
+                Arc::new(move |rt, env, top| {
                     let mut argv: Vec<u64> = Vec::with_capacity(cargs.len());
                     for c in &cargs {
                         argv.push(c(rt, env, top));
@@ -240,8 +240,8 @@ impl<M: ValueModel> ClosureComp<M> {
         }
     }
 
-    fn compiled_body(&self, body: &Rc<Ir>) -> Compiled<M> {
-        let key = Rc::as_ptr(body);
+    fn compiled_body(&self, body: &Arc<Ir>) -> Compiled<M> {
+        let key = Arc::as_ptr(body);
         if let Some(c) = self.cache.borrow().get(&key) {
             return c.clone();
         }

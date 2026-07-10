@@ -30,7 +30,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::code::CodeSpace;
 use crate::ir::{ConstId, Ir, Prim};
@@ -50,7 +50,7 @@ pub enum Op {
     MakeClosure {
         nparams: usize,
         variadic: bool,
-        body: Rc<Ir>,
+        body: Arc<Ir>,
     },
     DefGlobal(Sym),
     Pop,
@@ -134,7 +134,7 @@ impl ModelEmit for crate::model::NanBoxModel {
 
 /// The bytecode execution tier.
 pub struct BytecodeVm<M: ModelEmit> {
-    chunks: RefCell<HashMap<*const Ir, Rc<Chunk>>>,
+    chunks: RefCell<HashMap<*const Ir, Arc<Chunk>>>,
     _pd: std::marker::PhantomData<fn() -> M>,
 }
 
@@ -162,12 +162,12 @@ impl<M: ModelEmit> BytecodeVm<M> {
         ops.iter().map(op_name).collect()
     }
 
-    fn compiled_body(&self, body: &Rc<Ir>) -> Rc<Chunk> {
-        let key = Rc::as_ptr(body);
+    fn compiled_body(&self, body: &Arc<Ir>) -> Arc<Chunk> {
+        let key = Arc::as_ptr(body);
         if let Some(c) = self.chunks.borrow().get(&key) {
             return c.clone();
         }
-        let c = Rc::new(self.compile_expr_chunk(body));
+        let c = Arc::new(self.compile_expr_chunk(body));
         self.chunks.borrow_mut().insert(key, c.clone());
         c
     }

@@ -1,0 +1,13 @@
+// Read lines until EOF, echoing each. Exercises the blocking-from-the-program's-view
+// Console.readLine() loop and the Option<String> surface.
+fn main() {
+  var running = true
+  while running {
+    Console.print("> ")
+    match Console.readLine() {
+      None -> { running = false }
+      Some(line) -> { Console.log("echo: " + line) }
+    }
+  }
+  Console.log("done")
+}

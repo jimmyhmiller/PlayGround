@@ -20,7 +20,7 @@
 //! re-enters `eval_ir` per node (the interpreter tiers); a compiling backend
 //! (the JIT) never re-enters, so it pays the transform exactly once per form.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::code::CodeSpace;
 use crate::ir::{Ir, Prim};
@@ -89,7 +89,7 @@ fn map_children(ir: &Ir, f: &mut impl FnMut(&Ir) -> Ir) -> Ir {
         Ir::Def { name, init } => Ir::Def { name: *name, init: Box::new(f(init)) },
         Ir::Let(inits, body) => Ir::Let(inits.iter().map(|x| f(x)).collect(), Box::new(f(body))),
         Ir::Lambda { nparams, variadic, body } => {
-            Ir::Lambda { nparams: *nparams, variadic: *variadic, body: Rc::new(f(body)) }
+            Ir::Lambda { nparams: *nparams, variadic: *variadic, body: Arc::new(f(body)) }
         }
         Ir::Call(g, args) => Ir::Call(Box::new(f(g)), args.iter().map(|x| f(x)).collect()),
         Ir::Prim(p, args) => Ir::Prim(*p, args.iter().map(|x| f(x)).collect()),
@@ -136,7 +136,7 @@ fn shift(ir: &Ir, by: u16, cutoff: u16) -> Ir {
         Ir::Lambda { nparams, variadic, body } => Ir::Lambda {
             nparams: *nparams,
             variadic: *variadic,
-            body: Rc::new(shift(body, by, cutoff + 1)),
+            body: Arc::new(shift(body, by, cutoff + 1)),
         },
         other => map_children(other, &mut |c| shift(c, by, cutoff)),
     }
@@ -212,7 +212,7 @@ fn subst_params(body: &Ir, depth: u16, args: &[Ir]) -> Ir {
         Ir::Lambda { nparams, variadic, body: b } => Ir::Lambda {
             nparams: *nparams,
             variadic: *variadic,
-            body: Rc::new(subst_params(b, depth + 1, args)),
+            body: Arc::new(subst_params(b, depth + 1, args)),
         },
         other => map_children(other, &mut |c| subst_params(c, depth, args)),
     }
@@ -352,7 +352,7 @@ fn renumber_frame(ir: &Ir, depth: u16, map: &[Option<u16>]) -> Ir {
         Ir::Lambda { nparams, variadic, body } => Ir::Lambda {
             nparams: *nparams,
             variadic: *variadic,
-            body: Rc::new(renumber_frame(body, depth + 1, map)),
+            body: Arc::new(renumber_frame(body, depth + 1, map)),
         },
         other => map_children(other, &mut |c| renumber_frame(c, depth, map)),
     }
@@ -434,7 +434,7 @@ fn subst_slots(ir: &Ir, depth: u16, vals: &[Option<Ir>]) -> Ir {
         Ir::Lambda { nparams, variadic, body } => Ir::Lambda {
             nparams: *nparams,
             variadic: *variadic,
-            body: Rc::new(subst_slots(body, depth + 1, vals)),
+            body: Arc::new(subst_slots(body, depth + 1, vals)),
         },
         other => map_children(other, &mut |c| subst_slots(c, depth, vals)),
     }
@@ -512,7 +512,7 @@ pub fn specialize_fixnums<M: ValueModel>(rt: &Runtime<M>, ir: &Ir) -> Ir {
     match n {
         Ir::Lambda { nparams, variadic, body } => {
             let guarded = guard_lambda::<M>(rt, nparams, variadic, &body);
-            Ir::Lambda { nparams, variadic, body: Rc::new(guarded) }
+            Ir::Lambda { nparams, variadic, body: Arc::new(guarded) }
         }
         other => other,
     }
@@ -774,7 +774,7 @@ impl<M: ValueModel> CodeSpace<M> for Optimized<M> {
         let opt = optimize::<M>(rt, ir);
         // Run on `inner` as its OWN top (see the type doc): keeps a compiling
         // backend's native calling convention on. `opt` owns the transformed
-        // tree for this call; closures `Rc::clone` their specialized bodies, so
+        // tree for this call; closures `Arc::clone` their specialized bodies, so
         // those survive independently.
         self.inner.eval_ir(self.inner.as_ref(), rt, &opt, locals)
     }

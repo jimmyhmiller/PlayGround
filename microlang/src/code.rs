@@ -24,12 +24,13 @@
 //! mutability so `&self` still holds.
 
 use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::runtime::{Runtime, Var};
-use crate::value::{frame_get, frame_set, Frame, Locals, Obj, Val};
+use crate::value::{clone_slots, frame_get, frame_set, Frame, Locals, Obj, Val};
 
 pub trait CodeSpace<M: ValueModel> {
     /// Evaluate one IR node. `top` is the outermost backend to recurse through.
@@ -102,17 +103,16 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 // One growing frame (matching `analyze`), rebuilt each binding
                 // from the PREVIOUS frame's current cell values (not a bare
                 // Vec) so a GC during an init leaves the earlier bindings sound.
-                let mut cur: Locals = Some(Rc::new(Frame {
+                let mut cur: Locals = Some(Arc::new(Frame {
                     slots: Vec::new(),
                     parent: locals.clone(),
                 }));
                 for iexpr in inits {
                     let v = top.eval_ir(top, rt, iexpr, &cur);
                     let prev = cur.as_ref().unwrap();
-                    let mut slots: Vec<Cell<u64>> =
-                        prev.slots.iter().map(|c| Cell::new(c.get())).collect();
-                    slots.push(Cell::new(v));
-                    cur = Some(Rc::new(Frame {
+                    let mut slots = clone_slots(&prev.slots);
+                    slots.push(AtomicU64::new(v));
+                    cur = Some(Arc::new(Frame {
                         slots,
                         parent: locals.clone(),
                     }));
@@ -191,8 +191,8 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                         // a fresh one-slot frame (Local{up:0,idx:0}).
                         Ok(t) => match catch {
                             Some(cbody) => {
-                                let frame: Locals = Some(Rc::new(Frame {
-                                    slots: vec![Cell::new(t.value)],
+                                let frame: Locals = Some(Arc::new(Frame {
+                                    slots: vec![AtomicU64::new(t.value)],
                                     parent: locals.clone(),
                                 }));
                                 // Root the thrown value across the handler's evals.
@@ -340,17 +340,16 @@ fn eval_tail<M: ValueModel>(
             }
         },
         Ir::Let(inits, body) => {
-            let mut cur: Locals = Some(Rc::new(Frame {
+            let mut cur: Locals = Some(Arc::new(Frame {
                 slots: Vec::new(),
                 parent: locals.clone(),
             }));
             for iexpr in inits {
                 let v = top.eval_ir(top, rt, iexpr, &cur);
                 let prev = cur.as_ref().unwrap();
-                let mut slots: Vec<Cell<u64>> =
-                    prev.slots.iter().map(|c| Cell::new(c.get())).collect();
-                slots.push(Cell::new(v));
-                cur = Some(Rc::new(Frame {
+                let mut slots = clone_slots(&prev.slots);
+                slots.push(AtomicU64::new(v));
+                cur = Some(Arc::new(Frame {
                     slots,
                     parent: locals.clone(),
                 }));

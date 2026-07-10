@@ -1,0 +1,12 @@
+// Count how many lines arrive before EOF — a deterministic post-loop aggregate.
+fn main() {
+  var n = 0
+  var running = true
+  while running {
+    match Console.readLine() {
+      None -> { running = false }
+      Some(line) -> { n = n + 1 }
+    }
+  }
+  Console.log("lines: ${n}")
+}

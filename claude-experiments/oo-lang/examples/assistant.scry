@@ -1,0 +1,284 @@
+// examples/assistant.scry — the Phase 7 / M5 flagship: a Claude-Code-like interactive
+// terminal assistant. Honestly fake (canned model, no network), structurally real
+// (entities, an orchestrator, real sub-agents on real OS threads, a live conversation).
+//
+// Run it:   ./scry run examples/assistant.scry        (opens the viewer + reads your input)
+// Then at the `you> ` prompt, try:
+//     hello
+//     help
+//     research quantum computing        <- delegates to 2 sub-agents on 2 real threads;
+//                                           keep typing while they work — the viewer shows
+//                                           new Agent/Message instances appear and climb.
+//     exit                              (or Ctrl-D)   -> goodbye; the process stays alive so
+//                                           the heap is still browsable in the viewer.
+//
+// ============================ THE TWO-WAY LIVE-EDIT BEAT ============================
+// `Session.suggest(input)` is a deliberate extension point: it ships returning "" (nothing
+// printed after each response). WHILE this program runs, open the viewer's code panel and
+// paste the redefinition below. With NO restart, an autocomplete/suggestions box begins to
+// appear under every prompt — the running program's own behavior changed from the outside,
+// which is the whole point: we are running real code and steering it live.
+//
+//   class Session {
+//     history: List<String>
+//     fn init() { self.history = List<String>() }
+//     fn renderPrompt() -> String { "you> " }
+//     fn suggest(input: String) -> String {
+//       if self.history.len() == 0 { "" }
+//       else { "  [suggestions: help | research <topic> | exit  (last: " + self.history.get(self.history.len() - 1) + ")]" }
+//     }
+//   }
+//
+// The redefinition is a whole-class swap (Phase 6 / M4): it keeps Session's exact fields and
+// method set (init/renderPrompt/suggest) and only changes suggest's body. You can also change
+// renderPrompt's body the same way (e.g. return "assistant> ") since the whole class is one
+// generation. No restart: the very next prompt uses the new suggest.
+//
+// This file is an ORDINARY program. It contains zero viewer/server code; the runtime injects
+// the eval server for any program (like NREPL). The comments above describe the demo; the
+// code below does not know the viewer exists.
+
+// ============================ small string helpers ============================
+fn startsWith(s: String, p: String) -> Bool {
+  if s.len() < p.len() { return false }
+  s.slice(0, p.len()) == p
+}
+fn contains(s: String, needle: String) -> Bool {
+  let n = s.len()
+  let m = needle.len()
+  if m == 0 { return true }
+  if m > n { return false }
+  var i = 0
+  while i + m <= n {
+    if s.slice(i, i + m) == needle { return true }
+    i = i + 1
+  }
+  false
+}
+
+// ============================ domain entities ============================
+enum AgentStatus {
+  Idle
+  Running
+  Done
+}
+
+class Message {
+  role: String
+  content: String
+  fn init(role: String, content: String) {
+    self.role = role
+    self.content = content
+  }
+}
+
+class Conversation {
+  messages: List<Message>
+  count: Int
+  fn init() {
+    self.messages = List<Message>()
+    self.count = 0
+  }
+  fn append(m: Message) {
+    self.messages.push(m)
+    self.count = self.count + 1
+  }
+  fn size() -> Int { self.count }
+}
+
+// Heterogeneous tools through a real interface (itable dispatch), not an enum switch.
+interface Tool {
+  fn name() -> String
+  fn run(input: String) -> String
+}
+
+class ShellTool implements Tool {
+  command: String
+  fn name() -> String { "shell" }
+  fn run(input: String) -> String { "$ " + self.command + " " + input }
+}
+
+class SearchTool implements Tool {
+  index: String
+  fn name() -> String { "search" }
+  fn run(input: String) -> String { "search(" + self.index + "): " + input }
+}
+
+// Honestly-named canned model — visible in the viewer's type list as ScriptedModel. Keyword
+// triggers make the interaction feel causal without any real inference.
+class ScriptedModel {
+  persona: String
+  fn complete(prompt: String) -> String {
+    if contains(prompt, "hello") || contains(prompt, "hi ") {
+      "Hi there - I'm your assistant. Type 'help' to see what I can do."
+    } else if contains(prompt, "thanks") {
+      "You're welcome!"
+    } else if contains(prompt, "?") {
+      self.persona + ": good question - " + prompt
+    } else {
+      self.persona + ": " + prompt
+    }
+  }
+}
+
+class Agent {
+  name: String
+  role: String
+  color: String
+  status: AgentStatus
+  model: ScriptedModel
+  conversation: Conversation
+  tools: List<Tool>
+
+  fn init(name: String, role: String, color: String, model: ScriptedModel, tools: List<Tool>) {
+    self.name = name
+    self.role = role
+    self.color = color
+    self.status = AgentStatus.Idle
+    self.model = model
+    self.conversation = Conversation()
+    self.tools = tools
+  }
+
+  fn begin() { self.status = AgentStatus.Running }
+  fn finish() { self.status = AgentStatus.Done }
+
+  fn banner() -> String {
+    // ANSI color prefix via \xHH raw-byte escapes (ESC = \x1b). Minimal scrolling-log TUI.
+    "\x1b[1m\x1b[" + self.color + "m" + self.name + "\x1b[0m"
+  }
+
+  // Record one user/assistant exchange onto this agent's conversation and return the reply.
+  fn say(user: String) -> String {
+    self.conversation.append(Message(role: "user", content: user))
+    let reply = self.model.complete(user)
+    self.conversation.append(Message(role: "assistant", content: reply))
+    reply
+  }
+}
+
+// A spawned sub-agent's body: run on its OWN OS thread, do `turns` paced steps appending
+// Messages to its Conversation (visible climbing in the viewer), printing an interleaved
+// per-agent line each step, then set status Done. Concurrency-safe by single-writer
+// discipline: only this thread writes its agent's conversation/status.
+class SubAgentWorker implements Runnable {
+  agent: Agent
+  topic: String
+  turns: Int
+  fn run() -> Void {
+    self.agent.begin()
+    var i = 0
+    while i < self.turns {
+      let n = i + 1
+      let reply = self.agent.say("${self.agent.role} step ${n} of ${self.turns} on ${self.topic}")
+      let tool = self.agent.tools.get(0)
+      self.agent.conversation.append(Message(role: "tool", content: tool.run(self.topic)))
+      Console.log(self.agent.banner() + "  step ${n}/${self.turns}  " + reply)
+      Clock.sleep(250)
+      i = i + 1
+    }
+    self.agent.finish()
+  }
+}
+
+// The REPL loop owner + history. Deliberately TINY so the whole class is a compact live-edit
+// target: renderPrompt() and suggest() are the two extension points the demo redefines.
+class Session {
+  history: List<String>
+  fn init() { self.history = List<String>() }
+  fn renderPrompt() -> String { "you> " }
+  fn suggest(input: String) -> String { "" }
+}
+
+// The orchestrator: owns the assistant Agent, the shared tools, and every spawned sub-agent
+// (+ its ThreadHandle for a clean join at shutdown). Keyword routing lives here.
+class Orchestrator {
+  agent: Agent
+  subs: List<Agent>
+  handles: List<ThreadHandle>
+  tools: List<Tool>
+
+  fn init() {
+    self.tools = List<Tool>()
+    self.tools.push(ShellTool(command: "grep -r"))
+    self.tools.push(SearchTool(index: "codebase"))
+    self.agent = Agent(name: "assistant", role: "orchestrator", color: "36",
+                       model: ScriptedModel(persona: "assistant"), tools: self.tools)
+    self.subs = List<Agent>()
+    self.handles = List<ThreadHandle>()
+  }
+
+  fn help() {
+    Console.log(self.agent.banner() + " I can:")
+    Console.log("   - chat: just type a message and I'll reply")
+    Console.log("   - research <topic>: I delegate to 2 sub-agents on real threads")
+    Console.log("   - help: show this")
+    Console.log("   - exit (or Ctrl-D): quit (the process keeps serving the viewer)")
+  }
+
+  fn spawnSub(role: String, color: String, topic: String, turns: Int) {
+    let sub = Agent(name: role, role: role, color: color,
+                    model: ScriptedModel(persona: role), tools: self.tools)
+    self.subs.push(sub)
+    self.handles.push(Thread.spawn(SubAgentWorker(agent: sub, topic: topic, turns: turns)))
+  }
+
+  fn research(topic: String) {
+    Console.log(self.agent.banner() + " delegating \"" + topic + "\" to 2 sub-agents (researcher, summarizer) - keep typing, they work in the background.")
+    self.spawnSub("researcher", "34", topic, 4)
+    self.spawnSub("summarizer", "33", topic, 3)
+  }
+
+  fn dispatch(input: String) {
+    if startsWith(input, "help") {
+      self.help()
+    } else if startsWith(input, "research ") {
+      self.research(input.slice(9, input.len()))
+    } else {
+      let reply = self.agent.say(input)
+      Console.log(self.agent.banner() + " " + reply)
+    }
+  }
+
+  // Join every outstanding sub-agent thread — a clean, deterministic shutdown. After this the
+  // sub-agents' final Message counts are stable (what the aggregate golden/eval asserts on).
+  fn shutdown() {
+    var i = 0
+    while i < self.handles.len() {
+      self.handles.get(i).join()
+      i = i + 1
+    }
+    Console.log("assistant> " + "${self.subs.len()}" + " sub-agent(s) finished this session.")
+  }
+}
+
+fn main() {
+  Console.log("\x1b[1mScry assistant\x1b[0m - a Claude-Code-like REPL. Type 'help', or 'research <topic>'.")
+  let session = Session()
+  let orch = Orchestrator()
+
+  var running = true
+  while running {
+    Console.print(session.renderPrompt())
+    let inp = Console.readLine()
+    match inp {
+      None -> {
+        Console.log("")
+        running = false
+      }
+      Some(line) -> {
+        session.history.push(line)
+        if line == "exit" {
+          running = false
+        } else {
+          orch.dispatch(line)
+          let hint = session.suggest(line)
+          if hint.len() > 0 { Console.log(hint) }
+        }
+      }
+    }
+  }
+
+  orch.shutdown()
+  Console.log("assistant> goodbye.")
+}

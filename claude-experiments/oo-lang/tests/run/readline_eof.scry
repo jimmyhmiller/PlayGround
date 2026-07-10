@@ -1,0 +1,7 @@
+// Immediate EOF (empty stdin) must yield None, not a crash or a null.
+fn main() {
+  match Console.readLine() {
+    None -> Console.log("EOF -> None")
+    Some(line) -> Console.log("got: " + line)
+  }
+}

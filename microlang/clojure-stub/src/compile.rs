@@ -5,7 +5,7 @@
 //! protocol dispatch. The toolkit's job starts at `Ir`.
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use microlang::ir::{Ir, Prim};
 use microlang::value::Sym;
@@ -168,7 +168,7 @@ impl Compiler {
         self.scope.push(names);
         let body: Vec<Ir> = items[2..].iter().map(|&f| self.compile(rt, f)).collect();
         self.scope.pop();
-        Ir::Lambda { nparams, variadic, body: Rc::new(Ir::Do(body)) }
+        Ir::Lambda { nparams, variadic, body: Arc::new(Ir::Do(body)) }
     }
 
     /// `(try* body EXC dispatch finally)` — the fixed shape the expander lowers

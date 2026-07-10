@@ -119,6 +119,25 @@ cast pointers — the header is at offset 0, so `(cast (ptr Sub) hdrptr)` and
 Stored by value (tag + payload). Fine inside structs and generic collections.
 Recursive sums need a `(ptr …)` child. `_` is a wildcard binder.
 
+**Choose `defsum` for a closed set of mutually exclusive shapes.** This is the
+default for `Option`/`Result`, state machines, protocol messages, syntax trees,
+and compiler type representations: adding a variant makes every non-exhaustive
+`match` a compile error. Prefer several small domain sums over one giant
+all-purpose node type. For a recursive syntax tree, keep recursive children
+behind pointers:
+
+    (defsum Expr
+      (IntLit [(value i64)])
+      (Add [(left (ptr Expr)) (right (ptr Expr))]))
+
+    (defstruct LocatedExpr [(line i64) (col i64) (expr Expr)])
+
+Use a `defstruct` with an integer `kind` tag only when a uniform,
+representation-sensitive record is intentional: for example, a hot token
+stream, bytecode instruction, FFI record, or an externally prescribed layout.
+Do not use it merely to avoid writing a sum; it permits invalid combinations of
+fields and does not make new cases visible to the type checker.
+
 ## Pointers, memory, allocation
 
 Three allocation *operations*, each yields `(ptr T)`:

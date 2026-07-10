@@ -433,7 +433,12 @@
 (defn compile-builtin-object [(cs (ptr CState)) (od (ptr Decl)) (mname (ptr u8)) (mlen i64) (call (ptr Node))] (-> i64)
   (cond
     (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Console") 7)
-      (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_CONSOLE_LOG) 0)
+      (cond
+        (name-eq mname mlen (cast (ptr u8) c"print") 5)
+          (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_CONSOLE_PRINT) 0)
+        (name-eq mname mlen (cast (ptr u8) c"readLine") 8)
+          (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_CONSOLE_READLINE) 0)
+        (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_CONSOLE_LOG) 0))
     (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Clock") 5)
       (if (name-eq mname mlen (cast (ptr u8) c"now") 3)
         (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_CLOCK_NOW) 0)

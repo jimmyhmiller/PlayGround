@@ -13,7 +13,7 @@
 //! interning, decode/encode — so it could move to its own crate unchanged.)
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::code::CodeSpace;
 use crate::ir::{Ir, Prim};
@@ -293,7 +293,7 @@ impl Sexpr {
             body.push(self.analyze(rt, cs, f));
         }
         self.scope.pop();
-        Ir::Lambda { nparams, variadic: variadic.is_some(), body: Rc::new(Ir::Do(body)) }
+        Ir::Lambda { nparams, variadic: variadic.is_some(), body: Arc::new(Ir::Do(body)) }
     }
 
     fn parse_params<M: ValueModel>(&self, rt: &Runtime<M>, form: u64) -> (Vec<Sym>, Option<Sym>) {

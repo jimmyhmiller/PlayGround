@@ -5,7 +5,7 @@
 //! `Obj::Moved` forwarding markers. Every root is rewritten to the new address:
 //! the globals, the constant pool (which is why `Ir` holds no embedded heap
 //! pointers), the shadow stack, and the live environment. Lexical frames stay
-//! `Rc`-managed with `Cell` slots, so their heap pointers are rewritten in place
+//! `Arc`-managed with `Cell` slots, so their heap pointers are rewritten in place
 //! and the mutator's `locals` reference stays valid across a collection.
 //!
 //! The one thing a moving collector cannot fix for free: a bare `u64` the
@@ -22,12 +22,12 @@
 //! relocation semantics — copy, forward, rewrite roots, re-read via handle — are
 //! faithful.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::cek::Kont;
 use crate::model::{Repr, ValueModel};
 use crate::runtime::Runtime;
-use crate::value::{Locals, Obj, RawTag};
+use crate::value::{slot_load, slot_store, Locals, Obj, RawTag};
 
 /// A handle to a rooted value. `get` re-reads the shadow slot, so it yields the
 /// value's CURRENT address even after the collector relocated it.
@@ -77,11 +77,11 @@ impl<M: ValueModel> Runtime<M> {
     /// collection that happens while a continuation is live or captured relocates
     /// it correctly. This is the moving GC composed with the full-continuation
     /// tier — the combination the 45-way matrix deliberately left out.
-    pub fn collect_cek(&mut self, live_env: &Locals, live_kont: &Rc<Kont>) {
+    pub fn collect_cek(&mut self, live_env: &Locals, live_kont: &Arc<Kont>) {
         self.collect_inner(live_env, Some(live_kont));
     }
 
-    fn collect_inner(&mut self, live_env: &Locals, live_kont: Option<&Rc<Kont>>) {
+    fn collect_inner(&mut self, live_env: &Locals, live_kont: Option<&Arc<Kont>>) {
         let from_len = self.heap.len();
         let real_before = self
             .heap
@@ -243,7 +243,7 @@ fn walk_kont<M: ValueModel>(
     from_len: usize,
     to: &mut Vec<Obj>,
     reloc: &mut u64,
-    k: &Rc<Kont>,
+    k: &Arc<Kont>,
 ) {
     let mut cur = k.clone();
     loop {
@@ -251,7 +251,7 @@ fn walk_kont<M: ValueModel>(
             Kont::Done => return,
             Kont::CallK { done, env, next, .. } | Kont::PrimK { done, env, next, .. } => {
                 for cell in done {
-                    cell.set(fw::<M>(heap, from_len, to, reloc, cell.get()));
+                    slot_store(cell, fw::<M>(heap, from_len, to, reloc, slot_load(cell)));
                 }
                 update_env::<M>(heap, from_len, to, reloc, env);
                 next.clone()
@@ -289,7 +289,7 @@ fn update_env<M: ValueModel>(
     let mut cur = env.clone();
     while let Some(f) = cur {
         for cell in &f.slots {
-            cell.set(fw::<M>(heap, from_len, to, reloc, cell.get()));
+            slot_store(cell, fw::<M>(heap, from_len, to, reloc, slot_load(cell)));
         }
         cur = f.parent.clone();
     }
