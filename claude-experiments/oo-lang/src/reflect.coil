@@ -1,0 +1,235 @@
+; reflect.coil — runtime handle resolution + instance enumeration for the eval channel
+; (02-runtime.md §5/§8, 04-viewer.md §4.2). These are what OP_ARENA_AT / _INSTANCE /
+; _INSTANCES compile to. `at` = arena-slot-ptr + a generation compare (a stale handle is
+; a typed eval error, never a crash); `instances` = arena-for-each-live + a small filter
+; predicate evaluated per instance (04's query subset). All read-only over the shared
+; heap — exactly what §7 says can run without a full stop-the-world.
+;
+; The filter language is a DEDICATED SUBSET evaluator (not full Scry): a chain of
+;   <field> (== | != | < | <= | > | >= | contains) <literal>
+; joined by `and`/`or`, evaluated directly over FieldInfo offsets. Documented deviation
+; in docs/06-implementation.md.
+(module reflect)
+(import "ioutil.coil" :use *)
+(import "arena.coil" :use *)
+(import "builtins.coil" :use *)
+(import "bytecode.coil" :use *)
+(import "types.coil" :use *)
+(import "ast.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "evalrt.coil" :use *)
+
+; filter comparison operators
+(const OP_EQ 0) (const OP_NE 1) (const OP_LT 2) (const OP_LE 3) (const OP_GT 4) (const OP_GE 5) (const OP_CONTAINS 6)
+
+; ---- mono / field lookup ----
+(defn mono-for [(tid i64)] (-> (ptr MonoType))
+  (let [ms (load (field (ctx) monos))]
+    (if (or (< tid 0) (>= tid (al-len ms))) (cast (ptr MonoType) 0) (al-get ms tid))))
+(defn ti-for [(p (ptr Program)) (tid i64)] (-> (ptr TypeInfo))
+  (if (or (< tid 0) (>= tid (load (field p type-count)))) (cast (ptr TypeInfo) 0)
+    (load (index (load (field p types)) tid))))
+
+; report a stale/out-of-range handle as a typed eval error
+(defn stale-err [(m (ptr MonoType)) (slot i64)] (-> i64)
+  (let [buf (cast (ptr i8) (xalloc 256))]
+    (snprintf buf 256 c"%.*s#%lld is no longer live — slot has been freed, reused, or never existed"
+              (load (field m name-len)) (cast (ptr i8) (load (field m name))) slot)
+    (eval-panic EK_STALE buf 0 0) 0))
+
+(defn arena-at [(p (ptr Program)) (tid i64) (slot i64) (gen i64)] (-> i64)
+  (let [ti (ti-for p tid) m (mono-for tid)]
+    (if (or (= (cast i64 ti) 0) (not (load (field ti is-entity)))) (do (eval-panic0 EK_RUNTIME c"at(): not an entity type") 0)
+      (let [a (load (field ti arena))]
+        (if (or (< slot 0) (>= slot (load (field a bump-cursor)))) (do (stale-err m slot) 0)
+          (let [hp (cast (ptr InstanceHeader) (arena-slot-ptr a slot))]
+            (if (= (iand (load (field hp flags)) FLAG_LIVE) 0) (do (stale-err m slot) 0)
+              (if (!= (load (field hp generation)) gen) (do (stale-err m slot) 0)
+                (cast i64 hp)))))))))
+
+(defn arena-instance [(p (ptr Program)) (tid i64) (slot i64)] (-> i64)
+  (let [ti (ti-for p tid) m (mono-for tid)]
+    (if (or (= (cast i64 ti) 0) (not (load (field ti is-entity)))) (do (eval-panic0 EK_RUNTIME c"instance(): not an entity type") 0)
+      (let [a (load (field ti arena))]
+        (if (or (< slot 0) (>= slot (load (field a bump-cursor)))) (do (stale-err m slot) 0)
+          (let [hp (cast (ptr InstanceHeader) (arena-slot-ptr a slot))]
+            (if (= (iand (load (field hp flags)) FLAG_LIVE) 0) (do (stale-err m slot) 0)
+              (cast i64 hp))))))))
+
+(defn arena-instances [(p (ptr Program)) (tid i64) (filt (ptr StringObj)) (offset i64) (limit i64)] (-> (ptr ListObj))
+  (let [ti (ti-for p tid) m (mono-for tid) out (list-new)]
+    (if (or (= (cast i64 ti) 0) (not (load (field ti is-entity)))) (do (eval-panic0 EK_RUNTIME c"instances(): not an entity type") out)
+      (let [a (load (field ti arena)) hwm (load (field a bump-cursor)) (mut i) 0 (mut matched) 0 (mut taken) 0]
+        (loop
+          (if (< (load i) hwm)
+            (let [hp (cast (ptr InstanceHeader) (arena-slot-ptr a (load i)))]
+              (if (= (iand (load (field hp flags)) FLAG_LIVE) FLAG_LIVE)
+                (if (filter-match hp m filt)
+                  (do
+                    (if (>= (load matched) offset)
+                      (if (or (< limit 0) (< (load taken) limit))
+                        (do (list-push out (cast i64 hp)) (store! taken (+ (load taken) 1)) 0) 0)
+                      0)
+                    (store! matched (+ (load matched) 1)) 0)
+                  0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+        out))))
+
+; ================= filter predicate evaluator =================
+(defstruct FCur [(data (ptr u8)) (len i64) (pos i64)])
+(defn fc-peek [(c (ptr FCur))] (-> i64)
+  (if (>= (load (field c pos)) (load (field c len))) -1 (cast i64 (load (index (load (field c data)) (load (field c pos)))))))
+(defn fc-adv [(c (ptr FCur))] (-> i64) (store! (field c pos) (+ (load (field c pos)) 1)) 0)
+(defn fc-space [(c (ptr FCur))] (-> i64)
+  (loop (let [ch (fc-peek c)] (if (or (= ch \space) (or (= ch \tab) (= ch \newline))) (do (fc-adv c) 0) (break)))) 0)
+(defn is-idch [(ch i64)] (-> bool)
+  (or (or (and (>= ch \a) (<= ch \z)) (and (>= ch \A) (<= ch \Z))) (or (and (>= ch \0) (<= ch \9)) (= ch \_))))
+
+; read an identifier into (out-ptr, returns len); out is caller buffer of >=128
+(defn fc-ident [(c (ptr FCur)) (out (ptr u8))] (-> i64)
+  (fc-space c)
+  (let [(mut n) 0]
+    (loop (let [ch (fc-peek c)] (if (and (>= ch 0) (is-idch ch)) (do (store! (index out (load n)) (cast u8 ch)) (store! n (+ (load n) 1)) (fc-adv c) 0) (break))))
+    (load n)))
+
+; find a field's (offset, ty) by name; returns MonoField ptr or null
+(defn mono-field [(m (ptr MonoType)) (name (ptr u8)) (len i64)] (-> (ptr MonoField))
+  (let [fs (load (field m fields)) n (al-len fs) (mut i) 0 (mut r) (cast (ptr MonoField) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [mf (al-get fs (load i))]
+              (if (name-eq (load (field mf name)) (load (field mf name-len)) name len) (do (store! r mf) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn field-index-in [(m (ptr MonoType)) (mf (ptr MonoField))] (-> i64)
+  (let [fs (load (field m fields)) n (al-len fs) (mut i) 0 (mut r) -1]
+    (loop (if (< (load i) n) (do (if (= (cast i64 (al-get fs (load i))) (cast i64 mf)) (do (store! r (load i)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load r)))
+
+; variant name for an enum decl + tag
+(defn variant-name-of [(ed (ptr Decl)) (tag i64) (outlen (ptr i64))] (-> (ptr u8))
+  (let [ms (load (field ed members)) n (al-len ms) (mut i) 0 (mut idx) 0 (mut r) (cast (ptr u8) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [mem (al-get ms (load i))]
+              (if (= (load (field mem kind)) NK_VARIANT)
+                (do (if (= (load idx) tag) (do (store! r (nm mem)) (store! outlen (nlen mem)) 0) 0) (store! idx (+ (load idx) 1)) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+
+(defn bytes-eq [(a (ptr u8)) (an i64) (b (ptr u8)) (bn i64)] (-> bool) (name-eq a an b bn))
+(defn str-contains [(hay (ptr StringObj)) (needle (ptr u8)) (nn i64)] (-> bool)
+  (let [hn (load (field hay len)) hd (load (field hay data))]
+    (if (= nn 0) true
+      (if (> nn hn) false
+        (let [lim (+ (- hn nn) 1) (mut i) 0 (mut found) false]
+          (loop (if (and (not (load found)) (< (load i) lim))
+                  (let [(mut j) 0 (mut ok) true]
+                    (loop (if (and (load ok) (< (load j) nn))
+                            (do (if (!= (cast i64 (load (index hd (+ (load i) (load j))))) (cast i64 (load (index needle (load j))))) (do (store! ok false) 0) 0) (store! j (+ (load j) 1)) 0)
+                            (break)))
+                    (if (load ok) (do (store! found true) 0) 0) (store! i (+ (load i) 1)) 0)
+                  (break)))
+          (load found))))))
+
+; parse+eval one comparison; returns bool
+(defn eval-cmp [(c (ptr FCur)) (hp (ptr InstanceHeader)) (m (ptr MonoType))] (-> bool)
+  (let [fname (cast (ptr u8) (xalloc 128)) flen (fc-ident c fname)]
+    (if (= flen 0) true
+      (let [mf (mono-field m fname flen)]
+        (if (= (cast i64 mf) 0) false
+          (let [idx (field-index-in m mf)
+                addr (+ (cast i64 hp) (+ (sizeof InstanceHeader) (* idx 8)))
+                raw (load (cast (ptr i64) addr))
+                ty (load (field mf ty)) tk (ty-kind ty)]
+            ; operator
+            (fc-space c)
+            (let [op (fc-read-op c)
+                  lit (cast (ptr u8) (xalloc 256)) litlen (fc-literal c lit)]
+              (cond
+                (= tk TY_STRING)
+                  (let [so (cast (ptr StringObj) raw)]
+                    (cond
+                      (= op OP_CONTAINS) (str-contains so lit litlen)
+                      (= op OP_EQ) (bytes-eq (load (field so data)) (load (field so len)) lit litlen)
+                      (= op OP_NE) (not (bytes-eq (load (field so data)) (load (field so len)) lit litlen))
+                      false))
+                (or (= tk TY_INT) (= tk TY_BOOL))
+                  (let [lv (parse-int-lit lit litlen)] (cmp-num op raw lv))
+                (= tk TY_FLOAT)
+                  (cmp-float op (f-bits-to-f raw) (parse-float-lit lit litlen))
+                (= tk TY_NAMED)
+                  (let [d (load (field ty decl))]
+                    (if (= (load (field d kind)) DK_ENUM)
+                      (let [tag (load (cast (ptr i64) raw)) vlc (cast (ptr i64) (xalloc 8)) vn (variant-name-of d tag vlc)]
+                        (cond
+                          (= op OP_EQ) (bytes-eq vn (load vlc) lit litlen)
+                          (= op OP_NE) (not (bytes-eq vn (load vlc) lit litlen))
+                          false))
+                      false))
+                false))))))))
+
+(defn f-bits-to-f [(b i64)] (-> f64) (let [p (alloc-static i64)] (store! p b) (load (cast (ptr f64) p))))
+(defn cmp-float [(op i64) (a f64) (b f64)] (-> bool)
+  (cond (= op OP_EQ) (fcmp-eq a b) (= op OP_NE) (fcmp-ne a b) (= op OP_LT) (fcmp-lt a b)
+        (= op OP_LE) (fcmp-le a b) (= op OP_GT) (fcmp-gt a b) (= op OP_GE) (fcmp-ge a b) false))
+
+(defn fc-read-op [(c (ptr FCur))] (-> i64)
+  (fc-space c)
+  (let [ch (fc-peek c)]
+    (cond
+      (= ch \=) (do (fc-adv c) (if (= (fc-peek c) \=) (do (fc-adv c) 0) 0) OP_EQ)
+      (= ch \!) (do (fc-adv c) (if (= (fc-peek c) \=) (do (fc-adv c) 0) 0) OP_NE)
+      (= ch \<) (do (fc-adv c) (if (= (fc-peek c) \=) (do (fc-adv c) OP_LE) OP_LT))
+      (= ch \>) (do (fc-adv c) (if (= (fc-peek c) \=) (do (fc-adv c) OP_GE) OP_GT))
+      (= ch \c) (let [b (cast (ptr u8) (xalloc 32))] (fc-ident c b) OP_CONTAINS)  ; "contains"
+      OP_EQ)))
+(defn fc-literal [(c (ptr FCur)) (out (ptr u8))] (-> i64)
+  (fc-space c)
+  (let [ch (fc-peek c)]
+    (if (= ch \")
+      (do (fc-adv c)
+          (let [(mut n) 0]
+            (loop (let [x (fc-peek c)] (if (or (< x 0) (= x \")) (break) (do (store! (index out (load n)) (cast u8 x)) (store! n (+ (load n) 1)) (fc-adv c) 0))))
+            (if (= (fc-peek c) \") (do (fc-adv c) 0) 0)
+            (load n)))
+      (let [(mut n) 0]
+        (loop (let [x (fc-peek c)] (if (and (>= x 0) (or (is-idch x) (or (= x \-) (= x \.)))) (do (store! (index out (load n)) (cast u8 x)) (store! n (+ (load n) 1)) (fc-adv c) 0) (break))))
+        (load n)))))
+(defn parse-int-lit [(p (ptr u8)) (n i64)] (-> i64)
+  (if (= n 0) 0
+    (if (bytes-eq p n (cast (ptr u8) c"true") 4) 1
+      (if (bytes-eq p n (cast (ptr u8) c"false") 5) 0
+        (let [neg (= (cast i64 (load (index p 0))) \-) (mut i) (if neg 1 0) (mut v) 0]
+          (loop (if (< (load i) n) (let [ch (cast i64 (load (index p (load i))))] (if (and (>= ch \0) (<= ch \9)) (do (store! v (+ (* (load v) 10) (- ch \0))) (store! i (+ (load i) 1)) 0) (break))) (break)))
+          (if neg (- 0 (load v)) (load v)))))))
+(defn parse-float-lit [(p (ptr u8)) (n i64)] (-> f64)
+  (let [buf (cast (ptr i8) (xalloc (+ n 1))) (mut i) 0]
+    (loop (if (< (load i) n) (do (store! (index (cast (ptr u8) buf) (load i)) (load (index p (load i)))) (store! i (+ (load i) 1)) 0) (break)))
+    (store! (index (cast (ptr u8) buf) n) (cast u8 0))
+    (strtod buf (cast (ptr (ptr i8)) 0))))
+(defn cmp-num [(op i64) (a i64) (b i64)] (-> bool)
+  (cond (= op OP_EQ) (= a b) (= op OP_NE) (!= a b) (= op OP_LT) (< a b) (= op OP_LE) (<= a b)
+        (= op OP_GT) (> a b) (= op OP_GE) (>= a b) false))
+
+; top-level: <cmp> (and <cmp> | or <cmp>)*
+(defn filter-eval [(c (ptr FCur)) (hp (ptr InstanceHeader)) (m (ptr MonoType))] (-> bool)
+  (let [(mut acc) (eval-cmp c hp m)]
+    (loop
+      (do (fc-space c)
+          (let [save (load (field c pos)) kw (cast (ptr u8) (xalloc 16)) kl (fc-ident c kw)]
+            (cond
+              (bytes-eq kw kl (cast (ptr u8) c"and") 3) (let [r (eval-cmp c hp m)] (store! acc (and (load acc) r)) 0)
+              (bytes-eq kw kl (cast (ptr u8) c"or") 2) (let [r (eval-cmp c hp m)] (store! acc (or (load acc) r)) 0)
+              (do (store! (field c pos) save) (break))))))
+    (load acc)))
+
+(defn filter-match [(hp (ptr InstanceHeader)) (m (ptr MonoType)) (filt (ptr StringObj))] (-> bool)
+  (if (= (cast i64 filt) 0) true
+    (let [n (load (field filt len))]
+      (if (= n 0) true
+        (let [c (cast (ptr FCur) (xalloc (sizeof FCur)))]
+          (store! (field c data) (load (field filt data))) (store! (field c len) n) (store! (field c pos) 0)
+          (filter-eval c hp m))))))

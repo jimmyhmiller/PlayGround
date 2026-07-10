@@ -6,6 +6,7 @@
 (import "lexer.coil" :use *)
 (import "ast.coil" :use *)
 (import "arraylist.coil" :use *)
+(import "evalrt.coil" :use *)
 
 (defstruct Parser
   [(tdata (ptr Token)) (tlen i64) (idx i64) (filename (ptr i8)) (had-error bool)])
@@ -74,12 +75,14 @@
   0)
 (defn perror [(msg (ptr i8))] (-> i64)
   (let [t (cur-ptr)]
-    (perror-head t) (w-cstr 2 msg) (perror-found t))
+    (perror-head t) (w-cstr 2 msg) (perror-found t)
+    (if (eval-active?) (eval-panic EK_SYNTAX msg (load (field t line)) (load (field t col))) 0))
   (exit (cast i32 65))
   0)
 (defn perror-expected [(k i64)] (-> i64)
   (let [t (cur-ptr)]
-    (perror-head t) (w-cstr 2 c"expected ") (w-cstr 2 (tok-kind-name k)) (perror-found t))
+    (perror-head t) (w-cstr 2 c"expected ") (w-cstr 2 (tok-kind-name k)) (perror-found t)
+    (if (eval-active?) (eval-panic EK_SYNTAX (tok-kind-name k) (load (field t line)) (load (field t col))) 0))
   (exit (cast i32 65))
   0)
 (defn perror-node [(msg (ptr i8))] (-> (ptr Node)) (perror msg) (null-node))

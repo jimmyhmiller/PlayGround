@@ -1,0 +1,281 @@
+; serialize.coil — turn a live VM value into the tagged JSON of 04-viewer.md §4.1, and
+; build the reflection responses (types/fields/methods). This is the ONLY place the wire
+; format lives. The depth rule (§4.1) is one rule applied uniformly: the directly-returned
+; value(s) are depth 0 (entities expand their fields, list/map elements stay depth 0);
+; anything reached through an entity FIELD is depth ≥ 1 and collapses to a clickable ref.
+(module serialize)
+(import "ioutil.coil" :use *)
+(import "arena.coil" :use *)
+(import "builtins.coil" :use *)
+(import "bytecode.coil" :use *)
+(import "types.coil" :use *)
+(import "ast.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "json.coil" :use *)
+
+(const COLL_CAP 100)   ; list/map truncation threshold (04 uses ~20; task says ~100)
+
+(defn mono-by-id [(tid i64)] (-> (ptr MonoType))
+  (let [ms (load (field (ctx) monos))] (if (or (< tid 0) (>= tid (al-len ms))) (cast (ptr MonoType) 0) (al-get ms tid))))
+(defn f-bits [(b i64)] (-> f64) (let [p (alloc-static i64)] (store! p b) (load (cast (ptr f64) p))))
+
+; ---- type display strings (for schema) ----
+(defn ty-display [(b (ptr JBuf)) (t (ptr Type))] (-> i64)   ; e.g. "Inventory<Tool>"
+  (let [k (ty-kind t)]
+    (cond
+      (= k TY_INT) (jb-cstr b c"Int") (= k TY_FLOAT) (jb-cstr b c"Float") (= k TY_BOOL) (jb-cstr b c"Bool")
+      (= k TY_STRING) (jb-cstr b c"String") (= k TY_VOID) (jb-cstr b c"Void") (= k TY_UNIT) (jb-cstr b c"()")
+      (= k TY_VAR) (jb-bytes b (load (field t name)) (load (field t name-len)))
+      (= k TY_NAMED)
+        (do (jb-bytes b (load (field t name)) (load (field t name-len)))
+            (let [aa (load (field t args)) n (al-len aa)]
+              (if (> n 0)
+                (do (jb-byte b \<) (let [(mut i) 0] (loop (if (< (load i) n) (do (if (> (load i) 0) (jb-byte b \,) 0) (ty-display b (al-get aa (load i))) (store! i (+ (load i) 1)) 0) (break)))) (jb-byte b \>) 0)
+                0)))
+      (jb-cstr b c"?"))))
+
+; schema field-type string: "list:Tool", "map:String,Int", "ref:Conversation", enum/scalar name
+(defn ty-schema [(b (ptr JBuf)) (t (ptr Type))] (-> i64)
+  (jb-byte b \")
+  (let [k (ty-kind t)]
+    (if (= k TY_NAMED)
+      (let [d (load (field t decl)) dk (load (field d kind)) aa (load (field t args))]
+        (cond
+          (name-eq (load (field t name)) (load (field t name-len)) (cast (ptr u8) c"List") 4)
+            (do (jb-cstr b c"list:") (ty-display b (al-get aa 0)))
+          (name-eq (load (field t name)) (load (field t name-len)) (cast (ptr u8) c"Map") 3)
+            (do (jb-cstr b c"map:") (ty-display b (al-get aa 0)) (jb-byte b \,) (ty-display b (al-get aa 1)))
+          (or (or (= dk DK_CLASS) (= dk DK_OBJECT)) (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE)))
+            (do (jb-cstr b c"ref:") (ty-display b t))
+          (ty-display b t)))
+      (ty-display b t)))
+  (jb-byte b \") 0)
+
+; AST TYPE node -> display string (for method signatures)
+(defn ast-ty-str [(b (ptr JBuf)) (tn (ptr Node))] (-> i64)
+  (if (= (cast i64 tn) 0) (jb-cstr b c"Void")
+    (if (= (load (field tn ival)) 1) (jb-cstr b c"()")
+      (do (jb-bytes b (nm tn) (nlen tn))
+          (let [n (kid-count tn)]
+            (if (> n 0) (do (jb-byte b \<) (let [(mut i) 0] (loop (if (< (load i) n) (do (if (> (load i) 0) (jb-byte b \,) 0) (ast-ty-str b (kid-at tn (load i))) (store! i (+ (load i) 1)) 0) (break)))) (jb-byte b \>) 0) 0))))))
+
+; ---- ref helpers ----
+(defn emit-ref-id [(b (ptr JBuf)) (m (ptr MonoType)) (slot i64)] (-> i64)   ; "Name#slot"
+  (jb-byte b \") (jb-bytes b (load (field m name)) (load (field m name-len))) (jb-byte b \#) (jb-int b slot) (jb-byte b \") 0)
+
+; a short summary: value of a String field named "name"/"title"/"content" else first String field
+(defn summary-field-index [(m (ptr MonoType))] (-> i64)
+  (let [fs (load (field m fields)) n (al-len fs) (mut i) 0 (mut best) -1 (mut firsts) -1]
+    (loop (if (< (load i) n)
+            (let [mf (al-get fs (load i))]
+              (if (= (ty-kind (load (field mf ty))) TY_STRING)
+                (do (if (< (load firsts) 0) (do (store! firsts (load i)) 0) 0)
+                    (if (or (name-eq (load (field mf name)) (load (field mf name-len)) (cast (ptr u8) c"name") 4)
+                            (or (name-eq (load (field mf name)) (load (field mf name-len)) (cast (ptr u8) c"title") 5)
+                                (name-eq (load (field mf name)) (load (field mf name-len)) (cast (ptr u8) c"content") 7)))
+                      (if (< (load best) 0) (do (store! best (load i)) 0) 0) 0) 0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (if (>= (load best) 0) (load best) (load firsts))))
+
+(defn field-addr-at [(inst i64) (i i64)] (-> i64) (+ inst (+ (sizeof InstanceHeader) (* i 8))))
+
+; ================= main value serializer =================
+(defn serialize-value [(b (ptr JBuf)) (v i64) (t (ptr Type)) (depth i64)] (-> i64)
+  (let [k (ty-kind t)]
+    (cond
+      (= k TY_INT) (do (jb-cstr b c"{\"type\":\"Int\",\"value\":") (jb-int b v) (jb-byte b \}))
+      (= k TY_BOOL) (do (jb-cstr b c"{\"type\":\"Bool\",\"value\":") (jb-bool b v) (jb-byte b \}))
+      (= k TY_FLOAT) (do (jb-cstr b c"{\"type\":\"Float\",\"value\":") (jb-float b (f-bits v)) (jb-byte b \}))
+      (= k TY_STRING) (do (jb-cstr b c"{\"type\":\"String\",\"value\":") (let [s (cast (ptr StringObj) v)] (jb-str b (load (field s data)) (load (field s len)))) (jb-byte b \}))
+      (or (= k TY_VOID) (= k TY_UNIT)) (jb-cstr b c"{\"type\":\"Void\"}")
+      (= k TY_NAMED)
+        (let [d (load (field t decl)) dk (load (field d kind))]
+          (cond
+            (name-eq (load (field t name)) (load (field t name-len)) (cast (ptr u8) c"List") 4) (serialize-list b (cast (ptr ListObj) v) (al-get (load (field t args)) 0) depth)
+            (name-eq (load (field t name)) (load (field t name-len)) (cast (ptr u8) c"Map") 3) (serialize-map b (cast (ptr MapObj) v) (al-get (load (field t args)) 0) (al-get (load (field t args)) 1) depth)
+            (= dk DK_ENUM) (serialize-enum b (cast (ptr i64) v) t depth)
+            (or (or (= dk DK_CLASS) (= dk DK_OBJECT)) (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE))) (serialize-entity b v depth)
+            (jb-cstr b c"{\"type\":\"unknown\"}")))
+      (jb-cstr b c"{\"type\":\"unknown\"}"))))
+
+(defn serialize-entity [(b (ptr JBuf)) (v i64) (depth i64)] (-> i64)
+  (if (= v 0) (jb-cstr b c"null")
+    (let [hp (cast (ptr InstanceHeader) v) tid (load (field hp type-id)) m (mono-by-id tid)
+          slot (load (field hp slot-index)) gen (load (field hp generation))]
+      (if (= (cast i64 m) 0) (jb-cstr b c"{\"type\":\"unknown\"}")
+        (if (> depth 0)
+          ; collapsed reference
+          (do (jb-cstr b c"{\"type\":\"ref\",\"class\":") (jb-str b (load (field m name)) (load (field m name-len)))
+              (jb-cstr b c",\"ref\":") (emit-ref-id b m slot)
+              (jb-cstr b c",\"generation\":") (jb-int b gen)
+              (jb-cstr b c",\"summary\":")
+              (let [si (summary-field-index m)]
+                (if (< si 0) (emit-ref-id b m slot)
+                  (let [s (cast (ptr StringObj) (load (cast (ptr i64) (field-addr-at v si))))]
+                    (if (= (cast i64 s) 0) (jb-cstr b c"\"\"") (jb-str b (load (field s data)) (load (field s len)))))))
+              (jb-byte b \}))
+          ; depth 0: full field expansion
+          (do (jb-cstr b c"{\"type\":") (jb-str b (load (field m name)) (load (field m name-len)))
+              (jb-cstr b c",\"ref\":") (emit-ref-id b m slot)
+              (jb-cstr b c",\"generation\":") (jb-int b gen)
+              (jb-cstr b c",\"fields\":{")
+              (let [fs (load (field m fields)) n (al-len fs) (mut i) 0]
+                (loop (if (< (load i) n)
+                        (let [mf (al-get fs (load i))]
+                          (if (> (load i) 0) (jb-byte b \,) 0)
+                          (jb-str b (load (field mf name)) (load (field mf name-len))) (jb-byte b \:)
+                          (serialize-value b (load (cast (ptr i64) (field-addr-at v (load i)))) (load (field mf ty)) (+ depth 1))
+                          (store! i (+ (load i) 1)) 0)
+                        (break))))
+              (jb-cstr b c"}}")))))))
+
+(defn serialize-list [(b (ptr JBuf)) (l (ptr ListObj)) (elem (ptr Type)) (depth i64)] (-> i64)
+  (let [n (if (= (cast i64 l) 0) 0 (list-len l)) shown (if (> n COLL_CAP) COLL_CAP n)]
+    (jb-cstr b c"{\"type\":\"list\",\"elementType\":") (ty-display-quoted b elem)
+    (jb-cstr b c",\"length\":") (jb-int b n)
+    (jb-cstr b c",\"truncated\":") (jb-bool b (if (> n COLL_CAP) 1 0))
+    (jb-cstr b c",\"items\":[")
+    (let [(mut i) 0]
+      (loop (if (< (load i) shown)
+              (do (if (> (load i) 0) (jb-byte b \,) 0) (serialize-value b (list-get l (load i)) elem depth) (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"]}") 0))
+
+(defn serialize-map [(b (ptr JBuf)) (mp (ptr MapObj)) (kt (ptr Type)) (vt (ptr Type)) (depth i64)] (-> i64)
+  (let [n (if (= (cast i64 mp) 0) 0 (map-len mp)) shown (if (> n COLL_CAP) COLL_CAP n)]
+    (jb-cstr b c"{\"type\":\"map\",\"keyType\":") (ty-display-quoted b kt)
+    (jb-cstr b c",\"valueType\":") (ty-display-quoted b vt)
+    (jb-cstr b c",\"length\":") (jb-int b n)
+    (jb-cstr b c",\"truncated\":") (jb-bool b (if (> n COLL_CAP) 1 0))
+    (jb-cstr b c",\"entries\":[")
+    (let [(mut i) 0]
+      (loop (if (< (load i) shown)
+              (do (if (> (load i) 0) (jb-byte b \,) 0)
+                  (jb-byte b \[)
+                  (serialize-value b (load (index (load (field mp keys)) (load i))) kt depth) (jb-byte b \,)
+                  (serialize-value b (load (index (load (field mp vals)) (load i))) vt depth)
+                  (jb-byte b \]) (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"]}") 0))
+
+(defn ty-display-quoted [(b (ptr JBuf)) (t (ptr Type))] (-> i64) (jb-byte b \") (ty-display b t) (jb-byte b \") 0)
+
+; enum box [tag argc arg...]; variant name + payload types from the enum decl
+(defn serialize-enum [(b (ptr JBuf)) (box (ptr i64)) (t (ptr Type)) (depth i64)] (-> i64)
+  (if (= (cast i64 box) 0) (jb-cstr b c"null")
+    (let [d (load (field t decl)) tag (enum-tag box) argc (enum-argc box)]
+      (jb-cstr b c"{\"type\":") (jb-str b (load (field t name)) (load (field t name-len)))
+      (jb-cstr b c",\"case\":")
+      (let [vn (enum-variant-node d tag)]
+        (if (= (cast i64 vn) 0) (jb-cstr b c"\"?\"") (jb-str b (nm vn) (nlen vn)))
+        (if (> argc 0)
+          (do (jb-cstr b c",\"payload\":[")
+              (let [(mut i) 0]
+                (loop (if (< (load i) argc)
+                        (do (if (> (load i) 0) (jb-byte b \,) 0)
+                            (serialize-value b (enum-arg box (load i)) (enum-payload-type d vn (load i) t) depth)
+                            (store! i (+ (load i) 1)) 0)
+                        (break))))
+              (jb-byte b \])) 0))
+      (jb-byte b \}) 0)))
+
+(defn enum-variant-node [(d (ptr Decl)) (tag i64)] (-> (ptr Node))
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0 (mut idx) 0 (mut r) (cast (ptr Node) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [mem (al-get ms (load i))]
+              (if (= (load (field mem kind)) NK_VARIANT) (do (if (= (load idx) tag) (do (store! r mem) 0) 0) (store! idx (+ (load idx) 1)) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn enum-payload-type [(d (ptr Decl)) (vn (ptr Node)) (i i64) (enum-t (ptr Type))] (-> (ptr Type))
+  (if (= (cast i64 vn) 0) (ty-int)
+    (subst-type (resolve-type (kid-at vn i) d) d (load (field enum-t args)))))
+
+; ================= reflection: types() / fields() / methods() =================
+(defn mono-implements [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-byte b \[)
+  (let [cn (load (field d node))]
+    (if (= (cast i64 cn) 0) 0
+      (let [impl (load (field cn b))]
+        (if (= (cast i64 impl) 0) 0
+          (let [n (kid-count impl) (mut i) 0]
+            (loop (if (< (load i) n) (do (if (> (load i) 0) (jb-byte b \,) 0) (let [tn (kid-at impl (load i))] (jb-str b (nm tn) (nlen tn))) (store! i (+ (load i) 1)) 0) (break))))))))
+  (jb-byte b \]) 0)
+
+(defn emit-fields-array [(b (ptr JBuf)) (m (ptr MonoType))] (-> i64)
+  (jb-byte b \[)
+  (let [fs (load (field m fields)) n (al-len fs) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [mf (al-get fs (load i))]
+              (if (> (load i) 0) (jb-byte b \,) 0)
+              (jb-cstr b c"{\"name\":") (jb-str b (load (field mf name)) (load (field mf name-len)))
+              (jb-cstr b c",\"type\":") (ty-schema b (load (field mf ty))) (jb-byte b \})
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+
+(defn emit-methods-array [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-byte b \[)
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0 (mut first) true]
+    (loop (if (< (load i) n)
+            (let [mem (al-get ms (load i))]
+              (if (and (= (load (field mem kind)) NK_FN) (not (node-name-eq mem c"init")))
+                (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                    (jb-cstr b c"{\"name\":") (jb-str b (nm mem) (nlen mem))
+                    (jb-cstr b c",\"params\":[")
+                    (let [ps (load (field mem b)) np (kid-count ps) (mut j) 0]
+                      (loop (if (< (load j) np)
+                              (let [pn (kid-at ps (load j))]
+                                (if (> (load j) 0) (jb-byte b \,) 0)
+                                (jb-cstr b c"{\"name\":") (jb-str b (nm pn) (nlen pn))
+                                (jb-cstr b c",\"type\":") (jb-byte b \") (ast-ty-str b (load (field pn a))) (jb-byte b \") (jb-byte b \})
+                                (store! j (+ (load j) 1)) 0)
+                              (break))))
+                    (jb-cstr b c"],\"returns\":") (jb-byte b \") (ast-ty-str b (load (field mem c))) (jb-byte b \") (jb-byte b \})
+                    0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+
+(defn emit-type-descriptor [(b (ptr JBuf)) (m (ptr MonoType)) (ti (ptr TypeInfo))] (-> i64)
+  (jb-cstr b c"{\"type\":\"TypeDescriptor\",\"name\":") (jb-str b (load (field m name)) (load (field m name-len)))
+  (jb-cstr b c",\"liveCount\":") (jb-int b (if (= (cast i64 ti) 0) 0 (load (field (load (field ti arena)) live-count))))
+  (jb-cstr b c",\"implements\":") (mono-implements b (load (field m base)))
+  (jb-cstr b c",\"fields\":") (emit-fields-array b m)
+  (jb-cstr b c",\"methods\":") (emit-methods-array b (load (field m base)))
+  (jb-byte b \}) 0)
+
+(defn reflect-types [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+  (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut count) 0]
+    ; count entity monos
+    (loop (if (< (load i) n) (do (if (load (field (al-get ms (load i)) is-entity)) (do (store! count (+ (load count) 1)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (jb-cstr b c"{\"type\":\"list\",\"elementType\":\"TypeDescriptor\",\"length\":") (jb-int b (load count))
+    (jb-cstr b c",\"truncated\":false,\"items\":[")
+    (store! i 0)
+    (let [(mut first) true]
+      (loop (if (< (load i) n)
+              (let [m (al-get ms (load i))]
+                (if (load (field m is-entity))
+                  (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                      (emit-type-descriptor b m (load (index (load (field p types)) (load i)))) 0)
+                  0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"]}") 0))
+
+; fields("Name") / methods("Name") — one type's shape
+(defn find-entity-mono-by-name [(nm0 (ptr u8)) (len i64)] (-> (ptr MonoType))
+  (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut r) (cast (ptr MonoType) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [m (al-get ms (load i))]
+              (if (and (load (field m is-entity)) (name-eq (load (field m name)) (load (field m name-len)) nm0 len)) (do (store! r m) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn reflect-fields [(b (ptr JBuf)) (nm0 (ptr u8)) (len i64)] (-> i64)
+  (let [m (find-entity-mono-by-name nm0 len)] (if (= (cast i64 m) 0) (jb-cstr b c"{\"type\":\"list\",\"elementType\":\"FieldDescriptor\",\"length\":0,\"truncated\":false,\"items\":[]}") (emit-fields-array b m))))
+(defn reflect-methods [(b (ptr JBuf)) (nm0 (ptr u8)) (len i64)] (-> i64)
+  (let [m (find-entity-mono-by-name nm0 len)] (if (= (cast i64 m) 0) (jb-cstr b c"[]") (emit-methods-array b (load (field m base))))))

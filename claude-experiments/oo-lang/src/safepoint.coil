@@ -1,0 +1,38 @@
+; safepoint.coil — the generalized safepoint hook (02-runtime.md §7), M0/N=1 form.
+;
+; This is the ONE place the dispatch loop calls into on every instruction. In this
+; phase there is exactly one mutator (the main thread running main()); the embedded
+; server thread requests a stop by setting `stop-flag`, and the mutator, on its next
+; poll, drains pending eval requests by invoking a registered drain callback. Keeping
+; the poll + the drain-fnptr indirection here (a leaf module) is what lets `vm.coil`
+; call the hook without importing the server (which imports the vm) — no cycle.
+;
+; Phase 5 GENERALIZES this: `stop-flag` becomes the global stop every VMThread polls,
+; `request-global-stop`/`release-global-stop` park all N threads (02 §7's spin-wait
+; protocol), and the drain runs on a dedicated eval VMThread. The seam — one poll at the
+; top of `run`, one atomic flag, one drain entry point — is already exactly here.
+(module safepoint)
+(import "ioutil.coil" :use *)
+(import "atomic.coil" :use *)
+
+(defn sp-flag [] (-> (ptr i64)) (alloc-static i64))          ; 0 = run, 1 = stop requested
+(defn sp-draining [] (-> (ptr i64)) (alloc-static i64))      ; re-entrancy guard
+(defn sp-has-drain [] (-> (ptr i64)) (alloc-static i64))     ; 1 once a drain fn is registered
+(defn sp-drain-fn [] (-> (ptr (fnptr c [] i64))) (alloc-static (fnptr c [] i64)))
+
+; the server thread: "I have work; stop at your next poll and drain it."
+(defn safepoint-request [] (-> i64) (atomic-store (sp-flag) 1) 0)
+
+; register the drain callback (the eval executor). Called once at server startup.
+(defn safepoint-set-drain [(f (fnptr c [] i64))] (-> i64) (store! (sp-drain-fn) f) (store! (sp-has-drain) 1) 0)
+
+; called at the TOP of the dispatch loop, once per instruction. Almost always false.
+(defn safepoint-poll [] (-> i64)
+  (if (and (= (atomic-load (sp-flag)) 1) (= (load (sp-draining)) 0))
+    (do
+      (store! (sp-draining) 1)
+      (atomic-store (sp-flag) 0)            ; consume the request; nested polls see 0
+      (if (= (load (sp-has-drain)) 1) (do (call-ptr (load (sp-drain-fn))) 0) 0)
+      (store! (sp-draining) 0)
+      0)
+    0))

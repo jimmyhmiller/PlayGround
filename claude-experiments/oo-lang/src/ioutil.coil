@@ -23,6 +23,25 @@
 (extern memset   :cc c [(ptr i8) i32 i64] (-> (ptr i8)))
 (extern gettimeofday :cc c [(ptr i8) (ptr i8)] (-> i32))
 (extern nanosleep    :cc c [(ptr i8) (ptr i8)] (-> i32))
+; Phase 4 server: BSD sockets, non-local exit (setjmp/longjmp), and fd redirection
+; (for capturing compiler diagnostics into an eval response). Declared here — the one
+; extern home — and :use *-imported by the server / eval-runtime modules.
+(extern socket     :cc c [i32 i32 i32] (-> i32))
+(extern bind       :cc c [i32 (ptr i8) i32] (-> i32))
+(extern listen     :cc c [i32 i32] (-> i32))
+(extern accept     :cc c [i32 (ptr i8) (ptr i8)] (-> i32))
+(extern setsockopt :cc c [i32 i32 i32 (ptr i8) i32] (-> i32))
+(extern read       :cc c [i32 (ptr i8) i64] (-> i64))
+(extern close      :cc c [i32] (-> i32))
+(extern usleep     :cc c [i32] (-> i32))
+(extern setjmp     :cc c [(ptr i8)] (-> i32))
+(extern longjmp    :cc c [(ptr i8) i32] (-> void))
+(extern open       :cc c [(ptr i8) i32 i32] (-> i32))
+(extern lseek      :cc c [i32 i64 i32] (-> i64))
+(extern unlink     :cc c [(ptr i8)] (-> i32))
+(extern dup        :cc c [i32] (-> i32))
+(extern dup2       :cc c [i32 i32] (-> i32))
+(extern getpid     :cc c [] (-> i32))
 
 ; fd 1 = stdout, fd 2 = stderr
 (defn w-bytes [(fd i64) (p (ptr u8)) (n i64)] (-> i64) (write fd (cast (ptr i8) p) n) 0)

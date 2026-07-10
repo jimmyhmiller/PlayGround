@@ -13,6 +13,7 @@
 ;  - InstanceHeader uses i64 fields (not u32 packing) for alignment simplicity.
 (module arena)
 (import "ioutil.coil" :use *)
+(import "evalrt.coil" :use *)
 
 ; ---- header: every instance begins with this (fixed offset 0) ----
 (defstruct InstanceHeader
@@ -92,7 +93,7 @@
   (w-cstr 2 c" arena full at ") (w-int 2 (load (field a max-slots)))
   (w-cstr 2 c" slots (") (w-int 2 (load (field a live-count)))
   (w-cstr 2 c" live) — GC not implemented in this build, restart the process.\n")
-  (exit (cast i32 70)) 0)
+  (if (eval-active?) (eval-panic0 EK_RUNTIME c"OutOfArenaSpace: arena full (GC not implemented)") (do (exit (cast i32 70)) 0)) 0)
 
 ; allocate one slot; stamps the header (type-id, slot-index, flags=live). Returns ptr.
 (defn arena-alloc [(a (ptr TypeArena))] (-> (ptr u8))

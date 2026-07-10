@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scry</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">scry<span class="brand-sub">live viewer</span></div>
+  <input id="global-search" type="text" placeholder="jump to Agent#7 or search field values…" spellcheck="false" autocomplete="off">
+  <div class="topbar-right">
+    <button id="transcript-toggle" class="ghost-btn" title="eval transcript">transcript</button>
+    <div id="conn" class="conn"><span class="dot"></span><span class="conn-label">connecting…</span></div>
+  </div>
+</header>
+
+<div id="layout">
+  <nav id="rail">
+    <div class="rail-head">
+      <span>types</span>
+      <input id="type-search" type="text" placeholder="filter…" spellcheck="false" autocomplete="off">
+    </div>
+    <ul id="type-list"></ul>
+  </nav>
+
+  <main id="content">
+    <div id="breadcrumbs"></div>
+    <div id="pane"></div>
+  </main>
+</div>
+
+<section id="repl" class="collapsed">
+  <div class="repl-head">
+    <span class="repl-title">repl</span>
+    <span id="repl-context" class="repl-context"></span>
+    <span class="repl-hint">bound to <code>self</code> · press <kbd>`</kbd> to toggle</span>
+  </div>
+  <div id="repl-scroll"></div>
+  <div class="repl-input-row">
+    <span class="repl-prompt">›</span>
+    <input id="repl-input" type="text" spellcheck="false" autocomplete="off" placeholder="self.conversation.size()  —  or any Scry expression">
+  </div>
+</section>
+
+<aside id="transcript" class="collapsed">
+  <div class="transcript-head"><span>eval transcript</span><button id="transcript-close" class="ghost-btn">close</button></div>
+  <div id="transcript-list"></div>
+</aside>
+
+<script src="app.js"></script>
+</body>
+</html>

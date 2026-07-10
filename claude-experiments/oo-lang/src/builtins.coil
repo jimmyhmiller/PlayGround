@@ -6,6 +6,7 @@
 ; call it without an import cycle.
 (module builtins)
 (import "ioutil.coil" :use *)
+(import "evalrt.coil" :use *)
 
 ; ============================ String ========================================
 (defstruct StringObj [(len i64) (data (ptr u8))])
@@ -77,8 +78,10 @@
   (store! (field l len) (+ (load (field l len)) 1)) 0)
 
 (defn list-oob [(i i64) (n i64)] (-> i64)
-  (w-cstr 2 c"index ") (w-int 2 i) (w-cstr 2 c" out of bounds for List of length ") (w-int 2 n) (w-cstr 2 c"\n")
-  (exit (cast i32 70)) 0)
+  (if (eval-active?)
+    (eval-panic0 EK_RUNTIME c"List index out of bounds")
+    (do (w-cstr 2 c"index ") (w-int 2 i) (w-cstr 2 c" out of bounds for List of length ") (w-int 2 n) (w-cstr 2 c"\n")
+        (exit (cast i32 70)) 0)))
 (defn list-get [(l (ptr ListObj)) (i i64)] (-> i64)
   (if (or (< i 0) (>= i (load (field l len)))) (do (list-oob i (load (field l len))) 0) 0)
   (load (index (load (field l items)) i)))

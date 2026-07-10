@@ -376,6 +376,8 @@
     (if (!= (cast i64 nsd) 0)
       (let [dk (load (field nsd kind))]
         (cond
+          (and (or (= dk DK_CLASS) (= dk DK_OBJECT)) (> (reflect-static-kind mname mlen) 0))
+            (compile-reflect-static cs nsd mname mlen call)
           (= dk DK_ENUM)
             (let [vn (decl-member nsd mname mlen) argc (compile-args cs call)]
               (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag nsd mname mlen)) (cu8 cs argc) 0)
@@ -391,6 +393,27 @@
           (= (ty-kind rt) TY_STRING) (compile-string-method cs recv mname mlen call)
           (= (ty-kind rt) TY_NAMED) (compile-named-method cs recv rt mname mlen call)
           (do (w-cstr 2 c"compile: bad method receiver\n") (exit (cast i32 70)) 0))))))
+
+; Phase 4 reflection: ClassName.at(slot,gen) / .instance(slot) / .instances(filter,sort,offset,limit)
+(defn compile-reflect-static [(cs (ptr CState)) (nsd (ptr Decl)) (mname (ptr u8)) (mlen i64) (call (ptr Node))] (-> i64)
+  (let [k (reflect-static-kind mname mlen)
+        tid (mono-id-of (mk-named nsd (al-new [(ptr Type)] (alc-global))))]
+    (cond
+      (= k 1)  ; at(slot, gen)
+        (do (compile-expr cs (arg-val (arg-at call 0))) (compile-expr cs (arg-val (arg-at call 1)))
+            (cop cs OP_ARENA_AT) (cu16 cs tid) 0)
+      (= k 2)  ; instance(slot)
+        (do (compile-expr cs (arg-val (arg-at call 0)))
+            (cop cs OP_ARENA_INSTANCE) (cu16 cs tid) 0)
+      ; instances(filter?, sort?, offset?, limit?) — push filter,offset,limit in fixed order
+      (do
+        (let [fa (find-named-arg call (cast (ptr u8) c"filter") 6)]
+          (if (= (cast i64 fa) 0) (cconst cs (cast i64 (str-make (cast (ptr u8) c"") 0))) (compile-expr cs (arg-val fa))))
+        (let [oa (find-named-arg call (cast (ptr u8) c"offset") 6)]
+          (if (= (cast i64 oa) 0) (cconst cs 0) (compile-expr cs (arg-val oa))))
+        (let [la (find-named-arg call (cast (ptr u8) c"limit") 5)]
+          (if (= (cast i64 la) 0) (cconst cs -1) (compile-expr cs (arg-val la))))
+        (cop cs OP_ARENA_INSTANCES) (cu16 cs tid) 0))))
 
 (defn compile-builtin-object [(cs (ptr CState)) (od (ptr Decl)) (mname (ptr u8)) (mlen i64) (call (ptr Node))] (-> i64)
   (cond

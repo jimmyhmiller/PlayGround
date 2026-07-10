@@ -59,6 +59,11 @@
 (const OP_STR_EQ 60)          ; pop b,a (StringObj*) -> push bool
 (const OP_STR_NE 61)
 
+; ---- Phase 4: reflection / handle resolution (eval channel, 04-viewer.md §4.2) ----
+(const OP_ARENA_AT 62)        ; u16 type-id: pop gen, slot -> push instance ptr (stale => error)
+(const OP_ARENA_INSTANCE 63)  ; u16 type-id: pop slot -> push instance ptr (no gen check)
+(const OP_ARENA_INSTANCES 64) ; u16 type-id: pop limit,offset,filter(StringObj*) -> push ListObj
+
 ; ============================ builtin ids ===================================
 (const BLT_PRINT_I64 0) (const BLT_PRINT_F64 1) (const BLT_PRINT_BOOL 2) (const BLT_PRINT_STR 3)
 (const BLT_CONSOLE_LOG 4)
@@ -205,6 +210,9 @@
           (w-cstr 1 c"MAKE_ENUM tag=") (w-int 1 tg) (w-cstr 1 c" argc=") (w-int 1 ac) (w-cstr 1 c"\n") (+ off 3))
       (= op OP_ENUM_TAG) (dis-simple c"ENUM_TAG" off) (= op OP_ENUM_GET) (dis-u8 c c"ENUM_GET" off)
       (= op OP_STR_EQ) (dis-simple c"STR_EQ" off) (= op OP_STR_NE) (dis-simple c"STR_NE" off)
+      (= op OP_ARENA_AT) (dis-u16 c c"ARENA_AT" off)
+      (= op OP_ARENA_INSTANCE) (dis-u16 c c"ARENA_INSTANCE" off)
+      (= op OP_ARENA_INSTANCES) (dis-u16 c c"ARENA_INSTANCES" off)
       (do (w-cstr 1 c"??op ") (w-int 1 op) (w-cstr 1 c"\n") (+ off 1)))))
 
 (defn disassemble-chunk [(c (ptr Chunk))] (-> i64)

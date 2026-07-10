@@ -9,6 +9,7 @@
 (import "src/types.coil" :use *)
 (import "src/typecheck.coil" :use *)
 (import "src/compile.coil" :use *)
+(import "src/server.coil" :use *)
 
 (defn read-file [(path (ptr i8))] (-> (ptr u8))
   (let [file (fopen path c"rb")]
@@ -57,14 +58,43 @@
           (dump-program (parse-program))
           0)))))
 
-; scry run [--dump-arenas] <file.scry>
+; resolve the viewer/ asset directory: next to argv[0], else CWD.
+(defn resolve-viewer-dir [(argv0 (ptr i8))] (-> (ptr i8))
+  (let [cand (join-path (dirname argv0) c"viewer/")
+        idx (join-path cand c"index.html")]
+    (if (can-open idx) cand (cast (ptr i8) c"viewer/"))))
+
+; scry run [--dump-arenas | --no-viewer | --readonly] <file.scry>
 (defn cmd-run [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
-  (if (< argc 3)
-    (do (w-cstr 2 c"scry run: expected a file argument\n") 64)
-    (if (cstr-eq (load (index argv 2)) c"--dump-arenas")
-      (if (< argc 4) (do (w-cstr 2 c"scry run: expected a file argument\n") 64)
-        (scry-run (load (index argv 3)) true))
-      (scry-run (load (index argv 2)) false))))
+  (let [(mut file) (cast (ptr i8) 0) (mut dump) false (mut noview) false (mut ro) false (mut i) 2]
+    (loop (if (< (load i) argc)
+            (let [a (load (index argv (load i)))]
+              (cond
+                (cstr-eq a c"--dump-arenas") (do (store! dump true) 0)
+                (cstr-eq a c"--no-viewer") (do (store! noview true) 0)
+                (cstr-eq a c"--readonly") (do (store! ro true) 0)
+                (do (store! file a) 0))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (if (= (cast i64 (load file)) 0) (do (w-cstr 2 c"scry run: expected a file argument\n") 64)
+      (if (load dump)
+        (scry-run (load file) true)
+        (scry-serve (load file) (resolve-viewer-dir (load (index argv 0))) (load noview) (load ro))))))
+
+; scry eval <file.scry> -e "<expr>" [--readonly]
+(defn cmd-eval [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (let [(mut file) (cast (ptr i8) 0) (mut expr) (cast (ptr i8) 0) (mut ro) false (mut i) 2]
+    (loop (if (< (load i) argc)
+            (let [a (load (index argv (load i)))]
+              (cond
+                (cstr-eq a c"-e") (do (store! i (+ (load i) 1)) (if (< (load i) argc) (do (store! expr (load (index argv (load i)))) 0) 0) 0)
+                (cstr-eq a c"--readonly") (do (store! ro true) 0)
+                (do (store! file a) 0))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (if (or (= (cast i64 (load file)) 0) (= (cast i64 (load expr)) 0))
+      (do (w-cstr 2 c"usage: scry eval <file.scry> -e \"<expr>\" [--readonly]\n") 64)
+      (scry-eval-cli (load file) (cast (ptr u8) (load expr)) (strlen (load expr)) (load ro)))))
 
 (defn cmd-dump-bytecode [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
   (if (< argc 3)
@@ -82,4 +112,5 @@
           (cstr-eq sub c"dump-types") (cmd-dump-types n argv)
           (cstr-eq sub c"dump-bytecode") (cmd-dump-bytecode n argv)
           (cstr-eq sub c"run") (cmd-run n argv)
+          (cstr-eq sub c"eval") (cmd-eval n argv)
           (do (w-cstr 2 c"scry: unknown command\n") (usage) 64))))))

@@ -1,0 +1,68 @@
+; json.coil — a growable byte buffer with JSON emit helpers (Phase 4 eval responses).
+; StrBuf in types.coil hard-errors past 4 KiB; eval responses (a listing of instances)
+; routinely exceed that, so this one reallocs. Leaf module (imports only ioutil).
+(module json)
+(import "ioutil.coil" :use *)
+
+(defstruct JBuf [(data (ptr u8)) (len i64) (cap i64)])
+
+(defn jb-new [] (-> (ptr JBuf))
+  (let [b (cast (ptr JBuf) (xalloc (sizeof JBuf)))]
+    (store! (field b data) (xalloc 4096)) (store! (field b len) 0) (store! (field b cap) 4096) b))
+
+(defn jb-ensure [(b (ptr JBuf)) (extra i64)] (-> i64)
+  (let [need (+ (load (field b len)) extra)]
+    (if (>= need (load (field b cap)))
+      (let [(mut nc) (load (field b cap))]
+        (loop (if (>= need (load nc)) (do (store! nc (* (load nc) 2)) 0) (break)))
+        (store! (field b data) (cast (ptr u8) (realloc (cast (ptr i8) (load (field b data))) (load nc))))
+        (store! (field b cap) (load nc)) 0)
+      0)))
+
+(defn jb-byte [(b (ptr JBuf)) (c i64)] (-> i64)
+  (jb-ensure b 1)
+  (store! (index (load (field b data)) (load (field b len))) (cast u8 c))
+  (store! (field b len) (+ (load (field b len)) 1)) 0)
+
+(defn jb-bytes [(b (ptr JBuf)) (p (ptr u8)) (n i64)] (-> i64)
+  (jb-ensure b n)
+  (let [(mut i) 0]
+    (loop (if (< (load i) n) (do (store! (index (load (field b data)) (+ (load (field b len)) (load i))) (load (index p (load i)))) (store! i (+ (load i) 1)) 0) (break))))
+  (store! (field b len) (+ (load (field b len)) n)) 0)
+
+(defn jb-cstr [(b (ptr JBuf)) (s (ptr i8))] (-> i64) (jb-bytes b (cast (ptr u8) s) (strlen s)))
+
+(defn jb-int [(b (ptr JBuf)) (v i64)] (-> i64)
+  (let [buf (alloc-stack (array u8 32)) n (snprintf (cast (ptr i8) (index buf 0)) 32 c"%lld" v)]
+    (jb-bytes b (cast (ptr u8) (index buf 0)) (cast i64 n))))
+
+(defn jb-float [(b (ptr JBuf)) (x f64)] (-> i64)
+  (let [buf (alloc-stack (array u8 64)) n (snprintf (cast (ptr i8) (index buf 0)) 64 c"%g" x)]
+    (jb-bytes b (cast (ptr u8) (index buf 0)) (cast i64 n))))
+
+(defn jb-bool [(b (ptr JBuf)) (v i64)] (-> i64) (if (= v 0) (jb-cstr b c"false") (jb-cstr b c"true")))
+
+; emit a JSON string literal (with surrounding quotes) from raw UTF-8 bytes.
+(defn jb-str [(b (ptr JBuf)) (p (ptr u8)) (n i64)] (-> i64)
+  (jb-byte b \")
+  (let [(mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [ch (cast i64 (load (index p (load i))))]
+          (cond
+            (= ch \") (do (jb-byte b \\) (jb-byte b \"))
+            (= ch \\) (do (jb-byte b \\) (jb-byte b \\))
+            (= ch \newline) (do (jb-byte b \\) (jb-byte b \n))
+            (= ch \tab) (do (jb-byte b \\) (jb-byte b \t))
+            (= ch \return) (do (jb-byte b \\) (jb-byte b \r))
+            (< ch 32)
+              (do (jb-cstr b c"\\u00")
+                  (let [hi (idiv ch 16) lo (irem ch 16)]
+                    (jb-byte b (if (< hi 10) (+ \0 hi) (+ \a (- hi 10))))
+                    (jb-byte b (if (< lo 10) (+ \0 lo) (+ \a (- lo 10))))))
+            (jb-byte b ch))
+          (store! i (+ (load i) 1)) 0)
+        (break))))
+  (jb-byte b \") 0)
+
+(defn jb-cstr-quoted [(b (ptr JBuf)) (s (ptr i8))] (-> i64) (jb-str b (cast (ptr u8) s) (strlen s)))

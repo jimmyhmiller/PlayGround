@@ -12,6 +12,9 @@
 (import "arena.coil" :use *)
 (import "builtins.coil" :use *)
 (import "bytecode.coil" :use *)
+(import "safepoint.coil" :use *)
+(import "reflect.coil" :use *)
+(import "evalrt.coil" :use *)
 
 (const DK_OBJECT_KIND 3)
 (const STACK_MAX 65536)
@@ -87,15 +90,21 @@
     (= blt BLT_CLOCK_NOW) (vpush (clock-now))
     (= blt BLT_CLOCK_SLEEP) (let [ms (vpop)] (clock-sleep ms) (vpush 0))
     (or (= blt BLT_THREAD_SPAWN) (= blt BLT_THREAD_JOIN))
-      (do (w-cstr 2 c"threads: not implemented until Phase 5\n") (exit (cast i32 70)) 0)
-    (do (w-cstr 2 c"vm: unknown builtin\n") (exit (cast i32 70)) 0)))
+      (do (eval-panic0 EK_RUNTIME c"threads: not implemented until Phase 5") (exit (cast i32 70)) 0)
+    (do (eval-panic0 EK_RUNTIME c"vm: unknown builtin") (exit (cast i32 70)) 0)))
 
 ; ---- the dispatch loop ----
-(defn run [] (-> i64)
+; Runs until frame-count returns to `stop-fc`. `(run-to 0)` runs a whole program; an
+; eval invocation runs to the caller's saved depth (so it can re-enter from a safepoint
+; without unwinding the program's own frames). The safepoint-poll at the loop top is the
+; single seam every instruction passes — Phase 5's STW/GC parks here.
+(defn run-to [(stop-fc i64)] (-> i64)
   (let [(mut fr) (index (field (vm) frames) (- (load (field (vm) frame-count)) 1))
         (mut result) 0 (mut done) false]
     (loop
       (if (load done) (break)
+        (do
+          (safepoint-poll)
         (let [op (read-byte (load fr))]
           (case op
             OP_CONST (let [idx (read-u16 (load fr)) c (load (field (load (field (load fr) method)) chunk))] (vpush (load (index (load (field c consts)) idx))))
@@ -167,7 +176,7 @@
               (let [res (vpop) base (load (field (load fr) base))]
                 (store! (field (vm) frame-count) (- (load (field (vm) frame-count)) 1))
                 (store! (field (vm) stack-top) base)
-                (if (= (load (field (vm) frame-count)) 0)
+                (if (= (load (field (vm) frame-count)) stop-fc)
                   (do (store! result res) (store! done true) 0)
                   (do (store! fr (index (field (vm) frames) (- (load (field (vm) frame-count)) 1)))
                       (vpush res) 0)))
@@ -186,8 +195,28 @@
             OP_ENUM_GET (let [idx (read-byte (load fr)) p (vpop)] (vpush (enum-arg (cast (ptr i64) p) idx)))
             OP_STR_EQ (let [b (vpop) a (vpop)] (vpush (if (str-eq (cast (ptr StringObj) a) (cast (ptr StringObj) b)) 1 0)))
             OP_STR_NE (let [b (vpop) a (vpop)] (vpush (if (str-eq (cast (ptr StringObj) a) (cast (ptr StringObj) b)) 0 1)))
-            (do (w-cstr 2 c"vm: bad opcode ") (w-int 2 op) (w-cstr 2 c"\n") (exit (cast i32 70)) 0)))))
+            OP_ARENA_AT
+              (let [tid (read-u16 (load fr)) gen (vpop) slot (vpop)]
+                (vpush (arena-at (load (field (vm) program)) tid slot gen)))
+            OP_ARENA_INSTANCE
+              (let [tid (read-u16 (load fr)) slot (vpop)]
+                (vpush (arena-instance (load (field (vm) program)) tid slot)))
+            OP_ARENA_INSTANCES
+              (let [tid (read-u16 (load fr)) lim (vpop) off (vpop) filt (vpop)]
+                (vpush (cast i64 (arena-instances (load (field (vm) program)) tid (cast (ptr StringObj) filt) off lim))))
+            (do (w-cstr 2 c"vm: bad opcode ") (w-int 2 op) (w-cstr 2 c"\n") (eval-panic0 EK_RUNTIME c"internal: bad opcode") 0))))))
     (load result)))
+
+; run to completion from depth 0 (whole program).
+(defn run [] (-> i64) (run-to 0))
+
+; invoke an already-compiled, args-already-pushed method to completion, returning its
+; result value — the exact push-frame path bytecode uses. This is how a viewer eval
+; enters the VM (02-runtime.md §8: "not a special code path").
+(defn vm-eval-invoke [(m (ptr MethodInfo)) (argc i64)] (-> i64)
+  (let [fc0 (load (field (vm) frame-count))]
+    (push-frame m argc)
+    (run-to fc0)))
 
 ; allocate object singletons, then invoke main.
 (defn vm-run [(p (ptr Program))] (-> i64)

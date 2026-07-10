@@ -1,0 +1,503 @@
+; server.coil — the embedded eval server (Phase 4). ONE wire operation: POST /eval with
+; {id, source} -> {id, value|error} (04-viewer.md §4). A second OS thread (Coil pthread)
+; does socket transport + a minimal HTTP/1.1 parse and hands each request to the mutator
+; thread through a single-slot mailbox guarded by atomics; the mutator services it at a
+; safepoint (safepoint.coil), running parse -> typecheck -> compile -> VM -> serialize in
+; the live context. N=1 mutator here — Phase 5 generalizes the mailbox to a real queue and
+; the drain to a dedicated eval VMThread under request-global-stop (02-runtime.md §7).
+(module server)
+(import "ioutil.coil" :use *)
+(import "lexer.coil" :use *)
+(import "ast.coil" :use *)
+(import "parser.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "alloc.coil" :use *)
+(import "types.coil" :use *)
+(import "typecheck.coil" :use *)
+(import "arena.coil" :use *)
+(import "builtins.coil" :use *)
+(import "bytecode.coil" :use *)
+(import "vm.coil" :use *)
+(import "compile.coil" :use *)
+(import "json.coil" :use *)
+(import "serialize.coil" :use *)
+(import "reflect.coil" :use *)
+(import "evalrt.coil" :use *)
+(import "safepoint.coil" :use *)
+(import "thread.coil" :use *)
+(import "atomic.coil" :use *)
+
+; ============================ globals ============================
+(defn srv-program [] (-> (ptr (ptr Program))) (alloc-static (ptr Program)))
+(defn srv-listen-fd [] (-> (ptr i64)) (alloc-static i64))
+(defn srv-viewer-dir [] (-> (ptr (ptr i8))) (alloc-static (ptr i8)))
+(defn srv-readonly [] (-> (ptr i64)) (alloc-static i64))
+
+; mailbox
+(defn mbx-req-ready [] (-> (ptr i64)) (alloc-static i64))
+(defn mbx-resp-ready [] (-> (ptr i64)) (alloc-static i64))
+(defn mbx-src [] (-> (ptr (ptr u8))) (alloc-static (ptr u8)))
+(defn mbx-srclen [] (-> (ptr i64)) (alloc-static i64))
+(defn mbx-id [] (-> (ptr (ptr u8))) (alloc-static (ptr u8)))
+(defn mbx-idlen [] (-> (ptr i64)) (alloc-static i64))
+(defn mbx-readonly [] (-> (ptr i64)) (alloc-static i64))
+(defn mbx-resp [] (-> (ptr (ptr JBuf))) (alloc-static (ptr JBuf)))
+
+; eval outcome (set on the mutator thread inside eval-core)
+(defn ev-outcome [] (-> (ptr i64)) (alloc-static i64))   ; 0 = value, 1 = error
+(defn ev-valbuf [] (-> (ptr (ptr JBuf))) (alloc-static (ptr JBuf)))
+
+; ============================ tiny JSON request parse ============================
+; decode a JSON string value for `key` into a fresh buffer; returns len, out via out-ptr.
+(defn json-find-key [(body (ptr u8)) (blen i64) (key (ptr i8)) (klen i64)] (-> i64)  ; index just after the ':' or -1
+  (let [(mut i) 0 (mut r) -1]
+    (loop
+      (if (and (< (load r) 0) (< (load i) (- blen (+ klen 2))))
+        (do
+          (if (and (= (cast i64 (load (index body (load i)))) \") (match-at body (load i) key klen))
+            (let [(mut j) (+ (load i) (+ klen 1))]
+              ; skip to ':'
+              (loop (if (and (< (load j) blen) (!= (cast i64 (load (index body (load j)))) \:)) (do (store! j (+ (load j) 1)) 0) (break)))
+              (store! r (+ (load j) 1)) 0)
+            0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (load r)))
+(defn match-at [(body (ptr u8)) (i i64) (key (ptr i8)) (klen i64)] (-> bool)   ; body[i]=='"'; key matches body[i+1..i+1+klen] and body[i+1+klen]=='"'
+  (let [(mut k) 0 (mut ok) true]
+    (loop (if (and (load ok) (< (load k) klen))
+            (do (if (!= (cast i64 (load (index body (+ i (+ 1 (load k)))))) (cast i64 (load (index (cast (ptr u8) key) (load k))))) (do (store! ok false) 0) 0) (store! k (+ (load k) 1)) 0)
+            (break)))
+    (if (load ok) (= (cast i64 (load (index body (+ i (+ 1 klen))))) \") false)))
+
+; decode a JSON string starting at `pos` (which should point at or before the opening ").
+(defn json-decode-string [(body (ptr u8)) (blen i64) (pos i64) (out (ptr u8)) (outlen (ptr i64))] (-> i64)
+  (let [(mut i) pos]
+    (loop (if (and (< (load i) blen) (!= (cast i64 (load (index body (load i)))) \")) (do (store! i (+ (load i) 1)) 0) (break)))
+    (store! i (+ (load i) 1))   ; past opening quote
+    (let [(mut n) 0]
+      (loop
+        (if (>= (load i) blen) (break)
+          (let [ch (cast i64 (load (index body (load i))))]
+            (cond
+              (= ch \") (break)
+              (= ch \\)
+                (do (store! i (+ (load i) 1))
+                    (let [e (cast i64 (load (index body (load i))))]
+                      (cond
+                        (= e \n) (do (store! (index out (load n)) (cast u8 \newline)) 0)
+                        (= e \t) (do (store! (index out (load n)) (cast u8 \tab)) 0)
+                        (= e \r) (do (store! (index out (load n)) (cast u8 \return)) 0)
+                        (= e \u) (do (store! (index out (load n)) (cast u8 \?)) (store! i (+ (load i) 4)) 0)
+                        (do (store! (index out (load n)) (cast u8 e)) 0))
+                      (store! n (+ (load n) 1)) (store! i (+ (load i) 1)) 0))
+              (do (store! (index out (load n)) (cast u8 ch)) (store! n (+ (load n) 1)) (store! i (+ (load i) 1)) 0)))))
+      (store! outlen (load n)) 0)))
+
+; capture the raw id token (string incl. quotes, or a bare number) at pos.
+(defn json-raw-id [(body (ptr u8)) (blen i64) (pos i64) (out (ptr u8)) (outlen (ptr i64))] (-> i64)
+  (let [(mut i) pos]
+    (loop (if (and (< (load i) blen) (let [c (cast i64 (load (index body (load i))))] (or (= c \space) (= c \tab)))) (do (store! i (+ (load i) 1)) 0) (break)))
+    (let [start (load i) (mut n) 0]
+      (if (= (cast i64 (load (index body (load i)))) \")
+        (do (store! (index out 0) (cast u8 \")) (store! n 1) (store! i (+ (load i) 1))
+            (loop (if (and (< (load i) blen) (!= (cast i64 (load (index body (load i)))) \")) (do (store! (index out (load n)) (load (index body (load i)))) (store! n (+ (load n) 1)) (store! i (+ (load i) 1)) 0) (break)))
+            (store! (index out (load n)) (cast u8 \")) (store! n (+ (load n) 1)) 0)
+        (loop (if (< (load i) blen) (let [c (cast i64 (load (index body (load i))))] (if (or (= c \,) (or (= c \}) (or (= c \space) (= c \newline)))) (break) (do (store! (index out (load n)) (cast u8 c)) (store! n (+ (load n) 1)) (store! i (+ (load i) 1)) 0))) (break))))
+      (store! outlen (load n)) 0)))
+
+; ============================ eval executor (mutator thread) ============================
+(defn kind-str [(k i64)] (-> (ptr i8))
+  (cond (= k EK_SYNTAX) c"SyntaxError" (= k EK_TYPE) c"TypeError" (= k EK_RUNTIME) c"RuntimeError"
+        (= k EK_STALE) c"StaleReference" (= k EK_NOTIMPL) c"NotImplemented" (= k EK_READONLY) c"ReadOnly"
+        c"BadRequest"))
+(defn ev-fail [(kind i64) (msg (ptr i8)) (line i64) (col i64)] (-> i64)
+  (store! (ev-outcome) 1) (store! (ev-kind) kind) (store! (ev-line) line) (store! (ev-col) col) (ev-set-msg msg) 0)
+
+; is the leading token a top-level definition (live code change -> Phase 6)?
+(defn is-def-token [(k i64)] (-> bool)
+  (or (= k TK_CLASS) (or (= k TK_INTERFACE) (or (= k TK_ENUM) (or (= k TK_OBJECT) (or (= k TK_FN) (or (= k TK_MIGRATE) (or (= k TK_IMPORT) (= k TK_MODULE)))))))))
+
+; parse the eval source into a single BLOCK node (statements, last is the value).
+(defn parse-eval-block [] (-> (ptr Node))
+  (if (= (cur-kind) TK_LBRACE)
+    (parse-block)
+    (let [blk (mk-node NK_BLOCK (cur-line) (cur-col))]
+      (loop (if (check TK_EOF) (break) (do (add-kid! blk (parse-stmt)) 0)))
+      blk)))
+
+; detect a bare reflection call: types() / fields("X") / methods("X").
+; returns 1 if handled (valbuf filled), 0 otherwise.
+(defn try-reflection [(blk (ptr Node))] (-> i64)
+  (if (!= (kid-count blk) 1) 0
+    (let [st (kid-at blk 0)]
+      (if (!= (load (field st kind)) NK_EXPRSTMT) 0
+        (let [e (load (field st a))]
+          (if (!= (load (field e kind)) NK_CALL) 0
+            (let [callee (load (field e a))]
+              (if (!= (load (field callee kind)) NK_IDENT) 0
+                (cond
+                  (and (node-name-eq callee c"types") (= (arg-count e) 0))
+                    (do (reflect-types (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                  (and (node-name-eq callee c"fields") (= (arg-count e) 1))
+                    (let [s (str-arg e 0)] (if (= (cast i64 s) 0) 0 (do (reflect-fields (load (ev-valbuf)) (load (field s s-name)) (load (field s s-len))) (store! (ev-outcome) 0) 1)))
+                  (and (node-name-eq callee c"methods") (= (arg-count e) 1))
+                    (let [s (str-arg e 0)] (if (= (cast i64 s) 0) 0 (do (reflect-methods (load (ev-valbuf)) (load (field s s-name)) (load (field s s-len))) (store! (ev-outcome) 0) 1)))
+                  0)))))))))
+; extract a STRCHUNK payload from a string-literal argument, or null
+(defn str-arg [(call (ptr Node)) (i i64)] (-> (ptr Node))
+  (let [v (arg-val (arg-at call i))]
+    (if (and (= (load (field v kind)) NK_STRING) (= (kid-count v) 1))
+      (let [c (kid-at v 0)] (if (= (load (field c kind)) NK_STRCHUNK) c (cast (ptr Node) 0)))
+      (if (= (load (field v kind)) NK_STRCHUNK) v (cast (ptr Node) 0)))))
+
+; compile a typechecked eval block into a standalone nullary MethodInfo.
+(defn compile-eval-method [(blk (ptr Node)) (vty (ptr Type))] (-> (ptr MethodInfo))
+  (let [chunk (chunk-new)
+        env (env-new (null-ty) (cast (ptr Decl) 0) vty false)
+        cs (make-cstate chunk env (cast (ptr Decl) 0) 0)
+        mi (cast (ptr MethodInfo) (xalloc (sizeof MethodInfo)))]
+    (store! (field mi name) (cast (ptr u8) c"<eval>")) (store! (field mi name-len) 6)
+    (store! (field mi chunk) chunk) (store! (field mi is-void) false) (store! (field mi arity) 0)
+    (compile-block cs blk true)
+    (chunk-byte chunk OP_RETURN)
+    (store! (field mi local-count) (load (field cs max-slot)))
+    mi))
+
+; ---- readonly mutation analysis over compiled bytecode ----
+(defn op-instr-len [(op i64)] (-> i64)
+  (case op
+    OP_CALL_STATIC 4
+    OP_CALL_VIRTUAL 5
+    OP_CALL_BUILTIN 2 OP_ENUM_GET 2
+    OP_MAKE_ENUM 3
+    OP_CONST 3 OP_LOAD_LOCAL 3 OP_STORE_LOCAL 3
+    OP_LOAD_FIELD_I64 3 OP_LOAD_FIELD_F64 3 OP_LOAD_FIELD_REF 3
+    OP_STORE_FIELD_I64 3 OP_STORE_FIELD_F64 3 OP_STORE_FIELD_REF 3
+    OP_JUMP 3 OP_JUMP_IF_FALSE 3 OP_LOOP 3
+    OP_NEW 3 OP_LOAD_SINGLETON 3
+    OP_ARENA_AT 3 OP_ARENA_INSTANCE 3 OP_ARENA_INSTANCES 3
+    1))
+(defn chunk-u16-at [(c (ptr Chunk)) (off i64)] (-> i64)
+  (+ (* (cast i64 (load (index (load (field c code)) off))) 256) (cast i64 (load (index (load (field c code)) (+ off 1))))))
+(defstruct VisitSet [(arr (ptr i64)) (count i64) (cap i64)])
+(defn vs-new [] (-> (ptr VisitSet))
+  (let [v (cast (ptr VisitSet) (xalloc (sizeof VisitSet)))] (store! (field v arr) (cast (ptr i64) (xalloc (* 8 1024)))) (store! (field v count) 0) (store! (field v cap) 1024) v))
+(defn vs-has [(v (ptr VisitSet)) (x i64)] (-> bool)
+  (let [n (load (field v count)) (mut i) 0 (mut ok) false]
+    (loop (if (and (not (load ok)) (< (load i) n)) (do (if (= (load (index (load (field v arr)) (load i))) x) (do (store! ok true) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load ok)))
+(defn vs-add [(v (ptr VisitSet)) (x i64)] (-> i64)
+  (if (< (load (field v count)) (load (field v cap))) (do (store! (index (load (field v arr)) (load (field v count))) x) (store! (field v count) (+ (load (field v count)) 1)) 0) 0))
+(defn chunk-mutates [(c (ptr Chunk)) (p (ptr Program)) (visited (ptr VisitSet))] (-> bool)
+  (let [n (load (field c count)) (mut off) 0 (mut mut?) false]
+    (loop
+      (if (and (not (load mut?)) (< (load off) n))
+        (let [op (cast i64 (load (index (load (field c code)) (load off))))]
+          (cond
+            (or (= op OP_STORE_FIELD_I64) (or (= op OP_STORE_FIELD_F64) (= op OP_STORE_FIELD_REF))) (do (store! mut? true) 0)
+            (= op OP_NEW) (do (store! mut? true) 0)
+            (= op OP_CALL_VIRTUAL) (do (store! mut? true) 0)
+            (= op OP_CALL_BUILTIN)
+              (let [blt (cast i64 (load (index (load (field c code)) (+ (load off) 1))))]
+                (if (or (= blt BLT_LIST_PUSH) (= blt BLT_MAP_SET)) (do (store! mut? true) 0) 0))
+            (= op OP_CALL_STATIC)
+              (let [midx (chunk-u16-at c (+ (load off) 1))]
+                (if (not (vs-has visited midx))
+                  (do (vs-add visited midx)
+                      (if (chunk-mutates (load (field (load (index (load (field p methods)) midx)) chunk)) p visited) (do (store! mut? true) 0) 0))
+                  0))
+            0)
+          (store! off (+ (load off) (op-instr-len op))) 0)
+        (break)))
+    (load mut?)))
+
+; the guarded work: sets ev-outcome/valbuf on success, ev-outcome=1 + EvalError on failure.
+(defn eval-exec [(src (ptr u8)) (len i64) (readonly i64) (errbase i64)] (-> i64)
+  (block :done
+    (if (= (lex-file src c"<eval>") 1) (do (ev-fail EK_SYNTAX c"syntax error in eval source" 0 0) (return-from :done 0)) 0)
+    (parser-init (lexer-tokens) c"<eval>")
+    (if (is-def-token (cur-kind))
+      (do (ev-fail EK_NOTIMPL c"live code change: not implemented until Phase 6" 0 0) (return-from :done 0)) 0)
+    (let [blk (parse-eval-block)]
+      (if (= (try-reflection blk) 1) (return-from :done 0) 0)
+      (set-cur-file c"<eval>")
+      (let [env (env-new (null-ty) (cast (ptr Decl) 0) (ty-void) false)
+            vty (block-value blk env (null-ty) true)]
+        (if (> (err-count) errbase) (do (ev-fail EK_TYPE c"type error" 0 0) (return-from :done 0)) 0)
+        (let [mi (compile-eval-method blk vty)]
+          (if (and (= readonly 1) (chunk-mutates (load (field mi chunk)) (load (srv-program)) (vs-new)))
+            (do (ev-fail EK_READONLY c"eval rejected: this expression would mutate program state (--readonly)" 0 0) (return-from :done 0)) 0)
+          (let [resval (vm-eval-invoke mi 0)]
+            (serialize-value (load (ev-valbuf)) resval vty 0)
+            (store! (ev-outcome) 0) 0))))))
+
+; write `"value":...` / `"error":{...}` into b.  Never longjmps (all risky work is guarded).
+(defn eval-core [(b (ptr JBuf)) (src (ptr u8)) (len i64) (readonly i64)] (-> i64)
+  (store! (ev-valbuf) (jb-new))
+  (store! (ev-outcome) 1) (store! (ev-kind) EK_RUNTIME) (store! (ev-line) 0) (store! (ev-col) 0) (store! (ev-msglen) 0)
+  (eval-set-active 1)
+  (let [errbase (err-count)]
+    (diag-capture-begin)
+    (if (= (cast i64 (setjmp (ev-jmpbuf))) 0)
+      (eval-exec src len readonly errbase)
+      (store! (ev-outcome) 1))     ; longjmp'd: EvalError already recorded by eval-panic
+    (diag-capture-end))
+  (eval-set-active 0)
+  (if (= (load (ev-outcome)) 0)
+    (do (jb-cstr b c"\"value\":") (jb-bytes b (load (field (load (ev-valbuf)) data)) (load (field (load (ev-valbuf)) len))))
+    (write-error-inner b))
+  0)
+
+(defn write-error-inner [(b (ptr JBuf))] (-> i64)
+  (jb-cstr b c"\"error\":{\"kind\":") (jb-cstr-quoted b (kind-str (load (ev-kind))))
+  (jb-cstr b c",\"message\":")
+  ; prefer the real captured compiler diagnostic when present
+  (if (and (> (load (ev-caplen)) 0) (or (= (load (ev-kind)) EK_TYPE) (= (load (ev-kind)) EK_SYNTAX)))
+    (jb-str b (ev-capbuf) (trim-len (ev-capbuf) (load (ev-caplen))))
+    (jb-str b (ev-msgbuf) (load (ev-msglen))))
+  (if (> (load (ev-line)) 0)
+    (do (jb-cstr b c",\"line\":") (jb-int b (load (ev-line))) (jb-cstr b c",\"col\":") (jb-int b (load (ev-col)))) 0)
+  (jb-byte b \}) 0)
+(defn trim-len [(p (ptr u8)) (n i64)] (-> i64)
+  (let [(mut m) n] (loop (if (and (> (load m) 0) (let [c (cast i64 (load (index p (- (load m) 1))))] (or (= c \newline) (or (= c \return) (= c \space))))) (do (store! m (- (load m) 1)) 0) (break))) (load m)))
+
+; ============================ mailbox drain (registered safepoint callback) ============================
+(defn server-drain [] (-> i64)
+  (if (= (atomic-load (mbx-req-ready)) 1)
+    (let [b (jb-new)]
+      (jb-cstr b c"{\"id\":") (jb-bytes b (load (mbx-id)) (load (mbx-idlen))) (jb-byte b \,)
+      (eval-core b (load (mbx-src)) (load (mbx-srclen)) (load (mbx-readonly)))
+      (jb-byte b \})
+      (store! (mbx-resp) b)
+      (atomic-store (mbx-resp-ready) 1)
+      0)
+    0))
+
+; ============================ HTTP (server thread) ============================
+(defn ends-with [(name (ptr i8)) (suf (ptr i8))] (-> bool)
+  (let [nl (strlen name) sl (strlen suf)]
+    (if (< nl sl) false
+      (let [(mut i) 0 (mut ok) true]
+        (loop (if (and (load ok) (< (load i) sl)) (do (if (!= (cast i64 (load (index (cast (ptr u8) name) (+ (- nl sl) (load i))))) (cast i64 (load (index (cast (ptr u8) suf) (load i))))) (do (store! ok false) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+        (load ok)))))
+(defn content-type-for [(name (ptr i8))] (-> (ptr i8))
+  (cond (ends-with name c".html") c"text/html; charset=utf-8"
+        (ends-with name c".js") c"application/javascript; charset=utf-8"
+        (ends-with name c".css") c"text/css; charset=utf-8"
+        c"text/plain; charset=utf-8"))
+(defn srv-read-file [(path (ptr i8)) (out-len (ptr i64))] (-> (ptr u8))
+  (let [f (fopen path c"rb")]
+    (if (= (cast i64 f) 0) (do (store! out-len 0) (cast (ptr u8) 0))
+      (do (fseek f 0 (cast i32 2))
+          (let [sz (ftell f)] (rewind f)
+            (let [buf (xalloc (+ sz 1))] (fread (cast (ptr i8) buf) 1 sz f) (fclose f) (store! out-len sz) buf))))))
+
+; join viewer-dir + name into a fresh path buffer
+(defn join-path [(dir (ptr i8)) (name (ptr i8))] (-> (ptr i8))
+  (let [dl (strlen dir) nl (strlen name) buf (cast (ptr i8) (xalloc (+ (+ dl nl) 2))) (mut k) 0]
+    (let [(mut i) 0] (loop (if (< (load i) dl) (do (store! (index (cast (ptr u8) buf) (load k)) (load (index (cast (ptr u8) dir) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
+    (let [(mut i) 0] (loop (if (< (load i) nl) (do (store! (index (cast (ptr u8) buf) (load k)) (load (index (cast (ptr u8) name) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
+    (store! (index (cast (ptr u8) buf) (load k)) (cast u8 0)) buf))
+
+(defn write-all [(fd i64) (p (ptr u8)) (n i64)] (-> i64)
+  (let [(mut off) 0]
+    (loop (if (< (load off) n) (let [w (write fd (cast (ptr i8) (index p (load off))) (- n (load off)))] (if (<= w 0) (break) (do (store! off (+ (load off) w)) 0))) (break))))
+  0)
+; Coil's c"…" lexer decodes only \n \t \\ \" — NOT \r or \xHH — so HTTP CRLFs are
+; written as explicit bytes (\return=13, \newline=10) rather than via an escape.
+(defn sr-str [(buf (ptr u8)) (k (ptr i64)) (s (ptr i8))] (-> i64)
+  (let [n (strlen s) (mut i) 0]
+    (loop (if (< (load i) n) (do (store! (index buf (load k)) (load (index (cast (ptr u8) s) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break)))) 0)
+(defn sr-crlf [(buf (ptr u8)) (k (ptr i64))] (-> i64)
+  (store! (index buf (load k)) (cast u8 \return)) (store! (index buf (+ (load k) 1)) (cast u8 \newline)) (store! k (+ (load k) 2)) 0)
+(defn send-response [(fd i64) (status (ptr i8)) (ctype (ptr i8)) (body (ptr u8)) (blen i64)] (-> i64)
+  (let [hdr (xalloc 512) k (cast (ptr i64) (xalloc 8)) clbuf (cast (ptr i8) (xalloc 32))]
+    (store! k 0)
+    (sr-str hdr k c"HTTP/1.1 ") (sr-str hdr k status) (sr-crlf hdr k)
+    (sr-str hdr k c"Content-Type: ") (sr-str hdr k ctype) (sr-crlf hdr k)
+    (snprintf clbuf 32 c"Content-Length: %lld" blen) (sr-str hdr k clbuf) (sr-crlf hdr k)
+    (sr-str hdr k c"Connection: close") (sr-crlf hdr k)
+    (sr-str hdr k c"Access-Control-Allow-Origin: *") (sr-crlf hdr k)
+    (sr-crlf hdr k)
+    (write-all fd hdr (load k))
+    (write-all fd body blen) 0))
+
+; find the request path (after "METHOD ") into out; returns method: 0 GET, 1 POST, -1 other
+(defn parse-req [(buf (ptr u8)) (n i64) (pathout (ptr u8))] (-> i64)
+  (let [meth (if (= (cast i64 (load (index buf 0))) \P) 1 (if (= (cast i64 (load (index buf 0))) \G) 0 -1))
+        (mut i) 0]
+    ; skip method to first space
+    (loop (if (and (< (load i) n) (!= (cast i64 (load (index buf (load i)))) \space)) (do (store! i (+ (load i) 1)) 0) (break)))
+    (store! i (+ (load i) 1))
+    (let [(mut k) 0]
+      (loop (if (and (< (load i) n) (!= (cast i64 (load (index buf (load i)))) \space)) (do (store! (index pathout (load k)) (load (index buf (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break)))
+      (store! (index pathout (load k)) (cast u8 0)))
+    meth))
+
+; find Content-Length header value; -1 if none
+(defn header-content-length [(buf (ptr u8)) (n i64)] (-> i64)
+  (let [(mut i) 0 (mut r) -1]
+    (loop
+      (if (and (< (load r) 0) (< (load i) (- n 15)))
+        (do
+          (if (or (ci-match buf (load i) c"Content-Length:" 15) (ci-match buf (load i) c"content-length:" 15))
+            (let [(mut j) (+ (load i) 15) (mut v) 0]
+              (loop (if (and (< (load j) n) (let [c (cast i64 (load (index buf (load j))))] (or (= c \space) (= c \tab)))) (do (store! j (+ (load j) 1)) 0) (break)))
+              (loop (if (< (load j) n) (let [c (cast i64 (load (index buf (load j))))] (if (and (>= c \0) (<= c \9)) (do (store! v (+ (* (load v) 10) (- c \0))) (store! j (+ (load j) 1)) 0) (break))) (break)))
+              (store! r (load v)) 0)
+            0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (load r)))
+(defn ci-match [(buf (ptr u8)) (i i64) (s (ptr i8)) (sl i64)] (-> bool)
+  (let [(mut k) 0 (mut ok) true]
+    (loop (if (and (load ok) (< (load k) sl)) (do (if (!= (cast i64 (load (index buf (+ i (load k))))) (cast i64 (load (index (cast (ptr u8) s) (load k))))) (do (store! ok false) 0) 0) (store! k (+ (load k) 1)) 0) (break)))
+    (load ok)))
+(defn find-body-start [(buf (ptr u8)) (n i64)] (-> i64)   ; index after \r\n\r\n, or -1
+  (let [(mut i) 0 (mut r) -1]
+    (loop (if (and (< (load r) 0) (< (load i) (- n 3)))
+            (do (if (and (= (cast i64 (load (index buf (load i)))) \return) (and (= (cast i64 (load (index buf (+ (load i) 1)))) \newline) (and (= (cast i64 (load (index buf (+ (load i) 2)))) \return) (= (cast i64 (load (index buf (+ (load i) 3)))) \newline)))) (do (store! r (+ (load i) 4)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load r)))
+
+(defn handle-conn [(cfd i64)] (-> i64)
+  (let [cap 262144 buf (xalloc cap) (mut total) 0]
+    ; read until we have full headers, then full body
+    (let [(mut done) false]
+      (loop
+        (if (load done) (break)
+          (let [r (read (cast i32 cfd) (cast (ptr i8) (index buf (load total))) (- cap (load total)))]
+            (if (<= r 0) (break)
+              (do (store! total (+ (load total) r))
+                  (let [bs (find-body-start buf (load total))]
+                    (if (< bs 0)
+                      (if (>= (load total) cap) (do (store! done true) 0) 0)   ; headers too big; bail
+                      (let [cl (header-content-length buf (load total))]
+                        (if (or (< cl 0) (>= (- (load total) bs) cl)) (do (store! done true) 0)
+                          (if (>= (load total) cap) (do (store! done true) 0) 0)))) 0)))))))
+    (let [pathbuf (xalloc 2048) meth (parse-req buf (load total) pathbuf)]
+      (cond
+        (= meth 1) (handle-eval cfd buf (load total))
+        (= meth 0) (serve-static cfd (cast (ptr i8) pathbuf))
+        (send-response cfd c"400 Bad Request" c"text/plain" (cast (ptr u8) c"bad request") 11)))
+    0))
+
+(defn handle-eval [(cfd i64) (buf (ptr u8)) (n i64)] (-> i64)
+  (let [bs (find-body-start buf n)]
+    (if (< bs 0) (send-response cfd c"400 Bad Request" c"application/json" (cast (ptr u8) c"{\"error\":{\"kind\":\"BadRequest\",\"message\":\"no body\"}}") 52)
+      (let [srcbuf (xalloc 65536) srclen (cast (ptr i64) (xalloc 8))
+            idbuf (xalloc 256) idlen (cast (ptr i64) (xalloc 8))
+            spos (json-find-key (index buf bs) (- n bs) c"source" 6)
+            ipos (json-find-key (index buf bs) (- n bs) c"id" 2)]
+        (if (< spos 0) (send-response cfd c"400 Bad Request" c"application/json" (cast (ptr u8) c"{\"error\":{\"kind\":\"BadRequest\",\"message\":\"missing source\"}}") 60)
+          (do
+            (json-decode-string (index buf bs) (- n bs) spos srcbuf srclen)
+            (if (< ipos 0) (do (store! (index idbuf 0) (cast u8 \")) (store! (index idbuf 1) (cast u8 \")) (store! idlen 2) 0)
+              (json-raw-id (index buf bs) (- n bs) ipos idbuf idlen))
+            ; hand to mutator thread and wait
+            (store! (mbx-src) srcbuf) (store! (mbx-srclen) (load srclen))
+            (store! (mbx-id) idbuf) (store! (mbx-idlen) (load idlen))
+            (store! (mbx-readonly) (load (srv-readonly)))
+            (atomic-store (mbx-resp-ready) 0)
+            (atomic-store (mbx-req-ready) 1)
+            (safepoint-request)
+            (loop (if (= (atomic-load (mbx-resp-ready)) 1) (break) (usleep (cast i32 200))))
+            (let [resp (load (mbx-resp))]
+              (send-response cfd c"200 OK" c"application/json" (load (field resp data)) (load (field resp len))))
+            (atomic-store (mbx-req-ready) 0)
+            0))))))
+
+(defn serve-static [(cfd i64) (path (ptr i8))] (-> i64)
+  (let [name (if (or (= (cast i64 (load (index (cast (ptr u8) path) 0))) \/) true)
+               (if (= (cast i64 (load (index (cast (ptr u8) path) 1))) 0) c"index.html"
+                 (path-basename path)) c"index.html")
+        full (join-path (load (srv-viewer-dir)) name) outlen (cast (ptr i64) (xalloc 8))
+        body (srv-read-file full outlen)]
+    (if (= (cast i64 body) 0)
+      (send-response cfd c"404 Not Found" c"text/plain" (cast (ptr u8) c"not found") 9)
+      (send-response cfd c"200 OK" (content-type-for full) body (load outlen)))))
+; strip leading '/' and any query string
+(defn path-basename [(path (ptr i8))] (-> (ptr i8))
+  (let [n (strlen path) buf (cast (ptr i8) (xalloc (+ n 1))) (mut i) (if (= (cast i64 (load (index (cast (ptr u8) path) 0))) \/) 1 0) (mut k) 0]
+    (loop (if (< (load i) n) (let [c (cast i64 (load (index (cast (ptr u8) path) (load i))))] (if (= c \?) (break) (do (store! (index (cast (ptr u8) buf) (load k)) (cast u8 c)) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0))) (break)))
+    (store! (index (cast (ptr u8) buf) (load k)) (cast u8 0)) buf))
+
+; the server thread's entry: accept loop forever.
+(defn server-accept-loop [(arg (ptr i8))] (-> (ptr i8))
+  (let [fd (cast i64 arg)]
+    (loop
+      (let [c (accept (cast i32 fd) (cast (ptr i8) 0) (cast (ptr i8) 0))]
+        (if (< (cast i64 c) 0) (do (usleep (cast i32 1000)) 0)
+          (do (handle-conn (cast i64 c)) (close (cast i32 c)) 0)))))
+  (cast (ptr i8) 0))
+
+; ---- socket setup: bind on `port`, fall back to next free up to +20. returns bound port or -1. ----
+(defn make-sockaddr [(port i64)] (-> (ptr u8))
+  (let [sa (cast (ptr u8) (xalloc 16)) (mut i) 0]
+    (loop (if (< (load i) 16) (do (store! (index sa (load i)) (cast u8 0)) (store! i (+ (load i) 1)) 0) (break)))
+    (store! (index sa 0) (cast u8 16))
+    (store! (index sa 1) (cast u8 2))
+    (store! (index sa 2) (cast u8 (iand (ishr port 8) 255)))
+    (store! (index sa 3) (cast u8 (iand port 255)))
+    sa))
+(defn bind-server [(start-port i64)] (-> i64)   ; returns bound port or -1
+  (let [fd (socket (cast i32 2) (cast i32 1) (cast i32 0))]
+    (if (< (cast i64 fd) 0) -1
+      (do
+        (let [one (cast (ptr i8) (xalloc 4))] (store! (cast (ptr i32) one) (cast i32 1)) (setsockopt fd (cast i32 65535) (cast i32 4) one (cast i32 4)))
+        (let [(mut p) start-port (mut bound) -1]
+          (loop (if (and (< (load bound) 0) (< (load p) (+ start-port 21)))
+                  (if (>= (cast i64 (bind fd (cast (ptr i8) (make-sockaddr (load p))) (cast i32 16))) 0)
+                    (do (store! bound (load p)) 0)
+                    (do (store! p (+ (load p) 1)) 0))
+                  (break)))
+          (if (< (load bound) 0) (do (close fd) -1)
+            (do (listen fd 32) (store! (srv-listen-fd) (cast i64 fd)) (load bound))))))))
+
+; ============================ public entries ============================
+; scry run: build, start server, run main, then keep serving evals until Ctrl-C.
+(defn scry-serve [(path (ptr i8)) (viewer-dir (ptr i8)) (no-viewer bool) (readonly bool)] (-> i64)
+  (ctx-init) (loaded-init) (register-builtins)
+  (if (not (can-open path))
+    (do (w-cstr 2 c"scry run: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n") 74)
+    (if (> (typecheck-quiet path) 0) 65
+      (let [p (build-program)]
+        (if (< (load (field p entry)) 0) (do (w-cstr 2 c"scry run: no main() function\n") 70)
+          (do
+            (store! (srv-program) p)
+            (store! (srv-viewer-dir) viewer-dir)
+            (store! (srv-readonly) (if readonly 1 0))
+            (if no-viewer 0
+              (let [port (bind-server 7357)]
+                (if (< port 0) (do (w-cstr 2 c"scry run: could not bind a server port; continuing without viewer\n") 0)
+                  (do
+                    (safepoint-set-drain (fnptr-of server-drain))
+                    (let [th (cast (ptr Thread) (xalloc (sizeof Thread)))]
+                      (thread-spawn th (fnptr-of server-accept-loop) (cast (ptr i8) (load (srv-listen-fd)))))
+                    (w-cstr 1 c"viewer: http://localhost:") (w-int 1 port) (w-cstr 1 c"\n")
+                    (if readonly (w-cstr 1 c"  (--readonly: mutating evals are rejected)\n") 0)
+                    0))))
+            (vm-run p)
+            (if no-viewer 0
+              (do (w-cstr 1 c"\nmain() finished — the heap is still live and browsable. Serving evals; press Ctrl-C to exit.\n")
+                  (loop (do (safepoint-poll) (usleep (cast i32 3000)) (continue)))))
+            0))))))
+
+; scry eval <file> -e <expr>: run to completion, evaluate the expr once, print JSON, exit.
+(defn scry-eval-cli [(path (ptr i8)) (expr (ptr u8)) (exprlen i64) (readonly bool)] (-> i64)
+  (ctx-init) (loaded-init) (register-builtins)
+  (if (not (can-open path))
+    (do (w-cstr 2 c"scry eval: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n") 74)
+    (if (> (typecheck-quiet path) 0) 65
+      (let [p (build-program)]
+        (if (< (load (field p entry)) 0) (do (w-cstr 2 c"scry eval: no main() function\n") 70)
+          (do
+            (store! (srv-program) p) (store! (srv-readonly) (if readonly 1 0))
+            (vm-run p)
+            (let [b (jb-new)]
+              (jb-byte b \{)
+              (eval-core b expr exprlen (if readonly 1 0))
+              (jb-byte b \})
+              (write-all 1 (load (field b data)) (load (field b len)))
+              (w-cstr 1 c"\n"))
+            0))))))

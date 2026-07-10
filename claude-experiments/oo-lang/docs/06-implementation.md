@@ -510,3 +510,69 @@ implementation must change then.
   immutable let binding of it.
 - **`case` arms take exactly one expression** — the giant VM dispatch `case` needs each
   opcode's whole handler wrapped in one `(let …)`/`(do …)`.
+
+---
+
+# Phase 4 — the eval server + the browser viewer (M2 + M3)
+
+Phase 4 is the reason the project exists: the running program embeds a server whose
+**only** wire operation is `eval` (`04-viewer.md` §4, `DECISIONS.md` #8). Every viewer
+pane is sugar over `POST /eval {id, source} → {id, value|error}`; refresh is re-eval on an
+interval/focus/after-action; nothing is ever pushed. This is a REPL into the live process,
+not a message feed.
+
+## Module layout (`src/`, added this phase)
+
+| File | Module | Responsibility |
+|---|---|---|
+| `safepoint.coil` | `safepoint` | The one poll hook (`safepoint-poll`, called at the top of the VM dispatch loop) + a `stop-flag` + a registered drain callback. A leaf so `vm` can call it without importing `server` (which imports `vm`). Phase 5's STW protocol generalizes exactly here. |
+| `evalrt.coil` | `evalrt` | Eval-time error handling: an `eval-active` flag, a `setjmp` landing pad + `eval-panic` (records the error and `longjmp`s — never kills the process), and stderr capture (redirect fd 2 to a temp file so the real compiler diagnostic can be read back into the JSON `message`). |
+| `json.coil` | `json` | A growable byte buffer (`JBuf`, reallocs — unlike `types.coil`'s 4 KiB `StrBuf`) with JSON emit helpers (string escaping, ints, floats, bools). |
+| `serialize.coil` | `serialize` | Value → tagged JSON (§4.1) with the depth rule; the reflection responses `types()`/`fields()`/`methods()`. The only place the wire format lives. |
+| `reflect.coil` | `reflect` | Runtime handle resolution (`arena-at` with generation compare, `arena-instance`, `arena-instances`) + the filter-predicate evaluator. What the reflection opcodes call. |
+| `server.coil` | `server` | Sockets + minimal HTTP/1.1, the single-slot mailbox, the eval executor (`eval-core`), the safepoint drain, the post-main service loop, and the `scry run`/`scry eval` entries. |
+
+Import DAG (no cycles): `vm → {safepoint, reflect}`; `server → {vm, compile, serialize, reflect, …}`. The `vm`↔`server` cycle is broken by `safepoint` (a leaf holding a drain **fnptr** the server registers).
+
+## The eval pipeline (`eval-core` in `server.coil`)
+
+One request runs, in order, on the **mutator thread** at a safepoint:
+
+1. Arm the landing pad: `eval-set-active 1`, `diag-capture-begin` (redirect fd 2), `setjmp`.
+2. `eval-exec`: `lex-file` → classify the leading token. A **definition** (`class`/`fn`/`enum`/`interface`/`object`/`import`/`module`/`migrate`) is the live-code-change seam — it hard-errors `NotImplemented: live code change: not implemented until Phase 6` (Phase 6 replaces this branch).
+3. `parse-eval-block` (a `{…}` block, or a statement sequence wrapped as a `BLOCK`). `try-reflection` intercepts a bare `types()`/`fields("X")`/`methods("X")` and emits JSON directly (these return *metadata*, not VM values).
+4. Otherwise: `block-value` typechecks the block in the live `ctx` (interns any new monos), producing the result `Type`; a nonzero `err-count` delta → `TypeError` (message = the captured real diagnostic). `compile-eval-method` compiles it into a standalone nullary `MethodInfo`; if `--readonly`, `chunk-mutates` scans the compiled bytecode transitively (store-field / `NEW` / list-push/map-set / any virtual call) and rejects.
+5. `vm-eval-invoke` runs it via the **exact** `push-frame` + `run-to <caller-depth>` path bytecode uses; `serialize-value` turns the result into JSON at depth 0.
+6. On any `longjmp` (syntax error via the parser, `StaleReference`/`OutOfArenaSpace`/list-OOB via `eval-panic`), the landing pad writes the error envelope. `diag-capture-end`, `eval-set-active 0`.
+
+**`at`/`instance`/`instances` are compiler-synthesized reflection members** (`04` §4.2), taught to both the typechecker (`infer-reflect-static`) and the compiler (`compile-reflect-static` → `OP_ARENA_AT`/`OP_ARENA_INSTANCE`/`OP_ARENA_INSTANCES`), so `Agent.at(7,3).resume()` composes: `at` yields a real instance pointer of the class's static type, and the method call dispatches normally. `types()` stays a driver-level special case (its `TypeDescriptor` list is metadata, not an arena value).
+
+## JSON format
+
+Per `04` §4.1, uniform depth rule: the directly-returned value(s) are depth 0 (entities expand `fields{}`, list/map elements stay depth 0); anything reached through an entity **field** is depth ≥ 1 and collapses to `{"type":"ref","class":<concrete>,"ref":"Name#slot","generation":g,"summary":…}`. Scalars/strings/bools direct; `Void` = `{"type":"Void"}`; enums (incl. `Option`/`Result`) `{"type":<enum>,"case":…,"payload":[…]}`; lists/maps carry `length`+`truncated` and cap at 100 elements. A ref's `class` is always the **concrete** implementing type (read from the instance header's `type-id`), never the declared interface. Errors: `{"error":{"kind","message"[,"line","col"]}}` with kinds `SyntaxError`/`TypeError`/`RuntimeError`/`StaleReference`/`NotImplemented`/`ReadOnly`/`BadRequest`.
+
+## Server architecture (N=1 mutator; `02` §7 with one thread)
+
+- **One OS thread** (Coil `pthread` via `lib/thread.coil`) runs `server-accept-loop`: BSD-socket externs (`socket`/`bind`/`listen`/`accept`/`read`/`write`/`close`, all in `ioutil.coil`), a minimal HTTP/1.1 parse (request line + `Content-Length`, that's it), serving `POST /eval`, `GET /` and static `viewer/` assets.
+- **The mutator thread** (running `main()`, then a post-main service loop) polls `safepoint-poll` at the top of `run`'s dispatch loop. When the server thread has a request it fills a **single-slot mailbox**, sets `req-ready` + `stop-flag` (atomics from `lib/atomic.coil`), and spins on `resp-ready`; the mutator's next poll drains it, runs the eval to completion on the VM, serializes, sets `resp-ready`. Evals are serialized, run-to-completion, and see a consistent heap — `04`'s promise. Because there is one server thread issuing one request at a time, a single slot suffices (documented simplification; Phase 5 makes it a real lock-free queue).
+- **After `main()` finishes** the process stays alive in the service loop (`safepoint-poll` + `usleep`), servicing evals until Ctrl-C — a finished program with a live heap is still browsable (printed on exit of main). `--no-viewer` runs `main()` and exits (no server); `--readonly` (default OFF) rejects mutating evals.
+- `scry run` binds **7357** (falls back to the next free up to +20) and prints `viewer: http://localhost:7357` at startup. Viewer assets resolve to `<dir of argv[0]>/viewer/`, falling back to `./viewer/` (CWD).
+- `scry eval <file.scry> -e '<expr>'` runs the program to completion then evaluates the expression once, prints the JSON, and exits — the browser-free golden-test path through the entire eval stack.
+
+## Viewer (`viewer/index.html` + `app.js` + `style.css`, vanilla, self-contained)
+
+Implements `04`'s IA: a left rail **type index** (re-evals `types()` every 500ms; live counts, client-computed trend arrows, interface implementors grouped/foldable) → **instance table** (columns = schema fields with `id` pinned; a filter box passing the predicate string into `instances(filter:…)`; re-evals ~750ms) → **instance detail** (fields with clickable ref links + breadcrumbs, `implements` line, methods with typed-argument invoke forms, inline results/errors, re-eval ~750ms + immediately after invoke; changed fields flash the accent) → a **REPL dock** (backtick toggle; `self` bound by client-side textual substitution `\bself\b → Type.at(slot,gen)`; scrollback rendered by the shared value renderer) → an **eval-transcript drawer** logging every request/response. Dark-first with a `prefers-color-scheme` light override; one accent hue reserved for liveness; monospace for data, sans for chrome.
+
+## The seams Phase 5 / Phase 6 inherit
+
+- **Phase 6 (live change).** The definition-classification point in `eval-exec` (the `is-def-token` branch that hard-errors) is exactly where a definition-eval will instead typecheck against the live class and, at a full stop, **swap `Program.methods[]`/`types[]`**. All calls already route through method **indices**, so a new generation repoints the tables without touching call sites (`03-live-semantics.md`); `vm-eval-invoke` already enters through `push-frame` so an invoke is indistinguishable from a bytecode call.
+- **Phase 5 (threads).** The N=1 safepoint protocol lives entirely in `safepoint.coil`: one `stop-flag`, one poll at the dispatch-loop top, one drain callback. Phase 5 generalizes `stop-flag` to the global stop every `VMThread` polls, replaces the single-slot mailbox + spin with `request-global-stop`/`release-global-stop` parking all N threads and a lock-free queue, and runs the drain on a dedicated eval `VMThread` (`02` §7). `run` is already parameter-shaped (`run-to`) to hand each thread its own frames/stack.
+
+## Coil friction hit in Phase 4 (adds to Phase 1/2/3's list)
+
+- **`c"…"` decodes only `\n \t \\ \"` — NOT `\r` nor `\xHH`.** HTTP CRLFs written via `c"…\r\n…"` came out as the literal letter `r`; `\x0d` came out as literal `x0d`. `curl` tolerated the malformed headers but Python `urllib` returned an empty body. Fix: assemble headers with explicit `\return`(13)/`\newline`(10) **char literals** (which the reader *does* turn into integers), not string escapes.
+- **`setjmp`/`longjmp` work** across Coil functions (verified); the safe pattern is to keep every value that must survive the `longjmp` in `alloc-static` globals (the `EvalError` record, the result buffers), sidestepping any returns-twice/optimizer concern. This is what lets the parser's `exit`-on-error and the VM's panic sites become recoverable eval errors.
+- **`close()` on a socket sends the response fine**, but the response headers must be well-formed CRLF or strict HTTP clients drop the body (see above) — the bug looked like a socket problem and was a lexer problem.
+- **`localhost` resolves to `::1` first on macOS**; we bind IPv4 only, so clients using `localhost` eat a "connection refused" + fallback. Not a bug in the server; tests/tools should hit `127.0.0.1`. `curl`/browsers fall back automatically.
+- **A `(fnptr c […] …)` cannot be `(cast i64 …)`-null-checked** — keep a separate `has-drain` i64 flag instead of comparing the fnptr to 0.
+- **An `(ArrayList T)` value parameter is an immutable ref** (known from Phase 2/3) — the readonly bytecode-visited set is a heap `VisitSet` struct passed by pointer, not an `ArrayList` param.

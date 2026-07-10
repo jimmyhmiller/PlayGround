@@ -1,0 +1,94 @@
+; evalrt.coil — eval-time error handling for the server (Phase 4).
+;
+; An eval must NEVER kill the process: a syntax error, a stale reference, an
+; arena-OOM, a bad opcode, all have to come back as {id, error:{...}} JSON, with the
+; server still live. The parser and several VM/compiler paths hard-`exit` on error
+; (correct for `scry run` of a whole file, wrong for a REPL). So:
+;
+;  - the eval driver arms a setjmp landing pad and sets `eval-active`;
+;  - every hard-exit site instead calls `eval-panic`, which — when eval-active — records
+;    the error into globals and `longjmp`s back to the landing pad (all surviving state
+;    is in alloc-static globals, so this is safe regardless of optimizer aggressiveness);
+;  - typecheck errors are non-fatal already (they only bump a counter + write to stderr),
+;    so we capture stderr into a temp file for the duration of the eval and read the
+;    real compiler message back out of it.
+;
+; Leaf module (imports only ioutil). Imported by parser/compile/vm (for eval-panic) and
+; by the server (for the landing pad + capture).
+(module evalrt)
+(import "ioutil.coil" :use *)
+
+; ---- error kinds (JSON `kind` strings assigned in server.coil) ----
+(const EK_SYNTAX 0)
+(const EK_TYPE 1)
+(const EK_RUNTIME 2)
+(const EK_STALE 3)
+(const EK_NOTIMPL 4)
+(const EK_READONLY 5)
+(const EK_BADREQUEST 6)
+
+; ---- state (all alloc-static: survives longjmp) ----
+(defn ev-active [] (-> (ptr i64)) (alloc-static i64))
+(defn ev-jmpbuf [] (-> (ptr i8)) (cast (ptr i8) (alloc-static (array i64 64))))
+(defn ev-kind [] (-> (ptr i64)) (alloc-static i64))
+(defn ev-line [] (-> (ptr i64)) (alloc-static i64))
+(defn ev-col [] (-> (ptr i64)) (alloc-static i64))
+(defn ev-msgbuf [] (-> (ptr u8)) (cast (ptr u8) (alloc-static (array u8 1024))))
+(defn ev-msglen [] (-> (ptr i64)) (alloc-static i64))
+
+(defn eval-active? [] (-> bool) (= (load (ev-active)) 1))
+(defn eval-set-active [(v i64)] (-> i64) (store! (ev-active) v) 0)
+
+(defn ev-set-msg [(s (ptr i8))] (-> i64)
+  (let [n (strlen s) m (if (> n 1023) 1023 n) (mut i) 0]
+    (loop (if (< (load i) m) (do (store! (index (ev-msgbuf) (load i)) (load (index (cast (ptr u8) s) (load i)))) (store! i (+ (load i) 1)) 0) (break)))
+    (store! (ev-msglen) m) 0))
+(defn ev-set-msg-bytes [(p (ptr u8)) (n i64)] (-> i64)
+  (let [m (if (> n 1023) 1023 n) (mut i) 0]
+    (loop (if (< (load i) m) (do (store! (index (ev-msgbuf) (load i)) (load (index p (load i)))) (store! i (+ (load i) 1)) 0) (break)))
+    (store! (ev-msglen) m) 0))
+
+; the one raise point. If we're inside an eval, record + longjmp; otherwise (normal
+; `scry run`) behave exactly as before: message to stderr, exit nonzero.
+(defn eval-panic [(kind i64) (msg (ptr i8)) (line i64) (col i64)] (-> i64)
+  (if (eval-active?)
+    (do (store! (ev-kind) kind) (store! (ev-line) line) (store! (ev-col) col)
+        (ev-set-msg msg)
+        (longjmp (ev-jmpbuf) 1) 0)
+    (do (w-cstr 2 msg) (w-cstr 2 c"\n") (exit (cast i32 70)) 0)))
+
+; convenience: raise with no source location
+(defn eval-panic0 [(kind i64) (msg (ptr i8))] (-> i64) (eval-panic kind msg 0 0))
+
+; ---- stderr capture (temp file) ----
+(defn ev-capfd [] (-> (ptr i64)) (alloc-static i64))
+(defn ev-savefd [] (-> (ptr i64)) (alloc-static i64))
+(defn ev-cap-path [] (-> (ptr i8)) (cast (ptr i8) (alloc-static (array u8 64))))
+(defn ev-capbuf [] (-> (ptr u8)) (cast (ptr u8) (alloc-static (array u8 4096))))
+(defn ev-caplen [] (-> (ptr i64)) (alloc-static i64))
+
+; redirect fd 2 into a fresh temp file; remember the original.
+(defn diag-capture-begin [] (-> i64)
+  (let [p (ev-cap-path)]
+    (snprintf p 64 c"/tmp/scry-eval-%d.diag" (cast i64 (getpid)))
+    (let [fd (open p (cast i32 1538) (cast i32 420))]   ; O_RDWR|O_CREAT|O_TRUNC, 0644
+      (if (< (cast i64 fd) 0) 0
+        (do (store! (ev-savefd) (cast i64 (dup (cast i32 2))))
+            (dup2 fd (cast i32 2))
+            (store! (ev-capfd) (cast i64 fd)) 0)))
+    0))
+
+; restore fd 2 and slurp what was written.  Result available via ev-capbuf/ev-caplen.
+(defn diag-capture-end [] (-> i64)
+  (let [fd (cast i32 (load (ev-capfd))) saved (cast i32 (load (ev-savefd)))]
+    (if (< (cast i64 fd) 0) (do (store! (ev-caplen) 0) 0)
+      (do
+        (dup2 saved (cast i32 2)) (close saved)
+        (lseek fd 0 (cast i32 0))
+        (let [n (read fd (cast (ptr i8) (ev-capbuf)) 4095)]
+          (store! (ev-caplen) (if (< n 0) 0 n))
+          (store! (index (ev-capbuf) (if (< n 0) 0 n)) (cast u8 0)))
+        (close fd)
+        (unlink (ev-cap-path))
+        (store! (ev-capfd) -1)
+        0))))
