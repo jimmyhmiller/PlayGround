@@ -1,0 +1,1377 @@
+; clox.coil — a port of clox (Crafting Interpreters, Part III bytecode VM) to Coil.
+; Single file: clox has circular deps (value<->object<->table, memory<->all), so
+; one module sidesteps import cycles. Build with the SELF-HOSTED ./coil (char lits).
+;
+; Observable behavior is byte-identical to the reference C clox. All program output
+; goes through libc write(1)/write(2) + snprintf("%g", ...) so numbers, errors, and
+; stdout/stderr separation match exactly.
+(module app)
+
+; ============================ libc FFI ======================================
+(extern write    :cc c [i64 (ptr i8) i64] (-> i64))
+(extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
+(extern strlen   :cc c [(ptr i8)] (-> i64))
+(extern memcpy   :cc c [(ptr i8) (ptr i8) i64] (-> (ptr i8)))
+(extern malloc   :cc c [i64] (-> (ptr i8)))
+(extern realloc  :cc c [(ptr i8) i64] (-> (ptr i8)))
+(extern free     :cc c [(ptr i8)] (-> void))
+(extern strtod   :cc c [(ptr i8) (ptr (ptr i8))] (-> f64))
+(extern exit     :cc c [i32] (-> void))
+(extern clock    :cc c [] (-> i64))
+
+; ============================ output helpers ================================
+; fd 1 = stdout, fd 2 = stderr. All program output funnels through these.
+(defn w-bytes [(fd i64) (p (ptr u8)) (n i64)] (-> i64) (write fd (cast (ptr i8) p) n) 0)
+(defn w-cstr  [(fd i64) (s (ptr i8))]        (-> i64) (write fd s (strlen s)) 0)
+(defn w-num   [(fd i64) (x f64)] (-> i64)
+  (let [buf (alloc-stack (array u8 32))
+        n   (snprintf (cast (ptr i8) (index buf 0)) 32 c"%g" x)]
+    (write fd (cast (ptr i8) (index buf 0)) (cast i64 n)) 0))
+(defn w-int   [(fd i64) (v i64)] (-> i64)
+  (let [buf (alloc-stack (array u8 32))
+        n   (snprintf (cast (ptr i8) (index buf 0)) 32 c"%d" (cast i32 v))]
+    (write fd (cast (ptr i8) (index buf 0)) (cast i64 n)) 0))
+
+; ============================ opcodes =======================================
+(const OP_CONSTANT 0)   (const OP_NIL 1)          (const OP_TRUE 2)
+(const OP_FALSE 3)      (const OP_POP 4)          (const OP_GET_LOCAL 5)
+(const OP_SET_LOCAL 6)  (const OP_GET_GLOBAL 7)   (const OP_DEFINE_GLOBAL 8)
+(const OP_SET_GLOBAL 9) (const OP_GET_UPVALUE 10) (const OP_SET_UPVALUE 11)
+(const OP_GET_PROPERTY 12) (const OP_SET_PROPERTY 13) (const OP_GET_SUPER 14)
+(const OP_EQUAL 15)     (const OP_GREATER 16)     (const OP_LESS 17)
+(const OP_ADD 18)       (const OP_SUBTRACT 19)    (const OP_MULTIPLY 20)
+(const OP_DIVIDE 21)    (const OP_NOT 22)         (const OP_NEGATE 23)
+(const OP_PRINT 24)     (const OP_JUMP 25)        (const OP_JUMP_IF_FALSE 26)
+(const OP_LOOP 27)      (const OP_CALL 28)        (const OP_INVOKE 29)
+(const OP_SUPER_INVOKE 30) (const OP_CLOSURE 31)  (const OP_CLOSE_UPVALUE 32)
+(const OP_RETURN 33)    (const OP_CLASS 34)       (const OP_INHERIT 35)
+(const OP_METHOD 36)
+
+; ============================ obj types =====================================
+(const OBJ_BOUND_METHOD 0) (const OBJ_CLASS 1)    (const OBJ_CLOSURE 2)
+(const OBJ_FUNCTION 3)     (const OBJ_INSTANCE 4) (const OBJ_NATIVE 5)
+(const OBJ_STRING 6)       (const OBJ_UPVALUE 7)
+
+(const UINT8_COUNT 256)
+(const FRAMES_MAX 64)
+(const STACK_MAX 16384)   ; FRAMES_MAX * UINT8_COUNT
+(const U32_MASK 4294967295)
+
+; ============================ core data types ===============================
+(defstruct Obj [(kind i64) (is-marked bool) (next (ptr Obj))])
+
+(defsum Value
+  (VBool   [(b bool)])
+  (VNil)
+  (VNumber [(n f64)])
+  (VObj    [(o (ptr Obj))]))
+
+(defstruct ValueArray [(capacity i64) (count i64) (values (ptr Value))])
+(defstruct Chunk [(count i64) (capacity i64) (code (ptr u8)) (lines (ptr i64)) (constants ValueArray)])
+
+(defstruct Entry [(key (ptr ObjString)) (value Value)])
+(defstruct Table [(count i64) (capacity i64) (entries (ptr Entry))])
+
+(defstruct ObjString   [(obj Obj) (length i64) (chars (ptr u8)) (hash i64)])
+(defstruct ObjFunction [(obj Obj) (arity i64) (upvalue-count i64) (chunk Chunk) (name (ptr ObjString))])
+(defstruct ObjNative   [(obj Obj) (function (fnptr c [i64 (ptr Value)] Value))])
+(defstruct ObjUpvalue  [(obj Obj) (location (ptr Value)) (closed Value) (next (ptr ObjUpvalue))])
+(defstruct ObjClosure  [(obj Obj) (function (ptr ObjFunction)) (upvalues (ptr (ptr ObjUpvalue))) (upvalue-count i64)])
+(defstruct ObjClass    [(obj Obj) (name (ptr ObjString)) (methods Table)])
+(defstruct ObjInstance [(obj Obj) (klass (ptr ObjClass)) (fields Table)])
+(defstruct ObjBoundMethod [(obj Obj) (receiver Value) (method (ptr ObjClosure))])
+
+(defstruct CallFrame [(closure (ptr ObjClosure)) (ip (ptr u8)) (slots (ptr Value))])
+(defstruct VM
+  [(frames (array CallFrame 64))
+   (frame-count i64)
+   (stack (array Value 16384))
+   (stack-top (ptr Value))
+   (globals Table)
+   (strings Table)
+   (init-string (ptr ObjString))
+   (open-upvalues (ptr ObjUpvalue))
+   (bytes-allocated i64)
+   (next-gc i64)
+   (objects (ptr Obj))
+   (gray-count i64)
+   (gray-capacity i64)
+   (gray-stack (ptr (ptr Obj)))])
+
+; The one global VM (clox's `VM vm;`). alloc-static -> one stable global cell.
+(defn vm [] (-> (ptr VM)) (alloc-static VM))
+
+; ============================ Value helpers =================================
+(defn null-obj [] (-> (ptr Obj)) (cast (ptr Obj) 0))
+(defn beq [(a bool) (b bool)] (-> bool) (if a b (not b)))  ; bool has no Eq
+(defn is-obj    [(v Value)] (-> bool) (match v (VObj [_] true)  (VBool [_] false) (VNil [] false) (VNumber [_] false)))
+(defn is-nil    [(v Value)] (-> bool) (match v (VNil [] true)   (VBool [_] false) (VObj [_] false) (VNumber [_] false)))
+(defn is-bool   [(v Value)] (-> bool) (match v (VBool [_] true) (VNil [] false)   (VObj [_] false) (VNumber [_] false)))
+(defn is-number [(v Value)] (-> bool) (match v (VNumber [_] true) (VBool [_] false) (VNil [] false) (VObj [_] false)))
+(defn as-obj    [(v Value)] (-> (ptr Obj)) (match v (VObj [o] o) (VBool [_] (null-obj)) (VNil [] (null-obj)) (VNumber [_] (null-obj))))
+(defn as-bool   [(v Value)] (-> bool)      (match v (VBool [b] b) (VNil [] false) (VObj [_] false) (VNumber [_] false)))
+(defn as-number [(v Value)] (-> f64)       (match v (VNumber [n] n) (VBool [_] 0.0) (VNil [] 0.0) (VObj [_] 0.0)))
+
+(defn obj-kind  [(v Value)] (-> i64) (load (field (as-obj v) kind)))
+(defn is-obj-kind [(v Value) (k i64)] (-> bool) (if (is-obj v) (= (obj-kind v) k) false))
+(defn is-string   [(v Value)] (-> bool) (is-obj-kind v OBJ_STRING))
+(defn as-string   [(v Value)] (-> (ptr ObjString)) (cast (ptr ObjString) (as-obj v)))
+
+; ============================ memory ========================================
+(defn grow-capacity [(c i64)] (-> i64) (if (< c 8) 8 (* c 2)))
+
+; clox reallocate(pointer, oldSize, newSize). GC hooks added later.
+(defn reallocate [(pointer (ptr i8)) (old-size i64) (new-size i64)] (-> (ptr i8))
+  (if (= new-size 0)
+      (do (free pointer) (cast (ptr i8) 0))
+      (let [result (realloc pointer new-size)]
+        (if (= (cast i64 result) 0) (do (exit (cast i32 1)) result) result))))
+
+(defn allocate-object [(size i64) (otype i64)] (-> (ptr Obj))
+  (let [object (cast (ptr Obj) (reallocate (cast (ptr i8) 0) 0 size))]
+    (store! (field object kind) otype)
+    (store! (field object is-marked) false)
+    (store! (field object next) (load (field (vm) objects)))
+    (store! (field (vm) objects) object)
+    object))
+
+; ============================ ValueArray ====================================
+(defn init-value-array [(array (ptr ValueArray))] (-> i64)
+  (store! (field array values) (cast (ptr Value) 0))
+  (store! (field array capacity) 0)
+  (store! (field array count) 0) 0)
+(defn write-value-array [(array (ptr ValueArray)) (value Value)] (-> i64)
+  (if (< (load (field array capacity)) (+ (load (field array count)) 1))
+      (let [old-cap (load (field array capacity)) new-cap (grow-capacity old-cap)]
+        (store! (field array capacity) new-cap)
+        (store! (field array values)
+                (cast (ptr Value) (reallocate (cast (ptr i8) (load (field array values)))
+                                              (* (sizeof Value) old-cap)
+                                              (* (sizeof Value) new-cap))))
+        0)
+      0)
+  (store! (index (load (field array values)) (load (field array count))) value)
+  (store! (field array count) (+ (load (field array count)) 1)) 0)
+(defn free-value-array [(array (ptr ValueArray))] (-> i64)
+  (reallocate (cast (ptr i8) (load (field array values))) (* (sizeof Value) (load (field array capacity))) 0)
+  (init-value-array array))
+
+; ============================ Chunk =========================================
+(defn init-chunk [(chunk (ptr Chunk))] (-> i64)
+  (store! (field chunk count) 0)
+  (store! (field chunk capacity) 0)
+  (store! (field chunk code) (cast (ptr u8) 0))
+  (store! (field chunk lines) (cast (ptr i64) 0))
+  (init-value-array (field chunk constants)) 0)
+(defn write-chunk [(chunk (ptr Chunk)) (byte i64) (line i64)] (-> i64)
+  (if (< (load (field chunk capacity)) (+ (load (field chunk count)) 1))
+      (let [old-cap (load (field chunk capacity)) new-cap (grow-capacity old-cap)]
+        (store! (field chunk capacity) new-cap)
+        (store! (field chunk code)
+                (cast (ptr u8) (reallocate (cast (ptr i8) (load (field chunk code))) old-cap new-cap)))
+        (store! (field chunk lines)
+                (cast (ptr i64) (reallocate (cast (ptr i8) (load (field chunk lines)))
+                                            (* (sizeof i64) old-cap) (* (sizeof i64) new-cap))))
+        0)
+      0)
+  (store! (index (load (field chunk code)) (load (field chunk count))) (cast u8 byte))
+  (store! (index (load (field chunk lines)) (load (field chunk count))) line)
+  (store! (field chunk count) (+ (load (field chunk count)) 1)) 0)
+(defn add-constant [(chunk (ptr Chunk)) (value Value)] (-> i64)
+  (push value)
+  (write-value-array (field chunk constants) value)
+  (pop)
+  (- (load (field (field chunk constants) count)) 1))
+
+; ============================ stack =========================================
+(defn push [(value Value)] (-> i64)
+  (store! (load (field (vm) stack-top)) value)
+  (store! (field (vm) stack-top) (index (load (field (vm) stack-top)) 1)) 0)
+(defn pop [] (-> Value)
+  (store! (field (vm) stack-top) (index (load (field (vm) stack-top)) -1))
+  (load (load (field (vm) stack-top))))
+(defn peek [(distance i64)] (-> Value)
+  (load (index (load (field (vm) stack-top)) (- -1 distance))))
+(defn reset-stack [] (-> i64)
+  (store! (field (vm) stack-top) (index (field (vm) stack) 0))
+  (store! (field (vm) frame-count) 0)
+  (store! (field (vm) open-upvalues) (cast (ptr ObjUpvalue) 0)) 0)
+
+; ============================ Table =========================================
+(defn init-table [(table (ptr Table))] (-> i64)
+  (store! (field table count) 0)
+  (store! (field table capacity) 0)
+  (store! (field table entries) (cast (ptr Entry) 0)) 0)
+(defn free-table [(table (ptr Table))] (-> i64)
+  (reallocate (cast (ptr i8) (load (field table entries))) (* (sizeof Entry) (load (field table capacity))) 0)
+  (init-table table))
+
+(defn find-entry [(entries (ptr Entry)) (capacity i64) (key (ptr ObjString))] (-> (ptr Entry))
+  (let [(mut index) (& (load (field key hash)) (- capacity 1))
+        (mut tombstone) (cast (ptr Entry) 0) (mut result) (cast (ptr Entry) 0)]
+    (loop
+      (let [entry (index entries (load index))]
+        (if (= (cast i64 (load (field entry key))) 0)
+            (if (is-nil (load (field entry value)))
+                (do (store! result (if (= (cast i64 (load tombstone)) 0) entry (load tombstone))) (break))
+                (do (if (= (cast i64 (load tombstone)) 0) (do (store! tombstone entry) 0) 0)
+                    (store! index (& (+ (load index) 1) (- capacity 1)))))
+            (if (= (cast i64 (load (field entry key))) (cast i64 key))
+                (do (store! result entry) (break))
+                (store! index (& (+ (load index) 1) (- capacity 1)))))))
+    (load result)))
+
+(defn table-get [(table (ptr Table)) (key (ptr ObjString)) (value (ptr Value))] (-> bool)
+  (if (= (load (field table count)) 0) false
+      (let [entry (find-entry (load (field table entries)) (load (field table capacity)) key)]
+        (if (= (cast i64 (load (field entry key))) 0) false
+            (do (store! value (load (field entry value))) true)))))
+
+(defn adjust-capacity [(table (ptr Table)) (capacity i64)] (-> i64)
+  (let [entries (cast (ptr Entry) (reallocate (cast (ptr i8) 0) 0 (* (sizeof Entry) capacity))) (mut i) 0]
+    (loop (if (>= (load i) capacity) (break)
+      (do (store! (field (index entries (load i)) key) (cast (ptr ObjString) 0))
+          (store! (field (index entries (load i)) value) (VNil))
+          (store! i (+ (load i) 1)))))
+    (store! (field table count) 0)
+    (store! i 0)
+    (loop (if (>= (load i) (load (field table capacity))) (break)
+      (let [entry (index (load (field table entries)) (load i))]
+        (if (= (cast i64 (load (field entry key))) 0)
+            (store! i (+ (load i) 1))
+            (let [dest (find-entry entries capacity (load (field entry key)))]
+              (store! (field dest key) (load (field entry key)))
+              (store! (field dest value) (load (field entry value)))
+              (store! (field table count) (+ (load (field table count)) 1))
+              (store! i (+ (load i) 1)))))))
+    (reallocate (cast (ptr i8) (load (field table entries))) (* (sizeof Entry) (load (field table capacity))) 0)
+    (store! (field table entries) entries)
+    (store! (field table capacity) capacity) 0))
+
+(defn table-set [(table (ptr Table)) (key (ptr ObjString)) (value Value)] (-> bool)
+  (if (> (* (+ (load (field table count)) 1) 4) (* (load (field table capacity)) 3))
+      (adjust-capacity table (grow-capacity (load (field table capacity)))) 0)
+  (let [entry (find-entry (load (field table entries)) (load (field table capacity)) key)
+        is-new-key (= (cast i64 (load (field entry key))) 0)]
+    (if (and is-new-key (is-nil (load (field entry value))))
+        (store! (field table count) (+ (load (field table count)) 1)) 0)
+    (store! (field entry key) key)
+    (store! (field entry value) value)
+    is-new-key))
+
+(defn table-delete [(table (ptr Table)) (key (ptr ObjString))] (-> bool)
+  (if (= (load (field table count)) 0) false
+      (let [entry (find-entry (load (field table entries)) (load (field table capacity)) key)]
+        (if (= (cast i64 (load (field entry key))) 0) false
+            (do (store! (field entry key) (cast (ptr ObjString) 0))
+                (store! (field entry value) (VBool true)) true)))))
+
+(defn table-add-all [(from (ptr Table)) (to (ptr Table))] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (>= (load i) (load (field from capacity))) (break)
+      (let [entry (index (load (field from entries)) (load i))]
+        (if (!= (cast i64 (load (field entry key))) 0)
+            (do (table-set to (load (field entry key)) (load (field entry value))) 0) 0)
+        (store! i (+ (load i) 1)))))) 0)
+
+(defn table-find-string [(table (ptr Table)) (chars (ptr u8)) (length i64) (hash i64)] (-> (ptr ObjString))
+  (if (= (load (field table count)) 0) (cast (ptr ObjString) 0)
+      (let [(mut index) (& hash (- (load (field table capacity)) 1)) (mut result) (cast (ptr ObjString) 0) (mut go) true]
+        (loop
+          (let [entry (index (load (field table entries)) (load index))]
+            (if (= (cast i64 (load (field entry key))) 0)
+                (if (is-nil (load (field entry value))) (do (store! result (cast (ptr ObjString) 0)) (break)) 0)
+                (let [k (load (field entry key))]
+                  (if (and (= (load (field k length)) length)
+                           (and (= (load (field k hash)) hash)
+                                (= (mem-cmp (load (field k chars)) chars length) 0)))
+                      (do (store! result k) (break)) 0)))
+            (store! index (& (+ (load index) 1) (- (load (field table capacity)) 1)))))
+        (load result))))
+
+; memcmp returning 0 iff equal over length bytes
+(defn mem-cmp [(a (ptr u8)) (b (ptr u8)) (length i64)] (-> i64)
+  (let [(mut i) 0 (mut d) 0]
+    (loop (if (>= (load i) length) (break)
+      (let [ca (cast i64 (load (index a (load i)))) cb (cast i64 (load (index b (load i))))]
+        (if (!= ca cb) (do (store! d (- ca cb)) (break)) (store! i (+ (load i) 1))))))
+    (load d)))
+
+; ============================ strings / interning ===========================
+(defn hash-string [(key (ptr u8)) (length i64)] (-> i64)
+  (let [(mut h) 2166136261 (mut i) 0]
+    (loop (if (>= (load i) length) (break)
+      (do (store! h (& (^ (load h) (cast i64 (load (index key (load i))))) U32_MASK))
+          (store! h (& (* (load h) 16777619) U32_MASK))
+          (store! i (+ (load i) 1)))))
+    (load h)))
+
+(defn allocate-string [(chars (ptr u8)) (length i64) (hash i64)] (-> (ptr ObjString))
+  (let [string (cast (ptr ObjString) (allocate-object (sizeof ObjString) OBJ_STRING))]
+    (store! (field string length) length)
+    (store! (field string chars) chars)
+    (store! (field string hash) hash)
+    (push (VObj (cast (ptr Obj) string)))
+    (table-set (field (vm) strings) string (VNil))
+    (pop)
+    string))
+
+(defn take-string [(chars (ptr u8)) (length i64)] (-> (ptr ObjString))
+  (let [hash (hash-string chars length)
+        interned (table-find-string (field (vm) strings) chars length hash)]
+    (if (!= (cast i64 interned) 0)
+        (do (reallocate (cast (ptr i8) chars) (+ length 1) 0) interned)
+        (allocate-string chars length hash))))
+
+(defn copy-string [(chars (ptr u8)) (length i64)] (-> (ptr ObjString))
+  (let [hash (hash-string chars length)
+        interned (table-find-string (field (vm) strings) chars length hash)]
+    (if (!= (cast i64 interned) 0) interned
+        (let [heap-chars (cast (ptr u8) (reallocate (cast (ptr i8) 0) 0 (+ length 1)))]
+          (memcpy (cast (ptr i8) heap-chars) (cast (ptr i8) chars) length)
+          (store! (index heap-chars length) (cast u8 0))
+          (allocate-string heap-chars length hash)))))
+
+; ============================ object constructors ===========================
+(defn new-function [] (-> (ptr ObjFunction))
+  (let [function (cast (ptr ObjFunction) (allocate-object (sizeof ObjFunction) OBJ_FUNCTION))]
+    (store! (field function arity) 0)
+    (store! (field function upvalue-count) 0)
+    (store! (field function name) (cast (ptr ObjString) 0))
+    (init-chunk (field function chunk))
+    function))
+(defn new-native [(fn (fnptr c [i64 (ptr Value)] Value))] (-> (ptr ObjNative))
+  (let [native (cast (ptr ObjNative) (allocate-object (sizeof ObjNative) OBJ_NATIVE))]
+    (store! (field native function) fn) native))
+(defn new-upvalue [(slot (ptr Value))] (-> (ptr ObjUpvalue))
+  (let [upvalue (cast (ptr ObjUpvalue) (allocate-object (sizeof ObjUpvalue) OBJ_UPVALUE))]
+    (store! (field upvalue closed) (VNil))
+    (store! (field upvalue location) slot)
+    (store! (field upvalue next) (cast (ptr ObjUpvalue) 0)) upvalue))
+(defn new-closure [(function (ptr ObjFunction))] (-> (ptr ObjClosure))
+  (let [upvalues (cast (ptr (ptr ObjUpvalue)) (reallocate (cast (ptr i8) 0) 0 (* (sizeof (ptr ObjUpvalue)) (load (field function upvalue-count))))) (mut i) 0]
+    (loop (if (>= (load i) (load (field function upvalue-count))) (break)
+      (do (store! (index upvalues (load i)) (cast (ptr ObjUpvalue) 0)) (store! i (+ (load i) 1)))))
+    (let [closure (cast (ptr ObjClosure) (allocate-object (sizeof ObjClosure) OBJ_CLOSURE))]
+      (store! (field closure function) function)
+      (store! (field closure upvalues) upvalues)
+      (store! (field closure upvalue-count) (load (field function upvalue-count))) closure)))
+(defn new-class [(name (ptr ObjString))] (-> (ptr ObjClass))
+  (let [klass (cast (ptr ObjClass) (allocate-object (sizeof ObjClass) OBJ_CLASS))]
+    (store! (field klass name) name)
+    (init-table (field klass methods)) klass))
+(defn new-instance [(klass (ptr ObjClass))] (-> (ptr ObjInstance))
+  (let [instance (cast (ptr ObjInstance) (allocate-object (sizeof ObjInstance) OBJ_INSTANCE))]
+    (store! (field instance klass) klass)
+    (init-table (field instance fields)) instance))
+(defn new-bound-method [(receiver Value) (method (ptr ObjClosure))] (-> (ptr ObjBoundMethod))
+  (let [bound (cast (ptr ObjBoundMethod) (allocate-object (sizeof ObjBoundMethod) OBJ_BOUND_METHOD))]
+    (store! (field bound receiver) receiver)
+    (store! (field bound method) method) bound))
+
+; ============================ printing ======================================
+(defn print-function [(fd i64) (function (ptr ObjFunction))] (-> i64)
+  (if (= (cast i64 (load (field function name))) 0)
+      (w-cstr fd c"<script>")
+      (do (w-cstr fd c"<fn ")
+          (w-bytes fd (load (field (load (field function name)) chars)) (load (field (load (field function name)) length)))
+          (w-cstr fd c">"))))
+
+(defn print-object [(fd i64) (value Value)] (-> i64)
+  (let [k (obj-kind value)]
+    (cond
+      (= k OBJ_BOUND_METHOD) (print-function fd (load (field (load (field (cast (ptr ObjBoundMethod) (as-obj value)) method)) function)))
+      (= k OBJ_CLASS)   (let [nm (load (field (cast (ptr ObjClass) (as-obj value)) name))] (w-bytes fd (load (field nm chars)) (load (field nm length))))
+      (= k OBJ_CLOSURE) (print-function fd (load (field (cast (ptr ObjClosure) (as-obj value)) function)))
+      (= k OBJ_FUNCTION) (print-function fd (cast (ptr ObjFunction) (as-obj value)))
+      (= k OBJ_INSTANCE) (let [nm (load (field (load (field (cast (ptr ObjInstance) (as-obj value)) klass)) name))]
+                                 (do (w-bytes fd (load (field nm chars)) (load (field nm length))) (w-cstr fd c" instance")))
+      (= k OBJ_NATIVE)  (w-cstr fd c"<native fn>")
+      (= k OBJ_STRING)  (let [s (as-string value)] (w-bytes fd (load (field s chars)) (load (field s length))))
+      (= k OBJ_UPVALUE) (w-cstr fd c"upvalue")
+      (w-cstr fd c"?"))))
+
+(defn print-value [(fd i64) (value Value)] (-> i64)
+  (match value
+    (VBool [b] (if b (w-cstr fd c"true") (w-cstr fd c"false")))
+    (VNil [] (w-cstr fd c"nil"))
+    (VNumber [n] (w-num fd n))
+    (VObj [_] (print-object fd value))))
+
+(defn print-closure-bound [(fd i64) (bound (ptr ObjBoundMethod))] (-> i64)
+  (print-function fd (load (field (load (field bound method)) function))))
+
+(defn values-equal [(a Value) (b Value)] (-> bool)
+  (match a
+    (VBool [ab] (match b (VBool [bb] (if ab bb (not bb))) (VNil [] false) (VNumber [_] false) (VObj [_] false)))
+    (VNil [] (is-nil b))
+    (VNumber [an] (match b (VNumber [bn] (fcmp-eq an bn)) (VBool [_] false) (VNil [] false) (VObj [_] false)))
+    (VObj [ao] (match b (VObj [bo] (= (cast i64 ao) (cast i64 bo))) (VBool [_] false) (VNil [] false) (VNumber [_] false)))))
+
+; ============================ token types ===================================
+(const TOKEN_LEFT_PAREN 0)  (const TOKEN_RIGHT_PAREN 1) (const TOKEN_LEFT_BRACE 2)
+(const TOKEN_RIGHT_BRACE 3) (const TOKEN_COMMA 4)       (const TOKEN_DOT 5)
+(const TOKEN_MINUS 6)       (const TOKEN_PLUS 7)        (const TOKEN_SEMICOLON 8)
+(const TOKEN_SLASH 9)       (const TOKEN_STAR 10)       (const TOKEN_BANG 11)
+(const TOKEN_BANG_EQUAL 12) (const TOKEN_EQUAL 13)      (const TOKEN_EQUAL_EQUAL 14)
+(const TOKEN_GREATER 15)    (const TOKEN_GREATER_EQUAL 16) (const TOKEN_LESS 17)
+(const TOKEN_LESS_EQUAL 18) (const TOKEN_IDENTIFIER 19) (const TOKEN_STRING 20)
+(const TOKEN_NUMBER 21)     (const TOKEN_AND 22)        (const TOKEN_CLASS 23)
+(const TOKEN_ELSE 24)       (const TOKEN_FALSE 25)      (const TOKEN_FOR 26)
+(const TOKEN_FUN 27)        (const TOKEN_IF 28)         (const TOKEN_NIL 29)
+(const TOKEN_OR 30)         (const TOKEN_PRINT 31)      (const TOKEN_RETURN 32)
+(const TOKEN_SUPER 33)      (const TOKEN_THIS 34)       (const TOKEN_TRUE 35)
+(const TOKEN_VAR 36)        (const TOKEN_WHILE 37)      (const TOKEN_ERROR 38)
+(const TOKEN_EOF 39)
+
+; ============================ scanner =======================================
+(defstruct Token   [(kind i64) (start (ptr u8)) (length i64) (line i64)])
+(defstruct Scanner [(start (ptr u8)) (current (ptr u8)) (line i64)])
+(defn scn [] (-> (ptr Scanner)) (alloc-static Scanner))
+
+(defn init-scanner [(source (ptr u8))] (-> i64)
+  (store! (field (scn) start) source)
+  (store! (field (scn) current) source)
+  (store! (field (scn) line) 1) 0)
+
+(defn is-alpha [(c i64)] (-> bool)
+  (or (and (>= c \a) (<= c \z)) (or (and (>= c \A) (<= c \Z)) (= c \_))))
+(defn is-digit [(c i64)] (-> bool) (and (>= c \0) (<= c \9)))
+
+(defn scan-peek [] (-> i64) (cast i64 (load (load (field (scn) current)))))
+(defn scan-peek-next [] (-> i64)
+  (if (= (scan-peek) 0) 0 (cast i64 (load (index (load (field (scn) current)) 1)))))
+(defn scan-at-end [] (-> bool) (= (scan-peek) 0))
+(defn scan-advance [] (-> i64)
+  (store! (field (scn) current) (index (load (field (scn) current)) 1))
+  (cast i64 (load (index (load (field (scn) current)) -1))))
+(defn scan-match [(expected i64)] (-> bool)
+  (if (scan-at-end) false
+      (if (!= (scan-peek) expected) false
+          (do (store! (field (scn) current) (index (load (field (scn) current)) 1)) true))))
+
+(defn make-token [(kind i64)] (-> Token)
+  (let [(mut t) (zeroed Token)]
+    (store! (field t kind) kind)
+    (store! (field t start) (load (field (scn) start)))
+    (store! (field t length) (- (cast i64 (load (field (scn) current))) (cast i64 (load (field (scn) start)))))
+    (store! (field t line) (load (field (scn) line)))
+    (load t)))
+(defn error-token [(message (ptr u8))] (-> Token)
+  (let [(mut t) (zeroed Token)]
+    (store! (field t kind) TOKEN_ERROR)
+    (store! (field t start) message)
+    (store! (field t length) (strlen (cast (ptr i8) message)))
+    (store! (field t line) (load (field (scn) line)))
+    (load t)))
+
+(defn skip-whitespace [] (-> i64)
+  (loop
+    (let [c (scan-peek)]
+      (cond
+        (= c \space)  (do (scan-advance) 0)
+        (= c \return) (do (scan-advance) 0)
+        (= c \tab)    (do (scan-advance) 0)
+        (= c \newline) (do (store! (field (scn) line) (+ (load (field (scn) line)) 1)) (scan-advance) 0)
+        (= c \/) (if (= (scan-peek-next) \/)
+                           (do (loop (if (and (!= (scan-peek) \newline) (not (scan-at-end))) (do (scan-advance) 0) (break))) 0)
+                           (break))
+        (break))))
+  0)
+
+(defn check-keyword [(start i64) (length i64) (rest (ptr u8)) (kind i64)] (-> i64)
+  (if (and (= (- (cast i64 (load (field (scn) current))) (cast i64 (load (field (scn) start)))) (+ start length))
+           (= (mem-cmp (index (load (field (scn) start)) start) rest length) 0))
+      kind TOKEN_IDENTIFIER))
+
+(defn cur-minus-start [] (-> i64)
+  (- (cast i64 (load (field (scn) current))) (cast i64 (load (field (scn) start)))))
+(defn start-char [(i i64)] (-> i64) (cast i64 (load (index (load (field (scn) start)) i))))
+
+(defn identifier-type [] (-> i64)
+  (let [c0 (start-char 0)]
+    (cond
+      (= c0 \a) (check-keyword 1 2 (cast (ptr u8) c"nd") TOKEN_AND)
+      (= c0 \c) (check-keyword 1 4 (cast (ptr u8) c"lass") TOKEN_CLASS)
+      (= c0 \e) (check-keyword 1 3 (cast (ptr u8) c"lse") TOKEN_ELSE)
+      (= c0 \f) (if (> (cur-minus-start) 1)
+                          (let [c1 (start-char 1)]
+                            (cond
+                              (= c1 \a) (check-keyword 2 3 (cast (ptr u8) c"lse") TOKEN_FALSE)
+                              (= c1 \o) (check-keyword 2 1 (cast (ptr u8) c"r") TOKEN_FOR)
+                              (= c1 \u) (check-keyword 2 1 (cast (ptr u8) c"n") TOKEN_FUN)
+                              TOKEN_IDENTIFIER))
+                          TOKEN_IDENTIFIER)
+      (= c0 \i) (check-keyword 1 1 (cast (ptr u8) c"f") TOKEN_IF)
+      (= c0 \n) (check-keyword 1 2 (cast (ptr u8) c"il") TOKEN_NIL)
+      (= c0 \o) (check-keyword 1 1 (cast (ptr u8) c"r") TOKEN_OR)
+      (= c0 \p) (check-keyword 1 4 (cast (ptr u8) c"rint") TOKEN_PRINT)
+      (= c0 \r) (check-keyword 1 5 (cast (ptr u8) c"eturn") TOKEN_RETURN)
+      (= c0 \s) (check-keyword 1 4 (cast (ptr u8) c"uper") TOKEN_SUPER)
+      (= c0 \t) (if (> (cur-minus-start) 1)
+                          (let [c1 (start-char 1)]
+                            (cond
+                              (= c1 \h) (check-keyword 2 2 (cast (ptr u8) c"is") TOKEN_THIS)
+                              (= c1 \r) (check-keyword 2 2 (cast (ptr u8) c"ue") TOKEN_TRUE)
+                              TOKEN_IDENTIFIER))
+                          TOKEN_IDENTIFIER)
+      (= c0 \v) (check-keyword 1 2 (cast (ptr u8) c"ar") TOKEN_VAR)
+      (= c0 \w) (check-keyword 1 4 (cast (ptr u8) c"hile") TOKEN_WHILE)
+      TOKEN_IDENTIFIER)))
+
+(defn scan-identifier [] (-> Token)
+  (loop (if (or (is-alpha (scan-peek)) (is-digit (scan-peek))) (do (scan-advance) 0) (break)))
+  (make-token (identifier-type)))
+(defn scan-number [] (-> Token)
+  (loop (if (is-digit (scan-peek)) (do (scan-advance) 0) (break)))
+  (if (and (= (scan-peek) \.) (is-digit (scan-peek-next)))
+      (do (scan-advance) (loop (if (is-digit (scan-peek)) (do (scan-advance) 0) (break)))) 0)
+  (make-token TOKEN_NUMBER))
+(defn scan-string [] (-> Token)
+  (loop (if (and (!= (scan-peek) \") (not (scan-at-end)))
+            (do (if (= (scan-peek) \newline) (store! (field (scn) line) (+ (load (field (scn) line)) 1)) 0)
+                (scan-advance) 0)
+            (break)))
+  (if (scan-at-end) (error-token (cast (ptr u8) c"Unterminated string."))
+      (do (scan-advance) (make-token TOKEN_STRING))))
+
+(defn scan-token [] (-> Token)
+  (skip-whitespace)
+  (store! (field (scn) start) (load (field (scn) current)))
+  (if (scan-at-end) (make-token TOKEN_EOF)
+    (let [c (scan-advance)]
+      (cond
+        (is-alpha c) (scan-identifier)
+        (is-digit c) (scan-number)
+        (= c \() (make-token TOKEN_LEFT_PAREN)
+        (= c \)) (make-token TOKEN_RIGHT_PAREN)
+        (= c \{) (make-token TOKEN_LEFT_BRACE)
+        (= c \}) (make-token TOKEN_RIGHT_BRACE)
+        (= c \;) (make-token TOKEN_SEMICOLON)
+        (= c \,) (make-token TOKEN_COMMA)
+        (= c \.) (make-token TOKEN_DOT)
+        (= c \-) (make-token TOKEN_MINUS)
+        (= c \+) (make-token TOKEN_PLUS)
+        (= c \/) (make-token TOKEN_SLASH)
+        (= c \*) (make-token TOKEN_STAR)
+        (= c \!) (make-token (if (scan-match \=) TOKEN_BANG_EQUAL TOKEN_BANG))
+        (= c \=) (make-token (if (scan-match \=) TOKEN_EQUAL_EQUAL TOKEN_EQUAL))
+        (= c \<) (make-token (if (scan-match \=) TOKEN_LESS_EQUAL TOKEN_LESS))
+        (= c \>) (make-token (if (scan-match \=) TOKEN_GREATER_EQUAL TOKEN_GREATER))
+        (= c \") (scan-string)
+        (error-token (cast (ptr u8) c"Unexpected character."))))))
+
+; ============================ compiler ======================================
+(const PREC_NONE 0)       (const PREC_ASSIGNMENT 1) (const PREC_OR 2)
+(const PREC_AND 3)        (const PREC_EQUALITY 4)   (const PREC_COMPARISON 5)
+(const PREC_TERM 6)       (const PREC_FACTOR 7)     (const PREC_UNARY 8)
+(const PREC_CALL 9)       (const PREC_PRIMARY 10)
+
+(const TYPE_FUNCTION 0)   (const TYPE_INITIALIZER 1)
+(const TYPE_METHOD 2)     (const TYPE_SCRIPT 3)
+
+(defstruct Parser [(current Token) (previous Token) (had-error bool) (panic-mode bool)])
+(defstruct Local [(name Token) (depth i64) (is-captured bool)])
+(defstruct CompUpvalue [(index i64) (is-local bool)])
+(defstruct Compiler
+  [(enclosing (ptr Compiler))
+   (function (ptr ObjFunction))
+   (kind i64)
+   (locals (array Local 256))
+   (local-count i64)
+   (upvalues (array CompUpvalue 256))
+   (scope-depth i64)])
+(defstruct ClassCompiler [(enclosing (ptr ClassCompiler)) (has-superclass bool)])
+
+(defn parser [] (-> (ptr Parser)) (alloc-static Parser))
+(defn cur-comp-cell  [] (-> (ptr (ptr Compiler)))      (alloc-static (ptr Compiler)))
+(defn cur-class-cell [] (-> (ptr (ptr ClassCompiler))) (alloc-static (ptr ClassCompiler)))
+(defn ccomp    [] (-> (ptr Compiler))      (load (cur-comp-cell)))
+(defn cclass   [] (-> (ptr ClassCompiler)) (load (cur-class-cell)))
+(defn current-chunk [] (-> (ptr Chunk)) (field (load (field (ccomp) function)) chunk))
+
+; forward-referenced (Coil resolves forward refs within a file)
+(defn expression [] (-> i64) (parse-precedence PREC_ASSIGNMENT))
+
+; ---- errors ----
+(defn error-at [(token (ptr Token)) (message (ptr u8))] (-> i64)
+  (if (load (field (parser) panic-mode)) 0
+    (do
+      (store! (field (parser) panic-mode) true)
+      (w-cstr 2 c"[line ") (w-int 2 (load (field token line))) (w-cstr 2 c"] Error")
+      (cond
+        (= (load (field token kind)) TOKEN_EOF)   (w-cstr 2 c" at end")
+        (= (load (field token kind)) TOKEN_ERROR) 0
+        (do (w-cstr 2 c" at '") (w-bytes 2 (load (field token start)) (load (field token length))) (w-cstr 2 c"'")))
+      (w-cstr 2 c": ") (w-cstr 2 (cast (ptr i8) message)) (w-cstr 2 c"\n")
+      (store! (field (parser) had-error) true) 0)))
+(defn compile-error      [(message (ptr u8))] (-> i64) (error-at (field (parser) previous) message))
+(defn error-at-current   [(message (ptr u8))] (-> i64) (error-at (field (parser) current) message))
+
+(defn advance- [] (-> i64)
+  (store! (field (parser) previous) (load (field (parser) current)))
+  (loop
+    (store! (field (parser) current) (scan-token))
+    (if (!= (load (field (field (parser) current) kind)) TOKEN_ERROR) (break)
+      (error-at-current (load (field (field (parser) current) start)))))
+  0)
+(defn consume [(kind i64) (message (ptr u8))] (-> i64)
+  (if (= (load (field (field (parser) current) kind)) kind) (advance-) (error-at-current message)))
+(defn check- [(kind i64)] (-> bool) (= (load (field (field (parser) current) kind)) kind))
+(defn match- [(kind i64)] (-> bool) (if (check- kind) (do (advance-) true) false))
+
+; ---- emit ----
+(defn emit-byte [(byte i64)] (-> i64) (write-chunk (current-chunk) byte (load (field (field (parser) previous) line))))
+(defn emit-bytes [(b1 i64) (b2 i64)] (-> i64) (emit-byte b1) (emit-byte b2))
+(defn emit-loop [(loop-start i64)] (-> i64)
+  (emit-byte OP_LOOP)
+  (let [offset (+ (- (load (field (current-chunk) count)) loop-start) 2)]
+    (if (> offset 65535) (compile-error (cast (ptr u8) c"Loop body too large.")) 0)
+    (emit-byte (& (>> offset 8) 255))
+    (emit-byte (& offset 255))))
+(defn emit-jump [(instruction i64)] (-> i64)
+  (emit-byte instruction) (emit-byte 255) (emit-byte 255)
+  (- (load (field (current-chunk) count)) 2))
+(defn emit-return [] (-> i64)
+  (if (= (load (field (ccomp) kind)) TYPE_INITIALIZER) (emit-bytes OP_GET_LOCAL 0) (emit-byte OP_NIL))
+  (emit-byte OP_RETURN))
+(defn make-constant [(value Value)] (-> i64)
+  (let [constant (add-constant (current-chunk) value)]
+    (if (> constant 255) (do (compile-error (cast (ptr u8) c"Too many constants in one chunk.")) 0) constant)))
+(defn emit-constant [(value Value)] (-> i64) (emit-bytes OP_CONSTANT (make-constant value)))
+(defn patch-jump [(offset i64)] (-> i64)
+  (let [jump (- (- (load (field (current-chunk) count)) offset) 2)]
+    (if (> jump 65535) (compile-error (cast (ptr u8) c"Too much code to jump over.")) 0)
+    (store! (index (load (field (current-chunk) code)) offset) (cast u8 (& (>> jump 8) 255)))
+    (store! (index (load (field (current-chunk) code)) (+ offset 1)) (cast u8 (& jump 255))) 0))
+
+; ---- compiler state ----
+(defn init-compiler [(compiler (ptr Compiler)) (kind i64)] (-> i64)
+  (store! (field compiler enclosing) (ccomp))
+  (store! (field compiler function) (cast (ptr ObjFunction) 0))
+  (store! (field compiler kind) kind)
+  (store! (field compiler local-count) 0)
+  (store! (field compiler scope-depth) 0)
+  (store! (field compiler function) (new-function))
+  (store! (cur-comp-cell) compiler)
+  (if (!= kind TYPE_SCRIPT)
+      (do (store! (field (load (field compiler function)) name)
+                  (copy-string (load (field (field (parser) previous) start)) (load (field (field (parser) previous) length)))) 0) 0)
+  (let [local (index (field compiler locals) (load (field compiler local-count)))]
+    (store! (field compiler local-count) (+ (load (field compiler local-count)) 1))
+    (store! (field local depth) 0)
+    (store! (field local is-captured) false)
+    (if (!= kind TYPE_FUNCTION)
+        (do (store! (field (field local name) start) (cast (ptr u8) c"this")) (store! (field (field local name) length) 4))
+        (do (store! (field (field local name) start) (cast (ptr u8) c"")) (store! (field (field local name) length) 0))))
+  0)
+(defn end-compiler [] (-> (ptr ObjFunction))
+  (emit-return)
+  (let [function (load (field (ccomp) function))]
+    (store! (cur-comp-cell) (load (field (ccomp) enclosing)))
+    function))
+(defn begin-scope [] (-> i64) (store! (field (ccomp) scope-depth) (+ (load (field (ccomp) scope-depth)) 1)))
+(defn end-scope [] (-> i64)
+  (store! (field (ccomp) scope-depth) (- (load (field (ccomp) scope-depth)) 1))
+  (loop
+    (if (and (> (load (field (ccomp) local-count)) 0)
+             (> (load (field (index (field (ccomp) locals) (- (load (field (ccomp) local-count)) 1)) depth)) (load (field (ccomp) scope-depth))))
+        (do (if (load (field (index (field (ccomp) locals) (- (load (field (ccomp) local-count)) 1)) is-captured))
+                (emit-byte OP_CLOSE_UPVALUE) (emit-byte OP_POP))
+            (store! (field (ccomp) local-count) (- (load (field (ccomp) local-count)) 1)))
+        (break)))
+  0)
+
+; ---- names / locals / upvalues ----
+(defn identifier-constant [(name (ptr Token))] (-> i64)
+  (make-constant (VObj (cast (ptr Obj) (copy-string (load (field name start)) (load (field name length)))))))
+(defn identifiers-equal [(a (ptr Token)) (b (ptr Token))] (-> bool)
+  (if (!= (load (field a length)) (load (field b length))) false
+      (= (mem-cmp (load (field a start)) (load (field b start)) (load (field a length))) 0)))
+(defn resolve-local [(compiler (ptr Compiler)) (name (ptr Token))] (-> i64)
+  (let [(mut i) (- (load (field compiler local-count)) 1) (mut found) -1]
+    (loop (if (< (load i) 0) (break)
+      (let [local (index (field compiler locals) (load i))]
+        (if (identifiers-equal name (field local name))
+            (do (if (= (load (field local depth)) -1) (compile-error (cast (ptr u8) c"Can't read local variable in its own initializer.")) 0)
+                (store! found (load i)) (break))
+            (store! i (- (load i) 1))))))
+    (load found)))
+(defn add-upvalue [(compiler (ptr Compiler)) (index-val i64) (is-local bool)] (-> i64)
+  (let [upvalue-count (load (field (load (field compiler function)) upvalue-count)) (mut i) 0 (mut found) -1]
+    (loop (if (>= (load i) upvalue-count) (break)
+      (let [upvalue (index (field compiler upvalues) (load i))]
+        (if (and (= (load (field upvalue index)) index-val) (beq (load (field upvalue is-local)) is-local))
+            (do (store! found (load i)) (break))
+            (store! i (+ (load i) 1))))))
+    (if (>= (load found) 0) (load found)
+      (if (= upvalue-count 256) (do (compile-error (cast (ptr u8) c"Too many closure variables in function.")) 0)
+        (do (store! (field (index (field compiler upvalues) upvalue-count) is-local) is-local)
+            (store! (field (index (field compiler upvalues) upvalue-count) index) index-val)
+            (store! (field (load (field compiler function)) upvalue-count) (+ upvalue-count 1))
+            upvalue-count)))))
+(defn resolve-upvalue [(compiler (ptr Compiler)) (name (ptr Token))] (-> i64)
+  (if (= (cast i64 (load (field compiler enclosing))) 0) -1
+    (let [local (resolve-local (load (field compiler enclosing)) name)]
+      (if (!= local -1)
+          (do (store! (field (index (field (load (field compiler enclosing)) locals) local) is-captured) true)
+              (add-upvalue compiler local true))
+          (let [upvalue (resolve-upvalue (load (field compiler enclosing)) name)]
+            (if (!= upvalue -1) (add-upvalue compiler upvalue false) -1))))))
+(defn add-local [(name Token)] (-> i64)
+  (if (= (load (field (ccomp) local-count)) 256) (compile-error (cast (ptr u8) c"Too many local variables in function."))
+    (let [local (index (field (ccomp) locals) (load (field (ccomp) local-count)))]
+      (store! (field (ccomp) local-count) (+ (load (field (ccomp) local-count)) 1))
+      (store! (field local name) name)
+      (store! (field local depth) -1)
+      (store! (field local is-captured) false) 0)))
+(defn declare-variable [] (-> i64)
+  (if (= (load (field (ccomp) scope-depth)) 0) 0
+    (let [name (field (parser) previous) (mut i) (- (load (field (ccomp) local-count)) 1) (mut stop) false]
+      (loop (if (or (< (load i) 0) (load stop)) (break)
+        (let [local (index (field (ccomp) locals) (load i))]
+          (if (and (!= (load (field local depth)) -1) (< (load (field local depth)) (load (field (ccomp) scope-depth))))
+              (do (store! stop true) 0)
+              (do (if (identifiers-equal name (field local name)) (compile-error (cast (ptr u8) c"Already a variable with this name in this scope.")) 0)
+                  (store! i (- (load i) 1)))))))
+      (add-local (load name)))))
+(defn parse-variable [(error-message (ptr u8))] (-> i64)
+  (consume TOKEN_IDENTIFIER error-message)
+  (declare-variable)
+  (if (> (load (field (ccomp) scope-depth)) 0) 0 (identifier-constant (field (parser) previous))))
+(defn mark-initialized [] (-> i64)
+  (if (= (load (field (ccomp) scope-depth)) 0) 0
+    (store! (field (index (field (ccomp) locals) (- (load (field (ccomp) local-count)) 1)) depth) (load (field (ccomp) scope-depth)))))
+(defn define-variable [(global i64)] (-> i64)
+  (if (> (load (field (ccomp) scope-depth)) 0) (do (mark-initialized) 0)
+      (emit-bytes OP_DEFINE_GLOBAL global)))
+(defn argument-list [] (-> i64)
+  (let [(mut arg-count) 0]
+    (if (not (check- TOKEN_RIGHT_PAREN))
+        (loop
+          (expression)
+          (if (= (load arg-count) 255) (compile-error (cast (ptr u8) c"Can't have more than 255 arguments.")) 0)
+          (store! arg-count (+ (load arg-count) 1))
+          (if (match- TOKEN_COMMA) 0 (break))) 0)
+    (consume TOKEN_RIGHT_PAREN (cast (ptr u8) c"Expect ')' after arguments."))
+    (load arg-count)))
+
+; ---- expressions (Pratt) ----
+(defn p-and [(can-assign bool)] (-> i64)
+  (let [end-jump (emit-jump OP_JUMP_IF_FALSE)]
+    (emit-byte OP_POP) (parse-precedence PREC_AND) (patch-jump end-jump)))
+(defn p-or [(can-assign bool)] (-> i64)
+  (let [else-jump (emit-jump OP_JUMP_IF_FALSE) end-jump (emit-jump OP_JUMP)]
+    (patch-jump else-jump) (emit-byte OP_POP) (parse-precedence PREC_OR) (patch-jump end-jump)))
+(defn p-binary [(can-assign bool)] (-> i64)
+  (let [operator-type (load (field (field (parser) previous) kind))]
+    (parse-precedence (+ (rule-prec operator-type) 1))
+    (cond
+      (= operator-type TOKEN_BANG_EQUAL)    (emit-bytes OP_EQUAL OP_NOT)
+      (= operator-type TOKEN_EQUAL_EQUAL)   (emit-byte OP_EQUAL)
+      (= operator-type TOKEN_GREATER)       (emit-byte OP_GREATER)
+      (= operator-type TOKEN_GREATER_EQUAL) (emit-bytes OP_LESS OP_NOT)
+      (= operator-type TOKEN_LESS)          (emit-byte OP_LESS)
+      (= operator-type TOKEN_LESS_EQUAL)    (emit-bytes OP_GREATER OP_NOT)
+      (= operator-type TOKEN_PLUS)          (emit-byte OP_ADD)
+      (= operator-type TOKEN_MINUS)         (emit-byte OP_SUBTRACT)
+      (= operator-type TOKEN_STAR)          (emit-byte OP_MULTIPLY)
+      (= operator-type TOKEN_SLASH)         (emit-byte OP_DIVIDE)
+      0)))
+(defn p-call [(can-assign bool)] (-> i64)
+  (let [arg-count (argument-list)] (emit-bytes OP_CALL arg-count)))
+(defn p-dot [(can-assign bool)] (-> i64)
+  (consume TOKEN_IDENTIFIER (cast (ptr u8) c"Expect property name after '.'."))
+  (let [name (identifier-constant (field (parser) previous))]
+    (cond
+      (and can-assign (match- TOKEN_EQUAL)) (do (expression) (emit-bytes OP_SET_PROPERTY name))
+      (match- TOKEN_LEFT_PAREN) (let [arg-count (argument-list)] (emit-bytes OP_INVOKE name) (emit-byte arg-count))
+      (emit-bytes OP_GET_PROPERTY name))))
+(defn p-literal [(can-assign bool)] (-> i64)
+  (cond
+    (= (load (field (field (parser) previous) kind)) TOKEN_FALSE) (emit-byte OP_FALSE)
+    (= (load (field (field (parser) previous) kind)) TOKEN_NIL)   (emit-byte OP_NIL)
+    (= (load (field (field (parser) previous) kind)) TOKEN_TRUE)  (emit-byte OP_TRUE)
+    0))
+(defn p-grouping [(can-assign bool)] (-> i64)
+  (expression) (consume TOKEN_RIGHT_PAREN (cast (ptr u8) c"Expect ')' after expression.")))
+(defn p-number [(can-assign bool)] (-> i64)
+  (let [value (strtod (cast (ptr i8) (load (field (field (parser) previous) start))) (cast (ptr (ptr i8)) 0))]
+    (emit-constant (VNumber value))))
+(defn p-string [(can-assign bool)] (-> i64)
+  (emit-constant (VObj (cast (ptr Obj) (copy-string (index (load (field (field (parser) previous) start)) 1)
+                                                    (- (load (field (field (parser) previous) length)) 2))))))
+(defn named-variable [(name Token) (can-assign bool)] (-> i64)
+  (let [np (alloc-stack Token)]
+    (store! np name)
+    (let [(mut get-op) 0 (mut set-op) 0 (mut arg) (resolve-local (ccomp) np)]
+      (if (!= (load arg) -1)
+          (do (store! get-op OP_GET_LOCAL) (store! set-op OP_SET_LOCAL))
+          (do (store! arg (resolve-upvalue (ccomp) np))
+              (if (!= (load arg) -1)
+                  (do (store! get-op OP_GET_UPVALUE) (store! set-op OP_SET_UPVALUE))
+                  (do (store! arg (identifier-constant np))
+                      (store! get-op OP_GET_GLOBAL) (store! set-op OP_SET_GLOBAL)))))
+      (if (and can-assign (match- TOKEN_EQUAL))
+          (do (expression) (emit-bytes (load set-op) (load arg)))
+          (emit-bytes (load get-op) (load arg))))))
+(defn p-variable [(can-assign bool)] (-> i64) (named-variable (load (field (parser) previous)) can-assign))
+(defn synthetic-token [(text (ptr u8)) (len i64)] (-> Token)
+  (let [(mut t) (zeroed Token)] (store! (field t start) text) (store! (field t length) len) (load t)))
+(defn p-super [(can-assign bool)] (-> i64)
+  (cond
+    (= (cast i64 (cclass)) 0) (compile-error (cast (ptr u8) c"Can't use 'super' outside of a class."))
+    (not (load (field (cclass) has-superclass))) (compile-error (cast (ptr u8) c"Can't use 'super' in a class with no superclass."))
+    0)
+  (consume TOKEN_DOT (cast (ptr u8) c"Expect '.' after 'super'."))
+  (consume TOKEN_IDENTIFIER (cast (ptr u8) c"Expect superclass method name."))
+  (let [name (identifier-constant (field (parser) previous))]
+    (named-variable (synthetic-token (cast (ptr u8) c"this") 4) false)
+    (if (match- TOKEN_LEFT_PAREN)
+        (let [arg-count (argument-list)]
+          (named-variable (synthetic-token (cast (ptr u8) c"super") 5) false)
+          (emit-bytes OP_SUPER_INVOKE name) (emit-byte arg-count))
+        (do (named-variable (synthetic-token (cast (ptr u8) c"super") 5) false)
+            (emit-bytes OP_GET_SUPER name)))))
+(defn p-this [(can-assign bool)] (-> i64)
+  (if (= (cast i64 (cclass)) 0) (do (compile-error (cast (ptr u8) c"Can't use 'this' outside of a class.")) 0)
+      (p-variable false)))
+(defn p-unary [(can-assign bool)] (-> i64)
+  (let [operator-type (load (field (field (parser) previous) kind))]
+    (parse-precedence PREC_UNARY)
+    (cond
+      (= operator-type TOKEN_BANG)  (emit-byte OP_NOT)
+      (= operator-type TOKEN_MINUS) (emit-byte OP_NEGATE)
+      0)))
+
+; ---- parse rule dispatch (replaces clox's rules[] table) ----
+(defn rule-prec [(t i64)] (-> i64)
+  (cond
+    (= t TOKEN_LEFT_PAREN) PREC_CALL
+    (= t TOKEN_DOT)        PREC_CALL
+    (= t TOKEN_MINUS)      PREC_TERM
+    (= t TOKEN_PLUS)       PREC_TERM
+    (= t TOKEN_SLASH)      PREC_FACTOR
+    (= t TOKEN_STAR)       PREC_FACTOR
+    (= t TOKEN_BANG_EQUAL) PREC_EQUALITY
+    (= t TOKEN_EQUAL_EQUAL) PREC_EQUALITY
+    (= t TOKEN_GREATER)       PREC_COMPARISON
+    (= t TOKEN_GREATER_EQUAL) PREC_COMPARISON
+    (= t TOKEN_LESS)          PREC_COMPARISON
+    (= t TOKEN_LESS_EQUAL)    PREC_COMPARISON
+    (= t TOKEN_AND) PREC_AND
+    (= t TOKEN_OR)  PREC_OR
+    PREC_NONE))
+(defn prefix-null? [(t i64)] (-> bool)
+  (not (or (= t TOKEN_LEFT_PAREN) (or (= t TOKEN_MINUS) (or (= t TOKEN_BANG)
+       (or (= t TOKEN_IDENTIFIER) (or (= t TOKEN_STRING) (or (= t TOKEN_NUMBER)
+       (or (= t TOKEN_FALSE) (or (= t TOKEN_NIL) (or (= t TOKEN_TRUE)
+       (or (= t TOKEN_SUPER) (= t TOKEN_THIS)))))))))))))
+(defn call-prefix [(t i64) (can-assign bool)] (-> i64)
+  (cond
+    (= t TOKEN_LEFT_PAREN) (p-grouping can-assign)
+    (= t TOKEN_MINUS)      (p-unary can-assign)
+    (= t TOKEN_BANG)       (p-unary can-assign)
+    (= t TOKEN_IDENTIFIER) (p-variable can-assign)
+    (= t TOKEN_STRING)     (p-string can-assign)
+    (= t TOKEN_NUMBER)     (p-number can-assign)
+    (= t TOKEN_FALSE)      (p-literal can-assign)
+    (= t TOKEN_NIL)        (p-literal can-assign)
+    (= t TOKEN_TRUE)       (p-literal can-assign)
+    (= t TOKEN_SUPER)      (p-super can-assign)
+    (= t TOKEN_THIS)       (p-this can-assign)
+    0))
+(defn call-infix [(t i64) (can-assign bool)] (-> i64)
+  (cond
+    (= t TOKEN_LEFT_PAREN) (p-call can-assign)
+    (= t TOKEN_DOT)        (p-dot can-assign)
+    (= t TOKEN_AND)        (p-and can-assign)
+    (= t TOKEN_OR)         (p-or can-assign)
+    (p-binary can-assign)))
+(defn parse-precedence [(precedence i64)] (-> i64)
+  (advance-)
+  (if (prefix-null? (load (field (field (parser) previous) kind)))
+      (compile-error (cast (ptr u8) c"Expect expression."))
+    (let [can-assign (<= precedence PREC_ASSIGNMENT)]
+      (call-prefix (load (field (field (parser) previous) kind)) can-assign)
+      (loop (if (<= precedence (rule-prec (load (field (field (parser) current) kind))))
+                (do (advance-) (call-infix (load (field (field (parser) previous) kind)) can-assign))
+                (break)))
+      (if (and can-assign (match- TOKEN_EQUAL)) (compile-error (cast (ptr u8) c"Invalid assignment target.")) 0))))
+
+; ---- statements / declarations ----
+(defn compile-block [] (-> i64)
+  (loop (if (and (not (check- TOKEN_RIGHT_BRACE)) (not (check- TOKEN_EOF))) (declaration) (break)))
+  (consume TOKEN_RIGHT_BRACE (cast (ptr u8) c"Expect '}' after block.")))
+(defn p-function-decl [(kind i64)] (-> i64)
+  (let [compiler (alloc-stack Compiler)]
+    (init-compiler compiler kind)
+    (begin-scope)
+    (consume TOKEN_LEFT_PAREN (cast (ptr u8) c"Expect '(' after function name."))
+    (if (not (check- TOKEN_RIGHT_PAREN))
+        (loop
+          (store! (field (load (field (ccomp) function)) arity) (+ (load (field (load (field (ccomp) function)) arity)) 1))
+          (if (> (load (field (load (field (ccomp) function)) arity)) 255)
+              (error-at-current (cast (ptr u8) c"Can't have more than 255 parameters.")) 0)
+          (let [constant (parse-variable (cast (ptr u8) c"Expect parameter name."))] (define-variable constant))
+          (if (match- TOKEN_COMMA) 0 (break))) 0)
+    (consume TOKEN_RIGHT_PAREN (cast (ptr u8) c"Expect ')' after parameters."))
+    (consume TOKEN_LEFT_BRACE (cast (ptr u8) c"Expect '{' before function body."))
+    (compile-block)
+    (let [function (end-compiler)]
+      (emit-bytes OP_CLOSURE (make-constant (VObj (cast (ptr Obj) function))))
+      (let [(mut i) 0]
+        (loop (if (>= (load i) (load (field function upvalue-count))) (break)
+          (do (emit-byte (if (load (field (index (field compiler upvalues) (load i)) is-local)) 1 0))
+              (emit-byte (load (field (index (field compiler upvalues) (load i)) index)))
+              (store! i (+ (load i) 1)))))) 0)))
+(defn method [] (-> i64)
+  (consume TOKEN_IDENTIFIER (cast (ptr u8) c"Expect method name."))
+  (let [constant (identifier-constant (field (parser) previous))
+        (mut kind) TYPE_METHOD]
+    (if (and (= (load (field (field (parser) previous) length)) 4)
+             (= (mem-cmp (load (field (field (parser) previous) start)) (cast (ptr u8) c"init") 4) 0))
+        (store! kind TYPE_INITIALIZER) 0)
+    (p-function-decl (load kind))
+    (emit-bytes OP_METHOD constant)))
+(defn class-declaration [] (-> i64)
+  (consume TOKEN_IDENTIFIER (cast (ptr u8) c"Expect class name."))
+  (let [class-name (alloc-stack Token)]
+    (store! class-name (load (field (parser) previous)))
+    (let [name-constant (identifier-constant (field (parser) previous))]
+      (declare-variable)
+      (emit-bytes OP_CLASS name-constant)
+      (define-variable name-constant)
+      (let [class-compiler (alloc-stack ClassCompiler)]
+        (store! (field class-compiler has-superclass) false)
+        (store! (field class-compiler enclosing) (cclass))
+        (store! (cur-class-cell) class-compiler)
+        (if (match- TOKEN_LESS)
+            (do (consume TOKEN_IDENTIFIER (cast (ptr u8) c"Expect superclass name."))
+                (p-variable false)
+                (if (identifiers-equal class-name (field (parser) previous))
+                    (compile-error (cast (ptr u8) c"A class can't inherit from itself.")) 0)
+                (begin-scope)
+                (add-local (synthetic-token (cast (ptr u8) c"super") 5))
+                (define-variable 0)
+                (named-variable (load class-name) false)
+                (emit-byte OP_INHERIT)
+                (store! (field class-compiler has-superclass) true) 0) 0)
+        (named-variable (load class-name) false)
+        (consume TOKEN_LEFT_BRACE (cast (ptr u8) c"Expect '{' before class body."))
+        (loop (if (and (not (check- TOKEN_RIGHT_BRACE)) (not (check- TOKEN_EOF))) (method) (break)))
+        (consume TOKEN_RIGHT_BRACE (cast (ptr u8) c"Expect '}' after class body."))
+        (emit-byte OP_POP)
+        (if (load (field class-compiler has-superclass)) (end-scope) 0)
+        (store! (cur-class-cell) (load (field (cclass) enclosing)))) 0)))
+(defn fun-declaration [] (-> i64)
+  (let [global (parse-variable (cast (ptr u8) c"Expect function name."))]
+    (mark-initialized) (p-function-decl TYPE_FUNCTION) (define-variable global)))
+(defn var-declaration [] (-> i64)
+  (let [global (parse-variable (cast (ptr u8) c"Expect variable name."))]
+    (if (match- TOKEN_EQUAL) (expression) (emit-byte OP_NIL))
+    (consume TOKEN_SEMICOLON (cast (ptr u8) c"Expect ';' after variable declaration."))
+    (define-variable global)))
+(defn expression-statement [] (-> i64)
+  (expression) (consume TOKEN_SEMICOLON (cast (ptr u8) c"Expect ';' after expression.")) (emit-byte OP_POP))
+(defn for-statement [] (-> i64)
+  (begin-scope)
+  (consume TOKEN_LEFT_PAREN (cast (ptr u8) c"Expect '(' after 'for'."))
+  (cond
+    (match- TOKEN_SEMICOLON) 0
+    (match- TOKEN_VAR) (var-declaration)
+    (expression-statement))
+  (let [(mut loop-start) (load (field (current-chunk) count)) (mut exit-jump) -1]
+    (if (not (match- TOKEN_SEMICOLON))
+        (do (expression)
+            (consume TOKEN_SEMICOLON (cast (ptr u8) c"Expect ';' after loop condition."))
+            (store! exit-jump (emit-jump OP_JUMP_IF_FALSE))
+            (emit-byte OP_POP)) 0)
+    (if (not (match- TOKEN_RIGHT_PAREN))
+        (let [body-jump (emit-jump OP_JUMP) increment-start (load (field (current-chunk) count))]
+          (expression) (emit-byte OP_POP)
+          (consume TOKEN_RIGHT_PAREN (cast (ptr u8) c"Expect ')' after for clauses."))
+          (emit-loop (load loop-start))
+          (store! loop-start increment-start)
+          (patch-jump body-jump)) 0)
+    (statement)
+    (emit-loop (load loop-start))
+    (if (!= (load exit-jump) -1) (do (patch-jump (load exit-jump)) (emit-byte OP_POP)) 0)
+    (end-scope)))
+(defn if-statement [] (-> i64)
+  (consume TOKEN_LEFT_PAREN (cast (ptr u8) c"Expect '(' after 'if'."))
+  (expression)
+  (consume TOKEN_RIGHT_PAREN (cast (ptr u8) c"Expect ')' after condition."))
+  (let [then-jump (emit-jump OP_JUMP_IF_FALSE)]
+    (emit-byte OP_POP) (statement)
+    (let [else-jump (emit-jump OP_JUMP)]
+      (patch-jump then-jump) (emit-byte OP_POP)
+      (if (match- TOKEN_ELSE) (statement) 0)
+      (patch-jump else-jump))))
+(defn print-statement [] (-> i64)
+  (expression) (consume TOKEN_SEMICOLON (cast (ptr u8) c"Expect ';' after value.")) (emit-byte OP_PRINT))
+(defn return-statement [] (-> i64)
+  (if (= (load (field (ccomp) kind)) TYPE_SCRIPT) (compile-error (cast (ptr u8) c"Can't return from top-level code.")) 0)
+  (if (match- TOKEN_SEMICOLON) (emit-return)
+      (do (if (= (load (field (ccomp) kind)) TYPE_INITIALIZER) (compile-error (cast (ptr u8) c"Can't return a value from an initializer.")) 0)
+          (expression) (consume TOKEN_SEMICOLON (cast (ptr u8) c"Expect ';' after return value.")) (emit-byte OP_RETURN))))
+(defn while-statement [] (-> i64)
+  (let [loop-start (load (field (current-chunk) count))]
+    (consume TOKEN_LEFT_PAREN (cast (ptr u8) c"Expect '(' after 'while'."))
+    (expression)
+    (consume TOKEN_RIGHT_PAREN (cast (ptr u8) c"Expect ')' after condition."))
+    (let [exit-jump (emit-jump OP_JUMP_IF_FALSE)]
+      (emit-byte OP_POP) (statement) (emit-loop loop-start)
+      (patch-jump exit-jump) (emit-byte OP_POP))))
+(defn synchronize [] (-> i64)
+  (store! (field (parser) panic-mode) false)
+  (loop (if (= (load (field (field (parser) current) kind)) TOKEN_EOF) (break)
+    (if (= (load (field (field (parser) previous) kind)) TOKEN_SEMICOLON) (break)
+      (let [k (load (field (field (parser) current) kind))]
+        (if (or (= k TOKEN_CLASS) (or (= k TOKEN_FUN) (or (= k TOKEN_VAR) (or (= k TOKEN_FOR)
+                (or (= k TOKEN_IF) (or (= k TOKEN_WHILE) (or (= k TOKEN_PRINT) (= k TOKEN_RETURN))))))))
+            (break) (advance-))))))
+  0)
+(defn declaration [] (-> i64)
+  (cond
+    (match- TOKEN_CLASS) (class-declaration)
+    (match- TOKEN_FUN)   (fun-declaration)
+    (match- TOKEN_VAR)   (var-declaration)
+    (statement))
+  (if (load (field (parser) panic-mode)) (synchronize) 0))
+(defn statement [] (-> i64)
+  (cond
+    (match- TOKEN_PRINT) (print-statement)
+    (match- TOKEN_FOR)   (for-statement)
+    (match- TOKEN_IF)    (if-statement)
+    (match- TOKEN_RETURN) (return-statement)
+    (match- TOKEN_WHILE) (while-statement)
+    (match- TOKEN_LEFT_BRACE) (do (begin-scope) (compile-block) (end-scope))
+    (expression-statement)))
+
+(defn compile [(source (ptr u8))] (-> (ptr ObjFunction))
+  (init-scanner source)
+  (let [compiler (alloc-stack Compiler)]
+    (store! (cur-comp-cell) (cast (ptr Compiler) 0))
+    (init-compiler compiler TYPE_SCRIPT)
+    (store! (field (parser) had-error) false)
+    (store! (field (parser) panic-mode) false)
+    (advance-)
+    (loop (if (match- TOKEN_EOF) (break) (declaration)))
+    (let [function (end-compiler)]
+      (if (load (field (parser) had-error)) (cast (ptr ObjFunction) 0) function))))
+
+; ============================ VM ============================================
+(const INTERPRET_OK 0) (const INTERPRET_COMPILE_ERROR 1) (const INTERPRET_RUNTIME_ERROR 2)
+
+(defn frame-fn [(frame (ptr CallFrame))] (-> (ptr ObjFunction)) (load (field (load (field frame closure)) function)))
+(defn frame-chunk [(frame (ptr CallFrame))] (-> (ptr Chunk)) (field (frame-fn frame) chunk))
+
+; runtimeError: print message parts to stderr, then the stack trace, then reset.
+(defn runtime-error-trace [] (-> i64)
+  (w-cstr 2 c"\n")
+  (let [(mut i) (- (load (field (vm) frame-count)) 1)]
+    (loop (if (< (load i) 0) (break)
+      (let [frame (index (field (vm) frames) (load i))
+            function (frame-fn frame)
+            instruction (- (- (cast i64 (load (field frame ip))) (cast i64 (load (field (frame-chunk frame) code)))) 1)]
+        (w-cstr 2 c"[line ") (w-int 2 (load (index (load (field (frame-chunk frame) lines)) instruction))) (w-cstr 2 c"] in ")
+        (if (= (cast i64 (load (field function name))) 0) (w-cstr 2 c"script\n")
+            (do (w-bytes 2 (load (field (load (field function name)) chars)) (load (field (load (field function name)) length))) (w-cstr 2 c"()\n")))
+        (store! i (- (load i) 1))))))
+  (reset-stack) 0)
+(defn runtime-error [(message (ptr u8))] (-> i64) (w-cstr 2 (cast (ptr i8) message)) (runtime-error-trace))
+
+(defn clock-native [(arg-count i64) (args (ptr Value))] (-> Value) (VNumber (/ (cast f64 (clock)) 1000000.0)))
+(defn define-native [(name (ptr u8)) (function (fnptr c [i64 (ptr Value)] Value))] (-> i64)
+  (push (VObj (cast (ptr Obj) (copy-string name (strlen (cast (ptr i8) name))))))
+  (push (VObj (cast (ptr Obj) (new-native function))))
+  (table-set (field (vm) globals) (as-string (load (index (field (vm) stack) 0))) (load (index (field (vm) stack) 1)))
+  (pop) (pop) 0)
+
+(defn is-falsey [(value Value)] (-> bool) (or (is-nil value) (and (is-bool value) (not (as-bool value)))))
+(defn concatenate [] (-> i64)
+  (let [b (as-string (peek 0)) a (as-string (peek 1))
+        length (+ (load (field a length)) (load (field b length)))
+        chars (cast (ptr u8) (reallocate (cast (ptr i8) 0) 0 (+ length 1)))]
+    (memcpy (cast (ptr i8) chars) (cast (ptr i8) (load (field a chars))) (load (field a length)))
+    (memcpy (cast (ptr i8) (index chars (load (field a length)))) (cast (ptr i8) (load (field b chars))) (load (field b length)))
+    (store! (index chars length) (cast u8 0))
+    (let [result (take-string chars length)]
+      (pop) (pop) (push (VObj (cast (ptr Obj) result))) 0)))
+
+; call machinery — each returns bool (success). Failures call runtimeError.
+(defn call-closure [(closure (ptr ObjClosure)) (arg-count i64)] (-> bool)
+  (cond
+    (!= arg-count (load (field (load (field closure function)) arity)))
+      (do (w-cstr 2 c"Expected ") (w-int 2 (load (field (load (field closure function)) arity)))
+          (w-cstr 2 c" arguments but got ") (w-int 2 arg-count) (w-cstr 2 c".") (runtime-error-trace) false)
+    (= (load (field (vm) frame-count)) 64)
+      (do (runtime-error (cast (ptr u8) c"Stack overflow.")) false)
+    (let [frame (index (field (vm) frames) (load (field (vm) frame-count)))]
+      (store! (field (vm) frame-count) (+ (load (field (vm) frame-count)) 1))
+      (store! (field frame closure) closure)
+      (store! (field frame ip) (load (field (field (load (field closure function)) chunk) code)))
+      (store! (field frame slots) (index (load (field (vm) stack-top)) (- 0 (+ arg-count 1))))
+      true)))
+(defn call-value [(callee Value) (arg-count i64)] (-> bool)
+  (if (is-obj callee)
+    (let [k (obj-kind callee)]
+      (cond
+        (= k OBJ_BOUND_METHOD)
+          (let [bound (cast (ptr ObjBoundMethod) (as-obj callee))]
+            (store! (index (load (field (vm) stack-top)) (- 0 (+ arg-count 1))) (load (field bound receiver)))
+            (call-closure (load (field bound method)) arg-count))
+        (= k OBJ_CLASS)
+          (let [klass (cast (ptr ObjClass) (as-obj callee)) initializer (alloc-stack Value)]
+            (store! (index (load (field (vm) stack-top)) (- 0 (+ arg-count 1))) (VObj (cast (ptr Obj) (new-instance klass))))
+            (if (table-get (field klass methods) (load (field (vm) init-string)) initializer)
+                (call-closure (cast (ptr ObjClosure) (as-obj (load initializer))) arg-count)
+                (if (!= arg-count 0)
+                    (do (w-cstr 2 c"Expected 0 arguments but got ") (w-int 2 arg-count) (w-cstr 2 c".") (runtime-error-trace) false)
+                    true)))
+        (= k OBJ_CLOSURE) (call-closure (cast (ptr ObjClosure) (as-obj callee)) arg-count)
+        (= k OBJ_NATIVE)
+          (let [native (load (field (cast (ptr ObjNative) (as-obj callee)) function))
+                result (call-ptr native arg-count (index (load (field (vm) stack-top)) (- 0 arg-count)))]
+            (store! (field (vm) stack-top) (index (load (field (vm) stack-top)) (- 0 (+ arg-count 1))))
+            (push result) true)
+        (do (runtime-error (cast (ptr u8) c"Can only call functions and classes.")) false)))
+    (do (runtime-error (cast (ptr u8) c"Can only call functions and classes.")) false)))
+(defn invoke-from-class [(klass (ptr ObjClass)) (name (ptr ObjString)) (arg-count i64)] (-> bool)
+  (let [method (alloc-stack Value)]
+    (if (not (table-get (field klass methods) name method))
+        (do (w-cstr 2 c"Undefined property '") (w-bytes 2 (load (field name chars)) (load (field name length))) (w-cstr 2 c"'.") (runtime-error-trace) false)
+        (call-closure (cast (ptr ObjClosure) (as-obj (load method))) arg-count))))
+(defn invoke [(name (ptr ObjString)) (arg-count i64)] (-> bool)
+  (let [receiver (peek arg-count)]
+    (if (not (is-obj-kind receiver OBJ_INSTANCE))
+        (do (runtime-error (cast (ptr u8) c"Only instances have methods.")) false)
+        (let [instance (cast (ptr ObjInstance) (as-obj receiver)) value (alloc-stack Value)]
+          (if (table-get (field instance fields) name value)
+              (do (store! (index (load (field (vm) stack-top)) (- 0 (+ arg-count 1))) (load value))
+                  (call-value (load value) arg-count))
+              (invoke-from-class (load (field instance klass)) name arg-count))))))
+(defn bind-method [(klass (ptr ObjClass)) (name (ptr ObjString))] (-> bool)
+  (let [method (alloc-stack Value)]
+    (if (not (table-get (field klass methods) name method))
+        (do (w-cstr 2 c"Undefined property '") (w-bytes 2 (load (field name chars)) (load (field name length))) (w-cstr 2 c"'.") (runtime-error-trace) false)
+        (let [bound (new-bound-method (peek 0) (cast (ptr ObjClosure) (as-obj (load method))))]
+          (pop) (push (VObj (cast (ptr Obj) bound))) true))))
+(defn capture-upvalue [(local (ptr Value))] (-> (ptr ObjUpvalue))
+  (let [(mut prev-upvalue) (cast (ptr ObjUpvalue) 0) (mut upvalue) (load (field (vm) open-upvalues))]
+    (loop (if (and (!= (cast i64 (load upvalue)) 0) (> (cast i64 (load (field (load upvalue) location))) (cast i64 local)))
+              (do (store! prev-upvalue (load upvalue)) (store! upvalue (load (field (load upvalue) next))))
+              (break)))
+    (if (and (!= (cast i64 (load upvalue)) 0) (= (cast i64 (load (field (load upvalue) location))) (cast i64 local)))
+        (load upvalue)
+        (let [created-upvalue (new-upvalue local)]
+          (store! (field created-upvalue next) (load upvalue))
+          (if (= (cast i64 (load prev-upvalue)) 0)
+              (store! (field (vm) open-upvalues) created-upvalue)
+              (store! (field (load prev-upvalue) next) created-upvalue))
+          created-upvalue))))
+(defn close-upvalues [(last (ptr Value))] (-> i64)
+  (loop (if (and (!= (cast i64 (load (field (vm) open-upvalues))) 0)
+                 (>= (cast i64 (load (field (load (field (vm) open-upvalues)) location))) (cast i64 last)))
+            (let [upvalue (load (field (vm) open-upvalues))]
+              (store! (field upvalue closed) (load (load (field upvalue location))))
+              (store! (field upvalue location) (field upvalue closed))
+              (store! (field (vm) open-upvalues) (load (field upvalue next))))
+            (break)))
+  0)
+(defn define-method [(name (ptr ObjString))] (-> i64)
+  (let [method (peek 0) klass (cast (ptr ObjClass) (as-obj (peek 1)))]
+    (table-set (field klass methods) name method) (pop) 0))
+
+; ---- READ_* helpers over the current frame ----
+(defn read-byte [(frame (ptr CallFrame))] (-> i64)
+  (let [b (cast i64 (load (load (field frame ip))))]
+    (store! (field frame ip) (index (load (field frame ip)) 1)) b))
+(defn read-short [(frame (ptr CallFrame))] (-> i64)
+  (store! (field frame ip) (index (load (field frame ip)) 2))
+  (| (<< (cast i64 (load (index (load (field frame ip)) -2))) 8) (cast i64 (load (index (load (field frame ip)) -1)))))
+(defn read-constant [(frame (ptr CallFrame))] (-> Value)
+  (load (index (load (field (field (frame-chunk frame) constants) values)) (read-byte frame))))
+(defn read-string [(frame (ptr CallFrame))] (-> (ptr ObjString)) (as-string (read-constant frame)))
+
+(defn both-numbers [] (-> bool) (and (is-number (peek 0)) (is-number (peek 1))))
+; upvalue at slot of the current frame's closure
+(defn frame-upvalue [(frame (ptr CallFrame)) (slot i64)] (-> (ptr ObjUpvalue))
+  (load (index (load (field (load (field frame closure)) upvalues)) slot)))
+; advance the current frame's ip by delta elements
+(defn jump-ip [(frame (ptr CallFrame)) (delta i64)] (-> i64)
+  (store! (field frame ip) (index (load (field frame ip)) delta)) 0)
+
+(defn run [] (-> i64)
+  (let [(mut frame) (index (field (vm) frames) (- (load (field (vm) frame-count)) 1)) (mut result) -1]
+    (loop
+      (let [instruction (read-byte (load frame))]
+        (cond
+          (= instruction OP_CONSTANT) (do (push (read-constant (load frame))) 0)
+          (= instruction OP_NIL)   (do (push (VNil)) 0)
+          (= instruction OP_TRUE)  (do (push (VBool true)) 0)
+          (= instruction OP_FALSE) (do (push (VBool false)) 0)
+          (= instruction OP_POP)   (do (pop) 0)
+          (= instruction OP_GET_LOCAL) (let [slot (read-byte (load frame))] (push (load (index (load (field (load frame) slots)) slot))) 0)
+          (= instruction OP_SET_LOCAL) (let [slot (read-byte (load frame))] (store! (index (load (field (load frame) slots)) slot) (peek 0)) 0)
+          (= instruction OP_GET_GLOBAL)
+            (let [name (read-string (load frame)) value (alloc-stack Value)]
+              (if (not (table-get (field (vm) globals) name value))
+                  (do (w-cstr 2 c"Undefined variable '") (w-bytes 2 (load (field name chars)) (load (field name length))) (w-cstr 2 c"'.") (runtime-error-trace)
+                      (store! result INTERPRET_RUNTIME_ERROR) (break))
+                  (do (push (load value)) 0)))
+          (= instruction OP_DEFINE_GLOBAL)
+            (let [name (read-string (load frame))] (table-set (field (vm) globals) name (peek 0)) (pop) 0)
+          (= instruction OP_SET_GLOBAL)
+            (let [name (read-string (load frame))]
+              (if (table-set (field (vm) globals) name (peek 0))
+                  (do (table-delete (field (vm) globals) name)
+                      (w-cstr 2 c"Undefined variable '") (w-bytes 2 (load (field name chars)) (load (field name length))) (w-cstr 2 c"'.") (runtime-error-trace)
+                      (store! result INTERPRET_RUNTIME_ERROR) (break)) 0))
+          (= instruction OP_GET_UPVALUE)
+            (let [slot (read-byte (load frame))] (push (load (load (field (frame-upvalue (load frame) slot) location)))) 0)
+          (= instruction OP_SET_UPVALUE)
+            (let [slot (read-byte (load frame))] (store! (load (field (frame-upvalue (load frame) slot) location)) (peek 0)) 0)
+          (= instruction OP_GET_PROPERTY)
+            (if (not (is-obj-kind (peek 0) OBJ_INSTANCE))
+                (do (runtime-error (cast (ptr u8) c"Only instances have properties.")) (store! result INTERPRET_RUNTIME_ERROR) (break))
+                (let [instance (cast (ptr ObjInstance) (as-obj (peek 0))) name (read-string (load frame)) value (alloc-stack Value)]
+                  (if (table-get (field instance fields) name value)
+                      (do (pop) (push (load value)) 0)
+                      (if (not (bind-method (load (field instance klass)) name)) (do (store! result INTERPRET_RUNTIME_ERROR) (break)) 0))))
+          (= instruction OP_SET_PROPERTY)
+            (if (not (is-obj-kind (peek 1) OBJ_INSTANCE))
+                (do (runtime-error (cast (ptr u8) c"Only instances have fields.")) (store! result INTERPRET_RUNTIME_ERROR) (break))
+                (let [instance (cast (ptr ObjInstance) (as-obj (peek 1)))]
+                  (table-set (field instance fields) (read-string (load frame)) (peek 0))
+                  (let [value (pop)] (pop) (push value)) 0))
+          (= instruction OP_GET_SUPER)
+            (let [name (read-string (load frame)) superclass (cast (ptr ObjClass) (as-obj (pop)))]
+              (if (not (bind-method superclass name)) (do (store! result INTERPRET_RUNTIME_ERROR) (break)) 0))
+          (= instruction OP_EQUAL) (let [b (pop) a (pop)] (push (VBool (values-equal a b))) 0)
+          (= instruction OP_GREATER)
+            (if (not (both-numbers)) (do (runtime-error (cast (ptr u8) c"Operands must be numbers.")) (store! result INTERPRET_RUNTIME_ERROR) (break))
+                (let [b (as-number (pop)) a (as-number (pop))] (push (VBool (> a b))) 0))
+          (= instruction OP_LESS)
+            (if (not (both-numbers)) (do (runtime-error (cast (ptr u8) c"Operands must be numbers.")) (store! result INTERPRET_RUNTIME_ERROR) (break))
+                (let [b (as-number (pop)) a (as-number (pop))] (push (VBool (< a b))) 0))
+          (= instruction OP_ADD)
+            (cond
+              (and (is-string (peek 0)) (is-string (peek 1))) (do (concatenate) 0)
+              (both-numbers) (let [b (as-number (pop)) a (as-number (pop))] (push (VNumber (+ a b))) 0)
+              (do (runtime-error (cast (ptr u8) c"Operands must be two numbers or two strings.")) (store! result INTERPRET_RUNTIME_ERROR) (break)))
+          (= instruction OP_SUBTRACT)
+            (if (not (both-numbers)) (do (runtime-error (cast (ptr u8) c"Operands must be numbers.")) (store! result INTERPRET_RUNTIME_ERROR) (break))
+                (let [b (as-number (pop)) a (as-number (pop))] (push (VNumber (- a b))) 0))
+          (= instruction OP_MULTIPLY)
+            (if (not (both-numbers)) (do (runtime-error (cast (ptr u8) c"Operands must be numbers.")) (store! result INTERPRET_RUNTIME_ERROR) (break))
+                (let [b (as-number (pop)) a (as-number (pop))] (push (VNumber (* a b))) 0))
+          (= instruction OP_DIVIDE)
+            (if (not (both-numbers)) (do (runtime-error (cast (ptr u8) c"Operands must be numbers.")) (store! result INTERPRET_RUNTIME_ERROR) (break))
+                (let [b (as-number (pop)) a (as-number (pop))] (push (VNumber (/ a b))) 0))
+          (= instruction OP_NOT) (do (push (VBool (is-falsey (pop)))) 0)
+          (= instruction OP_NEGATE)
+            (if (not (is-number (peek 0))) (do (runtime-error (cast (ptr u8) c"Operand must be a number.")) (store! result INTERPRET_RUNTIME_ERROR) (break))
+                (do (push (VNumber (* -1.0 (as-number (pop))))) 0))
+          (= instruction OP_PRINT) (do (print-value 1 (pop)) (w-cstr 1 c"\n") 0)
+          (= instruction OP_JUMP) (let [offset (read-short (load frame))] (jump-ip (load frame) offset))
+          (= instruction OP_JUMP_IF_FALSE) (let [offset (read-short (load frame))] (if (is-falsey (peek 0)) (jump-ip (load frame) offset) 0))
+          (= instruction OP_LOOP) (let [offset (read-short (load frame))] (jump-ip (load frame) (- 0 offset)))
+          (= instruction OP_CALL)
+            (let [arg-count (read-byte (load frame))]
+              (if (not (call-value (peek arg-count) arg-count)) (do (store! result INTERPRET_RUNTIME_ERROR) (break))
+                  (do (store! frame (index (field (vm) frames) (- (load (field (vm) frame-count)) 1))) 0)))
+          (= instruction OP_INVOKE)
+            (let [method (read-string (load frame)) arg-count (read-byte (load frame))]
+              (if (not (invoke method arg-count)) (do (store! result INTERPRET_RUNTIME_ERROR) (break))
+                  (do (store! frame (index (field (vm) frames) (- (load (field (vm) frame-count)) 1))) 0)))
+          (= instruction OP_SUPER_INVOKE)
+            (let [method (read-string (load frame)) arg-count (read-byte (load frame)) superclass (cast (ptr ObjClass) (as-obj (pop)))]
+              (if (not (invoke-from-class superclass method arg-count)) (do (store! result INTERPRET_RUNTIME_ERROR) (break))
+                  (do (store! frame (index (field (vm) frames) (- (load (field (vm) frame-count)) 1))) 0)))
+          (= instruction OP_CLOSURE)
+            (let [function (cast (ptr ObjFunction) (as-obj (read-constant (load frame)))) closure (new-closure function)]
+              (push (VObj (cast (ptr Obj) closure)))
+              (let [(mut i) 0]
+                (loop (if (>= (load i) (load (field closure upvalue-count))) (break)
+                  (let [is-local (read-byte (load frame)) index-val (read-byte (load frame))]
+                    (if (!= is-local 0)
+                        (store! (index (load (field closure upvalues)) (load i)) (capture-upvalue (index (load (field (load frame) slots)) index-val)))
+                        (store! (index (load (field closure upvalues)) (load i)) (frame-upvalue (load frame) index-val)))
+                    (store! i (+ (load i) 1)))))) 0)
+          (= instruction OP_CLOSE_UPVALUE) (do (close-upvalues (index (load (field (vm) stack-top)) -1)) (pop) 0)
+          (= instruction OP_RETURN)
+            (let [res (pop)]
+              (close-upvalues (load (field (load frame) slots)))
+              (store! (field (vm) frame-count) (- (load (field (vm) frame-count)) 1))
+              (if (= (load (field (vm) frame-count)) 0)
+                  (do (pop) (store! result INTERPRET_OK) (break))
+                  (do (store! (field (vm) stack-top) (load (field (load frame) slots)))
+                      (push res)
+                      (store! frame (index (field (vm) frames) (- (load (field (vm) frame-count)) 1))) 0)))
+          (= instruction OP_CLASS) (do (push (VObj (cast (ptr Obj) (new-class (read-string (load frame)))))) 0)
+          (= instruction OP_INHERIT)
+            (let [superclass (peek 1)]
+              (if (not (is-obj-kind superclass OBJ_CLASS)) (do (runtime-error (cast (ptr u8) c"Superclass must be a class.")) (store! result INTERPRET_RUNTIME_ERROR) (break))
+                  (let [subclass (cast (ptr ObjClass) (as-obj (peek 0)))]
+                    (table-add-all (field (cast (ptr ObjClass) (as-obj superclass)) methods) (field subclass methods))
+                    (pop) 0)))
+          (= instruction OP_METHOD) (do (define-method (read-string (load frame))) 0)
+          0)))
+    (load result)))
+
+(defn interpret [(source (ptr u8))] (-> i64)
+  (let [function (compile source)]
+    (if (= (cast i64 function) 0) INTERPRET_COMPILE_ERROR
+      (do (push (VObj (cast (ptr Obj) function)))
+          (let [closure (new-closure function)]
+            (pop) (push (VObj (cast (ptr Obj) closure))) (call-closure closure 0))
+          (run)))))
+
+; ============================ init / main ===================================
+(defn init-vm [] (-> i64)
+  (reset-stack)
+  (store! (field (vm) objects) (cast (ptr Obj) 0))
+  (store! (field (vm) bytes-allocated) 0)
+  (store! (field (vm) next-gc) 1048576)
+  (store! (field (vm) gray-count) 0)
+  (store! (field (vm) gray-capacity) 0)
+  (store! (field (vm) gray-stack) (cast (ptr (ptr Obj)) 0))
+  (init-table (field (vm) globals))
+  (init-table (field (vm) strings))
+  (store! (field (vm) init-string) (cast (ptr ObjString) 0))
+  (store! (field (vm) init-string) (copy-string (cast (ptr u8) c"init") 4))
+  (define-native (cast (ptr u8) c"clock") (fnptr-of clock-native)) 0)
+
+(extern fopen  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern fseek  :cc c [(ptr i8) i64 i32] (-> i32))
+(extern ftell  :cc c [(ptr i8)] (-> i64))
+(extern rewind :cc c [(ptr i8)] (-> void))
+(extern fread  :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
+(extern fclose :cc c [(ptr i8)] (-> i32))
+
+(defn read-file [(path (ptr i8))] (-> (ptr u8))
+  (let [file (fopen path c"rb")]
+    (if (= (cast i64 file) 0) (do (w-cstr 2 c"Could not open file.\n") (exit (cast i32 74)) (cast (ptr u8) 0))
+      (do
+        (fseek file 0 (cast i32 2))     ; SEEK_END
+        (let [file-size (ftell file)]
+          (rewind file)
+          (let [buffer (cast (ptr u8) (malloc (+ file-size 1)))]
+            (if (= (cast i64 buffer) 0) (do (w-cstr 2 c"Not enough memory to read file.\n") (exit (cast i32 74)) (cast (ptr u8) 0))
+              (let [bytes-read (fread (cast (ptr i8) buffer) 1 file-size file)]
+                (store! (index buffer bytes-read) (cast u8 0))
+                (fclose file)
+                buffer))))))))
+
+(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (init-vm)
+  (let [n (cast i64 argc)]
+    (if (= n 2)
+        (let [source (read-file (load (index argv 1)))
+              result (interpret source)]
+          (cond (= result INTERPRET_COMPILE_ERROR) 65
+                (= result INTERPRET_RUNTIME_ERROR) 70
+                0))
+        (do (w-cstr 2 c"Usage: clox [path]\n") 64))))
