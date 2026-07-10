@@ -62,25 +62,29 @@ everything the viewer needs:
   objects the programmer maintains, no forgetting to register.
 - **Search**: the viewer filters instances by field values because the runtime knows every
   field's name, type, and offset — it's a statically-typed language; the metadata is free.
-- **Watch**: mutate `agent.status` and the viewer's detail pane updates, pushed over a
-  WebSocket the runtime embeds.
-- **Invoke**: click a method in the viewer, fill in typed arguments, run it against the
-  live process.
+- **Watch**: the viewer re-evaluates a pane's expression on an interval (or on focus, or
+  after an action); mutate `agent.status` in the running program and the next re-eval in
+  the detail pane picks it up. There is no push channel — the viewer keeps asking.
+- **Invoke**: click a method in the viewer, fill in typed arguments — that's sugar for
+  evaluating a call expression against the live process.
 
-Concretely, the viewer speaks a small JSON protocol to the embedded server:
+Concretely, the viewer is a REPL client over the live process. The runtime embeds a server
+whose **only** wire operation is `eval`: send an expression or definition in oo-lang itself,
+get back its value (or an error), evaluated against the live heap at a safepoint:
 
 ```json
-→ {"op": "instances", "type": "Agent", "query": "status == Paused"}
-← {"op": "instances", "type": "Agent",
-   "rows": [{"id": "Agent#7", "name": "researcher", "model": "fable-5",
-             "status": "Paused", "conversation": "Conversation#7", "tools": "List<Tool>#3"}]}
-
-→ {"op": "invoke", "target": "Agent#7", "method": "resume", "args": []}
-← {"op": "result", "target": "Agent#7", "value": null}
-← {"op": "changed", "target": "Agent#7", "fields": {"status": "Running"}}
+→ {"id": 7, "source": "Agent.instances()"}
+← {"id": 7, "value": [{"ref": "Agent#3", "type": "Agent"}, {"ref": "Agent#7", "type": "Agent"},
+                       {"ref": "Agent#9", "type": "Agent"}]}
 ```
 
-An ordinary program plus a lens. That's the whole shape of it.
+Every viewer pane is sugar over this one channel: the type index is an eval of instance
+counts, the instance table is an eval of `Agent.instances()`, clicking `resume()` on
+`Agent#7` is an eval of `Agent#7.resume()`, live code change is an eval of a new method
+definition. There is no per-feature op, and no subscription/delta/push machinery sitting
+underneath it — refresh is just re-eval, driven by the client, not the runtime.
+
+An ordinary program plus a REPL. That's the whole shape of it.
 
 ## Why this is not Smalltalk
 
@@ -159,9 +163,9 @@ registry, no instrumentation. These are just its live objects.*
 **1:30 — Drill in.** Click `Agent` → a searchable table of the three instances with their
 fields as columns. Click `researcher` → instance detail: every field, typed; references
 like `conversation: Conversation#2` are links. Click through to the conversation and the
-audience is reading the agent's messages *mid-run*, new ones appearing as the agent
-produces them. Type `status == Waiting` into the instance search and filter agents by a
-field predicate.
+audience is reading the agent's messages *mid-run* — the pane re-evaluates the
+conversation on an interval, so new messages the agent produces show up on the next tick.
+Type `status == Waiting` into the instance search and filter agents by a field predicate.
 
 **2:30 — Poke it.** In `researcher`'s detail pane, the methods are listed with their
 signatures. Click `pause()` → invoke. In the *terminal*, the researcher's status line

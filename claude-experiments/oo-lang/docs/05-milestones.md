@@ -104,53 +104,81 @@ never share a slab.
 counts, searchable instance tables, instance detail — without touching or mutating anything.
 
 **IN**
-- Runtime embeds an HTTP + WebSocket server, on by default, printing
+- Runtime embeds a server (transport TBD by `02-runtime.md` §7's risk note — WebSocket or
+  a simpler long-poll/SSE, that doc's call, not this one's), on by default, printing
   `viewer: http://localhost:7357` (or `--viewer=off` to disable). This is the *only* new
   runtime capability M1 adds beyond M0 — everything else is read access to structures M0
   already built.
-- Wire protocol (subset of the shape in `00-vision.md`), request/response over the WS
-  connection:
+- **The wire protocol is the eval channel, in full, from day one:** request
+  `{"id": <int>, "source": "<oo-lang source text>"}`, response `{"id": <int>, "value":
+  ...}` or `{"id": <int>, "error": "..."}`. There is no `types`/`instances`/`instance` op
+  set distinct from later milestones — M1 does not get its own wire shape that M2/M3 later
+  replace or extend. Every milestone's new capability is a new *kind of source text* the
+  server is willing to run, never a new request/response shape.
   ```json
-  → {"op": "types"}
-  ← {"op": "types", "rows": [{"name": "Agent", "count": 3}, {"name": "Message", "count": 47}]}
+  → {"id": 1, "source": "Type.summary()"}
+  ← {"id": 1, "value": [{"type": "Agent", "count": 3}, {"type": "Message", "count": 47}]}
 
-  → {"op": "instances", "type": "Agent", "query": "status == Paused"}
-  ← {"op": "instances", "type": "Agent",
-     "rows": [{"id": "Agent#7", "name": "researcher", "status": "Paused",
-               "conversation": "Conversation#2"}]}
+  → {"id": 2, "source": "Agent.instances()"}
+  ← {"id": 2, "value": [{"ref": "Agent#7", "type": "Agent", "name": "researcher",
+                          "status": "Paused", "conversation": {"ref": "Conversation#2"}}]}
 
-  → {"op": "instance", "id": "Agent#7"}
-  ← {"op": "instance", "id": "Agent#7", "type": "Agent",
-     "fields": {"name": "researcher", "status": "Paused",
-                "conversation": {"ref": "Conversation#2"}},
-     "methods": [{"name": "pause", "params": [], "returns": "Unit"},
-                 {"name": "resume", "params": [], "returns": "Unit"}]}
+  → {"id": 3, "source": "Agent#7"}
+  ← {"id": 3, "value": {"ref": "Agent#7", "type": "Agent", "name": "researcher",
+                         "status": "Paused", "conversation": {"ref": "Conversation#2"},
+                         "methods": [{"name": "pause", "params": [], "returns": "Unit"},
+                                     {"name": "resume", "params": [], "returns": "Unit"}]}}
   ```
   Class-typed fields serialize as `{"ref": "Type#n"}` (using the M0 identity triple),
-  never inlined — the viewer fetches on click, so instance payloads stay flat and cheap.
-- Query language for `instances`: intentionally tiny. `field == literal`,
-  `field != literal`, numeric `<`/`>`/`<=`/`>=`, string `contains`. No boolean
-  combinators, no nested field paths. This is a search box, not a query planner.
+  never inlined — the viewer fetches on click via a further `eval`, so instance payloads
+  stay flat and cheap. Exact stdlib method names (`Type.summary()`, `.instances()`) are
+  `01-language.md`'s call; the shape of the request/response envelope is what's pinned here.
+- **M1's viewer UI only ever emits canned, UI-generated `source` text — there is no
+  free-form input box yet (that's M2's REPL dock).** The type index sends a fixed
+  summary expression, drilling into a type sends that type's `.instances()` expression,
+  clicking a row sends that instance's own ref expression. The instance-search box compiles
+  down to one of a tiny, fixed family of filter expressions: `field == literal`,
+  `field != literal`, numeric `<`/`>`/`<=`/`>=`, string `contains`, no boolean combinators,
+  no nested field paths — a search box, not a query planner, expressed as generated source
+  text rather than a bespoke query op.
 - Browser UI: type index (name, live count, sparkline/arrow if the count is climbing) →
   click into a searchable instance table (columns = fields) → click a row into an instance
   detail view (every field, typed, refs are links; methods listed with signatures but
   **not clickable yet** — that's M2).
-- Freshness: the client re-fetches (`types`, or the open `instances`/`instance` view) on a
-  fixed short interval (e.g. every 250ms) while that view is open. This is client-driven
-  polling dressed as live update, not server-push-on-mutation — deliberately, because
-  server-push-on-mutation needs write-barrier-style dirty tracking in the interpreter,
-  which is more machinery than M1 needs to earn the "counts are visibly climbing" and
-  "messages appear mid-run" demo beats. It looks identical to the audience.
+- Freshness: the client re-sends the same canned `eval` request on a fixed short interval
+  (e.g. every 250ms) while a view is open, and gets a fresh `value` back each time. This is
+  the client re-asking, not the server noticing a mutation and pushing anything — there is
+  no dirty-bit or write-barrier machinery in the interpreter, and none is needed, because
+  nothing is ever sent that the client didn't just ask for. It looks identical to the
+  audience.
+- **M1's server-side eval gate — hard-enforced by the runtime, not a UI convention.**
+  Because the wire channel already speaks full `eval`, and `eval` can run anything the
+  language can express — including a mutating method call or a redefinition — M1 cannot
+  rely on "the UI only ever sends read expressions" as its safety boundary; nothing stops
+  a different client on the same socket from sending `Agent#7.resume()` or a new method
+  body, and M1 has none of M2's invoke-marshaling or M3's typecheck-and-swap machinery
+  built yet to run one safely. So the server classifies parsed `source` before running
+  anything: a **definition** (`class`, `fn`, `enum` at top level, or a redefinition of an
+  existing method) or an expression whose evaluation would **call a mutating method**
+  (anything of the shape `expr.method(args)` that isn't a plain field read the typechecker
+  already knows is side-effect-free) is refused outright, with a hard error, and nothing
+  runs:
+  ```json
+  → {"id": 4, "source": "Agent#7.resume()"}
+  ← {"id": 4, "error": "mutating eval (method calls, definitions) is disabled until M2 — M1 is read-only"}
+  ```
+  Field reads, `.instances()`-style enumeration, and comparison/filter expressions are
+  permitted; nothing that could mutate state or install new code is, regardless of what
+  the UI happens to offer. This gate is exactly what M2 lifts (for method calls) and M3
+  lifts (for definitions) — see those milestones' IN lists.
 
 **OUT**
-- No invoke, no eval, no mutation from the viewer at all — M1 cannot change program state,
-  full stop. (This makes M1 safe to build with zero concurrency-safety design: reads never
-  race with the interpreter in a way that matters, because slab layout is append-only and
-  a torn read of a not-yet-fully-written slot is bounded by the write being a single
-  pointer-width store per field in practice; if this assumption doesn't hold once M0's
-  layout is finalized, M1 must add a read-side generation check before more mutation-heavy
-  milestones make it worse.)
-- No true event-driven push (see freshness note above) — revisit only if polling proves
+- No invoke UI, no REPL dock, no free-form eval exposed to a person — M1's viewer only ever
+  emits the canned expressions above, and the server-side gate refuses anything else even
+  if it arrives some other way (see IN).
+- Mutating eval (method calls, definitions) hard-refused at the server, per the gate above
+  — not merely absent from the UI.
+- No true server-initiated push of any kind — revisit only if client-driven re-eval proves
   visibly laggy in rehearsal.
 - No auth/access control on the embedded server — PoC assumes localhost, trusted operator.
 
@@ -158,19 +186,28 @@ counts, searchable instance tables, instance detail — without touching or muta
 see the type index with counts, click a type, see a real instance table, type a query into
 the search box and see it filter, click an instance and see every field typed with refs as
 links. Watch a count climb while the program's own loop keeps allocating, with no code in
-the program aware the viewer exists.
+the program aware the viewer exists. Separately, send a hand-crafted `{"id": 99, "source":
+"Agent#7.resume()"}` at the raw socket (bypassing the UI) and confirm the server still
+refuses it — proving the read-only boundary is enforced by the runtime, not by what buttons
+the page happens to show.
 
 **Risk notes**
 - JSON-serializing a `List<T>` field usefully (not just "List<Message>#3, opaque") needs
   a decision: show length + first N elements? A dedicated array-view? Keep it to
   "length + link to a filtered instance table pre-scoped to this list's contents" —
   avoids inventing a second serialization shape for collections.
-- Polling interval is a real tuning knob: too slow and the "climbing counts" beat looks
-  static; too fast and re-serializing a large arena on every tick burns CPU the demo
-  program needs for its own work. Cache a global monotonic "anything mutated" epoch
-  counter bumped on every field write (cheap, one integer increment) so the poll handler
-  can skip re-serialization when nothing changed — the only concession to write-tracking
-  M1 needs, and it's a counter, not a barrier.
+- Re-eval interval is a real tuning knob: too slow and the "climbing counts" beat looks
+  static; too fast and re-running/re-serializing a large arena's `.instances()` on every
+  tick burns CPU the demo program needs for its own work. An interpreter-side global
+  monotonic "anything mutated" counter, bumped on every field write, lets the server
+  short-circuit re-serialization when nothing has changed since the last identical
+  request — a caching optimization inside the eval handler, not a protocol feature; the
+  wire shape and the client's "re-ask, get an answer" behavior are unaffected either way.
+- The mutating-eval gate above needs a real classifier, not a string-matching heuristic —
+  it has to walk the same parsed/typechecked AST the interpreter would run, so "is this a
+  definition" and "does this call resolve to a method with side effects" are answered by
+  the typechecker, not by pattern-matching the source text (which a client could trivially
+  get around with whitespace or aliasing).
 
 ## M2 — Interaction
 
@@ -178,30 +215,41 @@ the program aware the viewer exists.
 viewer, and see the results reflected both in the viewer and in the program's own output.
 
 **IN**
-- `invoke` wire op: `{"op": "invoke", "target": "Agent#7", "method": "resume", "args": []}`
-  → runtime resolves the method on the live instance, runs it, returns
-  `{"op": "result", "target": "Agent#7", "value": null}` followed by a `changed` push
-  listing exactly the fields that differ from the last snapshot sent for that instance.
-  Diffing is scoped to "the instance just invoked on," not a general dirty-tracking
-  system — cheap, and sufficient because invoke is the only mutation source in M2.
-- `eval` wire op for a REPL pane in the viewer: `{"op": "eval", "expr": "Task#3.setPriority(1)"}`
-  → runs one expression against the live process, same result/changed shape as invoke.
-  This is method-call sugar, not a general expression language extension — no new
-  bindings, no `let` in the eval pane, just "call a method or read a field on a known id."
-- Argument marshaling: only primitive-typed parameters (`Int`, `Float`, `Bool`, `String`)
-  are accepted from the wire. A method whose signature includes a class-typed or
-  generic-typed parameter cannot be invoked from the viewer in the PoC.
+- **M1's server-side eval gate is lifted for method calls.** The wire shape doesn't
+  change — still `{"id", "source"}` → `{"id", "value"}`/`{"id", "error"}` — what changes is
+  that the classifier M1 added now *permits* an expression whose evaluation calls a
+  mutating method: `{"id": 5, "source": "Agent#7.resume()"}` → runtime resolves the method
+  on the live instance, runs it, and returns `{"id": 5, "value": null}`. There is no
+  separate `invoke` op distinct from `eval` — a click on `pause()` in the instance detail
+  view is the viewer generating exactly this shape of `source` and sending it down the same
+  channel M1 already speaks; the previously-canned UI now also emits method-call source
+  text, not just reads.
+- **The viewer grows a REPL dock**: a free-form text input that sends whatever the user
+  types as `source`, verbatim, over the same channel — e.g. typing `Task#3.setPriority(1)`
+  in the dock sends `{"id": 6, "source": "Task#3.setPriority(1)"}`. This is not a new
+  wire feature; it's the UI finally exposing the channel with no canned-expression
+  restriction, now that the server permits method calls. It is *not* a general expression
+  language extension — no new bindings, no `let` — one expression per request, evaluated
+  in the context of the running program's classes and live instances. The gate still
+  refuses definitions (redefining a class or method) at this point — see OUT — so the REPL
+  dock's freedom is real but bounded, matching what the server will actually run.
+- Argument marshaling: only primitive-typed literal arguments (`Int`, `Float`, `Bool`,
+  `String`) written directly in the call's source text are accepted. A method whose
+  signature includes a class-typed or generic-typed parameter cannot be invoked from the
+  viewer in the PoC — there's no handle-literal syntax for "pass me that other live
+  instance" yet, and this milestone doesn't add one.
 - **The invoke-safety mechanism** (this milestone's actual hard problem, and the answer
   to the OPEN "how is the viewer's eval/invoke channel safe" question in
   `DECISIONS.md`): the interpreter runs a single OS thread. The bytecode compiler emits a
-  **safepoint check** at every loop back-edge and every call site. A pending invoke/eval
+  **safepoint check** at every loop back-edge and every call site. A pending `eval`
   request is queued; the main interpreter thread services the queue when it hits the next
-  safepoint, runs the invoked method to completion (itself just more bytecode, subject to
-  the same safepoints), then resumes whatever it was doing. No second thread ever touches
-  interpreter state. This is a *proposal*, not a final ruling — `03-live-semantics.md`
-  and `02-runtime.md` own the durable answer; M2 needs *a* working mechanism and this is
-  the one we build first because it needs no lock-free data structures and no GC-safepoint
-  infrastructure that doesn't already have to exist for M0's future GC anyway.
+  safepoint, runs the evaluated expression to completion (itself just more bytecode,
+  subject to the same safepoints), then resumes whatever it was doing. No second thread
+  ever touches interpreter state. This is a *proposal*, not a final ruling —
+  `03-live-semantics.md` and `02-runtime.md` own the durable answer; M2 needs *a* working
+  mechanism and this is the one we build first because it needs no lock-free data
+  structures and no GC-safepoint infrastructure that doesn't already have to exist for
+  M0's future GC anyway.
 - **OPEN, proposed stopgap for concurrency**: the demo needs "agents take turns" to look
   concurrent without real OS threads. M2 ships a cooperative single-threaded turn
   scheduler (a builtin `Task` queue the interpreter drains one bytecode-safepoint-bounded
@@ -211,13 +259,18 @@ viewer, and see the results reflected both in the viewer and in the program's ow
 
 **OUT**
 - No real OS-thread concurrency, no `async`/`await` surface syntax — see the stopgap above.
-- No live code redefinition (M3).
+- **No live code redefinition.** The eval gate still hard-refuses a `source` that parses as
+  a definition (`class`, `fn`/method redefinition, `enum`), exactly as M1 did — M2 only
+  lifts the gate for method calls, not for definitions. Lifting it for definitions, plus
+  the typecheck-against-live-class and method-table-swap machinery that makes doing so
+  safe, is M3's entire IN list.
 - No object-typed or generic-typed invoke arguments from the wire.
 
 **Acceptance demo:** in the viewer's instance detail for `researcher`, click `pause()` →
-in the terminal, the status line flips to `⏸ paused` within a frame. Open the eval pane,
-type `Task#3.setPriority(1)` → the TUI's task list visibly re-sorts. The viewer's own
-`changed` push updates the detail pane without a manual refresh.
+in the terminal, the status line flips to `⏸ paused` within a frame. Open the REPL dock,
+type `Task#3.setPriority(1)` → the TUI's task list visibly re-sorts. Re-opening (or the
+periodic re-eval of) `researcher`'s detail pane shows the updated `status` field — there is
+no separate push event, the pane's next re-eval of `Agent#7` just returns the new value.
 
 **Risk notes**
 - This is the riskiest milestone in the whole plan. Get the safepoint placement wrong
@@ -230,9 +283,11 @@ type `Task#3.setPriority(1)` → the TUI's task list visibly re-sorts. The viewe
   Any blocking operation the demo app performs must be wrapped in a runtime-provided
   primitive that checks the safepoint queue before and after the blocking call — this is
   the concrete shape the OPEN concurrency model needs to eventually generalize.
-- Field-level diffing for `changed` events needs a stable "last sent snapshot" cache per
-  instance per connected client — small, but easy to leak (never evicted, never bounded)
-  if not designed alongside the WS connection lifecycle.
+- The REPL dock is the first place a person, not just the UI, controls `source` text
+  directly. The M1 gate (still active for definitions in M2, per OUT) has to be re-verified
+  against genuinely free-form input, not just the fixed shapes M1's canned UI ever
+  produced — a classifier that only worked because the UI never generated an edge case is
+  not the same as one that's actually sound against arbitrary text.
 
 ## M3 — Live code change
 
@@ -240,13 +295,20 @@ type `Task#3.setPriority(1)` → the TUI's task list visibly re-sorts. The viewe
 running, with the type checker refusing bad edits before they ever reach the interpreter.
 
 **IN**
-- Method-body swap: given source for a new body of `Agent.summarize`, recompile just that
-  method, typecheck its signature against the **existing, already-loaded** class's field
-  table and method table (param types, return type must match exactly — no signature
-  change in M3). If it doesn't typecheck, the swap is refused and the old bytecode keeps
-  running; the viewer/CLI reports the exact type error. If it typechecks, the method
-  table's bytecode pointer for `Agent.summarize` is swapped atomically at the next
-  safepoint (same mechanism M2 built for invoke).
+- **The eval gate is lifted for definitions, the one restriction M1/M2 kept in place.**
+  Live code change is not a new wire feature — it's `eval` of a `source` that happens to be
+  a definition instead of an expression, over the exact same `{"id", "source"}` →
+  `{"id", "value"}`/`{"id", "error"}` channel M1 already speaks: `{"id": 7, "source": "fn
+  summarize() -> String { ... }"}` submitted against `Agent`. Method-body swap: given
+  source for a new body of `Agent.summarize`, recompile just that method, typecheck its
+  signature against the **existing, already-loaded** class's field table and method table
+  (param types, return type must match exactly — no signature change in M3). If it doesn't
+  typecheck, the swap is refused — the response is `{"id": 7, "error": "<exact type
+  error>"}` — and the old bytecode keeps running; nothing about the running program
+  changes. If it typechecks, the method table's bytecode pointer for `Agent.summarize` is
+  swapped atomically at the next safepoint (the same safepoint-queue mechanism M2 built for
+  method-call eval), and the response is `{"id": 7, "value": "method Agent.summarize
+  replaced — next call uses new code"}`.
 - **In-flight-call semantics, pinned for the PoC**: a call to `summarize()` already
   executing when the swap happens finishes on the *old* bytecode — the swap affects only
   calls made after the swap point. This is the only sane cut without a much deeper
@@ -370,9 +432,9 @@ close, no slides, nothing faked except the explicitly-visible `ScriptedModel`.
 | `00-vision.md` beat | Needs |
 |---|---|
 | 0:00 — start program, TUI renders | M0 (interpreter, classes/methods run) + M4 (the actual demo app and its terminal rendering) |
-| 0:30 — open viewer, type index with live counts | M1 (embedded server, `types` op, polling) |
-| 1:30 — drill into instances, search by field, watch messages append mid-run | M1 (instance table, query, instance detail, polling-as-push) |
-| 2:30 — invoke `pause()`, TUI reflects it; eval `setPriority(1)` | M2 (invoke, eval, safepoint mechanism, `changed` push) |
+| 0:30 — open viewer, type index with live counts | M1 (embedded server, eval channel, canned summary eval, client re-eval interval) |
+| 1:30 — drill into instances, search by field, watch messages append mid-run | M1 (instance table, query, instance detail, all as canned eval expressions re-sent on an interval) |
+| 2:30 — invoke `pause()`, TUI reflects it; eval `setPriority(1)` | M2 (mutating eval, REPL dock, safepoint mechanism) |
 | 3:30 — live-edit `summarize()`, typecheck-refuse then accept | M3 (method-body swap, in-flight semantics, redefinition typechecking) |
 | 4:30 — close browser tab, reopen, `Ctrl-C` the TUI | M1 (server survives client disconnect) + M0 (ordinary process semantics, no image) |
 
@@ -401,7 +463,7 @@ thing.
    deliberately ships only the additive-default subset of that design; the fuller
    mechanism is deferred past M4, not abandoned.
 5. **Non-primitive invoke/eval arguments from the viewer (M2).** The wire responds
-   `{"op": "error", "reason": "unsupported arg type Conversation for invoke; only Int/
+   `{"id": <n>, "error": "unsupported arg type Conversation for invoke; only Int/
    Float/Bool/String supported in this build"}`. Never coerced, never null-filled.
 6. **Real OS-thread concurrency / `async`/`await` (M2 stopgap).** If demo or future source
    uses a spawn/async primitive beyond the cooperative turn-queue, it hard-errors `spawn
@@ -411,9 +473,15 @@ thing.
    it's "never disguised": anyone browsing the running demo in the viewer sees
    `ScriptedModel`, not something dressed up to look like a real API integration.
 8. **Invoke stuck behind a non-yielding blocking call (M2 risk, not a normal path).** If a
-   safepoint isn't reached within a timeout, the pending invoke reports
-   `{"op": "error", "reason": "invoke timed out waiting for interpreter safepoint"}`
+   safepoint isn't reached within a timeout, the pending `eval` reports
+   `{"id": <n>, "error": "invoke timed out waiting for interpreter safepoint"}`
    rather than hanging the viewer with no feedback forever.
+9. **Mutating eval before its milestone (M1/M2).** M1 hard-refuses any `source` that would
+   call a mutating method or install a definition; M2 lifts that only for method calls,
+   still refusing definitions. Both refusals are the same shape: `{"id": <n>, "error":
+   "mutating eval (method calls, definitions) is disabled until M2 — M1 is read-only"}` in
+   M1, `{"id": <n>, "error": "live code redefinition is disabled until M3"}` in M2. Never a
+   silent no-op, never a partially-applied definition.
 
 ## OPEN items this document depends on but does not resolve
 

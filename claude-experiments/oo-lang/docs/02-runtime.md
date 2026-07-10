@@ -132,7 +132,7 @@ something every object has to carry itself.
                          ; the viewer a stable id (§5), and to return this slot to the
                          ; free list without a reverse lookup
    (generation u32)      ; bumped when this slot is freed — invalidates viewer handles (§5)
-   (flags      u32)])    ; bit0 live, bit1 gc-marked, bit2 watched-by-viewer (§8)
+   (flags      u32)])    ; bit0 live, bit1 gc-marked (bit2+ reserved)
 
 ; class Agent { name: String, model: String, status: AgentStatus, conversation: Conversation, tools: List<Tool> }
 (defstruct Agent_Instance
@@ -303,12 +303,12 @@ then compare `generation` against what's actually stored there. Mismatch means "
 instance is gone" — a clean, detectable failure mode, not a crash:
 
 ```json
-→ {"op": "instance", "target": "Agent#7"}
-← {"op": "instance", "target": "Agent#7", "live": false}
+→ {"id": 12, "source": "Agent#7"}
+← {"id": 12, "value": {"live": false}}
 ```
 
 Note the honest refinement to `00-vision.md`'s wire examples: the human-visible id stays
-`"Agent#7"` (type name + slot index), but the request/response payload that actually
+`"Agent#7"` (type name + slot index), but the serialized instance-ref value that actually
 crosses the wire carries `generation` too (as a hidden field the viewer round-trips, not
 something a person types) — without it, "click a link, the object was freed and the slot
 reused, you silently see someone else's data" is a real bug, not a corner case, given the
@@ -461,8 +461,9 @@ call") is accurate only when `old-shape` is null. The moment a migration is pend
 is resolved as `instance.header.shape-id == current.shape-id ? shape.methods[slot] :
 old-shape.methods[slot]` — one branch and one indirect load, not a hash lookup, and it
 collapses back to the flat, zero-cost form the instant the drain completes and `old-shape`
-goes null again. This is the same "pay only while it's actually in flight" shape as §8's
-`watched`-bit check: every other type, and this type once its drain finishes, never pays it.
+goes null again. This is the same "pay only while it's actually in flight" shape as §7's
+`safepoint-poll` check: every other type, and this type once its drain finishes, never
+pays it.
 
 **Cost, stated honestly, matching this doc's own convention (§4's enumeration-cost note):**
 a migration is `O(live instances of that type)` for the copy, plus `O(total live objects
@@ -651,17 +652,20 @@ to avoid. So: single-writer discipline on the whole object graph, enforced by co
 — everything that isn't the interpreter thread talks to it through the queue, never
 touches an arena directly.
 
-**The server thread does transport only.** It accepts connections, parses an incoming
-JSON op (`{"op":"instances","type":"Agent",...}`), and pushes a `ViewerRequest` onto a
-bounded queue; it never dereferences an oo-lang pointer itself, because there is no safe
-moment for it to do so — the interpreter could be mutating or the GC could be sweeping the
-exact arena it would read.
+**The server thread does transport only.** It accepts connections and parses an incoming
+`{"id": ..., "source": "..."}` payload — the *only* shape it ever sees; there is no other
+request shape, no op field to switch on — then pushes a `ViewerRequest` onto a bounded
+queue. It never dereferences an oo-lang pointer itself, because there is no safe moment for
+it to do so — the interpreter could be mutating or the GC could be sweeping the exact arena
+it would read.
 
 ```coil
 (defstruct ViewerRequest
-  [(kind (ptr u8)) (kind-len i64)      ; raw JSON body — parsed on the interpreter side
-   (conn (ptr u8))                     ; opaque connection handle, for the reply
-   (next i64)])                        ; CAS-linked queue node, Treiber-stack style
+  [(id          i64)                   ; echoed back verbatim in the response
+   (source      (ptr u8)) (source-len i64)  ; raw source text — parsed/typechecked/run on
+                                             ; the interpreter side, never here
+   (conn        (ptr u8))               ; opaque connection handle, for the reply
+   (next        i64)])                  ; CAS-linked queue node, Treiber-stack style
 
 (defn viewer-enqueue [(req (ptr ViewerRequest))] (-> i64)
   (loop (let [head (atomic-load (queue-head))]
@@ -676,18 +680,28 @@ steady state this check is false almost every time — the cost is in the noise 
 several branches clox's own dispatch already does per instruction.
 
 When a request is pending, the interpreter services it **synchronously, inline in the
-dispatch loop, before executing its next instruction**:
+dispatch loop, before executing its next instruction**: parse `source` as an expression or
+definition, typecheck it against the current generation's class/method tables, then run
+it and serialize whatever it produces back as `value` (or `error`). There is exactly one
+code path here, not a menu of ops — what varies is only what kind of source text comes in:
 
-- **Read-only ops** (`types`, `instances`, `instance`) walk the relevant arena directly
-  (§5's `arena-for-each-live`, or a single `arena-slot-ptr` + generation check) and format
-  a JSON response — safe, because the interpreter is the only thing that ever touches
-  arenas, so there's no concurrent mutation to race against its own read.
-- **`invoke`** resolves the target handle, looks up the `MethodInfo` by name in the target's
-  `TypeInfo`, marshals JSON args into typed stack values per `MethodSig`, and pushes a real
-  `CallFrame` using the exact same machinery `OP_CALL_STATIC` uses — a viewer-triggered
-  `pause()` is indistinguishable, once it's running, from a bytecode-triggered one. It runs
-  to completion before the interpreter returns to whatever bytecode it was executing before
+- **An expression that only reads** (`Agent.instances()`, `Agent#7`, a field access) walks
+  the relevant arena directly (§5's `arena-for-each-live`, or a single `arena-slot-ptr` +
+  generation check) and serializes the resulting value — safe, because the interpreter is
+  the only thing that ever touches arenas, so there's no concurrent mutation to race
+  against its own read.
+- **An expression that calls a method** (`Agent#7.resume()`) resolves the target handle,
+  looks up the `MethodInfo` by name in the target's `TypeInfo`, marshals the evaluated
+  argument values into typed stack values per `MethodSig`, and pushes a real `CallFrame`
+  using the exact same machinery `OP_CALL_STATIC` uses — a viewer-triggered `pause()` is
+  indistinguishable, once it's running, from a bytecode-triggered one. It runs to
+  completion before the interpreter returns to whatever bytecode it was executing before
   the safepoint fired.
+- **A definition** (a new method body, per `03-live-semantics.md`) typechecks against the
+  live class and, if it passes, swaps the method-table entry at this same safepoint; if it
+  fails, the response's `error` carries the type error and nothing about the running
+  program changes. Live code change is not a separate wire feature — it's `eval` of a
+  definition instead of an expression.
 
 This means a viewer invoke and the program's own next instruction are **strictly
 serialized** — never concurrent — so nothing inside the interpreter needs new
@@ -764,26 +778,29 @@ since the gap surfaces first as a runtime-mechanism question.
 
 ## 8. Introspection hooks
 
-Every op in `00-vision.md`'s wire protocol maps onto machinery already built above — this
-section is mostly "here's the lookup," not new design:
+The runtime exposes exactly **one** service to the outside world: `eval`. There is no
+per-feature op table — every viewer pane in `00-vision.md` is sugar over sending
+`{id, source}` and rendering the `{id, value}` (or `{id, error}`) that comes back. What
+follows is "here's what running different shapes of source does with machinery already
+built above," not a new op menu:
 
-| Wire op | Resolves via | Notes |
+| What the viewer sends as `source` | Resolves via | Notes |
 |---|---|---|
-| `types` | walk `type-table`, read `arena.live-count` per `TypeInfo` | O(type count); pushes a delta whenever any `arena-alloc`/`arena-free` fires for a type the client is watching |
-| `instances` (+ `query`) | `TypeInfo` by name → `arena-for-each-live`; evaluate simple field-equality predicates using `FieldInfo.offset`/`kind` — no reflection cost beyond a pointer add, since offsets are static | search is a linear scan over the arena (§5's honest cost); a real query language is `04-viewer.md`'s problem, this doc only guarantees per-field predicates are O(1) to evaluate |
-| `instance` | parse `Type#slot`, `arena-slot-ptr`, compare `generation` | returns `{"live": false}` cleanly on a stale handle (§5) — never a crash |
-| `invoke` | `TypeInfo.methods` by name, `MethodSig` for arg marshalling, push a real `CallFrame` | serialized with the main program via the safepoint queue (§7); pushes a `changed` event afterward if any mutated field is on a `watched` instance |
+| `Agent.instances()` (or any per-type summary the type index needs) | walk `type-table`, read `arena.live-count` per `TypeInfo`, or `TypeInfo` by name → `arena-for-each-live` | O(type count) for a summary, O(live) for a listing; the arena enumeration this whole doc is built around (§4) is exactly what makes this cheap enough to re-run on every eval |
+| a filtered listing (`Agent.instances().filter(...)` or equivalent) | same as above, plus evaluating simple field-equality predicates using `FieldInfo.offset`/`kind` — no reflection cost beyond a pointer add, since offsets are static | search is a linear scan over the arena (§5's honest cost); a real query surface is `04-viewer.md`'s problem, this doc only guarantees per-field predicates are O(1) to evaluate |
+| `Agent#7` / a field read | parse `Type#slot`, `arena-slot-ptr`, compare `generation` | evaluates to a clean `{"live": false}`-shaped value on a stale handle (§5) — never a crash |
+| `Agent#7.resume()` (a method call) | `TypeInfo.methods` by name, `MethodSig` for arg marshalling, push a real `CallFrame` | serialized with the main program via the safepoint queue (§7); the response's `value` is whatever the method returns |
+| a definition (a new method body) | typecheck against the live class, swap the method-table entry at the same safepoint (`03-live-semantics.md`, M3) | a rejected definition returns `{id, error}`; the running program is unaffected |
 
-**`watched` and the `changed` push.** `InstanceHeader.flags` bit2 is set when the viewer
-opens an instance's detail pane (an explicit `watch` op, not shown above — implied by
-`00-vision.md`'s live-update requirement) and cleared when the pane closes. `OP_STORE_FIELD_*`
-checks a single global "any viewer attached" flag first (near-zero cost when no viewer is
-connected — the common case for an ordinary run of the program), and only if that's set,
-checks the target instance's `watched` bit before enqueueing a `changed` event onto the
-outbound side of the same queue. This keeps the cost of being watchable at "one branch per
-field write," paid only while a viewer is actually attached, and "one more branch per
-field write on a watched instance," paid only for the handful of instances someone's
-actually looking at — not a cost that scales with total live object count.
+**There is no dirty-bit, tick, or publish machinery anywhere in this design.** Nothing
+marks an instance "watched," nothing fires when a field is written, and no background
+clock scans for changes. `OP_STORE_FIELD_*` does exactly what §2 already says it does and
+nothing more — nothing about the viewer touches the field-write path at all. A viewer pane
+goes stale the instant something changes in the running program and stays stale until the
+client sends the same `eval` again; refresh is the client re-asking — on an interval timer
+in the browser, on focus, after an action — never the runtime noticing a mutation and
+telling anyone. This is why the safepoint-queue machinery in §7 is the *entire* mechanism:
+there is no second, outbound-push half to build.
 
 **Method invocation from outside the main loop is not a special code path** — it is
 `OP_CALL_STATIC`'s own machinery, entered from the queue-drain point instead of from
@@ -805,8 +822,9 @@ of call, of field access, or of iteration.
   regardless, because `03-live-semantics.md`'s shape migration (field add/remove) is a
   narrower trigger for the identical pass. "Compaction deferred" means "nothing beyond
   migration moves objects yet," not "the rewrite machinery doesn't exist yet."
-- **Query language for `instances` search** (§8): this doc guarantees field predicates are
-  cheap to evaluate; the actual query surface is `04-viewer.md`'s scope.
+- **Query language for instance search** (§8): this doc guarantees field predicates are
+  cheap to evaluate as part of an `eval`; the actual query surface (what expression shape
+  the viewer generates for a search box) is `04-viewer.md`'s scope.
 - **Multiple concurrently-suspended call stacks** (§7): this doc's VM has exactly one
   frame array and one stack; `01-language.md`'s `async`/`await` is treated, for the PoC, as
   never suspending mid-call (option 2 in §7's "One call stack, not N"). A real per-task

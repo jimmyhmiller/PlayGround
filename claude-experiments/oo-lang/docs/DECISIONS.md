@@ -33,9 +33,18 @@ The raw project brief is in `../claude.md` — read it first; this file pins wha
    per-type arenas (sweep = walk the slab; free lists per slab).
 7. **Not Smalltalk:** no image, no baked-in state. You run an ordinary program (ordinary
    process, ordinary stdin/stdout); the viewer attaches as a lens over the live process.
-8. **Viewer: browser UI.** The runtime embeds a small HTTP + WebSocket server; the viewer
-   is HTML/JS served by it. Views: searchable entity-type list → searchable instance list
-   → instance detail → invoke methods → live updates pushed as state changes.
+8. **Viewer: browser UI over a live REPL — the ONLY wire operation is eval.** This is the
+   brief's "maybe actually in REPL", taken literally (Jimmy ruling, emphatic). The running
+   program embeds a server whose sole job is: receive an expression or definition in the
+   language, evaluate it against the live heap (at a safepoint), return the serialized
+   result. Every viewer pane is sugar over evals — type list is eval of instance counts,
+   instance table is eval of `Agent.instances()`, detail is field reads, invoking a method
+   is eval, live code change is eval of a definition (new generation), the REPL dock is
+   just raw access to the same channel. Refresh = re-eval (on interval/focus/after-action).
+   There is NO subscription/delta/dirty-tracking/push protocol, no seq numbers, no
+   coalesced ticks. We are IN the running program inspecting the heap directly, not
+   consuming a message feed. Result serialization must carry instance references as stable
+   ids so the viewer can render them as clickable links.
 9. **Live change is in scope:** redefine a method/class while the program runs; the design
    must say precisely how that interacts with static types and existing instances.
 10. **PoC demo app: an agent TUI.** A terminal app that runs AI agents — entity types like
