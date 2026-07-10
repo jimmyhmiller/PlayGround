@@ -37,6 +37,7 @@
 (import "comptime.coil" :use *)
 (import "expander.coil" :use *)
 (import "codegen_a64.coil" :use *)
+(import "wasm.coil" :use *)
 
 (defn dump-ast-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
   (let [w (stdout)]
@@ -477,6 +478,10 @@
           (do (sb-push-str! (mut sb) out) (sb-push-str! (mut sb) ".o")))
         (sb-str (load sb))))))
 
+(defn wasm-target? [(triple (ptr i8))] (-> bool)
+  (if (icmp-eq (cast i64 triple) 0) false
+    (starts-with (cstr->slice triple) "wasm32-")))
+
 ; `build <file> -o <out> [--link-flag X]...` : emit `<out>.o` then link it into a
 ; native executable with `cc <out>.o -o <out> <link-flags...>`. Mirrors the Rust
 ; `coil build` argv handling (src/main.rs) + link step (src/lib.rs).
@@ -557,7 +562,9 @@
                       (do (sb-push-str! (mut cmdsb) " ")
                           (sb-push-str! (mut cmdsb) (al-get [(slice u8)] (load flags) (load k)))
                           (store! k (iadd (load k) 1)))))) 0))
-            (let [rc (system (slice->cstr a (sb-str (load cmdsb))))]
+            (let [rc (if (wasm-target? (load trip))
+                          (wasm-link-object a obj-cstr out-slice)
+                          (cast i64 (system (slice->cstr a (sb-str (load cmdsb))))))]
               (if (icmp-ne rc 0)
                   (let [w (stderr) code (iand (udiv (cast i64 rc) 256) 255)]
                     (ps w "error: linker/ar failed with exit status: ") (dump-dec w code) (wb w 10) 1)
@@ -945,11 +952,17 @@
 (extern fclose :cc c [(ptr i8)] (-> i32))
 
 (defn d-write-file [(a (ptr Allocator)) (path (slice u8)) (content (slice u8))] (-> i64)
-  (let [f (fopen (slice->cstr a path) (slice->cstr a "w"))]
+  (let [f (fopen (slice->cstr a path) (slice->cstr a "wb"))]
     (if (icmp-eq (cast i64 f) 0)
         (do (ps (stderr) "error: cannot write ") (ps (stderr) path) (wb (stderr) 10) 1)
       (do (fwrite (cast (ptr i8) (slice-data [u8] content)) 1 (slice-len [u8] content) f)
           (fclose f) 0))))
+
+; Final Wasm linking is a Coil binary transformation, not a child process.
+(defn wasm-link-object [(a (ptr Allocator)) (obj-path (ptr i8)) (out-path (slice u8))] (-> i64)
+  (match (wasm-finalize a (read-file a obj-path))
+    (Ok [module] (d-write-file a out-path module))
+    (Err [why] (do (ps (stderr) why) (wb (stderr) 10) 1))))
 
 ; `new <name>` — scaffold Coil.toml + src/main.coil (mirrors Rust cmd_new).
 (defn new-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)

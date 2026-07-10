@@ -1,0 +1,182 @@
+; selfhost/src/wasm.coil -- single-object WebAssembly finalizer.
+;
+; LLVM emits a relocatable Wasm object. For one Coil compilation unit its code
+; and data indices are already final; the remaining object-only work is to turn
+; LLVM's imported linear memory into a defined memory, export main, and discard
+; linking metadata. This deliberately has no C++ API and never launches a linker.
+(module wasm)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "control.coil" :use *)
+
+(defstruct WasmReader [(data (slice u8)) (pos i64)])
+(defstruct WasmImports [(items (ArrayList u8)) (count i64) (mem (ArrayList u8)) (has-mem bool)])
+
+(defn wb! [(b (mut (ArrayList u8))) (v i64)] (-> i64)
+  (al-push! (mut b) (cast u8 (iand v 255))) 0)
+
+(defn wbytes! [(b (mut (ArrayList u8))) (s (slice u8))] (-> i64)
+  (let [n (slice-len s) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wb! (mut b) (cast i64 (slice-get s (load i))))
+          (store! i (iadd (load i) 1))))))
+  0)
+
+(defn wuleb! [(b (mut (ArrayList u8))) (v0 i64)] (-> i64)
+  (let [(mut v) v0]
+    (loop
+      (let [byte (iand (load v) 127)
+            rest (cast i64 (ishr (cast u64 (load v)) (cast u64 7)))]
+        (if (icmp-eq rest 0)
+            (do (wb! (mut b) byte) (break))
+          (do (wb! (mut b) (ior byte 128)) (store! v rest) 0))))
+  0))
+
+(defn wr-byte [(r (ptr WasmReader))] (-> i64)
+  (let [p (load (field r pos))]
+    (store! (field r pos) (iadd p 1))
+    (cast i64 (slice-get (load (field r data)) p))))
+
+(defn wr-uleb [(r (ptr WasmReader))] (-> i64)
+  (let [(mut shift) 0 (mut out) 0]
+    (loop
+      (let [byte (wr-byte r)]
+        (store! out (ior (load out) (ishl (iand byte 127) (load shift))))
+        (if (icmp-eq (iand byte 128) 0) (break)
+          (store! shift (iadd (load shift) 7)))))
+    (load out)))
+
+(defn wr-bytes [(r (ptr WasmReader)) (n i64)] (-> (slice u8))
+  (let [lo (load (field r pos))]
+    (store! (field r pos) (iadd lo n))
+    (subslice (load (field r data)) lo (iadd lo n))))
+
+(defn wr-name [(r (ptr WasmReader))] (-> (slice u8)) (wr-bytes r (wr-uleb r)))
+
+(defn wr-skip-limits [(r (ptr WasmReader))] (-> i64)
+  (let [flags (wr-uleb r)]
+    (wr-uleb r)
+    (if (icmp-ne (iand flags 1) 0) (wr-uleb r) 0)
+    0))
+
+(defn wasm-section! [(out (mut (ArrayList u8))) (id i64) (payload (slice u8))] (-> i64)
+  (wb! (mut out) id) (wuleb! (mut out) (slice-len payload)) (wbytes! (mut out) payload) 0)
+
+(defn wasm-custom-name [(payload (slice u8)) (a (ptr Allocator))] (-> (slice u8))
+  (let [r (alloc-stack WasmReader)]
+    (store! r (zeroed WasmReader)) (store! (field r data) payload)
+    (wr-name r)))
+
+; Read main's function index from the linking symbol table. The object-format
+; symbols are enough here because this finalizer accepts one object only.
+(defn wasm-main-index [(obj (slice u8)) (a (ptr Allocator))] (-> i64)
+  (let [r (alloc-stack WasmReader) n (slice-len obj) (mut answer) -1]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (or (icmp-ge (load (field r pos)) n) (icmp-ne (load answer) -1)) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 0)
+            (let [cr (alloc-stack WasmReader)]
+              (store! cr (zeroed WasmReader)) (store! (field cr data) payload)
+              (let [name (wr-name cr)]
+                (if (str-eq name "linking")
+                    (do
+                      (wr-uleb cr)
+                      (loop (if (icmp-ge (load (field cr pos)) (slice-len payload)) (break)
+                        (let [kind (wr-byte cr) len (wr-uleb cr) sub (wr-bytes cr len)]
+                          (if (icmp-eq kind 8)
+                              (let [sr (alloc-stack WasmReader)]
+                                (store! sr (zeroed WasmReader)) (store! (field sr data) sub)
+                                ; LLVM puts the entry function first in Coil's one-object symbol
+                                ; table. Reject anything else instead of guessing an index.
+                                (if (icmp-eq (wr-uleb sr) 0)
+                                    (store! answer -2)
+                                  (let [sk (wr-byte sr) flags (wr-uleb sr)]
+                                    (if (icmp-ne sk 0)
+                                        (store! answer -2)
+                                      (let [idx (wr-uleb sr)
+                                            nm (if (or (icmp-eq (iand flags 16) 0) (icmp-ne (iand flags 64) 0)) (wr-name sr) "")]
+                                        (if (str-eq nm "main") (store! answer idx) (store! answer -2)))))))
+                            0))))
+                      0)
+                  0)))
+          0))))
+    (load answer)))
+
+; Parse and rebuild the import section. LLVM's relocatable output imports one
+; memory as env.__linear_memory; final modules define that exact memory instead.
+(defn wasm-imports [(payload (slice u8)) (a (ptr Allocator))] (-> WasmImports)
+  (let [r (alloc-stack WasmReader) out (alloc-stack WasmImports)]
+    (store! r (zeroed WasmReader)) (store! (field r data) payload)
+    (store! out (zeroed WasmImports))
+    (store! (field out items) (al-new [u8] a)) (store! (field out mem) (al-new [u8] a))
+    (let [count (wr-uleb r) (mut i) 0]
+      (loop (if (icmp-ge (load i) count) (break)
+        (let [start (load (field r pos)) mod (wr-name r) name (wr-name r) kind (wr-byte r) type-start (load (field r pos))]
+          (if (icmp-eq kind 0) (wr-uleb r)
+            (if (icmp-eq kind 1) (do (wr-byte r) (wr-skip-limits r))
+              (if (icmp-eq kind 2) (wr-skip-limits r)
+                (if (icmp-eq kind 3) (do (wr-byte r) (wr-byte r))
+                  (wr-uleb r)))))
+          (let [end (load (field r pos))]
+            (if (and (icmp-eq kind 2) (and (str-eq mod "env") (str-eq name "__linear_memory")))
+                (do (wbytes! (mut (field out mem)) (subslice payload type-start end))
+                    (store! (field out has-mem) true) 0)
+              (do (wbytes! (mut (field out items)) (subslice payload start end))
+                  (store! (field out count) (iadd (load (field out count)) 1)) 0)))
+          (store! i (iadd (load i) 1)))))
+    (load out))))
+
+(defn wasm-import-payload [(a (ptr Allocator)) (im WasmImports)] (-> (slice u8))
+  (let [(mut b) (al-new [u8] a)]
+    (wuleb! (mut b) (load (field im count)))
+    (wbytes! (mut b) (al-slice [u8] (load (field im items))))
+    (al-slice [u8] (load b))))
+
+(defn wasm-memory-payload [(a (ptr Allocator)) (im WasmImports)] (-> (slice u8))
+  (let [(mut b) (al-new [u8] a)]
+    (wuleb! (mut b) 1) (wbytes! (mut b) (al-slice [u8] (load (field im mem))))
+    (al-slice [u8] (load b))))
+
+(defn wasm-export-payload [(a (ptr Allocator)) (main-index i64) (has-mem bool)] (-> (slice u8))
+  (let [(mut b) (al-new [u8] a)]
+    (wuleb! (mut b) (if has-mem 2 1))
+    (wuleb! (mut b) 4) (wbytes! (mut b) "main") (wb! (mut b) 0) (wuleb! (mut b) main-index)
+    (if has-mem (do (wuleb! (mut b) 6) (wbytes! (mut b) "memory") (wb! (mut b) 2) (wuleb! (mut b) 0)) 0)
+    (al-slice [u8] (load b))))
+
+; Convert one LLVM Wasm object into an executable module. Deliberately reject
+; objects whose linking table does not follow the simple single-unit form above.
+(defn wasm-finalize [(a (ptr Allocator)) (obj (slice u8))] (-> (Result (slice u8) (slice u8)))
+  (if (or (icmp-lt (slice-len obj) 8)
+          (not (and (icmp-eq (slice-get obj 0) (cast u8 0)) (and (icmp-eq (slice-get obj 1) (cast u8 97)) (and (icmp-eq (slice-get obj 2) (cast u8 115)) (icmp-eq (slice-get obj 3) (cast u8 109)))))))
+      (Err "wasm: LLVM did not emit a Wasm object")
+    (let [main-index (wasm-main-index obj a)]
+      (if (icmp-lt main-index 0) (Err "wasm: cannot find main in the object symbol table")
+        (let [r (alloc-stack WasmReader) (mut out) (al-new [u8] a) (mut im) (zeroed WasmImports)
+              (mut have-imports) false (mut put-mem) false (mut put-exports) false n (slice-len obj)]
+          (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+          (wbytes! (mut out) (subslice obj 0 8))
+          (loop (if (icmp-ge (load (field r pos)) n) (break)
+            (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+              (if (and (not (load put-mem)) (or (icmp-eq id 6) (or (icmp-eq id 7) (or (icmp-eq id 10) (icmp-eq id 12)))))
+                  (do (if (and (load have-imports) (load (field im has-mem))) (wasm-section! (mut out) 5 (wasm-memory-payload a (load im))) 0)
+                      (store! put-mem true) 0) 0)
+              (if (and (not (load put-exports)) (or (icmp-eq id 7) (or (icmp-eq id 10) (icmp-eq id 12))))
+                  (do (wasm-section! (mut out) 7 (wasm-export-payload a main-index (and (load have-imports) (load (field im has-mem)))) )
+                      (store! put-exports true) 0) 0)
+              (if (icmp-eq id 2)
+                  (do (store! im (wasm-imports payload a)) (store! have-imports true)
+                      (let [clean (wasm-import-payload a (load im))]
+                        (if (icmp-gt (slice-len clean) 1) (wasm-section! (mut out) 2 clean) 0)))
+                (if (icmp-eq id 7) 0
+                  (if (icmp-eq id 0)
+                      (let [nm (wasm-custom-name payload a)]
+                        (if (or (str-eq nm "linking") (starts-with nm "reloc.")) 0 (wasm-section! (mut out) id payload)))
+                    (wasm-section! (mut out) id payload)))))))
+          (if (not (load put-mem)) (if (and (load have-imports) (load (field im has-mem))) (wasm-section! (mut out) 5 (wasm-memory-payload a (load im))) 0) 0)
+          (if (not (load put-exports)) (wasm-section! (mut out) 7 (wasm-export-payload a main-index (and (load have-imports) (load (field im has-mem)))) ) 0)
+          (Ok (al-slice [u8] (load out))))))))

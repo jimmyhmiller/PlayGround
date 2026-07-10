@@ -1,0 +1,15 @@
+[package]
+name = "livetype"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "livetype-demo"
+path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+

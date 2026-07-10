@@ -8,7 +8,8 @@
 A dense, practical reference for writing correct Coil. Coil is a low-level,
 Lisp-syntax, ahead-of-time language: s-expressions, a macro system, and a type
 system where **calling convention** and **allocation** are first-class. It emits
-a native object and links with the system `cc`. Read this end to end before
+a native object and links with the system `cc`; the `wasm32-unknown-unknown`
+target instead writes a WebAssembly module directly. Read this end to end before
 writing Coil; most mistakes come from the gotchas marked ⚠.
 
 The compiler is self-contained: the prelude and standard library are bundled
@@ -18,6 +19,7 @@ inside it, so `coil` and every `(import \"…\")` below work from any directory.
 
     coil run   file.coil                 # build + run a single file
     coil build file.coil -o out          # build a native executable
+    coil build file.coil --target wasm32-unknown-unknown -o out.wasm
     coil run                             # build+run the ./Coil.toml project
     coil run -- arg1 arg2                # forward args to the program
     coil build file.coil -lm             # link a library (-l<name>)
@@ -31,6 +33,12 @@ imported must start with `(module NAME)`. `Coil.toml`:
     entry = \"main.coil\"      # default src/main.coil
     [link]
     libs = [\"m\"]             # -> -lm
+
+The Wasm target produces an instantiable module and exports `main` (and its
+linear `memory`). It is a single-Coil-program target: imports within the program
+are compiled normally, but external C functions and native libraries cannot be
+linked into the module. The compiler performs the final Wasm-object conversion
+itself; this target does not invoke a linker process.
 
 ## Modules & imports
 

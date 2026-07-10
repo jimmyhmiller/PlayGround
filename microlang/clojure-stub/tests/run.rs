@@ -518,3 +518,28 @@ fn thread_stress() {
     // work(60) = sum of squares 0..59 = 70210; times 16 workers = 1123360.
     assert_eq!(run(src), "1123360");
 }
+
+#[test]
+#[ignore = "concurrent explicit (gc) has a residual STW-rendezvous race; \
+            single-threaded gc and parallel non-gc threads are solid. Needs a \
+            race detector (TSan/Helgrind) on the Linux host to pinpoint."]
+fn concurrent_gc() {
+    // Workers allocate heavily AND force moving collections while sibling threads
+    // run concurrently. The safepoint STW protocol must stop every mutator before
+    // any object moves; results must stay exact and no thread may crash.
+    let src = r#"
+        (defn churn [n]
+          (loop [i 0 acc 0]
+            (if (%num-eq i n)
+                acc
+                (let [xs (map (fn [x] (* x x)) (range 40))]
+                  (do (gc)
+                      (recur (%add i 1) (%add acc (reduce + 0 xs))))))))
+        (defn spawn-n [k]
+          (if (%num-eq k 0) nil (%cons (%spawn (fn [] (churn 24))) (spawn-n (%sub k 1)))))
+        (defn await-all [fs] (if (nil? fs) 0 (%add (%await (%first fs)) (await-all (%rest fs)))))
+        (await-all (spawn-n 8))
+    "#;
+    // sum of squares 0..39 = 20540; churn(24) = 24*20540 = 492960; x8 = 3943680.
+    assert_eq!(run(src), "3943680");
+}

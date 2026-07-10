@@ -55,7 +55,7 @@
         targetout (alloc-stack (ptr i8))
         errout    (alloc-stack (ptr i8))]
     ; AsmPrinter init (targets themselves were initialized inside codegen-module).
-    (LLVMInitializeAArch64AsmPrinter) (LLVMInitializeX86AsmPrinter)
+    (LLVMInitializeAArch64AsmPrinter) (LLVMInitializeX86AsmPrinter) (LLVMInitializeWebAssemblyAsmPrinter)
     (LLVMGetTargetFromTriple triple targetout errout)
     (let [tm  (LLVMCreateTargetMachine (load targetout) triple c"generic" c"" 3 2 0)
           pbo (LLVMCreatePassBuilderOptions)

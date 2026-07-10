@@ -139,6 +139,21 @@ impl std::ops::IndexMut<usize> for Heap {
 /// this panics loudly rather than dangling — a clear error, not UB.
 const TABLE_CAP: usize = 1 << 20;
 
+/// Per-mutator-thread state the STW collector needs: where a parked thread
+/// publishes its GC roots. When a thread reaches a safepoint during a GC request
+/// it copies its shadow stack into `roots` and its live environment into `env`,
+/// flips `parked`, and waits; the collector rewrites `roots` in place (and the
+/// `env`'s frame cells) and the thread copies the rewritten roots back on resume.
+pub(crate) struct MutatorState {
+    pub(crate) roots: Mutex<Vec<u64>>,
+    /// The thread's whole DYNAMIC activation chain of environments (one per live
+    /// function call), not just the innermost — a moving collector must trace
+    /// every live frame, and a deep caller's env is not reachable from the
+    /// callee's lexical parent chain.
+    pub(crate) envs: Mutex<Vec<Locals>>,
+    pub(crate) parked: std::sync::atomic::AtomicBool,
+}
+
 /// The mutable dispatch tables, guarded by one lock. `resolve` copies a `u64`
 /// impl out and drops the guard before the caller invokes it, so no lock is held
 /// across a method call (no reentrancy).
@@ -176,7 +191,23 @@ pub struct Shared<M: ValueModel> {
     pub(crate) tables: Mutex<Tables>,
     apply_fn: AtomicU64, // Sym+1, or 0 for None
     escape_tags: AtomicU64,
+    /// Set when a thread requests a stop-the-world collection; every other
+    /// mutator parks at its next safepoint until it clears.
+    pub(crate) gc_requested: std::sync::atomic::AtomicBool,
+    /// Every live mutator handle, so the collector can find + rewrite all roots.
+    pub(crate) mutators: Mutex<Vec<Arc<MutatorState>>>,
     _pd: PhantomData<fn() -> M>,
+}
+
+/// Create + register a fresh mutator root-slot in the shared registry.
+fn register_mutator<M: ValueModel>(shared: &Arc<Shared<M>>) -> Arc<MutatorState> {
+    let me = Arc::new(MutatorState {
+        roots: Mutex::new(Vec::new()),
+        envs: Mutex::new(Vec::new()),
+        parked: std::sync::atomic::AtomicBool::new(false),
+    });
+    shared.mutators.lock().unwrap().push(me.clone());
+    me
 }
 
 // SAFETY: every field is accessed under the discipline documented on `Shared`:
@@ -193,7 +224,22 @@ pub struct Runtime<M: ValueModel> {
     /// The shadow stack: this THREAD's GC root set for transient values.
     /// Per-thread (not shared) — each mutator handle owns its own.
     pub(crate) shadow: Vec<u64>,
+    /// This thread's dynamic env stack: one entry per active function call, so a
+    /// collection traces every live frame in the whole call chain (see `invoke`,
+    /// which pushes/pops it). Published to `me.envs` when the thread parks.
+    pub(crate) env_stack: Vec<Locals>,
+    /// This thread's slot in the STW registry (where it publishes roots to park).
+    pub(crate) me: Arc<MutatorState>,
     _pd: PhantomData<fn() -> M>,
+}
+
+impl<M: ValueModel> Drop for Runtime<M> {
+    fn drop(&mut self) {
+        // Deregister this thread's root slot so a future collector won't wait on
+        // a thread that no longer exists.
+        let mut ms = self.shared.mutators.lock().unwrap();
+        ms.retain(|m| !Arc::ptr_eq(m, &self.me));
+    }
 }
 
 impl<M: ValueModel> Runtime<M> {
@@ -217,21 +263,26 @@ impl<M: ValueModel> Runtime<M> {
             }),
             apply_fn: AtomicU64::new(0),
             escape_tags: AtomicU64::new(0),
+            gc_requested: std::sync::atomic::AtomicBool::new(false),
+            mutators: Mutex::new(Vec::new()),
             _pd: PhantomData,
         };
         // Pre-size the global array to its reserved cap so its base is stable and
         // slots exist for every future symbol (index == Sym).
         let mut slots = Vec::with_capacity(TABLE_CAP);
         slots.extend((0..TABLE_CAP).map(|_| AtomicU64::new(GLOBAL_UNBOUND)));
-        let shared = Shared { global_slots: slots, ..shared };
-        Runtime { shared: Arc::new(shared), shadow: Vec::new(), _pd: PhantomData }
+        let shared = Arc::new(Shared { global_slots: slots, ..shared });
+        let me = register_mutator(&shared);
+        Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), me, _pd: PhantomData }
     }
 
     /// A fresh mutator handle for another OS thread, sharing this runtime's heap,
     /// globals, interner, and dispatch. The new handle has its OWN (empty) shadow
-    /// stack. This is what `spawn`/`future` hands to a `std::thread`.
+    /// stack and its own STW registry slot. This is what `spawn`/`future` hands to
+    /// a `std::thread`.
     pub fn thread_handle(&self) -> Self {
-        Runtime { shared: self.shared.clone(), shadow: Vec::new(), _pd: PhantomData }
+        let me = register_mutator(&self.shared);
+        Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), me, _pd: PhantomData }
     }
 
     // ── heap access (lock-free reads to stable addresses) ───
@@ -601,6 +652,10 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Int(i) = self.decode(args[1]) else {
                     panic!("vector-set!: index must be an int");
                 };
+                // In-place heap mutation MUST take the heap lock: without it, this
+                // `&mut Heap` aliases a concurrent `alloc`'s `&mut Heap` (data-race
+                // UB), and it must never overlap a collection.
+                let _g = self.shared.heap_lock.lock().unwrap();
                 let Obj::Vector(elems) = &mut self.heap_mut()[id as usize] else {
                     panic!("vector-set!: not a vector");
                 };

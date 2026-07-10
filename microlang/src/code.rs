@@ -132,12 +132,30 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 M::R::enc_ref(id)
             }
             Ir::Call(f, args) => {
+                // GC safepoint: a call boundary holds no `&Obj` borrow, so this is
+                // a safe place to park for a stop-the-world collection on another
+                // thread. `locals` is published so the collector traces our env.
+                rt.safepoint(locals);
+                // Precise rooting: an already-evaluated callee / earlier argument
+                // is a bare `u64` that a collection (triggered by ANOTHER thread's
+                // safepoint reached while we evaluate a LATER argument) would
+                // relocate. Publish each on the shadow stack and re-read after.
                 let fv = top.eval_ir(top, rt, f, locals);
-                let argv: Vec<u64> = args
-                    .iter()
-                    .map(|a| top.eval_ir(top, rt, a, locals))
-                    .collect();
-                top.invoke(top, rt, fv, &argv)
+                let base = rt.push_root(fv);
+                for a in args {
+                    let v = top.eval_ir(top, rt, a, locals);
+                    rt.push_root(v);
+                }
+                let fvr = rt.root_get(base);
+                let argv: Vec<u64> = (1..=args.len()).map(|i| rt.root_get(base + i)).collect();
+                rt.truncate_roots(base);
+                // Record this caller's env on the dynamic env stack so a collection
+                // that fires deep inside the callee traces THIS frame's live locals
+                // too (a callee's lexical parent chain does not reach its caller).
+                rt.env_stack.push(locals.clone());
+                let r = top.invoke(top, rt, fvr, &argv);
+                rt.env_stack.pop();
+                r
             }
             // The GC safepoint: the backend holds the live env, so it passes it
             // to `collect`. Frames are `Rc` with `Cell` slots, so `locals` stays
@@ -160,15 +178,28 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 let slot = std::sync::Arc::new(std::sync::Mutex::new(
                     crate::value::FutureSlot { handle: None, result: None },
                 ));
-                let slot2 = slot.clone();
+                let slot_worker = slot.clone();
+                let slot_obj = slot.clone();
                 let handle = std::thread::spawn(move || {
                     let cs = TreeWalk;
                     let mut crt = child;
-                    cs.invoke(&cs, &mut crt, f, &[])
+                    let r = cs.invoke(&cs, &mut crt, f, &[]);
+                    // Publish the result into the shared slot BEFORE the worker's
+                    // handle drops (deregistering it), so it is GC-rooted via the
+                    // reachable Future object (scan_obj forwards it).
+                    slot_worker.lock().unwrap().result = Some(r);
+                    r
                 });
                 slot.lock().unwrap().handle = Some(handle);
-                let id = rt.alloc(Obj::Future(slot2));
+                let id = rt.alloc(Obj::Future(slot_obj));
                 M::R::enc_ref(id)
+            }
+            // `(%await fut)` — backend-handled so it can publish this thread's
+            // roots + park while blocked on the join (a concurrent collector can
+            // then proceed). (The plain-`prim` `Await` is the single-thread path.)
+            Ir::Prim(Prim::Await, args) => {
+                let fut = top.eval_ir(top, rt, &args[0], locals);
+                rt.await_future(fut, locals)
             }
             // `(%callec f)`: call f with a fresh escape continuation. Invoking
             // the continuation unwinds (a panic carrying the tag) back here; f
@@ -237,10 +268,15 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 }
             }
             Ir::Prim(op, args) => {
-                let argv: Vec<u64> = args
-                    .iter()
-                    .map(|a| top.eval_ir(top, rt, a, locals))
-                    .collect();
+                // Precise rooting of already-evaluated args across the remaining
+                // arg evals (which may safepoint) — see the `Call` arm.
+                let base = rt.root_depth();
+                for a in args {
+                    let v = top.eval_ir(top, rt, a, locals);
+                    rt.push_root(v);
+                }
+                let argv: Vec<u64> = (0..args.len()).map(|i| rt.root_get(base + i)).collect();
+                rt.truncate_roots(base);
                 rt.prim(*op, &argv)
             }
             Ir::DefMethod { name, ty, imp } => {
@@ -249,10 +285,14 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 rt.encode(Val::Nil)
             }
             Ir::Dispatch { site, method, args } => {
-                let argv: Vec<u64> = args
-                    .iter()
-                    .map(|a| top.eval_ir(top, rt, a, locals))
-                    .collect();
+                // Precise rooting of already-evaluated args (see the `Call` arm).
+                let base = rt.root_depth();
+                for a in args {
+                    let v = top.eval_ir(top, rt, a, locals);
+                    rt.push_root(v);
+                }
+                let argv: Vec<u64> = (0..args.len()).map(|i| rt.root_get(base + i)).collect();
+                rt.truncate_roots(base);
                 let ty = rt
                     .type_of(argv[0])
                     .unwrap_or_else(|| panic!("dispatch: receiver is not a record"));

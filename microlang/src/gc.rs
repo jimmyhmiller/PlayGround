@@ -68,17 +68,127 @@ impl<M: ValueModel> Runtime<M> {
 
     /// A moving collection. `live_env` is the currently executing environment
     /// (the safepoint's live frame chain); its cells are rewritten in place.
+    /// STOP-THE-WORLD: every OTHER live mutator is brought to a safepoint and
+    /// parked (publishing its roots) before any object moves.
     pub fn collect(&mut self, live_env: &Locals) {
-        self.collect_inner(live_env, None);
+        self.stw_collect(live_env, None);
     }
 
     /// A moving collection from a `CekMachine` safepoint: additionally roots the
-    /// live continuation `live_kont` (its `done` cells and captured frames), so a
-    /// collection that happens while a continuation is live or captured relocates
-    /// it correctly. This is the moving GC composed with the full-continuation
-    /// tier — the combination the 45-way matrix deliberately left out.
+    /// live continuation `live_kont` (its `done` cells and captured frames).
     pub fn collect_cek(&mut self, live_env: &Locals, live_kont: &Arc<Kont>) {
-        self.collect_inner(live_env, Some(live_kont));
+        self.stw_collect(live_env, Some(live_kont));
+    }
+
+    /// The stop-the-world rendezvous around a collection: request a stop, wait
+    /// for all sibling mutators to park at a safepoint (so no one is reading or
+    /// mutating the heap), collect, then release them. One collector at a time
+    /// (`gc_lock`). The requesting thread scans its OWN live roots directly; the
+    /// parked threads' roots come from their published slots.
+    fn stw_collect(&mut self, live_env: &Locals, live_kont: Option<&Arc<Kont>>) {
+        use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+        let shared = self.shared.clone();
+        // Claim the collector role with ONE atomic step. If another thread already
+        // owns it (gc_requested was already true), we are a sibling mutator that
+        // happened to ask for a GC too — just park and participate in theirs. This
+        // is what makes concurrent `(gc)` calls safe instead of deadlocking on a
+        // lock while un-parked.
+        if shared
+            .gc_requested
+            .compare_exchange(false, true, AcqRel, Acquire)
+            .is_err()
+        {
+            self.park(live_env);
+            return;
+        }
+        // We are the sole collector. Wait until every other mutator is parked
+        // (published its roots, stopped touching the heap).
+        loop {
+            let all_parked = {
+                let ms = shared.mutators.lock().unwrap();
+                ms.iter()
+                    .filter(|m| !Arc::ptr_eq(m, &self.me))
+                    .all(|m| m.parked.load(Acquire))
+            };
+            if all_parked {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        self.collect_inner(live_env, live_kont);
+        // Release the world; parked threads take their rewritten roots back.
+        shared.gc_requested.store(false, Release);
+    }
+
+    /// Await a future, publishing this thread's roots and marking it parked while
+    /// blocked on the worker's join — so a collection requested by another thread
+    /// (possibly the worker) can proceed instead of deadlocking. The worker stores
+    /// its result into the future slot (GC-rooted via the reachable object), so we
+    /// read it back after the join even if a collection relocated it.
+    pub fn await_future(&mut self, fut: u64, locals: &Locals) -> u64 {
+        use std::sync::atomic::Ordering::{Acquire, Release};
+        let id = M::R::as_ref(fut) as usize;
+        let slot = match &self.heap()[id] {
+            Obj::Future(s) => s.clone(),
+            _ => panic!("await: not a future"),
+        };
+        if let Some(r) = slot.lock().unwrap().result {
+            return r;
+        }
+        // Publish roots + the whole env chain and mark parked before blocking.
+        *self.me.roots.lock().unwrap() = std::mem::take(&mut self.shadow);
+        *self.me.envs.lock().unwrap() = self.published_envs(locals);
+        self.me.parked.store(true, Release);
+        let handle = slot.lock().unwrap().handle.take();
+        if let Some(h) = handle {
+            let _ = h.join();
+        }
+        // Wait out any in-progress collection before un-parking (our roots stay
+        // published so it can complete), then take our (rewritten) roots back.
+        while self.shared.gc_requested.load(Acquire) {
+            std::thread::yield_now();
+        }
+        self.shadow = std::mem::take(&mut *self.me.roots.lock().unwrap());
+        self.me.envs.lock().unwrap().clear();
+        self.me.parked.store(false, Release);
+        let r = slot.lock().unwrap().result.expect("future produced no result");
+        r
+    }
+
+    /// The full set of environments to publish as roots: this thread's dynamic
+    /// call chain plus the innermost live env.
+    fn published_envs(&self, locals: &Locals) -> Vec<Locals> {
+        let mut envs = self.env_stack.clone();
+        envs.push(locals.clone());
+        envs
+    }
+
+    /// Poll a safepoint: if a collection is pending, park until it finishes. Call
+    /// this where the mutator holds no `&Obj` borrow across it (function entry,
+    /// alloc). `locals` is published so the collector can trace this thread's env.
+    #[inline]
+    pub fn safepoint(&mut self, locals: &Locals) {
+        use std::sync::atomic::Ordering::Acquire;
+        if self.shared.gc_requested.load(Acquire) {
+            self.park(locals);
+        }
+    }
+
+    /// Publish this thread's roots and block until the pending collection clears,
+    /// then take the (rewritten) roots back. The env's frame cells are rewritten
+    /// in place (shared `Arc` frames), so `locals` sees the new addresses without
+    /// a copy-back.
+    pub fn park(&mut self, locals: &Locals) {
+        use std::sync::atomic::Ordering::{Acquire, Release};
+        *self.me.roots.lock().unwrap() = std::mem::take(&mut self.shadow);
+        *self.me.envs.lock().unwrap() = self.published_envs(locals);
+        self.me.parked.store(true, Release);
+        while self.shared.gc_requested.load(Acquire) {
+            std::thread::yield_now();
+        }
+        self.shadow = std::mem::take(&mut *self.me.roots.lock().unwrap());
+        self.me.envs.lock().unwrap().clear();
+        self.me.parked.store(false, Release);
     }
 
     fn collect_inner(&mut self, live_env: &Locals, live_kont: Option<&Arc<Kont>>) {
@@ -107,6 +217,24 @@ impl<M: ValueModel> Runtime<M> {
         for s in self.shadow.iter_mut() {
             *s = fw::<M>(heap, from_len, &mut to, &mut reloc, *s);
         }
+        // Every OTHER (parked) thread's PUBLISHED roots: its shadow snapshot
+        // (rewritten in place, taken back on resume) and its live env frames.
+        {
+            let ms = self.shared.mutators.lock().unwrap();
+            for m in ms.iter() {
+                if Arc::ptr_eq(m, &self.me) {
+                    continue;
+                }
+                let mut roots = m.roots.lock().unwrap();
+                for r in roots.iter_mut() {
+                    *r = fw::<M>(heap, from_len, &mut to, &mut reloc, *r);
+                }
+                let envs = m.envs.lock().unwrap();
+                for env in envs.iter() {
+                    update_env::<M>(heap, from_len, &mut to, &mut reloc, env);
+                }
+            }
+        }
         // Constant pool.
         let consts = unsafe { &mut *self.shared.consts.get() };
         for c in consts.iter_mut() {
@@ -119,8 +247,12 @@ impl<M: ValueModel> Runtime<M> {
                 *imp = fw::<M>(heap, from_len, &mut to, &mut reloc, *imp);
             }
         }
-        // The live environment: rewrite the cells of its frame chain.
+        // This (collector) thread's OWN live environments: the innermost env plus
+        // every frame in its dynamic call chain.
         update_env::<M>(heap, from_len, &mut to, &mut reloc, live_env);
+        for env in self.env_stack.iter() {
+            update_env::<M>(heap, from_len, &mut to, &mut reloc, env);
+        }
         // The live continuation, if we are at a CEK safepoint.
         if let Some(k) = live_kont {
             walk_kont::<M>(heap, from_len, &mut to, &mut reloc, k);
@@ -213,6 +345,16 @@ fn scan_obj<M: ValueModel>(
             .collect();
         if let Obj::Record { fields, .. } = &mut to[i] {
             *fields = forwarded;
+        }
+        return;
+    }
+    // Future: forward its cached result (a worker stores the value here before
+    // ending, so it stays rooted via the reachable `Future` object).
+    if let Obj::Future(slot) = &to[i] {
+        let slot = slot.clone();
+        let mut g = slot.lock().unwrap();
+        if let Some(r) = g.result {
+            g.result = Some(fw::<M>(heap, from_len, to, reloc, r));
         }
         return;
     }
