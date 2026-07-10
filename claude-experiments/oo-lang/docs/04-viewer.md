@@ -29,7 +29,8 @@ type; this is a client-side filter over the schema, not a server round-trip.
 Agent           3 live
 Conversation    3 live
 Message        47 live   ▲
-Tool             5 live
+ShellTool        3 live
+SearchTool       2 live
 ToolCall        12 live   ▲
 Task             8 live
 ```
@@ -162,7 +163,7 @@ Invoking is inline, not modal, and typed:
   (number field, text field, checkbox) with the static type shown as a placeholder hint.
 - **Enum params** get a dropdown of the enum's variants — the schema message carries enum
   variants (§4) precisely so the viewer never has to guess valid values.
-- **Reference-typed params** (e.g. `assignTool(t: Tool)`) get a type-ahead picker: typing
+- **Reference-typed params** (e.g. `assign(t: Task)`) get a type-ahead picker: typing
   searches live instances of that type by id or field match (same query the instance table
   uses), and picking one fills the argument with that instance's id.
 - **Anything the form-builder doesn't have a widget for** (a `List<T>` argument, a
@@ -240,7 +241,8 @@ below.
   "runtime": { "pid": 51234, "program": "agents.oo", "started": "2026-07-09T14:02:11Z" },
   "schemaVersion": 3,
   "enums": [
-    { "name": "AgentStatus", "variants": ["Running", "Paused", "Waiting", "Done"] }
+    { "name": "AgentStatus", "variants": ["Running", "Paused", "Waiting", "Done"] },
+    { "name": "Tool", "variants": ["Shell", "Search"] }
   ],
   "types": [
     {
@@ -250,7 +252,7 @@ below.
         { "name": "model", "type": "String" },
         { "name": "status", "type": "AgentStatus" },
         { "name": "conversation", "type": "ref:Conversation" },
-        { "name": "tools", "type": "list:ref:Tool" }
+        { "name": "tools", "type": "list:Tool" }
       ],
       "methods": [
         { "name": "pause", "params": [], "returns": "Void" },
@@ -354,8 +356,8 @@ below.
     "conversation": { "ref": "Conversation#2", "summary": "Conversation#2 (14 messages)" },
     "tools": {
       "list": [
-        { "ref": "Tool#1", "summary": "web_search" },
-        { "ref": "Tool#4", "summary": "code_exec" }
+        { "case": "Shell", "ref": "ShellTool#1", "summary": "shell" },
+        { "case": "Search", "ref": "SearchTool#4", "summary": "search" }
       ]
     }
   },

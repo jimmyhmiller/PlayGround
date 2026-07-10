@@ -146,7 +146,8 @@ designed UI:
 Agent          3 live
 Conversation   3 live
 Message       47 live     ▲ climbing
-Tool           5 live
+ShellTool      3 live
+SearchTool     2 live
 ToolCall      12 live     ▲ climbing
 Task           8 live
 ```

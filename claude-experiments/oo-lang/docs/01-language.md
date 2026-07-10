@@ -256,6 +256,27 @@ object Console {
 `Clock.now()` is a call on the singleton instance, not a `static` keyword bolted onto
 `class` — there's one construct for "a thing with fields and methods" (§4 leans on this).
 
+### 1.8 `migrate` blocks (live-edit surface)
+
+When a live edit adds or renames fields on a class with live instances, the edit may carry
+a `migrate` block giving each new field its value — a constant default, or a function of
+the entire old instance:
+
+```
+migrate Agent v1 -> v2 {
+  notes: ""                                        // default form
+  summaryTone: (old) => old.status == AgentStatus.Paused
+    ? Tone.Terse
+    : Tone.Normal                                  // derived from an old field
+}
+```
+
+This is surface syntax only; when it runs, the quiescence gate, and per-instance
+failure/quarantine are all owned by `03-live-semantics.md`. The PoC ships only additive
+fields with a declaration-site default (`05-milestones.md` M3); a `migrate` block, if
+written, is a hard compile error in the PoC build (`migrate blocks are not implemented in
+this build`) — the syntax is pinned here so 03's fuller design has a defined surface.
+
 ## 2. Type system
 
 - **Nominal, not structural.** Two classes with identical fields are different types.
@@ -297,14 +318,13 @@ class Agent {
 ### 2.3 Interfaces — OPEN, not needed for the PoC
 
 DECISIONS.md leaves "interfaces/traits for polymorphism without inheritance" open. Per
-`05-milestones.md`'s actual scope, **the PoC demo does not need this**: M0–M4 use a single
-concrete `Tool` class (not a `ShellTool`/`SearchTool` split) and "M0–M4 above use zero
-polymorphism beyond generics" is that document's own conclusion. `Agent.tools: List<Tool>`
-in the demo app is a homogeneous list of one concrete class, not a heterogeneous slot —
-"swap a tool" (DECISIONS.md #10) means replacing which concrete `Tool` instance a field
-points at, which nominal classes already support with zero new mechanism. Generic bounds
-(`T: Comparable`, §1.2) are also out of scope for the PoC (05-milestones.md, "What we
-fake" #3) and hard-error if written.
+`05-milestones.md`'s actual scope, **the PoC demo does not need this**: the one place the
+demo wants interface-style polymorphism — `Agent.tools: List<Tool>` holding a
+heterogeneous mix of tool kinds — is met by the **enum-dispatch fallback** `05-milestones.md`
+M4 adopts (spelled out at the end of this section), built entirely from §1.3's enums and
+`match`, which ship in M0. "Swap a tool" (DECISIONS.md #10) means replacing a `Tool` enum
+value in that list with a different case. Generic bounds (`T: Comparable`, §1.2) are also
+out of scope for the PoC (05-milestones.md, "What we fake" #3) and hard-error if written.
 
 What follows is therefore a **post-PoC extension point**, not a PoC requirement: a
 concrete proposal for the day interfaces/traits do get built, so the design isn't
@@ -348,13 +368,31 @@ the one form of polymorphism-without-inheritance the language has; there is no o
 
 **Resolved for the PoC (per 05-milestones.md): interfaces do not ship in M0–M4.** The
 `interface`/`implements` keywords, if written, are a hard compile error in this build
-("What we fake" #2). The demo's `Tool` is one concrete class; there is no need for the
-enum-dispatch fallback either (`enum Tool { Shell(ShellTool), Search(SearchTool) }`) since
-there's no heterogeneity to dispatch over in the first place. What remains **OPEN** is
-only the question this section actually answers: *when* interfaces are eventually built
-post-PoC, is the jump-table-on-existing-class-tag mechanism above the right design, or
-does `02-runtime.md` want something else once per-type arenas are further along? That
-question has no bearing on M0–M4 and doesn't need resolving before the demo ships.
+("What we fake" #2). The demo's tool heterogeneity is carried instead by the
+**enum-dispatch fallback** `05-milestones.md` M4 adopts — concrete classes wrapped in enum
+cases, dispatched with an ordinary `match`:
+
+```
+enum Tool {
+  Shell(ShellTool)
+  Search(SearchTool)
+}
+
+fn callTool(tool: Tool, args: Map<String, String>) -> Result<String, ToolError> {
+  match tool {
+    Shell(t) -> t.call(args)
+    Search(t) -> t.call(args)
+  }
+}
+```
+
+The cost, named in `05-milestones.md`: adding a genuinely new kind of tool means editing
+the `Tool` enum itself, not writing an independent class that opts in — acceptable for a
+PoC with two tool kinds. What remains **OPEN** is only the question this section actually
+answers: *when* interfaces are eventually built post-PoC, is the
+jump-table-on-existing-class-tag mechanism above the right design, or does `02-runtime.md`
+want something else once per-type arenas are further along? That question has no bearing
+on M0–M4 and doesn't need resolving before the demo ships.
 
 ### 2.4 Generics: monomorphized, not erased
 
@@ -663,10 +701,10 @@ enum ToolError {
   Failed(String)
 }
 
-// One concrete Tool class — no interface, no subclasses (per 05-milestones.md, M0–M4
-// use a single concrete Tool, zero polymorphism beyond generics).
-class Tool {
-  name: String
+// Tool heterogeneity via the enum-dispatch fallback (§2.3, adopted by 05-milestones.md
+// M4): concrete classes wrapped in enum cases, dispatched with `match`. No interface,
+// no subclasses.
+class ShellTool {
   command: String
 
   fn call(args: Map<String, String>) -> Result<String, ToolError> {
@@ -674,6 +712,36 @@ class Tool {
       Some(cmd) -> Ok(__builtin_run_shell(cmd))
       None -> Err(ToolError.Failed("missing cmd arg"))
     }
+  }
+}
+
+class SearchTool {
+  index: String
+
+  fn call(args: Map<String, String>) -> Result<String, ToolError> {
+    match args.get("q") {
+      Some(q) -> Ok("results for " + q + " in " + self.index)
+      None -> Err(ToolError.Failed("missing q arg"))
+    }
+  }
+}
+
+enum Tool {
+  Shell(ShellTool)
+  Search(SearchTool)
+}
+
+fn toolName(t: Tool) -> String {
+  match t {
+    Shell(_) -> "shell"
+    Search(_) -> "search"
+  }
+}
+
+fn callTool(t: Tool, args: Map<String, String>) -> Result<String, ToolError> {
+  match t {
+    Shell(s) -> s.call(args)
+    Search(s) -> s.call(args)
   }
 }
 
@@ -693,9 +761,9 @@ class Agent {
   fn pause() { self.status = AgentStatus.Paused }
   fn resume() { self.status = AgentStatus.Waiting }
 
-  fn findTool(toolName: String) -> Option<Tool> {
+  fn findTool(name: String) -> Option<Tool> {
     for t in self.tools {
-      if t.name == toolName { return Some(t) }
+      if toolName(t) == name { return Some(t) }
     }
     None
   }
@@ -720,12 +788,13 @@ object Clock {
 ```
 // file: main.oo
 import std.collections.{List}
-import agents.core.{Agent, Tool}
+import agents.core.{Agent, Tool, ShellTool, SearchTool}
 import ui.tui.{Tui}
 
 fn main() {
   let tools = List<Tool>()
-  tools.push(Tool(name: "shell", command: "sh"))
+  tools.push(Tool.Shell(ShellTool(command: "sh")))
+  tools.push(Tool.Search(SearchTool(index: "docs")))
 
   let agents = List<Agent>()
   agents.push(Agent(name: "researcher", tools: tools))
@@ -746,6 +815,8 @@ fn main() {
 }
 ```
 
-Every entity here — every `Agent`, `Conversation`, `Message`, `Tool` — lives in its own
-arena the moment it's constructed, with no code in this file doing anything to make that
-true. That's the whole thesis, expressed as an ordinary-looking program.
+Every entity here — every `Agent`, `Conversation`, `Message`, `ShellTool`, `SearchTool` —
+lives in its own arena the moment it's constructed, with no code in this file doing
+anything to make that true (`Tool` itself is an enum, a value wrapping a reference to the
+concrete tool entity — §1.3, §4). That's the whole thesis, expressed as an
+ordinary-looking program.

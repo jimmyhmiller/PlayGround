@@ -30,28 +30,29 @@ happens to be byte-identical to generation 6's.
 ## VM structures this depends on
 
 ```
-ClassDescriptor {
-  class_id: u32
+TypeInfo {
+  type_id: u32
   name: Sym
   shape: ShapeId                     // current field layout
   methods: [FnPtr; N]                // indexed by compile-time method slot
                                       // (keyed by shape_id too during a drain — see below)
   active_frames: u32                 // atomic per §7's concurrency requirement, OPEN below
-  pending_migration: Option<ShapeId>
+  pending_shape: Option<ShapeId>
 }
 
-ShapeDescriptor {
+ShapeInfo {
   shape_id: u32
   fields: [(name: Sym, ty: Type, offset: u32)]
   stride: u32                        // size of one instance, this shape
 }
 ```
 
-This reuses `02-runtime.md`'s object model as-is, not a parallel one: `ShapeDescriptor`
-here *is* `02-runtime.md §3`'s `TypeInfo`/`FieldInfo` pair (a shape change is a new
-`TypeInfo` for the same `type-id`), and per-instance identity is `02-runtime.md §4`'s
-existing `InstanceHeader { slot-index, generation, flags }` plus the arena it lives in —
-there is no separate `ObjectHeader`/`HandleTable` layer on top of that.
+This reuses `02-runtime.md`'s object model as-is, not a parallel one: `TypeInfo` and
+`ShapeInfo` here *are* `02-runtime.md §4`'s structs of the same names (a shape change is a
+new `ShapeInfo` for the same `TypeInfo`, whose `old-shape`/`pending-shape` slots are
+populated only while a migration drains), and per-instance identity is `02-runtime.md
+§4`'s existing `InstanceHeader { slot-index, generation, shape-id, flags }` plus the arena
+it lives in — there is no separate `ObjectHeader`/`HandleTable` layer on top of that.
 
 One structural decision worth calling out because it isn't free:
 
@@ -188,7 +189,7 @@ current shape. Mechanically, this rides on bytecode the interpreter already has 
 ```
 ENTER_METHOD Agent   → class_table[Agent].active_frames += 1   (atomic)
 RETURN                → class_table[Agent].active_frames -= 1   (atomic)
-                         if active_frames == 0 and pending_migration:
+                         if active_frames == 0 and pending_shape:
                            run_migration(Agent)
 ```
 
@@ -196,7 +197,7 @@ When a field-changing edit is accepted:
 
 - if `active_frames == 0` right now, migrate synchronously, in the same instant the
   generation swaps in.
-- if `active_frames > 0`, mark `pending_migration = shape N+1` and let it fire on the
+- if `active_frames > 0`, mark `pending_shape = shape N+1` and let it fire on the
   return that brings the counter to zero — no polling, no global stop-the-world, and the
   gate is scoped to *this one class*, not the process. Every other class's methods keep
   running uninterrupted the whole time.
@@ -308,7 +309,7 @@ the exact primitive isn't chosen here.
 
 ### Class add
 
-No live state to reconcile — add a `ClassDescriptor`, an empty `ShapeDescriptor`, an
+No live state to reconcile — add a `TypeInfo`, an empty `ShapeInfo`, an
 empty arena. Effective the instant the generation swaps in. The only rejection is a name
 collision, caught by ordinary whole-program typecheck.
 

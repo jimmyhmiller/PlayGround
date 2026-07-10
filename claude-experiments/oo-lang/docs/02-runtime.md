@@ -278,15 +278,16 @@ compaction) is deferred, not solved.
 through a field, so a live object can never hold a dangling pointer to a dead one. Internal
 field access is one dereference, same cost as clox, no regression.
 
-This is a deliberate, load-bearing choice, stated here so `03-live-semantics.md` doesn't
-have to guess at it: oo-lang does **not** put a handle table between every class-typed
-field/local and the object it refers to, permanently, the way `03-live-semantics.md`
-proposes. That would tax every single field access (the hottest path in the VM, per §2/§3)
-to buy something only one feature actually needs — shape migration relocating a live
-instance to a new-stride slab without corrupting every other object's pointer to it. That
-feature is real and is designed, not waved away — see "Shape migration" below, later in
-this section, for the mechanism (it reuses §6's graph-rewrite pass and adds a *lazy*,
-per-type handle table only for types that have actually migrated at least once).
+This is a deliberate, load-bearing choice, made jointly with `03-live-semantics.md`:
+oo-lang does **not** put a handle table between class-typed fields/locals and the objects
+they refer to — not permanently, not lazily, not ever. That would tax every single field
+access (the hottest path in the VM, per §2/§3) to buy something only one feature actually
+needs — shape migration relocating live instances to a new-stride slab without corrupting
+every other object's pointer to them. Instances move *only* during a shape migration, and
+identity across that move is preserved by same-index copy, not by indirection — see
+"Shape migration" below, later in this section, for the mechanism (it reuses §6's
+graph-rewrite pass, run once at a safepoint, and leaves the resting representation
+untouched).
 
 **The viewer is different.** A handle like `"Agent#7"` can sit in a browser tab for
 minutes. In that window the referenced `Agent` might be freed and its slot **reused by a
@@ -330,28 +331,27 @@ as clox's `mark-array` over `ValueArray`).
 ### Shape migration — the structures `03-live-semantics.md` assumes exist here
 
 `03-live-semantics.md`'s entire field-add/remove design is written "as if `02-runtime.md`
-already existed" and invents `ClassDescriptor`/`ShapeDescriptor`/`ObjectHeader.shape_id`/
-`methods[shape_id][slot]` to make its semantics implementable. None of that has a home
-above: `InstanceHeader` has no shape field, and `TypeInfo`/`TypeArena` model exactly one
-fixed `instance-size` for a type's whole lifetime, with no notion of two shapes or two
-method tables coexisting. This subsection is that home — it adopts 03's structures,
-translated into this doc's own vocabulary (`FieldInfo`, `TypeInfo`, `TypeArena`), and
-reconciles them with what's already built above.
+already existed" — it needs shape-versioned method tables and a per-instance shape id,
+none of which has a home above: `InstanceHeader` has no shape field, and
+`TypeInfo`/`TypeArena` model exactly one fixed `instance-size` for a type's whole
+lifetime, with no notion of two shapes or two method tables coexisting. This subsection is
+that home. The vocabulary is shared: `TypeInfo`/`ShapeInfo`/`FieldInfo`/`TypeArena` below
+are the same structures `03-live-semantics.md` names, one definition, defined here.
 
 **A caveat this forces on the "raw pointers" position above:** the "internal references are
 raw pointers, safe by construction" claim a few paragraphs up is only true at rest — for a
 type that has never had a live instance moved out from under it. A field-add/remove
-migration (03's mechanism) allocates fresh slots at a new stride and copies live instances
-into them; a raw pointer captured before the copy now points at stale, about-to-be-freed
-memory. This doc does **not** resolve that by making every class-typed field a handle
-(03's simplification would cost an extra indirection on *every* field access, forever, to
-guard against a migration that most types will never undergo). Instead, migration reuses
+migration (03's mechanism) copies each live instance from the old-stride slab set into the
+new-stride one at the *same slot index*; a raw pointer captured before the copy would now
+point at stale, about-to-be-freed memory. This doc does **not** resolve that by making
+every class-typed field a handle (an extra indirection on *every* field access, forever,
+to guard against a migration that most types will never undergo). Instead, migration reuses
 the mechanism §6 already named and deferred for compaction: *"moving a live instance means
 rewriting every pointer to it, which requires exactly the same 'walk the graph with
 `TypeInfo`' pass mark already does, plus a second pass to fix up."* A field-add/remove
-migration is exactly that pass, scoped to one type. Ordinary field access stays a raw
-pointer dereference, always; the cost of a move is paid once, at migration time, not on
-every read.
+migration is exactly that pass, scoped to one type, run at a safepoint so no bytecode is
+mid-read while it happens. Ordinary field access stays a raw pointer dereference, always;
+the cost of a move is paid once, at migration time, not on every read.
 
 **`TypeInfo` and `ShapeInfo`.** A type's field layout is pulled out of `TypeInfo` into its
 own struct so two can exist for one type during a drain window:
@@ -404,9 +404,14 @@ slab and a new, growing one at once:
    (old-live-count i64)])           ; counts down to 0 as instances are copied over
 ```
 
-New instances always allocate from the *current* (`slot-size`/`slabs`) side. Existing
-instances on the old shape stay exactly where they are — read, written, and enumerated at
-their old stride — until the quiescence gate below fires.
+The flip happens the instant a field-changing edit is accepted: the existing slab set moves
+to the `old-*` fields, and a fresh current side is allocated at `pending-shape`'s stride.
+New instances always allocate from the *current* (`slot-size`/`slabs`) side — with its bump
+pointer started *above* the old side's high-water mark, so slot indices `0..old-HWM` stay
+reserved for the same-index copy the migration pass below performs (free slots among them
+rejoin the free list after the copy completes). Existing instances on the old shape stay
+exactly where they are — read, written, and enumerated at their old stride — until the
+quiescence gate below fires.
 
 **The quiescence gate and the migration pass**, using `TypeInfo.active-frames` and the
 bytecode this doc's dispatch loop already has to emit (this is 03's mechanism; it belongs
@@ -419,31 +424,36 @@ RETURN                   -> TypeInfo[type-id].active-frames -= 1
                               run-migration(type-id)
 ```
 
-`run-migration(type-id)`: allocate a fresh current-side slab set at `pending-shape`'s
-stride; for each live instance in the old slab set, compute its new field values (default
-or migration-fn, per 03) and copy into a freshly `arena-alloc`'d slot in the new set,
-stamping the new `shape-id` into its header. Then — the pass §6 defers for compaction,
-done here for one type — walk every arena's live instances via `TypeInfo`/`FieldInfo`
-exactly like `blacken-object` (§6) already does for GC marking, and for every `FIELD_REF`
-whose `elem-type-id` is the migrating type, rewrite the pointer from old slot to new slot.
-Finally repoint the wire-facing handle (§4 above: `{type-id, slot-index, generation}`) for
-every migrated instance to its new `slot-index` — this is the one place this doc's
-identity scheme needs a level of indirection 03 already assumes and this doc did not
-previously have: a **per-type `HandleTable`**, lazily allocated the first time a type is
-ever migrated (before that, a handle's `slot-index` component *is* the physical slot,
-exactly as §4 describes, zero extra cost):
+`run-migration(type-id)` runs at a **full safepoint** — it fires on the `RETURN` that
+drops `active-frames` to zero, so the interpreter thread itself is the one executing it,
+no bytecode is mid-read, and the server thread's queries are held off exactly as they are
+for any other safepoint-serviced work (§7). It does, in order:
 
-```coil
-(defstruct HandleTable [(slot-of (ptr i64)) (capacity i64)])   ; handle-id -> current slot-index
-; created on first migration of a type, initialized identity: slot-of[i] = i for i in 0..old live-count
-```
+1. **Same-index copy.** For each live instance at slot index `i` in the old slab set,
+   compute its new field values (default or migration-fn, per 03) and copy into slot index
+   `i` of the current-side slab set — the slot reserved for it above, **never a fresh
+   `arena-alloc`** — stamping the new `shape-id` into its header.
+   `InstanceHeader.slot-index` is unchanged and `generation` is **not** bumped (only
+   `arena-free` bumps it, §4), so the wire-facing identity `{type-id, slot-index,
+   generation}` survives the move untouched: `Agent#7` is still literally `Agent#7`, with
+   no lookup table anywhere.
+2. **Pointer rewrite** — the pass §6 defers for compaction, done here for one type. Walk
+   every arena's live instances via `TypeInfo`/`FieldInfo` exactly like `blacken-object`
+   (§6) does for GC marking, plus the VM stack's ref slots (`MethodInfo.ref-slots`, the
+   same bitmap §6's `mark-roots` reads) and the globals table; for every class-typed slot
+   holding an address inside the migrating type's old slab set, rewrite it to the
+   same-index address in the new set. Old and new addresses are both pure functions of
+   `slot-index` (§4's `arena-slot-ptr`), so the rewrite is address arithmetic — recover
+   `i` from the old address, emit the new-set address for `i` — no lookup table, no
+   remembered set.
 
-`Agent#7`'s `7` becomes a `HandleTable` index rather than a raw slot-index the instant its
-type migrates for the first time; resolving a handle is `arena-slot-ptr(arena,
-handle-table.slot-of[7])` instead of `arena-slot-ptr(arena, 7)` — one more array read, paid
-only by types that have actually migrated at least once. Old-shape slabs are freed once
-every live instance has been copied; `old-live-count` reaching 0 is what lets
-`run-migration` tear the old slab set down.
+Old-shape slabs are freed once every live instance has been copied; `old-live-count`
+reaching 0 is what lets `run-migration` tear the old slab set down. Handle resolution
+stays `arena-slot-ptr` plus the `generation` compare through any number of migrations,
+with one drain-window wrinkle: while `old-slot-size != 0`, a `slot-index` below the old
+high-water mark resolves into `old-slabs` (that's where those instances still physically
+are); the whole copy happens inside `run-migration`'s safepoint, so from the wire's point
+of view resolution flips old-set → new-set in one atomic step, same triple throughout.
 
 **Dispatch during the drain window.** §2's `OP_CALL_STATIC` comment ("no dispatch, direct
 call") is accurate only when `old-shape` is null. The moment a migration is pending,
@@ -456,7 +466,8 @@ goes null again. This is the same "pay only while it's actually in flight" shape
 
 **Cost, stated honestly, matching this doc's own convention (§4's enumeration-cost note):**
 a migration is `O(live instances of that type)` for the copy, plus `O(total live objects
-across every arena)` for the pointer-rewrite pass, run once per accepted field-add/remove
+across every arena, plus stack slots and globals)` for the pointer-rewrite pass — the
+whole live heap, honestly — run once per accepted field-add/remove
 edit — not on any hot path, and bounded by how often a developer saves that kind of edit,
 not by request rate. This is the real, buildable project §6 already flagged as deferred for
 general compaction; shape migration is the first concrete customer for it.
