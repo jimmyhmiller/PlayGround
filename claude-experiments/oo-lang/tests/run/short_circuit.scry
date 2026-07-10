@@ -1,0 +1,9 @@
+fn side(x: Int) -> Bool {
+  print(x)
+  x > 0
+}
+fn main() {
+  print(false && side(1))
+  print(true || side(2))
+  print(true && side(3))
+}

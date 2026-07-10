@@ -1,0 +1,136 @@
+; arena.coil — the per-type slab arena allocator (02-runtime.md §3/§4), M0 form.
+;
+; One TypeArena per entity mono type-id. Slabs are fixed-capacity blocks (~64 KiB)
+; with a flat bump frontier and a free-list (Treiber-shaped but single-threaded in
+; M0 — magazines + atomics land in M1, see docs/06-implementation.md). Stable
+; object identity is (type-id, slot-index, generation), stamped into InstanceHeader.
+;
+; DEVIATIONS from §4 (M0, single-threaded — noted in 06-implementation.md):
+;  - no per-thread magazines, no atomics: M0 is straight-line single-threaded (05 M0
+;    OUT). The shared-arena API (bump/free-push/free-pop) is the layer M1's magazines
+;    sit on top of; its shape is here, just without the atomics.
+;  - slot->(slab,local) uses div/mod, not shift/mask (slab-cap need not be 2^k).
+;  - InstanceHeader uses i64 fields (not u32 packing) for alignment simplicity.
+(module arena)
+(import "ioutil.coil" :use *)
+
+; ---- header: every instance begins with this (fixed offset 0) ----
+(defstruct InstanceHeader
+  [(type-id    i64)     ; which concrete type — recovers TypeInfo for iface dispatch + GC
+   (slot-index i64)     ; index within this type's arena (stable id component)
+   (generation i64)     ; bumped on free — invalidates viewer handles (Phase 4)
+   (flags      i64)])   ; bit0 = live, bit1 = gc-marked (reserved)
+
+(const FLAG_LIVE 1)
+(const FLAG_MARKED 2)
+
+(defstruct TypeArena
+  [(type-id     i64)
+   (name        (ptr u8)) (name-len i64)   ; for --dump-arenas + OutOfArenaSpace
+   (slot-size   i64)      ; sizeof(InstanceHeader)+fields, padded to 8
+   (slab-cap    i64)      ; slots per slab
+   (slabs       (ptr (ptr u8)))   ; growable array of slab base pointers
+   (slab-count  i64)
+   (slab-arrcap i64)
+   (bump-cursor i64)      ; flat frontier of ever-reserved slots (high-water mark)
+   (free-head   i64)      ; index of first free slot, or -1 (unused until GC)
+   (live-count  i64)
+   (max-slots   i64)])    ; budget; exceeding it => OutOfArenaSpace hard error
+
+(defn align8 [(n i64)] (-> i64) (iand (+ n 7) (ixor -1 7)))
+
+(defn arena-new [(type-id i64) (name (ptr u8)) (name-len i64) (fields-size i64) (max-slots i64)] (-> (ptr TypeArena))
+  (let [a (cast (ptr TypeArena) (xalloc (sizeof TypeArena)))
+        slot (align8 (+ (sizeof InstanceHeader) fields-size))
+        cap0 (idiv 65536 slot)
+        cap (if (< cap0 8) 8 cap0)]
+    (store! (field a type-id) type-id)
+    (store! (field a name) name) (store! (field a name-len) name-len)
+    (store! (field a slot-size) slot)
+    (store! (field a slab-cap) cap)
+    (store! (field a slabs) (cast (ptr (ptr u8)) (xalloc (* (sizeof (ptr u8)) 8))))
+    (store! (field a slab-count) 0)
+    (store! (field a slab-arrcap) 8)
+    (store! (field a bump-cursor) 0)
+    (store! (field a free-head) -1)
+    (store! (field a live-count) 0)
+    (store! (field a max-slots) max-slots)
+    a))
+
+; slot-index -> raw byte pointer
+(defn arena-slot-ptr [(a (ptr TypeArena)) (idx i64)] (-> (ptr u8))
+  (let [cap (load (field a slab-cap))
+        slabno (idiv idx cap)
+        local (irem idx cap)
+        base (load (index (load (field a slabs)) slabno))]
+    (index base (* local (load (field a slot-size))))))
+
+; grow the slab-base array if needed, then malloc+zero a fresh slab
+(defn arena-add-slab [(a (ptr TypeArena))] (-> i64)
+  (if (>= (load (field a slab-count)) (load (field a slab-arrcap)))
+    (let [ncap (* (load (field a slab-arrcap)) 2)
+          np (cast (ptr (ptr u8)) (realloc (cast (ptr i8) (load (field a slabs))) (* (sizeof (ptr u8)) ncap)))]
+      (store! (field a slabs) np)
+      (store! (field a slab-arrcap) ncap) 0)
+    0)
+  (let [bytes (* (load (field a slab-cap)) (load (field a slot-size)))
+        blk (xalloc bytes)]
+    (memset (cast (ptr i8) blk) (cast i32 0) bytes)
+    (store! (index (load (field a slabs)) (load (field a slab-count))) blk)
+    (store! (field a slab-count) (+ (load (field a slab-count)) 1))
+    0))
+
+(defn arena-ensure-slab [(a (ptr TypeArena)) (idx i64)] (-> i64)
+  (let [need (+ (idiv idx (load (field a slab-cap))) 1)]
+    (loop (if (< (load (field a slab-count)) need) (do (arena-add-slab a) 0) (break))))
+  0)
+
+; hard error: budget exceeded before GC exists (05 "What we fake" #1)
+(defn arena-oom [(a (ptr TypeArena))] (-> i64)
+  (w-cstr 2 c"OutOfArenaSpace: ")
+  (w-bytes 2 (load (field a name)) (load (field a name-len)))
+  (w-cstr 2 c" arena full at ") (w-int 2 (load (field a max-slots)))
+  (w-cstr 2 c" slots (") (w-int 2 (load (field a live-count)))
+  (w-cstr 2 c" live) — GC not implemented in this build, restart the process.\n")
+  (exit (cast i32 70)) 0)
+
+; allocate one slot; stamps the header (type-id, slot-index, flags=live). Returns ptr.
+(defn arena-alloc [(a (ptr TypeArena))] (-> (ptr u8))
+  (let [idx (if (>= (load (field a free-head)) 0)
+              (let [i (load (field a free-head))
+                    p (cast (ptr i64) (arena-slot-ptr a i))]
+                (store! (field a free-head) (load p)) i)
+              (let [i (load (field a bump-cursor))]
+                (if (>= i (load (field a max-slots))) (do (arena-oom a) 0) 0)
+                (store! (field a bump-cursor) (+ i 1)) i))]
+    (arena-ensure-slab a idx)
+    (let [p (cast (ptr InstanceHeader) (arena-slot-ptr a idx))]
+      (store! (field p type-id) (load (field a type-id)))
+      (store! (field p slot-index) idx)
+      (store! (field p flags) FLAG_LIVE)
+      (store! (field a live-count) (+ (load (field a live-count)) 1))
+      (cast (ptr u8) p))))
+
+; free-list push (structure present; unused until GC lands)
+(defn arena-free [(a (ptr TypeArena)) (idx i64)] (-> i64)
+  (let [p (cast (ptr InstanceHeader) (arena-slot-ptr a idx))]
+    (store! (field p generation) (+ (load (field p generation)) 1))
+    (store! (field p flags) 0)
+    (let [link (cast (ptr i64) p)] (store! link (load (field a free-head))))
+    (store! (field a free-head) idx)
+    (store! (field a live-count) (- (load (field a live-count)) 1))
+    0))
+
+; enumeration — "list every live instance of this type" (the viewer's foundation)
+(defn arena-for-each-live [(a (ptr TypeArena)) (f (fnptr c [(ptr u8)] i64))] (-> i64)
+  (let [hwm (load (field a bump-cursor)) (mut i) 0]
+    (loop
+      (if (< (load i) hwm)
+        (let [p (cast (ptr InstanceHeader) (arena-slot-ptr a (load i)))]
+          (if (= (iand (load (field p flags)) FLAG_LIVE) FLAG_LIVE) (do (call-ptr f (cast (ptr u8) p)) 0) 0)
+          (store! i (+ (load i) 1)) 0)
+        (break))))
+  0)
+
+(defn arena-live-count [(a (ptr TypeArena))] (-> i64) (load (field a live-count)))
+(defn arena-hwm [(a (ptr TypeArena))] (-> i64) (load (field a bump-cursor)))

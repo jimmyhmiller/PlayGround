@@ -1,0 +1,159 @@
+; builtins.coil — runtime for the M0 built-in value types and I/O:
+; StringObj, ListObj, MapObj, enum boxes (Option/Result and every user enum),
+; print/Console.log, and Clock. Kept behind functions so Phase 5's magazines /
+; string-rope replacements can slot in (02-runtime.md §4 "keep it behind functions").
+; Leaf module (imports only ioutil) so both the VM and the compiler-support code can
+; call it without an import cycle.
+(module builtins)
+(import "ioutil.coil" :use *)
+
+; ============================ String ========================================
+(defstruct StringObj [(len i64) (data (ptr u8))])
+
+(defn str-make [(data (ptr u8)) (len i64)] (-> (ptr StringObj))
+  (let [s (cast (ptr StringObj) (xalloc (sizeof StringObj)))]
+    (store! (field s len) len) (store! (field s data) data) s))
+
+(defn str-concat [(a (ptr StringObj)) (b (ptr StringObj))] (-> (ptr StringObj))
+  (let [la (load (field a len)) lb (load (field b len))
+        buf (xalloc (+ (+ la lb) 1))]
+    (memcpy (cast (ptr i8) buf) (cast (ptr i8) (load (field a data))) la)
+    (memcpy (cast (ptr i8) (index buf la)) (cast (ptr i8) (load (field b data))) lb)
+    (store! (index buf (+ la lb)) (cast u8 0))
+    (str-make buf (+ la lb))))
+
+(defn str-eq [(a (ptr StringObj)) (b (ptr StringObj))] (-> bool)
+  (if (!= (load (field a len)) (load (field b len)))
+    false
+    (let [n (load (field a len)) (mut i) 0 (mut ok) true]
+      (loop (if (and (load ok) (< (load i) n))
+              (do (if (!= (cast i64 (load (index (load (field a data)) (load i))))
+                          (cast i64 (load (index (load (field b data)) (load i)))))
+                    (do (store! ok false) 0) 0)
+                  (store! i (+ (load i) 1)) 0)
+              (break)))
+      (load ok))))
+
+(defn str-slice [(s (ptr StringObj)) (lo i64) (hi i64)] (-> (ptr StringObj))
+  (let [n (load (field s len))
+        l (if (< lo 0) 0 (if (> lo n) n lo))
+        h (if (< hi l) l (if (> hi n) n hi))]
+    (str-make (index (load (field s data)) l) (- h l))))
+
+(defn str-len [(s (ptr StringObj))] (-> i64) (load (field s len)))
+
+(defn str-from-i64 [(v i64)] (-> (ptr StringObj))
+  (let [buf (xalloc 32) n (snprintf (cast (ptr i8) buf) 32 c"%lld" v)]
+    (str-make buf (cast i64 n))))
+(defn f64-bits-to-f64 [(b i64)] (-> f64)
+  (let [p (alloc-static i64)] (store! p b) (load (cast (ptr f64) p))))
+(defn str-from-f64bits [(bits i64)] (-> (ptr StringObj))
+  (let [buf (xalloc 64) n (snprintf (cast (ptr i8) buf) 64 c"%g" (f64-bits-to-f64 bits))]
+    (str-make buf (cast i64 n))))
+(defn str-from-bool [(v i64)] (-> (ptr StringObj))
+  (if (= v 0) (str-make (cast (ptr u8) c"false") 5) (str-make (cast (ptr u8) c"true") 4)))
+
+; ============================ output ========================================
+(defn print-i64 [(v i64)] (-> i64) (w-int 1 v) (w-cstr 1 c"\n") 0)
+(defn print-f64bits [(bits i64)] (-> i64) (w-num 1 (f64-bits-to-f64 bits)) (w-cstr 1 c"\n") 0)
+(defn print-bool [(v i64)] (-> i64) (if (= v 0) (w-cstr 1 c"false") (w-cstr 1 c"true")) (w-cstr 1 c"\n") 0)
+(defn print-str [(s (ptr StringObj))] (-> i64) (w-bytes 1 (load (field s data)) (load (field s len))) (w-cstr 1 c"\n") 0)
+(defn console-log [(s (ptr StringObj))] (-> i64) (w-bytes 1 (load (field s data)) (load (field s len))) (w-cstr 1 c"\n") 0)
+
+; ============================ List ==========================================
+(defstruct ListObj [(items (ptr i64)) (len i64) (cap i64)])
+
+(defn list-new [] (-> (ptr ListObj))
+  (let [l (cast (ptr ListObj) (xalloc (sizeof ListObj)))]
+    (store! (field l items) (cast (ptr i64) (xalloc (* 8 8)))) (store! (field l len) 0) (store! (field l cap) 8) l))
+
+(defn list-push [(l (ptr ListObj)) (v i64)] (-> i64)
+  (if (>= (load (field l len)) (load (field l cap)))
+    (let [ncap (* (load (field l cap)) 2)]
+      (store! (field l items) (cast (ptr i64) (realloc (cast (ptr i8) (load (field l items))) (* 8 ncap))))
+      (store! (field l cap) ncap) 0)
+    0)
+  (store! (index (load (field l items)) (load (field l len))) v)
+  (store! (field l len) (+ (load (field l len)) 1)) 0)
+
+(defn list-oob [(i i64) (n i64)] (-> i64)
+  (w-cstr 2 c"index ") (w-int 2 i) (w-cstr 2 c" out of bounds for List of length ") (w-int 2 n) (w-cstr 2 c"\n")
+  (exit (cast i32 70)) 0)
+(defn list-get [(l (ptr ListObj)) (i i64)] (-> i64)
+  (if (or (< i 0) (>= i (load (field l len)))) (do (list-oob i (load (field l len))) 0) 0)
+  (load (index (load (field l items)) i)))
+(defn list-len [(l (ptr ListObj))] (-> i64) (load (field l len)))
+
+; ============================ enum boxes ====================================
+; layout: [tag i64][argc i64][arg0 i64]...  (payload slots are untagged, per §1)
+(defn enum-alloc [(tag i64) (argc i64)] (-> (ptr i64))
+  (let [p (cast (ptr i64) (xalloc (* 8 (+ 2 argc))))]
+    (store! (index p 0) tag) (store! (index p 1) argc) p))
+(defn enum-tag [(p (ptr i64))] (-> i64) (load (index p 0)))
+(defn enum-argc [(p (ptr i64))] (-> i64) (load (index p 1)))
+(defn enum-arg [(p (ptr i64)) (i i64)] (-> i64) (load (index p (+ 2 i))))
+(defn enum-set-arg [(p (ptr i64)) (i i64) (v i64)] (-> i64) (store! (index p (+ 2 i)) v) 0)
+(defn enum-none [] (-> (ptr i64)) (enum-alloc 0 0))
+(defn enum-some [(v i64)] (-> (ptr i64)) (let [p (enum-alloc 1 1)] (enum-set-arg p 0 v) p))
+
+; structural equality over two enum boxes (shallow: payload slots compared bit-for-bit)
+(defn enum-equal [(a (ptr i64)) (b (ptr i64))] (-> bool)
+  (if (!= (enum-tag a) (enum-tag b)) false
+    (let [n (enum-argc a) (mut i) 0 (mut ok) true]
+      (loop (if (and (load ok) (< (load i) n))
+              (do (if (!= (enum-arg a (load i)) (enum-arg b (load i))) (do (store! ok false) 0) 0) (store! i (+ (load i) 1)) 0)
+              (break)))
+      (load ok))))
+
+; ============================ Map ===========================================
+; M0: simple parallel-array assoc. Keys are all one kind per map (Int or String).
+(defstruct MapObj
+  [(keys (ptr i64)) (vals (ptr i64)) (len i64) (cap i64) (str-key bool)])
+
+(defn map-new [(str-key bool)] (-> (ptr MapObj))
+  (let [m (cast (ptr MapObj) (xalloc (sizeof MapObj)))]
+    (store! (field m keys) (cast (ptr i64) (xalloc (* 8 8))))
+    (store! (field m vals) (cast (ptr i64) (xalloc (* 8 8))))
+    (store! (field m len) 0) (store! (field m cap) 8) (store! (field m str-key) str-key) m))
+
+(defn map-key-eq [(m (ptr MapObj)) (a i64) (b i64)] (-> bool)
+  (if (load (field m str-key)) (str-eq (cast (ptr StringObj) a) (cast (ptr StringObj) b)) (= a b)))
+
+(defn map-find [(m (ptr MapObj)) (k i64)] (-> i64)   ; -> index or -1
+  (let [n (load (field m len)) (mut i) 0 (mut r) -1]
+    (loop (if (and (< (load r) 0) (< (load i) n))
+            (do (if (map-key-eq m (load (index (load (field m keys)) (load i))) k) (do (store! r (load i)) 0) 0) (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+
+(defn map-set [(m (ptr MapObj)) (k i64) (v i64)] (-> i64)
+  (let [idx (map-find m k)]
+    (if (>= idx 0)
+      (do (store! (index (load (field m vals)) idx) v) 0)
+      (do
+        (if (>= (load (field m len)) (load (field m cap)))
+          (let [ncap (* (load (field m cap)) 2)]
+            (store! (field m keys) (cast (ptr i64) (realloc (cast (ptr i8) (load (field m keys))) (* 8 ncap))))
+            (store! (field m vals) (cast (ptr i64) (realloc (cast (ptr i8) (load (field m vals))) (* 8 ncap))))
+            (store! (field m cap) ncap) 0)
+          0)
+        (store! (index (load (field m keys)) (load (field m len))) k)
+        (store! (index (load (field m vals)) (load (field m len))) v)
+        (store! (field m len) (+ (load (field m len)) 1)) 0))))
+
+(defn map-get [(m (ptr MapObj)) (k i64)] (-> (ptr i64))   ; -> Option box
+  (let [idx (map-find m k)]
+    (if (>= idx 0) (enum-some (load (index (load (field m vals)) idx))) (enum-none))))
+(defn map-has [(m (ptr MapObj)) (k i64)] (-> i64) (if (>= (map-find m k) 0) 1 0))
+(defn map-len [(m (ptr MapObj))] (-> i64) (load (field m len)))
+
+; ============================ Clock =========================================
+(defn clock-now [] (-> i64)   ; wall-clock milliseconds
+  (let [tv (alloc-stack (array i64 2))]
+    (gettimeofday (cast (ptr i8) (index tv 0)) (cast (ptr i8) 0))
+    (+ (* (load (index tv 0)) 1000) (idiv (load (index tv 1)) 1000))))
+(defn clock-sleep [(ms i64)] (-> i64)   ; real nanosleep (single-threaded, no safepoints yet — Phase 5)
+  (let [ts (alloc-stack (array i64 2))]
+    (store! (index ts 0) (idiv ms 1000))
+    (store! (index ts 1) (* (irem ms 1000) 1000000))
+    (nanosleep (cast (ptr i8) (index ts 0)) (cast (ptr i8) 0)) 0))

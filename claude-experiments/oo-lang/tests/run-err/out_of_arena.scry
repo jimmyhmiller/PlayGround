@@ -1,0 +1,11 @@
+class Cell {
+  v: Int
+}
+fn main() {
+  var i = 0
+  while i < 100001 {
+    let c = Cell(v: i)
+    i = i + 1
+  }
+  print(i)
+}

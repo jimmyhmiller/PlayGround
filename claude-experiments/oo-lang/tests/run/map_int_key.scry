@@ -1,0 +1,13 @@
+fn main() {
+  let m = Map<Int, String>()
+  m.set(1, "one")
+  m.set(2, "two")
+  match m.get(1) {
+    Some(v) -> print(v)
+    None -> print("none")
+  }
+  match m.get(9) {
+    Some(v) -> print(v)
+    None -> print("none")
+  }
+}

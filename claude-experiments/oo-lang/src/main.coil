@@ -8,6 +8,7 @@
 (import "src/parser.coil" :use *)
 (import "src/types.coil" :use *)
 (import "src/typecheck.coil" :use *)
+(import "src/compile.coil" :use *)
 
 (defn read-file [(path (ptr i8))] (-> (ptr u8))
   (let [file (fopen path c"rb")]
@@ -56,6 +57,20 @@
           (dump-program (parse-program))
           0)))))
 
+; scry run [--dump-arenas] <file.scry>
+(defn cmd-run [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (if (< argc 3)
+    (do (w-cstr 2 c"scry run: expected a file argument\n") 64)
+    (if (cstr-eq (load (index argv 2)) c"--dump-arenas")
+      (if (< argc 4) (do (w-cstr 2 c"scry run: expected a file argument\n") 64)
+        (scry-run (load (index argv 3)) true))
+      (scry-run (load (index argv 2)) false))))
+
+(defn cmd-dump-bytecode [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (if (< argc 3)
+    (do (w-cstr 2 c"scry dump-bytecode: expected a file argument\n") 64)
+    (scry-dump-bytecode (load (index argv 2)))))
+
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [n (cast i64 argc)]
     (if (< n 2)
@@ -65,6 +80,6 @@
           (cstr-eq sub c"parse-dump") (cmd-parse-dump n argv)
           (cstr-eq sub c"check") (cmd-check n argv)
           (cstr-eq sub c"dump-types") (cmd-dump-types n argv)
-          (cstr-eq sub c"run")
-            (do (w-cstr 2 c"scry run: not implemented until Phase 3\n") 2)
+          (cstr-eq sub c"dump-bytecode") (cmd-dump-bytecode n argv)
+          (cstr-eq sub c"run") (cmd-run n argv)
           (do (w-cstr 2 c"scry: unknown command\n") (usage) 64))))))

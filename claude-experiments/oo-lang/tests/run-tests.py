@@ -20,11 +20,14 @@ import os, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 PARSE_DIR = os.path.join(HERE, "parse")
 CHECK_DIR = os.path.join(HERE, "check")
+RUN_DIR = os.path.join(HERE, "run")
+RUNERR_DIR = os.path.join(HERE, "run-err")
+ARENAS_DIR = os.path.join(HERE, "run-arenas")
 
 
-def run(binary, subcmd, scry):
+def run(binary, subargs, scry):
     try:
-        p = subprocess.run([binary, subcmd, scry],
+        p = subprocess.run([binary] + subargs + [scry],
                            capture_output=True, text=True, timeout=60)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
@@ -51,7 +54,7 @@ def main():
     passed = failed = 0
     fails = []
 
-    def run_dir(directory, subcmd, golden):
+    def run_dir(directory, subargs, golden):
         nonlocal passed, failed
         if not os.path.isdir(directory):
             return
@@ -62,7 +65,7 @@ def main():
             scry = os.path.join(directory, f)
             out_path = os.path.join(directory, name + ".out")
             err_path = os.path.join(directory, name + ".err")
-            code, out, err = run(binary, subcmd, scry)
+            code, out, err = run(binary, subargs, scry)
             problems = []
             if os.path.exists(err_path):
                 # error test: nonzero exit + each nonblank .err line is a stderr substring
@@ -102,8 +105,11 @@ def main():
             else:
                 passed += 1
 
-    run_dir(PARSE_DIR, "parse-dump", True)
-    run_dir(CHECK_DIR, "check", False)
+    run_dir(PARSE_DIR, ["parse-dump"], True)
+    run_dir(CHECK_DIR, ["check"], False)
+    run_dir(RUN_DIR, ["run"], True)
+    run_dir(RUNERR_DIR, ["run"], True)
+    run_dir(ARENAS_DIR, ["run", "--dump-arenas"], True)
 
     print(f"\n{passed} passed, {failed} failed ({passed + failed} tests)")
     if fails and not verbose:

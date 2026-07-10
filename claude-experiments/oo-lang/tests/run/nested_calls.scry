@@ -1,0 +1,5 @@
+fn inc(x: Int) -> Int { x + 1 }
+fn dbl(x: Int) -> Int { x * 2 }
+fn main() {
+  print(inc(dbl(inc(3))))
+}

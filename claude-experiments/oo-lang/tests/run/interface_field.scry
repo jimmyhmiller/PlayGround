@@ -1,0 +1,14 @@
+interface Tool {
+  fn run(x: String) -> String
+}
+class Echo implements Tool {
+  fn run(x: String) -> String { "echo: " + x }
+}
+class Box {
+  tool: Tool
+  fn use(x: String) -> String { self.tool.run(x) }
+}
+fn main() {
+  let b = Box(tool: Echo())
+  print(b.use("hi"))
+}

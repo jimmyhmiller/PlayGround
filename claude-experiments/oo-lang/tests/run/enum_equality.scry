@@ -1,0 +1,9 @@
+enum Dir {
+  North
+  South
+}
+fn main() {
+  print(North == North)
+  print(North == South)
+  print(North != South)
+}

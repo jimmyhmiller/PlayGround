@@ -1,0 +1,14 @@
+class Rect {
+  w: Int
+  h: Int
+  fn init(side: Int) {
+    self.w = side
+    self.h = side
+  }
+  fn area() -> Int { self.w * self.h }
+}
+fn main() {
+  let r = Rect(side: 5)
+  print(r.w)
+  print(r.area())
+}

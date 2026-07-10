@@ -1,0 +1,10 @@
+class Wrap<T> {
+  value: T
+  fn get() -> T { self.value }
+}
+fn main() {
+  let a = Wrap<Int>(value: 5)
+  let b = Wrap<String>(value: "hi")
+  print(a.get())
+  print(b.get())
+}

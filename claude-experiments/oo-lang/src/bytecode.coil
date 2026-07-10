@@ -1,0 +1,213 @@
+; bytecode.coil — the Scry bytecode instruction set + the compiled-program model
+; (02-runtime.md §2/§3/§5). Values are UNTAGGED 8-byte slots; the opcode carries the
+; type (typed opcodes: iadd/fadd/sconcat/…), so there are no runtime tag checks on the
+; hot path. This module owns everything the compiler PRODUCES and the VM CONSUMES:
+; Chunk (code + constant pool), MethodInfo, FieldInfo/TypeInfo/ITable, and the Program.
+(module bytecode)
+(import "ioutil.coil" :use *)
+(import "arena.coil" :use *)
+
+; ============================ opcodes =======================================
+; Operand widths: u16 = index/offset/slot/jump (big-endian); u8 = argc/tag/small id.
+(const OP_CONST 0)            ; u16 const-idx      -> push pool[idx]
+(const OP_TRUE 1)            (const OP_FALSE 2)   ; push 1 / 0
+(const OP_UNIT 3)            ; push 0 (Void/() placeholder)
+(const OP_POP 4)            ; discard top
+(const OP_DUP 5)            ; duplicate top
+
+(const OP_LOAD_LOCAL 6)      ; u16 slot -> push frame[slot]
+(const OP_STORE_LOCAL 7)     ; u16 slot -> frame[slot] = pop
+
+(const OP_LOAD_FIELD_I64 8)  ; u16 off -> pop obj, push *(obj+off)
+(const OP_LOAD_FIELD_F64 9)
+(const OP_LOAD_FIELD_REF 10)
+(const OP_STORE_FIELD_I64 11); u16 off -> pop val, pop obj, *(obj+off)=val
+(const OP_STORE_FIELD_F64 12)
+(const OP_STORE_FIELD_REF 13)
+
+(const OP_ADD_I64 14) (const OP_SUB_I64 15) (const OP_MUL_I64 16)
+(const OP_DIV_I64 17) (const OP_REM_I64 18) (const OP_NEG_I64 19)
+(const OP_ADD_F64 20) (const OP_SUB_F64 21) (const OP_MUL_F64 22)
+(const OP_DIV_F64 23) (const OP_NEG_F64 24)
+
+(const OP_LT_I64 25) (const OP_LE_I64 26) (const OP_GT_I64 27) (const OP_GE_I64 28)
+(const OP_EQ_I64 29) (const OP_NE_I64 30)
+(const OP_LT_F64 31) (const OP_LE_F64 32) (const OP_GT_F64 33) (const OP_GE_F64 34)
+(const OP_EQ_F64 35) (const OP_NE_F64 36)
+(const OP_EQ_BOOL 37) (const OP_NE_BOOL 38) (const OP_NOT 39)
+(const OP_EQ_REF 40) (const OP_NE_REF 41)
+(const OP_EQ_ENUM 42) (const OP_NE_ENUM 43)   ; structural enum equality
+
+(const OP_CONCAT 44)          ; pop b,a (StringObj*) -> push concat
+(const OP_I64_TO_STR 45) (const OP_F64_TO_STR 46) (const OP_BOOL_TO_STR 47)
+
+(const OP_JUMP 48)            ; u16 -> ip += operand
+(const OP_JUMP_IF_FALSE 49)   ; u16 -> pop bool; if 0, ip += operand
+(const OP_LOOP 50)            ; u16 -> ip -= operand
+
+(const OP_CALL_STATIC 51)     ; u16 method-idx, u8 argc
+(const OP_CALL_VIRTUAL 52)    ; u16 iface-id, u8 slot, u8 argc
+(const OP_CALL_BUILTIN 53)    ; u8 builtin-id
+(const OP_RETURN 54)          ; return top of stack
+
+(const OP_NEW 55)             ; u16 type-id -> push fresh instance ptr
+(const OP_LOAD_SINGLETON 56)  ; u16 type-id -> push the object singleton ptr
+
+(const OP_MAKE_ENUM 57)       ; u8 tag, u8 argc -> pop argc payloads, push box
+(const OP_ENUM_TAG 58)        ; pop enum ptr, push its tag
+(const OP_ENUM_GET 59)        ; u8 idx -> pop enum ptr, push payload[idx]
+(const OP_STR_EQ 60)          ; pop b,a (StringObj*) -> push bool
+(const OP_STR_NE 61)
+
+; ============================ builtin ids ===================================
+(const BLT_PRINT_I64 0) (const BLT_PRINT_F64 1) (const BLT_PRINT_BOOL 2) (const BLT_PRINT_STR 3)
+(const BLT_CONSOLE_LOG 4)
+(const BLT_LIST_NEW 5) (const BLT_LIST_PUSH 6) (const BLT_LIST_GET 7) (const BLT_LIST_LEN 8)
+(const BLT_MAP_NEW 9) (const BLT_MAP_SET 10) (const BLT_MAP_GET 11) (const BLT_MAP_HAS 12) (const BLT_MAP_LEN 13)
+(const BLT_STR_LEN 14) (const BLT_STR_SLICE 15)
+(const BLT_CLOCK_NOW 16) (const BLT_CLOCK_SLEEP 17)
+(const BLT_THREAD_SPAWN 18) (const BLT_THREAD_JOIN 19)   ; hard-error at runtime (M0)
+
+; ============================ FieldInfo kinds ===============================
+(const FIELD_I64 0) (const FIELD_F64 1) (const FIELD_BOOL 2)
+(const FIELD_STRING 3) (const FIELD_REF 4) (const FIELD_LIST_REF 5) (const FIELD_IFACE_REF 6)
+
+; ============================ Chunk =========================================
+(defstruct Chunk
+  [(code (ptr u8)) (count i64) (cap i64)
+   (consts (ptr i64)) (const-count i64) (const-cap i64)])
+
+(defn chunk-new [] (-> (ptr Chunk))
+  (let [c (cast (ptr Chunk) (xalloc (sizeof Chunk)))]
+    (store! (field c code) (xalloc 64)) (store! (field c count) 0) (store! (field c cap) 64)
+    (store! (field c consts) (cast (ptr i64) (xalloc (* 8 16)))) (store! (field c const-count) 0) (store! (field c const-cap) 16)
+    c))
+
+(defn chunk-byte [(c (ptr Chunk)) (b i64)] (-> i64)
+  (if (>= (load (field c count)) (load (field c cap)))
+    (let [ncap (* (load (field c cap)) 2)]
+      (store! (field c code) (cast (ptr u8) (realloc (cast (ptr i8) (load (field c code))) ncap)))
+      (store! (field c cap) ncap) 0)
+    0)
+  (store! (index (load (field c code)) (load (field c count))) (cast u8 (iand b 255)))
+  (store! (field c count) (+ (load (field c count)) 1))
+  (- (load (field c count)) 1))
+
+(defn chunk-u16 [(c (ptr Chunk)) (v i64)] (-> i64)
+  (chunk-byte c (iand (ishr v 8) 255)) (chunk-byte c (iand v 255)) 0)
+
+(defn chunk-patch-u16 [(c (ptr Chunk)) (at i64) (v i64)] (-> i64)
+  (store! (index (load (field c code)) at) (cast u8 (iand (ishr v 8) 255)))
+  (store! (index (load (field c code)) (+ at 1)) (cast u8 (iand v 255))) 0)
+
+(defn chunk-add-const [(c (ptr Chunk)) (v i64)] (-> i64)
+  (if (>= (load (field c const-count)) (load (field c const-cap)))
+    (let [ncap (* (load (field c const-cap)) 2)]
+      (store! (field c consts) (cast (ptr i64) (realloc (cast (ptr i8) (load (field c consts))) (* 8 ncap))))
+      (store! (field c const-cap) ncap) 0)
+    0)
+  (store! (index (load (field c consts)) (load (field c const-count))) v)
+  (store! (field c const-count) (+ (load (field c const-count)) 1))
+  (- (load (field c const-count)) 1))
+
+(defn chunk-here [(c (ptr Chunk))] (-> i64) (load (field c count)))
+
+; ============================ program model =================================
+(defstruct MethodInfo
+  [(name (ptr u8)) (name-len i64)
+   (arity i64)              ; params incl. self
+   (local-count i64)       ; total declared slots (params + locals + bindings)
+   (chunk (ptr Chunk))
+   (is-void bool)])
+
+(defstruct FieldInfo [(name (ptr u8)) (name-len i64) (offset i64) (kind i64)])
+
+(defstruct ITable [(slots (ptr i64))])   ; slots[method-slot] = global method index
+
+(defstruct TypeInfo
+  [(type-id i64)
+   (name (ptr u8)) (name-len i64)
+   (kind i64)                 ; DK_CLASS / DK_OBJECT / (enums/values have no TypeInfo)
+   (is-entity bool)
+   (instance-size i64)
+   (fields (ptr FieldInfo)) (field-count i64)
+   (itables (ptr (ptr ITable)))   ; indexed by iface-id; null if not implemented
+   (arena (ptr TypeArena))
+   (singleton (ptr u8))])     ; for objects: the one instance
+
+(defstruct Program
+  [(methods (ptr (ptr MethodInfo))) (method-count i64)
+   (types (ptr (ptr TypeInfo))) (type-count i64)
+   (iface-count i64)
+   (entry i64)])              ; global method index of main
+
+; ============================ disassembler ==================================
+(defn dis-simple [(name (ptr i8)) (off i64)] (-> i64) (w-cstr 1 name) (w-cstr 1 c"\n") (+ off 1))
+(defn dis-u16 [(c (ptr Chunk)) (name (ptr i8)) (off i64)] (-> i64)
+  (let [hi (cast i64 (load (index (load (field c code)) (+ off 1))))
+        lo (cast i64 (load (index (load (field c code)) (+ off 2))))]
+    (w-cstr 1 name) (w-cstr 1 c" ") (w-int 1 (+ (* hi 256) lo)) (w-cstr 1 c"\n") (+ off 3)))
+(defn dis-u8 [(c (ptr Chunk)) (name (ptr i8)) (off i64)] (-> i64)
+  (w-cstr 1 name) (w-cstr 1 c" ") (w-int 1 (cast i64 (load (index (load (field c code)) (+ off 1))))) (w-cstr 1 c"\n") (+ off 2))
+
+(defn dis-op [(c (ptr Chunk)) (off i64)] (-> i64)
+  (let [op (cast i64 (load (index (load (field c code)) off)))]
+    (w-cstr 1 c"    ") (w-int 1 off) (w-cstr 1 c"  ")
+    (cond
+      (= op OP_CONST) (dis-u16 c c"CONST" off)
+      (= op OP_TRUE) (dis-simple c"TRUE" off) (= op OP_FALSE) (dis-simple c"FALSE" off)
+      (= op OP_UNIT) (dis-simple c"UNIT" off) (= op OP_POP) (dis-simple c"POP" off) (= op OP_DUP) (dis-simple c"DUP" off)
+      (= op OP_LOAD_LOCAL) (dis-u16 c c"LOAD_LOCAL" off) (= op OP_STORE_LOCAL) (dis-u16 c c"STORE_LOCAL" off)
+      (= op OP_LOAD_FIELD_I64) (dis-u16 c c"LOAD_FIELD_I64" off)
+      (= op OP_LOAD_FIELD_F64) (dis-u16 c c"LOAD_FIELD_F64" off)
+      (= op OP_LOAD_FIELD_REF) (dis-u16 c c"LOAD_FIELD_REF" off)
+      (= op OP_STORE_FIELD_I64) (dis-u16 c c"STORE_FIELD_I64" off)
+      (= op OP_STORE_FIELD_F64) (dis-u16 c c"STORE_FIELD_F64" off)
+      (= op OP_STORE_FIELD_REF) (dis-u16 c c"STORE_FIELD_REF" off)
+      (= op OP_ADD_I64) (dis-simple c"ADD_I64" off) (= op OP_SUB_I64) (dis-simple c"SUB_I64" off)
+      (= op OP_MUL_I64) (dis-simple c"MUL_I64" off) (= op OP_DIV_I64) (dis-simple c"DIV_I64" off)
+      (= op OP_REM_I64) (dis-simple c"REM_I64" off) (= op OP_NEG_I64) (dis-simple c"NEG_I64" off)
+      (= op OP_ADD_F64) (dis-simple c"ADD_F64" off) (= op OP_SUB_F64) (dis-simple c"SUB_F64" off)
+      (= op OP_MUL_F64) (dis-simple c"MUL_F64" off) (= op OP_DIV_F64) (dis-simple c"DIV_F64" off)
+      (= op OP_NEG_F64) (dis-simple c"NEG_F64" off)
+      (= op OP_LT_I64) (dis-simple c"LT_I64" off) (= op OP_LE_I64) (dis-simple c"LE_I64" off)
+      (= op OP_GT_I64) (dis-simple c"GT_I64" off) (= op OP_GE_I64) (dis-simple c"GE_I64" off)
+      (= op OP_EQ_I64) (dis-simple c"EQ_I64" off) (= op OP_NE_I64) (dis-simple c"NE_I64" off)
+      (= op OP_LT_F64) (dis-simple c"LT_F64" off) (= op OP_LE_F64) (dis-simple c"LE_F64" off)
+      (= op OP_GT_F64) (dis-simple c"GT_F64" off) (= op OP_GE_F64) (dis-simple c"GE_F64" off)
+      (= op OP_EQ_F64) (dis-simple c"EQ_F64" off) (= op OP_NE_F64) (dis-simple c"NE_F64" off)
+      (= op OP_EQ_BOOL) (dis-simple c"EQ_BOOL" off) (= op OP_NE_BOOL) (dis-simple c"NE_BOOL" off)
+      (= op OP_NOT) (dis-simple c"NOT" off)
+      (= op OP_EQ_REF) (dis-simple c"EQ_REF" off) (= op OP_NE_REF) (dis-simple c"NE_REF" off)
+      (= op OP_EQ_ENUM) (dis-simple c"EQ_ENUM" off) (= op OP_NE_ENUM) (dis-simple c"NE_ENUM" off)
+      (= op OP_CONCAT) (dis-simple c"CONCAT" off)
+      (= op OP_I64_TO_STR) (dis-simple c"I64_TO_STR" off) (= op OP_F64_TO_STR) (dis-simple c"F64_TO_STR" off)
+      (= op OP_BOOL_TO_STR) (dis-simple c"BOOL_TO_STR" off)
+      (= op OP_JUMP) (dis-u16 c c"JUMP" off) (= op OP_JUMP_IF_FALSE) (dis-u16 c c"JUMP_IF_FALSE" off)
+      (= op OP_LOOP) (dis-u16 c c"LOOP" off)
+      (= op OP_CALL_STATIC)
+        (let [hi (cast i64 (load (index (load (field c code)) (+ off 1))))
+              lo (cast i64 (load (index (load (field c code)) (+ off 2))))
+              ac (cast i64 (load (index (load (field c code)) (+ off 3))))]
+          (w-cstr 1 c"CALL_STATIC ") (w-int 1 (+ (* hi 256) lo)) (w-cstr 1 c" argc=") (w-int 1 ac) (w-cstr 1 c"\n") (+ off 4))
+      (= op OP_CALL_VIRTUAL)
+        (let [hi (cast i64 (load (index (load (field c code)) (+ off 1))))
+              lo (cast i64 (load (index (load (field c code)) (+ off 2))))
+              sl (cast i64 (load (index (load (field c code)) (+ off 3))))
+              ac (cast i64 (load (index (load (field c code)) (+ off 4))))]
+          (w-cstr 1 c"CALL_VIRTUAL iface=") (w-int 1 (+ (* hi 256) lo)) (w-cstr 1 c" slot=") (w-int 1 sl) (w-cstr 1 c" argc=") (w-int 1 ac) (w-cstr 1 c"\n") (+ off 5))
+      (= op OP_CALL_BUILTIN) (dis-u8 c c"CALL_BUILTIN" off)
+      (= op OP_RETURN) (dis-simple c"RETURN" off)
+      (= op OP_NEW) (dis-u16 c c"NEW" off) (= op OP_LOAD_SINGLETON) (dis-u16 c c"LOAD_SINGLETON" off)
+      (= op OP_MAKE_ENUM)
+        (let [tg (cast i64 (load (index (load (field c code)) (+ off 1))))
+              ac (cast i64 (load (index (load (field c code)) (+ off 2))))]
+          (w-cstr 1 c"MAKE_ENUM tag=") (w-int 1 tg) (w-cstr 1 c" argc=") (w-int 1 ac) (w-cstr 1 c"\n") (+ off 3))
+      (= op OP_ENUM_TAG) (dis-simple c"ENUM_TAG" off) (= op OP_ENUM_GET) (dis-u8 c c"ENUM_GET" off)
+      (= op OP_STR_EQ) (dis-simple c"STR_EQ" off) (= op OP_STR_NE) (dis-simple c"STR_NE" off)
+      (do (w-cstr 1 c"??op ") (w-int 1 op) (w-cstr 1 c"\n") (+ off 1)))))
+
+(defn disassemble-chunk [(c (ptr Chunk))] (-> i64)
+  (let [(mut off) 0 n (load (field c count))]
+    (loop (if (< (load off) n) (do (store! off (dis-op c (load off))) 0) (break))))
+  0)

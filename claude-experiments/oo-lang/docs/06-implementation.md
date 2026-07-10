@@ -346,3 +346,167 @@ args (all fields, definite assignment).
   share/grow a list through a pointer, wrap it in a one-field struct and push via
   `(mut (field p items))` (used for `PList`); a plain byte string-builder is easier
   as a hand-rolled `StrBuf` than an `(ArrayList u8)`.
+
+---
+
+# Phase 3 — bytecode compiler, VM, and per-type arenas (M0)
+
+Phase 3 turns the type-checked AST into a running program: a bytecode compiler
+(`src/compile.coil`), a stack VM (`src/vm.coil`), the per-type slab allocator
+(`src/arena.coil`), the instruction set + program model (`src/bytecode.coil`), and
+the built-in value runtime (`src/builtins.coil`). `02-runtime.md` is the spec; where
+M0 deviates it is because M0 is **single-threaded by mandate** (05 M0 OUT) — the
+thread-safety machinery (magazines, atomics, safepoints) is M1.
+
+## Module layout (`src/`, added this phase)
+
+| File | Module | Responsibility |
+|---|---|---|
+| `bytecode.coil` | `bytecode` | Opcode + builtin-id + field-kind constants; `Chunk` (growable code buffer + i64 constant pool); the program model (`MethodInfo`, `FieldInfo`, `ITable`, `TypeInfo`, `Program`); the disassembler (`dump-bytecode`). |
+| `arena.coil` | `arena` | `InstanceHeader`, `TypeArena`, slab bump-allocation + free-list, `arena-for-each-live` enumeration, `OutOfArenaSpace`. Leaf (imports only `ioutil`). |
+| `builtins.coil` | `builtins` | `StringObj`/`ListObj`/`MapObj`, enum boxes (Option/Result + every user enum), `print`/`Console.log`, `Clock`. Leaf; kept behind functions so Phase 5 magazines/ropes can replace them. |
+| `vm.coil` | `vm` | `VM`/`CallFrame`, the value stack, the dispatch loop (`run`), `vm-run` (allocate object singletons, invoke `main`). |
+| `compile.coil` | `compile` | AST→bytecode; builds `TypeInfo`+arenas+itables; the `run`/`dump-bytecode` CLI drivers. |
+
+Import DAG (no cycles): `arena`←`bytecode`; `{arena,builtins,bytecode}`←`vm`;
+`{...,typecheck,types,vm}`←`compile`←`main`. clox uses one file to dodge its
+value↔object↔table cycles; Scry's layers are acyclic, so it stays split.
+
+## Values: untagged slots, typed opcodes (§1)
+
+Every stack slot and every field is a raw 8-byte `i64`. The compiler knows each
+value's static type, so it picks a **typed opcode** and the VM never tag-checks:
+`Int`→`i64`, `Float`→the `f64` bit pattern (round-tripped through memory, never
+`(cast f64 i64)`), `Bool`→0/1, `String`/class/`List`/`Map`/enum→a raw pointer. There
+is no NaN-boxing and no runtime `Value` union.
+
+## Opcode inventory (`bytecode.coil`)
+
+Operands: `u16` big-endian for const-idx / local-slot / field-offset / jump /
+type-id / iface-id / method-idx; `u8` for argc / enum-tag / builtin-id / enum-arg-idx.
+
+- **Literals/stack:** `CONST`, `TRUE`, `FALSE`, `UNIT`, `POP`, `DUP`.
+- **Locals:** `LOAD_LOCAL`, `STORE_LOCAL` (slot = offset from frame base).
+- **Fields (typed):** `LOAD_FIELD_{I64,F64,REF}`, `STORE_FIELD_{I64,F64,REF}` — operand
+  is a **compile-time byte offset** that already includes the header (a pointer-add +
+  a move; no hashing, unlike clox's field `Table`). The three families are distinct
+  for GC/metadata intent; in M0 all three are the same 8-byte move.
+- **Arithmetic:** `{ADD,SUB,MUL,DIV,NEG}_{I64,F64}`, `REM_I64`.
+- **Comparison:** `{LT,LE,GT,GE,EQ,NE}_{I64,F64}`, `{EQ,NE}_BOOL`, `NOT`,
+  `{EQ,NE}_REF` (pointer identity), `{EQ,NE}_ENUM` (structural), `STR_{EQ,NE}`.
+- **Strings:** `CONCAT`, `{I64,F64,BOOL}_TO_STR` (interpolation coercions).
+- **Control:** `JUMP`, `JUMP_IF_FALSE` (pops), `LOOP` (backward).
+- **Calls:** `CALL_STATIC <method-idx> <argc>`, `CALL_VIRTUAL <iface-id> <slot> <argc>`,
+  `CALL_BUILTIN <builtin-id>` (fixed arity), `RETURN`.
+- **Objects/enums:** `NEW <type-id>`, `LOAD_SINGLETON <type-id>` (objects),
+  `MAKE_ENUM <tag> <argc>`, `ENUM_TAG` (pop box→tag), `ENUM_GET <idx>` (pop box→payload).
+
+Built-in ids (`CALL_BUILTIN`): `PRINT_{I64,F64,BOOL,STR}`, `CONSOLE_LOG`,
+`LIST_{NEW,PUSH,GET,LEN}`, `MAP_{NEW,SET,GET,HAS,LEN}`, `STR_{LEN,SLICE}`,
+`CLOCK_{NOW,SLEEP}`, `THREAD_{SPAWN,JOIN}` (hard-error until Phase 5).
+
+## Chunk + function-table format (Phase 4 hook)
+
+A `Chunk` is `{code:(ptr u8), consts:(ptr i64)}`, both malloc/realloc-grown. String/
+float constants are materialized **at compile time** (a `StringObj*` / the `f64` bit
+pattern) and stored directly in the pool. A `Program` holds a **flat method table**
+(`methods[]`) plus `types[]` (indexed by mono type-id) and `entry` (index of `main`).
+**Every call is through a method index, never a raw code pointer** — precisely so
+Phase 4's live-swap can rebuild `methods[]`/`types[]` and atomically repoint without
+touching call sites (03-live-semantics' function-table indirection).
+
+## Calling convention
+
+Stack VM à la clox. A call site pushes receiver-then-args; `CALL_STATIC` sets
+`base = stack-top - argc`, reserves+zeroes `[base+argc, base+local_count)` (so
+unwritten ref slots read null — the §2 zeroing invariant), and `stack-top =
+base+local_count`. Slot 0 is `self` for methods (`OP_LOAD_LOCAL 0`); params follow;
+locals/temporaries above. `RETURN` pops the result, sets `stack-top = base`, and pushes
+the result onto the caller — the callee's args are consumed, replaced by one value.
+Frames don't overlap because a nested call's base is the caller's live `stack-top`.
+`local_count` = the method's peak slot high-water (params + locals + scoped bindings +
+compiler temps); operand-stack depth is naturally covered because temporaries live above
+`local_count` in the shared stack. `void` methods (and `init`) push `UNIT` before
+`RETURN`; an unreachable trailing `RETURN` after a fully-returning body is dead code the
+VM never executes.
+
+Dispatch paths (§5): a call on a **concretely-typed** receiver (class/object) is
+`CALL_STATIC` to the baked-in method index. A call on an **interface-typed** receiver is
+`CALL_VIRTUAL iface-id slot argc`: load `type-id` from the receiver's header →
+`types[type-id].itables[iface-id].slots[slot]` → method index → same push-frame path.
+itable slots are interface-declaration-order; itables are built per (class, interface)
+at compile time. Built-in methods (List/Map/String/Clock/Console) compile to
+`CALL_BUILTIN`.
+
+## Object layout + arenas (§3/§4)
+
+`InstanceHeader` = `{type-id, slot-index, generation, flags}` (M0 uses four `i64`
+fields — spec's `u32` packing is deferred; correctness-equivalent). Fields follow in
+declaration order at fixed 8-byte offsets; `field-offset = sizeof(InstanceHeader) +
+field-index*8`. One `TypeArena` per **entity** mono type-id (`class`/`object`, incl.
+each generic instantiation — `Inventory<Tool>` and `Inventory<Message>` get separate
+arenas). Enums, `List`, `Map`, `Option`, `Result` are values (no arena). Arena params:
+`slot-size = align8(header + fields)`; `slab-cap = max(8, 65536/slot-size)` (≈64 KiB
+slabs); slabs `calloc`'d (fresh slots read `flags=0`); a flat `bump-cursor` frontier +
+a `free-head` free-list (list present but unused until GC — no frees happen in M0).
+Stable identity = `(type-id, slot-index, generation)`. `OP_NEW` calls `arena-alloc`,
+which stamps the header. Exceeding `max-slots` (100000) is the loud
+`OutOfArenaSpace: <Type> arena full at N slots ... GC not implemented in this build`.
+
+### M0 deviations from §4 (all because M0 is single-threaded)
+- **No per-thread magazines, no atomics.** The shared-arena API (bump + free-list) is
+  the layer M1's magazines sit on; its shape is here, without the atomics. §4's
+  `arena-free-push`/`arena-bump-batch` collapse to plain bump/free.
+- **slot→(slab,local) is div/mod**, not shift/mask (slab-cap needn't be 2^k).
+- **`shape-id` is not in the header yet** (Phase 4 migration adds it).
+
+## Enums, match, `?`, strings
+
+Enum values are heap boxes `[tag, argc, arg0…]` (`builtins.coil`); `MAKE_ENUM` builds
+one, `ENUM_TAG`/`ENUM_GET` read it. Variant tag = declaration order (Option: None=0,
+Some=1; Result: Ok=0, Err=1). `match` stores the scrutinee in a temp local, then per
+arm compares the tag (or a literal for primitive match) and binds payloads into fresh
+locals — a clean design that avoids stack juggling; the exhaustiveness the checker
+proved means the fall-through past the last arm is unreachable. `?` stores the `Result`
+in a temp, `RETURN`s the box early on `Err` (representation-identical across `Result<_,E>`
+so no rebuild), else extracts the `Ok` payload. `String` is `{len, data}`; concat/slice
+malloc; interpolation coerces each non-string part with `*_TO_STR` then `CONCAT`s.
+
+## `Clock.sleep` note (revisit in Phase 5)
+
+`Clock.sleep(ms)` is a real `nanosleep`. In M0 (single-threaded, no safepoints) that is
+fine. In Phase 5 a sleeping thread must poll its safepoint between short slices so it
+never delays a stop-the-world by more than one slice (01-language.md §1.7); this
+implementation must change then.
+
+## What Phase 4 (eval server) hooks into
+
+- **Compile-in-context + call.** `build-program` produces the `Program`; a live eval
+  compiles an expression/definition against the *same* `ctx` (types/monos) and appends
+  to `Program.methods`, then invokes it via the existing `push-frame`+`run` path — no
+  new call machinery. Because calls go through method **indices**, a new generation can
+  swap `methods[]`/`types[]` atomically (03-live-semantics) without rewriting call sites.
+- **Safepoint hook.** M1 will insert `safepoint-poll` at the **top of `run`'s dispatch
+  loop** (one branch, almost always false) — the single place every instruction passes
+  through. The loop is already parameter-shaped to take a `VMThread` (M0 uses one
+  implicit global `VM`); M1 threads each pthread's own frames/stack through `run`.
+- **Enumeration.** `arena-for-each-live(arena, fn)` is the viewer's foundation:
+  `dump-arenas-of` already walks every entity `TypeInfo`'s arena for `live-count` /
+  high-water / slab-count. Handle resolution will be `arena-slot-ptr(type-id, slot-index)`
+  + a `generation` compare (both fields already stamped in the header).
+
+## Coil friction hit in Phase 3 (adds to Phase 1/2's list)
+
+- **`field-index` is a reserved builtin form** ("expects `(field-index TYPE name)`") —
+  a plain `defn` of that name shadows it and errors; renamed to `fld-index`. (Same class
+  of clash as Phase 1's `call`/`block`.)
+- **`and`/`or` are strictly binary** (already known) — an 8-way `(or …)` over node kinds
+  had to become a `cond`-based `stmt-like?` helper.
+- **`(field (load place) f)` vs `(field place f)`** — to truncate a let-bound
+  `ArrayList`'s `len`, the place is `(field cs locals)` (a `(ptr ArrayList)`), **not**
+  `(load (field cs locals))` (the ArrayList value); `field`/`index` need the pointer.
+- **A let-bound growable `ArrayList` must be `(mut x) (al-new …)`** and pushed via
+  `(al-push! (mut x) …)` / read via `(load x)`; you cannot `(mut y) x`-alias an
+  immutable let binding of it.
+- **`case` arms take exactly one expression** — the giant VM dispatch `case` needs each
+  opcode's whole handler wrapped in one `(let …)`/`(do …)`.

@@ -1,0 +1,10 @@
+class Adder {
+  base: Int
+  fn add(x: Int) -> Int { self.base + x }
+  fn addTwice(x: Int) -> Int { self.add(x) + self.add(x) }
+}
+fn main() {
+  let a = Adder(base: 100)
+  print(a.add(5))
+  print(a.addTwice(5))
+}

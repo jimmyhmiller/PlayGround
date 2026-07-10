@@ -1,0 +1,855 @@
+; compile.coil — AST -> bytecode (02-runtime.md §2/§3/§5). Drives off Phase 2's
+; resolved types: it re-uses the typechecker's `infer` to recover the static type of
+; any subexpression (the program is already checked clean, so `infer` reports nothing
+; and just returns types), and off `ctx.monos` for stable type-ids + field layouts.
+;
+; Produces a Program: a flat method table (call through an INDEX, never a raw code
+; pointer — keeps Phase 4's live-swap door open), one TypeInfo+arena per entity mono,
+; and per-(class,interface) itables for OP_CALL_VIRTUAL.
+(module compile)
+(import "ioutil.coil" :use *)
+(import "lexer.coil" :use *)
+(import "ast.coil" :use *)
+(import "types.coil" :use *)
+(import "typecheck.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "alloc.coil" :use *)
+(import "arena.coil" :use *)
+(import "builtins.coil" :use *)
+(import "bytecode.coil" :use *)
+(import "vm.coil" :use *)
+
+(const MAX_SLOTS 100000)
+
+; ============================ compile-global state ==========================
+(defstruct CComp
+  [(methods (ArrayList (ptr MethodInfo)))
+   (method-nodes (ArrayList (ptr Node)))   ; parallel: index i <-> methods[i]
+   (iface-decls (ArrayList (ptr Decl)))     ; index = iface-id
+   (entry i64)])
+(defn cc [] (-> (ptr CComp)) (alloc-static CComp))
+(defn cc-init [] (-> i64)
+  (store! (field (cc) methods) (al-new [(ptr MethodInfo)] (alc-global)))
+  (store! (field (cc) method-nodes) (al-new [(ptr Node)] (alc-global)))
+  (store! (field (cc) iface-decls) (al-new [(ptr Decl)] (alc-global)))
+  (store! (field (cc) entry) -1) 0)
+
+; ============================ per-method state ==============================
+(defstruct CLocal [(name (ptr u8)) (name-len i64) (slot i64) (ty (ptr Type))])
+(defstruct CState
+  [(chunk (ptr Chunk))
+   (env (ptr Env))
+   (locals (ArrayList (ptr CLocal)))
+   (next-slot i64) (max-slot i64)
+   (ctxt (ptr Decl))])   ; decl providing type-param scope for resolve-type
+
+(defn cs-chunk [(cs (ptr CState))] (-> (ptr Chunk)) (load (field cs chunk)))
+
+; ---- slots / scope ----
+(defn note-slot [(cs (ptr CState)) (s i64)] (-> i64)
+  (if (>= s (load (field cs max-slot))) (do (store! (field cs max-slot) (+ s 1)) 0) 0) s)
+(defn alloc-temp [(cs (ptr CState))] (-> i64)
+  (let [s (load (field cs next-slot))] (store! (field cs next-slot) (+ s 1)) (note-slot cs s)))
+(defn bind-local [(cs (ptr CState)) (name (ptr u8)) (len i64) (ty (ptr Type)) (mutable bool)] (-> i64)
+  (let [s (load (field cs next-slot))
+        l (cast (ptr CLocal) (xalloc (sizeof CLocal)))]
+    (store! (field l name) name) (store! (field l name-len) len) (store! (field l slot) s) (store! (field l ty) ty)
+    (al-push! (mut (field cs locals)) l)
+    (env-push (load (field cs env)) name len ty mutable)
+    (store! (field cs next-slot) (+ s 1)) (note-slot cs s) s))
+(defn local-slot [(cs (ptr CState)) (name (ptr u8)) (len i64)] (-> i64)
+  (let [ls (load (field cs locals)) n (al-len ls) (mut i) (- n 1) (mut r) -1]
+    (loop (if (and (< (load r) 0) (>= (load i) 0))
+            (let [l (al-get ls (load i))]
+              (if (name-eq (load (field l name)) (load (field l name-len)) name len) (do (store! r (load (field l slot))) 0) 0)
+              (store! i (- (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn scope-mark [(cs (ptr CState))] (-> i64) (al-len (load (field cs locals))))
+(defn scope-reset [(cs (ptr CState)) (mark i64) (slot-mark i64)] (-> i64)
+  (store! (field (field cs locals) len) mark)
+  (env-reset (load (field cs env)) mark)
+  (store! (field cs next-slot) slot-mark) 0)
+
+; ---- emit ----
+(defn cop [(cs (ptr CState)) (op i64)] (-> i64) (chunk-byte (cs-chunk cs) op) 0)
+(defn cu16 [(cs (ptr CState)) (v i64)] (-> i64) (chunk-u16 (cs-chunk cs) v) 0)
+(defn cu8 [(cs (ptr CState)) (v i64)] (-> i64) (chunk-byte (cs-chunk cs) v) 0)
+(defn cconst [(cs (ptr CState)) (v i64)] (-> i64) (cop cs OP_CONST) (cu16 cs (chunk-add-const (cs-chunk cs) v)) 0)
+(defn cbits-cell [] (-> (ptr i64)) (alloc-static i64))
+(defn cbits [(x f64)] (-> i64) (store! (cast (ptr f64) (cbits-cell)) x) (load (cbits-cell)))
+
+(defn emit-jump [(cs (ptr CState)) (op i64)] (-> i64)
+  (cop cs op) (let [pos (chunk-here (cs-chunk cs))] (chunk-byte (cs-chunk cs) 255) (chunk-byte (cs-chunk cs) 255) pos))
+(defn patch-jump [(cs (ptr CState)) (pos i64)] (-> i64)
+  (chunk-patch-u16 (cs-chunk cs) pos (- (chunk-here (cs-chunk cs)) (+ pos 2))) 0)
+(defn emit-loop [(cs (ptr CState)) (loop-start i64)] (-> i64)
+  (cop cs OP_LOOP) (cu16 cs (- (+ (chunk-here (cs-chunk cs)) 2) loop-start)) 0)
+
+; ============================ type helpers =================================
+(defn tyof [(cs (ptr CState)) (n (ptr Node))] (-> (ptr Type)) (infer n (load (field cs env)) (null-ty)))
+(defn ty-store-op [(t (ptr Type))] (-> i64)
+  (let [k (ty-kind t)] (cond (or (= k TY_INT) (= k TY_BOOL)) OP_STORE_FIELD_I64 (= k TY_FLOAT) OP_STORE_FIELD_F64 OP_STORE_FIELD_REF)))
+(defn ty-load-op [(t (ptr Type))] (-> i64)
+  (let [k (ty-kind t)] (cond (or (= k TY_INT) (= k TY_BOOL)) OP_LOAD_FIELD_I64 (= k TY_FLOAT) OP_LOAD_FIELD_F64 OP_LOAD_FIELD_REF)))
+(defn ty-field-kind [(t (ptr Type))] (-> i64)
+  (let [k (ty-kind t)]
+    (cond (or (= k TY_INT) (= k TY_BOOL)) FIELD_I64 (= k TY_FLOAT) FIELD_F64 (= k TY_STRING) FIELD_STRING
+      (= k TY_NAMED)
+        (let [d (load (field t decl)) dk (load (field d kind))]
+          (cond (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE)) FIELD_IFACE_REF
+                (or (= dk DK_BUILTIN_GEN) (= dk DK_ENUM)) FIELD_REF
+                FIELD_REF))
+      FIELD_REF)))
+
+; canonical mono id for a concrete type
+(defn mono-id-of [(t (ptr Type))] (-> i64)
+  (let [sb (sb-new)] (type-canon sb t)
+    (let [m (find-mono (load (field sb data)) (load (field sb len)))]
+      (if (= (cast i64 m) 0) -1 (load (field m id))))))
+
+; ---- decl / member helpers ----
+(defn is-fn-node [(n (ptr Node))] (-> bool) (= (load (field n kind)) NK_FN))
+(defn fld-index [(d (ptr Decl)) (name (ptr u8)) (len i64)] (-> i64)
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0 (mut idx) 0 (mut r) -1]
+    (loop (if (and (< (load r) 0) (< (load i) n))
+            (let [m (al-get ms (load i))]
+              (if (= (load (field m kind)) NK_FIELD)
+                (do (if (name-eq (nm m) (nlen m) name len) (do (store! r (load idx)) 0) 0) (store! idx (+ (load idx) 1)) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn field-count-of [(d (ptr Decl))] (-> i64)
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0 (mut c) 0]
+    (loop (if (< (load i) n) (do (if (= (load (field (al-get ms (load i)) kind)) NK_FIELD) (do (store! c (+ (load c) 1)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load c)))
+(defn field-offset [(d (ptr Decl)) (name (ptr u8)) (len i64)] (-> i64)
+  (+ (sizeof InstanceHeader) (* (fld-index d name len) 8)))
+
+(defn variant-tag [(ed (ptr Decl)) (name (ptr u8)) (len i64)] (-> i64)
+  (let [ms (load (field ed members)) n (al-len ms) (mut i) 0 (mut idx) 0 (mut r) -1]
+    (loop (if (and (< (load r) 0) (< (load i) n))
+            (let [m (al-get ms (load i))]
+              (if (= (load (field m kind)) NK_VARIANT)
+                (do (if (name-eq (nm m) (nlen m) name len) (do (store! r (load idx)) 0) 0) (store! idx (+ (load idx) 1)) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+
+; ---- method-index table ----
+(defn method-index-of [(node (ptr Node))] (-> i64)
+  (let [ns (load (field (cc) method-nodes)) n (al-len ns) (mut i) 0 (mut r) -1]
+    (loop (if (and (< (load r) 0) (< (load i) n))
+            (do (if (= (cast i64 (al-get ns (load i))) (cast i64 node)) (do (store! r (load i)) 0) 0) (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn iface-id-of [(d (ptr Decl))] (-> i64)
+  (let [is (load (field (cc) iface-decls)) n (al-len is) (mut i) 0 (mut r) -1]
+    (loop (if (and (< (load r) 0) (< (load i) n))
+            (do (if (= (cast i64 (al-get is (load i))) (cast i64 d)) (do (store! r (load i)) 0) 0) (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn iface-method-slot [(id (ptr Decl)) (name (ptr u8)) (len i64)] (-> i64)
+  (let [ms (load (field id members)) n (al-len ms) (mut i) 0 (mut idx) 0 (mut r) -1]
+    (loop (if (and (< (load r) 0) (< (load i) n))
+            (let [m (al-get ms (load i))]
+              (if (is-fn-node m) (do (if (name-eq (nm m) (nlen m) name len) (do (store! r (load idx)) 0) 0) (store! idx (+ (load idx) 1)) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+
+; ============================ expression codegen ============================
+; forward decls resolve within the file (mutual recursion)
+(defn compile-expr [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [k (load (field n kind))]
+    (cond
+      (= k NK_INT) (cconst cs (load (field n ival)))
+      (= k NK_FLOAT) (cconst cs (cbits (load (field n fval))))
+      (= k NK_BOOL) (if (= (load (field n ival)) 1) (cop cs OP_TRUE) (cop cs OP_FALSE))
+      (= k NK_UNIT) (cop cs OP_UNIT)
+      (= k NK_SELF) (do (cop cs OP_LOAD_LOCAL) (cu16 cs 0))
+      (= k NK_STRING) (compile-string cs n)
+      (= k NK_STRCHUNK) (compile-strchunk cs n)
+      (= k NK_IDENT) (compile-ident cs n)
+      (= k NK_BINARY) (compile-binary cs n)
+      (= k NK_UNARY) (compile-unary cs n)
+      (= k NK_CALL) (compile-call cs n)
+      (= k NK_FIELDACC) (compile-fieldacc cs n)
+      (= k NK_TRY) (compile-try cs n)
+      (= k NK_TERNARY) (compile-ternary cs n)
+      (= k NK_MATCH) (compile-match cs n true)
+      (= k NK_IF) (compile-if cs n true)
+      (do (w-cstr 2 c"compile: unsupported expression kind ") (w-int 2 k) (w-cstr 2 c"\n") (exit (cast i32 70)) 0))))
+
+(defn compile-strchunk [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (cconst cs (cast i64 (str-make (load (field n s-name)) (load (field n s-len))))))
+
+(defn compile-string [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [m (kid-count n)]
+    (if (= m 0) (cconst cs (cast i64 (str-make (cast (ptr u8) c"") 0)))
+      (let [(mut i) 0]
+        (loop
+          (if (< (load i) m)
+            (let [part (kid-at n (load i))]
+              (compile-str-part cs part)
+              (if (> (load i) 0) (cop cs OP_CONCAT) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))))
+    0))
+(defn compile-str-part [(cs (ptr CState)) (part (ptr Node))] (-> i64)
+  (if (= (load (field part kind)) NK_STRCHUNK)
+    (compile-strchunk cs part)
+    (let [t (tyof cs part)]
+      (compile-expr cs part)
+      (cond (= (ty-kind t) TY_INT) (cop cs OP_I64_TO_STR)
+            (= (ty-kind t) TY_FLOAT) (cop cs OP_F64_TO_STR)
+            (= (ty-kind t) TY_BOOL) (cop cs OP_BOOL_TO_STR)
+            0))))
+
+(defn compile-ident [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [s (local-slot cs (nm n) (nlen n))]
+    (if (>= s 0) (do (cop cs OP_LOAD_LOCAL) (cu16 cs s) 0)
+      ; nullary enum variant (e.g. None)
+      (let [vr (find-variant (nm n) (nlen n) (cast (ptr Decl) 0))]
+        (if (!= (cast i64 vr) 0)
+          (do (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag (load (field vr enum-decl)) (nm n) (nlen n))) (cu8 cs 0) 0)
+          (do (w-cstr 2 c"compile: unresolved identifier\n") (exit (cast i32 70)) 0))))))
+
+(defn compile-unary [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [op (load (field n ival)) t (tyof cs (load (field n a)))]
+    (compile-expr cs (load (field n a)))
+    (cond (= op TK_BANG) (cop cs OP_NOT)
+          (= op TK_MINUS) (if (= (ty-kind t) TY_FLOAT) (cop cs OP_NEG_F64) (cop cs OP_NEG_I64))
+          0)))
+
+(defn compile-binary [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [op (load (field n ival))]
+    (cond
+      (= op TK_ANDAND)
+        (do (compile-expr cs (load (field n a)))
+            (let [jf (emit-jump cs OP_JUMP_IF_FALSE)]
+              (compile-expr cs (load (field n b)))
+              (let [je (emit-jump cs OP_JUMP)] (patch-jump cs jf) (cop cs OP_FALSE) (patch-jump cs je) 0)))
+      (= op TK_OROR)
+        (do (compile-expr cs (load (field n a)))
+            (let [jf (emit-jump cs OP_JUMP_IF_FALSE)]
+              (cop cs OP_TRUE)
+              (let [je (emit-jump cs OP_JUMP)] (patch-jump cs jf) (compile-expr cs (load (field n b))) (patch-jump cs je) 0)))
+      (let [lt (tyof cs (load (field n a)))]
+        (compile-expr cs (load (field n a)))
+        (compile-expr cs (load (field n b)))
+        (compile-binop cs op lt)))))
+
+(defn compile-binop [(cs (ptr CState)) (op i64) (lt (ptr Type))] (-> i64)
+  (let [k (ty-kind lt) f (= k TY_FLOAT) s (= k TY_STRING)]
+    (cond
+      (= op TK_PLUS) (if s (cop cs OP_CONCAT) (if f (cop cs OP_ADD_F64) (cop cs OP_ADD_I64)))
+      (= op TK_MINUS) (if f (cop cs OP_SUB_F64) (cop cs OP_SUB_I64))
+      (= op TK_STAR) (if f (cop cs OP_MUL_F64) (cop cs OP_MUL_I64))
+      (= op TK_SLASH) (if f (cop cs OP_DIV_F64) (cop cs OP_DIV_I64))
+      (= op TK_PERCENT) (cop cs OP_REM_I64)
+      (= op TK_LT) (if f (cop cs OP_LT_F64) (cop cs OP_LT_I64))
+      (= op TK_LE) (if f (cop cs OP_LE_F64) (cop cs OP_LE_I64))
+      (= op TK_GT) (if f (cop cs OP_GT_F64) (cop cs OP_GT_I64))
+      (= op TK_GE) (if f (cop cs OP_GE_F64) (cop cs OP_GE_I64))
+      (= op TK_EQEQ) (compile-eq cs k false)
+      (= op TK_NE) (compile-eq cs k true)
+      0)))
+(defn compile-eq [(cs (ptr CState)) (k i64) (neg bool)] (-> i64)
+  (cond
+    (= k TY_STRING) (if neg (cop cs OP_STR_NE) (cop cs OP_STR_EQ))
+    (= k TY_FLOAT) (if neg (cop cs OP_NE_F64) (cop cs OP_EQ_F64))
+    (= k TY_BOOL) (if neg (cop cs OP_NE_BOOL) (cop cs OP_EQ_BOOL))
+    (= k TY_NAMED) (if neg (cop cs OP_NE_ENUM) (cop cs OP_EQ_ENUM))
+    (if neg (cop cs OP_NE_I64) (cop cs OP_EQ_I64))))
+
+; ---- field access (read) ----
+(defn compile-fieldacc [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [recv (load (field n a)) nsd (namespace-decl recv (load (field cs env)))]
+    (if (!= (cast i64 nsd) 0)
+      ; Enum.Variant with no payload (namespace)
+      (if (= (load (field nsd kind)) DK_ENUM)
+        (do (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag nsd (nm n) (nlen n))) (cu8 cs 0) 0)
+        (do (w-cstr 2 c"compile: bad namespace field access\n") (exit (cast i32 70)) 0))
+      (let [rt (tyof cs recv) ft (tyof cs n) d (load (field rt decl))]
+        (compile-expr cs recv)
+        (cop cs (ty-load-op ft)) (cu16 cs (field-offset d (nm n) (nlen n))) 0))))
+
+; ---- try (?) ----
+(defn compile-try [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (compile-expr cs (load (field n a)))
+  (let [tmp (alloc-temp cs)]
+    (cop cs OP_STORE_LOCAL) (cu16 cs tmp)
+    (cop cs OP_LOAD_LOCAL) (cu16 cs tmp) (cop cs OP_ENUM_TAG) (cconst cs 1) (cop cs OP_EQ_I64)
+    (let [ok (emit-jump cs OP_JUMP_IF_FALSE)]
+      (cop cs OP_LOAD_LOCAL) (cu16 cs tmp) (cop cs OP_RETURN)
+      (patch-jump cs ok)
+      (cop cs OP_LOAD_LOCAL) (cu16 cs tmp) (cop cs OP_ENUM_GET) (cu8 cs 0) 0)))
+
+; ---- ternary ----
+(defn compile-ternary [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (compile-expr cs (load (field n a)))
+  (let [je (emit-jump cs OP_JUMP_IF_FALSE)]
+    (compile-expr cs (load (field n b)))
+    (let [jend (emit-jump cs OP_JUMP)]
+      (patch-jump cs je) (compile-expr cs (load (field n c))) (patch-jump cs jend) 0)))
+
+; ============================ calls ========================================
+(defn compile-args [(cs (ptr CState)) (call (ptr Node))] (-> i64)
+  (let [n (arg-count call) (mut i) 0]
+    (loop (if (< (load i) n) (do (compile-expr cs (arg-val (arg-at call (load i)))) (store! i (+ (load i) 1)) 0) (break))))
+  (arg-count call))
+
+(defn compile-call [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [callee (load (field n a)) ck (load (field callee kind))]
+    (cond
+      (= ck NK_TYPE) (compile-construct-type cs callee n)
+      (= ck NK_FIELDACC) (compile-dotted-call cs callee n)
+      (= ck NK_IDENT) (compile-ident-call cs callee n)
+      (do (w-cstr 2 c"compile: bad callee\n") (exit (cast i32 70)) 0))))
+
+; construction / collection literals from a TYPE-node callee
+(defn compile-construct-type [(cs (ptr CState)) (tn (ptr Node)) (call (ptr Node))] (-> i64)
+  (let [t (tyof cs call) d (load (field t decl))]
+    (cond
+      (name-eq (nm tn) (nlen tn) (cast (ptr u8) c"List") 4) (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_LIST_NEW) 0)
+      (name-eq (nm tn) (nlen tn) (cast (ptr u8) c"Map") 3)
+        (do (if (= (ty-kind (al-get (load (field t args)) 0)) TY_STRING) (cop cs OP_TRUE) (cop cs OP_FALSE))
+            (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MAP_NEW) 0)
+      (name-eq (nm tn) (nlen tn) (cast (ptr u8) c"Mutex") 5)
+        (do (w-cstr 2 c"Mutex: not implemented until Phase 5 (threads)\n") (exit (cast i32 70)) 0)
+      (compile-construct-class cs call t d))))
+
+(defn compile-construct-class [(cs (ptr CState)) (call (ptr Node)) (t (ptr Type)) (d (ptr Decl))] (-> i64)
+  (cop cs OP_NEW) (cu16 cs (mono-id-of t))
+  (let [init (decl-member-c d c"init")]
+    (if (!= (cast i64 init) 0)
+      (do
+        (cop cs OP_DUP)
+        (let [np (fn-param-count init) (mut i) 0]
+          (loop (if (< (load i) np)
+                  (let [pn (fn-param-at init (load i)) av (find-named-arg call (nm pn) (nlen pn))]
+                    (compile-expr cs (arg-val av)) (store! i (+ (load i) 1)) 0)
+                  (break)))
+          (cop cs OP_CALL_STATIC) (cu16 cs (method-index-of init)) (cu8 cs (+ np 1))
+          (cop cs OP_POP)))
+      ; memberwise
+      (let [ms (load (field d members)) n (al-len ms) (mut i) 0]
+        (loop
+          (if (< (load i) n)
+            (let [mem (al-get ms (load i))]
+              (if (= (load (field mem kind)) NK_FIELD)
+                (let [av (find-named-arg call (nm mem) (nlen mem))
+                      ft (subst-type (resolve-type (load (field mem a)) d) d (load (field t args)))]
+                  (cop cs OP_DUP) (compile-expr cs (arg-val av))
+                  (cop cs (ty-store-op ft)) (cu16 cs (field-offset d (nm mem) (nlen mem))) 0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))))
+  0)
+
+(defn compile-ident-call [(cs (ptr CState)) (callee (ptr Node)) (n (ptr Node))] (-> i64)
+  (let [nm0 (nm callee) len0 (nlen callee)]
+    (cond
+      (name-eq nm0 len0 (cast (ptr u8) c"print") 5)
+        (let [t (tyof cs (arg-val (arg-at n 0)))]
+          (compile-expr cs (arg-val (arg-at n 0)))
+          (cop cs OP_CALL_BUILTIN)
+          (cond (= (ty-kind t) TY_INT) (cu8 cs BLT_PRINT_I64) (= (ty-kind t) TY_FLOAT) (cu8 cs BLT_PRINT_F64)
+                (= (ty-kind t) TY_BOOL) (cu8 cs BLT_PRINT_BOOL) (cu8 cs BLT_PRINT_STR)) 0)
+      (let [d (find-decl nm0 len0)]
+        (if (!= (cast i64 d) 0)
+          (let [dk (load (field d kind))]
+            (cond
+              (= dk DK_FN)
+                (let [argc (compile-args cs n)] (cop cs OP_CALL_STATIC) (cu16 cs (method-index-of (load (field d node)))) (cu8 cs argc) 0)
+              (or (= dk DK_CLASS) (= dk DK_OBJECT)) (compile-construct-class cs n (tyof cs n) d)
+              (do (w-cstr 2 c"compile: bad ident call\n") (exit (cast i32 70)) 0)))
+          ; unqualified variant Some(x)/Ok(x)/Circle(r)
+          (let [vr (find-variant nm0 len0 (cast (ptr Decl) 0)) ed (load (field vr enum-decl))]
+            (let [argc (compile-args cs n)]
+              (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag ed nm0 len0)) (cu8 cs argc) 0)))))))
+
+(defn compile-dotted-call [(cs (ptr CState)) (facc (ptr Node)) (call (ptr Node))] (-> i64)
+  (let [recv (load (field facc a)) mname (nm facc) mlen (nlen facc)
+        nsd (namespace-decl recv (load (field cs env)))]
+    (if (!= (cast i64 nsd) 0)
+      (let [dk (load (field nsd kind))]
+        (cond
+          (= dk DK_ENUM)
+            (let [vn (decl-member nsd mname mlen) argc (compile-args cs call)]
+              (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag nsd mname mlen)) (cu8 cs argc) 0)
+          (= dk DK_BUILTIN_OBJ) (compile-builtin-object cs nsd mname mlen call)
+          (= dk DK_OBJECT)
+            (do (cop cs OP_LOAD_SINGLETON) (cu16 cs (mono-id-of (mk-named nsd (al-new [(ptr Type)] (alc-global)))))
+                (let [argc (compile-args cs call)]
+                  (cop cs OP_CALL_STATIC) (cu16 cs (method-index-of (decl-member nsd mname mlen))) (cu8 cs (+ argc 1)) 0))
+          (do (w-cstr 2 c"compile: bad static call\n") (exit (cast i32 70)) 0)))
+      ; value receiver
+      (let [rt (tyof cs recv)]
+        (cond
+          (= (ty-kind rt) TY_STRING) (compile-string-method cs recv mname mlen call)
+          (= (ty-kind rt) TY_NAMED) (compile-named-method cs recv rt mname mlen call)
+          (do (w-cstr 2 c"compile: bad method receiver\n") (exit (cast i32 70)) 0))))))
+
+(defn compile-builtin-object [(cs (ptr CState)) (od (ptr Decl)) (mname (ptr u8)) (mlen i64) (call (ptr Node))] (-> i64)
+  (cond
+    (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Console") 7)
+      (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_CONSOLE_LOG) 0)
+    (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Clock") 5)
+      (if (name-eq mname mlen (cast (ptr u8) c"now") 3)
+        (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_CLOCK_NOW) 0)
+        (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_CLOCK_SLEEP) 0))
+    (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Thread") 6)
+      (do (w-cstr 2 c"threads: not implemented until Phase 5\n") (exit (cast i32 70)) 0)
+    (do (w-cstr 2 c"compile: unknown builtin object\n") (exit (cast i32 70)) 0)))
+
+(defn compile-string-method [(cs (ptr CState)) (recv (ptr Node)) (mname (ptr u8)) (mlen i64) (call (ptr Node))] (-> i64)
+  (compile-expr cs recv)
+  (if (name-eq mname mlen (cast (ptr u8) c"len") 3)
+    (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_STR_LEN) 0)
+    (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_STR_SLICE) 0)))
+
+; method on a user/builtin named type (List/Map/class/object-through-interface)
+(defn compile-named-method [(cs (ptr CState)) (recv (ptr Node)) (rt (ptr Type)) (mname (ptr u8)) (mlen i64) (call (ptr Node))] (-> i64)
+  (let [d (load (field rt decl)) dk (load (field d kind))]
+    (cond
+      (name-eq (load (field d name)) (load (field d name-len)) (cast (ptr u8) c"List") 4)
+        (do (compile-expr cs recv) (compile-args cs call) (cop cs OP_CALL_BUILTIN)
+            (cond (name-eq mname mlen (cast (ptr u8) c"push") 4) (cu8 cs BLT_LIST_PUSH)
+                  (name-eq mname mlen (cast (ptr u8) c"get") 3) (cu8 cs BLT_LIST_GET)
+                  (cu8 cs BLT_LIST_LEN)) 0)
+      (name-eq (load (field d name)) (load (field d name-len)) (cast (ptr u8) c"Map") 3)
+        (do (compile-expr cs recv) (compile-args cs call) (cop cs OP_CALL_BUILTIN)
+            (cond (name-eq mname mlen (cast (ptr u8) c"set") 3) (cu8 cs BLT_MAP_SET)
+                  (name-eq mname mlen (cast (ptr u8) c"get") 3) (cu8 cs BLT_MAP_GET)
+                  (name-eq mname mlen (cast (ptr u8) c"containsKey") 11) (cu8 cs BLT_MAP_HAS)
+                  (cu8 cs BLT_MAP_LEN)) 0)
+      (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE))
+        (do (compile-expr cs recv) (let [argc (compile-args cs call)]
+              (cop cs OP_CALL_VIRTUAL) (cu16 cs (iface-id-of d)) (cu8 cs (iface-method-slot d mname mlen)) (cu8 cs (+ argc 1)) 0))
+      ; concrete class / object method: static dispatch
+      (do (compile-expr cs recv) (let [argc (compile-args cs call)]
+            (cop cs OP_CALL_STATIC) (cu16 cs (method-index-of (decl-member d mname mlen))) (cu8 cs (+ argc 1)) 0)))))
+
+; ============================ statements ===================================
+(defn compile-stmt [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [k (load (field n kind))]
+    (cond
+      (= k NK_LET) (compile-let cs n)
+      (= k NK_ASSIGN) (compile-assign cs n)
+      (= k NK_RETURN) (compile-return cs n)
+      (= k NK_IF) (do (compile-if cs n false) 0)
+      (= k NK_WHILE) (compile-while cs n)
+      (= k NK_FOR) (compile-for cs n)
+      (= k NK_MATCH) (do (compile-match cs n false) 0)
+      (= k NK_BLOCK) (compile-block cs n false)
+      (= k NK_EXPRSTMT) (do (compile-expr cs (load (field n a))) (cop cs OP_POP) 0)
+      (do (compile-expr cs n) (cop cs OP_POP) 0))))
+
+(defn compile-let [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [ann (load (field n a))
+        declty (if (= (cast i64 ann) 0) (null-ty) (resolve-type ann (load (field cs ctxt))))
+        it (infer (load (field n b)) (load (field cs env)) declty)
+        vty (if (has-ty declty) declty it)]
+    (compile-expr cs (load (field n b)))
+    (let [s (bind-local cs (nm n) (nlen n) vty (= (load (field n ival)) 1))]
+      (cop cs OP_STORE_LOCAL) (cu16 cs s) 0)))
+
+(defn compile-assign [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [target (load (field n a)) val (load (field n b))]
+    (if (= (load (field target kind)) NK_IDENT)
+      (do (compile-expr cs val) (cop cs OP_STORE_LOCAL) (cu16 cs (local-slot cs (nm target) (nlen target))) 0)
+      ; field assignment  recv.f = val
+      (let [recv (load (field target a)) rt (tyof cs recv) ft (tyof cs target) d (load (field rt decl))]
+        (compile-expr cs recv) (compile-expr cs val)
+        (cop cs (ty-store-op ft)) (cu16 cs (field-offset d (nm target) (nlen target))) 0))))
+
+(defn compile-return [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [e (load (field n a))]
+    (if (= (cast i64 e) 0) (cop cs OP_UNIT) (compile-expr cs e))
+    (cop cs OP_RETURN) 0))
+
+(defn compile-while [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [start (chunk-here (cs-chunk cs))]
+    (compile-expr cs (load (field n a)))
+    (let [jend (emit-jump cs OP_JUMP_IF_FALSE)]
+      (compile-block cs (load (field n b)) false)
+      (emit-loop cs start) (patch-jump cs jend) 0)))
+
+(defn compile-for [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [it (tyof cs (load (field n a)))
+        elem (al-get (load (field it args)) 0)
+        mark (scope-mark cs) smark (load (field cs next-slot))]
+    (compile-expr cs (load (field n a)))
+    (let [lst (alloc-temp cs) idx (alloc-temp cs)]
+      (cop cs OP_STORE_LOCAL) (cu16 cs lst)
+      (cconst cs 0) (cop cs OP_STORE_LOCAL) (cu16 cs idx)
+      (let [start (chunk-here (cs-chunk cs))]
+        (cop cs OP_LOAD_LOCAL) (cu16 cs idx)
+        (cop cs OP_LOAD_LOCAL) (cu16 cs lst) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_LIST_LEN)
+        (cop cs OP_LT_I64)
+        (let [jend (emit-jump cs OP_JUMP_IF_FALSE)
+              xslot (bind-local cs (nm n) (nlen n) elem false)]
+          (cop cs OP_LOAD_LOCAL) (cu16 cs lst) (cop cs OP_LOAD_LOCAL) (cu16 cs idx)
+          (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_LIST_GET) (cop cs OP_STORE_LOCAL) (cu16 cs xslot)
+          (compile-block cs (load (field n b)) false)
+          (cop cs OP_LOAD_LOCAL) (cu16 cs idx) (cconst cs 1) (cop cs OP_ADD_I64) (cop cs OP_STORE_LOCAL) (cu16 cs idx)
+          (emit-loop cs start) (patch-jump cs jend) 0)))
+    (scope-reset cs mark smark) 0))
+
+; ============================ blocks / if / match =========================
+; compile a block; if want-value, leave the trailing expression's value on the stack.
+(defn compile-block [(cs (ptr CState)) (blk (ptr Node)) (want-value bool)] (-> i64)
+  (let [n (kid-count blk) mark (scope-mark cs) smark (load (field cs next-slot))]
+    (if (= n 0) (if want-value (cop cs OP_UNIT) 0)
+      (let [(mut i) 0]
+        (loop
+          (if (< (load i) n)
+            (do
+              (if (and want-value (= (load i) (- n 1)))
+                (compile-trailing cs (kid-at blk (load i)))
+                (compile-stmt cs (kid-at blk (load i))))
+              (store! i (+ (load i) 1)) 0)
+            (break)))))
+    (scope-reset cs mark smark) 0))
+
+; compile a node in value position (implicit last-expression return)
+(defn compile-trailing [(cs (ptr CState)) (n (ptr Node))] (-> i64)
+  (let [k (load (field n kind))]
+    (cond
+      (= k NK_EXPRSTMT) (compile-expr cs (load (field n a)))
+      (= k NK_BLOCK) (compile-block cs n true)
+      (= k NK_IF) (compile-if cs n true)
+      (= k NK_MATCH) (compile-match cs n true)
+      (= k NK_RETURN) (do (compile-return cs n) (cop cs OP_UNIT) 0)
+      (or (or (= k NK_LET) (= k NK_ASSIGN)) (or (= k NK_WHILE) (= k NK_FOR)))
+        (do (compile-stmt cs n) (cop cs OP_UNIT) 0)
+      (compile-expr cs n))))
+
+(defn compile-if [(cs (ptr CState)) (n (ptr Node)) (want-value bool)] (-> i64)
+  (compile-expr cs (load (field n a)))
+  (let [je (emit-jump cs OP_JUMP_IF_FALSE)]
+    (compile-block cs (load (field n b)) want-value)
+    (let [jend (emit-jump cs OP_JUMP) els (load (field n c))]
+      (patch-jump cs je)
+      (if (= (cast i64 els) 0)
+        (if want-value (cop cs OP_UNIT) 0)
+        (if (= (load (field els kind)) NK_IF) (compile-if cs els want-value) (compile-block cs els want-value)))
+      (patch-jump cs jend) 0)))
+
+(defn compile-match [(cs (ptr CState)) (n (ptr Node)) (want-value bool)] (-> i64)
+  (let [st (tyof cs (load (field n a)))
+        enum-d (if (and (= (ty-kind st) TY_NAMED) (= (load (field (load (field st decl)) kind)) DK_ENUM)) (load (field st decl)) (cast (ptr Decl) 0))
+        narms (kid-count n)
+        smark (load (field cs next-slot))]
+    (compile-expr cs (load (field n a)))
+    (let [stmp (alloc-temp cs) (mut endsm) (al-new [i64] (alc-global)) (mut i) 0]
+      (cop cs OP_STORE_LOCAL) (cu16 cs stmp)
+      (loop
+        (if (< (load i) narms)
+          (let [arm (kid-at n (load i)) pat (load (field arm a)) body (load (field arm b))
+                mark (scope-mark cs) sm (load (field cs next-slot)) pk (load (field pat kind))]
+            (cond
+              (= pk NK_PAT_WILD)
+                (do (compile-arm-body cs body want-value) (al-push! (mut endsm) (emit-jump cs OP_JUMP)) 0)
+              (= pk NK_PAT_ENUM)
+                (let [vn (decl-member enum-d (nm pat) (nlen pat))]
+                  (cop cs OP_LOAD_LOCAL) (cu16 cs stmp) (cop cs OP_ENUM_TAG)
+                  (cconst cs (variant-tag enum-d (nm pat) (nlen pat))) (cop cs OP_EQ_I64)
+                  (let [next (emit-jump cs OP_JUMP_IF_FALSE) arity (kid-count pat) (mut b) 0]
+                    (loop (if (< (load b) arity)
+                            (let [bind (kid-at pat (load b))]
+                              (if (not (tok-eq (nm bind) (nlen bind) c"_"))
+                                (let [pty (subst-type (resolve-type (variant-payload-at vn (load b)) enum-d) enum-d (load (field st args)))
+                                      slot (bind-local cs (nm bind) (nlen bind) pty false)]
+                                  (cop cs OP_LOAD_LOCAL) (cu16 cs stmp) (cop cs OP_ENUM_GET) (cu8 cs (load b)) (cop cs OP_STORE_LOCAL) (cu16 cs slot) 0)
+                                0)
+                              (store! b (+ (load b) 1)) 0)
+                            (break)))
+                    (compile-arm-body cs body want-value)
+                    (al-push! (mut endsm) (emit-jump cs OP_JUMP))
+                    (patch-jump cs next) 0))
+              (= pk NK_PAT_LIT)
+                (let [lit (load (field pat a)) lk (ty-kind st)]
+                  (cop cs OP_LOAD_LOCAL) (cu16 cs stmp) (compile-expr cs lit) (compile-eq cs lk false)
+                  (let [next (emit-jump cs OP_JUMP_IF_FALSE)]
+                    (compile-arm-body cs body want-value)
+                    (al-push! (mut endsm) (emit-jump cs OP_JUMP))
+                    (patch-jump cs next) 0))
+              0)
+            (scope-reset cs mark sm)
+            (store! i (+ (load i) 1)) 0)
+          (break)))
+      ; patch all arm-end jumps to here
+      (let [ne (al-len (load endsm)) (mut j) 0]
+        (loop (if (< (load j) ne) (do (patch-jump cs (al-get (load endsm) (load j))) (store! j (+ (load j) 1)) 0) (break)))))
+    (store! (field cs next-slot) smark) 0))
+
+(defn compile-arm-body [(cs (ptr CState)) (body (ptr Node)) (want-value bool)] (-> i64)
+  (if want-value (compile-trailing cs body) (compile-arm-stmt cs body)))
+(defn stmt-like? [(k i64)] (-> bool)
+  (cond (= k NK_BLOCK) true (= k NK_IF) true (= k NK_MATCH) true (= k NK_RETURN) true
+        (= k NK_LET) true (= k NK_ASSIGN) true (= k NK_WHILE) true (= k NK_FOR) true false))
+(defn compile-arm-stmt [(cs (ptr CState)) (body (ptr Node))] (-> i64)
+  (if (stmt-like? (load (field body kind)))
+    (compile-stmt cs body)
+    (do (compile-expr cs body) (cop cs OP_POP) 0)))
+
+; ============================ method compilation ===========================
+(defn make-cstate [(chunk (ptr Chunk)) (env (ptr Env)) (ctxt (ptr Decl)) (start-slot i64)] (-> (ptr CState))
+  (let [cs (cast (ptr CState) (xalloc (sizeof CState)))]
+    (store! (field cs chunk) chunk) (store! (field cs env) env)
+    (store! (field cs locals) (al-new [(ptr CLocal)] (alc-global)))
+    (store! (field cs next-slot) start-slot) (store! (field cs max-slot) start-slot)
+    (store! (field cs ctxt) ctxt) cs))
+
+; compile one FN node into method `mi`. self-ty null for top-level fns.
+(defn compile-method [(mi (ptr MethodInfo)) (fnn (ptr Node)) (ctxt (ptr Decl)) (self-ty (ptr Type))] (-> i64)
+  (let [is-init (node-name-eq fnn c"init")
+        ret (resolve-type (fn-ret-node fnn) ctxt)
+        is-void (or (= (ty-kind ret) TY_VOID) (= (ty-kind ret) TY_UNIT))
+        env (env-new self-ty ctxt ret is-init)
+        has-self (!= (cast i64 self-ty) 0)
+        start-slot (if has-self 1 0)
+        chunk (chunk-new)
+        cs (make-cstate chunk env ctxt start-slot)
+        np (fn-param-count fnn)]
+    (store! (field mi chunk) chunk)
+    (store! (field mi arity) (+ np start-slot))
+    (store! (field mi is-void) is-void)
+    ; bind params
+    (let [(mut i) 0]
+      (loop (if (< (load i) np)
+              (let [pn (fn-param-at fnn (load i))]
+                (bind-local cs (nm pn) (nlen pn) (resolve-type (param-type-node pn) ctxt) false) (store! i (+ (load i) 1)) 0)
+              (break))))
+    (let [body (fn-body fnn)]
+      (if (= (cast i64 body) 0) (do (cop cs OP_UNIT) (cop cs OP_RETURN) 0)
+        (if is-init
+          (do (compile-block cs body false) (cop cs OP_UNIT) (cop cs OP_RETURN) 0)
+          (if is-void
+            (do (compile-block cs body false) (cop cs OP_UNIT) (cop cs OP_RETURN) 0)
+            (do (compile-block cs body true) (cop cs OP_RETURN) 0)))))
+    (store! (field mi local-count) (load (field cs max-slot)))
+    0))
+
+; ============================ program assembly =============================
+(defn new-method [(name (ptr u8)) (len i64) (node (ptr Node))] (-> (ptr MethodInfo))
+  (let [mi (cast (ptr MethodInfo) (xalloc (sizeof MethodInfo)))]
+    (store! (field mi name) name) (store! (field mi name-len) len)
+    (store! (field mi arity) 0) (store! (field mi local-count) 0) (store! (field mi is-void) false)
+    (al-push! (mut (field (cc) methods)) mi)
+    (al-push! (mut (field (cc) method-nodes)) node)
+    mi))
+
+; pass A: register every method (top-level fn + class/object methods), record entry.
+(defn register-methods [] (-> i64)
+  (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [d (al-get ds (load i)) dk (load (field d kind))]
+          (if (= (cast i64 (load (field d node))) 0) 0   ; skip builtins
+            (cond
+              (= dk DK_FN)
+                (let [mi (new-method (load (field d name)) (load (field d name-len)) (load (field d node)))]
+                  (if (name-eq (load (field d name)) (load (field d name-len)) (cast (ptr u8) c"main") 4)
+                    (store! (field (cc) entry) (- (al-len (load (field (cc) methods))) 1)) 0) 0)
+              (or (= dk DK_CLASS) (= dk DK_OBJECT))
+                (let [ms (load (field d members)) nm2 (al-len ms) (mut j) 0]
+                  (loop (if (< (load j) nm2)
+                          (let [mem (al-get ms (load j))]
+                            (if (is-fn-node mem) (do (new-method (nm mem) (nlen mem) mem) 0) 0) (store! j (+ (load j) 1)) 0)
+                          (break))))
+              0))
+          (store! i (+ (load i) 1)) 0)
+        (break))))
+  0)
+
+; assign iface-ids to every interface decl (user + builtin)
+(defn register-ifaces [] (-> i64)
+  (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [d (al-get ds (load i)) dk (load (field d kind))]
+          (if (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE)) (do (al-push! (mut (field (cc) iface-decls)) d) 0) 0)
+          (store! i (+ (load i) 1)) 0)
+        (break))))
+  0)
+
+; pass C: compile all registered method bodies
+(defn compile-all-methods [] (-> i64)
+  (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [d (al-get ds (load i)) dk (load (field d kind))]
+          (if (= (cast i64 (load (field d node))) 0) 0
+            (cond
+              (= dk DK_FN) (compile-method (index-mi (load (field d node))) (load (field d node)) d (null-ty))
+              (or (= dk DK_CLASS) (= dk DK_OBJECT))
+                (let [self-ty (mk-named d (self-args d)) ms (load (field d members)) nm2 (al-len ms) (mut j) 0]
+                  (loop (if (< (load j) nm2)
+                          (let [mem (al-get ms (load j))]
+                            (if (is-fn-node mem) (compile-method (index-mi mem) mem d self-ty) 0) (store! j (+ (load j) 1)) 0)
+                          (break))))
+              0))
+          (store! i (+ (load i) 1)) 0)
+        (break))))
+  0)
+; method-info by node
+(defn index-mi [(node (ptr Node))] (-> (ptr MethodInfo))
+  (al-get (load (field (cc) methods)) (method-index-of node)))
+
+; build TypeInfo + arena for one entity mono; itables filled after.
+(defn build-typeinfo [(m (ptr MonoType))] (-> (ptr TypeInfo))
+  (let [ti (cast (ptr TypeInfo) (xalloc (sizeof TypeInfo)))
+        d (load (field m base))
+        fc (field-count-of d)
+        finfos (cast (ptr FieldInfo) (xalloc (* (sizeof FieldInfo) (if (= fc 0) 1 fc))))
+        fields (load (field m fields)) nf (al-len fields) (mut i) 0]
+    (store! (field ti type-id) (load (field m id)))
+    (store! (field ti name) (load (field m name))) (store! (field ti name-len) (load (field m name-len)))
+    (store! (field ti kind) (load (field d kind)))
+    (store! (field ti is-entity) true)
+    (store! (field ti field-count) nf)
+    (store! (field ti fields) finfos)
+    (loop
+      (if (< (load i) nf)
+        (let [mf (al-get fields (load i)) fi (index finfos (load i))]
+          (store! (field fi name) (load (field mf name))) (store! (field fi name-len) (load (field mf name-len)))
+          (store! (field fi offset) (+ (sizeof InstanceHeader) (* (load i) 8)))
+          (store! (field fi kind) (ty-field-kind (load (field mf ty))))
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (store! (field ti instance-size) (+ (sizeof InstanceHeader) (* nf 8)))
+    (store! (field ti arena) (arena-new (load (field m id)) (load (field m name)) (load (field m name-len)) (* nf 8) MAX_SLOTS))
+    (store! (field ti singleton) (cast (ptr u8) 0))
+    ti))
+
+; build the (class x interface) itables for a TypeInfo whose base is a class
+(defn build-itables [(ti (ptr TypeInfo)) (m (ptr MonoType)) (niface i64)] (-> i64)
+  (let [tabs (cast (ptr (ptr ITable)) (xalloc (* (sizeof (ptr ITable)) (if (= niface 0) 1 niface)))) (mut i) 0]
+    (loop (if (< (load i) niface) (do (store! (index tabs (load i)) (cast (ptr ITable) 0)) (store! i (+ (load i) 1)) 0) (break)))
+    (store! (field ti itables) tabs)
+    (let [d (load (field m base)) cn (load (field d node))
+          impl (if (= (cast i64 cn) 0) (cast (ptr Node) 0) (load (field cn b)))]
+      (if (= (cast i64 impl) 0) 0
+        (let [ni (kid-count impl) (mut k) 0]
+          (loop
+            (if (< (load k) ni)
+              (let [tnode (kid-at impl (load k)) id (find-decl (nm tnode) (nlen tnode))]
+                (if (!= (cast i64 id) 0)
+                  (let [ifid (iface-id-of id)]
+                    (if (>= ifid 0)
+                      (let [ms (load (field id members)) nm2 (al-len ms) nfn (iface-fn-count id)
+                            it (cast (ptr ITable) (xalloc (sizeof ITable)))
+                            slots (cast (ptr i64) (xalloc (* 8 (if (= nfn 0) 1 nfn))))
+                            (mut j) 0 (mut slot) 0]
+                        (store! (field it slots) slots)
+                        (loop
+                          (if (< (load j) nm2)
+                            (let [im (al-get ms (load j))]
+                              (if (is-fn-node im)
+                                (do (store! (index slots (load slot)) (method-index-of (decl-member d (nm im) (nlen im))))
+                                    (store! slot (+ (load slot) 1)) 0) 0)
+                              (store! j (+ (load j) 1)) 0)
+                            (break)))
+                        (store! (index tabs ifid) it) 0)
+                      0)) 0)
+                (store! k (+ (load k) 1)) 0)
+              (break))))))
+  0))
+(defn iface-fn-count [(id (ptr Decl))] (-> i64)
+  (let [ms (load (field id members)) n (al-len ms) (mut i) 0 (mut c) 0]
+    (loop (if (< (load i) n) (do (if (is-fn-node (al-get ms (load i))) (do (store! c (+ (load c) 1)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load c)))
+
+; top-level: build the whole Program from the (already type-checked) ctx.
+(defn build-program [] (-> (ptr Program))
+  (cc-init)
+  (register-ifaces)
+  (register-methods)
+  (compile-all-methods)
+  (let [p (cast (ptr Program) (xalloc (sizeof Program)))
+        nm2 (al-len (load (field (cc) methods)))
+        marr (cast (ptr (ptr MethodInfo)) (xalloc (* (sizeof (ptr MethodInfo)) (if (= nm2 0) 1 nm2))))
+        monos (load (field (ctx) monos)) nmono (al-len monos)
+        tarr (cast (ptr (ptr TypeInfo)) (xalloc (* (sizeof (ptr TypeInfo)) (if (= nmono 0) 1 nmono))))
+        niface (al-len (load (field (cc) iface-decls)))
+        (mut i) 0]
+    (loop (if (< (load i) nm2) (do (store! (index marr (load i)) (al-get (load (field (cc) methods)) (load i))) (store! i (+ (load i) 1)) 0) (break)))
+    (store! (field p methods) marr) (store! (field p method-count) nm2)
+    (store! (field p iface-count) niface)
+    (store! (field p entry) (load (field (cc) entry)))
+    ; one TypeInfo per entity mono; null for value monos
+    (store! i 0)
+    (loop
+      (if (< (load i) nmono)
+        (let [m (al-get monos (load i))]
+          (if (load (field m is-entity))
+            (let [ti (build-typeinfo m)] (build-itables ti m niface) (store! (index tarr (load i)) ti) 0)
+            (do (store! (index tarr (load i)) (cast (ptr TypeInfo) 0)) 0))
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (store! (field p types) tarr) (store! (field p type-count) nmono)
+    p))
+
+; ============================ CLI drivers ==================================
+; typecheck quietly (no "ok"); returns the error count.
+(defn typecheck-quiet [(path (ptr i8))] (-> i64)
+  (load-file path true)
+  (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+    (loop (if (< (load i) n) (do (check-decl-signatures (al-get ds (load i))) (store! i (+ (load i) 1)) 0) (break))))
+  (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+    (loop (if (< (load i) n) (let [d (al-get ds (load i))] (if (load (field d deep)) (do (check-decl-bodies d) 0) 0) (store! i (+ (load i) 1)) 0) (break))))
+  (err-count))
+
+(defn dump-arenas-of [(p (ptr Program))] (-> i64)
+  (w-cstr 1 c"=== arenas ===\n")
+  (let [nt (load (field p type-count)) (mut i) 0]
+    (loop
+      (if (< (load i) nt)
+        (let [ti (load (index (load (field p types)) (load i)))]
+          (if (!= (cast i64 ti) 0)
+            (if (load (field ti is-entity))
+              (let [a (load (field ti arena))]
+                (w-cstr 1 c"arena ") (w-bytes 1 (load (field ti name)) (load (field ti name-len)))
+                (w-cstr 1 c": live=") (w-int 1 (load (field a live-count)))
+                (w-cstr 1 c" high-water=") (w-int 1 (load (field a bump-cursor)))
+                (w-cstr 1 c" slabs=") (w-int 1 (load (field a slab-count)))
+                (w-cstr 1 c" slot-size=") (w-int 1 (load (field a slot-size)))
+                (w-cstr 1 c"\n") 0)
+              0) 0)
+          (store! i (+ (load i) 1)) 0)
+        (break))))
+  0)
+
+(defn scry-run [(path (ptr i8)) (dump-arenas bool)] (-> i64)
+  (ctx-init) (loaded-init) (register-builtins)
+  (if (not (can-open path))
+    (do (w-cstr 2 c"scry run: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n") 74)
+    (if (> (typecheck-quiet path) 0)
+      65
+      (let [p (build-program)]
+        (if (< (load (field p entry)) 0)
+          (do (w-cstr 2 c"scry run: no main() function\n") 70)
+          (do (vm-run p) (if dump-arenas (dump-arenas-of p) 0) 0))))))
+
+(defn scry-dump-bytecode [(path (ptr i8))] (-> i64)
+  (ctx-init) (loaded-init) (register-builtins)
+  (if (not (can-open path))
+    (do (w-cstr 2 c"scry dump-bytecode: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n") 74)
+    (if (> (typecheck-quiet path) 0)
+      65
+      (let [p (build-program) n (load (field p method-count)) (mut i) 0]
+        (loop
+          (if (< (load i) n)
+            (let [mi (load (index (load (field p methods)) (load i)))]
+              (w-cstr 1 c"method #") (w-int 1 (load i)) (w-cstr 1 c" ")
+              (w-bytes 1 (load (field mi name)) (load (field mi name-len)))
+              (w-cstr 1 c" (arity=") (w-int 1 (load (field mi arity)))
+              (w-cstr 1 c" locals=") (w-int 1 (load (field mi local-count))) (w-cstr 1 c")\n")
+              (disassemble-chunk (load (field mi chunk)))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+        0))))

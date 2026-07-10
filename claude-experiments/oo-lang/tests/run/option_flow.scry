@@ -1,0 +1,26 @@
+fn firstPositive(xs: List<Int>) -> Option<Int> {
+  var i = 0
+  while i < xs.len() {
+    if xs.get(i) > 0 {
+      return Some(xs.get(i))
+    }
+    i = i + 1
+  }
+  None
+}
+fn main() {
+  let a = List<Int>()
+  a.push(-1)
+  a.push(-2)
+  a.push(5)
+  match firstPositive(a) {
+    Some(v) -> print(v)
+    None -> print(-1)
+  }
+  let b = List<Int>()
+  b.push(-1)
+  match firstPositive(b) {
+    Some(v) -> print(v)
+    None -> print(-1)
+  }
+}

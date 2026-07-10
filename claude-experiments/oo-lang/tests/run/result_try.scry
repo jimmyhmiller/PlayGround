@@ -1,0 +1,26 @@
+fn parse(s: String) -> Result<Int, String> {
+  if s.len() == 0 {
+    Err("empty")
+  } else {
+    Ok(s.len())
+  }
+}
+fn combine(a: String, b: String) -> Result<Int, String> {
+  let x = parse(a)?
+  let y = parse(b)?
+  Ok(x + y)
+}
+fn main() {
+  match combine("ab", "cde") {
+    Ok(n) -> print(n)
+    Err(e) -> print(e)
+  }
+  match combine("ab", "") {
+    Ok(n) -> print(n)
+    Err(e) -> print(e)
+  }
+  match combine("", "cde") {
+    Ok(n) -> print(n)
+    Err(e) -> print(e)
+  }
+}

@@ -16,6 +16,13 @@
 (extern rewind   :cc c [(ptr i8)] (-> void))
 (extern fread    :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
 (extern fclose   :cc c [(ptr i8)] (-> i32))
+; Phase 3 runtime: memory + time (declared here, the one extern home)
+(extern realloc  :cc c [(ptr i8) i64] (-> (ptr i8)))
+(extern free     :cc c [(ptr i8)] (-> void))
+(extern memcpy   :cc c [(ptr i8) (ptr i8) i64] (-> (ptr i8)))
+(extern memset   :cc c [(ptr i8) i32 i64] (-> (ptr i8)))
+(extern gettimeofday :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern nanosleep    :cc c [(ptr i8) (ptr i8)] (-> i32))
 
 ; fd 1 = stdout, fd 2 = stderr
 (defn w-bytes [(fd i64) (p (ptr u8)) (n i64)] (-> i64) (write fd (cast (ptr i8) p) n) 0)

@@ -1,0 +1,10 @@
+fn fib(n: Int) -> Int {
+  if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+fn fact(n: Int) -> Int {
+  if n <= 1 { 1 } else { n * fact(n - 1) }
+}
+fn main() {
+  print(fib(10))
+  print(fact(5))
+}
