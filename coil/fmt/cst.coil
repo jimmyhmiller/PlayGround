@@ -115,6 +115,24 @@
           (read-string r start)                        ; c"..." — extend over the string
           (subslice (load (field r src)) start end)))))
 
+; a `\c` / `\)` / `\newline` character literal, captured VERBATIM: a backslash,
+; then one char; if that char is a letter it's a name run (\newline, \space, …).
+(defn cl-alpha [(c i64)] (-> bool)
+  (or (and (icmp-ge c 97) (icmp-le c 122)) (and (icmp-ge c 65) (icmp-le c 90))))
+(defn cl-alnum [(c i64)] (-> bool)
+  (or (cl-alpha c) (and (icmp-ge c 48) (icmp-le c 57))))
+(defn read-char-lit [(r (ptr Rdr))] (-> (slice u8))
+  (let [start (load (field r pos))]
+    (r-adv r)                                     ; consume backslash
+    (if (icmp-ne (r-peek r) -1)
+        (let [first (r-peek r)]
+          (r-adv r)                               ; consume the char after backslash
+          (if (cl-alpha first)
+              (do (loop (if (cl-alnum (r-peek r)) (r-adv r) (break))) 0)
+              0))
+        0)
+    (subslice (load (field r src)) start (load (field r pos)))))
+
 ; ---- node reader -----------------------------------------------------------
 ; Read one node. Returns a null (ptr Node) at EOF or when the next byte is a close
 ; delimiter (the caller consumes the close). nl-before is stamped from the run of
@@ -131,7 +149,8 @@
                 (box-node a (read-prefix r c) nl)
               (if (icmp-eq c 34)
                   (box-node a (NAtom (read-string r (load (field r pos)))) nl)
-                (box-node a (NAtom (read-atom r)) nl)))))))))
+                (if (icmp-eq c 92) (box-node a (NAtom (read-char-lit r)) nl)
+                  (box-node a (NAtom (read-atom r)) nl))))))))))
 
 (defn read-prefix [(r (ptr Rdr)) (c i64)] (-> NodeKind)
   (let [a (load (field r a))]
