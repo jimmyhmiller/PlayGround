@@ -151,7 +151,6 @@
 
 ; ============================ Value helpers =================================
 (defn null-obj [] (-> (ptr Obj)) (cast (ptr Obj) 0))
-(defn beq [(a bool) (b bool)] (-> bool) (if a b (not b)))  ; bool has no Eq
 (defn is-bool [(v i64)] (-> bool) (= (| v 1) TRUE_VAL))
 (defn is-nil [(v i64)] (-> bool) (= v NIL_VAL))
 (defn is-number [(v i64)] (-> bool) (!= (& v QNAN) QNAN))
@@ -867,7 +866,7 @@
     (loop (if (>= (load i) upvalue-count)
             (break)
             (let [upvalue (index (field compiler upvalues) (load i))]
-              (if (and (= (load (field upvalue index)) index-val) (beq (load (field upvalue is-local)) is-local))
+              (if (and (= (load (field upvalue index)) index-val) (= (load (field upvalue is-local)) is-local))
                 (do (store! found (load i)) (break))
                 (store! i (+ (load i) 1))))))
     (if (>= (load found) 0)

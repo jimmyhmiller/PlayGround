@@ -91,6 +91,25 @@ entry:
   ret i64 %div
 }
 
+define internal i1 @"coil.core.Eq$bool$="(i1 %a, i1 %b) {
+entry:
+  %ifc = icmp ne i1 %a, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  ret i1 %b
+
+else:                                             ; preds = %entry
+  %ifc1 = icmp ne i1 %b, false
+  br i1 %ifc1, label %then2, label %else3
+
+then2:                                            ; preds = %else
+  ret i1 false
+
+else3:                                            ; preds = %else
+  ret i1 true
+}
+
 define internal i1 @"coil.core.Eq$i64$="(i64 %a, i64 %b) {
 entry:
   %cmp = icmp eq i64 %a, %b

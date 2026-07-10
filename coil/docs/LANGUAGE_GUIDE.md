@@ -6,8 +6,8 @@ system where **calling convention** and **allocation** are first-class. It emits
 a native object and links with the system `cc`. Read this end to end before
 writing Coil; most mistakes come from the gotchas marked ⚠.
 
-Run `coil guide` to print this. Source of truth: `docs/LANGUAGE_GUIDE.md`
-(the embedded copy `selfhost/src/guide.coil` is generated from it).
+The compiler is self-contained: the prelude and standard library are bundled
+inside it, so `coil` and every `(import "…")` below work from any directory.
 
 ## Build & run
 
@@ -46,11 +46,11 @@ extern in ONE module and `:use *` it, or two importers colliding will fail to li
   icmp-le icmp-gt icmp-ge`, `iand ior ixor ishl ishr`, `udiv urem` (unsigned),
   `fadd fsub fmul fdiv`, `fcmp-eq fcmp-ne fcmp-lt fcmp-le fcmp-gt fcmp-ge`.
 - **Clean prelude operators**: `+ - * / %`, `= != < <= > >=`, `& | ^ << >>`.
-  ⚠ These are implemented for **`i64` only** fully; **`f64` has `+ - * /` and
-  `< <= > >=` but NOT `Eq`** — `(= f64 f64)` fails with "f64 does not implement
-  Eq". Use `fcmp-eq`/`fcmp-ne` for float equality. **`bool` has no `Eq`** either
-  — write `(if a b (not b))` to compare bools. For `u8`/`u32`/other widths, use
-  the metal ops. Prefer clean operators on `i64`; drop to metal for other widths.
+  Implemented on `i64` (all of them) and `bool` (`=` / `!=`). `f64` has `+ - * /`
+  and `< <= > >=` but **deliberately no `Eq`** — like Rust, because `NaN != NaN`
+  breaks reflexivity; use `fcmp-eq` / `fcmp-ne` for float equality. For `u8`/`u32`
+  and other widths, use the metal ops. Prefer clean operators on `i64`/`bool`;
+  drop to metal for other widths.
 
 ## Numbers, bool, casts
 
@@ -224,9 +224,11 @@ value with the real C ABI. To call a Coil fn from C (e.g. `qsort` comparator) pa
 (you'll get "call target: expected symbol" / "macro arity mismatch"). Avoid `type`
 as a struct field name. When in doubt, prefix your name (`p-call`, `vm-call`).
 
-## Where to look
+## Bundled standard library
 
-`examples/` (one idea each: `sums`, `hashmap`, `references`, `closure`, `lisp`,
-`calc`, `json`), `lib/*.coil` (the standard library — the real API surface),
-`apps/` (larger programs, e.g. `apps/clox` — a full bytecode VM). The self-hosted
-compiler itself is in `selfhost/src/` (`reader.coil` = lexer/parser).
+These modules ship inside the compiler — `(import "NAME.coil" :use *)` works from
+anywhere, no path or install step:
+`alloc` (allocators), `arraylist`, `hashmap`, `slice`, `str`, `mem`, `io`, `fmt`,
+`print`, `result` (Option/Result), `control` (case/cond/while/for/…), `match`,
+`try`, `thread`, `atomic`, `simd`, `closure`, `derive`, `mmio`, `sexp`. The common
+ones are summarized above; import a module and call its functions directly.

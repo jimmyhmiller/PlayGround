@@ -11,6 +11,7 @@
 (import "try.coil" :use *)
 (import "match.coil" :use *)
 (import "ffi.coil" :use *)
+(import "embedded_stdlib.coil" :use *)   ; embedded prelude + bundled libs -> runs outside the repo
 (import "ast.coil" :use *)
 (import "parser.coil" :use *)
 (import "reader.coil" :use *)
@@ -190,7 +191,9 @@
           (if (bundled? bn)
               (let [libpath (path-join a "lib" bn)
                     lc (slice->cstr a libpath)
-                    text (read-file a lc)
+                    ; disk `lib/<bn>` first (dev edits), else the embedded copy (portable).
+                    text (let [d (read-file a lc)]
+                           (if (icmp-eq (slice-len d) 0) (embedded-lib bn) d))
                     rp (alloc-stack Resolved)]
                 (store! (field rp text) text) (store! (field rp incdir) base)
                 (store! (field rp disp) (sconcat3 a "<bundled " bn ">"))
@@ -576,7 +579,10 @@
 
 (defn load-program [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8))] (-> i64)
   (let [a (load (field s a))
-        prelude-text (read-file a (slice->cstr a "src/prelude.coil"))
+        ; disk first (so dev edits to src/prelude.coil take effect), else embedded
+        ; copy (so the compiler runs outside the repo). read-file returns empty on miss.
+        prelude-text (let [d (read-file a (slice->cstr a "src/prelude.coil"))]
+                       (if (icmp-eq (slice-len d) 0) (embedded-prelude) d))
         prelude-id (load (field s srccount))
         _ignore (store! (field s srccount) (iadd prelude-id 1))
         _reg (register-source! (mut s) "<prelude>" prelude-text)]
