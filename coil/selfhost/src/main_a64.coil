@@ -49,6 +49,10 @@
   (ps (stderr) "error: this coil was built without the LLVM backend; `__normalize` is unavailable\n")
   (abort) 1)
 
+(defn no-wasm-link [(obj-cstr (ptr i8)) (out-cstr (ptr i8))] (-> i64)
+  (ps (stderr) "error: this coil was built without the LLVM/Wasm backend\n")
+  1)
+
 ; default-backend = 2 (arm64): a bare `build` uses the native backend; there is no
 ; LLVM backend to fall back to.
 (defn do-cimport [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
@@ -60,4 +64,5 @@
                (fnptr-of no-llvm-emitir)
                (fnptr-of no-normalize)
                (fnptr-of do-cimport)
+               (fnptr-of no-wasm-link)
                2))

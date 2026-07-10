@@ -91,6 +91,10 @@
 ; reports "can't emit a file of this type"). Rust's Target::initialize_all does it.
 (extern LLVMInitializeAArch64AsmPrinter    :cc c [] (-> void))
 (extern LLVMInitializeX86AsmPrinter        :cc c [] (-> void))
+(extern LLVMInitializeWebAssemblyTargetInfo :cc c [] (-> void))
+(extern LLVMInitializeWebAssemblyTarget     :cc c [] (-> void))
+(extern LLVMInitializeWebAssemblyTargetMC   :cc c [] (-> void))
+(extern LLVMInitializeWebAssemblyAsmPrinter :cc c [] (-> void))
 (extern LLVMGetDefaultTargetTriple         :cc c [] (-> (ptr i8)))
 (extern LLVMGetTargetFromTriple            :cc c [(ptr i8) (ptr (ptr i8)) (ptr (ptr i8))] (-> i32))
 (extern LLVMCreateTargetMachine            :cc c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) i32 i32 i32] (-> (ptr i8)))
@@ -110,6 +114,9 @@
 (extern LLVMGetErrorMessage                :cc c [(ptr i8)] (-> (ptr i8)))
 ; libc: shell out to `cc` for the link step.
 (extern system                             :cc c [(ptr i8)] (-> i32))
+; In-process LLD Wasm link wrapper (selfhost/wasm_link.cpp). This is deliberately
+; separate from `system`: Wasm builds must not spawn wasm-ld.
+(extern coil_wasm_link                     :cc c [(ptr i8) (ptr i8)] (-> i32))
 ; ---- constants ----
 (extern LLVMConstInt                       :cc c [(ptr i8) i64 i32] (-> (ptr i8)))
 (extern LLVMConstReal                      :cc c [(ptr i8) f64] (-> (ptr i8)))

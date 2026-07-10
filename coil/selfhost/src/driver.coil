@@ -477,12 +477,21 @@
           (do (sb-push-str! (mut sb) out) (sb-push-str! (mut sb) ".o")))
         (sb-str (load sb))))))
 
+; Wasm uses LLVM for object emission and the compiler's in-process LLD wrapper
+; for final linking. Do not infer this from a filename: an explicit target keeps
+; native output behavior unchanged.
+(defn wasm-target? [(triple (ptr i8))] (-> bool)
+  (if (icmp-eq (cast i64 triple) 0) false
+    (let [t (cstr->slice triple)]
+      (or (starts-with t "wasm32-") (starts-with t "wasm64-")))))
+
 ; `build <file> -o <out> [--link-flag X]...` : emit `<out>.o` then link it into a
 ; native executable with `cc <out>.o -o <out> <link-flags...>`. Mirrors the Rust
 ; `coil build` argv handling (src/main.rs) + link step (src/lib.rs).
 (defn build-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))
                  (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
                  (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
+                 (wasm-link-fn (fnptr c [(ptr i8) (ptr i8)] i64))
                  (default-backend i64)] (-> i64)
   (let [file (load (index argv 2))
         (mut outp)  (cast (ptr i8) 0)
@@ -557,7 +566,9 @@
                       (do (sb-push-str! (mut cmdsb) " ")
                           (sb-push-str! (mut cmdsb) (al-get [(slice u8)] (load flags) (load k)))
                           (store! k (iadd (load k) 1)))))) 0))
-            (let [rc (system (slice->cstr a (sb-str (load cmdsb))))]
+            (let [rc (if (wasm-target? (load trip))
+                          (call-ptr wasm-link-fn obj-cstr (load outp))
+                          (system (slice->cstr a (sb-str (load cmdsb)))))]
               (if (icmp-ne rc 0)
                   (let [w (stderr) code (iand (udiv (cast i64 rc) 256) 255)]
                     (ps w "error: linker/ar failed with exit status: ") (dump-dec w code) (wb w 10) 1)
@@ -1068,6 +1079,7 @@
                    (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
                    (normalize-fn (fnptr c [(ptr Allocator) (slice u8)] i64))
                    (cimport-fn (fnptr c [(ptr Allocator) i32 (ptr (ptr i8))] i64))
+                   (wasm-link-fn (fnptr c [(ptr i8) (ptr i8)] i64))
                    (default-backend i64)] (-> i64)
   (let [a    (malloc-allocator)
         sub  (cstr->slice (load (index argv 1)))]
@@ -1091,7 +1103,7 @@
         (if (str-eq sub "cheader")
             (cheader-cmd a argc argv)
         (if (str-eq sub "build")
-            (if (manifest-mode? argc argv) (manifest-cmd a "build" argc argv) (build-cmd a argc argv build-fn emitir-fn default-backend))
+            (if (manifest-mode? argc argv) (manifest-cmd a "build" argc argv) (build-cmd a argc argv build-fn emitir-fn wasm-link-fn default-backend))
          (if (str-eq sub "dump-read")
              (let [path (load (index argv 2))] (dump-read-program a (read-file a path)))
           (if (str-eq sub "dump-ast")

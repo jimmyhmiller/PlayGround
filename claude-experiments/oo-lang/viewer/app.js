@@ -1,27 +1,56 @@
-// scry viewer — every pane is sugar over POST /eval {id,source} -> {id,value|error}.
+// scry viewer — React rewrite (htm + React 18, no build step).
+// Every pane is still pure sugar over the ONE wire op: POST /eval {id,source} -> {id,value|error}.
 // Refresh = re-eval on an interval / on focus / after an action. Nothing is pushed.
+//
+// Why React: the old vanilla viewer rebuilt panes with innerHTML on every 750ms poll and had
+// to hand-capture/restore open method cards, typed args, focus and selection so the refresh
+// didn't wipe the form out from under you. Here that state lives in React state/refs inside
+// keyed components, so polls only ever setState *data* — open cards, in-flight results, typed
+// text, focus, selection and scroll all survive a poll BY CONSTRUCTION.
 "use strict";
 
-let evalSeq = 0;
-const state = {
-  view: "index",            // "index" | "table" | "detail"
-  typeName: null,           // for table
-  ref: null,                // {class, slot, gen} for detail
-  breadcrumbs: [],          // [{label, go}]
-  schema: [],               // last types() items
-  lastCounts: {},           // name -> count (trend)
-  countTrend: {},           // name -> "up"|"down"|""
-  pollTimer: null,
-  lastDetail: null,         // previous detail fields (for flash diff)
-  filter: "",
-  ifaceOpen: {},
-};
+const { useState, useRef, useEffect, useCallback, useContext, useMemo, createContext } = React;
+const { useSyncExternalStore } = React;
+const html = htm.bind(React.createElement);
 
-// ---------- the one wire op ----------
+// ===================== the one wire op + cross-cutting stores =====================
+// conn + transcript update on *every* eval (many per second). We keep them in tiny external
+// stores so the whole App tree does not re-render on each request — only the two subscribed
+// widgets (ConnIndicator, TranscriptDrawer) do.
+function makeStore(initial) {
+  let value = initial;
+  const subs = new Set();
+  return {
+    get: () => value,
+    set: (v) => { value = v; subs.forEach((f) => f()); },
+    subscribe: (f) => { subs.add(f); return () => subs.delete(f); },
+  };
+}
+function useStore(store) { return useSyncExternalStore(store.subscribe, store.get); }
+
+const connStore = makeStore("connecting");
+const txStore = makeStore([]);          // [{source, resp, isErr, t}]
+const detailBus = makeStore(0);         // bump to ask the open DetailPane to re-fetch now
+const bumpDetail = () => detailBus.set(detailBus.get() + 1);
+
+let evalSeq = 0;
+function logReq(source) {
+  const arr = txStore.get().slice();
+  arr.unshift({ source, resp: null, isErr: false, t: Date.now() });
+  if (arr.length > 200) arr.length = 200;
+  txStore.set(arr);
+}
+function logResp(source, resp, isErr) {
+  const arr = txStore.get().slice();
+  const e = arr.find((x) => x.source === source && x.resp === null);
+  if (e) { e.resp = resp; e.isErr = isErr; }
+  else arr.unshift({ source, resp, isErr, t: Date.now() });
+  txStore.set(arr);
+}
 async function evalSource(source) {
   const id = "e" + (++evalSeq);
   const t0 = performance.now();
-  logTx(source, null, false);
+  logReq(source);
   try {
     const res = await fetch("/eval", {
       method: "POST",
@@ -30,405 +59,344 @@ async function evalSource(source) {
     });
     const json = await res.json();
     const dt = performance.now() - t0;
-    setConn(dt < 1200 ? "live" : "slow");
-    logTx(source, json, json.error != null, true);
+    connStore.set(dt < 1200 ? "live" : "slow");
+    logResp(source, json, json.error != null);
     return json;
   } catch (e) {
-    setConn("down");
-    logTx(source, { error: { kind: "Transport", message: String(e) } }, true, true);
-    return { error: { kind: "Transport", message: String(e) } };
+    connStore.set("down");
+    const err = { error: { kind: "Transport", message: String(e) } };
+    logResp(source, err, true);
+    return err;
   }
 }
 
-// ---------- connection indicator ----------
-function setConn(s) {
-  const el = document.getElementById("conn");
-  el.className = "conn " + (s === "down" ? "down" : "live");
-  el.querySelector(".conn-label").textContent =
-    s === "down" ? "reconnecting…" : s === "slow" ? "live (slow)" : "● live";
+// ===================== poll helper =====================
+// Runs fn now and every ms, but never while the tab is hidden (matches the vanilla
+// document.hidden guard). Also re-fires on focus + visibility regain. deps re-arm it.
+function usePoll(fn, ms, deps) {
+  const saved = useRef(fn);
+  saved.current = fn;
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => { if (!document.hidden && !cancelled) saved.current(); };
+    tick();
+    const id = setInterval(tick, ms);
+    const onWake = () => { if (!document.hidden) saved.current(); };
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+    };
+  }, deps); // eslint-disable-line
 }
 
-// ---------- transcript ----------
-const txList = [];
-function logTx(source, resp, isErr, isResp) {
-  if (!isResp) {
-    txList.unshift({ source, resp: null, isErr: false, t: new Date() });
-  } else {
-    // attach response to the most recent matching request
-    const e = txList.find((x) => x.source === source && x.resp === null);
-    if (e) { e.resp = resp; e.isErr = isErr; }
-    else txList.unshift({ source, resp, isErr, t: new Date() });
-  }
-  if (txList.length > 200) txList.length = 200;
-  renderTx();
-}
-function renderTx() {
-  const box = document.getElementById("transcript-list");
-  if (document.getElementById("transcript").classList.contains("collapsed")) return;
-  box.innerHTML = "";
-  for (const e of txList.slice(0, 120)) {
-    const d = document.createElement("div");
-    d.className = "tx";
-    const req = document.createElement("div");
-    req.className = "tx-req"; req.textContent = truncate(e.source, 200);
-    d.appendChild(req);
-    if (e.resp) {
-      const r = document.createElement("div");
-      r.className = "tx-res" + (e.isErr ? " err" : "");
-      r.textContent = truncate(JSON.stringify(e.resp.value ?? e.resp.error), 300);
-      d.appendChild(r);
-    }
-    box.appendChild(d);
-  }
-}
-function truncate(s, n) { s = String(s).replace(/\s+/g, " "); return s.length > n ? s.slice(0, n) + "…" : s; }
+// ===================== navigation context =====================
+// Refs are clickable anywhere a value is rendered; row clicks and breadcrumbs navigate too.
+const NavContext = createContext(null);
 
-// ---------- value renderer (shared everywhere) ----------
-function renderValue(v, opts = {}) {
-  const span = (cls, txt) => { const s = document.createElement("span"); s.className = cls; s.textContent = txt; return s; };
-  if (v == null) return span("v-void", "null");
+// ===================== shared value renderer =====================
+function ValueView({ v, inline }) {
+  if (v == null) return html`<span class="v-void">null</span>`;
   switch (v.type) {
-    case "Int": case "Float": return span("v-number", String(v.value));
-    case "Bool": return span("v-bool", String(v.value));
-    case "String": return span("v-string", JSON.stringify(v.value));
-    case "Void": return span("v-void", "void");
-    case "ref": return refLink(v);
-    case "list": return renderCollection(v, opts);
-    case "map": return renderMap(v, opts);
+    case "Int": case "Float": return html`<span class="v-number">${String(v.value)}</span>`;
+    case "Bool": return html`<span class="v-bool">${String(v.value)}</span>`;
+    case "String": return html`<span class="v-string">${JSON.stringify(v.value)}</span>`;
+    case "Void": return html`<span class="v-void">void</span>`;
+    case "ref": return html`<${RefLink} v=${v} />`;
+    case "list": return html`<${CollectionView} v=${v} inline=${inline} />`;
+    case "map": return html`<${MapView} v=${v} />`;
     default:
-      if (v.case !== undefined) return renderEnum(v);
-      if (v.ref !== undefined && v.fields) return refLink({ ...v, class: v.type, summary: v.ref });
-      { const s = span("v-void", JSON.stringify(v)); return s; }
+      if (v.case !== undefined) return html`<${EnumView} v=${v} />`;
+      if (v.ref !== undefined && v.fields) return html`<${RefLink} v=${{ ...v, class: v.type, summary: v.ref }} />`;
+      return html`<span class="v-void">${JSON.stringify(v)}</span>`;
   }
 }
-function renderEnum(v) {
-  const wrap = document.createElement("span");
-  const pill = document.createElement("span");
-  pill.className = "pill";
-  pill.textContent = v.type + "." + v.case;
-  wrap.appendChild(pill);
-  if (v.payload && v.payload.length) {
-    wrap.appendChild(document.createTextNode(" "));
-    v.payload.forEach((p, i) => { if (i) wrap.appendChild(document.createTextNode(", ")); wrap.appendChild(renderValue(p)); });
-  }
-  return wrap;
+function RefLink({ v }) {
+  const nav = useContext(NavContext);
+  const label = v.summary && v.summary !== v.ref ? `${v.ref} · ${v.summary}` : v.ref;
+  return html`<span class="reflink" title=${v.ref + " (gen " + v.generation + ")"}
+    onClick=${(e) => { e.stopPropagation(); nav.navigateRef(v); }}>${label}</span>`;
 }
-function refLink(v) {
-  const a = document.createElement("span");
-  a.className = "reflink";
-  a.textContent = v.summary && v.summary !== v.ref ? `${v.ref} · ${v.summary}` : v.ref;
-  a.title = v.ref + " (gen " + v.generation + ")";
-  a.onclick = (e) => { e.stopPropagation(); navigateRef(v); };
-  return a;
+function EnumView({ v }) {
+  const payload = v.payload && v.payload.length
+    ? v.payload.map((p, i) => html`<${React.Fragment} key=${i}>${i ? ", " : ""}<${ValueView} v=${p} /><//>`)
+    : null;
+  return html`<span><span class="pill">${v.type + "." + v.case}</span>${payload ? html` ${payload}` : ""}</span>`;
 }
-function renderCollection(v, opts) {
-  const wrap = document.createElement("span");
+function CollectionView({ v, inline }) {
   const items = v.items || [];
+  let body;
   if (items.length && items[0].type === "ref") {
-    items.forEach((it) => { const c = document.createElement("span"); c.className = "chip"; c.appendChild(renderValue(it)); wrap.appendChild(c); });
-  } else if (opts.inline === false) {
-    items.forEach((it, i) => { if (i) wrap.appendChild(document.createTextNode(", ")); wrap.appendChild(renderValue(it)); });
+    body = items.map((it, i) => html`<span class="chip" key=${i}><${ValueView} v=${it} /></span>`);
+  } else if (inline === false) {
+    body = items.map((it, i) => html`<${React.Fragment} key=${i}>${i ? ", " : ""}<${ValueView} v=${it} /><//>`);
   } else {
-    wrap.appendChild(document.createTextNode(`${v.length} × ${v.elementType}`));
+    const head = `${v.length} × ${v.elementType}`;
     if (items.length && items.length <= 6) {
-      wrap.appendChild(document.createTextNode("  ["));
-      items.forEach((it, i) => { if (i) wrap.appendChild(document.createTextNode(", ")); wrap.appendChild(renderValue(it)); });
-      wrap.appendChild(document.createTextNode("]"));
+      body = html`${head}  [${items.map((it, i) => html`<${React.Fragment} key=${i}>${i ? ", " : ""}<${ValueView} v=${it} /><//>`)}]`;
+    } else {
+      body = head;
     }
   }
-  if (v.truncated) { const m = document.createElement("span"); m.className = "list-more"; m.textContent = `  (+${v.length - items.length} more)`; wrap.appendChild(m); }
-  return wrap;
+  const more = v.truncated
+    ? html`<span class="list-more">  (+${v.length - items.length} more)</span>` : "";
+  return html`<span>${body}${more}</span>`;
 }
-function renderMap(v, opts) {
-  const wrap = document.createElement("span");
-  wrap.appendChild(document.createTextNode(`{${v.length} entries} `));
-  (v.entries || []).slice(0, 8).forEach(([k, val], i) => {
-    if (i) wrap.appendChild(document.createTextNode(", "));
-    wrap.appendChild(renderValue(k)); wrap.appendChild(document.createTextNode(": ")); wrap.appendChild(renderValue(val));
-  });
-  if (v.truncated) { const m = document.createElement("span"); m.className = "list-more"; m.textContent = ` (+${v.length - (v.entries||[]).length} more)`; wrap.appendChild(m); }
-  return wrap;
+function MapView({ v }) {
+  const entries = (v.entries || []).slice(0, 8);
+  const more = v.truncated
+    ? html`<span class="list-more"> (+${v.length - (v.entries || []).length} more)</span>` : "";
+  return html`<span>${`{${v.length} entries} `}${entries.map(([k, val], i) => html`<${React.Fragment} key=${i}>${i ? ", " : ""}<${ValueView} v=${k} />: <${ValueView} v=${val} /><//>`)}${more}</span>`;
 }
 
-// ---------- navigation ----------
-function navigateRef(v) {
-  const m = /^(.+)#(\d+)$/.exec(v.ref);
-  if (!m) return;
-  openDetail(v.class || v.type, +m[2], v.generation ?? 0, true);
-}
-function setBreadcrumbs(crumbs) {
-  const bc = document.getElementById("breadcrumbs");
-  bc.innerHTML = "";
-  crumbs.forEach((c, i) => {
-    if (i) { const s = document.createElement("span"); s.className = "sep"; s.textContent = "›"; bc.appendChild(s); }
-    const el = document.createElement("span");
-    el.className = "crumb" + (c.go ? "" : " static");
-    el.textContent = c.label;
-    if (c.go) el.onclick = c.go;
-    bc.appendChild(el);
-  });
-}
-function stopPoll() { if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; } }
-function startPoll(fn, ms) { stopPoll(); state.pollTimer = setInterval(() => { if (!document.hidden) fn(); }, ms); }
+// ===================== type rail =====================
+function TypeRail({ schema, trend, route, ifaceOpen, setIfaceOpen }) {
+  const nav = useContext(NavContext);
+  const [search, setSearch] = useState("");
+  const filt = search.toLowerCase();
 
-// ---------- type index ----------
-async function refreshTypes() {
-  const r = await evalSource("types()");
-  if (!r.value) return;
-  const items = r.value.items || [];
-  // trend
-  const trend = {};
-  for (const t of items) {
-    const prev = state.lastCounts[t.name];
-    if (prev != null && t.liveCount !== prev) trend[t.name] = t.liveCount > prev ? "up" : "down";
-    else trend[t.name] = state.countTrend[t.name] || "";
-    state.lastCounts[t.name] = t.liveCount;
-  }
-  state.countTrend = trend;
-  state.schema = items;
-  renderTypeList();
-}
-function renderTypeList() {
-  const ul = document.getElementById("type-list");
-  const filt = document.getElementById("type-search").value.toLowerCase();
-  ul.innerHTML = "";
-  // group interface implementors
   const byIface = {};
   const plain = [];
-  for (const t of state.schema) {
+  for (const t of schema) {
     if (t.implements && t.implements.length) {
       for (const i of t.implements) (byIface[i] = byIface[i] || []).push(t);
     } else plain.push(t);
   }
   const shown = new Set();
+  const rows = [];
   for (const iface of Object.keys(byIface).sort()) {
-    if (filt && !iface.toLowerCase().includes(filt) && !byIface[iface].some(t => t.name.toLowerCase().includes(filt))) continue;
+    if (filt && !iface.toLowerCase().includes(filt) && !byIface[iface].some((t) => t.name.toLowerCase().includes(filt))) continue;
     const total = byIface[iface].reduce((a, t) => a + t.liveCount, 0);
-    const li = document.createElement("li"); li.className = "iface-group";
-    const row = document.createElement("div"); row.className = "type-row iface";
-    const caret = document.createElement("span"); caret.className = "caret" + (state.ifaceOpen[iface] ? " open" : ""); caret.textContent = "▶";
-    row.appendChild(caret);
-    const nm = document.createElement("span"); nm.className = "tname"; nm.textContent = iface + " ‹interface›";
-    const cnt = document.createElement("span"); cnt.className = "count"; cnt.textContent = total + " live";
-    row.appendChild(nm); row.appendChild(cnt);
-    row.onclick = () => { state.ifaceOpen[iface] = !state.ifaceOpen[iface]; renderTypeList(); };
-    li.appendChild(row);
-    if (state.ifaceOpen[iface]) {
-      const kids = document.createElement("div"); kids.className = "iface-children";
-      for (const t of byIface[iface]) { kids.appendChild(typeRow(t, filt)); shown.add(t.name); }
-      li.appendChild(kids);
-    } else byIface[iface].forEach(t => shown.add(t.name));
-    ul.appendChild(li);
+    const open = !!ifaceOpen[iface];
+    byIface[iface].forEach((t) => shown.add(t.name));
+    rows.push(html`
+      <li class="iface-group" key=${"iface:" + iface}>
+        <div class="type-row iface" onClick=${() => setIfaceOpen(iface, !open)}>
+          <span class=${"caret" + (open ? " open" : "")}>▶</span>
+          <span class="tname">${iface + " ‹interface›"}</span>
+          <span class="count">${total + " live"}</span>
+        </div>
+        ${open ? html`<div class="iface-children">
+          ${byIface[iface].map((t) => html`<${TypeRow} key=${t.name} t=${t} trend=${trend[t.name] || ""} active=${route.view === "table" && route.typeName === t.name} onOpen=${() => nav.openTable(t.name)} />`)}
+        </div>` : ""}
+      </li>`);
   }
   for (const t of plain) {
     if (shown.has(t.name)) continue;
     if (filt && !t.name.toLowerCase().includes(filt)) continue;
-    const li = document.createElement("li"); li.appendChild(typeRow(t, filt)); ul.appendChild(li);
+    rows.push(html`<li key=${t.name}><${TypeRow} t=${t} trend=${trend[t.name] || ""} active=${route.view === "table" && route.typeName === t.name} onOpen=${() => nav.openTable(t.name)} /></li>`);
   }
+
+  return html`
+    <nav id="rail">
+      <div class="rail-head">
+        <span>types</span>
+        <input id="type-search" type="text" placeholder="filter…" spellcheck="false" autocomplete="off"
+               value=${search} onInput=${(e) => setSearch(e.target.value)} />
+      </div>
+      <ul id="type-list">${rows}</ul>
+    </nav>`;
 }
-function typeRow(t, filt) {
-  const row = document.createElement("div");
-  row.className = "type-row" + (state.view === "table" && state.typeName === t.name ? " active" : "");
-  const tr = state.countTrend[t.name] || "";
-  const trend = document.createElement("span"); trend.className = "trend " + tr; trend.textContent = tr === "up" ? "▲" : tr === "down" ? "▼" : "";
-  const nm = document.createElement("span"); nm.className = "tname"; nm.textContent = t.name;
-  const cnt = document.createElement("span"); cnt.className = "count" + (tr ? " changed" : ""); cnt.textContent = t.liveCount + " live";
-  row.appendChild(nm); row.appendChild(cnt); row.appendChild(trend);
-  row.onclick = () => openTable(t.name);
-  return row;
+function TypeRow({ t, trend, active, onOpen }) {
+  const arrow = trend === "up" ? "▲" : trend === "down" ? "▼" : "";
+  return html`
+    <div class=${"type-row" + (active ? " active" : "")} onClick=${onOpen}>
+      <span class="tname">${t.name}</span>
+      <span class=${"count" + (trend ? " changed" : "")}>${t.liveCount + " live"}</span>
+      <span class=${"trend " + trend}>${arrow}</span>
+    </div>`;
 }
 
-// ---------- instance table ----------
-function schemaFor(name) { return state.schema.find((t) => t.name === name); }
-function openTable(name) {
-  state.view = "table"; state.typeName = name; state.filter = "";
-  setBreadcrumbs([{ label: "types", go: goIndex }, { label: name }]);
-  renderTableShell();
-  refreshTable();
-  startPoll(refreshTable, 750);
-  renderTypeList();
+// ===================== index pane =====================
+function IndexPane() {
+  return html`
+    <div>
+      <div class="pane-title">Entity types</div>
+      <div class="pane-sub">Pick a type from the rail to browse its live instances. Counts refresh automatically.</div>
+    </div>`;
 }
-function goIndex() { state.view = "index"; stopPoll(); setBreadcrumbs([{ label: "types" }]);
-  document.getElementById("pane").innerHTML = `<div class="pane-title">Entity types</div><div class="pane-sub">Pick a type from the rail to browse its live instances. Counts refresh automatically.</div>`;
-  renderTypeList();
-}
-function renderTableShell() {
-  const sc = schemaFor(state.typeName);
-  const pane = document.getElementById("pane");
-  pane.innerHTML = "";
-  const title = document.createElement("div"); title.className = "pane-title"; title.textContent = state.typeName;
-  pane.appendChild(title);
-  const sub = document.createElement("div"); sub.className = "pane-sub";
-  sub.textContent = sc ? `${sc.fields.length} fields · ${sc.methods.length} methods` : "";
-  pane.appendChild(sub);
-  const tools = document.createElement("div"); tools.className = "tbl-tools";
-  const fb = document.createElement("input"); fb.className = "filter-box"; fb.placeholder = 'filter, e.g.  name == "coder"  or  status contains "run"';
-  fb.value = state.filter;
-  fb.oninput = () => { state.filter = fb.value; };
-  fb.onkeydown = (e) => { if (e.key === "Enter") refreshTable(); };
-  const meta = document.createElement("div"); meta.className = "tbl-meta"; meta.id = "tbl-meta";
-  tools.appendChild(fb); tools.appendChild(meta);
-  pane.appendChild(tools);
-  const holder = document.createElement("div"); holder.id = "tbl-holder"; pane.appendChild(holder);
-}
-async function refreshTable() {
-  const name = state.typeName;
-  const f = state.filter.replace(/"/g, '\\"');
-  const r = await evalSource(`${name}.instances(filter: "${f}", offset: 0, limit: 200)`);
-  if (state.view !== "table" || state.typeName !== name) return;
-  const holder = document.getElementById("tbl-holder");
-  if (!holder) return;
-  if (r.error) { holder.innerHTML = `<div class="invoke-result invoke-error">${esc(r.error.kind)}: ${esc(r.error.message)}</div>`; return; }
-  const items = r.value.items || [];
-  const meta = document.getElementById("tbl-meta");
-  if (meta) meta.textContent = `${r.value.length} live${r.value.truncated ? " (showing " + items.length + ")" : ""}`;
-  const sc = schemaFor(name);
+
+// ===================== instance table =====================
+function TablePane({ name, schema }) {
+  const nav = useContext(NavContext);
+  const sc = schema.find((t) => t.name === name);
+  const [filterInput, setFilterInput] = useState("");   // what you type
+  const [applied, setApplied] = useState("");           // what the poll queries
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  // reset the filter when the type changes
+  useEffect(() => { setFilterInput(""); setApplied(""); setData(null); setError(null); }, [name]);
+
+  usePoll(async () => {
+    const f = applied.replace(/"/g, '\\"');
+    const r = await evalSource(`${name}.instances(filter: "${f}", offset: 0, limit: 200)`);
+    if (r.error) { setError(r.error); setData(null); }
+    else { setError(null); setData(r.value); }
+  }, 750, [name, applied]);
+
+  const items = data ? (data.items || []) : [];
   const cols = sc ? sc.fields.map((f) => f.name) : (items[0] ? Object.keys(items[0].fields) : []);
-  const tbl = document.createElement("table"); tbl.className = "itable";
-  const thead = document.createElement("thead"); const htr = document.createElement("tr");
-  htr.appendChild(th("id")); cols.forEach((c) => htr.appendChild(th(c)));
-  thead.appendChild(htr); tbl.appendChild(thead);
-  const tb = document.createElement("tbody");
-  if (!items.length) { holder.innerHTML = ""; const e = document.createElement("div"); e.className = "empty"; e.textContent = "no live instances match."; holder.appendChild(e); return; }
-  for (const it of items) {
-    const tr = document.createElement("tr");
-    const m = /#(\d+)$/.exec(it.ref);
-    tr.onclick = () => openDetail(name, m ? +m[1] : 0, it.generation, true);
-    const idc = document.createElement("td"); idc.className = "col-id"; idc.textContent = it.ref; tr.appendChild(idc);
-    for (const c of cols) { const td = document.createElement("td"); const fv = it.fields[c]; if (fv) td.appendChild(renderValue(fv)); else td.textContent = "—"; tr.appendChild(td); }
-    tb.appendChild(tr);
-  }
-  tbl.appendChild(tb);
-  holder.innerHTML = ""; holder.appendChild(tbl);
+  const meta = data ? `${data.length} live${data.truncated ? " (showing " + items.length + ")" : ""}` : "";
+
+  return html`
+    <div>
+      <div class="pane-title">${name}</div>
+      <div class="pane-sub">${sc ? `${sc.fields.length} fields · ${sc.methods.length} methods` : ""}</div>
+      <div class="tbl-tools">
+        <input class="filter-box" spellcheck="false" autocomplete="off"
+               placeholder=${'filter, e.g.  name == "coder"  or  status contains "run"'}
+               value=${filterInput}
+               onInput=${(e) => setFilterInput(e.target.value)}
+               onKeyDown=${(e) => { if (e.key === "Enter") setApplied(filterInput); }} />
+        <div class="tbl-meta">${meta}</div>
+      </div>
+      ${error
+        ? html`<div class="invoke-result invoke-error">${error.kind}: ${error.message}</div>`
+        : !items.length
+          ? html`<div class="empty">no live instances match.</div>`
+          : html`
+            <table class="itable">
+              <thead><tr><th>id</th>${cols.map((c) => html`<th key=${c}>${c}</th>`)}</tr></thead>
+              <tbody>
+                ${items.map((it) => {
+                  const m = /#(\d+)$/.exec(it.ref);
+                  const slot = m ? +m[1] : 0;
+                  return html`
+                    <tr key=${it.ref} onClick=${() => nav.openDetail(name, slot, it.generation, true)}>
+                      <td class="col-id">${it.ref}</td>
+                      ${cols.map((c) => html`<td key=${c}>${it.fields[c] ? html`<${ValueView} v=${it.fields[c]} />` : "—"}</td>`)}
+                    </tr>`;
+                })}
+              </tbody>
+            </table>`}
+    </div>`;
 }
-function th(t) { const e = document.createElement("th"); e.textContent = t; return e; }
 
-// ---------- instance detail ----------
-function openDetail(cls, slot, gen, pushCrumb) {
-  state.view = "detail"; state.ref = { class: cls, slot, gen }; state.lastDetail = null;
-  document.getElementById("repl-context").textContent = `self = ${cls}#${slot}`;
-  const crumbLabel = `${cls}#${slot}`;
-  if (pushCrumb) {
-    const base = state.breadcrumbs.length && state.breadcrumbs[0].label === "types" ? state.breadcrumbs : [{ label: "types", go: goIndex }];
-    state.breadcrumbs = base.filter((c) => c.label !== crumbLabel);
-    state.breadcrumbs.push({ label: crumbLabel, go: () => openDetail(cls, slot, gen, false) });
-  }
-  setBreadcrumbs(state.breadcrumbs.length ? state.breadcrumbs : [{ label: "types", go: goIndex }, { label: crumbLabel }]);
-  refreshDetail();
-  startPoll(refreshDetail, 750);
-}
-async function refreshDetail() {
-  const { class: cls, slot, gen } = state.ref;
-  const r = await evalSource(`${cls}.at(${slot}, ${gen})`);
-  if (state.view !== "detail" || !state.ref || state.ref.slot !== slot) return;
-  const pane = document.getElementById("pane");
-  if (r.error) { pane.innerHTML = `<div class="pane-title">${esc(cls)}#${slot}</div><div class="invoke-result invoke-error">${esc(r.error.kind)}: ${esc(r.error.message)}</div>`; return; }
-  const inst = r.value;
-  const sc = schemaFor(cls);
-  const prev = state.lastDetail;
-  // Preserve interactive state across the poll rebuild: open invoke cards, typed
-  // arguments, visible results, and input focus — otherwise the 750ms refresh
-  // closes the form out from under the user.
-  const saved = { open: new Set(), vals: {}, results: {}, focus: null };
-  for (const card of pane.querySelectorAll(".method")) {
-    const name = card.dataset.method;
-    if (!name) continue;
-    if (card.classList.contains("open")) saved.open.add(name);
-    card.querySelectorAll("input[data-param]").forEach((inp) => {
-      (saved.vals[name] = saved.vals[name] || {})[inp.dataset.param] = inp.value;
-      if (document.activeElement === inp) saved.focus = { method: name, param: inp.dataset.param, s: inp.selectionStart, e: inp.selectionEnd };
-    });
-    const res = card.querySelector(".invoke-result");
-    if (res && res.style.display !== "none") saved.results[name] = { html: res.innerHTML, cls: res.className.replace(/\bflash\b/, "").trim() };
-  }
-  pane.innerHTML = "";
-  const title = document.createElement("div"); title.className = "pane-title"; title.textContent = inst.ref;
-  pane.appendChild(title);
-  const sub = document.createElement("div"); sub.className = "pane-sub";
-  sub.innerHTML = `generation ${inst.generation}`;
-  if (sc && sc.implements && sc.implements.length) sub.innerHTML += ` · implements <span class="impl">${sc.implements.join(", ")}</span>`;
-  if (sc) {
-    const edit = document.createElement("button"); edit.className = "ghost-btn edit-src";
-    edit.textContent = "✎ edit source";
-    edit.onclick = () => openCodePanel(cls, sc);
-    sub.appendChild(edit);
-  }
-  pane.appendChild(sub);
+// ===================== instance detail =====================
+function DetailPane({ cls, slot, gen, schema, onEditSource }) {
+  const sc = schema.find((t) => t.name === cls);
+  const [inst, setInst] = useState(null);
+  const [error, setError] = useState(null);
+  const prevFields = useRef(null);      // previous poll's fields, for flash diffing
+  const flashKeys = useRef({});         // field name -> nonce; bump => value cell remounts => flash replays
 
-  // fields
-  const fsec = document.createElement("div"); fsec.className = "detail-section";
-  fsec.innerHTML = `<h3>fields</h3>`;
-  const grid = document.createElement("div"); grid.className = "field-grid";
-  const typeOf = (n) => sc ? (sc.fields.find((f) => f.name === n) || {}).type : "";
-  for (const [k, val] of Object.entries(inst.fields)) {
-    const nameCell = document.createElement("div"); nameCell.className = "fcell fname";
-    nameCell.innerHTML = esc(k) + `<span class="ftype">${esc(typeOf(k) || "")}</span>`;
-    const valCell = document.createElement("div"); valCell.className = "fcell fval";
-    valCell.appendChild(renderValue(val));
-    if (prev && JSON.stringify(prev[k]) !== JSON.stringify(val)) valCell.classList.add("flash");
-    grid.appendChild(nameCell); grid.appendChild(valCell);
-  }
-  fsec.appendChild(grid); pane.appendChild(fsec);
-  state.lastDetail = inst.fields;
-
-  // methods
-  if (sc && sc.methods.length) {
-    const msec = document.createElement("div"); msec.className = "detail-section";
-    msec.innerHTML = `<h3>methods</h3>`;
-    for (const m of sc.methods) msec.appendChild(methodCard(cls, slot, gen, m, saved));
-    pane.appendChild(msec);
-    if (saved.focus) {
-      const inp = msec.querySelector(`.method[data-method="${saved.focus.method}"] input[data-param="${saved.focus.param}"]`);
-      if (inp) { inp.focus(); try { inp.setSelectionRange(saved.focus.s, saved.focus.e); } catch (_) {} }
+  const fetchDetail = useCallback(async () => {
+    const r = await evalSource(`${cls}.at(${slot}, ${gen})`);
+    if (r.error) { setError(r.error); return; }
+    setError(null);
+    const next = r.value;
+    const prev = prevFields.current;
+    if (prev) {
+      for (const [k, val] of Object.entries(next.fields)) {
+        if (JSON.stringify(prev[k]) !== JSON.stringify(val)) {
+          flashKeys.current[k] = (flashKeys.current[k] || 0) + 1;
+        }
+      }
     }
+    prevFields.current = next.fields;
+    setInst(next);
+  }, [cls, slot, gen]);
+
+  // fresh identity => drop the flash baseline so we don't flash the whole record on arrival
+  useEffect(() => { prevFields.current = null; flashKeys.current = {}; setInst(null); setError(null); }, [cls, slot, gen]);
+
+  usePoll(fetchDetail, 750, [cls, slot, gen]);
+
+  // let MethodCard / ReplDock ask for an immediate read-back after a mutation
+  const fetchRef = useRef(fetchDetail);
+  fetchRef.current = fetchDetail;
+  useEffect(() => detailBus.subscribe(() => { if (!document.hidden) fetchRef.current(); }), []);
+
+  if (error) {
+    return html`<div><div class="pane-title">${cls + "#" + slot}</div>
+      <div class="invoke-result invoke-error">${error.kind}: ${error.message}</div></div>`;
   }
+  if (!inst) return html`<div><div class="pane-title">${cls + "#" + slot}</div></div>`;
+
+  const typeOf = (n) => sc ? (sc.fields.find((f) => f.name === n) || {}).type : "";
+  const implementsLine = sc && sc.implements && sc.implements.length
+    ? html` · implements <span class="impl">${sc.implements.join(", ")}</span>` : "";
+
+  return html`
+    <div>
+      <div class="pane-title">${inst.ref}</div>
+      <div class="pane-sub">
+        generation ${inst.generation}${implementsLine}
+        ${sc ? html`<button class="ghost-btn edit-src" onClick=${() => onEditSource(cls, sc)}>✎ edit source</button>` : ""}
+      </div>
+
+      <div class="detail-section">
+        <h3>fields</h3>
+        <div class="field-grid">
+          ${Object.entries(inst.fields).map(([k, val]) => {
+            const fk = flashKeys.current[k] || 0;
+            return html`
+              <${React.Fragment} key=${k}>
+                <div class="fcell fname">${k}<span class="ftype">${typeOf(k) || ""}</span></div>
+                <div class=${"fcell fval" + (fk ? " flash" : "")} key=${"v" + fk}><${ValueView} v=${val} /></div>
+              <//>`;
+          })}
+        </div>
+      </div>
+
+      ${sc && sc.methods.length ? html`
+        <div class="detail-section">
+          <h3>methods</h3>
+          ${sc.methods.map((m) => html`<${MethodCard} key=${m.name} cls=${cls} slot=${slot} gen=${gen} m=${m} />`)}
+        </div>` : ""}
+    </div>`;
 }
-function methodCard(cls, slot, gen, m, saved) {
-  saved = saved || { open: new Set(), vals: {}, results: {} };
-  const card = document.createElement("div"); card.className = "method";
-  card.dataset.method = m.name;
-  if (saved.open.has(m.name)) card.classList.add("open");
-  const head = document.createElement("div"); head.className = "method-head";
-  const sig = document.createElement("span"); sig.className = "method-sig";
-  const params = m.params.map((p) => `${p.name}: ${p.type}`).join(", ");
-  sig.innerHTML = `${esc(m.name)}(${esc(params)}) <span class="mret">→ ${esc(m.returns)}</span>`;
-  const btn = document.createElement("button"); btn.className = "invoke-btn"; btn.textContent = "invoke";
-  head.appendChild(sig); head.appendChild(btn);
-  const body = document.createElement("div"); body.className = "method-body";
-  const inputs = {};
-  for (const p of m.params) {
-    const row = document.createElement("div"); row.className = "arg-row";
-    const lab = document.createElement("label"); lab.textContent = `${p.name}: ${p.type}`;
-    const inp = document.createElement("input"); inp.placeholder = literalHint(p.type);
-    inp.dataset.param = p.name;
-    if (saved.vals[m.name] && saved.vals[m.name][p.name] !== undefined) inp.value = saved.vals[m.name][p.name];
-    inputs[p.name] = { inp, type: p.type };
-    row.appendChild(lab); row.appendChild(inp); body.appendChild(row);
-  }
-  const result = document.createElement("div"); result.style.display = "none"; result.className = "invoke-result";
-  if (saved.results[m.name]) { result.style.display = "block"; result.className = saved.results[m.name].cls; result.innerHTML = saved.results[m.name].html; }
-  const doInvoke = async () => {
-    const args = m.params.map((p) => literalFor(inputs[p.name].inp.value, p.type)).join(", ");
-    const src = `${cls}.at(${slot}, ${gen}).${m.name}(${args})`;
+
+// A method card owns its own open/args/result state. That state is what the vanilla viewer
+// had to snapshot-and-restore across every poll; here it simply lives in the component, so a
+// poll re-rendering DetailPane never touches it.
+function MethodCard({ cls, slot, gen, m }) {
+  const [open, setOpen] = useState(false);
+  const [args, setArgs] = useState({});                 // param name -> string
+  const [result, setResult] = useState(null);           // {error|value, flash}
+  const flash = useRef(0);
+
+  const doInvoke = useCallback(async () => {
+    const argList = m.params.map((p) => literalFor(args[p.name] || "", p.type)).join(", ");
+    const src = `${cls}.at(${slot}, ${gen}).${m.name}(${argList})`;
     const r = await evalSource(src);
-    result.style.display = "block";
-    result.className = "invoke-result flash" + (r.error ? " invoke-error" : "");
-    result.innerHTML = "";
-    if (r.error) {
-      result.appendChild(document.createTextNode(`${r.error.kind}: ${r.error.message}`));
-      if (r.error.trace) { const t = document.createElement("div"); t.className = "etrace"; t.textContent = r.error.trace.map((f) => `${f.type}.${f.method} (line ${f.line})`).join(" › "); result.appendChild(t); }
-    } else result.appendChild(renderValue(r.value));
-    setTimeout(() => refreshDetail(), 60);  // read the mutation back immediately
-  };
-  head.onclick = (e) => { if (e.target === btn && m.params.length === 0) { doInvoke(); return; } card.classList.toggle("open"); };
-  btn.onclick = (e) => { e.stopPropagation(); if (m.params.length) card.classList.add("open"); doInvoke(); };
-  const runRow = document.createElement("div"); runRow.className = "arg-row";
-  const run = document.createElement("button"); run.className = "invoke-btn"; run.textContent = "run";
-  run.onclick = doInvoke;
-  if (m.params.length) { runRow.appendChild(run); body.appendChild(runRow); }
-  body.appendChild(result);
-  card.appendChild(head); card.appendChild(body);
-  return card;
+    flash.current += 1;
+    setResult({ ...r, flash: flash.current });
+    setTimeout(bumpDetail, 60); // read the mutation back immediately
+  }, [args, cls, slot, gen, m]);
+
+  const params = m.params.map((p) => `${p.name}: ${p.type}`).join(", ");
+
+  return html`
+    <div class=${"method" + (open ? " open" : "")}>
+      <div class="method-head" onClick=${() => setOpen((o) => !o)}>
+        <span class="method-sig">${m.name}(${params}) <span class="mret">→ ${m.returns}</span></span>
+        <button class="invoke-btn" onClick=${(e) => { e.stopPropagation(); if (m.params.length) setOpen(true); doInvoke(); }}>invoke</button>
+      </div>
+      <div class="method-body">
+        ${m.params.map((p) => html`
+          <div class="arg-row" key=${p.name}>
+            <label>${p.name}: ${p.type}</label>
+            <input placeholder=${literalHint(p.type)} value=${args[p.name] || ""}
+                   onInput=${(e) => setArgs((a) => ({ ...a, [p.name]: e.target.value }))}
+                   onKeyDown=${(e) => { if (e.key === "Enter") doInvoke(); }} />
+          </div>`)}
+        ${m.params.length ? html`<div class="arg-row"><button class="invoke-btn" onClick=${doInvoke}>run</button></div>` : ""}
+        ${result ? html`<${InvokeResult} result=${result} key=${result.flash} />` : ""}
+      </div>
+    </div>`;
+}
+function InvokeResult({ result }) {
+  if (result.error) {
+    const trace = result.error.trace
+      ? html`<div class="etrace">${result.error.trace.map((f) => `${f.type}.${f.method} (line ${f.line})`).join(" › ")}</div>` : "";
+    return html`<div class="invoke-result flash invoke-error">${result.error.kind}: ${result.error.message}${trace}</div>`;
+  }
+  return html`<div class="invoke-result flash"><${ValueView} v=${result.value} /></div>`;
 }
 function literalHint(type) {
   if (type === "String") return '"text"';
@@ -441,34 +409,77 @@ function literalFor(v, type) {
   return v || "0";
 }
 
-// ---------- repl ----------
-function replSubmit(src) {
-  let source = src;
-  if (state.view === "detail" && state.ref) {
-    const { class: cls, slot, gen } = state.ref;
-    source = src.replace(/\bself\b/g, `${cls}.at(${slot}, ${gen})`);
-  }
-  const scroll = document.getElementById("repl-scroll");
-  const entry = document.createElement("div"); entry.className = "repl-entry";
-  const ex = document.createElement("div"); ex.className = "repl-expr"; ex.textContent = src;
-  entry.appendChild(ex);
-  const out = document.createElement("div"); out.className = "repl-out"; out.textContent = "…";
-  entry.appendChild(out);
-  scroll.appendChild(entry); scroll.scrollTop = scroll.scrollHeight;
-  evalSource(source).then((r) => {
-    out.innerHTML = "";
-    if (r.error) { out.className = "repl-out err"; out.textContent = `${r.error.kind}: ${r.error.message}`; }
-    else out.appendChild(renderValue(r.value, { inline: false }));
-    scroll.scrollTop = scroll.scrollHeight;
-    if (state.view === "detail") setTimeout(refreshDetail, 60);
-  });
+// ===================== breadcrumbs =====================
+function Breadcrumbs({ crumbs }) {
+  const nav = useContext(NavContext);
+  return html`
+    <div id="breadcrumbs">
+      ${crumbs.map((c, i) => html`
+        <${React.Fragment} key=${i}>
+          ${i ? html`<span class="sep">›</span>` : ""}
+          <span class=${"crumb" + (c.target ? "" : " static")}
+                onClick=${c.target ? () => nav.goCrumb(c.target) : undefined}>${c.label}</span>
+        <//>`)}
+    </div>`;
 }
 
-// ---------- code panel (live code change / redefinition) ----------
-// A definition eval is live redefinition: POST the source, show accepted {gen} or the
-// rejection diagnostic inline. After acceptance the detail poll picks up the new behavior
-// on its own (calls resolve through the swapped method table). Persistent drawer, so the
-// 750ms detail refresh never wipes what you are typing.
+// ===================== repl dock =====================
+function ReplDock({ open, setOpen, route }) {
+  const [entries, setEntries] = useState([]);       // {expr, out?, error?}
+  const [input, setInput] = useState("");
+  const scrollRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => { if (open) inputRef.current && inputRef.current.focus(); }, [open]);
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [entries]);
+
+  const submit = useCallback((src) => {
+    let source = src;
+    if (route.view === "detail" && route.ref) {
+      const { class: c, slot, gen } = route.ref;
+      source = src.replace(/\bself\b/g, `${c}.at(${slot}, ${gen})`);
+    }
+    const idx = entries.length;
+    setEntries((es) => [...es, { expr: src, pending: true }]);
+    evalSource(source).then((r) => {
+      setEntries((es) => es.map((e, i) => i === idx ? { expr: src, error: r.error, value: r.value } : e));
+      if (route.view === "detail") setTimeout(bumpDetail, 60);
+    });
+  }, [entries.length, route]);
+
+  const ctx = route.view === "detail" && route.ref ? `self = ${route.ref.class}#${route.ref.slot}` : "";
+
+  return html`
+    <section id="repl" class=${open ? "" : "collapsed"}>
+      <div class="repl-head">
+        <span class="repl-title">repl</span>
+        <span class="repl-context">${ctx}</span>
+        <span class="repl-hint">bound to <code>self</code> · press <kbd>\`</kbd> to toggle</span>
+      </div>
+      <div id="repl-scroll" ref=${scrollRef}>
+        ${entries.map((e, i) => html`
+          <div class="repl-entry" key=${i}>
+            <div class="repl-expr">${e.expr}</div>
+            <div class=${"repl-out" + (e.error ? " err" : "")}>
+              ${e.pending ? "…" : e.error ? `${e.error.kind}: ${e.error.message}` : html`<${ValueView} v=${e.value} inline=${false} />`}
+            </div>
+          </div>`)}
+      </div>
+      <div class="repl-input-row">
+        <span class="repl-prompt">›</span>
+        <input id="repl-input" ref=${inputRef} type="text" spellcheck="false" autocomplete="off"
+               placeholder="self.conversation.size()  —  or any Scry expression"
+               value=${input}
+               onInput=${(e) => setInput(e.target.value)}
+               onKeyDown=${(e) => {
+                 if (e.key === "Enter" && input.trim()) { submit(input.trim()); setInput(""); }
+                 else if (e.key === "`" && input === "") { e.preventDefault(); setOpen(false); }
+               }} />
+      </div>
+    </section>`;
+}
+
+// ===================== code panel (live redefinition) =====================
 function cleanType(t) { return String(t).replace(/^\w+:/, ""); }
 function classSkeleton(cls, sc) {
   const impl = sc.implements && sc.implements.length ? " implements " + sc.implements.join(", ") : "";
@@ -482,87 +493,209 @@ function classSkeleton(cls, sc) {
   }
   return s + "}\n";
 }
-function openCodePanel(cls, sc) {
-  const panel = document.getElementById("code-panel");
-  const ed = document.getElementById("code-editor");
-  document.getElementById("code-cls").textContent = cls;
-  // keep an in-progress draft for this class; otherwise seed from the live schema skeleton
-  if (!state.codeDraft || state.codeDraft.cls !== cls) {
-    ed.value = classSkeleton(cls, sc);
-    state.codeDraft = { cls, text: ed.value };
-  } else {
-    ed.value = state.codeDraft.text;
-  }
-  document.getElementById("code-result").textContent = "";
-  document.getElementById("code-result").className = "code-result";
-  panel.classList.remove("collapsed");
-  ed.focus();
-}
-async function codeDefine() {
-  const ed = document.getElementById("code-editor");
-  const res = document.getElementById("code-result");
-  res.className = "code-result"; res.textContent = "defining…";
-  const r = await evalSource(ed.value);
-  if (r.error) {
-    res.className = "code-result err";
-    res.textContent = `✗ ${r.error.kind}: ${r.error.message}`;
-  } else {
-    const v = r.value || {};
-    res.className = "code-result ok flash";
-    res.textContent = v.type === "defined"
-      ? `✓ ${v.defined} redefined — now at generation ${v.gen}`
-      : `✓ ${JSON.stringify(v)}`;
-    if (state.view === "detail") setTimeout(refreshDetail, 60);
-  }
-}
-document.getElementById("code-editor").addEventListener("input", (e) => {
-  if (state.codeDraft) state.codeDraft.text = e.target.value;
-});
-document.getElementById("code-define").onclick = codeDefine;
-document.getElementById("code-close").onclick = () => document.getElementById("code-panel").classList.add("collapsed");
-document.getElementById("code-editor").addEventListener("keydown", (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); codeDefine(); }
-});
+function CodePanel({ session, text, setText, onClose }) {
+  const [res, setRes] = useState(null);  // {error} | {ok, text}
+  const flash = useRef(0);
+  const editorRef = useRef(null);
+  useEffect(() => { if (session) { setRes(null); editorRef.current && editorRef.current.focus(); } }, [session]);
 
-// ---------- global search ----------
-async function globalSearch(q) {
-  q = q.trim();
-  const m = /^([A-Za-z_][\w<>,]*)#(\d+)$/.exec(q);
-  if (m) { openDetail(m[1], +m[2], 0, true); return; }
-  // cross-type substring over instances(); jump to first hit
-  for (const t of state.schema) {
-    const r = await evalSource(`${t.name}.instances(filter: "", offset: 0, limit: 200)`);
-    const hit = (r.value?.items || []).find((it) => JSON.stringify(it.fields).toLowerCase().includes(q.toLowerCase()));
-    if (hit) { const mm = /#(\d+)$/.exec(hit.ref); openDetail(t.name, +mm[1], hit.generation, true); return; }
-  }
+  const define = useCallback(async () => {
+    setRes({ pending: true });
+    const r = await evalSource(text);
+    flash.current += 1;
+    if (r.error) setRes({ error: r.error, flash: flash.current });
+    else {
+      const v = r.value || {};
+      const msg = v.type === "defined"
+        ? `✓ ${v.defined} redefined — now at generation ${v.gen}`
+        : `✓ ${JSON.stringify(v)}`;
+      setRes({ ok: msg, flash: flash.current });
+      setTimeout(bumpDetail, 60);
+    }
+  }, [text]);
+
+  const cls = session ? session.cls : "";
+  const resClass = "code-result"
+    + (res && res.ok ? " ok flash" : "") + (res && res.error ? " err" : "");
+  const resText = !res ? "" : res.pending ? "defining…"
+    : res.ok ? res.ok : `✗ ${res.error.kind}: ${res.error.message}`;
+
+  return html`
+    <section id="code-panel" class=${session ? "" : "collapsed"}>
+      <div class="code-head">
+        <span class="code-title">redefine <span class="code-cls">${cls}</span></span>
+        <span class="code-hint">live code change — edit a body or add a <code>field: Type = default</code>, then define</span>
+        <button class="ghost-btn" onClick=${onClose}>close</button>
+      </div>
+      <textarea id="code-editor" ref=${editorRef} spellcheck="false" autocomplete="off"
+                value=${text}
+                onInput=${(e) => setText(e.target.value)}
+                onKeyDown=${(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); define(); } }}></textarea>
+      <div class="code-row">
+        <button class="invoke-btn" onClick=${define}>define</button>
+        <div class=${resClass} key=${res && res.flash}>${resText}</div>
+      </div>
+    </section>`;
 }
 
-// ---------- utils / boot ----------
-function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
-
-document.addEventListener("keydown", (e) => {
-  if (e.key === "`" && document.activeElement.id !== "repl-input" && !/input/i.test(document.activeElement.tagName)) {
-    e.preventDefault(); toggleRepl();
-  } else if (e.key === "`" && document.activeElement.id === "repl-input" && document.getElementById("repl-input").value === "") {
-    e.preventDefault(); toggleRepl();
-  } else if (e.key === "Escape") { document.getElementById("repl").classList.add("collapsed"); }
-});
-function toggleRepl() {
-  const r = document.getElementById("repl");
-  r.classList.toggle("collapsed");
-  if (!r.classList.contains("collapsed")) document.getElementById("repl-input").focus();
+// ===================== transcript drawer =====================
+function truncate(s, n) { s = String(s).replace(/\s+/g, " "); return s.length > n ? s.slice(0, n) + "…" : s; }
+function TranscriptDrawer({ open, onClose }) {
+  const tx = useStore(txStore);
+  return html`
+    <aside id="transcript" class=${open ? "" : "collapsed"}>
+      <div class="transcript-head"><span>eval transcript</span><button class="ghost-btn" onClick=${onClose}>close</button></div>
+      <div id="transcript-list">
+        ${open ? tx.slice(0, 120).map((e, i) => html`
+          <div class="tx" key=${i}>
+            <div class="tx-req">${truncate(e.source, 200)}</div>
+            ${e.resp ? html`<div class=${"tx-res" + (e.isErr ? " err" : "")}>${truncate(JSON.stringify(e.resp.value ?? e.resp.error), 300)}</div>` : ""}
+          </div>`) : ""}
+      </div>
+    </aside>`;
 }
-document.getElementById("repl-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && e.target.value.trim()) { replSubmit(e.target.value.trim()); e.target.value = ""; }
-});
-document.getElementById("type-search").addEventListener("input", renderTypeList);
-document.getElementById("global-search").addEventListener("keydown", (e) => { if (e.key === "Enter") globalSearch(e.target.value); });
-document.getElementById("transcript-toggle").onclick = () => { document.getElementById("transcript").classList.toggle("collapsed"); renderTx(); };
-document.getElementById("transcript-close").onclick = () => document.getElementById("transcript").classList.add("collapsed");
-window.addEventListener("focus", () => { if (state.view === "index") refreshTypes(); else if (state.pollTimer) { /* immediate */ } });
-document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshTypes(); } });
 
-// boot
-goIndex();
-refreshTypes();
-setInterval(() => { if (!document.hidden) refreshTypes(); }, 500);
+// ===================== connection indicator + topbar =====================
+function ConnIndicator() {
+  const s = useStore(connStore);
+  const cls = "conn " + (s === "down" ? "down" : "live");
+  const label = s === "down" ? "reconnecting…" : s === "slow" ? "live (slow)" : "● live";
+  return html`<div class=${cls}><span class="dot"></span><span class="conn-label">${label}</span></div>`;
+}
+function TopBar({ onGlobalSearch, onToggleTranscript }) {
+  const [q, setQ] = useState("");
+  return html`
+    <header id="topbar">
+      <div class="brand">scry<span class="brand-sub">live viewer</span></div>
+      <input id="global-search" type="text" spellcheck="false" autocomplete="off"
+             placeholder="jump to Agent#7 or search field values…"
+             value=${q} onInput=${(e) => setQ(e.target.value)}
+             onKeyDown=${(e) => { if (e.key === "Enter") onGlobalSearch(q); }} />
+      <div class="topbar-right">
+        <button class="ghost-btn" title="eval transcript" onClick=${onToggleTranscript}>transcript</button>
+        <${ConnIndicator} />
+      </div>
+    </header>`;
+}
+
+// ===================== app root =====================
+function App() {
+  const [schema, setSchema] = useState([]);
+  const [trend, setTrend] = useState({});
+  const lastCounts = useRef({});
+  const trendRef = useRef({});
+
+  const [route, setRoute] = useState({ view: "index", typeName: null, ref: null });
+  const [crumbs, setCrumbs] = useState([{ label: "types" }]);
+  const [ifaceOpen, setIfaceOpenState] = useState({});
+  const [replOpen, setReplOpen] = useState(false);
+  const [txOpen, setTxOpen] = useState(false);
+  const [codeSession, setCodeSession] = useState(null);   // {cls, sc}
+  const [codeText, setCodeText] = useState("");
+  const codeDraftCls = useRef(null);
+
+  // rail: refresh type counts every 500ms, always (matches vanilla)
+  usePoll(async () => {
+    const r = await evalSource("types()");
+    if (!r.value) return;
+    const items = r.value.items || [];
+    const nt = {};
+    for (const t of items) {
+      const prev = lastCounts.current[t.name];
+      if (prev != null && t.liveCount !== prev) nt[t.name] = t.liveCount > prev ? "up" : "down";
+      else nt[t.name] = trendRef.current[t.name] || "";
+      lastCounts.current[t.name] = t.liveCount;
+    }
+    trendRef.current = nt;
+    setTrend(nt);
+    setSchema(items);
+  }, 500, []);
+
+  const setIfaceOpen = useCallback((iface, v) => setIfaceOpenState((m) => ({ ...m, [iface]: v })), []);
+
+  const goIndex = useCallback(() => {
+    setRoute({ view: "index", typeName: null, ref: null });
+    setCrumbs([{ label: "types" }]);
+  }, []);
+  const openTable = useCallback((name) => {
+    setRoute({ view: "table", typeName: name, ref: null });
+    setCrumbs([{ label: "types", target: { kind: "index" } }, { label: name }]);
+  }, []);
+  const openDetail = useCallback((cls, slot, gen, pushCrumb) => {
+    const crumbLabel = `${cls}#${slot}`;
+    setRoute({ view: "detail", typeName: cls, ref: { class: cls, slot, gen } });
+    setCrumbs((prev) => {
+      if (!pushCrumb) return prev.length ? prev : [{ label: "types", target: { kind: "index" } }, { label: crumbLabel, target: { kind: "detail", cls, slot, gen } }];
+      const base = prev.length && prev[0].label === "types" && prev[0].target ? prev : [{ label: "types", target: { kind: "index" } }];
+      const filtered = base.filter((c) => c.label !== crumbLabel);
+      filtered.push({ label: crumbLabel, target: { kind: "detail", cls, slot, gen } });
+      return filtered;
+    });
+  }, []);
+  const navigateRef = useCallback((v) => {
+    const m = /^(.+)#(\d+)$/.exec(v.ref);
+    if (!m) return;
+    openDetail(v.class || v.type, +m[2], v.generation ?? 0, true);
+  }, [openDetail]);
+  const goCrumb = useCallback((target) => {
+    if (target.kind === "index") goIndex();
+    else if (target.kind === "table") openTable(target.name);
+    else if (target.kind === "detail") openDetail(target.cls, target.slot, target.gen, false);
+  }, [goIndex, openTable, openDetail]);
+
+  const openCodePanel = useCallback((cls, sc) => {
+    if (codeDraftCls.current !== cls) { setCodeText(classSkeleton(cls, sc)); codeDraftCls.current = cls; }
+    setCodeSession({ cls, sc });
+  }, []);
+
+  const globalSearch = useCallback(async (q) => {
+    q = q.trim();
+    if (!q) return;
+    const m = /^([A-Za-z_][\w<>,]*)#(\d+)$/.exec(q);
+    if (m) { openDetail(m[1], +m[2], 0, true); return; }
+    for (const t of schema) {
+      const r = await evalSource(`${t.name}.instances(filter: "", offset: 0, limit: 200)`);
+      const hit = (r.value?.items || []).find((it) => JSON.stringify(it.fields).toLowerCase().includes(q.toLowerCase()));
+      if (hit) { const mm = /#(\d+)$/.exec(hit.ref); openDetail(t.name, +mm[1], hit.generation, true); return; }
+    }
+  }, [schema, openDetail]);
+
+  // global keys: backtick toggles repl (unless typing in another input); Esc closes repl
+  useEffect(() => {
+    const onKey = (e) => {
+      const ae = document.activeElement;
+      const inInput = ae && (ae.id === "repl-input" || /input|textarea/i.test(ae.tagName));
+      if (e.key === "`") {
+        if (!inInput) { e.preventDefault(); setReplOpen((o) => !o); }
+        else if (ae.id === "repl-input" && ae.value === "") { e.preventDefault(); setReplOpen((o) => !o); }
+      } else if (e.key === "Escape") { setReplOpen(false); }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  const nav = useMemo(() => ({ openTable, openDetail, goIndex, navigateRef, goCrumb }),
+    [openTable, openDetail, goIndex, navigateRef, goCrumb]);
+
+  let pane;
+  if (route.view === "table") pane = html`<${TablePane} name=${route.typeName} schema=${schema} />`;
+  else if (route.view === "detail") pane = html`<${DetailPane} cls=${route.ref.class} slot=${route.ref.slot} gen=${route.ref.gen} schema=${schema} onEditSource=${openCodePanel} />`;
+  else pane = html`<${IndexPane} />`;
+
+  return html`
+    <${NavContext.Provider} value=${nav}>
+      <${TopBar} onGlobalSearch=${globalSearch} onToggleTranscript=${() => setTxOpen((o) => !o)} />
+      <div id="layout">
+        <${TypeRail} schema=${schema} trend=${trend} route=${route} ifaceOpen=${ifaceOpen} setIfaceOpen=${setIfaceOpen} />
+        <main id="content">
+          <${Breadcrumbs} crumbs=${crumbs} />
+          <div id="pane">${pane}</div>
+        </main>
+      </div>
+      <${ReplDock} open=${replOpen} setOpen=${setReplOpen} route=${route} />
+      <${CodePanel} session=${codeSession} text=${codeText} setText=${setCodeText} onClose=${() => setCodeSession(null)} />
+      <${TranscriptDrawer} open=${txOpen} onClose=${() => setTxOpen(false)} />
+    <//>`;
+}
+
+ReactDOM.createRoot(document.getElementById("app")).render(html`<${App} />`);

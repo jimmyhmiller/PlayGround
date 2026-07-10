@@ -41,6 +41,9 @@ body {
   font-family: var(--sans); font-size: 13px; line-height: 1.5;
   display: flex; flex-direction: column; overflow: hidden;
 }
+/* React mounts into #app; display:contents makes its children (#topbar, #layout) the direct
+   flex children of body, so the original body flex-column layout applies unchanged. */
+#app { display: contents; }
 code, .mono, input { font-family: var(--mono); }
 button { font-family: var(--sans); cursor: pointer; }
 ::-webkit-scrollbar { width: 9px; height: 9px; }

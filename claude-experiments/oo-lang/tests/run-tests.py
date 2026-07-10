@@ -137,6 +137,9 @@ def main():
     e7p, e7f = run_assistant_e2e(binary, filt)
     passed += e7p; failed += e7f
     if e7f: fails.append("assistant_e2e")
+    up, uf = run_ui_smoke_test(binary, filt)
+    passed += up; failed += uf
+    if uf: fails.append("ui_smoke")
 
     print(f"\n{passed} passed, {failed} failed ({passed + failed} tests)")
     if fails and not verbose:
@@ -671,6 +674,38 @@ def run_assistant_e2e(binary, filt):
             proc.wait(timeout=5)
         except Exception:
             proc.kill()
+
+
+def run_ui_smoke_test(binary, filt):
+    """Real headless-browser test of the React viewer (tests/ui-smoke.mjs). Zero npm deps —
+    drives system Chrome over the DevTools Protocol via Node's built-in WebSocket. Verifies the
+    click-through (rail -> table -> detail -> method invoke) AND, crucially, that an open method
+    card + typed arg text SURVIVE two poll refreshes (the whole point of the React rewrite).
+    Gated: SKIPPED (not failed) if `node` or a Chrome binary is absent."""
+    if filt and "ui" not in filt and "smoke" not in filt:
+        return 0, 0
+    import shutil
+    if shutil.which("node") is None:
+        print("SKIPPED ui_smoke: node not found on PATH")
+        return 0, 0
+    script = os.path.join(HERE, "ui-smoke.mjs")
+    if not os.path.exists(script):
+        return 0, 0
+    try:
+        p = subprocess.run(["node", script], capture_output=True, text=True, timeout=90)
+    except subprocess.TimeoutExpired:
+        print("FAIL ui_smoke\n     timed out")
+        return 0, 1
+    # the script prints SKIPPED + exits 0 when no Chrome is present
+    if "SKIPPED" in p.stdout:
+        print(p.stdout.strip().splitlines()[0])
+        return 0, 0
+    if p.returncode != 0:
+        print("FAIL ui_smoke")
+        for ln in (p.stdout + p.stderr).strip().splitlines():
+            print("     " + ln)
+        return 0, 1
+    return 1, 0
 
 
 def _diff(expected, actual):
