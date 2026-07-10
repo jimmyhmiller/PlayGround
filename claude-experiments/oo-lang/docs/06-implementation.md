@@ -1182,3 +1182,112 @@ program's types once; a local `vm-name-eq` avoids pulling `types.coil` into `vm.
 - **`http.coil` takes `(field vt parked)`, not the `VMThread`.** Same decoupling seam Phase 5 noted:
   passing the bare `(ptr i64)` parked word keeps the HTTP module free of a `vm.coil` import, so there
   is no module cycle even though the VM calls into it and it calls back into the safepoint protocol.
+
+# Phase 8b — `Env` builtin + a `Json` library written IN Scry
+
+Phase 8b closes the two remaining gaps between Phase 8a's raw HTTP transport and Phase 8c's real
+`AnthropicModel`: reading the API key from the process environment (`Env.get`) and turning an
+`HttpResponse.body` string into a navigable value (`Json.parse`). `Env` is a builtin (it needs
+libc `getenv`); **`Json` is written entirely in Scry** — dogfood, not a builtin — so it doubles as
+the largest Scry program the language runs.
+
+## New builtins (five, same 4-site registration as Phase 8a's `Http`)
+
+| builtin | surface | BLT id | VM handler |
+|---------|---------|--------|------------|
+| `Env.get` | `object Env { get(name: String) -> Option<String> }` | `BLT_ENV_GET 28` | `vm-env-get`: NUL-terminate a copy of the name, `getenv`, `None` if null else copy the value into an owned buffer → `Some(String)` |
+| `String.charCode` | `charCode(i: Int) -> Int` | `BLT_STR_CHARCODE 29` | byte at index `i` as an i64; out of bounds ⇒ `-1` (never traps) |
+| `String.toInt` | `toInt() -> Option<Int>` | `BLT_STR_TOINT 30` | strict base-10 signed parse (optional `+/-`, digits, nothing else) |
+| `String.toFloat` | `toFloat() -> Option<Float>` | `BLT_STR_TOFLOAT 31` | `strtod` over a NUL-terminated copy; `None` unless the WHOLE string was consumed. Payload is f64 bits |
+| `Str.fromCharCode` | `object Str { fromCharCode(code: Int) -> String }` | `BLT_STR_FROMCHARCODE 32` | UTF-8 encode a Unicode codepoint (1–4 bytes) into a fresh `String` |
+| `Map.keys` | `keys() -> List<K>` | `BLT_MAP_KEYS 33` | keys in insertion order — the ONLY way to enumerate a `Map` from Scry (the stringifier needs it) |
+
+The four registration sites are identical to `Http`'s: `bytecode.coil` (the `BLT_*` consts),
+`typecheck.coil` (`register-builtins` for the `Env`/`Str` objects + the `Map.keys` member; the
+`string-method` typechecker for `charCode`/`toInt`/`toFloat`, with a new `ty-option-of` helper that
+builds `Option<T>` via `mk-named`), `compile.coil` (`compile-builtin-object`'s `Env`/`Str`
+branches, `compile-string-method`, and the `Map` branch of `compile-named-method`), and `vm.coil`
+(`do-builtin` + the handler defns). `getenv` is the one new extern, declared in `ioutil.coil`.
+Strings are `{len,data}` and **not** NUL-terminated, so anything handed to libc (`getenv`,
+`strtod`) gets a malloc'd NUL-terminated copy first.
+
+## The `Json` library — `std/json.scry`
+
+A single Scry module (`module std.json`), imported by relative path (`import
+std.json.{Json, JsonValue, jget, ...}`). Scry's import resolver is relative to the *importing*
+file's directory, so the one canonical `std/json.scry` at the repo root is reached from
+`tests/run/` and `examples/` through committed symlinks (`tests/run/std`, `examples/std` →
+`../std`) — no copies.
+
+```
+enum JsonValue { JNull ; JBool(Bool) ; JNum(Float) ; JStr(String)
+                 ; JArr(List<JsonValue>) ; JObj(Map<String, JsonValue>) }
+object Json { fn parse(input: String) -> Result<JsonValue, String>
+              fn stringify(v: JsonValue) -> String }
+```
+
+`parse` is a recursive-descent parser (a `JsonParser` class holding `src`/`pos`/`n`, driven by the
+new `charCode`/`slice`/`toFloat` builtins) over the raw UTF-8 bytes: skip whitespace, then dispatch
+on the first byte to object / array / string / number / `true` / `false` / `null`. Strings decode
+`\" \\ \/ \b \f \n \r \t` and `\uXXXX` (including UTF-16 surrogate pairs) — runs of ordinary bytes
+are `slice`d straight out (preserving raw UTF-8) and escapes are rebuilt with `Str.fromCharCode`.
+Numbers become `JNum(Float)` via `String.toFloat` (`strtod`). Every malformed input is an `Err("…
+at <byte pos>")` value — **the parser never panics.** `stringify` re-emits canonical JSON (object
+members in insertion order via `Map.keys`, whole-valued floats without a fraction).
+
+### Accessor API (what Phase 8c should use)
+
+Free functions in `std/json.scry`, all total (return `Option`/never panic):
+
+| function | signature | purpose |
+|----------|-----------|---------|
+| `jget` | `(v: JsonValue, key: String) -> Option<JsonValue>` | field of a `JObj` |
+| `jindex` | `(v: JsonValue, i: Int) -> Option<JsonValue>` | element of a `JArr` |
+| `jstr` | `(v: JsonValue) -> Option<String>` | the `String` of a `JStr` |
+| `jint` | `(v: JsonValue) -> Option<Int>` | the truncated `Int` of a `JNum` |
+| `jbool` | `(v: JsonValue) -> Option<Bool>` | the `Bool` of a `JBool` |
+| `jgetStr` | `(v: JsonValue, key: String) -> Option<String>` | `jget` then `jstr` (the common case) |
+| `jgetInt` | `(v: JsonValue, key: String) -> Option<Int>` | `jget` then `jint` (token counts) |
+
+So Phase 8c extracts a completion from a `/v1/messages` body with
+`jgetStr(jindex(jget(body,"content")?,0)?, "text")` and reads `jgetStr(body,"stop_reason")`,
+`jgetInt(usage,"output_tokens")`, or a `tool_use` block's `name` / `input.location` — exactly the
+navigation the `json_anthropic` golden verifies.
+
+## Tests (6 new; 257 total)
+
+`tests/run/` goldens (stdout compared): `env_get` (Some/None structure), `str_numchar`
+(`charCode`/`toInt`/`toFloat`/`fromCharCode`), `json_roundtrip` (parse→stringify canonical forms:
+scalars, escapes, arrays, nested objects, whitespace-insensitive), `json_errors` (truncated /
+trailing-junk / bad-key inputs → `Err` with a position), and **`json_anthropic`** — parses a real
+Anthropic messages body and extracts `content[0].text == "hello"`, `stop_reason == "end_turn"`, and
+`usage` token counts, plus a `tool_use` body's `name`/`input.location`. A harness function
+`run_env_roundtrip_test` injects `SCRY_TEST_VAR` into the child's environment and asserts `Env.get`
+reads it back (the golden can't set env vars).
+
+## What Phase 8c consumes
+
+- `Env.get("ANTHROPIC_API_KEY")` → the key, no temp-file dance.
+- `Json.parse(response.body)` + the `jget*` accessors → the completion text, stop reason, and usage
+  from a real `/v1/messages` reply; the same accessors read `tool_use` blocks for tool-calling.
+- All of it is plain Scry values threading through the checker with zero friction.
+
+## Coil / Scry friction (adds to Phase 1–8a's list)
+
+- **The import resolver is relative-only (no project root).** `import std.json` resolves to
+  `<importer-dir>/std/json.scry`, so a shared library needs to sit beside each consumer. Committed
+  relative symlinks (`tests/run/std`, `examples/std` → `../std`) give the single canonical
+  `std/json.scry` one source of truth without copies; a real include path would be the clean fix.
+- **Scry statements are newline-separated — no `;`, and assignment is a statement, not an
+  expression.** A `match` arm whose body assigns (`Some(v) -> out = …`) must wrap the body in a
+  block (`Some(v) -> { out = … }`); a bare `out` parses as the arm and the `=` starts a "new
+  pattern". Method calls also don't chain off a call result (`f().len()`), so intermediate values
+  bind to locals.
+- **A class with an `init` constructs by init-parameter name** (`JsonParser(src: input)`), not by
+  field name — the memberwise form is only for classes without an `init`.
+- **`Str.fromCharCode` is the missing primitive for building strings from codepoints.** Scry can
+  read bytes (`charCode`) but had no way to *construct* a character, so JSON escape handling (and
+  any future text synthesis) needed one UTF-8-encoding builtin. Slicing handles the raw-byte runs;
+  `fromCharCode` handles the decoded escapes — together they preserve multibyte UTF-8 exactly.
+- **`Map` had no enumeration.** `set`/`get`/`containsKey`/`len` can't drive a serializer; `keys() ->
+  List<K>` (insertion order) is the minimal addition that lets a Scry program walk a map.
