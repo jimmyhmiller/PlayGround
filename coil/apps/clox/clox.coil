@@ -1216,7 +1216,11 @@
   (store! (field frame ip) (index (load (field frame ip)) delta)) 0)
 
 (defn run [] (-> i64)
-  (let [(mut frame) (index (field (vm) frames) (- (load (field (vm) frame-count)) 1)) (mut result) -1]
+  ; tmp-val is a reusable out-param slot, hoisted OUT of the loop: alloc-stack is
+  ; alloca, and an alloca inside the dispatch loop would leak the C stack per
+  ; instruction (millions of iterations -> stack overflow).
+  (let [(mut frame) (index (field (vm) frames) (- (load (field (vm) frame-count)) 1)) (mut result) -1
+        tmp-val (alloc-stack Value)]
     (loop
       (let [instruction (read-byte (load frame))]
         (cond
@@ -1228,7 +1232,7 @@
           (= instruction OP_GET_LOCAL) (let [slot (read-byte (load frame))] (push (load (index (load (field (load frame) slots)) slot))) 0)
           (= instruction OP_SET_LOCAL) (let [slot (read-byte (load frame))] (store! (index (load (field (load frame) slots)) slot) (peek 0)) 0)
           (= instruction OP_GET_GLOBAL)
-            (let [name (read-string (load frame)) value (alloc-stack Value)]
+            (let [name (read-string (load frame)) value tmp-val]
               (if (not (table-get (field (vm) globals) name value))
                   (do (w-cstr 2 c"Undefined variable '") (w-bytes 2 (load (field name chars)) (load (field name length))) (w-cstr 2 c"'.") (runtime-error-trace)
                       (store! result INTERPRET_RUNTIME_ERROR) (break))
@@ -1248,7 +1252,7 @@
           (= instruction OP_GET_PROPERTY)
             (if (not (is-obj-kind (peek 0) OBJ_INSTANCE))
                 (do (runtime-error (cast (ptr u8) c"Only instances have properties.")) (store! result INTERPRET_RUNTIME_ERROR) (break))
-                (let [instance (cast (ptr ObjInstance) (as-obj (peek 0))) name (read-string (load frame)) value (alloc-stack Value)]
+                (let [instance (cast (ptr ObjInstance) (as-obj (peek 0))) name (read-string (load frame)) value tmp-val]
                   (if (table-get (field instance fields) name value)
                       (do (pop) (push (load value)) 0)
                       (if (not (bind-method (load (field instance klass)) name)) (do (store! result INTERPRET_RUNTIME_ERROR) (break)) 0))))
