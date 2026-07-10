@@ -1,5 +1,7 @@
 # Coil (working name)
 
+> **New to Coil? Run `coil guide`** (or read [docs/LANGUAGE_GUIDE.md](docs/LANGUAGE_GUIDE.md)) — a dense language reference for humans and agents.
+
 A low-level, Lisp-macro language where **calling convention** and **allocation**
 are part of the **type system** — assembly-level control over where values live
 across calls and where data lives in memory, with higher-level constructs built

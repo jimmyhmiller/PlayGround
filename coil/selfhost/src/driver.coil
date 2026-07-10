@@ -24,6 +24,7 @@
 ; dir), matching the convention in codegen.coil/check.coil/etc. Only the top-level
 ; entry files (main.coil / main_a64.coil) use CWD-relative "selfhost/src/…" paths.
 (import "ffi.coil" :use *)
+(import "guide.coil" :use *)   ; `coil guide` — the language reference (generated from docs/LANGUAGE_GUIDE.md)
 (import "reader.coil" :use *)
 (import "ast.coil" :use *)
 (import "astdump.coil" :use *)
@@ -1072,6 +1073,8 @@
         sub  (cstr->slice (load (index argv 1)))]
     (if (str-eq sub "__smoke")
         (smoke a)
+      (if (str-eq sub "guide")
+          (do (ps (stdout) (guide-text)) 0)
       (if (str-eq sub "__normalize")
           (let [path (load (index argv 2)) src (read-file a path)]
             (call-ptr normalize-fn a src))
@@ -1124,5 +1127,5 @@
             (store! (field ctx emitir-fn) emitir-fn)
             ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
             ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
-            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))))))))
+            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0))))))))))))))))))))
   );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====

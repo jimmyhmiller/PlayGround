@@ -1,0 +1,238 @@
+; selfhost/src/guide.coil — GENERATED from docs/LANGUAGE_GUIDE.md.
+; Do not edit by hand; regenerate with: python3 tools/gen-guide.py
+(module guide)
+
+(defn guide-text [] (-> (slice u8))
+  "# The Coil Language — a guide for agents
+
+A dense, practical reference for writing correct Coil. Coil is a low-level,
+Lisp-syntax, ahead-of-time language: s-expressions, a macro system, and a type
+system where **calling convention** and **allocation** are first-class. It emits
+a native object and links with the system `cc`. Read this end to end before
+writing Coil; most mistakes come from the gotchas marked ⚠.
+
+Run `coil guide` to print this. Source of truth: `docs/LANGUAGE_GUIDE.md`
+(the embedded copy `selfhost/src/guide.coil` is generated from it).
+
+## Build & run
+
+    coil run   file.coil                 # build + run a single file
+    coil build file.coil -o out          # build a native executable
+    coil run                             # build+run the ./Coil.toml project
+    coil run -- arg1 arg2                # forward args to the program
+    coil build file.coil -lm             # link a library (-l<name>)
+    coil repl                            # interactive session
+
+`main`'s `i64` return is the process exit code. There is no JIT. A file that is
+imported must start with `(module NAME)`. `Coil.toml`:
+
+    [package]
+    name  = \"app\"
+    entry = \"main.coil\"      # default src/main.coil
+    [link]
+    libs = [\"m\"]             # -> -lm
+
+## Modules & imports
+
+    (module app)                         ; every importable file starts with this
+    (import \"other.coil\" :use *)         ; bring all exported names in, unqualified
+    (import \"other.coil\" :use [a b])     ; specific names
+    (import \"other.coil\" :as x)          ; qualified: x.name
+    (export foo bar)                     ; optional; omitted = everything visible
+
+Paths resolve relative to the **importing file's own directory**; bare stdlib
+names (`alloc.coil`, `str.coil`, …) resolve to the bundled library from anywhere.
+⚠ `extern` declarations are NOT deduped across modules — declare each libc
+extern in ONE module and `:use *` it, or two importers colliding will fail to link.
+
+## The two operator tiers
+
+- **Metal ops**, any width: `iadd isub imul idiv irem`, `icmp-eq icmp-ne icmp-lt
+  icmp-le icmp-gt icmp-ge`, `iand ior ixor ishl ishr`, `udiv urem` (unsigned),
+  `fadd fsub fmul fdiv`, `fcmp-eq fcmp-ne fcmp-lt fcmp-le fcmp-gt fcmp-ge`.
+- **Clean prelude operators**: `+ - * / %`, `= != < <= > >=`, `& | ^ << >>`.
+  ⚠ These are implemented for **`i64` only** fully; **`f64` has `+ - * /` and
+  `< <= > >=` but NOT `Eq`** — `(= f64 f64)` fails with \"f64 does not implement
+  Eq\". Use `fcmp-eq`/`fcmp-ne` for float equality. **`bool` has no `Eq`** either
+  — write `(if a b (not b))` to compare bools. For `u8`/`u32`/other widths, use
+  the metal ops. Prefer clean operators on `i64`; drop to metal for other widths.
+
+## Numbers, bool, casts
+
+Int types `i8 i16 i32 i64 u8 u32 u64 …` (arbitrary width, real signedness).
+Floats `f32 f64`. `bool` is real (`true`/`false`). Literals infer width from
+context; hex `0x1F`, binary `0b1010`, octal `0o17`, underscores `1_000`.
+
+`(cast T x)` converts: `(cast i64 f)` truncates f64→i64 (numeric), `(cast f64 i)`
+converts int→float, `(cast (ptr T) x)` reinterprets pointers, `(cast i64 p)` is a
+pointer's address. ⚠ `cast` between f64 and i64 is a **numeric conversion, not a
+bit reinterpret**. For a bitcast (e.g. NaN-boxing) round-trip through memory:
+`(let [p (alloc-stack i64)] (store! p bits) (load (cast (ptr f64) p)))` — LLVM at
+-O3 folds this to a register move.
+
+## Control flow
+
+Core: `if`, `do`, `let`, `loop`/`break`/`continue`. Macros (no import needed —
+reexported from core): `when unless cond case case-by while for and or not`.
+
+    (if cond then else)      ; ⚠ BOTH branches required, and they must have the
+                             ;    SAME type (the whole if yields a value).
+    (do a b c)               ; sequence, yields last
+    (let [x e (mut y) e0] …) ; bindings; (mut y) is a mutable stack cell
+    (loop … (break) … (break v) … (continue))
+    (cond t1 e1 t2 e2 … else)      ; lone trailing = else
+    (case x k1 e1 k2 e2 … default) ; x evaluated once; a dense integer case
+                                   ;   compiles to a JUMP TABLE
+
+⚠ `if` needs matching branch types. For effect-only conditionals write
+`(if c (do …effects… 0) 0)` so both sides are `i64`. `store!` returns the stored
+value's type, so `(if c (store! p ptr) 0)` mismatches — wrap: `(do (store! p ptr) 0)`.
+
+There is no `return`. Structure with `if`, or use `(block :b … (return-from :b v))`.
+Self-tail-recursion is constant-stack (guaranteed `musttail`).
+
+## Structs
+
+    (defstruct Point [(x i64) (y i64)])
+    (defstruct Rect  [(lo Point) (hi Point) (data (ptr u8)) (buf (array u8 64))])
+
+- `(field p name)` → a `(ptr FieldType)` (a place); then `load`/`store!`.
+  Requires `p : (ptr Struct)`. Nested: `(field (field s lo) x)`. Array field
+  element: `(index (field s buf) i)`.
+- `(load place)` reads, `(store! place v)` writes.
+- `(zeroed T)` = a zero value; `(sizeof T)`, `(alignof T)`, `(offsetof S f)` are
+  compile-time.
+- Passing: `(p Point)` = **immutable ref** (a `store!` through it won't type-check);
+  `(mut Point)` = **mutable ref**, pass a place with `(mut place)`; `(ptr Point)` =
+  raw pointer (metal / FFI / allocators). A `let` of struct/array type is a stack place.
+- ⚠ `(field rvalue name)` fails — `field` needs a place (a pointer), not a value.
+  Load into a place first, or take its address.
+
+**Struct \"inheritance\" (C-style):** embed a header struct as the first field and
+cast pointers — the header is at offset 0, so `(cast (ptr Sub) hdrptr)` and
+`(cast (ptr Hdr) subptr)` are the same address.
+
+## Sum types (tagged unions)
+
+    (defsum Value (VBool [(b bool)]) (VNil) (VNumber [(n f64)]) (VObj [(o (ptr Obj))]))
+    (defsum Option [T] (None) (Some [(val T)]))   ; generic
+
+    (match v
+      (VBool [b] …) (VNil [] …) (VNumber [n] …) (VObj [o] …))   ; must be exhaustive
+    (Some 42)  (None)  (VNumber 1.5)             ; construct
+
+Stored by value (tag + payload). Fine inside structs and generic collections.
+Recursive sums need a `(ptr …)` child. `_` is a wildcard binder.
+
+## Pointers, memory, allocation
+
+Three allocation *operations*, each yields `(ptr T)`:
+
+- `(alloc-stack T)` → `alloca`, this frame. ⚠ **NEVER call `alloc-stack` inside a
+  loop that runs many times** — alloca isn't freed until the function returns, so
+  it leaks the C stack per iteration and eventually segfaults. Hoist it into a
+  `let` outside the loop and reuse the slot.
+- `(alloc-static T)` → one global cell per call site (see Globals).
+- `(alloc-heap T)` → `malloc` (pair with `free`).
+
+`(index p i)` → `(ptr T)` at element i (pointer arithmetic, scaled by `sizeof T`);
+`(index p -1)` is p−1. Null: `(cast (ptr T) 0)`; null test `(= (cast i64 p) 0)`.
+
+**Allocator API** (`lib/alloc.coil`, thread a `(ptr Allocator)`):
+
+    (malloc-allocator)                 ; stable global libc allocator
+    (arena-allocator cap)              ; bump allocator
+    (create [T] a)                     ; -> (Option (ptr T))
+    (alloc-slice [T] a n)              ; -> (Option (ptr T)) array of n
+    (destroy [T] a p)                  ; free one T
+    (unwrap-ptr [T] optbox)            ; (Option (ptr T)) -> (ptr T), null on OOM
+    (raw-alloc a size align)           ; -> (Option (ptr i8))
+    (raw-resize a p oldsz newsz align) ; realloc
+    (raw-free a p size align)
+    ; idiom: (let [p (unwrap-ptr [T] (create [T] a))] (store! p …) p)
+
+## Collections (bundled)
+
+**ArrayList** (`lib/arraylist.coil`): `(al-new [T] a)`, `(al-len [T] l)`,
+`(al-get [T] l i)`, `(al-set! [T] (mut l) i v)`, `(al-push! [T] (mut l) v)`,
+`(al-pop! [T] (mut l))`, `(al-free! [T] (mut l))`. Mutators take `(mut …)`.
+**HashMap** (`lib/hashmap.coil`): `(hm-new [K V] a ops)`, `(hm-new-scalar [K V] a)`,
+`(hm-get [K V] m k)` → `(Option V)`, `(hm-put! [K V] (mut m) k v)`,
+`(hm-remove! [K V] (mut m) k)`. For string keys use `(str-keyops)` from `lib/str.coil`.
+Type args `[T]` come right after the name; usually inferable, so often omittable.
+
+## Strings & bytes
+
+`\"…\"` has type `(slice u8)` (UTF-8 bytes, static storage). `c\"…\"` has type
+`(ptr i8)` (NUL-terminated C string, for FFI/`printf`). ⚠ Don't pass `\"…\"` to a
+`(ptr i8)` param or `c\"…\"` to a `(slice u8)` param.
+
+`(slice T)` is a fat pointer `{data, len}`. `(slice-data s)`, `(slice-len s)`,
+`(slice-get s i)`, `(subslice s lo hi)`, `(slice-new [T] ptr n)`. String helpers
+(`lib/str.coil`): `(str-len s)`, `(char-at s i)`, `(str-eq a b)`, `(str-hash s)`,
+`(substr s lo hi)`, `(str-concat a x y)`.
+
+## Character literals
+
+`\\a` `\\Z` `\\0` are that byte's value (an integer literal). Delimiters/quotes work:
+`\\(` `\\)` `\\{` `\\}` `\\\"` `\\;` `\\.` `\\,` `\\*`. Named: `\\space`=32 `\\newline`=10
+`\\tab`=9 `\\return`=13 `\\nul`=0 `\\backspace`=8 `\\formfeed`=12. Hex: `\\u41`=65.
+They are plain `i64` literals — use with metal/clean ops after casting the byte:
+`(= (cast i64 (load p)) \\a)`.
+
+## Functions & function pointers
+
+    (defn name [(a T) (b U)] (-> R) body…)   ; last expr is the return value
+    (defn id [T] [(x T)] (-> T) x)            ; generic: [T] before the arg list
+    (defn f [(p (mut Rect))] (-> i64) …)      ; mutable-ref param
+    (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64) …)   ; CLI entry
+
+**Function pointers** (native callbacks, dispatch tables):
+`(fnptr c [ArgTs…] Ret)` is the type (`c` = C convention); `(fnptr-of fn)` takes a
+function's address; `(call-ptr fp args…)` calls indirectly. A normal `defn` can be
+taken as a `(fnptr c …)` and called via `call-ptr`; aggregate (struct/sum) returns
+cross the call correctly. Forward references within a file resolve (mutual
+recursion is fine) — define in any order.
+
+## Global mutable state
+
+There is **no top-level mutable variable**. Use `alloc-static` inside a zero-arg
+accessor — it returns the same global cell every call:
+
+    (defn counter [] (-> (ptr i64)) (alloc-static i64))
+    (store! (counter) (+ (load (counter)) 1))
+    ; for a global struct singleton (like a VM):
+    (defstruct VM [(x i64) …])
+    (defn vm [] (-> (ptr VM)) (alloc-static VM))   ; (load (field (vm) x)) …
+
+`(const NAME VALUE)` / `(const NAME TYPE VALUE)` are compile-time immutable scalars
+(opcodes, limits): `(const OP_RETURN 0)`.
+
+## I/O & FFI
+
+    (extern printf   :cc c [(ptr i8) ...] (-> i32))     ; ... = variadic
+    (extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
+    (extern write    :cc c [i64 (ptr i8) i64] (-> i64)) ; fd 1=stdout 2=stderr
+    (extern exit     :cc c [i32] (-> void))
+
+`(printf c\"%d\\n\" 42)`. Floats cross the C ABI correctly; structs pass/return by
+value with the real C ABI. To call a Coil fn from C (e.g. `qsort` comparator) pass
+`(fnptr-of f)`. Ambient `print`/`println` (over stdout) need no import.
+`lib/io.coil`/`lib/fmt.coil` give a `(ptr Writer)` API: `(stdout)`, `(stderr)`,
+`(print-str w s)`, `(fmt w \"n={d} s={s} f={f}\\n\" a b c)`. ⚠ `{f}` is a fixed
+6-digit display, NOT C `%g`; for exact float formatting call libc `snprintf` with
+`c\"%g\"`. `coil cimport header.h` auto-generates bindings from a real C header.
+
+## Reserved-name gotchas ⚠
+
+`call` and `block` are builtins/macros — don't name a `defn` `call` or `block`
+(you'll get \"call target: expected symbol\" / \"macro arity mismatch\"). Avoid `type`
+as a struct field name. When in doubt, prefix your name (`p-call`, `vm-call`).
+
+## Where to look
+
+`examples/` (one idea each: `sums`, `hashmap`, `references`, `closure`, `lisp`,
+`calc`, `json`), `lib/*.coil` (the standard library — the real API surface),
+`apps/` (larger programs, e.g. `apps/clox` — a full bytecode VM). The self-hosted
+compiler itself is in `selfhost/src/` (`reader.coil` = lexer/parser).
+")
