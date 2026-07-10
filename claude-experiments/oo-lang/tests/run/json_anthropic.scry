@@ -1,0 +1,55 @@
+// Phase 8b: parse REAL Anthropic /v1/messages response bodies and extract fields via the
+// json accessors — exactly the navigation Phase 8c (AnthropicModel) performs.
+import std.json.{Json, JsonValue, jget, jindex, jstr, jgetStr, jgetInt}
+
+fn contentText(v: JsonValue) -> String {
+  match jget(v, "content") {
+    Some(content) -> match jindex(content, 0) {
+      Some(first) -> match jgetStr(first, "text") {
+        Some(t) -> t
+        None -> "<no text>"
+      }
+      None -> "<empty>"
+    }
+    None -> "<no content>"
+  }
+}
+
+fn main() {
+  let body = "{\"id\":\"msg_013\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}"
+  match Json.parse(body) {
+    Ok(v) -> {
+      Console.log("text=" + contentText(v))
+      match jgetStr(v, "stop_reason") { Some(s) -> Console.log("stop=" + s) None -> Console.log("no stop") }
+      match jget(v, "usage") {
+        Some(u) -> {
+          match jgetInt(u, "input_tokens") { Some(n) -> Console.log("in=${n}") None -> Console.log("no in") }
+          match jgetInt(u, "output_tokens") { Some(n) -> Console.log("out=${n}") None -> Console.log("no out") }
+        }
+        None -> Console.log("no usage")
+      }
+    }
+    Err(e) -> Console.log("parse err: " + e)
+  }
+
+  let tbody = "{\"content\":[{\"type\":\"tool_use\",\"id\":\"tool_1\",\"name\":\"get_weather\",\"input\":{\"location\":\"SF\"}}],\"stop_reason\":\"tool_use\"}"
+  match Json.parse(tbody) {
+    Ok(v) -> {
+      match jget(v, "content") {
+        Some(content) -> match jindex(content, 0) {
+          Some(block) -> {
+            match jgetStr(block, "name") { Some(nm) -> Console.log("tool=" + nm) None -> Console.log("no name") }
+            match jget(block, "input") {
+              Some(inp) -> match jgetStr(inp, "location") { Some(loc) -> Console.log("input.location=" + loc) None -> Console.log("no loc") }
+              None -> Console.log("no input")
+            }
+          }
+          None -> Console.log("no block")
+        }
+        None -> Console.log("no content")
+      }
+      match jgetStr(v, "stop_reason") { Some(s) -> Console.log("tool_stop=" + s) None -> Console.log("no") }
+    }
+    Err(e) -> Console.log("parse err: " + e)
+  }
+}

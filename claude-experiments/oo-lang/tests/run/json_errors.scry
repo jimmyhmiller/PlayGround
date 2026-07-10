@@ -1,0 +1,21 @@
+// Phase 8b: Json.parse error handling — every malformed input is an Err value with a
+// position; the parser never panics.
+import std.json.{Json, JsonValue}
+
+fn rt(s: String) {
+  match Json.parse(s) {
+    Ok(v) -> Console.log("OK: " + Json.stringify(v))
+    Err(e) -> Console.log("ERR: " + e)
+  }
+}
+
+fn main() {
+  rt("")
+  rt("{")
+  rt("[1,2")
+  rt("truex")
+  rt("42 junk")
+  rt("{\"a\" 1}")
+  rt("[1 2]")
+  rt("\"unterminated")
+}

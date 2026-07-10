@@ -1,0 +1,25 @@
+// Phase 8b: Json.parse then Json.stringify — canonical round-trip goldens.
+import std.json.{Json, JsonValue}
+
+fn rt(s: String) {
+  match Json.parse(s) {
+    Ok(v) -> Console.log(Json.stringify(v))
+    Err(e) -> Console.log("ERR: " + e)
+  }
+}
+
+fn main() {
+  rt("null")
+  rt("true")
+  rt("false")
+  rt("42")
+  rt("-7")
+  rt("3.14")
+  rt("\"hello\"")
+  rt("\"esc: \\n \\t \\\" \\\\ done\"")
+  rt("[]")
+  rt("[1,2,3]")
+  rt("{}")
+  rt("{\"a\":1,\"b\":[true,null,\"x\"],\"c\":{\"d\":2}}")
+  rt("  {  \"x\" : 1 , \"y\" : 2 }  ")
+}

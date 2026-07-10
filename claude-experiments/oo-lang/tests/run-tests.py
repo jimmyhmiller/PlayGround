@@ -145,6 +145,10 @@ def main():
     passed += hnp; failed += hnf; fails += hnfails
     hsp, hsf, hsfails = run_http_stw_test(binary, filt)
     passed += hsp; failed += hsf; fails += hsfails
+    # Phase 8b: Env.get reads a variable the harness injects into the child's environment.
+    evp, evf = run_env_roundtrip_test(binary, filt)
+    passed += evp; failed += evf
+    if evf: fails.append("env_roundtrip")
 
     print(f"\n{passed} passed, {failed} failed ({passed + failed} tests)")
     if fails and not verbose:
@@ -723,6 +727,44 @@ def _net_reachable(host="api.anthropic.com", port=443, timeout=5):
         return True
     except Exception:
         return False
+
+
+def run_env_roundtrip_test(binary, filt):
+    """Phase 8b: prove Env.get actually reads the process environment (not just HOME/None, which
+    the env_get golden covers). The harness injects SCRY_TEST_VAR into the child's env and runs a
+    throwaway program that echoes Env.get("SCRY_TEST_VAR"); we assert the injected value comes back
+    and that a sibling unset name is None. Deleted immediately."""
+    if filt and "env" not in filt:
+        return 0, 0
+    prog = os.path.join(HERE, "run", "_env_roundtrip_tmp.scry")
+    with open(prog, "w") as fh:
+        fh.write('fn main() {\n'
+                 '  match Env.get("SCRY_TEST_VAR") { Some(v) -> Console.log("got=" + v) None -> Console.log("got=None") }\n'
+                 '  match Env.get("SCRY_STILL_UNSET_QQ") { Some(v) -> Console.log("other=Some") None -> Console.log("other=None") }\n'
+                 '}\n')
+    try:
+        env = dict(os.environ)
+        env["SCRY_TEST_VAR"] = "hello-from-harness"
+        env.pop("SCRY_STILL_UNSET_QQ", None)
+        p = subprocess.run([binary, "run", "--no-viewer", prog],
+                           capture_output=True, text=True, timeout=60, env=env)
+        out = p.stdout
+        problems = []
+        if "got=hello-from-harness" not in out:
+            problems.append(f"Env.get did not read injected var; stdout: {out!r}")
+        if "other=None" not in out:
+            problems.append(f"unset var not None; stdout: {out!r}")
+        if problems:
+            print("FAIL env_roundtrip")
+            for pr in problems:
+                print("     " + pr)
+            return 0, 1
+        return 1, 0
+    finally:
+        try:
+            os.remove(prog)
+        except OSError:
+            pass
 
 
 def run_http_network_test(binary, filt):
