@@ -1,0 +1,27 @@
+// Real OS threads: spawn 3 workers, each adds a fixed amount to a shared Mutex-guarded
+// counter, join all, then print the aggregate. Output is DETERMINISTIC because it is the
+// post-join total (10+20+30 = 60), never interleaved per-thread prints.
+
+class Adder implements Runnable {
+  box: Mutex<Int>
+  amount: Int
+  fn run() -> Void {
+    self.box.lock()
+    self.box.set(self.box.get() + self.amount)
+    self.box.unlock()
+  }
+}
+
+fn main() {
+  let box = Mutex<Int>(0)
+  let hs = List<ThreadHandle>()
+  hs.push(Thread.spawn(Adder(box: box, amount: 10)))
+  hs.push(Thread.spawn(Adder(box: box, amount: 20)))
+  hs.push(Thread.spawn(Adder(box: box, amount: 30)))
+  var i = 0
+  while i < 3 {
+    hs.get(i).join()
+    i = i + 1
+  }
+  print(box.get())
+}

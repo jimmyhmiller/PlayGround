@@ -92,6 +92,11 @@ fn eval_form<M: ValueModel>(
         macros.insert(name);
         return eval1(rt, cs, macros, comp, newform);
     }
+    // Real core.clj registers a macro AFTER defining it: `(. (var foo) (setMacro))`.
+    if let Some(name) = setmacro_target(rt, form) {
+        macros.insert(name);
+        return rt.encode(Val::Nil);
+    }
     if let Some(name) = defmacro_name(rt, form) {
         // (defmacro name params body...) -> (def name (fn [&form &env params...] body...)).
         // Every macro fn gets the Clojure `&form`/`&env` hidden params (our macros
@@ -176,6 +181,17 @@ fn expand<M: ValueModel>(
         } else if is_sym(rt, head, "deftype") {
             let d = desugar_deftype(rt, f);
             expand(rt, cs, macros, d)
+        } else if is_sym(rt, head, "var") {
+            // `(var x)` -> a first-class var value `(record 'Var 'x)`. (The
+            // `(. (var x) (setMacro))` bootstrap pattern is intercepted earlier,
+            // at eval-form level; this handles `var` in any other position.)
+            let items = rt.list_to_vec(f);
+            let rec = sym(rt, "record");
+            let vtag = sym(rt, "Var");
+            let tag_q = quote_form(rt, vtag);
+            let name_q = quote_form(rt, items[1]);
+            let g = rt.vec_to_list(&[rec, tag_q, name_q]);
+            expand(rt, cs, macros, g)
         } else if is_sym(rt, head, "instance?") {
             let d = instance_rewrite(rt, f);
             expand(rt, cs, macros, d)
@@ -907,6 +923,47 @@ fn strip_def_macro_meta<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> Option
     let mut newf = vec![items[0], nparts[1]];
     newf.extend_from_slice(&items[2..]);
     Some((name, rt.vec_to_list(&newf)))
+}
+
+/// Recognize real core.clj's macro registration `(. (var NAME) (setMacro))`
+/// (and its `(. (var NAME) setMacro)` / `(.setMacro (var NAME))` variants),
+/// returning NAME. This runs at eval-form level because marking a macro must
+/// mutate the (frontend-owned) macro set that the NEXT form's expander reads.
+fn setmacro_target<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Option<Sym> {
+    let items = rt.list_to_vec(form);
+    if items.is_empty() {
+        return None;
+    }
+    // Locate the receiver form and confirm the method is `setMacro`.
+    let recv = if is_sym(rt, items[0], ".") {
+        if items.len() < 3 {
+            return None;
+        }
+        // items[2] is either `(setMacro)` or the bare symbol `setMacro`.
+        let is_setmacro = match rt.as_cons(items[2]) {
+            Some(_) => is_sym(rt, rt.list_to_vec(items[2])[0], "setMacro"),
+            None => is_sym(rt, items[2], "setMacro"),
+        };
+        if !is_setmacro {
+            return None;
+        }
+        items[1]
+    } else if is_sym(rt, items[0], ".setMacro") {
+        if items.len() < 2 {
+            return None;
+        }
+        items[1]
+    } else {
+        return None;
+    };
+    // The receiver must be `(var NAME)` or a `#'NAME` var literal.
+    let rv = rt.list_to_vec(recv);
+    if rv.len() == 2 && is_sym(rt, rv[0], "var") {
+        if let Val::Sym(name) = rt.decode(rv[1]) {
+            return Some(name);
+        }
+    }
+    None
 }
 
 fn defmacro_name<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Option<Sym> {

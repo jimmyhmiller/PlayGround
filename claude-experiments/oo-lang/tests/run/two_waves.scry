@@ -1,0 +1,28 @@
+// Two sequential waves of spawn/join reuse the same shared counter; total is 2*3 = 6.
+class Inc implements Runnable {
+  box: Mutex<Int>
+  fn run() -> Void {
+    self.box.lock()
+    self.box.set(self.box.get() + 1)
+    self.box.unlock()
+  }
+}
+fn main() {
+  let box = Mutex<Int>(0)
+  var wave = 0
+  while wave < 2 {
+    let hs = List<ThreadHandle>()
+    var t = 0
+    while t < 3 {
+      hs.push(Thread.spawn(Inc(box: box)))
+      t = t + 1
+    }
+    var j = 0
+    while j < 3 {
+      hs.get(j).join()
+      j = j + 1
+    }
+    wave = wave + 1
+  }
+  print(box.get())
+}

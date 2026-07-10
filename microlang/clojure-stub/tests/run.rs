@@ -287,3 +287,87 @@ fn instance_predicate() {
 fn throw_aborts() {
     run("(throw \"boom\")");
 }
+
+#[test]
+fn real_core_clj_setmacro() {
+    // Real core.clj registers a macro via `(. (var name) (setMacro))` after a
+    // plain `(def name (fn* name [&form &env ...] ...))`, rather than metadata.
+    let src = r#"
+        (def my-when
+          (fn* my-when [&form &env test & body]
+            (cons 'if (cons test (cons (cons 'do body) nil)))))
+        (. (var my-when) (setMacro))
+        (my-when true 1 2 99)
+    "#;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let r = clojure_stub::run(&mut rt, &TreeWalk, src);
+    assert_eq!(clojure_stub::clj_str(&rt, r), "99");
+}
+
+#[test]
+fn real_style_defn_macro() {
+    // A `defn` defined the way core.clj does: a macro that destructures fdecl
+    // (optional docstring), then emits `(def name (fn name params body...))`.
+    // Proves the var+setMacro path plus seq/first/next/cons/syntax-quote suffice
+    // to host a real-shaped defn without any special toolkit support.
+    let src = r#"
+        (def my-defn
+          (fn* my-defn [&form &env name & fdecl]
+            (let [fdecl (if (instance? String (first fdecl)) (next fdecl) fdecl)
+                  params (first fdecl)
+                  body (next fdecl)]
+              (cons 'def
+                (cons name
+                  (list (cons `fn (cons name (cons params body)))))))))
+        (. (var my-defn) (setMacro))
+        (my-defn square "doc" [x] (* x x))
+        (square 9)
+    "#;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let r = clojure_stub::run(&mut rt, &TreeWalk, src);
+    assert_eq!(clojure_stub::clj_str(&rt, r), "81");
+}
+
+#[test]
+fn literal_core_defn() {
+    // A near-verbatim clojure.core `defn`: docstring + attr-map handling, sigs
+    // for :arglists, with-meta on the name symbol, and `(cons `fn fdecl)`. Loaded
+    // via the real var+setMacro registration. Then used to define + call fns.
+    let src = r#"
+        (def defn
+          (fn* defn [&form &env name & fdecl]
+            (let [m (if (instance? String (first fdecl)) {:doc (first fdecl)} {})
+                  fdecl (if (instance? String (first fdecl)) (next fdecl) fdecl)
+                  m (if (map? (first fdecl)) (conj m (first fdecl)) m)
+                  fdecl (if (map? (first fdecl)) (next fdecl) fdecl)
+                  fdecl (if (vector? (first fdecl)) (list fdecl) fdecl)
+                  m (conj {:arglists (list 'quote (sigs fdecl))} m)
+                  m (conj (if (meta name) (meta name) {}) m)]
+              (list 'def (with-meta name m)
+                    (cons `fn fdecl)))))
+        (. (var defn) (setMacro))
+        (defn cube "the cube" [x] (* x x x))
+        (defn add2 ([x] (add2 x 1)) ([x y] (+ x y)))
+        (list (cube 3) (add2 10) (add2 10 5))
+    "#;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let r = clojure_stub::run(&mut rt, &TreeWalk, src);
+    assert_eq!(clojure_stub::clj_str(&rt, r), "(27 11 15)");
+}
+
+#[test]
+fn variadic_arithmetic() {
+    assert_eq!(run("(+ 1 2 3 4)"), "10");
+    assert_eq!(run("(+)"), "0");
+    assert_eq!(run("(* 2 3 4)"), "24");
+    assert_eq!(run("(*)"), "1");
+    assert_eq!(run("(- 10 1 2 3)"), "4");
+    assert_eq!(run("(- 5)"), "-5");
+    assert_eq!(run("(< 1 2 3)"), "true");
+    assert_eq!(run("(< 1 2 2)"), "false");
+    assert_eq!(run("(<= 1 2 2)"), "true");
+    assert_eq!(run("(>= 3 3 2)"), "true");
+    assert_eq!(run("(= 1 1 1)"), "true");
+    assert_eq!(run("(not= 1 1 2)"), "true");
+    assert_eq!(run("(reduce + 0 [1 2 3 4 5])"), "15");
+}

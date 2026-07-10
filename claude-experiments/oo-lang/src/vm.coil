@@ -1,12 +1,20 @@
-; vm.coil — the Scry bytecode interpreter (02-runtime.md §2). A stack VM with the
-; clox dispatch-loop shape (Coil's dense `case` -> a jump table), but UNTAGGED slots
-; and TYPED opcodes: the compiler already proved every value's type, so the loop never
-; tag-checks. Single call stack in M0 (real per-thread VMThreads are M1 — the run()
-; entry is already parameter-shaped so M1 can hand each pthread its own frames/stack).
+; vm.coil — the Scry bytecode interpreter (02-runtime.md §2/§7). A stack VM with the
+; clox dispatch-loop shape (Coil's dense `case` -> a jump table), UNTAGGED slots and TYPED
+; opcodes: the compiler already proved every value's type, so the loop never tag-checks.
 ;
-; The safepoint hook (M1 GC/STW) goes at the top of the dispatch loop; noted in
-; docs/06-implementation.md. Phase 4's eval server compiles-in-context then calls a
-; method through this same push-frame path (see vm-invoke stub note in the docs).
+; PHASE 5: N real OS threads. Each Scry-level thread is a genuine pthread running this
+; dispatch loop against its OWN `VMThread` (frames + value stack); the Program, heap,
+; arenas, and globals are shared. `run-to` takes its VMThread as an explicit parameter
+; (Coil has no thread-local storage — the pointer is threaded through), and polls the
+; generalized safepoint (safepoint.coil) at the top of the loop so any coordinator can park
+; every thread at once for an eval (and, later, GC / shape migration).
+;
+;  - Thread.spawn(task: Runnable): OP_THREAD_SPAWN allocates a VMThread, registers it,
+;    resolves task.run() through the itable, and starts a pthread on the dispatch loop.
+;  - ThreadHandle.join(): OP_THREAD_JOIN cooperatively waits on the target's `done` flag
+;    (polling its own safepoint the whole time, so a join never blocks a global stop).
+;  - Clock.sleep / Mutex.lock are safepoint-cooperative spins (never a blocking syscall
+;    that would delay a stop past one short slice).
 (module vm)
 (import "ioutil.coil" :use *)
 (import "arena.coil" :use *)
@@ -15,35 +23,52 @@
 (import "safepoint.coil" :use *)
 (import "reflect.coil" :use *)
 (import "evalrt.coil" :use *)
+(import "thread.coil" :use *)
+(import "atomic.coil" :use *)
 
 (const DK_OBJECT_KIND 3)
 (const STACK_MAX 65536)
 (const FRAMES_MAX 256)
 
 (defstruct CallFrame [(method (ptr MethodInfo)) (ip i64) (base i64)])
-(defstruct VM
+
+; Per-thread interpreter state (02 §2). One per Scry-level thread. `parked`/`done` are
+; atomic 0/1 words the safepoint protocol reads; `os-thread` is lib/thread.coil's pthread.
+(defstruct VMThread
   [(stack (array i64 65536))
    (stack-top i64)
    (frames (array CallFrame 256))
    (frame-count i64)
-   (program (ptr Program))])
+   (parked i64)          ; atomic: 1 while stopped at a safepoint (or dead)
+   (done i64)            ; atomic: 1 once this thread's dispatch loop returned
+   (thread-id i64)
+   (os-thread Thread)])
 
+; Shared VM state: just the Program (types/methods/arenas hang off it). Heap + arenas are
+; global via their own modules; the thread registry lives in safepoint.coil.
+(defstruct VM [(program (ptr Program))])
 (defn vm [] (-> (ptr VM)) (alloc-static VM))
 
-; ---- f64 <-> i64 bit reinterpret (NOT a numeric cast) ----
-(defn vm-bits-cell [] (-> (ptr i64)) (alloc-static i64))
-(defn to-bits [(x f64)] (-> i64) (store! (cast (ptr f64) (vm-bits-cell)) x) (load (vm-bits-cell)))
-(defn to-f64 [(b i64)] (-> f64) (store! (vm-bits-cell) b) (load (cast (ptr f64) (vm-bits-cell))))
+; The main thread's and the eval-coordinator's VMThreads are singletons (one each);
+; agent threads are heap-allocated at spawn.
+(defn vm-thread-main [] (-> (ptr VMThread)) (alloc-static VMThread))
+(defn vm-thread-eval [] (-> (ptr VMThread)) (alloc-static VMThread))
+(defn vm-main-parked [] (-> (ptr i64)) (field (vm-thread-main) parked))   ; server: post-main poll
+(defn vm-eval-parked [] (-> (ptr i64)) (field (vm-thread-eval) parked))   ; server: coordinator id
 
-; ---- stack ----
-(defn vpush [(v i64)] (-> i64)
-  (store! (index (field (vm) stack) (load (field (vm) stack-top))) v)
-  (store! (field (vm) stack-top) (+ (load (field (vm) stack-top)) 1)) 0)
-(defn vpop [] (-> i64)
-  (store! (field (vm) stack-top) (- (load (field (vm) stack-top)) 1))
-  (load (index (field (vm) stack) (load (field (vm) stack-top)))))
-(defn vpeek [(d i64)] (-> i64)
-  (load (index (field (vm) stack) (- (- (load (field (vm) stack-top)) 1) d))))
+; ---- f64 <-> i64 bit reinterpret (NOT a numeric cast). Per-call stack cell => thread-safe.
+(defn to-bits [(x f64)] (-> i64) (let [p (alloc-stack i64)] (store! (cast (ptr f64) p) x) (load p)))
+(defn to-f64 [(b i64)] (-> f64) (let [p (alloc-stack i64)] (store! p b) (load (cast (ptr f64) p))))
+
+; ---- per-thread stack ----
+(defn vpush [(vt (ptr VMThread)) (v i64)] (-> i64)
+  (store! (index (field vt stack) (load (field vt stack-top))) v)
+  (store! (field vt stack-top) (+ (load (field vt stack-top)) 1)) 0)
+(defn vpop [(vt (ptr VMThread))] (-> i64)
+  (store! (field vt stack-top) (- (load (field vt stack-top)) 1))
+  (load (index (field vt stack) (load (field vt stack-top)))))
+(defn vpeek [(vt (ptr VMThread)) (d i64)] (-> i64)
+  (load (index (field vt stack) (- (- (load (field vt stack-top)) 1) d))))
 
 ; ---- code reading ----
 (defn read-byte [(fr (ptr CallFrame))] (-> i64)
@@ -54,184 +79,258 @@
   (let [hi (read-byte fr) lo (read-byte fr)] (+ (* hi 256) lo)))
 
 ; ---- frame setup ----
-(defn push-frame [(m (ptr MethodInfo)) (argc i64)] (-> i64)
-  (let [base (- (load (field (vm) stack-top)) argc)
-        fr (index (field (vm) frames) (load (field (vm) frame-count)))]
+(defn push-frame [(vt (ptr VMThread)) (m (ptr MethodInfo)) (argc i64)] (-> i64)
+  (let [base (- (load (field vt stack-top)) argc)
+        fr (index (field vt frames) (load (field vt frame-count)))]
     (store! (field fr method) m) (store! (field fr ip) 0) (store! (field fr base) base)
-    (store! (field (vm) frame-count) (+ (load (field (vm) frame-count)) 1))
-    ; reserve + zero the local slots above the incoming args
+    (store! (field vt frame-count) (+ (load (field vt frame-count)) 1))
     (let [top (+ base (load (field m local-count))) (mut i) (+ base argc)]
-      (loop (if (< (load i) top) (do (store! (index (field (vm) stack) (load i)) 0) (store! i (+ (load i) 1)) 0) (break)))
-      (store! (field (vm) stack-top) top))
+      (loop (if (< (load i) top) (do (store! (index (field vt stack) (load i)) 0) (store! i (+ (load i) 1)) 0) (break)))
+      (store! (field vt stack-top) top))
     0))
 
 ; obj-field helpers: byte offset already includes the header (compiler bakes it in)
 (defn field-addr [(obj i64) (off i64)] (-> (ptr i64)) (cast (ptr i64) (+ obj off)))
 
+; ---- safepoint-cooperative pacing + locking (need the VMThread in scope) ----
+; Clock.sleep(ms): sleep in short slices, polling the safepoint each slice so a sleeping
+; thread never delays a global stop by more than one slice (02 §7 pacing subsection).
+(defn vm-sleep [(vt (ptr VMThread)) (ms i64)] (-> i64)
+  (let [deadline (+ (clock-now) ms) ts (alloc-stack (array i64 2))]
+    (store! (index ts 0) 0) (store! (index ts 1) 2000000)      ; 2ms slice
+    (loop
+      (do (safepoint-poll (field vt parked))
+          (if (>= (clock-now) deadline) (break)
+            (do (nanosleep (cast (ptr i8) (index ts 0)) (cast (ptr i8) 0)) (continue))))))
+  0)
+
+; Mutex.lock: CAS-acquire, but back off through the safepoint so a waiter still parks for a
+; global stop (otherwise a spinning waiter would hang request-global-stop). During a global
+; stop the coordinator has EXCLUSIVE access, so lock/unlock are no-ops for it — this also
+; avoids deadlocking on a lock an agent happens to hold while parked.
+(defn vm-mutex-lock [(vt (ptr VMThread)) (m (ptr MutexObj))] (-> i64)
+  (if (= (safepoint-is-coordinator? (field vt parked)) 1) 0
+    (do
+      (loop
+        (if (= (safepoint-stopped?) 1)
+          (do (safepoint-poll (field vt parked)) (continue))
+          (if (= (atomic-cas (field m lock) 0 1) 0) (break)
+            (do (usleep (cast i32 10)) (continue)))))
+      0)))
+(defn vm-mutex-unlock [(vt (ptr VMThread)) (m (ptr MutexObj))] (-> i64)
+  (if (= (safepoint-is-coordinator? (field vt parked)) 1) 0
+    (do (atomic-store (field m lock) 0) 0)))
+
+; ---- the pthread body: run this thread's own dispatch loop, then mark dead-and-parked ----
+(defn interpreter-thread-main [(arg (ptr i8))] (-> (ptr i8))
+  (let [vt (cast (ptr VMThread) arg)]
+    (run-to vt 0)
+    (atomic-store (field vt done) 1)
+    (atomic-store (field vt parked) 1)     ; a finished thread counts as parked forever
+    (cast (ptr i8) 0)))
+
+(defn vt-alloc [] (-> (ptr VMThread))
+  (let [vt (cast (ptr VMThread) (xalloc (sizeof VMThread)))]
+    (store! (field vt stack-top) 0) (store! (field vt frame-count) 0)
+    (store! (field vt parked) 0) (store! (field vt done) 0) (store! (field vt thread-id) 0)
+    vt))
+
 ; the builtin dispatch (fixed arities; arg order = pushed order)
-(defn do-builtin [(blt i64)] (-> i64)
+(defn do-builtin [(vt (ptr VMThread)) (blt i64)] (-> i64)
   (cond
-    (= blt BLT_PRINT_I64) (do (print-i64 (vpop)) (vpush 0))
-    (= blt BLT_PRINT_F64) (do (print-f64bits (vpop)) (vpush 0))
-    (= blt BLT_PRINT_BOOL) (do (print-bool (vpop)) (vpush 0))
-    (= blt BLT_PRINT_STR) (do (print-str (cast (ptr StringObj) (vpop))) (vpush 0))
-    (= blt BLT_CONSOLE_LOG) (do (console-log (cast (ptr StringObj) (vpop))) (vpush 0))
-    (= blt BLT_LIST_NEW) (vpush (cast i64 (list-new)))
-    (= blt BLT_LIST_PUSH) (let [v (vpop) l (vpop)] (list-push (cast (ptr ListObj) l) v) (vpush 0))
-    (= blt BLT_LIST_GET) (let [i (vpop) l (vpop)] (vpush (list-get (cast (ptr ListObj) l) i)))
-    (= blt BLT_LIST_LEN) (let [l (vpop)] (vpush (list-len (cast (ptr ListObj) l))))
-    (= blt BLT_MAP_NEW) (vpush (cast i64 (map-new (= (vpop) 1))))
-    (= blt BLT_MAP_SET) (let [v (vpop) k (vpop) m (vpop)] (map-set (cast (ptr MapObj) m) k v) (vpush 0))
-    (= blt BLT_MAP_GET) (let [k (vpop) m (vpop)] (vpush (cast i64 (map-get (cast (ptr MapObj) m) k))))
-    (= blt BLT_MAP_HAS) (let [k (vpop) m (vpop)] (vpush (map-has (cast (ptr MapObj) m) k)))
-    (= blt BLT_MAP_LEN) (let [m (vpop)] (vpush (map-len (cast (ptr MapObj) m))))
-    (= blt BLT_STR_LEN) (let [s (vpop)] (vpush (str-len (cast (ptr StringObj) s))))
-    (= blt BLT_STR_SLICE) (let [hi (vpop) lo (vpop) s (vpop)] (vpush (cast i64 (str-slice (cast (ptr StringObj) s) lo hi))))
-    (= blt BLT_CLOCK_NOW) (vpush (clock-now))
-    (= blt BLT_CLOCK_SLEEP) (let [ms (vpop)] (clock-sleep ms) (vpush 0))
-    (or (= blt BLT_THREAD_SPAWN) (= blt BLT_THREAD_JOIN))
-      (do (eval-panic0 EK_RUNTIME c"threads: not implemented until Phase 5") (exit (cast i32 70)) 0)
+    (= blt BLT_PRINT_I64) (do (print-i64 (vpop vt)) (vpush vt 0))
+    (= blt BLT_PRINT_F64) (do (print-f64bits (vpop vt)) (vpush vt 0))
+    (= blt BLT_PRINT_BOOL) (do (print-bool (vpop vt)) (vpush vt 0))
+    (= blt BLT_PRINT_STR) (do (print-str (cast (ptr StringObj) (vpop vt))) (vpush vt 0))
+    (= blt BLT_CONSOLE_LOG) (do (console-log (cast (ptr StringObj) (vpop vt))) (vpush vt 0))
+    (= blt BLT_LIST_NEW) (vpush vt (cast i64 (list-new)))
+    (= blt BLT_LIST_PUSH) (let [v (vpop vt) l (vpop vt)] (list-push (cast (ptr ListObj) l) v) (vpush vt 0))
+    (= blt BLT_LIST_GET) (let [i (vpop vt) l (vpop vt)] (vpush vt (list-get (cast (ptr ListObj) l) i)))
+    (= blt BLT_LIST_LEN) (let [l (vpop vt)] (vpush vt (list-len (cast (ptr ListObj) l))))
+    (= blt BLT_MAP_NEW) (vpush vt (cast i64 (map-new (= (vpop vt) 1))))
+    (= blt BLT_MAP_SET) (let [v (vpop vt) k (vpop vt) m (vpop vt)] (map-set (cast (ptr MapObj) m) k v) (vpush vt 0))
+    (= blt BLT_MAP_GET) (let [k (vpop vt) m (vpop vt)] (vpush vt (cast i64 (map-get (cast (ptr MapObj) m) k))))
+    (= blt BLT_MAP_HAS) (let [k (vpop vt) m (vpop vt)] (vpush vt (map-has (cast (ptr MapObj) m) k)))
+    (= blt BLT_MAP_LEN) (let [m (vpop vt)] (vpush vt (map-len (cast (ptr MapObj) m))))
+    (= blt BLT_STR_LEN) (let [s (vpop vt)] (vpush vt (str-len (cast (ptr StringObj) s))))
+    (= blt BLT_STR_SLICE) (let [hi (vpop vt) lo (vpop vt) s (vpop vt)] (vpush vt (cast i64 (str-slice (cast (ptr StringObj) s) lo hi))))
+    (= blt BLT_CLOCK_NOW) (vpush vt (clock-now))
+    (= blt BLT_CLOCK_SLEEP) (let [ms (vpop vt)] (vm-sleep vt ms) (vpush vt 0))
+    (= blt BLT_MUTEX_NEW) (let [v (vpop vt)] (vpush vt (cast i64 (mutex-new v))))
+    (= blt BLT_MUTEX_LOCK) (let [m (vpop vt)] (vm-mutex-lock vt (cast (ptr MutexObj) m)) (vpush vt 0))
+    (= blt BLT_MUTEX_UNLOCK) (let [m (vpop vt)] (vm-mutex-unlock vt (cast (ptr MutexObj) m)) (vpush vt 0))
+    (= blt BLT_MUTEX_GET) (let [m (vpop vt)] (vpush vt (mutex-get (cast (ptr MutexObj) m))))
+    (= blt BLT_MUTEX_SET) (let [v (vpop vt) m (vpop vt)] (mutex-set (cast (ptr MutexObj) m) v) (vpush vt 0))
     (do (eval-panic0 EK_RUNTIME c"vm: unknown builtin") (exit (cast i32 70)) 0)))
 
+; spawn a language thread running task.<slot>() (task implements the interface `iface`).
+(defn vm-spawn [(vt (ptr VMThread)) (task i64) (iface i64) (slot i64)] (-> i64)
+  (let [tid (load (field (cast (ptr InstanceHeader) task) type-id))
+        ti (load (index (load (field (load (field (vm) program)) types)) tid))
+        it (load (index (load (field ti itables)) iface))
+        midx (load (index (load (field it slots)) slot))
+        m (load (index (load (field (load (field (vm) program)) methods)) midx))
+        avt (vt-alloc)]
+    (sp-register (field avt parked))
+    (store! (index (field avt stack) 0) task)          ; task is arg0 / self of run()
+    (store! (field avt stack-top) 1)
+    (push-frame avt m 1)
+    (thread-spawn (field avt os-thread) (fnptr-of interpreter-thread-main) (cast (ptr i8) avt))
+    (cast i64 avt)))
+
+; cooperatively join a spawned thread: spin on its `done` flag while still polling MY own
+; safepoint, so a join never blocks a global stop.
+(defn vm-join [(vt (ptr VMThread)) (handle i64)] (-> i64)
+  (let [avt (cast (ptr VMThread) handle)]
+    (loop (if (= (atomic-load (field avt done)) 1) (break)
+            (do (safepoint-poll (field vt parked)) (usleep (cast i32 500)) (continue))))
+    (thread-join (field avt os-thread))
+    0))
+
 ; ---- the dispatch loop ----
-; Runs until frame-count returns to `stop-fc`. `(run-to 0)` runs a whole program; an
-; eval invocation runs to the caller's saved depth (so it can re-enter from a safepoint
-; without unwinding the program's own frames). The safepoint-poll at the loop top is the
-; single seam every instruction passes — Phase 5's STW/GC parks here.
-(defn run-to [(stop-fc i64)] (-> i64)
-  (let [(mut fr) (index (field (vm) frames) (- (load (field (vm) frame-count)) 1))
+; Runs until frame-count returns to `stop-fc`. `(run-to vt 0)` runs a whole method to
+; completion; an eval invocation runs to the caller's saved depth. safepoint-poll at the
+; loop top is the single seam every instruction passes — a coordinator parks every thread
+; here for an eval (Phase 6 reuses it for table swaps / migration).
+(defn run-to [(vt (ptr VMThread)) (stop-fc i64)] (-> i64)
+  (let [(mut fr) (index (field vt frames) (- (load (field vt frame-count)) 1))
         (mut result) 0 (mut done) false]
     (loop
       (if (load done) (break)
         (do
-          (safepoint-poll)
+          (safepoint-poll (field vt parked))
         (let [op (read-byte (load fr))]
           (case op
-            OP_CONST (let [idx (read-u16 (load fr)) c (load (field (load (field (load fr) method)) chunk))] (vpush (load (index (load (field c consts)) idx))))
-            OP_TRUE (vpush 1) OP_FALSE (vpush 0) OP_UNIT (vpush 0)
-            OP_POP (do (vpop) 0)
-            OP_DUP (vpush (vpeek 0))
-            OP_LOAD_LOCAL (vpush (load (index (field (vm) stack) (+ (load (field (load fr) base)) (read-u16 (load fr))))))
-            OP_STORE_LOCAL (let [slot (read-u16 (load fr)) v (vpop)] (store! (index (field (vm) stack) (+ (load (field (load fr) base)) slot)) v) 0)
-            OP_LOAD_FIELD_I64 (let [off (read-u16 (load fr)) obj (vpop)] (vpush (load (field-addr obj off))))
-            OP_LOAD_FIELD_F64 (let [off (read-u16 (load fr)) obj (vpop)] (vpush (load (field-addr obj off))))
-            OP_LOAD_FIELD_REF (let [off (read-u16 (load fr)) obj (vpop)] (vpush (load (field-addr obj off))))
-            OP_STORE_FIELD_I64 (let [off (read-u16 (load fr)) v (vpop) obj (vpop)] (store! (field-addr obj off) v) 0)
-            OP_STORE_FIELD_F64 (let [off (read-u16 (load fr)) v (vpop) obj (vpop)] (store! (field-addr obj off) v) 0)
-            OP_STORE_FIELD_REF (let [off (read-u16 (load fr)) v (vpop) obj (vpop)] (store! (field-addr obj off) v) 0)
-            OP_ADD_I64 (let [b (vpop) a (vpop)] (vpush (+ a b)))
-            OP_SUB_I64 (let [b (vpop) a (vpop)] (vpush (- a b)))
-            OP_MUL_I64 (let [b (vpop) a (vpop)] (vpush (* a b)))
-            OP_DIV_I64 (let [b (vpop) a (vpop)] (vpush (idiv a b)))
-            OP_REM_I64 (let [b (vpop) a (vpop)] (vpush (irem a b)))
-            OP_NEG_I64 (let [a (vpop)] (vpush (- 0 a)))
-            OP_ADD_F64 (let [b (vpop) a (vpop)] (vpush (to-bits (fadd (to-f64 a) (to-f64 b)))))
-            OP_SUB_F64 (let [b (vpop) a (vpop)] (vpush (to-bits (fsub (to-f64 a) (to-f64 b)))))
-            OP_MUL_F64 (let [b (vpop) a (vpop)] (vpush (to-bits (fmul (to-f64 a) (to-f64 b)))))
-            OP_DIV_F64 (let [b (vpop) a (vpop)] (vpush (to-bits (fdiv (to-f64 a) (to-f64 b)))))
-            OP_NEG_F64 (let [a (vpop)] (vpush (to-bits (fsub 0.0 (to-f64 a)))))
-            OP_LT_I64 (let [b (vpop) a (vpop)] (vpush (if (< a b) 1 0)))
-            OP_LE_I64 (let [b (vpop) a (vpop)] (vpush (if (<= a b) 1 0)))
-            OP_GT_I64 (let [b (vpop) a (vpop)] (vpush (if (> a b) 1 0)))
-            OP_GE_I64 (let [b (vpop) a (vpop)] (vpush (if (>= a b) 1 0)))
-            OP_EQ_I64 (let [b (vpop) a (vpop)] (vpush (if (= a b) 1 0)))
-            OP_NE_I64 (let [b (vpop) a (vpop)] (vpush (if (!= a b) 1 0)))
-            OP_LT_F64 (let [b (vpop) a (vpop)] (vpush (if (fcmp-lt (to-f64 a) (to-f64 b)) 1 0)))
-            OP_LE_F64 (let [b (vpop) a (vpop)] (vpush (if (fcmp-le (to-f64 a) (to-f64 b)) 1 0)))
-            OP_GT_F64 (let [b (vpop) a (vpop)] (vpush (if (fcmp-gt (to-f64 a) (to-f64 b)) 1 0)))
-            OP_GE_F64 (let [b (vpop) a (vpop)] (vpush (if (fcmp-ge (to-f64 a) (to-f64 b)) 1 0)))
-            OP_EQ_F64 (let [b (vpop) a (vpop)] (vpush (if (fcmp-eq (to-f64 a) (to-f64 b)) 1 0)))
-            OP_NE_F64 (let [b (vpop) a (vpop)] (vpush (if (fcmp-ne (to-f64 a) (to-f64 b)) 1 0)))
-            OP_EQ_BOOL (let [b (vpop) a (vpop)] (vpush (if (= a b) 1 0)))
-            OP_NE_BOOL (let [b (vpop) a (vpop)] (vpush (if (!= a b) 1 0)))
-            OP_NOT (let [a (vpop)] (vpush (if (= a 0) 1 0)))
-            OP_EQ_REF (let [b (vpop) a (vpop)] (vpush (if (= a b) 1 0)))
-            OP_NE_REF (let [b (vpop) a (vpop)] (vpush (if (!= a b) 1 0)))
-            OP_EQ_ENUM (let [b (vpop) a (vpop)] (vpush (if (enum-equal (cast (ptr i64) a) (cast (ptr i64) b)) 1 0)))
-            OP_NE_ENUM (let [b (vpop) a (vpop)] (vpush (if (enum-equal (cast (ptr i64) a) (cast (ptr i64) b)) 0 1)))
-            OP_CONCAT (let [b (vpop) a (vpop)] (vpush (cast i64 (str-concat (cast (ptr StringObj) a) (cast (ptr StringObj) b)))))
-            OP_I64_TO_STR (let [v (vpop)] (vpush (cast i64 (str-from-i64 v))))
-            OP_F64_TO_STR (let [v (vpop)] (vpush (cast i64 (str-from-f64bits v))))
-            OP_BOOL_TO_STR (let [v (vpop)] (vpush (cast i64 (str-from-bool v))))
+            OP_CONST (let [idx (read-u16 (load fr)) c (load (field (load (field (load fr) method)) chunk))] (vpush vt (load (index (load (field c consts)) idx))))
+            OP_TRUE (vpush vt 1) OP_FALSE (vpush vt 0) OP_UNIT (vpush vt 0)
+            OP_POP (do (vpop vt) 0)
+            OP_DUP (vpush vt (vpeek vt 0))
+            OP_LOAD_LOCAL (vpush vt (load (index (field vt stack) (+ (load (field (load fr) base)) (read-u16 (load fr))))))
+            OP_STORE_LOCAL (let [slot (read-u16 (load fr)) v (vpop vt)] (store! (index (field vt stack) (+ (load (field (load fr) base)) slot)) v) 0)
+            OP_LOAD_FIELD_I64 (let [off (read-u16 (load fr)) obj (vpop vt)] (vpush vt (load (field-addr obj off))))
+            OP_LOAD_FIELD_F64 (let [off (read-u16 (load fr)) obj (vpop vt)] (vpush vt (load (field-addr obj off))))
+            OP_LOAD_FIELD_REF (let [off (read-u16 (load fr)) obj (vpop vt)] (vpush vt (load (field-addr obj off))))
+            OP_STORE_FIELD_I64 (let [off (read-u16 (load fr)) v (vpop vt) obj (vpop vt)] (store! (field-addr obj off) v) 0)
+            OP_STORE_FIELD_F64 (let [off (read-u16 (load fr)) v (vpop vt) obj (vpop vt)] (store! (field-addr obj off) v) 0)
+            OP_STORE_FIELD_REF (let [off (read-u16 (load fr)) v (vpop vt) obj (vpop vt)] (store! (field-addr obj off) v) 0)
+            OP_ADD_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (+ a b)))
+            OP_SUB_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (- a b)))
+            OP_MUL_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (* a b)))
+            OP_DIV_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (idiv a b)))
+            OP_REM_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (irem a b)))
+            OP_NEG_I64 (let [a (vpop vt)] (vpush vt (- 0 a)))
+            OP_ADD_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (to-bits (fadd (to-f64 a) (to-f64 b)))))
+            OP_SUB_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (to-bits (fsub (to-f64 a) (to-f64 b)))))
+            OP_MUL_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (to-bits (fmul (to-f64 a) (to-f64 b)))))
+            OP_DIV_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (to-bits (fdiv (to-f64 a) (to-f64 b)))))
+            OP_NEG_F64 (let [a (vpop vt)] (vpush vt (to-bits (fsub 0.0 (to-f64 a)))))
+            OP_LT_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (< a b) 1 0)))
+            OP_LE_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (<= a b) 1 0)))
+            OP_GT_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (> a b) 1 0)))
+            OP_GE_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (>= a b) 1 0)))
+            OP_EQ_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (= a b) 1 0)))
+            OP_NE_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (!= a b) 1 0)))
+            OP_LT_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (fcmp-lt (to-f64 a) (to-f64 b)) 1 0)))
+            OP_LE_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (fcmp-le (to-f64 a) (to-f64 b)) 1 0)))
+            OP_GT_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (fcmp-gt (to-f64 a) (to-f64 b)) 1 0)))
+            OP_GE_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (fcmp-ge (to-f64 a) (to-f64 b)) 1 0)))
+            OP_EQ_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (fcmp-eq (to-f64 a) (to-f64 b)) 1 0)))
+            OP_NE_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (fcmp-ne (to-f64 a) (to-f64 b)) 1 0)))
+            OP_EQ_BOOL (let [b (vpop vt) a (vpop vt)] (vpush vt (if (= a b) 1 0)))
+            OP_NE_BOOL (let [b (vpop vt) a (vpop vt)] (vpush vt (if (!= a b) 1 0)))
+            OP_NOT (let [a (vpop vt)] (vpush vt (if (= a 0) 1 0)))
+            OP_EQ_REF (let [b (vpop vt) a (vpop vt)] (vpush vt (if (= a b) 1 0)))
+            OP_NE_REF (let [b (vpop vt) a (vpop vt)] (vpush vt (if (!= a b) 1 0)))
+            OP_EQ_ENUM (let [b (vpop vt) a (vpop vt)] (vpush vt (if (enum-equal (cast (ptr i64) a) (cast (ptr i64) b)) 1 0)))
+            OP_NE_ENUM (let [b (vpop vt) a (vpop vt)] (vpush vt (if (enum-equal (cast (ptr i64) a) (cast (ptr i64) b)) 0 1)))
+            OP_CONCAT (let [b (vpop vt) a (vpop vt)] (vpush vt (cast i64 (str-concat (cast (ptr StringObj) a) (cast (ptr StringObj) b)))))
+            OP_I64_TO_STR (let [v (vpop vt)] (vpush vt (cast i64 (str-from-i64 v))))
+            OP_F64_TO_STR (let [v (vpop vt)] (vpush vt (cast i64 (str-from-f64bits v))))
+            OP_BOOL_TO_STR (let [v (vpop vt)] (vpush vt (cast i64 (str-from-bool v))))
             OP_JUMP (let [off (read-u16 (load fr))] (store! (field (load fr) ip) (+ (load (field (load fr) ip)) off)) 0)
-            OP_JUMP_IF_FALSE (let [off (read-u16 (load fr)) c (vpop)] (if (= c 0) (do (store! (field (load fr) ip) (+ (load (field (load fr) ip)) off)) 0) 0))
+            OP_JUMP_IF_FALSE (let [off (read-u16 (load fr)) c (vpop vt)] (if (= c 0) (do (store! (field (load fr) ip) (+ (load (field (load fr) ip)) off)) 0) 0))
             OP_LOOP (let [off (read-u16 (load fr))] (store! (field (load fr) ip) (- (load (field (load fr) ip)) off)) 0)
             OP_CALL_STATIC
               (let [idx (read-u16 (load fr)) argc (read-byte (load fr))
                     m (load (index (load (field (load (field (vm) program)) methods)) idx))]
-                (push-frame m argc)
-                (store! fr (index (field (vm) frames) (- (load (field (vm) frame-count)) 1))) 0)
+                (push-frame vt m argc)
+                (store! fr (index (field vt frames) (- (load (field vt frame-count)) 1))) 0)
             OP_CALL_VIRTUAL
               (let [iface (read-u16 (load fr)) slot (read-byte (load fr)) argc (read-byte (load fr))
-                    recv (vpeek (- argc 1))
+                    recv (vpeek vt (- argc 1))
                     tid (load (field (cast (ptr InstanceHeader) recv) type-id))
                     ti (load (index (load (field (load (field (vm) program)) types)) tid))
                     it (load (index (load (field ti itables)) iface))
                     midx (load (index (load (field it slots)) slot))
                     m (load (index (load (field (load (field (vm) program)) methods)) midx))]
-                (push-frame m argc)
-                (store! fr (index (field (vm) frames) (- (load (field (vm) frame-count)) 1))) 0)
-            OP_CALL_BUILTIN (do (do-builtin (read-byte (load fr))) 0)
+                (push-frame vt m argc)
+                (store! fr (index (field vt frames) (- (load (field vt frame-count)) 1))) 0)
+            OP_CALL_BUILTIN (do (do-builtin vt (read-byte (load fr))) 0)
+            OP_THREAD_SPAWN
+              (let [iface (read-u16 (load fr)) slot (read-byte (load fr)) task (vpop vt)]
+                (vpush vt (vm-spawn vt task iface slot)))
+            OP_THREAD_JOIN (let [h (vpop vt)] (vm-join vt h) (vpush vt 0))
             OP_RETURN
-              (let [res (vpop) base (load (field (load fr) base))]
-                (store! (field (vm) frame-count) (- (load (field (vm) frame-count)) 1))
-                (store! (field (vm) stack-top) base)
-                (if (= (load (field (vm) frame-count)) stop-fc)
+              (let [res (vpop vt) base (load (field (load fr) base))]
+                (store! (field vt frame-count) (- (load (field vt frame-count)) 1))
+                (store! (field vt stack-top) base)
+                (if (= (load (field vt frame-count)) stop-fc)
                   (do (store! result res) (store! done true) 0)
-                  (do (store! fr (index (field (vm) frames) (- (load (field (vm) frame-count)) 1)))
-                      (vpush res) 0)))
+                  (do (store! fr (index (field vt frames) (- (load (field vt frame-count)) 1)))
+                      (vpush vt res) 0)))
             OP_NEW
               (let [tid (read-u16 (load fr))
                     a (load (field (load (index (load (field (load (field (vm) program)) types)) tid)) arena))]
-                (vpush (cast i64 (arena-alloc a))))
+                (vpush vt (cast i64 (arena-alloc a))))
             OP_LOAD_SINGLETON
               (let [tid (read-u16 (load fr))]
-                (vpush (cast i64 (load (field (load (index (load (field (load (field (vm) program)) types)) tid)) singleton)))))
+                (vpush vt (cast i64 (load (field (load (index (load (field (load (field (vm) program)) types)) tid)) singleton)))))
             OP_MAKE_ENUM
               (let [tag (read-byte (load fr)) argc (read-byte (load fr)) box (enum-alloc tag argc) (mut k) 0]
-                (loop (if (< (load k) argc) (do (enum-set-arg box (- (- argc 1) (load k)) (vpop)) (store! k (+ (load k) 1)) 0) (break)))
-                (vpush (cast i64 box)))
-            OP_ENUM_TAG (let [p (vpop)] (vpush (enum-tag (cast (ptr i64) p))))
-            OP_ENUM_GET (let [idx (read-byte (load fr)) p (vpop)] (vpush (enum-arg (cast (ptr i64) p) idx)))
-            OP_STR_EQ (let [b (vpop) a (vpop)] (vpush (if (str-eq (cast (ptr StringObj) a) (cast (ptr StringObj) b)) 1 0)))
-            OP_STR_NE (let [b (vpop) a (vpop)] (vpush (if (str-eq (cast (ptr StringObj) a) (cast (ptr StringObj) b)) 0 1)))
+                (loop (if (< (load k) argc) (do (enum-set-arg box (- (- argc 1) (load k)) (vpop vt)) (store! k (+ (load k) 1)) 0) (break)))
+                (vpush vt (cast i64 box)))
+            OP_ENUM_TAG (let [p (vpop vt)] (vpush vt (enum-tag (cast (ptr i64) p))))
+            OP_ENUM_GET (let [idx (read-byte (load fr)) p (vpop vt)] (vpush vt (enum-arg (cast (ptr i64) p) idx)))
+            OP_STR_EQ (let [b (vpop vt) a (vpop vt)] (vpush vt (if (str-eq (cast (ptr StringObj) a) (cast (ptr StringObj) b)) 1 0)))
+            OP_STR_NE (let [b (vpop vt) a (vpop vt)] (vpush vt (if (str-eq (cast (ptr StringObj) a) (cast (ptr StringObj) b)) 0 1)))
             OP_ARENA_AT
-              (let [tid (read-u16 (load fr)) gen (vpop) slot (vpop)]
-                (vpush (arena-at (load (field (vm) program)) tid slot gen)))
+              (let [tid (read-u16 (load fr)) gen (vpop vt) slot (vpop vt)]
+                (vpush vt (arena-at (load (field (vm) program)) tid slot gen)))
             OP_ARENA_INSTANCE
-              (let [tid (read-u16 (load fr)) slot (vpop)]
-                (vpush (arena-instance (load (field (vm) program)) tid slot)))
+              (let [tid (read-u16 (load fr)) slot (vpop vt)]
+                (vpush vt (arena-instance (load (field (vm) program)) tid slot)))
             OP_ARENA_INSTANCES
-              (let [tid (read-u16 (load fr)) lim (vpop) off (vpop) filt (vpop)]
-                (vpush (cast i64 (arena-instances (load (field (vm) program)) tid (cast (ptr StringObj) filt) off lim))))
+              (let [tid (read-u16 (load fr)) lim (vpop vt) off (vpop vt) filt (vpop vt)]
+                (vpush vt (cast i64 (arena-instances (load (field (vm) program)) tid (cast (ptr StringObj) filt) off lim))))
             (do (w-cstr 2 c"vm: bad opcode ") (w-int 2 op) (w-cstr 2 c"\n") (eval-panic0 EK_RUNTIME c"internal: bad opcode") 0))))))
     (load result)))
 
-; run to completion from depth 0 (whole program).
-(defn run [] (-> i64) (run-to 0))
-
-; invoke an already-compiled, args-already-pushed method to completion, returning its
-; result value — the exact push-frame path bytecode uses. This is how a viewer eval
-; enters the VM (02-runtime.md §8: "not a special code path").
+; invoke an already-compiled, args-already-pushed method to completion, on the dedicated
+; eval-coordinator VMThread — the exact push-frame + run-to path bytecode uses (02 §8:
+; "not a special code path"). The caller (server.coil) has already parked every language
+; thread via request-global-stop, so this runs with the heap quiescent. The eval-vt is NOT
+; registered in the thread table (it is the coordinator; safepoint-poll never parks it).
 (defn vm-eval-invoke [(m (ptr MethodInfo)) (argc i64)] (-> i64)
-  (let [fc0 (load (field (vm) frame-count))]
-    (push-frame m argc)
-    (run-to fc0)))
+  (let [vt (vm-thread-eval)]
+    (store! (field vt stack-top) 0) (store! (field vt frame-count) 0)
+    (push-frame vt m argc)
+    (run-to vt 0)))
 
-; allocate object singletons, then invoke main.
+; allocate object singletons, then invoke main() on the main VMThread (registered so a
+; concurrent eval can park it too, including once it's finished and looping post-main).
 (defn vm-run [(p (ptr Program))] (-> i64)
   (store! (field (vm) program) p)
-  (store! (field (vm) stack-top) 0)
-  (store! (field (vm) frame-count) 0)
-  ; object singletons: one instance per DK_OBJECT entity type
-  (let [nt (load (field p type-count)) (mut i) 0]
-    (loop (if (< (load i) nt)
-            (let [ti (load (index (load (field p types)) (load i)))]
-              (if (!= (cast i64 ti) 0)
-                (if (and (load (field ti is-entity)) (= (load (field ti kind)) DK_OBJECT_KIND))
-                  (do (store! (field ti singleton) (arena-alloc (load (field ti arena)))) 0) 0) 0)
-              (store! i (+ (load i) 1)) 0)
-            (break))))
-  ; call main: it takes no args
-  (push-frame (load (index (load (field p methods)) (load (field p entry)))) 0)
-  (run))
+  (let [vt (vm-thread-main)]
+    (store! (field vt stack-top) 0) (store! (field vt frame-count) 0)
+    (store! (field vt parked) 0) (store! (field vt done) 0)
+    (sp-register (field vt parked))
+    (let [nt (load (field p type-count)) (mut i) 0]
+      (loop (if (< (load i) nt)
+              (let [ti (load (index (load (field p types)) (load i)))]
+                (if (!= (cast i64 ti) 0)
+                  (if (and (load (field ti is-entity)) (= (load (field ti kind)) DK_OBJECT_KIND))
+                    (do (store! (field ti singleton) (arena-alloc (load (field ti arena)))) 0) 0) 0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    (push-frame vt (load (index (load (field p methods)) (load (field p entry)))) 0)
+    (run-to vt 0)))

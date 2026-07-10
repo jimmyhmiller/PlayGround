@@ -1,0 +1,33 @@
+// Mutex mutual-exclusion stress: 4 threads each increment a shared Mutex-guarded counter
+// 25000 times under lock/unlock. If the mutex is real, the total is EXACTLY 100000; a
+// broken lock loses updates and prints less. Deterministic assertion, no interleaving.
+
+class Bump implements Runnable {
+  box: Mutex<Int>
+  iters: Int
+  fn run() -> Void {
+    var i = 0
+    while i < self.iters {
+      self.box.lock()
+      self.box.set(self.box.get() + 1)
+      self.box.unlock()
+      i = i + 1
+    }
+  }
+}
+
+fn main() {
+  let box = Mutex<Int>(0)
+  let hs = List<ThreadHandle>()
+  var t = 0
+  while t < 4 {
+    hs.push(Thread.spawn(Bump(box: box, iters: 25000)))
+    t = t + 1
+  }
+  var j = 0
+  while j < 4 {
+    hs.get(j).join()
+    j = j + 1
+  }
+  print(box.get())
+}

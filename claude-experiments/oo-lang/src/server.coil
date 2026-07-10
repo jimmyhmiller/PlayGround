@@ -177,6 +177,7 @@
     OP_JUMP 3 OP_JUMP_IF_FALSE 3 OP_LOOP 3
     OP_NEW 3 OP_LOAD_SINGLETON 3
     OP_ARENA_AT 3 OP_ARENA_INSTANCE 3 OP_ARENA_INSTANCES 3
+    OP_THREAD_SPAWN 4 OP_THREAD_JOIN 1
     1))
 (defn chunk-u16-at [(c (ptr Chunk)) (off i64)] (-> i64)
   (+ (* (cast i64 (load (index (load (field c code)) off))) 256) (cast i64 (load (index (load (field c code)) (+ off 1))))))
@@ -198,9 +199,10 @@
             (or (= op OP_STORE_FIELD_I64) (or (= op OP_STORE_FIELD_F64) (= op OP_STORE_FIELD_REF))) (do (store! mut? true) 0)
             (= op OP_NEW) (do (store! mut? true) 0)
             (= op OP_CALL_VIRTUAL) (do (store! mut? true) 0)
+            (or (= op OP_THREAD_SPAWN) (= op OP_THREAD_JOIN)) (do (store! mut? true) 0)
             (= op OP_CALL_BUILTIN)
               (let [blt (cast i64 (load (index (load (field c code)) (+ (load off) 1))))]
-                (if (or (= blt BLT_LIST_PUSH) (= blt BLT_MAP_SET)) (do (store! mut? true) 0) 0))
+                (if (or (= blt BLT_LIST_PUSH) (or (= blt BLT_MAP_SET) (or (= blt BLT_MUTEX_SET) (or (= blt BLT_MUTEX_LOCK) (= blt BLT_MUTEX_UNLOCK))))) (do (store! mut? true) 0) 0))
             (= op OP_CALL_STATIC)
               (let [midx (chunk-u16-at c (+ (load off) 1))]
                 (if (not (vs-has visited midx))
@@ -262,17 +264,19 @@
 (defn trim-len [(p (ptr u8)) (n i64)] (-> i64)
   (let [(mut m) n] (loop (if (and (> (load m) 0) (let [c (cast i64 (load (index p (- (load m) 1))))] (or (= c \newline) (or (= c \return) (= c \space))))) (do (store! m (- (load m) 1)) 0) (break))) (load m)))
 
-; ============================ mailbox drain (registered safepoint callback) ============================
-(defn server-drain [] (-> i64)
-  (if (= (atomic-load (mbx-req-ready)) 1)
-    (let [b (jb-new)]
-      (jb-cstr b c"{\"id\":") (jb-bytes b (load (mbx-id)) (load (mbx-idlen))) (jb-byte b \,)
-      (eval-core b (load (mbx-src)) (load (mbx-srclen)) (load (mbx-readonly)))
-      (jb-byte b \})
-      (store! (mbx-resp) b)
-      (atomic-store (mbx-resp-ready) 1)
-      0)
-    0))
+; ============================ eval under a full stop-the-world (Phase 5) ============================
+; The server thread is the eval COORDINATOR: it parks every language thread with
+; request-global-stop, runs the whole eval (parse -> typecheck -> compile -> VM ->
+; serialize) directly on the eval VMThread with the heap quiescent, then releases. Every
+; eval is full-STW for now — the conservative choice (05 M1 builds only full STW; partial
+; read-only safepoints are a documented future optimization, 02 §7). Because there is one
+; server thread accepting one connection at a time and request-global-stop CAS-serializes
+; coordinators, evals never overlap, so eval-core's global scratch state is safe.
+(defn server-eval-stw [(b (ptr JBuf)) (src (ptr u8)) (srclen i64) (readonly i64)] (-> i64)
+  (request-global-stop (vm-eval-parked))
+  (eval-core b src srclen readonly)
+  (release-global-stop)
+  0)
 
 ; ============================ HTTP (server thread) ============================
 (defn ends-with [(name (ptr i8)) (suf (ptr i8))] (-> bool)
@@ -394,17 +398,12 @@
             (json-decode-string (index buf bs) (- n bs) spos srcbuf srclen)
             (if (< ipos 0) (do (store! (index idbuf 0) (cast u8 \")) (store! (index idbuf 1) (cast u8 \")) (store! idlen 2) 0)
               (json-raw-id (index buf bs) (- n bs) ipos idbuf idlen))
-            ; hand to mutator thread and wait
-            (store! (mbx-src) srcbuf) (store! (mbx-srclen) (load srclen))
-            (store! (mbx-id) idbuf) (store! (mbx-idlen) (load idlen))
-            (store! (mbx-readonly) (load (srv-readonly)))
-            (atomic-store (mbx-resp-ready) 0)
-            (atomic-store (mbx-req-ready) 1)
-            (safepoint-request)
-            (loop (if (= (atomic-load (mbx-resp-ready)) 1) (break) (usleep (cast i32 200))))
-            (let [resp (load (mbx-resp))]
+            ; run the eval under a full stop-the-world (the server thread is the coordinator)
+            (let [resp (jb-new)]
+              (jb-cstr resp c"{\"id\":") (jb-bytes resp idbuf (load idlen)) (jb-byte resp \,)
+              (server-eval-stw resp srcbuf (load srclen) (load (srv-readonly)))
+              (jb-byte resp \})
               (send-response cfd c"200 OK" c"application/json" (load (field resp data)) (load (field resp len))))
-            (atomic-store (mbx-req-ready) 0)
             0))))))
 
 (defn serve-static [(cfd i64) (path (ptr i8))] (-> i64)
@@ -471,7 +470,6 @@
               (let [port (bind-server 7357)]
                 (if (< port 0) (do (w-cstr 2 c"scry run: could not bind a server port; continuing without viewer\n") 0)
                   (do
-                    (safepoint-set-drain (fnptr-of server-drain))
                     (let [th (cast (ptr Thread) (xalloc (sizeof Thread)))]
                       (thread-spawn th (fnptr-of server-accept-loop) (cast (ptr i8) (load (srv-listen-fd)))))
                     (w-cstr 1 c"viewer: http://localhost:") (w-int 1 port) (w-cstr 1 c"\n")
@@ -480,7 +478,9 @@
             (vm-run p)
             (if no-viewer 0
               (do (w-cstr 1 c"\nmain() finished — the heap is still live and browsable. Serving evals; press Ctrl-C to exit.\n")
-                  (loop (do (safepoint-poll) (usleep (cast i32 3000)) (continue)))))
+                  ; keep polling the main VMThread's safepoint so a coordinator eval can still
+                  ; park it (request-global-stop waits on every registered thread, this one too).
+                  (loop (do (safepoint-poll (vm-main-parked)) (usleep (cast i32 3000)) (continue)))))
             0))))))
 
 ; scry eval <file> -e <expr>: run to completion, evaluate the expr once, print JSON, exit.

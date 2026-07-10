@@ -1,7 +1,0 @@
-class Worker implements Runnable {
-  fn run() -> Void {
-  }
-}
-fn main() {
-  let h = Thread.spawn(Worker())
-}

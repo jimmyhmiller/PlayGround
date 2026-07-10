@@ -37,13 +37,27 @@ pub const CORE: &str = r#"
 (defn number? [x] (%num-eq (type-of x) 'Long))
 (defn not [x] (if x false true))
 
-;; ─────────────── first-class arithmetic / comparison (binary) ───────────────
-(defn + [a b] (%add a b))
-(defn - [a b] (%sub a b))
-(defn * [a b] (%mul a b))
-(defn < [a b] (%lt a b))
-(defn > [a b] (%lt b a))
-(defn = [a b] (%num-eq a b))
+;; ─────────────── first-class arithmetic / comparison (variadic) ───────────────
+;; Fold with the un-passable `%`-prims via a named helper (a prim can't be passed
+;; to `reduce` as a value), matching Clojure's variadic +/-/*/</>/=.
+(defn -add-seq [acc s] (if (nil? s) acc (-add-seq (%add acc (%first s)) (%rest s))))
+(defn -mul-seq [acc s] (if (nil? s) acc (-mul-seq (%mul acc (%first s)) (%rest s))))
+(defn -sub-seq [acc s] (if (nil? s) acc (-sub-seq (%sub acc (%first s)) (%rest s))))
+(defn + [& xs] (-add-seq 0 (seq xs)))
+(defn * [& xs] (-mul-seq 1 (seq xs)))
+(defn - [x & xs] (if (nil? (seq xs)) (%sub 0 x) (-sub-seq x (seq xs))))
+;; Chained comparisons: each adjacent pair must satisfy the relation.
+(defn -lt-seq [prev s] (if (nil? s) true (if (%lt prev (%first s)) (-lt-seq (%first s) (%rest s)) false)))
+(defn -gt-seq [prev s] (if (nil? s) true (if (%lt (%first s) prev) (-gt-seq (%first s) (%rest s)) false)))
+(defn -le-seq [prev s] (if (nil? s) true (if (%lt (%first s) prev) false (-le-seq (%first s) (%rest s)))))
+(defn -ge-seq [prev s] (if (nil? s) true (if (%lt prev (%first s)) false (-ge-seq (%first s) (%rest s)))))
+(defn -eq-seq [a s] (if (nil? s) true (if (-eq2 a (%first s)) (-eq-seq a (%rest s)) false)))
+(defn < [x & xs] (-lt-seq x (seq xs)))
+(defn > [x & xs] (-gt-seq x (seq xs)))
+(defn <= [x & xs] (-le-seq x (seq xs)))
+(defn >= [x & xs] (-ge-seq x (seq xs)))
+(defn = [x & xs] (-eq-seq x (seq xs)))
+(defn not= [x & xs] (not (-eq-seq x (seq xs))))
 (defn inc [n] (%add n 1))
 (defn dec [n] (%sub n 1))
 (defn pos? [n] (%lt 0 n))
@@ -110,9 +124,10 @@ pub const CORE: &str = r#"
 ;; the binary `=` to compare maps as key sets, structurally otherwise.
 (defn keys-match [ks a b]
   (cond (nil? ks) true
-        (= (mget (field a 0) (%first ks)) (mget (field b 0) (%first ks))) (keys-match (%rest ks) a b)
+        (-eq2 (mget (field a 0) (%first ks)) (mget (field b 0) (%first ks))) (keys-match (%rest ks) a b)
         true false))
-(defn = [a b]
+;; Pairwise (map-aware) equality; the variadic `=`/`not=` above chain over it.
+(defn -eq2 [a b]
   (if (and (map? a) (map? b))
       (if (%num-eq (count a) (count b)) (keys-match (keys a) a b) false)
       (%num-eq a b)))
@@ -150,6 +165,18 @@ pub const CORE: &str = r#"
 (defn take [n c] (take-seq n (seq c)))
 (defn second [c] (nth c 1))
 (defn last [c] (if (nil? (%rest (seq c))) (%first (seq c)) (last (%rest (seq c)))))
+(defn seq? [x] (%num-eq (type-of x) 'List))
+(defn butlast-seq [s] (if (nil? (%rest s)) nil (%cons (%first s) (butlast-seq (%rest s)))))
+(defn butlast [c] (butlast-seq (seq c)))
+;; `sigs` computes the :arglists metadata for `defn`: the parameter vector of a
+;; single-arity fn, or the seq of parameter vectors of a multi-arity one. (Our
+;; `def` discards symbol metadata, so this is informational — but it lets the
+;; literal core.clj `defn` body load and run unchanged.)
+(defn -asig [fd] (first fd))
+(defn sigs [fdecl]
+  (if (seq? (first fdecl))
+      (map -asig fdecl)
+      (list (-asig fdecl))))
 
 ;; ─────────────── more clojure.core ───────────────
 (defn get-in [m ks] (if (nil? (seq ks)) m (get-in (get m (%first (seq ks))) (%rest (seq ks)))))

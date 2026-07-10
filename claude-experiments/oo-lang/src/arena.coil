@@ -5,15 +5,27 @@
 ; M0 — magazines + atomics land in M1, see docs/06-implementation.md). Stable
 ; object identity is (type-id, slot-index, generation), stamped into InstanceHeader.
 ;
-; DEVIATIONS from §4 (M0, single-threaded — noted in 06-implementation.md):
-;  - no per-thread magazines, no atomics: M0 is straight-line single-threaded (05 M0
-;    OUT). The shared-arena API (bump/free-push/free-pop) is the layer M1's magazines
-;    sit on top of; its shape is here, just without the atomics.
-;  - slot->(slab,local) uses div/mod, not shift/mask (slab-cap need not be 2^k).
-;  - InstanceHeader uses i64 fields (not u32 packing) for alignment simplicity.
+; PHASE 5 ALLOC STRATEGY (as-built — see 06-implementation.md "alloc strategy"):
+;  The shared arena is made race-free with an ATOMIC bump frontier + a per-arena spinlock
+;  guarding slab growth — the documented "simpler correct thing" (05 M1 lets us pick this
+;  at 3-5 threads), NOT yet the per-thread magazines of §4. It is deliberately shaped so
+;  magazines slot in on top later: a magazine's refill is exactly one `atomic-add` of
+;  bump-cursor by MAGAZINE_CAP instead of by 1, over this same shared layer.
+;   - bump-cursor is bumped with `atomic-add` (returns the reserved slot; unique per caller,
+;     so two threads never get the same slot — no CAS loop needed, the frontier only grows).
+;   - live-count is `atomic-add`/`atomic-sub` (coarse, eventually consistent — §4).
+;   - slab growth (malloc a new 64KiB block + publish its base) takes the per-arena
+;     `growing` CAS spinlock; the common case (slot already inside a mapped slab) never
+;     touches it, just an `atomic-load` of slab-count.
+;   - the `slabs` base-pointer array is PRE-SIZED to the type's max at arena-new and NEVER
+;     realloc'd, so a concurrent arena-slot-ptr can never read a torn/moved array base.
+; DEVIATIONS from §4 still standing: no magazines (above); slot->(slab,local) is div/mod,
+; not shift/mask (slab-cap need not be 2^k); InstanceHeader uses i64 fields (not u32).
+; The free-list (arena-free) stays present-but-unused until GC lands (no frees in the PoC).
 (module arena)
 (import "ioutil.coil" :use *)
 (import "evalrt.coil" :use *)
+(import "atomic.coil" :use *)
 
 ; ---- header: every instance begins with this (fixed offset 0) ----
 (defstruct InstanceHeader
@@ -33,9 +45,10 @@
    (slabs       (ptr (ptr u8)))   ; growable array of slab base pointers
    (slab-count  i64)
    (slab-arrcap i64)
-   (bump-cursor i64)      ; flat frontier of ever-reserved slots (high-water mark)
+   (bump-cursor i64)      ; ATOMIC flat frontier of ever-reserved slots (high-water mark)
    (free-head   i64)      ; index of first free slot, or -1 (unused until GC)
-   (live-count  i64)
+   (growing     i64)      ; ATOMIC 0/1 spinlock — held only while mapping a new slab
+   (live-count  i64)      ; ATOMIC coarse live counter
    (max-slots   i64)])    ; budget; exceeding it => OutOfArenaSpace hard error
 
 (defn align8 [(n i64)] (-> i64) (iand (+ n 7) (ixor -1 7)))
@@ -44,16 +57,20 @@
   (let [a (cast (ptr TypeArena) (xalloc (sizeof TypeArena)))
         slot (align8 (+ (sizeof InstanceHeader) fields-size))
         cap0 (idiv 65536 slot)
-        cap (if (< cap0 8) 8 cap0)]
+        cap (if (< cap0 8) 8 cap0)
+        ; pre-size the slab base-pointer array to the type's whole budget + slack, once,
+        ; so it is NEVER realloc'd — a concurrent arena-slot-ptr reads a stable array base.
+        max-slabs (+ (idiv max-slots cap) 2)]
     (store! (field a type-id) type-id)
     (store! (field a name) name) (store! (field a name-len) name-len)
     (store! (field a slot-size) slot)
     (store! (field a slab-cap) cap)
-    (store! (field a slabs) (cast (ptr (ptr u8)) (xalloc (* (sizeof (ptr u8)) 8))))
+    (store! (field a slabs) (cast (ptr (ptr u8)) (xalloc (* (sizeof (ptr u8)) max-slabs))))
     (store! (field a slab-count) 0)
-    (store! (field a slab-arrcap) 8)
+    (store! (field a slab-arrcap) max-slabs)
     (store! (field a bump-cursor) 0)
     (store! (field a free-head) -1)
+    (store! (field a growing) 0)
     (store! (field a live-count) 0)
     (store! (field a max-slots) max-slots)
     a))
@@ -66,24 +83,31 @@
         base (load (index (load (field a slabs)) slabno))]
     (index base (* local (load (field a slot-size))))))
 
-; grow the slab-base array if needed, then malloc+zero a fresh slab
+; malloc+zero a fresh slab and publish it. MUST be called holding the `growing` lock.
+; The slabs array is pre-sized (arena-new), so this never realloc's it; it writes the base
+; pointer then advances slab-count with an atomic-store, so a reader that atomic-loads
+; slab-count >= slab#+1 is guaranteed to see the fully-written base (seq_cst publish).
 (defn arena-add-slab [(a (ptr TypeArena))] (-> i64)
-  (if (>= (load (field a slab-count)) (load (field a slab-arrcap)))
-    (let [ncap (* (load (field a slab-arrcap)) 2)
-          np (cast (ptr (ptr u8)) (realloc (cast (ptr i8) (load (field a slabs))) (* (sizeof (ptr u8)) ncap)))]
-      (store! (field a slabs) np)
-      (store! (field a slab-arrcap) ncap) 0)
-    0)
   (let [bytes (* (load (field a slab-cap)) (load (field a slot-size)))
         blk (xalloc bytes)]
     (memset (cast (ptr i8) blk) (cast i32 0) bytes)
     (store! (index (load (field a slabs)) (load (field a slab-count))) blk)
-    (store! (field a slab-count) (+ (load (field a slab-count)) 1))
+    (atomic-store (field a slab-count) (+ (load (field a slab-count)) 1))
     0))
 
+; ensure the slab containing `idx` is mapped. Common case: already mapped, one atomic-load,
+; no lock. Otherwise CAS-acquire `growing`, map slabs up to `need` under it, release.
 (defn arena-ensure-slab [(a (ptr TypeArena)) (idx i64)] (-> i64)
-  (let [need (+ (idiv idx (load (field a slab-cap))) 1)]
-    (loop (if (< (load (field a slab-count)) need) (do (arena-add-slab a) 0) (break))))
+  (let [need (+ (idiv idx (load (field a slab-cap))) 1) (mut done) false]
+    (loop
+      (if (load done) (break)
+        (if (>= (atomic-load (field a slab-count)) need) (do (store! done true) 0)
+          (if (= (atomic-cas (field a growing) 0 1) 0)
+            (do
+              (loop (if (< (atomic-load (field a slab-count)) need) (do (arena-add-slab a) 0) (break)))
+              (atomic-store (field a growing) 0)
+              (store! done true) 0)
+            (do (usleep (cast i32 20)) 0))))))
   0)
 
 ; hard error: budget exceeded before GC exists (05 "What we fake" #1)
@@ -96,20 +120,21 @@
   (if (eval-active?) (eval-panic0 EK_RUNTIME c"OutOfArenaSpace: arena full (GC not implemented)") (do (exit (cast i32 70)) 0)) 0)
 
 ; allocate one slot; stamps the header (type-id, slot-index, flags=live). Returns ptr.
+; THREAD-SAFE: `atomic-add` reserves a unique slot index (no two callers collide, no CAS
+; loop — the frontier only grows). The caller then maps its slab (locked only if unmapped)
+; and writes ITS OWN slot's header — no other thread touches that slot, so no race there.
+; The header's type-id is fully written before OP_NEW ever publishes the pointer to another
+; thread (05 M1 risk note: construction-visibility ordering), because publication is a
+; later store on the mutator's own stack/field.
 (defn arena-alloc [(a (ptr TypeArena))] (-> (ptr u8))
-  (let [idx (if (>= (load (field a free-head)) 0)
-              (let [i (load (field a free-head))
-                    p (cast (ptr i64) (arena-slot-ptr a i))]
-                (store! (field a free-head) (load p)) i)
-              (let [i (load (field a bump-cursor))]
-                (if (>= i (load (field a max-slots))) (do (arena-oom a) 0) 0)
-                (store! (field a bump-cursor) (+ i 1)) i))]
+  (let [idx (atomic-add (field a bump-cursor) 1)]   ; returns the OLD frontier = our reserved slot
+    (if (>= idx (load (field a max-slots))) (do (arena-oom a) 0) 0)
     (arena-ensure-slab a idx)
     (let [p (cast (ptr InstanceHeader) (arena-slot-ptr a idx))]
       (store! (field p type-id) (load (field a type-id)))
       (store! (field p slot-index) idx)
       (store! (field p flags) FLAG_LIVE)
-      (store! (field a live-count) (+ (load (field a live-count)) 1))
+      (atomic-add (field a live-count) 1)
       (cast (ptr u8) p))))
 
 ; free-list push (structure present; unused until GC lands)

@@ -64,6 +64,11 @@
 (const OP_ARENA_INSTANCE 63)  ; u16 type-id: pop slot -> push instance ptr (no gen check)
 (const OP_ARENA_INSTANCES 64) ; u16 type-id: pop limit,offset,filter(StringObj*) -> push ListObj
 
+; ---- Phase 5: real threads (02-runtime.md §7) ----
+(const OP_THREAD_SPAWN 65)    ; u16 iface-id, u8 slot: pop task(Runnable ptr) -> spawn a VMThread
+                              ;   running task.<slot>() via the itable; push ThreadHandle (VMThread ptr)
+(const OP_THREAD_JOIN 66)     ; pop ThreadHandle -> cooperatively join; push Unit
+
 ; ============================ builtin ids ===================================
 (const BLT_PRINT_I64 0) (const BLT_PRINT_F64 1) (const BLT_PRINT_BOOL 2) (const BLT_PRINT_STR 3)
 (const BLT_CONSOLE_LOG 4)
@@ -71,7 +76,13 @@
 (const BLT_MAP_NEW 9) (const BLT_MAP_SET 10) (const BLT_MAP_GET 11) (const BLT_MAP_HAS 12) (const BLT_MAP_LEN 13)
 (const BLT_STR_LEN 14) (const BLT_STR_SLICE 15)
 (const BLT_CLOCK_NOW 16) (const BLT_CLOCK_SLEEP 17)
-(const BLT_THREAD_SPAWN 18) (const BLT_THREAD_JOIN 19)   ; hard-error at runtime (M0)
+(const BLT_THREAD_SPAWN 18) (const BLT_THREAD_JOIN 19)   ; (superseded by OP_THREAD_SPAWN/JOIN)
+; ---- Phase 5: Mutex<T> (02-runtime.md §7 / 01-language.md §5) ----
+(const BLT_MUTEX_NEW 20)     ; pop initial value -> push (ptr MutexObj)
+(const BLT_MUTEX_LOCK 21)    ; pop mutex -> acquire (safepoint-cooperative spin) -> push Unit
+(const BLT_MUTEX_UNLOCK 22)  ; pop mutex -> release -> push Unit
+(const BLT_MUTEX_GET 23)     ; pop mutex -> push guarded value
+(const BLT_MUTEX_SET 24)     ; pop value, pop mutex -> store guarded value -> push Unit
 
 ; ============================ FieldInfo kinds ===============================
 (const FIELD_I64 0) (const FIELD_F64 1) (const FIELD_BOOL 2)
@@ -213,6 +224,12 @@
       (= op OP_ARENA_AT) (dis-u16 c c"ARENA_AT" off)
       (= op OP_ARENA_INSTANCE) (dis-u16 c c"ARENA_INSTANCE" off)
       (= op OP_ARENA_INSTANCES) (dis-u16 c c"ARENA_INSTANCES" off)
+      (= op OP_THREAD_SPAWN)
+        (let [hi (cast i64 (load (index (load (field c code)) (+ off 1))))
+              lo (cast i64 (load (index (load (field c code)) (+ off 2))))
+              sl (cast i64 (load (index (load (field c code)) (+ off 3))))]
+          (w-cstr 1 c"THREAD_SPAWN iface=") (w-int 1 (+ (* hi 256) lo)) (w-cstr 1 c" slot=") (w-int 1 sl) (w-cstr 1 c"\n") (+ off 4))
+      (= op OP_THREAD_JOIN) (dis-simple c"THREAD_JOIN" off)
       (do (w-cstr 1 c"??op ") (w-int 1 op) (w-cstr 1 c"\n") (+ off 1)))))
 
 (defn disassemble-chunk [(c (ptr Chunk))] (-> i64)

@@ -317,7 +317,7 @@
         (do (if (= (ty-kind (al-get (load (field t args)) 0)) TY_STRING) (cop cs OP_TRUE) (cop cs OP_FALSE))
             (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MAP_NEW) 0)
       (name-eq (nm tn) (nlen tn) (cast (ptr u8) c"Mutex") 5)
-        (do (w-cstr 2 c"Mutex: not implemented until Phase 5 (threads)\n") (exit (cast i32 70)) 0)
+        (do (compile-expr cs (arg-val (arg-at call 0))) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MUTEX_NEW) 0)
       (compile-construct-class cs call t d))))
 
 (defn compile-construct-class [(cs (ptr CState)) (call (ptr Node)) (t (ptr Type)) (d (ptr Decl))] (-> i64)
@@ -424,7 +424,10 @@
         (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_CLOCK_NOW) 0)
         (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_CLOCK_SLEEP) 0))
     (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Thread") 6)
-      (do (w-cstr 2 c"threads: not implemented until Phase 5\n") (exit (cast i32 70)) 0)
+      ; Thread.spawn(task: Runnable) -> spawn a VMThread running task.run() via the itable.
+      (let [rd (find-decl (cast (ptr u8) c"Runnable") 8)]
+        (compile-expr cs (arg-val (arg-at call 0)))
+        (cop cs OP_THREAD_SPAWN) (cu16 cs (iface-id-of rd)) (cu8 cs (iface-method-slot rd (cast (ptr u8) c"run") 3)) 0)
     (do (w-cstr 2 c"compile: unknown builtin object\n") (exit (cast i32 70)) 0)))
 
 (defn compile-string-method [(cs (ptr CState)) (recv (ptr Node)) (mname (ptr u8)) (mlen i64) (call (ptr Node))] (-> i64)
@@ -448,6 +451,15 @@
                   (name-eq mname mlen (cast (ptr u8) c"get") 3) (cu8 cs BLT_MAP_GET)
                   (name-eq mname mlen (cast (ptr u8) c"containsKey") 11) (cu8 cs BLT_MAP_HAS)
                   (cu8 cs BLT_MAP_LEN)) 0)
+      (name-eq (load (field d name)) (load (field d name-len)) (cast (ptr u8) c"ThreadHandle") 12)
+        (do (compile-expr cs recv) (cop cs OP_THREAD_JOIN) 0)
+      (name-eq (load (field d name)) (load (field d name-len)) (cast (ptr u8) c"Mutex") 5)
+        (do (compile-expr cs recv)
+            (cond
+              (name-eq mname mlen (cast (ptr u8) c"lock") 4) (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MUTEX_LOCK) 0)
+              (name-eq mname mlen (cast (ptr u8) c"unlock") 6) (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MUTEX_UNLOCK) 0)
+              (name-eq mname mlen (cast (ptr u8) c"get") 3) (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MUTEX_GET) 0)
+              (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MUTEX_SET) 0)))
       (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE))
         (do (compile-expr cs recv) (let [argc (compile-args cs call)]
               (cop cs OP_CALL_VIRTUAL) (cu16 cs (iface-id-of d)) (cu8 cs (iface-method-slot d mname mlen)) (cu8 cs (+ argc 1)) 0))

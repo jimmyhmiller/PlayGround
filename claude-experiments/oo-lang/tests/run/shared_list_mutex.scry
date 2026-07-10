@@ -1,0 +1,32 @@
+// Workers push into a shared List guarded by a Mutex used as a lock; final length is
+// exactly the sum of pushes (3 threads x 100 = 300). Exercises a mutex protecting a
+// non-counter shared structure.
+class Pusher implements Runnable {
+  gate: Mutex<Int>
+  items: List<Int>
+  fn run() -> Void {
+    var i = 0
+    while i < 100 {
+      self.gate.lock()
+      self.items.push(i)
+      self.gate.unlock()
+      i = i + 1
+    }
+  }
+}
+fn main() {
+  let gate = Mutex<Int>(0)
+  let items = List<Int>()
+  let hs = List<ThreadHandle>()
+  var t = 0
+  while t < 3 {
+    hs.push(Thread.spawn(Pusher(gate: gate, items: items)))
+    t = t + 1
+  }
+  var j = 0
+  while j < 3 {
+    hs.get(j).join()
+    j = j + 1
+  }
+  print(items.len())
+}

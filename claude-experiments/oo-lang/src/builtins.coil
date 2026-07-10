@@ -150,13 +150,21 @@
 (defn map-has [(m (ptr MapObj)) (k i64)] (-> i64) (if (>= (map-find m k) 0) 1 0))
 (defn map-len [(m (ptr MapObj))] (-> i64) (load (field m len)))
 
+; ============================ Mutex<T> ======================================
+; A guarded i64 slot + a lock word. `lock`/`unlock` (the safepoint-cooperative CAS spin)
+; live in vm.coil where a VMThread + safepoint-poll are in scope; here are the data + the
+; non-blocking accessors. get/set are single aligned-word accesses (non-tearing); by
+; convention they run inside lock/unlock.
+(defstruct MutexObj [(lock i64) (val i64)])
+(defn mutex-new [(v i64)] (-> (ptr MutexObj))
+  (let [m (cast (ptr MutexObj) (xalloc (sizeof MutexObj)))]
+    (store! (field m lock) 0) (store! (field m val) v) m))
+(defn mutex-get [(m (ptr MutexObj))] (-> i64) (load (field m val)))
+(defn mutex-set [(m (ptr MutexObj)) (v i64)] (-> i64) (store! (field m val) v) 0)
+
 ; ============================ Clock =========================================
 (defn clock-now [] (-> i64)   ; wall-clock milliseconds
   (let [tv (alloc-stack (array i64 2))]
     (gettimeofday (cast (ptr i8) (index tv 0)) (cast (ptr i8) 0))
     (+ (* (load (index tv 0)) 1000) (idiv (load (index tv 1)) 1000))))
-(defn clock-sleep [(ms i64)] (-> i64)   ; real nanosleep (single-threaded, no safepoints yet — Phase 5)
-  (let [ts (alloc-stack (array i64 2))]
-    (store! (index ts 0) (idiv ms 1000))
-    (store! (index ts 1) (* (irem ms 1000) 1000000))
-    (nanosleep (cast (ptr i8) (index ts 0)) (cast (ptr i8) 0)) 0))
+; Clock.sleep is safepoint-cooperative and lives in vm.coil (it needs the VMThread to poll).

@@ -119,6 +119,9 @@ def main():
     sp, sf = run_smoke_test(binary, filt)
     passed += sp; failed += sf
     if sf: fails.append("smoke")
+    lp, lf = run_liveness_test(binary, filt)
+    passed += lp; failed += lf
+    if lf: fails.append("liveness")
 
     print(f"\n{passed} passed, {failed} failed ({passed + failed} tests)")
     if fails and not verbose:
@@ -235,6 +238,95 @@ def run_smoke_test(binary, filt):
             print("FAIL smoke")
             for pr in problems:
                 print("     " + pr)
+            return 0, 1
+        return 1, 0
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+
+
+def run_liveness_test(binary, filt):
+    """THE Phase-5 demo beat: start examples/agents.scry (3 agents on 3 OS threads), and
+    while they run, POST evals through the viewer channel. Assert (1) types() counts and the
+    agent instances are visible, (2) Conversation sizes climb between two polls (agents work
+    concurrently), (3) invoking pause() on one agent freezes ITS conversation while the
+    others keep growing, and (4) resume() restarts it. Every eval runs under a full STW."""
+    if filt and "liveness" not in filt:
+        return 0, 0
+    import time, json, urllib.request
+    demo = os.path.abspath(os.path.join(HERE, "..", "examples", "agents.scry"))
+    proc = subprocess.Popen([binary, "run", demo], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    port = None
+    try:
+        for _ in range(200):
+            line = proc.stdout.readline()
+            if not line:
+                break
+            if "viewer: http://localhost:" in line:
+                port = int(line.strip().split(":")[-1]); break
+        if port is None:
+            print("FAIL liveness\n     never printed viewer URL")
+            return 0, 1
+
+        def ev(src):
+            body = json.dumps({"id": "L", "source": src}).encode()
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/eval", data=body,
+                                         headers={"Content-Type": "application/json"})
+            return json.loads(urllib.request.urlopen(req, timeout=10).read())
+
+        problems = []
+        time.sleep(1.0)
+        # (1) types() and instances visible
+        names = [t["name"] for t in ev("types()")["value"]["items"]]
+        for want in ("Agent", "Conversation", "Message", "ScriptedModel", "AgentWorker"):
+            if want not in names:
+                problems.append(f"types() missing {want}: {names}")
+        insts = ev("Agent.instances()")["value"]["items"]
+        slot = {it["fields"]["name"]["value"]: int(it["ref"].split("#")[1]) for it in insts}
+        if not all(a in slot for a in ("researcher", "coder", "reviewer")):
+            problems.append(f"missing agents: {slot}")
+            print("FAIL liveness");  [print("     " + p) for p in problems]
+            return 0, 1
+        r, c = slot["researcher"], slot["coder"]
+
+        def size(s):
+            return ev(f"Agent.instance({s}).conversation.size()")["value"]["value"]
+
+        # (2) both climb while running
+        r1, c1 = size(r), size(c)
+        time.sleep(1.8)
+        r2, c2 = size(r), size(c)
+        if not (r2 > r1):
+            problems.append(f"researcher did not climb while running: {r1}->{r2}")
+        if not (c2 > c1):
+            problems.append(f"coder did not climb while running: {c1}->{c2}")
+
+        # (3) pause researcher -> it freezes, coder keeps climbing
+        ev(f"Agent.instance({r}).pause()")
+        time.sleep(1.8)                 # let any in-flight step settle
+        ra, ca = size(r), size(c)
+        time.sleep(1.6)
+        rb, cb = size(r), size(c)
+        if rb != ra:
+            problems.append(f"paused researcher still grew: {ra}->{rb}")
+        if not (cb > ca):
+            problems.append(f"coder stalled while researcher paused: {ca}->{cb}")
+
+        # (4) resume researcher -> it climbs again
+        ev(f"Agent.instance({r}).resume()")
+        time.sleep(1.8)
+        rc = size(r)
+        if not (rc > rb):
+            problems.append(f"resumed researcher did not climb: {rb}->{rc}")
+
+        if problems:
+            print("FAIL liveness")
+            for p in problems:
+                print("     " + p)
             return 0, 1
         return 1, 0
     finally:
