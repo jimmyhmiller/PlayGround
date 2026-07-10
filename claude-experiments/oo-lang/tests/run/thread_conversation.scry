@@ -1,11 +1,22 @@
 // One worker grows a Conversation deterministically; join then report its size. Mirrors the
 // demo's per-agent Conversation growth without the pacing sleep (deterministic golden).
-class Message { content: String  fn init(content: String) { self.content = content } }
+class Message {
+  content: String
+  fn init(content: String) {
+    self.content = content
+  }
+}
 class Conversation {
   messages: List<Message>
   count: Int
-  fn init() { self.messages = List<Message>(); self.count = 0 }
-  fn append(m: Message) { self.messages.push(m); self.count = self.count + 1 }
+  fn init() {
+    self.messages = List<Message>()
+    self.count = 0
+  }
+  fn append(m: Message) {
+    self.messages.push(m)
+    self.count = self.count + 1
+  }
   fn size() -> Int { self.count }
 }
 class Grower implements Runnable {

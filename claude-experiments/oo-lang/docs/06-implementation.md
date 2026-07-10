@@ -576,3 +576,170 @@ Implements `04`'s IA: a left rail **type index** (re-evals `types()` every 500ms
 - **`localhost` resolves to `::1` first on macOS**; we bind IPv4 only, so clients using `localhost` eat a "connection refused" + fallback. Not a bug in the server; tests/tools should hit `127.0.0.1`. `curl`/browsers fall back automatically.
 - **A `(fnptr c […] …)` cannot be `(cast i64 …)`-null-checked** — keep a separate `has-drain` i64 flag instead of comparing the fnptr to 0.
 - **An `(ArrayList T)` value parameter is an immutable ref** (known from Phase 2/3) — the readonly bytecode-visited set is a heap `VisitSet` struct passed by pointer, not an `ArrayList` param.
+
+---
+
+# Phase 5 — real OS threads + the agents demo (M1 + M5)
+
+Phase 5 makes concurrency real (`DECISIONS.md` #4b): every Scry-level `Thread.spawn` is a
+genuine `pthread` running the dispatch loop against its own `VMThread`, sharing the
+Program/heap/arenas; a generalized safepoint parks all of them at once for an eval; and
+`examples/agents.scry` is the M5 demo — 3 named agents on 3 real threads, a shared task
+list under a `Mutex`, `Clock.sleep` pacing, and a viewer-invoked `pause()`/`resume()` that
+visibly stops/restarts one agent's terminal activity.
+
+## What changed, by file
+
+| File | Change |
+|---|---|
+| `bytecode.coil` | New opcodes `OP_THREAD_SPAWN <iface-id> <slot>` / `OP_THREAD_JOIN`; new builtin ids `BLT_MUTEX_{NEW,LOCK,UNLOCK,GET,SET}`; disassembler entries. |
+| `safepoint.coil` | **Rewritten** into the N-thread protocol: one global `stop-flag`, a registry of per-thread `parked`-word addresses, a coordinator marker, and `sp-register` / `safepoint-poll(parked)` / `request-global-stop(coord)` / `release-global-stop`. Still a leaf (knows only `(ptr i64)` parked words). |
+| `arena.coil` | Thread-safe allocation: `atomic-add` bump frontier + a per-arena `growing` CAS spinlock for slab mapping; `slabs` array pre-sized (never realloc'd). `live-count` is `atomic-add`. |
+| `builtins.coil` | `MutexObj` + `mutex-new/get/set` (data + non-blocking accessors); blocking `clock-sleep` removed (moved to `vm.coil`, cooperative). Float bit-cast helper made per-call (thread-safe). |
+| `vm.coil` | **Refactored** off the single global `VM`: per-thread state lives in `VMThread` (its own `stack`/`frames`/`stack-top`/`frame-count` + atomic `parked`/`done`); `run-to`/`push-frame`/`vpush`/`vpop`/`vpeek`/`do-builtin` all take the `VMThread`. New: `vm-spawn`, `vm-join`, `vm-sleep`, `vm-mutex-lock/unlock`, `interpreter-thread-main`, main/eval `VMThread` singletons. |
+| `compile.coil` | `Thread.spawn` → `OP_THREAD_SPAWN` (Runnable iface-id + `run` slot baked in); `ThreadHandle.join` → `OP_THREAD_JOIN`; `Mutex<T>(v)` and `.lock/.unlock/.get/.set` → the mutex builtins. The Phase-3 "not implemented" hard errors are gone. |
+| `server.coil` | Eval flow **inverted**: the server thread is now the eval **coordinator** — `request-global-stop` parks every language thread, `eval-core` runs on the dedicated eval `VMThread`, `release-global-stop` resumes them. The Phase-4 mailbox/drain-on-mutator round-trip is deleted. Post-main loop now polls the *main* `VMThread`'s parked word so a coordinator can stop it too. |
+
+## VMThread / VM (as-built)
+
+```
+(defstruct VMThread [(stack (array i64 65536)) (stack-top i64)
+                     (frames (array CallFrame 256)) (frame-count i64)
+                     (parked i64) (done i64) (thread-id i64) (os-thread Thread)])
+(defstruct VM [(program (ptr Program))])            ; the ONLY shared VM state
+```
+Main and the eval-coordinator each own one `VMThread` **singleton** (`alloc-static`); agent
+threads are `malloc`'d at spawn. Program/types/methods/arenas are shared read-only after
+`build-program`. `parked`/`done` are the only atomically-touched words on a `VMThread`.
+
+## Safepoint protocol (as-built)
+
+- Each thread that runs the dispatch loop calls `sp-register((field vt parked))` once, at
+  startup/spawn, publishing the address of its own `parked` word into a fixed 64-entry
+  table. The eval `VMThread` is **not** registered — it is always the coordinator, never a
+  waiter.
+- `safepoint-poll(parked)` runs at the top of `run-to`'s loop (once per instruction) and
+  inside `Clock.sleep` / `Mutex.lock` spins. When `stop-flag==1` and this thread is not the
+  coordinator, it publishes `parked=1`, spins until the flag clears, then `parked=0`.
+- `request-global-stop(coord)` CAS-acquires `stop-flag` (0→1), records `coord`, and spins
+  until every *other* registered thread's `parked==1`. `release-global-stop` stores 0.
+- **Dead threads count as parked.** `interpreter-thread-main` sets `parked=1` (and `done=1`)
+  when its dispatch loop returns, so a finished agent never makes `request-global-stop` wait
+  forever.
+- **Blocked foreign calls made cooperative.** `Clock.sleep` sleeps in 2 ms slices, polling
+  the safepoint each slice; `ThreadHandle.join` spins on the target's `done` flag while
+  polling its *own* safepoint. So neither a sleeping nor a joining thread delays a global
+  stop by more than one slice — nothing parks in a blocking syscall while holding the stop
+  hostage. (stdout writes are the one remaining non-cooperative foreign call, but they are
+  sub-millisecond; `request-global-stop` just waits out the write.)
+- **Every eval is full STW** — the deliberately conservative choice (05 M1 builds only the
+  full, all-thread stop). Partial/read-only safepoints (02 §7's read-eval fast path) are a
+  documented future optimization, not built here. Because there is one server thread taking
+  one connection at a time and `request-global-stop` CAS-serializes coordinators, evals
+  never overlap, so `eval-core`'s global scratch/`setjmp` state stays single-threaded.
+
+## Alloc strategy chosen (LOUD, per the brief)
+
+**Atomic-bump shared arena + a per-arena `growing` spinlock — NOT yet per-thread
+magazines.** 05 M1 lets us take the documented "simpler correct thing" at 3–5 threads; we
+did, and shaped it so §4's magazines slot in on top later:
+- `arena-alloc` = `atomic-add(bump-cursor, 1)`. The returned old value is this caller's
+  **unique** slot — two threads never collide, and there is no CAS loop because the frontier
+  only grows. A magazine refill later is exactly the same call with `+MAGAZINE_CAP` instead
+  of `+1`, over this identical layer.
+- Each thread writes **its own** slot's header; no other thread touches that slot → race-free
+  by construction, and the header's `type-id` is written before `OP_NEW` ever publishes the
+  pointer (05 M1's construction-visibility ordering note).
+- Slab mapping (malloc a 64 KiB block + publish its base) is the one shared mutation; it
+  takes the per-arena `growing` CAS spinlock. The common case (slot already in a mapped
+  slab) never touches it — just an `atomic-load` of `slab-count`.
+- The `slabs` base-pointer array is **pre-sized to the type's whole budget** at `arena-new`
+  and never realloc'd, so a concurrent `arena-slot-ptr` can never read a torn/moved array
+  base. `live-count` is `atomic-add` (coarse, eventually consistent — §4).
+
+Proven race-free empirically: 3 threads × 5000 and 6 threads × 15000 concurrent `Message`
+allocations yield **exactly** 15000 / 90000 live with matching high-water and no
+duplicated/lost slots, stable across dozens of runs; 4–8 threads × tens of thousands of
+mutex-guarded increments yield the **exact** expected total every time.
+
+## Mutex (as-built) — the parked-holder deadlock, and how it's dodged
+
+`MutexObj = {lock, val}`. `lock` is a `atomic-cas(0→1)` spin that **backs off through the
+safepoint** (so a waiting thread still parks for a global stop instead of hanging
+`request-global-stop`). `unlock` stores 0; `get`/`set` are single aligned-word accesses.
+The one subtlety: an agent can be parked at a safepoint *while holding a mutex*, and a
+viewer-invoked method (run by the coordinator during STW) might try to acquire that same
+mutex → deadlock. Dodged by making `lock`/`unlock` **no-ops for the coordinator**: during a
+global stop the coordinator has exclusive access to the whole heap, so it needs no app-level
+lock, and skipping avoids ever waiting on a lock a parked thread holds. Agents never run
+during STW, so they never take a lock while stopped; only the coordinator does, and for it
+it is a safe no-op.
+
+## agents.scry design notes (race-free by single-writer discipline)
+
+`AgentStatus {Waiting,Running,Paused,Done}`, `Message`, `Conversation`, `Task`,
+`interface Tool` (`ShellTool`/`SearchTool`), `ScriptedModel` (honest, in the type list),
+`Agent`, `AgentWorker : Runnable`. Concurrency safety without locks on the hot path comes
+from **single-writer-per-field**: `Agent.paused` is written *only* by the viewer/eval thread
+(`pause`/`resume`) and read by the worker; `Agent.status` and the `Conversation` are written
+*only* by that agent's worker. Single-word writes are non-tearing (02 §1), so no torn state
+without a lock. The genuinely shared mutable cell — `TaskList.remaining` — is behind a real
+`Mutex<Int>`; `take()` hands out a unique task id under it (the demo output shows ids
+120,119,118,… never duplicated, which is the mutex working). The TUI is the M5-acceptable
+minimal form: a scrolling log with per-agent ANSI color prefixes built via `\xHH` escapes
+(`\x1b[…m`), not a cursor-addressed repaint.
+
+## Tests (16 new; 213 total, all green, zero-regression on the 197 single-threaded)
+
+- `tests/run/`: `thread_spawn_join` (deterministic post-join aggregate), `mutex_counter`
+  (4×25000 → exactly 100000), `clock_sleep`, `many_threads` (8→8), `shared_list_mutex`
+  (3×100 → 300), `two_waves`, `mutex_get_set`, `threads_alloc_sum`,
+  `thread_interface_dispatch` (concurrent itable dispatch → 160), `thread_enum_match`
+  (enum+match under threads → 300), `thread_conversation`.
+- `tests/run-arenas/alloc_race`: 3×5000 concurrent `Message` allocs → exactly 15000 live.
+- `tests/eval/40-42`: `scry eval` against `examples/threads-mini.scry` (runs to completion,
+  then evaluates the final quiescent heap) — exact `Message` count 3000, type list, fields.
+- **`liveness`** (python, in `run-tests.py`): starts `examples/agents.scry`, POSTs evals
+  while the 3 agents run — asserts type/instance visibility, that two agents' `Conversation`
+  sizes **climb between polls**, that `pause()` on one **freezes** its conversation while the
+  others keep climbing, and that `resume()` **restarts** it. This is THE demo beat, verified
+  through the real viewer channel under real STW. All concurrency goldens are exact
+  (deterministic by design — post-join aggregates and mutex totals, never interleaved
+  prints), so a failure is a real race, never rehearsal noise.
+
+## What Phase 6 (live code change) inherits
+
+- **The stop machinery is exactly what a table swap needs.** `request-global-stop` /
+  `release-global-stop` already bring *every* `VMThread` to a quiescent stop and run
+  coordinator work with the heap frozen — a definition-eval swaps `Program.methods[]` /
+  `types[]` at that same stop instead of running an expression. All calls already route
+  through method **indices**, so a new generation repoints the tables without touching call
+  sites (03-live-semantics).
+- **The seam is unchanged from Phase 4**: `eval-exec`'s `is-def-token` branch still
+  hard-errors `NotImplemented: live code change`; Phase 6 replaces that branch with
+  typecheck-against-live-class + table swap, now already inside a full STW.
+- **What Phase 6 must still add for 02 §4's shape migration** (beyond a method-body swap):
+  `InstanceHeader.shape-id`, the `old-shape`/`pending-shape` `TypeArena` fields, and the
+  per-thread stack-root walk for the pointer-rewrite pass — none of which exist yet. The
+  registry in `safepoint.coil` already enumerates every live `VMThread`, which is the list
+  that walk will iterate.
+
+## Coil friction hit in Phase 5 (adds to Phase 1-4's list)
+
+- **A shared `alloc-static` cell is a data race across threads.** Phase 3's `to-bits`/
+  `to-f64` float bit-cast used one global `alloc-static i64` scratch cell; with N threads
+  doing float ops that races. Fix: use a per-call `alloc-stack i64` (freed on return, one
+  per invocation) — thread-safe, and LLVM folds the through-memory round-trip to a register
+  move anyway.
+- **`lib/thread.coil`'s externs dedup fine when declared once and `:use *`'d.** Both `vm`
+  and `server` import `thread.coil`; because the `pthread_*` externs live in that one module
+  and are only `:use *`-imported (never re-declared), there is no double-declaration link
+  error — the guide's "declare each extern in ONE module" advice, confirmed for pthreads.
+- **`(field vt parked)` is a clean decoupling seam.** Because `safepoint.coil` only ever
+  handles `(ptr i64)` parked-word addresses (never the `VMThread` struct), the safepoint
+  module stays a leaf and `vm.coil` calls it with no import cycle — the same trick Phase 4
+  used for the drain fnptr, generalized.
+- **`;` is not a statement separator in Scry** (re-confirmed while writing tests): statements
+  are newline-separated inside a block; `let a = f(); let b = g()` is a parse error. Enum
+  variants are likewise newline-separated, and a `match` on an enum needs bare (unqualified)
+  variant patterns.

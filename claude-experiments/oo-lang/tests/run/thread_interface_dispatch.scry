@@ -1,8 +1,14 @@
-// Concurrent virtual dispatch: workers call tool.run() through a Tool interface (itable)
-// while counting successes under a mutex. 3 threads x 40 calls = 120.
-interface Tool { fn tag() -> Int }
-class A implements Tool { fn tag() -> Int { 1 } }
-class B implements Tool { fn tag() -> Int { 2 } }
+// Concurrent virtual dispatch: workers call tool.tag() through a Tool interface (itable)
+// while accumulating under a mutex. A()=1 x2 threads x40 + B()=2 x1 thread x40 = 80+80 = 160.
+interface Tool {
+  fn tag() -> Int
+}
+class A implements Tool {
+  fn tag() -> Int { 1 }
+}
+class B implements Tool {
+  fn tag() -> Int { 2 }
+}
 class Caller implements Runnable {
   box: Mutex<Int>
   tool: Tool
@@ -24,6 +30,9 @@ fn main() {
   hs.push(Thread.spawn(Caller(box: box, tool: B())))
   hs.push(Thread.spawn(Caller(box: box, tool: A())))
   var j = 0
-  while j < 3 { hs.get(j).join(); j = j + 1 }
+  while j < 3 {
+    hs.get(j).join()
+    j = j + 1
+  }
   print(box.get())
 }

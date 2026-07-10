@@ -33,17 +33,7 @@
 (defn srv-viewer-dir [] (-> (ptr (ptr i8))) (alloc-static (ptr i8)))
 (defn srv-readonly [] (-> (ptr i64)) (alloc-static i64))
 
-; mailbox
-(defn mbx-req-ready [] (-> (ptr i64)) (alloc-static i64))
-(defn mbx-resp-ready [] (-> (ptr i64)) (alloc-static i64))
-(defn mbx-src [] (-> (ptr (ptr u8))) (alloc-static (ptr u8)))
-(defn mbx-srclen [] (-> (ptr i64)) (alloc-static i64))
-(defn mbx-id [] (-> (ptr (ptr u8))) (alloc-static (ptr u8)))
-(defn mbx-idlen [] (-> (ptr i64)) (alloc-static i64))
-(defn mbx-readonly [] (-> (ptr i64)) (alloc-static i64))
-(defn mbx-resp [] (-> (ptr (ptr JBuf))) (alloc-static (ptr JBuf)))
-
-; eval outcome (set on the mutator thread inside eval-core)
+; eval outcome (set on the coordinator thread inside eval-core)
 (defn ev-outcome [] (-> (ptr i64)) (alloc-static i64))   ; 0 = value, 1 = error
 (defn ev-valbuf [] (-> (ptr (ptr JBuf))) (alloc-static (ptr JBuf)))
 

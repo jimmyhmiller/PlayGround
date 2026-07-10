@@ -1,13 +1,24 @@
-// Workers build enums and branch on them via match, accumulating under a mutex.
-// tag Even contributes 2, Odd contributes 1; 100 iters over i: 50 even -> 100, 50 odd -> 50.
-enum Parity { Even, Odd }
+// Workers build an enum via a typed helper and branch on it via match, accumulating under a
+// mutex. Even->2, Odd->1; per thread 100 iters -> 50*2 + 50*1 = 150; x2 threads = 300.
+enum Parity {
+  Even
+  Odd
+}
 class M implements Runnable {
   box: Mutex<Int>
+  fn classify(i: Int) -> Parity {
+    if i % 2 == 0 {
+      return Even
+    }
+    Odd
+  }
   fn run() -> Void {
     var i = 0
     while i < 100 {
-      let p = if i % 2 == 0 { Parity.Even } else { Parity.Odd }
-      let w = match p { Even -> 2  Odd -> 1 }
+      let w = match self.classify(i) {
+        Even -> 2
+        Odd -> 1
+      }
       self.box.lock()
       self.box.set(self.box.get() + w)
       self.box.unlock()
