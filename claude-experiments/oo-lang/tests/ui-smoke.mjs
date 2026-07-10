@@ -102,7 +102,27 @@ async function main() {
     const fails = [];
     const ok = (label) => console.log("  ok  " + label);
 
-    // (a) type rail renders types, incl. Agent
+    // (g0) the class-relationship GRAPH is the landing view — nodes for classes, an interface
+    // and an enum, plus a resolved Agent->Conversation field edge; clicking a live class node
+    // navigates to its instance table (the static/live unification).
+    await waitFor("#graph .gnode");
+    const gnodes = await evalPage(`[...document.querySelectorAll('.gnode')].map(n=>n.dataset.name)`);
+    for (const want of ["Agent", "Conversation"]) {
+      if (!gnodes.includes(want)) fails.push(`graph missing node ${want}: ${JSON.stringify(gnodes)}`);
+    }
+    if (fails.length === 0) ok(`graph renders ${gnodes.length} nodes (Agent, Conversation present)`);
+    const kinds = await evalPage(`(()=>{const s={};for(const n of document.querySelectorAll('.gnode'))s[n.dataset.kind]=(s[n.dataset.kind]||0)+1;return s;})()`);
+    if (!kinds.interface) fails.push("graph has no interface node (e.g. Tool)"); else ok(`graph has ${kinds.interface} interface node(s)`);
+    if (!kinds.enum) fails.push("graph has no enum node (e.g. AgentStatus)"); else ok(`graph has ${kinds.enum} enum node(s)`);
+    const hasEdge = await evalPage(
+      `[...document.querySelectorAll('.gedge')].some(l=>l.dataset.from==='Agent'&&l.dataset.to==='Conversation')`);
+    if (!hasEdge) fails.push("graph missing Agent->Conversation field edge"); else ok("graph has Agent->Conversation edge");
+    // click the Agent node (live count >= 1 while running) -> drills to its instance table
+    await evalPage(`document.querySelector('.gnode[data-name="Agent"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+    try { await waitFor(".itable tbody tr", 8000); ok("clicking a live graph node navigates to its table"); }
+    catch { fails.push("clicking Agent graph node did not open its instance table"); }
+
+    // (a) the List view's type rail renders types, incl. Agent (we are now in browse mode)
     await waitFor(".type-row");
     const hasAgent = await evalPage(
       `[...document.querySelectorAll('.type-row .tname')].some(e=>e.textContent.trim()==='Agent')`);

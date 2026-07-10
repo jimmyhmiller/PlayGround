@@ -128,6 +128,9 @@ def main():
     sp, sf = run_smoke_test(binary, filt)
     passed += sp; failed += sf
     if sf: fails.append("smoke")
+    ip, if_ = run_inspect_test(binary, filt)
+    passed += ip; failed += if_
+    if if_: fails.append("inspect")
     lp, lf = run_liveness_test(binary, filt)
     passed += lp; failed += lf
     if lf: fails.append("liveness")
@@ -328,6 +331,98 @@ def run_smoke_test(binary, filt):
             print("FAIL smoke")
             for pr in problems:
                 print("     " + pr)
+            return 0, 1
+        return 1, 0
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+
+
+def run_inspect_test(binary, filt):
+    """Phase 9 gate: `scry inspect examples/assistant.scry` serves the STATIC schema WITHOUT
+    running main(). Asserts: (1) the viewer URL + the schema-only note print, (2) main() never
+    ran (no `you> ` prompt, no agent/'delegating' output on stdout), (3) types() returns the
+    full class set with liveCount 0, (4) the new schema() op returns class + interface + enum
+    nodes (Agent class, Tool interface, AgentStatus enum) all at count 0, with a resolved
+    Agent->Conversation field ref, and (5) GET / serves the viewer HTML + app.js contains the
+    graph view. Then kills it."""
+    if filt and "inspect" not in filt:
+        return 0, 0
+    import time, json, threading, urllib.request
+    demo = os.path.abspath(os.path.join(HERE, "..", "examples", "assistant.scry"))
+    proc = subprocess.Popen([binary, "inspect", demo], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    lines = []
+    threading.Thread(target=lambda: [lines.append(l) for l in proc.stdout], daemon=True).start()
+    port = None
+    try:
+        for _ in range(200):
+            for l in lines:
+                if "viewer: http://localhost:" in l:
+                    port = int(l.strip().split(":")[-1]); break
+            if port is not None:
+                break
+            time.sleep(0.05)
+        if port is None:
+            print("FAIL inspect\n     never printed viewer URL"); return 0, 1
+
+        def ev(src):
+            body = json.dumps({"id": "I", "source": src}).encode()
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/eval", data=body,
+                                         headers={"Content-Type": "application/json"})
+            return json.loads(urllib.request.urlopen(req, timeout=15).read())
+
+        problems = []
+        time.sleep(0.4)
+        # (1) schema-only note printed
+        if not any("inspect: schema only" in l for l in lines):
+            problems.append("did not print the 'inspect: schema only' note")
+        # (2) main() never ran — no interactive prompt / agent output
+        joined = "".join(lines)
+        for forbidden in ("you> ", "delegating", "goodbye"):
+            if forbidden in joined:
+                problems.append(f"main() appears to have run (stdout contains {forbidden!r})")
+        # (3) types() -> full class set, all liveCount 0
+        titems = ev("types()")["value"]["items"]
+        tnames = [t["name"] for t in titems]
+        for want in ("Agent", "Conversation", "Message", "ScriptedModel", "Orchestrator"):
+            if want not in tnames:
+                problems.append(f"types() missing {want}: {tnames}")
+        nonzero = [t["name"] for t in titems if t["liveCount"] != 0]
+        if nonzero:
+            problems.append(f"inspect mode has nonzero liveCounts (main must not have run): {nonzero}")
+        # (4) schema() -> class + interface + enum nodes at count 0, resolved edge
+        nodes = ev("schema()")["value"]["nodes"]
+        by = {n["name"]: n for n in nodes}
+        if by.get("Agent", {}).get("kind") != "class":
+            problems.append(f"schema() Agent not a class node: {by.get('Agent')}")
+        if by.get("Tool", {}).get("kind") != "interface":
+            problems.append(f"schema() missing Tool interface node")
+        if by.get("AgentStatus", {}).get("kind") != "enum":
+            problems.append(f"schema() missing AgentStatus enum node")
+        if any(n["liveCount"] != 0 for n in nodes):
+            problems.append("schema() has nonzero liveCount in inspect mode")
+        agent = by.get("Agent", {})
+        conv_ref = any("Conversation" in (f.get("refTypes") or []) for f in agent.get("fields", []))
+        if not conv_ref:
+            problems.append("schema() Agent has no field refTypes edge to Conversation")
+        variants = [v["name"] for v in by.get("AgentStatus", {}).get("variants", [])]
+        if "Idle" not in variants:
+            problems.append(f"AgentStatus enum missing variants: {variants}")
+        # (5) viewer HTML + graph-bearing app.js
+        html = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=10).read().decode()
+        if "<" not in html or "scry" not in html.lower():
+            problems.append("GET / did not return viewer HTML")
+        appjs = urllib.request.urlopen(f"http://127.0.0.1:{port}/app.js", timeout=10).read().decode()
+        if "GraphPane" not in appjs or "schema()" not in appjs:
+            problems.append("app.js does not contain the graph view")
+        if problems:
+            print("FAIL inspect")
+            for p in problems:
+                print("     " + p)
             return 0, 1
         return 1, 0
     finally:

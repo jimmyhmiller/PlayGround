@@ -562,11 +562,15 @@ function ConnIndicator() {
   const label = s === "down" ? "reconnecting…" : s === "slow" ? "live (slow)" : "● live";
   return html`<div class=${cls}><span class="dot"></span><span class="conn-label">${label}</span></div>`;
 }
-function TopBar({ onGlobalSearch, onToggleTranscript }) {
+function TopBar({ onGlobalSearch, onToggleTranscript, mode, setMode }) {
   const [q, setQ] = useState("");
   return html`
     <header id="topbar">
       <div class="brand">scry<span class="brand-sub">live viewer</span></div>
+      <div class="viewtoggle">
+        <button class=${"vt-btn" + (mode === "graph" ? " active" : "")} onClick=${() => setMode("graph")}>Graph</button>
+        <button class=${"vt-btn" + (mode === "browse" ? " active" : "")} onClick=${() => setMode("browse")}>List</button>
+      </div>
       <input id="global-search" type="text" spellcheck="false" autocomplete="off"
              placeholder="jump to Agent#7 or search field values…"
              value=${q} onInput=${(e) => setQ(e.target.value)}
@@ -578,6 +582,291 @@ function TopBar({ onGlobalSearch, onToggleTranscript }) {
     </header>`;
 }
 
+// ===================== class-relationship graph (Phase 9) =====================
+// A node-link graph of the program's STATIC structure, served by the new schema() eval op
+// (classes/objects/interfaces/enums, + per-field/variant refTypes so edges are server-resolved,
+// never string-parsed). The SAME graph is the landing view whether the program is running
+// (nodes carry live counts, a class click drills to its instance table) or merely inspected
+// (`scry inspect` — counts are 0, a click shows a static field/method card). Layout is a
+// DETERMINISTIC force sim (fixed seed + fixed iteration count), computed from the schema SHAPE
+// only, so positions never jitter when liveCounts tick.
+
+// derive visible nodes + typed edges from the raw schema() node list.
+function deriveGraph(rawNodes) {
+  const byName = new Map();
+  for (const n of rawNodes) if (!byName.has(n.name)) byName.set(n.name, n);
+  const edges = [];
+  const addEdge = (f, t, kind) => { if (f !== t && byName.has(t)) edges.push({ from: f, to: t, kind }); };
+  for (const n of byName.values()) {
+    if (n.kind === "class" || n.kind === "object") {
+      for (const f of n.fields || []) for (const rt of f.refTypes || []) addEdge(n.name, rt, "field");
+      for (const im of n.implements || []) addEdge(n.name, im, "implements");
+      const gm = /^[^<]+<(.+)>$/.exec(n.name);
+      if (gm) for (const g of gm[1].split(",").map((s) => s.trim())) addEdge(n.name, g, "generic");
+    } else if (n.kind === "enum") {
+      for (const v of n.variants || []) for (const rt of v.refTypes || []) addEdge(n.name, rt, "field");
+    }
+  }
+  const referenced = new Set();
+  for (const e of edges) { referenced.add(e.from); referenced.add(e.to); }
+  const visible = new Set();
+  for (const n of byName.values()) {
+    if (n.kind === "class" || n.kind === "object") visible.add(n.name);
+    else if (!n.builtin || referenced.has(n.name)) visible.add(n.name);
+  }
+  const vedges = [];
+  const seen = new Set();
+  for (const e of edges) {
+    if (!visible.has(e.from) || !visible.has(e.to)) continue;
+    const key = e.from + "→" + e.to + ":" + e.kind;
+    if (seen.has(key)) continue; seen.add(key);
+    vedges.push(e);
+  }
+  const vnodes = [...byName.values()].filter((n) => visible.has(n.name))
+    .map((n) => ({ name: n.name, kind: n.kind, builtin: !!n.builtin }));
+  return { nodes: vnodes, edges: vedges };
+}
+
+function nodeWidth(name) { return Math.max(78, name.length * 7.2 + 26); }
+const NODE_H = 32;
+
+// deterministic force-directed layout. No RNG anywhere: seed positions from the node index
+// (golden-angle spread) + a per-kind vertical band (interfaces up, enums down, classes center),
+// then run a FIXED number of Fruchterman-Reingold iterations with fixed constants. Same input
+// shape => byte-identical output => stable across polls and reloads.
+function computeLayout(nodes, edges) {
+  const N = nodes.length;
+  if (N === 0) return {};
+  const idx = new Map(nodes.map((n, i) => [n.name, i]));
+  const bandY = (kind) => kind === "interface" ? -300 : kind === "enum" ? 300 : 0;
+  const px = new Array(N), py = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const ang = i * 2.399963229728653;      // golden angle (radians)
+    const r = 60 + i * 9;
+    px[i] = Math.cos(ang) * r;
+    py[i] = bandY(nodes[i].kind) + Math.sin(ang) * r * 0.5;
+  }
+  const K = 150;                             // ideal spring length
+  const krep = K * K * 1.4;                  // repulsion strength
+  const iters = 420;
+  const adj = edges.map((e) => [idx.get(e.from), idx.get(e.to)]).filter(([a, b]) => a != null && b != null);
+  for (let it = 0; it < iters; it++) {
+    const dx = new Float64Array(N), dy = new Float64Array(N);
+    // repulsion between every pair
+    for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
+      let vx = px[i] - px[j], vy = py[i] - py[j];
+      let d2 = vx * vx + vy * vy; if (d2 < 0.01) { vx = (i - j) || 1; vy = (i + 1); d2 = vx * vx + vy * vy; }
+      const d = Math.sqrt(d2); const f = krep / d2;
+      dx[i] += (vx / d) * f; dy[i] += (vy / d) * f;
+      dx[j] -= (vx / d) * f; dy[j] -= (vy / d) * f;
+    }
+    // attraction along edges
+    for (const [a, b] of adj) {
+      let vx = px[a] - px[b], vy = py[a] - py[b];
+      const d = Math.sqrt(vx * vx + vy * vy) || 0.01; const f = (d * d) / K;
+      dx[a] -= (vx / d) * f; dy[a] -= (vy / d) * f;
+      dx[b] += (vx / d) * f; dy[b] += (vy / d) * f;
+    }
+    // vertical band gravity keeps the kinds in readable rows; mild horizontal centering
+    for (let i = 0; i < N; i++) {
+      dy[i] += (bandY(nodes[i].kind) - py[i]) * 0.08;
+      dx[i] += (0 - px[i]) * 0.005;
+    }
+    const t = 42 * (1 - it / iters) + 2;     // cooling schedule
+    for (let i = 0; i < N; i++) {
+      const dl = Math.sqrt(dx[i] * dx[i] + dy[i] * dy[i]) || 1;
+      px[i] += (dx[i] / dl) * Math.min(dl, t);
+      py[i] += (dy[i] / dl) * Math.min(dl, t);
+    }
+  }
+  const pos = {};
+  for (let i = 0; i < N; i++) pos[nodes[i].name] = { x: px[i], y: py[i] };
+  return pos;
+}
+
+// clip a center->center segment to the target node's bounding box, so the arrowhead lands on
+// the border rather than the middle of the box.
+function clipToBox(sx, sy, tx, ty, halfW, halfH) {
+  const vx = sx - tx, vy = sy - ty;
+  if (vx === 0 && vy === 0) return { x: tx, y: ty };
+  const sxScale = vx !== 0 ? halfW / Math.abs(vx) : Infinity;
+  const syScale = vy !== 0 ? halfH / Math.abs(vy) : Infinity;
+  const s = Math.min(sxScale, syScale);
+  return { x: tx + vx * s, y: ty + vy * s };
+}
+
+function GraphPane({ onOpenType }) {
+  const [rawNodes, setRawNodes] = useState([]);
+  const [hover, setHover] = useState(null);
+  const [sel, setSel] = useState(null);        // static-card node (name) when not drilling
+  const [view, setView] = useState({ tx: 0, ty: 0, s: 1 });
+  const svgRef = useRef(null);
+  const dragRef = useRef(null);
+  const fittedSig = useRef("");
+
+  usePoll(async () => {
+    const r = await evalSource("schema()");
+    if (r.value && r.value.nodes) setRawNodes(r.value.nodes);
+  }, 800, []);
+
+  const { nodes, edges } = useMemo(() => deriveGraph(rawNodes), [rawNodes]);
+  // structural signature: recompute layout ONLY when the shape changes, never on count ticks.
+  const sig = useMemo(() =>
+    nodes.map((n) => n.name + ":" + n.kind).sort().join("|") + "//" +
+    edges.map((e) => e.from + ">" + e.to + ":" + e.kind).sort().join("|"),
+    [nodes, edges]);
+  const pos = useMemo(() => computeLayout(nodes, edges), [sig]); // eslint-disable-line
+  const liveMap = useMemo(() => {
+    const m = {}; for (const n of rawNodes) m[n.name] = n.liveCount || 0; return m;
+  }, [rawNodes]);
+  const rawByName = useMemo(() => {
+    const m = {}; for (const n of rawNodes) m[n.name] = n; return m;
+  }, [rawNodes]);
+
+  // auto-fit once per new structural signature
+  const bounds = useMemo(() => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of nodes) {
+      const p = pos[n.name]; if (!p) continue;
+      const hw = nodeWidth(n.name) / 2;
+      minX = Math.min(minX, p.x - hw); maxX = Math.max(maxX, p.x + hw);
+      minY = Math.min(minY, p.y - NODE_H); maxY = Math.max(maxY, p.y + NODE_H);
+    }
+    if (!isFinite(minX)) return { minX: -200, minY: -200, maxX: 200, maxY: 200 };
+    return { minX, minY, maxX, maxY };
+  }, [sig, pos]); // eslint-disable-line
+
+  useEffect(() => {
+    if (fittedSig.current === sig || !svgRef.current || !nodes.length) return;
+    const el = svgRef.current.getBoundingClientRect();
+    const w = bounds.maxX - bounds.minX + 120, h = bounds.maxY - bounds.minY + 120;
+    const s = Math.min(el.width / w, el.height / h, 1.4);
+    setView({ s, tx: el.width / 2 - ((bounds.minX + bounds.maxX) / 2) * s, ty: el.height / 2 - ((bounds.minY + bounds.maxY) / 2) * s });
+    fittedSig.current = sig;
+  }, [sig, bounds, nodes.length]);
+
+  const onWheel = useCallback((e) => {
+    e.preventDefault();
+    const rect = svgRef.current.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    setView((v) => {
+      const ns = Math.max(0.25, Math.min(3, v.s * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
+      const k = ns / v.s;
+      return { s: ns, tx: mx - (mx - v.tx) * k, ty: my - (my - v.ty) * k };
+    });
+  }, []);
+  const onDown = useCallback((e) => {
+    if (e.target.closest(".gnode")) return;    // let node clicks through
+    dragRef.current = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty };
+  }, [view]);
+  const onMove = useCallback((e) => {
+    if (!dragRef.current) return;
+    const d = dragRef.current;
+    setView((v) => ({ ...v, tx: d.tx + (e.clientX - d.x), ty: d.ty + (e.clientY - d.y) }));
+  }, []);
+  const onUp = useCallback(() => { dragRef.current = null; }, []);
+
+  const clickNode = useCallback((n) => {
+    const live = liveMap[n.name] || 0;
+    if ((n.kind === "class" || n.kind === "object") && live > 0) { onOpenType(n.name); return; }
+    setSel(sel === n.name ? null : n.name);    // static card toggle
+  }, [liveMap, onOpenType, sel]);
+
+  const connected = (name) => hover && (name === hover || edges.some((e) =>
+    (e.from === hover && e.to === name) || (e.to === hover && e.from === name)));
+
+  return html`
+    <div id="graphwrap">
+      <svg id="graph" ref=${svgRef}
+           onWheel=${onWheel} onPointerDown=${onDown} onPointerMove=${onMove}
+           onPointerUp=${onUp} onPointerLeave=${onUp}>
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="arrowhead" />
+          </marker>
+          <marker id="arrowhi" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="arrowhead hi" />
+          </marker>
+        </defs>
+        <g transform=${`translate(${view.tx},${view.ty}) scale(${view.s})`}>
+          ${edges.map((e, i) => {
+            const a = pos[e.from], b = pos[e.to];
+            if (!a || !b) return null;
+            const hw = nodeWidth(e.to) / 2, hh = NODE_H / 2 + 3;
+            const p2 = clipToBox(a.x, a.y, b.x, b.y, hw, hh);
+            const hi = hover && (e.from === hover || e.to === hover);
+            const cls = "gedge " + e.kind + (hi ? " hi" : hover ? " dim" : "");
+            return html`<line key=${i} x1=${a.x} y1=${a.y} x2=${p2.x} y2=${p2.y}
+              class=${cls} data-from=${e.from} data-to=${e.to} data-kind=${e.kind}
+              marker-end=${hi ? "url(#arrowhi)" : "url(#arrow)"} />`;
+          })}
+          ${nodes.map((n) => {
+            const p = pos[n.name]; if (!p) return null;
+            const w = nodeWidth(n.name), h = NODE_H;
+            const live = liveMap[n.name] || 0;
+            const dim = hover && !connected(n.name);
+            const cls = `gnode ${n.kind}` + (dim ? " dim" : "") + (sel === n.name ? " sel" : "");
+            return html`<g key=${n.name} class=${cls} data-name=${n.name} data-kind=${n.kind} data-live=${live} transform=${`translate(${p.x},${p.y})`}
+                 onPointerEnter=${() => setHover(n.name)} onPointerLeave=${() => setHover(null)}
+                 onClick=${() => clickNode(n)}>
+              <rect x=${-w / 2} y=${-h / 2} width=${w} height=${h} rx=${n.kind === "interface" ? 15 : n.kind === "enum" ? 3 : 7} class="gbox" />
+              <text class="glabel" text-anchor="middle" dy="0.32em">${n.name}</text>
+              <g transform=${`translate(${w / 2 - 3},${-h / 2 + 3})`}>
+                <circle r="9" class=${"gbadge" + (live > 0 ? " live" : "")} />
+                <text class="gcount" text-anchor="middle" dy="0.32em">${live}</text>
+              </g>
+            </g>`;
+          })}
+        </g>
+      </svg>
+      <div id="glegend">
+        <div class="gl-row"><span class="gl-chip class"></span>class</div>
+        <div class="gl-row"><span class="gl-chip object"></span>object</div>
+        <div class="gl-row"><span class="gl-chip interface"></span>interface</div>
+        <div class="gl-row"><span class="gl-chip enum"></span>enum</div>
+        <div class="gl-sep"></div>
+        <div class="gl-row"><span class="gl-line field"></span>field ref</div>
+        <div class="gl-row"><span class="gl-line implements"></span>implements</div>
+        <div class="gl-hint">scroll = zoom · drag = pan · click a node</div>
+      </div>
+      ${sel ? html`<${NodeCard} node=${rawByName[sel]} live=${liveMap[sel] || 0} onClose=${() => setSel(null)} onBrowse=${() => { onOpenType(sel); setSel(null); }} />` : ""}
+    </div>`;
+}
+
+// static field/method/variant card — shown when clicking a node with no live instances
+// (the inspect state), or an interface/enum. Reuses the schema() payload; no extra eval.
+function NodeCard({ node, live, onClose, onBrowse }) {
+  if (!node) return null;
+  return html`
+    <aside id="nodecard">
+      <div class="nc-head">
+        <span class="nc-kind ${node.kind}">${node.kind}</span>
+        <span class="nc-name">${node.name}</span>
+        <button class="ghost-btn" onClick=${onClose}>close</button>
+      </div>
+      ${node.implements && node.implements.length ? html`<div class="nc-sub">implements ${node.implements.join(", ")}</div>` : ""}
+      ${node.implementors && node.implementors.length ? html`<div class="nc-sub">implemented by ${node.implementors.join(", ")}</div>` : ""}
+      ${(node.kind === "class" || node.kind === "object") ? html`
+        <div class="nc-count ${live > 0 ? "live" : ""}">${live} live instance${live === 1 ? "" : "s"}
+          ${live > 0 ? html`<button class="invoke-btn" onClick=${onBrowse}>browse →</button>` : ""}</div>` : ""}
+      ${node.fields && node.fields.length ? html`
+        <div class="nc-section"><h4>fields</h4>
+          ${node.fields.map((f) => html`<div class="nc-field" key=${f.name}>
+            <span class="nc-fname">${f.name}</span><span class="nc-ftype">${f.type}</span></div>`)}
+        </div>` : ""}
+      ${node.variants && node.variants.length ? html`
+        <div class="nc-section"><h4>variants</h4>
+          ${node.variants.map((v) => html`<div class="nc-field" key=${v.name}>
+            <span class="nc-fname">${v.name}</span><span class="nc-ftype">${v.payload && v.payload.length ? "(" + v.payload.join(", ") + ")" : ""}</span></div>`)}
+        </div>` : ""}
+      ${node.methods && node.methods.length ? html`
+        <div class="nc-section"><h4>methods</h4>
+          ${node.methods.map((m) => html`<div class="nc-method" key=${m.name}>
+            ${m.name}(${m.params.map((p) => p.name + ": " + p.type).join(", ")}) <span class="mret">→ ${m.returns}</span></div>`)}
+        </div>` : ""}
+    </aside>`;
+}
+
 // ===================== app root =====================
 function App() {
   const [schema, setSchema] = useState([]);
@@ -586,6 +875,7 @@ function App() {
   const trendRef = useRef({});
 
   const [route, setRoute] = useState({ view: "index", typeName: null, ref: null });
+  const [mode, setMode] = useState("graph");   // "graph" (landing) | "browse" (rail + panes)
   const [crumbs, setCrumbs] = useState([{ label: "types" }]);
   const [ifaceOpen, setIfaceOpenState] = useState({});
   const [replOpen, setReplOpen] = useState(false);
@@ -677,6 +967,10 @@ function App() {
   const nav = useMemo(() => ({ openTable, openDetail, goIndex, navigateRef, goCrumb }),
     [openTable, openDetail, goIndex, navigateRef, goCrumb]);
 
+  // graph node click: for a class with live instances, drill into the browse view's table;
+  // otherwise GraphPane shows a static card in place (handled inside GraphPane).
+  const onGraphOpen = useCallback((name) => { setMode("browse"); openTable(name); }, [openTable]);
+
   let pane;
   if (route.view === "table") pane = html`<${TablePane} name=${route.typeName} schema=${schema} />`;
   else if (route.view === "detail") pane = html`<${DetailPane} cls=${route.ref.class} slot=${route.ref.slot} gen=${route.ref.gen} schema=${schema} onEditSource=${openCodePanel} />`;
@@ -684,14 +978,16 @@ function App() {
 
   return html`
     <${NavContext.Provider} value=${nav}>
-      <${TopBar} onGlobalSearch=${globalSearch} onToggleTranscript=${() => setTxOpen((o) => !o)} />
-      <div id="layout">
-        <${TypeRail} schema=${schema} trend=${trend} route=${route} ifaceOpen=${ifaceOpen} setIfaceOpen=${setIfaceOpen} />
-        <main id="content">
-          <${Breadcrumbs} crumbs=${crumbs} />
-          <div id="pane">${pane}</div>
-        </main>
-      </div>
+      <${TopBar} onGlobalSearch=${globalSearch} onToggleTranscript=${() => setTxOpen((o) => !o)} mode=${mode} setMode=${setMode} />
+      ${mode === "graph"
+        ? html`<div id="layout"><${GraphPane} onOpenType=${onGraphOpen} /></div>`
+        : html`<div id="layout">
+            <${TypeRail} schema=${schema} trend=${trend} route=${route} ifaceOpen=${ifaceOpen} setIfaceOpen=${setIfaceOpen} />
+            <main id="content">
+              <${Breadcrumbs} crumbs=${crumbs} />
+              <div id="pane">${pane}</div>
+            </main>
+          </div>`}
       <${ReplDock} open=${replOpen} setOpen=${setReplOpen} route=${route} />
       <${CodePanel} session=${codeSession} text=${codeText} setText=${setCodeText} onClose=${() => setCodeSession(null)} />
       <${TranscriptDrawer} open=${txOpen} onClose=${() => setTxOpen(false)} />

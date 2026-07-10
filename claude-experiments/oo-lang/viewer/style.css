@@ -240,3 +240,72 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
 .tx-res::before { content: "← "; color: var(--c-enum); }
 .tx-res.err::before { color: var(--danger); }
 .tx-time { color: var(--fg-faint); font-size: 10px; }
+
+/* ---------- view toggle (Graph | List) ---------- */
+.viewtoggle { display: flex; gap: 0; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.vt-btn { background: transparent; border: none; color: var(--fg-dim); padding: 5px 13px; font-size: 12px; }
+.vt-btn:hover { color: var(--fg); }
+.vt-btn.active { background: var(--accent-soft); color: var(--accent); }
+
+/* ---------- class-relationship graph ---------- */
+#graphwrap { position: relative; flex: 1; min-width: 0; min-height: 0; overflow: hidden; background:
+  radial-gradient(circle at 50% 40%, var(--bg-elev) 0%, var(--bg) 70%); }
+#graph { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+#graph:active { cursor: grabbing; }
+
+.gedge { stroke: var(--fg-faint); stroke-width: 1.3; opacity: 0.55; fill: none; }
+.gedge.implements { stroke-dasharray: 5 4; stroke: var(--c-enum); opacity: 0.65; }
+.gedge.generic { stroke-dasharray: 2 3; stroke: var(--c-number); }
+.gedge.hi { stroke: var(--accent); stroke-width: 2.2; opacity: 1; }
+.gedge.dim { opacity: 0.12; }
+.arrowhead { fill: var(--fg-faint); }
+.arrowhead.hi { fill: var(--accent); }
+
+.gnode { cursor: pointer; }
+.gnode .gbox { fill: var(--bg-elev2); stroke: var(--c-ref); stroke-width: 1.6; transition: opacity .15s; }
+.gnode.object .gbox { stroke: var(--c-number); stroke-width: 2.2; }
+.gnode.interface .gbox { stroke: var(--c-enum); stroke-dasharray: 6 3; fill: transparent; }
+.gnode.enum .gbox { stroke: var(--c-bool); }
+.gnode .glabel { fill: var(--fg); font-family: var(--mono); font-size: 12px; pointer-events: none; }
+.gnode.interface .glabel { font-style: italic; }
+.gnode:hover .gbox { filter: brightness(1.25); stroke-width: 2.4; }
+.gnode.sel .gbox { stroke: var(--accent); stroke-width: 2.6; }
+.gnode.dim { opacity: 0.22; }
+.gbadge { fill: var(--line); stroke: var(--bg); stroke-width: 1.5; }
+.gbadge.live { fill: var(--accent); }
+.gcount { fill: var(--fg-dim); font-family: var(--mono); font-size: 10px; pointer-events: none; }
+.gbadge.live + .gcount { fill: #fff; }
+
+#glegend { position: absolute; left: 14px; bottom: 14px; background: var(--bg-elev); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 9px 11px; font-size: 11px; color: var(--fg-dim); display: flex; flex-direction: column; gap: 4px; }
+.gl-row { display: flex; align-items: center; gap: 7px; }
+.gl-chip { width: 13px; height: 11px; border-radius: 3px; border: 1.6px solid var(--c-ref); background: var(--bg-elev2); }
+.gl-chip.object { border-color: var(--c-number); }
+.gl-chip.interface { border-color: var(--c-enum); border-style: dashed; background: transparent; border-radius: 6px; }
+.gl-chip.enum { border-color: var(--c-bool); }
+.gl-line { width: 16px; height: 0; border-top: 1.5px solid var(--fg-faint); }
+.gl-line.implements { border-top: 1.5px dashed var(--c-enum); }
+.gl-sep { height: 1px; background: var(--line); margin: 3px 0; }
+.gl-hint { color: var(--fg-faint); font-size: 10px; margin-top: 2px; max-width: 150px; }
+
+/* ---------- static node card (inspect / non-live click) ---------- */
+#nodecard { position: absolute; right: 14px; top: 14px; width: 320px; max-height: calc(100% - 28px); overflow-y: auto;
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius); padding: 13px 15px;
+  box-shadow: 0 8px 30px #0006; }
+.nc-head { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; }
+.nc-kind { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; padding: 2px 6px; border-radius: 4px;
+  border: 1px solid var(--c-ref); color: var(--c-ref); }
+.nc-kind.object { border-color: var(--c-number); color: var(--c-number); }
+.nc-kind.interface { border-color: var(--c-enum); color: var(--c-enum); }
+.nc-kind.enum { border-color: var(--c-bool); color: var(--c-bool); }
+.nc-name { font-family: var(--mono); font-size: 15px; font-weight: 600; flex: 1; }
+.nc-sub { color: var(--fg-dim); font-size: 11.5px; margin-bottom: 4px; }
+.nc-count { font-size: 12px; color: var(--fg-dim); margin: 6px 0; display: flex; align-items: center; gap: 8px; }
+.nc-count.live { color: var(--accent); }
+.nc-section { margin-top: 10px; }
+.nc-section h4 { margin: 0 0 5px; font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--fg-faint); }
+.nc-field { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; font-family: var(--mono); font-size: 12px; }
+.nc-fname { color: var(--c-key); }
+.nc-ftype { color: var(--fg-dim); }
+.nc-method { font-family: var(--mono); font-size: 11.5px; padding: 2px 0; color: var(--fg); }
+.nc-method .mret { color: var(--fg-dim); }
