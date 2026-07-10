@@ -1,0 +1,55 @@
+; main.coil — the `scry` CLI (Phase 1: front end only).
+;   scry parse-dump <file.scry>   parse and print the AST (stable golden format)
+;   scry run <file.scry>          hard-errors: not implemented until Phase 3
+(module app)
+(import "src/ioutil.coil" :use *)
+(import "src/lexer.coil" :use *)
+(import "src/ast.coil" :use *)
+(import "src/parser.coil" :use *)
+
+(defn read-file [(path (ptr i8))] (-> (ptr u8))
+  (let [file (fopen path c"rb")]
+    (if (= (cast i64 file) 0)
+      (do (w-cstr 2 c"scry: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n")
+          (exit (cast i32 74)) (cast (ptr u8) 0))
+      (do
+        (fseek file 0 (cast i32 2))
+        (let [file-size (ftell file)]
+          (rewind file)
+          (let [buffer (xalloc (+ file-size 1))]
+            (let [bytes-read (fread (cast (ptr i8) buffer) 1 file-size file)]
+              (store! (index buffer bytes-read) (cast u8 0))
+              (fclose file)
+              buffer)))))))
+
+(defn cstr-eq [(a (ptr i8)) (b (ptr i8))] (-> bool) (= (cast i64 (strcmp a b)) 0))
+
+(defn usage [] (-> i64)
+  (w-cstr 2 c"scry — the Scry compiler (Phase 1: front end)\n")
+  (w-cstr 2 c"usage:\n")
+  (w-cstr 2 c"  scry parse-dump <file.scry>   parse and print the AST\n")
+  (w-cstr 2 c"  scry run <file.scry>          (not implemented until Phase 3)\n")
+  0)
+
+(defn cmd-parse-dump [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (if (< argc 3)
+    (do (w-cstr 2 c"scry parse-dump: expected a file argument\n") 64)
+    (let [path (load (index argv 2))
+          src (read-file path)]
+      (if (= (lex-file src path) 1)
+        1
+        (do
+          (parser-init (lexer-tokens) path)
+          (dump-program (parse-program))
+          0)))))
+
+(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [n (cast i64 argc)]
+    (if (< n 2)
+      (do (usage) 64)
+      (let [sub (load (index argv 1))]
+        (cond
+          (cstr-eq sub c"parse-dump") (cmd-parse-dump n argv)
+          (cstr-eq sub c"run")
+            (do (w-cstr 2 c"scry run: not implemented until Phase 3\n") 2)
+          (do (w-cstr 2 c"scry: unknown command\n") (usage) 64))))))

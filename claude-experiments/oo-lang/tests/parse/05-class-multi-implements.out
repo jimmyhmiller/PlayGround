@@ -1,0 +1,20 @@
+(program
+  (class Worker
+    (implements
+      (type Runnable)
+      (type Tool))
+    (field id
+      (type Int))
+    (fn run
+      (params)
+      (type Void)
+      (block
+        (assign
+          (dot id
+            self)
+          (int 0))))
+    (fn name
+      (params)
+      (type String)
+      (block
+        (str "worker")))))

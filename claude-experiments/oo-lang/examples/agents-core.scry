@@ -1,0 +1,164 @@
+// file: agents/core.scry
+module agents.core
+
+enum AgentStatus {
+  Waiting
+  Running
+  Paused
+  Done
+}
+
+class Message {
+  role: String
+  content: String
+  createdAt: Int
+
+  fn init(role: String, content: String) {
+    self.role = role
+    self.content = content
+    self.createdAt = Clock.now()
+  }
+}
+
+class Conversation {
+  messages: List<Message>
+
+  fn init() { self.messages = List<Message>() }
+
+  fn append(m: Message) { self.messages.push(m) }
+
+  fn tokenEstimate() -> Int {
+    var total = 0
+    for m in self.messages { total = total + m.content.len() / 4 }
+    total
+  }
+}
+
+enum ToolError {
+  NotFound(String)
+  Failed(String)
+}
+
+// Tool heterogeneity via real interfaces (§2.3 — supersedes an earlier enum-dispatch
+// fallback): any class that implements Tool can live in Agent.tools below, with no
+// enum to edit when a new tool kind is added.
+interface Tool {
+  fn name() -> String
+  fn call(args: Map<String, String>) -> Result<String, ToolError>
+}
+
+class ShellTool implements Tool {
+  command: String
+
+  fn name() -> String { "shell" }
+
+  fn call(args: Map<String, String>) -> Result<String, ToolError> {
+    match args.get("cmd") {
+      Some(cmd) -> Ok(__builtin_run_shell(cmd))
+      None -> Err(ToolError.Failed("missing cmd arg"))
+    }
+  }
+}
+
+class SearchTool implements Tool {
+  index: String
+
+  fn name() -> String { "search" }
+
+  fn call(args: Map<String, String>) -> Result<String, ToolError> {
+    match args.get("q") {
+      Some(q) -> Ok("results for " + q + " in " + self.index)
+      None -> Err(ToolError.Failed("missing q arg"))
+    }
+  }
+}
+
+class Agent {
+  name: String
+  // Wrapped in Mutex<T> because the main thread's TUI render loop and the viewer's
+  // eval channel both read these fields while this agent's own worker thread (below)
+  // mutates them (§5.2). `tools` is not wrapped: only this agent's own thread ever
+  // touches it, by convention (§5.3, flagged OPEN — not statically enforced).
+  status: Mutex<AgentStatus>
+  conversation: Mutex<Conversation>
+  tools: List<Tool>
+
+  fn init(name: String, tools: List<Tool>) {
+    self.name = name
+    self.status = Mutex<AgentStatus>(AgentStatus.Waiting)
+    self.conversation = Mutex<Conversation>(Conversation())
+    self.tools = tools
+  }
+
+  // A later live edit adding a field to Agent would ship as a `migrate` block (§1.8)
+  // giving the new field's value for every live instance; this class, as written,
+  // needs none yet.
+
+  fn pause() {
+    self.status.lock()
+    self.status.set(AgentStatus.Paused)
+    self.status.unlock()
+  }
+
+  fn resume() {
+    self.status.lock()
+    self.status.set(AgentStatus.Waiting)
+    self.status.unlock()
+  }
+
+  fn findTool(name: String) -> Option<Tool> {
+    for t in self.tools {
+      if t.name() == name { return Some(t) }
+    }
+    None
+  }
+
+  // Runs on this agent's own worker thread (§5.1), driven by AgentWorker below.
+  // ScriptedModel (M4) returns synchronously and deterministically in the PoC, so this
+  // never actually blocks yet — but note for when it does: a blocking Llm.complete call
+  // parks this thread somewhere it can't reach a safepoint, so it does NOT cost only this
+  // agent. Per 02-runtime.md §7, request-global-stop then blocks waiting for this thread
+  // specifically, delaying every GC, shape migration, and viewer invoke/definition-eval
+  // process-wide for as long as the call is outstanding — other agents' threads keep
+  // running, but nothing that needs a full stop-the-world can land until this call returns.
+  fn runTurn() -> Result<(), AgentError> {
+    self.status.lock()
+    if self.status.get() != AgentStatus.Waiting {
+      self.status.unlock()
+      return Ok(())
+    }
+    self.status.set(AgentStatus.Running)
+    self.status.unlock()
+
+    self.conversation.lock()
+    let reply = Llm.complete(self.conversation.get())?
+    self.conversation.get().append(Message(role: "assistant", content: reply))
+    self.conversation.unlock()
+
+    self.status.lock()
+    self.status.set(AgentStatus.Waiting)
+    self.status.unlock()
+    Ok(())
+  }
+}
+
+// The thread this agent runs on (§5.1): implements Runnable rather than taking a bare
+// function value, since the PoC has no closures — the agent to drive is just a field.
+class AgentWorker implements Runnable {
+  agent: Agent
+
+  fn run() -> Void {
+    while true {
+      match self.agent.runTurn() {
+        Ok(_) -> {}
+        Err(e) -> Console.log("agent " + self.agent.name + " turn failed")
+      }
+      Clock.sleep(400)   // pace the demo: turns stay watchable, not instantaneous (§1.7)
+    }
+  }
+}
+
+object Clock {
+  fn now() -> Int { __builtin_epoch_millis() }
+  fn sleep(ms: Int) -> Void { __builtin_sleep_millis(ms) }   // safepoint-cooperative (§1.7)
+}

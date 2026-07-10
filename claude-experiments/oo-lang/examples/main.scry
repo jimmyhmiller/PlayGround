@@ -1,0 +1,35 @@
+// file: main.scry
+import std.collections.{List}
+import agents.core.{Agent, Tool, ShellTool, SearchTool, AgentWorker}
+import ui.tui.{Tui}
+
+fn main() {
+  let tools = List<Tool>()
+  tools.push(ShellTool(command: "sh"))
+  tools.push(SearchTool(index: "docs"))
+  // No enum wrapper needed — ShellTool and SearchTool sit side by side in one
+  // List<Tool> purely because both implement Tool (§2.3).
+
+  let researcher = Agent(name: "researcher", tools: tools)
+  let coder = Agent(name: "coder", tools: tools)
+  let reviewer = Agent(name: "reviewer", tools: tools)
+
+  let agents = List<Agent>()
+  agents.push(researcher)
+  agents.push(coder)
+  agents.push(reviewer)
+
+  // Each agent runs its own turn loop on its own real OS thread (§5.1, DECISIONS.md
+  // #4b) — no cooperative scheduler, no round-robin loop driving all three from one
+  // thread.
+  let handles = List<ThreadHandle>()
+  handles.push(Thread.spawn(AgentWorker(agent: researcher)))
+  handles.push(Thread.spawn(AgentWorker(agent: coder)))
+  handles.push(Thread.spawn(AgentWorker(agent: reviewer)))
+
+  // Tui.render reads each agent's Mutex-guarded status/conversation fields (§5.2) —
+  // the one place this file's code crosses threads.
+  while true {
+    Tui.render(agents)
+  }
+}

@@ -1,0 +1,407 @@
+; lexer.coil — Scry lexer. Produces a flat token stream with line:col spans.
+; String interpolation is "lexed as parts": an interpolated string becomes the
+; token sequence STR_BEGIN (CHUNK | INTERP_BEGIN <expr tokens> INTERP_END)* STR_END.
+(module lexer)
+(import "ioutil.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "alloc.coil" :use *)
+
+; ---- token kinds ----------------------------------------------------------
+(const TK_EOF 0)
+(const TK_IDENT 1)
+(const TK_INT 2)
+(const TK_FLOAT 3)
+; string parts
+(const TK_STR_BEGIN 4)
+(const TK_STR_CHUNK 5)
+(const TK_INTERP_BEGIN 6)
+(const TK_INTERP_END 7)
+(const TK_STR_END 8)
+; keywords
+(const TK_CLASS 10)
+(const TK_INTERFACE 11)
+(const TK_IMPLEMENTS 12)
+(const TK_ENUM 13)
+(const TK_OBJECT 14)
+(const TK_FN 15)
+(const TK_LET 16)
+(const TK_VAR 17)
+(const TK_IF 18)
+(const TK_ELSE 19)
+(const TK_WHILE 20)
+(const TK_FOR 21)
+(const TK_IN 22)
+(const TK_MATCH 23)
+(const TK_RETURN 24)
+(const TK_MIGRATE 25)
+(const TK_IMPORT 26)
+(const TK_MODULE 27)
+(const TK_SELF 28)
+(const TK_TRUE 29)
+(const TK_FALSE 30)
+(const TK_AS 31)
+; punctuation / operators
+(const TK_LPAREN 40)
+(const TK_RPAREN 41)
+(const TK_LBRACE 42)
+(const TK_RBRACE 43)
+(const TK_LBRACK 44)
+(const TK_RBRACK 45)
+(const TK_ARROW 46)      ; ->
+(const TK_FATARROW 47)   ; =>
+(const TK_COLONCOLON 48) ; ::
+(const TK_COLON 49)
+(const TK_COMMA 50)
+(const TK_SEMICOLON 51)
+(const TK_DOT 52)
+(const TK_QUESTION 53)
+(const TK_LT 54)
+(const TK_LE 55)
+(const TK_GT 56)
+(const TK_GE 57)
+(const TK_EQEQ 58)
+(const TK_NE 59)
+(const TK_EQ 60)
+(const TK_PLUS 61)
+(const TK_MINUS 62)
+(const TK_STAR 63)
+(const TK_SLASH 64)
+(const TK_PERCENT 65)
+(const TK_ANDAND 66)
+(const TK_OROR 67)
+(const TK_BANG 68)
+(const TK_ERROR 69)
+
+(defstruct Token
+  [(kind i64) (start (ptr u8)) (len i64) (line i64) (col i64) (ival i64) (fval f64)])
+
+(defstruct Lexer
+  [(src (ptr u8)) (cur (ptr u8)) (line i64) (col i64)
+   (tok-start (ptr u8)) (tok-line i64) (tok-col i64)
+   (toks (ArrayList Token))
+   (had-error bool)
+   (filename (ptr i8))
+   (interp (array i64 32)) (interp-n i64)])
+
+(defn lx [] (-> (ptr Lexer)) (alloc-static Lexer))
+(defn alc-global [] (-> (ptr Allocator)) (malloc-allocator))
+
+; ---- low-level cursor ------------------------------------------------------
+(defn l-peek [] (-> i64) (cast i64 (load (load (field (lx) cur)))))
+(defn l-peek2 [] (-> i64)
+  (if (= (l-peek) 0) 0 (cast i64 (load (index (load (field (lx) cur)) 1)))))
+(defn l-at-end [] (-> bool) (= (l-peek) 0))
+
+(defn l-advance [] (-> i64)
+  (let [c (cast i64 (load (load (field (lx) cur))))]
+    (store! (field (lx) cur) (index (load (field (lx) cur)) 1))
+    (if (= c \newline)
+      (do (store! (field (lx) line) (+ (load (field (lx) line)) 1))
+          (store! (field (lx) col) 1) 0)
+      (do (store! (field (lx) col) (+ (load (field (lx) col)) 1)) 0))
+    c))
+
+(defn l-match [(expected i64)] (-> bool)
+  (if (l-at-end)
+    false
+    (if (!= (l-peek) expected)
+      false
+      (do (l-advance) true))))
+
+(defn is-alpha [(c i64)] (-> bool)
+  (or (and (>= c \a) (<= c \z)) (or (and (>= c \A) (<= c \Z)) (= c \_))))
+(defn is-digit [(c i64)] (-> bool) (and (>= c \0) (<= c \9)))
+(defn is-alnum [(c i64)] (-> bool) (or (is-alpha c) (is-digit c)))
+
+; ---- diagnostics -----------------------------------------------------------
+(defn report-at [(line i64) (col i64) (msg (ptr i8))] (-> i64)
+  (w-cstr 2 (load (field (lx) filename)))
+  (w-cstr 2 c":")
+  (w-int 2 line)
+  (w-cstr 2 c":")
+  (w-int 2 col)
+  (w-cstr 2 c": error: ")
+  (w-cstr 2 msg)
+  (w-cstr 2 c"\n")
+  0)
+
+(defn lex-error [(msg (ptr i8))] (-> i64)
+  (store! (field (lx) had-error) true)
+  (report-at (load (field (lx) tok-line)) (load (field (lx) tok-col)) msg)
+  (push-simple TK_ERROR)
+  0)
+
+; ---- token emission --------------------------------------------------------
+(defn push-tok [(kind i64) (start (ptr u8)) (len i64) (line i64) (col i64) (iv i64) (fv f64)] (-> i64)
+  (let [(mut t) (zeroed Token)]
+    (store! (field t kind) kind)
+    (store! (field t start) start)
+    (store! (field t len) len)
+    (store! (field t line) line)
+    (store! (field t col) col)
+    (store! (field t ival) iv)
+    (store! (field t fval) fv)
+    (al-push! (mut (field (lx) toks)) (load t))
+    0))
+
+(defn cur-len [] (-> i64)
+  (- (cast i64 (load (field (lx) cur))) (cast i64 (load (field (lx) tok-start)))))
+
+(defn push-simple [(kind i64)] (-> i64)
+  (push-tok kind (load (field (lx) tok-start)) (cur-len)
+            (load (field (lx) tok-line)) (load (field (lx) tok-col)) 0 0.0))
+
+(defn push-here [(kind i64)] (-> i64)
+  (push-tok kind (load (field (lx) cur)) 0
+            (load (field (lx) line)) (load (field (lx) col)) 0 0.0))
+
+; ---- whitespace + comments -------------------------------------------------
+(defn skip-block-comment [] (-> i64)
+  (loop
+    (cond
+      (l-at-end) (break)
+      (and (= (l-peek) \*) (= (l-peek2) \/)) (do (l-advance) (l-advance) (break))
+      (do (l-advance) 0)))
+  0)
+
+(defn skip-trivia [] (-> i64)
+  (loop
+    (let [c (l-peek)]
+      (cond
+        (= c \space)   (do (l-advance) 0)
+        (= c \tab)     (do (l-advance) 0)
+        (= c \return)  (do (l-advance) 0)
+        (= c \newline) (do (l-advance) 0)
+        (= c \/)
+          (cond
+            (= (l-peek2) \/) (do (loop (if (and (!= (l-peek) \newline) (not (l-at-end))) (do (l-advance) 0) (break))) 0)
+            (= (l-peek2) \*) (do (l-advance) (l-advance) (skip-block-comment) 0)
+            (break))
+        (break))))
+  0)
+
+; ---- identifiers / keywords ------------------------------------------------
+(defn tok-eq [(start (ptr u8)) (len i64) (s (ptr i8))] (-> bool)
+  (if (!= len (strlen s))
+    false
+    (let [(mut i) 0 (mut ok) true]
+      (loop
+        (if (and (load ok) (< (load i) len))
+          (do
+            (if (!= (cast i64 (load (index start (load i))))
+                    (cast i64 (load (index (cast (ptr u8) s) (load i)))))
+              (do (store! ok false) 0) 0)
+            (store! i (+ (load i) 1)) 0)
+          (break)))
+      (load ok))))
+
+(defn ident-kind [] (-> i64)
+  (let [s (load (field (lx) tok-start)) n (cur-len)]
+    (cond
+      (tok-eq s n c"class")      TK_CLASS
+      (tok-eq s n c"interface")  TK_INTERFACE
+      (tok-eq s n c"implements") TK_IMPLEMENTS
+      (tok-eq s n c"enum")       TK_ENUM
+      (tok-eq s n c"object")     TK_OBJECT
+      (tok-eq s n c"fn")         TK_FN
+      (tok-eq s n c"let")        TK_LET
+      (tok-eq s n c"var")        TK_VAR
+      (tok-eq s n c"if")         TK_IF
+      (tok-eq s n c"else")       TK_ELSE
+      (tok-eq s n c"while")      TK_WHILE
+      (tok-eq s n c"for")        TK_FOR
+      (tok-eq s n c"in")         TK_IN
+      (tok-eq s n c"match")      TK_MATCH
+      (tok-eq s n c"return")     TK_RETURN
+      (tok-eq s n c"migrate")    TK_MIGRATE
+      (tok-eq s n c"import")     TK_IMPORT
+      (tok-eq s n c"module")     TK_MODULE
+      (tok-eq s n c"self")       TK_SELF
+      (tok-eq s n c"as")         TK_AS
+      (tok-eq s n c"true")       TK_TRUE
+      (tok-eq s n c"false")      TK_FALSE
+      TK_IDENT)))
+
+(defn scan-ident [] (-> i64)
+  (loop (if (is-alnum (l-peek)) (do (l-advance) 0) (break)))
+  (push-simple (ident-kind)))
+
+; ---- numbers ---------------------------------------------------------------
+(defn parse-int [(p (ptr u8)) (n i64)] (-> i64)
+  (let [(mut i) 0 (mut v) 0]
+    (loop
+      (if (< (load i) n)
+        (do (store! v (+ (* (load v) 10) (- (cast i64 (load (index p (load i)))) \0)))
+            (store! i (+ (load i) 1)) 0)
+        (break)))
+    (load v)))
+
+(defn parse-float [(p (ptr u8))] (-> f64)
+  (let [endp (alloc-stack (ptr i8))]
+    (strtod (cast (ptr i8) p) endp)))
+
+(defn scan-number [] (-> i64)
+  (loop (if (is-digit (l-peek)) (do (l-advance) 0) (break)))
+  (if (and (= (l-peek) \.) (is-digit (l-peek2)))
+    (do
+      (l-advance)
+      (loop (if (is-digit (l-peek)) (do (l-advance) 0) (break)))
+      (push-tok TK_FLOAT (load (field (lx) tok-start)) (cur-len)
+                (load (field (lx) tok-line)) (load (field (lx) tok-col))
+                0 (parse-float (load (field (lx) tok-start)))))
+    (push-tok TK_INT (load (field (lx) tok-start)) (cur-len)
+              (load (field (lx) tok-line)) (load (field (lx) tok-col))
+              (parse-int (load (field (lx) tok-start)) (cur-len)) 0.0)))
+
+; ---- strings + interpolation ----------------------------------------------
+(defn hexval [(c i64)] (-> i64)
+  (cond
+    (and (>= c \0) (<= c \9)) (- c \0)
+    (and (>= c \a) (<= c \f)) (+ 10 (- c \a))
+    (and (>= c \A) (<= c \F)) (+ 10 (- c \A))
+    -1))
+
+(defn read-2hex [] (-> i64)
+  (let [h1 (hexval (l-peek))]
+    (if (< h1 0)
+      -1
+      (do
+        (l-advance)
+        (let [h2 (hexval (l-peek))]
+          (if (< h2 0) -1 (do (l-advance) (+ (* h1 16) h2))))))))
+
+(defn interp-push [] (-> i64)
+  (if (>= (load (field (lx) interp-n)) 32)
+    (lex-error c"string interpolation nested too deep")
+    (do
+      (store! (index (field (lx) interp) (load (field (lx) interp-n))) 0)
+      (store! (field (lx) interp-n) (+ (load (field (lx) interp-n)) 1))
+      0)))
+
+(defn interp-top [] (-> i64)
+  (load (index (field (lx) interp) (- (load (field (lx) interp-n)) 1))))
+(defn interp-set-top [(v i64)] (-> i64)
+  (store! (index (field (lx) interp) (- (load (field (lx) interp-n)) 1)) v) 0)
+
+; scan the literal-text portion of a string, decode escapes, push a CHUNK,
+; then push the terminator (INTERP_BEGIN or STR_END) and set up state.
+(defn scan-string-continue [] (-> i64)
+  (let [cap (+ (strlen (cast (ptr i8) (load (field (lx) cur)))) 1)
+        buf (xalloc cap)
+        (mut n) 0
+        cl (load (field (lx) line))
+        cc (load (field (lx) col))]
+    (loop
+      (let [c (l-peek)]
+        (cond
+          (= c 0) (break)
+          (= c \") (break)
+          (and (= c \$) (= (l-peek2) \{)) (break)
+          (= c \\)
+            (do
+              (l-advance)
+              (let [e (l-peek)]
+                (cond
+                  (= e \n) (do (l-advance) (store! (index buf (load n)) (cast u8 \newline)) (store! n (+ (load n) 1)) 0)
+                  (= e \t) (do (l-advance) (store! (index buf (load n)) (cast u8 \tab)) (store! n (+ (load n) 1)) 0)
+                  (= e \\) (do (l-advance) (store! (index buf (load n)) (cast u8 \\)) (store! n (+ (load n) 1)) 0)
+                  (= e \") (do (l-advance) (store! (index buf (load n)) (cast u8 \")) (store! n (+ (load n) 1)) 0)
+                  (= e \x)
+                    (do
+                      (l-advance)
+                      (let [hv (read-2hex)]
+                        (if (< hv 0)
+                          (lex-error c"invalid \\xHH escape (need two hex digits)")
+                          (do (store! (index buf (load n)) (cast u8 hv)) (store! n (+ (load n) 1)) 0))))
+                  (lex-error c"invalid string escape (only \\n \\t \\\\ \\\" \\xHH)"))))
+          (do (store! (index buf (load n)) (cast u8 (l-advance))) (store! n (+ (load n) 1)) 0))))
+    (if (> (load n) 0)
+      (push-tok TK_STR_CHUNK buf (load n) cl cc 0 0.0)
+      0)
+    (cond
+      (= (l-peek) \")
+        (do (l-advance) (push-here TK_STR_END) 0)
+      (and (= (l-peek) \$) (= (l-peek2) \{))
+        (do (l-advance) (l-advance) (push-here TK_INTERP_BEGIN) (interp-push) 0)
+      (do (lex-error c"unterminated string literal") (push-here TK_STR_END) 0))))
+
+(defn scan-string-body [] (-> i64)
+  (push-simple TK_STR_BEGIN)
+  (scan-string-continue))
+
+; ---- brace handling (interpolation aware) ----------------------------------
+(defn emit-lbrace [] (-> i64)
+  (if (> (load (field (lx) interp-n)) 0) (interp-set-top (+ (interp-top) 1)) 0)
+  (push-simple TK_LBRACE))
+
+(defn emit-rbrace [] (-> i64)
+  (if (and (> (load (field (lx) interp-n)) 0) (= (interp-top) 0))
+    (do
+      (push-simple TK_INTERP_END)
+      (store! (field (lx) interp-n) (- (load (field (lx) interp-n)) 1))
+      (scan-string-continue))
+    (do
+      (if (> (load (field (lx) interp-n)) 0) (interp-set-top (- (interp-top) 1)) 0)
+      (push-simple TK_RBRACE))))
+
+; ---- single token ----------------------------------------------------------
+(defn scan-one [] (-> i64)
+  (skip-trivia)
+  (store! (field (lx) tok-start) (load (field (lx) cur)))
+  (store! (field (lx) tok-line) (load (field (lx) line)))
+  (store! (field (lx) tok-col) (load (field (lx) col)))
+  (if (l-at-end)
+    (push-simple TK_EOF)
+    (let [c (l-advance)]
+      (cond
+        (is-alpha c) (scan-ident)
+        (is-digit c) (scan-number)
+        (= c \") (scan-string-body)
+        (= c \() (push-simple TK_LPAREN)
+        (= c \)) (push-simple TK_RPAREN)
+        (= c \{) (emit-lbrace)
+        (= c \}) (emit-rbrace)
+        (= c \[) (push-simple TK_LBRACK)
+        (= c \]) (push-simple TK_RBRACK)
+        (= c \,) (push-simple TK_COMMA)
+        (= c \;) (push-simple TK_SEMICOLON)
+        (= c \.) (push-simple TK_DOT)
+        (= c \?) (push-simple TK_QUESTION)
+        (= c \+) (push-simple TK_PLUS)
+        (= c \*) (push-simple TK_STAR)
+        (= c \/) (push-simple TK_SLASH)
+        (= c \%) (push-simple TK_PERCENT)
+        (= c \-) (if (l-match \>) (push-simple TK_ARROW) (push-simple TK_MINUS))
+        (= c \=) (cond (l-match \=) (push-simple TK_EQEQ) (l-match \>) (push-simple TK_FATARROW) (push-simple TK_EQ))
+        (= c \!) (if (l-match \=) (push-simple TK_NE) (push-simple TK_BANG))
+        (= c \<) (if (l-match \=) (push-simple TK_LE) (push-simple TK_LT))
+        (= c \>) (if (l-match \=) (push-simple TK_GE) (push-simple TK_GT))
+        (= c \:) (if (l-match \:) (push-simple TK_COLONCOLON) (push-simple TK_COLON))
+        (= c \&) (if (l-match \&) (push-simple TK_ANDAND) (lex-error c"unexpected '&' (did you mean '&&'?)"))
+        (= c \|) (if (l-match \|) (push-simple TK_OROR) (lex-error c"unexpected '|' (did you mean '||'?)"))
+        (lex-error c"unexpected character")))))
+
+(defn last-tok-kind [] (-> i64)
+  (let [n (al-len (load (field (lx) toks)))]
+    (if (= n 0)
+      TK_EOF
+      (let [(mut t) (al-get (load (field (lx) toks)) (- n 1))]
+        (load (field t kind))))))
+
+; lex the whole file; returns 1 on any lexical error, else 0.
+(defn lex-file [(src (ptr u8)) (filename (ptr i8))] (-> i64)
+  (store! (field (lx) src) src)
+  (store! (field (lx) cur) src)
+  (store! (field (lx) line) 1)
+  (store! (field (lx) col) 1)
+  (store! (field (lx) filename) filename)
+  (store! (field (lx) had-error) false)
+  (store! (field (lx) interp-n) 0)
+  (store! (field (lx) toks) (al-new [Token] (alc-global)))
+  (loop
+    (scan-one)
+    (if (= (last-tok-kind) TK_EOF) (break) 0))
+  (if (load (field (lx) had-error)) 1 0))
+
+(defn lexer-tokens [] (-> (ArrayList Token)) (load (field (lx) toks)))
+(defn lexer-filename [] (-> (ptr i8)) (load (field (lx) filename)))

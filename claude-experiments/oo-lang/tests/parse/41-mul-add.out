@@ -1,0 +1,16 @@
+(program
+  (fn main
+    (params)
+    (block
+      (let a
+        (binary +
+          (binary *
+            (int 1)
+            (int 2))
+          (int 3)))
+      (let b
+        (binary -
+          (binary -
+            (int 1)
+            (int 2))
+          (int 3))))))

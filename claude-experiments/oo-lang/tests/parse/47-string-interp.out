@@ -1,0 +1,14 @@
+(program
+  (fn main
+    (params)
+    (block
+      (let g
+        (str-interp
+          (str "Hello, ")
+          (dot name
+            self)
+          (str ", you have ")
+          (call
+            (dot len
+              (id tasks)))
+          (str " tasks"))))))

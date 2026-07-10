@@ -1,0 +1,11 @@
+(program
+  (class ShellTool
+    (implements
+      (type Tool))
+    (field command
+      (type String))
+    (fn name
+      (params)
+      (type String)
+      (block
+        (str "shell")))))

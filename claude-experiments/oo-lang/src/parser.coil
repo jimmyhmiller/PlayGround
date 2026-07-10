@@ -1,0 +1,652 @@
+; parser.coil — Scry recursive-descent parser over the token stream.
+; Fail-fast on the first parse error: report file:line:col + offending token,
+; then exit(65). (The task permits fail-fast; see docs/06-implementation.md.)
+(module parser)
+(import "ioutil.coil" :use *)
+(import "lexer.coil" :use *)
+(import "ast.coil" :use *)
+(import "arraylist.coil" :use *)
+
+(defstruct Parser
+  [(tdata (ptr Token)) (tlen i64) (idx i64) (filename (ptr i8)) (had-error bool)])
+(defn ps [] (-> (ptr Parser)) (alloc-static Parser))
+
+(defn parser-init [(toks (ArrayList Token)) (fname (ptr i8))] (-> i64)
+  (let [l toks]
+    (store! (field (ps) tdata) (load (field l data)))
+    (store! (field (ps) tlen) (load (field l len))))
+  (store! (field (ps) idx) 0)
+  (store! (field (ps) filename) fname)
+  (store! (field (ps) had-error) false)
+  0)
+
+; ---- token cursor ----------------------------------------------------------
+(defn cur-idx [] (-> i64) (load (field (ps) idx)))
+(defn tok-ptr [(i i64)] (-> (ptr Token)) (index (load (field (ps) tdata)) i))
+(defn cur-ptr [] (-> (ptr Token)) (tok-ptr (cur-idx)))
+(defn cur-kind [] (-> i64) (load (field (cur-ptr) kind)))
+(defn cur-line [] (-> i64) (load (field (cur-ptr) line)))
+(defn cur-col [] (-> i64) (load (field (cur-ptr) col)))
+(defn peek-kind [(off i64)] (-> i64)
+  (let [i (+ (cur-idx) off)]
+    (if (>= i (load (field (ps) tlen))) TK_EOF (load (field (tok-ptr i) kind)))))
+(defn tok-end [(i i64)] (-> i64)
+  (+ (cast i64 (load (field (tok-ptr i) start))) (load (field (tok-ptr i) len))))
+(defn check [(k i64)] (-> bool) (= (cur-kind) k))
+(defn advance [] (-> i64)
+  (if (< (cur-idx) (- (load (field (ps) tlen)) 1))
+    (do (store! (field (ps) idx) (+ (cur-idx) 1)) 0)
+    0))
+
+; ---- diagnostics -----------------------------------------------------------
+(defn tok-kind-name [(k i64)] (-> (ptr i8))
+  (cond
+    (= k TK_LBRACE) c"'{'"
+    (= k TK_RBRACE) c"'}'"
+    (= k TK_LPAREN) c"'('"
+    (= k TK_RPAREN) c"')'"
+    (= k TK_LBRACK) c"'['"
+    (= k TK_RBRACK) c"']'"
+    (= k TK_LT) c"'<'"
+    (= k TK_GT) c"'>'"
+    (= k TK_COLON) c"':'"
+    (= k TK_COMMA) c"','"
+    (= k TK_ARROW) c"'->'"
+    (= k TK_FATARROW) c"'=>'"
+    (= k TK_EQ) c"'='"
+    (= k TK_IDENT) c"an identifier"
+    (= k TK_IN) c"'in'"
+    (= k TK_INTERP_END) c"'}' (interpolation close)"
+    (= k TK_STR_END) c"end of string"
+    c"token"))
+
+(defn perror-head [(t (ptr Token))] (-> i64)
+  (w-cstr 2 (load (field (ps) filename)))
+  (w-cstr 2 c":") (w-int 2 (load (field t line)))
+  (w-cstr 2 c":") (w-int 2 (load (field t col)))
+  (w-cstr 2 c": error: ")
+  0)
+(defn perror-found [(t (ptr Token))] (-> i64)
+  (if (= (load (field t kind)) TK_EOF)
+    (w-cstr 2 c" (found end of input)")
+    (do (w-cstr 2 c" (found \"") (w-bytes 2 (load (field t start)) (load (field t len))) (w-cstr 2 c"\")") 0))
+  (w-cstr 2 c"\n")
+  0)
+(defn perror [(msg (ptr i8))] (-> i64)
+  (let [t (cur-ptr)]
+    (perror-head t) (w-cstr 2 msg) (perror-found t))
+  (exit (cast i32 65))
+  0)
+(defn perror-expected [(k i64)] (-> i64)
+  (let [t (cur-ptr)]
+    (perror-head t) (w-cstr 2 c"expected ") (w-cstr 2 (tok-kind-name k)) (perror-found t))
+  (exit (cast i32 65))
+  0)
+(defn perror-node [(msg (ptr i8))] (-> (ptr Node)) (perror msg) (null-node))
+(defn expect [(k i64)] (-> i64)
+  (if (check k) (advance) (perror-expected k)))
+(defn expect-ident [] (-> i64)
+  (if (check TK_IDENT) (advance) (perror-expected TK_IDENT)))
+
+; ---- small node helpers ----------------------------------------------------
+(defn parse-ident-node [] (-> (ptr Node))
+  (let [t (cur-ptr) nd (mk-node NK_IDENT (load (field t line)) (load (field t col)))]
+    (expect-ident)
+    (set-name! nd (load (field t start)) (load (field t len)))
+    nd))
+
+; ---- types -----------------------------------------------------------------
+(defn parse-type-args-into [(nd (ptr Node))] (-> i64)
+  (expect TK_LT)
+  (loop (if (check TK_GT) (break)
+          (do (add-kid! nd (parse-type)) (if (check TK_COMMA) (do (advance) 0) 0))))
+  (expect TK_GT)
+  0)
+(defn parse-type [] (-> (ptr Node))
+  (if (check TK_LPAREN)
+    (let [ln (cur-line) col (cur-col)]
+      (advance) (expect TK_RPAREN)
+      (let [nd (mk-node NK_TYPE ln col)] (store! (field nd ival) 1) nd))
+    (let [t (cur-ptr) nd (mk-node NK_TYPE (load (field t line)) (load (field t col)))]
+      (set-name! nd (load (field t start)) (load (field t len)))
+      (expect-ident)
+      (if (check TK_LT) (do (parse-type-args-into nd) 0) 0)
+      nd)))
+
+; ---- type params + implements ---------------------------------------------
+(defn parse-typeparam [] (-> (ptr Node))
+  (let [t (cur-ptr) nd (mk-node NK_TYPEPARAM (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (expect-ident)
+    (if (check TK_COLON) (do (advance) (store! (field nd a) (parse-type)) 0) 0)
+    nd))
+(defn parse-typeparams [] (-> (ptr Node))
+  (let [nd (mk-node NK_TYPEPARAMS (cur-line) (cur-col))]
+    (expect TK_LT)
+    (loop (if (check TK_GT) (break)
+            (do (add-kid! nd (parse-typeparam)) (if (check TK_COMMA) (do (advance) 0) 0))))
+    (expect TK_GT)
+    nd))
+(defn parse-implements [] (-> (ptr Node))
+  (advance) ; 'implements'
+  (let [nd (mk-node NK_IMPLEMENTS (cur-line) (cur-col))]
+    (add-kid! nd (parse-type))
+    (loop (if (check TK_COMMA) (do (advance) (add-kid! nd (parse-type)) 0) (break)))
+    nd))
+
+; ---- functions / methods ---------------------------------------------------
+(defn parse-params [] (-> (ptr Node))
+  (let [nd (mk-node NK_PARAMS (cur-line) (cur-col))]
+    (expect TK_LPAREN)
+    (loop (if (check TK_RPAREN) (break)
+            (do (add-kid! nd (parse-param)) (if (check TK_COMMA) (do (advance) 0) 0))))
+    (expect TK_RPAREN)
+    nd))
+(defn parse-param [] (-> (ptr Node))
+  (let [t (cur-ptr) nd (mk-node NK_PARAM (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (expect-ident)
+    (expect TK_COLON)
+    (store! (field nd a) (parse-type))
+    nd))
+(defn parse-fn [(allow-body bool)] (-> (ptr Node))
+  (advance) ; 'fn'
+  (let [t (cur-ptr) nd (mk-node NK_FN (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (expect-ident)
+    (if (check TK_LT) (do (store! (field nd a) (parse-typeparams)) 0) 0)
+    (store! (field nd b) (parse-params))
+    (if (check TK_ARROW) (do (advance) (store! (field nd c) (parse-type)) 0) 0)
+    (if (check TK_LBRACE)
+      (if allow-body
+        (do (store! (field nd d) (parse-block)) 0)
+        (perror c"interface methods must not have a body (default methods are not supported in this PoC)"))
+      0)
+    nd))
+
+; ---- declarations ----------------------------------------------------------
+(defn parse-field [] (-> (ptr Node))
+  (let [t (cur-ptr) nd (mk-node NK_FIELD (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (advance)
+    (expect TK_COLON)
+    (store! (field nd a) (parse-type))
+    nd))
+(defn parse-class [] (-> (ptr Node))
+  (advance) ; 'class'
+  (let [t (cur-ptr) nd (mk-node NK_CLASS (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (expect-ident)
+    (if (check TK_LT) (do (store! (field nd a) (parse-typeparams)) 0) 0)
+    (if (check TK_IMPLEMENTS) (do (store! (field nd b) (parse-implements)) 0) 0)
+    (expect TK_LBRACE)
+    (loop
+      (cond
+        (check TK_RBRACE) (break)
+        (check TK_EOF) (break)
+        (check TK_FN) (do (add-kid! nd (parse-fn true)) 0)
+        (check TK_IDENT) (do (add-kid! nd (parse-field)) 0)
+        (perror c"expected a field or method inside class body")))
+    (expect TK_RBRACE)
+    nd))
+(defn parse-interface [] (-> (ptr Node))
+  (advance) ; 'interface'
+  (let [t (cur-ptr) nd (mk-node NK_INTERFACE (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (expect-ident)
+    (if (check TK_LT) (do (store! (field nd a) (parse-typeparams)) 0) 0)
+    (expect TK_LBRACE)
+    (loop
+      (cond
+        (check TK_RBRACE) (break)
+        (check TK_EOF) (break)
+        (check TK_FN) (do (add-kid! nd (parse-fn false)) 0)
+        (perror c"expected a method signature inside interface body")))
+    (expect TK_RBRACE)
+    nd))
+(defn parse-variant [] (-> (ptr Node))
+  (let [t (cur-ptr) nd (mk-node NK_VARIANT (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (advance)
+    (if (check TK_LPAREN)
+      (do (advance)
+          (loop (if (check TK_RPAREN) (break)
+                  (do (add-kid! nd (parse-type)) (if (check TK_COMMA) (do (advance) 0) 0))))
+          (expect TK_RPAREN) 0)
+      0)
+    nd))
+(defn parse-enum [] (-> (ptr Node))
+  (advance) ; 'enum'
+  (let [t (cur-ptr) nd (mk-node NK_ENUM (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (expect-ident)
+    (if (check TK_LT) (do (store! (field nd a) (parse-typeparams)) 0) 0)
+    (expect TK_LBRACE)
+    (loop
+      (cond
+        (check TK_RBRACE) (break)
+        (check TK_EOF) (break)
+        (check TK_IDENT) (do (add-kid! nd (parse-variant)) 0)
+        (perror c"expected an enum variant")))
+    (expect TK_RBRACE)
+    nd))
+(defn parse-object [] (-> (ptr Node))
+  (advance) ; 'object'
+  (let [t (cur-ptr) nd (mk-node NK_OBJECT (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (expect-ident)
+    (expect TK_LBRACE)
+    (loop
+      (cond
+        (check TK_RBRACE) (break)
+        (check TK_EOF) (break)
+        (check TK_FN) (do (add-kid! nd (parse-fn true)) 0)
+        (check TK_IDENT) (do (add-kid! nd (parse-field)) 0)
+        (perror c"expected a field or method inside object body")))
+    (expect TK_RBRACE)
+    nd))
+
+; module NAME (dotted, contiguous in source)
+(defn parse-module [] (-> (ptr Node))
+  (let [ln (cur-line) col (cur-col)]
+    (advance) ; 'module'
+    (let [nd (mk-node NK_MODULE ln col)
+          startaddr (cast i64 (load (field (cur-ptr) start)))]
+      (expect-ident)
+      (loop (if (check TK_DOT) (do (advance) (expect-ident) 0) (break)))
+      (set-name! nd (cast (ptr u8) startaddr) (- (tok-end (- (cur-idx) 1)) startaddr))
+      nd)))
+
+; import a.b.{X, Y}  |  import a.b.X [as Z]
+(defn parse-import [] (-> (ptr Node))
+  (let [ln (cur-line) col (cur-col)]
+    (advance) ; 'import'
+    (let [nd (mk-node NK_IMPORT ln col)
+          startaddr (cast i64 (load (field (cur-ptr) start)))
+          (mut endaddr) 0]
+      (expect-ident)
+      (store! endaddr (tok-end (- (cur-idx) 1)))
+      (loop
+        (if (check TK_DOT)
+          (do (advance)
+              (if (check TK_LBRACE)
+                (do (advance)
+                    (loop (if (check TK_RBRACE) (break)
+                            (do (add-kid! nd (parse-ident-node)) (if (check TK_COMMA) (do (advance) 0) 0))))
+                    (expect TK_RBRACE)
+                    (break))
+                (do (expect-ident) (store! endaddr (tok-end (- (cur-idx) 1))) 0)))
+          (break)))
+      (set-name! nd (cast (ptr u8) startaddr) (- (load endaddr) startaddr))
+      (if (check TK_AS) (do (advance) (store! (field nd a) (parse-ident-node)) 0) 0)
+      nd)))
+
+; migrate NAME v1 -> v2 { field: (default | (p) => expr) ... }
+(defn parse-migrate-entry [] (-> (ptr Node))
+  (let [t (cur-ptr) nd (mk-node NK_MIGRATE_ENTRY (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (advance)
+    (expect TK_COLON)
+    (if (and (and (check TK_LPAREN) (= (peek-kind 1) TK_IDENT)) (and (= (peek-kind 2) TK_RPAREN) (= (peek-kind 3) TK_FATARROW)))
+      (do (advance)
+          (store! (field nd a) (parse-ident-node))
+          (expect TK_RPAREN) (expect TK_FATARROW)
+          (store! (field nd b) (parse-expr)) 0)
+      (do (store! (field nd b) (parse-expr)) 0))
+    nd))
+(defn parse-migrate [] (-> (ptr Node))
+  (advance) ; 'migrate'
+  (let [t (cur-ptr) nd (mk-node NK_MIGRATE (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (expect-ident)
+    (store! (field nd a) (parse-ident-node)) ; from-version
+    (expect TK_ARROW)
+    (store! (field nd b) (parse-ident-node)) ; to-version
+    (expect TK_LBRACE)
+    (loop
+      (cond
+        (check TK_RBRACE) (break)
+        (check TK_EOF) (break)
+        (check TK_IDENT) (do (add-kid! nd (parse-migrate-entry)) 0)
+        (perror c"expected a migrate entry (field: value)")))
+    (expect TK_RBRACE)
+    nd))
+
+(defn parse-toplevel [] (-> (ptr Node))
+  (cond
+    (check TK_MODULE) (parse-module)
+    (check TK_IMPORT) (parse-import)
+    (check TK_CLASS) (parse-class)
+    (check TK_INTERFACE) (parse-interface)
+    (check TK_ENUM) (parse-enum)
+    (check TK_OBJECT) (parse-object)
+    (check TK_FN) (parse-fn true)
+    (check TK_MIGRATE) (parse-migrate)
+    (perror-node c"expected a top-level declaration (class, interface, enum, object, fn, import, module, or migrate)")))
+
+; ---- statements ------------------------------------------------------------
+(defn parse-block [] (-> (ptr Node))
+  (let [nd (mk-node NK_BLOCK (cur-line) (cur-col))]
+    (expect TK_LBRACE)
+    (loop (if (or (check TK_RBRACE) (check TK_EOF)) (break) (do (add-kid! nd (parse-stmt)) 0)))
+    (expect TK_RBRACE)
+    nd))
+(defn parse-let [] (-> (ptr Node))
+  (let [isvar (check TK_VAR) ln (cur-line) col (cur-col)]
+    (advance)
+    (let [t (cur-ptr) nd (mk-node NK_LET ln col)]
+      (store! (field nd ival) (if isvar 1 0))
+      (set-name! nd (load (field t start)) (load (field t len)))
+      (expect-ident)
+      (if (check TK_COLON) (do (advance) (store! (field nd a) (parse-type)) 0) 0)
+      (expect TK_EQ)
+      (store! (field nd b) (parse-expr))
+      nd)))
+(defn parse-return [] (-> (ptr Node))
+  (let [ln (cur-line) col (cur-col)]
+    (advance)
+    (let [nd (mk-node NK_RETURN ln col)]
+      (if (or (check TK_RBRACE) (check TK_EOF)) 0 (do (store! (field nd a) (parse-expr)) 0))
+      nd)))
+(defn parse-if [] (-> (ptr Node))
+  (let [ln (cur-line) col (cur-col)]
+    (advance)
+    (let [nd (mk-node NK_IF ln col)]
+      (store! (field nd a) (parse-expr))
+      (store! (field nd b) (parse-block))
+      (if (check TK_ELSE)
+        (do (advance)
+            (if (check TK_IF)
+              (do (store! (field nd c) (parse-if)) 0)
+              (do (store! (field nd c) (parse-block)) 0))
+            0)
+        0)
+      nd)))
+(defn parse-while [] (-> (ptr Node))
+  (let [ln (cur-line) col (cur-col)]
+    (advance)
+    (let [nd (mk-node NK_WHILE ln col)]
+      (store! (field nd a) (parse-expr))
+      (store! (field nd b) (parse-block))
+      nd)))
+(defn parse-for [] (-> (ptr Node))
+  (let [ln (cur-line) col (cur-col)]
+    (advance)
+    (let [t (cur-ptr) nd (mk-node NK_FOR ln col)]
+      (set-name! nd (load (field t start)) (load (field t len)))
+      (expect-ident)
+      (expect TK_IN)
+      (store! (field nd a) (parse-expr))
+      (store! (field nd b) (parse-block))
+      nd)))
+(defn parse-expr-stmt [] (-> (ptr Node))
+  (let [e (parse-expr)]
+    (if (check TK_EQ)
+      (let [ln (cur-line) col (cur-col)]
+        (advance)
+        (let [rhs (parse-expr) nd (mk-node NK_ASSIGN ln col)]
+          (store! (field nd a) e) (store! (field nd b) rhs) nd))
+      (let [nd (mk-node NK_EXPRSTMT (load (field e line)) (load (field e col)))]
+        (store! (field nd a) e) nd))))
+(defn parse-stmt [] (-> (ptr Node))
+  (cond
+    (or (check TK_LET) (check TK_VAR)) (parse-let)
+    (check TK_RETURN) (parse-return)
+    (check TK_IF) (parse-if)
+    (check TK_WHILE) (parse-while)
+    (check TK_FOR) (parse-for)
+    (parse-expr-stmt)))
+
+; ---- expressions (precedence climbing) -------------------------------------
+(defn parse-expr [] (-> (ptr Node)) (parse-ternary))
+
+(defn parse-ternary [] (-> (ptr Node))
+  (let [cnd (parse-or)]
+    (if (check TK_QUESTION)
+      (let [ln (cur-line) col (cur-col)]
+        (advance)
+        (let [then-e (parse-expr)]
+          (expect TK_COLON)
+          (let [else-e (parse-expr) nd (mk-node NK_TERNARY ln col)]
+            (store! (field nd a) cnd) (store! (field nd b) then-e) (store! (field nd c) else-e)
+            nd)))
+      cnd)))
+
+(defn mk-bin [(op i64) (l (ptr Node)) (r (ptr Node)) (ln i64) (col i64)] (-> (ptr Node))
+  (let [nd (mk-node NK_BINARY ln col)]
+    (store! (field nd ival) op) (store! (field nd a) l) (store! (field nd b) r) nd))
+
+(defn parse-or [] (-> (ptr Node))
+  (let [(mut e) (parse-and)]
+    (loop (if (check TK_OROR)
+            (let [ln (cur-line) col (cur-col)] (advance)
+              (store! e (mk-bin TK_OROR (load e) (parse-and) ln col)) 0)
+            (break)))
+    (load e)))
+(defn parse-and [] (-> (ptr Node))
+  (let [(mut e) (parse-equality)]
+    (loop (if (check TK_ANDAND)
+            (let [ln (cur-line) col (cur-col)] (advance)
+              (store! e (mk-bin TK_ANDAND (load e) (parse-equality) ln col)) 0)
+            (break)))
+    (load e)))
+(defn parse-equality [] (-> (ptr Node))
+  (let [(mut e) (parse-comparison)]
+    (loop (if (or (check TK_EQEQ) (check TK_NE))
+            (let [op (cur-kind) ln (cur-line) col (cur-col)] (advance)
+              (store! e (mk-bin op (load e) (parse-comparison) ln col)) 0)
+            (break)))
+    (load e)))
+(defn parse-comparison [] (-> (ptr Node))
+  (let [(mut e) (parse-term)]
+    (loop (if (or (or (check TK_LT) (check TK_LE)) (or (check TK_GT) (check TK_GE)))
+            (let [op (cur-kind) ln (cur-line) col (cur-col)] (advance)
+              (store! e (mk-bin op (load e) (parse-term) ln col)) 0)
+            (break)))
+    (load e)))
+(defn parse-term [] (-> (ptr Node))
+  (let [(mut e) (parse-factor)]
+    (loop (if (or (check TK_PLUS) (check TK_MINUS))
+            (let [op (cur-kind) ln (cur-line) col (cur-col)] (advance)
+              (store! e (mk-bin op (load e) (parse-factor) ln col)) 0)
+            (break)))
+    (load e)))
+(defn parse-factor [] (-> (ptr Node))
+  (let [(mut e) (parse-unary)]
+    (loop (if (or (or (check TK_STAR) (check TK_SLASH)) (check TK_PERCENT))
+            (let [op (cur-kind) ln (cur-line) col (cur-col)] (advance)
+              (store! e (mk-bin op (load e) (parse-unary) ln col)) 0)
+            (break)))
+    (load e)))
+(defn parse-unary [] (-> (ptr Node))
+  (if (or (check TK_BANG) (check TK_MINUS))
+    (let [op (cur-kind) ln (cur-line) col (cur-col)]
+      (advance)
+      (let [operand (parse-unary) nd (mk-node NK_UNARY ln col)]
+        (store! (field nd ival) op) (store! (field nd a) operand) nd))
+    (parse-postfix)))
+
+; adjacency: '?' with no whitespace before it is Result-propagation; a '?' with
+; a space before it (ternary condition '<expr> ? ...') is left for parse-ternary.
+(defn qmark-attached [] (-> bool)
+  (let [i (cur-idx)]
+    (if (= i 0)
+      false
+      (= (cast i64 (load (field (cur-ptr) start))) (tok-end (- i 1))))))
+
+(defn parse-call-args [(callee (ptr Node))] (-> (ptr Node))
+  (let [ln (cur-line) col (cur-col) nd (mk-node NK_CALL ln col)]
+    (store! (field nd a) callee)
+    (expect TK_LPAREN)
+    (loop (if (check TK_RPAREN) (break)
+            (do (add-kid! nd (parse-arg)) (if (check TK_COMMA) (do (advance) 0) 0))))
+    (expect TK_RPAREN)
+    nd))
+(defn parse-arg [] (-> (ptr Node))
+  (if (and (check TK_IDENT) (= (peek-kind 1) TK_COLON))
+    (let [t (cur-ptr) nd (mk-node NK_ARG (load (field t line)) (load (field t col)))]
+      (set-name! nd (load (field t start)) (load (field t len)))
+      (advance) (advance)
+      (store! (field nd a) (parse-expr))
+      nd)
+    (let [e (parse-expr) nd (mk-node NK_ARG (load (field e line)) (load (field e col)))]
+      (store! (field nd a) e)
+      nd)))
+
+(defn parse-postfix [] (-> (ptr Node))
+  (let [(mut e) (parse-primary)]
+    (loop
+      (cond
+        (check TK_DOT)
+          (let [ln (cur-line) col (cur-col)]
+            (advance)
+            (let [t (cur-ptr) nd (mk-node NK_FIELDACC ln col)]
+              (set-name! nd (load (field t start)) (load (field t len)))
+              (expect-ident)
+              (store! (field nd a) (load e)) (store! e nd) 0))
+        (check TK_LPAREN)
+          (do (store! e (parse-call-args (load e))) 0)
+        (check TK_LBRACK)
+          (let [ln (cur-line) col (cur-col)]
+            (advance)
+            (let [ix (parse-expr) nd (mk-node NK_INDEX ln col)]
+              (expect TK_RBRACK)
+              (store! (field nd a) (load e)) (store! (field nd b) ix) (store! e nd) 0))
+        (check TK_QUESTION)
+          (if (qmark-attached)
+            (let [ln (cur-line) col (cur-col)]
+              (advance)
+              (let [nd (mk-node NK_TRY ln col)]
+                (store! (field nd a) (load e)) (store! e nd) 0))
+            (break))
+        (break)))
+    (load e)))
+
+(defn parse-string [] (-> (ptr Node))
+  (let [ln (cur-line) col (cur-col) nd (mk-node NK_STRING ln col)]
+    (advance) ; STR_BEGIN
+    (loop
+      (cond
+        (check TK_STR_END) (do (advance) (break))
+        (check TK_EOF) (break)
+        (check TK_STR_CHUNK)
+          (let [t (cur-ptr) ch (mk-node NK_STRCHUNK (load (field t line)) (load (field t col)))]
+            (set-name! ch (load (field t start)) (load (field t len)))
+            (advance)
+            (add-kid! nd ch) 0)
+        (check TK_INTERP_BEGIN)
+          (do (advance)
+              (add-kid! nd (parse-expr))
+              (expect TK_INTERP_END) 0)
+        (perror c"malformed string literal")))
+    nd))
+
+; a generic construction 'Name<T,...>(' — speculative scan (the standard '<'
+; disambiguation): treat '<' as type args only when the matching '>' is followed
+; by '('. Otherwise '<' is the comparison operator (handled higher up).
+(defn scan-is-generic-ctor [] (-> bool)
+  (let [(mut j) (+ (cur-idx) 1) (mut depth) 1 (mut ok) true]
+    (loop
+      (if (or (or (= (load depth) 0) (not (load ok))) (>= (load j) (load (field (ps) tlen))))
+        (break)
+        (let [k (load (field (tok-ptr (load j)) kind))]
+          (cond
+            (= k TK_LT) (do (store! depth (+ (load depth) 1)) (store! j (+ (load j) 1)) 0)
+            (= k TK_GT) (do (store! depth (- (load depth) 1)) (store! j (+ (load j) 1)) 0)
+            (= k TK_IDENT) (do (store! j (+ (load j) 1)) 0)
+            (= k TK_COMMA) (do (store! j (+ (load j) 1)) 0)
+            (= k TK_LPAREN) (do (store! j (+ (load j) 1)) 0)
+            (= k TK_RPAREN) (do (store! j (+ (load j) 1)) 0)
+            (do (store! ok false) 0)))))
+    (if (and (load ok) (= (load depth) 0))
+      (if (< (load j) (load (field (ps) tlen)))
+        (= (load (field (tok-ptr (load j)) kind)) TK_LPAREN)
+        false)
+      false)))
+
+(defn parse-pat-lit [] (-> (ptr Node))
+  (let [ln (cur-line) col (cur-col) e (parse-primary) nd (mk-node NK_PAT_LIT ln col)]
+    (store! (field nd a) e) nd))
+(defn parse-binding [] (-> (ptr Node))
+  (let [t (cur-ptr) nd (mk-node NK_IDENT (load (field t line)) (load (field t col)))]
+    (expect-ident)
+    (set-name! nd (load (field t start)) (load (field t len)))
+    nd))
+(defn parse-pat-enum [] (-> (ptr Node))
+  (let [t (cur-ptr) ln (load (field t line)) col (load (field t col))]
+    (advance)
+    (if (and (tok-eq (load (field t start)) (load (field t len)) c"_") (not (check TK_LPAREN)))
+      (mk-node NK_PAT_WILD ln col)
+      (let [nd (mk-node NK_PAT_ENUM ln col)]
+        (set-name! nd (load (field t start)) (load (field t len)))
+        (if (check TK_LPAREN)
+          (do (advance)
+              (loop (if (check TK_RPAREN) (break)
+                      (do (add-kid! nd (parse-binding)) (if (check TK_COMMA) (do (advance) 0) 0))))
+              (expect TK_RPAREN) 0)
+          0)
+        nd))))
+(defn parse-pattern [] (-> (ptr Node))
+  (cond
+    (check TK_INT) (parse-pat-lit)
+    (check TK_FLOAT) (parse-pat-lit)
+    (check TK_STR_BEGIN) (parse-pat-lit)
+    (check TK_TRUE) (parse-pat-lit)
+    (check TK_FALSE) (parse-pat-lit)
+    (check TK_IDENT) (parse-pat-enum)
+    (perror-node c"expected a pattern")))
+(defn parse-arm [] (-> (ptr Node))
+  (let [ln (cur-line) col (cur-col) nd (mk-node NK_ARM ln col)]
+    (store! (field nd a) (parse-pattern))
+    (expect TK_ARROW)
+    (if (check TK_LBRACE)
+      (do (store! (field nd b) (parse-block)) 0)
+      (do (store! (field nd b) (parse-expr)) 0))
+    nd))
+(defn parse-match [] (-> (ptr Node))
+  (let [ln (cur-line) col (cur-col)]
+    (advance)
+    (let [nd (mk-node NK_MATCH ln col)]
+      (store! (field nd a) (parse-expr))
+      (expect TK_LBRACE)
+      (loop (if (or (check TK_RBRACE) (check TK_EOF)) (break) (do (add-kid! nd (parse-arm)) 0)))
+      (expect TK_RBRACE)
+      nd)))
+
+(defn parse-primary [] (-> (ptr Node))
+  (let [t (cur-ptr) ln (load (field t line)) col (load (field t col)) k (cur-kind)]
+    (cond
+      (= k TK_INT) (let [nd (mk-node NK_INT ln col)] (advance) (store! (field nd ival) (load (field t ival))) nd)
+      (= k TK_FLOAT) (let [nd (mk-node NK_FLOAT ln col)] (advance) (store! (field nd fval) (load (field t fval))) nd)
+      (= k TK_TRUE) (let [nd (mk-node NK_BOOL ln col)] (advance) (store! (field nd ival) 1) nd)
+      (= k TK_FALSE) (let [nd (mk-node NK_BOOL ln col)] (advance) (store! (field nd ival) 0) nd)
+      (= k TK_SELF) (let [nd (mk-node NK_SELF ln col)] (advance) nd)
+      (= k TK_STR_BEGIN) (parse-string)
+      (= k TK_MATCH) (parse-match)
+      (= k TK_IF) (parse-if)
+      (= k TK_FATARROW) (perror-node c"lambdas/closures are not supported in this PoC")
+      (= k TK_LPAREN)
+        (do (advance)
+            (if (check TK_RPAREN)
+              (do (advance) (mk-node NK_UNIT ln col))
+            (let [e (parse-expr)]
+              (expect TK_RPAREN)
+              (if (check TK_FATARROW) (perror c"lambdas/closures are not supported in this PoC") 0)
+              e)))
+      (= k TK_IDENT)
+        (do (advance)
+            (if (and (check TK_LT) (scan-is-generic-ctor))
+              (let [nd (mk-node NK_TYPE ln col)]
+                (set-name! nd (load (field t start)) (load (field t len)))
+                (parse-type-args-into nd)
+                nd)
+              (let [nd (mk-node NK_IDENT ln col)]
+                (set-name! nd (load (field t start)) (load (field t len)))
+                nd)))
+      (perror-node c"expected an expression"))))
+
+; ---- entry -----------------------------------------------------------------
+(defn parse-program [] (-> (ptr Node))
+  (let [prog (mk-node NK_PROGRAM (cur-line) (cur-col))]
+    (loop (if (check TK_EOF) (break) (do (add-kid! prog (parse-toplevel)) 0)))
+    prog))

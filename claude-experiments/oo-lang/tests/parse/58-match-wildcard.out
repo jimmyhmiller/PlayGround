@@ -1,0 +1,19 @@
+(program
+  (fn run
+    (params)
+    (block
+      (match
+        (call
+          (dot runTurn
+            (dot agent
+              self)))
+        (arm
+          (pat Ok _)
+          (block))
+        (arm
+          (pat Err e)
+          (call
+            (dot log
+              (id Console))
+            (arg
+              (str "failed"))))))))

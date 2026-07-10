@@ -1,0 +1,36 @@
+; ioutil.coil — libc externs + small write helpers, declared ONCE here and
+; :use *-imported everywhere (the guide warns externs are NOT deduped across
+; modules, so every libc binding lives in exactly this module).
+(module ioutil)
+
+(extern write    :cc c [i64 (ptr i8) i64] (-> i64))
+(extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
+(extern strlen   :cc c [(ptr i8)] (-> i64))
+(extern strcmp   :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern strtod   :cc c [(ptr i8) (ptr (ptr i8))] (-> f64))
+(extern malloc   :cc c [i64] (-> (ptr i8)))
+(extern exit     :cc c [i32] (-> void))
+(extern fopen    :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern fseek    :cc c [(ptr i8) i64 i32] (-> i32))
+(extern ftell    :cc c [(ptr i8)] (-> i64))
+(extern rewind   :cc c [(ptr i8)] (-> void))
+(extern fread    :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
+(extern fclose   :cc c [(ptr i8)] (-> i32))
+
+; fd 1 = stdout, fd 2 = stderr
+(defn w-bytes [(fd i64) (p (ptr u8)) (n i64)] (-> i64) (write fd (cast (ptr i8) p) n) 0)
+(defn w-cstr  [(fd i64) (s (ptr i8))] (-> i64) (write fd s (strlen s)) 0)
+
+(defn w-int [(fd i64) (v i64)] (-> i64)
+  (let [buf (alloc-stack (array u8 32))
+        n (snprintf (cast (ptr i8) (index buf 0)) 32 c"%lld" v)]
+    (write fd (cast (ptr i8) (index buf 0)) (cast i64 n))
+    0))
+
+(defn w-num [(fd i64) (x f64)] (-> i64)
+  (let [buf (alloc-stack (array u8 64))
+        n (snprintf (cast (ptr i8) (index buf 0)) 64 c"%g" x)]
+    (write fd (cast (ptr i8) (index buf 0)) (cast i64 n))
+    0))
+
+(defn xalloc [(n i64)] (-> (ptr u8)) (cast (ptr u8) (malloc n)))

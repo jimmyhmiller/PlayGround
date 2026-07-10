@@ -1,0 +1,11 @@
+(program
+  (fn main
+    (params)
+    (block
+      (var i
+        (int 0))
+      (assign
+        (id i)
+        (binary +
+          (id i)
+          (int 1))))))

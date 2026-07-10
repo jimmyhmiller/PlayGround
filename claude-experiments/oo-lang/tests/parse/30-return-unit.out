@@ -1,0 +1,10 @@
+(program
+  (fn go
+    (params)
+    (type Result (type ()) (type AgentError))
+    (block
+      (return
+        (call
+          (id Ok)
+          (arg
+            (unit)))))))

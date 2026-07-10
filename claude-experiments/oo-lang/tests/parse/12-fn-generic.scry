@@ -1,0 +1,3 @@
+fn first<T>(items: List<T>) -> Option<T> {
+  if items.len() == 0 { None } else { Some(items.get(0)) }
+}

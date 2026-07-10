@@ -1,0 +1,13 @@
+(program
+  (fn main
+    (params)
+    (block
+      (if
+        (binary <
+          (id x)
+          (int 10))
+        (block
+          (call
+            (id print)
+            (arg
+              (id x))))))))

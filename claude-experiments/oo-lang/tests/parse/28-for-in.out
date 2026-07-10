@@ -1,0 +1,13 @@
+(program
+  (fn main
+    (params)
+    (block
+      (for msg
+        (dot messages
+          (id conversation))
+        (block
+          (call
+            (id print)
+            (arg
+              (dot role
+                (id msg)))))))))

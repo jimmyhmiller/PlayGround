@@ -1,0 +1,20 @@
+(program
+  (fn main
+    (params)
+    (block
+      (let a
+        (binary <=
+          (id x)
+          (id y)))
+      (let b
+        (binary >=
+          (id x)
+          (id y)))
+      (let c
+        (binary ==
+          (id x)
+          (id y)))
+      (let d
+        (binary !=
+          (id x)
+          (id y))))))

@@ -1,0 +1,10 @@
+(program
+  (fn find
+    (params)
+    (type Option (type Tool))
+    (block
+      (return
+        (call
+          (id Some)
+          (arg
+            (id t)))))))

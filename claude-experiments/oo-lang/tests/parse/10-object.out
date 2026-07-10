@@ -1,0 +1,18 @@
+(program
+  (object Clock
+    (fn now
+      (params)
+      (type Int)
+      (block
+        (call
+          (id __builtin_epoch_millis))))
+    (fn sleep
+      (params
+        (param ms
+          (type Int)))
+      (type Void)
+      (block
+        (call
+          (id __builtin_sleep_millis)
+          (arg
+            (id ms)))))))

@@ -1,0 +1,4 @@
+fn parsePriority(s: String) -> Result<Int, ParseError> {
+  let n = Int.parse(s)?
+  Ok(n)
+}

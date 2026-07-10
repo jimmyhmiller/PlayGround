@@ -1,0 +1,287 @@
+; ast.coil — Scry AST: one wide "Node" record with a kind tag, plus the
+; parse-dump pretty printer. See docs/06-implementation.md for the per-kind
+; slot conventions (which of s-name/ival/fval/a/b/c/d/kids each kind uses).
+(module ast)
+(import "ioutil.coil" :use *)
+(import "lexer.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "alloc.coil" :use *)
+
+; ---- node kinds ------------------------------------------------------------
+(const NK_PROGRAM 0)
+(const NK_MODULE 1)
+(const NK_IMPORT 2)
+(const NK_CLASS 3)
+(const NK_INTERFACE 4)
+(const NK_ENUM 5)
+(const NK_OBJECT 6)
+(const NK_FN 7)
+(const NK_MIGRATE 8)
+(const NK_FIELD 9)
+(const NK_VARIANT 10)
+(const NK_PARAM 11)
+(const NK_PARAMS 12)
+(const NK_TYPEPARAMS 13)
+(const NK_TYPEPARAM 14)
+(const NK_IMPLEMENTS 15)
+(const NK_TYPE 16)
+(const NK_BLOCK 17)
+(const NK_LET 18)
+(const NK_ASSIGN 19)
+(const NK_EXPRSTMT 20)
+(const NK_IF 21)
+(const NK_WHILE 22)
+(const NK_FOR 23)
+(const NK_RETURN 24)
+(const NK_INT 25)
+(const NK_FLOAT 26)
+(const NK_BOOL 27)
+(const NK_IDENT 28)
+(const NK_SELF 29)
+(const NK_STRING 30)
+(const NK_STRCHUNK 31)
+(const NK_BINARY 32)
+(const NK_UNARY 33)
+(const NK_CALL 34)
+(const NK_ARG 35)
+(const NK_INDEX 36)
+(const NK_FIELDACC 37)
+(const NK_TERNARY 38)
+(const NK_TRY 39)
+(const NK_MATCH 40)
+(const NK_ARM 41)
+(const NK_PAT_ENUM 42)
+(const NK_PAT_LIT 43)
+(const NK_PAT_WILD 44)
+(const NK_MIGRATE_ENTRY 45)
+(const NK_UNIT 46)
+
+(defstruct Node
+  [(kind i64) (line i64) (col i64)
+   (s-name (ptr u8)) (s-len i64)
+   (ival i64) (fval f64)
+   (a (ptr Node)) (b (ptr Node)) (c (ptr Node)) (d (ptr Node))
+   (kids (ArrayList (ptr Node)))])
+
+(defn null-node [] (-> (ptr Node)) (cast (ptr Node) 0))
+(defn is-null [(n (ptr Node))] (-> bool) (= (cast i64 n) 0))
+
+(defn mk-node [(kind i64) (line i64) (col i64)] (-> (ptr Node))
+  (let [p (cast (ptr Node) (xalloc (sizeof Node)))]
+    (store! p (zeroed Node))
+    (store! (field p kind) kind)
+    (store! (field p line) line)
+    (store! (field p col) col)
+    (store! (field p kids) (al-new [(ptr Node)] (alc-global)))
+    p))
+
+(defn set-name! [(n (ptr Node)) (s (ptr u8)) (len i64)] (-> i64)
+  (store! (field n s-name) s) (store! (field n s-len) len) 0)
+
+(defn add-kid! [(parent (ptr Node)) (kid (ptr Node))] (-> i64)
+  (al-push! (mut (field parent kids)) kid) 0)
+
+(defn kid-count [(n (ptr Node))] (-> i64) (al-len (load (field n kids))))
+(defn kid-at [(n (ptr Node)) (i i64)] (-> (ptr Node)) (al-get (load (field n kids)) i))
+
+; ---- output helpers --------------------------------------------------------
+(defn ws [(s (ptr i8))] (-> i64) (w-cstr 1 s))
+(defn nl [] (-> i64) (ws c"\n"))
+(defn wn [(n (ptr Node))] (-> i64) (w-bytes 1 (load (field n s-name)) (load (field n s-len))))
+(defn sp [(count i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (< (load i) count) (do (ws c" ") (store! i (+ (load i) 1)) 0) (break))))
+  0)
+(defn di [(depth i64)] (-> i64) (sp (* depth 2)))
+
+(defn emit-byte [(b i64)] (-> i64)
+  (let [buf (alloc-stack (array u8 4))]
+    (store! (index buf 0) (cast u8 b))
+    (w-bytes 1 (index buf 0) 1) 0))
+(defn emit-hex [(b i64)] (-> i64)
+  (let [buf (alloc-stack (array u8 8))]
+    (snprintf (cast (ptr i8) (index buf 0)) 8 c"\\x%02x" (cast i32 b))
+    (w-cstr 1 (cast (ptr i8) (index buf 0))) 0))
+(defn emit-escaped-byte [(b i64)] (-> i64)
+  (cond
+    (= b \newline) (ws c"\\n")
+    (= b \tab) (ws c"\\t")
+    (= b \\) (ws c"\\\\")
+    (= b \") (ws c"\\\"")
+    (and (>= b 32) (< b 127)) (emit-byte b)
+    (emit-hex b)))
+(defn emit-escaped [(p (ptr u8)) (len i64)] (-> i64)
+  (ws c"\"")
+  (let [(mut i) 0]
+    (loop
+      (if (< (load i) len)
+        (do (emit-escaped-byte (cast i64 (load (index p (load i))))) (store! i (+ (load i) 1)) 0)
+        (break))))
+  (ws c"\""))
+
+(defn op-sym [(op i64)] (-> (ptr i8))
+  (cond
+    (= op TK_PLUS) c"+"
+    (= op TK_MINUS) c"-"
+    (= op TK_STAR) c"*"
+    (= op TK_SLASH) c"/"
+    (= op TK_PERCENT) c"%"
+    (= op TK_EQEQ) c"=="
+    (= op TK_NE) c"!="
+    (= op TK_LT) c"<"
+    (= op TK_LE) c"<="
+    (= op TK_GT) c">"
+    (= op TK_GE) c">="
+    (= op TK_ANDAND) c"&&"
+    (= op TK_OROR) c"||"
+    (= op TK_BANG) c"!"
+    c"?op"))
+
+; ---- forward decls via mutual recursion (Coil resolves within a file) ------
+(defn dump [(n (ptr Node)) (depth i64)] (-> i64) (di depth) (dump-body n depth))
+(defn dchild [(kid (ptr Node)) (depth i64)] (-> i64) (nl) (dump kid depth))
+(defn dchild? [(kid (ptr Node)) (depth i64)] (-> i64)
+  (if (is-null kid) 0 (dchild kid depth)))
+(defn dump-kids [(n (ptr Node)) (depth i64)] (-> i64)
+  (let [(mut i) 0 m (kid-count n)]
+    (loop (if (< (load i) m) (do (dchild (kid-at n (load i)) depth) (store! i (+ (load i) 1)) 0) (break))))
+  0)
+
+; type nodes render inline (recursively)
+(defn dump-type [(n (ptr Node))] (-> i64)
+  (ws c"(type ")
+  (if (= (load (field n ival)) 1) (ws c"()") (wn n))
+  (let [(mut i) 0 m (kid-count n)]
+    (loop
+      (if (< (load i) m)
+        (do (ws c" ") (dump-type (kid-at n (load i))) (store! i (+ (load i) 1)) 0)
+        (break))))
+  (ws c")"))
+
+; enum-pattern bindings + literal patterns render inline
+(defn dump-lit-inline [(n (ptr Node))] (-> i64)
+  (let [k (load (field n kind))]
+    (cond
+      (= k NK_INT) (w-int 1 (load (field n ival)))
+      (= k NK_FLOAT) (w-num 1 (load (field n fval)))
+      (= k NK_BOOL) (if (= (load (field n ival)) 1) (ws c"true") (ws c"false"))
+      (= k NK_STRING) (dump-str-inline n)
+      (ws c"?lit"))))
+(defn dump-str-inline [(n (ptr Node))] (-> i64)
+  ; only used for single-chunk strings
+  (if (and (= (kid-count n) 1) (= (load (field (kid-at n 0) kind)) NK_STRCHUNK))
+    (emit-escaped (load (field (kid-at n 0) s-name)) (load (field (kid-at n 0) s-len)))
+    (ws c"\"?\"")))
+
+(defn dump-body [(n (ptr Node)) (depth i64)] (-> i64)
+  (let [k (load (field n kind)) d1 (+ depth 1)]
+    (cond
+      ; ---- leaves ----
+      (= k NK_INT) (do (ws c"(int ") (w-int 1 (load (field n ival))) (ws c")"))
+      (= k NK_FLOAT) (do (ws c"(float ") (w-num 1 (load (field n fval))) (ws c")"))
+      (= k NK_BOOL) (do (ws c"(bool ") (if (= (load (field n ival)) 1) (ws c"true") (ws c"false")) (ws c")"))
+      (= k NK_IDENT) (do (ws c"(id ") (wn n) (ws c")"))
+      (= k NK_SELF) (ws c"self")
+      (= k NK_UNIT) (ws c"(unit)")
+      (= k NK_STRCHUNK) (do (ws c"(str ") (emit-escaped (load (field n s-name)) (load (field n s-len))) (ws c")"))
+      (= k NK_TYPE) (dump-type n)
+      (= k NK_MODULE) (do (ws c"(module ") (wn n) (ws c")"))
+      (= k NK_PAT_WILD) (ws c"(pat _)")
+      ; ---- strings ----
+      (= k NK_STRING)
+        (cond
+          (= (kid-count n) 0) (ws c"(str \"\")")
+          (and (= (kid-count n) 1) (= (load (field (kid-at n 0) kind)) NK_STRCHUNK))
+            (do (ws c"(str ") (emit-escaped (load (field (kid-at n 0) s-name)) (load (field (kid-at n 0) s-len))) (ws c")"))
+          (do (ws c"(str-interp") (dump-kids n d1) (ws c")")))
+      ; ---- patterns ----
+      (= k NK_PAT_ENUM)
+        (do (ws c"(pat ") (wn n)
+            (let [(mut i) 0 m (kid-count n)]
+              (loop (if (< (load i) m) (do (ws c" ") (wn (kid-at n (load i))) (store! i (+ (load i) 1)) 0) (break))))
+            (ws c")"))
+      (= k NK_PAT_LIT) (do (ws c"(pat-lit ") (dump-lit-inline (load (field n a))) (ws c")"))
+      ; ---- expressions ----
+      (= k NK_BINARY)
+        (do (ws c"(binary ") (ws (op-sym (load (field n ival))))
+            (dchild (load (field n a)) d1) (dchild (load (field n b)) d1) (ws c")"))
+      (= k NK_UNARY)
+        (do (ws c"(unary ") (ws (op-sym (load (field n ival))))
+            (dchild (load (field n a)) d1) (ws c")"))
+      (= k NK_CALL)
+        (do (ws c"(call") (dchild (load (field n a)) d1) (dump-kids n d1) (ws c")"))
+      (= k NK_ARG)
+        (do (ws c"(arg")
+            (if (> (load (field n s-len)) 0) (do (ws c" ") (wn n) 0) 0)
+            (dchild (load (field n a)) d1) (ws c")"))
+      (= k NK_INDEX)
+        (do (ws c"(index") (dchild (load (field n a)) d1) (dchild (load (field n b)) d1) (ws c")"))
+      (= k NK_FIELDACC)
+        (do (ws c"(dot ") (wn n) (dchild (load (field n a)) d1) (ws c")"))
+      (= k NK_TERNARY)
+        (do (ws c"(ternary") (dchild (load (field n a)) d1) (dchild (load (field n b)) d1) (dchild (load (field n c)) d1) (ws c")"))
+      (= k NK_TRY)
+        (do (ws c"(try") (dchild (load (field n a)) d1) (ws c")"))
+      (= k NK_MATCH)
+        (do (ws c"(match") (dchild (load (field n a)) d1) (dump-kids n d1) (ws c")"))
+      (= k NK_ARM)
+        (do (ws c"(arm") (dchild (load (field n a)) d1) (dchild (load (field n b)) d1) (ws c")"))
+      ; ---- statements ----
+      (= k NK_EXPRSTMT) (dump-body (load (field n a)) depth)
+      (= k NK_BLOCK) (do (ws c"(block") (dump-kids n d1) (ws c")"))
+      (= k NK_LET)
+        (do (if (= (load (field n ival)) 1) (ws c"(var ") (ws c"(let ")) (wn n)
+            (dchild? (load (field n a)) d1) (dchild (load (field n b)) d1) (ws c")"))
+      (= k NK_ASSIGN)
+        (do (ws c"(assign") (dchild (load (field n a)) d1) (dchild (load (field n b)) d1) (ws c")"))
+      (= k NK_IF)
+        (do (ws c"(if") (dchild (load (field n a)) d1) (dchild (load (field n b)) d1) (dchild? (load (field n c)) d1) (ws c")"))
+      (= k NK_WHILE)
+        (do (ws c"(while") (dchild (load (field n a)) d1) (dchild (load (field n b)) d1) (ws c")"))
+      (= k NK_FOR)
+        (do (ws c"(for ") (wn n) (dchild (load (field n a)) d1) (dchild (load (field n b)) d1) (ws c")"))
+      (= k NK_RETURN)
+        (do (ws c"(return") (dchild? (load (field n a)) d1) (ws c")"))
+      ; ---- declarations ----
+      (= k NK_PROGRAM) (do (ws c"(program") (dump-kids n d1) (ws c")"))
+      (= k NK_IMPORT)
+        (do (ws c"(import ") (wn n)
+            (let [(mut i) 0 m (kid-count n)]
+              (loop (if (< (load i) m) (do (ws c" (name ") (wn (kid-at n (load i))) (ws c")") (store! i (+ (load i) 1)) 0) (break))))
+            (if (is-null (load (field n a))) 0 (do (ws c" (as ") (wn (load (field n a))) (ws c")") 0))
+            (ws c")"))
+      (= k NK_CLASS)
+        (do (ws c"(class ") (wn n)
+            (dchild? (load (field n a)) d1) (dchild? (load (field n b)) d1) (dump-kids n d1) (ws c")"))
+      (= k NK_INTERFACE)
+        (do (ws c"(interface ") (wn n) (dchild? (load (field n a)) d1) (dump-kids n d1) (ws c")"))
+      (= k NK_ENUM)
+        (do (ws c"(enum ") (wn n) (dchild? (load (field n a)) d1) (dump-kids n d1) (ws c")"))
+      (= k NK_OBJECT)
+        (do (ws c"(object ") (wn n) (dump-kids n d1) (ws c")"))
+      (= k NK_FN)
+        (do (ws c"(fn ") (wn n)
+            (dchild? (load (field n a)) d1) (dchild? (load (field n b)) d1)
+            (dchild? (load (field n c)) d1) (dchild? (load (field n d)) d1) (ws c")"))
+      (= k NK_FIELD) (do (ws c"(field ") (wn n) (dchild (load (field n a)) d1) (ws c")"))
+      (= k NK_VARIANT) (do (ws c"(variant ") (wn n) (dump-kids n d1) (ws c")"))
+      (= k NK_PARAM) (do (ws c"(param ") (wn n) (dchild (load (field n a)) d1) (ws c")"))
+      (= k NK_PARAMS) (do (ws c"(params") (dump-kids n d1) (ws c")"))
+      (= k NK_TYPEPARAMS) (do (ws c"(typeparams") (dump-kids n d1) (ws c")"))
+      (= k NK_TYPEPARAM)
+        (do (ws c"(typeparam ") (wn n) (dchild? (load (field n a)) d1) (ws c")"))
+      (= k NK_IMPLEMENTS) (do (ws c"(implements") (dump-kids n d1) (ws c")"))
+      (= k NK_MIGRATE)
+        (do (ws c"(migrate ") (wn n)
+            (ws c" (from ") (wn (load (field n a))) (ws c") (to ") (wn (load (field n b))) (ws c")")
+            (dump-kids n d1) (ws c")"))
+      (= k NK_MIGRATE_ENTRY)
+        (do (ws c"(entry ") (wn n)
+            (if (is-null (load (field n a))) 0 (do (ws c" (of ") (wn (load (field n a))) (ws c")") 0))
+            (dchild (load (field n b)) d1) (ws c")"))
+      (do (ws c"(unknown ") (w-int 1 k) (ws c")")))))
+
+(defn dump-program [(root (ptr Node))] (-> i64)
+  (dump root 0)
+  (nl)
+  0)

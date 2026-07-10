@@ -1,0 +1,16 @@
+(program
+  (fn main
+    (params)
+    (block
+      (assign
+        (dot role
+          self)
+        (id role))
+      (assign
+        (id best)
+        (id x))
+      (assign
+        (id total)
+        (binary +
+          (id total)
+          (int 1))))))

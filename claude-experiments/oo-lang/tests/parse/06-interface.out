@@ -1,0 +1,10 @@
+(program
+  (interface Tool
+    (fn name
+      (params)
+      (type String))
+    (fn call
+      (params
+        (param args
+          (type Map (type String) (type String))))
+      (type Result (type String) (type ToolError)))))

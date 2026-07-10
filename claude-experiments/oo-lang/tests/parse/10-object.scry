@@ -1,0 +1,4 @@
+object Clock {
+  fn now() -> Int { __builtin_epoch_millis() }
+  fn sleep(ms: Int) -> Void { __builtin_sleep_millis(ms) }
+}

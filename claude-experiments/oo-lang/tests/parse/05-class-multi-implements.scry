@@ -1,0 +1,5 @@
+class Worker implements Runnable, Tool {
+  id: Int
+  fn run() -> Void { self.id = 0 }
+  fn name() -> String { "worker" }
+}

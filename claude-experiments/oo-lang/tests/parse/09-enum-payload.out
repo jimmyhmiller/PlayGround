@@ -1,0 +1,12 @@
+(program
+  (enum Shape
+    (variant Circle
+      (type Float))
+    (variant Rectangle
+      (type Float)
+      (type Float)))
+  (enum ToolError
+    (variant NotFound
+      (type String))
+    (variant Failed
+      (type String))))

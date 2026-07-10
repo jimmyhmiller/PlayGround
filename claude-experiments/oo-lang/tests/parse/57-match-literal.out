@@ -1,0 +1,18 @@
+(program
+  (fn describe
+    (params
+      (param code
+        (type Int)))
+    (type String)
+    (block
+      (match
+        (id code)
+        (arm
+          (pat-lit 200)
+          (str "ok"))
+        (arm
+          (pat-lit 404)
+          (str "not found"))
+        (arm
+          (pat _)
+          (str "other"))))))

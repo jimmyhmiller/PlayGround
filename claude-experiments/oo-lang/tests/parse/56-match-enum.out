@@ -1,0 +1,21 @@
+(program
+  (fn area
+    (params
+      (param s
+        (type Shape)))
+    (type Float)
+    (block
+      (match
+        (id s)
+        (arm
+          (pat Circle r)
+          (binary *
+            (binary *
+              (float 3.14159)
+              (id r))
+            (id r)))
+        (arm
+          (pat Rectangle w h)
+          (binary *
+            (id w)
+            (id h)))))))
