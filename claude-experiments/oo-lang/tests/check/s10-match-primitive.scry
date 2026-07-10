@@ -1,0 +1,8 @@
+fn code(c: Int) -> String {
+  match c {
+    200 -> "ok"
+    404 -> "not found"
+    _ -> "other"
+  }
+}
+fn main() { print(code(200)) }

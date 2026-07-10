@@ -1,0 +1,10 @@
+interface A { fn a() -> Int }
+interface B { fn b() -> Int }
+class C implements A, B {
+  fn a() -> Int { 1 }
+  fn b() -> Int { 2 }
+}
+fn main() {
+  let c = C()
+  print(c.a() + c.b())
+}

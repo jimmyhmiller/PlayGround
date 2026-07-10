@@ -1,0 +1,10 @@
+class Log {
+  count: Int
+  fn init() { self.count = 0 }
+  fn record() -> Void { self.count = self.count + 1 }
+}
+fn main() {
+  let l = Log()
+  l.record()
+  print(l.count)
+}

@@ -1,0 +1,9 @@
+
+enum Status { Waiting Running Done }
+fn f(s: Status) -> String {
+  match s {
+    Waiting -> "w"
+    Running -> "r"
+  }
+}
+fn main() {}

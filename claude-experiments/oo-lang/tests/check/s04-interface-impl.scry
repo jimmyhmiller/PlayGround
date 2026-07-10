@@ -1,0 +1,10 @@
+interface Greeter { fn greet() -> String }
+class Friendly implements Greeter {
+  name: String
+  fn greet() -> String { "Hi, I'm " + self.name }
+}
+fn describe(g: Greeter) -> String { g.greet() }
+fn main() {
+  let f = Friendly(name: "ada")
+  print(describe(f))
+}

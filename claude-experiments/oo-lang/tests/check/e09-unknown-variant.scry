@@ -1,0 +1,10 @@
+
+enum Color { Red Green }
+fn f(c: Color) -> String {
+  match c {
+    Red -> "r"
+    Purple -> "p"
+    _ -> "o"
+  }
+}
+fn main() {}

@@ -1,0 +1,8 @@
+class Box<T> {
+  value: T
+  fn get() -> T { self.value }
+}
+fn main() {
+  let b = Box<List<Int>>(value: List<Int>())
+  print(b.get().len())
+}

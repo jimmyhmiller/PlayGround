@@ -1,17 +1,22 @@
 # 06 — Implementation (living doc)
 
 Phase 1 is the **front end**: lexer, AST, recursive-descent parser, and the
-`scry parse-dump` CLI, all written in Coil (`run coil guide`). No typechecker, no
-bytecode, no VM yet — those are Phase 2+. This doc records how the front end is
-built so later phases can stack on it without re-deriving it.
+`scry parse-dump` CLI. **Phase 2 is the static typechecker** (`src/types.coil`,
+`src/typecheck.coil`, `scry check`), a nominal two-pass checker over the Phase 1
+AST. Everything is written in Coil (`run coil guide`). No bytecode or VM yet —
+that is Phase 3. This doc records how each layer is built so later phases can
+stack on it without re-deriving it. (Phase 2 additions are at the bottom, under
+"Phase 2 — the typechecker".)
 
 ## Build & run
 
 ```
 coil build                     # project (Coil.toml) -> ./scry
 ./scry parse-dump f.scry       # parse and print the AST (stable golden format)
+./scry check f.scry            # typecheck (follows imports); prints "ok" or diagnostics, exit 65
+./scry dump-types f.scry       # debug: print the mono type table + itables (Phase 3 input)
 ./scry run f.scry              # HARD ERROR: "not implemented until Phase 3", exit 2
-python3 tests/run-tests.py     # golden suite; exits nonzero on any failure
+python3 tests/run-tests.py     # golden suite (tests/parse + tests/check); nonzero on any failure
 ```
 
 `coil build` writes the binary named after the package (`scry`). It is gitignored.
@@ -187,3 +192,157 @@ Decisions worth knowing:
   `let`/`var` accordingly. (The original brief said "mut?"; the doc wins.)
 - Block comments `/* */` are accepted though only `//` appears in the doc.
 - No genuine syntax typos were found in §6 — both example files parse verbatim.
+
+---
+
+# Phase 2 — the typechecker
+
+A nominal, fully-static checker over the Phase 1 AST. Two files:
+
+| File | Module | Responsibility |
+|---|---|---|
+| `src/types.coil` | `types` | The resolved `Type` universe, the symbol/`Decl` table, the **monomorphization table**, built-in-type registration hooks, type resolution from AST `TYPE` nodes, nominal equality/assignability, and the diagnostics buffer. |
+| `src/typecheck.coil` | `typecheck` | The two-pass driver, expression/statement/body checking, interface conformance, definite assignment, `match` exhaustiveness, `?`, the built-in-type definitions, module/import loading, and the `check`/`dump-types` entry points. |
+
+**No AST shape change** (per Phase 1's guidance): the checker keeps its own side
+tables keyed by `Decl`/`Node` identity rather than adding slots to `Node`. Types
+are separate `Type` records; the AST is read-only input.
+
+## Type representation (`Type`)
+
+`Type` is a small tagged record: `kind` (one of `TY_INT/FLOAT/BOOL/STRING/VOID/
+UNIT/NAMED/VAR/ERROR`), a `name`, a `decl` pointer (for `TY_NAMED`), and an
+`args` list of child `Type`s (type arguments). `TY_VAR` is an unsubstituted
+generic parameter; `TY_ERROR` propagates and suppresses cascade errors (assignable
+to/from anything). Equality is **nominal**: same `decl` pointer + pairwise-equal
+type args. Assignability adds exactly one subtyping rule — a `class`/`object` whose
+`implements` list names interface `I` is assignable to `I` (`class-implements`,
+resolved by name to the interface `Decl`). No numeric coercion, no `Void`/`()`
+interchange.
+
+## Symbol table (`Decl`)
+
+One `Decl` per declaration (`class`/`interface`/`enum`/`object`/top-level `fn`,
+plus built-ins), holding `kind`, name, the AST `node`, a `tparams` list (name
+nodes), a `members` list (the `FIELD`/`FN`/`VARIANT` child nodes), and the source
+`file` (for diagnostics). Unqualified enum-variant names (`Some`, `Ok`, `Circle`)
+are indexed separately (`VariantRef`) so `Ok(x)` resolves without a receiver.
+
+## Monomorphization table — what Phase 3 consumes (DECISIONS #6)
+
+Every **distinct** concrete instantiation is interned once into `ctx.monos` as a
+`MonoType` and assigned a stable integer `id` (its **type-id**), keyed by a
+canonical mangled name: `Inventory<Tool>`, `Inventory<Widget>`, `List<Message>`,
+`Map<String,String>`, `Result<String,ToolError>`, nested `Box<List<Int>>`, and
+every plain non-generic class/enum/object too. Interning happens the moment a
+concrete `TY_NAMED` is built (`mk-named` → `intern-mono`), so it fires from field
+types, param/return types, local annotations, and construction sites uniformly —
+built-in generics (`List`/`Map`/`Mutex`/`Option`/`Result`) go through the exact
+same path as user generics. `MonoType` carries:
+
+- `id` (type-id), canonical `name`, `base` `Decl`, resolved `args`;
+- `is-entity` — true for `class`/`object` (gets a per-type arena in Phase 3),
+  false for enums, `List`/`Map`/etc. (values, no arena);
+- `fields` — for entities, the **substituted field layout in declaration order**
+  (`MonoField` = name + resolved concrete `Type`). Cycle-safe: the entry is
+  registered before its fields are populated, so a self- or mutually-referential
+  field type finds the in-progress entry instead of recursing forever.
+
+`./scry dump-types f.scry` prints this table plus the **itables** (per
+`class × interface`, the interface's methods numbered in declaration order → the
+implementing class's method) — i.e. exactly `02-runtime.md` §5's `ITable` slot
+assignment, and the field layout `TypeInfo`/`ShapeInfo` wants. That dump is the
+concrete hand-off to Phase 3 codegen: mono type-ids + ordered field layouts +
+itable slots. Resolved per-node types are recomputed on demand (the checker is
+side-effect-light); Phase 3 can re-run resolution or read this table.
+
+## Diagnostics
+
+Errors carry `file:line:col` (span threaded from the offending `Node`) + a
+message, printed to stderr as `file:line:col: error: <msg>`. Type mismatches use
+the doc's `expected <X>, found <Y>` shape (`00-vision.md`). Recovery is
+**per-declaration**: a failed declaration doesn't stop the others, and inside an
+expression a type error yields `TY_ERROR` to suppress cascades, so one run reports
+many independent errors. Any error ⇒ exit 65.
+
+## Two passes + module loading
+
+1. **Collect** — register every declaration (dup-name check; `migrate` →
+   hard error; a generic **bound** like `<T: Comparable>` → hard error, matching
+   `05-milestones.md`'s "what we fake" #3).
+2. **Signatures + conformance** (all loaded modules): resolve field types (interns
+   monos, reports unknown types), intern each non-generic class/enum/object,
+   verify `implements` conformance (every interface method present with an
+   exactly-matching signature — each missing/mismatched method reported with its
+   span; `implements` of a non-interface rejected; interface method bodies
+   rejected).
+3. **Bodies** (entry module only, see below): definite assignment on `init`,
+   statement/expression checking, `self` typing, return-path checking, `match`
+   exhaustiveness, `?`, generic-function type-argument inference.
+
+**Imports / multi-file (`scry check` follows imports).** `import a.b.{X,Y}` (and
+`import a.b.X as Z`) resolves the module `a.b` to a file **relative to the
+importing file's directory**, trying `a/b.scry`, then `a-b.scry`, then the last
+segment `b.scry`. Found modules are parsed + collected (recursively, dedup by
+path); each imported name is validated to exist. Names that resolve to a built-in
+(e.g. `std.collections.{List}`) are accepted as no-ops even with no file. This is a
+**separate-compilation boundary**: the entry file's bodies are deep-checked, but
+imported modules contribute only their *declarations* (fields resolved + interface
+conformance checked) — their method **bodies** are not walked. So
+`scry check examples/main.scry` pulls `Agent`/`Tool`/… signatures from
+`agents.core` (and `Tui` from a small `examples/ui-tui.scry` created for the
+demo's `ui.tui` import) and typechecks green, without depending on symbols that
+only appear inside `agents.core`'s method bodies.
+
+## Built-ins
+
+`Int/Float/Bool/String/Void/()` are primitive kinds. `List<T>`(push/get/len,
+iterable), `Map<K,V>`(set/get→`Option<V>`/containsKey/len), `Mutex<T>`(lock/unlock/
+get/set), `Option<T>`, `Result<T,E>`, `Runnable`(interface), `Thread`(spawn→
+`ThreadHandle`), `ThreadHandle`(join), and `Clock`/`Console` are registered as
+synthetic `Decl`s with synthetic `FN`/`VARIANT` member nodes, so method/variant
+resolution is uniform with user types. `print(x)` is a built-in free function.
+`String` methods (`len`, `slice`) are special-cased. `List<Int>()`/`Map<K,V>()`
+take no ctor args; `Mutex<T>(v)` is positional; user classes construct by **named**
+args (all fields, definite assignment).
+
+## Doc deviations / gaps found in Phase 2
+
+- **§6's `agents/core.scry` is not self-contained.** Its method bodies reference
+  `Llm.complete(...)`, a return type `AgentError`, and `__builtin_*` intrinsics
+  that are declared **nowhere** in the doc set (they are M4/M5 placeholders). So
+  `scry check` on `agents-core.scry` *by itself* reports those as unknown — that
+  is correct, and it is why the separate-compilation boundary above matters: the
+  canonical gate is `scry check examples/main.scry`, which only needs
+  `agents.core`'s public signatures (none of which mention `Llm`/`AgentError`) and
+  passes clean.
+- **`Clock`/`Console` are both "built-ins" (task) and user-defined (§6).** Resolved
+  by letting a user declaration of a built-in-named `object` **override** the
+  built-in (no duplicate error), so programs that define `Clock` (the demo) and
+  programs that just use it both work.
+- **`ui.tui` / `std.collections` are referenced by `main.scry` but never defined
+  in the doc.** `std.collections.{List}` is satisfied by the built-in `List`; a
+  minimal `examples/ui-tui.scry` (`object Tui { fn render(agents: List<Agent>) }`)
+  was added so the canonical multi-file program resolves — noted here rather than
+  silently faking `Tui`.
+- **Generic *functions*** are supported (minimal, per §2.4 "erased/boxed"): type
+  args are inferred from argument types at the call site (no explicit turbofish).
+  Generic **bounds** are rejected (fake #3). Definite-assignment is the pragmatic
+  "every field assigned on some path" (not full per-path "exactly once") — noted
+  as a deliberate simplification; the demo's straight-line `init`s satisfy it.
+
+## Coil friction hit in Phase 2 (add to Phase 1's list)
+
+- `nl` name-collides with `ast.coil`'s newline helper across `:use *` — renamed the
+  node-length accessor to `nlen`. Watch for helper-name clashes when two modules
+  are both `:use *`-imported.
+- `cond`/`if` branches must have the **same type**; an effectful branch like
+  `(store! x v)` returns the stored value's type, not `i64` — wrap in `(do … 0)`.
+  A `cond` treats a trailing `true`-guarded clause as a normal arm and appends an
+  implicit `0` else, mismatching a `(ptr …)` result — make the last clause the bare
+  default instead.
+- `al-push!` needs a **mutable place** (`(mut x)` / `(mut (field p f))`); a
+  let-bound `ArrayList` must be bound `(mut xs)` and read back with `(load xs)`. To
+  share/grow a list through a pointer, wrap it in a one-field struct and push via
+  `(mut (field p items))` (used for `PList`); a plain byte string-builder is easier
+  as a hand-rolled `StrBuf` than an `(ArrayList u8)`.

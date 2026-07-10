@@ -39,6 +39,11 @@
     (do (w-cstr 2 c"scry check: expected a file argument\n") 64)
     (run-check (load (index argv 2)))))
 
+(defn cmd-dump-types [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (if (< argc 3)
+    (do (w-cstr 2 c"scry dump-types: expected a file argument\n") 64)
+    (run-dump-types (load (index argv 2)))))
+
 (defn cmd-parse-dump [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
   (if (< argc 3)
     (do (w-cstr 2 c"scry parse-dump: expected a file argument\n") 64)
@@ -59,6 +64,7 @@
         (cond
           (cstr-eq sub c"parse-dump") (cmd-parse-dump n argv)
           (cstr-eq sub c"check") (cmd-check n argv)
+          (cstr-eq sub c"dump-types") (cmd-dump-types n argv)
           (cstr-eq sub c"run")
             (do (w-cstr 2 c"scry run: not implemented until Phase 3\n") 2)
           (do (w-cstr 2 c"scry: unknown command\n") (usage) 64))))))

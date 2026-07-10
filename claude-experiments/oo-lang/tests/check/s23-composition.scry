@@ -1,0 +1,10 @@
+class Engine { power: Int }
+class Car {
+  engine: Engine
+  fn init(e: Engine) { self.engine = e }
+  fn power() -> Int { self.engine.power }
+}
+fn main() {
+  let c = Car(e: Engine(power: 100))
+  print(c.power())
+}

@@ -1,0 +1,8 @@
+fn main() {
+  let xs = List<Int>()
+  xs.push(1)
+  xs.push(2)
+  print(xs.get(0))
+  print(xs.len())
+  for x in xs { print(x) }
+}

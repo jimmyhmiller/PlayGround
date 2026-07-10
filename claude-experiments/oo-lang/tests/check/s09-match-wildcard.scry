@@ -1,0 +1,8 @@
+enum Color { Red Green Blue }
+fn f(c: Color) -> String {
+  match c {
+    Red -> "red"
+    _ -> "other"
+  }
+}
+fn main() { print(f(Green)) }

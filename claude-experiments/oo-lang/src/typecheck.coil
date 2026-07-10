@@ -254,13 +254,45 @@
   (let [fnn (load (field d node)) np (fn-param-count fnn) na (arg-count call)]
     (if (!= np na)
       (do (err-arity call np na) (ty-error))
-      (do
-        (let [(mut i) 0]
-          (loop (if (< (load i) na)
-                  (let [pt (resolve-type (param-type-node (fn-param-at fnn (load i))) d)]
-                    (infer (arg-val (arg-at call (load i))) env pt) (store! i (+ (load i) 1)) 0)
-                  (break))))
-        (resolve-type (fn-ret-node fnn) d)))))
+      (if (decl-is-generic d)
+        (call-generic-function d fnn call env na)
+        (do
+          (let [(mut i) 0]
+            (loop (if (< (load i) na)
+                    (let [pt (resolve-type (param-type-node (fn-param-at fnn (load i))) d)]
+                      (infer (arg-val (arg-at call (load i))) env pt) (store! i (+ (load i) 1)) 0)
+                    (break))))
+          (resolve-type (fn-ret-node fnn) d))))))
+
+; generic top-level function: infer type args from argument types, then verify
+(defn call-generic-function [(d (ptr Decl)) (fnn (ptr Node)) (call (ptr Node)) (env (ptr Env)) (na i64)] (-> (ptr Type))
+  (let [ntp (decl-tparam-count d)
+        subst (cast (ptr (array (ptr Type) 8)) (xalloc (sizeof (array (ptr Type) 8))))
+        atys (cast (ptr (array (ptr Type) 32)) (xalloc (sizeof (array (ptr Type) 32))))]
+    (let [(mut i) 0] (loop (if (< (load i) ntp) (do (store! (index subst (load i)) (null-ty)) (store! i (+ (load i) 1)) 0) (break))))
+    ; infer args + unify against declared param patterns
+    (let [(mut i) 0]
+      (loop (if (< (load i) na)
+              (let [at (infer (arg-val (arg-at call (load i))) env (null-ty))]
+                (store! (index atys (load i)) at)
+                (unify-into (resolve-type (param-type-node (fn-param-at fnn (load i))) d) at d subst)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    ; build type-argument list (unsolved => error)
+    (let [(mut args) (al-new [(ptr Type)] (alc-global)) (mut i) 0 (mut bad) false]
+      (loop (if (< (load i) ntp)
+              (do (if (= (cast i64 (load (index subst (load i)))) 0) (do (store! bad true) (al-push! (mut args) (ty-error)) 0) (do (al-push! (mut args) (load (index subst (load i)))) 0)) (store! i (+ (load i) 1)) 0)
+              (break)))
+      (if (load bad) (do (err-msg-name call c"cannot infer type arguments for '" (nm fnn) (nlen fnn) c"'") 0) 0)
+      ; verify each argument against its substituted parameter type
+      (let [(mut i) 0]
+        (loop (if (< (load i) na)
+                (let [pt (subst-type (resolve-type (param-type-node (fn-param-at fnn (load i))) d) d (load args))]
+                  (if (and (not (is-err (load (index atys (load i))))) (not (assignable (load (index atys (load i))) pt)))
+                    (do (err-exp-found (arg-val (arg-at call (load i))) c"" pt (load (index atys (load i)))) 0) 0)
+                  (store! i (+ (load i) 1)) 0)
+                (break))))
+      (subst-type (resolve-type (fn-ret-node fnn) d) d (load args)))))
 
 (defn err-arity [(n (ptr Node)) (want i64) (got i64)] (-> i64)
   (err-head-n n) (w-cstr 2 c"expected ") (w-int 2 want) (w-cstr 2 c" argument(s), found ") (w-int 2 got) (err-end))
@@ -1191,3 +1223,79 @@
       (if (= (err-count) 0)
         (do (w-cstr 1 c"ok\n") 0)
         65))))
+
+; ======================================================================
+; dump-types — expose the monomorphization table + itable layout (Phase 3 input)
+; ======================================================================
+(defn run-dump-types [(path (ptr i8))] (-> i64)
+  (ctx-init) (loaded-init) (register-builtins)
+  (if (not (can-open path))
+    (do (w-cstr 2 c"scry dump-types: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n") 74)
+    (do
+      (load-file path true)
+      (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+        (loop (if (< (load i) n) (do (check-decl-signatures (al-get ds (load i))) (store! i (+ (load i) 1)) 0) (break))))
+      (dump-monos)
+      (dump-itables)
+      (if (= (err-count) 0) 0 65))))
+
+(defn dump-monos [] (-> i64)
+  (w-cstr 1 c"; monomorphized types (declaration-order field layout; entity => per-type arena)\n")
+  (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [m (al-get ms (load i))]
+          (w-cstr 1 c"type #") (w-int 1 (load (field m id))) (w-cstr 1 c" ")
+          (w-bytes 1 (load (field m name)) (load (field m name-len)))
+          (if (load (field m is-entity)) (w-cstr 1 c" (entity)") (w-cstr 1 c" (value)"))
+          (w-cstr 1 c"\n")
+          (let [fs (load (field m fields)) nf (al-len fs) (mut j) 0]
+            (loop (if (< (load j) nf)
+                    (let [f (al-get fs (load j))]
+                      (w-cstr 1 c"  .") (w-bytes 1 (load (field f name)) (load (field f name-len)))
+                      (w-cstr 1 c": ") (type-write 1 (load (field f ty))) (w-cstr 1 c"\n") (store! j (+ (load j) 1)) 0)
+                    (break))))
+          (store! i (+ (load i) 1)) 0)
+        (break))))
+  0)
+
+(defn dump-itables [] (-> i64)
+  (w-cstr 1 c"; itables (class x interface -> method slots in interface declaration order)\n")
+  (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [d (al-get ds (load i))]
+          (if (= (load (field d kind)) DK_CLASS)
+            (let [cn (load (field d node)) impl (if (= (cast i64 cn) 0) (cast (ptr Node) 0) (load (field cn b)))]
+              (if (= (cast i64 impl) 0) 0
+                (let [ni (kid-count impl) (mut k) 0]
+                  (loop
+                    (if (< (load k) ni)
+                      (let [tnode (kid-at impl (load k)) id (find-decl (nm tnode) (nlen tnode))]
+                        (if (!= (cast i64 id) 0) (dump-itable-pair d id) 0)
+                        (store! k (+ (load k) 1)) 0)
+                      (break)))))) 0)
+          (store! i (+ (load i) 1)) 0)
+        (break))))
+  0)
+
+(defn dump-itable-pair [(cd (ptr Decl)) (id (ptr Decl))] (-> i64)
+  (let [ms (load (field id members)) n (al-len ms) (mut slot) 0 (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [im (al-get ms (load i))]
+          (if (= (nkind im) NK_FN)
+            (do
+              (w-cstr 1 c"itable ") (w-bytes 1 (load (field cd name)) (load (field cd name-len)))
+              (w-cstr 1 c" as ") (w-bytes 1 (load (field id name)) (load (field id name-len)))
+              (w-cstr 1 c"[") (w-int 1 (load slot)) (w-cstr 1 c"] ")
+              (w-bytes 1 (nm im) (nlen im)) (w-cstr 1 c" -> ")
+              (let [cm (decl-member cd (nm im) (nlen im))]
+                (if (= (cast i64 cm) 0) (w-cstr 1 c"<missing>")
+                  (do (w-bytes 1 (load (field cd name)) (load (field cd name-len))) (w-cstr 1 c".") (w-bytes 1 (nm cm) (nlen cm)))))
+              (w-cstr 1 c"\n")
+              (store! slot (+ (load slot) 1)) 0)
+            0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    0))
