@@ -898,3 +898,147 @@ than the conformance-guard-only handling here. None of that ships in M4, by desi
   `request-global-stop`/`release-global-stop` in `server-eval-stw`, so the swap is
   automatically at a full stop; the CLI path (`scry eval`) runs after `main()` returns, so
   there are no other threads to park at all.
+
+---
+
+# Phase 7 — interactive stdin I/O + the Claude-Code-like assistant (M5 flagship)
+
+Phase 7 makes the demo app a *real interactive terminal program*: it prompts, reads a line the
+user types, dispatches, replies, and (on "research …") spawns sub-agents on real threads — all
+while remaining 100% viewer-unaware (the runtime injects the eval server for any program, NREPL
+style). The point the owner wanted: *user interaction at the command line, and we watch it in the
+UI, and we can change code live and make new things pop up* — proven by redefining
+`Session.suggest` from the viewer and seeing a suggestions box appear under every prompt with no
+restart.
+
+## What changed, by file
+
+| File | Change |
+|---|---|
+| `bytecode.coil` | New builtin ids `BLT_CONSOLE_PRINT 25` (String → stdout, no trailing newline) and `BLT_CONSOLE_READLINE 26` (no args → `(ptr Option<String>)`). |
+| `ioutil.coil` | One extern: `poll(struct pollfd*, nfds, timeout-ms)` — the primitive behind the cooperative read. |
+| `builtins.coil` | `console-print` (like `console-log` but no `\n`; fd-1 `write` is unbuffered, so a prompt reaches the terminal before the following read). readLine's body lives in `vm.coil` (needs the VMThread to poll). |
+| `vm.coil` | `vm-readline(vt)` — the safepoint-cooperative line reader (below); `do-builtin` dispatches the two new ids. |
+| `typecheck.coil` | `Console` gains `print(s: String) -> Void` and `readLine() -> Option<String>`. |
+| `compile.coil` | `compile-builtin-object`'s `Console` branch is now a `cond` over the method name: `print` → `BLT_CONSOLE_PRINT`, `readLine` → `BLT_CONSOLE_READLINE` (no args compiled), else `log`. |
+| `examples/assistant.scry` | The flagship app (below). `agents.scry` is kept. |
+| `tests/run-tests.py` | `.stdin` files for `run/` goldens; a `stdin:` key for `eval/` `.t`; a new `app/*.t` runner (scripted stdin → stdout substrings); the `assistant_e2e` gate. |
+
+## `Console.readLine()` — blocking to the program, cooperative to the runtime
+
+The hard requirement: a line read must look blocking to the Scry program, but **never park the OS
+thread in a blocking `read()`** — that would freeze every STW/eval while the user thinks, defeating
+the whole "inspect the app while it waits for input" premise. So `vm-readline` is shaped **exactly
+like Phase 5's `Clock.sleep`**: a loop that each pass calls `safepoint-poll((field vt parked))`,
+then `poll(fd 0, POLLIN, 20ms)`. On a 20 ms timeout it loops (having just polled the safepoint); on
+readable it `read`s **one byte**. So the longest a coordinator's `request-global-stop` waits for
+this thread to park is one 20 ms slice — an eval POSTed while the user sits at the prompt answers
+promptly. The `struct pollfd` is built as a single `i64`: `fd=0` in bytes 0–3, `events=POLLIN(1)`
+at byte 4 → the literal `(<< 1 32)`; no sub-word struct writes needed.
+
+Byte-at-a-time under `poll` (rather than a bulk `read`) is deliberate: it means we never block
+between the bytes of a line even when input arrives split across pipe chunks — each byte waits at
+the cooperative `poll`, so a slow/partial writer can't hold the STW hostage. A complete terminal
+line (delivered on Enter) is fully buffered, so its bytes come back with zero inter-byte `poll`
+waits; we stop at `\newline` before touching the next line.
+
+**EOF is an honest `Option`.** 01 has no null, so `readLine()` returns `Option<String>`:
+`Some(line)` for a completed line (newline stripped; a bare Enter is `Some("")`, a real empty line),
+and `None` at EOF (Ctrl-D / closed pipe: `read` returns 0 with nothing buffered). The app matches on
+it. `Console.print(s)` is the no-newline sibling of `Console.log` for prompts.
+
+### stdin-vs-STW interaction (the crux, and how it's tested)
+
+While the main thread sits "in" `readLine`, it is really spinning the `poll`+`safepoint-poll` loop.
+When the server coordinator requests a global stop for an eval, the main thread publishes `parked=1`
+within ≤20 ms (same mechanism as a sleeping/joining thread), the eval runs on the eval `VMThread`
+with the heap quiescent (including a **mutation** eval — the `assistant_e2e` test appends to the
+orchestrator's conversation via `Agent.instance(0).say(...)` while the app waits at the prompt and
+reads the new size back), then the main thread resumes its read loop. No new machinery: `readLine`
+reuses the exact `parked`-word registered at thread start, so it is just another cooperative foreign
+call alongside `Clock.sleep`/`ThreadHandle.join`/`Mutex.lock`.
+
+## `examples/assistant.scry` — structurally real, honestly fake
+
+Entities: `Message`, `Conversation`, `interface Tool` (`ShellTool`/`SearchTool`, canned outputs),
+`ScriptedModel` (keyword-triggered canned replies — `hello`/`thanks`/`?`/default), `Agent`
+(name/role/color/status enum/model/conversation/tools), `SubAgentWorker : Runnable` (a spawned
+sub-agent's thread body), `Session` (REPL owner + history — the live-edit target), `Orchestrator`
+(owns the assistant `Agent`, shared tools, and every spawned sub-agent + its `ThreadHandle`).
+
+Main loop: print `renderPrompt()` with `Console.print`, `match Console.readLine()`, dispatch,
+optionally print `suggest(line)`, loop; `None` (EOF) or `"exit"` ends the loop → `orch.shutdown()`
+joins outstanding sub-agents → `goodbye`; `main` returns and the runtime keeps the process alive and
+browsable (its own post-main hint). Keyword routing (`Orchestrator.dispatch`): `help` lists
+capabilities; `research <topic>` prints a delegating line and `Thread.spawn`s two `SubAgentWorker`s
+(researcher: 4 turns, summarizer: 3 turns) that each append `Message`s to their own `Conversation`
+with `Clock.sleep(250)` pacing and print an interleaved per-agent line — **the main loop stays
+responsive, so you can type the next input while they work**; any other input gets a direct
+`ScriptedModel` reply. Sub-agents are ordinary `Agent` instances, so a `research` grows the live
+`Agent` count 1 → 3 and the `Message` count climbs — visible in the viewer *during* the interaction.
+Concurrency-safe by single-writer discipline (each sub-agent thread is the only writer of its own
+agent's conversation/status), exactly as `agents.scry`.
+
+### The `suggest()` extension-point pattern (the two-way live-edit beat)
+
+`Session` is kept **deliberately tiny** — `history`, `init`, `renderPrompt() -> String` ("you> "),
+`suggest(input) -> String` ("") — so the whole class is a compact Phase-6 redefinition target
+(M4 requires the *exact* field + method set, so a small class keeps the swap snippet short).
+`suggest` ships returning `""` (empty ⇒ main prints nothing). The demo redefines the whole class
+live from the viewer's code panel, changing only `suggest`'s body to return a bracketed suggestions
+line built from `history`; the very next prompt prints it — a new UI element **popped into a running
+program from the outside**. The exact snippet is in the file header (and asserted verbatim by
+`assistant_e2e`):
+
+```
+class Session {
+  history: List<String>
+  fn init() { self.history = List<String>() }
+  fn renderPrompt() -> String { "you> " }
+  fn suggest(input: String) -> String {
+    if self.history.len() == 0 { "" }
+    else { "  [suggestions: help | research <topic> | exit  (last: " + self.history.get(self.history.len() - 1) + ")]" }
+  }
+}
+```
+
+The source has **zero** viewer/server awareness — `suggest` is just a normal method the app calls;
+that the viewer can swap it is a runtime property, not something the app knows.
+
+## Tests (12 new; 248 total)
+
+- **`tests/run/readline_*` (5 golden, `.stdin`-driven, exact stdout):** `readline_echo` (line
+  loop), `readline_eof` (empty stdin → `None`), `readline_print` (`print` has no trailing newline,
+  `log` does), `readline_empty_line` (blank line is `Some("")`, distinct from `None`),
+  `readline_count` (deterministic post-loop aggregate). The harness pipes `NAME.stdin` if present.
+- **`tests/app/*.t` (5, scripted stdin → stdout substrings):** `hello`/`help`/`plain` response
+  flows, `eof` (EOF reaches goodbye), `research_aggregate` (the deterministic **post-join
+  aggregate** — "2 sub-agent(s) finished" — never the interleaved per-turn lines). Substring (not
+  exact) matching is what keeps a research golden non-flaky despite background-thread interleaving.
+- **`tests/eval/50-assistant-subagents.t` (1, `stdin:` + `-e`):** feed `research quantum`, run to
+  completion (which **joins** the sub-agents), then reflect: exactly 3 `Agent`s, 21 `Message`s,
+  3 `ScriptedModel`s, sub-agents `status Done` — the aggregate proof, deterministic because it is
+  read *after* the join, not off interleaved stdout.
+- **`assistant_e2e` (the gate):** drives the app over a stdin pipe while POSTing evals — (b) STW +
+  a mutation answer while the app is blocked in `readLine`; (a) `research` grows Agents 1→3 and
+  Messages climb *during* the interaction, sub-agent lines appear; (c) the verbatim `Session.suggest`
+  redefinition makes the suggestions box appear on the next typed input; (d) `exit` → goodbye and
+  the process still serves evals. Paced with generous sleeps against the canned `Clock.sleep`
+  timing; stable across repeated runs.
+
+## Coil friction hit in Phase 7 (adds to Phase 1-6's list)
+
+- **A `struct pollfd` is cleanest as one packed `i64` literal.** Rather than sub-word (`i16`) field
+  stores for `events`, build the whole `{fd,events,revents}` as a single `alloc-stack i64` and
+  `store!` `(<< 1 32)` (fd=0, `events=POLLIN=1` at byte offset 4, revents=0). One store, correct
+  little-endian layout, no struct type needed for a one-shot FFI arg.
+- **fd-1 `write` is unbuffered**, so `Console.print` needs no explicit flush before a `readLine` —
+  the prompt is already on the terminal. (Had `print` gone through a buffered `FILE*`, the prompt
+  would have lagged behind the blocking read; the raw `write` syscall sidesteps it.)
+- **The safepoint-cooperative recipe generalizes verbatim from `Clock.sleep` to `readLine`.** Any
+  "blocking" foreign wait becomes STW-safe by looping `safepoint-poll` + a short-timeout syscall
+  (`nanosleep` slice / `poll` timeout) instead of one long blocking call — the single most important
+  runtime pattern in this codebase, now applied three times (sleep, join-spin, readLine).
+- **A whole-class Phase-6 redefinition must carry the class's *exact* method set** (M4: no
+  add/remove). Keeping `Session` to `init`/`renderPrompt`/`suggest` is what makes the live-edit
+  snippet short enough to paste — a design constraint the app honors on purpose.

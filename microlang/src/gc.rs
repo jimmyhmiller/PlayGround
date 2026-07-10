@@ -133,7 +133,7 @@ impl<M: ValueModel> Runtime<M> {
 
             // 3. Commit to-space; poison remaining from-space so any stale
             //    pointer into it is a loud use-after-move.
-            heap.extend(to.drain(..));
+            for o in to.drain(..) { heap.push(o); }
             for i in 0..from_len {
                 if !matches!(heap[i], Obj::Moved(_)) {
                     heap[i] = Obj::Moved(u32::MAX);
@@ -153,7 +153,7 @@ impl<M: ValueModel> Runtime<M> {
 /// Copy `bits`'s object to to-space if needed, returning its new ref. Idempotent
 /// via `Moved` markers, so shared objects are copied once.
 fn fw<M: ValueModel>(
-    heap: &mut Vec<Obj>,
+    heap: &mut crate::runtime::Heap,
     from_len: usize,
     to: &mut Vec<Obj>,
     reloc: &mut u64,
@@ -179,7 +179,7 @@ fn fw<M: ValueModel>(
 
 /// Forward the internal pointers of the just-copied object `to[i]`.
 fn scan_obj<M: ValueModel>(
-    heap: &mut Vec<Obj>,
+    heap: &mut crate::runtime::Heap,
     from_len: usize,
     to: &mut Vec<Obj>,
     reloc: &mut u64,
@@ -239,7 +239,7 @@ fn scan_obj<M: ValueModel>(
 /// cells of every captured frame. In-place and idempotent (like `update_env`), so
 /// shared continuation tails and multi-shot resumptions need no visited set.
 fn walk_kont<M: ValueModel>(
-    heap: &mut Vec<Obj>,
+    heap: &mut crate::runtime::Heap,
     from_len: usize,
     to: &mut Vec<Obj>,
     reloc: &mut u64,
@@ -280,7 +280,7 @@ fn walk_kont<M: ValueModel>(
 /// Idempotent (a re-visited, already-forwarded slot forwards to itself), so
 /// frames shared between closures need no visited set.
 fn update_env<M: ValueModel>(
-    heap: &mut Vec<Obj>,
+    heap: &mut crate::runtime::Heap,
     from_len: usize,
     to: &mut Vec<Obj>,
     reloc: &mut u64,

@@ -57,8 +57,73 @@ pub struct Thrown {
     pub value: u64,
 }
 
+/// Objects per heap chunk. A power of two so index split is shift/mask.
+const CHUNK_BITS: u32 = 12;
+const CHUNK: usize = 1 << CHUNK_BITS;
+
+/// A SEGMENTED heap: a vector of fixed-capacity chunks. Appending only ever adds
+/// to (or pushes) a chunk, so the buffer holding any existing object NEVER moves
+/// — an `&Obj` stays valid while other objects are allocated. That address
+/// stability is what makes a shared heap safe to read concurrently (only chunk
+/// acquisition needs synchronization) and is the prerequisite for true
+/// system-thread parallelism over one heap. A `HeapId` is a flat index; the
+/// chunk is `id >> CHUNK_BITS`, the offset `id & (CHUNK-1)`. `Index`/`IndexMut`
+/// preserve the `heap[id]` call sites verbatim.
+pub struct Heap {
+    chunks: Vec<Vec<Obj>>,
+    len: usize,
+}
+
+impl Heap {
+    pub fn new() -> Self {
+        Heap { chunks: Vec::new(), len: 0 }
+    }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    /// Append an object; returns its flat id. The current chunk never grows past
+    /// its reserved capacity, so existing object addresses are stable.
+    pub fn push(&mut self, o: Obj) -> usize {
+        let i = self.len;
+        let c = i >> CHUNK_BITS;
+        if c >= self.chunks.len() {
+            self.chunks.push(Vec::with_capacity(CHUNK));
+        }
+        self.chunks[c].push(o);
+        self.len += 1;
+        i
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &Obj> {
+        self.chunks.iter().flat_map(|c| c.iter())
+    }
+}
+
+impl Default for Heap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::ops::Index<usize> for Heap {
+    type Output = Obj;
+    #[inline]
+    fn index(&self, i: usize) -> &Obj {
+        &self.chunks[i >> CHUNK_BITS][i & (CHUNK - 1)]
+    }
+}
+
+impl std::ops::IndexMut<usize> for Heap {
+    #[inline]
+    fn index_mut(&mut self, i: usize) -> &mut Obj {
+        &mut self.chunks[i >> CHUNK_BITS][i & (CHUNK - 1)]
+    }
+}
+
 pub struct Runtime<M: ValueModel> {
-    pub heap: Vec<Obj>,
+    pub heap: Heap,
     /// Count of heap allocations. Instrumentation so the value axis is visible.
     pub allocs: u64,
     /// Objects relocated (copied to to-space) by the moving collector so far.
@@ -105,7 +170,7 @@ pub struct Runtime<M: ValueModel> {
 impl<M: ValueModel> Runtime<M> {
     pub fn new() -> Self {
         Runtime {
-            heap: Vec::new(),
+            heap: Heap::new(),
             allocs: 0,
             relocated: 0,
             freed: 0,

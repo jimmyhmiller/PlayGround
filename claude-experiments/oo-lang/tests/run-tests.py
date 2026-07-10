@@ -134,6 +134,9 @@ def main():
     xp, xf = run_liveedit_test(binary, filt)
     passed += xp; failed += xf
     if xf: fails.append("liveedit")
+    e7p, e7f = run_assistant_e2e(binary, filt)
+    passed += e7p; failed += e7f
+    if e7f: fails.append("assistant_e2e")
 
     print(f"\n{passed} passed, {failed} failed ({passed + failed} tests)")
     if fails and not verbose:
@@ -522,6 +525,144 @@ def run_liveedit_test(binary, filt):
             print("FAIL liveedit")
             for pr in problems:
                 print("     " + pr)
+            return 0, 1
+        return 1, 0
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+
+
+def run_assistant_e2e(binary, filt):
+    """THE Phase-7 gate: drive examples/assistant.scry interactively (stdin pipe) while POSTing
+    evals over HTTP. Beats:
+      (b) WHILE the app sits blocked at the initial `you> ` prompt inside Console.readLine(),
+          POST types()/instance-read/a MUTATION and assert they answer promptly — proving the
+          readLine is safepoint-cooperative (an STW lands while the user 'thinks').
+      (a) type 'research quantum computing' -> orchestrator reply + per-agent sub-agent lines
+          appear in the terminal, and a types()/instances() eval DURING the interaction shows
+          the Agent count grew 1 -> 3 and the Message count climbing.
+      (c) POST the exact Session.suggest redefinition from the file header, type another input,
+          and assert the suggestions box now appears under the prompt (live two-way edit).
+      (d) type 'exit' -> clean goodbye + the process is still serving evals.
+    Paced with generous sleeps against the app's canned Clock.sleep timing (no flakiness)."""
+    if filt and "assistant_e2e" not in filt:
+        return 0, 0
+    import time, json, threading, urllib.request
+    demo = os.path.abspath(os.path.join(HERE, "..", "examples", "assistant.scry"))
+    proc = subprocess.Popen([binary, "run", demo], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1)
+    lines = []
+    threading.Thread(target=lambda: [lines.append(l) for l in proc.stdout], daemon=True).start()
+
+    def send(s):
+        proc.stdin.write(s + "\n"); proc.stdin.flush()
+
+    port = None
+    try:
+        for _ in range(400):
+            for l in lines:
+                if "viewer: http://localhost:" in l:
+                    port = int(l.strip().split(":")[-1]); break
+            if port is not None:
+                break
+            time.sleep(0.05)
+        if port is None:
+            print("FAIL assistant_e2e\n     never printed viewer URL")
+            return 0, 1
+
+        def ev(src):
+            body = json.dumps({"id": "E", "source": src}).encode()
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/eval", data=body,
+                                         headers={"Content-Type": "application/json"})
+            return json.loads(urllib.request.urlopen(req, timeout=30).read())
+
+        problems = []
+        time.sleep(0.9)   # app is now blocked at the first `you> ` prompt inside readLine
+
+        # (b) STW answers WHILE the main thread sits in readLine
+        names = [t["name"] for t in ev("types()")["value"]["items"]]
+        for want in ("Agent", "Conversation", "Message", "ScriptedModel", "SubAgentWorker", "Session", "Orchestrator"):
+            if want not in names:
+                problems.append(f"types() (during readLine) missing {want}: {names}")
+        a1 = ev("Agent.instances()")["value"]["length"]
+        if a1 != 1:
+            problems.append(f"expected 1 Agent before research, got {a1}")
+        # a MUTATION eval during readLine: append to the orchestrator's conversation, read it back
+        before = ev("Agent.instance(0).conversation.size()")["value"]["value"]
+        ev('Agent.instance(0).say("probe question?")')
+        after = ev("Agent.instance(0).conversation.size()")["value"]["value"]
+        if not (after == before + 2):
+            problems.append(f"mutation during readLine did not take effect: {before}->{after}")
+
+        # (a) research spawns 2 sub-agents on real threads; count 1->3, messages climb
+        send("research quantum computing")
+        time.sleep(0.35)
+        a2 = ev("Agent.instances()")["value"]["length"]
+        if a2 != 3:
+            problems.append(f"Agent count did not grow to 3 after research: {a2}")
+        m0 = ev("Message.instances()")["value"]["length"]
+        climbed = False
+        for _ in range(20):          # watch messages climb while the sub-agents work
+            time.sleep(0.15)
+            if ev("Message.instances()")["value"]["length"] > m0:
+                climbed = True; break
+        if not climbed:
+            problems.append(f"Message count never climbed while sub-agents worked (start {m0})")
+        # orchestrator reply + per-agent sub-agent lines are in the terminal
+        if not any("delegating" in l for l in lines):
+            problems.append("no orchestrator 'delegating' reply in terminal")
+        time.sleep(1.4)              # let all sub-agent turns finish printing
+        if not any("researcher" in l for l in lines):
+            problems.append("no 'researcher' sub-agent line in terminal")
+        if not any("summarizer" in l for l in lines):
+            problems.append("no 'summarizer' sub-agent line in terminal")
+
+        # (c) live-redefine Session.suggest (the EXACT snippet from the file header) -> box pops up
+        snippet = ('class Session {\n'
+                   '  history: List<String>\n'
+                   '  fn init() { self.history = List<String>() }\n'
+                   '  fn renderPrompt() -> String { "you> " }\n'
+                   '  fn suggest(input: String) -> String {\n'
+                   '    if self.history.len() == 0 { "" }\n'
+                   '    else { "  [suggestions: help | research <topic> | exit  (last: " + self.history.get(self.history.len() - 1) + ")]" }\n'
+                   '  }\n'
+                   '}')
+        r = ev(snippet)
+        v = r.get("value", {})
+        if v.get("type") != "defined" or v.get("defined") != "Session":
+            problems.append(f"Session.suggest redefinition not accepted: {r}")
+        mark = len(lines)
+        send("hello again")
+        boxed = False
+        for _ in range(20):
+            time.sleep(0.15)
+            if any("[suggestions:" in l for l in lines[mark:]):
+                boxed = True; break
+        if not boxed:
+            problems.append("suggestions box never appeared after redefining Session.suggest")
+
+        # (d) exit -> clean goodbye, process still serving evals
+        send("exit")
+        gone = False
+        for _ in range(20):
+            time.sleep(0.15)
+            if any("goodbye" in l for l in lines):
+                gone = True; break
+        if not gone:
+            problems.append("no goodbye after exit")
+        if proc.poll() is not None:
+            problems.append("process exited after 'exit' (should stay alive serving evals)")
+        elif ev("types()").get("value") is None:
+            problems.append("process stopped serving evals after exit")
+
+        if problems:
+            print("FAIL assistant_e2e")
+            for p in problems:
+                print("     " + p)
             return 0, 1
         return 1, 0
     finally:
