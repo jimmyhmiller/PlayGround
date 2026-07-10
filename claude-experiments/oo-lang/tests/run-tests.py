@@ -149,6 +149,13 @@ def main():
     evp, evf = run_env_roundtrip_test(binary, filt)
     passed += evp; failed += evf
     if evf: fails.append("env_roundtrip")
+    # Phase 8c: the real agent loop, live inspection (always, scripted) + online (gated on key).
+    alp, alf = run_agent_liveness_test(binary, filt)
+    passed += alp; failed += alf
+    if alf: fails.append("agent_liveness")
+    aop, aof = run_agent_online_test(binary, filt)
+    passed += aop; failed += aof
+    if aof: fails.append("agent_online")
 
     print(f"\n{passed} passed, {failed} failed ({passed + failed} tests)")
     if fails and not verbose:
@@ -935,6 +942,139 @@ def run_http_stw_test(binary, filt):
             proc.wait(timeout=5)
         except Exception:
             proc.kill()
+
+
+def run_agent_liveness_test(binary, filt):
+    """Phase 8c LIVE inspection of the real agent loop — always runs (scripted brain, ZERO network).
+    Starts `scry run` (viewer server) on examples/assistant.scry, types `loop weather in Tokyo` so a
+    LoopWorker runs a REPEATING agent loop (model->tool->result->answer) on a background OS thread,
+    then over the eval channel: (1) asserts Message.instances() climbs while it runs, (2) pause()s the
+    looper Agent and asserts its Message count FREEZES (the loop visibly stalls), (3) resume()s and
+    asserts it climbs again. Same STW-cooperative liveness pattern as Phase 5/7, now over the loop."""
+    if filt and "agent" not in filt and "liveness" not in filt:
+        return 0, 0
+    import time, json, threading, urllib.request
+    demo = os.path.abspath(os.path.join(HERE, "..", "examples", "assistant.scry"))
+    proc = subprocess.Popen([binary, "run", demo], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    lines = []
+    threading.Thread(target=lambda: [lines.append(l) for l in proc.stdout], daemon=True).start()
+
+    def send(s):
+        proc.stdin.write(s + "\n"); proc.stdin.flush()
+
+    port = None
+    try:
+        for _ in range(400):
+            for l in lines:
+                if "viewer: http://localhost:" in l:
+                    port = int(l.strip().split(":")[-1]); break
+            if port is not None:
+                break
+            time.sleep(0.05)
+        if port is None:
+            print("FAIL agent_liveness\n     never printed viewer URL")
+            return 0, 1
+
+        def ev(src):
+            body = json.dumps({"id": "AL", "source": src}).encode()
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/eval", data=body,
+                                         headers={"Content-Type": "application/json"})
+            return json.loads(urllib.request.urlopen(req, timeout=30).read())
+
+        problems = []
+        time.sleep(0.6)  # app is at the first prompt inside readLine
+        send("loop weather in Tokyo")
+        time.sleep(1.0)
+
+        def mcount():
+            return ev("Message.instances()")["value"]["length"]
+
+        # (1) Message climbs while the loop runs
+        m1 = mcount()
+        time.sleep(1.6)
+        m2 = mcount()
+        if not (m2 > m1):
+            problems.append(f"Message count did not climb while the loop ran: {m1}->{m2}")
+
+        # locate the looper Agent's slot
+        insts = ev("Agent.instances()")["value"]["items"]
+        slot = None
+        for it in insts:
+            if it["fields"]["name"]["value"] == "looper":
+                slot = int(it["ref"].split("#")[1]); break
+        if slot is None:
+            problems.append(f"no looper Agent found: {[i['fields']['name']['value'] for i in insts]}")
+            print("FAIL agent_liveness"); [print("     " + p) for p in problems]
+            proc.terminate(); return 0, 1
+
+        # (2) pause -> the loop freezes (let the in-flight round settle first)
+        ev(f"Agent.instance({slot}).pause()")
+        time.sleep(1.5)
+        ma = mcount()
+        time.sleep(1.6)
+        mb = mcount()
+        if mb != ma:
+            problems.append(f"paused loop still produced Messages: {ma}->{mb}")
+
+        # (3) resume -> it climbs again
+        ev(f"Agent.instance({slot}).resume()")
+        time.sleep(1.8)
+        mc = mcount()
+        if not (mc > mb):
+            problems.append(f"resumed loop did not climb: {mb}->{mc}")
+
+        if problems:
+            print("FAIL agent_liveness")
+            for p in problems:
+                print("     " + p)
+            return 0, 1
+        return 1, 0
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+
+
+def run_agent_online_test(binary, filt):
+    """Phase 8c ONLINE gate: the REAL Anthropic agent loop. Gated on ANTHROPIC_API_KEY + reachability
+    (SKIPPED LOUDLY otherwise). Exports the key into the child, drives examples/assistant.scry with a
+    prompt that needs a tool ('what is 17 times 23?'), and asserts the live model went stop_reason
+    tool_use -> the `calculate` tool ran -> a final answer contains 391. The key is read from the
+    environment only, never written to disk, never committed."""
+    if filt and "agent" not in filt and "online" not in filt:
+        return 0, 0
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        print("SKIPPED agent_online: ANTHROPIC_API_KEY not set")
+        return 0, 0
+    if not _net_reachable():
+        print("SKIPPED agent_online: api.anthropic.com:443 unreachable (offline)")
+        return 0, 0
+    demo = os.path.abspath(os.path.join(HERE, "..", "examples", "assistant.scry"))
+    try:
+        p = subprocess.run([binary, "run", "--no-viewer", demo],
+                           input="what is 17 times 23?\nexit\n",
+                           capture_output=True, text=True, timeout=120, env=dict(os.environ))
+        out = p.stdout
+    except subprocess.TimeoutExpired:
+        print("FAIL agent_online\n     timed out talking to the live API")
+        return 0, 1
+    problems = []
+    if "AnthropicModel" not in out:
+        problems.append("did not announce the AnthropicModel brain (key not seen?)")
+    if "[agent] -> tool_use: calculate" not in out:
+        problems.append(f"live model never emitted a tool_use for calculate; out={out.strip()!r}")
+    if "391" not in out:
+        problems.append(f"final answer did not contain 391; out={out.strip()!r}")
+    if problems:
+        print("FAIL agent_online")
+        for pr in problems:
+            print("     " + pr)
+        return 0, 1
+    return 1, 0
 
 
 def _diff(expected, actual):

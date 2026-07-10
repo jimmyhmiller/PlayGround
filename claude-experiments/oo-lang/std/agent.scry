@@ -342,8 +342,8 @@ class ScriptedModel implements Model {
         // turn 2+: the tool has answered — fold its output into a final reply
         finalTextResp("Here you go: " + last.content)
       } else {
-        let task = convo.messages.get(0)
-        let userText = task.content
+        // turn 1: `last` is the user task the loop just appended
+        let userText = last.content
         if strContains(userText, "weather") {
           let loc = pickCity(userText)
           let inp = "{\"location\":" + jq(loc) + "}"

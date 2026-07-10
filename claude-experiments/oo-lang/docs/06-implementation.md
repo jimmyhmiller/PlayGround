@@ -1291,3 +1291,132 @@ reads it back (the golden can't set env vars).
   `fromCharCode` handles the decoded escapes — together they preserve multibyte UTF-8 exactly.
 - **`Map` had no enumeration.** `set`/`get`/`containsKey`/`len` can't drive a serializer; `keys() ->
   List<K>` (insertion order) is the minimal addition that lets a Scry program walk a map.
+
+---
+
+# Phase 8c — a TRUE agent loop: a `Model` interface + a real `AnthropicModel`
+
+Phase 8c turns the assistant's canned brain into a **real, model-driven tool-use loop**. A `Model`
+interface makes brains interchangeable; `AnthropicModel` does live tool use against `/v1/messages`
+(over 8a `Http` + 8b `Json`); `ScriptedModel` is a deterministic offline brain that drives the
+**identical** loop so the whole thing is testable with zero network. Everything is written IN Scry,
+in the shared module `std/agent.scry`, imported by both `examples/assistant.scry` (the live app)
+and `tests/run/agent_loop.scry` (the offline golden).
+
+## The shapes (`std/agent.scry`)
+
+```
+interface Model {
+  fn complete(prompt: String) -> String                       // one-shot chat (legacy say path)
+  fn respond(convo: Conversation, tools: List<Tool>) -> ModelResponse   // one agentic turn
+}
+interface Tool {
+  fn name() -> String ; fn description() -> String
+  fn inputSchema() -> String                                  // a JSON object string (input_schema)
+  fn run(argsJson: String) -> String                          // receives the tool_use input JSON
+}
+class ModelResponse { text: String ; toolCalls: List<ToolCall> ; stopReason: String ; contentJson: String }
+class ToolCall      { id: String ; name: String ; inputJson: String }
+class Message       { role: String ; content: String ; contentJson: String }
+class Conversation  { messages: List<Message> ; count: Int }
+```
+
+`ModelResponse` is a **class, not an enum**, because Anthropic can return text AND `tool_use`
+together in one turn — a flat record captures "some text, plus N tool calls, plus a stop_reason"
+without contortions. `contentJson` on both `Message` and `ModelResponse` is the load-bearing field:
+it holds the exact JSON for the API `content` field (a quoted string for a user turn, a block array
+for an assistant/tool_result turn) so a turn can be **replayed verbatim** on the next request with
+`tool_use`/`tool_result` ids preserved.
+
+## THE loop (`runAgentLoop`)
+
+```
+append user(task) to convo
+loop (bounded by maxIters — hard stop, never a silent infinite loop):
+  resp = brain.respond(convo, tools)          # one API round-trip (or one scripted decision)
+  append assistant(resp.contentJson) to convo
+  if resp.stopReason == "tool_use":
+    for each ToolCall: find the Tool by name, run(inputJson), collect a tool_result block
+    append user([tool_result blocks]) to convo # ids match the tool_use ids
+    continue
+  else:
+    return resp.text                            # end_turn: the assistant's text is the answer
+```
+
+The same function runs whether `brain` is `ScriptedModel` or `AnthropicModel` — that is the whole
+point of the `Model` seam. `Agent.runLoop(task)` is a thin wrapper that runs it over the agent's own
+`conversation` + `tools`; every `Message`/`ToolCall` is an arena entity, so the loop is
+**browsable/pausable/hot-swappable live** in the viewer with zero extra machinery.
+
+## `AnthropicModel` — the real client
+
+`respond` hand-builds the request body (no serializer dependency — `jq` JSON-quotes each string and
+tool `inputSchema()`/message `contentJson` splice in directly), sets the three headers
+(`x-api-key`, `anthropic-version: 2023-06-01`, `content-type`), `Http.request`-POSTs to
+`https://api.anthropic.com/v1/messages`, and:
+
+- `status == 0` → **transport error** surfaced (`stopReason:"error"`, text = curl message).
+- non-2xx → **API error** surfaced with the response body (verified live: a bogus key returns a real
+  **401** `authentication_error` with a `request_id`; the request body is valid JSON the API parses).
+- 2xx → `Json.parse` the body and walk `content[]`: `text` blocks concatenate into `.text`,
+  `tool_use` blocks become `ToolCall{id,name,inputJson=Json.stringify(input)}`; `stop_reason` and the
+  re-serialized content array (`Json.stringify(content)`) are captured. **Never silent** — every
+  failure becomes a visible `stopReason:"error"` message.
+
+Because 8a's `HttpResponse` is itself an arena entity and the multi-loop is STW-cooperative, an agent
+thread parked mid-API-call stays live-inspectable for free.
+
+## `ScriptedModel` — the deterministic offline brain
+
+`respond` inspects the last message: a `tool_result` → a final answer that **incorporates the tool
+output**; otherwise it keyword-matches the user text and emits a REAL `tool_use` decision (extracting
+the integers for `calculate`, the city for `get_weather`) or answers directly via `complete()`. It
+emits the same `contentJson` block shapes as the real model, so the loop is exercised end-to-end with
+zero network and byte-deterministic output.
+
+## Tools
+
+`CalcTool` (the arg-taking proof: genuine integer `a op b` — the answer `391` only exists if `run`
+actually ran on the model-chosen args) and `WeatherTool` (canned per-location) are the two the model
+must pick and fill; `ShellTool`/`SearchTool` are canned-but-honest and tolerate a bare-string arg
+(the legacy sub-agent path). Each exposes a full `input_schema`, so a real model sees a proper tool
+catalog.
+
+## Wiring (`examples/assistant.scry`)
+
+`chooseBrain()` reads `Env.get("ANTHROPIC_API_KEY")` → `AnthropicModel("claude-sonnet-5", …)` when
+present, else `ScriptedModel`; the active brain is announced at startup (`brain: …`). Plain input
+routes through `Agent.runLoop` (one real agentic turn — the model may call a tool); `research`
+keeps the Phase-7 sub-agents on real threads; `loop <task>` spawns a `LoopWorker` that runs a
+repeating loop on a background thread with `pause()`/`resume()` for live inspection. The
+`Session.suggest` live-edit hook is unchanged; a tool's `run` body can be hot-swapped mid-loop too.
+
+## Tests (3 new; 260 total)
+
+- **Offline golden (`tests/run/agent_loop.scry`, exact stdout).** A `ScriptedModel` + `CalcTool`
+  runs the full loop: the model requests `calculate({"a":17,"b":23,"op":"mul"})`, the tool computes
+  `391`, the result feeds back, and the final answer contains it. Proves model-driven dispatch +
+  result feedback with zero network, deterministically. `tests/app/agent_loop.t` proves the same
+  through the interactive app wiring.
+- **Live inspection (`agent_liveness`, always runs, scripted).** While a `LoopWorker` runs a
+  repeating agent loop on a background thread, the harness POSTs evals: `Message.instances()` climbs;
+  `pause()` on the looper `Agent` **freezes** the count; `resume()` restarts it — the Phase-5/7
+  STW-cooperative liveness pattern, now over the loop.
+- **Online (`agent_online`, gated on `ANTHROPIC_API_KEY` + reachability, SKIPPED LOUDLY otherwise).**
+  Drives the app with "what is 17 times 23?"; asserts the live model went `stop_reason: tool_use` →
+  `calculate` ran → a final answer contains `391`. The key is read from the environment only, never
+  written to disk or committed.
+
+## Coil / Scry friction (adds to Phase 1–8b's list)
+
+- **A bare interface-typed field works** (`model: Model`), not just `List<Tool>` — so an `Agent` can
+  hold whichever brain, and one `runLoop` serves both. Interface methods may take/return user classes
+  (`respond(Conversation, List<Tool>) -> ModelResponse`), which is what makes the `Model` seam clean.
+- **A class only satisfies an interface with an explicit `implements`** — structural conformance is
+  not inferred, so `class CalcTool implements Tool` is required even though the methods all match.
+- **No `break`/`continue`.** Loops that scan to a sentinel (walk a `JArr` via `jindex` until `None`,
+  collect digit runs) use a `var more = true` flag; early exit inside a `fn` uses `return`.
+- **Building JSON by hand beats round-tripping through a value tree.** With no cross-module access to
+  the `JStr` constructor, a 12-line `jq` (quote + escape `" \ \n \t \r`) plus direct string splicing
+  of already-valid JSON (`contentJson`, `inputSchema()`) is simpler and faster than constructing a
+  `JsonValue` just to `stringify` it; parsing still uses the full `Json` + `jget*` accessor surface.

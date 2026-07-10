@@ -1,23 +1,32 @@
-// examples/assistant.scry — the Phase 7 / M5 flagship: a Claude-Code-like interactive
-// terminal assistant. Honestly fake (canned model, no network), structurally real
-// (entities, an orchestrator, real sub-agents on real OS threads, a live conversation).
+// examples/assistant.scry — the Phase 8c flagship: a Claude-Code-like interactive assistant with
+// a TRUE agent loop. The brain is now a real `Model` (interface): an AnthropicModel that does
+// model-driven tool use against the live /v1/messages API when ANTHROPIC_API_KEY is set, or a
+// deterministic ScriptedModel offline. Both drive the SAME loop (std.agent.runAgentLoop): the
+// model decides, tools run, results feed back, until a final answer. Structurally real (arena
+// entities, real sub-agents on real OS threads, a live conversation) and — with a key — honestly
+// real (a live model actually calls a tool).
 //
 // Run it:   ./scry run examples/assistant.scry        (opens the viewer + reads your input)
 // Then at the `you> ` prompt, try:
-//     hello
+//     hello                              <- plain chat: one agent turn (no tool needed)
+//     what is 17 times 23?               <- the model picks the `calculate` tool, runs it, answers
+//     weather in Tokyo?                  <- the model picks `get_weather` with the location it read
 //     help
-//     research quantum computing        <- delegates to 2 sub-agents on 2 real threads;
-//                                           keep typing while they work — the viewer shows
-//                                           new Agent/Message instances appear and climb.
-//     exit                              (or Ctrl-D)   -> goodbye; the process stays alive so
-//                                           the heap is still browsable in the viewer.
+//     research quantum computing         <- delegates to 2 sub-agents on 2 real threads; keep
+//                                           typing while they work — new Agent/Message instances
+//                                           appear and climb in the viewer.
+//     loop weather in Tokyo              <- runs a repeating agent loop on a background thread you
+//                                           can pause()/resume() live from the viewer.
+//     exit                              (or Ctrl-D)   -> goodbye; the process stays alive so the
+//                                           heap is still browsable in the viewer.
+//
+// With a key exported the SAME prompts hit the real model: `what is 17 times 23?` makes Claude
+// emit a tool_use for `calculate`, this loop runs it, feeds 391 back, and Claude answers 391.
 //
 // ============================ THE TWO-WAY LIVE-EDIT BEAT ============================
-// `Session.suggest(input)` is a deliberate extension point: it ships returning "" (nothing
-// printed after each response). WHILE this program runs, open the viewer's code panel and
-// paste the redefinition below. With NO restart, an autocomplete/suggestions box begins to
-// appear under every prompt — the running program's own behavior changed from the outside,
-// which is the whole point: we are running real code and steering it live.
+// `Session.suggest(input)` is a deliberate extension point: it ships returning "" (nothing printed
+// after each response). WHILE this program runs, open the viewer's code panel and paste the
+// redefinition below. With NO restart, a suggestions box begins to appear under every prompt.
 //
 //   class Session {
 //     history: List<String>
@@ -29,14 +38,13 @@
 //     }
 //   }
 //
-// The redefinition is a whole-class swap (Phase 6 / M4): it keeps Session's exact fields and
-// method set (init/renderPrompt/suggest) and only changes suggest's body. You can also change
-// renderPrompt's body the same way (e.g. return "assistant> ") since the whole class is one
-// generation. No restart: the very next prompt uses the new suggest.
+// You can also hot-swap a TOOL's behavior mid-loop the same way (redefine WeatherTool.run) and the
+// next tool call the running agent makes uses the new body. No restart.
 //
-// This file is an ORDINARY program. It contains zero viewer/server code; the runtime injects
-// the eval server for any program (like NREPL). The comments above describe the demo; the
-// code below does not know the viewer exists.
+// The brain + tools + loop live in std/agent.scry (imported below); this file is the app shell:
+// the REPL, the orchestrator, the real sub-agent threads, and the viewer-facing entities.
+
+import std.agent.{Message, Conversation, Tool, Model, ModelResponse, ScriptedModel, AnthropicModel, ShellTool, SearchTool, CalcTool, WeatherTool, runAgentLoop, mkTextMessage}
 
 // ============================ small string helpers ============================
 fn startsWith(s: String, p: String) -> Bool {
@@ -63,78 +71,22 @@ enum AgentStatus {
   Done
 }
 
-class Message {
-  role: String
-  content: String
-  fn init(role: String, content: String) {
-    self.role = role
-    self.content = content
-  }
-}
-
-class Conversation {
-  messages: List<Message>
-  count: Int
-  fn init() {
-    self.messages = List<Message>()
-    self.count = 0
-  }
-  fn append(m: Message) {
-    self.messages.push(m)
-    self.count = self.count + 1
-  }
-  fn size() -> Int { self.count }
-}
-
-// Heterogeneous tools through a real interface (itable dispatch), not an enum switch.
-interface Tool {
-  fn name() -> String
-  fn run(input: String) -> String
-}
-
-class ShellTool implements Tool {
-  command: String
-  fn name() -> String { "shell" }
-  fn run(input: String) -> String { "$ " + self.command + " " + input }
-}
-
-class SearchTool implements Tool {
-  index: String
-  fn name() -> String { "search" }
-  fn run(input: String) -> String { "search(" + self.index + "): " + input }
-}
-
-// Honestly-named canned model — visible in the viewer's type list as ScriptedModel. Keyword
-// triggers make the interaction feel causal without any real inference.
-class ScriptedModel {
-  persona: String
-  fn complete(prompt: String) -> String {
-    if contains(prompt, "hello") || contains(prompt, "hi ") {
-      "Hi there - I'm your assistant. Type 'help' to see what I can do."
-    } else if contains(prompt, "thanks") {
-      "You're welcome!"
-    } else if contains(prompt, "?") {
-      self.persona + ": good question - " + prompt
-    } else {
-      self.persona + ": " + prompt
-    }
-  }
-}
-
 class Agent {
   name: String
   role: String
   color: String
   status: AgentStatus
-  model: ScriptedModel
+  paused: Bool
+  model: Model                 // the brain — ScriptedModel offline, AnthropicModel with a key
   conversation: Conversation
   tools: List<Tool>
 
-  fn init(name: String, role: String, color: String, model: ScriptedModel, tools: List<Tool>) {
+  fn init(name: String, role: String, color: String, model: Model, tools: List<Tool>) {
     self.name = name
     self.role = role
     self.color = color
     self.status = AgentStatus.Idle
+    self.paused = false
     self.model = model
     self.conversation = Conversation()
     self.tools = tools
@@ -143,24 +95,36 @@ class Agent {
   fn begin() { self.status = AgentStatus.Running }
   fn finish() { self.status = AgentStatus.Done }
 
+  // pause/resume: written ONLY by the viewer/eval thread (single-writer); read by a loop worker.
+  fn pause() { self.paused = true }
+  fn resume() { self.paused = false }
+  fn isPaused() -> Bool { self.paused }
+
   fn banner() -> String {
     // ANSI color prefix via \xHH raw-byte escapes (ESC = \x1b). Minimal scrolling-log TUI.
     "\x1b[1m\x1b[" + self.color + "m" + self.name + "\x1b[0m"
   }
 
-  // Record one user/assistant exchange onto this agent's conversation and return the reply.
+  // Legacy one-shot exchange (2 messages). Kept for the sub-agent research path + eval mutation.
   fn say(user: String) -> String {
-    self.conversation.append(Message(role: "user", content: user))
+    self.conversation.append(mkTextMessage("user", user))
     let reply = self.model.complete(user)
-    self.conversation.append(Message(role: "assistant", content: reply))
+    self.conversation.append(mkTextMessage("assistant", reply))
     reply
+  }
+
+  // THE agent loop: a full model-driven tool-use turn over this agent's own conversation + tools.
+  fn runLoop(task: String) -> String {
+    self.begin()
+    let out = runAgentLoop(self.conversation, self.model, self.tools, task, 8)
+    self.status = AgentStatus.Idle
+    out
   }
 }
 
-// A spawned sub-agent's body: run on its OWN OS thread, do `turns` paced steps appending
-// Messages to its Conversation (visible climbing in the viewer), printing an interleaved
-// per-agent line each step, then set status Done. Concurrency-safe by single-writer
-// discipline: only this thread writes its agent's conversation/status.
+// A spawned sub-agent's body: run on its OWN OS thread, do `turns` paced steps appending Messages
+// to its Conversation (visible climbing in the viewer), printing an interleaved per-agent line
+// each step, then set status Done. Single-writer discipline keeps it concurrency-safe.
 class SubAgentWorker implements Runnable {
   agent: Agent
   topic: String
@@ -172,9 +136,32 @@ class SubAgentWorker implements Runnable {
       let n = i + 1
       let reply = self.agent.say("${self.agent.role} step ${n} of ${self.turns} on ${self.topic}")
       let tool = self.agent.tools.get(0)
-      self.agent.conversation.append(Message(role: "tool", content: tool.run(self.topic)))
+      self.agent.conversation.append(mkTextMessage("tool", tool.run(self.topic)))
       Console.log(self.agent.banner() + "  step ${n}/${self.turns}  " + reply)
       Clock.sleep(250)
+      i = i + 1
+    }
+    self.agent.finish()
+  }
+}
+
+// A background REPEATING agent loop: runs `rounds` full runLoop turns on its own thread, checking
+// paused between rounds. The `loop <task>` command spawns one so you can watch Message.instances()
+// climb in the viewer and pause()/resume() the agent live (Phase 5/7 liveness, now over the loop).
+class LoopWorker implements Runnable {
+  agent: Agent
+  task: String
+  rounds: Int
+  fn run() -> Void {
+    var i = 0
+    while i < self.rounds {
+      while self.agent.isPaused() {
+        Clock.sleep(150)
+      }
+      let n = i + 1
+      let ans = self.agent.runLoop(self.task)
+      Console.log(self.agent.banner() + "  loop ${n}/${self.rounds}  " + ans)
+      Clock.sleep(300)
       i = i + 1
     }
     self.agent.finish()
@@ -190,28 +177,38 @@ class Session {
   fn suggest(input: String) -> String { "" }
 }
 
-// The orchestrator: owns the assistant Agent, the shared tools, and every spawned sub-agent
-// (+ its ThreadHandle for a clean join at shutdown). Keyword routing lives here.
+// The orchestrator: owns the assistant Agent, the shared tools, and every spawned worker (+ its
+// ThreadHandle for a clean join at shutdown). Chooses the brain (Anthropic if a key is present,
+// else Scripted) and announces it. Keyword routing lives here.
 class Orchestrator {
   agent: Agent
   subs: List<Agent>
   handles: List<ThreadHandle>
   tools: List<Tool>
+  brainName: String
 
   fn init() {
     self.tools = List<Tool>()
+    self.tools.push(CalcTool(label: "calc"))
+    self.tools.push(WeatherTool(source: "demo"))
     self.tools.push(ShellTool(command: "grep -r"))
     self.tools.push(SearchTool(index: "codebase"))
+
+    // Pick the brain: a real AnthropicModel when ANTHROPIC_API_KEY is set, else the ScriptedModel.
+    let brain = chooseBrain()
+    self.brainName = brainLabel()
     self.agent = Agent(name: "assistant", role: "orchestrator", color: "36",
-                       model: ScriptedModel(persona: "assistant"), tools: self.tools)
+                       model: brain, tools: self.tools)
     self.subs = List<Agent>()
     self.handles = List<ThreadHandle>()
   }
 
   fn help() {
     Console.log(self.agent.banner() + " I can:")
-    Console.log("   - chat: just type a message and I'll reply")
+    Console.log("   - chat / ask: type a message; I run one agent loop (I may call a tool)")
+    Console.log("   - what is 17 times 23?  /  weather in Tokyo?: I pick + run the right tool")
     Console.log("   - research <topic>: I delegate to 2 sub-agents on real threads")
+    Console.log("   - loop <task>: run a repeating agent loop on a background thread (pause/resume live)")
     Console.log("   - help: show this")
     Console.log("   - exit (or Ctrl-D): quit (the process keeps serving the viewer)")
   }
@@ -229,19 +226,29 @@ class Orchestrator {
     self.spawnSub("summarizer", "33", topic, 3)
   }
 
+  fn spawnLoop(task: String) {
+    let a = Agent(name: "looper", role: "looper", color: "35",
+                  model: ScriptedModel(persona: "looper"), tools: self.tools)
+    self.subs.push(a)
+    Console.log(self.agent.banner() + " starting a background agent loop on \"" + task + "\" - pause()/resume() it live in the viewer.")
+    self.handles.push(Thread.spawn(LoopWorker(agent: a, task: task, rounds: 40)))
+  }
+
   fn dispatch(input: String) {
     if startsWith(input, "help") {
       self.help()
     } else if startsWith(input, "research ") {
       self.research(input.slice(9, input.len()))
+    } else if startsWith(input, "loop ") {
+      self.spawnLoop(input.slice(5, input.len()))
     } else {
-      let reply = self.agent.say(input)
+      // plain input -> one real agent loop turn (the model may pick + run a tool)
+      let reply = self.agent.runLoop(input)
       Console.log(self.agent.banner() + " " + reply)
     }
   }
 
-  // Join every outstanding sub-agent thread — a clean, deterministic shutdown. After this the
-  // sub-agents' final Message counts are stable (what the aggregate golden/eval asserts on).
+  // Join every outstanding worker thread — a clean, deterministic shutdown.
   fn shutdown() {
     var i = 0
     while i < self.handles.len() {
@@ -252,10 +259,29 @@ class Orchestrator {
   }
 }
 
+// Choose the brain from the environment: a real AnthropicModel if ANTHROPIC_API_KEY is present,
+// otherwise the deterministic ScriptedModel. Both implement Model, so the loop is identical.
+fn chooseBrain() -> Model {
+  match Env.get("ANTHROPIC_API_KEY") {
+    Some(key) -> AnthropicModel(modelId: "claude-sonnet-5", apiKey: key,
+                                systemPrompt: "You are a concise assistant. Use the provided tools when they help.")
+    None -> ScriptedModel(persona: "assistant")
+  }
+}
+
+fn brainLabel() -> String {
+  match Env.get("ANTHROPIC_API_KEY") {
+    Some(key) -> "AnthropicModel (claude-sonnet-5) - LIVE"
+    None -> "ScriptedModel - offline (set ANTHROPIC_API_KEY for the live model)"
+  }
+}
+
 fn main() {
-  Console.log("\x1b[1mScry assistant\x1b[0m - a Claude-Code-like REPL. Type 'help', or 'research <topic>'.")
+  Console.log("\x1b[1mScry assistant\x1b[0m - a Claude-Code-like REPL with a real agent loop.")
   let session = Session()
   let orch = Orchestrator()
+  Console.log("brain: " + orch.brainName)
+  Console.log("Type 'help', ask a question ('what is 17 times 23?'), or 'research <topic>'.")
 
   var running = true
   while running {

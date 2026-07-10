@@ -148,3 +148,76 @@ is still there to inspect. Ctrl-C in the terminal ends it.
 "That was an ordinary command-line program. We never wrote a line of UI or server code in it - the
 runtime gives every program a live, mutable window into itself, and we just reached in and changed
 its behavior while it was running."
+
+---
+
+# Scry demo, Phase 8c - a REAL agent loop (watch/pause/hot-swap a live agent)
+
+Phase 8c upgrades the assistant's brain from a canned string to a **model-driven tool-use loop**.
+Offline it uses a deterministic `ScriptedModel`; with a key it uses a real `AnthropicModel` that
+calls Claude and does live tool use. The loop is identical either way.
+
+## 0. Offline first - the loop is real with zero network
+
+```
+./scry run examples/assistant.scry
+brain: ScriptedModel - offline (set ANTHROPIC_API_KEY for the live model)
+you> what is 17 times 23?
+[agent] -> tool_use: calculate({"a":17,"b":23,"op":"mul"})
+[agent] <- tool_result: calculate => 17 * 23 = 391
+assistant Here you go: 17 * 23 = 391
+you> weather in Tokyo?
+[agent] -> tool_use: get_weather({"location":"Tokyo"})
+[agent] <- tool_result: get_weather => Tokyo: 18C, cloudy
+assistant Here you go: Tokyo: 18C, cloudy
+```
+
+The model **chose** the tool and its arguments; the tool ran for real (17*23=391 is arithmetic, not
+a canned string); the result fed back and shaped the final answer. That is the whole loop.
+
+## 1. With a key - a LIVE model actually calls the tool
+
+```
+export ANTHROPIC_API_KEY=sk-ant-...
+./scry run examples/assistant.scry
+brain: AnthropicModel (claude-sonnet-5) - LIVE
+you> what is 17 times 23?
+[agent] -> tool_use: calculate({"a":17,"b":23,"op":"mul"})   # Claude emitted this tool_use
+[agent] <- tool_result: calculate => 17 * 23 = 391            # our loop ran the tool + fed it back
+assistant 17 times 23 is 391.                                 # Claude's end_turn answer
+```
+
+Same prompts, same loop - now Claude is the brain. Every request/response is a browsable
+`HttpResponse` entity, and because the HTTP multi-loop is STW-cooperative, an agent parked mid-API-
+call stays fully inspectable in the viewer.
+
+## 2. Watch + pause the loop live (the payoff)
+
+```
+you> loop weather in Tokyo        # a repeating agent loop on a background OS thread
+```
+
+In the viewer (`http://localhost:PORT`): `Message.instances()` climbs as the loop turns. Find the
+`looper` Agent and invoke `pause()` on it - the message count **freezes**; the loop visibly stalls.
+`resume()` and it climbs again. You paused a running agent from the outside, with no restart.
+
+## 3. Hot-swap a tool's behavior mid-loop
+
+Paste a redefinition of a tool's `run` into the viewer's code panel WHILE the loop runs:
+
+```
+class WeatherTool implements Tool {
+  source: String
+  fn name() -> String { "get_weather" }
+  fn description() -> String { "..." }
+  fn inputSchema() -> String { "..." }
+  fn run(argsJson: String) -> String { "PATCHED: it's always sunny" }
+}
+```
+
+The very next tool call the running agent makes uses the new body - no restart. (A broken edit is
+rejected as a `TypeError` and the running program is untouched, same strict no-op as Phase 6.)
+
+The pitch: a real agent - model-driven tool use over a live API - that you can watch, pause, and
+rewrite while it runs, because it is an ordinary Scry program and the runtime gives every program a
+live, mutable window into itself.
