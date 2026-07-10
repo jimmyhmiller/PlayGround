@@ -60,33 +60,50 @@
 ; ============================ core data types ===============================
 (defstruct Obj [(kind i64) (is-marked bool) (next (ptr Obj))])
 
-(defsum Value
-  (VBool   [(b bool)])
-  (VNil)
-  (VNumber [(n f64)])
-  (VObj    [(o (ptr Obj))]))
+; Value is NaN-boxed into a single 64-bit word — exactly clox's representation
+; (typedef uint64_t Value). A quiet-NaN with tag bits encodes nil/bool/obj;
+; any other bit pattern is an IEEE double. Keeps Value at 8 bytes (vs 16 for a
+; tagged union), so the stack and every push/pop move half the memory.
+(const QNAN         0x7ffc000000000000)
+(const SIGN_BIT     0x8000000000000000)
+(const QNAN_SIGN    0xfffc000000000000)   ; QNAN | SIGN_BIT
+(const NOT_QNAN_SIGN 0x0003ffffffffffff)  ; ~(QNAN | SIGN_BIT)
+(const NIL_VAL      0x7ffc000000000001)   ; QNAN | 1
+(const FALSE_VAL    0x7ffc000000000002)   ; QNAN | 2
+(const TRUE_VAL     0x7ffc000000000003)   ; QNAN | 3
 
-(defstruct ValueArray [(capacity i64) (count i64) (values (ptr Value))])
+; f64<->i64 bit reinterpret (NOT a numeric cast). Uses a static scratch cell so
+; it never allocas (safe to inline into the VM loop, unlike alloc-stack).
+(defn bc-cell     [] (-> (ptr i64)) (alloc-static i64))
+(defn f64-to-bits [(x f64)] (-> i64) (store! (cast (ptr f64) (bc-cell)) x) (load (bc-cell)))
+(defn bits-to-f64 [(b i64)] (-> f64) (store! (bc-cell) b) (load (cast (ptr f64) (bc-cell))))
+
+(defn VNil    [] (-> i64) NIL_VAL)
+(defn VBool   [(b bool)] (-> i64) (if b TRUE_VAL FALSE_VAL))
+(defn VNumber [(n f64)] (-> i64) (f64-to-bits n))
+(defn VObj    [(o (ptr Obj))] (-> i64) (| SIGN_BIT (| QNAN (cast i64 o))))
+
+(defstruct ValueArray [(capacity i64) (count i64) (values (ptr i64))])
 (defstruct Chunk [(count i64) (capacity i64) (code (ptr u8)) (lines (ptr i64)) (constants ValueArray)])
 
-(defstruct Entry [(key (ptr ObjString)) (value Value)])
+(defstruct Entry [(key (ptr ObjString)) (value i64)])
 (defstruct Table [(count i64) (capacity i64) (entries (ptr Entry))])
 
 (defstruct ObjString   [(obj Obj) (length i64) (chars (ptr u8)) (hash i64)])
 (defstruct ObjFunction [(obj Obj) (arity i64) (upvalue-count i64) (chunk Chunk) (name (ptr ObjString))])
-(defstruct ObjNative   [(obj Obj) (function (fnptr c [i64 (ptr Value)] Value))])
-(defstruct ObjUpvalue  [(obj Obj) (location (ptr Value)) (closed Value) (next (ptr ObjUpvalue))])
+(defstruct ObjNative   [(obj Obj) (function (fnptr c [i64 (ptr i64)] i64))])
+(defstruct ObjUpvalue  [(obj Obj) (location (ptr i64)) (closed i64) (next (ptr ObjUpvalue))])
 (defstruct ObjClosure  [(obj Obj) (function (ptr ObjFunction)) (upvalues (ptr (ptr ObjUpvalue))) (upvalue-count i64)])
 (defstruct ObjClass    [(obj Obj) (name (ptr ObjString)) (methods Table)])
 (defstruct ObjInstance [(obj Obj) (klass (ptr ObjClass)) (fields Table)])
-(defstruct ObjBoundMethod [(obj Obj) (receiver Value) (method (ptr ObjClosure))])
+(defstruct ObjBoundMethod [(obj Obj) (receiver i64) (method (ptr ObjClosure))])
 
-(defstruct CallFrame [(closure (ptr ObjClosure)) (ip (ptr u8)) (slots (ptr Value))])
+(defstruct CallFrame [(closure (ptr ObjClosure)) (ip (ptr u8)) (slots (ptr i64))])
 (defstruct VM
   [(frames (array CallFrame 64))
    (frame-count i64)
-   (stack (array Value 16384))
-   (stack-top (ptr Value))
+   (stack (array i64 16384))
+   (stack-top (ptr i64))
    (globals Table)
    (strings Table)
    (init-string (ptr ObjString))
@@ -104,18 +121,18 @@
 ; ============================ Value helpers =================================
 (defn null-obj [] (-> (ptr Obj)) (cast (ptr Obj) 0))
 (defn beq [(a bool) (b bool)] (-> bool) (if a b (not b)))  ; bool has no Eq
-(defn is-obj    [(v Value)] (-> bool) (match v (VObj [_] true)  (VBool [_] false) (VNil [] false) (VNumber [_] false)))
-(defn is-nil    [(v Value)] (-> bool) (match v (VNil [] true)   (VBool [_] false) (VObj [_] false) (VNumber [_] false)))
-(defn is-bool   [(v Value)] (-> bool) (match v (VBool [_] true) (VNil [] false)   (VObj [_] false) (VNumber [_] false)))
-(defn is-number [(v Value)] (-> bool) (match v (VNumber [_] true) (VBool [_] false) (VNil [] false) (VObj [_] false)))
-(defn as-obj    [(v Value)] (-> (ptr Obj)) (match v (VObj [o] o) (VBool [_] (null-obj)) (VNil [] (null-obj)) (VNumber [_] (null-obj))))
-(defn as-bool   [(v Value)] (-> bool)      (match v (VBool [b] b) (VNil [] false) (VObj [_] false) (VNumber [_] false)))
-(defn as-number [(v Value)] (-> f64)       (match v (VNumber [n] n) (VBool [_] 0.0) (VNil [] 0.0) (VObj [_] 0.0)))
+(defn is-bool   [(v i64)] (-> bool) (= (| v 1) TRUE_VAL))
+(defn is-nil    [(v i64)] (-> bool) (= v NIL_VAL))
+(defn is-number [(v i64)] (-> bool) (!= (& v QNAN) QNAN))
+(defn is-obj    [(v i64)] (-> bool) (= (& v QNAN_SIGN) QNAN_SIGN))
+(defn as-bool   [(v i64)] (-> bool) (= v TRUE_VAL))
+(defn as-number [(v i64)] (-> f64)  (bits-to-f64 v))
+(defn as-obj    [(v i64)] (-> (ptr Obj)) (cast (ptr Obj) (& v NOT_QNAN_SIGN)))
 
-(defn obj-kind  [(v Value)] (-> i64) (load (field (as-obj v) kind)))
-(defn is-obj-kind [(v Value) (k i64)] (-> bool) (if (is-obj v) (= (obj-kind v) k) false))
-(defn is-string   [(v Value)] (-> bool) (is-obj-kind v OBJ_STRING))
-(defn as-string   [(v Value)] (-> (ptr ObjString)) (cast (ptr ObjString) (as-obj v)))
+(defn obj-kind  [(v i64)] (-> i64) (load (field (as-obj v) kind)))
+(defn is-obj-kind [(v i64) (k i64)] (-> bool) (if (is-obj v) (= (obj-kind v) k) false))
+(defn is-string   [(v i64)] (-> bool) (is-obj-kind v OBJ_STRING))
+(defn as-string   [(v i64)] (-> (ptr ObjString)) (cast (ptr ObjString) (as-obj v)))
 
 ; ============================ memory ========================================
 (defn grow-capacity [(c i64)] (-> i64) (if (< c 8) 8 (* c 2)))
@@ -144,23 +161,23 @@
 
 ; ============================ ValueArray ====================================
 (defn init-value-array [(array (ptr ValueArray))] (-> i64)
-  (store! (field array values) (cast (ptr Value) 0))
+  (store! (field array values) (cast (ptr i64) 0))
   (store! (field array capacity) 0)
   (store! (field array count) 0) 0)
-(defn write-value-array [(array (ptr ValueArray)) (value Value)] (-> i64)
+(defn write-value-array [(array (ptr ValueArray)) (value i64)] (-> i64)
   (if (< (load (field array capacity)) (+ (load (field array count)) 1))
       (let [old-cap (load (field array capacity)) new-cap (grow-capacity old-cap)]
         (store! (field array capacity) new-cap)
         (store! (field array values)
-                (cast (ptr Value) (reallocate (cast (ptr i8) (load (field array values)))
-                                              (* (sizeof Value) old-cap)
-                                              (* (sizeof Value) new-cap))))
+                (cast (ptr i64) (reallocate (cast (ptr i8) (load (field array values)))
+                                              (* (sizeof i64) old-cap)
+                                              (* (sizeof i64) new-cap))))
         0)
       0)
   (store! (index (load (field array values)) (load (field array count))) value)
   (store! (field array count) (+ (load (field array count)) 1)) 0)
 (defn free-value-array [(array (ptr ValueArray))] (-> i64)
-  (reallocate (cast (ptr i8) (load (field array values))) (* (sizeof Value) (load (field array capacity))) 0)
+  (reallocate (cast (ptr i8) (load (field array values))) (* (sizeof i64) (load (field array capacity))) 0)
   (init-value-array array))
 
 ; ============================ Chunk =========================================
@@ -189,20 +206,20 @@
   (store! (index (load (field chunk code)) (load (field chunk count))) (cast u8 byte))
   (store! (index (load (field chunk lines)) (load (field chunk count))) line)
   (store! (field chunk count) (+ (load (field chunk count)) 1)) 0)
-(defn add-constant [(chunk (ptr Chunk)) (value Value)] (-> i64)
+(defn add-constant [(chunk (ptr Chunk)) (value i64)] (-> i64)
   (push value)
   (write-value-array (field chunk constants) value)
   (pop)
   (- (load (field (field chunk constants) count)) 1))
 
 ; ============================ stack =========================================
-(defn push [(value Value)] (-> i64)
+(defn push [(value i64)] (-> i64)
   (store! (load (field (vm) stack-top)) value)
   (store! (field (vm) stack-top) (index (load (field (vm) stack-top)) 1)) 0)
-(defn pop [] (-> Value)
+(defn pop [] (-> i64)
   (store! (field (vm) stack-top) (index (load (field (vm) stack-top)) -1))
   (load (load (field (vm) stack-top))))
-(defn peek [(distance i64)] (-> Value)
+(defn peek [(distance i64)] (-> i64)
   (load (index (load (field (vm) stack-top)) (- -1 distance))))
 (defn reset-stack [] (-> i64)
   (store! (field (vm) stack-top) (index (field (vm) stack) 0))
@@ -233,7 +250,7 @@
                 (store! index (& (+ (load index) 1) (- capacity 1)))))))
     (load result)))
 
-(defn table-get [(table (ptr Table)) (key (ptr ObjString)) (value (ptr Value))] (-> bool)
+(defn table-get [(table (ptr Table)) (key (ptr ObjString)) (value (ptr i64))] (-> bool)
   (if (= (load (field table count)) 0) false
       (let [entry (find-entry (load (field table entries)) (load (field table capacity)) key)]
         (if (= (cast i64 (load (field entry key))) 0) false
@@ -260,7 +277,7 @@
     (store! (field table entries) entries)
     (store! (field table capacity) capacity) 0))
 
-(defn table-set [(table (ptr Table)) (key (ptr ObjString)) (value Value)] (-> bool)
+(defn table-set [(table (ptr Table)) (key (ptr ObjString)) (value i64)] (-> bool)
   (if (> (* (+ (load (field table count)) 1) 4) (* (load (field table capacity)) 3))
       (adjust-capacity table (grow-capacity (load (field table capacity)))) 0)
   (let [entry (find-entry (load (field table entries)) (load (field table capacity)) key)
@@ -352,10 +369,10 @@
     (store! (field function name) (cast (ptr ObjString) 0))
     (init-chunk (field function chunk))
     function))
-(defn new-native [(fn (fnptr c [i64 (ptr Value)] Value))] (-> (ptr ObjNative))
+(defn new-native [(fn (fnptr c [i64 (ptr i64)] i64))] (-> (ptr ObjNative))
   (let [native (cast (ptr ObjNative) (allocate-object (sizeof ObjNative) OBJ_NATIVE))]
     (store! (field native function) fn) native))
-(defn new-upvalue [(slot (ptr Value))] (-> (ptr ObjUpvalue))
+(defn new-upvalue [(slot (ptr i64))] (-> (ptr ObjUpvalue))
   (let [upvalue (cast (ptr ObjUpvalue) (allocate-object (sizeof ObjUpvalue) OBJ_UPVALUE))]
     (store! (field upvalue closed) (VNil))
     (store! (field upvalue location) slot)
@@ -376,7 +393,7 @@
   (let [instance (cast (ptr ObjInstance) (allocate-object (sizeof ObjInstance) OBJ_INSTANCE))]
     (store! (field instance klass) klass)
     (init-table (field instance fields)) instance))
-(defn new-bound-method [(receiver Value) (method (ptr ObjClosure))] (-> (ptr ObjBoundMethod))
+(defn new-bound-method [(receiver i64) (method (ptr ObjClosure))] (-> (ptr ObjBoundMethod))
   (let [bound (cast (ptr ObjBoundMethod) (allocate-object (sizeof ObjBoundMethod) OBJ_BOUND_METHOD))]
     (store! (field bound receiver) receiver)
     (store! (field bound method) method) bound))
@@ -389,7 +406,7 @@
           (w-bytes fd (load (field (load (field function name)) chars)) (load (field (load (field function name)) length)))
           (w-cstr fd c">"))))
 
-(defn print-object [(fd i64) (value Value)] (-> i64)
+(defn print-object [(fd i64) (value i64)] (-> i64)
   (let [k (obj-kind value)]
     (cond
       (= k OBJ_BOUND_METHOD) (print-function fd (load (field (load (field (cast (ptr ObjBoundMethod) (as-obj value)) method)) function)))
@@ -403,22 +420,17 @@
       (= k OBJ_UPVALUE) (w-cstr fd c"upvalue")
       (w-cstr fd c"?"))))
 
-(defn print-value [(fd i64) (value Value)] (-> i64)
-  (match value
-    (VBool [b] (if b (w-cstr fd c"true") (w-cstr fd c"false")))
-    (VNil [] (w-cstr fd c"nil"))
-    (VNumber [n] (w-num fd n))
-    (VObj [_] (print-object fd value))))
+(defn print-value [(fd i64) (value i64)] (-> i64)
+  (cond
+    (is-bool value)   (if (as-bool value) (w-cstr fd c"true") (w-cstr fd c"false"))
+    (is-nil value)    (w-cstr fd c"nil")
+    (is-number value) (w-num fd (as-number value))
+    (print-object fd value)))
 
-(defn print-closure-bound [(fd i64) (bound (ptr ObjBoundMethod))] (-> i64)
-  (print-function fd (load (field (load (field bound method)) function))))
-
-(defn values-equal [(a Value) (b Value)] (-> bool)
-  (match a
-    (VBool [ab] (match b (VBool [bb] (if ab bb (not bb))) (VNil [] false) (VNumber [_] false) (VObj [_] false)))
-    (VNil [] (is-nil b))
-    (VNumber [an] (match b (VNumber [bn] (fcmp-eq an bn)) (VBool [_] false) (VNil [] false) (VObj [_] false)))
-    (VObj [ao] (match b (VObj [bo] (= (cast i64 ao) (cast i64 bo))) (VBool [_] false) (VNil [] false) (VNumber [_] false)))))
+; NaN-boxed valuesEqual: numbers compared as f64 (so nan != nan), else bit-equal.
+(defn values-equal [(a i64) (b i64)] (-> bool)
+  (if (and (is-number a) (is-number b)) (fcmp-eq (as-number a) (as-number b))
+      (= a b)))
 
 ; ============================ token types ===================================
 (const TOKEN_LEFT_PAREN 0)  (const TOKEN_RIGHT_PAREN 1) (const TOKEN_LEFT_BRACE 2)
@@ -647,10 +659,10 @@
 (defn emit-return [] (-> i64)
   (if (= (load (field (ccomp) kind)) TYPE_INITIALIZER) (emit-bytes OP_GET_LOCAL 0) (emit-byte OP_NIL))
   (emit-byte OP_RETURN))
-(defn make-constant [(value Value)] (-> i64)
+(defn make-constant [(value i64)] (-> i64)
   (let [constant (add-constant (current-chunk) value)]
     (if (> constant 255) (do (compile-error (cast (ptr u8) c"Too many constants in one chunk.")) 0) constant)))
-(defn emit-constant [(value Value)] (-> i64) (emit-bytes OP_CONSTANT (make-constant value)))
+(defn emit-constant [(value i64)] (-> i64) (emit-bytes OP_CONSTANT (make-constant value)))
 (defn patch-jump [(offset i64)] (-> i64)
   (let [jump (- (- (load (field (current-chunk) count)) offset) 2)]
     (if (> jump 65535) (compile-error (cast (ptr u8) c"Too much code to jump over.")) 0)
@@ -1094,14 +1106,14 @@
   (reset-stack) 0)
 (defn runtime-error [(message (ptr u8))] (-> i64) (w-cstr 2 (cast (ptr i8) message)) (runtime-error-trace))
 
-(defn clock-native [(arg-count i64) (args (ptr Value))] (-> Value) (VNumber (/ (cast f64 (clock)) 1000000.0)))
-(defn define-native [(name (ptr u8)) (function (fnptr c [i64 (ptr Value)] Value))] (-> i64)
+(defn clock-native [(arg-count i64) (args (ptr i64))] (-> i64) (VNumber (/ (cast f64 (clock)) 1000000.0)))
+(defn define-native [(name (ptr u8)) (function (fnptr c [i64 (ptr i64)] i64))] (-> i64)
   (push (VObj (cast (ptr Obj) (copy-string name (strlen (cast (ptr i8) name))))))
   (push (VObj (cast (ptr Obj) (new-native function))))
   (table-set (field (vm) globals) (as-string (load (index (field (vm) stack) 0))) (load (index (field (vm) stack) 1)))
   (pop) (pop) 0)
 
-(defn is-falsey [(value Value)] (-> bool) (or (is-nil value) (and (is-bool value) (not (as-bool value)))))
+(defn is-falsey [(value i64)] (-> bool) (or (is-nil value) (and (is-bool value) (not (as-bool value)))))
 (defn concatenate [] (-> i64)
   (let [b (as-string (peek 0)) a (as-string (peek 1))
         length (+ (load (field a length)) (load (field b length)))
@@ -1126,7 +1138,7 @@
       (store! (field frame ip) (load (field (field (load (field closure function)) chunk) code)))
       (store! (field frame slots) (index (load (field (vm) stack-top)) (- 0 (+ arg-count 1))))
       true)))
-(defn call-value [(callee Value) (arg-count i64)] (-> bool)
+(defn call-value [(callee i64) (arg-count i64)] (-> bool)
   (if (is-obj callee)
     (let [k (obj-kind callee)]
       (cond
@@ -1135,7 +1147,7 @@
             (store! (index (load (field (vm) stack-top)) (- 0 (+ arg-count 1))) (load (field bound receiver)))
             (call-closure (load (field bound method)) arg-count))
         (= k OBJ_CLASS)
-          (let [klass (cast (ptr ObjClass) (as-obj callee)) initializer (alloc-stack Value)]
+          (let [klass (cast (ptr ObjClass) (as-obj callee)) initializer (alloc-stack i64)]
             (store! (index (load (field (vm) stack-top)) (- 0 (+ arg-count 1))) (VObj (cast (ptr Obj) (new-instance klass))))
             (if (table-get (field klass methods) (load (field (vm) init-string)) initializer)
                 (call-closure (cast (ptr ObjClosure) (as-obj (load initializer))) arg-count)
@@ -1151,7 +1163,7 @@
         (do (runtime-error (cast (ptr u8) c"Can only call functions and classes.")) false)))
     (do (runtime-error (cast (ptr u8) c"Can only call functions and classes.")) false)))
 (defn invoke-from-class [(klass (ptr ObjClass)) (name (ptr ObjString)) (arg-count i64)] (-> bool)
-  (let [method (alloc-stack Value)]
+  (let [method (alloc-stack i64)]
     (if (not (table-get (field klass methods) name method))
         (do (w-cstr 2 c"Undefined property '") (w-bytes 2 (load (field name chars)) (load (field name length))) (w-cstr 2 c"'.") (runtime-error-trace) false)
         (call-closure (cast (ptr ObjClosure) (as-obj (load method))) arg-count))))
@@ -1159,18 +1171,18 @@
   (let [receiver (peek arg-count)]
     (if (not (is-obj-kind receiver OBJ_INSTANCE))
         (do (runtime-error (cast (ptr u8) c"Only instances have methods.")) false)
-        (let [instance (cast (ptr ObjInstance) (as-obj receiver)) value (alloc-stack Value)]
+        (let [instance (cast (ptr ObjInstance) (as-obj receiver)) value (alloc-stack i64)]
           (if (table-get (field instance fields) name value)
               (do (store! (index (load (field (vm) stack-top)) (- 0 (+ arg-count 1))) (load value))
                   (call-value (load value) arg-count))
               (invoke-from-class (load (field instance klass)) name arg-count))))))
 (defn bind-method [(klass (ptr ObjClass)) (name (ptr ObjString))] (-> bool)
-  (let [method (alloc-stack Value)]
+  (let [method (alloc-stack i64)]
     (if (not (table-get (field klass methods) name method))
         (do (w-cstr 2 c"Undefined property '") (w-bytes 2 (load (field name chars)) (load (field name length))) (w-cstr 2 c"'.") (runtime-error-trace) false)
         (let [bound (new-bound-method (peek 0) (cast (ptr ObjClosure) (as-obj (load method))))]
           (pop) (push (VObj (cast (ptr Obj) bound))) true))))
-(defn capture-upvalue [(local (ptr Value))] (-> (ptr ObjUpvalue))
+(defn capture-upvalue [(local (ptr i64))] (-> (ptr ObjUpvalue))
   (let [(mut prev-upvalue) (cast (ptr ObjUpvalue) 0) (mut upvalue) (load (field (vm) open-upvalues))]
     (loop (if (and (!= (cast i64 (load upvalue)) 0) (> (cast i64 (load (field (load upvalue) location))) (cast i64 local)))
               (do (store! prev-upvalue (load upvalue)) (store! upvalue (load (field (load upvalue) next))))
@@ -1183,7 +1195,7 @@
               (store! (field (vm) open-upvalues) created-upvalue)
               (store! (field (load prev-upvalue) next) created-upvalue))
           created-upvalue))))
-(defn close-upvalues [(last (ptr Value))] (-> i64)
+(defn close-upvalues [(last (ptr i64))] (-> i64)
   (loop (if (and (!= (cast i64 (load (field (vm) open-upvalues))) 0)
                  (>= (cast i64 (load (field (load (field (vm) open-upvalues)) location))) (cast i64 last)))
             (let [upvalue (load (field (vm) open-upvalues))]
@@ -1203,7 +1215,7 @@
 (defn read-short [(frame (ptr CallFrame))] (-> i64)
   (store! (field frame ip) (index (load (field frame ip)) 2))
   (| (<< (cast i64 (load (index (load (field frame ip)) -2))) 8) (cast i64 (load (index (load (field frame ip)) -1)))))
-(defn read-constant [(frame (ptr CallFrame))] (-> Value)
+(defn read-constant [(frame (ptr CallFrame))] (-> i64)
   (load (index (load (field (field (frame-chunk frame) constants) values)) (read-byte frame))))
 (defn read-string [(frame (ptr CallFrame))] (-> (ptr ObjString)) (as-string (read-constant frame)))
 
@@ -1220,7 +1232,7 @@
   ; alloca, and an alloca inside the dispatch loop would leak the C stack per
   ; instruction (millions of iterations -> stack overflow).
   (let [(mut frame) (index (field (vm) frames) (- (load (field (vm) frame-count)) 1)) (mut result) -1
-        tmp-val (alloc-stack Value)]
+        tmp-val (alloc-stack i64)]
     (loop
       (let [instruction (read-byte (load frame))]
         (cond
@@ -1359,7 +1371,7 @@
             0)
         (store! (index (load (field (vm) gray-stack)) (load (field (vm) gray-count))) object)
         (store! (field (vm) gray-count) (+ (load (field (vm) gray-count)) 1)) 0))))
-(defn mark-value [(value Value)] (-> i64) (if (is-obj value) (mark-object (as-obj value)) 0))
+(defn mark-value [(value i64)] (-> i64) (if (is-obj value) (mark-object (as-obj value)) 0))
 (defn mark-array [(array (ptr ValueArray))] (-> i64)
   (let [(mut i) 0]
     (loop (if (>= (load i) (load (field array count))) (break)
