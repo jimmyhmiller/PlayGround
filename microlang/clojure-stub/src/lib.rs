@@ -39,7 +39,17 @@ pub fn run<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, src: &str)
     // core `-apply-obj` dispatcher, so keywords/collections are callable.
     let apply_obj = rt.intern("-apply-obj");
     rt.set_apply_fn(apply_obj);
-    run_src(rt, cs, &mut macros, &mut comp, src)
+    let result = run_src(rt, cs, &mut macros, &mut comp, src);
+    // Force any lazy sequence in the final value so callers / the printer (which
+    // can't invoke thunks) see a fully realized result.
+    let slot = rt.push_root(result);
+    let realize = rt.intern("-realize");
+    let out = match rt.globals.get(&realize).map(|g| g.val) {
+        Some(rf) => cs.invoke(cs, rt, rf, &[rt.root_get(slot)]),
+        None => rt.root_get(slot),
+    };
+    rt.truncate_roots(slot);
+    out
 }
 
 fn run_src<M: ValueModel>(
@@ -893,9 +903,11 @@ fn syntax_quote<M: ValueModel>(rt: &mut Runtime<M>, form: u64, gs: &mut HashMap<
     }
 }
 
-/// `(concat (list e0) (list e1) ..)`, with `~@x` contributing `x` directly.
+/// `(-concat (list e0) (list e1) ..)`, with `~@x` contributing `x` directly.
+/// Uses the EAGER `-concat` (not the lazy user `concat`): a macro must return a
+/// realized code form the expander can splice, not a lazy seq.
 fn sq_concat<M: ValueModel>(rt: &mut Runtime<M>, items: &[u64], gs: &mut HashMap<Sym, Sym>) -> u64 {
-    let concat = sym(rt, "concat");
+    let concat = sym(rt, "-concat");
     let mut parts = vec![concat];
     for &it in items {
         if let Some((h, _)) = rt.as_cons(it) {

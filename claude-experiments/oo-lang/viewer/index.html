@@ -44,6 +44,19 @@
   </div>
 </section>
 
+<section id="code-panel" class="collapsed">
+  <div class="code-head">
+    <span class="code-title">redefine <span id="code-cls" class="code-cls"></span></span>
+    <span class="code-hint">live code change — edit a body or add a <code>field: Type = default</code>, then define</span>
+    <button id="code-close" class="ghost-btn">close</button>
+  </div>
+  <textarea id="code-editor" spellcheck="false" autocomplete="off"></textarea>
+  <div class="code-row">
+    <button id="code-define" class="invoke-btn">define</button>
+    <div id="code-result" class="code-result"></div>
+  </div>
+</section>
+
 <aside id="transcript" class="collapsed">
   <div class="transcript-head"><span>eval transcript</span><button id="transcript-close" class="ghost-btn">close</button></div>
   <div id="transcript-list"></div>

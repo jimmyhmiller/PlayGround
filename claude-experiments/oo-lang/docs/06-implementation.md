@@ -743,3 +743,158 @@ minimal form: a scrolling log with per-agent ANSI color prefixes built via `\xHH
   are newline-separated inside a block; `let a = f(); let b = g()` is a parse error. Enum
   variants are likewise newline-separated, and a `match` on an enum needs bare (unqualified)
   variant patterns.
+
+---
+
+# Phase 6 — live code change (M4)
+
+The final demo beat: redefine a method on a *running* program, whole-program-typechecked,
+atomically, at a full stop-the-world. This is `03-live-semantics.md`'s "generations, not
+diffs" cut down to exactly `05-milestones.md` **M4**: method-**body** swap (same signature),
+whole-class body swap, and **additive fields with a static default**. Everything else is a
+loud rejection with a real diagnostic. No new wire op — it is `eval` of a `source` that
+happens to be a definition (`04-viewer.md` §3.4), over the same `{id, source}` →
+`{id, value|error}` channel, and it runs *inside the exact STW section Phase 5 built*
+(`server-eval-stw` → `request-global-stop` … `eval-core` … `release-global-stop`), so a
+definition-eval swaps tables with every language thread parked and the heap quiescent.
+
+## What changed, by file
+
+| File | Change |
+|---|---|
+| `parser.coil` | `parse-field` accepts an optional `= <expr>` **static default** (stored in `FIELD.b`). Plain fields are unchanged (b = null), so every existing golden is byte-identical. |
+| `ast.coil` | `NK_FIELD` dump emits the default child when present (optional; absent = unchanged dump). |
+| `typecheck.coil` | Definite-assignment treats a **defaulted** field as pre-assigned — a field with `= default` needs no `init` store (that's what makes an added field constructible without touching `init`). |
+| `compile.coil` | Generation counter (`current-generation`/`bump-generation`); `FIELD_HEADROOM` reserved in every entity arena's slot; the low-level swap mechanics: `repoint-method-node!`, `recompile-method-at!`, `add-field-live!`. |
+| `server.coil` | The redefinition engine: `eval-definition` (dispatch), `redefine-class` / `redefine-fn` / `redefine-interface`, shape classification, method-set + signature checks, the rejection helpers, `ev-defined`, and `generation()` reflection. The Phase-4 `is-def-token` hard-error branch now calls `eval-definition`. |
+| `main.coil` / `server.coil` | `scry eval` takes **multiple** `-e` run in sequence against one process — the browser-free define-then-observe path for golden tests. |
+| `viewer/` | A `#code-panel` drawer (opened by "✎ edit source" in the instance detail) prefilled with the class skeleton from the live schema; POSTs the source, shows `✓ … generation N` or the inline rejection. |
+
+## Generation machinery as-built
+
+One global counter (`compile.coil`, `gen-cell`): the initial `build-program` is **generation
+0**; each **accepted** edit calls `bump-generation` and the response reports the new number.
+A rejected edit never bumps it — rejection is a strict no-op (`03` §5). `generation()` is a
+bare reflection call (like `types()`), intercepted in `try-reflection` → `{"type":"Int",…}`.
+An accepted change serializes as `{"type":"defined","defined":"<name>","gen":N,"message":…}`.
+
+The swap itself is `03`'s "repoint one table, keep the index": every call is a `CALL_STATIC
+<method-idx>` / itable slot baked at compile time, so a redefinition **keeps the method's
+index and stores a fresh `MethodInfo` at it** in `Program.methods[]`. Every existing call
+site — and every future one — reaches the new body with zero call-site patching. To make the
+*new* body's own self/sibling calls resolve, the compiler's node→index map is repointed
+first (`repoint-method-node!` sets `method-nodes[idx] = new-node`), for **all** the class's
+methods, *then* each is recompiled (two passes, so cross-references resolve). Itables are
+untouched (method indices are stable) for a same-shape / additive edit. **Old chunks are
+never freed** — a stale frame may still be executing one — so there is a bounded
+per-generation leak, documented and acceptable for the PoC (no GC in this build anyway).
+
+## The acceptance path (per definition kind)
+
+- **`class` redefinition.** Find the live `Decl` (else *unknown class* reject). Classify the
+  shape delta against the live field layout: **SAME** (identical names+types+order),
+  **ADDITIVE** (old fields are a prefix, each new trailing field carries a static default),
+  or **incompatible** (removed / retyped / renamed / reordered → loud reject naming the field
+  and the live-instance count). Enforce the M4 method rules: no added method, no removed
+  method, and every method's signature matches the live one exactly (a sig change is
+  rejected — M4 forbids it). Then swap `d.members` to the new set, typecheck **every** method
+  body (and each default) against the now-current field table, and roll the members back on
+  any type error (rejection = no-op). On success: repoint + recompile every method at its
+  index, run the additive migration, bump the generation.
+- **standalone `fn`.** Signature must match the live one; typecheck the new body; repoint +
+  recompile at the same index.
+- **`interface`.** Temp-install the new members, re-run conformance for **every** implementor,
+  roll back. If conformance breaks (an implementor lacks a now-required method) → the captured
+  conformance diagnostic. Otherwise an honest *not supported in this build (M4)* — interface
+  changes beyond the conformance guard are out of M4 scope.
+- **`migrate` / `enum` / `object` / `import` / `module`** → loud *not supported* rejection.
+
+Every rejection carries a real diagnostic (typechecker-produced ones flow through the Phase-4
+stderr capture; policy ones are formatted messages) and leaves the running program **exactly**
+as it was — proven by tests that assert both the message *and* unchanged behavior/state after.
+
+## Additive field — the M4 cut, exactly
+
+`05` M4 pins field-add as: *a class may gain a new field only if it carries a mandatory
+default; on accept, walk the arena once (during the STW pause) and write the default into the
+new field's slot for every existing live instance; future constructions include it normally.*
+It explicitly does **not** ship the full `02` §4 migration (new-strided slab + graph pointer
+rewrite + shape-id + quarantine) — that is deferred past M5.
+
+To honour "write the default into the new slot" **without** re-striding the arena (which would
+move instances and dangle every raw pointer into it), **every entity arena reserves
+`FIELD_HEADROOM` (32 bytes = 4 i64 fields) of trailing per-slot space at `arena-new`.** An
+additive field therefore lands at a fixed trailing offset **inside each slot's existing
+reserved space** — no new slab, no instance move, no pointer rewrite. Identity
+(`type-id, slot-index, generation`), all field offsets of the old fields (additive only
+*appends*, so they never shift — which is also why a stale frame reading old fields stays
+correct), and every raw pointer into the arena survive the edit untouched. The migration is
+literally: append a `MonoField` (viewer schema) + a `FieldInfo` (VM metadata), then loop the
+live slots writing `defval` at the new offset — O(live instances), in place. The default is a
+static value: it is compiled as a nullary method and run once on the eval `VMThread` (heap
+quiescent), so a shared `""`/`0`/enum default is materialised once and stamped into every
+instance. A `self` in a default fails to typecheck (no self in scope) → rejected, so a default
+is genuinely static. Exhausting the headroom (a 5th added field) is a **loud** reject, never a
+silent overrun. This changed the two `run-arenas` goldens' `slot-size`/`slabs` numbers (bigger
+slots); the semantically-meaningful `live`/`high-water` counts are identical and were the only
+thing those tests actually guard — re-blessed.
+
+## Stale-frame story as-implemented
+
+Exactly `03`'s per-frame rule, and it falls out of Phase 5's STW for free. A definition-eval
+parks every language thread at a safepoint, swaps `Program.methods[]`, bumps the generation,
+and resumes. A thread that was **mid-old-body** finishes that frame on the old bytecode (its
+code pointer and PC were captured at entry; nothing re-fetches them) — but its *next* `CALL`,
+including a recursive self-call, re-reads `methods[idx]` and gets the new body. The live-edit
+e2e test exercises this directly: three agents are looping when the swap lands (some frames in
+flight during the STW); they keep running and the redefined output appears **within a couple
+of turns**, never mid-frame. There is no per-frame versioning and none is needed — the swap is
+one atomic store visible at the next dispatch, per thread. A deterministic "prove a specific
+frame finished on old code" test would need a `Clock.sleep` planted mid-body plus precise
+thread timing; that is inherently racy, so — per the owner's no-flaky-tests rule — it is not a
+golden, and the property is instead covered by the (deterministic) e2e "output changes within
+a couple turns while the process keeps running and identity/counts persist" assertions.
+
+## Viewer UX added
+
+An instance-detail **"✎ edit source"** button opens a persistent bottom `#code-panel` drawer
+(separate from the 750ms-polled detail pane, so it never wipes what you type), prefilled with
+the class's skeleton reconstructed from the live `fields()`/`methods()` schema (field types
+have their `ref:`/`list:` serialization prefix stripped; bodies are `// edit this body`
+stubs). "define" (or ⌘/Ctrl-Enter) POSTs the buffer as an ordinary eval and shows
+`✓ <Class> redefined — now at generation N` (accent flash) or `✗ <Kind>: <message>` inline;
+after acceptance the detail poll picks up the new behavior on its own. The eval-transcript
+drawer logs the definition eval like any other request. Dark/light both styled; the one accent
+hue (reserved for liveness) marks the accepted change.
+
+## What post-PoC migration would add (beyond M4)
+
+To reach `03`/`02` §4's full field-change design: `InstanceHeader.shape-id` + per-arena
+`old-shape`/`pending-shape`; the two-shape dispatch table (`methods[shape_id][slot]`) that
+only exists while a class drains; the `active_frames` per-class quiescence counter gating a
+migration on `== 0` rather than the whole-process STW used here; a **new-strided slab** with
+the graph pointer-rewrite pass (reusing GC's `TypeInfo`-driven walk over **every** thread's
+stack — the `safepoint.coil` registry already enumerates them) so a field **remove/retype**
+can move instances safely; user `migrate` functions with per-instance **quarantine** on
+failure; and interface **method-add acceptance** (itable rebuild + slot renumbering) rather
+than the conformance-guard-only handling here. None of that ships in M4, by design.
+
+## Coil friction hit in Phase 6 (adds to Phase 1-5's list)
+
+- **`al-set!` is the way to overwrite an `ArrayList` element in place** — used to repoint the
+  compiler's `method-nodes[idx]` and `methods[idx]` to the new generation's node/`MethodInfo`
+  without rebuilding the whole table.
+- **`snprintf` with `%.*s` bridges Scry's `(ptr u8, len)` names into C-string messages** —
+  names aren't NUL-terminated, so every dynamic rejection message is built with
+  `%.*s` (`(cast i32 len)` + `(cast (ptr i8) ptr)`), which is also how a formatted message
+  reaches `ev-fail`/`ev-set-msg` (policy rejections use `ev-msgbuf`; real typechecker
+  diagnostics come back through the Phase-4 fd-2 capture for `EK_TYPE`).
+- **Swap-members-recheck-rollback keeps the retypecheck localized.** Redefinition installs the
+  new members on the live `Decl`, runs the *existing* `check-fn-body`/`check-conformance`
+  against them, and restores the old members on any error — no separate "trial context", and
+  `mk-named`/`intern-mono` are idempotent (a re-intern hits the existing mono), so re-checking
+  a live class doesn't duplicate monos.
+- **A definition-eval never needs its own STW** — it already runs between
+  `request-global-stop`/`release-global-stop` in `server-eval-stw`, so the swap is
+  automatically at a full stop; the CLI path (`scry eval`) runs after `main()` returns, so
+  there are no other threads to park at all.

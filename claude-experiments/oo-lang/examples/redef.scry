@@ -1,0 +1,26 @@
+// redef.scry — a small, terminating fixture for live-code-change (Phase 6 / M4) golden
+// tests. main() constructs a few instances and RETURNS, so `scry eval` can redefine a
+// method/class against the live (quiescent) heap and observe the swap on the next call.
+
+class Counter {
+  n: Int
+  fn get() -> Int { self.n }
+  fn label() -> String { "count" }
+}
+
+class Box {
+  value: String
+  fn show() -> String { self.value }
+}
+
+fn describe(b: Box) -> String {
+  b.show()
+}
+
+fn main() {
+  let c = Counter(n: 5)
+  let b = Box(value: "hello")
+  print(c.get())
+  print(b.show())
+  print(describe(b))
+}

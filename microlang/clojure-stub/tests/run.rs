@@ -449,3 +449,33 @@ fn control_macros() {
     assert_eq!(run("(when-first [x [10 20]] x)"), "10");
     assert_eq!(run("(let [a (atom 0) i (atom 0)] (while (< @i 3) (swap! a + 1) (swap! i + 1)) @a)"), "3");
 }
+
+#[test]
+fn lazy_sequences() {
+    // Infinite range, consumed lazily.
+    assert_eq!(run("(take 5 (range))"), "(0 1 2 3 4)");
+    assert_eq!(run("(take 3 (map inc (range)))"), "(1 2 3)");
+    assert_eq!(run("(take 4 (filter even? (range)))"), "(0 2 4 6)");
+    // iterate / repeat / cycle / repeatedly.
+    assert_eq!(run("(take 5 (iterate (fn [x] (* x 2)) 1))"), "(1 2 4 8 16)");
+    assert_eq!(run("(take 3 (repeat :x))"), "(:x :x :x)");
+    assert_eq!(run("(repeat 3 :y)"), "(:y :y :y)");
+    assert_eq!(run("(take 7 (cycle [1 2 3]))"), "(1 2 3 1 2 3 1)");
+    // take-while / drop-while on an infinite seq.
+    assert_eq!(run("(take-while (fn [x] (< x 5)) (range))"), "(0 1 2 3 4)");
+    assert_eq!(run("(take 3 (drop-while (fn [x] (< x 10)) (range)))"), "(10 11 12)");
+    // lazy-seq is only realized on demand: a self-referential fib stream.
+    assert_eq!(
+        run("(defn nats [n] (lazy-seq (cons n (nats (inc n))))) (take 5 (nats 0))"),
+        "(0 1 2 3 4)"
+    );
+    // range with start/end/step.
+    assert_eq!(run("(range 2 8)"), "(2 3 4 5 6 7)");
+    assert_eq!(run("(range 0 10 2)"), "(0 2 4 6 8)");
+    // composition over an infinite source, forced by take.
+    assert_eq!(run("(reduce + 0 (take 5 (map (fn [x] (* x x)) (range))))"), "30");
+    // nth into an infinite seq.
+    assert_eq!(run("(nth (map inc (range)) 100)"), "101");
+    // keep drops nils.
+    assert_eq!(run("(keep (fn [x] (if (even? x) x nil)) (range 6))"), "(0 2 4)");
+}

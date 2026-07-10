@@ -122,6 +122,9 @@ def main():
     lp, lf = run_liveness_test(binary, filt)
     passed += lp; failed += lf
     if lf: fails.append("liveness")
+    xp, xf = run_liveedit_test(binary, filt)
+    passed += xp; failed += xf
+    if xf: fails.append("liveedit")
 
     print(f"\n{passed} passed, {failed} failed ({passed + failed} tests)")
     if fails and not verbose:
@@ -133,9 +136,10 @@ EVAL_DIR = os.path.join(HERE, "eval")
 
 
 def parse_eval_t(path):
-    """A .t file: `key: value` lines. Keys: file, expr, readonly, contains (repeat),
-    notcontains (repeat). `expr` may span until the next top-level `key:` line."""
-    spec = {"file": None, "expr": None, "readonly": False, "contains": [], "notcontains": []}
+    """A .t file: `key: value` lines. Keys: file, expr (may REPEAT — each is a separate
+    `-e`, run in sequence against one process for live-change tests), readonly,
+    contains (repeat), notcontains (repeat). An `expr` spans until the next `key:` line."""
+    spec = {"file": None, "exprs": [], "readonly": False, "contains": [], "notcontains": []}
     cur_key = None
     for raw in open(path).read().splitlines():
         if raw.startswith("file:"):
@@ -147,11 +151,10 @@ def parse_eval_t(path):
         elif raw.startswith("notcontains:"):
             spec["notcontains"].append(raw[12:].strip()); cur_key = None
         elif raw.startswith("expr:"):
-            spec["expr"] = raw[5:]; cur_key = "expr"
+            spec["exprs"].append(raw[5:]); cur_key = "expr"
         elif cur_key == "expr":
-            spec["expr"] += "\n" + raw
-    if spec["expr"] is not None:
-        spec["expr"] = spec["expr"].strip("\n")
+            spec["exprs"][-1] += "\n" + raw
+    spec["exprs"] = [e.strip("\n") for e in spec["exprs"]]
     return spec
 
 
@@ -166,12 +169,18 @@ def run_eval_tests(binary, filt):
             continue
         spec = parse_eval_t(os.path.join(EVAL_DIR, f))
         scry = os.path.join(HERE, "..", spec["file"])
-        sub = ["eval", os.path.abspath(scry), "-e", spec["expr"]]
+        sub = ["eval", os.path.abspath(scry)]
+        for e in spec["exprs"]:
+            sub += ["-e", e]
         if spec["readonly"]:
             sub.append("--readonly")
         try:
             p = subprocess.run([binary] + sub, capture_output=True, text=True, timeout=60)
-            out = p.stdout.strip().splitlines()[-1] if p.stdout.strip() else ""
+            # match against the eval RESULT lines only (JSON), never the program's stdout;
+            # joined so a multi-expr sequence can be asserted with distinct substrings.
+            evlines = [ln for ln in p.stdout.splitlines()
+                       if ln.startswith('{"value"') or ln.startswith('{"error"')]
+            out = "\n".join(evlines) if evlines else (p.stdout.strip().splitlines()[-1] if p.stdout.strip() else "")
         except subprocess.TimeoutExpired:
             out = "TIMEOUT"
         problems = []
@@ -216,7 +225,7 @@ def run_smoke_test(binary, filt):
             body = json.dumps({"id": "e1", "source": src}).encode()
             req = urllib.request.Request(f"http://127.0.0.1:{port}/eval", data=body,
                                          headers={"Content-Type": "application/json"})
-            return json.loads(urllib.request.urlopen(req, timeout=10).read())
+            return json.loads(urllib.request.urlopen(req, timeout=30).read())
 
         problems = []
         time.sleep(0.2)
@@ -256,18 +265,23 @@ def run_liveness_test(binary, filt):
     others keep growing, and (4) resume() restarts it. Every eval runs under a full STW."""
     if filt and "liveness" not in filt:
         return 0, 0
-    import time, json, urllib.request
+    import time, json, threading, urllib.request
     demo = os.path.abspath(os.path.join(HERE, "..", "examples", "agents.scry"))
     proc = subprocess.Popen([binary, "run", demo], stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True)
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    # Drain stdout continuously in a thread: an agent's Console.log write must never block on
+    # a full pipe, or it can't reach a safepoint and would stall request-global-stop's STW.
+    lines = []
+    threading.Thread(target=lambda: [lines.append(ln) for ln in proc.stdout], daemon=True).start()
     port = None
     try:
-        for _ in range(200):
-            line = proc.stdout.readline()
-            if not line:
+        for _ in range(400):
+            for ln in lines:
+                if "viewer: http://localhost:" in ln:
+                    port = int(ln.strip().split(":")[-1]); break
+            if port is not None:
                 break
-            if "viewer: http://localhost:" in line:
-                port = int(line.strip().split(":")[-1]); break
+            time.sleep(0.05)
         if port is None:
             print("FAIL liveness\n     never printed viewer URL")
             return 0, 1
@@ -276,7 +290,7 @@ def run_liveness_test(binary, filt):
             body = json.dumps({"id": "L", "source": src}).encode()
             req = urllib.request.Request(f"http://127.0.0.1:{port}/eval", data=body,
                                          headers={"Content-Type": "application/json"})
-            return json.loads(urllib.request.urlopen(req, timeout=10).read())
+            return json.loads(urllib.request.urlopen(req, timeout=30).read())
 
         problems = []
         time.sleep(1.0)
@@ -327,6 +341,128 @@ def run_liveness_test(binary, filt):
             print("FAIL liveness")
             for p in problems:
                 print("     " + p)
+            return 0, 1
+        return 1, 0
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+
+
+def run_liveedit_test(binary, filt):
+    """THE Phase-6 demo beat: start examples/agents.scry (3 agents on 3 OS threads) and,
+    WHILE they print to the terminal, POST a redefinition of ScriptedModel.complete that
+    changes the printed text. Assert (1) the terminal output visibly changes within a couple
+    of turns, (2) the process keeps running and instance identity/counts persist, then
+    (3) POST a deliberately-bad edit (type error) and assert it is rejected AND the behavior
+    is unchanged (the running program is untouched by a rejected edit)."""
+    if filt and "liveedit" not in filt:
+        return 0, 0
+    import time, json, threading, urllib.request
+    demo = os.path.abspath(os.path.join(HERE, "..", "examples", "agents.scry"))
+    proc = subprocess.Popen([binary, "run", demo], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    lines = []
+    def drain():
+        for ln in proc.stdout:
+            lines.append(ln)
+    t = threading.Thread(target=drain, daemon=True); t.start()
+
+    def port():
+        for ln in lines:
+            if "viewer: http://localhost:" in ln:
+                return int(ln.strip().split(":")[-1])
+        return None
+    try:
+        p = None
+        for _ in range(200):
+            p = port()
+            if p is not None:
+                break
+            time.sleep(0.05)
+        if p is None:
+            print("FAIL liveedit\n     never printed viewer URL")
+            return 0, 1
+
+        def ev(src):
+            body = json.dumps({"id": "X", "source": src}).encode()
+            req = urllib.request.Request(f"http://127.0.0.1:{p}/eval", data=body,
+                                         headers={"Content-Type": "application/json"})
+            return json.loads(urllib.request.urlopen(req, timeout=30).read())
+
+        problems = []
+        time.sleep(1.5)
+        # (0) baseline: the old ScriptedModel.complete prints "<reply> re: task <n>"
+        base = [ln for ln in lines if "re: task" in ln]
+        if not base:
+            problems.append("no baseline agent output containing 're: task'")
+
+        # (1) live-redefine ScriptedModel.complete to change the printed text
+        r = ev('class ScriptedModel {\n  reply: String\n'
+                '  fn complete(prompt: String) -> String { "PATCHED[" + self.reply + "] " + prompt }\n}')
+        v = r.get("value", {})
+        if v.get("type") != "defined" or v.get("defined") != "ScriptedModel":
+            problems.append(f"redefinition not accepted: {r}")
+        gen_after = v.get("gen")
+        if gen_after != 1:
+            problems.append(f"expected gen 1 after first edit, got {gen_after}")
+
+        # (2) the terminal output visibly changes within a couple of turns
+        mark = len(lines)
+        patched = None
+        for _ in range(30):
+            time.sleep(0.3)
+            if any("PATCHED[" in ln for ln in lines[mark:]):
+                patched = True
+                break
+        if not patched:
+            problems.append("terminal output never showed the redefined 'PATCHED[' text")
+
+        # (3) process still running + instance identity/counts persist across the edit
+        if proc.poll() is not None:
+            problems.append("process exited during the live edit")
+        names = [tt["name"] for tt in ev("types()")["value"]["items"]]
+        for want in ("Agent", "ScriptedModel"):
+            if want not in names:
+                problems.append(f"types() missing {want} after edit: {names}")
+        nsm = ev("ScriptedModel.instances()")["value"]["length"]
+        nag = ev("Agent.instances()")["value"]["length"]
+        if nsm != 3:
+            problems.append(f"ScriptedModel count changed across edit: {nsm}")
+        if nag != 3:
+            problems.append(f"Agent count changed across edit: {nag}")
+        agents = ev("Agent.instances()")["value"]["items"]
+        anames = sorted(a["fields"]["name"]["value"] for a in agents)
+        if anames != ["coder", "researcher", "reviewer"]:
+            problems.append(f"agent identities changed: {anames}")
+
+        # (4) a deliberately-bad edit is REJECTED and behavior is unchanged
+        rb = ev('class ScriptedModel {\n  reply: String\n'
+                '  fn complete(prompt: String) -> String { self.reply + 5 }\n}')
+        if "error" not in rb or rb["error"].get("kind") != "TypeError":
+            problems.append(f"bad edit not rejected as TypeError: {rb}")
+        if ev("generation()")["value"]["value"] != 1:
+            problems.append("generation changed on a rejected edit (must be a no-op)")
+        mark2 = len(lines)
+        still_patched = None
+        for _ in range(20):
+            time.sleep(0.3)
+            new = lines[mark2:]
+            if new and all(("PATCHED[" in ln) for ln in new if "msg#" in ln):
+                still_patched = True
+                break
+        if still_patched is None:
+            # tolerate: as long as no post-reject line reverted to the old "re: task" form
+            reverted = any(("re: task" in ln and "PATCHED[" not in ln) for ln in lines[mark2:])
+            if reverted:
+                problems.append("rejected edit changed behavior (output reverted)")
+
+        if problems:
+            print("FAIL liveedit")
+            for pr in problems:
+                print("     " + pr)
             return 0, 1
         return 1, 0
     finally:

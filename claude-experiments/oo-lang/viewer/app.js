@@ -332,6 +332,12 @@ async function refreshDetail() {
   const sub = document.createElement("div"); sub.className = "pane-sub";
   sub.innerHTML = `generation ${inst.generation}`;
   if (sc && sc.implements && sc.implements.length) sub.innerHTML += ` · implements <span class="impl">${sc.implements.join(", ")}</span>`;
+  if (sc) {
+    const edit = document.createElement("button"); edit.className = "ghost-btn edit-src";
+    edit.textContent = "✎ edit source";
+    edit.onclick = () => openCodePanel(cls, sc);
+    sub.appendChild(edit);
+  }
   pane.appendChild(sub);
 
   // fields
@@ -432,6 +438,66 @@ function replSubmit(src) {
     if (state.view === "detail") setTimeout(refreshDetail, 60);
   });
 }
+
+// ---------- code panel (live code change / redefinition) ----------
+// A definition eval is live redefinition: POST the source, show accepted {gen} or the
+// rejection diagnostic inline. After acceptance the detail poll picks up the new behavior
+// on its own (calls resolve through the swapped method table). Persistent drawer, so the
+// 750ms detail refresh never wipes what you are typing.
+function cleanType(t) { return String(t).replace(/^\w+:/, ""); }
+function classSkeleton(cls, sc) {
+  const impl = sc.implements && sc.implements.length ? " implements " + sc.implements.join(", ") : "";
+  let s = `class ${cls}${impl} {\n`;
+  for (const f of sc.fields) s += `  ${f.name}: ${cleanType(f.type)}\n`;
+  if (sc.methods.length) s += "\n";
+  for (const m of sc.methods) {
+    const params = m.params.map((p) => `${p.name}: ${cleanType(p.type)}`).join(", ");
+    const ret = m.returns && m.returns !== "Void" && m.returns !== "()" ? ` -> ${cleanType(m.returns)}` : "";
+    s += `  fn ${m.name}(${params})${ret} {\n    // edit this body\n  }\n`;
+  }
+  return s + "}\n";
+}
+function openCodePanel(cls, sc) {
+  const panel = document.getElementById("code-panel");
+  const ed = document.getElementById("code-editor");
+  document.getElementById("code-cls").textContent = cls;
+  // keep an in-progress draft for this class; otherwise seed from the live schema skeleton
+  if (!state.codeDraft || state.codeDraft.cls !== cls) {
+    ed.value = classSkeleton(cls, sc);
+    state.codeDraft = { cls, text: ed.value };
+  } else {
+    ed.value = state.codeDraft.text;
+  }
+  document.getElementById("code-result").textContent = "";
+  document.getElementById("code-result").className = "code-result";
+  panel.classList.remove("collapsed");
+  ed.focus();
+}
+async function codeDefine() {
+  const ed = document.getElementById("code-editor");
+  const res = document.getElementById("code-result");
+  res.className = "code-result"; res.textContent = "defining…";
+  const r = await evalSource(ed.value);
+  if (r.error) {
+    res.className = "code-result err";
+    res.textContent = `✗ ${r.error.kind}: ${r.error.message}`;
+  } else {
+    const v = r.value || {};
+    res.className = "code-result ok flash";
+    res.textContent = v.type === "defined"
+      ? `✓ ${v.defined} redefined — now at generation ${v.gen}`
+      : `✓ ${JSON.stringify(v)}`;
+    if (state.view === "detail") setTimeout(refreshDetail, 60);
+  }
+}
+document.getElementById("code-editor").addEventListener("input", (e) => {
+  if (state.codeDraft) state.codeDraft.text = e.target.value;
+});
+document.getElementById("code-define").onclick = codeDefine;
+document.getElementById("code-close").onclick = () => document.getElementById("code-panel").classList.add("collapsed");
+document.getElementById("code-editor").addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); codeDefine(); }
+});
 
 // ---------- global search ----------
 async function globalSearch(q) {

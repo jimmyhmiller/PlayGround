@@ -68,13 +68,29 @@ pub const CORE: &str = r#"
 (defn even? [n] (if (%lt n 0) (even-nn (%sub 0 n)) (even-nn n)))
 (defn odd? [n] (not (even? n)))
 
-;; ─────────────── seq abstraction ───────────────
+;; ─────────────── seq abstraction (with lazy sequences) ───────────────
 (defn elems [c] (field c 0))
 (defn entries [kvs]
   (if (nil? kvs) nil
       (%cons (vector (%first kvs) (%first (%rest kvs))) (entries (%rest (%rest kvs))))))
+;; A lazy seq is a record holding two mutable cells: a thunk (0-arg fn) and a
+;; realized? flag. On first force we call the thunk, `seq` its result (chaining
+;; through any further lazy layers), and cache it. This is what makes infinite
+;; seqs (range/iterate/repeat/cycle) and lazy map/filter/take possible — every
+;; seq walker below re-`seq`s its argument at entry, forcing lazy tails as it goes.
+(defn lazy-seq? [x] (%num-eq (type-of x) 'LazySeq))
+(defn -lazy-seq [thunk] (record 'LazySeq (%cell thunk) (%cell false)))
+(defn -force [ls]
+  (if (%cell-ref (field ls 1) 0)
+      (%cell-ref (field ls 0) 0)
+      (let [v (seq ((%cell-ref (field ls 0) 0)))]
+        (do (%cell-set! (field ls 0) 0 v)
+            (%cell-set! (field ls 1) 0 true)
+            v))))
+(defmacro lazy-seq (& body) (list '-lazy-seq (%cons 'fn (%cons (vector) body))))
 (defn seq [c]
   (cond (nil? c) nil
+        (lazy-seq? c) (-force c)
         (vector? c) (elems c)
         (set? c) (elems c)
         (map? c) (entries (field c 0))
@@ -82,14 +98,18 @@ pub const CORE: &str = r#"
 (defn first [c] (%first (seq c)))
 (defn rest [c] (%rest (seq c)))
 (defn next [c] (seq (%rest (seq c))))
-(defn cons [x c] (%cons x (seq c)))
+(defn cons [x c] (%cons x c))
 (defn empty? [c] (nil? (seq c)))
+;; Fully realize a (possibly lazy) seq into an eager cons list.
+(defn -to-list [s] (let [s (seq s)] (if (nil? s) nil (%cons (%first s) (-to-list (%rest s))))))
+(defn doall [c] (do (-to-list c) c))
+(defn dorun [c] (do (-to-list c) nil))
 
 ;; ─────────────── count / nth / get ───────────────
-(defn count-seq [s n] (if (nil? s) n (count-seq (%rest s) (%add n 1))))
-(defn count [c] (count-seq (seq c) 0))
-(defn nth-seq [s i] (if (%num-eq i 0) (%first s) (nth-seq (%rest s) (%sub i 1))))
-(defn nth [c i] (nth-seq (seq c) i))
+(defn count-seq [s n] (let [s (seq s)] (if (nil? s) n (count-seq (%rest s) (%add n 1)))))
+(defn count [c] (count-seq c 0))
+(defn nth-seq [s i] (let [s (seq s)] (if (%num-eq i 0) (%first s) (nth-seq (%rest s) (%sub i 1)))))
+(defn nth [c i] (nth-seq c i))
 (defn mget [kvs k]
   (cond (nil? kvs) nil
         (%num-eq (%first kvs) k) (%first (%rest kvs))
@@ -139,35 +159,71 @@ pub const CORE: &str = r#"
         (set? c) (record 'Set (%cons x (field c 0)))
         (map? c) (assoc c (nth x 0) (nth x 1))
         true (%cons x c)))
-(defn reduce-seq [f acc s] (if (nil? s) acc (reduce-seq f (f acc (%first s)) (%rest s))))
-(defn reduce [f init c] (reduce-seq f init (seq c)))
+(defn reduce-seq [f acc s] (let [s (seq s)] (if (nil? s) acc (reduce-seq f (f acc (%first s)) (%rest s)))))
+(defn reduce [f init c] (reduce-seq f init c))
 (defn into [to from] (reduce conj to from))
 
-;; ─────────────── higher-order seq fns ───────────────
-(defn map-seq [f s] (if (nil? s) nil (%cons (f (%first s)) (map-seq f (%rest s)))))
-(defn map [f c] (map-seq f (seq c)))
-(defn filter-seq [f s]
-  (cond (nil? s) nil
-        (f (%first s)) (%cons (%first s) (filter-seq f (%rest s)))
-        true (filter-seq f (%rest s))))
-(defn filter [f c] (filter-seq f (seq c)))
+;; ─────────────── higher-order seq fns (lazy) ───────────────
+(defn map [f c]
+  (lazy-seq (let [s (seq c)] (if (nil? s) nil (%cons (f (%first s)) (map f (%rest s)))))))
+(defn filter [f c]
+  (lazy-seq (let [s (seq c)]
+              (cond (nil? s) nil
+                    (f (%first s)) (%cons (%first s) (filter f (%rest s)))
+                    true (filter f (%rest s))))))
 (defn remove [f c] (filter (fn [x] (not (f x))) c))
-(defn range-from [i n] (if (%lt i n) (%cons i (range-from (%add i 1) n)) nil))
-(defn range [n] (range-from 0 n))
-(defn concat2 [a b] (if (nil? a) b (%cons (%first a) (concat2 (%rest a) b))))
-(defn concat-lists [lls] (if (nil? lls) nil (concat2 (seq (%first lls)) (concat-lists (%rest lls)))))
+(defn keep [f c]
+  (lazy-seq (let [s (seq c)]
+              (if (nil? s) nil
+                  (let [v (f (%first s))]
+                    (if (nil? v) (keep f (%rest s)) (%cons v (keep f (%rest s)))))))))
+(defn -range-inf [i] (lazy-seq (%cons i (-range-inf (%add i 1)))))
+(defn -range2 [i n] (lazy-seq (if (%lt i n) (%cons i (-range2 (%add i 1) n)) nil)))
+(defn -range3 [i n step] (lazy-seq (if (%lt i n) (%cons i (-range3 (%add i step) n step)) nil)))
+(defn range [& args]
+  (cond (nil? (seq args)) (-range-inf 0)
+        (nil? (next args)) (-range2 0 (first args))
+        (nil? (next (next args))) (-range2 (first args) (second args))
+        true (-range3 (first args) (second args) (nth args 2))))
+(defn concat2 [a b]
+  (lazy-seq (let [s (seq a)] (if (nil? s) (seq b) (%cons (%first s) (concat2 (%rest s) b))))))
+(defn concat-lists [lls] (if (nil? lls) nil (concat2 (%first lls) (concat-lists (%rest lls)))))
 (defn concat [& lls] (concat-lists lls))
-(defn reverse-onto [s acc] (if (nil? s) acc (reverse-onto (%rest s) (%cons (%first s) acc))))
-(defn reverse [c] (reverse-onto (seq c) nil))
-(defn drop-seq [n s] (if (%num-eq n 0) s (if (nil? s) nil (drop-seq (%sub n 1) (%rest s)))))
-(defn drop [n c] (drop-seq n (seq c)))
-(defn take-seq [n s] (if (%num-eq n 0) nil (if (nil? s) nil (%cons (%first s) (take-seq (%sub n 1) (%rest s))))))
-(defn take [n c] (take-seq n (seq c)))
+;; EAGER concat: syntax-quote builds code forms with this, since a macro must
+;; return a realized (non-lazy) form the expander can splice.
+(defn -concat2 [a b] (let [s (seq a)] (if (nil? s) (-to-list b) (%cons (%first s) (-concat2 (%rest s) b)))))
+(defn -concat-lists [lls] (if (nil? lls) nil (-concat2 (%first lls) (-concat-lists (%rest lls)))))
+(defn -concat [& lls] (-concat-lists lls))
+(defn reverse-onto [s acc] (let [s (seq s)] (if (nil? s) acc (reverse-onto (%rest s) (%cons (%first s) acc)))))
+(defn reverse [c] (reverse-onto c nil))
+(defn drop [n c]
+  (if (%lt 0 n) (let [s (seq c)] (if (nil? s) nil (drop (%sub n 1) (%rest s)))) (seq c)))
+(defn take [n c]
+  (lazy-seq (if (%lt 0 n)
+                (let [s (seq c)] (if (nil? s) nil (%cons (%first s) (take (%sub n 1) (%rest s)))))
+                nil)))
+(defn take-while [pred c]
+  (lazy-seq (let [s (seq c)]
+              (if (nil? s) nil
+                  (if (pred (%first s)) (%cons (%first s) (take-while pred (%rest s))) nil)))))
+(defn drop-while [pred c]
+  (lazy-seq (let [s (seq c)]
+              (if (nil? s) nil (if (pred (%first s)) (drop-while pred (%rest s)) s)))))
+;; ─────────────── infinite / generator seqs ───────────────
+(defn iterate [f x] (lazy-seq (%cons x (iterate f (f x)))))
+(defn -repeat-inf [x] (lazy-seq (%cons x (-repeat-inf x))))
+(defn -repeat-n [n x] (lazy-seq (if (%lt 0 n) (%cons x (-repeat-n (%sub n 1) x)) nil)))
+(defn repeat [& args] (if (nil? (next args)) (-repeat-inf (first args)) (-repeat-n (first args) (second args))))
+(defn repeatedly [f] (lazy-seq (%cons (f) (repeatedly f))))
+(defn -cycle [orig s]
+  (lazy-seq (let [s (seq s)]
+              (if (nil? s) (-cycle orig orig) (%cons (%first s) (-cycle orig (%rest s)))))))
+(defn cycle [c] (if (nil? (seq c)) nil (-cycle c c)))
 (defn second [c] (nth c 1))
-(defn last [c] (if (nil? (%rest (seq c))) (%first (seq c)) (last (%rest (seq c)))))
+(defn last [c] (let [s (seq c)] (if (nil? s) nil (if (nil? (next s)) (%first s) (last (%rest s))))))
 (defn seq? [x] (%num-eq (type-of x) 'List))
-(defn butlast-seq [s] (if (nil? (%rest s)) nil (%cons (%first s) (butlast-seq (%rest s)))))
-(defn butlast [c] (butlast-seq (seq c)))
+(defn butlast-seq [s] (let [s (seq s)] (if (nil? (next s)) nil (%cons (%first s) (butlast-seq (%rest s))))))
+(defn butlast [c] (butlast-seq c))
 ;; `sigs` computes the :arglists metadata for `defn`: the parameter vector of a
 ;; single-arity fn, or the seq of parameter vectors of a multi-arity one. (Our
 ;; `def` discards symbol metadata, so this is informational — but it lets the
@@ -185,10 +241,10 @@ pub const CORE: &str = r#"
       (assoc m (%first (seq ks)) v)
       (assoc m (%first (seq ks)) (assoc-in (get m (%first (seq ks))) (%rest (seq ks)) v))))
 (defn update [m k f] (assoc m k (f (get m k))))
-(defn some-seq [pred s] (if (nil? s) nil (if (pred (%first s)) (%first s) (some-seq pred (%rest s)))))
-(defn some [pred c] (some-seq pred (seq c)))
-(defn every-seq [pred s] (if (nil? s) true (if (pred (%first s)) (every-seq pred (%rest s)) false)))
-(defn every? [pred c] (every-seq pred (seq c)))
+(defn some-seq [pred s] (let [s (seq s)] (if (nil? s) nil (if (pred (%first s)) (%first s) (some-seq pred (%rest s))))))
+(defn some [pred c] (some-seq pred c))
+(defn every-seq [pred s] (let [s (seq s)] (if (nil? s) true (if (pred (%first s)) (every-seq pred (%rest s)) false))))
+(defn every? [pred c] (every-seq pred c))
 (defn mapv [f c] (vec (map f c)))
 (defn filterv [f c] (vec (filter f c)))
 (defn comp [f g] (fn [x] (f (g x))))
@@ -197,8 +253,9 @@ pub const CORE: &str = r#"
 (defn complement [f] (fn [x] (not (f x))))
 (defn max [a b] (if (%lt a b) b a))
 (defn min [a b] (if (%lt a b) a b))
-(defn map-indexed-h [f i s] (if (nil? s) nil (%cons (f i (%first s)) (map-indexed-h f (%add i 1) (%rest s)))))
-(defn map-indexed [f c] (map-indexed-h f 0 (seq c)))
+(defn map-indexed-h [f i s]
+  (lazy-seq (let [s (seq s)] (if (nil? s) nil (%cons (f i (%first s)) (map-indexed-h f (%add i 1) (%rest s)))))))
+(defn map-indexed [f c] (map-indexed-h f 0 c))
 
 ;; if-let / when-let build a LITERAL binding vector (not syntax-quote, which
 ;; would produce a runtime `(vec ..)` the `let` binder can't read).
@@ -242,7 +299,7 @@ pub const CORE: &str = r#"
 (defn -meta [x] (if (%lt 1 (nfields x)) (field x 1) nil))
 (def with-meta -with-meta)
 (def meta -meta)
-(defn vec [c] (record 'Vector (seq c)))
+(defn vec [c] (record 'Vector (-to-list c)))
 
 ;; ─────────────── threading macros ───────────────
 (defn thread-first [x form] (%cons (%first form) (%cons x (%rest form))))
@@ -310,4 +367,16 @@ pub const CORE: &str = r#"
             (nil? (next (next s))) (f old (first s) (second s))
             (nil? (next (next (next s)))) (f old (first s) (second s) (nth s 2))
             true (throw "swap!: too many args (max 3 beyond the atom)")))))
+
+;; ─────────────── realization (force a lazy result for printing) ───────────────
+;; The Rust printer can't invoke thunks, so `run` calls this on the final value
+;; to fully realize any lazy spine (and lazy elements) into eager collections.
+(defn -realize-list [s]
+  (let [s (seq s)] (if (nil? s) nil (%cons (-realize (%first s)) (-realize-list (%rest s))))))
+(defn -realize [x]
+  (cond (lazy-seq? x) (-realize-list x)
+        (%num-eq (type-of x) 'List) (-realize-list x)
+        (vector? x) (record 'Vector (-realize-list (field x 0)))
+        (set? x) (record 'Set (-realize-list (field x 0)))
+        true x))
 "#;
