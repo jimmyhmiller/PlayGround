@@ -43,6 +43,26 @@
 (extern dup        :cc c [i32] (-> i32))
 (extern dup2       :cc c [i32 i32] (-> i32))
 (extern getpid     :cc c [] (-> i32))
+; Phase 8a HTTP client: libcurl (system /usr/lib/libcurl.4.dylib). Declared here — the one
+; extern home — and :use *-imported by http.coil. curl's ABI is stable; the option/info
+; integers used by http.coil are baked with `; curl.h:` comments there. setopt/getinfo are
+; variadic in C (the option int selects the vararg's type); we always pass an 8-byte value.
+(extern curl_global_init      :cc c [i64] (-> i32))
+(extern curl_easy_init        :cc c [] (-> (ptr i8)))
+(extern curl_easy_setopt      :cc c [(ptr i8) i32 ...] (-> i32))
+(extern curl_easy_getinfo     :cc c [(ptr i8) i32 ...] (-> i32))
+(extern curl_easy_cleanup     :cc c [(ptr i8)] (-> void))
+(extern curl_easy_strerror    :cc c [i32] (-> (ptr i8)))
+(extern curl_slist_append     :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern curl_slist_free_all   :cc c [(ptr i8)] (-> void))
+(extern curl_multi_init       :cc c [] (-> (ptr i8)))
+(extern curl_multi_add_handle :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern curl_multi_remove_handle :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern curl_multi_perform    :cc c [(ptr i8) (ptr i8)] (-> i32))   ; (multi, int* running_handles)
+(extern curl_multi_poll       :cc c [(ptr i8) (ptr i8) i32 i32 (ptr i8)] (-> i32)) ; (multi, extra_fds, extra_nfds, timeout_ms, int* numfds)
+(extern curl_multi_info_read  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))  ; (multi, int* msgs_in_queue) -> CURLMsg*
+(extern curl_multi_cleanup    :cc c [(ptr i8)] (-> i32))
+(extern curl_multi_strerror   :cc c [i32] (-> (ptr i8)))
 
 ; fd 1 = stdout, fd 2 = stderr
 (defn w-bytes [(fd i64) (p (ptr u8)) (n i64)] (-> i64) (write fd (cast (ptr i8) p) n) 0)

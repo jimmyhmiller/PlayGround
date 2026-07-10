@@ -1066,6 +1066,8 @@
 (defn bt-type2 [(s (ptr i8)) (a1 (ptr Node)) (a2 (ptr Node))] (-> (ptr Node)) (let [t (bt-type s)] (add-kid! t a1) (add-kid! t a2) t))
 (defn bt-unit [] (-> (ptr Node)) (let [t (mk-node NK_TYPE 0 0)] (store! (field t ival) 1) t))
 (defn bt-param [(s (ptr i8)) (ty (ptr Node))] (-> (ptr Node)) (let [p (mk-node NK_PARAM 0 0)] (scn p s) (store! (field p a) ty) p))
+; a class FIELD member (name + type in slot a) — for builtin entity classes like HttpResponse.
+(defn bt-field [(s (ptr i8)) (ty (ptr Node))] (-> (ptr Node)) (let [f (mk-node NK_FIELD 0 0)] (scn f s) (store! (field f a) ty) f))
 (defn bt-tparam [(s (ptr i8))] (-> (ptr Node)) (let [t (mk-node NK_TYPEPARAM 0 0)] (scn t s) t))
 (defn bt-variant0 [(s (ptr i8))] (-> (ptr Node)) (let [v (mk-node NK_VARIANT 0 0)] (scn v s) v))
 (defn bt-variant1 [(s (ptr i8)) (ty (ptr Node))] (-> (ptr Node)) (let [v (bt-variant0 s)] (add-kid! v ty) v))
@@ -1120,6 +1122,24 @@
     (bdm mx (bt-fn0 c"unlock" (bt-type c"Void")))
     (bdm mx (bt-fn0 c"get" (bt-type c"T")))
     (bdm mx (bt-fn1 c"set" (bt-param c"value" (bt-type c"T")) (bt-type c"Void"))))
+  ; Phase 8a HTTP. HttpResponse is a real entity class (DK_CLASS => is-entity => arena-backed,
+  ; browsable in the viewer) with fields { status: Int, body: String }. The VM allocates it; user
+  ; code only reads its fields. Http is the object exposing request(...).
+  ; class HttpResponse { status: Int ; body: String }
+  (let [hr (mkbuiltin DK_CLASS c"HttpResponse")]
+    (bdm hr (bt-field c"status" (bt-type c"Int")))
+    (bdm hr (bt-field c"body" (bt-type c"String"))))
+  ; object Http { request(method: String, url: String, headers: List<String>, body: String) -> HttpResponse }
+  (let [h (mkbuiltin DK_BUILTIN_OBJ c"Http")]
+    (bdm h (let [f (mk-node NK_FN 0 0)]
+             (scn f c"request")
+             (store! (field f b) (mk-node NK_PARAMS 0 0))
+             (add-kid! (load (field f b)) (bt-param c"method" (bt-type c"String")))
+             (add-kid! (load (field f b)) (bt-param c"url" (bt-type c"String")))
+             (add-kid! (load (field f b)) (bt-param c"headers" (bt-type1 c"List" (bt-type c"String"))))
+             (add-kid! (load (field f b)) (bt-param c"body" (bt-type c"String")))
+             (store! (field f c) (bt-type c"HttpResponse"))
+             f)))
   ; enum Option<T> { None ; Some(T) }
   (let [o (mkbuiltin DK_ENUM c"Option")]
     (bdtp o c"T") (bdv o (bt-variant0 c"None")) (bdv o (bt-variant1 c"Some" (bt-type c"T"))))

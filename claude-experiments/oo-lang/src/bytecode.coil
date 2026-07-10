@@ -86,6 +86,10 @@
 ; ---- Phase 7: interactive stdin/stdout (01-language.md §DECISIONS #7) ----
 (const BLT_CONSOLE_PRINT 25)     ; pop String -> write to stdout with NO trailing newline (flushed) -> push Unit
 (const BLT_CONSOLE_READLINE 26)  ; (no args) -> safepoint-cooperative line read -> push (ptr Option<String> box): Some(line) / None at EOF
+; ---- Phase 8a: real HTTP(S) client via libcurl (06-implementation.md §8a) ----
+(const BLT_HTTP_REQUEST 27)      ; pop body(String),headers(List<String>),url(String),method(String)
+                                 ;   -> perform via curl_multi (safepoint-cooperative) -> push (ptr HttpResponse entity):
+                                 ;      { status:Int, body:String }. Transport failure => status 0, body=<error text>.
 
 ; ============================ FieldInfo kinds ===============================
 (const FIELD_I64 0) (const FIELD_F64 1) (const FIELD_BOOL 2)

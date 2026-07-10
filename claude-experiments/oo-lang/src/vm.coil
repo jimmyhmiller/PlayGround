@@ -25,6 +25,7 @@
 (import "evalrt.coil" :use *)
 (import "thread.coil" :use *)
 (import "atomic.coil" :use *)
+(import "http.coil" :use *)
 
 (const DK_OBJECT_KIND 3)
 (const STACK_MAX 65536)
@@ -166,6 +167,42 @@
     (store! (field vt parked) 0) (store! (field vt done) 0) (store! (field vt thread-id) 0)
     vt))
 
+; ---- Phase 8a: HttpResponse as a real arena-backed ENTITY -----------------
+; HttpResponse is registered (typecheck.coil) as a builtin class with fields
+; { status: Int, body: String } and, being class-kinded, gets an entity mono + a TypeArena
+; built by build-program exactly like a user class. We find its TypeInfo by name, arena-alloc a
+; slot (stamps the header: type-id/slot-index/gen/live), and store the two fields at their decl
+; offsets (status @ header+0, body @ header+8). The result is a live, browsable HttpResponse
+; instance in its own arena — the viewer lists it like any other entity.
+; raw byte-string equality (types.coil's name-eq isn't imported here to avoid a heavy dep).
+(defn vm-name-eq [(a (ptr u8)) (an i64) (b (ptr u8)) (bn i64)] (-> bool)
+  (if (!= an bn) false
+    (let [(mut i) 0 (mut ok) true]
+      (loop (if (and (load ok) (< (load i) an))
+              (do (if (!= (cast i64 (load (index a (load i)))) (cast i64 (load (index b (load i))))) (do (store! ok false) 0) 0)
+                  (store! i (+ (load i) 1)) 0)
+              (break)))
+      (load ok))))
+
+(defn find-typeinfo-by-name [(p (ptr Program)) (name (ptr u8)) (len i64)] (-> (ptr TypeInfo))
+  (let [n (load (field p type-count)) (mut i) 0 (mut r) (cast (ptr TypeInfo) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [ti (load (index (load (field p types)) (load i)))]
+              (if (and (!= (cast i64 ti) 0) (vm-name-eq (load (field ti name)) (load (field ti name-len)) name len))
+                (do (store! r ti) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+
+(defn http-alloc-response [(status i64) (body (ptr StringObj))] (-> i64)
+  (let [ti (find-typeinfo-by-name (load (field (vm) program)) (cast (ptr u8) c"HttpResponse") 12)]
+    (if (= (cast i64 ti) 0)
+      (do (eval-panic0 EK_RUNTIME c"internal: HttpResponse type not registered") (exit (cast i32 70)) 0)
+      (let [inst (cast i64 (arena-alloc (load (field ti arena))))]
+        (store! (field-addr inst (sizeof InstanceHeader)) status)                 ; field 0: status (Int)
+        (store! (field-addr inst (+ (sizeof InstanceHeader) 8)) (cast i64 body))   ; field 1: body (String)
+        inst))))
+
 ; the builtin dispatch (fixed arities; arg order = pushed order)
 (defn do-builtin [(vt (ptr VMThread)) (blt i64)] (-> i64)
   (cond
@@ -194,6 +231,13 @@
     (= blt BLT_MUTEX_UNLOCK) (let [m (vpop vt)] (vm-mutex-unlock vt (cast (ptr MutexObj) m)) (vpush vt 0))
     (= blt BLT_MUTEX_GET) (let [m (vpop vt)] (vpush vt (mutex-get (cast (ptr MutexObj) m))))
     (= blt BLT_MUTEX_SET) (let [v (vpop vt) m (vpop vt)] (mutex-set (cast (ptr MutexObj) m) v) (vpush vt 0))
+    ; args pushed left-to-right (method,url,headers,body) => pop right-to-left.
+    (= blt BLT_HTTP_REQUEST)
+      (let [body (vpop vt) headers (vpop vt) url (vpop vt) method (vpop vt)
+            res (http-request (field vt parked)
+                              (cast (ptr StringObj) method) (cast (ptr StringObj) url)
+                              (cast (ptr ListObj) headers) (cast (ptr StringObj) body))]
+        (vpush vt (http-alloc-response (load (field res status)) (load (field res body)))))
     (do (eval-panic0 EK_RUNTIME c"vm: unknown builtin") (exit (cast i32 70)) 0)))
 
 ; spawn a language thread running task.<slot>() (task implements the interface `iface`).
@@ -353,6 +397,8 @@
 ; concurrent eval can park it too, including once it's finished and looping post-main).
 (defn vm-run [(p (ptr Program))] (-> i64)
   (store! (field (vm) program) p)
+  (http-init)   ; libcurl global init once, on the main thread, before any thread can race
+
   (let [vt (vm-thread-main)]
     (store! (field vt stack-top) 0) (store! (field vt frame-count) 0)
     (store! (field vt parked) 0) (store! (field vt done) 0)

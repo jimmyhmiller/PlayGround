@@ -1,0 +1,168 @@
+; http.coil — Phase 8a: a real HTTP(S) client backed by libcurl via FFI (06-implementation.md
+; §8a). NO curl subprocess, NO hand-rolled TLS — this drives libcurl's `easy` API through the
+; `multi` interface so an in-flight request stays live-inspectable: the request is performed in
+; short curl_multi_poll(...,50ms) slices, and safepoint-poll runs every slice, so a coordinator
+; that requests a global stop (for an eval / table swap) sees this thread PARK within ~50ms even
+; while a network round-trip is outstanding. That is the whole reason we do NOT use the blocking
+; curl_easy_perform (which would stall every STW for the request's full duration).
+;
+; TLS: VERIFYPEER/VERIFYHOST are left at curl's secure defaults (system trust store). A cert
+; failure surfaces as a transport error (status 0 + message), never a silent bypass.
+;
+; The result is handed back as an HttpResult { status, body, err }; vm.coil turns it into a real
+; arena-backed HttpResponse ENTITY (browsable in the viewer). Leaf-ish: imports ioutil (curl +
+; libc externs), builtins (StringObj/ListObj), safepoint (cooperative parking). It takes the
+; caller's `(field vt parked)` word directly rather than the whole VMThread, so it does NOT depend
+; on vm.coil (no import cycle).
+(module http)
+(import "ioutil.coil" :use *)
+(import "builtins.coil" :use *)
+(import "safepoint.coil" :use *)
+
+; ---- curl option / info integers (curl.h, ABI-stable; verified against 8.7.1 headers) ----
+(const CURLOPT_URL 10002)            ; curl.h: CURLOPTTYPE_STRINGPOINT + 2   (objectpoint: char*)
+(const CURLOPT_WRITEFUNCTION 20011)  ; curl.h: CURLOPTTYPE_FUNCTIONPOINT + 11 (fn ptr)
+(const CURLOPT_WRITEDATA 10001)      ; curl.h: CURLOPTTYPE_CBPOINT + 1        (void*)
+(const CURLOPT_POSTFIELDS 10015)     ; curl.h: CURLOPTTYPE_OBJECTPOINT + 15   (char*)
+(const CURLOPT_POSTFIELDSIZE 60)     ; curl.h: CURLOPTTYPE_LONG + 60          (long)
+(const CURLOPT_HTTPHEADER 10023)     ; curl.h: CURLOPTTYPE_SLISTPOINT + 23    (struct curl_slist*)
+(const CURLOPT_CUSTOMREQUEST 10036)  ; curl.h: CURLOPTTYPE_OBJECTPOINT + 36   (char*)
+(const CURLOPT_TIMEOUT_MS 155)       ; curl.h: CURLOPTTYPE_LONG + 155         (long)
+(const CURLOPT_NOSIGNAL 99)          ; curl.h: CURLOPTTYPE_LONG + 99          (long)
+(const CURLINFO_RESPONSE_CODE 2097154) ; curl.h: CURLINFO_LONG + 2 (0x200002) -> writes long*
+(const CURL_GLOBAL_ALL 3)            ; curl.h: CURL_GLOBAL_DEFAULT == CURL_GLOBAL_ALL
+(const CURLE_OK 0)
+; CURLMsg { CURLMSG msg; CURL* easy_handle; union { void*; CURLcode result; } data; }
+; verified layout on this platform: msg@0, easy_handle@8, data@16 (sizeof 24).
+(const CURLMSG_RESULT_OFF 16)
+
+; per-request overall timeout (ms). Guards against a hung peer holding a thread forever.
+(const HTTP_TIMEOUT_MS 30000)
+
+; ---- growable response-body buffer (the write-callback's userdata) ----
+(defstruct HttpBuf [(data (ptr u8)) (len i64) (cap i64)])
+(defn httpbuf-new [] (-> (ptr HttpBuf))
+  (let [b (cast (ptr HttpBuf) (xalloc (sizeof HttpBuf)))]
+    (store! (field b data) (xalloc 256)) (store! (field b len) 0) (store! (field b cap) 256) b))
+
+; libcurl write callback: size_t cb(char* ptr, size_t size, size_t nmemb, void* userdata).
+; Appends size*nmemb bytes onto the growable buffer and returns the count consumed (returning
+; anything else tells curl to abort the transfer). Exposed to C via (fnptr-of http-write-cb).
+(defn http-write-cb [(ptr (ptr i8)) (size i64) (nmemb i64) (userdata (ptr i8))] (-> i64)
+  (let [total (* size nmemb) b (cast (ptr HttpBuf) userdata)]
+    (if (> (+ (load (field b len)) total) (load (field b cap)))
+      (let [(mut nc) (load (field b cap))]
+        (loop (if (< (load nc) (+ (load (field b len)) total)) (do (store! nc (* (load nc) 2)) 0) (break)))
+        (store! (field b data) (cast (ptr u8) (realloc (cast (ptr i8) (load (field b data))) (load nc))))
+        (store! (field b cap) (load nc)) 0)
+      0)
+    (memcpy (cast (ptr i8) (index (load (field b data)) (load (field b len)))) ptr total)
+    (store! (field b len) (+ (load (field b len)) total))
+    total))
+
+; copy a (NOT NUL-terminated) Scry String's bytes into a fresh malloc'd NUL-terminated C string.
+(defn str-to-cstr [(s (ptr StringObj))] (-> (ptr i8))
+  (let [n (load (field s len)) buf (xalloc (+ n 1))]
+    (memcpy (cast (ptr i8) buf) (cast (ptr i8) (load (field s data))) n)
+    (store! (index buf n) (cast u8 0))
+    (cast (ptr i8) buf)))
+
+; build a curl_slist from a Scry List<String> of "Key: Value" header lines. Each element is an
+; i64 that is really a (ptr StringObj). Returns the slist head (or null for an empty list).
+(defn http-build-headers [(headers (ptr ListObj))] (-> (ptr i8))
+  (let [n (list-len headers) (mut i) 0 (mut sl) (cast (ptr i8) 0)]
+    (loop (if (< (load i) n)
+            (let [hs (cast (ptr StringObj) (list-get headers (load i))) cs (str-to-cstr hs)]
+              (store! sl (curl_slist_append (load sl) cs))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load sl)))
+
+; ---- the outcome handed back to vm.coil ----
+(defstruct HttpResult [(status i64) (body (ptr StringObj)) (err i64)])   ; err: 0 ok, 1 transport failure
+
+; one-time libcurl global init (thread-safe to call once before any thread races; we do it from
+; the main thread at startup via http-init).
+(defn http-inited [] (-> (ptr i64)) (alloc-static i64))
+(defn http-init [] (-> i64)
+  (if (= (load (http-inited)) 0) (do (curl_global_init CURL_GLOBAL_ALL) (store! (http-inited) 1) 0) 0))
+
+; The cooperative multi-perform loop. Drives `mh` (which already has the easy handle added) to
+; completion, parking on `parked` every slice. This is the EXACT cooperative shape of vm-readline
+; / vm-sleep (safepoint-poll at the top of every pass), reusing the SAME parked word — so an
+; outstanding request never delays a global stop by more than one 50ms poll slice.
+(defn http-perform [(parked (ptr i64)) (mh (ptr i8))] (-> i64)
+  (let [running (alloc-stack i32) numfds (alloc-stack i32)]
+    (store! running 1)
+    (loop
+      (do
+        (safepoint-poll parked)
+        (curl_multi_perform mh (cast (ptr i8) running))
+        (if (= (cast i64 (load running)) 0) (break)
+          (do (curl_multi_poll mh (cast (ptr i8) 0) 0 50 (cast (ptr i8) numfds)) (continue)))))
+    0))
+
+; drain curl_multi_info_read for the transfer's final CURLcode. Returns CURLE_OK(0) on success,
+; else the CURLcode (a transport failure: DNS/TLS/connect/timeout).
+(defn http-result-code [(mh (ptr i8))] (-> i64)
+  (let [msgs (alloc-stack i32) (mut code) CURLE_OK]
+    (store! msgs 0)
+    (let [cmsg (curl_multi_info_read mh (cast (ptr i8) msgs))]
+      (if (!= (cast i64 cmsg) 0)
+        (store! code (cast i64 (load (cast (ptr i32) (index (cast (ptr u8) cmsg) CURLMSG_RESULT_OFF))))) 0))
+    (load code)))
+
+; Perform one HTTP(S) request cooperatively and return an HttpResult. method/url/body are Scry
+; Strings; headers a Scry List<String>. On transport failure returns { status:0, body:<curl error
+; text>, err:1 } — status 0 is the sentinel the agent layer checks; we NEVER fabricate success.
+(defn http-request [(parked (ptr i64))
+                    (method (ptr StringObj)) (url (ptr StringObj))
+                    (headers (ptr ListObj)) (body (ptr StringObj))] (-> (ptr HttpResult))
+  (http-init)
+  (let [res (cast (ptr HttpResult) (xalloc (sizeof HttpResult)))
+        buf (httpbuf-new)
+        eh (curl_easy_init)
+        mh (curl_multi_init)
+        url-c (str-to-cstr url)
+        method-c (str-to-cstr method)
+        slist (http-build-headers headers)]
+    (store! (field res status) 0) (store! (field res body) (cast (ptr StringObj) 0)) (store! (field res err) 0)
+    (if (or (= (cast i64 eh) 0) (= (cast i64 mh) 0))
+      (do
+        (store! (field res status) 0) (store! (field res err) 1)
+        (store! (field res body) (str-make (cast (ptr u8) c"curl init failed") 16))
+        res)
+      (do
+        (curl_easy_setopt eh CURLOPT_URL url-c)
+        (curl_easy_setopt eh CURLOPT_WRITEFUNCTION (fnptr-of http-write-cb))
+        (curl_easy_setopt eh CURLOPT_WRITEDATA (cast (ptr i8) buf))
+        (curl_easy_setopt eh CURLOPT_NOSIGNAL 1)           ; long: no SIGALRM (safe off main thread)
+        (curl_easy_setopt eh CURLOPT_TIMEOUT_MS HTTP_TIMEOUT_MS) ; long
+        (curl_easy_setopt eh CURLOPT_CUSTOMREQUEST method-c)    ; GET/POST/PUT/DELETE/...
+        (if (> (load (field body len)) 0)
+          (do
+            (curl_easy_setopt eh CURLOPT_POSTFIELDSIZE (load (field body len)))  ; long
+            (curl_easy_setopt eh CURLOPT_POSTFIELDS (str-to-cstr body)))          ; char*
+          0)
+        (if (!= (cast i64 slist) 0) (do (curl_easy_setopt eh CURLOPT_HTTPHEADER slist) 0) 0)
+        (curl_multi_add_handle mh eh)
+        (http-perform parked mh)
+        (let [rc (http-result-code mh)]
+          (if (!= rc CURLE_OK)
+            (do
+              ; transport failure: status 0 sentinel + curl's human-readable error text
+              (store! (field res status) 0) (store! (field res err) 1)
+              (let [msg (curl_easy_strerror (cast i32 rc))]
+                (store! (field res body) (str-make (cast (ptr u8) msg) (strlen msg)))))
+            (do
+              (let [codep (alloc-stack i64)]
+                (store! codep 0)
+                (curl_easy_getinfo eh CURLINFO_RESPONSE_CODE (cast (ptr i8) codep))
+                (store! (field res status) (load codep)))
+              (store! (field res err) 0)
+              (store! (field res body) (str-make (load (field buf data)) (load (field buf len)))))))
+        (curl_multi_remove_handle mh eh)
+        (curl_easy_cleanup eh)
+        (curl_multi_cleanup mh)
+        (if (!= (cast i64 slist) 0) (do (curl_slist_free_all slist) 0) 0)
+        res))))
