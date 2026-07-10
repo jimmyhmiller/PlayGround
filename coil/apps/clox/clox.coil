@@ -120,8 +120,15 @@
 ; ============================ memory ========================================
 (defn grow-capacity [(c i64)] (-> i64) (if (< c 8) 8 (* c 2)))
 
-; clox reallocate(pointer, oldSize, newSize). GC hooks added later.
+(defn gc-stress-cell [] (-> (ptr i64)) (alloc-static i64))   ; DEBUG_STRESS_GC toggle
+(const GC_HEAP_GROW_FACTOR 2)
+
+; clox reallocate(pointer, oldSize, newSize) — with GC trigger.
 (defn reallocate [(pointer (ptr i8)) (old-size i64) (new-size i64)] (-> (ptr i8))
+  (store! (field (vm) bytes-allocated) (+ (load (field (vm) bytes-allocated)) (- new-size old-size)))
+  (if (> new-size old-size)
+      (if (or (!= (load (gc-stress-cell)) 0) (> (load (field (vm) bytes-allocated)) (load (field (vm) next-gc))))
+          (collect-garbage) 0) 0)
   (if (= new-size 0)
       (do (free pointer) (cast (ptr i8) 0))
       (let [result (realloc pointer new-size)]
@@ -163,6 +170,11 @@
   (store! (field chunk code) (cast (ptr u8) 0))
   (store! (field chunk lines) (cast (ptr i64) 0))
   (init-value-array (field chunk constants)) 0)
+(defn free-chunk [(chunk (ptr Chunk))] (-> i64)
+  (reallocate (cast (ptr i8) (load (field chunk code))) (load (field chunk capacity)) 0)
+  (reallocate (cast (ptr i8) (load (field chunk lines))) (* (sizeof i64) (load (field chunk capacity))) 0)
+  (free-value-array (field chunk constants))
+  (init-chunk chunk))
 (defn write-chunk [(chunk (ptr Chunk)) (byte i64) (line i64)] (-> i64)
   (if (< (load (field chunk capacity)) (+ (load (field chunk count)) 1))
       (let [old-cap (load (field chunk capacity)) new-cap (grow-capacity old-cap)]
@@ -1329,7 +1341,137 @@
             (pop) (push (VObj (cast (ptr Obj) closure))) (call-closure closure 0))
           (run)))))
 
+; ============================ garbage collection ============================
+(defn mark-object [(object (ptr Obj))] (-> i64)
+  (if (= (cast i64 object) 0) 0
+    (if (load (field object is-marked)) 0
+      (do
+        (store! (field object is-marked) true)
+        (if (< (load (field (vm) gray-capacity)) (+ (load (field (vm) gray-count)) 1))
+            (do (store! (field (vm) gray-capacity) (grow-capacity (load (field (vm) gray-capacity))))
+                (store! (field (vm) gray-stack)
+                        (cast (ptr (ptr Obj)) (realloc (cast (ptr i8) (load (field (vm) gray-stack)))
+                                                       (* (sizeof (ptr Obj)) (load (field (vm) gray-capacity)))))) 0)
+            0)
+        (store! (index (load (field (vm) gray-stack)) (load (field (vm) gray-count))) object)
+        (store! (field (vm) gray-count) (+ (load (field (vm) gray-count)) 1)) 0))))
+(defn mark-value [(value Value)] (-> i64) (if (is-obj value) (mark-object (as-obj value)) 0))
+(defn mark-array [(array (ptr ValueArray))] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (>= (load i) (load (field array count))) (break)
+      (do (mark-value (load (index (load (field array values)) (load i)))) (store! i (+ (load i) 1)))))) 0)
+(defn mark-table [(table (ptr Table))] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (>= (load i) (load (field table capacity))) (break)
+      (let [entry (index (load (field table entries)) (load i))]
+        (mark-object (cast (ptr Obj) (load (field entry key))))
+        (mark-value (load (field entry value)))
+        (store! i (+ (load i) 1)))))) 0)
+(defn table-remove-white [(table (ptr Table))] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (>= (load i) (load (field table capacity))) (break)
+      (let [entry (index (load (field table entries)) (load i))]
+        (if (and (!= (cast i64 (load (field entry key))) 0) (not (load (field (cast (ptr Obj) (load (field entry key))) is-marked))))
+            (do (table-delete table (load (field entry key))) 0) 0)
+        (store! i (+ (load i) 1)))))) 0)
+
+(defn blacken-object [(object (ptr Obj))] (-> i64)
+  (let [k (load (field object kind))]
+    (cond
+      (= k OBJ_BOUND_METHOD)
+        (let [bound (cast (ptr ObjBoundMethod) object)]
+          (mark-value (load (field bound receiver))) (mark-object (cast (ptr Obj) (load (field bound method)))))
+      (= k OBJ_CLASS)
+        (let [klass (cast (ptr ObjClass) object)]
+          (mark-object (cast (ptr Obj) (load (field klass name)))) (mark-table (field klass methods)))
+      (= k OBJ_CLOSURE)
+        (let [closure (cast (ptr ObjClosure) object) (mut i) 0]
+          (mark-object (cast (ptr Obj) (load (field closure function))))
+          (loop (if (>= (load i) (load (field closure upvalue-count))) (break)
+            (do (mark-object (cast (ptr Obj) (load (index (load (field closure upvalues)) (load i))))) (store! i (+ (load i) 1))))) 0)
+      (= k OBJ_FUNCTION)
+        (let [function (cast (ptr ObjFunction) object)]
+          (mark-object (cast (ptr Obj) (load (field function name)))) (mark-array (field (field function chunk) constants)))
+      (= k OBJ_INSTANCE)
+        (let [instance (cast (ptr ObjInstance) object)]
+          (mark-object (cast (ptr Obj) (load (field instance klass)))) (mark-table (field instance fields)))
+      (= k OBJ_UPVALUE) (mark-value (load (field (cast (ptr ObjUpvalue) object) closed)))
+      0)))
+
+(defn free-object [(object (ptr Obj))] (-> i64)
+  (let [k (load (field object kind))]
+    (cond
+      (= k OBJ_BOUND_METHOD) (do (reallocate (cast (ptr i8) object) (sizeof ObjBoundMethod) 0) 0)
+      (= k OBJ_CLASS) (do (free-table (field (cast (ptr ObjClass) object) methods)) (reallocate (cast (ptr i8) object) (sizeof ObjClass) 0) 0)
+      (= k OBJ_CLOSURE)
+        (let [closure (cast (ptr ObjClosure) object)]
+          (reallocate (cast (ptr i8) (load (field closure upvalues))) (* (sizeof (ptr ObjUpvalue)) (load (field closure upvalue-count))) 0)
+          (reallocate (cast (ptr i8) object) (sizeof ObjClosure) 0) 0)
+      (= k OBJ_FUNCTION)
+        (let [function (cast (ptr ObjFunction) object)]
+          (free-chunk (field function chunk)) (reallocate (cast (ptr i8) object) (sizeof ObjFunction) 0) 0)
+      (= k OBJ_INSTANCE) (do (free-table (field (cast (ptr ObjInstance) object) fields)) (reallocate (cast (ptr i8) object) (sizeof ObjInstance) 0) 0)
+      (= k OBJ_NATIVE) (do (reallocate (cast (ptr i8) object) (sizeof ObjNative) 0) 0)
+      (= k OBJ_STRING)
+        (let [string (cast (ptr ObjString) object)]
+          (reallocate (cast (ptr i8) (load (field string chars))) (+ (load (field string length)) 1) 0)
+          (reallocate (cast (ptr i8) object) (sizeof ObjString) 0) 0)
+      (= k OBJ_UPVALUE) (do (reallocate (cast (ptr i8) object) (sizeof ObjUpvalue) 0) 0)
+      0)))
+
+(defn mark-compiler-roots [] (-> i64)
+  (let [(mut compiler) (ccomp)]
+    (loop (if (= (cast i64 (load compiler)) 0) (break)
+      (do (mark-object (cast (ptr Obj) (load (field (load compiler) function))))
+          (store! compiler (load (field (load compiler) enclosing))))))) 0)
+(defn mark-roots [] (-> i64)
+  (let [(mut slot) (index (field (vm) stack) 0)]
+    (loop (if (< (cast i64 (load slot)) (cast i64 (load (field (vm) stack-top))))
+              (do (mark-value (load (load slot))) (store! slot (index (load slot) 1)))
+              (break))))
+  (let [(mut i) 0]
+    (loop (if (>= (load i) (load (field (vm) frame-count))) (break)
+      (do (mark-object (cast (ptr Obj) (load (field (index (field (vm) frames) (load i)) closure)))) (store! i (+ (load i) 1))))))
+  (let [(mut upvalue) (load (field (vm) open-upvalues))]
+    (loop (if (!= (cast i64 (load upvalue)) 0)
+              (do (mark-object (cast (ptr Obj) (load upvalue))) (store! upvalue (load (field (load upvalue) next))))
+              (break))))
+  (mark-table (field (vm) globals))
+  (mark-compiler-roots)
+  (mark-object (cast (ptr Obj) (load (field (vm) init-string)))) 0)
+(defn trace-references [] (-> i64)
+  (loop (if (> (load (field (vm) gray-count)) 0)
+            (do (store! (field (vm) gray-count) (- (load (field (vm) gray-count)) 1))
+                (blacken-object (load (index (load (field (vm) gray-stack)) (load (field (vm) gray-count))))))
+            (break))) 0)
+(defn sweep [] (-> i64)
+  (let [(mut previous) (cast (ptr Obj) 0) (mut object) (load (field (vm) objects))]
+    (loop (if (= (cast i64 (load object)) 0) (break)
+      (if (load (field (load object) is-marked))
+          (do (store! (field (load object) is-marked) false)
+              (store! previous (load object))
+              (store! object (load (field (load object) next))) 0)
+          (let [unreached (load object)]
+            (store! object (load (field (load object) next)))
+            (if (!= (cast i64 (load previous)) 0)
+                (store! (field (load previous) next) (load object))
+                (store! (field (vm) objects) (load object)))
+            (free-object unreached)))))) 0)
+(defn collect-garbage [] (-> i64)
+  (mark-roots)
+  (trace-references)
+  (table-remove-white (field (vm) strings))
+  (sweep)
+  (store! (field (vm) next-gc) (* (load (field (vm) bytes-allocated)) GC_HEAP_GROW_FACTOR)) 0)
+(defn free-objects [] (-> i64)
+  (let [(mut object) (load (field (vm) objects))]
+    (loop (if (= (cast i64 (load object)) 0) (break)
+      (let [next (load (field (load object) next))]
+        (free-object (load object)) (store! object next)))))
+  (free (cast (ptr i8) (load (field (vm) gray-stack)))) 0)
+
 ; ============================ init / main ===================================
+(extern getenv :cc c [(ptr i8)] (-> (ptr i8)))
 (defn init-vm [] (-> i64)
   (reset-stack)
   (store! (field (vm) objects) (cast (ptr Obj) 0))
@@ -1366,6 +1508,7 @@
                 buffer))))))))
 
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (store! (gc-stress-cell) (if (= (cast i64 (getenv c"CLOX_GC_STRESS")) 0) 0 1))
   (init-vm)
   (let [n (cast i64 argc)]
     (if (= n 2)
