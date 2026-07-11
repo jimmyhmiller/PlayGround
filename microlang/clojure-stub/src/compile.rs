@@ -25,6 +25,28 @@ pub struct Compiler {
     /// toolkit's). User-facing `+`/`first`/… are ordinary globals in
     /// `clojure.core`; only these low-level names map to a `Prim`.
     prims: HashMap<Sym, Prim>,
+    /// Namespace state (frontend-owned; the toolkit's globals are a flat `Sym`
+    /// pool, so a user-ns var `foo/x` is simply the interned sym `"foo/x"`).
+    ns: NsState,
+}
+
+/// Namespace resolution state. `clojure.core` + the ported cljs types load in
+/// `core_mode` (defs are BARE — the flat core space — and their names recorded in
+/// `core_defs`); user code then runs with `core_mode = false`, qualifying its own
+/// defs into `current_ns` and resolving bare refs own-def → refer → core.
+#[derive(Default)]
+struct NsState {
+    current: String,
+    core_mode: bool,
+    /// Force the NEXT `def` to stay bare regardless of ns — used for macro fns,
+    /// which live in the flat space keyed by short name so the expander finds them.
+    bare_def: bool,
+    core_defs: std::collections::HashSet<String>,
+    ns_defs: HashMap<String, std::collections::HashSet<String>>,
+    /// per-ns: alias -> real namespace name
+    aliases: HashMap<String, HashMap<String, String>>,
+    /// per-ns: short name -> fully-qualified sym string
+    refers: HashMap<String, HashMap<String, String>>,
 }
 
 impl Compiler {
@@ -54,7 +76,53 @@ impl Compiler {
         ] {
             prims.insert(rt.intern(name), p);
         }
-        Compiler { scope: Vec::new(), methods: std::collections::HashSet::new(), site: 0, field_site: 0, prims }
+        Compiler {
+            scope: Vec::new(),
+            methods: std::collections::HashSet::new(),
+            site: 0,
+            field_site: 0,
+            prims,
+            // core.clj + the ported cljs types load first, in the flat core space.
+            ns: NsState { current: "clojure.core".to_string(), core_mode: true, ..NsState::default() },
+        }
+    }
+
+    /// Called by `run` once clojure.core + the cljs types are loaded: subsequent
+    /// (user) code qualifies its defs into `user` (or whatever `ns`/`in-ns` sets).
+    pub fn end_core_load(&mut self) {
+        self.ns.core_mode = false;
+        self.ns.current = "user".to_string();
+    }
+
+    /// Resolve a symbol the way a reference would, per the current namespace —
+    /// exposed so the frontend can locate a macro's fn global (it may have been
+    /// defined into the current ns).
+    pub fn resolve_ref<M: ValueModel>(&self, rt: &Runtime<M>, s: Sym) -> Sym {
+        self.resolve_global(rt, s)
+    }
+
+    /// Mark the next `def` as bare (flat space) — used by the macro-defining path,
+    /// since macros are found by short name in the expander's flat macro table.
+    pub fn next_def_bare(&mut self) {
+        self.ns.bare_def = true;
+    }
+
+    /// `(ns foo …)` / `(in-ns 'foo)` — switch the current namespace.
+    pub fn set_ns(&mut self, name: &str) {
+        self.ns.current = name.to_string();
+        self.ns.ns_defs.entry(name.to_string()).or_default();
+    }
+
+    /// `[foo :as bar]` / `(alias 'bar 'foo)` — `bar/x` now resolves to `foo/x`.
+    pub fn add_alias(&mut self, alias: &str, real: &str) {
+        let ns = self.ns.current.clone();
+        self.ns.aliases.entry(ns).or_default().insert(alias.to_string(), real.to_string());
+    }
+
+    /// `[foo :refer [x]]` — bare `x` now resolves to the fully-qualified `foo/x`.
+    pub fn add_refer(&mut self, short: &str, fq: &str) {
+        let ns = self.ns.current.clone();
+        self.ns.refers.entry(ns).or_default().insert(short.to_string(), fq.to_string());
     }
 
     /// Compile one fully-expanded top-level form to `Ir`.
@@ -63,7 +131,7 @@ impl Compiler {
             Val::Int(_) | Val::Float(_) | Val::Bool(_) | Val::Nil => Ir::Const(rt.intern_const(form)),
             Val::Sym(s) => match self.resolve_local(s) {
                 Some((up, idx)) => Ir::Local { up, idx },
-                None => Ir::Global(s),
+                None => Ir::Global(self.resolve_global(rt, s)),
             },
             Val::Ref(_) => {
                 if rt.as_cons(form).is_some() {
@@ -74,6 +142,75 @@ impl Compiler {
                 }
             }
         }
+    }
+
+    /// Resolve a REFERENCED global symbol to the interned sym its `Ir::Global`
+    /// should read, per the current namespace. `a/b` resolves the ns/alias part;
+    /// a bare name resolves own-def → refer → core → own-ns (forward ref).
+    fn resolve_global<M: ValueModel>(&self, rt: &Runtime<M>, s: Sym) -> Sym {
+        // Prims (`%add`, …) and protocol-method names live in the flat space
+        // (dispatch is by short name), never as ns-qualified globals.
+        if self.prims.contains_key(&s) || self.methods.contains(&s) {
+            return s;
+        }
+        let name = rt.sym_name(s);
+        // Qualified `a/b` (but not the bare division op `/`).
+        if name.len() > 1 {
+            if let Some(slash) = name.find('/') {
+                let (left, right) = (&name[..slash], &name[slash + 1..]);
+                if !right.is_empty() {
+                    let real = self
+                        .ns
+                        .aliases
+                        .get(&self.ns.current)
+                        .and_then(|a| a.get(left))
+                        .map(String::as_str)
+                        .unwrap_or(left);
+                    // clojure.core is the flat space -> its members are bare.
+                    if real == "clojure.core" {
+                        return rt.intern(right);
+                    }
+                    return rt.intern(&format!("{real}/{right}"));
+                }
+            }
+        }
+        if self.ns.core_mode {
+            return s;
+        }
+        let ns = &self.ns.current;
+        if self.ns.ns_defs.get(ns).is_some_and(|d| d.contains(name)) {
+            return rt.intern(&format!("{ns}/{name}")); // own def (shadows core)
+        }
+        if let Some(fq) = self.ns.refers.get(ns).and_then(|r| r.get(name)) {
+            return rt.intern(fq);
+        }
+        if self.ns.core_defs.contains(name) {
+            return s; // auto-referred clojure.core
+        }
+        // Unknown bare name: assume the current ns (forward ref to a var defined
+        // later here, or an as-yet-unbound var).
+        rt.intern(&format!("{ns}/{name}"))
+    }
+
+    /// Resolve a DEFINED name to the interned sym `Ir::Def` should write, and record
+    /// it so later bare references in this ns resolve to it.
+    fn def_name<M: ValueModel>(&mut self, rt: &Runtime<M>, raw: Sym) -> Sym {
+        let bare = std::mem::take(&mut self.ns.bare_def); // consume unconditionally
+        if rt.sym_name(raw).contains('/') {
+            return self.resolve_global(rt, raw); // explicitly qualified def
+        }
+        if self.ns.core_mode {
+            let n = rt.sym_name(raw).to_string();
+            self.ns.core_defs.insert(n);
+            return raw;
+        }
+        if bare {
+            return raw;
+        }
+        let name = rt.sym_name(raw).to_string();
+        let ns = self.ns.current.clone();
+        self.ns.ns_defs.entry(ns.clone()).or_default().insert(name.clone());
+        rt.intern(&format!("{ns}/{name}"))
     }
 
     fn resolve_local(&self, sym: Sym) -> Option<(u16, u16)> {
@@ -111,7 +248,10 @@ impl Compiler {
                 }
                 "do" => return Ir::Do(items[1..].iter().map(|&f| self.compile(rt, f)).collect()),
                 "def" => {
-                    let n = self.name(rt, items[1]).expect("def: name must be a symbol");
+                    let raw = self.name(rt, items[1]).expect("def: name must be a symbol");
+                    // Resolve+record the name FIRST so a self-reference inside the
+                    // init (e.g. `(def x (fn [] x))`) resolves to this same var.
+                    let n = self.def_name(rt, raw);
                     // value-less `(def x)` declares an unbound var (bound to nil).
                     let init = if items.len() > 2 {
                         self.compile(rt, items[2])
@@ -129,7 +269,7 @@ impl Compiler {
                     let val = Box::new(self.compile(rt, items[2]));
                     return match self.resolve_local(n) {
                         Some((up, idx)) => Ir::SetLocal { up, idx, val },
-                        None => Ir::SetGlobal { name: n, val },
+                        None => Ir::SetGlobal { name: self.resolve_global(rt, n), val },
                     };
                 }
                 "-proto-method" => {

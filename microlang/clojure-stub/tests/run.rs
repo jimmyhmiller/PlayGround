@@ -872,3 +872,33 @@ fn atom_cas_concurrent() {
     // 8 threads * 250 increments = 2000, exact iff no lost updates.
     assert_eq!(run(src), "2000");
 }
+
+#[test]
+fn namespaces() {
+    // Define in one ns, reference fully-qualified from another.
+    assert_eq!(run("(ns foo) (def x 42) (ns bar) foo/x"), "42");
+    // Own-ns def qualifies; a bare ref in the same ns resolves to it.
+    assert_eq!(run("(ns foo) (defn sq [n] (* n n)) (sq 7)"), "49");
+    // Forward reference to a var defined LATER in the same ns.
+    assert_eq!(run("(ns foo) (defn a [n] (b n)) (defn b [n] (+ n 1)) (a 10)"), "11");
+    // clojure.core is auto-referred into every namespace.
+    assert_eq!(run("(ns foo) (reduce + (map inc (range 5)))"), "15");
+    // The same short name in two namespaces is two distinct vars.
+    assert_eq!(run("(ns a) (def n 1) (ns b) (def n 2) (ns c) [a/n b/n]"), "[1 2]");
+    // A user var shadows an auto-referred core name for its own bare refs.
+    assert_eq!(run("(ns foo) (def inc 1000) inc"), "1000");
+}
+
+#[test]
+fn namespace_alias_and_refer() {
+    // `alias` and `(:require [ns :as x])` both make `x/name` resolve.
+    assert_eq!(run("(ns foo) (def val 99) (ns bar) (alias 'f 'foo) f/val"), "99");
+    assert_eq!(run("(ns foo) (def z 7) (ns bar (:require [foo :as f])) f/z"), "7");
+    // `(:require [ns :refer [name]])` brings `name` in bare.
+    assert_eq!(run("(ns foo) (def w 5) (ns bar (:require [foo :refer [w]])) w"), "5");
+    // A macro defined in one ns, referred into another and used there.
+    assert_eq!(
+        run("(ns foo) (defmacro twice [x] (list '+ x x)) (ns bar (:require [foo :refer [twice]])) (twice 21)"),
+        "42"
+    );
+}

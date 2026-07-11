@@ -39,6 +39,9 @@ pub fn run<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, src: &str)
     // Persistent data structures ported from ClojureScript (EPL-1.0), loaded after
     // the core protocols/shim they build on. Redefines vector/vec/vector?.
     run_src(rt, cs, &mut macros, &mut comp, cljs_types_src::CLJS);
+    // clojure.core + the cljs types are the flat/bare core space; user code from
+    // here on runs in the `user` namespace and qualifies its own defs.
+    comp.end_core_load();
     // Route `(obj arg)` for a non-closure record (keyword/map/vector) through the
     // core `-apply-obj` dispatcher, so keywords/collections are callable.
     let apply_obj = rt.intern("-apply-obj");
@@ -111,15 +114,29 @@ fn eval_form<M: ValueModel>(
     comp: &mut Compiler,
     form: u64,
 ) -> u64 {
+    // Namespace declarations are compile-time only: they mutate the compiler's
+    // resolution state and yield nil (no code). Handled before macro/def checks.
+    if let Some(r) = handle_ns_form(rt, comp, form) {
+        return r;
+    }
     // Real core.clj: `(def ^{:macro true} name (fn ...))` — reader wrapped the
     // name as `(-macro-meta name)`. Register the macro and define the fn.
     if let Some((name, newform)) = strip_def_macro_meta(rt, form) {
         macros.insert(name);
+        comp.next_def_bare(); // macro fns live in the flat space (short name)
         return eval1(rt, cs, macros, comp, newform);
     }
     // Real core.clj registers a macro AFTER defining it: `(. (var foo) (setMacro))`.
     if let Some(name) = setmacro_target(rt, form) {
         macros.insert(name);
+        // The fn was defined with a plain `def`, so it may live under the current
+        // ns (`user/name`); mirror it to the bare short name the expander looks up.
+        let qualified = comp.resolve_ref(rt, name);
+        if qualified != name {
+            if let Some(v) = rt.global(qualified) {
+                rt.define_global(name, v);
+            }
+        }
         return rt.encode(Val::Nil);
     }
     if let Some(name) = defmacro_name(rt, form) {
@@ -142,6 +159,7 @@ fn eval_form<M: ValueModel>(
         let lam = rt.vec_to_list(&fnform);
         let def_sym = sym(rt, "def");
         let defform = rt.vec_to_list(&[def_sym, items[1], lam]);
+        comp.next_def_bare(); // macro fns live in the flat space (short name)
         let r = eval1(rt, cs, macros, comp, defform);
         macros.insert(name);
         return r;
@@ -1240,6 +1258,129 @@ fn sym<M: ValueModel>(rt: &mut Runtime<M>, n: &str) -> u64 {
 
 fn is_sym<M: ValueModel>(rt: &Runtime<M>, bits: u64, name: &str) -> bool {
     matches!(rt.decode(bits), Val::Sym(s) if rt.sym_name(s) == name)
+}
+
+/// Strip a leading `(quote X)` wrapper, returning `X` (or the form unchanged).
+fn unquote<M: ValueModel>(rt: &Runtime<M>, f: u64) -> u64 {
+    if let Some((h, _)) = rt.as_cons(f) {
+        if is_sym(rt, h, "quote") {
+            return rt.list_to_vec(f)[1];
+        }
+    }
+    f
+}
+
+/// The name of a (possibly quoted) symbol form, e.g. `foo.bar` or `'foo.bar`.
+fn sym_name_of<M: ValueModel>(rt: &Runtime<M>, f: u64) -> Option<String> {
+    match rt.decode(unquote(rt, f)) {
+        Val::Sym(s) => Some(rt.sym_name(s).to_string()),
+        _ => None,
+    }
+}
+
+/// Handle a namespace declaration form (`ns`/`in-ns`/`require`/`use`/`alias`/
+/// `refer`). These are COMPILE-TIME only: they mutate the compiler's resolution
+/// state and produce nil. Returns `None` if `form` isn't such a declaration.
+fn handle_ns_form<M: ValueModel>(rt: &mut Runtime<M>, comp: &mut Compiler, form: u64) -> Option<u64> {
+    let (head, _) = rt.as_cons(form)?;
+    let nil = rt.encode(Val::Nil);
+    if is_sym(rt, head, "ns") {
+        let items = rt.list_to_vec(form);
+        if let Some(name) = items.get(1).and_then(|&f| sym_name_of(rt, f)) {
+            comp.set_ns(&name);
+        }
+        for &clause in items.get(2..).unwrap_or(&[]) {
+            process_ns_clause(rt, comp, clause);
+        }
+        return Some(nil);
+    }
+    if is_sym(rt, head, "in-ns") {
+        let items = rt.list_to_vec(form);
+        if let Some(name) = items.get(1).and_then(|&f| sym_name_of(rt, f)) {
+            comp.set_ns(&name);
+        }
+        return Some(nil);
+    }
+    if is_sym(rt, head, "require") || is_sym(rt, head, "use") {
+        let items = rt.list_to_vec(form);
+        for &spec in &items[1..] {
+            process_require_spec(rt, comp, spec);
+        }
+        return Some(nil);
+    }
+    if is_sym(rt, head, "alias") {
+        let items = rt.list_to_vec(form);
+        if let (Some(a), Some(real)) =
+            (items.get(1).and_then(|&f| sym_name_of(rt, f)), items.get(2).and_then(|&f| sym_name_of(rt, f)))
+        {
+            comp.add_alias(&a, &real);
+        }
+        return Some(nil);
+    }
+    if is_sym(rt, head, "refer") {
+        let items = rt.list_to_vec(form);
+        if let Some(real) = items.get(1).and_then(|&f| sym_name_of(rt, f)) {
+            refer_names(rt, comp, &items[2..], &real, "only");
+        }
+        return Some(nil);
+    }
+    None
+}
+
+/// A `(:require …)` / `(:use …)` clause inside an `ns` form.
+fn process_ns_clause<M: ValueModel>(rt: &mut Runtime<M>, comp: &mut Compiler, clause: u64) {
+    let items = rt.list_to_vec(clause);
+    if items.is_empty() {
+        return;
+    }
+    if is_keyword(rt, items[0], "require") || is_keyword(rt, items[0], "use") {
+        for &spec in &items[1..] {
+            process_require_spec(rt, comp, spec);
+        }
+    }
+    // :refer-clojure / :import — core is auto-referred; we model no host imports.
+}
+
+/// A single require spec: `foo`, `[foo :as bar]`, or `[foo :refer [x y]]`.
+fn process_require_spec<M: ValueModel>(rt: &mut Runtime<M>, comp: &mut Compiler, spec: u64) {
+    let spec = unquote(rt, spec);
+    if let Val::Sym(_) = rt.decode(spec) {
+        return; // bare `(require 'foo)` — nothing to alias/refer
+    }
+    let Some(elems) = binding_items(rt, spec) else { return };
+    let Some(real) = elems.first().and_then(|&f| sym_name_of(rt, f)) else { return };
+    let mut k = 1;
+    while k < elems.len() {
+        if is_keyword(rt, elems[k], "as") && k + 1 < elems.len() {
+            if let Some(alias) = sym_name_of(rt, elems[k + 1]) {
+                comp.add_alias(&alias, &real);
+            }
+            k += 2;
+        } else if is_keyword(rt, elems[k], "refer") && k + 1 < elems.len() {
+            refer_names(rt, comp, &[elems[k + 1]], &real, "");
+            k += 2;
+        } else {
+            k += 1;
+        }
+    }
+}
+
+/// Add refers for `[x y]` (a vector of names) under namespace `real`. When `kw`
+/// is non-empty the list is preceded by that keyword marker (`:only [x y]`).
+fn refer_names<M: ValueModel>(rt: &mut Runtime<M>, comp: &mut Compiler, forms: &[u64], real: &str, kw: &str) {
+    let list = if kw.is_empty() {
+        forms.first().copied()
+    } else {
+        forms.iter().position(|&f| is_keyword(rt, f, kw)).and_then(|i| forms.get(i + 1).copied())
+    };
+    let Some(list) = list else { return };
+    if let Some(names) = binding_items(rt, unquote(rt, list)) {
+        for nm in names {
+            if let Some(short) = sym_name_of(rt, nm) {
+                comp.add_refer(&short, &format!("{real}/{short}"));
+            }
+        }
+    }
 }
 
 /// Map the simple (last dotted segment of a) Java/JS class name to the runtime
