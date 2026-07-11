@@ -29,8 +29,17 @@
 (import "portalclient.coil" :use *)
 (import "trace.coil" :use *)
 
+; pthread_detach(pthread_t): reap a connection thread's resources at exit without a join.
+; Declared here (not in lib/thread.coil) because thread-per-connection is a server concern;
+; it is the only new pthread extern and is declared exactly once.
+(extern pthread_detach :cc c [(ptr i8)] (-> i32))
+
 ; ============================ globals ============================
 (defn srv-program [] (-> (ptr (ptr Program))) (alloc-static (ptr Program)))
+; a dedicated coordinator parked-word for the reflection self-coordinator path (server-eval-reflect
+; when NO eval is in flight): distinct from every language thread's parked word and from the eval
+; coordinator's (vm-eval-parked), so safepoint bookkeeping stays unambiguous.
+(defn refl-coord-word [] (-> (ptr i64)) (alloc-static i64))
 (defn srv-listen-fd [] (-> (ptr i64)) (alloc-static i64))
 (defn srv-viewer-dir [] (-> (ptr (ptr i8))) (alloc-static (ptr i8)))
 (defn srv-readonly [] (-> (ptr i64)) (alloc-static i64))
@@ -737,6 +746,84 @@
   (release-global-stop)
   0)
 
+; ============================ concurrent read-only reflection (Phase 5b) ============================
+; A viewer poll is one of a fixed set of bare, read-only reflection calls (types()/graph()/…).
+; These run NO bytecode, allocate nothing, and cannot panic — they just walk the (quiescent)
+; heap and serialize it. That makes them safe to overlap a long expression eval: the eval yields
+; the parked heap for the poll's brief read at its next safepoint (safepoint.coil's handoff),
+; then resumes. Because this path touches NONE of eval-core's singletons (ev-valbuf/ev-outcome/
+; ev-jmpbuf/the eval VMThread) — it writes only into the caller's per-request JBuf — a suspended
+; eval's in-flight state is untouched. Expression/mutating evals stay on server-eval-stw and are
+; fully serialized (the coordinator only ever hands off to these read-only readers).
+;
+; classify-reflection: is the trimmed source EXACTLY one of the zero-arg reflection calls the
+; viewer polls? Returns an index 0..6, or -1. Exact-match by design: a false negative merely
+; routes to the (correct, serialized) eval path, so this is sound in the safe direction.
+(defn refl-name [(idx i64)] (-> (ptr i8))
+  (cond (= idx 0) c"types()" (= idx 1) c"schema()" (= idx 2) c"graph()"
+        (= idx 3) c"views()" (= idx 4) c"actions()" (= idx 5) c"functions()"
+        (= idx 6) c"generation()" c""))
+(defn src-eq-trimmed [(src (ptr u8)) (len i64) (lit (ptr i8))] (-> bool)
+  (let [(mut s) 0 (mut e) len]
+    (loop (if (and (< (load s) (load e)) (let [c (cast i64 (load (index src (load s))))] (or (= c \space) (or (= c \tab) (or (= c \newline) (= c \return)))))) (do (store! s (+ (load s) 1)) 0) (break)))
+    (loop (if (and (< (load s) (load e)) (let [c (cast i64 (load (index src (- (load e) 1))))] (or (= c \space) (or (= c \tab) (or (= c \newline) (= c \return)))))) (do (store! e (- (load e) 1)) 0) (break)))
+    (let [tl (- (load e) (load s)) ll (strlen lit)]
+      (if (!= tl ll) false
+        (let [(mut i) 0 (mut ok) true]
+          (loop (if (and (load ok) (< (load i) tl)) (do (if (!= (cast i64 (load (index src (+ (load s) (load i))))) (cast i64 (load (index (cast (ptr u8) lit) (load i))))) (do (store! ok false) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+          (load ok))))))
+(defn classify-reflection [(src (ptr u8)) (len i64)] (-> i64)
+  (let [(mut r) -1 (mut i) 0]
+    (loop (if (and (< (load r) 0) (< (load i) 7))
+            (do (if (src-eq-trimmed src len (refl-name (load i))) (do (store! r (load i)) 0) 0) (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+
+; write the reflection value for `idx` into `b`. Pure reads; each writes a complete value object.
+(defn refl-emit [(b (ptr JBuf)) (idx i64)] (-> i64)
+  (let [p (load (srv-program))]
+    (cond
+      (= idx 0) (reflect-types b p)
+      (= idx 1) (reflect-schema b p)
+      (= idx 2) (reflect-graph b p)
+      (= idx 3) (reflect-views b p)
+      (= idx 4) (reflect-actions b p)
+      (= idx 5) (reflect-functions b p)
+      (= idx 6) (do (jb-cstr b c"{\"type\":\"Int\",\"value\":") (jb-int b (current-generation)) (jb-byte b \}))
+      0)))
+
+; run a read-only reflection with the heap held quiescent. Acquire the parked heap one of two
+; ways, then emit into `resp`:
+;   HANDOFF  (mode 1): an eval already holds the stop → announce in sp-waiting, wait for the
+;                      coordinator to offer (sp-granted 1), claim it (CAS 1->2), read, release (->0).
+;   SELF-STOP(mode 2): no eval holds the stop → win the flag ourselves and park the language
+;                      threads, exactly like a normal coordinator, then release when done.
+; The two are mutually exclusive by construction: an offer can exist only while the flag is held
+; (by the eval coordinator), and we can only win the flag when it is free — so at most ONE reader
+; ever reads at a time (globally serialized), which also makes any internal reflect-* scratch safe.
+(defn server-eval-reflect [(resp (ptr JBuf)) (idx i64)] (-> i64)
+  (jb-cstr resp c"\"value\":")
+  (atomic-add (sp-waiting) 1)
+  (let [(mut mode) 0]
+    (loop
+      (if (and (= (atomic-load (sp-granted)) 1) (= (atomic-cas (sp-granted) 1 2) 1))
+        (do (store! mode 1) (break))
+        (if (and (= (atomic-load (sp-flag)) 0) (= (atomic-cas (sp-flag) 0 1) 0))
+          (do (store! mode 2) (break))
+          (do (usleep (cast i32 20)) (continue)))))
+    (if (= (load mode) 2)
+      (do (atomic-sub (sp-waiting) 1)
+          (store! (sp-coord) (cast i64 (refl-coord-word)))
+          (sp-park-wait (refl-coord-word))) 0)
+    ; heap is parked + quiescent here — read it
+    (refl-emit resp idx)
+    (if (= (load mode) 1)
+      ; drop out of the waiting set BEFORE clearing the offer, so the coordinator, once it sees
+      ; sp-granted==0 and resumes, reads an already-decremented count (no spurious re-offer).
+      (do (atomic-sub (sp-waiting) 1) (atomic-store (sp-granted) 0))
+      (release-global-stop)))
+  0)
+
 ; ============================ HTTP (server thread) ============================
 (defn ends-with [(name (ptr i8)) (suf (ptr i8))] (-> bool)
   (let [nl (strlen name) sl (strlen suf)]
@@ -845,14 +932,18 @@
       (cond
         (= meth 1) (handle-eval cfd buf (load total))
         (= meth 0) (serve-static cfd (cast (ptr i8) pathbuf))
-        (send-response cfd c"400 Bad Request" c"text/plain" (cast (ptr u8) c"bad request") 11)))
+        (send-response cfd c"400 Bad Request" c"text/plain" (cast (ptr u8) c"bad request") 11))
+      (free (cast (ptr i8) pathbuf)))
+    ; reclaim the 256 KiB read buffer — nothing retains it past the request (source/id were
+    ; copied out). With thread-per-connection this keeps a thousands-of-polls hammer bounded.
+    (free (cast (ptr i8) buf))
     0))
 
 (defn handle-eval [(cfd i64) (buf (ptr u8)) (n i64)] (-> i64)
   (let [bs (find-body-start buf n)]
     (if (< bs 0) (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"BadRequest\",\"message\":\"no body\"}}")]
                    (send-response cfd c"400 Bad Request" c"application/json" m (strlen (cast (ptr i8) m))))
-      (let [srcbuf (xalloc 65536) srclen (cast (ptr i64) (xalloc 8))
+      (let [srcbuf (xalloc 65537) srclen (cast (ptr i64) (xalloc 8))
             idbuf (xalloc 256) idlen (cast (ptr i64) (xalloc 8))
             spos (json-find-key (index buf bs) (- n bs) c"source" 6)
             ipos (json-find-key (index buf bs) (- n bs) c"id" 2)]
@@ -860,12 +951,26 @@
                          (send-response cfd c"400 Bad Request" c"application/json" m (strlen (cast (ptr i8) m))))
           (do
             (json-decode-string (index buf bs) (- n bs) spos srcbuf srclen)
+            ; NUL-terminate: lex-file scans srcbuf as a C string. The decoder writes only the
+            ; source bytes, so without this the lexer runs past them into whatever the malloc'd
+            ; block held. (Latent since Phase 4 — masked because buffers were never freed, so
+            ; every request got fresh zeroed mmap memory. Freeing recycles dirty blocks, which
+            ; exposed it: a poll's freed srcbuf, reused by the next eval, fed the lexer garbage.)
+            (store! (index srcbuf (load srclen)) (cast u8 0))
             (if (< ipos 0) (do (store! (index idbuf 0) (cast u8 \")) (store! (index idbuf 1) (cast u8 \")) (store! idlen 2) 0)
               (json-raw-id (index buf bs) (- n bs) ipos idbuf idlen))
-            ; run the eval under a full stop-the-world (the server thread is the coordinator)
-            (let [resp (jb-new)]
+            ; run the eval. A bare read-only reflection poll (types()/graph()/…) takes the
+            ; concurrent handoff path so it never blocks behind a long eval; everything else runs
+            ; under a full stop-the-world with this thread as the (serialized) coordinator.
+            (let [resp (jb-new) ridx (classify-reflection srcbuf (load srclen))]
               (jb-cstr resp c"{\"id\":") (jb-bytes resp idbuf (load idlen)) (jb-byte resp \,)
-              (server-eval-stw resp srcbuf (load srclen) (load (srv-readonly)))
+              (if (>= ridx 0)
+                (do (server-eval-reflect resp ridx)
+                    ; the reflection path never lexes srcbuf, so it is safe to reclaim here (a
+                    ; definition-eval keeps srcbuf alive via the installed AST, so only free on
+                    ; this branch). Frees the dominant per-poll allocation under a hammer load.
+                    (free (cast (ptr i8) srcbuf)))
+                (server-eval-stw resp srcbuf (load srclen) (load (srv-readonly))))
               (jb-byte resp \})
               (send-response cfd c"200 OK" c"application/json" (load (field resp data)) (load (field resp len))))
             0))))))
@@ -885,13 +990,30 @@
     (loop (if (< (load i) n) (let [c (cast i64 (load (index (cast (ptr u8) path) (load i))))] (if (= c \?) (break) (do (store! (index (cast (ptr u8) buf) (load k)) (cast u8 c)) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0))) (break)))
     (store! (index (cast (ptr u8) buf) (load k)) (cast u8 0)) buf))
 
-; the server thread's entry: accept loop forever.
+; one connection served on its OWN OS thread: read+parse+serve, then close. Detached by the
+; accept loop, so a finished connection reaps its own resources with no join. Because eval
+; EXECUTION is serialized (server-eval-stw's coordinator holds the global stop; reflection
+; reads globally serialize on the stop too), these threads never run two evals at once — the
+; concurrency they add is exactly: accept the next connection, and let a read-only poll overlap
+; a long eval via the safepoint handoff.
+(defn conn-thread-main [(arg (ptr i8))] (-> (ptr i8))
+  (let [cfd (cast i64 arg)]
+    (handle-conn cfd)
+    (close (cast i32 cfd)))
+  (cast (ptr i8) 0))
+
+; the server thread's entry: accept forever, dispatching each connection to its own thread so a
+; long eval on one connection can never stall accepting/serving the next (the freeze fix, part 1).
 (defn server-accept-loop [(arg (ptr i8))] (-> (ptr i8))
   (let [fd (cast i64 arg)]
     (loop
       (let [c (accept (cast i32 fd) (cast (ptr i8) 0) (cast (ptr i8) 0))]
         (if (< (cast i64 c) 0) (do (usleep (cast i32 1000)) 0)
-          (do (handle-conn (cast i64 c)) (close (cast i32 c)) 0)))))
+          (let [th (cast (ptr Thread) (xalloc (sizeof Thread)))]
+            (thread-spawn th (fnptr-of conn-thread-main) (cast (ptr i8) (cast i64 c)))
+            (pthread_detach (load (field th handle)))
+            (free (cast (ptr i8) th))
+            0)))))
   (cast (ptr i8) 0))
 
 ; ---- socket setup: bind on `port`, fall back to next free up to +20. returns bound port or -1. ----

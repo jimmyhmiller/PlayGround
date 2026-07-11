@@ -869,6 +869,99 @@ minimal form: a scrolling log with per-agent ANSI color prefixes built via `\xHH
 
 ---
 
+# Phase 5b — the eval server stops freezing the viewer under a long eval
+
+**The bug (measured on `examples/functions.scry`):** `types()` alone = 11 ms; `fib(33)` alone =
+~410 ms; `types()` fired *while* `fib(33)` runs = ~324–380 ms — it was queued behind the eval.
+The viewer polls `graph()`/`schema()`/`types()` every ~800 ms, so any long eval froze the whole
+viewer for its full duration. Two independent causes, two fixes.
+
+**Cause 1 — the accept loop *is* the eval thread.** `server-accept-loop` called `handle-conn`
+inline, so while an eval ran the loop couldn't `accept` the next connection. **Fix:
+thread-per-connection.** `server-accept-loop` now spawns a detached OS thread (`conn-thread-main`,
+`pthread_detach` so it reaps itself with no join) per accepted socket. Eval *execution* stays
+serialized — expression/mutating evals are the coordinator that holds the global stop, and
+`request-global-stop`'s flag-CAS serializes coordinators (one eval-core at a time, `ec`-shaped
+singletons safe) — so the new concurrency is exactly: *accept the next connection* + *let a
+read-only poll overlap a long eval*.
+
+**Cause 2 — a long eval holds the global stop for its whole duration.** A poll needs the language
+threads parked for a consistent read, i.e. it needs the stop; the long eval didn't release it
+until it finished. **Fix: a consistent-read handoff in `safepoint.coil`** (`sp-waiting`/
+`sp-granted`). A read-only reflection poll (`server-eval-reflect`) announces itself in
+`sp-waiting`. The eval coordinator, at its next `safepoint-poll` (top of the dispatch loop, so
+within one bytecode of the request — the heap is already quiescent and every language thread is
+already parked *because the stop flag stays 1 the whole time*), **lends** the parked heap to the
+reader via `sp-granted` (offer `1` → reader claims `1→2` → reads → releases `→0`), then resumes.
+The flag is **never dropped**, so language threads never unpark and no second eval can slip in —
+the single-coordinator / "no two evals execute concurrently" / "mutating evals exclusive"
+invariants are all preserved; only a brief, side-effect-free read overlaps the suspended eval.
+When no eval holds the stop, the poll **self-coordinates** instead (wins the flag, `sp-park-wait`s
+the language threads, reads, releases). Handoff (flag held by an eval) and self-stop (flag free)
+are mutually exclusive by construction, so **at most one reflection reads at a time globally** —
+which also makes any internal `serialize`-scratch safe.
+
+The reflection reads chosen for the fast path are the exact bare viewer polls
+(`types`/`schema`/`graph`/`views`/`actions`/`functions`/`generation`), matched by an **exact
+trimmed-string** classifier (`classify-reflection`) — a false negative merely takes the correct
+serialized eval path, so it is sound in the safe direction. Those calls run **no bytecode, allocate
+nothing, and cannot panic**; `server-eval-reflect` writes only into the request's own `JBuf` and
+touches none of `eval-core`'s singletons (`ev-valbuf`/`ev-outcome`/`ev-jmpbuf`/the eval VMThread),
+so a suspended eval's in-flight state is untouched. `.instances()`/`.at()`/`trace()` and every
+mutating eval stay on the serialized `server-eval-stw` path (they run bytecode / can panic).
+
+**Result:** `types()` during `fib(33)` went **~379 ms → 1 ms**; `fib(33)` still returns 3524578.
+
+## Two latent pre-existing bugs this surfaced (both fixed here)
+
+- **Source buffers were never NUL-terminated.** `lex-file` scans `srcbuf` as a C string, but
+  `json-decode-string` writes only the decoded bytes. This was masked for the whole life of the
+  server because buffers were *never freed*, so every request got fresh zeroed `mmap` memory.
+  Thread-per-connection makes a thousands-of-polls hammer real, so `handle-conn`/`handle-eval`
+  now `free` the 256 KiB read buffer and the poll `srcbuf`; freeing recycles *dirty* blocks, and
+  a reused `srcbuf` fed the lexer garbage past the source (`SyntaxError` / segfault). Fix:
+  NUL-terminate the decoded source (`srcbuf[srclen]=0`; `srcbuf` grown by 1). Now freeing is safe.
+- **Construction-visibility NULL-deref (02 §4 / 05 M1 "construction ordering").** A freshly
+  arena-allocated object is published `LIVE` with zeroed fields, but its constructor stores the
+  real fields over the *following* bytecodes — with a safepoint between each. A poll that stops the
+  world while a constructor is parked mid-way reads a not-yet-written field. Ref-shaped fields are
+  already null-safe when serialized (null ref → `"null"`, null List/Map → empty, enums null-check);
+  only a `String` field still `0` made `serialize-value` dereference NULL and crash. Fix
+  (`vm.coil`): point every `FIELD_STRING` field at a shared empty-string sentinel at allocation
+  (`vm-init-string-fields`, from `TypeInfo.fields`/`offset`/`kind`), so a torn read renders `""`
+  (consistent with how a null ref renders) and the real string lands microseconds later. Applied
+  at `OP_NEW`, object-singleton allocation, and `http-alloc-response`.
+
+Both are pre-existing (the pristine binary crashes the reflect-race hammer identically, rc=-11 in
+`serialize.serialize-value`); the fixes live entirely in the four in-scope files.
+
+## Proof (tests/run-tests.py, all deterministic in the safe direction)
+
+- **`freeze`**: `fib(33)` in the background + a concurrent `types()`; asserts `types()` < 100 ms
+  (measured 1 ms) *and* `fib(33)` still returns 3524578.
+- **`no_deadlock`**: 3 waves × (two `fib(32)` + 8 threads × 40 concurrent read-only polls) = 960
+  polls + 6 long evals; asserts every poll returns valid JSON, both fibs return 2178309, nothing
+  hangs (a lost handoff / lock cycle would trip the per-request timeout), process alive each wave.
+- **`reflect_race`**: `assistant.scry` with a `loop`-agent appending `Message`s on a background OS
+  thread, 8 threads × 250 = 2000 hammered `graph()`/`types()`/`schema()`/`Agent.instances()`/
+  `Message.instances()`; asserts valid JSON every time, the agent still progressed (Message count
+  climbed), and the process is alive. Crashed rc=-11 before the construction-visibility fix.
+
+Zero regressions on the 297 existing non-browser tests (`ui_smoke` is a pre-existing flaky browser
+test that fails on the pristine binary too).
+
+## Coil friction (adds to Phase 1–5's list)
+
+- **`store!` is an expression whose type is the stored value**, so `(if c (store! p x) 0)` is a
+  branch-type mismatch (`ptr` vs `i64`); wrap side-effecting stores as `(do (store! …) 0)`.
+- **`alloc-static`/`xalloc` reuse is a latent contract.** The old code leaned (unknowingly) on
+  malloc handing back zeroed pages; the moment you `free`, that assumption breaks. NUL-terminate /
+  initialize anything a later reader scans, don't rely on fresh-zeroed allocations.
+- **`pthread_detach` declared once in `server.coil`** (thread-per-connection is a server concern);
+  no clash with `lib/thread.coil`'s `pthread_create`/`pthread_join`, same as Phase 5's pthreads note.
+
+---
+
 # Phase 6 — live code change (M4)
 
 The final demo beat: redefine a method on a *running* program, whole-program-typechecked,

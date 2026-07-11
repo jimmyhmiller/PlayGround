@@ -200,9 +200,34 @@
     (if (= (cast i64 ti) 0)
       (do (eval-panic0 EK_RUNTIME c"internal: HttpResponse type not registered") (exit (cast i32 70)) 0)
       (let [inst (cast i64 (arena-alloc (load (field ti arena))))]
+        (vm-init-string-fields ti inst)
         (store! (field-addr inst (sizeof InstanceHeader)) status)                 ; field 0: status (Int)
         (store! (field-addr inst (+ (sizeof InstanceHeader) 8)) (cast i64 body))   ; field 1: body (String)
         inst))))
+
+; ---- construction-visibility guard (02-runtime.md §4 / 05 M1 "construction ordering") ----
+; A freshly arena-allocated object is published LIVE with zeroed fields, but its constructor
+; stores the real field values over the FOLLOWING bytecodes — and there is a safepoint between
+; each op. A viewer poll that stops the world while the constructor is parked mid-construction
+; therefore reads a not-yet-written field. Reference-shaped fields are already null-safe when
+; serialized (a null entity ref -> "null", a null List/Map -> empty), but a String field that is
+; still 0 makes serialize.serialize-value dereference NULL and crash. Point every String field at
+; a shared empty-string sentinel at allocation time, so a torn read renders "" (consistent with
+; how a null ref renders) instead of segfaulting; the real string lands microseconds later. The
+; sentinel is created once at vm-bind-program (before any language thread exists).
+(defn vm-str-sentinel-cell [] (-> (ptr (ptr StringObj))) (alloc-static (ptr StringObj)))
+(defn vm-str-sentinel [] (-> (ptr StringObj)) (load (vm-str-sentinel-cell)))
+(defn vm-init-str-sentinel [] (-> i64)
+  (if (= (cast i64 (load (vm-str-sentinel-cell))) 0)
+    (do (store! (vm-str-sentinel-cell) (str-make (xalloc 1) 0)) 0) 0) 0)
+(defn vm-init-string-fields [(ti (ptr TypeInfo)) (inst i64)] (-> i64)
+  (let [n (load (field ti field-count)) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [fi (index (load (field ti fields)) (load i))]
+              (if (= (load (field fi kind)) FIELD_STRING)
+                (do (store! (cast (ptr i64) (+ inst (load (field fi offset)))) (cast i64 (vm-str-sentinel))) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))) 0)
 
 ; ---- Phase 8b: Env + String char/number builtins ----------------------------
 ; A StringObj is {len,data} and is NOT NUL-terminated; getenv needs a C string, so copy
@@ -448,8 +473,10 @@
                       (vpush vt res) 0)))
             OP_NEW
               (let [tid (read-u16 (load fr))
-                    a (load (field (load (index (load (field (load (field (vm) program)) types)) tid)) arena))]
-                (vpush vt (cast i64 (arena-alloc a))))
+                    ti (load (index (load (field (load (field (vm) program)) types)) tid))
+                    inst (cast i64 (arena-alloc (load (field ti arena))))]
+                (vm-init-string-fields ti inst)
+                (vpush vt inst))
             OP_LOAD_SINGLETON
               (let [tid (read-u16 (load fr))]
                 (vpush vt (cast i64 (load (field (load (index (load (field (load (field (vm) program)) types)) tid)) singleton)))))
@@ -501,7 +528,9 @@
 ; is side-effect-free on the heap; allocating a singleton is not, so it stays gated on
 ; main() via vm-run, same as every other instance in the program.
 (defn vm-bind-program [(p (ptr Program))] (-> i64)
-  (store! (field (vm) program) p) 0)
+  (store! (field (vm) program) p)
+  (vm-init-str-sentinel)   ; construction-visibility guard: sentinel ready before the first alloc
+  0)
 
 ; bind the program, allocate object singletons, then invoke main() on the main VMThread
 ; (registered so a concurrent eval can park it too, including once it's finished and looping
@@ -519,7 +548,8 @@
               (let [ti (load (index (load (field p types)) (load i)))]
                 (if (!= (cast i64 ti) 0)
                   (if (and (load (field ti is-entity)) (= (load (field ti kind)) DK_OBJECT_KIND))
-                    (do (store! (field ti singleton) (arena-alloc (load (field ti arena)))) 0) 0) 0)
+                    (do (store! (field ti singleton) (arena-alloc (load (field ti arena))))
+                        (vm-init-string-fields ti (cast i64 (load (field ti singleton)))) 0) 0) 0)
                 (store! i (+ (load i) 1)) 0)
               (break))))
     (push-frame vt (load (index (load (field p methods)) (load (field p entry)))) 0)

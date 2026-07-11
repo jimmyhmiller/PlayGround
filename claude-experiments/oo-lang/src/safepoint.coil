@@ -30,6 +30,19 @@
 (defn sp-nthreads [] (-> (ptr i64)) (alloc-static i64))
 (defn sp-coord [] (-> (ptr i64)) (alloc-static i64))          ; parked-ptr of the current coordinator, 0 if none
 
+; ---- consistent-read handoff (Phase 5b: unfreeze reflection polls during a long eval) ----
+; A long eval holds the global stop for its whole duration (so language threads never run
+; mid-eval — mutating evals stay exclusive). That used to also block a read-only reflection
+; poll (types()/graph()/schema()) for the eval's ENTIRE length. These two words add a
+; cooperative HANDOFF: a reflection reader announces itself in `sp-waiting`; the coordinator,
+; at its next safepoint (where the heap is already quiescent and every language thread is
+; already parked because the stop flag stays 1), lends the parked heap to the reader via
+; `sp-granted`, waits for it to finish, then resumes. The flag is NEVER dropped, so language
+; threads stay parked the whole time and no second eval can slip in — the single-coordinator
+; invariant is preserved; only a brief, side-effect-free read overlaps the suspended eval.
+(defn sp-waiting [] (-> (ptr i64)) (alloc-static i64))        ; # of reflection readers awaiting a handoff
+(defn sp-granted [] (-> (ptr i64)) (alloc-static i64))        ; handoff state: 0 none / 1 offered / 2 claimed
+
 ; register THIS thread's parked-word address so a global stop can wait on it. Called once
 ; per thread, at spawn (and for main/eval at startup). Registrations in the PoC are
 ; serialized (main spawns the agents one at a time), so a plain publish is sufficient; the
@@ -48,14 +61,30 @@
 (defn safepoint-is-coordinator? [(parked (ptr i64))] (-> i64)
   (if (= (load (sp-coord)) (cast i64 parked)) 1 0))
 
+; coordinator-only: if a reflection reader is waiting for a consistent read, hand it the
+; parked heap. We are AT a safepoint here (every language thread is parked and the heap is
+; quiescent), and we keep the stop flag held (=1) the whole time, so the reader sees a
+; consistent, frozen graph and no language thread runs. We publish an OFFER (sp-granted=1),
+; then spin until the reader has claimed it (1->2), read, and released it (->0). Only the
+; coordinator ever calls this; a language thread parks instead. Cheap on the hot path: when
+; no reader is waiting it is a single atomic load + branch.
+(defn sp-coordinator-yield [] (-> i64)
+  (if (> (atomic-load (sp-waiting)) 0)
+    (do
+      (atomic-store (sp-granted) 1)
+      (loop (if (= (atomic-load (sp-granted)) 0) (break) (do (usleep (cast i32 20)) (continue))))
+      0)
+    0))
+
 ; called at the TOP of the dispatch loop, once per instruction (and from sleep/lock spins).
 ; Almost always the flag is 0 and this is a single atomic load + branch. When a stop is in
 ; force, this thread parks (publishes parked=1) and spins until the flag clears — unless it
-; IS the coordinator, in which case it returns immediately so the coordinator can run.
+; IS the coordinator, in which case it services any pending reflection-read handoff and then
+; returns so the coordinator can continue its own eval.
 (defn safepoint-poll [(parked (ptr i64))] (-> i64)
   (if (= (atomic-load (sp-flag)) 1)
     (if (= (safepoint-is-coordinator? parked) 1)
-      0
+      (do (sp-coordinator-yield) 0)
       (do
         (atomic-store parked 1)
         (loop (if (= (atomic-load (sp-flag)) 0) (break) (do (usleep (cast i32 50)) (continue))))
@@ -63,12 +92,9 @@
         0))
     0))
 
-; coordinator side: acquire the global stop and wait until every OTHER registered thread
-; has parked. `coord` is the coordinator's own parked-word (excluded from the wait, and
-; recorded so its own polls don't self-park).
-(defn request-global-stop [(coord (ptr i64))] (-> i64)
-  (loop (if (= (atomic-cas (sp-flag) 0 1) 0) (break) (do (usleep (cast i32 50)) (continue))))
-  (store! (sp-coord) (cast i64 coord))
+; wait until every OTHER registered thread (all but `coord`) has parked. Factored out so the
+; reflection self-coordinator path (server.coil) can reuse it after winning the flag itself.
+(defn sp-park-wait [(coord (ptr i64))] (-> i64)
   (let [n (atomic-load (sp-nthreads)) (mut i) 0]
     (loop
       (if (< (load i) n)
@@ -77,6 +103,15 @@
             (loop (if (= (atomic-load p) 1) (break) (do (usleep (cast i32 50)) (continue)))) 0)
           (store! i (+ (load i) 1)) 0)
         (break))))
+  0)
+
+; coordinator side: acquire the global stop and wait until every OTHER registered thread
+; has parked. `coord` is the coordinator's own parked-word (excluded from the wait, and
+; recorded so its own polls don't self-park).
+(defn request-global-stop [(coord (ptr i64))] (-> i64)
+  (loop (if (= (atomic-cas (sp-flag) 0 1) 0) (break) (do (usleep (cast i32 50)) (continue))))
+  (store! (sp-coord) (cast i64 coord))
+  (sp-park-wait coord)
   0)
 
 ; coordinator side: release — every parked thread resumes together.

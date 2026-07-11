@@ -148,6 +148,16 @@ def main():
     lp, lf = run_liveness_test(binary, filt)
     passed += lp; failed += lf
     if lf: fails.append("liveness")
+    # Phase 5b: concurrent eval server — a long eval no longer freezes read-only viewer polls.
+    frp, frf = run_freeze_test(binary, filt)
+    passed += frp; failed += frf
+    if frf: fails.append("freeze")
+    ndp, ndf = run_no_deadlock_test(binary, filt)
+    passed += ndp; failed += ndf
+    if ndf: fails.append("no_deadlock")
+    rrp, rrf = run_reflect_race_test(binary, filt)
+    passed += rrp; failed += rrf
+    if rrf: fails.append("reflect_race")
     xp, xf = run_liveedit_test(binary, filt)
     passed += xp; failed += xf
     if xf: fails.append("liveedit")
@@ -1554,6 +1564,216 @@ def run_agent_online_test(binary, filt):
             print("     " + pr)
         return 0, 1
     return 1, 0
+
+
+# ============================ Phase 5b: concurrent eval-server tests ============================
+# One shared truth these three tests prove: a long eval no longer serializes the whole server.
+# (1) freeze: a read-only poll answers promptly DURING a long eval.  (2) no-deadlock: hammering
+# polls + two long evals concurrently, everything returns and the process stays alive.  (3) no-race:
+# reflection hammered thousands of times while language threads mutate the heap yields valid JSON
+# every time and never crashes.  All are deterministic in the safe direction: a failure is a real
+# freeze / hang / crash, never rehearsal noise.
+
+def _wait_viewer_port(lines):
+    import time
+    for _ in range(400):
+        for ln in lines:
+            if "viewer: http://localhost:" in ln:
+                return int(ln.strip().split(":")[-1])
+        time.sleep(0.05)
+    return None
+
+def _kill_proc(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        proc.kill()
+
+def _post_eval(port, src, to=60):
+    import json, time, urllib.request
+    body = json.dumps({"id": "C", "source": src}).encode()
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/eval", data=body,
+                                 headers={"Content-Type": "application/json"})
+    t = time.time()
+    r = json.loads(urllib.request.urlopen(req, timeout=to).read())
+    return (time.time() - t) * 1000.0, r
+
+
+def run_freeze_test(binary, filt):
+    """THE freeze fix (measured in the brief: types() went 11ms alone -> 324ms behind fib(33)).
+    Start functions.scry, fire fib(33) (~400ms) in the background and CONCURRENTLY fire types();
+    assert types() answers in << fib's time (< 100ms) AND fib still returns the correct value.
+    Proves the long eval yields the parked heap to the poll at a safepoint, then resumes intact."""
+    if filt and "freeze" not in filt and "concurrency" not in filt:
+        return 0, 0
+    import time, threading
+    demo = os.path.abspath(os.path.join(HERE, "..", "examples", "functions.scry"))
+    proc = subprocess.Popen([binary, "run", demo], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    lines = []
+    threading.Thread(target=lambda: [lines.append(l) for l in proc.stdout], daemon=True).start()
+    port = _wait_viewer_port(lines)
+    if port is None:
+        print("FAIL freeze\n     never printed viewer URL"); _kill_proc(proc); return 0, 1
+    try:
+        problems = []
+        time.sleep(0.4)
+        _post_eval(port, "types()")                      # warm the path
+        res = {}
+        def bg():
+            res["ms"], res["r"] = _post_eval(port, "fib(33)")
+        th = threading.Thread(target=bg); th.start()
+        time.sleep(0.03)                                 # let fib get deep into run-to
+        tms, tr = _post_eval(port, "types()")
+        th.join()
+        if "value" not in tr:
+            problems.append(f"types() during fib returned no value: {tr}")
+        if tms >= 100:
+            problems.append(f"types() blocked behind fib: {tms:.0f}ms (want < 100ms)")
+        fv = res["r"].get("value", {})
+        if not (isinstance(fv, dict) and fv.get("value") == 3524578):
+            problems.append(f"fib(33) wrong/absent result: {res['r']}")
+        if res["ms"] < 100:
+            problems.append(f"fib(33) too fast ({res['ms']:.0f}ms) — freeze test inconclusive")
+        if problems:
+            print("FAIL freeze"); [print("     " + p) for p in problems]; return 0, 1
+        print(f"       ok  freeze: types() {tms:.0f}ms answered DURING fib(33) {res['ms']:.0f}ms")
+        return 1, 0
+    finally:
+        _kill_proc(proc)
+
+
+def run_no_deadlock_test(binary, filt):
+    """No deadlock / no starvation under contention. Start functions.scry; run several WAVES, each
+    firing TWO long evals (fib(32)) plus a burst of concurrent read-only polls from 8 threads
+    (hundreds total). Assert every poll returns valid JSON, both long evals return the correct
+    value, and the process is alive after every wave. A hang (lost handoff / lock cycle) trips the
+    per-request timeout and fails loudly."""
+    if filt and "deadlock" not in filt and "concurrency" not in filt:
+        return 0, 0
+    import time, threading
+    demo = os.path.abspath(os.path.join(HERE, "..", "examples", "functions.scry"))
+    proc = subprocess.Popen([binary, "run", demo], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    lines = []
+    threading.Thread(target=lambda: [lines.append(l) for l in proc.stdout], daemon=True).start()
+    port = _wait_viewer_port(lines)
+    if port is None:
+        print("FAIL no_deadlock\n     never printed viewer URL"); _kill_proc(proc); return 0, 1
+    polls = ["types()", "graph()", "schema()", "views()", "actions()", "functions()", "generation()"]
+    try:
+        problems = []
+        time.sleep(0.4)
+        total_polls = 0
+        for wave in range(3):
+            longs = {}
+            def runlong(k):
+                longs[k] = _post_eval(port, "fib(32)", to=30)[1]
+            lt = [threading.Thread(target=runlong, args=(i,)) for i in range(2)]
+            for t in lt: t.start()
+            # 8 poll workers hammer read-only reflections while the two fibs run
+            errs = []
+            def worker(w):
+                nonlocal total_polls
+                for i in range(40):
+                    src = polls[(w + i) % len(polls)]
+                    try:
+                        _, r = _post_eval(port, src, to=20)
+                        if "value" not in r:
+                            errs.append(f"{src} -> {r}")
+                    except Exception as e:
+                        errs.append(f"{src} raised {e!r}")
+                    total_polls += 1
+            wk = [threading.Thread(target=worker, args=(w,)) for w in range(8)]
+            for t in wk: t.start()
+            for t in wk: t.join(timeout=40)
+            for t in lt: t.join(timeout=40)
+            if any(t.is_alive() for t in wk + lt):
+                problems.append(f"wave {wave}: a request HUNG (deadlock)"); break
+            if errs:
+                problems.append(f"wave {wave}: {len(errs)} bad polls, e.g. {errs[:2]}")
+            for k, r in longs.items():
+                fv = r.get("value", {})
+                if not (isinstance(fv, dict) and fv.get("value") == 2178309):
+                    problems.append(f"wave {wave}: fib(32)#{k} wrong: {r}")
+            if proc.poll() is not None:
+                problems.append(f"wave {wave}: process EXITED (rc={proc.returncode})"); break
+        if problems:
+            print("FAIL no_deadlock"); [print("     " + p) for p in problems]; return 0, 1
+        print(f"       ok  no_deadlock: {total_polls} concurrent polls + 6 long evals, no hang, process alive")
+        return 1, 0
+    finally:
+        _kill_proc(proc)
+
+
+def run_reflect_race_test(binary, filt):
+    """No race: language threads mutate the heap (a repeating agent loop appends Messages) WHILE
+    reflection is hammered thousands of times. Start assistant.scry, `loop weather in Tokyo` to run
+    a LoopWorker on a background OS thread, then 8 threads hammer graph()/types()/Message.instances()
+    ~2000 times total. Assert every response is valid JSON with a value (never a crash/torn read),
+    the agent still made progress (Message count climbed), and the process is alive at the end."""
+    if filt and "race" not in filt and "concurrency" not in filt:
+        return 0, 0
+    import time, threading
+    demo = os.path.abspath(os.path.join(HERE, "..", "examples", "assistant.scry"))
+    proc = subprocess.Popen([binary, "run", demo], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    lines = []
+    threading.Thread(target=lambda: [lines.append(l) for l in proc.stdout], daemon=True).start()
+    port = _wait_viewer_port(lines)
+    if port is None:
+        print("FAIL reflect_race\n     never printed viewer URL"); _kill_proc(proc); return 0, 1
+    try:
+        problems = []
+        time.sleep(0.6)                              # app is at the first prompt inside readLine
+        proc.stdin.write("loop weather in Tokyo\n"); proc.stdin.flush()
+        time.sleep(1.0)
+
+        def mcount():
+            try:
+                return _post_eval(port, "Message.instances()", to=20)[1]["value"]["length"]
+            except Exception:
+                return -1
+        m0 = mcount()
+
+        srcs = ["graph()", "types()", "Message.instances()", "schema()", "Agent.instances()"]
+        errs = []
+        counts = {"n": 0}
+        lock = threading.Lock()
+        def worker(w):
+            for i in range(250):
+                src = srcs[(w + i) % len(srcs)]
+                try:
+                    _, r = _post_eval(port, src, to=20)
+                    if "value" not in r:
+                        errs.append(f"{src} -> {r}")
+                except Exception as e:
+                    errs.append(f"{src} raised {e!r}")
+                with lock:
+                    counts["n"] += 1
+        wk = [threading.Thread(target=worker, args=(w,)) for w in range(8)]
+        t0 = time.time()
+        for t in wk: t.start()
+        for t in wk: t.join(timeout=120)
+        if any(t.is_alive() for t in wk):
+            problems.append("a request HUNG during the hammer (deadlock)")
+        if errs:
+            problems.append(f"{len(errs)} invalid/failed responses under mutation, e.g. {errs[:3]}")
+        m1 = mcount()
+        if m1 < 0:
+            problems.append("Message.instances() failed after the hammer")
+        elif not (m1 >= m0 and m1 > 0):
+            problems.append(f"agent did not progress under the hammer: {m0}->{m1}")
+        if proc.poll() is not None:
+            problems.append(f"process EXITED during the hammer (rc={proc.returncode})")
+        if problems:
+            print("FAIL reflect_race"); [print("     " + p) for p in problems]; return 0, 1
+        print(f"       ok  reflect_race: {counts['n']} reflections in {time.time()-t0:.1f}s under live mutation "
+              f"(Message {m0}->{m1}), valid JSON every time, process alive")
+        return 1, 0
+    finally:
+        _kill_proc(proc)
 
 
 def _diff(expected, actual):
