@@ -53,6 +53,18 @@ pub enum Prim {
     BitShr,
     /// `(%bit-count x)` -> population count (number of set bits); HAMT indexing.
     BitCount,
+    /// `(%register-fields type-sym (f0 f1 …))` -> record the field-name order of a
+    /// record type, so `(.-field x)` can resolve a name to a slot index. Generic
+    /// record reflection the frontend uses to support ClojureScript-style field
+    /// access on `deftype` instances. Returns nil.
+    RegisterFields,
+    /// `(%field-by-name x 'field)` -> the value of `x`'s field named `field`,
+    /// resolved through the registry keyed by `x`'s type tag.
+    FieldByName,
+    /// `(%hash x)` -> a 32-bit content hash of any value (ints by value, strings/
+    /// symbols/keywords/chars by content, collections structurally, nil=0). The
+    /// hashing a HAMT needs; deterministic but not tied to any host's exact hash.
+    Hash,
     List,
     Cons,
     First,

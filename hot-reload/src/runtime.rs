@@ -1,5 +1,63 @@
 use crate::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Does `function` contain a direct call to `callee`?
+fn calls(function: &Function, callee: DefId) -> bool {
+    function
+        .code
+        .iter()
+        .any(|i| matches!(i, Instruction::Call { function, .. } if *function == callee))
+}
+
+/// How supplying a value resumes a con-freeness trap, treating the paused frame
+/// as a one-shot delimited continuation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResumePlan {
+    /// Install the value as the trapping instruction's result, advance past it.
+    SetAdvance(usize),
+    /// Use the (Bool) value to pick a branch target.
+    Branch(usize, usize),
+    /// Make the value the frame's return value.
+    ReturnValue,
+}
+
+/// Given the instruction a con-freeness trap fired on, the type of value that
+/// resumes it and how resuming installs that value. This is the continuation
+/// view of repair: the frozen instruction "yields", and supplying a well-typed
+/// value is resuming it with that result. `result_ty` is the trapped function's
+/// declared result type (needed for a `Return`).
+pub fn resume_shape(
+    instruction: &Instruction,
+    result_ty: &Type,
+    world: &World,
+) -> Result<(Type, ResumePlan), String> {
+    Ok(match instruction {
+        Instruction::SubI64 { dst, .. } => (Type::I64, ResumePlan::SetAdvance(*dst)),
+        Instruction::LtI64 { dst, .. } => (Type::Bool, ResumePlan::SetAdvance(*dst)),
+        Instruction::Branch {
+            then_pc, else_pc, ..
+        } => (Type::Bool, ResumePlan::Branch(*then_pc, *else_pc)),
+        Instruction::New { dst, type_id, .. } => (Type::Ref(*type_id), ResumePlan::SetAdvance(*dst)),
+        Instruction::Call { dst, function, .. } => {
+            let version = *world
+                .current_functions
+                .get(function)
+                .ok_or("callee has no current version")?;
+            let FunctionState::Ready(f) = &world.functions[&(*function, version)] else {
+                return Err("callee is not ready".into());
+            };
+            (f.result.clone(), ResumePlan::SetAdvance(*dst))
+        }
+        Instruction::Return { .. } => (result_ty.clone(), ResumePlan::ReturnValue),
+        other => return Err(format!("cannot resume a {other:?} trap by supplying a value")),
+    })
+}
+
+// Operand-tag error messages, shared so the interpreter arms and the native
+// driver's `OUT_TYPE_ERROR` path produce byte-identical conditions.
+pub(crate) const ERR_SUB_NON_I64: &str = "subtraction on non-i64";
+pub(crate) const ERR_LT_NON_I64: &str = "comparison on non-i64";
+pub(crate) const ERR_BRANCH_NON_BOOL: &str = "branch on non-bool";
 
 #[derive(Debug, Default)]
 pub struct Runtime {
@@ -25,6 +83,14 @@ pub enum InstallError {
 }
 
 impl Runtime {
+    /// Hand off this runtime's world, heap, and object-id counter to the
+    /// thread-safe [`crate::Shared`] tier. All setup — schema/function installs,
+    /// auto-derived migrations, verification — is done through the ordinary
+    /// single-threaded API and then frozen for concurrent execution.
+    pub fn into_parts(self) -> (World, BTreeMap<ObjectId, Object>, ObjectId) {
+        (self.world, self.heap, self.next_object)
+    }
+
     pub fn install_schema(&mut self, schema: Schema) -> Result<(), InstallError> {
         let expected = self
             .world
@@ -35,15 +101,48 @@ impl Runtime {
             return Err(InstallError::BadVersion);
         }
         verify_schema(&schema, &self.world).map_err(InstallError::Invalid)?;
-        self.world
-            .current_schemas
-            .insert(schema.type_id, schema.version);
-        self.world
-            .schemas
-            .insert((schema.type_id, schema.version), schema);
-        self.invalidate_functions();
+        let type_id = schema.type_id;
+        let version = schema.version;
+        self.world.current_schemas.insert(type_id, version);
+        self.world.schemas.insert((type_id, version), schema);
+        // Auto-derive the migration from the previous version where the change
+        // is trivial (D6). A field is copied when it survives unchanged, or
+        // default-initialized when new/retyped-with-a-default; a field that is
+        // neither is a *gap* that abandons derivation, leaving a developer to
+        // supply a transformer (a `MissingMigration` trap on first cross). A
+        // derived migration is copy/default only, so it is type-sound by
+        // construction; an explicit `install_migration` for the same step
+        // overrides it.
+        if version.0 > 1 {
+            let from = Version(version.0 - 1);
+            if let Some(migration) = self.derive_migration(type_id, from, version) {
+                self.world.migrations.insert((type_id, from), migration);
+            }
+        }
+        self.invalidate_functions(type_id);
         self.world.epoch += 1;
         Ok(())
+    }
+
+    /// Try to build the `from → to` migration mechanically (see
+    /// [`Runtime::install_schema`]). Returns `None` when any field is a gap.
+    fn derive_migration(&self, type_id: DefId, from: Version, to: Version) -> Option<Migration> {
+        let old = self.world.schemas.get(&(type_id, from))?;
+        let new = self.world.schemas.get(&(type_id, to))?;
+        let mut fields = BTreeMap::new();
+        for field in &new.fields {
+            let source = match old.field(field.id) {
+                Some(old_field) if old_field.ty == field.ty => MigrationSource::Copy(field.id),
+                _ => MigrationSource::Value(field.default.clone()?),
+            };
+            fields.insert(field.id, source);
+        }
+        Some(Migration {
+            type_id,
+            from,
+            to,
+            fields,
+        })
     }
 
     pub fn install_migration(&mut self, migration: Migration) -> Result<(), InstallError> {
@@ -110,7 +209,10 @@ impl Runtime {
             return Err(InstallError::BadVersion);
         }
         let state = match verify_function(&function, &self.world) {
-            Ok(()) => FunctionState::Ready(function),
+            Ok(deps) => {
+                self.world.function_deps.insert(function.id, deps);
+                FunctionState::Ready(function)
+            }
             Err(diagnostics) => FunctionState::Broken {
                 id: function.id,
                 version: function.version,
@@ -245,7 +347,7 @@ impl Runtime {
                     .iter()
                     .map(|(id, reg)| Ok((*id, self.reg(actor, *reg)?)))
                     .collect::<Result<_, Condition>>()?;
-                let id = self.jit_new(type_id, &supplied);
+                let id = self.jit_new(type_id, &supplied)?;
                 self.write_and_advance(actor, dst, Value::Ref(id));
             }
             Instruction::GetField { dst, object, field } => {
@@ -259,7 +361,7 @@ impl Runtime {
                 let (Value::I64(a), Value::I64(b)) =
                     (self.reg(actor, left)?, self.reg(actor, right)?)
                 else {
-                    return Err(self.type_error(function, pc, "subtraction on non-i64"));
+                    return Err(self.type_error(function, pc, ERR_SUB_NON_I64));
                 };
                 self.write_and_advance(actor, dst, Value::I64(a - b));
             }
@@ -267,7 +369,7 @@ impl Runtime {
                 let (Value::I64(a), Value::I64(b)) =
                     (self.reg(actor, left)?, self.reg(actor, right)?)
                 else {
-                    return Err(self.type_error(function, pc, "comparison on non-i64"));
+                    return Err(self.type_error(function, pc, ERR_LT_NON_I64));
                 };
                 self.write_and_advance(actor, dst, Value::Bool(a < b));
             }
@@ -280,7 +382,7 @@ impl Runtime {
                 else_pc,
             } => {
                 let Value::Bool(taken) = self.reg(actor, cond)? else {
-                    return Err(self.type_error(function, pc, "branch on non-bool"));
+                    return Err(self.type_error(function, pc, ERR_BRANCH_NON_BOOL));
                 };
                 self.frame_mut(actor).pc = if taken { then_pc } else { else_pc };
             }
@@ -306,11 +408,16 @@ impl Runtime {
                         diagnostics: diagnostics.clone(),
                     });
                 };
+                let params = code.params.clone();
+                let registers_len = code.registers;
                 let values: Vec<_> = args
                     .into_iter()
                     .map(|r| self.reg(actor, r))
                     .collect::<Result<_, _>>()?;
-                let mut registers = vec![None; code.registers];
+                for (value, expected) in values.iter().zip(&params) {
+                    self.expect_value(value, expected, callee, pc, "call argument")?;
+                }
+                let mut registers = vec![None; registers_len];
                 for (slot, value) in values.into_iter().enumerate() {
                     registers[slot] = Some(value);
                 }
@@ -330,6 +437,15 @@ impl Runtime {
             }
             Instruction::Return { value } => {
                 let result = self.reg(actor, value)?;
+                // Check the result against this function version's declared type
+                // before it leaves the frame: a pinned old function returning a
+                // since-migrated value traps here instead of handing a lie to
+                // its caller (or completing the actor with one).
+                let key = self.actors[&actor].frames.last().unwrap().function;
+                if let FunctionState::Ready(f) = &self.world.functions[&key] {
+                    let result_ty = f.result.clone();
+                    self.expect_value(&result, &result_ty, function, pc, "return value")?;
+                }
                 let owner = self.actors.get_mut(&actor).unwrap();
                 let frame = owner.frames.pop().unwrap();
                 match frame.return_to {
@@ -347,10 +463,17 @@ impl Runtime {
     /// override defaults; missing fields fall back to their schema default.
     /// Shared by the interpreter's `New` arm and the native `lt_new` extern so
     /// the two executors allocate identically. `expect` is safe because both
-    /// callers only reach here for verified constructors.
-    pub fn jit_new(&mut self, type_id: DefId, supplied: &[(FieldId, Value)]) -> ObjectId {
+    /// callers only reach here for verified constructors. Each field value is
+    /// checked against its declared type (`value_ok`) so a pinned old function
+    /// constructing with a since-migrated value traps instead of publishing an
+    /// ill-typed object.
+    pub fn jit_new(
+        &mut self,
+        type_id: DefId,
+        supplied: &[(FieldId, Value)],
+    ) -> Result<ObjectId, Condition> {
         let version = self.world.current_schemas[&type_id];
-        let schema = &self.world.schemas[&(type_id, version)];
+        let schema = self.world.schemas[&(type_id, version)].clone();
         let mut values = BTreeMap::new();
         for field in &schema.fields {
             let value = supplied
@@ -359,9 +482,10 @@ impl Runtime {
                 .map(|(_, v)| v.clone())
                 .or_else(|| field.default.clone())
                 .expect("verified constructor");
+            self.expect_value(&value, &field.ty, 0, 0, &format!("field '{}'", field.name))?;
             values.insert(field.id, value);
         }
-        self.alloc(type_id, version, values)
+        Ok(self.alloc(type_id, version, values))
     }
 
     /// The migration barrier: migrate the object up to its type's current
@@ -395,9 +519,11 @@ impl Runtime {
             id,
             Object {
                 id,
-                type_id,
-                schema,
-                fields,
+                body: std::sync::Arc::new(Body {
+                    type_id,
+                    schema,
+                    fields,
+                }),
             },
         );
         id
@@ -446,13 +572,33 @@ impl Runtime {
                 };
                 fields.insert(target, value);
             }
+            // value_ok on the freshly built body before it is published: the
+            // migration plan is validated at install, so this is defense in
+            // depth — a body that is not structurally well-typed against the
+            // target schema never becomes the object's observable state.
+            let target_schema = self.world.schemas[&(old.type_id, plan.to)].clone();
+            for field in &target_schema.fields {
+                let value = &fields[&field.id];
+                if !self.value_ok(value, &field.ty) {
+                    return Err(self.type_error(
+                        0,
+                        0,
+                        &format!(
+                            "migration to {} v{} produced an ill-typed '{}'",
+                            target_schema.name, plan.to.0, field.name
+                        ),
+                    ));
+                }
+            }
             self.heap.insert(
                 id,
                 Object {
                     id,
-                    type_id: old.type_id,
-                    schema: plan.to,
-                    fields,
+                    body: std::sync::Arc::new(Body {
+                        type_id: old.type_id,
+                        schema: plan.to,
+                        fields,
+                    }),
                 },
             );
         }
@@ -464,6 +610,124 @@ impl Runtime {
             pc,
             message: message.into(),
         }
+    }
+
+    /// Reconstruct the condition for a native operand-tag trap (`OUT_TYPE_ERROR`)
+    /// from the trapping instruction, so it matches the interpreter's exactly.
+    pub fn operand_type_error(
+        &self,
+        function: DefId,
+        pc: usize,
+        instruction: &Instruction,
+    ) -> Condition {
+        let message = match instruction {
+            Instruction::SubI64 { .. } => ERR_SUB_NON_I64,
+            Instruction::LtI64 { .. } => ERR_LT_NON_I64,
+            Instruction::Branch { .. } => ERR_BRANCH_NON_BOOL,
+            _ => "operand type mismatch",
+        };
+        self.type_error(function, pc, message)
+    }
+
+    /// The soundness predicate (`value_ok`): does a live value's actual nominal
+    /// type match what a definition says it should be? References match at the
+    /// nominal type, not the schema version, so a migrated object still matches
+    /// a field/param/result typed `Ref(T)` — the check only fires on a genuine
+    /// representation confusion (e.g. an `Int` field read as a `Ref` by pinned
+    /// old code after a migration changed its type).
+    pub fn value_ok(&self, value: &Value, expected: &Type) -> bool {
+        value.shallow_type(&self.heap).as_ref() == Some(expected)
+    }
+
+    /// Enforce [`Runtime::value_ok`] at a value-use boundary. This is the
+    /// tested form of the soundness invariant: rather than trust that every
+    /// running frame stays well-typed, we check the value the code is about to
+    /// observe and trap (trap-and-repair, quarantining the frame) if a hot
+    /// update made it lie. Shared by both executors so they trap identically.
+    pub fn expect_value(
+        &self,
+        value: &Value,
+        expected: &Type,
+        function: DefId,
+        pc: usize,
+        what: &str,
+    ) -> Result<(), Condition> {
+        if self.value_ok(value, expected) {
+            Ok(())
+        } else {
+            Err(self.type_error(
+                function,
+                pc,
+                &format!("{what}: expected {expected:?}, found a value of another type"),
+            ))
+        }
+    }
+
+    /// The type of value a paused actor's con-freeness trap expects, so a
+    /// developer knows what to hand back. `None` if the actor isn't paused on a
+    /// type trap (or the trap isn't value-resumable, e.g. a migration gap).
+    pub fn pause_expected(&self, actor: ActorId) -> Option<Type> {
+        let a = self.actors.get(&actor)?;
+        if !matches!(a.status, ActorStatus::Paused(Condition::RuntimeTypeError { .. })) {
+            return None;
+        }
+        let frame = a.frames.last()?;
+        let FunctionState::Ready(f) = &self.world.functions[&frame.function] else {
+            return None;
+        };
+        resume_shape(&f.code[frame.pc], &f.result, &self.world)
+            .ok()
+            .map(|(ty, _)| ty)
+    }
+
+    /// Resume a con-freeness trap by supplying a value — the delimited-
+    /// continuation repair. The frozen instruction "produces" `value` and the
+    /// frame continues. The value must satisfy [`Runtime::value_ok`] for the
+    /// trap's expected type, so a repair can never reintroduce an ill-typed
+    /// value; a wrong-typed offering is rejected and the actor stays paused.
+    pub fn resume_with(&mut self, actor: ActorId, value: Value) -> Result<(), String> {
+        let a = &self.actors[&actor];
+        if !matches!(a.status, ActorStatus::Paused(Condition::RuntimeTypeError { .. })) {
+            return Err("actor is not paused on a resumable type trap".into());
+        }
+        let key = a.frames.last().unwrap().function;
+        let pc = a.frames.last().unwrap().pc;
+        let FunctionState::Ready(f) = &self.world.functions[&key] else {
+            return Err("frame pins non-ready code".into());
+        };
+        let result_ty = f.result.clone();
+        let instruction = f.code[pc].clone();
+        let (expected, plan) = resume_shape(&instruction, &result_ty, &self.world)?;
+        if !self.value_ok(&value, &expected) {
+            return Err(format!(
+                "supplied value does not have the expected type {expected:?}"
+            ));
+        }
+        match plan {
+            ResumePlan::SetAdvance(dst) => {
+                let frame = self.frame_mut(actor);
+                frame.registers[dst] = Some(value);
+                frame.pc += 1;
+                self.actors.get_mut(&actor).unwrap().status = ActorStatus::Runnable;
+            }
+            ResumePlan::Branch(then_pc, else_pc) => {
+                let take = matches!(value, Value::Bool(true));
+                self.frame_mut(actor).pc = if take { then_pc } else { else_pc };
+                self.actors.get_mut(&actor).unwrap().status = ActorStatus::Runnable;
+            }
+            ResumePlan::ReturnValue => {
+                let owner = self.actors.get_mut(&actor).unwrap();
+                let frame = owner.frames.pop().unwrap();
+                match frame.return_to {
+                    Some(target) => {
+                        owner.frames.last_mut().unwrap().registers[target.register] = Some(value);
+                        owner.status = ActorStatus::Runnable;
+                    }
+                    None => owner.status = ActorStatus::Complete(value),
+                }
+            }
+        }
+        Ok(())
     }
 
     fn resume_repaired(&mut self) {
@@ -491,31 +755,66 @@ impl Runtime {
     /// A schema update is allowed to land even when it makes callers invalid.
     /// Ready artifacts remain available to already-running pinned frames, while
     /// a new broken version becomes the call target for future entries.
-    fn invalidate_functions(&mut self) {
-        let current: Vec<_> = self
+    ///
+    /// Demand-driven (D7): re-verify only the functions this schema change can
+    /// reach, not every current function. The worklist is seeded with functions
+    /// whose type-dependency set contains the `changed` type; whenever one is
+    /// newly broken, its callers are enqueued, since a call to a broken function
+    /// no longer verifies. This propagates brokenness through the call graph to
+    /// a fixpoint (a caller re-checked before its callee broke used to be missed
+    /// by the old single map-order pass). A function's pinned registers may
+    /// still hold values of the changed type; that is the use-site soundness
+    /// checks' job, not this pass's.
+    fn invalidate_functions(&mut self, changed: DefId) {
+        let mut work: Vec<DefId> = self
             .world
             .current_functions
-            .iter()
-            .filter_map(
-                |(id, version)| match self.world.functions.get(&(*id, *version)) {
-                    Some(FunctionState::Ready(function)) => Some(function.clone()),
-                    _ => None,
-                },
-            )
+            .keys()
+            .filter(|id| {
+                self.world
+                    .function_deps
+                    .get(id)
+                    .is_some_and(|deps| deps.contains(&changed))
+            })
+            .copied()
             .collect();
-        for function in current {
-            if let Err(diagnostics) = verify_function(&function, &self.world) {
-                let version = Version(function.version.0 + 1);
-                self.world.functions.insert(
-                    (function.id, version),
-                    FunctionState::Broken {
-                        id: function.id,
-                        version,
-                        name: function.name,
-                        diagnostics,
-                    },
-                );
-                self.world.current_functions.insert(function.id, version);
+        let mut seen: BTreeSet<DefId> = work.iter().copied().collect();
+
+        while let Some(id) = work.pop() {
+            let version = self.world.current_functions[&id];
+            let Some(FunctionState::Ready(function)) = self.world.functions.get(&(id, version))
+            else {
+                continue; // already broken (or gone): nothing to re-verify
+            };
+            let function = function.clone();
+            let Err(diagnostics) = verify_function(&function, &self.world) else {
+                continue; // still well-typed against the new definitions
+            };
+            let broken = Version(version.0 + 1);
+            self.world.functions.insert(
+                (id, broken),
+                FunctionState::Broken {
+                    id,
+                    version: broken,
+                    name: function.name,
+                    diagnostics,
+                },
+            );
+            self.world.current_functions.insert(id, broken);
+            // Enqueue callers of the now-broken function.
+            let callers: Vec<DefId> = self
+                .world
+                .current_functions
+                .iter()
+                .filter(|(caller, _)| !seen.contains(caller))
+                .filter_map(|(caller, cver)| match self.world.functions.get(&(*caller, *cver)) {
+                    Some(FunctionState::Ready(f)) if calls(f, id) => Some(*caller),
+                    _ => None,
+                })
+                .collect();
+            for caller in callers {
+                seen.insert(caller);
+                work.push(caller);
             }
         }
     }

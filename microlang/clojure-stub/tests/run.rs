@@ -235,7 +235,7 @@ fn protocols() {
     // extend a BUILT-IN type (persistent vectors are records tagged 'PVec)
     let ext = r#"
         (defprotocol Sized (size [this]))
-        (extend-type PVec Sized (size [this] (count this)))
+        (extend-type PersistentVector Sized (size [this] (count this)))
     "#;
     assert_eq!(run(&format!("{ext} (size [10 20 30])")), "3");
 }

@@ -218,6 +218,72 @@ async function main() {
     const inspMethods = await evalPage(`document.querySelectorAll('#inspector .method').length`);
     if (inspFields < 1) fails.push("V4: inspector shows no fields"); else ok(`V4: inspector shows the Agent's ${inspFields} fields`);
     if (inspMethods < 1) fails.push("V4: inspector shows no methods"); else ok(`V4: inspector shows the Agent's ${inspMethods} methods`);
+
+    // (V6) DECLARED ACTIONS: the program declares `action "Pause"/"Resume"/"Ask" for Agent`, which
+    // the inspector surfaces as prominent BUTTONS in an ACTIONS section ABOVE the raw method list.
+    // Assert the buttons render (Pause/Resume/Ask), a param action (Ask) exposes an inline arg form,
+    // and clicking a 0-arg mutating action (Pause) flips the Agent's `paused` field LIVE in-inspector.
+    try { await waitFor("#inspector .actions-section .action-card", 8000); } catch { fails.push("V6: no ACTIONS section rendered in the inspector"); }
+    const actLabels = await evalPage(`[...document.querySelectorAll('#inspector .actions-section .action-btn .action-label')].map(e=>e.textContent.trim())`);
+    for (const need of ["Pause", "Resume", "Ask"]) {
+      if (!actLabels.includes(need)) fails.push(`V6: inspector ACTIONS missing '${need}' button (got ${JSON.stringify(actLabels)})`);
+    }
+    if (["Pause", "Resume", "Ask"].every((n) => actLabels.includes(n))) ok(`V6: inspector renders declared action buttons ${JSON.stringify(actLabels)}`);
+    // the ACTIONS section is ABOVE the methods section (curated affordances are primary)
+    const orderOk = await evalPage(`(()=>{
+      const secs=[...document.querySelectorAll('#inspector .detail-section h3')].map(h=>h.textContent.trim());
+      return secs.indexOf('actions') >= 0 && secs.indexOf('actions') < secs.indexOf('methods');
+    })()`);
+    if (!orderOk) fails.push("V6: ACTIONS section is not placed above the methods section"); else ok("V6: ACTIONS section sits above the method list (visually primary)");
+    // Ask has a param -> clicking it opens an inline arg form with an input (React state is async,
+    // so click first, then poll the card's class until it flips to open).
+    const askClicked = await evalPage(`(()=>{
+      const card=[...document.querySelectorAll('#inspector .action-card')].find(c=>{
+        const l=c.querySelector('.action-label'); return l&&l.textContent.trim()==='Ask'; });
+      if(!card) return false; card.dataset.smokeAsk='1'; card.querySelector('.action-btn').click(); return true;
+    })()`);
+    if (!askClicked) fails.push("V6: no 'Ask' action card found");
+    else {
+      let askForm = null;
+      for (let i = 0; i < 20; i++) {
+        await sleep(100);
+        askForm = await evalPage(`(()=>{const card=document.querySelector('#inspector .action-card[data-smoke-ask="1"]');
+          if(!card) return {gone:true};
+          const input=card.querySelector('.action-form input');
+          const shown=input && getComputedStyle(card.querySelector('.action-form')).display!=='none';
+          return {open:/\\bopen\\b/.test(card.className), input:!!input, shown:!!shown};})()`);
+        if (askForm.open && askForm.shown) break;
+      }
+      if (!askForm || askForm.gone) fails.push("V6: 'Ask' action card disappeared");
+      else if (!askForm.open || !askForm.input || !askForm.shown)
+        fails.push(`V6: 'Ask' (param action) did not reveal an inline arg form (open=${askForm.open}, input=${askForm.input}, shown=${askForm.shown})`);
+      else ok("V6: a param action (Ask) reveals an inline arg-input form");
+    }
+    // read the paused field, click the 0-arg Pause action, assert paused flips LIVE in the inspector
+    const readPaused = `(()=>{
+      const cells=[...document.querySelectorAll('#inspector .field-grid .fcell')];
+      for(let i=0;i<cells.length;i++){
+        if(cells[i].classList.contains('fname') && cells[i].textContent.trim().startsWith('paused')){
+          const v=cells[i+1]; return v?v.textContent.trim():null;
+        }
+      }
+      return null;
+    })()`;
+    const pausedBefore = await evalPage(readPaused);
+    const clickedPause = await evalPage(`(()=>{
+      const card=[...document.querySelectorAll('#inspector .action-card')].find(c=>{
+        const l=c.querySelector('.action-label'); return l&&l.textContent.trim()==='Pause'; });
+      if(!card) return false; card.querySelector('.action-btn').click(); return true;
+    })()`);
+    if (!clickedPause) fails.push("V6: no 'Pause' action button to click");
+    else {
+      // wait for the invoke result + the detailBus read-back poll to flip the field
+      let pausedAfter = null;
+      for (let i = 0; i < 40; i++) { await sleep(150); pausedAfter = await evalPage(readPaused); if (pausedAfter && /true/i.test(pausedAfter)) break; }
+      if (!(pausedAfter && /true/i.test(pausedAfter)))
+        fails.push(`V6: clicking Pause did not flip the Agent's paused field live (before=${JSON.stringify(pausedBefore)}, after=${JSON.stringify(pausedAfter)})`);
+      else ok(`V6: clicking the Pause action mutated the instance LIVE in the inspector (paused ${JSON.stringify(pausedBefore)} -> ${JSON.stringify(pausedAfter)})`);
+    }
     // the inspected instance is ringed in the map
     if (!await evalPage(`!!document.querySelector('#nested .sel-inspect')`)) fails.push("V4: inspected instance not highlighted in the map");
     else ok("V4: inspected instance is highlighted in the map");

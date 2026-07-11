@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub type DefId = u64;
 pub type FieldId = u64;
@@ -57,12 +57,33 @@ impl Schema {
     }
 }
 
+/// The mutable-by-migration part of an object: its schema-versioned layout and
+/// field values. A migration builds a *new* `Body` and swaps it in; the body
+/// itself is never mutated in place. Held behind an [`Arc`] so a swap is a
+/// cheap pointer replacement and readers keep the body they loaded alive — the
+/// reclamation half of "moving bodies behind non-moving handles."
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Object {
-    pub id: ObjectId,
+pub struct Body {
     pub type_id: DefId,
     pub schema: Version,
     pub fields: BTreeMap<FieldId, Value>,
+}
+
+/// A heap object: a stable handle ([`ObjectId`]) plus its current [`Body`].
+/// References name the handle; the body behind it can change version under a
+/// migration without the handle moving. `Deref` exposes the body's fields
+/// directly, so `object.schema` / `object.fields` read through to the body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Object {
+    pub id: ObjectId,
+    pub body: std::sync::Arc<Body>,
+}
+
+impl std::ops::Deref for Object {
+    type Target = Body;
+    fn deref(&self) -> &Body {
+        &self.body
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,6 +209,10 @@ pub struct World {
     pub functions: BTreeMap<(DefId, Version), FunctionState>,
     pub current_functions: BTreeMap<DefId, Version>,
     pub migrations: BTreeMap<(DefId, Version), Migration>,
+    /// The nominal types each function's current Ready version references (its
+    /// dependency set, D7). A schema change re-verifies only the functions whose
+    /// set contains the changed type instead of every current function.
+    pub function_deps: BTreeMap<DefId, BTreeSet<DefId>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -7,22 +7,25 @@
 ; memory-storable i32 index and `unretain`ed when the todo is deleted.
 (module todomvc)
 (import "slice.coil" :use *)
-(import "js.coil"    :use *)
-(import "dom.coil"   :use *)
+(import "js.coil" :use *)
+(import "dom.coil" :use *)
 
-(defstruct Todo  [(used i32) (done i32) (li i32)])   ; li = retain index of the <li>
+(defstruct Todo [(used i32) (done i32) (li i32)])  ; li = retain index of the <li>
 (defstruct Store [(todos (array Todo 512)) (nslots i32) (ul i32) (counter i32)])  ; ul/counter = retain indices
-(defn store []          (-> (ptr Store)) (alloc-static Store))
-(defn slot [(i i32)]    (-> (ptr Todo))  (index (field (store) todos) (cast i64 i)))
+(defn store [] (-> (ptr Store)) (alloc-static Store))
+(defn slot [(i i32)] (-> (ptr Todo)) (index (field (store) todos) (cast i64 i)))
 
 (defn active-count [] (-> i32)
   (let [(mut n) (cast i32 0) (mut i) (cast i32 0) ns (load (field (store) nslots))]
-    (loop (if (icmp-ge (load i) ns) (break)
-      (do (let [t (slot (load i))]
-            (if (and (icmp-ne (load (field t used)) (cast i32 0))
-                     (icmp-eq (load (field t done)) (cast i32 0)))
-                (store! n (iadd (load n) (cast i32 1))) 0))
-          (store! i (iadd (load i) (cast i32 1))))))
+    (loop (if (icmp-ge (load i) ns)
+            (break)
+            (do
+              (let [t (slot (load i))]
+                (if (and (icmp-ne (load (field t used)) (cast i32 0))
+                         (icmp-eq (load (field t done)) (cast i32 0)))
+                  (store! n (iadd (load n) (cast i32 1)))
+                  0))
+              (store! i (iadd (load i) (cast i32 1))))))
     (load n)))
 
 (defn update-count! [] (-> i32)
@@ -30,29 +33,35 @@
 
 (defn free-slot [] (-> i32)
   (let [ns (load (field (store) nslots)) (mut i) (cast i32 0) (mut found) (cast i32 -1)]
-    (loop (if (or (icmp-ge (load i) ns) (icmp-ne (load found) (cast i32 -1))) (break)
-      (do (if (icmp-eq (load (field (slot (load i)) used)) (cast i32 0)) (store! found (load i)) 0)
-          (store! i (iadd (load i) (cast i32 1))))))
-    (if (icmp-ne (load found) (cast i32 -1)) (load found)
+    (loop (if (or (icmp-ge (load i) ns) (icmp-ne (load found) (cast i32 -1)))
+            (break)
+            (do
+              (if (icmp-eq (load (field (slot (load i)) used)) (cast i32 0)) (store! found (load i)) 0)
+              (store! i (iadd (load i) (cast i32 1))))))
+    (if (icmp-ne (load found) (cast i32 -1))
+      (load found)
       (do (store! (field (store) nslots) (iadd ns (cast i32 1))) ns))))
 
 ; title-ref is a JS string (the trimmed input value); it becomes the label text.
 (defn add-todo [(title-ref externref)] (-> i32)
-  (let [i       (free-slot)
-        t       (slot i)
-        li      (create "li")
-        toggle  (create "input")
-        label   (create "label")
+  (let [i (free-slot)
+        t (slot i)
+        li (create "li")
+        toggle (create "input")
+        label (create "label")
         destroy (create "button")]
     (set-attr! toggle "type" "checkbox")
     (add-class! toggle "toggle")
     (set-text-ref! label title-ref)
     (add-class! destroy "destroy")
     (set-text! destroy "×")
-    (append! li toggle) (append! li label) (append! li destroy)
+    (append! li toggle)
+    (append! li label)
+    (append! li destroy)
     (add-listener! toggle "change" (make-cb "on_toggle" i))
     (add-listener! destroy "click" (make-cb "on_destroy" i))
-    (store! (field t used) (cast i32 1)) (store! (field t done) (cast i32 0))
+    (store! (field t used) (cast i32 1))
+    (store! (field t done) (cast i32 0))
     (store! (field t li) (retain li))
     (append! (deref (load (field (store) ul))) li)
     (update-count!)))
@@ -65,10 +74,10 @@
 ; ---- exported event handlers (userdata:i32, event:externref) ----
 (defn on-new [(userdata i32) (evt externref)] (-> i64)
   (if (icmp-eq (prop-int evt "keyCode") (cast i32 13))
-      (let [input (js-get evt "target")
-            val   (js-call (js-get input "value") "trim")     ; input.value.trim()
-            len   (js-int (js-get val "length"))]
-        (if (icmp-gt len (cast i32 0)) (do (add-todo val) (set-value! input "") 0) 0))
+    (let [input (js-get evt "target")
+          val (js-call (js-get input "value") "trim")  ; input.value.trim()
+          len (js-int (js-get val "length"))]
+      (if (icmp-gt len (cast i32 0)) (do (add-todo val) (set-value! input "") 0) 0))
     0)
   0)
 
@@ -76,7 +85,7 @@
   (let [t (slot idx) li (deref (load (field t li)))]
     (store! (field t done) (ixor (load (field t done)) (cast i32 1)))
     (if (icmp-ne (load (field t done)) (cast i32 0))
-        (add-class! li "completed")
+      (add-class! li "completed")
       (remove-class! li "completed")))
   (update-count!)
   0)
@@ -85,68 +94,89 @@
 
 (defn on-filter [(mode i32) (evt externref)] (-> i64)
   (let [ul (deref (load (field (store) ul)))]
-    (if (icmp-eq mode (cast i32 0)) (set-class! ul "todo-list")
-      (if (icmp-eq mode (cast i32 1)) (set-class! ul "todo-list filtered-active")
+    (if (icmp-eq mode (cast i32 0))
+      (set-class! ul "todo-list")
+      (if (icmp-eq mode (cast i32 1))
+        (set-class! ul "todo-list filtered-active")
         (set-class! ul "todo-list filtered-completed"))))
   0)
 
 (defn on-clear [(userdata i32) (evt externref)] (-> i64)
   (let [(mut i) (cast i32 0) ns (load (field (store) nslots))]
-    (loop (if (icmp-ge (load i) ns) (break)
-      (do (let [t (slot (load i))]
-            (if (and (icmp-ne (load (field t used)) (cast i32 0))
-                     (icmp-ne (load (field t done)) (cast i32 0)))
-                (drop-slot! t) 0))
-          (store! i (iadd (load i) (cast i32 1)))))))
+    (loop (if (icmp-ge (load i) ns)
+            (break)
+            (do
+              (let [t (slot (load i))]
+                (if (and (icmp-ne (load (field t used)) (cast i32 0))
+                         (icmp-ne (load (field t done)) (cast i32 0)))
+                  (drop-slot! t)
+                  0))
+              (store! i (iadd (load i) (cast i32 1)))))))
   (update-count!)
   0)
 
 ; ---- one-shot page construction ----
 (defn mk-filter [(parent externref) (label (slice u8)) (mode i32)] (-> externref)
   (let [li (create "li") a (create "a")]
-    (set-text! a label) (set-attr! a "href" "#")
-    (append! li a) (append! parent li)
+    (set-text! a label)
+    (set-attr! a "href" "#")
+    (append! li a)
+    (append! parent li)
     (on! a "click" "on_filter" mode)))
 
 (defn main [] (-> i64)
-  (let [root     (body)
-        app      (create "section")
-        header   (create "header")
-        h1       (create "h1")
-        input    (create "input")
+  (let [root (body)
+        app (create "section")
+        header (create "header")
+        h1 (create "h1")
+        input (create "input")
         main-sec (create "section")
-        ul       (create "ul")
-        footer   (create "footer")
-        cnt      (create "span")
-        counter  (create "strong")
-        suffix   (create "span")
-        filters  (create "ul")
-        clear    (create "button")]
-    (add-class! app "todoapp") (append! root app)
-    (add-class! header "header") (append! app header)
-    (set-text! h1 "todos") (append! header h1)
-    (add-class! input "new-todo") (set-attr! input "placeholder" "What needs to be done?")
-    (append! header input) (on! input "keydown" "on_new" (cast i32 0))
-    (add-class! main-sec "main") (append! app main-sec)
-    (add-class! ul "todo-list") (append! main-sec ul)
-    (add-class! footer "footer") (append! app footer)
-    (add-class! cnt "todo-count") (append! footer cnt)
-    (set-text! counter "0") (append! cnt counter)
-    (set-text! suffix " items left") (append! cnt suffix)
-    (add-class! filters "filters") (append! footer filters)
+        ul (create "ul")
+        footer (create "footer")
+        cnt (create "span")
+        counter (create "strong")
+        suffix (create "span")
+        filters (create "ul")
+        clear (create "button")]
+    (add-class! app "todoapp")
+    (append! root app)
+    (add-class! header "header")
+    (append! app header)
+    (set-text! h1 "todos")
+    (append! header h1)
+    (add-class! input "new-todo")
+    (set-attr! input "placeholder" "What needs to be done?")
+    (append! header input)
+    (on! input "keydown" "on_new" (cast i32 0))
+    (add-class! main-sec "main")
+    (append! app main-sec)
+    (add-class! ul "todo-list")
+    (append! main-sec ul)
+    (add-class! footer "footer")
+    (append! app footer)
+    (add-class! cnt "todo-count")
+    (append! footer cnt)
+    (set-text! counter "0")
+    (append! cnt counter)
+    (set-text! suffix " items left")
+    (append! cnt suffix)
+    (add-class! filters "filters")
+    (append! footer filters)
     (mk-filter filters "All" (cast i32 0))
     (mk-filter filters "Active" (cast i32 1))
     (mk-filter filters "Completed" (cast i32 2))
-    (add-class! clear "clear-completed") (set-text! clear "Clear completed")
-    (append! footer clear) (on! clear "click" "on_clear" (cast i32 0))
+    (add-class! clear "clear-completed")
+    (set-text! clear "Clear completed")
+    (append! footer clear)
+    (on! clear "click" "on_clear" (cast i32 0))
     ; persist the refs the handlers reach for later
-    (store! (field (store) ul)      (retain ul))
+    (store! (field (store) ul) (retain ul))
     (store! (field (store) counter) (retain counter))
-    (store! (field (store) nslots)  (cast i32 0))
+    (store! (field (store) nslots) (cast i32 0))
     0))
 
-(export-c [on-new     :as "on_new"]
-          [on-toggle  :as "on_toggle"]
+(export-c [on-new :as "on_new"]
+          [on-toggle :as "on_toggle"]
           [on-destroy :as "on_destroy"]
-          [on-filter  :as "on_filter"]
-          [on-clear   :as "on_clear"])
+          [on-filter :as "on_filter"]
+          [on-clear :as "on_clear"])

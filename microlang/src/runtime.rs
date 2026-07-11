@@ -181,6 +181,9 @@ pub(crate) struct Tables {
     pub(crate) methods: MethodRegistry,
     method_names: HashSet<Sym>,
     pub(crate) dispatch: Box<dyn Dispatch>,
+    /// Record type tag -> its field-name symbols, in slot order. Populated by
+    /// `deftype` (via `%register-fields`) so `(.-field x)` resolves by name.
+    field_names: HashMap<Sym, Vec<Sym>>,
 }
 
 /// State SHARED by every thread over one `Arc`. Its interior mutability is the
@@ -280,6 +283,7 @@ impl<M: ValueModel> Runtime<M> {
                 methods: HashMap::new(),
                 method_names: HashSet::new(),
                 dispatch: Box::new(Megamorphic::new()),
+                field_names: HashMap::new(),
             }),
             apply_fn: AtomicU64::new(0),
             escape_tags: AtomicU64::new(0),
@@ -731,6 +735,47 @@ impl<M: ValueModel> Runtime<M> {
             Prim::BitShl => self.encode(Val::Int(self.as_i128(args[0]) << self.as_i128(args[1]))),
             Prim::BitShr => self.encode(Val::Int(self.as_i128(args[0]) >> self.as_i128(args[1]))),
             Prim::BitCount => self.encode(Val::Int(self.as_i128(args[0]).count_ones() as i128)),
+            Prim::RegisterFields => {
+                let Val::Sym(ty) = self.decode(args[0]) else {
+                    panic!("register-fields: type must be a symbol");
+                };
+                let names: Vec<Sym> = self
+                    .list_to_vec(args[1])
+                    .into_iter()
+                    .map(|f| match self.decode(f) {
+                        Val::Sym(s) => s,
+                        _ => panic!("register-fields: field names must be symbols"),
+                    })
+                    .collect();
+                self.shared.tables.lock().unwrap().field_names.insert(ty, names);
+                self.enc_nil()
+            }
+            Prim::FieldByName => {
+                let ty = self.type_tag(args[0]);
+                let Val::Sym(name) = self.decode(args[1]) else {
+                    panic!("field-by-name: field must be a symbol");
+                };
+                let idx = {
+                    let t = self.shared.tables.lock().unwrap();
+                    let names = t.field_names.get(&ty).unwrap_or_else(|| {
+                        panic!("field access .-{} on unregistered type '{}'", self.sym_name(name), self.sym_name(ty))
+                    });
+                    names.iter().position(|&n| n == name).unwrap_or_else(|| {
+                        panic!("no field '{}' on type '{}'", self.sym_name(name), self.sym_name(ty))
+                    })
+                };
+                let Val::Ref(id) = self.decode(args[0]) else {
+                    panic!("field access on non-record");
+                };
+                let Obj::Record { fields, .. } = &self.heap()[id as usize] else {
+                    panic!("field access on non-record");
+                };
+                fields[idx]
+            }
+            Prim::Hash => {
+                let h = self.hash_value(args[0]);
+                self.encode(Val::Int((h & 0x7fff_ffff) as i128))
+            }
             Prim::VectorLen => {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("vector-length: not a vector");
@@ -904,6 +949,61 @@ impl<M: ValueModel> Runtime<M> {
             }
         }
         None
+    }
+
+    /// A deterministic 32-bit content hash of any value (for the HAMT). Equal
+    /// values (by `equal`) hash equal: ints by value, strings/symbols/chars by
+    /// content, records/cons/arrays structurally, nil=0. FNV-1a style mixing; not
+    /// tied to any host's exact hash (we don't interop with real cljs hashes).
+    pub fn hash_value(&self, bits: u64) -> u32 {
+        const FNV_OFFSET: u32 = 0x811c9dc5;
+        const FNV_PRIME: u32 = 0x0100_0193;
+        fn mix(h: u32, x: u32) -> u32 {
+            (h ^ x).wrapping_mul(FNV_PRIME)
+        }
+        fn mix_str(mut h: u32, s: &str) -> u32 {
+            for b in s.bytes() {
+                h = mix(h, b as u32);
+            }
+            h
+        }
+        match self.decode(bits) {
+            Val::Nil => 0,
+            Val::Bool(b) => mix(FNV_OFFSET, b as u32 + 1),
+            Val::Int(i) => mix(FNV_OFFSET, (i as u64 as u32) ^ ((i as u64 >> 32) as u32)),
+            Val::Float(f) => mix(FNV_OFFSET, f.to_bits() as u32 ^ (f.to_bits() >> 32) as u32),
+            Val::Sym(s) => mix_str(0x53_9d_11u32, self.sym_name(s)),
+            Val::Ref(id) => match &self.heap()[id as usize] {
+                Obj::Str(s) => mix_str(FNV_OFFSET, s),
+                Obj::Char(c) => mix(0xc4a_u32, *c as u32),
+                Obj::BigInt(i) => mix(FNV_OFFSET, *i as u64 as u32),
+                Obj::HugeInt(b) => mix_str(FNV_OFFSET, &b.to_string()),
+                Obj::BoxFloat(f) => mix(FNV_OFFSET, f.to_bits() as u32),
+                Obj::Record { type_id, fields } => {
+                    let mut h = mix_str(0x9e37_79b9u32, self.sym_name(*type_id));
+                    for &f in fields {
+                        h = mix(h, self.hash_value(f));
+                    }
+                    h
+                }
+                Obj::Cons { .. } => {
+                    let mut h = 0x1000_193u32;
+                    for x in self.list_to_vec(bits) {
+                        h = mix(h, self.hash_value(x));
+                    }
+                    h
+                }
+                Obj::Vector(elems) => {
+                    let elems = elems.clone();
+                    let mut h = 0x27d4_eb2fu32;
+                    for x in elems {
+                        h = mix(h, self.hash_value(x));
+                    }
+                    h
+                }
+                _ => mix(FNV_OFFSET, id),
+            },
+        }
     }
 
     /// The type TAG of ANY value as an interned symbol: a record's own `type_id`,

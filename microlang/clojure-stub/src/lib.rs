@@ -23,6 +23,7 @@ use microlang::{CodeSpace, Obj, Runtime, Val, ValueModel};
 static GENSYM: AtomicU64 = AtomicU64::new(0);
 
 mod compile;
+mod cljs_types_src;
 mod core_src;
 mod reader;
 pub use reader::read_all;
@@ -35,6 +36,9 @@ pub fn run<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, src: &str)
     let mut macros: HashSet<Sym> = HashSet::new();
     let mut comp = Compiler::new(rt);
     run_src(rt, cs, &mut macros, &mut comp, core_src::CORE);
+    // Persistent data structures ported from ClojureScript (EPL-1.0), loaded after
+    // the core protocols/shim they build on. Redefines vector/vec/vector?.
+    run_src(rt, cs, &mut macros, &mut comp, cljs_types_src::CLJS);
     // Route `(obj arg)` for a non-closure record (keyword/map/vector) through the
     // core `-apply-obj` dispatcher, so keywords/collections are callable.
     let apply_obj = rt.intern("-apply-obj");
@@ -519,8 +523,15 @@ fn desugar_deftype<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
     let defk = sym(rt, "def");
     let ctordef = rt.vec_to_list(&[defk, ctorname, ctorfn]);
 
+    // register the field-name order so `(.-field x)` resolves by name.
+    let regsym = sym(rt, "%register-fields");
+    let tq = quote_form(rt, tsym);
+    let flist = rt.vec_to_list(&fields);
+    let fq = quote_form(rt, flist);
+    let regcall = rt.vec_to_list(&[regsym, tq, fq]);
+
     let dok = sym(rt, "do");
-    let mut out = vec![dok, ctordef];
+    let mut out = vec![dok, ctordef, regcall];
 
     // inline protocol methods: a bare symbol starts a protocol group (or `Object`);
     // lists are method impls, and consecutive same-name impls are one multi-arity fn.
@@ -863,6 +874,16 @@ fn interop_rewrite<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> Option<u64>
         let method = hname[slash + 1..].to_string();
         return Some(shim_call(rt, &class, &method, &items[1..]));
     }
+    // `(.-field x)` -> `(%field-by-name x 'field)` — ClojureScript field access on
+    // a deftype instance, resolved through the field-name registry.
+    if let Some(field) = hname.strip_prefix(".-") {
+        if !field.is_empty() {
+            let fsym = sym(rt, field);
+            let fq = quote_form(rt, fsym);
+            let fbn = sym(rt, "%field-by-name");
+            return Some(rt.vec_to_list(&[fbn, items[1], fq]));
+        }
+    }
     if hname.starts_with('.') && hname.len() > 1 {
         let method = hname[1..].to_string();
         return Some(shim_instance(rt, &method, items[1], &items[2..]));
@@ -1107,10 +1128,44 @@ fn binding_items<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Option<Vec<u64>> 
     if let Some(lst) = record_field0(rt, form, reader::VECTOR) {
         return Some(rt.list_to_vec(lst));
     }
+    // A runtime vector built by a macro / syntax-quote. Two layouts coexist: the
+    // load-time `PVec` (macros expanded while core.clj loads) and the cljs-ported
+    // `PersistentVector` (user-time expansion, after cljs types load).
     if record_field0(rt, form, "PVec").is_some() {
         return Some(pvec_elems(rt, form));
     }
+    if record_field0(rt, form, "PersistentVector").is_some() {
+        return Some(persistent_vector_elems(rt, form));
+    }
     None
+}
+
+/// Read a cljs `PersistentVector`'s elements: fields [meta cnt shift root tail
+/// __hash], where `root` is a `VectorNode` (arr = its field 1) and `tail` is a
+/// raw array. Mirrors cljs `unchecked-array-for`.
+fn persistent_vector_elems<M: ValueModel>(rt: &Runtime<M>, pv: u64) -> Vec<u64> {
+    let cnt = pvec_int_field(rt, pv, 1);
+    let shift = pvec_int_field(rt, pv, 2);
+    let root = pvec_ref_field(rt, pv, 3);
+    let tail = pvec_ref_field(rt, pv, 4);
+    let node_arr = |rt: &Runtime<M>, node: u64| pvec_ref_field(rt, node, 1);
+    let tail_off = if cnt < 32 { 0 } else { ((cnt - 1) >> 5) << 5 };
+    let mut out = Vec::with_capacity(cnt);
+    for i in 0..cnt {
+        let arr = if i >= tail_off {
+            tail
+        } else {
+            let mut node = root;
+            let mut level = shift;
+            while level > 0 {
+                node = arr_get(rt, node_arr(rt, node), (i >> level) & 31);
+                level -= 5;
+            }
+            node_arr(rt, node)
+        };
+        out.push(arr_get(rt, arr, i & 31));
+    }
+    out
 }
 
 fn pvec_int_field<M: ValueModel>(rt: &Runtime<M>, pv: u64, i: usize) -> usize {
@@ -1188,7 +1243,7 @@ fn class_to_tag(simple: &str) -> Option<&'static str> {
         "Long" | "Integer" | "Short" | "Byte" | "BigInteger" | "BigInt" => "Long",
         "Double" | "Float" | "BigDecimal" => "Double",
         "Boolean" => "Boolean",
-        s if s.contains("Vector") => "PVec",
+        s if s.contains("Vector") => "PersistentVector",
         s if s.contains("Map") => "Map",
         s if s.contains("Set") => "Set",
         s if s.contains("List") || s == "ISeq" || s == "Seqable" || s == "Cons" => "List",

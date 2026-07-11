@@ -7,10 +7,12 @@
 
 mod jit;
 mod model;
+mod mt;
 mod runtime;
 mod verify;
 
 pub use jit::*;
 pub use model::*;
+pub use mt::*;
 pub use runtime::*;
 pub use verify::*;

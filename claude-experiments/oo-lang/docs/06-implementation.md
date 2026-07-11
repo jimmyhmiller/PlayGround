@@ -2072,3 +2072,102 @@ translates region/chip/mrow/type clicks into targets. `App` owns the `inspect` s
 - **htm/React context is the clean seam for ref-nav.** Because `RefLink` reads `navigateRef` from
   `NavContext`, redirecting refs from "switch to browse" to "push onto the inspector stack" was a
   one-line context override around the panel body — no prop-drilling through `DetailPane`/`ValueView`.
+
+
+# Phase V6 — program-declared `action` construct (DECISIONS #17)
+
+V6 is the MIRROR of V2's `view`: where `view` declares how an entity should be SEEN, `action`
+declares what a user can DO to it — named, typed, parameterized operations that change state / do
+side effects, surfaced as prominent BUTTONS in the instance detail inspector (above the raw method
+list, since curated affordances are primary). The whole thing is ~90% assembly of existing
+machinery: `view` is the structural template, a METHOD is the body/compile/invoke template, and the
+desugar reuses the entire method pipeline with ZERO new runtime.
+
+## Grammar (as implemented)
+```
+action "<Label>" for <Type> [(<param>: <T>, …)] { <body> }
+```
+The body is full Scry with `self` bound to the target instance (call methods, mutate fields, spawn
+threads, etc.). It may return a value or Void; V6 always reports `Void` and discards any yielded
+value (actions are side-effecting). `action` is the only new reserved keyword (`for` already
+existed). `parse-dump` renders it as `(action "Label" (for (type T)) (params (param p (type T)))
+(block …))`.
+
+- **Lexer** (`lexer.coil`): one keyword, `TK_ACTION` (33).
+- **AST** (`ast.coil`): `NK_ACTION` (52). Its slot layout deliberately MIRRORS an `NK_FN`
+  (`b`=`NK_PARAMS`, `c`=return type (null ⇒ Void), `d`=`NK_BLOCK` body) so `check-fn-body` and
+  `compile-method` drive an action body **directly**, with no adapter. `s-name`=label, `a`=`NK_TYPE`
+  target, `ival`=(cast) source-file pointer for diagnostics.
+- **Parser** (`parser.coil`): `parse-action` + `parse-toplevel` dispatch on `TK_ACTION`. Reuses
+  `parse-string` (label), `parse-type` (target), `parse-params` (the optional `(…)`), `parse-block`
+  (body) — the same helpers `parse-fn`/`parse-view` use.
+
+## Typecheck rules (`typecheck.coil`, pass 3 `check-all-actions`)
+Actions are collected (entry module only, `deep`) into `Ctx.actions`, checked AFTER
+signatures+bodies+views so monos exist — exactly like `check-all-views`. Per action `check-action`:
+the target `T` must be a declared entity **class/object** (interface/enum/unknown ⇒ span'd error),
+then the body is checked by handing the action node straight to `check-fn-body(T, action, self:T)`
+(valid because the node shares the `NK_FN` slot layout). Params are typed and bound; an unknown
+field/method/type/param in the body is a clean `file:line:col` diagnostic. Check goldens:
+`tests/check/51-action-ok` (success — mutate a field, call a method, take a param) + `e46`–`e50`
+(unknown target type, unknown method, unknown field, interface target, bad param type).
+
+## Desugar → hidden synthetic method (`compile.coil` `inject-actions`, in `build-program`)
+Each `action "L" for T (params) { body }` at registry index `i` becomes a HIDDEN synthetic method
+`__action_<i>` on `T`: a fresh `NK_FN` node sharing the action's params (`b`) / null return (`c`) /
+body (`d`), pushed onto `T`'s member list BEFORE `register-methods`. From there it flows through the
+UNCHANGED pipeline — `register-methods` gives it a method-table index, `compile-all-methods` compiles
+it with `self:T`, and it resolves on the normal method-invoke path — so the viewer invokes it as
+`T.at(slot,gen).__action_<i>(args)` with no new opcode. Injection is guarded to run once (a
+build-program can be called once per process). The synthetic methods are EXCLUDED from every shown
+method list by their `__action_` name prefix (`serialize.emit-methods-array`'s `is-action-method`),
+so `methods()`/`schema()` never leak them.
+
+## Reflection `actions()` (`serialize.coil` `reflect-actions`, wired in `server.coil` `try-reflection`)
+Registered exactly like `views()`; read off `Ctx.actions`. Payload:
+```json
+{ "type":"Actions", "actions":[
+  {"label":"Pause","target":"Agent","invoke":"__action_0","params":[],"returns":"Void"},
+  {"label":"Ask","target":"Agent","invoke":"__action_2",
+   "params":[{"name":"question","type":"String"}],"returns":"Void"} ] }
+```
+`invoke` is the mangled synthetic-method name (index `i` mirrors `inject-actions`' `__action_<i>`);
+`params` reuses the same `{name,type}` shape as `methods()`. Eval goldens: `tests/eval/60-actions`
+(payload), `61-action-invoke` (a live Pause flips `paused` false→true, returns Void),
+`62-action-methods-hidden` (`methods("Agent")` never contains `__action_`).
+
+## Viewer: the ACTIONS section (`viewer/app.js`, `viewer/style.css`)
+`DetailPane` fetches `actions()` once per type (they're static) and renders a new **ACTIONS** section
+ABOVE the methods section. Each declared action is an `ActionCard`: a prominent button (its own warm
+"action" green hue — distinct from methods AND from the blue liveness accent). A 0-arg action invokes
+on click; a param action opens an inline arg form (reusing `literalFor`/`literalHint`, same as
+`MethodCard`) with a `run <Label>` button. Invocation evals
+`<Type>.at(slot,gen).<invoke>(<args>)` through the existing invoke path, shows the result/error
+inline, then bumps `detailBus` so the instance re-reads and the mutation is visible LIVE. Since it
+runs through the safepoint eval channel, `--readonly` rejects the mutating ones automatically. Because
+`DetailPane` is shared, the section appears in BOTH the browse detail and the V4 in-map inspector.
+`ui-smoke.mjs` gained V6 beats (live, real headless Chrome on `examples/assistant.scry`): the Agent
+inspector renders Pause/Resume/Ask buttons above the method list, the param action (Ask) reveals an
+inline arg form, and clicking the 0-arg Pause action flips the Agent's `paused` field false→true LIVE
+in the inspector. Screenshot: `docs/v6-actions-inspector.png`.
+
+## Example actions (`examples/assistant.scry`)
+```
+action "Pause"  for Agent { self.pause() }
+action "Resume" for Agent { self.resume() }
+action "Ask"    for Agent (question: String) { self.runLoop(question) }
+action "Spawn researcher" for Orchestrator (topic: String) { self.research(topic) }
+```
+The assistant still runs + typechecks + passes its e2e app goldens with these added.
+
+## Friction / notes
+- **Almost pure reuse.** The one design decision that unlocked it: give `NK_ACTION` the `NK_FN` slot
+  layout (`b`/`c`/`d`), so `check-fn-body` and `compile-method` accept an action node verbatim, and
+  the desugar is a 4-field `NK_FN` shim into the target's member list. No new typecheck path, no new
+  compile path, no new opcode, no runtime change.
+- **Index alignment is the contract** between `inject-actions` and `reflect-actions`: both use the
+  `Ctx.actions` registry index `i` for `__action_<i>`, so the reflected `invoke` name always matches
+  the compiled method. In a well-typed program every action has a valid target (else typecheck fails
+  and it never runs), so every action is injected and indices stay aligned.
+- **Theme-aware, one new hue.** The action green (`--action`) has explicit light/dark values plus
+  `prefers-color-scheme` + `data-theme` overrides, keeping the blue accent reserved for liveness.

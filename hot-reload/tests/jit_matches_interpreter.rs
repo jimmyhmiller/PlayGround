@@ -478,15 +478,15 @@ fn scenario3_setup() -> (Runtime, ObjectId) {
         ],
     })
     .unwrap();
-    let account = rt.jit_new(ACCOUNT, &[(BALANCE, Value::I64(100))]);
+    let account = rt.jit_new(ACCOUNT, &[(BALANCE, Value::I64(100))]).unwrap();
     (rt, account)
 }
 
-/// Additive change with its migration: `Account` gains a defaulted `fee`, and
-/// the v1 → v2 migration copies `balance` and initializes `fee`. This does NOT
-/// break `loop_balance` (it still reads `balance: Int`); the live account
-/// migrates lazily and transparently at the next field access — the hot update
-/// landing between loop iterations.
+/// Additive change: `Account` gains a defaulted `fee`. No migration is
+/// installed — the runtime auto-derives it (copy `balance`, default `fee`)
+/// because the change is trivial. This does NOT break `loop_balance` (it still
+/// reads `balance: Int`); the live account migrates lazily and transparently at
+/// the next field access — the hot update landing between loop iterations.
 fn scenario3_add_fee(rt: &mut Runtime) {
     rt.install_schema(Schema {
         type_id: ACCOUNT,
@@ -496,16 +496,6 @@ fn scenario3_add_fee(rt: &mut Runtime) {
             field(BALANCE, "balance", Type::I64),
             field_with_default(FEE, "fee", Type::I64, Value::I64(0)),
         ],
-    })
-    .unwrap();
-    rt.install_migration(Migration {
-        type_id: ACCOUNT,
-        from: Version(1),
-        to: Version(2),
-        fields: BTreeMap::from([
-            (BALANCE, MigrationSource::Copy(BALANCE)),
-            (FEE, MigrationSource::Value(Value::I64(0))),
-        ]),
     })
     .unwrap();
 }
@@ -610,4 +600,271 @@ fn jit_gc_roots_from_frame_slots() {
     assert!(actor.frames.is_empty());
     assert_eq!(rt.collect_garbage_with_roots(&actor.roots()), 1, "box swept");
     assert!(rt.heap.is_empty());
+}
+
+// ===========================================================================
+// Con-freeness trap (soundness). A frame paused at a Yield inside an OLD pinned
+// function resumes AFTER a migration has changed a field's representation out
+// from under it. The pinned code must not silently use the wrong-typed value:
+// it traps, identically on both executors. Before the soundness work the JIT
+// read the migrated Ref's object id as an integer and diverged silently.
+// ===========================================================================
+
+const CELL: DefId = 5;
+const WRAPT: DefId = 6;
+const USE_CELL: DefId = 40;
+const READ_CELL: DefId = 41;
+const NF: FieldId = 500;
+const WF: FieldId = 600;
+
+/// Install `Cell{n:Int}` plus the pinned function `body`, allocate a cell, and
+/// return the runtime + cell id.
+fn confree_setup(body: Function) -> (Runtime, ObjectId) {
+    let mut rt = Runtime::default();
+    rt.install_schema(Schema {
+        type_id: CELL,
+        version: Version(1),
+        name: "Cell".into(),
+        fields: vec![field(NF, "n", Type::I64)],
+    })
+    .unwrap();
+    rt.install_function(body).unwrap();
+    let cell = rt.jit_new(CELL, &[(NF, Value::I64(41))]).unwrap();
+    (rt, cell)
+}
+
+/// The hot update that pulls the representation out from under pinned code:
+/// `Cell.n` becomes `Ref(Wrap)`, with a migration that wraps the old int. This
+/// breaks the pinned function (re-verify fails) but its running frame keeps the
+/// old version and later reads the now-`Ref` field.
+fn confree_migrate(rt: &mut Runtime) {
+    rt.install_schema(Schema {
+        type_id: WRAPT,
+        version: Version(1),
+        name: "Wrap".into(),
+        fields: vec![field(WF, "w", Type::I64)],
+    })
+    .unwrap();
+    rt.install_schema(Schema {
+        type_id: CELL,
+        version: Version(2),
+        name: "Cell".into(),
+        fields: vec![field(NF, "n", Type::Ref(WRAPT))],
+    })
+    .unwrap();
+    rt.install_migration(Migration {
+        type_id: CELL,
+        from: Version(1),
+        to: Version(2),
+        fields: BTreeMap::from([(
+            NF,
+            MigrationSource::Wrap {
+                type_id: WRAPT,
+                field: WF,
+                source: NF,
+            },
+        )]),
+    })
+    .unwrap();
+}
+
+fn run_confree(body: Function) -> (ActorStatus, ActorStatus) {
+    let (mut rt_i, cell_i) = confree_setup(body.clone());
+    let a_i = rt_i.spawn(USE_CELL, vec![Value::Ref(cell_i)]).unwrap();
+    let (mut rt_j, cell_j) = confree_setup(body);
+    let mut a_j = JitActor::spawn(&rt_j, 1, USE_CELL, vec![Value::Ref(cell_j)]).unwrap();
+
+    // Pause inside the pinned function at its Yield.
+    interp_run_to_yield(&mut rt_i, a_i);
+    drive(&mut rt_j, &mut a_j, true).unwrap();
+    assert_same(&rt_i, a_i, &rt_j, &a_j, "confree: at yield");
+
+    // Migrate the field's representation, then resume the pinned frame.
+    confree_migrate(&mut rt_i);
+    confree_migrate(&mut rt_j);
+    rt_i.run();
+    drive(&mut rt_j, &mut a_j, false).unwrap();
+    (rt_i.actors[&a_i].status.clone(), a_j.status.clone())
+}
+
+#[test]
+fn confree_arithmetic_trap_matches() {
+    // 0:Yield 1:n=GetField 2:one=1 3:SubI64(n,one) 4:Return
+    let body = Function {
+        id: USE_CELL,
+        version: Version(1),
+        name: "use_cell".into(),
+        params: vec![Type::Ref(CELL)],
+        result: Type::I64,
+        registers: 4,
+        code: vec![
+            Instruction::Yield,
+            Instruction::GetField {
+                dst: 1,
+                object: 0,
+                field: NF,
+            },
+            Instruction::Const {
+                dst: 2,
+                value: Value::I64(1),
+            },
+            Instruction::SubI64 {
+                dst: 3,
+                left: 1,
+                right: 2,
+            },
+            Instruction::Return { value: 3 },
+        ],
+    };
+    let (interp, jit) = run_confree(body);
+    // The pinned v1 code reads a now-Ref field and feeds it to SubI64: both
+    // executors trap with the identical operand-type condition (at pc 3).
+    assert_eq!(interp, jit, "executors diverged on the con-freeness trap");
+    assert!(
+        matches!(
+            &jit,
+            ActorStatus::Paused(Condition::RuntimeTypeError { function, pc, .. })
+                if *function == USE_CELL && *pc == 3
+        ),
+        "expected an operand-type trap at the subtraction, got {jit:?}"
+    );
+}
+
+#[test]
+fn confree_return_trap_matches() {
+    // 0:Yield 1:n=GetField 2:Return n  — returns a now-Ref where Int is declared
+    let body = Function {
+        id: USE_CELL,
+        version: Version(1),
+        name: "read_cell".into(),
+        params: vec![Type::Ref(CELL)],
+        result: Type::I64,
+        registers: 2,
+        code: vec![
+            Instruction::Yield,
+            Instruction::GetField {
+                dst: 1,
+                object: 0,
+                field: NF,
+            },
+            Instruction::Return { value: 1 },
+        ],
+    };
+    let (interp, jit) = run_confree(body);
+    assert_eq!(interp, jit, "executors diverged on the return-type trap");
+    assert!(
+        matches!(
+            &jit,
+            ActorStatus::Paused(Condition::RuntimeTypeError { function, pc, .. })
+                if *function == USE_CELL && *pc == 2
+        ),
+        "expected a return-type trap, got {jit:?}"
+    );
+    let _ = READ_CELL;
+}
+
+// ===========================================================================
+// Auto-derived migrations (D6). A trivial schema change (add a defaulted field)
+// migrates live values with NO hand-written migration; a genuine representation
+// change is left as a gap for the developer.
+// ===========================================================================
+
+const AUTO: DefId = 7;
+const AF: FieldId = 700;
+const AF2: FieldId = 701;
+const READ_AUTO: DefId = 50;
+
+fn auto_setup() -> (Runtime, ObjectId) {
+    let mut rt = Runtime::default();
+    rt.install_schema(Schema {
+        type_id: AUTO,
+        version: Version(1),
+        name: "Auto".into(),
+        fields: vec![field(AF, "a", Type::I64)],
+    })
+    .unwrap();
+    rt.install_function(Function {
+        id: READ_AUTO,
+        version: Version(1),
+        name: "read_auto".into(),
+        params: vec![Type::Ref(AUTO)],
+        result: Type::I64,
+        registers: 2,
+        code: vec![
+            Instruction::GetField {
+                dst: 1,
+                object: 0,
+                field: AF,
+            },
+            Instruction::Return { value: 1 },
+        ],
+    })
+    .unwrap();
+    let obj = rt.jit_new(AUTO, &[(AF, Value::I64(10))]).unwrap();
+    (rt, obj)
+}
+
+fn auto_add_field(rt: &mut Runtime) {
+    rt.install_schema(Schema {
+        type_id: AUTO,
+        version: Version(2),
+        name: "Auto".into(),
+        fields: vec![
+            field(AF, "a", Type::I64),
+            field_with_default(AF2, "b", Type::I64, Value::I64(99)),
+        ],
+    })
+    .unwrap();
+}
+
+#[test]
+fn auto_derived_migration_is_transparent_on_both_executors() {
+    let mut rt_i = auto_setup();
+    let mut rt_j = auto_setup();
+
+    auto_add_field(&mut rt_i.0);
+    auto_add_field(&mut rt_j.0);
+    // Installing the schema auto-derived the v1→v2 migration — no explicit one.
+    assert!(
+        rt_i.0.world.migrations.contains_key(&(AUTO, Version(1))),
+        "additive+defaulted change should auto-derive a migration"
+    );
+
+    let a_i = rt_i.0.spawn(READ_AUTO, vec![Value::Ref(rt_i.1)]).unwrap();
+    rt_i.0.run();
+    let mut a_j = JitActor::spawn(&rt_j.0, 1, READ_AUTO, vec![Value::Ref(rt_j.1)]).unwrap();
+    drive(&mut rt_j.0, &mut a_j, false).unwrap();
+
+    // The read migrated the object transparently (no pause) and saw the old
+    // value; the defaulted field was filled in.
+    assert_same(&rt_i.0, a_i, &rt_j.0, &a_j, "auto-derived");
+    assert_eq!(a_j.status, ActorStatus::Complete(Value::I64(10)));
+    assert_eq!(rt_j.0.heap[&rt_j.1].schema, Version(2));
+    assert_eq!(rt_j.0.heap[&rt_j.1].fields[&AF2], Value::I64(99));
+}
+
+#[test]
+fn auto_derivation_abstains_on_representation_change() {
+    // Retyping a field with no default is a gap: no migration is auto-installed,
+    // so a cross traps `MissingMigration` until a developer supplies one. (This
+    // is why the Box/Wrapper and Account/Money scenarios still pause.)
+    let mut rt = Runtime::default();
+    rt.install_schema(Schema {
+        type_id: AUTO,
+        version: Version(1),
+        name: "Auto".into(),
+        fields: vec![field(AF, "a", Type::I64)],
+    })
+    .unwrap();
+    rt.install_schema(Schema {
+        type_id: AUTO,
+        version: Version(2),
+        name: "Auto".into(),
+        fields: vec![field(AF, "a", Type::Ref(AUTO))], // Int → Ref, no default
+    })
+    .unwrap();
+    assert!(
+        !rt.world.migrations.contains_key(&(AUTO, Version(1))),
+        "a representation change must NOT be auto-derived"
+    );
 }

@@ -1,4 +1,4 @@
-use crate::{Function, Instruction, Schema, Type, Value, World};
+use crate::{DefId, Function, Instruction, Schema, Type, Value, World};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn value_type(value: &Value) -> Result<Type, String> {
@@ -176,7 +176,10 @@ fn successors(instruction: &Instruction, pc: usize) -> Vec<usize> {
 /// merge type-safe). A fixpoint worklist propagates environments from entry;
 /// a pc reached with two different environments, an out-of-range target, or a
 /// fall-through off the end is a type error.
-pub fn verify_function(function: &Function, world: &World) -> Result<(), Vec<String>> {
+/// On success returns the set of nominal types this function references (its
+/// dependency set, D7), so a schema change re-verifies only the functions that
+/// could be affected by it.
+pub fn verify_function(function: &Function, world: &World) -> Result<BTreeSet<DefId>, Vec<String>> {
     let mut errors = Vec::new();
     if function.registers < function.params.len() {
         return Err(vec!["not enough registers for parameters".into()]);
@@ -263,9 +266,29 @@ pub fn verify_function(function: &Function, world: &World) -> Result<(), Vec<Str
     if !any_return && errors.is_empty() {
         errors.push("function has no reachable return".into());
     }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors)
+    if !errors.is_empty() {
+        return Err(errors);
     }
+
+    // Collect the dependency set: every nominal type reachable through this
+    // function's signature, its registers (which cover `GetField` object and
+    // field types), and its `New` sites. A superset is fine — it only re-checks
+    // a few extra functions on a schema change, never too few.
+    let mut deps = BTreeSet::new();
+    let mut add = |ty: &Type| {
+        if let Type::Ref(t) = ty {
+            deps.insert(*t);
+        }
+    };
+    function.params.iter().for_each(&mut add);
+    add(&function.result);
+    for env in envs.iter().flatten() {
+        env.iter().flatten().for_each(&mut add);
+    }
+    for instruction in &function.code {
+        if let Instruction::New { type_id, .. } = instruction {
+            deps.insert(*type_id);
+        }
+    }
+    Ok(deps)
 }

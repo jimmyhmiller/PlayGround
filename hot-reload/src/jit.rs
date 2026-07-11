@@ -112,6 +112,11 @@ pub const OUT_RETURN: i64 = 0;
 pub const OUT_CALL: i64 = 1;
 pub const OUT_CONDITION: i64 = 2;
 pub const OUT_YIELD: i64 = 3;
+/// An operand-tag check failed (`SubI64`/`LtI64`/`Branch` saw a value of the
+/// wrong representation — the con-freeness trap). The driver reconstructs the
+/// exact condition from the instruction at `frame->pc` so it matches the
+/// interpreter's.
+pub const OUT_TYPE_ERROR: i64 = 4;
 
 // ---------------------------------------------------------------------------
 // Runtime externs. Native code calls these for the ops that touch runtime
@@ -119,14 +124,19 @@ pub const OUT_YIELD: i64 = 3;
 // interpreter cannot diverge on allocation, migration, or effects.
 // ---------------------------------------------------------------------------
 
+/// Returns 0 on success (writes `*out_objid`), 1 when construction trips the
+/// soundness check (the condition is stashed in `rt.pending_condition`).
+///
 /// # Safety
-/// `rt` is a live `*mut Runtime`, `fields` points to `n` `SuppliedField`s.
+/// `rt` is a live `*mut Runtime`, `fields` points to `n` `SuppliedField`s,
+/// `out_objid` is a writable `*mut i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lt_new(
     rt: *mut Runtime,
     type_id: i64,
     fields: *const SuppliedField,
     n: i64,
+    out_objid: *mut i64,
 ) -> i64 {
     let rt = unsafe { &mut *rt };
     let mut supplied = Vec::with_capacity(n as usize);
@@ -134,7 +144,16 @@ pub unsafe extern "C" fn lt_new(
         let f = unsafe { &*fields.offset(i) };
         supplied.push((f.field_id as FieldId, f.value.to_value()));
     }
-    rt.jit_new(type_id as DefId, &supplied) as i64
+    match rt.jit_new(type_id as DefId, &supplied) {
+        Ok(id) => {
+            unsafe { *out_objid = id as i64 };
+            0
+        }
+        Err(condition) => {
+            rt.pending_condition = Some(condition);
+            1
+        }
+    }
 }
 
 /// Returns 0 on success (writes `*out`), 1 when a migration barrier trips (the
@@ -239,7 +258,10 @@ impl<'ctx> Codegen<'ctx> {
         let void = self.ctx.void_type();
         self.module.add_function(
             "lt_new",
-            i64t.fn_type(&[ptr.into(), i64t.into(), ptr.into(), i64t.into()], false),
+            i64t.fn_type(
+                &[ptr.into(), i64t.into(), ptr.into(), i64t.into(), ptr.into()],
+                false,
+            ),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -303,12 +325,51 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.build_store(pay_f, payload).unwrap();
     }
 
-    /// Read register `i`'s payload (used for the operands of arithmetic,
-    /// comparison, branch conditions, and object ids — all verified to a known
-    /// tag, so the tag itself never needs checking here).
+    /// Read register `i`'s payload — used for operands whose tag has already
+    /// been guarded by [`Codegen::guard_tags`].
     fn payload_of(&self, frame: PointerValue<'ctx>, i: usize) -> IntValue<'ctx> {
         let slot = self.slot_ptr(frame, i);
         self.load_field(slot, 1, "payload")
+    }
+
+    fn tag_of(&self, frame: PointerValue<'ctx>, i: usize) -> IntValue<'ctx> {
+        let slot = self.slot_ptr(frame, i);
+        self.load_field(slot, 0, "tag")
+    }
+
+    /// Guard that each `(reg, expected_tag)` holds, before the current
+    /// instruction consumes those operands. On any mismatch, branch to a block
+    /// that parks `frame->pc` at this instruction and returns `OUT_TYPE_ERROR`
+    /// — the native con-freeness trap. On success the builder is left
+    /// positioned in a fresh "checks passed" block. Without this, native
+    /// arithmetic would read a migrated `Ref`'s object id as an integer and
+    /// silently diverge from the interpreter (which tag-checks its operands).
+    fn guard_tags(
+        &self,
+        step: FunctionValue<'ctx>,
+        frame: PointerValue<'ctx>,
+        pc: usize,
+        checks: &[(usize, i64)],
+    ) {
+        let i64t = self.ctx.i64_type();
+        let err = self.ctx.append_basic_block(step, &format!("pc{pc}.badtag"));
+        for (n, (reg, expected)) in checks.iter().enumerate() {
+            let ok = self.ctx.append_basic_block(step, &format!("pc{pc}.tagok{n}"));
+            let tag = self.tag_of(frame, *reg);
+            let good = self
+                .builder
+                .build_int_compare(IntPredicate::EQ, tag, i64t.const_int(*expected as u64, false), "tagok")
+                .unwrap();
+            self.builder.build_conditional_branch(good, ok, err).unwrap();
+            self.builder.position_at_end(ok);
+        }
+        // Emit the error block after wiring all checks so it dominates nothing
+        // on the success path. Save/restore the builder position.
+        let resume = step.get_last_basic_block().unwrap();
+        self.builder.position_at_end(err);
+        self.set_pc(frame, pc as u64);
+        self.ret_outcome(OUT_TYPE_ERROR);
+        self.builder.position_at_end(resume);
     }
 
     fn set_pc(&self, frame: PointerValue<'ctx>, pc: u64) {
@@ -370,6 +431,7 @@ impl<'ctx> Codegen<'ctx> {
                     fallthrough();
                 }
                 Instruction::SubI64 { dst, left, right } => {
+                    self.guard_tags(step, frame, pc, &[(*left, TAG_I64), (*right, TAG_I64)]);
                     let a = self.payload_of(frame, *left);
                     let b = self.payload_of(frame, *right);
                     let r = self.builder.build_int_sub(a, b, "sub").unwrap();
@@ -377,6 +439,7 @@ impl<'ctx> Codegen<'ctx> {
                     fallthrough();
                 }
                 Instruction::LtI64 { dst, left, right } => {
+                    self.guard_tags(step, frame, pc, &[(*left, TAG_I64), (*right, TAG_I64)]);
                     let a = self.payload_of(frame, *left);
                     let b = self.payload_of(frame, *right);
                     let lt = self
@@ -428,6 +491,7 @@ impl<'ctx> Codegen<'ctx> {
                             )
                             .unwrap()
                     };
+                    let out_objid = self.builder.build_alloca(i64t, "out.objid").unwrap();
                     let lt_new = self.module.get_function("lt_new").unwrap();
                     let call = self
                         .builder
@@ -438,13 +502,29 @@ impl<'ctx> Codegen<'ctx> {
                                 i64t.const_int(*type_id, false).into(),
                                 base.into(),
                                 i64t.const_int(n as u64, false).into(),
+                                out_objid.into(),
                             ],
-                            "objid",
+                            "status",
                         )
                         .unwrap();
-                    let objid = call_result(call).into_int_value();
+                    let status = call_result(call).into_int_value();
+                    // status != 0 → construction trapped the soundness check.
+                    let ok = self.ctx.append_basic_block(step, &format!("pc{pc}.newok"));
+                    let bad = self.ctx.append_basic_block(step, &format!("pc{pc}.newbad"));
+                    let is_ok = self
+                        .builder
+                        .build_int_compare(IntPredicate::EQ, status, i64t.const_zero(), "newisok")
+                        .unwrap();
+                    self.builder.build_conditional_branch(is_ok, ok, bad).unwrap();
+                    self.builder.position_at_end(bad);
+                    self.set_pc(frame, pc as u64);
+                    self.ret_outcome(OUT_CONDITION);
+                    self.builder.position_at_end(ok);
+                    let objid = self.builder.build_load(i64t, out_objid, "objid").unwrap().into_int_value();
                     self.store_slot(frame, *dst, i64t.const_int(TAG_REF as u64, false), objid);
-                    fallthrough();
+                    if pc + 1 < blocks.len() {
+                        self.builder.build_unconditional_branch(blocks[pc + 1]).unwrap();
+                    }
                 }
                 Instruction::GetField { dst, object, field } => {
                     let objid = self.payload_of(frame, *object);
@@ -496,6 +576,7 @@ impl<'ctx> Codegen<'ctx> {
                     then_pc,
                     else_pc,
                 } => {
+                    self.guard_tags(step, frame, pc, &[(*cond, TAG_BOOL)]);
                     let c = self.payload_of(frame, *cond);
                     let taken = self
                         .builder
@@ -524,6 +605,9 @@ impl<'ctx> Codegen<'ctx> {
                     self.builder.build_store(tag_f, tag).unwrap();
                     let pay_f = self.builder.build_struct_gep(frame_ty, frame, 6, "sc.pay").unwrap();
                     self.builder.build_store(pay_f, payload).unwrap();
+                    // Park pc at the Return so the driver's result-type check
+                    // reports the same pc the interpreter does.
+                    self.set_pc(frame, pc as u64);
                     self.ret_outcome(OUT_RETURN);
                 }
             }
@@ -763,11 +847,28 @@ pub fn drive(rt: &mut Runtime, actor: &mut JitActor, stop_on_yield: bool) -> Res
 
         match outcome {
             OUT_RETURN => {
-                let result = raw.scratch;
+                let result_slot = raw.scratch;
+                let result = result_slot.to_value();
+                // Check the result against the returning frame's declared type
+                // before it leaves the frame — the con-freeness trap for a
+                // pinned old function returning a since-migrated value.
+                let (fid, ver, ret_pc) = {
+                    let f = actor.frames.last().unwrap();
+                    (f.func_id, f.version, f.pc)
+                };
+                if let FunctionState::Ready(f) = &rt.world.functions[&(fid, ver)] {
+                    let result_ty = f.result.clone();
+                    if let Err(condition) =
+                        rt.expect_value(&result, &result_ty, fid, ret_pc, "return value")
+                    {
+                        actor.status = ActorStatus::Paused(condition);
+                        continue;
+                    }
+                }
                 let done = actor.frames.pop().unwrap();
                 match done.return_to {
-                    Some(reg) => actor.frames.last_mut().unwrap().regs[reg] = result,
-                    None => actor.status = ActorStatus::Complete(result.to_value()),
+                    Some(reg) => actor.frames.last_mut().unwrap().regs[reg] = result_slot,
+                    None => actor.status = ActorStatus::Complete(result),
                 }
             }
             OUT_CALL => handle_call(rt, actor)?,
@@ -778,6 +879,20 @@ pub fn drive(rt: &mut Runtime, actor: &mut JitActor, stop_on_yield: bool) -> Res
                     .expect("CONDITION outcome without a stashed condition");
                 actor.status = ActorStatus::Paused(condition);
             }
+            OUT_TYPE_ERROR => {
+                // Native operand-tag trap. Rebuild the exact condition from the
+                // trapping instruction so it matches the interpreter.
+                let (fid, ver, trap_pc) = {
+                    let f = actor.frames.last().unwrap();
+                    (f.func_id, f.version, f.pc)
+                };
+                let instruction = match &rt.world.functions[&(fid, ver)] {
+                    FunctionState::Ready(f) => f.code[trap_pc].clone(),
+                    _ => return Err(JitError("type-error frame pins non-ready code".into())),
+                };
+                actor.status =
+                    ActorStatus::Paused(rt.operand_type_error(fid, trap_pc, &instruction));
+            }
             OUT_YIELD => {
                 if stop_on_yield {
                     return Ok(());
@@ -787,6 +902,87 @@ pub fn drive(rt: &mut Runtime, actor: &mut JitActor, stop_on_yield: bool) -> Res
         }
     }
     Ok(())
+}
+
+/// Resume a JIT actor's con-freeness trap by supplying a value — the native
+/// half of the delimited-continuation repair (mirrors [`Runtime::resume_with`]).
+/// The offering must be well-typed for the trap's expected type, so repair can
+/// never reintroduce an ill-typed value. After this the actor is `Runnable`;
+/// call [`drive`] to continue it.
+pub fn resume_with(rt: &Runtime, actor: &mut JitActor, value: Value) -> Result<(), JitError> {
+    if !matches!(actor.status, ActorStatus::Paused(Condition::RuntimeTypeError { .. })) {
+        return Err(JitError("actor is not paused on a resumable type trap".into()));
+    }
+    let (fid, ver, pc) = {
+        let f = actor.frames.last().unwrap();
+        (f.func_id, f.version, f.pc)
+    };
+    let FunctionState::Ready(f) = &rt.world.functions[&(fid, ver)] else {
+        return Err(JitError("frame pins non-ready code".into()));
+    };
+    let result_ty = f.result.clone();
+    let instruction = f.code[pc].clone();
+    let (expected, plan) = resume_shape(&instruction, &result_ty, &rt.world).map_err(JitError)?;
+    if !rt.value_ok(&value, &expected) {
+        return Err(JitError(format!(
+            "supplied value does not have the expected type {expected:?}"
+        )));
+    }
+    let slot = RawSlot::from_value(&value);
+    match plan {
+        ResumePlan::SetAdvance(dst) => {
+            let frame = actor.frames.last_mut().unwrap();
+            frame.regs[dst] = slot;
+            frame.pc += 1;
+            actor.status = ActorStatus::Runnable;
+        }
+        ResumePlan::Branch(then_pc, else_pc) => {
+            let take = matches!(value, Value::Bool(true));
+            actor.frames.last_mut().unwrap().pc = if take { then_pc } else { else_pc };
+            actor.status = ActorStatus::Runnable;
+        }
+        ResumePlan::ReturnValue => {
+            let done = actor.frames.pop().unwrap();
+            match done.return_to {
+                Some(reg) => {
+                    actor.frames.last_mut().unwrap().regs[reg] = slot;
+                    actor.status = ActorStatus::Runnable;
+                }
+                None => actor.status = ActorStatus::Complete(value),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Interleave several actors over the one shared [`Runtime`] (its heap, world,
+/// and effects), round-robin at `Yield` granularity: each turn advances one
+/// runnable actor until its next safe point, pause, or completion, then moves
+/// on. Because the heap is shared, one actor's lazy migration of an object is
+/// visible to the others — the setting in which the soundness invariant is
+/// stressed by concurrency. Returns when no actor is runnable (all paused or
+/// complete). Deterministic: this is *semantic* concurrency (interleaving over a
+/// shared heap), not OS threads, so there are no data races to reason about —
+/// only whether type soundness survives shared, mid-flight migration.
+pub fn run_interleaved(rt: &mut Runtime, actors: &mut [JitActor]) -> Result<(), JitError> {
+    loop {
+        let mut progressed = false;
+        for actor in actors.iter_mut() {
+            if matches!(actor.status, ActorStatus::Runnable) {
+                drive(rt, actor, true)?;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            return Ok(());
+        }
+    }
+}
+
+/// Every live [`ObjectId`] rooted by any actor's frame slots — the precise root
+/// set for a garbage collection over a set of concurrent actors.
+pub fn all_roots(actors: &[JitActor]) -> Vec<ObjectId> {
+    actors.iter().flat_map(|a| a.roots()).collect()
 }
 
 /// Handle a `Call` hand-back: read the call site from the caller's IR, gather
@@ -835,6 +1031,16 @@ fn handle_call(rt: &mut Runtime, actor: &mut JitActor) -> Result<(), JitError> {
         let caller_frame = actor.frames.last().unwrap();
         args.iter().map(|r| caller_frame.regs[*r]).collect()
     };
+    // Check each argument against the callee's parameter type before the frame
+    // is pushed — a pinned old caller passing a since-migrated value traps here.
+    for (slot, expected) in arg_slots.iter().zip(&code.params) {
+        if let Err(condition) =
+            rt.expect_value(&slot.to_value(), expected, callee, call_pc, "call argument")
+        {
+            actor.status = ActorStatus::Paused(condition);
+            return Ok(());
+        }
+    }
     let mut regs = vec![RawSlot::EMPTY; code.registers];
     for (slot, value) in arg_slots.into_iter().enumerate() {
         regs[slot] = value;

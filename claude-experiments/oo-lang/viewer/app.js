@@ -289,8 +289,18 @@ function DetailPane({ cls, slot, gen, schema, onEditSource }) {
   const sc = schema.find((t) => t.name === cls);
   const [inst, setInst] = useState(null);
   const [error, setError] = useState(null);
+  const [actions, setActions] = useState([]);   // this type's declared actions (actions())
   const prevFields = useRef(null);      // previous poll's fields, for flash diffing
   const flashKeys = useRef({});         // field name -> nonce; bump => value cell remounts => flash replays
+
+  // Program-declared actions are static (the desugar is fixed at build) — fetch once per type.
+  useEffect(() => {
+    let live = true;
+    evalSource("actions()").then((r) => {
+      if (live && r.value && r.value.actions) setActions(r.value.actions.filter((a) => a.target === cls));
+    });
+    return () => { live = false; };
+  }, [cls]);
 
   const fetchDetail = useCallback(async () => {
     const r = await evalSource(`${cls}.at(${slot}, ${gen})`);
@@ -351,11 +361,61 @@ function DetailPane({ cls, slot, gen, schema, onEditSource }) {
         </div>
       </div>
 
+      ${actions.length ? html`
+        <div class="detail-section actions-section">
+          <h3>actions</h3>
+          <div class="action-grid">
+            ${actions.map((a) => html`<${ActionCard} key=${a.invoke} cls=${cls} slot=${slot} gen=${gen} a=${a} />`)}
+          </div>
+        </div>` : ""}
+
       ${sc && sc.methods.length ? html`
         <div class="detail-section">
           <h3>methods</h3>
           ${sc.methods.map((m) => html`<${MethodCard} key=${m.name} cls=${cls} slot=${slot} gen=${gen} m=${m} />`)}
         </div>` : ""}
+    </div>`;
+}
+
+// An action is a curated, app-blessed affordance: a prominent button (with an inline arg form if it
+// has params) that evals the action's hidden synthetic method against THIS instance through the
+// normal invoke path, then bumps detailBus so the mutation is read back live. Styled distinct from
+// the raw method list — these are "the things a person would want to do here."
+function ActionCard({ cls, slot, gen, a }) {
+  const [open, setOpen] = useState(false);
+  const [args, setArgs] = useState({});
+  const [result, setResult] = useState(null);
+  const flash = useRef(0);
+  const hasParams = a.params.length > 0;
+
+  const doInvoke = useCallback(async () => {
+    const argList = a.params.map((p) => literalFor(args[p.name] || "", p.type)).join(", ");
+    const src = `${cls}.at(${slot}, ${gen}).${a.invoke}(${argList})`;
+    const r = await evalSource(src);
+    flash.current += 1;
+    setResult({ ...r, flash: flash.current });
+    setTimeout(bumpDetail, 60); // read the mutation back immediately
+  }, [args, cls, slot, gen, a]);
+
+  return html`
+    <div class=${"action-card" + (open ? " open" : "")}>
+      <button class="action-btn" title=${hasParams ? "fill args, then run" : "run this action"}
+              onClick=${() => { if (hasParams) setOpen((o) => !o); else doInvoke(); }}>
+        <span class="action-label">${a.label}</span>
+        ${hasParams ? html`<span class="action-caret">${open ? "▾" : "▸"}</span>` : ""}
+      </button>
+      ${hasParams ? html`
+        <div class="action-form">
+          ${a.params.map((p) => html`
+            <div class="arg-row" key=${p.name}>
+              <label>${p.name}: ${cleanType(p.type)}</label>
+              <input placeholder=${literalHint(p.type)} value=${args[p.name] || ""}
+                     onInput=${(e) => setArgs((s) => ({ ...s, [p.name]: e.target.value }))}
+                     onKeyDown=${(e) => { if (e.key === "Enter") doInvoke(); }} />
+            </div>`)}
+          <div class="arg-row"><button class="action-run" onClick=${doInvoke}>run ${a.label}</button></div>
+        </div>` : ""}
+      ${result ? html`<${InvokeResult} result=${result} key=${result.flash} />` : ""}
     </div>`;
 }
 

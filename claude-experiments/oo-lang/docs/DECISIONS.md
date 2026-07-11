@@ -104,6 +104,32 @@ The raw project brief is in `../claude.md` — read it first; this file pins wha
     ought to be visualized" requirement. Build order: bespoke default view first, then the `view`
     construct. A visual MOCKUP artifact is being produced for sign-off BEFORE any runtime work.
 
+16. **Portal offers static inspection of any KNOWN project, on demand, with no `scry inspect`
+    process** (Jimmy ruling). Static inspection is a pure function of the source (typecheck →
+    schema + declared views), so a running process is unnecessary. Mechanism: a `scry schema-json
+    <file>` CLI dumps the `schema()`+`views()` JSON and exits (no server); the portal DISCOVERS
+    projects (`.scry` entry files / `Coil.toml` projects under its working tree, plus any path
+    ever run/inspected), lists them as "projects" distinct from live "running" cards, and on click
+    produces/caches (by path+mtime) that static dump and opens the V3 static view (type skeleton +
+    view templates) — zero spawned process. Non-static evals (instances/invoke/definitions) against
+    a static project return a clear "static inspection — run the project to interact" error. If the
+    project is also running, offer a jump to the live card. (Discovery scope default = working-tree
+    `.scry`/`Coil.toml`; adjustable.)
+
+17. **`action` construct — the app declares curated interaction affordances** (Jimmy ruling;
+    the mirror of `view`). Just as `view` lets a program declare how its entities should be SEEN,
+    `action` lets it declare what a user might want to DO to them — named, typed, parameterized
+    operations that change state / do side effects. Syntax (parallel to `view`):
+    `action "<Label>" for <Type> [(<param>: <T>, …)] { <body> }` — body is full Scry with `self`
+    bound to the target instance (call methods, mutate fields, spawn, etc.). Typecheck: target
+    type exists, params typed, body checks with self:T. Reflection: an `actions()` op (like
+    `views()`) returns label/target/params. The viewer surfaces declared actions as BUTTONS (with
+    arg forms) in the instance detail inspector, distinct from the raw method list — "these are the
+    things a person would want to do here." Runs through the safepoint eval channel (a curated,
+    app-blessed eval), so mutations are live and `--readonly` rejects them like any mutating eval.
+    Build AFTER the in-map inspector (action buttons live there). Global (non-`for`) app-level
+    actions are a possible later extension; start with `for <Type>`.
+
 ## Open (docs should propose, flag as OPEN, not silently decide)
 
 - **How the viewer's eval channel interleaves with running threads** — evals that read

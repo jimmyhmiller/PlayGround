@@ -196,6 +196,30 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
 .invoke-error { border-color: var(--danger); color: var(--danger); }
 .invoke-error .etrace { color: var(--fg-dim); font-size: 11px; margin-top: 5px; }
 
+/* actions — curated, app-blessed affordances (DECISIONS #17). Visually PRIMARY (above methods)
+   and given their own "action" hue (a warm go-green), distinct from methods and from the blue
+   liveness accent, so a button reads as "do this". */
+:root { --action: #3fb27f; --action-soft: #3fb27f1e; --action-ink: #06120c; }
+:root[data-theme="light"] { --action: #1f9d63; --action-soft: #1f9d6314; --action-ink: #f4fff9; }
+@media (prefers-color-scheme: light) { :root { --action: #1f9d63; --action-soft: #1f9d6314; --action-ink: #f4fff9; } }
+@media (prefers-color-scheme: light) { :root[data-theme="dark"] { --action: #3fb27f; --action-soft: #3fb27f1e; --action-ink: #06120c; } }
+.actions-section .action-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.action-card { border: 1px solid var(--action); border-radius: var(--radius); overflow: hidden;
+  background: var(--action-soft); display: flex; flex-direction: column; min-width: 0; }
+.action-btn { display: flex; align-items: center; gap: 8px; padding: 8px 14px; cursor: pointer;
+  background: var(--action); color: var(--action-ink); border: none; font-family: var(--mono);
+  font-size: 12.5px; font-weight: 600; letter-spacing: .2px; }
+.action-btn:hover { filter: brightness(1.08); }
+.action-label { white-space: nowrap; }
+.action-caret { opacity: .8; font-size: 10px; }
+.action-form { padding: 12px; border-top: 1px solid var(--action); background: var(--bg); display: none; }
+.action-card.open .action-form { display: block; }
+.action-form .arg-row input:focus { border-color: var(--action); }
+.action-run { background: var(--action); color: var(--action-ink); border: none; border-radius: 5px;
+  padding: 6px 12px; font-family: var(--mono); font-size: 12px; font-weight: 600; cursor: pointer; }
+.action-run:hover { filter: brightness(1.08); }
+.action-card .invoke-result { margin: 0; border-radius: 0; border-left: none; border-right: none; border-bottom: none; }
+
 /* repl */
 #repl { position: fixed; left: 0; right: 0; bottom: 0; height: 300px; background: var(--bg-elev);
   border-top: 1px solid var(--line); display: flex; flex-direction: column; z-index: 40;

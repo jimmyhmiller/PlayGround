@@ -471,25 +471,13 @@ pub const CORE: &str = r##"
 ;; The interop shim rewrites `(. clojure.lang.RT (first coll))` etc. to these, so
 ;; real clojure/core.clj definitions (which are written in terms of RT) execute.
 (def -list (fn [& xs] xs))
-(defn -rt-seq [c]
-  (cond (nil? c) nil
-        (pvec? c) (-pv-seq c)
-        (set? c) (field c 0)
-        (map? c) (entries (field c 0))
-        true c))
-(defn -rt-first [c] (%first (-rt-seq c)))
-(defn -rt-rest [c] (%rest (-rt-seq c)))
-(defn -rt-next [c] (let [r (%rest (-rt-seq c))] (if (nil? r) nil r)))
-(defn -rt-conj [c x]
-  (cond (pvec? c) (-pv-conj c x)
-        (set? c) (record 'Set (%cons x (field c 0)))
-        (map? c) (assoc c (nth x 0) (nth x 1))
-        (nil? c) (%cons x nil)
-        true (%cons x c)))
-(defn -rt-assoc [m k v]
-  (cond (map? m) (record 'Map (%cons k (%cons v (kv-without (field m 0) k))))
-        (nil? m) (record 'Map (%cons k (%cons v nil)))
-        true m))
+;; The RT shims just route to the protocol-dispatched public fns now.
+(defn -rt-seq [c] (seq c))
+(defn -rt-first [c] (first c))
+(defn -rt-rest [c] (rest c))
+(defn -rt-next [c] (next c))
+(defn -rt-conj [c x] (conj c x))
+(defn -rt-assoc [m k v] (assoc m k v))
 
 ;; metadata AS VALUES: stored as a trailing record field, so field 0 (the
 ;; contents) reads unchanged and `vector?`/`map?`/`seq`/… stay transparent. On a
@@ -871,7 +859,7 @@ pub const CORE: &str = r##"
 (defn -realize [x]
   (cond (lazy-seq? x) (-realize-list x)
         (%num-eq (type-of x) 'List) (-realize-list x)
-        (pvec? x) (record 'Vector (-realize-list (-pv-seq x)))
+        (vector? x) (record 'Vector (-realize-list (-pv-seq x)))
         (set? x) (record 'Set (-realize-list (field x 0)))
         (map? x) (record 'Map (-realize-list (field x 0)))
         true x))
