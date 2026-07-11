@@ -1726,30 +1726,87 @@ function ProgramCard({ prog, onOpen }) {
     </button>`;
 }
 
-function Landing({ onOpen }) {
+// A card per DISCOVERED project (GET /api/projects). A project is STATIC — pure function of its
+// source (typecheck -> schema/views/actions), served by the portal from a cached `scry schema-json`
+// dump with NO running process (DECISIONS #16). Clicking sets evalBase="/proj/<id>" and opens the
+// SAME inspector; since graph() is empty there, NestedView renders the type-skeleton (schema · not
+// running). If the project is ALSO running live, a jump affordance hops to its live program card.
+function ProjectCard({ proj, onOpen, onJumpLive }) {
+  const [nodes, setNodes] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    fetch(`/proj/${proj.id}/eval`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "card", source: "schema()" }),
+    }).then((r) => r.json()).then((j) => { if (alive) setNodes((j.value?.nodes || []).length); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [proj.id, proj.mtime]);
+  const live = proj.alsoRunning != null && proj.alsoRunning !== undefined && proj.alsoRunning !== null;
+  return html`
+    <button class="pcard project" onClick=${() => onOpen(proj)}>
+      <div class="pcard-top">
+        <span class="pcard-name">${proj.name}</span>
+        <span class="pcard-badge inspect">schema</span>
+      </div>
+      <div class="pcard-meta">
+        <span class="pcard-status static">static</span>
+        ${live
+          ? html`<span class="pcard-live-jump" onClick=${(e) => { e.stopPropagation(); onJumpLive(proj); }}>● live — jump</span>`
+          : ""}
+      </div>
+      <div class="pcard-stats">
+        ${nodes != null
+          ? html`<span><b>${nodes}</b> type${nodes === 1 ? "" : "s"}</span><span class="pcard-dot">·</span><span class="pcard-dim">no process</span>`
+          : html`<span class="pcard-dim">schema…</span>`}
+      </div>
+    </button>`;
+}
+
+function Landing({ onOpen, onOpenProject }) {
   const [progs, setProgs] = useState([]);
+  const [projects, setProjects] = useState([]);
   usePoll(async () => {
     try {
       const r = await fetch("/api/programs");
       if (r.status === 200) setProgs(await r.json());
     } catch (e) { /* keep last list */ }
+    try {
+      const rp = await fetch("/api/projects");
+      if (rp.status === 200) setProjects(await rp.json());
+    } catch (e) { /* keep last list */ }
   }, 1000, []);
+  // jump from a project card to its live program card (alsoRunning = the running program's id)
+  const jumpLive = useCallback((proj) => {
+    const p = progs.find((x) => x.id === proj.alsoRunning);
+    if (p) onOpen(p);
+  }, [progs, onOpen]);
   return html`
     <div id="portal-landing">
       <header id="portal-head">
         <div class="brand">scry<span class="brand-sub">portal</span></div>
-        <div class="portal-tag">running & inspected programs — click a card to drill in</div>
+        <div class="portal-tag">running programs & known projects — click a card to drill in</div>
       </header>
-      ${progs.length === 0
-        ? html`<div id="portal-empty">
-            <div class="pe-title">no programs yet</div>
-            <div class="pe-sub">run one in a terminal — it pops up here:</div>
-            <code class="pe-cmd">scry run examples/assistant.scry</code>
-            <code class="pe-cmd">scry inspect examples/agents.scry</code>
-          </div>`
-        : html`<div id="portal-grid">
-            ${progs.map((p) => html`<${ProgramCard} key=${p.id} prog=${p} onOpen=${onOpen} />`)}
-          </div>`}
+      <section class="portal-section">
+        <div class="portal-section-head">running <span class="psh-sub">live processes — pop up on ${"`scry run`"}</span></div>
+        ${progs.length === 0
+          ? html`<div id="portal-empty">
+              <div class="pe-title">no programs running</div>
+              <div class="pe-sub">run one in a terminal — it pops up here:</div>
+              <code class="pe-cmd">scry run examples/assistant.scry</code>
+            </div>`
+          : html`<div id="portal-grid">
+              ${progs.map((p) => html`<${ProgramCard} key=${p.id} prog=${p} onOpen=${onOpen} />`)}
+            </div>`}
+      </section>
+      <section class="portal-section">
+        <div class="portal-section-head">projects <span class="psh-sub">discovered — statically inspectable anytime, no process</span></div>
+        ${projects.length === 0
+          ? html`<div class="portal-empty-slim">no .scry projects discovered in the portal's working tree</div>`
+          : html`<div id="portal-grid">
+              ${projects.map((p) => html`<${ProjectCard} key=${p.id} proj=${p} onOpen=${onOpenProject} onJumpLive=${jumpLive} />`)}
+            </div>`}
+      </section>
     </div>`;
 }
 
@@ -1766,10 +1823,13 @@ function Root() {
       .catch(() => setPortalMode(false));
   }, []);
   const openProg = useCallback((p) => { setEvalBase(`/p/${p.id}`); setSelected(p); }, []);
+  // open a STATIC project: evalBase="/proj/<id>". graph() is empty there so the inspector shows
+  // the type-skeleton; non-static evals surface the StaticInspection error gracefully.
+  const openProject = useCallback((p) => { setEvalBase(`/proj/${p.id}`); setSelected({ id: `proj-${p.id}`, name: p.name, static: true }); }, []);
   const back = useCallback(() => { setEvalBase(""); setSelected(null); }, []);
   if (portalMode === null) return html`<div id="root-probe">connecting…</div>`;
   if (!portalMode) return html`<${App} />`;                       // standalone program
-  if (!selected) return html`<${Landing} onOpen=${openProg} />`;  // portal landing
+  if (!selected) return html`<${Landing} onOpen=${openProg} onOpenProject=${openProject} />`;  // portal landing
   return html`<${App} key=${selected.id} onBack=${back} programName=${selected.name} />`;
 }
 

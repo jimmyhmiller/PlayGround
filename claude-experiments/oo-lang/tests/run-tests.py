@@ -161,6 +161,13 @@ def main():
     pp, pf = run_portal_test(binary, filt)
     passed += pp; failed += pf
     if pf: fails.append("portal")
+    # Phase V5 (DECISIONS #16): static schema-json dump + portal static project discovery/serving.
+    sjp, sjf = run_schema_json_test(binary, filt)
+    passed += sjp; failed += sjf
+    if sjf: fails.append("schema_json")
+    ppp, ppf = run_portal_projects_test(binary, filt)
+    passed += ppp; failed += ppf
+    if ppf: fails.append("portal_projects")
     # Phase 8a: real HTTP(S) client via libcurl.
     hnp, hnf, hnfails = run_http_network_test(binary, filt)
     passed += hnp; failed += hnf; fails += hnfails
@@ -1041,6 +1048,145 @@ def run_portal_test(binary, filt):
         for k in kids:
             try: k.kill()
             except Exception: pass
+        portal.terminate()
+        try:
+            portal.wait(timeout=5)
+        except Exception:
+            portal.kill()
+
+
+def run_schema_json_test(binary, filt):
+    """Phase V5 (DECISIONS #16): `scry schema-json examples/assistant.scry` dumps the STATIC
+    reflection {schema,views,actions} as one JSON object and exits — no server, no main() run.
+    Asserts schema.nodes contains Agent, and views/actions are present specs."""
+    if filt and "schema" not in filt:
+        return 0, 0
+    import json
+    demo = os.path.abspath(os.path.join(HERE, "..", "examples", "assistant.scry"))
+    try:
+        p = subprocess.run([binary, "schema-json", demo], capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        print("FAIL schema_json\n     timed out"); return 0, 1
+    problems = []
+    if p.returncode != 0:
+        problems.append(f"expected exit 0, got {p.returncode}; stderr: {p.stderr.strip()!r}")
+    try:
+        d = json.loads(p.stdout)
+    except Exception as e:
+        print("FAIL schema_json\n     stdout not valid JSON: " + str(e))
+        return 0, 1
+    if d.get("schema", {}).get("type") != "Schema":
+        problems.append(f"missing schema object: {d.get('schema')}")
+    names = [n.get("name") for n in d.get("schema", {}).get("nodes", [])]
+    if "Agent" not in names:
+        problems.append(f"schema.nodes missing Agent: {names}")
+    if d.get("views", {}).get("type") != "Views" or not isinstance(d.get("views", {}).get("views"), list):
+        problems.append(f"missing views specs: {d.get('views')}")
+    if d.get("actions", {}).get("type") != "Actions" or not isinstance(d.get("actions", {}).get("actions"), list):
+        problems.append(f"missing actions specs: {d.get('actions')}")
+    if problems:
+        print("FAIL schema_json")
+        for pr in problems: print("     " + pr)
+        return 0, 1
+    return 1, 0
+
+
+def run_portal_projects_test(binary, filt):
+    """Phase V5 gate (DECISIONS #16): the portal statically inspects any DISCOVERED project with
+    NO `scry inspect`/`scry run` process. Starts `scry portal` (cwd = repo root, so examples/ is
+    discovered), then:
+      (1) GET /api/projects lists assistant.scry AND demo-mini.scry WITHOUT any program started;
+      (2) /api/programs is EMPTY throughout (proves no run/inspect child was ever spawned — the
+          only child is the transient `scry schema-json` dump, which exits immediately);
+      (3) POST /proj/<id>/eval {source:'schema()'} returns the real schema (nodes incl. Agent);
+      (4) views()/actions() return their specs; graph() returns empty instances;
+      (5) a mutating source (Agent.instances()) returns the StaticInspection error, not a crash.
+    SKIPPED LOUDLY if curl absent or :7357 already occupied."""
+    if filt and "projects" not in filt and "portal" not in filt:
+        return 0, 0
+    import shutil, time, json, socket as _socket, threading, urllib.request
+    if shutil.which("curl") is None:
+        print("SKIPPED portal_projects: curl not found on PATH"); return 0, 0
+    try:
+        s = _socket.create_connection(("127.0.0.1", 7357), timeout=0.4); s.close()
+        print("SKIPPED portal_projects: 127.0.0.1:7357 already in use"); return 0, 0
+    except OSError:
+        pass
+
+    root = os.path.abspath(os.path.join(HERE, ".."))
+    portal = subprocess.Popen([binary, "portal"], cwd=root, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, bufsize=1)
+    plines = []
+    threading.Thread(target=lambda: [plines.append(l) for l in portal.stdout], daemon=True).start()
+
+    def projects():
+        return json.loads(urllib.request.urlopen("http://127.0.0.1:7357/api/projects", timeout=10).read())
+
+    def programs():
+        return json.loads(urllib.request.urlopen("http://127.0.0.1:7357/api/programs", timeout=10).read())
+
+    def proj_eval(pid, src):
+        body = json.dumps({"id": "Z", "source": src}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:7357/proj/{pid}/eval", data=body,
+                                     headers={"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req, timeout=30).read())
+
+    try:
+        up = False
+        for _ in range(100):
+            if any("portal: http://localhost:7357" in l for l in plines):
+                up = True; break
+            if any("could not bind" in l for l in plines):
+                print("SKIPPED portal_projects: portal could not bind :7357"); return 0, 0
+            time.sleep(0.05)
+        if not up:
+            print("FAIL portal_projects\n     portal never started"); return 0, 1
+
+        problems = []
+        # (1) projects discovered with NO program started
+        projs = projects()
+        byname = {p["name"]: p for p in projs}
+        for want in ("assistant.scry", "demo-mini.scry"):
+            if want not in byname:
+                problems.append(f"/api/projects missing {want}: {list(byname)}")
+        # (2) no running/inspect program was spawned
+        if programs() != []:
+            problems.append(f"/api/programs not empty (a process was spawned!): {programs()}")
+        if problems:
+            print("FAIL portal_projects"); [print("     " + p) for p in problems]; return 0, 1
+
+        aid = byname["assistant.scry"]["id"]
+        # (3) schema()
+        r = proj_eval(aid, "schema()")
+        if r.get("id") != "Z":
+            problems.append(f"schema() id not echoed: {r}")
+        snames = [n.get("name") for n in r.get("value", {}).get("nodes", [])]
+        if "Agent" not in snames:
+            problems.append(f"/proj schema() missing Agent: {snames}")
+        # (4) views/actions/graph
+        rv = proj_eval(aid, "views()")
+        if rv.get("value", {}).get("type") != "Views":
+            problems.append(f"/proj views() wrong: {rv}")
+        ra = proj_eval(aid, "actions()")
+        if ra.get("value", {}).get("type") != "Actions":
+            problems.append(f"/proj actions() wrong: {ra}")
+        rg = proj_eval(aid, "graph()")
+        if rg.get("value", {}).get("instances") != []:
+            problems.append(f"/proj graph() not empty: {rg}")
+        # (5) mutating source -> StaticInspection error
+        rm = proj_eval(aid, "Agent.instances()")
+        if rm.get("error", {}).get("kind") != "StaticInspection":
+            problems.append(f"/proj mutating eval did not return StaticInspection: {rm}")
+        # still no program spawned after all that
+        if programs() != []:
+            problems.append(f"/api/programs not empty after static evals: {programs()}")
+
+        if problems:
+            print("FAIL portal_projects")
+            for p in problems: print("     " + p)
+            return 0, 1
+        return 1, 0
+    finally:
         portal.terminate()
         try:
             portal.wait(timeout=5)
