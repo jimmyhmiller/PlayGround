@@ -180,6 +180,9 @@ class TurnWorker implements Runnable {
     Console.log("\n[viewer] " + self.text)
     let reply = self.agent.runLoop(self.text)
     Console.log(self.agent.banner() + " " + reply)
+    // The main loop is still blocked in readLine (it drew the prompt before we ran), so it won't
+    // redraw it — re-show `you> ` ourselves so the terminal looks ready for the next input.
+    Console.print("you> ")
   }
 }
 
