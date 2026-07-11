@@ -591,6 +591,25 @@ fn persistent_hash_map() {
 }
 
 #[test]
+fn persistent_hash_set() {
+    assert_eq!(run("(set? #{1 2 3})"), "true");
+    assert_eq!(run("(type-of #{1 2})"), "PersistentHashSet");
+    assert_eq!(run("(contains? #{1 2 3} 2)"), "true");
+    assert_eq!(run("(contains? #{1 2 3} 9)"), "false");
+    assert_eq!(run("(conj #{1 2} 2)"), "#{1 2}"); // no dup
+    assert_eq!(run("(count (conj #{1 2} 3))"), "3");
+    assert_eq!(run("(count (disj #{1 2 3} 2))"), "2");
+    assert_eq!(run("(#{:a :b} :a)"), ":a"); // set is callable
+    assert_eq!(run("(#{:a :b} :z)"), "nil");
+    assert_eq!(run("(= #{1 2 3} #{3 2 1})"), "true"); // order-independent
+    assert_eq!(run("(= #{1 2} #{1 2 3})"), "false");
+    assert_eq!(run("(count (into #{} [1 1 2 2 3 3 3]))"), "3"); // dedup
+    assert_eq!(run("(count (set (range 100)))"), "100"); // backed by a HAMT
+    assert_eq!(run("(contains? (set (range 100)) 73)"), "true");
+    assert_eq!(run("(sort (seq #{3 1 2}))"), "(1 2 3)");
+}
+
+#[test]
 fn protocol_dispatch_collections() {
     // The core collection fns dispatch through protocols (ClojureScript-style):
     // a USER type that implements the protocols works with all of them, with no

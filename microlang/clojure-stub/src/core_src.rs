@@ -334,6 +334,7 @@ pub const CORE: &str = r##"
   (cond (multi? o) (-multi-call o args)
         (keyword? o) (get (first args) o)
         (map? o) (get o (first args))
+        (set? o) (get o (first args))
         (vector? o) (nth o (first args))
         true (throw "value is not callable")))
 
@@ -818,7 +819,7 @@ pub const CORE: &str = r##"
         (string? x) x
         (keyword? x) (%str-cat ":" (%str-of (field x 0)))
         (vector? x) (%str-cat "[" (%str-cat (-str-join " " x) "]"))
-        (set? x) (%str-cat "#{" (%str-cat (-str-join " " (field x 0)) "}"))
+        (set? x) (%str-cat "#{" (%str-cat (-str-join " " (seq x)) "}"))
         (map? x) (%str-cat "{" (%str-cat (-str-entries (seq x)) "}"))
         (lazy-seq? x) (%str-cat "(" (%str-cat (-str-join " " x) ")"))
         (list? x) (%str-cat "(" (%str-cat (-str-join " " x) ")"))
@@ -871,7 +872,7 @@ pub const CORE: &str = r##"
   (cond (lazy-seq? x) (-realize-list x)
         (%num-eq (type-of x) 'List) (-realize-list x)
         (vector? x) (record 'Vector (-realize-list (-pv-seq x)))
-        (set? x) (record 'Set (-realize-list (field x 0)))
+        (set? x) (record 'Set (-realize-list (seq x)))
         (map? x) (record 'Map (-realize-entries (seq x)))
         true x))
 ;; Flatten a seq of [k v] map entries into a realized (k v k v …) list for display.

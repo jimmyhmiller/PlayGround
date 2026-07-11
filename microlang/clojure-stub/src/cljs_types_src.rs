@@ -637,4 +637,63 @@ pub const CLJS: &str = r##"
 (def -EMPTY-PHM (PersistentHashMap. nil 0 nil false nil nil))
 ;; map? now recognises both persistent map types.
 (defn map? [x] (let [t (type-of x)] (if (%num-eq t 'PersistentArrayMap) true (%num-eq t 'PersistentHashMap))))
+
+;; ─────────────── PersistentHashSet — ported from cljs/core.cljs (EPL-1.0) ──────
+;; A set is a wrapper over a map whose keys are the elements. Verbatim except
+;; HOST: -lookup uses -contains-key? (not -find/MapEntry); -equiv scans the seq;
+;; -seq/-count delegate to the backing map; iterator/transient dropped.
+(defprotocol ISet (-disjoin [coll v]))
+(deftype PersistentHashSet [meta hash-map __hash]
+  IWithMeta
+  (-with-meta [coll new-meta]
+    (if (identical? new-meta meta) coll (PersistentHashSet. new-meta hash-map __hash)))
+  IMeta
+  (-meta [coll] meta)
+
+  ICollection
+  (-conj [coll o]
+    (let [m (-assoc hash-map o nil)]
+      (if (identical? m hash-map) coll (PersistentHashSet. meta m nil))))
+
+  IEmptyableCollection
+  (-empty [coll] (-with-meta -EMPTY-PHS meta))
+
+  IEquiv
+  (-equiv [coll other]
+    (if (set? other)
+      (if (== (-count coll) (-count other))
+        (loop [ks (seq coll)]
+          (if (nil? ks) true (if (-contains-key? (.-hash-map other) (first ks)) (recur (next ks)) false)))
+        false)
+      false))
+
+  IHash
+  (-hash [coll] (caching-hash coll hash-unordered-coll __hash))
+
+  ISeqable
+  (-seq [coll] (keys hash-map))
+
+  ICounted
+  (-count [coll] (-count hash-map))
+
+  ILookup
+  (-lookup [coll v] (-lookup coll v nil))
+  (-lookup [coll v not-found] (if (-contains-key? hash-map v) v not-found))
+
+  IAssociative
+  (-contains-key? [coll k] (-contains-key? hash-map k))
+
+  ISet
+  (-disjoin [coll v]
+    (let [m (-dissoc hash-map v)]
+      (if (identical? m hash-map) coll (PersistentHashSet. meta m nil))))
+
+  IFn
+  (-invoke [coll k] (-lookup coll k)))
+
+(def -EMPTY-PHS (PersistentHashSet. nil -EMPTY-PHM nil))
+(defn set? [x] (%num-eq (type-of x) 'PersistentHashSet))
+(defn set [coll] (reduce (fn [s x] (-conj s x)) -EMPTY-PHS (seq coll)))
+(defn hash-set [& es] (set es))
+(defn disj [s & vs] (loop [s s vs (seq vs)] (if (nil? vs) s (recur (-disjoin s (first vs)) (next vs)))))
 "##;
