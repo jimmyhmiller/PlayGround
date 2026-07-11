@@ -45,6 +45,14 @@ for **the browser** — enough to build interactive pages in Coil (see `web/`):
   and `GOT.mem.*` globals to concrete addresses, so string literals and
   `alloc-static` global state work with no JS-side plumbing. The only imports a
   module has are the host functions it actually calls.
+- **`externref`.** A built-in opaque type: a wasm reference to a host (JS) value,
+  held directly by the runtime and GC-managed. Use it in `extern` signatures and as
+  params/returns/`let`-locals to pass JS values to and from Coil without a handle
+  table — `(extern js_get :cc c [externref (ptr u8) i32] (-> externref))`. ⚠ An
+  `externref` lives only in wasm locals/args; it **cannot** be stored in linear
+  memory (no struct field, array, `(mut …)` slot, or `(ptr externref)`). To persist
+  one across calls, hand it to a host retain-table and keep the returned `i32`
+  index. Transient `externref`s are collected automatically — nothing to free.
 
 `web/coil-runtime.js` instantiates a module and wires the `env.dom_*` imports from
 `web/dom.coil` to a real `document`; `web/counter.coil` is a worked interactive

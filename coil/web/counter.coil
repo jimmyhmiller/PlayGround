@@ -1,5 +1,4 @@
-; counter.coil -- the minimal example on the generic bridge: an interactive page
-; in Coil. Same architecture as todomvc.coil, just tiny. Build:
+; counter.coil -- the minimal example, over externref. Build:
 ;   coil build counter.coil --target wasm32-unknown-unknown -o counter.wasm
 (module counter)
 (import "slice.coil" :use *)
@@ -7,12 +6,12 @@
 (import "dom.coil"   :use *)
 
 (defn count [] (-> (ptr i32)) (alloc-static i32))   ; the tally
-(defn view  [] (-> (ptr i32)) (alloc-static i32))   ; the display node's jsref
+(defn view  [] (-> (ptr i32)) (alloc-static i32))   ; retain index of the display node
 
-(defn render [] (-> i32) (set-text-ref! (load (view)) (js-num (load (count)))))
+(defn render [] (-> i32) (set-text-ref! (deref (load (view))) (js-num (load (count)))))
 
-(defn on-inc [(u i32) (e i32)] (-> i64) (store! (count) (iadd (load (count)) (cast i32 1))) (render) 0)
-(defn on-dec [(u i32) (e i32)] (-> i64) (store! (count) (isub (load (count)) (cast i32 1))) (render) 0)
+(defn on-inc [(u i32) (e externref)] (-> i64) (store! (count) (iadd (load (count)) (cast i32 1))) (render) 0)
+(defn on-dec [(u i32) (e externref)] (-> i64) (store! (count) (isub (load (count)) (cast i32 1))) (render) 0)
 
 (defn main [] (-> i64)
   (let [root    (body)
@@ -25,7 +24,7 @@
     (set-text! inc "+") (on! inc "click" "on_inc" (cast i32 0)) (append! root inc)
     (set-text! dec "-") (on! dec "click" "on_dec" (cast i32 0)) (append! root dec)
     (store! (count) (cast i32 0))
-    (store! (view) display)
+    (store! (view) (retain display))
     (render)
     0))
 

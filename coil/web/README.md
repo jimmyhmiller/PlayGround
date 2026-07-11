@@ -7,10 +7,20 @@ fixed, app-agnostic bridge that never grows.
 
 ## The idea: one generic bridge, everything else in Coil
 
-`js-bridge.js` exposes ~11 *generic* JavaScript operations — get/set a property, call
-a method, make a string/number, register a callback, release a handle — and knows
-nothing about the DOM or any app. Every JS value that crosses into Coil is an opaque
-integer **handle** (`jsref`). On top of these primitives:
+`js-bridge.js` exposes a handful of *generic* JavaScript operations — get/set a
+property, call a method, make a string/number, register a callback — and knows
+nothing about the DOM or any app. Every JS value that crosses into Coil is a wasm
+**`externref`**: the runtime holds the real JS value directly (GC-managed), so there
+is no handle table for the values flowing through get/set/call. A transient (the
+object a getter returns, the string a method produces) is just a wasm local and is
+collected automatically when the Coil function returns — **nothing to free, no leak**.
+
+The one exception is state a program keeps *across* turns (a DOM node it will mutate
+on a later event): `externref` can't live in linear memory, so those few values are
+`retain`ed to a small table and referred to by an `i32` index the Coil model stores
+(`unretain` on delete). The table holds only what you deliberately persist.
+
+On top of these primitives:
 
 - `js.coil` — a typed Coil layer over the primitives (`js-get`, `js-call1`, `js-str`, …).
 - `dom.coil` — a DOM vocabulary written **entirely in Coil** (`create`, `append!`,
@@ -50,10 +60,10 @@ node test-todomvc.mjs             # or run the headless test
 - **The count**: `set-text-ref! counter (js-num (active-count))` — Coil computes it,
   JS coerces the number to text.
 
-## Handle lifetime (the one caveat)
+## Ref lifetime
 
-`jsref` handles are freed manually (`js-release!`); the wrappers release obvious
-temporaries and per-todo handles are released on delete, but transient results of
-get/call chains still accumulate. The clean fix is wasm **`externref`** (GC-managed
-JS references, no handle table) — a planned backend addition; the handle table is the
-zero-new-features stepping stone.
+Transient JS values are `externref`s held in wasm locals and GC-managed — they never
+accumulate. `test-todomvc.mjs` proves it: after 200 add/toggle/delete cycles (each
+hundreds of get/set/call operations) the retain table stays flat at 3 (list + counter
++ one live todo). Only values the Coil model persists are `retain`ed, and they are
+`unretain`ed when the todo is deleted.

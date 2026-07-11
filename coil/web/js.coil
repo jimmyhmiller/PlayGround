@@ -1,46 +1,53 @@
-; js.coil -- the whole JavaScript FFI for Coil, as a thin typed layer over the
-; generic primitives in js-bridge.js. A `jsref` is an opaque handle (i32) to a JS
-; value; nothing here is DOM-specific. dom.coil and apps build on this.
+; js.coil -- the whole JavaScript FFI for Coil, over wasm `externref`.
+;
+; A JS value is an `externref`: the wasm runtime holds it directly (GC-managed).
+; Transient values (getter results, method returns) are ordinary Coil locals and are
+; collected automatically — there is no handle table and nothing to free. Only values
+; a program persists across turns need `js-retain` (-> i32 index) / `js-deref` /
+; `js-unretain`, because externref cannot live in linear memory. Property and method
+; NAMES are not JS values; they cross as (ptr u8)+len and the bridge reads them.
 (module js)
 (import "slice.coil" :use *)
 
 ; ---- generic host primitives (env.*, implemented once in js-bridge.js) ----
-(extern js_global    :cc c [(ptr u8) i32]           (-> i32))   ; globalThis[name]
-(extern js_get       :cc c [i32 (ptr u8) i32]       (-> i32))   ; obj[prop]
-(extern js_get_index :cc c [i32 i32]                (-> i32))   ; obj[i]
-(extern js_set       :cc c [i32 (ptr u8) i32 i32]   (-> i32))   ; obj[prop] = val
-(extern js_call0     :cc c [i32 (ptr u8) i32]       (-> i32))   ; obj.method()
-(extern js_call1     :cc c [i32 (ptr u8) i32 i32]   (-> i32))   ; obj.method(a)
-(extern js_call2     :cc c [i32 (ptr u8) i32 i32 i32] (-> i32)) ; obj.method(a,b)
-(extern js_str       :cc c [(ptr u8) i32]           (-> i32))   ; Coil string -> JS string
-(extern js_read      :cc c [i32 (ptr u8) i32]       (-> i32))   ; JS string -> Coil memory (returns byte len)
-(extern js_i32       :cc c [i32]                    (-> i32))   ; number -> JS value
-(extern js_to_i32    :cc c [i32]                    (-> i32))   ; JS value -> i32
-(extern js_cb        :cc c [(ptr u8) i32 i32]       (-> i32))   ; export name + userdata -> JS function
-(extern js_release   :cc c [i32]                    (-> i32))   ; drop a handle
+(extern js_global    :cc c [(ptr u8) i32]                       (-> externref))
+(extern js_get       :cc c [externref (ptr u8) i32]            (-> externref))
+(extern js_get_index :cc c [externref i32]                     (-> externref))
+(extern js_set       :cc c [externref (ptr u8) i32 externref]  (-> i32))
+(extern js_call0     :cc c [externref (ptr u8) i32]            (-> externref))
+(extern js_call1     :cc c [externref (ptr u8) i32 externref]  (-> externref))
+(extern js_call2     :cc c [externref (ptr u8) i32 externref externref] (-> externref))
+(extern js_str       :cc c [(ptr u8) i32]                       (-> externref))
+(extern js_read      :cc c [externref (ptr u8) i32]            (-> i32))
+(extern js_i32       :cc c [i32]                                (-> externref))
+(extern js_to_i32    :cc c [externref]                         (-> i32))
+(extern js_cb        :cc c [(ptr u8) i32 i32]                   (-> externref))
+(extern js_retain    :cc c [externref]                         (-> i32))
+(extern js_deref     :cc c [i32]                                (-> externref))
+(extern js_unretain  :cc c [i32]                                (-> i32))
 
-; ---- ergonomic wrappers: pass Coil strings, get/return jsrefs (i32) ----
-(defn js-global [(name (slice u8))] (-> i32)
+; ---- ergonomic wrappers ----
+(defn js-global [(name (slice u8))] (-> externref)
   (js_global (slice-data [u8] name) (cast i32 (slice-len [u8] name))))
-(defn js-get [(o i32) (prop (slice u8))] (-> i32)
+(defn js-get [(o externref) (prop (slice u8))] (-> externref)
   (js_get o (slice-data [u8] prop) (cast i32 (slice-len [u8] prop))))
-(defn js-get-i [(o i32) (i i32)] (-> i32) (js_get_index o i))
-(defn js-set! [(o i32) (prop (slice u8)) (v i32)] (-> i32)
+(defn js-get-i [(o externref) (i i32)] (-> externref) (js_get_index o i))
+(defn js-set! [(o externref) (prop (slice u8)) (v externref)] (-> i32)
   (js_set o (slice-data [u8] prop) (cast i32 (slice-len [u8] prop)) v))
-(defn js-str [(s (slice u8))] (-> i32) (js_str (slice-data [u8] s) (cast i32 (slice-len [u8] s))))
-; sets obj[prop] to a fresh JS string, releasing the temporary string handle.
-(defn js-set-str! [(o i32) (prop (slice u8)) (s (slice u8))] (-> i32)
-  (let [sr (js-str s) r (js-set! o prop sr)] (js_release sr) r))
-(defn js-num [(n i32)] (-> i32) (js_i32 n))
-(defn js-int [(r i32)] (-> i32) (js_to_i32 r))
-(defn js-call [(o i32) (m (slice u8))] (-> i32)
+(defn js-str [(s (slice u8))] (-> externref) (js_str (slice-data [u8] s) (cast i32 (slice-len [u8] s))))
+(defn js-set-str! [(o externref) (prop (slice u8)) (s (slice u8))] (-> i32) (js-set! o prop (js-str s)))
+(defn js-num [(n i32)] (-> externref) (js_i32 n))
+(defn js-int [(r externref)] (-> i32) (js_to_i32 r))
+(defn js-call [(o externref) (m (slice u8))] (-> externref)
   (js_call0 o (slice-data [u8] m) (cast i32 (slice-len [u8] m))))
-(defn js-call1 [(o i32) (m (slice u8)) (a i32)] (-> i32)
+(defn js-call1 [(o externref) (m (slice u8)) (a externref)] (-> externref)
   (js_call1 o (slice-data [u8] m) (cast i32 (slice-len [u8] m)) a))
-(defn js-call2 [(o i32) (m (slice u8)) (a i32) (b i32)] (-> i32)
+(defn js-call2 [(o externref) (m (slice u8)) (a externref) (b externref)] (-> externref)
   (js_call2 o (slice-data [u8] m) (cast i32 (slice-len [u8] m)) a b))
-; method call with a single string argument (the common case: classList.add, …);
-; releases the temporary string handle.
-(defn js-call-s [(o i32) (m (slice u8)) (s (slice u8))] (-> i32)
-  (let [sr (js-str s) r (js-call1 o m sr)] (js_release sr) r))
-(defn js-release! [(r i32)] (-> i32) (js_release r))
+; method call with a single string argument (classList.add, setAttribute value, …)
+(defn js-call-s [(o externref) (m (slice u8)) (s (slice u8))] (-> externref) (js-call1 o m (js-str s)))
+
+; ---- persistence: move a ref between externref and a memory-storable i32 index ----
+(defn retain   [(v externref)] (-> i32)       (js_retain v))
+(defn deref    [(i i32)]       (-> externref) (js_deref i))
+(defn unretain [(i i32)]       (-> i32)       (js_unretain i))

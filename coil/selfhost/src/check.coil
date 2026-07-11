@@ -326,6 +326,8 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 (defn validate-struct-name [(a (ptr Allocator)) (cx (ptr Cx)) (name (slice u8)) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  ; `externref` is a built-in opaque type (a wasm reference), not a struct/sum.
+  (if (str-eq name "externref") (Ok [i64 Diag] 0)
   (if (set-contains tps name) (Ok [i64 Diag] 0)
     (let [si (struct-find cx name)]
       (if (icmp-ne (cast i64 si) 0)
@@ -337,7 +339,7 @@
                 (let [np (al-len [(slice u8)] (load (field su type_params)))]
                   (if (icmp-eq np 0) (Ok [i64 Diag] 0)
                       (Err [i64 Diag] (derr (sconcat a (sconcat a (sconcat3 a "generic type '" name "' expects ") (i64->str a np)) " type arguments, got 0")))))
-                (Err [i64 Diag] (derr (sconcat3 a "unknown type '" name "'")))))))))
+                (Err [i64 Diag] (derr (sconcat3 a "unknown type '" name "'"))))))))))
 (defn validate-app [(a (ptr Allocator)) (cx (ptr Cx)) (name (slice u8)) (args (ptr (ArrayList Type))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (match (validate-type-list args cx tps) (Err [d] (Err [i64 Diag] d))
     (Ok [_]

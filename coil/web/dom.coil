@@ -1,44 +1,39 @@
-; dom.coil -- a DOM vocabulary, written ENTIRELY in Coil on top of js.coil.
-; There is no DOM-specific JavaScript anywhere: each of these is just generic JS
-; property/method access. Handles (i32 jsrefs) identify nodes and events.
+; dom.coil -- a DOM vocabulary, written entirely in Coil over js.coil. Nodes and
+; events are `externref` (real JS values held by the wasm runtime). There is no
+; DOM-specific JavaScript anywhere.
 (module dom)
 (import "slice.coil" :use *)
-(import "js.coil" :use *)
+(import "js.coil"    :use *)
 
-(defn document []                       (-> i32) (js-global "document"))
-(defn body []                           (-> i32) (js-get (document) "body"))
-(defn get-by-id [(id (slice u8))]       (-> i32) (js-call-s (document) "getElementById" id))
-(defn create [(tag (slice u8))]         (-> i32) (js-call-s (document) "createElement" tag))
+(defn document []                       (-> externref) (js-global "document"))
+(defn body []                           (-> externref) (js-get (document) "body"))
+(defn query [(sel (slice u8))]          (-> externref) (js-call-s (document) "querySelector" sel))
+(defn create [(tag (slice u8))]         (-> externref) (js-call-s (document) "createElement" tag))
 
-(defn append! [(parent i32) (child i32)] (-> i32) (js-call1 parent "appendChild" child))
-(defn remove! [(node i32)]               (-> i32) (js-call node "remove"))
+(defn append! [(parent externref) (child externref)] (-> externref) (js-call1 parent "appendChild" child))
+(defn remove! [(node externref)]                     (-> externref) (js-call node "remove"))
+(defn parent-of [(node externref)]                   (-> externref) (js-get node "parentNode"))
 
-(defn set-text!  [(node i32) (s (slice u8))] (-> i32) (js-set-str! node "textContent" s))
-(defn set-text-ref! [(node i32) (r i32)]     (-> i32) (js-set! node "textContent" r))
-(defn set-class! [(node i32) (s (slice u8))] (-> i32) (js-set-str! node "className" s))
-(defn set-value! [(node i32) (s (slice u8))] (-> i32) (js-set-str! node "value" s))
-(defn set-attr!  [(node i32) (k (slice u8)) (v (slice u8))] (-> i32)
-  (let [kr (js-str k) vr (js-str v) r (js-call2 node "setAttribute" kr vr)]
-    (js-release! kr) (js-release! vr) r))
+(defn set-text!     [(node externref) (s (slice u8))] (-> i32) (js-set-str! node "textContent" s))
+(defn set-text-ref! [(node externref) (r externref)]  (-> i32) (js-set! node "textContent" r))
+(defn set-class!    [(node externref) (s (slice u8))] (-> i32) (js-set-str! node "className" s))
+(defn set-value!    [(node externref) (s (slice u8))] (-> i32) (js-set-str! node "value" s))
+(defn set-attr!     [(node externref) (k (slice u8)) (v (slice u8))] (-> externref)
+  (js-call2 node "setAttribute" (js-str k) (js-str v)))
 
-(defn class-list [(node i32)]                (-> i32) (js-get node "classList"))
-(defn add-class!    [(node i32) (c (slice u8))] (-> i32) (js-call-s (class-list node) "add" c))
-(defn remove-class! [(node i32) (c (slice u8))] (-> i32) (js-call-s (class-list node) "remove" c))
-(defn toggle-class! [(node i32) (c (slice u8))] (-> i32) (js-call-s (class-list node) "toggle" c))
+(defn class-list [(node externref)]                     (-> externref) (js-get node "classList"))
+(defn add-class!    [(node externref) (c (slice u8))] (-> externref) (js-call-s (class-list node) "add" c))
+(defn remove-class! [(node externref) (c (slice u8))] (-> externref) (js-call-s (class-list node) "remove" c))
+(defn toggle-class! [(node externref) (c (slice u8))] (-> externref) (js-call-s (class-list node) "toggle" c))
 
-; node.property as a jsref (e.g. an <input>'s "value", an event's "keyCode")
-(defn prop     [(node i32) (p (slice u8))] (-> i32) (js-get node p))
-(defn prop-int [(node i32) (p (slice u8))] (-> i32) (js-int (js-get node p)))
+; a node/event property (e.g. an <input>'s "value", an event's "target"/"keyCode")
+(defn prop     [(node externref) (p (slice u8))] (-> externref) (js-get node p))
+(defn prop-int [(node externref) (p (slice u8))] (-> i32)       (js-int (js-get node p)))
 
-; a callback handle: the exported Coil `handler` bound with `userdata`. Keep it if
-; you need to release it later (per-item handlers); otherwise use `on!`.
-(defn make-cb [(handler (slice u8)) (userdata i32)] (-> i32)
+; a callback handle: the exported Coil `handler` bound with `userdata` (its first arg).
+(defn make-cb [(handler (slice u8)) (userdata i32)] (-> externref)
   (js_cb (slice-data [u8] handler) (cast i32 (slice-len [u8] handler)) userdata))
-
-(defn add-listener! [(node i32) (evt (slice u8)) (cb i32)] (-> i32)
-  (let [er (js-str evt) r (js-call2 node "addEventListener" er cb)] (js-release! er) r))
-
-; register an exported Coil handler `handler` for `evt` on `node`; `userdata` is
-; passed back as the handler's first argument so one export can serve many nodes.
-(defn on! [(node i32) (evt (slice u8)) (handler (slice u8)) (userdata i32)] (-> i32)
+(defn add-listener! [(node externref) (evt (slice u8)) (cb externref)] (-> externref)
+  (js-call2 node "addEventListener" (js-str evt) cb))
+(defn on! [(node externref) (evt (slice u8)) (handler (slice u8)) (userdata i32)] (-> externref)
   (add-listener! node evt (make-cb handler userdata)))

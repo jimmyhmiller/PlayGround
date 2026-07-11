@@ -183,6 +183,11 @@
       (TCode   []        (do (unimplemented "codegen/basic_ty: comptime-only Code reached codegen") (cast (ptr i8) 0))))))
 (defn cg-nominal-ty [(cg (ptr Cg)) (nm (slice u8))] (-> (ptr i8))
   (let [ctx (load (field cg ctx)) si (cg-struct-idx cg nm)]
+    ; `externref` is the built-in opaque wasm reference type: an addrspace(10)
+    ; pointer that LLVM's wasm backend lowers to the `externref` value type. It is
+    ; a scalar (cg-abi-struct? already returns false for an unregistered nominal),
+    ; lives only in wasm locals/args (never linear memory), and carries a JS value.
+    (if (str-eq nm "externref") (LLVMPointerTypeInContext ctx 10)
     (if (icmp-ge si 0)
         (let [sp (al-elem [CgStruct] (field cg structs) si)]
           (match-else (load (field sp layout))
@@ -191,7 +196,7 @@
       (let [ui (cg-sum-idx cg nm)]
         (if (icmp-ge ui 0)
             (load (field (al-elem [CgSum] (field cg sums) ui) ty))
-          (do (unimplemented "codegen/basic_ty: unknown nominal type") (cast (ptr i8) 0)))))))
+          (do (unimplemented "codegen/basic_ty: unknown nominal type") (cast (ptr i8) 0))))))))
 
 ; ---- layout helpers (src/codegen.rs:3449): conservative payload sizing for sums.
 (defn align8 [(x i64)] (-> i64) (imul (udiv (iadd x 7) 8) 8))

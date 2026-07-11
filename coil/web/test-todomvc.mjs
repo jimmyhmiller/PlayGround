@@ -90,5 +90,17 @@ addTodo('Third');
 check('add after delete', items().length, 1);
 check('third label', labelOf(items()[0]), 'Third');
 
-console.log(ok ? '\nPASS — TodoMVC runs entirely in Coil over the generic bridge' : '\nFAILED');
+// 8. THE externref payoff: transient refs are wasm-GC'd, not retained. After a heavy
+//    churn of add/toggle/delete (hundreds of get/set/call each), the retain table
+//    holds only what the model persists: 2 fixed (list + counter) + one per live todo.
+const baseRetained = bridge.stats().retained;   // 1 live todo + list + counter = 3
+for (let k = 0; k < 200; k++) {
+  addTodo('churn ' + k);
+  items()[1].children.find((c) => c.tag === 'input').dispatch('change'); // toggle the new one
+  items()[1].children.find((c) => c.tag === 'button').dispatch('click'); // then delete it
+}
+check('retain table stays flat under churn (no transient leak)', bridge.stats().retained, baseRetained);
+check('still one live item after churn', items().length, 1);
+
+console.log(ok ? '\nPASS — TodoMVC in Coil over externref; transients GC-managed, no handle leak' : '\nFAILED');
 process.exit(ok ? 0 : 1);
