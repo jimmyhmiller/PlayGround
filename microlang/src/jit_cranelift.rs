@@ -552,6 +552,11 @@ fn prim_tag(p: Prim) -> u32 {
         RegisterFields => 45,
         FieldByName => 46,
         Hash => 47,
+        DynGet => 48,
+        DynSet => 49,
+        DynMark => 50,
+        DynBind => 51,
+        DynUnwind => 52,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -617,6 +622,11 @@ fn prim_from_tag(tag: u32) -> Prim {
         45 => RegisterFields,
         46 => FieldByName,
         47 => Hash,
+        48 => DynGet,
+        49 => DynSet,
+        50 => DynMark,
+        51 => DynBind,
+        52 => DynUnwind,
         other => panic!("bad prim tag {other}"),
     }
 }

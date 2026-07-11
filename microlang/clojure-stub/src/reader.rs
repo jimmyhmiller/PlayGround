@@ -227,6 +227,11 @@ impl Parser {
                 if is_macro_meta(rt, meta) {
                     let m = sym(rt, "-macro-meta");
                     rt.vec_to_list(&[m, target])
+                } else if is_dynamic_meta(rt, meta) {
+                    // `^:dynamic name` -> `(-dynamic-meta name)`; the compiler's
+                    // `def` marks the var dynamic so refs read the binding stack.
+                    let m = sym(rt, "-dynamic-meta");
+                    rt.vec_to_list(&[m, target])
                 } else {
                     target
                 }
@@ -305,18 +310,28 @@ fn field0<M: ValueModel>(rt: &Runtime<M>, v: u64, tag: &str) -> Option<u64> {
     None
 }
 
-/// Is `meta` a macro marker — `^:macro` (a `:macro` keyword) or `^{:macro true}`
-/// (a map with a `:macro` key)?
+/// Is `meta` a macro marker — `^:macro` / `^{:macro true}`?
 fn is_macro_meta<M: ValueModel>(rt: &Runtime<M>, meta: u64) -> bool {
+    meta_has_key(rt, meta, "macro")
+}
+
+/// Is `meta` a `^:dynamic` marker — `^:dynamic` / `^{:dynamic true}`?
+fn is_dynamic_meta<M: ValueModel>(rt: &Runtime<M>, meta: u64) -> bool {
+    meta_has_key(rt, meta, "dynamic")
+}
+
+/// Does the reader metadata form carry keyword `key` — either as the bare
+/// keyword `^:key` or as a `^{:key true}` map entry?
+fn meta_has_key<M: ValueModel>(rt: &Runtime<M>, meta: u64, key: &str) -> bool {
     if let Some(name) = field0(rt, meta, KEYWORD) {
-        return matches!(rt.decode(name), Val::Sym(s) if rt.sym_name(s) == "macro");
+        return matches!(rt.decode(name), Val::Sym(s) if rt.sym_name(s) == key);
     }
     if let Some(kvlist) = field0(rt, meta, MAP) {
         let kvs = rt.list_to_vec(kvlist);
         let mut i = 0;
         while i + 1 < kvs.len() {
             if let Some(kname) = field0(rt, kvs[i], KEYWORD) {
-                if matches!(rt.decode(kname), Val::Sym(s) if rt.sym_name(s) == "macro") {
+                if matches!(rt.decode(kname), Val::Sym(s) if rt.sym_name(s) == key) {
                     return true;
                 }
             }

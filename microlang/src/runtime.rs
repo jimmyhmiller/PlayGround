@@ -191,8 +191,16 @@ pub(crate) struct MutatorState {
     /// every live frame, and a deep caller's env is not reachable from the
     /// callee's lexical parent chain.
     pub(crate) envs: Mutex<Vec<Locals>>,
+    /// This thread's dynamic-var binding stack, published when it parks so a
+    /// moving collector traces (and rewrites) the bound values. `(Sym, value)`;
+    /// `Sym == u32::MAX` is a `binding`-scope delimiter (see `DYN_MARK`).
+    pub(crate) dyn_roots: Mutex<Vec<(Sym, u64)>>,
     pub(crate) parked: std::sync::atomic::AtomicBool,
 }
+
+/// Delimiter sentinel on the dynamic-binding stack (never a real interned `Sym`,
+/// which are `< TABLE_CAP`). Pushed by `%dyn-mark`, popped through by `%dyn-unwind`.
+pub(crate) const DYN_MARK: Sym = u32::MAX;
 
 /// The mutable dispatch tables, guarded by one lock. `resolve` copies a `u64`
 /// impl out and drops the guard before the caller invokes it, so no lock is held
@@ -255,6 +263,7 @@ fn register_mutator<M: ValueModel>(shared: &Arc<Shared<M>>) -> Arc<MutatorState>
     let me = Arc::new(MutatorState {
         roots: Mutex::new(Vec::new()),
         envs: Mutex::new(Vec::new()),
+        dyn_roots: Mutex::new(Vec::new()),
         parked: std::sync::atomic::AtomicBool::new(false),
     });
     shared.mutators.lock().unwrap().push(me.clone());
@@ -284,6 +293,10 @@ pub struct Runtime<M: ValueModel> {
     /// This thread's pending non-local control-flow signal (throw / escape). See
     /// `Signal`. `kind == 0` in the common (no-signal) case.
     pub(crate) signal: Signal,
+    /// This thread's dynamic-var binding stack (`^:dynamic` + `binding`). Innermost
+    /// binding last; a `DYN_MARK` entry delimits each `binding` scope. Traced by the
+    /// collector (self here, published via `me.dyn_roots` when parked).
+    pub(crate) dyn_stack: Vec<(Sym, u64)>,
     _pd: PhantomData<fn() -> M>,
 }
 
@@ -338,7 +351,7 @@ impl<M: ValueModel> Runtime<M> {
             ..shared
         });
         let me = register_mutator(&shared);
-        Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), _pd: PhantomData }
+        Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), _pd: PhantomData }
     }
 
     /// A fresh mutator handle for another OS thread, sharing this runtime's heap,
@@ -347,7 +360,7 @@ impl<M: ValueModel> Runtime<M> {
     /// a `std::thread`.
     pub fn thread_handle(&self) -> Self {
         let me = register_mutator(&self.shared);
-        Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), _pd: PhantomData }
+        Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), _pd: PhantomData }
     }
 
     // ── heap access (lock-free reads to stable addresses) ───
@@ -932,6 +945,51 @@ impl<M: ValueModel> Runtime<M> {
             // `spawn` needs to invoke a closure on the child thread, so it is
             // handled in the backend (like `Gc`/`CallEc`), never here.
             Prim::Spawn => unreachable!("Prim::Spawn is backend-handled"),
+            // ── dynamic vars: a per-thread binding stack, so every tier runs them.
+            Prim::DynGet => {
+                let s = match self.decode(args[0]) {
+                    Val::Sym(s) => s,
+                    _ => panic!("%dyn-get: not a symbol"),
+                };
+                match self.dyn_stack.iter().rev().find(|e| e.0 == s) {
+                    Some(&(_, v)) => v,
+                    None => self.global(s).unwrap_or_else(|| self.encode(Val::Nil)),
+                }
+            }
+            Prim::DynSet => {
+                let s = match self.decode(args[0]) {
+                    Val::Sym(s) => s,
+                    _ => panic!("%dyn-set: not a symbol"),
+                };
+                match self.dyn_stack.iter_mut().rev().find(|e| e.0 == s) {
+                    Some(e) => e.1 = args[1],
+                    // set! on a dynamic with no active binding mutates the root.
+                    None => {
+                        self.set_global_val(s, args[1]);
+                    }
+                }
+                args[1]
+            }
+            Prim::DynMark => {
+                self.dyn_stack.push((DYN_MARK, 0));
+                self.encode(Val::Nil)
+            }
+            Prim::DynBind => {
+                let s = match self.decode(args[0]) {
+                    Val::Sym(s) => s,
+                    _ => panic!("%dyn-bind: not a symbol"),
+                };
+                self.dyn_stack.push((s, args[1]));
+                self.encode(Val::Nil)
+            }
+            Prim::DynUnwind => {
+                while let Some((s, _)) = self.dyn_stack.pop() {
+                    if s == DYN_MARK {
+                        break;
+                    }
+                }
+                self.encode(Val::Nil)
+            }
             // ── atoms: real cross-thread compare-and-set ────────────────
             Prim::AtomNew => {
                 let id = self.alloc(Obj::Atom(Arc::new(AtomicU64::new(args[0]))));

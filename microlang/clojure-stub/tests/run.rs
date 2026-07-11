@@ -902,3 +902,31 @@ fn namespace_alias_and_refer() {
         "42"
     );
 }
+
+#[test]
+fn dynamic_vars() {
+    // Root value, thread-local override, and unwind back to root after `binding`.
+    assert_eq!(run("(def ^:dynamic *x* 10) *x*"), "10");
+    assert_eq!(run("(def ^:dynamic *x* 10) (binding [*x* 20] *x*)"), "20");
+    assert_eq!(run("(def ^:dynamic *x* 10) [(binding [*x* 20] *x*) *x*]"), "[20 10]");
+    // The binding is visible to a function CALLED within its dynamic extent.
+    assert_eq!(run("(def ^:dynamic *x* 1) (defn gx [] *x*) (binding [*x* 99] (gx))"), "99");
+    // Nested + sibling bindings, and multiple vars at once.
+    assert_eq!(
+        run("(def ^:dynamic *x* 1) [(binding [*x* 2] (binding [*x* 3] *x*)) (binding [*x* 2] *x*)]"),
+        "[3 2]"
+    );
+    assert_eq!(
+        run("(def ^:dynamic *a* 1) (def ^:dynamic *b* 2) (binding [*a* 10 *b* 20] (+ *a* *b*))"),
+        "30"
+    );
+    // `set!` mutates the current thread-local binding; a throw still unwinds it.
+    assert_eq!(run("(def ^:dynamic *x* 0) (binding [*x* 5] (set! *x* 7) *x*)"), "7");
+    assert_eq!(
+        run("(def ^:dynamic *x* 1) (try (binding [*x* 9] (throw \"boom\")) (catch :default e *x*))"),
+        "1"
+    );
+    // Bindings are THREAD-LOCAL: a future runs on a fresh thread whose binding
+    // stack is empty, so it sees the root value (not the caller's binding).
+    assert_eq!(run("(def ^:dynamic *x* 0) (binding [*x* 5] [*x* @(future *x*)])"), "[5 0]");
+}

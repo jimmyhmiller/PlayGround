@@ -94,6 +94,19 @@ fn try_catch_on_jit() {
 }
 
 #[test]
+fn dynamic_vars_on_jit() {
+    // `^:dynamic` + `binding` compiled: override, dynamic scope through a call,
+    // set!, unwind-on-throw, nesting — all via the %dyn-* prims on the JIT.
+    assert_eq!(jit("(def ^:dynamic *x* 10) (binding [*x* 20] *x*)"), "20");
+    assert_eq!(jit("(def ^:dynamic *x* 1) (defn gx [] *x*) (binding [*x* 99] (gx))"), "99");
+    assert_eq!(jit("(def ^:dynamic *x* 0) (binding [*x* 5] (set! *x* 7) *x*)"), "7");
+    assert_eq!(jit("(def ^:dynamic *x* 1) (try (binding [*x* 9] (throw \"b\")) (catch :default e *x*))"), "1");
+    assert_eq!(jit("(def ^:dynamic *x* 1) [(binding [*x* 2] (binding [*x* 3] *x*)) *x*]"), "[3 1]");
+    // thread-local across a JIT worker thread (its binding stack starts empty).
+    assert_eq!(jit("(def ^:dynamic *x* 0) (binding [*x* 5] [*x* @(future *x*)])"), "[5 0]");
+}
+
+#[test]
 fn threads_on_jit() {
     // `future` spawns an OS thread that runs its closure on ITS OWN native JIT,
     // sharing the heap/atoms; `deref`/`@` joins it (parking during the wait).

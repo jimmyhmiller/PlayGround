@@ -138,6 +138,7 @@ impl<M: ValueModel> Runtime<M> {
         // Publish roots + the whole env chain and mark parked before blocking.
         *self.me.roots.lock().unwrap() = std::mem::take(&mut self.shadow);
         *self.me.envs.lock().unwrap() = self.published_envs(locals);
+        *self.me.dyn_roots.lock().unwrap() = std::mem::take(&mut self.dyn_stack);
         self.me.parked.store(true, Release);
         let handle = slot.lock().unwrap().handle.take();
         if let Some(h) = handle {
@@ -149,6 +150,7 @@ impl<M: ValueModel> Runtime<M> {
             std::thread::yield_now();
         }
         self.shadow = std::mem::take(&mut *self.me.roots.lock().unwrap());
+        self.dyn_stack = std::mem::take(&mut *self.me.dyn_roots.lock().unwrap());
         self.me.envs.lock().unwrap().clear();
         self.me.parked.store(false, Release);
         let r = slot.lock().unwrap().result.expect("future produced no result");
@@ -182,11 +184,13 @@ impl<M: ValueModel> Runtime<M> {
         use std::sync::atomic::Ordering::{Acquire, Release};
         *self.me.roots.lock().unwrap() = std::mem::take(&mut self.shadow);
         *self.me.envs.lock().unwrap() = self.published_envs(locals);
+        *self.me.dyn_roots.lock().unwrap() = std::mem::take(&mut self.dyn_stack);
         self.me.parked.store(true, Release);
         while self.shared.gc_requested.load(Acquire) {
             std::thread::yield_now();
         }
         self.shadow = std::mem::take(&mut *self.me.roots.lock().unwrap());
+        self.dyn_stack = std::mem::take(&mut *self.me.dyn_roots.lock().unwrap());
         self.me.envs.lock().unwrap().clear();
         self.me.parked.store(false, Release);
     }
@@ -217,6 +221,10 @@ impl<M: ValueModel> Runtime<M> {
         for s in self.shadow.iter_mut() {
             *s = fw::<M>(heap, from_len, &mut to, &mut reloc, *s);
         }
+        // This thread's dynamic-var bindings (the `Sym` keys don't move).
+        for (_, v) in self.dyn_stack.iter_mut() {
+            *v = fw::<M>(heap, from_len, &mut to, &mut reloc, *v);
+        }
         // Every OTHER (parked) thread's PUBLISHED roots: its shadow snapshot
         // (rewritten in place, taken back on resume) and its live env frames.
         {
@@ -228,6 +236,10 @@ impl<M: ValueModel> Runtime<M> {
                 let mut roots = m.roots.lock().unwrap();
                 for r in roots.iter_mut() {
                     *r = fw::<M>(heap, from_len, &mut to, &mut reloc, *r);
+                }
+                let mut dyn_roots = m.dyn_roots.lock().unwrap();
+                for (_, v) in dyn_roots.iter_mut() {
+                    *v = fw::<M>(heap, from_len, &mut to, &mut reloc, *v);
                 }
                 let envs = m.envs.lock().unwrap();
                 for env in envs.iter() {

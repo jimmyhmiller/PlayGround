@@ -25,6 +25,9 @@ pub struct Compiler {
     /// toolkit's). User-facing `+`/`first`/… are ordinary globals in
     /// `clojure.core`; only these low-level names map to a `Prim`.
     prims: HashMap<Sym, Prim>,
+    /// Resolved syms declared `^:dynamic`: a reference to one reads the thread-local
+    /// binding stack (`%dyn-get`) rather than the plain global.
+    dynamics: std::collections::HashSet<Sym>,
     /// Namespace state (frontend-owned; the toolkit's globals are a flat `Sym`
     /// pool, so a user-ns var `foo/x` is simply the interned sym `"foo/x"`).
     ns: NsState,
@@ -73,11 +76,14 @@ impl Compiler {
             ("%spawn", Spawn), ("%await", Await),
             // Atoms: real cross-thread compare-and-set.
             ("%atom-new", AtomNew), ("%atom-get", AtomGet), ("%atom-set", AtomSet), ("%atom-cas", AtomCas),
+            // Dynamic vars (`binding` desugars to these; refs/set! emit DynGet/DynSet).
+            ("%dyn-mark", DynMark), ("%dyn-bind", DynBind), ("%dyn-unwind", DynUnwind),
         ] {
             prims.insert(rt.intern(name), p);
         }
         Compiler {
             scope: Vec::new(),
+            dynamics: std::collections::HashSet::new(),
             methods: std::collections::HashSet::new(),
             site: 0,
             field_site: 0,
@@ -131,7 +137,7 @@ impl Compiler {
             Val::Int(_) | Val::Float(_) | Val::Bool(_) | Val::Nil => Ir::Const(rt.intern_const(form)),
             Val::Sym(s) => match self.resolve_local(s) {
                 Some((up, idx)) => Ir::Local { up, idx },
-                None => Ir::Global(self.resolve_global(rt, s)),
+                None => self.global_ref(rt, s),
             },
             Val::Ref(_) => {
                 if rt.as_cons(form).is_some() {
@@ -192,6 +198,36 @@ impl Compiler {
         rt.intern(&format!("{ns}/{name}"))
     }
 
+    /// Compile a (non-local) symbol reference: a `^:dynamic` var reads the
+    /// thread-local binding stack (`%dyn-get`); any other var is a plain global.
+    fn global_ref<M: ValueModel>(&self, rt: &mut Runtime<M>, s: Sym) -> Ir {
+        // Dynamic vars live in the flat space (bare), so a reference keys the
+        // binding stack by the same bare sym `def`/`binding`/`set!` use.
+        if self.dynamics.contains(&s) {
+            return Ir::Prim(Prim::DynGet, vec![self.sym_const(rt, s)]);
+        }
+        Ir::Global(self.resolve_global(rt, s))
+    }
+
+    /// `(def (-dynamic-meta x) …)` — the reader's lowering of `(def ^:dynamic x …)`.
+    /// Returns the inner name form `x` when present.
+    fn unwrap_dynamic_meta<M: ValueModel>(&self, rt: &Runtime<M>, form: u64) -> Option<u64> {
+        rt.as_cons(form)?;
+        let items = rt.list_to_vec(form);
+        if items.len() == 2 && matches!(rt.decode(items[0]), Val::Sym(s) if rt.sym_name(s) == "-dynamic-meta")
+        {
+            return Some(items[1]);
+        }
+        None
+    }
+
+    /// A `Const` Ir holding the symbol `s` as a value (for the `%dyn-*` prims,
+    /// which take the var's name as a runtime argument).
+    fn sym_const<M: ValueModel>(&self, rt: &mut Runtime<M>, s: Sym) -> Ir {
+        let v = rt.encode(Val::Sym(s));
+        Ir::Const(rt.intern_const(v))
+    }
+
     /// Resolve a DEFINED name to the interned sym `Ir::Def` should write, and record
     /// it so later bare references in this ns resolve to it.
     fn def_name<M: ValueModel>(&mut self, rt: &Runtime<M>, raw: Sym) -> Sym {
@@ -248,7 +284,17 @@ impl Compiler {
                 }
                 "do" => return Ir::Do(items[1..].iter().map(|&f| self.compile(rt, f)).collect()),
                 "def" => {
-                    let raw = self.name(rt, items[1]).expect("def: name must be a symbol");
+                    // `(def (-dynamic-meta x) v)` — reader-lowered `^:dynamic`.
+                    let (nameform, dynamic) = match self.unwrap_dynamic_meta(rt, items[1]) {
+                        Some(inner) => (inner, true),
+                        None => (items[1], false),
+                    };
+                    let raw = self.name(rt, nameform).expect("def: name must be a symbol");
+                    if dynamic {
+                        // Flat (bare) so ref/binding/set! all key by the same sym.
+                        self.dynamics.insert(raw);
+                        self.next_def_bare();
+                    }
                     // Resolve+record the name FIRST so a self-reference inside the
                     // init (e.g. `(def x (fn [] x))`) resolves to this same var.
                     let n = self.def_name(rt, raw);
@@ -269,6 +315,10 @@ impl Compiler {
                     let val = Box::new(self.compile(rt, items[2]));
                     return match self.resolve_local(n) {
                         Some((up, idx)) => Ir::SetLocal { up, idx, val },
+                        None if self.dynamics.contains(&n) => {
+                            // `set!` on a dynamic var mutates the current binding.
+                            Ir::Prim(Prim::DynSet, vec![self.sym_const(rt, n), *val])
+                        }
                         None => Ir::SetGlobal { name: self.resolve_global(rt, n), val },
                     };
                 }

@@ -149,6 +149,26 @@ pub enum Prim {
     /// delimited control; `CekMachine` only.
     Shift,
 
+    // ── dynamic vars (`^:dynamic` + `binding`) ───────────────────────────────
+    // A per-thread stack of (sym, value) bindings on the runtime, so a dynamic
+    // var reads its innermost thread-local binding (or its root global). All are
+    // ordinary `rt.prim` ops, so every tier — including the JIT — runs them.
+    /// `(%dyn-get 'v)` -> the innermost thread-local binding of `v`, or its root
+    /// global value if unbound. Emitted for a reference to a `^:dynamic` var.
+    DynGet,
+    /// `(%dyn-set 'v x)` -> mutate the innermost thread-local binding of `v` to
+    /// `x` (`set!` on a dynamic var); errors if `v` has no active binding.
+    DynSet,
+    /// `(%dyn-mark)` -> push a delimiter onto the dynamic stack; returns nil. The
+    /// `binding` desugar places one before its binds so `%dyn-unwind` pops exactly
+    /// this scope's bindings (however many were installed before a throw).
+    DynMark,
+    /// `(%dyn-bind 'v x)` -> push a thread-local binding `v = x`; returns nil.
+    DynBind,
+    /// `(%dyn-unwind)` -> pop the dynamic stack back through the last `%dyn-mark`
+    /// (inclusive). Run in a `finally`, so bindings unwind even on a throw.
+    DynUnwind,
+
     // ── optimizer-introduced fixnum specializations ──────────────────────────
     // These are produced ONLY by the `optimize` nanopass (never by `analyze`).
     // `FxAdd/FxSub/FxMul/FxLt/FxEq` mean "same as `Add/Sub/Mul/Lt/Eq`, but the

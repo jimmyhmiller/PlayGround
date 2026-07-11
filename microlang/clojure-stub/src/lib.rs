@@ -251,6 +251,11 @@ fn expand<M: ValueModel>(
             // type-dispatch (ClojureScript's model); expand the result.
             let d = desugar_try(rt, f);
             expand(rt, cs, macros, d)
+        } else if is_sym(rt, head, "binding") {
+            // `(binding [*x* v] body…)` — thread-local dynamic-var bindings via a
+            // `try`/`finally` that installs and (always) unwinds them.
+            let d = desugar_binding(rt, f);
+            expand(rt, cs, macros, d)
         } else if record_field0(rt, head, reader::KEYWORD).is_some() {
             // keyword in head position: (:k m) -> (get m :k)
             let items = rt.list_to_vec(f);
@@ -1488,6 +1493,39 @@ fn desugar_try<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
 
     let trystar = sym(rt, "try*");
     rt.vec_to_list(&[trystar, body, catchbind, dispatch, finally_form])
+}
+
+/// `(binding [*x* v …] body…)` -> `(try* (do (%dyn-mark) (%dyn-bind '*x* v) …
+/// body…) nil nil (%dyn-unwind))`. The `%dyn-mark` delimits this scope on the
+/// per-thread binding stack; the `finally` `%dyn-unwind` pops it (so bindings
+/// unwind even when the body throws). Var syms stay bare — dynamic vars live in
+/// the flat space, matching how references (`%dyn-get`) key the stack.
+fn desugar_binding<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
+    let items = rt.list_to_vec(form);
+    let pairs = binding_items(rt, items[1]).unwrap_or_else(|| rt.list_to_vec(items[1]));
+    let quote = sym(rt, "quote");
+    let dynbind = sym(rt, "%dyn-bind");
+    let do_sym = sym(rt, "do");
+    let nil = rt.encode(Val::Nil);
+
+    let mut body = vec![do_sym];
+    let mark = sym(rt, "%dyn-mark");
+    body.push(rt.vec_to_list(&[mark]));
+    let mut k = 0;
+    while k + 1 < pairs.len() {
+        let qvar = rt.vec_to_list(&[quote, pairs[k]]);
+        body.push(rt.vec_to_list(&[dynbind, qvar, pairs[k + 1]]));
+        k += 2;
+    }
+    body.extend_from_slice(&items[2..]);
+    let body = rt.vec_to_list(&body);
+
+    let unwind = {
+        let u = sym(rt, "%dyn-unwind");
+        rt.vec_to_list(&[u])
+    };
+    let trystar = sym(rt, "try*");
+    rt.vec_to_list(&[trystar, body, nil, nil, unwind])
 }
 
 /// The test form for one catch clause: `true` for a catch-all (`:default` or a
