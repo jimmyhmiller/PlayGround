@@ -1,0 +1,97 @@
+// examples/kanban.scry — a task board that shows off the whole viewer with zero agent/AI code:
+//   nesting          Board ▸ Column ▸ Card         (ownership = nesting in the Map)
+//   shared entities  a User assigned to many Cards -> identity color everywhere
+//   an enum status   Todo / Doing / Done           (badge on the card view)
+//   a declared view  BoardView / CardBoard         (the program says how it's seen)
+//   declared actions Start / Finish / Reassign     (what a person would do to a card)
+// Run it:  ./scry run examples/kanban.scry   then open the viewer, click into the Board.
+
+enum Status { Todo  Doing  Done }
+
+class User {
+  name: String
+  role: String
+  fn init(name: String, role: String) { self.name = name  self.role = role }
+}
+
+class Card {
+  title: String
+  status: Status
+  assignee: User
+  points: Int
+  fn init(title: String, assignee: User, points: Int) {
+    self.title = title
+    self.status = Status.Todo
+    self.assignee = assignee
+    self.points = points
+  }
+  fn start() { self.status = Status.Doing }
+  fn finish() { self.status = Status.Done }
+  fn reassign(u: User) { self.assignee = u }
+}
+
+class Column {
+  name: String
+  cards: List<Card>
+  fn init(name: String) { self.name = name  self.cards = List<Card>() }
+  fn add(c: Card) { self.cards.push(c) }
+}
+
+class Board {
+  name: String
+  columns: List<Column>
+  members: List<User>
+  fn init(name: String) {
+    self.name = name
+    self.columns = List<Column>()
+    self.members = List<User>()
+  }
+}
+
+// How a Card wants to be seen: title + a status badge + its assignee as a card.
+view CardBoard for Card {
+  title: title
+  badge: status
+  section "assignee" { assignee as card }
+}
+
+// How the Board wants to be seen: its columns as rows, the team as chips.
+view BoardView for Board {
+  title: name
+  section "columns" { columns as rows }
+  section "team"    { members as chips }
+}
+
+// What a person would do to a card — curated actions, not the raw method list.
+action "Start"    for Card { self.start() }
+action "Finish"   for Card { self.finish() }
+action "Reassign" for Card (to: User) { self.reassign(to) }
+
+fn main() {
+  let board = Board(name: "Launch")
+  let alice = User(name: "alice", role: "eng")
+  let bob   = User(name: "bob",   role: "design")
+  board.members.push(alice)
+  board.members.push(bob)
+
+  let todo  = Column(name: "Todo")
+  let doing = Column(name: "Doing")
+  let done  = Column(name: "Done")
+  board.columns.push(todo)
+  board.columns.push(doing)
+  board.columns.push(done)
+
+  // alice and bob are each assigned to several cards -> shared -> identity colors in the Map
+  todo.add(Card(title: "wire the API", assignee: alice, points: 5))
+  todo.add(Card(title: "design the logo", assignee: bob, points: 3))
+
+  let ci = Card(title: "set up CI", assignee: alice, points: 2)
+  ci.start()
+  doing.add(ci)
+
+  let readme = Card(title: "write the README", assignee: bob, points: 1)
+  readme.finish()
+  done.add(readme)
+
+  Console.log("board '${board.name}' ready: ${board.columns.len()} columns, ${board.members.len()} members")
+}
