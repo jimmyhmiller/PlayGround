@@ -88,6 +88,17 @@ Everything in this section is implemented, typechecked, and covered by golden te
 - **Per-type slab arenas** — each type gets its own arena; instance enumeration is a
   slab walk. This is what makes `Agent.instances()` cheap and the whole observability
   story work.
+- **Garbage collection** — precise, stop-the-world **mark-sweep** (02-runtime.md §6).
+  Reclaims dead class instances (back to each arena's free-list, so the per-type slab walk
+  is untouched) **and** dead non-arena heap objects (`String`/`List`/`Map`/enum/`Mutex`,
+  clox-style intrusive `Obj` list). Roots are **precise, not conservative**: the compiler
+  emits a per-instruction stack map for every method, so a collection scans exactly the live
+  references in every parked frame. Thread-safe by construction — GC reuses the same STW
+  safepoint the eval channel uses, so it runs with every mutator quiesced; two concurrent GC
+  initiators can't deadlock (a non-spinning try-acquire makes the loser park). Triggered on a
+  `bytes-allocated`/`next-gc` heuristic at the dispatch loop top, and fires from inside an eval
+  too (the allocating-eval path is verified). A `Point`-allocating loop that used to wall at
+  ~100k now runs to millions.
 - **Real threads** — OS threads, STW safepoints, atomic-bump allocation, `Mutex`.
 - **Uncrashable eval** — an eval from the viewer can **never** kill the process. Syntax
   errors, stale references, arena-OOM, bad opcodes, and even internal compiler-phase
@@ -187,10 +198,14 @@ reflection ops: `types`, `schema`, `fields`, `methods`, `graph`, `views`, `actio
 
 These are real, current gaps. Most are deliberate PoC cut-lines, not bugs.
 
-- **No garbage collector.** Each type's arena has a fixed cap; exhausting it is a hard
-  `OutOfArenaSpace` error ("GC not implemented in this build"). Long-running or
-  high-allocation programs will hit the wall (e.g. a tight `Point`-allocating loop caps
-  around 100k). This is the biggest limitation.
+- **GC is non-moving / non-generational.** Mark-sweep with per-arena free-lists is in
+  (above) — the `OutOfArenaSpace` wall is gone for reclaimable heaps. What's deferred:
+  **compaction** (so enumeration stays `O(high-water)`, not `O(live)`, on high-churn types —
+  a heavily churned arena's slab walk still costs one flag-check per ever-used slot); a
+  **generational/incremental** collector (v1 is a full STW pause, single-threaded marking —
+  the parked threads' cores sit idle during a collection); and per-type arena caps still
+  apply (a genuine `OutOfArenaSpace` fires only when a single type has >`MAX_SLOTS` (100k)
+  simultaneously **live** instances — raise the cap for that type).
 - **No lambdas / closures.** Explicit parse error: "lambdas/closures are not supported in
   this PoC." Functions are top-level only; no first-class function values.
 - **No generic bounds.** Generics are monomorphized but a bound on a type parameter
@@ -224,6 +239,15 @@ These are real, current gaps. Most are deliberate PoC cut-lines, not bugs.
 
 ## Recently fixed (this cycle)
 
+- **Garbage collection landed** (the previous "biggest limitation"). Precise STW mark-sweep over
+  per-type arenas + the non-arena object list. Three things made it tractable: (1) the compiler
+  now emits **per-instruction stack maps** by abstract-interpreting each method's bytecode, so
+  roots are precise without tagging values (slots were made **monotonic** — never reused across
+  kinds — so one bitmap per slot is exact); (2) every non-arena heap object carries a uniform
+  `Obj` header whose leading word doubles as an arena-vs-non-arena **classifier**; (3) GC reuses
+  the existing STW safepoint, with a **non-spinning try-acquire** so two concurrent GC initiators
+  park instead of deadlocking. Live-redefined method bodies get fresh stack maps too. Verified:
+  2M-alloc loop, concurrent 3-thread alloc (15000 distinct slots), and an 800k-alloc *eval*.
 - **Process crash on method invoke** — unguarded `exit()` in compiler/type-name paths could
   quit the whole process during an eval; all such sites now route through the eval landing
   pad. An eval can no longer kill the program.

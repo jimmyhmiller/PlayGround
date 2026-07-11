@@ -1,5 +1,48 @@
 # 06 — Implementation (living doc)
 
+# Phase G1 — garbage collection (02-runtime.md §6, as built)
+
+Precise, stop-the-world mark-sweep. New module `gc.coil` (mark worklist, `gc-mark-object`, the
+two blacken tracers, the two sweeps); root scanning + the collect coordinator live in `vm.coil`
+(they need the `VMThread` layout); allocation accounting is the leaf `gcstate.coil`.
+
+**What matched the doc:** per-type arena sweep = walk slabs, unmarked-live → free-list (reuse on
+next `arena-alloc`, so the enumeration walk is untouched); `TypeInfo`/`FieldInfo`-driven tracing;
+STW reuses §7's `request-global-stop`; trigger is a `bytes-allocated`/`next-gc` pair.
+
+**Deviations forced by the real compiler / Coil (worth knowing before you touch this):**
+- **Per-instruction stack maps, not a single per-method `ref-slots` bitmap.** The doc's single
+  bitmap needs "one kind per slot for the whole method," which a conventional push/pop operand
+  stack can't give (the same operand depth holds a ref in one expression and an Int in another).
+  So `compile.coil` **abstract-interprets** each method's emitted bytecode (a small CFG worklist,
+  `build-stackmaps`) and stores an opmap **per instruction offset** (`MethodInfo.opmaps`, indexed
+  by `ip`). `mark-roots` reads `opmaps[frame.ip]`. Declared-local slots were made **monotonic**
+  (compile-match / compile-for / scope-reset no longer recycle `next-slot`) so each slot has one
+  fixed kind — without that, a match arm's payload slot could be an `Int` in one arm and a
+  `String` in another and the map would be ambiguous (this was the first real bug found).
+- **Exhaustive-match last arm is emitted unconditionally.** Its redundant tag-check created a
+  statically-reachable-but-dead fall-through whose stack height disagreed with the value merge,
+  which the map builder (correctly) rejected. Dropping the check removes the dead edge (and is a
+  small codegen win).
+- **Every non-arena object gets a uniform `Obj{kind,marked,next}` header** (`builtins.coil`). The
+  `kind` word is a large sentinel (`>= OBJ_TAG_BASE`) so a single load classifies any pointer as
+  arena-instance (small type-id) vs non-arena — no range tables. String ownership was tightened
+  (a collectable `StringObj` owns its buffer; slices/literals copy or use an unlinked `-perm`
+  string) so the sweep can free the char data too. Containers carry an element/value ref-flag and
+  enum boxes a payload ref-mask, stamped by the compiler at construction (extra bool/`u8` operands
+  on `LIST_NEW`/`MAP_NEW`/`MUTEX_NEW`/`MAKE_ENUM`) so `List<Agent>` is traced but `List<Int>` skipped.
+- **Trigger fires at the dispatch loop top** (not inside `OP_NEW`), so `fr.ip` is an instruction
+  boundary with a valid map for every parked thread — never mid-instruction with a half-formed stack.
+- **Concurrent-GC deadlock fix.** Any thread may initiate a GC, so two can race the stop. The
+  original `request-global-stop` spins to win, but the winner then waits for the loser to *park* —
+  and the loser is spinning, not parking → hang (seen as a flaky `alloc_race` timeout). Fix:
+  `request-global-stop-try` (single CAS, no spin); the loser parks and lets the winner's collection
+  cover it. Live-redefined bodies (`recompile-method-at!`) build their stack maps too, or a GC
+  scanning the new frame would read a garbage `opmaps`.
+
+`ThreadHandle` is a raw `VMThread*` (not GC memory); it and the builtin objects are classified as
+opaque scalars (`ty-field-kind` → `FIELD_I64`) so the collector never traces them.
+
 # Phase F1/F2 — functions & execution: `trace(<expr>)` + `functions()`, functions in the Map
 
 The Map visualizes **data** (live entity instances). F1 adds the **computation** dimension: a
