@@ -1,0 +1,55 @@
+; web/dom.coil -- a general DOM vocabulary for Coil compiled to wasm32.
+;
+; Each `extern` here becomes a wasm import under `env.*`; coil-runtime.js supplies
+; the implementations against the real browser DOM. DOM nodes are referred to by an
+; opaque integer HANDLE (i32) that the runtime hands back — coil never holds a JS
+; object, only its handle. Strings cross the boundary as (ptr,len) into the wasm
+; linear memory, which the runtime reads as UTF-8.
+;
+; DOM events flow back into coil by NAME: `(on node "click" "on_click")` asks the
+; runtime to call the exported coil function `on_click` when the event fires. Export
+; such handlers with `(export-c [on-click :as "on_click"])`.
+(module dom)
+(import "slice.coil" :use *)
+
+; ---- raw host imports (implemented in coil-runtime.js) ----
+(extern dom_body           :cc c []                                   (-> i32))   ; document.body handle
+(extern dom_create_element :cc c [(ptr u8) i32]                       (-> i32))   ; createElement(tag)
+(extern dom_create_text    :cc c [(ptr u8) i32]                       (-> i32))   ; createTextNode(text)
+(extern dom_append         :cc c [i32 i32]                            (-> void))  ; parent.appendChild(child)
+(extern dom_set_text       :cc c [i32 (ptr u8) i32]                   (-> void))  ; node.textContent = s
+(extern dom_set_int        :cc c [i32 i32]                            (-> void))  ; node.textContent = String(n)
+(extern dom_set_attr       :cc c [i32 (ptr u8) i32 (ptr u8) i32]      (-> void))  ; node.setAttribute(k,v)
+(extern dom_on             :cc c [i32 (ptr u8) i32 (ptr u8) i32]      (-> void))  ; node.addEventListener(evt, ()=>exports[handler]())
+(extern dom_get_by_id      :cc c [(ptr u8) i32]                       (-> i32))   ; getElementById(id)
+(extern console_log        :cc c [(ptr u8) i32]                       (-> void))  ; console.log(s)
+
+; ---- ergonomic wrappers: pass a (slice u8) instead of splitting ptr/len yourself ----
+(defn body [] (-> i32) (dom_body))
+
+(defn create-element [(tag (slice u8))] (-> i32)
+  (dom_create_element (slice-data [u8] tag) (cast i32 (slice-len [u8] tag))))
+
+(defn create-text [(s (slice u8))] (-> i32)
+  (dom_create_text (slice-data [u8] s) (cast i32 (slice-len [u8] s))))
+
+(defn append [(parent i32) (child i32)] (-> void) (dom_append parent child))
+
+(defn set-text [(node i32) (s (slice u8))] (-> void)
+  (dom_set_text node (slice-data [u8] s) (cast i32 (slice-len [u8] s))))
+
+(defn set-int [(node i32) (v i32)] (-> void) (dom_set_int node v))
+
+(defn set-attr [(node i32) (name (slice u8)) (val (slice u8))] (-> void)
+  (dom_set_attr node (slice-data [u8] name) (cast i32 (slice-len [u8] name))
+                     (slice-data [u8] val)  (cast i32 (slice-len [u8] val))))
+
+(defn on [(node i32) (event (slice u8)) (handler (slice u8))] (-> void)
+  (dom_on node (slice-data [u8] event)   (cast i32 (slice-len [u8] event))
+               (slice-data [u8] handler) (cast i32 (slice-len [u8] handler))))
+
+(defn get-by-id [(id (slice u8))] (-> i32)
+  (dom_get_by_id (slice-data [u8] id) (cast i32 (slice-len [u8] id))))
+
+(defn log [(s (slice u8))] (-> void)
+  (console_log (slice-data [u8] s) (cast i32 (slice-len [u8] s))))

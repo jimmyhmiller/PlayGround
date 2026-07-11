@@ -29,11 +29,26 @@ imported must start with `(module NAME)`. `Coil.toml`:
     [link]
     libs = ["m"]             # -> -lm
 
-The Wasm target produces an instantiable module and exports `main` (and its
-linear `memory`). It is a single-Coil-program target: imports within the program
-are compiled normally, but external C functions and native libraries cannot be
-linked into the module. The compiler performs the final Wasm-object conversion
-itself; this target does not invoke a linker process.
+The Wasm target produces an instantiable module. The compiler performs the final
+Wasm-object conversion itself; this target does not invoke a linker process, and
+native libraries cannot be linked into the module. It is otherwise a full target
+for **the browser** — enough to build interactive pages in Coil (see `web/`):
+
+- **Exports.** `main` and its linear `memory` are always exported. Every
+  `(export-c [f :as "name"])` function is also exported, so JS can call into Coil:
+  `instance.exports.name(args)`. Args/results are wasm scalars (`i32`/`i64`/floats).
+- **Host imports.** An `extern … :cc c` that is *declared but never defined* becomes
+  a wasm import `env.<name>` — this is how Coil calls out to JS (DOM, `console`,
+  fetch, …). Pass a string as a `(ptr u8)`+`i32` pair via `(slice-data s)` /
+  `(slice-len s)`; the host reads it from linear memory as UTF-8.
+- **Self-contained.** The finalizer resolves the linker-provided `__memory_base`
+  and `GOT.mem.*` globals to concrete addresses, so string literals and
+  `alloc-static` global state work with no JS-side plumbing. The only imports a
+  module has are the host functions it actually calls.
+
+`web/coil-runtime.js` instantiates a module and wires the `env.dom_*` imports from
+`web/dom.coil` to a real `document`; `web/counter.coil` is a worked interactive
+example (build with `--target wasm32-unknown-unknown`).
 
 ## Modules & imports
 

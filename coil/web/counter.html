@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Coil counter — an interactive page written in Coil</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.5; }
+    h1 { font-size: 1.6rem; }
+    #count { font-size: 3rem; font-variant-numeric: tabular-nums; margin: 1rem 0; }
+    button { font-size: 1.5rem; width: 3rem; height: 3rem; margin-right: .5rem; border-radius: .5rem; border: 1px solid gray; cursor: pointer; }
+    p.note { opacity: .7; font-size: .9rem; margin-top: 2rem; }
+  </style>
+</head>
+<body>
+  <!-- Everything below <body> is built by Coil at runtime (see counter.coil).
+       This file only bootstraps the wasm module. -->
+  <script type="module">
+    import { runCoil } from './coil-runtime.js';
+    runCoil('./counter.wasm').catch((e) => {
+      document.body.innerHTML = '<pre style="color:red">' + e.stack + '</pre>';
+    });
+  </script>
+  <p class="note">The heading, counter, and buttons above are constructed by a
+  WebAssembly module compiled from <code>counter.coil</code>. Button clicks call
+  exported Coil functions; Coil mutates the DOM through host imports. Serve this
+  directory over HTTP (e.g. <code>python3 -m http.server</code>) — <code>file://</code>
+  will not load the wasm.</p>
+</body>
+</html>

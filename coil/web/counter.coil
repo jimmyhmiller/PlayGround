@@ -1,0 +1,53 @@
+; web/counter.coil -- an interactive web page written in Coil, à la Guile Hoot.
+;
+; Build:  coil build counter.coil --target wasm32-unknown-unknown -o counter.wasm
+; Serve:  open counter.html (which loads coil-runtime.js + counter.wasm)
+;
+; `main` builds the DOM once; the two exported handlers mutate shared state and
+; re-render. JS calls into coil (main, on_inc, on_dec); coil calls into JS (the
+; dom.* imports). No JS glue per widget — the page IS coil.
+(module counter)
+(import "dom.coil" :use *)
+
+; ---- shared mutable state (no top-level vars: alloc-static gives one global cell) ----
+(defn count-cell [] (-> (ptr i64)) (alloc-static i64))   ; the current count
+(defn view-cell  [] (-> (ptr i64)) (alloc-static i64))   ; the display node's handle
+
+(defn render [] (-> void)
+  (set-int (cast i32 (load (view-cell))) (cast i32 (load (count-cell)))))
+
+; ---- event handlers, called by name from JS on click ----
+(defn on-inc [] (-> i64)
+  (store! (count-cell) (iadd (load (count-cell)) 1)) (render) 0)
+
+(defn on-dec [] (-> i64)
+  (store! (count-cell) (isub (load (count-cell)) 1)) (render) 0)
+
+; ---- one-shot page construction ----
+(defn main [] (-> i64)
+  (let [root    (body)
+        title   (create-element "h1")
+        display (create-element "div")
+        inc     (create-element "button")
+        dec     (create-element "button")]
+    (set-text title "Coil counter")
+    (append root title)
+
+    (set-attr display "id" "count")
+    (set-int  display 0)
+    (append root display)
+
+    (set-text inc "+")
+    (on inc "click" "on_inc")
+    (append root inc)
+
+    (set-text dec "-")
+    (on dec "click" "on_dec")
+    (append root dec)
+
+    (store! (count-cell) 0)
+    (store! (view-cell)  (cast i64 display))
+    (render)
+    0))
+
+(export-c [on-inc :as "on_inc"] [on-dec :as "on_dec"])
