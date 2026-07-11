@@ -780,6 +780,9 @@
     (snprintf clbuf 32 c"Content-Length: %lld" blen) (sr-str hdr k clbuf) (sr-crlf hdr k)
     (sr-str hdr k c"Connection: close") (sr-crlf hdr k)
     (sr-str hdr k c"Access-Control-Allow-Origin: *") (sr-crlf hdr k)
+    ; never cache: the viewer JS/CSS change often and eval responses are live — a stale browser
+    ; cache is why "restart the portal, nothing changes" happened. Always serve fresh.
+    (sr-str hdr k c"Cache-Control: no-store, must-revalidate") (sr-crlf hdr k)
     (sr-crlf hdr k)
     (write-all fd hdr (load k))
     (write-all fd body blen) 0))

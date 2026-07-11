@@ -228,6 +228,35 @@ function IndexPane() {
 }
 
 // ===================== instance table =====================
+// When a type has no live instances (static inspect / a static project / just not created yet),
+// show its CLASS SCHEMA (fields + method signatures) instead of an empty table — so you can
+// always inspect a class statically.
+function TablePaneSchema({ sc, name, error }) {
+  if (error && error.kind !== "StaticInspection")
+    return html`<div class="invoke-result invoke-error">${error.kind}: ${error.message}</div>`;
+  if (!sc) return html`<div class="empty">no live instances, and no schema for ${name}.</div>`;
+  return html`
+    <div class="detail-section">
+      <div class="pane-sub">no live instances — showing the class schema</div>
+      ${sc.fields && sc.fields.length ? html`
+        <h3>fields</h3>
+        <div class="field-grid">
+          ${sc.fields.map((f) => html`<${React.Fragment} key=${f.name}>
+            <div class="fcell fname">${f.name}<span class="ftype">${cleanType(f.type)}</span></div>
+            <div class="fcell fval"><span class="v-void">⟵ runtime</span></div>
+          <//>`)}
+        </div>` : ""}
+      ${sc.methods && sc.methods.length ? html`
+        <h3 class="sec-gap">methods</h3>
+        ${sc.methods.map((m) => html`
+          <div class="method" key=${m.name}>
+            <div class="method-head static">
+              <span class="method-sig">${m.name}(${(m.params || []).map((p) => `${p.name}: ${cleanType(p.type)}`).join(", ")}) <span class="mret">→ ${m.returns}</span></span>
+            </div>
+          </div>`)}` : ""}
+    </div>`;
+}
+
 function TablePane({ name, schema }) {
   const nav = useContext(NavContext);
   const sc = schema.find((t) => t.name === name);
@@ -262,11 +291,11 @@ function TablePane({ name, schema }) {
                onKeyDown=${(e) => { if (e.key === "Enter") setApplied(filterInput); }} />
         <div class="tbl-meta">${meta}</div>
       </div>
-      ${error
-        ? html`<div class="invoke-result invoke-error">${error.kind}: ${error.message}</div>`
-        : !items.length
-          ? html`<div class="empty">no live instances match.</div>`
-          : html`
+      ${!items.length
+        ? (applied
+            ? html`<div class="empty">no instances match the filter.</div>`
+            : html`<${TablePaneSchema} sc=${sc} name=${name} error=${error} />`)
+        : html`
             <table class="itable">
               <thead><tr><th>id</th>${cols.map((c) => html`<th key=${c}>${c}</th>`)}</tr></thead>
               <tbody>
