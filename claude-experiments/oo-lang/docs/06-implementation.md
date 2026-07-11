@@ -1606,6 +1606,15 @@ Additions over `types()`:
 - **interface nodes** (from `DK_INTERFACE`/`DK_BUILTIN_IFACE` decls) with their `methods` and a
   server-computed **`implementors`** array (scan of entity monos whose decl `implements` it).
 - **enum nodes** (from `DK_ENUM` decls) with `variants` (name + payload type strings + `refTypes`).
+- **`ctor` per class/object** — the parameter list Scry construction actually takes, so a client can
+  build a "create a fresh instance" form. `emit-ctor-array` (src/serialize.coil): if the class
+  declares an explicit `fn init`, `ctor` is its parameters `[{name,type}]`; otherwise it is the
+  **synthesized memberwise constructor** — one entry per declared field, in field order (mirroring
+  `construct-with-fields` in typecheck.coil). Objects (singletons, never `Type(...)`-constructed) get
+  `[]`. `type` uses the same string form as method-param types (`ast-ty-str`), so the viewer's
+  `classifyParam` drives each ctor param recursively. `init` is still omitted from `methods` (a
+  constructor is not an invocable method); `ctor` is the one place it surfaces. Example:
+  `Account` → `"ctor":[{"name":"owner","type":"Customer"},{"name":"kind","type":"Kind"}]`.
 - **`builtin`** (decl has no AST node) — lets the client hide unreferenced stdlib nodes.
 
 `liveCount` reuses the arena live-count (same source as `types()`), so it climbs live in `scry run`
@@ -2330,6 +2339,31 @@ the rail's 500ms `types()` poll omits enums and carries no `kind`/`variants`, so
 separate `schema()` poll (`fullSchema`) passed to the browse `DetailPane`; `NestedView` already fed
 its in-map inspector the full `schema()` nodes, so both the browse detail and the V4 inspector get the
 right pickers.
+
+**"Create new" — construct a fresh instance inline (entity/interface params).** Picking an existing
+instance is not always enough — you often need to make one. So `EntityArgInput`'s `<select>` gains,
+after the live `Type#slot` options, a **`+ create new <Type>`** option per concrete type (for an
+interface, one per implementor — each a constructible concrete type). Choosing it (`value
+"__create__:<Type>"`) flips the widget into an **inline constructor form**: the `ctor` params from
+that type's `schema()` node, each rendered by **a nested `ArgInput`** — so the create form is fully
+**recursive** (an entity ctor param gets its own pick-or-create; a String/Int/enum param gets the
+right primitive widget) and reuses every existing widget + `argValid` unchanged. A `use existing`
+button returns to the picker. While any required ctor param is invalid the widget emits `""` (so the
+parent's `argValid`→run button stays disabled, no new state needed); once all are valid it emits the
+**construction expression** `Type(p1: v1, p2: v2, …)` — each `vi` built with `literalFor(sub, ptype)`
+(so nested strings quote, enums qualify, a nested construction/`Type#slot` passes through). That
+whole expression is stored as `args[p.name]` and flows through the top-level `literalFor` **unchanged**
+(a construction call is already valid source, and doesn't match the `Type#slot` rewrite), then into
+the invoke exactly like an instance ref. **Recursion guard:** `EntityArgInput` carries a `depth`
+(0 at the top; `+1` per nested create form) and stops offering `+ create new` at `MAX_CREATE_DEPTH`
+(3) — so a self-referential or cyclic ctor can't recurse forever; at the cap you pick a live instance
+(free-text id fallback if none exist). CSS: `.create-form` is a dashed bordered vertical box
+overriding `.arg-row`'s horizontal flex, with a `use existing` back button. `ui-smoke.mjs` covers
+both a **primitive-only** create (kanban `Reassign(to: User)` → `+ create new User`, fill
+`name`/`role`, invoke → live `User` count climbs) and a **recursive** create (bank
+`Transfer(to: Account)` → `+ create new Account`, whose `owner: Customer` uses a NESTED
+`+ create new Customer`, `kind: Kind` a dropdown → invoke → both `Account` and `Customer` counts
+climb). Screenshot: `docs/create-new-picker.png`.
 
 **Render safety net.** A bad eval can still happen through the free-text fallbacks (a `List<Tool>`
 param given a bare word) or a stale ref — the scry server always returns a clean `TypeError`, but
