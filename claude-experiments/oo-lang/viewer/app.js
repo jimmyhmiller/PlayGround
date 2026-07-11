@@ -471,7 +471,7 @@ function MethodCard({ cls, slot, gen, m, schema }) {
     <div class=${"method" + (open ? " open" : "")}>
       <div class="method-head" onClick=${() => setOpen((o) => !o)}>
         <span class="method-sig">${m.name}(${params}) <span class="mret">→ ${m.returns}</span></span>
-        <button class="invoke-btn" onClick=${(e) => { e.stopPropagation(); if (m.params.length) { setOpen(true); if (allValid) doInvoke(); } else doInvoke(); }}>invoke</button>
+        <button class="invoke-btn" onClick=${(e) => { e.stopPropagation(); setOpen(true); if (!m.params.length || allValid) doInvoke(); }}>invoke</button>
       </div>
       <div class="method-body">
         ${m.params.map((p) => html`<${ArgInput} key=${p.name} param=${p} schema=${schema} active=${open}
