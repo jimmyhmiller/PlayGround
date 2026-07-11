@@ -531,6 +531,37 @@ fn str_fn() {
 }
 
 #[test]
+fn persistent_array_map() {
+    assert_eq!(run("(type-of {:a 1})"), "PersistentArrayMap");
+    assert_eq!(run("{:a 1 :b 2}"), "{:a 1, :b 2}");
+    assert_eq!(run("(get {:a 1 :b 2} :b)"), "2");
+    assert_eq!(run("(get {:a 1} :z 99)"), "99"); // not-found arity
+    assert_eq!(run("(assoc {:a 1} :b 2 :c 3)"), "{:a 1, :b 2, :c 3}"); // variadic
+    assert_eq!(run("(assoc {:a 1} :a 9)"), "{:a 9}"); // overwrite in place
+    assert_eq!(run("(dissoc {:a 1 :b 2 :c 3} :b)"), "{:a 1, :c 3}");
+    assert_eq!(run("(dissoc {:a 1 :b 2} :a :b)"), "{}"); // variadic dissoc
+    assert_eq!(run("(count {:a 1 :b 2 :c 3})"), "3");
+    assert_eq!(run("(contains? {:a 1} :a)"), "true");
+    assert_eq!(run("(contains? {:a 1} :z)"), "false");
+    assert_eq!(run("(keys {:a 1 :b 2})"), "(:a :b)");
+    assert_eq!(run("(vals {:a 1 :b 2})"), "(1 2)");
+    assert_eq!(run("(:a {:a 5})"), "5"); // keyword call
+    assert_eq!(run("({:a 5} :a)"), "5"); // map call (IFn)
+    assert_eq!(run("(key (first {:a 1}))"), ":a");
+    assert_eq!(run("(val (first {:a 1}))"), "1");
+    assert_eq!(run("(map key {:a 1 :b 2})"), "(:a :b)");
+    // equality is order-independent
+    assert_eq!(run("(= {:a 1 :b 2} {:b 2 :a 1})"), "true");
+    assert_eq!(run("(= {:a 1} {:a 2})"), "false");
+    // grows past the 8-entry array-map size (promotion deferred; still correct)
+    assert_eq!(run("(count (into {} (map (fn [i] [i (* i i)]) (range 20))))"), "20");
+    assert_eq!(run("(get (into {} (map (fn [i] [i (* i i)]) (range 20))) 15)"), "225");
+    // nested + conj a map
+    assert_eq!(run("(get-in {:a {:b {:c 42}}} [:a :b :c])"), "42");
+    assert_eq!(run("(count (conj {:a 1} {:b 2 :c 3}))"), "3");
+}
+
+#[test]
 fn protocol_dispatch_collections() {
     // The core collection fns dispatch through protocols (ClojureScript-style):
     // a USER type that implements the protocols works with all of them, with no
@@ -655,12 +686,12 @@ fn seq_breadth() {
 
 #[test]
 fn map_breadth() {
-    assert_eq!(run("(group-by even? (range 6))"), "{false [1 3 5], true [0 2 4]}");
-    assert_eq!(run("(frequencies [:a :b :a :a :b])"), "{:b 2, :a 3}");
-    assert_eq!(run("(zipmap [:a :b] [1 2])"), "{:b 2, :a 1}");
+    assert_eq!(run("(group-by even? (range 6))"), "{true [0 2 4], false [1 3 5]}");
+    assert_eq!(run("(frequencies [:a :b :a :a :b])"), "{:a 3, :b 2}");
+    assert_eq!(run("(zipmap [:a :b] [1 2])"), "{:a 1, :b 2}");
     assert_eq!(run("(merge {:a 1} {:b 2} {:a 9})"), "{:a 9, :b 2}");
     assert_eq!(run("(merge-with + {:a 1 :b 2} {:a 10})"), "{:a 11, :b 2}");
-    assert_eq!(run("(select-keys {:a 1 :b 2 :c 3} [:a :c])"), "{:c 3, :a 1}");
+    assert_eq!(run("(select-keys {:a 1 :b 2 :c 3} [:a :c])"), "{:a 1, :c 3}");
     assert_eq!(run("(update-in {:a {:b 1}} [:a :b] inc)"), "{:a {:b 2}}");
 }
 

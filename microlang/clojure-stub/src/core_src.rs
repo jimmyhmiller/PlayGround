@@ -804,13 +804,22 @@ pub const CORE: &str = r##"
         true (%str-cat (-str1 (first kvs))
                        (%str-cat " " (%str-cat (-str1 (second kvs))
                                                (%str-cat ", " (-str-map-join (rest (rest kvs)))))))))
+;; Format a seq of [k v] map entries as "k v, k v" (map keys are unordered).
+(defn -str-entries [es]
+  (let [es (seq es)]
+    (cond (nil? es) ""
+          (nil? (next es)) (let [e (first es)] (%str-cat (-str1 (first e)) (%str-cat " " (-str1 (second e)))))
+          true (let [e (first es)]
+                 (%str-cat (-str1 (first e))
+                           (%str-cat " " (%str-cat (-str1 (second e))
+                                                   (%str-cat ", " (-str-entries (rest es))))))))))
 (defn -str1 [x]
   (cond (nil? x) ""
         (string? x) x
         (keyword? x) (%str-cat ":" (%str-of (field x 0)))
         (vector? x) (%str-cat "[" (%str-cat (-str-join " " x) "]"))
         (set? x) (%str-cat "#{" (%str-cat (-str-join " " (field x 0)) "}"))
-        (map? x) (%str-cat "{" (%str-cat (-str-map-join (field x 0)) "}"))
+        (map? x) (%str-cat "{" (%str-cat (-str-entries (seq x)) "}"))
         (lazy-seq? x) (%str-cat "(" (%str-cat (-str-join " " x) ")"))
         (list? x) (%str-cat "(" (%str-cat (-str-join " " x) ")"))
         true (%str-of x)))
@@ -863,6 +872,12 @@ pub const CORE: &str = r##"
         (%num-eq (type-of x) 'List) (-realize-list x)
         (vector? x) (record 'Vector (-realize-list (-pv-seq x)))
         (set? x) (record 'Set (-realize-list (field x 0)))
-        (map? x) (record 'Map (-realize-list (field x 0)))
+        (map? x) (record 'Map (-realize-entries (seq x)))
         true x))
+;; Flatten a seq of [k v] map entries into a realized (k v k v …) list for display.
+(defn -realize-entries [es]
+  (-rev (loop [es (seq es) acc nil]
+          (if (nil? es) acc
+              (let [e (first es)]
+                (recur (next es) (%cons (-realize (second e)) (%cons (-realize (first e)) acc))))))))
 "##;

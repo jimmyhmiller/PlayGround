@@ -196,11 +196,18 @@ a real STW runtime collects *while mutators run*, not only at quiescence.
 thread hammers `request_gc`, over 20 iterations: every actor finishes correctly
 despite being repeatedly paused and having its garbage swept mid-run, and
 nothing leaks. (The tier is single-frame — no `Call` — so multi-frame actors and
-message passing, and the JIT under threads, are the next steps. A true
-ThreadSanitizer gate is blocked only by the LLVM static lib the crate links for
-the JIT — a non-threaded test SIGSEGVs identically under `-Zsanitizer=thread` —
-and would be unblocked by splitting the runtime into an LLVM-free crate, as
-gc-rust does.)
+message passing, and the JIT under threads, are the next steps.)
+
+The runtime is split into two crates so the concurrency can be race-checked: the
+LLVM-free **`livetype-core`** (IR, verifier, interpreter, `mt`) and **`livetype`**
+(which adds the inkwell JIT and depends on core). Because `livetype-core` links
+no LLVM, its thread tests run under **Miri's data-race detector**
+(`cargo +nightly miri test -p livetype-core --test mt_threads`) — all pass,
+including across varied scheduler interleavings via `-Zmiri-many-seeds`, so the
+shared-heap migration and the STW-GC coordination are *machine-verified*
+race-free, not just race-free by construction. (ThreadSanitizer's own runtime
+SIGSEGVs on `aarch64-apple-darwin` regardless of the code — confirmed with a
+non-threaded, LLVM-free test — so Miri is the gate on this platform.)
 
 ### Migration chains cross many versions at once
 
@@ -233,9 +240,9 @@ repairable. What remains, in the owner's chosen direction:
   non-moving-handle / atomic-body object model, a `Shared` tier running real OS
   threads over one heap with race-free concurrent migration, and a **preemptive
   stop-the-world collector** that parks running threads at safepoints and sweeps
-  mid-run (`src/mt.rs`). Remaining: multi-frame actors (`Call`) and message
-  passing; the JIT under threads; a concurrent (non-STW) collector; and an
-  LLVM-free runtime crate so ThreadSanitizer can gate it (as `gc-rust` does).
+  mid-run (`crates/livetype-core/src/mt.rs`), split into an LLVM-free crate and
+  **race-checked under Miri**. Remaining: multi-frame actors (`Call`) and message
+  passing; the JIT under threads; and a concurrent (non-STW) collector.
   *(In progress.)*
 - **Name-based instant propagation** is the identity model (not content
   addressing): callers already resolve a callee's current version by name, so a

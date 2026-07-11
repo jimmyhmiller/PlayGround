@@ -1,18 +1,12 @@
 //! Live & Typed runtime prototype.
 //!
-//! Execution state lives in explicit, heap-resident frames. The interpreter is
-//! the reference executor for an IR whose instructions can later be lowered to
-//! LLVM `step(frame, runtime) -> StepResult` functions without changing pause
-//! and resume semantics.
+//! The LLVM-free core — IR, verifier, interpreter, and the thread-safe tier —
+//! lives in the [`livetype_core`] crate and is re-exported here. This crate adds
+//! the LLVM `step` backend (`jit`), so `livetype` is the full system and
+//! `livetype-core` is the runtime you can build (and ThreadSanitize) without
+//! LLVM.
 
 mod jit;
-mod model;
-mod mt;
-mod runtime;
-mod verify;
 
 pub use jit::*;
-pub use model::*;
-pub use mt::*;
-pub use runtime::*;
-pub use verify::*;
+pub use livetype_core::*;

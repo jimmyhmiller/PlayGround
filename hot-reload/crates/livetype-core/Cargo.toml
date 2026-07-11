@@ -1,0 +1,10 @@
+[package]
+name = "livetype-core"
+version = "0.1.0"
+edition = "2024"
+
+# The LLVM-free runtime core: IR, verifier, interpreter, and the thread-safe
+# tier. Kept free of the inkwell/LLVM dependency so its concurrency can be
+# gated under ThreadSanitizer (which the LLVM static lib otherwise breaks).
+[lib]
+path = "src/lib.rs"

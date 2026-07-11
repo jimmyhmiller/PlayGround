@@ -239,4 +239,138 @@ pub const CLJS: &str = r##"
   IMeta (-meta [x] nil))
 (defn with-meta [x m] (-with-meta x m))
 (defn meta [x] (-meta x))
+
+;; ─────────────── PersistentArrayMap — ported from cljs/core.cljs (EPL-1.0) ─────
+;; A small map backed by a flat [k0 v0 k1 v1 …] array with linear scan. Verbatim
+;; except: HOST: key lookup uses a single equiv scan (cljs specialises by key
+;; type); map entries are `[k v]` vectors (not a MapEntry deftype) and -seq builds
+;; them directly (not PersistentArrayMapSeq); promotion to PersistentHashMap at
+;; the 8-entry threshold is DEFERRED until the HAMT is ported (array map just keeps
+;; growing — O(n), still correct); static .-EMPTY / iterator / transient dropped.
+(defprotocol IMap (-dissoc [coll k]))
+
+(defn array-index-of [arr k]
+  (let [len (alength arr)]
+    (loop [i 0]
+      (cond (%lt (%sub len 1) i) -1
+            (-eq2 (aget arr i) k) i
+            :else (recur (%add i 2))))))
+(defn array-map-index-of [m k] (array-index-of (.-arr m) k))
+(defn array-extend-kv [arr k v]
+  (let [l (alength arr) narr (make-array (%add l 2))]
+    (loop [i 0] (if (%lt i l) (do (aset narr i (aget arr i)) (recur (%add i 1))) nil))
+    (aset narr l k) (aset narr (%add l 1) v) narr))
+
+;; -seq as a seq of `[k v]` vectors, built back-to-front (tail-recursive).
+(defn persistent-array-map-seq [arr]
+  (loop [i (%sub (alength arr) 2) acc nil]
+    (if (%lt i 0) acc (recur (%sub i 2) (%cons (vector (aget arr i) (aget arr (%add i 1))) acc)))))
+
+(deftype PersistentArrayMap [meta cnt arr __hash]
+  IWithMeta
+  (-with-meta [coll new-meta]
+    (if (identical? new-meta meta) coll (PersistentArrayMap. new-meta cnt arr __hash)))
+  IMeta
+  (-meta [coll] meta)
+
+  ICollection
+  (-conj [coll entry]
+    (if (vector? entry)
+      (-assoc coll (-nth entry 0) (-nth entry 1))
+      (loop [ret coll es (seq entry)]
+        (if (nil? es)
+          ret
+          (let [e (first es)]
+            (if (vector? e)
+              (recur (-assoc ret (-nth e 0) (-nth e 1)) (next es))
+              (throw "conj on a map takes map entries or seqables of map entries")))))))
+
+  IEmptyableCollection
+  (-empty [coll] (-with-meta -EMPTY-PAM meta))
+
+  IEquiv
+  (-equiv [coll other]
+    (if (map? other)
+      (if (== cnt (-count other))
+        (loop [i 0]
+          (if (%lt i (alength arr))
+            (let [v (-lookup other (aget arr i) -lookup-sentinel)]
+              (if-not (identical? v -lookup-sentinel)
+                (if (-eq2 (aget arr (inc i)) v) (recur (+ i 2)) false)
+                false))
+            true))
+        false)
+      false))
+
+  IHash
+  (-hash [coll] (caching-hash coll hash-unordered-coll __hash))
+
+  ISeqable
+  (-seq [coll] (persistent-array-map-seq arr))
+
+  ICounted
+  (-count [coll] cnt)
+
+  ILookup
+  (-lookup [coll k] (-lookup coll k nil))
+  (-lookup [coll k not-found]
+    (let [idx (array-map-index-of coll k)]
+      (if (== idx -1) not-found (aget arr (inc idx)))))
+
+  IAssociative
+  (-assoc [coll k v]
+    (let [idx (array-map-index-of coll k)]
+      (cond
+        (== idx -1)
+        ;; HOST: cljs promotes to PersistentHashMap past the threshold; deferred.
+        (let [arr (array-extend-kv arr k v)] (PersistentArrayMap. meta (inc cnt) arr nil))
+        (identical? v (aget arr (inc idx)))
+        coll
+        :else
+        (let [narr (aclone arr) _ (aset narr (inc idx) v)] (PersistentArrayMap. meta cnt narr nil)))))
+  (-contains-key? [coll k] (not (== (array-map-index-of coll k) -1)))
+
+  IMap
+  (-dissoc [coll k]
+    (let [idx (array-map-index-of coll k)]
+      (if (>= idx 0)
+        (let [len (alength arr) new-len (- len 2)]
+          (if (zero? new-len)
+            (-empty coll)
+            (let [new-arr (make-array new-len)]
+              (loop [s 0 d 0]
+                (cond
+                  (>= s len) (PersistentArrayMap. meta (dec cnt) new-arr nil)
+                  (-eq2 k (aget arr s)) (recur (+ s 2) d)
+                  :else (do (aset new-arr d (aget arr s))
+                            (aset new-arr (inc d) (aget arr (inc s)))
+                            (recur (+ s 2) (+ d 2))))))))
+        coll)))
+
+  IFn
+  (-invoke [coll k] (-lookup coll k))
+  (-invoke [coll k not-found] (-lookup coll k not-found)))
+
+;; HOST: lookup-sentinel is cljs's (js-obj); a fresh unshareable record here.
+(def -lookup-sentinel (record 'LookupSentinel nil))
+(defn hash-unordered-coll [coll]
+  (reduce (fn [h e] (%bit-and (%add h (hash e)) 2147483647)) 0 coll))
+(def -EMPTY-PAM (PersistentArrayMap. nil 0 (array) nil))
+(defn map? [x] (%num-eq (type-of x) 'PersistentArrayMap))
+(defn -kvs->map [kvs]
+  (loop [s (seq kvs) m -EMPTY-PAM]
+    (if (nil? s) m (recur (next (next s)) (-assoc m (first s) (second s))))))
+(defn hash-map [& kvs] (-kvs->map kvs))
+(defn array-map [& kvs] (-kvs->map kvs))
+;; variadic assoc/dissoc (clojure.core takes multiple keys); the 3-arg / 2-arg
+;; forms in core.clj dispatched to -assoc/-dissoc are superseded here.
+(defn assoc [m k v & kvs]
+  (loop [m (-assoc m k v) s (seq kvs)]
+    (if (nil? s) m (recur (-assoc m (first s) (second s)) (next (next s))))))
+(defn dissoc [m & ks]
+  (loop [m m s (seq ks)] (if (nil? s) m (recur (-dissoc m (first s)) (next s)))))
+(defn keys [m] (map first (seq m)))
+(defn vals [m] (map second (seq m)))
+(defn key [e] (-nth e 0))
+(defn val [e] (-nth e 1))
 "##;

@@ -1244,7 +1244,7 @@ fn class_to_tag(simple: &str) -> Option<&'static str> {
         "Double" | "Float" | "BigDecimal" => "Double",
         "Boolean" => "Boolean",
         s if s.contains("Vector") => "PersistentVector",
-        s if s.contains("Map") => "Map",
+        s if s.contains("Map") => "PersistentArrayMap",
         s if s.contains("Set") => "Set",
         s if s.contains("List") || s == "ISeq" || s == "Seqable" || s == "Cons" => "List",
         s if s == "IFn" || s == "AFn" || s == "Fn" => "Fn",

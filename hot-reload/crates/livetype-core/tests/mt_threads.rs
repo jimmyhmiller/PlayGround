@@ -1,11 +1,22 @@
 //! Real OS threads over one shared heap. The headline test drives many threads
 //! into migrating the *same* object concurrently and asserts they all agree —
-//! run over many iterations to shake out races (and clean under ThreadSanitizer:
-//! `RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test --test mt_threads`).
+//! run over many iterations to shake out races. Because this crate is LLVM-free
+//! it can be checked for data races under Miri's detector:
+//! `cargo +nightly miri test -p livetype-core --test mt_threads`.
+//! (ThreadSanitizer's runtime SIGSEGVs on aarch64-apple-darwin regardless of
+//! the code, so Miri is the machine-checked race gate here.)
 
-use livetype::*;
+use livetype_core::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+// Miri interprets (and race-checks) the code, so it is far slower than native.
+// Scale the stress loops down under Miri while keeping full counts otherwise.
+const MIGRATE_ITERS: usize = if cfg!(miri) { 4 } else { 200 };
+const MIGRATE_THREADS: usize = if cfg!(miri) { 3 } else { 8 };
+const GC_ITERS: usize = if cfg!(miri) { 2 } else { 20 };
+const GC_ACTORS: usize = if cfg!(miri) { 2 } else { 4 };
+const CHURN_N: i64 = if cfg!(miri) { 12 } else { 200 };
 
 const ACCT: DefId = 1;
 const MONEY: DefId = 2;
@@ -138,11 +149,11 @@ fn concurrent_migration_of_a_shared_object_is_race_free() {
     // Many iterations, each with 8 threads racing to migrate the same object.
     // A torn read or a lost/duplicated migration would show up as a wrong
     // result or a panic on some interleaving.
-    for _ in 0..200 {
+    for _ in 0..MIGRATE_ITERS {
         let (shared, obj) = migratable_shared();
         assert_eq!(shared.object_schema(obj), Some(Version(1)));
 
-        let outcomes = shared.run_threads(vec![(PEEK_MONEY, vec![Value::Ref(obj)]); 8]);
+        let outcomes = shared.run_threads(vec![(PEEK_MONEY, vec![Value::Ref(obj)]); MIGRATE_THREADS]);
         for o in &outcomes {
             assert_eq!(
                 *o,
@@ -245,7 +256,7 @@ fn churn() -> Function {
 
 #[test]
 fn preemptive_gc_runs_while_actors_churn() {
-    for _ in 0..20 {
+    for _ in 0..GC_ITERS {
         let mut rt = Runtime::default();
         rt.install_schema(Schema {
             type_id: SOME,
@@ -271,7 +282,7 @@ fn preemptive_gc_runs_while_actors_churn() {
         };
 
         // Four actors, each churning 200 allocations, preempted throughout.
-        let outcomes = shared.run_threads(vec![(CHURN, vec![Value::I64(200)]); 4]);
+        let outcomes = shared.run_threads(vec![(CHURN, vec![Value::I64(CHURN_N)]); GC_ACTORS]);
         done.store(true, Ordering::Release);
         collector.join().unwrap();
 
