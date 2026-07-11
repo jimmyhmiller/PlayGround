@@ -8,6 +8,7 @@
 ; and per-(class,interface) itables for OP_CALL_VIRTUAL.
 (module compile)
 (import "ioutil.coil" :use *)
+(import "evalrt.coil" :use *)
 (import "lexer.coil" :use *)
 (import "ast.coil" :use *)
 (import "types.coil" :use *)
@@ -194,7 +195,7 @@
       (= k NK_TERNARY) (compile-ternary cs n)
       (= k NK_MATCH) (compile-match cs n true)
       (= k NK_IF) (compile-if cs n true)
-      (do (w-cstr 2 c"compile: unsupported expression kind ") (w-int 2 k) (w-cstr 2 c"\n") (exit (cast i32 70)) 0))))
+      (do (w-cstr 2 c"compile: unsupported expression kind ") (w-int 2 k) (w-cstr 2 c"\n") (if (eval-active?) (eval-panic0 EK_RUNTIME c"compile: unsupported expression") 0) (exit (cast i32 70)) 0))))
 
 (defn compile-strchunk [(cs (ptr CState)) (n (ptr Node))] (-> i64)
   (cconst cs (cast i64 (str-make (load (field n s-name)) (load (field n s-len))))))
@@ -228,7 +229,7 @@
       (let [vr (find-variant (nm n) (nlen n) (cast (ptr Decl) 0))]
         (if (!= (cast i64 vr) 0)
           (do (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag (load (field vr enum-decl)) (nm n) (nlen n))) (cu8 cs 0) 0)
-          (do (w-cstr 2 c"compile: unresolved identifier\n") (exit (cast i32 70)) 0))))))
+          (fatal-or-panic EK_RUNTIME c"compile: unresolved identifier" 70))))))
 
 (defn compile-unary [(cs (ptr CState)) (n (ptr Node))] (-> i64)
   (let [op (load (field n ival)) t (tyof cs (load (field n a)))]
@@ -285,7 +286,7 @@
       ; Enum.Variant with no payload (namespace)
       (if (= (load (field nsd kind)) DK_ENUM)
         (do (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag nsd (nm n) (nlen n))) (cu8 cs 0) 0)
-        (do (w-cstr 2 c"compile: bad namespace field access\n") (exit (cast i32 70)) 0))
+        (fatal-or-panic EK_RUNTIME c"compile: bad namespace field access" 70))
       (let [rt (tyof cs recv) ft (tyof cs n) d (load (field rt decl))]
         (compile-expr cs recv)
         (cop cs (ty-load-op ft)) (cu16 cs (field-offset d (nm n) (nlen n))) 0))))
@@ -321,7 +322,7 @@
       (= ck NK_TYPE) (compile-construct-type cs callee n)
       (= ck NK_FIELDACC) (compile-dotted-call cs callee n)
       (= ck NK_IDENT) (compile-ident-call cs callee n)
-      (do (w-cstr 2 c"compile: bad callee\n") (exit (cast i32 70)) 0))))
+      (fatal-or-panic EK_RUNTIME c"compile: bad callee" 70))))
 
 ; construction / collection literals from a TYPE-node callee
 (defn compile-construct-type [(cs (ptr CState)) (tn (ptr Node)) (call (ptr Node))] (-> i64)
@@ -379,7 +380,7 @@
               (= dk DK_FN)
                 (let [argc (compile-args cs n)] (cop cs OP_CALL_STATIC) (cu16 cs (method-index-of (load (field d node)))) (cu8 cs argc) 0)
               (or (= dk DK_CLASS) (= dk DK_OBJECT)) (compile-construct-class cs n (tyof cs n) d)
-              (do (w-cstr 2 c"compile: bad ident call\n") (exit (cast i32 70)) 0)))
+              (fatal-or-panic EK_RUNTIME c"compile: bad ident call" 70)))
           ; unqualified variant Some(x)/Ok(x)/Circle(r)
           (let [vr (find-variant nm0 len0 (cast (ptr Decl) 0)) ed (load (field vr enum-decl))]
             (let [argc (compile-args cs n)]
@@ -401,13 +402,13 @@
             (do (cop cs OP_LOAD_SINGLETON) (cu16 cs (mono-id-of (mk-named nsd (al-new [(ptr Type)] (alc-global)))))
                 (let [argc (compile-args cs call)]
                   (cop cs OP_CALL_STATIC) (cu16 cs (method-index-of (decl-member nsd mname mlen))) (cu8 cs (+ argc 1)) 0))
-          (do (w-cstr 2 c"compile: bad static call\n") (exit (cast i32 70)) 0)))
+          (fatal-or-panic EK_RUNTIME c"compile: bad static call" 70)))
       ; value receiver
       (let [rt (tyof cs recv)]
         (cond
           (= (ty-kind rt) TY_STRING) (compile-string-method cs recv mname mlen call)
           (= (ty-kind rt) TY_NAMED) (compile-named-method cs recv rt mname mlen call)
-          (do (w-cstr 2 c"compile: bad method receiver\n") (exit (cast i32 70)) 0))))))
+          (fatal-or-panic EK_RUNTIME c"compile: bad method receiver" 70))))))
 
 ; Phase 4 reflection: ClassName.at(slot,gen) / .instance(slot) / .instances(filter,sort,offset,limit)
 (defn compile-reflect-static [(cs (ptr CState)) (nsd (ptr Decl)) (mname (ptr u8)) (mlen i64) (call (ptr Node))] (-> i64)
@@ -457,7 +458,7 @@
       (let [rd (find-decl (cast (ptr u8) c"Runnable") 8)]
         (compile-expr cs (arg-val (arg-at call 0)))
         (cop cs OP_THREAD_SPAWN) (cu16 cs (iface-id-of rd)) (cu8 cs (iface-method-slot rd (cast (ptr u8) c"run") 3)) 0)
-    (do (w-cstr 2 c"compile: unknown builtin object\n") (exit (cast i32 70)) 0)))
+    (fatal-or-panic EK_RUNTIME c"compile: unknown builtin object" 70)))
 
 (defn compile-string-method [(cs (ptr CState)) (recv (ptr Node)) (mname (ptr u8)) (mlen i64) (call (ptr Node))] (-> i64)
   (compile-expr cs recv)

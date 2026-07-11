@@ -60,6 +60,17 @@
 ; convenience: raise with no source location
 (defn eval-panic0 [(kind i64) (msg (ptr i8))] (-> i64) (eval-panic kind msg 0 0))
 
+; An "internal fatal" site (a compile/type-table invariant the typechecker should have caught):
+; during a NORMAL run it prints + exits, but DURING AN EVAL it must NOT kill the process —
+; longjmp back to the eval landing pad with a clean error instead. Every parser/compile/types
+; hard-exit that an eval's source can reach must go through this (or the parser's own guarded
+; perror), or a stray eval takes down the whole running program.
+(defn fatal-or-panic [(kind i64) (msg (ptr i8)) (code i64)] (-> i64)
+  (w-cstr 2 msg) (w-cstr 2 c"\n")
+  (if (eval-active?) (eval-panic0 kind msg) 0)
+  (exit (cast i32 code))
+  0)
+
 ; ---- stderr capture (temp file) ----
 (defn ev-capfd [] (-> (ptr i64)) (alloc-static i64))
 (defn ev-savefd [] (-> (ptr i64)) (alloc-static i64))

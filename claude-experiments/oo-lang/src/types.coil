@@ -5,6 +5,7 @@
 ; diagnostics buffer. typecheck.coil drives the actual body checking on top.
 (module types)
 (import "ioutil.coil" :use *)
+(import "evalrt.coil" :use *)
 (import "lexer.coil" :use *)
 (import "ast.coil" :use *)
 (import "arraylist.coil" :use *)
@@ -311,7 +312,7 @@
     (store! (field sb data) (xalloc 4096)) (store! (field sb len) 0) (store! (field sb cap) 4096) sb))
 (defn sb-byte [(sb (ptr StrBuf)) (b i64)] (-> i64)
   (if (>= (load (field sb len)) (load (field sb cap)))
-    (do (w-cstr 2 c"scry: internal: type name too long\n") (exit (cast i32 70)) 0)
+    (fatal-or-panic EK_RUNTIME c"scry: internal: type name too long" 70)
     (do (store! (index (load (field sb data)) (load (field sb len))) (cast u8 b))
         (store! (field sb len) (+ (load (field sb len)) 1)) 0)))
 (defn sb-push-str [(sb (ptr StrBuf)) (s (ptr i8))] (-> i64)
