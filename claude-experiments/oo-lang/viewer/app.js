@@ -579,7 +579,7 @@ function argValid(param, value, schema) {
 
 // The type-aware widget for ONE param. `onChange` stores a STRING literalFor turns into valid
 // source; `active` gates the entity instance poll to open cards only; `onEnter` invokes.
-function ArgInput({ param, value, onChange, schema, active, onEnter }) {
+function ArgInput({ param, value, onChange, schema, active, onEnter, depth }) {
   const info = classifyParam(param.type, schema);
   const label = html`<label>${param.name}: ${cleanType(param.type)}</label>`;
   const enterKey = (e) => { if (e.key === "Enter" && onEnter) onEnter(); };
@@ -602,7 +602,8 @@ function ArgInput({ param, value, onChange, schema, active, onEnter }) {
       ? ((info.node.implementors && info.node.implementors.length) ? info.node.implementors : [info.node.name])
       : [info.node.name];
     return html`<${EntityArgInput} label=${label} types=${types}
-      value=${value} onChange=${onChange} active=${active} onEnter=${onEnter} />`;
+      value=${value} onChange=${onChange} active=${active} onEnter=${onEnter}
+      schema=${schema} depth=${depth || 0} />`;
   }
   // Int / Float / String / (list/map/unknown) -> a text input; numbers are validated inline.
   const numeric = info.kind === "int" || info.kind === "float";
@@ -614,12 +615,26 @@ function ArgInput({ param, value, onChange, schema, active, onEnter }) {
            onInput=${(e) => onChange(e.target.value)} onKeyDown=${enterKey} />
     ${bad ? html`<span class="arg-err">not ${info.kind === "int" ? "an int" : "a float"}</span>` : ""}</div>`;
 }
+// Deepest CONSTRUCTOR nesting we allow through "+ create new" before we stop offering it and
+// force a live-instance pick — an entity whose ctor references its own type (or a cycle) would
+// otherwise recurse forever. 3 levels is plenty for the demo entity graphs.
+const MAX_CREATE_DEPTH = 3;
+
 // Entity/interface picker: a <select> of LIVE instances (Type#slot · summary) fetched from
-// <Type>.instances(...). For an interface, every implementor is queried and the results merged.
-// Refetches when the card opens (active), on focus/mousedown, and on a slow interval while open.
-// Zero live instances -> degrade to a free-text id field (you can still type Type#slot by hand).
-function EntityArgInput({ label, types, value, onChange, active, onEnter }) {
+// <Type>.instances(...) PLUS, per concrete type, a "+ create new <Type>" option. For an
+// interface, every implementor is queried (and each is offered as a constructible concrete
+// type). Refetches when the card opens (active), on focus/mousedown, and on a slow interval.
+// Choosing "create new" reveals an inline CONSTRUCTOR form: one ArgInput per ctor param (from
+// schema()'s `ctor`), RECURSIVELY (an entity ctor param gets its own pick-or-create). While the
+// sub-form is incomplete the emitted value is "" so the parent's run button stays disabled
+// (argValid). When valid it emits a construction expression `Type(p: v, ...)` that literalFor
+// passes through unchanged. Nesting is capped at MAX_CREATE_DEPTH.
+function EntityArgInput({ label, types, value, onChange, active, onEnter, schema, depth }) {
+  depth = depth || 0;
+  const canCreate = depth < MAX_CREATE_DEPTH;
   const [opts, setOpts] = useState(null);   // null = not loaded; [] = loaded, none live
+  const [createType, setCreateType] = useState(null); // null = pick mode; else the Type being built
+  const [ctorArgs, setCtorArgs] = useState({});       // ctor param name -> string
   const key = types.join(",");
   const fetchNow = useCallback(async () => {
     const all = [];
@@ -635,25 +650,68 @@ function EntityArgInput({ label, types, value, onChange, active, onEnter }) {
     setOpts(all);
   }, [key]); // eslint-disable-line
   useEffect(() => {
-    if (!active) return;
+    if (!active || createType) return;   // don't poll live instances while building a new one
     fetchNow();
     const id = setInterval(fetchNow, 1500);
     return () => clearInterval(id);
-  }, [active, fetchNow]);
+  }, [active, createType, fetchNow]);
+
+  // ctor param list for the type currently being constructed (from schema()'s `ctor`).
+  const ctorNode = createType ? (schema || []).find((n) => n.name === createType) : null;
+  const ctorParams = (ctorNode && ctorNode.ctor) || [];
+  // Continuously push the construction expression (or "" while incomplete) up to the parent.
+  useEffect(() => {
+    if (!createType) return;
+    const ok = ctorParams.every((p) => argValid(p, ctorArgs[p.name], schema));
+    if (ok) {
+      const argList = ctorParams.map((p) => `${p.name}: ${literalFor(ctorArgs[p.name] || "", p.type)}`).join(", ");
+      onChange(`${createType}(${argList})`);
+    } else {
+      onChange("");
+    }
+  }, [createType, JSON.stringify(ctorArgs)]); // eslint-disable-line
 
   const enterKey = (e) => { if (e.key === "Enter" && onEnter) onEnter(); };
-  if (opts !== null && opts.length === 0) {
+  const onSelect = (val) => {
+    const cm = /^__create__:(.+)$/.exec(val);
+    if (cm) { setCreateType(cm[1]); setCtorArgs({}); onChange(""); return; }
+    setCreateType(null);
+    onChange(val);
+  };
+  const createOpts = canCreate
+    ? types.map((tn) => html`<option key=${"__c:" + tn} value=${"__create__:" + tn}>+ create new ${tn}</option>`)
+    : "";
+
+  // ---- create mode: inline constructor form ----
+  if (createType) {
+    return html`<div class="arg-row create-form">${label}
+      <div class="create-head">
+        <span class="create-title">new ${createType}</span>
+        <button type="button" class="create-back" onClick=${() => { setCreateType(null); onChange(""); }}>use existing</button>
+      </div>
+      ${ctorParams.length === 0 ? html`<span class="arg-note">no constructor arguments</span>` : ""}
+      ${ctorParams.map((p) => html`<${ArgInput} key=${p.name} param=${p} schema=${schema} active=${active}
+          depth=${depth + 1} value=${ctorArgs[p.name]}
+          onChange=${(v) => setCtorArgs((s) => ({ ...s, [p.name]: v }))} onEnter=${onEnter} />`)}
+    </div>`;
+  }
+
+  // ---- pick mode ----
+  // No live instances AND can't create here (max depth) -> free-text id fallback.
+  if (opts !== null && opts.length === 0 && !canCreate) {
     return html`<div class="arg-row">${label}
       <input class="arg-input" placeholder="Type#slot" value=${value || ""}
              onFocus=${fetchNow} onInput=${(e) => onChange(e.target.value)} onKeyDown=${enterKey} />
-      <span class="arg-note">no live instances — type an id</span></div>`;
+      <span class="arg-note">max nesting — type an id</span></div>`;
   }
   return html`<div class="arg-row">${label}
     <select class="arg-select" value=${value || ""}
-            onMouseDown=${fetchNow} onFocus=${fetchNow} onChange=${(e) => onChange(e.target.value)}>
+            onMouseDown=${fetchNow} onFocus=${fetchNow} onChange=${(e) => onSelect(e.target.value)}>
       <option value="">${opts === null ? "loading…" : "— select —"}</option>
       ${(opts || []).map((o) => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
-    </select></div>`;
+      ${createOpts}
+    </select>
+    ${(opts !== null && opts.length === 0 && canCreate) ? html`<span class="arg-note">no live instances — create one</span>` : ""}</div>`;
 }
 
 // ===================== breadcrumbs =====================

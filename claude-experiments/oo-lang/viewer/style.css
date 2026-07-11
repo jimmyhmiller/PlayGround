@@ -195,6 +195,15 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
 .arg-row .arg-input.invalid { border-color: var(--danger); }
 .arg-row .arg-err { color: var(--danger); font-family: var(--mono); font-size: 11px; flex: 0 0 auto; }
 .arg-row .arg-note { color: var(--fg-faint); font-family: var(--mono); font-size: 11px; flex: 0 0 auto; }
+/* inline "create new <Type>" constructor form: a bordered vertical box holding one nested
+   ArgInput per ctor param (recursive). Overrides .arg-row's horizontal flex to stack. */
+.arg-row.create-form { flex-direction: column; align-items: stretch; gap: 6px;
+  border: 1px dashed var(--line); border-radius: 6px; padding: 9px 10px; background: var(--bg); }
+.create-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.create-title { color: var(--accent); font-family: var(--mono); font-size: 12px; font-weight: 600; }
+.create-back { background: transparent; border: 1px solid var(--line); color: var(--fg-faint);
+  border-radius: 5px; padding: 3px 8px; font-family: var(--mono); font-size: 11px; cursor: pointer; }
+.create-back:hover { border-color: var(--accent); color: var(--fg); }
 .invoke-btn:disabled, .action-run:disabled { opacity: .4; cursor: not-allowed; filter: none; }
 .invoke-result { margin-top: 10px; padding: 10px 12px; border-radius: 6px; background: var(--bg-elev);
   border: 1px solid var(--line); font-family: var(--mono); font-size: 12.5px; }

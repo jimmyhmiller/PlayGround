@@ -469,6 +469,17 @@ async function main() {
       el.dispatchEvent(new Event(${proto === "HTMLSelectElement" ? "'change'" : "'input'"},{bubbles:true}));
       return el.value;
     })()`;
+    // count live instances of a type through the CURRENT page's own /eval (same-origin), so a
+    // "create new" invoke can be shown to have actually CONSTRUCTED a fresh instance.
+    const countInstances = (type) => evalPage(
+      `fetch('/eval',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:'smoke-count',source:${JSON.stringify(type + '.instances(filter:"",offset:0,limit:200)')}})}).then(r=>r.json()).then(j=>(j.value&&j.value.length)||0)`,
+      true);
+    // poll until a selector appears within a marked action card (React state is async)
+    const waitInCard = async (label, sub, tries = 40) => {
+      for (let i = 0; i < tries; i++) { await sleep(100);
+        if (await evalPage(`!!(${actSel(label)} && ${actSel(label)}.querySelector(${JSON.stringify(sub)}))`)) return true; }
+      return false;
+    };
 
     const kport = await bootProgram("kanban.scry");
     if (!kport) fails.push("T: kanban never printed a viewer URL");
@@ -527,6 +538,42 @@ async function main() {
             if (res.none || res.err || /unknown identifier/i.test(res.text || "")) fails.push(`T: entity-param invoke errored: ${JSON.stringify(res)}`);
             else ok("T: entity-param action invokes cleanly (Type#slot -> Type.at(slot,0))");
           }
+          // --- CREATE NEW (simpler, primitive-only ctor): instead of picking an existing User,
+          // choose "+ create new User" and fill its ctor (name: String, role: String) inline,
+          // then invoke -> a NEW User is constructed and the reassign uses it (User count += 1).
+          const usersBefore = await countInstances("User");
+          const openedCreate = await evalPage(setControl(`${actSel("Reassign")}.querySelector('select.arg-select')`, "__create__:User", "HTMLSelectElement"));
+          if (openedCreate !== "__create__:User" && !await waitInCard("Reassign", ".create-form")) fails.push("T-create: 'Reassign' did not enter the User create-form");
+          else if (!await waitInCard("Reassign", ".create-form input.arg-input")) fails.push("T-create: User create-form exposed no ctor inputs (name/role)");
+          else {
+            ok("T-create: '+ create new User' reveals the inline constructor form (name, role)");
+            // fill both String ctor params (create-form arg-rows carry a plain text input each)
+            const filled = await evalPage(`(()=>{
+              const cf=${actSel("Reassign")}.querySelector('.create-form');
+              const inputs=[...cf.querySelectorAll('.arg-row input.arg-input')];
+              if(inputs.length<2) return {n:inputs.length};
+              const s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+              s.call(inputs[0],'Zoe'); inputs[0].dispatchEvent(new Event('input',{bubbles:true}));
+              s.call(inputs[1],'ops'); inputs[1].dispatchEvent(new Event('input',{bubbles:true}));
+              return {n:inputs.length};
+            })()`);
+            if (!filled || filled.n < 2) fails.push(`T-create: User create-form had ${filled && filled.n} inputs, expected 2 (name, role)`);
+            else {
+              await sleep(200);
+              const enabled = await evalPage(`!${actSel("Reassign")}.querySelector('.action-run').disabled`);
+              if (!enabled) fails.push("T-create: run stayed disabled after filling the new User's ctor params");
+              else {
+                ok("T-create: run enables once the constructed User's required ctor params are valid");
+                await evalPage(`${actSel("Reassign")}.querySelector('.action-run').click()`);
+                try { await waitFor(`.action-card[data-smoke-act="Reassign"] .invoke-result`, 8000); } catch { fails.push("T-create: create-new invoke produced no result"); }
+                const cres = await evalPage(`(()=>{const c=${actSel("Reassign")};const r=c&&c.querySelector('.invoke-result');return r?{err:r.classList.contains('invoke-error'),text:r.textContent}:{none:true};})()`);
+                const usersAfter = await countInstances("User");
+                if (cres.none || cres.err || /unknown identifier|no such|parse/i.test(cres.text || "")) fails.push(`T-create: create-new invoke errored: ${JSON.stringify(cres)}`);
+                else if (usersAfter <= usersBefore) fails.push(`T-create: no new User was constructed (count ${usersBefore} -> ${usersAfter})`);
+                else ok(`T-create: creating a NEW User inline and reassigning to it works (User count ${usersBefore} -> ${usersAfter})`);
+              }
+            }
+          }
         }
       } catch (e) { fails.push("T: kanban typed-arg scenario failed: " + (e && e.message || e)); }
     }
@@ -570,6 +617,48 @@ async function main() {
               const res = await evalPage(`(()=>{const c=${actSel("Transfer")};const r=c&&c.querySelector('.invoke-result');return r?{err:r.classList.contains('invoke-error'),text:r.textContent}:{none:true};})()`);
               if (res.none || res.err || /unknown identifier/i.test(res.text || "")) fails.push(`T: Transfer invoke errored: ${JSON.stringify(res)}`);
               else ok("T: Transfer (entity + Int) invokes cleanly with well-typed source");
+            }
+            // --- CREATE NEW (RECURSIVE ctor): instead of picking a live Account for `to`, choose
+            // "+ create new Account" and fill its ctor inline: owner (a Customer entity -> NESTED
+            // "+ create new Customer" with a String name) + kind (a Kind enum -> dropdown). Then a
+            // real amount, run -> a fresh Account (and a fresh Customer) are constructed and used.
+            const acctBefore = await countInstances("Account");
+            const custBefore = await countInstances("Customer");
+            await evalPage(setControl(`${actSel("Transfer")}.querySelector('.action-form select.arg-select')`, "__create__:Account", "HTMLSelectElement"));
+            if (!await waitInCard("Transfer", ".create-form")) fails.push("T-create: Transfer 'to' did not enter the Account create-form");
+            else {
+              const title = await evalPage(`(()=>{const t=${actSel("Transfer")}.querySelector('.create-form .create-title');return t?t.textContent.trim():null;})()`);
+              if (title !== "new Account") fails.push(`T-create: Account create-form title wrong (${JSON.stringify(title)})`);
+              else ok("T-create: '+ create new Account' reveals the recursive constructor form (owner, kind)");
+              // owner param: its picker carries a "+ create new Customer" option -> NESTED create
+              await evalPage(setControl(`${actSel("Transfer")}.querySelector('.create-form select.arg-select')`, "__create__:Customer", "HTMLSelectElement"));
+              if (!await waitInCard("Transfer", ".create-form .create-form")) fails.push("T-create: owner did not enter a NESTED Customer create-form");
+              else {
+                ok("T-create: owner (entity ctor param) offers its own '+ create new Customer' (recursion)");
+                // fill the nested Customer's String name
+                await evalPage(`(()=>{const inp=${actSel("Transfer")}.querySelector('.create-form .create-form input.arg-input');
+                  const s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,'Zoe');inp.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+                // kind: the enum <select> whose options are Kind.*
+                await evalPage(`(()=>{const sel=[...${actSel("Transfer")}.querySelectorAll('.create-form select.arg-select')].find(s=>[...s.options].some(o=>/^Kind\\./.test(o.value)));
+                  if(sel){const set=Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype,'value').set;set.call(sel,'Kind.Checking');sel.dispatchEvent(new Event('change',{bubbles:true}));}})()`);
+                // amount: the Int input that is a DIRECT arg-row of the action-form (not the create-form)
+                await evalPage(`(()=>{const row=[...${actSel("Transfer")}.querySelectorAll('.action-form > .arg-row')].find(r=>!r.classList.contains('create-form')&&r.querySelector('input'));
+                  const inp=row&&row.querySelector('input');if(inp){const s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,'10');inp.dispatchEvent(new Event('input',{bubbles:true}));}})()`);
+                await sleep(250);
+                const cenabled = await evalPage(`!${actSel("Transfer")}.querySelector('.action-run').disabled`);
+                if (!cenabled) fails.push("T-create: run stayed disabled after filling the recursive Account+Customer ctor + amount");
+                else {
+                  ok("T-create: run enables only once the constructed Account's required ctor params are all valid");
+                  await evalPage(`${actSel("Transfer")}.querySelector('.action-run').click()`);
+                  try { await waitFor(`.action-card[data-smoke-act="Transfer"] .invoke-result`, 8000); } catch { fails.push("T-create: recursive create invoke produced no result"); }
+                  const cres = await evalPage(`(()=>{const c=${actSel("Transfer")};const r=c&&c.querySelector('.invoke-result');return r?{err:r.classList.contains('invoke-error'),text:r.textContent}:{none:true};})()`);
+                  const acctAfter = await countInstances("Account");
+                  const custAfter = await countInstances("Customer");
+                  if (cres.none || cres.err || /unknown identifier|no such|parse/i.test(cres.text || "")) fails.push(`T-create: recursive create invoke errored: ${JSON.stringify(cres)}`);
+                  else if (acctAfter <= acctBefore || custAfter <= custBefore) fails.push(`T-create: nested construction did not add instances (Account ${acctBefore}->${acctAfter}, Customer ${custBefore}->${custAfter})`);
+                  else ok(`T-create: constructing a NEW Account with a NESTED new Customer + enum kind works (Account ${acctBefore}->${acctAfter}, Customer ${custBefore}->${custAfter})`);
+                }
+              }
             }
           }
         }
