@@ -489,8 +489,15 @@ fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
     rt.vec_to_list(&out)
 }
 
-/// `(deftype T [f0 f1])` -> `(def ->T (fn [f0 f1] (record 'T f0 f1)))`. Methods
-/// read fields with `(field this i)`.
+/// `(deftype T [f0 f1] Protocol (-m [this a] body) …)` — the full ClojureScript
+/// `deftype` form. Emits `(def ->T (fn [f0 f1] (record 'T f0 f1)))` PLUS an inline
+/// `-proto-method` per protocol method (type-indexed dispatch, same axis as
+/// `extend-type`). Inside a method body the deftype's FIELD NAMES are in lexical
+/// scope (bound from the instance = first param), matching cljs; multi-arity
+/// methods (the same name repeated) become a multi-arity fn. The `Object` group
+/// (host interop: toString/equiv/indexOf/…) is skipped. `^:mutable` is ignored
+/// (the reader already drops the meta) — `set!` on such a "field" hits the local
+/// binding, so caching-hash degrades to recomputation rather than erroring.
 fn desugar_deftype<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
     let items = rt.list_to_vec(form);
     let tsym = items[1];
@@ -498,23 +505,129 @@ fn desugar_deftype<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
         Val::Sym(s) => rt.sym_name(s).to_string(),
         _ => panic!("deftype: name must be a symbol"),
     };
-    let fields = match record_field0(rt, items[2], reader::VECTOR) {
-        Some(l) => rt.list_to_vec(l),
-        None => rt.list_to_vec(items[2]),
-    };
-    // (record 'T f0 f1 ...)
+    let fields = binding_items(rt, items[2]).unwrap_or_else(|| rt.list_to_vec(items[2]));
+
+    // constructor: (def ->T (fn [fields] (record 'T fields)))
     let recsym = sym(rt, "record");
     let tag = quote_form(rt, tsym);
     let mut rec = vec![recsym, tag];
     rec.extend_from_slice(&fields);
     let reccall = rt.vec_to_list(&rec);
-    // (fn [f0 f1] reccall)
-    let paramvec = make_vector(rt, fields);
-    let fnf = mk_fn(rt, paramvec, vec![reccall]);
-    // (def ->T fnf)
-    let ctor = sym(rt, &format!("->{tname}"));
+    let paramvec = make_vector(rt, fields.clone());
+    let ctorfn = mk_fn(rt, paramvec, vec![reccall]);
+    let ctorname = sym(rt, &format!("->{tname}"));
     let defk = sym(rt, "def");
-    rt.vec_to_list(&[defk, ctor, fnf])
+    let ctordef = rt.vec_to_list(&[defk, ctorname, ctorfn]);
+
+    let dok = sym(rt, "do");
+    let mut out = vec![dok, ctordef];
+
+    // inline protocol methods: a bare symbol starts a protocol group (or `Object`);
+    // lists are method impls, and consecutive same-name impls are one multi-arity fn.
+    let mut i = 3;
+    let mut in_object = false;
+    while i < items.len() {
+        let it = items[i];
+        if matches!(rt.decode(it), Val::Sym(_)) {
+            in_object = is_sym(rt, it, "Object");
+            i += 1;
+            continue;
+        }
+        let mname = rt.list_to_vec(it)[0];
+        // gather this + following consecutive impls sharing the method name.
+        let mut arities: Vec<(u64, Vec<u64>)> = Vec::new();
+        loop {
+            let p = rt.list_to_vec(items[i]);
+            arities.push((p[1], p[2..].to_vec()));
+            i += 1;
+            if i >= items.len() || matches!(rt.decode(items[i]), Val::Sym(_)) {
+                break;
+            }
+            if !same_sym(rt, rt.list_to_vec(items[i])[0], mname) {
+                break;
+            }
+        }
+        if in_object {
+            continue; // host interop methods — not dispatched
+        }
+        let mfn = build_method_fn(rt, &fields, &arities);
+        out.push(mk_defmethod(rt, mname, tsym, mfn));
+    }
+    rt.vec_to_list(&out)
+}
+
+fn same_sym<M: ValueModel>(rt: &Runtime<M>, a: u64, b: u64) -> bool {
+    matches!((rt.decode(a), rt.decode(b)), (Val::Sym(x), Val::Sym(y)) if x == y)
+}
+
+/// Build a method fn (single- or multi-arity) whose body has the deftype's fields
+/// bound from the instance (first param), except fields shadowed by a param name.
+fn build_method_fn<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    fields: &[u64],
+    arities: &[(u64, Vec<u64>)],
+) -> u64 {
+    if arities.len() == 1 {
+        let (params, body) = &arities[0];
+        let wrapped = wrap_field_let(rt, fields, *params, body);
+        return mk_fn(rt, *params, vec![wrapped]);
+    }
+    let fnk = sym(rt, "fn");
+    let mut out = vec![fnk];
+    for (params, body) in arities {
+        let wrapped = wrap_field_let(rt, fields, *params, body);
+        out.push(rt.vec_to_list(&[*params, wrapped]));
+    }
+    rt.vec_to_list(&out)
+}
+
+/// `(let [f0 (field inst 0) f1 (field inst 1) …] body…)` — binds each deftype
+/// field (that a param doesn't shadow) to its slot on the instance.
+fn wrap_field_let<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    fields: &[u64],
+    params: u64,
+    body: &[u64],
+) -> u64 {
+    let plist = binding_items(rt, params).unwrap_or_else(|| rt.list_to_vec(params));
+    if plist.is_empty() {
+        let dok = sym(rt, "do");
+        let mut out = vec![dok];
+        out.extend_from_slice(body);
+        return rt.vec_to_list(&out);
+    }
+    let inst = plist[0];
+    let param_syms: std::collections::HashSet<Sym> = plist
+        .iter()
+        .filter_map(|&p| match rt.decode(p) {
+            Val::Sym(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let fieldk = sym(rt, "field");
+    let mut binds = Vec::new();
+    for (idx, &f) in fields.iter().enumerate() {
+        if let Val::Sym(s) = rt.decode(f) {
+            if param_syms.contains(&s) {
+                continue; // a param shadows this field
+            }
+        }
+        let idxv = rt.encode(Val::Int(idx as i128));
+        let fieldcall = rt.vec_to_list(&[fieldk, inst, idxv]);
+        binds.push(f);
+        binds.push(fieldcall);
+    }
+    if binds.is_empty() {
+        let dok = sym(rt, "do");
+        let mut out = vec![dok];
+        out.extend_from_slice(body);
+        return rt.vec_to_list(&out);
+    }
+    let bindvec = make_vector(rt, binds);
+    let letk = sym(rt, "let");
+    let mut out = vec![letk, bindvec];
+    out.extend_from_slice(body);
+    rt.vec_to_list(&out)
 }
 
 fn mk_fn<M: ValueModel>(rt: &mut Runtime<M>, params: u64, body: Vec<u64>) -> u64 {
