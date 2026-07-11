@@ -78,9 +78,11 @@
 ; POST {name,pid,port,mode} to http://127.0.0.1:7357/register. Returns the id the portal
 ; assigned (>= 0), or -1 if the portal is not running / rejected us (standalone still works).
 (const PORTAL_PORT 7357)
-(defn portal-register [(name (ptr i8)) (pid i64) (port i64) (mode i64)] (-> i64)
-  (let [bodybuf (cast (ptr i8) (xalloc 512))
-        blen (snprintf bodybuf 512 c"{\"name\":\"%s\",\"pid\":%lld,\"port\":%lld,\"mode\":%lld}" name pid port mode)
+; `path` = the program's ABSOLUTE source path; the portal remembers it so the project stays
+; statically inspectable (via `scry schema-json`) even after this process exits (DECISIONS #16).
+(defn portal-register [(name (ptr i8)) (path (ptr i8)) (pid i64) (port i64) (mode i64)] (-> i64)
+  (let [bodybuf (cast (ptr i8) (xalloc 2048))
+        blen (snprintf bodybuf 2048 c"{\"name\":\"%s\",\"path\":\"%s\",\"pid\":%lld,\"port\":%lld,\"mode\":%lld}" name path pid port mode)
         out (pcbuf-new)
         status (pc-request c"POST" c"http://127.0.0.1:7357/register" (cast (ptr u8) bodybuf) (cast i64 blen) 1000 out)]
     (if (!= status 200) -1

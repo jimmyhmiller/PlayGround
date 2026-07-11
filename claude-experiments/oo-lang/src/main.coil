@@ -45,7 +45,11 @@
 ; scry portal — the persistent reverse-proxy hub (DECISIONS #13). Binds :7357, serves the viewer
 ; shell, and proxies /p/<id>/eval to whichever program registered under <id>. Runs until Ctrl-C.
 (defn cmd-portal [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
-  (scry-portal (resolve-viewer-dir (load (index argv 0)))))
+  ; resolve argv0 to an absolute path so the portal can shell `<scry> schema-json <file>` for
+  ; transient static inspection of discovered projects (DECISIONS #16), regardless of its cwd.
+  (let [abuf (cast (ptr i8) (xalloc 4096))
+        scry-path (let [r (realpath (load (index argv 0)) abuf)] (if (= (cast i64 r) 0) (load (index argv 0)) abuf))]
+    (scry-portal (resolve-viewer-dir (load (index argv 0))) scry-path)))
 
 (defn cmd-check [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
   (if (< argc 3)

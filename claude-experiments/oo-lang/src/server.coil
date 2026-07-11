@@ -812,7 +812,11 @@
 ; viewer on `port`). On success, print the portal URL so either entry point works. mode: 0 run,
 ; 1 inspect. Returns the portal-assigned id (or -1).
 (defn srv-register [(path (ptr i8)) (port i64) (mode i64)] (-> i64)
-  (let [id (portal-register (srv-basename path) (cast i64 (getpid)) port mode)]
+  ; resolve to an absolute path so the portal can remember + statically inspect this project
+  ; later (its cwd may differ). realpath failure => fall back to the path as given.
+  (let [abuf (cast (ptr i8) (xalloc 4096))
+        ap (let [r (realpath path abuf)] (if (= (cast i64 r) 0) path abuf))
+        id (portal-register (srv-basename path) ap (cast i64 (getpid)) port mode)]
     (if (>= id 0) (w-cstr 1 c"portal: http://localhost:7357\n") 0)
     id))
 

@@ -45,6 +45,18 @@
 (extern getpid     :cc c [] (-> i32))
 ; Phase 8b Env builtin: read a process environment variable. Declared here (the one extern home).
 (extern getenv     :cc c [(ptr i8)] (-> (ptr i8)))
+; Phase V5 portal static discovery (DECISIONS #16): directory scan, file mtime, absolute paths,
+; and a transient subprocess (popen -> read its stdout -> pclose) to shell `scry schema-json`.
+; Declared here — the one extern home — and :use *-imported by portal.coil. On arm64 macOS the
+; bare `stat` symbol IS the 64-bit-inode variant (no $INODE64 suffix), so `struct stat` is 144
+; bytes with st_mtimespec.tv_sec at offset 48 (verified via offsetof); we read that i64.
+(extern opendir  :cc c [(ptr i8)] (-> (ptr i8)))
+(extern readdir  :cc c [(ptr i8)] (-> (ptr i8)))   ; -> struct dirent* (d_type@20 u8, d_name@21)
+(extern closedir :cc c [(ptr i8)] (-> i32))
+(extern stat     :cc c [(ptr i8) (ptr i8)] (-> i32))   ; (path, struct stat[144]) -> 0 ok
+(extern realpath :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern popen    :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))   ; -> FILE*
+(extern pclose   :cc c [(ptr i8)] (-> i32))
 ; Phase 8a HTTP client: libcurl (system /usr/lib/libcurl.4.dylib). Declared here — the one
 ; extern home — and :use *-imported by http.coil. curl's ABI is stable; the option/info
 ; integers used by http.coil are baked with `; curl.h:` comments there. setopt/getinfo are

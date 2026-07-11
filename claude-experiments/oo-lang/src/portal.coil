@@ -18,7 +18,8 @@
 
 ; ============================ registry ============================
 (defstruct ProgEntry
-  [(id i64) (name (ptr u8)) (name-len i64) (mode i64) (port i64) (pid i64) (status i64) (start-time i64)])
+  [(id i64) (name (ptr u8)) (name-len i64) (mode i64) (port i64) (pid i64) (status i64) (start-time i64)
+   (path (ptr i8))])   ; absolute source path (for project<->running "alsoRunning" matching)
 ; mode: 0 = run, 1 = inspect.  status: 0 = running, 1 = exited (greyed).
 (const PROG_MAX 64)
 (defn preg-count  [] (-> (ptr i64)) (alloc-static i64))
@@ -37,16 +38,20 @@
   (let [tv (cast (ptr i64) (xalloc 16))] (gettimeofday (cast (ptr i8) tv) (cast (ptr i8) 0)) (load (index tv 0))))
 
 ; add a program; returns the assigned id (or -1 if the table is full).
-(defn preg-add [(name (ptr u8)) (namelen i64) (pid i64) (port i64) (mode i64)] (-> i64)
+(defn preg-add [(name (ptr u8)) (namelen i64) (path (ptr i8)) (pid i64) (port i64) (mode i64)] (-> i64)
   (let [n (load (preg-count))]
     (if (>= n PROG_MAX) -1
       (let [e (cast (ptr ProgEntry) (xalloc (sizeof ProgEntry)))
             id (load (preg-nextid))
-            nb (xalloc (+ namelen 1))]
+            nb (xalloc (+ namelen 1))
+            pl (if (= (cast i64 path) 0) 0 (strlen path))
+            pb (xalloc (+ pl 1))]
         (memcpy (cast (ptr i8) nb) (cast (ptr i8) name) namelen) (store! (index nb namelen) (cast u8 0))
+        (if (> pl 0) (do (memcpy (cast (ptr i8) pb) path pl) 0) 0) (store! (index pb pl) (cast u8 0))
         (store! (field e id) id) (store! (field e name) nb) (store! (field e name-len) namelen)
         (store! (field e mode) mode) (store! (field e port) port) (store! (field e pid) pid)
         (store! (field e status) 0) (store! (field e start-time) (now-sec))
+        (store! (field e path) (cast (ptr i8) pb))
         (store! (index (preg-slots) n) e)
         (store! (preg-count) (+ n 1)) (store! (preg-nextid) (+ id 1))
         id))))
@@ -95,6 +100,300 @@
             (break))))
   (jb-byte b \]) 0)
 
+; ============================ project registry (DECISIONS #16) ============================
+; KNOWN PROJECTS are STATIC: a project is a pure function of its source (typecheck -> schema +
+; views + actions). The portal DISCOVERS them (working-tree .scry / Coil.toml entries, plus any
+; path ever run/inspected via /register) and, on first access, shells a TRANSIENT
+; `scry schema-json <path>` subprocess and CACHES the dump keyed by path+mtime — zero lingering
+; process. This registry is separate from the live ProgEntry programs above.
+(defstruct ProjEntry
+  [(id i64) (path (ptr i8)) (name (ptr u8)) (name-len i64)
+   (mtime i64)            ; current source mtime (refreshed on each discovery scan)
+   (dump-mtime i64)       ; mtime the cached dump was produced at; -1 = no cache
+   (dump (ptr u8)) (dump-len i64)])
+(const PROJ_MAX 256)
+(defn proj-count  [] (-> (ptr i64)) (alloc-static i64))
+(defn proj-nextid [] (-> (ptr i64)) (alloc-static i64))
+(defn proj-slots  [] (-> (ptr (ptr ProjEntry))) (cast (ptr (ptr ProjEntry)) (alloc-static (array (ptr ProjEntry) 256))))
+(defn proj-get [(i i64)] (-> (ptr ProjEntry)) (load (index (proj-slots) i)))
+(defn portal-scry-path [] (-> (ptr (ptr i8))) (cast (ptr (ptr i8)) (alloc-static (ptr i8))))
+
+(defn proj-find-by-id [(id i64)] (-> (ptr ProjEntry))
+  (let [n (load (proj-count)) (mut i) 0 (mut r) (cast (ptr ProjEntry) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (do (if (= (load (field (proj-get (load i)) id)) id) (do (store! r (proj-get (load i))) 0) 0)
+                (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn proj-find-by-path [(path (ptr i8))] (-> (ptr ProjEntry))
+  (let [n (load (proj-count)) (mut i) 0 (mut r) (cast (ptr ProjEntry) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (do (if (= (cast i64 (strcmp (load (field (proj-get (load i)) path)) path)) 0) (do (store! r (proj-get (load i))) 0) 0)
+                (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+
+; join `a` + "/" + `b` (server.coil's join-path is a bare concat; discovery needs a separator).
+(defn path-cat [(a (ptr i8)) (b (ptr i8))] (-> (ptr i8))
+  (let [al (strlen a) bl (strlen b) buf (cast (ptr i8) (xalloc (+ (+ al bl) 2))) (mut k) 0]
+    (let [(mut i) 0] (loop (if (< (load i) al) (do (store! (index (cast (ptr u8) buf) (load k)) (load (index (cast (ptr u8) a) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
+    (store! (index (cast (ptr u8) buf) (load k)) (cast u8 \/)) (store! k (+ (load k) 1))
+    (let [(mut i) 0] (loop (if (< (load i) bl) (do (store! (index (cast (ptr u8) buf) (load k)) (load (index (cast (ptr u8) b) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
+    (store! (index (cast (ptr u8) buf) (load k)) (cast u8 0)) buf))
+
+; file mtime via stat (st_mtimespec.tv_sec @ byte 48 in the 144-byte arm64 struct stat). -1 fail.
+(defn file-mtime [(path (ptr i8))] (-> i64)
+  (let [st (xalloc 160)]
+    (if (= (cast i64 (stat path (cast (ptr i8) st))) 0)
+      (load (cast (ptr i64) (index st 48)))
+      -1)))
+
+; the basename (after the last '/') of an absolute path, as a fresh cstr.
+(defn proj-basename [(path (ptr i8))] (-> (ptr u8))
+  (let [n (strlen path) (mut start) 0 (mut i) 0]
+    (loop (if (< (load i) n) (do (if (= (cast i64 (load (index (cast (ptr u8) path) (load i)))) \/) (do (store! start (+ (load i) 1)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (let [bl (- n (load start)) b (xalloc (+ bl 1))]
+      (memcpy (cast (ptr i8) b) (cast (ptr i8) (index (cast (ptr u8) path) (load start))) bl) (store! (index b bl) (cast u8 0)) b)))
+
+; does `s` end in ".scry"?
+(defn ends-scry [(s (ptr i8))] (-> bool)
+  (let [n (strlen s)]
+    (if (< n 5) false
+      (and (= (cast i64 (load (index (cast (ptr u8) s) (- n 5)))) \.)
+           (and (= (cast i64 (load (index (cast (ptr u8) s) (- n 4)))) \s)
+                (and (= (cast i64 (load (index (cast (ptr u8) s) (- n 3)))) \c)
+                     (and (= (cast i64 (load (index (cast (ptr u8) s) (- n 2)))) \r)
+                          (= (cast i64 (load (index (cast (ptr u8) s) (- n 1)))) \y))))))))
+
+; absolute-path of `p` (realpath); returns a fresh buffer, or `p` itself on failure.
+(defn proj-abspath [(p (ptr i8))] (-> (ptr i8))
+  (let [buf (cast (ptr i8) (xalloc 4096)) r (realpath p buf)]
+    (if (= (cast i64 r) 0) p buf)))
+
+; remember an absolute .scry path as a known project (dedup by path). Returns its id (new or existing).
+(defn proj-remember [(abspath (ptr i8))] (-> i64)
+  (let [ex (proj-find-by-path abspath)]
+    (if (!= (cast i64 ex) 0)
+      (do (store! (field ex mtime) (file-mtime abspath)) (load (field ex id)))
+      (let [n (load (proj-count))]
+        (if (>= n PROJ_MAX) -1
+          (let [e (cast (ptr ProjEntry) (xalloc (sizeof ProjEntry)))
+                id (load (proj-nextid))
+                pl (strlen abspath) pb (xalloc (+ pl 1))]
+            (memcpy (cast (ptr i8) pb) abspath pl) (store! (index pb pl) (cast u8 0))
+            (store! (field e id) id) (store! (field e path) (cast (ptr i8) pb))
+            (store! (field e name) (proj-basename abspath)) (store! (field e name-len) (strlen (cast (ptr i8) (proj-basename abspath))))
+            (store! (field e mtime) (file-mtime abspath))
+            (store! (field e dump-mtime) -1) (store! (field e dump) (cast (ptr u8) 0)) (store! (field e dump-len) 0)
+            (store! (index (proj-slots) n) e)
+            (store! (proj-count) (+ n 1)) (store! (proj-nextid) (+ id 1))
+            id))))))
+
+; ---- Coil.toml: if `dir` has a Coil.toml whose entry ends in .scry, remember that entry ----
+(defn coil-toml-entry [(dir (ptr i8))] (-> i64)
+  (let [tp (path-cat dir c"Coil.toml") f (fopen tp c"rb")]
+    (if (= (cast i64 f) 0) 0
+      (let [buf (xalloc 8192) nr (fread (cast (ptr i8) buf) 1 8191 f)]
+        (fclose f) (store! (index buf nr) (cast u8 0))
+        ; find `entry` then the first "..." after it
+        (let [pos (json-find-key buf nr c"entry" 5)]   ; toml `entry = "x"` — reuse the quote-scan by treating it JSON-ish
+          (if (< pos 0) 0
+            (let [(mut j) pos]
+              (loop (if (and (< (load j) nr) (!= (cast i64 (load (index buf (load j)))) \")) (do (store! j (+ (load j) 1)) 0) (break)))
+              (store! j (+ (load j) 1))
+              (let [start (load j)]
+                (loop (if (and (< (load j) nr) (!= (cast i64 (load (index buf (load j)))) \")) (do (store! j (+ (load j) 1)) 0) (break)))
+                (let [elen (- (load j) start) eb (xalloc (+ elen 1))]
+                  (memcpy (cast (ptr i8) eb) (cast (ptr i8) (index buf start)) elen) (store! (index eb elen) (cast u8 0))
+                  (if (ends-scry (cast (ptr i8) eb))
+                    (do (proj-remember (proj-abspath (path-cat dir (cast (ptr i8) eb)))) 0) 0))))))))))
+
+; is `name` a directory we should NOT descend into during discovery?
+(defn skip-dir [(name (ptr i8))] (-> bool)
+  (or (= (cast i64 (load (index (cast (ptr u8) name) 0))) \.)   ; ., .., .git, hidden
+      (or (= (cast i64 (strcmp name c"tests")) 0)
+          (or (= (cast i64 (strcmp name c"std")) 0)
+              (or (= (cast i64 (strcmp name c"docs")) 0)
+                  (or (= (cast i64 (strcmp name c"viewer")) 0)
+                      (or (= (cast i64 (strcmp name c"src")) 0)
+                          (or (= (cast i64 (strcmp name c"node_modules")) 0)
+                              (= (cast i64 (strcmp name c"target")) 0)))))))))
+
+; scan ONE directory: remember every top-level .scry file + its Coil.toml entry.
+(defn scan-dir-flat [(dir (ptr i8))] (-> i64)
+  (coil-toml-entry dir)
+  (let [d (opendir dir)]
+    (if (= (cast i64 d) 0) 0
+      (do
+        (loop
+          (let [de (readdir d)]
+            (if (= (cast i64 de) 0) (break)
+              (let [name (cast (ptr i8) (index (cast (ptr u8) de) 21))
+                    dt (cast i64 (load (index (cast (ptr u8) de) 20)))]
+                (if (and (= dt 8) (ends-scry name))          ; DT_REG regular file
+                  (do (proj-remember (proj-abspath (path-cat dir name))) 0) 0)))))
+        (closedir d) 0))))
+
+; discovery: cwd (".") top-level, plus each immediate non-skip subdirectory (examples/ etc.),
+; plus every path ever registered (already in the table). Adjustable scope per DECISIONS #16.
+(defn portal-discover [] (-> i64)
+  (scan-dir-flat c".")
+  (let [d (opendir c".")]
+    (if (= (cast i64 d) 0) 0
+      (do
+        (loop
+          (let [de (readdir d)]
+            (if (= (cast i64 de) 0) (break)
+              (let [name (cast (ptr i8) (index (cast (ptr u8) de) 21))
+                    dt (cast i64 (load (index (cast (ptr u8) de) 20)))]
+                (if (and (= dt 4) (not (skip-dir name)))     ; DT_DIR
+                  (do (scan-dir-flat (path-cat c"." name)) 0) 0)))))
+        (closedir d) 0)))
+  0)
+
+; ---- transient dump + cache ----
+; run a shell command, capturing its stdout into a fresh growable buffer. sets *outlen. null on fail.
+(defn run-capture [(cmd (ptr i8)) (outlen (ptr i64))] (-> (ptr u8))
+  (let [f (popen cmd c"r")]
+    (if (= (cast i64 f) 0) (do (store! outlen 0) (cast (ptr u8) 0))
+      (let [(mut cap) 65536 (mut buf) (xalloc 65536) (mut len) 0]
+        (loop
+          (let [r (fread (cast (ptr i8) (index (load buf) (load len))) 1 (- (load cap) (load len)) f)]
+            (if (<= r 0) (break)
+              (do (store! len (+ (load len) r))
+                  (if (> (+ (load len) 8192) (load cap))
+                    (do (store! cap (* (load cap) 2))
+                        (store! buf (cast (ptr u8) (realloc (cast (ptr i8) (load buf)) (load cap)))) 0)
+                    0)
+                  0))))
+        (pclose f)
+        (store! outlen (load len)) (load buf)))))
+
+; ensure e's dump is present + fresh (re-dump if the file's mtime changed). returns 1 ok / 0 fail.
+(defn proj-ensure-dump [(e (ptr ProjEntry))] (-> i64)
+  (let [mt (file-mtime (load (field e path)))]
+    (if (and (!= (cast i64 (load (field e dump))) 0) (= (load (field e dump-mtime)) mt)) 1
+      (let [cmd (cast (ptr i8) (xalloc 8192)) outlen (cast (ptr i64) (xalloc 8))]
+        ; `<scry> schema-json '<path>' 2>/dev/null` — stderr dropped so stdout is clean JSON.
+        (snprintf cmd 8192 c"%s schema-json '%s' 2>/dev/null" (load (portal-scry-path)) (load (field e path)))
+        (let [buf (run-capture cmd outlen)]
+          (if (or (= (cast i64 buf) 0) (<= (load outlen) 0)) 0
+            (do (store! (field e dump) buf) (store! (field e dump-len) (load outlen))
+                (store! (field e dump-mtime) mt) (store! (field e mtime) mt) 1)))))))
+
+; ---- extract a top-level object value (`"key": <value>`) out of the cached dump ----
+; sets *outstart/*outlen to the value's byte span; 1 ok / 0 not found. String-aware brace scan.
+(defn json-value-span [(buf (ptr u8)) (blen i64) (key (ptr i8)) (klen i64) (outstart (ptr i64)) (outlen (ptr i64))] (-> i64)
+  (let [p (json-find-key buf blen key klen)]
+    (if (< p 0) 0
+      (let [(mut i) p]
+        (loop (if (and (< (load i) blen) (let [c (cast i64 (load (index buf (load i))))] (or (= c \space) (or (= c \tab) (or (= c \newline) (= c \return)))))) (do (store! i (+ (load i) 1)) 0) (break)))
+        (if (>= (load i) blen) 0
+          (let [vstart (load i) c0 (cast i64 (load (index buf (load i))))]
+            (if (not (or (= c0 \{) (= c0 \[))) 0
+              (let [(mut depth) 0 (mut instr) false (mut done) false]
+                (loop (if (load done) (break)
+                        (if (>= (load i) blen) (break)
+                          (let [c (cast i64 (load (index buf (load i))))]
+                            (if (load instr)
+                              (cond (= c \\) (do (store! i (+ (load i) 2)) 0)
+                                    (= c \") (do (store! instr false) (store! i (+ (load i) 1)) 0)
+                                    (do (store! i (+ (load i) 1)) 0))
+                              (cond (= c \") (do (store! instr true) (store! i (+ (load i) 1)) 0)
+                                    (or (= c \{) (= c \[)) (do (store! depth (+ (load depth) 1)) (store! i (+ (load i) 1)) 0)
+                                    (or (= c \}) (= c \])) (do (store! depth (- (load depth) 1)) (store! i (+ (load i) 1)) (if (= (load depth) 0) (do (store! done true) 0) 0) 0)
+                                    (do (store! i (+ (load i) 1)) 0)))))))
+                (store! outstart vstart) (store! outlen (- (load i) vstart)) 1))))))))
+
+; ============================ /api/projects serialization ============================
+(defn proj-also-running [(e (ptr ProjEntry))] (-> i64)   ; running ProgEntry id with same path, or -1
+  (let [n (load (preg-count)) (mut i) 0 (mut r) -1]
+    (loop (if (and (< (load r) 0) (< (load i) n))
+            (let [pe (preg-get (load i))]
+              (if (and (= (load (field pe status)) 0)
+                       (and (!= (cast i64 (load (field pe path))) 0)
+                            (= (cast i64 (strcmp (load (field pe path)) (load (field e path)))) 0)))
+                (do (store! r (load (field pe id))) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+
+(defn portal-projects-json [(b (ptr JBuf))] (-> i64)
+  (jb-byte b \[)
+  (let [n (load (proj-count)) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [e (proj-get (load i)) ar (proj-also-running e)]
+              (if (> (load i) 0) (jb-byte b \,) 0)
+              (jb-cstr b c"{\"id\":") (jb-int b (load (field e id)))
+              (jb-cstr b c",\"name\":") (jb-str b (load (field e name)) (load (field e name-len)))
+              (jb-cstr b c",\"path\":") (jb-str b (cast (ptr u8) (load (field e path))) (strlen (load (field e path))))
+              (jb-cstr b c",\"mtime\":") (jb-int b (load (field e mtime)))
+              (jb-cstr b c",\"alsoRunning\":") (if (< ar 0) (jb-cstr b c"null") (jb-int b ar))
+              (jb-byte b \})
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+
+; ============================ /proj/<id>/eval : STATIC serving ============================
+; extract the numeric <id> from a path of the form "/proj/<id>/eval"; -1 if not that shape.
+(defn path-proj-id [(path (ptr i8))] (-> i64)
+  (if (not (and (= (cast i64 (load (index (cast (ptr u8) path) 0))) \/)
+                (and (= (cast i64 (load (index (cast (ptr u8) path) 1))) \p)
+                     (and (= (cast i64 (load (index (cast (ptr u8) path) 2))) \r)
+                          (and (= (cast i64 (load (index (cast (ptr u8) path) 3))) \o)
+                               (and (= (cast i64 (load (index (cast (ptr u8) path) 4))) \j)
+                                    (= (cast i64 (load (index (cast (ptr u8) path) 5))) \/))))))) -1
+    (let [(mut j) 6 (mut v) 0 (mut seen) false]
+      (loop (if (let [c (cast i64 (load (index (cast (ptr u8) path) (load j))))] (and (>= c \0) (<= c \9)))
+              (do (store! v (+ (* (load v) 10) (- (cast i64 (load (index (cast (ptr u8) path) (load j)))) \0))) (store! seen true) (store! j (+ (load j) 1)) 0)
+              (break)))
+      (if (load seen) (load v) -1))))
+
+; does the (decoded) eval source begin (after leading ws) with `kw`?  e.g. kw="schema" for "schema()"
+(defn src-is-call [(src (ptr u8)) (slen i64) (kw (ptr i8))] (-> bool)
+  (let [(mut i) 0]
+    (loop (if (and (< (load i) slen) (let [c (cast i64 (load (index src (load i))))] (or (= c \space) (or (= c \tab) (or (= c \newline) (= c \return)))))) (do (store! i (+ (load i) 1)) 0) (break)))
+    (let [kl (strlen kw) (mut k) 0 (mut ok) true]
+      (loop (if (and (load ok) (< (load k) kl))
+              (do (if (or (>= (+ (load i) (load k)) slen) (!= (cast i64 (load (index src (+ (load i) (load k))))) (cast i64 (load (index (cast (ptr u8) kw) (load k)))))) (do (store! ok false) 0) 0) (store! k (+ (load k) 1)) 0)
+              (break)))
+      (load ok))))
+
+; serve one static reflection value ("schema"/"views"/"actions") from the cached dump into resp.
+(defn proj-emit-value [(resp (ptr JBuf)) (e (ptr ProjEntry)) (key (ptr i8))] (-> i64)
+  (let [os (cast (ptr i64) (xalloc 8)) ol (cast (ptr i64) (xalloc 8))]
+    (if (= (json-value-span (load (field e dump)) (load (field e dump-len)) key (strlen key) os ol) 1)
+      (jb-bytes resp (index (load (field e dump)) (load os)) (load ol))
+      (jb-cstr resp c"{\"error\":{\"kind\":\"StaticInspection\",\"message\":\"schema unavailable\"}}"))
+    0))
+
+(defn portal-proj-eval [(cfd i64) (id i64) (body (ptr u8)) (blen i64)] (-> i64)
+  (let [e (proj-find-by-id id)]
+    (if (= (cast i64 e) 0)
+      (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"NoSuchProject\",\"message\":\"no such project\"}}")]
+        (send-response cfd c"404 Not Found" c"application/json" m (strlen (cast (ptr i8) m))))
+      (if (= (proj-ensure-dump e) 0)
+        (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"StaticInspection\",\"message\":\"could not typecheck project for static inspection\"}}")]
+          (send-response cfd c"200 OK" c"application/json" m (strlen (cast (ptr i8) m))))
+        ; parse id + source out of the request body, classify, serve statically
+        (let [srcbuf (xalloc 65536) srclen (cast (ptr i64) (xalloc 8))
+              idbuf (xalloc 256) idlen (cast (ptr i64) (xalloc 8))
+              spos (json-find-key body blen c"source" 6)
+              ipos (json-find-key body blen c"id" 2)
+              resp (jb-new)]
+          (if (< spos 0) (store! srclen 0) (json-decode-string body blen spos srcbuf srclen))
+          (if (< ipos 0) (do (store! (index idbuf 0) (cast u8 \")) (store! (index idbuf 1) (cast u8 \")) (store! idlen 2) 0)
+            (json-raw-id body blen ipos idbuf idlen))
+          (jb-cstr resp c"{\"id\":") (jb-bytes resp idbuf (load idlen)) (jb-byte resp \,)
+          (cond
+            (src-is-call srcbuf (load srclen) c"schema")  (do (jb-cstr resp c"\"value\":") (proj-emit-value resp e c"schema") 0)
+            (src-is-call srcbuf (load srclen) c"views")   (do (jb-cstr resp c"\"value\":") (proj-emit-value resp e c"views") 0)
+            (src-is-call srcbuf (load srclen) c"actions") (do (jb-cstr resp c"\"value\":") (proj-emit-value resp e c"actions") 0)
+            (src-is-call srcbuf (load srclen) c"graph")   (do (jb-cstr resp c"\"value\":{\"type\":\"Graph\",\"instances\":[]}") 0)
+            (do (jb-cstr resp c"\"error\":{\"kind\":\"StaticInspection\",\"message\":\"static inspection \\u2014 run the project to interact\"}") 0))
+          (jb-byte resp \})
+          (send-response cfd c"200 OK" c"application/json" (load (field resp data)) (load (field resp len))))))))
+
 ; ============================ routing ============================
 ; extract the numeric <id> from a path of the form "/p/<id>/eval"; -1 if not that shape.
 (defn path-prog-id [(path (ptr i8))] (-> i64)
@@ -125,12 +424,19 @@
 
 (defn portal-handle-register [(cfd i64) (body (ptr u8)) (blen i64)] (-> i64)
   (let [namebuf (xalloc 512) namelen (cast (ptr i64) (xalloc 8))
-        npos (json-find-key body blen c"name" 4)]
+        pathbuf (xalloc 4096) pathlen (cast (ptr i64) (xalloc 8))
+        npos (json-find-key body blen c"name" 4)
+        ppos (json-find-key body blen c"path" 4)]
     (if (< npos 0) (store! namelen 0) (json-decode-string body blen npos namebuf namelen))
+    (if (< ppos 0) (store! pathlen 0) (json-decode-string body blen ppos pathbuf pathlen))
+    (store! (index pathbuf (load pathlen)) (cast u8 0))
+    ; remember this program's source as a KNOWN PROJECT so it stays statically inspectable
+    ; even after the process exits (DECISIONS #16).
+    (if (> (load pathlen) 0) (do (proj-remember (cast (ptr i8) pathbuf)) 0) 0)
     (let [pid (body-int body blen c"pid" 3)
           port (body-int body blen c"port" 4)
           mode (body-int body blen c"mode" 4)
-          id (preg-add namebuf (load namelen) pid port (if (< mode 0) 0 mode))
+          id (preg-add namebuf (load namelen) (if (> (load pathlen) 0) (cast (ptr i8) pathbuf) (cast (ptr i8) 0)) pid port (if (< mode 0) 0 mode))
           resp (jb-new)]
       (jb-cstr resp c"{\"id\":") (jb-int resp id) (jb-byte resp \})
       (send-response cfd c"200 OK" c"application/json" (load (field resp data)) (load (field resp len))))))
@@ -170,6 +476,13 @@
           (do (portal-reap)
               (let [resp (jb-new)] (portal-programs-json resp)
                 (send-response cfd c"200 OK" c"application/json" (load (field resp data)) (load (field resp len)))))
+        ; GET /api/projects -> discover-then-serialize the known STATIC projects (no process)
+        (and (= meth 0) (= (cast i64 (strcmp path c"/api/projects")) 0))
+          (do (portal-discover)
+              (let [resp (jb-new)] (portal-projects-json resp)
+                (send-response cfd c"200 OK" c"application/json" (load (field resp data)) (load (field resp len)))))
+        ; POST /proj/<id>/eval -> serve STATICALLY from the cached schema-json dump (zero process)
+        (and (= meth 1) (>= (path-proj-id path) 0)) (portal-proj-eval cfd (path-proj-id path) bodyp bodyn)
         ; POST /register | /deregister | /heartbeat
         (and (= meth 1) (= (cast i64 (strcmp path c"/register")) 0)) (portal-handle-register cfd bodyp bodyn)
         (and (= meth 1) (= (cast i64 (strcmp path c"/deregister")) 0)) (portal-handle-deregister cfd bodyp bodyn)
@@ -199,9 +512,11 @@
           (do (listen fd 32) (cast i64 fd)))))))
 
 ; ============================ public entry ============================
-(defn scry-portal [(viewer-dir (ptr i8))] (-> i64)
+(defn scry-portal [(viewer-dir (ptr i8)) (scry-path (ptr i8))] (-> i64)
   (store! (srv-viewer-dir) viewer-dir)
+  (store! (portal-scry-path) scry-path)
   (store! (preg-count) 0) (store! (preg-nextid) 1)
+  (store! (proj-count) 0) (store! (proj-nextid) 1)
   (let [fd (portal-bind PORTAL_PORT)]
     (if (< fd 0)
       (do (w-cstr 2 c"scry portal: could not bind port 7357 (is a portal already running?)\n") 1)
