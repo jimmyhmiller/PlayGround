@@ -1,0 +1,11 @@
+fn main() {
+  let t0 = Clock.now()
+  var i = 0
+  var acc = 0
+  while i < 50000000 {
+    acc = (acc + i * 3 + 7) % 1000000
+    i = i + 1
+  }
+  let t1 = Clock.now()
+  Console.log("loop = ${acc}  [${t1 - t0} ms]")
+}

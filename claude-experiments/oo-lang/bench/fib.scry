@@ -1,0 +1,7 @@
+fn fib(n: Int) -> Int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
+fn main() {
+  let t0 = Clock.now()
+  let r = fib(32)
+  let t1 = Clock.now()
+  Console.log("fib(32) = ${r}  [${t1 - t0} ms]")
+}

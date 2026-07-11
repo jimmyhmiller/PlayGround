@@ -1,0 +1,20 @@
+fn isPrime(n: Int) -> Bool {
+  if n < 2 { return false }
+  var d = 2
+  while d * d <= n {
+    if n % d == 0 { return false }
+    d = d + 1
+  }
+  true
+}
+fn main() {
+  let t0 = Clock.now()
+  var count = 0
+  var n = 2
+  while n < 200000 {
+    if isPrime(n) { count = count + 1 }
+    n = n + 1
+  }
+  let t1 = Clock.now()
+  Console.log("primes<200000 = ${count}  [${t1 - t0} ms]")
+}
