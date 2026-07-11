@@ -184,6 +184,14 @@ pub enum Prim {
     SymName,
     /// `(%sym-ns 'a/b)` -> the NAMESPACE part as a string (`"a"`), or nil if none.
     SymNs,
+    /// `(%var-flags 'sym)` -> the var's flag bits as an int (dynamic|private|macro).
+    VarFlags,
+    /// `(%ns-interns 'ns)` -> a list of the fully-qualified syms interned in `ns`.
+    NsInterns,
+    /// `(%all-ns)` -> a list of all registered namespace-name symbols.
+    AllNs,
+    /// `(%symbol "a/b")` -> the interned symbol for a string (reverse of `%str-of`).
+    SymbolOf,
 
     // ── optimizer-introduced fixnum specializations ──────────────────────────
     // These are produced ONLY by the `optimize` nanopass (never by `analyze`).

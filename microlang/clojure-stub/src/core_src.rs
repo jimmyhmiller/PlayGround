@@ -142,6 +142,9 @@ pub const CORE: &str = r##"
 (defn namespace [x]
   (cond (keyword? x) (%sym-ns (field x 0))
         true (%sym-ns x)))
+;; `(symbol "x")` / `(symbol "ns" "x")` -> an interned symbol.
+(defn symbol [n & more]
+  (if (nil? more) (%symbol n) (%symbol (%str-cat (%str-cat n "/") (first more)))))
 (defn fn? [x] (%num-eq (type-of x) 'Fn))
 (defn number? [x] (%num-eq (type-of x) 'Long))
 (defn not [x] (if x false true))
@@ -926,4 +929,24 @@ pub const CORE: &str = r##"
 ;; `(defn- name params body…)` — a PRIVATE fn (cross-namespace access errors).
 (defmacro defn- (name params & body)
   (list 'def (list '-private-meta name) (%cons 'fn (%cons params body))))
+
+;; ─────────────── namespace reflection ───────────────
+;; Backed by the runtime var registry (populated at every def). Namespaces are
+;; represented by their name symbol (we have no first-class Namespace object).
+(defn all-ns [] (%all-ns))
+(defn find-ns [n] (if (some (fn [x] (= x n)) (%all-ns)) n nil))
+(defn the-ns [n] n)
+(defn ns-name [n] n)
+;; {unqualified-name-symbol -> Var} for a namespace's interned vars.
+(defn ns-interns [n]
+  (reduce (fn [m qs] (assoc m (symbol (%sym-name qs)) (record 'Var qs)))
+          (hash-map) (%ns-interns n)))
+;; ns-interns minus the private vars.
+(defn ns-publics [n]
+  (reduce (fn [m qs]
+            (if (%num-eq 2 (%bit-and (%var-flags qs) 2))
+              m
+              (assoc m (symbol (%sym-name qs)) (record 'Var qs))))
+          (hash-map) (%ns-interns n)))
+(def ns-map ns-interns)
 "##;

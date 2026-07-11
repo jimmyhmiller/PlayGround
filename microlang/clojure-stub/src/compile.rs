@@ -89,6 +89,9 @@ impl Compiler {
             ("%global-get", GlobalGet), ("%global-set", GlobalSet), ("%global-bound?", GlobalBound),
             // Split a (possibly qualified) symbol for var reflection (name/namespace).
             ("%sym-name", SymName), ("%sym-ns", SymNs),
+            // Var/namespace registry reflection (metadata flags + ns enumeration).
+            ("%var-flags", VarFlags), ("%ns-interns", NsInterns), ("%all-ns", AllNs),
+            ("%symbol", SymbolOf),
         ] {
             prims.insert(rt.intern(name), p);
         }
@@ -325,13 +328,19 @@ impl Compiler {
                     // Resolve+record the name FIRST so a self-reference inside the
                     // init (e.g. `(def x (fn [] x))`) resolves to this same var.
                     let n = self.def_name(rt, raw);
+                    let mut flags = 0u8;
                     if dynamic {
                         // Key the binding stack by the var's resolved, qualified sym.
                         self.dynamics.insert(n);
+                        flags |= microlang::runtime::VAR_DYNAMIC;
                     }
                     if private {
                         self.private.insert(n);
+                        flags |= microlang::runtime::VAR_PRIVATE;
                     }
+                    // Record the var in the runtime registry (for ns enumeration and
+                    // `(meta #'x)` flags).
+                    rt.register_var(n, &self.ns.current, flags);
                     if items.len() > 2 {
                         let init = Box::new(self.compile(rt, items[2]));
                         return Ir::Def { name: n, init };

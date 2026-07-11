@@ -148,12 +148,16 @@ fn eval_form<M: ValueModel>(
     // its RESOLVED (namespace-qualified) sym.
     if let Some((name, newform)) = strip_def_macro_meta(rt, form) {
         let r = eval1(rt, cs, macros, comp, newform);
-        macros.insert(comp.resolve_ref(rt, name));
+        let q = comp.resolve_ref(rt, name);
+        macros.insert(q);
+        rt.set_var_flags(q, microlang::runtime::VAR_MACRO);
         return r;
     }
     // Real core.clj registers a macro AFTER defining it: `(. (var foo) (setMacro))`.
     if let Some(name) = setmacro_target(rt, form) {
-        macros.insert(comp.resolve_ref(rt, name));
+        let q = comp.resolve_ref(rt, name);
+        macros.insert(q);
+        rt.set_var_flags(q, microlang::runtime::VAR_MACRO);
         return rt.encode(Val::Nil);
     }
     if let Some(name) = defmacro_name(rt, form) {
@@ -177,7 +181,9 @@ fn eval_form<M: ValueModel>(
         let def_sym = sym(rt, "def");
         let defform = rt.vec_to_list(&[def_sym, items[1], lam]);
         let r = eval1(rt, cs, macros, comp, defform);
-        macros.insert(comp.resolve_ref(rt, name));
+        let q = comp.resolve_ref(rt, name);
+        macros.insert(q);
+        rt.set_var_flags(q, microlang::runtime::VAR_MACRO);
         return r;
     }
     eval1(rt, cs, macros, comp, form)

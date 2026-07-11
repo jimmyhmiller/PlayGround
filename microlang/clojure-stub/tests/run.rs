@@ -1075,7 +1075,27 @@ fn var_reflection() {
     assert_eq!(run("(resolve (quote definitely-not-defined))"), "nil");
     // ns-resolve targets a named namespace.
     assert_eq!(run("(ns geom) (def y 7) (ns app) (var-get (ns-resolve (quote geom) (quote y)))"), "7");
-    // var metadata: :name and :ns.
-    assert_eq!(run("(ns app) (def x 1) (:name (meta (var x)))"), "\"x\"");
-    assert_eq!(run("(ns app) (def x 1) (:ns (meta (var x)))"), "\"app\"");
+    // var metadata: :name and :ns (symbols, as in Clojure).
+    assert_eq!(run("(ns app) (def x 1) (:name (meta (var x)))"), "x");
+    assert_eq!(run("(ns app) (def x 1) (:ns (meta (var x)))"), "app");
+}
+
+#[test]
+fn var_registry_metadata_and_namespaces() {
+    // Metadata flags come from the runtime var registry, populated at each def.
+    assert_eq!(run("(def ^:dynamic *x* 1) (:dynamic (meta (var *x*)))"), "true");
+    assert_eq!(run("(defn- sec [] 1) (:private (meta (var sec)))"), "true");
+    assert_eq!(run("(defmacro m [x] x) (:macro (meta (var m)))"), "true");
+    assert_eq!(run("(def x 1) (:dynamic (meta (var x)))"), "false");
+    // symbol builds interned symbols (1- and 2-arg).
+    assert_eq!(run("(symbol \"foo\")"), "foo");
+    assert_eq!(run("(symbol \"ns\" \"bar\")"), "ns/bar");
+    // Namespace enumeration over the registry.
+    assert_eq!(run("(ns app) (def a 1) (def b 2) (count (ns-interns (quote app)))"), "2");
+    assert_eq!(run("(ns app) (def a 1) (def b 2) (get (ns-interns (quote app)) (quote a))"), "#'app/a");
+    // ns-publics excludes private vars.
+    assert_eq!(run("(ns app) (def a 1) (defn- p [] 2) (count (ns-publics (quote app)))"), "1");
+    // all-ns / find-ns see a user namespace once it has a def.
+    assert_eq!(run("(ns foo) (def x 1) (find-ns (quote foo))"), "foo");
+    assert_eq!(run("(ns foo) (def x 1) (some (fn [n] (= n (quote foo))) (all-ns))"), "foo");
 }

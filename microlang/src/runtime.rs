@@ -255,8 +255,20 @@ pub struct Shared<M: ValueModel> {
     pub(crate) gc_requested: std::sync::atomic::AtomicBool,
     /// Every live mutator handle, so the collector can find + rewrite all roots.
     pub(crate) mutators: Mutex<Vec<Arc<MutatorState>>>,
+    /// Frontend var/namespace registry (metadata only — `Sym`s, flag bits, and
+    /// name strings, never heap values — so the collector ignores it). A frontend
+    /// records each `def`'d var here so it can reflect over namespaces (ns-interns,
+    /// all-ns) and per-var flags (dynamic/private/macro) at runtime.
+    pub(crate) var_flags: Mutex<HashMap<Sym, u8>>,
+    /// namespace name -> the vars interned there, in definition order.
+    pub(crate) ns_vars: Mutex<HashMap<String, Vec<Sym>>>,
     _pd: PhantomData<fn() -> M>,
 }
+
+/// Var-flag bits stored in `Shared::var_flags`.
+pub const VAR_DYNAMIC: u8 = 1;
+pub const VAR_PRIVATE: u8 = 2;
+pub const VAR_MACRO: u8 = 4;
 
 /// Create + register a fresh mutator root-slot in the shared registry.
 fn register_mutator<M: ValueModel>(shared: &Arc<Shared<M>>) -> Arc<MutatorState> {
@@ -334,6 +346,8 @@ impl<M: ValueModel> Runtime<M> {
             escape_tags: AtomicU64::new(0),
             gc_requested: std::sync::atomic::AtomicBool::new(false),
             mutators: Mutex::new(Vec::new()),
+            var_flags: Mutex::new(HashMap::new()),
+            ns_vars: Mutex::new(HashMap::new()),
             _pd: PhantomData,
         };
         // Pre-size the global array to its reserved cap so its base is stable and
@@ -407,6 +421,44 @@ impl<M: ValueModel> Runtime<M> {
     /// Is this global bound? (`set!`/redefinition checks.)
     pub fn global_defined(&self, sym: Sym) -> bool {
         matches!(self.shared.global_slots.get(sym as usize).map(|a| a.load(GLOBAL_LOAD)), Some(v) if v != GLOBAL_UNBOUND)
+    }
+
+    /// Register a var in the frontend var/namespace registry: record it under its
+    /// namespace (in definition order, once) and OR in its flag bits. Called by a
+    /// frontend at `def` time so it can reflect over namespaces + var flags.
+    pub fn register_var(&self, sym: Sym, ns: &str, flags: u8) {
+        {
+            let mut nv = self.shared.ns_vars.lock().unwrap();
+            let list = nv.entry(ns.to_string()).or_default();
+            if !list.contains(&sym) {
+                list.push(sym);
+            }
+        }
+        if flags != 0 {
+            let mut vf = self.shared.var_flags.lock().unwrap();
+            *vf.entry(sym).or_insert(0) |= flags;
+        }
+    }
+
+    /// OR extra flag bits onto an existing var (e.g. `VAR_MACRO`, set after the def).
+    pub fn set_var_flags(&self, sym: Sym, flags: u8) {
+        let mut vf = self.shared.var_flags.lock().unwrap();
+        *vf.entry(sym).or_insert(0) |= flags;
+    }
+
+    /// This var's flag bits (`VAR_DYNAMIC | VAR_PRIVATE | VAR_MACRO`), 0 if none.
+    pub fn var_flags(&self, sym: Sym) -> u8 {
+        self.shared.var_flags.lock().unwrap().get(&sym).copied().unwrap_or(0)
+    }
+
+    /// The vars interned in a namespace, in definition order.
+    pub fn ns_var_syms(&self, ns: &str) -> Vec<Sym> {
+        self.shared.ns_vars.lock().unwrap().get(ns).cloned().unwrap_or_default()
+    }
+
+    /// The names of all registered namespaces.
+    pub fn all_ns_names(&self) -> Vec<String> {
+        self.shared.ns_vars.lock().unwrap().keys().cloned().collect()
     }
 
     /// Define (or redefine) a global. Atomic store, so `&self` suffices — a step
@@ -1045,6 +1097,33 @@ impl<M: ValueModel> Runtime<M> {
                     }
                     None => self.enc_nil(),
                 }
+            }
+            Prim::VarFlags => {
+                let s = match self.decode(args[0]) {
+                    Val::Sym(s) => s,
+                    _ => panic!("%var-flags: not a symbol"),
+                };
+                self.encode(Val::Int(self.var_flags(s) as i128))
+            }
+            Prim::NsInterns => {
+                let ns = match self.decode(args[0]) {
+                    Val::Sym(s) => self.sym_name(s).to_string(),
+                    _ => panic!("%ns-interns: not a symbol"),
+                };
+                let vals: Vec<u64> =
+                    self.ns_var_syms(&ns).into_iter().map(|s| self.encode(Val::Sym(s))).collect();
+                self.vec_to_list(&vals)
+            }
+            Prim::AllNs => {
+                let names = self.all_ns_names();
+                let vals: Vec<u64> =
+                    names.iter().map(|n| self.encode(Val::Sym(self.intern(n)))).collect();
+                self.vec_to_list(&vals)
+            }
+            Prim::SymbolOf => {
+                let s = self.as_str(args[0], "symbol");
+                let sym = self.intern(&s);
+                self.encode(Val::Sym(sym))
             }
             // ── atoms: real cross-thread compare-and-set ────────────────
             Prim::AtomNew => {
