@@ -1889,4 +1889,27 @@ function Root() {
   return html`<${App} key=${selected.id} onBack=${back} programName=${selected.name} />`;
 }
 
-ReactDOM.createRoot(document.getElementById("app")).render(html`<${Root} />`);
+// A render exception anywhere in the tree must NOT white-screen the viewer — the actual Scry
+// program keeps running regardless (the viewer is just a REPL client). Catch it, show a
+// recoverable message, and let the user dismiss (re-render) or reload.
+class ErrorBoundary extends React.Component {
+  constructor(p) { super(p); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) { try { console.error("viewer render error:", err, info); } catch (_) {} }
+  render() {
+    if (this.state.err) {
+      const msg = String((this.state.err && this.state.err.message) || this.state.err);
+      return html`<div class="crash-fallback">
+        <div class="crash-title">the viewer hit a rendering error</div>
+        <div class="crash-msg">${msg}</div>
+        <div class="crash-hint">Your program is still running — this is only a UI glitch. Dismiss to retry, or reload the page.</div>
+        <div class="crash-btns">
+          <button class="insp-btn" onClick=${() => this.setState({ err: null })}>dismiss</button>
+          <button class="insp-btn" onClick=${() => location.reload()}>reload</button>
+        </div>
+      </div>`;
+    }
+    return this.props.children;
+  }
+}
+ReactDOM.createRoot(document.getElementById("app")).render(html`<${ErrorBoundary}><${Root} /><//>`);
