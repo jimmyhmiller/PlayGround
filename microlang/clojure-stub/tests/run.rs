@@ -1110,3 +1110,16 @@ fn var_docstrings() {
     assert_eq!(run("(defn g [n] n) (:doc (meta (var g)))"), "nil");
     assert_eq!(run("(defn add [a b] (+ a b)) (add 3 4)"), "7");
 }
+
+#[test]
+fn var_arglists() {
+    // :arglists is captured (at compile time) from the fn's params, as vectors.
+    assert_eq!(run("(defn f [a b] (+ a b)) (:arglists (meta (var f)))"), "([a b])");
+    assert_eq!(run("(defn g [x] x) (:arglists (meta (var g)))"), "([x])");
+    assert_eq!(run("(defn h [a & bs] a) (:arglists (meta (var h)))"), "([a & bs])");
+    // Docstring + arglists together; the fn still works.
+    assert_eq!(run("(defn f \"adds\" [a b] (+ a b)) (:arglists (meta (var f)))"), "([a b])");
+    assert_eq!(run("(defn add [a b] (+ a b)) (add 3 4)"), "7");
+    // Non-fn vars have no arglists.
+    assert_eq!(run("(def x 5) (:arglists (meta (var x)))"), "nil");
+}
