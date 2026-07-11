@@ -1033,6 +1033,7 @@
           (cond
             (= k NK_MIGRATE)
               (do (set-cur-file file) (err-msg item c"migrate blocks are not implemented in this build") 0)
+            (and (= k NK_VIEW) deep) (do (store! (field item ival) (cast i64 file)) (register-view item) 0)
             (>= (dkind-of k) 0) (do (collect-decl item file deep) 0)
             0)
           (store! i (+ (load i) 1)) 0)
@@ -1280,6 +1281,129 @@
                 0))))))))
 
 ; ======================================================================
+; Program-declared views (DECISIONS #15b) — check a `view N for T { ... }`
+; against T: title/badge/size fields exist with sensible types, each section's
+; field-path resolves from T, and the representation matches the resolved type.
+; ======================================================================
+(defn view-field-type [(d (ptr Decl)) (name (ptr u8)) (len i64)] (-> (ptr Type))
+  (let [f (decl-member d name len)]
+    (if (or (= (cast i64 f) 0) (!= (nkind f) NK_FIELD)) (null-ty)
+      (resolve-type (load (field f a)) d))))
+(defn view-entity-decl-of [(t (ptr Type))] (-> (ptr Decl))
+  (if (!= (ty-kind t) TY_NAMED) (cast (ptr Decl) 0)
+    (let [d (load (field t decl))]
+      (if (= (cast i64 d) 0) (cast (ptr Decl) 0)
+        (let [dk (load (field d kind))]
+          (if (or (= dk DK_CLASS) (= dk DK_OBJECT)) d (cast (ptr Decl) 0)))))))
+(defn view-is-list [(t (ptr Type))] (-> bool)
+  (and (= (ty-kind t) TY_NAMED) (name-eq (load (field t name)) (load (field t name-len)) (cast (ptr u8) c"List") 4)))
+(defn view-list-elem [(t (ptr Type))] (-> (ptr Type))
+  (if (and (view-is-list t) (> (al-len (load (field t args))) 0)) (al-get (load (field t args)) 0) (null-ty)))
+(defn view-is-enum [(t (ptr Type))] (-> bool)
+  (and (= (ty-kind t) TY_NAMED)
+       (let [d (load (field t decl))] (and (!= (cast i64 d) 0) (= (load (field d kind)) DK_ENUM)))))
+(defn view-named-of [(d (ptr Decl))] (-> (ptr Type)) (mk-named d (al-new [(ptr Type)] (alc-global))))
+(defn view-list-of [(d (ptr Decl))] (-> (ptr Type))
+  (let [(mut args) (al-new [(ptr Type)] (alc-global))]
+    (al-push! (mut args) (view-named-of d)) (mk-named (find-decl-c c"List") (load args))))
+(defn path-is-single [(path (ptr Node)) (s (ptr i8))] (-> bool)
+  (and (= (kid-count path) 1) (node-name-eq (kid-at path 0) s)))
+(defn repr-is [(item (ptr Node)) (s (ptr i8))] (-> bool)
+  (name-eq (load (field item s-name)) (load (field item s-len)) (cast (ptr u8) s) (strlen s)))
+
+; walk a dotted field-path from a starting entity decl, emitting a span'd diagnostic
+; on the first bad hop; returns the resolved Type (or ty-error).
+(defn view-resolve-path [(startd (ptr Decl)) (path (ptr Node))] (-> (ptr Type))
+  (let [nh (kid-count path) (mut cur-decl) startd (mut cur-ty) (null-ty) (mut i) 0 (mut ok) true]
+    (loop
+      (if (and (load ok) (< (load i) nh))
+        (let [hop (kid-at path (load i))]
+          (if (= (cast i64 (load cur-decl)) 0)
+            (do (err-msg-name hop c"view field-path cannot descend into '" (nm hop) (nlen hop) c"' (previous hop is not an entity)") (store! ok false) 0)
+            (let [ft (view-field-type (load cur-decl) (nm hop) (nlen hop))]
+              (if (= (cast i64 ft) 0)
+                (do (err-msg-name hop c"unknown field '" (nm hop) (nlen hop) c"' in view field-path") (store! ok false) 0)
+                (do (store! cur-ty ft) (store! cur-decl (view-entity-decl-of ft)) 0))))
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (if (load ok) (load cur-ty) (ty-error))))
+
+; representation args: order:/by: reference a field on the list's element type.
+(defn view-check-list-args [(item (ptr Node)) (rty (ptr Type))] (-> i64)
+  (let [ed (view-entity-decl-of (view-list-elem rty)) na (kid-count item) (mut i) 0]
+    (loop (if (< (load i) na)
+            (let [arg (kid-at item (load i)) an (nm arg) al (nlen arg) fld (load (field arg a))]
+              (if (or (name-eq an al (cast (ptr u8) c"order") 5) (name-eq an al (cast (ptr u8) c"by") 2))
+                (if (= (cast i64 ed) 0)
+                  (err-msg arg c"view representation argument references a field on a non-entity list element")
+                  (if (= (cast i64 (view-field-type ed (nm fld) (nlen fld))) 0)
+                    (err-msg-name fld c"unknown field '" (nm fld) (nlen fld) c"' on the list element type") 0))
+                (err-msg-name arg c"unknown representation argument '" an al c"' (expected 'order:' or 'by:')"))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    0))
+(defn view-check-repr [(item (ptr Node)) (rty (ptr Type))] (-> i64)
+  (if (= (load (field item s-len)) 0) 0
+    (cond
+      (or (or (repr-is item c"timeline") (repr-is item c"rows")) (or (repr-is item c"chips") (repr-is item c"heat")))
+        (if (view-is-list rty) (view-check-list-args item rty)
+          (err-msg-name item c"representation '" (load (field item s-name)) (load (field item s-len)) c"' requires a List<...> field"))
+      (repr-is item c"card")
+        (if (!= (cast i64 (view-entity-decl-of rty)) 0) 0
+          (err-msg item c"representation 'card' requires a single entity field"))
+      (err-msg-name item c"unknown representation '" (load (field item s-name)) (load (field item s-len)) c"'"))))
+
+; resolve an item's data type; `all` = all instances of the target (List<T>),
+; `byCount` = a count (Int, size: only).
+(defn view-item-type [(target (ptr Decl)) (item (ptr Node)) (allow-all bool) (allow-count bool)] (-> (ptr Type))
+  (let [path (load (field item a))]
+    (cond
+      (path-is-single path c"all")
+        (if allow-all (view-list-of target) (do (err-msg path c"'all' is only valid as a top-level clause value") (ty-error)))
+      (path-is-single path c"byCount")
+        (if allow-count (ty-int) (do (err-msg path c"'byCount' is only valid as a 'size:' value") (ty-error)))
+      (view-resolve-path target path))))
+(defn check-view-section [(target (ptr Decl)) (sec (ptr Node))] (-> i64)
+  (let [item (load (field sec a)) rty (view-item-type target item false false)]
+    (if (is-err rty) 0 (do (view-check-repr item rty) 0))))
+(defn check-view-clause [(target (ptr Decl)) (clause (ptr Node))] (-> i64)
+  (let [key (nm clause) kl (nlen clause) item (load (field clause a))
+        allow-count (name-eq key kl (cast (ptr u8) c"size") 4)
+        rty (view-item-type target item true allow-count)]
+    (if (is-err rty) 0
+      (do
+        (view-check-repr item rty)
+        (if (= (load (field item s-len)) 0)
+          (cond
+            (name-eq key kl (cast (ptr u8) c"title") 5)
+              (if (= (ty-kind rty) TY_STRING) 0 (err-msg item c"'title:' field must be a String"))
+            (name-eq key kl (cast (ptr u8) c"badge") 5)
+              (if (or (= (ty-kind rty) TY_STRING) (view-is-enum rty)) 0 (err-msg item c"'badge:' field must be a String or an enum"))
+            0)
+          0)
+        0))))
+(defn check-view [(vn (ptr Node))] (-> i64)
+  (set-cur-file (cast (ptr i8) (load (field vn ival))))
+  (let [tn (load (field vn a)) target (find-decl (nm tn) (nlen tn))]
+    (if (= (cast i64 target) 0)
+      (err-msg-name tn c"view target: unknown type '" (nm tn) (nlen tn) c"'")
+      (let [dk (load (field target kind))]
+        (if (not (or (= dk DK_CLASS) (= dk DK_OBJECT)))
+          (err-msg-name tn c"view target '" (nm tn) (nlen tn) c"' must be an entity class or object")
+          (let [n (kid-count vn) (mut i) 0]
+            (loop (if (< (load i) n)
+                    (let [c (kid-at vn (load i))]
+                      (if (= (nkind c) NK_VIEW_SECTION) (check-view-section target c) (check-view-clause target c))
+                      (store! i (+ (load i) 1)) 0)
+                    (break)))
+            0)))))
+  0)
+(defn check-all-views [] (-> i64)
+  (let [n (view-count) (mut i) 0]
+    (loop (if (< (load i) n) (do (check-view (view-at (load i))) (store! i (+ (load i) 1)) 0) (break))))
+  0)
+
+; ======================================================================
 ; Driver
 ; ======================================================================
 (defn run-check [(path (ptr i8))] (-> i64)
@@ -1294,6 +1418,8 @@
       ; pass 2: deep-check bodies of the entry module only
       (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
         (loop (if (< (load i) n) (let [d (al-get ds (load i))] (if (load (field d deep)) (do (check-decl-bodies d) 0) 0) (store! i (+ (load i) 1)) 0) (break))))
+      ; pass 3: program-declared views
+      (check-all-views)
       (if (= (err-count) 0)
         (do (w-cstr 1 c"ok\n") 0)
         65))))

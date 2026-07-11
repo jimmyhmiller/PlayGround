@@ -55,6 +55,12 @@
 (const NK_PAT_WILD 44)
 (const NK_MIGRATE_ENTRY 45)
 (const NK_UNIT 46)
+; ---- program-declared views (DECISIONS #15b) ----
+(const NK_VIEW 47)          ; s-name = view name; a = NK_TYPE (target); kids = clauses
+(const NK_VIEW_CLAUSE 48)   ; s-name = key (title/size/badge/key/stream); a = NK_VIEW_ITEM
+(const NK_VIEW_SECTION 49)  ; s-name = section label; a = NK_VIEW_ITEM
+(const NK_VIEW_ITEM 50)     ; a = NK_VIEW_PATH; s-name = representation (empty if none); kids = NK_ARG
+(const NK_VIEW_PATH 51)     ; kids = NK_IDENT hops (dotted field path)
 
 (defstruct Node
   [(kind i64) (line i64) (col i64)
@@ -279,6 +285,26 @@
         (do (ws c"(entry ") (wn n)
             (if (is-null (load (field n a))) 0 (do (ws c" (of ") (wn (load (field n a))) (ws c")") 0))
             (dchild (load (field n b)) d1) (ws c")"))
+      ; ---- views ----
+      (= k NK_VIEW)
+        (do (ws c"(view ") (wn n)
+            (ws c" (for ") (if (is-null (load (field n a))) 0 (dump-type (load (field n a)))) (ws c")")
+            (dump-kids n d1) (ws c")"))
+      (= k NK_VIEW_CLAUSE)
+        (do (ws c"(clause ") (wn n) (dchild (load (field n a)) d1) (ws c")"))
+      (= k NK_VIEW_SECTION)
+        (do (ws c"(section ") (emit-escaped (load (field n s-name)) (load (field n s-len)))
+            (dchild (load (field n a)) d1) (ws c")"))
+      (= k NK_VIEW_ITEM)
+        (do (ws c"(item")
+            (dchild (load (field n a)) d1)
+            (if (> (load (field n s-len)) 0) (do (ws c" (as ") (wn n) (ws c")") 0) 0)
+            (dump-kids n d1) (ws c")"))
+      (= k NK_VIEW_PATH)
+        (do (ws c"(path")
+            (let [(mut i) 0 m (kid-count n)]
+              (loop (if (< (load i) m) (do (ws c" ") (wn (kid-at n (load i))) (store! i (+ (load i) 1)) 0) (break))))
+            (ws c")"))
       (do (ws c"(unknown ") (w-int 1 k) (ws c")")))))
 
 (defn dump-program [(root (ptr Node))] (-> i64)

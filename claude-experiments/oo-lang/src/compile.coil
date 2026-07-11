@@ -943,6 +943,7 @@
     (loop (if (< (load i) n) (do (check-decl-signatures (al-get ds (load i))) (store! i (+ (load i) 1)) 0) (break))))
   (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
     (loop (if (< (load i) n) (let [d (al-get ds (load i))] (if (load (field d deep)) (do (check-decl-bodies d) 0) 0) (store! i (+ (load i) 1)) 0) (break))))
+  (check-all-views)
   (err-count))
 
 (defn dump-arenas-of [(p (ptr Program))] (-> i64)

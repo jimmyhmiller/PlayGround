@@ -524,6 +524,67 @@
             (break))))
   (jb-cstr b c"]}") 0)
 
+; ================= views() : the program-declared view specs (Phase V2) =================
+; Static (from the parsed+checked program): each `view N for T { ... }` as JSON so a bespoke
+; renderer can honor it. One clause per entry (top-level clause or section), each carrying its
+; dotted field-path, optional representation, and representation args:
+;   { "type":"Views", "views":[
+;     { "name":"AgentBoard", "target":"Agent", "clauses":[
+;       {"kind":"clause","key":"title","path":"name","representation":null,"args":[]},
+;       {"kind":"section","label":"conversation","path":"conversation.messages",
+;        "representation":"timeline","args":[{"name":"order","value":"createdAt"}]} ] } ] }
+(defn emit-view-path [(b (ptr JBuf)) (path (ptr Node))] (-> i64)
+  (jb-byte b \")
+  (let [n (kid-count path) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [hop (kid-at path (load i))]
+              (if (> (load i) 0) (jb-byte b \.) 0)
+              (jb-bytes b (load (field hop s-name)) (load (field hop s-len)))
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \") 0)
+(defn emit-view-item [(b (ptr JBuf)) (item (ptr Node))] (-> i64)
+  (jb-cstr b c",\"path\":") (emit-view-path b (load (field item a)))
+  (jb-cstr b c",\"representation\":")
+  (if (> (load (field item s-len)) 0) (jb-str b (load (field item s-name)) (load (field item s-len))) (jb-cstr b c"null"))
+  (jb-cstr b c",\"args\":[")
+  (let [n (kid-count item) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [arg (kid-at item (load i)) v (load (field arg a))]
+              (if (> (load i) 0) (jb-byte b \,) 0)
+              (jb-cstr b c"{\"name\":") (jb-str b (load (field arg s-name)) (load (field arg s-len)))
+              (jb-cstr b c",\"value\":") (jb-str b (load (field v s-name)) (load (field v s-len)))
+              (jb-byte b \})
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+(defn emit-view-clause [(b (ptr JBuf)) (c (ptr Node))] (-> i64)
+  (if (= (load (field c kind)) NK_VIEW_SECTION)
+    (do (jb-cstr b c"{\"kind\":\"section\",\"label\":") (jb-str b (load (field c s-name)) (load (field c s-len)))
+        (emit-view-item b (load (field c a))) (jb-byte b \}))
+    (do (jb-cstr b c"{\"kind\":\"clause\",\"key\":") (jb-str b (load (field c s-name)) (load (field c s-len)))
+        (emit-view-item b (load (field c a))) (jb-byte b \})))
+  0)
+(defn emit-view [(b (ptr JBuf)) (vn (ptr Node))] (-> i64)
+  (jb-cstr b c"{\"name\":") (jb-str b (load (field vn s-name)) (load (field vn s-len)))
+  (let [tn (load (field vn a))]
+    (jb-cstr b c",\"target\":") (jb-str b (load (field tn s-name)) (load (field tn s-len))))
+  (jb-cstr b c",\"clauses\":[")
+  (let [n (kid-count vn) (mut i) 0]
+    (loop (if (< (load i) n)
+            (do (if (> (load i) 0) (jb-byte b \,) 0) (emit-view-clause b (kid-at vn (load i)))
+                (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-cstr b c"]}") 0)
+(defn reflect-views [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+  (jb-cstr b c"{\"type\":\"Views\",\"views\":[")
+  (let [n (view-count) (mut i) 0]
+    (loop (if (< (load i) n)
+            (do (if (> (load i) 0) (jb-byte b \,) 0) (emit-view b (view-at (load i)))
+                (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-cstr b c"]}") 0)
+
 (defn reflect-schema [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
   (jb-cstr b c"{\"type\":\"Schema\",\"nodes\":[")
   (let [(mut first) true]

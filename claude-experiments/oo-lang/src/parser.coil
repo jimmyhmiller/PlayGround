@@ -252,6 +252,83 @@
     (expect TK_RBRACE)
     nd))
 
+; ---- program-declared views (DECISIONS #15b) -------------------------------
+; view <Name> for <Type> { <clause>* }
+;   clause  = title: <item> | size: <item> | badge: <item> | key: <item> | <ident>: <item>
+;           | section "<label>" { <item> }
+;   item    = <field-path> [ as <repr>(<arg>*) ]
+;   arg     = <name>: <ident>
+(defn parse-view-path [] (-> (ptr Node))
+  (let [nd (mk-node NK_VIEW_PATH (cur-line) (cur-col))]
+    (add-kid! nd (parse-ident-node))
+    (loop (if (check TK_DOT) (do (advance) (add-kid! nd (parse-ident-node)) 0) (break)))
+    nd))
+(defn parse-view-arg [] (-> (ptr Node))
+  (let [t (cur-ptr) nd (mk-node NK_ARG (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (expect-ident)
+    (expect TK_COLON)
+    (store! (field nd a) (parse-ident-node))
+    nd))
+(defn parse-view-item [] (-> (ptr Node))
+  (let [nd (mk-node NK_VIEW_ITEM (cur-line) (cur-col))]
+    (store! (field nd a) (parse-view-path))
+    (if (check TK_AS)
+      (do (advance)
+          (let [t (cur-ptr)]
+            (set-name! nd (load (field t start)) (load (field t len)))
+            (expect-ident))
+          (if (check TK_LPAREN)
+            (do (advance)
+                (loop (if (check TK_RPAREN) (break)
+                        (do (add-kid! nd (parse-view-arg)) (if (check TK_COMMA) (do (advance) 0) 0))))
+                (expect TK_RPAREN) 0)
+            0)
+          0)
+      0)
+    nd))
+(defn parse-view-section [] (-> (ptr Node))
+  (advance) ; contextual 'section'
+  (let [nd (mk-node NK_VIEW_SECTION (cur-line) (cur-col))]
+    (if (check TK_STR_BEGIN)
+      (let [s (parse-string)]
+        (if (and (= (kid-count s) 1) (= (load (field (kid-at s 0) kind)) NK_STRCHUNK))
+          (set-name! nd (load (field (kid-at s 0) s-name)) (load (field (kid-at s 0) s-len)))
+          (set-name! nd (cast (ptr u8) c"") 0))
+        0)
+      (perror c"expected a section label string"))
+    (expect TK_LBRACE)
+    (store! (field nd a) (parse-view-item))
+    (expect TK_RBRACE)
+    nd))
+(defn parse-view-clause [] (-> (ptr Node))
+  (let [t (cur-ptr) nd (mk-node NK_VIEW_CLAUSE (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (expect-ident)
+    (expect TK_COLON)
+    (store! (field nd a) (parse-view-item))
+    nd))
+(defn cur-is-section? [] (-> bool)
+  (and (and (check TK_IDENT) (tok-eq (load (field (cur-ptr) start)) (load (field (cur-ptr) len)) c"section"))
+       (= (peek-kind 1) TK_STR_BEGIN)))
+(defn parse-view [] (-> (ptr Node))
+  (advance) ; 'view'
+  (let [t (cur-ptr) nd (mk-node NK_VIEW (load (field t line)) (load (field t col)))]
+    (set-name! nd (load (field t start)) (load (field t len)))
+    (expect-ident)
+    (expect TK_FOR)
+    (store! (field nd a) (parse-type))
+    (expect TK_LBRACE)
+    (loop
+      (cond
+        (check TK_RBRACE) (break)
+        (check TK_EOF) (break)
+        (cur-is-section?) (do (add-kid! nd (parse-view-section)) 0)
+        (check TK_IDENT) (do (add-kid! nd (parse-view-clause)) 0)
+        (perror c"expected a view clause (title/size/badge/section ...)")))
+    (expect TK_RBRACE)
+    nd))
+
 ; module NAME (dotted, contiguous in source)
 (defn parse-module [] (-> (ptr Node))
   (let [ln (cur-line) col (cur-col)]
@@ -328,7 +405,8 @@
     (check TK_OBJECT) (parse-object)
     (check TK_FN) (parse-fn true)
     (check TK_MIGRATE) (parse-migrate)
-    (perror-node c"expected a top-level declaration (class, interface, enum, object, fn, import, module, or migrate)")))
+    (check TK_VIEW) (parse-view)
+    (perror-node c"expected a top-level declaration (class, interface, enum, object, fn, view, import, module, or migrate)")))
 
 ; ---- statements ------------------------------------------------------------
 (defn parse-block [] (-> (ptr Node))

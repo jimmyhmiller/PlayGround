@@ -40,6 +40,7 @@
 (const TK_TRUE 29)
 (const TK_FALSE 30)
 (const TK_AS 31)
+(const TK_VIEW 32)
 ; punctuation / operators
 (const TK_LPAREN 40)
 (const TK_RPAREN 41)
@@ -218,6 +219,7 @@
       (tok-eq s n c"module")     TK_MODULE
       (tok-eq s n c"self")       TK_SELF
       (tok-eq s n c"as")         TK_AS
+      (tok-eq s n c"view")       TK_VIEW
       (tok-eq s n c"true")       TK_TRUE
       (tok-eq s n c"false")      TK_FALSE
       TK_IDENT)))

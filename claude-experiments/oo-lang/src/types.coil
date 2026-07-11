@@ -71,6 +71,7 @@
   [(decls (ArrayList (ptr Decl)))
    (monos (ArrayList (ptr MonoType)))
    (variants (ArrayList (ptr VariantRef)))
+   (views (ArrayList (ptr Node)))    ; program-declared views (NK_VIEW), in source order
    (cur-file (ptr i8))
    (nerr i64)
    (inited bool)])
@@ -82,6 +83,7 @@
       (store! (field (ctx) decls) (al-new [(ptr Decl)] (alc-global)))
       (store! (field (ctx) monos) (al-new [(ptr MonoType)] (alc-global)))
       (store! (field (ctx) variants) (al-new [(ptr VariantRef)] (alc-global)))
+      (store! (field (ctx) views) (al-new [(ptr Node)] (alc-global)))
       (store! (field (ctx) nerr) 0)
       (store! (field (ctx) inited) true)
       0)))
@@ -158,6 +160,9 @@
     (store! (field d members) (al-new [(ptr Node)] (alc-global)))
     d))
 (defn register-decl [(d (ptr Decl))] (-> i64) (al-push! (mut (field (ctx) decls)) d) 0)
+(defn register-view [(v (ptr Node))] (-> i64) (al-push! (mut (field (ctx) views)) v) 0)
+(defn view-count [] (-> i64) (al-len (load (field (ctx) views))))
+(defn view-at [(i i64)] (-> (ptr Node)) (al-get (load (field (ctx) views)) i))
 
 (defn decl-tparam-count [(d (ptr Decl))] (-> i64) (al-len (load (field d tparams))))
 (defn decl-is-generic [(d (ptr Decl))] (-> bool) (> (decl-tparam-count d) 0))
