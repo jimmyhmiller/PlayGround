@@ -1008,3 +1008,24 @@ fn protocol_methods_are_namespace_qualified() {
                    (ns c) [(a/go (a/->T 1)) (b/go (b/->U 2))]";
     assert_eq!(run(collide), "[:a-go :b-go]");
 }
+
+#[test]
+fn first_class_vars() {
+    // `#'x` / `(var x)` is a real, namespace-qualified Var handle.
+    assert_eq!(run("(def x 42) (var x)"), "#'user/x");
+    assert_eq!(run("(var reduce)"), "#'clojure.core/reduce");
+    assert_eq!(run("(def x 1) (var? (var x))"), "true");
+    assert_eq!(run("(var? 5)"), "false");
+    // A Var is derefable (yields its root).
+    assert_eq!(run("(def x 42) @(var x)"), "42");
+    assert_eq!(run("(def x 42) (var-get (var x))"), "42");
+    // alter-var-root changes the root (and returns the new value).
+    assert_eq!(run("(def x 1) (alter-var-root (var x) (fn [v] (+ v 10))) x"), "11");
+    assert_eq!(run("(def x 1) (alter-var-root (var x) + 5)"), "6");
+    // with-redefs temporarily rebinds a var's root, then restores it.
+    assert_eq!(run("(defn f [] 1) [(with-redefs [f (fn [] 99)] (f)) (f)]"), "[99 1]");
+    // Late binding is preserved: redefining a fn updates earlier callers.
+    assert_eq!(run("(defn f [] 1) (defn g [] (f)) (defn f [] 2) (g)"), "2");
+    // Vars key by qualified sym, so a var from another ns derefs correctly.
+    assert_eq!(run("(ns a) (def x 7) (ns b) (var-get (var a/x))"), "7");
+}

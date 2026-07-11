@@ -990,6 +990,38 @@ impl<M: ValueModel> Runtime<M> {
                 }
                 self.encode(Val::Nil)
             }
+            // First-class vars: read/write a global by symbol (the Var handle wraps
+            // the qualified sym). `%global-get` throws a catchable error if unbound.
+            Prim::GlobalGet => {
+                let s = match self.decode(args[0]) {
+                    Val::Sym(s) => s,
+                    _ => panic!("%global-get: not a symbol"),
+                };
+                match self.global(s) {
+                    Some(v) => v,
+                    None => {
+                        let name = self.sym_name(s).to_string();
+                        let id = self.alloc(Obj::Str(format!("Unbound var: {name}")));
+                        self.signal_throw(M::R::enc_ref(id));
+                        self.enc_nil()
+                    }
+                }
+            }
+            Prim::GlobalSet => {
+                let s = match self.decode(args[0]) {
+                    Val::Sym(s) => s,
+                    _ => panic!("%global-set: not a symbol"),
+                };
+                self.define_global(s, args[1]);
+                args[1]
+            }
+            Prim::GlobalBound => {
+                let s = match self.decode(args[0]) {
+                    Val::Sym(s) => s,
+                    _ => panic!("%global-bound?: not a symbol"),
+                };
+                M::R::enc_bool(self.global_defined(s))
+            }
             // ── atoms: real cross-thread compare-and-set ────────────────
             Prim::AtomNew => {
                 let id = self.alloc(Obj::Atom(Arc::new(AtomicU64::new(args[0]))));

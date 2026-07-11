@@ -169,6 +169,18 @@ pub enum Prim {
     /// (inclusive). Run in a `finally`, so bindings unwind even on a throw.
     DynUnwind,
 
+    // ── first-class vars (reflective global access by symbol) ────────────────
+    // A frontend Var is a thin handle over a global's SYMBOL; these read/write the
+    // global table by that sym, so `#'x`/deref/`alter-var-root` all work without
+    // adding indirection to the ordinary (compiled) global-reference path.
+    /// `(%global-get 'sym)` -> the global's value; THROWS (catchable) if unbound.
+    GlobalGet,
+    /// `(%global-set 'sym x)` -> set the global to `x` (creating/rebinding its
+    /// root); returns `x`.
+    GlobalSet,
+    /// `(%global-bound? 'sym)` -> whether the global currently has a value.
+    GlobalBound,
+
     // ── optimizer-introduced fixnum specializations ──────────────────────────
     // These are produced ONLY by the `optimize` nanopass (never by `analyze`).
     // `FxAdd/FxSub/FxMul/FxLt/FxEq` mean "same as `Add/Sub/Mul/Lt/Eq`, but the

@@ -253,14 +253,20 @@ fn expand<M: ValueModel>(
             let d = desugar_deftype(rt, f);
             expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "var") {
-            // `(var x)` -> a first-class var value `(record 'Var 'x)`. (The
-            // `(. (var x) (setMacro))` bootstrap pattern is intercepted earlier,
-            // at eval-form level; this handles `var` in any other position.)
+            // `(var x)` / `#'x` -> a first-class Var handle `(record 'Var 'ns/x)`.
+            // The name is RESOLVED so the handle keys the global table exactly as
+            // an ordinary reference to `x` does — deref/alter-var-root operate by
+            // that sym. (The `(. (var x) (setMacro))` bootstrap is intercepted
+            // earlier, at eval-form level; this handles `var` elsewhere.)
             let items = rt.list_to_vec(f);
+            let resolved = match rt.decode(items[1]) {
+                Val::Sym(s) => rt.encode(Val::Sym(comp.resolve_ref(rt, s))),
+                _ => items[1],
+            };
             let rec = sym(rt, "record");
             let vtag = sym(rt, "Var");
             let tag_q = quote_form(rt, vtag);
-            let name_q = quote_form(rt, items[1]);
+            let name_q = quote_form(rt, resolved);
             let g = rt.vec_to_list(&[rec, tag_q, name_q]);
             expand(rt, cs, macros, comp, g)
         } else if is_sym(rt, head, "instance?") {
@@ -275,6 +281,11 @@ fn expand<M: ValueModel>(
             // `(binding [*x* v] body…)` — thread-local dynamic-var bindings via a
             // `try`/`finally` that installs and (always) unwinds them.
             let d = desugar_binding(rt, comp, f);
+            expand(rt, cs, macros, comp, d)
+        } else if is_sym(rt, head, "with-redefs") {
+            // `(with-redefs [f g] body…)` — temporarily rebind var ROOTS (for
+            // testing), restoring them in a `finally`.
+            let d = desugar_with_redefs(rt, f);
             expand(rt, cs, macros, comp, d)
         } else if record_field0(rt, head, reader::KEYWORD).is_some() {
             // keyword in head position: (:k m) -> (get m :k)
@@ -1632,6 +1643,65 @@ fn desugar_binding<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u6
     rt.vec_to_list(&[trystar, body, nil, nil, unwind])
 }
 
+/// `(with-redefs [f newf …] body…)` -> save each var's current root, install the
+/// replacements, run the body, and (in a `finally`) restore the roots. Operates on
+/// var ROOTS by symbol (`(var f)` resolves the name), so it composes with the
+/// namespace-qualified var model.
+fn desugar_with_redefs<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
+    let items = rt.list_to_vec(form);
+    let pairs = binding_items(rt, items[1]).unwrap_or_else(|| rt.list_to_vec(items[1]));
+    let var_s = sym(rt, "var");
+    let vget = sym(rt, "var-get");
+    let vset = sym(rt, "var-set");
+    let let_s = sym(rt, "let");
+    let do_s = sym(rt, "do");
+    let trystar = sym(rt, "try*");
+    let nil = rt.encode(Val::Nil);
+
+    let mut let_binds = Vec::new(); // [old_i (var-get (var name_i)) …]
+    let mut sets = Vec::new(); // (var-set (var name_i) new_i)
+    let mut restores = Vec::new(); // (var-set (var name_i) old_i)
+    let mut k = 0;
+    while k + 1 < pairs.len() {
+        let (name, new) = (pairs[k], pairs[k + 1]);
+        let old = gensym(rt, "old");
+        let vf = |rt: &mut Runtime<M>| rt.vec_to_list(&[var_s, name]);
+        let getf = {
+            let v = vf(rt);
+            rt.vec_to_list(&[vget, v])
+        };
+        let_binds.push(old);
+        let_binds.push(getf);
+        let setf = {
+            let v = vf(rt);
+            rt.vec_to_list(&[vset, v, new])
+        };
+        sets.push(setf);
+        let restf = {
+            let v = vf(rt);
+            rt.vec_to_list(&[vset, v, old])
+        };
+        restores.push(restf);
+        k += 2;
+    }
+    let finally = {
+        let mut fin = vec![do_s];
+        fin.extend(restores);
+        rt.vec_to_list(&fin)
+    };
+    let body = {
+        let mut b = vec![do_s];
+        b.extend_from_slice(&items[2..]);
+        rt.vec_to_list(&b)
+    };
+    let tryf = rt.vec_to_list(&[trystar, body, nil, nil, finally]);
+    let bindvec = make_vector(rt, let_binds);
+    let mut letform = vec![let_s, bindvec];
+    letform.extend(sets);
+    letform.push(tryf);
+    rt.vec_to_list(&letform)
+}
+
 /// The test form for one catch clause: `true` for a catch-all (`:default` or a
 /// base class), else `(%num-eq (type-of exc) 'Tag)`.
 fn catch_test<M: ValueModel>(rt: &mut Runtime<M>, class: u64, exc: u64) -> u64 {
@@ -1747,6 +1817,7 @@ pub fn clj_str<M: ValueModel>(rt: &Runtime<M>, v: u64) -> String {
                     "Vector" => format!("[{}]", list_items(rt, fields[0], " ")),
                     "Set" => format!("#{{{}}}", list_items(rt, fields[0], " ")),
                     "Map" => format!("{{{}}}", map_items(rt, fields[0])),
+                    "Var" => format!("#'{}", rt.print(fields[0])),
                     _ => rt.print(v),
                 }
             }

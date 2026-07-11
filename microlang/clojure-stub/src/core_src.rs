@@ -556,8 +556,26 @@ pub const CORE: &str = r##"
 (defn atom [x] (%atom-new x))
 (defn atom? [x] (%num-eq (type-of x) 'Atom))
 (defn future? [x] (%num-eq (type-of x) 'Future))
-;; deref reads an atom (atomic load), or joins a future (blocking on its worker).
-(defn deref [x] (if (future? x) (%await x) (%atom-get x)))
+;; First-class vars. `#'x`/`(var x)` reads as `(record 'Var 'ns/x)`; a Var is a
+;; thin handle over the global's qualified SYM, so every operation dispatches
+;; through the global table by that sym (matching an ordinary reference to `x`).
+(defn var? [x] (%num-eq (type-of x) 'Var))
+(defn -var-sym [v] (field v 0))
+;; Reflectively read/rebind the var's ROOT (throws if unbound; sets on rebind).
+(defn var-get [v] (%global-get (-var-sym v)))
+(defn var-set [v val] (%global-set (-var-sym v) val))
+(defn bound? [v] (%global-bound? (-var-sym v)))
+;; alter-var-root: apply f (plus extra args) to the current root, install result.
+(defn alter-var-root [v f & args]
+  (let [s (-var-sym v)
+        nv (apply f (%global-get s) args)]
+    (%global-set s nv)
+    nv))
+;; deref reads an atom (atomic load), joins a future, or reads a var's root.
+(defn deref [x]
+  (cond (future? x) (%await x)
+        (var? x) (%global-get (-var-sym x))
+        :else (%atom-get x)))
 ;; Real OS threads: `(future body...)` runs on a worker sharing the heap.
 (defn future-call [f] (%spawn f))
 (defmacro future (& body) (list 'future-call (%cons 'fn (%cons (vector) body))))

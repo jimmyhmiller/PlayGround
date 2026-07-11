@@ -82,6 +82,8 @@ impl Compiler {
             ("%atom-new", AtomNew), ("%atom-get", AtomGet), ("%atom-set", AtomSet), ("%atom-cas", AtomCas),
             // Dynamic vars (`binding` desugars to these; refs/set! emit DynGet/DynSet).
             ("%dyn-mark", DynMark), ("%dyn-bind", DynBind), ("%dyn-unwind", DynUnwind),
+            // First-class vars: read/write a global by symbol (the Var handle's field).
+            ("%global-get", GlobalGet), ("%global-set", GlobalSet), ("%global-bound?", GlobalBound),
         ] {
             prims.insert(rt.intern(name), p);
         }
