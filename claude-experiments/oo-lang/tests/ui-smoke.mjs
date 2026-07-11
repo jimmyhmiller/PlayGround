@@ -253,6 +253,59 @@ async function main() {
       }
     }
 
+    // (I) INSPECT-MODE regression: `scry inspect` never calls vm-run, so main() never
+    // executes — every arena exists but is EMPTY. The graph's own node click is gated on
+    // liveCount (GraphPane.clickNode only drills into the live TablePane when `live > 0`;
+    // a zero-count node just opens the static NodeCard, which hides the "browse ->" button
+    // for the same reason) — so a zero-count node can never reach TablePane THROUGH the
+    // graph, by design. The List rail has no such gate: TypeRow always calls
+    // `nav.openTable(name)` regardless of live count, and TablePane polls
+    // `<Class>.instances()` every 750ms — exactly the opcode path (OP_ARENA_INSTANCES) that
+    // used to dereference a null `(vm).program` and crash the WHOLE server in inspect mode
+    // (only `vm-run` bound that pointer, and `scry inspect` intentionally never calls it).
+    // Assert browsing a zero-count type here renders the empty state, never a crash, and the
+    // server is still answering afterward.
+    const inspectProc = spawn(join(ROOT, "scry"), ["inspect", join(ROOT, "examples", "assistant.scry")],
+      { stdio: ["ignore", "pipe", "pipe"] });
+    extraProcs.push(inspectProc);
+    let inspectPort = null;
+    inspectProc.stdout.on("data", (b) => {
+      const m = /localhost:(\d+)/.exec(b.toString());
+      if (m && !inspectPort) inspectPort = +m[1];
+    });
+    for (let i = 0; i < 100 && !inspectPort; i++) await sleep(50);
+    if (!inspectPort) {
+      fails.push("inspect: `scry inspect` never printed a viewer URL");
+    } else {
+      try {
+        await send("Page.navigate", { url: `http://127.0.0.1:${inspectPort}/` });
+        await waitFor("#graph .gnode", 12000);
+        // sanity: the graph really does show Agent at liveCount 0 (main() never ran)
+        const liveAgent = await evalPage(
+          `document.querySelector('.gnode[data-name="Agent"]')?.dataset.live`);
+        if (liveAgent !== "0") fails.push(`inspect: expected Agent liveCount 0 in the graph, got ${JSON.stringify(liveAgent)}`);
+        // switch to the List rail (no liveCount gate) and browse Agent's (empty) table
+        await evalPage(`[...document.querySelectorAll('.vt-btn')].find(b=>b.textContent.trim()==='List').click()`);
+        await waitFor(".type-row");
+        await evalPage(`(()=>{const r=[...document.querySelectorAll('.type-row')].find(e=>{const n=e.querySelector('.tname');return n&&n.textContent.trim()==='Agent';});r.click();return true;})()`);
+        await waitFor(".empty, .itable tbody tr", 8000);
+        const emptyState = await evalPage(`!!document.querySelector('.empty')`);
+        if (!emptyState) fails.push("inspect: browsing the zero-count Agent table did not render the empty state (expected 0 live instances, since main() never ran)");
+        else ok("inspect mode: browsing a zero-count type renders the empty state, no crash");
+        // the whole point of this beat: the server process must survive that instances() poll
+        await sleep(300);
+        if (inspectProc.exitCode !== null) {
+          fails.push(`inspect: \`scry inspect\` process died (exit ${inspectProc.exitCode}) after browsing Agent`);
+        } else {
+          const stillUp = await fetch(`http://127.0.0.1:${inspectPort}/`).then(() => true).catch(() => false);
+          if (!stillUp) fails.push("inspect: server unreachable after browsing Agent");
+          else ok("inspect mode: server still alive and serving after the instances() poll");
+        }
+      } catch (e) {
+        fails.push("inspect-mode browse scenario failed: " + (e && e.message || e));
+      }
+    }
+
     if (fails.length) {
       console.error("FAIL ui-smoke");
       for (const f of fails) console.error("     " + f);

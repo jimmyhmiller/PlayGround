@@ -480,10 +480,30 @@
     (push-frame vt m argc)
     (run-to vt 0)))
 
-; allocate object singletons, then invoke main() on the main VMThread (registered so a
-; concurrent eval can park it too, including once it's finished and looping post-main).
+; Bind the shared VM handle to `p`. This is REQUIRED before the interpreter can execute ANY
+; opcode that touches Program state (OP_NEW, OP_LOAD_SINGLETON, OP_ARENA_AT/_INSTANCE/
+; _INSTANCES, OP_CALL_STATIC/_VIRTUAL, OP_THREAD_SPAWN — every one of these reads `(field
+; (vm) program)` directly) — even when main() never runs: `scry inspect` builds the Program
+; and serves the eval channel without calling vm-run, but an eval like `Agent.instances()`
+; still compiles down to OP_ARENA_INSTANCES and runs on the VM, so `(vm).program` must be
+; non-null before the FIRST eval, not just before main(). (Previously only `vm-run` set it,
+; so an inspect-mode eval dereferenced a null program pointer — this is the fix for
+; reflect.arena-instances's null-pointer segfault.)
+;
+; Deliberately does NOT allocate object singletons — that stays inside `vm-run` only. An
+; `object` singleton is arena-allocated (bumps live-count), and `scry inspect`'s whole
+; contract (asserted by tests/run-tests.py's inspect gate) is that EVERY type — singletons
+; included — reads liveCount 0 until main() actually runs. Binding the program pointer here
+; is side-effect-free on the heap; allocating a singleton is not, so it stays gated on
+; main() via vm-run, same as every other instance in the program.
+(defn vm-bind-program [(p (ptr Program))] (-> i64)
+  (store! (field (vm) program) p) 0)
+
+; bind the program, allocate object singletons, then invoke main() on the main VMThread
+; (registered so a concurrent eval can park it too, including once it's finished and looping
+; post-main).
 (defn vm-run [(p (ptr Program))] (-> i64)
-  (store! (field (vm) program) p)
+  (vm-bind-program p)
   (http-init)   ; libcurl global init once, on the main thread, before any thread can race
 
   (let [vt (vm-thread-main)]

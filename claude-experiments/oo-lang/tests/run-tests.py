@@ -131,6 +131,9 @@ def main():
     ip, if_ = run_inspect_test(binary, filt)
     passed += ip; failed += if_
     if if_: fails.append("inspect")
+    iip, iif_ = run_inspect_instances_test(binary, filt)
+    passed += iip; failed += iif_
+    if iif_: fails.append("inspect_instances")
     lp, lf = run_liveness_test(binary, filt)
     passed += lp; failed += lf
     if lf: fails.append("liveness")
@@ -425,6 +428,85 @@ def run_inspect_test(binary, filt):
             problems.append("app.js does not contain the graph view")
         if problems:
             print("FAIL inspect")
+            for p in problems:
+                print("     " + p)
+            return 0, 1
+        return 1, 0
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+
+
+def run_inspect_instances_test(binary, filt):
+    """Regression test for a real segfault: `scry inspect` starts the eval server but never
+    calls vm-run (main() must never execute), so `(vm).program` — the shared VM handle every
+    Program-touching opcode reads directly — was left null. `1 + 1` and `types()`/`schema()`
+    happened to work anyway (the latter two are intercepted before compiling to bytecode and
+    read the server's OWN `srv-program` global instead), but `SomeClass.instances()` compiles
+    to OP_ARENA_INSTANCES, which runs on the VM and dereferenced the null `(vm).program` ->
+    EXC_BAD_ACCESS, killing the whole server. Fixed by `vm-bind-program` (src/vm.coil), called
+    from both `vm-run` (scry run) and `scry-inspect` (src/server.coil) so the VM handle is
+    always bound before the first eval, independent of whether main() ran.
+
+    Asserts: `Agent.instances()`, `Message.instances()`, and a filtered/paginated
+    `Agent.instances(filter:, offset:, limit:)` each come back as a clean, empty list (never
+    a crash, never an error — an entity type with a never-allocated arena legitimately has 0
+    live instances), and the server is still alive and answering afterward."""
+    if filt and "inspect" not in filt and "instances" not in filt:
+        return 0, 0
+    import time, json, threading, urllib.request
+    demo = os.path.abspath(os.path.join(HERE, "..", "examples", "assistant.scry"))
+    proc = subprocess.Popen([binary, "inspect", demo], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    lines = []
+    threading.Thread(target=lambda: [lines.append(l) for l in proc.stdout], daemon=True).start()
+    port = None
+    try:
+        for _ in range(200):
+            for l in lines:
+                if "viewer: http://localhost:" in l:
+                    port = int(l.strip().split(":")[-1]); break
+            if port is not None:
+                break
+            time.sleep(0.05)
+        if port is None:
+            print("FAIL inspect_instances\n     never printed viewer URL"); return 0, 1
+
+        def ev(src):
+            body = json.dumps({"id": "R", "source": src}).encode()
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/eval", data=body,
+                                         headers={"Content-Type": "application/json"})
+            return json.loads(urllib.request.urlopen(req, timeout=15).read())
+
+        problems = []
+        time.sleep(0.3)
+        for expr, want_type in (
+            ("Agent.instances()", "Agent"),
+            ("Message.instances()", "Message"),
+            ('Agent.instances(filter: "name == \\"x\\"", offset: 0, limit: 10)', "Agent"),
+        ):
+            try:
+                r = ev(expr)
+            except Exception as e:
+                problems.append(f"`{expr}` crashed the inspect-mode server: {e}")
+                continue
+            v = r.get("value")
+            if (v is None or v.get("type") != "list" or v.get("length") != 0
+                    or v.get("elementType") != want_type or v.get("items") != []):
+                problems.append(f"`{expr}` expected an empty {want_type} list, got: {r}")
+        # the server must still be alive and answering correctly afterward
+        if not any(p.startswith("`") and "crashed" in p for p in problems):
+            try:
+                alive = ev("1 + 1")
+                if alive.get("value") != {"type": "Int", "value": 2}:
+                    problems.append(f"server not answering correctly after instances() calls: {alive}")
+            except Exception as e:
+                problems.append(f"server died after instances() calls: {e}")
+        if problems:
+            print("FAIL inspect_instances")
             for p in problems:
                 print("     " + p)
             return 0, 1

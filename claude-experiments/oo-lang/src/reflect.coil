@@ -37,9 +37,19 @@
               (load (field m name-len)) (cast (ptr i8) (load (field m name))) slot)
     (eval-panic EK_STALE buf 0 0) 0))
 
+; Is `ti` a usable, allocated entity TypeInfo? Written as NESTED ifs (never `or`/`and`):
+; Coil's `and`/`or` are eager bitwise ops on both operands (codegen.rs: build_and/build_or
+; over two already-evaluated values) — there is NO short-circuit. `(or (= ti 0) (not (load
+; (field ti is-entity))))` would evaluate its second operand even when ti is null, deref'ing
+; a null pointer. Nested ifs guarantee `ti`/`a` are only touched once known non-null.
+(defn ti-usable-entity? [(ti (ptr TypeInfo))] (-> bool)
+  (if (= (cast i64 ti) 0) false
+    (if (not (load (field ti is-entity))) false
+      (!= (cast i64 (load (field ti arena))) 0))))
+
 (defn arena-at [(p (ptr Program)) (tid i64) (slot i64) (gen i64)] (-> i64)
   (let [ti (ti-for p tid) m (mono-for tid)]
-    (if (or (= (cast i64 ti) 0) (not (load (field ti is-entity)))) (do (eval-panic0 EK_RUNTIME c"at(): not an entity type") 0)
+    (if (not (ti-usable-entity? ti)) (do (eval-panic0 EK_RUNTIME c"at(): not an entity type") 0)
       (let [a (load (field ti arena))]
         (if (or (< slot 0) (>= slot (load (field a bump-cursor)))) (do (stale-err m slot) 0)
           (let [hp (cast (ptr InstanceHeader) (arena-slot-ptr a slot))]
@@ -49,16 +59,18 @@
 
 (defn arena-instance [(p (ptr Program)) (tid i64) (slot i64)] (-> i64)
   (let [ti (ti-for p tid) m (mono-for tid)]
-    (if (or (= (cast i64 ti) 0) (not (load (field ti is-entity)))) (do (eval-panic0 EK_RUNTIME c"instance(): not an entity type") 0)
+    (if (not (ti-usable-entity? ti)) (do (eval-panic0 EK_RUNTIME c"instance(): not an entity type") 0)
       (let [a (load (field ti arena))]
         (if (or (< slot 0) (>= slot (load (field a bump-cursor)))) (do (stale-err m slot) 0)
           (let [hp (cast (ptr InstanceHeader) (arena-slot-ptr a slot))]
             (if (= (iand (load (field hp flags)) FLAG_LIVE) 0) (do (stale-err m slot) 0)
               (cast i64 hp))))))))
 
+; instances(): an entity type with a never-allocated arena (or an unknown/non-entity tid)
+; legitimately has zero instances — return an empty list, never an error, never a deref.
 (defn arena-instances [(p (ptr Program)) (tid i64) (filt (ptr StringObj)) (offset i64) (limit i64)] (-> (ptr ListObj))
   (let [ti (ti-for p tid) m (mono-for tid) out (list-new)]
-    (if (or (= (cast i64 ti) 0) (not (load (field ti is-entity)))) (do (eval-panic0 EK_RUNTIME c"instances(): not an entity type") out)
+    (if (not (ti-usable-entity? ti)) out
       (let [a (load (field ti arena)) hwm (load (field a bump-cursor)) (mut i) 0 (mut matched) 0 (mut taken) 0]
         (loop
           (if (< (load i) hwm)

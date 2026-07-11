@@ -852,6 +852,11 @@
       (let [p (build-program)]
         (do
           (store! (srv-program) p)
+          ; NOT vm-run: main() must never execute in inspect mode. But the VM's shared
+          ; program handle still has to be bound (+ singletons allocated) — every eval that
+          ; compiles to a Program-touching opcode (e.g. `Agent.instances()` -> OP_ARENA_INSTANCES)
+          ; runs on the VM and reads `(vm).program` directly, independent of whether main ran.
+          (vm-bind-program p)
           (store! (srv-viewer-dir) viewer-dir)
           (store! (srv-readonly) 0)
           (if no-viewer 0
