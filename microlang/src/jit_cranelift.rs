@@ -560,6 +560,8 @@ fn prim_tag(p: Prim) -> u32 {
         GlobalGet => 53,
         GlobalSet => 54,
         GlobalBound => 55,
+        SymName => 56,
+        SymNs => 57,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -633,6 +635,8 @@ fn prim_from_tag(tag: u32) -> Prim {
         53 => GlobalGet,
         54 => GlobalSet,
         55 => GlobalBound,
+        56 => SymName,
+        57 => SymNs,
         other => panic!("bad prim tag {other}"),
     }
 }

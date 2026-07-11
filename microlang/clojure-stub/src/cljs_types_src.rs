@@ -239,6 +239,10 @@ pub const CLJS: &str = r##"
   IMeta (-meta [x] nil))
 (defn with-meta [x m] (-with-meta x m))
 (defn meta [x] (-meta x))
+;; A Var's metadata: its :name and :ns, derived from the qualified sym it wraps.
+;; (:doc/:arglists/:macro would need a capture pass; not modelled yet.)
+(extend-type Var
+  IMeta (-meta [v] (hash-map :name (%sym-name (field v 0)) :ns (%sym-ns (field v 0)))))
 
 ;; ─────────────── PersistentArrayMap — ported from cljs/core.cljs (EPL-1.0) ─────
 ;; A small map backed by a flat [k0 v0 k1 v1 …] array with linear scan. Verbatim

@@ -1058,3 +1058,24 @@ fn unbound_var_semantics() {
         "\"caught: Unbound var: user/x\""
     );
 }
+
+#[test]
+fn var_reflection() {
+    // name / namespace split a (possibly qualified) symbol or keyword.
+    assert_eq!(run("(name (quote foo.bar/baz))"), "\"baz\"");
+    assert_eq!(run("(namespace (quote foo.bar/baz))"), "\"foo.bar\"");
+    assert_eq!(run("(name (quote xyz))"), "\"xyz\"");
+    assert_eq!(run("(name :hello)"), "\"hello\"");
+    // find-var on a fully-qualified sym; nil when unbound/absent.
+    assert_eq!(run("(def x 42) (var-get (find-var (quote user/x)))"), "42");
+    assert_eq!(run("(find-var (quote user/nope))"), "nil");
+    // resolve: an unqualified literal resolves through the current namespace.
+    assert_eq!(run("(def x 42) (var-get (resolve (quote x)))"), "42");
+    assert_eq!(run("(var? (resolve (quote reduce)))"), "true"); // clojure.core
+    assert_eq!(run("(resolve (quote definitely-not-defined))"), "nil");
+    // ns-resolve targets a named namespace.
+    assert_eq!(run("(ns geom) (def y 7) (ns app) (var-get (ns-resolve (quote geom) (quote y)))"), "7");
+    // var metadata: :name and :ns.
+    assert_eq!(run("(ns app) (def x 1) (:name (meta (var x)))"), "\"x\"");
+    assert_eq!(run("(ns app) (def x 1) (:ns (meta (var x)))"), "\"app\"");
+}

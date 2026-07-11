@@ -180,6 +180,10 @@ pub enum Prim {
     GlobalSet,
     /// `(%global-bound? 'sym)` -> whether the global currently has a value.
     GlobalBound,
+    /// `(%sym-name 'a/b)` -> the NAME part as a string (`"b"`; whole sym if no `/`).
+    SymName,
+    /// `(%sym-ns 'a/b)` -> the NAMESPACE part as a string (`"a"`), or nil if none.
+    SymNs,
 
     // ── optimizer-introduced fixnum specializations ──────────────────────────
     // These are produced ONLY by the `optimize` nanopass (never by `analyze`).

@@ -1022,6 +1022,30 @@ impl<M: ValueModel> Runtime<M> {
                 };
                 M::R::enc_bool(self.global_defined(s))
             }
+            Prim::SymName => {
+                let s = match self.decode(args[0]) {
+                    Val::Sym(s) => s,
+                    _ => panic!("%sym-name: not a symbol"),
+                };
+                let full = self.sym_name(s);
+                let name = full.rsplit_once('/').map(|(_, n)| n).unwrap_or(full).to_string();
+                let id = self.alloc(Obj::Str(name));
+                M::R::enc_ref(id)
+            }
+            Prim::SymNs => {
+                let s = match self.decode(args[0]) {
+                    Val::Sym(s) => s,
+                    _ => panic!("%sym-ns: not a symbol"),
+                };
+                let full = self.sym_name(s);
+                match full.rsplit_once('/') {
+                    Some((ns, _)) => {
+                        let id = self.alloc(Obj::Str(ns.to_string()));
+                        M::R::enc_ref(id)
+                    }
+                    None => self.enc_nil(),
+                }
+            }
             // ── atoms: real cross-thread compare-and-set ────────────────
             Prim::AtomNew => {
                 let id = self.alloc(Obj::Atom(Arc::new(AtomicU64::new(args[0]))));

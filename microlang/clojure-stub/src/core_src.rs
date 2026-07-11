@@ -134,6 +134,14 @@ pub const CORE: &str = r##"
 (defn list? [x] (%num-eq (type-of x) 'List))
 (defn string? [x] (%num-eq (type-of x) 'String))
 (defn symbol? [x] (%num-eq (type-of x) 'Symbol))
+;; `name`/`namespace` split a (possibly qualified) symbol or keyword on the last `/`.
+(defn name [x]
+  (cond (string? x) x
+        (keyword? x) (%sym-name (field x 0))
+        true (%sym-name x)))
+(defn namespace [x]
+  (cond (keyword? x) (%sym-ns (field x 0))
+        true (%sym-ns x)))
 (defn fn? [x] (%num-eq (type-of x) 'Fn))
 (defn number? [x] (%num-eq (type-of x) 'Long))
 (defn not [x] (if x false true))
@@ -561,6 +569,13 @@ pub const CORE: &str = r##"
 ;; through the global table by that sym (matching an ordinary reference to `x`).
 (defn var? [x] (%num-eq (type-of x) 'Var))
 (defn -var-sym [v] (field v 0))
+;; Reflection: `(find-var 'ns/x)` -> the Var for a FULLY-QUALIFIED sym (or nil).
+;; `resolve`/`ns-resolve` on an unqualified literal are rewritten at compile time to
+;; the qualified sym (namespace resolution is compile-time); given an already-
+;; qualified sym they are just `find-var`.
+(defn find-var [s] (if (%global-bound? s) (record 'Var s) nil))
+(defn resolve [s] (find-var s))
+(defn ns-resolve [n s] (find-var s))
 ;; Reflectively read/rebind the var's ROOT (throws if unbound; sets on rebind).
 (defn var-get [v] (%global-get (-var-sym v)))
 (defn var-set [v val] (%global-set (-var-sym v) val))

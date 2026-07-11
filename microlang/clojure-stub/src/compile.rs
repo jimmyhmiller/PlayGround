@@ -87,6 +87,8 @@ impl Compiler {
             ("%dyn-mark", DynMark), ("%dyn-bind", DynBind), ("%dyn-unwind", DynUnwind),
             // First-class vars: read/write a global by symbol (the Var handle's field).
             ("%global-get", GlobalGet), ("%global-set", GlobalSet), ("%global-bound?", GlobalBound),
+            // Split a (possibly qualified) symbol for var reflection (name/namespace).
+            ("%sym-name", SymName), ("%sym-ns", SymNs),
         ] {
             prims.insert(rt.intern(name), p);
         }
