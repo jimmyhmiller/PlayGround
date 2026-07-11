@@ -7,7 +7,7 @@
 //! they box a non-immediate category and unbox on the way out, and `allocs`
 //! counts the boxing so the micro-languages can *show* the cost.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use std::collections::{HashMap, HashSet};
 
 /// Memory ordering for the global-slot array. A global's VALUE is often a heap
@@ -181,9 +181,6 @@ pub(crate) struct Tables {
     pub(crate) methods: MethodRegistry,
     method_names: HashSet<Sym>,
     pub(crate) dispatch: Box<dyn Dispatch>,
-    /// Record type tag -> its field-name symbols, in slot order. Populated by
-    /// `deftype` (via `%register-fields`) so `(.-field x)` resolves by name.
-    field_names: HashMap<Sym, Vec<Sym>>,
 }
 
 /// State SHARED by every thread over one `Arc`. Its interior mutability is the
@@ -211,6 +208,12 @@ pub struct Shared<M: ValueModel> {
     sym_lock: Mutex<()>,
     /// Global environment: atomic slots, reserved stable base (see `global`).
     pub global_slots: Vec<AtomicU64>,
+    /// Record type tag (`Sym`) -> a leaked, immutable `Vec<Sym>` of its field
+    /// names in slot order (populated by `deftype`). Reserved stable base like
+    /// `global_slots`, so `(.-field x)` resolves LOCK-FREE: an atomic pointer load
+    /// per type, then a scan. A type's field list is write-once, so the boxed Vec
+    /// is leaked and readers deref it without synchronization.
+    field_names: Vec<AtomicPtr<Vec<Sym>>>,
     pub(crate) tables: Mutex<Tables>,
     apply_fn: AtomicU64, // Sym+1, or 0 for None
     escape_tags: AtomicU64,
@@ -279,11 +282,11 @@ impl<M: ValueModel> Runtime<M> {
             sym_ids: UnsafeCell::new(HashMap::new()),
             sym_lock: Mutex::new(()),
             global_slots: (0..0).map(|_| AtomicU64::new(GLOBAL_UNBOUND)).collect(),
+            field_names: Vec::new(),
             tables: Mutex::new(Tables {
                 methods: HashMap::new(),
                 method_names: HashSet::new(),
                 dispatch: Box::new(Megamorphic::new()),
-                field_names: HashMap::new(),
             }),
             apply_fn: AtomicU64::new(0),
             escape_tags: AtomicU64::new(0),
@@ -295,7 +298,9 @@ impl<M: ValueModel> Runtime<M> {
         // slots exist for every future symbol (index == Sym).
         let mut slots = Vec::with_capacity(TABLE_CAP);
         slots.extend((0..TABLE_CAP).map(|_| AtomicU64::new(GLOBAL_UNBOUND)));
-        let shared = Arc::new(Shared { global_slots: slots, ..shared });
+        let mut fnames = Vec::with_capacity(TABLE_CAP);
+        fnames.extend((0..TABLE_CAP).map(|_| AtomicPtr::new(std::ptr::null_mut())));
+        let shared = Arc::new(Shared { global_slots: slots, field_names: fnames, ..shared });
         let me = register_mutator(&shared);
         Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), me, _pd: PhantomData }
     }
@@ -747,7 +752,11 @@ impl<M: ValueModel> Runtime<M> {
                         _ => panic!("register-fields: field names must be symbols"),
                     })
                     .collect();
-                self.shared.tables.lock().unwrap().field_names.insert(ty, names);
+                // Leak an immutable Vec and publish its pointer atomically (Release).
+                // A prior registration for this type (rare re-deftype) is superseded;
+                // the old box leaks, which is bounded (one per type definition).
+                let boxed = Box::into_raw(Box::new(names));
+                self.shared.field_names[ty as usize].store(boxed, Ordering::Release);
                 self.enc_nil()
             }
             Prim::FieldByName => {
@@ -755,15 +764,15 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Sym(name) = self.decode(args[1]) else {
                     panic!("field-by-name: field must be a symbol");
                 };
-                let idx = {
-                    let t = self.shared.tables.lock().unwrap();
-                    let names = t.field_names.get(&ty).unwrap_or_else(|| {
-                        panic!("field access .-{} on unregistered type '{}'", self.sym_name(name), self.sym_name(ty))
-                    });
-                    names.iter().position(|&n| n == name).unwrap_or_else(|| {
-                        panic!("no field '{}' on type '{}'", self.sym_name(name), self.sym_name(ty))
-                    })
-                };
+                // Lock-free: one atomic pointer load per type, then a scan.
+                let ptr = self.shared.field_names[ty as usize].load(Ordering::Acquire);
+                if ptr.is_null() {
+                    panic!("field access .-{} on unregistered type '{}'", self.sym_name(name), self.sym_name(ty));
+                }
+                let names: &Vec<Sym> = unsafe { &*ptr };
+                let idx = names.iter().position(|&n| n == name).unwrap_or_else(|| {
+                    panic!("no field '{}' on type '{}'", self.sym_name(name), self.sym_name(ty))
+                });
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("field access on non-record");
                 };
