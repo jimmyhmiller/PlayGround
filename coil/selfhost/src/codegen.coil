@@ -178,16 +178,14 @@
       (TSlice  [el]      (cg-slice-ty cg))
       (TStruct [nm]      (cg-nominal-ty cg nm))
       (TVec    [el n]    (LLVMVectorType (basic-ty cg el) (cast i32 n)))
+      ; `externref` is a wasm reference: an addrspace(10) pointer LLVM's wasm backend
+      ; lowers to the externref value type. Opaque, scalar, never in linear memory.
+      (TExternRef [] (LLVMPointerTypeInContext ctx 10))
       (TVoid   []        (do (unimplemented "codegen/basic_ty: void reached as a value type (checker hole)") (cast (ptr i8) 0)))
       (TApp    [n a]     (do (unimplemented "codegen/basic_ty: generic type survived monomorphization") (cast (ptr i8) 0)))
       (TCode   []        (do (unimplemented "codegen/basic_ty: comptime-only Code reached codegen") (cast (ptr i8) 0))))))
 (defn cg-nominal-ty [(cg (ptr Cg)) (nm (slice u8))] (-> (ptr i8))
   (let [ctx (load (field cg ctx)) si (cg-struct-idx cg nm)]
-    ; `externref` is the built-in opaque wasm reference type: an addrspace(10)
-    ; pointer that LLVM's wasm backend lowers to the `externref` value type. It is
-    ; a scalar (cg-abi-struct? already returns false for an unregistered nominal),
-    ; lives only in wasm locals/args (never linear memory), and carries a JS value.
-    (if (str-eq nm "externref") (LLVMPointerTypeInContext ctx 10)
     (if (icmp-ge si 0)
         (let [sp (al-elem [CgStruct] (field cg structs) si)]
           (match-else (load (field sp layout))
@@ -196,7 +194,7 @@
       (let [ui (cg-sum-idx cg nm)]
         (if (icmp-ge ui 0)
             (load (field (al-elem [CgSum] (field cg sums) ui) ty))
-          (do (unimplemented "codegen/basic_ty: unknown nominal type") (cast (ptr i8) 0))))))))
+          (do (unimplemented "codegen/basic_ty: unknown nominal type") (cast (ptr i8) 0)))))))
 
 ; ---- layout helpers (src/codegen.rs:3449): conservative payload sizing for sums.
 (defn align8 [(x i64)] (-> i64) (imul (udiv (iadd x 7) 8) 8))
@@ -213,7 +211,7 @@
     (TVec   [el n]   (imul (type-bytes cg el) n))
     (TStruct [nm]    (cg-type-bytes-nominal cg nm))
     (TNever []       (do (unimplemented "codegen/type_bytes: Never has no size") 0))
-    (TCode  []       (do (unimplemented "codegen/type_bytes: Code has no size") 0))
+    (TCode  []       (do (unimplemented "codegen/type_bytes: Code has no size") 0)) (TExternRef [] (do (unimplemented "codegen/type_bytes: externref has no memory layout") 0))
     (TVoid  []       (do (unimplemented "codegen/type_bytes: void has no size") 0))
     (TApp   [n a]    8)))
 (defn cg-type-bytes-nominal [(cg (ptr Cg)) (nm (slice u8))] (-> i64)
@@ -1660,7 +1658,7 @@
       (TSlice [el]   (do (unimplemented "SysV ABI: passing a slice by value across the C boundary is not supported") 0))
       (TApp   [nm args] (do (unimplemented "SysV ABI: generic type survived to ABI classification (compiler bug)") 0))
       (TNever [] (do (unimplemented "SysV ABI: Never type has no ABI representation") 0))
-      (TCode  [] (do (unimplemented "SysV ABI: Code type has no ABI representation") 0))
+      (TCode  [] (do (unimplemented "SysV ABI: Code type has no ABI representation") 0)) (TExternRef [] (do (unimplemented "SysV ABI: externref has no SysV representation") 0))
       (TVoid  [] (do (unimplemented "SysV ABI: void is a return type only; never a field/by-value param") 0))
       ; Int, Bool, Ptr, Ref, Fn -> a single INTEGER leaf.
       (_ (let [lf (alloc-stack AbiLeaf)]

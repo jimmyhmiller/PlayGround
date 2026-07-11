@@ -272,7 +272,7 @@
 ; ---- types (src/parse.rs prim_type / int_type / parse_type) ----
 (defn type-int-bits [(t Type)] (-> i64)
   (match t (TInt [b s] b) (TFloat [_] -1) (TBool [] -1) (TVoid [] -1) (TPtr [_] -1) (TRef [_ _] -1)
-    (TStruct [_] -1) (TArray [_ _] -1) (TSlice [_] -1) (TVec [_ _] -1) (TFn [_ _ _] -1) (TApp [_ _] -1) (TNever [] -1) (TCode [] -1)))
+    (TStruct [_] -1) (TArray [_ _] -1) (TSlice [_] -1) (TVec [_ _] -1) (TFn [_ _ _] -1) (TApp [_ _] -1) (TNever [] -1) (TCode [] -1) (TExternRef [] -1)))
 (defn not-int-diag [(a (ptr Allocator)) (name (slice u8))] (-> Diag) (derr (sconcat3 a "not an int type '" name "'")))
 (defn int-type [(a (ptr Allocator)) (name (slice u8))] (-> (Result Type Diag))
   (let [n (slice-len name)]
@@ -298,7 +298,8 @@
   (if (str-eq name "f64") (Ok (TFloat 64))
   (if (str-eq name "bool") (Ok (TBool))
   (if (str-eq name "void") (Ok (TVoid))
-    (int-type a name))))))
+  (if (str-eq name "externref") (Ok (TExternRef))
+    (int-type a name)))))))
 (defn parse-types [(a (ptr Allocator)) (items (ptr (ArrayList Sexp)))] (-> (Result (ptr (ArrayList Type)) Diag))
   (try (let [(mut out) (al-new [Type] a) n (sx-len items) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break) (do (al-push! (mut out) (try! (parse-type a (sx-at items (load i))))) (store! i (iadd (load i) 1)))))

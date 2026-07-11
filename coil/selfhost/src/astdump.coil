@@ -52,7 +52,7 @@
     (TFn    [cc params ret] (do (ps w "(fn ") (dstr w cc) (wb w 32) (d-types w params) (wb w 32) (d-type w ret) (wb w 41)))
     (TApp   [name args]   (do (ps w "(app ") (dstr w name) (wb w 32) (d-types w args) (wb w 41)))
     (TNever []            (ps w "never"))
-    (TCode  []            (ps w "code"))))
+    (TCode  []            (ps w "code")) (TExternRef [] (ps w "externref"))))
 
 ; ---- enum-tag dumpers (i64 code -> string, mirrors *_tag in dump_ast.rs) ----
 (defn d-binop [(w (ptr Writer)) (op i64)] (-> i64)

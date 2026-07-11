@@ -255,6 +255,7 @@
   (let [a (load (field m a)) tg (type-tag t)]
     (if (icmp-eq tg 12) (Ok (TNever))
     (if (icmp-eq tg 13) (Ok (TCode))
+    (if (icmp-eq tg 14) (Ok (TExternRef))
     (if (icmp-eq tg 3) (Ok (TVoid))
     (if (icmp-eq tg 0) (Ok (TInt (t-int-bits t) (t-int-signed t)))
     (if (icmp-eq tg 1) (Ok (TFloat (t-int-bits t)))
@@ -270,7 +271,7 @@
                      (Ok [r] (Ok (TFn (t-fn-cc t) ps (box-type a r)))))))
     (if (icmp-eq tg 6)
         (match (subst-lookup map (type-struct-name t)) (Some [ct] (Ok ct)) (None [] (Ok (TStruct (type-struct-name t)))))
-      (resolve-ty-app m t map))))))))))))))))
+      (resolve-ty-app m t map)))))))))))))))))
 
 ; ---- resolve a sum / its variants (src/mono.rs::resolve_sum) -----------------
 (defn resolve-fields [(m (ptr MonoCtx)) (fs (ptr (ArrayList Field))) (map (ptr Subst))] (-> (Result (ptr (ArrayList Field)) Diag))

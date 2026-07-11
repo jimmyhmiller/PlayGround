@@ -157,6 +157,7 @@
 ; typename_to_type (src/check.rs:2303)
 (defn typename-to-type [(name (slice u8))] (-> Type)
   (if (str-eq name "bool") (TBool)
+    (if (str-eq name "externref") (TExternRef)
     (if (str-eq name "f32") (TFloat 32)
       (if (str-eq name "f64") (TFloat 64)
         (let [n (slice-len name)]
@@ -171,7 +172,7 @@
                                 (do (store! ok false) (break))))
                           (store! j (iadd (load j) 1)))))
                     (if (load ok) (TInt (load val) (icmp-eq c0 105)) (TStruct name)))
-                  (TStruct name)))))))))
+                  (TStruct name))))))))))
 
 ; subst_self (src/check.rs:2326)
 (defn subst-self-list [(a (ptr Allocator)) (v (ptr (ArrayList Type))) (selfp (slice u8)) (concrete (ptr Type))] (-> (ptr (ArrayList Type)))
@@ -326,8 +327,6 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 (defn validate-struct-name [(a (ptr Allocator)) (cx (ptr Cx)) (name (slice u8)) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
-  ; `externref` is a built-in opaque type (a wasm reference), not a struct/sum.
-  (if (str-eq name "externref") (Ok [i64 Diag] 0)
   (if (set-contains tps name) (Ok [i64 Diag] 0)
     (let [si (struct-find cx name)]
       (if (icmp-ne (cast i64 si) 0)
@@ -339,7 +338,7 @@
                 (let [np (al-len [(slice u8)] (load (field su type_params)))]
                   (if (icmp-eq np 0) (Ok [i64 Diag] 0)
                       (Err [i64 Diag] (derr (sconcat a (sconcat a (sconcat3 a "generic type '" name "' expects ") (i64->str a np)) " type arguments, got 0")))))
-                (Err [i64 Diag] (derr (sconcat3 a "unknown type '" name "'"))))))))))
+                (Err [i64 Diag] (derr (sconcat3 a "unknown type '" name "'")))))))))
 (defn validate-app [(a (ptr Allocator)) (cx (ptr Cx)) (name (slice u8)) (args (ptr (ArrayList Type))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (match (validate-type-list args cx tps) (Err [d] (Err [i64 Diag] d))
     (Ok [_]
@@ -356,7 +355,7 @@
   (let [a (load (field cx a))]
     (match (load t)
       (TNever [] (Ok [i64 Diag] 0))
-      (TCode  [] (Ok [i64 Diag] 0))
+      (TCode  [] (Ok [i64 Diag] 0)) (TExternRef [] (Ok [i64 Diag] 0))
       (TVoid  [] (Err [i64 Diag] (derr "'void' is only valid as a return type")))
       (TInt   [_ _] (Ok [i64 Diag] 0))
       (TFloat [_] (Ok [i64 Diag] 0))
@@ -615,6 +614,15 @@
   (let [es (load (field prog externs)) n (al-len [Extern] (load es)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
       (do (let [ep (al-elem [Extern] es (load i)) nm (load (field ep name))]
+            ; validate the signature's types up front, so an unknown type in an extern
+            ; declaration is a clean diagnostic instead of a later codegen crash.
+            (match (validate-type-list (load (field ep params)) cx (empty-strs a))
+              (Err [d] (do (store! err d) (store! failed true) 0))
+              (Ok [_] (if (type-is-void (field ep ret)) 0     ; void is valid in return position
+                        (match (validate-type (field ep ret) cx (empty-strs a))
+                          (Err [d] (do (store! err d) (store! failed true) 0))
+                          (Ok [_] 0)))))
+            (if (load failed) (break)
             (if (icmp-ne (cast i64 (sig-find cx nm)) 0)
                 (do (store! err (derr (sconcat3 a "'" nm "' is declared more than once"))) (store! failed true) (break))
                 (let [c (conv-find cx (load (field ep cc)))]
@@ -632,7 +640,7 @@
                             (store! (field sg variadic) (load (field ep variadic)))
                             (store! (field sg cc) (load (field ep cc)))
                             (store! (field sg fnptr_ok) true)
-                            (al-push! (mut (field cx sigs)) (load sg))))))))
+                            (al-push! (mut (field cx sigs)) (load sg)))))))))
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 (defn opt-type-some? [(o (ptr (Option Type)))] (-> bool) (match-else (load o) (Some [t] true) (_ false)))
@@ -2180,13 +2188,13 @@
   (let [cv (conv-find cx cc)] (and (icmp-ne (cast i64 cv) 0) (conv-is-shim cv))))
 ; a valid export-c PARAMETER type: scalars/ptr, or a C-layout struct (not a defsum).
 (defn export-param-ok [(cx (ptr Cx)) (t (ptr Type))] (-> bool)
-  (let [tg (type-tag t)]
-    (if (or (icmp-eq tg 0) (or (icmp-eq tg 1) (or (icmp-eq tg 2) (icmp-eq tg 4)))) true
+  (let [tg (type-tag t)]                               ; tg 14 = externref (a wasm reference scalar)
+    (if (or (icmp-eq tg 14) (or (icmp-eq tg 0) (or (icmp-eq tg 1) (or (icmp-eq tg 2) (icmp-eq tg 4))))) true
       (if (icmp-eq tg 6) (icmp-eq (cast i64 (sum-find cx (type-struct-name t))) 0) false))))
 ; a valid export-c RETURN type: scalars/ptr/void, or a C-layout struct/App (not a defsum).
 (defn export-ret-ok [(cx (ptr Cx)) (t (ptr Type))] (-> bool)
-  (let [tg (type-tag t)]
-    (if (or (icmp-eq tg 0) (or (icmp-eq tg 1) (or (icmp-eq tg 2) (or (icmp-eq tg 3) (icmp-eq tg 4))))) true
+  (let [tg (type-tag t)]                               ; tg 14 = externref (a wasm reference scalar)
+    (if (or (icmp-eq tg 14) (or (icmp-eq tg 0) (or (icmp-eq tg 1) (or (icmp-eq tg 2) (or (icmp-eq tg 3) (icmp-eq tg 4)))))) true
       (if (or (icmp-eq tg 6) (icmp-eq tg 11))
           (icmp-eq (cast i64 (sum-find cx (if (icmp-eq tg 6) (type-struct-name t) (t-app-name t)))) 0) false))))
 ; the default C symbol: bare name (module dropped) with `-` -> `_`.

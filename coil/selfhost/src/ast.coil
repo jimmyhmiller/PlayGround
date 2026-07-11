@@ -26,7 +26,8 @@
   (TFn     [(cc (slice u8)) (params (ptr (ArrayList Type))) (ret (ptr Type))])
   (TApp    [(name (slice u8)) (args (ptr (ArrayList Type)))])
   (TNever  [])
-  (TCode   []))
+  (TCode   [])
+  (TExternRef []))               ; wasm `externref`: an opaque, GC-managed host reference (last: keeps discriminants stable)
 
 ; A function parameter (name + type).
 (defstruct Param [(name (slice u8)) (ty Type)])

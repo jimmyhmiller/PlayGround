@@ -160,7 +160,7 @@
           (if (icmp-ge (g-sum-idx g nm) 0) 8
             (cga-fail2 "unknown nominal type: " nm)))))
     (TApp [_ _] (cga-fail "TApp reached cga64 (mono bug)"))
-    (TCode [] (cga-fail "TCode reached cga64 (mono bug)"))))
+    (TCode [] (cga-fail "TCode reached cga64 (mono bug)")) (TExternRef [] (cga-fail "TCode reached cga64 (mono bug)"))))
 
 (defn ty-size [(g (ptr Cga)) (t (ptr Type))] (-> i64)
   (match (load t)
@@ -184,7 +184,7 @@
                 (iadd 8 (imul 8 (load (field (al-at [GSum] (field g sums) su) words))))
               (cga-fail2 "unknown nominal type: " nm))))))
     (TApp [_ _] (cga-fail "TApp reached cga64 (mono bug)"))
-    (TCode [] (cga-fail "TCode reached cga64 (mono bug)"))))
+    (TCode [] (cga-fail "TCode reached cga64 (mono bug)")) (TExternRef [] (cga-fail "TCode reached cga64 (mono bug)"))))
 
 ; field byte offset within struct `si` (by field index).
 (defn g-field-off [(g (ptr Cga)) (si i64) (fi i64)] (-> i64)
@@ -214,7 +214,7 @@
     (TStruct [nm] (g-type-bytes-nominal g nm))
     (TVoid [] (cga-fail "g-type-bytes void"))
     (TApp [_ _] (cga-fail "g-type-bytes TApp"))
-    (TCode [] (cga-fail "g-type-bytes TCode"))))
+    (TCode [] (cga-fail "g-type-bytes TCode")) (TExternRef [] (cga-fail "g-type-bytes TCode"))))
 (defn g-type-bytes-nominal [(g (ptr Cga)) (nm (slice u8))] (-> i64)
   (let [si (g-struct-idx g nm)]
     (if (icmp-ge si 0)

@@ -212,7 +212,7 @@
 (defn type-tag [(t (ptr Type))] (-> i64)
   (match (load t) (TInt [_ _] 0) (TFloat [_] 1) (TBool [] 2) (TVoid [] 3) (TPtr [_] 4) (TRef [_ _] 5)
     (TStruct [_] 6) (TArray [_ _] 7) (TSlice [_] 8) (TVec [_ _] 9) (TFn [_ _ _] 10) (TApp [_ _] 11)
-    (TNever [] 12) (TCode [] 13)))
+    (TNever [] 12) (TCode [] 13) (TExternRef [] 14)))
 (defn t-inner [(t (ptr Type))] (-> (ptr Type))
   (match (load t) (TPtr [i] i) (TRef [_ i] i) (TArray [i _] i) (TSlice [i] i) (TVec [i _] i)
     (TInt [_ _] (do (loader-abort "t-inner: not a wrapper type") (box-type (malloc-allocator) (TVoid))))
@@ -223,7 +223,7 @@
     (TFn [_ _ _] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid))))
     (TApp [_ _] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid))))
     (TNever [] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid))))
-    (TCode [] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid))))))
+    (TCode [] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid)))) (TExternRef [] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid))))))
 (defn type-struct-name [(t (ptr Type))] (-> (slice u8))
   (match (load t) (TStruct [n] n)
     (TInt [_ _] (do (loader-abort "type-struct-name: not a struct") ""))
@@ -232,15 +232,15 @@
     (TRef [_ _] (do (loader-abort "type-struct-name") "")) (TArray [_ _] (do (loader-abort "type-struct-name") ""))
     (TSlice [_] (do (loader-abort "type-struct-name") "")) (TVec [_ _] (do (loader-abort "type-struct-name") ""))
     (TFn [_ _ _] (do (loader-abort "type-struct-name") "")) (TApp [_ _] (do (loader-abort "type-struct-name") ""))
-    (TNever [] (do (loader-abort "type-struct-name") "")) (TCode [] (do (loader-abort "type-struct-name") ""))))
-(defn t-int-bits [(t (ptr Type))] (-> i64) (match (load t) (TInt [b _] b) (TFloat [b] b) (TBool [] 0) (TVoid [] 0) (TPtr [_] 0) (TRef [_ _] 0) (TStruct [_] 0) (TArray [_ _] 0) (TSlice [_] 0) (TVec [_ _] 0) (TFn [_ _ _] 0) (TApp [_ _] 0) (TNever [] 0) (TCode [] 0)))
-(defn t-int-signed [(t (ptr Type))] (-> bool) (match (load t) (TInt [_ s] s) (TFloat [_] false) (TBool [] false) (TVoid [] false) (TPtr [_] false) (TRef [_ _] false) (TStruct [_] false) (TArray [_ _] false) (TSlice [_] false) (TVec [_ _] false) (TFn [_ _ _] false) (TApp [_ _] false) (TNever [] false) (TCode [] false)))
-(defn t-ref-mut [(t (ptr Type))] (-> bool) (match (load t) (TRef [m _] m) (TInt [_ _] false) (TFloat [_] false) (TBool [] false) (TVoid [] false) (TPtr [_] false) (TStruct [_] false) (TArray [_ _] false) (TSlice [_] false) (TVec [_ _] false) (TFn [_ _ _] false) (TApp [_ _] false) (TNever [] false) (TCode [] false)))
-(defn t-arrn [(t (ptr Type))] (-> i64) (match (load t) (TArray [_ n] n) (TVec [_ n] n) (TInt [_ _] 0) (TFloat [_] 0) (TBool [] 0) (TVoid [] 0) (TPtr [_] 0) (TRef [_ _] 0) (TStruct [_] 0) (TSlice [_] 0) (TFn [_ _ _] 0) (TApp [_ _] 0) (TNever [] 0) (TCode [] 0)))
-(defn t-fn-cc [(t (ptr Type))] (-> (slice u8)) (match (load t) (TFn [cc _ _] cc) (TInt [_ _] "") (TFloat [_] "") (TBool [] "") (TVoid [] "") (TPtr [_] "") (TRef [_ _] "") (TStruct [_] "") (TArray [_ _] "") (TSlice [_] "") (TVec [_ _] "") (TApp [_ _] "") (TNever [] "") (TCode [] "")))
-(defn t-fn-params [(t (ptr Type))] (-> (ptr (ArrayList Type))) (match (load t) (TFn [_ p _] p) (TApp [_ args] args) (TInt [_ _] (box-items-type (malloc-allocator))) (TFloat [_] (box-items-type (malloc-allocator))) (TBool [] (box-items-type (malloc-allocator))) (TVoid [] (box-items-type (malloc-allocator))) (TPtr [_] (box-items-type (malloc-allocator))) (TRef [_ _] (box-items-type (malloc-allocator))) (TStruct [_] (box-items-type (malloc-allocator))) (TArray [_ _] (box-items-type (malloc-allocator))) (TSlice [_] (box-items-type (malloc-allocator))) (TVec [_ _] (box-items-type (malloc-allocator))) (TNever [] (box-items-type (malloc-allocator))) (TCode [] (box-items-type (malloc-allocator)))))
-(defn t-fn-ret [(t (ptr Type))] (-> (ptr Type)) (match (load t) (TFn [_ _ r] r) (TInt [_ _] (box-type (malloc-allocator) (TVoid))) (TFloat [_] (box-type (malloc-allocator) (TVoid))) (TBool [] (box-type (malloc-allocator) (TVoid))) (TVoid [] (box-type (malloc-allocator) (TVoid))) (TPtr [_] (box-type (malloc-allocator) (TVoid))) (TRef [_ _] (box-type (malloc-allocator) (TVoid))) (TStruct [_] (box-type (malloc-allocator) (TVoid))) (TArray [_ _] (box-type (malloc-allocator) (TVoid))) (TSlice [_] (box-type (malloc-allocator) (TVoid))) (TVec [_ _] (box-type (malloc-allocator) (TVoid))) (TApp [_ _] (box-type (malloc-allocator) (TVoid))) (TNever [] (box-type (malloc-allocator) (TVoid))) (TCode [] (box-type (malloc-allocator) (TVoid)))))
-(defn t-app-name [(t (ptr Type))] (-> (slice u8)) (match (load t) (TApp [n _] n) (TInt [_ _] "") (TFloat [_] "") (TBool [] "") (TVoid [] "") (TPtr [_] "") (TRef [_ _] "") (TStruct [_] "") (TArray [_ _] "") (TSlice [_] "") (TVec [_ _] "") (TFn [_ _ _] "") (TNever [] "") (TCode [] "")))
+    (TNever [] (do (loader-abort "type-struct-name") "")) (TCode [] (do (loader-abort "type-struct-name") "")) (TExternRef [] (do (loader-abort "type-struct-name") ""))))
+(defn t-int-bits [(t (ptr Type))] (-> i64) (match (load t) (TInt [b _] b) (TFloat [b] b) (TBool [] 0) (TVoid [] 0) (TPtr [_] 0) (TRef [_ _] 0) (TStruct [_] 0) (TArray [_ _] 0) (TSlice [_] 0) (TVec [_ _] 0) (TFn [_ _ _] 0) (TApp [_ _] 0) (TNever [] 0) (TCode [] 0) (TExternRef [] 0)))
+(defn t-int-signed [(t (ptr Type))] (-> bool) (match (load t) (TInt [_ s] s) (TFloat [_] false) (TBool [] false) (TVoid [] false) (TPtr [_] false) (TRef [_ _] false) (TStruct [_] false) (TArray [_ _] false) (TSlice [_] false) (TVec [_ _] false) (TFn [_ _ _] false) (TApp [_ _] false) (TNever [] false) (TCode [] false) (TExternRef [] false)))
+(defn t-ref-mut [(t (ptr Type))] (-> bool) (match (load t) (TRef [m _] m) (TInt [_ _] false) (TFloat [_] false) (TBool [] false) (TVoid [] false) (TPtr [_] false) (TStruct [_] false) (TArray [_ _] false) (TSlice [_] false) (TVec [_ _] false) (TFn [_ _ _] false) (TApp [_ _] false) (TNever [] false) (TCode [] false) (TExternRef [] false)))
+(defn t-arrn [(t (ptr Type))] (-> i64) (match (load t) (TArray [_ n] n) (TVec [_ n] n) (TInt [_ _] 0) (TFloat [_] 0) (TBool [] 0) (TVoid [] 0) (TPtr [_] 0) (TRef [_ _] 0) (TStruct [_] 0) (TSlice [_] 0) (TFn [_ _ _] 0) (TApp [_ _] 0) (TNever [] 0) (TCode [] 0) (TExternRef [] 0)))
+(defn t-fn-cc [(t (ptr Type))] (-> (slice u8)) (match (load t) (TFn [cc _ _] cc) (TInt [_ _] "") (TFloat [_] "") (TBool [] "") (TVoid [] "") (TPtr [_] "") (TRef [_ _] "") (TStruct [_] "") (TArray [_ _] "") (TSlice [_] "") (TVec [_ _] "") (TApp [_ _] "") (TNever [] "") (TCode [] "") (TExternRef [] "")))
+(defn t-fn-params [(t (ptr Type))] (-> (ptr (ArrayList Type))) (match (load t) (TFn [_ p _] p) (TApp [_ args] args) (TInt [_ _] (box-items-type (malloc-allocator))) (TFloat [_] (box-items-type (malloc-allocator))) (TBool [] (box-items-type (malloc-allocator))) (TVoid [] (box-items-type (malloc-allocator))) (TPtr [_] (box-items-type (malloc-allocator))) (TRef [_ _] (box-items-type (malloc-allocator))) (TStruct [_] (box-items-type (malloc-allocator))) (TArray [_ _] (box-items-type (malloc-allocator))) (TSlice [_] (box-items-type (malloc-allocator))) (TVec [_ _] (box-items-type (malloc-allocator))) (TNever [] (box-items-type (malloc-allocator))) (TCode [] (box-items-type (malloc-allocator))) (TExternRef [] (box-items-type (malloc-allocator)))))
+(defn t-fn-ret [(t (ptr Type))] (-> (ptr Type)) (match (load t) (TFn [_ _ r] r) (TInt [_ _] (box-type (malloc-allocator) (TVoid))) (TFloat [_] (box-type (malloc-allocator) (TVoid))) (TBool [] (box-type (malloc-allocator) (TVoid))) (TVoid [] (box-type (malloc-allocator) (TVoid))) (TPtr [_] (box-type (malloc-allocator) (TVoid))) (TRef [_ _] (box-type (malloc-allocator) (TVoid))) (TStruct [_] (box-type (malloc-allocator) (TVoid))) (TArray [_ _] (box-type (malloc-allocator) (TVoid))) (TSlice [_] (box-type (malloc-allocator) (TVoid))) (TVec [_ _] (box-type (malloc-allocator) (TVoid))) (TApp [_ _] (box-type (malloc-allocator) (TVoid))) (TNever [] (box-type (malloc-allocator) (TVoid))) (TCode [] (box-type (malloc-allocator) (TVoid))) (TExternRef [] (box-type (malloc-allocator) (TVoid)))))
+(defn t-app-name [(t (ptr Type))] (-> (slice u8)) (match (load t) (TApp [n _] n) (TInt [_ _] "") (TFloat [_] "") (TBool [] "") (TVoid [] "") (TPtr [_] "") (TRef [_ _] "") (TStruct [_] "") (TArray [_ _] "") (TSlice [_] "") (TVec [_ _] "") (TFn [_ _ _] "") (TNever [] "") (TCode [] "") (TExternRef [] "")))
 (defn box-items-type [(a (ptr Allocator))] (-> (ptr (ArrayList Type)))
   (let [bp (unwrap-ptr [(ArrayList Type)] (create [(ArrayList Type)] a))] (store! bp (al-new [Type] a)) bp))
 
@@ -290,6 +290,7 @@
 (defn ty-str [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
   (let [tg (type-tag t)]
     (if (icmp-eq tg 12) "!"
+    (if (icmp-eq tg 14) "externref"
     (if (icmp-eq tg 13) "code"
     (if (icmp-eq tg 3) "void"
     (if (icmp-eq tg 0) (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t)))
@@ -302,7 +303,7 @@
     (if (icmp-eq tg 8) (sconcat3 a "(slice " (ty-str a (t-inner t)) ")")
     (if (icmp-eq tg 9) (sconcat3 a (sconcat3 a "(vec " (ty-str a (t-inner t)) " ") (i64->str a (t-arrn t)) ")")
     (if (icmp-eq tg 10) (sconcat3 a (sconcat3 a (sconcat3 a "(fnptr " (t-fn-cc t) " [") (ty-str-join a (t-fn-params t)) "] ") (ty-str a (t-fn-ret t)) ")")
-    (sconcat3 a (sconcat3 a "(" (t-app-name t) " ") (ty-str-join a (t-fn-params t)) ")"))))))))))))))))
+    (sconcat3 a (sconcat3 a "(" (t-app-name t) " ") (ty-str-join a (t-fn-params t)) ")")))))))))))))))))
 
 ; ---- qualify a Type in place (src/resolve.rs::qualify_type) ----------------
 (defn qualify-type-list [(c (ptr Ctx)) (lst (ptr (ArrayList Type))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
@@ -317,7 +318,7 @@
   (let [a (load (field c a))]
     (match (load typ)
       (TNever [] (Ok [i64 Diag] 0))
-      (TCode  [] (Ok [i64 Diag] 0))
+      (TCode  [] (Ok [i64 Diag] 0)) (TExternRef [] (Ok [i64 Diag] 0))
       (TBool  [] (Ok [i64 Diag] 0))
       (TVoid  [] (Ok [i64 Diag] 0))
       (TInt   [_ _] (Ok [i64 Diag] 0))
