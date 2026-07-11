@@ -314,9 +314,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 }
                 let argv: Vec<u64> = (0..args.len()).map(|i| rt.root_get(base + i)).collect();
                 rt.truncate_roots(base);
-                let ty = rt
-                    .type_of(argv[0])
-                    .unwrap_or_else(|| panic!("dispatch: receiver is not a record"));
+                let ty = rt.type_tag(argv[0]);
                 let imp = rt.resolve_method(*site, *method, ty).unwrap_or_else(|| {
                     panic!(
                         "no method '{}' for type '{}'",

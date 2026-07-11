@@ -801,31 +801,7 @@ impl<M: ValueModel> Runtime<M> {
                 M::R::enc_ref(id)
             }
             Prim::TypeOf => {
-                // A record reports its own type; everything else a built-in tag.
-                let name = match self.decode(args[0]) {
-                    Val::Int(_) => "Long",
-                    Val::Float(_) => "Double",
-                    Val::Bool(_) => "Boolean",
-                    Val::Nil => "nil",
-                    Val::Sym(_) => "Symbol",
-                    Val::Ref(id) => match &self.heap()[id as usize] {
-                        Obj::Record { type_id, .. } => {
-                            let s = *type_id;
-                            return M::R::enc_sym(s);
-                        }
-                        Obj::Cons { .. } => "List",
-                        Obj::Vector(_) => "Vector",
-                        Obj::Str(_) => "String",
-                        Obj::Char(_) => "Char",
-                        Obj::Closure { .. } => "Fn",
-                        Obj::BigInt(_) | Obj::HugeInt(_) => "Long",
-                        Obj::BoxFloat(_) => "Double",
-                        Obj::Atom(_) => "Atom",
-                        Obj::Future(_) => "Future",
-                        _ => "Object",
-                    },
-                };
-                let s = self.intern(name);
+                let s = self.type_tag(args[0]);
                 M::R::enc_sym(s)
             }
             Prim::Throw => {
@@ -928,6 +904,35 @@ impl<M: ValueModel> Runtime<M> {
             }
         }
         None
+    }
+
+    /// The type TAG of ANY value as an interned symbol: a record's own `type_id`,
+    /// or the built-in category tag (`List`/`Vector`/`String`/`Long`/`nil`/…).
+    /// This is the general dispatch key (unlike `type_of`, which is records-only),
+    /// so protocol/method dispatch can target primitives and built-in containers —
+    /// exactly what an in-language collection library needs.
+    pub fn type_tag(&self, bits: u64) -> Sym {
+        let name = match self.decode(bits) {
+            Val::Int(_) => "Long",
+            Val::Float(_) => "Double",
+            Val::Bool(_) => "Boolean",
+            Val::Nil => "nil",
+            Val::Sym(_) => "Symbol",
+            Val::Ref(id) => match &self.heap()[id as usize] {
+                Obj::Record { type_id, .. } => return *type_id,
+                Obj::Cons { .. } => "List",
+                Obj::Vector(_) => "Vector",
+                Obj::Str(_) => "String",
+                Obj::Char(_) => "Char",
+                Obj::Closure { .. } => "Fn",
+                Obj::BigInt(_) | Obj::HugeInt(_) => "Long",
+                Obj::BoxFloat(_) => "Double",
+                Obj::Atom(_) => "Atom",
+                Obj::Future(_) => "Future",
+                _ => "Object",
+            },
+        };
+        self.intern(name)
     }
     pub fn register_method(&self, name: Sym, ty: Sym, imp: u64) {
         let mut t = self.shared.tables.lock().unwrap();

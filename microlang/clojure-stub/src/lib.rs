@@ -467,7 +467,13 @@ fn desugar_defprotocol<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
 /// symbols) are grouping only, and skipped; method impls are lists.
 fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
     let items = rt.list_to_vec(form);
-    let ty = items[1];
+    // `(extend-type nil …)`: `nil` reads as the value Nil, but `type-of nil`
+    // reports the tag symbol `nil` — so extend against that symbol.
+    let ty = if matches!(rt.decode(items[1]), Val::Nil) {
+        sym(rt, "nil")
+    } else {
+        items[1]
+    };
     let dok = sym(rt, "do");
     let mut out = vec![dok];
     for &item in &items[2..] {
