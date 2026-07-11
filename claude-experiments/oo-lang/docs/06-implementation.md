@@ -1,5 +1,90 @@
 # 06 — Implementation (living doc)
 
+# Phase F1 — functions & execution: the `trace(<expr>)` op + the Functions view
+
+The Map visualizes **data** (live entity instances). F1 adds the **computation** dimension: a
+`trace(<expr>)` runtime op that runs a call with per-call instrumentation and returns its **call
+tree**, plus a bespoke recursion-tree renderer — `trace(fib(6))` shows the recursion unfolding.
+
+## The call recorder (`src/trace.coil`)
+A single process-global `TraceRec` singleton + a global `trace-flag` (an `i64`). The recorder is
+**inert unless the flag is 1**, which is set only while a `trace()` eval runs. Data:
+- `nodes`: a flat `TraceNode[]` (cap `TRACE_NODE_CAP` = 20000) recorded in **DFS pre-order** — each
+  node carries `{name, mi (callee MethodInfo), depth, parent index, args snapshot, retval, has-ret}`.
+- aggregates that stay **exact even past the node cap**: `total-calls`, `max-depth`, `truncated`,
+  and per-callee counts (`fn-mis`/`fn-counts`, aggregated by MethodInfo identity, so fib's 25 calls
+  collapse to one row).
+- `open`: a stack of open node indices (or `-1` for a truncated call) used to match returns to calls.
+
+Two hooks, both O(1): `trace-enter(mi, argc, argbase)` bumps the aggregates, and — if under the node
+cap — materializes a node parented at the currently-open call, snapshotting up to 8 arg slots from
+the value stack; it always pushes the open stack + bumps depth so exits stay matched. `trace-exit(v)`
+closes the innermost open call, attaching its return slot. Past the cap it stops materializing nodes
+(sets `truncated`) but keeps counting and keeps the open stack balanced — `trace(fib(20))` returns
+`totalCalls=21891, truncated=true` with a bounded 20000-node tree, never hangs/OOMs. Call depth is
+bounded by the VM's `FRAMES_MAX` (256), so the open stack (cap 1024) never fills.
+
+## Zero-cost when off (`src/vm.coil`)
+The dispatch loop gains **one guarded call each** at `OP_CALL_STATIC`, `OP_CALL_VIRTUAL` (after
+`push-frame`, reading the new frame's base for the arg pointer) and `OP_RETURN`:
+`(if (= (load (trace-flag)) 1) (trace-enter …) 0)` / `(trace-exit res)`. When untraced the cost is a
+single global load + compare-to-1 branch — no call, no allocation. Measured: `fib(32)` (~3.5M calls)
+runs in 0.22s untraced, unchanged.
+
+## Arg/return typing (`MethodInfo` carries its source node)
+Bytecode values are untagged, so to serialize args/results with the right type the tracer needs the
+callee's signature. `MethodInfo` (`bytecode.coil`) gained `src-node`/`src-ctxt` (opaque `(ptr i8)` to
+avoid an ast/types import cycle; cast back to `(ptr Node)`/`(ptr Decl)`), set by `compile-method`. The
+serializer resolves each param type via `resolve-type(param-type-node(...), ctxt)`; the receiver
+(`self`, arg0 of a method call) renders as a collapsed entity ref; the return type via `fn-ret-node`.
+Ints/Strings/Bools/Floats/enums/entities all go through the existing `serialize-value`.
+
+## `trace(<expr>)` (`src/server.coil`)
+Registered in `try-reflection` alongside `types()/graph()/…`, but unlike them it has an **argument
+that must actually run**. `eval-trace` wraps the arg expression in a one-statement block, typechecks +
+compiles it on the **normal eval path** (so ANY expression works: `fib(6)`, `Agent.at(0,0).step("hi")`,
+…), then `trace-enable → vm-eval-invoke → trace-finish → serialize-trace → disable`. A type error is a
+clean rejection; a runtime error longjmps to `eval-core`, which **always** calls `trace-disable` after
+the setjmp block, so the recorder can never leak armed into the next (untraced) eval.
+
+**Payload** (the eval `value`):
+```
+{ "type":"Trace",
+  "value": <serialize-value of the expression's result>,
+  "stats": { "totalCalls":N, "maxDepth":D, "nodeCount":M, "truncated":bool, "elapsedMs":T,
+             "perFn":[{"fn":"fib","calls":25}, ...] },
+  "nodes": [ {"i":0,"parent":-1,"depth":0,"fn":"fib","args":[<val>...],
+              "result":<val>,"hasResult":true}, ... ] }   // DFS pre-order; client builds the tree by parent
+```
+
+## The Functions view (`viewer/app.js`, `viewer/style.css`)
+A third top-level mode next to Map/List (`TopBar` button; `App` renders `FunctionsView`). You type an
+expression (default `fib(6)`, plus quick chips), it evals `trace(<expr>)` (one-shot; re-traces on
+submit) and renders: a **stats strip** (`fib(6) = 8`, total calls, max depth, function count, a per-fn
+call-count bar, a truncation tile) and a **bespoke collapsible call tree** — each node `fn(args) =
+result` reusing `ValueView`, indented by nesting with ▼/▶ toggles; large traces start collapsed below
+depth 1. The recursion structure of fib is immediately legible. Screenshot: `docs/f1-functions-trace.png`.
+
+## Example + tests
+- `examples/functions.scry`: `fib`/`fact`/`gcd`/`ack` + a `main` that runs them (so `scry run` serves
+  the viewer for live tracing).
+- Goldens `tests/eval/80..83`: `trace(fib(6))` → value 8, `totalCalls:25`, root `fib(6)` with children
+  `fib(5)`/`fib(4)`; `trace(fib(20))` → `totalCalls:21891, truncated:true, nodeCount:20000`; a method
+  trace (self renders as a ref); and error-reset (`trace(fib(nope))` clean error, then a normal eval
+  still works). `ui-smoke.mjs` gained a Functions beat: switch mode, trace, assert the tree + stats.
+
+## Friction / notes
+- **React `style` must be an object, not a string** in the htm+React viewer — `style=${{width:…}}`,
+  not `style=${`width:…`}` (a template-string `style` throws React error #62, which the ErrorBoundary
+  swallows into "the viewer hit a rendering error"). Cost a debug cycle.
+- **`MethodInfo` couldn't hold `(ptr Node)` directly** — `bytecode.coil` can't import `ast`/`types`
+  without a cycle, so the source node/ctxt are stored opaquely and cast back by the serializer.
+- **"Functions speak to their own visualization" (future).** F1 is generic (any call tree). The next
+  layer is a *per-function view construct* — the compute analogue of `view … for T { … }`: e.g.
+  `trace-view fib { as: tree; highlight: n; collapse-when: depth > 6 }`, or letting a function declare
+  a custom frame renderer (show accumulators, memo hits, a recurrence lattice). The payload already
+  carries everything a bespoke renderer would need; only the declaration + dispatch are missing.
+
 Phase 1 is the **front end**: lexer, AST, recursive-descent parser, and the
 `scry parse-dump` CLI. **Phase 2 is the static typechecker** (`src/types.coil`,
 `src/typecheck.coil`, `scry check`), a nominal two-pass checker over the Phase 1
