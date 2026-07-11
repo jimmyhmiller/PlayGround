@@ -451,6 +451,80 @@ fn control_macros() {
 }
 
 #[test]
+fn anon_fn_literals() {
+    // `#(...)` with %/%1/%2 and %& rest.
+    assert_eq!(run("(map #(* % %) [1 2 3 4])"), "(1 4 9 16)");
+    assert_eq!(run("(#(+ %1 %2) 3 4)"), "7");
+    assert_eq!(run("(map #(+ %1 %2) [1 2 3] [10 20 30])"), "(11 22 33)");
+    assert_eq!(run("(#(count %&) 1 2 3 4)"), "4");
+    assert_eq!(run("(filter #(> % 2) [1 2 3 4])"), "(3 4)");
+    // Nested data inside the body is scanned for params.
+    assert_eq!(run("(#(vector % [%1 :x]) 9)"), "[9 [9 :x]]");
+}
+
+#[test]
+fn for_comprehension() {
+    assert_eq!(run("(for [x [1 2 3]] (* x x))"), "(1 4 9)");
+    assert_eq!(run("(for [x [1 2] y [10 20]] (+ x y))"), "(11 21 12 22)");
+    assert_eq!(run("(for [x (range 10) :when (even? x)] x)"), "(0 2 4 6 8)");
+    assert_eq!(run("(for [x (range 100) :while (< x 5)] x)"), "(0 1 2 3 4)");
+    // :let in scope for a following :when.
+    assert_eq!(run("(for [x [1 2 3] :let [y (* x 10)] :when (> y 10)] y)"), "(20 30)");
+    // for is lazy: pull a finite prefix from an infinite source.
+    assert_eq!(run("(take 5 (for [x (range)] (* x x)))"), "(0 1 4 9 16)");
+    // :while nested — stops only the inner binding.
+    assert_eq!(run("(for [x [1 2] y (range 10) :while (< y 2)] [x y])"), "([1 0] [1 1] [2 0] [2 1])");
+}
+
+#[test]
+fn seq_breadth() {
+    assert_eq!(run("(mapcat (fn [x] [x x]) [1 2 3])"), "(1 1 2 2 3 3)");
+    assert_eq!(run("(map + [1 2 3] [10 20 30] [100 200 300])"), "(111 222 333)");
+    assert_eq!(run("(interpose 0 [1 2 3])"), "(1 0 2 0 3)");
+    assert_eq!(run("(interleave [1 2 3] [:a :b :c])"), "(1 :a 2 :b 3 :c)");
+    assert_eq!(run("(distinct [1 1 2 3 3 3 1])"), "(1 2 3)");
+    assert_eq!(run("(dedupe [1 1 2 2 2 3 1])"), "(1 2 3 1)");
+    assert_eq!(run("(flatten [1 [2 [3 [4]]]])"), "(1 2 3 4)");
+    assert_eq!(run("(partition 2 [1 2 3 4 5])"), "((1 2) (3 4))");
+    assert_eq!(run("(partition 2 3 (range 10))"), "((0 1) (3 4) (6 7))");
+    assert_eq!(run("(partition-all 2 [1 2 3 4 5])"), "((1 2) (3 4) (5))");
+    assert_eq!(run("(partition-by even? [1 1 2 4 3 5 6])"), "((1 1) (2 4) (3 5) (6))");
+    assert_eq!(run("(take-nth 2 (range 10))"), "(0 2 4 6 8)");
+    assert_eq!(run("(reductions + [1 2 3 4])"), "(1 3 6 10)");
+    assert_eq!(run("(keep-indexed (fn [i x] (if (even? i) x nil)) [:a :b :c :d])"), "(:a :c)");
+    assert_eq!(run("(sort [3 1 2 5 4])"), "(1 2 3 4 5)");
+    assert_eq!(run("(sort-by (fn [x] (- 0 x)) [3 1 2])"), "(3 2 1)");
+    assert_eq!(run("(reduce + [1 2 3 4])"), "10");
+    assert_eq!(run("((juxt first last count) [1 2 3 4])"), "[1 4 4]");
+    assert_eq!(run("(peek [1 2 3])"), "3");
+    assert_eq!(run("(pop [1 2 3])"), "[1 2]");
+}
+
+#[test]
+fn map_breadth() {
+    assert_eq!(run("(group-by even? (range 6))"), "{false [1 3 5], true [0 2 4]}");
+    assert_eq!(run("(frequencies [:a :b :a :a :b])"), "{:b 2, :a 3}");
+    assert_eq!(run("(zipmap [:a :b] [1 2])"), "{:b 2, :a 1}");
+    assert_eq!(run("(merge {:a 1} {:b 2} {:a 9})"), "{:a 9, :b 2}");
+    assert_eq!(run("(merge-with + {:a 1 :b 2} {:a 10})"), "{:a 11, :b 2}");
+    assert_eq!(run("(select-keys {:a 1 :b 2 :c 3} [:a :c])"), "{:c 3, :a 1}");
+    assert_eq!(run("(update-in {:a {:b 1}} [:a :b] inc)"), "{:a {:b 2}}");
+}
+
+#[test]
+fn extra_threading_macros() {
+    assert_eq!(run("(cond-> 1 true inc false inc (< 0 5) (+ 10))"), "12");
+    assert_eq!(run("(cond->> [1 2 3] true (map inc) true reverse)"), "(4 3 2)");
+    assert_eq!(run("(some-> {:a {:b 5}} :a :b inc)"), "6");
+    assert_eq!(run("(some-> {:a nil} :a :b inc)"), "nil");
+    assert_eq!(run("(some->> [1 2 3] (map inc) (reduce +))"), "9");
+    assert_eq!(run("(as-> 5 x (+ x 1) (* x 2))"), "12");
+    assert_eq!(run("(condp = 2 1 :one 2 :two :default)"), ":two");
+    assert_eq!(run("(condp = 9 1 :one 2 :two :default)"), ":default");
+    assert_eq!(run("(let [a (atom [])] (doto a (swap! conj 1) (swap! conj 2)) @a)"), "[1 2]");
+}
+
+#[test]
 fn lazy_sequences() {
     // Infinite range, consumed lazily.
     assert_eq!(run("(take 5 (range))"), "(0 1 2 3 4)");

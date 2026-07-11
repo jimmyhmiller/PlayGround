@@ -37,6 +37,7 @@ enum Tok {
     Open(char),  // ( [ {
     Close(char), // ) ] }
     HashBrace,   // #{
+    HashParen,   // #(  anonymous-fn literal
     Quote,
     Backtick,      // `  syntax-quote
     Unquote,       // ~
@@ -71,6 +72,13 @@ fn tokenize(src: &str) -> Vec<Tok> {
             }
             '#' if i + 1 < cs.len() && cs[i + 1] == '{' => {
                 out.push(Tok::HashBrace);
+                i += 2;
+            }
+            '#' if i + 1 < cs.len() && cs[i + 1] == '(' => {
+                // `#(...)` anonymous-fn literal: the `(` is consumed here so the
+                // body reads as a normal parenthesized form under `HashParen`.
+                out.push(Tok::HashParen);
+                out.push(Tok::Open('('));
                 i += 2;
             }
             '\'' => {
@@ -178,6 +186,36 @@ impl Parser {
                 let items = self.until(rt, '}');
                 let lst = rt.vec_to_list(&items);
                 record(rt, SET, vec![lst])
+            }
+            Tok::HashParen => {
+                // `#(...)` -> `(fn [%1 %2 … & %&] (...))`. Read the body (the
+                // following `(...)` form), scan it for the implicit params `%`,
+                // `%1`…`%N`, `%&`, then synthesize the param vector. Bare `%` is
+                // an alias for `%1`, so it is rewritten before emission.
+                let mut body = self.form(rt);
+                let mut max_n = 0usize;
+                let mut has_rest = false;
+                let mut has_bare = false;
+                scan_pct(rt, body, &mut max_n, &mut has_rest, &mut has_bare);
+                if has_bare {
+                    if max_n < 1 {
+                        max_n = 1;
+                    }
+                    let pct1 = sym(rt, "%1");
+                    body = rewrite_bare_pct(rt, body, pct1);
+                }
+                let mut params = Vec::new();
+                for i in 1..=max_n {
+                    params.push(sym(rt, &format!("%{i}")));
+                }
+                if has_rest {
+                    params.push(sym(rt, "&"));
+                    params.push(sym(rt, "%&"));
+                }
+                let plist = rt.vec_to_list(&params);
+                let pvec = record(rt, VECTOR, vec![plist]);
+                let fnsym = sym(rt, "fn");
+                rt.vec_to_list(&[fnsym, pvec, body])
             }
             Tok::Quote => self.wrap(rt, "quote"),
             Tok::Caret => {
@@ -296,4 +334,75 @@ fn alloc<M: ValueModel>(rt: &mut Runtime<M>, o: Obj) -> u64 {
 fn record<M: ValueModel>(rt: &mut Runtime<M>, ty: &str, fields: Vec<u64>) -> u64 {
     let type_id: Sym = rt.intern(ty);
     alloc(rt, Obj::Record { type_id, fields })
+}
+
+/// Walk a `#(...)` body form (cons lists + record contents) collecting the
+/// implicit anonymous-fn params it mentions: the largest `%N`, whether `%&`
+/// (rest) appears, and whether the bare `%` appears. Purely inspects — shared
+/// borrows only.
+fn scan_pct<M: ValueModel>(
+    rt: &Runtime<M>,
+    form: u64,
+    max_n: &mut usize,
+    has_rest: &mut bool,
+    has_bare: &mut bool,
+) {
+    match rt.decode(form) {
+        Val::Sym(s) => {
+            let name = rt.sym_name(s);
+            if name == "%&" {
+                *has_rest = true;
+            } else if name == "%" {
+                *has_bare = true;
+            } else if let Some(rest) = name.strip_prefix('%') {
+                if let Ok(n) = rest.parse::<usize>() {
+                    if n > *max_n {
+                        *max_n = n;
+                    }
+                }
+            }
+        }
+        Val::Ref(id) => {
+            let (head, tail, fields) = match &rt.heap()[id as usize] {
+                Obj::Cons { head, tail } => (Some(*head), Some(*tail), Vec::new()),
+                Obj::Record { fields, .. } => (None, None, fields.clone()),
+                _ => (None, None, Vec::new()),
+            };
+            if let Some(h) = head {
+                scan_pct(rt, h, max_n, has_rest, has_bare);
+            }
+            if let Some(t) = tail {
+                scan_pct(rt, t, max_n, has_rest, has_bare);
+            }
+            for f in fields {
+                scan_pct(rt, f, max_n, has_rest, has_bare);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Rebuild `form`, replacing every bare `%` symbol with `pct1` (the `%1` symbol).
+/// Cons/record structure is copied; leaves are returned unchanged.
+fn rewrite_bare_pct<M: ValueModel>(rt: &mut Runtime<M>, form: u64, pct1: u64) -> u64 {
+    match rt.decode(form) {
+        Val::Sym(s) if rt.sym_name(s) == "%" => pct1,
+        Val::Ref(id) => {
+            let obj = rt.heap()[id as usize].clone();
+            match obj {
+                Obj::Cons { head, tail } => {
+                    let h = rewrite_bare_pct(rt, head, pct1);
+                    let t = rewrite_bare_pct(rt, tail, pct1);
+                    alloc(rt, Obj::Cons { head: h, tail: t })
+                }
+                Obj::Record { type_id, fields } => {
+                    let nf: Vec<u64> =
+                        fields.iter().map(|&f| rewrite_bare_pct(rt, f, pct1)).collect();
+                    alloc(rt, Obj::Record { type_id, fields: nf })
+                }
+                _ => form,
+            }
+        }
+        _ => form,
+    }
 }

@@ -160,12 +160,32 @@ pub const CORE: &str = r#"
         (map? c) (assoc c (nth x 0) (nth x 1))
         true (%cons x c)))
 (defn reduce-seq [f acc s] (let [s (seq s)] (if (nil? s) acc (reduce-seq f (f acc (%first s)) (%rest s)))))
-(defn reduce [f init c] (reduce-seq f init c))
+;; `reduce` is 2- or 3-arity (like clojure.core): `(reduce f coll)` seeds with the
+;; first element (or `(f)` when empty); `(reduce f init coll)` seeds with `init`.
+(defn reduce [f & args]
+  (if (nil? (next args))
+      (let [s (seq (first args))] (if (nil? s) (f) (reduce-seq f (%first s) (%rest s))))
+      (reduce-seq f (first args) (second args))))
 (defn into [to from] (reduce conj to from))
 
 ;; ─────────────── higher-order seq fns (lazy) ───────────────
-(defn map [f c]
-  (lazy-seq (let [s (seq c)] (if (nil? s) nil (%cons (f (%first s)) (map f (%rest s)))))))
+(defn -map1 [f c]
+  (lazy-seq (let [s (seq c)] (if (nil? s) nil (%cons (f (%first s)) (-map1 f (%rest s)))))))
+(defn -map2 [f a b]
+  (lazy-seq (let [sa (seq a) sb (seq b)]
+              (if (if (nil? sa) true (nil? sb)) nil
+                  (%cons (f (%first sa) (%first sb)) (-map2 f (%rest sa) (%rest sb)))))))
+(defn -map3 [f a b c]
+  (lazy-seq (let [sa (seq a) sb (seq b) sc (seq c)]
+              (if (if (nil? sa) true (if (nil? sb) true (nil? sc))) nil
+                  (%cons (f (%first sa) (%first sb) (%first sc)) (-map3 f (%rest sa) (%rest sb) (%rest sc)))))))
+;; `map` is variadic over collections (like clojure.core), stopping at the
+;; shortest. Beyond 3 collections is unsupported (no `apply` on the interp tiers).
+(defn map [f & colls]
+  (cond (nil? (next colls)) (-map1 f (first colls))
+        (nil? (next (next colls))) (-map2 f (first colls) (second colls))
+        (nil? (next (next (next colls)))) (-map3 f (first colls) (second colls) (nth colls 2))
+        true (throw "map: only up to 3 collections supported")))
 (defn filter [f c]
   (lazy-seq (let [s (seq c)]
               (cond (nil? s) nil
@@ -381,6 +401,219 @@ pub const CORE: &str = r#"
       (let [old (%atom-get a)
             new (-swap-apply f old s)]
         (if (%atom-cas a old new) new (recur))))))
+
+;; ─────────────── seq/collection breadth (clojure.core) ───────────────
+(defn some? [x] (not (nil? x)))
+(defn true? [x] (%num-eq x true))
+(defn false? [x] (%num-eq x false))
+(defn ffirst [c] (first (first c)))
+(defn nfirst [c] (next (first c)))
+(defn fnext [c] (first (next c)))
+(defn nnext [c] (next (next c)))
+(defn peek [c] (cond (vector? c) (last c) (nil? c) nil true (first c)))
+(defn pop [c] (cond (vector? c) (vec (butlast c)) (nil? c) nil true (rest c)))
+(defn not-empty [c] (if (empty? c) nil c))
+(defn empty [c] (cond (vector? c) (vector) (map? c) (hash-map) (set? c) (hash-set) true nil))
+
+;; membership / equality helpers (map-aware `-eq2`)
+(defn -mem? [s x] (cond (nil? (seq s)) false (-eq2 (first s) x) true true (-mem? (rest s) x)))
+
+(defn mapcat [f coll]
+  (lazy-seq (let [s (seq coll)] (if (nil? s) nil (concat2 (f (first s)) (mapcat f (rest s)))))))
+(defn interpose [sep coll] (drop 1 (mapcat (fn [x] (list sep x)) coll)))
+(defn interleave [a b]
+  (lazy-seq (let [sa (seq a) sb (seq b)]
+              (if (if (nil? sa) true (nil? sb)) nil
+                  (%cons (first sa) (%cons (first sb) (interleave (rest sa) (rest sb))))))))
+(defn take-nth [n coll]
+  (lazy-seq (let [s (seq coll)] (if (nil? s) nil (%cons (first s) (take-nth n (drop n s)))))))
+
+(defn -distinct [seen coll]
+  (lazy-seq (let [s (seq coll)]
+              (if (nil? s) nil
+                  (let [x (first s)]
+                    (if (-mem? seen x) (-distinct seen (rest s))
+                        (%cons x (-distinct (%cons x seen) (rest s)))))))))
+(defn distinct [coll] (-distinct nil coll))
+(def -none (record 'None nil))
+(defn -dedupe [prev coll]
+  (lazy-seq (let [s (seq coll)]
+              (if (nil? s) nil
+                  (let [x (first s)]
+                    (if (-eq2 x prev) (-dedupe prev (rest s)) (%cons x (-dedupe x (rest s)))))))))
+(defn dedupe [coll] (-dedupe -none coll))
+
+(defn -seqable? [x] (cond (list? x) true (vector? x) true (set? x) true (lazy-seq? x) true true false))
+(defn flatten [coll] (mapcat (fn [x] (if (-seqable? x) (flatten x) (list x))) coll))
+
+;; partition family (chunks are lists; short final chunk dropped unless -all)
+;; Re-`seq` each iteration: `(rest s)` may hand back an unforced lazy tail that
+;; forces to nil, so the `nil?` guard must see the forced value (else a phantom
+;; nil element gets collected).
+(defn -take-n [n s]
+  (loop [n n s s acc nil]
+    (let [s (seq s)]
+      (cond (%num-eq n 0) (reverse acc)
+            (nil? s) nil
+            true (recur (dec n) (rest s) (%cons (first s) acc))))))
+(defn -take-upto [n s]
+  (loop [n n s s acc nil]
+    (let [s (seq s)]
+      (cond (%num-eq n 0) (reverse acc)
+            (nil? s) (reverse acc)
+            true (recur (dec n) (rest s) (%cons (first s) acc))))))
+(defn -partition [n step s]
+  (lazy-seq (let [s (seq s) chunk (-take-n n s)]
+              (if (nil? chunk) nil (%cons chunk (-partition n step (drop step s)))))))
+(defn partition [n & args]
+  (if (nil? (next args)) (-partition n n (first args)) (-partition n (first args) (second args))))
+(defn -partition-all [n step s]
+  (lazy-seq (let [s (seq s)]
+              (if (nil? s) nil (%cons (-take-upto n s) (-partition-all n step (drop step s)))))))
+(defn partition-all [n & args]
+  (if (nil? (next args)) (-partition-all n n (first args)) (-partition-all n (first args) (second args))))
+(defn -part-by-run [f v s acc]
+  (let [s (seq s)]
+    (if (if (nil? s) true (not (-eq2 (f (first s)) v))) (vector (reverse acc) s)
+        (-part-by-run f v (rest s) (%cons (first s) acc)))))
+(defn partition-by [f coll]
+  (lazy-seq (let [s (seq coll)]
+              (if (nil? s) nil
+                  (let [r (-part-by-run f (f (first s)) s nil)] (%cons (nth r 0) (partition-by f (nth r 1))))))))
+
+;; indexed / scanning
+(defn -keep-indexed [f i s]
+  (lazy-seq (let [s (seq s)]
+              (if (nil? s) nil
+                  (let [v (f i (first s))]
+                    (if (nil? v) (-keep-indexed f (inc i) (rest s)) (%cons v (-keep-indexed f (inc i) (rest s)))))))))
+(defn keep-indexed [f coll] (-keep-indexed f 0 coll))
+(defn -reductions [f init s]
+  (lazy-seq (%cons init (let [s (seq s)] (if (nil? s) nil (-reductions f (f init (first s)) (rest s)))))))
+(defn reductions [f & args]
+  (if (nil? (next args))
+      (let [s (seq (first args))] (if (nil? s) nil (-reductions f (first s) (rest s))))
+      (-reductions f (first args) (second args))))
+
+;; map building: group-by / frequencies / zipmap / merge / select-keys / update-in
+(defn group-by [f coll]
+  (reduce (fn [m x] (let [k (f x)] (assoc m k (conj (if (contains? m k) (get m k) (vector)) x)))) (hash-map) coll))
+(defn frequencies [coll]
+  (reduce (fn [m x] (assoc m x (inc (if (contains? m x) (get m x) 0)))) (hash-map) coll))
+(defn zipmap [ks vs]
+  (loop [ks (seq ks) vs (seq vs) m (hash-map)]
+    (if (if (nil? ks) true (nil? vs)) m (recur (next ks) (next vs) (assoc m (first ks) (first vs))))))
+(defn -merge2 [a b]
+  (if (nil? b) a (reduce (fn [m kv] (assoc m (first kv) (second kv))) a (seq b))))
+(defn merge [& maps]
+  (reduce (fn [a b] (if (nil? a) b (-merge2 a b))) nil (seq maps)))
+(defn -merge-with2 [f a b]
+  (reduce (fn [m kv] (let [k (first kv) v (second kv)]
+                       (if (contains? m k) (assoc m k (f (get m k) v)) (assoc m k v)))) a (seq b)))
+(defn merge-with [f & maps]
+  (reduce (fn [a b] (cond (nil? a) b (nil? b) a true (-merge-with2 f a b))) nil (seq maps)))
+(defn select-keys [m ks]
+  (reduce (fn [acc k] (if (contains? m k) (assoc acc k (get m k)) acc)) (hash-map) (seq ks)))
+(defn update-in [m ks f]
+  (let [k (first ks)]
+    (if (nil? (next ks)) (assoc m k (f (get m k))) (assoc m k (update-in (get m k) (rest ks) f)))))
+
+;; sorting (tortoise/hare split + merge; numeric default via %lt)
+(defn -default-less [a b] (%lt a b))
+(defn -merge-lists [less a b]
+  (cond (nil? (seq a)) (seq b)
+        (nil? (seq b)) (seq a)
+        (less (first b) (first a)) (%cons (first b) (-merge-lists less a (rest b)))
+        true (%cons (first a) (-merge-lists less (rest a) b))))
+(defn -halve [slow fast acc]
+  (if (if (nil? (seq fast)) true (nil? (next fast))) (vector (reverse acc) slow)
+      (-halve (rest slow) (rest (rest fast)) (%cons (first slow) acc))))
+(defn -msort [less s]
+  (let [s (-to-list s)]
+    (if (if (nil? s) true (nil? (next s))) s
+        (let [parts (-halve s s nil)]
+          (-merge-lists less (-msort less (nth parts 0)) (-msort less (nth parts 1)))))))
+(defn sort [& args]
+  (if (nil? (next args)) (-msort -default-less (first args)) (-msort (first args) (second args))))
+(defn sort-by [k & args]
+  (if (nil? (next args))
+      (-msort (fn [a b] (%lt (k a) (k b))) (first args))
+      (-msort (fn [a b] ((first args) (k a) (k b))) (second args))))
+
+;; misc combinators
+(defn -juxt-apply [fns x] (map (fn [f] (f x)) fns))
+(defn juxt [& fns] (fn [x] (vec (-juxt-apply fns x))))
+(defn -maxk [k best s] (let [s (seq s)] (if (nil? s) best (-maxk k (if (%lt (k best) (k (first s))) (first s) best) (rest s)))))
+(defn max-key [k a & more] (-maxk k a more))
+(defn -mink [k best s] (let [s (seq s)] (if (nil? s) best (-mink k (if (%lt (k (first s)) (k best)) (first s) best) (rest s)))))
+(defn min-key [k a & more] (-mink k a more))
+
+;; ─────────────── for (list comprehension) ───────────────
+;; Each collection binding drives `-for-drive`, which concats the sub-seqs its
+;; per-element fn returns. Modifiers nest LEXICALLY inside that fn so `:let` vars
+;; are in scope for a following `:when`/`:while`: `:when` false contributes nil
+;; (skip, continue); `:while` false returns the `-for-stop` sentinel (halts the
+;; nearest enclosing drive).
+(def -for-stop (record 'ForStop nil))
+(defn -for-drive [f s]
+  (lazy-seq (let [s (seq s)]
+              (if (nil? s) nil
+                  (let [r (f (%first s))]
+                    (if (%num-eq (type-of r) 'ForStop) nil (concat2 r (-for-drive f (%rest s)))))))))
+(defn -for-build [pairs body]
+  (if (nil? (seq pairs)) (list 'list body)
+      (let [k (first pairs) v (second pairs) more (rest (rest pairs))]
+        (if (keyword? k)
+            (cond (= k :let)   (list 'let v (-for-build more body))
+                  (= k :when)  (list 'if v (-for-build more body) nil)
+                  (= k :while) (list 'if v (-for-build more body) (quote -for-stop))
+                  true (throw "for: unknown modifier keyword"))
+            (list (quote -for-drive) (list 'fn (vector k) (-for-build more body)) v)))))
+(defmacro for (bindings body) (-for-build (seq bindings) body))
+
+;; ─────────────── extra threading / control macros ───────────────
+(defmacro cond-> (expr & clauses)
+  (if (nil? (seq clauses)) expr
+      (list 'let (vector (quote -ctg) expr)
+            (%cons 'cond->
+                   (%cons (list 'if (first clauses) (list '-> (quote -ctg) (second clauses)) (quote -ctg))
+                          (rest (rest clauses)))))))
+(defmacro cond->> (expr & clauses)
+  (if (nil? (seq clauses)) expr
+      (list 'let (vector (quote -ctg2) expr)
+            (%cons 'cond->>
+                   (%cons (list 'if (first clauses) (list '->> (quote -ctg2) (second clauses)) (quote -ctg2))
+                          (rest (rest clauses)))))))
+(defmacro some-> (expr & forms)
+  (if (nil? (seq forms)) expr
+      (list 'let (vector (quote -stg) expr)
+            (list 'if (list 'nil? (quote -stg)) nil
+                  (%cons 'some-> (%cons (list '-> (quote -stg) (first forms)) (rest forms)))))))
+(defmacro some->> (expr & forms)
+  (if (nil? (seq forms)) expr
+      (list 'let (vector (quote -stg2) expr)
+            (list 'if (list 'nil? (quote -stg2)) nil
+                  (%cons 'some->> (%cons (list '->> (quote -stg2) (first forms)) (rest forms)))))))
+(defn -as-binds [nm forms]
+  (if (nil? (seq forms)) nil (%cons nm (%cons (first forms) (-as-binds nm (rest forms))))))
+(defmacro as-> (expr nm & forms)
+  (list 'let (vec (%cons nm (%cons expr (-as-binds nm forms)))) nm))
+(defn -doto-forms [g forms]
+  (if (nil? (seq forms)) nil
+      (%cons (if (list? (first forms))
+                 (%cons (first (first forms)) (%cons g (rest (first forms))))
+                 (list (first forms) g))
+             (-doto-forms g (rest forms)))))
+(defmacro doto (expr & forms)
+  (list 'let (vector (quote -dtg) expr) (%cons 'do (append1 (-doto-forms (quote -dtg) forms) (quote -dtg)))))
+(defn -condp [pv ev clauses]
+  (cond (nil? (seq clauses)) (list 'throw "condp: no matching clause")
+        (nil? (next clauses)) (first clauses)
+        (= (second clauses) :>>) (throw "condp: :>> form not supported")
+        true (list 'if (list pv (first clauses) ev) (second clauses)
+                   (-condp pv ev (rest (rest clauses))))))
+(defmacro condp (pred expr & clauses)
+  (list 'let (vector (quote -cpp) pred (quote -cpe) expr) (-condp (quote -cpp) (quote -cpe) (seq clauses))))
 
 ;; ─────────────── realization (force a lazy result for printing) ───────────────
 ;; The Rust printer can't invoke thunks, so `run` calls this on the final value
