@@ -599,3 +599,36 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
 @media (prefers-reduced-motion: reduce) {
   #nested *, #nested *::before, #nested *::after { animation-duration: .001s !important; transition-duration: .01s !important; }
 }
+
+/* ===== type-level skeleton / template (Phase V3): schema-only inspect view ===== */
+/* the SAME bespoke vocabulary, drawn from TYPES — muted/dashed to read as "not filled yet". */
+.schema-affordance { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px;
+  font-family: var(--mono); font-size: 10px; letter-spacing: .4px; text-transform: uppercase;
+  color: var(--fg-faint); border: 1px dashed var(--line); border-radius: 20px; padding: 2px 10px; }
+.schema-affordance .sdot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-faint);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg-faint) 18%, transparent); }
+#nested.skeleton .nested-bar .ctl { display: none; } /* no links overlay when nothing is filled */
+
+.cx-track.tmpl { background: repeating-linear-gradient(90deg, var(--line-soft) 0 6px, transparent 6px 12px); opacity: .5; }
+.cx-count.tmpl { color: var(--fg-faint); } .cx-count.tmpl b { color: var(--fg-dim); }
+
+/* placeholder message stack + timeline rows: dashed, low-contrast ghost rows */
+.mrow.tmpl { opacity: .45; }
+.mrow.tmpl .fill { background: repeating-linear-gradient(90deg, color-mix(in srgb, var(--mc) 40%, var(--line-soft)) 0 10px, transparent 10px 16px); }
+.timeline .tl.tmpl { opacity: .7; }
+.timeline .tl.tmpl .msg { color: var(--fg-faint); font-style: italic; }
+.hcell.tmpl { opacity: .3; }
+
+/* the "field-name wiring" annotations that replace live values in a template */
+.tmpl-shape { font-family: var(--mono); font-size: 10.5px; color: var(--fg-faint); font-style: italic;
+  padding: 2px 0 6px; letter-spacing: .2px; }
+.tmpl-wire { font-family: var(--mono); font-size: 11px; font-weight: 400; color: var(--fg-faint); letter-spacing: 0; }
+.tmpl-path { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--fg-faint);
+  text-transform: none; letter-spacing: 0; border: 1px solid var(--line-soft); border-radius: 3px; padding: 0 5px; }
+.board.tmpl { border-style: dashed; }
+.board.tmpl .board-title { color: var(--fg-dim); }
+.badge.tmpl { --bc: var(--fg-faint); font-style: italic; }
+#nested.skeleton .region.lvl1, #nested.skeleton .region.lvl2 { background: color-mix(in srgb, var(--bg-elev) 70%, transparent); }
+#nested.skeleton .conv { border-style: dashed; }
+.singleton-obj .dim { font-style: italic; }
+.chip.solo { cursor: pointer; }

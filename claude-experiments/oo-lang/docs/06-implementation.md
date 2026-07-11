@@ -1875,3 +1875,113 @@ section "conversation" { conversation.messages as timeline }; section "tools" { 
 has no `createdAt`/timestamp and a `Conversation.messages` is an ordered `List`, so `timeline` uses
 natural insertion order (no `order:` arg) rather than synthesizing a fake ordinal — the honest, clean
 choice. (`order:` remains supported + typechecked; the parse golden `tests/parse/60-view` exercises it.)
+
+# Phase V3 — the STATIC type-level view (bespoke skeleton + declared-view templates)
+
+`scry inspect <file>` typechecks + serves the schema WITHOUT running `main()`, so every arena
+exists but is EMPTY (0 instances). V1/V2 already had all the static structure in hand — `schema()`
+carries the full type-reference graph (fields/`refTypes`/`implementors`) and `views()` the declared
+specs — but the Map view only *drew* them from live instances, so inspect hit a dead-end ("no live
+instances yet — run the program"). That was backwards: per DECISIONS #14, the static view is the
+TEMPLATE that live data fills in, and per #15 the custom views ("do the custom views not handle the
+static view as well?") should honor it too. V3 makes the bespoke nested view AND the program-declared
+`view`s render **statically, from TYPES**, in `scry inspect`.
+
+## Integration approach chosen: 0-instance fallback (NOT the unified base-skeleton)
+
+The brief offered two integrations and PREFERRED the unified one (NestedView always renders a
+type-skeleton base that live instances populate). **I chose the 0-instance fallback** and it is the
+principled call, not merely the safe one:
+
+- The live V1 view is fundamentally **instance-level** and is genuinely better for live data: an
+  `Agent "assistant"` region owning a `Conversation` whose height IS its 29-Message mass, with tools
+  as per-*instance* identity chips (`ShellTool#0`) hover-linked across owners. Rebuilding that as
+  "Agent-type cell ▸ [Agent#0] ▸ Conversation-type cell ▸ [Conversation#0] ▸ Message-type cell ▸ 29
+  rows" would **regress the V1 appearance** (the explicit bar: V1 screenshots). Doing the unified
+  version *without* that regression is a large, risky refactor of the exact code the demo depends on.
+- So: `NestedView` computes BOTH models each poll — `computeNested(instances, schema)` (live, V1/V2,
+  untouched) and `computeTypeSkeleton(schema)` (new, type-level). It renders the skeleton **iff
+  `instances.length === 0` and the skeleton has a domain root**; otherwise the live path renders
+  exactly as before. This still realizes "static is the template live fills in": at `scry run`
+  startup there is a split-second where `graph()` is empty and you literally see the template, which
+  then fills as `main()` populates the arenas — the same view at two fill levels, with zero live
+  regression. The live/skeleton switch is a single `showSkeleton` boolean; the live branch is
+  byte-for-byte the old code.
+
+## The type-containment skeleton model (`computeTypeSkeleton` in `viewer/app.js`)
+
+Pure, deterministic, `schema()`-only — mirrors `computeNested`'s static rules at the TYPE level:
+
+1. **Static reference graph + domain root.** Same as V1: build `refOut` (type → entity types it
+   references, interfaces expanded to `implementors`), pick the primary domain-root TYPE as the
+   unreferenced non-`Runnable`-worker container with the largest reachable set (ties → name, since
+   there are no live counts to break them). `domainTypes` = its reach. For `assistant.scry`:
+   `Orchestrator` → `{Agent, Conversation, Message, ScriptedModel, AnthropicModel, Shell/Search/Calc/WeatherTool}`.
+2. **Type-level ownership = nesting.** `owners(U)` = domain types whose `refOut` contains `U`. A type
+   with **exactly one** domain owner nests inside it (`Orchestrator ▸ Agent ▸ {Conversation ▸ Message,
+   the two Model implementors}`). A **message-like** child type (has a `role` scalar AND a
+   `content`/`text`/`body` scalar — same shape rule as V1's `isMsgLike`) renders as a labeled
+   **placeholder message stack** (ghost `.mrow`s), not a sub-region — so `Conversation ▸ Message`
+   reads exactly like the live conversation, minus the data.
+3. **Shared TYPES = identity chips.** A domain type with **≥2 distinct owner types** (the 4 tools,
+   referenced by both `Agent.tools` and `Orchestrator.tools`) is never nested; it gets a stable
+   identity color (`sorted-type-name → index mod 8`, palette `--id-0..7`) and renders as that colored
+   chip everywhere it is referenced + in the legend. Reuses the `.chip[data-identity]` contract, so
+   V1's imperative hover-highlight lights up every appearance of the same TYPE unchanged.
+4. **Singletons + infrastructure.** `object`-kind entity types (the std `Json`) render as `obj`
+   chips in the header — a class can't be *known* a singleton statically (that's a runtime count of
+   1), so classes like `Session` recede to the faded **infrastructure strip** alongside the other
+   non-domain entity types (`ModelResponse`, `ToolCall`, `HttpResponse`, `JsonParser`, the workers).
+5. **Census with 0 counts.** The mass ribbon lists every entity type (domain first, then singletons,
+   then infra) with a **dashed empty track** and `×—` instead of bars — "types present, mass fills at
+   runtime". A "SCHEMA · NOT RUNNING" affordance sits in the header (echoing the inspect banner).
+
+`computeTypeSkeleton` returns the same *shape* of model the renderers expect (`roots`, `sharedTypes`,
+`idColor`, `infraTypes`, `census`, `singletonTypes`, plus `byName`/`expand`/`isMsgType` for the
+template path-follower). Parallel renderers `TypeRegion`/`TypeChip` reuse V1's CSS vocabulary
+(`.region`, `.conv`, `.mstack`, `.refs`, `.chip`) with a `tmpl` modifier for the muted/dashed ghost
+styling.
+
+## Declared views as static templates (`TypeBoardView`/`TypeRepresentation`)
+
+The `▤ cell / ▧ board` toggle works in inspect too (per-type mode, keyed by type name — no collision
+with the live per-instance-id mode). Toggling an `Agent` type-cell to board renders `AgentBoard` as a
+**template against the TYPE**:
+
+- **Header wiring.** `title`/`badge` show their FIELD-NAME source, not a value: `Agent  title ⟵ name`
+  and a ghost `badge ⟵ status` — so before running you SEE how an Agent will be presented.
+- **Sections resolve the element TYPE** via `followTypePath` (the type-graph analog of V2's
+  `followPath`: hop → each type's field `refTypes`, interfaces expanded). `conversation.messages as
+  timeline` resolves to `Message` and renders its shape (`Message ⟵ role, content, contentJson`) plus
+  a few role-tinted placeholder rows (`role · content ⟵ Message`); `tools as chips` resolves to the
+  4 Tool implementor TYPES and renders them as identity chips; `card`/`rows`/`heat` likewise render
+  against the element type's shape. When instances exist, V2's live `BoardView` renders real data,
+  entirely unchanged.
+
+## Tests + screenshots
+
+- `tests/ui-smoke.mjs` — the inspect scenario was rewritten from "assert `.stage-empty` dead-end" to
+  assert the SKELETON: `#nested.skeleton` renders; `Agent` type-cell nests `Conversation` nests a
+  Message placeholder stack; shared Tool type chips appear; the infra strip renders; the `AgentBoard`
+  toggle flips to a template with title/badge field-name wiring + a timeline placeholder + 4
+  tool-type chips. The run-mode + portal beats are unchanged and still green.
+- All **275** tests pass; build clean (viewer is a no-build JS/CSS + one test + this doc — no `scry`
+  recompile, no `schema()`/`views()`/`graph()` payload change; V3 needed **no runtime change**, the
+  static payloads already carried everything).
+- Screenshots: `scratchpad/probe-inspect-nested.png` (type skeleton) and
+  `scratchpad/probe-inspect-board.png` (AgentBoard template) — both match the mockup's aesthetic,
+  drawn from types instead of instances.
+
+## Friction / notes
+
+- **No runtime change needed.** `schema()` already carries `kind`/`fields`/`refTypes`/`implementors`/
+  `implements`/`builtin` and `views()` the full clause specs — everything the type view needs. The
+  whole phase is client-side (`computeTypeSkeleton` + `TypeRegion`/`TypeBoardView`/`TypeRepresentation`
+  + the `showSkeleton` switch in `NestedView`), plus `tmpl` CSS.
+- **Statically un-knowable singletons.** `Session` is a 1-of at runtime but a `class` in the schema;
+  without counts there's no honest way to call it a singleton, so it sits in infra in inspect and
+  moves to the header singleton row only once the live view sees `liveCount === 1`. Called out rather
+  than faked.
+- **The two Model implementors** (`ScriptedModel`, `AnthropicModel`) both nest as leaf cells under
+  `Agent` (each has one owner type, `Agent.model`), following the same ≥2-owners rule as everything
+  else rather than a special case for interface-typed fields — consistent with the live algorithm.

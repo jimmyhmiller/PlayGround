@@ -737,6 +737,130 @@ function computeNested(instances, schema) {
   return { byId, roots, singletons, sharedIds, idColor, infraTypes, census, ownerCount };
 }
 
+// ===================== type-level containment skeleton (Phase V3) =====================
+// The STATIC template that live data fills in (DECISIONS #14 unified with #15). Built purely
+// from schema() — NO instances — so `scry inspect` (which never runs main()) still shows the
+// bespoke class-relationship structure in the nested style: a representative CELL per domain
+// TYPE, nested by ownership (Agent-type ▸ Conversation-type ▸ Message-type), shared TYPES as
+// identity chips (colored by a stable type-name→palette slot, since there are no instance ids),
+// infrastructure types faded in the strip, `object`-kind singletons as obj chips. It mirrors
+// computeNested's exact static reachability/ownership rules, just at the TYPE level (owner =
+// a domain type whose field references the target type, interfaces expanded to implementors).
+function computeTypeSkeleton(schema) {
+  const nodes = schema || [];
+  const byName = new Map(nodes.map((n) => [n.name, n]));
+  const isEntity = (t) => { const n = byName.get(t); return !!n && (n.kind === "class" || n.kind === "object"); };
+  const entityTypes = nodes.filter((n) => n.kind === "class" || n.kind === "object").map((n) => n.name);
+
+  // interface -> implementors, so a `Tool` field expands to ShellTool/SearchTool/…
+  const implementorsOf = new Map();
+  for (const n of nodes) if (n.kind === "interface") implementorsOf.set(n.name, n.implementors || []);
+  const expand = (t) => implementorsOf.has(t) ? implementorsOf.get(t) : [t];
+
+  // type -> Set(entity type) it references through a field (interfaces expanded)
+  const refOut = new Map();
+  for (const n of nodes) {
+    if (n.kind !== "class" && n.kind !== "object") continue;
+    const outs = new Set();
+    for (const f of n.fields || []) for (const rt of f.refTypes || []) for (const e of expand(rt)) if (isEntity(e)) outs.add(e);
+    refOut.set(n.name, outs);
+  }
+  const referenced = new Set();
+  for (const [, outs] of refOut) for (const t of outs) referenced.add(t);
+
+  const builtinIfaces = new Set(nodes.filter((n) => n.kind === "interface" && n.builtin).map((n) => n.name));
+  const isWorker = (t) => ((byName.get(t) || {}).implements || []).some((i) => builtinIfaces.has(i));
+
+  const reach = (start) => {
+    const seen = new Set([start]), st = [start];
+    while (st.length) { const c = st.pop(); for (const t of (refOut.get(c) || [])) if (!seen.has(t) && byName.has(t)) { seen.add(t); st.push(t); } }
+    return seen;
+  };
+  // primary domain root TYPE = unreferenced non-worker container with the largest reachable set;
+  // ties broken by name (no live counts to break them, unlike computeNested). Deterministic.
+  const rootCands = entityTypes.filter((t) => (refOut.get(t) || new Set()).size > 0 && !referenced.has(t) && !isWorker(t));
+  let domainTypes = new Set(entityTypes), rootTypes = [];
+  if (rootCands.length) {
+    const scored = rootCands.map((c) => ({ c, s: reach(c) })).sort((a, b) => b.s.size - a.s.size || a.c.localeCompare(b.c));
+    domainTypes = scored[0].s; rootTypes = [scored[0].c];
+  }
+
+  // type-level ownership: owners(U) = domain types T (≠U) whose refOut contains U
+  const ownerTypes = new Map();
+  for (const t of domainTypes) for (const u of (refOut.get(t) || [])) {
+    if (!domainTypes.has(u) || u === t) continue;
+    (ownerTypes.get(u) || ownerTypes.set(u, new Set()).get(u)).add(t);
+  }
+  const ownerCount = (t) => (ownerTypes.get(t) || new Set()).size;
+  const sharedTypes = new Set([...domainTypes].filter((t) => ownerCount(t) >= 2));
+
+  // message-like TYPE: has a `role` scalar AND a body scalar (content/text/body) — same shape
+  // rule as the live isMsgLike, so a Conversation's owned Message type renders as a stack.
+  const isMsgType = (t) => { const fs = new Set(((byName.get(t) || {}).fields || []).map((f) => f.name));
+    return fs.has("role") && (fs.has("content") || fs.has("text") || fs.has("body")); };
+
+  // nesting tree from the root type: a type with exactly ONE domain owner nests inside it;
+  // shared types (≥2 owners) become chips; refs into infra are ignored here.
+  const placed = new Set();
+  const buildNode = (name) => {
+    placed.add(name);
+    const children = [], chipTypes = [];
+    for (const u of [...(refOut.get(name) || [])].sort()) {
+      if (u === name) continue;
+      if (sharedTypes.has(u)) { if (!chipTypes.includes(u)) chipTypes.push(u); continue; }
+      if (!domainTypes.has(u)) continue;
+      if (ownerCount(u) === 1 && !placed.has(u)) children.push(buildNode(u));
+    }
+    let subtree = 1; for (const c of children) subtree += c.subtree;
+    return { name, node: byName.get(name), children, chipTypes, subtree };
+  };
+  const roots = rootTypes.filter((t) => !placed.has(t)).map(buildNode).sort((a, b) => b.subtree - a.subtree);
+
+  // identity color per shared TYPE (stable: sorted name -> slot), same palette as the live view.
+  const idColor = new Map([...sharedTypes].sort().map((t, i) => [t, i % N_ID]));
+
+  // singleton objects: `object`-kind entity types (language-level singletons like std `Json`).
+  // A class can't be known a singleton statically (that's a runtime count), so classes recede
+  // to infra even if they end up 1-of at runtime — the honest, count-free call.
+  const singletonTypes = entityTypes.filter((t) => !domainTypes.has(t) && byName.get(t).kind === "object");
+  const singletonSet = new Set(singletonTypes);
+
+  // infrastructure: entity types outside the domain (and not singleton objects) — faded strip.
+  const infraTypes = entityTypes
+    .filter((t) => !domainTypes.has(t) && !singletonSet.has(t))
+    .map((t) => ({ name: t }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  // census: every entity type, domain first (root order then name), then singletons, then infra.
+  // No live counts, so mass is unknown — the ribbon shows types with no bar.
+  const domainOrder = [...domainTypes].sort((a, b) => (rootTypes.includes(b) ? 1 : 0) - (rootTypes.includes(a) ? 1 : 0) || a.localeCompare(b));
+  const census = [
+    ...domainOrder.map((t) => ({ name: t, util: false })),
+    ...singletonTypes.map((t) => ({ name: t, util: true })),
+    ...infraTypes.map((x) => ({ name: x.name, util: true })),
+  ];
+
+  return { byName, roots, singletonTypes, sharedTypes, idColor, infraTypes, census, ownerCount, domainTypes, refOut, expand, isMsgType };
+}
+// follow a dotted field-path over the TYPE graph -> the distinct element TYPES at the end.
+// `all` = the target type itself (every instance of it, at runtime). Interfaces are expanded.
+function followTypePath(startType, pathStr, model) {
+  if (pathStr === "all" || pathStr === "byCount") return [startType];
+  let cur = [startType];
+  for (const hop of String(pathStr).split(".")) {
+    const next = [];
+    for (const t of cur) {
+      const n = model.byName.get(t); if (!n) continue;
+      const f = (n.fields || []).find((x) => x.name === hop);
+      if (f) for (const rt of f.refTypes || []) for (const e of model.expand(rt)) next.push(e);
+    }
+    cur = next;
+  }
+  return [...new Set(cur)];
+}
+const scalarFieldNames = (model, t) =>
+  ((model.byName.get(t) || {}).fields || []).filter((f) => !(f.refTypes && f.refTypes.length)).map((f) => f.name);
+
 // an identity chip for a shared instance (colored, hover-highlights all its appearances)
 function IdChip({ id, model, small, onEnter, onLeave, onClick }) {
   const slot = model.idColor.get(id) ?? 0;
@@ -914,6 +1038,154 @@ function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen, viewsByT
     </div>`;
 }
 
+// ---------- type-level (skeleton) renderers: the SAME bespoke vocabulary, drawn from TYPES ----------
+// A shared-TYPE chip (colored by the type-name identity slot). Reuses the .chip data-identity
+// contract so the live hover-highlight effect lights up every appearance of the SAME type.
+function TypeChip({ name, model, small, onEnter, onLeave, onOpen }) {
+  const slot = model.idColor.get(name) ?? 0;
+  const kind = (model.byName.get(name) || {}).kind || "type";
+  return html`
+    <button class=${"chip" + (small ? " sm" : "")} data-identity=${name} data-slot=${slot}
+            style=${{ "--c": `var(--id-${slot})` }}
+            title=${`${name} · shared ${kind} · referenced by ${model.ownerCount(name)} owners`}
+            onMouseEnter=${() => onEnter(name)} onMouseLeave=${onLeave}
+            onClick=${(e) => { e.stopPropagation(); onOpen(name); }}>
+      <span class="knob"></span>${name}</button>`;
+}
+
+// a template representation for a declared-view section, resolved over the TYPE graph. Shows the
+// element TYPE's shape (field names) rather than data, since no instances exist.
+function TypeRepresentation({ clause, node, model, onEnter, onLeave, onChip, onOpen }) {
+  const rep = clause.representation;
+  const elemTypes = followTypePath(node.name, clause.path, model);
+  if (rep === "timeline") {
+    const et = elemTypes[0];
+    const fields = et ? scalarFieldNames(model, et) : [];
+    const roleF = fields.includes("role") ? "role" : (fields[0] || "role");
+    const bodyF = fields.find((f) => f === "content" || f === "text" || f === "body") || fields[1] || "…";
+    const tint = ["user", "asst", "tool", "tres"];
+    return html`<div class="timeline">
+      <div class="tmpl-shape">${et || "?"} ⟵ ${fields.join(", ") || "—"}</div>
+      ${tint.map((c, i) => html`<div class=${"tl tmpl " + c} key=${i}>
+        <span class="role">${roleF}</span>
+        <span class="msg">${bodyF} ⟵ ${et || "instance"}</span></div>`)}
+    </div>`;
+  }
+  if (rep === "chips") {
+    return html`<div class="vchips">
+      ${elemTypes.map((t) => model.sharedTypes.has(t)
+        ? html`<${TypeChip} key=${t} name=${t} model=${model} onEnter=${onEnter} onLeave=${onLeave} onOpen=${onChip} />`
+        : html`<button class="chip solo" key=${t} style=${{ "--c": "var(--fg-faint)" }}
+              onClick=${(e) => { e.stopPropagation(); onOpen(t); }}><span class="knob"></span>${t}</button>`)}
+    </div>`;
+  }
+  if (rep === "rows") {
+    return html`<div class="vrows">
+      ${elemTypes.map((t) => html`<div class="vrow" key=${t} onClick=${() => onOpen(t)}>
+        <span class="vr-kind">${(model.byName.get(t) || {}).kind || "type"}</span>${t}</div>`)}
+    </div>`;
+  }
+  if (rep === "card") {
+    const et = elemTypes[0];
+    const fields = et ? scalarFieldNames(model, et) : [];
+    if (!et) return html`<div class="mini-card"><span class="fk">—</span><span class="fv">no type</span></div>`;
+    return html`<div class="mini-card">
+      ${fields.length ? fields.map((f) => html`<${React.Fragment} key=${f}>
+        <span class="fk">${f}</span><span class="fv">⟵ ${et}</span><//>`)
+        : html`<span class="fk">${et}</span><span class="fv">no scalar fields</span>`}
+    </div>`;
+  }
+  if (rep === "heat") {
+    const roles = [["user", "user"], ["asst", "assistant"], ["tool", "tool_use"], ["tres", "tool_result"]];
+    return html`<div>
+      <div class="heat-legend">
+        ${roles.map(([c, label]) => html`<span class="pl" key=${c}><span class="sw" style=${{ background: `var(--m-${c})` }}></span>${label}</span>`)}
+      </div>
+      <div class="heat">
+        ${Array.from({ length: 24 }).map((_, i) => html`<div class=${"hcell tmpl " + roles[i % 4][0]} key=${i}
+          style=${{ "--mc": `var(--m-${roles[i % 4][0]})` }}></div>`)}
+      </div>
+      <div class="tmpl-shape">${elemTypes[0] || "?"} instances fill this stream at runtime</div></div>`;
+  }
+  return html`<div class="vrows">${elemTypes.map((t) => html`<div class="vrow" key=${t}>${t}</div>`)}</div>`;
+}
+
+// a declared view rendered as a TEMPLATE against the target TYPE (the inspect-mode AgentBoard):
+// title/badge shown as their FIELD-NAME wiring, each section against the element type's shape.
+function TypeBoardView({ view, node, model, depth, onEnter, onLeave, onChip, onOpen, toggle }) {
+  const titleC = clauseByKey(view, "title");
+  const badgeC = clauseByKey(view, "badge");
+  const sections = (view.clauses || []).filter((c) => c.kind === "section" || (c.kind === "clause" && c.representation));
+  const cls = "region" + (depth === 0 ? " root" : depth === 1 ? " lvl1" : " lvl2");
+  return html`
+    <div class=${cls} data-region=${node.name}>
+      <div class="board tmpl" data-view=${view.name}>
+        <div class="board-head">
+          <div>
+            <div class="board-title">${node.name}<span class="tmpl-wire"> title ⟵ ${titleC ? titleC.path : "—"}</span></div>
+            <div class="board-sub">view ${view.name} · template · fills at runtime</div>
+          </div>
+          ${badgeC ? html`<span class="badge tmpl" style=${{ marginLeft: "auto" }}><span class="bd"></span>badge ⟵ ${badgeC.path}</span>` : ""}
+          ${toggle}
+        </div>
+        ${sections.map((c, i) => html`
+          <div class="vsection" key=${i}>
+            <div class="sh">${c.label || c.key}${c.representation ? html`<span class="as">as ${c.representation}</span>` : ""}
+              <span class="tmpl-path">${c.path}</span></div>
+            <${TypeRepresentation} clause=${c} node=${node} model=${model}
+              onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${onOpen} />
+          </div>`)}
+      </div>
+    </div>`;
+}
+
+// a nested TYPE region (recursive): a representative cell per domain type. Owned message-like
+// types render as a labeled placeholder stack; owned sub-types recurse; shared types are chips.
+function TypeRegion({ node, model, depth, onEnter, onLeave, onChip, onOpenType, viewsByType, viewMode, setViewMode }) {
+  const view = viewsByType && viewsByType.get(node.name);
+  const boardOn = !!(view && viewMode[node.name] === "board");
+  const toggle = view ? html`
+    <div class="vtoggle" onClick=${(e) => e.stopPropagation()}>
+      <button class=${boardOn ? "" : "on"} onClick=${(e) => { e.stopPropagation(); setViewMode(node.name, "cell"); }}>▤ cell</button>
+      <button class=${boardOn ? "on" : ""} onClick=${(e) => { e.stopPropagation(); setViewMode(node.name, "board"); }}>▧ board</button>
+    </div>` : "";
+  if (boardOn) return html`<${TypeBoardView} view=${view} node=${node} model=${model} depth=${depth}
+    onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${onOpenType} toggle=${toggle} />`;
+  const msgKids = node.children.filter((c) => model.isMsgType(c.name));
+  const subKids = node.children.filter((c) => !model.isMsgType(c.name));
+  const cls = "region" + (depth === 0 ? " root" : depth === 1 ? " lvl1" : " lvl2");
+  const kind = (node.node || {}).kind || "type";
+  return html`
+    <div class=${cls} data-region=${node.name} data-type-cell=${node.name}>
+      <div class="region-head" onClick=${() => onOpenType(node.name)}>
+        <span class="node-kind">${kind}</span>
+        <span class="region-name">${node.name}</span>
+        <span class="region-role">type</span>
+        ${toggle}
+      </div>
+      ${msgKids.map((c) => html`
+        <div class="conv" key=${c.name}>
+          <div class="conv-label"><span class="k">owns ▸ ${c.name}</span>
+            <span class="n">count <b>⟵ runtime</b></span></div>
+          <div class="mstack">
+            ${["user", "asst", "tool", "tres", "user", "asst"].map((r, i) => html`<div class=${"mrow tmpl " + r} key=${i}>
+              <span class="tick"></span><span class="fill"></span></div>`)}
+          </div>
+        </div>`)}
+      ${subKids.length ? html`
+        <div class=${"subregions" + (subKids.length > 1 && depth === 0 ? " grid" : "")}>
+          ${subKids.map((c) => html`<${TypeRegion} key=${c.name} node=${c} model=${model} depth=${depth + 1}
+            onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpenType=${onOpenType}
+            viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} />`)}
+        </div>` : ""}
+      ${node.chipTypes.length ? html`
+        <div class="refs"><span class="rk">references ▸ shared types</span>
+          ${node.chipTypes.map((t) => html`<${TypeChip} key=${t} name=${t} model=${model} small=${true}
+            onEnter=${onEnter} onLeave=${onLeave} onOpen=${onChip} />`)}
+        </div>` : ""}
+    </div>`;
+}
+
 function NestedView({ onOpenType, onOpenDetail }) {
   const [instances, setInstances] = useState([]);
   const [schema, setSchema] = useState([]);
@@ -952,6 +1224,12 @@ function NestedView({ onOpenType, onOpenDetail }) {
   const setViewMode = useCallback((id, m) => setViewModeState((s) => ({ ...s, [id]: m })), []);
 
   const model = useMemo(() => computeNested(instances, schema), [instances, schema]);
+  // the static TYPE-level template (from schema alone). When there are no live instances
+  // (`scry inspect`, or the split-second before main() populates the arenas) we render THIS —
+  // the same bespoke view at zero fill. Once instances arrive, the live model above takes over.
+  const typeModel = useMemo(() => computeTypeSkeleton(schema), [schema]);
+  const noInstances = instances.length === 0;
+  const showSkeleton = noInstances && typeModel.roots.length > 0;
 
   // fresh-instance pulse: mark the DOM rows/regions that are new since the previous poll.
   useEffect(() => {
@@ -990,7 +1268,8 @@ function NestedView({ onOpenType, onOpenDetail }) {
     });
     if (pts.length < 2) return;
     const hub = { x: pts.reduce((s, p) => s + p.x, 0) / pts.length, y: pts.reduce((s, p) => s + p.y, 0) / pts.length };
-    const slot = model.idColor.get(hoverId) ?? 0;
+    const first = wrap.querySelector(`.chip[data-identity="${CSS.escape(hoverId)}"]`);
+    const slot = (first && +first.dataset.slot) || model.idColor.get(hoverId) || 0;
     for (const p of pts) {
       const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
       path.setAttribute("d", `M${p.x},${p.y} Q${(p.x + hub.x) / 2},${p.y} ${hub.x},${hub.y}`);
@@ -1002,63 +1281,91 @@ function NestedView({ onOpenType, onOpenDetail }) {
   const maxCount = Math.max(1, ...model.census.map((c) => c.count));
   const barW = (n) => Math.max(3, Math.pow(n / maxCount, 0.72) * 100);
 
+  // --- census: live mass by count, OR (skeleton) the static type roster with no bars ---
+  const census = showSkeleton ? typeModel.census : model.census;
+  const infra = showSkeleton ? typeModel.infraTypes : model.infraTypes;
+
   return html`
-    <div id="nested" class=${hoverId ? "id-active" : ""} ref=${wrapRef}>
+    <div id="nested" class=${(hoverId ? "id-active " : "") + (showSkeleton ? "skeleton" : "")} ref=${wrapRef}>
       <div class="nested-bar">
-        <span class="nested-title">structure <span class="nsub">ownership = nesting · size = mass</span></span>
+        <span class="nested-title">structure <span class="nsub">${showSkeleton ? "ownership = nesting · this is the type-level template live data fills in" : "ownership = nesting · size = mass"}</span></span>
+        ${showSkeleton ? html`<span class="schema-affordance"><span class="sdot"></span>schema · not running</span>` : ""}
         <button class=${"ctl" + (linksOn ? " on" : "")} onClick=${() => setLinksOn((v) => !v)}>
           <span class="sw"></span>show links</button>
       </div>
 
       <div class="census">
-        <div class="census-head"><span class="h">live heap · mass by instance count</span>
-          <span class="meta">watching · refresh 800ms</span></div>
+        <div class="census-head"><span class="h">${showSkeleton ? "type structure · mass fills at runtime" : "live heap · mass by instance count"}</span>
+          <span class="meta">${showSkeleton ? "static schema · 0 instances" : "watching · refresh 800ms"}</span></div>
         <div class="census-grid">
-          ${model.census.map((c) => html`
+          ${census.map((c) => html`
             <${React.Fragment} key=${c.name}>
               <div class=${"cx-name" + (c.util ? " util" : "")}>${c.name}</div>
-              <div class="cx-track"><div class=${"cx-bar" + (live[c.name] ? " live" : "")} style=${{ width: barW(c.count) + "%" }}></div></div>
-              <div class=${"cx-count" + (live[c.name] ? " live" : "")}>×<b>${c.count}</b>${live[c.name] ? html`<span class="trend">▲</span>` : ""}</div>
+              <div class=${"cx-track" + (showSkeleton ? " tmpl" : "")}>${showSkeleton ? "" : html`<div class=${"cx-bar" + (live[c.name] ? " live" : "")} style=${{ width: barW(c.count) + "%" }}></div>`}</div>
+              ${showSkeleton
+                ? html`<div class="cx-count tmpl">×<b>—</b></div>`
+                : html`<div class=${"cx-count" + (live[c.name] ? " live" : "")}>×<b>${c.count}</b>${live[c.name] ? html`<span class="trend">▲</span>` : ""}</div>`}
             <//>`)}
         </div>
       </div>
 
-      ${model.sharedIds.size ? html`
-        <div class="legend"><span class="lbl">shared instances</span>
-          ${[...model.sharedIds].sort().map((id) => html`<${IdChip} key=${id} id=${id} model=${model}
-            onEnter=${onEnter} onLeave=${onLeave} onClick=${onChip} />`)}
-        </div>` : ""}
+      ${showSkeleton
+        ? (typeModel.sharedTypes.size ? html`
+            <div class="legend"><span class="lbl">shared types</span>
+              ${[...typeModel.sharedTypes].sort().map((t) => html`<${TypeChip} key=${t} name=${t} model=${typeModel}
+                onEnter=${onEnter} onLeave=${onLeave} onOpen=${onOpenType} />`)}
+            </div>` : "")
+        : (model.sharedIds.size ? html`
+            <div class="legend"><span class="lbl">shared instances</span>
+              ${[...model.sharedIds].sort().map((id) => html`<${IdChip} key=${id} id=${id} model=${model}
+                onEnter=${onEnter} onLeave=${onLeave} onClick=${onChip} />`)}
+            </div>` : "")}
 
       <div class="stage-wrap">
         <svg class="link-overlay" ref=${overlayRef} aria-hidden="true"></svg>
-        ${model.roots.length === 0 ? html`
-          <div class="stage-empty">no live instances yet — run the program, or switch to <b>List</b> to browse types.</div>` : ""}
-        ${model.roots.map((r) => html`
-          <div class="orch" key=${r.id}>
-            ${model.singletons.length && r === model.roots[0] ? html`
-              <div class="singletons">
-                ${model.singletons.map((s) => { const p = refParts(s.ref); return html`
-                  <button class="singleton-obj" key=${s.ref} onClick=${() => p && openDetail(p.cls, p.slot, s.generation)}>
-                    <span class="node-kind">obj</span>${s.type} <span class="dim">×1</span></button>`; })}
-              </div>` : ""}
-            <${Region} node=${r} model=${model} depth=${0}
-              onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${openDetail}
-              viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} />
-          </div>`)}
+        ${showSkeleton ? html`
+          ${typeModel.singletonTypes.length ? html`
+            <div class="singletons">
+              ${typeModel.singletonTypes.map((t) => html`
+                <button class="singleton-obj" key=${t} onClick=${() => onOpenType(t)}>
+                  <span class="node-kind">obj</span>${t} <span class="dim">singleton</span></button>`)}
+            </div>` : ""}
+          ${typeModel.roots.map((r) => html`
+            <div class="orch" key=${r.name}>
+              <${TypeRegion} node=${r} model=${typeModel} depth=${0}
+                onEnter=${onEnter} onLeave=${onLeave} onChip=${onOpenType} onOpenType=${onOpenType}
+                viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} />
+            </div>`)}
+        ` : html`
+          ${model.roots.length === 0 ? html`
+            <div class="stage-empty">no live instances yet — run the program, or switch to <b>List</b> to browse types.</div>` : ""}
+          ${model.roots.map((r) => html`
+            <div class="orch" key=${r.id}>
+              ${model.singletons.length && r === model.roots[0] ? html`
+                <div class="singletons">
+                  ${model.singletons.map((s) => { const p = refParts(s.ref); return html`
+                    <button class="singleton-obj" key=${s.ref} onClick=${() => p && openDetail(p.cls, p.slot, s.generation)}>
+                      <span class="node-kind">obj</span>${s.type} <span class="dim">×1</span></button>`; })}
+                </div>` : ""}
+              <${Region} node=${r} model=${model} depth=${0}
+                onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${openDetail}
+                viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} />
+            </div>`)}
+        `}
 
-        ${model.infraTypes.length ? html`
+        ${infra.length ? html`
           <div class=${"infra" + (infraOpen ? " open" : "")}>
             <div class="infra-head" onClick=${() => setInfraOpen((v) => !v)}>
               <span class="caret">▸</span><span class="k">infrastructure</span>
-              <span class="sub">${model.infraTypes.length} utility type${model.infraTypes.length === 1 ? "" : "s"} · faded — click to ${infraOpen ? "collapse" : "expand"}</span>
+              <span class="sub">${infra.length} utility type${infra.length === 1 ? "" : "s"} · faded — click to ${infraOpen ? "collapse" : "expand"}</span>
             </div>
             <div class="infra-body">
               <p class="infra-note">Transport &amp; parsing noise — present and browsable, but they don't own domain state, so the default view keeps them out of the way.</p>
               <div class="infra-grid">
-                ${model.infraTypes.map((u) => html`
+                ${infra.map((u) => html`
                   <button class="util" key=${u.name} onClick=${() => onOpenType(u.name)}>
                     <span class="un">${u.name}</span>
-                    <span class=${"uc" + (live[u.name] ? " live" : "")}>×${u.count}${live[u.name] ? " ▲" : ""}</span>
+                    <span class=${"uc" + (live[u.name] ? " live" : "")}>${showSkeleton ? "type" : "×" + u.count}${live[u.name] ? " ▲" : ""}</span>
                   </button>`)}
               </div>
             </div>

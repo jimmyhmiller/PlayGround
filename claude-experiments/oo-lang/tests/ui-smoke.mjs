@@ -364,11 +364,68 @@ async function main() {
     } else {
       try {
         await send("Page.navigate", { url: `http://127.0.0.1:${inspectPort}/` });
-        // the bespoke view loads; with main() never run, no instances exist so the stage shows
-        // its empty state (nothing to nest) — never a crash.
-        await waitFor("#nested", 12000);
-        await waitFor("#nested .stage-empty", 8000);
-        ok("inspect mode: bespoke view renders its empty stage (no live instances to nest)");
+        // (V3) with main() never run, no instances exist — so the Map view renders the TYPE-LEVEL
+        // SKELETON: the same bespoke nested view drawn from schema() alone. Assert the skeleton
+        // structure (Agent type-cell nests a Conversation type-cell nests a Message placeholder
+        // stack; a shared Tool type chip appears; the infra strip is present) and that a declared
+        // view renders as a TEMPLATE (toggle the Agent type-cell to board -> AgentBoard timeline
+        // placeholder + tool-type chips). Never the old "no live instances" dead-end, never a crash.
+        await waitFor("#nested.skeleton", 12000);
+        ok("inspect mode: Map view renders the type-level SKELETON (not the dead-end empty state)");
+        // a helper (in-page) that finds a TYPE cell whose header names a given type
+        const findTypeCellJS = (name) => `(()=>{
+          for(const r of document.querySelectorAll('#nested .region')){
+            const head=r.querySelector('.region-head');
+            const nm=head&&head.querySelector('.region-name');
+            if(nm&&nm.textContent.trim()===${JSON.stringify(name)}) return r;
+          }
+          return null;
+        })()`;
+        // Agent type-cell nests a Conversation type-cell that owns a Message placeholder stack
+        const nest = await evalPage(`(()=>{
+          const agent=${findTypeCellJS("Agent")};
+          if(!agent) return {noagent:true};
+          const conv=[...agent.querySelectorAll('.region .region-name')].some(n=>n.textContent.trim()==='Conversation');
+          const rows=agent.querySelectorAll('.conv .mstack .mrow').length;
+          return {conv, rows};
+        })()`);
+        if (nest.noagent) fails.push("inspect skeleton: no Agent type-cell");
+        else {
+          if (!nest.conv) fails.push("inspect skeleton: Agent type-cell does not nest a Conversation type-cell");
+          else ok("inspect skeleton: Agent type nests Conversation nests a Message placeholder stack");
+          if (nest.rows < 1) fails.push("inspect skeleton: nested Conversation renders no Message placeholder rows"); else ok(`inspect skeleton: placeholder message stack renders (${nest.rows} rows)`);
+        }
+        // a shared Tool TYPE chip appears (identity-colored, referenced by >=2 owner types)
+        const tchip = await evalPage(`(()=>{
+          const chips=[...document.querySelectorAll('#nested .stage-wrap .chip[data-identity]')];
+          const names=[...new Set(chips.map(c=>c.dataset.identity))];
+          return {chipCount:chips.length, names};
+        })()`);
+        if (tchip.chipCount < 1) fails.push("inspect skeleton: no shared type chip appears");
+        else ok(`inspect skeleton: shared type chips render (${tchip.names.length} distinct: ${JSON.stringify(tchip.names.slice(0,4))})`);
+        // the infrastructure strip renders in skeleton mode
+        if (!await evalPage(`!!document.querySelector('#nested .infra')`)) fails.push("inspect skeleton: infrastructure strip did not render");
+        else ok("inspect skeleton: infrastructure strip renders (utility types recede)");
+        // (V3 template) toggle the Agent type-cell to its declared-view BOARD -> AgentBoard renders
+        // as a TEMPLATE: a timeline placeholder + identity tool-type chips, titled by field wiring.
+        const hasToggle = await evalPage(`(()=>{const a=${findTypeCellJS("Agent")};return !!(a&&a.querySelector('.vtoggle'));})()`);
+        if (!hasToggle) fails.push("inspect skeleton: Agent type-cell has no declared-view toggle (AgentBoard not surfaced)");
+        else {
+          ok("inspect skeleton: Agent type-cell shows a cell<->board toggle (AgentBoard declared)");
+          await evalPage(`(()=>{const a=${findTypeCellJS("Agent")};const b=[...a.querySelectorAll('.vtoggle button')].find(x=>/board/.test(x.textContent));b.click();return true;})()`);
+          try { await waitFor('#nested .board[data-view="AgentBoard"] .timeline', 8000); } catch (e) { fails.push("inspect template: toggling to board never rendered an AgentBoard timeline"); }
+          const board = await evalPage(`(()=>{
+            const b=document.querySelector('#nested .board[data-view="AgentBoard"]');
+            if(!b) return {noboard:true};
+            return {rows:b.querySelectorAll('.timeline .tl').length, chips:b.querySelectorAll('.vchips .chip').length, hasTitle:!!b.querySelector('.board-title'), wired:!!b.querySelector('.tmpl-wire')};
+          })()`);
+          if (board.noboard) fails.push("inspect template: toggling to board did not render an AgentBoard");
+          else {
+            if (!board.hasTitle || !board.wired) fails.push("inspect template: AgentBoard missing title / field-name wiring"); else ok("inspect template: AgentBoard header shows title/badge FIELD-NAME wiring");
+            if (board.rows < 1) fails.push("inspect template: AgentBoard timeline rendered no placeholder rows"); else ok(`inspect template: AgentBoard timeline placeholder renders (${board.rows} rows)`);
+            if (board.chips < 1) fails.push("inspect template: AgentBoard tools section rendered no type chips"); else ok(`inspect template: AgentBoard tools section renders ${board.chips} tool-type chips`);
+          }
+        }
         // switch to the List rail (no liveCount gate) and browse Agent's (empty) table
         await evalPage(`[...document.querySelectorAll('.vt-btn')].find(b=>b.textContent.trim()==='List').click()`);
         await waitFor(".type-row");
