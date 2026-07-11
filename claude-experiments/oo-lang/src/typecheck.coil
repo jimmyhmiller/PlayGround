@@ -1034,6 +1034,7 @@
             (= k NK_MIGRATE)
               (do (set-cur-file file) (err-msg item c"migrate blocks are not implemented in this build") 0)
             (and (= k NK_VIEW) deep) (do (store! (field item ival) (cast i64 file)) (register-view item) 0)
+            (and (= k NK_ACTION) deep) (do (store! (field item ival) (cast i64 file)) (register-action item) 0)
             (>= (dkind-of k) 0) (do (collect-decl item file deep) 0)
             0)
           (store! i (+ (load i) 1)) 0)
@@ -1404,6 +1405,30 @@
   0)
 
 ; ======================================================================
+; Program-declared actions (DECISIONS #17) — the mirror of views. Each
+; `action "L" for T (params) { body }` is checked like a method on T:
+; target must be a declared entity (class/object), params are typed, and the
+; body typechecks with self:T (via check-fn-body, since an action node shares
+; the NK_FN slot layout b=params/c=ret/d=body). No compile artifact here —
+; build-program desugars each action into a hidden synthetic method on T.
+; ======================================================================
+(defn check-action [(an (ptr Node))] (-> i64)
+  (set-cur-file (cast (ptr i8) (load (field an ival))))
+  (let [tn (load (field an a)) target (find-decl (nm tn) (nlen tn))]
+    (if (= (cast i64 target) 0)
+      (err-msg-name tn c"action target: unknown type '" (nm tn) (nlen tn) c"'")
+      (let [dk (load (field target kind))]
+        (if (not (or (= dk DK_CLASS) (= dk DK_OBJECT)))
+          (err-msg-name tn c"action target '" (nm tn) (nlen tn) c"' must be an entity class or object")
+          (let [self-ty (mk-named target (self-args target))]
+            (check-fn-body target an self-ty) 0)))))
+  0)
+(defn check-all-actions [] (-> i64)
+  (let [n (action-count) (mut i) 0]
+    (loop (if (< (load i) n) (do (check-action (action-at (load i))) (store! i (+ (load i) 1)) 0) (break))))
+  0)
+
+; ======================================================================
 ; Driver
 ; ======================================================================
 (defn run-check [(path (ptr i8))] (-> i64)
@@ -1418,8 +1443,9 @@
       ; pass 2: deep-check bodies of the entry module only
       (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
         (loop (if (< (load i) n) (let [d (al-get ds (load i))] (if (load (field d deep)) (do (check-decl-bodies d) 0) 0) (store! i (+ (load i) 1)) 0) (break))))
-      ; pass 3: program-declared views
+      ; pass 3: program-declared views + actions
       (check-all-views)
+      (check-all-actions)
       (if (= (err-count) 0)
         (do (w-cstr 1 c"ok\n") 0)
         65))))

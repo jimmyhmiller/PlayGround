@@ -216,12 +216,17 @@
             (break))))
   (jb-byte b \]) 0)
 
+; a hidden synthetic action method (name starts with "__action_") — excluded from the
+; shown method list; surfaced instead by actions() as a curated affordance.
+(defn is-action-method [(mem (ptr Node))] (-> bool)
+  (and (>= (nlen mem) 9) (name-eq (nm mem) 9 (cast (ptr u8) c"__action_") 9)))
+
 (defn emit-methods-array [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
   (jb-byte b \[)
   (let [ms (load (field d members)) n (al-len ms) (mut i) 0 (mut first) true]
     (loop (if (< (load i) n)
             (let [mem (al-get ms (load i))]
-              (if (and (= (load (field mem kind)) NK_FN) (not (node-name-eq mem c"init")))
+              (if (and (and (= (load (field mem kind)) NK_FN) (not (node-name-eq mem c"init"))) (not (is-action-method mem)))
                 (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
                     (jb-cstr b c"{\"name\":") (jb-str b (nm mem) (nlen mem))
                     (jb-cstr b c",\"params\":[")
@@ -581,6 +586,38 @@
   (let [n (view-count) (mut i) 0]
     (loop (if (< (load i) n)
             (do (if (> (load i) 0) (jb-byte b \,) 0) (emit-view b (view-at (load i)))
+                (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-cstr b c"]}") 0)
+
+; ================= actions() : the program-declared action affordances (Phase V6) =================
+; The mirror of views(). Each `action "L" for T (params) { body }` as JSON so the inspector can
+; surface it as a BUTTON. `invoke` is the hidden synthetic method name the button evals against the
+; instance (T.at(slot,gen).<invoke>(args)); index i mirrors build-program's __action_<i> desugar:
+;   { "type":"Actions", "actions":[
+;     { "label":"Pause", "target":"Agent", "invoke":"__action_0", "params":[], "returns":"Void" },
+;     { "label":"Ask", "target":"Agent", "invoke":"__action_2",
+;       "params":[{"name":"question","type":"String"}], "returns":"Void" } ] }
+(defn emit-action [(b (ptr JBuf)) (an (ptr Node)) (idx i64)] (-> i64)
+  (jb-cstr b c"{\"label\":") (jb-str b (nm an) (nlen an))
+  (let [tn (load (field an a))]
+    (jb-cstr b c",\"target\":") (jb-str b (nm tn) (nlen tn)))
+  (jb-cstr b c",\"invoke\":") (jb-byte b \") (jb-cstr b c"__action_") (jb-int b idx) (jb-byte b \")
+  (jb-cstr b c",\"params\":[")
+  (let [ps (load (field an b)) np (if (= (cast i64 ps) 0) 0 (kid-count ps)) (mut j) 0]
+    (loop (if (< (load j) np)
+            (let [pn (kid-at ps (load j))]
+              (if (> (load j) 0) (jb-byte b \,) 0)
+              (jb-cstr b c"{\"name\":") (jb-str b (nm pn) (nlen pn))
+              (jb-cstr b c",\"type\":") (jb-byte b \") (ast-ty-str b (load (field pn a))) (jb-byte b \") (jb-byte b \})
+              (store! j (+ (load j) 1)) 0)
+            (break))))
+  (jb-cstr b c"],\"returns\":") (jb-byte b \") (ast-ty-str b (load (field an c))) (jb-byte b \") (jb-byte b \}) 0)
+(defn reflect-actions [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+  (jb-cstr b c"{\"type\":\"Actions\",\"actions\":[")
+  (let [n (action-count) (mut i) 0]
+    (loop (if (< (load i) n)
+            (do (if (> (load i) 0) (jb-byte b \,) 0) (emit-action b (action-at (load i)) (load i))
                 (store! i (+ (load i) 1)) 0)
             (break))))
   (jb-cstr b c"]}") 0)

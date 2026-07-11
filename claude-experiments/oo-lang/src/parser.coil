@@ -329,6 +329,26 @@
     (expect TK_RBRACE)
     nd))
 
+; ---- program-declared actions (DECISIONS #17) -----------------------------
+; action "<Label>" for <Type> [(<param>: <T>, ...)] { <body> }
+; Slot layout mirrors an NK_FN so check-fn-body / compile-method drive it directly:
+;   s-name = label, a = NK_TYPE target, b = NK_PARAMS, c = null (ret; Void), d = NK_BLOCK body.
+(defn parse-action [] (-> (ptr Node))
+  (advance) ; 'action'
+  (let [nd (mk-node NK_ACTION (cur-line) (cur-col))]
+    (if (check TK_STR_BEGIN)
+      (let [s (parse-string)]
+        (if (and (= (kid-count s) 1) (= (load (field (kid-at s 0) kind)) NK_STRCHUNK))
+          (set-name! nd (load (field (kid-at s 0) s-name)) (load (field (kid-at s 0) s-len)))
+          (perror c"action label must be a plain (non-interpolated) string"))
+        0)
+      (perror c"expected an action label string"))
+    (expect TK_FOR)
+    (store! (field nd a) (parse-type))
+    (if (check TK_LPAREN) (do (store! (field nd b) (parse-params)) 0) 0)
+    (store! (field nd d) (parse-block))
+    nd))
+
 ; module NAME (dotted, contiguous in source)
 (defn parse-module [] (-> (ptr Node))
   (let [ln (cur-line) col (cur-col)]
@@ -406,7 +426,8 @@
     (check TK_FN) (parse-fn true)
     (check TK_MIGRATE) (parse-migrate)
     (check TK_VIEW) (parse-view)
-    (perror-node c"expected a top-level declaration (class, interface, enum, object, fn, view, import, module, or migrate)")))
+    (check TK_ACTION) (parse-action)
+    (perror-node c"expected a top-level declaration (class, interface, enum, object, fn, view, action, import, module, or migrate)")))
 
 ; ---- statements ------------------------------------------------------------
 (defn parse-block [] (-> (ptr Node))

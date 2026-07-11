@@ -360,3 +360,14 @@ view Pulse for Message {
   stream: all as heat(by: role)
   key:    role
 }
+
+// ============================ program-declared actions (DECISIONS #17) ============================
+// The mirror of `view`: `view` declares how entities are SEEN, `action` declares what a user can DO
+// to them. The viewer surfaces each as a BUTTON in the instance detail inspector (distinct from the
+// raw method list) — "the things a person would want to do here." The body is full Scry with `self`
+// bound to the target instance; it runs through the safepoint eval channel, so mutations are live
+// and `--readonly` rejects the mutating ones. See docs/06-implementation.md.
+action "Pause"  for Agent { self.pause() }
+action "Resume" for Agent { self.resume() }
+action "Ask"    for Agent (question: String) { self.runLoop(question) }
+action "Spawn researcher" for Orchestrator (topic: String) { self.research(topic) }

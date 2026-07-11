@@ -838,9 +838,45 @@
     (loop (if (< (load i) n) (do (if (is-fn-node (al-get ms (load i))) (do (store! c (+ (load c) 1)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
     (load c)))
 
+; ---- action desugar (DECISIONS #17) ----
+; Each `action "L" for T (params) { body }` becomes a HIDDEN synthetic method on T named
+; `__action_<i>` (i = registry index), sharing the action's params (b) / null return (c) /
+; body (d). Injected into T's member list so it flows through register-methods +
+; compile-all-methods with ZERO new runtime, and resolves on the normal method-invoke path
+; (the viewer evals `T.at(slot,gen).__action_<i>(args)`). Excluded from the shown method
+; list by the `__action_` name prefix (serialize.emit-methods-array). Guarded to inject once.
+(defn actions-injected-cell [] (-> (ptr bool)) (alloc-static bool))
+(defn action-mangled-name [(i i64)] (-> (ptr u8))
+  (let [buf (cast (ptr i8) (xalloc 32))]
+    (snprintf buf 32 c"__action_%d" (cast i32 i))
+    (cast (ptr u8) buf)))
+(defn is-action-method-name [(name (ptr u8)) (len i64)] (-> bool)
+  (if (< len 9) false
+    (tok-eq name 9 c"__action_")))
+(defn inject-actions [] (-> i64)
+  (if (load (actions-injected-cell)) 0
+    (do
+      (store! (actions-injected-cell) true)
+      (let [n (action-count) (mut i) 0]
+        (loop
+          (if (< (load i) n)
+            (let [an (action-at (load i)) tn (load (field an a)) target (find-decl (nm tn) (nlen tn))]
+              (if (= (cast i64 target) 0) 0
+                (let [synth (mk-node NK_FN (load (field an line)) (load (field an col)))
+                      mname (action-mangled-name (load i))]
+                  (set-name! synth mname (strlen (cast (ptr i8) mname)))
+                  (store! (field synth b) (load (field an b)))   ; params (may be null)
+                  (store! (field synth c) (load (field an c)))   ; return (null => Void)
+                  (store! (field synth d) (load (field an d)))   ; body block
+                  (al-push! (mut (field target members)) synth) 0))
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+      0)))
+
 ; top-level: build the whole Program from the (already type-checked) ctx.
 (defn build-program [] (-> (ptr Program))
   (cc-init)
+  (inject-actions)
   (register-ifaces)
   (register-methods)
   (compile-all-methods)
@@ -944,6 +980,7 @@
   (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
     (loop (if (< (load i) n) (let [d (al-get ds (load i))] (if (load (field d deep)) (do (check-decl-bodies d) 0) 0) (store! i (+ (load i) 1)) 0) (break))))
   (check-all-views)
+  (check-all-actions)
   (err-count))
 
 (defn dump-arenas-of [(p (ptr Program))] (-> i64)

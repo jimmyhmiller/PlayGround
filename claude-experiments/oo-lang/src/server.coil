@@ -136,6 +136,8 @@
                     (do (reflect-graph (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"views") (= (arg-count e) 0))
                     (do (reflect-views (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                  (and (node-name-eq callee c"actions") (= (arg-count e) 0))
+                    (do (reflect-actions (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"generation") (= (arg-count e) 0))
                     (do (jb-cstr (load (ev-valbuf)) c"{\"type\":\"Int\",\"value\":") (jb-int (load (ev-valbuf)) (current-generation)) (jb-byte (load (ev-valbuf)) \}) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"fields") (= (arg-count e) 1))
