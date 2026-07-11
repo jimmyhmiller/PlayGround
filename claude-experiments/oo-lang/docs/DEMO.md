@@ -233,8 +233,9 @@ and it's literally the same graph, which just fills in once you run it.
 
 ```
 ./scry inspect examples/assistant.scry
-# viewer: http://localhost:7357
+# viewer: http://localhost:7400
 #   (inspect: schema only, program not running - press Ctrl-C to exit)
+# (as of Phase 10 the fixed :7357 belongs to the PORTAL; run/inspect take an ephemeral :7400+)
 ```
 
 `main()` never runs - no `you>` prompt, no agent output. It typechecks, builds the (empty) arenas,
@@ -272,3 +273,66 @@ from the earlier demos - rows, fields, click through to a detail, invoke a metho
 One view, two states: the static schema you inspected and the live heap you're now steering are the
 **same node-link graph**. That's the pitch - the class diagram isn't a separate artifact you keep in
 sync by hand; it IS the running program, before and during the run.
+
+
+---
+
+# Scry demo, Phase 10 - the PORTAL: sit at one page, watch programs pop up (DECISIONS #13)
+
+The UI model change the owner asked for: launch a hub, sit at ONE page, and every program you run or
+inspect appears as a card you click into. No per-program URL juggling - one origin (`:7357`) that
+reverse-proxies the eval channel to whichever program you picked.
+
+## 0. Launch the portal and leave it open
+
+```
+./scry portal
+# portal: http://localhost:7357  - sit here; run/inspect programs pop up as cards. Ctrl-C to exit.
+```
+
+Open **http://localhost:7357**. It's empty - "no programs yet" - with the two commands to try.
+
+## 1. In OTHER terminals, start programs - watch cards POP UP
+
+```
+# terminal 2
+./scry run examples/assistant.scry
+# viewer: http://localhost:7400
+# portal: http://localhost:7357     <- it found the portal and registered
+
+# terminal 3
+./scry inspect examples/agents.scry
+# viewer: http://localhost:7401
+# portal: http://localhost:7357
+```
+
+Watch the portal page (it polls every second): a **`assistant.scry` card** appears with a *running*
+badge, then an **`agents.scry` card** with an *inspect* badge. Each card shows a live status dot, the
+port, start time, and cheap live stats (instance + type counts, fetched through the proxy). New cards
+animate in - it feels alive.
+
+## 2. Click a card -> the inspector, proxied
+
+Click the `assistant.scry` card. You land in the **class graph** (the Phase 9 default view) for THAT
+program - nodes, edges, live badges - except every eval now flows through `/p/<id>/eval` and the
+portal routes it to that process. Everything you learned in the earlier demos works verbatim:
+drill a live node into its instance table, open a detail, invoke a method, pop the REPL dock. Hit
+**`← portal`** (top-left) to go back to the grid and click into the `agents.scry` inspector instead
+(all-zero badges - it's inspect-only, never ran main()).
+
+## 3. It still works standalone - the portal is ADDITIVE, never required
+
+Kill the portal (Ctrl-C in terminal 1). The programs keep running and **each still serves its own
+viewer** on its printed `:7400`/`:7401` URL - open either directly and it's the exact same inspector.
+Registration is best-effort: if no portal is up when you `scry run`, it simply prints its direct URL
+and nothing else. The portal adds a hub; it never becomes a dependency.
+
+Back on the portal page, kill one program (Ctrl-C its terminal): within a second its card **greys out**
+("exited") - the portal health-probes each program's port on every poll, so a dead program visibly
+drops out of the live set.
+
+### One-line pitch to land
+
+> Launch the portal, sit at one page, and run programs in other terminals - they pop up as cards you
+> click into and get the full live inspector, all through one origin. Kill the portal and every
+> program still stands on its own. The hub is a lens, not a leash.

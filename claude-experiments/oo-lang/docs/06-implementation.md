@@ -1518,10 +1518,10 @@ Graph** (the better first impression). List is the original rail + table + detai
 
 Dark-first with a `prefers-color-scheme` light path, reusing the existing viewer CSS variables.
 
-## What the portal phase (DECISIONS #13) will wrap
+## What the portal phase (DECISIONS #13) wraps — NOW BUILT in Phase 10 (see below)
 
 The portal is a reverse-proxy hub where each `scry run`/`scry inspect` registers `{name, pid, port,
-schema, …}` and appears as a card. Phase 9 is built to slot straight in:
+mode, …}` and appears as a card. Phase 9 was built to slot straight in, and Phase 10 realizes it:
 
 - **`schema()` is the registration payload.** A program can hand the portal its `schema()` result at
   register time; the portal can render the class graph as the card's preview **before the program is
@@ -1559,3 +1559,110 @@ schema, …}` and appears as a card. Phase 9 is built to slot straight in:
 - **Deterministic layout means NO `Math.random()` anywhere** — the golden-angle seed + fixed
   iteration count + AABB separation give a settled, non-overlapping, reload-stable layout; memoizing on
   a structural signature (never on counts) is what keeps it from jittering when badges tick live.
+
+
+# Phase 10 — the reverse-proxy PORTAL: one hub, programs pop up as cards (DECISIONS #13)
+
+The UI model changes: instead of juggling a per-program URL, you launch ONE persistent **portal**
+(`scry portal`, fixed `http://localhost:7357`) and sit at it. Each `scry run`/`scry inspect` binds an
+EPHEMERAL port and REGISTERS with the portal; programs appear as cards when they start and grey out
+when they stop. The portal serves the viewer shell and REVERSE-PROXIES the eval channel to the right
+program (`POST /p/<id>/eval`). One origin, no port juggling. The eval channel itself is unchanged —
+still the only wire op; the portal just routes it. **Crucially the portal is ADDITIVE, never
+required:** registration is best-effort, so `scry run` still serves its own viewer standalone exactly
+as before if no portal is up.
+
+## The registry + the hub (`src/portal.coil`)
+
+The portal runs **NO VM**. It is pure socket transport + a blocking libcurl, so its accept loop is
+single-threaded and serial ⇒ the registry needs **no lock** (all mutation happens on the one accept
+thread). The registry is a fixed array of `ProgEntry {id, name, mode, port, pid, status, start-time}`
+(mode 0=run / 1=inspect; status 0=running / 1=exited). Routes on the accept thread:
+
+- `GET /api/programs` → **reap-then-serialize**. Before answering it health-probes every *running*
+  entry with a fast blocking `GET /` to `127.0.0.1:<port>` (400 ms budget); a dead port (curl status
+  0 = connection refused) flips the entry to `status:"exited"` so it visibly greys. Then it emits the
+  JSON array `[{id,name,mode,port,pid,status,startTime}, …]`.
+- `POST /register {name,pid,port,mode}` → assigns an id, adds the entry, returns `{"id":N}`. The
+  portal timestamps `startTime` (its own clock) on receipt.
+- `POST /deregister {id}` / `POST /heartbeat {id}` → mark exited / un-grey (both optional; the health
+  probe is the real liveness source, so deregister is just a courtesy on clean exit).
+- `POST /p/<id>/eval` → **the reverse proxy.** Look the entry up by id, `pc-request POST` the body
+  verbatim to `http://127.0.0.1:<port>/eval`, return the program's response verbatim (status + body).
+  A dead peer (status 0) greys the entry and returns `502`. `path-prog-id` parses the `<id>` digits
+  out of `/p/<id>/eval`.
+- `GET` anything else → `serve-static` (the same viewer shell/assets server.coil already serves).
+
+The portal reuses server.coil's HTTP primitives (`send-response`, `serve-static`, `parse-req`,
+`find-body-start`, `header-content-length`, `make-sockaddr`) and json.coil's `JBuf`. `portal-bind`
+binds **exactly** 7357 (no `+20` scan — the portal must own that port or fail loudly).
+
+## The blocking curl client (`src/portalclient.coil`)
+
+A tiny leaf module (imports only `ioutil`) shared by two callers that both lack a VM: the portal's
+proxy and a program's registration. Unlike http.coil's cooperative `curl_multi` loop (which parks on
+safepoints because it runs *inside* a mutator), here a plain **blocking `curl_easy_perform`** is
+exactly right (added one extern, `curl_easy_perform`, to ioutil.coil). `pc-request method url body
+blen timeout-ms outbuf` returns the HTTP status (0 = transport failure) and leaves the body in a
+growable `PcBuf`. `portal-register name pid port mode` POSTs to `/register` and parses `{"id":N}`
+back; `portal-deregister id` is fire-and-forget. No import cycle: server.coil and portal.coil both
+import portalclient; it imports neither.
+
+## Ephemeral ports + best-effort registration (`src/server.coil`)
+
+`scry-serve`/`scry-inspect` now bind starting at **7400** (`bind-server 7400`, +20 scan) so they never
+grab the portal's 7357. After the accept thread is up and the direct viewer URL is printed, each calls
+`srv-register path port mode`: it POSTs `{name:<basename>, pid:getpid(), port, mode}` to
+`127.0.0.1:7357/register`. **If the portal is not running the POST fails and we silently continue** —
+the program still serves its own viewer on its ephemeral port. On success it additionally prints
+`portal: http://localhost:7357`, so BOTH the direct URL and the portal entry point work.
+
+## Viewer dual-mode (`viewer/app.js` + `style.css`)
+
+One app, two modes, decided once at boot by a `Root` component:
+
+- A module-level `evalBase` (default `""`) is prepended to every `evalSource` POST → `${evalBase}/eval`.
+  Standalone leaves it `""` (today's `/eval`); clicking into a program through the portal sets it to
+  `/p/<id>` so **every existing pane works unchanged through the proxy** — nothing below `evalSource`
+  knows the difference.
+- `Root` probes `GET /api/programs` once: **200 ⇒ portal mode** (show the landing grid); **404 ⇒
+  standalone** (a program serving its own viewer directly) ⇒ render `<App/>` immediately with
+  `evalBase=""`, exactly as before.
+- The **`Landing`** grid polls `/api/programs` every ~1 s so cards POP UP when a program launches and
+  grey when it exits (`.pcard.exited`). Each `ProgramCard` shows the name, a mode badge
+  (running/inspect), a live/exited status dot, the port, start time, and cheap live stats (one
+  `types()` through the proxy → instance + type counts). A subtle `pcard-in` enter animation makes new
+  cards feel alive.
+- Clicking a card sets `evalBase="/p/<id>"` and mounts `<App key=<id> onBack=… programName=…/>` — the
+  existing inspector, Graph view default (Phase 9), now driven entirely through the proxy. `App` grows
+  an optional `← portal` back button (in `TopBar`) that clears `evalBase` and returns to the grid.
+
+## Tests (1 new py gate + a portal scenario in ui-smoke; 262 total)
+
+- **`run_portal_test`.** Starts `scry portal`; asserts `GET /api/programs` is `[]`; launches
+  `scry run examples/demo-mini.scry` and asserts it appears within ~4 s with `mode:"run"` and an
+  ephemeral port ≥ 7400; `POST /p/<id>/eval {source:"types()"}` **proxies and returns the real schema
+  JSON** with the id echoed (proves the proxy); launches `scry inspect examples/agents.scry` for a
+  SECOND entry with `mode:"inspect"`; **kills** the run program and asserts it greys to
+  `status:"exited"` within the reap window; `GET /` serves the viewer HTML. SKIPPED LOUDLY if :7357 is
+  already in use (a developer's own portal), never clobbering it.
+- **`ui-smoke` portal beats (headless Chrome, gated).** After the standalone graph/click-through
+  beats, boots a portal + a program, navigates the page to `http://localhost:7357/`, asserts a program
+  **card renders**, clicks it, asserts the **inspector graph loads through the proxy** (Agent node
+  present), and that the `← portal` back button returns to the grid.
+- All 261 prior tests unchanged and green (they hit programs directly on their ephemeral ports, not
+  through the portal — standalone stays first-class).
+
+## Coil / JS friction (adds to Phase 1–9's list)
+
+- **A single-threaded accept loop dissolves the "mutex-guarded registry" requirement.** The portal
+  runs no mutator, accepts one connection at a time, and does all registry reads/writes/reaps on that
+  one thread — so the obvious concurrency worry simply isn't there. The lock the brief suggested would
+  have guarded nothing.
+- **Health-probe-on-poll beats a heartbeat timer.** Because the viewer already polls `/api/programs`
+  every second, hanging the reap off that GET (probe each running port) needs no background thread and
+  no clock skew — a dead program greys on the very next poll. Deregister/heartbeat exist but are
+  belt-and-suspenders.
+- **`bind-server 7357`→`7400` was the whole "port juggling" fix** — one constant. Because
+  `bind-server` already scans `+20`, two programs on one machine transparently land on 7400/7401/… and
+  each registers its real bound port, so the proxy always targets the right process.
