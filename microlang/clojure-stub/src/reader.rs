@@ -232,6 +232,11 @@ impl Parser {
                     // `def` marks the var dynamic so refs read the binding stack.
                     let m = sym(rt, "-dynamic-meta");
                     rt.vec_to_list(&[m, target])
+                } else if meta_has_key(rt, meta, "private") {
+                    // `^:private name` -> `(-private-meta name)`; the compiler marks
+                    // the var private (cross-namespace access errors).
+                    let m = sym(rt, "-private-meta");
+                    rt.vec_to_list(&[m, target])
                 } else {
                     target
                 }

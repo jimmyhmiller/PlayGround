@@ -1029,3 +1029,32 @@ fn first_class_vars() {
     // Vars key by qualified sym, so a var from another ns derefs correctly.
     assert_eq!(run("(ns a) (def x 7) (ns b) (var-get (var a/x))"), "7");
 }
+
+#[test]
+fn declare_defonce_and_private() {
+    // declare: forward reference (var interned; the later def binds it).
+    assert_eq!(run("(declare later) (defn now [] (later)) (defn later [] 7) (now)"), "7");
+    // defonce: the second definition is a no-op.
+    assert_eq!(run("(defonce x 1) (defonce x 2) x"), "1");
+    // defn- defines a normal fn (usable within its own namespace).
+    assert_eq!(run("(defn- helper [n] (* n n)) (helper 6)"), "36");
+    assert_eq!(run("(ns geom) (defn- secret [] 9) (defn pub [] (secret)) (pub)"), "9");
+}
+
+#[test]
+#[should_panic(expected = "is private")]
+fn private_var_cross_namespace_errors() {
+    run("(ns geom) (defn- secret [] 9) (ns app) (geom/secret)");
+}
+
+#[test]
+fn unbound_var_semantics() {
+    // A value-less (def x) interns an UNBOUND var: #'x works, bound? is false,
+    // and a deref throws a CATCHABLE "Unbound var".
+    assert_eq!(run("(def x) (bound? (var x))"), "false");
+    assert_eq!(run("(declare y) (def y 5) (bound? (var y))"), "true");
+    assert_eq!(
+        run("(def x) (try @(var x) (catch :default e (str \"caught: \" e)))"),
+        "\"caught: Unbound var: user/x\""
+    );
+}

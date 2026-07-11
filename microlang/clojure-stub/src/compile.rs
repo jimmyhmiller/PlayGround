@@ -28,6 +28,9 @@ pub struct Compiler {
     /// Resolved syms declared `^:dynamic`: a reference to one reads the thread-local
     /// binding stack (`%dyn-get`) rather than the plain global.
     dynamics: std::collections::HashSet<Sym>,
+    /// Resolved syms declared `^:private` / `defn-`: a qualified reference from a
+    /// DIFFERENT namespace is a compile error.
+    private: std::collections::HashSet<Sym>,
     /// Namespace state (frontend-owned; the toolkit's globals are a flat `Sym`
     /// pool, so a user-ns var `foo/x` is simply the interned sym `"foo/x"`).
     ns: NsState,
@@ -90,6 +93,7 @@ impl Compiler {
         Compiler {
             scope: Vec::new(),
             dynamics: std::collections::HashSet::new(),
+            private: std::collections::HashSet::new(),
             methods: std::collections::HashSet::new(),
             site: 0,
             field_site: 0,
@@ -197,7 +201,12 @@ impl Compiler {
                         .and_then(|a| a.get(left))
                         .map(String::as_str)
                         .unwrap_or(left);
-                    return rt.intern(&format!("{real}/{right}"));
+                    let q = rt.intern(&format!("{real}/{right}"));
+                    // A `^:private` / `defn-` var is only accessible within its ns.
+                    if real != self.ns.current && self.private.contains(&q) {
+                        panic!("var {real}/{right} is private (declared with defn-/^:private)");
+                    }
+                    return q;
                 }
             }
         }
@@ -229,16 +238,29 @@ impl Compiler {
         Ir::Global(r)
     }
 
-    /// `(def (-dynamic-meta x) …)` — the reader's lowering of `(def ^:dynamic x …)`.
-    /// Returns the inner name form `x` when present.
-    fn unwrap_dynamic_meta<M: ValueModel>(&self, rt: &Runtime<M>, form: u64) -> Option<u64> {
-        rt.as_cons(form)?;
-        let items = rt.list_to_vec(form);
-        if items.len() == 2 && matches!(rt.decode(items[0]), Val::Sym(s) if rt.sym_name(s) == "-dynamic-meta")
-        {
-            return Some(items[1]);
+    /// Peel `(-dynamic-meta …)` / `(-private-meta …)` wrappers off a `def` name
+    /// (from `^:dynamic` / `^:private` / `defn-`), returning the bare name form and
+    /// the flags. Handles either order / both.
+    fn unwrap_def_meta<M: ValueModel>(&self, rt: &Runtime<M>, mut form: u64) -> (u64, bool, bool) {
+        let (mut dynamic, mut private) = (false, false);
+        while rt.as_cons(form).is_some() {
+            let items = rt.list_to_vec(form);
+            if items.len() != 2 {
+                break;
+            }
+            match rt.decode(items[0]) {
+                Val::Sym(s) if rt.sym_name(s) == "-dynamic-meta" => {
+                    dynamic = true;
+                    form = items[1];
+                }
+                Val::Sym(s) if rt.sym_name(s) == "-private-meta" => {
+                    private = true;
+                    form = items[1];
+                }
+                _ => break,
+            }
         }
-        None
+        (form, dynamic, private)
     }
 
     /// A `Const` Ir holding the symbol `s` as a value (for the `%dyn-*` prims,
@@ -295,11 +317,8 @@ impl Compiler {
                 }
                 "do" => return Ir::Do(items[1..].iter().map(|&f| self.compile(rt, f)).collect()),
                 "def" => {
-                    // `(def (-dynamic-meta x) v)` — reader-lowered `^:dynamic`.
-                    let (nameform, dynamic) = match self.unwrap_dynamic_meta(rt, items[1]) {
-                        Some(inner) => (inner, true),
-                        None => (items[1], false),
-                    };
+                    // Peel reader-lowered `^:dynamic` / `^:private` off the name.
+                    let (nameform, dynamic, private) = self.unwrap_def_meta(rt, items[1]);
                     let raw = self.name(rt, nameform).expect("def: name must be a symbol");
                     // Resolve+record the name FIRST so a self-reference inside the
                     // init (e.g. `(def x (fn [] x))`) resolves to this same var.
@@ -308,14 +327,19 @@ impl Compiler {
                         // Key the binding stack by the var's resolved, qualified sym.
                         self.dynamics.insert(n);
                     }
-                    // value-less `(def x)` declares an unbound var (bound to nil).
-                    let init = if items.len() > 2 {
-                        self.compile(rt, items[2])
-                    } else {
-                        let nil = rt.encode(Val::Nil);
-                        Ir::Const(rt.intern_const(nil))
-                    };
-                    return Ir::Def { name: n, init: Box::new(init) };
+                    if private {
+                        self.private.insert(n);
+                    }
+                    if items.len() > 2 {
+                        let init = Box::new(self.compile(rt, items[2]));
+                        return Ir::Def { name: n, init };
+                    }
+                    // value-less `(def x)` / `(declare x)`: the var is INTERNED
+                    // (so `#'x` resolves and `x` is a forward reference) but its
+                    // root stays UNBOUND — a deref throws "Unbound" until set. The
+                    // name was recorded by `def_name`; emit no store, just nil.
+                    let nil = rt.encode(Val::Nil);
+                    return Ir::Const(rt.intern_const(nil));
                 }
                 "fn" | "fn*" => return self.compile_fn(rt, &items),
                 "let" | "let*" => return self.compile_let(rt, &items),

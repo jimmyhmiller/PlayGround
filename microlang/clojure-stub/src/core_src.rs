@@ -899,4 +899,16 @@ pub const CORE: &str = r##"
           (if (nil? es) acc
               (let [e (first es)]
                 (recur (next es) (%cons (-realize (second e)) (%cons (-realize (first e)) acc))))))))
+
+;; ─────────────── var-defining macros ───────────────
+;; `(declare a b c)` interns unbound vars (forward references); a deref before a
+;; real `def` throws "Unbound".
+(defmacro declare (& names)
+  (%cons 'do (map (fn [n] (list 'def n)) names)))
+;; `(defonce name val)` defs only if the var is not already bound.
+(defmacro defonce (name val)
+  (list 'if (list 'bound? (list 'var name)) nil (list 'def name val)))
+;; `(defn- name params body…)` — a PRIVATE fn (cross-namespace access errors).
+(defmacro defn- (name params & body)
+  (list 'def (list '-private-meta name) (%cons 'fn (%cons params body))))
 "##;
