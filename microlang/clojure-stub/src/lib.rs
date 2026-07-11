@@ -59,21 +59,22 @@ pub fn run_with_paths<M: ValueModel>(
     // Persistent data structures ported from ClojureScript (EPL-1.0), loaded after
     // the core protocols/shim they build on. Redefines vector/vec/vector?.
     run_src(rt, cs, &mut macros, &mut comp, cljs_types_src::CLJS);
-    // clojure.core + the cljs types are the flat/bare core space; user code from
-    // here on runs in the `user` namespace and qualifies its own defs.
+    // clojure.core + the cljs types loaded into `clojure.core`; user code from
+    // here on runs in the `user` namespace. EVERY var is now ns-qualified, so the
+    // frontend's own references to core helpers use their `clojure.core/…` names.
     comp.end_core_load();
     // These are provided in-process; `require` must never look for them on disk.
     comp.mark_loaded("clojure.core");
     comp.mark_loaded("user");
     // Route `(obj arg)` for a non-closure record (keyword/map/vector) through the
     // core `-apply-obj` dispatcher, so keywords/collections are callable.
-    let apply_obj = rt.intern("-apply-obj");
+    let apply_obj = rt.intern("clojure.core/-apply-obj");
     rt.set_apply_fn(apply_obj);
     let result = run_src(rt, cs, &mut macros, &mut comp, src);
     // Force any lazy sequence in the final value so callers / the printer (which
     // can't invoke thunks) see a fully realized result.
     let slot = rt.push_root(result);
-    let realize = rt.intern("-realize");
+    let realize = rt.intern("clojure.core/-realize");
     let out = match rt.global(realize) {
         Some(rf) => cs.invoke(cs, rt, rf, &[rt.root_get(slot)]),
         None => rt.root_get(slot),
@@ -112,7 +113,7 @@ fn eval1<M: ValueModel>(
     comp: &mut Compiler,
     form: u64,
 ) -> u64 {
-    let expanded = expand(rt, cs, macros, form);
+    let expanded = expand(rt, cs, macros, comp, form);
     let slot = rt.push_root(expanded);
     let ir = comp.compile(rt, rt.root_get(slot));
     rt.truncate_roots(slot);
@@ -143,23 +144,16 @@ fn eval_form<M: ValueModel>(
         return r;
     }
     // Real core.clj: `(def ^{:macro true} name (fn ...))` — reader wrapped the
-    // name as `(-macro-meta name)`. Register the macro and define the fn.
+    // name as `(-macro-meta name)`. Define the fn, then register the macro under
+    // its RESOLVED (namespace-qualified) sym.
     if let Some((name, newform)) = strip_def_macro_meta(rt, form) {
-        macros.insert(name);
-        comp.next_def_bare(); // macro fns live in the flat space (short name)
-        return eval1(rt, cs, macros, comp, newform);
+        let r = eval1(rt, cs, macros, comp, newform);
+        macros.insert(comp.resolve_ref(rt, name));
+        return r;
     }
     // Real core.clj registers a macro AFTER defining it: `(. (var foo) (setMacro))`.
     if let Some(name) = setmacro_target(rt, form) {
-        macros.insert(name);
-        // The fn was defined with a plain `def`, so it may live under the current
-        // ns (`user/name`); mirror it to the bare short name the expander looks up.
-        let qualified = comp.resolve_ref(rt, name);
-        if qualified != name {
-            if let Some(v) = rt.global(qualified) {
-                rt.define_global(name, v);
-            }
-        }
+        macros.insert(comp.resolve_ref(rt, name));
         return rt.encode(Val::Nil);
     }
     if let Some(name) = defmacro_name(rt, form) {
@@ -182,9 +176,8 @@ fn eval_form<M: ValueModel>(
         let lam = rt.vec_to_list(&fnform);
         let def_sym = sym(rt, "def");
         let defform = rt.vec_to_list(&[def_sym, items[1], lam]);
-        comp.next_def_bare(); // macro fns live in the flat space (short name)
         let r = eval1(rt, cs, macros, comp, defform);
-        macros.insert(name);
+        macros.insert(comp.resolve_ref(rt, name));
         return r;
     }
     eval1(rt, cs, macros, comp, form)
@@ -195,6 +188,7 @@ fn expand<M: ValueModel>(
     rt: &mut Runtime<M>,
     cs: &dyn CodeSpace<M>,
     macros: &HashSet<Sym>,
+    comp: &Compiler,
     form: u64,
 ) -> u64 {
     let slot = rt.push_root(form);
@@ -203,10 +197,13 @@ fn expand<M: ValueModel>(
         let f = rt.root_get(slot);
         let Some((head, _)) = rt.as_cons(f) else { break };
         let Val::Sym(hs) = rt.decode(head) else { break };
-        if !macros.contains(&hs) {
+        // Resolve the head to its namespace-qualified var; is that a macro? This
+        // makes bare, fully-qualified, AND alias-qualified macro calls all work.
+        let q = comp.resolve_ref(rt, hs);
+        if !macros.contains(&q) {
             break;
         }
-        let mfn = match rt.global(hs) {
+        let mfn = match rt.global(q) {
             Some(v) => v,
             None => break,
         };
@@ -228,7 +225,7 @@ fn expand<M: ValueModel>(
             let datum = rt.list_to_vec(f)[1];
             if datum_has_coll(rt, datum) {
                 let built = build_quote(rt, datum);
-                expand(rt, cs, macros, built)
+                expand(rt, cs, macros, comp, built)
             } else {
                 f
             }
@@ -237,24 +234,24 @@ fn expand<M: ValueModel>(
             let inner = rt.list_to_vec(f)[1];
             let mut gs = HashMap::new();
             let built = syntax_quote(rt, inner, &mut gs);
-            expand(rt, cs, macros, built)
+            expand(rt, cs, macros, comp, built)
         } else if is_sym(rt, head, "ns") || is_sym(rt, head, "in-ns") {
             rt.encode(Val::Nil) // namespaces are a no-op for now
         } else if is_sym(rt, head, "fn") || is_sym(rt, head, "fn*") {
-            expand_fn(rt, cs, macros, f)
+            expand_fn(rt, cs, macros, comp, f)
         } else if is_sym(rt, head, "let") || is_sym(rt, head, "let*") {
-            rebuild_binder(rt, cs, macros, f)
+            rebuild_binder(rt, cs, macros, comp, f)
         } else if is_sym(rt, head, "loop") || is_sym(rt, head, "loop*") {
-            expand_loop(rt, cs, macros, f)
+            expand_loop(rt, cs, macros, comp, f)
         } else if is_sym(rt, head, "defprotocol") {
             let d = desugar_defprotocol(rt, f);
-            expand(rt, cs, macros, d)
+            expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "extend-type") {
             let d = desugar_extend_type(rt, f);
-            expand(rt, cs, macros, d)
+            expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "deftype") {
             let d = desugar_deftype(rt, f);
-            expand(rt, cs, macros, d)
+            expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "var") {
             // `(var x)` -> a first-class var value `(record 'Var 'x)`. (The
             // `(. (var x) (setMacro))` bootstrap pattern is intercepted earlier,
@@ -265,39 +262,39 @@ fn expand<M: ValueModel>(
             let tag_q = quote_form(rt, vtag);
             let name_q = quote_form(rt, items[1]);
             let g = rt.vec_to_list(&[rec, tag_q, name_q]);
-            expand(rt, cs, macros, g)
+            expand(rt, cs, macros, comp, g)
         } else if is_sym(rt, head, "instance?") {
             let d = instance_rewrite(rt, f);
-            expand(rt, cs, macros, d)
+            expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "try") {
             // Desugar typed multi-catch into a single catch-all whose body is a
             // type-dispatch (ClojureScript's model); expand the result.
             let d = desugar_try(rt, f);
-            expand(rt, cs, macros, d)
+            expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "binding") {
             // `(binding [*x* v] body…)` — thread-local dynamic-var bindings via a
             // `try`/`finally` that installs and (always) unwinds them.
-            let d = desugar_binding(rt, f);
-            expand(rt, cs, macros, d)
+            let d = desugar_binding(rt, comp, f);
+            expand(rt, cs, macros, comp, d)
         } else if record_field0(rt, head, reader::KEYWORD).is_some() {
             // keyword in head position: (:k m) -> (get m :k)
             let items = rt.list_to_vec(f);
             let getsym = sym(rt, "get");
             let g = rt.vec_to_list(&[getsym, items[1], head]);
-            expand(rt, cs, macros, g)
+            expand(rt, cs, macros, comp, g)
         } else if let Some(rw) = interop_rewrite(rt, f) {
-            expand(rt, cs, macros, rw)
+            expand(rt, cs, macros, comp, rw)
         } else {
             let items = rt.list_to_vec(f);
-            let ex = expand_each(rt, cs, macros, &items);
+            let ex = expand_each(rt, cs, macros, comp, &items);
             rt.vec_to_list(&ex)
         }
     } else if let Some(lst) = record_field0(rt, f, reader::VECTOR) {
-        build_call(rt, cs, macros, "vector", lst)
+        build_call(rt, cs, macros, comp, "vector", lst)
     } else if let Some(lst) = record_field0(rt, f, reader::MAP) {
-        build_call(rt, cs, macros, "hash-map", lst)
+        build_call(rt, cs, macros, comp, "hash-map", lst)
     } else if let Some(lst) = record_field0(rt, f, reader::SET) {
-        build_call(rt, cs, macros, "hash-set", lst)
+        build_call(rt, cs, macros, comp, "hash-set", lst)
     } else {
         f // keyword / string / char / number / symbol — self-evaluating
     };
@@ -309,9 +306,10 @@ fn expand_each<M: ValueModel>(
     rt: &mut Runtime<M>,
     cs: &dyn CodeSpace<M>,
     macros: &HashSet<Sym>,
+    comp: &Compiler,
     items: &[u64],
 ) -> Vec<u64> {
-    items.iter().map(|&it| expand(rt, cs, macros, it)).collect()
+    items.iter().map(|&it| expand(rt, cs, macros, comp, it)).collect()
 }
 
 /// `(vector|hash-map|hash-set <elems>)` from a list of element forms.
@@ -319,13 +317,14 @@ fn build_call<M: ValueModel>(
     rt: &mut Runtime<M>,
     cs: &dyn CodeSpace<M>,
     macros: &HashSet<Sym>,
+    comp: &Compiler,
     ctor: &str,
     arglist: u64,
 ) -> u64 {
     let args = rt.list_to_vec(arglist);
     let fsym = sym(rt, ctor);
     let mut out = vec![fsym];
-    out.extend(expand_each(rt, cs, macros, &args));
+    out.extend(expand_each(rt, cs, macros, comp, &args));
     rt.vec_to_list(&out)
 }
 
@@ -335,6 +334,7 @@ fn rebuild_binder<M: ValueModel>(
     rt: &mut Runtime<M>,
     cs: &dyn CodeSpace<M>,
     macros: &HashSet<Sym>,
+    comp: &Compiler,
     form: u64,
 ) -> u64 {
     let items = rt.list_to_vec(form);
@@ -368,7 +368,7 @@ fn rebuild_binder<M: ValueModel>(
             vec![rt.vec_to_list(&letf)]
         };
         let mut out = vec![items[0], paramlist];
-        out.extend(expand_each(rt, cs, macros, &inner));
+        out.extend(expand_each(rt, cs, macros, comp, &inner));
         return rt.vec_to_list(&out);
     }
 
@@ -380,10 +380,10 @@ fn rebuild_binder<M: ValueModel>(
         binds.extend(pairs);
         i += 2;
     }
-    let exbinds = expand_each(rt, cs, macros, &binds);
+    let exbinds = expand_each(rt, cs, macros, comp, &binds);
     let bindlist = rt.vec_to_list(&exbinds);
     let mut out = vec![items[0], bindlist];
-    out.extend(expand_each(rt, cs, macros, &items[2..]));
+    out.extend(expand_each(rt, cs, macros, comp, &items[2..]));
     rt.vec_to_list(&out)
 }
 
@@ -719,6 +719,7 @@ fn expand_loop<M: ValueModel>(
     rt: &mut Runtime<M>,
     cs: &dyn CodeSpace<M>,
     macros: &HashSet<Sym>,
+    comp: &Compiler,
     form: u64,
 ) -> u64 {
     let items = rt.list_to_vec(form);
@@ -754,7 +755,7 @@ fn expand_loop<M: ValueModel>(
     call.extend(inits);
     let callform = rt.vec_to_list(&call);
     let letform = rt.vec_to_list(&[letk, bindvec, setform, callform]);
-    expand(rt, cs, macros, letform)
+    expand(rt, cs, macros, comp, letform)
 }
 
 /// Replace `(recur ...)` with `(g ...)`, not descending into a nested `fn`/`loop`
@@ -785,6 +786,7 @@ fn expand_fn<M: ValueModel>(
     rt: &mut Runtime<M>,
     cs: &dyn CodeSpace<M>,
     macros: &HashSet<Sym>,
+    comp: &Compiler,
     form: u64,
 ) -> u64 {
     let items = rt.list_to_vec(form);
@@ -811,11 +813,11 @@ fn expand_fn<M: ValueModel>(
         let mut norm = vec![fnstar, params];
         norm.extend(body);
         let normf = rt.vec_to_list(&norm);
-        rebuild_binder(rt, cs, macros, normf)
+        rebuild_binder(rt, cs, macros, comp, normf)
     } else {
         let clauses: Vec<u64> = items[i..].to_vec();
         let desugared = multi_arity(rt, &clauses);
-        expand(rt, cs, macros, desugared)
+        expand(rt, cs, macros, comp, desugared)
     }
 }
 
@@ -1592,12 +1594,12 @@ fn desugar_try<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
     rt.vec_to_list(&[trystar, body, catchbind, dispatch, finally_form])
 }
 
-/// `(binding [*x* v …] body…)` -> `(try* (do (%dyn-mark) (%dyn-bind '*x* v) …
+/// `(binding [*x* v …] body…)` -> `(try* (do (%dyn-mark) (%dyn-bind 'ns/*x* v) …
 /// body…) nil nil (%dyn-unwind))`. The `%dyn-mark` delimits this scope on the
 /// per-thread binding stack; the `finally` `%dyn-unwind` pops it (so bindings
-/// unwind even when the body throws). Var syms stay bare — dynamic vars live in
-/// the flat space, matching how references (`%dyn-get`) key the stack.
-fn desugar_binding<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
+/// unwind even when the body throws). Each var is RESOLVED to its qualified
+/// dynamic sym so it keys the stack the same way references (`%dyn-get`) do.
+fn desugar_binding<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
     let items = rt.list_to_vec(form);
     let pairs = binding_items(rt, items[1]).unwrap_or_else(|| rt.list_to_vec(items[1]));
     let quote = sym(rt, "quote");
@@ -1610,7 +1612,12 @@ fn desugar_binding<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
     body.push(rt.vec_to_list(&[mark]));
     let mut k = 0;
     while k + 1 < pairs.len() {
-        let qvar = rt.vec_to_list(&[quote, pairs[k]]);
+        // Resolve the var to its qualified dynamic sym (matching `%dyn-get`).
+        let resolved = match rt.decode(pairs[k]) {
+            Val::Sym(s) => rt.encode(Val::Sym(comp.resolve_ref(rt, s))),
+            _ => pairs[k],
+        };
+        let qvar = rt.vec_to_list(&[quote, resolved]);
         body.push(rt.vec_to_list(&[dynbind, qvar, pairs[k + 1]]));
         k += 2;
     }

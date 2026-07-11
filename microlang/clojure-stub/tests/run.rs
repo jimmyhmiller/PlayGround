@@ -965,3 +965,27 @@ fn require_loads_files() {
 fn require_missing_namespace_errors() {
     run_req("(ns app (:require [does.not.exist :as x])) 1");
 }
+
+#[test]
+fn full_namespace_qualification() {
+    // EVERY var is namespace-qualified: clojure.core is a real namespace, so its
+    // members can be referenced explicitly — and bare names auto-refer to it.
+    assert_eq!(run("(clojure.core/reduce clojure.core/+ (clojure.core/range 5))"), "10");
+    assert_eq!(run("(reduce + (map inc (range 5)))"), "15");
+    // A user var is qualified into its ns and reachable fully-qualified elsewhere.
+    assert_eq!(run("(ns a) (def x 7) (ns b) a/x"), "7");
+    // A dynamic var is qualified too; binding + ref agree on the qualified sym.
+    assert_eq!(run("(ns a) (def ^:dynamic *v* 1) (defn get-v [] *v*) (binding [*v* 9] (get-v))"), "9");
+    // Cross-namespace: a's dynamic var seen fully-qualified from b, and bound there.
+    assert_eq!(run("(ns a) (def ^:dynamic *v* 1) (ns b) (binding [a/*v* 5] a/*v*)"), "5");
+}
+
+#[test]
+fn require_aliased_macro() {
+    // An ALIASED macro call (`m/twice`) resolves now that macros are qualified —
+    // the expander resolves the head through the namespace before checking.
+    assert_eq!(run_req("(ns app (:require [util.mac :as m])) (m/twice 21)"), "42");
+    // …and a :refer'd macro, and an aliased fn from the same file.
+    assert_eq!(run_req("(ns app (:require [util.mac :refer [twice]])) (twice 21)"), "42");
+    assert_eq!(run_req("(ns app (:require [util.mac :as m])) (m/sq 6)"), "36");
+}
