@@ -2171,3 +2171,80 @@ The assistant still runs + typechecks + passes its e2e app goldens with these ad
   and it never runs), so every action is injected and indices stay aligned.
 - **Theme-aware, one new hue.** The action green (`--action`) has explicit light/dark values plus
   `prefers-color-scheme` + `data-theme` overrides, keeping the blue accent reserved for liveness.
+
+
+# Phase V5 — portal static inspection of any KNOWN project, no process (DECISIONS #16)
+
+**Insight.** Static inspection is a *pure function of the source* — typecheck → schema + views +
+actions. A running process is unnecessary. So the portal offers static inspection of any project it
+KNOWS ABOUT, on demand, producing/caching a transient dump with **zero lingering process**. This
+supersedes `scry inspect`'s lingering-server model for the "see the code first" use case (inspect
+still exists; it is no longer the only way to see a static schema).
+
+## `scry schema-json <file>` (`main.coil` `cmd-schema-json`, `server.coil` `scry-schema-json`)
+The static reflection dump. `typecheck-quiet` → `build-program` → emit ONE JSON object
+`{"schema":<reflect-schema>,"views":<reflect-views>,"actions":<reflect-actions>}` to stdout, then
+exit 0. Modeled on `run-dump-types`: it builds the Program (arenas/types exist, EMPTY) but **never
+runs `main()`** and **starts no server**. Typecheck failure → diagnostics already went to stderr →
+exit 65 (nothing on stdout). Golden: `run_schema_json_test` asserts `schema.nodes` contains `Agent`
+plus `views`/`actions` specs.
+
+## Portal project discovery (`portal.coil`, a `ProjEntry` registry separate from `ProgEntry`)
+On every `GET /api/projects` the portal runs `portal-discover` (like `portal-reap`):
+- scans the working dir top-level for `.scry` files + a `Coil.toml` whose `entry` ends in `.scry`;
+- scans each **immediate** non-skip subdirectory (e.g. `examples/`; skips `tests/ std/ docs/ viewer/
+  src/ target/ node_modules/` + dotdirs) the same way;
+- plus every path ever registered via `/register` is already remembered (see below).
+Dirs are read with `opendir`/`readdir` (dirent `d_type`@20, `d_name`@21); dedupe is by **absolute
+path** (`realpath`). Scope is deliberately conservative and adjustable per DECISIONS #16. Each
+`ProjEntry` carries `{id, path, name, mtime, dump, dump-mtime}`; `mtime` via `stat` (arm64 `struct
+stat` is 144 bytes, `st_mtimespec.tv_sec` @ byte 48). New externs live in `ioutil.coil`
+(opendir/readdir/closedir/stat/realpath/popen/pclose).
+
+**Remembering run/inspected paths.** `/register` now carries the program's absolute `path`
+(`server.coil srv-register` resolves it with `realpath`; `portalclient.coil portal-register` sends
+it; `ProgEntry` gained a `path` field). On register the portal `proj-remember`s that path, so
+anything ever run stays statically inspectable **after it exits**.
+
+## Cache + `/proj/<id>/eval` static serving (zero process)
+`proj-ensure-dump` shells `<scry> schema-json '<path>' 2>/dev/null` via `popen` (the transient
+subprocess — captured with `run-capture`, `pclose`d immediately) and caches the JSON keyed by
+`path` + `mtime`; a changed file re-dumps. `POST /proj/<id>/eval` serves **statically** from the
+cache: `schema()`/`views()`/`actions()` return the matching sub-object (extracted with a
+string-aware balanced-brace scan `json-value-span`), `graph()` returns `{"type":"Graph",
+"instances":[]}` (empty, so the viewer renders the type-skeleton), and **any other source**
+(instances/at/invoke/definitions) returns a clean typed error
+`{"error":{"kind":"StaticInspection","message":"static inspection — run the project to interact"}}` —
+never a crash. `GET /api/projects` returns `[{id,name,path,mtime,alsoRunning:<program-id|null>}]`
+(alsoRunning = a running `ProgEntry` with the same absolute path).
+
+## Viewer (`viewer/app.js`, `viewer/style.css`)
+`Landing` polls both `/api/programs` and `/api/projects` and renders two sections: **running**
+(existing `ProgramCard`s) and **projects** (new `ProjectCard`s, dashed, `SCHEMA` badge, a
+`schema()` node-count, "no process"). A project card opens with `evalBase = "/proj/<id>"`; since
+`graph()` is empty there, the existing `NestedView` skeleton path renders the V3 type-template + the
+"schema · not running" affordance with **no code change to NestedView**. A card whose `alsoRunning`
+is set shows a "● live — jump" affordance that hops to the live program card. Non-static evals in a
+static project surface the `StaticInspection` error through the normal eval-result UI.
+
+## Tests + gate
+- `run_schema_json_test` (golden): `scry schema-json examples/assistant.scry` → valid JSON with
+  `schema.nodes` (incl. `Agent`) + `views` + `actions`.
+- `run_portal_projects_test`: a portal (cwd = repo root) lists `assistant.scry` + `demo-mini.scry`
+  as projects with **no** program started; `/api/programs` stays `[]` throughout (proves no
+  run/inspect child — only the transient `schema-json` dump); `/proj/<id>/eval` serves the real
+  schema/views/actions, empty `graph()`, and the `StaticInspection` error for a mutating source.
+- `ui-smoke.mjs` gained a project-card beat: the landing shows `.pcard.project` cards, clicking the
+  `assistant` project opens `#nested.skeleton` with `Agent` in the census + the `schema · not
+  running` note — served from `/proj`, zero process.
+- All 287 tests pass. Screenshots: `docs/v5-portal-landing.png` (running + projects sections) and
+  `docs/v5-project-static.png` (a project opened statically — SCHEMA · NOT RUNNING skeleton).
+
+## Friction / notes
+- **`join-path` is a bare concat** (server.coil), so discovery needed a `path-cat` that inserts `/`.
+- **arm64 `stat` ABI.** No `$INODE64` symbol on Apple Silicon — bare `stat` IS the 64-bit-inode
+  variant (144-byte struct, mtime @ 48), verified with `offsetof` before wiring the extern.
+- **Coil `if` is typed** — both branches must agree, so `store!`/`memcpy` in an `if` are wrapped
+  `(do … 0)`.
+- **`/proj/…` vs `/p/…` don't collide**: `path-prog-id` requires `/p/` (index 2 == `/`), which
+  `/proj/` fails, and the `/proj` route is matched first anyway.

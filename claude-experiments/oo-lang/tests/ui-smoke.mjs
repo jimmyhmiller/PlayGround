@@ -409,7 +409,7 @@ async function main() {
     if (portalBusy) {
       console.log("  --  portal scenario skipped (:7357 already in use)");
     } else {
-      const portal = spawn(join(ROOT, "scry"), ["portal"], { stdio: ["ignore", "pipe", "pipe"] });
+      const portal = spawn(join(ROOT, "scry"), ["portal"], { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
       extraProcs.push(portal);
       let portalUp = false, portalFailed = false;
       portal.stdout.on("data", (b) => {
@@ -452,6 +452,24 @@ async function main() {
             await evalPage(`(()=>{const b=document.querySelector('.back-btn');if(b)b.click();return !!b;})()`);
             await waitFor(".pcard", 6000);
             ok("portal back button returns to the landing grid");
+            // Phase V5: a STATIC project card (discovered from the working tree — no process)
+            // opens the V3 type-skeleton served from /proj, with the "schema · not running" note.
+            await waitFor(".pcard.project", 6000);
+            const projNames = await evalPage(`[...document.querySelectorAll('.pcard.project .pcard-name')].map(n=>n.textContent)`);
+            ok(`portal landing shows ${projNames.length} project card(s): ${JSON.stringify(projNames.slice(0,6))}`);
+            // click a project card whose name contains 'assistant' (deterministic type set)
+            const clicked = await evalPage(`(()=>{const c=[...document.querySelectorAll('.pcard.project')].find(x=>/assistant/.test(x.textContent));if(c){c.click();return true;}return false;})()`);
+            if (!clicked) fails.push("portal: no 'assistant' project card to click");
+            else {
+              await waitFor("#nested.skeleton .cx-name", 12000);
+              const stTypes = await evalPage(`[...document.querySelectorAll('#nested .cx-name')].map(n=>n.textContent.trim())`);
+              const hasNote = await evalPage(`!!document.querySelector('.schema-affordance')`);
+              if (!stTypes.includes("Agent")) fails.push(`static project view missing Agent: ${JSON.stringify(stTypes)}`);
+              else if (!hasNote) fails.push("static project view missing 'schema · not running' affordance");
+              else ok(`static project card opens the V3 type-skeleton from /proj (${stTypes.length} types, no process)`);
+              await evalPage(`(()=>{const b=document.querySelector('.back-btn');if(b)b.click();return !!b;})()`);
+              await waitFor(".pcard", 6000);
+            }
           } catch (e) {
             fails.push("portal dual-mode scenario failed: " + (e && e.message || e));
           }
