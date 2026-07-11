@@ -322,8 +322,10 @@ pub const CLJS: &str = r##"
     (let [idx (array-map-index-of coll k)]
       (cond
         (== idx -1)
-        ;; HOST: cljs promotes to PersistentHashMap past the threshold; deferred.
-        (let [arr (array-extend-kv arr k v)] (PersistentArrayMap. meta (inc cnt) arr nil))
+        (if (%lt cnt 8)
+          (let [arr (array-extend-kv arr k v)] (PersistentArrayMap. meta (inc cnt) arr nil))
+          ;; promote to PersistentHashMap past the 8-entry threshold (as cljs does)
+          (-assoc (reduce (fn [m e] (-conj m e)) -EMPTY-PHM (persistent-array-map-seq arr)) k v))
         (identical? v (aget arr (inc idx)))
         coll
         :else
@@ -373,4 +375,266 @@ pub const CLJS: &str = r##"
 (defn vals [m] (map second (seq m)))
 (defn key [e] (-nth e 0))
 (defn val [e] (-nth e 1))
+
+;; ─────────────── PersistentHashMap (HAMT) — ported from cljs/core.cljs (EPL-1.0) ─
+;; A hash array-mapped trie: BitmapIndexedNode / ArrayNode / HashCollisionNode +
+;; PersistentHashMap. Verbatim except HOST: the nodes' cljs `Object` methods
+;; (.inode-assoc/.inode-lookup/.inode-without/.kv-reduce), which cljs calls via
+;; `.method`, are an `INode` protocol here (an Object method named `keys`/`get`
+;; would collide with core fns if made dispatchable). The mutable-cell `Box`
+;; out-param is a %cell; static .-EMPTY nodes are globals; the transient
+;; assoc!/without!/ensure-editable paths and the NodeSeq/ArrayNodeSeq types are
+;; dropped — -seq is built from kv-reduce; key equality via -eq2.
+(defprotocol INode
+  (-inode-assoc [node shift hash key val added-leaf?])
+  (-inode-without [node shift hash key])
+  (-inode-lookup [node shift hash key not-found])
+  (-inode-kv-reduce [node f init]))
+
+(defn -box [v] (%cell v))
+(defn -box-val [b] (%cell-ref b 0))
+(defn -box-set! [b v] (%cell-set! b 0 v))
+(defn key-test [a b] (-eq2 a b))
+(defn array-copy [src si dst di len]
+  (loop [i 0] (if (%lt i len) (do (aset dst (%add di i) (aget src (%add si i))) (recur (%add i 1))) dst)))
+(defn clone-and-set
+  ([arr i a] (let [r (aclone arr)] (aset r i a) r))
+  ([arr i a j b] (let [r (aclone arr)] (aset r i a) (aset r j b) r)))
+(defn remove-pair [arr i]
+  (let [new-arr (make-array (%sub (alength arr) 2))]
+    (array-copy arr 0 new-arr 0 (%mul 2 i))
+    (array-copy arr (%mul 2 (inc i)) new-arr (%mul 2 i) (%sub (alength new-arr) (%mul 2 i)))
+    new-arr))
+(defn mask [hash shift] (bit-and (bit-shift-right-zero-fill hash shift) 31))
+(defn bitpos [hash shift] (bit-shift-left 1 (mask hash shift)))
+(defn bitmap-indexed-node-index [bitmap bit] (bit-count (bit-and bitmap (dec bit))))
+(defn inode-kv-reduce [arr f init]
+  (let [len (alength arr)]
+    (loop [i 0 init init]
+      (if (%lt i len)
+        (recur (%add i 2)
+               (let [k (aget arr i)]
+                 (if-not (nil? k)
+                   (f init k (aget arr (inc i)))
+                   (let [node (aget arr (inc i))] (if-not (nil? node) (-inode-kv-reduce node f init) init)))))
+        init))))
+
+(deftype BitmapIndexedNode [edit bitmap arr]
+  INode
+  (-inode-assoc [inode shift hash key val added-leaf?]
+    (let [bit (bitpos hash shift) idx (bitmap-indexed-node-index bitmap bit)]
+      (if (zero? (bit-and bitmap bit))
+        (let [n (bit-count bitmap)]
+          (if (>= n 16)
+            (let [nodes (make-array 32) jdx (mask hash shift)]
+              (aset nodes jdx (-inode-assoc -EMPTY-BIN (+ shift 5) hash key val added-leaf?))
+              (loop [i 0 j 0]
+                (if (%lt i 32)
+                  (if (zero? (bit-and (bit-shift-right-zero-fill bitmap i) 1))
+                    (recur (inc i) j)
+                    (do (aset nodes i
+                              (if-not (nil? (aget arr j))
+                                ;; HOST: `hash` here is the method's hash PARAM, so call the prim.
+                                (-inode-assoc -EMPTY-BIN (+ shift 5) (%hash (aget arr j)) (aget arr j) (aget arr (inc j)) added-leaf?)
+                                (aget arr (inc j))))
+                        (recur (inc i) (+ j 2))))
+                  (ArrayNode. nil (inc n) nodes))))
+            (let [new-arr (make-array (%mul 2 (inc n)))]
+              (array-copy arr 0 new-arr 0 (%mul 2 idx))
+              (aset new-arr (%mul 2 idx) key)
+              (aset new-arr (inc (%mul 2 idx)) val)
+              (array-copy arr (%mul 2 idx) new-arr (%mul 2 (inc idx)) (%mul 2 (- n idx)))
+              (-box-set! added-leaf? true)
+              (BitmapIndexedNode. nil (bit-or bitmap bit) new-arr))))
+        (let [key-or-nil (aget arr (%mul 2 idx)) val-or-node (aget arr (inc (%mul 2 idx)))]
+          (cond (nil? key-or-nil)
+                (let [n (-inode-assoc val-or-node (+ shift 5) hash key val added-leaf?)]
+                  (if (identical? n val-or-node) inode
+                      (BitmapIndexedNode. nil bitmap (clone-and-set arr (inc (%mul 2 idx)) n))))
+                (key-test key key-or-nil)
+                (if (identical? val val-or-node) inode
+                    (BitmapIndexedNode. nil bitmap (clone-and-set arr (inc (%mul 2 idx)) val)))
+                :else
+                (do (-box-set! added-leaf? true)
+                    (BitmapIndexedNode. nil bitmap
+                      (clone-and-set arr (%mul 2 idx) nil (inc (%mul 2 idx))
+                                     (create-node (+ shift 5) key-or-nil val-or-node hash key val)))))))))
+  (-inode-without [inode shift hash key]
+    (let [bit (bitpos hash shift)]
+      (if (zero? (bit-and bitmap bit)) inode
+        (let [idx (bitmap-indexed-node-index bitmap bit)
+              key-or-nil (aget arr (%mul 2 idx)) val-or-node (aget arr (inc (%mul 2 idx)))]
+          (cond (nil? key-or-nil)
+                (let [n (-inode-without val-or-node (+ shift 5) hash key)]
+                  (cond (identical? n val-or-node) inode
+                        (not (nil? n)) (BitmapIndexedNode. nil bitmap (clone-and-set arr (inc (%mul 2 idx)) n))
+                        (== bitmap bit) nil
+                        :else (BitmapIndexedNode. nil (bit-xor bitmap bit) (remove-pair arr idx))))
+                (key-test key key-or-nil)
+                (if (== bitmap bit) nil (BitmapIndexedNode. nil (bit-xor bitmap bit) (remove-pair arr idx)))
+                :else inode)))))
+  (-inode-lookup [inode shift hash key not-found]
+    (let [bit (bitpos hash shift)]
+      (if (zero? (bit-and bitmap bit)) not-found
+        (let [idx (bitmap-indexed-node-index bitmap bit)
+              key-or-nil (aget arr (%mul 2 idx)) val-or-node (aget arr (inc (%mul 2 idx)))]
+          (cond (nil? key-or-nil) (-inode-lookup val-or-node (+ shift 5) hash key not-found)
+                (key-test key key-or-nil) val-or-node
+                :else not-found)))))
+  (-inode-kv-reduce [inode f init] (inode-kv-reduce arr f init)))
+
+(deftype ArrayNode [edit cnt arr]
+  INode
+  (-inode-assoc [inode shift hash key val added-leaf?]
+    (let [idx (mask hash shift) node (aget arr idx)]
+      (if (nil? node)
+        (ArrayNode. nil (inc cnt) (clone-and-set arr idx (-inode-assoc -EMPTY-BIN (+ shift 5) hash key val added-leaf?)))
+        (let [n (-inode-assoc node (+ shift 5) hash key val added-leaf?)]
+          (if (identical? n node) inode (ArrayNode. nil cnt (clone-and-set arr idx n)))))))
+  (-inode-without [inode shift hash key]
+    (let [idx (mask hash shift) node (aget arr idx)]
+      (if-not (nil? node)
+        (let [n (-inode-without node (+ shift 5) hash key)]
+          (cond (identical? n node) inode
+                (nil? n) (if (<= cnt 8) (pack-array-node inode nil idx) (ArrayNode. nil (dec cnt) (clone-and-set arr idx n)))
+                :else (ArrayNode. nil cnt (clone-and-set arr idx n))))
+        inode)))
+  (-inode-lookup [inode shift hash key not-found]
+    (let [idx (mask hash shift) node (aget arr idx)]
+      (if-not (nil? node) (-inode-lookup node (+ shift 5) hash key not-found) not-found)))
+  (-inode-kv-reduce [inode f init]
+    (let [len (alength arr)]
+      (loop [i 0 init init]
+        (if (%lt i len)
+          (recur (inc i) (let [node (aget arr i)] (if-not (nil? node) (-inode-kv-reduce node f init) init)))
+          init)))))
+
+(defn pack-array-node [array-node edit idx]
+  (let [arr (.-arr array-node) len (alength arr) new-arr (make-array (%mul 2 (dec (.-cnt array-node))))]
+    (loop [i 0 j 1 bitmap 0]
+      (if (%lt i len)
+        (if (if (not (== i idx)) (not (nil? (aget arr i))) false)
+          (do (aset new-arr j (aget arr i)) (recur (inc i) (%add j 2) (bit-or bitmap (bit-shift-left 1 i))))
+          (recur (inc i) j bitmap))
+        (BitmapIndexedNode. edit bitmap new-arr)))))
+
+(defn hash-collision-node-find-index [arr cnt key]
+  (let [lim (%mul 2 cnt)]
+    (loop [i 0] (if (%lt i lim) (if (key-test key (aget arr i)) i (recur (%add i 2))) -1))))
+
+(deftype HashCollisionNode [edit collision-hash cnt arr]
+  INode
+  (-inode-assoc [inode shift hash key val added-leaf?]
+    (if (== hash collision-hash)
+      (let [idx (hash-collision-node-find-index arr cnt key)]
+        (if (== idx -1)
+          (let [len (%mul 2 cnt) new-arr (make-array (%add len 2))]
+            (array-copy arr 0 new-arr 0 len)
+            (aset new-arr len key) (aset new-arr (inc len) val)
+            (-box-set! added-leaf? true)
+            (HashCollisionNode. nil collision-hash (inc cnt) new-arr))
+          (if (-eq2 (aget arr (inc idx)) val) inode
+              (HashCollisionNode. nil collision-hash cnt (clone-and-set arr (inc idx) val)))))
+      (-inode-assoc (BitmapIndexedNode. nil (bitpos collision-hash shift) (array nil inode)) shift hash key val added-leaf?)))
+  (-inode-without [inode shift hash key]
+    (let [idx (hash-collision-node-find-index arr cnt key)]
+      (cond (== idx -1) inode
+            (== cnt 1) nil
+            :else (HashCollisionNode. nil collision-hash (dec cnt) (remove-pair arr (%quot idx 2))))))
+  (-inode-lookup [inode shift hash key not-found]
+    (let [idx (hash-collision-node-find-index arr cnt key)]
+      (if (%lt idx 0) not-found (aget arr (inc idx)))))
+  (-inode-kv-reduce [inode f init] (inode-kv-reduce arr f init)))
+
+(defn create-node [shift key1 val1 key2hash key2 val2]
+  (let [key1hash (hash key1)]
+    (if (== key1hash key2hash)
+      (HashCollisionNode. nil key1hash 2 (array key1 val1 key2 val2))
+      (let [added-leaf? (-box false)]
+        (-inode-assoc (-inode-assoc -EMPTY-BIN shift key1hash key1 val1 added-leaf?) shift key2hash key2 val2 added-leaf?)))))
+
+(def -EMPTY-BIN (BitmapIndexedNode. nil 0 (make-array 0)))
+
+(defn equiv-map [m other]
+  (if (map? other)
+    (if (== (-count m) (-count other))
+      (loop [es (seq m)]
+        (if (nil? es) true
+            (let [e (first es)]
+              (if (-eq2 (-lookup other (key e) -lookup-sentinel) (val e)) (recur (next es)) false))))
+      false)
+    false))
+
+(deftype PersistentHashMap [meta cnt root has-nil? nil-val __hash]
+  IWithMeta
+  (-with-meta [coll new-meta]
+    (if (identical? new-meta meta) coll (PersistentHashMap. new-meta cnt root has-nil? nil-val __hash)))
+  IMeta
+  (-meta [coll] meta)
+
+  ICollection
+  (-conj [coll entry]
+    (if (vector? entry)
+      (-assoc coll (-nth entry 0) (-nth entry 1))
+      (loop [ret coll es (seq entry)]
+        (if (nil? es) ret
+            (let [e (first es)]
+              (if (vector? e) (recur (-assoc ret (-nth e 0) (-nth e 1)) (next es))
+                  (throw "conj on a map takes map entries or seqables of map entries")))))))
+
+  IEmptyableCollection
+  (-empty [coll] (-with-meta -EMPTY-PHM meta))
+
+  IEquiv
+  (-equiv [coll other] (equiv-map coll other))
+
+  IHash
+  (-hash [coll] (caching-hash coll hash-unordered-coll __hash))
+
+  ISeqable
+  (-seq [coll]
+    (if (pos? cnt)
+      (let [s (if (nil? root) nil (-inode-kv-reduce root (fn [acc k v] (%cons (vector k v) acc)) nil))]
+        (if has-nil? (%cons (vector nil nil-val) s) s))
+      nil))
+
+  ICounted
+  (-count [coll] cnt)
+
+  ILookup
+  (-lookup [coll k] (-lookup coll k nil))
+  (-lookup [coll k not-found]
+    (cond (nil? k) (if has-nil? nil-val not-found)
+          (nil? root) not-found
+          :else (-inode-lookup root 0 (hash k) k not-found)))
+
+  IAssociative
+  (-assoc [coll k v]
+    (if (nil? k)
+      (if (if has-nil? (identical? v nil-val) false) coll
+          (PersistentHashMap. meta (if has-nil? cnt (inc cnt)) root true v nil))
+      (let [added-leaf? (-box false)
+            new-root (-inode-assoc (if (nil? root) -EMPTY-BIN root) 0 (hash k) k v added-leaf?)]
+        (if (identical? new-root root) coll
+            (PersistentHashMap. meta (if (-box-val added-leaf?) (inc cnt) cnt) new-root has-nil? nil-val nil)))))
+  (-contains-key? [coll k]
+    (cond (nil? k) has-nil?
+          (nil? root) false
+          :else (not (identical? (-inode-lookup root 0 (hash k) k -lookup-sentinel) -lookup-sentinel))))
+
+  IMap
+  (-dissoc [coll k]
+    (cond (nil? k) (if has-nil? (PersistentHashMap. meta (dec cnt) root false nil nil) coll)
+          (nil? root) coll
+          :else (let [new-root (-inode-without root 0 (hash k) k)]
+                  (if (identical? new-root root) coll
+                      (PersistentHashMap. meta (dec cnt) new-root has-nil? nil-val nil)))))
+
+  IFn
+  (-invoke [coll k] (-lookup coll k))
+  (-invoke [coll k not-found] (-lookup coll k not-found)))
+
+(def -EMPTY-PHM (PersistentHashMap. nil 0 nil false nil nil))
+;; map? now recognises both persistent map types.
+(defn map? [x] (let [t (type-of x)] (if (%num-eq t 'PersistentArrayMap) true (%num-eq t 'PersistentHashMap))))
 "##;

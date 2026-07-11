@@ -562,6 +562,35 @@ fn persistent_array_map() {
 }
 
 #[test]
+fn persistent_hash_map() {
+    // small maps are array maps; they promote to a HAMT past 8 entries.
+    assert_eq!(run("(type-of {:a 1})"), "PersistentArrayMap");
+    assert_eq!(run("(type-of (into {} (map (fn [i] [i i]) (range 20))))"), "PersistentHashMap");
+    // correctness at scale (crosses BitmapIndexedNode -> ArrayNode)
+    let big = "(into {} (map (fn [i] [i (* i i)]) (range 200)))";
+    assert_eq!(run(&format!("(count {big})")), "200");
+    assert_eq!(run(&format!("(get {big} 137)")), "18769");
+    assert_eq!(run(&format!("(get {big} 999 :nope)")), ":nope");
+    assert_eq!(run(&format!("(contains? {big} 50)")), "true");
+    assert_eq!(run(&format!("(contains? {big} 500)")), "false");
+    assert_eq!(run(&format!("(count (dissoc {big} 50 51 52))")), "197");
+    assert_eq!(run(&format!("(get (assoc {big} 50 :x) 50)")), ":x");
+    // string keys, nil key
+    assert_eq!(run(r#"(get (into {} (map (fn [i] [(str "k" i) i]) (range 30))) "k15")"#), "15");
+    assert_eq!(run("(get (assoc (into {} (map (fn [i] [i i]) (range 20))) nil :nv) nil)"), ":nv");
+    // order-independent equality across differently-built large maps
+    assert_eq!(
+        run("(= (into {} (map (fn [i] [i i]) (range 40))) (into {} (map (fn [i] [i i]) (reverse (range 40)))))"),
+        "true"
+    );
+    // keys/vals/reduce over a HAMT
+    assert_eq!(run("(count (keys (into {} (map (fn [i] [i i]) (range 50)))))"), "50");
+    assert_eq!(run("(reduce + (vals (into {} (map (fn [i] [i i]) (range 10)))))"), "45");
+    // callable + get-in through a HAMT
+    assert_eq!(run("((into {} [[:a 1]]) :a)"), "1");
+}
+
+#[test]
 fn protocol_dispatch_collections() {
     // The core collection fns dispatch through protocols (ClojureScript-style):
     // a USER type that implements the protocols works with all of them, with no
