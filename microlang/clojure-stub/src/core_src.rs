@@ -173,70 +173,163 @@ pub const CORE: &str = r##"
 (defn even? [n] (%num-eq (%mod n 2) 0))
 (defn odd? [n] (%num-eq (%mod n 2) 1))
 
-;; ─────────────── seq abstraction (with lazy sequences) ───────────────
+;; ─────────────── low-level helpers (prim-based; used by the protocol impls) ────
 (defn elems [c] (field c 0))
 (defn entries [kvs]
   (if (nil? kvs) nil
       (%cons (vector (%first kvs) (%first (%rest kvs))) (entries (%rest (%rest kvs))))))
+(defn count-seq [s n] (let [s (seq s)] (if (nil? s) n (count-seq (%rest s) (%add n 1)))))
+(defn nth-seq [s i] (let [s (seq s)] (if (%num-eq i 0) (%first s) (nth-seq (%rest s) (%sub i 1)))))
+(defn mget [kvs k]
+  (cond (nil? kvs) nil (%num-eq (%first kvs) k) (%first (%rest kvs)) true (mget (%rest (%rest kvs)) k)))
+(defn kv-has [kvs k]
+  (cond (nil? kvs) false (%num-eq (%first kvs) k) true true (kv-has (%rest (%rest kvs)) k)))
+(defn kv-without [kvs k]
+  (cond (nil? kvs) nil
+        (%num-eq (%first kvs) k) (%rest (%rest kvs))
+        true (%cons (%first kvs) (%cons (%first (%rest kvs)) (kv-without (%rest (%rest kvs)) k)))))
+(defn kv-keys [kvs] (if (nil? kvs) nil (%cons (%first kvs) (kv-keys (%rest (%rest kvs))))))
+(defn kv-vals [kvs] (if (nil? kvs) nil (%cons (%first (%rest kvs)) (kv-vals (%rest (%rest kvs))))))
+(defn append1 [lst x] (if (nil? lst) (%cons x nil) (%cons (%first lst) (append1 (%rest lst) x))))
+
 ;; A lazy seq is a record holding two mutable cells: a thunk (0-arg fn) and a
 ;; realized? flag. On first force we call the thunk, `seq` its result (chaining
-;; through any further lazy layers), and cache it. This is what makes infinite
-;; seqs (range/iterate/repeat/cycle) and lazy map/filter/take possible — every
-;; seq walker below re-`seq`s its argument at entry, forcing lazy tails as it goes.
+;; through further lazy layers), and cache it — this makes infinite seqs and lazy
+;; map/filter/take possible.
 (defn lazy-seq? [x] (%num-eq (type-of x) 'LazySeq))
 (defn -lazy-seq [thunk] (record 'LazySeq (%cell thunk) (%cell false)))
 (defn -force [ls]
   (if (%cell-ref (field ls 1) 0)
       (%cell-ref (field ls 0) 0)
       (let [v (seq ((%cell-ref (field ls 0) 0)))]
-        (do (%cell-set! (field ls 0) 0 v)
-            (%cell-set! (field ls 1) 0 true)
-            v))))
+        (do (%cell-set! (field ls 0) 0 v) (%cell-set! (field ls 1) 0 true) v))))
 (defmacro lazy-seq (& body) (list '-lazy-seq (%cons 'fn (%cons (vector) body))))
-(defn seq [c]
-  (cond (nil? c) nil
-        (lazy-seq? c) (-force c)
-        (pvec? c) (-pv-seq c)
-        ;; a reader/code vector (list-backed 'Vector) — macros manipulate binding
-        ;; forms like `[a 5]` with first/second/nth, and -realize's display vectors
-        ;; are this shape too — so seq yields its element list.
-        (%num-eq (type-of c) 'Vector) (field c 0)
-        (set? c) (elems c)
-        (map? c) (entries (field c 0))
-        true c))
-(defn first [c] (%first (seq c)))
-(defn rest [c] (%rest (seq c)))
-(defn next [c] (seq (%rest (seq c))))
+
+;; ─────────────── collection protocols (ClojureScript-style) ───────────────
+;; The seq/collection abstraction is polymorphic THROUGH these protocols: the
+;; public fns below are thin dispatchers, and every collection type — nil, cons
+;; lists, code vectors, PVec, Map, Set, LazySeq — implements them via extend-type.
+;; New collection types need only implement the protocols; no core fn grows a
+;; per-type branch. `Object` provides the lenient defaults (get -> not-found, etc.).
+(defprotocol ISeqable (-seq [coll]))
+(defprotocol ISeq (-first [coll]) (-rest [coll]))
+(defprotocol ICollection (-conj [coll o]))
+(defprotocol ICounted (-count [coll]))
+(defprotocol IIndexed (-nth [coll n]))
+(defprotocol ILookup (-lookup [coll k nf]))
+(defprotocol IAssociative (-assoc [coll k v]) (-contains-key? [coll k]))
+(defprotocol IStack (-peek [coll]) (-pop [coll]))
+(defprotocol IEquiv (-equiv [coll other]))
+(defprotocol IEmptyableCollection (-empty [coll]))
+
+(extend-type Object
+  IEquiv (-equiv [a b] (%num-eq a b))
+  ILookup (-lookup [_ k nf] nf)
+  IAssociative (-contains-key? [_ k] false)
+  IEmptyableCollection (-empty [_] nil))
+
+(extend-type nil
+  ISeqable (-seq [_] nil)
+  ICounted (-count [_] 0)
+  IIndexed (-nth [_ n] nil)
+  ICollection (-conj [_ o] (%cons o nil))
+  ILookup (-lookup [_ k nf] nf)
+  IAssociative (-assoc [_ k v] (record 'Map (%cons k (%cons v nil)))) (-contains-key? [_ k] false)
+  IStack (-peek [_] nil) (-pop [_] nil)
+  IEquiv (-equiv [_ o] (nil? o))
+  IEmptyableCollection (-empty [_] nil))
+
+(extend-type List
+  ISeqable (-seq [l] l)
+  ISeq (-first [l] (%first l)) (-rest [l] (%rest l))
+  ICollection (-conj [l o] (%cons o l))
+  ICounted (-count [l] (count-seq l 0))
+  IIndexed (-nth [l n] (nth-seq l n))
+  IEmptyableCollection (-empty [_] nil))
+
+;; reader/code vectors (list-backed 'Vector records) — macros build & manipulate
+;; binding forms like `[a 5]`, and -realize's display vectors are this shape too.
+(extend-type Vector
+  ISeqable (-seq [v] (field v 0))
+  ICounted (-count [v] (count-seq (field v 0) 0))
+  IIndexed (-nth [v n] (nth-seq (field v 0) n)))
+
+(extend-type LazySeq
+  ISeqable (-seq [l] (-force l))
+  ICounted (-count [l] (count-seq l 0))
+  IIndexed (-nth [l n] (nth-seq l n)))
+
+(extend-type PVec
+  ISeqable (-seq [v] (-pv-seq v))
+  ICounted (-count [v] (-pv-cnt v))
+  IIndexed (-nth [v n] (-pv-nth v n))
+  ICollection (-conj [v o] (-pv-conj v o))
+  IAssociative (-assoc [v k val] (-pv-assoc v k val))
+    (-contains-key? [v k] (if (if (%lt k 0) true (%lt (%sub (-pv-cnt v) 1) k)) false true))
+  ILookup (-lookup [v k nf] (if (if (%lt k 0) true (%lt (%sub (-pv-cnt v) 1) k)) nf (-pv-nth v k)))
+  IStack (-peek [v] (if (%num-eq (-pv-cnt v) 0) nil (-pv-nth v (%sub (-pv-cnt v) 1))))
+    (-pop [v] (-pv-pop v))
+  IEquiv (-equiv [v o] (if (pvec? o) (if (%num-eq (-pv-cnt v) (-pv-cnt o)) (-seq-eq v o) false) false))
+  IEmptyableCollection (-empty [_] -empty-pvec))
+
+(extend-type Map
+  ISeqable (-seq [m] (entries (field m 0)))
+  ICounted (-count [m] (count-seq (entries (field m 0)) 0))
+  ;; conj a [k v] pair, or MERGE another map's entries (as clojure.core does).
+  ICollection (-conj [m e] (if (map? e) (reduce conj m (entries (field e 0))) (-assoc m (-nth e 0) (-nth e 1))))
+  ILookup (-lookup [m k nf] (if (kv-has (field m 0) k) (mget (field m 0) k) nf))
+  IAssociative (-assoc [m k v] (record 'Map (%cons k (%cons v (kv-without (field m 0) k)))))
+    (-contains-key? [m k] (kv-has (field m 0) k))
+  IEquiv (-equiv [m o] (if (map? o) (if (%num-eq (-count m) (-count o)) (keys-match (keys m) m o) false) false))
+  IEmptyableCollection (-empty [_] (record 'Map nil)))
+
+(extend-type Set
+  ISeqable (-seq [s] (elems s))
+  ICounted (-count [s] (count-seq (elems s) 0))
+  ICollection (-conj [s o] (record 'Set (%cons o (field s 0))))
+  ILookup (-lookup [s k nf] (if (-mem? (elems s) k) k nf))
+  IAssociative (-contains-key? [s k] (-mem? (elems s) k))
+  IEmptyableCollection (-empty [_] (record 'Set nil)))
+
+;; ─────────────── public collection API (thin protocol dispatchers) ───────────
+(defn seq [c] (if (nil? c) nil (-seq c)))
+(defn first [c] (let [s (seq c)] (if (nil? s) nil (-first s))))
+(defn rest [c] (let [s (seq c)] (if (nil? s) nil (-rest s))))
+(defn next [c] (seq (rest c)))
 (defn cons [x c] (%cons x c))
 (defn empty? [c] (nil? (seq c)))
-;; tail-recursive list reverse (never grows the stack).
+(defn empty [c] (-empty c))
+(defn count [c] (if (nil? c) 0 (-count c)))
+(defn nth [c i] (-nth c i))
+(defn conj [c x] (-conj c x))
+(defn assoc [m k v] (-assoc m k v))
+(defn contains? [c k] (-contains-key? c k))
+(defn peek [c] (-peek c))
+(defn pop [c] (-pop c))
+(defn get [c k & r] (-lookup c k (if (nil? r) nil (%first r))))
+(defn dissoc [m k] (record 'Map (kv-without (field m 0) k)))
+(defn keys [m] (kv-keys (field m 0)))
+(defn vals [m] (kv-vals (field m 0)))
+
+;; tail-recursive list reverse + full realization (never grow the native stack).
 (defn -rev [s] (loop [s (seq s) acc nil] (if (nil? s) acc (recur (next s) (%cons (%first s) acc)))))
-;; Fully realize a (possibly lazy) seq into an eager cons list. Accumulate
-;; reversed with a tail loop, then reverse — so arbitrarily long seqs are safe.
 (defn -to-list [s] (-rev (-rev s)))
 (defn doall [c] (do (-to-list c) c))
 (defn dorun [c] (do (-to-list c) nil))
 
-;; ─────────────── count / nth / get ───────────────
-(defn count-seq [s n] (let [s (seq s)] (if (nil? s) n (count-seq (%rest s) (%add n 1)))))
-(defn count [c] (cond (nil? c) 0 (pvec? c) (-pv-cnt c) true (count-seq c 0)))
-(defn nth-seq [s i] (let [s (seq s)] (if (%num-eq i 0) (%first s) (nth-seq (%rest s) (%sub i 1)))))
-(defn nth [c i] (if (pvec? c) (-pv-nth c i) (nth-seq c i)))
-(defn mget [kvs k]
-  (cond (nil? kvs) nil
-        (%num-eq (%first kvs) k) (%first (%rest kvs))
-        true (mget (%rest (%rest kvs)) k)))
-(defn get [c k]
-  (cond (map? c) (mget (field c 0) k)
-        (pvec? c) (if (if (%lt k 0) true (%lt (%sub (-pv-cnt c) 1) k)) nil (-pv-nth c k))
-        (set? c) (if (-mem? (elems c) k) k nil)
-        true nil))
-(defn kv-has [kvs k]
-  (cond (nil? kvs) false (%num-eq (%first kvs) k) true true (kv-has (%rest (%rest kvs)) k)))
-(defn contains? [c k] (if (map? c) (kv-has (field c 0) k) false))
+;; equality: maps compare order-independently, vectors element-wise, everything
+;; else structurally — all via the IEquiv protocol (Object default = %num-eq).
+(defn keys-match [ks a b]
+  (cond (nil? ks) true
+        (-eq2 (mget (field a 0) (%first ks)) (mget (field b 0) (%first ks))) (keys-match (%rest ks) a b)
+        true false))
+(defn -seq-eq [a b]
+  (let [a (seq a) b (seq b)]
+    (cond (nil? a) (nil? b) (nil? b) false
+          (-eq2 (%first a) (%first b)) (-seq-eq (%rest a) (%rest b)) true false)))
+(defn -eq2 [a b] (-equiv a b))
 
 ;; Callable objects: keywords, maps and vectors act as functions of one arg.
-;; The backend routes `(obj arg)` for a non-closure record here (see set_apply_fn).
 (defn -apply-obj [o & args]
   (cond (multi? o) (-multi-call o args)
         (keyword? o) (get (first args) o)
@@ -244,50 +337,7 @@ pub const CORE: &str = r##"
         (vector? o) (nth o (first args))
         true (throw "value is not callable")))
 
-;; ─────────────── assoc / dissoc / keys / vals ───────────────
-(defn kv-without [kvs k]
-  (cond (nil? kvs) nil
-        (%num-eq (%first kvs) k) (%rest (%rest kvs))
-        true (%cons (%first kvs)
-                    (%cons (%first (%rest kvs)) (kv-without (%rest (%rest kvs)) k)))))
-(defn assoc [m k v]
-  (if (pvec? m) (-pv-assoc m k v)
-      (record 'Map (%cons k (%cons v (kv-without (field m 0) k))))))
-(defn dissoc [m k] (record 'Map (kv-without (field m 0) k)))
-(defn kv-keys [kvs] (if (nil? kvs) nil (%cons (%first kvs) (kv-keys (%rest (%rest kvs))))))
-(defn keys [m] (kv-keys (field m 0)))
-(defn kv-vals [kvs] (if (nil? kvs) nil (%cons (%first (%rest kvs)) (kv-vals (%rest (%rest kvs))))))
-(defn vals [m] (kv-vals (field m 0)))
-
-;; map equality is ORDER-INDEPENDENT (unlike ordered record equality); override
-;; the binary `=` to compare maps as key sets, structurally otherwise.
-(defn keys-match [ks a b]
-  (cond (nil? ks) true
-        (-eq2 (mget (field a 0) (%first ks)) (mget (field b 0) (%first ks))) (keys-match (%rest ks) a b)
-        true false))
-;; element-wise (sequential) equality, used for vectors (whose trie is not
-;; structurally comparable across build histories).
-(defn -seq-eq [a b]
-  (let [a (seq a) b (seq b)]
-    (cond (nil? a) (nil? b)
-          (nil? b) false
-          (-eq2 (%first a) (%first b)) (-seq-eq (%rest a) (%rest b))
-          true false)))
-;; Pairwise (map-aware, vector-aware) equality; the variadic `=`/`not=` chain over it.
-(defn -eq2 [a b]
-  (cond (and (map? a) (map? b))
-          (if (%num-eq (count a) (count b)) (keys-match (keys a) a b) false)
-        (and (pvec? a) (pvec? b))
-          (if (%num-eq (-pv-cnt a) (-pv-cnt b)) (-seq-eq a b) false)
-        true (%num-eq a b)))
-
-;; ─────────────── conj / into ───────────────
-(defn append1 [lst x] (if (nil? lst) (%cons x nil) (%cons (%first lst) (append1 (%rest lst) x))))
-(defn conj [c x]
-  (cond (pvec? c) (-pv-conj c x)
-        (set? c) (record 'Set (%cons x (field c 0)))
-        (map? c) (assoc c (nth x 0) (nth x 1))
-        true (%cons x c)))
+;; ─────────────── reduce / into ───────────────
 (defn reduce-seq [f acc s] (let [s (seq s)] (if (nil? s) acc (reduce-seq f (f acc (%first s)) (%rest s)))))
 ;; `reduce` is 2- or 3-arity (like clojure.core): `(reduce f coll)` seeds with the
 ;; first element (or `(f)` when empty); `(reduce f init coll)` seeds with `init`.
@@ -545,12 +595,9 @@ pub const CORE: &str = r##"
 (defn nfirst [c] (next (first c)))
 (defn fnext [c] (first (next c)))
 (defn nnext [c] (next (next c)))
-(defn peek [c]
-  (cond (pvec? c) (if (%num-eq (-pv-cnt c) 0) nil (-pv-nth c (%sub (-pv-cnt c) 1)))
-        (nil? c) nil true (first c)))
-(defn pop [c] (cond (pvec? c) (-pv-pop c) (nil? c) nil true (rest c)))
+;; peek/pop/empty are defined above as protocol dispatchers (IStack /
+;; IEmptyableCollection).
 (defn not-empty [c] (if (empty? c) nil c))
-(defn empty [c] (cond (vector? c) (vector) (map? c) (hash-map) (set? c) (hash-set) true nil))
 
 ;; membership / equality helpers (map-aware `-eq2`)
 (defn -mem? [s x] (cond (nil? (seq s)) false (-eq2 (first s) x) true true (-mem? (rest s) x)))

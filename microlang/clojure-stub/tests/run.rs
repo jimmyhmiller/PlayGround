@@ -531,6 +531,38 @@ fn str_fn() {
 }
 
 #[test]
+fn protocol_dispatch_collections() {
+    // The core collection fns dispatch through protocols (ClojureScript-style):
+    // a USER type that implements the protocols works with all of them, with no
+    // change to core. This is the whole point of the protocol rearchitecture.
+    let pair = r#"
+        (deftype Pair [a b])
+        (extend-type Pair
+          ISeqable (-seq [p] (list (field p 0) (field p 1)))
+          ICounted (-count [p] 2)
+          IIndexed (-nth [p i] (field p i)))
+    "#;
+    assert_eq!(run(&format!("{pair} (seq (->Pair 10 20))")), "(10 20)");
+    assert_eq!(run(&format!("{pair} (count (->Pair 10 20))")), "2");
+    assert_eq!(run(&format!("{pair} (nth (->Pair 10 20) 1)")), "20");
+    assert_eq!(run(&format!("{pair} (map inc (->Pair 3 4))")), "(4 5)");
+    assert_eq!(run(&format!("{pair} (reduce + (->Pair 100 200))")), "300");
+    assert_eq!(run(&format!("{pair} (into [] (->Pair :x :y))")), "[:x :y]");
+    assert_eq!(run(&format!("{pair} (first (->Pair :a :b))")), ":a");
+    assert_eq!(run(&format!("{pair} (filter odd? (->Pair 3 4))")), "(3)");
+
+    // built-in collection protocols dispatch on ANY value type (lists, nil,
+    // lazy seqs, vectors, maps, sets) — not just records.
+    assert_eq!(run("(-conj nil 1)"), "(1)"); // nil ICollection
+    assert_eq!(run("(-count '(1 2 3))"), "3"); // List ICounted
+    assert_eq!(run("(-nth [10 20 30] 2)"), "30"); // PVec IIndexed
+    assert_eq!(run("(-lookup {:a 1} :b :none)"), ":none"); // Map ILookup w/ default
+    assert_eq!(run("(-seq (range 3))"), "(0 1 2)"); // LazySeq ISeqable
+    assert_eq!(run("(count (conj {:a 1} {:b 2 :c 3}))"), "3"); // conj map merges entries
+    assert_eq!(run("(get (conj {:a 1} {:b 2}) :b)"), "2");
+}
+
+#[test]
 fn persistent_vector() {
     // basics
     assert_eq!(run("[1 2 3]"), "[1 2 3]");

@@ -965,6 +965,16 @@ impl<M: ValueModel> Runtime<M> {
         t.dispatch.resolve(&t.methods, site, method, ty)
     }
 
+    /// Resolve `method` for `ty`, falling back to an `Object` extension when the
+    /// receiver's own type has no impl. `Object` is the universal root a protocol
+    /// can be extended against to provide a DEFAULT (as ClojureScript's `default`
+    /// / `Object` does), so e.g. `=` works on any value without every type
+    /// implementing `IEquiv`.
+    pub fn resolve_or_default(&self, site: usize, method: Sym, ty: Sym) -> Option<u64> {
+        self.resolve_method(site, method, ty)
+            .or_else(|| self.resolve_method(site, method, self.intern("Object")))
+    }
+
     /// A fresh tag for an escape continuation.
     pub fn fresh_escape_tag(&self) -> u64 {
         self.shared.escape_tags.fetch_add(1, Ordering::Relaxed) + 1
