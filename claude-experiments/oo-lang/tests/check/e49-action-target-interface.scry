@@ -1,0 +1,12 @@
+enum AgentStatus { Idle Running Done }
+class Agent {
+  name: String
+  status: AgentStatus
+  paused: Bool
+  fn init() { self.name = "x" self.status = AgentStatus.Idle self.paused = false }
+  fn pause() { self.paused = true }
+  fn ask(question: String) -> String { self.name }
+}
+interface Runnable { fn run() -> Void }
+fn main() { let a = Agent() }
+action "X" for Runnable { self.run() }
