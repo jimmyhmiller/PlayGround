@@ -989,3 +989,22 @@ fn require_aliased_macro() {
     assert_eq!(run_req("(ns app (:require [util.mac :refer [twice]])) (twice 21)"), "42");
     assert_eq!(run_req("(ns app (:require [util.mac :as m])) (m/sq 6)"), "36");
 }
+
+#[test]
+fn protocol_methods_are_namespace_qualified() {
+    // A protocol method is a qualified var: defined in `geom`, called QUALIFIED
+    // (geom/area) and via :refer from another namespace.
+    let base = "(ns geom) (defprotocol Shape (area [s])) (deftype Sq [side]) \
+                (extend-type Sq Shape (area [s] (* (field s 0) (field s 0)))) ";
+    assert_eq!(run(&format!("{base} (ns app) (geom/area (geom/->Sq 5))")), "25");
+    assert_eq!(
+        run(&format!("{base} (ns app (:require [geom :refer [area ->Sq]])) (area (->Sq 6))")),
+        "36"
+    );
+    // Two protocols in DIFFERENT namespaces may share a method name; each is its
+    // own qualified var and dispatches independently (flat names would collide).
+    let collide = "(ns a) (defprotocol P (go [x])) (deftype T [v]) (extend-type T P (go [x] :a-go)) \
+                   (ns b) (defprotocol Q (go [x])) (deftype U [v]) (extend-type U Q (go [x] :b-go)) \
+                   (ns c) [(a/go (a/->T 1)) (b/go (b/->U 2))]";
+    assert_eq!(run(collide), "[:a-go :b-go]");
+}

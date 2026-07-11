@@ -178,9 +178,8 @@ impl Compiler {
     /// should read, per the current namespace. `a/b` resolves the ns/alias part;
     /// a bare name resolves own-def → refer → core → own-ns (forward ref).
     fn resolve_global<M: ValueModel>(&self, rt: &Runtime<M>, s: Sym) -> Sym {
-        // Prims (`%add`, …) and protocol-method names live in the flat space
-        // (dispatch is by short name), never as ns-qualified globals.
-        if self.prims.contains_key(&s) || self.methods.contains(&s) {
+        // Frontend prims (`%add`, `list`, …) are never namespace vars.
+        if self.prims.contains_key(&s) {
             return s;
         }
         let name = rt.sym_name(s);
@@ -336,15 +335,27 @@ impl Compiler {
                     };
                 }
                 "-proto-method" => {
-                    let m = self.name(rt, items[1]).expect("defmethod: method name");
+                    let m_raw = self.name(rt, items[1]).expect("defmethod: method name");
                     let ty = self.name(rt, items[2]).expect("defmethod: type name");
+                    // A protocol method is a namespace-qualified var (as in Clojure).
+                    // The declaration from `defprotocol` (ty = the -protocol-default
+                    // sentinel) DEFINES it in the current ns; an `extend-type` impl
+                    // RESOLVES it (own -> refer -> auto-referred clojure.core). The
+                    // TYPE tag stays bare — it's a `type-of` record tag, not a var.
+                    let m = if rt.sym_name(ty) == "-protocol-default" {
+                        self.def_name(rt, m_raw)
+                    } else {
+                        self.resolve_global(rt, m_raw)
+                    };
                     self.methods.insert(m);
                     let imp = self.compile(rt, items[3]);
                     return Ir::DefMethod { name: m, ty, imp: Box::new(imp) };
                 }
                 _ => {
-                    // A binding shadows a prim; a prim is otherwise its default.
-                    let shadowed = self.resolve_local(hs).is_some() || rt.global_defined(hs);
+                    // A binding (local or a def'd var) shadows a prim; a prim is
+                    // otherwise its default. The var check uses the RESOLVED sym.
+                    let shadowed =
+                        self.resolve_local(hs).is_some() || rt.global_defined(self.resolve_global(rt, hs));
                     if !shadowed {
                         if let Some(&p) = self.prims.get(&hs) {
                             // `(%field-by-name obj (quote field))` -> an inline-cached
@@ -360,10 +371,11 @@ impl Compiler {
                             return Ir::Prim(p, args);
                         }
                     }
-                    if self.methods.contains(&hs) {
+                    let method = self.resolve_global(rt, hs);
+                    if self.methods.contains(&method) {
                         let site = self.fresh_site();
                         let args = items[1..].iter().map(|&f| self.compile(rt, f)).collect();
-                        return Ir::Dispatch { site, method: hs, args };
+                        return Ir::Dispatch { site, method, args };
                     }
                 }
             }
