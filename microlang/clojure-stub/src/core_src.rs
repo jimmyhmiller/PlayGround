@@ -21,12 +21,113 @@ pub const CORE: &str = r##"
         true (list 'if (%first xs) (%first xs) (%cons 'or (%rest xs)))))
 
 ;; ─────────────── constructors ───────────────
-(defn vector [& es] (record 'Vector es))
 (defn hash-map [& kvs] (record 'Map kvs))
 (defn hash-set [& es] (record 'Set es))
 
+;; ─────────────── PersistentVector (ClojureScript-style, in-language) ───────────
+;; A 32-way bit-partitioned trie with a tail buffer, built on the mutable-array
+;; primitives (%make-array / %aget / %cell-set! / %aclone) exactly as cljs builds
+;; its PersistentVector on JS arrays. Fields: (PVec cnt shift root tail) where
+;; root/tail are arrays; conj/assoc/pop path-copy (aclone) so nodes are shared
+;; immutably. Indexing uses 5-bit shifts (branch factor 32, mask 31).
+(defn -make-array [n] (%make-array n))
+(defn -aget [a i] (%aget a i))
+(defn -aset [a i v] (do (%cell-set! a i v) a))   ; mutate then return the array
+(defn -aclone [a] (%aclone a))
+(defn -alength [a] (%alength a))
+(defn -arr-conj [a v]                            ; copy of a with v appended
+  (let [n (-alength a) r (-make-array (%add n 1))]
+    (loop [i 0] (if (%lt i n) (do (-aset r i (-aget a i)) (recur (%add i 1))) (-aset r n v)))))
+(defn -arr-pop [a]                               ; copy of a without its last element
+  (let [n (%sub (-alength a) 1) r (-make-array n)]
+    (loop [i 0] (if (%lt i n) (do (-aset r i (-aget a i)) (recur (%add i 1))) r))))
+
+(defn pvec? [x] (%num-eq (type-of x) 'PVec))
+(defn -pv-cnt [pv] (field pv 0))
+(defn -pv-shift [pv] (field pv 1))
+(defn -pv-root [pv] (field pv 2))
+(defn -pv-tail [pv] (field pv 3))
+(defn -tail-off [pv]
+  (let [cnt (-pv-cnt pv)] (if (%lt cnt 32) 0 (%bit-shl (%bit-shr (%sub cnt 1) 5) 5))))
+(defn -array-for [pv i]
+  (if (%lt i (-tail-off pv))
+      (loop [node (-pv-root pv) level (-pv-shift pv)]
+        (if (%lt 0 level)
+            (recur (-aget node (%bit-and (%bit-shr i level) 31)) (%sub level 5))
+            node))
+      (-pv-tail pv)))
+(defn -pv-nth [pv i]
+  (if (if (%lt i 0) true (%lt (%sub (-pv-cnt pv) 1) i))
+      (throw (str "index out of bounds: " i))
+      (-aget (-array-for pv i) (%bit-and i 31))))
+(defn -new-path [level node]
+  (if (%num-eq level 0) node
+      (-aset (-make-array 32) 0 (-new-path (%sub level 5) node))))
+(defn -push-tail [pv level parent tailnode]
+  (let [subidx (%bit-and (%bit-shr (%sub (-pv-cnt pv) 1) level) 31) ret (-aclone parent)]
+    (if (%num-eq level 5)
+        (-aset ret subidx tailnode)
+        (let [child (-aget parent subidx)]
+          (if (nil? child)
+              (-aset ret subidx (-new-path (%sub level 5) tailnode))
+              (-aset ret subidx (-push-tail pv (%sub level 5) child tailnode)))))))
+(defn -pv-conj [pv val]
+  (let [cnt (-pv-cnt pv) shift (-pv-shift pv)]
+    (if (%lt (%sub cnt (-tail-off pv)) 32)
+        (record 'PVec (%add cnt 1) shift (-pv-root pv) (-arr-conj (-pv-tail pv) val))
+        (if (%lt (%bit-shl 1 shift) (%bit-shr cnt 5))
+            (let [new-root (-make-array 32)]
+              (-aset new-root 0 (-pv-root pv))
+              (-aset new-root 1 (-new-path shift (-pv-tail pv)))
+              (record 'PVec (%add cnt 1) (%add shift 5) new-root (%anew val)))
+            (record 'PVec (%add cnt 1) shift (-push-tail pv shift (-pv-root pv) (-pv-tail pv)) (%anew val))))))
+(defn -do-assoc [level node i val]
+  (let [ret (-aclone node)]
+    (if (%num-eq level 0)
+        (-aset ret (%bit-and i 31) val)
+        (let [subidx (%bit-and (%bit-shr i level) 31)]
+          (-aset ret subidx (-do-assoc (%sub level 5) (-aget node subidx) i val))))))
+(defn -pv-assoc [pv i val]
+  (let [cnt (-pv-cnt pv) shift (-pv-shift pv)]
+    (cond (%num-eq i cnt) (-pv-conj pv val)
+          (if (%lt i 0) true (%lt (%sub cnt 1) i)) (throw (str "assoc index out of bounds: " i))
+          (%lt i (-tail-off pv)) (record 'PVec cnt shift (-do-assoc shift (-pv-root pv) i val) (-pv-tail pv))
+          true (record 'PVec cnt shift (-pv-root pv) (-aset (-aclone (-pv-tail pv)) (%bit-and i 31) val)))))
+(defn -pop-tail [pv level node]
+  (let [subidx (%bit-and (%bit-shr (%sub (-pv-cnt pv) 2) level) 31)]
+    (cond (%lt 5 level)
+            (let [new-child (-pop-tail pv (%sub level 5) (-aget node subidx))]
+              (if (if (nil? new-child) (%num-eq subidx 0) false) nil
+                  (-aset (-aclone node) subidx new-child)))
+          (%num-eq subidx 0) nil
+          true (-aset (-aclone node) subidx nil))))
+(defn -pv-pop [pv]
+  (let [cnt (-pv-cnt pv) shift (-pv-shift pv)]
+    (cond (%num-eq cnt 0) (throw "can't pop empty vector")
+          (%num-eq cnt 1) -empty-pvec
+          (%lt 1 (%sub cnt (-tail-off pv))) (record 'PVec (%sub cnt 1) shift (-pv-root pv) (-arr-pop (-pv-tail pv)))
+          true (let [new-tail (-array-for pv (%sub cnt 2))
+                     rt0 (-pop-tail pv shift (-pv-root pv))
+                     new-root (if (nil? rt0) (-make-array 32) rt0)]
+                 (if (if (%lt 5 shift) (nil? (-aget new-root 1)) false)
+                     (record 'PVec (%sub cnt 1) (%sub shift 5) (-aget new-root 0) new-tail)
+                     (record 'PVec (%sub cnt 1) shift new-root new-tail))))))
+;; Eager cons realization of the vector (finite), built back-to-front with a
+;; tail-recursive loop so it never grows the native stack (a chunked-lazy seq
+;; would avoid realizing the whole spine for partial consumption; a later opt).
+(defn -pv-seq [pv]
+  (loop [i (%sub (-pv-cnt pv) 1) acc nil]
+    (if (%lt i 0) acc (recur (%sub i 1) (%cons (-pv-nth pv i) acc)))))
+(def -empty-pvec (record 'PVec 0 5 (-make-array 32) (-make-array 0)))
+;; `vector` is used by MACROS at expansion time (e.g. `if-let`, `case`, `for`),
+;; so it must depend only on prims + the in-block PVec fns — never on `seq`/
+;; `reduce`/`second`, which are defined later in this file.
+(defn -vec-from-list [pv s] (if (nil? s) pv (-vec-from-list (-pv-conj pv (%first s)) (%rest s))))
+(defn vector [& es] (-vec-from-list -empty-pvec es))
+(defn vec [c] (-vec-from-list -empty-pvec (-to-list c)))
+(defn vector? [x] (%num-eq (type-of x) 'PVec))
+
 ;; ─────────────── type predicates ───────────────
-(defn vector? [x] (%num-eq (type-of x) 'Vector))
 (defn map? [x] (%num-eq (type-of x) 'Map))
 (defn set? [x] (%num-eq (type-of x) 'Set))
 (defn keyword? [x] (%num-eq (type-of x) 'Keyword))
@@ -95,7 +196,11 @@ pub const CORE: &str = r##"
 (defn seq [c]
   (cond (nil? c) nil
         (lazy-seq? c) (-force c)
-        (vector? c) (elems c)
+        (pvec? c) (-pv-seq c)
+        ;; a reader/code vector (list-backed 'Vector) — macros manipulate binding
+        ;; forms like `[a 5]` with first/second/nth, and -realize's display vectors
+        ;; are this shape too — so seq yields its element list.
+        (%num-eq (type-of c) 'Vector) (field c 0)
         (set? c) (elems c)
         (map? c) (entries (field c 0))
         true c))
@@ -104,21 +209,28 @@ pub const CORE: &str = r##"
 (defn next [c] (seq (%rest (seq c))))
 (defn cons [x c] (%cons x c))
 (defn empty? [c] (nil? (seq c)))
-;; Fully realize a (possibly lazy) seq into an eager cons list.
-(defn -to-list [s] (let [s (seq s)] (if (nil? s) nil (%cons (%first s) (-to-list (%rest s))))))
+;; tail-recursive list reverse (never grows the stack).
+(defn -rev [s] (loop [s (seq s) acc nil] (if (nil? s) acc (recur (next s) (%cons (%first s) acc)))))
+;; Fully realize a (possibly lazy) seq into an eager cons list. Accumulate
+;; reversed with a tail loop, then reverse — so arbitrarily long seqs are safe.
+(defn -to-list [s] (-rev (-rev s)))
 (defn doall [c] (do (-to-list c) c))
 (defn dorun [c] (do (-to-list c) nil))
 
 ;; ─────────────── count / nth / get ───────────────
 (defn count-seq [s n] (let [s (seq s)] (if (nil? s) n (count-seq (%rest s) (%add n 1)))))
-(defn count [c] (count-seq c 0))
+(defn count [c] (cond (nil? c) 0 (pvec? c) (-pv-cnt c) true (count-seq c 0)))
 (defn nth-seq [s i] (let [s (seq s)] (if (%num-eq i 0) (%first s) (nth-seq (%rest s) (%sub i 1)))))
-(defn nth [c i] (nth-seq c i))
+(defn nth [c i] (if (pvec? c) (-pv-nth c i) (nth-seq c i)))
 (defn mget [kvs k]
   (cond (nil? kvs) nil
         (%num-eq (%first kvs) k) (%first (%rest kvs))
         true (mget (%rest (%rest kvs)) k)))
-(defn get [c k] (cond (map? c) (mget (field c 0) k) (vector? c) (nth c k) true nil))
+(defn get [c k]
+  (cond (map? c) (mget (field c 0) k)
+        (pvec? c) (if (if (%lt k 0) true (%lt (%sub (-pv-cnt c) 1) k)) nil (-pv-nth c k))
+        (set? c) (if (-mem? (elems c) k) k nil)
+        true nil))
 (defn kv-has [kvs k]
   (cond (nil? kvs) false (%num-eq (%first kvs) k) true true (kv-has (%rest (%rest kvs)) k)))
 (defn contains? [c k] (if (map? c) (kv-has (field c 0) k) false))
@@ -138,7 +250,9 @@ pub const CORE: &str = r##"
         (%num-eq (%first kvs) k) (%rest (%rest kvs))
         true (%cons (%first kvs)
                     (%cons (%first (%rest kvs)) (kv-without (%rest (%rest kvs)) k)))))
-(defn assoc [m k v] (record 'Map (%cons k (%cons v (kv-without (field m 0) k)))))
+(defn assoc [m k v]
+  (if (pvec? m) (-pv-assoc m k v)
+      (record 'Map (%cons k (%cons v (kv-without (field m 0) k))))))
 (defn dissoc [m k] (record 'Map (kv-without (field m 0) k)))
 (defn kv-keys [kvs] (if (nil? kvs) nil (%cons (%first kvs) (kv-keys (%rest (%rest kvs))))))
 (defn keys [m] (kv-keys (field m 0)))
@@ -151,16 +265,26 @@ pub const CORE: &str = r##"
   (cond (nil? ks) true
         (-eq2 (mget (field a 0) (%first ks)) (mget (field b 0) (%first ks))) (keys-match (%rest ks) a b)
         true false))
-;; Pairwise (map-aware) equality; the variadic `=`/`not=` above chain over it.
+;; element-wise (sequential) equality, used for vectors (whose trie is not
+;; structurally comparable across build histories).
+(defn -seq-eq [a b]
+  (let [a (seq a) b (seq b)]
+    (cond (nil? a) (nil? b)
+          (nil? b) false
+          (-eq2 (%first a) (%first b)) (-seq-eq (%rest a) (%rest b))
+          true false)))
+;; Pairwise (map-aware, vector-aware) equality; the variadic `=`/`not=` chain over it.
 (defn -eq2 [a b]
-  (if (and (map? a) (map? b))
-      (if (%num-eq (count a) (count b)) (keys-match (keys a) a b) false)
-      (%num-eq a b)))
+  (cond (and (map? a) (map? b))
+          (if (%num-eq (count a) (count b)) (keys-match (keys a) a b) false)
+        (and (pvec? a) (pvec? b))
+          (if (%num-eq (-pv-cnt a) (-pv-cnt b)) (-seq-eq a b) false)
+        true (%num-eq a b)))
 
 ;; ─────────────── conj / into ───────────────
 (defn append1 [lst x] (if (nil? lst) (%cons x nil) (%cons (%first lst) (append1 (%rest lst) x))))
 (defn conj [c x]
-  (cond (vector? c) (record 'Vector (append1 (field c 0) x))
+  (cond (pvec? c) (-pv-conj c x)
         (set? c) (record 'Set (%cons x (field c 0)))
         (map? c) (assoc c (nth x 0) (nth x 1))
         true (%cons x c)))
@@ -299,7 +423,7 @@ pub const CORE: &str = r##"
 (def -list (fn [& xs] xs))
 (defn -rt-seq [c]
   (cond (nil? c) nil
-        (vector? c) (field c 0)
+        (pvec? c) (-pv-seq c)
         (set? c) (field c 0)
         (map? c) (entries (field c 0))
         true c))
@@ -307,7 +431,7 @@ pub const CORE: &str = r##"
 (defn -rt-rest [c] (%rest (-rt-seq c)))
 (defn -rt-next [c] (let [r (%rest (-rt-seq c))] (if (nil? r) nil r)))
 (defn -rt-conj [c x]
-  (cond (vector? c) (record 'Vector (append1 (field c 0) x))
+  (cond (pvec? c) (-pv-conj c x)
         (set? c) (record 'Set (%cons x (field c 0)))
         (map? c) (assoc c (nth x 0) (nth x 1))
         (nil? c) (%cons x nil)
@@ -321,14 +445,16 @@ pub const CORE: &str = r##"
 ;; contents) reads unchanged and `vector?`/`map?`/`seq`/… stay transparent. On a
 ;; symbol/other value the metadata is dropped (it is only informational there).
 (defn -with-meta [x m]
-  (cond (vector? x) (record 'Vector (field x 0) m)
+  (cond (pvec? x) (record 'PVec (-pv-cnt x) (-pv-shift x) (-pv-root x) (-pv-tail x) m)
         (map? x) (record 'Map (field x 0) m)
         (set? x) (record 'Set (field x 0) m)
         true x))
-(defn -meta [x] (if (%lt 1 (nfields x)) (field x 1) nil))
+(defn -meta [x]
+  (cond (pvec? x) (if (%lt 4 (nfields x)) (field x 4) nil)
+        (%lt 1 (nfields x)) (field x 1)
+        true nil))
 (def with-meta -with-meta)
 (def meta -meta)
-(defn vec [c] (record 'Vector (-to-list c)))
 
 ;; ─────────────── threading macros ───────────────
 (defn thread-first [x form] (%cons (%first form) (%cons x (%rest form))))
@@ -419,8 +545,10 @@ pub const CORE: &str = r##"
 (defn nfirst [c] (next (first c)))
 (defn fnext [c] (first (next c)))
 (defn nnext [c] (next (next c)))
-(defn peek [c] (cond (vector? c) (last c) (nil? c) nil true (first c)))
-(defn pop [c] (cond (vector? c) (vec (butlast c)) (nil? c) nil true (rest c)))
+(defn peek [c]
+  (cond (pvec? c) (if (%num-eq (-pv-cnt c) 0) nil (-pv-nth c (%sub (-pv-cnt c) 1)))
+        (nil? c) nil true (first c)))
+(defn pop [c] (cond (pvec? c) (-pv-pop c) (nil? c) nil true (rest c)))
 (defn not-empty [c] (if (empty? c) nil c))
 (defn empty [c] (cond (vector? c) (vector) (map? c) (hash-map) (set? c) (hash-set) true nil))
 
@@ -643,7 +771,7 @@ pub const CORE: &str = r##"
   (cond (nil? x) ""
         (string? x) x
         (keyword? x) (%str-cat ":" (%str-of (field x 0)))
-        (vector? x) (%str-cat "[" (%str-cat (-str-join " " (field x 0)) "]"))
+        (vector? x) (%str-cat "[" (%str-cat (-str-join " " x) "]"))
         (set? x) (%str-cat "#{" (%str-cat (-str-join " " (field x 0)) "}"))
         (map? x) (%str-cat "{" (%str-cat (-str-map-join (field x 0)) "}"))
         (lazy-seq? x) (%str-cat "(" (%str-cat (-str-join " " x) ")"))
@@ -687,12 +815,17 @@ pub const CORE: &str = r##"
 ;; ─────────────── realization (force a lazy result for printing) ───────────────
 ;; The Rust printer can't invoke thunks, so `run` calls this on the final value
 ;; to fully realize any lazy spine (and lazy elements) into eager collections.
+;; tail-recursive so realizing/printing a large collection never overflows.
 (defn -realize-list [s]
-  (let [s (seq s)] (if (nil? s) nil (%cons (-realize (%first s)) (-realize-list (%rest s))))))
+  (-rev (loop [s (seq s) acc nil] (if (nil? s) acc (recur (next s) (%cons (-realize (%first s)) acc))))))
+;; Persistent structures are down-converted to the list-backed display records
+;; the Rust printer understands (a PVec -> `(record 'Vector <elems>)`), so the
+;; printer stays oblivious to the trie layout.
 (defn -realize [x]
   (cond (lazy-seq? x) (-realize-list x)
         (%num-eq (type-of x) 'List) (-realize-list x)
-        (vector? x) (record 'Vector (-realize-list (field x 0)))
+        (pvec? x) (record 'Vector (-realize-list (-pv-seq x)))
         (set? x) (record 'Set (-realize-list (field x 0)))
+        (map? x) (record 'Map (-realize-list (field x 0)))
         true x))
 "##;

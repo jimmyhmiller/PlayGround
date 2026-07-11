@@ -37,6 +37,22 @@ pub enum Prim {
     /// RAW (unquoted), any other atom via the neutral printer. Records/lists are
     /// formatted by the frontend, so this is only called on leaf values.
     StrOf,
+    /// `(%make-array n)` -> a fresh mutable array of `n` nil slots. The substrate
+    /// for in-language persistent data structures (ClojureScript-style), just as
+    /// `%cell` is but sized rather than element-listed.
+    MakeArray,
+    /// `(%aclone a)` -> a shallow copy of a mutable array (for trie path-copying).
+    AClone,
+    /// Bitwise ops on integers, for trie index math and HAMT bitmaps.
+    BitAnd,
+    BitOr,
+    BitXor,
+    /// `(%bit-shl x n)` / `(%bit-shr x n)` -> logical shifts (operands are the
+    /// non-negative indices/hashes the persistent structures use).
+    BitShl,
+    BitShr,
+    /// `(%bit-count x)` -> population count (number of set bits); HAMT indexing.
+    BitCount,
     List,
     Cons,
     First,

@@ -392,6 +392,14 @@ fn prim_tag(p: Prim) -> u32 {
         Mod => 34,
         StrCat => 35,
         StrOf => 36,
+        MakeArray => 37,
+        AClone => 38,
+        BitAnd => 39,
+        BitOr => 40,
+        BitXor => 41,
+        BitShl => 42,
+        BitShr => 43,
+        BitCount => 44,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -446,6 +454,14 @@ fn prim_from_tag(tag: u32) -> Prim {
         34 => Mod,
         35 => StrCat,
         36 => StrOf,
+        37 => MakeArray,
+        38 => AClone,
+        39 => BitAnd,
+        40 => BitOr,
+        41 => BitXor,
+        42 => BitShl,
+        43 => BitShr,
+        44 => BitCount,
         other => panic!("bad prim tag {other}"),
     }
 }

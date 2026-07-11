@@ -232,10 +232,10 @@ fn protocols() {
     assert_eq!(run(&format!("{poly} (describe (->Dog :rex))")), ":woof");
     assert_eq!(run(&format!("{poly} (describe (->Cat :tom))")), ":meow");
 
-    // extend a BUILT-IN type (vectors are records tagged 'Vector)
+    // extend a BUILT-IN type (persistent vectors are records tagged 'PVec)
     let ext = r#"
         (defprotocol Sized (size [this]))
-        (extend-type Vector Sized (size [this] (count this)))
+        (extend-type PVec Sized (size [this] (count this)))
     "#;
     assert_eq!(run(&format!("{ext} (size [10 20 30])")), "3");
 }
@@ -528,6 +528,47 @@ fn str_fn() {
     assert_eq!(run(r#"(str "n=" 42 " v=" [1 2])"#), r#""n=42 v=[1 2]""#);
     assert_eq!(run("(str (map inc [1 2 3]))"), r#""(2 3 4)""#);
     assert_eq!(run(r#"(str \a \b)"#), r#""ab""#);
+}
+
+#[test]
+fn persistent_vector() {
+    // basics
+    assert_eq!(run("[1 2 3]"), "[1 2 3]");
+    assert_eq!(run("(vector? [1 2])"), "true");
+    assert_eq!(run("(vector? '(1 2))"), "false");
+    assert_eq!(run("(conj [1 2] 3)"), "[1 2 3]");
+    assert_eq!(run("(assoc [1 2 3] 1 :x)"), "[1 :x 3]");
+    assert_eq!(run("(assoc [1 2 3] 3 4)"), "[1 2 3 4]"); // assoc at count == conj
+    assert_eq!(run("(pop [1 2 3])"), "[1 2]");
+    assert_eq!(run("(peek [1 2 3])"), "3");
+    assert_eq!(run("(get [10 20 30] 1)"), "20");
+    assert_eq!(run("(get [10 20 30] 9)"), "nil"); // out of range -> nil
+    assert_eq!(run("([:a :b :c] 2)"), ":c"); // vectors are callable
+    assert_eq!(run("(nth [10 20 30] 1)"), "20");
+    // quoted vector literal is a real persistent vector
+    assert_eq!(run("(vector? '[1 2 3])"), "true");
+    assert_eq!(run("(conj '[1 2] 3)"), "[1 2 3]");
+    assert_eq!(run("(nth ['a 'b] 0)"), "a");
+    // nested vectors realize/print correctly
+    assert_eq!(run("[[1 2] [3 4]]"), "[[1 2] [3 4]]");
+    assert_eq!(run("(assoc-in [[1 2] [3 4]] [1 0] 99)"), "[[1 2] [99 4]]");
+    // structural equality is by contents, independent of build path
+    assert_eq!(run("(= [1 2 3] (conj [1 2] 3))"), "true");
+    assert_eq!(run("(= [1 2 3] '(1 2 3))"), "false"); // vector != list (as in this impl)
+    // the trie crosses tail -> root -> multiple levels
+    assert_eq!(run("(count (vec (range 1000)))"), "1000");
+    // 40000 > 32768 so the trie is 3 internal levels deep (shift 15).
+    assert_eq!(run("(nth (vec (range 40000)) 39999)"), "39999");
+    assert_eq!(run("(last (vec (range 2000)))"), "1999");
+    assert_eq!(run("(nth (assoc (vec (range 1000)) 500 :x) 500)"), ":x");
+    assert_eq!(run("(nth (assoc (vec (range 1000)) 500 :x) 499)"), "499");
+    assert_eq!(run("(reduce + (vec (range 1001)))"), "500500");
+    assert_eq!(run("(count (pop (vec (range 2000))))"), "1999");
+    assert_eq!(run("(= (vec (range 100)) (vec (range 100)))"), "true");
+    // interop with seq fns
+    assert_eq!(run("(map inc [1 2 3])"), "(2 3 4)");
+    assert_eq!(run("(mapv inc [1 2 3])"), "[2 3 4]");
+    assert_eq!(run("(into [] (map inc [1 2 3]))"), "[2 3 4]");
 }
 
 #[test]

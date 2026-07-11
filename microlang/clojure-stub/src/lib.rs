@@ -167,7 +167,15 @@ fn expand<M: ValueModel>(
     let f = rt.root_get(slot);
     let out = if let Some((head, _)) = rt.as_cons(f) {
         if is_sym(rt, head, "quote") {
-            f
+            // A quoted collection literal must build the runtime persistent type;
+            // a plain quoted datum (symbols, lists of atoms) stays a literal.
+            let datum = rt.list_to_vec(f)[1];
+            if datum_has_coll(rt, datum) {
+                let built = build_quote(rt, datum);
+                expand(rt, cs, macros, built)
+            } else {
+                f
+            }
         } else if is_sym(rt, head, "syntax-quote") {
             // ` template -> a form that BUILDS the data; then expand that.
             let inner = rt.list_to_vec(f)[1];
@@ -269,10 +277,7 @@ fn rebuild_binder<M: ValueModel>(
     form: u64,
 ) -> u64 {
     let items = rt.list_to_vec(form);
-    let bind_forms = match record_field0(rt, items[1], reader::VECTOR) {
-        Some(lst) => rt.list_to_vec(lst),
-        None => rt.list_to_vec(items[1]),
-    };
+    let bind_forms = binding_items(rt, items[1]).unwrap_or_else(|| rt.list_to_vec(items[1]));
 
     if is_sym(rt, items[0], "fn") || is_sym(rt, items[0], "fn*") {
         // Params: a destructuring param becomes a fresh param + a `let` in the
@@ -328,8 +333,7 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
     if matches!(rt.decode(pat), Val::Sym(_)) {
         return vec![pat, init];
     }
-    if let Some(lst) = record_field0(rt, pat, reader::VECTOR) {
-        let elems = rt.list_to_vec(lst);
+    if let Some(elems) = binding_items(rt, pat) {
         let t = gensym(rt, "vec");
         let mut binds = vec![t, init];
         let mut idx: i128 = 0;
@@ -402,8 +406,8 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
             let val = kvs[k + 1];
             if is_keyword(rt, key, "keys") {
                 // {:keys [x y]} -> x (get t :x), y (get t :y)  (honoring :or)
-                if let Some(vl) = record_field0(rt, val, reader::VECTOR) {
-                    for s in rt.list_to_vec(vl) {
+                if let Some(vl) = binding_items(rt, val) {
+                    for s in vl {
                         let kw = keyword_expr(rt, s);
                         let ge = get_with_default(rt, s, kw);
                         binds.push(s);
@@ -531,8 +535,8 @@ fn expand_loop<M: ValueModel>(
     form: u64,
 ) -> u64 {
     let items = rt.list_to_vec(form);
-    let binds = match record_field0(rt, items[1], reader::VECTOR) {
-        Some(l) => rt.list_to_vec(l),
+    let binds = match binding_items(rt, items[1]) {
+        Some(l) => l,
         None => rt.list_to_vec(items[1]),
     };
     let mut names = Vec::new();
@@ -606,7 +610,7 @@ fn expand_fn<M: ValueModel>(
     // whose first element is a params container.
     let single = if i >= items.len() {
         true
-    } else if record_field0(rt, items[i], reader::VECTOR).is_some() {
+    } else if binding_items(rt, items[i]).is_some() {
         true
     } else if let Some((h, _)) = rt.as_cons(items[i]) {
         matches!(rt.decode(h), Val::Sym(_))
@@ -649,8 +653,8 @@ fn wrap_fn_recur<M: ValueModel>(rt: &mut Runtime<M>, params: u64, body: &[u64]) 
 
 /// The plain-symbol params (skipping `&`, keeping the rest name).
 fn param_syms<M: ValueModel>(rt: &Runtime<M>, params: u64) -> Vec<u64> {
-    let list = match record_field0(rt, params, reader::VECTOR) {
-        Some(l) => rt.list_to_vec(l),
+    let list = match binding_items(rt, params) {
+        Some(l) => l,
         None => rt.list_to_vec(params),
     };
     list.into_iter()
@@ -681,9 +685,7 @@ fn multi_arity<M: ValueModel>(rt: &mut Runtime<M>, clauses: &[u64]) -> u64 {
     for &clause in clauses {
         let parts = rt.list_to_vec(clause);
         let paramvec = parts[0];
-        let params = record_field0(rt, paramvec, reader::VECTOR)
-            .map(|l| rt.list_to_vec(l))
-            .unwrap_or_default();
+        let params = binding_items(rt, paramvec).unwrap_or_default();
         let variadic = params.iter().any(|&p| is_sym(rt, p, "&"));
         let fixed = params.iter().position(|&p| is_sym(rt, p, "&")).unwrap_or(params.len());
         let test = if variadic {
@@ -929,9 +931,110 @@ fn quote_form<M: ValueModel>(rt: &mut Runtime<M>, x: u64) -> u64 {
     rt.vec_to_list(&[q, x])
 }
 
+/// Does this quoted datum contain a collection literal (vector/map/set) anywhere?
+/// Such a datum can't stay a plain `(quote …)` literal, because collection
+/// literals must evaluate to the runtime persistent types, not the reader's
+/// list-backed records — so it is rebuilt with constructor calls instead.
+fn datum_has_coll<M: ValueModel>(rt: &Runtime<M>, datum: u64) -> bool {
+    if record_field0(rt, datum, reader::VECTOR).is_some()
+        || record_field0(rt, datum, reader::MAP).is_some()
+        || record_field0(rt, datum, reader::SET).is_some()
+    {
+        return true;
+    }
+    if rt.as_cons(datum).is_some() {
+        return rt.list_to_vec(datum).into_iter().any(|e| datum_has_coll(rt, e));
+    }
+    false
+}
+
+/// Rebuild a quoted datum as code: vector/map/set literals become `(vector …)` /
+/// `(hash-map …)` / `(hash-set …)` constructor calls (so they evaluate to the
+/// persistent runtime types), a list containing a collection becomes `(list …)`,
+/// and every leaf stays a `(quote leaf)`.
+fn build_quote<M: ValueModel>(rt: &mut Runtime<M>, datum: u64) -> u64 {
+    for (tag, ctor) in [
+        (reader::VECTOR, "vector"),
+        (reader::MAP, "hash-map"),
+        (reader::SET, "hash-set"),
+    ] {
+        if let Some(lst) = record_field0(rt, datum, tag) {
+            let elems = rt.list_to_vec(lst);
+            let mut out = vec![sym(rt, ctor)];
+            out.extend(elems.into_iter().map(|e| build_quote(rt, e)));
+            return rt.vec_to_list(&out);
+        }
+    }
+    if rt.as_cons(datum).is_some() && datum_has_coll(rt, datum) {
+        let elems = rt.list_to_vec(datum);
+        let mut out = vec![sym(rt, "list")];
+        out.extend(elems.into_iter().map(|e| build_quote(rt, e)));
+        return rt.vec_to_list(&out);
+    }
+    quote_form(rt, datum)
+}
+
 fn call1<M: ValueModel>(rt: &mut Runtime<M>, f: &str, arg: u64) -> u64 {
     let fs = sym(rt, f);
     rt.vec_to_list(&[fs, arg])
+}
+
+/// The elements of a binding/param vector, from EITHER the reader's list-backed
+/// `Vector` record OR a runtime `PVec`. Syntax-quote and the `vector` constructor
+/// both build binding forms (`(loop [~i 0] …)`, `(fn [x] …)`) as runtime PVecs,
+/// so the expander must read them structurally here. Returns `None` if `form` is
+/// neither representation.
+fn binding_items<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Option<Vec<u64>> {
+    if let Some(lst) = record_field0(rt, form, reader::VECTOR) {
+        return Some(rt.list_to_vec(lst));
+    }
+    if record_field0(rt, form, "PVec").is_some() {
+        return Some(pvec_elems(rt, form));
+    }
+    None
+}
+
+fn pvec_int_field<M: ValueModel>(rt: &Runtime<M>, pv: u64, i: usize) -> usize {
+    let Val::Ref(id) = rt.decode(pv) else { panic!("PVec: not a record") };
+    let Obj::Record { fields, .. } = &rt.heap()[id as usize] else { panic!("PVec: not a record") };
+    match rt.decode(fields[i]) {
+        Val::Int(n) => n as usize,
+        _ => panic!("PVec: field {i} is not an int"),
+    }
+}
+fn pvec_ref_field<M: ValueModel>(rt: &Runtime<M>, pv: u64, i: usize) -> u64 {
+    let Val::Ref(id) = rt.decode(pv) else { panic!("PVec: not a record") };
+    let Obj::Record { fields, .. } = &rt.heap()[id as usize] else { panic!("PVec: not a record") };
+    fields[i]
+}
+fn arr_get<M: ValueModel>(rt: &Runtime<M>, arr: u64, i: usize) -> u64 {
+    let Val::Ref(id) = rt.decode(arr) else { panic!("PVec node: not an array") };
+    let Obj::Vector(v) = &rt.heap()[id as usize] else { panic!("PVec node: not an array") };
+    v[i]
+}
+/// Read a PVec's logical elements by walking its trie (mirrors core's `-pv-nth`).
+fn pvec_elems<M: ValueModel>(rt: &Runtime<M>, pv: u64) -> Vec<u64> {
+    let cnt = pvec_int_field(rt, pv, 0);
+    let shift = pvec_int_field(rt, pv, 1);
+    let root = pvec_ref_field(rt, pv, 2);
+    let tail = pvec_ref_field(rt, pv, 3);
+    let tail_off = if cnt < 32 { 0 } else { ((cnt - 1) >> 5) << 5 };
+    let mut out = Vec::with_capacity(cnt);
+    for i in 0..cnt {
+        let node = if i >= tail_off {
+            tail
+        } else {
+            let mut n = root;
+            let mut level = shift;
+            while level > 0 {
+                n = arr_get(rt, n, (i >> level) & 31);
+                level -= 5;
+            }
+            n
+        };
+        out.push(arr_get(rt, node, i & 31));
+    }
+    out
 }
 
 fn record_field0<M: ValueModel>(rt: &Runtime<M>, form: u64, tag: &str) -> Option<u64> {
@@ -966,7 +1069,7 @@ fn class_to_tag(simple: &str) -> Option<&'static str> {
         "Long" | "Integer" | "Short" | "Byte" | "BigInteger" | "BigInt" => "Long",
         "Double" | "Float" | "BigDecimal" => "Double",
         "Boolean" => "Boolean",
-        s if s.contains("Vector") => "Vector",
+        s if s.contains("Vector") => "PVec",
         s if s.contains("Map") => "Map",
         s if s.contains("Set") => "Set",
         s if s.contains("List") || s == "ISeq" || s == "Seqable" || s == "Cons" => "List",

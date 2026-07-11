@@ -706,6 +706,31 @@ impl<M: ValueModel> Runtime<M> {
                 *slot = args[2];
                 self.enc_nil()
             }
+            Prim::MakeArray => {
+                let Val::Int(n) = self.decode(args[0]) else {
+                    panic!("make-array: size must be an int");
+                };
+                let nil = self.enc_nil();
+                let id = self.alloc(Obj::Vector(vec![nil; n as usize]));
+                M::R::enc_ref(id)
+            }
+            Prim::AClone => {
+                let Val::Ref(id) = self.decode(args[0]) else {
+                    panic!("aclone: not an array");
+                };
+                let Obj::Vector(elems) = &self.heap()[id as usize] else {
+                    panic!("aclone: not an array");
+                };
+                let copy = elems.clone();
+                let nid = self.alloc(Obj::Vector(copy));
+                M::R::enc_ref(nid)
+            }
+            Prim::BitAnd => self.encode(Val::Int(self.as_i128(args[0]) & self.as_i128(args[1]))),
+            Prim::BitOr => self.encode(Val::Int(self.as_i128(args[0]) | self.as_i128(args[1]))),
+            Prim::BitXor => self.encode(Val::Int(self.as_i128(args[0]) ^ self.as_i128(args[1]))),
+            Prim::BitShl => self.encode(Val::Int(self.as_i128(args[0]) << self.as_i128(args[1]))),
+            Prim::BitShr => self.encode(Val::Int(self.as_i128(args[0]) >> self.as_i128(args[1]))),
+            Prim::BitCount => self.encode(Val::Int(self.as_i128(args[0]).count_ones() as i128)),
             Prim::VectorLen => {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("vector-length: not a vector");
@@ -973,6 +998,16 @@ impl<M: ValueModel> Runtime<M> {
         }
         let id = self.alloc(Obj::BigInt(r));
         M::R::enc_ref(id)
+    }
+
+    /// An integer operand as `i128`, or a clear error. For the bitwise ops,
+    /// which operate on the (non-negative, bounded) indices/hashes/bitmaps the
+    /// persistent structures compute.
+    fn as_i128(&self, bits: u64) -> i128 {
+        match self.decode(bits) {
+            Val::Int(i) => i,
+            _ => panic!("bitwise op: argument is not an integer"),
+        }
     }
 
     /// The `String` behind a string value, or a clear error if it is not one.

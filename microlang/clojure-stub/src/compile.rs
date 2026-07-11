@@ -33,6 +33,11 @@ impl Compiler {
             ("%add", Add), ("%sub", Sub), ("%mul", Mul), ("%lt", Lt), ("%num-eq", Eq),
             ("%quot", Quot), ("%rem", Rem), ("%mod", Mod), ("%str-cat", StrCat), ("%str-of", StrOf),
             ("%apply", Apply),
+            // Array substrate + bitwise ops for in-language persistent structures.
+            ("%make-array", MakeArray), ("%aclone", AClone), ("%alength", VectorLen),
+            ("%aget", VectorRef), ("%anew", Vector),
+            ("%bit-and", BitAnd), ("%bit-or", BitOr), ("%bit-xor", BitXor),
+            ("%bit-shl", BitShl), ("%bit-shr", BitShr), ("%bit-count", BitCount),
             ("%first", First), ("%rest", Rest), ("%cons", Cons),
             ("record", Record), ("field", Field), ("type-of", TypeOf), ("nfields", NFields), ("throw", Throw),
             ("nil?", IsNil), ("list", List), ("println", Println), ("gc", Gc),
