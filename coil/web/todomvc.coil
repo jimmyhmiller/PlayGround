@@ -1,0 +1,170 @@
+; todomvc.coil -- TodoMVC, written entirely in Coil, compiled to wasm32.
+;
+; The MODEL is Coil-side state (a fixed-capacity array of todos in `alloc-static`
+; storage — no malloc). The VIEW is the real DOM, driven through the generic
+; js-bridge via js.coil / dom.coil. All app logic (add/toggle/destroy/filter/clear,
+; the active-item count) lives here in Coil; the only JavaScript in the project is
+; the app-agnostic bridge.
+(module todomvc)
+(import "slice.coil" :use *)
+(import "js.coil"    :use *)
+(import "dom.coil"   :use *)
+
+; ---- model -------------------------------------------------------------------
+; One todo slot. Refs (li/cbt/cbd) are JS handles (i32). `used`=slot occupied,
+; `done`=completed. Deleting a todo tombstones the slot (used=0) and its slot index
+; is reused by the next add — so handler userdata (the slot index) stays stable.
+(defstruct Todo  [(used i32) (done i32) (li i32) (cbt i32) (cbd i32)])
+(defstruct Store [(todos (array Todo 512)) (nslots i32) (input i32) (list i32) (counter i32)])
+(defn store []          (-> (ptr Store)) (alloc-static Store))
+(defn slot [(i i32)]    (-> (ptr Todo))  (index (field (store) todos) (cast i64 i)))
+
+; number of active (used and not done) todos
+(defn active-count [] (-> i32)
+  (let [(mut n) (cast i32 0) (mut i) (cast i32 0) ns (load (field (store) nslots))]
+    (loop (if (icmp-ge (load i) ns) (break)
+      (do (let [t (slot (load i))]
+            (if (and (icmp-ne (load (field t used)) (cast i32 0))
+                     (icmp-eq (load (field t done)) (cast i32 0)))
+                (store! n (iadd (load n) (cast i32 1))) 0))
+          (store! i (iadd (load i) (cast i32 1))))))
+    (load n)))
+
+(defn update-count! [] (-> i32)
+  (set-text-ref! (load (field (store) counter)) (js-num (active-count))))
+
+; first free (tombstoned) slot, else a fresh slot (bumping nslots)
+(defn free-slot [] (-> i32)
+  (let [ns (load (field (store) nslots)) (mut i) (cast i32 0) (mut found) (cast i32 -1)]
+    (loop (if (or (icmp-ge (load i) ns) (icmp-ne (load found) (cast i32 -1))) (break)
+      (do (if (icmp-eq (load (field (slot (load i)) used)) (cast i32 0)) (store! found (load i)) 0)
+          (store! i (iadd (load i) (cast i32 1))))))
+    (if (icmp-ne (load found) (cast i32 -1)) (load found)
+      (do (store! (field (store) nslots) (iadd ns (cast i32 1))) ns))))
+
+; ---- rendering one todo ------------------------------------------------------
+; title-ref is a JS string (e.g. the trimmed input value); it becomes the label text.
+(defn add-todo [(title-ref i32)] (-> i32)
+  (let [i       (free-slot)
+        t       (slot i)
+        li      (create "li")
+        toggle  (create "input")
+        label   (create "label")
+        destroy (create "button")
+        cbt     (make-cb "on_toggle"  i)
+        cbd     (make-cb "on_destroy" i)]
+    (set-attr! toggle "type" "checkbox")
+    (add-class! toggle "toggle")
+    (set-text-ref! label title-ref)
+    (add-class! destroy "destroy")
+    (set-text! destroy "×")                     ; ×
+    (append! li toggle) (append! li label) (append! li destroy)
+    (add-listener! toggle "change" cbt)
+    (add-listener! destroy "click" cbd)
+    (store! (field t used) (cast i32 1)) (store! (field t done) (cast i32 0))
+    (store! (field t li) li) (store! (field t cbt) cbt) (store! (field t cbd) cbd)
+    (append! (load (field (store) list)) li)
+    (update-count!)))
+
+; release the JS handles a slot owns and tombstone it
+(defn drop-slot! [(t (ptr Todo))] (-> i32)
+  (remove! (load (field t li)))
+  (js-release! (load (field t li)))
+  (js-release! (load (field t cbt)))
+  (js-release! (load (field t cbd)))
+  (store! (field t used) (cast i32 0)))
+
+; ---- exported event handlers (userdata, event) -------------------------------
+(defn on-new [(userdata i32) (evt i32)] (-> i64)
+  (if (icmp-eq (prop-int evt "keyCode") (cast i32 13))
+      (let [input (load (field (store) input))
+            val   (js-call (js-get input "value") "trim")   ; input.value.trim() -> jsref
+            len   (js-int (js-get val "length"))]
+        (if (icmp-gt len (cast i32 0)) (do (add-todo val) (set-value! input "") 0) 0))
+    0)
+  0)
+
+(defn on-toggle [(idx i32) (evt i32)] (-> i64)
+  (let [t (slot idx)]
+    (store! (field t done) (ixor (load (field t done)) (cast i32 1)))
+    (if (icmp-ne (load (field t done)) (cast i32 0))
+        (add-class! (load (field t li)) "completed")
+      (remove-class! (load (field t li)) "completed")))
+  (update-count!)
+  0)
+
+(defn on-destroy [(idx i32) (evt i32)] (-> i64) (drop-slot! (slot idx)) (update-count!) 0)
+
+(defn on-filter [(mode i32) (evt i32)] (-> i64)
+  (let [ul (load (field (store) list))]
+    (if (icmp-eq mode (cast i32 0)) (set-class! ul "todo-list")
+      (if (icmp-eq mode (cast i32 1)) (set-class! ul "todo-list filtered-active")
+        (set-class! ul "todo-list filtered-completed"))))
+  0)
+
+(defn on-clear [(userdata i32) (evt i32)] (-> i64)
+  (let [(mut i) (cast i32 0) ns (load (field (store) nslots))]
+    (loop (if (icmp-ge (load i) ns) (break)
+      (do (let [t (slot (load i))]
+            (if (and (icmp-ne (load (field t used)) (cast i32 0))
+                     (icmp-ne (load (field t done)) (cast i32 0)))
+                (drop-slot! t) 0))
+          (store! i (iadd (load i) (cast i32 1)))))))
+  (update-count!)
+  0)
+
+; ---- one-shot page construction ----------------------------------------------
+(defn mk-filter [(parent i32) (label (slice u8)) (mode i32)] (-> i32)
+  (let [li (create "li") a (create "a")]
+    (set-text! a label) (set-attr! a "href" "#")
+    (append! li a) (append! parent li)
+    (on! a "click" "on_filter" mode)))
+
+(defn main [] (-> i64)
+  (let [root     (body)
+        app      (create "section")
+        header   (create "header")
+        h1       (create "h1")
+        input    (create "input")
+        main-sec (create "section")
+        ul       (create "ul")
+        footer   (create "footer")
+        cnt      (create "span")
+        counter  (create "strong")
+        suffix   (create "span")
+        filters  (create "ul")
+        clear    (create "button")]
+    (add-class! app "todoapp") (append! root app)
+    ; header
+    (add-class! header "header") (append! app header)
+    (set-text! h1 "todos") (append! header h1)
+    (add-class! input "new-todo") (set-attr! input "placeholder" "What needs to be done?")
+    (append! header input) (on! input "keydown" "on_new" (cast i32 0))
+    ; list
+    (add-class! main-sec "main") (append! app main-sec)
+    (add-class! ul "todo-list") (append! main-sec ul)
+    ; footer: count
+    (add-class! footer "footer") (append! app footer)
+    (add-class! cnt "todo-count") (append! footer cnt)
+    (set-text! counter "0") (append! cnt counter)
+    (set-text! suffix " items left") (append! cnt suffix)
+    ; footer: filters
+    (add-class! filters "filters") (append! footer filters)
+    (mk-filter filters "All" (cast i32 0))
+    (mk-filter filters "Active" (cast i32 1))
+    (mk-filter filters "Completed" (cast i32 2))
+    ; footer: clear completed
+    (add-class! clear "clear-completed") (set-text! clear "Clear completed")
+    (append! footer clear) (on! clear "click" "on_clear" (cast i32 0))
+    ; publish refs the handlers need
+    (store! (field (store) input) input)
+    (store! (field (store) list) ul)
+    (store! (field (store) counter) counter)
+    (store! (field (store) nslots) (cast i32 0))
+    0))
+
+(export-c [on-new     :as "on_new"]
+          [on-toggle  :as "on_toggle"]
+          [on-destroy :as "on_destroy"]
+          [on-filter  :as "on_filter"]
+          [on-clear   :as "on_clear"])

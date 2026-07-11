@@ -17,7 +17,7 @@
   <!-- Everything below <body> is built by Coil at runtime (see counter.coil).
        This file only bootstraps the wasm module. -->
   <script type="module">
-    import { runCoil } from './coil-runtime.js';
+    import { runCoil } from './js-bridge.js';
     runCoil('./counter.wasm').catch((e) => {
       document.body.innerHTML = '<pre style="color:red">' + e.stack + '</pre>';
     });
