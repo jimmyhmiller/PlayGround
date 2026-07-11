@@ -18,6 +18,9 @@ use only after eyeballing a diff. Exits nonzero if any test fails.
 import os, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# LLM keys scrubbed from os.environ at startup for hermetic determinism (see main()); the
+# online agent test re-injects from this saved copy. Module-level default so it always exists.
+SAVED_LLM_ENV = {}
 PARSE_DIR = os.path.join(HERE, "parse")
 CHECK_DIR = os.path.join(HERE, "check")
 RUN_DIR = os.path.join(HERE, "run")
@@ -51,6 +54,14 @@ def main():
     if not os.path.exists(binary):
         print(f"scry binary not found: {binary} (run `coil build` first)")
         sys.exit(2)
+
+    # Hermetic env: the deterministic golden tests spawn examples/assistant.scry, whose
+    # chooseBrain() picks the LIVE model when an LLM key is present in the environment.
+    # Scrub the keys so EVERY test subprocess gets the deterministic ScriptedModel regardless
+    # of the developer's shell; run_agent_online_test re-injects the saved key explicitly.
+    global SAVED_LLM_ENV
+    SAVED_LLM_ENV = {k: os.environ.pop(k) for k in
+                     ("DEEPSEEK_API_KEY", "DEEPSEEK_KEY", "ANTHROPIC_API_KEY") if k in os.environ}
 
     passed = failed = 0
     fails = []
@@ -1361,8 +1372,11 @@ def run_agent_online_test(binary, filt):
         return 0, 0
     # Default target is DeepSeek's Anthropic-compatible endpoint; chooseBrain resolves the key
     # from DEEPSEEK_API_KEY | DEEPSEEK_KEY | ANTHROPIC_API_KEY and the base from ANTHROPIC_BASE_URL.
-    key = (os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_KEY")
-           or os.environ.get("ANTHROPIC_API_KEY"))
+    # The keys were scrubbed from os.environ for hermetic determinism; read the saved copy and
+    # re-inject it into THIS child only, so the live model is exercised here and nowhere else.
+    saved = globals().get("SAVED_LLM_ENV", {})
+    key = (saved.get("DEEPSEEK_API_KEY") or saved.get("DEEPSEEK_KEY")
+           or saved.get("ANTHROPIC_API_KEY"))
     if not key:
         print("SKIPPED agent_online: no DEEPSEEK_API_KEY / DEEPSEEK_KEY / ANTHROPIC_API_KEY set")
         return 0, 0
@@ -1371,11 +1385,12 @@ def run_agent_online_test(binary, filt):
     if not _net_reachable(host=host):
         print(f"SKIPPED agent_online: {host}:443 unreachable (offline)")
         return 0, 0
+    child_env = dict(os.environ, **saved)
     demo = os.path.abspath(os.path.join(HERE, "..", "examples", "assistant.scry"))
     try:
         p = subprocess.run([binary, "run", "--no-viewer", demo],
                            input="what is 17 times 23?\nexit\n",
-                           capture_output=True, text=True, timeout=120, env=dict(os.environ))
+                           capture_output=True, text=True, timeout=120, env=child_env)
         out = p.stdout
     except subprocess.TimeoutExpired:
         print("FAIL agent_online\n     timed out talking to the live API")
