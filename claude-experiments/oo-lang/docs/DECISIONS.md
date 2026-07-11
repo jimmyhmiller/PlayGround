@@ -132,8 +132,13 @@ The raw project brief is in `../claude.md` — read it first; this file pins wha
 
 ## Open (docs should propose, flag as OPEN, not silently decide)
 
-- **How the viewer's eval channel interleaves with running threads** — evals that read
-  can likely run at a partial safepoint; definition evals need full stop-the-world.
+- ~~**How the viewer's eval channel interleaves with running threads**~~ **[RESOLVED
+  2026-07-11]** — thread-per-connection server; expression/mutating evals are the sole
+  coordinator (a global-stop flag-CAS serializes them, so no two ever run at once);
+  read-only reflection polls are lent the eval's already-stopped heap at a safepoint
+  (consistent-read handoff) or self-coordinate when no eval is running. At most one
+  reflection reads at a time globally, always with language threads parked. `types()`
+  during `fib(33)`: 380ms → 1ms. See `06-implementation.md` Phase 5b + `STATUS.md`.
 - **Thread API surface** — spawn/join shape, what synchronization primitives (mutex?
   channels? atomics?) the language exposes for the PoC.
 - **Interface default methods** — lean no for PoC.
