@@ -6,8 +6,16 @@
 
 pub const CORE: &str = r##"
 ;; ─────────────── control macros ───────────────
-(defmacro defn (name params & body)
-  (list 'def name (%cons 'fn (%cons params body))))
+;; `(defn f [args] body…)` or `(defn f "docstring" [args] body…)`. Only PRIMS are
+;; used in the macro body (it must expand before the seq library exists); the
+;; docstring path records :doc in the var registry (via `-set-var-doc!`, defined
+;; once atoms are available — which is before any documented user fn).
+(defmacro defn (name p2 & more)
+  (if (%num-eq (type-of p2) 'String)
+    (list 'do
+          (list 'def name (%cons 'fn (%cons (%first more) (%rest more))))
+          (list '-set-var-doc! (list 'var name) p2))
+    (list 'def name (%cons 'fn (%cons p2 more)))))
 (defmacro when (c & body)     (list 'if c (%cons 'do body) nil))
 (defmacro when-not (c & body) (list 'if c nil (%cons 'do body)))
 (defmacro cond (& cs)
@@ -572,6 +580,12 @@ pub const CORE: &str = r##"
 ;; through the global table by that sym (matching an ordinary reference to `x`).
 (defn var? [x] (%num-eq (type-of x) 'Var))
 (defn -var-sym [v] (field v 0))
+;; Docstrings captured by `defn` (keyed by the var's qualified sym). A plain atom
+;; map, so it is GC-managed like any value (no toolkit registry change needed).
+(def -var-docs (%atom-new (hash-map)))
+(defn -set-var-doc! [v doc]
+  (%atom-set -var-docs (assoc (%atom-get -var-docs) (field v 0) doc)))
+(defn -var-doc [v] (get (%atom-get -var-docs) (field v 0)))
 ;; Reflection: `(find-var 'ns/x)` -> the Var for a FULLY-QUALIFIED sym (or nil).
 ;; `resolve`/`ns-resolve` on an unqualified literal are rewritten at compile time to
 ;; the qualified sym (namespace resolution is compile-time); given an already-

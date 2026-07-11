@@ -1099,3 +1099,14 @@ fn var_registry_metadata_and_namespaces() {
     assert_eq!(run("(ns foo) (def x 1) (find-ns (quote foo))"), "foo");
     assert_eq!(run("(ns foo) (def x 1) (some (fn [n] (= n (quote foo))) (all-ns))"), "foo");
 }
+
+#[test]
+fn var_docstrings() {
+    // `(defn f "doc" [args] …)` captures :doc into the var's metadata.
+    assert_eq!(run("(defn f \"squares n\" [n] (* n n)) (:doc (meta (var f)))"), "\"squares n\"");
+    // The documented fn still works normally.
+    assert_eq!(run("(defn f \"squares n\" [n] (* n n)) (f 7)"), "49");
+    // No docstring -> :doc is nil; plain fns are unaffected.
+    assert_eq!(run("(defn g [n] n) (:doc (meta (var g)))"), "nil");
+    assert_eq!(run("(defn add [a b] (+ a b)) (add 3 4)"), "7");
+}

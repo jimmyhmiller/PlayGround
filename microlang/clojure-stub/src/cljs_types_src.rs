@@ -246,6 +246,7 @@ pub const CLJS: &str = r##"
     (let [s (field v 0) fl (%var-flags s)]
       (hash-map :name (symbol (%sym-name s))
                 :ns (symbol (%sym-ns s))
+                :doc (-var-doc v)
                 :dynamic (%num-eq 1 (%bit-and fl 1))
                 :private (%num-eq 2 (%bit-and fl 2))
                 :macro (%num-eq 4 (%bit-and fl 4))))))
