@@ -1,0 +1,75 @@
+// examples/todo.scry — a tiny INTERACTIVE program: type commands at the prompt and watch the
+// Todo entities appear/complete live in the viewer. Shows Console.readLine (safepoint-cooperative,
+// so the viewer stays responsive while it waits for input) + a live-growing entity list.
+//
+//   ./scry run examples/todo.scry     then type:
+//     add buy milk
+//     add write tests
+//     done 1
+//     list
+//     quit
+
+fn startsWith(s: String, p: String) -> Bool {
+  if s.len() < p.len() { return false }
+  s.slice(0, p.len()) == p
+}
+
+enum State { Open  Done }
+
+class Todo {
+  text: String
+  state: State
+  fn init(text: String) { self.text = text  self.state = State.Open }
+  fn complete() { self.state = State.Done }
+}
+
+class TodoList {
+  items: List<Todo>
+  fn init() { self.items = List<Todo>() }
+  fn add(text: String) { self.items.push(Todo(text: text)) }
+}
+
+action "Complete" for Todo { self.complete() }
+
+fn main() {
+  let list = TodoList()
+  Console.log("todo> commands: add <text> | done <n> | list | quit")
+  var running = true
+  while running {
+    Console.print("todo> ")
+    match Console.readLine() {
+      None -> { running = false }
+      Some(line) -> {
+        if line == "quit" {
+          running = false
+        } else if line == "list" {
+          var i = 0
+          while i < list.items.len() {
+            let t = list.items.get(i)
+            let mark = match t.state { Open -> "[ ]"  Done -> "[x]" }
+            Console.log("  ${i + 1}. ${mark} ${t.text}")
+            i = i + 1
+          }
+        } else if startsWith(line, "add ") {
+          list.add(line.slice(4, line.len()))
+          Console.log("added (${list.items.len()} total)")
+        } else if startsWith(line, "done ") {
+          match line.slice(5, line.len()).toInt() {
+            Some(n) -> {
+              if n >= 1 {
+                if n <= list.items.len() {
+                  list.items.get(n - 1).complete()
+                  Console.log("completed ${n}")
+                } else { Console.log("no todo ${n}") }
+              } else { Console.log("no todo ${n}") }
+            }
+            None -> Console.log("done needs a number")
+          }
+        } else {
+          Console.log("? try: add <text> | done <n> | list | quit")
+        }
+      }
+    }
+  }
+  Console.log("bye")
+}
