@@ -101,6 +101,13 @@ fn check_instruction(
                     .clone();
                 Ok(Some((*dst, ty)))
             }
+            Instruction::Copy { dst, src } => Ok(Some((*dst, read(regs, *src)?))),
+            Instruction::AddI64 { dst, left, right } => {
+                if read(regs, *left)? != Type::I64 || read(regs, *right)? != Type::I64 {
+                    return Err("addition needs i64 operands".into());
+                }
+                Ok(Some((*dst, Type::I64)))
+            }
             Instruction::SubI64 { dst, left, right } => {
                 if read(regs, *left)? != Type::I64 || read(regs, *right)? != Type::I64 {
                     return Err("subtraction needs i64 operands".into());

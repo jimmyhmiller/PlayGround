@@ -148,7 +148,12 @@
    (arity i64)              ; params incl. self
    (local-count i64)       ; total declared slots (params + locals + bindings)
    (chunk (ptr Chunk))
-   (is-void bool)])
+   (is-void bool)
+   ; F1 trace: the source fn Node + its type-param ctxt Decl, kept OPAQUE here (bytecode.coil
+   ; can't import ast/types without a cycle) and cast back to (ptr Node)/(ptr Decl) by the
+   ; trace serializer to resolve arg/return types. Both null for synthetic methods (<eval>, defaults).
+   (src-node (ptr i8))
+   (src-ctxt (ptr i8))])
 
 (defstruct FieldInfo [(name (ptr u8)) (name-len i64) (offset i64) (kind i64)])
 

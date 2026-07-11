@@ -350,7 +350,74 @@ extern "C" fn shim_prim<M: ValueModel>(
     rt.prim(prim_from_tag(prim_tag), args)
 }
 
-// A stable integer tag per prim so the emitted code can name one. (The `Prim`
+/// `(.-field obj)` — the inline-cached field read, same as TreeWalk's `FieldGet`.
+extern "C" fn shim_field_get<M: ValueModel>(
+    ctx: *mut JitCtx<M>,
+    site: u32,
+    field: u32,
+    obj: u64,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.field_get(site as usize, field, obj)
+}
+
+/// A protocol/method dispatch: resolve the impl for the receiver's type (with the
+/// `Object` default) and invoke it through `top` — identical to TreeWalk.
+extern "C" fn shim_dispatch<M: ValueModel>(
+    ctx: *mut JitCtx<M>,
+    site: u32,
+    method: u32,
+    args: *const u64,
+    argc: u32,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let top = unsafe { (*ctx.rc).top };
+    let args: &[u64] =
+        if argc == 0 { &[] } else { unsafe { std::slice::from_raw_parts(args, argc as usize) } };
+    let ty = rt.type_tag(args[0]);
+    let imp = rt.resolve_or_default(site as usize, method, ty).unwrap_or_else(|| {
+        panic!("no method '{}' for type '{}'", rt.sym_name(method), rt.sym_name(ty))
+    });
+    top.invoke(top, rt, imp, args)
+}
+
+/// Register a `deftype`/protocol method impl (type-indexed dispatch table).
+extern "C" fn shim_def_method<M: ValueModel>(
+    ctx: *mut JitCtx<M>,
+    name: u32,
+    ty: u32,
+    imp: u64,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.register_method(name, ty, imp);
+    rt.encode(Val::Nil)
+}
+
+/// `(apply f a … lst)` — flatten the leading args with the final list and invoke
+/// `f` through `top`, exactly as the TreeWalk `Prim::Apply` arm does.
+extern "C" fn shim_apply<M: ValueModel>(
+    ctx: *mut JitCtx<M>,
+    args: *const u64,
+    argc: u32,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let top = unsafe { (*ctx.rc).top };
+    let argv: &[u64] =
+        if argc == 0 { &[] } else { unsafe { std::slice::from_raw_parts(args, argc as usize) } };
+    let f = argv[0];
+    let rest = &argv[1..];
+    let mut flat: Vec<u64> = rest[..rest.len().saturating_sub(1)].to_vec();
+    if let Some(&last) = rest.last() {
+        flat.extend(rt.list_to_vec(last));
+    }
+    top.invoke(top, rt, f, &flat)
+}
+
+// A stable integer tag so the emitted code can name one. (The `Prim`
 // enum carries no `#[repr]`, so this is an explicit, total mapping.)
 fn prim_tag(p: Prim) -> u32 {
     use Prim::*;
@@ -491,6 +558,10 @@ struct Shims {
     let_enter: FuncId,
     let_set: FuncId,
     let_exit: FuncId,
+    field_get: FuncId,
+    dispatch: FuncId,
+    def_method: FuncId,
+    apply: FuncId,
 }
 
 #[derive(Clone, Copy)]
@@ -508,6 +579,10 @@ struct ShimRefs {
     let_enter: cranelift_codegen::ir::FuncRef,
     let_set: cranelift_codegen::ir::FuncRef,
     let_exit: cranelift_codegen::ir::FuncRef,
+    field_get: cranelift_codegen::ir::FuncRef,
+    dispatch: cranelift_codegen::ir::FuncRef,
+    def_method: cranelift_codegen::ir::FuncRef,
+    apply: cranelift_codegen::ir::FuncRef,
 }
 
 /// A finished, runnable body: the host code pointer plus the closure templates
@@ -761,6 +836,10 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let le: extern "C" fn(*mut JitCtx<M>, u32) -> u64 = shim_let_enter::<M>;
         let ls: extern "C" fn(*mut JitCtx<M>, u32, u64) -> u64 = shim_let_set::<M>;
         let lx: extern "C" fn(*mut JitCtx<M>, u32) -> u64 = shim_let_exit::<M>;
+        let fget: extern "C" fn(*mut JitCtx<M>, u32, u32, u64) -> u64 = shim_field_get::<M>;
+        let disp: extern "C" fn(*mut JitCtx<M>, u32, u32, *const u64, u32) -> u64 = shim_dispatch::<M>;
+        let dmeth: extern "C" fn(*mut JitCtx<M>, u32, u32, u64) -> u64 = shim_def_method::<M>;
+        let apl: extern "C" fn(*mut JitCtx<M>, *const u64, u32) -> u64 = shim_apply::<M>;
         builder.symbol("ml_load_local", ll as *const u8);
         builder.symbol("ml_load_global", lg as *const u8);
         builder.symbol("ml_def_global", dg as *const u8);
@@ -774,6 +853,10 @@ impl<M: ModelArithJit> JitCranelift<M> {
         builder.symbol("ml_let_enter", le as *const u8);
         builder.symbol("ml_let_set", ls as *const u8);
         builder.symbol("ml_let_exit", lx as *const u8);
+        builder.symbol("ml_field_get", fget as *const u8);
+        builder.symbol("ml_dispatch", disp as *const u8);
+        builder.symbol("ml_def_method", dmeth as *const u8);
+        builder.symbol("ml_apply", apl as *const u8);
 
         let mut module = JITModule::new(builder);
 
@@ -799,6 +882,11 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let s_let_enter = sig(&[ptr, cranelift_codegen::ir::types::I32]);
         let s_let_set = sig(&[ptr, cranelift_codegen::ir::types::I32, I64]);
         let s_let_exit = sig(&[ptr, cranelift_codegen::ir::types::I32]);
+        let i32t = cranelift_codegen::ir::types::I32;
+        let s_field_get = sig(&[ptr, i32t, i32t, I64]);
+        let s_dispatch = sig(&[ptr, i32t, i32t, ptr, i32t]);
+        let s_def_method = sig(&[ptr, i32t, i32t, I64]);
+        let s_apply = sig(&[ptr, ptr, i32t]);
 
         let decl = |module: &mut JITModule, name: &str, sig: &cranelift_codegen::ir::Signature| {
             module
@@ -819,6 +907,10 @@ impl<M: ModelArithJit> JitCranelift<M> {
             let_enter: decl(&mut module, "ml_let_enter", &s_let_enter),
             let_set: decl(&mut module, "ml_let_set", &s_let_set),
             let_exit: decl(&mut module, "ml_let_exit", &s_let_exit),
+            field_get: decl(&mut module, "ml_field_get", &s_field_get),
+            dispatch: decl(&mut module, "ml_dispatch", &s_dispatch),
+            def_method: decl(&mut module, "ml_def_method", &s_def_method),
+            apply: decl(&mut module, "ml_apply", &s_apply),
         };
 
         JitCranelift {
@@ -1196,6 +1288,10 @@ fn build_body<M: ModelArithJit>(
         let_enter: module.declare_func_in_func(shims.let_enter, fb.func),
         let_set: module.declare_func_in_func(shims.let_set, fb.func),
         let_exit: module.declare_func_in_func(shims.let_exit, fb.func),
+        field_get: module.declare_func_in_func(shims.field_get, fb.func),
+        dispatch: module.declare_func_in_func(shims.dispatch, fb.func),
+        def_method: module.declare_func_in_func(shims.def_method, fb.func),
+        apply: module.declare_func_in_func(shims.apply, fb.func),
     };
 
     // A signature matching every compiled body — `fn(*mut JitCtx) -> u64` — for
@@ -1683,8 +1779,13 @@ impl<'a, 'b> Compiler<'a, 'b> {
             Ir::Prim(Prim::CallEc | Prim::CallCc | Prim::Reset | Prim::Shift, _) => panic!(
                 "JIT tier: continuations not supported; run on the tree-walker / CEK"
             ),
-            Ir::Prim(Prim::Apply, _) => {
-                panic!("JIT tier: apply requires a backend that intercepts it (CekMachine)")
+            // `(apply f a … lst)` — flatten + invoke through `top` in the shim.
+            Ir::Prim(Prim::Apply, args) => {
+                let argvals: Vec<Value> =
+                    args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                let (addr, count) = self.spill_args(&argvals);
+                let ctx = self.ctx_val;
+                self.call_shim(self.refs.apply, &[ctx, addr, count])
             }
             // Every other prim: compute args, escape to the runtime (the native
             // analogue of the bytecode tier's `Slow`).
@@ -1743,8 +1844,32 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let ctx = self.ctx_val;
                 self.call_shim(self.refs.set_global, &[ctx, namev, v])
             }
-            Ir::DefMethod { .. } | Ir::Dispatch { .. } | Ir::FieldGet { .. } => {
-                panic!("JIT tier: dispatch not supported; run on the tree-walker")
+            // `(.-field obj)` — inline-cached field read via the shim.
+            Ir::FieldGet { site, field, obj } => {
+                let o = self.compile::<M>(obj, false);
+                let sitev = self.i32const(*site as u32);
+                let fieldv = self.i32const(*field);
+                let ctx = self.ctx_val;
+                self.call_shim(self.refs.field_get, &[ctx, sitev, fieldv, o])
+            }
+            // Protocol/method dispatch: args spilled like a call, resolved + invoked
+            // in the shim (which reaches `top`).
+            Ir::Dispatch { site, method, args } => {
+                let argvals: Vec<Value> =
+                    args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                let (addr, count) = self.spill_args(&argvals);
+                let sitev = self.i32const(*site as u32);
+                let methodv = self.i32const(*method);
+                let ctx = self.ctx_val;
+                self.call_shim(self.refs.dispatch, &[ctx, sitev, methodv, addr, count])
+            }
+            // Register a deftype/protocol method impl.
+            Ir::DefMethod { name, ty, imp } => {
+                let impv = self.compile::<M>(imp, false);
+                let namev = self.i32const(*name);
+                let tyv = self.i32const(*ty);
+                let ctx = self.ctx_val;
+                self.call_shim(self.refs.def_method, &[ctx, namev, tyv, impv])
             }
             Ir::Try { .. } => panic!("JIT tier: try/catch not supported; run on the tree-walker"),
         }
@@ -1970,9 +2095,11 @@ impl<'a, 'b> Compiler<'a, 'b> {
 /// not model: the continuation / `apply` / `gc` prims, or record dispatch.
 pub fn jit_can_compile(ir: &Ir) -> bool {
     match ir {
-        Ir::Prim(Prim::CallCc | Prim::Reset | Prim::Shift | Prim::CallEc | Prim::Gc | Prim::Apply | Prim::Spawn, _) => false,
-        Ir::Dispatch { .. } | Ir::DefMethod { .. } | Ir::FieldGet { .. } => false,
-        // try/catch unwinds the native stack; only the TreeWalk tier models it.
+        Ir::Prim(Prim::CallCc | Prim::Reset | Prim::Shift | Prim::CallEc | Prim::Gc | Prim::Spawn, _) => false,
+        Ir::Dispatch { args, .. } => args.iter().all(jit_can_compile),
+        Ir::DefMethod { imp, .. } => jit_can_compile(imp),
+        Ir::FieldGet { obj, .. } => jit_can_compile(obj),
+        // try/catch unwinds the native stack; handled below by lowering to a shim.
         Ir::Try { .. } => false,
         // A `Lambda` only makes a closure here; its body's compilability is
         // decided when that closure is invoked. So do NOT descend.

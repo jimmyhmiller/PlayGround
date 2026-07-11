@@ -5,11 +5,13 @@
 //! split keeps this crate free of the inkwell/LLVM static library so its
 //! concurrency can be verified under ThreadSanitizer.
 
+mod frontend;
 mod model;
 mod mt;
 mod runtime;
 mod verify;
 
+pub use frontend::*;
 pub use model::*;
 pub use mt::*;
 pub use runtime::*;

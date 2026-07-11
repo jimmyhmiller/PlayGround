@@ -430,6 +430,23 @@ impl<'ctx> Codegen<'ctx> {
                     );
                     fallthrough();
                 }
+                Instruction::Copy { dst, src } => {
+                    // Copy the whole slot (tag + payload) — works for any type,
+                    // and the GC sees a copied Ref in dst.
+                    let s = self.slot_ptr(frame, *src);
+                    let tag = self.load_field(s, 0, "cp.tag");
+                    let payload = self.load_field(s, 1, "cp.pay");
+                    self.store_slot(frame, *dst, tag, payload);
+                    fallthrough();
+                }
+                Instruction::AddI64 { dst, left, right } => {
+                    self.guard_tags(step, frame, pc, &[(*left, TAG_I64), (*right, TAG_I64)]);
+                    let a = self.payload_of(frame, *left);
+                    let b = self.payload_of(frame, *right);
+                    let r = self.builder.build_int_add(a, b, "add").unwrap();
+                    self.store_slot(frame, *dst, i64t.const_int(TAG_I64 as u64, false), r);
+                    fallthrough();
+                }
                 Instruction::SubI64 { dst, left, right } => {
                     self.guard_tags(step, frame, pc, &[(*left, TAG_I64), (*right, TAG_I64)]);
                     let a = self.payload_of(frame, *left);

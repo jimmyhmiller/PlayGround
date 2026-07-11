@@ -357,6 +357,21 @@ impl Shared {
                         Err(c) => return Outcome::Paused(c),
                     }
                 }
+                Instruction::Copy { dst, src } => {
+                    let v = read(&frames, src);
+                    let t = frames.last_mut().unwrap();
+                    t.regs[dst] = Some(v);
+                    t.pc += 1;
+                }
+                Instruction::AddI64 { dst, left, right } => {
+                    let (Value::I64(a), Value::I64(b)) = (read(&frames, left), read(&frames, right))
+                    else {
+                        return err(crate::runtime::ERR_ADD_NON_I64);
+                    };
+                    let t = frames.last_mut().unwrap();
+                    t.regs[dst] = Some(Value::I64(a + b));
+                    t.pc += 1;
+                }
                 Instruction::SubI64 { dst, left, right } => {
                     let (Value::I64(a), Value::I64(b)) = (read(&frames, left), read(&frames, right))
                     else {

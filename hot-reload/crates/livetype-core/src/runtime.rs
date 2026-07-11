@@ -55,6 +55,7 @@ pub fn resume_shape(
 
 // Operand-tag error messages, shared so the interpreter arms and the native
 // driver's `OUT_TYPE_ERROR` path produce byte-identical conditions.
+pub(crate) const ERR_ADD_NON_I64: &str = "addition on non-i64";
 pub(crate) const ERR_SUB_NON_I64: &str = "subtraction on non-i64";
 pub(crate) const ERR_LT_NON_I64: &str = "comparison on non-i64";
 pub(crate) const ERR_BRANCH_NON_BOOL: &str = "branch on non-bool";
@@ -357,6 +358,18 @@ impl Runtime {
                 let value = self.jit_get_field(id, field)?;
                 self.write_and_advance(actor, dst, value);
             }
+            Instruction::Copy { dst, src } => {
+                let value = self.reg(actor, src)?;
+                self.write_and_advance(actor, dst, value);
+            }
+            Instruction::AddI64 { dst, left, right } => {
+                let (Value::I64(a), Value::I64(b)) =
+                    (self.reg(actor, left)?, self.reg(actor, right)?)
+                else {
+                    return Err(self.type_error(function, pc, ERR_ADD_NON_I64));
+                };
+                self.write_and_advance(actor, dst, Value::I64(a + b));
+            }
             Instruction::SubI64 { dst, left, right } => {
                 let (Value::I64(a), Value::I64(b)) =
                     (self.reg(actor, left)?, self.reg(actor, right)?)
@@ -628,6 +641,7 @@ impl Runtime {
         instruction: &Instruction,
     ) -> Condition {
         let message = match instruction {
+            Instruction::AddI64 { .. } => ERR_ADD_NON_I64,
             Instruction::SubI64 { .. } => ERR_SUB_NON_I64,
             Instruction::LtI64 { .. } => ERR_LT_NON_I64,
             Instruction::Branch { .. } => ERR_BRANCH_NON_BOOL,

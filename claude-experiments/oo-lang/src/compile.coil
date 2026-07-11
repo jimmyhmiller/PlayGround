@@ -690,6 +690,9 @@
     (store! (field mi chunk) chunk)
     (store! (field mi arity) (+ np start-slot))
     (store! (field mi is-void) is-void)
+    ; F1 trace: remember the source fn Node + ctxt Decl so the tracer can resolve arg/return types
+    (store! (field mi src-node) (cast (ptr i8) fnn))
+    (store! (field mi src-ctxt) (cast (ptr i8) ctxt))
     ; bind params
     (let [(mut i) 0]
       (loop (if (< (load i) np)
@@ -711,6 +714,7 @@
   (let [mi (cast (ptr MethodInfo) (xalloc (sizeof MethodInfo)))]
     (store! (field mi name) name) (store! (field mi name-len) len)
     (store! (field mi arity) 0) (store! (field mi local-count) 0) (store! (field mi is-void) false)
+    (store! (field mi src-node) (cast (ptr i8) 0)) (store! (field mi src-ctxt) (cast (ptr i8) 0))
     (al-push! (mut (field (cc) methods)) mi)
     (al-push! (mut (field (cc) method-nodes)) node)
     mi))

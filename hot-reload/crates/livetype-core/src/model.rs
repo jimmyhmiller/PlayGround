@@ -123,6 +123,19 @@ pub enum Instruction {
         object: usize,
         field: FieldId,
     },
+    /// Copy a value from one register to another (any type). The one op that
+    /// isn't produced by a single source construct — the frontend emits it to
+    /// bind a local to another local's value and to land branch results in a
+    /// common register (this IR has no phi nodes).
+    Copy {
+        dst: usize,
+        src: usize,
+    },
+    AddI64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
     SubI64 {
         dst: usize,
         left: usize,
