@@ -417,6 +417,44 @@ extern "C" fn shim_apply<M: ValueModel>(
     top.invoke(top, rt, f, &flat)
 }
 
+/// `(%spawn thunk)` — spawn an OS thread that runs `thunk` on the JIT. The worker
+/// builds its OWN `JitCranelift` in-thread (so the JIT need not be `Send`) and
+/// shares this runtime's heap/globals via the thread handle; the closure and
+/// everything it calls run NATIVE on the worker. Mirrors the TreeWalk `Spawn` arm
+/// but with a JIT worker instead of a tree-walker.
+extern "C" fn shim_spawn<M: ModelArithJit>(ctx: *mut JitCtx<M>, thunk: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let child = rt.thread_handle();
+    let slot = std::sync::Arc::new(std::sync::Mutex::new(crate::value::FutureSlot {
+        handle: None,
+        result: None,
+    }));
+    let slot_worker = slot.clone();
+    let slot_obj = slot.clone();
+    let handle = std::thread::spawn(move || {
+        let cs = JitCranelift::<M>::new();
+        let mut crt = child;
+        let r = cs.invoke(&cs, &mut crt, thunk, &[]);
+        // Publish the result before the worker's handle drops (see TreeWalk Spawn).
+        slot_worker.lock().unwrap().result = Some(r);
+        r
+    });
+    slot.lock().unwrap().handle = Some(handle);
+    let id = rt.alloc(Obj::Future(slot_obj));
+    M::R::enc_ref(id)
+}
+
+/// `(%await fut)` — join the future's worker, PARKING this thread while blocked so
+/// a concurrent stop-the-world collector can proceed (the reason this is backend-
+/// handled and not a plain `rt.prim`). Uses `ctx.cur` for the roots to publish.
+extern "C" fn shim_await<M: ValueModel>(ctx: *mut JitCtx<M>, fut: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let locals = ctx.cur.borrow().clone();
+    rt.await_future(fut, &locals)
+}
+
 /// `(try body (catch e handler) (finally f))` — the body/catch/finally Ir nodes
 /// are passed by raw pointer (they outlive the compiled code) and evaluated via
 /// `top`, so this mirrors TreeWalk's `Ir::Try` EXACTLY: catch_unwind the body, on
@@ -607,6 +645,8 @@ struct Shims {
     def_method: FuncId,
     apply: FuncId,
     try_: FuncId,
+    spawn: FuncId,
+    await_: FuncId,
 }
 
 #[derive(Clone, Copy)]
@@ -629,6 +669,8 @@ struct ShimRefs {
     def_method: cranelift_codegen::ir::FuncRef,
     apply: cranelift_codegen::ir::FuncRef,
     try_: cranelift_codegen::ir::FuncRef,
+    spawn: cranelift_codegen::ir::FuncRef,
+    await_: cranelift_codegen::ir::FuncRef,
 }
 
 /// A finished, runnable body: the host code pointer plus the closure templates
@@ -887,6 +929,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let dmeth: extern "C" fn(*mut JitCtx<M>, u32, u32, u64) -> u64 = shim_def_method::<M>;
         let apl: extern "C" fn(*mut JitCtx<M>, *const u64, u32) -> u64 = shim_apply::<M>;
         let tryf: extern "C" fn(*mut JitCtx<M>, *const Ir, *const Ir, *const Ir) -> u64 = shim_try::<M>;
+        let spwn: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_spawn::<M>;
+        let awt: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_await::<M>;
         builder.symbol("ml_load_local", ll as *const u8);
         builder.symbol("ml_load_global", lg as *const u8);
         builder.symbol("ml_def_global", dg as *const u8);
@@ -905,6 +949,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
         builder.symbol("ml_def_method", dmeth as *const u8);
         builder.symbol("ml_apply", apl as *const u8);
         builder.symbol("ml_try", tryf as *const u8);
+        builder.symbol("ml_spawn", spwn as *const u8);
+        builder.symbol("ml_await", awt as *const u8);
 
         let mut module = JITModule::new(builder);
 
@@ -936,6 +982,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let s_def_method = sig(&[ptr, i32t, i32t, I64]);
         let s_apply = sig(&[ptr, ptr, i32t]);
         let s_try = sig(&[ptr, ptr, ptr, ptr]);
+        let s_spawn = sig(&[ptr, I64]);
+        let s_await = sig(&[ptr, I64]);
 
         let decl = |module: &mut JITModule, name: &str, sig: &cranelift_codegen::ir::Signature| {
             module
@@ -961,6 +1009,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
             def_method: decl(&mut module, "ml_def_method", &s_def_method),
             apply: decl(&mut module, "ml_apply", &s_apply),
             try_: decl(&mut module, "ml_try", &s_try),
+            spawn: decl(&mut module, "ml_spawn", &s_spawn),
+            await_: decl(&mut module, "ml_await", &s_await),
         };
 
         JitCranelift {
@@ -1361,6 +1411,8 @@ fn build_body<M: ModelArithJit>(
         def_method: module.declare_func_in_func(shims.def_method, fb.func),
         apply: module.declare_func_in_func(shims.apply, fb.func),
         try_: module.declare_func_in_func(shims.try_, fb.func),
+        spawn: module.declare_func_in_func(shims.spawn, fb.func),
+        await_: module.declare_func_in_func(shims.await_, fb.func),
     };
 
     // A signature matching every compiled body — `fn(*mut JitCtx) -> u64` — for
@@ -1882,6 +1934,19 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let vs: Vec<Value> = args.iter().map(|a| self.compile::<M>(a, false)).collect();
                 self.emit_all_fixnum::<M>(&vs)
             }
+            // `(%spawn thunk)` — spawn a native-JIT worker thread; `(%await fut)`
+            // — join it, parking during the wait. Both via shims that reach the
+            // runtime + build a worker JIT, so threads run WHOLLY on the JIT.
+            Ir::Prim(Prim::Spawn, args) => {
+                let thunk = self.compile::<M>(&args[0], false);
+                let ctx = self.ctx_val;
+                self.call_shim(self.refs.spawn, &[ctx, thunk])
+            }
+            Ir::Prim(Prim::Await, args) => {
+                let fut = self.compile::<M>(&args[0], false);
+                let ctx = self.ctx_val;
+                self.call_shim_checked(self.refs.await_, &[ctx, fut])
+            }
             Ir::Prim(Prim::Gc, _) => panic!(
                 "JIT tier: (gc) is a safepoint not modeled here; run it on the tree-walker / CEK"
             ),
@@ -2216,7 +2281,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
 /// not model: the continuation / `apply` / `gc` prims, or record dispatch.
 pub fn jit_can_compile(ir: &Ir) -> bool {
     match ir {
-        Ir::Prim(Prim::CallCc | Prim::Reset | Prim::Shift | Prim::CallEc | Prim::Gc | Prim::Spawn, _) => false,
+        Ir::Prim(Prim::CallCc | Prim::Reset | Prim::Shift | Prim::CallEc | Prim::Gc, _) => false,
         Ir::Dispatch { args, .. } => args.iter().all(jit_can_compile),
         Ir::DefMethod { imp, .. } => jit_can_compile(imp),
         Ir::FieldGet { obj, .. } => jit_can_compile(obj),

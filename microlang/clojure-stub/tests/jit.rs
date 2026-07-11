@@ -94,6 +94,23 @@ fn try_catch_on_jit() {
 }
 
 #[test]
+fn threads_on_jit() {
+    // `future` spawns an OS thread that runs its closure on ITS OWN native JIT,
+    // sharing the heap/atoms; `deref`/`@` joins it (parking during the wait).
+    assert_eq!(jit("@(future (+ 1 2))"), "3");
+    // atomic swap! across JIT worker threads over the shared atom
+    assert_eq!(jit("(let [a (atom 0)] (dotimes [_ 5] @(future (swap! a inc))) @a)"), "5");
+    // fan out N futures and combine — all workers native
+    assert_eq!(jit("(reduce + (map deref (mapv (fn [i] (future (* i i))) (range 8))))"), "140");
+    assert_eq!(
+        jit("(reduce + (map deref (mapv (fn [i] (future (reduce + (range i)))) (range 10))))"),
+        "120"
+    );
+    // a future whose body itself dispatches through the collection protocols
+    assert_eq!(jit("@(future (count (into {} (map (fn [i] [i i]) (range 30)))))"), "30");
+}
+
+#[test]
 fn lazy_seqs_on_jit() {
     assert_eq!(jit("(take 5 (map (fn [x] (* x x)) (range)))"), "(0 1 4 9 16)");
     assert_eq!(jit("(reduce + (take 10 (iterate inc 1)))"), "55");
