@@ -7,6 +7,7 @@ fn value_type(value: &Value) -> Result<Type, String> {
         Value::I64(_) => Ok(Type::I64),
         Value::Bool(_) => Ok(Type::Bool),
         Value::Ref(_) => Err("object literals are runtime values, not code constants".into()),
+        Value::Foreign { .. } => Err("foreign handles are runtime values, not code constants".into()),
     }
 }
 
@@ -162,6 +163,29 @@ fn check_instruction(
                 }
                 Ok(Some((*dst, result)))
             }
+        Instruction::CallForeign { dst, foreign, args } => {
+            let (params, result) = world
+                .foreign_sigs
+                .get(foreign)
+                .ok_or_else(|| format!("unknown foreign fn {foreign}"))?;
+            if args.len() != params.len() {
+                return Err("wrong argument count to foreign fn".into());
+            }
+            for (arg, expected) in args.iter().zip(params) {
+                if read(regs, *arg)? != *expected {
+                    return Err(format!("foreign argument r{arg} has the wrong type"));
+                }
+            }
+            Ok(Some((*dst, result.clone())))
+        }
+        Instruction::LoadGlobal { dst, global } => {
+            let ty = world
+                .global_types
+                .get(global)
+                .ok_or_else(|| format!("unknown global {global}"))?
+                .clone();
+            Ok(Some((*dst, ty)))
+        }
         Instruction::LtI64 { dst, left, right } => {
             if read(regs, *left)? != Type::I64 || read(regs, *right)? != Type::I64 {
                 return Err("comparison needs i64 operands".into());

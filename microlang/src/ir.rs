@@ -192,6 +192,8 @@ pub enum Prim {
     AllNs,
     /// `(%symbol "a/b")` -> the interned symbol for a string (reverse of `%str-of`).
     SymbolOf,
+    /// `(%var-arglists 'sym)` -> the var's captured `:arglists` datum, or nil.
+    VarArglists,
 
     // ── optimizer-introduced fixnum specializations ──────────────────────────
     // These are produced ONLY by the `optimize` nanopass (never by `analyze`).

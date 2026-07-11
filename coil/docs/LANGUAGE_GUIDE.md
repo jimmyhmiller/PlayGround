@@ -251,8 +251,46 @@ accessor — it returns the same global cell every call:
     (defstruct VM [(x i64) …])
     (defn vm [] (-> (ptr VM)) (alloc-static VM))   ; (load (field (vm) x)) …
 
-`(const NAME VALUE)` / `(const NAME TYPE VALUE)` are compile-time immutable scalars
-(opcodes, limits): `(const OP_RETURN 0)`.
+`(const NAME VALUE)` / `(const NAME TYPE VALUE)` — compile-time immutable bindings.
+The value is ANY expression, run at compile time: `(const OP_RETURN 0)`, `(const
+FACT5 (fact 5))`. An aggregate const (struct/array) is evaluated once and emitted as
+a static global (a compile-time lookup table): `(const SQUARES (build-squares))`.
+
+## Compile-time: comptime, macros, reflection
+
+The whole language runs at compile time — one language, two phases. No separate
+macro dialect.
+
+**`(comptime E)`** evaluates `E` during compilation and splices the literal result:
+`(comptime (fact 5))` compiles to the constant `120` (no call in the output). It runs
+real Coil — arithmetic, `if`/`let`/`loop`, `match`, any monomorphic `defn`
+(recursively), mutable locals, and memory (`alloc`/`load`/`store!`/`field`/`index`).
+It may return a scalar, struct, sum, or array; build a table with a loop and index it
+at runtime. ⚠ Not at comptime: generics, FFI/`extern`, `sizeof`/`alignof` (codegen
+needs LLVM layout). Each raises a clear error, never a miscompile.
+
+**Macros are ordinary functions** `[Code…] (-> Code)` — detected by type, no
+`defmacro`. `Code` is a first-class value: quote a form with `` `FORM ``, splice a
+value in with `~E`, splice a list's elements with `~@E`. `(gensym)` gives a fresh
+symbol so macro temporaries don't capture. `&` before the last param makes it
+variadic (soaks up the rest as one Code list). Calls expand inline, outside-in:
+
+    (defn when [(c Code) (body Code)] (-> Code) `(if ~c (do ~@body) 0))
+    (when (< x 10) (println "small"))     ; → (if (< x 10) (do (println …)) 0)
+
+**`(meta (gen …))`** runs a generator at compile time and splices its result as new
+top-level forms; later code may depend on what it generates.
+
+**Reflection** — introspect a type by name at comptime (fold to literals):
+`(field-count T)`, `(variant-count T)`, `(struct? T)`/`(sum? T)`/`(int? T)`/`(float?
+T)`/`(ptr? T)`/`(array? T)`, `(field-name T i)`, `(field-type-kind T i)`,
+`(field-type-name T i)`, `(field-index T "name")`. Inside a macro (where a type
+arrives as a Code symbol) use the `code-*` family: `code-field-count`/`-name`/`-kind`
+/`-type`, `code-variant-sum`/`-count`/`-name`/`-fields`, and trait reflection
+`code-trait-method-count`/`-name`/`-arity`/`-param-type`/`-ret-type` (for generating
+vtables). Take Code apart with `code-count`/`code-nth`/`code-rest`/`code-sym`
+/`code-list?`/`code-sym?`/`code-int?`. This makes `derive` (lib/derive.coil:
+eq/hash/keyops) a pure library, not a compiler builtin.
 
 ## I/O & FFI
 

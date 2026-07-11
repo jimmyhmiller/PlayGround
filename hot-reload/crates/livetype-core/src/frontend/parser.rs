@@ -63,8 +63,58 @@ impl Parser {
         match self.peek() {
             Tok::Struct => Ok(Item::Struct(self.struct_def()?)),
             Tok::Fn => Ok(Item::Fn(self.fn_def()?)),
-            other => Err(format!("line {}: expected `struct` or `fn`, found {other:?}", self.line())),
+            Tok::Foreign => self.foreign_item(),
+            Tok::LetOnce => self.global_def(),
+            other => Err(format!(
+                "line {}: expected `struct`, `fn`, `foreign`, or `letonce`, found {other:?}",
+                self.line()
+            )),
         }
+    }
+
+    /// `foreign type Name;` or `foreign fn name(params) -> ret;`. `type` is a
+    /// contextual word (only special after `foreign`), so it stays usable as an
+    /// identifier elsewhere.
+    fn foreign_item(&mut self) -> Result<Item, String> {
+        self.expect(&Tok::Foreign)?;
+        if let Tok::Ident(word) = self.peek()
+            && word == "type"
+        {
+            self.bump();
+            let name = self.ident()?;
+            self.expect(&Tok::Semi)?;
+            return Ok(Item::ForeignType(name));
+        }
+        self.expect(&Tok::Fn)?;
+        let name = self.ident()?;
+        self.expect(&Tok::LParen)?;
+        let mut params = Vec::new();
+        while !self.at(&Tok::RParen) {
+            let pname = self.ident()?;
+            self.expect(&Tok::Colon)?;
+            let ty = self.type_expr()?;
+            params.push(Param { name: pname, ty });
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(&Tok::RParen)?;
+        let ret = if self.eat(&Tok::Arrow) {
+            self.type_expr()?
+        } else {
+            TypeExpr::Unit
+        };
+        self.expect(&Tok::Semi)?;
+        Ok(Item::ForeignFn(ForeignFnDef { name, params, ret }))
+    }
+
+    fn global_def(&mut self) -> Result<Item, String> {
+        self.expect(&Tok::LetOnce)?;
+        let name = self.ident()?;
+        self.expect(&Tok::Eq)?;
+        let init = self.expr(true)?;
+        self.expect(&Tok::Semi)?;
+        Ok(Item::Global(GlobalDef { name, init }))
     }
 
     fn type_expr(&mut self) -> Result<TypeExpr, String> {

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use microlang::ir::{Ir, Prim};
 use microlang::value::Sym;
-use microlang::{Runtime, Val, ValueModel};
+use microlang::{Obj, Runtime, Val, ValueModel};
 
 /// Compile-time state that persists across top-level forms.
 pub struct Compiler {
@@ -91,7 +91,7 @@ impl Compiler {
             ("%sym-name", SymName), ("%sym-ns", SymNs),
             // Var/namespace registry reflection (metadata flags + ns enumeration).
             ("%var-flags", VarFlags), ("%ns-interns", NsInterns), ("%all-ns", AllNs),
-            ("%symbol", SymbolOf),
+            ("%symbol", SymbolOf), ("%var-arglists", VarArglists),
         ] {
             prims.insert(rt.intern(name), p);
         }
@@ -268,6 +268,48 @@ impl Compiler {
         (form, dynamic, private)
     }
 
+    /// Extract `:arglists` from a `(fn …)` init form (single-arity), building a
+    /// `([params])` datum captured into the var registry at compile time. Returns
+    /// `None` for non-fn inits or multi-arity fns (whose arglists our basic `defn`
+    /// doesn't produce anyway).
+    fn fn_arglists<M: ValueModel>(&self, rt: &mut Runtime<M>, init: u64) -> Option<u64> {
+        rt.as_cons(init)?;
+        let items = rt.list_to_vec(init);
+        let is_fn = items
+            .first()
+            .is_some_and(|&h| matches!(rt.decode(h), Val::Sym(s) if matches!(rt.sym_name(s), "fn" | "fn*")));
+        if !is_fn {
+            return None;
+        }
+        let mut i = 1;
+        // Skip an optional self-name (`(fn* name params …)`).
+        if items.get(i).is_some_and(|&x| matches!(rt.decode(x), Val::Sym(_))) {
+            i += 1;
+        }
+        let params = *items.get(i)?;
+        // Multi-arity `(fn ([a] …) ([a b] …))`: the item is a list whose head is
+        // itself a (param) list — skip (single-arity only).
+        if let Some((h, _)) = rt.as_cons(params) {
+            if rt.as_cons(h).is_some() {
+                return None;
+            }
+        }
+        let v = self.vector_of(rt, params);
+        Some(rt.vec_to_list(&[v]))
+    }
+
+    /// Present a param binder as a `Vector` record (so `:arglists` prints `[a b]`).
+    /// A post-expansion param LIST is wrapped; an already-vector value is kept.
+    fn vector_of<M: ValueModel>(&self, rt: &mut Runtime<M>, params: u64) -> u64 {
+        if rt.as_cons(params).is_some() {
+            let vsym = rt.intern("Vector");
+            let id = rt.alloc(Obj::Record { type_id: vsym, fields: vec![params] });
+            rt.encode(Val::Ref(id))
+        } else {
+            params
+        }
+    }
+
     /// A `Const` Ir holding the symbol `s` as a value (for the `%dyn-*` prims,
     /// which take the var's name as a runtime argument).
     fn sym_const<M: ValueModel>(&self, rt: &mut Runtime<M>, s: Sym) -> Ir {
@@ -341,6 +383,13 @@ impl Compiler {
                     // Record the var in the runtime registry (for ns enumeration and
                     // `(meta #'x)` flags).
                     rt.register_var(n, &self.ns.current, flags);
+                    // Capture :arglists from a `(fn …)` init (compile-time, so it
+                    // needs no bootstrap-order-sensitive emitted code).
+                    if items.len() > 2 {
+                        if let Some(al) = self.fn_arglists(rt, items[2]) {
+                            rt.set_var_arglists(n, al);
+                        }
+                    }
                     if items.len() > 2 {
                         let init = Box::new(self.compile(rt, items[2]));
                         return Ir::Def { name: n, init };

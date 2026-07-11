@@ -71,6 +71,13 @@ impl RawSlot {
                 tag: TAG_REF,
                 payload: *id as i64,
             },
+            // A foreign handle (kind + native pointer) does not fit one tagged
+            // i64 slot, and the JIT tier does not run FFI (foreign calls trap in
+            // codegen). Reaching here means a foreign value leaked into a native
+            // frame — fail loudly rather than truncate a pointer.
+            Value::Foreign { .. } => {
+                panic!("foreign handles are not supported on the JIT tier (use the interpreter)")
+            }
         }
     }
 
@@ -617,6 +624,12 @@ impl<'ctx> Codegen<'ctx> {
                 Instruction::Send { .. } | Instruction::Recv { .. } => {
                     // Message passing belongs to the concurrent tier; the JIT
                     // never runs programs containing it. Trap if one appears.
+                    self.set_pc(frame, pc as u64);
+                    self.ret_outcome(OUT_TYPE_ERROR);
+                }
+                Instruction::CallForeign { .. } | Instruction::LoadGlobal { .. } => {
+                    // FFI and globals run on the interpreter (live-edit) tier;
+                    // the JIT does not lower them. Trap clearly if one appears.
                     self.set_pc(frame, pc as u64);
                     self.ret_outcome(OUT_TYPE_ERROR);
                 }

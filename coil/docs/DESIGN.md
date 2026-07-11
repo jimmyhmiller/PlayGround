@@ -674,9 +674,11 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
     a sum type (`(Result :i64 IoError)`). It composes with allocation — a `Writer`
     formats into an allocator-provided buffer (`examples/io.coil` → `answer=42`).
     **Next:** a `defer`/scope macro for cleanup.
-- **Macros — ✅ done (engine).** `defmacro`/`def` evaluated by a compile-time
-  Lisp interpreter (quasiquote/unquote/splicing, `gensym`, list & symbol
-  builtins, lambdas, recursion, helper functions). Macros compute and can emit
+- **Macros — ✅ done (engine).** Macros are ordinary Coil `[Code…] -> Code`
+  functions (detected by type, no `defmacro`), run by the comptime interpreter
+  over `Code` as a first-class value (quasiquote/unquote/splicing, `gensym`,
+  code builtins, recursion, helper functions). The old separate compile-time
+  Lisp was retired — it is one language now. Macros compute and can emit
   whole top-level definitions (a top-level `(do ...)` is spliced). They compose
   with conventions and allocators. The target is exposed as compile-time values
   (`target-arch`, `target-os`, `target-triple`, `target-pointer-width`), so

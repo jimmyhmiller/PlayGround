@@ -12,7 +12,7 @@ The hard compiler core is done and is genuinely competitive:
 - **Calling convention is a type.** `defcc` with a `:native` lowering (rides an LLVM CC) or a `:shim` lowering (naked trampoline + register-constrained call sites), emitted per architecture (x86-64, AArch64). Nothing else exposes this.
 - **Allocation is a value, not a keyword.** Region-less pointers (`(ptr T)`); `alloc-stack/static/heap`; Zig-style allocators threaded as vtable values (`lib/alloc.coil`); an IO capability the same way (`lib/io.coil`).
 - **Layout is a type** (the dual of calling convention): `:c`/`:packed`/`(align N)`/`:explicit`/`:bits`, with `sizeof`/`alignof`/`offsetof`/`static-assert`.
-- **Real metaprogramming.** A compile-time Lisp (`defmacro`, quasiquote, gensym hygiene) that can emit whole top-level definitions and branch on the target.
+- **Real metaprogramming.** Macros are ordinary Coil `[Code…] -> Code` functions (quasiquote, gensym hygiene) run at compile time by the comptime interpreter — one language, no separate macro dialect — that can emit whole top-level definitions and branch on the target.
 - **A module system** with namespaced functions/types/sums/conventions, file-relative `import` (`:as`/`:use`), `(export …)` visibility, and **proper cross-module macro hygiene** (references resolve in the macro's defining module, including the macro-generated, second-order case).
 - **Raw LLVM IR as a first-class escape hatch.** `(llvm-ir …)` inlines arbitrary LLVM IR with zero overhead; on top of it, SIMD (`(vec T N)` + `lib/simd.coil`) is a *library*. A consequence we proved: a C function from `clang -emit-llvm` pastes straight into Coil and runs identically.
 - **C interop**: `extern` (incl. variadic), and struct-by-value across the real C ABI (SysV AMD64 + AArch64 AAPCS64), verified against clang.
@@ -147,8 +147,8 @@ A concrete, compelling demo: a tiny ARM Cortex-M blink/UART program with the dev
 ## 8. Lean-in #3 — metaprogramming, comptime, and "features as libraries"
 
 - **`adapt`** (the deferred macro): general convention-to-convention trampolines synthesized from two `defcc` descriptions — the last piece of the calling-convention story, and the foundation for FFI shims and JIT glue.
-- **A comptime story that bridges macros and types.** Coil's macros are a separate Lisp; Zig's comptime is type-level computation in the *same* language. Decide and build the bridge: comptime evaluation of Coil functions, comptime type construction, and comptime values flowing into types (`Array(T, comptime_len)`). This is what makes generic data structures and reflection ergonomic.
-- **Reflection / `@typeInfo`** — introspect struct fields, sum variants, function signatures at comptime; enables serialization, formatting, ORMs, and generic printing without boilerplate.
+- **A comptime story that bridges macros and types — ✅ shipped.** `(comptime E)` evaluates real Coil functions at compile time, and macros are now the same language (`[Code…] -> Code` run by the comptime interpreter), not a separate Lisp. Remaining: comptime *type construction* (reflection returning first-class `Type` values) and comptime values flowing into types (`Array(T, comptime_len)`).
+- **Reflection — ✅ shipped (structural).** Introspect struct fields, sum variants, and trait/method signatures at comptime (`field-count`, `code-field-*`, `code-trait-*`); `lib/derive.coil` (eq/hash/keyops) is a pure library over it. Remaining: field types as first-class `Type` values and generic-type-param reflection.
 - **Interfaces / structural constraints** — bless the allocator/`Writer` vtable pattern, or add comptime structural "does T have method m" checks, so generic code documents its requirements.
 - **Closures, iterators, `defer`, error sets, even bounds-checked slices** can largely be *library* macros over the core — keep the compiler small.
 
@@ -191,7 +191,7 @@ Coil's design explicitly says coroutines and async frames are points in the *(ca
 - **Incremental compilation** is genuinely hard under whole-program mono. A per-module IR cache + on-demand instantiation is the likely path; true incremental may require giving up some whole-program optimization.
 - **Safety without a borrow checker.** The debug-mode-checks plan (§4) covers spatial/temporal *detection*; it does not *prevent* use-after-free at compile time. That's a deliberate, defensible stance (it's C/Zig's stance too) — but it should be stated, not papered over.
 - **Macro hygiene's last edge.** The current system is robust through the second-order case; full Racket-style scope-set hygiene is more than Coil likely needs, but the residual (a reference to a macro-generated def that appears *after* the use site) should be documented and, if it ever bites, addressed with a proper expansion-environment model.
-- **A `comptime` model that unifies with the macro Lisp** is a real design project, not a feature — it touches the type system, the evaluator, and generics.
+- **A `comptime` model that unifies with the macro Lisp** — ✅ done (Stage 3): macros are ordinary Coil `[Code…] -> Code` functions run by the comptime interpreter, and the separate macro Lisp was deleted.
 - **Stdlib surface area.** "Batteries included" is hundreds of files. It needs sustained effort and an API-design throughline (allocator-aware, error-set-based, slice-first).
 
 ---

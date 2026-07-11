@@ -39,10 +39,33 @@ pub struct FnDef {
     pub body: Vec<Stmt>,
 }
 
+/// A native function declaration: `foreign fn draw(w: Window, n: i64);`. Only
+/// the signature is written here; the implementation is registered on the
+/// runtime by the host. This is the managed → native boundary.
+#[derive(Clone, Debug)]
+pub struct ForeignFnDef {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret: TypeExpr,
+}
+
+/// A persistent top-level binding: `letonce win = open_window();`. Its
+/// initializer runs once and the value survives hot edits — where native
+/// resources live so a reload changes code, not the running world.
+#[derive(Clone, Debug)]
+pub struct GlobalDef {
+    pub name: String,
+    pub init: Expr,
+}
+
 #[derive(Clone, Debug)]
 pub enum Item {
     Struct(StructDef),
     Fn(FnDef),
+    /// `foreign type Window;` — declares an opaque native resource type.
+    ForeignType(String),
+    ForeignFn(ForeignFnDef),
+    Global(GlobalDef),
 }
 
 #[derive(Clone, Debug)]

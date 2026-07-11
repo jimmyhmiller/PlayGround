@@ -262,6 +262,9 @@ pub struct Shared<M: ValueModel> {
     pub(crate) var_flags: Mutex<HashMap<Sym, u8>>,
     /// namespace name -> the vars interned there, in definition order.
     pub(crate) ns_vars: Mutex<HashMap<String, Vec<Sym>>>,
+    /// qualified sym -> its `:arglists` value (a heap datum captured at `def` time,
+    /// so it IS traced by the collector, unlike the flags/ns tables above).
+    pub(crate) var_arglists: Mutex<HashMap<Sym, u64>>,
     _pd: PhantomData<fn() -> M>,
 }
 
@@ -348,6 +351,7 @@ impl<M: ValueModel> Runtime<M> {
             mutators: Mutex::new(Vec::new()),
             var_flags: Mutex::new(HashMap::new()),
             ns_vars: Mutex::new(HashMap::new()),
+            var_arglists: Mutex::new(HashMap::new()),
             _pd: PhantomData,
         };
         // Pre-size the global array to its reserved cap so its base is stable and
@@ -459,6 +463,14 @@ impl<M: ValueModel> Runtime<M> {
     /// The names of all registered namespaces.
     pub fn all_ns_names(&self) -> Vec<String> {
         self.shared.ns_vars.lock().unwrap().keys().cloned().collect()
+    }
+
+    /// Record / read a var's `:arglists` datum (a heap value; captured at def time).
+    pub fn set_var_arglists(&self, sym: Sym, val: u64) {
+        self.shared.var_arglists.lock().unwrap().insert(sym, val);
+    }
+    pub fn get_var_arglists(&self, sym: Sym) -> Option<u64> {
+        self.shared.var_arglists.lock().unwrap().get(&sym).copied()
     }
 
     /// Define (or redefine) a global. Atomic store, so `&self` suffices — a step
@@ -1124,6 +1136,13 @@ impl<M: ValueModel> Runtime<M> {
                 let s = self.as_str(args[0], "symbol");
                 let sym = self.intern(&s);
                 self.encode(Val::Sym(sym))
+            }
+            Prim::VarArglists => {
+                let s = match self.decode(args[0]) {
+                    Val::Sym(s) => s,
+                    _ => panic!("%var-arglists: not a symbol"),
+                };
+                self.get_var_arglists(s).unwrap_or_else(|| self.enc_nil())
             }
             // ── atoms: real cross-thread compare-and-set ────────────────
             Prim::AtomNew => {

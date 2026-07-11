@@ -153,3 +153,44 @@ fn field_id(s: &Session, struct_name: &str, field_name: &str) -> FieldId {
         .unwrap()
         .id
 }
+
+#[test]
+fn edit_a_tight_loop_with_no_yields_between_steps() {
+    // A hot, active loop — NO `yield` anywhere in it.
+    let mut s = Session::new();
+    s.eval(
+        r#"
+        struct Sensor { reading: i64 }
+        fn read(x: Sensor) -> i64 { x.reading }
+        fn main() -> i64 {
+            let x = Sensor { reading: 42 };
+            let i = 0;
+            while i < 8 {
+                emit(read(x));
+                i = i + 1;
+            }
+            0
+        }
+    "#,
+    )
+    .unwrap();
+    let main = s.fn_id("main").unwrap();
+    let a = s.runtime.spawn(main, vec![]).unwrap();
+
+    // Advance the loop a few iterations by stepping — it is genuinely running,
+    // not parked at any safe point.
+    while s.runtime.output.len() < 3 {
+        s.runtime.step(a);
+    }
+
+    // Live-edit `read` between two steps of the running loop. No yield needed.
+    s.eval("fn read(x: Sensor) -> i64 { x.reading + 100 }").unwrap();
+
+    // Let it finish. Subsequent iterations call the NEW `read`.
+    s.runtime.run();
+
+    let out = &s.runtime.output;
+    assert_eq!(out[0], Value::I64(42), "early iterations ran the old code");
+    assert_eq!(*out.last().unwrap(), Value::I64(142), "later iterations ran the edit");
+    assert!(out.contains(&Value::I64(42)) && out.contains(&Value::I64(142)), "switched mid-loop");
+}

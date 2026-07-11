@@ -112,8 +112,8 @@ compiler verifies and emits a realization that hits those bytes exactly.
 (defstruct Packet :layout wire [(len :i32 :at 0) (kind :i16 :at 4) ...])
 
 ;; per-target layout, exactly like per-arch defcc — macros branch on the target
-(defmacro defword [name]
-  (if (= target-pointer-width 64)
+(defn defword [(name Code)] (-> Code)
+  (if (= (target-pointer-width) 64)
       `(defstruct ~name :layout c [(lo :i64) ...])
       `(defstruct ~name :layout c [(lo :i32) ...])))
 ```

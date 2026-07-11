@@ -26,6 +26,14 @@ path = "src/poc.rs"
 name = "livetype-repl"
 path = "src/repl.rs"
 
+[[bin]]
+name = "livetype-liveloop"
+path = "src/live_loop.rs"
+
+[[bin]]
+name = "livetype-ffi-gui"
+path = "src/ffi_gui.rs"
+
 [workspace]
 members = ["crates/livetype-core"]
 

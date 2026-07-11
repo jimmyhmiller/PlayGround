@@ -67,7 +67,13 @@ pub(crate) const ERR_EQ_NON_I64: &str = "equality on non-i64";
 pub(crate) const ERR_NOT_NON_BOOL: &str = "negation on non-bool";
 pub(crate) const ERR_BRANCH_NON_BOOL: &str = "branch on non-bool";
 
-#[derive(Debug, Default)]
+/// A registered native function: the implementation behind a `foreign fn`.
+/// `Send` so a runtime carrying foreign functions can still move to the driver
+/// thread of a `:live` session. It takes its arguments as values and returns
+/// one; native side effects (opening a window, drawing) happen in its body.
+pub type ForeignFn = Box<dyn FnMut(&[Value]) -> Value + Send>;
+
+#[derive(Default)]
 pub struct Runtime {
     pub world: World,
     pub heap: BTreeMap<ObjectId, Object>,
@@ -80,8 +86,32 @@ pub struct Runtime {
     /// so it stashes the condition here and returns the `CONDITION` outcome for
     /// the JIT driver to pick up. Unused by the interpreter path.
     pub pending_condition: Option<Condition>,
+    /// Persistent values of top-level `letonce` globals. They outlive hot edits
+    /// (a re-eval leaves an already-initialized global untouched), so native
+    /// resources stored here survive reloads — the code changes, the running
+    /// world does not. A `Ref` global is a GC root like any frame slot.
+    pub globals: BTreeMap<DefId, Value>,
+    /// Native implementations of `foreign fn`s, keyed by [`ForeignFnId`]. The
+    /// host registers these before running; a `CallForeign` to an unregistered
+    /// id traps with a clear condition rather than doing anything silent.
+    foreign_registry: BTreeMap<ForeignFnId, ForeignFn>,
     next_object: ObjectId,
     next_actor: ActorId,
+}
+
+impl std::fmt::Debug for Runtime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The foreign registry holds closures (not `Debug`); summarize it.
+        f.debug_struct("Runtime")
+            .field("world", &self.world)
+            .field("heap", &self.heap)
+            .field("actors", &self.actors)
+            .field("output", &self.output)
+            .field("pending_condition", &self.pending_condition)
+            .field("globals", &self.globals)
+            .field("foreign_fns", &self.foreign_registry.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -503,6 +533,35 @@ impl Runtime {
                     return_to: Some(ReturnTo { register: dst }),
                 });
             }
+            Instruction::CallForeign { dst, foreign, args } => {
+                let values: Vec<_> = args
+                    .into_iter()
+                    .map(|r| self.reg(actor, r))
+                    .collect::<Result<_, _>>()?;
+                // The result's type is checked against the declared foreign
+                // signature before it enters a frame slot — the native → managed
+                // return is a use-boundary, so a lying native value traps here
+                // instead of poisoning the caller.
+                let result_ty = self
+                    .world
+                    .foreign_sigs
+                    .get(&foreign)
+                    .map(|(_, r)| r.clone())
+                    .ok_or_else(|| self.type_error(function, pc, "call to unknown foreign fn"))?;
+                let result = self.call_foreign(foreign, &values).map_err(|m| {
+                    self.type_error(function, pc, &m)
+                })?;
+                self.expect_value(&result, &result_ty, function, pc, "foreign result")?;
+                self.write_and_advance(actor, dst, result);
+            }
+            Instruction::LoadGlobal { dst, global } => {
+                let value = self
+                    .globals
+                    .get(&global)
+                    .cloned()
+                    .ok_or_else(|| self.type_error(function, pc, "global read before initialization"))?;
+                self.write_and_advance(actor, dst, value);
+            }
             Instruction::Emit { value } => {
                 let value = self.reg(actor, value)?;
                 self.jit_emit(value);
@@ -585,6 +644,33 @@ impl Runtime {
     /// this appends, so a later pause/resume cannot replay an earlier effect.
     pub fn jit_emit(&mut self, value: Value) {
         self.output.push(value);
+    }
+
+    /// Register (or replace) the native implementation of a `foreign fn`. The
+    /// host wires these up before running; they persist across hot edits, so a
+    /// reloaded program keeps talking to the same native resources.
+    pub fn register_foreign(&mut self, id: ForeignFnId, f: ForeignFn) {
+        self.foreign_registry.insert(id, f);
+    }
+
+    /// Set a global's value directly — used by the frontend to publish the
+    /// result of a `letonce` initializer, and by hosts seeding native handles.
+    pub fn set_global(&mut self, id: DefId, value: Value) {
+        self.globals.insert(id, value);
+    }
+
+    /// Invoke a registered foreign function. The registry entry is taken out for
+    /// the duration so the `FnMut` can hold mutable native state without
+    /// aliasing `self`; a re-entrant call to the *same* foreign id therefore
+    /// finds it absent and gets a clear error rather than a borrow panic.
+    fn call_foreign(&mut self, id: ForeignFnId, args: &[Value]) -> Result<Value, String> {
+        let mut f = self
+            .foreign_registry
+            .remove(&id)
+            .ok_or_else(|| format!("foreign fn {id} has no registered implementation"))?;
+        let result = f(args);
+        self.foreign_registry.insert(id, f);
+        Ok(result)
     }
 
     fn alloc(
@@ -918,6 +1004,13 @@ impl Runtime {
     /// cannot see.
     pub fn collect_garbage_with_roots(&mut self, extra_roots: &[ObjectId]) -> usize {
         let mut work: Vec<ObjectId> = extra_roots.to_vec();
+        // Globals are roots too: a `letonce` binding keeps its object alive
+        // across edits, which is what makes persistent state survive a reload.
+        for value in self.globals.values() {
+            if let Value::Ref(id) = value {
+                work.push(*id);
+            }
+        }
         for actor in self.actors.values() {
             for frame in &actor.frames {
                 for value in frame.registers.iter().flatten() {

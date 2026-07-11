@@ -259,6 +259,13 @@ impl<M: ValueModel> Runtime<M> {
                 *imp = fw::<M>(heap, from_len, &mut to, &mut reloc, *imp);
             }
         }
+        // Captured `:arglists` data (the only heap values in the var registry).
+        {
+            let mut al = self.shared.var_arglists.lock().unwrap();
+            for v in al.values_mut() {
+                *v = fw::<M>(heap, from_len, &mut to, &mut reloc, *v);
+            }
+        }
         // This (collector) thread's OWN live environments: the innermost env plus
         // every frame in its dynamic call chain.
         update_env::<M>(heap, from_len, &mut to, &mut reloc, live_env);

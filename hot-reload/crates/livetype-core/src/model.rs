@@ -8,12 +8,23 @@ pub type ActorId = u64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Version(pub u64);
 
+/// A foreign resource kind — the nominal identity of a `foreign type`
+/// (a `Window`, a socket, a GL context). It is opaque: the runtime never
+/// inspects its layout, so it has no schema version and can never go stale,
+/// which is exactly why a foreign handle never traps at a use-boundary.
+pub type ForeignKind = u32;
+/// The id of a `foreign fn` — a native function registered on the [`Runtime`].
+pub type ForeignFnId = u32;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
     Unit,
     I64,
     Bool,
     Ref(DefId),
+    /// An opaque handle to a native resource. Matched nominally by kind; the GC
+    /// never traces through it (native code owns the pointee's lifetime).
+    Foreign(ForeignKind),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +33,10 @@ pub enum Value {
     I64(i64),
     Bool(bool),
     Ref(ObjectId),
+    /// A native pointer behind a kind tag. Passed to and returned from foreign
+    /// calls; stored in globals and object fields like any other value. Opaque
+    /// to the GC — `ptr` is never dereferenced or traced by the runtime.
+    Foreign { kind: ForeignKind, ptr: u64 },
 }
 
 impl Value {
@@ -31,6 +46,7 @@ impl Value {
             Self::I64(_) => Some(Type::I64),
             Self::Bool(_) => Some(Type::Bool),
             Self::Ref(id) => Some(Type::Ref(heap.get(id)?.type_id)),
+            Self::Foreign { kind, .. } => Some(Type::Foreign(*kind)),
         }
     }
 }
@@ -186,6 +202,23 @@ pub enum Instruction {
         function: DefId,
         args: Vec<usize>,
     },
+    /// Call a registered native function (managed → native). Atomic and
+    /// uninterruptible from the runtime's view: it runs to completion with no
+    /// safepoint, GC, trap, or hot-update landing inside it. All reference
+    /// arguments are pinned in frame slots across the call (non-moving GC), so
+    /// a raw pointer handed to native code stays valid for its duration.
+    CallForeign {
+        dst: usize,
+        foreign: ForeignFnId,
+        args: Vec<usize>,
+    },
+    /// Read a top-level `letonce` binding. Globals are persistent runtime state
+    /// that survives hot edits — where native resources (a window, a context)
+    /// live so a reload changes code, not the running world.
+    LoadGlobal {
+        dst: usize,
+        global: DefId,
+    },
     Emit {
         value: usize,
     },
@@ -258,6 +291,12 @@ pub struct World {
     /// dependency set, D7). A schema change re-verifies only the functions whose
     /// set contains the changed type instead of every current function.
     pub function_deps: BTreeMap<DefId, BTreeSet<DefId>>,
+    /// Declared signatures of `foreign fn`s (the ABI contract with native code).
+    /// The verifier checks `CallForeign` arguments against these; the native
+    /// implementations themselves live on the [`Runtime`], not in the `World`.
+    pub foreign_sigs: BTreeMap<ForeignFnId, (Vec<Type>, Type)>,
+    /// Declared types of top-level `letonce` globals, so a `LoadGlobal` types.
+    pub global_types: BTreeMap<DefId, Type>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

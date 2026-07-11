@@ -8,12 +8,31 @@ use livetype::*;
 use livetype_core::Session;
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+/// A message to the background driver during a `:live` run.
+enum ToDriver {
+    Edit(String),
+    Stop,
+}
+
+/// A running `:live` session: the driver thread owns the `Session` and returns
+/// it when stopped.
+struct Live {
+    tx: Sender<ToDriver>,
+    handle: JoinHandle<Session>,
+}
 
 fn main() {
     banner();
-    let mut s = Session::new();
+    // The session is owned by the main thread while idle, and moved to the
+    // driver thread during a `:live` run (reclaimed on `:stop`).
+    let mut s: Option<Session> = Some(Session::new());
     let mut actor: Option<ActorId> = None;
-    let mut seen = 0usize; // emitted values already shown for `actor`
+    let mut seen = 0usize;
+    let mut live: Option<Live> = None;
 
     let mut buf = String::new();
     prompt(false);
@@ -24,10 +43,40 @@ fn main() {
             Err(_) => break,
         };
 
-        // A command only when we're not mid-definition.
+        // ── while a program is running live, input goes to it ──────────────
+        if let Some(l) = &live {
+            if buf.trim().is_empty() && line.trim_start().starts_with(':') {
+                if line.trim() == ":stop" {
+                    l.tx.send(ToDriver::Stop).ok();
+                    let session = live.take().unwrap().handle.join().unwrap();
+                    s = Some(session);
+                    actor = None;
+                    println!("  ⏹ stopped; back to the prompt");
+                } else {
+                    println!("  (running live — type a definition to edit it, or `:stop`)");
+                }
+                prompt(false);
+                continue;
+            }
+            buf.push_str(&line);
+            buf.push('\n');
+            if braces_balanced(&buf) && !buf.trim().is_empty() {
+                l.tx.send(ToDriver::Edit(buf.clone())).ok();
+                buf.clear();
+                prompt(false);
+            } else {
+                prompt(true);
+            }
+            continue;
+        }
+
+        // ── idle: commands + definitions ───────────────────────────────────
         if buf.trim().is_empty() && line.trim_start().starts_with(':') {
             buf.clear();
-            if !command(line.trim(), &mut s, &mut actor, &mut seen) {
+            let cmd = line.trim();
+            if let Some(name) = cmd.strip_prefix(":live ") {
+                live = start_live(&mut s, name.trim());
+            } else if !command(cmd, s.as_mut().unwrap(), &mut actor, &mut seen) {
                 break;
             }
             prompt(false);
@@ -37,10 +86,10 @@ fn main() {
         buf.push_str(&line);
         buf.push('\n');
         if braces_balanced(&buf) && !buf.trim().is_empty() {
-            match s.eval(&buf) {
+            match s.as_mut().unwrap().eval(&buf) {
                 Ok(()) => {
                     println!("  ✓ installed");
-                    note_resumable(&s, actor);
+                    note_resumable(s.as_ref().unwrap(), actor);
                 }
                 Err(e) => println!("  ✗ {e}"),
             }
@@ -53,10 +102,97 @@ fn main() {
     println!();
 }
 
+/// Move the session onto a background thread that runs `name` in a loop,
+/// applying edits between steps and printing what it emits — the program keeps
+/// running while you type edits at the prompt.
+fn start_live(s: &mut Option<Session>, name: &str) -> Option<Live> {
+    let session = s.as_ref().unwrap();
+    let Some(id) = session.fn_id(name) else {
+        println!("  no function `{name}`");
+        return None;
+    };
+    let _ = id;
+    let mut session = s.take().unwrap();
+    let (tx, rx) = channel::<ToDriver>();
+    println!("  ▸ live: `{name}` is running — type definitions to edit it, `:stop` to end");
+    prompt(false);
+    let name = name.to_string();
+    let handle = thread::spawn(move || {
+        live_driver(&mut session, &name, rx);
+        session
+    });
+    Some(Live { tx, handle })
+}
+
+/// The background loop: step the actor continuously, draining and applying
+/// edits between steps; block for input when it finishes or freezes.
+fn live_driver(s: &mut Session, name: &str, rx: Receiver<ToDriver>) {
+    let id = s.fn_id(name).unwrap();
+    let actor = match s.runtime.spawn(id, vec![]) {
+        Ok(a) => a,
+        Err(c) => {
+            println!("\r  cannot start `{name}`: {c:?}");
+            return;
+        }
+    };
+    let mut seen = 0usize;
+    loop {
+        // Apply any edits the user typed — between steps of the running loop.
+        loop {
+            match rx.try_recv() {
+                Ok(ToDriver::Edit(src)) => match s.eval(&src) {
+                    Ok(()) => println!("\r  ✎ live edit applied"),
+                    Err(e) => println!("\r  ✗ {e}"),
+                },
+                Ok(ToDriver::Stop) => return,
+                Err(_) => break,
+            }
+        }
+        match &s.runtime.actors[&actor].status {
+            ActorStatus::Runnable => {
+                s.runtime.step(actor);
+                if s.runtime.output.len() > seen {
+                    seen = s.runtime.output.len();
+                    if let Value::I64(n) = s.runtime.output[seen - 1] {
+                        println!("\r  → {n}");
+                    }
+                    thread::sleep(Duration::from_millis(350));
+                }
+            }
+            // Finished or frozen: nothing to step, so block for the next input
+            // (an edit that repairs it, or `:stop`).
+            other => {
+                match other {
+                    ActorStatus::Complete(v) => println!("\r  ⏹ finished: {}", show(v)),
+                    ActorStatus::Paused(c) => println!("\r  ⏸ frozen: {}", cond_line(c)),
+                    _ => {}
+                }
+                match rx.recv() {
+                    Ok(ToDriver::Edit(src)) => {
+                        if let Err(e) = s.eval(&src) {
+                            println!("\r  ✗ {e}");
+                        }
+                    }
+                    _ => return,
+                }
+            }
+        }
+    }
+}
+
+fn cond_line(c: &Condition) -> String {
+    match c {
+        Condition::BrokenFunction { .. } => "a function no longer type-checks (redefine it)".into(),
+        Condition::MissingMigration { .. } => "needs a migration".into(),
+        Condition::RuntimeTypeError { message, .. } => message.clone(),
+    }
+}
+
 fn banner() {
     println!("Live & Typed — interactive live editing");
     println!("  · type `struct`/`fn` definitions to edit the world (live)");
-    println!("  · `:run main`   start a function running     `:go`   advance to the next yield / pause");
+    println!("  · `:run main`   step it turn-by-turn (`:go`)   `:live main`  run it continuously");
+    println!("  · while `:live`, type edits and watch the loop change; `:stop` to end");
     println!("  · `:status`     where the running actor is    `:out`  everything it has emitted");
     println!("  · `:migrate T.f = wrap M.c | copy g | 42`     supply a migration when one is needed");
     println!("  · `:defs`  `:reset`  `:help`  `:quit`");
@@ -343,6 +479,7 @@ fn show(v: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Unit => "()".into(),
         Value::Ref(id) => format!("<ref #{id}>"),
+        Value::Foreign { kind, ptr } => format!("<foreign k{kind} @{ptr:#x}>"),
     }
 }
 
@@ -352,6 +489,7 @@ fn ty_name(t: &Type, s: &Session) -> String {
         Type::Bool => "bool".into(),
         Type::Unit => "()".into(),
         Type::Ref(id) => struct_name(s, *id),
+        Type::Foreign(kind) => format!("foreign#{kind}"),
     }
 }
 

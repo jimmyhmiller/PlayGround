@@ -280,6 +280,49 @@ migration-gap traps, and con-freeness traps (~526 / 22 / 52 by outcome); the JIT
 and interpreter agree on every one. A divergence would pin a bug in codegen, the
 verifier, migration, or the soundness checks.
 
+### FFI: live editing across a native boundary
+
+The endgame — live-editing a GUI without a restart — needs FFI, and FFI breaks
+the assumptions the trap-and-repair story rests on: native stacks aren't scanned,
+native calls can't be paused, and native code holds resources that must *survive*
+edits. The model absorbs this by keeping the native side a **stable substrate**
+and the reloadable, trappable world strictly on our side of it. Five moves, all
+built (`frontend` `foreign`/`letonce`, `Runtime::{register_foreign, call_foreign,
+globals}`, `Session::{register_foreign, call}`); demoed in `src/ffi_gui.rs`;
+covered by `crates/livetype-core/tests/ffi.rs`:
+
+1. **Foreign handles are opaque, never migratable.** `foreign type Window` gives
+   `Type::Foreign(kind)` / `Value::Foreign { kind, ptr }` — a tagged native
+   pointer with no schema version, so it can never go stale and never traps at a
+   use-boundary. The GC never traces through it (native owns the pointee).
+2. **A foreign call is one uninterruptible step.** `CallForeign` runs the
+   registered native fn to completion with no safepoint, GC, trap, or hot-update
+   inside it; reference arguments are pinned in frame slots across the call
+   (non-moving GC), so a raw pointer handed to C stays valid for its duration.
+3. **Callbacks late-bind through a stable trampoline.** `Session::call(name, …)`
+   is the native → managed direction: it resolves the *current version* of the
+   callback each invocation, so editing `on_frame` is picked up by the next frame
+   with no re-registration — the window never blinks. The native → managed return
+   is a use-boundary, so a lying native value traps (`value_ok`) instead of
+   poisoning the caller.
+4. **Under a native frame, a trap degrades to report, not freeze.** A callback
+   can't freeze-and-wait (a native frame is on the stack expecting a return, and
+   freezing would hang the UI thread). `Session::call` surfaces a con-freeness
+   trap as a returned `Condition`; the host supplies a default / logs it, and the
+   next callback picks up the repair.
+5. **State persists, native init runs once.** `letonce win = open_window()` is a
+   persistent global (`Runtime::globals`, a GC root) whose initializer runs
+   exactly once and survives every reload — the code changes, the running world
+   (and its native resources) does not.
+
+`src/ffi_gui.rs` runs a fake native "toolkit" event loop on its own thread that
+calls up into `on_frame` each frame while another thread edits the callback; the
+loop hot-swaps `42 → 84` mid-flight and the `letonce` window (opened once) keeps
+rendering. Honest limits (mirrored in the code): the JIT and `Shared` tiers don't
+run FFI (they trap clearly — it lives on the interpreter/live-edit tier); a trap
+under a native frame can't freeze; and changing the *ABI shape* a callback
+presents to C would need an explicit re-register (only the logic hot-swaps).
+
 ### Still open
 
 All nine core design decisions (D1–D9) are realized; the shared-heap concurrency

@@ -566,6 +566,7 @@ fn prim_tag(p: Prim) -> u32 {
         NsInterns => 59,
         AllNs => 60,
         SymbolOf => 61,
+        VarArglists => 62,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -645,6 +646,7 @@ fn prim_from_tag(tag: u32) -> Prim {
         59 => NsInterns,
         60 => AllNs,
         61 => SymbolOf,
+        62 => VarArglists,
         other => panic!("bad prim tag {other}"),
     }
 }

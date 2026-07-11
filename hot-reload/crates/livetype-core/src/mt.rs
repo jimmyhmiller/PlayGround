@@ -134,6 +134,7 @@ impl Shared {
             Value::I64(_) => Type::I64,
             Value::Bool(_) => Type::Bool,
             Value::Ref(id) => self.body_of(*id),
+            Value::Foreign { kind, .. } => Type::Foreign(*kind),
         };
         actual == *expected
     }
@@ -493,6 +494,13 @@ impl Shared {
                         regs,
                         return_to: Some(dst),
                     });
+                }
+                Instruction::CallForeign { .. } | Instruction::LoadGlobal { .. } => {
+                    // FFI and globals belong to the single-threaded live-edit
+                    // tier; the shared-memory tier does not run them (native
+                    // resources are not part of the frozen shared world). Trap
+                    // clearly rather than pretend.
+                    return err("foreign calls and globals are not available in the concurrent runtime");
                 }
                 Instruction::Return { value } => {
                     let result = read(&frames, value);
