@@ -110,13 +110,17 @@
 (defn portal-proxy-eval [(cfd i64) (id i64) (body (ptr u8)) (blen i64)] (-> i64)
   (let [e (preg-find id)]
     (if (= (cast i64 e) 0)
-      (send-response cfd c"404 Not Found" c"application/json" (cast (ptr u8) c"{\"error\":{\"kind\":\"NoSuchProgram\",\"message\":\"no such program\"}}") 63)
+      ; length via strlen, NOT a hand-counted literal — a wrong Content-Length makes the browser
+      ; read a stray trailing byte and fail JSON.parse with "unexpected data after JSON".
+      (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"NoSuchProgram\",\"message\":\"no such program\"}}")]
+        (send-response cfd c"404 Not Found" c"application/json" m (strlen (cast (ptr i8) m))))
       (let [url (cast (ptr i8) (xalloc 64)) out (pcbuf-new)]
         (snprintf url 64 c"http://127.0.0.1:%lld/eval" (load (field e port)))
         (let [status (pc-request c"POST" url body blen 30000 out)]
           (if (= status 0)
             (do (store! (field e status) 1)
-                (send-response cfd c"502 Bad Gateway" c"application/json" (cast (ptr u8) c"{\"error\":{\"kind\":\"ProgramGone\",\"message\":\"program not responding\"}}") 68))
+                (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"ProgramGone\",\"message\":\"program not responding\"}}")]
+                  (send-response cfd c"502 Bad Gateway" c"application/json" m (strlen (cast (ptr i8) m)))))
             (send-response cfd c"200 OK" c"application/json" (load (field out data)) (load (field out len)))))))))
 
 (defn portal-handle-register [(cfd i64) (body (ptr u8)) (blen i64)] (-> i64)

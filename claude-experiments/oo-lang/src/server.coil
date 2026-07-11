@@ -728,12 +728,14 @@
 
 (defn handle-eval [(cfd i64) (buf (ptr u8)) (n i64)] (-> i64)
   (let [bs (find-body-start buf n)]
-    (if (< bs 0) (send-response cfd c"400 Bad Request" c"application/json" (cast (ptr u8) c"{\"error\":{\"kind\":\"BadRequest\",\"message\":\"no body\"}}") 52)
+    (if (< bs 0) (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"BadRequest\",\"message\":\"no body\"}}")]
+                   (send-response cfd c"400 Bad Request" c"application/json" m (strlen (cast (ptr i8) m))))
       (let [srcbuf (xalloc 65536) srclen (cast (ptr i64) (xalloc 8))
             idbuf (xalloc 256) idlen (cast (ptr i64) (xalloc 8))
             spos (json-find-key (index buf bs) (- n bs) c"source" 6)
             ipos (json-find-key (index buf bs) (- n bs) c"id" 2)]
-        (if (< spos 0) (send-response cfd c"400 Bad Request" c"application/json" (cast (ptr u8) c"{\"error\":{\"kind\":\"BadRequest\",\"message\":\"missing source\"}}") 60)
+        (if (< spos 0) (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"BadRequest\",\"message\":\"missing source\"}}")]
+                         (send-response cfd c"400 Bad Request" c"application/json" m (strlen (cast (ptr i8) m))))
           (do
             (json-decode-string (index buf bs) (- n bs) spos srcbuf srclen)
             (if (< ipos 0) (do (store! (index idbuf 0) (cast u8 \")) (store! (index idbuf 1) (cast u8 \")) (store! idlen 2) 0)
