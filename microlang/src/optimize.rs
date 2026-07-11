@@ -64,6 +64,7 @@ fn children(ir: &Ir) -> Vec<&Ir> {
         Ir::Prim(_, args) => args.iter().collect(),
         Ir::DefMethod { imp, .. } => vec![imp],
         Ir::Dispatch { args, .. } => args.iter().collect(),
+        Ir::FieldGet { obj, .. } => vec![obj],
         Ir::Try { body, catch, finally } => {
             let mut v = vec![body.as_ref()];
             if let Some(c) = catch {
@@ -96,6 +97,9 @@ fn map_children(ir: &Ir, f: &mut impl FnMut(&Ir) -> Ir) -> Ir {
         Ir::DefMethod { name, ty, imp } => Ir::DefMethod { name: *name, ty: *ty, imp: Box::new(f(imp)) },
         Ir::Dispatch { site, method, args } => {
             Ir::Dispatch { site: *site, method: *method, args: args.iter().map(|x| f(x)).collect() }
+        }
+        Ir::FieldGet { site, field, obj } => {
+            Ir::FieldGet { site: *site, field: *field, obj: Box::new(f(obj)) }
         }
         Ir::Try { body, catch, finally } => Ir::Try {
             body: Box::new(f(body)),
@@ -555,6 +559,11 @@ fn call_census(ir: &Ir, tail: bool) -> (bool, bool) {
                 ht |= a;
                 hn |= b;
             }
+        }
+        Ir::FieldGet { obj, .. } => {
+            let (a, b) = call_census(obj, false);
+            ht |= a;
+            hn |= b;
         }
         Ir::If(c, t, e) => {
             for (child, ctail) in [(c.as_ref(), false), (t.as_ref(), tail), (e.as_ref(), tail)] {

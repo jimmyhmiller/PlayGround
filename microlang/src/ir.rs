@@ -234,6 +234,15 @@ pub enum Ir {
         method: Sym,
         args: Vec<Ir>,
     },
+    /// `(.-field obj)` — read a record field BY NAME, with a per-site inline
+    /// cache. `site` keys a `(type, index)` cache: a monomorphic access resolves
+    /// the field name to a slot index once (a scan), then reuses it. A field
+    /// layout is fixed per type, so the cache only needs a type-tag check.
+    FieldGet {
+        site: usize,
+        field: Sym,
+        obj: Box<Ir>,
+    },
     /// Structured exception handling. Evaluate `body`; if it unwinds with a
     /// `Throw`, bind the thrown value in a fresh one-slot frame and evaluate
     /// `catch` (when present). `finally` always runs, for its effect, on both the

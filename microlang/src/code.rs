@@ -267,6 +267,11 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                     Err(payload) => std::panic::resume_unwind(payload),
                 }
             }
+            Ir::FieldGet { site, field, obj } => {
+                // No allocation between eval and the field read, so no rooting.
+                let o = top.eval_ir(top, rt, obj, locals);
+                rt.field_get(*site, *field, o)
+            }
             Ir::Prim(Prim::Apply, args) => {
                 // `(apply f a … lst)` — invoking a closure with a runtime-built
                 // arg list, which `rt.prim` cannot do (it has no `top`). Evaluate

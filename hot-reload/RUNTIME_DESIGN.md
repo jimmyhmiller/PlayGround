@@ -195,8 +195,13 @@ a real STW runtime collects *while mutators run*, not only at quiescence.
 `tests/mt_threads.rs` runs four actors churning allocations while a separate
 thread hammers `request_gc`, over 20 iterations: every actor finishes correctly
 despite being repeatedly paused and having its garbage swept mid-run, and
-nothing leaks. (The tier is single-frame — no `Call` — so multi-frame actors and
-message passing, and the JIT under threads, are the next steps.)
+nothing leaks. Actors are **multi-frame** (`Call`/`Return` push and pop a real
+call stack) and communicate by **message passing**: `Send { target, value }`
+drops a value into another actor's mailbox and `Recv { dst, ty }` blocks until
+one arrives — checking it has type `ty`, so a wrong-typed message traps like any
+other con-freeness violation. Messages may carry `Ref`s, so actors share heap
+objects *and* pass messages, over the same shared heap. (`Send`/`Recv` are
+concurrent-tier only; the interpreter and JIT reject them with a clear error.)
 
 The runtime is split into two crates so the concurrency can be race-checked: the
 LLVM-free **`livetype-core`** (IR, verifier, interpreter, `mt`) and **`livetype`**
@@ -240,10 +245,11 @@ repairable. What remains, in the owner's chosen direction:
   non-moving-handle / atomic-body object model, a `Shared` tier running real OS
   threads over one heap with race-free concurrent migration, and a **preemptive
   stop-the-world collector** that parks running threads at safepoints and sweeps
-  mid-run (`crates/livetype-core/src/mt.rs`), split into an LLVM-free crate and
-  **race-checked under Miri**. Remaining: multi-frame actors (`Call`) and message
-  passing; the JIT under threads; and a concurrent (non-STW) collector.
-  *(In progress.)*
+  mid-run, multi-frame actors, and message passing over the shared heap
+  (`crates/livetype-core/src/mt.rs`), split into an LLVM-free crate and
+  **race-checked under Miri**. Remaining: the JIT under threads; a concurrent
+  (non-STW) collector; and a blocking (rather than polling) `Recv`.
+  *(Largely there.)*
 - **Name-based instant propagation** is the identity model (not content
   addressing): callers already resolve a callee's current version by name, so a
   signature-compatible republish is visible instantly. The one gap is eager

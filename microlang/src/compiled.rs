@@ -235,6 +235,14 @@ impl<M: ValueModel> ClosureComp<M> {
                     top.invoke(top, rt, imp, &argv)
                 })
             }
+            Ir::FieldGet { site, field, obj } => {
+                let (site, field) = (*site, *field);
+                let cobj = self.compile(obj);
+                Arc::new(move |rt, env, top| {
+                    let o = cobj(rt, env, top);
+                    rt.field_get(site, field, o)
+                })
+            }
             Ir::Try { .. } => panic!("try/catch is only supported on the TreeWalk tier"),
         }
     }

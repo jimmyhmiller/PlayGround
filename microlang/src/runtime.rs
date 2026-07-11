@@ -159,6 +159,13 @@ impl std::ops::IndexMut<usize> for Heap {
 /// this panics loudly rather than dangling — a clear error, not UB.
 const TABLE_CAP: usize = 1 << 20;
 
+/// Reserved capacity for the per-site field inline-cache (`field_ic`). One slot
+/// per `.-field` call site in the whole program; a stable base so the cache is
+/// lock-free. `u64::MAX` is the empty sentinel (its high 32 bits, `0xffffffff`,
+/// exceed any real type `Sym` (< `TABLE_CAP`), so it never false-hits).
+const FIELD_SITE_CAP: usize = 1 << 17;
+const FIELD_IC_EMPTY: u64 = u64::MAX;
+
 /// Per-mutator-thread state the STW collector needs: where a parked thread
 /// publishes its GC roots. When a thread reaches a safepoint during a GC request
 /// it copies its shadow stack into `roots` and its live environment into `env`,
@@ -214,6 +221,11 @@ pub struct Shared<M: ValueModel> {
     /// per type, then a scan. A type's field list is write-once, so the boxed Vec
     /// is leaked and readers deref it without synchronization.
     field_names: Vec<AtomicPtr<Vec<Sym>>>,
+    /// Per-site inline cache for `(.-field x)`: packs `(type Sym << 32) | index`,
+    /// keyed by the `FieldGet` site id. Reserved stable base, lock-free: a hit is
+    /// one relaxed load + a type-tag compare; a miss scans the field list and
+    /// refills. `FIELD_IC_EMPTY` sentinel until first filled.
+    field_ic: Vec<AtomicU64>,
     pub(crate) tables: Mutex<Tables>,
     apply_fn: AtomicU64, // Sym+1, or 0 for None
     escape_tags: AtomicU64,
@@ -283,6 +295,7 @@ impl<M: ValueModel> Runtime<M> {
             sym_lock: Mutex::new(()),
             global_slots: (0..0).map(|_| AtomicU64::new(GLOBAL_UNBOUND)).collect(),
             field_names: Vec::new(),
+            field_ic: Vec::new(),
             tables: Mutex::new(Tables {
                 methods: HashMap::new(),
                 method_names: HashSet::new(),
@@ -300,7 +313,14 @@ impl<M: ValueModel> Runtime<M> {
         slots.extend((0..TABLE_CAP).map(|_| AtomicU64::new(GLOBAL_UNBOUND)));
         let mut fnames = Vec::with_capacity(TABLE_CAP);
         fnames.extend((0..TABLE_CAP).map(|_| AtomicPtr::new(std::ptr::null_mut())));
-        let shared = Arc::new(Shared { global_slots: slots, field_names: fnames, ..shared });
+        let mut fic = Vec::with_capacity(FIELD_SITE_CAP);
+        fic.extend((0..FIELD_SITE_CAP).map(|_| AtomicU64::new(FIELD_IC_EMPTY)));
+        let shared = Arc::new(Shared {
+            global_slots: slots,
+            field_names: fnames,
+            field_ic: fic,
+            ..shared
+        });
         let me = register_mutator(&shared);
         Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), me, _pd: PhantomData }
     }
@@ -958,6 +978,43 @@ impl<M: ValueModel> Runtime<M> {
             }
         }
         None
+    }
+
+    /// Inline-cached `(.-field obj)`: read the field named `field` from record
+    /// `obj`, using the per-site cache to skip the field-name scan on a monomorphic
+    /// access. The cache packs `(type << 32) | index`; a hit needs only a type-tag
+    /// compare (a field layout is fixed per type). Lock-free (relaxed load/store —
+    /// the cache is a hint re-validated by the type check; the packed pair is
+    /// written atomically, and a type's index is deterministic, so a stale hit is
+    /// still correct).
+    pub fn field_get(&self, site: usize, field: Sym, obj: u64) -> u64 {
+        let ty = self.type_tag(obj);
+        let cache = self.shared.field_ic[site].load(Ordering::Relaxed);
+        let idx = if (cache >> 32) as u32 == ty {
+            (cache & 0xffff_ffff) as usize
+        } else {
+            let ptr = self.shared.field_names[ty as usize].load(Ordering::Acquire);
+            if ptr.is_null() {
+                panic!(
+                    "field access .-{} on unregistered type '{}'",
+                    self.sym_name(field),
+                    self.sym_name(ty)
+                );
+            }
+            let names: &Vec<Sym> = unsafe { &*ptr };
+            let idx = names.iter().position(|&n| n == field).unwrap_or_else(|| {
+                panic!("no field '{}' on type '{}'", self.sym_name(field), self.sym_name(ty))
+            });
+            self.shared.field_ic[site].store(((ty as u64) << 32) | idx as u64, Ordering::Relaxed);
+            idx
+        };
+        let Val::Ref(id) = self.decode(obj) else {
+            panic!("field access on non-record");
+        };
+        let Obj::Record { fields, .. } = &self.heap()[id as usize] else {
+            panic!("field access on non-record");
+        };
+        fields[idx]
     }
 
     /// A deterministic 32-bit content hash of any value (for the HAMT). Equal

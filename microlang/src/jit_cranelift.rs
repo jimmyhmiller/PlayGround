@@ -558,7 +558,7 @@ fn body_needs_cur(ir: &Ir) -> bool {
         Ir::Call(f, args) => body_needs_cur(f) || args.iter().any(body_needs_cur),
         Ir::Def { init, .. } | Ir::SetGlobal { val: init, .. } => body_needs_cur(init),
         // Not compiled by this tier (rejected earlier); be conservative.
-        Ir::DefMethod { .. } | Ir::Dispatch { .. } | Ir::Try { .. } => true,
+        Ir::DefMethod { .. } | Ir::Dispatch { .. } | Ir::FieldGet { .. } | Ir::Try { .. } => true,
     }
 }
 
@@ -1743,7 +1743,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let ctx = self.ctx_val;
                 self.call_shim(self.refs.set_global, &[ctx, namev, v])
             }
-            Ir::DefMethod { .. } | Ir::Dispatch { .. } => {
+            Ir::DefMethod { .. } | Ir::Dispatch { .. } | Ir::FieldGet { .. } => {
                 panic!("JIT tier: dispatch not supported; run on the tree-walker")
             }
             Ir::Try { .. } => panic!("JIT tier: try/catch not supported; run on the tree-walker"),
@@ -1971,7 +1971,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
 pub fn jit_can_compile(ir: &Ir) -> bool {
     match ir {
         Ir::Prim(Prim::CallCc | Prim::Reset | Prim::Shift | Prim::CallEc | Prim::Gc | Prim::Apply | Prim::Spawn, _) => false,
-        Ir::Dispatch { .. } | Ir::DefMethod { .. } => false,
+        Ir::Dispatch { .. } | Ir::DefMethod { .. } | Ir::FieldGet { .. } => false,
         // try/catch unwinds the native stack; only the TreeWalk tier models it.
         Ir::Try { .. } => false,
         // A `Lambda` only makes a closure here; its body's compilability is

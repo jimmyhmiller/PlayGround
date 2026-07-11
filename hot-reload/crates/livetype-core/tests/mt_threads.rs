@@ -298,3 +298,190 @@ fn preemptive_gc_runs_while_actors_churn() {
         assert_eq!(shared.object_count(), 0);
     }
 }
+
+// --- multi-frame actors (Call/Return) --------------------------------------
+
+const CALLER: DefId = 13;
+const SUB: DefId = 14;
+
+fn sub_fn() -> Function {
+    Function {
+        id: SUB,
+        version: Version(1),
+        name: "sub".into(),
+        params: vec![Type::I64, Type::I64],
+        result: Type::I64,
+        registers: 3,
+        code: vec![
+            Instruction::SubI64 { dst: 2, left: 0, right: 1 },
+            Instruction::Return { value: 2 },
+        ],
+    }
+}
+
+fn caller_fn() -> Function {
+    Function {
+        id: CALLER,
+        version: Version(1),
+        name: "caller".into(),
+        params: vec![],
+        result: Type::I64,
+        registers: 3,
+        code: vec![
+            Instruction::Const { dst: 0, value: Value::I64(10) },
+            Instruction::Const { dst: 1, value: Value::I64(3) },
+            Instruction::Call { dst: 2, function: SUB, args: vec![0, 1] },
+            Instruction::Return { value: 2 },
+        ],
+    }
+}
+
+#[test]
+fn multi_frame_call_in_the_concurrent_tier() {
+    let mut rt = Runtime::default();
+    rt.install_function(sub_fn()).unwrap();
+    rt.install_function(caller_fn()).unwrap();
+    let shared = Shared::from_runtime(rt);
+    // Several threads each push a call frame and pop it — 10 - 3 = 7.
+    let outcomes = shared.run_threads(vec![(CALLER, vec![]); 4]);
+    for o in &outcomes {
+        assert_eq!(*o, Outcome::Complete(Value::I64(7)));
+    }
+}
+
+// --- message passing --------------------------------------------------------
+
+const CONSUMER: DefId = 15;
+const PRODUCER: DefId = 16;
+const CONSUMER_REF: DefId = 17;
+const PRODUCER_REF: DefId = 18;
+const BOXT: DefId = 6;
+const VAL: FieldId = 600;
+
+fn consumer_int() -> Function {
+    Function {
+        id: CONSUMER,
+        version: Version(1),
+        name: "consumer".into(),
+        params: vec![],
+        result: Type::I64,
+        registers: 1,
+        code: vec![
+            Instruction::Recv { dst: 0, ty: Type::I64 },
+            Instruction::Return { value: 0 },
+        ],
+    }
+}
+
+/// `producer(target)` sends 42 to actor `target`, then returns 0.
+fn producer_int() -> Function {
+    Function {
+        id: PRODUCER,
+        version: Version(1),
+        name: "producer".into(),
+        params: vec![Type::I64],
+        result: Type::I64,
+        registers: 3,
+        code: vec![
+            Instruction::Const { dst: 1, value: Value::I64(42) },
+            Instruction::Send { target: 0, value: 1 },
+            Instruction::Const { dst: 2, value: Value::I64(0) },
+            Instruction::Return { value: 2 },
+        ],
+    }
+}
+
+#[test]
+fn message_passing_between_actors() {
+    let mut rt = Runtime::default();
+    rt.install_function(consumer_int()).unwrap();
+    rt.install_function(producer_int()).unwrap();
+    let shared = Shared::from_runtime(rt);
+    // Actor 0 waits for a message; actor 1 sends it 42.
+    let outcomes = shared.run_threads(vec![(CONSUMER, vec![]), (PRODUCER, vec![Value::I64(0)])]);
+    assert_eq!(outcomes[0], Outcome::Complete(Value::I64(42)));
+    assert_eq!(outcomes[1], Outcome::Complete(Value::I64(0)));
+}
+
+fn consumer_ref() -> Function {
+    Function {
+        id: CONSUMER_REF,
+        version: Version(1),
+        name: "consumer_ref".into(),
+        params: vec![],
+        result: Type::I64,
+        registers: 2,
+        code: vec![
+            Instruction::Recv { dst: 0, ty: Type::Ref(BOXT) },
+            Instruction::GetField { dst: 1, object: 0, field: VAL },
+            Instruction::Return { value: 1 },
+        ],
+    }
+}
+
+/// `producer_ref(boxref, target)` hands a shared object to another actor.
+fn producer_ref() -> Function {
+    Function {
+        id: PRODUCER_REF,
+        version: Version(1),
+        name: "producer_ref".into(),
+        params: vec![Type::Ref(BOXT), Type::I64],
+        result: Type::I64,
+        registers: 3,
+        code: vec![
+            Instruction::Send { target: 1, value: 0 },
+            Instruction::Const { dst: 2, value: Value::I64(0) },
+            Instruction::Return { value: 2 },
+        ],
+    }
+}
+
+#[test]
+fn message_passing_shares_a_heap_reference() {
+    let mut rt = Runtime::default();
+    rt.install_schema(Schema {
+        type_id: BOXT,
+        version: Version(1),
+        name: "Box".into(),
+        fields: vec![field(VAL, "value", Type::I64)],
+    })
+    .unwrap();
+    let boxid = rt.jit_new(BOXT, &[(VAL, Value::I64(99))]).unwrap();
+    rt.install_function(consumer_ref()).unwrap();
+    rt.install_function(producer_ref()).unwrap();
+    let shared = Shared::from_runtime(rt);
+    // Actor 1 sends the shared Box to actor 0, which reads its field.
+    let outcomes = shared.run_threads(vec![
+        (CONSUMER_REF, vec![]),
+        (PRODUCER_REF, vec![Value::Ref(boxid), Value::I64(0)]),
+    ]);
+    assert_eq!(outcomes[0], Outcome::Complete(Value::I64(99)));
+    assert_eq!(outcomes[1], Outcome::Complete(Value::I64(0)));
+}
+
+#[test]
+fn message_type_mismatch_traps_the_receiver() {
+    // The consumer's mailbox contract says Int, but a Ref is sent: receiving it
+    // traps, exactly like any other con-freeness violation.
+    let mut rt = Runtime::default();
+    rt.install_schema(Schema {
+        type_id: BOXT,
+        version: Version(1),
+        name: "Box".into(),
+        fields: vec![field(VAL, "value", Type::I64)],
+    })
+    .unwrap();
+    let boxid = rt.jit_new(BOXT, &[(VAL, Value::I64(1))]).unwrap();
+    rt.install_function(consumer_int()).unwrap(); // expects an Int message
+    rt.install_function(producer_ref()).unwrap(); // sends a Ref
+    let shared = Shared::from_runtime(rt);
+    let outcomes = shared.run_threads(vec![
+        (CONSUMER, vec![]),
+        (PRODUCER_REF, vec![Value::Ref(boxid), Value::I64(0)]),
+    ]);
+    assert!(
+        matches!(outcomes[0], Outcome::Paused(Condition::RuntimeTypeError { .. })),
+        "receiving a wrong-typed message should trap, got {:?}",
+        outcomes[0]
+    );
+}

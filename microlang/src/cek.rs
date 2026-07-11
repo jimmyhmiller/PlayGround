@@ -181,7 +181,7 @@ fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Arc<Kon
                 Step::Eval(first, frame.clone(), Arc::new(Kont::LetSlot { inits, i: 0, frame, body: *body, next: k }))
             }
         }
-        Ir::Dispatch { .. } | Ir::DefMethod { .. } => {
+        Ir::Dispatch { .. } | Ir::DefMethod { .. } | Ir::FieldGet { .. } => {
             panic!("CekMachine: dispatch not supported; run on the tree-walker")
         }
         Ir::Try { .. } => panic!("CekMachine: try/catch not supported; run on the tree-walker"),

@@ -19,6 +19,8 @@ pub struct Compiler {
     methods: std::collections::HashSet<Sym>,
     /// Monotonic dispatch-site id.
     site: usize,
+    /// Monotonic `.-field` inline-cache site id.
+    field_site: usize,
     /// The names THIS frontend treats as primitives (its choice, not the
     /// toolkit's). User-facing `+`/`first`/… are ordinary globals in
     /// `clojure.core`; only these low-level names map to a `Prim`.
@@ -52,7 +54,7 @@ impl Compiler {
         ] {
             prims.insert(rt.intern(name), p);
         }
-        Compiler { scope: Vec::new(), methods: std::collections::HashSet::new(), site: 0, prims }
+        Compiler { scope: Vec::new(), methods: std::collections::HashSet::new(), site: 0, field_site: 0, prims }
     }
 
     /// Compile one fully-expanded top-level form to `Ir`.
@@ -142,6 +144,15 @@ impl Compiler {
                     let shadowed = self.resolve_local(hs).is_some() || rt.global_defined(hs);
                     if !shadowed {
                         if let Some(&p) = self.prims.get(&hs) {
+                            // `(%field-by-name obj (quote field))` -> an inline-cached
+                            // FieldGet; the field name is a compile-time constant.
+                            if let Prim::FieldByName = p {
+                                if let Some(field) = self.quoted_sym(rt, items[2]) {
+                                    let obj = Box::new(self.compile(rt, items[1]));
+                                    let site = self.fresh_field_site();
+                                    return Ir::FieldGet { site, field, obj };
+                                }
+                            }
                             let args = items[1..].iter().map(|&f| self.compile(rt, f)).collect();
                             return Ir::Prim(p, args);
                         }
@@ -227,5 +238,23 @@ impl Compiler {
         let s = self.site;
         self.site += 1;
         s
+    }
+
+    fn fresh_field_site(&mut self) -> usize {
+        let s = self.field_site;
+        self.field_site += 1;
+        s
+    }
+
+    /// If `form` is `(quote sym)`, the interned `sym`; used to lift a `.-field`
+    /// name (a compile-time constant) out of its quote for the inline cache.
+    fn quoted_sym<M: ValueModel>(&self, rt: &Runtime<M>, form: u64) -> Option<Sym> {
+        let items = rt.list_to_vec(form);
+        if items.len() == 2 && matches!(rt.decode(items[0]), Val::Sym(s) if rt.sym_name(s) == "quote") {
+            if let Val::Sym(s) = rt.decode(items[1]) {
+                return Some(s);
+            }
+        }
+        None
     }
 }
