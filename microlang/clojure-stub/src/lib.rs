@@ -515,7 +515,9 @@ fn mk_fn<M: ValueModel>(rt: &mut Runtime<M>, params: u64, body: Vec<u64>) -> u64
 }
 
 fn mk_defmethod<M: ValueModel>(rt: &mut Runtime<M>, m: u64, ty: u64, imp: u64) -> u64 {
-    let dm = sym(rt, "defmethod");
+    // Internal protocol-impl form (type-indexed dispatch). Named distinctly from
+    // the user-facing `defmethod` (multimethods), which is a library macro.
+    let dm = sym(rt, "-proto-method");
     rt.vec_to_list(&[dm, m, ty, imp])
 }
 

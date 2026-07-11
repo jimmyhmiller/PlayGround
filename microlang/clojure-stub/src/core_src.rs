@@ -4,7 +4,7 @@
 //! the un-shadowable `%`-prims (`%add`/`%first`/…); user-facing `+`/`=`/`first`
 //! are first-class fns wrapping them (so they can be passed to `map`/`reduce`).
 
-pub const CORE: &str = r#"
+pub const CORE: &str = r##"
 ;; ─────────────── control macros ───────────────
 (defmacro defn (name params & body)
   (list 'def name (%cons 'fn (%cons params body))))
@@ -60,13 +60,17 @@ pub const CORE: &str = r#"
 (defn not= [x & xs] (not (-eq-seq x (seq xs))))
 (defn inc [n] (%add n 1))
 (defn dec [n] (%sub n 1))
+;; integer division family (quot truncates toward zero; rem follows the dividend's
+;; sign; mod follows the divisor's).
+(defn quot [a b] (%quot a b))
+(defn rem [a b] (%rem a b))
+(defn mod [a b] (%mod a b))
 (defn pos? [n] (%lt 0 n))
 (defn neg? [n] (%lt n 0))
 (defn zero? [n] (%num-eq n 0))
 (defn identity [x] x)
-(defn even-nn [n] (cond (%num-eq n 0) true (%num-eq n 1) false true (even-nn (%sub n 2))))
-(defn even? [n] (if (%lt n 0) (even-nn (%sub 0 n)) (even-nn n)))
-(defn odd? [n] (not (even? n)))
+(defn even? [n] (%num-eq (%mod n 2) 0))
+(defn odd? [n] (%num-eq (%mod n 2) 1))
 
 ;; ─────────────── seq abstraction (with lazy sequences) ───────────────
 (defn elems [c] (field c 0))
@@ -121,10 +125,11 @@ pub const CORE: &str = r#"
 
 ;; Callable objects: keywords, maps and vectors act as functions of one arg.
 ;; The backend routes `(obj arg)` for a non-closure record here (see set_apply_fn).
-(defn -apply-obj [o a]
-  (cond (keyword? o) (get a o)
-        (map? o) (get o a)
-        (vector? o) (nth o a)
+(defn -apply-obj [o & args]
+  (cond (multi? o) (-multi-call o args)
+        (keyword? o) (get (first args) o)
+        (map? o) (get o (first args))
+        (vector? o) (nth o (first args))
         true (throw "value is not callable")))
 
 ;; ─────────────── assoc / dissoc / keys / vals ───────────────
@@ -615,6 +620,64 @@ pub const CORE: &str = r#"
 (defmacro condp (pred expr & clauses)
   (list 'let (vector (quote -cpp) pred (quote -cpe) expr) (-condp (quote -cpp) (quote -cpe) (seq clauses))))
 
+;; ─────────────── str (value -> string) ───────────────
+;; Clojure-style `str`: strings raw, collections formatted structurally here (so
+;; the toolkit stays frontend-neutral); leaf atoms go through `%str-of`. Uses
+;; `%str-cat` to concatenate. `nil` stringifies to "" (as in clojure.core).
+(defn -str-join [sep coll]
+  (let [s (seq coll)]
+    (cond (nil? s) ""
+          (nil? (next s)) (-str1 (first s))
+          true (%str-cat (-str1 (first s)) (%str-cat sep (-str-join sep (rest s)))))))
+(defn -str-map-join [kvs]
+  (cond (nil? (seq kvs)) ""
+        (nil? (seq (rest (rest kvs))))
+          (%str-cat (-str1 (first kvs)) (%str-cat " " (-str1 (second kvs))))
+        true (%str-cat (-str1 (first kvs))
+                       (%str-cat " " (%str-cat (-str1 (second kvs))
+                                               (%str-cat ", " (-str-map-join (rest (rest kvs)))))))))
+(defn -str1 [x]
+  (cond (nil? x) ""
+        (string? x) x
+        (keyword? x) (%str-cat ":" (%str-of (field x 0)))
+        (vector? x) (%str-cat "[" (%str-cat (-str-join " " (field x 0)) "]"))
+        (set? x) (%str-cat "#{" (%str-cat (-str-join " " (field x 0)) "}"))
+        (map? x) (%str-cat "{" (%str-cat (-str-map-join (field x 0)) "}"))
+        (lazy-seq? x) (%str-cat "(" (%str-cat (-str-join " " x) ")"))
+        (list? x) (%str-cat "(" (%str-cat (-str-join " " x) ")"))
+        true (%str-of x)))
+(defn -str-seq [acc s] (if (nil? (seq s)) acc (-str-seq (%str-cat acc (-str1 (first s))) (rest s))))
+(defn str [& xs] (-str-seq "" xs))
+
+;; ─────────────── multimethods (defmulti / defmethod) ───────────────
+;; A multimethod is a callable record `(MultiFn dispatch-fn table-atom)` where the
+;; table-atom holds a map from dispatch-value -> method fn (with a `:default` entry
+;; as the fallback). Calling it computes `(dispatch-fn args...)`, looks the value
+;; up, and applies the chosen method to the same args. Dispatch values compare by
+;; structural equality (so keywords / numbers / vectors all work as keys).
+(defn -make-multi [df] (record 'MultiFn df (atom (hash-map))))
+(defn multi? [x] (%num-eq (type-of x) 'MultiFn))
+(defn -add-method [mf dval method]
+  (let [a (field mf 1)] (reset! a (assoc (deref a) dval method))))
+;; Bounded apply (no general `apply` on the interpreter tiers): forward up to 3
+;; args to `f`. Beyond that raises a clear error rather than silently dropping.
+(defn -applyn [f args]
+  (cond (nil? (seq args)) (f)
+        (nil? (next args)) (f (first args))
+        (nil? (next (next args))) (f (first args) (second args))
+        (nil? (next (next (next args)))) (f (first args) (second args) (nth args 2))
+        true (throw "multimethod: only up to 3 args supported")))
+(defn -multi-lookup [mf dval]
+  (let [tbl (deref (field mf 1))]
+    (cond (contains? tbl dval) (get tbl dval)
+          (contains? tbl :default) (get tbl :default)
+          true (throw (str "no method for dispatch value: " dval)))))
+(defn -multi-call [mf args]
+  (-applyn (-multi-lookup mf (-applyn (field mf 0) args)) args))
+(defmacro defmulti (name dispatch-fn) (list 'def name (list '-make-multi dispatch-fn)))
+(defmacro defmethod (name dval params & body)
+  (list '-add-method name dval (%cons 'fn (%cons params body))))
+
 ;; ─────────────── realization (force a lazy result for printing) ───────────────
 ;; The Rust printer can't invoke thunks, so `run` calls this on the final value
 ;; to fully realize any lazy spine (and lazy elements) into eager collections.
@@ -626,4 +689,4 @@ pub const CORE: &str = r#"
         (vector? x) (record 'Vector (-realize-list (field x 0)))
         (set? x) (record 'Set (-realize-list (field x 0)))
         true x))
-"#;
+"##;

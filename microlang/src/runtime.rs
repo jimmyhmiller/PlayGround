@@ -597,6 +597,27 @@ impl<M: ValueModel> Runtime<M> {
             Prim::Add | Prim::FxAdd => self.arith(args[0], args[1], i64::checked_add, i128::checked_add, |a, b| a + b, BigInt::add),
             Prim::Sub | Prim::FxSub => self.arith(args[0], args[1], i64::checked_sub, i128::checked_sub, |a, b| a - b, BigInt::sub),
             Prim::Mul | Prim::FxMul => self.arith(args[0], args[1], i64::checked_mul, i128::checked_mul, |a, b| a * b, BigInt::mul),
+            Prim::Quot => self.int_div(args[0], args[1], "quot", |a, b| a / b),
+            Prim::Rem => self.int_div(args[0], args[1], "rem", |a, b| a % b),
+            Prim::Mod => self.int_div(args[0], args[1], "mod", |a, b| ((a % b) + b) % b),
+            Prim::StrCat => {
+                let (a, b) = (self.as_str(args[0], "str-cat"), self.as_str(args[1], "str-cat"));
+                let id = self.alloc(Obj::Str(format!("{a}{b}")));
+                M::R::enc_ref(id)
+            }
+            Prim::StrOf => {
+                // A string is its own raw content; anything else uses the neutral
+                // printer (correct for int/float/bool/nil/sym/char).
+                let s = match self.decode(args[0]) {
+                    Val::Ref(id) => match &self.heap()[id as usize] {
+                        Obj::Str(s) => s.clone(),
+                        _ => self.print(args[0]),
+                    },
+                    _ => self.print(args[0]),
+                };
+                let id = self.alloc(Obj::Str(s));
+                M::R::enc_ref(id)
+            }
             Prim::Lt | Prim::FxLt => {
                 let r = self.num_lt(args[0], args[1]);
                 self.encode(Val::Bool(r))
@@ -929,6 +950,41 @@ impl<M: ValueModel> Runtime<M> {
     ///   LowBit big result -> checked op overflows -> promote to boxed BigInt
     ///   NanBox floats      -> float fast path,      0 allocations
     ///   NanBox ints        -> no immediate int, slow path, boxes (BigInt)
+    /// Integer division family (`quot`/`rem`/`mod`). Both operands must be
+    /// integers that fit `i128` (the common case); arbitrary-precision operands
+    /// and non-integers raise a clear error rather than silently degrading.
+    fn int_div(&mut self, a: u64, b: u64, name: &str, op: fn(i128, i128) -> i128) -> u64 {
+        let (Val::Int(x), Val::Int(y)) = (self.decode(a), self.decode(b)) else {
+            if self.as_huge(a).is_some() || self.as_huge(b).is_some() {
+                panic!("{name}: arbitrary-precision integers are unsupported");
+            }
+            panic!("{name}: both arguments must be integers");
+        };
+        if y == 0 {
+            panic!("{name}: divide by zero");
+        }
+        let r = op(x, y);
+        if M::R::is_immediate(Cat::Int) {
+            if let Ok(r64) = i64::try_from(r) {
+                if M::R::imm_fits(r64) {
+                    return M::R::enc_int(r64);
+                }
+            }
+        }
+        let id = self.alloc(Obj::BigInt(r));
+        M::R::enc_ref(id)
+    }
+
+    /// The `String` behind a string value, or a clear error if it is not one.
+    fn as_str(&self, bits: u64, who: &str) -> String {
+        if let Val::Ref(id) = self.decode(bits) {
+            if let Obj::Str(s) = &self.heap()[id as usize] {
+                return s.clone();
+            }
+        }
+        panic!("{who}: argument is not a string");
+    }
+
     fn arith(
         &mut self,
         a: u64,

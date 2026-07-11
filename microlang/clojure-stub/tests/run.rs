@@ -451,6 +451,67 @@ fn control_macros() {
 }
 
 #[test]
+fn multimethods() {
+    // dispatch on a computed value.
+    assert_eq!(
+        run("(defmulti f (fn [x] (mod x 2))) (defmethod f 0 [x] :even) (defmethod f 1 [x] :odd) [(f 4) (f 7)]"),
+        "[:even :odd]"
+    );
+    // dispatch via a keyword accessor, with :default.
+    assert_eq!(
+        run("(defmulti area :shape) \
+             (defmethod area :circle [s] (* (:r s) (:r s))) \
+             (defmethod area :rect [s] (* (:w s) (:h s))) \
+             (defmethod area :default [s] :unknown) \
+             [(area {:shape :circle :r 3}) (area {:shape :rect :w 2 :h 5}) (area {:shape :blob})]"),
+        "[9 10 :unknown]"
+    );
+    // multi-arg dispatch on a vector of tags.
+    assert_eq!(
+        run("(defmulti op (fn [a b] [(:t a) (:t b)])) \
+             (defmethod op [:i :i] [a b] (+ (:v a) (:v b))) \
+             (op {:t :i :v 3} {:t :i :v 4})"),
+        "7"
+    );
+    // a later defmethod for the same value replaces the earlier one.
+    assert_eq!(
+        run("(defmulti g :k) (defmethod g :a [x] 1) (defmethod g :a [x] 2) (g {:k :a})"),
+        "2"
+    );
+    // no matching method and no :default throws a clear, catchable error.
+    assert_eq!(
+        run("(defmulti h identity) (defmethod h 1 [_] :one) (try (h 2) (catch :default e e))"),
+        "\"no method for dispatch value: 2\""
+    );
+}
+
+#[test]
+fn integer_division() {
+    assert_eq!(run("(quot 17 5)"), "3");
+    assert_eq!(run("(rem 17 5)"), "2");
+    assert_eq!(run("(quot -17 5)"), "-3");
+    assert_eq!(run("(rem -7 3)"), "-1"); // sign follows dividend
+    assert_eq!(run("(mod -7 3)"), "2"); // sign follows divisor
+    assert_eq!(run("(mod 7 3)"), "1");
+    assert_eq!(run("(map even? (range 4))"), "(true false true false)");
+    assert_eq!(run("(odd? -3)"), "true");
+}
+
+#[test]
+fn str_fn() {
+    assert_eq!(run(r#"(str "a" "b" "c")"#), r#""abc""#);
+    assert_eq!(run("(str 1 2 3)"), r#""123""#);
+    assert_eq!(run("(str :foo)"), r#"":foo""#);
+    assert_eq!(run("(str nil)"), r#""""#);
+    assert_eq!(run("(str [1 2 3])"), r#""[1 2 3]""#);
+    assert_eq!(run("(str {:a 1 :b 2})"), r#""{:a 1, :b 2}""#);
+    assert_eq!(run("(str (list 1 2))"), r#""(1 2)""#);
+    assert_eq!(run(r#"(str "n=" 42 " v=" [1 2])"#), r#""n=42 v=[1 2]""#);
+    assert_eq!(run("(str (map inc [1 2 3]))"), r#""(2 3 4)""#);
+    assert_eq!(run(r#"(str \a \b)"#), r#""ab""#);
+}
+
+#[test]
 fn anon_fn_literals() {
     // `#(...)` with %/%1/%2 and %& rest.
     assert_eq!(run("(map #(* % %) [1 2 3 4])"), "(1 4 9 16)");

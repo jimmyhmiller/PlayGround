@@ -387,6 +387,11 @@ fn prim_tag(p: Prim) -> u32 {
         AtomGet => 29,
         AtomSet => 30,
         AtomCas => 31,
+        Quot => 32,
+        Rem => 33,
+        Mod => 34,
+        StrCat => 35,
+        StrOf => 36,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -436,6 +441,11 @@ fn prim_from_tag(tag: u32) -> Prim {
         29 => AtomGet,
         30 => AtomSet,
         31 => AtomCas,
+        32 => Quot,
+        33 => Rem,
+        34 => Mod,
+        35 => StrCat,
+        36 => StrOf,
         other => panic!("bad prim tag {other}"),
     }
 }

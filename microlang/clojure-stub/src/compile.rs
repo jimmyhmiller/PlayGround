@@ -31,6 +31,7 @@ impl Compiler {
         let mut prims = HashMap::new();
         for (name, p) in [
             ("%add", Add), ("%sub", Sub), ("%mul", Mul), ("%lt", Lt), ("%num-eq", Eq),
+            ("%quot", Quot), ("%rem", Rem), ("%mod", Mod), ("%str-cat", StrCat), ("%str-of", StrOf),
             ("%first", First), ("%rest", Rest), ("%cons", Cons),
             ("record", Record), ("field", Field), ("type-of", TypeOf), ("nfields", NFields), ("throw", Throw),
             ("nil?", IsNil), ("list", List), ("println", Println), ("gc", Gc),
@@ -122,7 +123,7 @@ impl Compiler {
                         None => Ir::SetGlobal { name: n, val },
                     };
                 }
-                "defmethod" => {
+                "-proto-method" => {
                     let m = self.name(rt, items[1]).expect("defmethod: method name");
                     let ty = self.name(rt, items[2]).expect("defmethod: type name");
                     self.methods.insert(m);

@@ -23,6 +23,20 @@ pub enum Prim {
     Mul,
     Lt,
     Eq,
+    /// `(%quot a b)` -> integer quotient, truncated toward zero (Clojure `quot`).
+    Quot,
+    /// `(%rem a b)` -> integer remainder; sign follows the dividend (`rem`).
+    Rem,
+    /// `(%mod a b)` -> integer modulo; sign follows the divisor (`mod`).
+    Mod,
+    /// `(%str-cat a b)` -> concatenation of two strings. Neutral string op (no
+    /// frontend-specific formatting); the value-to-string logic lives in the
+    /// frontend library.
+    StrCat,
+    /// `(%str-of x)` -> a value's string form for `str`: a string is returned
+    /// RAW (unquoted), any other atom via the neutral printer. Records/lists are
+    /// formatted by the frontend, so this is only called on leaf values.
+    StrOf,
     List,
     Cons,
     First,
