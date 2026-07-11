@@ -1,0 +1,95 @@
+// examples/bank.scry — showcases ACTIONS THAT MUTATE STATE LIVE. Open the viewer, click an
+// Account, and use the green action buttons: Deposit / Withdraw / Transfer change the balance
+// (and append a Transaction) right in front of you. Complements kanban.scry (which shows
+// structure); this one is about doing things.
+
+enum Kind { Checking  Savings }
+
+class Customer {
+  name: String
+  fn init(name: String) { self.name = name }
+}
+
+class Transaction {
+  kind: String
+  amount: Int
+  note: String
+  fn init(kind: String, amount: Int, note: String) {
+    self.kind = kind
+    self.amount = amount
+    self.note = note
+  }
+}
+
+class Account {
+  owner: Customer
+  kind: Kind
+  balance: Int
+  history: List<Transaction>
+  fn init(owner: Customer, kind: Kind) {
+    self.owner = owner
+    self.kind = kind
+    self.balance = 0
+    self.history = List<Transaction>()
+  }
+  fn deposit(amount: Int) {
+    self.balance = self.balance + amount
+    self.history.push(Transaction(kind: "deposit", amount: amount, note: "deposit"))
+  }
+  fn withdraw(amount: Int) {
+    if amount <= self.balance {
+      self.balance = self.balance - amount
+      self.history.push(Transaction(kind: "withdraw", amount: amount, note: "withdraw"))
+    }
+  }
+  fn transfer(to: Account, amount: Int) {
+    if amount <= self.balance {
+      self.balance = self.balance - amount
+      to.balance = to.balance + amount
+      self.history.push(Transaction(kind: "transfer", amount: amount, note: "to " + to.owner.name))
+    }
+  }
+}
+
+class Bank {
+  name: String
+  accounts: List<Account>
+  customers: List<Customer>
+  fn init(name: String) {
+    self.name = name
+    self.accounts = List<Account>()
+    self.customers = List<Customer>()
+  }
+}
+
+// A transaction wants to be seen with its note as title and kind as a badge.
+view TxnView for Transaction {
+  title: note
+  badge: kind
+}
+
+// The curated things a person does to an account. Transfer takes another Account instance —
+// in the viewer, type an account id like  Account#1  (the invoke form turns it into a real ref).
+action "Deposit $100" for Account { self.deposit(100) }
+action "Withdraw $50" for Account { self.withdraw(50) }
+action "Deposit"      for Account (amount: Int) { self.deposit(amount) }
+action "Transfer"     for Account (to: Account, amount: Int) { self.transfer(to, amount) }
+
+fn main() {
+  let bank = Bank(name: "First Scry")
+  let alice = Customer(name: "alice")
+  let bob   = Customer(name: "bob")
+  bank.customers.push(alice)
+  bank.customers.push(bob)
+
+  let checking = Account(owner: alice, kind: Kind.Checking)
+  let savings  = Account(owner: bob,   kind: Kind.Savings)
+  bank.accounts.push(checking)
+  bank.accounts.push(savings)
+
+  checking.deposit(500)
+  checking.withdraw(120)
+  checking.transfer(savings, 200)
+
+  Console.log("bank '${bank.name}': alice=${checking.balance} bob=${savings.balance}")
+}
