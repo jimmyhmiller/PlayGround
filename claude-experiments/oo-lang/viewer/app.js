@@ -471,10 +471,23 @@ function literalHint(type) {
   if (type === "Int") return "0"; if (type === "Float") return "0.0"; if (type === "Bool") return "true";
   return "expression";
 }
+// Turn a user's raw text into a well-typed literal for the param's type. NEVER emit a bare
+// word (which the compiler would read as an unknown variable) — quote/parse/qualify by type.
 function literalFor(v, type) {
-  v = v.trim();
-  if (type === "String" && !(v.startsWith('"'))) return JSON.stringify(v);
-  return v || "0";
+  v = (v || "").trim();
+  const t = (type || "").trim();
+  if (t === "String") return v.startsWith('"') ? v : JSON.stringify(v);   // always a real string
+  if (t === "Bool") return v === "true" || v === "1" ? "true" : "false";
+  if (t === "Int") { const n = parseInt(v, 10); return Number.isFinite(n) ? String(n) : "0"; }
+  if (t === "Float") { const f = parseFloat(v); return Number.isFinite(f) ? String(f) : "0.0"; }
+  if (v === "") return "0";
+  // an instance reference typed as "Agent#3" -> Agent.at(3, 0)
+  const rm = /^([A-Za-z_]\w*)#(\d+)$/.exec(v);
+  if (rm) return `${rm[1]}.at(${rm[2]}, 0)`;
+  // enum variant already qualified ("AgentStatus.Running") passes through; a BARE word for a
+  // non-primitive param (entity/enum) can't be a literal — pass it through so the eval returns a
+  // clean typed error rather than us guessing (proper instance/enum pickers are a follow-up).
+  return v;
 }
 
 // ===================== breadcrumbs =====================
@@ -1300,6 +1313,48 @@ function TypeStaticDetail({ name, schema, onEditSource, onOpenType }) {
     </div>`;
 }
 
+// pick a human-ish label field off a graph/instances record for the instance list
+function instSummary(it) {
+  const f = it.fields || {};
+  for (const k of ["name", "title", "role", "label", "topic", "id"]) {
+    if (f[k] && f[k].type === "String" && f[k].value) return f[k].value;
+  }
+  return "";
+}
+// Opening a TYPE in the inspector: list its LIVE instances (click one to drill to its full
+// detail — fields, methods, and the green ACTIONS buttons). Falls back to the static template
+// when there are no instances (inspect / static-project mode).
+function TypeLiveDetail({ name, schema, onEditSource, onNavRef }) {
+  const [items, setItems] = useState(null);
+  usePoll(async () => {
+    const r = await evalSource(`${name}.instances(filter: "", offset: 0, limit: 200)`);
+    setItems(r && r.value && r.value.items ? r.value.items : []);
+  }, 900, [name]);
+  if (items === null) return html`<div class="pane-title">${name}</div><div class="pane-sub">loading…</div>`;
+  if (items.length === 0)
+    return html`<${TypeStaticDetail} name=${name} schema=${schema} onEditSource=${onEditSource}
+      onOpenType=${(n) => onNavRef({ kind: "type", name: n })} />`;
+  const sc = schema.find((t) => t.name === name);
+  return html`
+    <div>
+      <div class="pane-title">${name}</div>
+      <div class="pane-sub">${items.length} live instance${items.length > 1 ? "s" : ""} · click one to inspect
+        ${sc ? html`<button class="ghost-btn edit-src" onClick=${() => onEditSource(name, sc)}>✎ edit source</button>` : ""}</div>
+      <div class="detail-section">
+        <h3>instances</h3>
+        <div class="inst-list">
+          ${items.map((it) => {
+            const m = /#(\d+)$/.exec(it.ref); const slot = m ? +m[1] : 0; const s = instSummary(it);
+            return html`<button class="inst-row" key=${it.ref}
+              onClick=${() => onNavRef({ kind: "instance", cls: name, slot, gen: it.generation ?? 0 })}>
+              <span class="inst-id">${it.ref}</span>${s ? html`<span class="inst-sum">${s}</span>` : ""}
+              <span class="inst-arrow">›</span></button>`;
+          })}
+        </div>
+      </div>
+    </div>`;
+}
+
 function InspectorPanel({ stack, schema, onEditSource, onNavRef, onCrumb, onBack, onClose, nav }) {
   const top = stack[stack.length - 1];
   const crumbLabel = (t) => t.kind === "instance" ? `${t.cls}#${t.slot}` : t.name;
@@ -1330,8 +1385,8 @@ function InspectorPanel({ stack, schema, onEditSource, onNavRef, onCrumb, onBack
         <${NavContext.Provider} value=${inspNav}>
           ${top.kind === "instance"
             ? html`<${DetailPane} cls=${top.cls} slot=${top.slot} gen=${top.gen} schema=${schema} onEditSource=${onEditSource} />`
-            : html`<${TypeStaticDetail} name=${top.name} schema=${schema} onEditSource=${onEditSource}
-                onOpenType=${(n) => onNavRef({ kind: "type", name: n })} />`}
+            : html`<${TypeLiveDetail} name=${top.name} schema=${schema} onEditSource=${onEditSource}
+                onNavRef=${onNavRef} />`}
         <//>
       </div>
     </aside>`;
@@ -1463,13 +1518,14 @@ function NestedView({ onInspect, selectedId }) {
           <span class="meta">${showSkeleton ? "static schema · 0 instances" : "watching · refresh 800ms"}</span></div>
         <div class="census-grid">
           ${census.map((c) => html`
-            <${React.Fragment} key=${c.name}>
-              <div class=${"cx-name" + (c.util ? " util" : "")}>${c.name}</div>
+            <div class=${"cx-row" + (c.util ? " util" : "")} key=${c.name}
+                 onClick=${() => openType(c.name)} title=${"inspect " + c.name}>
+              <div class="cx-name">${c.name}</div>
               <div class=${"cx-track" + (showSkeleton ? " tmpl" : "")}>${showSkeleton ? "" : html`<div class=${"cx-bar" + (live[c.name] ? " live" : "")} style=${{ width: barW(c.count) + "%" }}></div>`}</div>
               ${showSkeleton
                 ? html`<div class="cx-count tmpl">×<b>—</b></div>`
                 : html`<div class=${"cx-count" + (live[c.name] ? " live" : "")}>×<b>${c.count}</b>${live[c.name] ? html`<span class="trend">▲</span>` : ""}</div>`}
-            <//>`)}
+            </div>`)}
         </div>
       </div>
 

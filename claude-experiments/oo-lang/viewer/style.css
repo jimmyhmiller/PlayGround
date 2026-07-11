@@ -515,9 +515,19 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
 .census-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 13px; }
 .census-head .h { text-transform: uppercase; letter-spacing: 1.2px; font-size: 10px; color: var(--fg-faint); }
 .census-head .meta { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
-.census-grid { display: grid; grid-template-columns: 148px 1fr auto; gap: 6px 14px; align-items: center; }
+.census-grid { display: flex; flex-direction: column; gap: 3px; }
+.cx-row { display: grid; grid-template-columns: 148px 1fr auto; gap: 0 14px; align-items: center; cursor: pointer; padding: 3px 7px; margin: 0 -7px; border-radius: 5px; transition: background .12s; }
+.cx-row:hover { background: var(--line-soft); }
 .cx-name { font-family: var(--mono); font-size: 12px; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cx-row.util .cx-name { color: var(--fg-faint); }
 .cx-name.util { color: var(--fg-faint); }
+/* type inspector: live-instance list */
+.inst-list { display: flex; flex-direction: column; gap: 4px; }
+.inst-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: var(--bg-elev); border: 1px solid var(--line); border-radius: 6px; padding: 8px 11px; cursor: pointer; font-family: var(--mono); font-size: 12px; color: var(--fg); transition: background .12s, border-color .12s; }
+.inst-row:hover { background: var(--line-soft); border-color: var(--fg-faint); }
+.inst-id { font-weight: 600; }
+.inst-sum { color: var(--fg-dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inst-arrow { color: var(--fg-faint); margin-left: auto; }
 .cx-track { height: 10px; background: var(--line-soft); border-radius: 3px; overflow: hidden; }
 .cx-bar { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--bg-elev2), var(--fg-faint)); transition: width .6s cubic-bezier(.2,.7,.2,1); }
 .cx-bar.live { background: linear-gradient(90deg, var(--live-soft), var(--live)); }
