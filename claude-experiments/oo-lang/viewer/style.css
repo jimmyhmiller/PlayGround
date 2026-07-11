@@ -751,6 +751,24 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
   border: 1px solid var(--danger); border-radius: 6px; padding: 10px 12px; margin: 8px 0; }
 .te-kind { font-weight: 700; margin-right: 8px; }
 .trace-empty { color: var(--fg-faint); font-size: 13px; padding: 24px 4px; }
+.trace-note { font-family: var(--mono); font-size: 12.5px; color: var(--fg-dim); background: var(--bg-elev);
+  border: 1px dashed var(--line); border-radius: 6px; padding: 10px 12px; margin: 8px 0; }
+
+/* functions as first-class Map citizens: a section in the NestedView + a per-function trace view */
+.fnsec { margin-top: 12px; border: 1px solid var(--line); border-radius: var(--radius); }
+.fnsec-head { display: flex; align-items: center; gap: 10px; padding: 9px 13px; }
+.fnsec-head .k { text-transform: uppercase; letter-spacing: 1px; font-size: 10px; color: var(--accent); }
+.fnsec-head .sub { font-family: var(--mono); font-size: 10.5px; color: var(--fg-faint); margin-left: auto; }
+.fnsec-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px,1fr)); gap: 8px; padding: 2px 13px 13px; }
+.fn-item { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; text-align: left; background: var(--bg-elev);
+  border: 1px solid var(--line-soft); border-radius: 8px; padding: 8px 11px; cursor: pointer; }
+.fn-item:hover { border-color: var(--accent); }
+.fn-item .fn-name { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--fg); }
+.fn-item .fn-sig { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
+.fn-item .fn-ret { font-family: var(--mono); font-size: 11px; color: var(--fg-faint); margin-left: auto; }
+.trace-panel.fn-trace { padding: 4px 2px 20px; max-width: none; margin: 0; }
+.fn-trace .fn-sig { font-family: var(--mono); font-size: 12px; color: var(--fg-dim); font-weight: 400; margin-left: 8px; }
+.fn-trace .trace-input { flex: 1 1 auto; }
 
 .trace-stats { background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 18px; }
 .ts-headline { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--line-soft); }

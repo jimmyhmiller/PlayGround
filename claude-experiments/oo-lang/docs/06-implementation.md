@@ -1,10 +1,14 @@
 # 06 — Implementation (living doc)
 
-# Phase F1 — functions & execution: the `trace(<expr>)` op + the Functions view
+# Phase F1/F2 — functions & execution: `trace(<expr>)` + `functions()`, functions in the Map
 
 The Map visualizes **data** (live entity instances). F1 adds the **computation** dimension: a
 `trace(<expr>)` runtime op that runs a call with per-call instrumentation and returns its **call
 tree**, plus a bespoke recursion-tree renderer — `trace(fib(6))` shows the recursion unfolding.
+F2 makes functions **first-class citizens of the Map**: a static `functions()` reflection op lists a
+program's top-level functions with signatures (visible before/without running, parallel to how
+`types()` shows classes), and the Map renders them as a section where clicking one opens its trace in
+the in-map inspector — not a separate screen.
 
 ## The call recorder (`src/trace.coil`)
 A single process-global `TraceRec` singleton + a global `trace-flag` (an `i64`). The recorder is
@@ -57,13 +61,41 @@ the setjmp block, so the recorder can never leak armed into the next (untraced) 
               "result":<val>,"hasResult":true}, ... ] }   // DFS pre-order; client builds the tree by parent
 ```
 
-## The Functions view (`viewer/app.js`, `viewer/style.css`)
-A third top-level mode next to Map/List (`TopBar` button; `App` renders `FunctionsView`). You type an
-expression (default `fib(6)`, plus quick chips), it evals `trace(<expr>)` (one-shot; re-traces on
-submit) and renders: a **stats strip** (`fib(6) = 8`, total calls, max depth, function count, a per-fn
-call-count bar, a truncation tile) and a **bespoke collapsible call tree** — each node `fn(args) =
-result` reusing `ValueView`, indented by nesting with ▼/▶ toggles; large traces start collapsed below
-depth 1. The recursion structure of fib is immediately legible. Screenshot: `docs/f1-functions-trace.png`.
+## `functions()` — the STATIC counterpart (`src/serialize.coil`, `src/server.coil`)
+`trace(<expr>)` needs a *running* call to visualize — useless before a run. `functions()` is the
+static reflection op that lists a program's **top-level functions with signatures** so you can SEE
+them before/without running, exactly parallel to how `types()/schema()` show the class shape
+statically. Registered in `try-reflection` as a 0-arg op like the others; `reflect-functions`
+enumerates the **source of truth = the typecheck/compile decl table (`ctx().decls`)**: every `DK_FN`
+decl with a **non-null node** is a user-written top-level function (builtins have `node==0`).
+Class/object methods live on their `DK_CLASS`/`DK_OBJECT` decl's `members` (never `DK_FN`) so they
+don't appear, and the synthetic `__action_<n>` methods are members too — both excluded *by
+construction* (no name-prefix filtering needed). `main` is included. Payload:
+```
+{ "type":"Functions", "functions":[
+  {"name":"fib","params":[{"name":"n","type":"Int"}],"returns":"Int"},
+  {"name":"main","params":[],"returns":"Void"} ] }
+```
+Works with **no running instances**: `scry inspect` serves it live, and the **static portal** `/proj`
+route serves it from the cached `scry schema-json` dump — which now emits a `functions` key alongside
+`schema`/`views`/`actions` (`scry-schema-json` in `server.coil`; the `/proj` branch in
+`portal-proj-eval`), so a static project card shows its functions with zero process.
+
+## Functions ARE first-class Map citizens (`viewer/app.js`, `viewer/style.css`)
+There is **no separate Functions mode** — functions live *inside the Map* alongside entities. The
+`NestedView` polls `functions()` (folded into its `graph()/schema()/views()` poll) and renders a
+**`functions` section** listing each top-level function as `name(params) → returns`, in both the live
+view and the static type-skeleton. Statically (`showSkeleton`) the section subtitle reads "run the
+program to trace a call"; live it reads "click one to trace a call".
+
+Clicking a function opens the **same in-map inspector** used for entities, via a new target kind
+`{kind:"function", name, params, returns}` (`openFn` → `onInspect`). The inspector dispatches it to
+`FnTraceView`, which reuses the F1 call-tree renderer (`TraceStats`/`TraceNodeRow`): the `trace(…)`
+input is **pre-filled from the signature** (`fib(n)` → `fib(6)` ready for args; a 0-arg function
+auto-traces in one click), and tracing renders the stats strip + collapsible recursion tree right in
+the inspector. If the program is static (a portal project where `trace(…)` returns `StaticInspection`)
+the view shows the signature + a "run the program to trace" note instead of a dead/empty tree; `scry
+inspect` runs pure functions live so tracing still works there. Screenshot: `docs/f1-functions-trace.png`.
 
 ## Example + tests
 - `examples/functions.scry`: `fib`/`fact`/`gcd`/`ack` + a `main` that runs them (so `scry run` serves
@@ -71,7 +103,13 @@ depth 1. The recursion structure of fib is immediately legible. Screenshot: `doc
 - Goldens `tests/eval/80..83`: `trace(fib(6))` → value 8, `totalCalls:25`, root `fib(6)` with children
   `fib(5)`/`fib(4)`; `trace(fib(20))` → `totalCalls:21891, truncated:true, nodeCount:20000`; a method
   trace (self renders as a ref); and error-reset (`trace(fib(nope))` clean error, then a normal eval
-  still works). `ui-smoke.mjs` gained a Functions beat: switch mode, trace, assert the tree + stats.
+  still works).
+- Goldens `tests/eval/84..85`: `functions()` on `functions.scry` lists `fib`/`fact`/`gcd`/`ack`/`main`
+  with exact signatures; on `assistant.scry` it lists the top-level fns but **not** class methods
+  (`begin`/`pause`/`say`) or `__action_*`. `ui-smoke.mjs` gained: a live beat (Map `functions` section
+  → click `contains` → pre-filled trace inspector → call tree), a static-inspect beat (skeleton Map
+  lists functions + a run-to-trace note, no error), and a static-portal bug beat (clicking a type shows
+  its schema, not "type not in schema").
 
 ## Friction / notes
 - **React `style` must be an object, not a string** in the htm+React viewer — `style=${{width:…}}`,

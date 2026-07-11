@@ -389,6 +389,9 @@
             (src-is-call srcbuf (load srclen) c"schema")  (do (jb-cstr resp c"\"value\":") (proj-emit-value resp e c"schema") 0)
             (src-is-call srcbuf (load srclen) c"views")   (do (jb-cstr resp c"\"value\":") (proj-emit-value resp e c"views") 0)
             (src-is-call srcbuf (load srclen) c"actions") (do (jb-cstr resp c"\"value\":") (proj-emit-value resp e c"actions") 0)
+            ; functions() — the program's TOP-LEVEL functions, served statically from the cached
+            ; dump so a static portal project shows its functions in the Map with no process.
+            (src-is-call srcbuf (load srclen) c"functions") (do (jb-cstr resp c"\"value\":") (proj-emit-value resp e c"functions") 0)
             (src-is-call srcbuf (load srclen) c"graph")   (do (jb-cstr resp c"\"value\":{\"type\":\"Graph\",\"instances\":[]}") 0)
             (do (jb-cstr resp c"\"error\":{\"kind\":\"StaticInspection\",\"message\":\"static inspection \\u2014 run the project to interact\"}") 0))
           (jb-byte resp \})

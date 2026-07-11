@@ -329,26 +329,36 @@ async function main() {
       fails.push("V4: closing the inspector did not restore the full-width map");
     else ok("V4: closing the inspector restores the full-width map");
 
-    // (F1) Functions / Trace mode: switch to it, trace an expression valid under assistant.scry
-    // (`contains(...)`), and assert the call tree + stats strip render.
-    await evalPage(`[...document.querySelectorAll('.vt-btn')].find(b=>b.textContent.trim()==='Functions').click()`);
-    await waitFor(".trace-panel");
-    await evalPage(`(()=>{
-      const inp=document.querySelector('.trace-input');
-      const setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
-      setter.call(inp,'contains("hello world", "wor")');
-      inp.dispatchEvent(new Event('input',{bubbles:true}));
-      return inp.value;
-    })()`);
-    await sleep(250);  // let React flush the input state before the run button reads it
-    await evalPage(`document.querySelector('.trace-run').click()`);
+    // (F1/F2) Functions are FIRST-CLASS MAP CITIZENS (no separate mode). The Map (NestedView) shows
+    // a `functions` section listing top-level functions with signatures. Clicking one opens a TRACE
+    // view in the SAME in-map inspector, pre-filled from the signature; tracing renders the call tree
+    // + stats strip. Runs against assistant.scry's `contains(s, needle)`.
+    await waitFor("#nested .fnsec .fn-item", 10000);
+    const hasContainsFn = await evalPage(`[...document.querySelectorAll('#nested .fnsec .fn-item .fn-name')].some(e=>e.textContent.trim()==='contains')`);
+    if (!hasContainsFn) fails.push("Functions section: 'contains' top-level function not listed in the Map");
+    else ok("Functions section: the Map lists top-level functions with signatures");
+    await evalPage(`(()=>{const it=[...document.querySelectorAll('#nested .fnsec .fn-item')].find(c=>{const n=c.querySelector('.fn-name');return n&&n.textContent.trim()==='contains';});if(it)it.click();return !!it;})()`);
     try {
-      const tn = await waitFor(".tnode", 8000);
-      const strip = await evalPage(`(()=>{const s=document.querySelector('.ts-strip');return s?s.textContent:'';})()`);
-      const hasFn = await evalPage(`[...document.querySelectorAll('.tnode-fn')].some(e=>e.textContent.trim()==='contains')`);
-      if (tn >= 1 && /calls/.test(strip) && hasFn) ok(`Functions mode: trace renders a call tree (${tn} node(s)) + stats strip`);
-      else fails.push(`Functions mode: incomplete trace render (nodes=${tn}, strip=${JSON.stringify(strip)}, hasFn=${hasFn})`);
-    } catch (e) { fails.push("Functions mode: no call tree rendered after trace (" + e.message + ")"); }
+      await waitFor("#inspector .trace-panel.fn-trace", 8000);
+      const prefill = await evalPage(`(()=>{const i=document.querySelector('#inspector .trace-input');return i?i.value:null;})()`);
+      if (!prefill || !/^contains\(/.test(prefill)) fails.push(`Functions: clicking a function did not pre-fill the trace input (got ${JSON.stringify(prefill)})`);
+      else ok(`Functions: clicking a function opens the in-map trace inspector, pre-filled (${JSON.stringify(prefill)})`);
+      // type real args + trace -> a call tree renders IN the inspector
+      await evalPage(`(()=>{
+        const inp=document.querySelector('#inspector .trace-input');
+        const setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+        setter.call(inp,'contains("hello world", "wor")');
+        inp.dispatchEvent(new Event('input',{bubbles:true}));
+      })()`);
+      await sleep(250);  // let React flush the input state before the run button reads it
+      await evalPage(`document.querySelector('#inspector .trace-run').click()`);
+      const tn = await waitFor("#inspector .tnode", 8000);
+      const strip = await evalPage(`(()=>{const s=document.querySelector('#inspector .ts-strip');return s?s.textContent:'';})()`);
+      const hasFn = await evalPage(`[...document.querySelectorAll('#inspector .tnode-fn')].some(e=>e.textContent.trim()==='contains')`);
+      if (tn >= 1 && /calls/.test(strip) && hasFn) ok(`Functions: tracing a function from the Map renders a call tree (${tn} node(s)) + stats strip`);
+      else fails.push(`Functions: incomplete trace render (nodes=${tn}, strip=${JSON.stringify(strip)}, hasFn=${hasFn})`);
+      await evalPage(`(()=>{const b=document.querySelector('#inspector .insp-btn[title="close inspector"]');if(b)b.click();return true;})()`);
+    } catch (e) { fails.push("Functions: no trace inspector / call tree after clicking a function (" + e.message + ")"); }
 
     // switch to the List rail for the remaining browse beats (List is unchanged by V4)
     await evalPage(`[...document.querySelectorAll('.vt-btn')].find(b=>b.textContent.trim()==='List').click()`);
@@ -706,6 +716,27 @@ async function main() {
               if (!stTypes.includes("Agent")) fails.push(`static project view missing Agent: ${JSON.stringify(stTypes)}`);
               else if (!hasNote) fails.push("static project view missing 'schema · not running' affordance");
               else ok(`static project card opens the V3 type-skeleton from /proj (${stTypes.length} types, no process)`);
+              // (bug fix) clicking a TYPE in the static-portal Map must show its fields/methods, NOT
+              // "type not in schema". The /proj route serves schema()/views()/actions() but NOT
+              // types(), so the inspector must resolve the type against the schema() payload
+              // (fullSchema), which the InspectorPanel now receives. Click the Agent type cell.
+              const findTypeCellJS2 = (name) => `(()=>{
+                for(const r of document.querySelectorAll('#nested .region')){
+                  const nm=r.querySelector('.region-head .region-name');
+                  if(nm&&nm.textContent.trim()===${JSON.stringify(name)}) return r;
+                }
+                return null;
+              })()`;
+              await evalPage(`(()=>{const a=${findTypeCellJS2("Agent")};if(a)a.querySelector('.region-head').click();return !!a;})()`);
+              try {
+                await waitFor("#inspector .field-grid", 6000);
+                const st = await evalPage(`(()=>{const insp=document.querySelector('#inspector');
+                  return {notInSchema:/type not in schema/i.test(insp.textContent), fields:insp.querySelectorAll('.field-grid .fname').length};})()`);
+                if (st.notInSchema) fails.push("bug: static-portal type inspector shows 'type not in schema' (schema prop not resolved to schema())");
+                else if (st.fields < 1) fails.push("bug: static-portal type inspector shows no fields");
+                else ok(`bug fix: clicking a type in the static-portal Map shows its ${st.fields} fields (no 'type not in schema')`);
+                await evalPage(`(()=>{const b=document.querySelector('#inspector .insp-btn[title="close inspector"]');if(b)b.click();return true;})()`);
+              } catch (e) { fails.push("bug fix: static-portal type-cell inspector scenario failed: " + (e && e.message || e)); }
               await evalPage(`(()=>{const b=document.querySelector('.back-btn');if(b)b.click();return !!b;})()`);
               await waitFor(".pcard", 6000);
             }
@@ -750,6 +781,19 @@ async function main() {
         // placeholder + tool-type chips). Never the old "no live instances" dead-end, never a crash.
         await waitFor("#nested.skeleton", 12000);
         ok("inspect mode: Map view renders the type-level SKELETON (not the dead-end empty state)");
+        // (F2 static) functions are first-class Map citizens STATICALLY too: the skeleton Map lists
+        // the program's top-level functions with signatures (parallel to how classes show statically),
+        // with a "run the program to trace" affordance — no error, no running process needed.
+        try {
+          await waitFor("#nested .fnsec .fn-item", 8000);
+          const statFns = await evalPage(`[...document.querySelectorAll('#nested .fnsec .fn-item .fn-name')].map(e=>e.textContent.trim())`);
+          const hasSig = await evalPage(`!!document.querySelector('#nested .fnsec .fn-item .fn-sig')`);
+          const runNote = await evalPage(`(()=>{const s=document.querySelector('#nested .fnsec .fnsec-head .sub');return s?s.textContent:'';})()`);
+          if (!statFns.includes("contains") || !statFns.includes("main")) fails.push(`F2 static: functions section missing expected functions (got ${JSON.stringify(statFns.slice(0,8))})`);
+          else if (!hasSig) fails.push("F2 static: function items render no signature");
+          else if (!/run the program to trace/.test(runNote)) fails.push(`F2 static: functions section missing 'run the program to trace' affordance (got ${JSON.stringify(runNote)})`);
+          else ok(`F2 static: inspect Map lists ${statFns.length} functions with signatures + a run-to-trace note (no process)`);
+        } catch (e) { fails.push("F2 static: functions section did not render in inspect Map (" + (e && e.message || e) + ")"); }
         // a helper (in-page) that finds a TYPE cell whose header names a given type
         const findTypeCellJS = (name) => `(()=>{
           for(const r of document.querySelectorAll('#nested .region')){
@@ -826,14 +870,25 @@ async function main() {
           await evalPage(`(()=>{const b=document.querySelector('#inspector .insp-btn[title="close inspector"]');if(b)b.click();return true;})()`);
         } catch (e) { fails.push("V4 static: type-cell inspector scenario failed: " + (e && e.message || e)); }
 
-        // switch to the List rail (no liveCount gate) and browse Agent's (empty) table
+        // switch to the List rail (no liveCount gate) and browse Agent's (empty) table. With 0 live
+        // instances the TablePane renders the CLASS SCHEMA fallback (TablePaneSchema: "no live
+        // instances — showing the class schema") rather than a bare empty div — so accept either the
+        // schema fallback or a real table, and assert it is NOT a crash/error.
         await evalPage(`[...document.querySelectorAll('.vt-btn')].find(b=>b.textContent.trim()==='List').click()`);
         await waitFor(".type-row");
         await evalPage(`(()=>{const r=[...document.querySelectorAll('.type-row')].find(e=>{const n=e.querySelector('.tname');return n&&n.textContent.trim()==='Agent';});r.click();return true;})()`);
-        await waitFor(".empty, .itable tbody tr", 8000);
-        const emptyState = await evalPage(`!!document.querySelector('.empty')`);
-        if (!emptyState) fails.push("inspect: browsing the zero-count Agent table did not render the empty state (expected 0 live instances, since main() never ran)");
-        else ok("inspect mode: browsing a zero-count type renders the empty state, no crash");
+        await waitFor(".empty, .itable tbody tr, #pane .detail-section", 8000);
+        const zeroState = await evalPage(`(()=>{
+          const empty=!!document.querySelector('.empty');
+          const schemaFallback=!!document.querySelector('#pane .detail-section');
+          const rows=document.querySelectorAll('.itable tbody tr').length;
+          const err=!!document.querySelector('#pane .invoke-error');
+          return {empty, schemaFallback, rows, err};
+        })()`);
+        if (zeroState.err) fails.push("inspect: browsing the zero-count Agent table rendered an error (expected the class-schema fallback)");
+        else if (zeroState.rows > 0) fails.push(`inspect: zero-count Agent table unexpectedly rendered ${zeroState.rows} rows (main() never ran)`);
+        else if (!zeroState.empty && !zeroState.schemaFallback) fails.push("inspect: browsing the zero-count Agent table rendered neither the empty state nor the class-schema fallback");
+        else ok("inspect mode: browsing a zero-count type renders the class-schema fallback, no crash");
         // the whole point of this beat: the server process must survive that instances() poll
         await sleep(300);
         if (inspectProc.exitCode !== null) {

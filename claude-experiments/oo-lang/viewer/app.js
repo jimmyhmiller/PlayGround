@@ -818,7 +818,6 @@ function TopBar({ onGlobalSearch, onToggleTranscript, mode, setMode, onBack, pro
       <div class="viewtoggle">
         <button class=${"vt-btn" + (mode === "map" ? " active" : "")} onClick=${() => setMode("map")}>Map</button>
         <button class=${"vt-btn" + (mode === "browse" ? " active" : "")} onClick=${() => setMode("browse")}>List</button>
-        <button class=${"vt-btn" + (mode === "functions" ? " active" : "")} onClick=${() => setMode("functions")}>Functions</button>
       </div>
       <input id="global-search" type="text" spellcheck="false" autocomplete="off"
              placeholder="jump to Agent#7 or search field values…"
@@ -1524,7 +1523,7 @@ function TypeLiveDetail({ name, schema, onEditSource, onNavRef }) {
 
 function InspectorPanel({ stack, schema, onEditSource, onNavRef, onCrumb, onBack, onClose, nav }) {
   const top = stack[stack.length - 1];
-  const crumbLabel = (t) => t.kind === "instance" ? `${t.cls}#${t.slot}` : t.name;
+  const crumbLabel = (t) => t.kind === "instance" ? `${t.cls}#${t.slot}` : t.kind === "function" ? `${t.name}()` : t.name;
   // refs anywhere in the inspector (field values, method results, REPL) push a new target here.
   const inspNav = useMemo(() => ({
     ...nav,
@@ -1552,6 +1551,8 @@ function InspectorPanel({ stack, schema, onEditSource, onNavRef, onCrumb, onBack
         <${NavContext.Provider} value=${inspNav}>
           ${top.kind === "instance"
             ? html`<${DetailPane} cls=${top.cls} slot=${top.slot} gen=${top.gen} schema=${schema} onEditSource=${onEditSource} />`
+            : top.kind === "function"
+            ? html`<${FnTraceView} fn=${top} />`
             : html`<${TypeLiveDetail} name=${top.name} schema=${schema} onEditSource=${onEditSource}
                 onNavRef=${onNavRef} />`}
         <//>
@@ -1562,6 +1563,7 @@ function InspectorPanel({ stack, schema, onEditSource, onNavRef, onCrumb, onBack
 function NestedView({ onInspect, selectedId }) {
   const [instances, setInstances] = useState([]);
   const [schema, setSchema] = useState([]);
+  const [functions, setFunctions] = useState([]);  // top-level functions (functions()) — first-class Map citizens
   const [views, setViews] = useState([]);          // program-declared view specs (views())
   const [viewMode, setViewModeState] = useState({});// instance id -> "cell" | "board"
   const [hoverId, setHoverId] = useState(null);
@@ -1574,7 +1576,8 @@ function NestedView({ onInspect, selectedId }) {
   const overlayRef = useRef(null);
 
   usePoll(async () => {
-    const [g, s, v] = await Promise.all([evalSource("graph()"), evalSource("schema()"), evalSource("views()")]);
+    const [g, s, v, fns] = await Promise.all([evalSource("graph()"), evalSource("schema()"), evalSource("views()"), evalSource("functions()")]);
+    if (fns.value && fns.value.type === "Functions") setFunctions(fns.value.functions || []);
     if (s.value && s.value.nodes) {
       const nl = {};
       for (const n of s.value.nodes) {
@@ -1640,6 +1643,8 @@ function NestedView({ onInspect, selectedId }) {
   // V4: every drill-in in the Map opens the docked in-map inspector — we never switch to browse.
   const openDetail = useCallback((cls, slot, gen) => onInspect({ kind: "instance", cls, slot, gen: gen ?? 0 }), [onInspect]);
   const openType = useCallback((name) => onInspect({ kind: "type", name }), [onInspect]);
+  // functions are first-class Map citizens: clicking one opens a trace view in the same in-map inspector.
+  const openFn = useCallback((f) => onInspect({ kind: "function", name: f.name, params: f.params || [], returns: f.returns }), [onInspect]);
   const onChip = useCallback((id) => { const p = refParts(id); if (p) openDetail(p.cls, p.slot, (model.byId.get(id) || {}).generation); }, [model, openDetail]);
 
   // "show links" overlay: hub-and-spoke faded connectors between every appearance of hoverId.
@@ -1757,31 +1762,64 @@ function NestedView({ onInspect, selectedId }) {
               </div>
             </div>
           </div>` : ""}
+
+        ${functions.length ? html`
+          <div class="fnsec">
+            <div class="fnsec-head">
+              <span class="k">functions</span>
+              <span class="sub">${functions.length} top-level function${functions.length === 1 ? "" : "s"} · ${showSkeleton ? "run the program to trace a call — click to open" : "click one to trace a call"}</span>
+            </div>
+            <div class="fnsec-grid">
+              ${functions.map((f) => html`
+                <button class="fn-item" key=${f.name} onClick=${() => openFn(f)} title=${"trace " + f.name}>
+                  <span class="fn-name">${f.name}</span><span class="fn-sig">(${(f.params || []).map((p) => `${p.name}: ${cleanType(p.type)}`).join(", ")})</span>
+                  <span class="fn-ret">→ ${f.returns}</span>
+                </button>`)}
+            </div>
+          </div>` : ""}
       </div>
     </div>`;
 }
 
 // ===================== app root =====================
-// ===================== Functions / Trace mode (Phase F1) =====================
-// The COMPUTATION counterpart to the Map's DATA view. You type an expression; it evals
-// `trace(<expr>)` (the server runs it with the call recorder on) and renders the returned
-// call tree as a bespoke, collapsible recursion tree — each node `fn(args) = result` — plus a
-// stats strip (total calls, per-function counts, max depth, truncation). A trace is a one-shot
-// run (no polling): re-tracing on submit. The flat node list is assembled into a tree by parent.
-function FunctionsView() {
-  const [expr, setExpr] = useState("fib(6)");
-  const [submitted, setSubmitted] = useState("fib(6)");
+// ===================== Function trace inspector (Phase F1/F2) =====================
+// A FUNCTION is a first-class Map citizen: clicking one in the Map's `functions` section opens
+// THIS view in the in-map inspector. The COMPUTATION counterpart to an entity's DATA detail — it
+// evals `trace(<call>)` (the server runs it with the call recorder on) and renders the returned
+// call tree as a collapsible recursion tree — each node `fn(args) = result` — plus a stats strip
+// (total calls, per-function counts, max depth, truncation). The trace input is pre-filled from
+// the function's signature (`name(a, b)`), so a 0-arg function traces in one click and a
+// parametered one is ready to have its args typed. Statically (a portal project with no process,
+// where `trace(...)` returns StaticInspection) we show the signature + a "run the program to
+// trace" note instead of a dead/empty tree. `scry inspect` runs pure functions live, so tracing
+// still works there. Re-tracing on submit; the flat node list is assembled into a tree by parent.
+function fnCallExpr(fn) { return `${fn.name}(${(fn.params || []).map((p) => p.name).join(", ")})`; }
+function FnTraceView({ fn }) {
+  const zeroArg = !(fn.params && fn.params.length);
+  const [expr, setExpr] = useState(() => fnCallExpr(fn));
+  const [submitted, setSubmitted] = useState(() => (zeroArg ? fnCallExpr(fn) : ""));
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [staticNote, setStaticNote] = useState(false);
   const [busy, setBusy] = useState(false);
   const [collapsed, setCollapsed] = useState(() => new Set());
+
+  // when the inspected function changes, reset the input to its signature; auto-trace 0-arg fns.
+  useEffect(() => {
+    const ini = fnCallExpr(fn);
+    setExpr(ini); setData(null); setError(null); setStaticNote(false);
+    setSubmitted(zeroArg ? ini : "");
+  }, [fn.name]); // eslint-disable-line
 
   const runTrace = useCallback(async (src) => {
     src = (src || "").trim();
     if (!src) return;
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setStaticNote(false);
     const r = await evalSource(`trace(${src})`);
     setBusy(false);
+    // static/portal-static: the program isn't running, so a trace can't execute — show the
+    // signature + a "run to trace" note rather than surfacing the raw StaticInspection error.
+    if (r.error && r.error.kind === "StaticInspection") { setStaticNote(true); setData(null); return; }
     if (r.error || !r.value || r.value.type !== "Trace") {
       setError(r.error || { kind: "BadResult", message: "not a trace result" });
       setData(null); return;
@@ -1794,7 +1832,7 @@ function FunctionsView() {
     setData(v);
   }, []);
 
-  useEffect(() => { runTrace(submitted); }, [submitted, runTrace]);
+  useEffect(() => { if (submitted) runTrace(submitted); }, [submitted, runTrace]);
 
   const kids = useMemo(() => {
     const m = new Map();
@@ -1815,13 +1853,16 @@ function FunctionsView() {
 
   const roots = kids.get(-1) || [];
   const submit = () => setSubmitted(expr.trim());
+  const sig = `(${(fn.params || []).map((p) => `${p.name}: ${cleanType(p.type)}`).join(", ")})`;
 
   return html`
-    <div class="trace-panel">
+    <div class="trace-panel fn-trace">
+      <div class="pane-title">${fn.name}<span class="fn-sig">${sig} → ${fn.returns}</span></div>
+      <div class="pane-sub">function · trace a call to watch its recursion tree</div>
       <div class="trace-controls">
         <span class="trace-prompt">trace(</span>
         <input class="trace-input" type="text" spellcheck="false" autocomplete="off"
-               placeholder="fib(6)" value=${expr}
+               placeholder=${fnCallExpr(fn)} value=${expr}
                onInput=${(e) => setExpr(e.target.value)}
                onKeyDown=${(e) => { if (e.key === "Enter") submit(); }} />
         <span class="trace-prompt">)</span>
@@ -1830,16 +1871,16 @@ function FunctionsView() {
           <button class="ghost-btn tsm" onClick=${expandAll}>expand all</button>
           <button class="ghost-btn tsm" onClick=${collapseAll}>collapse all</button>` : ""}
       </div>
-      ${["fib(6)", "fact(5)", "gcd(48, 36)", "ack(2, 3)"].map((s) => html`
-        <button key=${s} class=${"trace-chip" + (s === submitted ? " active" : "")}
-          onClick=${() => { setExpr(s); setSubmitted(s); }}>${s}</button>`)}
+      ${staticNote ? html`<div class="trace-note">▷ run the program to trace a call — this is a static view (no live process).</div>` : ""}
       ${error ? html`<div class="trace-error"><span class="te-kind">${error.kind}</span> ${error.message}</div>` : ""}
       ${data ? html`
         <${TraceStats} stats=${data.stats} value=${data.value} expr=${submitted} />
         <div class="trace-tree">
           ${roots.length ? roots.map((n) => html`<${TraceNodeRow} key=${n.i} node=${n} kids=${kids} collapsed=${collapsed} toggle=${toggle} />`)
             : html`<div class="trace-empty">no function calls — <code>${submitted}</code> evaluated without calling any user function.</div>`}
-        </div>` : (!error ? html`<div class="trace-empty">tracing…</div>` : "")}
+        </div>`
+        : (busy ? html`<div class="trace-empty">tracing…</div>`
+           : (!error && !staticNote ? html`<div class="trace-empty">edit the arguments above and press <b>trace</b>.</div>` : ""))}
     </div>`;
 }
 
@@ -2037,11 +2078,9 @@ function App({ onBack, programName } = {}) {
       ${mode === "map"
         ? html`<div id="layout" class=${"nested-layout" + (inspect ? " has-inspector" : "")}>
             <div class="nested-stage-col"><${NestedView} onInspect=${openInspect} selectedId=${inspSelId} /></div>
-            ${inspect ? html`<${InspectorPanel} stack=${inspect.stack} schema=${schema} onEditSource=${openCodePanel}
+            ${inspect ? html`<${InspectorPanel} stack=${inspect.stack} schema=${fullSchema.length ? fullSchema : schema} onEditSource=${openCodePanel}
                 onNavRef=${inspectPush} onCrumb=${inspectGoto} onBack=${inspectBack} onClose=${inspectClose} nav=${nav} />` : ""}
           </div>`
-        : mode === "functions"
-        ? html`<div id="layout"><main id="content"><${FunctionsView} /></main></div>`
         : html`<div id="layout">
             <${TypeRail} schema=${schema} trend=${trend} route=${route} ifaceOpen=${ifaceOpen} setIfaceOpen=${setIfaceOpen} />
             <main id="content">

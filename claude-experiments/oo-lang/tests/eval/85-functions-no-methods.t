@@ -1,0 +1,10 @@
+file: examples/assistant.scry
+expr: functions()
+contains: "type":"Functions"
+contains: {"name":"startsWith","params":[{"name":"s","type":"String"},{"name":"p","type":"String"}],"returns":"Bool"}
+contains: {"name":"contains","params":[{"name":"s","type":"String"},{"name":"needle","type":"String"}],"returns":"Bool"}
+contains: {"name":"main","params":[],"returns":"Void"}
+notcontains: {"name":"begin"
+notcontains: {"name":"pause"
+notcontains: {"name":"say"
+notcontains: __action_
