@@ -168,13 +168,41 @@ async function main() {
       else if (hi.n < 2) fails.push(`hovering a shared chip highlighted only ${hi.n} appearance(s), expected >=2`);
       else ok(`hovering a shared chip lights up all ${hi.n} appearances (id-active + id-hi)`);
     }
-    // the infrastructure strip renders and expands to reveal utility-type rows
+    // the infrastructure strip renders and expands to reveal utility-type rows. The infra types
+    // (ModelResponse/ToolCall/…) only appear once the agent loop has run a tool turn, so wait for
+    // the strip rather than sampling a single poll (deterministic, not timing-flaky).
+    try { await waitFor("#nested .infra", 15000); } catch (e) {}
     if (!await evalPage(`!!document.querySelector('#nested .infra')`)) fails.push("infrastructure strip did not render");
     else {
       ok("infrastructure strip renders (utility types recede)");
       await evalPage(`document.querySelector('#nested .infra-head').click()`);
       const rows = await evalPage(`document.querySelector('#nested .infra').classList.contains('open') ? document.querySelectorAll('#nested .util').length : 0`);
       if (!rows) fails.push("infrastructure strip did not expand with utility rows"); else ok(`infrastructure strip expands (${rows} utility rows)`);
+    }
+    // (V2) program-declared view: an Agent declares `view AgentBoard for Agent` -> a
+    // ▤ cell / ▧ board toggle. Toggling renders the bespoke board (timeline rows + tool chips);
+    // toggling back returns to the default nested cell. This is DECISIONS #15b landing in place.
+    const hasToggle = await evalPage(`(()=>{const a=${findRegionJS("Agent")};return !!(a&&a.querySelector('.vtoggle'));})()`);
+    if (!hasToggle) fails.push("Agent region has no declared-view toggle (AgentBoard not surfaced)");
+    else {
+      ok("Agent region shows a default<->custom view toggle (AgentBoard declared)");
+      await evalPage(`(()=>{const a=${findRegionJS("Agent")};const b=[...a.querySelectorAll('.vtoggle button')].find(x=>/board/.test(x.textContent));b.click();return true;})()`);
+      try { await waitFor('#nested .board[data-view="AgentBoard"] .timeline', 8000); } catch (e) { fails.push("toggling to board never rendered an AgentBoard timeline"); }
+      const board = await evalPage(`(()=>{
+        const b=document.querySelector('#nested .board[data-view="AgentBoard"]');
+        if(!b) return {noboard:true};
+        return {rows:b.querySelectorAll('.timeline .tl').length, chips:b.querySelectorAll('.vchips .chip').length, hasTitle:!!b.querySelector('.board-title')};
+      })()`);
+      if (board.noboard) fails.push("toggling to board did not render an AgentBoard");
+      else {
+        if (!board.hasTitle) fails.push("AgentBoard has no title header");
+        if (board.rows < 1) fails.push("AgentBoard timeline rendered no message rows"); else ok(`toggling to board renders the AgentBoard timeline (${board.rows} rows)`);
+        if (board.chips < 1) fails.push("AgentBoard tools section rendered no chips"); else ok(`AgentBoard tools section renders ${board.chips} identity chips`);
+      }
+      // toggle back to the default nested cell
+      await evalPage(`(()=>{const b=document.querySelector('#nested .board[data-view="AgentBoard"] .vtoggle button');b.click();return true;})()`);
+      try { await waitFor("#nested .region .conv .mstack", 8000); ok("toggling back returns to the default nested cell (message stack)"); }
+      catch (e) { fails.push("toggling back did not restore the default nested cell"); }
     }
     // clicking an Agent region drills into its detail (switches to browse) -> sets up the rail beats
     await evalPage(`(()=>{const agent=${findRegionJS("Agent")};if(agent)agent.querySelector('.region-head').click();return !!agent;})()`);

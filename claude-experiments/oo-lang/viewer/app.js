@@ -752,9 +752,128 @@ function IdChip({ id, model, small, onEnter, onLeave, onClick }) {
       <span class="knob"></span>${label}</button>`;
 }
 
-// a nested region (recursive): header + owned children + a dense message stack + identity chips
-function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen }) {
+// ---------- program-declared views (V2): follow a dotted field-path over graph() records ----------
+function followPath(startId, pathStr, byId) {
+  let cur = [startId];
+  for (const hop of String(pathStr).split(".")) {
+    const next = [];
+    for (const id of cur) {
+      const inst = byId.get(id); if (!inst) continue;
+      const r = (inst.refs || []).find((x) => x.field === hop);
+      if (r) for (const t of r.ids) next.push(t);
+    }
+    cur = next;
+  }
+  return cur;
+}
+const clauseByKey = (view, key) => (view.clauses || []).find((c) => c.key === key);
+const argValue = (clause, name) => ((clause.args || []).find((a) => a.name === name) || {}).value;
+// resolve the instance ids a section/clause item points at (path, or `all` = all of a type)
+function resolveItemIds(clause, node, model, targetType) {
+  if (clause.path === "all") return [...model.byId.values()].filter((i) => i.type === targetType).map((i) => i.ref);
+  if (clause.path === "byCount") return [];
+  return followPath(node.id, clause.path, model.byId);
+}
+
+// one representation (timeline / chips / rows / card / heat), honoring the declared spec
+function Representation({ clause, node, model, targetType, onEnter, onLeave, onChip, onOpen }) {
+  const rep = clause.representation;
+  let ids = resolveItemIds(clause, node, model, targetType);
+  const insts = ids.map((id) => model.byId.get(id)).filter(Boolean);
+  const orderField = argValue(clause, "order");
+  if (orderField) insts.sort((a, b) => String(sVal(a, orderField)).localeCompare(String(sVal(b, orderField))));
+  if (rep === "timeline") {
+    return html`<div class="timeline">
+      ${insts.map((m) => html`<div class=${"tl " + roleClass(sVal(m, "role"))} data-mrow=${m.ref} key=${m.ref}>
+        <span class="role">${sVal(m, "role") || m.type}</span>
+        <span class="msg">${truncate(sVal(m, "content") || sVal(m, "text") || displayName(m), 160)}</span></div>`)}
+    </div>`;
+  }
+  if (rep === "chips") {
+    return html`<div class="vchips">
+      ${insts.map((it) => model.sharedIds.has(it.ref)
+        ? html`<${IdChip} key=${it.ref} id=${it.ref} model=${model} onEnter=${onEnter} onLeave=${onLeave} onClick=${onChip} />`
+        : html`<button class="chip" key=${it.ref} style=${{ "--c": "var(--fg-faint)" }}
+              onClick=${(e) => { e.stopPropagation(); const p = refParts(it.ref); if (p) onOpen(p.cls, p.slot, it.generation); }}>
+            <span class="knob"></span>${sVal(it, "name") || sVal(it, "title") || it.type}</button>`)}
+    </div>`;
+  }
+  if (rep === "rows") {
+    return html`<div class="vrows">
+      ${insts.map((it) => html`<div class="vrow" key=${it.ref}
+          onClick=${() => { const p = refParts(it.ref); if (p) onOpen(p.cls, p.slot, it.generation); }}>
+        <span class="vr-kind">${it.type}</span>${displayName(it)}</div>`)}
+    </div>`;
+  }
+  if (rep === "card") {
+    const it = insts[0];
+    if (!it) return html`<div class="mini-card"><span class="fk">—</span><span class="fv">no instance</span></div>`;
+    return html`<div class="mini-card">
+      ${Object.entries(it.scalars || {}).map(([k, f]) => html`<${React.Fragment} key=${k}>
+        <span class="fk">${k}</span><span class="fv">${f.case !== undefined ? f.case : String(f.value)}</span><//>`)}
+    </div>`;
+  }
+  if (rep === "heat") {
+    const byField = argValue(clause, "by") || "role";
+    const roles = [["user", "user"], ["asst", "assistant"], ["tool", "tool_use"], ["tres", "tool_result"]];
+    return html`<div>
+      <div class="heat-legend">
+        ${roles.map(([c, label]) => html`<span class="pl" key=${c}><span class="sw" style=${{ background: `var(--m-${c})` }}></span>${label}</span>`)}
+      </div>
+      <div class="heat">
+        ${insts.map((it, i) => html`<div class=${"hcell " + roleClass(sVal(it, byField))} data-hcell=${it.ref} key=${it.ref}
+          style=${{ "--mc": `var(--m-${roleClass(sVal(it, byField))})`, "--o": (0.55 + (i % 5) * 0.09).toFixed(2) }}></div>`)}
+      </div></div>`;
+  }
+  return html`<div class="vrows">${insts.map((it) => html`<div class="vrow" key=${it.ref}>${displayName(it)}</div>`)}</div>`;
+}
+
+// a declared view rendered in place of the default cell (the mockup's AgentBoard)
+function BoardView({ view, node, model, depth, onEnter, onLeave, onChip, onOpen, toggle }) {
   const { inst } = node;
+  const titleC = clauseByKey(view, "title");
+  const badgeC = clauseByKey(view, "badge");
+  const role = sVal(inst, "role");
+  const title = (titleC && sVal(inst, titleC.path)) || displayName(inst);
+  const badge = badgeC && sVal(inst, badgeC.path);
+  const st = badge ? String(badge).toLowerCase() : "";
+  const badgeCls = "badge " + (st.includes("run") ? "running" : st.includes("paus") ? "paused" : st.includes("done") ? "done" : "waiting");
+  const sections = (view.clauses || []).filter((c) => c.kind === "section" || (c.kind === "clause" && c.representation));
+  const cls = "region" + (depth === 0 ? " root" : depth === 1 ? " lvl1" : " lvl2");
+  return html`
+    <div class=${cls} data-region=${node.id}>
+      <div class="board" data-view=${view.name}>
+        <div class="board-head">
+          <div>
+            <div class="board-title">${title}</div>
+            <div class="board-sub">${inst.type}${role ? " · " + role : ""} · view ${view.name}</div>
+          </div>
+          ${badge ? html`<span class=${badgeCls} style=${{ marginLeft: "auto" }}><span class="bd"></span>${String(badge)}</span>` : ""}
+          ${toggle}
+        </div>
+        ${sections.map((c, i) => html`
+          <div class="vsection" key=${i}>
+            <div class="sh">${c.label || c.key}${c.representation ? html`<span class="as">as ${c.representation}</span>` : ""}</div>
+            <${Representation} clause=${c} node=${node} model=${model} targetType=${view.target}
+              onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${onOpen} />
+          </div>`)}
+      </div>
+    </div>`;
+}
+
+// a nested region (recursive): header + owned children + a dense message stack + identity chips.
+// When the instance's type has a declared `view`, a ▤ cell / ▧ board toggle flips to the bespoke board.
+function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen, viewsByType, viewMode, setViewMode }) {
+  const { inst } = node;
+  const view = viewsByType && viewsByType.get(inst.type);
+  const boardOn = !!(view && viewMode[node.id] === "board");
+  const toggle = view ? html`
+    <div class="vtoggle" onClick=${(e) => e.stopPropagation()}>
+      <button class=${boardOn ? "" : "on"} onClick=${(e) => { e.stopPropagation(); setViewMode(node.id, "cell"); }}>▤ cell</button>
+      <button class=${boardOn ? "on" : ""} onClick=${(e) => { e.stopPropagation(); setViewMode(node.id, "board"); }}>▧ board</button>
+    </div>` : "";
+  if (boardOn) return html`<${BoardView} view=${view} node=${node} model=${model} depth=${depth}
+    onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${onOpen} toggle=${toggle} />`;
   const status = sVal(inst, "status");
   const role = sVal(inst, "role");
   const msgKids = node.children.filter((c) => isMsgLike(c.inst));
@@ -770,6 +889,7 @@ function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen }) {
         <span class="region-name">${displayName(inst)}</span>
         ${role ? html`<span class="region-role">${role}</span>` : ""}
         ${status ? html`<span class=${badgeCls}><span class="bd"></span>${String(status)}</span>` : ""}
+        ${toggle}
       </div>
       ${msgKids.length ? html`
         <div class="conv">
@@ -783,7 +903,8 @@ function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen }) {
       ${subKids.length ? html`
         <div class=${"subregions" + (subKids.length > 1 && depth === 0 ? " grid" : "")}>
           ${subKids.map((c) => html`<${Region} key=${c.id} node=${c} model=${model} depth=${depth + 1}
-            onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${onOpen} />`)}
+            onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${onOpen}
+            viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} />`)}
         </div>` : ""}
       ${node.chipIds.length ? html`
         <div class="refs"><span class="rk">references ▸ shared</span>
@@ -796,6 +917,8 @@ function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen }) {
 function NestedView({ onOpenType, onOpenDetail }) {
   const [instances, setInstances] = useState([]);
   const [schema, setSchema] = useState([]);
+  const [views, setViews] = useState([]);          // program-declared view specs (views())
+  const [viewMode, setViewModeState] = useState({});// instance id -> "cell" | "board"
   const [hoverId, setHoverId] = useState(null);
   const [linksOn, setLinksOn] = useState(false);
   const [infraOpen, setInfraOpen] = useState(false);
@@ -806,7 +929,7 @@ function NestedView({ onOpenType, onOpenDetail }) {
   const overlayRef = useRef(null);
 
   usePoll(async () => {
-    const [g, s] = await Promise.all([evalSource("graph()"), evalSource("schema()")]);
+    const [g, s, v] = await Promise.all([evalSource("graph()"), evalSource("schema()"), evalSource("views()")]);
     if (s.value && s.value.nodes) {
       const nl = {};
       for (const n of s.value.nodes) {
@@ -817,7 +940,16 @@ function NestedView({ onOpenType, onOpenDetail }) {
       setLive(nl); setSchema(s.value.nodes);
     }
     if (g.value && g.value.instances) setInstances(g.value.instances);
+    if (v.value && v.value.views) setViews(v.value.views);
   }, 800, []);
+
+  // first declared view per target type — the type's default custom board
+  const viewsByType = useMemo(() => {
+    const m = new Map();
+    for (const v of views) if (!m.has(v.target)) m.set(v.target, v);
+    return m;
+  }, [views]);
+  const setViewMode = useCallback((id, m) => setViewModeState((s) => ({ ...s, [id]: m })), []);
 
   const model = useMemo(() => computeNested(instances, schema), [instances, schema]);
 
@@ -910,7 +1042,8 @@ function NestedView({ onOpenType, onOpenDetail }) {
                     <span class="node-kind">obj</span>${s.type} <span class="dim">×1</span></button>`; })}
               </div>` : ""}
             <${Region} node=${r} model=${model} depth=${0}
-              onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${openDetail} />
+              onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${openDetail}
+              viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} />
           </div>`)}
 
         ${model.infraTypes.length ? html`
