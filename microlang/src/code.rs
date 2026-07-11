@@ -49,6 +49,7 @@ struct EscapeSignal {
 }
 
 /// The interpreter tier.
+#[derive(Clone, Copy)]
 pub struct TreeWalk;
 
 impl<M: ValueModel> CodeSpace<M> for TreeWalk {

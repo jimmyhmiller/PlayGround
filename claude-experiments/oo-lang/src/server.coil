@@ -27,6 +27,7 @@
 (import "thread.coil" :use *)
 (import "atomic.coil" :use *)
 (import "portalclient.coil" :use *)
+(import "trace.coil" :use *)
 
 ; ============================ globals ============================
 (defn srv-program [] (-> (ptr (ptr Program))) (alloc-static (ptr Program)))
@@ -144,6 +145,9 @@
                     (let [s (str-arg e 0)] (if (= (cast i64 s) 0) 0 (do (reflect-fields (load (ev-valbuf)) (load (field s s-name)) (load (field s s-len))) (store! (ev-outcome) 0) 1)))
                   (and (node-name-eq callee c"methods") (= (arg-count e) 1))
                     (let [s (str-arg e 0)] (if (= (cast i64 s) 0) 0 (do (reflect-methods (load (ev-valbuf)) (load (field s s-name)) (load (field s s-len))) (store! (ev-outcome) 0) 1)))
+                  ; F1: trace(<expr>) — compile+run the argument expression with the call recorder ON
+                  (and (node-name-eq callee c"trace") (= (arg-count e) 1))
+                    (do (eval-trace (arg-val (arg-at e 0))) 1)
                   0)))))))))
 ; extract a STRCHUNK payload from a string-literal argument, or null
 (defn str-arg [(call (ptr Node)) (i i64)] (-> (ptr Node))
@@ -151,6 +155,109 @@
     (if (and (= (load (field v kind)) NK_STRING) (= (kid-count v) 1))
       (let [c (kid-at v 0)] (if (= (load (field c kind)) NK_STRCHUNK) c (cast (ptr Node) 0)))
       (if (= (load (field v kind)) NK_STRCHUNK) v (cast (ptr Node) 0)))))
+
+; ============================ F1: trace(<expr>) — function EXECUTION visualization ============================
+; The compute analogue of graph()/instances(): run one expression with the call recorder ON and
+; serialize the resulting CALL TREE. Payload (the eval "value"):
+;   { "type":"Trace",
+;     "value": <serialize-value of the expression's result>,
+;     "stats": { "totalCalls":N, "maxDepth":D, "nodeCount":M, "truncated":bool, "elapsedMs":T,
+;                "perFn":[{"fn":"fib","calls":25}, ...] },
+;     "nodes": [ {"i":0,"parent":-1,"depth":0,"fn":"fib","args":[<val>...],
+;                 "result":<val>,"hasResult":true}, ... ] }   // DFS pre-order; client builds the tree by parent
+; Arg/return values are typed from the callee MethodInfo's source fn node (src-node/src-ctxt); the
+; receiver (self, arg0 of a method call) is rendered as a collapsed entity ref. Ints/Strings/Bools/
+; Floats/enums/entities all render through serialize-value; a callee with no source node (only the
+; synthetic <eval> root, which is never a traced callee) would fall back to an honest raw slot.
+
+; serialize arg i of a trace node, using the callee's signature to type it.
+(defn trace-node-arg [(b (ptr JBuf)) (nd (ptr TraceNode)) (i i64)] (-> i64)
+  (let [mi (load (field nd mi))
+        snode (cast (ptr Node) (load (field mi src-node)))
+        sctxt (cast (ptr Decl) (load (field mi src-ctxt)))
+        v (load (index (field nd args) i))]
+    (if (= (cast i64 snode) 0)
+      (do (jb-cstr b c"{\"type\":\"raw\",\"value\":") (jb-int b v) (jb-byte b \}))
+      (let [np (fn-param-count snode) arity (load (field mi arity)) start-slot (- arity np)]
+        (if (and (> start-slot 0) (= i 0))
+          (serialize-entity b v 1)                              ; the receiver (self)
+          (let [pi (- i start-slot)]
+            (if (or (< pi 0) (>= pi np))
+              (do (jb-cstr b c"{\"type\":\"raw\",\"value\":") (jb-int b v) (jb-byte b \}))
+              (serialize-value b v (resolve-type (param-type-node (fn-param-at snode pi)) sctxt) 1)))))))
+  0)
+
+(defn trace-node-result [(b (ptr JBuf)) (nd (ptr TraceNode))] (-> i64)
+  (if (= (load (field nd has-ret)) 0) (jb-cstr b c"null")
+    (let [mi (load (field nd mi)) snode (cast (ptr Node) (load (field mi src-node)))
+          sctxt (cast (ptr Decl) (load (field mi src-ctxt))) v (load (field nd retval))]
+      (if (load (field mi is-void)) (jb-cstr b c"{\"type\":\"Void\"}")
+        (if (= (cast i64 snode) 0)
+          (do (jb-cstr b c"{\"type\":\"raw\",\"value\":") (jb-int b v) (jb-byte b \}))
+          (serialize-value b v (resolve-type (fn-ret-node snode) sctxt) 1)))))
+  0)
+
+(defn serialize-trace [(b (ptr JBuf)) (resval i64) (vty (ptr Type))] (-> i64)
+  (let [r (trace-rec)]
+    (jb-cstr b c"{\"type\":\"Trace\",\"value\":")
+    (serialize-value b resval vty 0)
+    (jb-cstr b c",\"stats\":{\"totalCalls\":") (jb-int b (load (field r total-calls)))
+    (jb-cstr b c",\"maxDepth\":") (jb-int b (load (field r max-depth)))
+    (jb-cstr b c",\"nodeCount\":") (jb-int b (load (field r node-count)))
+    (jb-cstr b c",\"truncated\":") (jb-bool b (load (field r truncated)))
+    (jb-cstr b c",\"elapsedMs\":") (jb-int b (- (load (field r t-end)) (load (field r t-start))))
+    (jb-cstr b c",\"perFn\":[")
+    (let [n (load (field r fn-count)) (mut i) 0]
+      (loop (if (< (load i) n)
+              (let [mi (cast (ptr MethodInfo) (load (index (load (field r fn-mis)) (load i))))]
+                (if (> (load i) 0) (jb-byte b \,) 0)
+                (jb-cstr b c"{\"fn\":") (jb-str b (load (field mi name)) (load (field mi name-len)))
+                (jb-cstr b c",\"calls\":") (jb-int b (load (index (load (field r fn-counts)) (load i))))
+                (jb-byte b \})
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"]}")
+    (jb-cstr b c",\"nodes\":[")
+    (let [n (load (field r node-count)) (mut i) 0]
+      (loop (if (< (load i) n)
+              (let [nd (index (load (field r nodes)) (load i))]
+                (if (> (load i) 0) (jb-byte b \,) 0)
+                (jb-cstr b c"{\"i\":") (jb-int b (load i))
+                (jb-cstr b c",\"parent\":") (jb-int b (load (field nd parent)))
+                (jb-cstr b c",\"depth\":") (jb-int b (load (field nd depth)))
+                (jb-cstr b c",\"fn\":") (jb-str b (load (field nd name)) (load (field nd name-len)))
+                (jb-cstr b c",\"args\":[")
+                (let [na (load (field nd argc)) (mut k) 0]
+                  (loop (if (< (load k) na)
+                          (do (if (> (load k) 0) (jb-byte b \,) 0) (trace-node-arg b nd (load k)) (store! k (+ (load k) 1)) 0)
+                          (break))))
+                (jb-cstr b c"],\"result\":") (trace-node-result b nd)
+                (jb-cstr b c",\"hasResult\":") (jb-bool b (load (field nd has-ret)))
+                (jb-byte b \})
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"]}"))
+  0)
+
+; the trace() handler: wrap the argument expression in a one-statement block, typecheck + compile it
+; exactly like a normal eval, then run it with the recorder armed and serialize the tree. Any type
+; error is a clean rejection; a runtime error longjmps to eval-core (which always disarms the recorder).
+(defn eval-trace [(argexpr (ptr Node))] (-> i64)
+  (let [st (mk-node NK_EXPRSTMT 0 0) blk (mk-node NK_BLOCK 0 0)]
+    (store! (field st a) argexpr)
+    (add-kid! blk st)
+    (set-cur-file c"<eval>")
+    (let [tbase (err-count)
+          env (env-new (null-ty) (cast (ptr Decl) 0) (ty-void) false)
+          vty (block-value blk env (null-ty) true)]
+      (if (> (err-count) tbase) (ev-fail EK_TYPE c"type error" 0 0)
+        (let [mi (compile-eval-method blk vty)]
+          (trace-enable)
+          (let [resval (vm-eval-invoke mi 0)]
+            (trace-finish)
+            (store! (trace-flag) 0)          ; stop recording before serializing (serialize runs no VM code, but be explicit)
+            (serialize-trace (load (ev-valbuf)) resval vty)
+            (store! (ev-outcome) 0) 0))))))
 
 ; ============================ live code change (Phase 6, M4) ============================
 ; A definition-eval (class / standalone fn / interface) is live redefinition. This runs on
@@ -594,6 +701,8 @@
       (store! (ev-outcome) 1))     ; longjmp'd: EvalError already recorded by eval-panic
     (diag-capture-end))
   (eval-set-active 0)
+  (trace-disable)   ; F1: always disarm the recorder — even if a traced expr longjmp'd past its handler
+
   (if (= (load (ev-outcome)) 0)
     (do (jb-cstr b c"\"value\":") (jb-bytes b (load (field (load (ev-valbuf)) data)) (load (field (load (ev-valbuf)) len))))
     (write-error-inner b))

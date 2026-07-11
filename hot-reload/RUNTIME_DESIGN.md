@@ -66,6 +66,27 @@ copying, native deoptimization, or replay of an entire callback.
 
 ## Implementation status
 
+### A Rust-flavored frontend
+
+Programs are no longer hand-built IR: `crates/livetype-core/src/frontend/`
+(lexer → parser → lower) compiles a Rust-shaped surface syntax to the IR.
+`struct Name { field: Type = default? }` becomes a `Schema`; `fn name(p: T, …)
+-> R { … }` becomes a `Function`. The body language has `let`, assignment,
+`if`/`else`, `while`, `return`, `emit`, struct literals, field access `a.b.c`,
+calls, and `+ - < >`. Types are `i64`, `bool`, `()`, and `&Struct` (all struct
+values are references). Lowering gives locals fixed registers (this IR has no
+phi), sub-expressions fresh temporaries, and emits control flow with symbolic
+labels patched to program counters; structs and functions install in
+dependency order, so a bad type or a recursive call is a clean *compile* error.
+`compile(src) -> Compiled` returns a ready-to-run `Runtime`. Two IR ops were
+added to make the language real: `Copy` (bind/merge in a phi-free IR) and
+`AddI64`. `tests/frontend.rs` covers structs/fields/arithmetic, loops,
+`if`/`else`, nested structs by reference, and the compile-error cases;
+`tests/frontend_jit.rs` runs a compiled program on both executors and gets the
+same answer.
+
+### Executors
+
 Both executors exist and are proven equivalent:
 
 - **Interpreter** (`src/runtime.rs`) — the reference executor, one instruction

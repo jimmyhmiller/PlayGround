@@ -205,7 +205,37 @@ fn run_jit() -> (ActorStatus, Vec<Value>) {
     (actor.status.clone(), rt.output.clone())
 }
 
+/// Compile a program written in the Rust-flavored surface syntax and run it.
+fn run_frontend() {
+    println!("── frontend (source → IR → run) ──");
+    let source = r#"
+        struct Account {
+            balance: i64,
+            fee: i64 = 0,
+        }
+        fn charge(a: &Account, amt: i64) -> i64 {
+            let b = a.balance;
+            return b - amt;
+        }
+        fn main() -> i64 {
+            let acct = Account { balance: 100 };
+            emit(acct.balance);
+            return charge(acct, 5);
+        }
+    "#;
+    let mut compiled = livetype_core::compile(source).expect("compile");
+    let main_id = compiled.functions["main"];
+    let actor = compiled.runtime.spawn(main_id, vec![]).unwrap();
+    compiled.runtime.run();
+    println!(
+        "  result: {:?}; effects: {:?}",
+        compiled.runtime.actors[&actor].status, compiled.runtime.output
+    );
+}
+
 fn main() {
+    run_frontend();
+    println!();
     let (interp_status, interp_out) = run_interpreter();
     println!();
     let (jit_status, jit_out) = run_jit();

@@ -652,6 +652,7 @@ function TopBar({ onGlobalSearch, onToggleTranscript, mode, setMode, onBack, pro
       <div class="viewtoggle">
         <button class=${"vt-btn" + (mode === "map" ? " active" : "")} onClick=${() => setMode("map")}>Map</button>
         <button class=${"vt-btn" + (mode === "browse" ? " active" : "")} onClick=${() => setMode("browse")}>List</button>
+        <button class=${"vt-btn" + (mode === "functions" ? " active" : "")} onClick=${() => setMode("functions")}>Functions</button>
       </div>
       <input id="global-search" type="text" spellcheck="false" autocomplete="off"
              placeholder="jump to Agent#7 or search field values…"
@@ -1595,6 +1596,144 @@ function NestedView({ onInspect, selectedId }) {
 }
 
 // ===================== app root =====================
+// ===================== Functions / Trace mode (Phase F1) =====================
+// The COMPUTATION counterpart to the Map's DATA view. You type an expression; it evals
+// `trace(<expr>)` (the server runs it with the call recorder on) and renders the returned
+// call tree as a bespoke, collapsible recursion tree — each node `fn(args) = result` — plus a
+// stats strip (total calls, per-function counts, max depth, truncation). A trace is a one-shot
+// run (no polling): re-tracing on submit. The flat node list is assembled into a tree by parent.
+function FunctionsView() {
+  const [expr, setExpr] = useState("fib(6)");
+  const [submitted, setSubmitted] = useState("fib(6)");
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => new Set());
+
+  const runTrace = useCallback(async (src) => {
+    src = (src || "").trim();
+    if (!src) return;
+    setBusy(true); setError(null);
+    const r = await evalSource(`trace(${src})`);
+    setBusy(false);
+    if (r.error || !r.value || r.value.type !== "Trace") {
+      setError(r.error || { kind: "BadResult", message: "not a trace result" });
+      setData(null); return;
+    }
+    const v = r.value;
+    // large trees: start collapsed below depth 1 so the browser stays responsive; small ones expand fully.
+    const init = new Set();
+    if (v.nodes.length > 300) for (const n of v.nodes) if (n.depth >= 1) init.add(n.i);
+    setCollapsed(init);
+    setData(v);
+  }, []);
+
+  useEffect(() => { runTrace(submitted); }, [submitted, runTrace]);
+
+  const kids = useMemo(() => {
+    const m = new Map();
+    if (data && data.nodes) for (const n of data.nodes) {
+      if (!m.has(n.parent)) m.set(n.parent, []);
+      m.get(n.parent).push(n);
+    }
+    return m;
+  }, [data]);
+
+  const toggle = useCallback((i) => setCollapsed((s) => {
+    const n = new Set(s); if (n.has(i)) n.delete(i); else n.add(i); return n;
+  }), []);
+  const expandAll = useCallback(() => setCollapsed(new Set()), []);
+  const collapseAll = useCallback(() => setCollapsed(() => {
+    const n = new Set(); if (data && data.nodes) for (const x of data.nodes) if (kids.has(x.i)) n.add(x.i); return n;
+  }), [data, kids]);
+
+  const roots = kids.get(-1) || [];
+  const submit = () => setSubmitted(expr.trim());
+
+  return html`
+    <div class="trace-panel">
+      <div class="trace-controls">
+        <span class="trace-prompt">trace(</span>
+        <input class="trace-input" type="text" spellcheck="false" autocomplete="off"
+               placeholder="fib(6)" value=${expr}
+               onInput=${(e) => setExpr(e.target.value)}
+               onKeyDown=${(e) => { if (e.key === "Enter") submit(); }} />
+        <span class="trace-prompt">)</span>
+        <button class="trace-run" onClick=${submit} disabled=${busy}>${busy ? "running…" : "trace"}</button>
+        ${data ? html`<span class="trace-spacer"></span>
+          <button class="ghost-btn tsm" onClick=${expandAll}>expand all</button>
+          <button class="ghost-btn tsm" onClick=${collapseAll}>collapse all</button>` : ""}
+      </div>
+      ${["fib(6)", "fact(5)", "gcd(48, 36)", "ack(2, 3)"].map((s) => html`
+        <button key=${s} class=${"trace-chip" + (s === submitted ? " active" : "")}
+          onClick=${() => { setExpr(s); setSubmitted(s); }}>${s}</button>`)}
+      ${error ? html`<div class="trace-error"><span class="te-kind">${error.kind}</span> ${error.message}</div>` : ""}
+      ${data ? html`
+        <${TraceStats} stats=${data.stats} value=${data.value} expr=${submitted} />
+        <div class="trace-tree">
+          ${roots.length ? roots.map((n) => html`<${TraceNodeRow} key=${n.i} node=${n} kids=${kids} collapsed=${collapsed} toggle=${toggle} />`)
+            : html`<div class="trace-empty">no function calls — <code>${submitted}</code> evaluated without calling any user function.</div>`}
+        </div>` : (!error ? html`<div class="trace-empty">tracing…</div>` : "")}
+    </div>`;
+}
+
+function TraceStats({ stats, value, expr }) {
+  const perFn = (stats.perFn || []).slice().sort((a, b) => b.calls - a.calls);
+  const maxCalls = perFn.length ? perFn[0].calls : 1;
+  return html`
+    <div class="trace-stats">
+      <div class="ts-headline">
+        <code class="ts-expr">${expr}</code>
+        <span class="ts-eq">=</span>
+        <span class="ts-result"><${ValueView} v=${value} /></span>
+      </div>
+      <div class="ts-strip">
+        <div class="ts-tile"><div class="ts-num">${stats.totalCalls}</div><div class="ts-lbl">calls</div></div>
+        <div class="ts-tile"><div class="ts-num">${stats.maxDepth}</div><div class="ts-lbl">max depth</div></div>
+        <div class="ts-tile"><div class="ts-num">${perFn.length}</div><div class="ts-lbl">functions</div></div>
+        ${stats.truncated ? html`<div class="ts-tile ts-warn"><div class="ts-num">${stats.nodeCount}</div><div class="ts-lbl">shown (truncated)</div></div>` : ""}
+      </div>
+      <div class="ts-perfn">
+        ${perFn.map((f) => html`
+          <div class="ts-fnrow" key=${f.fn}>
+            <span class="ts-fnname">${f.fn}</span>
+            <span class="ts-fnbar"><span class="ts-fnfill" style=${{ width: Math.max(4, (f.calls / maxCalls) * 100) + "%" }}></span></span>
+            <span class="ts-fncount">×${f.calls}</span>
+          </div>`)}
+      </div>
+    </div>`;
+}
+
+function TraceNodeRow({ node, kids, collapsed, toggle }) {
+  const children = kids.get(node.i) || [];
+  const hasKids = children.length > 0;
+  const isCollapsed = collapsed.has(node.i);
+  return html`
+    <div class="tnode">
+      <div class=${"tnode-row" + (hasKids ? " has-kids" : "")} onClick=${() => hasKids && toggle(node.i)}>
+        <span class="tnode-tw">${hasKids ? (isCollapsed ? "▶" : "▼") : ""}</span>
+        <span class="tnode-fn">${node.fn}</span>
+        <span class="tnode-paren">(</span>
+        ${(node.args || []).map((a, i) => html`<${React.Fragment} key=${i}>${i ? html`<span class="tnode-comma">, </span>` : ""}<${ValueView} v=${a} inline=${false} /><//>`)}
+        <span class="tnode-paren">)</span>
+        <span class="tnode-eq"> = </span>
+        <span class="tnode-res">${node.hasResult ? html`<${ValueView} v=${node.result} inline=${false} />` : html`<span class="v-void">…</span>`}</span>
+        ${hasKids && isCollapsed ? html`<span class="tnode-badge">${subtreeCount(node, kids)}</span>` : ""}
+      </div>
+      ${hasKids && !isCollapsed ? html`<div class="tnode-kids">
+        ${children.map((c) => html`<${TraceNodeRow} key=${c.i} node=${c} kids=${kids} collapsed=${collapsed} toggle=${toggle} />`)}
+      </div>` : ""}
+    </div>`;
+}
+
+// total descendants of a node (shown on a collapsed node so mass stays legible)
+function subtreeCount(node, kids) {
+  let total = 0;
+  const stack = [...(kids.get(node.i) || [])];
+  while (stack.length) { const n = stack.pop(); total++; const c = kids.get(n.i); if (c) for (const x of c) stack.push(x); }
+  return total;
+}
+
 function App({ onBack, programName } = {}) {
   const [schema, setSchema] = useState([]);
   const [trend, setTrend] = useState({});
@@ -1726,6 +1865,8 @@ function App({ onBack, programName } = {}) {
             ${inspect ? html`<${InspectorPanel} stack=${inspect.stack} schema=${schema} onEditSource=${openCodePanel}
                 onNavRef=${inspectPush} onCrumb=${inspectGoto} onBack=${inspectBack} onClose=${inspectClose} nav=${nav} />` : ""}
           </div>`
+        : mode === "functions"
+        ? html`<div id="layout"><main id="content"><${FunctionsView} /></main></div>`
         : html`<div id="layout">
             <${TypeRail} schema=${schema} trend=${trend} route=${route} ifaceOpen=${ifaceOpen} setIfaceOpen=${setIfaceOpen} />
             <main id="content">

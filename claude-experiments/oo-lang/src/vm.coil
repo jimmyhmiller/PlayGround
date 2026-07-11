@@ -26,6 +26,7 @@
 (import "thread.coil" :use *)
 (import "atomic.coil" :use *)
 (import "http.coil" :use *)
+(import "trace.coil" :use *)
 
 (const DK_OBJECT_KIND 3)
 (const STACK_MAX 65536)
@@ -418,6 +419,7 @@
               (let [idx (read-u16 (load fr)) argc (read-byte (load fr))
                     m (load (index (load (field (load (field (vm) program)) methods)) idx))]
                 (push-frame vt m argc)
+                (if (= (load (trace-flag)) 1) (trace-enter m argc (index (field vt stack) (load (field (index (field vt frames) (- (load (field vt frame-count)) 1)) base)))) 0)
                 (store! fr (index (field vt frames) (- (load (field vt frame-count)) 1))) 0)
             OP_CALL_VIRTUAL
               (let [iface (read-u16 (load fr)) slot (read-byte (load fr)) argc (read-byte (load fr))
@@ -428,6 +430,7 @@
                     midx (load (index (load (field it slots)) slot))
                     m (load (index (load (field (load (field (vm) program)) methods)) midx))]
                 (push-frame vt m argc)
+                (if (= (load (trace-flag)) 1) (trace-enter m argc (index (field vt stack) (load (field (index (field vt frames) (- (load (field vt frame-count)) 1)) base)))) 0)
                 (store! fr (index (field vt frames) (- (load (field vt frame-count)) 1))) 0)
             OP_CALL_BUILTIN (do (do-builtin vt (read-byte (load fr))) 0)
             OP_THREAD_SPAWN
@@ -436,6 +439,7 @@
             OP_THREAD_JOIN (let [h (vpop vt)] (vm-join vt h) (vpush vt 0))
             OP_RETURN
               (let [res (vpop vt) base (load (field (load fr) base))]
+                (if (= (load (trace-flag)) 1) (trace-exit res) 0)
                 (store! (field vt frame-count) (- (load (field vt frame-count)) 1))
                 (store! (field vt stack-top) base)
                 (if (= (load (field vt frame-count)) stop-fc)

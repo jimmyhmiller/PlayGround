@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, HashMap};
 
 /// A compiled program: a runtime with every struct and function installed, plus
 /// the name → id maps so callers can spawn `main` (or any function).
+#[derive(Debug)]
 pub struct Compiled {
     pub runtime: Runtime,
     pub functions: HashMap<String, DefId>,

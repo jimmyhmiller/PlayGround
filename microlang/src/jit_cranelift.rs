@@ -78,7 +78,7 @@ use crate::value::{frame_get, frame_set, Frame, Locals, Obj, Sym, Val};
 // ─────────────────────────────────────────────────────────────────────────
 // The runtime-interaction ABI.
 //
-// A compiled body is `extern "C" fn(*mut JitCtx<M>) -> u64`. Everything it
+// A compiled body is `extern "C-unwind" fn(*mut JitCtx<M>) -> u64`. Everything it
 // cannot do with a bare arithmetic/branch instruction it does by calling one of
 // the shims below with that context pointer. This mirrors how the tree-walker
 // and bytecode VM call back into `Runtime` — the difference is only that here
@@ -192,12 +192,12 @@ struct ClosureTemplate {
     body: Arc<Ir>,
 }
 
-extern "C" fn shim_load_local<M: ValueModel>(ctx: *mut JitCtx<M>, up: u32, idx: u32) -> u64 {
+extern "C-unwind" fn shim_load_local<M: ValueModel>(ctx: *mut JitCtx<M>, up: u32, idx: u32) -> u64 {
     let ctx = unsafe { &*ctx };
     frame_get(&ctx.cur.borrow(), up as u16, idx as u16)
 }
 
-extern "C" fn shim_set_local<M: ValueModel>(
+extern "C-unwind" fn shim_set_local<M: ValueModel>(
     ctx: *mut JitCtx<M>,
     up: u32,
     idx: u32,
@@ -208,7 +208,7 @@ extern "C" fn shim_set_local<M: ValueModel>(
     val // `set!` evaluates to the assigned value (matches the tree-walker)
 }
 
-extern "C" fn shim_set_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32, val: u64) -> u64 {
+extern "C-unwind" fn shim_set_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32, val: u64) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
     if !rt.set_global_val(sym as Sym, val) {
@@ -219,7 +219,7 @@ extern "C" fn shim_set_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32, val:
 
 /// Enter a `let`: push a fresh child frame with `nslots` nil slots and make it
 /// the current scope. Its inits fill the slots sequentially via `shim_let_set`.
-extern "C" fn shim_let_enter<M: ValueModel>(ctx: *mut JitCtx<M>, nslots: u32) -> u64 {
+extern "C-unwind" fn shim_let_enter<M: ValueModel>(ctx: *mut JitCtx<M>, nslots: u32) -> u64 {
     let ctx = unsafe { &*ctx };
     let parent = ctx.cur.borrow().clone();
     let nil = M::R::enc_nil();
@@ -232,14 +232,14 @@ extern "C" fn shim_let_enter<M: ValueModel>(ctx: *mut JitCtx<M>, nslots: u32) ->
 }
 
 /// Set slot `idx` of the current `let` frame during its sequential init.
-extern "C" fn shim_let_set<M: ValueModel>(ctx: *mut JitCtx<M>, idx: u32, val: u64) -> u64 {
+extern "C-unwind" fn shim_let_set<M: ValueModel>(ctx: *mut JitCtx<M>, idx: u32, val: u64) -> u64 {
     let ctx = unsafe { &*ctx };
     ctx.cur.borrow().as_ref().unwrap().slots[idx as usize].store(val, std::sync::atomic::Ordering::Relaxed);
     val
 }
 
 /// Leave a `let`: restore the enclosing scope.
-extern "C" fn shim_let_exit<M: ValueModel>(ctx: *mut JitCtx<M>, _unused: u32) -> u64 {
+extern "C-unwind" fn shim_let_exit<M: ValueModel>(ctx: *mut JitCtx<M>, _unused: u32) -> u64 {
     let ctx = unsafe { &*ctx };
     let restored = ctx.saved.borrow_mut().pop().expect("let_exit without enter");
     ctx.cur_slots.set(slots_ptr(&restored));
@@ -247,7 +247,7 @@ extern "C" fn shim_let_exit<M: ValueModel>(ctx: *mut JitCtx<M>, _unused: u32) ->
     0
 }
 
-extern "C" fn shim_load_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32) -> u64 {
+extern "C-unwind" fn shim_load_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &*(*ctx.rc).rt };
     match rt.global(sym as Sym) {
@@ -256,7 +256,7 @@ extern "C" fn shim_load_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32) -> 
     }
 }
 
-extern "C" fn shim_def_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32, val: u64) -> u64 {
+extern "C-unwind" fn shim_def_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32, val: u64) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
     rt.define_global(sym as Sym, val);
@@ -264,7 +264,7 @@ extern "C" fn shim_def_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32, val:
     rt.encode(Val::Sym(sym as Sym))
 }
 
-extern "C" fn shim_make_closure<M: ValueModel>(ctx: *mut JitCtx<M>, template_id: u32) -> u64 {
+extern "C-unwind" fn shim_make_closure<M: ValueModel>(ctx: *mut JitCtx<M>, template_id: u32) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
     let templates = unsafe { &*ctx.templates };
@@ -285,7 +285,7 @@ extern "C" fn shim_make_closure<M: ValueModel>(ctx: *mut JitCtx<M>, template_id:
 /// through `top` preserves TCO (bounded stack) and composition. The common self
 /// tail case never reaches this (it loops in place); this only handles a fast body
 /// tail-calling a DIFFERENT function.
-extern "C" fn shim_finish_tail<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
+extern "C-unwind" fn shim_finish_tail<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
     let top = unsafe { (*ctx.rc).top };
@@ -295,7 +295,7 @@ extern "C" fn shim_finish_tail<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
     top.invoke(top, rt, callee, &args)
 }
 
-extern "C" fn shim_call<M: ValueModel>(
+extern "C-unwind" fn shim_call<M: ValueModel>(
     ctx: *mut JitCtx<M>,
     callee: u64,
     args: *const u64,
@@ -317,7 +317,7 @@ extern "C" fn shim_call<M: ValueModel>(
 /// Record a tail call for the trampoline instead of recursing. Returns a dummy
 /// value that flows to the function's `return`; the trampoline ignores it and
 /// reads the stashed callee/args.
-extern "C" fn shim_tail_call<M: ValueModel>(
+extern "C-unwind" fn shim_tail_call<M: ValueModel>(
     ctx: *mut JitCtx<M>,
     callee: u64,
     args: *const u64,
@@ -334,7 +334,7 @@ extern "C" fn shim_tail_call<M: ValueModel>(
     0
 }
 
-extern "C" fn shim_prim<M: ValueModel>(
+extern "C-unwind" fn shim_prim<M: ValueModel>(
     ctx: *mut JitCtx<M>,
     prim_tag: u32,
     args: *const u64,
@@ -351,7 +351,7 @@ extern "C" fn shim_prim<M: ValueModel>(
 }
 
 /// `(.-field obj)` — the inline-cached field read, same as TreeWalk's `FieldGet`.
-extern "C" fn shim_field_get<M: ValueModel>(
+extern "C-unwind" fn shim_field_get<M: ValueModel>(
     ctx: *mut JitCtx<M>,
     site: u32,
     field: u32,
@@ -364,7 +364,7 @@ extern "C" fn shim_field_get<M: ValueModel>(
 
 /// A protocol/method dispatch: resolve the impl for the receiver's type (with the
 /// `Object` default) and invoke it through `top` — identical to TreeWalk.
-extern "C" fn shim_dispatch<M: ValueModel>(
+extern "C-unwind" fn shim_dispatch<M: ValueModel>(
     ctx: *mut JitCtx<M>,
     site: u32,
     method: u32,
@@ -384,7 +384,7 @@ extern "C" fn shim_dispatch<M: ValueModel>(
 }
 
 /// Register a `deftype`/protocol method impl (type-indexed dispatch table).
-extern "C" fn shim_def_method<M: ValueModel>(
+extern "C-unwind" fn shim_def_method<M: ValueModel>(
     ctx: *mut JitCtx<M>,
     name: u32,
     ty: u32,
@@ -398,7 +398,7 @@ extern "C" fn shim_def_method<M: ValueModel>(
 
 /// `(apply f a … lst)` — flatten the leading args with the final list and invoke
 /// `f` through `top`, exactly as the TreeWalk `Prim::Apply` arm does.
-extern "C" fn shim_apply<M: ValueModel>(
+extern "C-unwind" fn shim_apply<M: ValueModel>(
     ctx: *mut JitCtx<M>,
     args: *const u64,
     argc: u32,
@@ -415,6 +415,67 @@ extern "C" fn shim_apply<M: ValueModel>(
         flat.extend(rt.list_to_vec(last));
     }
     top.invoke(top, rt, f, &flat)
+}
+
+/// `(try body (catch e handler) (finally f))` — the body/catch/finally Ir nodes
+/// are passed by raw pointer (they outlive the compiled code) and evaluated via
+/// `top`, so this mirrors TreeWalk's `Ir::Try` EXACTLY: catch_unwind the body, on
+/// a `Thrown` bind the value in a fresh one-slot frame and run the handler, run
+/// finally on every path, re-raise anything else. Requires unwind info on the
+/// emitted frames so the panic can cross them (enabled in the ISA flags).
+extern "C-unwind" fn shim_try<M: ValueModel>(
+    ctx: *mut JitCtx<M>,
+    body: *const Ir,
+    catch: *const Ir,
+    finally: *const Ir,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let locals = ctx.cur.borrow().clone();
+    let body = unsafe { &*body };
+
+    // Run the protected region on the TreeWalk tier: a `throw` is a Rust panic, and
+    // the `catch_unwind` below is a pure-Rust frame wrapping pure-Rust eval, so the
+    // unwind never has to cross a Cranelift frame (cranelift-jit doesn't register
+    // its unwind tables with the OS unwinder). Everything OUTSIDE `try` stays
+    // JIT-native; only the dynamic extent of the try body is interpreted.
+    let tw = crate::code::TreeWalk;
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let res = {
+        let rt2 = unsafe { &mut *(*ctx.rc).rt };
+        let locals2 = locals.clone();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            tw.eval_ir(&tw, rt2, body, &locals2)
+        }))
+    };
+    std::panic::set_hook(prev);
+    let outcome: Result<u64, Box<dyn std::any::Any + Send>> = match res {
+        Ok(v) => Ok(v),
+        Err(payload) => match payload.downcast::<crate::runtime::Thrown>() {
+            Ok(t) => {
+                if catch.is_null() {
+                    Err(Box::new(*t) as Box<dyn std::any::Any + Send>)
+                } else {
+                    let cbody = unsafe { &*catch };
+                    let frame: Locals = Some(std::sync::Arc::new(Frame {
+                        slots: vec![std::sync::atomic::AtomicU64::new(t.value)],
+                        parent: locals.clone(),
+                    }));
+                    Ok(tw.eval_ir(&tw, rt, cbody, &frame))
+                }
+            }
+            Err(other) => Err(other),
+        },
+    };
+    if !finally.is_null() {
+        let fbody = unsafe { &*finally };
+        tw.eval_ir(&tw, rt, fbody, &locals);
+    }
+    match outcome {
+        Ok(v) => v,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 // A stable integer tag so the emitted code can name one. (The `Prim`
@@ -562,6 +623,7 @@ struct Shims {
     dispatch: FuncId,
     def_method: FuncId,
     apply: FuncId,
+    try_: FuncId,
 }
 
 #[derive(Clone, Copy)]
@@ -583,6 +645,7 @@ struct ShimRefs {
     dispatch: cranelift_codegen::ir::FuncRef,
     def_method: cranelift_codegen::ir::FuncRef,
     apply: cranelift_codegen::ir::FuncRef,
+    try_: cranelift_codegen::ir::FuncRef,
 }
 
 /// A finished, runnable body: the host code pointer plus the closure templates
@@ -814,6 +877,9 @@ impl<M: ModelArithJit> JitCranelift<M> {
         // Bodies compile once and run many times, so optimize the emitted code
         // (register allocation, redundancy elimination) — worth the compile cost.
         flags.set("opt_level", "speed").unwrap();
+        // Emit unwind info so a `throw` (a Rust panic) can unwind THROUGH JIT
+        // frames back to the `catch_unwind` in `shim_try` — try/catch on native code.
+        flags.set("unwind_info", "true").unwrap();
         let isa = cranelift_native::builder()
             .expect("host machine is not supported by Cranelift")
             .finish(settings::Flags::new(flags))
@@ -823,23 +889,24 @@ impl<M: ModelArithJit> JitCranelift<M> {
         // Register the monomorphised shim addresses under stable names. Casting
         // each `extern "C"` fn pointer to a raw address is what lets the JIT link
         // the emitted `call` to concrete host code.
-        let ll: extern "C" fn(*mut JitCtx<M>, u32, u32) -> u64 = shim_load_local::<M>;
-        let lg: extern "C" fn(*mut JitCtx<M>, u32) -> u64 = shim_load_global::<M>;
-        let dg: extern "C" fn(*mut JitCtx<M>, u32, u64) -> u64 = shim_def_global::<M>;
-        let mk: extern "C" fn(*mut JitCtx<M>, u32) -> u64 = shim_make_closure::<M>;
-        let ca: extern "C" fn(*mut JitCtx<M>, u64, *const u64, u32) -> u64 = shim_call::<M>;
-        let tc: extern "C" fn(*mut JitCtx<M>, u64, *const u64, u32) -> u64 = shim_tail_call::<M>;
-        let ft: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_finish_tail::<M>;
-        let pr: extern "C" fn(*mut JitCtx<M>, u32, *const u64, u32) -> u64 = shim_prim::<M>;
-        let sl: extern "C" fn(*mut JitCtx<M>, u32, u32, u64) -> u64 = shim_set_local::<M>;
-        let sg: extern "C" fn(*mut JitCtx<M>, u32, u64) -> u64 = shim_set_global::<M>;
-        let le: extern "C" fn(*mut JitCtx<M>, u32) -> u64 = shim_let_enter::<M>;
-        let ls: extern "C" fn(*mut JitCtx<M>, u32, u64) -> u64 = shim_let_set::<M>;
-        let lx: extern "C" fn(*mut JitCtx<M>, u32) -> u64 = shim_let_exit::<M>;
-        let fget: extern "C" fn(*mut JitCtx<M>, u32, u32, u64) -> u64 = shim_field_get::<M>;
-        let disp: extern "C" fn(*mut JitCtx<M>, u32, u32, *const u64, u32) -> u64 = shim_dispatch::<M>;
-        let dmeth: extern "C" fn(*mut JitCtx<M>, u32, u32, u64) -> u64 = shim_def_method::<M>;
-        let apl: extern "C" fn(*mut JitCtx<M>, *const u64, u32) -> u64 = shim_apply::<M>;
+        let ll: extern "C-unwind" fn(*mut JitCtx<M>, u32, u32) -> u64 = shim_load_local::<M>;
+        let lg: extern "C-unwind" fn(*mut JitCtx<M>, u32) -> u64 = shim_load_global::<M>;
+        let dg: extern "C-unwind" fn(*mut JitCtx<M>, u32, u64) -> u64 = shim_def_global::<M>;
+        let mk: extern "C-unwind" fn(*mut JitCtx<M>, u32) -> u64 = shim_make_closure::<M>;
+        let ca: extern "C-unwind" fn(*mut JitCtx<M>, u64, *const u64, u32) -> u64 = shim_call::<M>;
+        let tc: extern "C-unwind" fn(*mut JitCtx<M>, u64, *const u64, u32) -> u64 = shim_tail_call::<M>;
+        let ft: extern "C-unwind" fn(*mut JitCtx<M>) -> u64 = shim_finish_tail::<M>;
+        let pr: extern "C-unwind" fn(*mut JitCtx<M>, u32, *const u64, u32) -> u64 = shim_prim::<M>;
+        let sl: extern "C-unwind" fn(*mut JitCtx<M>, u32, u32, u64) -> u64 = shim_set_local::<M>;
+        let sg: extern "C-unwind" fn(*mut JitCtx<M>, u32, u64) -> u64 = shim_set_global::<M>;
+        let le: extern "C-unwind" fn(*mut JitCtx<M>, u32) -> u64 = shim_let_enter::<M>;
+        let ls: extern "C-unwind" fn(*mut JitCtx<M>, u32, u64) -> u64 = shim_let_set::<M>;
+        let lx: extern "C-unwind" fn(*mut JitCtx<M>, u32) -> u64 = shim_let_exit::<M>;
+        let fget: extern "C-unwind" fn(*mut JitCtx<M>, u32, u32, u64) -> u64 = shim_field_get::<M>;
+        let disp: extern "C-unwind" fn(*mut JitCtx<M>, u32, u32, *const u64, u32) -> u64 = shim_dispatch::<M>;
+        let dmeth: extern "C-unwind" fn(*mut JitCtx<M>, u32, u32, u64) -> u64 = shim_def_method::<M>;
+        let apl: extern "C-unwind" fn(*mut JitCtx<M>, *const u64, u32) -> u64 = shim_apply::<M>;
+        let tryf: extern "C-unwind" fn(*mut JitCtx<M>, *const Ir, *const Ir, *const Ir) -> u64 = shim_try::<M>;
         builder.symbol("ml_load_local", ll as *const u8);
         builder.symbol("ml_load_global", lg as *const u8);
         builder.symbol("ml_def_global", dg as *const u8);
@@ -857,6 +924,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         builder.symbol("ml_dispatch", disp as *const u8);
         builder.symbol("ml_def_method", dmeth as *const u8);
         builder.symbol("ml_apply", apl as *const u8);
+        builder.symbol("ml_try", tryf as *const u8);
 
         let mut module = JITModule::new(builder);
 
@@ -887,6 +955,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let s_dispatch = sig(&[ptr, i32t, i32t, ptr, i32t]);
         let s_def_method = sig(&[ptr, i32t, i32t, I64]);
         let s_apply = sig(&[ptr, ptr, i32t]);
+        let s_try = sig(&[ptr, ptr, ptr, ptr]);
 
         let decl = |module: &mut JITModule, name: &str, sig: &cranelift_codegen::ir::Signature| {
             module
@@ -911,6 +980,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             dispatch: decl(&mut module, "ml_dispatch", &s_dispatch),
             def_method: decl(&mut module, "ml_def_method", &s_def_method),
             apply: decl(&mut module, "ml_apply", &s_apply),
+            try_: decl(&mut module, "ml_try", &s_try),
         };
 
         JitCranelift {
@@ -1085,7 +1155,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         // The top of a native call tree is its own run context; children copy this
         // pointer and read the shared fields through it.
         ctx.rc = &ctx as *const JitCtx<M>;
-        let f: extern "C" fn(*mut JitCtx<M>) -> u64 =
+        let f: extern "C-unwind" fn(*mut JitCtx<M>) -> u64 =
             unsafe { std::mem::transmute::<*const u8, _>(compiled.code) };
         let ret = f(&mut ctx as *mut JitCtx<M>);
         if ctx.tail_pending.get() {
@@ -1229,6 +1299,24 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
     }
 
     fn invoke(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, callee: u64, args: &[u64]) -> u64 {
+        // Callable-object hook (keywords / maps / vectors / sets / multimethods): a
+        // non-closure record with a registered apply handler routes to
+        // `(handler object args…)`, exactly like the TreeWalk `invoke`.
+        let routed;
+        let (callee, args) = match rt.decode(callee) {
+            Val::Ref(id)
+                if matches!(&rt.heap()[id as usize], Obj::Record { .. })
+                    && rt.apply_handler().is_some() =>
+            {
+                let h = rt.apply_handler().unwrap();
+                let mut v = Vec::with_capacity(args.len() + 1);
+                v.push(callee);
+                v.extend_from_slice(args);
+                routed = v;
+                (h, routed.as_slice())
+            }
+            _ => (callee, args),
+        };
         // Resolve through the monomorphic inline cache (decode + heap + compiled +
         // env all skipped on a repeat callee).
         let (nparams, variadic, compiled, env) = self.resolve_call(rt, callee);
@@ -1292,6 +1380,7 @@ fn build_body<M: ModelArithJit>(
         dispatch: module.declare_func_in_func(shims.dispatch, fb.func),
         def_method: module.declare_func_in_func(shims.def_method, fb.func),
         apply: module.declare_func_in_func(shims.apply, fb.func),
+        try_: module.declare_func_in_func(shims.try_, fb.func),
     };
 
     // A signature matching every compiled body — `fn(*mut JitCtx) -> u64` — for
@@ -1871,7 +1960,19 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let ctx = self.ctx_val;
                 self.call_shim(self.refs.def_method, &[ctx, namev, tyv, impv])
             }
-            Ir::Try { .. } => panic!("JIT tier: try/catch not supported; run on the tree-walker"),
+            // try/catch/finally: pass the body/catch/finally Ir by pointer (they
+            // outlive the compiled code) and let the shim run them via `top` under
+            // a catch_unwind — so the whole construct is one shim call.
+            Ir::Try { body, catch, finally } => {
+                let bp = (&**body as *const Ir) as i64;
+                let cp = catch.as_deref().map_or(std::ptr::null::<Ir>(), |c| c as *const Ir) as i64;
+                let fp = finally.as_deref().map_or(std::ptr::null::<Ir>(), |c| c as *const Ir) as i64;
+                let bpv = self.fb.ins().iconst(I64, bp);
+                let cpv = self.fb.ins().iconst(I64, cp);
+                let fpv = self.fb.ins().iconst(I64, fp);
+                let ctx = self.ctx_val;
+                self.call_shim(self.refs.try_, &[ctx, bpv, cpv, fpv])
+            }
         }
     }
 
@@ -2099,8 +2200,9 @@ pub fn jit_can_compile(ir: &Ir) -> bool {
         Ir::Dispatch { args, .. } => args.iter().all(jit_can_compile),
         Ir::DefMethod { imp, .. } => jit_can_compile(imp),
         Ir::FieldGet { obj, .. } => jit_can_compile(obj),
-        // try/catch unwinds the native stack; handled below by lowering to a shim.
-        Ir::Try { .. } => false,
+        // try/catch is a shim call; the body/handlers run via `top`, so their
+        // compilability is decided when the shim evaluates them (not here).
+        Ir::Try { .. } => true,
         // A `Lambda` only makes a closure here; its body's compilability is
         // decided when that closure is invoked. So do NOT descend.
         Ir::Lambda { .. } => true,

@@ -1,0 +1,41 @@
+// functions.scry — the F1 "functions speak to their own visualization" demo. Where the other
+// examples are about DATA (live entity instances the Map browses), this one is about COMPUTATION:
+// a handful of small recursive functions whose EXECUTION is worth seeing. Run it and open the
+// viewer's Functions mode, then trace an expression — e.g. `trace(fib(6))` — to watch the call
+// tree unfold, with per-function call counts and recursion depth.
+//
+//   scry run examples/functions.scry      # then: viewer -> Functions -> trace(fib(6))
+//   scry eval examples/functions.scry -e 'trace(fib(6))'
+
+// The classic: exponential-call recursion. fib(6) = 8 and makes exactly 25 calls (2*fib(7)-1),
+// a small tree whose branching is immediately legible in the call-tree renderer.
+fn fib(n: Int) -> Int {
+  if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+// Linear recursion — one child per call, a straight spine in the tree.
+fn fact(n: Int) -> Int {
+  if n <= 1 { 1 } else { n * fact(n - 1) }
+}
+
+// Euclid's gcd — recursion that shrinks fast; a short spine.
+fn gcd(a: Int, b: Int) -> Int {
+  if b == 0 { a } else { gcd(b, a % b) }
+}
+
+// Ackermann — deep, non-primitive-recursive; even small inputs branch a lot. Handy to watch the
+// truncation/aggregate stats kick in (try `trace(ack(2, 3))` for a modest tree, larger to truncate).
+fn ack(m: Int, n: Int) -> Int {
+  if m == 0 {
+    n + 1
+  } else {
+    if n == 0 { ack(m - 1, 1) } else { ack(m - 1, ack(m, n - 1)) }
+  }
+}
+
+fn main() {
+  print(fib(6))
+  print(fact(5))
+  print(gcd(48, 36))
+  print(ack(2, 3))
+}

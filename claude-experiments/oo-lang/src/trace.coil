@@ -1,0 +1,143 @@
+; trace.coil — the F1 call-tree recorder (06-implementation.md §F1). A single global recorder
+; that is INERT unless `trace-flag` is 1 (set only while a `trace(<expr>)` eval runs). The VM's
+; hot call path guards every hook behind `(= (load (trace-flag)) 1)` — one global load + branch —
+; so an untraced run is zero-cost (no node, no clock, no aggregation).
+;
+; On call-enter (OP_CALL_STATIC / OP_CALL_VIRTUAL, after push-frame) the VM calls `trace-enter`
+; with the callee MethodInfo, argc, and a pointer to the args on the value stack; on OP_RETURN
+; it calls `trace-exit` with the returned slot. Nodes form a tree via parent indices, recorded in
+; DFS pre-order (so the client can assemble the tree from a flat array). Aggregates (total calls,
+; per-fn counts, max depth) stay EXACT even after the node array caps out: past `TRACE_NODE_CAP`
+; we stop materializing tree nodes (set `truncated`) but keep counting, and still push/pop the open
+; stack so return-matching never desyncs. Call depth is bounded by the VM's FRAMES_MAX (256), so the
+; open stack (cap 1024) never fills; the guards are belt-and-suspenders and never crash/hang/OOM.
+(module trace)
+(import "ioutil.coil" :use *)
+(import "arena.coil" :use *)
+(import "builtins.coil" :use *)
+(import "bytecode.coil" :use *)
+
+(const TRACE_NODE_CAP 20000)   ; max tree nodes materialized; beyond this: truncated=1, counts stay exact
+(const TRACE_OPEN_CAP 1024)    ; open-call stack depth (>= VM FRAMES_MAX=256, so never fills)
+(const TRACE_ARG_CAP 8)        ; args snapshotted per node (extra args counted in argc but not stored)
+(const TRACE_FN_CAP 1024)      ; distinct callee functions aggregated
+
+; one tree node: callee identity + a snapshot of its argument slots + its return slot. The raw i64
+; slots are typed later by the serializer using the callee MethodInfo's source node (src-node/src-ctxt).
+(defstruct TraceNode
+  [(name (ptr u8)) (name-len i64)
+   (mi (ptr MethodInfo))       ; callee, for arg/return type resolution
+   (depth i64)
+   (parent i64)                ; index of parent node, -1 for a root
+   (argc i64)                  ; number of arg slots snapshotted (<= TRACE_ARG_CAP)
+   (args (array i64 8))        ; raw arg slot values (self is args[0] for a method call)
+   (retval i64)
+   (has-ret i64)])
+
+(defstruct TraceRec
+  [(nodes (ptr TraceNode))
+   (node-count i64)
+   (total-calls i64)
+   (max-depth i64)
+   (truncated i64)
+   (depth i64)                 ; current live call depth
+   (open (ptr i64))           ; stack of open node indices (or -1 when that call was truncated)
+   (open-count i64)
+   (fn-mis (ptr i64))         ; distinct callee MethodInfo ptrs (as i64)
+   (fn-counts (ptr i64))      ; parallel call counts
+   (fn-count i64)
+   (t-start i64) (t-end i64)  ; wall-clock ms bracketing the traced run
+   (allocated i64)])          ; 1 once the arrays are malloc'd (reused across traces)
+
+; the recorder + the hot-path flag are process singletons (evals never overlap: request-global-stop
+; serializes coordinators, so one global recorder is safe — same discipline as eval-core's scratch).
+(defn trace-rec [] (-> (ptr TraceRec)) (alloc-static TraceRec))
+(defn trace-flag [] (-> (ptr i64)) (alloc-static i64))
+
+(defn trace-alloc [(r (ptr TraceRec))] (-> i64)
+  (if (= (load (field r allocated)) 1) 0
+    (do
+      (store! (field r nodes) (cast (ptr TraceNode) (xalloc (* (sizeof TraceNode) TRACE_NODE_CAP))))
+      (store! (field r open) (cast (ptr i64) (xalloc (* 8 TRACE_OPEN_CAP))))
+      (store! (field r fn-mis) (cast (ptr i64) (xalloc (* 8 TRACE_FN_CAP))))
+      (store! (field r fn-counts) (cast (ptr i64) (xalloc (* 8 TRACE_FN_CAP))))
+      (store! (field r allocated) 1) 0)))
+
+(defn trace-reset [(r (ptr TraceRec))] (-> i64)
+  (store! (field r node-count) 0) (store! (field r total-calls) 0)
+  (store! (field r max-depth) 0) (store! (field r truncated) 0)
+  (store! (field r depth) 0) (store! (field r open-count) 0)
+  (store! (field r fn-count) 0) (store! (field r t-start) 0) (store! (field r t-end) 0) 0)
+
+; ---- lifecycle (server.coil) ----
+(defn trace-enable [] (-> i64)
+  (let [r (trace-rec)] (trace-alloc r) (trace-reset r) (store! (field r t-start) (clock-now)) (store! (trace-flag) 1)) 0)
+; record the finish time (called by the trace() handler right after the traced expr returns).
+(defn trace-finish [] (-> i64) (store! (field (trace-rec) t-end) (clock-now)) 0)
+; ALWAYS-safe reset of the hot-path flag; called unconditionally in eval-core so an error mid-trace
+; (longjmp past the handler) can never leave the recorder armed for the next, untraced eval.
+(defn trace-disable [] (-> i64) (store! (trace-flag) 0) 0)
+
+; ---- per-fn aggregation by MethodInfo identity (fib's many calls collapse to one row) ----
+(defn trace-bump-fn [(r (ptr TraceRec)) (mi (ptr MethodInfo))] (-> i64)
+  (let [n (load (field r fn-count)) (mut i) 0 (mut found) 0]
+    (loop (if (and (= (load found) 0) (< (load i) n))
+            (if (= (load (index (load (field r fn-mis)) (load i))) (cast i64 mi))
+              (do (store! (index (load (field r fn-counts)) (load i)) (+ (load (index (load (field r fn-counts)) (load i))) 1)) (store! found 1) 0)
+              (do (store! i (+ (load i) 1)) 0))
+            (break)))
+    (if (and (= (load found) 0) (< n TRACE_FN_CAP))
+      (do (store! (index (load (field r fn-mis)) n) (cast i64 mi))
+          (store! (index (load (field r fn-counts)) n) 1)
+          (store! (field r fn-count) (+ n 1)) 0)
+      0))
+  0)
+
+(defn trace-push-open [(r (ptr TraceRec)) (idx i64)] (-> i64)
+  (let [oc (load (field r open-count))]
+    (if (< oc TRACE_OPEN_CAP) (do (store! (index (load (field r open)) oc) idx) (store! (field r open-count) (+ oc 1)) 0) 0))
+  0)
+
+; ---- the two hot-path hooks ----
+; call-enter: aggregate, then (if under the node cap) materialize a node parented at the currently
+; open call; always push the open stack + bump depth so exits stay matched.
+(defn trace-enter [(mi (ptr MethodInfo)) (argc i64) (argbase (ptr i64))] (-> i64)
+  (let [r (trace-rec)]
+    (store! (field r total-calls) (+ (load (field r total-calls)) 1))
+    (trace-bump-fn r mi)
+    (let [d (load (field r depth))]
+      (if (> d (load (field r max-depth))) (store! (field r max-depth) d) 0)
+      (let [parent (if (> (load (field r open-count)) 0)
+                     (load (index (load (field r open)) (- (load (field r open-count)) 1))) -1)]
+        (if (< (load (field r node-count)) TRACE_NODE_CAP)
+          (let [idx (load (field r node-count)) nd (index (load (field r nodes)) idx)]
+            (store! (field nd name) (load (field mi name)))
+            (store! (field nd name-len) (load (field mi name-len)))
+            (store! (field nd mi) mi)
+            (store! (field nd depth) d)
+            (store! (field nd parent) parent)
+            (let [na (if (> argc TRACE_ARG_CAP) TRACE_ARG_CAP argc) (mut k) 0]
+              (store! (field nd argc) na)
+              (loop (if (< (load k) na)
+                      (do (store! (index (field nd args) (load k)) (load (index argbase (load k)))) (store! k (+ (load k) 1)) 0)
+                      (break))))
+            (store! (field nd has-ret) 0) (store! (field nd retval) 0)
+            (store! (field r node-count) (+ idx 1))
+            (trace-push-open r idx) 0)
+          (do (store! (field r truncated) 1) (trace-push-open r -1) 0))
+        (store! (field r depth) (+ d 1)) 0)))
+  0)
+
+; call-exit: close the innermost open call (attaching its return slot). An OP_RETURN with nothing
+; open is the traced expression's own outermost frame (the <eval> method) — skipped.
+(defn trace-exit [(retval i64)] (-> i64)
+  (let [r (trace-rec)]
+    (if (<= (load (field r open-count)) 0) 0
+      (let [oc (- (load (field r open-count)) 1) idx (load (index (load (field r open)) oc))]
+        (store! (field r open-count) oc)
+        (store! (field r depth) (- (load (field r depth)) 1))
+        (if (>= idx 0)
+          (let [nd (index (load (field r nodes)) idx)]
+            (store! (field nd retval) retval) (store! (field nd has-ret) 1) 0)
+          0))))
+  0)

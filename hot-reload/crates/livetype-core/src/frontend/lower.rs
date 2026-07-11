@@ -156,7 +156,6 @@ struct Lower<'a> {
     labels: Vec<usize>,
     next_reg: usize,
     scopes: Vec<HashMap<String, (usize, Type)>>,
-    result_ty: Type,
 }
 
 fn lower_fn(
@@ -172,7 +171,6 @@ fn lower_fn(
         labels: Vec::new(),
         next_reg: 0,
         scopes: vec![HashMap::new()],
-        result_ty: sig.result.clone(),
     };
     for (p, ty) in f.params.iter().zip(&sig.params) {
         let r = lo.fresh_reg();

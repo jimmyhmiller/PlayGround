@@ -329,6 +329,27 @@ async function main() {
       fails.push("V4: closing the inspector did not restore the full-width map");
     else ok("V4: closing the inspector restores the full-width map");
 
+    // (F1) Functions / Trace mode: switch to it, trace an expression valid under assistant.scry
+    // (`contains(...)`), and assert the call tree + stats strip render.
+    await evalPage(`[...document.querySelectorAll('.vt-btn')].find(b=>b.textContent.trim()==='Functions').click()`);
+    await waitFor(".trace-panel");
+    await evalPage(`(()=>{
+      const inp=document.querySelector('.trace-input');
+      const setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+      setter.call(inp,'contains("hello world", "wor")');
+      inp.dispatchEvent(new Event('input',{bubbles:true}));
+      return inp.value;
+    })()`);
+    await sleep(250);  // let React flush the input state before the run button reads it
+    await evalPage(`document.querySelector('.trace-run').click()`);
+    try {
+      const tn = await waitFor(".tnode", 8000);
+      const strip = await evalPage(`(()=>{const s=document.querySelector('.ts-strip');return s?s.textContent:'';})()`);
+      const hasFn = await evalPage(`[...document.querySelectorAll('.tnode-fn')].some(e=>e.textContent.trim()==='contains')`);
+      if (tn >= 1 && /calls/.test(strip) && hasFn) ok(`Functions mode: trace renders a call tree (${tn} node(s)) + stats strip`);
+      else fails.push(`Functions mode: incomplete trace render (nodes=${tn}, strip=${JSON.stringify(strip)}, hasFn=${hasFn})`);
+    } catch (e) { fails.push("Functions mode: no call tree rendered after trace (" + e.message + ")"); }
+
     // switch to the List rail for the remaining browse beats (List is unchanged by V4)
     await evalPage(`[...document.querySelectorAll('.vt-btn')].find(b=>b.textContent.trim()==='List').click()`);
 

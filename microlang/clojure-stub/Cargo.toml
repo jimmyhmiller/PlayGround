@@ -7,6 +7,10 @@ description = "A mini-Clojure frontend with its OWN procedural macro expander, b
 [dependencies]
 microlang = { path = ".." }
 
+[features]
+# Run the clojure frontend on the native JIT tier (for tests/jit.rs).
+jit = ["microlang/jit"]
+
 [lib]
 path = "src/lib.rs"
 

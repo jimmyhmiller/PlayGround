@@ -203,7 +203,7 @@ pub struct JitError(pub String);
 /// to bottom, so `engine` (which references the module's code) is torn down
 /// before `module`. Dropping the module first was a use-after-free that only
 /// crashed under release optimization.
-pub struct Compiled<'ctx> {
+pub(crate) struct Compiled<'ctx> {
     _engine: ExecutionEngine<'ctx>,
     _module: Module<'ctx>,
     addrs: HashMap<(DefId, Version), usize>,
@@ -652,7 +652,7 @@ fn call_result(cs: inkwell::values::CallSiteValue<'_>) -> inkwell::values::Basic
 
 /// Compile every Ready function version in the world (old pinned versions
 /// included) into `step` functions and wire the runtime externs.
-pub fn compile<'ctx>(ctx: &'ctx Context, rt: &Runtime) -> Result<Compiled<'ctx>, JitError> {
+pub(crate) fn compile<'ctx>(ctx: &'ctx Context, rt: &Runtime) -> Result<Compiled<'ctx>, JitError> {
     let cg = Codegen {
         ctx,
         module: ctx.create_module("livetype"),

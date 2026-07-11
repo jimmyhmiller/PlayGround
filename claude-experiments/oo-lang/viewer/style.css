@@ -724,3 +724,54 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
 .crash-msg { font-family: var(--mono); font-size: 12px; color: var(--live); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; word-break: break-word; }
 .crash-hint { font-size: 12.5px; color: var(--fg-dim); margin-bottom: 16px; line-height: 1.5; }
 .crash-btns { display: flex; gap: 10px; justify-content: center; }
+
+/* ===================== Functions / Trace mode (Phase F1) ===================== */
+.trace-panel { padding: 20px 26px 60px; max-width: 1100px; margin: 0 auto; }
+.trace-controls { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+.trace-prompt { font-family: var(--mono); font-size: 15px; color: var(--fg-dim); }
+.trace-input { flex: 0 1 340px; font-family: var(--mono); font-size: 14px; color: var(--fg);
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; outline: none; }
+.trace-input:focus { border-color: var(--accent); }
+.trace-run { font-family: var(--sans); font-size: 13px; font-weight: 600; color: #fff; background: var(--accent);
+  border: none; border-radius: 6px; padding: 7px 16px; margin-left: 6px; cursor: pointer; }
+.trace-run:disabled { opacity: .6; cursor: default; }
+.trace-spacer { flex: 1; }
+.tsm { font-size: 12px; padding: 5px 10px; }
+.trace-chip { font-family: var(--mono); font-size: 12px; color: var(--fg-dim); background: var(--bg-elev);
+  border: 1px solid var(--line); border-radius: 20px; padding: 4px 12px; margin: 0 6px 14px 0; cursor: pointer; }
+.trace-chip:hover { color: var(--fg); border-color: var(--fg-faint); }
+.trace-chip.active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.trace-error { font-family: var(--mono); font-size: 13px; color: var(--danger); background: var(--bg-elev);
+  border: 1px solid var(--danger); border-radius: 6px; padding: 10px 12px; margin: 8px 0; }
+.te-kind { font-weight: 700; margin-right: 8px; }
+.trace-empty { color: var(--fg-faint); font-size: 13px; padding: 24px 4px; }
+
+.trace-stats { background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 18px; }
+.ts-headline { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--line-soft); }
+.ts-expr { font-family: var(--mono); font-size: 15px; color: var(--fg); }
+.ts-eq { color: var(--fg-faint); font-size: 15px; }
+.ts-result { font-family: var(--mono); font-size: 15px; }
+.ts-strip { display: flex; gap: 26px; margin-bottom: 14px; }
+.ts-tile { min-width: 66px; }
+.ts-num { font-family: var(--mono); font-size: 22px; font-weight: 700; color: var(--fg); line-height: 1.1; }
+.ts-lbl { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: .04em; margin-top: 3px; }
+.ts-warn .ts-num { color: var(--c-number); }
+.ts-perfn { display: flex; flex-direction: column; gap: 5px; }
+.ts-fnrow { display: flex; align-items: center; gap: 10px; }
+.ts-fnname { font-family: var(--mono); font-size: 12.5px; color: var(--c-ref); min-width: 120px; text-align: right; }
+.ts-fnbar { flex: 1; height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+.ts-fnfill { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+.ts-fncount { font-family: var(--mono); font-size: 12px; color: var(--fg-dim); min-width: 44px; }
+
+.trace-tree { font-family: var(--mono); font-size: 13px; }
+.tnode-kids { margin-left: 16px; border-left: 1px solid var(--line-soft); padding-left: 4px; }
+.tnode-row { display: flex; align-items: baseline; gap: 2px; padding: 2px 6px; border-radius: 5px; flex-wrap: wrap; }
+.tnode-row.has-kids { cursor: pointer; }
+.tnode-row.has-kids:hover { background: var(--bg-elev); }
+.tnode-tw { width: 14px; flex: 0 0 14px; color: var(--fg-faint); font-size: 10px; }
+.tnode-fn { color: var(--c-ref); font-weight: 600; }
+.tnode-paren, .tnode-comma { color: var(--fg-faint); }
+.tnode-eq { color: var(--fg-faint); }
+.tnode-res { color: var(--fg); }
+.tnode-badge { margin-left: 8px; font-size: 10.5px; color: var(--fg-dim); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 10px; padding: 0 7px; align-self: center; }
