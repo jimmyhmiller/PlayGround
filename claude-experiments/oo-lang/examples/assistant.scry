@@ -168,6 +168,21 @@ class LoopWorker implements Runnable {
   }
 }
 
+// A ONE-SHOT turn on a background thread — used by the "Ask" action so that a message sent from
+// the VIEWER behaves like one typed at the prompt: it echoes `you> <question>` and prints the
+// reply in the terminal (the same way the input loop's dispatch does), AND it runs off the eval
+// thread so the viewer stays responsive while the live model works (the eval returns immediately).
+class TurnWorker implements Runnable {
+  agent: Agent
+  text: String
+  fn run() -> Void {
+    // leading newline breaks off the pending `you> ` prompt; the marker shows it came from the viewer
+    Console.log("\n[viewer] " + self.text)
+    let reply = self.agent.runLoop(self.text)
+    Console.log(self.agent.banner() + " " + reply)
+  }
+}
+
 // The REPL loop owner + history. Deliberately TINY so the whole class is a compact live-edit
 // target: renderPrompt() and suggest() are the two extension points the demo redefines.
 class Session {
@@ -369,5 +384,7 @@ view Pulse for Message {
 // and `--readonly` rejects the mutating ones. See docs/06-implementation.md.
 action "Pause"  for Agent { self.pause() }
 action "Resume" for Agent { self.resume() }
-action "Ask"    for Agent (question: String) { self.runLoop(question) }
+// Ask runs the turn on a background thread (TurnWorker) so the viewer stays live during the
+// live-model call AND the question + reply show in the terminal, exactly like typing at the prompt.
+action "Ask"    for Agent (question: String) { let h = Thread.spawn(TurnWorker(agent: self, text: question)) }
 action "Spawn researcher" for Orchestrator (topic: String) { self.research(topic) }
