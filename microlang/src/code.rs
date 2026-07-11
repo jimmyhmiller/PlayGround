@@ -267,6 +267,27 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                     Err(payload) => std::panic::resume_unwind(payload),
                 }
             }
+            Ir::Prim(Prim::Apply, args) => {
+                // `(apply f a … lst)` — invoking a closure with a runtime-built
+                // arg list, which `rt.prim` cannot do (it has no `top`). Evaluate
+                // the args (rooted), flatten the leading args with the elements of
+                // the final list, then invoke through `top` (so tail-calls, GC
+                // safepoints, and dispatch all compose).
+                let base = rt.root_depth();
+                for a in args {
+                    let v = top.eval_ir(top, rt, a, locals);
+                    rt.push_root(v);
+                }
+                let argv: Vec<u64> = (0..args.len()).map(|i| rt.root_get(base + i)).collect();
+                rt.truncate_roots(base);
+                let f = argv[0];
+                let rest = &argv[1..];
+                let mut flat: Vec<u64> = rest[..rest.len().saturating_sub(1)].to_vec();
+                if let Some(&last) = rest.last() {
+                    flat.extend(rt.list_to_vec(last));
+                }
+                top.invoke(top, rt, f, &flat)
+            }
             Ir::Prim(op, args) => {
                 // Precise rooting of already-evaluated args across the remaining
                 // arg evals (which may safepoint) — see the `Call` arm.

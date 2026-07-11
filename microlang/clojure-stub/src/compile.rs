@@ -32,6 +32,7 @@ impl Compiler {
         for (name, p) in [
             ("%add", Add), ("%sub", Sub), ("%mul", Mul), ("%lt", Lt), ("%num-eq", Eq),
             ("%quot", Quot), ("%rem", Rem), ("%mod", Mod), ("%str-cat", StrCat), ("%str-of", StrOf),
+            ("%apply", Apply),
             ("%first", First), ("%rest", Rest), ("%cons", Cons),
             ("record", Record), ("field", Field), ("type-of", TypeOf), ("nfields", NFields), ("throw", Throw),
             ("nil?", IsNil), ("list", List), ("println", Println), ("gc", Gc),

@@ -451,6 +451,25 @@ fn control_macros() {
 }
 
 #[test]
+fn apply_fn() {
+    assert_eq!(run("(apply + [1 2 3 4])"), "10");
+    assert_eq!(run("(apply + 1 2 [3 4 5])"), "15");
+    assert_eq!(run("(apply max [3 7 2 9 4])"), "9");
+    assert_eq!(run("(apply + (range 100))"), "4950");
+    assert_eq!(run(r#"(apply str (interpose "," [1 2 3]))"#), r#""1,2,3""#);
+    assert_eq!(run("(apply vector 1 2 [3 4])"), "[1 2 3 4]");
+    assert_eq!(run("(apply hash-map [:a 1 :b 2])"), "{:a 1, :b 2}");
+    assert_eq!(run("(apply (fn [a b c] (* a b c)) [2 3 4])"), "24");
+    // leading args + a lazy final collection, into a variadic fn.
+    assert_eq!(run("(let [f (fn [& xs] (count xs))] (apply f 1 2 (range 5)))"), "7");
+    // apply-enabled variadic combinators.
+    assert_eq!(run("((comp inc inc inc) 0)"), "3");
+    assert_eq!(run("((partial + 1 2) 3 4)"), "10");
+    assert_eq!(run("((juxt + *) 2 3 4)"), "[9 24]");
+    assert_eq!(run("(min 5 2 8 1)"), "1");
+}
+
+#[test]
 fn multimethods() {
     // dispatch on a computed value.
     assert_eq!(

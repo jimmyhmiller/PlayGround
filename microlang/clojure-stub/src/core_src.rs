@@ -272,12 +272,16 @@ pub const CORE: &str = r##"
 (defn every? [pred c] (every-seq pred c))
 (defn mapv [f c] (vec (map f c)))
 (defn filterv [f c] (vec (filter f c)))
-(defn comp [f g] (fn [x] (f (g x))))
-(defn partial [f a] (fn [x] (f a x)))
+(defn -comp2 [f g] (fn [& args] (f (apply g args))))
+(defn comp [& fns]
+  (cond (nil? (seq fns)) identity
+        (nil? (next fns)) (first fns)
+        true (reduce -comp2 (first fns) (rest fns))))
+(defn partial [f & pre] (fn [& args] (apply f (concat pre args))))
 (defn constantly [x] (fn [& _] x))
 (defn complement [f] (fn [x] (not (f x))))
-(defn max [a b] (if (%lt a b) b a))
-(defn min [a b] (if (%lt a b) a b))
+(defn max [a & more] (reduce (fn [x y] (if (%lt x y) y x)) a more))
+(defn min [a & more] (reduce (fn [x y] (if (%lt x y) x y)) a more))
 (defn map-indexed-h [f i s]
   (lazy-seq (let [s (seq s)] (if (nil? s) nil (%cons (f i (%first s)) (map-indexed-h f (%add i 1) (%rest s)))))))
 (defn map-indexed [f c] (map-indexed-h f 0 c))
@@ -546,8 +550,7 @@ pub const CORE: &str = r##"
       (-msort (fn [a b] ((first args) (k a) (k b))) (second args))))
 
 ;; misc combinators
-(defn -juxt-apply [fns x] (map (fn [f] (f x)) fns))
-(defn juxt [& fns] (fn [x] (vec (-juxt-apply fns x))))
+(defn juxt [& fns] (fn [& args] (vec (map (fn [f] (apply f args)) fns))))
 (defn -maxk [k best s] (let [s (seq s)] (if (nil? s) best (-maxk k (if (%lt (k best) (k (first s))) (first s) best) (rest s)))))
 (defn max-key [k a & more] (-maxk k a more))
 (defn -mink [k best s] (let [s (seq s)] (if (nil? s) best (-mink k (if (%lt (k (first s)) (k best)) (first s) best) (rest s)))))
@@ -649,6 +652,17 @@ pub const CORE: &str = r##"
 (defn -str-seq [acc s] (if (nil? (seq s)) acc (-str-seq (%str-cat acc (-str1 (first s))) (rest s))))
 (defn str [& xs] (-str-seq "" xs))
 
+;; ─────────────── apply ───────────────
+;; `(apply f a b ... coll)` — call `f` with the leading args followed by the
+;; elements of the final collection. The final collection is realized into a
+;; plain cons-list (so vectors / maps / lazy seqs all spread), the leading args
+;; are consed on front, and the `%apply` prim spreads that list into the call.
+(defn -apply-flatten [args]
+  (if (nil? (next args))
+      (-to-list (first args))
+      (%cons (first args) (-apply-flatten (rest args)))))
+(defn apply [f & args] (%apply f (-apply-flatten args)))
+
 ;; ─────────────── multimethods (defmulti / defmethod) ───────────────
 ;; A multimethod is a callable record `(MultiFn dispatch-fn table-atom)` where the
 ;; table-atom holds a map from dispatch-value -> method fn (with a `:default` entry
@@ -659,21 +673,13 @@ pub const CORE: &str = r##"
 (defn multi? [x] (%num-eq (type-of x) 'MultiFn))
 (defn -add-method [mf dval method]
   (let [a (field mf 1)] (reset! a (assoc (deref a) dval method))))
-;; Bounded apply (no general `apply` on the interpreter tiers): forward up to 3
-;; args to `f`. Beyond that raises a clear error rather than silently dropping.
-(defn -applyn [f args]
-  (cond (nil? (seq args)) (f)
-        (nil? (next args)) (f (first args))
-        (nil? (next (next args))) (f (first args) (second args))
-        (nil? (next (next (next args)))) (f (first args) (second args) (nth args 2))
-        true (throw "multimethod: only up to 3 args supported")))
 (defn -multi-lookup [mf dval]
   (let [tbl (deref (field mf 1))]
     (cond (contains? tbl dval) (get tbl dval)
           (contains? tbl :default) (get tbl :default)
           true (throw (str "no method for dispatch value: " dval)))))
 (defn -multi-call [mf args]
-  (-applyn (-multi-lookup mf (-applyn (field mf 0) args)) args))
+  (apply (-multi-lookup mf (apply (field mf 0) args)) args))
 (defmacro defmulti (name dispatch-fn) (list 'def name (list '-make-multi dispatch-fn)))
 (defmacro defmethod (name dval params & body)
   (list '-add-method name dval (%cons 'fn (%cons params body))))
