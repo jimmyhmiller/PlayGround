@@ -435,8 +435,8 @@ def run_inspect_test(binary, filt):
         if "<" not in html or "scry" not in html.lower():
             problems.append("GET / did not return viewer HTML")
         appjs = urllib.request.urlopen(f"http://127.0.0.1:{port}/app.js", timeout=10).read().decode()
-        if "GraphPane" not in appjs or "schema()" not in appjs:
-            problems.append("app.js does not contain the graph view")
+        if "NestedView" not in appjs or "graph()" not in appjs or "schema()" not in appjs:
+            problems.append("app.js does not contain the bespoke nested view (NestedView + graph()/schema())")
         if problems:
             print("FAIL inspect")
             for p in problems:

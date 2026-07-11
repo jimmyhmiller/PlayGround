@@ -88,6 +88,22 @@ The raw project brief is in `../claude.md` — read it first; this file pins wha
     drillable once main() populates the arenas. Static graph and live inspector are one
     unified view, not two.
 
+15. **Visualization: bespoke, meaningful, program-declared — NOT a generic graph** (Jimmy ruling,
+    emphatic; the off-the-shelf force-graph is rejected). Two pillars:
+    (a) **Default view = nested containment.** Ownership becomes nesting (a Conversation holds its
+    Messages, an Agent holds its Conversation); node size ∝ live instance count (mass is visible);
+    utility/noise types recede to a faded periphery. Position and size CARRY MEANING; the layout is
+    deterministic (never physics/jitter). **Shared entities** (referenced by multiple owners — a Tool
+    held by every Agent) are the hard case: do NOT nest arbitrarily and do NOT fall back to a graph.
+    Give each shared entity a stable **identity color** and render it as a colored chip everywhere it
+    is referenced; hovering one highlights all its appearances. Light edges optional. Keep it flexible.
+    (b) **Program-declared views = a first-class `view` construct.** The program declares how its
+    entities should be seen: `view Name for T { title: <field>; size: byCount; section "…" { <field>
+    as timeline(order: …) | chips | rows | card } }`. Reflection surfaces the view specs + the data
+    they need; a hand-built bespoke renderer honors them. This is the "the program speaks to how it
+    ought to be visualized" requirement. Build order: bespoke default view first, then the `view`
+    construct. A visual MOCKUP artifact is being produced for sign-off BEFORE any runtime work.
+
 ## Open (docs should propose, flag as OPEN, not silently decide)
 
 - **How the viewer's eval channel interleaves with running threads** — evals that read

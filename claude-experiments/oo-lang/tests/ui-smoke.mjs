@@ -29,9 +29,13 @@ async function main() {
   const chrome = findChrome();
   if (!chrome) { console.log("SKIPPED ui-smoke: no Chrome/Chromium binary found"); process.exit(0); }
 
-  // 1. boot scry with the viewer server
+  // 1. boot scry with the viewer server. Feed it two prompts (stdin kept OPEN so the process
+  // stays interactive + alive for the viewer) so the agent loop actually runs and the main
+  // Agent's Conversation accumulates Messages — the mass the nested view visualizes. Keys are
+  // scrubbed by the harness, so this drives the deterministic ScriptedModel (real tool_use turns).
   const scry = spawn(join(ROOT, "scry"), ["run", join(ROOT, "examples", "assistant.scry")],
-    { stdio: ["ignore", "pipe", "pipe"] });
+    { stdio: ["pipe", "pipe", "pipe"] });
+  try { scry.stdin.write("what is 17 times 23?\nweather in Tokyo?\n"); } catch {}
   let port = null;
   const waitPort = new Promise((res) => {
     scry.stdout.on("data", (b) => {
@@ -106,25 +110,78 @@ async function main() {
     const fails = [];
     const ok = (label) => console.log("  ok  " + label);
 
-    // (g0) the class-relationship GRAPH is the landing view — nodes for classes, an interface
-    // and an enum, plus a resolved Agent->Conversation field edge; clicking a live class node
-    // navigates to its instance table (the static/live unification).
-    await waitFor("#graph .gnode");
-    const gnodes = await evalPage(`[...document.querySelectorAll('.gnode')].map(n=>n.dataset.name)`);
-    for (const want of ["Agent", "Conversation"]) {
-      if (!gnodes.includes(want)) fails.push(`graph missing node ${want}: ${JSON.stringify(gnodes)}`);
+    // (V) the bespoke NESTED-CONTAINMENT view is the default landing mode (Phase V1). Ownership
+    // is nesting: a root region (Orchestrator) contains an Agent region that contains a
+    // Conversation with a dense message stack (mass). Shared tools render as identity-colored
+    // chips that hover-highlight across every appearance. Utility types recede to a faded,
+    // collapsible infrastructure strip. Driven by the graph() + schema() evals — no force graph.
+    await waitFor("#nested .census");
+    ok("nested view is the default landing (census / mass ribbon renders)");
+    await waitFor("#nested .orch .region");
+    // a helper (in-page) that finds a region whose OWN header names a given type
+    const findRegionJS = (kind) => `(()=>{
+      for(const r of document.querySelectorAll('#nested .region')){
+        const head=r.querySelector('.region-head');
+        const k=head&&head.querySelector('.node-kind');
+        if(k&&k.textContent.trim()===${JSON.stringify(kind)}) return r;
+      }
+      return null;
+    })()`;
+    // an Agent region contains a Conversation which contains message rows
+    const nesting = await evalPage(`(()=>{
+      const agent=${findRegionJS("Agent")};
+      if(!agent) return {noagent:true};
+      const mstack=agent.querySelector('.conv .mstack');
+      return {rows: mstack?mstack.querySelectorAll('.mrow').length:0, hasConv: !!agent.querySelector('.conv')};
+    })()`);
+    if (nesting.noagent) fails.push("nested view has no Agent region");
+    else {
+      if (!nesting.hasConv) fails.push("Agent region does not nest a Conversation"); else ok("Agent region nests a Conversation (ownership = nesting)");
+      if (nesting.rows < 1) fails.push("nested Conversation renders no message rows"); else ok(`nested Conversation renders ${nesting.rows} message rows (mass)`);
     }
-    if (fails.length === 0) ok(`graph renders ${gnodes.length} nodes (Agent, Conversation present)`);
-    const kinds = await evalPage(`(()=>{const s={};for(const n of document.querySelectorAll('.gnode'))s[n.dataset.kind]=(s[n.dataset.kind]||0)+1;return s;})()`);
-    if (!kinds.interface) fails.push("graph has no interface node (e.g. Tool)"); else ok(`graph has ${kinds.interface} interface node(s)`);
-    if (!kinds.enum) fails.push("graph has no enum node (e.g. AgentStatus)"); else ok(`graph has ${kinds.enum} enum node(s)`);
-    const hasEdge = await evalPage(
-      `[...document.querySelectorAll('.gedge')].some(l=>l.dataset.from==='Agent'&&l.dataset.to==='Conversation')`);
-    if (!hasEdge) fails.push("graph missing Agent->Conversation field edge"); else ok("graph has Agent->Conversation edge");
-    // click the Agent node (live count >= 1 while running) -> drills to its instance table
-    await evalPage(`document.querySelector('.gnode[data-name="Agent"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
-    try { await waitFor(".itable tbody tr", 8000); ok("clicking a live graph node navigates to its table"); }
-    catch { fails.push("clicking Agent graph node did not open its instance table"); }
+    // a shared tool chip appears in >=2 owners with the SAME identity color slot
+    const chipInfo = await evalPage(`(()=>{
+      const chips=[...document.querySelectorAll('#nested .stage-wrap .chip[data-identity]')];
+      const byId={};
+      for(const c of chips){const id=c.dataset.identity;(byId[id]=byId[id]||[]).push(c.dataset.slot);}
+      const shared=Object.entries(byId).filter(([,slots])=>slots.length>=2);
+      const sameColor=shared.every(([,slots])=>slots.every(s=>s===slots[0]));
+      return {chipCount:chips.length, sharedCount:shared.length, sameColor, firstShared: shared[0]?shared[0][0]:null};
+    })()`);
+    if (chipInfo.sharedCount < 1) fails.push(`no shared tool chip appears in >=2 owner regions (chips=${chipInfo.chipCount})`);
+    else {
+      ok(`a shared instance chip appears across ${chipInfo.sharedCount} owner region(s)`);
+      if (!chipInfo.sameColor) fails.push("shared chip appearances have inconsistent identity colors"); else ok("shared chip keeps ONE stable identity color everywhere");
+    }
+    // hover a shared chip -> id-active + EVERY appearance of that exact instance gets id-hi
+    if (chipInfo.firstShared) {
+      const hi = await evalPage(`(()=>{
+        const id=${JSON.stringify(chipInfo.firstShared)};
+        const c=document.querySelector('#nested .chip[data-identity="'+CSS.escape(id)+'"]');
+        c.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));  // React onMouseEnter fires on native mouseover
+        return new Promise(res=>setTimeout(()=>res({
+          active: document.querySelector('#nested').classList.contains('id-active'),
+          n: document.querySelectorAll('#nested .chip[data-identity="'+CSS.escape(id)+'"].id-hi').length,
+        }),100));
+      })()`, true);
+      if (!hi.active) fails.push("hovering a chip did not activate identity highlighting (id-active)");
+      else if (hi.n < 2) fails.push(`hovering a shared chip highlighted only ${hi.n} appearance(s), expected >=2`);
+      else ok(`hovering a shared chip lights up all ${hi.n} appearances (id-active + id-hi)`);
+    }
+    // the infrastructure strip renders and expands to reveal utility-type rows
+    if (!await evalPage(`!!document.querySelector('#nested .infra')`)) fails.push("infrastructure strip did not render");
+    else {
+      ok("infrastructure strip renders (utility types recede)");
+      await evalPage(`document.querySelector('#nested .infra-head').click()`);
+      const rows = await evalPage(`document.querySelector('#nested .infra').classList.contains('open') ? document.querySelectorAll('#nested .util').length : 0`);
+      if (!rows) fails.push("infrastructure strip did not expand with utility rows"); else ok(`infrastructure strip expands (${rows} utility rows)`);
+    }
+    // clicking an Agent region drills into its detail (switches to browse) -> sets up the rail beats
+    await evalPage(`(()=>{const agent=${findRegionJS("Agent")};if(agent)agent.querySelector('.region-head').click();return !!agent;})()`);
+    try { await waitFor(".field-grid", 8000); ok("clicking a region drills into that instance's detail"); }
+    catch { fails.push("clicking an Agent region did not open its detail"); }
+    // switch to the List rail for the remaining browse beats
+    await evalPage(`[...document.querySelectorAll('.vt-btn')].find(b=>b.textContent.trim()==='List').click()`);
 
     // (a) the List view's type rail renders types, incl. Agent (we are now in browse mode)
     await waitFor(".type-row");
@@ -236,12 +293,12 @@ async function main() {
             await waitFor(".pcard");
             const cards = await evalPage(`[...document.querySelectorAll('.pcard-name')].map(n=>n.textContent)`);
             ok(`portal landing renders ${cards.length} card(s): ${JSON.stringify(cards)}`);
-            // click the first (running) card -> drills into that program's inspector graph, proxied
+            // click the first (running) card -> drills into that program's bespoke view, proxied
             await evalPage(`document.querySelector('.pcard:not(.exited)').click()`);
-            await waitFor("#graph .gnode", 12000);
-            const pnodes = await evalPage(`[...document.querySelectorAll('.gnode')].map(n=>n.dataset.name)`);
-            if (!pnodes.includes("Agent")) fails.push(`portal proxied graph missing Agent node: ${JSON.stringify(pnodes)}`);
-            else ok(`clicking a portal card loads the inspector graph through the proxy (${pnodes.length} nodes)`);
+            await waitFor("#nested .cx-name", 12000);
+            const pTypes = await evalPage(`[...document.querySelectorAll('#nested .cx-name')].map(n=>n.textContent.trim())`);
+            if (!pTypes.includes("Agent")) fails.push(`portal proxied nested view missing Agent in census: ${JSON.stringify(pTypes)}`);
+            else ok(`clicking a portal card loads the nested view through the proxy (${pTypes.length} census types)`);
             // the back affordance returns to the landing grid
             await evalPage(`(()=>{const b=document.querySelector('.back-btn');if(b)b.click();return !!b;})()`);
             await waitFor(".pcard", 6000);
@@ -279,11 +336,11 @@ async function main() {
     } else {
       try {
         await send("Page.navigate", { url: `http://127.0.0.1:${inspectPort}/` });
-        await waitFor("#graph .gnode", 12000);
-        // sanity: the graph really does show Agent at liveCount 0 (main() never ran)
-        const liveAgent = await evalPage(
-          `document.querySelector('.gnode[data-name="Agent"]')?.dataset.live`);
-        if (liveAgent !== "0") fails.push(`inspect: expected Agent liveCount 0 in the graph, got ${JSON.stringify(liveAgent)}`);
+        // the bespoke view loads; with main() never run, no instances exist so the stage shows
+        // its empty state (nothing to nest) — never a crash.
+        await waitFor("#nested", 12000);
+        await waitFor("#nested .stage-empty", 8000);
+        ok("inspect mode: bespoke view renders its empty stage (no live instances to nest)");
         // switch to the List rail (no liveCount gate) and browse Agent's (empty) table
         await evalPage(`[...document.querySelectorAll('.vt-btn')].find(b=>b.textContent.trim()==='List').click()`);
         await waitFor(".type-row");

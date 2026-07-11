@@ -408,6 +408,122 @@
   (jb-cstr b c",\"variants\":") (emit-variants b d)
   (jb-byte b \}) 0)
 
+; ================= graph() : the live instance-reference graph (Phase V1) =================
+; Powers the bespoke NESTED-CONTAINMENT view. Unlike schema() (static class SHAPE) and
+; instances() (one type's rows), graph() walks EVERY entity arena and emits one compact record
+; per LIVE instance so the client can compute ownership (nesting) vs sharing (identity chips):
+;   { "ref":"Agent#3", "type":"Agent", "generation":0,
+;     "scalars": { "name":{..}, "role":{..}, "status":{..} },   // shallow scalar/enum fields only
+;     "refs": [ {"field":"conversation","list":false,"ids":["Conversation#3"]},
+;               {"field":"tools","list":true,"ids":["CalcTool#0","WeatherTool#0", ...]} ] }
+; Every referenced id is the CONCRETE runtime type#slot of the target instance (recovered from the
+; target's own InstanceHeader), so an interface/`List<T>`-typed field resolves to real implementors.
+; The client assembles the tree + reverse-reference counts from these ids — this one eval is the
+; whole live payload (counts come from grouping instances by type; static reachability from schema()).
+
+; is a field's DECLARED type a scalar/enum leaf we inline into "scalars"? (skip List/Map/entity)
+(defn graph-scalar-leaf? [(t (ptr Type))] (-> bool)
+  (let [k (ty-kind t)]
+    (if (or (or (= k TY_INT) (= k TY_BOOL)) (or (= k TY_FLOAT) (= k TY_STRING))) true
+      (if (= k TY_NAMED)
+        (let [d (load (field t decl))]
+          (if (= (cast i64 d) 0) false (= (load (field d kind)) DK_ENUM)))
+        false))))
+
+; is a Type an entity (class/object/interface)?
+(defn graph-type-entity? [(t (ptr Type))] (-> bool)
+  (if (!= (ty-kind t) TY_NAMED) false
+    (let [d (load (field t decl))]
+      (if (= (cast i64 d) 0) false
+        (let [dk (load (field d kind))]
+          (or (or (= dk DK_CLASS) (= dk DK_OBJECT)) (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE))))))))
+
+; classify a field's declared type for the graph: 0 = scalar/other, 1 = single entity ref,
+; 2 = List<entity>. (List/Map of scalars -> 0, skipped entirely; counts come from arenas.)
+(defn graph-field-kind [(t (ptr Type))] (-> i64)
+  (if (!= (ty-kind t) TY_NAMED) 0
+    (let [nmp (load (field t name)) nml (load (field t name-len))]
+      (if (name-eq nmp nml (cast (ptr u8) c"List") 4)
+        (if (graph-type-entity? (al-get (load (field t args)) 0)) 2 0)
+        (if (name-eq nmp nml (cast (ptr u8) c"Map") 3) 0
+          (if (graph-type-entity? t) 1 0))))))
+
+; emit "ConcreteType#slot" (quoted) for an instance pointer, using the target's OWN mono.
+(defn emit-inst-id [(b (ptr JBuf)) (v i64)] (-> i64)
+  (if (= v 0) (jb-cstr b c"null")
+    (let [hp (cast (ptr InstanceHeader) v) tid (load (field hp type-id)) m (mono-by-id tid) slot (load (field hp slot-index))]
+      (if (= (cast i64 m) 0) (jb-cstr b c"null") (emit-ref-id b m slot)))))
+
+(defn emit-graph-instance [(b (ptr JBuf)) (m (ptr MonoType)) (hp (ptr InstanceHeader))] (-> i64)
+  (let [slot (load (field hp slot-index)) gen (load (field hp generation)) v (cast i64 hp)]
+    (jb-cstr b c"{\"ref\":") (emit-ref-id b m slot)
+    (jb-cstr b c",\"type\":") (jb-str b (load (field m name)) (load (field m name-len)))
+    (jb-cstr b c",\"generation\":") (jb-int b gen)
+    ; ---- scalars ----
+    (jb-cstr b c",\"scalars\":{")
+    (let [fs (load (field m fields)) n (al-len fs) (mut i) 0 (mut first) true]
+      (loop (if (< (load i) n)
+              (let [mf (al-get fs (load i)) ty (load (field mf ty))]
+                (if (graph-scalar-leaf? ty)
+                  (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                      (jb-str b (load (field mf name)) (load (field mf name-len))) (jb-byte b \:)
+                      (serialize-value b (load (cast (ptr i64) (field-addr-at v (load i)))) ty 1) 0)
+                  0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"}")
+    ; ---- refs ----
+    (jb-cstr b c",\"refs\":[")
+    (let [fs (load (field m fields)) n (al-len fs) (mut i) 0 (mut first) true]
+      (loop (if (< (load i) n)
+              (let [mf (al-get fs (load i)) ty (load (field mf ty)) fk (graph-field-kind ty)]
+                (if (> fk 0)
+                  (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                      (jb-cstr b c"{\"field\":") (jb-str b (load (field mf name)) (load (field mf name-len)))
+                      (jb-cstr b c",\"list\":") (jb-bool b (if (= fk 2) 1 0))
+                      (jb-cstr b c",\"ids\":[")
+                      (let [raw (load (cast (ptr i64) (field-addr-at v (load i))))]
+                        (if (= fk 1)
+                          (if (= raw 0) 0 (emit-inst-id b raw))
+                          (let [l (cast (ptr ListObj) raw) ln (if (= raw 0) 0 (list-len l)) (mut j) 0 (mut fe) true]
+                            (loop (if (< (load j) ln)
+                                    (let [ev (list-get l (load j))]
+                                      (if (= ev 0) 0
+                                        (do (if (load fe) (do (store! fe false) 0) (jb-byte b \,)) (emit-inst-id b ev) 0))
+                                      (store! j (+ (load j) 1)) 0)
+                                    (break)))
+                            0)))
+                      (jb-cstr b c"]}") 0)
+                  0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"]}") 0))
+
+(defn reflect-graph [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+  (jb-cstr b c"{\"type\":\"Graph\",\"instances\":[")
+  (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut first) true]
+    (loop (if (< (load i) n)
+            (let [m (al-get ms (load i))]
+              (if (load (field m is-entity))
+                (let [ti (load (index (load (field p types)) (load i)))]
+                  (if (= (cast i64 ti) 0) 0
+                    (let [a (load (field ti arena))]
+                      (if (= (cast i64 a) 0) 0
+                        (let [hwm (load (field a bump-cursor)) (mut s) 0]
+                          (loop (if (< (load s) hwm)
+                                  (let [hp (cast (ptr InstanceHeader) (arena-slot-ptr a (load s)))]
+                                    (if (= (iand (load (field hp flags)) FLAG_LIVE) FLAG_LIVE)
+                                      (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                                          (emit-graph-instance b m hp) 0)
+                                      0)
+                                    (store! s (+ (load s) 1)) 0)
+                                  (break)))
+                          0)))))
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-cstr b c"]}") 0)
+
 (defn reflect-schema [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
   (jb-cstr b c"{\"type\":\"Schema\",\"nodes\":[")
   (let [(mut first) true]

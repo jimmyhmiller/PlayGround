@@ -577,7 +577,7 @@ function TopBar({ onGlobalSearch, onToggleTranscript, mode, setMode, onBack, pro
       ${onBack ? html`<button class="ghost-btn back-btn" title="back to the portal" onClick=${onBack}>← portal</button>` : ""}
       <div class="brand">scry<span class="brand-sub">${programName || "live viewer"}</span></div>
       <div class="viewtoggle">
-        <button class=${"vt-btn" + (mode === "graph" ? " active" : "")} onClick=${() => setMode("graph")}>Graph</button>
+        <button class=${"vt-btn" + (mode === "map" ? " active" : "")} onClick=${() => setMode("map")}>Map</button>
         <button class=${"vt-btn" + (mode === "browse" ? " active" : "")} onClick=${() => setMode("browse")}>List</button>
       </div>
       <input id="global-search" type="text" spellcheck="false" autocomplete="off"
@@ -591,299 +591,347 @@ function TopBar({ onGlobalSearch, onToggleTranscript, mode, setMode, onBack, pro
     </header>`;
 }
 
-// ===================== class-relationship graph (Phase 9) =====================
-// A node-link graph of the program's STATIC structure, served by the new schema() eval op
-// (classes/objects/interfaces/enums, + per-field/variant refTypes so edges are server-resolved,
-// never string-parsed). The SAME graph is the landing view whether the program is running
-// (nodes carry live counts, a class click drills to its instance table) or merely inspected
-// (`scry inspect` — counts are 0, a click shows a static field/method card). Layout is a
-// DETERMINISTIC force sim (fixed seed + fixed iteration count), computed from the schema SHAPE
-// only, so positions never jitter when liveCounts tick.
+// ===================== bespoke nested-containment view (Phase V1) =====================
+// The DEFAULT live view. NOT a graph — a hand-built instrument panel where OWNERSHIP becomes
+// NESTING and SIZE becomes MASS, driven by the graph() eval (every live instance + its
+// entity-field references, by stable id) plus schema() (static shape, for domain-vs-infra
+// reachability + interface implementors + climbing per-type counts). Layout is DETERMINISTIC:
+// positions derive from the stable program structure, not from counts, so climbing counts grow
+// stacks/bars IN PLACE and never reflow. Shared instances (a Tool held by many owners) are NOT
+// nested and NOT edges — each gets a stable IDENTITY COLOR and renders as that chip everywhere
+// it is held; hovering one lights up every appearance. Utility/transport types recede to a
+// faded, collapsible infrastructure strip. See docs/DECISIONS.md #15 + docs/06-implementation.md.
 
-// derive visible nodes + typed edges from the raw schema() node list.
-function deriveGraph(rawNodes) {
-  const byName = new Map();
-  for (const n of rawNodes) if (!byName.has(n.name)) byName.set(n.name, n);
-  const edges = [];
-  const addEdge = (f, t, kind) => { if (f !== t && byName.has(t)) edges.push({ from: f, to: t, kind }); };
-  for (const n of byName.values()) {
-    if (n.kind === "class" || n.kind === "object") {
-      for (const f of n.fields || []) for (const rt of f.refTypes || []) addEdge(n.name, rt, "field");
-      for (const im of n.implements || []) addEdge(n.name, im, "implements");
-      const gm = /^[^<]+<(.+)>$/.exec(n.name);
-      if (gm) for (const g of gm[1].split(",").map((s) => s.trim())) addEdge(n.name, g, "generic");
-    } else if (n.kind === "enum") {
-      for (const v of n.variants || []) for (const rt of v.refTypes || []) addEdge(n.name, rt, "field");
-    }
+const N_ID = 8;                                  // identity palette slots (--id-0 .. --id-7)
+const roleClass = (r) => {                       // normalize a Message role -> mrow tint class
+  const s = String(r || "").toLowerCase();
+  if (s.startsWith("assist") || s === "asst") return "asst";
+  if (s === "tool_result" || s === "tres" || s.startsWith("tool_res")) return "tres";
+  if (s === "tool" || s === "tool_use" || s === "tuse" || s.startsWith("tool")) return "tool";
+  return "user";
+};
+// scalar accessors over a graph() instance record
+const sVal = (inst, name) => {                   // a scalar field's String/number value, or null
+  const f = inst.scalars && inst.scalars[name];
+  if (!f) return null;
+  if (f.case !== undefined) return f.case;       // enum -> its case name
+  return f.value !== undefined ? f.value : null;
+};
+// a "message" = a leaf with a role AND some body text (content/text). Agent also has a `role`
+// field, so requiring a body keeps Agents/other role-bearing entities out of message stacks.
+const isMsgLike = (inst) => !!(inst.scalars && inst.scalars.role != null &&
+  (inst.scalars.content != null || inst.scalars.text != null || inst.scalars.body != null));
+const displayName = (inst) =>
+  sVal(inst, "name") || sVal(inst, "title") ||
+  (sVal(inst, "content") ? truncate(sVal(inst, "content"), 40) : null) || inst.ref;
+const refParts = (id) => { const m = /^(.+)#(\d+)$/.exec(id); return m ? { cls: m[1], slot: +m[2] } : null; };
+
+// The whole derivation: ownership (nesting) vs sharing (identity chips) vs infrastructure,
+// from the live instance list + the static schema. Pure + deterministic.
+function computeNested(instances, schema) {
+  const byId = new Map(instances.map((i) => [i.ref, i]));
+  const typeOf = (id) => (byId.get(id) || {}).type;
+  const nodes = schema || [];
+  const byName = new Map(nodes.map((n) => [n.name, n]));
+  const entityTypes = nodes.filter((n) => n.kind === "class" || n.kind === "object").map((n) => n.name);
+  const liveCount = (t) => (byName.get(t) || {}).liveCount || 0;
+
+  // ---- static type-reference graph, interfaces expanded to their implementors ----
+  const implementorsOf = new Map();
+  for (const n of nodes) if (n.kind === "interface") implementorsOf.set(n.name, n.implementors || []);
+  const expand = (t) => implementorsOf.has(t) ? implementorsOf.get(t) : [t];
+  const refOut = new Map();                       // entity type -> Set(entity type) it can point at
+  for (const n of nodes) {
+    if (n.kind !== "class" && n.kind !== "object") continue;
+    const outs = new Set();
+    for (const f of n.fields || []) for (const rt of f.refTypes || []) for (const e of expand(rt)) outs.add(e);
+    refOut.set(n.name, outs);
   }
   const referenced = new Set();
-  for (const e of edges) { referenced.add(e.from); referenced.add(e.to); }
-  const visible = new Set();
-  for (const n of byName.values()) {
-    if (n.kind === "class" || n.kind === "object") visible.add(n.name);
-    else if (!n.builtin || referenced.has(n.name)) visible.add(n.name);
+  for (const [, outs] of refOut) for (const t of outs) referenced.add(t);
+  // worker/scaffolding types (those implementing a BUILTIN interface, i.e. Runnable thread
+  // bodies) are execution machinery, not domain roots — they hold a domain object to run it,
+  // but the domain owner (Orchestrator) is the real container. Excluding them as root
+  // candidates keeps them (and their held instances' second owner) out of the domain spine, so
+  // e.g. a sub-agent held by BOTH the Orchestrator and its worker still nests under the
+  // Orchestrator instead of counting as "shared". They recede to the infrastructure strip.
+  const builtinIfaces = new Set(nodes.filter((n) => n.kind === "interface" && n.builtin).map((n) => n.name));
+  const isWorker = (t) => ((byName.get(t) || {}).implements || []).some((i) => builtinIfaces.has(i));
+
+  // primary domain root TYPE = the unreferenced container whose static reachable set is largest.
+  const reach = (start) => {
+    const seen = new Set([start]), st = [start];
+    while (st.length) { const c = st.pop(); for (const t of (refOut.get(c) || [])) if (!seen.has(t) && byName.has(t)) { seen.add(t); st.push(t); } }
+    return seen;
+  };
+  const rootTypeCands = entityTypes.filter((t) => (refOut.get(t) || new Set()).size > 0 && !referenced.has(t) && !isWorker(t));
+  const sumLive = (set) => { let s = 0; for (const t of set) s += liveCount(t); return s; };
+  let domainTypes = new Set(entityTypes);         // fallback: everything is domain
+  if (rootTypeCands.length) {
+    // Primary root = the candidate spanning the LARGEST connected domain (reach size); ties
+    // broken by total LIVE instances in that reach (so a real, populated container like
+    // Orchestrator beats a same-shaped-but-empty worker like SubAgentWorker, and a small
+    // side-tree like ModelResponse->ToolCall can never win on instance count alone).
+    let best = null, bestSize = -1, bestLive = -1;
+    for (const c of rootTypeCands) {
+      const s = reach(c), sz = s.size, lv = sumLive(s);
+      if (sz > bestSize || (sz === bestSize && lv > bestLive)) { best = c; bestSize = sz; bestLive = lv; domainTypes = s; }
+    }
   }
-  const vedges = [];
-  const seen = new Set();
-  for (const e of edges) {
-    if (!visible.has(e.from) || !visible.has(e.to)) continue;
-    const key = e.from + "→" + e.to + ":" + e.kind;
-    if (seen.has(key)) continue; seen.add(key);
-    vedges.push(e);
+  const isDomainInst = (id) => byId.has(id) && domainTypes.has(typeOf(id));
+
+  // ---- instance-level ownership (only among domain instances) ----
+  const owners = new Map();                        // targetId -> Set(ownerId)
+  for (const inst of instances) {
+    if (!isDomainInst(inst.ref)) continue;
+    for (const r of inst.refs || []) for (const tid of r.ids) {
+      if (!isDomainInst(tid) || tid === inst.ref) continue;
+      (owners.get(tid) || owners.set(tid, new Set()).get(tid)).add(inst.ref);
+    }
   }
-  const vnodes = [...byName.values()].filter((n) => visible.has(n.name))
-    .map((n) => ({ name: n.name, kind: n.kind, builtin: !!n.builtin }));
-  return { nodes: vnodes, edges: vedges };
+  const ownerCount = (id) => (owners.get(id) || new Set()).size;
+  const sharedIds = new Set();                     // >= 2 distinct domain owners
+  for (const inst of instances) if (isDomainInst(inst.ref) && ownerCount(inst.ref) >= 2) sharedIds.add(inst.ref);
+
+  // ---- nesting tree from the domain roots (inCount 0) ----
+  const placed = new Set();
+  const buildNode = (id) => {
+    const inst = byId.get(id);
+    placed.add(id);
+    const children = [], chipIds = [];
+    for (const r of inst.refs || []) for (const tid of r.ids) {
+      if (!byId.has(tid) || tid === id) continue;
+      if (sharedIds.has(tid)) { chipIds.push(tid); continue; }
+      if (!isDomainInst(tid)) continue;            // reference into infra -> ignore here
+      if (ownerCount(tid) === 1 && !placed.has(tid)) children.push(buildNode(tid));
+    }
+    let subtree = 1;
+    for (const c of children) subtree += c.subtree;
+    return { id, inst, children, chipIds, subtree };
+  };
+  const rootIds = instances.filter((i) => isDomainInst(i.ref) && ownerCount(i.ref) === 0).map((i) => i.ref);
+  // singleton objects (a leaf like Session): unreferenced, no entity fields, exactly 1 live.
+  const singletonTypes = new Set(entityTypes.filter((t) =>
+    !domainTypes.has(t) && liveCount(t) === 1 && (refOut.get(t) || new Set()).size === 0 && !referenced.has(t)));
+  const singletons = instances.filter((i) => singletonTypes.has(i.type));
+  // container roots become the stage; leaf roots that are singleton-objects go to the header.
+  const roots = rootIds.filter((id) => !singletonTypes.has(typeOf(id))).map(buildNode)
+    .sort((a, b) => b.subtree - a.subtree);
+
+  // ---- identity color: stable slot per shared id (sorted -> index) ----
+  const idColor = new Map([...sharedIds].sort().map((id, i) => [id, i % N_ID]));
+
+  // ---- infrastructure types: entity types with no presence in the domain (nor singletons) ----
+  const infraTypes = entityTypes
+    .filter((t) => !domainTypes.has(t) && !singletonTypes.has(t) && liveCount(t) > 0)
+    .map((t) => ({ name: t, count: liveCount(t) }))
+    .sort((a, b) => b.count - a.count);
+  const infraSet = new Set(infraTypes.map((x) => x.name));
+
+  // ---- census: every entity type with a live instance, mass by count ----
+  const census = entityTypes
+    .filter((t) => liveCount(t) > 0)
+    .map((t) => ({ name: t, count: liveCount(t), util: infraSet.has(t) }))
+    .sort((a, b) => b.count - a.count);
+
+  return { byId, roots, singletons, sharedIds, idColor, infraTypes, census, ownerCount };
 }
 
-function nodeWidth(name) { return Math.max(78, name.length * 7.2 + 26); }
-const NODE_H = 32;
-
-// deterministic force-directed layout. No RNG anywhere: seed positions from the node index
-// (golden-angle spread) + a per-kind vertical band (interfaces up, enums down, classes center),
-// then run a FIXED number of Fruchterman-Reingold iterations with fixed constants. Same input
-// shape => byte-identical output => stable across polls and reloads.
-function computeLayout(nodes, edges) {
-  const N = nodes.length;
-  if (N === 0) return {};
-  const idx = new Map(nodes.map((n, i) => [n.name, i]));
-  const bandY = (kind) => kind === "interface" ? -360 : kind === "enum" ? 360 : 0;
-  // per-node half-extents (+ margin) so springs, repulsion and overlap-separation all respect size
-  const hw = nodes.map((n) => nodeWidth(n.name) / 2 + 16);
-  const hh = NODE_H / 2 + 22;
-  const px = new Array(N), py = new Array(N);
-  for (let i = 0; i < N; i++) {
-    const ang = i * 2.399963229728653;       // golden angle — deterministic spread, no RNG
-    const r = 90 + i * 14;
-    px[i] = Math.cos(ang) * r;
-    py[i] = bandY(nodes[i].kind) + Math.sin(ang) * r * 0.55;
-  }
-  const K = 230;                             // ideal spring length
-  const krep = 26000;                        // long-range repulsion
-  const iters = 600;
-  const adj = edges.map((e) => [idx.get(e.from), idx.get(e.to)]).filter(([a, b]) => a != null && b != null);
-  for (let it = 0; it < iters; it++) {
-    const dx = new Float64Array(N), dy = new Float64Array(N);
-    for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
-      let vx = px[i] - px[j], vy = py[i] - py[j];
-      let d2 = vx * vx + vy * vy; if (d2 < 0.01) { vx = ((i * 31 + 7) % 13) - 6 || 1; vy = ((j * 17 + 3) % 11) - 5 || 1; d2 = vx * vx + vy * vy; }
-      const d = Math.sqrt(d2); const f = krep / d2;
-      dx[i] += (vx / d) * f; dy[i] += (vy / d) * f;
-      dx[j] -= (vx / d) * f; dy[j] -= (vy / d) * f;
-    }
-    for (const [a, b] of adj) {
-      let vx = px[a] - px[b], vy = py[a] - py[b];
-      const d = Math.sqrt(vx * vx + vy * vy) || 0.01; const f = (d * d) / K;
-      dx[a] -= (vx / d) * f; dy[a] -= (vy / d) * f;
-      dx[b] += (vx / d) * f; dy[b] += (vy / d) * f;
-    }
-    for (let i = 0; i < N; i++) {
-      dy[i] += (bandY(nodes[i].kind) - py[i]) * 0.10;   // keep kinds in readable rows
-      dx[i] += (0 - px[i]) * 0.004;                     // gentle horizontal centering
-    }
-    const t = 60 * (1 - it / iters) + 3;                // cooling
-    for (let i = 0; i < N; i++) {
-      const dl = Math.sqrt(dx[i] * dx[i] + dy[i] * dy[i]) || 1;
-      px[i] += (dx[i] / dl) * Math.min(dl, t);
-      py[i] += (dy[i] / dl) * Math.min(dl, t);
-    }
-    // hard AABB overlap resolution — separate any two boxes that still intersect, along the
-    // axis of least penetration. Runs every iteration so the settled layout never overlaps.
-    for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
-      const ox = (hw[i] + hw[j]) - Math.abs(px[i] - px[j]);
-      const oy = (hh + hh) - Math.abs(py[i] - py[j]);
-      if (ox > 0 && oy > 0) {
-        if (ox < oy) { const s = (px[i] < px[j] ? -1 : 1) * ox / 2; px[i] += s; px[j] -= s; }
-        else { const s = (py[i] < py[j] ? -1 : 1) * oy / 2; py[i] += s; py[j] -= s; }
-      }
-    }
-  }
-  const pos = {};
-  for (let i = 0; i < N; i++) pos[nodes[i].name] = { x: px[i], y: py[i] };
-  return pos;
-}
-
-// clip a center->center segment to the target node's bounding box, so the arrowhead lands on
-// the border rather than the middle of the box.
-function clipToBox(sx, sy, tx, ty, halfW, halfH) {
-  const vx = sx - tx, vy = sy - ty;
-  if (vx === 0 && vy === 0) return { x: tx, y: ty };
-  const sxScale = vx !== 0 ? halfW / Math.abs(vx) : Infinity;
-  const syScale = vy !== 0 ? halfH / Math.abs(vy) : Infinity;
-  const s = Math.min(sxScale, syScale);
-  return { x: tx + vx * s, y: ty + vy * s };
-}
-
-function GraphPane({ onOpenType }) {
-  const [rawNodes, setRawNodes] = useState([]);
-  const [hover, setHover] = useState(null);
-  const [sel, setSel] = useState(null);        // static-card node (name) when not drilling
-  const [view, setView] = useState({ tx: 0, ty: 0, s: 1 });
-  const svgRef = useRef(null);
-  const dragRef = useRef(null);
-  const fittedSig = useRef("");
-
-  usePoll(async () => {
-    const r = await evalSource("schema()");
-    if (r.value && r.value.nodes) setRawNodes(r.value.nodes);
-  }, 800, []);
-
-  const { nodes, edges } = useMemo(() => deriveGraph(rawNodes), [rawNodes]);
-  // structural signature: recompute layout ONLY when the shape changes, never on count ticks.
-  const sig = useMemo(() =>
-    nodes.map((n) => n.name + ":" + n.kind).sort().join("|") + "//" +
-    edges.map((e) => e.from + ">" + e.to + ":" + e.kind).sort().join("|"),
-    [nodes, edges]);
-  const pos = useMemo(() => computeLayout(nodes, edges), [sig]); // eslint-disable-line
-  const liveMap = useMemo(() => {
-    const m = {}; for (const n of rawNodes) m[n.name] = n.liveCount || 0; return m;
-  }, [rawNodes]);
-  const rawByName = useMemo(() => {
-    const m = {}; for (const n of rawNodes) m[n.name] = n; return m;
-  }, [rawNodes]);
-
-  // auto-fit once per new structural signature
-  const bounds = useMemo(() => {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const n of nodes) {
-      const p = pos[n.name]; if (!p) continue;
-      const hw = nodeWidth(n.name) / 2;
-      minX = Math.min(minX, p.x - hw); maxX = Math.max(maxX, p.x + hw);
-      minY = Math.min(minY, p.y - NODE_H); maxY = Math.max(maxY, p.y + NODE_H);
-    }
-    if (!isFinite(minX)) return { minX: -200, minY: -200, maxX: 200, maxY: 200 };
-    return { minX, minY, maxX, maxY };
-  }, [sig, pos]); // eslint-disable-line
-
-  useEffect(() => {
-    if (fittedSig.current === sig || !svgRef.current || !nodes.length) return;
-    const el = svgRef.current.getBoundingClientRect();
-    const w = bounds.maxX - bounds.minX + 120, h = bounds.maxY - bounds.minY + 120;
-    const s = Math.min(el.width / w, el.height / h, 1.4);
-    setView({ s, tx: el.width / 2 - ((bounds.minX + bounds.maxX) / 2) * s, ty: el.height / 2 - ((bounds.minY + bounds.maxY) / 2) * s });
-    fittedSig.current = sig;
-  }, [sig, bounds, nodes.length]);
-
-  const onWheel = useCallback((e) => {
-    e.preventDefault();
-    const rect = svgRef.current.getBoundingClientRect();
-    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    setView((v) => {
-      const ns = Math.max(0.25, Math.min(3, v.s * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
-      const k = ns / v.s;
-      return { s: ns, tx: mx - (mx - v.tx) * k, ty: my - (my - v.ty) * k };
-    });
-  }, []);
-  const onDown = useCallback((e) => {
-    if (e.target.closest(".gnode")) return;    // let node clicks through
-    dragRef.current = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty };
-  }, [view]);
-  const onMove = useCallback((e) => {
-    if (!dragRef.current) return;
-    const d = dragRef.current;
-    setView((v) => ({ ...v, tx: d.tx + (e.clientX - d.x), ty: d.ty + (e.clientY - d.y) }));
-  }, []);
-  const onUp = useCallback(() => { dragRef.current = null; }, []);
-
-  const clickNode = useCallback((n) => {
-    const live = liveMap[n.name] || 0;
-    if ((n.kind === "class" || n.kind === "object") && live > 0) { onOpenType(n.name); return; }
-    setSel(sel === n.name ? null : n.name);    // static card toggle
-  }, [liveMap, onOpenType, sel]);
-
-  const connected = (name) => hover && (name === hover || edges.some((e) =>
-    (e.from === hover && e.to === name) || (e.to === hover && e.from === name)));
-
+// an identity chip for a shared instance (colored, hover-highlights all its appearances)
+function IdChip({ id, model, small, onEnter, onLeave, onClick }) {
+  const slot = model.idColor.get(id) ?? 0;
+  const inst = model.byId.get(id);
+  const label = inst ? (sVal(inst, "name") || sVal(inst, "title") || inst.type) : id;
+  const held = model.ownerCount(id);
   return html`
-    <div id="graphwrap">
-      <svg id="graph" ref=${svgRef}
-           onWheel=${onWheel} onPointerDown=${onDown} onPointerMove=${onMove}
-           onPointerUp=${onUp} onPointerLeave=${onUp}>
-        <defs>
-          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M0,0 L10,5 L0,10 z" class="arrowhead" />
-          </marker>
-          <marker id="arrowhi" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M0,0 L10,5 L0,10 z" class="arrowhead hi" />
-          </marker>
-        </defs>
-        <g transform=${`translate(${view.tx},${view.ty}) scale(${view.s})`}>
-          ${edges.map((e, i) => {
-            const a = pos[e.from], b = pos[e.to];
-            if (!a || !b) return null;
-            const hw = nodeWidth(e.to) / 2, hh = NODE_H / 2 + 3;
-            const p2 = clipToBox(a.x, a.y, b.x, b.y, hw, hh);
-            const hi = hover && (e.from === hover || e.to === hover);
-            const cls = "gedge " + e.kind + (hi ? " hi" : hover ? " dim" : "");
-            return html`<line key=${i} x1=${a.x} y1=${a.y} x2=${p2.x} y2=${p2.y}
-              class=${cls} data-from=${e.from} data-to=${e.to} data-kind=${e.kind}
-              marker-end=${hi ? "url(#arrowhi)" : "url(#arrow)"} />`;
-          })}
-          ${nodes.map((n) => {
-            const p = pos[n.name]; if (!p) return null;
-            const w = nodeWidth(n.name), h = NODE_H;
-            const live = liveMap[n.name] || 0;
-            const dim = hover && !connected(n.name);
-            const cls = `gnode ${n.kind}` + (dim ? " dim" : "") + (sel === n.name ? " sel" : "");
-            return html`<g key=${n.name} class=${cls} data-name=${n.name} data-kind=${n.kind} data-live=${live} transform=${`translate(${p.x},${p.y})`}
-                 onPointerEnter=${() => setHover(n.name)} onPointerLeave=${() => setHover(null)}
-                 onClick=${() => clickNode(n)}>
-              <rect x=${-w / 2} y=${-h / 2} width=${w} height=${h} rx=${n.kind === "interface" ? 15 : n.kind === "enum" ? 3 : 7} class="gbox" />
-              <text class="glabel" text-anchor="middle" dy="0.32em">${n.name}</text>
-              <g transform=${`translate(${w / 2 - 3},${-h / 2 + 3})`}>
-                <circle r="9" class=${"gbadge" + (live > 0 ? " live" : "")} />
-                <text class="gcount" text-anchor="middle" dy="0.32em">${live}</text>
-              </g>
-            </g>`;
-          })}
-        </g>
-      </svg>
-      <div id="glegend">
-        <div class="gl-row"><span class="gl-chip class"></span>class</div>
-        <div class="gl-row"><span class="gl-chip object"></span>object</div>
-        <div class="gl-row"><span class="gl-chip interface"></span>interface</div>
-        <div class="gl-row"><span class="gl-chip enum"></span>enum</div>
-        <div class="gl-sep"></div>
-        <div class="gl-row"><span class="gl-line field"></span>field ref</div>
-        <div class="gl-row"><span class="gl-line implements"></span>implements</div>
-        <div class="gl-hint">scroll = zoom · drag = pan · click a node</div>
+    <button class=${"chip" + (small ? " sm" : "")} data-identity=${id} data-slot=${slot}
+            style=${{ "--c": `var(--id-${slot})` }}
+            title=${`${id} · shared instance · held by ${held}`}
+            onMouseEnter=${() => onEnter(id)} onMouseLeave=${onLeave}
+            onClick=${(e) => { e.stopPropagation(); onClick(id); }}>
+      <span class="knob"></span>${label}</button>`;
+}
+
+// a nested region (recursive): header + owned children + a dense message stack + identity chips
+function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen }) {
+  const { inst } = node;
+  const status = sVal(inst, "status");
+  const role = sVal(inst, "role");
+  const msgKids = node.children.filter((c) => isMsgLike(c.inst));
+  const subKids = node.children.filter((c) => !isMsgLike(c.inst));
+  const cls = "region" + (depth === 0 ? " root" : depth === 1 ? " lvl1" : " lvl2");
+  const st = status ? String(status).toLowerCase() : "";
+  const badgeCls = "badge " + (st.includes("run") ? "running" : st.includes("paus") ? "paused" : st.includes("done") ? "done" : "waiting");
+  const p = refParts(node.id);
+  return html`
+    <div class=${cls} data-region=${node.id}>
+      <div class="region-head" onClick=${() => p && onOpen(p.cls, p.slot, inst.generation)}>
+        <span class="node-kind">${inst.type}</span>
+        <span class="region-name">${displayName(inst)}</span>
+        ${role ? html`<span class="region-role">${role}</span>` : ""}
+        ${status ? html`<span class=${badgeCls}><span class="bd"></span>${String(status)}</span>` : ""}
       </div>
-      ${sel ? html`<${NodeCard} node=${rawByName[sel]} live=${liveMap[sel] || 0} onClose=${() => setSel(null)} onBrowse=${() => { onOpenType(sel); setSel(null); }} />` : ""}
+      ${msgKids.length ? html`
+        <div class="conv">
+          <div class="conv-label"><span class="k">owns ▸ ${msgKids[0].inst.type}</span>
+            <span class="n">count <b>${msgKids.length}</b></span></div>
+          <div class="mstack">
+            ${msgKids.map((c) => html`<div class=${"mrow " + roleClass(sVal(c.inst, "role"))} key=${c.id}
+              data-mrow=${c.id}><span class="tick"></span><span class="fill"></span></div>`)}
+          </div>
+        </div>` : ""}
+      ${subKids.length ? html`
+        <div class=${"subregions" + (subKids.length > 1 && depth === 0 ? " grid" : "")}>
+          ${subKids.map((c) => html`<${Region} key=${c.id} node=${c} model=${model} depth=${depth + 1}
+            onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${onOpen} />`)}
+        </div>` : ""}
+      ${node.chipIds.length ? html`
+        <div class="refs"><span class="rk">references ▸ shared</span>
+          ${node.chipIds.map((id) => html`<${IdChip} key=${id} id=${id} model=${model} small=${true}
+            onEnter=${onEnter} onLeave=${onLeave} onClick=${onChip} />`)}
+        </div>` : ""}
     </div>`;
 }
 
-// static field/method/variant card — shown when clicking a node with no live instances
-// (the inspect state), or an interface/enum. Reuses the schema() payload; no extra eval.
-function NodeCard({ node, live, onClose, onBrowse }) {
-  if (!node) return null;
+function NestedView({ onOpenType, onOpenDetail }) {
+  const [instances, setInstances] = useState([]);
+  const [schema, setSchema] = useState([]);
+  const [hoverId, setHoverId] = useState(null);
+  const [linksOn, setLinksOn] = useState(false);
+  const [infraOpen, setInfraOpen] = useState(false);
+  const prevCounts = useRef({});
+  const [live, setLive] = useState({});           // type -> true when its count just climbed
+  const freshRef = useRef(new Set());             // instance ids seen last poll (for pulse)
+  const wrapRef = useRef(null);
+  const overlayRef = useRef(null);
+
+  usePoll(async () => {
+    const [g, s] = await Promise.all([evalSource("graph()"), evalSource("schema()")]);
+    if (s.value && s.value.nodes) {
+      const nl = {};
+      for (const n of s.value.nodes) {
+        const prev = prevCounts.current[n.name];
+        nl[n.name] = prev != null && (n.liveCount || 0) > prev;
+        prevCounts.current[n.name] = n.liveCount || 0;
+      }
+      setLive(nl); setSchema(s.value.nodes);
+    }
+    if (g.value && g.value.instances) setInstances(g.value.instances);
+  }, 800, []);
+
+  const model = useMemo(() => computeNested(instances, schema), [instances, schema]);
+
+  // fresh-instance pulse: mark the DOM rows/regions that are new since the previous poll.
+  useEffect(() => {
+    const now = new Set(instances.map((i) => i.ref));
+    if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches && freshRef.current.size) {
+      for (const id of now) if (!freshRef.current.has(id)) {
+        const el = wrapRef.current && wrapRef.current.querySelector(`[data-mrow="${CSS.escape(id)}"]`);
+        if (el) { el.classList.remove("fresh"); void el.offsetWidth; el.classList.add("fresh"); }
+      }
+    }
+    freshRef.current = now;
+  }, [instances]);
+
+  // identity highlight: light up EVERY appearance of the hovered instance id (imperative, like
+  // the mockup — survives poll re-renders because it re-runs on both hoverId and instances).
+  useEffect(() => {
+    const wrap = wrapRef.current; if (!wrap) return;
+    wrap.querySelectorAll(".chip.id-hi").forEach((c) => c.classList.remove("id-hi"));
+    if (hoverId) wrap.querySelectorAll(`.chip[data-identity="${CSS.escape(hoverId)}"]`).forEach((c) => c.classList.add("id-hi"));
+  }, [hoverId, instances]);
+
+  const onEnter = useCallback((id) => setHoverId(id), []);
+  const onLeave = useCallback(() => setHoverId(null), []);
+  const openDetail = useCallback((cls, slot, gen) => onOpenDetail(cls, slot, gen ?? 0), [onOpenDetail]);
+  const onChip = useCallback((id) => { const p = refParts(id); if (p) openDetail(p.cls, p.slot, (model.byId.get(id) || {}).generation); }, [model, openDetail]);
+
+  // "show links" overlay: hub-and-spoke faded connectors between every appearance of hoverId.
+  useEffect(() => {
+    const svg = overlayRef.current, wrap = wrapRef.current;
+    if (!svg || !wrap) return;
+    svg.innerHTML = "";
+    if (!linksOn || !hoverId) return;
+    const wb = wrap.getBoundingClientRect();
+    const pts = [...wrap.querySelectorAll(`.chip[data-identity="${CSS.escape(hoverId)}"]`)].map((c) => {
+      const r = c.getBoundingClientRect(); return { x: r.left + r.width / 2 - wb.left, y: r.top + r.height / 2 - wb.top };
+    });
+    if (pts.length < 2) return;
+    const hub = { x: pts.reduce((s, p) => s + p.x, 0) / pts.length, y: pts.reduce((s, p) => s + p.y, 0) / pts.length };
+    const slot = model.idColor.get(hoverId) ?? 0;
+    for (const p of pts) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", `M${p.x},${p.y} Q${(p.x + hub.x) / 2},${p.y} ${hub.x},${hub.y}`);
+      path.setAttribute("class", "link show"); path.style.setProperty("--c", `var(--id-${slot})`);
+      svg.appendChild(path);
+    }
+  }, [linksOn, hoverId, model, instances]);
+
+  const maxCount = Math.max(1, ...model.census.map((c) => c.count));
+  const barW = (n) => Math.max(3, Math.pow(n / maxCount, 0.72) * 100);
+
   return html`
-    <aside id="nodecard">
-      <div class="nc-head">
-        <span class="nc-kind ${node.kind}">${node.kind}</span>
-        <span class="nc-name">${node.name}</span>
-        <button class="ghost-btn" onClick=${onClose}>close</button>
+    <div id="nested" class=${hoverId ? "id-active" : ""} ref=${wrapRef}>
+      <div class="nested-bar">
+        <span class="nested-title">structure <span class="nsub">ownership = nesting · size = mass</span></span>
+        <button class=${"ctl" + (linksOn ? " on" : "")} onClick=${() => setLinksOn((v) => !v)}>
+          <span class="sw"></span>show links</button>
       </div>
-      ${node.implements && node.implements.length ? html`<div class="nc-sub">implements ${node.implements.join(", ")}</div>` : ""}
-      ${node.implementors && node.implementors.length ? html`<div class="nc-sub">implemented by ${node.implementors.join(", ")}</div>` : ""}
-      ${(node.kind === "class" || node.kind === "object") ? html`
-        <div class="nc-count ${live > 0 ? "live" : ""}">${live} live instance${live === 1 ? "" : "s"}
-          ${live > 0 ? html`<button class="invoke-btn" onClick=${onBrowse}>browse →</button>` : ""}</div>` : ""}
-      ${node.fields && node.fields.length ? html`
-        <div class="nc-section"><h4>fields</h4>
-          ${node.fields.map((f) => html`<div class="nc-field" key=${f.name}>
-            <span class="nc-fname">${f.name}</span><span class="nc-ftype">${f.type}</span></div>`)}
+
+      <div class="census">
+        <div class="census-head"><span class="h">live heap · mass by instance count</span>
+          <span class="meta">watching · refresh 800ms</span></div>
+        <div class="census-grid">
+          ${model.census.map((c) => html`
+            <${React.Fragment} key=${c.name}>
+              <div class=${"cx-name" + (c.util ? " util" : "")}>${c.name}</div>
+              <div class="cx-track"><div class=${"cx-bar" + (live[c.name] ? " live" : "")} style=${{ width: barW(c.count) + "%" }}></div></div>
+              <div class=${"cx-count" + (live[c.name] ? " live" : "")}>×<b>${c.count}</b>${live[c.name] ? html`<span class="trend">▲</span>` : ""}</div>
+            <//>`)}
+        </div>
+      </div>
+
+      ${model.sharedIds.size ? html`
+        <div class="legend"><span class="lbl">shared instances</span>
+          ${[...model.sharedIds].sort().map((id) => html`<${IdChip} key=${id} id=${id} model=${model}
+            onEnter=${onEnter} onLeave=${onLeave} onClick=${onChip} />`)}
         </div>` : ""}
-      ${node.variants && node.variants.length ? html`
-        <div class="nc-section"><h4>variants</h4>
-          ${node.variants.map((v) => html`<div class="nc-field" key=${v.name}>
-            <span class="nc-fname">${v.name}</span><span class="nc-ftype">${v.payload && v.payload.length ? "(" + v.payload.join(", ") + ")" : ""}</span></div>`)}
-        </div>` : ""}
-      ${node.methods && node.methods.length ? html`
-        <div class="nc-section"><h4>methods</h4>
-          ${node.methods.map((m) => html`<div class="nc-method" key=${m.name}>
-            ${m.name}(${m.params.map((p) => p.name + ": " + p.type).join(", ")}) <span class="mret">→ ${m.returns}</span></div>`)}
-        </div>` : ""}
-    </aside>`;
+
+      <div class="stage-wrap">
+        <svg class="link-overlay" ref=${overlayRef} aria-hidden="true"></svg>
+        ${model.roots.length === 0 ? html`
+          <div class="stage-empty">no live instances yet — run the program, or switch to <b>List</b> to browse types.</div>` : ""}
+        ${model.roots.map((r) => html`
+          <div class="orch" key=${r.id}>
+            ${model.singletons.length && r === model.roots[0] ? html`
+              <div class="singletons">
+                ${model.singletons.map((s) => { const p = refParts(s.ref); return html`
+                  <button class="singleton-obj" key=${s.ref} onClick=${() => p && openDetail(p.cls, p.slot, s.generation)}>
+                    <span class="node-kind">obj</span>${s.type} <span class="dim">×1</span></button>`; })}
+              </div>` : ""}
+            <${Region} node=${r} model=${model} depth=${0}
+              onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${openDetail} />
+          </div>`)}
+
+        ${model.infraTypes.length ? html`
+          <div class=${"infra" + (infraOpen ? " open" : "")}>
+            <div class="infra-head" onClick=${() => setInfraOpen((v) => !v)}>
+              <span class="caret">▸</span><span class="k">infrastructure</span>
+              <span class="sub">${model.infraTypes.length} utility type${model.infraTypes.length === 1 ? "" : "s"} · faded — click to ${infraOpen ? "collapse" : "expand"}</span>
+            </div>
+            <div class="infra-body">
+              <p class="infra-note">Transport &amp; parsing noise — present and browsable, but they don't own domain state, so the default view keeps them out of the way.</p>
+              <div class="infra-grid">
+                ${model.infraTypes.map((u) => html`
+                  <button class="util" key=${u.name} onClick=${() => onOpenType(u.name)}>
+                    <span class="un">${u.name}</span>
+                    <span class=${"uc" + (live[u.name] ? " live" : "")}>×${u.count}${live[u.name] ? " ▲" : ""}</span>
+                  </button>`)}
+              </div>
+            </div>
+          </div>` : ""}
+      </div>
+    </div>`;
 }
 
 // ===================== app root =====================
@@ -894,7 +942,7 @@ function App({ onBack, programName } = {}) {
   const trendRef = useRef({});
 
   const [route, setRoute] = useState({ view: "index", typeName: null, ref: null });
-  const [mode, setMode] = useState("graph");   // "graph" (landing) | "browse" (rail + panes)
+  const [mode, setMode] = useState("map");   // "map" (bespoke nested landing) | "browse" (rail + panes)
   const [crumbs, setCrumbs] = useState([{ label: "types" }]);
   const [ifaceOpen, setIfaceOpenState] = useState({});
   const [replOpen, setReplOpen] = useState(false);
@@ -986,9 +1034,10 @@ function App({ onBack, programName } = {}) {
   const nav = useMemo(() => ({ openTable, openDetail, goIndex, navigateRef, goCrumb }),
     [openTable, openDetail, goIndex, navigateRef, goCrumb]);
 
-  // graph node click: for a class with live instances, drill into the browse view's table;
-  // otherwise GraphPane shows a static card in place (handled inside GraphPane).
+  // nested-view "open a type" (an infra chip click): drill into the browse view's instance table.
   const onGraphOpen = useCallback((name) => { setMode("browse"); openTable(name); }, [openTable]);
+  // clicking a region/chip in the nested view drills into that instance's detail (browse mode).
+  const onNestOpenDetail = useCallback((cls, slot, gen) => { setMode("browse"); openDetail(cls, slot, gen ?? 0, true); }, [openDetail]);
 
   let pane;
   if (route.view === "table") pane = html`<${TablePane} name=${route.typeName} schema=${schema} />`;
@@ -998,8 +1047,8 @@ function App({ onBack, programName } = {}) {
   return html`
     <${NavContext.Provider} value=${nav}>
       <${TopBar} onGlobalSearch=${globalSearch} onToggleTranscript=${() => setTxOpen((o) => !o)} mode=${mode} setMode=${setMode} onBack=${onBack} programName=${programName} />
-      ${mode === "graph"
-        ? html`<div id="layout"><${GraphPane} onOpenType=${onGraphOpen} /></div>`
+      ${mode === "map"
+        ? html`<div id="layout" class="nested-layout"><${NestedView} onOpenType=${onGraphOpen} onOpenDetail=${onNestOpenDetail} /></div>`
         : html`<div id="layout">
             <${TypeRail} schema=${schema} trend=${trend} route=${route} ifaceOpen=${ifaceOpen} setIfaceOpen=${setIfaceOpen} />
             <main id="content">

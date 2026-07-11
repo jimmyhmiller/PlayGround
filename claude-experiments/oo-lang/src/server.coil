@@ -132,6 +132,8 @@
                     (do (reflect-types (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"schema") (= (arg-count e) 0))
                     (do (reflect-schema (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                  (and (node-name-eq callee c"graph") (= (arg-count e) 0))
+                    (do (reflect-graph (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"generation") (= (arg-count e) 0))
                     (do (jb-cstr (load (ev-valbuf)) c"{\"type\":\"Int\",\"value\":") (jb-int (load (ev-valbuf)) (current-generation)) (jb-byte (load (ev-valbuf)) \}) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"fields") (= (arg-count e) 1))

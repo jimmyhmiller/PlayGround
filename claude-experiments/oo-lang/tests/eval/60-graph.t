@@ -1,0 +1,10 @@
+file: examples/demo-mini.scry
+expr: graph()
+contains: "type":"Graph"
+contains: {"ref":"Agent#0","type":"Agent"
+contains: {"field":"conversation","list":false,"ids":["Conversation#0"]}
+contains: {"field":"model","list":false,"ids":["ScriptedModel#0"]}
+contains: {"field":"tools","list":false,"ids":["Inventory<Tool>#0"]}
+contains: {"ref":"Conversation#0","type":"Conversation","generation":0,"scalars":{},"refs":[{"field":"messages","list":false,"ids":["Inventory<Message>#0"]}]}
+contains: {"field":"items","list":true,"ids":["ShellTool#0","SearchTool#0"]}
+contains: {"ref":"Message#0","type":"Message","generation":0,"scalars":{"role":{"type":"Role","case":"User"}

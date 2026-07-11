@@ -1666,3 +1666,131 @@ One app, two modes, decided once at boot by a `Root` component:
 - **`bind-server 7357`→`7400` was the whole "port juggling" fix** — one constant. Because
   `bind-server` already scans `+20`, two programs on one machine transparently land on 7400/7401/… and
   each registers its real bound port, so the proxy always targets the right process.
+
+---
+
+# Phase V1 — the bespoke NESTED-CONTAINMENT view (DECISIONS #15a)
+
+The off-the-shelf force-directed instance graph is **rejected** (DECISIONS #15, emphatic). Phase V1
+replaces the default live view with a hand-built, deterministic **nested-containment** instrument
+panel where **ownership becomes nesting** and **live instance count becomes mass**, ported from the
+signed-off mockup (`scratchpad/scry-bespoke-views.html`). The old `GraphPane`/`deriveGraph`/
+`computeLayout` (the Fruchterman-Reingold sim) are **deleted**. Two modes remain: **Map** (this view,
+the default landing) and **List** (the rail + table/detail browse). The static class graph of Phase 9
+is superseded as the landing view by this.
+
+## The `graph()` reflection op (`src/serialize.coil` `reflect-graph`, wired in `src/server.coil`)
+
+One new eval op powers the whole view. It walks **every entity arena** and emits one compact record
+per LIVE instance so the client can compute ownership vs sharing entirely on its own:
+
+```json
+{ "type":"Graph", "instances":[
+  { "ref":"Agent#0", "type":"Agent", "generation":0,
+    "scalars": { "name":{"type":"String","value":"assistant"},
+                 "role":{"type":"String","value":"orchestrator"},
+                 "status":{"type":"AgentStatus","case":"Idle"} },
+    "refs": [ {"field":"conversation","list":false,"ids":["Conversation#0"]},
+              {"field":"model","list":false,"ids":["ScriptedModel#0"]},
+              {"field":"tools","list":true,"ids":["CalcTool#0","WeatherTool#0","ShellTool#0","SearchTool#0"]} ] } ] }
+```
+
+- **`scalars`** — only scalar/enum LEAF fields (Int/Bool/Float/String + enums), inlined via the
+  existing `serialize-value` at depth 1. `List`/`Map`-of-scalar and entity fields are excluded here.
+- **`refs`** — one entry per entity-typed field: a single entity ref (`list:false`) or a
+  `List<Entity>` (`list:true`). Every id is the **concrete runtime `Type#slot`** recovered from the
+  *target's own* `InstanceHeader`, so an interface- or `List<T>`-typed field resolves to real
+  implementors (`Agent.tools : List<Tool>` → `["CalcTool#0", …]`).
+- Registered exactly like `schema()`: a `graph()` branch in `try-reflection` + `reflect-graph` in
+  serialize.coil. `types()`/`schema()`/`instances()` and their goldens are byte-for-byte untouched.
+
+**Why one op, not cascading `T.instances()`:** a single `graph()` is one round-trip that carries the
+whole live reference structure with stable ids; the alternative (one `instances()` per type, then
+re-resolving refs client-side) is N chatty round-trips per poll and re-derives what the server already
+knows. The client still ALSO polls `schema()` (unchanged) for the static SHAPE — interface
+implementors, per-field `refTypes`, and climbing per-type `liveCount` — which `graph()` deliberately
+does not carry. So: `schema()` = static skeleton + counts, `graph()` = live instance graph. Two small
+evals per 800 ms poll; the census/mass reads `schema().liveCount` (climbs live), the nesting reads
+`graph()`.
+
+## Ownership / sharing / infrastructure rules (all client-side, `computeNested` in `viewer/app.js`)
+
+Pure and deterministic — same program → same layout, positions derive from the stable structure, not
+from counts, so climbing counts grow stacks/bars **in place** and never reflow.
+
+1. **Static domain-type set.** Build the type-reference graph from `schema()` (`refTypes` per field),
+   expanding each interface to its `implementors`. The **primary domain root type** is the
+   *unreferenced container* whose reachable set is largest; ties broken by total live instances in
+   that reach (so a real, populated container like `Orchestrator` beats an empty, same-shaped worker,
+   and a small side-tree like `ModelResponse→ToolCall` can never win). **Worker types** — those
+   implementing a *builtin* interface (`Runnable`, the thread-body contract) — are excluded as root
+   candidates: they hold a domain object to *run* it, they are not the domain container. `domainTypes`
+   = the reach set of the chosen root.
+2. **Ownership = nesting.** Among domain instances only, count distinct owners per target (an entity
+   ref edge owner→target). Restricting to domain owners is what makes a sub-agent held by BOTH the
+   `Orchestrator` (`subs`) and its (infra) `SubAgentWorker` still nest under the Orchestrator instead
+   of counting as shared. A target with **exactly one** domain owner **nests** inside it.
+3. **Size = mass.** The census ribbon bars use the mockup's `pow(n/max, 0.72)` compression (big masses
+   dominate, small ones stay visible); a Conversation's message stack renders **one row per Message**,
+   so its height literally IS its mass — 29 Messages visibly dominate 3 Agents.
+4. **Shared = identity color, not nesting.** A domain instance with **≥2 distinct domain owners** (the
+   4 tools, held by the Orchestrator and every Agent) is never nested; it gets a stable identity slot
+   (`id → sorted-index mod 8`, palette `--id-0..--id-7`) and renders as that colored chip **everywhere**
+   it is referenced, plus in the legend. Hovering any chip adds `id-active` to the view and `id-hi` to
+   *every* appearance of that exact id (imperative toggle, survives poll re-renders). The optional
+   **show links** toggle draws the mockup's hub-and-spoke faded SVG connectors between appearances.
+5. **Infrastructure recedes.** Entity types **not** in `domainTypes` (and not singleton-objects) with a
+   live count — `ModelResponse`, `ToolCall`, `HttpResponse`, `JsonParser`, the `Runnable` workers — sit
+   in a faded, collapsible **infrastructure strip** with live counts; click a util type to browse it in
+   List mode. The rule is principled (reachability from the domain root, not a class-name allowlist);
+   **V2's `view`/hidden construct will let the program override it.**
+6. **Singleton objects.** An unreferenced leaf with no entity fields and exactly 1 live instance
+   (`Session`, the std `Json` object) renders as a small `obj` node in the primary root's header, not
+   the infra strip.
+7. **Interaction / live.** Clicking a region or chip opens the existing detail (switches to browse mode,
+   reuses `NavContext.openDetail`). Fresh Messages get the mockup's soft-teal pulse; live census rows
+   flag `▲` when a count climbs; everything respects `prefers-reduced-motion`. Dark-first and fully
+   theme-aware — `prefers-color-scheme` AND an explicit `data-theme` toggle both switch base + identity
+   palettes in both directions (the viewer's `data-theme` blocks were extended to restate the base
+   palette so an explicit toggle can always win over the OS media query).
+
+## What V2's `view` construct will layer on (DECISIONS #15b)
+
+The default view above is the substrate. V2 adds the first-class program-declared `view Name for T {
+title; size; badge; section "…" { field as timeline|chips|rows|card|heat } }`: reflection surfaces the
+spec + the fields it needs, and a per-view bespoke renderer honors it (the mockup's Act III `AgentBoard`
+and Act IV `Pulse`). A `hidden`/`view`-level override will also let a program *reclassify* a type the
+heuristic put in the infra strip (or force something out of the default nesting) — the reachability rule
+here is the sensible default it overrides, not a hard wall.
+
+## Tests
+
+- `tests/eval/60-graph.t` — a `graph()` golden on `examples/demo-mini.scry`: asserts the `Graph`
+  payload, an `Agent`'s `conversation`/`model`/`tools` ref ids, a `Conversation`→`Inventory<Message>`
+  nesting, the shared `["ShellTool#0","SearchTool#0"]` tool list appearing under multiple owners, and a
+  `Message`'s inlined `role` enum scalar.
+- `tests/ui-smoke.mjs` — the graph beats are replaced by nested-view beats (Chrome-gated, skips loud
+  if absent): the census renders; an `Agent` region nests a `Conversation` that renders message rows;
+  a shared tool chip appears across ≥2 owner regions with **one** stable identity color; hovering it
+  lights up all appearances (`id-active` + ≥2 `id-hi`); the infra strip renders and expands; clicking a
+  region drills into detail. The portal + inspect scenarios now assert the proxied/empty **nested** view.
+- All 264 prior tests remain green (265 total with the new golden); `schema()`/`types()`/`instances()`
+  goldens unchanged.
+
+## Coil / JS friction (adds to Phase 1–10's list)
+
+- **`graph()` is ~90 lines of straight arena-walking Coil, zero new machinery.** It reuses the exact
+  live-slot scan pattern from `reflect.coil`'s `arena-instances` (`bump-cursor` high-water + `FLAG_LIVE`)
+  and the `serialize-value`/`emit-ref-id`/`mono-by-id` helpers already in serialize.coil — the only new
+  logic is classifying a field's declared type (scalar-leaf vs single-entity vs `List<entity>`), a
+  three-line predicate over `ty-kind`/decl-kind.
+- **Real live data is messier than the mockup, and the fix was a heuristic, not a special case.** Two
+  places bit: (1) `Agent` has its own `role` field, so a naïve "has a `role` scalar ⇒ it's a Message"
+  test swallowed Agents into message stacks — fixed by requiring a *body* scalar (`content`/`text`)
+  too; (2) `research` spawns `SubAgentWorker`s that hold the sub-`Agent`s, so those agents have two
+  owners and the workers are unreferenced containers that tie the real `Orchestrator` on reach —
+  fixed by excluding builtin-interface (`Runnable`) workers from domain roots, which drops both the
+  worker and its second-owner edge, restoring clean nesting. Both fixes are data-driven signals
+  (field shape, builtin-interface conformance), not class-name allowlists.
+- **React `onMouseEnter` fires on native `mouseover`.** The headless-Chrome hover beat had to dispatch
+  `mouseover` (not `mouseenter`) to trip React's synthetic enter handler.
