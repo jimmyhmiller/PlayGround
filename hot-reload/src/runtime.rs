@@ -9,6 +9,11 @@ pub struct Runtime {
     /// Committed external observations. `Emit` advances the frame only after
     /// appending, so pausing and resuming cannot replay an earlier effect.
     pub output: Vec<Value>,
+    /// Set by [`Runtime::jit_get_field`] when a migration barrier trips: the
+    /// native `step` cannot carry a rich condition through its integer return,
+    /// so it stashes the condition here and returns the `CONDITION` outcome for
+    /// the JIT driver to pick up. Unused by the interpreter path.
+    pub pending_condition: Option<Condition>,
     next_object: ObjectId,
     next_actor: ActorId,
 }
@@ -208,15 +213,18 @@ impl Runtime {
     }
 
     fn write_and_advance(&mut self, actor: ActorId, dst: usize, value: Value) {
-        let frame = self
-            .actors
+        let frame = self.frame_mut(actor);
+        frame.registers[dst] = Some(value);
+        frame.pc += 1;
+    }
+
+    fn frame_mut(&mut self, actor: ActorId) -> &mut Frame {
+        self.actors
             .get_mut(&actor)
             .unwrap()
             .frames
             .last_mut()
-            .unwrap();
-        frame.registers[dst] = Some(value);
-        frame.pc += 1;
+            .unwrap()
     }
 
     fn execute(
@@ -233,32 +241,18 @@ impl Runtime {
                 type_id,
                 fields,
             } => {
-                let version = self.world.current_schemas[&type_id];
-                let schema = &self.world.schemas[&(type_id, version)];
-                let mut values = BTreeMap::new();
-                for field in &schema.fields {
-                    let value = fields
-                        .iter()
-                        .find(|(id, _)| *id == field.id)
-                        .map(|(_, reg)| self.reg(actor, *reg))
-                        .transpose()?
-                        .or_else(|| field.default.clone())
-                        .expect("verified constructor");
-                    values.insert(field.id, value);
-                }
-                let id = self.alloc(type_id, version, values);
+                let supplied: Vec<(FieldId, Value)> = fields
+                    .iter()
+                    .map(|(id, reg)| Ok((*id, self.reg(actor, *reg)?)))
+                    .collect::<Result<_, Condition>>()?;
+                let id = self.jit_new(type_id, &supplied);
                 self.write_and_advance(actor, dst, Value::Ref(id));
             }
             Instruction::GetField { dst, object, field } => {
                 let Value::Ref(id) = self.reg(actor, object)? else {
                     return Err(self.type_error(function, pc, "field access on non-reference"));
                 };
-                self.migrate(id)?;
-                let value = self.heap[&id]
-                    .fields
-                    .get(&field)
-                    .cloned()
-                    .ok_or_else(|| self.type_error(function, pc, "field is absent"))?;
+                let value = self.jit_get_field(id, field)?;
                 self.write_and_advance(actor, dst, value);
             }
             Instruction::SubI64 { dst, left, right } => {
@@ -268,6 +262,33 @@ impl Runtime {
                     return Err(self.type_error(function, pc, "subtraction on non-i64"));
                 };
                 self.write_and_advance(actor, dst, Value::I64(a - b));
+            }
+            Instruction::LtI64 { dst, left, right } => {
+                let (Value::I64(a), Value::I64(b)) =
+                    (self.reg(actor, left)?, self.reg(actor, right)?)
+                else {
+                    return Err(self.type_error(function, pc, "comparison on non-i64"));
+                };
+                self.write_and_advance(actor, dst, Value::Bool(a < b));
+            }
+            Instruction::Jump { target } => {
+                self.frame_mut(actor).pc = target;
+            }
+            Instruction::Branch {
+                cond,
+                then_pc,
+                else_pc,
+            } => {
+                let Value::Bool(taken) = self.reg(actor, cond)? else {
+                    return Err(self.type_error(function, pc, "branch on non-bool"));
+                };
+                self.frame_mut(actor).pc = if taken { then_pc } else { else_pc };
+            }
+            Instruction::Yield => {
+                // A recurring safe point. Observationally a no-op in the
+                // interpreter; the native path uses it to hand control back so
+                // a pending update can land between iterations (DESIGN.md T5).
+                self.frame_mut(actor).pc += 1;
             }
             Instruction::Call {
                 dst,
@@ -304,14 +325,8 @@ impl Runtime {
             }
             Instruction::Emit { value } => {
                 let value = self.reg(actor, value)?;
-                self.output.push(value);
-                self.actors
-                    .get_mut(&actor)
-                    .unwrap()
-                    .frames
-                    .last_mut()
-                    .unwrap()
-                    .pc += 1;
+                self.jit_emit(value);
+                self.frame_mut(actor).pc += 1;
             }
             Instruction::Return { value } => {
                 let result = self.reg(actor, value)?;
@@ -326,6 +341,46 @@ impl Runtime {
             }
         }
         Ok(())
+    }
+
+    /// Construct an object at the type's current schema. Supplied fields
+    /// override defaults; missing fields fall back to their schema default.
+    /// Shared by the interpreter's `New` arm and the native `lt_new` extern so
+    /// the two executors allocate identically. `expect` is safe because both
+    /// callers only reach here for verified constructors.
+    pub fn jit_new(&mut self, type_id: DefId, supplied: &[(FieldId, Value)]) -> ObjectId {
+        let version = self.world.current_schemas[&type_id];
+        let schema = &self.world.schemas[&(type_id, version)];
+        let mut values = BTreeMap::new();
+        for field in &schema.fields {
+            let value = supplied
+                .iter()
+                .find(|(id, _)| *id == field.id)
+                .map(|(_, v)| v.clone())
+                .or_else(|| field.default.clone())
+                .expect("verified constructor");
+            values.insert(field.id, value);
+        }
+        self.alloc(type_id, version, values)
+    }
+
+    /// The migration barrier: migrate the object up to its type's current
+    /// schema (lazily, identity-preserving) and read one field. A migration gap
+    /// returns [`Condition::MissingMigration`]. Shared by the interpreter's
+    /// `GetField` arm and the native `lt_get_field` extern.
+    pub fn jit_get_field(&mut self, id: ObjectId, field: FieldId) -> Result<Value, Condition> {
+        self.migrate(id)?;
+        self.heap[&id]
+            .fields
+            .get(&field)
+            .cloned()
+            .ok_or_else(|| self.type_error(0, 0, "field is absent after migration"))
+    }
+
+    /// Commit one external observation. `Emit` advances the frame only after
+    /// this appends, so a later pause/resume cannot replay an earlier effect.
+    pub fn jit_emit(&mut self, value: Value) {
+        self.output.push(value);
     }
 
     fn alloc(
@@ -469,7 +524,17 @@ impl Runtime {
     /// the complete root graph. This is the same root contract LLVM lowering
     /// must preserve at every step boundary.
     pub fn collect_garbage(&mut self) -> usize {
-        let mut work = Vec::new();
+        self.collect_garbage_with_roots(&[])
+    }
+
+    /// Precise collection with additional roots supplied by the caller — used
+    /// by the JIT driver to hand over the [`ObjectId`]s it reads out of native
+    /// [`crate::RawSlot`] frame slots. This is the same complete-root-map
+    /// contract the interpreter relies on, proven for the native path: every
+    /// live reference is a typed frame slot, nothing hides in a register the GC
+    /// cannot see.
+    pub fn collect_garbage_with_roots(&mut self, extra_roots: &[ObjectId]) -> usize {
+        let mut work: Vec<ObjectId> = extra_roots.to_vec();
         for actor in self.actors.values() {
             for frame in &actor.frames {
                 for value in frame.registers.iter().flatten() {

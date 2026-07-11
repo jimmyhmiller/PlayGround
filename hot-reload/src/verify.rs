@@ -5,6 +5,7 @@ fn value_type(value: &Value) -> Result<Type, String> {
     match value {
         Value::Unit => Ok(Type::Unit),
         Value::I64(_) => Ok(Type::I64),
+        Value::Bool(_) => Ok(Type::Bool),
         Value::Ref(_) => Err("object literals are runtime values, not code constants".into()),
     }
 }
@@ -46,26 +47,23 @@ pub fn verify_schema(schema: &Schema, world: &World) -> Result<(), Vec<String>> 
     }
 }
 
-/// Verify the deliberately straight-line resumable IR. Each instruction is a
-/// potential pause boundary; all live values are therefore named registers.
-pub fn verify_function(function: &Function, world: &World) -> Result<(), Vec<String>> {
-    let mut errors = Vec::new();
-    if function.registers < function.params.len() {
-        return Err(vec!["not enough registers for parameters".into()]);
-    }
-    let mut regs = vec![None; function.registers];
-    for (slot, ty) in function.params.iter().enumerate() {
-        regs[slot] = Some(ty.clone());
-    }
-    let mut returned = false;
-    for (pc, instruction) in function.code.iter().enumerate() {
-        let result: Result<Option<(usize, Type)>, String> = (|| match instruction {
-            Instruction::Const { dst, value } => Ok(Some((*dst, value_type(value)?))),
-            Instruction::New {
-                dst,
-                type_id,
-                fields,
-            } => {
+/// Type-check one instruction against the incoming register environment,
+/// returning the register it writes (if any) and that register's new type.
+/// Control-flow instructions (`Jump`/`Branch`/`Yield`) and effects write no
+/// register and return `None`; successor wiring is handled by the caller.
+fn check_instruction(
+    instruction: &Instruction,
+    function: &Function,
+    world: &World,
+    regs: &[Option<Type>],
+) -> Result<Option<(usize, Type)>, String> {
+    match instruction {
+        Instruction::Const { dst, value } => Ok(Some((*dst, value_type(value)?))),
+        Instruction::New {
+            dst,
+            type_id,
+            fields,
+        } => {
                 let version = world
                     .current_schemas
                     .get(type_id)
@@ -77,7 +75,7 @@ pub fn verify_function(function: &Function, world: &World) -> Result<(), Vec<Str
                 let supplied: BTreeMap<_, _> = fields.iter().copied().collect();
                 for field in &schema.fields {
                     match supplied.get(&field.id) {
-                        Some(reg) if read(&regs, *reg)? == field.ty => {}
+                        Some(reg) if read(regs, *reg)? == field.ty => {}
                         Some(_) => {
                             return Err(format!("field '{}' has the wrong type", field.name));
                         }
@@ -88,7 +86,7 @@ pub fn verify_function(function: &Function, world: &World) -> Result<(), Vec<Str
                 Ok(Some((*dst, Type::Ref(*type_id))))
             }
             Instruction::GetField { dst, object, field } => {
-                let Type::Ref(type_id) = read(&regs, *object)? else {
+                let Type::Ref(type_id) = read(regs, *object)? else {
                     return Err("field access needs a reference".into());
                 };
                 let version = world
@@ -104,7 +102,7 @@ pub fn verify_function(function: &Function, world: &World) -> Result<(), Vec<Str
                 Ok(Some((*dst, ty)))
             }
             Instruction::SubI64 { dst, left, right } => {
-                if read(&regs, *left)? != Type::I64 || read(&regs, *right)? != Type::I64 {
+                if read(regs, *left)? != Type::I64 || read(regs, *right)? != Type::I64 {
                     return Err("subtraction needs i64 operands".into());
                 }
                 Ok(Some((*dst, Type::I64)))
@@ -126,35 +124,144 @@ pub fn verify_function(function: &Function, world: &World) -> Result<(), Vec<Str
                     return Err("wrong argument count".into());
                 }
                 for (arg, expected) in args.iter().zip(&callee.params) {
-                    if read(&regs, *arg)? != *expected {
+                    if read(regs, *arg)? != *expected {
                         return Err(format!("argument r{arg} has the wrong type"));
                     }
                 }
                 Ok(Some((*dst, callee.result.clone())))
             }
-            Instruction::Emit { value } => {
-                read(&regs, *value)?;
-                Ok(None)
+        Instruction::LtI64 { dst, left, right } => {
+            if read(regs, *left)? != Type::I64 || read(regs, *right)? != Type::I64 {
+                return Err("comparison needs i64 operands".into());
             }
-            Instruction::Return { value } => {
-                if read(&regs, *value)? != function.result {
-                    return Err("return value has the wrong type".into());
-                }
-                returned = true;
-                Ok(None)
+            Ok(Some((*dst, Type::Bool)))
+        }
+        Instruction::Branch { cond, .. } => {
+            if read(regs, *cond)? != Type::Bool {
+                return Err("branch condition must be a bool".into());
             }
-        })();
-        match result {
-            Ok(Some((dst, ty))) if dst < regs.len() => regs[dst] = Some(ty),
-            Ok(Some((dst, _))) => {
-                errors.push(format!("pc {pc}: destination r{dst} is out of bounds"))
+            Ok(None)
+        }
+        Instruction::Jump { .. } | Instruction::Yield => Ok(None),
+        Instruction::Emit { value } => {
+            read(regs, *value)?;
+            Ok(None)
+        }
+        Instruction::Return { value } => {
+            if read(regs, *value)? != function.result {
+                return Err("return value has the wrong type".into());
             }
-            Ok(None) => {}
-            Err(error) => errors.push(format!("pc {pc}: {error}")),
+            Ok(None)
         }
     }
-    if !returned {
-        errors.push("function has no return".into());
+}
+
+/// Successor program counters of the instruction at `pc`. `Return` has none;
+/// `Jump`/`Branch` name their targets; everything else falls through to `pc+1`.
+fn successors(instruction: &Instruction, pc: usize) -> Vec<usize> {
+    match instruction {
+        Instruction::Return { .. } => vec![],
+        Instruction::Jump { target } => vec![*target],
+        Instruction::Branch {
+            then_pc, else_pc, ..
+        } => vec![*then_pc, *else_pc],
+        _ => vec![pc + 1],
+    }
+}
+
+/// Verify the resumable IR as a control-flow graph. Every instruction is a
+/// potential pause boundary, so all live values are named registers and the
+/// register-type environment must be consistent on entry to each pc regardless
+/// of the path taken there (this is what makes a loop back-edge or a branch
+/// merge type-safe). A fixpoint worklist propagates environments from entry;
+/// a pc reached with two different environments, an out-of-range target, or a
+/// fall-through off the end is a type error.
+pub fn verify_function(function: &Function, world: &World) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+    if function.registers < function.params.len() {
+        return Err(vec!["not enough registers for parameters".into()]);
+    }
+    if function.code.is_empty() {
+        return Err(vec!["function has no code".into()]);
+    }
+
+    let mut entry = vec![Some(vec![None; function.registers])];
+    for (slot, ty) in function.params.iter().enumerate() {
+        entry[0].as_mut().unwrap()[slot] = Some(ty.clone());
+    }
+    let mut envs: Vec<Option<Vec<Option<Type>>>> = vec![None; function.code.len()];
+    envs[0] = entry.pop().unwrap();
+    let mut work = vec![0usize];
+    let mut any_return = false;
+
+    while let Some(pc) = work.pop() {
+        let regs = envs[pc].clone().expect("worklist only enqueues assigned pcs");
+        let instruction = &function.code[pc];
+        if matches!(instruction, Instruction::Return { .. }) {
+            any_return = true;
+        }
+        let mut out = regs.clone();
+        match check_instruction(instruction, function, world, &regs) {
+            Ok(Some((dst, ty))) if dst < out.len() => out[dst] = Some(ty),
+            Ok(Some((dst, _))) => {
+                errors.push(format!("pc {pc}: destination r{dst} is out of bounds"));
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                errors.push(format!("pc {pc}: {error}"));
+                continue;
+            }
+        }
+        for succ in successors(instruction, pc) {
+            if succ >= function.code.len() {
+                errors.push(format!("pc {pc}: control flows to invalid pc {succ}"));
+                continue;
+            }
+            match &mut envs[succ] {
+                None => {
+                    envs[succ] = Some(out.clone());
+                    work.push(succ);
+                }
+                Some(existing) => {
+                    // Join incoming paths per register: a register keeps a type
+                    // only if every path agrees; defined-on-some-paths weakens to
+                    // undefined (reading it later is then the error), and two
+                    // different concrete types is an outright conflict. Weakening
+                    // is monotone, so the fixpoint terminates; a loop back-edge
+                    // that reassigns its induction registers before use verifies
+                    // cleanly this way.
+                    let mut changed = false;
+                    for (reg, slot) in existing.iter_mut().enumerate() {
+                        match (slot.clone(), &out[reg]) {
+                            (Some(a), Some(b)) if a == *b => {}
+                            (Some(a), Some(b)) => {
+                                errors.push(format!(
+                                    "pc {succ}: register r{reg} merges incompatible types \
+                                     {a:?} and {b:?}"
+                                ));
+                                *slot = None;
+                                changed = true;
+                            }
+                            (Some(_), None) => {
+                                *slot = None;
+                                changed = true;
+                            }
+                            (None, _) => {}
+                        }
+                    }
+                    if changed {
+                        work.push(succ);
+                    }
+                }
+            }
+        }
+    }
+
+    // Only worth reporting when nothing else went wrong; an earlier error
+    // aborts a path before its return and would make this misleading noise.
+    if !any_return && errors.is_empty() {
+        errors.push("function has no reachable return".into());
     }
     if errors.is_empty() {
         Ok(())

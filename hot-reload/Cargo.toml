@@ -6,6 +6,12 @@ edition = "2024"
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+# LLVM backend (JIT) via Inkwell. Same fork/feature the gc-rust reference uses.
+# LLVM 21 accelerates execution without owning continuation semantics: the Rust
+# runtime still owns frame push/pop, migration barriers, conditions, and GC.
+inkwell = { git = "https://github.com/jimmyhmiller/inkwell", features = ["llvm21-1"] }
+
 [[bin]]
 name = "livetype-demo"
 path = "src/main.rs"

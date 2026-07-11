@@ -5,10 +5,12 @@
 //! LLVM `step(frame, runtime) -> StepResult` functions without changing pause
 //! and resume semantics.
 
+mod jit;
 mod model;
 mod runtime;
 mod verify;
 
+pub use jit::*;
 pub use model::*;
 pub use runtime::*;
 pub use verify::*;

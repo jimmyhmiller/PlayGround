@@ -1,3 +1,9 @@
+//! End-to-end demo: the Account/Money hot-update scenario driven by BOTH
+//! executors — the reference interpreter and the LLVM `step` backend — showing
+//! they produce identical effects, pauses, and results. This is
+//! `RUNTIME_DESIGN.md` made real: LLVM accelerates execution while the runtime
+//! keeps pause/repair/resume.
+
 use livetype::*;
 use std::collections::BTreeMap;
 
@@ -17,7 +23,10 @@ fn field(id: FieldId, name: &str, ty: Type) -> Field {
     }
 }
 
-fn main() {
+/// Account.balance : Int, `charge` subtracts, `main` opens an account, emits its
+/// balance, hits a Yield safe point, then charges 5. The Yield lets both
+/// executors stop at the same place before the hot update lands.
+fn setup() -> Runtime {
     let mut rt = Runtime::default();
     rt.install_schema(Schema {
         type_id: ACCOUNT,
@@ -66,6 +75,7 @@ fn main() {
                 fields: vec![(BALANCE, 0)],
             },
             Instruction::Emit { value: 0 },
+            Instruction::Yield,
             Instruction::Const {
                 dst: 2,
                 value: Value::I64(5),
@@ -79,11 +89,12 @@ fn main() {
         ],
     })
     .unwrap();
-    let actor = rt.spawn(MAIN, vec![]).unwrap();
-    for _ in 0..3 {
-        rt.step(actor);
-    }
+    rt
+}
 
+// The hot update: balance becomes Money (breaks `charge`), then the fix, then
+// the migration.
+fn update_break(rt: &mut Runtime) {
     rt.install_schema(Schema {
         type_id: MONEY,
         version: Version(1),
@@ -98,9 +109,9 @@ fn main() {
         fields: vec![field(BALANCE, "balance", Type::Ref(MONEY))],
     })
     .unwrap();
-    rt.run();
-    println!("paused: {:?}", rt.actors[&actor].status);
+}
 
+fn update_fix(rt: &mut Runtime) {
     rt.install_function(Function {
         id: CHARGE,
         version: Version(3),
@@ -128,8 +139,9 @@ fn main() {
         ],
     })
     .unwrap();
-    rt.run();
-    println!("paused: {:?}", rt.actors[&actor].status);
+}
+
+fn update_migrate(rt: &mut Runtime) {
     rt.install_migration(Migration {
         type_id: ACCOUNT,
         from: Version(1),
@@ -144,9 +156,64 @@ fn main() {
         )]),
     })
     .unwrap();
+}
+
+/// Drive the scenario on the interpreter, narrating each phase.
+fn run_interpreter() -> (ActorStatus, Vec<Value>) {
+    println!("── interpreter ──");
+    let mut rt = setup();
+    let actor = rt.spawn(MAIN, vec![]).unwrap();
+    // Run to the yield safe point (Const, New, Emit, Yield).
+    for _ in 0..4 {
+        rt.step(actor);
+    }
+    println!("  at yield, effects so far: {:?}", rt.output);
+
+    update_break(&mut rt);
     rt.run();
+    println!("  after update:   {:?}", rt.actors[&actor].status);
+
+    update_fix(&mut rt);
+    rt.run();
+    println!("  after fix:      {:?}", rt.actors[&actor].status);
+
+    update_migrate(&mut rt);
+    rt.run();
+    println!("  after migrate:  {:?}", rt.actors[&actor].status);
+    (rt.actors[&actor].status.clone(), rt.output.clone())
+}
+
+/// Drive the same scenario on the LLVM `step` backend, narrating each phase.
+fn run_jit() -> (ActorStatus, Vec<Value>) {
+    println!("── llvm jit ──");
+    let mut rt = setup();
+    let mut actor = JitActor::spawn(&rt, 1, MAIN, vec![]).unwrap();
+    drive(&mut rt, &mut actor, true).unwrap();
+    println!("  at yield, effects so far: {:?}", rt.output);
+
+    update_break(&mut rt);
+    drive(&mut rt, &mut actor, false).unwrap();
+    println!("  after update:   {:?}", actor.status);
+
+    update_fix(&mut rt);
+    drive(&mut rt, &mut actor, false).unwrap();
+    println!("  after fix:      {:?}", actor.status);
+
+    update_migrate(&mut rt);
+    drive(&mut rt, &mut actor, false).unwrap();
+    println!("  after migrate:  {:?}", actor.status);
+    (actor.status.clone(), rt.output.clone())
+}
+
+fn main() {
+    let (interp_status, interp_out) = run_interpreter();
+    println!();
+    let (jit_status, jit_out) = run_jit();
+    println!();
+    let matched = interp_status == jit_status && interp_out == jit_out;
     println!(
-        "complete: {:?}; effects: {:?}",
-        rt.actors[&actor].status, rt.output
+        "interpreter and jit agree: {matched}  (status {:?}, effects {:?})",
+        jit_status, jit_out
     );
+    assert!(matched, "executors diverged");
 }

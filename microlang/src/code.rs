@@ -420,12 +420,29 @@ fn eval_tail<M: ValueModel>(
             eval_tail(top, rt, body, &cur)
         }
         Ir::Call(f, args) => {
+            // Precise rooting across arg evaluation, exactly as the eval_ir `Call`
+            // arm: the already-evaluated callee/args are bare u64s a collection
+            // (fired at a nested safepoint) would relocate — and they escape this
+            // frame in the `Bounce::Tail`, so they must be re-read after.
             let callee = top.eval_ir(top, rt, f, locals);
-            let argv: Vec<u64> = args.iter().map(|a| top.eval_ir(top, rt, a, locals)).collect();
-            Bounce::Tail(callee, argv)
+            let base = rt.push_root(callee);
+            for a in args {
+                let v = top.eval_ir(top, rt, a, locals);
+                rt.push_root(v);
+            }
+            let calleer = rt.root_get(base);
+            let argv: Vec<u64> = (1..=args.len()).map(|i| rt.root_get(base + i)).collect();
+            rt.truncate_roots(base);
+            Bounce::Tail(calleer, argv)
         }
         Ir::Dispatch { site, method, args } => {
-            let argv: Vec<u64> = args.iter().map(|a| top.eval_ir(top, rt, a, locals)).collect();
+            let base = rt.root_depth();
+            for a in args {
+                let v = top.eval_ir(top, rt, a, locals);
+                rt.push_root(v);
+            }
+            let argv: Vec<u64> = (0..args.len()).map(|i| rt.root_get(base + i)).collect();
+            rt.truncate_roots(base);
             let ty = rt
                 .type_of(argv[0])
                 .unwrap_or_else(|| panic!("dispatch: receiver is not a record"));

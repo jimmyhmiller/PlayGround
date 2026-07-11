@@ -10,11 +10,13 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::{HashMap, HashSet};
 
-/// Memory ordering for the global-slot array. Reads/writes are `Relaxed`; a
-/// cross-thread global definition is made visible to another thread by the
-/// happens-before edge on whatever channel passes the value (an atom / a join),
-/// not by the slot store itself.
-const GLOBAL_ORDER: Ordering = Ordering::Relaxed;
+/// Memory ordering for the global-slot array. A global's VALUE is often a heap
+/// object (a closure) that a sibling thread reads through this slot, so the store
+/// must publish the allocation (`Release`) and the load must acquire it
+/// (`Acquire`) — otherwise a reader can observe the id before the object's writes
+/// are visible (a real cross-thread use-before-init, not just a TSan report).
+const GLOBAL_LOAD: Ordering = Ordering::Acquire;
+const GLOBAL_STORE: Ordering = Ordering::Release;
 use std::hash::BuildHasherDefault;
 
 /// A cheap hasher for `Sym` (a `u32`) keys. The global environment is consulted
@@ -93,16 +95,19 @@ impl Heap {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
-    /// Append an object; returns its flat id. The current chunk never grows past
-    /// its reserved capacity, so existing object addresses are stable.
+    /// Append an object; returns its flat id. A new chunk is PRE-INITIALIZED to
+    /// sentinels (never `Vec::with_capacity`), so a lock-free reader never touches
+    /// uninitialized memory or the mutable `Vec` length; allocation ASSIGNS an
+    /// existing slot rather than pushing, and existing object addresses are stable.
     pub fn push(&mut self, o: Obj) -> usize {
         let i = self.len;
         let c = i >> CHUNK_BITS;
         if c >= self.chunks.len() {
             assert!(c < CHUNKS_CAP, "heap chunk index overflow: raise CHUNKS_CAP");
-            self.chunks.push(Vec::with_capacity(CHUNK));
+            self.chunks.push(vec![Obj::Moved(u32::MAX); CHUNK]);
         }
-        self.chunks[c].push(o);
+        // Assign the (already-initialized) slot via the unchecked path.
+        *std::ops::IndexMut::index_mut(self, i) = o;
         self.len += 1;
         i
     }
@@ -121,14 +126,29 @@ impl std::ops::Index<usize> for Heap {
     type Output = Obj;
     #[inline]
     fn index(&self, i: usize) -> &Obj {
-        &self.chunks[i >> CHUNK_BITS][i & (CHUNK - 1)]
+        // UNCHECKED on purpose: a bounds check reads the (inner and outer) Vec
+        // `len`, which a concurrent `push` on the current fill-chunk WRITES — a
+        // data race even when the two touch different objects (TSan-confirmed).
+        // A `HeapId` is only ever handed out by `push`, so it is always in range;
+        // `get_unchecked` reads the stable base pointer + a computed offset and
+        // never the mutable length. (Object addresses are stable — segmented
+        // heap — so the returned `&Obj` is sound while other objects allocate.)
+        unsafe {
+            self.chunks
+                .get_unchecked(i >> CHUNK_BITS)
+                .get_unchecked(i & (CHUNK - 1))
+        }
     }
 }
 
 impl std::ops::IndexMut<usize> for Heap {
     #[inline]
     fn index_mut(&mut self, i: usize) -> &mut Obj {
-        &mut self.chunks[i >> CHUNK_BITS][i & (CHUNK - 1)]
+        unsafe {
+            self.chunks
+                .get_unchecked_mut(i >> CHUNK_BITS)
+                .get_unchecked_mut(i & (CHUNK - 1))
+        }
     }
 }
 
@@ -320,7 +340,7 @@ impl<M: ValueModel> Runtime<M> {
     /// dense `global_slots` array IS the store (no separate map), so this is a
     /// single indexed load, and a `Sym` beyond the current slot count is unbound.
     pub fn global(&self, sym: Sym) -> Option<u64> {
-        match self.shared.global_slots.get(sym as usize).map(|a| a.load(GLOBAL_ORDER)) {
+        match self.shared.global_slots.get(sym as usize).map(|a| a.load(GLOBAL_LOAD)) {
             Some(v) if v != GLOBAL_UNBOUND => Some(v),
             _ => None,
         }
@@ -328,22 +348,22 @@ impl<M: ValueModel> Runtime<M> {
 
     /// Is this global bound? (`set!`/redefinition checks.)
     pub fn global_defined(&self, sym: Sym) -> bool {
-        matches!(self.shared.global_slots.get(sym as usize).map(|a| a.load(GLOBAL_ORDER)), Some(v) if v != GLOBAL_UNBOUND)
+        matches!(self.shared.global_slots.get(sym as usize).map(|a| a.load(GLOBAL_LOAD)), Some(v) if v != GLOBAL_UNBOUND)
     }
 
     /// Define (or redefine) a global. Atomic store, so `&self` suffices — a step
     /// toward the shared runtime where a thread defines through an `Arc`.
     pub fn define_global(&self, sym: Sym, val: u64) {
         if let Some(slot) = self.shared.global_slots.get(sym as usize) {
-            slot.store(val, GLOBAL_ORDER);
+            slot.store(val, GLOBAL_STORE);
         }
     }
 
     /// Assign an existing global's value (`set!`). Returns `false` if unbound.
     pub fn set_global_val(&self, sym: Sym, val: u64) -> bool {
         match self.shared.global_slots.get(sym as usize) {
-            Some(slot) if slot.load(GLOBAL_ORDER) != GLOBAL_UNBOUND => {
-                slot.store(val, GLOBAL_ORDER);
+            Some(slot) if slot.load(GLOBAL_LOAD) != GLOBAL_UNBOUND => {
+                slot.store(val, GLOBAL_STORE);
                 true
             }
             _ => false,

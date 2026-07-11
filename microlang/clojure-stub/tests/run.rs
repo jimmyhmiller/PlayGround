@@ -519,10 +519,17 @@ fn thread_stress() {
     assert_eq!(run(src), "1123360");
 }
 
+/// Concurrent moving GC: workers force stop-the-world collections while sibling
+/// threads run over the shared heap. TSan-diagnosed and hugely improved (the
+/// deterministic use-after-move — an unrooted callee/args in the `eval_tail`
+/// tail-call trampoline — is FIXED, and TSan races dropped from ~125 to ~8), but
+/// NOT fully race-free: ~8 lock-free-heap-read vs alloc races remain, which can
+/// still surface as a rare use-after-move under heavy contention. Closing them
+/// needs a read barrier / per-thread allocation nurseries. Ignored (a flaky test
+/// is worse than an honest gap); run alone with `-- --ignored` to exercise it.
 #[test]
-#[ignore = "concurrent explicit (gc) has a residual STW-rendezvous race; \
-            single-threaded gc and parallel non-gc threads are solid. Needs a \
-            race detector (TSan/Helgrind) on the Linux host to pinpoint."]
+#[ignore = "concurrent moving GC: ~8 residual read-vs-alloc races (TSan) can \
+            rarely fault under contention; needs a read barrier to fully close"]
 fn concurrent_gc() {
     // Workers allocate heavily AND force moving collections while sibling threads
     // run concurrently. The safepoint STW protocol must stop every mutator before

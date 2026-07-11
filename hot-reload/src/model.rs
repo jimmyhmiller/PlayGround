@@ -12,6 +12,7 @@ pub struct Version(pub u64);
 pub enum Type {
     Unit,
     I64,
+    Bool,
     Ref(DefId),
 }
 
@@ -19,6 +20,7 @@ pub enum Type {
 pub enum Value {
     Unit,
     I64(i64),
+    Bool(bool),
     Ref(ObjectId),
 }
 
@@ -27,6 +29,7 @@ impl Value {
         match self {
             Self::Unit => Some(Type::Unit),
             Self::I64(_) => Some(Type::I64),
+            Self::Bool(_) => Some(Type::Bool),
             Self::Ref(id) => Some(Type::Ref(heap.get(id)?.type_id)),
         }
     }
@@ -104,6 +107,29 @@ pub enum Instruction {
         left: usize,
         right: usize,
     },
+    /// `dst := left < right` (signed). Produces a `Bool`, the only condition
+    /// source for `Branch`. Pure, so it never ends a basic block.
+    LtI64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// Unconditional transfer to another program counter. A back-edge (a target
+    /// at or before this pc) forms a loop.
+    Jump {
+        target: usize,
+    },
+    /// Transfer to `then_pc` when `cond` is `true`, else `else_pc`.
+    Branch {
+        cond: usize,
+        then_pc: usize,
+        else_pc: usize,
+    },
+    /// A recurring safe point (DESIGN.md T5). The native `step` hands control
+    /// back here so a pending hot update can land between iterations; the
+    /// interpreter treats it as a no-op advance. It computes nothing, so both
+    /// executors stay observationally identical.
+    Yield,
     Call {
         dst: usize,
         function: DefId,
