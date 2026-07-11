@@ -92,6 +92,11 @@ impl Compiler {
             // Var/namespace registry reflection (metadata flags + ns enumeration).
             ("%var-flags", VarFlags), ("%ns-interns", NsInterns), ("%all-ns", AllNs),
             ("%symbol", SymbolOf), ("%var-arglists", VarArglists),
+            // THE string-introspection primitive; clojure.string/regex build on it.
+            ("%str->chars", StrChars),
+            // Existing low-level prims surfaced for the string library (char codes
+            // for case mapping, raw length) — not new primitives.
+            ("%char-code", CharToInt), ("%char-of", IntToChar), ("%str-len", StrLen),
         ] {
             prims.insert(rt.intern(name), p);
         }

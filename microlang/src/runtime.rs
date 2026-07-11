@@ -1144,6 +1144,23 @@ impl<M: ValueModel> Runtime<M> {
                 };
                 self.get_var_arglists(s).unwrap_or_else(|| self.enc_nil())
             }
+            Prim::StrChars => {
+                let cs: Vec<char> = match self.decode(args[0]) {
+                    Val::Ref(id) => match &self.heap()[id as usize] {
+                        Obj::Str(s) => s.chars().collect(),
+                        _ => panic!("%str->chars: not a string"),
+                    },
+                    _ => panic!("%str->chars: not a string"),
+                };
+                let vals: Vec<u64> = cs
+                    .into_iter()
+                    .map(|c| {
+                        let id = self.alloc(Obj::Char(c));
+                        M::R::enc_ref(id)
+                    })
+                    .collect();
+                self.vec_to_list(&vals)
+            }
             // ── atoms: real cross-thread compare-and-set ────────────────
             Prim::AtomNew => {
                 let id = self.alloc(Obj::Atom(Arc::new(AtomicU64::new(args[0]))));

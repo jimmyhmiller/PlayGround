@@ -24,6 +24,7 @@ static GENSYM: AtomicU64 = AtomicU64::new(0);
 
 mod compile;
 mod cljs_types_src;
+mod clojure_string_src;
 mod core_src;
 mod reader;
 pub use reader::read_all;
@@ -63,6 +64,11 @@ pub fn run_with_paths<M: ValueModel>(
     // here on runs in the `user` namespace. EVERY var is now ns-qualified, so the
     // frontend's own references to core helpers use their `clojure.core/…` names.
     comp.end_core_load();
+    // `clojure.string` — bundled, but written ENTIRELY in the language (its `(ns
+    // clojure.string)` form sets the ns + marks it loaded). Proof that the string
+    // library is library code over one primitive, not builtins.
+    run_src(rt, cs, &mut macros, &mut comp, clojure_string_src::CLOJURE_STRING);
+    comp.set_ns("user");
     // These are provided in-process; `require` must never look for them on disk.
     comp.mark_loaded("clojure.core");
     comp.mark_loaded("user");

@@ -194,6 +194,10 @@ pub enum Prim {
     SymbolOf,
     /// `(%var-arglists 'sym)` -> the var's captured `:arglists` datum, or nil.
     VarArglists,
+    /// `(%str->chars s)` -> a list of the string's characters. THE string-
+    /// introspection primitive: with it (plus `str`/`str-cat` to rebuild), all of
+    /// `clojure.string`, regex, and a reader can be written in the language.
+    StrChars,
 
     // ── optimizer-introduced fixnum specializations ──────────────────────────
     // These are produced ONLY by the `optimize` nanopass (never by `analyze`).

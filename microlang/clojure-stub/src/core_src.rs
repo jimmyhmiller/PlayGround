@@ -318,7 +318,12 @@ pub const CORE: &str = r##"
 (defn cons [x c] (%cons x c))
 (defn empty? [c] (nil? (seq c)))
 (defn empty [c] (-empty c))
-(defn count [c] (if (nil? c) 0 (-count c)))
+(defn count [c] (cond (nil? c) 0 (string? c) (%str-len c) true (-count c)))
+;; `subs` (clojure.core) — substring via the char list; end defaults to the length.
+(defn subs [s start & end]
+  (let [cs (%str->chars s)
+        e (if (nil? end) (%str-len s) (first end))]
+    (apply str (take (- e start) (drop start cs)))))
 (defn nth [c i] (-nth c i))
 (defn conj [c x] (-conj c x))
 (defn assoc [m k v] (-assoc m k v))

@@ -1123,3 +1123,33 @@ fn var_arglists() {
     // Non-fn vars have no arglists.
     assert_eq!(run("(def x 5) (:arglists (meta (var x)))"), "nil");
 }
+
+#[test]
+fn clojure_string_is_library_code() {
+    // clojure.string, written ENTIRELY in the language over %str->chars.
+    let with = |body: &str| format!("(ns a (:require [clojure.string :as s])) {body}");
+    assert_eq!(run(&with("(s/upper-case \"hello\")")), "\"HELLO\"");
+    assert_eq!(run(&with("(s/lower-case \"HeLLo\")")), "\"hello\"");
+    assert_eq!(run(&with("(s/capitalize \"hELLO\")")), "\"Hello\"");
+    assert_eq!(run(&with("(s/reverse \"abc\")")), "\"cba\"");
+    assert_eq!(run(&with("(s/trim \"  hi  \")")), "\"hi\"");
+    assert_eq!(run(&with("(s/join \",\" [1 2 3])")), "\"1,2,3\"");
+    assert_eq!(run(&with("(s/split \"a,b,c\" \",\")")), "[\"a\" \"b\" \"c\"]");
+    assert_eq!(run(&with("(s/replace \"a-b-c\" \"-\" \"+\")")), "\"a+b+c\"");
+    assert_eq!(run(&with("(s/index-of \"hello world\" \"world\")")), "6");
+    assert_eq!(run(&with("[(s/starts-with? \"foobar\" \"foo\") (s/ends-with? \"foobar\" \"bar\")]")), "[true true]");
+    assert_eq!(run(&with("(s/includes? \"hello\" \"ell\")")), "true");
+    // core: subs + count on strings (also over %str->chars / %str-len).
+    assert_eq!(run("(subs \"hello world\" 6)"), "\"world\"");
+    assert_eq!(run("(count \"hello\")"), "5");
+}
+
+#[test]
+fn regex_engine_is_library_code() {
+    // A tiny backtracking regex, also pure library code over the one primitive.
+    let with = |body: &str| format!("(ns a (:require [clojure.string :as s])) {body}");
+    assert_eq!(run(&with("(s/re-match? \"ell\" \"hello\")")), "true");
+    assert_eq!(run(&with("(s/re-match? \"^h.*o$\" \"hello\")")), "true");
+    assert_eq!(run(&with("(s/re-match? \"^h.*o$\" \"hellox\")")), "false");
+    assert_eq!(run(&with("[(s/re-match? \"ab*c\" \"ac\") (s/re-match? \"ab*c\" \"abbbc\") (s/re-match? \"ab*c\" \"adc\")]")), "[true true false]");
+}
