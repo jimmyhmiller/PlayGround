@@ -64,3 +64,32 @@ This model supports loops, branches, and suspension once they are added to the
 IR: their continuation is simply a PC plus registers. It does not require stack
 copying, native deoptimization, or replay of an entire callback.
 
+## Implementation status
+
+Both executors exist and are proven equivalent:
+
+- **Interpreter** (`src/runtime.rs`) — the reference executor, one instruction
+  per step, over heap-resident frames.
+- **LLVM `step` backend** (`src/jit.rs`) — each Ready function version is
+  JIT-compiled (inkwell / LLVM 21) to a native
+  `step(RawFrame*, Runtime*) -> outcome` over a C-ABI frame. Native code runs
+  the pure ops (`Const`/`SubI64`/`LtI64`) and the non-pausing runtime calls
+  (`New`/`GetField`/`Emit`, via the `lt_*` externs), and hands control back to
+  the Rust driver for the boundaries that own continuation semantics —
+  `Call` (push a frame), `Return` (pop), a migration barrier (`condition`), and
+  `Yield` (recurring safe point). It resumes at an exact PC via a
+  `switch(frame->pc)` dispatch. Crucially, **no SSA value crosses a basic
+  block**: every register read/write goes through `frame->regs[i]`, so loops and
+  branches need no phi nodes and every live reference is a typed frame slot the
+  GC roots from directly (`JitActor::roots`).
+
+The IR now includes control flow (`LtI64`, `Jump`, `Branch`, `Yield`), verified
+by a CFG-worklist type checker (`src/verify.rs`) that joins register
+environments at merge points.
+
+`tests/jit_matches_interpreter.rs` drives both executors through the same hot
+updates on the Box/Wrapper migration, the Account/Money break-fix-migrate story,
+and a loop with a mid-loop update at a `Yield`, asserting identical effects,
+pause conditions, migrations, heaps, and results at every boundary. A further
+test collects garbage precisely from native frame slots.
+

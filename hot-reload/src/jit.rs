@@ -736,7 +736,6 @@ pub fn drive(rt: &mut Runtime, actor: &mut JitActor, stop_on_yield: bool) -> Res
 
     let ctx = Context::create();
     let compiled = compile(&ctx, rt)?;
-    let rt_ptr: *mut Runtime = rt;
 
     while matches!(actor.status, ActorStatus::Runnable) {
         let frame = actor.frames.last_mut().unwrap();
@@ -755,6 +754,10 @@ pub fn drive(rt: &mut Runtime, actor: &mut JitActor, stop_on_yield: bool) -> Res
             scratch: RawSlot::EMPTY,
             return_reg: frame.return_to.map_or(-1, |r| r as i64),
         };
+        // Reborrow `rt` fresh each iteration: intervening `&mut rt` uses below
+        // (handle_call, pending_condition) would invalidate a pointer derived
+        // once before the loop, which the optimizer is entitled to exploit.
+        let rt_ptr: *mut Runtime = rt as *mut Runtime;
         let outcome = unsafe { step(&mut raw, rt_ptr) };
         frame.pc = raw.pc as usize;
 

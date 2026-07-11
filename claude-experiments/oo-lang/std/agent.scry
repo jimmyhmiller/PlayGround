@@ -400,11 +400,13 @@ class AnthropicModel implements Model {
   modelId: String
   apiKey: String
   systemPrompt: String
+  baseUrl: String          // Anthropic-compatible endpoint base, e.g. https://api.deepseek.com/anthropic
 
-  fn init(modelId: String, apiKey: String, systemPrompt: String) {
+  fn init(modelId: String, apiKey: String, systemPrompt: String, baseUrl: String) {
     self.modelId = modelId
     self.apiKey = apiKey
     self.systemPrompt = systemPrompt
+    self.baseUrl = baseUrl
   }
 
   // one-shot completion (used by the legacy chat path): a respond() with no tools.
@@ -455,7 +457,7 @@ class AnthropicModel implements Model {
     h.push("x-api-key: " + self.apiKey)
     h.push("anthropic-version: 2023-06-01")
     h.push("content-type: application/json")
-    let resp = Http.request("POST", "https://api.anthropic.com/v1/messages", h, body)
+    let resp = Http.request("POST", self.baseUrl + "/v1/messages", h, body)
     if resp.status == 0 {
       errorResp("transport error: " + resp.body)
     } else if resp.status < 200 || resp.status >= 300 {

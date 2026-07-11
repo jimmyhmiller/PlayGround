@@ -17,11 +17,12 @@ use std::sync::Arc;
 
 use crate::ir::Ir;
 
-/// Memory ordering for frame/cell slot access. Mutators run these single-threaded
-/// between safepoints; cross-thread visibility is established by the acquire/
-/// release fences at the safepoint park/resume boundary (see the GC), so plain
-/// `Relaxed` on the slots themselves is sufficient and cheap.
-const SLOT_ORDER: Ordering = Ordering::Relaxed;
+/// Memory ordering for frame/cell slot access. A frame can be captured by a
+/// closure that runs on ANOTHER thread, so a slot holding a heap id is a
+/// cross-thread channel: the store must publish the pointed-to object (`Release`)
+/// and the load acquire it (`Acquire`). Cheap on x86, and correct on weaker isas.
+const SLOT_LOAD: Ordering = Ordering::Acquire;
+const SLOT_STORE: Ordering = Ordering::Release;
 
 pub type Sym = u32;
 pub type HeapId = u32;
@@ -162,16 +163,16 @@ pub fn slots_from(vals: impl IntoIterator<Item = u64>) -> Vec<AtomicU64> {
 /// Snapshot existing slots into fresh atomics (each frame/`done` vector is
 /// immutable-once-shared, so extending it must copy rather than mutate the prefix).
 pub fn clone_slots(slots: &[AtomicU64]) -> Vec<AtomicU64> {
-    slots.iter().map(|c| AtomicU64::new(c.load(SLOT_ORDER))).collect()
+    slots.iter().map(|c| AtomicU64::new(c.load(SLOT_LOAD))).collect()
 }
 
 /// Read a slot atomic with the frame ordering.
 pub fn slot_load(a: &AtomicU64) -> u64 {
-    a.load(SLOT_ORDER)
+    a.load(SLOT_LOAD)
 }
 /// Store a slot atomic with the frame ordering.
 pub fn slot_store(a: &AtomicU64, v: u64) {
-    a.store(v, SLOT_ORDER)
+    a.store(v, SLOT_STORE)
 }
 
 /// Read slot `idx` in the frame `up` levels out. Reads through the atomic, so a
@@ -181,7 +182,7 @@ pub fn frame_get(env: &Locals, up: u16, idx: u16) -> u64 {
     for _ in 0..up {
         f = f.parent.as_ref().expect("local reference past root frame");
     }
-    f.slots[idx as usize].load(SLOT_ORDER)
+    f.slots[idx as usize].load(SLOT_LOAD)
 }
 
 /// Mutate slot `idx` in the frame `up` levels out. The slots are already atomics
@@ -191,5 +192,5 @@ pub fn frame_set(env: &Locals, up: u16, idx: u16, v: u64) {
     for _ in 0..up {
         f = f.parent.as_ref().expect("assignment past root frame");
     }
-    f.slots[idx as usize].store(v, SLOT_ORDER);
+    f.slots[idx as usize].store(v, SLOT_STORE);
 }

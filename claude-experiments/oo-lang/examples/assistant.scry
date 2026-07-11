@@ -259,20 +259,50 @@ class Orchestrator {
   }
 }
 
-// Choose the brain from the environment: a real AnthropicModel if ANTHROPIC_API_KEY is present,
-// otherwise the deterministic ScriptedModel. Both implement Model, so the loop is identical.
+// Choose the brain from the environment. Default target is DeepSeek's Anthropic-compatible
+// endpoint (deepseek-v4-pro over https://api.deepseek.com/anthropic) — the same /v1/messages
+// tool-use protocol, so AnthropicModel is unchanged but the API key. All three are overridable:
+//   key:   DEEPSEEK_API_KEY | DEEPSEEK_KEY | ANTHROPIC_API_KEY
+//   base:  ANTHROPIC_BASE_URL   (default https://api.deepseek.com/anthropic)
+//   model: SCRY_MODEL           (default deepseek-v4-pro)
+// No key at all -> the deterministic ScriptedModel. Both implement Model, so the loop is identical.
+fn resolveKey() -> Option<String> {
+  match Env.get("DEEPSEEK_API_KEY") {
+    Some(k) -> Some(k)
+    None -> match Env.get("DEEPSEEK_KEY") {
+      Some(k) -> Some(k)
+      None -> Env.get("ANTHROPIC_API_KEY")
+    }
+  }
+}
+
+fn modelBase() -> String {
+  match Env.get("ANTHROPIC_BASE_URL") {
+    Some(u) -> u
+    None -> "https://api.deepseek.com/anthropic"
+  }
+}
+
+fn modelName() -> String {
+  match Env.get("SCRY_MODEL") {
+    Some(m) -> m
+    None -> "deepseek-v4-pro"
+  }
+}
+
 fn chooseBrain() -> Model {
-  match Env.get("ANTHROPIC_API_KEY") {
-    Some(key) -> AnthropicModel(modelId: "claude-sonnet-5", apiKey: key,
-                                systemPrompt: "You are a concise assistant. Use the provided tools when they help.")
+  match resolveKey() {
+    Some(key) -> AnthropicModel(modelId: modelName(), apiKey: key,
+                                systemPrompt: "You are a concise assistant. Use the provided tools when they help.",
+                                baseUrl: modelBase())
     None -> ScriptedModel(persona: "assistant")
   }
 }
 
 fn brainLabel() -> String {
-  match Env.get("ANTHROPIC_API_KEY") {
-    Some(key) -> "AnthropicModel (claude-sonnet-5) - LIVE"
-    None -> "ScriptedModel - offline (set ANTHROPIC_API_KEY for the live model)"
+  match resolveKey() {
+    Some(key) -> "AnthropicModel (" + modelName() + " @ " + modelBase() + ") - LIVE"
+    None -> "ScriptedModel - offline (set DEEPSEEK_API_KEY for the live model)"
   }
 }
 
