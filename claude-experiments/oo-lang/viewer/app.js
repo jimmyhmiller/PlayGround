@@ -452,13 +452,41 @@ function MethodCard({ cls, slot, gen, m, schema }) {
       </div>
     </div>`;
 }
+// A safe string for any value (never throws). Used as the render fallback.
+function safeStringify(v) {
+  try { return typeof v === "string" ? v : JSON.stringify(v); }
+  catch { return String(v); }
+}
+// A render error boundary: if a child render throws (a malformed value shape, etc.), show the
+// fallback instead of unmounting the whole app (the reported "white-screen" bug). Each invoke
+// result is keyed by `flash`, so a fresh invoke remounts the boundary clean.
+class RenderBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  render() { return this.state.err ? this.props.fallback(this.state.err) : this.props.children; }
+}
+// ValueView guarded by the boundary: a throw anywhere in the (possibly deep) value render
+// degrades to a plain safe string rather than crashing the viewer.
+function SafeValue({ v }) {
+  return html`<${RenderBoundary} fallback=${() => html`<span class="v-void">${safeStringify(v)}</span>`}>
+    <${ValueView} v=${v} />
+  <//>`;
+}
+// Render an invoke's result or error. Bulletproof: no error/value shape (missing kind/message,
+// odd `type`, null, a non-array trace, an unexpected error primitive) may throw during render —
+// the scry server is uncrashable and always returns a clean TypeError, so a bad eval must show
+// inline and leave the form fully usable.
 function InvokeResult({ result }) {
-  if (result.error) {
-    const trace = result.error.trace
-      ? html`<div class="etrace">${result.error.trace.map((f) => `${f.type}.${f.method} (line ${f.line})`).join(" › ")}</div>` : "";
-    return html`<div class="invoke-result flash invoke-error">${result.error.kind}: ${result.error.message}${trace}</div>`;
+  const r = result || {};
+  if (r.error != null) {
+    const err = (r.error && typeof r.error === "object") ? r.error : { message: safeStringify(r.error) };
+    const kind = err.kind != null ? String(err.kind) : "Error";
+    const message = err.message != null ? String(err.message) : safeStringify(err);
+    const trace = Array.isArray(err.trace) && err.trace.length
+      ? html`<div class="etrace">${err.trace.map((f) => (f && f.type != null) ? `${f.type}.${f.method} (line ${f.line})` : safeStringify(f)).join(" › ")}</div>` : "";
+    return html`<div class="invoke-result flash invoke-error">${kind}: ${message}${trace}</div>`;
   }
-  return html`<div class="invoke-result flash"><${ValueView} v=${result.value} /></div>`;
+  return html`<div class="invoke-result flash"><${SafeValue} v=${r.value} /></div>`;
 }
 function literalHint(type) {
   if (type === "String") return '"text"';

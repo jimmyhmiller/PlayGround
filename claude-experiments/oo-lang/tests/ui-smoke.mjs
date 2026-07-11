@@ -568,6 +568,75 @@ async function main() {
     // return the page to the assistant viewer so the remaining portal/inspect beats are unaffected
     await send("Page.navigate", { url: viewerURL });
 
+    // (T-safety) SAFETY NET for the reported viewer white-screen: a bad arg that reaches eval
+    // (here the List<Tool> free-text fallback given a bare word `test`) returns a clean server
+    // TypeError — but rendering that error must NEVER throw and unmount the whole app. Invoke
+    // ScriptedModel.respond(convo, tools=`test`): assert the error renders INLINE, the form stays
+    // usable, and the app root (#app) is still mounted (no white-screen).
+    try {
+      // whichever Model brain is live depends on whether LLM keys are present (scrubbed in the
+      // harness -> ScriptedModel; present -> AnthropicModel). Both expose respond(convo, tools:
+      // List<Tool>) with a List free-text fallback, so try each until one has a live instance.
+      await waitFor(".vt-btn", 12000);
+      await evalPage(`[...document.querySelectorAll('.vt-btn')].find(b=>b.textContent.trim()==='List').click()`);
+      await waitFor(".type-row", 12000);
+      // Model brains are interface implementors -> under a collapsed `Model ‹interface›` group;
+      // expand every interface group so the implementor rows are in the DOM to click.
+      await evalPage(`(()=>{document.querySelectorAll('#rail .type-row.iface').forEach(r=>{const c=r.querySelector('.caret');if(c&&!c.classList.contains('open'))r.click();});})()`);
+      await sleep(300);
+      let modelOpened = false;
+      for (const modelType of ["ScriptedModel", "AnthropicModel"]) {
+        const clicked = await evalPage(`(()=>{const r=[...document.querySelectorAll('.type-row')].find(e=>{const n=e.querySelector('.tname');return n&&n.textContent.trim()===${JSON.stringify(modelType)};});if(r)r.click();return !!r;})()`);
+        if (!clicked) continue;
+        let hasRow = false;
+        for (let i = 0; i < 30; i++) { await sleep(100);
+          hasRow = await evalPage(`!!document.querySelector('.itable tbody tr')`);
+          if (hasRow || await evalPage(`!!document.querySelector('.empty')`)) break;
+        }
+        if (hasRow) { await evalPage(`document.querySelector('.itable tbody tr').click()`); await waitFor(".field-grid", 10000); modelOpened = true; break; }
+      }
+      if (!modelOpened) { console.log("  --  no live Model instance to test the safety net (skipped)"); throw { skip: true }; }
+      await waitFor(".method", 10000);
+      const opened = await evalPage(`(()=>{
+        const card=[...document.querySelectorAll('.method')].find(c=>{const s=c.querySelector('.method-sig');return s&&s.textContent.trim().startsWith('respond(');});
+        if(!card) return false; card.dataset.smokeBad='1'; card.querySelector('.method-head').click(); return true;
+      })()`);
+      if (!opened) console.log("  --  no ScriptedModel.respond method to test the safety net (skipped)");
+      else {
+        // wait for the convo entity picker to populate a Conversation option
+        let ready = null;
+        for (let i = 0; i < 40; i++) { await sleep(100);
+          ready = await evalPage(`(()=>{const c=document.querySelector('.method[data-smoke-bad="1"]');if(!c)return{gone:true};
+            const sel=c.querySelector('.method-body select.arg-select'); const inp=c.querySelector('.method-body input');
+            return{sel:!!sel, opts: sel?[...sel.options].map(o=>o.value).filter(Boolean):[], inp:!!inp};})()`);
+          if (ready.sel && ready.opts.length && ready.inp) break;
+        }
+        if (!ready || ready.gone || !ready.sel || !ready.inp) fails.push(`T-safety: respond card did not expose convo picker + tools input (${JSON.stringify(ready)})`);
+        else {
+          // select a real Conversation, and give the List<Tool> param a BARE WORD -> server errors
+          await evalPage(`(()=>{const el=document.querySelector('.method[data-smoke-bad="1"] select.arg-select');
+            const s=Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype,'value').set;s.call(el,${JSON.stringify("")});
+            s.call(el, [...el.options].map(o=>o.value).filter(Boolean)[0]); el.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+          await evalPage(`(()=>{const el=document.querySelector('.method[data-smoke-bad="1"] .method-body input');
+            const s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(el,'test');el.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+          await sleep(150);
+          await evalPage(`document.querySelector('.method[data-smoke-bad="1"] .method-body .invoke-btn').click()`);
+          try { await waitFor('.method[data-smoke-bad="1"] .invoke-result.invoke-error', 8000); }
+          catch { fails.push("T-safety: bad-arg invoke did not render an inline error"); }
+          const after = await evalPage(`(()=>{
+            const app=document.querySelector('#app'); const err=document.querySelector('.method[data-smoke-bad="1"] .invoke-result.invoke-error');
+            return { rootMounted: !!(app && app.childElementCount > 0), topbar: !!document.querySelector('#topbar'),
+                     errText: err?err.textContent:null, formUsable: !!document.querySelector('.method[data-smoke-bad="1"] .method-body input') };
+          })()`);
+          if (!after.rootMounted || !after.topbar) fails.push("T-safety: the app root white-screened (unmounted) while rendering the invoke error");
+          else if (!after.errText) fails.push("T-safety: no inline error text after a bad-arg invoke");
+          else if (!after.formUsable) fails.push("T-safety: the invoke form was destroyed after the error");
+          else ok(`T-safety: a bad-arg invoke renders the error INLINE with the app still mounted (${JSON.stringify(after.errText.slice(0,60))})`);
+        }
+      }
+    } catch (e) { if (!(e && e.skip)) fails.push("T-safety: bad-arg render-safety scenario failed: " + (e && e.message || e)); }
+    await send("Page.navigate", { url: viewerURL });
+
     // (P) Phase 10 PORTAL dual-mode: boot a portal + a program, load the portal `/`, assert a
     // program CARD renders, click it, and assert the inspector graph loads THROUGH the proxy.
     // Skipped (not failed) if :7357 is already in use by a developer's own portal.

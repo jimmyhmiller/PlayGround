@@ -2258,6 +2258,61 @@ The assistant still runs + typechecks + passes its e2e app goldens with these ad
   `prefers-color-scheme` + `data-theme` overrides, keeping the blue accent reserved for liveness.
 
 
+# Typed argument entry — `ArgInput` (`viewer/app.js`, `viewer/style.css`)
+
+**Bug.** Both the `MethodCard` and `ActionCard` invoke forms rendered ONE plain `<input>` per param
+and fed it through `literalFor(value, type)`. `literalFor` quotes strings, parses numbers, and maps
+`Foo#n → Foo.at(n,0)`, but for an **entity** or **enum** param a bare word (e.g. `test`) fell through
+as a raw expression → the compiler read it as an unbound variable → `unknown identifier`. The fix is
+not to guess: render a **type-aware widget** per param so the form can only emit well-typed source.
+
+**`ArgInput`** — one shared component (used by both cards), given `{param, value, onChange, schema,
+active, onEnter}`. `classifyParam(type, schema)` maps the declared type to a widget by looking the
+`cleanType`'d name up in the schema (a `list:`/`map:`/`<…>` type never becomes a picker):
+
+- **Bool** → a `<select>` true/false (stores `"true"`/`"false"`).
+- **enum** (schema node `kind:"enum"`) → a `<select>` of the node's `variants`; the option label is
+  the bare variant, the stored value is the FULLY-QUALIFIED `Type.Variant` (so it compiles).
+- **entity** (`kind:"class"`/`"object"`) or **interface** (union its `implementors`) → `EntityArgInput`:
+  a `<select>` populated by eval'ing `<Type>.instances(filter:"",offset:0,limit:50)` (one eval per
+  implementor for an interface, merged), options labeled `Type#slot · <summary>` (reusing
+  `instSummary`), value stores `Type#slot` (→ `literalFor` → `Type.at(slot,0)`). It refetches when the
+  card opens (`active`), on focus/mousedown, and on a 1.5s interval while open. **Zero live instances**
+  → it degrades to a free-text id field ("no live instances — type an id").
+- **Int / Float** → a text input, validated (`argValid`); an invalid number shows a red border and
+  BLOCKS invoke. **String** → text input (`literalFor` quotes). **List/Map/unknown** → the old
+  free-text fallback with the `literalHint` placeholder.
+
+`literalFor` stays the **single final mapper** — the widgets just produce better `args[p.name]`
+strings that already pass through it unchanged (qualified enum / `Type#slot` / quoted string / raw
+number). `argValid(param, value, schema)` gates the run button: numbers must parse, a required
+entity/enum must have a selection; the button is `disabled` and `doInvoke` early-returns otherwise, so
+bad source is never sent. Both cards now take `schema`; `DetailPane` threads it down. **Schema source:**
+the rail's 500ms `types()` poll omits enums and carries no `kind`/`variants`, so `App` gained a
+separate `schema()` poll (`fullSchema`) passed to the browse `DetailPane`; `NestedView` already fed
+its in-map inspector the full `schema()` nodes, so both the browse detail and the V4 inspector get the
+right pickers.
+
+**Render safety net.** A bad eval can still happen through the free-text fallbacks (a `List<Tool>`
+param given a bare word) or a stale ref — the scry server always returns a clean `TypeError`, but
+rendering it must never unmount the app (a reported white-screen). `InvokeResult` is now defensive
+against any error/value shape (missing `kind`/`message`, non-array `trace`, odd `type`, null), and the
+result value renders through `SafeValue` — `ValueView` wrapped in a `RenderBoundary`
+(`getDerivedStateFromError`) that degrades a throw to a safe string instead of crashing. Each result is
+keyed by `flash`, so the boundary resets on every invoke.
+
+**Example.** `examples/kanban.scry` gained `fn setStatus(s: Status)` + `action "Set status" for Card
+(s: Status)` so the showcase (and the smoke test) exercises an enum picker; `Reassign(to: User)` and
+bank's `Transfer(to: Account, amount: Int)` cover the entity + number cases.
+
+`ui-smoke.mjs` gained typed-arg beats (real headless Chrome, booting `kanban.scry` + `bank.scry`):
+the enum param renders a `<select>` of `Status.*` variants and invokes cleanly (no `unknown
+identifier`); the entity param renders a `<select>` of live `User#slot`/`Account#slot` instances and
+invokes; Transfer's run button is disabled while a required param is empty and enables once entity +
+number are valid; and a deliberately-bad arg (`test` into a `List<Tool>` param) renders the error
+INLINE with the app root still mounted (no white-screen). Screenshot: `docs/typed-arg-picker.png`.
+
+
 # Phase V5 — portal static inspection of any KNOWN project, no process (DECISIONS #16)
 
 **Insight.** Static inspection is a *pure function of the source* — typecheck → schema + views +
