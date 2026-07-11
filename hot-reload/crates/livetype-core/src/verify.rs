@@ -147,6 +147,14 @@ fn check_instruction(
             read(regs, *value)?;
             Ok(None)
         }
+        Instruction::Send { target, value } => {
+            if read(regs, *target)? != Type::I64 {
+                return Err("send target must be an actor id (i64)".into());
+            }
+            read(regs, *value)?;
+            Ok(None)
+        }
+        Instruction::Recv { dst, ty } => Ok(Some((*dst, ty.clone()))),
         Instruction::Return { value } => {
             if read(regs, *value)? != function.result {
                 return Err("return value has the wrong type".into());

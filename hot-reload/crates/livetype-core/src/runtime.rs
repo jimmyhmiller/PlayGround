@@ -435,6 +435,13 @@ impl Runtime {
                 self.jit_emit(value);
                 self.frame_mut(actor).pc += 1;
             }
+            Instruction::Send { .. } | Instruction::Recv { .. } => {
+                return Err(self.type_error(
+                    function,
+                    pc,
+                    "message passing is only available in the concurrent runtime",
+                ));
+            }
             Instruction::Return { value } => {
                 let result = self.reg(actor, value)?;
                 // Check the result against this function version's declared type

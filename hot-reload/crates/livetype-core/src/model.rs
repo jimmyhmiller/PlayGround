@@ -159,6 +159,21 @@ pub enum Instruction {
     Emit {
         value: usize,
     },
+    /// Send a value to another actor's mailbox. `target` holds the recipient
+    /// actor id (an `I64`); `value` is any value (including a `Ref` into the
+    /// shared heap). Concurrent tier only.
+    Send {
+        target: usize,
+        value: usize,
+    },
+    /// Block until a message arrives in this actor's mailbox, then bind it to
+    /// `dst`. The message is checked to have type `ty` — a mismatch traps like
+    /// any other con-freeness violation, so message contracts stay sound.
+    /// Concurrent tier only.
+    Recv {
+        dst: usize,
+        ty: Type,
+    },
     Return {
         value: usize,
     },

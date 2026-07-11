@@ -29,6 +29,16 @@ struct ObjCell {
     body: Mutex<Arc<Body>>,
 }
 
+/// One call frame of a concurrent actor: the pinned function version it runs,
+/// its program counter and registers, and where its result goes in the caller.
+struct MtFrame {
+    func: DefId,
+    version: Version,
+    pc: usize,
+    regs: Vec<Option<Value>>,
+    return_to: Option<usize>,
+}
+
 /// The outcome of running one actor to a stop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -55,6 +65,10 @@ pub struct Shared {
     objects: Mutex<BTreeMap<ObjectId, Arc<ObjCell>>>,
     output: Mutex<Vec<Value>>,
     next_object: AtomicU64,
+    /// One mailbox per actor id, created before threads spawn so a `Send` never
+    /// races the recipient into existence. A `Recv` polls its own mailbox,
+    /// hitting a GC safepoint each spin so a waiting actor stays collectable.
+    mailboxes: Mutex<BTreeMap<usize, Arc<Mutex<std::collections::VecDeque<Value>>>>>,
     /// Fast-path poll flag: threads check this at every safepoint and only take
     /// the coordination lock when a collection is actually pending.
     gc_pending: AtomicBool,
@@ -82,6 +96,7 @@ impl Shared {
             objects: Mutex::new(objects),
             output: Mutex::new(Vec::new()),
             next_object: AtomicU64::new(next_object),
+            mailboxes: Mutex::new(BTreeMap::new()),
             gc_pending: AtomicBool::new(false),
             gc: Mutex::new(GcCoord::default()),
             gc_cv: Condvar::new(),
@@ -230,12 +245,30 @@ impl Shared {
         self.output.lock().unwrap().push(value);
     }
 
-    /// Run one actor (a single call frame) to completion or a trap. `tid`
-    /// identifies this actor to the GC (its published-roots slot). The actor
-    /// counts as active for the duration and hits a safepoint every step, so a
-    /// preemptive collection can pause it.
+    fn mailbox(&self, tid: usize) -> Arc<Mutex<std::collections::VecDeque<Value>>> {
+        self.mailboxes
+            .lock()
+            .unwrap()
+            .entry(tid)
+            .or_insert_with(|| Arc::new(Mutex::new(std::collections::VecDeque::new())))
+            .clone()
+    }
+
+    /// Push a value into actor `target`'s mailbox. False if no such actor.
+    fn deliver(&self, target: usize, value: Value) -> bool {
+        let Some(mb) = self.mailboxes.lock().unwrap().get(&target).cloned() else {
+            return false;
+        };
+        mb.lock().unwrap().push_back(value);
+        true
+    }
+
+    /// Run one actor — a full call stack — to completion or a trap. `tid`
+    /// identifies it to the GC (its published-roots slot) and names its mailbox.
+    /// It counts as an active mutator and hits a safepoint every step, so a
+    /// preemptive collection can pause it; a blocked `Recv` keeps hitting
+    /// safepoints while it polls, so it stays collectable too.
     pub fn run_actor(self: &Arc<Self>, tid: usize, function: DefId, args: Vec<Value>) -> Outcome {
-        // Count as an active mutator until this frame ends (any return path).
         struct Active<'a>(&'a Shared, usize);
         impl Drop for Active<'_> {
             fn drop(&mut self) {
@@ -244,10 +277,11 @@ impl Shared {
         }
         self.register();
         let _active = Active(self, tid);
+        let mailbox = self.mailbox(tid);
 
         let version = self.world.current_functions[&function];
-        let code = match &self.world.functions[&(function, version)] {
-            FunctionState::Ready(f) => f.clone(),
+        let registers = match &self.world.functions[&(function, version)] {
+            FunctionState::Ready(f) => f.registers,
             FunctionState::Broken { diagnostics, .. } => {
                 return Outcome::Paused(Condition::BrokenFunction {
                     function,
@@ -255,27 +289,44 @@ impl Shared {
                 });
             }
         };
-        let mut regs: Vec<Option<Value>> = vec![None; code.registers];
+        let mut regs = vec![None; registers];
         for (i, v) in args.into_iter().enumerate() {
             regs[i] = Some(v);
         }
-        let mut pc = 0usize;
-
-        let read = |regs: &Vec<Option<Value>>, i: usize| -> Value {
-            regs[i].clone().expect("verified register read")
-        };
+        let mut frames = vec![MtFrame {
+            func: function,
+            version,
+            pc: 0,
+            regs,
+            return_to: None,
+        }];
 
         loop {
-            self.safepoint(tid, &regs);
-            let err = |msg: &str| Condition::RuntimeTypeError {
-                function,
-                pc,
-                message: msg.into(),
+            self.safepoint(tid, &frames);
+            let (func, version, pc) = {
+                let t = frames.last().unwrap();
+                (t.func, t.version, t.pc)
             };
-            match &code.code[pc] {
+            let (instruction, result_ty) = match &self.world.functions[&(func, version)] {
+                FunctionState::Ready(f) => (f.code[pc].clone(), f.result.clone()),
+                _ => unreachable!("a frame only pins ready code"),
+            };
+            let err = |msg: &str| {
+                Outcome::Paused(Condition::RuntimeTypeError {
+                    function: func,
+                    pc,
+                    message: msg.into(),
+                })
+            };
+            let read = |frames: &Vec<MtFrame>, i: usize| -> Value {
+                frames.last().unwrap().regs[i].clone().expect("verified register read")
+            };
+
+            match instruction {
                 Instruction::Const { dst, value } => {
-                    regs[*dst] = Some(value.clone());
-                    pc += 1;
+                    let t = frames.last_mut().unwrap();
+                    t.regs[dst] = Some(value);
+                    t.pc += 1;
                 }
                 Instruction::New {
                     dst,
@@ -283,77 +334,148 @@ impl Shared {
                     fields,
                 } => {
                     let supplied: Vec<(FieldId, Value)> =
-                        fields.iter().map(|(f, r)| (*f, read(&regs, *r))).collect();
-                    match self.new_object(*type_id, &supplied) {
+                        fields.iter().map(|(f, r)| (*f, read(&frames, *r))).collect();
+                    match self.new_object(type_id, &supplied) {
                         Ok(oid) => {
-                            regs[*dst] = Some(Value::Ref(oid));
-                            pc += 1;
+                            let t = frames.last_mut().unwrap();
+                            t.regs[dst] = Some(Value::Ref(oid));
+                            t.pc += 1;
                         }
                         Err(c) => return Outcome::Paused(c),
                     }
                 }
                 Instruction::GetField { dst, object, field } => {
-                    let Value::Ref(oid) = read(&regs, *object) else {
-                        return Outcome::Paused(err("field access on non-reference"));
+                    let Value::Ref(oid) = read(&frames, object) else {
+                        return err("field access on non-reference");
                     };
-                    match self.read_field(oid, *field) {
+                    match self.read_field(oid, field) {
                         Ok(v) => {
-                            regs[*dst] = Some(v);
-                            pc += 1;
+                            let t = frames.last_mut().unwrap();
+                            t.regs[dst] = Some(v);
+                            t.pc += 1;
                         }
                         Err(c) => return Outcome::Paused(c),
                     }
                 }
                 Instruction::SubI64 { dst, left, right } => {
-                    let (Value::I64(a), Value::I64(b)) = (read(&regs, *left), read(&regs, *right))
+                    let (Value::I64(a), Value::I64(b)) = (read(&frames, left), read(&frames, right))
                     else {
-                        return Outcome::Paused(err(crate::runtime::ERR_SUB_NON_I64));
+                        return err(crate::runtime::ERR_SUB_NON_I64);
                     };
-                    regs[*dst] = Some(Value::I64(a - b));
-                    pc += 1;
+                    let t = frames.last_mut().unwrap();
+                    t.regs[dst] = Some(Value::I64(a - b));
+                    t.pc += 1;
                 }
                 Instruction::LtI64 { dst, left, right } => {
-                    let (Value::I64(a), Value::I64(b)) = (read(&regs, *left), read(&regs, *right))
+                    let (Value::I64(a), Value::I64(b)) = (read(&frames, left), read(&frames, right))
                     else {
-                        return Outcome::Paused(err(crate::runtime::ERR_LT_NON_I64));
+                        return err(crate::runtime::ERR_LT_NON_I64);
                     };
-                    regs[*dst] = Some(Value::Bool(a < b));
-                    pc += 1;
+                    let t = frames.last_mut().unwrap();
+                    t.regs[dst] = Some(Value::Bool(a < b));
+                    t.pc += 1;
                 }
                 Instruction::Branch {
                     cond,
                     then_pc,
                     else_pc,
                 } => {
-                    let Value::Bool(t) = read(&regs, *cond) else {
-                        return Outcome::Paused(err(crate::runtime::ERR_BRANCH_NON_BOOL));
+                    let Value::Bool(taken) = read(&frames, cond) else {
+                        return err(crate::runtime::ERR_BRANCH_NON_BOOL);
                     };
-                    pc = if t { *then_pc } else { *else_pc };
+                    frames.last_mut().unwrap().pc = if taken { then_pc } else { else_pc };
                 }
-                Instruction::Jump { target } => pc = *target,
-                Instruction::Yield => pc += 1,
+                Instruction::Jump { target } => frames.last_mut().unwrap().pc = target,
+                Instruction::Yield => frames.last_mut().unwrap().pc += 1,
                 Instruction::Emit { value } => {
-                    self.emit(read(&regs, *value));
-                    pc += 1;
+                    self.emit(read(&frames, value));
+                    frames.last_mut().unwrap().pc += 1;
                 }
-                Instruction::Call { .. } => {
-                    return Outcome::Paused(err("the concurrent tier is single-frame; no Call"));
+                Instruction::Send { target, value } => {
+                    let Value::I64(id) = read(&frames, target) else {
+                        return err("send target must be an actor id");
+                    };
+                    let payload = read(&frames, value);
+                    if !self.deliver(id as usize, payload) {
+                        return err("send to an unknown actor");
+                    }
+                    frames.last_mut().unwrap().pc += 1;
+                }
+                Instruction::Recv { dst, ty } => {
+                    // Poll our mailbox, hitting a GC safepoint each spin so a
+                    // waiting actor is still parkable and collectable.
+                    let message = loop {
+                        self.safepoint(tid, &frames);
+                        if let Some(v) = mailbox.lock().unwrap().pop_front() {
+                            break v;
+                        }
+                        std::thread::yield_now();
+                    };
+                    if !self.value_ok(&message, &ty) {
+                        return err("received message has the wrong type");
+                    }
+                    let t = frames.last_mut().unwrap();
+                    t.regs[dst] = Some(message);
+                    t.pc += 1;
+                }
+                Instruction::Call {
+                    dst,
+                    function: callee,
+                    args,
+                } => {
+                    let callee_version = self.world.current_functions[&callee];
+                    let callee_regs = match &self.world.functions[&(callee, callee_version)] {
+                        FunctionState::Ready(f) => {
+                            for (arg, expected) in args.iter().zip(&f.params) {
+                                if !self.value_ok(&read(&frames, *arg), expected) {
+                                    return err("call argument has the wrong type");
+                                }
+                            }
+                            f.registers
+                        }
+                        FunctionState::Broken { diagnostics, .. } => {
+                            return Outcome::Paused(Condition::BrokenFunction {
+                                function: callee,
+                                diagnostics: diagnostics.clone(),
+                            });
+                        }
+                    };
+                    let mut regs = vec![None; callee_regs];
+                    for (slot, arg) in args.iter().enumerate() {
+                        regs[slot] = Some(read(&frames, *arg));
+                    }
+                    frames.last_mut().unwrap().pc += 1;
+                    frames.push(MtFrame {
+                        func: callee,
+                        version: callee_version,
+                        pc: 0,
+                        regs,
+                        return_to: Some(dst),
+                    });
                 }
                 Instruction::Return { value } => {
-                    let result = read(&regs, *value);
-                    if !self.value_ok(&result, &code.result) {
-                        return Outcome::Paused(err("return value has the wrong type"));
+                    let result = read(&frames, value);
+                    if !self.value_ok(&result, &result_ty) {
+                        return err("return value has the wrong type");
                     }
-                    return Outcome::Complete(result);
+                    let done = frames.pop().unwrap();
+                    match done.return_to {
+                        Some(dst) => frames.last_mut().unwrap().regs[dst] = Some(result),
+                        None => return Outcome::Complete(result),
+                    }
                 }
             }
         }
     }
 
     /// Spawn one OS thread per actor over the shared runtime and join them,
-    /// returning outcomes in the actors' order. This is the real-parallelism
-    /// entry point: all threads share this `Shared`'s heap.
+    /// returning outcomes in the actors' order. Mailboxes for every actor id
+    /// are created up front, so a `Send` can never race its recipient into
+    /// existence. All threads share this `Shared`'s heap.
     pub fn run_threads(self: &Arc<Self>, actors: Vec<(DefId, Vec<Value>)>) -> Vec<Outcome> {
+        for tid in 0..actors.len() {
+            self.mailbox(tid);
+        }
         let handles: Vec<_> = actors
             .into_iter()
             .enumerate()
@@ -379,15 +501,16 @@ impl Shared {
     }
 
     /// A safepoint: if a collection is pending, publish this actor's live roots
-    /// and park until the collector releases us. Called every instruction, so
-    /// preemption latency is one step.
-    fn safepoint(&self, tid: usize, regs: &[Option<Value>]) {
+    /// (every reference across its whole call stack) and park until the
+    /// collector releases us. Called every instruction, so preemption latency is
+    /// one step.
+    fn safepoint(&self, tid: usize, frames: &[MtFrame]) {
         if !self.gc_pending.load(Ordering::Acquire) {
             return;
         }
-        let live: Vec<ObjectId> = regs
+        let live: Vec<ObjectId> = frames
             .iter()
-            .flatten()
+            .flat_map(|f| f.regs.iter().flatten())
             .filter_map(|v| match v {
                 Value::Ref(id) => Some(*id),
                 _ => None,

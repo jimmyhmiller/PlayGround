@@ -568,6 +568,12 @@ impl<'ctx> Codegen<'ctx> {
                         .unwrap();
                     fallthrough();
                 }
+                Instruction::Send { .. } | Instruction::Recv { .. } => {
+                    // Message passing belongs to the concurrent tier; the JIT
+                    // never runs programs containing it. Trap if one appears.
+                    self.set_pc(frame, pc as u64);
+                    self.ret_outcome(OUT_TYPE_ERROR);
+                }
                 Instruction::Jump { target } => {
                     self.builder.build_unconditional_branch(blocks[*target]).unwrap();
                 }
