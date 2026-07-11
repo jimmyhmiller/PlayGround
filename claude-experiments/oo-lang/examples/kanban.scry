@@ -27,6 +27,7 @@ class Card {
   }
   fn start() { self.status = Status.Doing }
   fn finish() { self.status = Status.Done }
+  fn setStatus(s: Status) { self.status = s }
   fn reassign(u: User) { self.assignee = u }
 }
 
@@ -63,9 +64,10 @@ view BoardView for Board {
 }
 
 // What a person would do to a card — curated actions, not the raw method list.
-action "Start"    for Card { self.start() }
-action "Finish"   for Card { self.finish() }
-action "Reassign" for Card (to: User) { self.reassign(to) }
+action "Start"      for Card { self.start() }
+action "Finish"     for Card { self.finish() }
+action "Set status" for Card (s: Status) { self.setStatus(s) }
+action "Reassign"   for Card (to: User) { self.reassign(to) }
 
 fn main() {
   let board = Board(name: "Launch")

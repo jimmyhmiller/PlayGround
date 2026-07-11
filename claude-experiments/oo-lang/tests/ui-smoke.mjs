@@ -419,6 +419,155 @@ async function main() {
       catch { fails.push("0-arg invoke produced no result"); }
     }
 
+    // (T) TYPED ARG ENTRY (ArgInput): the proper fix for the bare-word "unknown identifier" bug.
+    // A non-primitive param used to render a plain <input>; typing `test` for a User/Account/enum
+    // param compiled to an unbound variable. Now each param renders a TYPE-AWARE widget: an enum
+    // param is a <select> of variants (emits `Type.Variant`), an entity param is a <select> of
+    // live instances (emits `Type#slot` -> Type.at(slot,0)), numbers validate + block invoke.
+    // Boot kanban ("Set status" enum param + "Reassign" entity param) and bank ("Transfer" entity
+    // + Int params): assert the picker renders (not a bare input), select an option, invoke, and
+    // assert a real, non-"unknown identifier" result.
+    const bootProgram = async (example) => {
+      const p = spawn(join(ROOT, "scry"), ["run", join(ROOT, "examples", example)], { stdio: ["pipe", "pipe", "pipe"] });
+      extraProcs.push(p);
+      let pport = null;
+      p.stdout.on("data", (b) => { const m = /localhost:(\d+)/.exec(b.toString()); if (m && !pport) pport = +m[1]; });
+      for (let i = 0; i < 160 && !pport; i++) await sleep(50);
+      return pport;
+    };
+    // browse to the first instance of a type via the List rail -> its DetailPane (fields+actions)
+    const openFirstInstance = async (typeName) => {
+      await waitFor(".vt-btn", 12000);   // wait for the freshly-navigated app to boot
+      await evalPage(`[...document.querySelectorAll('.vt-btn')].find(b=>b.textContent.trim()==='List').click()`);
+      await waitFor(".type-row", 12000);
+      await evalPage(`(()=>{const r=[...document.querySelectorAll('.type-row')].find(e=>{const n=e.querySelector('.tname');return n&&n.textContent.trim()===${JSON.stringify(typeName)};});if(r)r.click();return !!r;})()`);
+      await waitFor(".itable tbody tr", 12000);
+      await evalPage(`document.querySelector('.itable tbody tr').click()`);
+      await waitFor(".field-grid", 12000);
+    };
+    // open an action card by label (marks it for later lookup); returns whether it was found
+    const openAction = (label) => `(()=>{
+      const card=[...document.querySelectorAll('.actions-section .action-card')].find(c=>{const l=c.querySelector('.action-label');return l&&l.textContent.trim()===${JSON.stringify(label)};});
+      if(!card) return false; card.dataset.smokeAct=${JSON.stringify(label)}; card.querySelector('.action-btn').click(); return true;
+    })()`;
+    const actSel = (label) => `document.querySelector('.action-card[data-smoke-act=${JSON.stringify(label)}]')`;
+    // fire a React-controlled <select>/<input> change
+    const setControl = (elExpr, val, proto) => `(()=>{
+      const el=${elExpr}; if(!el) return false;
+      const setter=Object.getOwnPropertyDescriptor(window.${proto}.prototype,'value').set;
+      setter.call(el, ${JSON.stringify(val)});
+      el.dispatchEvent(new Event(${proto === "HTMLSelectElement" ? "'change'" : "'input'"},{bubbles:true}));
+      return el.value;
+    })()`;
+
+    const kport = await bootProgram("kanban.scry");
+    if (!kport) fails.push("T: kanban never printed a viewer URL");
+    else {
+      await send("Page.navigate", { url: `http://127.0.0.1:${kport}/` });
+      try {
+        await openFirstInstance("Card");
+        // --- ENUM param: "Set status" (s: Status) is a <select> of variants, never a bare input
+        if (!await evalPage(openAction("Set status"))) fails.push("T: kanban Card has no 'Set status' action");
+        else {
+          let form = null;
+          for (let i = 0; i < 30; i++) { await sleep(100);
+            form = await evalPage(`(()=>{const c=${actSel("Set status")};if(!c)return{gone:true};
+              const f=c.querySelector('.action-form'); const sel=f&&f.querySelector('select.arg-select');
+              return{open:/\\bopen\\b/.test(c.className), hasSelect:!!sel, hasBareInput:!!(f&&f.querySelector('input')),
+                     opts: sel?[...sel.options].map(o=>o.value):[]};})()`);
+            if (form.open && form.hasSelect) break;
+          }
+          if (!form || form.gone) fails.push("T: 'Set status' action card disappeared");
+          else if (!form.hasSelect) fails.push("T: enum param 'Set status' did not render a <select> picker (got a bare input)");
+          else {
+            ok(`T: enum param renders a <select> variant picker (options: ${JSON.stringify(form.opts)})`);
+            if (form.hasBareInput) fails.push("T: enum param 'Set status' still shows a bare text input alongside the select");
+            if (!form.opts.includes("Status.Done")) fails.push(`T: enum picker options are not fully-qualified Type.Variant (${JSON.stringify(form.opts)})`);
+            await evalPage(setControl(`${actSel("Set status")}.querySelector('select.arg-select')`, "Status.Done", "HTMLSelectElement"));
+            await sleep(100);
+            await evalPage(`${actSel("Set status")}.querySelector('.action-run').click()`);
+            try { await waitFor(`.action-card[data-smoke-act="Set status"] .invoke-result`, 8000); } catch { fails.push("T: enum-param invoke produced no result"); }
+            const res = await evalPage(`(()=>{const c=${actSel("Set status")};const r=c&&c.querySelector('.invoke-result');
+              return r?{err:r.classList.contains('invoke-error'), text:r.textContent}:{none:true};})()`);
+            if (res.none) fails.push("T: enum-param invoke produced no result element");
+            else if (res.err || /unknown identifier/i.test(res.text)) fails.push(`T: enum-param invoke errored (bare-word bug NOT fixed): ${JSON.stringify(res.text)}`);
+            else ok("T: enum-param action invokes cleanly (no 'unknown identifier')");
+          }
+        }
+        // --- ENTITY param: "Reassign" (to: User) is a <select> populated from User.instances()
+        if (!await evalPage(openAction("Reassign"))) fails.push("T: kanban Card has no 'Reassign' action");
+        else {
+          let ent = null;
+          for (let i = 0; i < 40; i++) { await sleep(100);
+            ent = await evalPage(`(()=>{const c=${actSel("Reassign")};if(!c)return{gone:true};
+              const sel=c.querySelector('.action-form select.arg-select');
+              return{hasSelect:!!sel, opts: sel?[...sel.options].map(o=>o.value).filter(Boolean):[]};})()`);
+            if (ent.hasSelect && ent.opts.length) break;
+          }
+          if (!ent || ent.gone) fails.push("T: 'Reassign' action card disappeared");
+          else if (!ent.hasSelect) fails.push("T: entity param 'Reassign' did not render a <select> picker");
+          else if (!ent.opts.some((o) => /^User#\d+$/.test(o))) fails.push(`T: entity picker not populated with live User#slot options (${JSON.stringify(ent.opts)})`);
+          else {
+            ok(`T: entity param renders a <select> of live instances (${JSON.stringify(ent.opts)})`);
+            await evalPage(setControl(`${actSel("Reassign")}.querySelector('select.arg-select')`, ent.opts[0], "HTMLSelectElement"));
+            await sleep(100);
+            await evalPage(`${actSel("Reassign")}.querySelector('.action-run').click()`);
+            try { await waitFor(`.action-card[data-smoke-act="Reassign"] .invoke-result`, 8000); } catch { fails.push("T: entity-param invoke produced no result"); }
+            const res = await evalPage(`(()=>{const c=${actSel("Reassign")};const r=c&&c.querySelector('.invoke-result');return r?{err:r.classList.contains('invoke-error'),text:r.textContent}:{none:true};})()`);
+            if (res.none || res.err || /unknown identifier/i.test(res.text || "")) fails.push(`T: entity-param invoke errored: ${JSON.stringify(res)}`);
+            else ok("T: entity-param action invokes cleanly (Type#slot -> Type.at(slot,0))");
+          }
+        }
+      } catch (e) { fails.push("T: kanban typed-arg scenario failed: " + (e && e.message || e)); }
+    }
+
+    // bank "Transfer" (to: Account, amount: Int): the entity param is a picker; the Int param
+    // validates + BLOCKS invoke (the run button is disabled) until it is a real number.
+    const bport = await bootProgram("bank.scry");
+    if (!bport) fails.push("T: bank never printed a viewer URL");
+    else {
+      await send("Page.navigate", { url: `http://127.0.0.1:${bport}/` });
+      try {
+        await openFirstInstance("Account");
+        if (!await evalPage(openAction("Transfer"))) fails.push("T: bank Account has no 'Transfer' action");
+        else {
+          let tf = null;
+          for (let i = 0; i < 40; i++) { await sleep(100);
+            tf = await evalPage(`(()=>{const c=${actSel("Transfer")};if(!c)return{gone:true};
+              const f=c.querySelector('.action-form'); const sel=f&&f.querySelector('select.arg-select');
+              return{hasSelect:!!sel, opts: sel?[...sel.options].map(o=>o.value).filter(Boolean):[], hasNum:!!(f&&f.querySelector('input')),
+                     runDisabled: !!(c.querySelector('.action-run')&&c.querySelector('.action-run').disabled)};})()`);
+            if (tf.hasSelect && tf.opts.length) break;
+          }
+          if (!tf || tf.gone) fails.push("T: 'Transfer' action card disappeared");
+          else if (!tf.hasSelect || !tf.opts.some((o) => /^Account#\d+$/.test(o))) fails.push(`T: Transfer 'to' param is not an Account picker (${JSON.stringify(tf)})`);
+          else {
+            ok(`T: bank Transfer 'to' param is an Account picker (${JSON.stringify(tf.opts)})`);
+            if (!tf.hasNum) fails.push("T: Transfer 'amount' Int param has no text input");
+            // block-on-invalid: with amount empty (and/or 'to' unset) the run button is disabled
+            if (!tf.runDisabled) fails.push("T: Transfer run button was NOT disabled while required params were empty (no blocking)");
+            else ok("T: Transfer run button is disabled while a required param is empty (invoke blocked)");
+            // fill both: pick an account + a valid amount -> run enables, invoke is clean
+            await evalPage(setControl(`${actSel("Transfer")}.querySelector('select.arg-select')`, tf.opts[0], "HTMLSelectElement"));
+            await evalPage(setControl(`${actSel("Transfer")}.querySelector('.action-form input')`, "10", "HTMLInputElement"));
+            await sleep(150);
+            const enabled = await evalPage(`!${actSel("Transfer")}.querySelector('.action-run').disabled`);
+            if (!enabled) fails.push("T: Transfer run button stayed disabled after valid entity + number were entered");
+            else {
+              ok("T: Transfer run button enables once entity + number are valid");
+              await evalPage(`${actSel("Transfer")}.querySelector('.action-run').click()`);
+              try { await waitFor(`.action-card[data-smoke-act="Transfer"] .invoke-result`, 8000); } catch { fails.push("T: Transfer invoke produced no result"); }
+              const res = await evalPage(`(()=>{const c=${actSel("Transfer")};const r=c&&c.querySelector('.invoke-result');return r?{err:r.classList.contains('invoke-error'),text:r.textContent}:{none:true};})()`);
+              if (res.none || res.err || /unknown identifier/i.test(res.text || "")) fails.push(`T: Transfer invoke errored: ${JSON.stringify(res)}`);
+              else ok("T: Transfer (entity + Int) invokes cleanly with well-typed source");
+            }
+          }
+        }
+      } catch (e) { fails.push("T: bank typed-arg scenario failed: " + (e && e.message || e)); }
+    }
+    // return the page to the assistant viewer so the remaining portal/inspect beats are unaffected
+    await send("Page.navigate", { url: viewerURL });
+
     // (P) Phase 10 PORTAL dual-mode: boot a portal + a program, load the portal `/`, assert a
     // program CARD renders, click it, and assert the inspector graph loads THROUGH the proxy.
     // Skipped (not failed) if :7357 is already in use by a developer's own portal.

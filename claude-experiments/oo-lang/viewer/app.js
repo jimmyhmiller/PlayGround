@@ -365,14 +365,14 @@ function DetailPane({ cls, slot, gen, schema, onEditSource }) {
         <div class="detail-section actions-section">
           <h3>actions</h3>
           <div class="action-grid">
-            ${actions.map((a) => html`<${ActionCard} key=${a.invoke} cls=${cls} slot=${slot} gen=${gen} a=${a} />`)}
+            ${actions.map((a) => html`<${ActionCard} key=${a.invoke} cls=${cls} slot=${slot} gen=${gen} a=${a} schema=${schema} />`)}
           </div>
         </div>` : ""}
 
       ${sc && sc.methods.length ? html`
         <div class="detail-section">
           <h3>methods</h3>
-          ${sc.methods.map((m) => html`<${MethodCard} key=${m.name} cls=${cls} slot=${slot} gen=${gen} m=${m} />`)}
+          ${sc.methods.map((m) => html`<${MethodCard} key=${m.name} cls=${cls} slot=${slot} gen=${gen} m=${m} schema=${schema} />`)}
         </div>` : ""}
     </div>`;
 }
@@ -381,21 +381,23 @@ function DetailPane({ cls, slot, gen, schema, onEditSource }) {
 // has params) that evals the action's hidden synthetic method against THIS instance through the
 // normal invoke path, then bumps detailBus so the mutation is read back live. Styled distinct from
 // the raw method list — these are "the things a person would want to do here."
-function ActionCard({ cls, slot, gen, a }) {
+function ActionCard({ cls, slot, gen, a, schema }) {
   const [open, setOpen] = useState(false);
   const [args, setArgs] = useState({});
   const [result, setResult] = useState(null);
   const flash = useRef(0);
   const hasParams = a.params.length > 0;
+  const allValid = a.params.every((p) => argValid(p, args[p.name], schema));
 
   const doInvoke = useCallback(async () => {
+    if (!a.params.every((p) => argValid(p, args[p.name], schema))) return;  // never send bad source
     const argList = a.params.map((p) => literalFor(args[p.name] || "", p.type)).join(", ");
     const src = `${cls}.at(${slot}, ${gen}).${a.invoke}(${argList})`;
     const r = await evalSource(src);
     flash.current += 1;
     setResult({ ...r, flash: flash.current });
     setTimeout(bumpDetail, 60); // read the mutation back immediately
-  }, [args, cls, slot, gen, a]);
+  }, [args, cls, slot, gen, a, schema]);
 
   return html`
     <div class=${"action-card" + (open ? " open" : "")}>
@@ -406,14 +408,9 @@ function ActionCard({ cls, slot, gen, a }) {
       </button>
       ${hasParams ? html`
         <div class="action-form">
-          ${a.params.map((p) => html`
-            <div class="arg-row" key=${p.name}>
-              <label>${p.name}: ${cleanType(p.type)}</label>
-              <input placeholder=${literalHint(p.type)} value=${args[p.name] || ""}
-                     onInput=${(e) => setArgs((s) => ({ ...s, [p.name]: e.target.value }))}
-                     onKeyDown=${(e) => { if (e.key === "Enter") doInvoke(); }} />
-            </div>`)}
-          <div class="arg-row"><button class="action-run" onClick=${doInvoke}>run ${a.label}</button></div>
+          ${a.params.map((p) => html`<${ArgInput} key=${p.name} param=${p} schema=${schema} active=${open}
+              value=${args[p.name]} onChange=${(val) => setArgs((s) => ({ ...s, [p.name]: val }))} onEnter=${doInvoke} />`)}
+          <div class="arg-row"><button class="action-run" onClick=${doInvoke} disabled=${!allValid}>run ${a.label}</button></div>
         </div>` : ""}
       ${result ? html`<${InvokeResult} result=${result} key=${result.flash} />` : ""}
     </div>`;
@@ -422,20 +419,22 @@ function ActionCard({ cls, slot, gen, a }) {
 // A method card owns its own open/args/result state. That state is what the vanilla viewer
 // had to snapshot-and-restore across every poll; here it simply lives in the component, so a
 // poll re-rendering DetailPane never touches it.
-function MethodCard({ cls, slot, gen, m }) {
+function MethodCard({ cls, slot, gen, m, schema }) {
   const [open, setOpen] = useState(false);
   const [args, setArgs] = useState({});                 // param name -> string
   const [result, setResult] = useState(null);           // {error|value, flash}
   const flash = useRef(0);
+  const allValid = m.params.every((p) => argValid(p, args[p.name], schema));
 
   const doInvoke = useCallback(async () => {
+    if (!m.params.every((p) => argValid(p, args[p.name], schema))) return;  // never send bad source
     const argList = m.params.map((p) => literalFor(args[p.name] || "", p.type)).join(", ");
     const src = `${cls}.at(${slot}, ${gen}).${m.name}(${argList})`;
     const r = await evalSource(src);
     flash.current += 1;
     setResult({ ...r, flash: flash.current });
     setTimeout(bumpDetail, 60); // read the mutation back immediately
-  }, [args, cls, slot, gen, m]);
+  }, [args, cls, slot, gen, m, schema]);
 
   const params = m.params.map((p) => `${p.name}: ${p.type}`).join(", ");
 
@@ -443,17 +442,12 @@ function MethodCard({ cls, slot, gen, m }) {
     <div class=${"method" + (open ? " open" : "")}>
       <div class="method-head" onClick=${() => setOpen((o) => !o)}>
         <span class="method-sig">${m.name}(${params}) <span class="mret">→ ${m.returns}</span></span>
-        <button class="invoke-btn" onClick=${(e) => { e.stopPropagation(); if (m.params.length) setOpen(true); doInvoke(); }}>invoke</button>
+        <button class="invoke-btn" onClick=${(e) => { e.stopPropagation(); if (m.params.length) { setOpen(true); if (allValid) doInvoke(); } else doInvoke(); }}>invoke</button>
       </div>
       <div class="method-body">
-        ${m.params.map((p) => html`
-          <div class="arg-row" key=${p.name}>
-            <label>${p.name}: ${p.type}</label>
-            <input placeholder=${literalHint(p.type)} value=${args[p.name] || ""}
-                   onInput=${(e) => setArgs((a) => ({ ...a, [p.name]: e.target.value }))}
-                   onKeyDown=${(e) => { if (e.key === "Enter") doInvoke(); }} />
-          </div>`)}
-        ${m.params.length ? html`<div class="arg-row"><button class="invoke-btn" onClick=${doInvoke}>run</button></div>` : ""}
+        ${m.params.map((p) => html`<${ArgInput} key=${p.name} param=${p} schema=${schema} active=${open}
+            value=${args[p.name]} onChange=${(val) => setArgs((a) => ({ ...a, [p.name]: val }))} onEnter=${doInvoke} />`)}
+        ${m.params.length ? html`<div class="arg-row"><button class="invoke-btn" onClick=${doInvoke} disabled=${!allValid}>run</button></div>` : ""}
         ${result ? html`<${InvokeResult} result=${result} key=${result.flash} />` : ""}
       </div>
     </div>`;
@@ -484,10 +478,125 @@ function literalFor(v, type) {
   // an instance reference typed as "Agent#3" -> Agent.at(3, 0)
   const rm = /^([A-Za-z_]\w*)#(\d+)$/.exec(v);
   if (rm) return `${rm[1]}.at(${rm[2]}, 0)`;
-  // enum variant already qualified ("AgentStatus.Running") passes through; a BARE word for a
-  // non-primitive param (entity/enum) can't be a literal — pass it through so the eval returns a
-  // clean typed error rather than us guessing (proper instance/enum pickers are a follow-up).
+  // enum variant already qualified ("AgentStatus.Running") passes through; the ArgInput widgets
+  // below already emit qualified enum variants / Type#slot ids / quoted strings, so literalFor is
+  // just the FINAL mapper — a bare word only survives for the free-text fallback types.
   return v;
+}
+
+// ===================== typed argument entry (ArgInput) =====================
+// The proper fix for "unknown identifier": a bare word typed for an entity/enum param used to
+// desugar to a raw expression the compiler read as an unbound variable. Instead of one plain
+// <input> per param, we render a TYPE-AWARE widget so the form always emits well-typed source,
+// and literalFor stays the single final mapper (bool→as-is, enum "Type.Variant"→as-is,
+// "Type#slot"→Type.at(slot,0), number→as-is, string→quoted).
+
+// Classify a declared param type against the schema. cleanType strips a `ref:`/`list:` prefix; a
+// generic (`List<Card>`) or an explicit `list:`/`map:` type is never a picker — free text.
+function classifyParam(type, schema) {
+  const raw = String(type || "").trim();
+  if (/^(list|map):/i.test(raw) || /[<>]/.test(raw)) return { kind: "text" };
+  const t = cleanType(raw);
+  if (t === "Bool") return { kind: "bool" };
+  if (t === "Int") return { kind: "int" };
+  if (t === "Float") return { kind: "float" };
+  if (t === "String") return { kind: "string" };
+  const node = (schema || []).find((n) => n.name === t);
+  if (node) {
+    if (node.kind === "enum") return { kind: "enum", node };
+    if (node.kind === "interface") return { kind: "interface", node };
+    if (node.kind === "class" || node.kind === "object") return { kind: "entity", node };
+  }
+  return { kind: "text" };  // unknown / generic -> free-text fallback
+}
+// Is the current string a VALID value for this param? Blocks invoke on bad/missing input:
+// numbers must parse; a required entity/enum must have a selection. String/text/bool are always ok.
+function argValid(param, value, schema) {
+  const { kind } = classifyParam(param.type, schema);
+  const v = (value || "").trim();
+  if (kind === "int") return /^[+-]?\d+$/.test(v);
+  if (kind === "float") return v !== "" && Number.isFinite(Number(v));
+  if (kind === "enum" || kind === "entity" || kind === "interface") return v !== "";
+  return true;
+}
+
+// The type-aware widget for ONE param. `onChange` stores a STRING literalFor turns into valid
+// source; `active` gates the entity instance poll to open cards only; `onEnter` invokes.
+function ArgInput({ param, value, onChange, schema, active, onEnter }) {
+  const info = classifyParam(param.type, schema);
+  const label = html`<label>${param.name}: ${cleanType(param.type)}</label>`;
+  const enterKey = (e) => { if (e.key === "Enter" && onEnter) onEnter(); };
+  if (info.kind === "bool") {
+    return html`<div class="arg-row">${label}
+      <select class="arg-select" value=${value || "false"} onChange=${(e) => onChange(e.target.value)}>
+        <option value="true">true</option><option value="false">false</option>
+      </select></div>`;
+  }
+  if (info.kind === "enum") {
+    const variants = info.node.variants || [];
+    return html`<div class="arg-row">${label}
+      <select class="arg-select" value=${value || ""} onChange=${(e) => onChange(e.target.value)}>
+        <option value="">— select —</option>
+        ${variants.map((vr) => html`<option key=${vr.name} value=${`${info.node.name}.${vr.name}`}>${vr.name}</option>`)}
+      </select></div>`;
+  }
+  if (info.kind === "entity" || info.kind === "interface") {
+    const types = info.kind === "interface"
+      ? ((info.node.implementors && info.node.implementors.length) ? info.node.implementors : [info.node.name])
+      : [info.node.name];
+    return html`<${EntityArgInput} label=${label} types=${types}
+      value=${value} onChange=${onChange} active=${active} onEnter=${onEnter} />`;
+  }
+  // Int / Float / String / (list/map/unknown) -> a text input; numbers are validated inline.
+  const numeric = info.kind === "int" || info.kind === "float";
+  const bad = numeric && (value || "").trim() !== "" && !argValid(param, value, schema);
+  return html`<div class="arg-row">${label}
+    <input class=${"arg-input" + (bad ? " invalid" : "")}
+           inputMode=${info.kind === "int" ? "numeric" : info.kind === "float" ? "decimal" : undefined}
+           placeholder=${literalHint(param.type)} value=${value || ""}
+           onInput=${(e) => onChange(e.target.value)} onKeyDown=${enterKey} />
+    ${bad ? html`<span class="arg-err">not ${info.kind === "int" ? "an int" : "a float"}</span>` : ""}</div>`;
+}
+// Entity/interface picker: a <select> of LIVE instances (Type#slot · summary) fetched from
+// <Type>.instances(...). For an interface, every implementor is queried and the results merged.
+// Refetches when the card opens (active), on focus/mousedown, and on a slow interval while open.
+// Zero live instances -> degrade to a free-text id field (you can still type Type#slot by hand).
+function EntityArgInput({ label, types, value, onChange, active, onEnter }) {
+  const [opts, setOpts] = useState(null);   // null = not loaded; [] = loaded, none live
+  const key = types.join(",");
+  const fetchNow = useCallback(async () => {
+    const all = [];
+    for (const tn of types) {
+      const r = await evalSource(`${tn}.instances(filter: "", offset: 0, limit: 50)`);
+      const items = (r && r.value && r.value.items) || [];
+      for (const it of items) {
+        const m = /#(\d+)$/.exec(it.ref); const slot = m ? +m[1] : 0;
+        const s = instSummary(it);
+        all.push({ value: `${tn}#${slot}`, label: `${tn}#${slot}` + (s ? ` · ${s}` : "") });
+      }
+    }
+    setOpts(all);
+  }, [key]); // eslint-disable-line
+  useEffect(() => {
+    if (!active) return;
+    fetchNow();
+    const id = setInterval(fetchNow, 1500);
+    return () => clearInterval(id);
+  }, [active, fetchNow]);
+
+  const enterKey = (e) => { if (e.key === "Enter" && onEnter) onEnter(); };
+  if (opts !== null && opts.length === 0) {
+    return html`<div class="arg-row">${label}
+      <input class="arg-input" placeholder="Type#slot" value=${value || ""}
+             onFocus=${fetchNow} onInput=${(e) => onChange(e.target.value)} onKeyDown=${enterKey} />
+      <span class="arg-note">no live instances — type an id</span></div>`;
+  }
+  return html`<div class="arg-row">${label}
+    <select class="arg-select" value=${value || ""}
+            onMouseDown=${fetchNow} onFocus=${fetchNow} onChange=${(e) => onChange(e.target.value)}>
+      <option value="">${opts === null ? "loading…" : "— select —"}</option>
+      ${(opts || []).map((o) => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
+    </select></div>`;
 }
 
 // ===================== breadcrumbs =====================
@@ -1769,6 +1878,15 @@ function App({ onBack, programName } = {}) {
     setSchema(items);
   }, 500, []);
 
+  // types() (above) drives the rail's live counts/trend, but its nodes carry no `kind`/`variants`
+  // and omit enums — so the DetailPane's typed ArgInput widgets need the RICHER schema() payload
+  // (kind + enum variants + interface implementors) to render the right per-param picker.
+  const [fullSchema, setFullSchema] = useState([]);
+  usePoll(async () => {
+    const r = await evalSource("schema()");
+    if (r.value && r.value.nodes) setFullSchema(r.value.nodes);
+  }, 1500, []);
+
   const setIfaceOpen = useCallback((iface, v) => setIfaceOpenState((m) => ({ ...m, [iface]: v })), []);
 
   const goIndex = useCallback(() => {
@@ -1853,7 +1971,7 @@ function App({ onBack, programName } = {}) {
 
   let pane;
   if (route.view === "table") pane = html`<${TablePane} name=${route.typeName} schema=${schema} />`;
-  else if (route.view === "detail") pane = html`<${DetailPane} cls=${route.ref.class} slot=${route.ref.slot} gen=${route.ref.gen} schema=${schema} onEditSource=${openCodePanel} />`;
+  else if (route.view === "detail") pane = html`<${DetailPane} cls=${route.ref.class} slot=${route.ref.slot} gen=${route.ref.gen} schema=${fullSchema.length ? fullSchema : schema} onEditSource=${openCodePanel} />`;
   else pane = html`<${IndexPane} />`;
 
   return html`
