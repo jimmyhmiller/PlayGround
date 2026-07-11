@@ -1,0 +1,29 @@
+enum AgentStatus { Idle Running Done }
+class Message {
+  role: String
+  content: String
+  fn init(role: String, content: String) { self.role = role self.content = content }
+}
+class Conversation {
+  messages: List<Message>
+  fn init() { self.messages = List<Message>() }
+}
+class Agent {
+  name: String
+  status: AgentStatus
+  conversation: Conversation
+  tools: List<Message>
+  fn init() { self.name = "x" self.status = AgentStatus.Idle self.conversation = Conversation() self.tools = List<Message>() }
+}
+fn main() { let a = Agent() }
+view AgentBoard for Agent {
+  title: name
+  size: byCount
+  badge: status
+  section "conversation" { conversation.messages as timeline(order: role) }
+  section "tools" { tools as chips }
+}
+view Pulse for Message {
+  stream: all as heat(by: role)
+  key: role
+}

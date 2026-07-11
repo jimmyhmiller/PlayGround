@@ -1,0 +1,15 @@
+view AgentBoard for Agent {
+  title: name
+  size: byCount
+  badge: status
+  section "conversation" {
+    conversation.messages as timeline(order: createdAt)
+  }
+  section "tools" {
+    tools as chips
+  }
+}
+view Pulse for Message {
+  stream: all as heat(by: role, order: createdAt)
+  key: role
+}

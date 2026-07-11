@@ -1,0 +1,30 @@
+(program
+  (view AgentBoard (for (type Agent))
+    (clause title
+      (item
+        (path name)))
+    (clause size
+      (item
+        (path byCount)))
+    (clause badge
+      (item
+        (path status)))
+    (section "conversation"
+      (item
+        (path conversation messages) (as timeline)
+        (arg order
+          (id createdAt))))
+    (section "tools"
+      (item
+        (path tools) (as chips))))
+  (view Pulse (for (type Message))
+    (clause stream
+      (item
+        (path all) (as heat)
+        (arg by
+          (id role))
+        (arg order
+          (id createdAt))))
+    (clause key
+      (item
+        (path role)))))

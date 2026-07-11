@@ -338,3 +338,25 @@ fn main() {
   orch.shutdown()
   Console.log("assistant> goodbye.")
 }
+
+// ============================ program-declared views (DECISIONS #15b) ============================
+// The program declares HOW its entities should be visualized. Reflection (`views()`) hands the
+// viewer these specs; a bespoke renderer honors them, and each type/instance gains a
+// default(nested cell) <-> custom(this view) toggle in the viewer. See docs/06-implementation.md.
+//
+// NOTE on ordering: Message has no timestamp/createdAt field, and a Conversation's `messages` is
+// an ordered List already, so `timeline` here uses natural insertion order (no `order:` arg) —
+// the honest, clean choice over synthesizing a fake ordinal field.
+view AgentBoard for Agent {
+  title:  name
+  size:   byCount
+  badge:  status
+  section "conversation" { conversation.messages as timeline }
+  section "tools"        { tools as chips }
+}
+
+// A second lens for the same live data: every Message as a cell in a heat stream keyed by role.
+view Pulse for Message {
+  stream: all as heat(by: role)
+  key:    role
+}
