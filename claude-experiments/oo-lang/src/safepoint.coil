@@ -114,6 +114,17 @@
   (sp-park-wait coord)
   0)
 
+; NON-SPINNING acquire (for GC, where ANY thread may initiate a stop): try to win the flag with
+; a single CAS. On success, record ourselves as coordinator, wait for everyone else to park, and
+; return 1. On failure — another coordinator (a concurrent GC or an eval) already holds it —
+; return 0 IMMEDIATELY so the caller can PARK instead of contending. This closes the deadlock
+; where two would-be coordinators each spin to acquire while the winner waits for the loser to
+; park: the loser must not spin, it must become a parkable follower.
+(defn request-global-stop-try [(coord (ptr i64))] (-> i64)
+  (if (= (atomic-cas (sp-flag) 0 1) 0)
+    (do (store! (sp-coord) (cast i64 coord)) (sp-park-wait coord) 1)
+    0))
+
 ; coordinator side: release — every parked thread resumes together.
 (defn release-global-stop [] (-> i64)
   (store! (sp-coord) 0)

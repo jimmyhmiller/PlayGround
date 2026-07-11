@@ -1,10 +1,14 @@
+// A genuine capacity overflow: every Cell is kept LIVE (in a list), so the collector can
+// reclaim nothing and the per-type arena's fixed budget is exhausted for real. (A loop that
+// dropped each Cell on every iteration would now run forever — the GC reclaims dead instances.)
 class Cell {
   v: Int
 }
 fn main() {
+  let all = List<Cell>()
   var i = 0
   while i < 100001 {
-    let c = Cell(v: i)
+    all.push(Cell(v: i))
     i = i + 1
   }
   print(i)

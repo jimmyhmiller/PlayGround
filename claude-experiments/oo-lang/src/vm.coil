@@ -27,6 +27,8 @@
 (import "atomic.coil" :use *)
 (import "http.coil" :use *)
 (import "trace.coil" :use *)
+(import "gcstate.coil" :use *)
+(import "gc.coil" :use *)
 
 (const DK_OBJECT_KIND 3)
 (const STACK_MAX 65536)
@@ -57,6 +59,84 @@
 (defn vm-thread-eval [] (-> (ptr VMThread)) (alloc-static VMThread))
 (defn vm-main-parked [] (-> (ptr i64)) (field (vm-thread-main) parked))   ; server: post-main poll
 (defn vm-eval-parked [] (-> (ptr i64)) (field (vm-thread-eval) parked))   ; server: coordinator id
+
+; ---- VMThread registry (GC roots, 02 §6) ----------------------------------------------------
+; Every language thread (main + spawned agents) records its VMThread here so gc-mark-roots can
+; walk its live frames. The eval coordinator is NOT here (it never runs concurrently with the
+; language threads); it is scanned separately when an eval is in flight. Grows monotonically —
+; a finished thread stays registered but has frame-count 0, so scanning it is a no-op. Bounded
+; by SP_MAX_THREADS (64), same as the safepoint registry it parallels.
+(defn vm-threads-cell [] (-> (ptr (array i64 64))) (alloc-static (array i64 64)))
+(defn vm-nthreads-cell [] (-> (ptr i64)) (alloc-static i64))
+(defn vm-register-thread [(vt (ptr VMThread))] (-> i64)
+  (let [i (atomic-load (vm-nthreads-cell))]
+    (store! (index (vm-threads-cell) i) (cast i64 vt))
+    (atomic-store (vm-nthreads-cell) (+ i 1)) 0))
+
+; scan ONE thread's live call frames for reference roots, using each frame's per-ip stack map
+; (compile.coil). A frame's slot extent is [base, next-frame-base) — or [base, stack-top) for the
+; top frame — so a caller suspended at a CALL scans exactly its own residual slots (its arg slots
+; already belong to the callee frame, its not-yet-pushed result slot is beyond the extent). The
+; map at frame.ip tells us which of those slots hold a live reference at that instruction boundary.
+(defn gc-mark-thread [(vt (ptr VMThread))] (-> i64)
+  (let [fc (load (field vt frame-count)) (mut i) 0]
+    (loop
+      (if (< (load i) fc)
+        (let [fr (index (field vt frames) (load i)) m (load (field fr method))
+              base (load (field fr base)) ip (load (field fr ip))
+              extent (- (if (< (load i) (- fc 1)) (load (field (index (field vt frames) (+ (load i) 1)) base)) (load (field vt stack-top))) base)
+              maps (load (field m opmaps)) stride (load (field m map-stride))]
+          (if (= (cast i64 maps) 0) 0     ; no map (should not happen once every method is built)
+            (let [bm (index maps (* ip stride)) (mut s) 0]
+              (loop (if (< (load s) extent)
+                      (do (if (= (bitmap-test bm (load s)) 1)
+                            (gc-mark-object (cast (ptr u8) (load (index (field vt stack) (+ base (load s)))))) 0)
+                          (store! s (+ (load s) 1)) 0)
+                      (break)))))
+          (store! i (+ (load i) 1)) 0)
+        (break))))
+  0)
+
+; object singletons are permanent roots — the program can reference `SomeObject` at any point.
+(defn gc-mark-singletons [] (-> i64)
+  (let [p (load (field (vm) program)) n (load (field p type-count)) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [ti (load (index (load (field p types)) (load i)))]
+              (if (and (!= (cast i64 ti) 0) (!= (cast i64 (load (field ti singleton))) 0))
+                (gc-mark-object (load (field ti singleton))) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))) 0)
+
+; the full precise root set: every registered thread's frames, the eval coordinator's frames
+; (only while an eval runs), object singletons, and the shared empty-string sentinel.
+(defn gc-mark-roots [] (-> i64)
+  (let [n (atomic-load (vm-nthreads-cell)) (mut t) 0]
+    (loop (if (< (load t) n) (do (gc-mark-thread (cast (ptr VMThread) (load (index (vm-threads-cell) (load t))))) (store! t (+ (load t) 1)) 0) (break))))
+  (if (eval-active?) (gc-mark-thread (vm-thread-eval)) 0)
+  (gc-mark-singletons)
+  (if (!= (cast i64 (vm-str-sentinel)) 0) (gc-mark-object (cast (ptr u8) (vm-str-sentinel))) 0)
+  0)
+
+; drive a full collection. If the caller already owns the global stop (a GC triggered from inside
+; an eval, where the eval thread is the coordinator and the world is already quiescent) we mark and
+; sweep in place; otherwise we stop the world ourselves. Reusing the single-coordinator stop keeps
+; GC exclusive against evals and shape migrations — never two coordinators at once.
+(defn gc-do-mark-sweep [] (-> i64)
+  (gc-wl-reset)
+  (gc-mark-roots)
+  (gc-drain (load (field (vm) program)))
+  (gc-sweep-all (load (field (vm) program)))
+  0)
+(defn gc-collect [(vt (ptr VMThread))] (-> i64)
+  (if (and (= (safepoint-stopped?) 1) (= (safepoint-is-coordinator? (field vt parked)) 1))
+    ; we already own the stop (a GC triggered from inside our own eval) — the heap is quiescent.
+    (gc-do-mark-sweep)
+    ; try to win the stop WITHOUT spinning. If another thread is already coordinating (a concurrent
+    ; GC or an eval), park instead of contending — its collection covers us, and we re-check the
+    ; threshold on our next dispatch step. This is what prevents two GC initiators from deadlocking.
+    (if (= (request-global-stop-try (field vt parked)) 1)
+      (do (gc-do-mark-sweep) (release-global-stop) 0)
+      (do (safepoint-poll (field vt parked)) 0))))
 
 ; ---- f64 <-> i64 bit reinterpret (NOT a numeric cast). Per-call stack cell => thread-safe.
 (defn to-bits [(x f64)] (-> i64) (let [p (alloc-stack i64)] (store! (cast (ptr f64) p) x) (load p)))
@@ -362,6 +442,7 @@
         m (load (index (load (field (load (field (vm) program)) methods)) midx))
         avt (vt-alloc)]
     (sp-register (field avt parked))
+    (vm-register-thread avt)                            ; GC roots: scan this agent's stack too
     (store! (index (field avt stack) 0) task)          ; task is arg0 / self of run()
     (store! (field avt stack-top) 1)
     (push-frame avt m 1)
@@ -389,6 +470,10 @@
       (if (load done) (break)
         (do
           (safepoint-poll (field vt parked))
+          ; GC trigger (02 §6): at the dispatch loop top, fr.ip is exactly an instruction
+          ; boundary, so every thread parked here for the stop has a valid stack map. Firing here
+          ; (never mid-instruction) is what makes precise root scanning of THIS frame sound.
+          (if (= (gc-should?) 1) (gc-collect vt) 0)
         (let [op (read-byte (load fr))]
           (case op
             OP_CONST (let [idx (read-u16 (load fr)) c (load (field (load (field (load fr) method)) chunk))] (vpush vt (load (index (load (field c consts)) idx))))
@@ -543,6 +628,11 @@
     (store! (field vt stack-top) 0) (store! (field vt frame-count) 0)
     (store! (field vt parked) 0) (store! (field vt done) 0)
     (sp-register (field vt parked))
+    (vm-register-thread vt)
+    ; arm the collector: main is about to run and every method now has stack maps. A ~1 MiB
+    ; threshold fires well before any single arena (>= 100k slots) could fill, so per-type
+    ; enumeration stays cheap and the OutOfArenaSpace wall never comes up for reclaimable heaps.
+    (gc-set-bytes 0) (gc-set-nextgc 1048576) (gc-enable)
     (let [nt (load (field p type-count)) (mut i) 0]
       (loop (if (< (load i) nt)
               (let [ti (load (index (load (field p types)) (load i)))]

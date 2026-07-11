@@ -122,7 +122,7 @@
   (w-bytes 2 (load (field a name)) (load (field a name-len)))
   (w-cstr 2 c" arena full at ") (w-int 2 (load (field a max-slots)))
   (w-cstr 2 c" slots (") (w-int 2 (load (field a live-count)))
-  (w-cstr 2 c" live) — GC not implemented in this build, restart the process.\n")
+  (w-cstr 2 c" live) — every slot is a LIVE instance (raise MAX_SLOTS for this type).\n")
   (if (eval-active?) (eval-panic0 EK_RUNTIME c"OutOfArenaSpace: arena full (GC not implemented)") (do (exit (cast i32 70)) 0)) 0)
 
 ; ---- GC mark bit (02 §6). Set during mark, cleared on survivors during sweep. Outside a
@@ -171,13 +171,31 @@
 ; The caller then maps its slab (locked only if unmapped) and writes ITS OWN slot's header —
 ; no other thread touches that slot, so no race there. The header's type-id is fully written
 ; before OP_NEW ever publishes the pointer to another thread (05 M1 construction-visibility).
-(defn arena-alloc [(a (ptr TypeArena))] (-> (ptr u8))
+; reserve the next fresh slot index, or -1 if the arena is at capacity. CAS-capped so the
+; high-water mark NEVER passes max-slots — otherwise a failed alloc would leave `bump-cursor`
+; pointing past the mapped slabs and a later enumeration walk would read unmapped memory.
+(defn arena-bump-one [(a (ptr TypeArena))] (-> i64)
+  (let [(mut r) -1]
+    (loop
+      (let [cur (atomic-load (field a bump-cursor))]
+        (if (>= cur (load (field a max-slots))) (do (store! r -1) (break))
+          (if (= (atomic-cas (field a bump-cursor) cur (+ cur 1)) cur) (do (store! r cur) (break)) (continue)))))
+    (load r)))
+
+; allocate a slot, or null if the arena is genuinely at capacity (every slot live).
+(defn arena-alloc-or-null [(a (ptr TypeArena))] (-> (ptr u8))
   (let [reused (arena-free-pop a)]
     (if (>= reused 0)
       (arena-stamp a reused)
-      (let [idx (atomic-add (field a bump-cursor) 1)]   ; OLD frontier = our reserved slot
-        (if (>= idx (load (field a max-slots))) (do (arena-oom a) (cast (ptr u8) 0))
+      (let [idx (arena-bump-one a)]
+        (if (< idx 0) (cast (ptr u8) 0)
           (do (arena-ensure-slab a idx) (arena-stamp a idx)))))))
+
+; allocate a slot; hard OutOfArenaSpace when the arena is full of LIVE instances (a real
+; capacity limit — GC has already run at the trigger points and could reclaim nothing).
+(defn arena-alloc [(a (ptr TypeArena))] (-> (ptr u8))
+  (let [p (arena-alloc-or-null a)]
+    (if (= (cast i64 p) 0) (do (arena-oom a) (cast (ptr u8) 0)) p)))
 
 ; free one slot: bump generation (invalidate viewer handles), clear flags, drop live-count,
 ; and push onto the free-list. Called only by the GC sweep, under STW.

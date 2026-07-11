@@ -1,7 +1,9 @@
 // Thread-safe allocation stress: 3 threads each allocate 5000 Message instances into the
-// SAME per-type arena concurrently, with no locking around the allocation itself (the
-// atomic bump frontier is what makes it race-free). After join, the Message arena must
-// show EXACTLY 15000 live with high-water 15000 — no duplicated or lost slots.
+// SAME per-type arena concurrently, with no locking around the allocation itself (the atomic
+// bump frontier + free-list is what makes it race-free). Each thread KEEPS its Messages live in
+// its own list (single-writer per list), and main keeps the Fillers live, so the collector can
+// reclaim nothing and — even if a GC fires mid-run — the Message arena must show EXACTLY 15000
+// live with high-water 15000: no duplicated or lost slots across the concurrent allocators.
 
 class Message {
   n: Int
@@ -10,20 +12,25 @@ class Message {
 
 class Filler implements Runnable {
   count: Int
+  msgs: List<Message>
+  fn init(count: Int) { self.count = count  self.msgs = List<Message>() }
   fn run() -> Void {
     var i = 0
     while i < self.count {
-      let m = Message(n: i)
+      self.msgs.push(Message(n: i))
       i = i + 1
     }
   }
 }
 
 fn main() {
+  let fillers = List<Filler>()
   let hs = List<ThreadHandle>()
   var t = 0
   while t < 3 {
-    hs.push(Thread.spawn(Filler(count: 5000)))
+    let f = Filler(count: 5000)
+    fillers.push(f)
+    hs.push(Thread.spawn(f))
     t = t + 1
   }
   var j = 0

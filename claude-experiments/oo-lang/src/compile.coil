@@ -1225,7 +1225,11 @@
   (let [mi (cast (ptr MethodInfo) (xalloc (sizeof MethodInfo)))]
     (store! (field mi name) (nm new-node)) (store! (field mi name-len) (nlen new-node))
     (store! (field mi arity) 0) (store! (field mi local-count) 0) (store! (field mi is-void) false)
+    (store! (field mi opmaps) (cast (ptr i64) 0))
     (compile-method mi new-node d self-ty)
+    ; GC: the recompiled body needs its own precise stack maps, or a collection that scans a
+    ; frame running the new code would read a garbage `opmaps`. Runs under the edit's stop-the-world.
+    (build-stackmaps mi p)
     (store! (index (load (field p methods)) idx) mi)
     (al-set! (mut (field (cc) methods)) idx mi)
     0))

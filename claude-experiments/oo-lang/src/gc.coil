@@ -1,0 +1,149 @@
+; gc.coil — precise, stop-the-world mark-sweep collector (02-runtime.md §6).
+;
+; The low-level half of GC: the tricolor mark worklist, per-object tracing (blacken), and the
+; two sweeps (per-type arenas + the global non-arena object list). It is deliberately a LEAF
+; with respect to the VM: it imports only the heap layers (arena/builtins), the program model
+; (bytecode), and the allocation accounting (gcstate) — NOT vm.coil. Root scanning (which needs
+; the VMThread layout + stack maps) lives in vm.coil, which imports THIS module and drives a
+; collection via gc-mark-roots → gc-drain → gc-sweep-all under a global stop. Splitting it this
+; way is what keeps the trigger (in the dispatch loop) free of an import cycle.
+;
+; CLASSIFICATION: given any heap pointer, its first word disambiguates — a large OBJ_* sentinel
+; means a non-arena object (builtins.coil), anything smaller is an arena instance's type-id.
+; Roots are PRECISE (stack maps say exactly which slots are references), so there is no guessing
+; about whether a word is a pointer — only which family a known-live pointer belongs to.
+(module gc)
+(import "ioutil.coil" :use *)
+(import "arena.coil" :use *)
+(import "builtins.coil" :use *)
+(import "bytecode.coil" :use *)
+(import "gcstate.coil" :use *)
+(import "atomic.coil" :use *)
+
+; ---- mark worklist (grey set): pointers already marked whose children still need tracing ----
+(defn gc-wl-arr-cell [] (-> (ptr i64)) (alloc-static i64))   ; array base as ptr bits (0 = uninit)
+(defn gc-wl-top-cell [] (-> (ptr i64)) (alloc-static i64))
+(defn gc-wl-cap-cell [] (-> (ptr i64)) (alloc-static i64))
+
+(defn gc-wl-ensure [] (-> i64)
+  (if (= (load (gc-wl-cap-cell)) 0)
+    (do (store! (gc-wl-arr-cell) (cast i64 (xalloc (* 8 4096)))) (store! (gc-wl-cap-cell) 4096) (store! (gc-wl-top-cell) 0) 0) 0))
+(defn gc-wl-reset [] (-> i64) (gc-wl-ensure) (store! (gc-wl-top-cell) 0) 0)
+(defn gc-wl-push [(p (ptr u8))] (-> i64)
+  (if (>= (load (gc-wl-top-cell)) (load (gc-wl-cap-cell)))
+    (let [ncap (* (load (gc-wl-cap-cell)) 2)]
+      (store! (gc-wl-arr-cell) (cast i64 (realloc (cast (ptr i8) (cast (ptr i64) (load (gc-wl-arr-cell)))) (* 8 ncap))))
+      (store! (gc-wl-cap-cell) ncap) 0)
+    0)
+  (let [arr (cast (ptr i64) (load (gc-wl-arr-cell)))]
+    (store! (index arr (load (gc-wl-top-cell))) (cast i64 p))
+    (store! (gc-wl-top-cell) (+ (load (gc-wl-top-cell)) 1))) 0)
+
+; MARK one pointer: classify, set its mark bit if unmarked, and grey it (push to the worklist).
+; Null is "nothing to mark" (covers every optional/unassigned reference slot). Runs only during
+; a stop-the-world mark phase, so plain (non-atomic) flag reads/writes are sound.
+(defn gc-mark-object [(p (ptr u8))] (-> i64)
+  (if (= (cast i64 p) 0) 0
+    (if (= (obj-is-kind? (load (cast (ptr i64) p))) 1)
+      ; non-arena object (String/List/Map/enum/Mutex)
+      (if (= (obj-marked? (cast (ptr i8) p)) 1) 0 (do (obj-mark (cast (ptr i8) p)) (gc-wl-push p) 0))
+      ; arena instance — first word is its type-id; mark bit lives in the InstanceHeader
+      (let [h (cast (ptr InstanceHeader) p)]
+        (if (= (arena-marked? h) 1) 0 (do (arena-mark-set h) (gc-wl-push p) 0))))))
+
+(defn gc-field-is-ref? [(k i64)] (-> i64)
+  (if (or (= k FIELD_STRING) (or (= k FIELD_REF) (or (= k FIELD_IFACE_REF) (= k FIELD_LIST_REF)))) 1 0))
+
+; trace an arena instance's outgoing references, driven by its TypeInfo/FieldInfo (the same
+; reflection table the viewer uses). The concrete type is the instance's own header type-id, so
+; this works uniformly whether the object was reached through a class- or interface-typed field.
+(defn gc-blacken-entity [(p (ptr u8)) (program (ptr Program))] (-> i64)
+  (let [tid (load (cast (ptr i64) p))
+        ti (load (index (load (field program types)) tid))]
+    (if (= (cast i64 ti) 0) 0
+      (let [nf (load (field ti field-count)) (mut i) 0]
+        (loop (if (< (load i) nf)
+                (let [fi (index (load (field ti fields)) (load i))]
+                  (if (= (gc-field-is-ref? (load (field fi kind))) 1)
+                    (gc-mark-object (cast (ptr u8) (load (cast (ptr i64) (+ (cast i64 p) (load (field fi offset))))))) 0)
+                  (store! i (+ (load i) 1)) 0)
+                (break))) 0))))
+
+; trace a non-arena object's outgoing references, using the per-object element/payload ref-flags
+; the compiler stamped at construction (so List<Agent> is traced but List<Int> is skipped).
+(defn gc-blacken-obj [(p (ptr u8))] (-> i64)
+  (let [k (obj-kind (cast (ptr i8) p))]
+    (cond
+      (= k OBJ_STRING) 0
+      (= k OBJ_LIST)
+        (if (= (list-elemref (cast (ptr ListObj) p)) 1)
+          (let [l (cast (ptr ListObj) p) items (list-items l) n (list-len l) (mut i) 0]
+            (loop (if (< (load i) n) (do (gc-mark-object (cast (ptr u8) (load (index items (load i))))) (store! i (+ (load i) 1)) 0) (break))) 0)
+          0)
+      (= k OBJ_MAP)
+        (let [m (cast (ptr MapObj) p) n (map-count m) keys (map-keys-arr m) vals (map-vals-arr m)
+              kr (map-strkey? m) vr (map-valref m) (mut i) 0]
+          (loop (if (< (load i) n)
+                  (do (if (= kr 1) (gc-mark-object (cast (ptr u8) (load (index keys (load i))))) 0)
+                      (if (= vr 1) (gc-mark-object (cast (ptr u8) (load (index vals (load i))))) 0)
+                      (store! i (+ (load i) 1)) 0)
+                  (break))) 0)
+      (= k OBJ_ENUM)
+        (let [box (cast (ptr i64) p) argc (enum-argc box) rm (enum-refmask box) (mut i) 0]
+          (loop (if (< (load i) argc)
+                  (do (if (= (iand rm (ishl 1 (load i))) 0) 0 (gc-mark-object (cast (ptr u8) (enum-arg box (load i))))) (store! i (+ (load i) 1)) 0)
+                  (break))) 0)
+      (= k OBJ_MUTEX)
+        (if (= (mutex-valref (cast (ptr MutexObj) p)) 1) (gc-mark-object (cast (ptr u8) (mutex-get (cast (ptr MutexObj) p)))) 0)
+      0)))
+
+; drain the grey set to a fixpoint: pop each object and blacken it (marking its children grey).
+(defn gc-drain [(program (ptr Program))] (-> i64)
+  (loop
+    (if (= (load (gc-wl-top-cell)) 0) (break)
+      (let [arr (cast (ptr i64) (load (gc-wl-arr-cell)))]
+        (store! (gc-wl-top-cell) (- (load (gc-wl-top-cell)) 1))
+        (let [p (cast (ptr u8) (load (index arr (load (gc-wl-top-cell)))))]
+          (if (= (obj-is-kind? (load (cast (ptr i64) p))) 1) (gc-blacken-obj p) (gc-blacken-entity p program)) 0))))
+  0)
+
+; approximate live size of a swept-survivor object (for the next-gc threshold heuristic).
+(defn gc-obj-size [(o (ptr i8))] (-> i64)
+  (let [k (obj-kind o)]
+    (cond
+      (= k OBJ_STRING) (+ (sizeof StringObj) (load (field (cast (ptr StringObj) o) len)))
+      (= k OBJ_LIST)   (+ (sizeof ListObj) (* 8 (load (field (cast (ptr ListObj) o) cap))))
+      (= k OBJ_MAP)    (+ (sizeof MapObj) (* 16 (load (field (cast (ptr MapObj) o) cap))))
+      64)))
+
+; SWEEP the non-arena object list (clox-style): free unmarked objects and unlink them, unmark
+; survivors for the next cycle. Returns the surviving byte estimate. STW → single-threaded.
+(defn gc-sweep-objs [] (-> i64)
+  (let [(mut prev) (cast i64 0) (mut cur) (atomic-load (gc-objs-cell)) (mut bytes) 0]
+    (loop
+      (if (= (load cur) 0) (break)
+        (let [o (cast (ptr i8) (load cur)) next (obj-next o)]
+          (if (= (obj-marked? o) 1)
+            (do (obj-unmark o) (store! bytes (+ (load bytes) (gc-obj-size o))) (store! prev (load cur)) (store! cur next) 0)
+            (do (if (= (load prev) 0) (atomic-store (gc-objs-cell) next) (obj-set-next (cast (ptr i8) (load prev)) next))
+                (obj-free o) (store! cur next) 0)))))
+    (load bytes)))
+
+; SWEEP every arena + the object list, then re-arm the trigger from the surviving live size.
+(defn gc-sweep-all [(program (ptr Program))] (-> i64)
+  (let [nt (load (field program type-count)) (mut i) 0 (mut live) 0]
+    (loop
+      (if (< (load i) nt)
+        (let [ti (load (index (load (field program types)) (load i)))]
+          (if (and (!= (cast i64 ti) 0) (load (field ti is-entity)))
+            (let [a (load (field ti arena))]
+              (arena-sweep a)
+              (store! live (+ (load live) (* (arena-live-count a) (load (field a slot-size))))) 0)
+            0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (store! live (+ (load live) (gc-sweep-objs)))
+    ; next collection when we have allocated another ~1x of the live set (min 1 MiB of headroom).
+    (gc-set-bytes (load live))
+    (gc-set-nextgc (+ (* (load live) 2) 1048576))
+    (load live)))
