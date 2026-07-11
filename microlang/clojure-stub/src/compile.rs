@@ -31,6 +31,12 @@ pub struct Compiler {
     /// Namespace state (frontend-owned; the toolkit's globals are a flat `Sym`
     /// pool, so a user-ns var `foo/x` is simply the interned sym `"foo/x"`).
     ns: NsState,
+    /// Directories searched to turn a required namespace `foo.bar` into a source
+    /// file `foo/bar.clj` (or `.cljc`). `require` reads and loads it on demand.
+    load_paths: Vec<std::path::PathBuf>,
+    /// Namespaces already loaded (embedded or from a file), so `require` loads
+    /// each at most once and cycles terminate.
+    loaded: std::collections::HashSet<String>,
 }
 
 /// Namespace resolution state. `clojure.core` + the ported cljs types load in
@@ -90,7 +96,34 @@ impl Compiler {
             prims,
             // core.clj + the ported cljs types load first, in the flat core space.
             ns: NsState { current: "clojure.core".to_string(), core_mode: true, ..NsState::default() },
+            load_paths: Vec::new(),
+            loaded: std::collections::HashSet::new(),
         }
+    }
+
+    /// Directories `require` searches for a namespace's source file.
+    pub fn set_load_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.load_paths = paths;
+    }
+
+    /// The load-path directories (for the frontend's file loader).
+    pub fn load_paths(&self) -> &[std::path::PathBuf] {
+        &self.load_paths
+    }
+
+    /// Mark a namespace loaded (embedded prelude, or a file just loaded).
+    pub fn mark_loaded(&mut self, ns: &str) {
+        self.loaded.insert(ns.to_string());
+    }
+
+    /// Has this namespace already been loaded?
+    pub fn is_loaded(&self, ns: &str) -> bool {
+        self.loaded.contains(ns)
+    }
+
+    /// The namespace currently being compiled (saved/restored around a file load).
+    pub fn current_ns(&self) -> &str {
+        &self.ns.current
     }
 
     /// Called by `run` once clojure.core + the cljs types are loaded: subsequent

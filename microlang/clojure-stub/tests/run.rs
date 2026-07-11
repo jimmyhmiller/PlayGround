@@ -930,3 +930,38 @@ fn dynamic_vars() {
     // stack is empty, so it sees the root value (not the caller's binding).
     assert_eq!(run("(def ^:dynamic *x* 0) (binding [*x* 5] [*x* @(future *x*)])"), "[5 0]");
 }
+
+/// Load a program with the on-disk require fixture dir on the load path.
+fn run_req(src: &str) -> String {
+    use std::path::PathBuf;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let r = clojure_stub::run_with_paths(&mut rt, &TreeWalk, src, vec![dir]);
+    clojure_stub::clj_str(&rt, r)
+}
+
+#[test]
+fn require_loads_files() {
+    // `require` reads util/math.clj off the load path; its fns resolve via alias.
+    assert_eq!(run_req("(ns app (:require [util.math :as m])) (m/square 9)"), "81");
+    // `:refer` brings names in bare.
+    assert_eq!(run_req("(ns app (:require [util.math :refer [square pi]])) (+ (square 4) pi)"), "19");
+    // A top-level `(require …)` (outside an `ns` form) also loads.
+    assert_eq!(run_req("(require '[util.helper :as h]) (h/greet \"you\")"), "\"hi you\"");
+    // TRANSITIVE: myapp.core's own `(ns … :require …)` pulls in util.math + util.helper.
+    assert_eq!(
+        run_req("(ns app (:require [myapp.core :as c])) [(c/area 10) (c/hello)]"),
+        "[300 \"hi world\"]"
+    );
+    // A namespace loaded once is not reloaded (idempotent require).
+    assert_eq!(
+        run_req("(require '[util.math :as m]) (require '[util.math :as m2]) (+ m/pi (m2/square 2))"),
+        "7"
+    );
+}
+
+#[test]
+#[should_panic(expected = "cannot find namespace")]
+fn require_missing_namespace_errors() {
+    run_req("(ns app (:require [does.not.exist :as x])) 1");
+}

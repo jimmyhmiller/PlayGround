@@ -31,10 +31,30 @@ pub use reader::read_all;
 use compile::Compiler;
 
 /// Run a mini-Clojure program (the `clojure.core` prelude first). Returns the
-/// last form's value.
+/// last form's value. `require` searches the default load path (`$MICROLANG_PATH`,
+/// colon-separated, else `.`).
 pub fn run<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, src: &str) -> u64 {
+    run_with_paths(rt, cs, src, default_load_paths())
+}
+
+/// The load-path directories `require` searches (from `$MICROLANG_PATH`, else `.`).
+pub fn default_load_paths() -> Vec<std::path::PathBuf> {
+    match std::env::var("MICROLANG_PATH") {
+        Ok(v) if !v.is_empty() => v.split(':').map(std::path::PathBuf::from).collect(),
+        _ => vec![std::path::PathBuf::from(".")],
+    }
+}
+
+/// Like [`run`], but with an explicit set of load-path directories for `require`.
+pub fn run_with_paths<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    cs: &dyn CodeSpace<M>,
+    src: &str,
+    load_paths: Vec<std::path::PathBuf>,
+) -> u64 {
     let mut macros: HashSet<Sym> = HashSet::new();
     let mut comp = Compiler::new(rt);
+    comp.set_load_paths(load_paths);
     run_src(rt, cs, &mut macros, &mut comp, core_src::CORE);
     // Persistent data structures ported from ClojureScript (EPL-1.0), loaded after
     // the core protocols/shim they build on. Redefines vector/vec/vector?.
@@ -42,6 +62,9 @@ pub fn run<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, src: &str)
     // clojure.core + the cljs types are the flat/bare core space; user code from
     // here on runs in the `user` namespace and qualifies its own defs.
     comp.end_core_load();
+    // These are provided in-process; `require` must never look for them on disk.
+    comp.mark_loaded("clojure.core");
+    comp.mark_loaded("user");
     // Route `(obj arg)` for a non-closure record (keyword/map/vector) through the
     // core `-apply-obj` dispatcher, so keywords/collections are callable.
     let apply_obj = rt.intern("-apply-obj");
@@ -114,9 +137,9 @@ fn eval_form<M: ValueModel>(
     comp: &mut Compiler,
     form: u64,
 ) -> u64 {
-    // Namespace declarations are compile-time only: they mutate the compiler's
-    // resolution state and yield nil (no code). Handled before macro/def checks.
-    if let Some(r) = handle_ns_form(rt, comp, form) {
+    // Namespace declarations mutate the compiler's resolution state (and may LOAD
+    // required files) and yield nil. Handled before macro/def checks.
+    if let Some(r) = handle_ns_form(rt, cs, macros, comp, form) {
         return r;
     }
     // Real core.clj: `(def ^{:macro true} name (fn ...))` — reader wrapped the
@@ -905,8 +928,13 @@ fn interop_rewrite<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> Option<u64>
     }
     if let Some(slash) = hname.find('/') {
         let class = last_seg(&hname[..slash]);
-        let method = hname[slash + 1..].to_string();
-        return Some(shim_call(rt, &class, &method, &items[1..]));
+        // `Foo/bar` with an UPPERCASE leading segment is a host static call; a
+        // lowercase prefix (`m/square`, `util.math/square`) is a namespace- or
+        // alias-qualified VAR reference — leave it for the compiler to resolve.
+        if class.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            let method = hname[slash + 1..].to_string();
+            return Some(shim_call(rt, &class, &method, &items[1..]));
+        }
     }
     // `(.-field x)` -> `(%field-by-name x 'field)` — ClojureScript field access on
     // a deftype instance, resolved through the field-name registry.
@@ -1286,16 +1314,24 @@ fn sym_name_of<M: ValueModel>(rt: &Runtime<M>, f: u64) -> Option<String> {
 /// Handle a namespace declaration form (`ns`/`in-ns`/`require`/`use`/`alias`/
 /// `refer`). These are COMPILE-TIME only: they mutate the compiler's resolution
 /// state and produce nil. Returns `None` if `form` isn't such a declaration.
-fn handle_ns_form<M: ValueModel>(rt: &mut Runtime<M>, comp: &mut Compiler, form: u64) -> Option<u64> {
+fn handle_ns_form<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    cs: &dyn CodeSpace<M>,
+    macros: &mut HashSet<Sym>,
+    comp: &mut Compiler,
+    form: u64,
+) -> Option<u64> {
     let (head, _) = rt.as_cons(form)?;
     let nil = rt.encode(Val::Nil);
     if is_sym(rt, head, "ns") {
         let items = rt.list_to_vec(form);
         if let Some(name) = items.get(1).and_then(|&f| sym_name_of(rt, f)) {
             comp.set_ns(&name);
+            // This ns is being defined here (not from a file); don't re-load it.
+            comp.mark_loaded(&name);
         }
         for &clause in items.get(2..).unwrap_or(&[]) {
-            process_ns_clause(rt, comp, clause);
+            process_ns_clause(rt, cs, macros, comp, clause);
         }
         return Some(nil);
     }
@@ -1303,13 +1339,14 @@ fn handle_ns_form<M: ValueModel>(rt: &mut Runtime<M>, comp: &mut Compiler, form:
         let items = rt.list_to_vec(form);
         if let Some(name) = items.get(1).and_then(|&f| sym_name_of(rt, f)) {
             comp.set_ns(&name);
+            comp.mark_loaded(&name);
         }
         return Some(nil);
     }
     if is_sym(rt, head, "require") || is_sym(rt, head, "use") {
         let items = rt.list_to_vec(form);
         for &spec in &items[1..] {
-            process_require_spec(rt, comp, spec);
+            process_require_spec(rt, cs, macros, comp, spec);
         }
         return Some(nil);
     }
@@ -1333,27 +1370,43 @@ fn handle_ns_form<M: ValueModel>(rt: &mut Runtime<M>, comp: &mut Compiler, form:
 }
 
 /// A `(:require …)` / `(:use …)` clause inside an `ns` form.
-fn process_ns_clause<M: ValueModel>(rt: &mut Runtime<M>, comp: &mut Compiler, clause: u64) {
+fn process_ns_clause<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    cs: &dyn CodeSpace<M>,
+    macros: &mut HashSet<Sym>,
+    comp: &mut Compiler,
+    clause: u64,
+) {
     let items = rt.list_to_vec(clause);
     if items.is_empty() {
         return;
     }
     if is_keyword(rt, items[0], "require") || is_keyword(rt, items[0], "use") {
         for &spec in &items[1..] {
-            process_require_spec(rt, comp, spec);
+            process_require_spec(rt, cs, macros, comp, spec);
         }
     }
     // :refer-clojure / :import — core is auto-referred; we model no host imports.
 }
 
-/// A single require spec: `foo`, `[foo :as bar]`, or `[foo :refer [x y]]`.
-fn process_require_spec<M: ValueModel>(rt: &mut Runtime<M>, comp: &mut Compiler, spec: u64) {
+/// A single require spec: `foo`, `[foo :as bar]`, or `[foo :refer [x y]]`. LOADS
+/// the namespace's file (once) before wiring up any alias/refer.
+fn process_require_spec<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    cs: &dyn CodeSpace<M>,
+    macros: &mut HashSet<Sym>,
+    comp: &mut Compiler,
+    spec: u64,
+) {
     let spec = unquote(rt, spec);
-    if let Val::Sym(_) = rt.decode(spec) {
-        return; // bare `(require 'foo)` — nothing to alias/refer
+    // bare `(require 'foo)` — load it, nothing to alias/refer.
+    if let Some(real) = sym_name_of(rt, spec) {
+        ensure_loaded(rt, cs, macros, comp, &real);
+        return;
     }
     let Some(elems) = binding_items(rt, spec) else { return };
     let Some(real) = elems.first().and_then(|&f| sym_name_of(rt, f)) else { return };
+    ensure_loaded(rt, cs, macros, comp, &real);
     let mut k = 1;
     while k < elems.len() {
         if is_keyword(rt, elems[k], "as") && k + 1 < elems.len() {
@@ -1386,6 +1439,50 @@ fn refer_names<M: ValueModel>(rt: &mut Runtime<M>, comp: &mut Compiler, forms: &
             }
         }
     }
+}
+
+/// Load a required namespace from disk if it isn't already loaded. Maps ns
+/// `foo.bar` to `foo/bar.clj` (`.cljc`/`.cljs` also tried; hyphens in a segment
+/// become underscores, as Clojure munges file paths) and searches each load-path
+/// directory. Errors clearly if the namespace can't be located.
+fn ensure_loaded<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    cs: &dyn CodeSpace<M>,
+    macros: &mut HashSet<Sym>,
+    comp: &mut Compiler,
+    name: &str,
+) {
+    if comp.is_loaded(name) {
+        return;
+    }
+    let rel = name.replace('.', "/").replace('-', "_");
+    let mut found = None;
+    for dir in comp.load_paths() {
+        for ext in ["clj", "cljc", "cljs"] {
+            let p = dir.join(format!("{rel}.{ext}"));
+            if p.is_file() {
+                found = Some(p);
+                break;
+            }
+        }
+        if found.is_some() {
+            break;
+        }
+    }
+    let Some(path) = found else {
+        panic!(
+            "require: cannot find namespace `{name}` (looked for `{rel}.clj` on load path {:?})",
+            comp.load_paths()
+        );
+    };
+    let src = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("require: failed reading {}: {e}", path.display()));
+    // Mark loaded BEFORE running so a cyclic require terminates.
+    comp.mark_loaded(name);
+    let saved = comp.current_ns().to_string();
+    run_src(rt, cs, macros, comp, &src);
+    // The loaded file's `(ns …)` moved us into it; restore the requiring ns.
+    comp.set_ns(&saved);
 }
 
 /// Map the simple (last dotted segment of a) Java/JS class name to the runtime
