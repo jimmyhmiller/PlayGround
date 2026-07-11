@@ -471,13 +471,15 @@ pub const CORE: &str = r##"
 ;; The interop shim rewrites `(. clojure.lang.RT (first coll))` etc. to these, so
 ;; real clojure/core.clj definitions (which are written in terms of RT) execute.
 (def -list (fn [& xs] xs))
-;; The RT shims just route to the protocol-dispatched public fns now.
-(defn -rt-seq [c] (seq c))
-(defn -rt-first [c] (first c))
-(defn -rt-rest [c] (rest c))
-(defn -rt-next [c] (next c))
-(defn -rt-conj [c x] (conj c x))
-(defn -rt-assoc [m k v] (assoc m k v))
+;; The RT shims route straight to the PROTOCOL methods, not the public fns —
+;; real core.clj REDEFINES seq/first/conj/assoc (in terms of RT), so calling the
+;; public names here would recurse forever.
+(defn -rt-seq [c] (if (nil? c) nil (-seq c)))
+(defn -rt-first [c] (let [s (-rt-seq c)] (if (nil? s) nil (-first s))))
+(defn -rt-rest [c] (let [s (-rt-seq c)] (if (nil? s) nil (-rest s))))
+(defn -rt-next [c] (-rt-seq (-rt-rest c)))
+(defn -rt-conj [c x] (-conj c x))
+(defn -rt-assoc [m k v] (-assoc m k v))
 
 ;; metadata AS VALUES: stored as a trailing record field, so field 0 (the
 ;; contents) reads unchanged and `vector?`/`map?`/`seq`/… stay transparent. On a

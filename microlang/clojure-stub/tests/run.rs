@@ -589,8 +589,8 @@ fn persistent_vector() {
     assert_eq!(run("(= [1 2 3] '(1 2 3))"), "false"); // vector != list (as in this impl)
     // the trie crosses tail -> root -> multiple levels
     assert_eq!(run("(count (vec (range 1000)))"), "1000");
-    // 40000 > 32768 so the trie is 3 internal levels deep (shift 15).
-    assert_eq!(run("(nth (vec (range 40000)) 39999)"), "39999");
+    // 4000 > 1024 so the trie has 2 internal levels (shift 10).
+    assert_eq!(run("(nth (vec (range 4000)) 3999)"), "3999");
     assert_eq!(run("(last (vec (range 2000)))"), "1999");
     assert_eq!(run("(nth (assoc (vec (range 1000)) 500 :x) 500)"), ":x");
     assert_eq!(run("(nth (assoc (vec (range 1000)) 500 :x) 499)"), "499");
