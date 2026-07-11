@@ -57,21 +57,36 @@
    (env (ptr Env))
    (locals (ArrayList (ptr CLocal)))
    (next-slot i64) (max-slot i64)
-   (ctxt (ptr Decl))])   ; decl providing type-param scope for resolve-type
+   (ctxt (ptr Decl))     ; decl providing type-param scope for resolve-type
+   ; GC: per-slot ref-ness, indexed by declared slot. Recorded at bind-local and never cleared
+   ; (slots are monotonic), so it survives a slot's scope for the whole-method local-ref bitmap.
+   (slot-ref (ptr u8)) (slot-ref-cap i64)])
 
 (defn cs-chunk [(cs (ptr CState))] (-> (ptr Chunk)) (load (field cs chunk)))
 
 ; ---- slots / scope ----
 (defn note-slot [(cs (ptr CState)) (s i64)] (-> i64)
   (if (>= s (load (field cs max-slot))) (do (store! (field cs max-slot) (+ s 1)) 0) 0) s)
-(defn alloc-temp [(cs (ptr CState))] (-> i64)
-  (let [s (load (field cs next-slot))] (store! (field cs next-slot) (+ s 1)) (note-slot cs s)))
+; allocate a scratch local slot; `ref` records whether it holds a GC reference (so the
+; collector scans temps like a match scrutinee or a for-loop's List, which live across safepoints).
+(defn alloc-temp [(cs (ptr CState)) (ref i64)] (-> i64)
+  (let [s (load (field cs next-slot))] (cs-note-slot-ref cs s ref) (store! (field cs next-slot) (+ s 1)) (note-slot cs s)))
+; record slot `s`'s GC ref-ness (grows the slot-ref array as slots are handed out).
+(defn cs-note-slot-ref [(cs (ptr CState)) (s i64) (ref i64)] (-> i64)
+  (if (>= s (load (field cs slot-ref-cap)))
+    (let [ncap (let [(mut c) (* (load (field cs slot-ref-cap)) 2)] (loop (if (<= (load c) s) (do (store! c (* (load c) 2)) 0) (break))) (load c))]
+      (store! (field cs slot-ref) (cast (ptr u8) (realloc (cast (ptr i8) (load (field cs slot-ref))) ncap)))
+      (store! (field cs slot-ref-cap) ncap) 0)
+    0)
+  (store! (index (load (field cs slot-ref)) s) (cast u8 ref)) 0)
+
 (defn bind-local [(cs (ptr CState)) (name (ptr u8)) (len i64) (ty (ptr Type)) (mutable bool)] (-> i64)
   (let [s (load (field cs next-slot))
         l (cast (ptr CLocal) (xalloc (sizeof CLocal)))]
     (store! (field l name) name) (store! (field l name-len) len) (store! (field l slot) s) (store! (field l ty) ty)
     (al-push! (mut (field cs locals)) l)
     (env-push (load (field cs env)) name len ty mutable)
+    (cs-note-slot-ref cs s (ty-gcref? ty))
     (store! (field cs next-slot) (+ s 1)) (note-slot cs s) s))
 (defn local-slot [(cs (ptr CState)) (name (ptr u8)) (len i64)] (-> i64)
   (let [ls (load (field cs locals)) n (al-len ls) (mut i) (- n 1) (mut r) -1]
@@ -82,16 +97,29 @@
             (break)))
     (load r)))
 (defn scope-mark [(cs (ptr CState))] (-> i64) (al-len (load (field cs locals))))
+; Pop the name scope, but keep `next-slot` MONOTONIC — a slot index is never reused for a
+; different-typed binding, so each declared slot has ONE GC kind for the whole method and a
+; single per-method local-ref bitmap is exact. (`slot-mark` is now ignored; frames are a few
+; slots larger in branchy methods, which is fine.)
 (defn scope-reset [(cs (ptr CState)) (mark i64) (slot-mark i64)] (-> i64)
   (store! (field (field cs locals) len) mark)
   (env-reset (load (field cs env)) mark)
-  (store! (field cs next-slot) slot-mark) 0)
+  0)
 
 ; ---- emit ----
 (defn cop [(cs (ptr CState)) (op i64)] (-> i64) (chunk-byte (cs-chunk cs) op) 0)
 (defn cu16 [(cs (ptr CState)) (v i64)] (-> i64) (chunk-u16 (cs-chunk cs) v) 0)
 (defn cu8 [(cs (ptr CState)) (v i64)] (-> i64) (chunk-byte (cs-chunk cs) v) 0)
 (defn cconst [(cs (ptr CState)) (v i64)] (-> i64) (cop cs OP_CONST) (cu16 cs (chunk-add-const (cs-chunk cs) v)) 0)
+; a STRING constant — pool slot marked as a GC reference so the collector treats OP_CONST's
+; pushed value as a root (compile-time literals are immortal, but a walk must still classify it).
+(defn cconst-ref [(cs (ptr CState)) (v i64)] (-> i64) (cop cs OP_CONST) (cu16 cs (chunk-add-const-ref (cs-chunk cs) v)) 0)
+; record, for the GC stack-map builder, that the instruction ABOUT to be emitted (its opcode
+; byte is at the current chunk offset) pushes a result whose GC-ref-ness is `ref` — used only for
+; the type-dependent producers the abstract interp can't derive from the opcode alone
+; (List.get / Mutex.get / enum payload extraction).
+(defn cann [(cs (ptr CState)) (ref i64)] (-> i64)
+  (chunk-add-ann (cs-chunk cs) (chunk-here (cs-chunk cs)) ref) 0)
 (defn cbits-cell [] (-> (ptr i64)) (alloc-static i64))
 (defn cbits [(x f64)] (-> i64) (store! (cast (ptr f64) (cbits-cell)) x) (load (cbits-cell)))
 
@@ -114,9 +142,31 @@
       (= k TY_NAMED)
         (let [d (load (field t decl)) dk (load (field d kind))]
           (cond (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE)) FIELD_IFACE_REF
+                ; ThreadHandle (DK_BUILTIN_CLASS) is a raw VMThread* and the builtin objects
+                ; (Console/Clock/Env/Thread) are compile-time singletons — NEITHER is GC-managed
+                ; memory, so classify them as opaque scalars the collector must never trace.
+                (or (= dk DK_BUILTIN_CLASS) (= dk DK_BUILTIN_OBJ)) FIELD_I64
                 (or (= dk DK_BUILTIN_GEN) (= dk DK_ENUM)) FIELD_REF
                 FIELD_REF))
       FIELD_REF)))
+
+; GC classification (02 §6): is a value of type `t` a heap reference the collector must trace
+; (and therefore a precise root when it sits in a stack slot / field)? Single source of truth,
+; derived from ty-field-kind — String / class-or-object ref / interface ref / List|Map|Mutex|enum
+; are refs; Int/Float/Bool/Void and opaque handles (ThreadHandle) are not.
+(defn ty-gcref? [(t (ptr Type))] (-> i64)
+  (let [fk (ty-field-kind t)]
+    (if (or (= fk FIELD_STRING) (or (= fk FIELD_REF) (or (= fk FIELD_IFACE_REF) (= fk FIELD_LIST_REF)))) 1 0)))
+
+; ref-mask for an enum construction: bit i set iff payload arg i is a GC reference (so a boxed
+; enum's payload slots are traced correctly). Computed from the argument expression types.
+(defn enum-refmask-of [(cs (ptr CState)) (call (ptr Node))] (-> i64)
+  (let [ac (arg-count call) (mut i) 0 (mut mask) 0]
+    (loop (if (< (load i) ac)
+            (do (if (= (ty-gcref? (tyof cs (arg-val (arg-at call (load i))))) 1) (store! mask (ior (load mask) (ishl 1 (load i)))) 0)
+                (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load mask)))
 
 ; canonical mono id for a concrete type
 (defn mono-id-of [(t (ptr Type))] (-> i64)
@@ -198,11 +248,11 @@
       (do (w-cstr 2 c"compile: unsupported expression kind ") (w-int 2 k) (w-cstr 2 c"\n") (if (eval-active?) (eval-panic0 EK_RUNTIME c"compile: unsupported expression") 0) (exit (cast i32 70)) 0))))
 
 (defn compile-strchunk [(cs (ptr CState)) (n (ptr Node))] (-> i64)
-  (cconst cs (cast i64 (str-make (load (field n s-name)) (load (field n s-len))))))
+  (cconst-ref cs (cast i64 (str-make-perm (load (field n s-name)) (load (field n s-len))))))
 
 (defn compile-string [(cs (ptr CState)) (n (ptr Node))] (-> i64)
   (let [m (kid-count n)]
-    (if (= m 0) (cconst cs (cast i64 (str-make (cast (ptr u8) c"") 0)))
+    (if (= m 0) (cconst-ref cs (cast i64 (str-make-perm (cast (ptr u8) c"") 0)))
       (let [(mut i) 0]
         (loop
           (if (< (load i) m)
@@ -228,7 +278,7 @@
       ; nullary enum variant (e.g. None)
       (let [vr (find-variant (nm n) (nlen n) (cast (ptr Decl) 0))]
         (if (!= (cast i64 vr) 0)
-          (do (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag (load (field vr enum-decl)) (nm n) (nlen n))) (cu8 cs 0) 0)
+          (do (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag (load (field vr enum-decl)) (nm n) (nlen n))) (cu8 cs 0) (cu8 cs 0) 0)
           (fatal-or-panic EK_RUNTIME c"compile: unresolved identifier" 70))))))
 
 (defn compile-unary [(cs (ptr CState)) (n (ptr Node))] (-> i64)
@@ -285,7 +335,7 @@
     (if (!= (cast i64 nsd) 0)
       ; Enum.Variant with no payload (namespace)
       (if (= (load (field nsd kind)) DK_ENUM)
-        (do (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag nsd (nm n) (nlen n))) (cu8 cs 0) 0)
+        (do (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag nsd (nm n) (nlen n))) (cu8 cs 0) (cu8 cs 0) 0)
         (fatal-or-panic EK_RUNTIME c"compile: bad namespace field access" 70))
       (let [rt (tyof cs recv) ft (tyof cs n) d (load (field rt decl))]
         (compile-expr cs recv)
@@ -294,13 +344,13 @@
 ; ---- try (?) ----
 (defn compile-try [(cs (ptr CState)) (n (ptr Node))] (-> i64)
   (compile-expr cs (load (field n a)))
-  (let [tmp (alloc-temp cs)]
+  (let [tmp (alloc-temp cs 1)]   ; holds a Result enum box (a reference)
     (cop cs OP_STORE_LOCAL) (cu16 cs tmp)
     (cop cs OP_LOAD_LOCAL) (cu16 cs tmp) (cop cs OP_ENUM_TAG) (cconst cs 1) (cop cs OP_EQ_I64)
     (let [ok (emit-jump cs OP_JUMP_IF_FALSE)]
       (cop cs OP_LOAD_LOCAL) (cu16 cs tmp) (cop cs OP_RETURN)
       (patch-jump cs ok)
-      (cop cs OP_LOAD_LOCAL) (cu16 cs tmp) (cop cs OP_ENUM_GET) (cu8 cs 0) 0)))
+      (cop cs OP_LOAD_LOCAL) (cu16 cs tmp) (cann cs (ty-gcref? (tyof cs n))) (cop cs OP_ENUM_GET) (cu8 cs 0) 0)))
 
 ; ---- ternary ----
 (defn compile-ternary [(cs (ptr CState)) (n (ptr Node))] (-> i64)
@@ -328,12 +378,20 @@
 (defn compile-construct-type [(cs (ptr CState)) (tn (ptr Node)) (call (ptr Node))] (-> i64)
   (let [t (tyof cs call) d (load (field t decl))]
     (cond
-      (name-eq (nm tn) (nlen tn) (cast (ptr u8) c"List") 4) (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_LIST_NEW) 0)
+      ; each collection is told, at construction, whether its element/value/guarded slot holds a
+      ; GC reference (pushed as a bool operand) so the collector can trace List<Agent> but skip
+      ; List<Int>. Map keys are refs iff String (already tracked via str-key).
+      (name-eq (nm tn) (nlen tn) (cast (ptr u8) c"List") 4)
+        (do (if (= (ty-gcref? (al-get (load (field t args)) 0)) 1) (cop cs OP_TRUE) (cop cs OP_FALSE))
+            (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_LIST_NEW) 0)
       (name-eq (nm tn) (nlen tn) (cast (ptr u8) c"Map") 3)
         (do (if (= (ty-kind (al-get (load (field t args)) 0)) TY_STRING) (cop cs OP_TRUE) (cop cs OP_FALSE))
+            (if (= (ty-gcref? (al-get (load (field t args)) 1)) 1) (cop cs OP_TRUE) (cop cs OP_FALSE))
             (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MAP_NEW) 0)
       (name-eq (nm tn) (nlen tn) (cast (ptr u8) c"Mutex") 5)
-        (do (compile-expr cs (arg-val (arg-at call 0))) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MUTEX_NEW) 0)
+        (do (compile-expr cs (arg-val (arg-at call 0)))
+            (if (= (ty-gcref? (al-get (load (field t args)) 0)) 1) (cop cs OP_TRUE) (cop cs OP_FALSE))
+            (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MUTEX_NEW) 0)
       (compile-construct-class cs call t d))))
 
 (defn compile-construct-class [(cs (ptr CState)) (call (ptr Node)) (t (ptr Type)) (d (ptr Decl))] (-> i64)
@@ -384,7 +442,7 @@
           ; unqualified variant Some(x)/Ok(x)/Circle(r)
           (let [vr (find-variant nm0 len0 (cast (ptr Decl) 0)) ed (load (field vr enum-decl))]
             (let [argc (compile-args cs n)]
-              (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag ed nm0 len0)) (cu8 cs argc) 0)))))))
+              (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag ed nm0 len0)) (cu8 cs argc) (cu8 cs (enum-refmask-of cs n)) 0)))))))
 
 (defn compile-dotted-call [(cs (ptr CState)) (facc (ptr Node)) (call (ptr Node))] (-> i64)
   (let [recv (load (field facc a)) mname (nm facc) mlen (nlen facc)
@@ -396,7 +454,7 @@
             (compile-reflect-static cs nsd mname mlen call)
           (= dk DK_ENUM)
             (let [vn (decl-member nsd mname mlen) argc (compile-args cs call)]
-              (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag nsd mname mlen)) (cu8 cs argc) 0)
+              (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag nsd mname mlen)) (cu8 cs argc) (cu8 cs (enum-refmask-of cs call)) 0)
           (= dk DK_BUILTIN_OBJ) (compile-builtin-object cs nsd mname mlen call)
           (= dk DK_OBJECT)
             (do (cop cs OP_LOAD_SINGLETON) (cu16 cs (mono-id-of (mk-named nsd (al-new [(ptr Type)] (alc-global)))))
@@ -424,7 +482,7 @@
       ; instances(filter?, sort?, offset?, limit?) — push filter,offset,limit in fixed order
       (do
         (let [fa (find-named-arg call (cast (ptr u8) c"filter") 6)]
-          (if (= (cast i64 fa) 0) (cconst cs (cast i64 (str-make (cast (ptr u8) c"") 0))) (compile-expr cs (arg-val fa))))
+          (if (= (cast i64 fa) 0) (cconst-ref cs (cast i64 (str-make-perm (cast (ptr u8) c"") 0))) (compile-expr cs (arg-val fa))))
         (let [oa (find-named-arg call (cast (ptr u8) c"offset") 6)]
           (if (= (cast i64 oa) 0) (cconst cs 0) (compile-expr cs (arg-val oa))))
         (let [la (find-named-arg call (cast (ptr u8) c"limit") 5)]
@@ -478,7 +536,9 @@
   (let [d (load (field rt decl)) dk (load (field d kind))]
     (cond
       (name-eq (load (field d name)) (load (field d name-len)) (cast (ptr u8) c"List") 4)
-        (do (compile-expr cs recv) (compile-args cs call) (cop cs OP_CALL_BUILTIN)
+        (do (compile-expr cs recv) (compile-args cs call)
+            (if (name-eq mname mlen (cast (ptr u8) c"get") 3) (cann cs (ty-gcref? (al-get (load (field rt args)) 0))) 0)
+            (cop cs OP_CALL_BUILTIN)
             (cond (name-eq mname mlen (cast (ptr u8) c"push") 4) (cu8 cs BLT_LIST_PUSH)
                   (name-eq mname mlen (cast (ptr u8) c"get") 3) (cu8 cs BLT_LIST_GET)
                   (cu8 cs BLT_LIST_LEN)) 0)
@@ -496,7 +556,7 @@
             (cond
               (name-eq mname mlen (cast (ptr u8) c"lock") 4) (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MUTEX_LOCK) 0)
               (name-eq mname mlen (cast (ptr u8) c"unlock") 6) (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MUTEX_UNLOCK) 0)
-              (name-eq mname mlen (cast (ptr u8) c"get") 3) (do (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MUTEX_GET) 0)
+              (name-eq mname mlen (cast (ptr u8) c"get") 3) (do (cann cs (ty-gcref? (al-get (load (field rt args)) 0))) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MUTEX_GET) 0)
               (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_MUTEX_SET) 0)))
       (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE))
         (do (compile-expr cs recv) (let [argc (compile-args cs call)]
@@ -555,7 +615,7 @@
         elem (al-get (load (field it args)) 0)
         mark (scope-mark cs) smark (load (field cs next-slot))]
     (compile-expr cs (load (field n a)))
-    (let [lst (alloc-temp cs) idx (alloc-temp cs)]
+    (let [lst (alloc-temp cs 1) idx (alloc-temp cs 0)]   ; lst = the List (ref), idx = Int (scalar)
       (cop cs OP_STORE_LOCAL) (cu16 cs lst)
       (cconst cs 0) (cop cs OP_STORE_LOCAL) (cu16 cs idx)
       (let [start (chunk-here (cs-chunk cs))]
@@ -565,7 +625,7 @@
         (let [jend (emit-jump cs OP_JUMP_IF_FALSE)
               xslot (bind-local cs (nm n) (nlen n) elem false)]
           (cop cs OP_LOAD_LOCAL) (cu16 cs lst) (cop cs OP_LOAD_LOCAL) (cu16 cs idx)
-          (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_LIST_GET) (cop cs OP_STORE_LOCAL) (cu16 cs xslot)
+          (cann cs (ty-gcref? elem)) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_LIST_GET) (cop cs OP_STORE_LOCAL) (cu16 cs xslot)
           (compile-block cs (load (field n b)) false)
           (cop cs OP_LOAD_LOCAL) (cu16 cs idx) (cconst cs 1) (cop cs OP_ADD_I64) (cop cs OP_STORE_LOCAL) (cu16 cs idx)
           (emit-loop cs start) (patch-jump cs jend) 0)))
@@ -617,7 +677,7 @@
         narms (kid-count n)
         smark (load (field cs next-slot))]
     (compile-expr cs (load (field n a)))
-    (let [stmp (alloc-temp cs) (mut endsm) (al-new [i64] (alc-global)) (mut i) 0]
+    (let [stmp (alloc-temp cs (ty-gcref? st)) (mut endsm) (al-new [i64] (alc-global)) (mut i) 0]   ; scrutinee (ref-ness of its type)
       (cop cs OP_STORE_LOCAL) (cu16 cs stmp)
       (loop
         (if (< (load i) narms)
@@ -627,22 +687,29 @@
               (= pk NK_PAT_WILD)
                 (do (compile-arm-body cs body want-value) (al-push! (mut endsm) (emit-jump cs OP_JUMP)) 0)
               (= pk NK_PAT_ENUM)
-                (let [vn (decl-member enum-d (nm pat) (nlen pat))]
-                  (cop cs OP_LOAD_LOCAL) (cu16 cs stmp) (cop cs OP_ENUM_TAG)
-                  (cconst cs (variant-tag enum-d (nm pat) (nlen pat))) (cop cs OP_EQ_I64)
-                  (let [next (emit-jump cs OP_JUMP_IF_FALSE) arity (kid-count pat) (mut b) 0]
+                ; The LAST arm of an exhaustive match always matches once every prior arm has
+                ; failed, so its tag check is redundant — emit it UNCONDITIONALLY. This is both a
+                ; small codegen win and, crucially, it removes a statically-reachable-but-dead
+                ; fall-through into the value-merge that would otherwise give that merge an
+                ; inconsistent stack height (breaking the GC stack-map builder).
+                (let [vn (decl-member enum-d (nm pat) (nlen pat)) last? (= (load i) (- narms 1))
+                      next (if last? -1
+                             (do (cop cs OP_LOAD_LOCAL) (cu16 cs stmp) (cop cs OP_ENUM_TAG)
+                                 (cconst cs (variant-tag enum-d (nm pat) (nlen pat))) (cop cs OP_EQ_I64)
+                                 (emit-jump cs OP_JUMP_IF_FALSE)))]
+                  (let [arity (kid-count pat) (mut b) 0]
                     (loop (if (< (load b) arity)
                             (let [bind (kid-at pat (load b))]
                               (if (not (tok-eq (nm bind) (nlen bind) c"_"))
                                 (let [pty (subst-type (resolve-type (variant-payload-at vn (load b)) enum-d) enum-d (load (field st args)))
                                       slot (bind-local cs (nm bind) (nlen bind) pty false)]
-                                  (cop cs OP_LOAD_LOCAL) (cu16 cs stmp) (cop cs OP_ENUM_GET) (cu8 cs (load b)) (cop cs OP_STORE_LOCAL) (cu16 cs slot) 0)
+                                  (cop cs OP_LOAD_LOCAL) (cu16 cs stmp) (cann cs (ty-gcref? pty)) (cop cs OP_ENUM_GET) (cu8 cs (load b)) (cop cs OP_STORE_LOCAL) (cu16 cs slot) 0)
                                 0)
                               (store! b (+ (load b) 1)) 0)
                             (break)))
                     (compile-arm-body cs body want-value)
                     (al-push! (mut endsm) (emit-jump cs OP_JUMP))
-                    (patch-jump cs next) 0))
+                    (if last? 0 (patch-jump cs next)) 0))
               (= pk NK_PAT_LIT)
                 (let [lit (load (field pat a)) lk (ty-kind st)]
                   (cop cs OP_LOAD_LOCAL) (cu16 cs stmp) (compile-expr cs lit) (compile-eq cs lk false)
@@ -657,7 +724,10 @@
       ; patch all arm-end jumps to here
       (let [ne (al-len (load endsm)) (mut j) 0]
         (loop (if (< (load j) ne) (do (patch-jump cs (al-get (load endsm) (load j))) (store! j (+ (load j) 1)) 0) (break)))))
-    (store! (field cs next-slot) smark) 0))
+    ; NOTE: next-slot is NOT reset to smark — slots stay MONOTONIC so each declared slot keeps
+    ; ONE GC kind for the whole method (arm payload bindings never share a slot with a later,
+    ; differently-typed binding). `smark` is retained only for the name-scope reset above.
+    0))
 
 (defn compile-arm-body [(cs (ptr CState)) (body (ptr Node)) (want-value bool)] (-> i64)
   (if want-value (compile-trailing cs body) (compile-arm-stmt cs body)))
@@ -675,7 +745,9 @@
     (store! (field cs chunk) chunk) (store! (field cs env) env)
     (store! (field cs locals) (al-new [(ptr CLocal)] (alc-global)))
     (store! (field cs next-slot) start-slot) (store! (field cs max-slot) start-slot)
-    (store! (field cs ctxt) ctxt) cs))
+    (store! (field cs ctxt) ctxt)
+    (let [sr (xalloc 64)] (memset (cast (ptr i8) sr) (cast i32 0) 64) (store! (field cs slot-ref) sr))
+    (store! (field cs slot-ref-cap) 64) cs))
 
 ; compile one FN node into method `mi`. self-ty null for top-level fns.
 (defn compile-method [(mi (ptr MethodInfo)) (fnn (ptr Node)) (ctxt (ptr Decl)) (self-ty (ptr Type))] (-> i64)
@@ -691,6 +763,10 @@
     (store! (field mi chunk) chunk)
     (store! (field mi arity) (+ np start-slot))
     (store! (field mi is-void) is-void)
+    ; GC: does this method return a reference? (a caller's result temp is then a precise root)
+    (store! (field mi ret-ref) (if is-void 0 (ty-gcref? ret)))
+    ; self occupies slot 0 when present and is always an entity reference (a live receiver root).
+    (if has-self (cs-note-slot-ref cs 0 1) 0)
     ; F1 trace: remember the source fn Node + ctxt Decl so the tracer can resolve arg/return types
     (store! (field mi src-node) (cast (ptr i8) fnn))
     (store! (field mi src-ctxt) (cast (ptr i8) ctxt))
@@ -708,6 +784,16 @@
             (do (compile-block cs body false) (cop cs OP_UNIT) (cop cs OP_RETURN) 0)
             (do (compile-block cs body true) (cop cs OP_RETURN) 0)))))
     (store! (field mi local-count) (load (field cs max-slot)))
+    ; freeze the declared-slot ref-ness into a per-method local-ref bitmap (over [0,local-count)).
+    (let [lc (load (field mi local-count)) w (bitmap-words (if (= lc 0) 1 lc))
+          bm (cast (ptr i64) (xalloc (* 8 w))) (mut i) 0]
+      (loop (if (< (load i) w) (do (store! (index bm (load i)) 0) (store! i (+ (load i) 1)) 0) (break)))
+      (store! i 0)
+      (loop (if (< (load i) lc)
+              (do (if (= (cast i64 (load (index (load (field cs slot-ref)) (load i)))) 1) (bitmap-set bm (load i)) 0)
+                  (store! i (+ (load i) 1)) 0)
+              (break)))
+      (store! (field mi local-ref) bm))
     0))
 
 ; ============================ program assembly =============================
@@ -716,6 +802,8 @@
     (store! (field mi name) name) (store! (field mi name-len) len)
     (store! (field mi arity) 0) (store! (field mi local-count) 0) (store! (field mi is-void) false)
     (store! (field mi src-node) (cast (ptr i8) 0)) (store! (field mi src-ctxt) (cast (ptr i8) 0))
+    (store! (field mi ret-ref) 0) (store! (field mi local-ref) (cast (ptr i64) 0))
+    (store! (field mi frame-slots) 0) (store! (field mi map-stride) 0) (store! (field mi opmaps) (cast (ptr i64) 0))
     (al-push! (mut (field (cc) methods)) mi)
     (al-push! (mut (field (cc) method-nodes)) node)
     mi))
@@ -878,6 +966,205 @@
             (break))))
       0)))
 
+; ============================ GC stack-map builder (02 §6) =================
+; After every method is compiled, abstract-interpret its bytecode to produce, for each
+; instruction-start offset, a bitmap of the frame slots holding a GC reference at that point
+; (declared locals via the fixed local-ref bitmap + operand-stack temps via dataflow). The VM's
+; mark-roots reads opmaps[frame.ip] to scan exactly the live references in a parked frame.
+(const SM_MAXD 256)   ; max operand-stack depth we model (deep nested expr => loud error)
+(const SM_KW 4)       ; bitmap-words(SM_MAXD)
+
+(defn code-u16 [(code (ptr u8)) (off i64)] (-> i64)
+  (+ (* (cast i64 (load (index code off))) 256) (cast i64 (load (index code (+ off 1))))))
+
+; per-builtin operand pop count — MUST match do-builtin (vm.coil), incl. the ref-flag operands
+; the compiler now pushes for List/Map/Mutex construction.
+(defn sm-builtin-pops [(blt i64)] (-> i64)
+  (cond
+    (= blt BLT_LIST_NEW) 1 (= blt BLT_LIST_PUSH) 2 (= blt BLT_LIST_GET) 2 (= blt BLT_LIST_LEN) 1
+    (= blt BLT_MAP_NEW) 2 (= blt BLT_MAP_SET) 3 (= blt BLT_MAP_GET) 2 (= blt BLT_MAP_HAS) 2 (= blt BLT_MAP_LEN) 1 (= blt BLT_MAP_KEYS) 1
+    (= blt BLT_STR_LEN) 1 (= blt BLT_STR_SLICE) 3 (= blt BLT_STR_CHARCODE) 2 (= blt BLT_STR_TOINT) 1 (= blt BLT_STR_TOFLOAT) 1 (= blt BLT_STR_FROMCHARCODE) 1
+    (= blt BLT_CLOCK_NOW) 0 (= blt BLT_CLOCK_SLEEP) 1
+    (= blt BLT_MUTEX_NEW) 2 (= blt BLT_MUTEX_LOCK) 1 (= blt BLT_MUTEX_UNLOCK) 1 (= blt BLT_MUTEX_GET) 1 (= blt BLT_MUTEX_SET) 2
+    (= blt BLT_CONSOLE_READLINE) 0 (= blt BLT_CONSOLE_PRINT) 1 (= blt BLT_CONSOLE_LOG) 1
+    (= blt BLT_HTTP_REQUEST) 4 (= blt BLT_ENV_GET) 1
+    1))   ; print-family: pop 1
+
+; per-builtin result ref-ness (only for builtins whose kind is FIXED — LIST_GET/MUTEX_GET are
+; element-typed and read from the per-op annotation instead).
+(defn sm-builtin-pushref [(blt i64)] (-> i64)
+  (cond
+    (= blt BLT_LIST_NEW) 1 (= blt BLT_MAP_NEW) 1 (= blt BLT_MUTEX_NEW) 1
+    (= blt BLT_MAP_GET) 1 (= blt BLT_MAP_KEYS) 1 (= blt BLT_CONSOLE_READLINE) 1 (= blt BLT_ENV_GET) 1
+    (= blt BLT_STR_TOINT) 1 (= blt BLT_STR_TOFLOAT) 1 (= blt BLT_STR_SLICE) 1 (= blt BLT_STR_FROMCHARCODE) 1
+    (= blt BLT_HTTP_REQUEST) 1
+    0))
+
+(defn sm-pushes? [(op i64)] (-> i64)
+  (cond
+    (= op OP_POP) 0 (= op OP_STORE_LOCAL) 0
+    (or (= op OP_STORE_FIELD_I64) (or (= op OP_STORE_FIELD_F64) (= op OP_STORE_FIELD_REF))) 0
+    (= op OP_JUMP) 0 (= op OP_JUMP_IF_FALSE) 0 (= op OP_LOOP) 0 (= op OP_RETURN) 0
+    1))
+
+(defn sm-pops [(op i64) (code (ptr u8)) (ip i64)] (-> i64)
+  (cond
+    (= op OP_CALL_STATIC) (cast i64 (load (index code (+ ip 3))))
+    (= op OP_CALL_VIRTUAL) (cast i64 (load (index code (+ ip 4))))
+    (= op OP_CALL_BUILTIN) (sm-builtin-pops (cast i64 (load (index code (+ ip 1)))))
+    (= op OP_MAKE_ENUM) (cast i64 (load (index code (+ ip 2))))
+    (= op OP_POP) 1 (= op OP_STORE_LOCAL) 1
+    (or (= op OP_STORE_FIELD_I64) (or (= op OP_STORE_FIELD_F64) (= op OP_STORE_FIELD_REF))) 2
+    (and (>= op OP_ADD_I64) (<= op OP_REM_I64)) 2
+    (= op OP_NEG_I64) 1
+    (and (>= op OP_ADD_F64) (<= op OP_DIV_F64)) 2
+    (= op OP_NEG_F64) 1
+    (and (>= op OP_LT_I64) (<= op OP_NE_F64)) 2
+    (or (= op OP_EQ_BOOL) (= op OP_NE_BOOL)) 2
+    (= op OP_NOT) 1
+    (and (>= op OP_EQ_REF) (<= op OP_NE_ENUM)) 2
+    (= op OP_CONCAT) 2
+    (and (>= op OP_I64_TO_STR) (<= op OP_BOOL_TO_STR)) 1
+    (or (= op OP_STR_EQ) (= op OP_STR_NE)) 2
+    (or (= op OP_LOAD_FIELD_I64) (or (= op OP_LOAD_FIELD_F64) (= op OP_LOAD_FIELD_REF))) 1
+    (= op OP_JUMP_IF_FALSE) 1 (= op OP_RETURN) 1
+    (= op OP_ENUM_TAG) 1 (= op OP_ENUM_GET) 1
+    (= op OP_ARENA_AT) 2 (= op OP_ARENA_INSTANCE) 1 (= op OP_ARENA_INSTANCES) 3
+    (= op OP_THREAD_SPAWN) 1 (= op OP_THREAD_JOIN) 1
+    0))   ; CONST/TRUE/FALSE/UNIT/DUP/LOAD_LOCAL/NEW/LOAD_SINGLETON: pop 0
+
+; K = ref-ness of the value this op pushes (only meaningful when sm-pushes? is 1). `topk` is the
+; kind of the current operand-stack top (for DUP).
+(defn sm-pushkind [(op i64) (code (ptr u8)) (ip i64) (chunk (ptr Chunk)) (p (ptr Program)) (mi (ptr MethodInfo)) (topk i64)] (-> i64)
+  (cond
+    (= op OP_CONST) (chunk-const-ref? chunk (code-u16 code (+ ip 1)))
+    (= op OP_LOAD_LOCAL) (bitmap-test (load (field mi local-ref)) (code-u16 code (+ ip 1)))
+    (= op OP_DUP) topk
+    (= op OP_LOAD_FIELD_REF) 1
+    (= op OP_NEW) 1 (= op OP_LOAD_SINGLETON) 1 (= op OP_MAKE_ENUM) 1
+    (= op OP_CONCAT) 1 (and (>= op OP_I64_TO_STR) (<= op OP_BOOL_TO_STR)) 1
+    (or (= op OP_ARENA_AT) (or (= op OP_ARENA_INSTANCE) (= op OP_ARENA_INSTANCES))) 1
+    (= op OP_CALL_STATIC) (load (field (load (index (load (field p methods)) (code-u16 code (+ ip 1)))) ret-ref))
+    (= op OP_CALL_VIRTUAL)
+      (let [iface (code-u16 code (+ ip 1)) slot (cast i64 (load (index code (+ ip 3))))]
+        (load (index (load (index (load (field p iface-ret-ref)) iface)) slot)))
+    (= op OP_CALL_BUILTIN)
+      (let [blt (cast i64 (load (index code (+ ip 1))))]
+        (if (or (= blt BLT_LIST_GET) (= blt BLT_MUTEX_GET))
+          (let [a (chunk-ann-of chunk ip)] (if (< a 0) (fatal-or-panic EK_RUNTIME c"gc: missing list/mutex-get annotation" 70) a))
+          (sm-builtin-pushref blt)))
+    (= op OP_ENUM_GET) (let [a (chunk-ann-of chunk ip)] (if (< a 0) (fatal-or-panic EK_RUNTIME c"gc: missing enum-get annotation" 70) a))
+    0))   ; TRUE/FALSE/UNIT/arith/cmp/NOT/NEG/ENUM_TAG/STR_EQ/NE/LOAD_FIELD_I64/F64/THREAD_* -> scalar
+
+(defn kw-copy [(dst (ptr i64)) (src (ptr i64))] (-> i64)
+  (let [(mut i) 0] (loop (if (< (load i) SM_KW) (do (store! (index dst (load i)) (load (index src (load i))) ) (store! i (+ (load i) 1)) 0) (break)))) 0)
+(defn kw-eq [(a (ptr i64)) (b (ptr i64))] (-> i64)
+  (let [(mut i) 0 (mut ok) 1] (loop (if (< (load i) SM_KW) (do (if (!= (load (index a (load i))) (load (index b (load i)))) (store! ok 0) 0) (store! i (+ (load i) 1)) 0) (break))) (load ok)))
+
+(defn build-stackmaps [(mi (ptr MethodInfo)) (p (ptr Program))] (-> i64)
+  (let [chunk (load (field mi chunk)) code (load (field chunk code)) n (load (field chunk count))
+        lc (load (field mi local-count))
+        in-h (cast (ptr i64) (xalloc (* 8 (if (= n 0) 1 n))))
+        in-k (cast (ptr i64) (xalloc (* 8 (* (if (= n 0) 1 n) SM_KW))))
+        done (xalloc (if (= n 0) 1 n))
+        wl (cast (ptr i64) (xalloc (* 8 (if (= n 0) 1 n)))) (mut wtop) 0
+        (mut maxd) 0
+        tmpk (cast (ptr i64) (xalloc (* 8 SM_KW)))]
+    ; init
+    (let [(mut i) 0] (loop (if (< (load i) n) (do (store! (index in-h (load i)) -1) (store! (index done (load i)) (cast u8 0)) (store! i (+ (load i) 1)) 0) (break))))
+    (let [(mut i) 0] (loop (if (< (load i) (* n SM_KW)) (do (store! (index in-k (load i)) 0) (store! i (+ (load i) 1)) 0) (break))))
+    (if (> n 0) (do (store! (index in-h 0) 0) (store! (index wl 0) 0) (store! wtop 1) 0) 0)
+    ; worklist
+    (loop
+      (if (= (load wtop) 0) (break)
+        (let [ip (do (store! wtop (- (load wtop) 1)) (load (index wl (load wtop))))]
+          (if (= (cast i64 (load (index done ip))) 1) (continue) 0)
+          (store! (index done ip) (cast u8 1))
+          (let [h (load (index in-h ip)) k (index in-k (* ip SM_KW)) op (cast i64 (load (index code ip)))
+                len (op-instr-len op) pops (sm-pops op code ip) push (sm-pushes? op)]
+            (if (> h (load maxd)) (store! maxd h) 0)
+            ; out-state = k with `pops` removed then optional push
+            (kw-copy tmpk k)
+            (let [topk (if (> h 0) (bitmap-test tmpk (- h 1)) 0) (mut oh) (- h pops)]
+              (if (< (load oh) 0) (fatal-or-panic EK_RUNTIME c"gc: stack underflow in stackmap (compiler bug)" 70) 0)
+              ; clear the popped slots so stale kind bits never leak above the height (keeps the
+              ; invariant: no bit set at depth >= height, so kw-eq compares clean bitmaps).
+              (let [(mut d) (load oh)] (loop (if (< (load d) h) (do (store! (index tmpk (idiv (load d) 64)) (iand (load (index tmpk (idiv (load d) 64))) (ixor -1 (ishl 1 (irem (load d) 64))))) (store! d (+ (load d) 1)) 0) (break))))
+              (if (= push 1)
+                (let [pk (sm-pushkind op code ip chunk p mi topk)]
+                  ; clear then set the pushed slot's bit at depth oh
+                  (store! (index tmpk (idiv (load oh) 64)) (iand (load (index tmpk (idiv (load oh) 64))) (ixor -1 (ishl 1 (irem (load oh) 64)))))
+                  (if (= pk 1) (bitmap-set tmpk (load oh)) 0)
+                  (store! oh (+ (load oh) 1)) 0)
+                0)
+              (if (>= (load oh) SM_MAXD) (fatal-or-panic EK_RUNTIME c"gc: operand depth exceeds SM_MAXD" 70) 0)
+              ; propagate the out-state (oh, tmpk) to each successor; enqueue newly-set ones.
+              (if (= op OP_RETURN) 0
+                (do
+                  (if (or (= op OP_JUMP) (= op OP_LOOP)) 0                    ; fall-through
+                    (if (= (sm-merge in-h in-k done (+ ip len) (load oh) tmpk mi) 1)
+                      (do (store! (index wl (load wtop)) (+ ip len)) (store! wtop (+ (load wtop) 1)) 0) 0))
+                  (if (or (= op OP_JUMP) (= op OP_JUMP_IF_FALSE))            ; forward branch
+                    (let [tgt (+ (+ ip len) (code-u16 code (+ ip 1)))]
+                      (if (= (sm-merge in-h in-k done tgt (load oh) tmpk mi) 1)
+                        (do (store! (index wl (load wtop)) tgt) (store! wtop (+ (load wtop) 1)) 0) 0)) 0)
+                  (if (= op OP_LOOP)                                          ; backward branch
+                    (let [tgt (- (+ ip len) (code-u16 code (+ ip 1)))]
+                      (if (= (sm-merge in-h in-k done tgt (load oh) tmpk mi) 1)
+                        (do (store! (index wl (load wtop)) tgt) (store! wtop (+ (load wtop) 1)) 0) 0)) 0)
+                  0)))))))
+    ; allocate opmaps and fill from stored in-states
+    (let [fs (+ lc (load maxd)) stride (bitmap-words (if (= fs 0) 1 fs))
+          opmaps (cast (ptr i64) (xalloc (* 8 (* (if (= n 0) 1 n) stride))))]
+      (let [(mut i) 0] (loop (if (< (load i) (* n stride)) (do (store! (index opmaps (load i)) 0) (store! i (+ (load i) 1)) 0) (break))))
+      (let [(mut ip) 0]
+        (loop
+          (if (< (load ip) n)
+            (do
+              (if (= (cast i64 (load (index done (load ip)))) 1)
+                (let [m (index opmaps (* (load ip) stride)) h (load (index in-h (load ip))) k (index in-k (* (load ip) SM_KW))]
+                  ; declared-local refs (constant across ip)
+                  (let [(mut s) 0] (loop (if (< (load s) lc) (do (if (= (bitmap-test (load (field mi local-ref)) (load s)) 1) (bitmap-set m (load s)) 0) (store! s (+ (load s) 1)) 0) (break))))
+                  ; operand-temp refs at this ip
+                  (let [(mut d) 0] (loop (if (< (load d) h) (do (if (= (bitmap-test k (load d)) 1) (bitmap-set m (+ lc (load d))) 0) (store! d (+ (load d) 1)) 0) (break)))) 0)
+                0)
+              (store! ip (+ (load ip) 1)) 0)
+            (break))))
+      (store! (field mi frame-slots) fs)
+      (store! (field mi map-stride) stride)
+      (store! (field mi opmaps) opmaps))
+    0))
+
+; merge an out-state (oh, tmpk) into successor `s`. Returns 1 if `s` was newly set (caller
+; enqueues it), 0 otherwise. A revisit with a DIFFERENT height/kinds is a compiler bug (loud).
+(defn sm-merge [(in-h (ptr i64)) (in-k (ptr i64)) (done (ptr u8)) (s i64) (oh i64) (tmpk (ptr i64)) (mi (ptr MethodInfo))] (-> i64)
+  (if (< (load (index in-h s)) 0)
+    (do (store! (index in-h s) oh) (kw-copy (index in-k (* s SM_KW)) tmpk) 1)
+    (do (if (or (!= (load (index in-h s)) oh) (= (kw-eq (index in-k (* s SM_KW)) tmpk) 0))
+          (fatal-or-panic EK_RUNTIME c"gc: inconsistent stack map merge (compiler bug)" 70) 0)
+        0)))
+
+; interface-method return ref-ness table: iface-ret-ref[iface-id][slot] (02 §6, for CALL_VIRTUAL).
+(defn build-iface-ret-ref [] (-> (ptr (ptr i64)))
+  (let [is (load (field (cc) iface-decls)) ni (al-len is)
+        tab (cast (ptr (ptr i64)) (xalloc (* (sizeof (ptr i64)) (if (= ni 0) 1 ni)))) (mut i) 0]
+    (loop
+      (if (< (load i) ni)
+        (let [d (al-get is (load i)) ms (load (field d members)) nm2 (al-len ms) (mut j) 0 (mut nslot) 0]
+          ; count fn members
+          (loop (if (< (load j) nm2) (do (if (is-fn-node (al-get ms (load j))) (store! nslot (+ (load nslot) 1)) 0) (store! j (+ (load j) 1)) 0) (break)))
+          (let [arr (cast (ptr i64) (xalloc (* 8 (if (= (load nslot) 0) 1 (load nslot))))) (mut j2) 0 (mut sl) 0]
+            (loop (if (< (load j2) nm2)
+                    (let [m (al-get ms (load j2))]
+                      (if (is-fn-node m)
+                        (do (store! (index arr (load sl)) (ty-gcref? (resolve-type (fn-ret-node m) d))) (store! sl (+ (load sl) 1)) 0) 0)
+                      (store! j2 (+ (load j2) 1)) 0)
+                    (break)))
+            (store! (index tab (load i)) arr)) 0)
+        (break))
+      (store! i (+ (load i) 1)) 0)
+    tab))
+
 ; top-level: build the whole Program from the (already type-checked) ctx.
 (defn build-program [] (-> (ptr Program))
   (cc-init)
@@ -907,6 +1194,12 @@
           (store! i (+ (load i) 1)) 0)
         (break)))
     (store! (field p types) tarr) (store! (field p type-count) nmono)
+    ; GC precise-root metadata: interface return-ref table, then per-method stack maps. Runs
+    ; here (after every method + its ret-ref is known) so CALL_STATIC/CALL_VIRTUAL result kinds
+    ; resolve against the assembled Program.
+    (store! (field p iface-ret-ref) (build-iface-ret-ref))
+    (store! i 0)
+    (loop (if (< (load i) nm2) (do (build-stackmaps (load (index marr (load i))) p) (store! i (+ (load i) 1)) 0) (break)))
     p))
 
 ; ============================ live redefinition (Phase 6, M4) ===============

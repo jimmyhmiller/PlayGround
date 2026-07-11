@@ -21,18 +21,24 @@
 ;     realloc'd, so a concurrent arena-slot-ptr can never read a torn/moved array base.
 ; DEVIATIONS from §4 still standing: no magazines (above); slot->(slab,local) is div/mod,
 ; not shift/mask (slab-cap need not be 2^k); InstanceHeader uses i64 fields (not u32).
-; The free-list (arena-free) stays present-but-unused until GC lands (no frees in the PoC).
+; GC LANDED: the free-list is now live — `arena-sweep` pushes swept slots onto it and
+; `arena-alloc` pops (reuses) them before bumping. Freeing happens only under a stop-the-world
+; GC sweep (gc.coil), so per-arena reuse never races a mutator (Treiber pop covers concurrent
+; allocators; push is sweep/coordinator-only). Enumeration is unchanged: a swept slot reads
+; flags=0 and is skipped, a reused slot reads flags=LIVE and reappears — the per-type slab
+; walk that powers the viewer is untouched.
 (module arena)
 (import "ioutil.coil" :use *)
 (import "evalrt.coil" :use *)
 (import "atomic.coil" :use *)
+(import "gcstate.coil" :use *)
 
 ; ---- header: every instance begins with this (fixed offset 0) ----
 (defstruct InstanceHeader
   [(type-id    i64)     ; which concrete type — recovers TypeInfo for iface dispatch + GC
    (slot-index i64)     ; index within this type's arena (stable id component)
    (generation i64)     ; bumped on free — invalidates viewer handles (Phase 4)
-   (flags      i64)])   ; bit0 = live, bit1 = gc-marked (reserved)
+   (flags      i64)])   ; bit0 = live, bit1 = gc-marked (set during mark, cleared on sweep)
 
 (const FLAG_LIVE 1)
 (const FLAG_MARKED 2)
@@ -119,33 +125,86 @@
   (w-cstr 2 c" live) — GC not implemented in this build, restart the process.\n")
   (if (eval-active?) (eval-panic0 EK_RUNTIME c"OutOfArenaSpace: arena full (GC not implemented)") (do (exit (cast i32 70)) 0)) 0)
 
-; allocate one slot; stamps the header (type-id, slot-index, flags=live). Returns ptr.
-; THREAD-SAFE: `atomic-add` reserves a unique slot index (no two callers collide, no CAS
-; loop — the frontier only grows). The caller then maps its slab (locked only if unmapped)
-; and writes ITS OWN slot's header — no other thread touches that slot, so no race there.
-; The header's type-id is fully written before OP_NEW ever publishes the pointer to another
-; thread (05 M1 risk note: construction-visibility ordering), because publication is a
-; later store on the mutator's own stack/field.
-(defn arena-alloc [(a (ptr TypeArena))] (-> (ptr u8))
-  (let [idx (atomic-add (field a bump-cursor) 1)]   ; returns the OLD frontier = our reserved slot
-    (if (>= idx (load (field a max-slots))) (do (arena-oom a) 0) 0)
-    (arena-ensure-slab a idx)
-    (let [p (cast (ptr InstanceHeader) (arena-slot-ptr a idx))]
-      (store! (field p type-id) (load (field a type-id)))
-      (store! (field p slot-index) idx)
-      (store! (field p flags) FLAG_LIVE)
-      (atomic-add (field a live-count) 1)
-      (cast (ptr u8) p))))
+; ---- GC mark bit (02 §6). Set during mark, cleared on survivors during sweep. Outside a
+; collection no live slot ever carries it. STW guarantees no concurrent writer, so plain ops. ----
+(defn arena-mark-set  [(p (ptr InstanceHeader))] (-> i64) (store! (field p flags) (ior (load (field p flags)) FLAG_MARKED)) 0)
+(defn arena-marked?   [(p (ptr InstanceHeader))] (-> i64) (if (= (iand (load (field p flags)) FLAG_MARKED) FLAG_MARKED) 1 0))
 
-; free-list push (structure present; unused until GC lands)
+; ---- lock-free free-list over slot INDICES (02 §4 Layer 1). The freed slot's own first word
+; is the link (the slot is dead, so its bytes are ours). Pop is a Treiber CAS loop; push is
+; only ever called by the GC sweep coordinator (STW → uncontended) but is CAS-safe anyway.
+; ABA cannot occur: pushes happen ONLY at a stop-the-world sweep (no mutators running), pops
+; ONLY while mutators run (no concurrent push) — the head never gets a value re-introduced
+; under a concurrent popper, so a plain CAS pop is sound here. ----
+(defn arena-free-push [(a (ptr TypeArena)) (idx i64)] (-> i64)
+  (let [slotp (cast (ptr i64) (arena-slot-ptr a idx))]
+    (loop
+      (let [old (atomic-load (field a free-head))]
+        (store! slotp old)
+        (if (= (atomic-cas (field a free-head) old idx) old) (break) (continue)))))
+  0)
+
+(defn arena-free-pop [(a (ptr TypeArena))] (-> i64)   ; -> reused slot index, or -1 if empty
+  (let [(mut r) -1]
+    (loop
+      (let [old (atomic-load (field a free-head))]
+        (if (< old 0) (do (store! r -1) (break))
+          (let [next (load (cast (ptr i64) (arena-slot-ptr a old)))]
+            (if (= (atomic-cas (field a free-head) old next) old) (do (store! r old) (break)) (continue))))))
+    (load r)))
+
+; stamp the header of `idx` as a fresh live instance and account its bytes. Shared by the
+; free-list-reuse and bump paths. `generation` is NOT reset — a reused slot keeps its bumped
+; generation so any viewer handle to the previous occupant stays invalid.
+(defn arena-stamp [(a (ptr TypeArena)) (idx i64)] (-> (ptr u8))
+  (let [p (cast (ptr InstanceHeader) (arena-slot-ptr a idx))]
+    (store! (field p type-id) (load (field a type-id)))
+    (store! (field p slot-index) idx)
+    (store! (field p flags) FLAG_LIVE)
+    (atomic-add (field a live-count) 1)
+    (gc-account (load (field a slot-size)))
+    (cast (ptr u8) p)))
+
+; allocate one slot; stamps the header (type-id, slot-index, flags=live). Returns ptr.
+; THREAD-SAFE: a GC-swept slot is reused first (Treiber pop); otherwise `atomic-add` reserves
+; a unique fresh slot index (no two callers collide, no CAS loop — the frontier only grows).
+; The caller then maps its slab (locked only if unmapped) and writes ITS OWN slot's header —
+; no other thread touches that slot, so no race there. The header's type-id is fully written
+; before OP_NEW ever publishes the pointer to another thread (05 M1 construction-visibility).
+(defn arena-alloc [(a (ptr TypeArena))] (-> (ptr u8))
+  (let [reused (arena-free-pop a)]
+    (if (>= reused 0)
+      (arena-stamp a reused)
+      (let [idx (atomic-add (field a bump-cursor) 1)]   ; OLD frontier = our reserved slot
+        (if (>= idx (load (field a max-slots))) (do (arena-oom a) (cast (ptr u8) 0))
+          (do (arena-ensure-slab a idx) (arena-stamp a idx)))))))
+
+; free one slot: bump generation (invalidate viewer handles), clear flags, drop live-count,
+; and push onto the free-list. Called only by the GC sweep, under STW.
 (defn arena-free [(a (ptr TypeArena)) (idx i64)] (-> i64)
   (let [p (cast (ptr InstanceHeader) (arena-slot-ptr a idx))]
     (store! (field p generation) (+ (load (field p generation)) 1))
     (store! (field p flags) 0)
-    (let [link (cast (ptr i64) p)] (store! link (load (field a free-head))))
-    (store! (field a free-head) idx)
-    (store! (field a live-count) (- (load (field a live-count)) 1))
-    0))
+    (atomic-sub (field a live-count) 1)
+    (arena-free-push a idx))
+  0)
+
+; SWEEP one arena (02 §6): walk [0, hwm); a marked live slot is unmarked and survives, an
+; unmarked live slot is freed onto the free-list. Returns the number of slots reclaimed.
+; STW: the collector is the only thread touching this arena, so plain flag reads/writes.
+(defn arena-sweep [(a (ptr TypeArena))] (-> i64)
+  (let [hwm (load (field a bump-cursor)) (mut i) 0 (mut freed) 0]
+    (loop
+      (if (< (load i) hwm)
+        (let [p (cast (ptr InstanceHeader) (arena-slot-ptr a (load i))) fl (load (field p flags))]
+          (if (= (iand fl FLAG_LIVE) FLAG_LIVE)
+            (if (= (iand fl FLAG_MARKED) FLAG_MARKED)
+              (store! (field p flags) (iand fl (ixor -1 FLAG_MARKED)))       ; survive; clear mark
+              (do (arena-free a (load i)) (store! freed (+ (load freed) 1)) 0))
+            0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (load freed)))
 
 ; enumeration — "list every live instance of this type" (the viewer's foundation)
 (defn arena-for-each-live [(a (ptr TypeArena)) (f (fnptr c [(ptr u8)] i64))] (-> i64)

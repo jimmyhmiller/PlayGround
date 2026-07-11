@@ -135,7 +135,7 @@
                       (continue))))))))))
     (if (and (= (load iseof) 1) (= (load len) 0))
       (enum-none)                                   ; EOF with nothing buffered -> None
-      (enum-some (cast i64 (str-make (load buf) (load len)))))))   ; Some(line)
+      (enum-some-r (cast i64 (str-make (load buf) (load len))) 1))))   ; Some(line) — String payload is a ref
 
 ; Mutex.lock: CAS-acquire, but back off through the safepoint so a waiter still parks for a
 ; global stop (otherwise a spinning waiter would hang request-global-stop). During a global
@@ -219,7 +219,7 @@
 (defn vm-str-sentinel [] (-> (ptr StringObj)) (load (vm-str-sentinel-cell)))
 (defn vm-init-str-sentinel [] (-> i64)
   (if (= (cast i64 (load (vm-str-sentinel-cell))) 0)
-    (do (store! (vm-str-sentinel-cell) (str-make (xalloc 1) 0)) 0) 0) 0)
+    (do (store! (vm-str-sentinel-cell) (str-make-perm (cast (ptr u8) c"") 0)) 0) 0) 0)
 (defn vm-init-string-fields [(ti (ptr TypeInfo)) (inst i64)] (-> i64)
   (let [n (load (field ti field-count)) (mut i) 0]
     (loop (if (< (load i) n)
@@ -247,7 +247,7 @@
       (let [vl (strlen v) buf (xalloc (+ vl 1))]
         (if (> vl 0) (do (memcpy (cast (ptr i8) buf) v vl) 0) 0)
         (store! (index buf vl) (cast u8 0))
-        (enum-some (cast i64 (str-make buf vl)))))))
+        (enum-some-r (cast i64 (str-make buf vl)) 1)))))   ; Some(value) — String payload is a ref
 
 ; String.charCode(i) -> the byte at index i as i64 (0..255); out of bounds => -1 (never traps).
 (defn vm-str-charcode [(s (ptr StringObj)) (i i64)] (-> i64)
@@ -319,11 +319,11 @@
     (= blt BLT_CONSOLE_LOG) (do (console-log (cast (ptr StringObj) (vpop vt))) (vpush vt 0))
     (= blt BLT_CONSOLE_PRINT) (do (console-print (cast (ptr StringObj) (vpop vt))) (vpush vt 0))
     (= blt BLT_CONSOLE_READLINE) (vpush vt (cast i64 (vm-readline vt)))
-    (= blt BLT_LIST_NEW) (vpush vt (cast i64 (list-new)))
+    (= blt BLT_LIST_NEW) (let [er (vpop vt) l (list-new)] (list-set-elemref l er) (vpush vt (cast i64 l)))
     (= blt BLT_LIST_PUSH) (let [v (vpop vt) l (vpop vt)] (list-push (cast (ptr ListObj) l) v) (vpush vt 0))
     (= blt BLT_LIST_GET) (let [i (vpop vt) l (vpop vt)] (vpush vt (list-get (cast (ptr ListObj) l) i)))
     (= blt BLT_LIST_LEN) (let [l (vpop vt)] (vpush vt (list-len (cast (ptr ListObj) l))))
-    (= blt BLT_MAP_NEW) (vpush vt (cast i64 (map-new (= (vpop vt) 1))))
+    (= blt BLT_MAP_NEW) (let [vr (vpop vt) sk (vpop vt) m (map-new (= sk 1))] (map-set-valref m vr) (vpush vt (cast i64 m)))
     (= blt BLT_MAP_SET) (let [v (vpop vt) k (vpop vt) m (vpop vt)] (map-set (cast (ptr MapObj) m) k v) (vpush vt 0))
     (= blt BLT_MAP_GET) (let [k (vpop vt) m (vpop vt)] (vpush vt (cast i64 (map-get (cast (ptr MapObj) m) k))))
     (= blt BLT_MAP_HAS) (let [k (vpop vt) m (vpop vt)] (vpush vt (map-has (cast (ptr MapObj) m) k)))
@@ -333,7 +333,7 @@
     (= blt BLT_STR_SLICE) (let [hi (vpop vt) lo (vpop vt) s (vpop vt)] (vpush vt (cast i64 (str-slice (cast (ptr StringObj) s) lo hi))))
     (= blt BLT_CLOCK_NOW) (vpush vt (clock-now))
     (= blt BLT_CLOCK_SLEEP) (let [ms (vpop vt)] (vm-sleep vt ms) (vpush vt 0))
-    (= blt BLT_MUTEX_NEW) (let [v (vpop vt)] (vpush vt (cast i64 (mutex-new v))))
+    (= blt BLT_MUTEX_NEW) (let [vr (vpop vt) v (vpop vt) m (mutex-new v)] (mutex-set-valref m vr) (vpush vt (cast i64 m)))
     (= blt BLT_MUTEX_LOCK) (let [m (vpop vt)] (vm-mutex-lock vt (cast (ptr MutexObj) m)) (vpush vt 0))
     (= blt BLT_MUTEX_UNLOCK) (let [m (vpop vt)] (vm-mutex-unlock vt (cast (ptr MutexObj) m)) (vpush vt 0))
     (= blt BLT_MUTEX_GET) (let [m (vpop vt)] (vpush vt (mutex-get (cast (ptr MutexObj) m))))
@@ -481,7 +481,7 @@
               (let [tid (read-u16 (load fr))]
                 (vpush vt (cast i64 (load (field (load (index (load (field (load (field (vm) program)) types)) tid)) singleton)))))
             OP_MAKE_ENUM
-              (let [tag (read-byte (load fr)) argc (read-byte (load fr)) box (enum-alloc tag argc) (mut k) 0]
+              (let [tag (read-byte (load fr)) argc (read-byte (load fr)) rm (read-byte (load fr)) box (enum-alloc-rm tag argc rm) (mut k) 0]
                 (loop (if (< (load k) argc) (do (enum-set-arg box (- (- argc 1) (load k)) (vpop vt)) (store! k (+ (load k) 1)) 0) (break)))
                 (vpush vt (cast i64 box)))
             OP_ENUM_TAG (let [p (vpop vt)] (vpush vt (enum-tag (cast (ptr i64) p))))

@@ -1,0 +1,44 @@
+(module app)
+(import "io.coil"  :use *)
+(import "fmt.coil" :use *)
+(import "gc.coil"  :use *)
+
+(defstruct Node [(val :i64) (next (ptr Node))])
+(gctype Node)                          ; tracer generated from reflection: follows `next`
+
+; Build a k-node list (values 0..k-1). Recursive: each frame roots the growing
+; tail (via gc-let) while it allocates its node, so a collection mid-build must
+; follow `next` pointers to keep the tail alive — that's the tracing test.
+(defn build-list [(k :i64) (i :i64)] (-> (ptr Node))
+  (if (icmp-ge i k)
+      (cast (ptr Node) 0)
+      (gc-let rest (build-list k (iadd i 1))
+        (let [node (new Node)]
+          (fset node val i)
+          (store! (field node next) rest)
+          node))))
+
+(defn sum-list [(h (ptr Node))] (-> :i64)
+  (let [(mut cur) h (mut acc) 0]
+    (loop
+      (if (icmp-eq (cast i64 (load cur)) 0)
+          (break (load acc))
+          (do
+            (store! acc (iadd (load acc) (load (field (load cur) val))))
+            (store! cur (load (field (load cur) next))))))))
+
+(defn once [(k :i64)] (-> :i64)
+  (gc-let head (build-list k 0)
+    (sum-list head)))
+
+(defn main [] (-> :i64)
+  (let [(mut total) 0 (mut m) 0]
+    (loop
+      (if (icmp-ge (load m) 2000)
+          (break 0)
+          (do
+            (store! total (iadd (load total) (once 50)))
+            (store! m (iadd (load m) 1)))))
+    (fmt (stdout) "graph: lists=2000 len=50  total_sum={d} (expect 2450000)  peak_live={d}  collections={d}\n"
+         (load total) (peak-live) (num-collections))
+    0))

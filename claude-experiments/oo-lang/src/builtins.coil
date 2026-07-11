@@ -1,19 +1,105 @@
 ; builtins.coil — runtime for the M0 built-in value types and I/O:
 ; StringObj, ListObj, MapObj, enum boxes (Option/Result and every user enum),
-; print/Console.log, and Clock. Kept behind functions so Phase 5's magazines /
-; string-rope replacements can slot in (02-runtime.md §4 "keep it behind functions").
-; Leaf module (imports only ioutil) so both the VM and the compiler-support code can
-; call it without an import cycle.
+; print/Console.log, and Clock.
+;
+; GC (02-runtime.md §6): every non-arena heap object begins with a uniform `ObjHeader`
+; {kind, marked, next}. The `kind` word doubles as a CLASSIFIER — its value is a large
+; sentinel (>= OBJ_TAG_BASE) that can never collide with an arena instance's leading
+; `type-id` word (a small index), so the collector, given ANY heap pointer from a root or a
+; field, can tell an arena entity (word0 = small type-id) from a non-arena object (word0 =
+; OBJ_* sentinel) with a single load + compare — no range tables, fully precise. Every
+; non-arena object is also threaded onto one global Treiber list (`gc-objs`) so the sweep can
+; enumerate and free them; allocation accounts bytes toward the GC trigger (gcstate.coil).
+;
+; STRING OWNERSHIP: a LINKED (collectable) StringObj OWNS its `data` buffer — the sweep frees
+; both. Callers that would otherwise alias another buffer (str-slice) or point at a static
+; literal (str-from-bool, error strings) must COPY into an owned buffer or use `str-make-perm`
+; (an UNLINKED, never-freed string, used for compile-time constants + the field sentinel).
+;
+; Leaf module (imports ioutil + evalrt + atomic + gcstate) so both the VM and compiler-support
+; code can call it without an import cycle.
 (module builtins)
 (import "ioutil.coil" :use *)
 (import "evalrt.coil" :use *)
+(import "atomic.coil" :use *)
+(import "gcstate.coil" :use *)
+
+; ============================ GC object header ==============================
+; Kind sentinels: any value >= OBJ_TAG_BASE means "non-arena object"; below it means "arena
+; instance, word0 is a type-id". 4e18 is comfortably below i64 max (9.2e18) and unreachably
+; far above any real type-id.
+(const OBJ_TAG_BASE 4000000000000000000)
+(const OBJ_STRING   4000000000000000001)
+(const OBJ_LIST     4000000000000000002)
+(const OBJ_MAP      4000000000000000003)
+(const OBJ_ENUM     4000000000000000004)
+(const OBJ_MUTEX    4000000000000000005)
+
+(defstruct ObjHeader [(kind i64) (marked i64) (next i64)])   ; next = raw ptr bits (0 = end)
+
+(defn obj-kind    [(o (ptr i8))] (-> i64) (load (field (cast (ptr ObjHeader) o) kind)))
+(defn obj-marked? [(o (ptr i8))] (-> i64) (load (field (cast (ptr ObjHeader) o) marked)))
+(defn obj-mark    [(o (ptr i8))] (-> i64) (store! (field (cast (ptr ObjHeader) o) marked) 1) 0)
+(defn obj-unmark  [(o (ptr i8))] (-> i64) (store! (field (cast (ptr ObjHeader) o) marked) 0) 0)
+(defn obj-next    [(o (ptr i8))] (-> i64) (load (field (cast (ptr ObjHeader) o) next)))
+(defn obj-set-next [(o (ptr i8)) (n i64)] (-> i64) (store! (field (cast (ptr ObjHeader) o) next) n) 0)
+
+; is this word a non-arena object pointer's leading word (a kind sentinel)?
+(defn obj-is-kind? [(w i64)] (-> i64) (if (>= w OBJ_TAG_BASE) 1 0))
+
+; global Treiber list head of all LINKED non-arena objects (raw ptr bits, 0 = empty).
+(defn gc-objs-cell [] (-> (ptr i64)) (alloc-static i64))
+
+(defn gc-obj-link [(o (ptr i8))] (-> i64)
+  (loop
+    (let [old (atomic-load (gc-objs-cell))]
+      (obj-set-next o old)
+      (if (= (atomic-cas (gc-objs-cell) old (cast i64 o)) old) (break) (continue))))
+  0)
+
+; allocate `bytes`, stamp the header with kind `k`, link into the global list, account bytes.
+(defn obj-alloc [(bytes i64) (k i64)] (-> (ptr i8))
+  (let [o (cast (ptr i8) (xalloc bytes))]
+    (store! (field (cast (ptr ObjHeader) o) kind) k)
+    (store! (field (cast (ptr ObjHeader) o) marked) 0)
+    (gc-obj-link o)
+    (gc-account bytes)
+    o))
+
+; immortal allocation: header stamped, NOT linked, NOT accounted — never swept. For
+; compile-time constants and the shared field sentinel.
+(defn obj-alloc-perm [(bytes i64) (k i64)] (-> (ptr i8))
+  (let [o (cast (ptr i8) (xalloc bytes))]
+    (store! (field (cast (ptr ObjHeader) o) kind) k)
+    (store! (field (cast (ptr ObjHeader) o) marked) 0)
+    (obj-set-next o 0)
+    o))
 
 ; ============================ String ========================================
-(defstruct StringObj [(len i64) (data (ptr u8))])
+; hdr + {len, data}. `data` is an owned, NUL-terminated heap buffer for LINKED strings.
+(defstruct StringObj [(hdr ObjHeader) (len i64) (data (ptr u8))])
 
+; str-make TAKES OWNERSHIP of `data` (must be a heap buffer). Collectable.
 (defn str-make [(data (ptr u8)) (len i64)] (-> (ptr StringObj))
-  (let [s (cast (ptr StringObj) (xalloc (sizeof StringObj)))]
+  (let [s (cast (ptr StringObj) (obj-alloc (sizeof StringObj) OBJ_STRING))]
     (store! (field s len) len) (store! (field s data) data) s))
+
+; copy `len` bytes into a fresh owned buffer, then make a collectable string. Safe for
+; aliased/literal sources.
+(defn str-copy [(data (ptr u8)) (len i64)] (-> (ptr StringObj))
+  (let [buf (xalloc (+ len 1))]
+    (if (> len 0) (do (memcpy (cast (ptr i8) buf) (cast (ptr i8) data) len) 0) 0)
+    (store! (index buf len) (cast u8 0))
+    (str-make buf len)))
+
+; immortal string (compile-time constants + sentinel): copies into an owned buffer but is NOT
+; linked, so it is never swept. Cheap and safe to point at literals.
+(defn str-make-perm [(data (ptr u8)) (len i64)] (-> (ptr StringObj))
+  (let [s (cast (ptr StringObj) (obj-alloc-perm (sizeof StringObj) OBJ_STRING))
+        buf (xalloc (+ len 1))]
+    (if (> len 0) (do (memcpy (cast (ptr i8) buf) (cast (ptr i8) data) len) 0) 0)
+    (store! (index buf len) (cast u8 0))
+    (store! (field s len) len) (store! (field s data) buf) s))
 
 (defn str-concat [(a (ptr StringObj)) (b (ptr StringObj))] (-> (ptr StringObj))
   (let [la (load (field a len)) lb (load (field b len))
@@ -35,11 +121,13 @@
               (break)))
       (load ok))))
 
+; slice COPIES (owns its buffer) — a slice must never alias the parent's data, or freeing one
+; would corrupt the other.
 (defn str-slice [(s (ptr StringObj)) (lo i64) (hi i64)] (-> (ptr StringObj))
   (let [n (load (field s len))
         l (if (< lo 0) 0 (if (> lo n) n lo))
         h (if (< hi l) l (if (> hi n) n hi))]
-    (str-make (index (load (field s data)) l) (- h l))))
+    (str-copy (index (load (field s data)) l) (- h l))))
 
 (defn str-len [(s (ptr StringObj))] (-> i64) (load (field s len)))
 
@@ -51,8 +139,9 @@
 (defn str-from-f64bits [(bits i64)] (-> (ptr StringObj))
   (let [buf (xalloc 64) n (snprintf (cast (ptr i8) buf) 64 c"%g" (f64-bits-to-f64 bits))]
     (str-make buf (cast i64 n))))
+; copies the literal into an owned buffer so the result is a normal collectable string.
 (defn str-from-bool [(v i64)] (-> (ptr StringObj))
-  (if (= v 0) (str-make (cast (ptr u8) c"false") 5) (str-make (cast (ptr u8) c"true") 4)))
+  (if (= v 0) (str-copy (cast (ptr u8) c"false") 5) (str-copy (cast (ptr u8) c"true") 4)))
 
 ; ============================ output ========================================
 (defn print-i64 [(v i64)] (-> i64) (w-int 1 v) (w-cstr 1 c"\n") 0)
@@ -66,11 +155,18 @@
 ; Console.readLine's cooperative body lives in vm.coil (it needs the VMThread to poll the safepoint).
 
 ; ============================ List ==========================================
-(defstruct ListObj [(items (ptr i64)) (len i64) (cap i64)])
+; hdr + {items, len, cap, elem-ref}. `elem-ref` (0/1) tells the GC whether the untagged
+; `items` slots are references to trace (List<Agent>) or scalars to skip (List<Int>).
+(defstruct ListObj [(hdr ObjHeader) (items (ptr i64)) (len i64) (cap i64) (elem-ref i64)])
 
 (defn list-new [] (-> (ptr ListObj))
-  (let [l (cast (ptr ListObj) (xalloc (sizeof ListObj)))]
-    (store! (field l items) (cast (ptr i64) (xalloc (* 8 8)))) (store! (field l len) 0) (store! (field l cap) 8) l))
+  (let [l (cast (ptr ListObj) (obj-alloc (sizeof ListObj) OBJ_LIST))]
+    (store! (field l items) (cast (ptr i64) (xalloc (* 8 8)))) (store! (field l len) 0)
+    (store! (field l cap) 8) (store! (field l elem-ref) 0) l))
+
+(defn list-set-elemref [(l (ptr ListObj)) (r i64)] (-> i64) (store! (field l elem-ref) r) 0)
+(defn list-elemref [(l (ptr ListObj))] (-> i64) (load (field l elem-ref)))
+(defn list-items [(l (ptr ListObj))] (-> (ptr i64)) (load (field l items)))
 
 (defn list-push [(l (ptr ListObj)) (v i64)] (-> i64)
   (if (>= (load (field l len)) (load (field l cap)))
@@ -92,16 +188,25 @@
 (defn list-len [(l (ptr ListObj))] (-> i64) (load (field l len)))
 
 ; ============================ enum boxes ====================================
-; layout: [tag i64][argc i64][arg0 i64]...  (payload slots are untagged, per §1)
-(defn enum-alloc [(tag i64) (argc i64)] (-> (ptr i64))
-  (let [p (cast (ptr i64) (xalloc (* 8 (+ 2 argc))))]
-    (store! (index p 0) tag) (store! (index p 1) argc) p))
-(defn enum-tag [(p (ptr i64))] (-> i64) (load (index p 0)))
-(defn enum-argc [(p (ptr i64))] (-> i64) (load (index p 1)))
-(defn enum-arg [(p (ptr i64)) (i i64)] (-> i64) (load (index p (+ 2 i))))
-(defn enum-set-arg [(p (ptr i64)) (i i64) (v i64)] (-> i64) (store! (index p (+ 2 i)) v) 0)
-(defn enum-none [] (-> (ptr i64)) (enum-alloc 0 0))
-(defn enum-some [(v i64)] (-> (ptr i64)) (let [p (enum-alloc 1 1)] (enum-set-arg p 0 v) p))
+; layout: [ObjHeader(3)][tag][argc][ref-mask][arg0]...  Payload slots are untagged (§1); the
+; GC reads `ref-mask` (bit i set => arg i is a reference to trace). Accessors hide the offset.
+(const ENUM_HDR 3)   ; ObjHeader words before the enum body
+(defn enum-alloc-rm [(tag i64) (argc i64) (refmask i64)] (-> (ptr i64))
+  (let [p (cast (ptr i64) (obj-alloc (* 8 (+ (+ ENUM_HDR 3) argc)) OBJ_ENUM))]
+    (store! (index p (+ ENUM_HDR 0)) tag) (store! (index p (+ ENUM_HDR 1)) argc)
+    (store! (index p (+ ENUM_HDR 2)) refmask) p))
+; back-compat: default ref-mask 0 (set later by the caller that knows payload kinds).
+(defn enum-alloc [(tag i64) (argc i64)] (-> (ptr i64)) (enum-alloc-rm tag argc 0))
+(defn enum-tag [(p (ptr i64))] (-> i64) (load (index p (+ ENUM_HDR 0))))
+(defn enum-argc [(p (ptr i64))] (-> i64) (load (index p (+ ENUM_HDR 1))))
+(defn enum-refmask [(p (ptr i64))] (-> i64) (load (index p (+ ENUM_HDR 2))))
+(defn enum-set-refmask [(p (ptr i64)) (m i64)] (-> i64) (store! (index p (+ ENUM_HDR 2)) m) 0)
+(defn enum-arg [(p (ptr i64)) (i i64)] (-> i64) (load (index p (+ (+ ENUM_HDR 3) i))))
+(defn enum-set-arg [(p (ptr i64)) (i i64) (v i64)] (-> i64) (store! (index p (+ (+ ENUM_HDR 3) i)) v) 0)
+(defn enum-none [] (-> (ptr i64)) (enum-alloc-rm 0 0 0))
+; Some(v): `ref?` (0/1) says whether the payload is a reference — the caller knows.
+(defn enum-some-r [(v i64) (ref? i64)] (-> (ptr i64)) (let [p (enum-alloc-rm 1 1 ref?)] (enum-set-arg p 0 v) p))
+(defn enum-some [(v i64)] (-> (ptr i64)) (enum-some-r v 0))   ; back-compat: payload treated as scalar
 
 ; structural equality over two enum boxes (shallow: payload slots compared bit-for-bit)
 (defn enum-equal [(a (ptr i64)) (b (ptr i64))] (-> bool)
@@ -113,15 +218,24 @@
       (load ok))))
 
 ; ============================ Map ===========================================
-; M0: simple parallel-array assoc. Keys are all one kind per map (Int or String).
+; M0: simple parallel-array assoc. Keys are all one kind per map (Int or String). `val-ref`
+; (0/1) tells the GC whether values are references; keys are references iff `str-key`.
 (defstruct MapObj
-  [(keys (ptr i64)) (vals (ptr i64)) (len i64) (cap i64) (str-key bool)])
+  [(hdr ObjHeader) (keys (ptr i64)) (vals (ptr i64)) (len i64) (cap i64) (str-key bool) (val-ref i64)])
 
 (defn map-new [(str-key bool)] (-> (ptr MapObj))
-  (let [m (cast (ptr MapObj) (xalloc (sizeof MapObj)))]
+  (let [m (cast (ptr MapObj) (obj-alloc (sizeof MapObj) OBJ_MAP))]
     (store! (field m keys) (cast (ptr i64) (xalloc (* 8 8))))
     (store! (field m vals) (cast (ptr i64) (xalloc (* 8 8))))
-    (store! (field m len) 0) (store! (field m cap) 8) (store! (field m str-key) str-key) m))
+    (store! (field m len) 0) (store! (field m cap) 8) (store! (field m str-key) str-key)
+    (store! (field m val-ref) 0) m))
+
+(defn map-set-valref [(m (ptr MapObj)) (r i64)] (-> i64) (store! (field m val-ref) r) 0)
+(defn map-valref [(m (ptr MapObj))] (-> i64) (load (field m val-ref)))
+(defn map-strkey? [(m (ptr MapObj))] (-> i64) (if (load (field m str-key)) 1 0))
+(defn map-keys-arr [(m (ptr MapObj))] (-> (ptr i64)) (load (field m keys)))
+(defn map-vals-arr [(m (ptr MapObj))] (-> (ptr i64)) (load (field m vals)))
+(defn map-count [(m (ptr MapObj))] (-> i64) (load (field m len)))
 
 (defn map-key-eq [(m (ptr MapObj)) (a i64) (b i64)] (-> bool)
   (if (load (field m str-key)) (str-eq (cast (ptr StringObj) a) (cast (ptr StringObj) b)) (= a b)))
@@ -148,31 +262,49 @@
         (store! (index (load (field m vals)) (load (field m len))) v)
         (store! (field m len) (+ (load (field m len)) 1)) 0))))
 
+; map-get returns Some(val) — the value's ref-ness is the map's `val-ref`, so the Option box
+; is tagged correctly for the GC.
 (defn map-get [(m (ptr MapObj)) (k i64)] (-> (ptr i64))   ; -> Option box
   (let [idx (map-find m k)]
-    (if (>= idx 0) (enum-some (load (index (load (field m vals)) idx))) (enum-none))))
+    (if (>= idx 0) (enum-some-r (load (index (load (field m vals)) idx)) (load (field m val-ref))) (enum-none))))
 (defn map-has [(m (ptr MapObj)) (k i64)] (-> i64) (if (>= (map-find m k) 0) 1 0))
 (defn map-len [(m (ptr MapObj))] (-> i64) (load (field m len)))
 ; Phase 8b: keys() -> List<K> in insertion order (the only way to ENUMERATE a Map from Scry;
 ; the Json stringifier needs it to re-emit object members). Keys are the raw i64 slots.
 (defn map-keys [(m (ptr MapObj))] (-> (ptr ListObj))
   (let [l (list-new) n (load (field m len)) (mut i) 0]
+    (list-set-elemref l (map-strkey? m))    ; String keys are references
     (loop (if (< (load i) n)
             (do (list-push l (load (index (load (field m keys)) (load i)))) (store! i (+ (load i) 1)) 0)
             (break)))
     l))
 
 ; ============================ Mutex<T> ======================================
-; A guarded i64 slot + a lock word. `lock`/`unlock` (the safepoint-cooperative CAS spin)
-; live in vm.coil where a VMThread + safepoint-poll are in scope; here are the data + the
-; non-blocking accessors. get/set are single aligned-word accesses (non-tearing); by
-; convention they run inside lock/unlock.
-(defstruct MutexObj [(lock i64) (val i64)])
+; hdr + {lock, val, val-ref}. `lock`/`unlock` (the safepoint-cooperative CAS spin) live in
+; vm.coil where a VMThread + safepoint-poll are in scope; here are the data + the non-blocking
+; accessors. `val-ref` tells the GC whether the guarded slot is a reference.
+(defstruct MutexObj [(hdr ObjHeader) (lock i64) (val i64) (val-ref i64)])
 (defn mutex-new [(v i64)] (-> (ptr MutexObj))
-  (let [m (cast (ptr MutexObj) (xalloc (sizeof MutexObj)))]
-    (store! (field m lock) 0) (store! (field m val) v) m))
+  (let [m (cast (ptr MutexObj) (obj-alloc (sizeof MutexObj) OBJ_MUTEX))]
+    (store! (field m lock) 0) (store! (field m val) v) (store! (field m val-ref) 0) m))
+(defn mutex-set-valref [(m (ptr MutexObj)) (r i64)] (-> i64) (store! (field m val-ref) r) 0)
+(defn mutex-valref [(m (ptr MutexObj))] (-> i64) (load (field m val-ref)))
 (defn mutex-get [(m (ptr MutexObj))] (-> i64) (load (field m val)))
 (defn mutex-set [(m (ptr MutexObj)) (v i64)] (-> i64) (store! (field m val) v) 0)
+
+; ============================ GC free (sweep) ===============================
+; free one swept non-arena object: release any owned sub-buffers, then the object itself.
+; Called only from the STW sweep (gc.coil), so no concurrent access.
+(defn obj-free [(o (ptr i8))] (-> i64)
+  (let [k (obj-kind o)]
+    (cond
+      (= k OBJ_STRING) (do (free (cast (ptr i8) (load (field (cast (ptr StringObj) o) data)))) (free o) 0)
+      (= k OBJ_LIST)   (do (free (cast (ptr i8) (load (field (cast (ptr ListObj) o) items)))) (free o) 0)
+      (= k OBJ_MAP)    (do (free (cast (ptr i8) (load (field (cast (ptr MapObj) o) keys))))
+                           (free (cast (ptr i8) (load (field (cast (ptr MapObj) o) vals)))) (free o) 0)
+      (= k OBJ_ENUM)   (do (free o) 0)
+      (= k OBJ_MUTEX)  (do (free o) 0)
+      (do (free o) 0))))
 
 ; ============================ Clock =========================================
 (defn clock-now [] (-> i64)   ; wall-clock milliseconds

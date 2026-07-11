@@ -53,7 +53,7 @@
 (const OP_NEW 55)             ; u16 type-id -> push fresh instance ptr
 (const OP_LOAD_SINGLETON 56)  ; u16 type-id -> push the object singleton ptr
 
-(const OP_MAKE_ENUM 57)       ; u8 tag, u8 argc -> pop argc payloads, push box
+(const OP_MAKE_ENUM 57)       ; u8 tag, u8 argc, u8 ref-mask -> pop argc payloads, push box (ref-mask: bit i = payload i is a GC ref)
 (const OP_ENUM_TAG 58)        ; pop enum ptr, push its tag
 (const OP_ENUM_GET 59)        ; u8 idx -> pop enum ptr, push payload[idx]
 (const OP_STR_EQ 60)          ; pop b,a (StringObj*) -> push bool
@@ -105,13 +105,38 @@
 ; ============================ Chunk =========================================
 (defstruct Chunk
   [(code (ptr u8)) (count i64) (cap i64)
-   (consts (ptr i64)) (const-count i64) (const-cap i64)])
+   (consts (ptr i64)) (const-count i64) (const-cap i64)
+   (const-ref (ptr u8))    ; parallel to consts: 1 if pool[i] is a GC reference (a String), else 0
+   ; GC stack-map annotations: for the few type-dependent producers (List.get/Mutex.get/enum
+   ; payload get) the compiler records (offset<<1 | ref-bit) so the map builder knows the
+   ; pushed value's ref-ness. Sparse — a handful per method.
+   (anns (ptr i64)) (ann-count i64) (ann-cap i64)])
 
 (defn chunk-new [] (-> (ptr Chunk))
   (let [c (cast (ptr Chunk) (xalloc (sizeof Chunk)))]
     (store! (field c code) (xalloc 64)) (store! (field c count) 0) (store! (field c cap) 64)
     (store! (field c consts) (cast (ptr i64) (xalloc (* 8 16)))) (store! (field c const-count) 0) (store! (field c const-cap) 16)
+    (store! (field c const-ref) (xalloc 16))
+    (store! (field c anns) (cast (ptr i64) (xalloc (* 8 8)))) (store! (field c ann-count) 0) (store! (field c ann-cap) 8)
     c))
+
+(defn chunk-add-ann [(c (ptr Chunk)) (off i64) (ref i64)] (-> i64)
+  (if (>= (load (field c ann-count)) (load (field c ann-cap)))
+    (let [ncap (* (load (field c ann-cap)) 2)]
+      (store! (field c anns) (cast (ptr i64) (realloc (cast (ptr i8) (load (field c anns))) (* 8 ncap))))
+      (store! (field c ann-cap) ncap) 0)
+    0)
+  (store! (index (load (field c anns)) (load (field c ann-count))) (ior (ishl off 1) ref))
+  (store! (field c ann-count) (+ (load (field c ann-count)) 1)) 0)
+
+; -> ref bit (0/1) recorded for the instruction at `off`, or -1 if none.
+(defn chunk-ann-of [(c (ptr Chunk)) (off i64)] (-> i64)
+  (let [n (load (field c ann-count)) (mut i) 0 (mut r) -1]
+    (loop (if (and (< (load r) 0) (< (load i) n))
+            (let [e (load (index (load (field c anns)) (load i)))]
+              (if (= (ishr e 1) off) (do (store! r (iand e 1)) 0) 0) (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
 
 (defn chunk-byte [(c (ptr Chunk)) (b i64)] (-> i64)
   (if (>= (load (field c count)) (load (field c cap)))
@@ -130,30 +155,68 @@
   (store! (index (load (field c code)) at) (cast u8 (iand (ishr v 8) 255)))
   (store! (index (load (field c code)) (+ at 1)) (cast u8 (iand v 255))) 0)
 
-(defn chunk-add-const [(c (ptr Chunk)) (v i64)] (-> i64)
+(defn chunk-add-const-k [(c (ptr Chunk)) (v i64) (isref i64)] (-> i64)
   (if (>= (load (field c const-count)) (load (field c const-cap)))
     (let [ncap (* (load (field c const-cap)) 2)]
       (store! (field c consts) (cast (ptr i64) (realloc (cast (ptr i8) (load (field c consts))) (* 8 ncap))))
+      (store! (field c const-ref) (cast (ptr u8) (realloc (cast (ptr i8) (load (field c const-ref))) ncap)))
       (store! (field c const-cap) ncap) 0)
     0)
   (store! (index (load (field c consts)) (load (field c const-count))) v)
+  (store! (index (load (field c const-ref)) (load (field c const-count))) (cast u8 isref))
   (store! (field c const-count) (+ (load (field c const-count)) 1))
   (- (load (field c const-count)) 1))
+; scalar const (Int/Float/Bool) and ref const (String) — GC needs to know which pool slots are pointers.
+(defn chunk-add-const [(c (ptr Chunk)) (v i64)] (-> i64) (chunk-add-const-k c v 0))
+(defn chunk-add-const-ref [(c (ptr Chunk)) (v i64)] (-> i64) (chunk-add-const-k c v 1))
+(defn chunk-const-ref? [(c (ptr Chunk)) (idx i64)] (-> i64) (cast i64 (load (index (load (field c const-ref)) idx))))
 
 (defn chunk-here [(c (ptr Chunk))] (-> i64) (load (field c count)))
+
+; ---- GC stack-map bitmaps (02 §6): 1 bit per frame slot, packed into i64 words ----
+(defn bitmap-words [(nbits i64)] (-> i64) (idiv (+ nbits 63) 64))
+(defn bitmap-set [(w (ptr i64)) (i i64)] (-> i64)
+  (store! (index w (idiv i 64)) (ior (load (index w (idiv i 64))) (ishl 1 (irem i 64)))) 0)
+(defn bitmap-test [(w (ptr i64)) (i i64)] (-> i64)
+  (if (= (iand (load (index w (idiv i 64))) (ishl 1 (irem i 64))) 0) 0 1))
+
+; canonical instruction length (opcode byte + operand bytes) — the single source used by the
+; readonly-mutation scanner (server.coil) AND the GC stack-map builder (compile.coil).
+(defn op-instr-len [(op i64)] (-> i64)
+  (case op
+    OP_CALL_STATIC 4
+    OP_CALL_VIRTUAL 5
+    OP_CALL_BUILTIN 2 OP_ENUM_GET 2
+    OP_MAKE_ENUM 4
+    OP_CONST 3 OP_LOAD_LOCAL 3 OP_STORE_LOCAL 3
+    OP_LOAD_FIELD_I64 3 OP_LOAD_FIELD_F64 3 OP_LOAD_FIELD_REF 3
+    OP_STORE_FIELD_I64 3 OP_STORE_FIELD_F64 3 OP_STORE_FIELD_REF 3
+    OP_JUMP 3 OP_JUMP_IF_FALSE 3 OP_LOOP 3
+    OP_NEW 3 OP_LOAD_SINGLETON 3
+    OP_ARENA_AT 3 OP_ARENA_INSTANCE 3 OP_ARENA_INSTANCES 3
+    OP_THREAD_SPAWN 4 OP_THREAD_JOIN 1
+    1))
 
 ; ============================ program model =================================
 (defstruct MethodInfo
   [(name (ptr u8)) (name-len i64)
    (arity i64)              ; params incl. self
-   (local-count i64)       ; total declared slots (params + locals + bindings)
+   (local-count i64)       ; total DECLARED slots (params + locals + bindings); operand temps sit above
    (chunk (ptr Chunk))
    (is-void bool)
    ; F1 trace: the source fn Node + its type-param ctxt Decl, kept OPAQUE here (bytecode.coil
    ; can't import ast/types without a cycle) and cast back to (ptr Node)/(ptr Decl) by the
    ; trace serializer to resolve arg/return types. Both null for synthetic methods (<eval>, defaults).
    (src-node (ptr i8))
-   (src-ctxt (ptr i8))])
+   (src-ctxt (ptr i8))
+   ; ---- GC precise roots (02 §6) ----
+   (ret-ref i64)           ; 1 if this method returns a GC reference (so a caller's result temp is a root)
+   (local-ref (ptr i64))   ; bitmap over [0,local-count): which DECLARED slots hold a GC reference (fixed
+                           ;   per method because slots are never reused across kinds — see compile.coil)
+   (frame-slots i64)       ; local-count + max operand-stack depth = full frame extent the maps cover
+   (map-stride i64)        ; i64 words per per-ip stack map = bitmap-words(frame-slots)
+   (opmaps (ptr i64))])    ; code-count * map-stride words: opmaps[ip*stride..] = ref-slot bitmap AT ip
+                           ;   (covers declared locals + operand temps live at that instruction boundary)
 
 (defstruct FieldInfo [(name (ptr u8)) (name-len i64) (offset i64) (kind i64)])
 
@@ -174,7 +237,9 @@
   [(methods (ptr (ptr MethodInfo))) (method-count i64)
    (types (ptr (ptr TypeInfo))) (type-count i64)
    (iface-count i64)
-   (entry i64)])              ; global method index of main
+   (entry i64)               ; global method index of main
+   (iface-ret-ref (ptr (ptr i64)))])   ; GC: [iface-id][slot] -> 1 if that interface method returns a ref
+                                        ; (so an OP_CALL_VIRTUAL result temp is a precise root)
 
 ; ============================ disassembler ==================================
 (defn dis-simple [(name (ptr i8)) (off i64)] (-> i64) (w-cstr 1 name) (w-cstr 1 c"\n") (+ off 1))
@@ -236,8 +301,9 @@
       (= op OP_NEW) (dis-u16 c c"NEW" off) (= op OP_LOAD_SINGLETON) (dis-u16 c c"LOAD_SINGLETON" off)
       (= op OP_MAKE_ENUM)
         (let [tg (cast i64 (load (index (load (field c code)) (+ off 1))))
-              ac (cast i64 (load (index (load (field c code)) (+ off 2))))]
-          (w-cstr 1 c"MAKE_ENUM tag=") (w-int 1 tg) (w-cstr 1 c" argc=") (w-int 1 ac) (w-cstr 1 c"\n") (+ off 3))
+              ac (cast i64 (load (index (load (field c code)) (+ off 2))))
+              rm (cast i64 (load (index (load (field c code)) (+ off 3))))]
+          (w-cstr 1 c"MAKE_ENUM tag=") (w-int 1 tg) (w-cstr 1 c" argc=") (w-int 1 ac) (w-cstr 1 c" refmask=") (w-int 1 rm) (w-cstr 1 c"\n") (+ off 4))
       (= op OP_ENUM_TAG) (dis-simple c"ENUM_TAG" off) (= op OP_ENUM_GET) (dis-u8 c c"ENUM_GET" off)
       (= op OP_STR_EQ) (dis-simple c"STR_EQ" off) (= op OP_STR_NE) (dis-simple c"STR_NE" off)
       (= op OP_ARENA_AT) (dis-u16 c c"ARENA_AT" off)

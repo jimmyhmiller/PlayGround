@@ -130,7 +130,7 @@
     (if (or (= (cast i64 eh) 0) (= (cast i64 mh) 0))
       (do
         (store! (field res status) 0) (store! (field res err) 1)
-        (store! (field res body) (str-make (cast (ptr u8) c"curl init failed") 16))
+        (store! (field res body) (str-copy (cast (ptr u8) c"curl init failed") 16))
         res)
       (do
         (curl_easy_setopt eh CURLOPT_URL url-c)
@@ -153,7 +153,7 @@
               ; transport failure: status 0 sentinel + curl's human-readable error text
               (store! (field res status) 0) (store! (field res err) 1)
               (let [msg (curl_easy_strerror (cast i32 rc))]
-                (store! (field res body) (str-make (cast (ptr u8) msg) (strlen msg)))))
+                (store! (field res body) (str-copy (cast (ptr u8) msg) (strlen msg)))))
             (do
               (let [codep (alloc-stack i64)]
                 (store! codep 0)

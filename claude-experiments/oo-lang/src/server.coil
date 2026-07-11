@@ -631,20 +631,7 @@
     mi))
 
 ; ---- readonly mutation analysis over compiled bytecode ----
-(defn op-instr-len [(op i64)] (-> i64)
-  (case op
-    OP_CALL_STATIC 4
-    OP_CALL_VIRTUAL 5
-    OP_CALL_BUILTIN 2 OP_ENUM_GET 2
-    OP_MAKE_ENUM 3
-    OP_CONST 3 OP_LOAD_LOCAL 3 OP_STORE_LOCAL 3
-    OP_LOAD_FIELD_I64 3 OP_LOAD_FIELD_F64 3 OP_LOAD_FIELD_REF 3
-    OP_STORE_FIELD_I64 3 OP_STORE_FIELD_F64 3 OP_STORE_FIELD_REF 3
-    OP_JUMP 3 OP_JUMP_IF_FALSE 3 OP_LOOP 3
-    OP_NEW 3 OP_LOAD_SINGLETON 3
-    OP_ARENA_AT 3 OP_ARENA_INSTANCE 3 OP_ARENA_INSTANCES 3
-    OP_THREAD_SPAWN 4 OP_THREAD_JOIN 1
-    1))
+; op-instr-len now lives in bytecode.coil (shared with the GC stack-map builder).
 (defn chunk-u16-at [(c (ptr Chunk)) (off i64)] (-> i64)
   (+ (* (cast i64 (load (index (load (field c code)) off))) 256) (cast i64 (load (index (load (field c code)) (+ off 1))))))
 (defstruct VisitSet [(arr (ptr i64)) (count i64) (cap i64)])

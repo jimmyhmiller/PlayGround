@@ -1,0 +1,25 @@
+(module app)
+(import "io.coil"  :use *)
+(import "fmt.coil" :use *)
+(import "gc.coil"  :use *)
+
+(defstruct Point [(x :i64) (y :i64)])
+(gctype Point)                         ; generate Point's tracer (no ptr fields → no-op)
+
+(defn run [(n :i64)] (-> :i64)
+  (let [(mut i) 0 (mut acc) 0]
+    (loop
+      (if (icmp-ge (load i) n)
+          (break (load acc))
+          (do
+            (gc-let p (new Point)
+              (fset p x (load i))
+              (fset p y (imul (load i) 2))
+              (store! acc (iadd (load acc) (iadd (fget p x) (fget p y)))))
+            (store! i (iadd (load i) 1)))))))
+
+(defn main [] (-> :i64)
+  (let [s (run 100000)]
+    (fmt (stdout) "flat:  allocated=100000  sum={d}  peak_live={d}  collections={d}\n"
+         s (peak-live) (num-collections))
+    0))

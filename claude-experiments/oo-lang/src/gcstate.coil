@@ -1,0 +1,30 @@
+; gcstate.coil — process-global GC allocation accounting + trigger threshold (02-runtime.md §6).
+;
+; The whole program is one heap (arenas + non-arena objects). GC's trigger is a single
+; `bytes-allocated`/`next-gc` pair summed across every allocation site, exactly clox's
+; heuristic. This is a LEAF (imports only atomic) so both the allocator (arena.coil) and the
+; non-arena object layer (builtins.coil) can bump the counter without an import cycle, and
+; the collector (gc.coil) / VM can read it. `enabled` stays 0 until vm-run arms GC, so the
+; static-inspect / typecheck paths that build a Program without running never collect.
+(module gcstate)
+(import "atomic.coil" :use *)
+
+(defn gc-bytes-cell  [] (-> (ptr i64)) (alloc-static i64))
+(defn gc-nextgc-cell [] (-> (ptr i64)) (alloc-static i64))
+(defn gc-enabled-cell [] (-> (ptr i64)) (alloc-static i64))
+
+; add `n` bytes to the live-allocation estimate (called from every alloc site).
+(defn gc-account [(n i64)] (-> i64) (atomic-add (gc-bytes-cell) n) 0)
+(defn gc-bytes [] (-> i64) (atomic-load (gc-bytes-cell)))
+(defn gc-set-bytes [(v i64)] (-> i64) (atomic-store (gc-bytes-cell) v) 0)
+
+(defn gc-nextgc [] (-> i64) (load (gc-nextgc-cell)))
+(defn gc-set-nextgc [(v i64)] (-> i64) (store! (gc-nextgc-cell) v) 0)
+
+(defn gc-enabled? [] (-> i64) (load (gc-enabled-cell)))
+(defn gc-enable [] (-> i64) (store! (gc-enabled-cell) 1) 0)
+(defn gc-disable [] (-> i64) (store! (gc-enabled-cell) 0) 0)
+
+; should the VM stop the world and collect at its next trigger point? Cheap: one load + cmp.
+(defn gc-should? [] (-> i64)
+  (if (= (gc-enabled?) 1) (if (> (gc-bytes) (gc-nextgc)) 1 0) 0))
