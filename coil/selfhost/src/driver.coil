@@ -38,6 +38,7 @@
 (import "expander.coil" :use *)
 (import "codegen_a64.coil" :use *)
 (import "wasm.coil" :use *)
+(import "../../fmt/rules.coil" :as fmtr)      ; the `coil fmt` formatter (qualified to avoid name clashes)
 
 (defn dump-ast-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
   (let [w (stdout)]
@@ -964,6 +965,27 @@
     (Ok [module] (d-write-file a out-path module))
     (Err [why] (do (ps (stderr) why) (wb (stderr) 10) 1))))
 
+; `fmt [--check|--write] <file>` — the Coil source formatter (fmt/rules.coil). Prints
+; the formatted source, or with --write rewrites the file, or with --check exits 1 if
+; the file isn't already formatted. Width 120, Clojure indentation conventions.
+(defn fmt-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (if (icmp-lt (cast i64 argc) 3)
+      (do (ps (stderr) "usage: coil fmt [--check|--write] <file.coil>\n") 1)
+    (let [arg1  (cstr->slice (load (index argv 2)))
+          check (str-eq arg1 "--check")
+          write (str-eq arg1 "--write")]
+      (if (and (or check write) (icmp-lt (cast i64 argc) 4))
+          (do (ps (stderr) "usage: coil fmt [--check|--write] <file.coil>\n") 1)
+        (let [pathc (if (or check write) (load (index argv 3)) (load (index argv 2)))
+              src   (read-file a pathc)
+              out   (fmtr/format-src a src 120)
+              same  (str-eq src out)]
+          (if check
+              (if same 0 (do (ps (stderr) "not formatted: ") (ps (stderr) (cstr->slice pathc)) (wb (stderr) 10) 1))
+            (if write
+                (if same 0 (d-write-file a (cstr->slice pathc) out))
+              (do (ps (stdout) out) 0))))))))
+
 ; `new <name>` — scaffold Coil.toml + src/main.coil (mirrors Rust cmd_new).
 (defn new-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (if (icmp-lt (cast i64 argc) 3)
@@ -1097,6 +1119,8 @@
             (repl-cmd a argv)
         (if (str-eq sub "run")
             (if (manifest-mode? argc argv) (manifest-cmd a "run" argc argv) (run-cmd a argc argv))
+        (if (str-eq sub "fmt")
+            (fmt-cmd a argc argv)
         (if (str-eq sub "new")
             (new-cmd a argc argv)
         (if (str-eq sub "emit-obj")
@@ -1140,5 +1164,5 @@
             (store! (field ctx emitir-fn) emitir-fn)
             ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
             ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
-            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0))))))))))))))))))))
+            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))))))))))
   );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====

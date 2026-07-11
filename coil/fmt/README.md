@@ -6,12 +6,18 @@ flat if it fits the target width, otherwise break it — but respecting the
 Coil, over the standard library.
 
 ```
-coil run fmt/fmt.coil -- <file.coil>            # print the formatted source
-coil run fmt/fmt.coil -- --check <file.coil>    # exit 1 if not already formatted
-coil run fmt/fmt.coil -- --write <file.coil>    # reformat the file in place
+coil fmt <file.coil>            # print the formatted source
+coil fmt --check <file.coil>    # exit 1 if not already formatted
+coil fmt --write <file.coil>    # reformat the file in place
 ```
 
-Target width is 120 columns.
+`fmt` is a built-in subcommand of the `coil` compiler (the formatter lives in
+`fmt/rules.coil` and is compiled into the binary; `selfhost/src/driver.coil` wires it
+up). The standalone `coil run fmt/fmt.coil -- <file>` still works and is equivalent.
+
+Target width is 120 columns. `let`/`loop` binding vectors with two or more pairs
+always break to one pair per line (aligned in a column), even when they would fit
+flat; a single-binding vector stays inline.
 
 ## What it preserves
 

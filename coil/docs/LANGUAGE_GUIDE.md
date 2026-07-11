@@ -19,6 +19,7 @@ inside it, so `coil` and every `(import "…")` below work from any directory.
     coil run -- arg1 arg2                # forward args to the program
     coil build file.coil -lm             # link a library (-l<name>)
     coil repl                            # interactive session
+    coil fmt   file.coil                 # print formatted source (--write / --check)
 
 `main`'s `i64` return is the process exit code. There is no JIT. A file that is
 imported must start with `(module NAME)`. `Coil.toml`:

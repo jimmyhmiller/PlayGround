@@ -134,7 +134,10 @@
   (let [cnt (node-count n)]
     (if (icmp-le cnt 0) (d-text a "[]")
       (let [rows (build-pair-rows a n 0)
-            forced (or (any-child-multiline n) (any-child-comment n))
+            ; a binding vector with 2+ rows (pairs) ALWAYS breaks one-per-line — even
+            ; if it would fit flat — so `let`/`loop` bindings line up in a column.
+            forced (or (icmp-gt (al-len [(ptr Doc)] (load rows)) 1)
+                       (or (any-child-multiline n) (any-child-comment n)))
             dl (dl-new a) rn (al-len [(ptr Doc)] (load rows))]
         ; row 0 on the "[" line, the rest each on their own line at +1
         (dl-push! dl (d-text a "["))
@@ -319,3 +322,7 @@
           (store! i (iadd (load i) 1)))))
     (dl-push! dl (d-hardline a))       ; trailing newline
     (d-group-forced a (dl-done a dl))))
+
+; one-call entry: source text -> formatted source text (width cols).
+(defn format-src [(a (ptr Allocator)) (src (slice u8)) (width i64)] (-> (slice u8))
+  (render-doc a (doc->doc a (read-doc a src)) width))
