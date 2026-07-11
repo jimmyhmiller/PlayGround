@@ -143,6 +143,10 @@ def main():
     up, uf = run_ui_smoke_test(binary, filt)
     passed += up; failed += uf
     if uf: fails.append("ui_smoke")
+    # Phase 10: the reverse-proxy portal (registry + proxy + reaping). Gated on curl present.
+    pp, pf = run_portal_test(binary, filt)
+    passed += pp; failed += pf
+    if pf: fails.append("portal")
     # Phase 8a: real HTTP(S) client via libcurl.
     hnp, hnf, hnfails = run_http_network_test(binary, filt)
     passed += hnp; failed += hnf; fails += hnfails
@@ -817,6 +821,138 @@ def run_ui_smoke_test(binary, filt):
             print("     " + ln)
         return 0, 1
     return 1, 0
+
+
+def run_portal_test(binary, filt):
+    """Phase 10 gate: the reverse-proxy PORTAL. Starts `scry portal` (fixed :7357), then:
+      (1) GET /api/programs is [] before any program registers;
+      (2) `scry run examples/demo-mini.scry` in the background APPEARS in /api/programs within
+          ~2s with mode 'run' and an ephemeral port (>= 7400);
+      (3) POST /p/<id>/eval {source:'types()'} proxies to that program and returns the real
+          schema JSON (proves the reverse proxy) — with the SAME id echoed back;
+      (4) `scry inspect examples/agents.scry` gives a SECOND entry with mode 'inspect';
+      (5) killing one program greys it to status 'exited' within the reap window;
+      (6) GET / serves the viewer HTML.
+    SKIPPED LOUDLY (not failed) if :7357 is already occupied (e.g. a developer's own portal)."""
+    if filt and "portal" not in filt:
+        return 0, 0
+    import time, json, socket as _socket, threading, urllib.request
+    # if something already holds :7357, skip rather than clobber it.
+    try:
+        s = _socket.create_connection(("127.0.0.1", 7357), timeout=0.4); s.close()
+        print("SKIPPED portal: 127.0.0.1:7357 already in use (a portal is already running?)")
+        return 0, 0
+    except OSError:
+        pass  # free — good
+
+    demo = os.path.abspath(os.path.join(HERE, "..", "examples", "demo-mini.scry"))
+    other = os.path.abspath(os.path.join(HERE, "..", "examples", "agents.scry"))
+    portal = subprocess.Popen([binary, "portal"], stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, bufsize=1)
+    plines = []
+    threading.Thread(target=lambda: [plines.append(l) for l in portal.stdout], daemon=True).start()
+    kids = []
+
+    def api():
+        return json.loads(urllib.request.urlopen("http://127.0.0.1:7357/api/programs", timeout=10).read())
+
+    def proxy(pid, src):
+        body = json.dumps({"id": "P", "source": src}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:7357/p/{pid}/eval", data=body,
+                                     headers={"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req, timeout=30).read())
+
+    try:
+        # wait for the portal to come up (or bail if it couldn't bind)
+        up = False
+        for _ in range(100):
+            if any("portal: http://localhost:7357" in l for l in plines):
+                up = True; break
+            if any("could not bind" in l for l in plines):
+                print("SKIPPED portal: portal could not bind :7357"); return 0, 0
+            time.sleep(0.05)
+        if not up:
+            print("FAIL portal\n     portal never printed its startup line"); return 0, 1
+
+        problems = []
+        # (1) empty registry
+        if api() != []:
+            problems.append(f"expected [] before any program, got {api()}")
+
+        # (2) launch a `run` program; it should pop up
+        kids.append(subprocess.Popen([binary, "run", demo], stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL))
+        run_entry = None
+        for _ in range(40):        # ~4s
+            time.sleep(0.1)
+            progs = api()
+            run_entry = next((p for p in progs if p["mode"] == "run"), None)
+            if run_entry:
+                break
+        if not run_entry:
+            problems.append("run program never appeared in /api/programs")
+            print("FAIL portal"); [print("     " + p) for p in problems]; return 0, 1
+        if run_entry["port"] < 7400:
+            problems.append(f"run program port not ephemeral (>=7400): {run_entry['port']}")
+        if run_entry["name"] != "demo-mini.scry":
+            problems.append(f"unexpected program name: {run_entry['name']}")
+
+        # (3) reverse-proxy an eval to it
+        r = proxy(run_entry["id"], "types()")
+        if r.get("id") != "P":
+            problems.append(f"proxied eval id not echoed: {r}")
+        names = [t.get("name") for t in r.get("value", {}).get("items", [])]
+        if "Agent" not in names:
+            problems.append(f"proxied types() missing Agent: {names}")
+
+        # (4) a second program, this time `inspect` -> two entries, correct modes
+        kids.append(subprocess.Popen([binary, "inspect", other], stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        insp_entry = None
+        for _ in range(40):
+            time.sleep(0.1)
+            progs = api()
+            insp_entry = next((p for p in progs if p["mode"] == "inspect"), None)
+            if insp_entry and len([p for p in progs if p["status"] == "running"]) >= 2:
+                break
+        if not insp_entry:
+            problems.append("inspect program never appeared with mode 'inspect'")
+        else:
+            ri = proxy(insp_entry["id"], "types()")
+            if "Agent" not in [t.get("name") for t in ri.get("value", {}).get("items", [])]:
+                problems.append(f"proxied types() to inspect program failed: {ri}")
+
+        # (5) kill the run program -> it greys (status 'exited') within the reap window
+        kids[0].kill()
+        greyed = False
+        for _ in range(30):        # ~3s (reap runs on each /api/programs poll)
+            time.sleep(0.1)
+            e = next((p for p in api() if p["id"] == run_entry["id"]), None)
+            if e and e["status"] == "exited":
+                greyed = True; break
+        if not greyed:
+            problems.append("killed run program never greyed to status 'exited'")
+
+        # (6) GET / serves the viewer HTML
+        html = urllib.request.urlopen("http://127.0.0.1:7357/", timeout=10).read().decode()
+        if "<" not in html or "scry" not in html.lower():
+            problems.append("portal GET / did not return viewer HTML")
+
+        if problems:
+            print("FAIL portal")
+            for p in problems:
+                print("     " + p)
+            return 0, 1
+        return 1, 0
+    finally:
+        for k in kids:
+            try: k.kill()
+            except Exception: pass
+        portal.terminate()
+        try:
+            portal.wait(timeout=5)
+        except Exception:
+            portal.kill()
 
 
 HTTP_DIR = os.path.join(HERE, "http")

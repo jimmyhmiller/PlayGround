@@ -1,0 +1,108 @@
+; portalclient.coil — Phase 10. A tiny BLOCKING libcurl client shared by two callers:
+;   (1) the reverse-proxy PORTAL forwarding an eval to a program (portal.coil), and
+;   (2) a running program registering itself with the portal, best-effort (server.coil).
+; Neither runs a VM, so — unlike http.coil's cooperative multi loop — a plain
+; curl_easy_perform is exactly right (06-implementation.md §10). Leaf module: imports only
+; ioutil (the one extern home for the curl bindings + libc). No cycle: server.coil and
+; portal.coil both import THIS; this imports neither.
+(module portalclient)
+(import "ioutil.coil" :use *)
+
+; ---- curl option / info integers (curl.h, ABI-stable; identical to http.coil's) ----
+(const PC_CURLOPT_URL 10002)
+(const PC_CURLOPT_WRITEFUNCTION 20011)
+(const PC_CURLOPT_WRITEDATA 10001)
+(const PC_CURLOPT_POSTFIELDS 10015)
+(const PC_CURLOPT_POSTFIELDSIZE 60)
+(const PC_CURLOPT_CUSTOMREQUEST 10036)
+(const PC_CURLOPT_TIMEOUT_MS 155)
+(const PC_CURLOPT_CONNECTTIMEOUT_MS 156)  ; curl.h: CURLOPTTYPE_LONG + 156
+(const PC_CURLOPT_NOSIGNAL 99)
+(const PC_CURLINFO_RESPONSE_CODE 2097154)
+(const PC_CURL_GLOBAL_ALL 3)
+(const PC_CURLE_OK 0)
+
+; ---- growable response buffer (the write-callback userdata) ----
+(defstruct PcBuf [(data (ptr u8)) (len i64) (cap i64)])
+(defn pcbuf-new [] (-> (ptr PcBuf))
+  (let [b (cast (ptr PcBuf) (xalloc (sizeof PcBuf)))]
+    (store! (field b data) (xalloc 512)) (store! (field b len) 0) (store! (field b cap) 512) b))
+(defn pc-write-cb [(ptr (ptr i8)) (size i64) (nmemb i64) (userdata (ptr i8))] (-> i64)
+  (let [total (* size nmemb) b (cast (ptr PcBuf) userdata)]
+    (if (> (+ (load (field b len)) total) (load (field b cap)))
+      (let [(mut nc) (load (field b cap))]
+        (loop (if (< (load nc) (+ (load (field b len)) total)) (do (store! nc (* (load nc) 2)) 0) (break)))
+        (store! (field b data) (cast (ptr u8) (realloc (cast (ptr i8) (load (field b data))) (load nc))))
+        (store! (field b cap) (load nc)) 0)
+      0)
+    (memcpy (cast (ptr i8) (index (load (field b data)) (load (field b len)))) ptr total)
+    (store! (field b len) (+ (load (field b len)) total))
+    total))
+
+; one-time global init (idempotent; the portal or a program may or may not also use http.coil).
+(defn pc-inited [] (-> (ptr i64)) (alloc-static i64))
+(defn pc-init [] (-> i64)
+  (if (= (load (pc-inited)) 0) (do (curl_global_init PC_CURL_GLOBAL_ALL) (store! (pc-inited) 1) 0) 0))
+
+; Perform one blocking HTTP request to a 127.0.0.1 URL. method/url are C strings; body is
+; `blen` bytes (0 = no body). Returns the HTTP status (0 = transport failure: e.g. the peer is
+; not listening). On success the response body is left in `outbuf` (a fresh PcBuf). `timeout-ms`
+; bounds the whole call so a dead/hung peer never stalls the portal thread.
+(defn pc-request [(method (ptr i8)) (url (ptr i8)) (body (ptr u8)) (blen i64) (timeout-ms i64) (outbuf (ptr PcBuf))] (-> i64)
+  (pc-init)
+  (let [eh (curl_easy_init)]
+    (if (= (cast i64 eh) 0) 0
+      (do
+        (curl_easy_setopt eh PC_CURLOPT_URL url)
+        (curl_easy_setopt eh PC_CURLOPT_WRITEFUNCTION (fnptr-of pc-write-cb))
+        (curl_easy_setopt eh PC_CURLOPT_WRITEDATA (cast (ptr i8) outbuf))
+        (curl_easy_setopt eh PC_CURLOPT_NOSIGNAL 1)
+        (curl_easy_setopt eh PC_CURLOPT_TIMEOUT_MS timeout-ms)
+        (curl_easy_setopt eh PC_CURLOPT_CONNECTTIMEOUT_MS timeout-ms)
+        (curl_easy_setopt eh PC_CURLOPT_CUSTOMREQUEST method)
+        (if (> blen 0)
+          (do (curl_easy_setopt eh PC_CURLOPT_POSTFIELDSIZE blen)
+              (curl_easy_setopt eh PC_CURLOPT_POSTFIELDS (cast (ptr i8) body)))
+          0)
+        (let [rc (curl_easy_perform eh) (mut status) 0]
+          (if (= (cast i64 rc) PC_CURLE_OK)
+            (let [codep (alloc-stack i64)]
+              (store! codep 0)
+              (curl_easy_getinfo eh PC_CURLINFO_RESPONSE_CODE (cast (ptr i8) codep))
+              (store! status (load codep)) 0)
+            0)
+          (curl_easy_cleanup eh)
+          (load status))))))
+
+; ---- program -> portal registration (best-effort; a failure is silently ignored) ----
+; POST {name,pid,port,mode} to http://127.0.0.1:7357/register. Returns the id the portal
+; assigned (>= 0), or -1 if the portal is not running / rejected us (standalone still works).
+(const PORTAL_PORT 7357)
+(defn portal-register [(name (ptr i8)) (pid i64) (port i64) (mode i64)] (-> i64)
+  (let [bodybuf (cast (ptr i8) (xalloc 512))
+        blen (snprintf bodybuf 512 c"{\"name\":\"%s\",\"pid\":%lld,\"port\":%lld,\"mode\":%lld}" name pid port mode)
+        out (pcbuf-new)
+        status (pc-request c"POST" c"http://127.0.0.1:7357/register" (cast (ptr u8) bodybuf) (cast i64 blen) 1000 out)]
+    (if (!= status 200) -1
+      ; parse {"id":N} out of the response body
+      (let [d (load (field out data)) n (load (field out len)) (mut i) 0 (mut r) -1]
+        (loop (if (and (< (load r) 0) (< (load i) (- n 4)))
+                (do (if (and (= (cast i64 (load (index d (load i)))) \i)
+                             (and (= (cast i64 (load (index d (+ (load i) 1)))) \d)
+                                  (= (cast i64 (load (index d (+ (load i) 2)))) \")))
+                      (let [(mut j) (+ (load i) 3) (mut v) 0 (mut seen) false]
+                        ; skip ':' and spaces
+                        (loop (if (and (< (load j) n) (let [c (cast i64 (load (index d (load j))))] (or (= c \:) (or (= c \space) (= c \"))))) (do (store! j (+ (load j) 1)) 0) (break)))
+                        (loop (if (< (load j) n) (let [c (cast i64 (load (index d (load j))))] (if (and (>= c \0) (<= c \9)) (do (store! v (+ (* (load v) 10) (- c \0))) (store! seen true) (store! j (+ (load j) 1)) 0) (break))) (break)))
+                        (if (load seen) (do (store! r (load v)) 0) 0)) 0)
+                    (store! i (+ (load i) 1)) 0)
+                (break)))
+        (load r)))))
+
+; best-effort deregister on clean exit (POST {id} to /deregister). Ignores the outcome.
+(defn portal-deregister [(id i64)] (-> i64)
+  (let [bodybuf (cast (ptr i8) (xalloc 128))
+        blen (snprintf bodybuf 128 c"{\"id\":%lld}" id)
+        out (pcbuf-new)]
+    (pc-request c"POST" c"http://127.0.0.1:7357/deregister" (cast (ptr u8) bodybuf) (cast i64 blen) 1000 out)
+    0))

@@ -33,6 +33,14 @@ const txStore = makeStore([]);          // [{source, resp, isErr, t}]
 const detailBus = makeStore(0);         // bump to ask the open DetailPane to re-fetch now
 const bumpDetail = () => detailBus.set(detailBus.get() + 1);
 
+// Phase 10 portal: every eval is routed through `evalBase`. Standalone (a program serving its
+// own viewer directly) leaves this "" -> POST /eval, exactly as before. When the viewer is
+// served BY the portal and you click into a program card, evalBase becomes "/p/<id>" so the
+// SAME panes POST to /p/<id>/eval and the portal reverse-proxies to that program. One app,
+// both modes; nothing below evalSource knows the difference.
+let evalBase = "";
+function setEvalBase(b) { evalBase = b || ""; }
+
 let evalSeq = 0;
 function logReq(source) {
   const arr = txStore.get().slice();
@@ -52,7 +60,7 @@ async function evalSource(source) {
   const t0 = performance.now();
   logReq(source);
   try {
-    const res = await fetch("/eval", {
+    const res = await fetch(evalBase + "/eval", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, source }),
@@ -562,11 +570,12 @@ function ConnIndicator() {
   const label = s === "down" ? "reconnecting…" : s === "slow" ? "live (slow)" : "● live";
   return html`<div class=${cls}><span class="dot"></span><span class="conn-label">${label}</span></div>`;
 }
-function TopBar({ onGlobalSearch, onToggleTranscript, mode, setMode }) {
+function TopBar({ onGlobalSearch, onToggleTranscript, mode, setMode, onBack, programName }) {
   const [q, setQ] = useState("");
   return html`
     <header id="topbar">
-      <div class="brand">scry<span class="brand-sub">live viewer</span></div>
+      ${onBack ? html`<button class="ghost-btn back-btn" title="back to the portal" onClick=${onBack}>← portal</button>` : ""}
+      <div class="brand">scry<span class="brand-sub">${programName || "live viewer"}</span></div>
       <div class="viewtoggle">
         <button class=${"vt-btn" + (mode === "graph" ? " active" : "")} onClick=${() => setMode("graph")}>Graph</button>
         <button class=${"vt-btn" + (mode === "browse" ? " active" : "")} onClick=${() => setMode("browse")}>List</button>
@@ -878,7 +887,7 @@ function NodeCard({ node, live, onClose, onBrowse }) {
 }
 
 // ===================== app root =====================
-function App() {
+function App({ onBack, programName } = {}) {
   const [schema, setSchema] = useState([]);
   const [trend, setTrend] = useState({});
   const lastCounts = useRef({});
@@ -988,7 +997,7 @@ function App() {
 
   return html`
     <${NavContext.Provider} value=${nav}>
-      <${TopBar} onGlobalSearch=${globalSearch} onToggleTranscript=${() => setTxOpen((o) => !o)} mode=${mode} setMode=${setMode} />
+      <${TopBar} onGlobalSearch=${globalSearch} onToggleTranscript=${() => setTxOpen((o) => !o)} mode=${mode} setMode=${setMode} onBack=${onBack} programName=${programName} />
       ${mode === "graph"
         ? html`<div id="layout"><${GraphPane} onOpenType=${onGraphOpen} /></div>`
         : html`<div id="layout">
@@ -1004,4 +1013,94 @@ function App() {
     <//>`;
 }
 
-ReactDOM.createRoot(document.getElementById("app")).render(html`<${App} />`);
+// ===================== portal landing =====================
+// A card per registered program (GET /api/programs, polled ~1s so cards POP UP when a program
+// launches and grey when it exits). Each card fetches a cheap types() through the proxy to show
+// live counts. Clicking a card sets evalBase="/p/<id>" and drops you into the inspector (graph
+// default, per Phase 9) for that program.
+function ProgramCard({ prog, onOpen }) {
+  const [stats, setStats] = useState(null);   // { types, instances }
+  const exited = prog.status === "exited";
+  usePoll(async () => {
+    if (exited) return;
+    try {
+      const res = await fetch(`/p/${prog.id}/eval`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: "card", source: "types()" }),
+      });
+      const json = await res.json();
+      const items = json.value?.items || [];
+      setStats({ types: items.length, instances: items.reduce((s, t) => s + (t.liveCount || 0), 0) });
+    } catch (e) { /* leave last-known stats */ }
+  }, 1500, [prog.id, exited]);
+  const started = prog.startTime ? new Date(prog.startTime * 1000).toLocaleTimeString() : "";
+  return html`
+    <button class=${"pcard" + (exited ? " exited" : "")} disabled=${exited}
+            onClick=${() => !exited && onOpen(prog)}>
+      <div class="pcard-top">
+        <span class="pcard-name">${prog.name}</span>
+        <span class=${"pcard-badge " + prog.mode}>${prog.mode === "inspect" ? "inspect" : "running"}</span>
+      </div>
+      <div class="pcard-meta">
+        <span class=${"pcard-status " + prog.status}>${exited ? "exited" : "live"}</span>
+        <span class="pcard-port">:${prog.port}</span>
+        ${started ? html`<span class="pcard-time">${started}</span>` : ""}
+      </div>
+      <div class="pcard-stats">
+        ${exited
+          ? html`<span class="pcard-dim">program gone</span>`
+          : stats
+            ? html`<span><b>${stats.instances}</b> instance${stats.instances === 1 ? "" : "s"}</span><span class="pcard-dot">·</span><span><b>${stats.types}</b> types</span>`
+            : html`<span class="pcard-dim">loading…</span>`}
+      </div>
+    </button>`;
+}
+
+function Landing({ onOpen }) {
+  const [progs, setProgs] = useState([]);
+  usePoll(async () => {
+    try {
+      const r = await fetch("/api/programs");
+      if (r.status === 200) setProgs(await r.json());
+    } catch (e) { /* keep last list */ }
+  }, 1000, []);
+  return html`
+    <div id="portal-landing">
+      <header id="portal-head">
+        <div class="brand">scry<span class="brand-sub">portal</span></div>
+        <div class="portal-tag">running & inspected programs — click a card to drill in</div>
+      </header>
+      ${progs.length === 0
+        ? html`<div id="portal-empty">
+            <div class="pe-title">no programs yet</div>
+            <div class="pe-sub">run one in a terminal — it pops up here:</div>
+            <code class="pe-cmd">scry run examples/assistant.scry</code>
+            <code class="pe-cmd">scry inspect examples/agents.scry</code>
+          </div>`
+        : html`<div id="portal-grid">
+            ${progs.map((p) => html`<${ProgramCard} key=${p.id} prog=${p} onOpen=${onOpen} />`)}
+          </div>`}
+    </div>`;
+}
+
+// ===================== dual-mode root =====================
+// Decide portal vs standalone ONCE: if GET /api/programs is 200 we are served by the portal ->
+// show the landing grid; a 404 means a program is serving its own viewer directly -> go straight
+// to the inspector with evalBase="" (today's behavior). One app, both modes.
+function Root() {
+  const [portalMode, setPortalMode] = useState(null);   // null=probing, true, false
+  const [selected, setSelected] = useState(null);       // the opened program {id,name,mode}
+  useEffect(() => {
+    fetch("/api/programs")
+      .then((r) => setPortalMode(r.status === 200))
+      .catch(() => setPortalMode(false));
+  }, []);
+  const openProg = useCallback((p) => { setEvalBase(`/p/${p.id}`); setSelected(p); }, []);
+  const back = useCallback(() => { setEvalBase(""); setSelected(null); }, []);
+  if (portalMode === null) return html`<div id="root-probe">connecting…</div>`;
+  if (!portalMode) return html`<${App} />`;                       // standalone program
+  if (!selected) return html`<${Landing} onOpen=${openProg} />`;  // portal landing
+  return html`<${App} key=${selected.id} onBack=${back} programName=${selected.name} />`;
+}
+
+ReactDOM.createRoot(document.getElementById("app")).render(html`<${Root} />`);

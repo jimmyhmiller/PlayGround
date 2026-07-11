@@ -309,3 +309,57 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
 .nc-ftype { color: var(--fg-dim); }
 .nc-method { font-family: var(--mono); font-size: 11.5px; padding: 2px 0; color: var(--fg); }
 .nc-method .mret { color: var(--fg-dim); }
+
+/* ===================== Phase 10: portal landing + program cards ===================== */
+#root-probe { display: grid; place-items: center; height: 100%; color: var(--fg-faint);
+  font-family: var(--mono); font-size: 13px; letter-spacing: .5px; }
+.back-btn { margin-right: 4px; }
+
+#portal-landing { display: flex; flex-direction: column; height: 100%; overflow-y: auto; }
+#portal-head { display: flex; align-items: baseline; gap: 16px; padding: 20px 28px 14px;
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 2; }
+#portal-head .brand { font-size: 18px; }
+.portal-tag { color: var(--fg-faint); font-size: 12.5px; }
+
+#portal-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 14px; padding: 24px 28px; align-content: start; }
+
+.pcard { text-align: left; display: flex; flex-direction: column; gap: 10px;
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px 16px; cursor: pointer; color: var(--fg); font: inherit;
+  transition: border-color .15s, transform .15s, box-shadow .15s;
+  animation: pcard-in .22s ease both; }
+@keyframes pcard-in { from { opacity: 0; transform: translateY(6px) scale(.98); } to { opacity: 1; transform: none; } }
+.pcard:hover:not(.exited) { border-color: var(--accent); transform: translateY(-2px);
+  box-shadow: 0 6px 20px -8px var(--accent-soft); }
+.pcard.exited { opacity: .45; cursor: default; filter: grayscale(.6); animation: none; }
+
+.pcard-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pcard-name { font-weight: 600; font-size: 14px; font-family: var(--mono); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.pcard-badge { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; padding: 2px 7px;
+  border-radius: 20px; font-weight: 600; flex: none; }
+.pcard-badge.run { background: var(--accent-soft); color: var(--accent); }
+.pcard-badge.inspect { background: var(--bg-elev2); color: var(--c-enum); border: 1px solid var(--line); }
+
+.pcard-meta { display: flex; align-items: center; gap: 8px; font-family: var(--mono);
+  font-size: 11px; color: var(--fg-faint); }
+.pcard-status { display: inline-flex; align-items: center; gap: 5px; }
+.pcard-status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--fg-faint); }
+.pcard-status.running::before { background: #4ec98a; box-shadow: 0 0 6px #4ec98a99; }
+.pcard-status.exited::before { background: var(--danger); }
+.pcard-port { color: var(--fg-dim); }
+.pcard-time { margin-left: auto; }
+
+.pcard-stats { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--fg-dim);
+  border-top: 1px solid var(--line-soft); padding-top: 9px; }
+.pcard-stats b { color: var(--fg); font-variant-numeric: tabular-nums; }
+.pcard-dot { color: var(--fg-faint); }
+.pcard-dim { color: var(--fg-faint); font-style: italic; }
+
+#portal-empty { margin: auto; text-align: center; display: flex; flex-direction: column;
+  align-items: center; gap: 8px; padding: 40px; }
+.pe-title { font-size: 17px; font-weight: 600; }
+.pe-sub { color: var(--fg-dim); font-size: 13px; margin-bottom: 6px; }
+.pe-cmd { font-family: var(--mono); font-size: 12.5px; background: var(--bg-elev); color: var(--c-string);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; }

@@ -51,6 +51,10 @@
 ; variadic in C (the option int selects the vararg's type); we always pass an 8-byte value.
 (extern curl_global_init      :cc c [i64] (-> i32))
 (extern curl_easy_init        :cc c [] (-> (ptr i8)))
+; Phase 10 portal: a plain BLOCKING curl_easy_perform is used by the reverse-proxy hub and by
+; best-effort program->portal registration (neither runs a VM, so no cooperative multi loop is
+; needed). Declared here — the one extern home.
+(extern curl_easy_perform     :cc c [(ptr i8)] (-> i32))
 (extern curl_easy_setopt      :cc c [(ptr i8) i32 ...] (-> i32))
 (extern curl_easy_getinfo     :cc c [(ptr i8) i32 ...] (-> i32))
 (extern curl_easy_cleanup     :cc c [(ptr i8)] (-> void))

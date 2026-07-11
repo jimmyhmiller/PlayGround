@@ -10,6 +10,7 @@
 (import "src/typecheck.coil" :use *)
 (import "src/compile.coil" :use *)
 (import "src/server.coil" :use *)
+(import "src/portal.coil" :use *)
 (import "arraylist.coil" :use *)
 (import "alloc.coil" :use *)
 
@@ -37,7 +38,13 @@
   (w-cstr 2 c"  scry check <file.scry>        typecheck (follows imports)\n")
   (w-cstr 2 c"  scry run <file.scry>          build, run main(), serve the live viewer\n")
   (w-cstr 2 c"  scry inspect <file.scry>      serve the static schema WITHOUT running main()\n")
+  (w-cstr 2 c"  scry portal                  run the persistent hub (localhost:7357) programs pop up in\n")
   0)
+
+; scry portal — the persistent reverse-proxy hub (DECISIONS #13). Binds :7357, serves the viewer
+; shell, and proxies /p/<id>/eval to whichever program registered under <id>. Runs until Ctrl-C.
+(defn cmd-portal [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (scry-portal (resolve-viewer-dir (load (index argv 0)))))
 
 (defn cmd-check [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
   (if (< argc 3)
@@ -137,5 +144,6 @@
           (cstr-eq sub c"dump-bytecode") (cmd-dump-bytecode n argv)
           (cstr-eq sub c"run") (cmd-run n argv)
           (cstr-eq sub c"inspect") (cmd-inspect n argv)
+          (cstr-eq sub c"portal") (cmd-portal n argv)
           (cstr-eq sub c"eval") (cmd-eval n argv)
           (do (w-cstr 2 c"scry: unknown command\n") (usage) 64))))))

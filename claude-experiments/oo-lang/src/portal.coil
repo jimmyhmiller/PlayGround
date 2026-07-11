@@ -1,0 +1,207 @@
+; portal.coil — Phase 10: the persistent reverse-proxy PORTAL (DECISIONS #13). ONE hub on a
+; fixed port (7357). Each `scry run` / `scry inspect` binds an ephemeral port (>= 7400) and
+; REGISTERS {name,pid,port,mode} here; the portal serves the viewer shell and REVERSE-PROXIES
+; the eval channel to the right program via `POST /p/<id>/eval` (curl POST to
+; 127.0.0.1:<port>/eval, body forwarded, response returned verbatim). Programs pop up as cards
+; when they register and grey out when their port stops responding (a health probe on each
+; /api/programs poll). The portal runs NO VM — it is pure socket transport + a blocking curl,
+; so the accept loop is single-threaded and serial => the registry needs no lock.
+;
+; Reuses server.coil's HTTP primitives (send-response / serve-static / parse-req /
+; find-body-start / header-content-length / make-sockaddr) and json.coil's JBuf. The blocking
+; curl lives in portalclient.coil (also used by server.coil for registration; no import cycle).
+(module portal)
+(import "ioutil.coil" :use *)
+(import "json.coil" :use *)
+(import "server.coil" :use *)
+(import "portalclient.coil" :use *)
+
+; ============================ registry ============================
+(defstruct ProgEntry
+  [(id i64) (name (ptr u8)) (name-len i64) (mode i64) (port i64) (pid i64) (status i64) (start-time i64)])
+; mode: 0 = run, 1 = inspect.  status: 0 = running, 1 = exited (greyed).
+(const PROG_MAX 64)
+(defn preg-count  [] (-> (ptr i64)) (alloc-static i64))
+(defn preg-nextid [] (-> (ptr i64)) (alloc-static i64))
+(defn preg-slots  [] (-> (ptr (ptr ProgEntry))) (cast (ptr (ptr ProgEntry)) (alloc-static (array (ptr ProgEntry) 64))))
+(defn preg-get [(i i64)] (-> (ptr ProgEntry)) (load (index (preg-slots) i)))
+(defn preg-find [(id i64)] (-> (ptr ProgEntry))
+  (let [n (load (preg-count)) (mut i) 0 (mut r) (cast (ptr ProgEntry) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (do (if (= (load (field (preg-get (load i)) id)) id) (do (store! r (preg-get (load i))) 0) 0)
+                (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+
+(defn now-sec [] (-> i64)
+  (let [tv (cast (ptr i64) (xalloc 16))] (gettimeofday (cast (ptr i8) tv) (cast (ptr i8) 0)) (load (index tv 0))))
+
+; add a program; returns the assigned id (or -1 if the table is full).
+(defn preg-add [(name (ptr u8)) (namelen i64) (pid i64) (port i64) (mode i64)] (-> i64)
+  (let [n (load (preg-count))]
+    (if (>= n PROG_MAX) -1
+      (let [e (cast (ptr ProgEntry) (xalloc (sizeof ProgEntry)))
+            id (load (preg-nextid))
+            nb (xalloc (+ namelen 1))]
+        (memcpy (cast (ptr i8) nb) (cast (ptr i8) name) namelen) (store! (index nb namelen) (cast u8 0))
+        (store! (field e id) id) (store! (field e name) nb) (store! (field e name-len) namelen)
+        (store! (field e mode) mode) (store! (field e port) port) (store! (field e pid) pid)
+        (store! (field e status) 0) (store! (field e start-time) (now-sec))
+        (store! (index (preg-slots) n) e)
+        (store! (preg-count) (+ n 1)) (store! (preg-nextid) (+ id 1))
+        id))))
+
+; ============================ JSON request-body helpers ============================
+; parse the integer value of a numeric key ("port":7400) out of a JSON body; -1 if absent.
+(defn body-int [(body (ptr u8)) (blen i64) (key (ptr i8)) (klen i64)] (-> i64)
+  (let [pos (json-find-key body blen key klen)]
+    (if (< pos 0) -1
+      (let [(mut j) pos (mut v) 0 (mut seen) false]
+        (loop (if (and (< (load j) blen) (let [c (cast i64 (load (index body (load j))))] (or (= c \space) (or (= c \tab) (= c \"))))) (do (store! j (+ (load j) 1)) 0) (break)))
+        (loop (if (< (load j) blen) (let [c (cast i64 (load (index body (load j))))] (if (and (>= c \0) (<= c \9)) (do (store! v (+ (* (load v) 10) (- c \0))) (store! seen true) (store! j (+ (load j) 1)) 0) (break))) (break)))
+        (if (load seen) (load v) -1)))))
+
+; ============================ health probe / reaping ============================
+; probe each running program's port with a fast blocking GET /; a dead port (status 0) greys it.
+(defn portal-reap [] (-> i64)
+  (let [n (load (preg-count)) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [e (preg-get (load i))]
+              (if (= (load (field e status)) 0)
+                (let [url (cast (ptr i8) (xalloc 64)) out (pcbuf-new)]
+                  (snprintf url 64 c"http://127.0.0.1:%lld/" (load (field e port)))
+                  (if (= (pc-request c"GET" url (cast (ptr u8) 0) 0 400 out) 0)
+                    (do (store! (field e status) 1) 0) 0)) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  0)
+
+; ============================ /api/programs serialization ============================
+(defn portal-programs-json [(b (ptr JBuf))] (-> i64)
+  (jb-byte b \[)
+  (let [n (load (preg-count)) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [e (preg-get (load i))]
+              (if (> (load i) 0) (jb-byte b \,) 0)
+              (jb-cstr b c"{\"id\":") (jb-int b (load (field e id)))
+              (jb-cstr b c",\"name\":") (jb-str b (load (field e name)) (load (field e name-len)))
+              (jb-cstr b c",\"mode\":") (jb-cstr-quoted b (if (= (load (field e mode)) 0) c"run" c"inspect"))
+              (jb-cstr b c",\"port\":") (jb-int b (load (field e port)))
+              (jb-cstr b c",\"pid\":") (jb-int b (load (field e pid)))
+              (jb-cstr b c",\"status\":") (jb-cstr-quoted b (if (= (load (field e status)) 0) c"running" c"exited"))
+              (jb-cstr b c",\"startTime\":") (jb-int b (load (field e start-time)))
+              (jb-byte b \})
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+
+; ============================ routing ============================
+; extract the numeric <id> from a path of the form "/p/<id>/eval"; -1 if not that shape.
+(defn path-prog-id [(path (ptr i8))] (-> i64)
+  (if (not (and (= (cast i64 (load (index (cast (ptr u8) path) 0))) \/)
+                (and (= (cast i64 (load (index (cast (ptr u8) path) 1))) \p)
+                     (= (cast i64 (load (index (cast (ptr u8) path) 2))) \/)))) -1
+    (let [(mut j) 3 (mut v) 0 (mut seen) false]
+      (loop (if (let [c (cast i64 (load (index (cast (ptr u8) path) (load j))))] (and (>= c \0) (<= c \9)))
+              (do (store! v (+ (* (load v) 10) (- (cast i64 (load (index (cast (ptr u8) path) (load j)))) \0))) (store! seen true) (store! j (+ (load j) 1)) 0)
+              (break)))
+      (if (load seen) (load v) -1))))
+
+(defn portal-proxy-eval [(cfd i64) (id i64) (body (ptr u8)) (blen i64)] (-> i64)
+  (let [e (preg-find id)]
+    (if (= (cast i64 e) 0)
+      (send-response cfd c"404 Not Found" c"application/json" (cast (ptr u8) c"{\"error\":{\"kind\":\"NoSuchProgram\",\"message\":\"no such program\"}}") 63)
+      (let [url (cast (ptr i8) (xalloc 64)) out (pcbuf-new)]
+        (snprintf url 64 c"http://127.0.0.1:%lld/eval" (load (field e port)))
+        (let [status (pc-request c"POST" url body blen 30000 out)]
+          (if (= status 0)
+            (do (store! (field e status) 1)
+                (send-response cfd c"502 Bad Gateway" c"application/json" (cast (ptr u8) c"{\"error\":{\"kind\":\"ProgramGone\",\"message\":\"program not responding\"}}") 68))
+            (send-response cfd c"200 OK" c"application/json" (load (field out data)) (load (field out len)))))))))
+
+(defn portal-handle-register [(cfd i64) (body (ptr u8)) (blen i64)] (-> i64)
+  (let [namebuf (xalloc 512) namelen (cast (ptr i64) (xalloc 8))
+        npos (json-find-key body blen c"name" 4)]
+    (if (< npos 0) (store! namelen 0) (json-decode-string body blen npos namebuf namelen))
+    (let [pid (body-int body blen c"pid" 3)
+          port (body-int body blen c"port" 4)
+          mode (body-int body blen c"mode" 4)
+          id (preg-add namebuf (load namelen) pid port (if (< mode 0) 0 mode))
+          resp (jb-new)]
+      (jb-cstr resp c"{\"id\":") (jb-int resp id) (jb-byte resp \})
+      (send-response cfd c"200 OK" c"application/json" (load (field resp data)) (load (field resp len))))))
+
+(defn portal-handle-deregister [(cfd i64) (body (ptr u8)) (blen i64)] (-> i64)
+  (let [id (body-int body blen c"id" 2) e (preg-find id)]
+    (if (!= (cast i64 e) 0) (do (store! (field e status) 1) 0) 0)
+    (send-response cfd c"200 OK" c"application/json" (cast (ptr u8) c"{\"ok\":true}") 11)))
+
+(defn portal-handle-heartbeat [(cfd i64) (body (ptr u8)) (blen i64)] (-> i64)
+  (let [id (body-int body blen c"id" 2) e (preg-find id)]
+    (if (!= (cast i64 e) 0) (do (store! (field e status) 0) 0) 0)   ; heartbeat un-greys
+    (send-response cfd c"200 OK" c"application/json" (cast (ptr u8) c"{\"ok\":true}") 11)))
+
+(defn portal-handle-conn [(cfd i64)] (-> i64)
+  (let [cap 262144 buf (xalloc cap) (mut total) 0]
+    ; read until full headers + full body (identical shape to server.coil's handle-conn)
+    (let [(mut done) false]
+      (loop
+        (if (load done) (break)
+          (let [r (read (cast i32 cfd) (cast (ptr i8) (index buf (load total))) (- cap (load total)))]
+            (if (<= r 0) (break)
+              (do (store! total (+ (load total) r))
+                  (let [bs (find-body-start buf (load total))]
+                    (if (< bs 0)
+                      (if (>= (load total) cap) (do (store! done true) 0) 0)
+                      (let [cl (header-content-length buf (load total))]
+                        (if (or (< cl 0) (>= (- (load total) bs) cl)) (do (store! done true) 0)
+                          (if (>= (load total) cap) (do (store! done true) 0) 0)))) 0)))))))
+    (let [pathbuf (xalloc 2048) meth (parse-req buf (load total) pathbuf) path (cast (ptr i8) pathbuf)
+          bs (find-body-start buf (load total))
+          bodyp (if (< bs 0) (cast (ptr u8) 0) (index buf bs))
+          bodyn (if (< bs 0) 0 (- (load total) bs))]
+      (cond
+        ; GET /api/programs -> reap-then-serialize the registry
+        (and (= meth 0) (= (cast i64 (strcmp path c"/api/programs")) 0))
+          (do (portal-reap)
+              (let [resp (jb-new)] (portal-programs-json resp)
+                (send-response cfd c"200 OK" c"application/json" (load (field resp data)) (load (field resp len)))))
+        ; POST /register | /deregister | /heartbeat
+        (and (= meth 1) (= (cast i64 (strcmp path c"/register")) 0)) (portal-handle-register cfd bodyp bodyn)
+        (and (= meth 1) (= (cast i64 (strcmp path c"/deregister")) 0)) (portal-handle-deregister cfd bodyp bodyn)
+        (and (= meth 1) (= (cast i64 (strcmp path c"/heartbeat")) 0)) (portal-handle-heartbeat cfd bodyp bodyn)
+        ; POST /p/<id>/eval -> reverse proxy
+        (and (= meth 1) (>= (path-prog-id path) 0)) (portal-proxy-eval cfd (path-prog-id path) bodyp bodyn)
+        ; GET anything else -> the viewer shell + static assets
+        (= meth 0) (serve-static cfd path)
+        (send-response cfd c"400 Bad Request" c"text/plain" (cast (ptr u8) c"bad request") 11)))
+    0))
+
+(defn portal-accept-loop [(fd i64)] (-> i64)
+  (loop
+    (let [c (accept (cast i32 fd) (cast (ptr i8) 0) (cast (ptr i8) 0))]
+      (if (< (cast i64 c) 0) (do (usleep (cast i32 1000)) 0)
+        (do (portal-handle-conn (cast i64 c)) (close (cast i32 c)) 0))))
+  0)
+
+; bind EXACTLY `port` (no scan — the portal must own 7357 or fail loudly). fd or -1.
+(defn portal-bind [(port i64)] (-> i64)
+  (let [fd (socket (cast i32 2) (cast i32 1) (cast i32 0))]
+    (if (< (cast i64 fd) 0) -1
+      (do
+        (let [one (cast (ptr i8) (xalloc 4))] (store! (cast (ptr i32) one) (cast i32 1)) (setsockopt fd (cast i32 65535) (cast i32 4) one (cast i32 4)))
+        (if (< (cast i64 (bind fd (cast (ptr i8) (make-sockaddr port)) (cast i32 16))) 0)
+          (do (close fd) -1)
+          (do (listen fd 32) (cast i64 fd)))))))
+
+; ============================ public entry ============================
+(defn scry-portal [(viewer-dir (ptr i8))] (-> i64)
+  (store! (srv-viewer-dir) viewer-dir)
+  (store! (preg-count) 0) (store! (preg-nextid) 1)
+  (let [fd (portal-bind PORTAL_PORT)]
+    (if (< fd 0)
+      (do (w-cstr 2 c"scry portal: could not bind port 7357 (is a portal already running?)\n") 1)
+      (do
+        (w-cstr 1 c"portal: http://localhost:7357  — sit here; run/inspect programs pop up as cards. Ctrl-C to exit.\n")
+        (portal-accept-loop fd)
+        0))))

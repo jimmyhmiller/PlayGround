@@ -51,7 +51,11 @@ async function main() {
     `--remote-debugging-port=${dport}`, `--user-data-dir=${profile}`, "about:blank",
   ], { stdio: ["ignore", "pipe", "pipe"] });
 
-  const cleanup = () => { try { cproc.kill("SIGKILL"); } catch {} try { scry.kill("SIGKILL"); } catch {} };
+  const extraProcs = [];
+  const cleanup = () => {
+    for (const p of extraProcs) { try { p.kill("SIGKILL"); } catch {} }
+    try { cproc.kill("SIGKILL"); } catch {} try { scry.kill("SIGKILL"); } catch {}
+  };
 
   try {
     // 3. find the page target's WebSocket URL
@@ -186,6 +190,67 @@ async function main() {
     else {
       try { await waitFor(".invoke-result", 8000); ok("0-arg invoke produced a result"); }
       catch { fails.push("0-arg invoke produced no result"); }
+    }
+
+    // (P) Phase 10 PORTAL dual-mode: boot a portal + a program, load the portal `/`, assert a
+    // program CARD renders, click it, and assert the inspector graph loads THROUGH the proxy.
+    // Skipped (not failed) if :7357 is already in use by a developer's own portal.
+    let portalBusy = false;
+    try {
+      const probe = await fetch("http://127.0.0.1:7357/api/programs").then(() => true).catch(() => false);
+      portalBusy = probe;
+    } catch { portalBusy = false; }
+    if (portalBusy) {
+      console.log("  --  portal scenario skipped (:7357 already in use)");
+    } else {
+      const portal = spawn(join(ROOT, "scry"), ["portal"], { stdio: ["ignore", "pipe", "pipe"] });
+      extraProcs.push(portal);
+      let portalUp = false, portalFailed = false;
+      portal.stdout.on("data", (b) => {
+        const s = b.toString();
+        if (s.includes("portal: http://localhost:7357")) portalUp = true;
+        if (s.includes("could not bind")) portalFailed = true;
+      });
+      for (let i = 0; i < 100 && !portalUp && !portalFailed; i++) await sleep(50);
+      if (portalFailed || !portalUp) {
+        console.log("  --  portal scenario skipped (portal did not start)");
+      } else {
+        // a program registers with the portal (its own viewer port is ephemeral, >=7400)
+        const prog = spawn(join(ROOT, "scry"), ["run", join(ROOT, "examples", "demo-mini.scry")],
+          { stdio: ["ignore", "ignore", "ignore"] });
+        extraProcs.push(prog);
+        let regd = null;
+        for (let i = 0; i < 60; i++) {
+          await sleep(150);
+          try {
+            const progs = await fetch("http://127.0.0.1:7357/api/programs").then((r) => r.json());
+            regd = progs.find((p) => p.mode === "run" && p.status === "running");
+            if (regd) break;
+          } catch {}
+        }
+        if (!regd) fails.push("portal: program never registered / appeared in /api/programs");
+        else {
+          ok(`portal registry shows program card '${regd.name}'`);
+          await send("Page.navigate", { url: "http://127.0.0.1:7357/" });
+          try {
+            await waitFor(".pcard");
+            const cards = await evalPage(`[...document.querySelectorAll('.pcard-name')].map(n=>n.textContent)`);
+            ok(`portal landing renders ${cards.length} card(s): ${JSON.stringify(cards)}`);
+            // click the first (running) card -> drills into that program's inspector graph, proxied
+            await evalPage(`document.querySelector('.pcard:not(.exited)').click()`);
+            await waitFor("#graph .gnode", 12000);
+            const pnodes = await evalPage(`[...document.querySelectorAll('.gnode')].map(n=>n.dataset.name)`);
+            if (!pnodes.includes("Agent")) fails.push(`portal proxied graph missing Agent node: ${JSON.stringify(pnodes)}`);
+            else ok(`clicking a portal card loads the inspector graph through the proxy (${pnodes.length} nodes)`);
+            // the back affordance returns to the landing grid
+            await evalPage(`(()=>{const b=document.querySelector('.back-btn');if(b)b.click();return !!b;})()`);
+            await waitFor(".pcard", 6000);
+            ok("portal back button returns to the landing grid");
+          } catch (e) {
+            fails.push("portal dual-mode scenario failed: " + (e && e.message || e));
+          }
+        }
+      }
     }
 
     if (fails.length) {
