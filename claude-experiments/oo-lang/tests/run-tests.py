@@ -1277,12 +1277,17 @@ def run_agent_online_test(binary, filt):
     environment only, never written to disk, never committed."""
     if filt and "agent" not in filt and "online" not in filt:
         return 0, 0
-    key = os.environ.get("ANTHROPIC_API_KEY")
+    # Default target is DeepSeek's Anthropic-compatible endpoint; chooseBrain resolves the key
+    # from DEEPSEEK_API_KEY | DEEPSEEK_KEY | ANTHROPIC_API_KEY and the base from ANTHROPIC_BASE_URL.
+    key = (os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_KEY")
+           or os.environ.get("ANTHROPIC_API_KEY"))
     if not key:
-        print("SKIPPED agent_online: ANTHROPIC_API_KEY not set")
+        print("SKIPPED agent_online: no DEEPSEEK_API_KEY / DEEPSEEK_KEY / ANTHROPIC_API_KEY set")
         return 0, 0
-    if not _net_reachable():
-        print("SKIPPED agent_online: api.anthropic.com:443 unreachable (offline)")
+    base = os.environ.get("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    host = base.split("://", 1)[-1].split("/", 1)[0]
+    if not _net_reachable(host=host):
+        print(f"SKIPPED agent_online: {host}:443 unreachable (offline)")
         return 0, 0
     demo = os.path.abspath(os.path.join(HERE, "..", "examples", "assistant.scry"))
     try:

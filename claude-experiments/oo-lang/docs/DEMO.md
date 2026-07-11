@@ -161,7 +161,7 @@ calls Claude and does live tool use. The loop is identical either way.
 
 ```
 ./scry run examples/assistant.scry
-brain: ScriptedModel - offline (set ANTHROPIC_API_KEY for the live model)
+brain: ScriptedModel - offline (set DEEPSEEK_API_KEY for the live model)
 you> what is 17 times 23?
 [agent] -> tool_use: calculate({"a":17,"b":23,"op":"mul"})
 [agent] <- tool_result: calculate => 17 * 23 = 391
@@ -177,14 +177,20 @@ a canned string); the result fed back and shaped the final answer. That is the w
 
 ## 1. With a key - a LIVE model actually calls the tool
 
+Default target is **DeepSeek's Anthropic-compatible endpoint** (`deepseek-v4-pro` over
+`https://api.deepseek.com/anthropic`) — same `/v1/messages` tool-use protocol, so the only thing
+that changes is the key. Overridable: `ANTHROPIC_BASE_URL`, `SCRY_MODEL`, and the key resolves from
+`DEEPSEEK_API_KEY` | `DEEPSEEK_KEY` | `ANTHROPIC_API_KEY`. (To target Anthropic instead:
+`export ANTHROPIC_BASE_URL=https://api.anthropic.com SCRY_MODEL=claude-sonnet-5 ANTHROPIC_API_KEY=sk-ant-...`.)
+
 ```
-export ANTHROPIC_API_KEY=sk-ant-...
+export DEEPSEEK_API_KEY=sk-...
 ./scry run examples/assistant.scry
-brain: AnthropicModel (claude-sonnet-5) - LIVE
+brain: AnthropicModel (deepseek-v4-pro @ https://api.deepseek.com/anthropic) - LIVE
 you> what is 17 times 23?
-[agent] -> tool_use: calculate({"a":17,"b":23,"op":"mul"})   # Claude emitted this tool_use
+[agent] -> tool_use: calculate({"a":17,"b":23,"op":"mul"})   # the live model emitted this tool_use
 [agent] <- tool_result: calculate => 17 * 23 = 391            # our loop ran the tool + fed it back
-assistant 17 times 23 is 391.                                 # Claude's end_turn answer
+assistant 17 × 23 = **391**.                                  # the model's end_turn answer
 ```
 
 Same prompts, same loop - now Claude is the brain. Every request/response is a browsable
