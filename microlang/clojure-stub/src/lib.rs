@@ -90,7 +90,18 @@ fn eval1<M: ValueModel>(
     let slot = rt.push_root(expanded);
     let ir = comp.compile(rt, rt.root_get(slot));
     rt.truncate_roots(slot);
-    cs.eval_ir(cs, rt, &ir, &None)
+    let r = cs.eval_ir(cs, rt, &ir, &None);
+    // A signal still pending at the top level is an UNCAUGHT throw/escape — a
+    // program error that terminates (like an uncaught exception in real Clojure).
+    // This is the boundary, not the throw/catch mechanism (which is signal-based).
+    if rt.pending() {
+        let sig = rt.take_signal();
+        if sig.kind == 1 {
+            panic!("uncaught throw: {}", rt.print(sig.value));
+        }
+        panic!("escape continuation invoked outside its (%callec) extent");
+    }
+    r
 }
 
 fn eval_form<M: ValueModel>(

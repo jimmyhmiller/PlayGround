@@ -7,26 +7,93 @@ use super::ast::*;
 use crate::{DefId, Field, FieldId, Function, Instruction, Schema, Type, Value, Version};
 use std::collections::HashMap;
 
-struct StructInfo {
-    id: DefId,
-    fields: Vec<(String, FieldId, Type)>,
+/// The persistent symbol table of a compilation. It survives across live edits
+/// (a [`crate::Session`] owns one), so a redefined struct keeps its `DefId` and
+/// each field keeps its `FieldId` *by name* — which is exactly what lets an
+/// auto-derived migration copy the fields that stayed the same. It also holds
+/// the current layout of every struct and signature of every function, so a
+/// later edit can reference definitions from an earlier one.
+#[derive(Default)]
+pub struct IdEnv {
+    struct_ids: HashMap<String, DefId>,
+    fn_ids: HashMap<String, DefId>,
+    field_ids: HashMap<(DefId, String), FieldId>,
+    struct_fields: HashMap<DefId, Vec<(String, FieldId, Type)>>,
+    fn_sigs: HashMap<DefId, (Vec<Type>, Type)>,
+    next_struct: DefId,
+    next_fn: DefId,
+    next_field: FieldId,
 }
 
-struct FnSig {
-    id: DefId,
-    params: Vec<Type>,
-    result: Type,
+impl IdEnv {
+    pub fn new() -> IdEnv {
+        // Disjoint id ranges so a type id and a function id never collide.
+        IdEnv {
+            next_struct: 1,
+            next_fn: 1_000_000,
+            next_field: 1,
+            ..Default::default()
+        }
+    }
+    fn struct_id(&mut self, name: &str) -> DefId {
+        if let Some(id) = self.struct_ids.get(name) {
+            return *id;
+        }
+        let id = self.next_struct;
+        self.next_struct += 1;
+        self.struct_ids.insert(name.to_string(), id);
+        id
+    }
+    fn fn_id(&mut self, name: &str) -> DefId {
+        if let Some(id) = self.fn_ids.get(name) {
+            return *id;
+        }
+        let id = self.next_fn;
+        self.next_fn += 1;
+        self.fn_ids.insert(name.to_string(), id);
+        id
+    }
+    fn field_id(&mut self, struct_id: DefId, name: &str) -> FieldId {
+        if let Some(id) = self.field_ids.get(&(struct_id, name.to_string())) {
+            return *id;
+        }
+        let id = self.next_field;
+        self.next_field += 1;
+        self.field_ids.insert((struct_id, name.to_string()), id);
+        id
+    }
+    pub fn struct_of(&self, name: &str) -> Option<DefId> {
+        self.struct_ids.get(name).copied()
+    }
+    pub fn fn_of(&self, name: &str) -> Option<DefId> {
+        self.fn_ids.get(name).copied()
+    }
+    pub fn struct_map(&self) -> HashMap<String, DefId> {
+        self.struct_ids.clone()
+    }
+    pub fn fn_map(&self) -> HashMap<String, DefId> {
+        self.fn_ids.clone()
+    }
 }
 
-/// The result of lowering a whole program.
+fn resolve(te: &TypeExpr, ids: &IdEnv) -> Result<Type, String> {
+    Ok(match te {
+        TypeExpr::I64 => Type::I64,
+        TypeExpr::Bool => Type::Bool,
+        TypeExpr::Unit => Type::Unit,
+        TypeExpr::Ref(name) => {
+            Type::Ref(ids.struct_of(name).ok_or_else(|| format!("unknown struct `{name}`"))?)
+        }
+    })
+}
+
+/// The result of lowering one program (or one live edit).
 pub struct Lowered {
     pub schemas: Vec<Schema>,
     pub functions: Vec<Function>,
-    pub struct_ids: HashMap<String, DefId>,
-    pub fn_ids: HashMap<String, DefId>,
 }
 
-pub fn lower(program: &Program) -> Result<Lowered, String> {
+pub fn lower(program: &Program, ids: &mut IdEnv) -> Result<Lowered, String> {
     let structs: Vec<&StructDef> = program
         .items
         .iter()
@@ -44,43 +111,19 @@ pub fn lower(program: &Program) -> Result<Lowered, String> {
         })
         .collect();
 
-    // Assign disjoint id ranges: structs 1..=S, functions S+1.. .
-    let mut struct_table: HashMap<String, StructInfo> = HashMap::new();
-    for (idx, s) in structs.iter().enumerate() {
-        let id = (idx + 1) as DefId;
-        let mut fields = Vec::new();
-        for (fidx, f) in s.fields.iter().enumerate() {
-            let fid = id * 1000 + fidx as FieldId;
-            // Field type is resolved against the whole struct table below; a
-            // temporary placeholder is fine here since we re-resolve.
-            fields.push((f.name.clone(), fid, Type::Unit));
-        }
-        if struct_table
-            .insert(s.name.clone(), StructInfo { id, fields })
-            .is_some()
-        {
-            return Err(format!("duplicate struct `{}`", s.name));
-        }
+    // Register every struct name first (so fields that reference each other
+    // resolve), then build each schema and record its current layout.
+    for s in &structs {
+        ids.struct_id(&s.name);
     }
-    // Resolve field types now that all struct names are known.
-    let resolve = |te: &TypeExpr, table: &HashMap<String, StructInfo>| -> Result<Type, String> {
-        Ok(match te {
-            TypeExpr::I64 => Type::I64,
-            TypeExpr::Bool => Type::Bool,
-            TypeExpr::Unit => Type::Unit,
-            TypeExpr::Ref(name) => {
-                Type::Ref(table.get(name).ok_or_else(|| format!("unknown struct `{name}`"))?.id)
-            }
-        })
-    };
     let mut schemas = Vec::new();
     for s in &structs {
-        let info_id = struct_table[&s.name].id;
+        let sid = ids.struct_of(&s.name).unwrap();
         let mut fields = Vec::new();
-        let mut resolved = Vec::new();
-        for (fidx, f) in s.fields.iter().enumerate() {
-            let fid = info_id * 1000 + fidx as FieldId;
-            let ty = resolve(&f.ty, &struct_table)?;
+        let mut layout = Vec::new();
+        for f in &s.fields {
+            let fid = ids.field_id(sid, &f.name);
+            let ty = resolve(&f.ty, ids)?;
             let default = match &f.default {
                 None => None,
                 Some(e) => Some(const_value(e, &ty)?),
@@ -91,49 +134,35 @@ pub fn lower(program: &Program) -> Result<Lowered, String> {
                 ty: ty.clone(),
                 default,
             });
-            resolved.push((f.name.clone(), fid, ty));
+            layout.push((f.name.clone(), fid, ty));
         }
-        struct_table.get_mut(&s.name).unwrap().fields = resolved;
+        ids.struct_fields.insert(sid, layout);
         schemas.push(Schema {
-            type_id: info_id,
-            version: Version(1),
+            type_id: sid,
+            version: Version(1), // the session rewrites this to the next version
             name: s.name.clone(),
             fields,
         });
     }
 
-    // Function signatures.
-    let mut fn_table: HashMap<String, FnSig> = HashMap::new();
-    let base = structs.len() as DefId;
-    for (idx, f) in fns.iter().enumerate() {
-        let id = base + 1 + idx as DefId;
-        let params = f
+    // Register function signatures (so calls — including recursion — resolve),
+    // then lower the bodies.
+    for f in &fns {
+        let id = ids.fn_id(&f.name);
+        let params: Vec<Type> = f
             .params
             .iter()
-            .map(|p| resolve(&p.ty, &struct_table))
+            .map(|p| resolve(&p.ty, ids))
             .collect::<Result<_, _>>()?;
-        let result = resolve(&f.ret, &struct_table)?;
-        if fn_table
-            .insert(f.name.clone(), FnSig { id, params, result })
-            .is_some()
-        {
-            return Err(format!("duplicate function `{}`", f.name));
-        }
+        let result = resolve(&f.ret, ids)?;
+        ids.fn_sigs.insert(id, (params, result));
     }
-
     let mut functions = Vec::new();
     for f in &fns {
-        functions.push(lower_fn(f, &struct_table, &fn_table)?);
+        functions.push(lower_fn(f, ids)?);
     }
 
-    let struct_ids = struct_table.iter().map(|(k, v)| (k.clone(), v.id)).collect();
-    let fn_ids = fn_table.iter().map(|(k, v)| (k.clone(), v.id)).collect();
-    Ok(Lowered {
-        schemas,
-        functions,
-        struct_ids,
-        fn_ids,
-    })
+    Ok(Lowered { schemas, functions })
 }
 
 fn const_value(e: &Expr, ty: &Type) -> Result<Value, String> {
@@ -150,29 +179,24 @@ fn const_value(e: &Expr, ty: &Type) -> Result<Value, String> {
 }
 
 struct Lower<'a> {
-    structs: &'a HashMap<String, StructInfo>,
-    fns: &'a HashMap<String, FnSig>,
+    ids: &'a IdEnv,
     code: Vec<Instruction>,
     labels: Vec<usize>,
     next_reg: usize,
     scopes: Vec<HashMap<String, (usize, Type)>>,
 }
 
-fn lower_fn(
-    f: &FnDef,
-    structs: &HashMap<String, StructInfo>,
-    fns: &HashMap<String, FnSig>,
-) -> Result<Function, String> {
-    let sig = &fns[&f.name];
+fn lower_fn(f: &FnDef, ids: &IdEnv) -> Result<Function, String> {
+    let id = ids.fn_of(&f.name).unwrap();
+    let (params, result) = ids.fn_sigs[&id].clone();
     let mut lo = Lower {
-        structs,
-        fns,
+        ids,
         code: Vec::new(),
         labels: Vec::new(),
         next_reg: 0,
         scopes: vec![HashMap::new()],
     };
-    for (p, ty) in f.params.iter().zip(&sig.params) {
+    for (p, ty) in f.params.iter().zip(&params) {
         let r = lo.fresh_reg();
         lo.bind(&p.name, r, ty.clone());
     }
@@ -181,11 +205,11 @@ fn lower_fn(
     }
     lo.patch_labels()?;
     Ok(Function {
-        id: sig.id,
+        id,
         version: Version(1),
         name: f.name.clone(),
-        params: sig.params.clone(),
-        result: sig.result.clone(),
+        params,
+        result,
         registers: lo.next_reg,
         code: lo.code,
     })
@@ -347,29 +371,62 @@ impl<'a> Lower<'a> {
                         self.code.push(Instruction::SubI64 { dst, left: lr, right: rr });
                         Type::I64
                     }
+                    BinOp::Mul => {
+                        self.code.push(Instruction::MulI64 { dst, left: lr, right: rr });
+                        Type::I64
+                    }
                     BinOp::Lt => {
                         self.code.push(Instruction::LtI64 { dst, left: lr, right: rr });
                         Type::Bool
                     }
-                    // `a > b` is `b < a`.
                     BinOp::Gt => {
+                        // `a > b` is `b < a`.
                         self.code.push(Instruction::LtI64 { dst, left: rr, right: lr });
                         Type::Bool
                     }
+                    BinOp::Eq => {
+                        self.code.push(Instruction::EqI64 { dst, left: lr, right: rr });
+                        Type::Bool
+                    }
+                    // The rest compose from `<`/`==` and `!`.
+                    BinOp::Ne => {
+                        let t = self.fresh_reg();
+                        self.code.push(Instruction::EqI64 { dst: t, left: lr, right: rr });
+                        self.code.push(Instruction::Not { dst, src: t });
+                        Type::Bool
+                    }
+                    BinOp::Le => {
+                        // `a <= b` is `!(b < a)`.
+                        let t = self.fresh_reg();
+                        self.code.push(Instruction::LtI64 { dst: t, left: rr, right: lr });
+                        self.code.push(Instruction::Not { dst, src: t });
+                        Type::Bool
+                    }
+                    BinOp::Ge => {
+                        // `a >= b` is `!(a < b)`.
+                        let t = self.fresh_reg();
+                        self.code.push(Instruction::LtI64 { dst: t, left: lr, right: rr });
+                        self.code.push(Instruction::Not { dst, src: t });
+                        Type::Bool
+                    }
                 }
+            }
+            Expr::Not(inner) => {
+                let (r, _) = self.expr(inner)?;
+                self.code.push(Instruction::Not { dst, src: r });
+                Type::Bool
             }
             Expr::Field { object, field } => {
                 let (obj, ty) = self.expr(object)?;
                 let Type::Ref(type_id) = ty else {
                     return Err(format!("`.{field}` on a non-struct value"));
                 };
-                let info = self
-                    .structs
-                    .values()
-                    .find(|s| s.id == type_id)
+                let layout = self
+                    .ids
+                    .struct_fields
+                    .get(&type_id)
                     .ok_or("field access on an unknown struct")?;
-                let (_, fid, fty) = info
-                    .fields
+                let (_, fid, fty) = layout
                     .iter()
                     .find(|(n, _, _)| n == field)
                     .ok_or_else(|| format!("no field `{field}` on that struct"))?;
@@ -381,13 +438,17 @@ impl<'a> Lower<'a> {
                 fty.clone()
             }
             Expr::StructLit { name, fields } => {
-                let info = self
-                    .structs
-                    .get(name)
+                let type_id = self
+                    .ids
+                    .struct_of(name)
                     .ok_or_else(|| format!("unknown struct `{name}`"))?;
-                let type_id = info.id;
+                let layout = self
+                    .ids
+                    .struct_fields
+                    .get(&type_id)
+                    .ok_or_else(|| format!("unknown struct `{name}`"))?;
                 let field_ids: HashMap<&str, FieldId> =
-                    info.fields.iter().map(|(n, id, _)| (n.as_str(), *id)).collect();
+                    layout.iter().map(|(n, id, _)| (n.as_str(), *id)).collect();
                 let mut supplied = Vec::new();
                 for (fname, fexpr) in fields {
                     let fid = *field_ids
@@ -404,11 +465,11 @@ impl<'a> Lower<'a> {
                 Type::Ref(type_id)
             }
             Expr::Call { name, args } => {
-                let sig = self
-                    .fns
-                    .get(name)
+                let callee = self
+                    .ids
+                    .fn_of(name)
                     .ok_or_else(|| format!("unknown function `{name}`"))?;
-                let (callee, result) = (sig.id, sig.result.clone());
+                let result = self.ids.fn_sigs[&callee].1.clone();
                 let mut arg_regs = Vec::new();
                 for a in args {
                     let (r, _) = self.expr(a)?;

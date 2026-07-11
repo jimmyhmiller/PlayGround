@@ -54,8 +54,13 @@ pub struct Program {
 pub enum BinOp {
     Add,
     Sub,
+    Mul,
     Lt,
     Gt,
+    Le,
+    Ge,
+    Eq,
+    Ne,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +83,7 @@ pub enum Expr {
     Unit,
     Var(String),
     Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
+    Not(Box<Expr>),
     Field { object: Box<Expr>, field: String },
     StructLit { name: String, fields: Vec<(String, Expr)> },
     Call { name: String, args: Vec<Expr> },

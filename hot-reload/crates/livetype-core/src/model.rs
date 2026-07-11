@@ -141,12 +141,29 @@ pub enum Instruction {
         left: usize,
         right: usize,
     },
+    MulI64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
     /// `dst := left < right` (signed). Produces a `Bool`, the only condition
     /// source for `Branch`. Pure, so it never ends a basic block.
     LtI64 {
         dst: usize,
         left: usize,
         right: usize,
+    },
+    /// `dst := left == right` (on i64). Produces a `Bool`.
+    EqI64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// `dst := !src` (on a Bool). Produces a `Bool`; lets the frontend build
+    /// `!=`, `<=`, `>=`, and unary `!` from `<`/`==`.
+    Not {
+        dst: usize,
+        src: usize,
     },
     /// Unconditional transfer to another program counter. A back-edge (a target
     /// at or before this pc) forms a loop.

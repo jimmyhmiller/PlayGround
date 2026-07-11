@@ -434,48 +434,31 @@ extern "C-unwind" fn shim_try<M: ValueModel>(
     let locals = ctx.cur.borrow().clone();
     let body = unsafe { &*body };
 
-    // Run the protected region on the TreeWalk tier: a `throw` is a Rust panic, and
-    // the `catch_unwind` below is a pure-Rust frame wrapping pure-Rust eval, so the
-    // unwind never has to cross a Cranelift frame (cranelift-jit doesn't register
-    // its unwind tables with the OS unwinder). Everything OUTSIDE `try` stays
-    // JIT-native; only the dynamic extent of the try body is interpreted.
+    // `throw` is a flag on the runtime now, not a panic — so this is the exact
+    // signal-checking logic of TreeWalk's `Ir::Try`, no unwinding involved. The
+    // protected region runs on TreeWalk so signals propagate through it (until the
+    // JIT emits per-call pending checks the body could run native).
     let tw = crate::code::TreeWalk;
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let res = {
-        let rt2 = unsafe { &mut *(*ctx.rc).rt };
-        let locals2 = locals.clone();
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            tw.eval_ir(&tw, rt2, body, &locals2)
-        }))
-    };
-    std::panic::set_hook(prev);
-    let outcome: Result<u64, Box<dyn std::any::Any + Send>> = match res {
-        Ok(v) => Ok(v),
-        Err(payload) => match payload.downcast::<crate::runtime::Thrown>() {
-            Ok(t) => {
-                if catch.is_null() {
-                    Err(Box::new(*t) as Box<dyn std::any::Any + Send>)
-                } else {
-                    let cbody = unsafe { &*catch };
-                    let frame: Locals = Some(std::sync::Arc::new(Frame {
-                        slots: vec![std::sync::atomic::AtomicU64::new(t.value)],
-                        parent: locals.clone(),
-                    }));
-                    Ok(tw.eval_ir(&tw, rt, cbody, &frame))
-                }
-            }
-            Err(other) => Err(other),
-        },
-    };
+    let mut result = tw.eval_ir(&tw, rt, body, &locals);
+    if rt.pending_throw() && !catch.is_null() {
+        let thrown = rt.take_signal().value;
+        let cbody = unsafe { &*catch };
+        let frame: Locals = Some(std::sync::Arc::new(Frame {
+            slots: vec![std::sync::atomic::AtomicU64::new(thrown)],
+            parent: locals.clone(),
+        }));
+        result = tw.eval_ir(&tw, rt, cbody, &frame);
+    }
     if !finally.is_null() {
         let fbody = unsafe { &*finally };
-        tw.eval_ir(&tw, rt, fbody, &locals);
+        let suspended = rt.take_signal();
+        let fv = tw.eval_ir(&tw, rt, fbody, &locals);
+        if rt.pending() {
+            return fv;
+        }
+        rt.signal = suspended;
     }
-    match outcome {
-        Ok(v) => v,
-        Err(payload) => std::panic::resume_unwind(payload),
-    }
+    result
 }
 
 // A stable integer tag so the emitted code can name one. (The `Prim`
@@ -1409,6 +1392,8 @@ fn build_body<M: ModelArithJit>(
         off_self_closure: core::mem::offset_of!(JitCtx<'static, M>, self_closure) as i32,
         off_tail_pending: core::mem::offset_of!(JitCtx<'static, M>, tail_pending) as i32,
         off_rc,
+        off_rt: core::mem::offset_of!(JitCtx<'static, M>, rt) as i32,
+        signal_kind_off: Runtime::<M>::signal_kind_offset() as i32,
         ctx_size: core::mem::size_of::<JitCtx<'static, M>>() as u32,
         loop_header: None,
         loop_vars: Vec::new(),
@@ -1460,6 +1445,10 @@ pub struct Compiler<'a, 'b> {
     off_self_closure: i32,
     off_tail_pending: i32,
     off_rc: i32,
+    /// Offset of the `rt` pointer within `JitCtx`, and of the throw/escape flag
+    /// (`signal.kind`) within `Runtime` — for the per-call pending check.
+    off_rt: i32,
+    signal_kind_off: i32,
     ctx_size: u32,
     /// The run-context pointer, loaded once at entry; shared-field reads use it.
     rc_val: Value,
@@ -1477,6 +1466,38 @@ impl<'a, 'b> Compiler<'a, 'b> {
     fn call_shim(&mut self, f: cranelift_codegen::ir::FuncRef, args: &[Value]) -> Value {
         let inst = self.fb.ins().call(f, args);
         self.fb.inst_results(inst)[0]
+    }
+
+    /// After an operation that can raise a `throw`/escape, check the runtime's
+    /// `signal.kind` flag and RETURN early (propagating the pending signal up) if
+    /// set. The dummy `result` flows out; whoever eventually checks `pending()` (a
+    /// `Try`, or the frontend top level) handles it. Same design as the TreeWalk
+    /// `if rt.pending() { return v }` after every sub-eval — a plain load + branch.
+    fn emit_pending_check(&mut self, result: Value) -> Value {
+        let rt_ptr = self.load_rc_field(self.off_rt);
+        let kind = self.fb.ins().load(
+            cranelift_codegen::ir::types::I8,
+            MemFlagsData::trusted(),
+            rt_ptr,
+            self.signal_kind_off,
+        );
+        let ret_b = self.fb.create_block();
+        let cont_b = self.fb.create_block();
+        // `result` is computed in the current (dominating) block, so it is live in
+        // both successors — no block params needed.
+        self.fb.ins().brif(kind, ret_b, &[], cont_b, &[]);
+        self.fb.switch_to_block(ret_b);
+        self.fb.seal_block(ret_b);
+        self.fb.ins().return_(&[result]);
+        self.fb.switch_to_block(cont_b);
+        self.fb.seal_block(cont_b);
+        result
+    }
+
+    /// A shim call that can raise, with the pending check emitted after it.
+    fn call_shim_checked(&mut self, f: cranelift_codegen::ir::FuncRef, args: &[Value]) -> Value {
+        let result = self.call_shim(f, args);
+        self.emit_pending_check(result)
     }
 
     fn iconst(&mut self, v: u64) -> Value {
@@ -1618,7 +1639,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
 
         self.fb.switch_to_block(merge);
         self.fb.seal_block(merge);
-        self.fb.use_var(result)
+        // The callee may have raised a throw/escape (on either path); propagate.
+        let r = self.fb.use_var(result);
+        self.emit_pending_check(r)
     }
 
     /// Spill a run of computed values into a fresh stack slot and return
@@ -1874,7 +1897,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     args.iter().map(|a| self.compile::<M>(a, false)).collect();
                 let (addr, count) = self.spill_args(&argvals);
                 let ctx = self.ctx_val;
-                self.call_shim(self.refs.apply, &[ctx, addr, count])
+                self.call_shim_checked(self.refs.apply, &[ctx, addr, count])
             }
             // Every other prim: compute args, escape to the runtime (the native
             // analogue of the bytecode tier's `Slow`).
@@ -1884,7 +1907,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let (addr, count) = self.spill_args(&argvals);
                 let tagv = self.i32const(prim_tag(*p));
                 let ctx = self.ctx_val;
-                self.call_shim(self.refs.prim, &[ctx, tagv, addr, count])
+                self.call_shim_checked(self.refs.prim, &[ctx, tagv, addr, count])
             }
             // Sequential `let`: push a fresh frame, fill its slots in order (each
             // init can see the earlier ones), run the body in it, then restore.
@@ -1950,7 +1973,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let sitev = self.i32const(*site as u32);
                 let methodv = self.i32const(*method);
                 let ctx = self.ctx_val;
-                self.call_shim(self.refs.dispatch, &[ctx, sitev, methodv, addr, count])
+                self.call_shim_checked(self.refs.dispatch, &[ctx, sitev, methodv, addr, count])
             }
             // Register a deftype/protocol method impl.
             Ir::DefMethod { name, ty, imp } => {
@@ -1971,7 +1994,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let cpv = self.fb.ins().iconst(I64, cp);
                 let fpv = self.fb.ins().iconst(I64, fp);
                 let ctx = self.ctx_val;
-                self.call_shim(self.refs.try_, &[ctx, bpv, cpv, fpv])
+                self.call_shim_checked(self.refs.try_, &[ctx, bpv, cpv, fpv])
             }
         }
     }
@@ -1982,7 +2005,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let (addr, count) = self.spill_args(args);
         let tagv = self.i32const(prim_tag(op));
         let ctx = self.ctx_val;
-        self.call_shim(self.refs.prim, &[ctx, tagv, addr, count])
+        self.call_shim_checked(self.refs.prim, &[ctx, tagv, addr, count])
     }
 
     /// Emit guarded arithmetic: the per-model fixnum fast path when both operands

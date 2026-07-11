@@ -55,10 +55,23 @@ use crate::value::{Cat, Frame, HeapId, Locals, Obj, RawTag, Sym, Val};
 /// with a real encoded value — reading it back means "not bound, use slow path".
 pub const GLOBAL_UNBOUND: u64 = u64::MAX;
 
-/// The panic payload of a `(throw v)`: the thrown runtime value, carried up the
-/// stack until an `Ir::Try` catches it. Neutral control-flow, not Clojure-specific.
-pub struct Thrown {
+/// Non-local control-flow signal for one thread. A `(throw v)` or an escape SETS
+/// this and returns a dummy value; every eval site checks `pending()` and
+/// short-circuits, bubbling the value up until an `Ir::Try` / `%callec` handles
+/// it. This replaces the old Rust-panic-based control flow: it is a plain branch
+/// (fast), correct under `panic = "abort"`, needs no global panic-hook swap, and
+/// the JIT lowers it natively (a load + conditional return after each call).
+///
+/// `#[repr(C)]` with `kind` first so the JIT can read the flag at
+/// `offset_of!(Runtime, signal)` with an `i8` load.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Signal {
+    /// 0 = none, 1 = throw, 2 = escape.
+    pub kind: u8,
     pub value: u64,
+    /// The escape-continuation tag (only meaningful when `kind == 2`).
+    pub tag: u64,
 }
 
 /// Objects per heap chunk. A power of two so index split is shift/mask.
@@ -268,6 +281,9 @@ pub struct Runtime<M: ValueModel> {
     pub(crate) env_stack: Vec<Locals>,
     /// This thread's slot in the STW registry (where it publishes roots to park).
     pub(crate) me: Arc<MutatorState>,
+    /// This thread's pending non-local control-flow signal (throw / escape). See
+    /// `Signal`. `kind == 0` in the common (no-signal) case.
+    pub(crate) signal: Signal,
     _pd: PhantomData<fn() -> M>,
 }
 
@@ -322,7 +338,7 @@ impl<M: ValueModel> Runtime<M> {
             ..shared
         });
         let me = register_mutator(&shared);
-        Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), me, _pd: PhantomData }
+        Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), _pd: PhantomData }
     }
 
     /// A fresh mutator handle for another OS thread, sharing this runtime's heap,
@@ -331,7 +347,7 @@ impl<M: ValueModel> Runtime<M> {
     /// a `std::thread`.
     pub fn thread_handle(&self) -> Self {
         let me = register_mutator(&self.shared);
-        Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), me, _pd: PhantomData }
+        Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), _pd: PhantomData }
     }
 
     // ── heap access (lock-free reads to stable addresses) ───
@@ -879,11 +895,11 @@ impl<M: ValueModel> Runtime<M> {
                 M::R::enc_sym(s)
             }
             Prim::Throw => {
-                // Unwind with the thrown VALUE as the payload, so an enclosing
-                // `Ir::Try` can catch it (via catch_unwind + downcast). Uncaught,
-                // it aborts like any panic. Neutral: the payload is a raw runtime
-                // value, not a Clojure exception object.
-                std::panic::panic_any(Thrown { value: args[0] });
+                // Set the thread's throw signal and return a dummy; the caller
+                // checks `pending()` and bubbles up to the nearest `Ir::Try`. No
+                // panic — a plain signal (see `Signal`).
+                self.signal_throw(args[0]);
+                self.enc_nil()
             }
             Prim::NFields => {
                 let n = match self.decode(args[0]) {
@@ -1015,6 +1031,45 @@ impl<M: ValueModel> Runtime<M> {
             panic!("field access on non-record");
         };
         fields[idx]
+    }
+
+    // ── non-local control-flow signal (throw / escape) ──────────────────────
+    /// Raise `(throw v)`: record the signal and return a dummy. The interpreter /
+    /// JIT checks `pending()` after the throwing expression and bubbles up.
+    pub fn signal_throw(&mut self, v: u64) {
+        self.signal = Signal { kind: 1, value: v, tag: 0 };
+    }
+    /// Raise a non-local escape to the `%callec` with `tag`.
+    pub fn signal_escape(&mut self, tag: u64, v: u64) {
+        self.signal = Signal { kind: 2, value: v, tag };
+    }
+    /// Is a control-flow signal in flight on this thread?
+    #[inline]
+    pub fn pending(&self) -> bool {
+        self.signal.kind != 0
+    }
+    /// Is the pending signal a `throw` (vs an escape)?
+    #[inline]
+    pub fn pending_throw(&self) -> bool {
+        self.signal.kind == 1
+    }
+    /// The pending signal's carried value (thrown value / escape value).
+    #[inline]
+    pub fn signal_value(&self) -> u64 {
+        self.signal.value
+    }
+    /// The pending escape's target tag (meaningful when `pending_escape()`).
+    #[inline]
+    pub fn signal_tag(&self) -> u64 {
+        self.signal.tag
+    }
+    /// Take + clear the pending signal (a handler consumed it).
+    pub fn take_signal(&mut self) -> Signal {
+        std::mem::take(&mut self.signal)
+    }
+    /// Byte offset of the `signal.kind` flag, for the JIT's inline pending-check.
+    pub fn signal_kind_offset() -> usize {
+        core::mem::offset_of!(Runtime<M>, signal) + core::mem::offset_of!(Signal, kind)
     }
 
     /// A deterministic 32-bit content hash of any value (for the HAMT). Equal

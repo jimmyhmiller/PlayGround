@@ -55,6 +55,7 @@ fn check_instruction(
     instruction: &Instruction,
     function: &Function,
     world: &World,
+    extra: &BTreeMap<DefId, (Vec<Type>, Type)>,
     regs: &[Option<Type>],
 ) -> Result<Option<(usize, Type)>, String> {
     match instruction {
@@ -114,28 +115,52 @@ fn check_instruction(
                 }
                 Ok(Some((*dst, Type::I64)))
             }
+            Instruction::MulI64 { dst, left, right } => {
+                if read(regs, *left)? != Type::I64 || read(regs, *right)? != Type::I64 {
+                    return Err("multiplication needs i64 operands".into());
+                }
+                Ok(Some((*dst, Type::I64)))
+            }
+            Instruction::EqI64 { dst, left, right } => {
+                if read(regs, *left)? != Type::I64 || read(regs, *right)? != Type::I64 {
+                    return Err("equality needs i64 operands".into());
+                }
+                Ok(Some((*dst, Type::Bool)))
+            }
+            Instruction::Not { dst, src } => {
+                if read(regs, *src)? != Type::Bool {
+                    return Err("negation needs a bool operand".into());
+                }
+                Ok(Some((*dst, Type::Bool)))
+            }
             Instruction::Call {
                 dst,
                 function: callee,
                 args,
             } => {
-                let version = world
-                    .current_functions
-                    .get(callee)
-                    .ok_or_else(|| format!("unknown function {callee}"))?;
-                let state = &world.functions[&(*callee, *version)];
-                let crate::FunctionState::Ready(callee) = state else {
-                    return Err(format!("callee {callee} is broken"));
+                // Resolve the callee's signature from the world (its current
+                // Ready version) or, failing that, from the batch of functions
+                // being installed together (`extra`) — which is how a call to a
+                // not-yet-installed function, including recursion, type-checks.
+                let (params, result) = if let Some(version) = world.current_functions.get(callee) {
+                    match &world.functions[&(*callee, *version)] {
+                        crate::FunctionState::Ready(f) => (f.params.clone(), f.result.clone()),
+                        _ => return Err(format!("callee {callee} is broken")),
+                    }
+                } else if let Some(sig) = extra.get(callee) {
+                    sig.clone()
+                } else {
+                    return Err(format!("unknown function {callee}"));
                 };
-                if args.len() != callee.params.len() {
+                if args.len() != params.len() {
                     return Err("wrong argument count".into());
                 }
-                for (arg, expected) in args.iter().zip(&callee.params) {
+                for (arg, expected) in args.iter().zip(&params) {
                     if read(regs, *arg)? != *expected {
                         return Err(format!("argument r{arg} has the wrong type"));
                     }
                 }
-                Ok(Some((*dst, callee.result.clone())))
+                Ok(Some((*dst, result)))
             }
         Instruction::LtI64 { dst, left, right } => {
             if read(regs, *left)? != Type::I64 || read(regs, *right)? != Type::I64 {
@@ -195,6 +220,18 @@ fn successors(instruction: &Instruction, pc: usize) -> Vec<usize> {
 /// dependency set, D7), so a schema change re-verifies only the functions that
 /// could be affected by it.
 pub fn verify_function(function: &Function, world: &World) -> Result<BTreeSet<DefId>, Vec<String>> {
+    verify_function_with(function, world, &BTreeMap::new())
+}
+
+/// Like [`verify_function`], but calls may also resolve against `extra` — the
+/// signatures of a batch of functions being installed together but not yet in
+/// the world. This is what lets a batch verify recursive and mutually-recursive
+/// calls (and removes any need to install callees before callers).
+pub fn verify_function_with(
+    function: &Function,
+    world: &World,
+    extra: &BTreeMap<DefId, (Vec<Type>, Type)>,
+) -> Result<BTreeSet<DefId>, Vec<String>> {
     let mut errors = Vec::new();
     if function.registers < function.params.len() {
         return Err(vec!["not enough registers for parameters".into()]);
@@ -219,7 +256,7 @@ pub fn verify_function(function: &Function, world: &World) -> Result<BTreeSet<De
             any_return = true;
         }
         let mut out = regs.clone();
-        match check_instruction(instruction, function, world, &regs) {
+        match check_instruction(instruction, function, world, extra, &regs) {
             Ok(Some((dst, ty))) if dst < out.len() => out[dst] = Some(ty),
             Ok(Some((dst, _))) => {
                 errors.push(format!("pc {pc}: destination r{dst} is out of bounds"));

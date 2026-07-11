@@ -18,6 +18,14 @@ inkwell = { git = "https://github.com/jimmyhmiller/inkwell", features = ["llvm21
 name = "livetype-demo"
 path = "src/main.rs"
 
+[[bin]]
+name = "livetype-poc"
+path = "src/poc.rs"
+
+[[bin]]
+name = "livetype-repl"
+path = "src/repl.rs"
+
 [workspace]
 members = ["crates/livetype-core"]
 

@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! struct Account { balance: i64, fee: i64 = 0 }
-//! fn charge(a: &Account, amt: i64) -> i64 {
+//! fn charge(a: Account, amt: i64) -> i64 {   // structs are GC references, no `&`
 //!     let b = a.balance;
 //!     return b - amt;
 //! }
@@ -22,7 +22,7 @@ mod parser;
 
 pub use ast::*;
 
-use crate::{DefId, Runtime, Schema, Type, verify_function};
+use crate::{DefId, Runtime, Schema, Type, Version, verify_function_with};
 use std::collections::{BTreeMap, HashMap};
 
 /// A compiled program: a runtime with every struct and function installed, plus
@@ -34,77 +34,116 @@ pub struct Compiled {
     pub structs: HashMap<String, DefId>,
 }
 
-/// Compile source text into a ready-to-run [`Runtime`].
+/// A live-programming session: a running [`Runtime`] plus the symbol table and
+/// version bookkeeping that let you `eval` more source *into it over time*. Each
+/// `eval` installs new versions of the definitions it names — driving migration,
+/// invalidation, and trap-and-repair on whatever is already running. This is the
+/// object behind the live-edit POC.
+pub struct Session {
+    pub runtime: Runtime,
+    ids: lower::IdEnv,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Session::new()
+    }
+}
+
+impl Session {
+    pub fn new() -> Session {
+        Session {
+            runtime: Runtime::default(),
+            ids: lower::IdEnv::new(),
+        }
+    }
+
+    pub fn struct_id(&self, name: &str) -> Option<DefId> {
+        self.ids.struct_of(name)
+    }
+    pub fn fn_id(&self, name: &str) -> Option<DefId> {
+        self.ids.fn_of(name)
+    }
+
+    /// Compile `source` and install its definitions as the next versions of
+    /// whatever they name — the live edit. Structs install first (in
+    /// reference-dependency order) so the functions in the same edit verify
+    /// against the new layouts; functions install as a batch so recursion and
+    /// forward references work.
+    pub fn eval(&mut self, source: &str) -> Result<(), String> {
+        let tokens = lexer::lex(source)?;
+        let program = parser::parse(tokens)?;
+        let lowered = lower::lower(&program, &mut self.ids)?;
+
+        let schema_by_id: BTreeMap<DefId, Schema> =
+            lowered.schemas.iter().map(|s| (s.type_id, s.clone())).collect();
+        let struct_deps: HashMap<DefId, Vec<DefId>> = lowered
+            .schemas
+            .iter()
+            .map(|s| {
+                let deps = s
+                    .fields
+                    .iter()
+                    .filter_map(|f| match f.ty {
+                        Type::Ref(t) if t != s.type_id => Some(t),
+                        _ => None,
+                    })
+                    .collect();
+                (s.type_id, deps)
+            })
+            .collect();
+        for id in topo(schema_by_id.keys().copied().collect(), &struct_deps)
+            .map_err(|_| "structs reference each other cyclically (not supported)".to_string())?
+        {
+            let mut schema = schema_by_id[&id].clone();
+            // Next version follows the runtime's current one — which may already
+            // have advanced (e.g. a prior edit's `invalidate` bumped it).
+            let v = self.runtime.world.current_schemas.get(&id).map_or(1, |c| c.0 + 1);
+            schema.version = Version(v);
+            self.runtime
+                .install_schema(schema)
+                .map_err(|e| format!("installing a struct: {e:?}"))?;
+        }
+
+        let sigs: BTreeMap<DefId, (Vec<Type>, Type)> = lowered
+            .functions
+            .iter()
+            .map(|f| (f.id, (f.params.clone(), f.result.clone())))
+            .collect();
+        for func in &lowered.functions {
+            let mut func = func.clone();
+            // Next version follows the runtime's current one (which invalidation
+            // may have bumped to a Broken version behind our back).
+            let v = self
+                .runtime
+                .world
+                .current_functions
+                .get(&func.id)
+                .map_or(1, |c| c.0 + 1);
+            func.version = Version(v);
+            let deps = verify_function_with(&func, &self.runtime.world, &sigs)
+                .map_err(|diags| format!("in `{}`: {}", func.name, diags.join("; ")))?;
+            self.runtime
+                .install_verified_function(func, deps)
+                .map_err(|e| format!("installing a function: {e:?}"))?;
+        }
+        Ok(())
+    }
+
+    fn maps(&self) -> (HashMap<String, DefId>, HashMap<String, DefId>) {
+        (self.ids.fn_map(), self.ids.struct_map())
+    }
+}
+
+/// Compile source text into a ready-to-run [`Runtime`] (a one-shot [`Session`]).
 pub fn compile(source: &str) -> Result<Compiled, String> {
-    let tokens = lexer::lex(source)?;
-    let program = parser::parse(tokens)?;
-    let lowered = lower::lower(&program)?;
-
-    let mut rt = Runtime::default();
-
-    // Install structs in dependency order: a struct that references another
-    // must be installed after it (self-references are fine).
-    let schema_by_id: BTreeMap<DefId, Schema> =
-        lowered.schemas.iter().map(|s| (s.type_id, s.clone())).collect();
-    let struct_deps: HashMap<DefId, Vec<DefId>> = lowered
-        .schemas
-        .iter()
-        .map(|s| {
-            let deps = s
-                .fields
-                .iter()
-                .filter_map(|f| match f.ty {
-                    Type::Ref(t) if t != s.type_id => Some(t),
-                    _ => None,
-                })
-                .collect();
-            (s.type_id, deps)
-        })
-        .collect();
-    for id in topo(schema_by_id.keys().copied().collect(), &struct_deps)
-        .map_err(|_| "structs reference each other cyclically (not supported)".to_string())?
-    {
-        rt.install_schema(schema_by_id[&id].clone())
-            .map_err(|e| format!("installing a struct: {e:?}"))?;
-    }
-
-    // Install functions in call-graph order: a callee before its caller (so it
-    // is Ready when the caller is verified). A cycle is recursion, unsupported.
-    let fn_by_id: BTreeMap<DefId, &crate::Function> =
-        lowered.functions.iter().map(|f| (f.id, f)).collect();
-    let fn_deps: HashMap<DefId, Vec<DefId>> = lowered
-        .functions
-        .iter()
-        .map(|f| {
-            let mut callees: Vec<DefId> = f
-                .code
-                .iter()
-                .filter_map(|i| match i {
-                    crate::Instruction::Call { function, .. } => Some(*function),
-                    _ => None,
-                })
-                .collect();
-            callees.sort_unstable();
-            callees.dedup();
-            (f.id, callees)
-        })
-        .collect();
-    for id in topo(fn_by_id.keys().copied().collect(), &fn_deps)
-        .map_err(|_| "recursion is not supported yet (use a `while` loop)".to_string())?
-    {
-        let func = fn_by_id[&id];
-        // Verify first so a type error is a clean compile error rather than a
-        // silently-Broken function version.
-        verify_function(func, &rt.world)
-            .map_err(|diags| format!("in `{}`: {}", func.name, diags.join("; ")))?;
-        rt.install_function((*func).clone())
-            .map_err(|e| format!("installing `{}`: {e:?}", func.name))?;
-    }
-
+    let mut session = Session::new();
+    session.eval(source)?;
+    let (functions, structs) = session.maps();
     Ok(Compiled {
-        runtime: rt,
-        functions: lowered.fn_ids,
-        structs: lowered.struct_ids,
+        runtime: session.runtime,
+        functions,
+        structs,
     })
 }
 

@@ -32,8 +32,12 @@ pub fn resume_shape(
     world: &World,
 ) -> Result<(Type, ResumePlan), String> {
     Ok(match instruction {
-        Instruction::SubI64 { dst, .. } => (Type::I64, ResumePlan::SetAdvance(*dst)),
-        Instruction::LtI64 { dst, .. } => (Type::Bool, ResumePlan::SetAdvance(*dst)),
+        Instruction::AddI64 { dst, .. } | Instruction::SubI64 { dst, .. } | Instruction::MulI64 { dst, .. } => {
+            (Type::I64, ResumePlan::SetAdvance(*dst))
+        }
+        Instruction::LtI64 { dst, .. } | Instruction::EqI64 { dst, .. } | Instruction::Not { dst, .. } => {
+            (Type::Bool, ResumePlan::SetAdvance(*dst))
+        }
         Instruction::Branch {
             then_pc, else_pc, ..
         } => (Type::Bool, ResumePlan::Branch(*then_pc, *else_pc)),
@@ -57,7 +61,10 @@ pub fn resume_shape(
 // driver's `OUT_TYPE_ERROR` path produce byte-identical conditions.
 pub(crate) const ERR_ADD_NON_I64: &str = "addition on non-i64";
 pub(crate) const ERR_SUB_NON_I64: &str = "subtraction on non-i64";
+pub(crate) const ERR_MUL_NON_I64: &str = "multiplication on non-i64";
 pub(crate) const ERR_LT_NON_I64: &str = "comparison on non-i64";
+pub(crate) const ERR_EQ_NON_I64: &str = "equality on non-i64";
+pub(crate) const ERR_NOT_NON_BOOL: &str = "negation on non-bool";
 pub(crate) const ERR_BRANCH_NON_BOOL: &str = "branch on non-bool";
 
 #[derive(Debug, Default)]
@@ -230,6 +237,37 @@ impl Runtime {
         Ok(())
     }
 
+    /// Install a function that has already been verified elsewhere, with its
+    /// dependency set (`deps`) supplied — used by the frontend's batch install,
+    /// where a group of functions (possibly mutually recursive) are verified
+    /// together against each other's signatures and cannot pass the per-function
+    /// callee-is-Ready check of [`Runtime::install_function`]. Trusts the caller
+    /// verified it; installs it Ready.
+    pub fn install_verified_function(
+        &mut self,
+        function: Function,
+        deps: std::collections::BTreeSet<DefId>,
+    ) -> Result<(), InstallError> {
+        let expected = self
+            .world
+            .current_functions
+            .get(&function.id)
+            .map_or(Version(1), |v| Version(v.0 + 1));
+        if function.version != expected {
+            return Err(InstallError::BadVersion);
+        }
+        let id = function.id;
+        let version = function.version;
+        self.world.function_deps.insert(id, deps);
+        self.world
+            .functions
+            .insert((id, version), FunctionState::Ready(function));
+        self.world.current_functions.insert(id, version);
+        self.world.epoch += 1;
+        self.resume_repaired();
+        Ok(())
+    }
+
     pub fn spawn(&mut self, function: DefId, args: Vec<Value>) -> Result<ActorId, Condition> {
         let version = *self.world.current_functions.get(&function).ok_or_else(|| {
             Condition::BrokenFunction {
@@ -378,6 +416,14 @@ impl Runtime {
                 };
                 self.write_and_advance(actor, dst, Value::I64(a - b));
             }
+            Instruction::MulI64 { dst, left, right } => {
+                let (Value::I64(a), Value::I64(b)) =
+                    (self.reg(actor, left)?, self.reg(actor, right)?)
+                else {
+                    return Err(self.type_error(function, pc, ERR_MUL_NON_I64));
+                };
+                self.write_and_advance(actor, dst, Value::I64(a * b));
+            }
             Instruction::LtI64 { dst, left, right } => {
                 let (Value::I64(a), Value::I64(b)) =
                     (self.reg(actor, left)?, self.reg(actor, right)?)
@@ -385,6 +431,20 @@ impl Runtime {
                     return Err(self.type_error(function, pc, ERR_LT_NON_I64));
                 };
                 self.write_and_advance(actor, dst, Value::Bool(a < b));
+            }
+            Instruction::EqI64 { dst, left, right } => {
+                let (Value::I64(a), Value::I64(b)) =
+                    (self.reg(actor, left)?, self.reg(actor, right)?)
+                else {
+                    return Err(self.type_error(function, pc, ERR_EQ_NON_I64));
+                };
+                self.write_and_advance(actor, dst, Value::Bool(a == b));
+            }
+            Instruction::Not { dst, src } => {
+                let Value::Bool(b) = self.reg(actor, src)? else {
+                    return Err(self.type_error(function, pc, ERR_NOT_NON_BOOL));
+                };
+                self.write_and_advance(actor, dst, Value::Bool(!b));
             }
             Instruction::Jump { target } => {
                 self.frame_mut(actor).pc = target;
@@ -643,7 +703,10 @@ impl Runtime {
         let message = match instruction {
             Instruction::AddI64 { .. } => ERR_ADD_NON_I64,
             Instruction::SubI64 { .. } => ERR_SUB_NON_I64,
+            Instruction::MulI64 { .. } => ERR_MUL_NON_I64,
             Instruction::LtI64 { .. } => ERR_LT_NON_I64,
+            Instruction::EqI64 { .. } => ERR_EQ_NON_I64,
+            Instruction::Not { .. } => ERR_NOT_NON_BOOL,
             Instruction::Branch { .. } => ERR_BRANCH_NON_BOOL,
             _ => "operand type mismatch",
         };

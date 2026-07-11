@@ -42,11 +42,6 @@ pub trait CodeSpace<M: ValueModel> {
     fn invoke(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, callee: u64, args: &[u64]) -> u64;
 }
 
-/// The panic payload carrying a non-local escape back to its `%callec`.
-struct EscapeSignal {
-    tag: u64,
-    value: u64,
-}
 
 /// The interpreter tier.
 #[derive(Clone, Copy)]
@@ -69,11 +64,17 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
             },
             Ir::SetLocal { up, idx, val } => {
                 let v = top.eval_ir(top, rt, val, locals);
+                if rt.pending() {
+                    return v;
+                }
                 frame_set(locals, *up, *idx, v);
                 v
             }
             Ir::SetGlobal { name, val } => {
                 let v = top.eval_ir(top, rt, val, locals);
+                if rt.pending() {
+                    return v;
+                }
                 if !rt.set_global_val(*name, v) {
                     panic!("set!: unbound variable: {}", rt.sym_name(*name));
                 }
@@ -81,6 +82,9 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
             }
             Ir::If(c, t, e) => {
                 let cv = top.eval_ir(top, rt, c, locals);
+                if rt.pending() {
+                    return cv;
+                }
                 if M::truthy(rt.decode(cv)) {
                     top.eval_ir(top, rt, t, locals)
                 } else {
@@ -91,11 +95,17 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 let mut r = rt.encode(Val::Nil);
                 for x in xs {
                     r = top.eval_ir(top, rt, x, locals);
+                    if rt.pending() {
+                        return r; // a throw/escape short-circuits the sequence
+                    }
                 }
                 r
             }
             Ir::Def { name, init } => {
                 let v = top.eval_ir(top, rt, init, locals);
+                if rt.pending() {
+                    return v;
+                }
                 rt.define_global(*name, v);
                 rt.encode(Val::Sym(*name))
             }
@@ -109,6 +119,9 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 }));
                 for iexpr in inits {
                     let v = top.eval_ir(top, rt, iexpr, &cur);
+                    if rt.pending() {
+                        return v;
+                    }
                     let prev = cur.as_ref().unwrap();
                     let mut slots = clone_slots(&prev.slots);
                     slots.push(AtomicU64::new(v));
@@ -142,9 +155,16 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 // safepoint reached while we evaluate a LATER argument) would
                 // relocate. Publish each on the shadow stack and re-read after.
                 let fv = top.eval_ir(top, rt, f, locals);
+                if rt.pending() {
+                    return fv;
+                }
                 let base = rt.push_root(fv);
                 for a in args {
                     let v = top.eval_ir(top, rt, a, locals);
+                    if rt.pending() {
+                        rt.truncate_roots(base);
+                        return v;
+                    }
                     rt.push_root(v);
                 }
                 let fvr = rt.root_get(base);
@@ -200,77 +220,61 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
             // then proceed). (The plain-`prim` `Await` is the single-thread path.)
             Ir::Prim(Prim::Await, args) => {
                 let fut = top.eval_ir(top, rt, &args[0], locals);
+                if rt.pending() {
+                    return fut;
+                }
                 rt.await_future(fut, locals)
             }
-            // `(%callec f)`: call f with a fresh escape continuation. Invoking
-            // the continuation unwinds (a panic carrying the tag) back here; f
-            // returning normally is the result. Escape-only (one-shot upward);
-            // full multi-shot continuations would need CPS or stack copying.
+            // `(%callec f)`: call f with a fresh escape continuation. Invoking the
+            // continuation sets an ESCAPE signal carrying this call's tag; f
+            // returning normally is the result. Escape-only (one-shot, upward).
             Ir::Prim(Prim::CallEc, args) => {
                 let f = top.eval_ir(top, rt, &args[0], locals);
+                if rt.pending() {
+                    return f;
+                }
                 let tag = rt.fresh_escape_tag();
                 let kid = rt.alloc(Obj::Escape { tag });
                 let kref = M::R::enc_ref(kid);
-                let prev = std::panic::take_hook();
-                std::panic::set_hook(Box::new(|_| {})); // escapes are not errors
-                let res = {
-                    let rt2 = &mut *rt;
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                        top.invoke(top, rt2, f, &[kref])
-                    }))
-                };
-                std::panic::set_hook(prev);
-                match res {
-                    Ok(v) => v,
-                    Err(payload) => match payload.downcast::<EscapeSignal>() {
-                        Ok(sig) if sig.tag == tag => sig.value, // caught our escape
-                        Ok(sig) => std::panic::resume_unwind(sig), // a different escape
-                        Err(other) => std::panic::resume_unwind(other), // a real panic
-                    },
+                let v = top.invoke(top, rt, f, &[kref]);
+                // Caught our escape? (kind 2 == escape, matching tag.)
+                if rt.signal.kind == 2 && rt.signal_tag() == tag {
+                    return rt.take_signal().value;
                 }
+                v // normal return, or a throw / other escape that keeps propagating
             }
             Ir::Try { body, catch, finally } => {
-                let prev = std::panic::take_hook();
-                std::panic::set_hook(Box::new(|_| {})); // a caught throw is not an error
-                let res = {
-                    let rt2 = &mut *rt;
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                        top.eval_ir(top, rt2, body, locals)
-                    }))
-                };
-                std::panic::set_hook(prev);
-                let outcome = match res {
-                    Ok(v) => Ok(v),
-                    Err(payload) => match payload.downcast::<crate::runtime::Thrown>() {
-                        // Our throw: run the catch handler with the value bound in
-                        // a fresh one-slot frame (Local{up:0,idx:0}).
-                        Ok(t) => match catch {
-                            Some(cbody) => {
-                                let frame: Locals = Some(Arc::new(Frame {
-                                    slots: vec![AtomicU64::new(t.value)],
-                                    parent: locals.clone(),
-                                }));
-                                // Root the thrown value across the handler's evals.
-                                Ok(top.eval_ir(top, rt, cbody, &frame))
-                            }
-                            None => Err(Box::new(*t) as Box<dyn std::any::Any + Send>),
-                        },
-                        // Some other unwind (a real panic, an escape signal): after
-                        // running `finally`, re-raise it.
-                        Err(other) => Err(other),
-                    },
-                };
+                let mut result = top.eval_ir(top, rt, body, locals);
+                // Catch a THROW (kind 1) if there is a handler; escapes pass through.
+                if rt.pending_throw() {
+                    if let Some(cbody) = catch {
+                        let thrown = rt.take_signal().value;
+                        let frame: Locals = Some(Arc::new(Frame {
+                            slots: vec![AtomicU64::new(thrown)],
+                            parent: locals.clone(),
+                        }));
+                        result = top.eval_ir(top, rt, cbody, &frame); // may re-raise
+                    }
+                    // no catch: the throw signal stays pending and propagates below
+                }
+                // `finally` runs on every path; a signal IT raises supersedes, else
+                // the suspended throw/escape (if any) is restored.
                 if let Some(fbody) = finally {
-                    top.eval_ir(top, rt, fbody, locals);
+                    let suspended = rt.take_signal();
+                    let fv = top.eval_ir(top, rt, fbody, locals);
+                    if rt.pending() {
+                        return fv;
+                    }
+                    rt.signal = suspended;
                 }
-                match outcome {
-                    Ok(v) => v,
-                    Err(payload) => std::panic::resume_unwind(payload),
-                }
+                result
             }
             Ir::FieldGet { site, field, obj } => {
                 // No allocation between eval and the field read, so no rooting.
                 let o = top.eval_ir(top, rt, obj, locals);
+                if rt.pending() {
+                    return o;
+                }
                 rt.field_get(*site, *field, o)
             }
             Ir::Prim(Prim::Apply, args) => {
@@ -282,6 +286,10 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 let base = rt.root_depth();
                 for a in args {
                     let v = top.eval_ir(top, rt, a, locals);
+                    if rt.pending() {
+                        rt.truncate_roots(base);
+                        return v;
+                    }
                     rt.push_root(v);
                 }
                 let argv: Vec<u64> = (0..args.len()).map(|i| rt.root_get(base + i)).collect();
@@ -300,14 +308,22 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 let base = rt.root_depth();
                 for a in args {
                     let v = top.eval_ir(top, rt, a, locals);
+                    if rt.pending() {
+                        rt.truncate_roots(base);
+                        return v;
+                    }
                     rt.push_root(v);
                 }
                 let argv: Vec<u64> = (0..args.len()).map(|i| rt.root_get(base + i)).collect();
                 rt.truncate_roots(base);
+                // `Throw` sets the signal here; the returned dummy propagates up.
                 rt.prim(*op, &argv)
             }
             Ir::DefMethod { name, ty, imp } => {
                 let c = top.eval_ir(top, rt, imp, locals);
+                if rt.pending() {
+                    return c;
+                }
                 rt.register_method(*name, *ty, c);
                 rt.encode(Val::Nil)
             }
@@ -316,6 +332,10 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 let base = rt.root_depth();
                 for a in args {
                     let v = top.eval_ir(top, rt, a, locals);
+                    if rt.pending() {
+                        rt.truncate_roots(base);
+                        return v;
+                    }
                     rt.push_root(v);
                 }
                 let argv: Vec<u64> = (0..args.len()).map(|i| rt.root_get(base + i)).collect();
@@ -371,12 +391,12 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                     env,
                 } => (*nparams, *variadic, body.clone(), env.clone()),
                 Obj::Escape { tag } => {
-                    // Invoking an escape continuation: unwind to its `%callec`.
-                    let sig = EscapeSignal {
-                        tag: *tag,
-                        value: args.first().copied().unwrap_or_else(M::R::enc_nil),
-                    };
-                    std::panic::panic_any(sig);
+                    // Invoking an escape continuation: raise an ESCAPE signal to its
+                    // `%callec`; the dummy return propagates up like any signal.
+                    let tag = *tag;
+                    let v = args.first().copied().unwrap_or_else(M::R::enc_nil);
+                    rt.signal_escape(tag, v);
+                    return M::R::enc_nil();
                 }
                 _ => panic!("value not callable: {}", rt.print(callee)),
             };
@@ -384,6 +404,10 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
             match eval_tail(top, rt, &body, &frame) {
                 Bounce::Done(v) => return v,
                 Bounce::Tail(next, next_args) => {
+                    // A signal raised while evaluating the tail call's args: stop.
+                    if rt.pending() {
+                        return next;
+                    }
                     callee = next;
                     args = next_args;
                 }
@@ -412,6 +436,9 @@ fn eval_tail<M: ValueModel>(
     match ir {
         Ir::If(c, t, e) => {
             let cv = top.eval_ir(top, rt, c, locals);
+            if rt.pending() {
+                return Bounce::Done(cv);
+            }
             if M::truthy(rt.decode(cv)) {
                 eval_tail(top, rt, t, locals)
             } else {
@@ -422,7 +449,10 @@ fn eval_tail<M: ValueModel>(
             None => Bounce::Done(rt.encode(Val::Nil)),
             Some((last, init)) => {
                 for x in init {
-                    top.eval_ir(top, rt, x, locals);
+                    let v = top.eval_ir(top, rt, x, locals);
+                    if rt.pending() {
+                        return Bounce::Done(v);
+                    }
                 }
                 eval_tail(top, rt, last, locals)
             }
@@ -434,6 +464,9 @@ fn eval_tail<M: ValueModel>(
             }));
             for iexpr in inits {
                 let v = top.eval_ir(top, rt, iexpr, &cur);
+                if rt.pending() {
+                    return Bounce::Done(v);
+                }
                 let prev = cur.as_ref().unwrap();
                 let mut slots = clone_slots(&prev.slots);
                 slots.push(AtomicU64::new(v));
@@ -450,9 +483,16 @@ fn eval_tail<M: ValueModel>(
             // (fired at a nested safepoint) would relocate — and they escape this
             // frame in the `Bounce::Tail`, so they must be re-read after.
             let callee = top.eval_ir(top, rt, f, locals);
+            if rt.pending() {
+                return Bounce::Done(callee);
+            }
             let base = rt.push_root(callee);
             for a in args {
                 let v = top.eval_ir(top, rt, a, locals);
+                if rt.pending() {
+                    rt.truncate_roots(base);
+                    return Bounce::Done(v);
+                }
                 rt.push_root(v);
             }
             let calleer = rt.root_get(base);
@@ -464,6 +504,10 @@ fn eval_tail<M: ValueModel>(
             let base = rt.root_depth();
             for a in args {
                 let v = top.eval_ir(top, rt, a, locals);
+                if rt.pending() {
+                    rt.truncate_roots(base);
+                    return Bounce::Done(v);
+                }
                 rt.push_root(v);
             }
             let argv: Vec<u64> = (0..args.len()).map(|i| rt.root_get(base + i)).collect();

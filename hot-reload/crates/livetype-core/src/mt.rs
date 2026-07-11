@@ -381,6 +381,15 @@ impl Shared {
                     t.regs[dst] = Some(Value::I64(a - b));
                     t.pc += 1;
                 }
+                Instruction::MulI64 { dst, left, right } => {
+                    let (Value::I64(a), Value::I64(b)) = (read(&frames, left), read(&frames, right))
+                    else {
+                        return err(crate::runtime::ERR_MUL_NON_I64);
+                    };
+                    let t = frames.last_mut().unwrap();
+                    t.regs[dst] = Some(Value::I64(a * b));
+                    t.pc += 1;
+                }
                 Instruction::LtI64 { dst, left, right } => {
                     let (Value::I64(a), Value::I64(b)) = (read(&frames, left), read(&frames, right))
                     else {
@@ -388,6 +397,23 @@ impl Shared {
                     };
                     let t = frames.last_mut().unwrap();
                     t.regs[dst] = Some(Value::Bool(a < b));
+                    t.pc += 1;
+                }
+                Instruction::EqI64 { dst, left, right } => {
+                    let (Value::I64(a), Value::I64(b)) = (read(&frames, left), read(&frames, right))
+                    else {
+                        return err(crate::runtime::ERR_EQ_NON_I64);
+                    };
+                    let t = frames.last_mut().unwrap();
+                    t.regs[dst] = Some(Value::Bool(a == b));
+                    t.pc += 1;
+                }
+                Instruction::Not { dst, src } => {
+                    let Value::Bool(b) = read(&frames, src) else {
+                        return err(crate::runtime::ERR_NOT_NON_BOOL);
+                    };
+                    let t = frames.last_mut().unwrap();
+                    t.regs[dst] = Some(Value::Bool(!b));
                     t.pc += 1;
                 }
                 Instruction::Branch {

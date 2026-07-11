@@ -455,6 +455,14 @@ impl<'ctx> Codegen<'ctx> {
                     self.store_slot(frame, *dst, i64t.const_int(TAG_I64 as u64, false), r);
                     fallthrough();
                 }
+                Instruction::MulI64 { dst, left, right } => {
+                    self.guard_tags(step, frame, pc, &[(*left, TAG_I64), (*right, TAG_I64)]);
+                    let a = self.payload_of(frame, *left);
+                    let b = self.payload_of(frame, *right);
+                    let r = self.builder.build_int_mul(a, b, "mul").unwrap();
+                    self.store_slot(frame, *dst, i64t.const_int(TAG_I64 as u64, false), r);
+                    fallthrough();
+                }
                 Instruction::LtI64 { dst, left, right } => {
                     self.guard_tags(step, frame, pc, &[(*left, TAG_I64), (*right, TAG_I64)]);
                     let a = self.payload_of(frame, *left);
@@ -464,6 +472,27 @@ impl<'ctx> Codegen<'ctx> {
                         .build_int_compare(IntPredicate::SLT, a, b, "lt")
                         .unwrap();
                     let r = self.builder.build_int_z_extend(lt, i64t, "ltz").unwrap();
+                    self.store_slot(frame, *dst, i64t.const_int(TAG_BOOL as u64, false), r);
+                    fallthrough();
+                }
+                Instruction::EqI64 { dst, left, right } => {
+                    self.guard_tags(step, frame, pc, &[(*left, TAG_I64), (*right, TAG_I64)]);
+                    let a = self.payload_of(frame, *left);
+                    let b = self.payload_of(frame, *right);
+                    let eq = self
+                        .builder
+                        .build_int_compare(IntPredicate::EQ, a, b, "eq")
+                        .unwrap();
+                    let r = self.builder.build_int_z_extend(eq, i64t, "eqz").unwrap();
+                    self.store_slot(frame, *dst, i64t.const_int(TAG_BOOL as u64, false), r);
+                    fallthrough();
+                }
+                Instruction::Not { dst, src } => {
+                    self.guard_tags(step, frame, pc, &[(*src, TAG_BOOL)]);
+                    // Bool payload is 0/1; flip it.
+                    let v = self.payload_of(frame, *src);
+                    let one = i64t.const_int(1, false);
+                    let r = self.builder.build_xor(v, one, "not").unwrap();
                     self.store_slot(frame, *dst, i64t.const_int(TAG_BOOL as u64, false), r);
                     fallthrough();
                 }

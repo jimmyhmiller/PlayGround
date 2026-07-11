@@ -68,21 +68,17 @@ impl Parser {
     }
 
     fn type_expr(&mut self) -> Result<TypeExpr, String> {
-        if self.eat(&Tok::Amp) {
-            return Ok(TypeExpr::Ref(self.ident()?));
-        }
         if self.eat(&Tok::LParen) {
             self.expect(&Tok::RParen)?;
             return Ok(TypeExpr::Unit);
         }
-        match self.ident()?.as_str() {
-            "i64" => Ok(TypeExpr::I64),
-            "bool" => Ok(TypeExpr::Bool),
-            other => Err(format!(
-                "line {}: unknown type `{other}` (write `&{other}` for a struct reference)",
-                self.line()
-            )),
-        }
+        // A bare struct name is a reference — we are garbage-collected, so every
+        // struct value is a heap reference (there is no borrow/own distinction).
+        Ok(match self.ident()?.as_str() {
+            "i64" => TypeExpr::I64,
+            "bool" => TypeExpr::Bool,
+            name => TypeExpr::Ref(name.to_string()),
+        })
     }
 
     fn struct_def(&mut self) -> Result<StructDef, String> {
@@ -136,7 +132,31 @@ impl Parser {
         self.expect(&Tok::LBrace)?;
         let mut stmts = Vec::new();
         while !self.at(&Tok::RBrace) {
-            stmts.push(self.stmt()?);
+            // Keyword and assignment statements self-terminate; a bare
+            // expression is either a `;`-terminated statement or, if it's the
+            // last thing in the block, a tail expression (implicit return).
+            let is_keyword_stmt = matches!(
+                self.peek(),
+                Tok::Let | Tok::Return | Tok::Emit | Tok::Yield | Tok::If | Tok::While
+            );
+            let is_assign = matches!(self.peek(), Tok::Ident(_))
+                && matches!(self.tokens[self.pos + 1].tok, Tok::Eq);
+            if is_keyword_stmt || is_assign {
+                stmts.push(self.stmt()?);
+            } else {
+                let e = self.expr(true)?;
+                if self.eat(&Tok::Semi) {
+                    stmts.push(Stmt::Expr(e));
+                } else if self.at(&Tok::RBrace) {
+                    stmts.push(Stmt::Return(e)); // tail expression
+                } else {
+                    return Err(format!(
+                        "line {}: expected `;` or `}}` after expression, found {:?}",
+                        self.line(),
+                        self.peek()
+                    ));
+                }
+            }
         }
         self.expect(&Tok::RBrace)?;
         Ok(stmts)
@@ -192,20 +212,28 @@ impl Parser {
                 self.expect(&Tok::Semi)?;
                 Ok(Stmt::Assign { name, value })
             }
-            _ => {
-                let e = self.expr(true)?;
-                self.expect(&Tok::Semi)?;
-                Ok(Stmt::Expr(e))
-            }
+            other => Err(format!(
+                "line {}: unexpected {other:?} at the start of a statement",
+                self.line()
+            )),
         }
     }
 
-    // expr := comparison ; comparison := additive ((< | >) additive)* ;
-    // additive := postfix ((+ | -) postfix)*
+    // Precedence (loosest first): comparison < additive < multiplicative <
+    // unary < postfix < primary.
     fn expr(&mut self, allow_struct: bool) -> Result<Expr, String> {
         let mut left = self.additive(allow_struct)?;
-        while matches!(self.peek(), Tok::Lt | Tok::Gt) {
-            let op = if self.eat(&Tok::Lt) { BinOp::Lt } else { self.expect(&Tok::Gt).map(|_| ())?; BinOp::Gt };
+        loop {
+            let op = match self.peek() {
+                Tok::Lt => BinOp::Lt,
+                Tok::Gt => BinOp::Gt,
+                Tok::Le => BinOp::Le,
+                Tok::Ge => BinOp::Ge,
+                Tok::EqEq => BinOp::Eq,
+                Tok::BangEq => BinOp::Ne,
+                _ => break,
+            };
+            self.bump();
             let right = self.additive(allow_struct)?;
             left = Expr::Binary { op, left: Box::new(left), right: Box::new(right) };
         }
@@ -213,7 +241,7 @@ impl Parser {
     }
 
     fn additive(&mut self, allow_struct: bool) -> Result<Expr, String> {
-        let mut left = self.postfix(allow_struct)?;
+        let mut left = self.multiplicative(allow_struct)?;
         loop {
             let op = match self.peek() {
                 Tok::Plus => BinOp::Add,
@@ -221,10 +249,27 @@ impl Parser {
                 _ => break,
             };
             self.bump();
-            let right = self.postfix(allow_struct)?;
+            let right = self.multiplicative(allow_struct)?;
             left = Expr::Binary { op, left: Box::new(left), right: Box::new(right) };
         }
         Ok(left)
+    }
+
+    fn multiplicative(&mut self, allow_struct: bool) -> Result<Expr, String> {
+        let mut left = self.unary(allow_struct)?;
+        while self.at(&Tok::Star) {
+            self.bump();
+            let right = self.unary(allow_struct)?;
+            left = Expr::Binary { op: BinOp::Mul, left: Box::new(left), right: Box::new(right) };
+        }
+        Ok(left)
+    }
+
+    fn unary(&mut self, allow_struct: bool) -> Result<Expr, String> {
+        if self.eat(&Tok::Bang) {
+            return Ok(Expr::Not(Box::new(self.unary(allow_struct)?)));
+        }
+        self.postfix(allow_struct)
     }
 
     fn postfix(&mut self, allow_struct: bool) -> Result<Expr, String> {
@@ -249,12 +294,6 @@ impl Parser {
             Tok::False => {
                 self.bump();
                 Ok(Expr::Bool(false))
-            }
-            Tok::Amp => {
-                // `&expr` — a reference-taking marker; structs are already
-                // references, so it's accepted and ignored (Rust-flavored sugar).
-                self.bump();
-                self.primary(allow_struct)
             }
             Tok::LParen => {
                 self.bump();

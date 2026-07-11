@@ -28,11 +28,16 @@ pub enum Tok {
     Comma,
     Dot,
     Eq,
-    Amp,
+    EqEq,
+    BangEq,
+    Bang,
     Plus,
     Minus,
+    Star,
     Lt,
+    Le,
     Gt,
+    Ge,
     Arrow, // ->
     Eof,
 }
@@ -69,11 +74,12 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             ';' => push(&mut out, Tok::Semi, line, &mut i),
             ',' => push(&mut out, Tok::Comma, line, &mut i),
             '.' => push(&mut out, Tok::Dot, line, &mut i),
-            '=' => push(&mut out, Tok::Eq, line, &mut i),
-            '&' => push(&mut out, Tok::Amp, line, &mut i),
             '+' => push(&mut out, Tok::Plus, line, &mut i),
-            '<' => push(&mut out, Tok::Lt, line, &mut i),
-            '>' => push(&mut out, Tok::Gt, line, &mut i),
+            '*' => push(&mut out, Tok::Star, line, &mut i),
+            '=' => two(&mut out, bytes, &mut i, line, b'=', Tok::EqEq, Tok::Eq),
+            '!' => two(&mut out, bytes, &mut i, line, b'=', Tok::BangEq, Tok::Bang),
+            '<' => two(&mut out, bytes, &mut i, line, b'=', Tok::Le, Tok::Lt),
+            '>' => two(&mut out, bytes, &mut i, line, b'=', Tok::Ge, Tok::Gt),
             '-' => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'>' {
                     out.push(Token { tok: Tok::Arrow, line });
@@ -126,4 +132,16 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
 fn push(out: &mut Vec<Token>, tok: Tok, line: usize, i: &mut usize) {
     out.push(Token { tok, line });
     *i += 1;
+}
+
+/// Lex a one-or-two character token: if the next byte is `second`, emit `two`
+/// (consuming both); otherwise emit `one`.
+fn two(out: &mut Vec<Token>, bytes: &[u8], i: &mut usize, line: usize, second: u8, two: Tok, one: Tok) {
+    if *i + 1 < bytes.len() && bytes[*i + 1] == second {
+        out.push(Token { tok: two, line });
+        *i += 2;
+    } else {
+        out.push(Token { tok: one, line });
+        *i += 1;
+    }
 }

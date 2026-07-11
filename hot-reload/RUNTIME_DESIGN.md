@@ -72,18 +72,42 @@ Programs are no longer hand-built IR: `crates/livetype-core/src/frontend/`
 (lexer → parser → lower) compiles a Rust-shaped surface syntax to the IR.
 `struct Name { field: Type = default? }` becomes a `Schema`; `fn name(p: T, …)
 -> R { … }` becomes a `Function`. The body language has `let`, assignment,
-`if`/`else`, `while`, `return`, `emit`, struct literals, field access `a.b.c`,
-calls, and `+ - < >`. Types are `i64`, `bool`, `()`, and `&Struct` (all struct
-values are references). Lowering gives locals fixed registers (this IR has no
-phi), sub-expressions fresh temporaries, and emits control flow with symbolic
-labels patched to program counters; structs and functions install in
-dependency order, so a bad type or a recursive call is a clean *compile* error.
-`compile(src) -> Compiled` returns a ready-to-run `Runtime`. Two IR ops were
-added to make the language real: `Copy` (bind/merge in a phi-free IR) and
-`AddI64`. `tests/frontend.rs` covers structs/fields/arithmetic, loops,
-`if`/`else`, nested structs by reference, and the compile-error cases;
-`tests/frontend_jit.rs` runs a compiled program on both executors and gets the
-same answer.
+`if`/`else`, `while`, `return`, tail-expression returns, `emit`, `yield`, struct
+literals, field access `a.b.c`, calls (including **recursion and mutual
+recursion**), the operators `+ - * < > <= >= == !=` and unary `!`. Types are
+`i64`, `bool`, `()`, and a bare struct name like `Account` — since the language
+is garbage-collected, a struct-typed value is simply a heap reference (no
+borrow/own distinction, so no `&`). Lowering
+gives locals fixed registers (this IR has no phi), sub-expressions fresh
+temporaries, and emits control flow with symbolic labels patched to program
+counters; a bad type is a clean *compile* error. IR ops added to make the
+language real: `Copy`, `AddI64`, `MulI64`, `EqI64`, `Not`. Recursion works
+because functions install as a **batch verified against each other's
+signatures** (`verify_function_with` + `install_verified_function`), not in
+callee-before-caller order. `tests/frontend.rs` covers structs/fields, all the
+operators, loops, `if`/`else`, tail returns, recursion, nested structs, and
+compile errors; `tests/frontend_jit.rs` runs a compiled program on both
+executors and gets the same answer.
+
+### Live editing from source
+
+`Session` (`frontend::Session`) is the live-programming object: a running
+`Runtime` plus a persistent symbol table (`IdEnv`) that keeps each definition's
+id — and each field's id *by name* — stable across edits. `session.eval(src)`
+installs the definitions it names as the **next versions** of what's already
+there, driving migration, invalidation, and trap-and-repair on whatever is
+running. Because field ids are name-stable, an additive struct edit
+auto-migrates live objects; a breaking edit republishes the affected function
+Broken and freezes the frame that reaches it; a repair edit that type-checks
+thaws it. `tests/live_edit.rs` drives both: an additive edit that changes
+behavior and migrates data mid-run with no restart, and a breaking edit that
+traps and is then repaired (function fix + a supplied migration) to completion.
+`src/poc.rs` (`cargo run --bin livetype-poc`) narrates the whole loop end to
+end, and `src/repl.rs` (`cargo run --bin livetype-repl`) is an **interactive
+REPL**: type `struct`/`fn` definitions to edit the world live, `:run main` to
+start a program, `:go` to advance it to the next `yield` / pause, and `:migrate`
+to supply a transformer when a repair needs one — so you make the edits by hand
+while the program is running.
 
 ### Executors
 

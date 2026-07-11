@@ -9,7 +9,7 @@ const SRC: &str = r#"
         fee: i64 = 0,
     }
 
-    fn charge(a: &Account, amt: i64) -> i64 {
+    fn charge(a: Account, amt: i64) -> i64 {
         return a.balance - amt;
     }
 
