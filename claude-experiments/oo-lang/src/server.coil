@@ -880,6 +880,26 @@
                   (loop (do (usleep (cast i32 3000)) (continue)))))))
           0)))))
 
+; scry schema-json <file>: the STATIC reflection dump (DECISIONS #16). Typecheck + build the
+; program (arenas/types exist, EMPTY, main() never runs) and emit one JSON object
+;   {"schema":<reflect-schema>,"views":<reflect-views>,"actions":<reflect-actions>}
+; to stdout, then exit. NO server, NO lingering process — static inspection is a pure function
+; of the source, so the portal shells this transiently and caches the result (keyed by path+mtime).
+; Typecheck failure => diagnostics already went to stderr; return 65 (nonzero) and print nothing.
+(defn scry-schema-json [(path (ptr i8))] (-> i64)
+  (ctx-init) (loaded-init) (register-builtins)
+  (if (not (can-open path))
+    (do (w-cstr 2 c"scry schema-json: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n") 74)
+    (if (> (typecheck-quiet path) 0) 65
+      (let [p (build-program) b (jb-new)]
+        (jb-cstr b c"{\"schema\":") (reflect-schema b p)
+        (jb-cstr b c",\"views\":") (reflect-views b p)
+        (jb-cstr b c",\"actions\":") (reflect-actions b p)
+        (jb-byte b \})
+        (write-all 1 (load (field b data)) (load (field b len)))
+        (w-cstr 1 c"\n")
+        0))))
+
 ; scry eval <file> -e <expr> [-e <expr> ...]: run main() to completion, then evaluate each
 ; expr in sequence against the SAME live process, printing one JSON result line each, exit.
 ; A definition-eval (live code change) here does NOT need request-global-stop — main() has
