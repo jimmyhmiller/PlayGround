@@ -419,6 +419,41 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
 .nested-layout { display: block !important; overflow: auto; }
 #nested { max-width: 1180px; margin: 0 auto; padding: 20px 24px 80px; }
 
+/* V4: when the in-map inspector is docked, the layout becomes a flex row: the map stage scrolls
+   on the left, the inspector column is fixed-width on the right. The map stays fully visible. */
+.nested-layout.has-inspector { display: flex !important; overflow: hidden; }
+.nested-stage-col { min-width: 0; }
+.nested-layout.has-inspector .nested-stage-col { flex: 1; overflow: auto; min-width: 0; }
+.nested-layout.has-inspector #nested { max-width: 980px; }
+
+#inspector { flex: 0 0 460px; max-width: 46vw; min-width: 340px; display: flex; flex-direction: column;
+  min-height: 0; background: var(--bg-rail); border-left: 1px solid var(--line); }
+.insp-head { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 9px 12px 9px 14px;
+  border-bottom: 1px solid var(--line-soft); background: var(--bg-elev); }
+.insp-crumbs { flex: 1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0;
+  font-family: var(--mono); font-size: 12px; }
+.icrumb { color: var(--c-ref); cursor: pointer; white-space: nowrap; }
+.icrumb:not(.cur):hover { text-decoration: underline; }
+.icrumb.cur { color: var(--fg); font-weight: 600; cursor: default; }
+.isep { color: var(--fg-faint); }
+.insp-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.insp-btn { background: var(--bg-elev2); border: 1px solid var(--line); color: var(--fg-dim);
+  border-radius: 5px; padding: 3px 9px; font-size: 12px; line-height: 1.2; }
+.insp-btn:hover { color: var(--fg); border-color: var(--fg-faint); }
+.insp-body { flex: 1; overflow: auto; padding: 16px 16px 48px; min-height: 0; }
+.method-head.static { cursor: default; }
+.method-head.static:hover { background: var(--bg-elev); }
+
+/* selection ring: the inspected instance's region / message row / identity chip in the map */
+#nested .region.sel-inspect { box-shadow: 0 0 0 2px var(--accent); }
+#nested .mrow.sel-inspect, #nested .tl.sel-inspect, #nested .hcell.sel-inspect { box-shadow: 0 0 0 2px var(--accent); }
+#nested .chip.sel-inspect { box-shadow: 0 0 0 2px var(--accent); }
+/* drillable message rows / timeline cells */
+#nested .mrow.drill, #nested .tl.drill, #nested .hcell.drill { cursor: pointer; }
+#nested .mrow.drill:hover { filter: brightness(1.35); }
+#nested .tl.drill:hover { background: var(--bg-elev2); }
+#nested .hcell.drill:hover { outline: 1px solid var(--fg-faint); }
+
 /* header strip with the show-links toggle */
 .nested-bar { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
 .nested-title { font-family: var(--mono); font-weight: 600; font-size: 14px; }

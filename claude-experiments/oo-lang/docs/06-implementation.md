@@ -1985,3 +1985,90 @@ with the live per-instance-id mode). Toggling an `Agent` type-cell to board rend
 - **The two Model implementors** (`ScriptedModel`, `AnthropicModel`) both nest as leaf cells under
   `Agent` (each has one owner type, `Agent.model`), following the same ≥2-owners rule as everything
   else rather than a special case for interface-typed fields — consistent with the live algorithm.
+
+# Phase V4 — drill into ALL details from WITHIN the Map (the in-map inspector)
+
+Before V4 the only way to see an instance's full detail from the Map was `onNestOpenDetail`, which
+did `setMode("browse")` — it **threw you out of the Map** into the List/detail screen, losing the map
+and your place. And the dense message-stack rows in a Conversation cell were purely decorative — you
+could not click an individual `Message` to inspect it. V4 makes every entity in the Map drillable
+**without ever leaving the Map**.
+
+## The UX: a right-docked inspector column (not an overlay drawer)
+
+Clicking any entity opens a **docked inspector column** to the right of the nested stage — the
+"IDE inspector" choice — rather than an overlay drawer. Reasoning: the whole point is to keep the
+map *and* the detail visible at once; an overlay would cover exactly the map you're trying to keep
+your place in. When the inspector is open, `#layout` (class `nested-layout has-inspector`) becomes a
+flex row: the map stage scrolls on the left (`.nested-stage-col`, `#nested` max-width tightened to
+980px), the inspector is a fixed `flex: 0 0 460px` column on the right with its own scroll and a
+sticky header (breadcrumb + back `←` + close `✕`). Closing returns the map to full width.
+
+## What became drillable (all of it → the inspector, never browse)
+
+- **Region head** (instance cell) — `Region`'s `onOpen` now routes to the inspector.
+- **Message-stack rows** (`.mrow.drill` in a Conversation cell) — previously inert; each row is now a
+  real click target to *that specific* `Message` instance (`refParts(c.id)` + its generation).
+- **Board-view (declared `view`) rows** — `timeline` rows (`.tl.drill`) and `heat` cells
+  (`.hcell.drill`) are now clickable to their underlying `Message`; `chips`/`rows` reps already
+  opened detail and now target the inspector too.
+- **Identity chips & tool chips** (shared instances) and **singleton obj-chips** — inspector.
+- **Infra utility buttons** — open that TYPE's static detail in the inspector (in-map, graceful),
+  instead of jumping to the browse table.
+- **STATIC / inspect mode** (V3 type templates, no instances) — clicking a TYPE cell/chip opens that
+  TYPE's static detail (`TypeStaticDetail`: fields, method signatures, implementors) in the same
+  inspector. No instance to poll, so it shows the shape (`⟵ runtime` field values) — never an error.
+
+## Reuse (nothing reinvented)
+
+- **`DetailPane` verbatim.** The instance branch of the inspector renders the *exact* `DetailPane`
+  the browse screen uses — same `at(slot,gen)` 750ms poll, same field flash-diffing, same
+  `detailBus` refresh-after-invoke, same `✎ edit source` (`openCodePanel`). No refactor of its body
+  was needed; it already took `cls/slot/gen/schema/onEditSource` as props.
+- **`MethodCard` / invoke** verbatim inside that `DetailPane` — signatures, inline arg forms,
+  results/errors, and the immediate `bumpDetail` read-back all work unchanged in the inspector.
+- **Reference navigation is an in-inspector back-stack.** The inspector holds a stack of targets
+  (`App.inspect = { stack: [...] }`). It wraps its body in a `NavContext.Provider` whose
+  `navigateRef` **pushes** onto the stack instead of switching to browse — so every `RefLink`
+  (field values, method results) navigates *within* the inspector and the breadcrumb grows; crumbs
+  are clickable to truncate the stack, `←` pops.
+- **The instance-scoped REPL reuses the existing bottom `ReplDock`.** While the inspector shows an
+  instance in Map mode, `App` feeds `ReplDock` a `replRoute` of `{view:"detail", ref:…}` bound to the
+  inspector's current target — so `self` = the open instance and post-eval `bumpDetail` refreshes the
+  inspector, with zero changes to the dock component.
+- **Selection highlight reuses the identity mechanism.** A `selectedId` effect in `NestedView` rings
+  every appearance of the inspected instance in the map (`.sel-inspect` on its `[data-region]`,
+  `[data-mrow]`/`[data-hcell]`, and `.chip[data-identity]`), mirroring the hover `id-hi` effect.
+
+## Structure
+
+`NestedView` no longer takes browse-routing props; it takes `onInspect(target)` + `selectedId` and
+translates region/chip/mrow/type clicks into targets. `App` owns the `inspect` stack and the
+`openInspect`/`inspectPush`/`inspectGoto`/`inspectBack`/`inspectClose` handlers; switching to List
+(`changeMode`) closes the inspector (it belongs to the Map). Two new components:
+`InspectorPanel` (header + nav-override + dispatch to `DetailPane`/`TypeStaticDetail`) and
+`TypeStaticDetail` (static type card).
+
+## Tests + screenshot
+
+- `tests/ui-smoke.mjs` gained V4 beats (live): clicking an Agent region opens the docked inspector
+  **while staying in the Map** (`.nested-layout.has-inspector #inspector` present, `#nested` still
+  there); the inspector shows the Agent's fields + methods; the instance is ringed in the map
+  (`.sel-inspect`); a 0-arg invoke from the inspector produces a result; a reference field grows the
+  inspector breadcrumb; a `.mrow.drill` message row opens that `Message`'s detail; closing restores
+  full width. Plus an inspect-mode beat: clicking a TYPE cell opens its static detail (fields) with
+  the skeleton map still visible, no error.
+- All **275** tests pass (List/browse + `DetailPane` + REPL unchanged; run + inspect ui-smoke green).
+  Viewer is no-build JS/CSS — no `scry` recompile, no reflection-payload change.
+- Screenshot: `docs/v4-inspector.png` — the Map with the Agent inspector docked open (fields incl.
+  clickable `model`/`conversation` refs and tool chips, methods with invoke buttons) and the Agent
+  region ringed in the still-visible map.
+
+## Friction / notes
+
+- **No runtime change needed** — V4 is entirely `viewer/app.js` + `viewer/style.css`. Every payload
+  the inspector needs (`at(slot,gen)`, `schema()` fields/methods/implementors, `graph()` owned
+  message ids) already existed from V1–V3.
+- **htm/React context is the clean seam for ref-nav.** Because `RefLink` reads `navigateRef` from
+  `NavContext`, redirecting refs from "switch to browse" to "push onto the inspector stack" was a
+  one-line context override around the panel body — no prop-drilling through `DetailPane`/`ValueView`.

@@ -908,7 +908,8 @@ function Representation({ clause, node, model, targetType, onEnter, onLeave, onC
   if (orderField) insts.sort((a, b) => String(sVal(a, orderField)).localeCompare(String(sVal(b, orderField))));
   if (rep === "timeline") {
     return html`<div class="timeline">
-      ${insts.map((m) => html`<div class=${"tl " + roleClass(sVal(m, "role"))} data-mrow=${m.ref} key=${m.ref}>
+      ${insts.map((m) => html`<div class=${"tl drill " + roleClass(sVal(m, "role"))} data-mrow=${m.ref} key=${m.ref}
+        onClick=${(e) => { e.stopPropagation(); const p = refParts(m.ref); if (p) onOpen(p.cls, p.slot, m.generation); }}>
         <span class="role">${sVal(m, "role") || m.type}</span>
         <span class="msg">${truncate(sVal(m, "content") || sVal(m, "text") || displayName(m), 160)}</span></div>`)}
     </div>`;
@@ -945,7 +946,8 @@ function Representation({ clause, node, model, targetType, onEnter, onLeave, onC
         ${roles.map(([c, label]) => html`<span class="pl" key=${c}><span class="sw" style=${{ background: `var(--m-${c})` }}></span>${label}</span>`)}
       </div>
       <div class="heat">
-        ${insts.map((it, i) => html`<div class=${"hcell " + roleClass(sVal(it, byField))} data-hcell=${it.ref} key=${it.ref}
+        ${insts.map((it, i) => html`<div class=${"hcell drill " + roleClass(sVal(it, byField))} data-hcell=${it.ref} key=${it.ref}
+          title=${displayName(it)} onClick=${(e) => { e.stopPropagation(); const p = refParts(it.ref); if (p) onOpen(p.cls, p.slot, it.generation); }}
           style=${{ "--mc": `var(--m-${roleClass(sVal(it, byField))})`, "--o": (0.55 + (i % 5) * 0.09).toFixed(2) }}></div>`)}
       </div></div>`;
   }
@@ -1020,8 +1022,10 @@ function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen, viewsByT
           <div class="conv-label"><span class="k">owns ▸ ${msgKids[0].inst.type}</span>
             <span class="n">count <b>${msgKids.length}</b></span></div>
           <div class="mstack">
-            ${msgKids.map((c) => html`<div class=${"mrow " + roleClass(sVal(c.inst, "role"))} key=${c.id}
-              data-mrow=${c.id}><span class="tick"></span><span class="fill"></span></div>`)}
+            ${msgKids.map((c) => { const mp = refParts(c.id); return html`<div class=${"mrow drill " + roleClass(sVal(c.inst, "role"))} key=${c.id}
+              data-mrow=${c.id} title=${displayName(c.inst)}
+              onClick=${(e) => { e.stopPropagation(); if (mp) onOpen(mp.cls, mp.slot, c.inst.generation); }}>
+              <span class="tick"></span><span class="fill"></span></div>`; })}
           </div>
         </div>` : ""}
       ${subKids.length ? html`
@@ -1186,7 +1190,94 @@ function TypeRegion({ node, model, depth, onEnter, onLeave, onChip, onOpenType, 
     </div>`;
 }
 
-function NestedView({ onOpenType, onOpenDetail }) {
+// ===================== V4: in-map detail inspector =====================
+// A right-docked inspector column that renders the FULL instance detail (the same DetailPane the
+// browse screen uses) WITHOUT leaving the Map. Reference fields, method-result refs and REPL refs
+// navigate WITHIN the inspector (a back-stack of targets) instead of switching to browse — done by
+// overriding NavContext.navigateRef for everything rendered inside the panel. A target is either an
+// instance {kind:"instance",cls,slot,gen} or, in static/inspect mode, a type {kind:"type",name}.
+function TypeStaticDetail({ name, schema, onEditSource, onOpenType }) {
+  const sc = schema.find((t) => t.name === name);
+  if (!sc) return html`<div><div class="pane-title">${name}</div>
+    <div class="pane-sub">type not in schema</div></div>`;
+  const isIface = sc.kind === "interface" || (sc.implementors && sc.implementors.length);
+  return html`
+    <div>
+      <div class="pane-title">${name}</div>
+      <div class="pane-sub">
+        ${isIface ? "interface" : "type"}${sc.implements && sc.implements.length
+          ? html` · implements <span class="impl">${sc.implements.join(", ")}</span>` : ""} · static template
+        <button class="ghost-btn edit-src" onClick=${() => onEditSource(name, sc)}>✎ edit source</button>
+      </div>
+      ${sc.fields && sc.fields.length ? html`
+        <div class="detail-section">
+          <h3>fields</h3>
+          <div class="field-grid">
+            ${sc.fields.map((f) => html`<${React.Fragment} key=${f.name}>
+              <div class="fcell fname">${f.name}<span class="ftype">${cleanType(f.type)}</span></div>
+              <div class="fcell fval"><span class="v-void">⟵ runtime</span></div>
+            <//>`)}
+          </div>
+        </div>` : ""}
+      ${sc.methods && sc.methods.length ? html`
+        <div class="detail-section">
+          <h3>methods</h3>
+          ${sc.methods.map((m) => html`
+            <div class="method" key=${m.name}>
+              <div class="method-head static">
+                <span class="method-sig">${m.name}(${m.params.map((p) => `${p.name}: ${cleanType(p.type)}`).join(", ")}) <span class="mret">→ ${m.returns}</span></span>
+              </div>
+            </div>`)}
+        </div>` : ""}
+      ${sc.implementors && sc.implementors.length ? html`
+        <div class="detail-section">
+          <h3>implementors</h3>
+          <div class="vchips">
+            ${sc.implementors.map((t) => html`<button class="chip" key=${t}
+              onClick=${() => onOpenType(t)}><span class="knob"></span>${t}</button>`)}
+          </div>
+        </div>` : ""}
+    </div>`;
+}
+
+function InspectorPanel({ stack, schema, onEditSource, onNavRef, onCrumb, onBack, onClose, nav }) {
+  const top = stack[stack.length - 1];
+  const crumbLabel = (t) => t.kind === "instance" ? `${t.cls}#${t.slot}` : t.name;
+  // refs anywhere in the inspector (field values, method results, REPL) push a new target here.
+  const inspNav = useMemo(() => ({
+    ...nav,
+    navigateRef: (v) => {
+      const m = /^(.+)#(\d+)$/.exec(v.ref);
+      if (m) onNavRef({ kind: "instance", cls: v.class || v.type, slot: +m[2], gen: v.generation ?? 0 });
+    },
+  }), [nav, onNavRef]);
+  return html`
+    <aside id="inspector">
+      <div class="insp-head">
+        <div class="insp-crumbs">
+          ${stack.map((t, i) => html`<${React.Fragment} key=${i}>
+            ${i ? html`<span class="isep">›</span>` : ""}
+            <span class=${"icrumb" + (i === stack.length - 1 ? " cur" : "")}
+                  onClick=${i === stack.length - 1 ? undefined : () => onCrumb(i)}>${crumbLabel(t)}</span>
+          <//>`)}
+        </div>
+        <div class="insp-actions">
+          ${stack.length > 1 ? html`<button class="insp-btn" onClick=${onBack} title="back">←</button>` : ""}
+          <button class="insp-btn" onClick=${onClose} title="close inspector">✕</button>
+        </div>
+      </div>
+      <div class="insp-body">
+        <${NavContext.Provider} value=${inspNav}>
+          ${top.kind === "instance"
+            ? html`<${DetailPane} cls=${top.cls} slot=${top.slot} gen=${top.gen} schema=${schema} onEditSource=${onEditSource} />`
+            : html`<${TypeStaticDetail} name=${top.name} schema=${schema} onEditSource=${onEditSource}
+                onOpenType=${(n) => onNavRef({ kind: "type", name: n })} />`}
+        <//>
+      </div>
+    </aside>`;
+}
+
+function NestedView({ onInspect, selectedId }) {
   const [instances, setInstances] = useState([]);
   const [schema, setSchema] = useState([]);
   const [views, setViews] = useState([]);          // program-declared view specs (views())
@@ -1251,9 +1342,22 @@ function NestedView({ onOpenType, onOpenDetail }) {
     if (hoverId) wrap.querySelectorAll(`.chip[data-identity="${CSS.escape(hoverId)}"]`).forEach((c) => c.classList.add("id-hi"));
   }, [hoverId, instances]);
 
+  // V4 selection highlight: ring EVERY appearance of the inspected instance (its region, its
+  // message row, its identity chip) so the map shows where the open inspector target lives.
+  useEffect(() => {
+    const wrap = wrapRef.current; if (!wrap) return;
+    wrap.querySelectorAll(".sel-inspect").forEach((c) => c.classList.remove("sel-inspect"));
+    if (!selectedId) return;
+    const esc = CSS.escape(selectedId);
+    wrap.querySelectorAll(`[data-region="${esc}"], [data-mrow="${esc}"], [data-hcell="${esc}"], .chip[data-identity="${esc}"]`)
+      .forEach((c) => c.classList.add("sel-inspect"));
+  }, [selectedId, instances]);
+
   const onEnter = useCallback((id) => setHoverId(id), []);
   const onLeave = useCallback(() => setHoverId(null), []);
-  const openDetail = useCallback((cls, slot, gen) => onOpenDetail(cls, slot, gen ?? 0), [onOpenDetail]);
+  // V4: every drill-in in the Map opens the docked in-map inspector — we never switch to browse.
+  const openDetail = useCallback((cls, slot, gen) => onInspect({ kind: "instance", cls, slot, gen: gen ?? 0 }), [onInspect]);
+  const openType = useCallback((name) => onInspect({ kind: "type", name }), [onInspect]);
   const onChip = useCallback((id) => { const p = refParts(id); if (p) openDetail(p.cls, p.slot, (model.byId.get(id) || {}).generation); }, [model, openDetail]);
 
   // "show links" overlay: hub-and-spoke faded connectors between every appearance of hoverId.
@@ -1313,7 +1417,7 @@ function NestedView({ onOpenType, onOpenDetail }) {
         ? (typeModel.sharedTypes.size ? html`
             <div class="legend"><span class="lbl">shared types</span>
               ${[...typeModel.sharedTypes].sort().map((t) => html`<${TypeChip} key=${t} name=${t} model=${typeModel}
-                onEnter=${onEnter} onLeave=${onLeave} onOpen=${onOpenType} />`)}
+                onEnter=${onEnter} onLeave=${onLeave} onOpen=${openType} />`)}
             </div>` : "")
         : (model.sharedIds.size ? html`
             <div class="legend"><span class="lbl">shared instances</span>
@@ -1327,13 +1431,13 @@ function NestedView({ onOpenType, onOpenDetail }) {
           ${typeModel.singletonTypes.length ? html`
             <div class="singletons">
               ${typeModel.singletonTypes.map((t) => html`
-                <button class="singleton-obj" key=${t} onClick=${() => onOpenType(t)}>
+                <button class="singleton-obj" key=${t} onClick=${() => openType(t)}>
                   <span class="node-kind">obj</span>${t} <span class="dim">singleton</span></button>`)}
             </div>` : ""}
           ${typeModel.roots.map((r) => html`
             <div class="orch" key=${r.name}>
               <${TypeRegion} node=${r} model=${typeModel} depth=${0}
-                onEnter=${onEnter} onLeave=${onLeave} onChip=${onOpenType} onOpenType=${onOpenType}
+                onEnter=${onEnter} onLeave=${onLeave} onChip=${openType} onOpenType=${openType}
                 viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} />
             </div>`)}
         ` : html`
@@ -1363,7 +1467,7 @@ function NestedView({ onOpenType, onOpenDetail }) {
               <p class="infra-note">Transport &amp; parsing noise — present and browsable, but they don't own domain state, so the default view keeps them out of the way.</p>
               <div class="infra-grid">
                 ${infra.map((u) => html`
-                  <button class="util" key=${u.name} onClick=${() => onOpenType(u.name)}>
+                  <button class="util" key=${u.name} onClick=${() => openType(u.name)}>
                     <span class="un">${u.name}</span>
                     <span class=${"uc" + (live[u.name] ? " live" : "")}>${showSkeleton ? "type" : "×" + u.count}${live[u.name] ? " ▲" : ""}</span>
                   </button>`)}
@@ -1390,6 +1494,8 @@ function App({ onBack, programName } = {}) {
   const [codeSession, setCodeSession] = useState(null);   // {cls, sc}
   const [codeText, setCodeText] = useState("");
   const codeDraftCls = useRef(null);
+  // V4 in-map inspector: a back-stack of targets ({kind:"instance"|...}). null = closed.
+  const [inspect, setInspect] = useState(null);
 
   // rail: refresh type counts every 500ms, always (matches vanilla)
   usePoll(async () => {
@@ -1474,10 +1580,21 @@ function App({ onBack, programName } = {}) {
   const nav = useMemo(() => ({ openTable, openDetail, goIndex, navigateRef, goCrumb }),
     [openTable, openDetail, goIndex, navigateRef, goCrumb]);
 
-  // nested-view "open a type" (an infra chip click): drill into the browse view's instance table.
-  const onGraphOpen = useCallback((name) => { setMode("browse"); openTable(name); }, [openTable]);
-  // clicking a region/chip in the nested view drills into that instance's detail (browse mode).
-  const onNestOpenDetail = useCallback((cls, slot, gen) => { setMode("browse"); openDetail(cls, slot, gen ?? 0, true); }, [openDetail]);
+  // V4: clicking ANY entity in the Map opens the in-map inspector — never switches to browse.
+  const openInspect = useCallback((t) => setInspect({ stack: [t] }), []);
+  const inspectPush = useCallback((t) => setInspect((s) => s ? { stack: [...s.stack, t] } : { stack: [t] }), []);
+  const inspectGoto = useCallback((i) => setInspect((s) => s && i < s.stack.length ? { stack: s.stack.slice(0, i + 1) } : s), []);
+  const inspectBack = useCallback(() => setInspect((s) => s && s.stack.length > 1 ? { stack: s.stack.slice(0, -1) } : null), []);
+  const inspectClose = useCallback(() => setInspect(null), []);
+  // switching to browse (List) closes the inspector; it belongs to the Map.
+  const changeMode = useCallback((m) => { setMode(m); if (m !== "map") setInspect(null); }, []);
+
+  const inspTop = inspect && inspect.stack[inspect.stack.length - 1];
+  const inspSelId = inspTop && inspTop.kind === "instance" ? `${inspTop.cls}#${inspTop.slot}` : null;
+  // the shared bottom REPL dock binds `self` to the inspector's open instance while it's up in Map.
+  const replRoute = (mode === "map" && inspTop && inspTop.kind === "instance")
+    ? { view: "detail", ref: { class: inspTop.cls, slot: inspTop.slot, gen: inspTop.gen } }
+    : route;
 
   let pane;
   if (route.view === "table") pane = html`<${TablePane} name=${route.typeName} schema=${schema} />`;
@@ -1486,9 +1603,13 @@ function App({ onBack, programName } = {}) {
 
   return html`
     <${NavContext.Provider} value=${nav}>
-      <${TopBar} onGlobalSearch=${globalSearch} onToggleTranscript=${() => setTxOpen((o) => !o)} mode=${mode} setMode=${setMode} onBack=${onBack} programName=${programName} />
+      <${TopBar} onGlobalSearch=${globalSearch} onToggleTranscript=${() => setTxOpen((o) => !o)} mode=${mode} setMode=${changeMode} onBack=${onBack} programName=${programName} />
       ${mode === "map"
-        ? html`<div id="layout" class="nested-layout"><${NestedView} onOpenType=${onGraphOpen} onOpenDetail=${onNestOpenDetail} /></div>`
+        ? html`<div id="layout" class=${"nested-layout" + (inspect ? " has-inspector" : "")}>
+            <div class="nested-stage-col"><${NestedView} onInspect=${openInspect} selectedId=${inspSelId} /></div>
+            ${inspect ? html`<${InspectorPanel} stack=${inspect.stack} schema=${schema} onEditSource=${openCodePanel}
+                onNavRef=${inspectPush} onCrumb=${inspectGoto} onBack=${inspectBack} onClose=${inspectClose} nav=${nav} />` : ""}
+          </div>`
         : html`<div id="layout">
             <${TypeRail} schema=${schema} trend=${trend} route=${route} ifaceOpen=${ifaceOpen} setIfaceOpen=${setIfaceOpen} />
             <main id="content">
@@ -1496,7 +1617,7 @@ function App({ onBack, programName } = {}) {
               <div id="pane">${pane}</div>
             </main>
           </div>`}
-      <${ReplDock} open=${replOpen} setOpen=${setReplOpen} route=${route} />
+      <${ReplDock} open=${replOpen} setOpen=${setReplOpen} route=${replRoute} />
       <${CodePanel} session=${codeSession} text=${codeText} setText=${setCodeText} onClose=${() => setCodeSession(null)} />
       <${TranscriptDrawer} open=${txOpen} onClose=${() => setTxOpen(false)} />
     <//>`;

@@ -204,11 +204,66 @@ async function main() {
       try { await waitFor("#nested .region .conv .mstack", 8000); ok("toggling back returns to the default nested cell (message stack)"); }
       catch (e) { fails.push("toggling back did not restore the default nested cell"); }
     }
-    // clicking an Agent region drills into its detail (switches to browse) -> sets up the rail beats
+    // (V4) IN-MAP INSPECTOR: clicking an Agent region opens a docked inspector WITHOUT leaving the
+    // Map. The map stays visible; the inspector shows the SAME full detail (fields + methods) the
+    // browse DetailPane does; ref fields navigate WITHIN the inspector (a growing breadcrumb);
+    // message rows are individually drillable; a 0-arg invoke works; closing restores full width.
     await evalPage(`(()=>{const agent=${findRegionJS("Agent")};if(agent)agent.querySelector('.region-head').click();return !!agent;})()`);
-    try { await waitFor(".field-grid", 8000); ok("clicking a region drills into that instance's detail"); }
-    catch { fails.push("clicking an Agent region did not open its detail"); }
-    // switch to the List rail for the remaining browse beats
+    try { await waitFor("#inspector .field-grid", 8000); }
+    catch { fails.push("V4: clicking an Agent region did not open the in-map inspector"); }
+    const inMap = await evalPage(`!!document.querySelector('#nested') && !!document.querySelector('.nested-layout.has-inspector #inspector')`);
+    if (!inMap) fails.push("V4: inspector did not open IN the map (mode left map / no docked inspector)");
+    else ok("V4: clicking an Agent region opens the docked inspector, staying in the Map");
+    const inspFields = await evalPage(`document.querySelectorAll('#inspector .field-grid .fname').length`);
+    const inspMethods = await evalPage(`document.querySelectorAll('#inspector .method').length`);
+    if (inspFields < 1) fails.push("V4: inspector shows no fields"); else ok(`V4: inspector shows the Agent's ${inspFields} fields`);
+    if (inspMethods < 1) fails.push("V4: inspector shows no methods"); else ok(`V4: inspector shows the Agent's ${inspMethods} methods`);
+    // the inspected instance is ringed in the map
+    if (!await evalPage(`!!document.querySelector('#nested .sel-inspect')`)) fails.push("V4: inspected instance not highlighted in the map");
+    else ok("V4: inspected instance is highlighted in the map");
+    // invoke a 0-arg method FROM the inspector -> a result appears
+    const inspInvoked = await evalPage(`(()=>{
+      const card=[...document.querySelectorAll('#inspector .method')].find(c=>!c.querySelector('.method-body input'));
+      if(!card) return false; card.querySelector('.invoke-btn').click(); return true;
+    })()`);
+    if (!inspInvoked) console.log("  --  no 0-arg method in inspector to invoke (skipped)");
+    else { try { await waitFor("#inspector .invoke-result", 8000); ok("V4: invoking a 0-arg method from the inspector produced a result"); }
+           catch { fails.push("V4: inspector 0-arg invoke produced no result"); } }
+    // click a reference field in the inspector -> navigate to that instance IN the inspector (breadcrumb grows)
+    const refNav = await evalPage(`(()=>{
+      const before=document.querySelectorAll('#inspector .insp-crumbs .icrumb').length;
+      const link=document.querySelector('#inspector .field-grid .fval .reflink');
+      if(!link) return {nolink:true, before};
+      link.click(); return {before};
+    })()`);
+    if (refNav.nolink) console.log("  --  no reference field in Agent detail to navigate (skipped)");
+    else {
+      await sleep(400);
+      const after = await evalPage(`document.querySelectorAll('#inspector .insp-crumbs .icrumb').length`);
+      if (after <= refNav.before) fails.push(`V4: clicking a ref field did not grow the inspector breadcrumb (${refNav.before}->${after})`);
+      else ok(`V4: a reference field navigates inside the inspector (breadcrumb ${refNav.before}->${after})`);
+    }
+    // click a Message row in a Conversation stack -> that specific Message opens in the inspector
+    const msgDrill = await evalPage(`(()=>{
+      const row=document.querySelector('#nested .conv .mstack .mrow.drill');
+      if(!row) return {norow:true}; row.click(); return {ok:true};
+    })()`);
+    if (msgDrill.norow) fails.push("V4: no drillable message row found in a Conversation stack");
+    else {
+      await sleep(500);
+      const cur = await evalPage(`(()=>{const c=document.querySelector('#inspector .insp-crumbs .icrumb.cur');return c?c.textContent.trim():null;})()`);
+      const mf = await evalPage(`document.querySelectorAll('#inspector .field-grid .fname').length`);
+      if (!cur || mf < 1) fails.push("V4: clicking a message row did not open that Message's detail in the inspector");
+      else ok(`V4: clicking a message row opens that Message in the inspector (${cur}, ${mf} fields)`);
+    }
+    // close the inspector -> the map returns to full width
+    await evalPage(`document.querySelector('#inspector .insp-btn[title="close inspector"]').click()`);
+    await sleep(300);
+    if (await evalPage(`!!document.querySelector('#inspector') || !!document.querySelector('.nested-layout.has-inspector')`))
+      fails.push("V4: closing the inspector did not restore the full-width map");
+    else ok("V4: closing the inspector restores the full-width map");
+
+    // switch to the List rail for the remaining browse beats (List is unchanged by V4)
     await evalPage(`[...document.querySelectorAll('.vt-btn')].find(b=>b.textContent.trim()==='List').click()`);
 
     // (a) the List view's type rail renders types, incl. Agent (we are now in browse mode)
@@ -426,6 +481,28 @@ async function main() {
             if (board.chips < 1) fails.push("inspect template: AgentBoard tools section rendered no type chips"); else ok(`inspect template: AgentBoard tools section renders ${board.chips} tool-type chips`);
           }
         }
+        // (V4 static) in inspect mode there are no instances — clicking a TYPE cell opens that
+        // TYPE's static detail (fields/methods/implementors) in the inspector, NOT an error, and
+        // the skeleton map stays visible. First toggle the Agent cell back from board -> cell.
+        await evalPage(`(()=>{const b=document.querySelector('#nested .board[data-view="AgentBoard"] .vtoggle button');if(b)b.click();return true;})()`);
+        try { await waitFor("#nested.skeleton .region .region-head", 6000); } catch {}
+        await evalPage(`(()=>{const a=${findTypeCellJS("Agent")};if(a)a.querySelector('.region-head').click();return !!a;})()`);
+        try {
+          await waitFor("#inspector .field-grid", 6000);
+          const stat = await evalPage(`(()=>{
+            const insp=document.querySelector('#inspector'); if(!insp) return {noinsp:true};
+            return { title:(insp.querySelector('.pane-title')||{}).textContent, fields:insp.querySelectorAll('.field-grid .fname').length,
+                     stillSkeleton:!!document.querySelector('#nested.skeleton') };
+          })()`);
+          if (stat.noinsp) fails.push("V4 static: clicking a type cell did not open the inspector");
+          else {
+            if (!stat.stillSkeleton) fails.push("V4 static: opening a type detail left the skeleton map");
+            else ok(`V4 static: clicking a type cell opens its static detail in the inspector (${stat.title}), map still skeleton`);
+            if (stat.fields < 1) fails.push("V4 static: type static detail shows no fields"); else ok(`V4 static: type static detail shows ${stat.fields} fields`);
+          }
+          await evalPage(`(()=>{const b=document.querySelector('#inspector .insp-btn[title="close inspector"]');if(b)b.click();return true;})()`);
+        } catch (e) { fails.push("V4 static: type-cell inspector scenario failed: " + (e && e.message || e)); }
+
         // switch to the List rail (no liveCount gate) and browse Agent's (empty) table
         await evalPage(`[...document.querySelectorAll('.vt-btn')].find(b=>b.textContent.trim()==='List').click()`);
         await waitFor(".type-row");
