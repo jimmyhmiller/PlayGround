@@ -1794,3 +1794,84 @@ here is the sensible default it overrides, not a hard wall.
   (field shape, builtin-interface conformance), not class-name allowlists.
 - **React `onMouseEnter` fires on native `mouseover`.** The headless-Chrome hover beat had to dispatch
   `mouseover` (not `mouseenter`) to trip React's synthetic enter handler.
+
+# Phase V2 — program-declared `view` construct (DECISIONS #15b)
+
+V2 makes "the program speaks to how it ought to be visualized" real: a first-class `view` toplevel
+declaration, checked against its target type, exposed by reflection, and honored by a bespoke renderer
+that the viewer flips to via a per-instance DEFAULT↔CUSTOM toggle. Built on V1's nested default (the
+substrate) — the mockup's Act III `AgentBoard` and Act IV `Pulse`.
+
+## Grammar (as implemented)
+```
+view <Name> for <Type> {
+  <clause>*
+}
+```
+where a clause is either a **keyed clause** `<key>: <item>` (e.g. `title: name`, `size: byCount`,
+`badge: status`, `key: role`, `stream: all as heat(...)`) or a **section** `section "<label>" { <item> }`.
+An **item** is a dotted field-path with an optional representation: `<field-path> [ as <repr>(<arg>*) ]`,
+and an **arg** is `<name>: <ident>` (e.g. `order: createdAt`, `by: role`). Representations: `timeline`,
+`chips`, `rows`, `card`, `heat`. Two special single-hop paths: `all` (all instances of the target type,
+top-level clauses only) and `byCount` (a count, `size:` only). `view` is the only new reserved keyword;
+`section`/`title`/`size`/`badge`/`timeline`/… stay contextual identifiers (`for`/`as` already existed),
+so no existing program breaks. `parse-dump` renders views as `(view N (for (type T)) (clause …)
+(section "…" (item (path a b) (as repr) (arg …))))`.
+
+- **Lexer** (`lexer.coil`): one keyword, `TK_VIEW`.
+- **AST** (`ast.coil`): `NK_VIEW` (s-name = name; slot a = `NK_TYPE` target; kids = clauses),
+  `NK_VIEW_CLAUSE` (s-name = key; a = item), `NK_VIEW_SECTION` (s-name = label; a = item),
+  `NK_VIEW_ITEM` (a = `NK_VIEW_PATH`; s-name = representation, empty if none; kids = `NK_ARG`),
+  `NK_VIEW_PATH` (kids = `NK_IDENT` hops). A view node also stashes its source file pointer in
+  `ival` (cast) so `check-view` can set the diagnostic file.
+- **Parser** (`parser.coil`): `parse-view` + `parse-toplevel` dispatch on `TK_VIEW`. Sections are
+  detected by a contextual `section` ident followed by a string (`cur-is-section?`), so a clause
+  literally named `section:` is still possible.
+
+## Typecheck rules (`typecheck.coil`, pass 3 `check-all-views`)
+Views collected (entry module only, `deep`) into `Ctx.views`, checked AFTER signatures+bodies so monos
+exist. Per view: the target `T` must be a declared entity **class/object** (interface/enum/unknown =
+error). Then per clause/section: the field-path resolves hop-by-hop from `T` (each intermediate hop must
+be an entity to descend; unknown field or descend-into-non-entity = span'd error). `title:` must resolve
+to `String`; `badge:` to `String` or an enum; `size:` is `byCount` or any resolvable field. A
+representation is validated against the resolved type: `timeline`/`rows`/`chips`/`heat` require a
+`List<…>`, `card` a single entity, anything else = "unknown representation". `order:`/`by:` args must
+name a field on the list's element type. Every failure carries a file:line:col span. Check goldens:
+`tests/check/50-view-ok` (success) + `e39`–`e45` (unknown type, unknown field, bad repr, timeline on a
+non-list, non-String title, bad order field, interface target).
+
+## Reflection `views()` (`serialize.coil` `reflect-views`, wired in `server.coil` `try-reflection`)
+Static (from the parsed+checked program, read off `Ctx.views`); registered exactly like `schema()`/
+`graph()`. Payload: `{ "type":"Views", "views":[ { "name", "target", "clauses":[ … ] } ] }`, one clause
+entry per top-level clause OR section, each carrying its dotted `path`, `representation` (or `null`), and
+`args:[{name,value}]`:
+```json
+{"kind":"clause","key":"title","path":"name","representation":null,"args":[]}
+{"kind":"section","label":"conversation","path":"conversation.messages","representation":"timeline","args":[]}
+{"kind":"clause","key":"stream","path":"all","representation":"heat","args":[{"name":"by","value":"role"}]}
+```
+Eval golden: `tests/eval/72-views` on `examples/assistant.scry`.
+
+## Viewer: declared-view rendering + the toggle (`viewer/app.js`, `viewer/style.css`)
+`NestedView` now polls `views()` alongside `graph()`+`schema()` (three evals per 800 ms) and builds
+`viewsByType` (first view per target). A `Region` whose instance type has a declared view shows a
+`▤ cell / ▧ board` toggle (per-instance mode in `viewMode`, keyed by instance id); DEFAULT stays the V1
+nested cell, CUSTOM renders `BoardView`. `BoardView` reads the spec's `title`/`badge` scalars for the
+header and renders each section via `<Representation>`, which resolves the item's instances by
+**following the field-path over the same `graph()` records** (`followPath`: hop → each instance's
+`refs[field].ids`) — or, for `all`, every instance of the target type. Representations:
+`timeline` = ordered role-tinted message rows (reuses V1's `roleClass`/`--m-*`), `chips` = identity
+chips (shared → V1 `IdChip`, else a solo chip; both open detail on click), `rows` = compact list,
+`card` = a scalar field grid, `heat` = role-keyed colored cells with a legend. Live (re-eval), fully
+theme-aware (reuses V1's tokens/palette). `ui-smoke.mjs` gained beats: the Agent region shows the
+toggle; toggling renders the AgentBoard timeline rows + tool chips; toggling back restores the nested
+cell. Verified in real headless Chrome against `examples/assistant.scry` — the three agent cells flip to
+titled boards with role-colored timelines and identity-colored tool chips, matching the mockup's Act III.
+
+## Example views (`examples/assistant.scry`)
+`view AgentBoard for Agent { title: name; size: byCount; badge: status;
+section "conversation" { conversation.messages as timeline }; section "tools" { tools as chips } }` and
+`view Pulse for Message { stream: all as heat(by: role); key: role }`. **Ordering decision:** `Message`
+has no `createdAt`/timestamp and a `Conversation.messages` is an ordered `List`, so `timeline` uses
+natural insertion order (no `order:` arg) rather than synthesizing a fake ordinal — the honest, clean
+choice. (`order:` remains supported + typechecked; the parse golden `tests/parse/60-view` exercises it.)
