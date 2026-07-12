@@ -161,6 +161,124 @@ impl Default for NodeFilter {
     }
 }
 
+/// What the color legend should show for the active color mode.
+#[derive(Clone)]
+enum Legend {
+    None,
+    /// Single uniform color (no legend needed).
+    Uniform,
+    /// A continuous scalar with a turbo gradient between `lo` and `hi`.
+    Scalar { lo: f32, hi: f32, log: bool, name: String },
+    /// A categorical field with `count` distinct classes.
+    Categorical { count: usize, name: String },
+}
+
+impl Legend {
+    /// Build a scalar legend from the current per-node values.
+    fn scalar(values: &Option<Vec<f32>>, name: &str, log: bool) -> Legend {
+        match values {
+            Some(v) if !v.is_empty() => {
+                let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+                for &x in v {
+                    if x.is_finite() {
+                        lo = lo.min(x);
+                        hi = hi.max(x);
+                    }
+                }
+                if lo > hi {
+                    Legend::None
+                } else {
+                    Legend::Scalar { lo, hi, log, name: name.to_string() }
+                }
+            }
+            _ => Legend::None,
+        }
+    }
+
+    /// Build a categorical legend (distinct class count) from label values.
+    fn categorical(values: &Option<Vec<f32>>, name: &str) -> Legend {
+        match values {
+            Some(v) => {
+                let mut set = std::collections::HashSet::new();
+                for &x in v {
+                    set.insert(x as i64);
+                }
+                Legend::Categorical { count: set.len(), name: name.to_string() }
+            }
+            None => Legend::None,
+        }
+    }
+}
+
+/// Unpack a packed RGBA8 color into an egui color (drops alpha).
+fn egui_rgb(c: u32) -> egui::Color32 {
+    egui::Color32::from_rgb((c & 0xff) as u8, ((c >> 8) & 0xff) as u8, ((c >> 16) & 0xff) as u8)
+}
+
+/// Format a legend endpoint: integers without decimals, else a few places.
+fn fmt_legend_num(v: f32) -> String {
+    if (v - v.round()).abs() < 1e-4 && v.abs() < 1e7 {
+        format!("{}", v.round() as i64)
+    } else if v.abs() < 1e-2 || v.abs() >= 1e5 {
+        format!("{v:.2e}")
+    } else {
+        format!("{v:.3}")
+    }
+}
+
+/// Draw the color legend for the active mode into the panel.
+fn draw_legend(ui: &mut egui::Ui, legend: &Legend) {
+    match legend {
+        Legend::None | Legend::Uniform => {}
+        Legend::Scalar { lo, hi, log, name } => {
+            ui.add_space(2.0);
+            let w = ui.available_width().min(220.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 12.0), egui::Sense::hover());
+            let painter = ui.painter();
+            let steps = 64;
+            for i in 0..steps {
+                let t = i as f32 / (steps - 1) as f32;
+                let col = egui_rgb(crate::coloring::turbo_rgba(t));
+                let x0 = rect.left() + rect.width() * i as f32 / steps as f32;
+                let x1 = rect.left() + rect.width() * (i + 1) as f32 / steps as f32;
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(x0, rect.top()),
+                        egui::pos2(x1, rect.bottom()),
+                    ),
+                    0.0,
+                    col,
+                );
+            }
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(fmt_legend_num(*lo)).weak().small());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(fmt_legend_num(*hi)).weak().small());
+                });
+            });
+            let suffix = if *log { "  (log scale)" } else { "" };
+            ui.label(egui::RichText::new(format!("{name}{suffix}")).weak().small());
+        }
+        Legend::Categorical { count, name } => {
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                for i in 0..(*count).min(12) {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(13.0, 13.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, 2.0, egui_rgb(crate::coloring::categorical(i as u32)));
+                }
+                if *count > 12 {
+                    ui.label(egui::RichText::new("…").weak());
+                }
+            });
+            ui.label(
+                egui::RichText::new(format!("{name}: {count} categories")).weak().small(),
+            );
+        }
+    }
+}
+
 /// Options passed in from the CLI.
 pub struct RunOptions {
     pub title: String,
@@ -242,6 +360,8 @@ pub struct App {
     filter: NodeFilter,
     /// Node count matching the current filter (for the UI), or None if disabled.
     filter_match_count: Option<usize>,
+    /// Legend descriptor for the active color mode.
+    legend: Legend,
     /// Unfiltered colors/sizes from the active color mode; the filter masks
     /// these into the GPU buffers so toggling the filter doesn't recompute.
     base_colors: Vec<u32>,
@@ -327,6 +447,7 @@ impl App {
             attr_keys: attribute_keys(node_attrs.as_deref()),
             filter: init_filter,
             filter_match_count: None,
+            legend: Legend::None,
             base_colors: Vec::new(),
             base_sizes: Vec::new(),
             labels,
@@ -458,6 +579,21 @@ impl App {
         };
         self.base_colors = colors;
         self.base_sizes = sizes.unwrap_or_else(|| vec![1.0f32; n]);
+        // Legend for the active mode (the attribute case is set in
+        // `colors_for_attribute`, which knows whether it went scalar).
+        match self.color_mode {
+            ColorMode::Uniform => self.legend = Legend::Uniform,
+            ColorMode::Degree => self.legend = Legend::scalar(&self.last_values, "degree", true),
+            ColorMode::PageRank => self.legend = Legend::scalar(&self.last_values, "pagerank", true),
+            ColorMode::Components => {
+                self.legend = Legend::categorical(&self.last_values, "component")
+            }
+            ColorMode::Coloring => self.legend = Legend::categorical(&self.last_values, "color"),
+            ColorMode::Communities => {
+                self.legend = Legend::categorical(&self.last_values, "community")
+            }
+            ColorMode::Attribute(_) => {}
+        }
         self.push_filtered();
         log::info!("color mode -> {}", self.color_mode.label());
     }
@@ -538,6 +674,7 @@ impl App {
         if any_present && all_numeric {
             let scalar: Vec<f32> = nums.iter().map(|o| o.unwrap_or(0.0)).collect();
             self.last_values = Some(scalar.clone());
+            self.legend = Legend::scalar(&self.last_values, &key, true);
             // Log scale: counts (read_count, parent_count, …) are heavily skewed.
             return (coloring::sequential_colors_f32(&scalar, true), None);
         }
@@ -551,6 +688,7 @@ impl App {
             labels[id] = *map.entry(key).or_insert(next);
         }
         self.last_values = Some(labels.iter().map(|&l| l as f32).collect());
+        self.legend = Legend::Categorical { count: map.len(), name: key };
         (coloring::categorical_colors(&labels), None)
     }
 
@@ -617,6 +755,7 @@ impl App {
         let mut filter_op = self.filter.op;
         let mut filter_value = self.filter.value.clone();
         let filter_count = self.filter_match_count;
+        let legend = self.legend.clone();
 
         // Actions requiring heavier work (GPU recompute) are recorded and run
         // after the panel closure, when `self` is freely borrowable again.
@@ -693,6 +832,7 @@ impl App {
                         }
                     }
                 }
+                draw_legend(ui, &legend);
                 ui.separator();
 
                 ui.strong("Display");
