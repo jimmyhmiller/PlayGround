@@ -12,7 +12,7 @@ Distinguished only by *what they receive* and *what they return*.
 |---|---|---|---|---|
 | **Macro** | `[Code…] -> Code` | its own call site | replacement code | shipped |
 | **Generator** | `() -> Code` (via `meta`) | nothing | new top-level forms | shipped |
-| **Checker** | `Program -> Diagnostics` | the whole program | located reports / veto | **building** |
+| **Checker** | `Program -> Code` | the whole program | veto via `error` | **shipped** |
 | **Transformer** | `Program -> Program` | the whole program | a rewritten program | planned |
 
 All four share one substrate: the `Code` value, the `code-*` operations, type
@@ -74,9 +74,19 @@ re-blesses the oracle.
   Built in `driver.coil`.
 
 ### Phase 1 — the whole-program hook (the core addition)
-- **1.1 Checker: `(checker f)`** where `f : Code(Program) -> Void`. Driver runs each
-  registered checker after resolve (after check for typed queries), collects reports,
-  vetoes on error. Sibling to the existing `run-metas`. **Unlocks: safety dialects.**
+- **1.1 Checker: `(checker FN)` — ✅ SHIPPED.** `FN` is an ordinary `[(prog Code)] ->
+  Code` function; `(checker FN)` registers it. After macro expansion, the driver hands
+  FN the **whole program** (all top-level forms as one Code list) via the existing
+  `expand-macro` machinery, and FN VETOES compilation by calling `error` (its returned
+  Code is ignored). Because FN is Code-signed, the existing macro closure already
+  type-checks it; the hook (`run-checkers` in `selfhost/src/expander.coil`) just invokes
+  it. Imported checker libraries work (name resolved via `resolve-macro`). Demo:
+  `metaprog-poc/policy_{ok,bad}.coil` — an imported `no-forbidden-op` checker vetoes a
+  program that calls a banned form, anywhere, buried in any function body. Verified: full
+  oracle green + rebootstrap fixpoint. **Known limitation:** the checker sees *all* loaded
+  forms including imported stdlib, so a "ban X everywhere" policy also inspects library
+  code — scope-to-user-module and located `(report …)`/`(code-span …)` diagnostics (v1
+  vetoes with a message only) are the next refinements.
 - **1.2 Transformer: `(transform f)`** where `f : Code(Program) -> Code(Program)`.
   Driver applies it and continues with the rewritten program (re-check after).
   **Unlocks: transparent GC rooting, GC lowering, Scheme lowering as a pass.**
