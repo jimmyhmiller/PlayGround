@@ -81,9 +81,17 @@ between them; after Phase 4 the Shared comparison extends to the edit scenario.
   `TieredMachine`) and the JIT's compiled `step` — with `push_callee` /
   `deliver_return` as the shared tier-and-marshal seam. Proven by
   `tests/tiered.rs`: a function called in a loop is promoted mid-run, result
-  identical to the pure interpreter; FFI/globals survive promotion. *Remaining:*
-  on-stack replacement (promoting a hot *loop* in a running frame, not just at
-  the next call) and applying tiering on the concurrent workers.
+  identical to the pure interpreter; FFI/globals survive promotion.
+  **Hot-reload composes with tiering** (`tests/tiered_hotreload.rs`, via
+  `Tiered::{install_function,install_schema,install_migration,resume}`): editing
+  a *promoted (JIT)* function is picked up on the next run; a breaking edit
+  **traps a JIT caller** rather than running stale native code (soundness holds
+  through the JIT because effects go through the runtime externs), and
+  trap → repair → `resume()` completes with a JIT frame on the stack; a live
+  schema migration is transparent to a JIT-compiled reader (its `GetField` uses
+  the same migration barrier as the interpreter). *Remaining:* on-stack
+  replacement (promoting a hot *loop* in a running frame, not just at the next
+  call) and applying tiering on the concurrent workers.
 
 - [x] **Phase 6 — the surface language's features now run on every tier.** FFI +
   globals run on the concurrent tier
