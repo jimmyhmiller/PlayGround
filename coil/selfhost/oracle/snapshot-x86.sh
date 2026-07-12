@@ -9,7 +9,7 @@
 # host — a code path distinct from the host AAPCS64 lowering the full gate covers.
 set -euo pipefail
 cd "$(dirname "$0")/../.."          # repo root
-COIL=${COIL_REF_BIN:-./target/debug/coil}
+COIL=${COIL_REF_BIN:-./coil}
 TARGET=x86_64-apple-macosx11.0.0
 REF=selfhost/oracle/x86/reference
 LIST=selfhost/oracle/x86/corpus.txt

@@ -16,7 +16,7 @@
 # FIRST diagnostic, so error-path parity is gated too.
 set -uo pipefail
 cd "$(dirname "$0")/../.."          # repo root
-COIL=${COIL_REF_BIN:-./target/debug/coil}
+COIL=${COIL_REF_BIN:-./coil}
 CHK=selfhost/oracle/checked
 REF=$CHK/reference
 LIST=$CHK/corpus.txt

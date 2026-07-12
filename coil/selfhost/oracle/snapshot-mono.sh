@@ -15,7 +15,7 @@
 # spanless (`(error@D:D "msg")`). So every error path is gated too.
 set -uo pipefail
 cd "$(dirname "$0")/../.."          # repo root
-COIL=${COIL_REF_BIN:-./target/debug/coil}
+COIL=${COIL_REF_BIN:-./coil}
 MONO=selfhost/oracle/mono
 REF=$MONO/reference
 LIST=$MONO/corpus.txt

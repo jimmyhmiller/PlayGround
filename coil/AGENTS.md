@@ -13,7 +13,7 @@ before writing Coil.
 - The compiler is **self-hosted** (written in Coil, in `selfhost/src/`). Rebuild +
   verify it with `selfhost/rebootstrap.sh` (fixpoint + gates). If you change a file
   in the gate corpus (e.g. `selfhost/src/main.coil`), regenerate the reference
-  snapshot first: `COIL_REF_BIN=./target/release/coil ./selfhost/oracle/snapshot-full.sh`.
+  snapshot first: `COIL_REF_BIN=./coil ./selfhost/oracle/snapshot-full.sh`.
 
 ## Where things live
 

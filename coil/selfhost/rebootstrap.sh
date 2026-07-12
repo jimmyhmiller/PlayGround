@@ -5,7 +5,7 @@
 # compiler bootstraps and verifies itself):
 #   1. $STAGE0 if you set it explicitly
 #   2. selfhost/seed/coil-seed  (the committed, prebuilt self-host compiler) — DEFAULT
-#   3. ./target/debug/coil  (the legacy Rust reference, only if #2 is somehow absent)
+#   (the Rust reference compiler has been removed; the seed is fully self-sufficient)
 # You never need cargo/rustc/inkwell; the seed re-derives the whole compiler from source.
 #
 # The seed is NEVER trusted blindly. Every run re-derives the compiler from source and proves
@@ -28,7 +28,6 @@ LF=(--link-flag -L/opt/homebrew/opt/llvm/lib --link-flag -lLLVM)
 
 if   [ -n "${STAGE0:-}" ];        then :
 elif [ -x "$SEED" ];              then STAGE0="$SEED"
-elif [ -x ./target/debug/coil ];  then STAGE0=./target/debug/coil
 else echo "no stage0: need a committed $SEED (or set STAGE0=/path/to/coil)"; exit 1
 fi
 echo "stage0 = $STAGE0"

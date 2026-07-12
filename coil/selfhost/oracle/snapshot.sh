@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."          # repo root
 REF=selfhost/oracle/reference
 LIST=selfhost/oracle/corpus.txt
-COIL=${COIL_REF_BIN:-./target/debug/coil}
+COIL=${COIL_REF_BIN:-./coil}
 
 [ -x "$COIL" ] || { echo "reference compiler not found: $COIL (run: cargo build)"; exit 1; }
 

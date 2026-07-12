@@ -15,7 +15,7 @@
 # prelude closure. That is the honest shape of codegen first-green.
 set -uo pipefail
 cd "$(dirname "$0")/../.."          # repo root
-COIL=${COIL_REF_BIN:-./target/debug/coil}
+COIL=${COIL_REF_BIN:-./coil}
 IR=selfhost/oracle/ir
 REF=$IR/reference
 LIST=$IR/corpus.txt

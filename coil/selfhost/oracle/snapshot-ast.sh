@@ -5,7 +5,7 @@
 # This is the oracle the self-hosted parser must reproduce byte-for-byte.
 set -uo pipefail
 cd "$(dirname "$0")/../.."          # repo root
-COIL=${COIL_REF_BIN:-./target/debug/coil}
+COIL=${COIL_REF_BIN:-./coil}
 AST=selfhost/oracle/ast
 CORP=$AST/corpus
 REF=$AST/reference

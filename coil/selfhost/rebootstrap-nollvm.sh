@@ -7,8 +7,7 @@
 # stage0 is chosen automatically:
 #   1. $STAGE0 if set
 #   2. selfhost/seed/coil-seed-nollvm   (the committed LLVM-free self-host compiler)
-#   3. ./target/debug/coil              (the Rust reference, if present — it can
-#                                        compile main_a64.coil into an LLVM-free binary too)
+#   (the Rust reference compiler has been removed; the seed is fully self-sufficient)
 # On a fresh checkout only #2 exists — the point: no cargo/rustc/inkwell AND no libLLVM.
 #
 # The seed is re-verified from source on every run, three independent ways, so a
@@ -29,8 +28,7 @@ SEED=selfhost/seed/coil-seed-nollvm
 
 if   [ -n "${STAGE0:-}" ];        then :
 elif [ -x "$SEED" ];              then STAGE0="$SEED"
-elif [ -x ./target/debug/coil ];  then STAGE0=./target/debug/coil
-else echo "no stage0: need a committed $SEED or ./target/debug/coil (cargo build)"; exit 1
+else echo "no stage0: need a committed $SEED (or set STAGE0=/path/to/coil)"; exit 1
 fi
 echo "stage0 = $STAGE0"
 

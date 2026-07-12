@@ -15,7 +15,7 @@
 # This is the oracle the self-hosted resolver must reproduce byte-for-byte.
 set -uo pipefail
 cd "$(dirname "$0")/../.."          # repo root
-COIL=${COIL_REF_BIN:-./target/debug/coil}
+COIL=${COIL_REF_BIN:-./coil}
 RES=selfhost/oracle/resolved
 CORP=$RES/corpus
 REF=$RES/reference

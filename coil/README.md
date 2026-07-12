@@ -5,7 +5,8 @@
 A low-level, Lisp-macro language where **calling convention** and **allocation**
 are part of the **type system** — assembly-level control over where values live
 across calls and where data lives in memory, with higher-level constructs built
-up through macros. Backend: **raw LLVM** (via [inkwell]).
+up through macros. Backend: **raw LLVM** (emitted directly), plus a self-hosted
+native **arm64** backend that needs no LLVM at all.
 
 Core bet: a *closure* is not a primitive — it's
 `(code-pointer-with-a-convention, environment-with-an-allocation)`. Make the
@@ -290,51 +291,45 @@ which previously owned the `get`/`set!` spellings, are now `bit-get` /
 
 ## Build & run
 
-Needs Rust and **LLVM 18** with `llvm-config` on `PATH`. On Debian/Ubuntu the
-dev pieces inkwell/llvm-sys link against:
+The compiler ships as a committed, self-hosted native binary — `./coil` — that
+is **fully self-hosting**: there is no Rust, cargo, or standalone LLVM toolchain
+to install. To rebuild it from source, see [Bootstrap without Rust](#bootstrap-without-rust);
+day to day you just run `./coil`.
 
 ```sh
-apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev zlib1g-dev
-```
-
-Then:
-
-```sh
-cargo test                                     # 155 tests (build + run native exes)
-
 # AOT: compile + link a native executable, then run it (exit code = result)
-cargo run -- run   examples/everything.coil; echo $?                       # => 42 (every feature, 24 self-checks)
-cargo run -- run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)
-cargo run -- run   examples/closure-lib.coil; echo $?                      # => 42 (uses (include ...))
-cargo run -- run   examples/per-arch.coil; echo $?                         # => 42
-cargo run -- run   examples/closure.coil; echo $?                          # => 42
-cargo run -- run   examples/allocation.coil; echo $?                       # => 42
-cargo run -- run   examples/inference.coil; echo $?                        # => 42 (literal inference)
-cargo run -- run   examples/extern.coil                                    # prints 12345
-cargo run -- run   examples/io.coil                                        # prints answer=42 (Writer capability)
-cargo run -- run   examples/structabi.coil; echo $?                        # => 92 (struct-by-value C ABI: libc div)
-cargo run -- run   examples/simd.coil; echo $?                             # => 42 (explicit SIMD: NEON fmul.4s via macros)
-cargo run -- run   examples/references.coil; echo $?                       # => 42 (mut refs + let stack locals)
-cargo run -- build examples/args.coil -o /tmp/args && /tmp/args a b c      # echoes argv
+./coil run   examples/everything.coil; echo $?                       # => 42 (every feature, 24 self-checks)
+./coil run   examples/allocators.coil; echo $?                       # => 42 (Zig-style allocators)
+./coil run   examples/closure-lib.coil; echo $?                      # => 42 (uses (include ...))
+./coil run   examples/per-arch.coil; echo $?                         # => 42
+./coil run   examples/closure.coil; echo $?                          # => 42
+./coil run   examples/allocation.coil; echo $?                       # => 42
+./coil run   examples/inference.coil; echo $?                        # => 42 (literal inference)
+./coil run   examples/extern.coil                                    # prints 12345
+./coil run   examples/io.coil                                        # prints answer=42 (Writer capability)
+./coil run   examples/structabi.coil; echo $?                        # => 92 (struct-by-value C ABI: libc div)
+./coil run   examples/simd.coil; echo $?                             # => 42 (explicit SIMD: NEON fmul.4s via macros)
+./coil run   examples/references.coil; echo $?                       # => 42 (mut refs + let stack locals)
+./coil build examples/args.coil -o /tmp/args && /tmp/args a b c      # echoes argv
 
 # Debug info: -g emits DWARF (function-granularity line tables + a .dSYM on macOS)
 # so lldb/gdb can set breakpoints by function and show file:line in backtraces.
-cargo run -- build examples/fib.coil -o /tmp/fib -g && lldb /tmp/fib        # see docs/DEBUGINFO_DWARF.md
+./coil build examples/fib.coil -o /tmp/fib -g && lldb /tmp/fib        # see docs/DEBUGINFO_DWARF.md
 
 # Benchmark the optimized output against C (clang -O3) on matched programs
 bench/run.sh                                              # => bench/RESULTS.md (≈ cc -O3)
 
 # Inspect the pipeline
-cargo run -- emit-obj examples/shim.coil -o /tmp/shim.o   # native object file
-cargo run -- emit-ir  examples/shim.coil                  # LLVM IR (trampoline + inline asm)
-cargo run -- expand   examples/macros.coil                # program after macro expansion
+./coil emit-obj    examples/shim.coil -o /tmp/shim.o   # native object file
+./coil dump-ir     examples/shim.coil                  # LLVM IR (trampoline + inline asm)
+./coil dump-expand examples/macros.coil                # program after macro expansion
 
 # Cross-compile for a non-host target with --target <triple> (any command).
 # The triple drives both the IR/ABI lowering and the linker's -arch; on macOS a
 # cross binary runs under Rosetta, so `run` works end-to-end.
-cargo run -- run     examples/per-arch.coil --target x86_64-apple-macosx11.0.0; echo $?  # => 42
-cargo run -- build   examples/per-arch.coil -o /tmp/pa --target x86_64-apple-macosx11.0.0
-cargo run -- emit-ir examples/per-arch.coil --target x86_64-apple-macosx11.0.0   # x86-64 SysV lowering
+./coil run     examples/per-arch.coil --target x86_64-apple-macosx11.0.0; echo $?  # => 42
+./coil build   examples/per-arch.coil -o /tmp/pa --target x86_64-apple-macosx11.0.0
+./coil dump-ir examples/per-arch.coil --target x86_64-apple-macosx11.0.0   # x86-64 SysV lowering
 ```
 
 There is no `eval`/JIT: the only way to run a program is to AOT-compile it.
@@ -370,7 +365,7 @@ an expression, compiled (session definitions + a generated entry that prints
 the value) and run:
 
 ```
-$ cargo run -- repl
+$ ./coil repl
 coil> (defn square [(x i64)] (-> i64) (imul x x))
 #'repl/square
 coil> (square 12)
@@ -412,11 +407,10 @@ packages that up (a `lisp-mode` derivative for `.coil` plus `M-x run-coil`):
 ```elisp
 (add-to-list 'load-path "/path/to/coil/emacs")
 (require 'coil-mode)
-;; (setq coil-program "/path/to/coil/target/release/coil") ; if not on PATH
+;; (setq coil-program "/path/to/coil/coil") ; if not on PATH
 ```
 
 Then from any `.coil` buffer: `C-x C-e` sends the sexp before point, `C-M-x`
 sends (and redefines) the enclosing definition, `C-c C-l` `:load`s the file,
 `C-c C-z` jumps to the REPL.
 
-[inkwell]: https://github.com/TheDan64/inkwell
