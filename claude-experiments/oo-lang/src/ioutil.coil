@@ -46,6 +46,7 @@
 (extern getpid     :cc c [] (-> i32))
 ; Phase 8b Env builtin: read a process environment variable. Declared here (the one extern home).
 (extern getenv     :cc c [(ptr i8)] (-> (ptr i8)))
+(extern atoi       :cc c [(ptr i8)] (-> i32))
 ; Phase V5 portal static discovery (DECISIONS #16): directory scan, file mtime, absolute paths,
 ; and a transient subprocess (popen -> read its stdout -> pclose) to shell `scry schema-json`.
 ; Declared here — the one extern home — and :use *-imported by portal.coil. On arm64 macOS the

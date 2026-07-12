@@ -1188,6 +1188,9 @@
         (jb-cstr b c",\"views\":") (reflect-views b p)
         (jb-cstr b c",\"actions\":") (reflect-actions b p)
         (jb-cstr b c",\"functions\":") (reflect-functions b p)
+        ; types() drives the browse-mode type rail; dump it too (arenas empty here -> liveCount 0)
+        ; so a static portal project's List view populates without a running process.
+        (jb-cstr b c",\"types\":") (reflect-types b p)
         (jb-byte b \})
         (write-all 1 (load (field b data)) (load (field b len)))
         (w-cstr 1 c"\n")

@@ -1094,6 +1094,12 @@ def run_schema_json_test(binary, filt):
         problems.append(f"missing views specs: {d.get('views')}")
     if d.get("actions", {}).get("type") != "Actions" or not isinstance(d.get("actions", {}).get("actions"), list):
         problems.append(f"missing actions specs: {d.get('actions')}")
+    # types() is dumped too (drives the static List view's type rail); entities incl. Agent, liveCount 0
+    titems = d.get("types", {}).get("items", [])
+    if "Agent" not in [i.get("name") for i in titems]:
+        problems.append(f"schema-json missing types.items Agent: {[i.get('name') for i in titems]}")
+    if titems and not all(i.get("liveCount") == 0 for i in titems):
+        problems.append("schema-json types.items liveCount not all 0 (no main() ran)")
     if problems:
         print("FAIL schema_json")
         for pr in problems: print("     " + pr)
@@ -1109,42 +1115,43 @@ def run_portal_projects_test(binary, filt):
       (2) /api/programs is EMPTY throughout (proves no run/inspect child was ever spawned — the
           only child is the transient `scry schema-json` dump, which exits immediately);
       (3) POST /proj/<id>/eval {source:'schema()'} returns the real schema (nodes incl. Agent);
+      (3b) types() is served statically (liveCount 0) so the browse-mode type rail populates;
       (4) views()/actions() return their specs; graph() returns empty instances;
       (5) a mutating source (Agent.instances()) returns the StaticInspection error, not a crash.
-    SKIPPED LOUDLY if curl absent or :7357 already occupied."""
+    Runs on an ephemeral free port (SCRY_PORTAL_PORT), so a dev portal on 7357 no longer skips it.
+    SKIPPED LOUDLY only if curl absent."""
     if filt and "projects" not in filt and "portal" not in filt:
         return 0, 0
     import shutil, time, json, socket as _socket, threading, urllib.request
     if shutil.which("curl") is None:
         print("SKIPPED portal_projects: curl not found on PATH"); return 0, 0
-    try:
-        s = _socket.create_connection(("127.0.0.1", 7357), timeout=0.4); s.close()
-        print("SKIPPED portal_projects: 127.0.0.1:7357 already in use"); return 0, 0
-    except OSError:
-        pass
+    # Bind an ephemeral free port and hand it to the portal via SCRY_PORTAL_PORT, so this test
+    # runs even when a dev portal already owns the default 7357 (previously it just skipped).
+    _s = _socket.socket(); _s.bind(("127.0.0.1", 0)); port = _s.getsockname()[1]; _s.close()
 
     root = os.path.abspath(os.path.join(HERE, ".."))
+    penv = dict(os.environ); penv["SCRY_PORTAL_PORT"] = str(port)
     portal = subprocess.Popen([binary, "portal"], cwd=root, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, text=True, bufsize=1)
+                              stderr=subprocess.STDOUT, text=True, bufsize=1, env=penv)
     plines = []
     threading.Thread(target=lambda: [plines.append(l) for l in portal.stdout], daemon=True).start()
 
     def projects():
-        return json.loads(urllib.request.urlopen("http://127.0.0.1:7357/api/projects", timeout=10).read())
+        return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/projects", timeout=10).read())
 
     def programs():
-        return json.loads(urllib.request.urlopen("http://127.0.0.1:7357/api/programs", timeout=10).read())
+        return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/programs", timeout=10).read())
 
     def proj_eval(pid, src):
         body = json.dumps({"id": "Z", "source": src}).encode()
-        req = urllib.request.Request(f"http://127.0.0.1:7357/proj/{pid}/eval", data=body,
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/proj/{pid}/eval", data=body,
                                      headers={"Content-Type": "application/json"})
         return json.loads(urllib.request.urlopen(req, timeout=30).read())
 
     try:
         up = False
         for _ in range(100):
-            if any("portal: http://localhost:7357" in l for l in plines):
+            if any(f"portal: http://localhost:{port}" in l for l in plines):
                 up = True; break
             if any("could not bind" in l for l in plines):
                 print("SKIPPED portal_projects: portal could not bind :7357"); return 0, 0
@@ -1173,6 +1180,15 @@ def run_portal_projects_test(binary, filt):
         snames = [n.get("name") for n in r.get("value", {}).get("nodes", [])]
         if "Agent" not in snames:
             problems.append(f"/proj schema() missing Agent: {snames}")
+        # (3b) types() — drives the browse-mode type rail; must be served statically (liveCount 0)
+        # so a static project's List view populates with no process running.
+        rt = proj_eval(aid, "types()")
+        titems = rt.get("value", {}).get("items", [])
+        tnames = [i.get("name") for i in titems]
+        if "Agent" not in tnames:
+            problems.append(f"/proj types() missing Agent (rail empty statically): {rt}")
+        if titems and not all(i.get("liveCount") == 0 for i in titems):
+            problems.append(f"/proj types() liveCount not all 0 for a static project: {titems}")
         # (4) views/actions/graph
         rv = proj_eval(aid, "views()")
         if rv.get("value", {}).get("type") != "Views":
