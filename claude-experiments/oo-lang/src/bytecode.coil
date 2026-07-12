@@ -97,6 +97,12 @@
 (const BLT_STR_TOFLOAT 31)       ; pop string -> strtod parse -> push (ptr Option<Float> box): Some(x) / None (payload is f64 bits)
 (const BLT_STR_FROMCHARCODE 32)  ; pop code(Int) -> push a String holding the UTF-8 encoding of that Unicode codepoint
 (const BLT_MAP_KEYS 33)          ; pop map -> push (ptr ListObj) of the keys in insertion order
+; ---- real OS work: subprocess + files (the assistant's tools call these) ----
+(const BLT_PROC_RUN 34)          ; pop cmd(String) -> run `/bin/sh -c "<cmd> 2>&1"`, push combined output String (cooperative)
+(const BLT_FILE_READ 35)         ; pop path(String) -> push Option<String> (None if unreadable)
+(const BLT_FILE_WRITE 36)        ; pop content(String), path(String) -> truncate+write, push Bool ok
+(const BLT_FILE_APPEND 37)       ; pop content(String), path(String) -> append, push Bool ok
+(const BLT_FILE_EXISTS 38)       ; pop path(String) -> push Bool (stat succeeds)
 
 ; ============================ FieldInfo kinds ===============================
 (const FIELD_I64 0) (const FIELD_F64 1) (const FIELD_BOOL 2)

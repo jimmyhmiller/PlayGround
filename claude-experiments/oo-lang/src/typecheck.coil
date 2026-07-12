@@ -1165,6 +1165,15 @@
   ; Phase 8b: object Env { get(name: String) -> Option<String> } — read a process env var.
   (let [e (mkbuiltin DK_BUILTIN_OBJ c"Env")]
     (bdm e (bt-fn1 c"get" (bt-param c"name" (bt-type c"String")) (bt-type1 c"Option" (bt-type c"String")))))
+  ; object Process { run(cmd: String) -> String } — run a shell command, return its combined output.
+  (let [pr (mkbuiltin DK_BUILTIN_OBJ c"Process")]
+    (bdm pr (bt-fn1 c"run" (bt-param c"cmd" (bt-type c"String")) (bt-type c"String"))))
+  ; object File { read(path) -> Option<String> ; write/append(path, content) -> Bool ; exists(path) -> Bool }
+  (let [fl (mkbuiltin DK_BUILTIN_OBJ c"File")]
+    (bdm fl (bt-fn1 c"read" (bt-param c"path" (bt-type c"String")) (bt-type1 c"Option" (bt-type c"String"))))
+    (bdm fl (bt-fn2 c"write" (bt-param c"path" (bt-type c"String")) (bt-param c"content" (bt-type c"String")) (bt-type c"Bool")))
+    (bdm fl (bt-fn2 c"append" (bt-param c"path" (bt-type c"String")) (bt-param c"content" (bt-type c"String")) (bt-type c"Bool")))
+    (bdm fl (bt-fn1 c"exists" (bt-param c"path" (bt-type c"String")) (bt-type c"Bool"))))
   ; Phase 8b: object Str { fromCharCode(code: Int) -> String } — UTF-8 encode a codepoint (for the
   ; Json parser's string-escape handling, which rebuilds \" \\ \n \uXXXX into real characters).
   (let [s (mkbuiltin DK_BUILTIN_OBJ c"Str")]

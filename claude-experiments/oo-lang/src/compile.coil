@@ -508,6 +508,15 @@
     (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Env") 3)
       ; Env.get(name): push the name String, then the builtin.
       (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_ENV_GET) 0)
+    (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Process") 7)
+      ; Process.run(cmd): push the cmd String, then the builtin.
+      (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_PROC_RUN) 0)
+    (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"File") 4)
+      (do (compile-args cs call) (cop cs OP_CALL_BUILTIN)
+          (cond (name-eq mname mlen (cast (ptr u8) c"read") 4) (cu8 cs BLT_FILE_READ)
+                (name-eq mname mlen (cast (ptr u8) c"write") 5) (cu8 cs BLT_FILE_WRITE)
+                (name-eq mname mlen (cast (ptr u8) c"append") 6) (cu8 cs BLT_FILE_APPEND)
+                (cu8 cs BLT_FILE_EXISTS)) 0)
     (name-eq (load (field od name)) (load (field od name-len)) (cast (ptr u8) c"Str") 3)
       ; Str.fromCharCode(code): push the code Int, then the builtin.
       (do (compile-args cs call) (cop cs OP_CALL_BUILTIN) (cu8 cs BLT_STR_FROMCHARCODE) 0)
@@ -988,6 +997,8 @@
     (= blt BLT_MUTEX_NEW) 2 (= blt BLT_MUTEX_LOCK) 1 (= blt BLT_MUTEX_UNLOCK) 1 (= blt BLT_MUTEX_GET) 1 (= blt BLT_MUTEX_SET) 2
     (= blt BLT_CONSOLE_READLINE) 0 (= blt BLT_CONSOLE_PRINT) 1 (= blt BLT_CONSOLE_LOG) 1
     (= blt BLT_HTTP_REQUEST) 4 (= blt BLT_ENV_GET) 1
+    (= blt BLT_PROC_RUN) 1 (= blt BLT_FILE_READ) 1 (= blt BLT_FILE_EXISTS) 1
+    (= blt BLT_FILE_WRITE) 2 (= blt BLT_FILE_APPEND) 2
     1))   ; print-family: pop 1
 
 ; per-builtin result ref-ness (only for builtins whose kind is FIXED — LIST_GET/MUTEX_GET are
@@ -998,7 +1009,8 @@
     (= blt BLT_MAP_GET) 1 (= blt BLT_MAP_KEYS) 1 (= blt BLT_CONSOLE_READLINE) 1 (= blt BLT_ENV_GET) 1
     (= blt BLT_STR_TOINT) 1 (= blt BLT_STR_TOFLOAT) 1 (= blt BLT_STR_SLICE) 1 (= blt BLT_STR_FROMCHARCODE) 1
     (= blt BLT_HTTP_REQUEST) 1
-    0))
+    (= blt BLT_PROC_RUN) 1 (= blt BLT_FILE_READ) 1    ; String / Option<String> box — both refs
+    0))                                               ; FILE_WRITE/APPEND/EXISTS -> Bool (scalar)
 
 (defn sm-pushes? [(op i64)] (-> i64)
   (cond

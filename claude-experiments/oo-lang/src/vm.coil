@@ -443,6 +443,70 @@
           (store! (index buf 3) (cast u8 (ior 128 (iand cp 63))))
           (str-make buf 4)))))
 
+; ---- real OS work: subprocess + files ----------------------------------------
+; Process.run(cmd): run `/bin/sh -c "<cmd> 2>&1"` (popen), returning combined stdout+stderr. The
+; pipe fd is read COOPERATIVELY — poll(20ms) + safepoint-poll each pass — so a long-running command
+; never stalls a global stop: the viewer stays live and evals answer while a tool executes.
+(defn vm-proc-run [(vt (ptr VMThread)) (cmd (ptr StringObj))] (-> (ptr StringObj))
+  (let [clen (load (field cmd len)) full (xalloc (+ clen 6))]
+    (if (> clen 0) (do (memcpy (cast (ptr i8) full) (cast (ptr i8) (load (field cmd data))) clen) 0) 0)
+    (memcpy (cast (ptr i8) (index full clen)) (cast (ptr i8) c" 2>&1") 5)
+    (store! (index full (+ clen 5)) (cast u8 0))
+    (let [f (popen (cast (ptr i8) full) c"r")]
+      (if (= (cast i64 f) 0) (str-copy (cast (ptr u8) c"(command failed to start)") 25)
+        (let [fd (fileno f) pfd (alloc-stack i64) chunk (alloc-stack (array i8 8192))
+              (mut cap) 1024 (mut len) 0 (mut buf) (xalloc 1024)]
+          (store! pfd (ior (cast i64 fd) (<< 1 32)))     ; struct pollfd { fd; events=POLLIN(1); revents=0 }
+          (loop
+            (do
+              (safepoint-poll (field vt parked))
+              (let [r (cast i64 (poll (cast (ptr i8) pfd) 1 20))]
+                (if (<= r 0) (continue)                   ; timeout / EINTR: re-poll after the safepoint
+                  (let [n (read fd (cast (ptr i8) (index chunk 0)) 8192)]
+                    (if (= n 0) (break)                   ; EOF -> child done
+                      (if (< n 0) (continue)
+                        (do
+                          (if (> (+ (load len) n) (load cap))
+                            (do (loop (if (< (load cap) (+ (load len) n)) (do (store! cap (* (load cap) 2)) 0) (break)))
+                                (store! buf (cast (ptr u8) (realloc (cast (ptr i8) (load buf)) (load cap)))) 0) 0)
+                          (memcpy (cast (ptr i8) (index (load buf) (load len))) (cast (ptr i8) (index chunk 0)) n)
+                          (store! len (+ (load len) n)) (continue)))))))))
+          (pclose f)
+          (str-make (load buf) (load len)))))))
+
+; File.read(path): whole-file slurp -> Some(String), or None if it can't be opened. Uses fopen (not
+; open+mode) so we never touch open's variadic `mode` arg — that doesn't pass in a register on
+; arm64, so open would have created files with a garbage mode.
+(defn vm-file-read [(path (ptr StringObj))] (-> (ptr i64))
+  (let [f (fopen (str-to-cstr-copy path) c"r")]
+    (if (= (cast i64 f) 0) (enum-none)
+      (let [chunk (alloc-stack (array i8 65536)) (mut cap) 4096 (mut len) 0 (mut buf) (xalloc 4096)]
+        (loop
+          (let [n (fread (cast (ptr i8) (index chunk 0)) 1 65536 (cast (ptr i8) f))]
+            (if (<= n 0) (break)
+              (do
+                (if (> (+ (load len) n) (load cap))
+                  (do (loop (if (< (load cap) (+ (load len) n)) (do (store! cap (* (load cap) 2)) 0) (break)))
+                      (store! buf (cast (ptr u8) (realloc (cast (ptr i8) (load buf)) (load cap)))) 0) 0)
+                (memcpy (cast (ptr i8) (index (load buf) (load len))) (cast (ptr i8) (index chunk 0)) n)
+                (store! len (+ (load len) n)) (continue)))))
+        (fclose (cast (ptr i8) f))
+        (enum-some-r (cast i64 (str-make (load buf) (load len))) 1)))))
+
+; File.write/append(path, content): fopen mode "w" (truncate) or "a" (append) -> 1 ok / 0 fail.
+(defn vm-file-write-mode [(path (ptr StringObj)) (content (ptr StringObj)) (mode (ptr i8))] (-> i64)
+  (let [f (fopen (str-to-cstr-copy path) mode)]
+    (if (= (cast i64 f) 0) 0
+      (let [n (load (field content len))
+            w (if (> n 0) (fwrite (cast (ptr i8) (load (field content data))) 1 n (cast (ptr i8) f)) 0)]
+        (fclose (cast (ptr i8) f))
+        (if (= w n) 1 0)))))
+
+; File.exists(path) -> 1 iff stat succeeds.
+(defn vm-file-exists [(path (ptr StringObj))] (-> i64)
+  (let [sb (alloc-stack (array i8 256))]   ; struct stat is ~144 bytes on darwin
+    (if (= (cast i64 (stat (str-to-cstr-copy path) (cast (ptr i8) (index sb 0)))) 0) 1 0)))
+
 ; the builtin dispatch (fixed arities; arg order = pushed order)
 (defn do-builtin [(vt (ptr VMThread)) (blt i64)] (-> i64)
   (cond
@@ -485,6 +549,15 @@
     (= blt BLT_STR_TOINT) (let [s (vpop vt)] (vpush vt (cast i64 (vm-str-toint (cast (ptr StringObj) s)))))
     (= blt BLT_STR_TOFLOAT) (let [s (vpop vt)] (vpush vt (cast i64 (vm-str-tofloat (cast (ptr StringObj) s)))))
     (= blt BLT_STR_FROMCHARCODE) (let [cp (vpop vt)] (vpush vt (cast i64 (vm-str-fromcharcode cp))))
+    ; Process.run(cmd) -> String
+    (= blt BLT_PROC_RUN) (let [cmd (vpop vt)] (vpush vt (cast i64 (vm-proc-run vt (cast (ptr StringObj) cmd)))))
+    ; File.read(path) -> Option<String>
+    (= blt BLT_FILE_READ) (let [path (vpop vt)] (vpush vt (cast i64 (vm-file-read (cast (ptr StringObj) path)))))
+    ; File.write/append(path, content) -> Bool.  Args pushed (path, content) => pop content then path.
+    (= blt BLT_FILE_WRITE) (let [content (vpop vt) path (vpop vt)] (vpush vt (vm-file-write-mode (cast (ptr StringObj) path) (cast (ptr StringObj) content) (cast (ptr i8) c"w"))))
+    (= blt BLT_FILE_APPEND) (let [content (vpop vt) path (vpop vt)] (vpush vt (vm-file-write-mode (cast (ptr StringObj) path) (cast (ptr StringObj) content) (cast (ptr i8) c"a"))))
+    ; File.exists(path) -> Bool
+    (= blt BLT_FILE_EXISTS) (let [path (vpop vt)] (vpush vt (vm-file-exists (cast (ptr StringObj) path))))
     (do (eval-panic0 EK_RUNTIME c"vm: unknown builtin") (exit (cast i32 70)) 0)))
 
 ; spawn a language thread running task.<slot>() (task implements the interface `iface`).

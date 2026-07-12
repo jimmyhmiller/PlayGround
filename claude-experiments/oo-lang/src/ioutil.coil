@@ -15,6 +15,7 @@
 (extern ftell    :cc c [(ptr i8)] (-> i64))
 (extern rewind   :cc c [(ptr i8)] (-> void))
 (extern fread    :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
+(extern fwrite   :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
 (extern fclose   :cc c [(ptr i8)] (-> i32))
 ; Phase 3 runtime: memory + time (declared here, the one extern home)
 (extern realloc  :cc c [(ptr i8) i64] (-> (ptr i8)))
@@ -57,6 +58,7 @@
 (extern realpath :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
 (extern popen    :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))   ; -> FILE*
 (extern pclose   :cc c [(ptr i8)] (-> i32))
+(extern fileno   :cc c [(ptr i8)] (-> i32))   ; FILE* -> raw fd (so a popen pipe can be poll'd cooperatively)
 ; Phase 8a HTTP client: libcurl (system /usr/lib/libcurl.4.dylib). Declared here — the one
 ; extern home — and :use *-imported by http.coil. curl's ABI is stable; the option/info
 ; integers used by http.coil are baked with `; curl.h:` comments there. setopt/getinfo are

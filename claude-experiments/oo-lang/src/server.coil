@@ -716,7 +716,9 @@
             (or (= op OP_THREAD_SPAWN) (= op OP_THREAD_JOIN)) (do (store! mut? true) 0)
             (= op OP_CALL_BUILTIN)
               (let [blt (cast i64 (load (index (load (field c code)) (+ (load off) 1))))]
-                (if (or (= blt BLT_LIST_PUSH) (or (= blt BLT_MAP_SET) (or (= blt BLT_MUTEX_SET) (or (= blt BLT_MUTEX_LOCK) (= blt BLT_MUTEX_UNLOCK))))) (do (store! mut? true) 0) 0))
+                (if (or (= blt BLT_LIST_PUSH) (or (= blt BLT_MAP_SET) (or (= blt BLT_MUTEX_SET) (or (= blt BLT_MUTEX_LOCK) (or (= blt BLT_MUTEX_UNLOCK)
+                        ; real-world side effects: a subprocess or a file write can change the world.
+                        (or (= blt BLT_PROC_RUN) (or (= blt BLT_FILE_WRITE) (= blt BLT_FILE_APPEND)))))))) (do (store! mut? true) 0) 0))
             (= op OP_CALL_STATIC)
               (let [midx (chunk-u16-at c (+ (load off) 1))]
                 (if (not (vs-has visited midx))
