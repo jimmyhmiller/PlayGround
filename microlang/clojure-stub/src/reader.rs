@@ -40,6 +40,7 @@ enum Tok {
     HashParen,   // #(  anonymous-fn literal
     ReaderCond,  // #?  reader conditional (followed by a `(...)`)
     ReaderCondSplice, // #?@  splicing reader conditional (splices a collection)
+    Discard,     // #_  discard the next form
     VarQuote,    // #'  -> (var x)
     Quote,
     Backtick,      // `  syntax-quote
@@ -75,6 +76,11 @@ fn tokenize(src: &str) -> Vec<Tok> {
             }
             '#' if i + 1 < cs.len() && cs[i + 1] == '{' => {
                 out.push(Tok::HashBrace);
+                i += 2;
+            }
+            // `#_` — discard the next form entirely.
+            '#' if i + 1 < cs.len() && cs[i + 1] == '_' => {
+                out.push(Tok::Discard);
                 i += 2;
             }
             '#' if i + 1 < cs.len() && cs[i + 1] == '(' => {
@@ -298,6 +304,11 @@ impl Parser {
                 let elems = self.read_cond_splice(rt);
                 rt.vec_to_list(&elems)
             }
+            // `#_` discards the next form; the value here is the form AFTER it.
+            Tok::Discard => {
+                self.form(rt); // read & drop the discarded form
+                self.form(rt)
+            }
             Tok::Open(c) | Tok::Close(c) => panic!("reader: unexpected {c}"),
         }
     }
@@ -349,6 +360,11 @@ impl Parser {
                     self.pos += 1;
                     let elems = self.read_cond_splice(rt);
                     items.extend(elems);
+                }
+                // `#_ form` inside a collection: read and drop the next form.
+                Some(Tok::Discard) => {
+                    self.pos += 1;
+                    self.form(rt);
                 }
                 Some(_) => items.push(self.form(rt)),
                 None => panic!("reader: unbalanced, expected {close}"),

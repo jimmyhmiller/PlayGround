@@ -256,6 +256,10 @@ impl Compiler {
                         .and_then(|a| a.get(left))
                         .map(String::as_str)
                         .unwrap_or(left);
+                    // `cljs.core/x` resolves to `clojure.core/x` — this dialect is
+                    // JVM-free like ClojureScript, so cljs-targeted library code
+                    // referring to cljs.core builtins finds our core equivalents.
+                    let real = if real == "cljs.core" { "clojure.core" } else { real };
                     let q = rt.intern(&format!("{real}/{right}"));
                     // A `^:private` / `defn-` var is only accessible within its ns
                     // (var-quote `#'ns/x` bypasses this, like Clojure).

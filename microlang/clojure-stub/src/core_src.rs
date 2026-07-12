@@ -10,12 +10,19 @@ pub const CORE: &str = r##"
 ;; used in the macro body (it must expand before the seq library exists); the
 ;; docstring path records :doc in the var registry (via `-set-var-doc!`, defined
 ;; once atoms are available — which is before any documented user fn).
+;; (defn name docstring? attr-map? fntail) — skip an optional leading
+;; docstring and an optional leading attr-map (e.g. {:arglists '([& xs])})
+;; before the fn body/arity-clauses, matching Clojure's defn grammar.
 (defmacro defn (name p2 & more)
   (if (%num-eq (type-of p2) 'String)
     (list 'do
-          (list 'def name (%cons 'fn (%cons (%first more) (%rest more))))
+          (list 'def name
+                (%cons 'fn (if (%num-eq (type-of (%first more)) 'Map)
+                             (%rest more) more)))
           (list '-set-var-doc! (list 'var name) p2))
-    (list 'def name (%cons 'fn (%cons p2 more)))))
+    (if (%num-eq (type-of p2) 'Map)
+      (list 'def name (%cons 'fn more))
+      (list 'def name (%cons 'fn (%cons p2 more))))))
 (defmacro when (c & body)     (list 'if c (%cons 'do body) nil))
 (defmacro when-not (c & body) (list 'if c nil (%cons 'do body)))
 (defmacro cond (& cs)
@@ -258,6 +265,10 @@ pub const CORE: &str = r##"
 (defprotocol IStack (-peek [coll]) (-pop [coll]))
 (defprotocol IEquiv (-equiv [coll other]))
 (defprotocol IEmptyableCollection (-empty [coll]))
+;; ClojureScript's editable-collection protocol. Nothing extends it here, so
+;; `(satisfies? IEditableCollection x)` is always false and cljs library code
+;; (e.g. medley) falls back to its non-transient path.
+(defprotocol IEditableCollection (-as-transient [coll]))
 
 (extend-type Object
   IEquiv (-equiv [a b] (%num-eq a b))
@@ -430,7 +441,11 @@ pub const CORE: &str = r##"
         true (throw "value is not callable")))
 
 ;; ─────────────── reduce / into ───────────────
-(defn reduce-seq [f acc s] (let [s (seq s)] (if (nil? s) acc (reduce-seq f (f acc (%first s)) (%rest s)))))
+;; honors `(reduced x)`: once the accumulator is reduced, stop and unwrap it.
+(defn reduce-seq [f acc s]
+  (if (reduced? acc)
+    (field acc 0)
+    (let [s (seq s)] (if (nil? s) acc (reduce-seq f (f acc (%first s)) (%rest s))))))
 ;; `reduce` is 2- or 3-arity (like clojure.core): `(reduce f coll)` seeds with the
 ;; first element (or `(f)` when empty); `(reduce f init coll)` seeds with `init`.
 (defn reduce [f & args]
@@ -567,12 +582,9 @@ pub const CORE: &str = r##"
   (lazy-seq (let [s (seq s)] (if (nil? s) nil (%cons (f i (%first s)) (map-indexed-h f (%add i 1) (%rest s)))))))
 (defn map-indexed [f c] (map-indexed-h f 0 c))
 
-;; if-let / when-let build a LITERAL binding vector (not syntax-quote, which
-;; would produce a runtime `(vec ..)` the `let` binder can't read).
-(defmacro if-let [bv then else]
-  (list 'let (vector (first bv) (second bv)) (list 'if (first bv) then else)))
-(defmacro when-let [bv & body]
-  (list 'let (vector (first bv) (second bv)) (list 'if (first bv) (%cons 'do body) nil)))
+;; if-let / when-let are defined below, after `gensym` (they need a fresh temp so
+;; a DESTRUCTURING binding form like `[k & ks]` is bound-and-tested via the temp,
+;; not used as the raw `if` condition).
 
 ;; ── host runtime: our stand-in for clojure.lang.RT ──
 ;; The interop shim rewrites `(. clojure.lang.RT (first coll))` etc. to these, so
@@ -1010,7 +1022,7 @@ pub const CORE: &str = r##"
 ;; up, and applies the chosen method to the same args. Dispatch values compare by
 ;; structural equality (so keywords / numbers / vectors all work as keys).
 ;; MultiFn record: (record 'MultiFn dispatch-fn method-table-atom prefers-atom).
-(defn -make-multi [df] (record 'MultiFn df (atom (hash-map)) (atom (hash-map))))
+(defn -make-multi [df nm] (record 'MultiFn df (atom (hash-map)) (atom (hash-map)) nm))
 (defn multi? [x] (%num-eq (type-of x) 'MultiFn))
 (defn -add-method [mf dval method]
   (let [a (field mf 1)] (reset! a (assoc (deref a) dval method))))
@@ -1028,7 +1040,7 @@ pub const CORE: &str = r##"
       (let [matches (filter (fn [k] (and (not= k :default) (isa? dval k))) (keys tbl))]
         (cond
           (empty? matches) (if (contains? tbl :default) (get tbl :default)
-                             (throw (str "No method in multimethod for dispatch value: " dval)))
+                             (throw (str "No method in multimethod '" (field mf 3) "' for dispatch value: " dval)))
           (= 1 (count matches)) (get tbl (first matches))
           :else (let [best (reduce (fn [a b] (cond (nil? a) b
                                                     (-mf-prefers? mf a b) a
@@ -1048,7 +1060,7 @@ pub const CORE: &str = r##"
 (defn get-method [mf dval] (-multi-lookup mf dval))
 (defn remove-method [mf dval] (let [a (field mf 1)] (reset! a (dissoc (deref a) dval)) mf))
 (defn remove-all-methods [mf] (let [a (field mf 1)] (reset! a (hash-map)) mf))
-(defmacro defmulti (name dispatch-fn) (list 'def name (list '-make-multi dispatch-fn)))
+(defmacro defmulti (name dispatch-fn) (list 'def name (list '-make-multi dispatch-fn (list 'quote name))))
 (defmacro defmethod (name dval params & body)
   (list '-add-method name dval (%cons 'fn (%cons params body))))
 
@@ -1129,6 +1141,19 @@ pub const CORE: &str = r##"
 (defn gensym
   ([] (gensym "G__"))
   ([prefix] (symbol (str prefix (swap! -gensym-counter inc)))))
+
+;; if-let / when-let: bind the test to a fresh temp, test the TEMP, then bind the
+;; (possibly destructuring) form to it. Using the raw binding form as the `if`
+;; condition would break for patterns like `[k & ks]` (a vector in expression
+;; position → `&` leaks as a symbol). Binding vectors are built literally.
+(defmacro if-let [bv then else]
+  (let [form (first bv) tst (second bv) t (gensym "if-let")]
+    (list 'let (vector t tst)
+          (list 'if t (list 'let (vector form t) then) else))))
+(defmacro when-let [bv & body]
+  (let [form (first bv) tst (second bv) t (gensym "when-let")]
+    (list 'let (vector t tst)
+          (list 'if t (list 'let (vector form t) (%cons 'do body)) nil))))
 
 ;; ─────────────── transients (value-level; the in-place optimization is a
 ;; no-op here, but the persistent result is identical, which is all a program
@@ -1288,8 +1313,12 @@ pub const CORE: &str = r##"
 ;; real arg vector / multi-arity clauses).
 (defmacro defn- (name p2 & more)
   (if (%num-eq (type-of p2) 'String)
-    (list 'def (list '-private-meta name) (%cons 'fn more))
-    (list 'def (list '-private-meta name) (%cons 'fn (%cons p2 more)))))
+    (list 'def (list '-private-meta name)
+          (%cons 'fn (if (%num-eq (type-of (%first more)) 'Map)
+                       (%rest more) more)))
+    (if (%num-eq (type-of p2) 'Map)
+      (list 'def (list '-private-meta name) (%cons 'fn more))
+      (list 'def (list '-private-meta name) (%cons 'fn (%cons p2 more))))))
 
 ;; ─────────────── more clojure.core (library code) ───────────────
 (defn abs [n] (if (%lt n 0) (%sub 0 n) n))

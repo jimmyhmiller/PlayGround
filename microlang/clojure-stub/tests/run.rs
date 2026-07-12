@@ -500,7 +500,7 @@ fn multimethods() {
     // no matching method and no :default throws a clear, catchable error.
     assert_eq!(
         run("(defmulti h identity) (defmethod h 1 [_] :one) (try (h 2) (catch :default e e))"),
-        "\"no method for dispatch value: 2\""
+        "\"No method in multimethod 'h' for dispatch value: 2\""
     );
 }
 
@@ -665,7 +665,7 @@ fn persistent_vector() {
     assert_eq!(run("(assoc-in [[1 2] [3 4]] [1 0] 99)"), "[[1 2] [99 4]]");
     // structural equality is by contents, independent of build path
     assert_eq!(run("(= [1 2 3] (conj [1 2] 3))"), "true");
-    assert_eq!(run("(= [1 2 3] '(1 2 3))"), "false"); // vector != list (as in this impl)
+    assert_eq!(run("(= [1 2 3] '(1 2 3))"), "true"); // vectors are Sequential: = to a list, as in real Clojure
     // the trie crosses tail -> root -> multiple levels
     assert_eq!(run("(count (vec (range 1000)))"), "1000");
     // 4000 > 1024 so the trie has 2 internal levels (shift 10).
@@ -1179,9 +1179,9 @@ fn clojure_data_json_is_library_code() {
     assert_eq!(run(&j("(json/read-str \"[1, [2, 3], 4]\")")), "[1 [2 3] 4]");
     assert_eq!(run(&j("(json/read-str \"{\\\"a\\\": 1, \\\"b\\\": 2}\")")), "{\"a\" 1, \"b\" 2}");
     assert_eq!(run(&j("(get (json/read-str \"{\\\"a\\\": 42}\") \"a\")")), "42");
-    // write-str (the display wraps the string in quotes without escaping inner ones)
+    // write-str: pr-str wraps the string in quotes and escapes inner ones, as in real Clojure.
     assert_eq!(run(&j("(json/write-str [1 2 3])")), "\"[1,2,3]\"");
-    assert_eq!(run(&j("(json/write-str {:name \"Bob\" :age 25})")), "\"{\"name\":\"Bob\",\"age\":25}\"");
+    assert_eq!(run(&j("(json/write-str {:name \"Bob\" :age 25})")), "\"{\\\"name\\\":\\\"Bob\\\",\\\"age\\\":25}\"");
     // round-trip
     assert_eq!(run(&j("(json/read-str (json/write-str {\"a\" [1 2] \"b\" true}))")), "{\"a\" [1 2], \"b\" true}");
 }

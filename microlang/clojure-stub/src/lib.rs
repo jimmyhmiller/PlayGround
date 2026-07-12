@@ -994,7 +994,7 @@ fn expand_fn<M: ValueModel>(
     };
     if single {
         let params = items[i];
-        let body = wrap_fn_recur(rt, params, &items[i + 1..]);
+        let (params, body) = wrap_fn_recur(rt, params, &items[i + 1..]);
         let fnstar = sym(rt, "fn*");
         let mut norm = vec![fnstar, params];
         norm.extend(body);
@@ -1009,32 +1009,61 @@ fn expand_fn<M: ValueModel>(
 
 /// A `fn` body that contains `recur` re-enters the fn — desugar to a `loop` over
 /// the params (so `recur` rebinds them and tail-jumps via the loop trampoline).
-fn wrap_fn_recur<M: ValueModel>(rt: &mut Runtime<M>, params: u64, body: &[u64]) -> Vec<u64> {
-    let psyms = param_syms(rt, params);
-    if psyms.is_empty() || !body.iter().any(|&b| has_recur(rt, b)) {
-        return body.to_vec();
-    }
-    let loopsym = sym(rt, "loop");
-    let mut binds = Vec::new();
-    for &s in &psyms {
-        binds.push(s);
-        binds.push(s);
-    }
-    let bindvec = make_vector(rt, binds);
-    let mut loopf = vec![loopsym, bindvec];
-    loopf.extend_from_slice(body);
-    vec![rt.vec_to_list(&loopf)]
-}
-
-/// The plain-symbol params (skipping `&`, keeping the rest name).
-fn param_syms<M: ValueModel>(rt: &Runtime<M>, params: u64) -> Vec<u64> {
-    let list = match binding_items(rt, params) {
+/// Returns `(new_params, new_body)`: a DESTRUCTURING param (e.g. `[x :as xs]`) is
+/// replaced by a fresh gensym in the param list — so the loop binds every position
+/// (matching `recur`'s arity) — and the pattern is destructured from that gensym
+/// via a `let` inside the loop, re-run each iteration. When there's no `recur`,
+/// params and body pass through unchanged.
+fn wrap_fn_recur<M: ValueModel>(rt: &mut Runtime<M>, params: u64, body: &[u64]) -> (u64, Vec<u64>) {
+    let plist = match binding_items(rt, params) {
         Some(l) => l,
         None => rt.list_to_vec(params),
     };
-    list.into_iter()
-        .filter(|&p| matches!(rt.decode(p), Val::Sym(_)) && !is_sym(rt, p, "&"))
-        .collect()
+    if plist.is_empty() || !body.iter().any(|&b| has_recur(rt, b)) {
+        return (params, body.to_vec());
+    }
+    let mut new_params = Vec::new();
+    let mut loop_binds = Vec::new();
+    let mut destr = Vec::new(); // pattern, gensym pairs to destructure inside the loop
+    let mut amp = false;
+    for &p in &plist {
+        if matches!(rt.decode(p), Val::Sym(_)) {
+            new_params.push(p);
+            if is_sym(rt, p, "&") {
+                amp = true;
+                continue;
+            }
+            // a normal symbol, or the rest name after `&`: loop-bind it to itself
+            loop_binds.push(p);
+            loop_binds.push(p);
+            amp = false;
+        } else {
+            // a destructuring pattern (possibly the variadic rest pattern): gensym it
+            let g = gensym(rt, "p");
+            new_params.push(g);
+            loop_binds.push(g);
+            loop_binds.push(g);
+            destr.push(p);
+            destr.push(g);
+            amp = false;
+        }
+    }
+    let _ = amp;
+    let inner: Vec<u64> = if destr.is_empty() {
+        body.to_vec()
+    } else {
+        let letk = sym(rt, "let");
+        let bvec = make_vector(rt, destr);
+        let mut letf = vec![letk, bvec];
+        letf.extend_from_slice(body);
+        vec![rt.vec_to_list(&letf)]
+    };
+    let loopsym = sym(rt, "loop");
+    let bindvec = make_vector(rt, loop_binds);
+    let mut loopf = vec![loopsym, bindvec];
+    loopf.extend(inner);
+    let new_params = make_vector(rt, new_params);
+    (new_params, vec![rt.vec_to_list(&loopf)])
 }
 
 /// Does `ir` contain a `(recur …)` in this fn's scope (not inside a nested
@@ -1069,7 +1098,7 @@ fn multi_arity<M: ValueModel>(rt: &mut Runtime<M>, clauses: &[u64]) -> u64 {
             let k = int(rt, fixed as i128);
             call2(rt, "=", n, k)
         };
-        let body = wrap_fn_recur(rt, paramvec, &parts[1..]);
+        let (paramvec, body) = wrap_fn_recur(rt, paramvec, &parts[1..]);
         let letsym = sym(rt, "let");
         let bindvec = make_vector(rt, vec![paramvec, g]);
         let mut letf = vec![letsym, bindvec];
@@ -1162,6 +1191,17 @@ fn last_seg(s: &str) -> String {
     s.rsplit('.').next().unwrap_or(s).to_string()
 }
 
+/// Compile an unsupported host-interop form to a RUNTIME throw (not a compile-time
+/// panic), so a library that only touches host interop in a few (platform-specific)
+/// functions still LOADS and its pure functions work; only calling the interop one
+/// throws a clear, catchable error.
+fn interop_unsupported<M: ValueModel>(rt: &mut Runtime<M>, what: String) -> u64 {
+    let id = rt.alloc(Obj::Str(format!("unsupported host interop: {what}")));
+    let msgv = <M::R as microlang::Repr>::enc_ref(id);
+    let throwk = sym(rt, "throw");
+    rt.vec_to_list(&[throwk, msgv])
+}
+
 fn shim_call<M: ValueModel>(rt: &mut Runtime<M>, class: &str, method: &str, args: &[u64]) -> u64 {
     let head = match (class, method) {
         ("RT", "cons") => "%cons",
@@ -1171,7 +1211,7 @@ fn shim_call<M: ValueModel>(rt: &mut Runtime<M>, class: &str, method: &str, args
         ("RT", "seq") => "-rt-seq",
         ("RT", "conj") => "-rt-conj",
         ("RT", "assoc") => "-rt-assoc",
-        _ => panic!("unimplemented interop: {class}/{method}"),
+        _ => return interop_unsupported(rt, format!("{class}/{method}")),
     };
     let h = sym(rt, head);
     let mut out = vec![h];
@@ -1182,7 +1222,7 @@ fn shim_call<M: ValueModel>(rt: &mut Runtime<M>, class: &str, method: &str, args
 fn shim_field<M: ValueModel>(rt: &mut Runtime<M>, class: &str, field: &str) -> u64 {
     match (class, field) {
         ("PersistentList", "creator") => sym(rt, "-list"),
-        _ => panic!("unimplemented interop field: {class}/{field}"),
+        _ => interop_unsupported(rt, format!("{class}/{field}")),
     }
 }
 
@@ -1195,7 +1235,11 @@ fn shim_instance<M: ValueModel>(rt: &mut Runtime<M>, method: &str, obj: u64, arg
             rt.vec_to_list(&out)
         }
         "meta" => call1(rt, "-meta", obj),
-        _ => panic!("unimplemented interop instance method: .{method}"),
+        // A handful of host collection methods map cleanly to core fns.
+        "isEmpty" => call1(rt, "empty?", obj),
+        "toArray" => call1(rt, "to-array", obj),
+        "size" | "count" | "length" => call1(rt, "count", obj),
+        _ => interop_unsupported(rt, format!(".{method}")),
     }
 }
 
