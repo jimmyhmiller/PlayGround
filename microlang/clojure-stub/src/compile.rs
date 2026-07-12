@@ -289,6 +289,22 @@ impl Compiler {
     /// Compile a (non-local) symbol reference: a `^:dynamic` var reads the
     /// thread-local binding stack (`%dyn-get`); any other var is a plain global.
     fn global_ref<M: ValueModel>(&self, rt: &mut Runtime<M>, s: Sym) -> Ir {
+        // `PersistentQueue/EMPTY` (or cljs's `…PersistentQueue.EMPTY`) is the empty
+        // persistent queue — map it to our `-empty-queue` value.
+        {
+            let nm = rt.sym_name(s);
+            if nm.ends_with("PersistentQueue/EMPTY") || nm.ends_with("PersistentQueue.EMPTY") {
+                return Ir::Global(rt.intern("clojure.core/-empty-queue"));
+            }
+        }
+        // A prim used in VALUE position (`(map nil? xs)`, `{:a nil?}`) has no var to
+        // read — synthesize a wrapper closure so it's a first-class function. In
+        // CALL position the prim still inlines (checked before this path).
+        if let Some(&p) = self.prims.get(&s) {
+            if let Some(wrap) = prim_value_wrapper(p) {
+                return wrap;
+            }
+        }
         let r = self.resolve_global(rt, s);
         // A `^:dynamic` var reads the thread-local binding stack (keyed by its
         // resolved, qualified sym), falling back to the root global if unbound.
@@ -614,5 +630,24 @@ impl Compiler {
             }
         }
         None
+    }
+}
+
+/// A first-class wrapper closure for a prim referenced in VALUE position, so
+/// `nil?`/`list`/etc. can be passed around like any function. `None` for prims
+/// that are only ever internal (`%`-prefixed) and never used as bare values.
+fn prim_value_wrapper(p: Prim) -> Option<Ir> {
+    // body references the wrapper's params via Local{up:0, idx:i}
+    let local = |i: u16| Ir::Local { up: 0, idx: i };
+    let fixed = |p: Prim, n: u16| {
+        let args = (0..n).map(local).collect();
+        Ir::Lambda { nparams: n as usize, variadic: false, body: Arc::new(Ir::Prim(p, args)) }
+    };
+    match p {
+        // `(fn [& xs] xs)` — the collected rest IS the list.
+        Prim::List => Some(Ir::Lambda { nparams: 0, variadic: true, body: Arc::new(local(0)) }),
+        Prim::IsNil | Prim::TypeOf | Prim::Throw | Prim::Hash | Prim::NFields => Some(fixed(p, 1)),
+        Prim::Field => Some(fixed(p, 2)),
+        _ => None,
     }
 }

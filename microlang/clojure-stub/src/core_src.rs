@@ -575,7 +575,7 @@ pub const CORE: &str = r##"
         true (reduce -comp2 (first fns) (rest fns))))
 (defn partial [f & pre] (fn [& args] (apply f (concat pre args))))
 (defn constantly [x] (fn [& _] x))
-(defn complement [f] (fn [x] (not (f x))))
+(defn complement [f] (fn [& args] (not (apply f args))))
 (defn max [a & more] (reduce (fn [x y] (if (%lt x y) y x)) a more))
 (defn min [a & more] (reduce (fn [x y] (if (%lt x y) x y)) a more))
 (defn map-indexed-h [f i s]
@@ -1320,7 +1320,98 @@ pub const CORE: &str = r##"
       (list 'def (list '-private-meta name) (%cons 'fn more))
       (list 'def (list '-private-meta name) (%cons 'fn (%cons p2 more))))))
 
+;; ─────────────── regex (library code over the one string primitive) ───────────────
+;; A compiled pattern is `(record 'Regex pattern-string)`; `#"…"` reads as
+;; `(re-pattern "…")`. A tiny backtracking engine supports literals, `.`, `*`,
+;; `^`, `$` — enough for common patterns; it returns the MATCH LENGTH so re-find
+;; can hand back the matched substring, not just a boolean.
+(defn regexp? [x] (%num-eq (type-of x) 'Regex))
+(defn re-pattern [s] (if (regexp? s) s (record 'Regex (str s))))
+(defn -re-pat-chars [re] (%str->chars (if (regexp? re) (field re 0) (str re))))
+;; number of leading chars of `txt` matched by `re` (both char lists), or nil.
+(defn -re-len [re txt]
+  (cond
+    (nil? (seq re)) 0
+    (and (%num-eq (first re) \$) (nil? (seq (rest re)))) (if (nil? (seq txt)) 0 nil)
+    (and (seq (rest re)) (%num-eq (first (rest re)) \*))
+      (-re-star-len (first re) (rest (rest re)) txt)
+    (and (seq txt) (or (%num-eq (first re) \.) (%num-eq (first re) (first txt))))
+      (let [n (-re-len (rest re) (rest txt))] (if (nil? n) nil (%add n 1)))
+    :else nil))
+;; `c* rest` against txt, greedy with backtracking; total consumed length or nil.
+(defn -re-star-len [c re txt]
+  (if (and (seq txt) (or (%num-eq (first txt) c) (%num-eq c \.)))
+    (let [longer (-re-star-len c re (rest txt))]
+      (if (nil? longer) (-re-len re txt) (%add longer 1)))
+    (-re-len re txt)))
+;; leftmost match of the pattern anywhere in s; returns the matched substring or nil.
+(defn re-find [re s]
+  (let [pc (-re-pat-chars re)
+        anchored (and (seq pc) (%num-eq (first pc) \^))
+        rec (if anchored (rest pc) pc)]
+    (loop [t (%str->chars s)]
+      (let [n (-re-len rec t)]
+        (cond
+          (not (nil? n)) (apply str (take n t))
+          (or anchored (nil? (seq t))) nil
+          :else (recur (rest t)))))))
+;; whole-string match: returns s (the match) only if the pattern matches all of s.
+(defn re-matches [re s]
+  (let [pc (-re-pat-chars re)
+        rec (if (and (seq pc) (%num-eq (first pc) \^)) (rest pc) pc)
+        sc (%str->chars s)
+        n (-re-len rec sc)]
+    (if (and (not (nil? n)) (%num-eq n (count sc))) (apply str (take n sc)) nil)))
+(defn re-seq [re s]
+  (lazy-seq
+    (when (seq (%str->chars s))
+      (let [m (re-find re s)]
+        (if (nil? m) nil
+          (let [after (drop (max 1 (count m)) (%str->chars s))]
+            (cons m (re-seq re (apply str after)))))))))
+
+;; ─────────────── PersistentQueue (FIFO) ───────────────
+;; `(record 'PersistentQueue items)` where items is a LIST front→back (a list, not
+;; a vector — this loads before the PVec name-fields are registered). conj appends
+;; to the back; first/peek read the front. `PersistentQueue/EMPTY` (or cljs's
+;; `PersistentQueue.EMPTY`) resolves to `-empty-queue` in the compiler.
+(def -empty-queue (record 'PersistentQueue nil))
+(defn -q-append [xs x] (if (nil? (seq xs)) (%cons x nil) (%cons (first xs) (-q-append (rest xs) x))))
+(extend-type PersistentQueue
+  ISeqable (-seq [q] (seq (field q 0)))
+  ISeq (-first [q] (first (field q 0))) (-rest [q] (record 'PersistentQueue (rest (field q 0))))
+  ICounted (-count [q] (count (field q 0)))
+  ICollection (-conj [q x] (record 'PersistentQueue (-q-append (field q 0) x)))
+  IStack (-peek [q] (first (field q 0))) (-pop [q] (record 'PersistentQueue (rest (field q 0))))
+  IEquiv (-equiv [q o] (if (or (-seqlike? o) (%num-eq (type-of o) 'PersistentQueue))
+                         (-seq-eq (seq q) (seq o)) false))
+  IEmptyableCollection (-empty [_] -empty-queue))
+
+;; ─────────────── array-list (cljs's mutable growable array) ───────────────
+;; A tiny mutable buffer (a record wrapping an atom holding a vector) — cljs
+;; library code uses `(array-list)` + `.add`/`.isEmpty`/`.toArray`/`.clear` as a
+;; local mutation optimization (e.g. medley's partition transducers).
+(defn array-list [] (record 'ArrayList (%atom-new [])))
+(defn -al-add! [al x] (do (%atom-set (field al 0) (conj (%atom-get (field al 0)) x)) al))
+(defn -al-clear! [al] (do (%atom-set (field al 0) []) al))
+(extend-type ArrayList
+  ICounted (-count [al] (count (%atom-get (field al 0))))
+  ISeqable (-seq [al] (seq (%atom-get (field al 0)))))
+
 ;; ─────────────── more clojure.core (library code) ───────────────
+(defn to-array [coll] (vec coll))
+;; UUID: `(record 'UUID canonical-string)`; `#uuid "…"` reads as `(uuid "…")`.
+(defn uuid [s] (record 'UUID (str s)))
+(defn uuid? [x] (%num-eq (type-of x) 'UUID))
+(def -uuid-counter (atom 0))
+;; distinct (not cryptographically random) UUIDs — enough for `(not= (random-uuid) (random-uuid))`.
+(defn random-uuid []
+  (uuid (str "00000000-0000-4000-8000-" (swap! -uuid-counter inc))))
+(extend-type UUID
+  IEquiv (-equiv [u o] (if (%num-eq (type-of o) 'UUID) (= (field u 0) (field o 0)) false)))
+(defn identical? [a b] (%num-eq a b))
+;; keywords aren't reference-identical here (they're records), so compare by value.
+(defn keyword-identical? [a b] (= a b))
 (defn abs [n] (if (%lt n 0) (%sub 0 n) n))
 (defn boolean? [x] (or (true? x) (false? x)))
 (defn int? [x] (%num-eq (type-of x) 'Long))
@@ -1426,6 +1517,8 @@ pub const CORE: &str = r##"
                (-contains-key? [m k] (-sm-has? (field m 0) k))
   IMap (-dissoc [m k] (record 'SortedMap (-sm-dissoc (field m 0) k)))
   ICollection (-conj [m e] (record 'SortedMap (-sm-assoc (field m 0) (nth e 0) (nth e 1))))
+  ;; a sorted-map is = to any map (sorted or not) with the same entries.
+  IEquiv (-equiv [m o] (if (map? o) (if (%num-eq (-count m) (-count o)) (keys-match (keys m) m o) false) false))
   IEmptyableCollection (-empty [_] (record 'SortedMap nil)))
 (defn -ss-conj [es x]
   (cond (nil? (seq es)) (%cons x nil)
@@ -1484,7 +1577,6 @@ pub const CORE: &str = r##"
 (defn bytes? [x] false)
 (defn class? [x] false)
 (defn uri? [x] false)
-(defn uuid? [x] false)
 (defn inst? [x] false)
 (defn NaN? [x] (not (%num-eq x x)))
 (defn infinite? [x] (or (%num-eq x (/ 1.0 0.0)) (%num-eq x (/ -1.0 0.0))))

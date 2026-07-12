@@ -37,8 +37,14 @@ pub const CLOJURE_TEST: &str = r##"
       (:v r) (-inc! :pass)
       :else (-report-fail form (:v r)))))
 
+;; `(is (thrown? Class body…))` is a special assertion form (like real
+;; clojure.test): it passes iff evaluating body throws. The class is ignored (this
+;; dialect has no Java class hierarchy). `is` recognizes it directly, so `thrown?`
+;; need not be referred in the testing namespace.
 (defmacro is [form & _msg]
-  `(-run-is (fn [] ~form) '~form))
+  (if (and (seq? form) (%num-eq (first form) 'thrown?))
+    `(-run-is (fn [] (try ~@(rest (rest form)) false (catch Throwable e# true))) '~form)
+    `(-run-is (fn [] ~form) '~form)))
 
 ;; `(are [x y] (= x y) a b c d …)` -> an `is` per row, binding argv to the row.
 (defmacro are [argv expr & data]

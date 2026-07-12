@@ -341,13 +341,22 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 let argv: Vec<u64> = (0..args.len()).map(|i| rt.root_get(base + i)).collect();
                 rt.truncate_roots(base);
                 let ty = rt.type_tag(argv[0]);
-                let imp = rt.resolve_or_default(*site, *method, ty).unwrap_or_else(|| {
-                    panic!(
-                        "no method '{}' for type '{}'",
-                        rt.sym_name(*method),
-                        rt.sym_name(ty)
-                    )
-                });
+                let imp = match rt.resolve_or_default(*site, *method, ty) {
+                    Some(imp) => imp,
+                    None => {
+                        // No protocol impl for this type — a CATCHABLE throw (like
+                        // Clojure's "no implementation of method" / seq-on-non-seq),
+                        // not a hard panic, so `try`/`catch` can handle it.
+                        let msg = format!(
+                            "no method '{}' for type '{}'",
+                            rt.sym_name(*method),
+                            rt.sym_name(ty)
+                        );
+                        let id = rt.alloc(Obj::Str(msg));
+                        rt.signal_throw(M::R::enc_ref(id));
+                        return M::R::enc_nil();
+                    }
+                };
                 top.invoke(top, rt, imp, &argv)
             }
         }
@@ -400,6 +409,19 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 }
                 _ => panic!("value not callable: {}", rt.print(callee)),
             };
+            // Arity mismatch is a CATCHABLE throw (not a hard panic), so `try`/
+            // `catch` can handle a wrong-arity call as it would in Clojure.
+            let arity_ok = if variadic { args.len() >= nparams } else { args.len() == nparams };
+            if !arity_ok {
+                let msg = if variadic {
+                    format!("arity: expected at least {}, got {}", nparams, args.len())
+                } else {
+                    format!("arity: expected {}, got {}", nparams, args.len())
+                };
+                let sid = rt.alloc(Obj::Str(msg));
+                rt.signal_throw(M::R::enc_ref(sid));
+                return M::R::enc_nil();
+            }
             let frame = rt.build_call_frame(nparams, variadic, &args, env);
             match eval_tail(top, rt, &body, &frame) {
                 Bounce::Done(v) => return v,

@@ -41,6 +41,8 @@ enum Tok {
     ReaderCond,  // #?  reader conditional (followed by a `(...)`)
     ReaderCondSplice, // #?@  splicing reader conditional (splices a collection)
     Discard,     // #_  discard the next form
+    Regex(String), // #"pat"  regex literal -> (re-pattern "pat")
+    UuidLit,     // #uuid "…"  -> (uuid "…")
     VarQuote,    // #'  -> (var x)
     Quote,
     Backtick,      // `  syntax-quote
@@ -82,6 +84,28 @@ fn tokenize(src: &str) -> Vec<Tok> {
             '#' if i + 1 < cs.len() && cs[i + 1] == '_' => {
                 out.push(Tok::Discard);
                 i += 2;
+            }
+            // `#uuid "…"` — a UUID tagged literal -> (uuid "…").
+            '#' if cs[i + 1..].starts_with(&['u', 'u', 'i', 'd']) => {
+                out.push(Tok::UuidLit);
+                i += 5;
+            }
+            // `#"pat"` — a regex literal; read the pattern RAW (backslashes kept).
+            '#' if i + 1 < cs.len() && cs[i + 1] == '"' => {
+                i += 2;
+                let mut s = String::new();
+                while i < cs.len() && cs[i] != '"' {
+                    if cs[i] == '\\' && i + 1 < cs.len() {
+                        s.push(cs[i]);
+                        s.push(cs[i + 1]);
+                        i += 2;
+                    } else {
+                        s.push(cs[i]);
+                        i += 1;
+                    }
+                }
+                i += 1; // closing quote
+                out.push(Tok::Regex(s));
             }
             '#' if i + 1 < cs.len() && cs[i + 1] == '(' => {
                 // `#(...)` anonymous-fn literal: the `(` is consumed here so the
@@ -296,6 +320,14 @@ impl Parser {
             Tok::Unquote => self.wrap(rt, "unquote"),
             Tok::UnquoteSplice => self.wrap(rt, "unquote-splice"),
             Tok::Str(s) => alloc(rt, Obj::Str(s)),
+            // `#"pat"` -> `(re-pattern "pat")`, built at runtime into a Regex value.
+            Tok::Regex(p) => {
+                let rp = sym(rt, "re-pattern");
+                let pat = alloc(rt, Obj::Str(p));
+                rt.vec_to_list(&[rp, pat])
+            }
+            // `#uuid "…"` -> `(uuid "…")`.
+            Tok::UuidLit => self.wrap(rt, "uuid"),
             Tok::Char(c) => alloc(rt, Obj::Char(c)),
             Tok::Atom(a) => self.atom(rt, &a),
             // `#?@` outside a collection is unusual; return the selected collection

@@ -303,6 +303,16 @@ fn expand<M: ValueModel>(
             let qform = quote_form(rt, qsym);
             let g = rt.vec_to_list(&[find, qform]);
             expand(rt, cs, macros, comp, g)
+        } else if is_sym(rt, head, "new") {
+            // `(new Class args…)` is the same as `(Class. args…)` — rewrite to the
+            // trailing-dot constructor form and let the interop shim handle it.
+            let items = rt.list_to_vec(f);
+            let cname = sym_str(rt, items[1]);
+            let ctor = sym(rt, &format!("{cname}."));
+            let mut out = vec![ctor];
+            out.extend_from_slice(&items[2..]);
+            let d = rt.vec_to_list(&out);
+            expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "instance?") {
             let d = instance_rewrite(rt, f);
             expand(rt, cs, macros, comp, d)
@@ -1171,6 +1181,12 @@ fn interop_rewrite<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> Option<u64>
     // so `type-of` / typed `catch` can identify it (e.g. `(RuntimeException. m)`).
     if hname.ends_with('.') && hname.len() > 1 && hname != ".." {
         let simple = last_seg(&hname[..hname.len() - 1]);
+        // A map entry is a `[k v]` vector in this dialect (as it is everywhere
+        // else here), so `(MapEntry. k v _hash)` builds the 2-vector.
+        if simple == "MapEntry" && items.len() >= 3 {
+            let veck = sym(rt, "vector");
+            return Some(rt.vec_to_list(&[veck, items[1], items[2]]));
+        }
         let rec = sym(rt, "record");
         let tag = sym(rt, &simple);
         let tag_q = quote_form(rt, tag);
@@ -1188,7 +1204,9 @@ fn sym_str<M: ValueModel>(rt: &Runtime<M>, v: u64) -> String {
     }
 }
 fn last_seg(s: &str) -> String {
-    s.rsplit('.').next().unwrap_or(s).to_string()
+    // the simple class name: the segment after the last `.` or `/`
+    // (e.g. `cljs.core/MapEntry` -> `MapEntry`).
+    s.rsplit(['.', '/']).next().unwrap_or(s).to_string()
 }
 
 /// Compile an unsupported host-interop form to a RUNTIME throw (not a compile-time
@@ -1239,6 +1257,14 @@ fn shim_instance<M: ValueModel>(rt: &mut Runtime<M>, method: &str, obj: u64, arg
         "isEmpty" => call1(rt, "empty?", obj),
         "toArray" => call1(rt, "to-array", obj),
         "size" | "count" | "length" => call1(rt, "count", obj),
+        // mutable array-list (cljs `(array-list)`): add/clear mutate in place.
+        "add" => {
+            let h = sym(rt, "-al-add!");
+            let mut out = vec![h, obj];
+            out.extend_from_slice(args);
+            rt.vec_to_list(&out)
+        }
+        "clear" => call1(rt, "-al-clear!", obj),
         _ => interop_unsupported(rt, format!(".{method}")),
     }
 }
@@ -1657,11 +1683,13 @@ fn process_require_spec<M: ValueModel>(
     let spec = unquote(rt, spec);
     // bare `(require 'foo)` — load it, nothing to alias/refer.
     if let Some(real) = sym_name_of(rt, spec) {
+        let real = normalize_ns(&real);
         ensure_loaded(rt, cs, macros, comp, &real);
         return;
     }
     let Some(elems) = binding_items(rt, spec) else { return };
     let Some(real) = elems.first().and_then(|&f| sym_name_of(rt, f)) else { return };
+    let real = normalize_ns(&real);
     ensure_loaded(rt, cs, macros, comp, &real);
     let mut k = 1;
     while k < elems.len() {
@@ -1670,12 +1698,26 @@ fn process_require_spec<M: ValueModel>(
                 comp.add_alias(&alias, &real);
             }
             k += 2;
-        } else if is_keyword(rt, elems[k], "refer") && k + 1 < elems.len() {
+        // `:refer` and cljs's `:refer-macros` both bring names into scope.
+        } else if (is_keyword(rt, elems[k], "refer") || is_keyword(rt, elems[k], "refer-macros"))
+            && k + 1 < elems.len()
+        {
             refer_names(rt, comp, &[elems[k + 1]], &real, "");
             k += 2;
         } else {
             k += 1;
         }
+    }
+}
+
+/// Map a ClojureScript-namespace to its bundled `clojure.*` equivalent — this
+/// dialect is JVM-free like cljs, so `.cljc`/`.cljs` files that target cljs
+/// (requiring `cljs.core`, `cljs.test`, …) find our namespaces.
+fn normalize_ns(name: &str) -> String {
+    match name {
+        "cljs.core" => "clojure.core".to_string(),
+        "cljs.test" => "clojure.test".to_string(),
+        _ => name.to_string(),
     }
 }
 
@@ -1753,6 +1795,7 @@ fn class_to_tag(simple: &str) -> Option<&'static str> {
         "Long" | "Integer" | "Short" | "Byte" | "BigInteger" | "BigInt" => "Long",
         "Double" | "Float" | "BigDecimal" => "Double",
         "Boolean" => "Boolean",
+        "RegExp" | "Pattern" | "Regex" => "Regex",
         s if s.contains("Vector") => "PersistentVector",
         s if s.contains("Map") => "PersistentArrayMap",
         s if s.contains("Set") => "PersistentHashSet",
@@ -1771,7 +1814,7 @@ fn instance_rewrite<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
         panic!("instance?: first argument must be a class symbol");
     };
     let cname = rt.sym_name(cs).to_string();
-    let simple = cname.rsplit('.').next().unwrap_or(&cname);
+    let simple = cname.rsplit(['.', '/']).next().unwrap_or(&cname);
     // A deftype/record instance is tagged by its own simple name, so fall back to
     // that when the class isn't a built-in we map.
     let tag = class_to_tag(simple).unwrap_or(simple).to_string();
