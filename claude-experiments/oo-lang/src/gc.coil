@@ -42,14 +42,19 @@
 ; MARK one pointer: classify, set its mark bit if unmarked, and grey it (push to the worklist).
 ; Null is "nothing to mark" (covers every optional/unassigned reference slot). Runs only during
 ; a stop-the-world mark phase, so plain (non-atomic) flag reads/writes are sound.
+; During a MINOR collection an OLD object is IGNORED — it's already live (never swept by a minor)
+; and its own young children are reached via the remembered set, not by re-tracing it. This is the
+; generational win: a minor never touches the old generation's pointer graph.
 (defn gc-mark-object [(p (ptr u8))] (-> i64)
   (if (= (cast i64 p) 0) 0
     (if (= (obj-is-kind? (load (cast (ptr i64) p))) 1)
       ; non-arena object (String/List/Map/enum/Mutex)
-      (if (= (obj-marked? (cast (ptr i8) p)) 1) 0 (do (obj-mark (cast (ptr i8) p)) (gc-wl-push p) 0))
+      (if (and (= (gc-in-minor?) 1) (= (obj-old? (cast (ptr i8) p)) 1)) 0
+        (if (= (obj-marked? (cast (ptr i8) p)) 1) 0 (do (obj-mark (cast (ptr i8) p)) (gc-wl-push p) 0)))
       ; arena instance — first word is its type-id; mark bit lives in the InstanceHeader
       (let [h (cast (ptr InstanceHeader) p)]
-        (if (= (arena-marked? h) 1) 0 (do (arena-mark-set h) (gc-wl-push p) 0))))))
+        (if (and (= (gc-in-minor?) 1) (= (arena-old? h) 1)) 0
+          (if (= (arena-marked? h) 1) 0 (do (arena-mark-set h) (gc-wl-push p) 0)))))))
 
 (defn gc-field-is-ref? [(k i64)] (-> i64)
   (if (or (= k FIELD_STRING) (or (= k FIELD_REF) (or (= k FIELD_IFACE_REF) (= k FIELD_LIST_REF)))) 1 0))
@@ -97,14 +102,26 @@
         (if (= (mutex-valref (cast (ptr MutexObj) p)) 1) (gc-mark-object (cast (ptr u8) (mutex-get (cast (ptr MutexObj) p)))) 0)
       0)))
 
+; trace one object's outgoing references (dispatch on family).
+(defn gc-blacken [(p (ptr u8)) (program (ptr Program))] (-> i64)
+  (if (= (obj-is-kind? (load (cast (ptr i64) p))) 1) (gc-blacken-obj p) (gc-blacken-entity p program)))
+
 ; drain the grey set to a fixpoint: pop each object and blacken it (marking its children grey).
 (defn gc-drain [(program (ptr Program))] (-> i64)
   (loop
     (if (= (load (gc-wl-top-cell)) 0) (break)
       (let [arr (cast (ptr i64) (load (gc-wl-arr-cell)))]
         (store! (gc-wl-top-cell) (- (load (gc-wl-top-cell)) 1))
-        (let [p (cast (ptr u8) (load (index arr (load (gc-wl-top-cell)))))]
-          (if (= (obj-is-kind? (load (cast (ptr i64) p))) 1) (gc-blacken-obj p) (gc-blacken-entity p program)) 0))))
+        (gc-blacken (cast (ptr u8) (load (index arr (load (gc-wl-top-cell))))) program) 0)))
+  0)
+
+; MINOR extra roots: each remembered OLD object is traced for the young objects it points at (the
+; write barrier put it here). We trace its fields WITHOUT marking the old object itself — only its
+; young children get greyed (mark-object skips old). This is what keeps a young object alive when
+; its only reference lives in the old generation.
+(defn gc-rem-blacken [(program (ptr Program))] (-> i64)
+  (let [n (gc-rem-count) (mut i) 0]
+    (loop (if (< (load i) n) (do (gc-blacken (cast (ptr u8) (gc-rem-at (load i))) program) (store! i (+ (load i) 1)) 0) (break))))
   0)
 
 ; approximate live size of a swept-survivor object (for the next-gc threshold heuristic).
@@ -149,9 +166,46 @@
         (break)))
     (store! live (+ (load live) (gc-sweep-objs)))
     ; a major promoted every survivor to OLD and cleared every REMEMBERED bit, so the young list
-    ; and remembered set are now empty and the minor counter restarts.
-    (gc-young-reset) (gc-rem-reset) (gc-minors-reset)
-    ; next collection when we have allocated another ~1x of the live set (min 1 MiB of headroom).
-    (gc-set-bytes (load live))
-    (gc-set-nextgc (+ (* (load live) 2) 1048576))
+    ; and remembered set are now empty, the minor counter restarts, and any force-major is consumed.
+    (gc-young-reset) (gc-rem-reset) (gc-minors-reset) (gc-clear-force-major)
     (load live)))
+
+; O(1) unlink of `o` from the doubly-linked object list (STW).
+(defn gc-obj-unlink [(o (ptr i8))] (-> i64)
+  (let [pv (obj-prev o) nx (obj-next o)]
+    (if (= pv 0) (atomic-store (gc-objs-cell) nx) (obj-set-next (cast (ptr i8) pv) nx))
+    (if (!= nx 0) (obj-set-prev (cast (ptr i8) nx) pv) 0)) 0)
+
+; clear the REMEMBERED bit on every remembered object and reset the set for the next epoch.
+(defn gc-rem-clear [] (-> i64)
+  (let [n (gc-rem-count) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [p (gc-rem-at (load i))]
+              (if (= (obj-is-kind? (load (cast (ptr i64) p))) 1) (obj-clear-remembered (cast (ptr i8) p)) (arena-clear-remembered (cast (ptr InstanceHeader) p)))
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (gc-rem-reset) 0)
+
+; MINOR SWEEP: process ONLY the young list (O(young) — the whole point). A marked young object is
+; promoted to OLD in place (no move, so interior pointers + the per-type slab walk are untouched);
+; an unmarked young object is freed (entity -> arena free-list, non-arena -> unlink + free). Then
+; reset the young list and clear the remembered set for the next epoch.
+(defn gc-minor-sweep [(program (ptr Program))] (-> i64)
+  (let [n (gc-young-count) (mut i) 0]
+    (loop
+      (if (< (load i) n)
+        (let [p (gc-young-at (load i))]
+          (if (= (obj-is-kind? (load (cast (ptr i64) p))) 1)
+            (let [o (cast (ptr i8) p)]
+              (if (= (obj-marked? o) 1) (do (obj-clear-mark-rem o) (obj-set-old o) 0)
+                (do (gc-obj-unlink o) (obj-free o) 0)))
+            (let [h (cast (ptr InstanceHeader) p)]
+              (if (= (arena-marked? h) 1)
+                (store! (field h flags) (ior (iand (load (field h flags)) (ixor -1 (ior FLAG_MARKED FLAG_REMEMBERED))) FLAG_OLD))
+                (let [tid (load (field h type-id)) ti (load (index (load (field program types)) tid))]
+                  (arena-free (load (field ti arena)) (load (field h slot-index))) 0))))
+          (store! i (+ (load i) 1)) 0)
+        (break))))
+  (gc-young-reset)
+  (gc-rem-clear)
+  0)

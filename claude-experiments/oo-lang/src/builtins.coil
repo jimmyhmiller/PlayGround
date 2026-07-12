@@ -49,6 +49,7 @@
 (defn obj-remembered? [(o (ptr i8))] (-> i64) (if (= (iand (load (field (cast (ptr ObjHeader) o) flags)) OBJ_REM) OBJ_REM) 1 0))
 (defn obj-set-remembered [(o (ptr i8))] (-> i64) (store! (field (cast (ptr ObjHeader) o) flags) (ior (load (field (cast (ptr ObjHeader) o) flags)) OBJ_REM)) 0)
 (defn obj-clear-mark-rem [(o (ptr i8))] (-> i64) (store! (field (cast (ptr ObjHeader) o) flags) (iand (load (field (cast (ptr ObjHeader) o) flags)) (ixor -1 (ior OBJ_MARK OBJ_REM)))) 0)
+(defn obj-clear-remembered [(o (ptr i8))] (-> i64) (store! (field (cast (ptr ObjHeader) o) flags) (iand (load (field (cast (ptr ObjHeader) o) flags)) (ixor -1 OBJ_REM))) 0)
 ; WRITE BARRIER for non-arena containers (List/Map/Mutex): remember an OLD container that just had
 ; something stored into it, so a minor traces it for young elements (dedup via the REMEMBERED bit).
 (defn obj-write-barrier [(o (ptr i8))] (-> i64)

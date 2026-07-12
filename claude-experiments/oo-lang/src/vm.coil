@@ -121,22 +121,62 @@
 ; an eval, where the eval thread is the coordinator and the world is already quiescent) we mark and
 ; sweep in place; otherwise we stop the world ourselves. Reusing the single-coordinator stop keeps
 ; GC exclusive against evals and shape migrations — never two coordinators at once.
-(defn gc-do-mark-sweep [] (-> i64)
+; MAJOR: full mark + sweep of both generations (survivors -> OLD; young list + remembered set reset).
+(defn gc-major-cycle [] (-> i64)
+  (gc-set-major)
   (gc-wl-reset)
-  (gc-mark-roots)
+  (gc-mark-roots)                                  ; mark-object (major mode) marks young AND old
   (gc-drain (load (field (vm) program)))
   (gc-sweep-all (load (field (vm) program)))
   0)
+
+; MINOR: roots (stacks/singletons/sentinel, old ignored) + the remembered set (old->young edges),
+; then drain the young grey set and sweep ONLY the young list. The old generation is never touched.
+(defn gc-minor-cycle [] (-> i64)
+  (gc-set-minor)
+  (gc-wl-reset)
+  (gc-mark-roots)                                  ; mark-object (minor mode) greys only young roots
+  (gc-rem-blacken (load (field (vm) program)))     ; young children reachable from remembered olds
+  (gc-drain (load (field (vm) program)))
+  (gc-minor-sweep (load (field (vm) program)))
+  (gc-minors-inc)
+  0)
+
+; run one collection, choosing minor vs major: a major every GC_MAJOR_EVERY minors, or when the
+; remembered set overflowed, or when an arena filled and forced one (only a major reclaims old).
+(defn gc-cycle [] (-> i64)
+  (if (or (>= (gc-minors) GC_MAJOR_EVERY) (or (= (gc-rem-overflow?) 1) (= (gc-force-major?) 1)))
+    (gc-major-cycle)
+    (gc-minor-cycle))
+  (gc-rearm)
+  0)
+
 (defn gc-collect [(vt (ptr VMThread))] (-> i64)
   (if (and (= (safepoint-stopped?) 1) (= (safepoint-is-coordinator? (field vt parked)) 1))
     ; we already own the stop (a GC triggered from inside our own eval) — the heap is quiescent.
-    (gc-do-mark-sweep)
+    (gc-cycle)
     ; try to win the stop WITHOUT spinning. If another thread is already coordinating (a concurrent
     ; GC or an eval), park instead of contending — its collection covers us, and we re-check the
     ; threshold on our next dispatch step. This is what prevents two GC initiators from deadlocking.
     (if (= (request-global-stop-try (field vt parked)) 1)
-      (do (gc-do-mark-sweep) (release-global-stop) 0)
+      (do (gc-cycle) (release-global-stop) 0)
       (do (safepoint-poll (field vt parked)) 0))))
+
+; allocate one instance for OP_NEW. If the type's arena is full, a minor can't help (it never
+; reclaims OLD instances), so FORCE a major and retry; only then is it a genuine capacity error.
+; Rewinds fr.ip to the OP_NEW instruction start across the collection so this frame's stack map
+; matches the physical stack (the freshly-allocated result is not pushed yet).
+(defn vm-alloc-instance [(vt (ptr VMThread)) (fr (ptr CallFrame)) (a (ptr TypeArena))] (-> i64)
+  (let [p (arena-alloc-or-null a)]
+    (if (!= (cast i64 p) 0) (cast i64 p)
+      (if (= (gc-enabled?) 1)
+        (let [saved (load (field fr ip))]
+          (store! (field fr ip) (- saved 3))          ; OP_NEW is 3 bytes (op + u16 type-id)
+          (gc-request-major) (gc-collect vt)
+          (store! (field fr ip) saved)
+          (let [p2 (arena-alloc-or-null a)]
+            (if (!= (cast i64 p2) 0) (cast i64 p2) (do (arena-oom a) 0))))
+        (do (arena-oom a) 0)))))
 
 ; ---- f64 <-> i64 bit reinterpret (NOT a numeric cast). Per-call stack cell => thread-safe.
 (defn to-bits [(x f64)] (-> i64) (let [p (alloc-stack i64)] (store! (cast (ptr f64) p) x) (load p)))
@@ -559,7 +599,7 @@
             OP_NEW
               (let [tid (read-u16 (load fr))
                     ti (load (index (load (field (load (field (vm) program)) types)) tid))
-                    inst (cast i64 (arena-alloc (load (field ti arena))))]
+                    inst (vm-alloc-instance vt (load fr) (load (field ti arena)))]
                 (vm-init-string-fields ti inst)
                 (vpush vt inst))
             OP_LOAD_SINGLETON
@@ -631,10 +671,10 @@
     (store! (field vt parked) 0) (store! (field vt done) 0)
     (sp-register (field vt parked))
     (vm-register-thread vt)
-    ; arm the collector: main is about to run and every method now has stack maps. A ~1 MiB
-    ; threshold fires well before any single arena (>= 100k slots) could fill, so per-type
-    ; enumeration stays cheap and the OutOfArenaSpace wall never comes up for reclaimable heaps.
-    (gc-set-bytes 0) (gc-set-nextgc 1048576) (gc-enable)
+    ; arm the collector: main is about to run and every method now has stack maps. Collections
+    ; (mostly cheap minors) fire every GC_MINOR_THRESHOLD of fresh allocation; a major runs
+    ; periodically to reclaim the old generation. gc-bytes is monotonic.
+    (gc-set-bytes 0) (gc-rearm) (gc-enable)
     (let [nt (load (field p type-count)) (mut i) 0]
       (loop (if (< (load i) nt)
               (let [ti (load (index (load (field p types)) (load i)))]

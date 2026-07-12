@@ -64,6 +64,18 @@
 (defn gc-minors-inc [] (-> i64) (store! (gc-minors-cell) (+ (load (gc-minors-cell)) 1)) 0)
 (defn gc-minors-reset [] (-> i64) (store! (gc-minors-cell) 0) 0)
 
+; force the NEXT collection to be a major (set when an arena genuinely fills — only a major
+; reclaims the old generation).
+(defn gc-force-major-cell [] (-> (ptr i64)) (alloc-static i64))
+(defn gc-force-major? [] (-> i64) (load (gc-force-major-cell)))
+(defn gc-request-major [] (-> i64) (store! (gc-force-major-cell) 1) 0)
+(defn gc-clear-force-major [] (-> i64) (store! (gc-force-major-cell) 0) 0)
+
+; gc-bytes is MONOTONIC (total allocated); re-arm the trigger GC_MINOR_THRESHOLD bytes ahead after
+; every collection, so a (minor) collection fires roughly every threshold of fresh allocation.
+(const GC_MINOR_THRESHOLD 2097152)   ; 2 MiB of young allocation between minors
+(defn gc-rearm [] (-> i64) (gc-set-nextgc (+ (gc-bytes) GC_MINOR_THRESHOLD)) 0)
+
 ; add `n` bytes to the live-allocation estimate (called from every alloc site).
 (defn gc-account [(n i64)] (-> i64) (atomic-add (gc-bytes-cell) n) 0)
 (defn gc-bytes [] (-> i64) (atomic-load (gc-bytes-cell)))

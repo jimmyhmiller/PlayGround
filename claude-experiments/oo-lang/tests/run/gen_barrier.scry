@@ -1,0 +1,19 @@
+// Generational GC correctness: the write barrier. A young object reachable ONLY through an
+// object that has already been promoted to the OLD generation must survive a minor collection.
+// Without the barrier remembering the old list, Box(4242) would be swept by a minor and this
+// would print garbage or crash.
+class Box { v: Int }
+class Holder { items: List<Box> }
+fn main() {
+  let h = Holder(items: List<Box>())
+  // young churn -> several minor collections -> h and h.items are promoted to OLD
+  var i = 0
+  while i < 150000 { let junk = Box(v: i)  i = i + 1 }
+  // h.items is now OLD; push a fresh YOUNG Box reachable only through it (barrier must fire)
+  h.items.push(Box(v: 4242))
+  // more young churn -> more minors; the young Box must stay alive via the old list
+  var j = 0
+  while j < 150000 { let junk2 = Box(v: j)  j = j + 1 }
+  print(h.items.get(0).v)   // must be 4242
+  print(h.items.len())      // must be 1
+}

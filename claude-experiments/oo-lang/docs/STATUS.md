@@ -88,17 +88,21 @@ Everything in this section is implemented, typechecked, and covered by golden te
 - **Per-type slab arenas** — each type gets its own arena; instance enumeration is a
   slab walk. This is what makes `Agent.instances()` cheap and the whole observability
   story work.
-- **Garbage collection** — precise, stop-the-world **mark-sweep** (02-runtime.md §6).
-  Reclaims dead class instances (back to each arena's free-list, so the per-type slab walk
-  is untouched) **and** dead non-arena heap objects (`String`/`List`/`Map`/enum/`Mutex`,
-  clox-style intrusive `Obj` list). Roots are **precise, not conservative**: the compiler
-  emits a per-instruction stack map for every method, so a collection scans exactly the live
-  references in every parked frame. Thread-safe by construction — GC reuses the same STW
-  safepoint the eval channel uses, so it runs with every mutator quiesced; two concurrent GC
-  initiators can't deadlock (a non-spinning try-acquire makes the loser park). Triggered on a
-  `bytes-allocated`/`next-gc` heuristic at the dispatch loop top, and fires from inside an eval
-  too (the allocating-eval path is verified). A `Point`-allocating loop that used to wall at
-  ~100k now runs to millions.
+- **Garbage collection** — precise, stop-the-world, **generational** mark-sweep (02-runtime.md §6).
+  Reclaims dead class instances (back to each arena's free-list, so the per-type slab walk is
+  untouched) **and** dead non-arena heap objects (`String`/`List`/`Map`/enum/`Mutex`, doubly-linked
+  `Obj` list). Roots are **precise, not conservative**: the compiler emits a per-instruction stack
+  map for every method, so a collection scans exactly the live references in every parked frame.
+  **Generational**: objects are young until they survive a collection, then promoted to OLD **in
+  place** (a header bit — nothing moves, so interior pointers and enumeration are safe). A **minor**
+  collection sweeps only the young list (objects allocated since the last collection) and never
+  traces or sweeps the old generation — its cost is O(young), not O(heap). A **write barrier** on
+  every heap-mutation site records old→young edges in a remembered set so a young object reachable
+  only from the old generation still survives. **Majors** (full mark-sweep) run periodically and on
+  arena pressure to reclaim the old generation. Thread-safe — GC reuses the STW safepoint (every
+  mutator quiesced); two concurrent initiators can't deadlock (non-spinning try-acquire → loser
+  parks); barriers/young-pushes are lock-free. Fires from inside an eval too. A `Point` loop that
+  used to wall at ~100k now runs to millions.
 - **Real threads** — OS threads, STW safepoints, atomic-bump allocation, `Mutex`.
 - **Uncrashable eval** — an eval from the viewer can **never** kill the process. Syntax
   errors, stale references, arena-OOM, bad opcodes, and even internal compiler-phase
@@ -198,14 +202,16 @@ reflection ops: `types`, `schema`, `fields`, `methods`, `graph`, `views`, `actio
 
 These are real, current gaps. Most are deliberate PoC cut-lines, not bugs.
 
-- **GC is non-moving / non-generational.** Mark-sweep with per-arena free-lists is in
-  (above) — the `OutOfArenaSpace` wall is gone for reclaimable heaps. What's deferred:
-  **compaction** (so enumeration stays `O(high-water)`, not `O(live)`, on high-churn types —
-  a heavily churned arena's slab walk still costs one flag-check per ever-used slot); a
-  **generational/incremental** collector (v1 is a full STW pause, single-threaded marking —
-  the parked threads' cores sit idle during a collection); and per-type arena caps still
-  apply (a genuine `OutOfArenaSpace` fires only when a single type has >`MAX_SLOTS` (100k)
-  simultaneously **live** instances — raise the cap for that type).
+- **GC is non-moving, generational but not incremental.** Mark-sweep with per-arena free-lists +
+  a young/old split is in (above) — the `OutOfArenaSpace` wall is gone for reclaimable heaps, and
+  minor collections don't rescan the old generation. What's still deferred: **compaction** (so
+  enumeration stays `O(high-water)`, not `O(live)`, on high-churn types — a heavily churned arena's
+  slab walk still costs one flag-check per ever-used slot); an **incremental/concurrent** collector
+  (both minor and major are full STW pauses with single-threaded marking — the parked cores sit
+  idle); **promotion is immediate** (survive one minor → old), which is the simplest provably-correct
+  policy but promotes more eagerly than an aged nursery; and per-type arena caps still apply (a
+  genuine `OutOfArenaSpace` fires only when one type has >`MAX_SLOTS` (100k) simultaneously **live**
+  instances — raise the cap for that type).
 - **No lambdas / closures.** Explicit parse error: "lambdas/closures are not supported in
   this PoC." Functions are top-level only; no first-class function values.
 - **No generic bounds.** Generics are monomorphized but a bound on a type parameter
@@ -239,6 +245,16 @@ These are real, current gaps. Most are deliberate PoC cut-lines, not bugs.
 
 ## Recently fixed (this cycle)
 
+- **GC is now generational.** On top of the precise mark-sweep below, objects have a young/old
+  generation (a header bit; promotion is in-place, nothing moves). A minor collection sweeps only
+  the young list and skips the old generation entirely — O(young), not O(heap). Correctness rests
+  on a **write barrier** at all four heap-mutation sites (`OP_STORE_FIELD_REF`, `list-push`,
+  `map-set`, `mutex-set`, plus additive-field migration) feeding a remembered set, and an
+  **immediate-promotion** invariant (after a minor, every old object points only to old) that makes
+  the barrier the *only* source of old→young edges. Majors run every 8 minors / on arena pressure.
+  Verified: a young object reachable only through an old list survives 150k allocations of churn
+  (`gen_barrier`); old-generation garbage is reclaimed so a promote-then-drop loop doesn't OOM
+  (`gen_major`); the whole suite (threads, live-edit, agent loop) stays green.
 - **Garbage collection landed** (the previous "biggest limitation"). Precise STW mark-sweep over
   per-type arenas + the non-arena object list. Three things made it tractable: (1) the compiler
   now emits **per-instruction stack maps** by abstract-interpreting each method's bytecode, so

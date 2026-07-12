@@ -1,0 +1,17 @@
+// Generational GC: the OLD generation is reclaimed too. Objects kept alive long enough to be
+// promoted to OLD, then dropped, become old garbage — reclaimed by periodic MAJOR collections
+// (or a major forced when an arena fills). If majors never ran, the Cell arena would hit its
+// fixed cap and OutOfArenaSpace; completing proves the old generation is collected.
+class Cell { v: Int }
+fn main() {
+  var keep = List<Cell>()
+  var i = 0
+  while i < 1000000 {
+    let c = Cell(v: i)
+    if i % 20 == 0 { keep.push(c) }             // promote some to OLD
+    if i % 40000 == 0 { keep = List<Cell>() }   // then drop them -> old garbage
+    i = i + 1
+  }
+  print(i)
+  print(keep.len())
+}

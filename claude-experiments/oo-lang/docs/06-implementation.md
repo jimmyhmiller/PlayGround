@@ -1,5 +1,43 @@
 # 06 — Implementation (living doc)
 
+# Phase G2 — generational GC (02-runtime.md §6, as built)
+
+Layered on the Phase G1 mark-sweep. Non-moving (interior pointers + the per-type slab walk are
+load-bearing), so generations are a header bit, not separate spaces; promotion flips the bit in place.
+
+**Model.** New objects are YOUNG; every allocation appends its pointer to a global **young list**
+(`gcstate.coil`, lock-free `atomic-add` index, pre-sized so it never reallocs mid-epoch; overflow →
+the object is born OLD, so it's simply major-collected later). A **minor** collection marks from
+roots + the remembered set, drains, then sweeps **only the young list** (O(young)); survivors are
+promoted OLD in place, dead young are freed (entities → arena free-list, non-arena → O(1) unlink
+from the now **doubly-linked** obj list). It never traces or sweeps the old generation — the win.
+A **major** is the G1 full mark-sweep; it promotes every survivor to OLD and resets the young
+list + remembered set. `gc-cycle` picks major every `GC_MAJOR_EVERY` (8) minors, on remembered-set
+overflow, or when an arena fills (forced).
+
+**Correctness — the write barrier is the whole game.** `mark-object` skips OLD objects during a
+minor, so a young object reachable only from the old generation would be lost — unless the old
+object is in the **remembered set**. A barrier at every heap ref-store (`OP_STORE_FIELD_REF` in
+vm.coil; `list-push`/`map-set`/`mutex-set` in builtins.coil; and `add-field-live!`'s default write
+in compile.coil) remembers an OLD target the first time it's mutated (deduped by a REMEMBERED
+header bit; the set is cleared each minor). **Immediate promotion** (survive one minor → OLD) is
+what keeps this sufficient: because a minor promotes *all* survivors together, when an object
+becomes old every object it currently points at becomes old in the same minor — so the only way an
+old object comes to point at a young one is a store *after* promotion, which the barrier catches.
+An aged nursery (promote after N>1) would additionally need to scan promoted objects for young
+children; immediate promotion sidesteps that and is the simplest provably-correct policy.
+
+**Header bits.** `InstanceHeader.flags` gains `FLAG_OLD`/`FLAG_REMEMBERED`; the non-arena `Obj`
+header became `{kind, flags, next, prev}` (flags = MARK/OLD/REM; `prev` makes minor unlink O(1)).
+`ENUM_HDR` therefore moved 3→4 (enum boxes carry the full header). Barriers/young-pushes run on
+mutators concurrently but only ever `atomic-add` an index or set a header bit — a benign duplicate
+remembered-set entry is harmless, so no locks. Collections stay fully STW.
+
+**Triggers.** `gc-bytes` is monotonic; after each collection `gc-rearm` sets `next-gc = gc-bytes +
+GC_MINOR_THRESHOLD` (2 MiB), so collections (mostly cheap minors) fire per fresh-allocation volume.
+The arena-full path rewinds `fr.ip` to the `OP_NEW` start across the forced major (so this frame's
+stack map matches the not-yet-pushed result), then retries.
+
 # Phase G1 — garbage collection (02-runtime.md §6, as built)
 
 Precise, stop-the-world mark-sweep. New module `gc.coil` (mark worklist, `gc-mark-object`, the
