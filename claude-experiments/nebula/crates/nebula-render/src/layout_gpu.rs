@@ -25,6 +25,10 @@ pub struct LayoutParams {
     pub damping: f32,
     pub dt: f32,
     pub max_speed: f32,
+    pub alpha: f32,
+    pub _p1: f32,
+    pub _p2: f32,
+    pub _p3: f32,
 }
 
 /// Tunable physics knobs surfaced to the UI.
@@ -40,6 +44,13 @@ pub struct LayoutSettings {
     /// Simulation substeps per rendered frame.
     pub substeps: u32,
     pub running: bool,
+    /// Global cooling. `alpha` scales all forces; it decays by `alpha_decay` per
+    /// simulation step and the sim auto-pauses once it reaches `alpha_min`.
+    pub alpha: f32,
+    pub alpha_decay: f32,
+    pub alpha_min: f32,
+    /// Alpha to "reheat" to when the user resumes a settled layout.
+    pub alpha_reheat: f32,
 }
 
 impl Default for LayoutSettings {
@@ -54,6 +65,10 @@ impl Default for LayoutSettings {
             max_speed: 50.0,
             substeps: 1,
             running: true,
+            alpha: 1.0,
+            alpha_decay: 0.015,
+            alpha_min: 0.004,
+            alpha_reheat: 0.4,
         }
     }
 }
@@ -94,6 +109,10 @@ impl LayoutGpu {
             damping: settings.damping,
             dt: settings.dt,
             max_speed: settings.max_speed,
+            alpha: settings.alpha,
+            _p1: 0.0,
+            _p2: 0.0,
+            _p3: 0.0,
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("layout_params"),
@@ -214,6 +233,10 @@ impl LayoutGpu {
             damping: settings.damping,
             dt: settings.dt,
             max_speed: settings.max_speed,
+            alpha: settings.alpha,
+            _p1: 0.0,
+            _p2: 0.0,
+            _p3: 0.0,
         };
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
     }

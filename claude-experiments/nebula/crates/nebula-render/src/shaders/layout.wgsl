@@ -25,6 +25,12 @@ struct Params {
     damping: f32,
     dt: f32,
     max_speed: f32,
+    // Global cooling: forces are scaled by alpha, which decays toward 0 so the
+    // simulation converges and stops (d3-force style). Padded to 16 bytes.
+    alpha: f32,
+    _p1: f32,
+    _p2: f32,
+    _p3: f32,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -232,7 +238,8 @@ fn forces(
     force = force - pi * params.gravity;
 
     // --- Integrate velocity (positions advanced in a later pass) -------------
-    var vel = velocities[i] * params.damping + force * params.dt;
+    // Scale the force by alpha: as alpha decays to ~0 the graph freezes in place.
+    var vel = velocities[i] * params.damping + force * (params.dt * params.alpha);
     let sp = length(vel);
     if (sp > params.max_speed) {
         vel = vel * (params.max_speed / sp);

@@ -22,6 +22,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 
+fn rt_type_error(message: &str) -> Condition {
+    Condition::RuntimeTypeError {
+        function: 0,
+        pc: 0,
+        message: message.into(),
+    }
+}
+
 /// The outcome of running one actor to a stop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -366,6 +374,37 @@ impl Shared {
     /// function/version lookups.
     pub fn with_world<R>(&self, f: impl FnOnce(&World) -> R) -> R {
         f(&self.world.read().unwrap())
+    }
+
+    /// The full `CallForeign` semantics for the JIT extern (concurrent tier).
+    pub fn jit_call_foreign(
+        &self,
+        foreign: ForeignFnId,
+        args: &[Value],
+    ) -> Result<Value, Condition> {
+        let result_ty = self
+            .world
+            .read()
+            .unwrap()
+            .foreign_sigs
+            .get(&foreign)
+            .map(|(_, r)| r.clone())
+            .ok_or_else(|| rt_type_error("call to unknown foreign fn"))?;
+        let result = self.call_foreign(foreign, args).ok_or_else(|| {
+            rt_type_error(&format!("foreign fn {foreign} has no registered implementation"))
+        })?;
+        if !self.value_ok(&result, &result_ty) {
+            return Err(rt_type_error(&format!(
+                "foreign result: expected {result_ty:?}, found a value of another type"
+            )));
+        }
+        Ok(result)
+    }
+
+    /// The `LoadGlobal` semantics for the JIT extern (concurrent tier).
+    pub fn jit_load_global(&self, id: DefId) -> Result<Value, Condition> {
+        self.global(id)
+            .ok_or_else(|| rt_type_error("global read before initialization"))
     }
 
     /// Preemptive stop-the-world collection: request a pause, wait until every

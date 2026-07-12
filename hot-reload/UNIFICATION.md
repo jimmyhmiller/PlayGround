@@ -72,29 +72,37 @@ between them; after Phase 4 the Shared comparison extends to the edit scenario.
   issue), so a program can be **live-edited while it runs on the JIT threads**
   (`live_edit_a_program_running_on_a_jit_thread`: a JIT worker's `tick()`
   hot-swapped 1→2 mid-loop, then a breaking edit stops it).
-- [~] **Phase 6** — *managed tiers done.* FFI + globals now run on the
-  concurrent tier (`tests/live_concurrent.rs::ffi_and_globals_run_on_the_concurrent_tier`),
-  so the interpreter and concurrent tiers are feature-reaching for FFI/globals.
-  The remaining silos are JIT-only or unreachable-from-source (see below).
+- [x] **Phase 6 — the surface language's features now run on every tier.** FFI +
+  globals run on the concurrent tier
+  (`tests/live_concurrent.rs::ffi_and_globals_run_on_the_concurrent_tier`) *and*
+  on the JIT: `RawSlot` now tag-encodes a `Foreign` handle (kind in the tag's
+  high bits, pointer in the payload — no wider frame layout), and the JIT lowers
+  `CallForeign`/`LoadGlobal` to `lt_call_foreign`/`lt_load_global` externs routed
+  through the shared `JitHost`, so a foreign program runs identically on the
+  interpreter and the JIT, single-threaded or across threads
+  (`tests/jit_ffi.rs`, incl. a `Foreign` handle round-tripping through JIT
+  slots). The one remaining trap is `Send`/`Recv` on the interpreter and JIT —
+  message passing has **no surface syntax** (reachable only by hand-built IR),
+  so it stays concurrent-tier-only, documented, inert from source.
 
 ## What actually remains, and the real constraints
 
-Phases 1–5 delivered the unification: one heap, one step semantics, one managed
-frame, one install path, live-edit across threads, and the JIT executing on the
-concurrent tier's threads (the LLVM/Miri boundary was honored by re-pointing the
-externs at `Shared` via `JitHost` and keeping the threaded driver in the
-`livetype` crate — core still links no LLVM). Phase 6 removed the
-practically-important silo (FFI/globals on the concurrent tier). What's left is
-bounded and lower-urgency:
+All six phases are done. The unification: one heap, one step semantics, one
+managed frame, one install path; live-edit across threads; the JIT running on the
+concurrent tier's threads (LLVM/Miri boundary honored — core links no LLVM, the
+externs route through a `JitHost` enum, the threaded driver lives in `livetype`);
+version-cached recompile so a program can be live-edited *while it runs on the
+JIT threads*; and every surface-language feature (structs, migration, FFI,
+globals, live-edit) running on all three tiers.
 
-1. **JIT FFI/globals/message passing** (reachable only by hand-built IR, not from
-   the surface language): needs `RawSlot` widened to a tagged two-word slot (to
-   carry `Foreign{kind,ptr}`) plus `lt_call_foreign` / `lt_load_global` externs.
-   The `step_instruction` seam already traps these clearly; wiring is mechanical
-   once the slot is widened.
-2. **Interpreter message passing** (`Send`/`Recv`): needs a parked-actor
-   scheduler state + deadlock detection in `run()`, and there's no `send`/`recv`
-   surface syntax to reach it — inert from source today.
+The single remaining trap is **message passing** (`Send`/`Recv`) on the
+interpreter and JIT. It has no surface syntax — only hand-built IR reaches it —
+so it's inert from source and stays concurrent-tier-only by design. Fully closing
+it would need a parked-actor scheduler + deadlock detection in the interpreter's
+`run()`, and mailbox externs + blocking in the JIT driver; not worth it until the
+language grows message-passing syntax. Two optimizations also remain: reclaiming
+leaked JIT engines once no frame pins an old version, and a fairer world lock so
+a tight-loop concurrent worker can't writer-starve a live edit.
 
 ## Hard problems to solve along the way
 

@@ -37,9 +37,18 @@ pub const TAG_UNIT: i64 = 1;
 pub const TAG_I64: i64 = 2;
 pub const TAG_BOOL: i64 = 3;
 pub const TAG_REF: i64 = 4;
+pub const TAG_FOREIGN: i64 = 5;
+/// Low-byte mask for the tag. A `Foreign` slot carries its (small `u32`) kind in
+/// the tag's high bits and its native pointer in the payload, so a two-word slot
+/// still represents every value — no wider frame layout needed. Only `Foreign`
+/// uses the high bits; every other tag is a bare low value, so the exact-`==`
+/// tag guards the codegen emits for arithmetic/branch operands are unaffected.
+pub const TAG_KIND_SHIFT: i64 = 8;
+pub const TAG_MASK: i64 = 0xff;
 
 /// One typed register slot. For `TAG_REF` the payload is the [`ObjectId`] — a
-/// GC root the collector reads directly out of the frame.
+/// GC root the collector reads directly out of the frame. For `TAG_FOREIGN` the
+/// payload is the native pointer and the kind is in `tag >> TAG_KIND_SHIFT`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct RawSlot {
@@ -71,22 +80,23 @@ impl RawSlot {
                 tag: TAG_REF,
                 payload: *id as i64,
             },
-            // A foreign handle (kind + native pointer) does not fit one tagged
-            // i64 slot, and the JIT tier does not run FFI (foreign calls trap in
-            // codegen). Reaching here means a foreign value leaked into a native
-            // frame — fail loudly rather than truncate a pointer.
-            Value::Foreign { .. } => {
-                panic!("foreign handles are not supported on the JIT tier (use the interpreter)")
-            }
+            Value::Foreign { kind, ptr } => RawSlot {
+                tag: TAG_FOREIGN | ((*kind as i64) << TAG_KIND_SHIFT),
+                payload: *ptr as i64,
+            },
         }
     }
 
     pub fn to_value(self) -> Value {
-        match self.tag {
+        match self.tag & TAG_MASK {
             TAG_UNIT => Value::Unit,
             TAG_I64 => Value::I64(self.payload),
             TAG_BOOL => Value::Bool(self.payload != 0),
             TAG_REF => Value::Ref(self.payload as ObjectId),
+            TAG_FOREIGN => Value::Foreign {
+                kind: (self.tag >> TAG_KIND_SHIFT) as u32,
+                ptr: self.payload as u64,
+            },
             other => panic!("empty or unknown slot tag {other} escaped a step boundary"),
         }
     }
@@ -163,6 +173,18 @@ impl<'a> JitHost<'a> {
         match self {
             JitHost::Single { rt, .. } => rt.jit_emit(value),
             JitHost::Concurrent { shared, .. } => shared.jit_emit(value),
+        }
+    }
+    fn call_foreign(&mut self, foreign: ForeignFnId, args: &[Value]) -> Result<Value, Condition> {
+        match self {
+            JitHost::Single { rt, .. } => rt.jit_call_foreign(foreign, args),
+            JitHost::Concurrent { shared, .. } => shared.jit_call_foreign(foreign, args),
+        }
+    }
+    fn load_global(&mut self, id: DefId) -> Result<Value, Condition> {
+        match self {
+            JitHost::Single { rt, .. } => rt.jit_load_global(id),
+            JitHost::Concurrent { shared, .. } => shared.jit_load_global(id),
         }
     }
     fn set_pending(&mut self, condition: Condition) {
@@ -242,6 +264,58 @@ pub unsafe extern "C" fn lt_get_field(
 pub unsafe extern "C" fn lt_emit(host: *mut JitHost, value: *const RawSlot) {
     let host = unsafe { &mut *host };
     host.emit(unsafe { *value }.to_value());
+}
+
+/// Returns 0 on success (writes the result to `*out`), 1 when the call traps
+/// (unregistered fn, or a native return that fails the type check) — the
+/// condition is stashed in the host.
+///
+/// # Safety
+/// `host` is a live `*mut JitHost`, `args` points to `n` `RawSlot`s, `out` is a
+/// writable `*mut RawSlot`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lt_call_foreign(
+    host: *mut JitHost,
+    foreign: i64,
+    args: *const RawSlot,
+    n: i64,
+    out: *mut RawSlot,
+) -> i64 {
+    let host = unsafe { &mut *host };
+    let mut values = Vec::with_capacity(n as usize);
+    for i in 0..n as isize {
+        values.push(unsafe { *args.offset(i) }.to_value());
+    }
+    match host.call_foreign(foreign as ForeignFnId, &values) {
+        Ok(value) => {
+            unsafe { *out = RawSlot::from_value(&value) };
+            0
+        }
+        Err(condition) => {
+            host.set_pending(condition);
+            1
+        }
+    }
+}
+
+/// Returns 0 on success (writes `*out`), 1 when the global is unset (condition
+/// stashed in the host).
+///
+/// # Safety
+/// `host` is a live `*mut JitHost`, `out` a writable `*mut RawSlot`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lt_load_global(host: *mut JitHost, global: i64, out: *mut RawSlot) -> i64 {
+    let host = unsafe { &mut *host };
+    match host.load_global(global as DefId) {
+        Ok(value) => {
+            unsafe { *out = RawSlot::from_value(&value) };
+            0
+        }
+        Err(condition) => {
+            host.set_pending(condition);
+            1
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +415,19 @@ impl<'ctx> Codegen<'ctx> {
         self.module.add_function(
             "lt_emit",
             void.fn_type(&[ptr.into(), ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "lt_call_foreign",
+            i64t.fn_type(
+                &[ptr.into(), i64t.into(), ptr.into(), i64t.into(), ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "lt_load_global",
+            i64t.fn_type(&[ptr.into(), i64t.into(), ptr.into()], false),
             Some(Linkage::External),
         );
     }
@@ -689,11 +776,97 @@ impl<'ctx> Codegen<'ctx> {
                     self.set_pc(frame, pc as u64);
                     self.ret_outcome(OUT_TYPE_ERROR);
                 }
-                Instruction::CallForeign { .. } | Instruction::LoadGlobal { .. } => {
-                    // FFI and globals run on the interpreter (live-edit) tier;
-                    // the JIT does not lower them. Trap clearly if one appears.
+                Instruction::CallForeign { dst, foreign, args } => {
+                    // Marshal argument slots into a stack `RawSlot[n]` (flat
+                    // `i64[2n]`), then call the foreign extern, which writes the
+                    // result into `dst`'s slot or stashes a trap condition.
+                    let n = args.len();
+                    let arr_ty = i64t.array_type(2 * n as u32);
+                    let arr = self.builder.build_alloca(arr_ty, "cf.args").unwrap();
+                    for (k, reg) in args.iter().enumerate() {
+                        let slot = self.slot_ptr(frame, *reg);
+                        let tag = self.load_field(slot, 0, "a.tag");
+                        let payload = self.load_field(slot, 1, "a.pay");
+                        let store = |off: usize, v: IntValue<'ctx>| {
+                            let elem = unsafe {
+                                self.builder
+                                    .build_in_bounds_gep(
+                                        arr_ty,
+                                        arr,
+                                        &[i64t.const_zero(), i64t.const_int((2 * k + off) as u64, false)],
+                                        "arg",
+                                    )
+                                    .unwrap()
+                            };
+                            self.builder.build_store(elem, v).unwrap();
+                        };
+                        store(0, tag);
+                        store(1, payload);
+                    }
+                    let base = unsafe {
+                        self.builder
+                            .build_in_bounds_gep(
+                                arr_ty,
+                                arr,
+                                &[i64t.const_zero(), i64t.const_zero()],
+                                "cf.args.base",
+                            )
+                            .unwrap()
+                    };
+                    let out = self.slot_ptr(frame, *dst);
+                    let lt_cf = self.module.get_function("lt_call_foreign").unwrap();
+                    let call = self
+                        .builder
+                        .build_call(
+                            lt_cf,
+                            &[
+                                rt.into(),
+                                i64t.const_int(*foreign as u64, false).into(),
+                                base.into(),
+                                i64t.const_int(n as u64, false).into(),
+                                out.into(),
+                            ],
+                            "status",
+                        )
+                        .unwrap();
+                    let status = call_result(call).into_int_value();
+                    let ok = self.ctx.append_basic_block(step, &format!("pc{pc}.cfok"));
+                    let bad = self.ctx.append_basic_block(step, &format!("pc{pc}.cfbad"));
+                    let is_ok = self
+                        .builder
+                        .build_int_compare(IntPredicate::EQ, status, i64t.const_zero(), "cfisok")
+                        .unwrap();
+                    self.builder.build_conditional_branch(is_ok, ok, bad).unwrap();
+                    self.builder.position_at_end(bad);
                     self.set_pc(frame, pc as u64);
-                    self.ret_outcome(OUT_TYPE_ERROR);
+                    self.ret_outcome(OUT_CONDITION);
+                    self.builder.position_at_end(ok);
+                    fallthrough();
+                }
+                Instruction::LoadGlobal { dst, global } => {
+                    let out = self.slot_ptr(frame, *dst);
+                    let lt_lg = self.module.get_function("lt_load_global").unwrap();
+                    let call = self
+                        .builder
+                        .build_call(
+                            lt_lg,
+                            &[rt.into(), i64t.const_int(*global, false).into(), out.into()],
+                            "status",
+                        )
+                        .unwrap();
+                    let status = call_result(call).into_int_value();
+                    let ok = self.ctx.append_basic_block(step, &format!("pc{pc}.lgok"));
+                    let bad = self.ctx.append_basic_block(step, &format!("pc{pc}.lgbad"));
+                    let is_ok = self
+                        .builder
+                        .build_int_compare(IntPredicate::EQ, status, i64t.const_zero(), "lgisok")
+                        .unwrap();
+                    self.builder.build_conditional_branch(is_ok, ok, bad).unwrap();
+                    self.builder.position_at_end(bad);
+                    self.set_pc(frame, pc as u64);
+                    self.ret_outcome(OUT_CONDITION);
+                    self.builder.position_at_end(ok);
+                    fallthrough();
                 }
                 Instruction::Jump { target } => {
                     self.builder.build_unconditional_branch(blocks[*target]).unwrap();
@@ -794,6 +967,8 @@ pub(crate) fn compile<'ctx>(ctx: &'ctx Context, world: &World) -> Result<Compile
         ("lt_new", lt_new as *const () as usize),
         ("lt_get_field", lt_get_field as *const () as usize),
         ("lt_emit", lt_emit as *const () as usize),
+        ("lt_call_foreign", lt_call_foreign as *const () as usize),
+        ("lt_load_global", lt_load_global as *const () as usize),
     ] {
         if let Some(f) = cg.module.get_function(name) {
             engine.add_global_mapping(&f, addr);

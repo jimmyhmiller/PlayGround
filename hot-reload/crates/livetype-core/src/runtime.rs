@@ -516,6 +516,36 @@ impl Runtime {
         self.output.push(value);
     }
 
+    /// The full `CallForeign` semantics for the JIT extern (mirrors the
+    /// interpreter's arm): resolve the declared result type, invoke the native
+    /// fn, and check the returned value against it (the native → managed
+    /// use-boundary).
+    pub fn jit_call_foreign(
+        &mut self,
+        foreign: ForeignFnId,
+        args: &[Value],
+    ) -> Result<Value, Condition> {
+        let result_ty = self
+            .world
+            .foreign_sigs
+            .get(&foreign)
+            .map(|(_, r)| r.clone())
+            .ok_or_else(|| self.type_error(0, 0, "call to unknown foreign fn"))?;
+        let result = self
+            .call_foreign(foreign, args)
+            .map_err(|m| self.type_error(0, 0, &m))?;
+        self.expect_value(&result, &result_ty, 0, 0, "foreign result")?;
+        Ok(result)
+    }
+
+    /// The `LoadGlobal` semantics for the JIT extern.
+    pub fn jit_load_global(&self, id: DefId) -> Result<Value, Condition> {
+        self.globals
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| self.type_error(0, 0, "global read before initialization"))
+    }
+
     /// Register (or replace) the native implementation of a `foreign fn`. The
     /// host wires these up before running; they persist across hot edits, so a
     /// reloaded program keeps talking to the same native resources.

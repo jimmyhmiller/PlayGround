@@ -324,8 +324,12 @@ impl App {
 
         let live = self.live.as_mut().unwrap();
 
-        // Advance layout.
+        // Advance layout, cooling alpha so the simulation converges and stops.
         if self.settings.running {
+            let decay = (1.0 - self.settings.alpha_decay).powi(self.settings.substeps as i32);
+            self.settings.alpha *= decay;
+            live.layout.update_settings(&live.gpu.queue, &self.settings);
+
             let mut enc = live
                 .gpu
                 .device
@@ -335,6 +339,11 @@ impl App {
                 self.total_steps += 1;
             }
             live.gpu.queue.submit(Some(enc.finish()));
+
+            if self.settings.alpha <= self.settings.alpha_min {
+                self.settings.running = false;
+                log::info!("layout settled after {} steps", self.total_steps);
+            }
         }
 
         // Camera uniform.
@@ -845,6 +854,10 @@ impl App {
             KeyCode::Escape => event_loop.exit(),
             KeyCode::Space => {
                 self.settings.running = !self.settings.running;
+                if self.settings.running {
+                    // Reheat a settled layout so resuming actually moves it.
+                    self.settings.alpha = self.settings.alpha.max(self.settings.alpha_reheat);
+                }
                 self.update_title();
             }
             KeyCode::Digit1 => self.set_color_mode(ColorMode::Uniform),
