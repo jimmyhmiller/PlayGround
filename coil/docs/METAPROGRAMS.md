@@ -35,15 +35,17 @@ Rust-like ownership dialect, a Scheme frontend).
 
 New API this project added (all shipped):
 
-- **`(report NODE MSG)`** — emit a **located** compile-time *error*: at `NODE`'s
-  source span (file:line:col + caret) with message `MSG`. Like `error` but with a
-  location; aborts the build.
-- **`(warn NODE MSG)`** — emit a **located, non-fatal** warning at `NODE`; the build
-  continues. Multiple warnings collect and all print. This is what a *linter* wants —
-  see `metaprog-poc/lint.coil` (warns at every `icmp-*`, suggesting `< > = …`).
-- **Checkers are scoped to the user's entry file** (source 0), not bundled stdlib, so a
-  linter doesn't drown in library warnings. (Transformed forms are stamped with their
-  original source so they stay in scope.)
+- **`(report NODE MSG)`** — a located compile-time **error** at `NODE`. It **collects**:
+  a checker keeps running and surfaces EVERY error in one pass; the build fails after
+  printing them all (see `metaprog-poc/located_multi.coil` → 2 errors, then failure).
+- **`(warn NODE MSG)`** — a located, **non-fatal** warning at `NODE`; collects and all
+  print, the build succeeds. What a *linter* wants — `metaprog-poc/lint.coil` warns at
+  every `icmp-*`, suggesting `< > = …`.
+- **Metaprograms are fed the WHOLE program, including all imports** (their own modules
+  and bundled stdlib). A checker sees imported code too — `metaprog-poc/imports_test.coil`
+  shows the linter flag an `icmp` in an imported user module. (A linter that wants to
+  skip bundled stdlib can filter by origin — a `code-source`/`code-file` op is the clean
+  next primitive for that.)
 - **`(checker FN)` / `(transform FN)`** — register a whole-program metaprogram.
 - **A dialect is a single import.** A module that contains `(checker …)`/`(transform …)`
   registrations *is* a dialect — importing it applies the whole stack (import order =
