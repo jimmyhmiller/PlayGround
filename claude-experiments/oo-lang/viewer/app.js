@@ -1137,7 +1137,14 @@ function computeTypeSkeleton(schema) {
     let subtree = 1; for (const c of children) subtree += c.subtree;
     return { name, node: byName.get(name), children, chipTypes, subtree };
   };
-  const roots = rootTypes.filter((t) => !placed.has(t)).map(buildNode).sort((a, b) => b.subtree - a.subtree);
+  let roots = rootTypes.filter((t) => !placed.has(t)).map(buildNode).sort((a, b) => b.subtree - a.subtree);
+  // DEFAULT when the program has no ownership hierarchy (flat types with no entity-to-entity
+  // references, or a pure reference cycle with no unreferenced root): rather than an empty stage,
+  // show every domain type as its own standalone cell. Gives any program a map to look at.
+  if (roots.length === 0) {
+    for (const t of [...domainTypes].sort()) if (!placed.has(t)) roots.push(buildNode(t));
+    roots.sort((a, b) => b.subtree - a.subtree || a.name.localeCompare(b.name));
+  }
 
   // identity color per shared TYPE (stable: sorted name -> slot), same palette as the live view.
   const idColor = new Map([...sharedTypes].sort().map((t, i) => [t, i % N_ID]));
@@ -1490,6 +1497,16 @@ function TypeRegion({ node, model, depth, onEnter, onLeave, onChip, onOpenType, 
         <span class="region-role">type</span>
         ${toggle}
       </div>
+      ${(() => {
+        // DEFAULT representation for a type with no declared view: its scalar fields (name: type).
+        // Entity-reference fields are already shown as nested subregions / shared-type chips below.
+        const fields = ((node.node || {}).fields || []).filter((f) => !(f.refTypes && f.refTypes.length));
+        return fields.length ? html`
+          <div class="type-fields">
+            ${fields.map((f) => html`<div class="tf-row" key=${f.name}>
+              <span class="tf-name">${f.name}</span><span class="tf-type">${cleanType(f.type)}</span></div>`)}
+          </div>` : "";
+      })()}
       ${msgKids.map((c) => html`
         <div class="conv" key=${c.name}>
           <div class="conv-label"><span class="k">owns ▸ ${c.name}</span>
@@ -1651,13 +1668,11 @@ function NestedView({ onInspect, selectedId }) {
   const [views, setViews] = useState([]);          // program-declared view specs (views())
   const [viewMode, setViewModeState] = useState({});// instance id -> "cell" | "board"
   const [hoverId, setHoverId] = useState(null);
-  const [linksOn, setLinksOn] = useState(false);
   const [infraOpen, setInfraOpen] = useState(false);
   const prevCounts = useRef({});
   const [live, setLive] = useState({});           // type -> true when its count just climbed
   const freshRef = useRef(new Set());             // instance ids seen last poll (for pulse)
   const wrapRef = useRef(null);
-  const overlayRef = useRef(null);
 
   usePoll(async () => {
     const [g, s, v, fns] = await Promise.all([evalSource("graph()"), evalSource("schema()"), evalSource("views()"), evalSource("functions()")]);
@@ -1731,28 +1746,6 @@ function NestedView({ onInspect, selectedId }) {
   const openFn = useCallback((f) => onInspect({ kind: "function", name: f.name, params: f.params || [], returns: f.returns }), [onInspect]);
   const onChip = useCallback((id) => { const p = refParts(id); if (p) openDetail(p.cls, p.slot, (model.byId.get(id) || {}).generation); }, [model, openDetail]);
 
-  // "show links" overlay: hub-and-spoke faded connectors between every appearance of hoverId.
-  useEffect(() => {
-    const svg = overlayRef.current, wrap = wrapRef.current;
-    if (!svg || !wrap) return;
-    svg.innerHTML = "";
-    if (!linksOn || !hoverId) return;
-    const wb = wrap.getBoundingClientRect();
-    const pts = [...wrap.querySelectorAll(`.chip[data-identity="${CSS.escape(hoverId)}"]`)].map((c) => {
-      const r = c.getBoundingClientRect(); return { x: r.left + r.width / 2 - wb.left, y: r.top + r.height / 2 - wb.top };
-    });
-    if (pts.length < 2) return;
-    const hub = { x: pts.reduce((s, p) => s + p.x, 0) / pts.length, y: pts.reduce((s, p) => s + p.y, 0) / pts.length };
-    const first = wrap.querySelector(`.chip[data-identity="${CSS.escape(hoverId)}"]`);
-    const slot = (first && +first.dataset.slot) || model.idColor.get(hoverId) || 0;
-    for (const p of pts) {
-      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute("d", `M${p.x},${p.y} Q${(p.x + hub.x) / 2},${p.y} ${hub.x},${hub.y}`);
-      path.setAttribute("class", "link show"); path.style.setProperty("--c", `var(--id-${slot})`);
-      svg.appendChild(path);
-    }
-  }, [linksOn, hoverId, model, instances]);
-
   const maxCount = Math.max(1, ...model.census.map((c) => c.count));
   const barW = (n) => Math.max(3, Math.pow(n / maxCount, 0.72) * 100);
 
@@ -1765,8 +1758,6 @@ function NestedView({ onInspect, selectedId }) {
       <div class="nested-bar">
         <span class="nested-title">structure <span class="nsub">${showSkeleton ? "ownership = nesting · this is the type-level template live data fills in" : "ownership = nesting · size = mass"}</span></span>
         ${showSkeleton ? html`<span class="schema-affordance"><span class="sdot"></span>schema · not running</span>` : ""}
-        <button class=${"ctl" + (linksOn ? " on" : "")} onClick=${() => setLinksOn((v) => !v)}>
-          <span class="sw"></span>show links</button>
       </div>
 
       <div class="census">
@@ -1798,7 +1789,6 @@ function NestedView({ onInspect, selectedId }) {
             </div>` : "")}
 
       <div class="stage-wrap">
-        <svg class="link-overlay" ref=${overlayRef} aria-hidden="true"></svg>
         ${showSkeleton ? html`
           ${typeModel.singletonTypes.length ? html`
             <div class="singletons">
