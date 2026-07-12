@@ -29,6 +29,9 @@ pub enum Prim {
     Rem,
     /// `(%mod a b)` -> integer modulo; sign follows the divisor (`mod`).
     Mod,
+    /// `(%div a b)` -> division. Exact integer result when it divides evenly;
+    /// otherwise float division (there is no Ratio type). Integer `/0` errors.
+    Div,
     /// `(%str-cat a b)` -> concatenation of two strings. Neutral string op (no
     /// frontend-specific formatting); the value-to-string logic lives in the
     /// frontend library.

@@ -65,7 +65,7 @@ impl Compiler {
         let mut prims = HashMap::new();
         for (name, p) in [
             ("%add", Add), ("%sub", Sub), ("%mul", Mul), ("%lt", Lt), ("%num-eq", Eq),
-            ("%quot", Quot), ("%rem", Rem), ("%mod", Mod), ("%str-cat", StrCat), ("%str-of", StrOf),
+            ("%quot", Quot), ("%rem", Rem), ("%mod", Mod), ("%div", Div), ("%str-cat", StrCat), ("%str-of", StrOf),
             ("%apply", Apply),
             // Array substrate + bitwise ops for in-language persistent structures.
             ("%make-array", MakeArray), ("%aclone", AClone), ("%alength", VectorLen),
@@ -325,8 +325,10 @@ impl Compiler {
     /// Resolve a DEFINED name to the interned sym `Ir::Def` should write, and record
     /// it so later bare references in this ns resolve to it.
     fn def_name<M: ValueModel>(&mut self, rt: &Runtime<M>, raw: Sym) -> Sym {
-        if rt.sym_name(raw).contains('/') {
-            return self.resolve_global(rt, raw); // explicitly qualified def
+        // A name containing `/` is explicitly qualified — EXCEPT the lone `/`
+        // symbol (division), whose name simply is "/".
+        if rt.sym_name(raw).contains('/') && rt.sym_name(raw) != "/" {
+            return self.resolve_global(rt, raw);
         }
         let name = rt.sym_name(raw).to_string();
         let ns = self.ns.current.clone();

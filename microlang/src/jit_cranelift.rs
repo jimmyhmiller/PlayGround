@@ -539,6 +539,7 @@ fn prim_tag(p: Prim) -> u32 {
         Quot => 32,
         Rem => 33,
         Mod => 34,
+        Div => 64,
         StrCat => 35,
         StrOf => 36,
         MakeArray => 37,
@@ -649,6 +650,7 @@ fn prim_from_tag(tag: u32) -> Prim {
         61 => SymbolOf,
         62 => VarArglists,
         63 => StrChars,
+        64 => Div,
         other => panic!("bad prim tag {other}"),
     }
 }

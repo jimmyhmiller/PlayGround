@@ -185,6 +185,19 @@ pub const CORE: &str = r##"
 (defn quot [a b] (%quot a b))
 (defn rem [a b] (%rem a b))
 (defn mod [a b] (%mod a b))
+;; `/` — 1-arg is reciprocal; otherwise a left fold. Exact when integers divide
+;; evenly, else float (no Ratio type).
+(defn / [x & more]
+  (if (nil? more) (%div 1 x) (-div-seq x (seq more))))
+(defn -div-seq [acc s] (if (nil? s) acc (-div-seq (%div acc (first s)) (next s))))
+
+;; ── ex-info: a data-carrying exception (throw/catch already take any value) ──
+(defn ex-info [msg data & more]
+  (record 'ExInfo msg data (if (nil? more) nil (first more))))
+(defn ex-info? [x] (%num-eq (type-of x) 'ExInfo))
+(defn ex-message [e] (if (ex-info? e) (field e 0) nil))
+(defn ex-data [e] (if (ex-info? e) (field e 1) nil))
+(defn ex-cause [e] (if (ex-info? e) (field e 2) nil))
 (defn pos? [n] (%lt 0 n))
 (defn neg? [n] (%lt n 0))
 (defn zero? [n] (%num-eq n 0))

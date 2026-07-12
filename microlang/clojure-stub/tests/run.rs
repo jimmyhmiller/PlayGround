@@ -1153,3 +1153,35 @@ fn regex_engine_is_library_code() {
     assert_eq!(run(&with("(s/re-match? \"^h.*o$\" \"hellox\")")), "false");
     assert_eq!(run(&with("[(s/re-match? \"ab*c\" \"ac\") (s/re-match? \"ab*c\" \"abbbc\") (s/re-match? \"ab*c\" \"adc\")]")), "[true true false]");
 }
+
+#[test]
+fn division_and_ex_info() {
+    // `/` was a genuinely missing arithmetic primitive; now complete.
+    assert_eq!(run("(/ 6 3)"), "2");           // exact integer
+    assert_eq!(run("(/ 5 2)"), "2.5");         // -> float (no Ratio type)
+    assert_eq!(run("(/ 22 7)"), "3.142857142857143");
+    assert_eq!(run("(/ 100 5 2)"), "10");      // left fold
+    assert_eq!(run("(/ 4)"), "0.25");          // reciprocal
+    // ex-info (in-language): data-carrying, catchable.
+    assert_eq!(run("(ex-message (ex-info \"boom\" {:x 1}))"), "\"boom\"");
+    assert_eq!(run("(try (throw (ex-info \"e\" {:code 42})) (catch :default e (ex-data e)))"), "{:code 42}");
+}
+
+#[test]
+fn clojure_data_json_is_library_code() {
+    // A real, well-known library — implemented ENTIRELY in the language over the
+    // one string primitive (%str->chars) + `/` + ex-info.
+    let j = |body: &str| format!("(ns app (:require [clojure.data.json :as json])) {body}");
+    // read-str
+    assert_eq!(run(&j("(json/read-str \"42\")")), "42");
+    assert_eq!(run(&j("(json/read-str \"3.14\")")), "3.14");
+    assert_eq!(run(&j("(json/read-str \"[true false null]\")")), "[true false nil]");
+    assert_eq!(run(&j("(json/read-str \"[1, [2, 3], 4]\")")), "[1 [2 3] 4]");
+    assert_eq!(run(&j("(json/read-str \"{\\\"a\\\": 1, \\\"b\\\": 2}\")")), "{\"a\" 1, \"b\" 2}");
+    assert_eq!(run(&j("(get (json/read-str \"{\\\"a\\\": 42}\") \"a\")")), "42");
+    // write-str (the display wraps the string in quotes without escaping inner ones)
+    assert_eq!(run(&j("(json/write-str [1 2 3])")), "\"[1,2,3]\"");
+    assert_eq!(run(&j("(json/write-str {:name \"Bob\" :age 25})")), "\"{\"name\":\"Bob\",\"age\":25}\"");
+    // round-trip
+    assert_eq!(run(&j("(json/read-str (json/write-str {\"a\" [1 2] \"b\" true}))")), "{\"a\" [1 2], \"b\" true}");
+}

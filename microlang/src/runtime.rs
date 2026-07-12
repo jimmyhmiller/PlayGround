@@ -722,6 +722,7 @@ impl<M: ValueModel> Runtime<M> {
             Prim::Quot => self.int_div(args[0], args[1], "quot", |a, b| a / b),
             Prim::Rem => self.int_div(args[0], args[1], "rem", |a, b| a % b),
             Prim::Mod => self.int_div(args[0], args[1], "mod", |a, b| ((a % b) + b) % b),
+            Prim::Div => self.divide(args[0], args[1]),
             Prim::StrCat => {
                 let (a, b) = (self.as_str(args[0], "str-cat"), self.as_str(args[1], "str-cat"));
                 let id = self.alloc(Obj::Str(format!("{a}{b}")));
@@ -1443,6 +1444,34 @@ impl<M: ValueModel> Runtime<M> {
     /// Integer division family (`quot`/`rem`/`mod`). Both operands must be
     /// integers that fit `i128` (the common case); arbitrary-precision operands
     /// and non-integers raise a clear error rather than silently degrading.
+    /// `/`: exact integer division when it divides evenly; otherwise float
+    /// division (no Ratio type). Integer division by zero errors; float `/0.0`
+    /// follows IEEE (`inf`), as in Clojure.
+    fn divide(&mut self, a: u64, b: u64) -> u64 {
+        if let (Some(x), Some(y)) = (self.as_int_big(a), self.as_int_big(b)) {
+            if let (Some(xi), Some(yi)) = (x.to_i128(), y.to_i128()) {
+                if yi == 0 {
+                    panic!("Divide by zero");
+                }
+                if xi % yi == 0 {
+                    let r = xi / yi;
+                    if M::R::is_immediate(Cat::Int) {
+                        if let Ok(r64) = i64::try_from(r) {
+                            if M::R::imm_fits(r64) {
+                                return M::R::enc_int(r64);
+                            }
+                        }
+                    }
+                    let id = self.alloc(Obj::BigInt(r));
+                    return M::R::enc_ref(id);
+                }
+            }
+        }
+        let x = self.num_as_f64(a).expect("/: not a number");
+        let y = self.num_as_f64(b).expect("/: not a number");
+        self.encode(Val::Float(x / y))
+    }
+
     fn int_div(&mut self, a: u64, b: u64, name: &str, op: fn(i128, i128) -> i128) -> u64 {
         let (Val::Int(x), Val::Int(y)) = (self.decode(a), self.decode(b)) else {
             if self.as_huge(a).is_some() || self.as_huge(b).is_some() {
