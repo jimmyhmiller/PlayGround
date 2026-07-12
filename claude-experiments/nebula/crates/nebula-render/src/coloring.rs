@@ -117,6 +117,12 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     )
 }
 
+/// Turbo colormap sample packed as RGBA8 (for legends etc.).
+pub fn turbo_rgba(t: f32) -> u32 {
+    let (r, g, b) = turbo(t);
+    pack_rgba(r, g, b, 255)
+}
+
 /// Compact polynomial approximation of the "turbo" colormap (Mikhailov 2019).
 /// Input t in [0,1]. Good perceptual ordering, dark-to-bright.
 fn turbo(t: f32) -> (u8, u8, u8) {

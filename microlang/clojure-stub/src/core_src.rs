@@ -352,8 +352,14 @@ pub const CORE: &str = r##"
     (apply str (take (- e start) (drop start cs)))))
 (defn nth [c i & d]
   (if (and (seq d) (or (neg? i) (not (< i (count c))))) (first d) (-nth c i)))
-(defn conj [c x] (-conj c x))
-(defn assoc [m k v] (-assoc m k v))
+(defn conj
+  ([] [])
+  ([c] c)
+  ([c x] (-conj c x))
+  ([c x & more] (reduce -conj (-conj c x) more)))
+(defn assoc
+  ([m k v] (-assoc m k v))
+  ([m k v & kvs] (reduce (fn [a p] (-assoc a (first p) (second p))) (-assoc m k v) (-pairs kvs))))
 (defn contains? [c k] (-contains-key? c k))
 (defn peek [c] (-peek c))
 (defn pop [c] (-pop c))
@@ -397,7 +403,11 @@ pub const CORE: &str = r##"
   (if (nil? (next args))
       (let [s (seq (first args))] (if (nil? s) (f) (reduce-seq f (%first s) (%rest s))))
       (reduce-seq f (first args) (seq (second args)))))
-(defn into [to from] (reduce conj to from))
+(defn into
+  ([] [])
+  ([to] to)
+  ([to from] (reduce conj to from))
+  ([to xform from] (transduce xform conj to from)))
 
 ;; ─────────────── higher-order seq fns (lazy) ───────────────
 (defn -map1 [f c]
@@ -413,16 +423,21 @@ pub const CORE: &str = r##"
 ;; `map` is variadic over collections (like clojure.core), stopping at the
 ;; shortest. Beyond 3 collections is unsupported (no `apply` on the interp tiers).
 (defn map [f & colls]
-  (cond (nil? (next colls)) (-map1 f (first colls))
+  (cond (nil? colls) (fn [rf] (fn ([] (rf)) ([a] (rf a)) ([a x] (rf a (f x)))))
+        (nil? (next colls)) (-map1 f (first colls))
         (nil? (next (next colls))) (-map2 f (first colls) (second colls))
         (nil? (next (next (next colls)))) (-map3 f (first colls) (second colls) (nth colls 2))
         true (throw "map: only up to 3 collections supported")))
-(defn filter [f c]
-  (lazy-seq (let [s (seq c)]
-              (cond (nil? s) nil
-                    (f (%first s)) (%cons (%first s) (filter f (%rest s)))
-                    true (filter f (%rest s))))))
-(defn remove [f c] (filter (fn [x] (not (f x))) c))
+(defn filter
+  ([pred] (fn [rf] (fn ([] (rf)) ([a] (rf a)) ([a x] (if (pred x) (rf a x) a)))))
+  ([f c]
+   (lazy-seq (let [s (seq c)]
+               (cond (nil? s) nil
+                     (f (%first s)) (%cons (%first s) (filter f (%rest s)))
+                     true (filter f (%rest s)))))))
+(defn remove
+  ([pred] (filter (fn [x] (not (pred x)))))
+  ([f c] (filter (fn [x] (not (f x))) c)))
 (defn keep [f c]
   (lazy-seq (let [s (seq c)]
               (if (nil? s) nil
@@ -645,6 +660,10 @@ pub const CORE: &str = r##"
 (defn deref [x]
   (cond (future? x) (%await x)
         (var? x) (%global-get (-var-sym x))
+        (%num-eq (type-of x) 'Volatile) (%cell-ref (field x 0) 0)
+        (%num-eq (type-of x) 'Delay) (-force-delay x)
+        (%num-eq (type-of x) 'Reduced) (field x 0)
+        (%num-eq (type-of x) 'Promise) (-await-promise x)
         :else (%atom-get x)))
 ;; Real OS threads: `(future body...)` runs on a worker sharing the heap.
 (defn future-call [f] (%spawn f))
@@ -1239,4 +1258,59 @@ pub const CORE: &str = r##"
 ;; self-named fn. (Non-mutual / self-recursion; each fn carries its own name.)
 (defmacro letfn (specs & body)
   (%cons 'let (%cons (apply concat (map (fn [s] (list (first s) (%cons 'fn s))) specs)) body)))
+
+;; ─────────────── transducers ───────────────
+(defn reduced [x] (record 'Reduced x))
+(defn unreduced [x] (if (reduced? x) (field x 0) x))
+(defn ensure-reduced [x] (if (reduced? x) x (reduced x)))
+(defn volatile! [x] (record 'Volatile (%cell x)))
+(defn vreset! [v x] (do (%cell-set! (field v 0) 0 x) x))
+(defn vswap! [v f & args] (vreset! v (apply f (%cell-ref (field v 0) 0) args)))
+(defn -tr-reduce [rf init coll]
+  (loop [acc init s (seq coll)]
+    (if (if (nil? s) true (reduced? acc)) acc (recur (rf acc (first s)) (next s)))))
+(defn transduce
+  ([xform f coll] (transduce xform f (f) coll))
+  ([xform f init coll] (let [rf (xform f)] (rf (unreduced (-tr-reduce rf init coll))))))
+(defn sequence
+  ([coll] (seq coll))
+  ([xform coll] (seq (transduce xform conj [] coll))))
+(defn eduction [& args] (seq (transduce (apply comp (butlast args)) conj [] (last args))))
+(defn completing
+  ([f] (completing f identity))
+  ([f cf] (fn ([] (f)) ([x] (cf x)) ([x y] (f x y)))))
+(defn cat [rf] (fn ([] (rf)) ([a] (rf a)) ([a x] (reduce rf a x))))
+(defn halt-when
+  ([pred] (halt-when pred nil))
+  ([pred retf] (fn [rf] (fn ([] (rf)) ([a] (rf a))
+                            ([a x] (if (pred x) (reduced (if retf (retf a x) x)) (rf a x)))))))
+;; take/drop with a transducer arity (stateful via volatile), keeping the seq arity.
+(defn take
+  ([n] (fn [rf] (let [nv (volatile! n)]
+                  (fn ([] (rf)) ([a] (rf a))
+                      ([a x] (let [k (deref nv)] (vreset! nv (- k 1))
+                               (if (%lt 0 k) (if (%lt 1 k) (rf a x) (ensure-reduced (rf a x))) (ensure-reduced a))))))))
+  ([n c] (lazy-seq (if (%lt 0 n) (let [s (seq c)] (if (nil? s) nil (%cons (%first s) (take (%sub n 1) (%rest s))))) nil))))
+(defn drop
+  ([n] (fn [rf] (let [nv (volatile! n)]
+                  (fn ([] (rf)) ([a] (rf a))
+                      ([a x] (let [k (deref nv)] (vreset! nv (- k 1)) (if (%lt 0 k) a (rf a x))))))))
+  ([n c] (if (%lt 0 n) (let [s (seq c)] (if (nil? s) nil (drop (%sub n 1) (%rest s)))) (seq c))))
+
+;; ─────────────── delay / promise ───────────────
+(defn -force-delay [d]
+  (let [done (%cell-ref (field d 1) 0)]
+    (if done (%cell-ref (field d 0) 0)
+        (let [v ((%cell-ref (field d 0) 0))]
+          (%cell-set! (field d 0) 0 v) (%cell-set! (field d 1) 0 true) v))))
+(defmacro delay (& body) (list 'record ''Delay (list '%cell (%cons 'fn (%cons (vector) body))) (list '%cell false)))
+(defn force [x] (if (%num-eq (type-of x) 'Delay) (-force-delay x) x))
+;; promise/deliver via an atom + spin (single-process); deref blocks until delivered.
+(defn promise [] (record 'Promise (atom '-unset) (atom false)))
+(defn deliver [p v] (if (deref (field p 1)) nil (do (reset! (field p 0) v) (reset! (field p 1) true) p)))
+(defn -await-promise [p] (loop [] (if (deref (field p 1)) (deref (field p 0)) (recur))))
+(defn realized? [x]
+  (cond (%num-eq (type-of x) 'Delay) (%cell-ref (field x 1) 0)
+        (%num-eq (type-of x) 'Promise) (deref (field x 1))
+        :else true))
 "##;

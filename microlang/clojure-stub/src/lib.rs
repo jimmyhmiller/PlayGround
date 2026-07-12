@@ -26,6 +26,8 @@ mod compile;
 mod cljs_types_src;
 mod clojure_data_json_src;
 mod clojure_set_src;
+mod clojure_walk_src;
+mod clojure_zip_src;
 mod clojure_string_src;
 mod core_src;
 mod reader;
@@ -73,6 +75,8 @@ pub fn run_with_paths<M: ValueModel>(
     // `clojure.data.json` — a real library, also written entirely in the language
     // (loaded after clojure.string, which its writer uses for `join`).
     run_src(rt, cs, &mut macros, &mut comp, clojure_set_src::CLOJURE_SET);
+    run_src(rt, cs, &mut macros, &mut comp, clojure_walk_src::CLOJURE_WALK);
+    run_src(rt, cs, &mut macros, &mut comp, clojure_zip_src::CLOJURE_ZIP);
     run_src(rt, cs, &mut macros, &mut comp, clojure_data_json_src::CLOJURE_DATA_JSON);
     comp.set_ns("user");
     // These are provided in-process; `require` must never look for them on disk.

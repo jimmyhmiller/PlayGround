@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use nebula_core::{algorithms, Graph, Pos};
+use nebula_layout::{CircleLayout, GridLayout, Layout, RandomLayout};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -105,6 +106,7 @@ pub struct App {
     // Selection / overlay.
     selected: Option<u32>,
     selected_pos: Option<glam::Vec2>,
+    neighbor_positions: Vec<glam::Vec2>,
     last_values: Option<Vec<f32>>,
     value_name: &'static str,
     show_help: bool,
@@ -155,6 +157,7 @@ impl App {
             color_mode,
             selected,
             selected_pos: None,
+            neighbor_positions: Vec::new(),
             last_values: None,
             value_name: "",
             show_help,
@@ -287,18 +290,10 @@ impl App {
             return;
         }
 
-        // Refresh the selected node's position (cheap 8-byte readback) so the
-        // marker + info panel track it as the simulation moves it.
+        // Refresh selection geometry (node + neighbor positions) so the marker,
+        // info panel, and connection lines track the live simulation.
         if let Some(sel) = self.selected {
-            let sp = self
-                .live
-                .as_ref()
-                .and_then(|live| crate::readback::read_one_position(&live.gpu, &live.graph_gpu, sel))
-                .map(|p| glam::vec2(p[0], p[1]));
-            if sp.is_none() {
-                log::warn!("selected node {sel}: position readback returned None");
-            }
-            self.selected_pos = sp;
+            self.refresh_selection(sel);
         }
         // Build overlay commands before borrowing live mutably.
         let overlay_cmds = self.build_overlay();
@@ -365,6 +360,9 @@ impl App {
             live.overlay.begin();
             for (x, y, w, h, col) in &overlay_cmds.rects {
                 live.overlay.rect(*x, *y, *w, *h, *col);
+            }
+            for (a, b, th, col) in &overlay_cmds.lines {
+                live.overlay.line(*a, *b, *th, *col);
             }
             for (x, y, s, col, txt) in &overlay_cmds.texts {
                 live.overlay.text(*x, *y, *s, *col, txt);
@@ -438,6 +436,34 @@ impl App {
                 ),
             ];
             self.panel(&mut c, pad, pad, scale, line, panel_bg, &lines);
+
+            // Gradient legend for scalar color modes.
+            if matches!(self.color_mode, ColorMode::Degree | ColorMode::PageRank) {
+                if let Some((lo, hi)) = self.value_range() {
+                    let lx = pad;
+                    // Below the stats panel (3 lines + padding) with room for a label.
+                    let ly = pad + 4.0 * line + 30.0;
+                    let bar_w = 180.0 * (scale / 2.0).max(0.7);
+                    let bar_h = 10.0 * scale.max(1.0);
+                    let steps = 48;
+                    for i in 0..steps {
+                        let t = i as f32 / (steps - 1) as f32;
+                        let col = coloring::turbo_rgba(t);
+                        c.rects.push((lx + t * bar_w, ly, bar_w / steps as f32 + 1.0, bar_h, col));
+                    }
+                    let ts = scale * 0.85;
+                    c.texts.push((lx, ly + bar_h + 3.0, ts, dim, format!("{lo:.3}")));
+                    let hs = format!("{hi:.3}");
+                    c.texts.push((
+                        lx + bar_w - crate::overlay::Overlay::text_width(&hs, ts),
+                        ly + bar_h + 3.0,
+                        ts,
+                        dim,
+                        hs,
+                    ));
+                    c.texts.push((lx, ly - line, scale * 0.9, dim, self.value_name.to_string()));
+                }
+            }
         }
 
         // --- Bottom-left controls ---
@@ -448,6 +474,7 @@ impl App {
                 "1 uniform  2 components  3 degree",
                 "4 pagerank  5 coloring  6 communities",
                 "space pause / E edges / N nodes",
+                "R random / G grid / O circle re-seed",
                 "+/- node size / [ ] edge brightness",
                 "H help / Tab hud / C clear / Esc quit",
             ];
@@ -487,13 +514,18 @@ impl App {
                     .collect();
                 let mut s = show.join(" ");
                 if nbrs.len() > 8 {
-                    s.push_str(" …");
+                    s.push_str(&format!(" +{} more", nbrs.len() - 8));
                 }
                 lines.push((dim, format!("adj: {s}")));
             }
-            if let Some(vals) = self.last_values.as_ref() {
-                if let Some(v) = vals.get(id as usize) {
-                    lines.push((white, format!("{} {:.4}", self.value_name, v)));
+            if self.value_name != "degree" && !self.value_name.is_empty() {
+                if let Some(v) = self.last_values.as_ref().and_then(|vals| vals.get(id as usize)) {
+                    // Integer-valued modes read cleaner without decimals.
+                    if matches!(self.color_mode, ColorMode::Components | ColorMode::Coloring | ColorMode::Communities) {
+                        lines.push((white, format!("{} {}", self.value_name, *v as i64)));
+                    } else {
+                        lines.push((white, format!("{} {:.5}", self.value_name, v)));
+                    }
                 }
             }
             lines.push((dim, format!("pos {:.0}, {:.0}", wp.x, wp.y)));
@@ -507,10 +539,23 @@ impl App {
             let px = vp.x - pw - 10.0;
             self.panel(&mut c, px, 10.0, scale, line, panel_bg, &lines);
 
-            // Marker: a square outline around the node's screen position.
+            // Connection lines to neighbors + a ring on each neighbor.
             let sp = self.camera.world_to_screen(wp);
-            let r = 12.0;
-            let t = 2.0;
+            let link = pack_rgba(255, 220, 120, 90);
+            let nbr_ring = pack_rgba(255, 210, 90, 230);
+            for np in &self.neighbor_positions {
+                let ns = self.camera.world_to_screen(*np);
+                c.lines.push((sp, ns, 1.5, link));
+                let rr = 5.0;
+                c.rects.push((ns.x - rr, ns.y - rr, 2.0 * rr, 1.5, nbr_ring));
+                c.rects.push((ns.x - rr, ns.y + rr - 1.5, 2.0 * rr, 1.5, nbr_ring));
+                c.rects.push((ns.x - rr, ns.y - rr, 1.5, 2.0 * rr, nbr_ring));
+                c.rects.push((ns.x + rr - 1.5, ns.y - rr, 1.5, 2.0 * rr, nbr_ring));
+            }
+
+            // Marker: a bright square outline around the selected node.
+            let r = 13.0;
+            let t = 2.5;
             let ring = accent;
             c.rects.push((sp.x - r, sp.y - r, 2.0 * r, t, ring)); // top
             c.rects.push((sp.x - r, sp.y + r - t, 2.0 * r, t, ring)); // bottom
@@ -519,6 +564,24 @@ impl App {
         }
 
         c
+    }
+
+    /// Min/max of the current scalar values (for the legend).
+    fn value_range(&self) -> Option<(f32, f32)> {
+        let vals = self.last_values.as_ref()?;
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        for &v in vals {
+            if v.is_finite() {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        }
+        if lo <= hi {
+            Some((lo, hi))
+        } else {
+            None
+        }
     }
 
     /// Draw a panel: a background rect sized to the text plus the lines.
@@ -597,6 +660,9 @@ impl App {
             for (x, y, rw, rh, col) in &overlay_cmds.rects {
                 live.overlay.rect(*x, *y, *rw, *rh, *col);
             }
+            for (a, b, th, col) in &overlay_cmds.lines {
+                live.overlay.line(*a, *b, *th, *col);
+            }
             for (x, y, s, col, txt) in &overlay_cmds.texts {
                 live.overlay.text(*x, *y, *s, *col, txt);
             }
@@ -607,6 +673,61 @@ impl App {
 
         if let Err(e) = crate::screenshot::save_texture(&live.gpu, &tex, w, h, format, &path) {
             log::error!("screenshot failed: {e}");
+        }
+    }
+
+    /// Re-seed node positions from a one-shot CPU layout and restart the sim.
+    /// Demonstrates the pluggable `Layout` trait at runtime.
+    fn reseed(&mut self, layout: &dyn Layout) {
+        let n = self.graph.num_nodes() as usize;
+        let mut pos = vec![[0.0f32; 2]; n];
+        let seed = 0x51ED ^ self.total_steps;
+        layout.place(&self.graph, &mut pos, seed);
+        if let Some(live) = self.live.as_ref() {
+            live.graph_gpu.set_positions(&live.gpu.queue, &pos);
+        }
+        let (min, max) = bounds(&pos);
+        self.camera.fit_bounds(min, max);
+        self.settings.running = true;
+        if let Some(live) = self.live.as_ref() {
+            live.layout.update_settings(&live.gpu.queue, &self.settings);
+        }
+        log::info!("re-seeded with {} layout", layout.name());
+    }
+
+    /// Read back positions needed to draw the selection: the node itself and (for
+    /// modest graphs) its neighbors, so we can draw connection lines. Big graphs
+    /// only refresh the single node to stay cheap.
+    fn refresh_selection(&mut self, sel: u32) {
+        const SMALL: u64 = 250_000;
+        const MAX_LINES: usize = 512;
+        let n = self.graph.num_nodes();
+        let neighbors: Vec<u32> = self
+            .graph
+            .csr_ref()
+            .map(|c| c.neighbors(sel).iter().copied().take(MAX_LINES).collect())
+            .unwrap_or_default();
+
+        if n <= SMALL {
+            let pos = self
+                .live
+                .as_ref()
+                .and_then(|live| crate::readback::read_positions(&live.gpu, &live.graph_gpu));
+            if let Some(pos) = pos {
+                self.selected_pos = pos.get(sel as usize).map(|p| glam::vec2(p[0], p[1]));
+                self.neighbor_positions = neighbors
+                    .iter()
+                    .filter_map(|&nb| pos.get(nb as usize).map(|p| glam::vec2(p[0], p[1])))
+                    .collect();
+            }
+        } else {
+            let sp = self
+                .live
+                .as_ref()
+                .and_then(|live| crate::readback::read_one_position(&live.gpu, &live.graph_gpu, sel))
+                .map(|p| glam::vec2(p[0], p[1]));
+            self.selected_pos = sp;
+            self.neighbor_positions.clear();
         }
     }
 
@@ -673,6 +794,17 @@ impl App {
                 }
             }
             KeyCode::KeyF => self.fit_view(),
+            KeyCode::KeyR => {
+                let ext = self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt();
+                self.reseed(&RandomLayout { extent: ext });
+            }
+            KeyCode::KeyG => {
+                self.reseed(&GridLayout { spacing: self.opts.k });
+            }
+            KeyCode::KeyO => {
+                let r = self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt() * 0.5;
+                self.reseed(&CircleLayout { radius: r });
+            }
             KeyCode::KeyH => self.show_help = !self.show_help,
             KeyCode::Tab => self.show_hud = !self.show_hud,
             KeyCode::KeyC => {
@@ -807,6 +939,7 @@ impl ApplicationHandler for App {
 struct OverlayCmds {
     rects: Vec<(f32, f32, f32, f32, u32)>,
     texts: Vec<(f32, f32, f32, u32, String)>,
+    lines: Vec<(glam::Vec2, glam::Vec2, f32, u32)>,
 }
 
 /// Group digits with thousands separators: 1234567 -> "1,234,567".
