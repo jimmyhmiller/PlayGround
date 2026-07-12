@@ -46,6 +46,12 @@ pub struct RunOptions {
     pub title: String,
     pub k: f32,
     pub settings: LayoutSettings,
+    /// If set, exit after this many rendered frames (for headless capture/bench).
+    pub max_frames: Option<u64>,
+    /// If set, save a PNG of the final frame before exiting.
+    pub screenshot: Option<String>,
+    /// Color mode to apply on startup.
+    pub color_mode: ColorMode,
 }
 
 impl Default for RunOptions {
@@ -54,6 +60,9 @@ impl Default for RunOptions {
             title: "nebula".into(),
             k: 30.0,
             settings: LayoutSettings::default(),
+            max_frames: None,
+            screenshot: None,
+            color_mode: ColorMode::Uniform,
         }
     }
 }
@@ -91,12 +100,15 @@ pub struct App {
     fps_timer: Instant,
     fps: f32,
     total_steps: u64,
+    rendered_frames: u64,
+    should_exit: bool,
 }
 
 impl App {
     pub fn new(mut graph: Graph, seed_positions: Vec<Pos>, opts: RunOptions) -> Self {
         graph.ensure_csr();
         let settings = opts.settings;
+        let color_mode = opts.color_mode;
         App {
             graph,
             seed_positions,
@@ -105,7 +117,7 @@ impl App {
             camera: Camera2D::new(glam::vec2(1280.0, 800.0)),
             settings,
             render_params: RenderParams::default(),
-            color_mode: ColorMode::Uniform,
+            color_mode,
             cursor: glam::Vec2::ZERO,
             dragging: false,
             last_cursor: glam::Vec2::ZERO,
@@ -114,6 +126,8 @@ impl App {
             fps_timer: Instant::now(),
             fps: 0.0,
             total_steps: 0,
+            rendered_frames: 0,
+            should_exit: false,
         }
     }
 
@@ -268,6 +282,17 @@ impl App {
         live.gpu.queue.submit(Some(enc.finish()));
         frame.present();
 
+        // Headless frame limit / screenshot.
+        self.rendered_frames += 1;
+        if let Some(maxf) = self.opts.max_frames {
+            if self.rendered_frames >= maxf {
+                // Fit to the settled layout so the capture frames the real result.
+                self.fit_view();
+                self.capture_if_requested();
+                self.should_exit = true;
+            }
+        }
+
         // FPS.
         self.frame_count += 1;
         let now = Instant::now();
@@ -278,6 +303,26 @@ impl App {
             self.update_title();
         }
         self.last_frame = now;
+    }
+
+    fn capture_if_requested(&self) {
+        let (Some(path), Some(live)) = (self.opts.screenshot.as_ref(), self.live.as_ref()) else {
+            return;
+        };
+        let (w, h) = (live.gpu.size.width, live.gpu.size.height);
+        if let Err(e) = crate::screenshot::capture(
+            &live.gpu,
+            &live.graph_gpu,
+            w,
+            h,
+            &self.camera.uniform(),
+            &self.render_params,
+            live.renderer.draw_edges,
+            live.renderer.draw_nodes,
+            path,
+        ) {
+            log::error!("screenshot failed: {e}");
+        }
     }
 
     fn set_color_mode(&mut self, mode: ColorMode) {
@@ -400,12 +445,19 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.render();
+                if self.should_exit {
+                    event_loop.exit();
+                }
             }
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.should_exit {
+            event_loop.exit();
+            return;
+        }
         if let Some(live) = self.live.as_ref() {
             live.window.request_redraw();
         }

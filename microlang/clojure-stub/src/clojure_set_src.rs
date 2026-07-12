@@ -7,6 +7,7 @@ pub const CLOJURE_SET: &str = r##"
   (into #{} (filter (fn [x] (every? (fn [s] (contains? s x)) sets)) s1)))
 (defn difference [s1 & sets]
   (into #{} (filter (fn [x] (not (some (fn [s] (contains? s x)) sets))) s1)))
+(defn map-invert [m] (reduce (fn [acc e] (assoc acc (second e) (first e))) {} (seq m)))
 (defn subset? [a b] (every? (fn [x] (contains? b x)) a))
 (defn superset? [a b] (every? (fn [x] (contains? a x)) b))
 (defn select [pred xset] (into #{} (filter pred xset)))

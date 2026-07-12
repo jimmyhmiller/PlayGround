@@ -32,7 +32,7 @@ pub fn read_positions(gpu: &Gpu, graph: &GpuGraph) -> Option<Vec<Pos>> {
         let _ = tx.send(r);
     });
     // Block until the copy completes and the mapping is ready.
-    let _ = gpu.device.poll(wgpu::PollType::Wait);
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
     match rx.recv() {
         Ok(Ok(())) => {}
         _ => return None,

@@ -486,12 +486,18 @@ pub const CORE: &str = r##"
       (list (-asig fdecl))))
 
 ;; ─────────────── more clojure.core ───────────────
-(defn get-in [m ks] (if (nil? (seq ks)) m (get-in (get m (%first (seq ks))) (%rest (seq ks)))))
+(defn get-in [m ks & d]
+  (let [nf (if (nil? d) nil (first d))]
+    (loop [m m ks (seq ks)]
+      (cond (nil? ks) m
+            (and (associative? m) (contains? m (first ks))) (recur (get m (first ks)) (next ks))
+            (nil? (next ks)) (get m (first ks) nf)
+            true nf))))
 (defn assoc-in [m ks v]
   (if (nil? (%rest (seq ks)))
       (assoc m (%first (seq ks)) v)
       (assoc m (%first (seq ks)) (assoc-in (get m (%first (seq ks))) (%rest (seq ks)) v))))
-(defn update [m k f] (assoc m k (f (get m k))))
+(defn update [m k f & args] (assoc m k (apply f (get m k) args)))
 (defn some-seq [pred s] (let [s (seq s)] (if (nil? s) nil (let [r (pred (%first s))] (if r r (some-seq pred (%rest s)))))))
 (defn some [pred c] (some-seq pred c))
 (defn every-seq [pred s] (let [s (seq s)] (if (nil? s) true (if (pred (%first s)) (every-seq pred (%rest s)) false))))
@@ -771,9 +777,11 @@ pub const CORE: &str = r##"
   (reduce (fn [a b] (cond (nil? a) b (nil? b) a true (-merge-with2 f a b))) nil (seq maps)))
 (defn select-keys [m ks]
   (reduce (fn [acc k] (if (contains? m k) (assoc acc k (get m k)) acc)) (hash-map) (seq ks)))
-(defn update-in [m ks f]
+(defn update-in [m ks f & args]
   (let [k (first ks)]
-    (if (nil? (next ks)) (assoc m k (f (get m k))) (assoc m k (update-in (get m k) (rest ks) f)))))
+    (if (nil? (next ks))
+      (assoc m k (apply f (get m k) args))
+      (assoc m k (apply update-in (get m k) (rest ks) f args)))))
 
 ;; sorting (tortoise/hare split + merge; numeric default via %lt)
 (defn -default-less [a b] (%lt (compare a b) 0))
@@ -1026,16 +1034,71 @@ pub const CORE: &str = r##"
     (let [x (first args)] (if (keyword? x) x (record 'Keyword (symbol (if (string? x) x (name x))))))
     (record 'Keyword (symbol (first args) (second args)))))
 (defn fnil [f x] (fn [a & args] (apply f (if (nil? a) x a) args)))
-;; sorted collections: a list-backed Map/Set kept in key/element order (reuses the
-;; existing Map/Set protocols + printer; O(n) but conformant).
+(defn char [n] (%char-of n))
+(defn char? [x] (%num-eq (type-of x) 'Char))
+(defn associative? [x] (or (map? x) (vector? x) (%num-eq (type-of x) 'SortedMap)))
+(defn sequential? [x] (or (vector? x) (list? x) (seq? x)))
+(defn counted? [x] (or (vector? x) (map? x) (set? x) (list? x) (string? x)))
+(defn indexed? [x] (vector? x))
+(defn rseq [v] (reverse v))
+(defn run! [f coll] (loop [s (seq coll)] (if (nil? s) nil (do (f (first s)) (recur (next s))))))
+(defn -list*-seq [args] (if (nil? (next args)) (seq (first args)) (%cons (first args) (-list*-seq (next args)))))
+(defn list* [& args] (-list*-seq args))
+(defn reduce-kv [f init coll]
+  (if (vector? coll)
+    (loop [i 0 acc init s (seq coll)] (if (nil? s) acc (recur (inc i) (f acc i (first s)) (rest s))))
+    (reduce (fn [acc e] (f acc (first e) (second e))) init (seq coll))))
+(defn update-keys [m f] (reduce (fn [acc e] (assoc acc (f (first e)) (second e))) {} (seq m)))
+(defn update-vals [m f] (reduce (fn [acc e] (assoc acc (first e) (f (second e)))) {} (seq m)))
+(defn every-pred [& preds] (fn [& args] (every? (fn [p] (every? (fn [a] (p a)) args)) preds)))
+(defn some-fn [& fns] (fn [& args] (some (fn [f] (some (fn [a] (f a)) args)) fns)))
+;; bit ops (on integers, via the bitwise prims)
+(defn bit-not [x] (%sub (%sub 0 x) 1))
+(defn bit-flip [x n] (%bit-xor x (%bit-shl 1 n)))
+(defn bit-set [x n] (%bit-or x (%bit-shl 1 n)))
+(defn bit-clear [x n] (%bit-and x (bit-not (%bit-shl 1 n))))
+(defn bit-test [x n] (not (%num-eq 0 (%bit-and x (%bit-shl 1 n)))))
+
+;; ── SORTED collections: distinct types keeping entries in compare-order under
+;; assoc/conj (so `(into (sorted-map) …)` really sorts). O(n) inserts. A SortedMap
+;; stores a FLAT (k1 v1 k2 v2 …) list sorted by key — reuses the Map printer/entries.
 (defn -pairs [s] (if (nil? (seq s)) nil (%cons (vector (first s) (second s)) (-pairs (rest (rest s))))))
-(defn -flatten-pairs [ps]
-  (if (nil? (seq ps)) nil (%cons (first (first ps)) (%cons (second (first ps)) (-flatten-pairs (rest ps))))))
-(defn sorted-map [& kvs] (record 'Map (-flatten-pairs (sort-by first (-pairs kvs)))))
-(defn sorted-set [& xs] (record 'Set (sort (distinct xs))))
+(defn -sm-assoc [kvs k v]
+  (cond (nil? (seq kvs)) (%cons k (%cons v nil))
+        (= k (%first kvs)) (%cons k (%cons v (%rest (%rest kvs))))
+        (%lt (compare k (%first kvs)) 0) (%cons k (%cons v kvs))
+        true (%cons (%first kvs) (%cons (%first (%rest kvs)) (-sm-assoc (%rest (%rest kvs)) k v)))))
+(defn -sm-get [kvs k nf]
+  (cond (nil? (seq kvs)) nf (= (%first kvs) k) (%first (%rest kvs)) true (-sm-get (%rest (%rest kvs)) k nf)))
+(defn -sm-has? [kvs k]
+  (cond (nil? (seq kvs)) false (= (%first kvs) k) true true (-sm-has? (%rest (%rest kvs)) k)))
+(defn sorted-map [& kvs]
+  (record 'SortedMap (reduce (fn [acc p] (-sm-assoc acc (first p) (second p))) nil (-pairs kvs))))
+(extend-type SortedMap
+  ISeqable (-seq [m] (entries (field m 0)))
+  ICounted (-count [m] (%quot (count-seq (field m 0) 0) 2))
+  ILookup (-lookup [m k nf] (-sm-get (field m 0) k nf))
+  IAssociative (-assoc [m k v] (record 'SortedMap (-sm-assoc (field m 0) k v)))
+               (-contains-key? [m k] (-sm-has? (field m 0) k))
+  ICollection (-conj [m e] (record 'SortedMap (-sm-assoc (field m 0) (nth e 0) (nth e 1))))
+  IEmptyableCollection (-empty [_] (record 'SortedMap nil)))
+(defn -ss-conj [es x]
+  (cond (nil? (seq es)) (%cons x nil)
+        (= x (first es)) es
+        (%lt (compare x (first es)) 0) (%cons x es)
+        true (%cons (first es) (-ss-conj (rest es) x))))
+(defn sorted-set [& xs] (record 'SortedSet (reduce -ss-conj nil xs)))
+(extend-type SortedSet
+  ISeqable (-seq [s] (seq (field s 0)))
+  ICounted (-count [s] (count-seq (field s 0) 0))
+  ICollection (-conj [s x] (record 'SortedSet (-ss-conj (field s 0) x)))
+  ILookup (-lookup [s k nf] (if (some (fn [x] (= x k)) (field s 0)) k nf))
+  IEmptyableCollection (-empty [_] (record 'SortedSet nil)))
 (defn sorted-map-by [cmp & kvs]
-  (record 'Map (-flatten-pairs (-msort (fn [a b] (%lt (cmp (first a) (first b)) 0)) (-pairs kvs)))))
-(defn sorted-set-by [cmp & xs] (record 'Set (-msort (fn [a b] (%lt (cmp a b) 0)) (distinct xs))))
+  (reduce (fn [m p] (assoc m (first p) (second p))) (record 'SortedMap nil) (-pairs kvs)))
+(defn sorted-set-by [cmp & xs] (reduce conj (record 'SortedSet nil) xs))
+;; lazy-cat: concatenation of the collections.
+(defmacro lazy-cat (& colls) (%cons 'concat colls))
 
 ;; ─────────────── namespace reflection ───────────────
 ;; Backed by the runtime var registry (populated at every def). Namespaces are

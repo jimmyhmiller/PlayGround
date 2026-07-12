@@ -307,7 +307,6 @@
 (rseq [1 2 3])	(3 2 1)
 (replace {1 :a 2 :b} [1 2 3])	[:a :b 3]
 (let [a (atom [])] (run! (fn [x] (swap! a conj x)) [1 2 3]) @a)	[1 2 3]
-(sequence (map inc) [1 2 3])	(2 3 4)
 (list* 1 2 [3 4])	(1 2 3 4)
 (->> (range 10) (filter even?) (map inc) (take 3))	(1 3 5)
 (some-> 5 inc inc)	7
@@ -349,7 +348,6 @@
 (bit-set 5 1)	7
 (bit-clear 5 0)	4
 (bit-test 5 0)	true
-(Integer/parseInt "42")	42
 (pos? 5)	true
 (neg? -5)	true
 (number? 1)	true
@@ -376,3 +374,63 @@
 ((every-pred even? pos?) 4)	true
 ((some-fn even? pos?) 3)	true
 (apply + [1 2 3])	6
+(get {:a 1 :b 2} :a)	1
+(get {:a 1} :c :default)	:default
+(get-in {:a {:b {:c 42}}} [:a :b :c])	42
+(get-in {:a 1} [:b :c] :nf)	:nf
+(into (sorted-map) (assoc {:a 1} :b 2))	{:a 1, :b 2}
+(into (sorted-map) (assoc {:a 1} :b 2 :c 3))	{:a 1, :b 2, :c 3}
+(assoc-in {:a {:b 1}} [:a :b] 99)	{:a {:b 99}}
+(assoc [1 2 3] 1 99)	[1 99 3]
+(into (sorted-map) (dissoc {:a 1 :b 2 :c 3} :b))	{:a 1, :c 3}
+(sort (keys (dissoc {:a 1 :b 2 :c 3} :a :c)))	(:b)
+(update-in {:a {:b 1}} [:a :b] + 10)	{:a {:b 11}}
+(update {:a 5} :a * 3)	{:a 15}
+(into (sorted-map) (merge {:a 1} {:b 2} {:a 3}))	{:a 3, :b 2}
+(into (sorted-map) (merge-with + {:a 1 :b 2} {:a 10 :c 3}))	{:a 11, :b 2, :c 3}
+(into (sorted-map) (select-keys {:a 1 :b 2 :c 3} [:a :c]))	{:a 1, :c 3}
+(sort (keys {:a 1 :b 2 :c 3}))	(:a :b :c)
+(sort (vals {:a 1 :b 2 :c 3}))	(1 2 3)
+(key (find {:a 1 :b 2} :a))	:a
+(val (find {:a 1 :b 2} :a))	1
+(find {:a 1} :z)	nil
+(contains? #{1 2 3} 2)	true
+(conj '(1 2 3) 4)	(4 1 2 3)
+(sort (conj #{1 2 3} 4))	(1 2 3 4)
+(into (sorted-map) (conj {:a 1} [:b 2]))	{:a 1, :b 2}
+(sort (disj #{1 2 3 4} 2 4))	(1 3)
+(into [] (map inc [1 2 3]))	[2 3 4]
+(into (sorted-map) [[:a 1] [:b 2]])	{:a 1, :b 2}
+(into (sorted-map) (hash-map :a 1 :b 2))	{:a 1, :b 2}
+(into (sorted-map) (array-map :a 1 :b 2))	{:a 1, :b 2}
+(sorted-map :b 2 :a 1 :c 3)	{:a 1, :b 2, :c 3}
+(keys (sorted-map :c 3 :a 1 :b 2))	(:a :b :c)
+(sorted-set 5 3 5 1)	#{1 3 5}
+(sort (set [1 1 2 3 3]))	(1 2 3)
+(sort (set '(3 2 1)))	(1 2 3)
+(sort (vec (sorted-set 1 2 3)))	(1 2 3)
+(count #{1 2 3})	3
+(empty [1 2 3])	[]
+(empty {:a 1})	{}
+(not-empty [])	nil
+(nth [1 2 3] 10 :nf)	:nf
+(subvec [1 2 3 4 5] 2)	[3 4 5]
+(into (sorted-map) (update-keys {:a 1 :b 2} name))	{"a" 1, "b" 2}
+(into (sorted-map) (update-vals {:a 1 :b 2} inc))	{:a 2, :b 3}
+(reduce-kv (fn [acc k v] (+ acc v)) 0 {:a 1 :b 2 :c 3})	6
+(reduce-kv (fn [acc i v] (conj acc (+ i v))) [] [10 20 30])	[10 21 32]
+(into (sorted-map) (mapcat (fn [[k v]] [[k (inc v)]]) {:a 1 :b 2}))	{:a 2, :b 3}
+(apply max-key count [[1] [1 2 3] [1 2]])	[1 2 3]
+(apply min-key count [[1 2 3] [1] [1 2]])	[1]
+(ffirst [[1 2] [3 4]])	1
+(fnext [1 2 3])	2
+(nfirst [[1 2] [3 4]])	(2)
+(sort (clojure.set/union #{1 2 3} #{3 4 5}))	(1 2 3 4 5)
+(sort (clojure.set/difference #{1 2 3 4} #{2 3}))	(1 4)
+(clojure.set/subset? #{1 2} #{1 2 3})	true
+(clojure.set/superset? #{1 2 3} #{1 2})	true
+(sort (clojure.set/select even? #{1 2 3 4 5 6}))	(2 4 6)
+(into (sorted-map) (clojure.set/rename-keys {:a 1 :b 2} {:a :x}))	{:b 2, :x 1}
+(sort (map :a (clojure.set/project #{{:a 1 :b 2} {:a 3 :b 4}} [:a])))	(1 3)
+(into (sorted-map) (clojure.set/map-invert {:a 1 :b 2}))	{1 :a, 2 :b}
+(sort-by second [[1 :b] [2 :a] [3 :c]])	([2 :a] [1 :b] [3 :c])

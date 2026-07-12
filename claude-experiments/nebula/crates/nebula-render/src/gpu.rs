@@ -57,6 +57,7 @@ impl Gpu {
                 required_features: wgpu::Features::empty(),
                 required_limits: adapter_limits.clone(),
                 memory_hints: wgpu::MemoryHints::Performance,
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 trace: wgpu::Trace::Off,
             })
             .await

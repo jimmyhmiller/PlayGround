@@ -13,6 +13,7 @@ pub mod layout_gpu;
 pub mod readback;
 pub mod render;
 pub mod scene;
+pub mod screenshot;
 
 pub use app::{App, ColorMode, RunOptions};
 pub use layout_gpu::LayoutSettings;

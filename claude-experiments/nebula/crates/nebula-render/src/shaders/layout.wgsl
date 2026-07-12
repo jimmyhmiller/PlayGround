@@ -101,6 +101,11 @@ fn forces(
     var force = vec2<f32>(0.0, 0.0);
 
     // --- Repulsion from nodes in the 3x3 neighborhood of cells ---------------
+    // A cell may hold more nodes than `grid_cap`, in which case we only stored a
+    // sample. We still know the *true* count, so we scale the sampled repulsion
+    // by (true_count / sampled_count): a dense cell then repels with its full
+    // mass instead of saturating, which is what stops the whole graph from
+    // collapsing into a point.
     let c = cell_coord(pi);
     let dim = i32(params.grid_dim);
     for (var dy = -1; dy <= 1; dy = dy + 1) {
@@ -111,8 +116,10 @@ fn forces(
                 continue;
             }
             let cell = u32(ny) * params.grid_dim + u32(nx);
-            let cnt = min(atomicLoad(&grid_counts[cell]), params.grid_cap);
+            let true_cnt = atomicLoad(&grid_counts[cell]);
+            let cnt = min(true_cnt, params.grid_cap);
             let base = cell * params.grid_cap;
+            var cell_rep = vec2<f32>(0.0, 0.0);
             for (var s = 0u; s < cnt; s = s + 1u) {
                 let j = grid_items[base + s];
                 if (j == i) {
@@ -126,7 +133,10 @@ fn forces(
                     d2 = 0.0001;
                 }
                 // FR repulsion: magnitude k^2/dist, direction +delta -> delta*k^2/d2.
-                force = force + delta * (params.repulsion * k2 / d2);
+                cell_rep = cell_rep + delta * (k2 / d2);
+            }
+            if (cnt > 0u) {
+                force = force + cell_rep * (params.repulsion * f32(true_cnt) / f32(cnt));
             }
         }
     }

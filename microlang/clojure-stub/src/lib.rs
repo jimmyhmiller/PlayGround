@@ -1863,6 +1863,8 @@ pub fn clj_str<M: ValueModel>(rt: &Runtime<M>, v: u64) -> String {
                     "Vector" => format!("[{}]", list_items(rt, fields[0], " ")),
                     "Set" => format!("#{{{}}}", list_items(rt, fields[0], " ")),
                     "Map" => format!("{{{}}}", map_items(rt, fields[0])),
+                    "SortedSet" => format!("#{{{}}}", list_items(rt, fields[0], " ")),
+                    "SortedMap" => format!("{{{}}}", map_items(rt, fields[0])),
                     "Var" => format!("#'{}", rt.print(fields[0])),
                     _ => rt.print(v),
                 }

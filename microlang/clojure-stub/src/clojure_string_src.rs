@@ -47,6 +47,14 @@ pub const CLOJURE_STRING: &str = r##"
         true (-index-loop (rest hay) needle (+ i 1))))
 (defn index-of [s value]
   (-index-loop (%str->chars s) (%str->chars (str value)) 0))
+(defn last-index-of [s value]
+  (let [sub (%str->chars (str value))
+        n (count (%str->chars s))]
+    (loop [i (index-of s value) best nil]
+      (if (nil? i) best
+          (let [rest-s (subs s (+ i 1))
+                nxt (index-of rest-s value)]
+            (recur (if (nil? nxt) nil (+ i 1 nxt)) i))))))
 (defn starts-with? [s sub] (-starts-at? (%str->chars s) (%str->chars sub)))
 (defn ends-with? [s sub]
   (-starts-at? (clojure.core/reverse (%str->chars s)) (clojure.core/reverse (%str->chars sub))))

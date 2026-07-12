@@ -48,10 +48,10 @@ impl Default for LayoutSettings {
             k: 30.0,
             repulsion: 1.0,
             attraction: 1.0,
-            gravity: 0.03,
+            gravity: 0.005,
             damping: 0.9,
-            dt: 0.35,
-            max_speed: 60.0,
+            dt: 0.3,
+            max_speed: 50.0,
             substeps: 1,
             running: true,
         }

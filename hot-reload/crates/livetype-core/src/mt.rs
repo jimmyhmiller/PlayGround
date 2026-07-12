@@ -19,7 +19,7 @@
 use crate::*;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 
 /// The outcome of running one actor to a stop.
@@ -44,7 +44,11 @@ struct GcCoord {
 
 /// The shared, thread-safe runtime.
 pub struct Shared {
-    world: World,
+    /// Behind an `RwLock` so live edits can land while worker threads run: a
+    /// worker holds a read guard for one step; an edit takes the write lock
+    /// (which waits out the in-flight steps), installs new versions, and the
+    /// next `Call` on each worker re-resolves the current one.
+    world: RwLock<World>,
     /// The one [`Heap`] — the *same* type the single-threaded interpreter uses,
     /// shared here behind the `Arc<Shared>`. Migration, allocation, and the
     /// soundness predicate all live on it, so this tier can no longer drift from
@@ -68,7 +72,7 @@ impl Shared {
     pub fn from_runtime(rt: Runtime) -> Arc<Shared> {
         let (world, heap) = rt.into_parts();
         Arc::new(Shared {
-            world,
+            world: RwLock::new(world),
             heap,
             output: Mutex::new(Vec::new()),
             mailboxes: Mutex::new(BTreeMap::new()),
@@ -89,6 +93,45 @@ impl Shared {
 
     pub fn object_count(&self) -> usize {
         self.heap.len()
+    }
+
+    // ── live editing while worker threads run ────────────────────────────────
+    // Each takes the world write lock (waiting out any in-flight steps) and
+    // applies the *same* `World` install path the single-threaded runtime uses.
+    // A running frame keeps its pinned version; the next `Call` picks up the new
+    // one. These take `&self` because the editor holds an `Arc<Shared>` clone.
+
+    pub fn install_schema(&self, schema: Schema) -> Result<(), InstallError> {
+        self.world.write().unwrap().install_schema(schema)
+    }
+    pub fn install_function(&self, function: Function) -> Result<(), InstallError> {
+        self.world.write().unwrap().install_function(function)
+    }
+    pub fn install_verified_function(
+        &self,
+        function: Function,
+        deps: std::collections::BTreeSet<DefId>,
+    ) -> Result<(), InstallError> {
+        self.world
+            .write()
+            .unwrap()
+            .install_verified_function(function, deps)
+    }
+    pub fn install_migration(&self, migration: Migration) -> Result<(), InstallError> {
+        self.world
+            .write()
+            .unwrap()
+            .install_migration(migration, &self.heap)
+    }
+
+    /// Pre-create actor `tid`'s mailbox so an external `send_to` can't race its
+    /// creation. For hosts/tests coordinating with a running actor.
+    pub fn ensure_mailbox(&self, tid: usize) {
+        self.mailbox(tid);
+    }
+    /// Deliver a value into actor `tid`'s mailbox from outside the thread pool.
+    pub fn send_to(&self, tid: usize, value: Value) -> bool {
+        self.deliver(tid, value)
     }
 
     fn emit(&self, value: Value) {
@@ -129,51 +172,63 @@ impl Shared {
         let _active = Active(self, tid);
         let mailbox = self.mailbox(tid);
 
-        let version = self.world.current_functions[&function];
-        let registers = match &self.world.functions[&(function, version)] {
-            FunctionState::Ready(f) => f.registers,
-            FunctionState::Broken { diagnostics, .. } => {
-                return Outcome::Paused(Condition::BrokenFunction {
-                    function,
-                    diagnostics: diagnostics.clone(),
-                });
+        let (version, registers) = {
+            let world = self.world.read().unwrap();
+            let version = world.current_functions[&function];
+            match &world.functions[&(function, version)] {
+                FunctionState::Ready(f) => (version, f.registers),
+                FunctionState::Broken { diagnostics, .. } => {
+                    return Outcome::Paused(Condition::BrokenFunction {
+                        function,
+                        diagnostics: diagnostics.clone(),
+                    });
+                }
             }
         };
         let mut regs = vec![None; registers];
         for (i, v) in args.into_iter().enumerate() {
             regs[i] = Some(v);
         }
-        let frames = vec![Frame {
+        let mut frames = vec![Frame {
             function: (function, version),
             pc: 0,
             registers: regs,
             return_to: None,
         }];
+        let mut done: Option<Value> = None;
 
         // Drive the *one* step semantics (shared with the interpreter) over a
-        // thread-local frame stack. A safepoint at the top of each turn keeps
-        // this actor parkable for a stop-the-world collection; a `Recv` with no
-        // message yet comes back as `Flow::Blocked`, so we spin (still hitting
-        // the safepoint) until it arrives.
-        let mut machine = MtMachine {
-            shared: self,
-            mailbox,
-            frames,
-            done: None,
-        };
+        // thread-local frame stack. A read guard on the world is taken per step:
+        // a running frame keeps its pinned version, while a live edit (which
+        // takes the write lock between steps) is picked up by the next `Call`
+        // that re-resolves the current version. A safepoint at the top of each
+        // turn keeps this actor parkable for a stop-the-world collection; a
+        // `Recv` with no message yet returns `Flow::Blocked`, so we spin (still
+        // releasing the guard and hitting the safepoint) until it arrives.
         loop {
-            machine.shared.safepoint(tid, &machine.frames);
-            let ((func, version), pc) = {
-                let t = machine.frames.last().unwrap();
-                (t.function, t.pc)
+            self.safepoint(tid, &frames);
+            let flow = {
+                let world = self.world.read().unwrap();
+                let ((func, version), pc) = {
+                    let t = frames.last().unwrap();
+                    (t.function, t.pc)
+                };
+                let instruction = match &world.functions[&(func, version)] {
+                    FunctionState::Ready(f) => f.code[pc].clone(),
+                    _ => unreachable!("a frame only pins ready code"),
+                };
+                let mut machine = MtMachine {
+                    shared: self,
+                    world: &world,
+                    mailbox: &mailbox,
+                    frames: &mut frames,
+                    done: &mut done,
+                };
+                step_instruction(&mut machine, &instruction)
             };
-            let instruction = match &machine.shared.world.functions[&(func, version)] {
-                FunctionState::Ready(f) => f.code[pc].clone(),
-                _ => unreachable!("a frame only pins ready code"),
-            };
-            match step_instruction(&mut machine, &instruction) {
+            match flow {
                 Ok(Flow::Stepped) => {
-                    if let Some(value) = machine.done.take() {
+                    if let Some(value) = done.take() {
                         return Outcome::Complete(value);
                     }
                 }
@@ -289,10 +344,14 @@ impl Shared {
 /// `WouldBlock` so the driver can spin at a safepoint.
 struct MtMachine<'a> {
     shared: &'a Arc<Shared>,
-    mailbox: Arc<Mutex<std::collections::VecDeque<Value>>>,
-    frames: Vec<Frame>,
+    /// The world read guard for the current step (a live edit can't land while
+    /// this is held).
+    world: &'a World,
+    mailbox: &'a Arc<Mutex<std::collections::VecDeque<Value>>>,
+    /// The persistent frame stack, borrowed for the step.
+    frames: &'a mut Vec<Frame>,
     /// Set when the top frame returns — the driver turns it into `Complete`.
-    done: Option<Value>,
+    done: &'a mut Option<Value>,
 }
 
 impl MtMachine<'_> {
@@ -306,7 +365,7 @@ impl MtMachine<'_> {
 
 impl Machine for MtMachine<'_> {
     fn world(&self) -> &World {
-        &self.shared.world
+        self.world
     }
     fn heap(&self) -> &Heap {
         &self.shared.heap
@@ -356,7 +415,7 @@ impl Machine for MtMachine<'_> {
         let done = self.frames.pop().unwrap();
         match done.return_to {
             Some(dst) => self.top_mut().registers[dst] = Some(value),
-            None => self.done = Some(value),
+            None => *self.done = Some(value),
         }
     }
     fn send(&mut self, target: usize, value: Value) -> Option<bool> {

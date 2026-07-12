@@ -119,54 +119,48 @@ pub enum InstallError {
     Invalid(Vec<String>),
 }
 
-impl Runtime {
-    /// Hand off this runtime's world and heap to the thread-safe [`crate::Shared`]
-    /// tier. All setup — schema/function installs, auto-derived migrations,
-    /// verification — is done through the ordinary single-threaded API and then
-    /// frozen for concurrent execution. The heap is the *same* [`Heap`]; the
-    /// concurrent tier shares it behind an `Arc` rather than rebuilding it.
-    pub fn into_parts(self) -> (World, Heap) {
-        (self.world, self.heap)
-    }
-
+/// Installing definitions is a pure operation on the [`World`] — it never
+/// touches running frames. Keeping it here (rather than on `Runtime`) is what
+/// lets *both* the single-threaded runtime and the concurrent tier apply hot
+/// edits through one code path: `Runtime` wraps these and then resumes any of
+/// its paused actors; the concurrent tier applies them to its locked world
+/// while worker threads run (a running frame keeps its pinned version; the next
+/// call re-resolves the current one).
+impl World {
     pub fn install_schema(&mut self, schema: Schema) -> Result<(), InstallError> {
         let expected = self
-            .world
             .current_schemas
             .get(&schema.type_id)
             .map_or(Version(1), |v| Version(v.0 + 1));
         if schema.version != expected {
             return Err(InstallError::BadVersion);
         }
-        verify_schema(&schema, &self.world).map_err(InstallError::Invalid)?;
+        verify_schema(&schema, self).map_err(InstallError::Invalid)?;
         let type_id = schema.type_id;
         let version = schema.version;
-        self.world.current_schemas.insert(type_id, version);
-        self.world.schemas.insert((type_id, version), schema);
+        self.current_schemas.insert(type_id, version);
+        self.schemas.insert((type_id, version), schema);
         // Auto-derive the migration from the previous version where the change
-        // is trivial (D6). A field is copied when it survives unchanged, or
-        // default-initialized when new/retyped-with-a-default; a field that is
-        // neither is a *gap* that abandons derivation, leaving a developer to
-        // supply a transformer (a `MissingMigration` trap on first cross). A
-        // derived migration is copy/default only, so it is type-sound by
-        // construction; an explicit `install_migration` for the same step
-        // overrides it.
+        // is trivial (D6): copy a surviving field, default a new/retyped one; a
+        // field that is neither is a gap that abandons derivation (a developer
+        // supplies a transformer). Derived migrations are copy/default only, so
+        // they are type-sound by construction; an explicit `install_migration`
+        // overrides them.
         if version.0 > 1 {
             let from = Version(version.0 - 1);
             if let Some(migration) = self.derive_migration(type_id, from, version) {
-                self.world.migrations.insert((type_id, from), migration);
+                self.migrations.insert((type_id, from), migration);
             }
         }
         self.invalidate_functions(type_id);
-        self.world.epoch += 1;
+        self.epoch += 1;
         Ok(())
     }
 
-    /// Try to build the `from → to` migration mechanically (see
-    /// [`Runtime::install_schema`]). Returns `None` when any field is a gap.
+    /// Try to build the `from → to` migration mechanically. `None` on a gap.
     fn derive_migration(&self, type_id: DefId, from: Version, to: Version) -> Option<Migration> {
-        let old = self.world.schemas.get(&(type_id, from))?;
-        let new = self.world.schemas.get(&(type_id, to))?;
+        let old = self.schemas.get(&(type_id, from))?;
+        let new = self.schemas.get(&(type_id, to))?;
         let mut fields = BTreeMap::new();
         for field in &new.fields {
             let source = match old.field(field.id) {
@@ -183,17 +177,19 @@ impl Runtime {
         })
     }
 
-    pub fn install_migration(&mut self, migration: Migration) -> Result<(), InstallError> {
+    pub fn install_migration(
+        &mut self,
+        migration: Migration,
+        heap: &Heap,
+    ) -> Result<(), InstallError> {
         if migration.to.0 != migration.from.0 + 1 {
             return Err(InstallError::BadVersion);
         }
         let old = self
-            .world
             .schemas
             .get(&(migration.type_id, migration.from))
             .ok_or(InstallError::BadVersion)?;
         let new = self
-            .world
             .schemas
             .get(&(migration.type_id, migration.to))
             .ok_or(InstallError::BadVersion)?;
@@ -205,16 +201,16 @@ impl Runtime {
             };
             let source_ty = match source {
                 MigrationSource::Copy(id) => old.field(*id).map(|f| f.ty.clone()),
-                MigrationSource::Value(value) => self.heap.shallow_type(value),
+                MigrationSource::Value(value) => heap.shallow_type(value),
                 MigrationSource::Wrap {
                     type_id,
                     field: inner,
                     source,
                 } => {
                     let input = old.field(*source).map(|f| &f.ty);
-                    let version = self.world.current_schemas.get(type_id);
+                    let version = self.current_schemas.get(type_id);
                     let target = version
-                        .and_then(|v| self.world.schemas.get(&(*type_id, *v)))
+                        .and_then(|v| self.schemas.get(&(*type_id, *v)))
                         .and_then(|s| s.field(*inner));
                     if input == target.map(|f| &f.ty) {
                         Some(Type::Ref(*type_id))
@@ -230,25 +226,22 @@ impl Runtime {
         if !errors.is_empty() {
             return Err(InstallError::Invalid(errors));
         }
-        self.world
-            .migrations
+        self.migrations
             .insert((migration.type_id, migration.from), migration);
-        self.resume_repaired();
         Ok(())
     }
 
     pub fn install_function(&mut self, function: Function) -> Result<(), InstallError> {
         let expected = self
-            .world
             .current_functions
             .get(&function.id)
             .map_or(Version(1), |v| Version(v.0 + 1));
         if function.version != expected {
             return Err(InstallError::BadVersion);
         }
-        let state = match verify_function(&function, &self.world) {
+        let state = match verify_function(&function, self) {
             Ok(deps) => {
-                self.world.function_deps.insert(function.id, deps);
+                self.function_deps.insert(function.id, deps);
                 FunctionState::Ready(function)
             }
             Err(diagnostics) => FunctionState::Broken {
@@ -260,26 +253,18 @@ impl Runtime {
         };
         let id = state.id();
         let version = state.version();
-        self.world.functions.insert((id, version), state);
-        self.world.current_functions.insert(id, version);
-        self.world.epoch += 1;
-        self.resume_repaired();
+        self.functions.insert((id, version), state);
+        self.current_functions.insert(id, version);
+        self.epoch += 1;
         Ok(())
     }
 
-    /// Install a function that has already been verified elsewhere, with its
-    /// dependency set (`deps`) supplied — used by the frontend's batch install,
-    /// where a group of functions (possibly mutually recursive) are verified
-    /// together against each other's signatures and cannot pass the per-function
-    /// callee-is-Ready check of [`Runtime::install_function`]. Trusts the caller
-    /// verified it; installs it Ready.
     pub fn install_verified_function(
         &mut self,
         function: Function,
-        deps: std::collections::BTreeSet<DefId>,
+        deps: BTreeSet<DefId>,
     ) -> Result<(), InstallError> {
         let expected = self
-            .world
             .current_functions
             .get(&function.id)
             .map_or(Version(1), |v| Version(v.0 + 1));
@@ -288,12 +273,105 @@ impl Runtime {
         }
         let id = function.id;
         let version = function.version;
-        self.world.function_deps.insert(id, deps);
-        self.world
-            .functions
+        self.function_deps.insert(id, deps);
+        self.functions
             .insert((id, version), FunctionState::Ready(function));
-        self.world.current_functions.insert(id, version);
-        self.world.epoch += 1;
+        self.current_functions.insert(id, version);
+        self.epoch += 1;
+        Ok(())
+    }
+
+    /// Re-verify only the functions a schema change can reach (D7), propagating
+    /// brokenness through the call graph to a fixpoint. See the long note that
+    /// used to live on `Runtime::invalidate_functions`.
+    fn invalidate_functions(&mut self, changed: DefId) {
+        let mut work: Vec<DefId> = self
+            .current_functions
+            .keys()
+            .filter(|id| {
+                self.function_deps
+                    .get(id)
+                    .is_some_and(|deps| deps.contains(&changed))
+            })
+            .copied()
+            .collect();
+        let mut seen: BTreeSet<DefId> = work.iter().copied().collect();
+
+        while let Some(id) = work.pop() {
+            let version = self.current_functions[&id];
+            let Some(FunctionState::Ready(function)) = self.functions.get(&(id, version)) else {
+                continue; // already broken (or gone): nothing to re-verify
+            };
+            let function = function.clone();
+            let Err(diagnostics) = verify_function(&function, self) else {
+                continue; // still well-typed against the new definitions
+            };
+            let broken = Version(version.0 + 1);
+            self.functions.insert(
+                (id, broken),
+                FunctionState::Broken {
+                    id,
+                    version: broken,
+                    name: function.name,
+                    diagnostics,
+                },
+            );
+            self.current_functions.insert(id, broken);
+            let callers: Vec<DefId> = self
+                .current_functions
+                .iter()
+                .filter(|(caller, _)| !seen.contains(caller))
+                .filter_map(|(caller, cver)| match self.functions.get(&(*caller, *cver)) {
+                    Some(FunctionState::Ready(f)) if calls(f, id) => Some(*caller),
+                    _ => None,
+                })
+                .collect();
+            for caller in callers {
+                seen.insert(caller);
+                work.push(caller);
+            }
+        }
+    }
+}
+
+impl Runtime {
+    /// Hand off this runtime's world and heap to the thread-safe [`crate::Shared`]
+    /// tier. All setup — schema/function installs, auto-derived migrations,
+    /// verification — is done through the ordinary single-threaded API and then
+    /// frozen for concurrent execution. The heap is the *same* [`Heap`]; the
+    /// concurrent tier shares it behind an `Arc` rather than rebuilding it.
+    pub fn into_parts(self) -> (World, Heap) {
+        (self.world, self.heap)
+    }
+
+    // Installs delegate to the one [`World`] install path, then resume any of
+    // this runtime's actors that the edit repaired (a now-Ready function or a
+    // newly-present migration). The concurrent tier calls the same `World`
+    // methods under its world lock; it has no actor table, so it skips resume.
+    pub fn install_schema(&mut self, schema: Schema) -> Result<(), InstallError> {
+        self.world.install_schema(schema)?;
+        self.resume_repaired();
+        Ok(())
+    }
+
+    pub fn install_migration(&mut self, migration: Migration) -> Result<(), InstallError> {
+        self.world.install_migration(migration, &self.heap)?;
+        self.resume_repaired();
+        Ok(())
+    }
+
+    pub fn install_function(&mut self, function: Function) -> Result<(), InstallError> {
+        self.world.install_function(function)?;
+        self.resume_repaired();
+        Ok(())
+    }
+
+    pub fn install_verified_function(
+        &mut self,
+        function: Function,
+        deps: BTreeSet<DefId>,
+    ) -> Result<(), InstallError> {
+        self.world.install_verified_function(function, deps)?;
         self.resume_repaired();
         Ok(())
     }
@@ -588,73 +666,6 @@ impl Runtime {
             };
             if repaired {
                 actor.status = ActorStatus::Runnable;
-            }
-        }
-    }
-
-    /// A schema update is allowed to land even when it makes callers invalid.
-    /// Ready artifacts remain available to already-running pinned frames, while
-    /// a new broken version becomes the call target for future entries.
-    ///
-    /// Demand-driven (D7): re-verify only the functions this schema change can
-    /// reach, not every current function. The worklist is seeded with functions
-    /// whose type-dependency set contains the `changed` type; whenever one is
-    /// newly broken, its callers are enqueued, since a call to a broken function
-    /// no longer verifies. This propagates brokenness through the call graph to
-    /// a fixpoint (a caller re-checked before its callee broke used to be missed
-    /// by the old single map-order pass). A function's pinned registers may
-    /// still hold values of the changed type; that is the use-site soundness
-    /// checks' job, not this pass's.
-    fn invalidate_functions(&mut self, changed: DefId) {
-        let mut work: Vec<DefId> = self
-            .world
-            .current_functions
-            .keys()
-            .filter(|id| {
-                self.world
-                    .function_deps
-                    .get(id)
-                    .is_some_and(|deps| deps.contains(&changed))
-            })
-            .copied()
-            .collect();
-        let mut seen: BTreeSet<DefId> = work.iter().copied().collect();
-
-        while let Some(id) = work.pop() {
-            let version = self.world.current_functions[&id];
-            let Some(FunctionState::Ready(function)) = self.world.functions.get(&(id, version))
-            else {
-                continue; // already broken (or gone): nothing to re-verify
-            };
-            let function = function.clone();
-            let Err(diagnostics) = verify_function(&function, &self.world) else {
-                continue; // still well-typed against the new definitions
-            };
-            let broken = Version(version.0 + 1);
-            self.world.functions.insert(
-                (id, broken),
-                FunctionState::Broken {
-                    id,
-                    version: broken,
-                    name: function.name,
-                    diagnostics,
-                },
-            );
-            self.world.current_functions.insert(id, broken);
-            // Enqueue callers of the now-broken function.
-            let callers: Vec<DefId> = self
-                .world
-                .current_functions
-                .iter()
-                .filter(|(caller, _)| !seen.contains(caller))
-                .filter_map(|(caller, cver)| match self.world.functions.get(&(*caller, *cver)) {
-                    Some(FunctionState::Ready(f)) if calls(f, id) => Some(*caller),
-                    _ => None,
-                })
-                .collect();
-            for caller in callers {
-                seen.insert(caller);
-                work.push(caller);
             }
         }
     }

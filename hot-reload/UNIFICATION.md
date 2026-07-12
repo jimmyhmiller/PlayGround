@@ -55,7 +55,7 @@ between them; after Phase 4 the Shared comparison extends to the edit scenario.
 - [x] **Phase 1** — one `Heap` (objects + `ObjCell` + migration + `value_ok` + alloc).
 - [x] **Phase 2** — one step function (`exec::step_instruction` over `Machine`); `run_actor` match and `execute` both deleted.
 - [x] **Phase 3** — one managed `Frame` (interp + Shared) + one `frame_roots`. (JIT `RawSlot` widening deferred to Phase 5, where JIT-FFI exercises it.)
-- [ ] **Phase 4** — live edit on the concurrent runtime (edit = safepoint op).
+- [x] **Phase 4** — live edit on the concurrent runtime. Install logic is now one `impl World` path used by both tiers; `Shared.world` is an `RwLock` a worker reads per step and an editor writes between steps; `Shared::install_*` are live. Proven by `tests/live_concurrent.rs` (a worker thread's function hot-swapped between two of its calls, deterministic via message-passing handshake). *(Note: edits use the world `RwLock`, not the GC safepoint — simpler and sufficient; a tight-loop worker could in theory writer-starve on a platform with reader-preferring `RwLock`, a later fairness tweak.)*
 - [ ] **Phase 5** — JIT under threads + version-cached recompile + widen `RawSlot`.
 - [ ] **Phase 6** — delete the trap-gated feature silos.
 
