@@ -606,3 +606,8 @@
 (first ())
 (vector? ())
 (map (fn [x] (list)) [1 2])
+(do (defn f [& {:keys [x y]}] [x y]) (f :x 1 :y 2))
+(do (defn g [a & {:keys [x] :or {x 9}}] [a x]) [(g 5 :x 1) (g 5)])
+(do (defn h [& {:keys [x]}] x) (h {:x 7}))
+(let [{:keys [a b] :or {b 0}} {:a 5}] [a b])
+(let [{a :aa b :bb} {:aa 1 :bb 2}] [a b])

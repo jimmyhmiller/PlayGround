@@ -395,15 +395,26 @@ fn rebuild_binder<M: ValueModel>(
         // Params: a destructuring param becomes a fresh param + a `let` in the
         // body binding the pattern to it. (Symbols and `&` pass through.)
         let mut params = Vec::new();
-        let mut wrap = Vec::new(); // pattern, gensym pairs
+        let mut wrap = Vec::new(); // pattern, init pairs
+        let mut prev_amp = false;
         for &p in &bind_forms {
             if matches!(rt.decode(p), Val::Sym(_)) {
                 params.push(p);
+                prev_amp = is_sym(rt, p, "&");
             } else {
                 let g = gensym(rt, "p");
                 params.push(g);
+                // `& {:keys …}` — the trailing args are keyword pairs; collect them
+                // into a map before destructuring the pattern.
+                let init = if prev_amp && record_field0(rt, p, reader::MAP).is_some() {
+                    let kw = sym(rt, "-kwargs->map");
+                    rt.vec_to_list(&[kw, g])
+                } else {
+                    g
+                };
                 wrap.push(p);
-                wrap.push(g);
+                wrap.push(init);
+                prev_amp = false;
             }
         }
         let paramlist = rt.vec_to_list(&params);
@@ -454,6 +465,13 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
             if is_sym(rt, elems[k], "&") {
                 let iv = int(rt, idx);
                 let rest_expr = call2(rt, "drop", iv, t);
+                // `& {:keys …}` — collect trailing kwargs into a map to destructure.
+                let rest_expr = if record_field0(rt, elems[k + 1], reader::MAP).is_some() {
+                    let kw = sym(rt, "-kwargs->map");
+                    rt.vec_to_list(&[kw, rest_expr])
+                } else {
+                    rest_expr
+                };
                 binds.extend(destructure(rt, elems[k + 1], rest_expr));
                 k += 2;
                 continue;

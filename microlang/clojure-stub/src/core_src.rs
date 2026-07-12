@@ -138,6 +138,11 @@ pub const CORE: &str = r##"
 ;; ─────────────── type predicates ───────────────
 (defn map? [x] (let [t (type-of x)] (or (%num-eq t 'Map) (%num-eq t 'SortedMap))))
 (defn set? [x] (let [t (type-of x)] (or (%num-eq t 'Set) (%num-eq t 'SortedSet))))
+;; `& {:keys […]}` keyword-argument destructuring: collect trailing kwargs into a
+;; map. A single trailing MAP arg is used as-is (Clojure 1.11 map/kwargs mixing).
+(defn -kwargs->map [args]
+  (let [s (seq args)]
+    (if (and s (nil? (next s)) (map? (first s))) (first s) (apply hash-map args))))
 (defn keyword? [x] (%num-eq (type-of x) 'Keyword))
 (defn list? [x] (let [t (type-of x)] (or (%num-eq t 'List) (%num-eq t 'EmptyList))))
 (defn string? [x] (%num-eq (type-of x) 'String))
