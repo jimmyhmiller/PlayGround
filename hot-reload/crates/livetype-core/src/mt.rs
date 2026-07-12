@@ -21,15 +21,6 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-/// One call frame of a concurrent actor: the pinned function version it runs,
-/// its program counter and registers, and where its result goes in the caller.
-struct MtFrame {
-    func: DefId,
-    version: Version,
-    pc: usize,
-    regs: Vec<Option<Value>>,
-    return_to: Option<usize>,
-}
 
 /// The outcome of running one actor to a stop.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,11 +143,10 @@ impl Shared {
         for (i, v) in args.into_iter().enumerate() {
             regs[i] = Some(v);
         }
-        let frames = vec![MtFrame {
-            func: function,
-            version,
+        let frames = vec![Frame {
+            function: (function, version),
             pc: 0,
-            regs,
+            registers: regs,
             return_to: None,
         }];
 
@@ -173,9 +163,9 @@ impl Shared {
         };
         loop {
             machine.shared.safepoint(tid, &machine.frames);
-            let (func, version, pc) = {
+            let ((func, version), pc) = {
                 let t = machine.frames.last().unwrap();
-                (t.func, t.version, t.pc)
+                (t.function, t.pc)
             };
             let instruction = match &machine.shared.world.functions[&(func, version)] {
                 FunctionState::Ready(f) => f.code[pc].clone(),
@@ -229,18 +219,11 @@ impl Shared {
     /// (every reference across its whole call stack) and park until the
     /// collector releases us. Called every instruction, so preemption latency is
     /// one step.
-    fn safepoint(&self, tid: usize, frames: &[MtFrame]) {
+    fn safepoint(&self, tid: usize, frames: &[Frame]) {
         if !self.gc_pending.load(Ordering::Acquire) {
             return;
         }
-        let live: Vec<ObjectId> = frames
-            .iter()
-            .flat_map(|f| f.regs.iter().flatten())
-            .filter_map(|v| match v {
-                Value::Ref(id) => Some(*id),
-                _ => None,
-            })
-            .collect();
+        let live = frame_roots(frames);
         let mut c = self.gc.lock().unwrap();
         c.roots.insert(tid, live);
         c.parked += 1;
@@ -307,16 +290,16 @@ impl Shared {
 struct MtMachine<'a> {
     shared: &'a Arc<Shared>,
     mailbox: Arc<Mutex<std::collections::VecDeque<Value>>>,
-    frames: Vec<MtFrame>,
+    frames: Vec<Frame>,
     /// Set when the top frame returns — the driver turns it into `Complete`.
     done: Option<Value>,
 }
 
 impl MtMachine<'_> {
-    fn top(&self) -> &MtFrame {
+    fn top(&self) -> &Frame {
         self.frames.last().unwrap()
     }
-    fn top_mut(&mut self) -> &mut MtFrame {
+    fn top_mut(&mut self) -> &mut Frame {
         self.frames.last_mut().unwrap()
     }
 }
@@ -329,17 +312,16 @@ impl Machine for MtMachine<'_> {
         &self.shared.heap
     }
     fn current(&self) -> (DefId, Version) {
-        let t = self.top();
-        (t.func, t.version)
+        self.top().function
     }
     fn pc(&self) -> usize {
         self.top().pc
     }
     fn reg(&self, i: usize) -> Option<Value> {
-        self.top().regs.get(i).cloned().flatten()
+        self.top().registers.get(i).cloned().flatten()
     }
     fn set_reg(&mut self, dst: usize, value: Value) {
-        self.top_mut().regs[dst] = Some(value);
+        self.top_mut().registers[dst] = Some(value);
     }
     fn set_pc(&mut self, pc: usize) {
         self.top_mut().pc = pc;
@@ -363,18 +345,17 @@ impl Machine for MtMachine<'_> {
         registers: Vec<Option<Value>>,
         return_reg: usize,
     ) {
-        self.frames.push(MtFrame {
-            func: callee,
-            version,
+        self.frames.push(Frame {
+            function: (callee, version),
             pc: 0,
-            regs: registers,
+            registers,
             return_to: Some(return_reg),
         });
     }
     fn do_return(&mut self, value: Value) {
         let done = self.frames.pop().unwrap();
         match done.return_to {
-            Some(dst) => self.top_mut().regs[dst] = Some(value),
+            Some(dst) => self.top_mut().registers[dst] = Some(value),
             None => self.done = Some(value),
         }
     }

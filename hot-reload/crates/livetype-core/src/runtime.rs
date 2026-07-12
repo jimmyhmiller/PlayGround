@@ -559,8 +559,8 @@ impl Runtime {
                 let owner = self.actors.get_mut(&actor).unwrap();
                 let frame = owner.frames.pop().unwrap();
                 match frame.return_to {
-                    Some(target) => {
-                        owner.frames.last_mut().unwrap().registers[target.register] = Some(value);
+                    Some(register) => {
+                        owner.frames.last_mut().unwrap().registers[register] = Some(value);
                         owner.status = ActorStatus::Runnable;
                     }
                     None => owner.status = ActorStatus::Complete(value),
@@ -682,13 +682,7 @@ impl Runtime {
             }
         }
         for actor in self.actors.values() {
-            for frame in &actor.frames {
-                for value in frame.registers.iter().flatten() {
-                    if let Value::Ref(id) = value {
-                        work.push(*id);
-                    }
-                }
-            }
+            work.extend(frame_roots(&actor.frames));
         }
         let mut live = std::collections::BTreeSet::new();
         while let Some(id) = work.pop() {
@@ -772,15 +766,15 @@ impl Machine for InterpMachine<'_> {
             function: (callee, version),
             pc: 0,
             registers,
-            return_to: Some(ReturnTo { register: return_reg }),
+            return_to: Some(return_reg),
         });
     }
     fn do_return(&mut self, value: Value) {
         let owner = self.rt.actors.get_mut(&self.actor).unwrap();
         let frame = owner.frames.pop().unwrap();
         match frame.return_to {
-            Some(target) => {
-                owner.frames.last_mut().unwrap().registers[target.register] = Some(value)
+            Some(register) => {
+                owner.frames.last_mut().unwrap().registers[register] = Some(value)
             }
             None => owner.status = ActorStatus::Complete(value),
         }

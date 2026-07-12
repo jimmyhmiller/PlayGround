@@ -19,7 +19,7 @@ Every row is a place the same idea is implemented more than once and can drift.
 | Soundness (`value_ok`) | ~~on `Runtime`~~ | via `expect_value` | ~~reimplemented~~ | **DONE** — `Heap::value_ok` |
 | Allocation | ~~`alloc`/`jit_new`~~ | via `lt_new` | ~~`alloc`~~ | **DONE** — `Heap::new_object`/`alloc` |
 | GC roots + sweep | `collect_garbage_with_roots` | driver hands slot roots | `collect` + safepoint parking | sweep+trace unified on `Heap` (`retain`/`child_refs`); root-*gathering* still per-tier |
-| Frame/slot layout | `Frame{registers:Vec<Option<Value>>}` | `RawFrame`/`RawSlot` (tag+i64) | `MtFrame{regs:Vec<Option<Value>>}` | **Phase 3** — abstracted behind `Machine` for now; still 3 layouts |
+| Frame/slot layout | one shared `Frame` | `RawFrame`/`RawSlot` (tag+i64) | one shared `Frame` | **DONE for the managed tiers** — interp + Shared share `Frame` (holds any `Value`, incl `Foreign`) + `frame_roots`; the JIT's C-ABI `RawSlot` widening is coupled to JIT-FFI and lands in Phase 5 (widen there, where it's exercised) |
 | Effects (`Emit`) | `jit_emit` | via `lt_emit` | `Shared::emit` | one path each; step calls `m.emit` |
 
 The `Machine` trait (`exec.rs`) is the seam: `InterpMachine` (over `&mut Runtime`
@@ -52,11 +52,11 @@ between them; after Phase 4 the Shared comparison extends to the edit scenario.
 ## Phases
 
 - [x] **Phase 0** — three-way differential net + this duplication map.
-- [ ] **Phase 1** — one `Heap` (objects + `ObjCell` + migration + `value_ok` + alloc).
-- [ ] **Phase 2** — one step function; delete `run_actor`.
-- [ ] **Phase 3** — unified frame/slot (flat, GC-scannable, holds any `Value`).
+- [x] **Phase 1** — one `Heap` (objects + `ObjCell` + migration + `value_ok` + alloc).
+- [x] **Phase 2** — one step function (`exec::step_instruction` over `Machine`); `run_actor` match and `execute` both deleted.
+- [x] **Phase 3** — one managed `Frame` (interp + Shared) + one `frame_roots`. (JIT `RawSlot` widening deferred to Phase 5, where JIT-FFI exercises it.)
 - [ ] **Phase 4** — live edit on the concurrent runtime (edit = safepoint op).
-- [ ] **Phase 5** — JIT under threads + version-cached recompile.
+- [ ] **Phase 5** — JIT under threads + version-cached recompile + widen `RawSlot`.
 - [ ] **Phase 6** — delete the trap-gated feature silos.
 
 ## Hard problems to solve along the way

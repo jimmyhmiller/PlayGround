@@ -286,17 +286,33 @@ pub struct World {
     pub global_types: BTreeMap<DefId, Type>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReturnTo {
-    pub register: usize,
-}
-
+/// One call frame — the single frame representation shared by the interpreter
+/// and the concurrent worker (the JIT keeps a C-ABI mirror it marshals per step;
+/// see `RawFrame`). Registers are the complete live-value set at any pause
+/// boundary, so they are also the complete GC root map for this frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
     pub function: (DefId, Version),
     pub pc: usize,
     pub registers: Vec<Option<Value>>,
-    pub return_to: Option<ReturnTo>,
+    /// The caller register the result lands in on return; `None` when this is
+    /// the actor's entry frame (its return completes the actor).
+    pub return_to: Option<usize>,
+}
+
+/// The object references live in a set of frames — the frame half of the GC
+/// root set. One routine, used by both the single-threaded collector and each
+/// concurrent worker's safepoint, so the two can never disagree on what a frame
+/// keeps alive.
+pub fn frame_roots(frames: &[Frame]) -> Vec<ObjectId> {
+    frames
+        .iter()
+        .flat_map(|f| f.registers.iter().flatten())
+        .filter_map(|v| match v {
+            Value::Ref(id) => Some(*id),
+            _ => None,
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

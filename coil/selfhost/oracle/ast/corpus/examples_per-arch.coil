@@ -1,126 +1,1185 @@
-(defn when [(c Code) & (body Code)] (-> Code) (quasiquote (if (unquote c) (do (unquote-splicing body)) 0)))
-(defn unless [(c Code) & (body Code)] (-> Code) (quasiquote (if (unquote c) 0 (do (unquote-splicing body)))))
-(defn cond-arms [(cs Code)] (-> Code) (if (icmp-eq (code-count cs) 0) (quasiquote 0) (if (icmp-eq (code-count cs) 1) (code-nth cs 0) (quasiquote (if (unquote (code-nth cs 0)) (unquote (code-nth cs 1)) (unquote (cond-arms (code-rest (code-rest cs)))))))))
-(defn cond [& (cs Code)] (-> Code) (cond-arms cs))
-(defn case-arms [(v Code) (eq Code) (clauses Code)] (-> Code) (if (icmp-eq (code-count clauses) 0) (quasiquote 0) (if (icmp-eq (code-count clauses) 1) (code-nth clauses 0) (quasiquote (if ((unquote eq) (unquote v) (unquote (code-nth clauses 0))) (unquote (code-nth clauses 1)) (unquote (case-arms v eq (code-rest (code-rest clauses)))))))))
-(defn case [(x Code) & (clauses Code)] (-> Code) (let [v (gensym)] (quasiquote (let [(unquote v) (unquote x)] (unquote (case-arms v (quasiquote =) clauses))))))
-(defn case-by [(x Code) (eq Code) & (clauses Code)] (-> Code) (let [v (gensym)] (quasiquote (let [(unquote v) (unquote x)] (unquote (case-arms v eq clauses))))))
-(defn while [(c Code) & (body Code)] (-> Code) (quasiquote (loop (if (unquote c) (do (unquote-splicing body)) (break)))))
-(defn for [(binding Code) & (body Code)] (-> Code) (if (not (icmp-eq (code-count binding) 3)) (error "for: binding must be [i LO HI]") (let [i (code-nth binding 0) lo (code-nth binding 1) hi (code-nth binding 2) idx (gensym)] (quasiquote (let [(mut (unquote idx)) (isub (unquote lo) 1)] (loop (store! (unquote idx) (iadd (load (unquote idx)) 1)) (if (icmp-lt (load (unquote idx)) (unquote hi)) (let [(unquote i) (load (unquote idx))] (unquote-splicing body)) (break))))))))
-(defn for-in [(binding Code) & (body Code)] (-> Code) (if (not (icmp-eq (code-count binding) 2)) (error "for-in: binding must be [x COLL]") (let [x (code-nth binding 0) coll (code-nth binding 1)] (if (not (code-list? coll)) (error "for-in: COLL must be a form, e.g. (range lo hi), (in coll), or (over arr len)") (let [h (code-nth coll 0)] (if (code-eq h (quasiquote range)) (quasiquote (for [(unquote x) (unquote (code-nth coll 1)) (unquote (code-nth coll 2))] (unquote-splicing body))) (if (code-eq h (quasiquote in)) (let [c (gensym) i (gensym)] (quasiquote (let [(unquote c) (unquote (code-nth coll 1))] (for [(unquote i) 0 (len (unquote c))] (let [(unquote x) (get (unquote c) (unquote i))] (unquote-splicing body)))))) (if (code-eq h (quasiquote over)) (let [arr (code-nth coll 1) len (code-nth coll 2) i (gensym)] (quasiquote (for [(unquote i) 0 (unquote len)] (let [(unquote x) (load (index (unquote arr) (unquote i)))] (unquote-splicing body))))) (if (code-eq h (quasiquote iter)) (let [nf (code-nth coll 1) st (code-nth coll 2) nfv (gensym) stv (gensym)] (quasiquote (let [(unquote nfv) (unquote nf) (unquote stv) (unquote st)] (loop (match (call-ptr (unquote nfv) (unquote stv)) (None [] (break)) (Some [(unquote x)] (unquote-splicing body))))))) (error "for-in: unsupported collection; use (range lo hi), (in coll), (over arr len), or (iter next state)"))))))))))
-(defn thread-first [(x Code) (forms Code)] (-> Code) (if (icmp-eq (code-count forms) 0) x (thread-first (let [form (code-nth forms 0)] (if (code-list? form) (quasiquote ((unquote (code-nth form 0)) (unquote x) (unquote-splicing (code-rest form)))) (quasiquote ((unquote form) (unquote x))))) (code-rest forms))))
-(defn |> [(x Code) & (forms Code)] (-> Code) (thread-first x forms))
-(defn thread-last [(x Code) (forms Code)] (-> Code) (if (icmp-eq (code-count forms) 0) x (thread-last (let [form (code-nth forms 0)] (if (code-list? form) (quasiquote ((unquote-splicing form) (unquote x))) (quasiquote ((unquote form) (unquote x))))) (code-rest forms))))
-(defn |>> [(x Code) & (forms Code)] (-> Code) (thread-last x forms))
-(defn block [(label Code) & (body Code)] (-> Code) (quasiquote (loop (unquote label) (break (unquote label) (do (unquote-splicing body))))))
-(defn return-from [(label Code) (v Code)] (-> Code) (quasiquote (break (unquote label) (unquote v))))
-(defn is-control? [(h Code)] (-> bool) (if (code-eq h (quasiquote break)) true (if (code-eq h (quasiquote continue)) true (code-eq h (quasiquote return-from)))))
-(defn loop-introducer? [(h Code)] (-> bool) (if (code-eq h (quasiquote loop)) true (if (code-eq h (quasiquote while)) true (if (code-eq h (quasiquote for)) true (if (code-eq h (quasiquote block)) true (code-eq h (quasiquote scope)))))))
-(defn control-label [(form Code)] (-> Code) (if (icmp-lt 1 (code-count form)) (let [a (code-nth form 1)] (if (code-keyword? a) a (quasiquote no-label))) (quasiquote no-label)))
-(defn label-member? [(x Code) (xs Code) (i i64)] (-> bool) (if (not (icmp-lt i (code-count xs))) false (if (code-eq x (code-nth xs i)) true (label-member? x xs (iadd i 1)))))
-(defn escape-labels [(form Code) (labels Code)] (-> Code) (if (icmp-lt 1 (code-count form)) (let [a (code-nth form 1)] (if (code-keyword? a) (quasiquote ((unquote a) (unquote-splicing labels))) labels)) labels))
-(defn is-defer? [(f Code)] (-> bool) (if (code-list? f) (if (icmp-lt 0 (code-count f)) (code-eq (code-nth f 0) (quasiquote defer)) false) false))
-(defn scope-escape [(form Code) (depth i64) (labels Code) (slabel Code)] (-> i64) (if (not (code-list? form)) 0 (if (not (icmp-lt 0 (code-count form))) 0 (let [h (code-nth form 0)] (if (is-control? h) (let [lab (control-label form)] (if (not (code-eq lab (quasiquote no-label))) (if (label-member? lab labels 0) 0 (if (code-eq lab slabel) (if (code-eq h (quasiquote continue)) (error "scope: (continue) cannot target the scope label; use return-from to exit") 0) (error "scope: a labeled break/continue escapes the (scope ...) past its defers"))) (if (icmp-lt 0 depth) 0 (error "scope: an unlabeled break/continue cannot exit a (scope ...); use (return-from :label v)")))) (if (loop-introducer? h) (scope-escape-list (code-rest form) (iadd depth 1) (escape-labels form labels) slabel) (scope-escape-list (code-rest form) depth labels slabel)))))))
-(defn scope-escape-list [(forms Code) (depth i64) (labels Code) (slabel Code)] (-> i64) (if (not (icmp-lt 0 (code-count forms))) 0 (let [chk (scope-escape (code-nth forms 0) depth labels slabel)] (scope-escape-list (code-rest forms) depth labels slabel))))
-(defn scope-cleanups [(body Code) (i i64) (acc Code)] (-> Code) (if (not (icmp-lt i (code-count body))) acc (let [f (code-nth body i)] (scope-cleanups body (iadd i 1) (if (is-defer? f) (quasiquote ((unquote (code-nth f 1)) (unquote-splicing acc))) acc)))))
-(defn scope-mains [(body Code) (i i64) (acc Code)] (-> Code) (if (not (icmp-lt i (code-count body))) acc (let [f (code-nth body i)] (scope-mains body (iadd i 1) (if (is-defer? f) acc (quasiquote ((unquote-splicing acc) (unquote f))))))))
-(defn scope [(label Code) & (body Code)] (-> Code) (if (not (code-keyword? label)) (error "scope: first argument must be a :label, e.g. (scope :s body...)") (let [chk (scope-escape-list body 0 (quasiquote ()) label) cleanups (scope-cleanups body 0 (quasiquote ())) mains (scope-mains body 0 (quasiquote ())) r (gensym)] (quasiquote (let [(unquote r) (block (unquote label) (unquote-splicing mains))] (unquote-splicing cleanups) (unquote r))))))
-(defn defer [& (_ Code)] (-> Code) (error "defer: (defer expr) is only valid as a DIRECT form inside (scope :s ...)"))
-(defn inline-for-iters [(i Code) (lo i64) (hi i64) (body Code)] (-> Code) (if (icmp-lt lo hi) (quasiquote ((let [(unquote i) (unquote lo)] (unquote-splicing body)) (unquote-splicing (inline-for-iters i (iadd lo 1) hi body)))) (quasiquote ())))
-(defn inline-for [(binding Code) & (body Code)] (-> Code) (if (not (icmp-eq (code-count binding) 3)) (error "inline-for: binding must be [i LO HI] with literal integer bounds") (let [i (code-nth binding 0) lo (code-int (code-nth binding 1)) hi (code-int (code-nth binding 2))] (quasiquote (do (unquote-splicing (inline-for-iters i lo hi body)))))))
-(defn all [& (xs Code)] (-> Code) (if (icmp-eq (code-count xs) 0) (quasiquote true) (if (icmp-eq (code-count xs) 1) (code-nth xs 0) (quasiquote (and (unquote (code-nth xs 0)) (all (unquote-splicing (code-rest xs))))))))
-(defn any [& (xs Code)] (-> Code) (if (icmp-eq (code-count xs) 0) (quasiquote false) (if (icmp-eq (code-count xs) 1) (code-nth xs 0) (quasiquote (or (unquote (code-nth xs 0)) (any (unquote-splicing (code-rest xs))))))))
-(defn slice-new [T] [(data (ptr T)) (len i64)] (-> (slice T)) (llvm-ir (slice T) [data len] "%s0 = insertvalue $ret undef, $t0 $0, 0\n%s1 = insertvalue $ret %s0, $t1 $1, 1\nret $ret %s1"))
-(defn slice-len [T] [(s (slice T))] (-> i64) (llvm-ir i64 [s] "%l = extractvalue $t0 $0, 1\nret $ret %l"))
-(defn slice-data [T] [(s (slice T))] (-> (ptr T)) (llvm-ir (ptr T) [s] "%d = extractvalue $t0 $0, 0\nret $ret %d"))
-(defn slice-empty? [T] [(s (slice T))] (-> bool) (icmp-eq (slice-len s) 0))
-(defn slice-get [T] [(s (slice T)) (i i64)] (-> T) (load (index (slice-data s) i)))
-(defn slice-set! [T] [(s (slice T)) (i i64) (v T)] (-> i64) (store! (index (slice-data s) i) v) 0)
-(defn subslice [T] [(s (slice T)) (lo i64) (hi i64)] (-> (slice T)) (slice-new (index (slice-data s) lo) (isub hi lo)))
-(defn slice-of [(arr Code) (len Code)] (-> Code) (quasiquote (slice-new (index (unquote arr) 0) (unquote len))))
-(defn slice-for [(binding Code) & (body Code)] (-> Code) (if (not (icmp-eq (code-count binding) 2)) (error "slice-for: binding must be [x slice]") (let [x (code-nth binding 0) s (code-nth binding 1) sv (gensym) i (gensym)] (quasiquote (let [(unquote sv) (unquote s)] (for [(unquote i) 0 (slice-len (unquote sv))] (let [(unquote x) (slice-get (unquote sv) (unquote i))] (unquote-splicing body))))))))
-(impl [T] Len (slice T) (len [(s (slice T))] (-> i64) (slice-len s)))
-(impl [T] Get (slice T) (get [(s (slice T)) (i i64)] (-> T) (slice-get s i)))
-(impl [T] Set (slice T) (set! [(s (mut (slice T))) (i i64) (v T)] (-> i64) (slice-set! (load s) i v)))
-(extern write :cc c [:i64 (ptr i8) :i64] (-> :i64))
-(extern read :cc c [:i64 (ptr i8) :i64] (-> :i64))
-(extern strlen :cc c [(ptr i8)] (-> :i64))
-(extern memcpy :cc c [(ptr i8) (ptr i8) :i64] (-> (ptr i8)))
-(defsum IoError (Eof) (Errno [(code :i64)]))
-(defstruct Writer [(write-fn (fnptr c [(ptr i8) (ptr i8) :i64] (Result :i64 IoError))) (ctx (ptr i8))])
-(defn write-some [(w (ptr Writer)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError)) (call-ptr (load (field w write-fn)) (load (field w ctx)) buf len))
-(defn write-all [(w (ptr Writer)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError)) (if (icmp-le len 0) (Ok 0) (match (write-some w buf len) (Err [e] (Err e)) (Ok [n] (if (icmp-le n 0) (Err (Errno 0)) (match (write-all w (index buf n) (isub len n)) (Err [e] (Err e)) (Ok [m] (Ok (iadd n m)))))))))
-(defn write-byte [(w (ptr Writer)) (b :u8)] (-> (Result :i64 IoError)) (let [p (alloc-stack :u8)] (store! p b) (write-all w (cast (ptr i8) p) 1)))
-(defn print-str [(w (ptr Writer)) (s (slice u8))] (-> (Result :i64 IoError)) (write-all w (cast (ptr i8) (slice-data s)) (slice-len s)))
-(defn print-cstr [(w (ptr Writer)) (s (ptr i8))] (-> (Result :i64 IoError)) (write-all w s (strlen s)))
-(defn print-int [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError)) (if (icmp-lt n 10) (write-byte w (cast :u8 (iadd n 48))) (do (print-int w (idiv n 10)) (write-byte w (cast :u8 (iadd (irem n 10) 48))))))
-(defn fd-write [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError)) (let [n (write (cast :i64 ctx) buf len)] (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
-(defn fd-writer [(fd :i64)] (-> (ptr Writer)) (let [w (alloc-static Writer)] (store! (field w write-fn) (fnptr-of fd-write)) (store! (field w ctx) (cast (ptr i8) fd)) w))
-(defn stdout [] (-> (ptr Writer)) (fd-writer 1))
-(defn stderr [] (-> (ptr Writer)) (fd-writer 2))
-(defn null-write [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError)) (Ok len))
-(defn null-writer [] (-> (ptr Writer)) (let [w (alloc-static Writer)] (store! (field w write-fn) (fnptr-of null-write)) (store! (field w ctx) (cast (ptr i8) 0)) w))
-(defstruct FixBuf [(data (ptr i8)) (len :i64) (cap :i64)])
-(defn fb-write [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError)) (let [fb (cast (ptr FixBuf) ctx) cur (load (field fb len)) room (isub (load (field fb cap)) cur) n (if (icmp-lt len room) len room)] (memcpy (index (load (field fb data)) cur) buf n) (store! (field fb len) (iadd cur n)) (if (icmp-lt n len) (Err (Errno 0)) (Ok n))))
-(defn fixed-buffer-writer [(fb (ptr FixBuf))] (-> (ptr Writer)) (let [w (alloc-static Writer)] (store! (field fb len) 0) (store! (field w write-fn) (fnptr-of fb-write)) (store! (field w ctx) (cast (ptr i8) fb)) w))
-(defstruct Reader [(read-fn (fnptr c [(ptr i8) (ptr i8) :i64] (Result :i64 IoError))) (ctx (ptr i8))])
-(defn read-some [(r (ptr Reader)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError)) (call-ptr (load (field r read-fn)) (load (field r ctx)) buf len))
-(defn fd-read [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError)) (let [n (read (cast :i64 ctx) buf len)] (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
-(defn fd-reader [(fd :i64)] (-> (ptr Reader)) (let [r (alloc-static Reader)] (store! (field r read-fn) (fnptr-of fd-read)) (store! (field r ctx) (cast (ptr i8) fd)) r))
-(defn stdin [] (-> (ptr Reader)) (fd-reader 0))
-(defn print-i [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError)) (if (icmp-lt n 0) (match (write-byte w (cast :u8 45)) (Err [e] (Err e)) (Ok [_] (print-int w (isub 0 n)))) (print-int w n)))
-(defn print-hex [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError)) (if (icmp-lt n 16) (write-byte w (cast :u8 (if (icmp-lt n 10) (iadd n 48) (iadd n 87)))) (match (print-hex w (idiv n 16)) (Err [e] (Err e)) (Ok [_] (let [d (irem n 16)] (write-byte w (cast :u8 (if (icmp-lt d 10) (iadd d 48) (iadd d 87)))))))))
-(defn uhex-digits [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError)) (if (icmp-eq n 0) (Ok 0) (match (uhex-digits w (udiv n 16)) (Err [e] (Err e)) (Ok [_] (let [d (urem n 16)] (write-byte w (cast :u8 (if (icmp-lt d 10) (iadd d 48) (iadd d 87)))))))))
-(defn print-uhex [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError)) (if (icmp-eq n 0) (write-byte w (cast :u8 48)) (uhex-digits w n)))
-(defn udec-digits [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError)) (if (icmp-eq n 0) (Ok 0) (match (udec-digits w (udiv n 10)) (Err [e] (Err e)) (Ok [_] (write-byte w (cast :u8 (iadd (urem n 10) 48)))))))
-(defn print-u [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError)) (if (icmp-eq n 0) (write-byte w (cast :u8 48)) (udec-digits w n)))
-(defn f--zeros [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError)) (if (icmp-le n 0) (Ok 0) (do (write-byte w (cast :u8 48)) (f--zeros w (isub n 1)))))
-(defn f--ndigits [(n :i64)] (-> :i64) (if (icmp-lt n 10) 1 (iadd 1 (f--ndigits (idiv n 10)))))
-(defn f--frac [(w (ptr Writer)) (fr6 :i64)] (-> (Result :i64 IoError)) (let [(mut v) fr6 (mut width) 6] (loop (if (and (icmp-gt (load width) 1) (icmp-eq (irem (load v) 10) 0)) (do (store! v (idiv (load v) 10)) (store! width (isub (load width) 1))) (break))) (write-byte w (cast :u8 46)) (f--zeros w (isub (load width) (f--ndigits (load v)))) (print-int w (load v))))
-(defn f--fixed [(w (ptr Writer)) (x :f64)] (-> (Result :i64 IoError)) (let [ip0 (cast :i64 x) fr6-r (cast :i64 (fadd (fmul (fsub x (cast :f64 ip0)) 1000000.0) 0.5)) carry (icmp-eq fr6-r 1000000) ip (if carry (iadd ip0 1) ip0) fr6 (if carry 0 fr6-r)] (print-int w ip) (f--frac w fr6)))
-(defn f--sci [(w (ptr Writer)) (x :f64)] (-> (Result :i64 IoError)) (let [(mut m) x (mut e) 0] (loop (if (fcmp-ge (load m) 10.0) (do (store! m (fdiv (load m) 10.0)) (store! e (iadd (load e) 1))) (break))) (f--fixed w (load m)) (write-byte w (cast :u8 101)) (write-byte w (cast :u8 43)) (print-int w (load e))))
-(defn f--abs [(w (ptr Writer)) (x :f64)] (-> (Result :i64 IoError)) (if (if (fcmp-gt x 0.0) (fcmp-eq (fdiv 1.0 x) 0.0) false) (print-str w "inf") (if (fcmp-lt x 9.223372036854776e18) (f--fixed w x) (f--sci w x))))
-(defn print-f [(w (ptr Writer)) (x :f64)] (-> (Result :i64 IoError)) (if (not (fcmp-eq x x)) (print-str w "NaN") (if (fcmp-lt x 0.0) (do (write-byte w (cast :u8 45)) (f--abs w (fsub 0.0 x))) (f--abs w x))))
-(defn print-bool [(w (ptr Writer)) (b bool)] (-> (Result :i64 IoError)) (print-str w (if b "true" "false")))
-(defn print-char [(w (ptr Writer)) (c :i64)] (-> (Result :i64 IoError)) (write-byte w (cast :u8 c)))
-(defn print-nl [(w (ptr Writer))] (-> (Result :i64 IoError)) (write-byte w (cast :u8 10)))
-(defn print-line [(w (ptr Writer)) (s (slice u8))] (-> (Result :i64 IoError)) (match (print-str w s) (Err [e] (Err e)) (Ok [_] (print-nl w))))
-(defn fmt--printer [(spec i64)] (-> Code) (if (icmp-eq spec 100) (quasiquote fmt.print-i) (if (icmp-eq spec 115) (quasiquote io.print-str) (if (icmp-eq spec 120) (quasiquote fmt.print-hex) (if (icmp-eq spec 99) (quasiquote fmt.print-char) (if (icmp-eq spec 98) (quasiquote fmt.print-bool) (if (icmp-eq spec 117) (quasiquote fmt.print-u) (if (icmp-eq spec 102) (quasiquote fmt.print-f) (error "fmt: unknown spec; use {d} {s} {x} {c} {b} {u} {f}")))))))))
-(defn fmt--flush [(w Code) (lit Code)] (-> Code) (if (icmp-eq (code-count lit) 0) (quasiquote ()) (quasiquote ((io.print-str (unquote w) (unquote (bytes->str lit)))))))
-(defn fmt--go [(w Code) (bs Code) (i i64) (lit Code) (args Code) (ai i64)] (-> Code) (if (icmp-eq i (code-count bs)) (fmt--flush w lit) (let [b (code-int (code-nth bs i))] (if (icmp-eq b 123) (if (if (icmp-lt (iadd i 1) (code-count bs)) (icmp-eq (code-int (code-nth bs (iadd i 1))) 123) false) (fmt--go w bs (iadd i 2) (quasiquote ((unquote-splicing lit) 123)) args ai) (if (if (icmp-lt (iadd i 2) (code-count bs)) (icmp-eq (code-int (code-nth bs (iadd i 2))) 125) false) (if (icmp-eq ai (code-count args)) (error "fmt: not enough arguments for the format string") (quasiquote ((unquote-splicing (fmt--flush w lit)) ((unquote (fmt--printer (code-int (code-nth bs (iadd i 1))))) (unquote w) (unquote (code-nth args ai))) (unquote-splicing (fmt--go w bs (iadd i 3) (quasiquote ()) args (iadd ai 1)))))) (error "fmt: malformed spec, expected {X}"))) (if (icmp-eq b 125) (if (if (icmp-lt (iadd i 1) (code-count bs)) (icmp-eq (code-int (code-nth bs (iadd i 1))) 125) false) (fmt--go w bs (iadd i 2) (quasiquote ((unquote-splicing lit) 125)) args ai) (error "fmt: unmatched '}' (use '}}')")) (fmt--go w bs (iadd i 1) (quasiquote ((unquote-splicing lit) (unquote (code-nth bs i)))) args ai))))))
-(defn fmt [(w Code) (fmt-str Code) & (args Code)] (-> Code) (quasiquote (do (unquote-splicing (fmt--go w (str-bytes fmt-str) 0 (quasiquote ()) args 0)))))
-(defn print [(f Code) & (args Code)] (-> Code) (let [w (gensym)] (quasiquote (let [(unquote w) (stdout)] (fmt (unquote w) (unquote f) (unquote-splicing args))))))
-(defn println [(f Code) & (args Code)] (-> Code) (let [w (gensym)] (quasiquote (let [(unquote w) (stdout)] (do (fmt (unquote w) (unquote f) (unquote-splicing args)) (print-nl (unquote w)))))))
-(defsum Option [T] (None) (Some [(val T)]))
-(defsum Result [T E] (Ok [(val T)]) (Err [(err E)]))
-(deftrait Eq [Self] (= [(a Self) (b Self)] (-> bool)))
-(deftrait Hash [Self] (hash [(x Self)] (-> i64)))
-(deftrait Add [Self] (+ [(a Self) (b Self)] (-> Self)))
-(deftrait Sub [Self] (- [(a Self) (b Self)] (-> Self)))
-(deftrait Mul [Self] (* [(a Self) (b Self)] (-> Self)))
-(deftrait Div [Self] (/ [(a Self) (b Self)] (-> Self)))
-(deftrait Rem [Self] (% [(a Self) (b Self)] (-> Self)))
-(deftrait Ord [Self] (< [(a Self) (b Self)] (-> bool)) (<= [(a Self) (b Self)] (-> bool)) (> [(a Self) (b Self)] (-> bool)) (>= [(a Self) (b Self)] (-> bool)))
-(impl Eq i64 (= [(a i64) (b i64)] (-> bool) (icmp-eq a b)))
-(impl Hash i64 (hash [(x i64)] (-> i64) x))
-(impl Add i64 (+ [(a i64) (b i64)] (-> i64) (iadd a b)))
-(impl Sub i64 (- [(a i64) (b i64)] (-> i64) (isub a b)))
-(impl Mul i64 (* [(a i64) (b i64)] (-> i64) (imul a b)))
-(impl Div i64 (/ [(a i64) (b i64)] (-> i64) (idiv a b)))
-(impl Rem i64 (% [(a i64) (b i64)] (-> i64) (irem a b)))
-(impl Ord i64 (< [(a i64) (b i64)] (-> bool) (icmp-lt a b)) (<= [(a i64) (b i64)] (-> bool) (icmp-le a b)) (> [(a i64) (b i64)] (-> bool) (icmp-gt a b)) (>= [(a i64) (b i64)] (-> bool) (icmp-ge a b)))
-(impl Add f64 (+ [(a f64) (b f64)] (-> f64) (fadd a b)))
-(impl Sub f64 (- [(a f64) (b f64)] (-> f64) (fsub a b)))
-(impl Mul f64 (* [(a f64) (b f64)] (-> f64) (fmul a b)))
-(impl Div f64 (/ [(a f64) (b f64)] (-> f64) (fdiv a b)))
-(impl Ord f64 (< [(a f64) (b f64)] (-> bool) (fcmp-lt a b)) (<= [(a f64) (b f64)] (-> bool) (fcmp-le a b)) (> [(a f64) (b f64)] (-> bool) (fcmp-gt a b)) (>= [(a f64) (b f64)] (-> bool) (fcmp-ge a b)))
-(deftrait Len [Self] (len [(xs Self)] (-> i64)))
-(deftrait Get [Self K E] (get [(xs Self) (k K)] (-> E)))
-(deftrait Set [Self K E] (set! [(xs (mut Self)) (k K) (v E)] (-> i64)))
-(deftrait Push [Self E] (push! [(xs (mut Self)) (v E)] (-> i64)))
-(deftrait Pop [Self E] (pop! [(xs (mut Self))] (-> (Option E))))
-(defn empty? [(C Len)] [(xs C)] (-> bool) (icmp-eq (len xs) 0))
-(defn def-arch-cc [(name Code)] (-> Code) (if (code-eq (target-arch) (quasiquote x86_64)) (quasiquote (defcc (unquote name) :params [rax rdx] :ret rax :clobber [rax rdx rcx] :native fast)) (quasiquote (defcc (unquote name) :params [x0 x1] :ret x0 :clobber [x0 x1 x2] :native fast))))
-(defcc platform-fast :params [x0 x1] :ret x0 :clobber [x0 x1 x2] :native fast)
-(defn add :cc platform-fast [(a :i64) (b :i64)] (-> :i64) (iadd a b))
-(defn main [] (-> :i64) (add 20 22))
+; ModuleID = 'coil'
+source_filename = "coil"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+target triple = "arm64-apple-darwin25.5.0"
+
+%coil.core.Result__i64__io.IoError = type { i32, [2 x i64] }
+
+%io.FixBuf = type { ptr, i64, i64 }
+
+%io.IoError = type { i32, [1 x i64] }
+
+%io.Reader = type { ptr, ptr }
+
+%io.Writer = type { ptr, ptr }
+
+@g.0 = global %io.Reader zeroinitializer
+
+@g.1 = global %io.Writer zeroinitializer
+
+@g.2 = global %io.Writer zeroinitializer
+
+@g.3 = global %io.Writer zeroinitializer
+
+@str.0 = private constant [4 x i8] c"inf\00"
+
+@str.1 = private constant [5 x i8] c"true\00"
+
+@str.2 = private constant [6 x i8] c"false\00"
+
+@str.3 = private constant [4 x i8] c"NaN\00"
+
+declare ptr @memcpy(ptr, ptr, i64)
+
+declare i64 @read(i64, ptr, i64)
+
+declare i64 @strlen(ptr)
+
+declare i64 @write(i64, ptr, i64)
+
+define internal double @"coil.core.Add$f64$+"(double %a, double %b) {
+entry:
+  %fadd = fadd double %a, %b
+  ret double %fadd
+}
+
+define internal i64 @"coil.core.Add$i64$+"(i64 %a, i64 %b) {
+entry:
+  %add = add i64 %a, %b
+  ret i64 %add
+}
+
+define internal i64 @"coil.core.BitAnd$i64$&"(i64 %a, i64 %b) {
+entry:
+  %and = and i64 %a, %b
+  ret i64 %and
+}
+
+define internal i64 @"coil.core.BitOr$i64$|"(i64 %a, i64 %b) {
+entry:
+  %or = or i64 %a, %b
+  ret i64 %or
+}
+
+define internal i64 @"coil.core.BitXor$i64$^"(i64 %a, i64 %b) {
+entry:
+  %xor = xor i64 %a, %b
+  ret i64 %xor
+}
+
+define internal double @"coil.core.Div$f64$/"(double %a, double %b) {
+entry:
+  %fdiv = fdiv double %a, %b
+  ret double %fdiv
+}
+
+define internal i64 @"coil.core.Div$i64$/"(i64 %a, i64 %b) {
+entry:
+  %div = sdiv i64 %a, %b
+  ret i64 %div
+}
+
+define internal i1 @"coil.core.Eq$bool$="(i1 %a, i1 %b) {
+entry:
+  %ifc = icmp ne i1 %a, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  ret i1 %b
+
+else:                                             ; preds = %entry
+  %ifc1 = icmp ne i1 %b, false
+  br i1 %ifc1, label %then2, label %else3
+
+then2:                                            ; preds = %else
+  ret i1 false
+
+else3:                                            ; preds = %else
+  ret i1 true
+}
+
+define internal i1 @"coil.core.Eq$i64$="(i64 %a, i64 %b) {
+entry:
+  %cmp = icmp eq i64 %a, %b
+  ret i1 %cmp
+}
+
+define internal i64 @"coil.core.Hash$i64$hash"(i64 %x) {
+entry:
+  ret i64 %x
+}
+
+define internal double @"coil.core.Mul$f64$*"(double %a, double %b) {
+entry:
+  %fmul = fmul double %a, %b
+  ret double %fmul
+}
+
+define internal i64 @"coil.core.Mul$i64$*"(i64 %a, i64 %b) {
+entry:
+  %mul = mul i64 %a, %b
+  ret i64 %mul
+}
+
+define internal i1 @"coil.core.Ord$f64$<"(double %a, double %b) {
+entry:
+  %fcmp = fcmp olt double %a, %b
+  ret i1 %fcmp
+}
+
+define internal i1 @"coil.core.Ord$f64$<="(double %a, double %b) {
+entry:
+  %fcmp = fcmp ole double %a, %b
+  ret i1 %fcmp
+}
+
+define internal i1 @"coil.core.Ord$f64$>"(double %a, double %b) {
+entry:
+  %fcmp = fcmp ogt double %a, %b
+  ret i1 %fcmp
+}
+
+define internal i1 @"coil.core.Ord$f64$>="(double %a, double %b) {
+entry:
+  %fcmp = fcmp oge double %a, %b
+  ret i1 %fcmp
+}
+
+define internal i1 @"coil.core.Ord$i64$<"(i64 %a, i64 %b) {
+entry:
+  %cmp = icmp slt i64 %a, %b
+  ret i1 %cmp
+}
+
+define internal i1 @"coil.core.Ord$i64$<="(i64 %a, i64 %b) {
+entry:
+  %cmp = icmp sle i64 %a, %b
+  ret i1 %cmp
+}
+
+define internal i1 @"coil.core.Ord$i64$>"(i64 %a, i64 %b) {
+entry:
+  %cmp = icmp sgt i64 %a, %b
+  ret i1 %cmp
+}
+
+define internal i1 @"coil.core.Ord$i64$>="(i64 %a, i64 %b) {
+entry:
+  %cmp = icmp sge i64 %a, %b
+  ret i1 %cmp
+}
+
+define internal i64 @"coil.core.Rem$i64$%"(i64 %a, i64 %b) {
+entry:
+  %rem = srem i64 %a, %b
+  ret i64 %rem
+}
+
+define internal i64 @"coil.core.Shl$i64$<<"(i64 %a, i64 %b) {
+entry:
+  %shl = shl i64 %a, %b
+  ret i64 %shl
+}
+
+define internal i64 @"coil.core.Shr$i64$>>"(i64 %a, i64 %b) {
+entry:
+  %shr = ashr i64 %a, %b
+  ret i64 %shr
+}
+
+define internal double @"coil.core.Sub$f64$-"(double %a, double %b) {
+entry:
+  %fsub = fsub double %a, %b
+  ret double %fsub
+}
+
+define internal i64 @"coil.core.Sub$i64$-"(i64 %a, i64 %b) {
+entry:
+  %sub = sub i64 %a, %b
+  ret i64 %sub
+}
+
+define internal ptr @__coil_llvm_ir_0({ ptr, i64 } %0) #0 {
+  %d = extractvalue { ptr, i64 } %0, 0
+  ret ptr %d
+}
+
+define internal i64 @__coil_llvm_ir_1({ ptr, i64 } %0) #0 {
+  %l = extractvalue { ptr, i64 } %0, 1
+  ret i64 %l
+}
+
+define internal fastcc i64 @add(i64 %a, i64 %b) {
+entry:
+  %add = add i64 %a, %b
+  ret i64 %add
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.f--abs(ptr %w, double %x) {
+entry:
+  %fcmp = fcmp ogt double %x, 0.000000e+00
+  %ifc = icmp ne i1 %fcmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %fdiv = fdiv double 1.000000e+00, %x
+  %fcmp1 = fcmp oeq double %fdiv, 0.000000e+00
+  br label %ifcont
+
+else:                                             ; preds = %entry
+  br label %ifcont
+
+ifcont:                                           ; preds = %else, %then
+  %ifval = phi i1 [ %fcmp1, %then ], [ false, %else ]
+  %ifc2 = icmp ne i1 %ifval, false
+  br i1 %ifc2, label %then3, label %else4
+
+then3:                                            ; preds = %ifcont
+  %call = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %w, { ptr, i64 } { ptr @str.0, i64 3 })
+  ret %coil.core.Result__i64__io.IoError %call
+
+else4:                                            ; preds = %ifcont
+  %fcmp5 = fcmp olt double %x, 0x43E0000000000000
+  %ifc6 = icmp ne i1 %fcmp5, false
+  br i1 %ifc6, label %then7, label %else8
+
+then7:                                            ; preds = %else4
+  %call9 = call %coil.core.Result__i64__io.IoError @fmt.f--fixed(ptr %w, double %x)
+  ret %coil.core.Result__i64__io.IoError %call9
+
+else8:                                            ; preds = %else4
+  %call10 = call %coil.core.Result__i64__io.IoError @fmt.f--sci(ptr %w, double %x)
+  ret %coil.core.Result__i64__io.IoError %call10
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.f--fixed(ptr %w, double %x) {
+entry:
+  %fptosi = fptosi double %x to i64
+  %sitofp = sitofp i64 %fptosi to double
+  %fsub = fsub double %x, %sitofp
+  %fmul = fmul double %fsub, 1.000000e+06
+  %fadd = fadd double %fmul, 5.000000e-01
+  %fptosi1 = fptosi double %fadd to i64
+  %cmp = icmp eq i64 %fptosi1, 1000000
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %add = add i64 %fptosi, 1
+  br label %ifcont
+
+else:                                             ; preds = %entry
+  br label %ifcont
+
+ifcont:                                           ; preds = %else, %then
+  %ifval = phi i64 [ %add, %then ], [ %fptosi, %else ]
+  %ifc2 = icmp ne i1 %cmp, false
+  br i1 %ifc2, label %then3, label %else4
+
+then3:                                            ; preds = %ifcont
+  br label %ifcont5
+
+else4:                                            ; preds = %ifcont
+  br label %ifcont5
+
+ifcont5:                                          ; preds = %else4, %then3
+  %ifval6 = phi i64 [ 0, %then3 ], [ %fptosi1, %else4 ]
+  %call = call %coil.core.Result__i64__io.IoError @io.print-int(ptr %w, i64 %ifval)
+  %call7 = call %coil.core.Result__i64__io.IoError @fmt.f--frac(ptr %w, i64 %ifval6)
+  ret %coil.core.Result__i64__io.IoError %call7
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.f--frac(ptr %w, i64 %fr6) {
+entry:
+  %stack.slot = alloca i64, align 8
+  store i64 %fr6, ptr %stack.slot, align 8
+  %stack.slot1 = alloca i64, align 8
+  store i64 6, ptr %stack.slot1, align 8
+  br label %loop.body
+
+loop.body:                                        ; preds = %then5, %entry
+  %load = load i64, ptr %stack.slot1, align 8
+  %cmp = icmp sgt i64 %load, 1
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+loop.after:                                       ; preds = %else6
+  %loop.val = phi i64 [ 0, %else6 ]
+  %call = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 46)
+  %load9 = load i64, ptr %stack.slot1, align 8
+  %load10 = load i64, ptr %stack.slot, align 8
+  %call11 = call i64 @fmt.f--ndigits(i64 %load10)
+  %sub12 = sub i64 %load9, %call11
+  %call13 = call %coil.core.Result__i64__io.IoError @fmt.f--zeros(ptr %w, i64 %sub12)
+  %load14 = load i64, ptr %stack.slot, align 8
+  %call15 = call %coil.core.Result__i64__io.IoError @io.print-int(ptr %w, i64 %load14)
+  ret %coil.core.Result__i64__io.IoError %call15
+
+then:                                             ; preds = %loop.body
+  %load2 = load i64, ptr %stack.slot, align 8
+  %rem = srem i64 %load2, 10
+  %cmp3 = icmp eq i64 %rem, 0
+  br label %ifcont
+
+else:                                             ; preds = %loop.body
+  br label %ifcont
+
+ifcont:                                           ; preds = %else, %then
+  %ifval = phi i1 [ %cmp3, %then ], [ false, %else ]
+  %ifc4 = icmp ne i1 %ifval, false
+  br i1 %ifc4, label %then5, label %else6
+
+then5:                                            ; preds = %ifcont
+  %load7 = load i64, ptr %stack.slot, align 8
+  %div = sdiv i64 %load7, 10
+  store i64 %div, ptr %stack.slot, align 8
+  %load8 = load i64, ptr %stack.slot1, align 8
+  %sub = sub i64 %load8, 1
+  store i64 %sub, ptr %stack.slot1, align 8
+  br label %loop.body
+
+else6:                                            ; preds = %ifcont
+  br label %loop.after
+}
+
+define internal i64 @fmt.f--ndigits(i64 %n) {
+entry:
+  %cmp = icmp slt i64 %n, 10
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  ret i64 1
+
+else:                                             ; preds = %entry
+  %div = sdiv i64 %n, 10
+  %call = call i64 @fmt.f--ndigits(i64 %div)
+  %add = add i64 1, %call
+  ret i64 %add
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.f--sci(ptr %w, double %x) {
+entry:
+  %stack.slot = alloca double, align 8
+  store double %x, ptr %stack.slot, align 8
+  %stack.slot1 = alloca i64, align 8
+  store i64 0, ptr %stack.slot1, align 8
+  br label %loop.body
+
+loop.body:                                        ; preds = %then, %entry
+  %load = load double, ptr %stack.slot, align 8
+  %fcmp = fcmp oge double %load, 1.000000e+01
+  %ifc = icmp ne i1 %fcmp, false
+  br i1 %ifc, label %then, label %else
+
+loop.after:                                       ; preds = %else
+  %loop.val = phi i64 [ 0, %else ]
+  %load4 = load double, ptr %stack.slot, align 8
+  %call = call %coil.core.Result__i64__io.IoError @fmt.f--fixed(ptr %w, double %load4)
+  %call5 = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 101)
+  %call6 = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 43)
+  %load7 = load i64, ptr %stack.slot1, align 8
+  %call8 = call %coil.core.Result__i64__io.IoError @io.print-int(ptr %w, i64 %load7)
+  ret %coil.core.Result__i64__io.IoError %call8
+
+then:                                             ; preds = %loop.body
+  %load2 = load double, ptr %stack.slot, align 8
+  %fdiv = fdiv double %load2, 1.000000e+01
+  store double %fdiv, ptr %stack.slot, align 8
+  %load3 = load i64, ptr %stack.slot1, align 8
+  %add = add i64 %load3, 1
+  store i64 %add, ptr %stack.slot1, align 8
+  br label %loop.body
+
+else:                                             ; preds = %loop.body
+  br label %loop.after
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.f--zeros(ptr %w, i64 %n) {
+entry:
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %cmp = icmp sle i64 %n, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 0, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  store i64 0, ptr %vf, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+
+else:                                             ; preds = %entry
+  %call = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 48)
+  %sub = sub i64 %n, 1
+  %tailcall = musttail call %coil.core.Result__i64__io.IoError @fmt.f--zeros(ptr %w, i64 %sub)
+  ret %coil.core.Result__i64__io.IoError %tailcall
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.print-bool(ptr %w, i1 %b) {
+entry:
+  %ifc = icmp ne i1 %b, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  br label %ifcont
+
+else:                                             ; preds = %entry
+  br label %ifcont
+
+ifcont:                                           ; preds = %else, %then
+  %ifval = phi { ptr, i64 } [ { ptr @str.1, i64 4 }, %then ], [ { ptr @str.2, i64 5 }, %else ]
+  %call = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %w, { ptr, i64 } %ifval)
+  ret %coil.core.Result__i64__io.IoError %call
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.print-char(ptr %w, i64 %c) {
+entry:
+  %trunc = trunc i64 %c to i8
+  %call = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 %trunc)
+  ret %coil.core.Result__i64__io.IoError %call
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.print-f(ptr %w, double %x) {
+entry:
+  %fcmp = fcmp oeq double %x, %x
+  %ifc = icmp ne i1 %fcmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  br label %ifcont
+
+else:                                             ; preds = %entry
+  br label %ifcont
+
+ifcont:                                           ; preds = %else, %then
+  %ifval = phi i1 [ false, %then ], [ true, %else ]
+  %ifc1 = icmp ne i1 %ifval, false
+  br i1 %ifc1, label %then2, label %else3
+
+then2:                                            ; preds = %ifcont
+  %call = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %w, { ptr, i64 } { ptr @str.3, i64 3 })
+  ret %coil.core.Result__i64__io.IoError %call
+
+else3:                                            ; preds = %ifcont
+  %fcmp4 = fcmp olt double %x, 0.000000e+00
+  %ifc5 = icmp ne i1 %fcmp4, false
+  br i1 %ifc5, label %then6, label %else7
+
+then6:                                            ; preds = %else3
+  %call8 = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 45)
+  %fsub = fsub double 0.000000e+00, %x
+  %call9 = call %coil.core.Result__i64__io.IoError @fmt.f--abs(ptr %w, double %fsub)
+  ret %coil.core.Result__i64__io.IoError %call9
+
+else7:                                            ; preds = %else3
+  %call10 = call %coil.core.Result__i64__io.IoError @fmt.f--abs(ptr %w, double %x)
+  ret %coil.core.Result__i64__io.IoError %call10
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.print-hex(ptr %w, i64 %n) {
+entry:
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %cmp = icmp slt i64 %n, 16
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %cmp1 = icmp slt i64 %n, 10
+  %ifc2 = icmp ne i1 %cmp1, false
+  br i1 %ifc2, label %then3, label %else4
+
+else:                                             ; preds = %entry
+  %div = sdiv i64 %n, 16
+  %call6 = call %coil.core.Result__i64__io.IoError @fmt.print-hex(ptr %w, i64 %div)
+  store %coil.core.Result__i64__io.IoError %call6, ptr %match.tmp, align 8
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
+  %tag7 = load i32, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 1
+  switch i32 %tag7, label %match.default [
+    i32 1, label %arm
+    i32 0, label %arm8
+  ]
+
+then3:                                            ; preds = %then
+  %add = add i64 %n, 48
+  br label %ifcont
+
+else4:                                            ; preds = %then
+  %add5 = add i64 %n, 87
+  br label %ifcont
+
+ifcont:                                           ; preds = %else4, %then3
+  %ifval = phi i64 [ %add, %then3 ], [ %add5, %else4 ]
+  %trunc = trunc i64 %ifval to i8
+  %call = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 %trunc)
+  ret %coil.core.Result__i64__io.IoError %call
+
+arm:                                              ; preds = %else
+  %vf = getelementptr inbounds nuw { %io.IoError }, ptr %payload, i32 0, i32 0
+  %e = load %io.IoError, ptr %vf, align 8
+  %tag9 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 1, ptr %tag9, align 4
+  %payload10 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf11 = getelementptr inbounds nuw { %io.IoError }, ptr %payload10, i32 0, i32 0
+  store %io.IoError %e, ptr %vf11, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+
+arm8:                                             ; preds = %else
+  %vf12 = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  %_ = load i64, ptr %vf12, align 8
+  %rem = srem i64 %n, 16
+  %cmp13 = icmp slt i64 %rem, 10
+  %ifc14 = icmp ne i1 %cmp13, false
+  br i1 %ifc14, label %then15, label %else16
+
+match.default:                                    ; preds = %else
+  unreachable
+
+then15:                                           ; preds = %arm8
+  %add17 = add i64 %rem, 48
+  br label %ifcont19
+
+else16:                                           ; preds = %arm8
+  %add18 = add i64 %rem, 87
+  br label %ifcont19
+
+ifcont19:                                         ; preds = %else16, %then15
+  %ifval20 = phi i64 [ %add17, %then15 ], [ %add18, %else16 ]
+  %trunc21 = trunc i64 %ifval20 to i8
+  %call22 = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 %trunc21)
+  ret %coil.core.Result__i64__io.IoError %call22
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.print-i(ptr %w, i64 %n) {
+entry:
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %cmp = icmp slt i64 %n, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %call = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 45)
+  store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
+  %tag1 = load i32, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 1
+  switch i32 %tag1, label %match.default [
+    i32 1, label %arm
+    i32 0, label %arm2
+  ]
+
+else:                                             ; preds = %entry
+  %call8 = call %coil.core.Result__i64__io.IoError @io.print-int(ptr %w, i64 %n)
+  ret %coil.core.Result__i64__io.IoError %call8
+
+arm:                                              ; preds = %then
+  %vf = getelementptr inbounds nuw { %io.IoError }, ptr %payload, i32 0, i32 0
+  %e = load %io.IoError, ptr %vf, align 8
+  %tag3 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 1, ptr %tag3, align 4
+  %payload4 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf5 = getelementptr inbounds nuw { %io.IoError }, ptr %payload4, i32 0, i32 0
+  store %io.IoError %e, ptr %vf5, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+
+arm2:                                             ; preds = %then
+  %vf6 = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  %_ = load i64, ptr %vf6, align 8
+  %sub = sub i64 0, %n
+  %call7 = call %coil.core.Result__i64__io.IoError @io.print-int(ptr %w, i64 %sub)
+  ret %coil.core.Result__i64__io.IoError %call7
+
+match.default:                                    ; preds = %then
+  unreachable
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.print-line(ptr %w, { ptr, i64 } %s) {
+entry:
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %call = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %w, { ptr, i64 } %s)
+  store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
+  %tag1 = load i32, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 1
+  switch i32 %tag1, label %match.default [
+    i32 1, label %arm
+    i32 0, label %arm2
+  ]
+
+arm:                                              ; preds = %entry
+  %vf = getelementptr inbounds nuw { %io.IoError }, ptr %payload, i32 0, i32 0
+  %e = load %io.IoError, ptr %vf, align 8
+  %tag3 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 1, ptr %tag3, align 4
+  %payload4 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf5 = getelementptr inbounds nuw { %io.IoError }, ptr %payload4, i32 0, i32 0
+  store %io.IoError %e, ptr %vf5, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+
+arm2:                                             ; preds = %entry
+  %vf6 = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  %_ = load i64, ptr %vf6, align 8
+  %call7 = call %coil.core.Result__i64__io.IoError @fmt.print-nl(ptr %w)
+  ret %coil.core.Result__i64__io.IoError %call7
+
+match.default:                                    ; preds = %entry
+  unreachable
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.print-nl(ptr %w) {
+entry:
+  %call = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 10)
+  ret %coil.core.Result__i64__io.IoError %call
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.print-u(ptr %w, i64 %n) {
+entry:
+  %cmp = icmp eq i64 %n, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %call = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 48)
+  ret %coil.core.Result__i64__io.IoError %call
+
+else:                                             ; preds = %entry
+  %call1 = call %coil.core.Result__i64__io.IoError @fmt.udec-digits(ptr %w, i64 %n)
+  ret %coil.core.Result__i64__io.IoError %call1
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.print-uhex(ptr %w, i64 %n) {
+entry:
+  %cmp = icmp eq i64 %n, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %call = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 48)
+  ret %coil.core.Result__i64__io.IoError %call
+
+else:                                             ; preds = %entry
+  %call1 = call %coil.core.Result__i64__io.IoError @fmt.uhex-digits(ptr %w, i64 %n)
+  ret %coil.core.Result__i64__io.IoError %call1
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.udec-digits(ptr %w, i64 %n) {
+entry:
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %cmp = icmp eq i64 %n, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 0, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  store i64 0, ptr %vf, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+
+else:                                             ; preds = %entry
+  %udiv = udiv i64 %n, 10
+  %call = call %coil.core.Result__i64__io.IoError @fmt.udec-digits(ptr %w, i64 %udiv)
+  store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
+  %tag1 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
+  %tag2 = load i32, ptr %tag1, align 4
+  %payload3 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 1
+  switch i32 %tag2, label %match.default [
+    i32 1, label %arm
+    i32 0, label %arm4
+  ]
+
+arm:                                              ; preds = %else
+  %vf5 = getelementptr inbounds nuw { %io.IoError }, ptr %payload3, i32 0, i32 0
+  %e = load %io.IoError, ptr %vf5, align 8
+  %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
+  store i32 1, ptr %tag7, align 4
+  %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
+  %vf9 = getelementptr inbounds nuw { %io.IoError }, ptr %payload8, i32 0, i32 0
+  store %io.IoError %e, ptr %vf9, align 8
+  %sum10 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, align 8
+  ret %coil.core.Result__i64__io.IoError %sum10
+
+arm4:                                             ; preds = %else
+  %vf11 = getelementptr inbounds nuw { i64 }, ptr %payload3, i32 0, i32 0
+  %_ = load i64, ptr %vf11, align 8
+  %urem = urem i64 %n, 10
+  %add = add i64 %urem, 48
+  %trunc = trunc i64 %add to i8
+  %call12 = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 %trunc)
+  ret %coil.core.Result__i64__io.IoError %call12
+
+match.default:                                    ; preds = %else
+  unreachable
+}
+
+define internal %coil.core.Result__i64__io.IoError @fmt.uhex-digits(ptr %w, i64 %n) {
+entry:
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %cmp = icmp eq i64 %n, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 0, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  store i64 0, ptr %vf, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+
+else:                                             ; preds = %entry
+  %udiv = udiv i64 %n, 16
+  %call = call %coil.core.Result__i64__io.IoError @fmt.uhex-digits(ptr %w, i64 %udiv)
+  store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
+  %tag1 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
+  %tag2 = load i32, ptr %tag1, align 4
+  %payload3 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 1
+  switch i32 %tag2, label %match.default [
+    i32 1, label %arm
+    i32 0, label %arm4
+  ]
+
+arm:                                              ; preds = %else
+  %vf5 = getelementptr inbounds nuw { %io.IoError }, ptr %payload3, i32 0, i32 0
+  %e = load %io.IoError, ptr %vf5, align 8
+  %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
+  store i32 1, ptr %tag7, align 4
+  %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
+  %vf9 = getelementptr inbounds nuw { %io.IoError }, ptr %payload8, i32 0, i32 0
+  store %io.IoError %e, ptr %vf9, align 8
+  %sum10 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, align 8
+  ret %coil.core.Result__i64__io.IoError %sum10
+
+arm4:                                             ; preds = %else
+  %vf11 = getelementptr inbounds nuw { i64 }, ptr %payload3, i32 0, i32 0
+  %_ = load i64, ptr %vf11, align 8
+  %urem = urem i64 %n, 16
+  %cmp12 = icmp slt i64 %urem, 10
+  %ifc13 = icmp ne i1 %cmp12, false
+  br i1 %ifc13, label %then14, label %else15
+
+match.default:                                    ; preds = %else
+  unreachable
+
+then14:                                           ; preds = %arm4
+  %add = add i64 %urem, 48
+  br label %ifcont
+
+else15:                                           ; preds = %arm4
+  %add16 = add i64 %urem, 87
+  br label %ifcont
+
+ifcont:                                           ; preds = %else15, %then14
+  %ifval = phi i64 [ %add, %then14 ], [ %add16, %else15 ]
+  %trunc = trunc i64 %ifval to i8
+  %call17 = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 %trunc)
+  ret %coil.core.Result__i64__io.IoError %call17
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.fb-write(ptr %ctx, ptr %buf, i64 %len) {
+entry:
+  %sum.tmp15 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp10 = alloca %io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %field = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 1
+  %load = load i64, ptr %field, align 8
+  %field1 = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 2
+  %load2 = load i64, ptr %field1, align 8
+  %sub = sub i64 %load2, %load
+  %cmp = icmp slt i64 %len, %sub
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  br label %ifcont
+
+else:                                             ; preds = %entry
+  br label %ifcont
+
+ifcont:                                           ; preds = %else, %then
+  %ifval = phi i64 [ %len, %then ], [ %sub, %else ]
+  %field3 = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 0
+  %load4 = load ptr, ptr %field3, align 8
+  %idx = getelementptr i8, ptr %load4, i64 %load
+  %call = call ptr @memcpy(ptr %idx, ptr %buf, i64 %ifval)
+  %field5 = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 1
+  %add = add i64 %load, %ifval
+  store i64 %add, ptr %field5, align 8
+  %cmp6 = icmp slt i64 %ifval, %len
+  %ifc7 = icmp ne i1 %cmp6, false
+  br i1 %ifc7, label %then8, label %else9
+
+then8:                                            ; preds = %ifcont
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 1, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %tag11 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp10, i32 0, i32 0
+  store i32 1, ptr %tag11, align 4
+  %payload12 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp10, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload12, i32 0, i32 0
+  store i64 0, ptr %vf, align 8
+  %sum = load %io.IoError, ptr %sum.tmp10, align 8
+  %vf13 = getelementptr inbounds nuw { %io.IoError }, ptr %payload, i32 0, i32 0
+  store %io.IoError %sum, ptr %vf13, align 8
+  %sum14 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum14
+
+else9:                                            ; preds = %ifcont
+  %tag16 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp15, i32 0, i32 0
+  store i32 0, ptr %tag16, align 4
+  %payload17 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp15, i32 0, i32 1
+  %vf18 = getelementptr inbounds nuw { i64 }, ptr %payload17, i32 0, i32 0
+  store i64 %ifval, ptr %vf18, align 8
+  %sum19 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp15, align 8
+  ret %coil.core.Result__i64__io.IoError %sum19
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.fd-read(ptr %ctx, ptr %buf, i64 %len) {
+entry:
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp1 = alloca %io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %ptrtoint = ptrtoint ptr %ctx to i64
+  %call = call i64 @read(i64 %ptrtoint, ptr %buf, i64 %len)
+  %cmp = icmp slt i64 %call, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 1, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %tag2 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp1, i32 0, i32 0
+  store i32 1, ptr %tag2, align 4
+  %payload3 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp1, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload3, i32 0, i32 0
+  store i64 %call, ptr %vf, align 8
+  %sum = load %io.IoError, ptr %sum.tmp1, align 8
+  %vf4 = getelementptr inbounds nuw { %io.IoError }, ptr %payload, i32 0, i32 0
+  store %io.IoError %sum, ptr %vf4, align 8
+  %sum5 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum5
+
+else:                                             ; preds = %entry
+  %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
+  store i32 0, ptr %tag7, align 4
+  %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
+  %vf9 = getelementptr inbounds nuw { i64 }, ptr %payload8, i32 0, i32 0
+  store i64 %call, ptr %vf9, align 8
+  %sum10 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, align 8
+  ret %coil.core.Result__i64__io.IoError %sum10
+}
+
+define internal ptr @io.fd-reader(i64 %fd) {
+entry:
+  store ptr @io.fd-read, ptr @g.0, align 8
+  %inttoptr = inttoptr i64 %fd to ptr
+  store ptr %inttoptr, ptr getelementptr inbounds nuw (%io.Reader, ptr @g.0, i32 0, i32 1), align 8
+  ret ptr @g.0
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.fd-write(ptr %ctx, ptr %buf, i64 %len) {
+entry:
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp1 = alloca %io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %ptrtoint = ptrtoint ptr %ctx to i64
+  %call = call i64 @write(i64 %ptrtoint, ptr %buf, i64 %len)
+  %cmp = icmp slt i64 %call, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 1, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %tag2 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp1, i32 0, i32 0
+  store i32 1, ptr %tag2, align 4
+  %payload3 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp1, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload3, i32 0, i32 0
+  store i64 %call, ptr %vf, align 8
+  %sum = load %io.IoError, ptr %sum.tmp1, align 8
+  %vf4 = getelementptr inbounds nuw { %io.IoError }, ptr %payload, i32 0, i32 0
+  store %io.IoError %sum, ptr %vf4, align 8
+  %sum5 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum5
+
+else:                                             ; preds = %entry
+  %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
+  store i32 0, ptr %tag7, align 4
+  %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
+  %vf9 = getelementptr inbounds nuw { i64 }, ptr %payload8, i32 0, i32 0
+  store i64 %call, ptr %vf9, align 8
+  %sum10 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, align 8
+  ret %coil.core.Result__i64__io.IoError %sum10
+}
+
+define internal ptr @io.fd-writer(i64 %fd) {
+entry:
+  store ptr @io.fd-write, ptr @g.1, align 8
+  %inttoptr = inttoptr i64 %fd to ptr
+  store ptr %inttoptr, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.1, i32 0, i32 1), align 8
+  ret ptr @g.1
+}
+
+define internal ptr @io.fixed-buffer-writer(ptr %fb) {
+entry:
+  %field = getelementptr inbounds nuw %io.FixBuf, ptr %fb, i32 0, i32 1
+  store i64 0, ptr %field, align 8
+  store ptr @io.fb-write, ptr @g.2, align 8
+  store ptr %fb, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.2, i32 0, i32 1), align 8
+  ret ptr @g.2
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.null-write(ptr %ctx, ptr %buf, i64 %len) {
+entry:
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 0, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  store i64 %len, ptr %vf, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+}
+
+define internal ptr @io.null-writer() {
+entry:
+  store ptr @io.null-write, ptr @g.3, align 8
+  store ptr null, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.3, i32 0, i32 1), align 8
+  ret ptr @g.3
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.print-cstr(ptr %w, ptr %s) {
+entry:
+  %call = call i64 @strlen(ptr %s)
+  %call1 = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %w, ptr %s, i64 %call)
+  ret %coil.core.Result__i64__io.IoError %call1
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.print-int(ptr %w, i64 %n) {
+entry:
+  %cmp = icmp slt i64 %n, 10
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %add = add i64 %n, 48
+  %trunc = trunc i64 %add to i8
+  %call = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 %trunc)
+  ret %coil.core.Result__i64__io.IoError %call
+
+else:                                             ; preds = %entry
+  %div = sdiv i64 %n, 10
+  %call1 = call %coil.core.Result__i64__io.IoError @io.print-int(ptr %w, i64 %div)
+  %rem = srem i64 %n, 10
+  %add2 = add i64 %rem, 48
+  %trunc3 = trunc i64 %add2 to i8
+  %call4 = call %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 %trunc3)
+  ret %coil.core.Result__i64__io.IoError %call4
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.print-str(ptr %w, { ptr, i64 } %s) {
+entry:
+  %call = call ptr @slice.slice-data__u8({ ptr, i64 } %s)
+  %call1 = call i64 @slice.slice-len__u8({ ptr, i64 } %s)
+  %call2 = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %w, ptr %call, i64 %call1)
+  ret %coil.core.Result__i64__io.IoError %call2
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.read-some(ptr %r, ptr %buf, i64 %len) {
+entry:
+  %field = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 0
+  %load = load ptr, ptr %field, align 8
+  %field1 = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 1
+  %load2 = load ptr, ptr %field1, align 8
+  %callptr = call %coil.core.Result__i64__io.IoError %load(ptr %load2, ptr %buf, i64 %len)
+  ret %coil.core.Result__i64__io.IoError %callptr
+}
+
+define internal ptr @io.stderr() {
+entry:
+  %call = call ptr @io.fd-writer(i64 2)
+  ret ptr %call
+}
+
+define internal ptr @io.stdin() {
+entry:
+  %call = call ptr @io.fd-reader(i64 0)
+  ret ptr %call
+}
+
+define internal ptr @io.stdout() {
+entry:
+  %call = call ptr @io.fd-writer(i64 1)
+  ret ptr %call
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.write-all(ptr %w, ptr %buf, i64 %len) {
+entry:
+  %sum.tmp42 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp36 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp27 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp19 = alloca %io.IoError, align 8
+  %sum.tmp16 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %cmp = icmp sle i64 %len, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 0, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  store i64 0, ptr %vf, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+
+else:                                             ; preds = %entry
+  %call = call %coil.core.Result__i64__io.IoError @io.write-some(ptr %w, ptr %buf, i64 %len)
+  store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
+  %tag1 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
+  %tag2 = load i32, ptr %tag1, align 4
+  %payload3 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 1
+  switch i32 %tag2, label %match.default [
+    i32 1, label %arm
+    i32 0, label %arm4
+  ]
+
+arm:                                              ; preds = %else
+  %vf5 = getelementptr inbounds nuw { %io.IoError }, ptr %payload3, i32 0, i32 0
+  %e = load %io.IoError, ptr %vf5, align 8
+  %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
+  store i32 1, ptr %tag7, align 4
+  %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
+  %vf9 = getelementptr inbounds nuw { %io.IoError }, ptr %payload8, i32 0, i32 0
+  store %io.IoError %e, ptr %vf9, align 8
+  %sum10 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, align 8
+  ret %coil.core.Result__i64__io.IoError %sum10
+
+arm4:                                             ; preds = %else
+  %vf11 = getelementptr inbounds nuw { i64 }, ptr %payload3, i32 0, i32 0
+  %n = load i64, ptr %vf11, align 8
+  %cmp12 = icmp sle i64 %n, 0
+  %ifc13 = icmp ne i1 %cmp12, false
+  br i1 %ifc13, label %then14, label %else15
+
+match.default:                                    ; preds = %else
+  unreachable
+
+then14:                                           ; preds = %arm4
+  %tag17 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp16, i32 0, i32 0
+  store i32 1, ptr %tag17, align 4
+  %payload18 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp16, i32 0, i32 1
+  %tag20 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp19, i32 0, i32 0
+  store i32 1, ptr %tag20, align 4
+  %payload21 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp19, i32 0, i32 1
+  %vf22 = getelementptr inbounds nuw { i64 }, ptr %payload21, i32 0, i32 0
+  store i64 0, ptr %vf22, align 8
+  %sum23 = load %io.IoError, ptr %sum.tmp19, align 8
+  %vf24 = getelementptr inbounds nuw { %io.IoError }, ptr %payload18, i32 0, i32 0
+  store %io.IoError %sum23, ptr %vf24, align 8
+  %sum25 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp16, align 8
+  ret %coil.core.Result__i64__io.IoError %sum25
+
+else15:                                           ; preds = %arm4
+  %idx = getelementptr i8, ptr %buf, i64 %n
+  %sub = sub i64 %len, %n
+  %call26 = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %w, ptr %idx, i64 %sub)
+  store %coil.core.Result__i64__io.IoError %call26, ptr %match.tmp27, align 8
+  %tag28 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp27, i32 0, i32 0
+  %tag29 = load i32, ptr %tag28, align 4
+  %payload30 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp27, i32 0, i32 1
+  switch i32 %tag29, label %match.default33 [
+    i32 1, label %arm31
+    i32 0, label %arm32
+  ]
+
+arm31:                                            ; preds = %else15
+  %vf34 = getelementptr inbounds nuw { %io.IoError }, ptr %payload30, i32 0, i32 0
+  %e35 = load %io.IoError, ptr %vf34, align 8
+  %tag37 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp36, i32 0, i32 0
+  store i32 1, ptr %tag37, align 4
+  %payload38 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp36, i32 0, i32 1
+  %vf39 = getelementptr inbounds nuw { %io.IoError }, ptr %payload38, i32 0, i32 0
+  store %io.IoError %e35, ptr %vf39, align 8
+  %sum40 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp36, align 8
+  ret %coil.core.Result__i64__io.IoError %sum40
+
+arm32:                                            ; preds = %else15
+  %vf41 = getelementptr inbounds nuw { i64 }, ptr %payload30, i32 0, i32 0
+  %m = load i64, ptr %vf41, align 8
+  %tag43 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp42, i32 0, i32 0
+  store i32 0, ptr %tag43, align 4
+  %payload44 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp42, i32 0, i32 1
+  %add = add i64 %n, %m
+  %vf45 = getelementptr inbounds nuw { i64 }, ptr %payload44, i32 0, i32 0
+  store i64 %add, ptr %vf45, align 8
+  %sum46 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp42, align 8
+  ret %coil.core.Result__i64__io.IoError %sum46
+
+match.default33:                                  ; preds = %else15
+  unreachable
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.write-byte(ptr %w, i8 %b) {
+entry:
+  %stack.slot = alloca i8, align 1
+  store i8 %b, ptr %stack.slot, align 1
+  %call = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %w, ptr %stack.slot, i64 1)
+  ret %coil.core.Result__i64__io.IoError %call
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.write-some(ptr %w, ptr %buf, i64 %len) {
+entry:
+  %field = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 0
+  %load = load ptr, ptr %field, align 8
+  %field1 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 1
+  %load2 = load ptr, ptr %field1, align 8
+  %callptr = call %coil.core.Result__i64__io.IoError %load(ptr %load2, ptr %buf, i64 %len)
+  ret %coil.core.Result__i64__io.IoError %callptr
+}
+
+define i64 @main() {
+entry:
+  %call = call fastcc i64 @add(i64 20, i64 22)
+  ret i64 %call
+}
+
+define internal ptr @slice.slice-data__u8({ ptr, i64 } %s) {
+entry:
+  %llvmir = call ptr @__coil_llvm_ir_0({ ptr, i64 } %s)
+  ret ptr %llvmir
+}
+
+define internal i64 @slice.slice-len__u8({ ptr, i64 } %s) {
+entry:
+  %llvmir = call i64 @__coil_llvm_ir_1({ ptr, i64 } %s)
+  ret i64 %llvmir
+}
+
+; Function Attrs: alwaysinline
+
+; Function Attrs: alwaysinline
+
+attributes #0 = { alwaysinline }
+
