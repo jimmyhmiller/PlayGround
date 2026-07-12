@@ -344,9 +344,8 @@
     (if (icmp-eq nc 0) (None [Diag])
       (let [nf (al-len [TaggedForm] (load forms)) (mut items) (al-new [Sexp] a) (mut i) 0]
         (loop (if (icmp-ge (load i) nf) (break)
-          (do (let [ff (field (al-elem [TaggedForm] forms (load i)) form)]
-                ; scope checkers to the user's entry file (source 0), not bundled stdlib
-                (if (icmp-eq (sx-source (load ff)) 0) (al-push! (mut items) (load ff)) 0))
+          ; metaprograms are fed the WHOLE program, including all imported forms
+          (do (al-push! (mut items) (load (field (al-elem [TaggedForm] forms (load i)) form)))
               (store! i (iadd (load i) 1)))))
         (let [proglist (mk-sexp (KList (box-al [Sexp] a (load items))) -1 -1) (mut margs) (al-new [Sexp] a)]
           (al-push! (mut margs) proglist)
@@ -454,7 +453,10 @@
             (do (store! (field s out) (load tforms))
                 (match (run-checkers (mut checkers) checked tforms allfns gs gu impb expb a)
                   (Some [d] (Err [i64 Diag] d))
-                  (None [] (do (drain-warnings (mut s)) (Ok [i64 Diag] 0)))))))))))
+                  (None [] (do (drain-warnings (mut s))
+                               (if (icmp-gt (diag-errs) 0)
+                                   (Err [i64 Diag] (derr "compilation failed: checker reported error(s) above"))
+                                 (Ok [i64 Diag] 0))))))))))))
 (defn do-produced [(outf (ptr Sexp)) (module (Option (slice u8))) (result (ptr SBoxTF)) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum)) (allfns (ptr SBox)) (a (ptr Allocator)) (errf (mut (Option Diag)))] (-> i64)
   (let [(mut produced) (al-new [Sexp] a)]
     (if (and (icmp-eq (sx-tag (load outf)) 6)

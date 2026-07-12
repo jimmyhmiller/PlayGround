@@ -616,8 +616,10 @@
   (let [c (gensym-cell) v (load (field c n))]
     (store! (field c n) (iadd v 1))
     v))
-; ── non-fatal warning collector (for `(warn NODE MSG)` from a checker) ──
-(defstruct WarnBox [(init i64) (lst (ptr (ArrayList Diag)))])
+; ── compile-time diagnostic collector for `(warn …)`/`(report …)` from checkers.
+; Both COLLECT (non-aborting) so a checker surfaces EVERY warning and error in one
+; run; the build fails afterward iff any error-severity diagnostic was reported.
+(defstruct WarnBox [(init i64) (lst (ptr (ArrayList Diag))) (errs i64)])
 (defn warn-box [] (-> (ptr WarnBox)) (alloc-static WarnBox))
 (defn warn-list [] (-> (ptr (ArrayList Diag)))
   (let [b (warn-box)]
@@ -628,6 +630,8 @@
       0)
     (load (field b lst))))
 (defn warn-push [(d Diag)] (-> i64) (al-push! (warn-list) d) 0)
+(defn diag-errs [] (-> i64) (let [b (warn-box)] (if (icmp-eq (load (field b init)) 0) 0 (load (field b errs)))))
+(defn diag-err-bump [] (-> i64) (let [_ (warn-list) b (warn-box)] (store! (field b errs) (iadd (load (field b errs)) 1)) 0))
 (defn target-arch-str [] (-> (slice u8)) "aarch64")
 (defn ct-sum-find [(cx (ptr CtCtx)) (name (slice u8))] (-> (ptr SumDef))
   (let [lst (load (field cx sums)) n (al-len [SumDef] (load lst)) (mut i) 0 (mut r) (cast (ptr SumDef) 0)]
@@ -1009,8 +1013,9 @@
                 (Some [msgv] (if (is-cstr msgv)
                     (let [node (ccode-of nodev) d (alloc-stack Diag)]
                       (store! (field d lo) (sx-lo node)) (store! (field d hi) (sx-hi node))
-                      (store! (field d msg) (cstr-of msgv)) (store! (field d source) (sx-source node)) (store! (field d ctxt) 0)
-                      (Err [CtVal Diag] (load d)))
+                      (store! (field d msg) (sconcat a "error: " (cstr-of msgv))) (store! (field d source) (sx-source node)) (store! (field d ctxt) 0)
+                      (warn-push (load d)) (diag-err-bump)
+                      (Ok [CtVal Diag] (CInt 0)))
                   (Err [CtVal Diag] (derr "report: message must be a string"))))
                 (None [] (Err [CtVal Diag] (derr "report: expects (report NODE MSG)"))))
             (Err [CtVal Diag] (derr "report: first arg must be a Code node"))))

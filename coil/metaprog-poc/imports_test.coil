@@ -1,0 +1,5 @@
+(module app)
+(import "lint.coil" :use *)
+(import "mymath.coil" :use *)
+(checker lint-icmp)
+(defn main [] (-> :i64) (if (less 1 2) 42 0))
