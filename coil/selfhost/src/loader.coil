@@ -596,9 +596,9 @@
 
 (defn load-program [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8))] (-> i64)
   (let [a (load (field s a))
-        ; disk first (so dev edits to src/prelude.coil take effect), else embedded
-        ; copy (so the compiler runs outside the repo). read-file returns empty on miss.
-        prelude-text (let [d (read-file a (slice->cstr a "src/prelude.coil"))]
+        ; disk first (so dev edits to the prelude take effect), else embedded copy
+        ; (so the compiler runs outside the repo). read-file returns empty on miss.
+        prelude-text (let [d (read-file a (slice->cstr a "selfhost/src/prelude.coil"))]
                        (if (icmp-eq (slice-len d) 0) (embedded-prelude) d))
         prelude-id (load (field s srccount))
         _ignore (store! (field s srccount) (iadd prelude-id 1))

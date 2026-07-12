@@ -71,7 +71,7 @@ The same scoping is mirrored in three places, by design:
 
 ## coil.core (the prelude)
 
-`src/prelude.coil` is `(module coil.core)`, compiled into the compiler and
+`selfhost/src/prelude.coil` is `(module coil.core)`, compiled into the compiler and
 auto-loaded. It defines the operator traits (`Eq`/`Hash`/`Add`/`Sub`/`Mul`/`Div`/
 `Rem`/`Ord`) and their `i64`/`f64` impls, so `=`, `+`, `<`, `hash`, `case` work in
 any module with **no import** — exactly like `clojure.core`. The auto-refer is the

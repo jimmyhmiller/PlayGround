@@ -9,7 +9,7 @@ compilation: no coherence/orphan rules, no runtime dictionaries, no vtables
 
 ## Surface
 
-The `Eq`/`Hash` traits ship in the auto-loaded prelude (`src/prelude.coil`), so no
+The `Eq`/`Hash` traits ship in the auto-loaded prelude (`selfhost/src/prelude.coil`), so no
 import is needed. `Eq`'s method is `=`, so runtime equality is `(= a b)`.
 
 ```lisp
