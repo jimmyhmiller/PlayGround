@@ -1375,6 +1375,10 @@ pub const CORE: &str = r##"
   (cond (nil? (seq kvs)) nf (= (%first kvs) k) (%first (%rest kvs)) true (-sm-get (%rest (%rest kvs)) k nf)))
 (defn -sm-has? [kvs k]
   (cond (nil? (seq kvs)) false (= (%first kvs) k) true true (-sm-has? (%rest (%rest kvs)) k)))
+(defn -sm-dissoc [kvs k]
+  (cond (nil? (seq kvs)) nil
+        (= (%first kvs) k) (%rest (%rest kvs))
+        true (%cons (%first kvs) (%cons (%first (%rest kvs)) (-sm-dissoc (%rest (%rest kvs)) k)))))
 (defn sorted-map [& kvs]
   (record 'SortedMap (reduce (fn [acc p] (-sm-assoc acc (first p) (second p))) nil (-pairs kvs))))
 (extend-type SortedMap
@@ -1383,6 +1387,7 @@ pub const CORE: &str = r##"
   ILookup (-lookup [m k nf] (-sm-get (field m 0) k nf))
   IAssociative (-assoc [m k v] (record 'SortedMap (-sm-assoc (field m 0) k v)))
                (-contains-key? [m k] (-sm-has? (field m 0) k))
+  IMap (-dissoc [m k] (record 'SortedMap (-sm-dissoc (field m 0) k)))
   ICollection (-conj [m e] (record 'SortedMap (-sm-assoc (field m 0) (nth e 0) (nth e 1))))
   IEmptyableCollection (-empty [_] (record 'SortedMap nil)))
 (defn -ss-conj [es x]
