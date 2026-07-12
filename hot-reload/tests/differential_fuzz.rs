@@ -382,3 +382,54 @@ fn jit_matches_interpreter_on_random_programs() {
         run_seed(seed);
     }
 }
+
+/// Run the *base* program (no schema updates) to completion on the interpreter
+/// and on the `Shared` concurrent tier, and assert they agree. The Shared tier
+/// freezes the world and cannot take mid-run edits (that is what Phase 4 adds),
+/// so the three-way net compares the edit scenario on interp↔JIT and the
+/// steady-state run on interp↔Shared. Together they pin every executor's shared
+/// machinery (heap, migration, step semantics, soundness) during the
+/// unification refactor.
+fn run_seed_shared(seed: u64) {
+    let program = gen_program(seed);
+
+    let mut rt_i = install_program(&program);
+    let Ok(a_i) = rt_i.spawn(ENTRY, vec![]) else {
+        return; // a broken entry cannot spawn; nothing to compare
+    };
+    rt_i.run();
+    let interp_status = rt_i.actors[&a_i].status.clone();
+    let interp_out = rt_i.output.clone();
+    let interp_objs = rt_i.heap.len();
+
+    let rt_s = install_program(&program);
+    let shared = Shared::from_runtime(rt_s);
+    let outcomes = shared.run_threads(vec![(ENTRY, vec![])]);
+
+    match (&interp_status, &outcomes[0]) {
+        (ActorStatus::Complete(x), Outcome::Complete(y)) => {
+            assert_eq!(x, y, "seed {seed}: shared completion value diverged");
+        }
+        (ActorStatus::Paused(x), Outcome::Paused(y)) => {
+            assert_eq!(
+                std::mem::discriminant(x),
+                std::mem::discriminant(y),
+                "seed {seed}: shared pause condition diverged"
+            );
+        }
+        (i, s) => panic!("seed {seed}: shared outcome diverged\n  interp: {i:?}\n  shared: {s:?}"),
+    }
+    assert_eq!(interp_out, shared.output(), "seed {seed}: shared effects diverged");
+    assert_eq!(
+        interp_objs,
+        shared.object_count(),
+        "seed {seed}: shared object count diverged"
+    );
+}
+
+#[test]
+fn shared_matches_interpreter_on_random_programs() {
+    for seed in 1..=600u64 {
+        run_seed_shared(seed);
+    }
+}

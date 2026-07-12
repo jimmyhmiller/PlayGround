@@ -25,7 +25,7 @@ pub const CORE: &str = r##"
   (cond (nil? xs) true (nil? (%rest xs)) (%first xs)
         true (list 'if (%first xs) (%cons 'and (%rest xs)) false)))
 (defmacro or (& xs)
-  (cond (nil? xs) false (nil? (%rest xs)) (%first xs)
+  (cond (nil? xs) nil (nil? (%rest xs)) (%first xs)
         true (list 'if (%first xs) (%first xs) (%cons 'or (%rest xs)))))
 
 ;; ─────────────── constructors ───────────────
@@ -277,7 +277,12 @@ pub const CORE: &str = r##"
   ICollection (-conj [l o] (%cons o l))
   ICounted (-count [l] (count-seq l 0))
   IIndexed (-nth [l n] (nth-seq l n))
+  IStack (-peek [l] (%first l)) (-pop [l] (%rest l))
   IEmptyableCollection (-empty [_] nil))
+;; a String seqs as its character list (clojure treats strings as seqable).
+(extend-type String
+  ISeqable (-seq [s] (seq (%str->chars s)))
+  ICounted (-count [s] (%str-len s)))
 
 ;; reader/code vectors (list-backed 'Vector records) — macros build & manipulate
 ;; binding forms like `[a 5]`, and -realize's display vectors are this shape too.
@@ -337,7 +342,8 @@ pub const CORE: &str = r##"
   (let [cs (%str->chars s)
         e (if (nil? end) (%str-len s) (first end))]
     (apply str (take (- e start) (drop start cs)))))
-(defn nth [c i] (-nth c i))
+(defn nth [c i & d]
+  (if (and (seq d) (or (neg? i) (not (< i (count c))))) (first d) (-nth c i)))
 (defn conj [c x] (-conj c x))
 (defn assoc [m k v] (-assoc m k v))
 (defn contains? [c k] (-contains-key? c k))
@@ -350,7 +356,7 @@ pub const CORE: &str = r##"
 
 ;; tail-recursive list reverse + full realization (never grow the native stack).
 (defn -rev [s] (loop [s (seq s) acc nil] (if (nil? s) acc (recur (next s) (%cons (%first s) acc)))))
-(defn -to-list [s] (-rev (-rev s)))
+(defn -to-list [s] (-rev (-rev (seq s))))
 (defn doall [c] (do (-to-list c) c))
 (defn dorun [c] (do (-to-list c) nil))
 
@@ -382,7 +388,7 @@ pub const CORE: &str = r##"
 (defn reduce [f & args]
   (if (nil? (next args))
       (let [s (seq (first args))] (if (nil? s) (f) (reduce-seq f (%first s) (%rest s))))
-      (reduce-seq f (first args) (second args))))
+      (reduce-seq f (first args) (seq (second args)))))
 (defn into [to from] (reduce conj to from))
 
 ;; ─────────────── higher-order seq fns (lazy) ───────────────
@@ -478,7 +484,7 @@ pub const CORE: &str = r##"
       (assoc m (%first (seq ks)) v)
       (assoc m (%first (seq ks)) (assoc-in (get m (%first (seq ks))) (%rest (seq ks)) v))))
 (defn update [m k f] (assoc m k (f (get m k))))
-(defn some-seq [pred s] (let [s (seq s)] (if (nil? s) nil (if (pred (%first s)) (%first s) (some-seq pred (%rest s))))))
+(defn some-seq [pred s] (let [s (seq s)] (if (nil? s) nil (let [r (pred (%first s))] (if r r (some-seq pred (%rest s)))))))
 (defn some [pred c] (some-seq pred c))
 (defn every-seq [pred s] (let [s (seq s)] (if (nil? s) true (if (pred (%first s)) (every-seq pred (%rest s)) false))))
 (defn every? [pred c] (every-seq pred c))
@@ -762,7 +768,7 @@ pub const CORE: &str = r##"
     (if (nil? (next ks)) (assoc m k (f (get m k))) (assoc m k (update-in (get m k) (rest ks) f)))))
 
 ;; sorting (tortoise/hare split + merge; numeric default via %lt)
-(defn -default-less [a b] (%lt a b))
+(defn -default-less [a b] (%lt (compare a b) 0))
 (defn -merge-lists [less a b]
   (cond (nil? (seq a)) (seq b)
         (nil? (seq b)) (seq a)
@@ -961,6 +967,57 @@ pub const CORE: &str = r##"
 ;; `(defn- name params body…)` — a PRIVATE fn (cross-namespace access errors).
 (defmacro defn- (name params & body)
   (list 'def (list '-private-meta name) (%cons 'fn (%cons params body))))
+
+;; ─────────────── more clojure.core (library code) ───────────────
+(defn abs [n] (if (%lt n 0) (%sub 0 n) n))
+(defn boolean? [x] (or (true? x) (false? x)))
+(defn int? [x] (%num-eq (type-of x) 'Long))
+(defn integer? [x] (int? x))
+(defn double? [x] (%num-eq (type-of x) 'Double))
+(defn float? [x] (double? x))
+(defn pos-int? [x] (and (int? x) (%lt 0 x)))
+(defn neg-int? [x] (and (int? x) (%lt x 0)))
+(defn nat-int? [x] (and (int? x) (not (%lt x 0))))
+(defn coll? [x] (or (vector? x) (map? x) (set? x) (list? x) (seq? x)))
+(defn ifn? [x] (or (fn? x) (keyword? x) (map? x) (set? x) (vector? x) (symbol? x)))
+(defn distinct? [& xs] (%num-eq (count xs) (count (distinct xs))))
+;; comparison: numbers and strings (char-code lexicographic).
+(defn -str< [a b]
+  (let [as (%str->chars a) bs (%str->chars b)]
+    (loop [as as bs bs]
+      (cond (nil? (seq as)) (if (nil? (seq bs)) 0 -1)
+            (nil? (seq bs)) 1
+            (%lt (%char-code (first as)) (%char-code (first bs))) -1
+            (%lt (%char-code (first bs)) (%char-code (first as))) 1
+            true (recur (rest as) (rest bs))))))
+(defn compare [a b]
+  (cond (nil? a) (if (nil? b) 0 -1)
+        (nil? b) 1
+        (and (string? a) (string? b)) (-str< a b)
+        (and (keyword? a) (keyword? b)) (-str< (name a) (name b))
+        (and (symbol? a) (symbol? b)) (-str< (name a) (name b))
+        (%lt a b) -1 (%lt b a) 1 :else 0))
+;; replace preserves a vector input (returns a vector), else a seq.
+(defn replace [smap coll]
+  (let [f (fn [x] (if (contains? smap x) (get smap x) x))]
+    (if (vector? coll) (mapv f coll) (map f coll))))
+;; seq tail ops
+(defn take-last [n coll] (loop [s (seq coll) len (count coll)] (if (%lt n (+ len 1)) (if (%num-eq len n) s (recur (rest s) (- len 1))) s)))
+(defn drop-last [a & more]
+  (if (nil? more) (take (- (count a) 1) a) (take (- (count (first more)) a) (first more))))
+(defn split-at [n coll] [(take n coll) (drop n coll)])
+(defn split-with [pred coll] [(take-while pred coll) (drop-while pred coll)])
+(defn not-any? [pred coll] (not (some pred coll)))
+(defn not-every? [pred coll] (not (every? pred coll)))
+(defn nthnext [coll n] (loop [n n xs (seq coll)] (if (and (%lt 0 n) xs) (recur (- n 1) (next xs)) xs)))
+(defn nthrest [coll n] (loop [n n xs coll] (if (and (%lt 0 n) (seq xs)) (recur (- n 1) (rest xs)) xs)))
+(defn find [m k] (if (contains? m k) [k (get m k)] nil))
+(defn subvec [v start & e] (vec (let [end (if (nil? e) (count v) (first e))] (take (- end start) (drop start v)))))
+(defn keyword [& args]
+  (if (nil? (next args))
+    (let [x (first args)] (if (keyword? x) x (record 'Keyword (symbol (if (string? x) x (name x))))))
+    (record 'Keyword (symbol (first args) (second args)))))
+(defn fnil [f x] (fn [a & args] (apply f (if (nil? a) x a) args)))
 
 ;; ─────────────── namespace reflection ───────────────
 ;; Backed by the runtime var registry (populated at every def). Namespaces are

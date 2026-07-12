@@ -25,6 +25,7 @@ static GENSYM: AtomicU64 = AtomicU64::new(0);
 mod compile;
 mod cljs_types_src;
 mod clojure_data_json_src;
+mod clojure_set_src;
 mod clojure_string_src;
 mod core_src;
 mod reader;
@@ -71,6 +72,7 @@ pub fn run_with_paths<M: ValueModel>(
     run_src(rt, cs, &mut macros, &mut comp, clojure_string_src::CLOJURE_STRING);
     // `clojure.data.json` — a real library, also written entirely in the language
     // (loaded after clojure.string, which its writer uses for `join`).
+    run_src(rt, cs, &mut macros, &mut comp, clojure_set_src::CLOJURE_SET);
     run_src(rt, cs, &mut macros, &mut comp, clojure_data_json_src::CLOJURE_DATA_JSON);
     comp.set_ns("user");
     // These are provided in-process; `require` must never look for them on disk.
@@ -1866,6 +1868,15 @@ pub fn clj_str<M: ValueModel>(rt: &Runtime<M>, v: u64) -> String {
                 }
             }
             Obj::Cons { .. } => format!("({})", list_items(rt, v, " ")),
+            // A char prints readably as `\a` (like Clojure's pr), distinct from
+            // `(str \a)` -> "a".
+            Obj::Char(c) => match c {
+                ' ' => "\\space".to_string(),
+                '\n' => "\\newline".to_string(),
+                '\t' => "\\tab".to_string(),
+                '\r' => "\\return".to_string(),
+                _ => format!("\\{c}"),
+            },
             _ => rt.print(v),
         },
         _ => rt.print(v),
