@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use nebula_core::{algorithms, Graph, Pos};
-use nebula_layout::{CircleLayout, GridLayout, Layout, LayeredLayout, RandomLayout};
+use nebula_layout::{CircleLayout, GridLayout, Layout, LayeredLayout, RadialLayout, RandomLayout};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -66,6 +66,8 @@ enum Seed {
     Circle,
     /// Fixed hierarchical (layered DAG) layout; pauses the simulation.
     Hierarchical,
+    /// Fixed radial (concentric DAG) layout; pauses the simulation.
+    Radial,
 }
 
 /// Comparison used by the attribute filter.
@@ -186,6 +188,8 @@ pub struct RunOptions {
     pub filter: Option<(usize, FilterOp, String)>,
     /// Start in the hierarchical (layered DAG) layout instead of force-directed.
     pub start_hierarchical: bool,
+    /// Start in the radial (concentric DAG) layout instead of force-directed.
+    pub start_radial: bool,
 }
 
 impl Default for RunOptions {
@@ -206,6 +210,7 @@ impl Default for RunOptions {
             node_size: 3.0,
             filter: None,
             start_hierarchical: false,
+            start_radial: false,
         }
     }
 }
@@ -395,7 +400,9 @@ impl App {
         renderer.draw_nodes = self.opts.draw_nodes;
         self.live = Some(Live { window, gpu, graph_gpu, renderer, layout, overlay, density });
         self.apply_color_mode();
-        if self.opts.start_hierarchical {
+        if self.opts.start_radial {
+            self.apply_radial();
+        } else if self.opts.start_hierarchical {
             self.apply_hierarchical();
         }
         self.update_title();
@@ -640,13 +647,22 @@ impl App {
                 ui.separator();
 
                 ui.strong("Layout");
-                if ui
-                    .button("⬇ Hierarchical (DAG)")
-                    .on_hover_text("Layered top-down layout by dependency depth; pauses physics")
-                    .clicked()
-                {
-                    act_reseed = Some(Seed::Hierarchical);
-                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("⬇ Hierarchical")
+                        .on_hover_text("Layered top-down DAG layout by dependency depth; pauses physics")
+                        .clicked()
+                    {
+                        act_reseed = Some(Seed::Hierarchical);
+                    }
+                    if ui
+                        .button("◎ Radial")
+                        .on_hover_text("Concentric DAG layout: root at center, layers as rings; pauses physics")
+                        .clicked()
+                    {
+                        act_reseed = Some(Seed::Radial);
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label("Force reseed:");
                     if ui.button("Random").clicked() {
@@ -789,6 +805,7 @@ impl App {
                     self.reseed(&CircleLayout { radius: r });
                 }
                 Seed::Hierarchical => self.apply_hierarchical(),
+                Seed::Radial => self.apply_radial(),
             }
         }
     }
@@ -1035,7 +1052,7 @@ impl App {
                 "1 uniform  2 components  3 degree",
                 "4 pagerank  5 coloring  6 communities",
                 "space pause / E edges / N nodes",
-                "Y hierarchical / R G O re-seed",
+                "Y hierarchical / U radial / RGO seed",
                 "A aggregate (density) / L labels",
                 "+/- node size / [ ] edge brightness",
                 "P panel / H help / Tab hud / Esc quit",
@@ -1356,20 +1373,6 @@ impl App {
         let n = self.graph.num_nodes() as usize;
         let mut pos = vec![[0.0f32; 2]; n];
         layout.place(&self.graph, &mut pos, 0);
-        {
-            use std::collections::HashMap;
-            let mut per_layer: HashMap<i64, u32> = HashMap::new();
-            for p in &pos {
-                *per_layer.entry(p[1] as i64).or_insert(0) += 1;
-            }
-            let widest = per_layer.values().copied().max().unwrap_or(0);
-            log::info!(
-                "layout '{}': {} layers, widest {} nodes",
-                layout.name(),
-                per_layer.len(),
-                widest
-            );
-        }
         if let Some(live) = self.live.as_ref() {
             live.graph_gpu.set_positions(&live.gpu.queue, &pos);
         }
@@ -1387,6 +1390,15 @@ impl App {
         let layout = LayeredLayout {
             target_height: self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt(),
             aspect: 1.8,
+            sweeps: 4,
+        };
+        self.apply_fixed_layout(&layout);
+    }
+
+    /// Radial (concentric) DAG layout, scaled to the graph's edge length `k`.
+    fn apply_radial(&mut self) {
+        let layout = RadialLayout {
+            radius: self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt() * 0.6,
             sweeps: 4,
         };
         self.apply_fixed_layout(&layout);
@@ -1523,6 +1535,7 @@ impl App {
                 self.reseed(&CircleLayout { radius: r });
             }
             KeyCode::KeyY => self.apply_hierarchical(),
+            KeyCode::KeyU => self.apply_radial(),
             KeyCode::KeyA => {
                 self.show_density = !self.show_density;
                 log::info!("aggregation (density heatmap) {}", if self.show_density { "on" } else { "off" });

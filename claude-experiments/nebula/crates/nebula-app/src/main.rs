@@ -62,6 +62,8 @@ struct Args {
     filter: Option<String>,
     /// Start in the hierarchical (layered DAG) layout.
     hierarchical: bool,
+    /// Start in the radial (concentric DAG) layout.
+    radial: bool,
     paused: bool,
     no_edges: bool,
     no_nodes: bool,
@@ -214,6 +216,7 @@ fn main() -> anyhow::Result<()> {
         node_size: args.node_size,
         filter,
         start_hierarchical: args.hierarchical,
+        start_radial: args.radial,
     };
 
     let app = App::with_labels(graph, positions, opts, node_labels, node_attrs);
@@ -233,6 +236,7 @@ fn parse_args() -> Result<Args, String> {
     let mut color_attr: Option<String> = None;
     let mut filter: Option<String> = None;
     let mut hierarchical = false;
+    let mut radial = false;
     let mut paused = false;
     let mut no_edges = false;
     let mut no_nodes = false;
@@ -318,8 +322,18 @@ fn parse_args() -> Result<Args, String> {
             "--layout" => {
                 let name = it.next().ok_or("--layout needs a name")?;
                 match name.as_str() {
-                    "hierarchical" | "layered" | "dag" => hierarchical = true,
-                    "force" | "force-directed" => hierarchical = false,
+                    "hierarchical" | "layered" | "dag" => {
+                        hierarchical = true;
+                        radial = false;
+                    }
+                    "radial" | "concentric" => {
+                        radial = true;
+                        hierarchical = false;
+                    }
+                    "force" | "force-directed" => {
+                        hierarchical = false;
+                        radial = false;
+                    }
                     other => return Err(format!("unknown layout: {other}")),
                 }
             }
@@ -339,6 +353,7 @@ fn parse_args() -> Result<Args, String> {
         color_attr,
         filter,
         hierarchical,
+        radial,
         paused,
         no_edges,
         no_nodes,
