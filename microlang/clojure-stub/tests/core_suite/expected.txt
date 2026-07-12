@@ -553,3 +553,13 @@
 (do (defmulti shape :kind) (defmethod shape :circle [x] :round) (defmethod shape :square [x] :boxy) [(shape {:kind :circle}) (shape {:kind :square})])	[:round :boxy]
 (do (defmulti f identity) (defmethod f :default [x] :fallback) (f 99))	:fallback
 (do (derive ::child ::parent) (defmulti g identity) (defmethod g ::parent [x] :p) (g ::child))	:p
+(let [a (atom 1)] (swap-vals! a inc))	[1 2]
+(let [a (atom 5)] (reset-vals! a 9))	[5 9]
+(let [a (atom 1)] (compare-and-set! a 1 2) (deref a))	2
+(let [a (atom 1)] (compare-and-set! a 99 2))	false
+(do (keyword "foo") (find-keyword "foo"))	:foo
+(vector-of :int 1 2 3)	[1 2 3]
+(tagged-literal? (tagged-literal (quote inst) "2020"))	true
+(tagged-literal? 5)	false
+(reader-conditional? (reader-conditional (list :clj 1) false))	true
+(reader-conditional? :nope)	false

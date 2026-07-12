@@ -689,6 +689,31 @@ pub const CORE: &str = r##"
       (let [old (%atom-get a)
             new (-swap-apply f old s)]
         (if (%atom-cas a old new) new (recur))))))
+(defn compare-and-set! [a old new] (%atom-cas a old new))
+;; swap-vals!/reset-vals! return the [old new] pair.
+(defn swap-vals! [a f & args]
+  (let [s (seq args)]
+    (loop []
+      (let [old (%atom-get a) new (-swap-apply f old s)]
+        (if (%atom-cas a old new) [old new] (recur))))))
+(defn reset-vals! [a v]
+  (loop []
+    (let [old (%atom-get a)]
+      (if (%atom-cas a old v) [old v] (recur)))))
+
+;; ─────────────── misc small library fns ───────────────
+(defn find-keyword
+  ([nm] (keyword nm))
+  ([ns nm] (keyword ns nm)))
+(defn vector-of [t & elems] (vec elems))
+(defn tagged-literal [tag form] (record 'TaggedLiteral tag form))
+(defn tagged-literal? [x] (= (type-of x) 'TaggedLiteral))
+(defn reader-conditional [form splicing?] (record 'ReaderConditional form splicing?))
+(defn reader-conditional? [x] (= (type-of x) 'ReaderConditional))
+;; hash mixing (matches clojure.core's small-int mixing shape closely enough for
+;; use as a value-combining helper; not bit-for-bit the JVM's Murmur3).
+(defn hash-combine [seed h] (%bit-xor seed (+ h 2654435769 (%bit-shl seed 6) (%bit-shr seed 2))))
+(defn mix-collection-hash [hash-basis cnt] (%bit-xor hash-basis cnt))
 
 ;; ─────────────── seq/collection breadth (clojure.core) ───────────────
 (defn some? [x] (not (nil? x)))
