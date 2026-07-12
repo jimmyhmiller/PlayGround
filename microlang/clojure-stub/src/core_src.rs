@@ -1308,7 +1308,7 @@ pub const CORE: &str = r##"
         assoc-branches (apply concat (map (fn [f]
           (list (list '= 'k (keyword f))
                 (%cons ctor (map (fn [g] (if (= g f) 'v (acc g 'r))) fields)))) fields))
-        seq-entries (map (fn [f] (vector (keyword f) (acc f 'r))) fields)
+        seq-entries (map (fn [f] (list 'vector (keyword f) (acc f 'r))) fields)
         has-key (map (fn [f] (list '= 'k (keyword f))) fields)]
     (list 'do
       (%cons 'deftype (%cons name (%cons fields specs)))

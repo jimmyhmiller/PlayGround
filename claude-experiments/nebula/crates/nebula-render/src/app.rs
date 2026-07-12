@@ -60,6 +60,8 @@ pub struct RunOptions {
     pub select: Option<u32>,
     /// Start with the help overlay visible.
     pub show_help: bool,
+    /// Start with node labels visible.
+    pub show_labels: bool,
 }
 
 impl Default for RunOptions {
@@ -75,6 +77,7 @@ impl Default for RunOptions {
             draw_nodes: true,
             select: None,
             show_help: false,
+            show_labels: false,
         }
     }
 }
@@ -111,6 +114,8 @@ pub struct App {
     value_name: &'static str,
     show_help: bool,
     show_hud: bool,
+    show_labels: bool,
+    cached_positions: Option<Vec<Pos>>,
 
     // Input state.
     cursor: glam::Vec2,
@@ -147,6 +152,7 @@ impl App {
         let color_mode = opts.color_mode;
         let selected = opts.select;
         let show_help = opts.show_help;
+        let show_labels = opts.show_labels;
         App {
             graph,
             seed_positions,
@@ -164,6 +170,8 @@ impl App {
             value_name: "",
             show_help,
             show_hud: true,
+            show_labels,
+            cached_positions: None,
             cursor: glam::Vec2::ZERO,
             dragging: false,
             press_pos: glam::Vec2::ZERO,
@@ -298,6 +306,18 @@ impl App {
         // info panel, and connection lines track the live simulation.
         if let Some(sel) = self.selected {
             self.refresh_selection(sel);
+        }
+        // For label rendering on modest graphs, keep a CPU copy of positions.
+        if self.show_labels && self.graph.num_nodes() <= 50_000 {
+            let pos = self
+                .live
+                .as_ref()
+                .and_then(|live| crate::readback::read_positions(&live.gpu, &live.graph_gpu));
+            if pos.is_some() {
+                self.cached_positions = pos;
+            }
+        } else {
+            self.cached_positions = None;
         }
         // Build overlay commands before borrowing live mutably.
         let overlay_cmds = self.build_overlay();
@@ -489,6 +509,34 @@ impl App {
             c.texts.push((10.0, vp.y - line - 6.0, scale, dim, "H  help".to_string()));
         }
 
+        // --- Node labels (only when few are on screen, to avoid clutter) ---
+        if self.show_labels {
+            if let Some(pos) = self.cached_positions.as_ref() {
+                let lscale = scale * 0.75;
+                let mut visible: Vec<(glam::Vec2, u32)> = Vec::new();
+                for (i, p) in pos.iter().enumerate() {
+                    let sp = self.camera.world_to_screen(glam::vec2(p[0], p[1]));
+                    if sp.x >= 0.0 && sp.x <= vp.x && sp.y >= 0.0 && sp.y <= vp.y {
+                        visible.push((sp, i as u32));
+                        if visible.len() > 400 {
+                            break; // too many on screen -> skip labels this frame
+                        }
+                    }
+                }
+                if visible.len() <= 400 {
+                    for (sp, i) in visible {
+                        let label = self
+                            .labels
+                            .as_ref()
+                            .and_then(|l| l.get(i as usize))
+                            .cloned()
+                            .unwrap_or_else(|| i.to_string());
+                        c.texts.push((sp.x + 6.0, sp.y - 4.0, lscale, white, label));
+                    }
+                }
+            }
+        }
+
         // --- Selected node info panel + marker ---
         if let (Some(id), Some(wp)) = (self.selected, self.selected_pos) {
             let mut lines: Vec<(u32, String)> = Vec::new();
@@ -614,13 +662,15 @@ impl App {
     }
 
     fn capture_if_requested(&mut self) {
-        if self.opts.screenshot.is_none() {
-            return;
+        if let Some(path) = self.opts.screenshot.clone() {
+            self.save_frame(&path);
         }
-        // Render the real scene (graph + overlay) to an offscreen texture matching
-        // the swapchain format, then save it — so the capture includes the HUD.
+    }
+
+    /// Render the real scene (graph + overlay) to an offscreen texture matching
+    /// the swapchain format and save it as a PNG — so the capture includes the HUD.
+    fn save_frame(&mut self, path: &str) {
         let overlay_cmds = self.build_overlay();
-        let path = self.opts.screenshot.clone().unwrap();
         let Some(live) = self.live.as_mut() else { return };
         let (w, h) = (live.gpu.size.width, live.gpu.size.height);
         let format = live.gpu.config.format;
@@ -826,6 +876,16 @@ impl App {
                 self.reseed(&CircleLayout { radius: r });
             }
             KeyCode::KeyH => self.show_help = !self.show_help,
+            KeyCode::KeyL => {
+                self.show_labels = !self.show_labels;
+                if self.show_labels && self.graph.num_nodes() > 50_000 {
+                    log::info!("labels only render for graphs up to 50k nodes");
+                }
+            }
+            KeyCode::KeyS => {
+                let path = format!("nebula-{}.png", self.total_steps);
+                self.save_frame(&path);
+            }
             KeyCode::Tab => self.show_hud = !self.show_hud,
             KeyCode::KeyC => {
                 self.selected = None;

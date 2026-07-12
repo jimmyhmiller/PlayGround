@@ -104,11 +104,23 @@ struct EdgeVsOut {
 
 @vertex
 fn vs_edge(@builtin(vertex_index) vi: u32) -> EdgeVsOut {
+    let edge = vi / 2u;
     let node = edges[vi];
     let world = positions[node];
     let ndc = (world - cam.center) * cam.scale;
 
+    // Edge frustum cull: if both endpoints are off the same side of NDC the whole
+    // segment is offscreen. Big win for large unsettled graphs where most edges
+    // are long and off-view.
+    let other = edges[edge * 2u + (1u - (vi & 1u))];
+    let ondc = (positions[other] - cam.center) * cam.scale;
     var out: EdgeVsOut;
+    if ((ndc.x < -1.0 && ondc.x < -1.0) || (ndc.x > 1.0 && ondc.x > 1.0) ||
+        (ndc.y < -1.0 && ondc.y < -1.0) || (ndc.y > 1.0 && ondc.y > 1.0)) {
+        out.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        out.color = vec4<f32>(0.0);
+        return out;
+    }
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     var col = unpack_color(colors[node]);
     out.color = vec4<f32>(col.rgb, params.edge_alpha);

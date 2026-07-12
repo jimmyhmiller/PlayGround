@@ -21,22 +21,30 @@ GENERATORS (pick one; default: --ba 50000 3):
     --ba <N> <M>              Barabasi-Albert scale-free: N nodes, m=M attachments
     --blocks <N> <K> <M>      Stochastic block model: N nodes, K communities, M edges
     --geo <N> <R>             Random geometric: N nodes, connect within radius R (0..1)
-    --file <PATH>             Load an edge-list file (\"u v\" per line)
+    --file <PATH>             Load a graph file (edge-list/CSV/mtx/DIMACS/GML/DOT/JSON/adjacency)
 
 OPTIONS:
+    --color <MODE>            uniform|components|degree|pagerank|coloring|communities
     --k <FLOAT>               Optimal edge length (default 30)
     --seed <INT>              RNG seed (default 42)
     --dt <FLOAT>              Simulation timestep
     --substeps <INT>          Sim substeps per frame (default 1)
+    --paused                  Start with the simulation paused
+    --labels                  Show node labels (graphs up to 50k nodes)
+    --select <INDEX>          Preselect a node
+    --no-edges / --no-nodes   Hide edges / nodes
+    --frames <N>              Exit after N frames (headless)
+    --screenshot <PATH>       Save a PNG of the final frame (headless)
+    --help-overlay            Start with the controls overlay visible
     -h, --help                Show this help
 
 CONTROLS (in the window):
-    drag           pan            scroll        zoom
-    space          pause/resume   F             fit view
-    1..6           color by: uniform / components / degree / pagerank / coloring / communities
-    E / N          toggle edges / nodes
-    + / -          node size      [ / ]         edge brightness
-    Esc            quit
+    drag pan / scroll zoom / F fit / click a node to inspect / double-click to focus
+    1..6           color: uniform / components / degree / pagerank / coloring / communities
+    R / G / O      re-seed random / grid / circle
+    E / N          toggle edges / nodes      L   labels      S   save screenshot
+    + / -          node size                 [ / ]  edge brightness
+    space pause / H help / Tab hud / C clear selection / Esc quit
 ";
 
 struct Args {
@@ -53,6 +61,7 @@ struct Args {
     no_nodes: bool,
     select: Option<u32>,
     help_overlay: bool,
+    labels: bool,
 }
 
 enum Gen {
@@ -151,6 +160,7 @@ fn main() -> anyhow::Result<()> {
         draw_nodes: !args.no_nodes,
         select: args.select,
         show_help: args.help_overlay,
+        show_labels: args.labels,
     };
 
     let app = App::with_labels(graph, positions, opts, node_labels);
@@ -172,6 +182,7 @@ fn parse_args() -> Result<Args, String> {
     let mut no_nodes = false;
     let mut select = None;
     let mut help_overlay = false;
+    let mut labels = false;
 
     fn next_u64(it: &mut impl Iterator<Item = String>, name: &str) -> Result<u64, String> {
         it.next()
@@ -223,6 +234,7 @@ fn parse_args() -> Result<Args, String> {
             "--no-nodes" => no_nodes = true,
             "--select" => select = Some(next_u32(&mut it, "--select")?),
             "--help-overlay" => help_overlay = true,
+            "--labels" => labels = true,
             "--frames" => frames = Some(next_u64(&mut it, "--frames")?),
             "--screenshot" => screenshot = Some(it.next().ok_or("--screenshot needs a path")?),
             "--color" => {
@@ -255,5 +267,6 @@ fn parse_args() -> Result<Args, String> {
         no_nodes,
         select,
         help_overlay,
+        labels,
     })
 }
