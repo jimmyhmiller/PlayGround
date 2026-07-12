@@ -32,16 +32,14 @@ SEEDS=(
   examples/vector.coil examples/widths.coil
   examples/calc.coil examples/json.coil examples/hashmap.coil
   apps/chip8/objc.coil
-  lib/alloc.coil lib/arraylist.coil lib/atomic.coil lib/closure.coil
-  lib/control.coil lib/derive.coil lib/dyn.coil lib/fmt.coil lib/hashmap.coil
-  lib/match.coil lib/mem.coil lib/mmio.coil lib/print.coil lib/result.coil
-  lib/slice.coil lib/thread.coil lib/try.coil
+  # every lib/*.coil is added by the glob below (the directory IS the manifest) —
+  # no hand-maintained list to drift from what the compiler actually bundles.
   selfhost/src/main.coil
   selfhost/src/main_a64.coil                  # LLVM-free top file (shares driver.coil); guards drift vs main.coil
   # --- feature corpora: each exercises a stubbed self-host feature so it becomes
   # part of the contract (currently failing on the self-host, green on Rust). ---
   examples/dyn_write.coil                     # trait objects / dyn dispatch (lib/dyn.coil)
-  examples/simd.coil lib/simd.coil            # SIMD / vector types (lib/simd.coil)
+  examples/simd.coil                          # SIMD / vector types (lib/simd.coil via glob)
   selfhost/oracle/features/meta_stage3.coil   # (meta …) Stage-3 staged macros
   selfhost/oracle/features/export_c.coil      # (export-c …) C ABI export thunks
   selfhost/oracle/features/x86_sysv_abi.coil  # struct-by-value (host lowering; x86 gate below)
@@ -70,6 +68,7 @@ snap() {
 
 n=0
 for f in selfhost/oracle/ir/fixtures/*.coil; do [ -e "$f" ] || continue; snap "$f"; n=$((n+1)); done
+for f in lib/*.coil;                        do [ -e "$f" ] || continue; snap "$f"; n=$((n+1)); done
 for f in "${SEEDS[@]}"; do snap "$f"; n=$((n+1)); done
 
 sort -o "$LIST" "$LIST"

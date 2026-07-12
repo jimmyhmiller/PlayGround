@@ -571,18 +571,14 @@
 ; Each file's forms are walked as it is loaded (EVERY file, always — no dependence
 ; on the macro-expansion pass), and each `(include-str "rel")` is replaced by a
 ; string literal of the file's bytes. `rel` resolves relative to the INCLUDING
-; file's own directory (Rust's `include_str!` semantics). A cwd-relative fallback is
-; kept for the migration so pre-move paths still resolve; it is dropped once every
-; embed uses source-relative paths. A missing file or non-literal path is a hard
-; load error — never a silent empty embed.
+; file's own directory (Rust's `include_str!` semantics). A missing file or a
+; non-literal path is a hard load error — never a silent empty embed.
 (defn incl-is-include-str [(items (ptr (ArrayList Sexp)))] (-> bool)
   (and (icmp-ge (sx-len items) 1)
        (and (icmp-eq (sx-tag (sx-at items 0)) 2)
             (str-eq (sx-sval (sx-at items 0)) "include-str"))))
 (defn incl-read [(a (ptr Allocator)) (dir (slice u8)) (rel (slice u8))] (-> (Option (slice u8)))
-  (match (read-file-opt a (slice->cstr a (path-join a dir rel)))
-    (Some [t] (Some t))
-    (None []  (read-file-opt a (slice->cstr a rel)))))   ; cwd-relative fallback (migration)
+  (read-file-opt a (slice->cstr a (path-join a dir rel))))
 (defn do-include-str [(s (mut LS)) (f (ptr Sexp)) (dir (slice u8))] (-> Sexp)
   (let [a (load (field s a)) items (sx-items (load f))]
     (if (icmp-ne (sx-len items) 2)
