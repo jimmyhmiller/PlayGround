@@ -1755,7 +1755,24 @@ impl Tiered {
             registers,
             return_to: None,
         }));
+        self.drive_loop()
+    }
 
+    /// Resume a paused actor after a repair (a migration installed, a broken
+    /// function redefined). The frame stack is intact from the pause; the top
+    /// frame's pc still points at the trapping instruction, so re-driving
+    /// re-checks it — now that the world is repaired, it proceeds. Works with a
+    /// mixed interp/JIT stack: a paused *JIT* frame re-runs its compiled `step`
+    /// from the same pc. This is hot-reload's repair half, holding through the
+    /// JIT exactly as through the interpreter.
+    pub fn resume(&mut self) -> Outcome {
+        if self.stack.is_empty() {
+            return Outcome::Complete(Value::Unit);
+        }
+        self.drive_loop()
+    }
+
+    fn drive_loop(&mut self) -> Outcome {
         loop {
             if let Some(v) = self.result.take() {
                 return Outcome::Complete(v);
@@ -1769,6 +1786,20 @@ impl Tiered {
                 None => return Outcome::Complete(Value::Unit),
             }
         }
+    }
+
+    /// Hot-reload a function into the tiered runtime's world (the same install
+    /// path the interpreter uses). A running frame keeps its pinned version; the
+    /// next call re-resolves the current one; a version that gets hot recompiles
+    /// on demand. Callers hold the symbol table (a `Session`) to build the edit.
+    pub fn install_function(&mut self, function: Function) -> Result<(), InstallError> {
+        self.rt.install_function(function)
+    }
+    pub fn install_schema(&mut self, schema: Schema) -> Result<(), InstallError> {
+        self.rt.install_schema(schema)
+    }
+    pub fn install_migration(&mut self, migration: Migration) -> Result<(), InstallError> {
+        self.rt.install_migration(migration)
     }
 
     /// Push a callee frame, promoting to JIT if it is (now) hot. `registers` is
