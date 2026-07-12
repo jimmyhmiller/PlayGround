@@ -544,6 +544,31 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
                         binds.push(ge);
                     }
                 }
+            } else if is_keyword(rt, key, "strs") {
+                // {:strs [a b]} -> a (get t "a"), b (get t "b")  (string keys)
+                if let Some(vl) = binding_items(rt, val) {
+                    for s in vl {
+                        let name = match rt.decode(s) {
+                            Val::Sym(sy) => rt.sym_name(sy).to_string(),
+                            _ => continue,
+                        };
+                        let id = rt.alloc(Obj::Str(name));
+                        let strv = <M::R as microlang::Repr>::enc_ref(id);
+                        let ge = get_with_default(rt, s, strv);
+                        binds.push(s);
+                        binds.push(ge);
+                    }
+                }
+            } else if is_keyword(rt, key, "syms") {
+                // {:syms [a b]} -> a (get t 'a), b (get t 'b)  (symbol keys)
+                if let Some(vl) = binding_items(rt, val) {
+                    for s in vl {
+                        let q = quote_form(rt, s);
+                        let ge = get_with_default(rt, s, q);
+                        binds.push(s);
+                        binds.push(ge);
+                    }
+                }
             } else if is_keyword(rt, key, "as") {
                 // {:as whole} -> whole bound to the entire map.
                 binds.push(val);
