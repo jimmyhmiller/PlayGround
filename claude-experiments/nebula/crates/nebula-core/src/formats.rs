@@ -21,6 +21,9 @@ use std::path::Path;
 pub struct Loaded {
     pub graph: Graph,
     pub labels: Vec<String>,
+    /// Optional per-node attributes (key/value), indexed by compact id. Populated
+    /// by formats that carry node metadata (currently JSON); empty otherwise.
+    pub attrs: Vec<Vec<(String, String)>>,
     pub format: &'static str,
     /// True if the source declared itself directed (informational only; we store
     /// an undirected edge list regardless).
@@ -125,6 +128,7 @@ fn finish(mut interner: Interner, edges: Vec<[NodeId; 2]>, declared_nodes: Optio
     Loaded {
         graph: Graph::new(n, edges),
         labels: interner.labels,
+        attrs: Vec::new(),
         format,
         directed,
     }
@@ -335,7 +339,20 @@ fn parse_json(text: &str) -> Result<Loaded> {
         }
     };
 
-    // Register explicit nodes first (preserves isolated nodes + ordering).
+    // Format a scalar JSON value for display as an attribute; skip containers.
+    let scalar = |val: &serde_json::Value| -> Option<String> {
+        match val {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            serde_json::Value::Null => Some("null".to_string()),
+            _ => None,
+        }
+    };
+
+    // Register explicit nodes first (preserves isolated nodes + ordering), and
+    // capture their scalar fields as per-node attributes (keyed by compact id).
+    let mut raw_attrs: Vec<(NodeId, Vec<(String, String)>)> = Vec::new();
     if let Some(nodes) = v.get("nodes").and_then(|n| n.as_array()) {
         for node in nodes {
             let key = node
@@ -343,7 +360,17 @@ fn parse_json(text: &str) -> Result<Loaded> {
                 .and_then(&id_of)
                 .or_else(|| id_of(node));
             if let Some(k) = key {
-                it.intern(&k);
+                let cid = it.intern(&k);
+                if let Some(obj) = node.as_object() {
+                    let a: Vec<(String, String)> = obj
+                        .iter()
+                        .filter(|(k, _)| k.as_str() != "id" && k.as_str() != "children")
+                        .filter_map(|(k, v)| scalar(v).map(|s| (k.clone(), s)))
+                        .collect();
+                    if !a.is_empty() {
+                        raw_attrs.push((cid, a));
+                    }
+                }
             }
         }
     }
@@ -373,7 +400,17 @@ fn parse_json(text: &str) -> Result<Loaded> {
             }
         }
     }
-    Ok(finish(it, edges, None, "json", false))
+    let mut loaded = finish(it, edges, None, "json", false);
+    if !raw_attrs.is_empty() {
+        let mut attrs = vec![Vec::new(); loaded.labels.len()];
+        for (cid, a) in raw_attrs {
+            if let Some(slot) = attrs.get_mut(cid as usize) {
+                *slot = a;
+            }
+        }
+        loaded.attrs = attrs;
+    }
+    Ok(loaded)
 }
 
 fn parse_adjacency(text: &str) -> Result<Loaded> {

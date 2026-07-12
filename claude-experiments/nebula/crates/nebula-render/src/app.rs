@@ -20,6 +20,7 @@ use crate::layout_gpu::{LayoutGpu, LayoutSettings};
 use crate::overlay::Overlay;
 use crate::render::{RenderParams, Renderer};
 use crate::scene::{pack_rgba, GpuGraph};
+use crate::ui::{Ui, UiFrame};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ColorMode {
@@ -42,6 +43,24 @@ impl ColorMode {
             ColorMode::Communities => "communities",
         }
     }
+}
+
+/// Color modes shown in the UI panel, paired with human labels.
+const COLOR_MODES: [(ColorMode, &str); 6] = [
+    (ColorMode::Uniform, "Uniform"),
+    (ColorMode::Components, "Connected components"),
+    (ColorMode::Degree, "Degree"),
+    (ColorMode::PageRank, "PageRank"),
+    (ColorMode::Coloring, "Greedy coloring"),
+    (ColorMode::Communities, "Communities"),
+];
+
+/// Which seed layout to re-apply when the user clicks a reseed button.
+#[derive(Clone, Copy)]
+enum Seed {
+    Random,
+    Grid,
+    Circle,
 }
 
 /// Options passed in from the CLI.
@@ -106,9 +125,18 @@ pub struct App {
     seed_positions: Vec<Pos>,
     opts: RunOptions,
     labels: Option<Vec<String>>,
+    /// Optional per-node attributes (key/value), indexed by node id. Shown in
+    /// the inspection panel when a node is selected.
+    node_attrs: Option<Vec<Vec<(String, String)>>>,
 
     // Runtime.
     live: Option<Live>,
+    /// egui control panel plumbing (created with the window).
+    ui: Option<Ui>,
+    /// Tessellated egui output for the current frame, drawn during `render`.
+    ui_frame: Option<UiFrame>,
+    /// Whether the control panel is shown.
+    show_panel: bool,
     camera: Camera2D,
     settings: LayoutSettings,
     render_params: RenderParams,
@@ -147,7 +175,7 @@ pub struct App {
 
 impl App {
     pub fn new(graph: Graph, seed_positions: Vec<Pos>, opts: RunOptions) -> Self {
-        Self::with_labels(graph, seed_positions, opts, None)
+        Self::with_labels(graph, seed_positions, opts, None, None)
     }
 
     pub fn with_labels(
@@ -155,6 +183,7 @@ impl App {
         seed_positions: Vec<Pos>,
         opts: RunOptions,
         labels: Option<Vec<String>>,
+        node_attrs: Option<Vec<Vec<(String, String)>>>,
     ) -> Self {
         graph.ensure_csr();
         let settings = opts.settings;
@@ -173,7 +202,11 @@ impl App {
             seed_positions,
             opts,
             labels,
+            node_attrs,
             live: None,
+            ui: None,
+            ui_frame: None,
+            show_panel: true,
             camera: Camera2D::new(glam::vec2(1280.0, 800.0)),
             settings,
             render_params,
@@ -227,6 +260,7 @@ impl App {
         let layout = LayoutGpu::new(&gpu.device, &graph_gpu, &self.settings);
         let overlay = Overlay::new(&gpu.device, gpu.config.format);
         let density = Density::new(&gpu.device, gpu.config.format, &graph_gpu);
+        self.ui = Some(Ui::new(&gpu.device, gpu.config.format, &window));
 
         // Fit camera to the seeded layout.
         self.camera.viewport = glam::vec2(gpu.size.width as f32, gpu.size.height as f32);
@@ -315,10 +349,162 @@ impl App {
         live.window.set_title(&title);
     }
 
+    /// Run the egui control panel for this frame: feed input, build the panel,
+    /// tessellate. Stores the paint jobs in `self.ui_frame` for `render`.
+    fn run_ui(&mut self) {
+        let Some(mut ui) = self.ui.take() else { return };
+        let Some(window) = self.live.as_ref().map(|l| l.window.clone()) else {
+            self.ui = Some(ui);
+            return;
+        };
+        let raw = ui.state.take_egui_input(window.as_ref());
+        let ctx = ui.ctx.clone();
+        let full = ctx.run(raw, |ctx| self.build_ui(ctx));
+        ui.state.handle_platform_output(window.as_ref(), full.platform_output);
+        let jobs = ctx.tessellate(full.shapes, full.pixels_per_point);
+        self.ui_frame = Some(UiFrame {
+            jobs,
+            textures_delta: full.textures_delta,
+            pixels_per_point: full.pixels_per_point,
+        });
+        self.ui = Some(ui);
+    }
+
+    /// Build the control panel. Widgets edit local snapshots (never `self`
+    /// directly, to avoid borrow conflicts inside egui's nested closures); the
+    /// diffs are applied to `self` after the panel closes.
+    fn build_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_panel {
+            return;
+        }
+
+        let mut running = self.settings.running;
+        let mut substeps = self.settings.substeps;
+        let mut node_size = self.render_params.base_radius_px;
+        let mut edge_alpha = self.render_params.edge_alpha;
+        let mut draw_edges = self.live.as_ref().map(|l| l.renderer.draw_edges).unwrap_or(true);
+        let mut draw_nodes = self.live.as_ref().map(|l| l.renderer.draw_nodes).unwrap_or(true);
+        let mut show_density = self.show_density;
+        let mut show_labels = self.show_labels;
+        let cur_color = self.color_mode;
+        let n = self.graph.num_nodes();
+        let e = self.graph.num_edges();
+        let fps = self.fps;
+        let status = self.sim_status();
+
+        // Actions requiring heavier work (GPU recompute) are recorded and run
+        // after the panel closure, when `self` is freely borrowable again.
+        let mut act_fit = false;
+        let mut act_color: Option<ColorMode> = None;
+        let mut act_reseed: Option<Seed> = None;
+
+        egui::SidePanel::left("nebula_controls")
+            .resizable(true)
+            .default_width(250.0)
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.heading("nebula");
+                ui.label(format!("{n} nodes · {e} edges"));
+                ui.label(format!("{fps:.0} fps · {status}"));
+                ui.separator();
+
+                ui.strong("Simulation");
+                ui.horizontal(|ui| {
+                    if ui.button(if running { "⏸ Pause" } else { "▶ Resume" }).clicked() {
+                        running = !running;
+                    }
+                    if ui.button("Fit view").clicked() {
+                        act_fit = true;
+                    }
+                });
+                ui.add(egui::Slider::new(&mut substeps, 1..=16).text("steps / frame"));
+                ui.horizontal(|ui| {
+                    ui.label("Reseed:");
+                    if ui.button("Random").clicked() {
+                        act_reseed = Some(Seed::Random);
+                    }
+                    if ui.button("Grid").clicked() {
+                        act_reseed = Some(Seed::Grid);
+                    }
+                    if ui.button("Circle").clicked() {
+                        act_reseed = Some(Seed::Circle);
+                    }
+                });
+                ui.separator();
+
+                ui.strong("Color by");
+                for (mode, label) in COLOR_MODES {
+                    if ui.selectable_label(cur_color == mode, label).clicked() {
+                        act_color = Some(mode);
+                    }
+                }
+                ui.separator();
+
+                ui.strong("Display");
+                ui.checkbox(&mut draw_nodes, "Nodes");
+                ui.checkbox(&mut draw_edges, "Edges");
+                ui.checkbox(&mut show_density, "Aggregate (density LOD)");
+                ui.checkbox(&mut show_labels, "Labels");
+                ui.add(
+                    egui::Slider::new(&mut node_size, 0.5..=64.0)
+                        .logarithmic(true)
+                        .text("node size"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut edge_alpha, 0.01..=1.0)
+                        .logarithmic(true)
+                        .text("edge glow"),
+                );
+            });
+
+        // --- apply diffs ---
+        if running != self.settings.running {
+            self.settings.running = running;
+            if running {
+                self.settings.alpha = self.settings.alpha.max(self.settings.alpha_reheat);
+            }
+        }
+        self.settings.substeps = substeps;
+        if node_size != self.render_params.base_radius_px {
+            self.render_params.base_radius_px = node_size;
+            self.push_params();
+        }
+        if edge_alpha != self.render_params.edge_alpha {
+            self.render_params.edge_alpha = edge_alpha;
+            self.push_params();
+        }
+        self.show_density = show_density;
+        self.show_labels = show_labels;
+        if let Some(live) = self.live.as_mut() {
+            live.renderer.draw_edges = draw_edges;
+            live.renderer.draw_nodes = draw_nodes;
+        }
+        if act_fit {
+            self.fit_view();
+        }
+        if let Some(m) = act_color {
+            self.set_color_mode(m);
+        }
+        if let Some(seed) = act_reseed {
+            match seed {
+                Seed::Random => {
+                    let ext = self.opts.k * (n.max(1) as f32).sqrt();
+                    self.reseed(&RandomLayout { extent: ext });
+                }
+                Seed::Grid => self.reseed(&GridLayout { spacing: self.opts.k }),
+                Seed::Circle => {
+                    let r = self.opts.k * (n.max(1) as f32).sqrt() * 0.5;
+                    self.reseed(&CircleLayout { radius: r });
+                }
+            }
+        }
+    }
+
     fn render(&mut self) {
         if self.live.is_none() {
             return;
         }
+        self.run_ui();
 
         // Refresh selection geometry (node + neighbor positions) so the marker,
         // info panel, and connection lines track the live simulation.
@@ -339,6 +525,11 @@ impl App {
         }
         // Build overlay commands before borrowing live mutably.
         let overlay_cmds = self.build_overlay();
+
+        // Take the egui state out of `self` so it can be used alongside the
+        // `&mut self.live` borrow below (disjoint owned locals, no conflict).
+        let mut ui_taken = self.ui.take();
+        let ui_frame = self.ui_frame.take();
 
         let live = self.live.as_mut().unwrap();
 
@@ -434,8 +625,21 @@ impl App {
             live.overlay
                 .draw(&live.gpu.device, &live.gpu.queue, vp, &mut pass);
         }
+
+        // egui control panel, composited over the scene + overlay.
+        let size = (live.gpu.size.width, live.gpu.size.height);
+        if let (Some(ui), Some(uf)) = (ui_taken.as_mut(), ui_frame.as_ref()) {
+            ui.record(&live.gpu.device, &live.gpu.queue, size, &mut enc, &view, uf);
+        }
+
         live.gpu.queue.submit(Some(enc.finish()));
         frame.present();
+
+        // Free egui textures released this frame, then restore the UI state.
+        if let (Some(ui), Some(uf)) = (ui_taken.as_mut(), ui_frame.as_ref()) {
+            ui.free_textures(uf);
+        }
+        self.ui = ui_taken;
 
         // Headless frame limit / screenshot.
         self.rendered_frames += 1;
@@ -479,8 +683,8 @@ impl App {
         let panel_bg = pack_rgba(12, 14, 26, 220);
         let accent = pack_rgba(120, 200, 255, 255);
 
-        // --- Top-left stats HUD ---
-        if self.show_hud {
+        // --- Top-left stats HUD (hidden when the egui panel shows the same) ---
+        if self.show_hud && !self.show_panel {
             let pad = 10.0;
             let lines = vec![
                 (accent, "nebula".to_string()),
@@ -530,8 +734,8 @@ impl App {
             }
         }
 
-        // --- Bottom-left controls ---
-        if self.show_help {
+        // --- Bottom-left controls (hidden when the egui panel is up) ---
+        if self.show_help && !self.show_panel {
             let help = [
                 "drag pan / scroll zoom / F fit",
                 "click a node to inspect it",
@@ -546,7 +750,7 @@ impl App {
             let lines: Vec<(u32, String)> = help.iter().map(|s| (dim, s.to_string())).collect();
             let h = help.len() as f32 * line + 12.0;
             self.panel(&mut c, 10.0, vp.y - h - 10.0, scale, line, panel_bg, &lines);
-        } else {
+        } else if !self.show_panel {
             c.texts.push((10.0, vp.y - line - 6.0, scale, dim, "H  help".to_string()));
         }
 
@@ -581,13 +785,24 @@ impl App {
         // --- Selected node info panel + marker ---
         if let (Some(id), Some(wp)) = (self.selected, self.selected_pos) {
             let mut lines: Vec<(u32, String)> = Vec::new();
-            let label = self
-                .labels
-                .as_ref()
-                .and_then(|l| l.get(id as usize))
-                .cloned()
+            // Per-node attributes carried from the source file (e.g. JSON).
+            let attrs = self.node_attrs.as_ref().and_then(|a| a.get(id as usize));
+            // Prefer a meaningful attribute (`ty`/`type`/`name`/`label`) as the
+            // panel title; fall back to the interned label or the numeric id.
+            let title = attrs
+                .and_then(|a| {
+                    a.iter()
+                        .find(|(k, _)| matches!(k.as_str(), "ty" | "type" | "name" | "label"))
+                        .map(|(_, v)| v.clone())
+                })
+                .or_else(|| {
+                    self.labels
+                        .as_ref()
+                        .and_then(|l| l.get(id as usize))
+                        .cloned()
+                })
                 .unwrap_or_else(|| id.to_string());
-            lines.push((accent, format!("node {label}")));
+            lines.push((accent, title));
             lines.push((dim, format!("index {id}")));
             if let Some(csr) = self.graph.csr_ref() {
                 let deg = csr.degree(id);
@@ -619,6 +834,16 @@ impl App {
                     } else {
                         lines.push((white, format!("{} {:.5}", self.value_name, v)));
                     }
+                }
+            }
+            // Source attributes: one line per key/value (title field already
+            // shown above, so skip it here to avoid duplication).
+            if let Some(attrs) = attrs {
+                for (k, v) in attrs {
+                    if matches!(k.as_str(), "ty" | "type" | "name" | "label") {
+                        continue;
+                    }
+                    lines.push((white, format!("{k}: {v}")));
                 }
             }
             lines.push((dim, format!("pos {:.0}, {:.0}", wp.x, wp.y)));
@@ -722,8 +947,15 @@ impl App {
     /// Render the real scene (graph + overlay) to an offscreen texture matching
     /// the swapchain format and save it as a PNG — so the capture includes the HUD.
     fn save_frame(&mut self, path: &str) {
+        // Refresh the egui panel so captured screenshots include the UI.
+        self.run_ui();
         let overlay_cmds = self.build_overlay();
-        let Some(live) = self.live.as_mut() else { return };
+        let mut ui_taken = self.ui.take();
+        let ui_frame = self.ui_frame.take();
+        let Some(live) = self.live.as_mut() else {
+            self.ui = ui_taken;
+            return;
+        };
         let (w, h) = (live.gpu.size.width, live.gpu.size.height);
         let format = live.gpu.config.format;
 
@@ -785,7 +1017,17 @@ impl App {
             live.overlay
                 .draw(&live.gpu.device, &live.gpu.queue, (w as f32, h as f32), &mut pass);
         }
+
+        // Composite the egui panel into the capture too.
+        if let (Some(ui), Some(uf)) = (ui_taken.as_mut(), ui_frame.as_ref()) {
+            ui.record(&live.gpu.device, &live.gpu.queue, (w, h), &mut enc, &view, uf);
+        }
+
         live.gpu.queue.submit(Some(enc.finish()));
+        if let (Some(ui), Some(uf)) = (ui_taken.as_mut(), ui_frame.as_ref()) {
+            ui.free_textures(uf);
+        }
+        self.ui = ui_taken;
 
         if let Err(e) = crate::screenshot::save_texture(&live.gpu, &tex, w, h, format, &path) {
             log::error!("screenshot failed: {e}");
@@ -958,6 +1200,7 @@ impl App {
                 self.save_frame(&path);
             }
             KeyCode::Tab => self.show_hud = !self.show_hud,
+            KeyCode::KeyP => self.show_panel = !self.show_panel,
             KeyCode::KeyC => {
                 self.selected = None;
                 self.selected_pos = None;
@@ -1014,6 +1257,14 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Let egui see the event first. If the pointer/keyboard is over a panel
+        // and egui wants the event, don't also drive the camera/selection.
+        let egui_consumed = if let (Some(ui), Some(live)) = (self.ui.as_mut(), self.live.as_ref()) {
+            ui.state.on_window_event(live.window.as_ref(), &event).consumed
+        } else {
+            false
+        };
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -1023,14 +1274,17 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed {
+                if !egui_consumed && event.state == ElementState::Pressed {
                     if let PhysicalKey::Code(code) = event.physical_key {
                         self.handle_key(code, event_loop);
                     }
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if button == MouseButton::Left {
+                if egui_consumed {
+                    // Cancel any in-progress drag so releasing over a panel is clean.
+                    self.dragging = false;
+                } else if button == MouseButton::Left {
                     match state {
                         ElementState::Pressed => {
                             self.dragging = true;
@@ -1070,12 +1324,14 @@ impl ApplicationHandler for App {
                 self.cursor = new;
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let scroll = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.02,
-                };
-                let factor = (1.0 + scroll * 0.12).clamp(0.2, 5.0);
-                self.camera.zoom_about(factor, self.cursor);
+                if !egui_consumed {
+                    let scroll = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.02,
+                    };
+                    let factor = (1.0 + scroll * 0.12).clamp(0.2, 5.0);
+                    self.camera.zoom_about(factor, self.cursor);
+                }
             }
             WindowEvent::RedrawRequested => {
                 self.render();

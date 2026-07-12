@@ -92,6 +92,7 @@ fn main() -> anyhow::Result<()> {
     // --- Build the graph ---------------------------------------------------
     let t0 = Instant::now();
     let mut node_labels: Option<Vec<String>> = None;
+    let mut node_attrs: Option<Vec<Vec<(String, String)>>> = None;
     let (mut graph, what): (Graph, String) = match &args.generator {
         Gen::Grid(w, h) => (generate::grid_2d(*w, *h), format!("grid {w}x{h}")),
         Gen::Random(n, m) => (
@@ -119,6 +120,9 @@ fn main() -> anyhow::Result<()> {
                 loaded.format
             );
             node_labels = Some(loaded.labels);
+            if !loaded.attrs.is_empty() {
+                node_attrs = Some(loaded.attrs);
+            }
             (loaded.graph, label)
         }
     };
@@ -167,7 +171,7 @@ fn main() -> anyhow::Result<()> {
         node_size: args.node_size,
     };
 
-    let app = App::with_labels(graph, positions, opts, node_labels);
+    let app = App::with_labels(graph, positions, opts, node_labels, node_attrs);
     app.run()
 }
 
