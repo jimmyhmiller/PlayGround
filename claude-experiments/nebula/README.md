@@ -16,11 +16,14 @@ cargo run --release -p nebula-app -- --blocks 40000 6 300000 --color communities
 
 ## What it does
 
-- **GPU force-directed layout.** A Fruchterman–Reingold simulation runs entirely
-  in compute shaders. Repulsion is approximated with a uniform spatial grid for
-  the near field plus a coarse center-of-mass grid (a single-level Barnes–Hut)
-  for the far field — this is what lets a grid unfold into a flat sheet and lets
-  communities separate, instead of everything collapsing into a ball.
+- **GPU force-directed layout that converges and stops.** A Fruchterman–Reingold
+  simulation runs entirely in compute shaders. Repulsion is approximated with a
+  uniform spatial grid for the near field plus a coarse center-of-mass grid (a
+  single-level Barnes–Hut) for the far field — this is what lets a grid unfold
+  into a flat sheet and lets communities separate, instead of everything
+  collapsing into a ball. A global **alpha** cooling factor scales the forces down
+  to zero (d3-force style) so the layout settles and auto-pauses; `space` reheats
+  it, `R`/`G`/`O` restart from a fresh seed.
 - **GPU rendering.** Nodes are instanced SDF circles (crisp at any zoom); edges
   are additively-blended lines so dense regions read as luminous bundles.
   Positions are shared by *binding* between the compute and render passes — zero

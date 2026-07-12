@@ -289,7 +289,7 @@ impl App {
             self.graph.num_nodes(),
             self.graph.num_edges(),
             self.color_mode.label(),
-            if self.settings.running { "sim" } else { "paused" },
+            self.sim_status(),
             self.fps,
             self.total_steps,
             if self.render_params.base_radius_px > 0.0 { "" } else { "" },
@@ -464,7 +464,7 @@ impl App {
                         "{:.0} fps   {}   {}",
                         self.fps,
                         self.color_mode.label(),
-                        if self.settings.running { "simulating" } else { "paused" }
+                        self.sim_status()
                     ),
                 ),
             ];
@@ -627,6 +627,17 @@ impl App {
         c
     }
 
+    /// Human-readable simulation status for the HUD.
+    fn sim_status(&self) -> String {
+        if self.settings.running {
+            format!("cooling a={:.3}", self.settings.alpha)
+        } else if self.settings.alpha <= self.settings.alpha_min {
+            "settled".to_string()
+        } else {
+            "paused".to_string()
+        }
+    }
+
     /// Min/max of the current scalar values (for the legend).
     fn value_range(&self) -> Option<(f32, f32)> {
         let vals = self.last_values.as_ref()?;
@@ -752,6 +763,7 @@ impl App {
         let (min, max) = bounds(&pos);
         self.camera.fit_bounds(min, max);
         self.settings.running = true;
+        self.settings.alpha = 1.0; // full reheat: lay out from scratch
         if let Some(live) = self.live.as_ref() {
             live.layout.update_settings(&live.gpu.queue, &self.settings);
         }
