@@ -434,3 +434,67 @@
 (sort (map :a (clojure.set/project #{{:a 1 :b 2} {:a 3 :b 4}} [:a])))	(1 3)
 (into (sorted-map) (clojure.set/map-invert {:a 1 :b 2}))	{1 :a, 2 :b}
 (sort-by second [[1 :b] [2 :a] [3 :c]])	([2 :a] [1 :b] [3 :c])
+(into [] (map inc) [1 2 3])	[2 3 4]
+(into [] (filter even?) [1 2 3 4 5])	[2 4]
+(into [] (comp (map inc) (filter even?)) [1 2 3 4 5])	[2 4 6]
+(transduce (map inc) + [1 2 3])	9
+(transduce (map inc) + 100 [1 2 3])	109
+(transduce (filter odd?) conj [] [1 2 3 4 5])	[1 3 5]
+(transduce (take 3) conj [] (range 100))	[0 1 2]
+(sequence (map inc) [1 2 3])	(2 3 4)
+(sequence (comp (filter even?) (map inc)) (range 10))	(1 3 5 7 9)
+(eduction (map inc) (filter even?) (range 10))	(2 4 6 8 10)
+(reduced? (reduced 5))	true
+(unreduced (reduced 5))	5
+(unreduced 5)	5
+(deref (reduced 42))	42
+(let [v (volatile! 10)] (vswap! v inc) @v)	11
+(let [v (volatile! 10)] (vreset! v 99) @v)	99
+(volatile? (volatile! 1))	true
+@(delay (+ 1 2 3))	6
+(force (delay 42))	42
+(force 42)	42
+(delay? (delay 1))	true
+(realized? (delay 1))	false
+(let [p (promise)] (deliver p 7) @p)	7
+(let [p (promise)] (deliver p 1) (deliver p 2) @p)	1
+(parse-long "42")	42
+(parse-long "-17")	-17
+(parse-long "abc")	nil
+(parse-double "3.5")	3.5
+(parse-boolean "true")	true
+(parse-boolean "nope")	nil
+(any? 5)	true
+(seqable? [1 2])	true
+(seqable? 5)	false
+(ident? :a)	true
+(ident? 'a)	true
+(ident? 5)	false
+(simple-ident? :foo)	true
+(qualified-ident? :foo/bar)	true
+(simple-keyword? :a)	true
+(qualified-keyword? :a/b)	true
+(simple-symbol? 'x)	true
+(qualified-symbol? 'x/y)	true
+(rational? 5)	true
+(NaN? (/ 0.0 0.0))	true
+(num 5)	5
+(bit-and-not 12 10)	4
+(unchecked-add 2 3)	5
+(unchecked-inc 5)	6
+(replicate 3 :x)	(:x :x :x)
+(bounded-count 2 [1 2 3 4])	4
+(trampoline (fn [] (fn [] 42)))	42
+(let [f (memoize (fn [x] (* x x)))] [(f 5) (f 5)])	[25 25]
+(letfn [(f [x] (* x 2))] (f 21))	42
+(when-some [x 5] (inc x))	6
+(when-some [x nil] (inc x))	nil
+(if-some [x 5] x :none)	5
+(if-some [x nil] x :none)	:none
+(do (defrecord Point [x y]) (:x (->Point 3 4)))	3
+(do (defrecord Point [x y]) (:y (assoc (->Point 3 4) :y 99)))	99
+(do (defrecord Point [x y]) (record? (->Point 1 2)))	true
+(do (defrecord Point [x y]) [(count (->Point 1 2)) (keys (->Point 1 2)) (vals (->Point 1 2))])	[2 (:x :y) (1 2)]
+(do (defrecord Point [x y]) (:x (map->Point {:x 7 :y 8})))	7
+(do (defrecord Point [x y]) (get (->Point 1 2) :z :nope))	:nope
+(do (defprotocol P (m [x])) (extend-protocol P Long (m [x] :n) String (m [x] :s)) [(m 1) (m "a")])	[:n :s]

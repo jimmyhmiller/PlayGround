@@ -1245,7 +1245,7 @@ pub const CORE: &str = r##"
 (defmacro comment (& body) nil)
 (defn comparator [pred] (fn [a b] (cond (pred a b) -1 (pred b a) 1 :else 0)))
 (defn replicate [n x] (take n (repeat x)))
-(defn bounded-count [n coll] (min n (count coll)))
+(defn bounded-count [n coll] (if (counted? coll) (count coll) (loop [i 0 s (seq coll)] (if (or (nil? s) (%num-eq i n)) i (recur (inc i) (next s))))))
 (defn trampoline [f & args]
   (loop [r (apply f args)] (if (fn? r) (recur (r)) r)))
 (defn memoize [f]
@@ -1257,7 +1257,7 @@ pub const CORE: &str = r##"
 ;; `(letfn [(f [x] …) (g [y] …)] body)` -> a let binding each name to a
 ;; self-named fn. (Non-mutual / self-recursion; each fn carries its own name.)
 (defmacro letfn (specs & body)
-  (%cons 'let (%cons (apply concat (map (fn [s] (list (first s) (%cons 'fn s))) specs)) body)))
+  (%cons 'let (%cons (-to-list (apply concat (map (fn [s] (list (first s) (%cons 'fn s))) specs))) body)))
 
 ;; ─────────────── transducers ───────────────
 (defn reduced [x] (record 'Reduced x))
