@@ -29,6 +29,17 @@ struct RenderParams {
 @group(1) @binding(2) var<storage, read> sizes: array<f32>;
 @group(1) @binding(3) var<storage, read> edges: array<u32>;
 
+// Per-edge-type style. mode 0 = color edges by endpoint node color (default);
+// mode 1 = use `color` (a fixed per-type tint).
+struct EdgeStyle {
+    color: vec4<f32>,
+    mode: u32,
+    _p0: u32,
+    _p1: u32,
+    _p2: u32,
+};
+@group(1) @binding(4) var<uniform> edge_style: EdgeStyle;
+
 fn unpack_color(c: u32) -> vec4<f32> {
     return vec4<f32>(
         f32(c & 0xffu) / 255.0,
@@ -122,8 +133,9 @@ fn vs_edge(@builtin(vertex_index) vi: u32) -> EdgeVsOut {
         return out;
     }
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    var col = unpack_color(colors[node]);
-    out.color = vec4<f32>(col.rgb, params.edge_alpha);
+    let node_col = unpack_color(colors[node]);
+    let rgb = select(node_col.rgb, edge_style.color.rgb, edge_style.mode == 1u);
+    out.color = vec4<f32>(rgb, params.edge_alpha);
     return out;
 }
 

@@ -58,6 +58,15 @@ const COLOR_MODES: [(ColorMode, &str); 6] = [
     (ColorMode::Communities, "Communities"),
 ];
 
+/// A named set of edges (relationship type) shown over the shared node set.
+struct EdgeType {
+    name: String,
+    /// Packed RGBA8 tint, or None to color edges by endpoint node color.
+    color: Option<u32>,
+    visible: bool,
+    edges: Vec<[u32; 2]>,
+}
+
 /// Which layout to (re)apply when the user clicks a layout button.
 #[derive(Clone, Copy)]
 enum Seed {
@@ -476,6 +485,10 @@ pub struct App {
     /// Distinct attribute keys (union over all nodes), in first-seen order.
     /// Drives the "color by attribute" and filter UI.
     attr_keys: Vec<String>,
+    /// Named edge sets shown over the graph (e.g. children, deps).
+    edge_types: Vec<EdgeType>,
+    /// Which edge type drives the hierarchical/radial DAG layout.
+    structure_type: usize,
     /// Attribute "show only" filter; non-matching nodes are hidden.
     filter: NodeFilter,
     /// Node count matching the current filter (for the UI), or None if disabled.
@@ -537,7 +550,7 @@ pub struct App {
 
 impl App {
     pub fn new(graph: Graph, seed_positions: Vec<Pos>, opts: RunOptions) -> Self {
-        Self::with_labels(graph, seed_positions, opts, None, None)
+        Self::with_labels(graph, seed_positions, opts, None, None, Vec::new())
     }
 
     pub fn with_labels(
@@ -546,8 +559,24 @@ impl App {
         opts: RunOptions,
         labels: Option<Vec<String>>,
         node_attrs: Option<Vec<Vec<(String, String)>>>,
+        loaded_edge_types: Vec<nebula_core::formats::LoadedEdgeType>,
     ) -> Self {
         graph.ensure_csr();
+        // Build edge types from the load; synthesize a single node-colored set
+        // for formats/generators that don't carry types.
+        let edge_types: Vec<EdgeType> = if loaded_edge_types.is_empty() {
+            vec![EdgeType {
+                name: "edges".to_string(),
+                color: None,
+                visible: true,
+                edges: graph.edges().to_vec(),
+            }]
+        } else {
+            loaded_edge_types
+                .into_iter()
+                .map(|t| EdgeType { name: t.name, color: t.color, visible: true, edges: t.edges })
+                .collect()
+        };
         let settings = opts.settings;
         let color_mode = opts.color_mode;
         let selected = opts.select;
@@ -569,6 +598,8 @@ impl App {
             seed_positions,
             opts,
             attr_keys: attribute_keys(node_attrs.as_deref()),
+            edge_types,
+            structure_type: 0,
             filter: init_filter,
             filter_match_count: None,
             legend: Legend::None,
@@ -645,6 +676,19 @@ impl App {
         let mut renderer = renderer;
         renderer.draw_edges = self.opts.draw_edges;
         renderer.draw_nodes = self.opts.draw_nodes;
+        // Upload the edge types to the renderer.
+        let specs: Vec<crate::render::EdgeTypeInput> = self
+            .edge_types
+            .iter()
+            .map(|t| crate::render::EdgeTypeInput {
+                name: &t.name,
+                color: t.color,
+                visible: t.visible,
+                edges: &t.edges,
+            })
+            .collect();
+        renderer.set_edge_types(&gpu.device, &graph_gpu, &specs);
+        drop(specs);
         self.live = Some(Live { window, gpu, graph_gpu, renderer, layout, overlay, density });
         self.apply_color_mode();
         if self.opts.start_radial {
@@ -945,6 +989,13 @@ impl App {
         let mut filter_value = self.filter.value.clone();
         let filter_count = self.filter_match_count;
         let legend = self.legend.clone();
+        let edge_info: Vec<(String, Option<u32>, usize)> = self
+            .edge_types
+            .iter()
+            .map(|t| (t.name.clone(), t.color, t.edges.len()))
+            .collect();
+        let mut edge_visible: Vec<bool> = self.edge_types.iter().map(|t| t.visible).collect();
+        let mut structure_sel = self.structure_type;
 
         // Actions requiring heavier work (GPU recompute) are recorded and run
         // after the panel closure, when `self` is freely borrowable again.
@@ -1042,6 +1093,34 @@ impl App {
                         .text("edge glow"),
                 );
 
+                // Edge types: per-type visibility + color, plus which type drives
+                // the DAG layouts.
+                if edge_info.len() > 1 {
+                    ui.separator();
+                    ui.strong("Edge types");
+                    for (i, (name, color, count)) in edge_info.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut edge_visible[i], "");
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(13.0, 13.0), egui::Sense::hover());
+                            let col = match color {
+                                Some(c) => egui_rgb(*c),
+                                None => egui::Color32::from_gray(150),
+                            };
+                            ui.painter().rect_filled(rect, 2.0, col);
+                            ui.label(format!("{name}  ({count})"));
+                        });
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new("layout uses:").weak().small());
+                        for (i, (name, _, _)) in edge_info.iter().enumerate() {
+                            if ui.selectable_label(structure_sel == i, name).clicked() {
+                                structure_sel = i;
+                            }
+                        }
+                    });
+                }
+
                 if !self.attr_keys.is_empty() {
                     ui.separator();
                     ui.strong("Filter (show only)");
@@ -1103,6 +1182,17 @@ impl App {
         }
         self.show_density = show_density;
         self.show_labels = show_labels;
+        self.structure_type = structure_sel.min(self.edge_types.len().saturating_sub(1));
+        for (i, &v) in edge_visible.iter().enumerate() {
+            if self.edge_types.get(i).map(|t| t.visible) != Some(v) {
+                if let Some(t) = self.edge_types.get_mut(i) {
+                    t.visible = v;
+                }
+                if let Some(live) = self.live.as_mut() {
+                    live.renderer.set_edge_visible(i, v);
+                }
+            }
+        }
         if let Some(live) = self.live.as_mut() {
             live.renderer.draw_edges = draw_edges;
             live.renderer.draw_nodes = draw_nodes;
@@ -1709,12 +1799,22 @@ impl App {
         log::info!("re-seeded with {} layout", layout.name());
     }
 
-    /// Apply a fixed (non-physics) layout: place nodes, upload, fit the view,
-    /// and stop the simulation so the arrangement stays put.
-    fn apply_fixed_layout(&mut self, layout: &dyn Layout) {
+    /// A `Graph` built from the structure edge type (the one driving the DAG
+    /// layouts). Falls back to the union graph if there are no edge types.
+    fn structure_graph(&self) -> Graph {
+        let n = self.graph.num_nodes();
+        match self.edge_types.get(self.structure_type) {
+            Some(t) => Graph::new(n, t.edges.clone()),
+            None => Graph::new(n, self.graph.edges().to_vec()),
+        }
+    }
+
+    /// Apply a fixed (non-physics) layout over `graph`: place nodes, upload, fit
+    /// the view, and stop the simulation so the arrangement stays put.
+    fn apply_fixed_layout(&mut self, layout: &dyn Layout, graph: &Graph) {
         let n = self.graph.num_nodes() as usize;
         let mut pos = vec![[0.0f32; 2]; n];
-        layout.place(&self.graph, &mut pos, 0);
+        layout.place(graph, &mut pos, 0);
         if let Some(live) = self.live.as_ref() {
             live.graph_gpu.set_positions(&live.gpu.queue, &pos);
         }
@@ -1724,26 +1824,29 @@ impl App {
         if let Some(live) = self.live.as_ref() {
             live.layout.update_settings(&live.gpu.queue, &self.settings);
         }
-        log::info!("applied {} layout (simulation paused)", layout.name());
+        let sname = self.edge_types.get(self.structure_type).map(|t| t.name.as_str()).unwrap_or("edges");
+        log::info!("applied {} layout over '{}' edges (simulation paused)", layout.name(), sname);
     }
 
-    /// Hierarchical (layered DAG) layout, scaled to the graph's edge length `k`.
+    /// Hierarchical (layered DAG) layout over the structure edge type.
     fn apply_hierarchical(&mut self) {
         let layout = LayeredLayout {
             target_height: self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt(),
             aspect: 1.8,
             sweeps: 4,
         };
-        self.apply_fixed_layout(&layout);
+        let g = self.structure_graph();
+        self.apply_fixed_layout(&layout, &g);
     }
 
-    /// Radial (concentric) DAG layout, scaled to the graph's edge length `k`.
+    /// Radial (concentric) DAG layout over the structure edge type.
     fn apply_radial(&mut self) {
         let layout = RadialLayout {
             radius: self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt() * 0.6,
             sweeps: 4,
         };
-        self.apply_fixed_layout(&layout);
+        let g = self.structure_graph();
+        self.apply_fixed_layout(&layout, &g);
     }
 
     /// Read back positions needed to draw the selection: the node itself and (for

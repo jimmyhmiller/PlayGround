@@ -38,11 +38,48 @@ impl Default for RenderParams {
     }
 }
 
+/// Per-edge-type style uniform. `mode` 0 = color edges by node color, 1 = tint.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct EdgeStyle {
+    color: [f32; 4],
+    mode: u32,
+    _pad: [u32; 3],
+}
+
+/// Input describing one edge type to upload (borrowed from the app).
+pub struct EdgeTypeInput<'a> {
+    pub name: &'a str,
+    /// Packed RGBA8 tint, or None to color edges by endpoint node color.
+    pub color: Option<u32>,
+    pub visible: bool,
+    pub edges: &'a [[u32; 2]],
+}
+
+/// GPU state for one edge type: its own edge buffer + bind group.
+struct EdgeTypeGpu {
+    bind_group: wgpu::BindGroup,
+    num_edges: u32,
+    visible: bool,
+}
+
+fn unpack_norm(c: u32) -> [f32; 4] {
+    [
+        (c & 0xff) as f32 / 255.0,
+        ((c >> 8) & 0xff) as f32 / 255.0,
+        ((c >> 16) & 0xff) as f32 / 255.0,
+        ((c >> 24) & 0xff) as f32 / 255.0,
+    ]
+}
+
 pub struct Renderer {
     camera_buf: wgpu::Buffer,
     params_buf: wgpu::Buffer,
     view_bg: wgpu::BindGroup,
     graph_bg: wgpu::BindGroup,
+    graph_bgl: wgpu::BindGroupLayout,
+    /// Per-edge-type GPU state (buffers + bind groups). Set via `set_edge_types`.
+    edge_types: Vec<EdgeTypeGpu>,
     node_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
     pick_pipeline: wgpu::RenderPipeline,
@@ -96,9 +133,25 @@ impl Renderer {
             },
             count: None,
         };
+        let edge_style_entry = wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
         let graph_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("graph_bgl"),
-            entries: &[ro_storage(0), ro_storage(1), ro_storage(2), ro_storage(3)],
+            entries: &[ro_storage(0), ro_storage(1), ro_storage(2), ro_storage(3), edge_style_entry],
+        });
+        // Default edge style (node-colored) for the node/base bind group.
+        let default_edge_style = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("default_edge_style"),
+            contents: bytemuck::bytes_of(&EdgeStyle { color: [0.0; 4], mode: 0, _pad: [0; 3] }),
+            usage: wgpu::BufferUsages::UNIFORM,
         });
 
         let view_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -117,6 +170,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 1, resource: graph.colors.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: graph.sizes.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: graph.edges.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: default_edge_style.as_entire_binding() },
             ],
         });
 
@@ -240,6 +294,8 @@ impl Renderer {
             params_buf,
             view_bg,
             graph_bg,
+            graph_bgl,
+            edge_types: Vec::new(),
             node_pipeline,
             edge_pipeline,
             pick_pipeline,
@@ -357,17 +413,72 @@ impl Renderer {
         }
     }
 
+    /// Upload the edge types (buffers + per-type bind groups). Replaces any
+    /// previously set types.
+    pub fn set_edge_types(&mut self, device: &wgpu::Device, graph: &GpuGraph, specs: &[EdgeTypeInput]) {
+        self.edge_types.clear();
+        for s in specs {
+            let flat: Vec<u32> = s.edges.iter().flat_map(|&[a, b]| [a, b]).collect();
+            let edge_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("edge_type_buf"),
+                contents: if flat.is_empty() {
+                    bytemuck::cast_slice(&[0u32, 0u32])
+                } else {
+                    bytemuck::cast_slice(&flat)
+                },
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+            let (mode, color) = match s.color {
+                Some(c) => (1u32, unpack_norm(c)),
+                None => (0u32, [0.0; 4]),
+            };
+            let style_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("edge_style_buf"),
+                contents: bytemuck::bytes_of(&EdgeStyle { color, mode, _pad: [0; 3] }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("edge_type_bg"),
+                layout: &self.graph_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: graph.positions.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: graph.colors.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: graph.sizes.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: edge_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: style_buf.as_entire_binding() },
+                ],
+            });
+            self.edge_types.push(EdgeTypeGpu {
+                bind_group,
+                num_edges: s.edges.len() as u32,
+                visible: s.visible,
+            });
+        }
+    }
+
+    /// Toggle visibility of edge type `i`.
+    pub fn set_edge_visible(&mut self, i: usize, visible: bool) {
+        if let Some(et) = self.edge_types.get_mut(i) {
+            et.visible = visible;
+        }
+    }
+
     /// Record draw calls into an already-begun render pass.
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
         pass.set_bind_group(0, &self.view_bg, &[]);
-        pass.set_bind_group(1, &self.graph_bg, &[]);
 
-        // Edges under nodes.
-        if self.draw_edges && self.num_edges > 0 {
+        // Edges under nodes: one draw per visible edge type (own bind group).
+        if self.draw_edges {
             pass.set_pipeline(&self.edge_pipeline);
-            pass.draw(0..(self.num_edges * 2), 0..1);
+            for et in &self.edge_types {
+                if et.visible && et.num_edges > 0 {
+                    pass.set_bind_group(1, &et.bind_group, &[]);
+                    pass.draw(0..(et.num_edges * 2), 0..1);
+                }
+            }
         }
         if self.draw_nodes && self.num_nodes > 0 {
+            pass.set_bind_group(1, &self.graph_bg, &[]);
             pass.set_pipeline(&self.node_pipeline);
             pass.draw(0..6, 0..self.num_nodes);
         }

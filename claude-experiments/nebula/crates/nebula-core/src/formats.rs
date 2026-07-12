@@ -17,13 +17,24 @@ use ahash::AHashMap;
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
 
+/// One named set of edges (a relationship type) with an optional display color.
+pub struct LoadedEdgeType {
+    pub name: String,
+    /// Packed RGBA8 color, or None to color edges by endpoint node color.
+    pub color: Option<u32>,
+    pub edges: Vec<[NodeId; 2]>,
+}
+
 /// A loaded graph plus the original node labels (indexed by compact id).
 pub struct Loaded {
+    /// Union of all edge types (drives CSR, algorithms, and force layout).
     pub graph: Graph,
     pub labels: Vec<String>,
     /// Optional per-node attributes (key/value), indexed by compact id. Populated
     /// by formats that carry node metadata (currently JSON); empty otherwise.
     pub attrs: Vec<Vec<(String, String)>>,
+    /// Named edge sets. Formats without types produce a single "edges" type.
+    pub edge_types: Vec<LoadedEdgeType>,
     pub format: &'static str,
     /// True if the source declared itself directed (informational only; we store
     /// an undirected edge list regardless).
@@ -125,10 +136,17 @@ fn finish(mut interner: Interner, edges: Vec<[NodeId; 2]>, declared_nodes: Optio
         interner.ensure_count(n);
     }
     let n = interner.labels.len() as u64;
+    // Formats without explicit types expose a single "edges" set (node-colored).
+    let edge_types = vec![LoadedEdgeType {
+        name: "edges".to_string(),
+        color: None,
+        edges: edges.clone(),
+    }];
     Loaded {
         graph: Graph::new(n, edges),
         labels: interner.labels,
         attrs: Vec::new(),
+        edge_types,
         format,
         directed,
     }
@@ -375,32 +393,65 @@ fn parse_json(text: &str) -> Result<Loaded> {
         }
     }
 
-    // Edges may be under "links" (d3), "edges", with source/target or as pairs.
-    let edge_arrays = ["links", "edges"];
-    for key in edge_arrays {
-        if let Some(arr) = v.get(key).and_then(|e| e.as_array()) {
-            for e in arr {
-                let (a, b) = match e {
-                    serde_json::Value::Array(pair) if pair.len() >= 2 => {
-                        (id_of(&pair[0]), id_of(&pair[1]))
+    // Endpoints of an edge, given as `[u, v]` or `{source, target}`.
+    let endpoints = |e: &serde_json::Value| -> (Option<String>, Option<String>) {
+        match e {
+            serde_json::Value::Array(pair) if pair.len() >= 2 => {
+                (id_of(&pair[0]), id_of(&pair[1]))
+            }
+            serde_json::Value::Object(_) => (
+                e.get("source").and_then(&id_of),
+                e.get("target").and_then(&id_of),
+            ),
+            _ => (None, None),
+        }
+    };
+    // Optional `[r, g, b]` / `[r, g, b, a]` color -> packed RGBA8.
+    let color_of = |val: &serde_json::Value| -> Option<u32> {
+        let arr = val.as_array()?;
+        let c = |i: usize, d: u64| arr.get(i).and_then(|x| x.as_u64()).unwrap_or(d).min(255) as u32;
+        Some(c(0, 120) | (c(1, 120) << 8) | (c(2, 120) << 16) | (c(3, 255) << 24))
+    };
+
+    // Typed edges: `edge_types: [{name, color?, edges}]`. Otherwise fall back to
+    // the flat `links`/`edges` arrays as a single unnamed set.
+    let mut typed: Vec<LoadedEdgeType> = Vec::new();
+    if let Some(types) = v.get("edge_types").and_then(|t| t.as_array()) {
+        for t in types {
+            let name = t.get("name").and_then(|n| n.as_str()).unwrap_or("edges").to_string();
+            let color = t.get("color").and_then(&color_of);
+            let mut te: Vec<[NodeId; 2]> = Vec::new();
+            if let Some(arr) = t.get("edges").and_then(|e| e.as_array()) {
+                for e in arr {
+                    if let (Some(a), Some(b)) = endpoints(e) {
+                        let (ia, ib) = (it.intern(&a), it.intern(&b));
+                        if ia != ib {
+                            te.push([ia, ib]);
+                            edges.push([ia, ib]);
+                        }
                     }
-                    serde_json::Value::Object(_) => (
-                        e.get("source").and_then(&id_of),
-                        e.get("target").and_then(&id_of),
-                    ),
-                    _ => (None, None),
-                };
-                if let (Some(a), Some(b)) = (a, b) {
-                    let ia = it.intern(&a);
-                    let ib = it.intern(&b);
-                    if ia != ib {
-                        edges.push([ia, ib]);
+                }
+            }
+            typed.push(LoadedEdgeType { name, color, edges: te });
+        }
+    } else {
+        for key in ["links", "edges"] {
+            if let Some(arr) = v.get(key).and_then(|e| e.as_array()) {
+                for e in arr {
+                    if let (Some(a), Some(b)) = endpoints(e) {
+                        let (ia, ib) = (it.intern(&a), it.intern(&b));
+                        if ia != ib {
+                            edges.push([ia, ib]);
+                        }
                     }
                 }
             }
         }
     }
     let mut loaded = finish(it, edges, None, "json", false);
+    if !typed.is_empty() {
+        loaded.edge_types = typed;
+    }
     if !raw_attrs.is_empty() {
         let mut attrs = vec![Vec::new(); loaded.labels.len()];
         for (cid, a) in raw_attrs {
