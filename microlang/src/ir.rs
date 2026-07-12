@@ -201,6 +201,11 @@ pub enum Prim {
     NsInterns,
     /// `(%all-ns)` -> a list of all registered namespace-name symbols.
     AllNs,
+    /// `(%method-types 'method)` -> a list of the type-name symbols that have a
+    /// concrete impl registered for `method` in the dispatch registry (excluding
+    /// the `-protocol-default` sentinel). Reflection over protocol extensions,
+    /// used by `satisfies?`/`extends?`/`extenders`.
+    MethodTypes,
     /// `(%symbol "a/b")` -> the interned symbol for a string (reverse of `%str-of`).
     SymbolOf,
     /// `(%var-arglists 'sym)` -> the var's captured `:arglists` datum, or nil.

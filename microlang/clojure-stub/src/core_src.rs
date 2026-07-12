@@ -1001,6 +1001,19 @@ pub const CORE: &str = r##"
 (defmacro defmethod (name dval params & body)
   (list '-add-method name dval (%cons 'fn (%cons params body))))
 
+;; ─────────────── protocol reflection (satisfies? / extends? / extenders) ───────────────
+;; A protocol is (record 'Protocol 'Name (list 'm1 'm2 …)); its methods dispatch on
+;; type via the native registry, queryable with %method-types.
+(defn -protocol? [p] (and (record? p) (= (type-of p) 'Protocol)))
+(defn -proto-methods [p] (field p 1))
+(defn satisfies? [p x]
+  (let [ty (type-of x)]
+    (boolean (some (fn [m] (some (fn [t] (= t ty)) (%method-types m))) (-proto-methods p)))))
+(defn extends? [p ty]
+  (boolean (some (fn [m] (some (fn [t] (= t ty)) (%method-types m))) (-proto-methods p))))
+(defn extenders [p]
+  (-to-list (reduce (fn [acc m] (reduce conj acc (%method-types m))) #{} (-proto-methods p))))
+
 ;; ─────────────── ad-hoc hierarchy (derive / isa? / parents / …) ───────────────
 ;; A hierarchy is {:parents {tag #{parents}} :ancestors {tag #{transitive}}
 ;; :descendants {tag #{transitive}}}, held in a global atom for the arity-1 forms.

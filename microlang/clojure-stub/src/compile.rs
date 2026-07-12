@@ -93,7 +93,7 @@ impl Compiler {
             ("%var-flags", VarFlags), ("%ns-interns", NsInterns), ("%all-ns", AllNs),
             ("%symbol", SymbolOf), ("%var-arglists", VarArglists),
             // THE string-introspection primitive; clojure.string/regex build on it.
-            ("%str->chars", StrChars),
+            ("%str->chars", StrChars), ("%method-types", MethodTypes),
             // Existing low-level prims surfaced for the string library (char codes
             // for case mapping, raw length) — not new primitives.
             ("%char-code", CharToInt), ("%char-of", IntToChar), ("%str-len", StrLen),

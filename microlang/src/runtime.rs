@@ -1158,6 +1158,24 @@ impl<M: ValueModel> Runtime<M> {
                     names.iter().map(|n| self.encode(Val::Sym(self.intern(n)))).collect();
                 self.vec_to_list(&vals)
             }
+            Prim::MethodTypes => {
+                let method = match self.decode(args[0]) {
+                    Val::Sym(s) => s,
+                    _ => panic!("%method-types: not a symbol"),
+                };
+                let sentinel = self.intern("-protocol-default");
+                let tys: Vec<Sym> = {
+                    let tables = self.shared.tables.lock().unwrap();
+                    tables
+                        .methods
+                        .keys()
+                        .filter(|(m, ty)| *m == method && *ty != sentinel)
+                        .map(|(_, ty)| *ty)
+                        .collect()
+                };
+                let vals: Vec<u64> = tys.iter().map(|&t| self.encode(Val::Sym(t))).collect();
+                self.vec_to_list(&vals)
+            }
             Prim::SymbolOf => {
                 let s = self.as_str(args[0], "symbol");
                 let sym = self.intern(&s);

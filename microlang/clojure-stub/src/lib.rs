@@ -266,7 +266,7 @@ fn expand<M: ValueModel>(
         } else if is_sym(rt, head, "loop") || is_sym(rt, head, "loop*") {
             expand_loop(rt, cs, macros, comp, f)
         } else if is_sym(rt, head, "defprotocol") {
-            let d = desugar_defprotocol(rt, f);
+            let d = desugar_defprotocol(rt, comp, f);
             expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "extend-type") {
             let d = desugar_extend_type(rt, f);
@@ -548,11 +548,12 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
 /// `(defprotocol P (m1 [this]) (m2 [this x]))` -> register each method NAME so
 /// `(m1 x)` becomes a dispatch site (a sentinel `defmethod` per method; the real
 /// impls come from `extend-type`). No-impl calls then error cleanly.
-fn desugar_defprotocol<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
+fn desugar_defprotocol<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
     let items = rt.list_to_vec(form);
     let dok = sym(rt, "do");
     let mut out = vec![dok];
     let sentinel = sym(rt, "-protocol-default");
+    let mut method_syms = Vec::new();
     for &spec in &items[2..] {
         let parts = rt.list_to_vec(spec);
         let m = parts[0];
@@ -560,7 +561,33 @@ fn desugar_defprotocol<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
         let nilv = rt.encode(Val::Nil);
         let fnf = mk_fn(rt, params, vec![nilv]);
         out.push(mk_defmethod(rt, m, sentinel, fnf));
+        // record the RESOLVED (qualified) method name — the same sym the dispatch
+        // registry is keyed by — so %method-types matches at reflection time.
+        let resolved = match rt.decode(m) {
+            Val::Sym(s) => rt.encode(Val::Sym(comp.resolve_ref(rt, s))),
+            _ => m,
+        };
+        let quote = sym(rt, "quote");
+        method_syms.push(rt.vec_to_list(&[quote, resolved]));
     }
+    // Bind the protocol name to a `(record 'Protocol 'Name (list 'm1 'm2 ...))`
+    // so `satisfies?`/`extends?`/`extenders` can reflect over its methods.
+    let pname = items[1];
+    let quote = sym(rt, "quote");
+    let qpname = rt.vec_to_list(&[quote, pname]);
+    let listk = sym(rt, "list");
+    let mut mlist = vec![listk];
+    mlist.extend(method_syms);
+    let methods_list = rt.vec_to_list(&mlist);
+    let recordk = sym(rt, "record");
+    let ptag = {
+        let q = sym(rt, "quote");
+        let pt = sym(rt, "Protocol");
+        rt.vec_to_list(&[q, pt])
+    };
+    let precord = rt.vec_to_list(&[recordk, ptag, qpname, methods_list]);
+    let defk = sym(rt, "def");
+    out.push(rt.vec_to_list(&[defk, pname, precord]));
     rt.vec_to_list(&out)
 }
 
