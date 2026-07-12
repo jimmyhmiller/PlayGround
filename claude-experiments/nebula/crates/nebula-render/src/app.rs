@@ -161,13 +161,22 @@ impl Default for NodeFilter {
     }
 }
 
-/// A legend-hover highlight predicate over per-node `last_values`.
+/// A legend highlight predicate over per-node `last_values`.
 #[derive(Clone, Copy, PartialEq)]
 enum Highlight {
     /// Keep nodes whose value equals this category label.
     Category(f32),
     /// Keep nodes whose value falls in `[lo, hi]` (a slice of the scalar ramp).
     ValueBand(f32, f32),
+}
+
+/// What the pointer did to the legend this frame.
+#[derive(Default)]
+struct LegendInteraction {
+    /// Entry under the pointer (temporary preview highlight).
+    hovered: Option<Highlight>,
+    /// Entry clicked this frame (toggles the pinned highlight).
+    clicked: Option<Highlight>,
 }
 
 /// What the color legend should show for the active color mode.
@@ -232,13 +241,15 @@ impl Legend {
     }
 }
 
-/// Dim a packed RGBA8 color for the hover "fade": darken the rgb (so additive
-/// edges nearly vanish) and drop the alpha (so node dots recede).
-fn dim_color(c: u32) -> u32 {
-    let r = ((c & 0xff) as f32 * 0.09) as u8;
-    let g = (((c >> 8) & 0xff) as f32 * 0.09) as u8;
-    let b = (((c >> 16) & 0xff) as f32 * 0.09) as u8;
-    pack_rgba(r, g, b, 55)
+/// Greyscale a packed RGBA8 color for the "fade": desaturate to luminance (so
+/// non-matching nodes read as muted context) and lower the alpha a little.
+fn grey_color(c: u32) -> u32 {
+    let r = (c & 0xff) as f32;
+    let g = ((c >> 8) & 0xff) as f32;
+    let b = ((c >> 16) & 0xff) as f32;
+    let lum = (0.299 * r + 0.587 * g + 0.114 * b) * 0.4;
+    let v = lum.clamp(0.0, 255.0) as u8;
+    pack_rgba(v, v, v, 95)
 }
 
 /// Unpack a packed RGBA8 color into an egui color (drops alpha).
@@ -257,18 +268,37 @@ fn fmt_legend_num(v: f32) -> String {
     }
 }
 
-/// Draw the color legend for the active mode. Returns a highlight predicate when
-/// the pointer is over a legend entry (a category swatch, or a slice of the
-/// scalar gradient), so callers can fade non-matching nodes.
-fn draw_legend(ui: &mut egui::Ui, legend: &Legend) -> Option<Highlight> {
-    let mut hover: Option<Highlight> = None;
+/// Forward map a value to a `[0,1]` position on the (optionally log) gradient.
+fn scalar_t(v: f32, lo: f32, hi: f32, log: bool) -> f32 {
+    if log {
+        let a = (lo.max(0.0) + 1.0).ln();
+        let b = (hi.max(0.0) + 1.0).ln();
+        if b <= a {
+            0.0
+        } else {
+            (((v.max(0.0) + 1.0).ln()) - a) / (b - a)
+        }
+    } else if hi <= lo {
+        0.0
+    } else {
+        (v - lo) / (hi - lo)
+    }
+    .clamp(0.0, 1.0)
+}
+
+/// Draw the color legend for the active mode. Entries are hoverable (temporary
+/// preview) and clickable (toggles a persistent pin). `pinned` is the currently
+/// pinned highlight, drawn with a persistent marker.
+fn draw_legend(ui: &mut egui::Ui, legend: &Legend, pinned: Option<Highlight>) -> LegendInteraction {
+    let mut out = LegendInteraction::default();
+    let accent = egui::Color32::from_rgb(120, 200, 255);
     match legend {
         Legend::None | Legend::Uniform => {}
         Legend::Scalar { lo, hi, log, name } => {
             ui.add_space(2.0);
             let w = ui.available_width().min(220.0);
             let (rect, resp) =
-                ui.allocate_exact_size(egui::vec2(w, 14.0), egui::Sense::hover());
+                ui.allocate_exact_size(egui::vec2(w, 14.0), egui::Sense::click());
             let painter = ui.painter();
             let steps = 64;
             for i in 0..steps {
@@ -285,28 +315,39 @@ fn draw_legend(ui: &mut egui::Ui, legend: &Legend) -> Option<Highlight> {
                     col,
                 );
             }
-            // Hovering the bar highlights a slice of the value range (±6%).
+            let band = 0.06;
+            let inv = |tt: f32| -> f32 {
+                let tt = tt.clamp(0.0, 1.0);
+                if *log {
+                    let a = (lo.max(0.0) + 1.0).ln();
+                    let b = (hi.max(0.0) + 1.0).ln();
+                    (a + tt * (b - a)).exp() - 1.0
+                } else {
+                    lo + tt * (hi - lo)
+                }
+            };
+            let marker = |painter: &egui::Painter, t: f32, color: egui::Color32| {
+                let mx = rect.left() + t.clamp(0.0, 1.0) * rect.width();
+                painter.line_segment(
+                    [egui::pos2(mx, rect.top() - 2.0), egui::pos2(mx, rect.bottom() + 2.0)],
+                    egui::Stroke::new(2.0, color),
+                );
+            };
+            // Persistent marker for a pinned band.
+            if let Some(Highlight::ValueBand(plo, phi)) = pinned {
+                marker(painter, scalar_t((plo + phi) * 0.5, *lo, *hi, *log), accent);
+            }
+            // Hover preview + click to pin.
             if let Some(p) = resp.hover_pos() {
                 let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                let inv = |tt: f32| -> f32 {
-                    let tt = tt.clamp(0.0, 1.0);
-                    if *log {
-                        // Ramp is ln(v+1); invert to raw value space.
-                        let a = (lo.max(0.0) + 1.0).ln();
-                        let b = (hi.max(0.0) + 1.0).ln();
-                        (a + tt * (b - a)).exp() - 1.0
-                    } else {
-                        lo + tt * (hi - lo)
-                    }
-                };
-                let band = 0.06;
-                hover = Some(Highlight::ValueBand(inv(t - band), inv(t + band)));
-                // Marker at the hovered position.
-                let mx = rect.left() + t * rect.width();
-                painter.line_segment(
-                    [egui::pos2(mx, rect.top() - 1.0), egui::pos2(mx, rect.bottom() + 1.0)],
-                    egui::Stroke::new(1.5, egui::Color32::WHITE),
-                );
+                out.hovered = Some(Highlight::ValueBand(inv(t - band), inv(t + band)));
+                marker(painter, t, egui::Color32::WHITE);
+            }
+            if resp.clicked() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                    out.clicked = Some(Highlight::ValueBand(inv(t - band), inv(t + band)));
+                }
             }
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(fmt_legend_num(*lo)).weak().small());
@@ -321,18 +362,26 @@ fn draw_legend(ui: &mut egui::Ui, legend: &Legend) -> Option<Highlight> {
             ui.add_space(2.0);
             ui.horizontal_wrapped(|ui| {
                 for &(label, color, freq) in top {
-                    let (rect, resp) = ui
-                        .allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::hover());
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::click());
                     ui.painter().rect_filled(rect, 2.0, egui_rgb(color));
-                    if resp.hovered() {
+                    let is_pinned = pinned == Some(Highlight::Category(label));
+                    let hovered = resp.hovered();
+                    if hovered || is_pinned {
+                        let stroke_col = if hovered { egui::Color32::WHITE } else { accent };
                         ui.painter().rect_stroke(
                             rect,
                             2.0,
-                            egui::Stroke::new(1.5, egui::Color32::WHITE),
+                            egui::Stroke::new(2.0, stroke_col),
                             egui::StrokeKind::Outside,
                         );
-                        hover = Some(Highlight::Category(label));
-                        resp.on_hover_text(format!("{freq} nodes"));
+                    }
+                    if hovered {
+                        out.hovered = Some(Highlight::Category(label));
+                        resp.clone().on_hover_text(format!("{freq} nodes — click to pin"));
+                    }
+                    if resp.clicked() {
+                        out.clicked = Some(Highlight::Category(label));
                     }
                 }
                 if *count > top.len() {
@@ -344,7 +393,7 @@ fn draw_legend(ui: &mut egui::Ui, legend: &Legend) -> Option<Highlight> {
             );
         }
     }
-    hover
+    out
 }
 
 /// Options passed in from the CLI.
@@ -453,8 +502,10 @@ pub struct App {
 
     // Selection / overlay.
     selected: Option<u32>,
-    /// Active legend-hover highlight (keeps matching nodes bright, fades rest).
+    /// Effective highlight in effect this frame (hover preview, else pinned).
     highlight: Option<Highlight>,
+    /// Highlight pinned by clicking a legend entry; persists without hovering.
+    pinned_highlight: Option<Highlight>,
     selected_pos: Option<glam::Vec2>,
     neighbor_positions: Vec<glam::Vec2>,
     last_values: Option<Vec<f32>>,
@@ -535,6 +586,7 @@ impl App {
             color_mode,
             selected,
             highlight: None,
+            pinned_highlight: None,
             selected_pos: None,
             neighbor_positions: Vec::new(),
             last_values: None,
@@ -757,8 +809,8 @@ impl App {
             let base = self.base_colors[i];
             match &matched {
                 Some(m) if !m[i] => {
-                    colors[i] = dim_color(base);
-                    sizes[i] = self.base_sizes[i] * 0.55;
+                    colors[i] = grey_color(base);
+                    sizes[i] = self.base_sizes[i] * 0.7;
                 }
                 _ => {
                     colors[i] = base;
@@ -869,7 +921,8 @@ impl App {
     /// diffs are applied to `self` after the panel closes.
     fn build_ui(&mut self, ctx: &egui::Context) {
         if !self.show_panel {
-            self.set_highlight(None);
+            // Panel hidden: no hover preview, but keep any pinned highlight.
+            self.set_highlight(self.pinned_highlight);
             return;
         }
 
@@ -898,7 +951,8 @@ impl App {
         let mut act_fit = false;
         let mut act_color: Option<ColorMode> = None;
         let mut act_reseed: Option<Seed> = None;
-        let mut act_highlight: Option<Highlight> = None;
+        let pinned = self.pinned_highlight;
+        let mut legend_iact = LegendInteraction::default();
 
         egui::SidePanel::left("nebula_controls")
             .resizable(true)
@@ -969,7 +1023,7 @@ impl App {
                         }
                     }
                 }
-                act_highlight = draw_legend(ui, &legend);
+                legend_iact = draw_legend(ui, &legend, pinned);
                 ui.separator();
 
                 ui.strong("Display");
@@ -1070,9 +1124,16 @@ impl App {
         if let Some(m) = act_color {
             self.set_color_mode(m);
         }
+        // Clicking a legend entry toggles the persistent pin.
+        if let Some(clicked) = legend_iact.clicked {
+            self.pinned_highlight =
+                if self.pinned_highlight == Some(clicked) { None } else { Some(clicked) };
+        }
         // In headless capture there's no live pointer; keep any preset preview.
+        // Otherwise the effective highlight is the hover preview, else the pin.
         if self.opts.max_frames.is_none() {
-            self.set_highlight(act_highlight);
+            let effective = legend_iact.hovered.or(self.pinned_highlight);
+            self.set_highlight(effective);
         }
         if let Some(seed) = act_reseed {
             match seed {
@@ -1774,7 +1835,9 @@ impl App {
     fn set_color_mode(&mut self, mode: ColorMode) {
         if self.color_mode != mode {
             self.color_mode = mode;
-            self.highlight = None; // categories/ranges differ across modes
+            // Categories/ranges differ across modes; drop any highlight + pin.
+            self.highlight = None;
+            self.pinned_highlight = None;
             self.apply_color_mode();
             self.update_title();
         }
