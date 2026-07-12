@@ -161,9 +161,15 @@ those numbers.
 
 | Graph | What's running | Throughput |
 |-------|----------------|------------|
+| 30k nodes / 220k edges | full sim + render | ~120 fps |
 | 1M nodes / 3M edges | full force sim + render every frame | ~8 fps |
 | 10M nodes | render only (nodes) | 30–40 fps |
-| 30k nodes / 220k edges | full sim + render | ~120 fps |
+| 20M nodes / 40M edges | render only (nodes) | ~60 fps |
+| 50M nodes / 50M edges | render only (nodes) | loads & renders (single-digit fps) |
+
+(50M nodes / 50M edges live in GPU buffers simultaneously — this is the tens-of-
+millions ceiling of a 64 GB machine. Node rendering scales near-linearly; the
+frame-time floor is memory bandwidth.)
 
 The worst case for rendering is a large *unsettled* (random) layout: every edge
 is a long, screen-crossing line and additive blending makes overdraw dominate.

@@ -1297,6 +1297,50 @@ pub const CORE: &str = r##"
                       ([a x] (let [k (deref nv)] (vreset! nv (- k 1)) (if (%lt 0 k) a (rf a x))))))))
   ([n c] (if (%lt 0 n) (let [s (seq c)] (if (nil? s) nil (drop (%sub n 1) (%rest s)))) (seq c))))
 
+;; ─────────────── defrecord / reify / protocols ───────────────
+(def -record-types (atom #{}))
+(defn record? [x] (contains? (deref -record-types) (type-of x)))
+(defn -dotdash [f] (symbol (str ".-" (name f))))
+(defmacro defrecord (name fields & specs)
+  (let [ctor (symbol (str "->" name))
+        acc (fn [f r] (list (-dotdash f) r))
+        lookup-branches (apply concat (map (fn [f] (list (list '= 'k (keyword f)) (acc f 'r))) fields))
+        assoc-branches (apply concat (map (fn [f]
+          (list (list '= 'k (keyword f))
+                (%cons ctor (map (fn [g] (if (= g f) 'v (acc g 'r))) fields)))) fields))
+        seq-entries (map (fn [f] (vector (keyword f) (acc f 'r))) fields)
+        has-key (map (fn [f] (list '= 'k (keyword f))) fields)]
+    (list 'do
+      (%cons 'deftype (%cons name (%cons fields specs)))
+      (list 'swap! '-record-types 'conj (list 'quote name))
+      (list 'extend-type name
+        'ILookup (list '-lookup ['r 'k 'nf] (%cons 'cond (concat lookup-branches (list :else 'nf))))
+        'ICounted (list '-count ['r] (count fields))
+        'ISeqable (list '-seq ['r] (%cons 'list seq-entries))
+        'IAssociative
+          (list '-assoc ['r 'k 'v] (%cons 'cond (concat assoc-branches (list :else 'r))))
+          (list '-contains-key? ['r 'k] (%cons 'or has-key)))
+      (list 'defn (symbol (str "map->" name)) ['m]
+        (%cons ctor (map (fn [f] (list 'get 'm (keyword f))) fields))))))
+;; reify: an anonymous single-instance type. Generates a gensym'd deftype closing
+;; over the referenced locals is complex; instead build a record tagged 'Reified
+;; whose methods are stored + dispatched. Minimal: support protocol method impls.
+(defmacro reify (& specs)
+  (let [t (gensym "reify")]
+    (list 'do
+      (%cons 'deftype (%cons t (%cons [] specs)))
+      (list (symbol (str "->" t))))))
+(defmacro extend-protocol (p & body)
+  ;; (extend-protocol P T1 (m [x] ..) T2 (m [x] ..)) -> (do (extend-type T1 P ..) ..)
+  (%cons 'do (-extend-protocol-forms p body)))
+(defn -extend-protocol-forms [p body]
+  (loop [b (seq body) out nil]
+    (if (nil? b) (reverse out)
+      (let [ty (first b)
+            impls (take-while (fn [x] (not (symbol? x))) (rest b))
+            rest-b (drop-while (fn [x] (not (symbol? x))) (rest b))]
+        (recur (seq rest-b) (%cons (%cons 'extend-type (%cons ty (%cons p impls))) out))))))
+
 ;; ─────────────── delay / promise ───────────────
 (defn -force-delay [d]
   (let [done (%cell-ref (field d 1) 0)]
