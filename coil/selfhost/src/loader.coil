@@ -168,29 +168,32 @@
           (store! i (iadd (load i) 1)))))
     (if (icmp-lt (load idx) 0) p (subslice p (iadd (load idx) 1) n))))
 
+; The embedded table IS the single manifest of bundled modules: a name is bundled
+; iff we carry its text (embedded-lib returns "" for anything not bundled). This is
+; the one source of truth — the old hand-maintained duplicate list is gone, and the
+; snapshot corpus derives its lib set from `lib/*.coil` directly.
 (defn bundled? [(name (slice u8))] (-> bool)
-  (let [(mut f) false]
-    (if (str-eq name "alloc.coil")     (do (store! f true) 0) 0)
-    (if (str-eq name "arraylist.coil") (do (store! f true) 0) 0)
-    (if (str-eq name "atomic.coil")    (do (store! f true) 0) 0)
-    (if (str-eq name "closure.coil")   (do (store! f true) 0) 0)
-    (if (str-eq name "control.coil")   (do (store! f true) 0) 0)
-    (if (str-eq name "derive.coil")    (do (store! f true) 0) 0)
-    (if (str-eq name "fmt.coil")       (do (store! f true) 0) 0)
-    (if (str-eq name "hashmap.coil")   (do (store! f true) 0) 0)
-    (if (str-eq name "io.coil")        (do (store! f true) 0) 0)
-    (if (str-eq name "match.coil")     (do (store! f true) 0) 0)
-    (if (str-eq name "mem.coil")       (do (store! f true) 0) 0)
-    (if (str-eq name "mmio.coil")      (do (store! f true) 0) 0)
-    (if (str-eq name "print.coil")     (do (store! f true) 0) 0)
-    (if (str-eq name "result.coil")    (do (store! f true) 0) 0)
-    (if (str-eq name "sexp.coil")      (do (store! f true) 0) 0)
-    (if (str-eq name "simd.coil")      (do (store! f true) 0) 0)
-    (if (str-eq name "slice.coil")     (do (store! f true) 0) 0)
-    (if (str-eq name "str.coil")       (do (store! f true) 0) 0)
-    (if (str-eq name "thread.coil")    (do (store! f true) 0) 0)
-    (if (str-eq name "try.coil")       (do (store! f true) 0) 0)
-    (load f)))
+  (icmp-gt (slice-len (embedded-lib name)) 0))
+
+; The explicit stdlib source root (`COIL_STDLIB_DIR`), or None. When set, the loader
+; prefers live source files under it over the embedded copies — for developing the
+; compiler (edit a lib, rebuild a program, no compiler rebuild). When UNSET the
+; embedded copies are authoritative and NO disk path is consulted, so a portable
+; binary can never be shadowed by a stray lib/*.coil in whatever directory it runs
+; in. (The self-build stays correct either way: each stage's embedded copies equal
+; the disk sources it was built from.)
+(defn stdlib-dir [(a (ptr Allocator))] (-> (Option (slice u8)))
+  (let [p (getenv (slice->cstr a "COIL_STDLIB_DIR"))]
+    (if (icmp-eq (cast i64 p) 0) (None [(slice u8)]) (Some (cstr->slice p)))))
+
+; Text of a bundled lib: the file under $COIL_STDLIB_DIR/lib if that override is set
+; and the file exists, otherwise the embedded copy.
+(defn bundled-text [(a (ptr Allocator)) (bn (slice u8))] (-> (slice u8))
+  (match (stdlib-dir a)
+    (None []    (embedded-lib bn))
+    (Some [dir] (let [lc (slice->cstr a (path-join a (path-join a dir "lib") bn))
+                      d  (read-file a lc)]
+                  (if (icmp-eq (slice-len d) 0) (embedded-lib bn) d)))))
 
 (defn resolve-source [(a (ptr Allocator)) (s (mut LS)) (form (ptr Sexp)) (base (slice u8)) (path (slice u8))] (-> Resolved)
   (let [joined (path-join a base path)
@@ -206,11 +209,7 @@
           (load rp))
         (let [bn (basename path)]
           (if (bundled? bn)
-              (let [libpath (path-join a "lib" bn)
-                    lc (slice->cstr a libpath)
-                    ; disk `lib/<bn>` first (dev edits), else the embedded copy (portable).
-                    text (let [d (read-file a lc)]
-                           (if (icmp-eq (slice-len d) 0) (embedded-lib bn) d))
+              (let [text (bundled-text a bn)
                     rp (alloc-stack Resolved)]
                 (store! (field rp text) text) (store! (field rp incdir) base)
                 (store! (field rp disp) (sconcat3 a "<bundled " bn ">"))
@@ -596,10 +595,13 @@
 
 (defn load-program [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8))] (-> i64)
   (let [a (load (field s a))
-        ; disk first (so dev edits to the prelude take effect), else embedded copy
-        ; (so the compiler runs outside the repo). read-file returns empty on miss.
-        prelude-text (let [d (read-file a (slice->cstr a "selfhost/src/prelude.coil"))]
-                       (if (icmp-eq (slice-len d) 0) (embedded-prelude) d))
+        ; $COIL_STDLIB_DIR/selfhost/src/prelude.coil if that override is set and the
+        ; file exists (so dev edits take effect without a compiler rebuild), else the
+        ; embedded copy. Unset => embedded only, never an ambient disk read.
+        prelude-text (match (stdlib-dir a)
+                       (None []    (embedded-prelude))
+                       (Some [dir] (let [d (read-file a (slice->cstr a (path-join a dir "selfhost/src/prelude.coil")))]
+                                     (if (icmp-eq (slice-len d) 0) (embedded-prelude) d))))
         prelude-id (load (field s srccount))
         _ignore (store! (field s srccount) (iadd prelude-id 1))
         _reg (register-source! (mut s) "<prelude>" prelude-text)]

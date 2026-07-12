@@ -14,6 +14,7 @@
 (extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
 (extern realpath :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))   ; NULL on failure
 (extern getcwd   :cc c [(ptr i8) i64] (-> (ptr i8)))
+(extern getenv   :cc c [(ptr i8)] (-> (ptr i8)))            ; NULL if the var is unset
 ; pthread FFI — run the deeply-recursive pipeline on a big stack, mirroring
 ; src/lib.rs::elaborate which spawns a 256MB-stack scoped thread. A `coil build`
 ; binary gets the default ~8MB main stack, which the recursive passes overflow on a
