@@ -1257,9 +1257,13 @@ pub const CORE: &str = r##"
 ;; `(defonce name val)` defs only if the var is not already bound.
 (defmacro defonce (name val)
   (list 'if (list 'bound? (list 'var name)) nil (list 'def name val)))
-;; `(defn- name params body…)` — a PRIVATE fn (cross-namespace access errors).
-(defmacro defn- (name params & body)
-  (list 'def (list '-private-meta name) (%cons 'fn (%cons params body))))
+;; `(defn- name [docstring] params body…)` — a PRIVATE fn (cross-namespace access
+;; errors). Like `defn`, a leading docstring is skipped (so `params` is always the
+;; real arg vector / multi-arity clauses).
+(defmacro defn- (name p2 & more)
+  (if (%num-eq (type-of p2) 'String)
+    (list 'def (list '-private-meta name) (%cons 'fn more))
+    (list 'def (list '-private-meta name) (%cons 'fn (%cons p2 more)))))
 
 ;; ─────────────── more clojure.core (library code) ───────────────
 (defn abs [n] (if (%lt n 0) (%sub 0 n) n))

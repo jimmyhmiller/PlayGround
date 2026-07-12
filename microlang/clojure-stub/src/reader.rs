@@ -38,6 +38,7 @@ enum Tok {
     Close(char), // ) ] }
     HashBrace,   // #{
     HashParen,   // #(  anonymous-fn literal
+    ReaderCond,  // #?  reader conditional (followed by a `(...)`)
     Quote,
     Backtick,      // `  syntax-quote
     Unquote,       // ~
@@ -80,6 +81,19 @@ fn tokenize(src: &str) -> Vec<Tok> {
                 out.push(Tok::HashParen);
                 out.push(Tok::Open('('));
                 i += 2;
+            }
+            // `#^{...}` / `#^Foo` — the old metadata reader macro, identical to `^`.
+            '#' if i + 1 < cs.len() && cs[i + 1] == '^' => {
+                out.push(Tok::Caret);
+                i += 2;
+            }
+            // `#?(...)` reader conditional. `#?@` (splicing) is not supported.
+            '#' if i + 1 < cs.len() && cs[i + 1] == '?' => {
+                if i + 2 < cs.len() && cs[i + 2] == '@' {
+                    panic!("reader: splicing reader conditional `#?@` not supported");
+                }
+                out.push(Tok::ReaderCond);
+                i += 2; // leave the `(` to tokenize as a normal Open
             }
             '\'' => {
                 out.push(Tok::Quote);
@@ -243,6 +257,19 @@ impl Parser {
                     target
                 }
             }
+            Tok::ReaderCond => {
+                // `#?(:platform form :platform form …)`. This dialect is JVM-free
+                // like ClojureScript, so we prefer the `:cljs` branch (its forms
+                // avoid Java interop that the `:clj` branch uses), then `:default`,
+                // then `:clj`, else the first form. All branches are READ (harmless)
+                // but only the selected one is kept.
+                match self.toks.get(self.pos) {
+                    Some(Tok::Open('(')) => self.pos += 1,
+                    _ => panic!("reader: #? must be followed by `(`"),
+                }
+                let items = self.until(rt, ')');
+                self.select_reader_cond(rt, &items)
+            }
             Tok::Backtick => self.wrap(rt, "syntax-quote"),
             Tok::Deref => self.wrap(rt, "deref"),
             Tok::Unquote => self.wrap(rt, "unquote"),
@@ -252,6 +279,22 @@ impl Parser {
             Tok::Atom(a) => self.atom(rt, &a),
             Tok::Open(c) | Tok::Close(c) => panic!("reader: unexpected {c}"),
         }
+    }
+
+    /// Pick a reader-conditional branch from `[kw form kw form …]`. Priority:
+    /// `:cljs` (JVM-free, like us), then `:default`, then `:clj`; if no platform
+    /// matches, the form vanishes (reads as `nil`).
+    fn select_reader_cond<M: ValueModel>(&mut self, rt: &mut Runtime<M>, items: &[u64]) -> u64 {
+        for pref in ["cljs", "default", "clj"] {
+            let mut i = 0;
+            while i + 1 < items.len() {
+                if kw_name(rt, items[i]).as_deref() == Some(pref) {
+                    return items[i + 1];
+                }
+                i += 2;
+            }
+        }
+        rt.encode(Val::Nil)
     }
 
     /// `(head <next-form>)` — for reader macros `'`, `` ` ``, `~`, `~@`.
@@ -356,6 +399,22 @@ fn alloc<M: ValueModel>(rt: &mut Runtime<M>, o: Obj) -> u64 {
 fn record<M: ValueModel>(rt: &mut Runtime<M>, ty: &str, fields: Vec<u64>) -> u64 {
     let type_id: Sym = rt.intern(ty);
     alloc(rt, Obj::Record { type_id, fields })
+}
+
+/// The name of a `:keyword` value (a `Keyword` record), or `None` for anything else.
+fn kw_name<M: ValueModel>(rt: &Runtime<M>, v: u64) -> Option<String> {
+    if let Val::Ref(id) = rt.decode(v) {
+        if let Obj::Record { type_id, fields } = &rt.heap()[id as usize] {
+            if rt.sym_name(*type_id) == KEYWORD {
+                if let Some(&f0) = fields.first() {
+                    if let Val::Sym(s) = rt.decode(f0) {
+                        return Some(rt.sym_name(s).to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Walk a `#(...)` body form (cons lists + record contents) collecting the

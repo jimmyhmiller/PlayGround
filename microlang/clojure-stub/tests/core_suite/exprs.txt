@@ -587,3 +587,7 @@
 (assert (= 1 1))
 (try (assert false) :ok (catch Throwable e :caught))
 (binding [*print-length* 4] (pr-str (list 1 2 3 4 5 6)))
+(do (defn- priv-fn "a docstring" [n] (* n n)) (priv-fn 6))
+(do (defn- ^{:dynamic true} pv "doc here" [a b] (+ a b)) (pv 3 4))
+(do (defn doc-multi "d" ([x] x) ([x y] (+ x y))) [(doc-multi 5) (doc-multi 2 3)])
+(do #^{:tag :meta} (def zz 7) zz)
