@@ -78,6 +78,10 @@ pub enum Prim {
     Rest,
     IsNil,
     Println,
+    /// `(%print x)` -> write `x`'s str-form to stdout with NO trailing newline.
+    /// The no-newline sibling of `Println`; the in-language `print`/`pr` families
+    /// build on it.
+    Print,
     /// Force a garbage collection. A safepoint you can place explicitly, so the
     /// GC-during-macro hazard is deterministic to demonstrate.
     Gc,

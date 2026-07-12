@@ -498,3 +498,50 @@
 (do (defrecord Point [x y]) (:x (map->Point {:x 7 :y 8})))	7
 (do (defrecord Point [x y]) (get (->Point 1 2) :z :nope))	:nope
 (do (defprotocol P (m [x])) (extend-protocol P Long (m [x] :n) String (m [x] :s)) [(m 1) (m "a")])	[:n :s]
+(nth "hello" 1)	\e
+(nth "hello" 0)	\h
+(nth "hi" 5 :none)	:none
+((fn f [n] (if (= n 0) 1 (* n (f (dec n))))) 5)	120
+((fn fib [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) 10)	55
+(map (fn sq [x] (* x x)) [1 2 3 4])	(1 4 9 16)
+((fn cnt ([] (cnt 0)) ([n] (if (< n 3) (cnt (inc n)) n))))	3
+(persistent! (conj! (transient []) 1))	[1]
+(persistent! (reduce conj! (transient []) [1 2 3 4]))	[1 2 3 4]
+(persistent! (assoc! (transient {}) :a 1))	{:a 1}
+(persistent! (dissoc! (transient {:a 1 :b 2}) :a))	{:b 2}
+(sort (persistent! (disj! (transient #{1 2 3}) 2)))	(1 3)
+(persistent! (pop! (transient [1 2 3])))	[1 2]
+(tree-seq seq? identity (quote (1 (2 3))))	((1 (2 3)) 1 (2 3) 2 3)
+(tree-seq vector? seq [1 [2 [3]]])	([1 [2 [3]]] 1 [2 [3]] 2 [3] 3)
+(do (derive ::dog ::animal) (isa? ::dog ::animal))	true
+(do (derive ::cat ::animal) (derive ::animal ::thing) (isa? ::cat ::thing))	true
+(do (derive ::a ::b) (= (parents ::a) #{::b}))	true
+(do (derive ::x ::y) (derive ::y ::z) (= (ancestors ::x) #{::y ::z}))	true
+(do (derive ::p ::q) (derive ::r ::q) (contains? (descendants ::q) ::p))	true
+(isa? 5 5)	true
+(do (derive ::dog ::animal) (derive ::cat ::animal) (isa? [::dog ::cat] [::animal ::animal]))	true
+(boolean nil)	false
+(boolean 0)	true
+(boolean "")	true
+(with-out-str (println "hi"))	"hi\n"
+(with-out-str (println 1 2 3))	"1 2 3\n"
+(with-out-str (print "a" "b"))	"a b"
+(with-out-str (pr [1 2 3]))	"[1 2 3]"
+(with-out-str (prn "x"))	"\"x\"\n"
+(with-out-str (pr "quoted"))	"\"quoted\""
+(with-out-str (newline))	"\n"
+(with-out-str (dotimes [i 3] (print i)))	"012"
+(format "%d and %s" 5 "cats")	"5 and cats"
+(format "%5d" 42)	"   42"
+(format "%-5d|" 42)	"42   |"
+(format "%05d" 42)	"00042"
+(format "%x" 255)	"ff"
+(format "%X" 255)	"FF"
+(format "%o" 64)	"100"
+(format "%.2f" 3.14159)	"3.14"
+(format "%.0f" 2.7)	"3"
+(format "%.3s" "hello")	"hel"
+(format "%c%c" \h \i)	"hi"
+(format "%b" (= 1 1))	"true"
+(format "100%% done")	"100% done"
+(clojure.string/join "," (map str [1 2 3]))	"1,2,3"

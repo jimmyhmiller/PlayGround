@@ -955,8 +955,15 @@ impl<M: ValueModel> Runtime<M> {
                 self.encode(Val::Bool(r))
             }
             Prim::Println => {
-                let s = self.print(args[0]);
+                let s = self.str_form(args[0]);
                 println!("{s}");
+                self.enc_nil()
+            }
+            Prim::Print => {
+                let s = self.str_form(args[0]);
+                print!("{s}");
+                use std::io::Write as _;
+                let _ = std::io::stdout().flush();
                 self.enc_nil()
             }
             Prim::Gc => {
@@ -1625,6 +1632,16 @@ impl<M: ValueModel> Runtime<M> {
     }
 
     // ── printing ────────────────────────────────────────────
+    /// The `str`-form of a value: a string yields its raw content (no quotes);
+    /// everything else uses the neutral printer. Mirrors `StrOf`.
+    pub fn str_form(&self, bits: u64) -> String {
+        if let Val::Ref(id) = self.decode(bits) {
+            if let Obj::Str(s) = &self.heap()[id as usize] {
+                return s.clone();
+            }
+        }
+        self.print(bits)
+    }
     pub fn print(&self, bits: u64) -> String {
         match self.decode(bits) {
             Val::Int(i) => i.to_string(),
@@ -1644,7 +1661,24 @@ impl<M: ValueModel> Runtime<M> {
                     let inner: Vec<String> = items.iter().map(|&x| self.print(x)).collect();
                     format!("({})", inner.join(" "))
                 }
-                Obj::Str(s) => format!("\"{s}\""),
+                Obj::Str(s) => {
+                    // Readable form: escape the reader-significant chars so the
+                    // output round-trips (matches Clojure's pr on strings).
+                    let mut out = String::with_capacity(s.len() + 2);
+                    out.push('"');
+                    for c in s.chars() {
+                        match c {
+                            '"' => out.push_str("\\\""),
+                            '\\' => out.push_str("\\\\"),
+                            '\n' => out.push_str("\\n"),
+                            '\t' => out.push_str("\\t"),
+                            '\r' => out.push_str("\\r"),
+                            _ => out.push(c),
+                        }
+                    }
+                    out.push('"');
+                    out
+                }
                 Obj::Char(c) => c.to_string(),
                 Obj::Vector(elems) => {
                     let inner: Vec<String> = elems.iter().map(|&x| self.print(x)).collect();

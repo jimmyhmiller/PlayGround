@@ -831,9 +831,63 @@ fn expand_fn<M: ValueModel>(
     form: u64,
 ) -> u64 {
     let items = rt.list_to_vec(form);
-    let mut i = 1;
+    let i = 1;
     if i < items.len() && matches!(rt.decode(items[i]), Val::Sym(_)) {
-        i += 1; // drop the self-name
+        // Named fn `(fn name . clauses)`: `name` must be in scope inside the body,
+        // bound to the closure itself (letrec semantics — supports general, not
+        // just tail, recursion). Desugar via a cell that holds the closure:
+        //   (let [-box (%atom-new nil)]
+        //     (%atom-set -box (fn . clauses'))    ; clauses' wrap each body with
+        //     (%atom-get -box))                   ;   (let [name (%atom-get -box)] ..)
+        // so `name` derefs the closure at CALL time (the atom is filled by then).
+        let name = items[i];
+        let box_sym = gensym(rt, "self-box");
+        let rest = &items[i + 1..];
+        // Wrap the clause bodies so `name` resolves to `(%atom-get box)`.
+        let cellref = {
+            let cr = sym(rt, "%atom-get");
+            rt.vec_to_list(&[cr, box_sym])
+        };
+        let wrap_body = |rt: &mut Runtime<M>, body: &[u64]| -> u64 {
+            let letk = sym(rt, "let");
+            let bvec = make_vector(rt, vec![name, cellref]);
+            let mut lf = vec![letk, bvec];
+            lf.extend_from_slice(body);
+            rt.vec_to_list(&lf)
+        };
+        // single-arity iff rest[0] is a params container (vector / legacy sym-list)
+        // or there is no clause at all.
+        let single = rest.is_empty()
+            || binding_items(rt, rest[0]).is_some()
+            || rt.as_cons(rest[0]).map(|(h, _)| matches!(rt.decode(h), Val::Sym(_))).unwrap_or(true);
+        let fnk = sym(rt, "fn");
+        let inner_fn = if single {
+            let params = if rest.is_empty() { make_vector(rt, vec![]) } else { rest[0] };
+            let wrapped = wrap_body(rt, if rest.is_empty() { &[] } else { &rest[1..] });
+            rt.vec_to_list(&[fnk, params, wrapped])
+        } else {
+            let mut clauses = vec![fnk];
+            for &cl in rest {
+                let cv = rt.list_to_vec(cl);
+                let params = cv[0];
+                let wrapped = wrap_body(rt, &cv[1..]);
+                clauses.push(rt.vec_to_list(&[params, wrapped]));
+            }
+            rt.vec_to_list(&clauses)
+        };
+        let cellk = sym(rt, "%atom-new");
+        let niln = rt.encode(Val::Nil);
+        let cellnew = rt.vec_to_list(&[cellk, niln]);
+        let setk = sym(rt, "%atom-set");
+        let setf = rt.vec_to_list(&[setk, box_sym, inner_fn]);
+        let letk = sym(rt, "let");
+        let bvec = make_vector(rt, vec![box_sym, cellnew]);
+        let cellref2 = {
+            let cr = sym(rt, "%atom-get");
+            rt.vec_to_list(&[cr, box_sym])
+        };
+        let letform = rt.vec_to_list(&[letk, bvec, setf, cellref2]);
+        return expand(rt, cs, macros, comp, letform);
     }
     // Single-arity: params are a `[..]` vector, a `(a b)` symbol-list (our legacy
     // style), or empty. Multi-arity: each element is a CLAUSE `([params] body)`

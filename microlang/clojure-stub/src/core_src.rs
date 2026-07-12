@@ -351,7 +351,12 @@ pub const CORE: &str = r##"
         e (if (nil? end) (%str-len s) (first end))]
     (apply str (take (- e start) (drop start cs)))))
 (defn nth [c i & d]
-  (if (and (seq d) (or (neg? i) (not (< i (count c))))) (first d) (-nth c i)))
+  (cond
+    (string? c) (if (and (>= i 0) (< i (%str-len c)))
+                  (nth-seq (%str->chars c) i)
+                  (if (seq d) (first d) (throw (str "String index out of bounds: " i))))
+    (and (seq d) (or (neg? i) (not (< i (count c))))) (first d)
+    :else (-nth c i)))
 (defn conj
   ([] [])
   ([c] c)
@@ -953,20 +958,235 @@ pub const CORE: &str = r##"
 ;; as the fallback). Calling it computes `(dispatch-fn args...)`, looks the value
 ;; up, and applies the chosen method to the same args. Dispatch values compare by
 ;; structural equality (so keywords / numbers / vectors all work as keys).
-(defn -make-multi [df] (record 'MultiFn df (atom (hash-map))))
+;; MultiFn record: (record 'MultiFn dispatch-fn method-table-atom prefers-atom).
+(defn -make-multi [df] (record 'MultiFn df (atom (hash-map)) (atom (hash-map))))
 (defn multi? [x] (%num-eq (type-of x) 'MultiFn))
 (defn -add-method [mf dval method]
   (let [a (field mf 1)] (reset! a (assoc (deref a) dval method))))
+(defn -prefers [mf] (deref (field mf 2)))
+;; Does `a` win over `b` for this multimethod (transitively via the prefers graph)?
+(defn -mf-prefers? [mf a b]
+  (let [pm (-prefers mf) pa (get pm a)]
+    (boolean (or (contains? pa b)
+                 (some (fn [x] (-mf-prefers? mf x b)) pa)))))
+;; Resolve the dispatch value to a method, honoring `isa?` and `prefer-method`.
 (defn -multi-lookup [mf dval]
   (let [tbl (deref (field mf 1))]
-    (cond (contains? tbl dval) (get tbl dval)
-          (contains? tbl :default) (get tbl :default)
-          true (throw (str "no method for dispatch value: " dval)))))
+    (if (contains? tbl dval)
+      (get tbl dval)
+      (let [matches (filter (fn [k] (and (not= k :default) (isa? dval k))) (keys tbl))]
+        (cond
+          (empty? matches) (if (contains? tbl :default) (get tbl :default)
+                             (throw (str "No method in multimethod for dispatch value: " dval)))
+          (= 1 (count matches)) (get tbl (first matches))
+          :else (let [best (reduce (fn [a b] (cond (nil? a) b
+                                                    (-mf-prefers? mf a b) a
+                                                    (-mf-prefers? mf b a) b
+                                                    (isa? b a) b
+                                                    (isa? a b) a
+                                                    :else (throw (str "Multiple methods match dispatch value: " dval " -> " a " and " b ", and neither is preferred"))))
+                            nil matches)]
+                  (get tbl best)))))))
 (defn -multi-call [mf args]
   (apply (-multi-lookup mf (apply (field mf 0) args)) args))
+(defn -mf-prefer [mf a b]
+  (let [pa (field mf 2)] (reset! pa (assoc (deref pa) a (conj (get (deref pa) a (hash-set)) b))) nil))
+(defn prefer-method [mf a b] (-mf-prefer mf a b))
+(defn prefers [mf] (-prefers mf))
+(defn methods [mf] (deref (field mf 1)))
+(defn get-method [mf dval] (-multi-lookup mf dval))
+(defn remove-method [mf dval] (let [a (field mf 1)] (reset! a (dissoc (deref a) dval)) mf))
+(defn remove-all-methods [mf] (let [a (field mf 1)] (reset! a (hash-map)) mf))
 (defmacro defmulti (name dispatch-fn) (list 'def name (list '-make-multi dispatch-fn)))
 (defmacro defmethod (name dval params & body)
   (list '-add-method name dval (%cons 'fn (%cons params body))))
+
+;; ─────────────── ad-hoc hierarchy (derive / isa? / parents / …) ───────────────
+;; A hierarchy is {:parents {tag #{parents}} :ancestors {tag #{transitive}}
+;; :descendants {tag #{transitive}}}, held in a global atom for the arity-1 forms.
+;; Faithful port of clojure.core's derive/underive/isa?.
+(defn make-hierarchy [] {:parents {} :ancestors {} :descendants {}})
+(def -global-hierarchy (atom (make-hierarchy)))
+(defn parents
+  ([tag] (parents (deref -global-hierarchy) tag))
+  ([h tag] (get (:parents h) tag)))
+(defn ancestors
+  ([tag] (ancestors (deref -global-hierarchy) tag))
+  ([h tag] (get (:ancestors h) tag)))
+(defn descendants
+  ([tag] (descendants (deref -global-hierarchy) tag))
+  ([h tag] (get (:descendants h) tag)))
+(defn isa?
+  ([child parent] (isa? (deref -global-hierarchy) child parent))
+  ([h child parent]
+   (boolean
+    (or (= child parent)
+        (contains? (get (:ancestors h) child) parent)
+        (and (vector? child) (vector? parent)
+             (= (count child) (count parent))
+             (loop [i 0]
+               (cond (= i (count child)) true
+                     (isa? h (nth child i) (nth parent i)) (recur (inc i))
+                     :else false)))))))
+(defn -tf [m source sources target targets]
+  (reduce (fn [ret k]
+            (assoc ret k (reduce conj (get targets k (hash-set)) (cons target (get targets target)))))
+          m (cons source (get sources source))))
+(defn derive
+  ([tag parent]
+   (reset! -global-hierarchy (derive (deref -global-hierarchy) tag parent)) nil)
+  ([h tag parent]
+   (let [tp (:parents h) td (:descendants h) ta (:ancestors h)]
+     (when (contains? (get ta tag) parent)
+       (throw (str tag " already has " parent " as ancestor")))
+     (when (contains? (get ta parent) tag)
+       (throw (str "Cyclic derivation: " parent " has " tag " as ancestor")))
+     (if (contains? (get tp tag) parent)
+       h
+       {:parents (assoc tp tag (conj (get tp tag (hash-set)) parent))
+        :ancestors (-tf ta tag td parent ta)
+        :descendants (-tf td parent ta tag td)}))))
+(defn underive
+  ([tag parent]
+   (reset! -global-hierarchy (underive (deref -global-hierarchy) tag parent)) nil)
+  ([h tag parent]
+   (let [tp (:parents h)
+         np (disj (get tp tag (hash-set)) parent)
+         parentmap (if (seq np) (assoc tp tag np) (dissoc tp tag))
+         ;; rebuild ancestor/descendant closure from scratch over the new parent map
+         rebuild (reduce (fn [hh [t ps]] (reduce (fn [h2 p] (derive h2 t p)) hh ps))
+                         (make-hierarchy) parentmap)]
+     (if (contains? (get tp tag) parent) rebuild h))))
+
+;; ─────────────── type / gensym / boolean ───────────────
+(defn boolean [x] (if x true false))
+(defn type [x] (let [m (meta x)] (if (and m (contains? m :type)) (:type m) (type-of x))))
+(def -gensym-counter (atom 0))
+(defn gensym
+  ([] (gensym "G__"))
+  ([prefix] (symbol (str prefix (swap! -gensym-counter inc)))))
+
+;; ─────────────── transients (value-level; the in-place optimization is a
+;; no-op here, but the persistent result is identical, which is all a program
+;; that uses the return value can observe) ───────────────
+(defn transient [coll] coll)
+(defn persistent! [coll] coll)
+(defn conj! ([] (transient [])) ([coll] coll) ([coll x] (conj coll x)))
+(defn assoc! [coll k v] (assoc coll k v))
+(defn dissoc! [coll k] (dissoc coll k))
+(defn disj! [coll x] (disj coll x))
+(defn pop! [coll] (pop coll))
+
+;; ─────────────── metadata combinators ───────────────
+(defn vary-meta [obj f & args] (with-meta obj (apply f (meta obj) args)))
+
+;; ─────────────── tree walking ───────────────
+(defn -tree-walk [branch? children node]
+  (lazy-seq
+   (cons node
+         (when (branch? node)
+           (mapcat (fn [c] (-tree-walk branch? children c)) (children node))))))
+(defn tree-seq [branch? children root] (-tree-walk branch? children root))
+
+;; ─────────────── printing ───────────────
+;; `*out*` = nil -> real stdout; an atom -> a capture buffer (used by with-out-str).
+(def ^:dynamic *out* nil)
+(defn -emit [s] (if (nil? *out*) (%print s) (swap! *out* str s)) nil)
+(def -newline-str (%str-of (%char-of 10)))
+(defn print [& xs] (-emit (apply print-str xs)))
+(defn println [& xs] (-emit (str (apply print-str xs) -newline-str)))
+(defn pr [& xs] (-emit (apply pr-str xs)))
+(defn prn [& xs] (-emit (str (apply pr-str xs) -newline-str)))
+(defn newline [] (-emit -newline-str))
+(defn flush [] nil)
+(defmacro with-out-str (& body)
+  (list 'let (vector '-sb (list 'atom ""))
+        (%cons 'binding (%cons (vector '*out* '-sb) body))
+        (list 'deref '-sb)))
+
+;; ─────────────── format / printf (subset of java.util.Formatter) ───────────────
+;; Supports %[-0][width][.prec]<conv> for conv in s d x X o c b n %.
+(defn -has-char? [s c] (some (fn [x] (= x c)) (%str->chars s)))
+(defn -pad-str [s width left? zero?]
+  (let [n (- width (count s))]
+    (if (<= n 0) s
+      (let [p (apply str (repeat n (if (and zero? (not left?)) "0" " ")))]
+        (if left? (str s p) (str p s))))))
+(defn -int->radix [n radix]
+  (if (= n 0) "0"
+    (let [neg? (< n 0) n (if neg? (- n) n)
+          digs "0123456789abcdef"
+          go (fn go [n acc] (if (= n 0) acc (recur (quot n radix) (cons (nth digs (rem n radix)) acc))))]
+      (str (if neg? "-" "") (apply str (go n nil))))))
+;; round the decimal string of a float to `prec` places (string-based: no
+;; float->int primitive needed). Splits on the point, pads/truncates with
+;; round-half-up carry propagation.
+(defn -str-carry [digs]
+  ;; digs: seq of digit chars for the integer part, LSB first; add 1, return chars MSB-first
+  (loop [ds (seq digs) carry 1 acc nil]
+    (if (nil? ds)
+      (if (= carry 1) (cons \1 acc) acc)
+      (let [d (+ (- (%char-code (first ds)) 48) carry)]
+        (recur (next ds) (quot d 10) (cons (%char-of (+ 48 (rem d 10))) acc))))))
+(defn -float->fixed [x prec]
+  (let [neg? (< x 0)
+        s (str (if neg? (- x) x))
+        ;; strip scientific if present is out of scope; assume plain decimal repr
+        dot (loop [cs (%str->chars s) i 0] (cond (nil? (seq cs)) -1 (= (first cs) \.) i :else (recur (rest cs) (inc i))))
+        ipart (if (= dot -1) s (subs s 0 dot))
+        fpart (if (= dot -1) "" (subs s (inc dot)))
+        fpad (str fpart (apply str (repeat (max 0 (- (inc prec) (count fpart))) "0")))
+        keep (subs fpad 0 prec)
+        rup? (and (< prec (count fpad)) (>= (- (%char-code (nth fpad prec)) 48) 5))
+        combined (str ipart keep)
+        rounded (if rup? (apply str (-str-carry (reverse (%str->chars combined)))) combined)
+        rlen (count rounded)
+        ni (- rlen prec)
+        ip2 (if (<= ni 0) "0" (subs rounded 0 ni))
+        fp2 (subs rounded (max 0 ni))
+        fp3 (str (apply str (repeat (max 0 (- prec (count fp2))) "0")) fp2)]
+    (str (if neg? "-" "") ip2 (if (= prec 0) "" (str "." fp3)))))
+;; parse one %-directive starting at index i (cs is the char vector); returns
+;; [consumed-count flags width prec conv]
+(defn -fmt-spec [cs i]
+  (let [n (count cs)
+        rd (fn rd [j flags] (if (and (< j n) (or (= (nth cs j) \-) (= (nth cs j) \0) (= (nth cs j) \+) (= (nth cs j) \space) (= (nth cs j) \#)))
+                              (rd (inc j) (str flags (nth cs j))) [j flags]))
+        [j flags] (rd i "")
+        rn (fn rn [j acc] (if (and (< j n) (-digit? (nth cs j))) (rn (inc j) (str acc (nth cs j))) [j acc]))
+        [j2 ws] (rn j "")
+        [j3 ps] (if (and (< j2 n) (= (nth cs j2) \.)) (rn (inc j2) "") [j2 nil])
+        conv (nth cs j3)]
+    [(- (inc j3) i) flags (if (= ws "") nil (-parse-digits (%str->chars ws))) (if (nil? ps) nil (-parse-digits (%str->chars ps))) conv]))
+(defn -fmt-conv [conv flags width prec arg]
+  (let [left? (-has-char? flags \-)
+        zero? (-has-char? flags \0)
+        body (cond
+               (= conv \s) (let [s (str arg)] (if (nil? prec) s (subs s 0 (min prec (count s)))))
+               (= conv \d) (str arg)
+               (= conv \x) (-int->radix arg 16)
+               (= conv \X) (apply str (map (fn [c] (let [n (%char-code c)] (if (and (>= n 97) (<= n 122)) (%char-of (- n 32)) c))) (%str->chars (-int->radix arg 16))))
+               (= conv \o) (-int->radix arg 8)
+               (= conv \c) (str arg)
+               (= conv \b) (str (boolean arg))
+               (= conv \f) (-float->fixed arg (if (nil? prec) 6 prec))
+               :else (throw (str "Unsupported format conversion: %" conv)))]
+    (if (nil? width) body (-pad-str body width left? zero?))))
+(defn format [fmt & args]
+  (let [cs (%str->chars fmt) n (count cs)]
+    (loop [i 0 args (seq args) out ""]
+      (if (>= i n) out
+        (let [c (nth cs i)]
+          (if (= c \%)
+            (if (= (nth cs (inc i)) \%)
+              (recur (+ i 2) args (str out "%"))
+              (if (= (nth cs (inc i)) \n)
+                (recur (+ i 2) args (str out -newline-str))
+                (let [[consumed flags width prec conv] (-fmt-spec cs (inc i))]
+                  (recur (+ i 1 consumed) (rest args)
+                         (str out (-fmt-conv conv flags width prec (first args)))))))
+            (recur (inc i) args (str out (str c)))))))))
+(defn printf [fmt & args] (-emit (apply format fmt args)))
 
 ;; ─────────────── realization (force a lazy result for printing) ───────────────
 ;; The Rust printer can't invoke thunks, so `run` calls this on the final value
@@ -1218,10 +1438,29 @@ pub const CORE: &str = r##"
 (defn unchecked-divide-int [a b] (%quot a b))
 
 ;; ─────────────── readable printing (pr-str family, pure) ───────────────
+;; escape one char for inside a readable string literal
+(defn -esc-char [c]
+  (let [n (%char-code c)]
+    (cond (= n 34) (str (%char-of 92) (%char-of 34))
+          (= n 92) (str (%char-of 92) (%char-of 92))
+          (= n 10) (str (%char-of 92) "n")
+          (= n 9) (str (%char-of 92) "t")
+          (= n 13) (str (%char-of 92) "r")
+          :else (str c))))
+;; readable form of a character literal (Clojure names the special ones)
+(defn -pr-char [x]
+  (let [n (%char-code x) bs (%char-of 92)]
+    (cond (= n 10) (str bs "newline")
+          (= n 32) (str bs "space")
+          (= n 9) (str bs "tab")
+          (= n 13) (str bs "return")
+          (= n 12) (str bs "formfeed")
+          (= n 8) (str bs "backspace")
+          :else (str bs x))))
 (defn -pr [x]
   (cond (nil? x) "nil"
-        (string? x) (str (%char-of 34) x (%char-of 34))
-        (char? x) (str (%char-of 92) x)
+        (string? x) (str (%char-of 34) (apply str (map -esc-char (%str->chars x))) (%char-of 34))
+        (char? x) (-pr-char x)
         (keyword? x) (str ":" (name-with-ns x))
         (symbol? x) (str x)
         (vector? x) (str "[" (apply str (interpose " " (map -pr x))) "]")

@@ -75,7 +75,7 @@ impl Compiler {
             ("%register-fields", RegisterFields), ("%field-by-name", FieldByName), ("%field-names", FieldNames), ("%make-record", MakeRecord), ("%hash", Hash),
             ("%first", First), ("%rest", Rest), ("%cons", Cons),
             ("record", Record), ("field", Field), ("type-of", TypeOf), ("nfields", NFields), ("throw", Throw),
-            ("nil?", IsNil), ("list", List), ("println", Println), ("gc", Gc),
+            ("nil?", IsNil), ("list", List), ("%println", Println), ("%print", Print), ("gc", Gc),
             // Mutable 1-slot cell backing atoms (a real mutable array, unlike the
             // immutable list-backed clojure `vector`).
             ("%cell", Vector), ("%cell-ref", VectorRef), ("%cell-set!", VectorSet),
