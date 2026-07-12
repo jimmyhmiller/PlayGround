@@ -179,10 +179,10 @@ pub const CLJS: &str = r##"
   (-empty [coll] (-with-meta -EMPTY-PV meta))
 
   IEquiv
+  ;; A vector is `=` to any SEQUENTIAL collection (vector / list / lazy-seq) with the
+  ;; same elements, not just other vectors (Clojure: `(= [1 2] '(1 2))` is true).
   (-equiv [coll other]
-    (if (vector? other)
-      (if (== cnt (count other)) (-seq-eq coll other) false)
-      false))
+    (if (-seqlike? other) (-seq-eq coll other) false))
 
   IHash
   (-hash [coll] (caching-hash coll hash-ordered-coll __hash))

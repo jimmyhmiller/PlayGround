@@ -611,3 +611,11 @@
 (do (defn h [& {:keys [x]}] x) (h {:x 7}))	7
 (let [{:keys [a b] :or {b 0}} {:a 5}] [a b])	[5 0]
 (let [{a :aa b :bb} {:aa 1 :bb 2}] [a b])	[1 2]
+(= [1 2] (list 1 2))	true
+(= (list 1 2) [1 2])	true
+(= [1 2] (map identity [1 2]))	true
+(= [] (list))	true
+(= [1] #{1})	false
+(= [1 2 3] [1 2 3])	true
+(= (seq [1 2]) [1 2])	true
+(= [1 2] (list 1 2 3))	false

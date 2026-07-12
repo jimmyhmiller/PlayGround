@@ -279,9 +279,12 @@ pub const CORE: &str = r##"
 ;; Sequential seqs (list / lazy-seq / empty-list) compare `=` element-wise with
 ;; each other (but NOT with vectors) — matching Clojure, where `(= '(1 2) (map …))`
 ;; is true but `(= '(1 2) [1 2])` is false.
+;; A "sequential" collection for `=`: lists, lazy-seqs, empty-list, AND vectors all
+;; compare element-wise with each other (Clojure: `(= [1 2] '(1 2))` is true), but
+;; NOT with sets/maps.
 (defn -seqlike? [x]
   (let [t (type-of x)]
-    (or (%num-eq t 'List) (%num-eq t 'LazySeq) (%num-eq t 'EmptyList))))
+    (or (%num-eq t 'List) (%num-eq t 'LazySeq) (%num-eq t 'EmptyList) (vector? x))))
 (extend-type List
   ISeqable (-seq [l] l)
   ISeq (-first [l] (%first l)) (-rest [l] (%rest l))
