@@ -34,6 +34,11 @@ pub struct GpuGraph {
     pub grid_dim: u32,
     pub grid_cap: u32,
     pub world_size: f32,
+
+    /// Coarse center-of-mass grid for far-field repulsion.
+    pub coarse_com: wgpu::Buffer,
+    pub coarse_mass: wgpu::Buffer,
+    pub coarse_dim: u32,
 }
 
 impl GpuGraph {
@@ -132,9 +137,27 @@ impl GpuGraph {
             mapped_at_creation: false,
         });
 
+        // Coarse grid for far-field: kept small so the per-node far-field loop
+        // (coarse_dim^2 iterations) stays cheap, but large enough that a coarse
+        // cell is only a few fine cells wide.
+        let coarse_dim = grid_dim.min(64).max(1);
+        let ncoarse = (coarse_dim as u64) * (coarse_dim as u64);
+        let coarse_com = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("coarse_com"),
+            size: ncoarse * 8, // vec2<f32>
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let coarse_mass = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("coarse_mass"),
+            size: ncoarse * 4, // f32
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         log::info!(
-            "GpuGraph: {} nodes, {} edges, grid {}x{} cap {} (world {:.0})",
-            num_nodes, num_edges, grid_dim, grid_dim, grid_cap, world_size
+            "GpuGraph: {} nodes, {} edges, grid {}x{} cap {}, coarse {}x{} (world {:.0})",
+            num_nodes, num_edges, grid_dim, grid_dim, grid_cap, coarse_dim, coarse_dim, world_size
         );
 
         GpuGraph {
@@ -152,6 +175,9 @@ impl GpuGraph {
             grid_dim,
             grid_cap,
             world_size,
+            coarse_com,
+            coarse_mass,
+            coarse_dim,
         }
     }
 

@@ -52,6 +52,8 @@ pub struct RunOptions {
     pub screenshot: Option<String>,
     /// Color mode to apply on startup.
     pub color_mode: ColorMode,
+    pub draw_edges: bool,
+    pub draw_nodes: bool,
 }
 
 impl Default for RunOptions {
@@ -63,6 +65,8 @@ impl Default for RunOptions {
             max_frames: None,
             screenshot: None,
             color_mode: ColorMode::Uniform,
+            draw_edges: true,
+            draw_nodes: true,
         }
     }
 }
@@ -156,6 +160,9 @@ impl App {
         let (min, max) = bounds(&self.seed_positions);
         self.camera.fit_bounds(min, max);
 
+        let mut renderer = renderer;
+        renderer.draw_edges = self.opts.draw_edges;
+        renderer.draw_nodes = self.opts.draw_nodes;
         self.live = Some(Live { window, gpu, graph_gpu, renderer, layout });
         self.apply_color_mode();
         self.update_title();
@@ -301,6 +308,13 @@ impl App {
             self.frame_count = 0;
             self.fps_timer = now;
             self.update_title();
+            log::info!(
+                "{:.1} fps · {} sim-steps/frame · {} nodes · {} edges",
+                self.fps,
+                self.settings.substeps,
+                self.graph.num_nodes(),
+                self.graph.num_edges()
+            );
         }
         self.last_frame = now;
     }

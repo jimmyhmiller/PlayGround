@@ -56,8 +56,47 @@ between them; after Phase 4 the Shared comparison extends to the edit scenario.
 - [x] **Phase 2** — one step function (`exec::step_instruction` over `Machine`); `run_actor` match and `execute` both deleted.
 - [x] **Phase 3** — one managed `Frame` (interp + Shared) + one `frame_roots`. (JIT `RawSlot` widening deferred to Phase 5, where JIT-FFI exercises it.)
 - [x] **Phase 4** — live edit on the concurrent runtime. Install logic is now one `impl World` path used by both tiers; `Shared.world` is an `RwLock` a worker reads per step and an editor writes between steps; `Shared::install_*` are live. Proven by `tests/live_concurrent.rs` (a worker thread's function hot-swapped between two of its calls, deterministic via message-passing handshake). *(Note: edits use the world `RwLock`, not the GC safepoint — simpler and sufficient; a tight-loop worker could in theory writer-starve on a platform with reader-preferring `RwLock`, a later fairness tweak.)*
-- [ ] **Phase 5** — JIT under threads + version-cached recompile + widen `RawSlot`.
-- [ ] **Phase 6** — delete the trap-gated feature silos.
+- [~] **Phase 5** — *partly blocked, see below.* JIT-under-threads and
+  version-cached recompile are gated by two real constraints discovered during
+  implementation; not faked.
+- [~] **Phase 6** — *managed tiers done.* FFI + globals now run on the
+  concurrent tier (`tests/live_concurrent.rs::ffi_and_globals_run_on_the_concurrent_tier`),
+  so the interpreter and concurrent tiers are feature-reaching for FFI/globals.
+  The remaining silos are JIT-only or unreachable-from-source (see below).
+
+## What actually remains, and the real constraints
+
+Phases 1–4 delivered the core unification (one heap, one step semantics, one
+managed frame, one install path, live-edit across threads) — all tested and
+Miri-clean. Phase 6 removed the practically-important silo (FFI/globals on the
+concurrent tier). What's left is dominated by the JIT, and two constraints make
+it a bounded *follow-on* rather than a quick edit:
+
+1. **The LLVM/Miri boundary.** `livetype-core` (which owns the concurrent tier)
+   is deliberately LLVM-free so its concurrency can be checked under Miri/TSan.
+   The JIT lives in the `livetype` crate and its externs take `*mut Runtime`
+   (the single-threaded runtime). "Worker threads execute JIT step functions"
+   therefore needs the JIT externs re-pointed at the thread-safe `Shared`
+   (heap/world/globals/foreign registry) with the threaded driver living in the
+   `livetype` crate — a real restructure, not a breach of the boundary. The
+   compiled code itself is callable from many threads; the work is the externs +
+   per-thread `RawFrame` marshalling + safepoint polling in the driver.
+2. **inkwell self-referential lifetimes.** `Compiled<'ctx>` borrows its
+   `Context`, so caching a compiled module across `drive()` calls (version-cached
+   recompile) fights the borrow checker; recompile-per-run was the deliberate
+   workaround. A cache needs an ownership shim (e.g. `ouroboros`) or a leaked
+   per-generation `Context`.
+
+Lower-urgency remaining silos (reachable only by hand-built IR, not from the
+surface language, so low practical value today):
+- **Interpreter message passing** (`Send`/`Recv`): needs a parked-actor
+  scheduler state + deadlock detection in `run()`; and there's no `send`/`recv`
+  surface syntax to reach it, so it's inert from source.
+- **JIT FFI/globals/message passing**: needs `RawSlot` widened to a tagged
+  two-word slot (to carry `Foreign{kind,ptr}`) plus `lt_call_foreign` /
+  `lt_load_global` externs. The `Machine`/`step_instruction` seam already makes
+  each an `Unsupported` answer that traps clearly; wiring them is mechanical once
+  the slot is widened.
 
 ## Hard problems to solve along the way
 

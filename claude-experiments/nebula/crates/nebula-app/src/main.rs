@@ -48,6 +48,9 @@ struct Args {
     frames: Option<u64>,
     screenshot: Option<String>,
     color: ColorMode,
+    paused: bool,
+    no_edges: bool,
+    no_nodes: bool,
 }
 
 enum Gen {
@@ -121,6 +124,7 @@ fn main() -> anyhow::Result<()> {
     let mut settings = LayoutSettings {
         k: args.k,
         substeps: args.substeps,
+        running: !args.paused,
         ..Default::default()
     };
     if let Some(dt) = args.dt {
@@ -134,6 +138,8 @@ fn main() -> anyhow::Result<()> {
         max_frames: args.frames,
         screenshot: args.screenshot,
         color_mode: args.color,
+        draw_edges: !args.no_edges,
+        draw_nodes: !args.no_nodes,
     };
 
     let app = App::new(graph, positions, opts);
@@ -150,6 +156,9 @@ fn parse_args() -> Result<Args, String> {
     let mut frames = None;
     let mut screenshot = None;
     let mut color = ColorMode::Uniform;
+    let mut paused = false;
+    let mut no_edges = false;
+    let mut no_nodes = false;
 
     fn next_u64(it: &mut impl Iterator<Item = String>, name: &str) -> Result<u64, String> {
         it.next()
@@ -196,6 +205,9 @@ fn parse_args() -> Result<Args, String> {
             "--seed" => seed = next_u64(&mut it, "--seed")?,
             "--dt" => dt = Some(next_f32(&mut it, "--dt")?),
             "--substeps" => substeps = next_u32(&mut it, "--substeps")?,
+            "--paused" => paused = true,
+            "--no-edges" => no_edges = true,
+            "--no-nodes" => no_nodes = true,
             "--frames" => frames = Some(next_u64(&mut it, "--frames")?),
             "--screenshot" => screenshot = Some(it.next().ok_or("--screenshot needs a path")?),
             "--color" => {
@@ -223,5 +235,8 @@ fn parse_args() -> Result<Args, String> {
         frames,
         screenshot,
         color,
+        paused,
+        no_edges,
+        no_nodes,
     })
 }

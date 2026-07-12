@@ -335,13 +335,17 @@ impl World {
 }
 
 impl Runtime {
-    /// Hand off this runtime's world and heap to the thread-safe [`crate::Shared`]
-    /// tier. All setup — schema/function installs, auto-derived migrations,
-    /// verification — is done through the ordinary single-threaded API and then
-    /// frozen for concurrent execution. The heap is the *same* [`Heap`]; the
-    /// concurrent tier shares it behind an `Arc` rather than rebuilding it.
-    pub fn into_parts(self) -> (World, Heap) {
-        (self.world, self.heap)
+    /// Hand off this runtime's world, heap, globals, and foreign implementations
+    /// to the thread-safe [`crate::Shared`] tier. All setup is done through the
+    /// ordinary single-threaded API (including running `letonce` initializers
+    /// and registering native functions) and then frozen for concurrent
+    /// execution — so an FFI program built and initialized single-threaded runs,
+    /// and stays editable, across worker threads. The heap is the *same*
+    /// [`Heap`], shared behind an `Arc` rather than rebuilt.
+    pub fn into_parts(
+        self,
+    ) -> (World, Heap, BTreeMap<DefId, Value>, BTreeMap<ForeignFnId, ForeignFn>) {
+        (self.world, self.heap, self.globals, self.foreign_registry)
     }
 
     // Installs delegate to the one [`World`] install path, then resume any of

@@ -16,7 +16,7 @@ pub struct LayoutParams {
     pub num_nodes: u32,
     pub grid_dim: u32,
     pub grid_cap: u32,
-    pub _p0: u32,
+    pub coarse_dim: u32,
     pub world_size: f32,
     pub k: f32,
     pub repulsion: f32,
@@ -64,11 +64,13 @@ pub struct LayoutGpu {
     data_bg: wgpu::BindGroup,
     clear_pipeline: wgpu::ComputePipeline,
     build_pipeline: wgpu::ComputePipeline,
+    coarse_pipeline: wgpu::ComputePipeline,
     forces_pipeline: wgpu::ComputePipeline,
     integrate_pipeline: wgpu::ComputePipeline,
     num_nodes: u32,
     grid_dim: u32,
     grid_cap: u32,
+    coarse_dim: u32,
     world_size: f32,
 }
 
@@ -83,7 +85,7 @@ impl LayoutGpu {
             num_nodes: graph.num_nodes as u32,
             grid_dim: graph.grid_dim,
             grid_cap: graph.grid_cap,
-            _p0: 0,
+            coarse_dim: graph.coarse_dim,
             world_size: graph.world_size,
             k: settings.k,
             repulsion: settings.repulsion,
@@ -135,6 +137,8 @@ impl LayoutGpu {
                 storage(3, true),  // csr_targets (ro)
                 storage(4, false), // grid_counts (rw, atomic)
                 storage(5, false), // grid_items (rw)
+                storage(6, false), // coarse_com (rw)
+                storage(7, false), // coarse_mass (rw)
             ],
         });
 
@@ -156,6 +160,8 @@ impl LayoutGpu {
                 wgpu::BindGroupEntry { binding: 3, resource: graph.csr_targets.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: graph.grid_counts.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: graph.grid_items.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: graph.coarse_com.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: graph.coarse_mass.as_entire_binding() },
             ],
         });
 
@@ -182,11 +188,13 @@ impl LayoutGpu {
             data_bg,
             clear_pipeline: make("clear_grid"),
             build_pipeline: make("build_grid"),
+            coarse_pipeline: make("build_coarse"),
             forces_pipeline: make("forces"),
             integrate_pipeline: make("integrate"),
             num_nodes: graph.num_nodes as u32,
             grid_dim: graph.grid_dim,
             grid_cap: graph.grid_cap,
+            coarse_dim: graph.coarse_dim,
             world_size: graph.world_size,
         }
     }
@@ -197,7 +205,7 @@ impl LayoutGpu {
             num_nodes: self.num_nodes,
             grid_dim: self.grid_dim,
             grid_cap: self.grid_cap,
-            _p0: 0,
+            coarse_dim: self.coarse_dim,
             world_size: self.world_size,
             k: settings.k,
             repulsion: settings.repulsion,
@@ -213,12 +221,15 @@ impl LayoutGpu {
     /// Encode one simulation step (four passes).
     pub fn step(&self, encoder: &mut wgpu::CommandEncoder) {
         let cells = self.grid_dim as u64 * self.grid_dim as u64;
+        let coarse_cells = self.coarse_dim as u64 * self.coarse_dim as u64;
         let cell_groups = dispatch_dims(cells.div_ceil(256));
+        let coarse_groups = dispatch_dims(coarse_cells.div_ceil(256));
         let node_groups = dispatch_dims((self.num_nodes as u64).div_ceil(256));
 
         // Each stage in its own pass so wgpu inserts the needed memory barriers.
         self.pass(encoder, &self.clear_pipeline, cell_groups, "clear_grid");
         self.pass(encoder, &self.build_pipeline, node_groups, "build_grid");
+        self.pass(encoder, &self.coarse_pipeline, coarse_groups, "build_coarse");
         self.pass(encoder, &self.forces_pipeline, node_groups, "forces");
         self.pass(encoder, &self.integrate_pipeline, node_groups, "integrate");
     }

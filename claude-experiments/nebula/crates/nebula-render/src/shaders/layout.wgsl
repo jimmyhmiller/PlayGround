@@ -16,7 +16,7 @@ struct Params {
     num_nodes: u32,
     grid_dim: u32,
     grid_cap: u32,
-    _p0: u32,
+    coarse_dim: u32,
     world_size: f32,
     k: f32,
     repulsion: f32,
@@ -35,6 +35,9 @@ struct Params {
 @group(1) @binding(3) var<storage, read> csr_targets: array<u32>;
 @group(1) @binding(4) var<storage, read_write> grid_counts: array<atomic<u32>>;
 @group(1) @binding(5) var<storage, read_write> grid_items: array<u32>;
+// Coarse center-of-mass grid for far-field (single-level Barnes-Hut) repulsion.
+@group(1) @binding(6) var<storage, read_write> coarse_com: array<vec2<f32>>;
+@group(1) @binding(7) var<storage, read_write> coarse_mass: array<f32>;
 
 // Linearize a (possibly 2D/3D) dispatch into a single global index. We dispatch
 // in 2D once the workgroup count exceeds the 65535 per-dimension limit, so we
@@ -83,6 +86,53 @@ fn build_grid(
     if (slot < params.grid_cap) {
         grid_items[cell * params.grid_cap + slot] = i;
     }
+}
+
+// Reduce the fine grid into a coarse center-of-mass grid. Dispatched over coarse
+// cells; each sums the (true) counts of the fine cells it covers, using fine-cell
+// centers as mass locations — an approximation good enough for far-field.
+@compute @workgroup_size(256)
+fn build_coarse(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(num_workgroups) nwg: vec3<u32>,
+    @builtin(local_invocation_index) lidx: u32,
+) {
+    let ci = linear_index(wid, nwg, lidx);
+    let ncoarse = params.coarse_dim * params.coarse_dim;
+    if (ci >= ncoarse) {
+        return;
+    }
+    let ccx = ci % params.coarse_dim;
+    let ccy = ci / params.coarse_dim;
+    // Fine-cell range covered by this coarse cell.
+    let fx0 = (ccx * params.grid_dim) / params.coarse_dim;
+    let fx1 = ((ccx + 1u) * params.grid_dim) / params.coarse_dim;
+    let fy0 = (ccy * params.grid_dim) / params.coarse_dim;
+    let fy1 = ((ccy + 1u) * params.grid_dim) / params.coarse_dim;
+
+    let cs = params.world_size / f32(params.grid_dim);
+    let half = params.world_size * 0.5;
+    var sum = vec2<f32>(0.0, 0.0);
+    var mass = 0.0;
+    for (var fy = fy0; fy < fy1; fy = fy + 1u) {
+        for (var fx = fx0; fx < fx1; fx = fx + 1u) {
+            let cnt = atomicLoad(&grid_counts[fy * params.grid_dim + fx]);
+            if (cnt > 0u) {
+                let center = vec2<f32>(
+                    (f32(fx) + 0.5) * cs - half,
+                    (f32(fy) + 0.5) * cs - half,
+                );
+                sum = sum + center * f32(cnt);
+                mass = mass + f32(cnt);
+            }
+        }
+    }
+    if (mass > 0.0) {
+        coarse_com[ci] = sum / mass;
+    } else {
+        coarse_com[ci] = vec2<f32>(0.0, 0.0);
+    }
+    coarse_mass[ci] = mass;
 }
 
 @compute @workgroup_size(256)
@@ -139,6 +189,32 @@ fn forces(
                 force = force + cell_rep * (params.repulsion * f32(true_cnt) / f32(cnt));
             }
         }
+    }
+
+    // --- Far-field repulsion from the coarse COM grid ------------------------
+    // Long-range global repulsion (what actually flattens sheets and separates
+    // clusters). We skip the node's own coarse cell — its vicinity is covered
+    // exactly by the fine near-field above.
+    let coarse_cs = params.world_size / f32(params.coarse_dim);
+    let cdim = i32(params.coarse_dim);
+    let my_ccx = clamp(i32((pi.x + params.world_size * 0.5) / coarse_cs), 0, cdim - 1);
+    let my_ccy = clamp(i32((pi.y + params.world_size * 0.5) / coarse_cs), 0, cdim - 1);
+    let my_cc = u32(my_ccy) * params.coarse_dim + u32(my_ccx);
+    let ncoarse = params.coarse_dim * params.coarse_dim;
+    for (var cc = 0u; cc < ncoarse; cc = cc + 1u) {
+        if (cc == my_cc) {
+            continue;
+        }
+        let mass = coarse_mass[cc];
+        if (mass <= 0.0) {
+            continue;
+        }
+        var delta = pi - coarse_com[cc];
+        var d2 = dot(delta, delta);
+        if (d2 < 1.0) {
+            d2 = 1.0;
+        }
+        force = force + delta * (params.repulsion * mass * k2 / d2);
     }
 
     // --- Attraction along edges (CSR neighbors) ------------------------------

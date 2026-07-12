@@ -5,7 +5,9 @@
 //! the runtime's own message passing, so the interleaving is deterministic (no
 //! sleeps-and-hope).
 
-use livetype_core::*;
+use livetype_core::{
+    DefId, Function, Instruction, Outcome, Runtime, Session, Shared, Type, Value, Version,
+};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -95,4 +97,34 @@ fn function_hot_swapped_while_a_worker_thread_runs() {
         vec![Value::I64(1), Value::I64(2)],
         "the running worker emitted the old version, then the hot-swapped one"
     );
+}
+
+/// FFI and `letonce` globals — previously interpreter-only — now run on the
+/// concurrent tier too. Built and initialized through the ordinary frontend,
+/// then frozen and run across worker threads.
+#[test]
+fn ffi_and_globals_run_on_the_concurrent_tier() {
+    let mut s = Session::new();
+    s.eval("foreign fn dbl(n: i64) -> i64;").unwrap();
+    s.register_foreign(
+        "dbl",
+        Box::new(|args| match args[0] {
+            Value::I64(n) => Value::I64(n * 2),
+            _ => panic!("dbl expects an i64"),
+        }),
+    )
+    .unwrap();
+    // `base` is a global initialized once (single-threaded), then frozen in.
+    s.eval("letonce base = 21; fn compute() -> i64 { dbl(base) }")
+        .unwrap();
+    let compute = s.fn_id("compute").unwrap();
+
+    let shared = Shared::from_runtime(s.runtime);
+    // Run the same FFI+global function on four worker threads at once — the
+    // per-fn lock lets the concurrent calls to `dbl` proceed without spuriously
+    // reporting it unregistered.
+    let outcomes = shared.run_threads(vec![(compute, vec![]); 4]);
+    for outcome in outcomes {
+        assert_eq!(outcome, Outcome::Complete(Value::I64(42)));
+    }
 }

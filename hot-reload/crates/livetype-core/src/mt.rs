@@ -54,6 +54,14 @@ pub struct Shared {
     /// soundness predicate all live on it, so this tier can no longer drift from
     /// the interpreter on object semantics.
     heap: Heap,
+    /// Persistent `letonce` globals, behind an `RwLock` like the world so an
+    /// edit can add one while workers read them. A `Ref` global is a GC root.
+    globals: RwLock<BTreeMap<DefId, Value>>,
+    /// Native `foreign fn` implementations, one `Mutex` per fn so concurrent
+    /// calls to *different* foreign fns run in parallel while calls to the *same*
+    /// one serialize (native code is rarely reentrant-safe). This is what lets
+    /// FFI run on the concurrent tier, not just the single-threaded one.
+    foreign_registry: Mutex<BTreeMap<ForeignFnId, Arc<Mutex<ForeignFn>>>>,
     output: Mutex<Vec<Value>>,
     /// One mailbox per actor id, created before threads spawn so a `Send` never
     /// races the recipient into existence. A `Recv` polls its own mailbox,
@@ -70,10 +78,16 @@ impl Shared {
     /// Freeze a set-up [`Runtime`] into a shareable runtime — the heap moves in
     /// as-is (same `Heap`, now shared behind the `Arc`), no rebuild.
     pub fn from_runtime(rt: Runtime) -> Arc<Shared> {
-        let (world, heap) = rt.into_parts();
+        let (world, heap, globals, foreigns) = rt.into_parts();
+        let foreign_registry = foreigns
+            .into_iter()
+            .map(|(id, f)| (id, Arc::new(Mutex::new(f))))
+            .collect();
         Arc::new(Shared {
             world: RwLock::new(world),
             heap,
+            globals: RwLock::new(globals),
+            foreign_registry: Mutex::new(foreign_registry),
             output: Mutex::new(Vec::new()),
             mailboxes: Mutex::new(BTreeMap::new()),
             gc_pending: AtomicBool::new(false),
@@ -122,6 +136,30 @@ impl Shared {
             .write()
             .unwrap()
             .install_migration(migration, &self.heap)
+    }
+
+    /// Register (or replace) a native `foreign fn` on the running tier — the
+    /// live-edit counterpart to installing a new function version.
+    pub fn register_foreign(&self, id: ForeignFnId, f: ForeignFn) {
+        self.foreign_registry
+            .lock()
+            .unwrap()
+            .insert(id, Arc::new(Mutex::new(f)));
+    }
+    /// Set a global's value directly (seed a native handle, publish a `letonce`).
+    pub fn set_global(&self, id: DefId, value: Value) {
+        self.globals.write().unwrap().insert(id, value);
+    }
+
+    /// Invoke a registered foreign fn. The per-fn `Mutex` is held only for the
+    /// call, so different foreign fns run concurrently; `None` = not registered.
+    fn call_foreign(&self, id: ForeignFnId, args: &[Value]) -> Option<Value> {
+        let cell = self.foreign_registry.lock().unwrap().get(&id).cloned()?;
+        let mut f = cell.lock().unwrap();
+        Some(f(args))
+    }
+    fn global(&self, id: DefId) -> Option<Value> {
+        self.globals.read().unwrap().get(&id).cloned()
     }
 
     /// Pre-create actor `tid`'s mailbox so an external `send_to` can't race its
@@ -324,6 +362,12 @@ impl Shared {
     /// first. Returns the number of objects reclaimed.
     pub fn collect(&self, roots: &[ObjectId]) -> usize {
         let mut work: Vec<ObjectId> = roots.to_vec();
+        // Globals are roots too (same as the single-threaded collector).
+        for value in self.globals.read().unwrap().values() {
+            if let Value::Ref(id) = value {
+                work.push(*id);
+            }
+        }
         let mut live = std::collections::BTreeSet::new();
         while let Some(id) = work.pop() {
             if !live.insert(id) {
@@ -391,11 +435,19 @@ impl Machine for MtMachine<'_> {
     fn emit(&mut self, value: Value) {
         self.shared.emit(value);
     }
-    fn global(&self, _id: DefId) -> GlobalRead {
-        GlobalRead::Unsupported
+    fn global(&self, id: DefId) -> GlobalRead {
+        match self.shared.global(id) {
+            Some(v) => GlobalRead::Value(v),
+            None => GlobalRead::Missing,
+        }
     }
-    fn call_foreign(&mut self, _id: ForeignFnId, _args: &[Value]) -> ForeignCall {
-        ForeignCall::Unsupported
+    fn call_foreign(&mut self, id: ForeignFnId, args: &[Value]) -> ForeignCall {
+        match self.shared.call_foreign(id, args) {
+            Some(v) => ForeignCall::Done(Ok(v)),
+            None => ForeignCall::Done(Err(format!(
+                "foreign fn {id} has no registered implementation"
+            ))),
+        }
     }
     fn push_call(
         &mut self,
