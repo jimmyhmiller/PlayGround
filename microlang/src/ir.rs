@@ -64,6 +64,10 @@ pub enum Prim {
     /// `(%field-by-name x 'field)` -> the value of `x`'s field named `field`,
     /// resolved through the registry keyed by `x`'s type tag.
     FieldByName,
+    /// `(%field-names x)` -> list of the registered field-name symbols of x's type.
+    FieldNames,
+    /// `(%make-record 'Type (v0 v1 …))` -> a record of that type with those fields.
+    MakeRecord,
     /// `(%hash x)` -> a 32-bit content hash of any value (ints by value, strings/
     /// symbols/keywords/chars by content, collections structurally, nil=0). The
     /// hashing a HAMT needs; deterministic but not tied to any host's exact hash.

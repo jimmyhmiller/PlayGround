@@ -873,6 +873,24 @@ impl<M: ValueModel> Runtime<M> {
                 self.shared.field_names[ty as usize].store(boxed, Ordering::Release);
                 self.enc_nil()
             }
+            // The registered field-name symbols of a value's type, as a list (empty
+            // if unregistered). Lets a frontend give records generic map behavior.
+            Prim::MakeRecord => {
+                let Val::Sym(type_id) = self.decode(args[0]) else { panic!("make-record: type must be a symbol"); };
+                let fields = self.list_to_vec(args[1]);
+                let id = self.alloc(Obj::Record { type_id, fields });
+                M::R::enc_ref(id)
+            }
+            Prim::FieldNames => {
+                let ty = self.type_tag(args[0]);
+                let ptr = self.shared.field_names[ty as usize].load(Ordering::Acquire);
+                if ptr.is_null() {
+                    return self.vec_to_list(&[]);
+                }
+                let names: &Vec<Sym> = unsafe { &*ptr };
+                let vals: Vec<u64> = names.iter().map(|&n| self.encode(Val::Sym(n))).collect();
+                self.vec_to_list(&vals)
+            }
             Prim::FieldByName => {
                 let ty = self.type_tag(args[0]);
                 let Val::Sym(name) = self.decode(args[1]) else {

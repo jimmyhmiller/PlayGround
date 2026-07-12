@@ -72,7 +72,7 @@ impl Compiler {
             ("%aget", VectorRef), ("%anew", Vector),
             ("%bit-and", BitAnd), ("%bit-or", BitOr), ("%bit-xor", BitXor),
             ("%bit-shl", BitShl), ("%bit-shr", BitShr), ("%bit-count", BitCount),
-            ("%register-fields", RegisterFields), ("%field-by-name", FieldByName), ("%hash", Hash),
+            ("%register-fields", RegisterFields), ("%field-by-name", FieldByName), ("%field-names", FieldNames), ("%make-record", MakeRecord), ("%hash", Hash),
             ("%first", First), ("%rest", Rest), ("%cons", Cons),
             ("record", Record), ("field", Field), ("type-of", TypeOf), ("nfields", NFields), ("throw", Throw),
             ("nil?", IsNil), ("list", List), ("println", Println), ("gc", Gc),
