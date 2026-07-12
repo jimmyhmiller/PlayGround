@@ -29,6 +29,7 @@ mod clojure_set_src;
 mod clojure_walk_src;
 mod clojure_zip_src;
 mod clojure_string_src;
+mod clojure_test_src;
 mod core_src;
 mod reader;
 pub use reader::read_all;
@@ -78,9 +79,11 @@ pub fn run_with_paths<M: ValueModel>(
     run_src(rt, cs, &mut macros, &mut comp, clojure_walk_src::CLOJURE_WALK);
     run_src(rt, cs, &mut macros, &mut comp, clojure_zip_src::CLOJURE_ZIP);
     run_src(rt, cs, &mut macros, &mut comp, clojure_data_json_src::CLOJURE_DATA_JSON);
+    run_src(rt, cs, &mut macros, &mut comp, clojure_test_src::CLOJURE_TEST);
     comp.set_ns("user");
     // These are provided in-process; `require` must never look for them on disk.
     comp.mark_loaded("clojure.core");
+    comp.mark_loaded("clojure.test");
     comp.mark_loaded("user");
     // Route `(obj arg)` for a non-closure record (keyword/map/vector) through the
     // core `-apply-obj` dispatcher, so keywords/collections are callable.
@@ -255,7 +258,7 @@ fn expand<M: ValueModel>(
             // ` template -> a form that BUILDS the data; then expand that.
             let inner = rt.list_to_vec(f)[1];
             let mut gs = HashMap::new();
-            let built = syntax_quote(rt, inner, &mut gs);
+            let built = syntax_quote(rt, comp, inner, &mut gs);
             expand(rt, cs, macros, comp, built)
         } else if is_sym(rt, head, "ns") || is_sym(rt, head, "in-ns") {
             rt.encode(Val::Nil) // namespaces are a no-op for now
@@ -282,7 +285,8 @@ fn expand<M: ValueModel>(
             // earlier, at eval-form level; this handles `var` elsewhere.)
             let items = rt.list_to_vec(f);
             let resolved = match rt.decode(items[1]) {
-                Val::Sym(s) => rt.encode(Val::Sym(comp.resolve_ref(rt, s))),
+                // var-quote may reach PRIVATE vars (Clojure allows `#'ns/private`).
+                Val::Sym(s) => rt.encode(Val::Sym(comp.resolve_ref_allow_private(rt, s))),
                 _ => items[1],
             };
             let rec = sym(rt, "record");
@@ -330,7 +334,13 @@ fn expand<M: ValueModel>(
             let ex = expand_each(rt, cs, macros, comp, &items);
             rt.vec_to_list(&ex)
         }
-    } else if let Some(lst) = record_field0(rt, f, reader::VECTOR) {
+    } else if let Some(elems) = binding_items(rt, f) {
+        // A vector in EXPRESSION position -> `(vector e0 e1 …)` so its elements
+        // evaluate. `binding_items` matches every vector representation, including
+        // a runtime PVec produced by syntax-quote/a macro (whose form-elements
+        // would otherwise be treated as self-evaluating data). Param/binding
+        // vectors are handled by fn/let/loop BEFORE reaching here, so they are safe.
+        let lst = rt.vec_to_list(&elems);
         build_call(rt, cs, macros, comp, "vector", lst)
     } else if let Some(lst) = record_field0(rt, f, reader::MAP) {
         build_call(rt, cs, macros, comp, "hash-map", lst)
@@ -808,21 +818,32 @@ fn expand_loop<M: ValueModel>(
 
     // (fn [names] body)
     let fnk = sym(rt, "fn");
-    let paramvec = make_vector(rt, names);
+    let paramvec = make_vector(rt, names.clone());
     let mut fnform = vec![fnk, paramvec];
     fnform.extend(body);
     let fnform = rt.vec_to_list(&fnform);
 
-    // (let [g nil] (set! g fnform) (g inits))
+    // (let [g nil]
+    //   (set! g fnform)
+    //   (let [name0 init0 name1 init1 …] (g name0 name1 …)))
+    // The inner `let` binds the loop names to their inits SEQUENTIALLY (so a later
+    // init can see an earlier binding, matching `let`/Clojure), then calls `g`.
     let letk = sym(rt, "let");
     let nilv = rt.encode(Val::Nil);
     let bindvec = make_vector(rt, vec![g, nilv]);
     let setk = sym(rt, "set!");
     let setform = rt.vec_to_list(&[setk, g, fnform]);
-    let mut call = vec![g];
-    call.extend(inits);
-    let callform = rt.vec_to_list(&call);
-    let letform = rt.vec_to_list(&[letk, bindvec, setform, callform]);
+    let mut initbinds = Vec::new();
+    for (n, ini) in names.iter().zip(inits.iter()) {
+        initbinds.push(*n);
+        initbinds.push(*ini);
+    }
+    let initbindvec = make_vector(rt, initbinds);
+    let mut gcall = vec![g];
+    gcall.extend(names.iter().copied());
+    let gcallform = rt.vec_to_list(&gcall);
+    let initlet = rt.vec_to_list(&[letk, initbindvec, gcallform]);
+    let letform = rt.vec_to_list(&[letk, bindvec, setform, initlet]);
     expand(rt, cs, macros, comp, letform)
 }
 
@@ -1178,7 +1199,7 @@ fn is_keyword<M: ValueModel>(rt: &Runtime<M>, k: u64, name: &str) -> bool {
 // Produces a FORM that builds the templated data at run time.
 // ─────────────────────────────────────────────────────────────────────────
 
-fn syntax_quote<M: ValueModel>(rt: &mut Runtime<M>, form: u64, gs: &mut HashMap<Sym, Sym>) -> u64 {
+fn syntax_quote<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64, gs: &mut HashMap<Sym, Sym>) -> u64 {
     match rt.decode(form) {
         // symbol -> 'symbol, or a per-template gensym for `foo#`
         Val::Sym(s) => {
@@ -1196,7 +1217,11 @@ fn syntax_quote<M: ValueModel>(rt: &mut Runtime<M>, form: u64, gs: &mut HashMap<
                 let gv = rt.encode(Val::Sym(g));
                 quote_form(rt, gv)
             } else {
-                quote_form(rt, form)
+                // Auto-qualify to the current namespace (macro hygiene), so a
+                // macro's helper references resolve at the expansion site.
+                let q = comp.qualify_for_syntax_quote(rt, s);
+                let qv = rt.encode(Val::Sym(q));
+                quote_form(rt, qv)
             }
         }
         // self-evaluating literals stay as themselves
@@ -1209,12 +1234,12 @@ fn syntax_quote<M: ValueModel>(rt: &mut Runtime<M>, form: u64, gs: &mut HashMap<
                 }
                 // a list -> (concat <seq parts>)
                 let items = rt.list_to_vec(form);
-                return sq_concat(rt, &items, gs);
+                return sq_concat(rt, comp, &items, gs);
             }
             // [..] -> (vec (concat ..))
             if let Some(lst) = record_field0(rt, form, reader::VECTOR) {
                 let items = rt.list_to_vec(lst);
-                let inner = sq_concat(rt, &items, gs);
+                let inner = sq_concat(rt, comp, &items, gs);
                 return call1(rt, "vec", inner);
             }
             // {..} -> (hash-map 'k (sq v) ..)  (no splice in map position)
@@ -1223,7 +1248,7 @@ fn syntax_quote<M: ValueModel>(rt: &mut Runtime<M>, form: u64, gs: &mut HashMap<
                 let hm = sym(rt, "hash-map");
                 let mut out = vec![hm];
                 for &it in &items {
-                    out.push(syntax_quote(rt, it, gs));
+                    out.push(syntax_quote(rt, comp, it, gs));
                 }
                 return rt.vec_to_list(&out);
             }
@@ -1236,7 +1261,7 @@ fn syntax_quote<M: ValueModel>(rt: &mut Runtime<M>, form: u64, gs: &mut HashMap<
 /// `(-concat (list e0) (list e1) ..)`, with `~@x` contributing `x` directly.
 /// Uses the EAGER `-concat` (not the lazy user `concat`): a macro must return a
 /// realized code form the expander can splice, not a lazy seq.
-fn sq_concat<M: ValueModel>(rt: &mut Runtime<M>, items: &[u64], gs: &mut HashMap<Sym, Sym>) -> u64 {
+fn sq_concat<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, items: &[u64], gs: &mut HashMap<Sym, Sym>) -> u64 {
     let concat = sym(rt, "-concat");
     let mut parts = vec![concat];
     for &it in items {
@@ -1246,7 +1271,7 @@ fn sq_concat<M: ValueModel>(rt: &mut Runtime<M>, items: &[u64], gs: &mut HashMap
                 continue;
             }
         }
-        let one = syntax_quote(rt, it, gs);
+        let one = syntax_quote(rt, comp, it, gs);
         parts.push(call1(rt, "list", one));
     }
     rt.vec_to_list(&parts)

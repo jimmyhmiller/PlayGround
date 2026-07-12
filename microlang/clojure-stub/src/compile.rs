@@ -153,6 +153,48 @@ impl Compiler {
         self.resolve_global(rt, s)
     }
 
+    /// Like `resolve_ref`, but WITHOUT the private-var access check — for `(var x)`
+    /// / `#'ns/x` (var-quote), which in Clojure legitimately reaches PRIVATE vars
+    /// (`@#'some.ns/private-fn` is the standard idiom to test a private).
+    pub fn resolve_ref_allow_private<M: ValueModel>(&self, rt: &Runtime<M>, s: Sym) -> Sym {
+        self.resolve_global_checked(rt, s, false)
+    }
+
+    /// Namespace-qualify a symbol the way `syntax-quote` does (Clojure macro
+    /// hygiene): a symbol that resolves to a KNOWN var (own def, refer, or
+    /// clojure.core) becomes its fully-qualified name, so a macro's references to
+    /// its own/ core helpers resolve correctly at the EXPANSION site regardless of
+    /// the caller's namespace. Special forms (`let`/`if`/`fn`/…), prims, `&`, and
+    /// genuinely unknown symbols are left BARE (the compiler matches those by bare
+    /// name; qualifying them would break dispatch).
+    pub fn qualify_for_syntax_quote<M: ValueModel>(&self, rt: &Runtime<M>, s: Sym) -> Sym {
+        if self.prims.contains_key(&s) {
+            return s;
+        }
+        let name = rt.sym_name(s);
+        if name.len() > 1 && name.contains('/') {
+            // already qualified / alias-prefixed -> resolve normally
+            return self.resolve_global(rt, s);
+        }
+        let ns = &self.ns.current;
+        let q = if self.ns.ns_defs.get(ns).is_some_and(|d| d.contains(name)) {
+            rt.intern(&format!("{ns}/{name}"))
+        } else if let Some(fq) = self.ns.refers.get(ns).and_then(|r| r.get(name)) {
+            rt.intern(fq)
+        } else if self.ns.ns_defs.get("clojure.core").is_some_and(|d| d.contains(name)) {
+            rt.intern(&format!("clojure.core/{name}"))
+        } else {
+            // Special form or unknown: leave bare.
+            return s;
+        };
+        // Protocol methods (`-conj`, `-seq`, …) dispatch by NAME — a qualified
+        // reference won't resolve as a method, so keep them bare.
+        if rt.is_method_name(q) {
+            return s;
+        }
+        q
+    }
+
     /// `(ns foo …)` / `(in-ns 'foo)` — switch the current namespace.
     pub fn set_ns(&mut self, name: &str) {
         self.ns.current = name.to_string();
@@ -194,6 +236,9 @@ impl Compiler {
     /// should read, per the current namespace. `a/b` resolves the ns/alias part;
     /// a bare name resolves own-def → refer → core → own-ns (forward ref).
     fn resolve_global<M: ValueModel>(&self, rt: &Runtime<M>, s: Sym) -> Sym {
+        self.resolve_global_checked(rt, s, true)
+    }
+    fn resolve_global_checked<M: ValueModel>(&self, rt: &Runtime<M>, s: Sym, check_private: bool) -> Sym {
         // Frontend prims (`%add`, `list`, …) are never namespace vars.
         if self.prims.contains_key(&s) {
             return s;
@@ -212,8 +257,9 @@ impl Compiler {
                         .map(String::as_str)
                         .unwrap_or(left);
                     let q = rt.intern(&format!("{real}/{right}"));
-                    // A `^:private` / `defn-` var is only accessible within its ns.
-                    if real != self.ns.current && self.private.contains(&q) {
+                    // A `^:private` / `defn-` var is only accessible within its ns
+                    // (var-quote `#'ns/x` bypasses this, like Clojure).
+                    if check_private && real != self.ns.current && self.private.contains(&q) {
                         panic!("var {real}/{right} is private (declared with defn-/^:private)");
                     }
                     return q;

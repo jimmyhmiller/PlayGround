@@ -271,6 +271,12 @@ pub const CORE: &str = r##"
   IEquiv (-equiv [_ o] (nil? o))
   IEmptyableCollection (-empty [_] nil))
 
+;; Sequential seqs (list / lazy-seq / empty-list) compare `=` element-wise with
+;; each other (but NOT with vectors) — matching Clojure, where `(= '(1 2) (map …))`
+;; is true but `(= '(1 2) [1 2])` is false.
+(defn -seqlike? [x]
+  (let [t (type-of x)]
+    (or (%num-eq t 'List) (%num-eq t 'LazySeq) (%num-eq t 'EmptyList))))
 (extend-type List
   ISeqable (-seq [l] l)
   ISeq (-first [l] (%first l)) (-rest [l] (%rest l))
@@ -278,6 +284,7 @@ pub const CORE: &str = r##"
   ICounted (-count [l] (count-seq l 0))
   IIndexed (-nth [l n] (nth-seq l n))
   IStack (-peek [l] (%first l)) (-pop [l] (%rest l))
+  IEquiv (-equiv [a b] (if (-seqlike? b) (-seq-eq a b) false))
   IEmptyableCollection (-empty [_] nil))
 ;; The empty list `()` — a distinct value from nil: `list?`/`seq?` true, prints
 ;; `()`, not `= nil`. Behaves as an empty seq (seq -> nil, count 0, first/rest nil).
@@ -288,7 +295,7 @@ pub const CORE: &str = r##"
   ICounted (-count [_] 0)
   IIndexed (-nth [_ n] nil)
   IStack (-peek [_] nil) (-pop [_] nil)
-  IEquiv (-equiv [_ other] (%num-eq (type-of other) 'EmptyList))
+  IEquiv (-equiv [_ other] (if (-seqlike? other) (nil? (seq other)) false))
   IEmptyableCollection (-empty [e] e))
 ;; a String seqs as its character list (clojure treats strings as seqable).
 (extend-type String
@@ -309,7 +316,8 @@ pub const CORE: &str = r##"
   ISeq (-first [l] (let [s (-force l)] (if (nil? s) nil (-first s))))
        (-rest [l] (let [s (-force l)] (if (nil? s) nil (-rest s))))
   ICounted (-count [l] (count-seq l 0))
-  IIndexed (-nth [l n] (nth-seq l n)))
+  IIndexed (-nth [l n] (nth-seq l n))
+  IEquiv (-equiv [a b] (if (-seqlike? b) (-seq-eq a b) false)))
 
 (extend-type PVec
   ISeqable (-seq [v] (-pv-seq v))
@@ -372,7 +380,9 @@ pub const CORE: &str = r##"
   ([] [])
   ([c] c)
   ([c x] (-conj c x))
-  ([c x & more] (reduce -conj (-conj c x) more)))
+  ;; `-conj` is a dispatch-only protocol method (no value binding), so fold with
+  ;; the public `conj` wrapper instead of passing `-conj` as a value.
+  ([c x & more] (reduce conj (-conj c x) more)))
 (defn assoc
   ([m k v] (-assoc m k v))
   ([m k v & kvs] (reduce (fn [a p] (-assoc a (first p) (second p))) (-assoc m k v) (-pairs kvs))))
@@ -611,14 +621,11 @@ pub const CORE: &str = r##"
 (defmacro dotimes (binding & body)
   (let [i (first binding) n (second binding)]
     `(loop [~i 0] (when (< ~i ~n) ~@body (recur (inc ~i))))))
-(defmacro doseq (binding & body)
-  (if (> (count binding) 2)
-      (throw "doseq: only a single [x coll] binding is supported")
-      (let [x (first binding) coll (second binding)]
-        `(loop [s# (seq ~coll)]
-           (when s#
-             (let [~x (first s#)] ~@body)
-             (recur (next s#)))))))
+;; `doseq` runs `body` for side effects over the SAME binding grammar as `for`
+;; (multiple bindings, :let/:when/:while), then returns nil. `dorun` forces the
+;; lazy `for` without retaining its head.
+(defmacro doseq (bindings & body)
+  `(dorun (for ~bindings (do ~@body))))
 (defmacro when-first (binding & body)
   (let [x (first binding) coll (second binding)]
     `(let [s# (seq ~coll)]
@@ -1304,6 +1311,10 @@ pub const CORE: &str = r##"
         (and (string? a) (string? b)) (-str< a b)
         (and (keyword? a) (keyword? b)) (-str< (name a) (name b))
         (and (symbol? a) (symbol? b)) (-str< (name a) (name b))
+        ;; characters compare by code point (they are not numbers, so `%lt` would
+        ;; error) — needed for `(sort [\c \a \b])` etc.
+        (and (char? a) (char? b))
+        (let [x (%char-code a) y (%char-code b)] (cond (%lt x y) -1 (%lt y x) 1 :else 0))
         (%lt a b) -1 (%lt b a) 1 :else 0))
 ;; replace preserves a vector input (returns a vector), else a seq.
 (defn replace [smap coll]

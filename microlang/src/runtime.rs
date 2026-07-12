@@ -758,6 +758,15 @@ impl<M: ValueModel> Runtime<M> {
                 M::R::enc_ref(id)
             }
             Prim::Lt | Prim::FxLt => {
+                // `<` on a non-number is a CATCHABLE error (Clojure throws a
+                // ClassCastException), not a hard abort.
+                if self.as_int_big(args[0]).is_none() && self.num_as_f64(args[0]).is_none()
+                    || self.as_int_big(args[1]).is_none() && self.num_as_f64(args[1]).is_none()
+                {
+                    let id = self.alloc(Obj::Str("< on non-number".to_string()));
+                    self.signal_throw(M::R::enc_ref(id));
+                    return self.enc_nil();
+                }
                 let r = self.num_lt(args[0], args[1]);
                 self.encode(Val::Bool(r))
             }

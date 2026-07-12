@@ -40,6 +40,7 @@ enum Tok {
     HashParen,   // #(  anonymous-fn literal
     ReaderCond,  // #?  reader conditional (followed by a `(...)`)
     ReaderCondSplice, // #?@  splicing reader conditional (splices a collection)
+    VarQuote,    // #'  -> (var x)
     Quote,
     Backtick,      // `  syntax-quote
     Unquote,       // ~
@@ -86,6 +87,11 @@ fn tokenize(src: &str) -> Vec<Tok> {
             // `#^{...}` / `#^Foo` — the old metadata reader macro, identical to `^`.
             '#' if i + 1 < cs.len() && cs[i + 1] == '^' => {
                 out.push(Tok::Caret);
+                i += 2;
+            }
+            // `#'x` — var-quote, sugar for `(var x)`.
+            '#' if i + 1 < cs.len() && cs[i + 1] == '\'' => {
+                out.push(Tok::VarQuote);
                 i += 2;
             }
             // `#?@(...)` splicing reader conditional — splice the chosen collection.
@@ -242,6 +248,7 @@ impl Parser {
                 rt.vec_to_list(&[fnsym, pvec, body])
             }
             Tok::Quote => self.wrap(rt, "quote"),
+            Tok::VarQuote => self.wrap(rt, "var"),
             Tok::Caret => {
                 // ^meta target : we discard metadata for now, EXCEPT `:macro`
                 // (as `^{:macro true}` or `^:macro`), which real core.clj uses to
