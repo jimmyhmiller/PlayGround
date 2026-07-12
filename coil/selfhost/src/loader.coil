@@ -29,6 +29,23 @@
     (close fd)
     (al-slice [u8] (load bytes))))
 
+; Like `read-file`, but distinguishes "could not open" (None) from an empty file
+; (Some ""). `read-file` returns an empty slice for both, which is fine for the
+; loader's disk-first / embedded-fallback probing but WRONG for `include-str`,
+; where a missing file at compile time is a hard build error, not an empty embed.
+(defn read-file-opt [(a (ptr Allocator)) (path (ptr i8))] (-> (Option (slice u8)))
+  (let [fd (open path 0)]
+    (if (icmp-lt (cast i64 fd) 0) (None [(slice u8)])
+      (let [buf (unwrap-ptr [i8] (raw-alloc a 65536 1)) (mut bytes) (al-new [u8] a)]
+        (loop
+          (let [n (read (cast i64 fd) buf 65536)]
+            (if (icmp-le n 0) (break)
+              (let [(mut i) 0]
+                (loop (if (icmp-ge (load i) n) (break)
+                    (do (al-push! (mut bytes) (cast u8 (load (index buf (load i))))) (store! i (iadd (load i) 1)))))))))
+        (close fd)
+        (Some (al-slice [u8] (load bytes)))))))
+
 ; A hand-built Program smoke test (no spans → byte-exact against `coil dump-ast`
 ; of the equivalent source). Validates the dumper before the parser is filled.
 (defstruct TaggedForm [(form Sexp) (module (Option (slice u8)))])

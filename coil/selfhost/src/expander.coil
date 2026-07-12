@@ -178,6 +178,27 @@
 (defstruct ExpEnv
   [(macros (ptr (ArrayList (slice u8)))) (comptime (ptr (ArrayList (slice u8))))
    (sub (ptr Program)) (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry))) (a (ptr Allocator))])
+; ── include-str: compile-time file embed (the Rust `include_str!` analog) ─────
+; `(include-str "path")` is replaced, at expand time, by a string literal holding
+; the file's bytes. The path is resolved relative to the compiler's build working
+; directory (repo root) — the same way the loader reads its bundled sources. A
+; missing file or a non-literal path is a HARD compile error; there is no silent
+; empty embed. This is what lets embedded_stdlib.coil bake in the prelude + libs
+; with no external codegen step (see selfhost/src/embedded_stdlib.coil).
+(defn is-include-str [(items (ptr (ArrayList Sexp)))] (-> bool)
+  (and (icmp-ge (sx-len items) 1)
+       (and (icmp-eq (sx-tag (sx-at items 0)) 2)
+            (str-eq (sx-sval (sx-at items 0)) "include-str"))))
+(defn expand-include-str [(s (ptr Sexp)) (items (ptr (ArrayList Sexp))) (a (ptr Allocator))] (-> (Result Sexp Diag))
+  (if (icmp-ne (sx-len items) 2)
+      (Err [Sexp Diag] (diag-at-form s "include-str: expects exactly one string-literal path argument"))
+    (let [arg (sx-at items 1)]
+      (if (icmp-ne (sx-tag arg) 4)
+          (Err [Sexp Diag] (diag-at-form s "include-str: path must be a string literal"))
+        (let [path (sx-sval arg)]
+          (match (read-file-opt a (slice->cstr a path))
+            (None []     (Err [Sexp Diag] (diag-at-form s (sconcat3 a "include-str: cannot read file '" path "' (paths are relative to the compiler build directory)"))))
+            (Some [text] (Ok  [Sexp Diag] (mk-sexp-src (KStr text) s)))))))))
 (defn expand-calls-list [(items (ptr (ArrayList Sexp))) (module (Option (slice u8))) (env (ptr ExpEnv)) (allfns (ptr (ArrayList (slice u8)))) (gs (ptr (ArrayList StructDef))) (gu (ptr (ArrayList SumDef))) (depth (ptr i64)) (ls (mut LS))] (-> (Result (ptr (ArrayList Sexp)) Diag))
   (let [a (load (field env a)) n (sx-len items) (mut out) (al-new [Sexp] a) (mut i) 0 (mut errf) (None [Diag])]
     (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) n)) (break)
@@ -189,7 +210,10 @@
 (defn expand-calls [(s (ptr Sexp)) (module (Option (slice u8))) (env (ptr ExpEnv)) (allfns (ptr (ArrayList (slice u8)))) (gs (ptr (ArrayList StructDef))) (gu (ptr (ArrayList SumDef))) (depth (ptr i64)) (ls (mut LS))] (-> (Result Sexp Diag))
   (let [a (load (field env a)) tg (sx-tag (load s))]
     (if (icmp-eq tg 6)
-        (let [items (sx-items (load s)) headq (if (and (icmp-ge (sx-len items) 1) (icmp-eq (sx-tag (sx-at items 0)) 2)) (resolve-macro (sx-sval (sx-at items 0)) module (load (field env macros)) (load (field env impb)) (load (field env expb)) a) (None [(slice u8)]))]
+        (let [items (sx-items (load s))]
+         (if (is-include-str items)
+          (expand-include-str s items a)
+          (let [headq (if (and (icmp-ge (sx-len items) 1) (icmp-eq (sx-tag (sx-at items 0)) 2)) (resolve-macro (sx-sval (sx-at items 0)) module (load (field env macros)) (load (field env impb)) (load (field env expb)) a) (None [(slice u8)]))]
           (match headq
             (Some [q]
               (do (store! depth (iadd (load depth) 1))
@@ -212,7 +236,7 @@
             (None []
               (match (expand-calls-list items module env allfns gs gu depth (mut ls))
                 (Err [d] (Err [Sexp Diag] d))
-                (Ok [outitems] (Ok [Sexp Diag] (mk-sexp-src (KList outitems) s)))))))
+                (Ok [outitems] (Ok [Sexp Diag] (mk-sexp-src (KList outitems) s)))))))))
         (if (icmp-eq tg 7)
             (match (expand-calls-list (sx-items (load s)) module env allfns gs gu depth (mut ls))
               (Err [d] (Err [Sexp Diag] d))
