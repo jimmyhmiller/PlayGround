@@ -118,6 +118,8 @@ pub struct App {
     press_pos: glam::Vec2,
     moved_since_press: bool,
     last_cursor: glam::Vec2,
+    last_click: Instant,
+    last_click_pos: glam::Vec2,
 
     // Timing / stats.
     last_frame: Instant,
@@ -167,6 +169,8 @@ impl App {
             press_pos: glam::Vec2::ZERO,
             moved_since_press: false,
             last_cursor: glam::Vec2::ZERO,
+            last_click: Instant::now(),
+            last_click_pos: glam::Vec2::splat(-1e6),
             last_frame: Instant::now(),
             frame_count: 0,
             fps_timer: Instant::now(),
@@ -731,6 +735,22 @@ impl App {
         }
     }
 
+    /// Zoom/center the camera on the selected node and its neighborhood.
+    fn focus_selected(&mut self) {
+        let Some(anchor) = self.selected_pos else { return };
+        let mut min = anchor;
+        let mut max = anchor;
+        for np in &self.neighbor_positions {
+            min = min.min(*np);
+            max = max.max(*np);
+        }
+        // Pad so the node isn't flush against the edge; ensure a minimum span so
+        // an isolated node doesn't zoom to infinity.
+        let span = (max - min).max(glam::Vec2::splat(self.opts.k * 6.0));
+        let c = (min + max) * 0.5;
+        self.camera.fit_bounds(c - span * 0.6, c + span * 0.6);
+    }
+
     /// Pick a node under a screen pixel and select it (updating the info panel).
     fn pick_at(&mut self, screen: glam::Vec2) {
         // Ensure the pick pass uses the current camera.
@@ -885,9 +905,18 @@ impl ApplicationHandler for App {
                         }
                         ElementState::Released => {
                             self.dragging = false;
-                            // A click (negligible movement) selects a node.
+                            // A click (negligible movement) selects a node; a
+                            // double-click also focuses the camera on it.
                             if !self.moved_since_press {
                                 self.pick_at(self.cursor);
+                                let now = Instant::now();
+                                let dbl = now.duration_since(self.last_click).as_millis() < 350
+                                    && (self.cursor - self.last_click_pos).length() < 6.0;
+                                if dbl {
+                                    self.focus_selected();
+                                }
+                                self.last_click = now;
+                                self.last_click_pos = self.cursor;
                             }
                         }
                     }

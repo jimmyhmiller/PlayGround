@@ -64,6 +64,17 @@ fn vs_node(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -
     let center_ndc = (world - cam.center) * cam.scale;
 
     var out: NodeVsOut;
+    // Frustum cull: if the node is well outside NDC, collapse its quad offscreen
+    // so it costs no rasterization. Big win when zoomed into a subset of a huge
+    // graph — most nodes are offscreen and contribute nothing.
+    let m = radius_ndc + vec2<f32>(0.02, 0.02);
+    if (center_ndc.x < -1.0 - m.x || center_ndc.x > 1.0 + m.x ||
+        center_ndc.y < -1.0 - m.y || center_ndc.y > 1.0 + m.y) {
+        out.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        out.uv = corner;
+        out.color = vec4<f32>(0.0);
+        return out;
+    }
     out.clip = vec4<f32>(center_ndc + corner * radius_ndc, 0.0, 1.0);
     out.uv = corner;
     var col = unpack_color(colors[inst]);
