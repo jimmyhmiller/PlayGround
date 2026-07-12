@@ -72,13 +72,27 @@
 (defn fd-write [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
   (let [n (write (cast :i64 ctx) buf len)]
     (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
+; CAUTION: `alloc-static` gives ONE Writer per call site, so `fd-writer` returns a
+; single shared struct — holding two `fd-writer` results for different fds at once
+; aliases them. `stdout`/`stderr` therefore each own a DEDICATED static (below) so a
+; held stdout writer is not clobbered when stderr is touched (and vice versa) — that
+; aliasing bug is why `coil emit-ir f > f.ll` used to yield an empty file (the IR
+; write landed on fd 2 after a diagnostic path touched stderr).
 (defn fd-writer [(fd :i64)] (-> (ptr Writer))
   (let [w (alloc-static Writer)]
     (store! (field w write-fn) (fnptr-of fd-write))
     (store! (field w ctx) (cast (ptr i8) fd))
     w))
-(defn stdout [] (-> (ptr Writer)) (fd-writer 1))
-(defn stderr [] (-> (ptr Writer)) (fd-writer 2))
+(defn stdout [] (-> (ptr Writer))
+  (let [w (alloc-static Writer)]     ; own static, distinct from stderr's
+    (store! (field w write-fn) (fnptr-of fd-write))
+    (store! (field w ctx) (cast (ptr i8) 1))
+    w))
+(defn stderr [] (-> (ptr Writer))
+  (let [w (alloc-static Writer)]     ; own static, distinct from stdout's
+    (store! (field w write-fn) (fnptr-of fd-write))
+    (store! (field w ctx) (cast (ptr i8) 2))
+    w))
 
 ; null sink: discards everything, always succeeds.
 (defn null-write [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))

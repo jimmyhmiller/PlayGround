@@ -34,8 +34,11 @@ SEEDS=(
   apps/chip8/objc.coil
   # every lib/*.coil is added by the glob below (the directory IS the manifest) —
   # no hand-maintained list to drift from what the compiler actually bundles.
-  selfhost/src/main.coil
-  selfhost/src/main_a64.coil                  # LLVM-free top file (shares driver.coil); guards drift vs main.coil
+  #
+  # NOTE: main.coil / main_a64.coil are deliberately NOT snapshotted — each emits
+  # ~11 MB of IR, and the compiler itself is already covered far more strongly by the
+  # rebootstrap FIXPOINT (stage2.o == stage3.o) than an IR text diff could. Keeping
+  # their 22 MB dumps out of git is the right trade.
   # --- feature corpora: each exercises a stubbed self-host feature so it becomes
   # part of the contract (currently failing on the self-host, green on Rust). ---
   examples/dyn_write.coil                     # trait objects / dyn dispatch (lib/dyn.coil)
