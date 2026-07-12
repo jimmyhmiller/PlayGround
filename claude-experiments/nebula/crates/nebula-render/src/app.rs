@@ -30,6 +30,8 @@ pub enum ColorMode {
     PageRank,
     Coloring,
     Communities,
+    /// Color by a loaded node attribute, indexed into `App::attr_keys`.
+    Attribute(usize),
 }
 
 impl ColorMode {
@@ -41,6 +43,7 @@ impl ColorMode {
             ColorMode::PageRank => "pagerank",
             ColorMode::Coloring => "greedy-coloring",
             ColorMode::Communities => "communities",
+            ColorMode::Attribute(_) => "attribute",
         }
     }
 }
@@ -128,6 +131,9 @@ pub struct App {
     /// Optional per-node attributes (key/value), indexed by node id. Shown in
     /// the inspection panel when a node is selected.
     node_attrs: Option<Vec<Vec<(String, String)>>>,
+    /// Distinct attribute keys (union over all nodes), in first-seen order.
+    /// Drives the "color by attribute" and filter UI.
+    attr_keys: Vec<String>,
 
     // Runtime.
     live: Option<Live>,
@@ -147,7 +153,7 @@ pub struct App {
     selected_pos: Option<glam::Vec2>,
     neighbor_positions: Vec<glam::Vec2>,
     last_values: Option<Vec<f32>>,
-    value_name: &'static str,
+    value_name: String,
     show_help: bool,
     show_hud: bool,
     show_labels: bool,
@@ -201,6 +207,7 @@ impl App {
             graph,
             seed_positions,
             opts,
+            attr_keys: attribute_keys(node_attrs.as_deref()),
             labels,
             node_attrs,
             live: None,
@@ -215,7 +222,7 @@ impl App {
             selected_pos: None,
             neighbor_positions: Vec::new(),
             last_values: None,
-            value_name: "",
+            value_name: String::new(),
             show_help,
             show_hud: true,
             show_labels,
@@ -280,20 +287,20 @@ impl App {
             return;
         }
         let n = self.graph.num_nodes() as usize;
-        self.value_name = "";
+        self.value_name = String::new();
         self.last_values = None;
         let (colors, sizes): (Vec<u32>, Option<Vec<f32>>) = match self.color_mode {
             ColorMode::Uniform => (vec![pack_rgba(120, 170, 255, 255); n], None),
             ColorMode::Components => {
                 let labels = algorithms::connected_components(&self.graph);
-                self.value_name = "component";
+                self.value_name = "component".to_string();
                 self.last_values = Some(labels.iter().map(|&l| l as f32).collect());
                 (coloring::categorical_colors(&labels), None)
             }
             ColorMode::Degree => {
                 let deg = self.graph.degrees();
                 let degf: Vec<f32> = deg.iter().map(|&d| d as f32).collect();
-                self.value_name = "degree";
+                self.value_name = "degree".to_string();
                 self.last_values = Some(degf.clone());
                 (
                     coloring::sequential_colors_u32(&deg, true),
@@ -302,7 +309,7 @@ impl App {
             }
             ColorMode::PageRank => {
                 let pr = algorithms::pagerank(&mut self.graph, 40, 0.85);
-                self.value_name = "pagerank";
+                self.value_name = "pagerank".to_string();
                 self.last_values = Some(pr.clone());
                 (
                     coloring::sequential_colors_f32(&pr, true),
@@ -311,16 +318,17 @@ impl App {
             }
             ColorMode::Coloring => {
                 let c = algorithms::greedy_coloring(&mut self.graph);
-                self.value_name = "color";
+                self.value_name = "color".to_string();
                 self.last_values = Some(c.iter().map(|&x| x as f32).collect());
                 (coloring::categorical_colors(&c), None)
             }
             ColorMode::Communities => {
                 let labels = algorithms::label_propagation(&mut self.graph, 20);
-                self.value_name = "community";
+                self.value_name = "community".to_string();
                 self.last_values = Some(labels.iter().map(|&l| l as f32).collect());
                 (coloring::categorical_colors(&labels), None)
             }
+            ColorMode::Attribute(i) => self.colors_for_attribute(i, n),
         };
         let Some(live) = self.live.as_mut() else { return };
         live.graph_gpu.set_colors(&live.gpu.queue, &colors);
@@ -331,6 +339,53 @@ impl App {
                 .set_sizes(&live.gpu.queue, &vec![1.0f32; n]),
         }
         log::info!("color mode -> {}", self.color_mode.label());
+    }
+
+    /// Build `(colors, sizes)` for coloring by attribute key index `i`. Numeric
+    /// attributes get a turbo scalar ramp; everything else (booleans, strings)
+    /// is colored categorically.
+    fn colors_for_attribute(&mut self, i: usize, n: usize) -> (Vec<u32>, Option<Vec<f32>>) {
+        let Some(key) = self.attr_keys.get(i).cloned() else {
+            return (vec![pack_rgba(120, 170, 255, 255); n], None);
+        };
+        self.value_name = key.clone();
+
+        // Snapshot the attribute's value for each node (owned), so the borrow of
+        // `self.node_attrs` is released before we mutate `self` below.
+        let vals: Vec<Option<String>> = (0..n)
+            .map(|id| {
+                self.node_attrs
+                    .as_ref()
+                    .and_then(|a| a.get(id))
+                    .and_then(|kv| kv.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()))
+            })
+            .collect();
+
+        // Numeric if every present value parses as a number (and at least one is).
+        let nums: Vec<Option<f32>> = vals
+            .iter()
+            .map(|o| o.as_ref().and_then(|s| s.trim().parse::<f32>().ok()))
+            .collect();
+        let any_present = vals.iter().any(|o| o.is_some());
+        let all_numeric = vals.iter().zip(&nums).all(|(v, n)| v.is_none() || n.is_some());
+
+        if any_present && all_numeric {
+            let scalar: Vec<f32> = nums.iter().map(|o| o.unwrap_or(0.0)).collect();
+            self.last_values = Some(scalar.clone());
+            // Log scale: counts (read_count, parent_count, …) are heavily skewed.
+            return (coloring::sequential_colors_f32(&scalar, true), None);
+        }
+
+        // Categorical: intern distinct string values into dense labels.
+        let mut map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut labels = vec![0u32; n];
+        for (id, v) in vals.into_iter().enumerate() {
+            let key = v.unwrap_or_default();
+            let next = map.len() as u32;
+            labels[id] = *map.entry(key).or_insert(next);
+        }
+        self.last_values = Some(labels.iter().map(|&l| l as f32).collect());
+        (coloring::categorical_colors(&labels), None)
     }
 
     fn update_title(&self) {
@@ -436,6 +491,16 @@ impl App {
                 for (mode, label) in COLOR_MODES {
                     if ui.selectable_label(cur_color == mode, label).clicked() {
                         act_color = Some(mode);
+                    }
+                }
+                if !self.attr_keys.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("attributes").weak());
+                    for (i, k) in self.attr_keys.iter().enumerate() {
+                        let mode = ColorMode::Attribute(i);
+                        if ui.selectable_label(cur_color == mode, k).clicked() {
+                            act_color = Some(mode);
+                        }
                     }
                 }
                 ui.separator();
@@ -826,7 +891,10 @@ impl App {
                 }
                 lines.push((dim, format!("adj: {s}")));
             }
-            if self.value_name != "degree" && !self.value_name.is_empty() {
+            if self.value_name != "degree"
+                && !self.value_name.is_empty()
+                && !matches!(self.color_mode, ColorMode::Attribute(_))
+            {
                 if let Some(v) = self.last_values.as_ref().and_then(|vals| vals.get(id as usize)) {
                     // Integer-valued modes read cleaner without decimals.
                     if matches!(self.color_mode, ColorMode::Components | ColorMode::Coloring | ColorMode::Communities) {
@@ -1374,6 +1442,22 @@ fn commafy(n: u64) -> String {
         out.push(ch);
     }
     out
+}
+
+/// Distinct attribute keys across all nodes, in first-seen order.
+fn attribute_keys(attrs: Option<&[Vec<(String, String)>]>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut keys = Vec::new();
+    if let Some(attrs) = attrs {
+        for node in attrs {
+            for (k, _) in node {
+                if seen.insert(k.clone()) {
+                    keys.push(k.clone());
+                }
+            }
+        }
+    }
+    keys
 }
 
 fn bounds(pos: &[Pos]) -> (glam::Vec2, glam::Vec2) {

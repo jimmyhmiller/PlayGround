@@ -56,6 +56,8 @@ struct Args {
     frames: Option<u64>,
     screenshot: Option<String>,
     color: ColorMode,
+    /// Start colored by this node attribute (resolved to an index after load).
+    color_attr: Option<String>,
     paused: bool,
     no_edges: bool,
     no_nodes: bool,
@@ -126,6 +128,25 @@ fn main() -> anyhow::Result<()> {
             (loaded.graph, label)
         }
     };
+    // Resolve --color-attr to an attribute color index (first-seen key order,
+    // matching the viewer's own ordering).
+    let mut color_mode = args.color;
+    if let Some(key) = &args.color_attr {
+        let mut keys: Vec<&str> = Vec::new();
+        if let Some(attrs) = node_attrs.as_ref() {
+            for node in attrs {
+                for (k, _) in node {
+                    if !keys.iter().any(|s| s == k) {
+                        keys.push(k);
+                    }
+                }
+            }
+        }
+        match keys.iter().position(|k| *k == key) {
+            Some(i) => color_mode = ColorMode::Attribute(i),
+            None => anyhow::bail!("attribute '{key}' not found; available: {}", keys.join(", ")),
+        }
+    }
     log::info!(
         "built {what}: {} nodes, {} edges in {:.2}s",
         graph.num_nodes(),
@@ -161,7 +182,7 @@ fn main() -> anyhow::Result<()> {
         settings,
         max_frames: args.frames,
         screenshot: args.screenshot,
-        color_mode: args.color,
+        color_mode,
         draw_edges: !args.no_edges,
         draw_nodes: !args.no_nodes,
         select: args.select,
@@ -185,6 +206,7 @@ fn parse_args() -> Result<Args, String> {
     let mut frames = None;
     let mut screenshot = None;
     let mut color = ColorMode::Uniform;
+    let mut color_attr: Option<String> = None;
     let mut paused = false;
     let mut no_edges = false;
     let mut no_nodes = false;
@@ -261,6 +283,9 @@ fn parse_args() -> Result<Args, String> {
                     other => return Err(format!("unknown color mode: {other}")),
                 };
             }
+            "--color-attr" => {
+                color_attr = Some(it.next().ok_or("--color-attr needs an attribute name")?);
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -274,6 +299,7 @@ fn parse_args() -> Result<Args, String> {
         frames,
         screenshot,
         color,
+        color_attr,
         paused,
         no_edges,
         no_nodes,
