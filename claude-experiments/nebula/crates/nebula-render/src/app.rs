@@ -14,6 +14,7 @@ use winit::window::{Window, WindowId};
 
 use crate::camera::Camera2D;
 use crate::coloring;
+use crate::density::Density;
 use crate::gpu::Gpu;
 use crate::layout_gpu::{LayoutGpu, LayoutSettings};
 use crate::overlay::Overlay;
@@ -62,6 +63,10 @@ pub struct RunOptions {
     pub show_help: bool,
     /// Start with node labels visible.
     pub show_labels: bool,
+    /// Force the density-aggregation LOD on (otherwise auto for >2M nodes).
+    pub aggregate: bool,
+    /// Initial node radius in pixels (runtime-adjustable with +/-).
+    pub node_size: f32,
 }
 
 impl Default for RunOptions {
@@ -78,6 +83,7 @@ impl Default for RunOptions {
             select: None,
             show_help: false,
             show_labels: false,
+            aggregate: false,
         }
     }
 }
@@ -90,6 +96,7 @@ struct Live {
     renderer: Renderer,
     layout: LayoutGpu,
     overlay: Overlay,
+    density: Density,
 }
 
 pub struct App {
@@ -116,6 +123,7 @@ pub struct App {
     show_hud: bool,
     show_labels: bool,
     cached_positions: Option<Vec<Pos>>,
+    show_density: bool,
 
     // Input state.
     cursor: glam::Vec2,
@@ -153,6 +161,8 @@ impl App {
         let selected = opts.select;
         let show_help = opts.show_help;
         let show_labels = opts.show_labels;
+        let node_count = graph.num_nodes();
+        let aggregate = opts.aggregate;
         App {
             graph,
             seed_positions,
@@ -172,6 +182,8 @@ impl App {
             show_hud: true,
             show_labels,
             cached_positions: None,
+            // Auto-enable aggregation for graphs too large to click through.
+            show_density: aggregate || node_count > 2_000_000,
             cursor: glam::Vec2::ZERO,
             dragging: false,
             press_pos: glam::Vec2::ZERO,
@@ -209,6 +221,7 @@ impl App {
         let renderer = Renderer::new(&gpu.device, gpu.config.format, &graph_gpu);
         let layout = LayoutGpu::new(&gpu.device, &graph_gpu, &self.settings);
         let overlay = Overlay::new(&gpu.device, gpu.config.format);
+        let density = Density::new(&gpu.device, gpu.config.format, &graph_gpu);
 
         // Fit camera to the seeded layout.
         self.camera.viewport = glam::vec2(gpu.size.width as f32, gpu.size.height as f32);
@@ -218,7 +231,7 @@ impl App {
         let mut renderer = renderer;
         renderer.draw_edges = self.opts.draw_edges;
         renderer.draw_nodes = self.opts.draw_nodes;
-        self.live = Some(Live { window, gpu, graph_gpu, renderer, layout, overlay });
+        self.live = Some(Live { window, gpu, graph_gpu, renderer, layout, overlay, density });
         self.apply_color_mode();
         self.update_title();
     }
@@ -349,6 +362,10 @@ impl App {
         // Camera uniform.
         live.renderer.update_camera(&live.gpu.queue, &self.camera.uniform());
         live.renderer.update_params(&live.gpu.queue, &self.render_params);
+        if self.show_density {
+            let (vw, vh) = (live.gpu.size.width as f32, live.gpu.size.height as f32);
+            live.density.update(&live.gpu.queue, &self.camera.uniform(), vw, vh);
+        }
 
         let frame = match live.gpu.surface.get_current_texture() {
             Ok(f) => f,
@@ -366,6 +383,10 @@ impl App {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("draw") });
+        // Bin nodes into screen tiles before the render pass (same encoder).
+        if self.show_density {
+            live.density.record_compute(&mut enc);
+        }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),
@@ -387,7 +408,11 @@ impl App {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            live.renderer.draw(&mut pass);
+            if self.show_density {
+                live.density.draw(&mut pass);
+            } else {
+                live.renderer.draw(&mut pass);
+            }
 
             // Overlay (HUD, info panel, selection marker) on top.
             live.overlay.begin();
@@ -461,10 +486,11 @@ impl App {
                 (
                     dim,
                     format!(
-                        "{:.0} fps   {}   {}",
+                        "{:.0} fps   {}   {}{}",
                         self.fps,
                         self.color_mode.label(),
-                        self.sim_status()
+                        self.sim_status(),
+                        if self.show_density { "   [aggregated]" } else { "" }
                     ),
                 ),
             ];
@@ -508,6 +534,7 @@ impl App {
                 "4 pagerank  5 coloring  6 communities",
                 "space pause / E edges / N nodes",
                 "R random / G grid / O circle re-seed",
+                "A aggregate (density) / L labels",
                 "+/- node size / [ ] edge brightness",
                 "H help / Tab hud / C clear / Esc quit",
             ];
@@ -697,6 +724,9 @@ impl App {
 
         live.renderer.update_camera(&live.gpu.queue, &self.camera.uniform());
         live.renderer.update_params(&live.gpu.queue, &self.render_params);
+        if self.show_density {
+            live.density.update(&live.gpu.queue, &self.camera.uniform(), w as f32, h as f32);
+        }
 
         let tex = live.gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("capture_tex"),
@@ -713,6 +743,9 @@ impl App {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture") });
+        if self.show_density {
+            live.density.record_compute(&mut enc);
+        }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("capture_pass"),
@@ -729,7 +762,11 @@ impl App {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            live.renderer.draw(&mut pass);
+            if self.show_density {
+                live.density.draw(&mut pass);
+            } else {
+                live.renderer.draw(&mut pass);
+            }
             live.overlay.begin();
             for (x, y, rw, rh, col) in &overlay_cmds.rects {
                 live.overlay.rect(*x, *y, *rw, *rh, *col);
@@ -899,6 +936,10 @@ impl App {
             KeyCode::KeyO => {
                 let r = self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt() * 0.5;
                 self.reseed(&CircleLayout { radius: r });
+            }
+            KeyCode::KeyA => {
+                self.show_density = !self.show_density;
+                log::info!("aggregation (density heatmap) {}", if self.show_density { "on" } else { "off" });
             }
             KeyCode::KeyH => self.show_help = !self.show_help,
             KeyCode::KeyL => {

@@ -1906,7 +1906,7 @@
   (if (or (icmp-eq op 3) (or (icmp-eq op 6) (or (icmp-eq op 14) (or (icmp-eq op 16) (or (icmp-eq op 19) (or (icmp-eq op 21) (or (icmp-eq op 22) (icmp-eq op 24)))))))) (TInt 64 true)
   (if (or (icmp-eq op 5) (icmp-eq op 13)) (TSlice (box-type (malloc-allocator) (TInt 8 false)))
   (if (or (icmp-eq op 0) (or (icmp-eq op 1) (or (icmp-eq op 2) (or (icmp-eq op 10) (icmp-eq op 11))))) (TBool)
-  (if (icmp-eq op 9) (TNever)
+  (if (or (icmp-eq op 9) (icmp-eq op 31)) (TNever)
     (TCode))))))
 
 (defn synth-callptr-args [(a (ptr Allocator)) (params (ptr (ArrayList Type))) (args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result (ptr (ArrayList Expr)) Diag))

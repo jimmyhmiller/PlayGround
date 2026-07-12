@@ -44,7 +44,7 @@
 // The brain + tools + loop live in std/agent.scry (imported below); this file is the app shell:
 // the REPL, the orchestrator, the real sub-agent threads, and the viewer-facing entities.
 
-import std.agent.{Message, Conversation, Tool, Model, ModelResponse, ScriptedModel, AnthropicModel, ShellTool, SearchTool, CalcTool, WeatherTool, runAgentLoop, mkTextMessage}
+import std.agent.{Message, Conversation, Tool, Model, ModelResponse, ScriptedModel, AnthropicModel, ShellTool, SearchTool, CalcTool, WeatherTool, FileReadTool, FileWriteTool, runAgentLoop, mkTextMessage}
 
 // ============================ small string helpers ============================
 fn startsWith(s: String, p: String) -> Bool {
@@ -209,8 +209,10 @@ class Orchestrator {
     self.tools = List<Tool>()
     self.tools.push(CalcTool(label: "calc"))
     self.tools.push(WeatherTool(source: "demo"))
-    self.tools.push(ShellTool(command: "grep -r"))
-    self.tools.push(SearchTool(index: "codebase"))
+    self.tools.push(ShellTool(command: "sh"))            // REAL: runs commands on the host
+    self.tools.push(SearchTool(index: "codebase"))       // REAL: greps the working tree
+    self.tools.push(FileReadTool(root: "."))             // REAL: reads files
+    self.tools.push(FileWriteTool(root: "."))            // REAL: writes files
 
     // Pick the brain: a real AnthropicModel when ANTHROPIC_API_KEY is set, else the ScriptedModel.
     let brain = chooseBrain()

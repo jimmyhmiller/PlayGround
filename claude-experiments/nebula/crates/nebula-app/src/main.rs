@@ -62,6 +62,7 @@ struct Args {
     select: Option<u32>,
     help_overlay: bool,
     labels: bool,
+    aggregate: bool,
 }
 
 enum Gen {
@@ -161,6 +162,7 @@ fn main() -> anyhow::Result<()> {
         select: args.select,
         show_help: args.help_overlay,
         show_labels: args.labels,
+        aggregate: args.aggregate,
     };
 
     let app = App::with_labels(graph, positions, opts, node_labels);
@@ -183,6 +185,7 @@ fn parse_args() -> Result<Args, String> {
     let mut select = None;
     let mut help_overlay = false;
     let mut labels = false;
+    let mut aggregate = false;
 
     fn next_u64(it: &mut impl Iterator<Item = String>, name: &str) -> Result<u64, String> {
         it.next()
@@ -235,6 +238,7 @@ fn parse_args() -> Result<Args, String> {
             "--select" => select = Some(next_u32(&mut it, "--select")?),
             "--help-overlay" => help_overlay = true,
             "--labels" => labels = true,
+            "--aggregate" => aggregate = true,
             "--frames" => frames = Some(next_u64(&mut it, "--frames")?),
             "--screenshot" => screenshot = Some(it.next().ok_or("--screenshot needs a path")?),
             "--color" => {
@@ -268,5 +272,6 @@ fn parse_args() -> Result<Args, String> {
         select,
         help_overlay,
         labels,
+        aggregate,
     })
 }

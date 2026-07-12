@@ -1403,20 +1403,21 @@ impl JitCode {
     }
 
     /// The current address map, recompiling first if the world has changed since
-    /// the last compile (or if nothing is compiled yet).
-    fn addrs(&self, shared: &Shared) -> Result<Arc<HashMap<(DefId, Version), usize>>, JitError> {
+    /// the last compile (or if nothing is compiled yet). Takes a bare [`World`]
+    /// so both the concurrent tier (via `Shared::with_world`) and the
+    /// single-threaded tiered runtime can share one cache.
+    pub fn addrs(&self, world: &World) -> Result<Arc<HashMap<(DefId, Version), usize>>, JitError> {
         let mut inner = self.inner.lock().unwrap();
-        let epoch = shared.with_world(|w| w.epoch);
-        if inner.epoch != Some(epoch) {
+        if inner.epoch != Some(world.epoch) {
             // Leak the context so the compiled code outlives this call; extract
-            // the addresses (the only thing workers need), then leak the
+            // the addresses (the only thing callers need), then leak the
             // `Compiled` too so its engine stays alive.
             let ctx: &'static Context = Box::leak(Box::new(Context::create()));
-            let compiled = shared.with_world(|w| compile(ctx, w))?;
+            let compiled = compile(ctx, world)?;
             let addrs = compiled.addr_map();
             Box::leak(Box::new(compiled));
             inner.addrs = Arc::new(addrs);
-            inner.epoch = Some(epoch);
+            inner.epoch = Some(world.epoch);
         }
         Ok(Arc::clone(&inner.addrs))
     }
@@ -1506,7 +1507,7 @@ fn concurrent_drive(
     tid: usize,
     actor: &mut JitActor,
 ) -> Result<(), JitError> {
-    let mut addrs = code.addrs(shared)?;
+    let mut addrs = shared.with_world(|w| code.addrs(w))?;
     while matches!(actor.status, ActorStatus::Runnable) {
         if shared.gc_pending() {
             shared.safepoint_roots(tid, actor.roots());
@@ -1518,7 +1519,7 @@ fn concurrent_drive(
         // A live edit may have introduced this version since we last compiled;
         // recompile-on-demand (cached by epoch) picks it up.
         if !addrs.contains_key(&key) {
-            addrs = code.addrs(shared)?;
+            addrs = shared.with_world(|w| code.addrs(w))?;
         }
         let Some(&addr) = addrs.get(&key) else {
             return Err(JitError(format!(
@@ -1661,4 +1662,420 @@ fn handle_call_concurrent(shared: &Arc<Shared>, actor: &mut JitActor) -> Result<
         return_to: Some(dst),
     });
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Auto-tiering: start interpreted, promote hot functions to JIT.
+//
+// One runtime, two engines, chosen automatically. A function begins as an
+// interpreted frame; a per-(func, version) call counter promotes it once it
+// crosses a threshold, and thereafter its frames run as compiled `step`
+// functions. A single actor's stack freely mixes interpreted and JIT frames,
+// marshalling `Value <-> RawSlot` at the call/return boundaries — so a hot
+// callee runs native while its cold caller keeps interpreting, with no
+// re-implementation of either engine (the interpreter's `step_instruction` and
+// the JIT's compiled `step` are reused verbatim).
+// ---------------------------------------------------------------------------
+
+use std::collections::HashSet;
+
+/// A frame in a tiered actor: either interpreted (register `Value`s) or JIT
+/// (flat `RawSlot`s). Both carry the caller register their result returns to.
+enum TierFrame {
+    Interp(Frame),
+    Jit(JitFrame),
+}
+
+/// A single-threaded runtime that auto-promotes hot functions from the
+/// interpreter to the JIT.
+pub struct Tiered {
+    rt: Runtime,
+    code: JitCode,
+    counts: HashMap<(DefId, Version), u64>,
+    hot: HashSet<(DefId, Version)>,
+    threshold: u64,
+    stack: Vec<TierFrame>,
+    result: Option<Value>,
+    paused: Option<Condition>,
+}
+
+impl Tiered {
+    /// Wrap a set-up runtime; `threshold` call-count promotes a function to JIT.
+    pub fn new(rt: Runtime, threshold: u64) -> Tiered {
+        Tiered {
+            rt,
+            code: JitCode::new(),
+            counts: HashMap::new(),
+            hot: HashSet::new(),
+            threshold,
+            stack: Vec::new(),
+            result: None,
+            paused: None,
+        }
+    }
+
+    pub fn runtime(&self) -> &Runtime {
+        &self.rt
+    }
+    /// How many function versions have been promoted to JIT so far.
+    pub fn promoted(&self) -> usize {
+        self.hot.len()
+    }
+    /// Was `(func, version)` promoted to the JIT?
+    pub fn is_hot(&self, func: DefId, version: Version) -> bool {
+        self.hot.contains(&(func, version))
+    }
+
+    /// Run `func(args)` to completion or a trap, promoting hot callees mid-run.
+    pub fn run(&mut self, func: DefId, args: Vec<Value>) -> Outcome {
+        let (version, regcount) = match self.rt.world.current_functions.get(&func) {
+            Some(v) => match &self.rt.world.functions[&(func, *v)] {
+                FunctionState::Ready(f) => (*v, f.registers),
+                FunctionState::Broken { diagnostics, .. } => {
+                    return Outcome::Paused(Condition::BrokenFunction {
+                        function: func,
+                        diagnostics: diagnostics.clone(),
+                    });
+                }
+            },
+            None => {
+                return Outcome::Paused(Condition::BrokenFunction {
+                    function: func,
+                    diagnostics: vec!["unknown function".into()],
+                });
+            }
+        };
+        let mut registers = vec![None; regcount];
+        for (i, v) in args.into_iter().enumerate() {
+            registers[i] = Some(v);
+        }
+        self.stack.push(TierFrame::Interp(Frame {
+            function: (func, version),
+            pc: 0,
+            registers,
+            return_to: None,
+        }));
+
+        loop {
+            if let Some(v) = self.result.take() {
+                return Outcome::Complete(v);
+            }
+            if let Some(c) = self.paused.take() {
+                return Outcome::Paused(c);
+            }
+            match self.stack.last() {
+                Some(TierFrame::Jit(_)) => self.jit_step(),
+                Some(TierFrame::Interp(_)) => self.interp_step(),
+                None => return Outcome::Complete(Value::Unit),
+            }
+        }
+    }
+
+    /// Push a callee frame, promoting to JIT if it is (now) hot. `registers` is
+    /// the full seeded register array; for a JIT frame it is marshalled to
+    /// `RawSlot`s. A failed compile degrades gracefully to interpreting.
+    fn push_callee(
+        &mut self,
+        callee: DefId,
+        version: Version,
+        registers: Vec<Option<Value>>,
+        return_to: Option<usize>,
+    ) {
+        let key = (callee, version);
+        *self.counts.entry(key).or_insert(0) += 1;
+        if self.counts[&key] >= self.threshold {
+            self.hot.insert(key);
+        }
+        if self.hot.contains(&key) {
+            if let Ok(addrs) = self.code.addrs(&self.rt.world) {
+                if addrs.contains_key(&key) {
+                    let regs = registers
+                        .iter()
+                        .map(|o| o.as_ref().map_or(RawSlot::EMPTY, RawSlot::from_value))
+                        .collect();
+                    self.stack.push(TierFrame::Jit(JitFrame {
+                        func_id: callee,
+                        version,
+                        pc: 0,
+                        regs,
+                        return_to,
+                    }));
+                    return;
+                }
+            }
+        }
+        self.stack.push(TierFrame::Interp(Frame {
+            function: key,
+            pc: 0,
+            registers,
+            return_to,
+        }));
+    }
+
+    /// Pop the returning frame and deliver `value` to the caller, converting to
+    /// the caller's representation; if the stack empties, the actor completes.
+    fn deliver_return(&mut self, value: Value) {
+        let done = self.stack.pop().unwrap();
+        let return_to = match &done {
+            TierFrame::Interp(f) => f.return_to,
+            TierFrame::Jit(f) => f.return_to,
+        };
+        match self.stack.last_mut() {
+            None => self.result = Some(value),
+            Some(TierFrame::Interp(f)) => {
+                if let Some(r) = return_to {
+                    f.registers[r] = Some(value);
+                }
+            }
+            Some(TierFrame::Jit(f)) => {
+                if let Some(r) = return_to {
+                    f.regs[r] = RawSlot::from_value(&value);
+                }
+            }
+        }
+    }
+
+    fn interp_step(&mut self) {
+        let instr = {
+            let (key, pc) = match self.stack.last().unwrap() {
+                TierFrame::Interp(f) => (f.function, f.pc),
+                _ => unreachable!(),
+            };
+            match &self.rt.world.functions[&key] {
+                FunctionState::Ready(f) => f.code[pc].clone(),
+                _ => {
+                    self.paused = Some(Condition::RuntimeTypeError {
+                        function: key.0,
+                        pc,
+                        message: "interp frame pins non-ready code".into(),
+                    });
+                    return;
+                }
+            }
+        };
+        let mut m = TieredMachine { t: self };
+        if let Err(condition) = step_instruction(&mut m, &instr) {
+            self.paused = Some(condition);
+        }
+    }
+
+    fn jit_step(&mut self) {
+        let key = match self.stack.last().unwrap() {
+            TierFrame::Jit(f) => (f.func_id, f.version),
+            _ => unreachable!(),
+        };
+        let addrs = match self.code.addrs(&self.rt.world) {
+            Ok(a) => a,
+            Err(e) => {
+                self.paused = Some(Condition::RuntimeTypeError { function: key.0, pc: 0, message: e.0 });
+                return;
+            }
+        };
+        let Some(&addr) = addrs.get(&key) else {
+            self.paused = Some(Condition::RuntimeTypeError {
+                function: key.0,
+                pc: 0,
+                message: "no compiled step".into(),
+            });
+            return;
+        };
+        let step = step_at(addr);
+        let (outcome, pending, scratch) = {
+            let frame = match self.stack.last_mut().unwrap() {
+                TierFrame::Jit(f) => f,
+                _ => unreachable!(),
+            };
+            let mut raw = RawFrame {
+                func_id: frame.func_id as i64,
+                version: frame.version.0 as i64,
+                pc: frame.pc as i64,
+                n_regs: frame.regs.len() as i64,
+                regs: frame.regs.as_mut_ptr(),
+                scratch: RawSlot::EMPTY,
+                return_reg: frame.return_to.map_or(-1, |r| r as i64),
+            };
+            let mut host = JitHost::single(&mut self.rt);
+            let out = unsafe { step(&mut raw, &mut host as *mut JitHost) };
+            frame.pc = raw.pc as usize;
+            (out, host.take_pending(), raw.scratch)
+        };
+
+        match outcome {
+            OUT_RETURN => {
+                let result = scratch.to_value();
+                let (fid, ver, ret_pc) = match self.stack.last().unwrap() {
+                    TierFrame::Jit(f) => (f.func_id, f.version, f.pc),
+                    _ => unreachable!(),
+                };
+                if let FunctionState::Ready(f) = &self.rt.world.functions[&(fid, ver)] {
+                    let ty = f.result.clone();
+                    if !self.rt.value_ok(&result, &ty) {
+                        self.paused = Some(Condition::RuntimeTypeError {
+                            function: fid,
+                            pc: ret_pc,
+                            message: format!("return value: expected {ty:?}, found a value of another type"),
+                        });
+                        return;
+                    }
+                }
+                self.deliver_return(result);
+            }
+            OUT_CALL => self.jit_handle_call(),
+            OUT_YIELD => {} // run to completion
+            OUT_CONDITION => self.paused = pending,
+            OUT_TYPE_ERROR => {
+                let (fid, ver, trap_pc) = match self.stack.last().unwrap() {
+                    TierFrame::Jit(f) => (f.func_id, f.version, f.pc),
+                    _ => unreachable!(),
+                };
+                let instruction = match &self.rt.world.functions[&(fid, ver)] {
+                    FunctionState::Ready(f) => f.code[trap_pc].clone(),
+                    _ => {
+                        self.paused = Some(Condition::RuntimeTypeError { function: fid, pc: trap_pc, message: "non-ready".into() });
+                        return;
+                    }
+                };
+                self.paused = Some(operand_type_error(fid, trap_pc, &instruction));
+            }
+            other => {
+                self.paused = Some(Condition::RuntimeTypeError {
+                    function: key.0,
+                    pc: 0,
+                    message: format!("unknown step outcome {other}"),
+                });
+            }
+        }
+    }
+
+    /// A `Call` hand-back from a JIT frame: gather args from its slots, decide
+    /// the callee's tier, and push the matching frame.
+    fn jit_handle_call(&mut self) {
+        let (caller_key, call_pc) = match self.stack.last().unwrap() {
+            TierFrame::Jit(f) => ((f.func_id, f.version), f.pc),
+            _ => unreachable!(),
+        };
+        let Instruction::Call { dst, function: callee, args } =
+            (match &self.rt.world.functions[&caller_key] {
+                FunctionState::Ready(f) => f.code[call_pc].clone(),
+                _ => unreachable!(),
+            })
+        else {
+            self.paused = Some(Condition::RuntimeTypeError { function: caller_key.0, pc: call_pc, message: "CALL at non-call pc".into() });
+            return;
+        };
+        let (version, params, regcount) = match self.rt.world.current_functions.get(&callee) {
+            None => {
+                self.paused = Some(Condition::BrokenFunction { function: callee, diagnostics: vec!["unknown function".into()] });
+                return;
+            }
+            Some(v) => match &self.rt.world.functions[&(callee, *v)] {
+                FunctionState::Ready(f) => (*v, f.params.clone(), f.registers),
+                FunctionState::Broken { diagnostics, .. } => {
+                    self.paused = Some(Condition::BrokenFunction { function: callee, diagnostics: diagnostics.clone() });
+                    return;
+                }
+            },
+        };
+        // Gather + type-check args from the caller's JIT slots.
+        let arg_vals: Vec<Value> = {
+            let frame = match self.stack.last().unwrap() {
+                TierFrame::Jit(f) => f,
+                _ => unreachable!(),
+            };
+            args.iter().map(|r| frame.regs[*r].to_value()).collect()
+        };
+        for (v, expected) in arg_vals.iter().zip(&params) {
+            if !self.rt.value_ok(v, expected) {
+                self.paused = Some(Condition::RuntimeTypeError {
+                    function: callee,
+                    pc: call_pc,
+                    message: "call argument: expected a value of another type".into(),
+                });
+                return;
+            }
+        }
+        // Advance the caller past the Call, then push the callee.
+        if let TierFrame::Jit(f) = self.stack.last_mut().unwrap() {
+            f.pc = call_pc + 1;
+        }
+        let mut registers = vec![None; regcount];
+        for (i, v) in arg_vals.into_iter().enumerate() {
+            registers[i] = Some(v);
+        }
+        self.push_callee(callee, version, registers, Some(dst));
+    }
+}
+
+/// The [`Machine`] for a tiered actor's *interpreted* frames — reads/writes the
+/// top interpreted frame, and routes `Call`/`Return` through the tiering policy
+/// (`push_callee`/`deliver_return`), so a call from interpreted code can land in
+/// a JIT frame and vice versa.
+struct TieredMachine<'a> {
+    t: &'a mut Tiered,
+}
+
+impl TieredMachine<'_> {
+    fn top(&self) -> &Frame {
+        match self.t.stack.last().unwrap() {
+            TierFrame::Interp(f) => f,
+            _ => unreachable!("interp step over a non-interp frame"),
+        }
+    }
+    fn top_mut(&mut self) -> &mut Frame {
+        match self.t.stack.last_mut().unwrap() {
+            TierFrame::Interp(f) => f,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Machine for TieredMachine<'_> {
+    fn world(&self) -> &World {
+        &self.t.rt.world
+    }
+    fn heap(&self) -> &Heap {
+        &self.t.rt.heap
+    }
+    fn current(&self) -> (DefId, Version) {
+        self.top().function
+    }
+    fn pc(&self) -> usize {
+        self.top().pc
+    }
+    fn reg(&self, i: usize) -> Option<Value> {
+        self.top().registers.get(i).cloned().flatten()
+    }
+    fn set_reg(&mut self, dst: usize, value: Value) {
+        self.top_mut().registers[dst] = Some(value);
+    }
+    fn set_pc(&mut self, pc: usize) {
+        self.top_mut().pc = pc;
+    }
+    fn advance(&mut self) {
+        self.top_mut().pc += 1;
+    }
+    fn emit(&mut self, value: Value) {
+        self.t.rt.jit_emit(value);
+    }
+    fn global(&self, id: DefId) -> GlobalRead {
+        match self.t.rt.globals.get(&id) {
+            Some(v) => GlobalRead::Value(v.clone()),
+            None => GlobalRead::Missing,
+        }
+    }
+    fn call_foreign(&mut self, id: ForeignFnId, args: &[Value]) -> ForeignCall {
+        ForeignCall::Done(self.t.rt.call_foreign_raw(id, args))
+    }
+    fn push_call(&mut self, callee: DefId, version: Version, registers: Vec<Option<Value>>, return_reg: usize) {
+        self.t.push_callee(callee, version, registers, Some(return_reg));
+    }
+    fn do_return(&mut self, value: Value) {
+        self.t.deliver_return(value);
+    }
+    fn send(&mut self, _t: usize, _v: Value) -> Option<bool> {
+        None
+    }
+    fn recv(&mut self) -> RecvResult {
+        RecvResult::Unsupported
+    }
 }

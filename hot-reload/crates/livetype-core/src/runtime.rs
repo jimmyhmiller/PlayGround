@@ -538,6 +538,13 @@ impl Runtime {
         Ok(result)
     }
 
+    /// Invoke a registered foreign fn, returning its raw result (no type check)
+    /// — for the tiered executor's interpreter machine, which does the
+    /// use-boundary check itself (mirroring `step_instruction`'s arm).
+    pub fn call_foreign_raw(&mut self, id: ForeignFnId, args: &[Value]) -> Result<Value, String> {
+        self.call_foreign(id, args)
+    }
+
     /// The `LoadGlobal` semantics for the JIT extern.
     pub fn jit_load_global(&self, id: DefId) -> Result<Value, Condition> {
         self.globals

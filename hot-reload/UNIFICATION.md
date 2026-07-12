@@ -72,6 +72,19 @@ between them; after Phase 4 the Shared comparison extends to the edit scenario.
   issue), so a program can be **live-edited while it runs on the JIT threads**
   (`live_edit_a_program_running_on_a_jit_thread`: a JIT worker's `tick()`
   hot-swapped 1→2 mid-loop, then a breaking edit stops it).
+- [x] **Phase 7 — auto-tiering (interp → JIT promotion).** The two engines are
+  no longer a manual choice. `Tiered` (src/jit.rs) starts every function
+  interpreted, counts calls per `(func, version)`, and promotes a hot one to the
+  JIT; a single actor's stack freely mixes interpreted (`Value` registers) and
+  JIT (`RawSlot`) frames, marshalling at the call/return boundaries. Both engines
+  are reused verbatim — the interpreter's `step_instruction` (via a
+  `TieredMachine`) and the JIT's compiled `step` — with `push_callee` /
+  `deliver_return` as the shared tier-and-marshal seam. Proven by
+  `tests/tiered.rs`: a function called in a loop is promoted mid-run, result
+  identical to the pure interpreter; FFI/globals survive promotion. *Remaining:*
+  on-stack replacement (promoting a hot *loop* in a running frame, not just at
+  the next call) and applying tiering on the concurrent workers.
+
 - [x] **Phase 6 — the surface language's features now run on every tier.** FFI +
   globals run on the concurrent tier
   (`tests/live_concurrent.rs::ffi_and_globals_run_on_the_concurrent_tier`) *and*

@@ -208,26 +208,71 @@ fn extractArg(argsJson: String, key: String) -> String {
   }
 }
 
+// REAL shell: runs the command on the host via Process.run and returns its combined output.
 class ShellTool implements Tool {
   command: String
   fn name() -> String { "shell" }
-  fn description() -> String { "Run a demo shell command (canned; does not actually execute). Args: cmd (string)." }
+  fn description() -> String { "Run a shell command on the host machine and return its combined stdout+stderr. Use this to inspect the system, list/read files, run tools, etc. Args: cmd (string)." }
   fn inputSchema() -> String { "{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}},\"required\":[\"cmd\"]}" }
   fn run(argsJson: String) -> String {
     let cmd = extractArg(argsJson, "cmd")
-    "$ " + self.command + " " + cmd + "  (canned)"
+    let out = Process.run(cmd)
+    if out.len() == 0 { "(no output)" } else { out }
   }
 }
 
+// REAL search: greps the working tree (recursive, line-numbered) via ripgrep-style grep.
 class SearchTool implements Tool {
   index: String
   fn name() -> String { "search" }
-  fn description() -> String { "Search a canned index and return a stub hit. Args: query (string)." }
+  fn description() -> String { "Search the files under the working directory for a pattern and return matching lines with file:line. Args: query (string)." }
   fn inputSchema() -> String { "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}" }
   fn run(argsJson: String) -> String {
     let q = extractArg(argsJson, "query")
-    "search(" + self.index + "): " + q
+    let out = Process.run("grep -rnI -- " + shellQuote(q) + " . 2>/dev/null | head -40")
+    if out.len() == 0 { "no matches for '" + q + "'" } else { out }
   }
+}
+
+// REAL file read: returns the file's contents (or a not-found note).
+class FileReadTool implements Tool {
+  root: String
+  fn name() -> String { "read_file" }
+  fn description() -> String { "Read a file from disk and return its contents. Args: path (string)." }
+  fn inputSchema() -> String { "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}" }
+  fn run(argsJson: String) -> String {
+    let path = extractArg(argsJson, "path")
+    match File.read(path) {
+      Some(s) -> s
+      None -> "error: cannot read '" + path + "' (not found or not readable)"
+    }
+  }
+}
+
+// REAL file write: creates/overwrites a file with the given contents.
+class FileWriteTool implements Tool {
+  root: String
+  fn name() -> String { "write_file" }
+  fn description() -> String { "Write (create or overwrite) a file on disk with the given contents. Args: path (string), content (string)." }
+  fn inputSchema() -> String { "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}" }
+  fn run(argsJson: String) -> String {
+    let path = extractArg(argsJson, "path")
+    let content = extractArg(argsJson, "content")
+    if File.write(path, content) { "wrote ${content.len()} bytes to ${path}" }
+    else { "error: could not write '" + path + "'" }
+  }
+}
+
+// single-quote a string for /bin/sh: wrap in '...' and escape embedded quotes as '\''
+fn shellQuote(s: String) -> String {
+  var out = "'"
+  var i = 0
+  while i < s.len() {
+    let c = s.charCode(i)
+    if c == 39 { out = out + "'\\''" } else { out = out + Str.fromCharCode(c) }
+    i = i + 1
+  }
+  out + "'"
 }
 
 // The arg-taking tool that a REAL model must pick and fill correctly: genuine integer arithmetic
@@ -344,7 +389,14 @@ class ScriptedModel implements Model {
       } else {
         // turn 1: `last` is the user task the loop just appended
         let userText = last.content
-        if strContains(userText, "weather") {
+        if strStartsWith(userText, "run ") {
+          // `run <command>` -> execute it for real via the shell tool
+          toolUseResp("call_1", "shell", "{\"cmd\":" + jq(afterPrefix(userText, "run ")) + "}")
+        } else if strStartsWith(userText, "read ") {
+          toolUseResp("call_1", "read_file", "{\"path\":" + jq(afterPrefix(userText, "read ")) + "}")
+        } else if strContains(userText, "list files") {
+          toolUseResp("call_1", "shell", "{\"cmd\":\"ls -la\"}")
+        } else if strContains(userText, "weather") {
           let loc = pickCity(userText)
           let inp = "{\"location\":" + jq(loc) + "}"
           toolUseResp("call_1", "get_weather", inp)
@@ -361,6 +413,9 @@ class ScriptedModel implements Model {
     }
   }
 }
+
+// the remainder of `s` after a known prefix `p`
+fn afterPrefix(s: String, p: String) -> String { s.slice(p.len(), s.len()) }
 
 fn pickCity(s: String) -> String {
   if strContains(s, "Tokyo") {

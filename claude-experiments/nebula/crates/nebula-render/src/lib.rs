@@ -8,6 +8,7 @@
 pub mod app;
 pub mod camera;
 pub mod coloring;
+pub mod density;
 pub mod font;
 pub mod gpu;
 pub mod layout_gpu;
