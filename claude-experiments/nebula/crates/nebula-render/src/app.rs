@@ -210,6 +210,15 @@ impl Legend {
     }
 }
 
+/// Dim a packed RGBA8 color for the hover "fade": darken the rgb (so additive
+/// edges nearly vanish) and drop the alpha (so node dots recede).
+fn dim_color(c: u32) -> u32 {
+    let r = ((c & 0xff) as f32 * 0.16) as u8;
+    let g = (((c >> 8) & 0xff) as f32 * 0.16) as u8;
+    let b = (((c >> 16) & 0xff) as f32 * 0.16) as u8;
+    pack_rgba(r, g, b, 70)
+}
+
 /// Unpack a packed RGBA8 color into an egui color (drops alpha).
 fn egui_rgb(c: u32) -> egui::Color32 {
     egui::Color32::from_rgb((c & 0xff) as u8, ((c >> 8) & 0xff) as u8, ((c >> 16) & 0xff) as u8)
@@ -382,6 +391,8 @@ pub struct App {
 
     // Selection / overlay.
     selected: Option<u32>,
+    /// Node currently under the cursor (drives hover highlight-by-color).
+    hovered: Option<u32>,
     selected_pos: Option<glam::Vec2>,
     neighbor_positions: Vec<glam::Vec2>,
     last_values: Option<Vec<f32>>,
@@ -461,6 +472,7 @@ impl App {
             render_params,
             color_mode,
             selected,
+            hovered: None,
             selected_pos: None,
             neighbor_positions: Vec::new(),
             last_values: None,
@@ -525,6 +537,11 @@ impl App {
             self.apply_radial();
         } else if self.opts.start_hierarchical {
             self.apply_hierarchical();
+        }
+        // Headless preview of the hover highlight: treat --select as a hover.
+        if self.opts.max_frames.is_some() && self.selected.is_some() {
+            self.hovered = self.selected;
+            self.push_filtered();
         }
         self.update_title();
     }
@@ -619,27 +636,83 @@ impl App {
         )
     }
 
-    /// Push `base_colors`/`base_sizes` to the GPU, hiding filtered-out nodes.
+    /// Push `base_colors`/`base_sizes` to the GPU, applying the attribute filter
+    /// (hides non-matching) and the hover highlight (fades nodes whose color
+    /// differs from the hovered node's — i.e. keeps only "that color" bright).
     fn push_filtered(&mut self) {
         let n = self.graph.num_nodes() as usize;
         let mask = self.filter_mask(n);
         self.filter_match_count = mask.as_ref().map(|m| m.iter().filter(|&&v| v).count());
+
+        // The color to keep bright while hovering (the hovered node's own color).
+        let highlight: Option<u32> = self
+            .hovered
+            .and_then(|h| self.base_colors.get(h as usize).copied());
+
         let Some(live) = self.live.as_ref() else { return };
-        match &mask {
-            Some(mask) => {
-                let colors: Vec<u32> = (0..n)
-                    .map(|i| if mask[i] { self.base_colors[i] } else { 0 })
-                    .collect();
-                let sizes: Vec<f32> = (0..n)
-                    .map(|i| if mask[i] { self.base_sizes[i] } else { 0.0 })
-                    .collect();
-                live.graph_gpu.set_colors(&live.gpu.queue, &colors);
-                live.graph_gpu.set_sizes(&live.gpu.queue, &sizes);
+
+        if mask.is_none() && highlight.is_none() {
+            // Fast path: nothing to modify.
+            live.graph_gpu.set_colors(&live.gpu.queue, &self.base_colors);
+            live.graph_gpu.set_sizes(&live.gpu.queue, &self.base_sizes);
+            return;
+        }
+
+        let mut colors = vec![0u32; n];
+        let mut sizes = vec![0f32; n];
+        for i in 0..n {
+            let visible = mask.as_ref().map_or(true, |m| m[i]);
+            if !visible {
+                continue; // hidden by filter (color 0, size 0)
             }
-            None => {
-                live.graph_gpu.set_colors(&live.gpu.queue, &self.base_colors);
-                live.graph_gpu.set_sizes(&live.gpu.queue, &self.base_sizes);
+            let base = self.base_colors[i];
+            match highlight {
+                Some(hc) if base != hc => {
+                    colors[i] = dim_color(base);
+                    sizes[i] = self.base_sizes[i] * 0.55;
+                }
+                _ => {
+                    colors[i] = base;
+                    sizes[i] = self.base_sizes[i];
+                }
             }
+        }
+        live.graph_gpu.set_colors(&live.gpu.queue, &colors);
+        live.graph_gpu.set_sizes(&live.gpu.queue, &sizes);
+    }
+
+    /// Recompute the hovered node each frame (one id-pick) and, when it changes,
+    /// re-push colors so the highlight follows the cursor. Skipped while dragging,
+    /// over the panel, or on graphs too large to pick cheaply per frame.
+    fn update_hover(&mut self) {
+        // Headless capture has no live cursor; keep any preset hover (see
+        // init_live) and skip the per-frame pick.
+        if self.opts.max_frames.is_some() {
+            return;
+        }
+        let clear = |s: &mut Self| {
+            if s.hovered.is_some() {
+                s.hovered = None;
+                s.push_filtered();
+            }
+        };
+        if self.dragging || self.graph.num_nodes() > 3_000_000 {
+            clear(self);
+            return;
+        }
+        let over_panel = self
+            .ui
+            .as_ref()
+            .map(|u| u.ctx.is_pointer_over_area())
+            .unwrap_or(false);
+        if over_panel {
+            clear(self);
+            return;
+        }
+        let h = self.pick_id(self.cursor);
+        if h != self.hovered {
+            self.hovered = h;
+            self.push_filtered();
         }
     }
 
@@ -955,6 +1028,7 @@ impl App {
             return;
         }
         self.run_ui();
+        self.update_hover();
 
         // Refresh selection geometry (node + neighbor positions) so the marker,
         // info panel, and connection lines track the live simulation.
@@ -1597,21 +1671,24 @@ impl App {
     }
 
     /// Pick a node under a screen pixel and select it (updating the info panel).
-    fn pick_at(&mut self, screen: glam::Vec2) {
+    /// GPU id-pick the node under a screen pixel (no state mutation).
+    fn pick_id(&self, screen: glam::Vec2) -> Option<u32> {
+        let live = self.live.as_ref()?;
         // Ensure the pick pass uses the current camera.
-        let picked = {
-            let Some(live) = self.live.as_ref() else { return };
-            live.renderer.update_camera(&live.gpu.queue, &self.camera.uniform());
-            let (w, h) = (live.gpu.size.width, live.gpu.size.height);
-            live.renderer.pick(
-                &live.gpu.device,
-                &live.gpu.queue,
-                w,
-                h,
-                screen.x.max(0.0) as u32,
-                screen.y.max(0.0) as u32,
-            )
-        };
+        live.renderer.update_camera(&live.gpu.queue, &self.camera.uniform());
+        let (w, h) = (live.gpu.size.width, live.gpu.size.height);
+        live.renderer.pick(
+            &live.gpu.device,
+            &live.gpu.queue,
+            w,
+            h,
+            screen.x.max(0.0) as u32,
+            screen.y.max(0.0) as u32,
+        )
+    }
+
+    fn pick_at(&mut self, screen: glam::Vec2) {
+        let picked = self.pick_id(screen);
         self.selected = picked;
         if let Some(id) = picked {
             let deg = self.graph.csr_ref().map(|c| c.degree(id)).unwrap_or(0);
