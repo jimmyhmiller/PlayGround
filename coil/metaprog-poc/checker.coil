@@ -1,0 +1,40 @@
+; ── A METAPROGRAM CHECKER, built with today's macro machinery ────────────────
+; `check-uaf` is a macro [Code…] -> Code that reads a sequence of forms, finds a
+; use-after-free (a `(free X)` followed by a later reference to X), and VETOES
+; compilation via `error`. Otherwise it returns the body unchanged. This is the
+; "reject" power of a metaprogram — a program that refuses to compile your program.
+; Uses only Code builtins (code-eq/code-nth/…), so it needs no imports.
+(module checker)
+
+; is form `f` a `(free …)` call?
+(defn head-free? [(f Code)] (-> bool)
+  (and (code-list? f)
+       (and (icmp-gt (code-count f) 0)
+            (code-eq (code-nth f 0) `free))))
+
+; does form `f` (anywhere in its tree) reference the symbol node `x`?
+(defn refs? [(f Code) (x Code)] (-> bool)
+  (if (code-sym? f) (code-eq f x)
+    (if (code-list? f) (refs-list? f x 0 (code-count f)) false)))
+(defn refs-list? [(f Code) (x Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) false
+    (if (refs? (code-nth f i) x) true (refs-list? f x (iadd i 1) n))))
+
+; is `x` referenced by any body form at index >= j?
+(defn used-after? [(body Code) (x Code) (j i64) (n i64)] (-> bool)
+  (if (icmp-ge j n) false
+    (if (refs? (code-nth body j) x) true (used-after? body x (iadd j 1) n))))
+
+; is the whole sequence free of use-after-free?
+(defn uaf-clean? [(body Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) true
+    (let [f (code-nth body i)]
+      (if (and (head-free? f)
+               (used-after? body (code-nth f 1) (iadd i 1) n))
+          false
+        (uaf-clean? body (iadd i 1) n)))))
+
+(defn check-uaf [& (body Code)] (-> Code)
+  (if (uaf-clean? body 0 (code-count body))
+      `(do ~@body)
+    (error "check-uaf: use after free — a freed pointer is read later")))

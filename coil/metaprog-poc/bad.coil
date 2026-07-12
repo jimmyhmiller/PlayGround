@@ -1,0 +1,11 @@
+(module app)
+(import "checker.coil" :use *)
+(defstruct Node [(val :i64)])
+(defn free [(p (ptr Node))] (-> :i64) 0)
+(defn use-bad [(p (ptr Node))] (-> :i64)
+  (check-uaf
+    (store! (field p val) 7)
+    (free p)                 ; freed here
+    (load (field p val))))   ; ← USE AFTER FREE
+(defn main [] (-> :i64)
+  (let [n (alloc-stack Node)] (use-bad n)))
