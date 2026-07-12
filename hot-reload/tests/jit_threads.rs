@@ -6,6 +6,7 @@
 //! compiled code and calls into core's thread-safe `Shared`.
 
 use livetype::*;
+use std::sync::Arc;
 
 /// Compile `source` through the frontend and freeze it for concurrent JIT.
 fn shared(source: &str) -> (std::sync::Arc<Shared>, Session) {
@@ -55,4 +56,40 @@ fn jit_call_and_shared_heap_alloc_across_threads() {
     }
     // Four threads each allocated one Box on the shared heap.
     assert_eq!(sh.object_count(), 4);
+}
+
+#[test]
+fn stop_the_world_gc_pauses_jit_threads() {
+    // JIT workers churn allocations while another thread fires stop-the-world
+    // collections. If the JIT driver did not hit safepoints, `request_gc` would
+    // deadlock waiting for the workers to park — so completion proves the JIT
+    // tier participates in the preemptive collector.
+    let (sh, ids) = shared(
+        "struct Box { v: i64 }
+         fn churn(n: i64) -> i64 {
+            let i = 0;
+            while i < n {
+                let b = Box { v: i };
+                i = i + 1;
+            }
+            0
+         }",
+    );
+    let churn = ids.fn_id("churn").unwrap();
+
+    let collector = {
+        let sh = Arc::clone(&sh);
+        std::thread::spawn(move || {
+            for _ in 0..30 {
+                sh.request_gc();
+            }
+        })
+    };
+    let outcomes = run_jit_threads(&sh, vec![(churn, vec![Value::I64(400)]); 3]).unwrap();
+    collector.join().unwrap();
+
+    for outcome in outcomes {
+        assert_eq!(outcome, Outcome::Complete(Value::I64(0)));
+    }
+    assert!(sh.collections() > 0, "at least one collection ran mid-flight");
 }

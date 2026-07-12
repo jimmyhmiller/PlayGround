@@ -34,6 +34,15 @@ struct GlyphInst {
     ch: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SegInst {
+    a: [f32; 2],
+    b: [f32; 2],
+    color: u32,
+    thickness: f32,
+}
+
 pub struct Overlay {
     uniform_buf: wgpu::Buffer,
     font_buf: wgpu::Buffer,
@@ -41,13 +50,17 @@ pub struct Overlay {
     data_bgl: wgpu::BindGroupLayout,
     rect_pipeline: wgpu::RenderPipeline,
     glyph_pipeline: wgpu::RenderPipeline,
+    seg_pipeline: wgpu::RenderPipeline,
 
     rects: Vec<RectInst>,
     glyphs: Vec<GlyphInst>,
+    segs: Vec<SegInst>,
     rect_buf: wgpu::Buffer,
     glyph_buf: wgpu::Buffer,
+    seg_buf: wgpu::Buffer,
     rect_cap: usize,
     glyph_cap: usize,
+    seg_cap: usize,
 }
 
 impl Overlay {
@@ -102,7 +115,7 @@ impl Overlay {
         };
         let data_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("overlay_data_bgl"),
-            entries: &[ro(0), ro(1), ro(2)],
+            entries: &[ro(0), ro(1), ro(2), ro(3)],
         });
 
         let view_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -150,9 +163,11 @@ impl Overlay {
         };
         let rect_pipeline = make("vs_rect", "fs_rect");
         let glyph_pipeline = make("vs_glyph", "fs_glyph");
+        let seg_pipeline = make("vs_seg", "fs_seg");
 
         let rect_cap = 256usize;
         let glyph_cap = 8192usize;
+        let seg_cap = 4096usize;
         let rect_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("overlay_rects"),
             size: (rect_cap * std::mem::size_of::<RectInst>()) as u64,
@@ -165,6 +180,12 @@ impl Overlay {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let seg_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("overlay_segs"),
+            size: (seg_cap * std::mem::size_of::<SegInst>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         Overlay {
             uniform_buf,
@@ -173,22 +194,32 @@ impl Overlay {
             data_bgl,
             rect_pipeline,
             glyph_pipeline,
+            seg_pipeline,
             rects: Vec::new(),
             glyphs: Vec::new(),
+            segs: Vec::new(),
             rect_buf,
             glyph_buf,
+            seg_buf,
             rect_cap,
             glyph_cap,
+            seg_cap,
         }
     }
 
     pub fn begin(&mut self) {
         self.rects.clear();
         self.glyphs.clear();
+        self.segs.clear();
     }
 
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: u32) {
         self.rects.push(RectInst { pos: [x, y], size: [w, h], color, _p: 0 });
+    }
+
+    /// Draw a line segment between two screen points.
+    pub fn line(&mut self, a: glam::Vec2, b: glam::Vec2, thickness: f32, color: u32) {
+        self.segs.push(SegInst { a: [a.x, a.y], b: [b.x, b.y], color, thickness });
     }
 
     /// Draw text at (x,y) top-left, glyph cell `scale`*8 px. Returns the x after.
@@ -256,6 +287,18 @@ impl Overlay {
         if !self.glyphs.is_empty() {
             queue.write_buffer(&self.glyph_buf, 0, bytemuck::cast_slice(&self.glyphs));
         }
+        if self.segs.len() > self.seg_cap {
+            self.seg_cap = self.segs.len().next_power_of_two();
+            self.seg_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("overlay_segs"),
+                size: (self.seg_cap * std::mem::size_of::<SegInst>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !self.segs.is_empty() {
+            queue.write_buffer(&self.seg_buf, 0, bytemuck::cast_slice(&self.segs));
+        }
 
         // A fresh bind group each frame since the buffers may have been recreated.
         let data_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -265,6 +308,7 @@ impl Overlay {
                 wgpu::BindGroupEntry { binding: 0, resource: self.rect_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: self.glyph_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: self.font_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: self.seg_buf.as_entire_binding() },
             ],
         });
 
@@ -273,6 +317,11 @@ impl Overlay {
         if !self.rects.is_empty() {
             pass.set_pipeline(&self.rect_pipeline);
             pass.draw(0..6, 0..self.rects.len() as u32);
+        }
+        // Segments above panels but below text.
+        if !self.segs.is_empty() {
+            pass.set_pipeline(&self.seg_pipeline);
+            pass.draw(0..6, 0..self.segs.len() as u32);
         }
         if !self.glyphs.is_empty() {
             pass.set_pipeline(&self.glyph_pipeline);
