@@ -535,7 +535,7 @@ fn scenario3_loop_with_midloop_update_matches() {
     );
     assert_eq!(a_j.status, ActorStatus::Complete(Value::I64(0)));
     // ...and the mid-loop migration actually happened: the account is now v2.
-    assert_eq!(rt_j.heap[&acct_j].schema, Version(2), "account migrated mid-loop");
+    assert_eq!(rt_j.heap.body(acct_j).unwrap().schema, Version(2), "account migrated mid-loop");
     assert_same(&rt_i, a_i, &rt_j, &a_j, "loop complete");
 }
 
@@ -839,8 +839,8 @@ fn auto_derived_migration_is_transparent_on_both_executors() {
     // value; the defaulted field was filled in.
     assert_same(&rt_i.0, a_i, &rt_j.0, &a_j, "auto-derived");
     assert_eq!(a_j.status, ActorStatus::Complete(Value::I64(10)));
-    assert_eq!(rt_j.0.heap[&rt_j.1].schema, Version(2));
-    assert_eq!(rt_j.0.heap[&rt_j.1].fields[&AF2], Value::I64(99));
+    assert_eq!(rt_j.0.heap.body(rt_j.1).unwrap().schema, Version(2));
+    assert_eq!(rt_j.0.heap.body(rt_j.1).unwrap().fields[&AF2], Value::I64(99));
 }
 
 #[test]

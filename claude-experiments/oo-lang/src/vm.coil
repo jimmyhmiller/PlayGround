@@ -169,6 +169,13 @@
 (defn vm-gc-major [] (-> i64)
   (if (= (gc-enabled?) 1) (do (gc-request-major) (gc-collect (vm-thread-eval)) 0) 0))
 
+; force a MINOR collection now (young generation only). Like vm-gc-major it runs inside the eval
+; coordinator with the world already stopped, so it drives gc-minor-cycle directly (no need for
+; gc-collect's coordination) — bypassing gc-cycle's "every N minors, do a major" cadence so the
+; viewer can watch a pure young-generation sweep in isolation.
+(defn vm-gc-minor [] (-> i64)
+  (if (= (gc-enabled?) 1) (do (gc-minor-cycle) (gc-rearm) 0) 0))
+
 ; allocate one instance for OP_NEW. If the type's arena is full, a minor can't help (it never
 ; reclaims OLD instances), so FORCE a major and retry; only then is it a genuine capacity error.
 ; Rewinds fr.ip to the OP_NEW instruction start across the collection so this frame's stack map

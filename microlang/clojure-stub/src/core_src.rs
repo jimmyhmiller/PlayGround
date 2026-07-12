@@ -293,6 +293,10 @@ pub const CORE: &str = r##"
 
 (extend-type LazySeq
   ISeqable (-seq [l] (-force l))
+  ;; forcing ISeq, so -first/-rest work on an unrealized lazy seq (the seq fns
+  ;; and any consumer can treat a LazySeq like any other seq).
+  ISeq (-first [l] (let [s (-force l)] (if (nil? s) nil (-first s))))
+       (-rest [l] (let [s (-force l)] (if (nil? s) nil (-rest s))))
   ICounted (-count [l] (count-seq l 0))
   IIndexed (-nth [l n] (nth-seq l n)))
 
@@ -412,14 +416,14 @@ pub const CORE: &str = r##"
 (defn filter [f c]
   (lazy-seq (let [s (seq c)]
               (cond (nil? s) nil
-                    (f (%first s)) (%cons (%first s) (filter f (%rest s)))
-                    true (filter f (%rest s))))))
+                    (f (-first s)) (%cons (-first s) (filter f (-rest s)))
+                    true (filter f (-rest s))))))
 (defn remove [f c] (filter (fn [x] (not (f x))) c))
 (defn keep [f c]
   (lazy-seq (let [s (seq c)]
               (if (nil? s) nil
-                  (let [v (f (%first s))]
-                    (if (nil? v) (keep f (%rest s)) (%cons v (keep f (%rest s)))))))))
+                  (let [v (f (-first s))]
+                    (if (nil? v) (keep f (-rest s)) (%cons v (keep f (-rest s)))))))))
 (defn -range-inf [i] (lazy-seq (%cons i (-range-inf (%add i 1)))))
 (defn -range2 [i n] (lazy-seq (if (%lt i n) (%cons i (-range2 (%add i 1) n)) nil)))
 (defn -range3 [i n step] (lazy-seq (if (%lt i n) (%cons i (-range3 (%add i step) n step)) nil)))

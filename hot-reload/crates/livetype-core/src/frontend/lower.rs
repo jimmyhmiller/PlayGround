@@ -345,7 +345,7 @@ fn const_value(e: &Expr, ty: &Type) -> Result<Value, String> {
         Expr::Unit => Value::Unit,
         _ => return Err("field default must be a literal".into()),
     };
-    if v.shallow_type(&std::collections::BTreeMap::new()).as_ref() != Some(ty) {
+    if v.scalar_type().as_ref() != Some(ty) {
         return Err("field default has the wrong type".into());
     }
     Ok(v)

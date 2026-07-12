@@ -40,13 +40,17 @@ pub enum Value {
 }
 
 impl Value {
-    pub fn shallow_type(&self, heap: &BTreeMap<ObjectId, Object>) -> Option<Type> {
+    /// The nominal type of a *scalar* value — everything except a reference,
+    /// whose type depends on its object's current schema and is resolved by the
+    /// [`crate::Heap`]. Used where no heap is in scope (e.g. checking a code
+    /// constant, which is never a reference).
+    pub fn scalar_type(&self) -> Option<Type> {
         match self {
             Self::Unit => Some(Type::Unit),
             Self::I64(_) => Some(Type::I64),
             Self::Bool(_) => Some(Type::Bool),
-            Self::Ref(id) => Some(Type::Ref(heap.get(id)?.type_id)),
             Self::Foreign { kind, .. } => Some(Type::Foreign(*kind)),
+            Self::Ref(_) => None,
         }
     }
 }
@@ -83,23 +87,6 @@ pub struct Body {
     pub type_id: DefId,
     pub schema: Version,
     pub fields: BTreeMap<FieldId, Value>,
-}
-
-/// A heap object: a stable handle ([`ObjectId`]) plus its current [`Body`].
-/// References name the handle; the body behind it can change version under a
-/// migration without the handle moving. `Deref` exposes the body's fields
-/// directly, so `object.schema` / `object.fields` read through to the body.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Object {
-    pub id: ObjectId,
-    pub body: std::sync::Arc<Body>,
-}
-
-impl std::ops::Deref for Object {
-    type Target = Body;
-    fn deref(&self) -> &Body {
-        &self.body
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

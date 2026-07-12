@@ -6,12 +6,14 @@
 //! concurrency can be verified under ThreadSanitizer.
 
 mod frontend;
+mod heap;
 mod model;
 mod mt;
 mod runtime;
 mod verify;
 
 pub use frontend::*;
+pub use heap::*;
 pub use model::*;
 pub use mt::*;
 pub use runtime::*;

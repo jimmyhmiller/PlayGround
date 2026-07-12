@@ -122,7 +122,7 @@ fn concurrent_migration_quarantines_the_pinned_reader() {
     // Y runs up to its yield — pinned at peek_int@v1, before it reads `balance`.
     drive(&mut rt, &mut y, true).unwrap();
     assert!(matches!(y.status, ActorStatus::Runnable));
-    assert_eq!(rt.heap[&shared].schema, Version(1));
+    assert_eq!(rt.heap.body(shared).unwrap().schema, Version(1));
 
     // Hot update: balance becomes Money. peek_int is now broken, but Y's frame
     // pins the old version. Install a new reader that speaks Money, and the
@@ -183,7 +183,7 @@ fn concurrent_migration_quarantines_the_pinned_reader() {
     let mut x = JitActor::spawn(&rt, 2, PEEK_MONEY, vec![Value::Ref(shared)]).unwrap();
     drive(&mut rt, &mut x, false).unwrap();
     assert_eq!(x.status, ActorStatus::Complete(Value::I64(100)));
-    assert_eq!(rt.heap[&shared].schema, Version(2), "X migrated the shared object");
+    assert_eq!(rt.heap.body(shared).unwrap().schema, Version(2), "X migrated the shared object");
 
     // Now Y resumes — pinned old code, reading the object X migrated. It reads a
     // Money reference where it expects an Int and traps on use: quarantined,

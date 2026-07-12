@@ -36,7 +36,7 @@ fn field_def(id: FieldId, name: &str, ty: Type, d: Value) -> Field {
 
 /// Run a build closure on a fresh interpreter and a fresh JIT runtime, then
 /// compare the object's migrated state and the actor result.
-fn both(build: impl Fn(&mut Runtime) -> ObjectId, entry: DefId) -> (ActorStatus, Object) {
+fn both(build: impl Fn(&mut Runtime) -> ObjectId, entry: DefId) -> (ActorStatus, std::sync::Arc<Body>) {
     // interpreter
     let mut rt_i = Runtime::default();
     let obj_i = build(&mut rt_i);
@@ -53,8 +53,12 @@ fn both(build: impl Fn(&mut Runtime) -> ObjectId, entry: DefId) -> (ActorStatus,
         rt_i.actors[&a_i].status, a_j.status,
         "executors diverged on the migration chain"
     );
-    assert_eq!(rt_i.heap[&obj_i], rt_j.heap[&obj_j], "migrated object diverged");
-    (a_j.status.clone(), rt_j.heap[&obj_j].clone())
+    assert_eq!(
+        rt_i.heap.body(obj_i).unwrap(),
+        rt_j.heap.body(obj_j).unwrap(),
+        "migrated object diverged"
+    );
+    (a_j.status.clone(), rt_j.heap.body(obj_j).unwrap())
 }
 
 #[test]

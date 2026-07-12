@@ -245,7 +245,7 @@ fn core_breadth() {
     assert_eq!(run("(get-in {:a {:b {:c 42}}} [:a :b :c])"), "42");
     assert_eq!(run("(assoc-in {:a {:b 1}} [:a :b] 99)"), "{:a {:b 99}}");
     assert_eq!(run("(update {:n 5} :n inc)"), "{:n 6}");
-    assert_eq!(run("(some even? [1 3 5 6])"), "6");
+    assert_eq!(run("(some even? [1 3 5 6])"), "true");
     assert_eq!(run("(every? even? [2 4 6])"), "true");
     assert_eq!(run("(mapv inc [1 2 3])"), "[2 3 4]");
     assert_eq!(run("((comp inc inc) 5)"), "7");
@@ -1097,7 +1097,7 @@ fn var_registry_metadata_and_namespaces() {
     assert_eq!(run("(ns app) (def a 1) (defn- p [] 2) (count (ns-publics (quote app)))"), "1");
     // all-ns / find-ns see a user namespace once it has a def.
     assert_eq!(run("(ns foo) (def x 1) (find-ns (quote foo))"), "foo");
-    assert_eq!(run("(ns foo) (def x 1) (some (fn [n] (= n (quote foo))) (all-ns))"), "foo");
+    assert_eq!(run("(ns foo) (def x 1) (some (fn [n] (= n (quote foo))) (all-ns))"), "true");
 }
 
 #[test]

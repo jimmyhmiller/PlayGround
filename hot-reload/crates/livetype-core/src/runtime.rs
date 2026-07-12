@@ -76,7 +76,7 @@ pub type ForeignFn = Box<dyn FnMut(&[Value]) -> Value + Send>;
 #[derive(Default)]
 pub struct Runtime {
     pub world: World,
-    pub heap: BTreeMap<ObjectId, Object>,
+    pub heap: Heap,
     pub actors: BTreeMap<ActorId, Actor>,
     /// Committed external observations. `Emit` advances the frame only after
     /// appending, so pausing and resuming cannot replay an earlier effect.
@@ -95,7 +95,6 @@ pub struct Runtime {
     /// host registers these before running; a `CallForeign` to an unregistered
     /// id traps with a clear condition rather than doing anything silent.
     foreign_registry: BTreeMap<ForeignFnId, ForeignFn>,
-    next_object: ObjectId,
     next_actor: ActorId,
 }
 
@@ -121,12 +120,13 @@ pub enum InstallError {
 }
 
 impl Runtime {
-    /// Hand off this runtime's world, heap, and object-id counter to the
-    /// thread-safe [`crate::Shared`] tier. All setup — schema/function installs,
-    /// auto-derived migrations, verification — is done through the ordinary
-    /// single-threaded API and then frozen for concurrent execution.
-    pub fn into_parts(self) -> (World, BTreeMap<ObjectId, Object>, ObjectId) {
-        (self.world, self.heap, self.next_object)
+    /// Hand off this runtime's world and heap to the thread-safe [`crate::Shared`]
+    /// tier. All setup — schema/function installs, auto-derived migrations,
+    /// verification — is done through the ordinary single-threaded API and then
+    /// frozen for concurrent execution. The heap is the *same* [`Heap`]; the
+    /// concurrent tier shares it behind an `Arc` rather than rebuilding it.
+    pub fn into_parts(self) -> (World, Heap) {
+        (self.world, self.heap)
     }
 
     pub fn install_schema(&mut self, schema: Schema) -> Result<(), InstallError> {
@@ -205,7 +205,7 @@ impl Runtime {
             };
             let source_ty = match source {
                 MigrationSource::Copy(id) => old.field(*id).map(|f| f.ty.clone()),
-                MigrationSource::Value(value) => value.shallow_type(&self.heap),
+                MigrationSource::Value(value) => self.heap.shallow_type(value),
                 MigrationSource::Wrap {
                     type_id,
                     field: inner,
@@ -598,46 +598,22 @@ impl Runtime {
         Ok(())
     }
 
-    /// Construct an object at the type's current schema. Supplied fields
-    /// override defaults; missing fields fall back to their schema default.
-    /// Shared by the interpreter's `New` arm and the native `lt_new` extern so
-    /// the two executors allocate identically. `expect` is safe because both
-    /// callers only reach here for verified constructors. Each field value is
-    /// checked against its declared type (`value_ok`) so a pinned old function
-    /// constructing with a since-migrated value traps instead of publishing an
-    /// ill-typed object.
+    /// Construct an object at the type's current schema — delegates to the one
+    /// [`Heap::new_object`], shared by the interpreter's `New` arm and the JIT's
+    /// `lt_new` extern so allocation is identical everywhere.
     pub fn jit_new(
         &mut self,
         type_id: DefId,
         supplied: &[(FieldId, Value)],
     ) -> Result<ObjectId, Condition> {
-        let version = self.world.current_schemas[&type_id];
-        let schema = self.world.schemas[&(type_id, version)].clone();
-        let mut values = BTreeMap::new();
-        for field in &schema.fields {
-            let value = supplied
-                .iter()
-                .find(|(id, _)| *id == field.id)
-                .map(|(_, v)| v.clone())
-                .or_else(|| field.default.clone())
-                .expect("verified constructor");
-            self.expect_value(&value, &field.ty, 0, 0, &format!("field '{}'", field.name))?;
-            values.insert(field.id, value);
-        }
-        Ok(self.alloc(type_id, version, values))
+        self.heap.new_object(type_id, supplied, &self.world)
     }
 
-    /// The migration barrier: migrate the object up to its type's current
-    /// schema (lazily, identity-preserving) and read one field. A migration gap
-    /// returns [`Condition::MissingMigration`]. Shared by the interpreter's
-    /// `GetField` arm and the native `lt_get_field` extern.
+    /// The migration barrier + field read — delegates to the one
+    /// [`Heap::get_field`], shared by the interpreter's `GetField` arm, the JIT's
+    /// `lt_get_field` extern, and the concurrent tier.
     pub fn jit_get_field(&mut self, id: ObjectId, field: FieldId) -> Result<Value, Condition> {
-        self.migrate(id)?;
-        self.heap[&id]
-            .fields
-            .get(&field)
-            .cloned()
-            .ok_or_else(|| self.type_error(0, 0, "field is absent after migration"))
+        self.heap.get_field(id, field, &self.world)
     }
 
     /// Commit one external observation. `Emit` advances the frame only after
@@ -671,103 +647,6 @@ impl Runtime {
         let result = f(args);
         self.foreign_registry.insert(id, f);
         Ok(result)
-    }
-
-    fn alloc(
-        &mut self,
-        type_id: DefId,
-        schema: Version,
-        fields: BTreeMap<FieldId, Value>,
-    ) -> ObjectId {
-        self.next_object += 1;
-        let id = self.next_object;
-        self.heap.insert(
-            id,
-            Object {
-                id,
-                body: std::sync::Arc::new(Body {
-                    type_id,
-                    schema,
-                    fields,
-                }),
-            },
-        );
-        id
-    }
-
-    /// Transactional migrate-on-read: all replacement bodies and nested wrapper
-    /// objects are staged first; the stable handle is changed only after success.
-    fn migrate(&mut self, id: ObjectId) -> Result<(), Condition> {
-        loop {
-            let old = self.heap[&id].clone();
-            let current = self.world.current_schemas[&old.type_id];
-            if old.schema == current {
-                return Ok(());
-            }
-            let Some(plan) = self
-                .world
-                .migrations
-                .get(&(old.type_id, old.schema))
-                .cloned()
-            else {
-                return Err(Condition::MissingMigration {
-                    object: id,
-                    type_id: old.type_id,
-                    from: old.schema,
-                    to: Version(old.schema.0 + 1),
-                });
-            };
-            let mut fields = BTreeMap::new();
-            for (target, source) in plan.fields {
-                let value = match source {
-                    MigrationSource::Copy(source) => old.fields[&source].clone(),
-                    MigrationSource::Value(value) => value,
-                    MigrationSource::Wrap {
-                        type_id,
-                        field,
-                        source,
-                    } => {
-                        let version = self.world.current_schemas[&type_id];
-                        let wrapped = self.alloc(
-                            type_id,
-                            version,
-                            BTreeMap::from([(field, old.fields[&source].clone())]),
-                        );
-                        Value::Ref(wrapped)
-                    }
-                };
-                fields.insert(target, value);
-            }
-            // value_ok on the freshly built body before it is published: the
-            // migration plan is validated at install, so this is defense in
-            // depth — a body that is not structurally well-typed against the
-            // target schema never becomes the object's observable state.
-            let target_schema = self.world.schemas[&(old.type_id, plan.to)].clone();
-            for field in &target_schema.fields {
-                let value = &fields[&field.id];
-                if !self.value_ok(value, &field.ty) {
-                    return Err(self.type_error(
-                        0,
-                        0,
-                        &format!(
-                            "migration to {} v{} produced an ill-typed '{}'",
-                            target_schema.name, plan.to.0, field.name
-                        ),
-                    ));
-                }
-            }
-            self.heap.insert(
-                id,
-                Object {
-                    id,
-                    body: std::sync::Arc::new(Body {
-                        type_id: old.type_id,
-                        schema: plan.to,
-                        fields,
-                    }),
-                },
-            );
-        }
     }
 
     fn type_error(&self, function: DefId, pc: usize, message: &str) -> Condition {
@@ -806,7 +685,7 @@ impl Runtime {
     /// representation confusion (e.g. an `Int` field read as a `Ref` by pinned
     /// old code after a migration changed its type).
     pub fn value_ok(&self, value: &Value, expected: &Type) -> bool {
-        value.shallow_type(&self.heap).as_ref() == Some(expected)
+        self.heap.value_ok(value, expected)
     }
 
     /// Enforce [`Runtime::value_ok`] at a value-use boundary. This is the
@@ -1025,16 +904,10 @@ impl Runtime {
             if !live.insert(id) {
                 continue;
             }
-            if let Some(object) = self.heap.get(&id) {
-                for value in object.fields.values() {
-                    if let Value::Ref(child) = value {
-                        work.push(*child);
-                    }
-                }
+            for child in self.heap.child_refs(id) {
+                work.push(child);
             }
         }
-        let before = self.heap.len();
-        self.heap.retain(|id, _| live.contains(id));
-        before - self.heap.len()
+        self.heap.retain(&live)
     }
 }

@@ -150,7 +150,8 @@
         (jb-cstr b c",\"freed\":") (jb-int b (- bef aft)) (jb-byte b \}) 1)
       0)))
 
-(defn reflect-gc [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+; `major` = 1 forces a full major collection, 0 forces a young-only minor. Same report either way.
+(defn reflect-gc [(b (ptr JBuf)) (p (ptr Program)) (major i64)] (-> i64)
   (let [n (load (field p type-count))
         before (cast (ptr i64) (xalloc (* 8 (if (= n 0) 1 n))))
         (mut i) 0 (mut tb) 0 (mut ta) 0 (mut emitted) 0]
@@ -161,8 +162,8 @@
               (if (> lc 0) (store! tb (+ (load tb) lc)) 0)
               (store! i (+ (load i) 1)) 0)
             (break)))
-    ; force a full major collection (the world is already stopped)
-    (vm-gc-major)
+    ; force the collection (the world is already stopped: we run inside the eval coordinator)
+    (if (= major 1) (vm-gc-major) (vm-gc-minor))
     ; sum after + write the report
     (store! i 0)
     (loop (if (< (load i) n)
@@ -170,7 +171,7 @@
               (if (> lc 0) (store! ta (+ (load ta) lc)) 0)
               (store! i (+ (load i) 1)) 0)
             (break)))
-    (jb-cstr b c"{\"type\":\"GC\",\"kind\":\"major\",\"liveBefore\":") (jb-int b (load tb))
+    (jb-cstr b c"{\"type\":\"GC\",\"kind\":\"") (jb-cstr b (if (= major 1) c"major" c"minor")) (jb-cstr b c"\",\"liveBefore\":") (jb-int b (load tb))
     (jb-cstr b c",\"liveAfter\":") (jb-int b (load ta))
     (jb-cstr b c",\"freed\":") (jb-int b (- (load tb) (load ta)))
     (jb-cstr b c",\"byType\":[")
@@ -205,10 +206,13 @@
                     (do (reflect-functions (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"generation") (= (arg-count e) 0))
                     (do (jb-cstr (load (ev-valbuf)) c"{\"type\":\"Int\",\"value\":") (jb-int (load (ev-valbuf)) (current-generation)) (jb-byte (load (ev-valbuf)) \}) (store! (ev-outcome) 0) 1)
-                  ; gc() — force a full collection and report what it reclaimed. NOT in
-                  ; classify-reflection, so it runs on the full-STW eval path (it mutates the heap).
+                  ; gc() / minorGc() — force a full major / young-only minor collection and report
+                  ; what it reclaimed. NOT in classify-reflection, so they run on the full-STW eval
+                  ; path (they mutate the heap).
                   (and (node-name-eq callee c"gc") (= (arg-count e) 0))
-                    (do (reflect-gc (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                    (do (reflect-gc (load (ev-valbuf)) (load (srv-program)) 1) (store! (ev-outcome) 0) 1)
+                  (and (node-name-eq callee c"minorGc") (= (arg-count e) 0))
+                    (do (reflect-gc (load (ev-valbuf)) (load (srv-program)) 0) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"fields") (= (arg-count e) 1))
                     (let [s (str-arg e 0)] (if (= (cast i64 s) 0) 0 (do (reflect-fields (load (ev-valbuf)) (load (field s s-name)) (load (field s s-len))) (store! (ev-outcome) 0) 1)))
                   (and (node-name-eq callee c"methods") (= (arg-count e) 1))

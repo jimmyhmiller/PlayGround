@@ -84,22 +84,24 @@ async function evalSource(source) {
 // program and prints what it reclaimed, then refreshes every pane so the drop in live counts is
 // visible immediately. It is pure sugar over the one wire op: it POSTs `gc()`.
 const toolsRefresh = () => { window.dispatchEvent(new Event("focus")); bumpDetail(); };
+async function runGc(source) {
+  const r = await evalSource(source);
+  if (r.error) { console.error(`tools.${source.replace("()", "")} failed:`, r.error); return r; }
+  const v = r.value || {};
+  console.log(
+    `%cGC (${v.kind}) — freed ${v.freed} instances: ${v.liveBefore} → ${v.liveAfter} live`,
+    "color:#7fd4ff;font-weight:bold");
+  if (v.byType && v.byType.length) console.table(v.byType);
+  else console.log("(no live entity instances yet — nothing to reclaim)");
+  toolsRefresh();  // re-poll every pane so the effect shows up now, not on the next tick
+  return v;
+}
 window.tools = {
-  async gc() {
-    const r = await evalSource("gc()");
-    if (r.error) { console.error("tools.gc() failed:", r.error); return r; }
-    const v = r.value || {};
-    console.log(
-      `%cGC (${v.kind}) — freed ${v.freed} instances: ${v.liveBefore} → ${v.liveAfter} live`,
-      "color:#7fd4ff;font-weight:bold");
-    if (v.byType && v.byType.length) console.table(v.byType);
-    else console.log("(no live entity instances yet — nothing to reclaim)");
-    toolsRefresh();  // re-poll every pane so the effect shows up now, not on the next tick
-    return v;
-  },
+  gc: () => runGc("gc()"),           // full major collection (both generations)
+  minorGc: () => runGc("minorGc()"), // young-only minor collection (leaves the old generation alone)
   refresh: toolsRefresh,
 };
-console.log("%cscry%c  tools.gc() forces a collection and shows the effect · tools.refresh() re-polls",
+console.log("%cscry%c  tools.gc() (major) · tools.minorGc() (young only) · tools.refresh() re-polls — each shows the effect",
   "color:#7fd4ff;font-weight:bold", "color:inherit");
 
 // ===================== poll helper =====================

@@ -18,16 +18,8 @@
 
 use crate::*;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-
-/// One heap slot: a stable handle whose body can be atomically swapped. The
-/// `Mutex<Arc<Body>>` gives a reader a consistent whole body (clone the `Arc`,
-/// then read) and a migrator an atomic swap; the old `Arc` lives until its last
-/// reader drops it.
-struct ObjCell {
-    body: Mutex<Arc<Body>>,
-}
 
 /// One call frame of a concurrent actor: the pinned function version it runs,
 /// its program counter and registers, and where its result goes in the caller.
@@ -62,9 +54,12 @@ struct GcCoord {
 /// The shared, thread-safe runtime.
 pub struct Shared {
     world: World,
-    objects: Mutex<BTreeMap<ObjectId, Arc<ObjCell>>>,
+    /// The one [`Heap`] — the *same* type the single-threaded interpreter uses,
+    /// shared here behind the `Arc<Shared>`. Migration, allocation, and the
+    /// soundness predicate all live on it, so this tier can no longer drift from
+    /// the interpreter on object semantics.
+    heap: Heap,
     output: Mutex<Vec<Value>>,
-    next_object: AtomicU64,
     /// One mailbox per actor id, created before threads spawn so a `Send` never
     /// races the recipient into existence. A `Recv` polls its own mailbox,
     /// hitting a GC safepoint each spin so a waiting actor stays collectable.
@@ -77,25 +72,14 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// Freeze a set-up [`Runtime`] into a shareable runtime.
+    /// Freeze a set-up [`Runtime`] into a shareable runtime — the heap moves in
+    /// as-is (same `Heap`, now shared behind the `Arc`), no rebuild.
     pub fn from_runtime(rt: Runtime) -> Arc<Shared> {
-        let (world, heap, next_object) = rt.into_parts();
-        let objects = heap
-            .into_iter()
-            .map(|(id, obj)| {
-                (
-                    id,
-                    Arc::new(ObjCell {
-                        body: Mutex::new(obj.body),
-                    }),
-                )
-            })
-            .collect();
+        let (world, heap) = rt.into_parts();
         Arc::new(Shared {
             world,
-            objects: Mutex::new(objects),
+            heap,
             output: Mutex::new(Vec::new()),
-            next_object: AtomicU64::new(next_object),
             mailboxes: Mutex::new(BTreeMap::new()),
             gc_pending: AtomicBool::new(false),
             gc: Mutex::new(GcCoord::default()),
@@ -109,137 +93,28 @@ impl Shared {
 
     /// Current schema version of an object (for tests/inspection).
     pub fn object_schema(&self, id: ObjectId) -> Option<Version> {
-        let cell = self.objects.lock().unwrap().get(&id).cloned()?;
-        let body = cell.body.lock().unwrap();
-        Some(body.schema)
+        self.heap.schema_version(id)
     }
 
     pub fn object_count(&self) -> usize {
-        self.objects.lock().unwrap().len()
-    }
-
-    fn cell(&self, id: ObjectId) -> Arc<ObjCell> {
-        self.objects.lock().unwrap().get(&id).unwrap().clone()
-    }
-
-    fn body_of(&self, id: ObjectId) -> Type {
-        let cell = self.cell(id);
-        let tid = cell.body.lock().unwrap().type_id;
-        Type::Ref(tid)
+        self.heap.len()
     }
 
     fn value_ok(&self, value: &Value, expected: &Type) -> bool {
-        let actual = match value {
-            Value::Unit => Type::Unit,
-            Value::I64(_) => Type::I64,
-            Value::Bool(_) => Type::Bool,
-            Value::Ref(id) => self.body_of(*id),
-            Value::Foreign { kind, .. } => Type::Foreign(*kind),
-        };
-        actual == *expected
+        self.heap.value_ok(value, expected)
     }
 
-    fn alloc(&self, type_id: DefId, schema: Version, fields: BTreeMap<FieldId, Value>) -> ObjectId {
-        let id = self.next_object.fetch_add(1, Ordering::Relaxed) + 1;
-        let cell = Arc::new(ObjCell {
-            body: Mutex::new(Arc::new(Body {
-                type_id,
-                schema,
-                fields,
-            })),
-        });
-        self.objects.lock().unwrap().insert(id, cell);
-        id
-    }
-
-    /// Construct an object at the type's current schema, checking each field.
+    /// Construct an object at the type's current schema — the one shared
+    /// [`Heap::new_object`].
     fn new_object(&self, type_id: DefId, supplied: &[(FieldId, Value)]) -> Result<ObjectId, Condition> {
-        let version = self.world.current_schemas[&type_id];
-        let schema = &self.world.schemas[&(type_id, version)];
-        let mut values = BTreeMap::new();
-        for field in &schema.fields {
-            let value = supplied
-                .iter()
-                .find(|(id, _)| *id == field.id)
-                .map(|(_, v)| v.clone())
-                .or_else(|| field.default.clone())
-                .expect("verified constructor");
-            if !self.value_ok(&value, &field.ty) {
-                return Err(Condition::RuntimeTypeError {
-                    function: 0,
-                    pc: 0,
-                    message: format!("field '{}' has the wrong type", field.name),
-                });
-            }
-            values.insert(field.id, value);
-        }
-        Ok(self.alloc(type_id, version, values))
+        self.heap.new_object(type_id, supplied, &self.world)
     }
 
-    /// Migrate an object up to its current schema (concurrently safe) and read a
-    /// field. Migration builds each replacement body *without* holding the
-    /// object's lock (so allocating wrapper objects can't deadlock against the
-    /// heap-table lock), then swaps it in under the lock with a double-check —
-    /// if another thread already advanced this object, the freshly built body is
-    /// discarded (its wrapper allocations become garbage the GC reclaims).
+    /// The migration barrier + field read — the one shared, concurrency-safe
+    /// [`Heap::get_field`]. (The careful lock dance that makes concurrent
+    /// migration race-free now lives on `Heap`.)
     fn read_field(&self, id: ObjectId, field: FieldId) -> Result<Value, Condition> {
-        let cell = self.cell(id);
-        loop {
-            let body = cell.body.lock().unwrap().clone();
-            let current = self.world.current_schemas[&body.type_id];
-            if body.schema == current {
-                return body.fields.get(&field).cloned().ok_or_else(|| {
-                    Condition::RuntimeTypeError {
-                        function: 0,
-                        pc: 0,
-                        message: "field is absent after migration".into(),
-                    }
-                });
-            }
-            let Some(plan) = self.world.migrations.get(&(body.type_id, body.schema)).cloned() else {
-                return Err(Condition::MissingMigration {
-                    object: id,
-                    type_id: body.type_id,
-                    from: body.schema,
-                    to: Version(body.schema.0 + 1),
-                });
-            };
-            // Build the next body (allocating wrappers) without the cell lock.
-            let mut fields = BTreeMap::new();
-            for (target, source) in &plan.fields {
-                let value = match source {
-                    MigrationSource::Copy(s) => body.fields[s].clone(),
-                    MigrationSource::Value(v) => v.clone(),
-                    MigrationSource::Wrap {
-                        type_id,
-                        field,
-                        source,
-                    } => {
-                        let v = self.world.current_schemas[type_id];
-                        let wid = self.alloc(
-                            *type_id,
-                            v,
-                            BTreeMap::from([(*field, body.fields[source].clone())]),
-                        );
-                        Value::Ref(wid)
-                    }
-                };
-                fields.insert(*target, value);
-            }
-            let next = Arc::new(Body {
-                type_id: body.type_id,
-                schema: plan.to,
-                fields,
-            });
-            // Swap under the lock, only if nobody migrated this step already.
-            {
-                let mut slot = cell.body.lock().unwrap();
-                if slot.schema == body.schema {
-                    *slot = next;
-                }
-            }
-            // Re-read: continue the chain or read the now-current field.
-        }
+        self.heap.get_field(id, field, &self.world)
     }
 
     fn emit(&self, value: Value) {
@@ -615,19 +490,10 @@ impl Shared {
             if !live.insert(id) {
                 continue;
             }
-            let Some(cell) = self.objects.lock().unwrap().get(&id).cloned() else {
-                continue;
-            };
-            let body = cell.body.lock().unwrap();
-            for v in body.fields.values() {
-                if let Value::Ref(child) = v {
-                    work.push(*child);
-                }
+            for child in self.heap.child_refs(id) {
+                work.push(child);
             }
         }
-        let mut objects = self.objects.lock().unwrap();
-        let before = objects.len();
-        objects.retain(|id, _| live.contains(id));
-        before - objects.len()
+        self.heap.retain(&live)
     }
 }

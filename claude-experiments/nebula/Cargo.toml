@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nebula-core",
+    "crates/nebula-layout",
+    "crates/nebula-render",
+    "crates/nebula-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Jimmy Miller"]
+
+[workspace.dependencies]
+# GPU / windowing
+wgpu = "27"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+glam = { version = "0.30", features = ["bytemuck"] }
+egui = "0.32"
+egui-wgpu = "0.32"
+egui-winit = "0.32"
+
+# Parallelism / perf
+rayon = "1.10"
+ahash = "0.8"
+
+# Utility
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+rand = "0.8"
+rand_xoshiro = "0.6"
+memmap2 = "0.9"
+half = { version = "2", features = ["bytemuck"] }
+
+nebula-core = { path = "crates/nebula-core" }
+nebula-layout = { path = "crates/nebula-layout" }
+nebula-render = { path = "crates/nebula-render" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+
+# Fast iteration: build deps optimized even in dev
+[profile.dev.package."*"]
+opt-level = 3
