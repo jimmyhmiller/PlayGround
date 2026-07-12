@@ -13,7 +13,7 @@ Distinguished only by *what they receive* and *what they return*.
 | **Macro** | `[Code…] -> Code` | its own call site | replacement code | shipped |
 | **Generator** | `() -> Code` (via `meta`) | nothing | new top-level forms | shipped |
 | **Checker** | `Program -> Code` | the whole program | veto via `error` | **shipped** |
-| **Transformer** | `Program -> Program` | the whole program | a rewritten program | planned |
+| **Transformer** | `Program -> Program` | the whole program | a rewritten program | **shipped** |
 
 All four share one substrate: the `Code` value, the `code-*` operations, type
 reflection, and the comptime interpreter. The difference is **scope** (my-call-site
@@ -87,8 +87,20 @@ re-blesses the oracle.
   forms including imported stdlib, so a "ban X everywhere" policy also inspects library
   code — scope-to-user-module and located `(report …)`/`(code-span …)` diagnostics (v1
   vetoes with a message only) are the next refinements.
-- **1.2 Transformer: `(transform f)`** where `f : Code(Program) -> Code(Program)`.
-  Driver applies it and continues with the rewritten program (re-check after).
+- **1.2 Transformer: `(transform FN)` — ✅ SHIPPED.** `FN` is a `[(prog Code)] -> Code`
+  function; `(transform FN)` registers it. After expansion, the driver hands FN the whole
+  program and **replaces** it with FN's returned `(do form…)`, then re-resolves/checks the
+  result. Implemented in `expander.coil::run-transformers` (mirrors `run-checkers`, runs
+  before checkers). **v1 constraint:** FN must return the *same number* of top-level forms
+  (an in-place rewrite), so each output form inherits the module tag it replaces — this
+  keeps module structure intact without threading it through the flat Code list. Demo:
+  `metaprog-poc/tx_test.coil` + `dialect.coil` — a `desugar-inc` transformer rewrites
+  `(inc E)` → `(iadd E 1)` program-wide (`inc` is otherwise undefined, so the program only
+  compiles *because* of the transform). Verified: full oracle green + rebootstrap fixpoint.
+  **Known limitations:** the transformer sees *all* loaded forms (incl. prelude) — a naive
+  rewrite must leave forms it doesn't target untouched (the demo only rebuilds forms
+  containing the target) or it corrupts library code; and it can't add/remove top-level
+  forms yet (same-count v1). Scope-to-user-module and add/remove-forms are the refinements.
   **Unlocks: transparent GC rooting, GC lowering, Scheme lowering as a pass.**
 
 ### Phase 2 — ordered composition = dialects

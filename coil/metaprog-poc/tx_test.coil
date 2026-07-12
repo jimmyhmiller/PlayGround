@@ -1,0 +1,5 @@
+(module app)
+(import "dialect.coil" :use *)
+(transform desugar-inc)                       ; ← rewrites (inc …) program-wide
+(defn f [(x :i64)] (-> :i64) (inc (inc x)))   ; `inc` is NOT defined anywhere…
+(defn main [] (-> :i64) (f 40))               ; …the transformer turns it into iadd → 42
