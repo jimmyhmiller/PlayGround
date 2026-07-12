@@ -143,7 +143,12 @@ loud, explicit rejection** (never a silent corruption).
 Served from disk (vendored no-build React 18 + htm), dark-first, `Cache-Control: no-store`
 so you never get a stale `app.js`. The wire surface is `POST /eval` plus read-only
 reflection ops: `types`, `schema`, `fields`, `methods`, `graph`, `views`, `actions`,
-`functions`, `trace`, `generation`.
+`functions`, `trace`, `generation`. One **mutating** reflection op: `gc()` forces a full major
+collection and returns `{liveBefore, liveAfter, freed, byType[...]}`. It runs on the full-STW eval
+path (it frees memory), not the concurrent read-only handoff. The viewer exposes it on the browser
+console as **`tools.gc()`** (logs the reclaim summary + re-polls every pane so the drop in live
+counts is visible immediately) — a debugging affordance kept in the console, not as UI chrome,
+since the viewer is itself a live REPL.
 
 - **Map view (default)** — bespoke nested-containment visualization (ownership = nesting,
   size = live-instance mass, shared instances share an identity color with

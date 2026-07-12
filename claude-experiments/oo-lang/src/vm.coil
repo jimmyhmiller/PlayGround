@@ -162,6 +162,13 @@
       (do (gc-cycle) (release-global-stop) 0)
       (do (safepoint-poll (field vt parked)) 0))))
 
+; force a full MAJOR collection now. Called from the viewer's `gc()` reflection op, which runs
+; inside the eval coordinator with the world already stopped — so gc-collect takes its
+; already-coordinator path and marks+sweeps in place. A major (not a minor) so the whole effect
+; of reclaiming both generations is visible.
+(defn vm-gc-major [] (-> i64)
+  (if (= (gc-enabled?) 1) (do (gc-request-major) (gc-collect (vm-thread-eval)) 0) 0))
+
 ; allocate one instance for OP_NEW. If the type's arena is full, a minor can't help (it never
 ; reclaims OLD instances), so FORCE a major and retry; only then is it a genuine capacity error.
 ; Rewinds fr.ip to the OP_NEW instruction start across the collection so this frame's stack map

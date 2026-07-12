@@ -78,6 +78,30 @@ async function evalSource(source) {
   }
 }
 
+// ===================== console tools =====================
+// A small toolbox exposed on the browser console (the viewer is a live REPL, so debugging
+// affordances live here, not as chrome). `tools.gc()` forces a full collection on the running
+// program and prints what it reclaimed, then refreshes every pane so the drop in live counts is
+// visible immediately. It is pure sugar over the one wire op: it POSTs `gc()`.
+const toolsRefresh = () => { window.dispatchEvent(new Event("focus")); bumpDetail(); };
+window.tools = {
+  async gc() {
+    const r = await evalSource("gc()");
+    if (r.error) { console.error("tools.gc() failed:", r.error); return r; }
+    const v = r.value || {};
+    console.log(
+      `%cGC (${v.kind}) — freed ${v.freed} instances: ${v.liveBefore} → ${v.liveAfter} live`,
+      "color:#7fd4ff;font-weight:bold");
+    if (v.byType && v.byType.length) console.table(v.byType);
+    else console.log("(no live entity instances yet — nothing to reclaim)");
+    toolsRefresh();  // re-poll every pane so the effect shows up now, not on the next tick
+    return v;
+  },
+  refresh: toolsRefresh,
+};
+console.log("%cscry%c  tools.gc() forces a collection and shows the effect · tools.refresh() re-polls",
+  "color:#7fd4ff;font-weight:bold", "color:inherit");
+
 // ===================== poll helper =====================
 // Runs fn now and every ms, but never while the tab is hidden (matches the vanilla
 // document.hidden guard). Also re-fires on focus + visibility regain. deps re-arm it.

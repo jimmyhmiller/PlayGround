@@ -129,6 +129,59 @@
 
 ; detect a bare reflection call: types() / fields("X") / methods("X").
 ; returns 1 if handled (valbuf filled), 0 otherwise.
+; gc() — snapshot per-type live counts, force a full major collection (the world is already
+; stopped: we run inside the eval coordinator), then report before/after. Payload (the eval value):
+;   { "type":"GC","kind":"major","liveBefore":B,"liveAfter":A,"freed":B-A,
+;     "byType":[{"name":"Point","before":1000,"after":1,"freed":999}, ...] }   // only types touched
+; entity live-count for type index i, or -1 for non-entity slots.
+(defn gc-type-live [(p (ptr Program)) (i i64)] (-> i64)
+  (let [ti (load (index (load (field p types)) i))]
+    (if (and (!= (cast i64 ti) 0) (load (field ti is-entity))) (arena-live-count (load (field ti arena))) -1)))
+
+; emit one {"name","before","after","freed"} object for type i if it had any live instances.
+; `already` is how many were emitted so far (for the leading comma). Returns 1 if it emitted.
+(defn gc-emit-type [(b (ptr JBuf)) (p (ptr Program)) (i i64) (bef i64) (already i64)] (-> i64)
+  (let [ti (load (index (load (field p types)) i)) aft (gc-type-live p i)]
+    (if (or (> bef 0) (> aft 0))
+      (do
+        (if (> already 0) (jb-byte b \,) 0)
+        (jb-cstr b c"{\"name\":\"") (jb-bytes b (load (field ti name)) (load (field ti name-len)))
+        (jb-cstr b c"\",\"before\":") (jb-int b bef) (jb-cstr b c",\"after\":") (jb-int b aft)
+        (jb-cstr b c",\"freed\":") (jb-int b (- bef aft)) (jb-byte b \}) 1)
+      0)))
+
+(defn reflect-gc [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+  (let [n (load (field p type-count))
+        before (cast (ptr i64) (xalloc (* 8 (if (= n 0) 1 n))))
+        (mut i) 0 (mut tb) 0 (mut ta) 0 (mut emitted) 0]
+    ; snapshot per-type live counts before the collection
+    (loop (if (< (load i) n)
+            (let [lc (gc-type-live p (load i))]
+              (store! (index before (load i)) lc)
+              (if (> lc 0) (store! tb (+ (load tb) lc)) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    ; force a full major collection (the world is already stopped)
+    (vm-gc-major)
+    ; sum after + write the report
+    (store! i 0)
+    (loop (if (< (load i) n)
+            (let [lc (gc-type-live p (load i))]
+              (if (> lc 0) (store! ta (+ (load ta) lc)) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (jb-cstr b c"{\"type\":\"GC\",\"kind\":\"major\",\"liveBefore\":") (jb-int b (load tb))
+    (jb-cstr b c",\"liveAfter\":") (jb-int b (load ta))
+    (jb-cstr b c",\"freed\":") (jb-int b (- (load tb) (load ta)))
+    (jb-cstr b c",\"byType\":[")
+    (store! i 0)
+    (loop (if (< (load i) n)
+            (do (if (= (gc-emit-type b p (load i) (load (index before (load i))) (load emitted)) 1) (store! emitted (+ (load emitted) 1)) 0)
+                (store! i (+ (load i) 1)) 0)
+            (break)))
+    (jb-cstr b c"]}")
+    (free (cast (ptr i8) before)) 0))
+
 (defn try-reflection [(blk (ptr Node))] (-> i64)
   (if (!= (kid-count blk) 1) 0
     (let [st (kid-at blk 0)]
@@ -152,6 +205,10 @@
                     (do (reflect-functions (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"generation") (= (arg-count e) 0))
                     (do (jb-cstr (load (ev-valbuf)) c"{\"type\":\"Int\",\"value\":") (jb-int (load (ev-valbuf)) (current-generation)) (jb-byte (load (ev-valbuf)) \}) (store! (ev-outcome) 0) 1)
+                  ; gc() — force a full collection and report what it reclaimed. NOT in
+                  ; classify-reflection, so it runs on the full-STW eval path (it mutates the heap).
+                  (and (node-name-eq callee c"gc") (= (arg-count e) 0))
+                    (do (reflect-gc (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"fields") (= (arg-count e) 1))
                     (let [s (str-arg e 0)] (if (= (cast i64 s) 0) 0 (do (reflect-fields (load (ev-valbuf)) (load (field s s-name)) (load (field s s-len))) (store! (ev-outcome) 0) 1)))
                   (and (node-name-eq callee c"methods") (= (arg-count e) 1))
