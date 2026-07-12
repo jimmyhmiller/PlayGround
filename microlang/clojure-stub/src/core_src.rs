@@ -1513,6 +1513,12 @@ pub const CORE: &str = r##"
 (def ^:dynamic *e nil)
 (def *clojure-version* {:major 1 :minor 11 :incremental 1 :qualifier nil})
 (defn clojure-version [] "1.11.1")
+;; `assert` throws when its expr is falsey — unless *assert* is bound false.
+(defmacro assert
+  ([x] (list 'when (list 'and '*assert* (list 'not x))
+             (list 'throw (list 'str "Assert failed: " (list 'pr-str (list 'quote x))))))
+  ([x message] (list 'when (list 'and '*assert* (list 'not x))
+                     (list 'throw (list 'str "Assert failed: " message (%str-of (%char-of 10)) (list 'pr-str (list 'quote x)))))))
 
 ;; ─────────────── readable printing (pr-str family, pure) ───────────────
 ;; escape one char for inside a readable string literal
@@ -1562,7 +1568,7 @@ pub const CORE: &str = r##"
         (vector? x) (if (-over-level? level) "#" (str "[" (-pr-elems x (inc level) readable?) "]"))
         (set? x) (if (-over-level? level) "#" (str "#{" (-pr-elems (seq x) (inc level) readable?) "}"))
         (map? x) (if (-over-level? level) "#" (str "{" (-pr-map-elems (seq x) (inc level) readable?) "}"))
-        (or (list? x) (seq? x)) (if (-over-level? level) "#" (str "(" (-pr-elems x (inc level) readable?) ")"))
+        (or (lazy-seq? x) (list? x) (seq? x)) (if (-over-level? level) "#" (str "(" (-pr-elems x (inc level) readable?) ")"))
         true (str x)))
 (defn -pr [x] (-prn-el x 1 true))
 (defn -pr-print [x] (-prn-el x 1 false))
