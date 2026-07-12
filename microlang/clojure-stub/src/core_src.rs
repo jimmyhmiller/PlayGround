@@ -333,7 +333,11 @@ pub const CORE: &str = r##"
   IEmptyableCollection (-empty [_] (record 'Set nil)))
 
 ;; ─────────────── public collection API (thin protocol dispatchers) ───────────
-(defn seq [c] (if (nil? c) nil (-seq c)))
+;; `seq` returns a REALIZED seq (a cons whose head is forced) or nil — never an
+;; unforced lazy seq. This is Clojure's contract, and it means every downstream
+;; `%first`/`%rest` (which assume a cons) is correct regardless of the source
+;; (list, vector, set, map, lazy seq): a lazy `-seq` result is forced here.
+(defn seq [c] (if (nil? c) nil (let [s (-seq c)] (if (lazy-seq? s) (seq s) s))))
 (defn first [c] (let [s (seq c)] (if (nil? s) nil (-first s))))
 (defn rest [c] (let [s (seq c)] (if (nil? s) nil (-rest s))))
 (defn next [c] (seq (rest c)))
@@ -416,14 +420,14 @@ pub const CORE: &str = r##"
 (defn filter [f c]
   (lazy-seq (let [s (seq c)]
               (cond (nil? s) nil
-                    (f (-first s)) (%cons (-first s) (filter f (-rest s)))
-                    true (filter f (-rest s))))))
+                    (f (%first s)) (%cons (%first s) (filter f (%rest s)))
+                    true (filter f (%rest s))))))
 (defn remove [f c] (filter (fn [x] (not (f x))) c))
 (defn keep [f c]
   (lazy-seq (let [s (seq c)]
               (if (nil? s) nil
-                  (let [v (f (-first s))]
-                    (if (nil? v) (keep f (-rest s)) (%cons v (keep f (-rest s)))))))))
+                  (let [v (f (%first s))]
+                    (if (nil? v) (keep f (%rest s)) (%cons v (keep f (%rest s)))))))))
 (defn -range-inf [i] (lazy-seq (%cons i (-range-inf (%add i 1)))))
 (defn -range2 [i n] (lazy-seq (if (%lt i n) (%cons i (-range2 (%add i 1) n)) nil)))
 (defn -range3 [i n step] (lazy-seq (if (%lt i n) (%cons i (-range3 (%add i step) n step)) nil)))
@@ -790,7 +794,7 @@ pub const CORE: &str = r##"
   (if (nil? (next args)) (-msort -default-less (first args)) (-msort (first args) (second args))))
 (defn sort-by [k & args]
   (if (nil? (next args))
-      (-msort (fn [a b] (%lt (k a) (k b))) (first args))
+      (-msort (fn [a b] (%lt (compare (k a) (k b)) 0)) (first args))
       (-msort (fn [a b] ((first args) (k a) (k b))) (second args))))
 
 ;; misc combinators
@@ -1022,6 +1026,16 @@ pub const CORE: &str = r##"
     (let [x (first args)] (if (keyword? x) x (record 'Keyword (symbol (if (string? x) x (name x))))))
     (record 'Keyword (symbol (first args) (second args)))))
 (defn fnil [f x] (fn [a & args] (apply f (if (nil? a) x a) args)))
+;; sorted collections: a list-backed Map/Set kept in key/element order (reuses the
+;; existing Map/Set protocols + printer; O(n) but conformant).
+(defn -pairs [s] (if (nil? (seq s)) nil (%cons (vector (first s) (second s)) (-pairs (rest (rest s))))))
+(defn -flatten-pairs [ps]
+  (if (nil? (seq ps)) nil (%cons (first (first ps)) (%cons (second (first ps)) (-flatten-pairs (rest ps))))))
+(defn sorted-map [& kvs] (record 'Map (-flatten-pairs (sort-by first (-pairs kvs)))))
+(defn sorted-set [& xs] (record 'Set (sort (distinct xs))))
+(defn sorted-map-by [cmp & kvs]
+  (record 'Map (-flatten-pairs (-msort (fn [a b] (%lt (cmp (first a) (first b)) 0)) (-pairs kvs)))))
+(defn sorted-set-by [cmp & xs] (record 'Set (-msort (fn [a b] (%lt (cmp a b) 0)) (distinct xs))))
 
 ;; ─────────────── namespace reflection ───────────────
 ;; Backed by the runtime var registry (populated at every def). Namespaces are
