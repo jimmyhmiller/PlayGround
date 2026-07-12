@@ -1,5 +1,11 @@
-// file: agents/core.scry
-module agents.core
+// file: agents/core.scry — a self-contained multi-agent demo core (module `agents.core`).
+//
+// This is deliberately separate from the real `agent` library (agent.scry): it illustrates the
+// "N agents, each on its own OS thread, browsable live in the viewer" pattern from the design
+// docs (§5), using only REAL runtime primitives — the built-in Clock, Process.run, Mutex<T>,
+// Thread.spawn/Runnable. There is no network and no LLM: the brain is a deterministic offline
+// `Brain` that does honest work, so the demo runs reproducibly. main.scry wires three of these
+// agents up; ui/tui.scry renders them.
 
 enum AgentStatus {
   Waiting
@@ -16,7 +22,7 @@ class Message {
   fn init(role: String, content: String) {
     self.role = role
     self.content = content
-    self.createdAt = Clock.now()
+    self.createdAt = Clock.now()   // built-in Clock: wall-clock milliseconds
   }
 }
 
@@ -39,9 +45,8 @@ enum ToolError {
   Failed(String)
 }
 
-// Tool heterogeneity via real interfaces (§2.3 — supersedes an earlier enum-dispatch
-// fallback): any class that implements Tool can live in Agent.tools below, with no
-// enum to edit when a new tool kind is added.
+// Tool heterogeneity via real interfaces (§2.3): any class that implements Tool can live in
+// Agent.tools below, with no enum to edit when a new tool kind is added.
 interface Tool {
   fn name() -> String
   fn call(args: Map<String, String>) -> Result<String, ToolError>
@@ -54,7 +59,7 @@ class ShellTool implements Tool {
 
   fn call(args: Map<String, String>) -> Result<String, ToolError> {
     match args.get("cmd") {
-      Some(cmd) -> Ok(__builtin_run_shell(cmd))
+      Some(cmd) -> Ok(Process.run(cmd))   // real shell via the Process builtin
       None -> Err(ToolError.Failed("missing cmd arg"))
     }
   }
@@ -73,12 +78,28 @@ class SearchTool implements Tool {
   }
 }
 
+// The turn can fail; a real error type (not a fake stub) so runTurn's `?` propagates honestly.
+enum AgentError {
+  EmptyConversation
+  Failed(String)
+}
+
+// A deterministic, offline "brain": no network, no LLM. It produces a real reply from the
+// conversation so the multi-agent demo does honest work and runs reproducibly. A live LLM would
+// slot in here by implementing the same Result-returning shape.
+object Brain {
+  fn respond(convo: Conversation) -> Result<String, AgentError> {
+    if convo.messages.len() == 0 { return Err(AgentError.EmptyConversation) }
+    let last = convo.messages.get(convo.messages.len() - 1)
+    Ok("ack: " + last.content)
+  }
+}
+
 class Agent {
   name: String
-  // Wrapped in Mutex<T> because the main thread's TUI render loop and the viewer's
-  // eval channel both read these fields while this agent's own worker thread (below)
-  // mutates them (§5.2). `tools` is not wrapped: only this agent's own thread ever
-  // touches it, by convention (§5.3, flagged OPEN — not statically enforced).
+  // Wrapped in Mutex<T> because the main thread's TUI render loop and the viewer's eval channel
+  // both read these fields while this agent's own worker thread (below) mutates them (§5.2).
+  // `tools` is not wrapped: only this agent's own thread ever touches it, by convention (§5.3).
   status: Mutex<AgentStatus>
   conversation: Mutex<Conversation>
   tools: List<Tool>
@@ -89,10 +110,6 @@ class Agent {
     self.conversation = Mutex<Conversation>(Conversation())
     self.tools = tools
   }
-
-  // A later live edit adding a field to Agent would ship as a `migrate` block (§1.8)
-  // giving the new field's value for every live instance; this class, as written,
-  // needs none yet.
 
   fn pause() {
     self.status.lock()
@@ -113,14 +130,11 @@ class Agent {
     None
   }
 
-  // Runs on this agent's own worker thread (§5.1), driven by AgentWorker below.
-  // ScriptedModel (M4) returns synchronously and deterministically in the PoC, so this
-  // never actually blocks yet — but note for when it does: a blocking Llm.complete call
-  // parks this thread somewhere it can't reach a safepoint, so it does NOT cost only this
-  // agent. Per 02-runtime.md §7, request-global-stop then blocks waiting for this thread
-  // specifically, delaying every GC, shape migration, and viewer invoke/definition-eval
-  // process-wide for as long as the call is outstanding — other agents' threads keep
-  // running, but nothing that needs a full stop-the-world can land until this call returns.
+  // Runs on this agent's own worker thread (§5.1), driven by AgentWorker below. Brain.respond
+  // returns synchronously in the offline demo, so this never blocks — but note for when a real
+  // model is slotted in: a blocking call parks this thread where it can't reach a safepoint, so
+  // per 02-runtime.md §7 request-global-stop would then wait on it, delaying every GC / shape
+  // migration / viewer eval process-wide until it returns (other agents' threads keep running).
   fn runTurn() -> Result<(), AgentError> {
     self.status.lock()
     if self.status.get() != AgentStatus.Waiting {
@@ -131,7 +145,8 @@ class Agent {
     self.status.unlock()
 
     self.conversation.lock()
-    let reply = Llm.complete(self.conversation.get())?
+    self.conversation.get().append(Message(role: "user", content: "continue"))
+    let reply = Brain.respond(self.conversation.get())?
     self.conversation.get().append(Message(role: "assistant", content: reply))
     self.conversation.unlock()
 
@@ -142,8 +157,8 @@ class Agent {
   }
 }
 
-// The thread this agent runs on (§5.1): implements Runnable rather than taking a bare
-// function value, since the PoC has no closures — the agent to drive is just a field.
+// The thread this agent runs on (§5.1): implements Runnable rather than taking a bare function
+// value, since the PoC has no closures — the agent to drive is just a field.
 class AgentWorker implements Runnable {
   agent: Agent
 
@@ -156,9 +171,4 @@ class AgentWorker implements Runnable {
       Clock.sleep(400)   // pace the demo: turns stay watchable, not instantaneous (§1.7)
     }
   }
-}
-
-object Clock {
-  fn now() -> Int { __builtin_epoch_millis() }
-  fn sleep(ms: Int) -> Void { __builtin_sleep_millis(ms) }   // safepoint-cooperative (§1.7)
 }

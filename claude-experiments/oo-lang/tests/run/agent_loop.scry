@@ -2,7 +2,7 @@
 // A ScriptedModel + the real CalcTool: the model requests `calculate`, the tool does REAL
 // integer arithmetic on the model-chosen args (17 * 23 = 391), the result feeds back, and the
 // final answer INCORPORATES it. Proves model-driven dispatch + result feedback deterministically.
-import std.agent.{Model, Tool, Conversation, ScriptedModel, CalcTool, WeatherTool, runAgentLoop}
+import agent.core.{Model, Tool, Conversation, ScriptedModel, CalcTool, WeatherTool, runAgentLoop}
 
 fn main() {
   let tools = List<Tool>()

@@ -1,4 +1,6 @@
-// std/agent.scry — the Phase 8c agent core, written IN Scry (dogfood over 8a Http + 8b Json).
+// agent/core.scry — the agent core, written IN Scry (dogfood over Http + std.json). This is an
+// application-level library (module `agent.core`), NOT part of the standard library — an agent
+// framework does not belong in `std`. It still depends on std.json, which is genuinely stdlib.
 //
 // This is the reusable "brain + tools + loop" layer shared by examples/assistant.scry (the live
 // app) and tests/run/agent_loop.scry (the offline golden). It contains ZERO app/UI code: no
@@ -19,7 +21,7 @@
 //   - ScriptedModel:  a deterministic keyword brain — emits a REAL tool_use decision offline.
 //   - AnthropicModel: a real /v1/messages tool-use client over Http (8a) + Json (8b).
 
-module std.agent
+module agent.core
 
 import std.json.{Json, JsonValue, jget, jindex, jstr, jint, jgetStr, jgetInt}
 

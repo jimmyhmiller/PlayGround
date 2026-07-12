@@ -212,12 +212,13 @@
 (defn skip-dir [(name (ptr i8))] (-> bool)
   (or (= (cast i64 (load (index (cast (ptr u8) name) 0))) \.)   ; ., .., .git, hidden
       (or (= (cast i64 (strcmp name c"tests")) 0)
+          (or (= (cast i64 (strcmp name c"agent")) 0)   ; the `agent` library dir, not a project
           (or (= (cast i64 (strcmp name c"std")) 0)
               (or (= (cast i64 (strcmp name c"docs")) 0)
                   (or (= (cast i64 (strcmp name c"viewer")) 0)
                       (or (= (cast i64 (strcmp name c"src")) 0)
                           (or (= (cast i64 (strcmp name c"node_modules")) 0)
-                              (= (cast i64 (strcmp name c"target")) 0)))))))))
+                              (= (cast i64 (strcmp name c"target")) 0))))))))))
 
 ; scan ONE directory: remember every top-level .scry file + its Coil.toml entry.
 (defn scan-dir-flat [(dir (ptr i8))] (-> i64)

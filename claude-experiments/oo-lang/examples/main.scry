@@ -1,5 +1,6 @@
-// file: main.scry
-import std.collections.{List}
+// file: main.scry — the multi-agent demo entry point. Three agents, each on its own OS thread,
+// browsable live in the viewer while a small TUI prints their status. List is a built-in (no
+// import needed); the agent core and TUI are this demo's own modules.
 import agents.core.{Agent, Tool, ShellTool, SearchTool, AgentWorker}
 import ui.tui.{Tui}
 
@@ -28,8 +29,10 @@ fn main() {
   handles.push(Thread.spawn(AgentWorker(agent: reviewer)))
 
   // Tui.render reads each agent's Mutex-guarded status/conversation fields (§5.2) —
-  // the one place this file's code crosses threads.
+  // the one place this file's code crosses threads. Paced with Clock.sleep so the render loop
+  // stays a safepoint-cooperative heartbeat rather than a busy spin.
   while true {
     Tui.render(agents)
+    Clock.sleep(500)
   }
 }

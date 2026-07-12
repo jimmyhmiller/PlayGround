@@ -44,7 +44,7 @@
 // The brain + tools + loop live in std/agent.scry (imported below); this file is the app shell:
 // the REPL, the orchestrator, the real sub-agent threads, and the viewer-facing entities.
 
-import std.agent.{Message, Conversation, Tool, Model, ModelResponse, ScriptedModel, AnthropicModel, ShellTool, SearchTool, CalcTool, WeatherTool, FileReadTool, FileWriteTool, runAgentLoop, mkTextMessage}
+import agent.core.{Message, Conversation, Tool, Model, ModelResponse, ScriptedModel, AnthropicModel, ShellTool, SearchTool, CalcTool, WeatherTool, FileReadTool, FileWriteTool, runAgentLoop, mkTextMessage}
 
 // ============================ small string helpers ============================
 fn startsWith(s: String, p: String) -> Bool {

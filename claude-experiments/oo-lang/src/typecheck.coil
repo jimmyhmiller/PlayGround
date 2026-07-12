@@ -2,8 +2,9 @@
 ;
 ; Two passes: (1) collect all declarations into the symbol table (types.coil),
 ; (2a) resolve field types + interface conformance for every loaded module,
-; (2b) deep-check the bodies of the *entry* module (imported modules contribute
-; signatures only — a separate-compilation boundary, see docs/06-implementation.md).
+; (2b) deep-check the bodies of EVERY loaded module. build-program compiles imported
+; modules' bodies too, so they must be typechecked here — otherwise a broken dependency
+; slips past this gate and crashes the compiler on an error-typed node.
 ;
 ; `scry check <file.scry>` follows imports (relative paths) and reports every
 ; independent error it can (per-declaration recovery), exiting 65 on any error.
@@ -877,20 +878,23 @@
     (loop (if (and (not (load ok)) (< (load i) n)) (do (if (= (cast i64 (al-get as (load i))) (cast i64 fld)) (do (store! ok true) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
     (load ok)))
 
+; Body-check one decl. Called for EVERY loaded decl (entry + imports + builtins) so it must
+; no-op cleanly on the builtin kinds (DK_BUILTIN_*) — set-cur-file only runs inside the real
+; DK_FN/DK_CLASS/DK_OBJECT branches, since builtin decls carry no source file.
 (defn check-decl-bodies [(d (ptr Decl))] (-> i64)
-  (set-cur-file (load (field d file)))
   (let [dk (load (field d kind))]
     (cond
-      (= dk DK_FN) (check-fn-body d (load (field d node)) (null-ty))
-      (or (or (= dk DK_CLASS) (= dk DK_OBJECT)) false)
-        (let [self-ty (mk-named d (self-args d)) ms (load (field d members)) n (al-len ms) (mut i) 0]
-          (loop
-            (if (< (load i) n)
-              (let [mem (al-get ms (load i))]
-                (if (= (nkind mem) NK_FN) (check-fn-body d mem self-ty) 0)
-                (store! i (+ (load i) 1)) 0)
-              (break)))
-          0)
+      (= dk DK_FN) (do (set-cur-file (load (field d file))) (check-fn-body d (load (field d node)) (null-ty)))
+      (or (= dk DK_CLASS) (= dk DK_OBJECT))
+        (do (set-cur-file (load (field d file)))
+          (let [self-ty (mk-named d (self-args d)) ms (load (field d members)) n (al-len ms) (mut i) 0]
+            (loop
+              (if (< (load i) n)
+                (let [mem (al-get ms (load i))]
+                  (if (= (nkind mem) NK_FN) (check-fn-body d mem self-ty) 0)
+                  (store! i (+ (load i) 1)) 0)
+                (break)))
+            0))
       0)))
 
 ; self type args: for a generic class, self is C<T,...> with the tparams as vars
@@ -1449,9 +1453,11 @@
       ; pass 1b: signatures + conformance for every loaded decl
       (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
         (loop (if (< (load i) n) (do (check-decl-signatures (al-get ds (load i))) (store! i (+ (load i) 1)) 0) (break))))
-      ; pass 2: deep-check bodies of the entry module only
+      ; pass 2: deep-check bodies of EVERY loaded module. build-program compiles imported
+      ; modules' bodies too, so they must be typechecked here or a broken dependency slips past
+      ; this gate and crashes the compiler on an error-typed node (builtins no-op in check-decl-bodies).
       (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
-        (loop (if (< (load i) n) (let [d (al-get ds (load i))] (if (load (field d deep)) (do (check-decl-bodies d) 0) 0) (store! i (+ (load i) 1)) 0) (break))))
+        (loop (if (< (load i) n) (do (check-decl-bodies (al-get ds (load i))) (store! i (+ (load i) 1)) 0) (break))))
       ; pass 3: program-declared views + actions
       (check-all-views)
       (check-all-actions)

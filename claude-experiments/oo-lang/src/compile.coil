@@ -439,10 +439,16 @@
                 (let [argc (compile-args cs n)] (cop cs OP_CALL_STATIC) (cu16 cs (method-index-of (load (field d node)))) (cu8 cs argc) 0)
               (or (= dk DK_CLASS) (= dk DK_OBJECT)) (compile-construct-class cs n (tyof cs n) d)
               (fatal-or-panic EK_RUNTIME c"compile: bad ident call" 70)))
-          ; unqualified variant Some(x)/Ok(x)/Circle(r)
-          (let [vr (find-variant nm0 len0 (cast (ptr Decl) 0)) ed (load (field vr enum-decl))]
-            (let [argc (compile-args cs n)]
-              (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag ed nm0 len0)) (cu8 cs argc) (cu8 cs (enum-refmask-of cs n)) 0)))))))
+          ; unqualified variant Some(x)/Ok(x)/Circle(r) — or an unresolved name. The typechecker
+          ; now deep-checks every compiled module, so an unknown callee is caught before we get
+          ; here; guard anyway so a slipped-through error yields a clear diagnostic, never a
+          ; null-deref (find-variant returns null for an unknown name).
+          (let [vr (find-variant nm0 len0 (cast (ptr Decl) 0))]
+            (if (= (cast i64 vr) 0)
+              (do (w-cstr 2 c"compile: unresolved call to '") (w-bytes 2 nm0 len0) (w-cstr 2 c"'\n")
+                  (fatal-or-panic EK_RUNTIME c"compile: unresolved call" 70))
+              (let [ed (load (field vr enum-decl)) argc (compile-args cs n)]
+                (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag ed nm0 len0)) (cu8 cs argc) (cu8 cs (enum-refmask-of cs n)) 0))))))))
 
 (defn compile-dotted-call [(cs (ptr CState)) (facc (ptr Node)) (call (ptr Node))] (-> i64)
   (let [recv (load (field facc a)) mname (nm facc) mlen (nlen facc)
@@ -1296,8 +1302,10 @@
   (load-file path true)
   (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
     (loop (if (< (load i) n) (do (check-decl-signatures (al-get ds (load i))) (store! i (+ (load i) 1)) 0) (break))))
+  ; deep-check EVERY loaded module's bodies (not just the entry): build-program compiles them
+  ; all, so an unchecked import would otherwise crash the compiler on an error-typed node.
   (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
-    (loop (if (< (load i) n) (let [d (al-get ds (load i))] (if (load (field d deep)) (do (check-decl-bodies d) 0) 0) (store! i (+ (load i) 1)) 0) (break))))
+    (loop (if (< (load i) n) (do (check-decl-bodies (al-get ds (load i))) (store! i (+ (load i) 1)) 0) (break))))
   (check-all-views)
   (check-all-actions)
   (err-count))
