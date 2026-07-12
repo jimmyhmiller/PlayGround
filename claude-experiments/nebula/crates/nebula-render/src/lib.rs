@@ -8,8 +8,10 @@
 pub mod app;
 pub mod camera;
 pub mod coloring;
+pub mod font;
 pub mod gpu;
 pub mod layout_gpu;
+pub mod overlay;
 pub mod readback;
 pub mod render;
 pub mod scene;

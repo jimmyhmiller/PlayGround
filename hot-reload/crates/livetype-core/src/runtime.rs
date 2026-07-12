@@ -1,6 +1,27 @@
 use crate::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Reconstruct the condition for an operand-tag trap from the trapping
+/// instruction — free-standing so the concurrent JIT driver (in the `livetype`
+/// crate, with no `Runtime`) can build the same condition the interpreter does.
+pub fn operand_type_error(function: DefId, pc: usize, instruction: &Instruction) -> Condition {
+    let message = match instruction {
+        Instruction::AddI64 { .. } => ERR_ADD_NON_I64,
+        Instruction::SubI64 { .. } => ERR_SUB_NON_I64,
+        Instruction::MulI64 { .. } => ERR_MUL_NON_I64,
+        Instruction::LtI64 { .. } => ERR_LT_NON_I64,
+        Instruction::EqI64 { .. } => ERR_EQ_NON_I64,
+        Instruction::Not { .. } => ERR_NOT_NON_BOOL,
+        Instruction::Branch { .. } => ERR_BRANCH_NON_BOOL,
+        _ => "operand type mismatch",
+    };
+    Condition::RuntimeTypeError {
+        function,
+        pc,
+        message: message.into(),
+    }
+}
+
 /// Does `function` contain a direct call to `callee`?
 fn calls(function: &Function, callee: DefId) -> bool {
     function
@@ -538,17 +559,7 @@ impl Runtime {
         pc: usize,
         instruction: &Instruction,
     ) -> Condition {
-        let message = match instruction {
-            Instruction::AddI64 { .. } => ERR_ADD_NON_I64,
-            Instruction::SubI64 { .. } => ERR_SUB_NON_I64,
-            Instruction::MulI64 { .. } => ERR_MUL_NON_I64,
-            Instruction::LtI64 { .. } => ERR_LT_NON_I64,
-            Instruction::EqI64 { .. } => ERR_EQ_NON_I64,
-            Instruction::Not { .. } => ERR_NOT_NON_BOOL,
-            Instruction::Branch { .. } => ERR_BRANCH_NON_BOOL,
-            _ => "operand type mismatch",
-        };
-        self.type_error(function, pc, message)
+        operand_type_error(function, pc, instruction)
     }
 
     /// The soundness predicate (`value_ok`): does a live value's actual nominal

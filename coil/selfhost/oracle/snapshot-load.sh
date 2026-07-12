@@ -33,7 +33,7 @@ snap() {  # snap <file>
 
 while IFS= read -r f; do
   snap "$f"
-done < <(find examples lib apps src freestanding -name '*.coil' 2>/dev/null | sort)
+done < <(find examples lib apps freestanding -name '*.coil' 2>/dev/null | sort)
 
 # curated edge fixtures (module + import :as + :use [names] + export)
 for f in "$LOAD"/fixtures/*.coil; do

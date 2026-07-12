@@ -41,7 +41,7 @@ while IFS= read -r f; do
     rm -f "$exp"
     ex=$((ex+1))
   fi
-done < <(find examples lib apps src freestanding -name '*.coil' 2>/dev/null | sort)
+done < <(find examples lib apps freestanding -name '*.coil' 2>/dev/null | sort)
 
 # (b) curated multi-module RAW fixtures, fed to dump-resolved directly.
 for f in "$RES"/fixtures/*.coil; do

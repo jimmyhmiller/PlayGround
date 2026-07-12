@@ -295,11 +295,14 @@ impl Shared {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     }
 
-    fn register(&self) {
+    /// Enter as an active mutator (a thread that touches the shared heap). Also
+    /// used by the JIT tier's worker threads (in the `livetype` crate), so it is
+    /// public. Pair with [`Shared::unregister`].
+    pub fn register(&self) {
         self.gc.lock().unwrap().active += 1;
     }
 
-    fn unregister(&self, tid: usize) {
+    pub fn unregister(&self, tid: usize) {
         let mut c = self.gc.lock().unwrap();
         c.active -= 1;
         c.roots.remove(&tid);
@@ -309,22 +312,60 @@ impl Shared {
     }
 
     /// A safepoint: if a collection is pending, publish this actor's live roots
-    /// (every reference across its whole call stack) and park until the
-    /// collector releases us. Called every instruction, so preemption latency is
-    /// one step.
+    /// and park until the collector releases us. Called every instruction, so
+    /// preemption latency is one step.
     fn safepoint(&self, tid: usize, frames: &[Frame]) {
         if !self.gc_pending.load(Ordering::Acquire) {
             return;
         }
-        let live = frame_roots(frames);
+        self.safepoint_roots(tid, frame_roots(frames));
+    }
+
+    /// The root-carrying core of a safepoint, for callers that compute their own
+    /// root set — the JIT worker threads read theirs out of native frame slots.
+    /// Assumes a collection is pending.
+    pub fn safepoint_roots(&self, tid: usize, roots: Vec<ObjectId>) {
         let mut c = self.gc.lock().unwrap();
-        c.roots.insert(tid, live);
+        c.roots.insert(tid, roots);
         c.parked += 1;
         let generation = c.generation;
         self.gc_cv.notify_all();
         while c.generation == generation {
             c = self.gc_cv.wait(c).unwrap();
         }
+    }
+
+    /// Is a collection pending? JIT workers poll this to decide whether to park.
+    pub fn gc_pending(&self) -> bool {
+        self.gc_pending.load(Ordering::Acquire)
+    }
+
+    // ── JIT bridge (called by the `livetype` crate's externs/driver) ─────────
+    /// Allocate at the current schema (thread-safe) — the JIT's `lt_new`.
+    pub fn jit_new(
+        &self,
+        type_id: DefId,
+        supplied: &[(FieldId, Value)],
+    ) -> Result<ObjectId, Condition> {
+        let world = self.world.read().unwrap();
+        self.heap.new_object(type_id, supplied, &world)
+    }
+    /// Migrate + read a field (thread-safe) — the JIT's `lt_get_field`.
+    pub fn jit_get_field(&self, id: ObjectId, field: FieldId) -> Result<Value, Condition> {
+        let world = self.world.read().unwrap();
+        self.heap.get_field(id, field, &world)
+    }
+    /// Commit an observation — the JIT's `lt_emit`.
+    pub fn jit_emit(&self, value: Value) {
+        self.emit(value);
+    }
+    pub fn value_ok(&self, value: &Value, expected: &Type) -> bool {
+        self.heap.value_ok(value, expected)
+    }
+    /// Run a closure against a read guard on the world — for the JIT driver's
+    /// function/version lookups.
+    pub fn with_world<R>(&self, f: impl FnOnce(&World) -> R) -> R {
+        f(&self.world.read().unwrap())
     }
 
     /// Preemptive stop-the-world collection: request a pause, wait until every

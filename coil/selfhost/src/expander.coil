@@ -302,6 +302,35 @@
               (match (check-program a sub (mut checkls))
                 (Err [d] (Err [i64 Diag] d))
                 (Ok [checked] (run-expand (mut s) quals wanted checked a))))))))))
+; ── whole-program CHECKERS ───────────────────────────────────────────────────
+; `(checker FN)` registers FN — a [(prog Code)] -> Code function — to be run once,
+; after expansion, over the WHOLE program (all top-level forms as one Code list).
+; A checker VETOES compilation by calling `error`; its returned Code is ignored.
+; FN is Code-signed so the existing macro machinery already type-checks it; we just
+; invoke it here via expand-macro with the program as its single argument.
+(defn is-checker-form [(f (ptr Sexp))] (-> bool)
+  (and (icmp-eq (sx-tag (load f)) 6)
+       (let [it (sx-items (load f))]
+         (and (icmp-eq (sx-len it) 2)
+              (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "checker"))))))
+(defn run-checkers [(checkers (ptr (ArrayList (slice u8)))) (checked (ptr Program)) (forms (ptr (ArrayList TaggedForm)))
+                    (allfns (ptr SBox)) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum))
+                    (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry))) (a (ptr Allocator))] (-> (Option Diag))
+  (let [nc (al-len [(slice u8)] (load checkers))]
+    (if (icmp-eq nc 0) (None [Diag])
+      (let [nf (al-len [TaggedForm] (load forms)) (mut items) (al-new [Sexp] a) (mut i) 0]
+        (loop (if (icmp-ge (load i) nf) (break)
+          (do (al-push! (mut items) (load (field (al-elem [TaggedForm] forms (load i)) form)))
+              (store! i (iadd (load i) 1)))))
+        (let [proglist (mk-sexp (KList (box-al [Sexp] a (load items))) -1 -1) (mut margs) (al-new [Sexp] a)]
+          (al-push! (mut margs) proglist)
+          (let [(mut j) 0 (mut err) (None [Diag]) margsb (box-al [Sexp] a (load margs))]
+            (loop (if (or (diag-some? (load err)) (icmp-ge (load j) nc)) (break)
+              (do (match (expand-macro checked (al-get [(slice u8)] (load checkers) (load j)) margsb (field allfns items) (field gs items) (field gu items) impb expb a)
+                    (Err [d] (do (store! err (Some d)) 0))
+                    (Ok [_] 0))
+                  (store! j (iadd (load j) 1)))))
+            (load err)))))))
 (defn run-expand [(s (mut LS)) (macros (ptr (ArrayList (slice u8)))) (comptime (ptr (ArrayList (slice u8)))) (checked (ptr Program)) (a (ptr Allocator))] (-> (Result i64 Diag))
   (let [out-forms (box-al [TaggedForm] a (load (field s out))) nforms (al-len [TaggedForm] (load out-forms))
         impb (unwrap-ptr [(ArrayList ImpEntry)] (create [(ArrayList ImpEntry)] a))
@@ -310,6 +339,7 @@
         allfns (all-defn-names out-forms a)
         gs (unwrap-ptr [SBoxStruct] (create [SBoxStruct] a)) gu (unwrap-ptr [SBoxSum] (create [SBoxSum] a))
         result (unwrap-ptr [SBoxTF] (create [SBoxTF] a))
+        (mut checkers) (al-new [(slice u8)] a)
         (mut i) 0 (mut errf) (None [Diag]) (mut depthv) 0]
     (store! impb (load (field s imports))) (store! expb (load (field s exports)))
     (store! (field gs items) (al-new [StructDef] a)) (store! (field gu items) (al-new [SumDef] a))
@@ -319,14 +349,22 @@
     (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) nforms)) (break)
       (do (let [tf (alloc-stack TaggedForm)] (store! tf (al-get [TaggedForm] (load out-forms) (load i)))
             (let [module (load (field tf module))]
-              (match (expand-top-form (field tf form) module env (field allfns items) (field gs items) (field gu items) (mut depthv) (mut s))
-                (Err [d] (do (store! errf (Some d)) 0))
-                (Ok [outf]
-                  (do-produced (box-sexp a outf) module result gs gu allfns a (mut errf))))))
+              (if (is-checker-form (field tf form))
+                  (match (resolve-macro (sx-sval (sx-at (sx-items (load (field tf form))) 1)) module macros impb expb a)
+                    (Some [q] (do (al-push! (mut checkers) q) 0))
+                    (None [] (do (store! errf (Some (derr "checker: FN must be a [(prog Code)] -> Code function in scope"))) 0)))
+                (match (expand-top-form (field tf form) module env (field allfns items) (field gs items) (field gu items) (mut depthv) (mut s))
+                  (Err [d] (do (store! errf (Some d)) 0))
+                  (Ok [outf]
+                    (do-produced (box-sexp a outf) module result gs gu allfns a (mut errf)))))))
           (store! i (iadd (load i) 1)))))
     (match (load errf)
       (Some [d] (Err [i64 Diag] d))
-      (None [] (do (store! (field s out) (load (field result items))) (Ok [i64 Diag] 0))))))
+      (None []
+        (do (store! (field s out) (load (field result items)))
+            (match (run-checkers (mut checkers) checked (field result items) allfns gs gu impb expb a)
+              (Some [d] (Err [i64 Diag] d))
+              (None [] (Ok [i64 Diag] 0))))))))
 (defn do-produced [(outf (ptr Sexp)) (module (Option (slice u8))) (result (ptr SBoxTF)) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum)) (allfns (ptr SBox)) (a (ptr Allocator)) (errf (mut (Option Diag)))] (-> i64)
   (let [(mut produced) (al-new [Sexp] a)]
     (if (and (icmp-eq (sx-tag (load outf)) 6)

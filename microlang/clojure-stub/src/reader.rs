@@ -147,7 +147,9 @@ fn tokenize(src: &str) -> Vec<Tok> {
                 let start = i;
                 while i < cs.len()
                     && !cs[i].is_whitespace()
-                    && !matches!(cs[i], '(' | ')' | '[' | ']' | '{' | '}' | '\'' | '"' | ';' | ',' | '`' | '~' | '^')
+                    // `'` is allowed INSIDE a symbol (`+'`, `inc'`) — a LEADING quote
+                    // is handled by the `'` token case before this branch is reached.
+                    && !matches!(cs[i], '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';' | ',' | '`' | '~' | '^')
                 {
                     i += 1;
                 }

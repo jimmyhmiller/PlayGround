@@ -1,0 +1,5 @@
+(module app)
+(import "policy.coil" :use *)
+(checker no-forbidden-op)
+(defn compute [(x :i64)] (-> :i64) (iadd x 1))
+(defn main [] (-> :i64) (compute 41))

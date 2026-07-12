@@ -126,74 +126,122 @@ pub const OUT_YIELD: i64 = 3;
 pub const OUT_TYPE_ERROR: i64 = 4;
 
 // ---------------------------------------------------------------------------
-// Runtime externs. Native code calls these for the ops that touch runtime
-// state; each is a thin bridge to a shared `Runtime` helper, so the JIT and the
-// interpreter cannot diverge on allocation, migration, or effects.
+// The JIT host. The runtime side of a JIT step — allocation, migration, and
+// effects — behind one type so there is a single set of externs for both
+// executors: `Single` wraps the single-threaded `&mut Runtime`, `Concurrent`
+// wraps the thread-safe `&Shared` used by JIT worker threads. Each is a thin
+// bridge to the *same* `Heap`/`World` operations the interpreter uses, so the
+// JIT cannot diverge on them. A trapped condition is stashed per call (per
+// thread) for the driver to pick up on an `OUT_CONDITION`.
 // ---------------------------------------------------------------------------
 
+pub enum JitHost<'a> {
+    Single { rt: &'a mut Runtime, pending: Option<Condition> },
+    Concurrent { shared: &'a Shared, pending: Option<Condition> },
+}
+
+impl<'a> JitHost<'a> {
+    fn single(rt: &'a mut Runtime) -> JitHost<'a> {
+        JitHost::Single { rt, pending: None }
+    }
+    fn concurrent(shared: &'a Shared) -> JitHost<'a> {
+        JitHost::Concurrent { shared, pending: None }
+    }
+    fn new_object(&mut self, type_id: DefId, supplied: &[(FieldId, Value)]) -> Result<ObjectId, Condition> {
+        match self {
+            JitHost::Single { rt, .. } => rt.jit_new(type_id, supplied),
+            JitHost::Concurrent { shared, .. } => shared.jit_new(type_id, supplied),
+        }
+    }
+    fn get_field(&mut self, id: ObjectId, field: FieldId) -> Result<Value, Condition> {
+        match self {
+            JitHost::Single { rt, .. } => rt.jit_get_field(id, field),
+            JitHost::Concurrent { shared, .. } => shared.jit_get_field(id, field),
+        }
+    }
+    fn emit(&mut self, value: Value) {
+        match self {
+            JitHost::Single { rt, .. } => rt.jit_emit(value),
+            JitHost::Concurrent { shared, .. } => shared.jit_emit(value),
+        }
+    }
+    fn set_pending(&mut self, condition: Condition) {
+        match self {
+            JitHost::Single { pending, .. } | JitHost::Concurrent { pending, .. } => {
+                *pending = Some(condition)
+            }
+        }
+    }
+    fn take_pending(&mut self) -> Option<Condition> {
+        match self {
+            JitHost::Single { pending, .. } | JitHost::Concurrent { pending, .. } => pending.take(),
+        }
+    }
+}
+
 /// Returns 0 on success (writes `*out_objid`), 1 when construction trips the
-/// soundness check (the condition is stashed in `rt.pending_condition`).
+/// soundness check (the condition is stashed in the host).
 ///
 /// # Safety
-/// `rt` is a live `*mut Runtime`, `fields` points to `n` `SuppliedField`s,
+/// `host` is a live `*mut JitHost`, `fields` points to `n` `SuppliedField`s,
 /// `out_objid` is a writable `*mut i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lt_new(
-    rt: *mut Runtime,
+    host: *mut JitHost,
     type_id: i64,
     fields: *const SuppliedField,
     n: i64,
     out_objid: *mut i64,
 ) -> i64 {
-    let rt = unsafe { &mut *rt };
+    let host = unsafe { &mut *host };
     let mut supplied = Vec::with_capacity(n as usize);
     for i in 0..n as isize {
         let f = unsafe { &*fields.offset(i) };
         supplied.push((f.field_id as FieldId, f.value.to_value()));
     }
-    match rt.jit_new(type_id as DefId, &supplied) {
+    match host.new_object(type_id as DefId, &supplied) {
         Ok(id) => {
             unsafe { *out_objid = id as i64 };
             0
         }
         Err(condition) => {
-            rt.pending_condition = Some(condition);
+            host.set_pending(condition);
             1
         }
     }
 }
 
 /// Returns 0 on success (writes `*out`), 1 when a migration barrier trips (the
-/// condition is stashed in `rt.pending_condition` for the driver).
+/// condition is stashed in the host for the driver).
 ///
 /// # Safety
-/// `rt` is a live `*mut Runtime`, `out` a writable `*mut RawSlot`.
+/// `host` is a live `*mut JitHost`, `out` a writable `*mut RawSlot`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lt_get_field(
-    rt: *mut Runtime,
+    host: *mut JitHost,
     objid: i64,
     field: i64,
     out: *mut RawSlot,
 ) -> i64 {
-    let rt = unsafe { &mut *rt };
-    match rt.jit_get_field(objid as ObjectId, field as FieldId) {
+    let host = unsafe { &mut *host };
+    match host.get_field(objid as ObjectId, field as FieldId) {
         Ok(value) => {
             unsafe { *out = RawSlot::from_value(&value) };
             0
         }
         Err(condition) => {
-            rt.pending_condition = Some(condition);
+            host.set_pending(condition);
             1
         }
     }
 }
 
 /// # Safety
-/// `rt` is a live `*mut Runtime`, `value` a readable `*const RawSlot`.
+/// `host` is a live `*mut JitHost`, `value` a readable `*const RawSlot`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lt_emit(rt: *mut Runtime, value: *const RawSlot) {
-    let rt = unsafe { &mut *rt };
-    rt.jit_emit(unsafe { *value }.to_value());
+pub unsafe extern "C" fn lt_emit(host: *mut JitHost, value: *const RawSlot) {
+    let host = unsafe { &mut *host };
+    host.emit(unsafe { *value }.to_value());
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +264,7 @@ pub(crate) struct Compiled<'ctx> {
     addrs: HashMap<(DefId, Version), usize>,
 }
 
-type StepFn = unsafe extern "C" fn(*mut RawFrame, *mut Runtime) -> i64;
+type StepFn = unsafe extern "C" fn(*mut RawFrame, *mut JitHost) -> i64;
 
 impl<'ctx> Compiled<'ctx> {
     fn step_of(&self, func: DefId, version: Version) -> Option<StepFn> {
@@ -224,6 +272,20 @@ impl<'ctx> Compiled<'ctx> {
             .get(&(func, version))
             .map(|addr| unsafe { std::mem::transmute::<usize, StepFn>(*addr) })
     }
+
+    /// A `Send` copy of the compiled addresses, for handing to worker threads.
+    /// The addresses are raw code pointers — valid to call from any thread as
+    /// long as this `Compiled` (which owns the engine backing them) outlives the
+    /// threads. The concurrent runner guarantees that by joining before drop.
+    fn addr_map(&self) -> HashMap<(DefId, Version), usize> {
+        self.addrs.clone()
+    }
+}
+
+/// Transmute a compiled step address to a callable. See [`Compiled::addr_map`]
+/// for the lifetime guarantee that makes this safe.
+fn step_at(addr: usize) -> StepFn {
+    unsafe { std::mem::transmute::<usize, StepFn>(addr) }
 }
 
 struct Codegen<'ctx> {
@@ -694,7 +756,7 @@ fn call_result(cs: inkwell::values::CallSiteValue<'_>) -> inkwell::values::Basic
 
 /// Compile every Ready function version in the world (old pinned versions
 /// included) into `step` functions and wire the runtime externs.
-pub(crate) fn compile<'ctx>(ctx: &'ctx Context, rt: &Runtime) -> Result<Compiled<'ctx>, JitError> {
+pub(crate) fn compile<'ctx>(ctx: &'ctx Context, world: &World) -> Result<Compiled<'ctx>, JitError> {
     let cg = Codegen {
         ctx,
         module: ctx.create_module("livetype"),
@@ -702,8 +764,7 @@ pub(crate) fn compile<'ctx>(ctx: &'ctx Context, rt: &Runtime) -> Result<Compiled
     };
     cg.declare_externs();
 
-    let ready: Vec<&Function> = rt
-        .world
+    let ready: Vec<&Function> = world
         .functions
         .values()
         .filter_map(|state| match state {
@@ -803,14 +864,20 @@ impl JitActor {
     /// Spawn an actor at `func`'s current version, mirroring [`Runtime::spawn`]:
     /// entering a broken entry is a `BrokenFunction` condition.
     pub fn spawn(rt: &Runtime, id: ActorId, func: DefId, args: Vec<Value>) -> Result<JitActor, Condition> {
-        let version = *rt.world.current_functions.get(&func).ok_or_else(|| {
+        Self::spawn_in(&rt.world, id, func, args)
+    }
+
+    /// Spawn from a bare [`World`] — used by the concurrent JIT runner, which
+    /// only has the shared world (behind its lock), not a `Runtime`.
+    pub fn spawn_in(world: &World, id: ActorId, func: DefId, args: Vec<Value>) -> Result<JitActor, Condition> {
+        let version = *world.current_functions.get(&func).ok_or_else(|| {
             Condition::BrokenFunction {
                 function: func,
                 diagnostics: vec!["unknown function".into()],
             }
         })?;
-        let FunctionState::Ready(code) = &rt.world.functions[&(func, version)] else {
-            let FunctionState::Broken { diagnostics, .. } = &rt.world.functions[&(func, version)]
+        let FunctionState::Ready(code) = &world.functions[&(func, version)] else {
+            let FunctionState::Broken { diagnostics, .. } = &world.functions[&(func, version)]
             else {
                 unreachable!()
             };
@@ -884,7 +951,7 @@ pub fn drive(rt: &mut Runtime, actor: &mut JitActor, stop_on_yield: bool) -> Res
     }
 
     let ctx = Context::create();
-    let compiled = compile(&ctx, rt)?;
+    let compiled = compile(&ctx, &rt.world)?;
 
     while matches!(actor.status, ActorStatus::Runnable) {
         let frame = actor.frames.last_mut().unwrap();
@@ -903,11 +970,14 @@ pub fn drive(rt: &mut Runtime, actor: &mut JitActor, stop_on_yield: bool) -> Res
             scratch: RawSlot::EMPTY,
             return_reg: frame.return_to.map_or(-1, |r| r as i64),
         };
-        // Reborrow `rt` fresh each iteration: intervening `&mut rt` uses below
-        // (handle_call, pending_condition) would invalidate a pointer derived
-        // once before the loop, which the optimizer is entitled to exploit.
-        let rt_ptr: *mut Runtime = rt as *mut Runtime;
-        let outcome = unsafe { step(&mut raw, rt_ptr) };
+        // Build a fresh host (borrowing `rt`) for just this step call, then
+        // release the borrow so the outcome dispatch below can use `rt` again.
+        // A trap is stashed in the host and picked up on `OUT_CONDITION`.
+        let (outcome, pending) = {
+            let mut host = JitHost::single(rt);
+            let out = unsafe { step(&mut raw, &mut host as *mut JitHost) };
+            (out, host.take_pending())
+        };
         frame.pc = raw.pc as usize;
 
         match outcome {
@@ -938,10 +1008,8 @@ pub fn drive(rt: &mut Runtime, actor: &mut JitActor, stop_on_yield: bool) -> Res
             }
             OUT_CALL => handle_call(rt, actor)?,
             OUT_CONDITION => {
-                let condition = rt
-                    .pending_condition
-                    .take()
-                    .expect("CONDITION outcome without a stashed condition");
+                let condition =
+                    pending.expect("CONDITION outcome without a stashed condition");
                 actor.status = ActorStatus::Paused(condition);
             }
             OUT_TYPE_ERROR => {
@@ -1107,6 +1175,244 @@ fn handle_call(rt: &mut Runtime, actor: &mut JitActor) -> Result<(), JitError> {
         }
     }
     let mut regs = vec![RawSlot::EMPTY; code.registers];
+    for (slot, value) in arg_slots.into_iter().enumerate() {
+        regs[slot] = value;
+    }
+    actor.frames.last_mut().unwrap().pc = call_pc + 1;
+    actor.frames.push(JitFrame {
+        func_id: callee,
+        version,
+        pc: 0,
+        regs: regs.into_boxed_slice(),
+        return_to: Some(dst),
+    });
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The JIT under threads. Worker threads execute the same compiled `step`
+// functions over the thread-safe `Shared` runtime — the JIT counterpart of the
+// interpreter's `Shared::run_threads`. The runtime still owns continuation
+// semantics per thread; only the pure/effect ops run as native code. Respects
+// the LLVM/Miri boundary: `livetype-core` never links LLVM — this crate owns
+// the threads and the compiled code and calls *into* core's `Shared`.
+// ---------------------------------------------------------------------------
+
+use std::sync::Arc;
+
+/// Run each `(function, args)` as an actor on its own OS thread, executing
+/// JIT-compiled `step` functions over one shared runtime. Compiles once on this
+/// thread; the worker threads share the resolved code addresses (raw pointers,
+/// valid to call from any thread) while the engine is kept alive here until they
+/// join. Returns each actor's [`Outcome`] in order.
+pub fn run_jit_threads(
+    shared: &Arc<Shared>,
+    actors: Vec<(DefId, Vec<Value>)>,
+) -> Result<Vec<Outcome>, JitError> {
+    let ctx = Context::create();
+    let compiled = shared.with_world(|w| compile(&ctx, w))?;
+    let addrs = Arc::new(compiled.addr_map());
+    // Mailboxes up front so a Send can't race its recipient into existence.
+    for tid in 0..actors.len() {
+        shared.ensure_mailbox(tid);
+    }
+    let handles: Vec<_> = actors
+        .into_iter()
+        .enumerate()
+        .map(|(tid, (func, args))| {
+            let shared = Arc::clone(shared);
+            let addrs = Arc::clone(&addrs);
+            std::thread::spawn(move || concurrent_actor(&shared, tid, &addrs, func, args))
+        })
+        .collect();
+    // Join before `compiled`/`ctx` drop, so the code the workers call stays live.
+    Ok(handles.into_iter().map(|h| h.join().unwrap()).collect())
+}
+
+/// One JIT worker: spawn the actor, register as a mutator, drive it to a stop.
+fn concurrent_actor(
+    shared: &Arc<Shared>,
+    tid: usize,
+    addrs: &HashMap<(DefId, Version), usize>,
+    func: DefId,
+    args: Vec<Value>,
+) -> Outcome {
+    struct Active<'a>(&'a Shared, usize);
+    impl Drop for Active<'_> {
+        fn drop(&mut self) {
+            self.0.unregister(self.1);
+        }
+    }
+    shared.register();
+    let _active = Active(shared, tid);
+
+    let mut actor = match shared.with_world(|w| JitActor::spawn_in(w, tid as ActorId, func, args)) {
+        Ok(a) => a,
+        Err(c) => return Outcome::Paused(c),
+    };
+    if let Err(e) = concurrent_drive(shared, tid, addrs, &mut actor) {
+        // A driver-level fault (e.g. an edit introduced a version with no
+        // compiled code) surfaces as a clear trap, never a silent stall.
+        return Outcome::Paused(Condition::RuntimeTypeError {
+            function: 0,
+            pc: 0,
+            message: e.0,
+        });
+    }
+    match actor.status {
+        ActorStatus::Complete(v) => Outcome::Complete(v),
+        ActorStatus::Paused(c) => Outcome::Paused(c),
+        ActorStatus::Runnable => Outcome::Paused(Condition::RuntimeTypeError {
+            function: 0,
+            pc: 0,
+            message: "actor left runnable".into(),
+        }),
+    }
+}
+
+/// Drive one JIT actor over `Shared` to completion or a pause. Mirrors [`drive`]
+/// but reads the world under the shared read lock and hits a GC safepoint each
+/// step (publishing its native frame roots) so a stop-the-world collection can
+/// pause it. `Yield` never stops here — worker threads run to completion.
+fn concurrent_drive(
+    shared: &Arc<Shared>,
+    tid: usize,
+    addrs: &HashMap<(DefId, Version), usize>,
+    actor: &mut JitActor,
+) -> Result<(), JitError> {
+    while matches!(actor.status, ActorStatus::Runnable) {
+        if shared.gc_pending() {
+            shared.safepoint_roots(tid, actor.roots());
+        }
+        let frame = actor.frames.last_mut().unwrap();
+        let Some(&addr) = addrs.get(&(frame.func_id, frame.version)) else {
+            return Err(JitError(format!(
+                "no compiled step for {}@{} (a mid-run edit would need recompile)",
+                frame.func_id, frame.version.0
+            )));
+        };
+        let step = step_at(addr);
+        let mut raw = RawFrame {
+            func_id: frame.func_id as i64,
+            version: frame.version.0 as i64,
+            pc: frame.pc as i64,
+            n_regs: frame.regs.len() as i64,
+            regs: frame.regs.as_mut_ptr(),
+            scratch: RawSlot::EMPTY,
+            return_reg: frame.return_to.map_or(-1, |r| r as i64),
+        };
+        let (outcome, pending) = {
+            let mut host = JitHost::concurrent(shared);
+            let out = unsafe { step(&mut raw, &mut host as *mut JitHost) };
+            (out, host.take_pending())
+        };
+        frame.pc = raw.pc as usize;
+
+        match outcome {
+            OUT_RETURN => {
+                let result = raw.scratch.to_value();
+                let (fid, ver, ret_pc) = {
+                    let f = actor.frames.last().unwrap();
+                    (f.func_id, f.version, f.pc)
+                };
+                let result_ty = shared.with_world(|w| match &w.functions[&(fid, ver)] {
+                    FunctionState::Ready(f) => Some(f.result.clone()),
+                    _ => None,
+                });
+                if let Some(ty) = result_ty {
+                    if !shared.value_ok(&result, &ty) {
+                        actor.status = ActorStatus::Paused(Condition::RuntimeTypeError {
+                            function: fid,
+                            pc: ret_pc,
+                            message: format!(
+                                "return value: expected {ty:?}, found a value of another type"
+                            ),
+                        });
+                        continue;
+                    }
+                }
+                let done = actor.frames.pop().unwrap();
+                match done.return_to {
+                    Some(reg) => actor.frames.last_mut().unwrap().regs[reg] = raw.scratch,
+                    None => actor.status = ActorStatus::Complete(result),
+                }
+            }
+            OUT_CALL => handle_call_concurrent(shared, actor)?,
+            OUT_CONDITION => {
+                actor.status = ActorStatus::Paused(
+                    pending.expect("CONDITION outcome without a stashed condition"),
+                );
+            }
+            OUT_TYPE_ERROR => {
+                let (fid, ver, trap_pc) = {
+                    let f = actor.frames.last().unwrap();
+                    (f.func_id, f.version, f.pc)
+                };
+                let instruction = shared.with_world(|w| match &w.functions[&(fid, ver)] {
+                    FunctionState::Ready(f) => Some(f.code[trap_pc].clone()),
+                    _ => None,
+                });
+                let Some(instruction) = instruction else {
+                    return Err(JitError("type-error frame pins non-ready code".into()));
+                };
+                actor.status = ActorStatus::Paused(operand_type_error(fid, trap_pc, &instruction));
+            }
+            OUT_YIELD => {} // run to completion
+            other => return Err(JitError(format!("unknown step outcome {other}"))),
+        }
+    }
+    Ok(())
+}
+
+/// A `Call` hand-back on the concurrent tier — mirrors [`handle_call`], reading
+/// the world under the shared read lock.
+fn handle_call_concurrent(shared: &Arc<Shared>, actor: &mut JitActor) -> Result<(), JitError> {
+    let (caller_id, caller_ver, call_pc) = {
+        let f = actor.frames.last().unwrap();
+        (f.func_id, f.version, f.pc)
+    };
+    let call = shared.with_world(|w| match &w.functions[&(caller_id, caller_ver)] {
+        FunctionState::Ready(caller) => Ok(caller.code[call_pc].clone()),
+        _ => Err(JitError("caller frame pins non-ready code".into())),
+    })?;
+    let Instruction::Call { dst, function: callee, args } = call else {
+        return Err(JitError("CALL outcome at a non-call pc".into()));
+    };
+
+    // Resolve the callee's current version + params under one guard.
+    let resolved = shared.with_world(|w| match w.current_functions.get(&callee) {
+        None => Err(vec!["unknown function".to_string()]),
+        Some(v) => match &w.functions[&(callee, *v)] {
+            FunctionState::Ready(code) => Ok((*v, code.params.clone(), code.registers)),
+            FunctionState::Broken { diagnostics, .. } => Err(diagnostics.clone()),
+        },
+    });
+    let (version, params, registers) = match resolved {
+        Ok(x) => x,
+        Err(diagnostics) => {
+            actor.status = ActorStatus::Paused(Condition::BrokenFunction {
+                function: callee,
+                diagnostics,
+            });
+            return Ok(());
+        }
+    };
+
+    let arg_slots: Vec<RawSlot> = {
+        let caller_frame = actor.frames.last().unwrap();
+        args.iter().map(|r| caller_frame.regs[*r]).collect()
+    };
+    for (slot, expected) in arg_slots.iter().zip(&params) {
+        if !shared.value_ok(&slot.to_value(), expected) {
+            actor.status = ActorStatus::Paused(Condition::RuntimeTypeError {
+                function: callee,
+                pc: call_pc,
+                message: "call argument: expected a value of another type".into(),
+            });
+            return Ok(());
+        }
+    }
+    let mut regs = vec![RawSlot::EMPTY; registers];
     for (slot, value) in arg_slots.into_iter().enumerate() {
         regs[slot] = value;
     }

@@ -108,3 +108,43 @@ fn vs_edge(@builtin(vertex_index) vi: u32) -> EdgeVsOut {
 fn fs_edge(in: EdgeVsOut) -> @location(0) vec4<f32> {
     return in.color;
 }
+
+// ---------------- Picking ----------------
+// Renders each node's id (+1) into an R32Uint target; 0 means "no node".
+struct PickOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) id: u32,
+};
+
+@vertex
+fn vs_pick(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> PickOut {
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
+    );
+    let corner = corners[vi];
+    let world = positions[inst];
+    // Match node sizing, but enlarge the pick radius a little so small nodes are
+    // easy to click.
+    let r = clamp(
+        params.base_radius_px * pow(max(sizes[inst], 0.0001), params.size_gamma),
+        params.min_radius_px,
+        params.max_radius_px,
+    ) + 2.0;
+    let radius_ndc = vec2<f32>(r * 2.0 / cam.viewport.x, r * 2.0 / cam.viewport.y);
+    let center_ndc = (world - cam.center) * cam.scale;
+    var out: PickOut;
+    out.clip = vec4<f32>(center_ndc + corner * radius_ndc, 0.0, 1.0);
+    out.uv = corner;
+    out.id = inst + 1u;
+    return out;
+}
+
+@fragment
+fn fs_pick(in: PickOut) -> @location(0) u32 {
+    if (length(in.uv) > 1.0) {
+        discard;
+    }
+    return in.id;
+}

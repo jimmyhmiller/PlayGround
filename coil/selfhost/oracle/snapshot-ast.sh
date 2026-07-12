@@ -30,7 +30,7 @@ while IFS= read -r f; do
     rm -f "$exp"
     ex=$((ex+1))
   fi
-done < <(find examples lib apps src freestanding -name '*.coil' 2>/dev/null | sort)
+done < <(find examples lib apps freestanding -name '*.coil' 2>/dev/null | sort)
 
 # curated negative/edge fixtures (hand-written core forms with parser errors),
 # fed to dump-ast directly (they are already core forms).

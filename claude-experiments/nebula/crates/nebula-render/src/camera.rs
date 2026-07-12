@@ -49,6 +49,12 @@ impl Camera2D {
         self.center -= glam::vec2(delta.x, -delta.y) / self.zoom;
     }
 
+    /// World point -> screen pixels (origin top-left, y down).
+    pub fn world_to_screen(&self, world: glam::Vec2) -> glam::Vec2 {
+        let offset = (world - self.center) * self.zoom;
+        self.viewport * 0.5 + glam::vec2(offset.x, -offset.y)
+    }
+
     pub fn screen_to_world(&self, screen: glam::Vec2) -> glam::Vec2 {
         // screen: pixels, origin top-left, y down.
         let centered = screen - self.viewport * 0.5;

@@ -14,7 +14,7 @@ rm -rf "$REF"; mkdir -p "$REF"
 
 # Corpus = every real .coil file in the tree (reader is semantics-agnostic, so
 # all of them are valid inputs) plus the curated negative/edge fixtures.
-{ find examples lib apps src freestanding -name '*.coil' 2>/dev/null
+{ find examples lib apps freestanding -name '*.coil' 2>/dev/null
   find selfhost/oracle/negative -name '*.coil' 2>/dev/null
 } | sort > "$LIST"
 

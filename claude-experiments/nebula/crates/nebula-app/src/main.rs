@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use nebula_core::{generate, io, Graph, Pos};
+use nebula_core::{formats, generate, Graph, Pos};
 use nebula_layout::{Layout, RandomLayout};
 use nebula_render::{App, ColorMode, LayoutSettings, RunOptions};
 
@@ -51,6 +51,8 @@ struct Args {
     paused: bool,
     no_edges: bool,
     no_nodes: bool,
+    select: Option<u32>,
+    help_overlay: bool,
 }
 
 enum Gen {
@@ -78,6 +80,7 @@ fn main() -> anyhow::Result<()> {
 
     // --- Build the graph ---------------------------------------------------
     let t0 = Instant::now();
+    let mut node_labels: Option<Vec<String>> = None;
     let (mut graph, what): (Graph, String) = match &args.generator {
         Gen::Grid(w, h) => (generate::grid_2d(*w, *h), format!("grid {w}x{h}")),
         Gen::Random(n, m) => (
@@ -97,9 +100,15 @@ fn main() -> anyhow::Result<()> {
             format!("geometric n={n} r={r}"),
         ),
         Gen::File(path) => {
-            let (g, _) = io::load_edge_list(path)?;
-            let label = format!("file {path}");
-            (g, label)
+            let loaded = formats::load(path)?;
+            log::info!("detected format: {}", loaded.format);
+            let label = format!(
+                "{} [{}]",
+                std::path::Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path),
+                loaded.format
+            );
+            node_labels = Some(loaded.labels);
+            (loaded.graph, label)
         }
     };
     log::info!(
@@ -140,9 +149,11 @@ fn main() -> anyhow::Result<()> {
         color_mode: args.color,
         draw_edges: !args.no_edges,
         draw_nodes: !args.no_nodes,
+        select: args.select,
+        show_help: args.help_overlay,
     };
 
-    let app = App::new(graph, positions, opts);
+    let app = App::with_labels(graph, positions, opts, node_labels);
     app.run()
 }
 
@@ -159,6 +170,8 @@ fn parse_args() -> Result<Args, String> {
     let mut paused = false;
     let mut no_edges = false;
     let mut no_nodes = false;
+    let mut select = None;
+    let mut help_overlay = false;
 
     fn next_u64(it: &mut impl Iterator<Item = String>, name: &str) -> Result<u64, String> {
         it.next()
@@ -208,6 +221,8 @@ fn parse_args() -> Result<Args, String> {
             "--paused" => paused = true,
             "--no-edges" => no_edges = true,
             "--no-nodes" => no_nodes = true,
+            "--select" => select = Some(next_u32(&mut it, "--select")?),
+            "--help-overlay" => help_overlay = true,
             "--frames" => frames = Some(next_u64(&mut it, "--frames")?),
             "--screenshot" => screenshot = Some(it.next().ok_or("--screenshot needs a path")?),
             "--color" => {
@@ -238,5 +253,7 @@ fn parse_args() -> Result<Args, String> {
         paused,
         no_edges,
         no_nodes,
+        select,
+        help_overlay,
     })
 }

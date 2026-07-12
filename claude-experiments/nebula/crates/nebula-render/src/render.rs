@@ -45,6 +45,7 @@ pub struct Renderer {
     graph_bg: wgpu::BindGroup,
     node_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
+    pick_pipeline: wgpu::RenderPipeline,
     num_nodes: u32,
     num_edges: u32,
     pub draw_edges: bool,
@@ -205,6 +206,35 @@ impl Renderer {
             cache: None,
         });
 
+        let pick_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("pick_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_pick"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_pick"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         Renderer {
             camera_buf,
             params_buf,
@@ -212,6 +242,7 @@ impl Renderer {
             graph_bg,
             node_pipeline,
             edge_pipeline,
+            pick_pipeline,
             num_nodes: graph.num_nodes as u32,
             num_edges: graph.num_edges as u32,
             draw_edges: true,
@@ -225,6 +256,105 @@ impl Renderer {
 
     pub fn update_params(&self, queue: &wgpu::Queue, params: &RenderParams) {
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(params));
+    }
+
+    /// Pick the node under a cursor pixel by rendering node ids to an R32Uint
+    /// target and reading back the single texel. The camera uniform must already
+    /// reflect the current view (the app updates it every frame). Returns the
+    /// node index, or None for empty space.
+    pub fn pick(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        cursor_x: u32,
+        cursor_y: u32,
+    ) -> Option<u32> {
+        if self.num_nodes == 0 || width == 0 || height == 0 {
+            return None;
+        }
+        let cx = cursor_x.min(width - 1);
+        let cy = cursor_y.min(height - 1);
+
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pick_tex"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Uint,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("pick") });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("pick_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_bind_group(0, &self.view_bg, &[]);
+            pass.set_bind_group(1, &self.graph_bg, &[]);
+            pass.set_pipeline(&self.pick_pipeline);
+            pass.draw(0..6, 0..self.num_nodes);
+        }
+
+        // Copy the single texel under the cursor into a 256-byte staging buffer.
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pick_readback"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: cx, y: cy, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        queue.submit(Some(enc.finish()));
+
+        let slice = staging.slice(..4);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().ok()?.ok()?;
+        let data = slice.get_mapped_range();
+        let id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        drop(data);
+        staging.unmap();
+
+        if id == 0 {
+            None
+        } else {
+            Some(id - 1)
+        }
     }
 
     /// Record draw calls into an already-begun render pass.

@@ -1119,4 +1119,124 @@ pub const CORE: &str = r##"
               (assoc m (symbol (%sym-name qs)) (record 'Var qs))))
           (hash-map) (%ns-interns n)))
 (def ns-map ns-interns)
+
+;; ─────────────── clojure.core burn-down: predicates ───────────────
+(defn any? [x] true)
+(defn seqable? [x] (or (nil? x) (coll? x) (string? x)))
+(defn reversible? [x] (vector? x))
+(defn sorted? [x] (or (%num-eq (type-of x) 'SortedMap) (%num-eq (type-of x) 'SortedSet)))
+(defn map-entry? [x] (and (vector? x) (%num-eq (count x) 2)))
+(defn ident? [x] (or (keyword? x) (symbol? x)))
+(defn simple-ident? [x] (and (ident? x) (nil? (namespace x))))
+(defn qualified-ident? [x] (and (ident? x) (not (nil? (namespace x)))))
+(defn simple-symbol? [x] (and (symbol? x) (nil? (namespace x))))
+(defn qualified-symbol? [x] (and (symbol? x) (not (nil? (namespace x)))))
+(defn simple-keyword? [x] (and (keyword? x) (nil? (namespace x))))
+(defn qualified-keyword? [x] (and (keyword? x) (not (nil? (namespace x)))))
+(defn ratio? [x] false)
+(defn rational? [x] (int? x))
+(defn decimal? [x] false)
+(defn bytes? [x] false)
+(defn class? [x] false)
+(defn uri? [x] false)
+(defn uuid? [x] false)
+(defn inst? [x] false)
+(defn NaN? [x] (not (%num-eq x x)))
+(defn infinite? [x] (or (%num-eq x (/ 1.0 0.0)) (%num-eq x (/ -1.0 0.0))))
+(defn volatile? [x] (%num-eq (type-of x) 'Volatile))
+(defn delay? [x] (%num-eq (type-of x) 'Delay))
+(defn reduced? [x] (%num-eq (type-of x) 'Reduced))
+(defn realized? [x] true)
+(defn chunked-seq? [x] false)
+(defn special-symbol? [x] (not (nil? (some (fn [s] (= x s)) '(if do let* fn* quote def loop* recur throw try catch finally var set! new .)))))
+(defn record? [x] false)
+
+;; ─────────────── string->number parsing ───────────────
+(defn -digit? [c] (let [n (%char-code c)] (and (%lt 47 n) (%lt n 58))))
+(defn -parse-digits [cs] (reduce (fn [a c] (+ (* a 10) (- (%char-code c) 48))) 0 cs))
+(defn parse-long [s]
+  (let [cs (%str->chars s)
+        neg (= (first cs) \-)
+        ds (if (or neg (= (first cs) \+)) (rest cs) cs)]
+    (if (every? -digit? (seq ds)) (let [v (-parse-digits ds)] (if neg (- v) v)) nil)))
+(defn parse-boolean [s] (cond (= s "true") true (= s "false") false :else nil))
+(defn parse-double [s]
+  (let [cs (%str->chars s)
+        neg (= (first cs) \-)
+        ds (if (or neg (= (first cs) \+)) (rest cs) cs)
+        dot (some (fn [c] (= c \.)) ds)]
+    (if dot
+      (let [ip (take-while -digit? ds)
+            fp (take-while -digit? (rest (drop-while -digit? ds)))
+            k (count fp)
+            v (/ (+ (* (-parse-digits ip) (-pow10-p k)) (-parse-digits fp)) (-pow10-p k))]
+        (if neg (- v) v))
+      (let [v (-parse-digits ds)] (if neg (- v) v)))))
+(defn -pow10-p [n] (if (%num-eq n 0) 1 (* 10 (-pow10-p (- n 1)))))
+
+;; ─────────────── numeric aliases / unchecked (we auto-promote) ───────────────
+(def inc' inc)
+(def dec' dec)
+(def +' +)
+(def -' -)
+(def *' *)
+(defn num [x] x)
+(defn rationalize [x] x)
+(defn bit-and-not [x y] (%bit-and x (bit-not y)))
+(defn unchecked-add [a b] (%add a b))
+(defn unchecked-subtract [a b] (%sub a b))
+(defn unchecked-multiply [a b] (%mul a b))
+(defn unchecked-negate [a] (%sub 0 a))
+(defn unchecked-inc [a] (%add a 1))
+(defn unchecked-dec [a] (%sub a 1))
+(defn unchecked-add-int [a b] (%add a b))
+(defn unchecked-subtract-int [a b] (%sub a b))
+(defn unchecked-multiply-int [a b] (%mul a b))
+(defn unchecked-inc-int [a] (%add a 1))
+(defn unchecked-dec-int [a] (%sub a 1))
+(defn unchecked-negate-int [a] (%sub 0 a))
+(defn unchecked-remainder-int [a b] (%rem a b))
+(defn unchecked-divide-int [a b] (%quot a b))
+
+;; ─────────────── readable printing (pr-str family, pure) ───────────────
+(defn -pr [x]
+  (cond (nil? x) "nil"
+        (string? x) (str (%char-of 34) x (%char-of 34))
+        (char? x) (str (%char-of 92) x)
+        (keyword? x) (str ":" (name-with-ns x))
+        (symbol? x) (str x)
+        (vector? x) (str "[" (apply str (interpose " " (map -pr x))) "]")
+        (set? x) (str "#{" (apply str (interpose " " (map -pr x))) "}")
+        (map? x) (str "{" (apply str (interpose ", " (map (fn [e] (str (-pr (first e)) " " (-pr (second e)))) (seq x)))) "}")
+        (or (list? x) (seq? x)) (str "(" (apply str (interpose " " (map -pr x))) ")")
+        true (str x)))
+(defn name-with-ns [k] (if (nil? (namespace k)) (name k) (str (namespace k) "/" (name k))))
+(defn pr-str [& xs] (apply str (interpose " " (map -pr xs))))
+(defn prn-str [& xs] (str (apply pr-str xs) (%char-of 10)))
+(defn print-str [& xs] (apply str (interpose " " (map str xs))))
+(defn println-str [& xs] (str (apply print-str xs) (%char-of 10)))
+
+;; ─────────────── misc combinators + control ───────────────
+(defmacro when-some (bv & body)
+  (list 'let [(first bv) (second bv)]
+        (list 'if (list 'nil? (first bv)) nil (%cons 'do body))))
+(defmacro if-some (bv then & else)
+  (list 'let [(first bv) (second bv)]
+        (list 'if (list 'nil? (first bv)) (if (nil? else) nil (first else)) then)))
+(defmacro comment (& body) nil)
+(defn comparator [pred] (fn [a b] (cond (pred a b) -1 (pred b a) 1 :else 0)))
+(defn replicate [n x] (take n (repeat x)))
+(defn bounded-count [n coll] (min n (count coll)))
+(defn trampoline [f & args]
+  (loop [r (apply f args)] (if (fn? r) (recur (r)) r)))
+(defn memoize [f]
+  (let [cache (atom {})]
+    (fn [& args]
+      (if (contains? (deref cache) args)
+        (get (deref cache) args)
+        (let [v (apply f args)] (swap! cache assoc args v) v)))))
+;; `(letfn [(f [x] …) (g [y] …)] body)` -> a let binding each name to a
+;; self-named fn. (Non-mutual / self-recursion; each fn carries its own name.)
+(defmacro letfn (specs & body)
+  (%cons 'let (%cons (apply concat (map (fn [s] (list (first s) (%cons 'fn s))) specs)) body)))
 "##;

@@ -1,0 +1,14 @@
+(module policy)
+; Whole-program policy check: ban any call to `forbidden-op` anywhere in the program.
+(defn has-bad? [(f Code)] (-> bool)
+  (if (code-list? f)
+      (if (and (icmp-gt (code-count f) 0) (code-eq (code-nth f 0) `forbidden-op)) true
+        (has-bad-list? f 0 (code-count f)))
+    false))
+(defn has-bad-list? [(f Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) false
+    (if (has-bad? (code-nth f i)) true (has-bad-list? f (iadd i 1) n))))
+(defn no-forbidden-op [(prog Code)] (-> Code)
+  (if (has-bad-list? prog 0 (code-count prog))
+      (error "policy: (forbidden-op …) is not allowed")
+    `0))
