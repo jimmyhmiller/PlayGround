@@ -344,7 +344,9 @@
     (if (icmp-eq nc 0) (None [Diag])
       (let [nf (al-len [TaggedForm] (load forms)) (mut items) (al-new [Sexp] a) (mut i) 0]
         (loop (if (icmp-ge (load i) nf) (break)
-          (do (al-push! (mut items) (load (field (al-elem [TaggedForm] forms (load i)) form)))
+          (do (let [ff (field (al-elem [TaggedForm] forms (load i)) form)]
+                ; scope checkers to the user's entry file (source 0), not bundled stdlib
+                (if (icmp-eq (sx-source (load ff)) 0) (al-push! (mut items) (load ff)) 0))
               (store! i (iadd (load i) 1)))))
         (let [proglist (mk-sexp (KList (box-al [Sexp] a (load items))) -1 -1) (mut margs) (al-new [Sexp] a)]
           (al-push! (mut margs) proglist)
@@ -394,12 +396,23 @@
                             (loop (if (icmp-ge (load k) nf) (break)
                               (do (let [tf (alloc-stack TaggedForm)]
                                     (store! (field tf form) (al-get [Sexp] (load newsexps) (load k)))
+                                    (let [of (field (al-elem [TaggedForm] cur (load k)) form)]
+                                      ; rebuilt forms get dummy spans — stamp them with the original
+                                      ; form's source so checker scoping (by source) still sees them
+                                      (stamp-expansion (field tf form) (sx-source (load of)) (sx-lo (load of)) (sx-hi (load of)) 0))
                                     (store! (field tf module) (load (field (al-elem [TaggedForm] cur (load k)) module)))
                                     (al-push! (mut newforms) (load tf)))
                                   (store! k (iadd (load k) 1)))))
                             (store! cur (box-al [TaggedForm] a (load newforms))) 0)))))))
               (store! ti (iadd (load ti) 1)))))
         (match (load errf) (Some [d] (Err [(ptr (ArrayList TaggedForm)) Diag] d)) (None [] (Ok [(ptr (ArrayList TaggedForm)) Diag] (load cur))))))))
+; print all collected `(warn …)` diagnostics (located, non-fatal) to stderr.
+(defn drain-warnings [(s (mut LS))] (-> i64)
+  (let [w (stderr) lst (warn-list) n (al-len [Diag] (load lst)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (render-diag w (mut s) (al-get [Diag] (load lst) (load i))) (wb w 10)
+          (store! i (iadd (load i) 1)))))
+    0))
 (defn run-expand [(s (mut LS)) (macros (ptr (ArrayList (slice u8)))) (comptime (ptr (ArrayList (slice u8)))) (checked (ptr Program)) (a (ptr Allocator))] (-> (Result i64 Diag))
   (let [out-forms (box-al [TaggedForm] a (load (field s out))) nforms (al-len [TaggedForm] (load out-forms))
         impb (unwrap-ptr [(ArrayList ImpEntry)] (create [(ArrayList ImpEntry)] a))
@@ -441,7 +454,7 @@
             (do (store! (field s out) (load tforms))
                 (match (run-checkers (mut checkers) checked tforms allfns gs gu impb expb a)
                   (Some [d] (Err [i64 Diag] d))
-                  (None [] (Ok [i64 Diag] 0))))))))))
+                  (None [] (do (drain-warnings (mut s)) (Ok [i64 Diag] 0)))))))))))
 (defn do-produced [(outf (ptr Sexp)) (module (Option (slice u8))) (result (ptr SBoxTF)) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum)) (allfns (ptr SBox)) (a (ptr Allocator)) (errf (mut (Option Diag)))] (-> i64)
   (let [(mut produced) (al-new [Sexp] a)]
     (if (and (icmp-eq (sx-tag (load outf)) 6)
