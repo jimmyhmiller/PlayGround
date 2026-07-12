@@ -39,6 +39,7 @@ enum Tok {
     HashBrace,   // #{
     HashParen,   // #(  anonymous-fn literal
     ReaderCond,  // #?  reader conditional (followed by a `(...)`)
+    ReaderCondSplice, // #?@  splicing reader conditional (splices a collection)
     Quote,
     Backtick,      // `  syntax-quote
     Unquote,       // ~
@@ -87,11 +88,13 @@ fn tokenize(src: &str) -> Vec<Tok> {
                 out.push(Tok::Caret);
                 i += 2;
             }
-            // `#?(...)` reader conditional. `#?@` (splicing) is not supported.
+            // `#?@(...)` splicing reader conditional — splice the chosen collection.
+            '#' if i + 2 < cs.len() && cs[i + 1] == '?' && cs[i + 2] == '@' => {
+                out.push(Tok::ReaderCondSplice);
+                i += 3; // leave the `(` to tokenize as a normal Open
+            }
+            // `#?(...)` reader conditional.
             '#' if i + 1 < cs.len() && cs[i + 1] == '?' => {
-                if i + 2 < cs.len() && cs[i + 2] == '@' {
-                    panic!("reader: splicing reader conditional `#?@` not supported");
-                }
                 out.push(Tok::ReaderCond);
                 i += 2; // leave the `(` to tokenize as a normal Open
             }
@@ -186,7 +189,12 @@ impl Parser {
         match tok {
             Tok::Open('(') => {
                 let items = self.until(rt, ')');
-                rt.vec_to_list(&items)
+                if items.is_empty() {
+                    // `()` is the empty list — a distinct value from nil.
+                    rt.enc_empty_list()
+                } else {
+                    rt.vec_to_list(&items)
+                }
             }
             Tok::Open('[') => {
                 let items = self.until(rt, ']');
@@ -277,8 +285,26 @@ impl Parser {
             Tok::Str(s) => alloc(rt, Obj::Str(s)),
             Tok::Char(c) => alloc(rt, Obj::Char(c)),
             Tok::Atom(a) => self.atom(rt, &a),
+            // `#?@` outside a collection is unusual; return the selected collection
+            // as a value (it can only be meaningfully spliced inside `until`).
+            Tok::ReaderCondSplice => {
+                let elems = self.read_cond_splice(rt);
+                rt.vec_to_list(&elems)
+            }
             Tok::Open(c) | Tok::Close(c) => panic!("reader: unexpected {c}"),
         }
+    }
+
+    /// Read a `#?@(:platform coll …)` and return the SPLICED elements of the chosen
+    /// collection (its members), for the caller to inline into the enclosing seq.
+    fn read_cond_splice<M: ValueModel>(&mut self, rt: &mut Runtime<M>) -> Vec<u64> {
+        match self.toks.get(self.pos) {
+            Some(Tok::Open('(')) => self.pos += 1,
+            _ => panic!("reader: #?@ must be followed by `(`"),
+        }
+        let branches = self.until(rt, ')');
+        let selected = self.select_reader_cond(rt, &branches);
+        splice_elements(rt, selected)
     }
 
     /// Pick a reader-conditional branch from `[kw form kw form …]`. Priority:
@@ -311,6 +337,11 @@ impl Parser {
                 Some(Tok::Close(c)) if *c == close => {
                     self.pos += 1;
                     return items;
+                }
+                Some(Tok::ReaderCondSplice) => {
+                    self.pos += 1;
+                    let elems = self.read_cond_splice(rt);
+                    items.extend(elems);
                 }
                 Some(_) => items.push(self.form(rt)),
                 None => panic!("reader: unbalanced, expected {close}"),
@@ -399,6 +430,20 @@ fn alloc<M: ValueModel>(rt: &mut Runtime<M>, o: Obj) -> u64 {
 fn record<M: ValueModel>(rt: &mut Runtime<M>, ty: &str, fields: Vec<u64>) -> u64 {
     let type_id: Sym = rt.intern(ty);
     alloc(rt, Obj::Record { type_id, fields })
+}
+
+/// The members of a `#?@`-selected collection (a `[..]` Vector record or a `(..)`
+/// list), to splice into the enclosing seq. `nil` (no branch matched) -> empty.
+fn splice_elements<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Vec<u64> {
+    if let Val::Ref(id) = rt.decode(form) {
+        if let Obj::Record { type_id, fields } = &rt.heap()[id as usize] {
+            if rt.sym_name(*type_id) == VECTOR && !fields.is_empty() {
+                return rt.list_to_vec(fields[0]);
+            }
+        }
+    }
+    // a cons list (or nil): list_to_vec handles both (nil -> empty).
+    rt.list_to_vec(form)
 }
 
 /// The name of a `:keyword` value (a `Keyword` record), or `None` for anything else.

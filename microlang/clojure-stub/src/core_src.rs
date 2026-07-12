@@ -139,7 +139,7 @@ pub const CORE: &str = r##"
 (defn map? [x] (%num-eq (type-of x) 'Map))
 (defn set? [x] (%num-eq (type-of x) 'Set))
 (defn keyword? [x] (%num-eq (type-of x) 'Keyword))
-(defn list? [x] (%num-eq (type-of x) 'List))
+(defn list? [x] (let [t (type-of x)] (or (%num-eq t 'List) (%num-eq t 'EmptyList))))
 (defn string? [x] (%num-eq (type-of x) 'String))
 (defn symbol? [x] (%num-eq (type-of x) 'Symbol))
 ;; `name`/`namespace` split a (possibly qualified) symbol or keyword on the last `/`.
@@ -279,6 +279,17 @@ pub const CORE: &str = r##"
   IIndexed (-nth [l n] (nth-seq l n))
   IStack (-peek [l] (%first l)) (-pop [l] (%rest l))
   IEmptyableCollection (-empty [_] nil))
+;; The empty list `()` — a distinct value from nil: `list?`/`seq?` true, prints
+;; `()`, not `= nil`. Behaves as an empty seq (seq -> nil, count 0, first/rest nil).
+(extend-type EmptyList
+  ISeqable (-seq [_] nil)
+  ISeq (-first [_] nil) (-rest [_] nil)
+  ICollection (-conj [_ o] (%cons o nil))
+  ICounted (-count [_] 0)
+  IIndexed (-nth [_ n] nil)
+  IStack (-peek [_] nil) (-pop [_] nil)
+  IEquiv (-equiv [_ other] (%num-eq (type-of other) 'EmptyList))
+  IEmptyableCollection (-empty [e] e))
 ;; a String seqs as its character list (clojure treats strings as seqable).
 (extend-type String
   ISeqable (-seq [s] (seq (%str->chars s)))
@@ -492,7 +503,7 @@ pub const CORE: &str = r##"
 (defn cycle [c] (if (nil? (seq c)) nil (-cycle c c)))
 (defn second [c] (nth c 1))
 (defn last [c] (let [s (seq c)] (if (nil? s) nil (if (nil? (next s)) (%first s) (last (%rest s))))))
-(defn seq? [x] (%num-eq (type-of x) 'List))
+(defn seq? [x] (let [t (type-of x)] (or (%num-eq t 'List) (%num-eq t 'EmptyList) (%num-eq t 'LazySeq))))
 (defn butlast-seq [s] (let [s (seq s)] (if (nil? (next s)) nil (%cons (%first s) (butlast-seq (%rest s))))))
 (defn butlast [c] (butlast-seq c))
 ;; `sigs` computes the :arglists metadata for `defn`: the parameter vector of a
@@ -755,7 +766,7 @@ pub const CORE: &str = r##"
                     (if (-eq2 x prev) (-dedupe prev (rest s)) (%cons x (-dedupe x (rest s)))))))))
 (defn dedupe [coll] (-dedupe -none coll))
 
-(defn -seqable? [x] (cond (list? x) true (vector? x) true (set? x) true (lazy-seq? x) true true false))
+(defn -seqable? [x] (cond (nil? x) true (list? x) true (vector? x) true (set? x) true (lazy-seq? x) true true false))
 (defn flatten [coll] (mapcat (fn [x] (if (-seqable? x) (flatten x) (list x))) coll))
 
 ;; partition family (chunks are lists; short final chunk dropped unless -all)

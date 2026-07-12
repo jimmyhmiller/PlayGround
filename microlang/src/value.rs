@@ -71,6 +71,11 @@ pub enum Obj {
         head: u64,
         tail: u64,
     },
+    /// The empty list `()` — a distinct value from `nil` (Clojure's
+    /// `PersistentList/EMPTY`). `list?`/`seq?` are true for it, it prints as `()`,
+    /// and it is NOT `= nil`. Cons chains still terminate in `nil` (not this), so
+    /// iteration is unaffected; `%cons` normalizes an `EmptyList` tail back to nil.
+    EmptyList,
     Str(String),
     /// A character (R7RS `char?`), disjoint from integers and strings.
     Char(char),

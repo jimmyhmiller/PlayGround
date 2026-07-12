@@ -619,7 +619,21 @@ impl<M: ValueModel> Runtime<M> {
     }
 
     // ── lists ───────────────────────────────────────────────
+    /// The empty list `()` — a heap value distinct from nil.
+    pub fn enc_empty_list(&mut self) -> u64 {
+        let id = self.alloc(Obj::EmptyList);
+        M::R::enc_ref(id)
+    }
+    pub fn is_empty_list(&self, bits: u64) -> bool {
+        if let RawTag::Ref = M::R::tag_of(bits) {
+            return matches!(&self.heap()[M::R::as_ref(bits) as usize], Obj::EmptyList);
+        }
+        false
+    }
     pub fn cons(&mut self, head: u64, tail: u64) -> u64 {
+        // A cons chain terminates in nil, never in the standalone `()` value — so
+        // `(cons x ())` is `(x)` and iteration (which stops at nil) is unaffected.
+        let tail = if self.is_empty_list(tail) { self.enc_nil() } else { tail };
         let id = self.alloc(Obj::Cons { head, tail });
         M::R::enc_ref(id)
     }
@@ -675,6 +689,8 @@ impl<M: ValueModel> Runtime<M> {
                         let (hb, tb) = self.as_cons(b).unwrap();
                         self.equal(ha, hb) && self.equal(ta, tb)
                     }
+                    // All empty lists are equal (and only to each other, never nil).
+                    (Obj::EmptyList, Obj::EmptyList) => true,
                     // Structural equality for aggregates (R7RS `equal?` on
                     // strings/vectors; ordered field equality for records — the
                     // general aggregate case). Order-INSENSITIVE collections
@@ -946,7 +962,13 @@ impl<M: ValueModel> Runtime<M> {
                 // CekMachine intercepts it before reaching here.
                 panic!("apply requires a backend that can invoke closures (CekMachine)");
             }
-            Prim::List => self.vec_to_list(args),
+            Prim::List => {
+                if args.is_empty() {
+                    self.enc_empty_list()
+                } else {
+                    self.vec_to_list(args)
+                }
+            }
             Prim::Cons => self.cons(args[0], args[1]),
             Prim::First => self.as_cons(args[0]).map(|(h, _)| h).unwrap_or_else(|| self.enc_nil()),
             Prim::Rest => self.as_cons(args[0]).map(|(_, t)| t).unwrap_or_else(|| self.enc_nil()),
@@ -1415,6 +1437,7 @@ impl<M: ValueModel> Runtime<M> {
             Val::Ref(id) => match &self.heap()[id as usize] {
                 Obj::Record { type_id, .. } => return *type_id,
                 Obj::Cons { .. } => "List",
+                Obj::EmptyList => "EmptyList",
                 Obj::Vector(_) => "Vector",
                 Obj::Str(_) => "String",
                 Obj::Char(_) => "Char",
@@ -1679,6 +1702,7 @@ impl<M: ValueModel> Runtime<M> {
                     let inner: Vec<String> = items.iter().map(|&x| self.print(x)).collect();
                     format!("({})", inner.join(" "))
                 }
+                Obj::EmptyList => "()".to_string(),
                 Obj::Str(s) => {
                     // Readable form: escape the reader-significant chars so the
                     // output round-trips (matches Clojure's pr on strings).
