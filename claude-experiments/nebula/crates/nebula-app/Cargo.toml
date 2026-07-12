@@ -1,0 +1,16 @@
+[package]
+name = "nebula-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "nebula"
+path = "src/main.rs"
+
+[dependencies]
+nebula-core.workspace = true
+nebula-layout.workspace = true
+nebula-render.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true

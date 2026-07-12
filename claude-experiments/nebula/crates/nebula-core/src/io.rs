@@ -25,7 +25,7 @@ pub fn parse_edge_list_bytes(bytes: &[u8]) -> Result<(Graph, Vec<u64>)> {
     let mut originals: Vec<u64> = Vec::new();
     let mut edges: Vec<[NodeId; 2]> = Vec::new();
 
-    let mut intern = |orig: u64, remap: &mut AHashMap<u64, NodeId>, originals: &mut Vec<u64>| -> NodeId {
+    let intern = |orig: u64, remap: &mut AHashMap<u64, NodeId>, originals: &mut Vec<u64>| -> NodeId {
         if let Some(&id) = remap.get(&orig) {
             id
         } else {

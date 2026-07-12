@@ -100,23 +100,6 @@ impl Shared {
         self.heap.len()
     }
 
-    fn value_ok(&self, value: &Value, expected: &Type) -> bool {
-        self.heap.value_ok(value, expected)
-    }
-
-    /// Construct an object at the type's current schema — the one shared
-    /// [`Heap::new_object`].
-    fn new_object(&self, type_id: DefId, supplied: &[(FieldId, Value)]) -> Result<ObjectId, Condition> {
-        self.heap.new_object(type_id, supplied, &self.world)
-    }
-
-    /// The migration barrier + field read — the one shared, concurrency-safe
-    /// [`Heap::get_field`]. (The careful lock dance that makes concurrent
-    /// migration race-free now lives on `Heap`.)
-    fn read_field(&self, id: ObjectId, field: FieldId) -> Result<Value, Condition> {
-        self.heap.get_field(id, field, &self.world)
-    }
-
     fn emit(&self, value: Value) {
         self.output.lock().unwrap().push(value);
     }
@@ -169,7 +152,7 @@ impl Shared {
         for (i, v) in args.into_iter().enumerate() {
             regs[i] = Some(v);
         }
-        let mut frames = vec![MtFrame {
+        let frames = vec![MtFrame {
             func: function,
             version,
             pc: 0,
@@ -177,217 +160,35 @@ impl Shared {
             return_to: None,
         }];
 
+        // Drive the *one* step semantics (shared with the interpreter) over a
+        // thread-local frame stack. A safepoint at the top of each turn keeps
+        // this actor parkable for a stop-the-world collection; a `Recv` with no
+        // message yet comes back as `Flow::Blocked`, so we spin (still hitting
+        // the safepoint) until it arrives.
+        let mut machine = MtMachine {
+            shared: self,
+            mailbox,
+            frames,
+            done: None,
+        };
         loop {
-            self.safepoint(tid, &frames);
+            machine.shared.safepoint(tid, &machine.frames);
             let (func, version, pc) = {
-                let t = frames.last().unwrap();
+                let t = machine.frames.last().unwrap();
                 (t.func, t.version, t.pc)
             };
-            let (instruction, result_ty) = match &self.world.functions[&(func, version)] {
-                FunctionState::Ready(f) => (f.code[pc].clone(), f.result.clone()),
+            let instruction = match &machine.shared.world.functions[&(func, version)] {
+                FunctionState::Ready(f) => f.code[pc].clone(),
                 _ => unreachable!("a frame only pins ready code"),
             };
-            let err = |msg: &str| {
-                Outcome::Paused(Condition::RuntimeTypeError {
-                    function: func,
-                    pc,
-                    message: msg.into(),
-                })
-            };
-            let read = |frames: &Vec<MtFrame>, i: usize| -> Value {
-                frames.last().unwrap().regs[i].clone().expect("verified register read")
-            };
-
-            match instruction {
-                Instruction::Const { dst, value } => {
-                    let t = frames.last_mut().unwrap();
-                    t.regs[dst] = Some(value);
-                    t.pc += 1;
-                }
-                Instruction::New {
-                    dst,
-                    type_id,
-                    fields,
-                } => {
-                    let supplied: Vec<(FieldId, Value)> =
-                        fields.iter().map(|(f, r)| (*f, read(&frames, *r))).collect();
-                    match self.new_object(type_id, &supplied) {
-                        Ok(oid) => {
-                            let t = frames.last_mut().unwrap();
-                            t.regs[dst] = Some(Value::Ref(oid));
-                            t.pc += 1;
-                        }
-                        Err(c) => return Outcome::Paused(c),
+            match step_instruction(&mut machine, &instruction) {
+                Ok(Flow::Stepped) => {
+                    if let Some(value) = machine.done.take() {
+                        return Outcome::Complete(value);
                     }
                 }
-                Instruction::GetField { dst, object, field } => {
-                    let Value::Ref(oid) = read(&frames, object) else {
-                        return err("field access on non-reference");
-                    };
-                    match self.read_field(oid, field) {
-                        Ok(v) => {
-                            let t = frames.last_mut().unwrap();
-                            t.regs[dst] = Some(v);
-                            t.pc += 1;
-                        }
-                        Err(c) => return Outcome::Paused(c),
-                    }
-                }
-                Instruction::Copy { dst, src } => {
-                    let v = read(&frames, src);
-                    let t = frames.last_mut().unwrap();
-                    t.regs[dst] = Some(v);
-                    t.pc += 1;
-                }
-                Instruction::AddI64 { dst, left, right } => {
-                    let (Value::I64(a), Value::I64(b)) = (read(&frames, left), read(&frames, right))
-                    else {
-                        return err(crate::runtime::ERR_ADD_NON_I64);
-                    };
-                    let t = frames.last_mut().unwrap();
-                    t.regs[dst] = Some(Value::I64(a + b));
-                    t.pc += 1;
-                }
-                Instruction::SubI64 { dst, left, right } => {
-                    let (Value::I64(a), Value::I64(b)) = (read(&frames, left), read(&frames, right))
-                    else {
-                        return err(crate::runtime::ERR_SUB_NON_I64);
-                    };
-                    let t = frames.last_mut().unwrap();
-                    t.regs[dst] = Some(Value::I64(a - b));
-                    t.pc += 1;
-                }
-                Instruction::MulI64 { dst, left, right } => {
-                    let (Value::I64(a), Value::I64(b)) = (read(&frames, left), read(&frames, right))
-                    else {
-                        return err(crate::runtime::ERR_MUL_NON_I64);
-                    };
-                    let t = frames.last_mut().unwrap();
-                    t.regs[dst] = Some(Value::I64(a * b));
-                    t.pc += 1;
-                }
-                Instruction::LtI64 { dst, left, right } => {
-                    let (Value::I64(a), Value::I64(b)) = (read(&frames, left), read(&frames, right))
-                    else {
-                        return err(crate::runtime::ERR_LT_NON_I64);
-                    };
-                    let t = frames.last_mut().unwrap();
-                    t.regs[dst] = Some(Value::Bool(a < b));
-                    t.pc += 1;
-                }
-                Instruction::EqI64 { dst, left, right } => {
-                    let (Value::I64(a), Value::I64(b)) = (read(&frames, left), read(&frames, right))
-                    else {
-                        return err(crate::runtime::ERR_EQ_NON_I64);
-                    };
-                    let t = frames.last_mut().unwrap();
-                    t.regs[dst] = Some(Value::Bool(a == b));
-                    t.pc += 1;
-                }
-                Instruction::Not { dst, src } => {
-                    let Value::Bool(b) = read(&frames, src) else {
-                        return err(crate::runtime::ERR_NOT_NON_BOOL);
-                    };
-                    let t = frames.last_mut().unwrap();
-                    t.regs[dst] = Some(Value::Bool(!b));
-                    t.pc += 1;
-                }
-                Instruction::Branch {
-                    cond,
-                    then_pc,
-                    else_pc,
-                } => {
-                    let Value::Bool(taken) = read(&frames, cond) else {
-                        return err(crate::runtime::ERR_BRANCH_NON_BOOL);
-                    };
-                    frames.last_mut().unwrap().pc = if taken { then_pc } else { else_pc };
-                }
-                Instruction::Jump { target } => frames.last_mut().unwrap().pc = target,
-                Instruction::Yield => frames.last_mut().unwrap().pc += 1,
-                Instruction::Emit { value } => {
-                    self.emit(read(&frames, value));
-                    frames.last_mut().unwrap().pc += 1;
-                }
-                Instruction::Send { target, value } => {
-                    let Value::I64(id) = read(&frames, target) else {
-                        return err("send target must be an actor id");
-                    };
-                    let payload = read(&frames, value);
-                    if !self.deliver(id as usize, payload) {
-                        return err("send to an unknown actor");
-                    }
-                    frames.last_mut().unwrap().pc += 1;
-                }
-                Instruction::Recv { dst, ty } => {
-                    // Poll our mailbox, hitting a GC safepoint each spin so a
-                    // waiting actor is still parkable and collectable.
-                    let message = loop {
-                        self.safepoint(tid, &frames);
-                        if let Some(v) = mailbox.lock().unwrap().pop_front() {
-                            break v;
-                        }
-                        std::thread::yield_now();
-                    };
-                    if !self.value_ok(&message, &ty) {
-                        return err("received message has the wrong type");
-                    }
-                    let t = frames.last_mut().unwrap();
-                    t.regs[dst] = Some(message);
-                    t.pc += 1;
-                }
-                Instruction::Call {
-                    dst,
-                    function: callee,
-                    args,
-                } => {
-                    let callee_version = self.world.current_functions[&callee];
-                    let callee_regs = match &self.world.functions[&(callee, callee_version)] {
-                        FunctionState::Ready(f) => {
-                            for (arg, expected) in args.iter().zip(&f.params) {
-                                if !self.value_ok(&read(&frames, *arg), expected) {
-                                    return err("call argument has the wrong type");
-                                }
-                            }
-                            f.registers
-                        }
-                        FunctionState::Broken { diagnostics, .. } => {
-                            return Outcome::Paused(Condition::BrokenFunction {
-                                function: callee,
-                                diagnostics: diagnostics.clone(),
-                            });
-                        }
-                    };
-                    let mut regs = vec![None; callee_regs];
-                    for (slot, arg) in args.iter().enumerate() {
-                        regs[slot] = Some(read(&frames, *arg));
-                    }
-                    frames.last_mut().unwrap().pc += 1;
-                    frames.push(MtFrame {
-                        func: callee,
-                        version: callee_version,
-                        pc: 0,
-                        regs,
-                        return_to: Some(dst),
-                    });
-                }
-                Instruction::CallForeign { .. } | Instruction::LoadGlobal { .. } => {
-                    // FFI and globals belong to the single-threaded live-edit
-                    // tier; the shared-memory tier does not run them (native
-                    // resources are not part of the frozen shared world). Trap
-                    // clearly rather than pretend.
-                    return err("foreign calls and globals are not available in the concurrent runtime");
-                }
-                Instruction::Return { value } => {
-                    let result = read(&frames, value);
-                    if !self.value_ok(&result, &result_ty) {
-                        return err("return value has the wrong type");
-                    }
-                    let done = frames.pop().unwrap();
-                    match done.return_to {
-                        Some(dst) => frames.last_mut().unwrap().regs[dst] = Some(result),
-                        None => return Outcome::Complete(result),
-                    }
-                }
+                Ok(Flow::Blocked) => std::thread::yield_now(),
+                Err(condition) => return Outcome::Paused(condition),
             }
         }
     }
@@ -495,5 +296,95 @@ impl Shared {
             }
         }
         self.heap.retain(&live)
+    }
+}
+
+/// A concurrent worker's [`Machine`]: the shared step semantics run over a
+/// thread-local frame stack layered on the shared runtime. Effects go to the
+/// shared heap/output/mailboxes (all internally synchronized). This tier has no
+/// FFI or globals (`Unsupported`); `Recv` polls the mailbox and reports
+/// `WouldBlock` so the driver can spin at a safepoint.
+struct MtMachine<'a> {
+    shared: &'a Arc<Shared>,
+    mailbox: Arc<Mutex<std::collections::VecDeque<Value>>>,
+    frames: Vec<MtFrame>,
+    /// Set when the top frame returns — the driver turns it into `Complete`.
+    done: Option<Value>,
+}
+
+impl MtMachine<'_> {
+    fn top(&self) -> &MtFrame {
+        self.frames.last().unwrap()
+    }
+    fn top_mut(&mut self) -> &mut MtFrame {
+        self.frames.last_mut().unwrap()
+    }
+}
+
+impl Machine for MtMachine<'_> {
+    fn world(&self) -> &World {
+        &self.shared.world
+    }
+    fn heap(&self) -> &Heap {
+        &self.shared.heap
+    }
+    fn current(&self) -> (DefId, Version) {
+        let t = self.top();
+        (t.func, t.version)
+    }
+    fn pc(&self) -> usize {
+        self.top().pc
+    }
+    fn reg(&self, i: usize) -> Option<Value> {
+        self.top().regs.get(i).cloned().flatten()
+    }
+    fn set_reg(&mut self, dst: usize, value: Value) {
+        self.top_mut().regs[dst] = Some(value);
+    }
+    fn set_pc(&mut self, pc: usize) {
+        self.top_mut().pc = pc;
+    }
+    fn advance(&mut self) {
+        self.top_mut().pc += 1;
+    }
+    fn emit(&mut self, value: Value) {
+        self.shared.emit(value);
+    }
+    fn global(&self, _id: DefId) -> GlobalRead {
+        GlobalRead::Unsupported
+    }
+    fn call_foreign(&mut self, _id: ForeignFnId, _args: &[Value]) -> ForeignCall {
+        ForeignCall::Unsupported
+    }
+    fn push_call(
+        &mut self,
+        callee: DefId,
+        version: Version,
+        registers: Vec<Option<Value>>,
+        return_reg: usize,
+    ) {
+        self.frames.push(MtFrame {
+            func: callee,
+            version,
+            pc: 0,
+            regs: registers,
+            return_to: Some(return_reg),
+        });
+    }
+    fn do_return(&mut self, value: Value) {
+        let done = self.frames.pop().unwrap();
+        match done.return_to {
+            Some(dst) => self.top_mut().regs[dst] = Some(value),
+            None => self.done = Some(value),
+        }
+    }
+    fn send(&mut self, target: usize, value: Value) -> Option<bool> {
+        Some(self.shared.deliver(target, value))
+    }
+    fn recv(&mut self) -> RecvResult {
+        match self.mailbox.lock().unwrap().pop_front() {
+            Some(v) => RecvResult::Got(v),
+            None => RecvResult::WouldBlock,
+        }
     }
 }

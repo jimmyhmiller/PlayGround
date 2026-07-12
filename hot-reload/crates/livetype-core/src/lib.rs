@@ -5,6 +5,7 @@
 //! split keeps this crate free of the inkwell/LLVM static library so its
 //! concurrency can be verified under ThreadSanitizer.
 
+mod exec;
 mod frontend;
 mod heap;
 mod model;
@@ -12,6 +13,7 @@ mod mt;
 mod runtime;
 mod verify;
 
+pub use exec::*;
 pub use frontend::*;
 pub use heap::*;
 pub use model::*;

@@ -90,6 +90,12 @@ impl Graph {
         self.csr.as_ref()
     }
 
+    /// Build a fresh CSR without caching it (useful when a consumer wants to own
+    /// adjacency independently of the graph's lifetime, e.g. a layout engine).
+    pub fn compute_csr(&self) -> Csr {
+        build_csr(self.num_nodes, &self.edges)
+    }
+
     pub fn ensure_csr(&mut self) {
         let _ = self.csr();
     }

@@ -200,9 +200,10 @@ where
         })
         .collect();
 
+    let f = &f;
     ranges
         .into_par_iter()
-        .flat_map_iter(|(start, end)| {
+        .flat_map_iter(move |(start, end)| {
             // Distinct stream per chunk via jump-seeded RNG.
             let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed ^ (start.wrapping_mul(0x9E3779B97F4A7C15)));
             (start..end).map(move |_| f(&mut rng))

@@ -11,20 +11,23 @@ This doc tracks the refactor. See `RUNTIME_DESIGN.md` for the semantics.
 
 Every row is a place the same idea is implemented more than once and can drift.
 
-| Concern | Interpreter (`runtime.rs`) | JIT (`src/jit.rs`) | Shared (`mt.rs`) | Target |
+| Concern | Interpreter (`runtime.rs`) | JIT (`src/jit.rs`) | Shared (`mt.rs`) | Status |
 |---|---|---|---|---|
-| Instruction semantics | `execute` match | `define_step` codegen | `run_actor` match | interp = spec; JIT compiles; **delete `run_actor`** |
-| Object model | `BTreeMap<ObjectId, Object>` (`Object{body:Arc<Body>}`) | (reads via externs) | `Mutex<BTreeMap<ObjectId, Arc<ObjCell>>>` (`ObjCell{body:Mutex<Arc<Body>>}`) | one `Heap` |
-| Migration barrier | `migrate` | via `lt_get_field`→`jit_get_field` | `read_field` inline | one impl on `Heap` |
-| Soundness (`value_ok`/`expect_value`) | on `Runtime` | shared via `expect_value` | reimplemented on `Shared` | one impl on `Heap` |
-| Allocation | `alloc`/`jit_new` | via `lt_new`→`jit_new` | `alloc` inline | one impl on `Heap` |
-| GC roots + sweep | `collect_garbage_with_roots` | driver hands slot roots | `collect` + safepoint parking | one collector |
-| Frame/slot layout | `Frame{registers:Vec<Option<Value>>}` | `RawFrame`/`RawSlot` (tag+i64) | `MtFrame{regs:Vec<Option<Value>>}` | one flat GC-scannable slot |
-| Effects (`Emit`) | `jit_emit` | via `lt_emit`→`jit_emit` | `output` mutex inline | one impl |
+| Instruction semantics | ~~`execute` match~~ → `InterpMachine` | `define_step` codegen | ~~`run_actor` match~~ → `MtMachine` | **DONE** — one `exec::step_instruction` over the `Machine` trait; JIT still compiles (checked by fuzzer) |
+| Object model | ~~`BTreeMap<Object>`~~ | (reads via externs) | ~~`Mutex<BTreeMap<ObjCell>>`~~ | **DONE** — one `heap::Heap` |
+| Migration barrier | ~~`migrate`~~ | via `lt_get_field`→`jit_get_field` | ~~`read_field`~~ | **DONE** — `Heap::migrate` (concurrency-safe) |
+| Soundness (`value_ok`) | ~~on `Runtime`~~ | via `expect_value` | ~~reimplemented~~ | **DONE** — `Heap::value_ok` |
+| Allocation | ~~`alloc`/`jit_new`~~ | via `lt_new` | ~~`alloc`~~ | **DONE** — `Heap::new_object`/`alloc` |
+| GC roots + sweep | `collect_garbage_with_roots` | driver hands slot roots | `collect` + safepoint parking | sweep+trace unified on `Heap` (`retain`/`child_refs`); root-*gathering* still per-tier |
+| Frame/slot layout | `Frame{registers:Vec<Option<Value>>}` | `RawFrame`/`RawSlot` (tag+i64) | `MtFrame{regs:Vec<Option<Value>>}` | **Phase 3** — abstracted behind `Machine` for now; still 3 layouts |
+| Effects (`Emit`) | `jit_emit` | via `lt_emit` | `Shared::emit` | one path each; step calls `m.emit` |
 
-Already single-sourced (keep): `jit_new`/`jit_get_field`/`jit_emit` shared by
-interp + JIT; `expect_value`/`value_ok` shared by interp + JIT;
-`operand_type_error` reconstructs JIT traps to match the interpreter.
+The `Machine` trait (`exec.rs`) is the seam: `InterpMachine` (over `&mut Runtime`
++ an actor) and `MtMachine` (over a thread-local frame stack + `&Shared`) are
+the only two implementations, and `step_instruction` is written once against it.
+Tier feature gaps are now expressed as the `Machine` answering `Unsupported`
+(FFI/globals on the concurrent tier; message passing on the interpreter), which
+`step_instruction` turns into a clear trap — the exact seam Phase 6 removes.
 
 ## Tier feature gaps (behavior depends on executor — a footgun)
 

@@ -360,33 +360,24 @@ impl Runtime {
         if !matches!(self.actors[&actor_id].status, ActorStatus::Runnable) {
             return;
         }
-        let (function_key, pc, instruction) = {
+        let instruction = {
             let actor = &self.actors[&actor_id];
             let frame = actor.frames.last().expect("runnable actor has a frame");
             let FunctionState::Ready(function) = &self.world.functions[&frame.function] else {
                 unreachable!("frames only pin ready code");
             };
-            (frame.function, frame.pc, function.code[frame.pc].clone())
+            function.code[frame.pc].clone()
         };
-        if let Err(condition) = self.execute(actor_id, function_key.0, pc, instruction) {
-            self.actors.get_mut(&actor_id).unwrap().status = ActorStatus::Paused(condition);
+        // Run the *one* step semantics (shared with the concurrent tier) against
+        // this actor. `Flow::Blocked` never arises here — the interpreter has no
+        // message passing, so `Recv` traps rather than blocks.
+        let mut machine = InterpMachine {
+            rt: self,
+            actor: actor_id,
+        };
+        if let Err(condition) = step_instruction(&mut machine, &instruction) {
+            machine.rt.actors.get_mut(&actor_id).unwrap().status = ActorStatus::Paused(condition);
         }
-    }
-
-    fn reg(&self, actor: ActorId, index: usize) -> Result<Value, Condition> {
-        self.actors[&actor].frames.last().unwrap().registers[index]
-            .clone()
-            .ok_or_else(|| Condition::RuntimeTypeError {
-                function: self.actors[&actor].frames.last().unwrap().function.0,
-                pc: self.actors[&actor].frames.last().unwrap().pc,
-                message: format!("empty r{index}"),
-            })
-    }
-
-    fn write_and_advance(&mut self, actor: ActorId, dst: usize, value: Value) {
-        let frame = self.frame_mut(actor);
-        frame.registers[dst] = Some(value);
-        frame.pc += 1;
     }
 
     fn frame_mut(&mut self, actor: ActorId) -> &mut Frame {
@@ -396,206 +387,6 @@ impl Runtime {
             .frames
             .last_mut()
             .unwrap()
-    }
-
-    fn execute(
-        &mut self,
-        actor: ActorId,
-        function: DefId,
-        pc: usize,
-        instruction: Instruction,
-    ) -> Result<(), Condition> {
-        match instruction {
-            Instruction::Const { dst, value } => self.write_and_advance(actor, dst, value),
-            Instruction::New {
-                dst,
-                type_id,
-                fields,
-            } => {
-                let supplied: Vec<(FieldId, Value)> = fields
-                    .iter()
-                    .map(|(id, reg)| Ok((*id, self.reg(actor, *reg)?)))
-                    .collect::<Result<_, Condition>>()?;
-                let id = self.jit_new(type_id, &supplied)?;
-                self.write_and_advance(actor, dst, Value::Ref(id));
-            }
-            Instruction::GetField { dst, object, field } => {
-                let Value::Ref(id) = self.reg(actor, object)? else {
-                    return Err(self.type_error(function, pc, "field access on non-reference"));
-                };
-                let value = self.jit_get_field(id, field)?;
-                self.write_and_advance(actor, dst, value);
-            }
-            Instruction::Copy { dst, src } => {
-                let value = self.reg(actor, src)?;
-                self.write_and_advance(actor, dst, value);
-            }
-            Instruction::AddI64 { dst, left, right } => {
-                let (Value::I64(a), Value::I64(b)) =
-                    (self.reg(actor, left)?, self.reg(actor, right)?)
-                else {
-                    return Err(self.type_error(function, pc, ERR_ADD_NON_I64));
-                };
-                self.write_and_advance(actor, dst, Value::I64(a + b));
-            }
-            Instruction::SubI64 { dst, left, right } => {
-                let (Value::I64(a), Value::I64(b)) =
-                    (self.reg(actor, left)?, self.reg(actor, right)?)
-                else {
-                    return Err(self.type_error(function, pc, ERR_SUB_NON_I64));
-                };
-                self.write_and_advance(actor, dst, Value::I64(a - b));
-            }
-            Instruction::MulI64 { dst, left, right } => {
-                let (Value::I64(a), Value::I64(b)) =
-                    (self.reg(actor, left)?, self.reg(actor, right)?)
-                else {
-                    return Err(self.type_error(function, pc, ERR_MUL_NON_I64));
-                };
-                self.write_and_advance(actor, dst, Value::I64(a * b));
-            }
-            Instruction::LtI64 { dst, left, right } => {
-                let (Value::I64(a), Value::I64(b)) =
-                    (self.reg(actor, left)?, self.reg(actor, right)?)
-                else {
-                    return Err(self.type_error(function, pc, ERR_LT_NON_I64));
-                };
-                self.write_and_advance(actor, dst, Value::Bool(a < b));
-            }
-            Instruction::EqI64 { dst, left, right } => {
-                let (Value::I64(a), Value::I64(b)) =
-                    (self.reg(actor, left)?, self.reg(actor, right)?)
-                else {
-                    return Err(self.type_error(function, pc, ERR_EQ_NON_I64));
-                };
-                self.write_and_advance(actor, dst, Value::Bool(a == b));
-            }
-            Instruction::Not { dst, src } => {
-                let Value::Bool(b) = self.reg(actor, src)? else {
-                    return Err(self.type_error(function, pc, ERR_NOT_NON_BOOL));
-                };
-                self.write_and_advance(actor, dst, Value::Bool(!b));
-            }
-            Instruction::Jump { target } => {
-                self.frame_mut(actor).pc = target;
-            }
-            Instruction::Branch {
-                cond,
-                then_pc,
-                else_pc,
-            } => {
-                let Value::Bool(taken) = self.reg(actor, cond)? else {
-                    return Err(self.type_error(function, pc, ERR_BRANCH_NON_BOOL));
-                };
-                self.frame_mut(actor).pc = if taken { then_pc } else { else_pc };
-            }
-            Instruction::Yield => {
-                // A recurring safe point. Observationally a no-op in the
-                // interpreter; the native path uses it to hand control back so
-                // a pending update can land between iterations (DESIGN.md T5).
-                self.frame_mut(actor).pc += 1;
-            }
-            Instruction::Call {
-                dst,
-                function: callee,
-                args,
-            } => {
-                let version = self.world.current_functions[&callee];
-                let state = &self.world.functions[&(callee, version)];
-                let FunctionState::Ready(code) = state else {
-                    let FunctionState::Broken { diagnostics, .. } = state else {
-                        unreachable!()
-                    };
-                    return Err(Condition::BrokenFunction {
-                        function: callee,
-                        diagnostics: diagnostics.clone(),
-                    });
-                };
-                let params = code.params.clone();
-                let registers_len = code.registers;
-                let values: Vec<_> = args
-                    .into_iter()
-                    .map(|r| self.reg(actor, r))
-                    .collect::<Result<_, _>>()?;
-                for (value, expected) in values.iter().zip(&params) {
-                    self.expect_value(value, expected, callee, pc, "call argument")?;
-                }
-                let mut registers = vec![None; registers_len];
-                for (slot, value) in values.into_iter().enumerate() {
-                    registers[slot] = Some(value);
-                }
-                let owner = self.actors.get_mut(&actor).unwrap();
-                owner.frames.last_mut().unwrap().pc += 1;
-                owner.frames.push(Frame {
-                    function: (callee, version),
-                    pc: 0,
-                    registers,
-                    return_to: Some(ReturnTo { register: dst }),
-                });
-            }
-            Instruction::CallForeign { dst, foreign, args } => {
-                let values: Vec<_> = args
-                    .into_iter()
-                    .map(|r| self.reg(actor, r))
-                    .collect::<Result<_, _>>()?;
-                // The result's type is checked against the declared foreign
-                // signature before it enters a frame slot — the native → managed
-                // return is a use-boundary, so a lying native value traps here
-                // instead of poisoning the caller.
-                let result_ty = self
-                    .world
-                    .foreign_sigs
-                    .get(&foreign)
-                    .map(|(_, r)| r.clone())
-                    .ok_or_else(|| self.type_error(function, pc, "call to unknown foreign fn"))?;
-                let result = self.call_foreign(foreign, &values).map_err(|m| {
-                    self.type_error(function, pc, &m)
-                })?;
-                self.expect_value(&result, &result_ty, function, pc, "foreign result")?;
-                self.write_and_advance(actor, dst, result);
-            }
-            Instruction::LoadGlobal { dst, global } => {
-                let value = self
-                    .globals
-                    .get(&global)
-                    .cloned()
-                    .ok_or_else(|| self.type_error(function, pc, "global read before initialization"))?;
-                self.write_and_advance(actor, dst, value);
-            }
-            Instruction::Emit { value } => {
-                let value = self.reg(actor, value)?;
-                self.jit_emit(value);
-                self.frame_mut(actor).pc += 1;
-            }
-            Instruction::Send { .. } | Instruction::Recv { .. } => {
-                return Err(self.type_error(
-                    function,
-                    pc,
-                    "message passing is only available in the concurrent runtime",
-                ));
-            }
-            Instruction::Return { value } => {
-                let result = self.reg(actor, value)?;
-                // Check the result against this function version's declared type
-                // before it leaves the frame: a pinned old function returning a
-                // since-migrated value traps here instead of handing a lie to
-                // its caller (or completing the actor with one).
-                let key = self.actors[&actor].frames.last().unwrap().function;
-                if let FunctionState::Ready(f) = &self.world.functions[&key] {
-                    let result_ty = f.result.clone();
-                    self.expect_value(&result, &result_ty, function, pc, "return value")?;
-                }
-                let owner = self.actors.get_mut(&actor).unwrap();
-                let frame = owner.frames.pop().unwrap();
-                match frame.return_to {
-                    Some(target) => {
-                        owner.frames.last_mut().unwrap().registers[target.register] = Some(result)
-                    }
-                    None => owner.status = ActorStatus::Complete(result),
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Construct an object at the type's current schema — delegates to the one
@@ -909,5 +700,95 @@ impl Runtime {
             }
         }
         self.heap.retain(&live)
+    }
+}
+
+/// The interpreter's [`Machine`]: the shared step semantics run against one
+/// actor of a single-threaded [`Runtime`]. The current frame is the top of that
+/// actor's frame stack; effects go straight to the runtime's heap/output/globals
+/// (no locks contend — it is single-threaded). Message passing is unsupported
+/// here (it belongs to the concurrent tier), so `Recv` traps rather than blocks.
+struct InterpMachine<'a> {
+    rt: &'a mut Runtime,
+    actor: ActorId,
+}
+
+impl InterpMachine<'_> {
+    fn frame(&self) -> &Frame {
+        self.rt.actors[&self.actor].frames.last().unwrap()
+    }
+    fn frame_mut(&mut self) -> &mut Frame {
+        self.rt.frame_mut(self.actor)
+    }
+}
+
+impl Machine for InterpMachine<'_> {
+    fn world(&self) -> &World {
+        &self.rt.world
+    }
+    fn heap(&self) -> &Heap {
+        &self.rt.heap
+    }
+    fn current(&self) -> (DefId, Version) {
+        self.frame().function
+    }
+    fn pc(&self) -> usize {
+        self.frame().pc
+    }
+    fn reg(&self, i: usize) -> Option<Value> {
+        self.frame().registers.get(i).cloned().flatten()
+    }
+    fn set_reg(&mut self, dst: usize, value: Value) {
+        self.frame_mut().registers[dst] = Some(value);
+    }
+    fn set_pc(&mut self, pc: usize) {
+        self.frame_mut().pc = pc;
+    }
+    fn advance(&mut self) {
+        self.frame_mut().pc += 1;
+    }
+    fn emit(&mut self, value: Value) {
+        self.rt.output.push(value);
+    }
+    fn global(&self, id: DefId) -> GlobalRead {
+        // The interpreter has globals; a missing one is uninitialized, not
+        // unsupported.
+        match self.rt.globals.get(&id) {
+            Some(v) => GlobalRead::Value(v.clone()),
+            None => GlobalRead::Missing,
+        }
+    }
+    fn call_foreign(&mut self, id: ForeignFnId, args: &[Value]) -> ForeignCall {
+        ForeignCall::Done(self.rt.call_foreign(id, args))
+    }
+    fn push_call(
+        &mut self,
+        callee: DefId,
+        version: Version,
+        registers: Vec<Option<Value>>,
+        return_reg: usize,
+    ) {
+        self.rt.actors.get_mut(&self.actor).unwrap().frames.push(Frame {
+            function: (callee, version),
+            pc: 0,
+            registers,
+            return_to: Some(ReturnTo { register: return_reg }),
+        });
+    }
+    fn do_return(&mut self, value: Value) {
+        let owner = self.rt.actors.get_mut(&self.actor).unwrap();
+        let frame = owner.frames.pop().unwrap();
+        match frame.return_to {
+            Some(target) => {
+                owner.frames.last_mut().unwrap().registers[target.register] = Some(value)
+            }
+            None => owner.status = ActorStatus::Complete(value),
+        }
+    }
+    fn send(&mut self, _target: usize, _value: Value) -> Option<bool> {
+        None // no message passing in the single-threaded tier
+    }
+    fn recv(&mut self) -> RecvResult {
+        RecvResult::Unsupported
     }
 }
