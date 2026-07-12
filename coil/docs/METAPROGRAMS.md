@@ -33,12 +33,18 @@ Rust-like ownership dialect, a Scheme frontend).
 - **Compute:** the comptime interpreter runs arbitrary *monomorphic* Coil.
 - **Fail / branch:** `error` (abort expansion with a message), `target-arch`.
 
-New API this project adds:
+New API this project added (all shipped):
 
-- **`(code-span node)` → Span** — expose the span every `Code` node already carries.
-- **`(report severity span msg)`** — a non-fatal, located diagnostic sink; the
-  build vetoes after a pass if any error-severity report was emitted.
-- **`(checker f)` / `(transform f)`** — register a whole-program metaprogram.
+- **`(report NODE MSG)`** — emit a **located** compile-time diagnostic: an error at
+  `NODE`'s source span (file:line:col + caret) with message `MSG`. Like `error` but
+  with a location — a checker can point at the exact offending form. (v1: single,
+  aborts on first; multi-error collection is a future refinement. No separate
+  `code-span` value was needed — `report` takes the node directly.)
+- **`(checker FN)` / `(transform FN)`** — register a whole-program metaprogram.
+- **A dialect is a single import.** A module that contains `(checker …)`/`(transform …)`
+  registrations *is* a dialect — importing it applies the whole stack (import order =
+  pass order; transformers run before checkers). No new syntax; the module is the
+  manifest. See `metaprog-poc/safe_dialect.coil`.
 
 ## What today's metaprograms can and can't do
 
@@ -103,10 +109,12 @@ re-blesses the oracle.
   forms yet (same-count v1). Scope-to-user-module and add/remove-forms are the refinements.
   **Unlocks: transparent GC rooting, GC lowering, Scheme lowering as a pass.**
 
-### Phase 2 — ordered composition = dialects
-- **2.1 A pass manifest** — an ordered list of registered metapasses the driver runs
-  in order. The ordered stack *is* the dialect definition. Answers "can you have more
-  than one?".
+### Phase 2 — ordered composition = dialects — ✅ SHIPPED (via imports)
+- **2.1** No new syntax was needed: `(checker …)`/`(transform …)` registrations in an
+  imported module compose, and **an imported module bundling them IS a dialect**.
+  Import order = pass order; transformers run before checkers. `metaprog-poc/safe_dialect.coil`
+  bundles a transform + a checker; `(import "safe_dialect.coil")` applies both.
+  A named `(dialect …)` form would be pure sugar over this.
 
 ### Phase 3 — core-form demotion (à la carte)
 - **3.1 Demote `store!` first** — parser emits an interceptable `(store! …)` call over
