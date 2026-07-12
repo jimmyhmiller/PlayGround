@@ -70,6 +70,7 @@ Everything in this section is implemented, typechecked, and covered by golden te
 - `List` (new/push/get/len, `for … in`), `Map` (new/set/get/has/keys/len, Int or String keys).
 - `Mutex` (new/lock/unlock/get/set) — real mutual exclusion across threads.
 - `Console` (log/print/**readLine**), `Clock` (now/**sleep**), `Env.get`.
+- `Process.run(cmd)` (real shell), `File.read`/`write`/`append`/`exists` (real file I/O).
 - `Thread.spawn(Runnable)` / `Thread.join` — **real pthreads**, N-thread stop-the-world
   safepoints, atomic-bump arena allocation. `readLine` and `sleep` are
   safepoint-cooperative, so the viewer stays live while a program blocks at a prompt.
@@ -185,6 +186,14 @@ objects and *leaves the ones already promoted to OLD*, then `gc()` sweeps those 
 - **Real HTTP(S) via libcurl** — `Http.request` with real TLS/cert validation. Uses a
   cooperative multi-interface so in-flight requests stay live-inspectable; `HttpResponse`
   is an arena entity you can browse.
+- **Real subprocess + files** — `Process.run(cmd) -> String` runs `/bin/sh -c "<cmd> 2>&1"` and
+  returns the combined output, read **cooperatively** (poll + safepoint on the pipe fd, so a long
+  command never freezes the viewer). `File.read(path) -> Option<String>`, `File.write/append(path,
+  content) -> Bool`, `File.exists(path) -> Bool` (fopen-based, so files land with a sane `0644`
+  mode). A `--readonly` eval rejects `Process.run`/`File.write`/`File.append` as side-effecting.
+  This is what turns the assistant's tools from stubs into real work: `ShellTool` now executes,
+  `SearchTool` greps the tree, and there are real `FileReadTool`/`FileWriteTool` — the model picks
+  a tool, Scry actually does it, the output feeds back (offline golden: `agent_real_tool`).
 - **A real LLM agent loop** — verified live against DeepSeek's Anthropic-compatible
   endpoint (default `deepseek-v4-pro` @ `https://api.deepseek.com/anthropic`; key from
   `DEEPSEEK_API_KEY | DEEPSEEK_KEY | ANTHROPIC_API_KEY`). Real tool-use: the model picks a
