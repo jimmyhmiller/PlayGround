@@ -31,7 +31,13 @@ cargo run --release -p nebula-app -- --blocks 40000 6 300000 --color communities
 - **Click a node to inspect it.** GPU id-picking selects the node under the
   cursor; an in-engine panel shows its label, degree, neighbors, algorithm value,
   and position, and its connections are drawn as highlighted links to ringed
-  neighbors.
+  neighbors. Node size is adjustable at runtime (`+`/`-`, or `--node-size`) so
+  nodes are easy to hit.
+- **Aggregation for graphs too big to draw.** A density heatmap LOD (`A`) bins
+  every node into screen tiles in one O(N) compute pass and renders the *tiles*,
+  not the nodes — so rendering is O(screen), independent of N. A 20M-node graph
+  draws at ~210 fps aggregated (vs ~64 fps node-by-node). Auto-enables past 2M
+  nodes.
 - **Color by graph algorithm.** Connected components, degree, PageRank, greedy
   proper coloring, and label-propagation communities — all computed on the CPU in
   parallel (rayon) and mapped to perceptual palettes (turbo for scalars, golden-
@@ -79,10 +85,11 @@ Default (no generator): `--ba 50000 3`.
 ```
 drag            pan                 scroll          zoom
 space           pause/resume        F               fit view
-click a node    inspect it          C               clear selection
+click a node    inspect it          double-click    focus its neighborhood
+C               clear selection     A               aggregate (density LOD)
 1..6            color: uniform / components / degree / pagerank / coloring / communities
 R / G / O       re-seed random / grid / circle
-E / N           toggle edges / nodes
+E / N           toggle edges / nodes            L    labels        S   save screenshot
 + / -           node size           [ / ]           edge brightness
 H               help overlay        Tab             toggle HUD          Esc  quit
 ```
@@ -153,12 +160,18 @@ The design targets a billion nodes: `u32` ids, `u64` edge counts, structure-of-
 arrays throughout, GPU-resident positions, O(N) grid repulsion, and dispatch
 tiling that already handles billion-scale workgroup counts.
 
-The honest limit today is **memory**. A billion nodes with a modest average
-degree needs on the order of 64 GB just for positions, velocities, and edges —
-i.e. true 1B is out-of-core territory on a 64 GB machine. nebula demonstrates at
-the tens-of-millions the machine holds and is architected for the streaming /
-memory-mapped / tiled approach that closes the rest of the gap. It does not fake
-those numbers.
+The honest limit today is **memory**. See [docs/MEMORY.md](docs/MEMORY.md) for the
+exact per-buffer byte accounting: at average degree 4 a billion nodes costs
+~60 GB on the GPU (and the current build also keeps a ~40 GB CPU copy, so ~100 GB
+total — not yet optimal). The document works out the ~28-32 GB optimal floor and
+the mechanical wins to get there (render edges from CSR, GPU-side algorithms to
+drop the CPU copy, derive sizes/colors, fp16 velocities), plus where compression
+and out-of-core tiling become necessary past degree 4. nebula demonstrates at the
+tens-of-millions the machine holds and does not fake those numbers.
+
+**Rendering is a separate ceiling from storage.** The density-aggregation LOD
+draws a graph in O(screen tiles), independent of N — so "can it be shown" is
+solved even where "can it be held in memory" is not.
 
 ## Performance (Apple M2 Max)
 

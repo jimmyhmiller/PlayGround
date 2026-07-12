@@ -1,0 +1,12 @@
+// The agent doing REAL work, offline + deterministic: the ScriptedModel emits a `shell` tool_use,
+// ShellTool actually runs the command via Process.run, and the real output feeds back into the
+// answer. Proves the whole model-driven loop performs genuine side-effecting work (not canned).
+import std.agent.{Model, Tool, Conversation, ScriptedModel, ShellTool, FileReadTool, FileWriteTool, runAgentLoop}
+fn main() {
+  let tools = List<Tool>()
+  tools.push(ShellTool(command: "sh"))
+  tools.push(FileReadTool(root: "."))
+  tools.push(FileWriteTool(root: "."))
+  let brain = ScriptedModel(persona: "assistant")
+  Console.log(runAgentLoop(Conversation(), brain, tools, "run printf 'scry-real-%d' $((20+3))", 8))
+}

@@ -84,6 +84,7 @@ impl Default for RunOptions {
             show_help: false,
             show_labels: false,
             aggregate: false,
+            node_size: 3.0,
         }
     }
 }
@@ -163,6 +164,10 @@ impl App {
         let show_labels = opts.show_labels;
         let node_count = graph.num_nodes();
         let aggregate = opts.aggregate;
+        let render_params = RenderParams {
+            base_radius_px: opts.node_size.clamp(0.5, 64.0),
+            ..RenderParams::default()
+        };
         App {
             graph,
             seed_positions,
@@ -171,7 +176,7 @@ impl App {
             live: None,
             camera: Camera2D::new(glam::vec2(1280.0, 800.0)),
             settings,
-            render_params: RenderParams::default(),
+            render_params,
             color_mode,
             selected,
             selected_pos: None,
@@ -957,11 +962,15 @@ impl App {
                 self.selected = None;
                 self.selected_pos = None;
             }
-            KeyCode::Equal => {
+            KeyCode::Equal | KeyCode::NumpadAdd => {
                 self.render_params.base_radius_px = (self.render_params.base_radius_px * 1.3).min(64.0);
+                self.push_params();
+                log::info!("node size: {:.1} px", self.render_params.base_radius_px);
             }
-            KeyCode::Minus => {
+            KeyCode::Minus | KeyCode::NumpadSubtract => {
                 self.render_params.base_radius_px = (self.render_params.base_radius_px / 1.3).max(0.5);
+                self.push_params();
+                log::info!("node size: {:.1} px", self.render_params.base_radius_px);
             }
             KeyCode::BracketLeft => {
                 self.render_params.edge_alpha = (self.render_params.edge_alpha / 1.4).max(0.01);
