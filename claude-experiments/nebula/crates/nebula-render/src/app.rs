@@ -161,6 +161,15 @@ impl Default for NodeFilter {
     }
 }
 
+/// A legend-hover highlight predicate over per-node `last_values`.
+#[derive(Clone, Copy, PartialEq)]
+enum Highlight {
+    /// Keep nodes whose value equals this category label.
+    Category(f32),
+    /// Keep nodes whose value falls in `[lo, hi]` (a slice of the scalar ramp).
+    ValueBand(f32, f32),
+}
+
 /// What the color legend should show for the active color mode.
 #[derive(Clone)]
 enum Legend {
@@ -169,8 +178,9 @@ enum Legend {
     Uniform,
     /// A continuous scalar with a turbo gradient between `lo` and `hi`.
     Scalar { lo: f32, hi: f32, log: bool, name: String },
-    /// A categorical field with `count` distinct classes.
-    Categorical { count: usize, name: String },
+    /// A categorical field: the most frequent classes as `(label, color, freq)`
+    /// plus the total distinct count.
+    Categorical { count: usize, name: String, top: Vec<(f32, u32, usize)> },
 }
 
 impl Legend {
@@ -195,15 +205,27 @@ impl Legend {
         }
     }
 
-    /// Build a categorical legend (distinct class count) from label values.
+    /// Build a categorical legend from label values: the 12 most frequent
+    /// classes (with their real colors) plus the distinct count.
     fn categorical(values: &Option<Vec<f32>>, name: &str) -> Legend {
         match values {
             Some(v) => {
-                let mut set = std::collections::HashSet::new();
+                let mut freq: std::collections::HashMap<i64, usize> =
+                    std::collections::HashMap::new();
                 for &x in v {
-                    set.insert(x as i64);
+                    *freq.entry(x as i64).or_insert(0) += 1;
                 }
-                Legend::Categorical { count: set.len(), name: name.to_string() }
+                let count = freq.len();
+                let mut items: Vec<(i64, usize)> = freq.into_iter().collect();
+                items.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                let top = items
+                    .iter()
+                    .take(12)
+                    .map(|&(label, f)| {
+                        (label as f32, crate::coloring::categorical(label as u32), f)
+                    })
+                    .collect();
+                Legend::Categorical { count, name: name.to_string(), top }
             }
             None => Legend::None,
         }
@@ -213,10 +235,10 @@ impl Legend {
 /// Dim a packed RGBA8 color for the hover "fade": darken the rgb (so additive
 /// edges nearly vanish) and drop the alpha (so node dots recede).
 fn dim_color(c: u32) -> u32 {
-    let r = ((c & 0xff) as f32 * 0.16) as u8;
-    let g = (((c >> 8) & 0xff) as f32 * 0.16) as u8;
-    let b = (((c >> 16) & 0xff) as f32 * 0.16) as u8;
-    pack_rgba(r, g, b, 70)
+    let r = ((c & 0xff) as f32 * 0.09) as u8;
+    let g = (((c >> 8) & 0xff) as f32 * 0.09) as u8;
+    let b = (((c >> 16) & 0xff) as f32 * 0.09) as u8;
+    pack_rgba(r, g, b, 55)
 }
 
 /// Unpack a packed RGBA8 color into an egui color (drops alpha).
@@ -235,14 +257,18 @@ fn fmt_legend_num(v: f32) -> String {
     }
 }
 
-/// Draw the color legend for the active mode into the panel.
-fn draw_legend(ui: &mut egui::Ui, legend: &Legend) {
+/// Draw the color legend for the active mode. Returns a highlight predicate when
+/// the pointer is over a legend entry (a category swatch, or a slice of the
+/// scalar gradient), so callers can fade non-matching nodes.
+fn draw_legend(ui: &mut egui::Ui, legend: &Legend) -> Option<Highlight> {
+    let mut hover: Option<Highlight> = None;
     match legend {
         Legend::None | Legend::Uniform => {}
         Legend::Scalar { lo, hi, log, name } => {
             ui.add_space(2.0);
             let w = ui.available_width().min(220.0);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 12.0), egui::Sense::hover());
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(w, 14.0), egui::Sense::hover());
             let painter = ui.painter();
             let steps = 64;
             for i in 0..steps {
@@ -259,6 +285,29 @@ fn draw_legend(ui: &mut egui::Ui, legend: &Legend) {
                     col,
                 );
             }
+            // Hovering the bar highlights a slice of the value range (±6%).
+            if let Some(p) = resp.hover_pos() {
+                let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                let inv = |tt: f32| -> f32 {
+                    let tt = tt.clamp(0.0, 1.0);
+                    if *log {
+                        // Ramp is ln(v+1); invert to raw value space.
+                        let a = (lo.max(0.0) + 1.0).ln();
+                        let b = (hi.max(0.0) + 1.0).ln();
+                        (a + tt * (b - a)).exp() - 1.0
+                    } else {
+                        lo + tt * (hi - lo)
+                    }
+                };
+                let band = 0.06;
+                hover = Some(Highlight::ValueBand(inv(t - band), inv(t + band)));
+                // Marker at the hovered position.
+                let mx = rect.left() + t * rect.width();
+                painter.line_segment(
+                    [egui::pos2(mx, rect.top() - 1.0), egui::pos2(mx, rect.bottom() + 1.0)],
+                    egui::Stroke::new(1.5, egui::Color32::WHITE),
+                );
+            }
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(fmt_legend_num(*lo)).weak().small());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -268,16 +317,25 @@ fn draw_legend(ui: &mut egui::Ui, legend: &Legend) {
             let suffix = if *log { "  (log scale)" } else { "" };
             ui.label(egui::RichText::new(format!("{name}{suffix}")).weak().small());
         }
-        Legend::Categorical { count, name } => {
+        Legend::Categorical { count, name, top } => {
             ui.add_space(2.0);
             ui.horizontal_wrapped(|ui| {
-                for i in 0..(*count).min(12) {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(13.0, 13.0), egui::Sense::hover());
-                    ui.painter()
-                        .rect_filled(rect, 2.0, egui_rgb(crate::coloring::categorical(i as u32)));
+                for &(label, color, freq) in top {
+                    let (rect, resp) = ui
+                        .allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 2.0, egui_rgb(color));
+                    if resp.hovered() {
+                        ui.painter().rect_stroke(
+                            rect,
+                            2.0,
+                            egui::Stroke::new(1.5, egui::Color32::WHITE),
+                            egui::StrokeKind::Outside,
+                        );
+                        hover = Some(Highlight::Category(label));
+                        resp.on_hover_text(format!("{freq} nodes"));
+                    }
                 }
-                if *count > 12 {
+                if *count > top.len() {
                     ui.label(egui::RichText::new("…").weak());
                 }
             });
@@ -286,6 +344,7 @@ fn draw_legend(ui: &mut egui::Ui, legend: &Legend) {
             );
         }
     }
+    hover
 }
 
 /// Options passed in from the CLI.
@@ -317,6 +376,8 @@ pub struct RunOptions {
     pub start_hierarchical: bool,
     /// Start in the radial (concentric DAG) layout instead of force-directed.
     pub start_radial: bool,
+    /// Headless preview of the legend-hover highlight (the most frequent class).
+    pub preview_highlight: bool,
 }
 
 impl Default for RunOptions {
@@ -338,6 +399,7 @@ impl Default for RunOptions {
             filter: None,
             start_hierarchical: false,
             start_radial: false,
+            preview_highlight: false,
         }
     }
 }
@@ -391,8 +453,8 @@ pub struct App {
 
     // Selection / overlay.
     selected: Option<u32>,
-    /// Node currently under the cursor (drives hover highlight-by-color).
-    hovered: Option<u32>,
+    /// Active legend-hover highlight (keeps matching nodes bright, fades rest).
+    highlight: Option<Highlight>,
     selected_pos: Option<glam::Vec2>,
     neighbor_positions: Vec<glam::Vec2>,
     last_values: Option<Vec<f32>>,
@@ -472,7 +534,7 @@ impl App {
             render_params,
             color_mode,
             selected,
-            hovered: None,
+            highlight: None,
             selected_pos: None,
             neighbor_positions: Vec::new(),
             last_values: None,
@@ -538,10 +600,28 @@ impl App {
         } else if self.opts.start_hierarchical {
             self.apply_hierarchical();
         }
-        // Headless preview of the hover highlight: treat --select as a hover.
-        if self.opts.max_frames.is_some() && self.selected.is_some() {
-            self.hovered = self.selected;
-            self.push_filtered();
+        // Headless: preview the legend hover highlight (most frequent class).
+        if self.opts.max_frames.is_some() && self.opts.preview_highlight {
+            let h = match &self.legend {
+                Legend::Categorical { top, .. } => {
+                    top.first().map(|&(label, _, _)| Highlight::Category(label))
+                }
+                Legend::Scalar { lo, hi, log, .. } => {
+                    // Mimic hovering ~55% along the (log) bar, ±8%.
+                    let inv = |tt: f32| {
+                        if *log {
+                            let a = (lo.max(0.0) + 1.0).ln();
+                            let b = (hi.max(0.0) + 1.0).ln();
+                            (a + tt * (b - a)).exp() - 1.0
+                        } else {
+                            lo + tt * (hi - lo)
+                        }
+                    };
+                    Some(Highlight::ValueBand(inv(0.47), inv(0.63)))
+                }
+                _ => None,
+            };
+            self.set_highlight(h);
         }
         self.update_title();
     }
@@ -637,21 +717,31 @@ impl App {
     }
 
     /// Push `base_colors`/`base_sizes` to the GPU, applying the attribute filter
-    /// (hides non-matching) and the hover highlight (fades nodes whose color
-    /// differs from the hovered node's — i.e. keeps only "that color" bright).
+    /// (hides non-matching) and the legend-hover highlight (fades nodes that
+    /// don't match the hovered legend entry — keeps only "that color" bright).
     fn push_filtered(&mut self) {
         let n = self.graph.num_nodes() as usize;
         let mask = self.filter_mask(n);
         self.filter_match_count = mask.as_ref().map(|m| m.iter().filter(|&&v| v).count());
 
-        // The color to keep bright while hovering (the hovered node's own color).
-        let highlight: Option<u32> = self
-            .hovered
-            .and_then(|h| self.base_colors.get(h as usize).copied());
+        // Per-node highlight match against the hovered legend entry.
+        let matched: Option<Vec<bool>> = self.highlight.map(|hl| {
+            let vals = self.last_values.as_ref();
+            (0..n)
+                .map(|i| {
+                    let v = vals.and_then(|v| v.get(i)).copied();
+                    match (hl, v) {
+                        (Highlight::Category(c), Some(x)) => x == c,
+                        (Highlight::ValueBand(lo, hi), Some(x)) => x >= lo && x <= hi,
+                        _ => false,
+                    }
+                })
+                .collect()
+        });
 
         let Some(live) = self.live.as_ref() else { return };
 
-        if mask.is_none() && highlight.is_none() {
+        if mask.is_none() && matched.is_none() {
             // Fast path: nothing to modify.
             live.graph_gpu.set_colors(&live.gpu.queue, &self.base_colors);
             live.graph_gpu.set_sizes(&live.gpu.queue, &self.base_sizes);
@@ -661,13 +751,12 @@ impl App {
         let mut colors = vec![0u32; n];
         let mut sizes = vec![0f32; n];
         for i in 0..n {
-            let visible = mask.as_ref().map_or(true, |m| m[i]);
-            if !visible {
+            if !mask.as_ref().map_or(true, |m| m[i]) {
                 continue; // hidden by filter (color 0, size 0)
             }
             let base = self.base_colors[i];
-            match highlight {
-                Some(hc) if base != hc => {
+            match &matched {
+                Some(m) if !m[i] => {
                     colors[i] = dim_color(base);
                     sizes[i] = self.base_sizes[i] * 0.55;
                 }
@@ -681,37 +770,10 @@ impl App {
         live.graph_gpu.set_sizes(&live.gpu.queue, &sizes);
     }
 
-    /// Recompute the hovered node each frame (one id-pick) and, when it changes,
-    /// re-push colors so the highlight follows the cursor. Skipped while dragging,
-    /// over the panel, or on graphs too large to pick cheaply per frame.
-    fn update_hover(&mut self) {
-        // Headless capture has no live cursor; keep any preset hover (see
-        // init_live) and skip the per-frame pick.
-        if self.opts.max_frames.is_some() {
-            return;
-        }
-        let clear = |s: &mut Self| {
-            if s.hovered.is_some() {
-                s.hovered = None;
-                s.push_filtered();
-            }
-        };
-        if self.dragging || self.graph.num_nodes() > 3_000_000 {
-            clear(self);
-            return;
-        }
-        let over_panel = self
-            .ui
-            .as_ref()
-            .map(|u| u.ctx.is_pointer_over_area())
-            .unwrap_or(false);
-        if over_panel {
-            clear(self);
-            return;
-        }
-        let h = self.pick_id(self.cursor);
-        if h != self.hovered {
-            self.hovered = h;
+    /// Update the legend-hover highlight and re-push colors if it changed.
+    fn set_highlight(&mut self, h: Option<Highlight>) {
+        if h != self.highlight {
+            self.highlight = h;
             self.push_filtered();
         }
     }
@@ -761,7 +823,7 @@ impl App {
             labels[id] = *map.entry(key).or_insert(next);
         }
         self.last_values = Some(labels.iter().map(|&l| l as f32).collect());
-        self.legend = Legend::Categorical { count: map.len(), name: key };
+        self.legend = Legend::categorical(&self.last_values, &key);
         (coloring::categorical_colors(&labels), None)
     }
 
@@ -807,6 +869,7 @@ impl App {
     /// diffs are applied to `self` after the panel closes.
     fn build_ui(&mut self, ctx: &egui::Context) {
         if !self.show_panel {
+            self.set_highlight(None);
             return;
         }
 
@@ -835,6 +898,7 @@ impl App {
         let mut act_fit = false;
         let mut act_color: Option<ColorMode> = None;
         let mut act_reseed: Option<Seed> = None;
+        let mut act_highlight: Option<Highlight> = None;
 
         egui::SidePanel::left("nebula_controls")
             .resizable(true)
@@ -905,7 +969,7 @@ impl App {
                         }
                     }
                 }
-                draw_legend(ui, &legend);
+                act_highlight = draw_legend(ui, &legend);
                 ui.separator();
 
                 ui.strong("Display");
@@ -1006,6 +1070,10 @@ impl App {
         if let Some(m) = act_color {
             self.set_color_mode(m);
         }
+        // In headless capture there's no live pointer; keep any preset preview.
+        if self.opts.max_frames.is_none() {
+            self.set_highlight(act_highlight);
+        }
         if let Some(seed) = act_reseed {
             match seed {
                 Seed::Random => {
@@ -1028,7 +1096,6 @@ impl App {
             return;
         }
         self.run_ui();
-        self.update_hover();
 
         // Refresh selection geometry (node + neighbor positions) so the marker,
         // info panel, and connection lines track the live simulation.
@@ -1707,6 +1774,7 @@ impl App {
     fn set_color_mode(&mut self, mode: ColorMode) {
         if self.color_mode != mode {
             self.color_mode = mode;
+            self.highlight = None; // categories/ranges differ across modes
             self.apply_color_mode();
             self.update_title();
         }
