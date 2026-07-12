@@ -124,6 +124,31 @@ fn threads_on_jit() {
 }
 
 #[test]
+fn repeated_await_inside_let_is_stable() {
+    // Regression: `%await`/`(gc)` shims READ `ctx.cur`, but a body containing them
+    // was eligible for the caller-built-frame fast path, which leaves `ctx.cur`
+    // uninitialized (stack garbage). First/fresh-stack call happened to work;
+    // RE-ENTERING a `let` scope that awaits (batch 2+) read a stale heap-id as the
+    // frame pointer -> `Arc::clone` fault. Fixed by forcing `needs_cur` for
+    // Await/Gc bodies (they take the shim path, so `run_once` inits `cur`).
+    // Each of these crashed with SIGSEGV before the fix.
+    assert_eq!(
+        jit("(defn trial [] (let [c 0] @(future 42) 99)) \
+             (loop [i 0 ok 0] (if (= i 5) ok (recur (inc i) (do (trial) (inc ok)))))"),
+        "5"
+    );
+    // heavy: 25 batches of 8 workers CAS-hammering a shared atom, awaited in a let
+    assert_eq!(
+        jit("(def counter (atom 0)) \
+             (defn trial [] (reset! counter 0) \
+               (let [fs (mapv (fn [_] (future (dotimes [_ 300] (swap! counter inc)))) (range 8))] \
+                 (doseq [f fs] (deref f)) (= (deref counter) 2400))) \
+             (loop [i 0 ok 0] (if (= i 25) ok (recur (inc i) (if (trial) (inc ok) ok))))"),
+        "25"
+    );
+}
+
+#[test]
 fn lazy_seqs_on_jit() {
     assert_eq!(jit("(take 5 (map (fn [x] (* x x)) (range)))"), "(0 1 4 9 16)");
     assert_eq!(jit("(reduce + (take 10 (iterate inc 1)))"), "55");

@@ -775,6 +775,11 @@ fn body_needs_cur(ir: &Ir) -> bool {
         Ir::SetLocal { up, val, .. } => *up > 0 || body_needs_cur(val),
         Ir::Const(_) | Ir::Quote(_) | Ir::Global(_) => false,
         Ir::If(a, b, c) => body_needs_cur(a) || body_needs_cur(b) || body_needs_cur(c),
+        // `%await` / `(gc)` shims READ `ctx.cur` (to publish/root the live frame
+        // chain). Their body therefore needs the real `cur` and must NOT take the
+        // caller-built-frame fast path, which leaves `cur` uninitialized (stack
+        // garbage) — reading it there faults. So force `needs_cur` here.
+        Ir::Prim(Prim::Await | Prim::Gc, _) => true,
         Ir::Do(xs) | Ir::Prim(_, xs) => xs.iter().any(body_needs_cur),
         Ir::Call(f, args) => body_needs_cur(f) || args.iter().any(body_needs_cur),
         Ir::Def { init, .. } | Ir::SetGlobal { val: init, .. } => body_needs_cur(init),
