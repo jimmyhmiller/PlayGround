@@ -8,10 +8,61 @@
 ; static-inspect / typecheck paths that build a Program without running never collect.
 (module gcstate)
 (import "atomic.coil" :use *)
+(import "ioutil.coil" :use *)
 
 (defn gc-bytes-cell  [] (-> (ptr i64)) (alloc-static i64))
 (defn gc-nextgc-cell [] (-> (ptr i64)) (alloc-static i64))
 (defn gc-enabled-cell [] (-> (ptr i64)) (alloc-static i64))
+
+; ============================ generational state (02 §6, generational) =======
+; YOUNG LIST — every fresh object's pointer, appended lock-free (`atomic-add` reserves a unique
+; slot, pre-sized so it never reallocs mid-epoch). A MINOR collection sweeps THIS list, not the
+; whole heap, so its cost is O(objects-allocated-since-last-minor). Overflow (more objects in one
+; epoch than the cap) => the pusher is told (-1) and marks that object OLD, so it's simply
+; collected at the next major instead — safe, never lost.
+(const GC_YOUNG_CAP 262144)   ; 2 MiB of pointers; the minor byte-threshold fires long before this
+(defn gc-young-arr-cell   [] (-> (ptr i64)) (alloc-static i64))
+(defn gc-young-count-cell [] (-> (ptr i64)) (alloc-static i64))
+(defn gc-young-init [] (-> i64)
+  (if (= (load (gc-young-arr-cell)) 0) (do (store! (gc-young-arr-cell) (cast i64 (xalloc (* 8 GC_YOUNG_CAP)))) 0) 0)
+  (atomic-store (gc-young-count-cell) 0) 0)
+(defn gc-young-push [(p i64)] (-> i64)
+  (let [i (atomic-add (gc-young-count-cell) 1)]
+    (if (>= i GC_YOUNG_CAP) -1 (do (store! (index (cast (ptr i64) (load (gc-young-arr-cell))) i) p) i))))
+(defn gc-young-count [] (-> i64) (let [c (atomic-load (gc-young-count-cell))] (if (> c GC_YOUNG_CAP) GC_YOUNG_CAP c)))
+(defn gc-young-at [(i i64)] (-> i64) (load (index (cast (ptr i64) (load (gc-young-arr-cell))) i)))
+(defn gc-young-reset [] (-> i64) (atomic-store (gc-young-count-cell) 0) 0)
+
+; REMEMBERED SET — old objects a write barrier caught storing a reference (potential old->young
+; edges). A minor treats these as extra roots. Overflow just forces the next collection to be a
+; major (which scans everything, needing no remembered set).
+(const GC_REM_CAP 65536)
+(defn gc-rem-arr-cell   [] (-> (ptr i64)) (alloc-static i64))
+(defn gc-rem-count-cell [] (-> (ptr i64)) (alloc-static i64))
+(defn gc-rem-overflow-cell [] (-> (ptr i64)) (alloc-static i64))
+(defn gc-rem-init [] (-> i64)
+  (if (= (load (gc-rem-arr-cell)) 0) (do (store! (gc-rem-arr-cell) (cast i64 (xalloc (* 8 GC_REM_CAP)))) 0) 0)
+  (atomic-store (gc-rem-count-cell) 0) (store! (gc-rem-overflow-cell) 0) 0)
+(defn gc-rem-push [(p i64)] (-> i64)
+  (let [i (atomic-add (gc-rem-count-cell) 1)]
+    (if (>= i GC_REM_CAP) (do (store! (gc-rem-overflow-cell) 1) -1) (do (store! (index (cast (ptr i64) (load (gc-rem-arr-cell))) i) p) i))))
+(defn gc-rem-count [] (-> i64) (let [c (atomic-load (gc-rem-count-cell))] (if (> c GC_REM_CAP) GC_REM_CAP c)))
+(defn gc-rem-at [(i i64)] (-> i64) (load (index (cast (ptr i64) (load (gc-rem-arr-cell))) i)))
+(defn gc-rem-reset [] (-> i64) (atomic-store (gc-rem-count-cell) 0) (store! (gc-rem-overflow-cell) 0) 0)
+(defn gc-rem-overflow? [] (-> i64) (load (gc-rem-overflow-cell)))
+
+; which collection kind is currently running (mark-object skips OLD objects during a minor).
+(defn gc-minor-mode-cell [] (-> (ptr i64)) (alloc-static i64))
+(defn gc-in-minor? [] (-> i64) (load (gc-minor-mode-cell)))
+(defn gc-set-minor [] (-> i64) (store! (gc-minor-mode-cell) 1) 0)
+(defn gc-set-major [] (-> i64) (store! (gc-minor-mode-cell) 0) 0)
+
+; minors since the last major — a major runs every GC_MAJOR_EVERY minors (bounds old-gen floating garbage).
+(const GC_MAJOR_EVERY 8)
+(defn gc-minors-cell [] (-> (ptr i64)) (alloc-static i64))
+(defn gc-minors [] (-> i64) (load (gc-minors-cell)))
+(defn gc-minors-inc [] (-> i64) (store! (gc-minors-cell) (+ (load (gc-minors-cell)) 1)) 0)
+(defn gc-minors-reset [] (-> i64) (store! (gc-minors-cell) 0) 0)
 
 ; add `n` bytes to the live-allocation estimate (called from every alloc site).
 (defn gc-account [(n i64)] (-> i64) (atomic-add (gc-bytes-cell) n) 0)

@@ -1263,12 +1263,17 @@
           (store! (field ti fields) nfi)
           (store! (field ti field-count) (+ old-fc 1))
           (store! (field ti instance-size) (+ offset 8)))
-        ; write the default into every live instance's new slot (O(live instances) STW pass)
-        (let [hwm (arena-hwm a) (mut i) 0]
+        ; write the default into every live instance's new slot (O(live instances) STW pass).
+        ; If the new field is a reference and the default is a (possibly young) heap object, the
+        ; write barrier remembers each old instance so a later MINOR traces it and keeps `defval`
+        ; (and its subgraph) alive — otherwise an old->young edge would be invisible.
+        (let [isref (let [k (ty-field-kind fty)] (if (or (= k FIELD_STRING) (or (= k FIELD_REF) (or (= k FIELD_IFACE_REF) (= k FIELD_LIST_REF)))) 1 0))
+              hwm (arena-hwm a) (mut i) 0]
           (loop (if (< (load i) hwm)
                   (let [ip (cast (ptr InstanceHeader) (arena-slot-ptr a (load i)))]
                     (if (= (iand (load (field ip flags)) FLAG_LIVE) FLAG_LIVE)
-                      (do (store! (cast (ptr i64) (index (cast (ptr u8) ip) offset)) defval) 0) 0)
+                      (do (store! (cast (ptr i64) (index (cast (ptr u8) ip) offset)) defval)
+                          (if (and (= isref 1) (!= defval 0)) (arena-write-barrier ip) 0) 0) 0)
                     (store! i (+ (load i) 1)) 0)
                   (break))))
         0))))

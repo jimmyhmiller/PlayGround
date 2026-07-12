@@ -35,44 +35,68 @@
 (const OBJ_ENUM     4000000000000000004)
 (const OBJ_MUTEX    4000000000000000005)
 
-(defstruct ObjHeader [(kind i64) (marked i64) (next i64)])   ; next = raw ptr bits (0 = end)
+; DOUBLY-linked so a minor collection can O(1)-unlink an individual dead young object without
+; a full-list walk. `flags` carries the mark/generation bits (mirrors InstanceHeader.flags).
+(defstruct ObjHeader [(kind i64) (flags i64) (next i64) (prev i64)])   ; next/prev = raw ptr bits (0 = end)
+(const OBJ_MARK 1) (const OBJ_OLD 2) (const OBJ_REM 4)
 
 (defn obj-kind    [(o (ptr i8))] (-> i64) (load (field (cast (ptr ObjHeader) o) kind)))
-(defn obj-marked? [(o (ptr i8))] (-> i64) (load (field (cast (ptr ObjHeader) o) marked)))
-(defn obj-mark    [(o (ptr i8))] (-> i64) (store! (field (cast (ptr ObjHeader) o) marked) 1) 0)
-(defn obj-unmark  [(o (ptr i8))] (-> i64) (store! (field (cast (ptr ObjHeader) o) marked) 0) 0)
+(defn obj-marked? [(o (ptr i8))] (-> i64) (if (= (iand (load (field (cast (ptr ObjHeader) o) flags)) OBJ_MARK) OBJ_MARK) 1 0))
+(defn obj-mark    [(o (ptr i8))] (-> i64) (store! (field (cast (ptr ObjHeader) o) flags) (ior (load (field (cast (ptr ObjHeader) o) flags)) OBJ_MARK)) 0)
+(defn obj-unmark  [(o (ptr i8))] (-> i64) (store! (field (cast (ptr ObjHeader) o) flags) (iand (load (field (cast (ptr ObjHeader) o) flags)) (ixor -1 OBJ_MARK))) 0)
+(defn obj-old?    [(o (ptr i8))] (-> i64) (if (= (iand (load (field (cast (ptr ObjHeader) o) flags)) OBJ_OLD) OBJ_OLD) 1 0))
+(defn obj-set-old [(o (ptr i8))] (-> i64) (store! (field (cast (ptr ObjHeader) o) flags) (ior (load (field (cast (ptr ObjHeader) o) flags)) OBJ_OLD)) 0)
+(defn obj-remembered? [(o (ptr i8))] (-> i64) (if (= (iand (load (field (cast (ptr ObjHeader) o) flags)) OBJ_REM) OBJ_REM) 1 0))
+(defn obj-set-remembered [(o (ptr i8))] (-> i64) (store! (field (cast (ptr ObjHeader) o) flags) (ior (load (field (cast (ptr ObjHeader) o) flags)) OBJ_REM)) 0)
+(defn obj-clear-mark-rem [(o (ptr i8))] (-> i64) (store! (field (cast (ptr ObjHeader) o) flags) (iand (load (field (cast (ptr ObjHeader) o) flags)) (ixor -1 (ior OBJ_MARK OBJ_REM)))) 0)
+; WRITE BARRIER for non-arena containers (List/Map/Mutex): remember an OLD container that just had
+; something stored into it, so a minor traces it for young elements (dedup via the REMEMBERED bit).
+(defn obj-write-barrier [(o (ptr i8))] (-> i64)
+  (if (= (obj-old? o) 1)
+    (if (= (obj-remembered? o) 1) 0 (do (obj-set-remembered o) (gc-rem-push (cast i64 o)) 0))
+    0))
 (defn obj-next    [(o (ptr i8))] (-> i64) (load (field (cast (ptr ObjHeader) o) next)))
 (defn obj-set-next [(o (ptr i8)) (n i64)] (-> i64) (store! (field (cast (ptr ObjHeader) o) next) n) 0)
+(defn obj-prev    [(o (ptr i8))] (-> i64) (load (field (cast (ptr ObjHeader) o) prev)))
+(defn obj-set-prev [(o (ptr i8)) (n i64)] (-> i64) (store! (field (cast (ptr ObjHeader) o) prev) n) 0)
 
 ; is this word a non-arena object pointer's leading word (a kind sentinel)?
 (defn obj-is-kind? [(w i64)] (-> i64) (if (>= w OBJ_TAG_BASE) 1 0))
 
-; global Treiber list head of all LINKED non-arena objects (raw ptr bits, 0 = empty).
+; global head of the doubly-linked list of all LINKED non-arena objects (raw ptr bits, 0 = empty).
 (defn gc-objs-cell [] (-> (ptr i64)) (alloc-static i64))
 
+; lock-free push onto the head (Treiber). The new node is the head, so its prev = 0; the old head
+; gets its prev repointed at the new node. Exactly one push per (old head) wins the CAS, so
+; old-head.prev has a single writer — no race. prev links are only READ at a STW sweep.
 (defn gc-obj-link [(o (ptr i8))] (-> i64)
+  (obj-set-prev o 0)
   (loop
     (let [old (atomic-load (gc-objs-cell))]
       (obj-set-next o old)
-      (if (= (atomic-cas (gc-objs-cell) old (cast i64 o)) old) (break) (continue))))
+      (if (= (atomic-cas (gc-objs-cell) old (cast i64 o)) old)
+        (do (if (!= old 0) (obj-set-prev (cast (ptr i8) old) (cast i64 o)) 0) (break))
+        (continue))))
   0)
 
-; allocate `bytes`, stamp the header with kind `k`, link into the global list, account bytes.
+; allocate `bytes`, stamp header (kind, flags=0 => young), link into the list, account bytes,
+; and record the fresh object on the young list (overflow => born OLD, collected only at a major).
 (defn obj-alloc [(bytes i64) (k i64)] (-> (ptr i8))
   (let [o (cast (ptr i8) (xalloc bytes))]
     (store! (field (cast (ptr ObjHeader) o) kind) k)
-    (store! (field (cast (ptr ObjHeader) o) marked) 0)
+    (store! (field (cast (ptr ObjHeader) o) flags) 0)
     (gc-obj-link o)
     (gc-account bytes)
+    (if (< (gc-young-push (cast i64 o)) 0) (obj-set-old o) 0)
     o))
 
-; immortal allocation: header stamped, NOT linked, NOT accounted — never swept. For
-; compile-time constants and the shared field sentinel.
+; immortal allocation: header stamped OLD (so a minor never touches it), NOT linked, NOT
+; accounted — never swept. For compile-time constants and the shared field sentinel.
 (defn obj-alloc-perm [(bytes i64) (k i64)] (-> (ptr i8))
   (let [o (cast (ptr i8) (xalloc bytes))]
     (store! (field (cast (ptr ObjHeader) o) kind) k)
-    (store! (field (cast (ptr ObjHeader) o) marked) 0)
-    (obj-set-next o 0)
+    (store! (field (cast (ptr ObjHeader) o) flags) OBJ_OLD)
+    (obj-set-next o 0) (obj-set-prev o 0)
     o))
 
 ; ============================ String ========================================
@@ -175,7 +199,8 @@
       (store! (field l cap) ncap) 0)
     0)
   (store! (index (load (field l items)) (load (field l len))) v)
-  (store! (field l len) (+ (load (field l len)) 1)) 0)
+  (store! (field l len) (+ (load (field l len)) 1))
+  (obj-write-barrier (cast (ptr i8) l)) 0)
 
 (defn list-oob [(i i64) (n i64)] (-> i64)
   (if (eval-active?)
@@ -190,7 +215,7 @@
 ; ============================ enum boxes ====================================
 ; layout: [ObjHeader(3)][tag][argc][ref-mask][arg0]...  Payload slots are untagged (§1); the
 ; GC reads `ref-mask` (bit i set => arg i is a reference to trace). Accessors hide the offset.
-(const ENUM_HDR 3)   ; ObjHeader words before the enum body
+(const ENUM_HDR 4)   ; ObjHeader words before the enum body (kind, flags, next, prev)
 (defn enum-alloc-rm [(tag i64) (argc i64) (refmask i64)] (-> (ptr i64))
   (let [p (cast (ptr i64) (obj-alloc (* 8 (+ (+ ENUM_HDR 3) argc)) OBJ_ENUM))]
     (store! (index p (+ ENUM_HDR 0)) tag) (store! (index p (+ ENUM_HDR 1)) argc)
@@ -260,7 +285,8 @@
           0)
         (store! (index (load (field m keys)) (load (field m len))) k)
         (store! (index (load (field m vals)) (load (field m len))) v)
-        (store! (field m len) (+ (load (field m len)) 1)) 0))))
+        (store! (field m len) (+ (load (field m len)) 1)) 0))
+    (obj-write-barrier (cast (ptr i8) m)) 0))
 
 ; map-get returns Some(val) — the value's ref-ness is the map's `val-ref`, so the Option box
 ; is tagged correctly for the GC.
@@ -290,7 +316,7 @@
 (defn mutex-set-valref [(m (ptr MutexObj)) (r i64)] (-> i64) (store! (field m val-ref) r) 0)
 (defn mutex-valref [(m (ptr MutexObj))] (-> i64) (load (field m val-ref)))
 (defn mutex-get [(m (ptr MutexObj))] (-> i64) (load (field m val)))
-(defn mutex-set [(m (ptr MutexObj)) (v i64)] (-> i64) (store! (field m val) v) 0)
+(defn mutex-set [(m (ptr MutexObj)) (v i64)] (-> i64) (store! (field m val) v) (obj-write-barrier (cast (ptr i8) m)) 0)
 
 ; ============================ GC free (sweep) ===============================
 ; free one swept non-arena object: release any owned sub-buffers, then the object itself.

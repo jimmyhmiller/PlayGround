@@ -38,10 +38,28 @@
   [(type-id    i64)     ; which concrete type — recovers TypeInfo for iface dispatch + GC
    (slot-index i64)     ; index within this type's arena (stable id component)
    (generation i64)     ; bumped on free — invalidates viewer handles (Phase 4)
-   (flags      i64)])   ; bit0 = live, bit1 = gc-marked (set during mark, cleared on sweep)
+   (flags      i64)])   ; bit0 live, bit1 gc-marked, bit2 OLD (survived a minor), bit3 REMEMBERED
 
 (const FLAG_LIVE 1)
 (const FLAG_MARKED 2)
+(const FLAG_OLD 4)          ; generational: set on promotion (survived a minor collection)
+(const FLAG_REMEMBERED 8)   ; generational: this old instance is in the remembered set (dedup)
+
+; ---- generational header helpers (STW during collection => plain ops; barrier sets during a
+; running mutator, but a benign duplicate remembered-set entry is harmless, so no atomics) ----
+(defn arena-old?          [(p (ptr InstanceHeader))] (-> i64) (if (= (iand (load (field p flags)) FLAG_OLD) FLAG_OLD) 1 0))
+(defn arena-set-old       [(p (ptr InstanceHeader))] (-> i64) (store! (field p flags) (ior (load (field p flags)) FLAG_OLD)) 0)
+(defn arena-remembered?   [(p (ptr InstanceHeader))] (-> i64) (if (= (iand (load (field p flags)) FLAG_REMEMBERED) FLAG_REMEMBERED) 1 0))
+(defn arena-set-remembered [(p (ptr InstanceHeader))] (-> i64) (store! (field p flags) (ior (load (field p flags)) FLAG_REMEMBERED)) 0)
+(defn arena-clear-remembered [(p (ptr InstanceHeader))] (-> i64) (store! (field p flags) (iand (load (field p flags)) (ixor -1 FLAG_REMEMBERED))) 0)
+
+; WRITE BARRIER: called after a reference is stored into instance `p`. If `p` is OLD, add it to
+; the remembered set (once — the REMEMBERED bit dedups) so the next MINOR collection treats it as
+; a root and finds the young object we just stored. Young targets are the common case and a no-op.
+(defn arena-write-barrier [(p (ptr InstanceHeader))] (-> i64)
+  (if (= (arena-old? p) 1)
+    (if (= (arena-remembered? p) 1) 0 (do (arena-set-remembered p) (gc-rem-push (cast i64 p)) 0))
+    0))
 
 (defstruct TypeArena
   [(type-id     i64)
@@ -160,9 +178,11 @@
   (let [p (cast (ptr InstanceHeader) (arena-slot-ptr a idx))]
     (store! (field p type-id) (load (field a type-id)))
     (store! (field p slot-index) idx)
-    (store! (field p flags) FLAG_LIVE)
+    (store! (field p flags) FLAG_LIVE)              ; born YOUNG (no OLD bit)
     (atomic-add (field a live-count) 1)
     (gc-account (load (field a slot-size)))
+    ; record on the young list; if it overflowed, the instance is born OLD (major-only reclaim).
+    (if (< (gc-young-push (cast i64 p)) 0) (arena-set-old p) 0)
     (cast (ptr u8) p)))
 
 ; allocate one slot; stamps the header (type-id, slot-index, flags=live). Returns ptr.
@@ -207,9 +227,10 @@
     (arena-free-push a idx))
   0)
 
-; SWEEP one arena (02 §6): walk [0, hwm); a marked live slot is unmarked and survives, an
-; unmarked live slot is freed onto the free-list. Returns the number of slots reclaimed.
-; STW: the collector is the only thread touching this arena, so plain flag reads/writes.
+; MAJOR SWEEP of one arena (02 §6): walk [0, hwm); a marked live slot survives (clear mark),
+; an unmarked live slot is freed onto the free-list. A generational MAJOR promotes every
+; survivor to OLD and clears its REMEMBERED bit (the remembered set is reset after a major).
+; Returns the number of slots reclaimed. STW: the collector is the sole toucher => plain ops.
 (defn arena-sweep [(a (ptr TypeArena))] (-> i64)
   (let [hwm (load (field a bump-cursor)) (mut i) 0 (mut freed) 0]
     (loop
@@ -217,7 +238,8 @@
         (let [p (cast (ptr InstanceHeader) (arena-slot-ptr a (load i))) fl (load (field p flags))]
           (if (= (iand fl FLAG_LIVE) FLAG_LIVE)
             (if (= (iand fl FLAG_MARKED) FLAG_MARKED)
-              (store! (field p flags) (iand fl (ixor -1 FLAG_MARKED)))       ; survive; clear mark
+              ; survive: clear MARK + REMEMBERED, set OLD
+              (store! (field p flags) (ior (iand fl (ixor -1 (ior FLAG_MARKED FLAG_REMEMBERED))) FLAG_OLD))
               (do (arena-free a (load i)) (store! freed (+ (load freed) 1)) 0))
             0)
           (store! i (+ (load i) 1)) 0)

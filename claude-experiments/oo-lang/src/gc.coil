@@ -116,17 +116,22 @@
       (= k OBJ_MAP)    (+ (sizeof MapObj) (* 16 (load (field (cast (ptr MapObj) o) cap))))
       64)))
 
-; SWEEP the non-arena object list (clox-style): free unmarked objects and unlink them, unmark
-; survivors for the next cycle. Returns the surviving byte estimate. STW → single-threaded.
+; MAJOR SWEEP of the non-arena object list: free unmarked, keep marked survivors — promote each
+; to OLD (clear mark + remembered) and rebuild the doubly-linked list among survivors (so a later
+; minor's O(1) unlink has correct prev links). Returns the surviving byte estimate. STW.
 (defn gc-sweep-objs [] (-> i64)
   (let [(mut prev) (cast i64 0) (mut cur) (atomic-load (gc-objs-cell)) (mut bytes) 0]
     (loop
       (if (= (load cur) 0) (break)
         (let [o (cast (ptr i8) (load cur)) next (obj-next o)]
           (if (= (obj-marked? o) 1)
-            (do (obj-unmark o) (store! bytes (+ (load bytes) (gc-obj-size o))) (store! prev (load cur)) (store! cur next) 0)
-            (do (if (= (load prev) 0) (atomic-store (gc-objs-cell) next) (obj-set-next (cast (ptr i8) (load prev)) next))
-                (obj-free o) (store! cur next) 0)))))
+            (do (obj-clear-mark-rem o) (obj-set-old o)      ; survive => OLD, mark/rem cleared
+                (obj-set-prev o (load prev))
+                (if (= (load prev) 0) (atomic-store (gc-objs-cell) (cast i64 o)) (obj-set-next (cast (ptr i8) (load prev)) (cast i64 o)))
+                (store! bytes (+ (load bytes) (gc-obj-size o))) (store! prev (cast i64 o)) (store! cur next) 0)
+            (do (obj-free o) (store! cur next) 0)))))
+    ; terminate the rebuilt list
+    (if (= (load prev) 0) (atomic-store (gc-objs-cell) 0) (obj-set-next (cast (ptr i8) (load prev)) 0))
     (load bytes)))
 
 ; SWEEP every arena + the object list, then re-arm the trigger from the surviving live size.
@@ -143,6 +148,9 @@
           (store! i (+ (load i) 1)) 0)
         (break)))
     (store! live (+ (load live) (gc-sweep-objs)))
+    ; a major promoted every survivor to OLD and cleared every REMEMBERED bit, so the young list
+    ; and remembered set are now empty and the minor counter restarts.
+    (gc-young-reset) (gc-rem-reset) (gc-minors-reset)
     ; next collection when we have allocated another ~1x of the live set (min 1 MiB of headroom).
     (gc-set-bytes (load live))
     (gc-set-nextgc (+ (* (load live) 2) 1048576))

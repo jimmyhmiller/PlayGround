@@ -487,7 +487,7 @@
             OP_LOAD_FIELD_REF (let [off (read-u16 (load fr)) obj (vpop vt)] (vpush vt (load (field-addr obj off))))
             OP_STORE_FIELD_I64 (let [off (read-u16 (load fr)) v (vpop vt) obj (vpop vt)] (store! (field-addr obj off) v) 0)
             OP_STORE_FIELD_F64 (let [off (read-u16 (load fr)) v (vpop vt) obj (vpop vt)] (store! (field-addr obj off) v) 0)
-            OP_STORE_FIELD_REF (let [off (read-u16 (load fr)) v (vpop vt) obj (vpop vt)] (store! (field-addr obj off) v) 0)
+            OP_STORE_FIELD_REF (let [off (read-u16 (load fr)) v (vpop vt) obj (vpop vt)] (store! (field-addr obj off) v) (arena-write-barrier (cast (ptr InstanceHeader) obj)) 0)
             OP_ADD_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (+ a b)))
             OP_SUB_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (- a b)))
             OP_MUL_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (* a b)))
@@ -614,6 +614,8 @@
 ; main() via vm-run, same as every other instance in the program.
 (defn vm-bind-program [(p (ptr Program))] (-> i64)
   (store! (field (vm) program) p)
+  (gc-young-init) (gc-rem-init)   ; young list / remembered set ready before the FIRST allocation
+                                  ; (inspect-mode evals allocate too, though GC stays disabled there)
   (vm-init-str-sentinel)   ; construction-visibility guard: sentinel ready before the first alloc
   0)
 
