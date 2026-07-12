@@ -65,10 +65,13 @@ between them; after Phase 4 the Shared comparison extends to the edit scenario.
   drift on alloc/migration/effects. JIT workers hit GC safepoints (publishing
   native-frame roots), so stop-the-world collection pauses them too. Proven by
   `tests/jit_threads.rs` (loops, calls, concurrent shared-heap alloc, and STW GC
-  firing while JIT threads churn). *Remaining Phase-5 optimization:* version-
-  cached recompile (still recompiles per run; a mid-run edit that bumps a version
-  the driver hasn't compiled surfaces a clear error — no silent stall), gated by
-  the inkwell self-referential-lifetime issue.
+  firing while JIT threads churn). **Version-cached recompile — DONE:** `JitCode`
+  caches compiled code by world epoch and recompiles on demand when a live edit
+  advances it (leaking one engine per edit generation — a documented
+  research-prototype tradeoff around the inkwell self-referential-lifetime
+  issue), so a program can be **live-edited while it runs on the JIT threads**
+  (`live_edit_a_program_running_on_a_jit_thread`: a JIT worker's `tick()`
+  hot-swapped 1→2 mid-loop, then a breaking edit stops it).
 - [~] **Phase 6** — *managed tiers done.* FFI + globals now run on the
   concurrent tier (`tests/live_concurrent.rs::ffi_and_globals_run_on_the_concurrent_tier`),
   so the interpreter and concurrent tiers are feature-reaching for FFI/globals.
@@ -84,18 +87,12 @@ externs at `Shared` via `JitHost` and keeping the threaded driver in the
 practically-important silo (FFI/globals on the concurrent tier). What's left is
 bounded and lower-urgency:
 
-1. **Version-cached recompile.** The JIT still recompiles the world per run;
-   caching a compiled module across runs fights `Compiled<'ctx>`'s borrow of its
-   `Context`. Needs an ownership shim (`ouroboros`) or a leaked per-generation
-   `Context`. Consequence today: live-edit *combined with* JIT-threads needs a
-   recompile on the version bump; the driver returns a clear error if it meets an
-   uncompiled version rather than stalling.
-2. **JIT FFI/globals/message passing** (reachable only by hand-built IR, not from
+1. **JIT FFI/globals/message passing** (reachable only by hand-built IR, not from
    the surface language): needs `RawSlot` widened to a tagged two-word slot (to
    carry `Foreign{kind,ptr}`) plus `lt_call_foreign` / `lt_load_global` externs.
    The `step_instruction` seam already traps these clearly; wiring is mechanical
    once the slot is widened.
-3. **Interpreter message passing** (`Send`/`Recv`): needs a parked-actor
+2. **Interpreter message passing** (`Send`/`Recv`): needs a parked-actor
    scheduler state + deadlock detection in `run()`, and there's no `send`/`recv`
    surface syntax to reach it — inert from source today.
 

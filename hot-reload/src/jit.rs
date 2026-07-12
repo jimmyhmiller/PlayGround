@@ -1198,20 +1198,72 @@ fn handle_call(rt: &mut Runtime, actor: &mut JitActor) -> Result<(), JitError> {
 // the threads and the compiled code and calls *into* core's `Shared`.
 // ---------------------------------------------------------------------------
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// A version-cached JIT code store, shared by the worker threads of one run. It
+/// compiles the world lazily and *recompiles when the world's epoch advances* —
+/// which is what lets a program being live-edited on the JIT threads pick up new
+/// function versions. It hands out only resolved code addresses (`usize`, so
+/// `Send`); the engines that back them are leaked so they outlive every caller
+/// (a research-prototype tradeoff: one engine leaks per edit generation — a real
+/// system would reclaim them once no frame pins an old version). Recompiles are
+/// serialized under the lock, so LLVM's compilation globals are never raced;
+/// executing already-compiled code stays fully concurrent.
+pub struct JitCode {
+    inner: Mutex<JitCodeInner>,
+}
+struct JitCodeInner {
+    epoch: Option<u64>,
+    addrs: Arc<HashMap<(DefId, Version), usize>>,
+}
+
+impl JitCode {
+    pub fn new() -> JitCode {
+        JitCode {
+            inner: Mutex::new(JitCodeInner {
+                epoch: None,
+                addrs: Arc::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// The current address map, recompiling first if the world has changed since
+    /// the last compile (or if nothing is compiled yet).
+    fn addrs(&self, shared: &Shared) -> Result<Arc<HashMap<(DefId, Version), usize>>, JitError> {
+        let mut inner = self.inner.lock().unwrap();
+        let epoch = shared.with_world(|w| w.epoch);
+        if inner.epoch != Some(epoch) {
+            // Leak the context so the compiled code outlives this call; extract
+            // the addresses (the only thing workers need), then leak the
+            // `Compiled` too so its engine stays alive.
+            let ctx: &'static Context = Box::leak(Box::new(Context::create()));
+            let compiled = shared.with_world(|w| compile(ctx, w))?;
+            let addrs = compiled.addr_map();
+            Box::leak(Box::new(compiled));
+            inner.addrs = Arc::new(addrs);
+            inner.epoch = Some(epoch);
+        }
+        Ok(Arc::clone(&inner.addrs))
+    }
+}
+
+impl Default for JitCode {
+    fn default() -> Self {
+        JitCode::new()
+    }
+}
 
 /// Run each `(function, args)` as an actor on its own OS thread, executing
-/// JIT-compiled `step` functions over one shared runtime. Compiles once on this
-/// thread; the worker threads share the resolved code addresses (raw pointers,
-/// valid to call from any thread) while the engine is kept alive here until they
-/// join. Returns each actor's [`Outcome`] in order.
+/// JIT-compiled `step` functions over one shared runtime. Code is compiled lazily
+/// and cached by world epoch (see [`JitCode`]); worker threads share the resolved
+/// addresses and recompile-on-demand when a live edit advances the world, so a
+/// program can be edited *while it runs on the JIT threads*. Returns each actor's
+/// [`Outcome`] in order.
 pub fn run_jit_threads(
     shared: &Arc<Shared>,
     actors: Vec<(DefId, Vec<Value>)>,
 ) -> Result<Vec<Outcome>, JitError> {
-    let ctx = Context::create();
-    let compiled = shared.with_world(|w| compile(&ctx, w))?;
-    let addrs = Arc::new(compiled.addr_map());
+    let code = Arc::new(JitCode::new());
     // Mailboxes up front so a Send can't race its recipient into existence.
     for tid in 0..actors.len() {
         shared.ensure_mailbox(tid);
@@ -1221,19 +1273,18 @@ pub fn run_jit_threads(
         .enumerate()
         .map(|(tid, (func, args))| {
             let shared = Arc::clone(shared);
-            let addrs = Arc::clone(&addrs);
-            std::thread::spawn(move || concurrent_actor(&shared, tid, &addrs, func, args))
+            let code = Arc::clone(&code);
+            std::thread::spawn(move || concurrent_actor(&shared, &code, tid, func, args))
         })
         .collect();
-    // Join before `compiled`/`ctx` drop, so the code the workers call stays live.
     Ok(handles.into_iter().map(|h| h.join().unwrap()).collect())
 }
 
 /// One JIT worker: spawn the actor, register as a mutator, drive it to a stop.
 fn concurrent_actor(
     shared: &Arc<Shared>,
+    code: &Arc<JitCode>,
     tid: usize,
-    addrs: &HashMap<(DefId, Version), usize>,
     func: DefId,
     args: Vec<Value>,
 ) -> Outcome {
@@ -1250,7 +1301,7 @@ fn concurrent_actor(
         Ok(a) => a,
         Err(c) => return Outcome::Paused(c),
     };
-    if let Err(e) = concurrent_drive(shared, tid, addrs, &mut actor) {
+    if let Err(e) = concurrent_drive(shared, code, tid, &mut actor) {
         // A driver-level fault (e.g. an edit introduced a version with no
         // compiled code) surfaces as a clear trap, never a silent stall.
         return Outcome::Paused(Condition::RuntimeTypeError {
@@ -1276,22 +1327,32 @@ fn concurrent_actor(
 /// pause it. `Yield` never stops here — worker threads run to completion.
 fn concurrent_drive(
     shared: &Arc<Shared>,
+    code: &Arc<JitCode>,
     tid: usize,
-    addrs: &HashMap<(DefId, Version), usize>,
     actor: &mut JitActor,
 ) -> Result<(), JitError> {
+    let mut addrs = code.addrs(shared)?;
     while matches!(actor.status, ActorStatus::Runnable) {
         if shared.gc_pending() {
             shared.safepoint_roots(tid, actor.roots());
         }
-        let frame = actor.frames.last_mut().unwrap();
-        let Some(&addr) = addrs.get(&(frame.func_id, frame.version)) else {
+        let key = {
+            let f = actor.frames.last().unwrap();
+            (f.func_id, f.version)
+        };
+        // A live edit may have introduced this version since we last compiled;
+        // recompile-on-demand (cached by epoch) picks it up.
+        if !addrs.contains_key(&key) {
+            addrs = code.addrs(shared)?;
+        }
+        let Some(&addr) = addrs.get(&key) else {
             return Err(JitError(format!(
-                "no compiled step for {}@{} (a mid-run edit would need recompile)",
-                frame.func_id, frame.version.0
+                "no compiled step for {}@{}",
+                key.0, key.1.0
             )));
         };
         let step = step_at(addr);
+        let frame = actor.frames.last_mut().unwrap();
         let mut raw = RawFrame {
             func_id: frame.func_id as i64,
             version: frame.version.0 as i64,

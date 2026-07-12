@@ -1475,6 +1475,45 @@ pub const CORE: &str = r##"
 (defn unchecked-remainder-int [a b] (%rem a b))
 (defn unchecked-divide-int [a b] (%quot a b))
 
+;; ─────────────── dynamic vars (bindable via `binding`) ───────────────
+;; Declared `^:dynamic` so references compile to a dynamic-get and `binding`
+;; rebinds them. `*out*` is defined earlier (needed by the print family).
+(def ^:dynamic *print-length* nil)      ;; max seq elements to print (nil = all)
+(def ^:dynamic *print-level* nil)       ;; max nesting depth to print (nil = all)
+(def ^:dynamic *print-readably* true)
+(def ^:dynamic *print-dup* false)
+(def ^:dynamic *print-meta* false)
+(def ^:dynamic *print-namespace-maps* true)
+(def ^:dynamic *flush-on-newline* true)
+(def ^:dynamic *assert* true)
+(def ^:dynamic *read-eval* true)
+(def ^:dynamic *ns* 'user)
+(def ^:dynamic *command-line-args* nil)
+(def ^:dynamic *data-readers* {})
+(def ^:dynamic *default-data-reader-fn* nil)
+(def ^:dynamic *math-context* nil)
+(def ^:dynamic *unchecked-math* false)
+(def ^:dynamic *warn-on-reflection* false)
+(def ^:dynamic *compile-files* false)
+(def ^:dynamic *compile-path* "classes")
+(def ^:dynamic *compiler-options* nil)
+(def ^:dynamic *verbose-defrecords* false)
+(def ^:dynamic *allow-unresolved-vars* false)
+(def ^:dynamic *suppress-read* nil)
+(def ^:dynamic *source-path* "NO_SOURCE_PATH")
+(def ^:dynamic *file* "NO_SOURCE_PATH")
+(def ^:dynamic *fn-loader* nil)
+(def ^:dynamic *reader-resolver* nil)
+(def ^:dynamic *in* nil)
+(def ^:dynamic *err* nil)
+(def ^:dynamic *agent* nil)
+(def ^:dynamic *1 nil)
+(def ^:dynamic *2 nil)
+(def ^:dynamic *3 nil)
+(def ^:dynamic *e nil)
+(def *clojure-version* {:major 1 :minor 11 :incremental 1 :qualifier nil})
+(defn clojure-version [] "1.11.1")
+
 ;; ─────────────── readable printing (pr-str family, pure) ───────────────
 ;; escape one char for inside a readable string literal
 (defn -esc-char [c]
@@ -1495,21 +1534,42 @@ pub const CORE: &str = r##"
           (= n 12) (str bs "formfeed")
           (= n 8) (str bs "backspace")
           :else (str bs x))))
-(defn -pr [x]
+;; true when the CURRENT depth exceeds *print-level* (collections beyond it -> "#")
+(defn -over-level? [level] (and (not (nil? *print-level*)) (> level *print-level*)))
+;; render a seq's elements honoring *print-length* (append "..." when truncated)
+(defn -pr-elems [items level readable?]
+  (let [lim *print-length*
+        s (seq items)
+        shown (if (nil? lim) s (take lim s))
+        parts (map (fn [e] (-prn-el e level readable?)) shown)
+        parts (if (and (not (nil? lim)) (seq (drop lim s))) (concat parts (list "...")) parts)]
+    (apply str (interpose " " parts))))
+(defn -pr-map-elems [es level readable?]
+  (let [lim *print-length*
+        s (seq es)
+        shown (if (nil? lim) s (take lim s))
+        parts (map (fn [e] (str (-prn-el (first e) level readable?) " " (-prn-el (second e) level readable?))) shown)
+        parts (if (and (not (nil? lim)) (seq (drop lim s))) (concat parts (list "...")) parts)]
+    (apply str (interpose ", " parts))))
+;; the core printer. `readable?` => pr-style (quote/escape strings & chars);
+;; otherwise print-style (raw). `level` starts at 1 for the top value.
+(defn -prn-el [x level readable?]
   (cond (nil? x) "nil"
-        (string? x) (str (%char-of 34) (apply str (map -esc-char (%str->chars x))) (%char-of 34))
-        (char? x) (-pr-char x)
+        (string? x) (if readable? (str (%char-of 34) (apply str (map -esc-char (%str->chars x))) (%char-of 34)) x)
+        (char? x) (if readable? (-pr-char x) (str x))
         (keyword? x) (str ":" (name-with-ns x))
         (symbol? x) (str x)
-        (vector? x) (str "[" (apply str (interpose " " (map -pr x))) "]")
-        (set? x) (str "#{" (apply str (interpose " " (map -pr x))) "}")
-        (map? x) (str "{" (apply str (interpose ", " (map (fn [e] (str (-pr (first e)) " " (-pr (second e)))) (seq x)))) "}")
-        (or (list? x) (seq? x)) (str "(" (apply str (interpose " " (map -pr x))) ")")
+        (vector? x) (if (-over-level? level) "#" (str "[" (-pr-elems x (inc level) readable?) "]"))
+        (set? x) (if (-over-level? level) "#" (str "#{" (-pr-elems (seq x) (inc level) readable?) "}"))
+        (map? x) (if (-over-level? level) "#" (str "{" (-pr-map-elems (seq x) (inc level) readable?) "}"))
+        (or (list? x) (seq? x)) (if (-over-level? level) "#" (str "(" (-pr-elems x (inc level) readable?) ")"))
         true (str x)))
+(defn -pr [x] (-prn-el x 1 true))
+(defn -pr-print [x] (-prn-el x 1 false))
 (defn name-with-ns [k] (if (nil? (namespace k)) (name k) (str (namespace k) "/" (name k))))
 (defn pr-str [& xs] (apply str (interpose " " (map -pr xs))))
 (defn prn-str [& xs] (str (apply pr-str xs) (%char-of 10)))
-(defn print-str [& xs] (apply str (interpose " " (map str xs))))
+(defn print-str [& xs] (apply str (interpose " " (map -pr-print xs))))
 (defn println-str [& xs] (str (apply print-str xs) (%char-of 10)))
 
 ;; ─────────────── misc combinators + control ───────────────
