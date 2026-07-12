@@ -117,6 +117,157 @@ impl Layout for GridLayout {
     }
 }
 
+/// Layered (Sugiyama-style) layout for directed / DAG-like graphs such as task
+/// graphs. Treats each stored edge `[u, v]` as a directed edge `u → v` (the
+/// canonical edge list preserves insertion order, so parent→child direction
+/// survives even though the graph is otherwise undirected).
+///
+/// Three classic stages:
+///   1. **Layer assignment** by longest path from the roots (in-degree 0),
+///      falling back to a BFS layer for nodes trapped in cycles.
+///   2. **Crossing reduction** via a few barycenter (median-of-neighbors)
+///      ordering sweeps, down then up.
+///   3. **Coordinate assignment**: `y` from the layer, `x` from the in-layer
+///      order, each layer centered on the origin.
+pub struct LayeredLayout {
+    /// World-space height of the whole layout (roots at top, leaves at bottom).
+    pub target_height: f32,
+    /// Width-to-height ratio of the layout's bounding box. Layers are scaled to
+    /// this so a very wide/shallow DAG stays viewable instead of a flat band.
+    pub aspect: f32,
+    /// Barycenter ordering sweeps (more = fewer crossings, slower).
+    pub sweeps: u32,
+}
+
+impl Default for LayeredLayout {
+    fn default() -> Self {
+        LayeredLayout { target_height: 4000.0, aspect: 1.8, sweeps: 4 }
+    }
+}
+
+impl Layout for LayeredLayout {
+    fn name(&self) -> &str {
+        "layered"
+    }
+
+    fn place(&self, graph: &Graph, pos: &mut [Pos], _seed: u64) {
+        use std::collections::VecDeque;
+        let n = graph.num_nodes() as usize;
+        if n == 0 {
+            return;
+        }
+        let edges = graph.edges();
+
+        // Directed adjacency (u → v) + in-adjacency (parents) + in-degree.
+        let mut out: Vec<Vec<u32>> = vec![Vec::new(); n];
+        let mut parents: Vec<Vec<u32>> = vec![Vec::new(); n];
+        let mut indeg = vec![0u32; n];
+        for &[u, v] in edges {
+            let (u, v) = (u as usize, v as usize);
+            if u >= n || v >= n || u == v {
+                continue;
+            }
+            out[u].push(v as u32);
+            parents[v].push(u as u32);
+            indeg[v] += 1;
+        }
+
+        // 1. Longest-path layering via Kahn's topological order.
+        let mut layer = vec![0i32; n];
+        let mut remaining = indeg.clone();
+        let mut queue: VecDeque<usize> =
+            (0..n).filter(|&i| remaining[i] == 0).collect();
+        let mut processed = vec![false; n];
+        while let Some(u) = queue.pop_front() {
+            processed[u] = true;
+            let lu = layer[u];
+            for &v in &out[u] {
+                let v = v as usize;
+                if layer[v] < lu + 1 {
+                    layer[v] = lu + 1;
+                }
+                remaining[v] -= 1;
+                if remaining[v] == 0 {
+                    queue.push_back(v);
+                }
+            }
+        }
+        // Cycle fallback: nodes never dequeued sit in a cycle. Place each just
+        // below its deepest already-placed parent so it still flows downward.
+        for i in 0..n {
+            if !processed[i] {
+                let deepest = parents[i]
+                    .iter()
+                    .filter(|&&p| processed[p as usize])
+                    .map(|&p| layer[p as usize])
+                    .max()
+                    .unwrap_or(0);
+                layer[i] = deepest + 1;
+            }
+        }
+
+        // Bucket nodes into layers (initial order = node id).
+        let max_layer = layer.iter().copied().max().unwrap_or(0) as usize;
+        let mut layers: Vec<Vec<u32>> = vec![Vec::new(); max_layer + 1];
+        for i in 0..n {
+            layers[layer[i] as usize].push(i as u32);
+        }
+
+        // In-layer x index per node, initialized from the bucket order.
+        let mut order = vec![0f32; n];
+        for lnodes in &layers {
+            for (i, &nid) in lnodes.iter().enumerate() {
+                order[nid as usize] = i as f32;
+            }
+        }
+
+        // 2. Barycenter crossing reduction: alternate downward (order by parent
+        //    average) and upward (order by child average) sweeps.
+        let barycenter = |nid: u32, neigh: &[Vec<u32>], order: &[f32]| -> f32 {
+            let ns = &neigh[nid as usize];
+            if ns.is_empty() {
+                order[nid as usize]
+            } else {
+                ns.iter().map(|&m| order[m as usize]).sum::<f32>() / ns.len() as f32
+            }
+        };
+        for s in 0..self.sweeps {
+            let down = s % 2 == 0;
+            let range: Vec<usize> = if down {
+                (1..layers.len()).collect()
+            } else {
+                (0..layers.len().saturating_sub(1)).rev().collect()
+            };
+            for l in range {
+                let neigh = if down { &parents } else { &out };
+                let mut keyed: Vec<(f32, u32)> = layers[l]
+                    .iter()
+                    .map(|&nid| (barycenter(nid, neigh, &order), nid))
+                    .collect();
+                keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                layers[l] = keyed.iter().map(|(_, nid)| *nid).collect();
+                for (i, &nid) in layers[l].iter().enumerate() {
+                    order[nid as usize] = i as f32;
+                }
+            }
+        }
+
+        // 3. Coordinate assignment. Scale so the whole layout fits a box of the
+        //    requested height and aspect: `y` from the layer (roots at top),
+        //    `x` from the in-layer order with each layer centered on x=0.
+        let widest = layers.iter().map(|l| l.len()).max().unwrap_or(1).max(1);
+        let sy = self.target_height / (max_layer.max(1) as f32);
+        let sx = (self.target_height * self.aspect) / widest as f32;
+        for (l, lnodes) in layers.iter().enumerate() {
+            let half = lnodes.len().saturating_sub(1) as f32 * 0.5;
+            let y = -(l as f32) * sy;
+            for (i, &nid) in lnodes.iter().enumerate() {
+                pos[nid as usize] = [(i as f32 - half) * sx, y];
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

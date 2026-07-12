@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use nebula_core::{algorithms, Graph, Pos};
-use nebula_layout::{CircleLayout, GridLayout, Layout, RandomLayout};
+use nebula_layout::{CircleLayout, GridLayout, Layout, LayeredLayout, RandomLayout};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -58,12 +58,14 @@ const COLOR_MODES: [(ColorMode, &str); 6] = [
     (ColorMode::Communities, "Communities"),
 ];
 
-/// Which seed layout to re-apply when the user clicks a reseed button.
+/// Which layout to (re)apply when the user clicks a layout button.
 #[derive(Clone, Copy)]
 enum Seed {
     Random,
     Grid,
     Circle,
+    /// Fixed hierarchical (layered DAG) layout; pauses the simulation.
+    Hierarchical,
 }
 
 /// Comparison used by the attribute filter.
@@ -182,6 +184,8 @@ pub struct RunOptions {
     pub node_size: f32,
     /// Optional startup "show only" filter: (attribute key index, op, value).
     pub filter: Option<(usize, FilterOp, String)>,
+    /// Start in the hierarchical (layered DAG) layout instead of force-directed.
+    pub start_hierarchical: bool,
 }
 
 impl Default for RunOptions {
@@ -201,6 +205,7 @@ impl Default for RunOptions {
             aggregate: false,
             node_size: 3.0,
             filter: None,
+            start_hierarchical: false,
         }
     }
 }
@@ -390,6 +395,9 @@ impl App {
         renderer.draw_nodes = self.opts.draw_nodes;
         self.live = Some(Live { window, gpu, graph_gpu, renderer, layout, overlay, density });
         self.apply_color_mode();
+        if self.opts.start_hierarchical {
+            self.apply_hierarchical();
+        }
         self.update_title();
     }
 
@@ -629,8 +637,18 @@ impl App {
                     }
                 });
                 ui.add(egui::Slider::new(&mut substeps, 1..=16).text("steps / frame"));
+                ui.separator();
+
+                ui.strong("Layout");
+                if ui
+                    .button("⬇ Hierarchical (DAG)")
+                    .on_hover_text("Layered top-down layout by dependency depth; pauses physics")
+                    .clicked()
+                {
+                    act_reseed = Some(Seed::Hierarchical);
+                }
                 ui.horizontal(|ui| {
-                    ui.label("Reseed:");
+                    ui.label("Force reseed:");
                     if ui.button("Random").clicked() {
                         act_reseed = Some(Seed::Random);
                     }
@@ -770,6 +788,7 @@ impl App {
                     let r = self.opts.k * (n.max(1) as f32).sqrt() * 0.5;
                     self.reseed(&CircleLayout { radius: r });
                 }
+                Seed::Hierarchical => self.apply_hierarchical(),
             }
         }
     }
@@ -1016,10 +1035,10 @@ impl App {
                 "1 uniform  2 components  3 degree",
                 "4 pagerank  5 coloring  6 communities",
                 "space pause / E edges / N nodes",
-                "R random / G grid / O circle re-seed",
+                "Y hierarchical / R G O re-seed",
                 "A aggregate (density) / L labels",
                 "+/- node size / [ ] edge brightness",
-                "H help / Tab hud / C clear / Esc quit",
+                "P panel / H help / Tab hud / Esc quit",
             ];
             let lines: Vec<(u32, String)> = help.iter().map(|s| (dim, s.to_string())).collect();
             let h = help.len() as f32 * line + 12.0;
@@ -1331,6 +1350,48 @@ impl App {
         log::info!("re-seeded with {} layout", layout.name());
     }
 
+    /// Apply a fixed (non-physics) layout: place nodes, upload, fit the view,
+    /// and stop the simulation so the arrangement stays put.
+    fn apply_fixed_layout(&mut self, layout: &dyn Layout) {
+        let n = self.graph.num_nodes() as usize;
+        let mut pos = vec![[0.0f32; 2]; n];
+        layout.place(&self.graph, &mut pos, 0);
+        {
+            use std::collections::HashMap;
+            let mut per_layer: HashMap<i64, u32> = HashMap::new();
+            for p in &pos {
+                *per_layer.entry(p[1] as i64).or_insert(0) += 1;
+            }
+            let widest = per_layer.values().copied().max().unwrap_or(0);
+            log::info!(
+                "layout '{}': {} layers, widest {} nodes",
+                layout.name(),
+                per_layer.len(),
+                widest
+            );
+        }
+        if let Some(live) = self.live.as_ref() {
+            live.graph_gpu.set_positions(&live.gpu.queue, &pos);
+        }
+        let (min, max) = bounds(&pos);
+        self.camera.fit_bounds(min, max);
+        self.settings.running = false;
+        if let Some(live) = self.live.as_ref() {
+            live.layout.update_settings(&live.gpu.queue, &self.settings);
+        }
+        log::info!("applied {} layout (simulation paused)", layout.name());
+    }
+
+    /// Hierarchical (layered DAG) layout, scaled to the graph's edge length `k`.
+    fn apply_hierarchical(&mut self) {
+        let layout = LayeredLayout {
+            target_height: self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt(),
+            aspect: 1.8,
+            sweeps: 4,
+        };
+        self.apply_fixed_layout(&layout);
+    }
+
     /// Read back positions needed to draw the selection: the node itself and (for
     /// modest graphs) its neighbors, so we can draw connection lines. Big graphs
     /// only refresh the single node to stay cheap.
@@ -1461,6 +1522,7 @@ impl App {
                 let r = self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt() * 0.5;
                 self.reseed(&CircleLayout { radius: r });
             }
+            KeyCode::KeyY => self.apply_hierarchical(),
             KeyCode::KeyA => {
                 self.show_density = !self.show_density;
                 log::info!("aggregation (density heatmap) {}", if self.show_density { "on" } else { "off" });

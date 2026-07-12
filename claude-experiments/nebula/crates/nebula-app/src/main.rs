@@ -60,6 +60,8 @@ struct Args {
     color_attr: Option<String>,
     /// Startup "show only" filter, raw "KEY:OP:VALUE" (resolved after load).
     filter: Option<String>,
+    /// Start in the hierarchical (layered DAG) layout.
+    hierarchical: bool,
     paused: bool,
     no_edges: bool,
     no_nodes: bool,
@@ -211,6 +213,7 @@ fn main() -> anyhow::Result<()> {
         aggregate: args.aggregate,
         node_size: args.node_size,
         filter,
+        start_hierarchical: args.hierarchical,
     };
 
     let app = App::with_labels(graph, positions, opts, node_labels, node_attrs);
@@ -229,6 +232,7 @@ fn parse_args() -> Result<Args, String> {
     let mut color = ColorMode::Uniform;
     let mut color_attr: Option<String> = None;
     let mut filter: Option<String> = None;
+    let mut hierarchical = false;
     let mut paused = false;
     let mut no_edges = false;
     let mut no_nodes = false;
@@ -311,6 +315,14 @@ fn parse_args() -> Result<Args, String> {
             "--filter" => {
                 filter = Some(it.next().ok_or("--filter needs KEY:OP:VALUE")?);
             }
+            "--layout" => {
+                let name = it.next().ok_or("--layout needs a name")?;
+                match name.as_str() {
+                    "hierarchical" | "layered" | "dag" => hierarchical = true,
+                    "force" | "force-directed" => hierarchical = false,
+                    other => return Err(format!("unknown layout: {other}")),
+                }
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -326,6 +338,7 @@ fn parse_args() -> Result<Args, String> {
         color,
         color_attr,
         filter,
+        hierarchical,
         paused,
         no_edges,
         no_nodes,
