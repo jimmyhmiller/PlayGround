@@ -136,8 +136,8 @@ pub const CORE: &str = r##"
 (defn vector? [x] (%num-eq (type-of x) 'PVec))
 
 ;; ─────────────── type predicates ───────────────
-(defn map? [x] (%num-eq (type-of x) 'Map))
-(defn set? [x] (%num-eq (type-of x) 'Set))
+(defn map? [x] (let [t (type-of x)] (or (%num-eq t 'Map) (%num-eq t 'SortedMap))))
+(defn set? [x] (let [t (type-of x)] (or (%num-eq t 'Set) (%num-eq t 'SortedSet))))
 (defn keyword? [x] (%num-eq (type-of x) 'Keyword))
 (defn list? [x] (let [t (type-of x)] (or (%num-eq t 'List) (%num-eq t 'EmptyList))))
 (defn string? [x] (%num-eq (type-of x) 'String))

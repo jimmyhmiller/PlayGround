@@ -648,7 +648,7 @@ pub const CLJS: &str = r##"
 
 (def -EMPTY-PHM (PersistentHashMap. nil 0 nil false nil nil))
 ;; map? now recognises both persistent map types.
-(defn map? [x] (let [t (type-of x)] (if (%num-eq t 'PersistentArrayMap) true (%num-eq t 'PersistentHashMap))))
+(defn map? [x] (let [t (type-of x)] (or (%num-eq t 'PersistentArrayMap) (%num-eq t 'PersistentHashMap) (%num-eq t 'SortedMap) (%num-eq t 'Map))))
 
 ;; ─────────────── PersistentHashSet — ported from cljs/core.cljs (EPL-1.0) ──────
 ;; A set is a wrapper over a map whose keys are the elements. Verbatim except
@@ -704,7 +704,7 @@ pub const CLJS: &str = r##"
   (-invoke [coll k] (-lookup coll k)))
 
 (def -EMPTY-PHS (PersistentHashSet. nil -EMPTY-PHM nil))
-(defn set? [x] (%num-eq (type-of x) 'PersistentHashSet))
+(defn set? [x] (let [t (type-of x)] (or (%num-eq t 'PersistentHashSet) (%num-eq t 'SortedSet) (%num-eq t 'Set))))
 (defn set [coll] (reduce (fn [s x] (-conj s x)) -EMPTY-PHS (seq coll)))
 (defn hash-set [& es] (set es))
 (defn disj [s & vs] (loop [s s vs (seq vs)] (if (nil? vs) s (recur (-disjoin s (first vs)) (next vs)))))
