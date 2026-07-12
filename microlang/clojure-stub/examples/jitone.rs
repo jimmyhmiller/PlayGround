@@ -13,5 +13,9 @@ fn run(src: &str) -> String {
 }
 
 fn main() {
-    println!("{}", run(&std::env::args().nth(1).unwrap()));
+    let arg = std::env::args().nth(1).unwrap();
+    // A readable file path -> run its contents (keeps shell/lldb args clean);
+    // otherwise treat the arg itself as the program.
+    let src = std::fs::read_to_string(&arg).unwrap_or(arg);
+    println!("{}", run(&src));
 }
