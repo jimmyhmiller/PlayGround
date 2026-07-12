@@ -1513,12 +1513,16 @@ pub const CORE: &str = r##"
 (def ^:dynamic *e nil)
 (def *clojure-version* {:major 1 :minor 11 :incremental 1 :qualifier nil})
 (defn clojure-version [] "1.11.1")
-;; `assert` throws when its expr is falsey — unless *assert* is bound false.
-(defmacro assert
-  ([x] (list 'when (list 'and '*assert* (list 'not x))
-             (list 'throw (list 'str "Assert failed: " (list 'pr-str (list 'quote x))))))
-  ([x message] (list 'when (list 'and '*assert* (list 'not x))
-                     (list 'throw (list 'str "Assert failed: " message (%str-of (%char-of 10)) (list 'pr-str (list 'quote x)))))))
+;; `assert` throws when its expr is falsey. Like Clojure, *assert* is consulted at
+;; MACRO-EXPANSION time: when false, assert expands to nil (the check is compiled
+;; out entirely — a runtime `binding` can't re-enable it).
+(defmacro assert (x & msg)
+  (if *assert*
+    (let [detail (if (seq msg)
+                   (list 'str "Assert failed: " (first msg) (%str-of (%char-of 10)) (list 'pr-str (list 'quote x)))
+                   (list 'str "Assert failed: " (list 'pr-str (list 'quote x))))]
+      (list 'when (list 'not x) (list 'throw detail)))
+    nil))
 
 ;; ─────────────── readable printing (pr-str family, pure) ───────────────
 ;; escape one char for inside a readable string literal

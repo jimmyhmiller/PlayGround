@@ -563,3 +563,27 @@
 (tagged-literal? 5)
 (reader-conditional? (reader-conditional (list :clj 1) false))
 (reader-conditional? :nope)
+*assert*
+*read-eval*
+*flush-on-newline*
+*print-readably*
+*print-length*
+*print-level*
+*warn-on-reflection*
+*unchecked-math*
+*command-line-args*
+*compile-path*
+*print-namespace-maps*
+*clojure-version*
+(binding [*print-length* 3] (pr-str (range 10)))
+(binding [*print-length* 2] (pr-str [1 2 3 4 5]))
+(binding [*print-length* 0] (pr-str [1 2 3]))
+(binding [*print-level* 1] (pr-str [1 [2 [3]]]))
+(binding [*print-level* 2] (pr-str [1 [2 [3]]]))
+(binding [*print-level* 0] (pr-str [1 2 3]))
+(binding [*print-length* 3] (with-out-str (println (range 100))))
+(binding [*print-length* 2] (pr-str {:a 1 :b 2 :c 3}))
+(assert true)
+(assert (= 1 1))
+(try (assert false) :ok (catch Throwable e :caught))
+(binding [*print-length* 4] (pr-str (list 1 2 3 4 5 6)))

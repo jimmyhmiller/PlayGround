@@ -563,3 +563,27 @@
 (tagged-literal? 5)	false
 (reader-conditional? (reader-conditional (list :clj 1) false))	true
 (reader-conditional? :nope)	false
+*assert*	true
+*read-eval*	true
+*flush-on-newline*	true
+*print-readably*	true
+*print-length*	nil
+*print-level*	nil
+*warn-on-reflection*	false
+*unchecked-math*	false
+*command-line-args*	nil
+*compile-path*	"classes"
+*print-namespace-maps*	true
+*clojure-version*	{:major 1, :minor 11, :incremental 1, :qualifier nil}
+(binding [*print-length* 3] (pr-str (range 10)))	"(0 1 2 ...)"
+(binding [*print-length* 2] (pr-str [1 2 3 4 5]))	"[1 2 ...]"
+(binding [*print-length* 0] (pr-str [1 2 3]))	"[...]"
+(binding [*print-level* 1] (pr-str [1 [2 [3]]]))	"[1 #]"
+(binding [*print-level* 2] (pr-str [1 [2 [3]]]))	"[1 [2 #]]"
+(binding [*print-level* 0] (pr-str [1 2 3]))	"#"
+(binding [*print-length* 3] (with-out-str (println (range 100))))	"(0 1 2 ...)\n"
+(binding [*print-length* 2] (pr-str {:a 1 :b 2 :c 3}))	"{:a 1, :b 2, ...}"
+(assert true)	nil
+(assert (= 1 1))	nil
+(try (assert false) :ok (catch Throwable e :caught))	:caught
+(binding [*print-length* 4] (pr-str (list 1 2 3 4 5 6)))	"(1 2 3 4 ...)"
