@@ -207,7 +207,11 @@ pub const CORE: &str = r##"
 (defn ex-info [msg data & more]
   (record 'ExInfo msg data (if (nil? more) nil (first more))))
 (defn ex-info? [x] (%num-eq (type-of x) 'ExInfo))
-(defn ex-message [e] (if (ex-info? e) (field e 0) nil))
+;; ex-info stores (msg data cause); a bare `(new Error "msg")` is `(record 'Error msg)`.
+(defn ex-message [e]
+  (cond (ex-info? e) (field e 0)
+        (%num-eq (type-of e) 'Error) (field e 0)
+        :else nil))
 (defn ex-data [e] (if (ex-info? e) (field e 1) nil))
 (defn ex-cause [e] (if (ex-info? e) (field e 2) nil))
 (defn pos? [n] (%lt 0 n))
