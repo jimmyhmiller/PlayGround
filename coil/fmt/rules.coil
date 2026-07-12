@@ -111,12 +111,12 @@
 ; the head line. nest-amt: body indentation past the open delimiter. Element 0 is
 ; the "head" (a list's operator, or a vector's first element).
 (defn layout [(a (ptr Allocator)) (n (ptr Node)) (open i64) (close i64)
-              (inline-n i64) (nest-amt i64)] (-> (ptr Doc))
+              (inline-n i64) (nest-amt i64) (force bool)] (-> (ptr Doc))
   (let [cnt (node-count n)]
     (if (icmp-le cnt 0)
         (d-text a (if (icmp-eq open 40) "()" "[]"))
       (let [dl (dl-new a)
-            forced (or (any-child-multiline n) (any-child-comment n))
+            forced (or force (or (any-child-multiline n) (any-child-comment n)))
             inline-hi (clamp-before-comment n 1 (let [h (iadd 1 inline-n)] (if (icmp-gt h cnt) cnt h)))]
         (dl-push! dl (d-text a (if (icmp-eq open 40) "(" "[")))
         (dl-push! dl (node->doc a (node-nth n 0)))                ; head
@@ -209,7 +209,7 @@
 ;         else)
 (defn layout-clauses [(a (ptr Allocator)) (n (ptr Node))] (-> (ptr Doc))
   (let [cnt (node-count n)]
-    (if (icmp-le cnt 1) (layout a n 40 41 0 2)
+    (if (icmp-le cnt 1) (layout a n 40 41 0 2 false)
       (let [rows (build-pair-rows a n 1)
             forced (or (any-child-multiline n) (any-child-comment n))
             headlen (slice-len (node-raw-flat a (node-nth n 0)))
@@ -232,7 +232,7 @@
 (defn layout-binding-form [(a (ptr Allocator)) (n (ptr Node))] (-> (ptr Doc))
   (let [cnt (node-count n) bv (node-nth n 1)]
     (if (or (icmp-lt cnt 2) (not (and (node-list? bv) (icmp-eq (node-open bv) 91))))
-        (layout a n 40 41 1 2)                          ; no binding vector: fall back
+        (layout a n 40 41 1 2 false)                    ; no binding vector: fall back
       (let [dl (dl-new a)
             forced (or (any-child-multiline n) (any-child-comment n))]
         (dl-push! dl (d-text a "("))
@@ -243,19 +243,31 @@
         (dl-push! dl (d-text a ")"))
         (seal a dl forced)))))
 
-; index (>=1) of the parameter vector in a defn, or -1.
-(defn defn-vec-index [(n (ptr Node))] (-> i64)
-  (let [cnt (node-count n) (mut i) 1 (mut idx) -1]
-    (loop (if (or (icmp-ge (load i) cnt) (icmp-ge (load idx) 0)) (break)
-      (do (let [ch (node-nth n (load i))]
-            (if (and (node-list? ch) (icmp-eq (node-open ch) 91)) (store! idx (load i)) 0))
-          (store! i (iadd (load i) 1)))))
-    (load idx)))
+; The inline element count for a defn signature: how many children after the
+; head (the name) stay on the head line. A defn signature is the name's leading
+; parameter vector(s) — a *generic* defn writes a [type-params] vector before the
+; [params] vector — plus an optional (-> ret). The body starts after that.
+; Returns 0 when there is no leading vector at all (def / defmulti / multi-arity
+; defn), which the caller treats as "name inline, don't force the body".
+(defn defn-sig-end [(n (ptr Node))] (-> i64)
+  ; index 0 is the head (defn), index 1 is the name; the parameter vector(s)
+  ; start at index 2. Consume the contiguous leading [...] vectors from there.
+  (let [cnt (node-count n) (mut i) 2]
+    (loop (if (icmp-ge (load i) cnt) (break)
+      (let [ch (node-nth n (load i))]
+        (if (and (node-list? ch) (icmp-eq (node-open ch) 91))
+            (store! i (iadd (load i) 1))
+            (break)))))
+    (if (icmp-le (load i) 2) 0                                   ; no param vector
+      ; include a trailing (-> ret); else stop at the last vector
+      (if (and (icmp-lt (load i) cnt) (list-head-is n (load i) "->"))
+          (load i)
+          (isub (load i) 1)))))
 
 ; ---- list dispatch ---------------------------------------------------------
 (defn list->doc [(a (ptr Allocator)) (n (ptr Node))] (-> (ptr Doc))
   (if (icmp-eq (node-open n) 91)
-      (layout a n 91 93 0 1)                                    ; vector: align under first elem
+      (layout a n 91 93 0 1 false)                              ; vector: align under first elem
     (let [cnt (node-count n)]
       (if (icmp-le cnt 0) (d-text a "()")
         (let [h (head-sym n) rp (alloc-stack Rule)]
@@ -268,20 +280,19 @@
           (if (icmp-eq style 0)
               ; CALL: arg1 inline, rest align under it (nest = headlen + 2)
               (let [headlen (slice-len (node-raw-flat a (node-nth n 0)))]
-                (layout a n 40 41 1 (iadd headlen 2)))
+                (layout a n 40 41 1 (iadd headlen 2) false))
             (if (icmp-eq style 2)
                 ; DEFN: signature = up to the param vector (+ optional (-> ...)), body +2.
                 ; With no param vector (def, defmulti, multi-arity defn): just the
                 ; name on the head line, body +2 — never function-call alignment.
-                (let [vi (defn-vec-index n)]
-                  (if (icmp-lt vi 0)
-                      (layout a n 40 41 1 2)
-                    (let [sig-end (if (and (icmp-lt (iadd vi 1) cnt)
-                                           (list-head-is n (iadd vi 1) "->"))
-                                      (iadd vi 1) vi)]
-                      (layout a n 40 41 sig-end 2))))
+                (let [sig-end (defn-sig-end n)]
+                  (if (icmp-eq sig-end 0)
+                      (layout a n 40 41 1 2 false)
+                    ; force the body onto its own line(s): a defn signature is
+                    ; never joined with its body, even when it would fit flat.
+                    (layout a n 40 41 sig-end 2 true)))
               ; BLOCK n
-              (layout a n 40 41 rn 2)))))))))))
+              (layout a n 40 41 rn 2 false)))))))))))
 
 ; true if child `i` is a list whose head symbol equals `lit`.
 (defn list-head-is [(n (ptr Node)) (i i64) (lit (slice u8))] (-> bool)
