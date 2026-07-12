@@ -567,6 +567,56 @@
                                 (store! k (iadd (load k) 1)))))
                           0)))))))))))))
 
+; ── include-str: compile-time file embed, resolved at LOAD time ───────────────
+; Each file's forms are walked as it is loaded (EVERY file, always — no dependence
+; on the macro-expansion pass), and each `(include-str "rel")` is replaced by a
+; string literal of the file's bytes. `rel` resolves relative to the INCLUDING
+; file's own directory (Rust's `include_str!` semantics). A cwd-relative fallback is
+; kept for the migration so pre-move paths still resolve; it is dropped once every
+; embed uses source-relative paths. A missing file or non-literal path is a hard
+; load error — never a silent empty embed.
+(defn incl-is-include-str [(items (ptr (ArrayList Sexp)))] (-> bool)
+  (and (icmp-ge (sx-len items) 1)
+       (and (icmp-eq (sx-tag (sx-at items 0)) 2)
+            (str-eq (sx-sval (sx-at items 0)) "include-str"))))
+(defn incl-read [(a (ptr Allocator)) (dir (slice u8)) (rel (slice u8))] (-> (Option (slice u8)))
+  (match (read-file-opt a (slice->cstr a (path-join a dir rel)))
+    (Some [t] (Some t))
+    (None []  (read-file-opt a (slice->cstr a rel)))))   ; cwd-relative fallback (migration)
+(defn do-include-str [(s (mut LS)) (f (ptr Sexp)) (dir (slice u8))] (-> Sexp)
+  (let [a (load (field s a)) items (sx-items (load f))]
+    (if (icmp-ne (sx-len items) 2)
+        (do (ls-set-err! (mut s) (diag-at-form f "include-str: expects exactly one string-literal path argument")) (load f))
+      (let [arg (sx-at items 1)]
+        (if (icmp-ne (sx-tag arg) 4)
+            (do (ls-set-err! (mut s) (diag-at-form f "include-str: path must be a string literal")) (load f))
+          (let [rel (sx-sval arg)]
+            (match (incl-read a dir rel)
+              (Some [text] (mk-sexp-src (KStr text) f))
+              (None []     (do (ls-set-err! (mut s) (diag-at-form f (sconcat3 a "include-str: cannot read file '" rel "' (relative to the including file)"))) (load f))))))))))
+(defn form-has-include-str [(f (ptr Sexp))] (-> bool)
+  (let [tg (sx-tag (load f))]
+    (if (and (icmp-eq tg 6) (incl-is-include-str (sx-items (load f)))) true
+      (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+          (let [items (sx-items (load f)) n (sx-len items) (mut i) 0 (mut r) false]
+            (loop (if (or (load r) (icmp-ge (load i) n)) (break)
+              (do (if (form-has-include-str (al-elem [Sexp] items (load i))) (do (store! r true) 0) 0)
+                  (store! i (iadd (load i) 1)))))
+            (load r))
+        false))))
+(defn expand-includes-in-form [(s (mut LS)) (f (ptr Sexp)) (dir (slice u8))] (-> Sexp)
+  (let [a (load (field s a)) tg (sx-tag (load f))]
+    (if (and (icmp-eq tg 6) (incl-is-include-str (sx-items (load f))))
+        (do-include-str (mut s) f dir)
+      (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+          (let [items (sx-items (load f)) n (sx-len items) (mut out) (al-new [Sexp] a) (mut i) 0]
+            (loop (if (icmp-ge (load i) n) (break)
+              (do (al-push! (mut out) (expand-includes-in-form (mut s) (al-elem [Sexp] items (load i)) dir))
+                  (store! i (iadd (load i) 1)))))
+            (if (icmp-eq tg 6) (mk-sexp-src (KList (box-al [Sexp] a (load out))) f)
+                               (mk-sexp-src (KVec  (box-al [Sexp] a (load out))) f)))
+        (load f)))))
+
 (defn process-forms [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8)) (cur0 (Option (slice u8)))] (-> i64)
   (let [n (al-len [Sexp] (load forms)) (mut cur) (None [(slice u8)]) (mut i) 0]
     (store! cur cur0)
@@ -587,7 +637,9 @@
                           (None []  (ls-set-err! (mut s) (diag-at-form f "import requires a (module …) declaration: add one (e.g. `(module app)`) at the top of the file, before any imports — otherwise imported types and functions cannot be resolved"))))
                       (if (str-eq h "cimport")
                           (process-cimport (mut s) f (load cur))
-                        (al-push! (mut (field s out)) (mk-tagged (load f) (load cur))))))))
+                        (if (form-has-include-str f)
+                            (al-push! (mut (field s out)) (mk-tagged (expand-includes-in-form (mut s) f base) (load cur)))
+                          (al-push! (mut (field s out)) (mk-tagged (load f) (load cur)))))))))
               (None []
                 (al-push! (mut (field s out)) (mk-tagged (load f) (load cur))))))
           (store! i (iadd (load i) 1)))))
