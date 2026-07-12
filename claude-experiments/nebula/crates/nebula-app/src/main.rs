@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use nebula_core::{formats, generate, Graph, Pos};
 use nebula_layout::{Layout, RandomLayout};
-use nebula_render::{App, ColorMode, LayoutSettings, RunOptions};
+use nebula_render::{App, ColorMode, FilterOp, LayoutSettings, RunOptions};
 
 const HELP: &str = "\
 nebula — the GPU graph viewer
@@ -58,6 +58,8 @@ struct Args {
     color: ColorMode,
     /// Start colored by this node attribute (resolved to an index after load).
     color_attr: Option<String>,
+    /// Startup "show only" filter, raw "KEY:OP:VALUE" (resolved after load).
+    filter: Option<String>,
     paused: bool,
     no_edges: bool,
     no_nodes: bool,
@@ -128,24 +130,42 @@ fn main() -> anyhow::Result<()> {
             (loaded.graph, label)
         }
     };
-    // Resolve --color-attr to an attribute color index (first-seen key order,
-    // matching the viewer's own ordering).
-    let mut color_mode = args.color;
-    if let Some(key) = &args.color_attr {
-        let mut keys: Vec<&str> = Vec::new();
-        if let Some(attrs) = node_attrs.as_ref() {
-            for node in attrs {
-                for (k, _) in node {
-                    if !keys.iter().any(|s| s == k) {
-                        keys.push(k);
-                    }
+    // Attribute keys in first-seen order (matches the viewer's own ordering),
+    // used to resolve --color-attr and --filter by name.
+    let mut keys: Vec<&str> = Vec::new();
+    if let Some(attrs) = node_attrs.as_ref() {
+        for node in attrs {
+            for (k, _) in node {
+                if !keys.iter().any(|s| s == k) {
+                    keys.push(k);
                 }
             }
         }
+    }
+
+    // Resolve --color-attr to an attribute color index.
+    let mut color_mode = args.color;
+    if let Some(key) = &args.color_attr {
         match keys.iter().position(|k| *k == key) {
             Some(i) => color_mode = ColorMode::Attribute(i),
             None => anyhow::bail!("attribute '{key}' not found; available: {}", keys.join(", ")),
         }
+    }
+
+    // Resolve --filter "KEY:OP:VALUE" (op = contains/eq/ne/gt/ge/lt/le).
+    let mut filter = None;
+    if let Some(spec) = &args.filter {
+        let mut parts = spec.splitn(3, ':');
+        let key = parts.next().unwrap_or("");
+        let op_name = parts.next().unwrap_or("");
+        let value = parts.next().unwrap_or("").to_string();
+        let idx = keys
+            .iter()
+            .position(|k| *k == key)
+            .ok_or_else(|| anyhow::anyhow!("filter attribute '{key}' not found"))?;
+        let op = FilterOp::from_name(op_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown filter op '{op_name}'"))?;
+        filter = Some((idx, op, value));
     }
     log::info!(
         "built {what}: {} nodes, {} edges in {:.2}s",
@@ -190,6 +210,7 @@ fn main() -> anyhow::Result<()> {
         show_labels: args.labels,
         aggregate: args.aggregate,
         node_size: args.node_size,
+        filter,
     };
 
     let app = App::with_labels(graph, positions, opts, node_labels, node_attrs);
@@ -207,6 +228,7 @@ fn parse_args() -> Result<Args, String> {
     let mut screenshot = None;
     let mut color = ColorMode::Uniform;
     let mut color_attr: Option<String> = None;
+    let mut filter: Option<String> = None;
     let mut paused = false;
     let mut no_edges = false;
     let mut no_nodes = false;
@@ -286,6 +308,9 @@ fn parse_args() -> Result<Args, String> {
             "--color-attr" => {
                 color_attr = Some(it.next().ok_or("--color-attr needs an attribute name")?);
             }
+            "--filter" => {
+                filter = Some(it.next().ok_or("--filter needs KEY:OP:VALUE")?);
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -300,6 +325,7 @@ fn parse_args() -> Result<Args, String> {
         screenshot,
         color,
         color_attr,
+        filter,
         paused,
         no_edges,
         no_nodes,

@@ -66,6 +66,97 @@ enum Seed {
     Circle,
 }
 
+/// Comparison used by the attribute filter.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FilterOp {
+    Contains,
+    Eq,
+    Ne,
+    Gt,
+    Ge,
+    Lt,
+    Le,
+}
+
+impl FilterOp {
+    /// Parse an operator name (for the CLI): contains/eq/ne/gt/ge/lt/le.
+    pub fn from_name(s: &str) -> Option<FilterOp> {
+        Some(match s {
+            "contains" => FilterOp::Contains,
+            "eq" => FilterOp::Eq,
+            "ne" => FilterOp::Ne,
+            "gt" => FilterOp::Gt,
+            "ge" => FilterOp::Ge,
+            "lt" => FilterOp::Lt,
+            "le" => FilterOp::Le,
+            _ => return None,
+        })
+    }
+
+    const ALL: [FilterOp; 7] = [
+        FilterOp::Contains,
+        FilterOp::Eq,
+        FilterOp::Ne,
+        FilterOp::Gt,
+        FilterOp::Ge,
+        FilterOp::Lt,
+        FilterOp::Le,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            FilterOp::Contains => "contains",
+            FilterOp::Eq => "=",
+            FilterOp::Ne => "≠",
+            FilterOp::Gt => ">",
+            FilterOp::Ge => "≥",
+            FilterOp::Lt => "<",
+            FilterOp::Le => "≤",
+        }
+    }
+    /// Evaluate `actual <op> target`. Numeric ops parse both sides as numbers
+    /// and fail closed (no match) when either side isn't numeric.
+    fn eval(self, actual: &str, target: &str) -> bool {
+        match self {
+            FilterOp::Contains => actual.contains(target),
+            FilterOp::Eq => actual == target,
+            FilterOp::Ne => actual != target,
+            _ => {
+                let (Ok(a), Ok(b)) = (actual.trim().parse::<f64>(), target.trim().parse::<f64>())
+                else {
+                    return false;
+                };
+                match self {
+                    FilterOp::Gt => a > b,
+                    FilterOp::Ge => a >= b,
+                    FilterOp::Lt => a < b,
+                    FilterOp::Le => a <= b,
+                    _ => false,
+                }
+            }
+        }
+    }
+}
+
+/// "Show only" filter on a node attribute. When enabled, non-matching nodes are
+/// hidden (rgb + size zeroed, which also drops their additively-blended edges).
+struct NodeFilter {
+    enabled: bool,
+    key: usize,
+    op: FilterOp,
+    value: String,
+}
+
+impl Default for NodeFilter {
+    fn default() -> Self {
+        NodeFilter {
+            enabled: false,
+            key: 0,
+            op: FilterOp::Contains,
+            value: String::new(),
+        }
+    }
+}
+
 /// Options passed in from the CLI.
 pub struct RunOptions {
     pub title: String,
@@ -89,6 +180,8 @@ pub struct RunOptions {
     pub aggregate: bool,
     /// Initial node radius in pixels (runtime-adjustable with +/-).
     pub node_size: f32,
+    /// Optional startup "show only" filter: (attribute key index, op, value).
+    pub filter: Option<(usize, FilterOp, String)>,
 }
 
 impl Default for RunOptions {
@@ -107,6 +200,7 @@ impl Default for RunOptions {
             show_labels: false,
             aggregate: false,
             node_size: 3.0,
+            filter: None,
         }
     }
 }
@@ -134,6 +228,14 @@ pub struct App {
     /// Distinct attribute keys (union over all nodes), in first-seen order.
     /// Drives the "color by attribute" and filter UI.
     attr_keys: Vec<String>,
+    /// Attribute "show only" filter; non-matching nodes are hidden.
+    filter: NodeFilter,
+    /// Node count matching the current filter (for the UI), or None if disabled.
+    filter_match_count: Option<usize>,
+    /// Unfiltered colors/sizes from the active color mode; the filter masks
+    /// these into the GPU buffers so toggling the filter doesn't recompute.
+    base_colors: Vec<u32>,
+    base_sizes: Vec<f32>,
 
     // Runtime.
     live: Option<Live>,
@@ -199,6 +301,11 @@ impl App {
         let show_labels = opts.show_labels;
         let node_count = graph.num_nodes();
         let aggregate = opts.aggregate;
+        let init_filter = opts
+            .filter
+            .clone()
+            .map(|(key, op, value)| NodeFilter { enabled: true, key, op, value })
+            .unwrap_or_default();
         let render_params = RenderParams {
             base_radius_px: opts.node_size.clamp(0.5, 64.0),
             ..RenderParams::default()
@@ -208,6 +315,10 @@ impl App {
             seed_positions,
             opts,
             attr_keys: attribute_keys(node_attrs.as_deref()),
+            filter: init_filter,
+            filter_match_count: None,
+            base_colors: Vec::new(),
+            base_sizes: Vec::new(),
             labels,
             node_attrs,
             live: None,
@@ -330,15 +441,55 @@ impl App {
             }
             ColorMode::Attribute(i) => self.colors_for_attribute(i, n),
         };
-        let Some(live) = self.live.as_mut() else { return };
-        live.graph_gpu.set_colors(&live.gpu.queue, &colors);
-        match sizes {
-            Some(s) => live.graph_gpu.set_sizes(&live.gpu.queue, &s),
-            None => live
-                .graph_gpu
-                .set_sizes(&live.gpu.queue, &vec![1.0f32; n]),
-        }
+        self.base_colors = colors;
+        self.base_sizes = sizes.unwrap_or_else(|| vec![1.0f32; n]);
+        self.push_filtered();
         log::info!("color mode -> {}", self.color_mode.label());
+    }
+
+    /// Compute the filter mask (`true` = visible), or `None` when disabled.
+    fn filter_mask(&self, n: usize) -> Option<Vec<bool>> {
+        if !self.filter.enabled {
+            return None;
+        }
+        let key = self.attr_keys.get(self.filter.key)?.clone();
+        let attrs = self.node_attrs.as_ref()?;
+        let f = &self.filter;
+        Some(
+            (0..n)
+                .map(|id| {
+                    let val = attrs
+                        .get(id)
+                        .and_then(|kv| kv.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str()))
+                        .unwrap_or("");
+                    f.op.eval(val, &f.value)
+                })
+                .collect(),
+        )
+    }
+
+    /// Push `base_colors`/`base_sizes` to the GPU, hiding filtered-out nodes.
+    fn push_filtered(&mut self) {
+        let n = self.graph.num_nodes() as usize;
+        let mask = self.filter_mask(n);
+        self.filter_match_count = mask.as_ref().map(|m| m.iter().filter(|&&v| v).count());
+        let Some(live) = self.live.as_ref() else { return };
+        match &mask {
+            Some(mask) => {
+                let colors: Vec<u32> = (0..n)
+                    .map(|i| if mask[i] { self.base_colors[i] } else { 0 })
+                    .collect();
+                let sizes: Vec<f32> = (0..n)
+                    .map(|i| if mask[i] { self.base_sizes[i] } else { 0.0 })
+                    .collect();
+                live.graph_gpu.set_colors(&live.gpu.queue, &colors);
+                live.graph_gpu.set_sizes(&live.gpu.queue, &sizes);
+            }
+            None => {
+                live.graph_gpu.set_colors(&live.gpu.queue, &self.base_colors);
+                live.graph_gpu.set_sizes(&live.gpu.queue, &self.base_sizes);
+            }
+        }
     }
 
     /// Build `(colors, sizes)` for coloring by attribute key index `i`. Numeric
@@ -446,6 +597,11 @@ impl App {
         let e = self.graph.num_edges();
         let fps = self.fps;
         let status = self.sim_status();
+        let mut filter_enabled = self.filter.enabled;
+        let mut filter_key = self.filter.key;
+        let mut filter_op = self.filter.op;
+        let mut filter_value = self.filter.value.clone();
+        let filter_count = self.filter_match_count;
 
         // Actions requiring heavier work (GPU recompute) are recorded and run
         // after the panel closure, when `self` is freely borrowable again.
@@ -520,6 +676,48 @@ impl App {
                         .logarithmic(true)
                         .text("edge glow"),
                 );
+
+                if !self.attr_keys.is_empty() {
+                    ui.separator();
+                    ui.strong("Filter (show only)");
+                    ui.checkbox(&mut filter_enabled, "Enable filter");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("filter_key")
+                            .selected_text(
+                                self.attr_keys
+                                    .get(filter_key)
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("—"),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (i, k) in self.attr_keys.iter().enumerate() {
+                                    ui.selectable_value(&mut filter_key, i, k);
+                                }
+                            });
+                        egui::ComboBox::from_id_salt("filter_op")
+                            .width(72.0)
+                            .selected_text(filter_op.label())
+                            .show_ui(ui, |ui| {
+                                for op in FilterOp::ALL {
+                                    ui.selectable_value(&mut filter_op, op, op.label());
+                                }
+                            });
+                    });
+                    ui.add(
+                        egui::TextEdit::singleline(&mut filter_value)
+                            .hint_text("value (e.g. true, 5, resolve)"),
+                    );
+                    if filter_enabled {
+                        match filter_count {
+                            Some(c) => {
+                                ui.label(egui::RichText::new(format!("{c} of {n} shown")).weak());
+                            }
+                            None => {
+                                ui.label(egui::RichText::new("…").weak());
+                            }
+                        }
+                    }
+                }
             });
 
         // --- apply diffs ---
@@ -543,6 +741,17 @@ impl App {
         if let Some(live) = self.live.as_mut() {
             live.renderer.draw_edges = draw_edges;
             live.renderer.draw_nodes = draw_nodes;
+        }
+        let filter_changed = filter_enabled != self.filter.enabled
+            || filter_key != self.filter.key
+            || filter_op != self.filter.op
+            || filter_value != self.filter.value;
+        if filter_changed {
+            self.filter.enabled = filter_enabled;
+            self.filter.key = filter_key;
+            self.filter.op = filter_op;
+            self.filter.value = filter_value;
+            self.push_filtered();
         }
         if act_fit {
             self.fit_view();
