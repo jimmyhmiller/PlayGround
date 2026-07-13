@@ -216,6 +216,29 @@ impl Compiler {
         self.ns.refers.entry(ns).or_default().insert(short.to_string(), fq.to_string());
     }
 
+    /// `(use 'foo)` / `(:use foo)` — refer EVERY public name of `foo`: its defined
+    /// vars AND its protocol/interface method names (which aren't vars, so a plain
+    /// var-refer would miss them).
+    pub fn refer_all<M: ValueModel>(&mut self, rt: &Runtime<M>, from: &str) {
+        let prefix = format!("{from}/");
+        let method_refers: Vec<(String, String)> = self
+            .methods
+            .iter()
+            .filter_map(|&m| {
+                let name = rt.sym_name(m).to_string();
+                name.strip_prefix(&prefix).map(|short| (short.to_string(), name.clone()))
+            })
+            .collect();
+        for (short, fq) in method_refers {
+            self.add_refer(&short, &fq);
+        }
+        if let Some(defs) = self.ns.ns_defs.get(from).cloned() {
+            for name in defs {
+                self.add_refer(&name, &format!("{from}/{name}"));
+            }
+        }
+    }
+
     /// Compile one fully-expanded top-level form to `Ir`.
     pub fn compile<M: ValueModel>(&mut self, rt: &mut Runtime<M>, form: u64) -> Ir {
         match rt.decode(form) {
@@ -534,7 +557,17 @@ impl Compiler {
                         }
                     }
                     let method = self.resolve_global(rt, hs);
-                    if self.methods.contains(&method) {
+                    // Dispatch a protocol method. cljs-style protocol methods are
+                    // dash-prefixed (`-nth`, `-meta`) and ALWAYS dispatch. A non-dash
+                    // name (e.g. `nth`/`get`/`conj`) that a JVM library registered as an
+                    // interface method AND that is also a real fn var means the code wants
+                    // the fn (its seq fallbacks + internal `-nth` dispatch), so let it fall
+                    // through to the ordinary call.
+                    let mname = rt.sym_name(method);
+                    let is_dash = mname.rsplit('/').next().unwrap_or(mname).starts_with('-');
+                    let dispatch = self.methods.contains(&method)
+                        && (is_dash || !rt.global_defined(method));
+                    if dispatch {
                         let site = self.fresh_site();
                         let args = items[1..].iter().map(|&f| self.compile(rt, f)).collect();
                         return Ir::Dispatch { site, method, args };

@@ -411,6 +411,8 @@ pub const CORE: &str = r##"
                   (nth-seq (%str->chars c) i)
                   (if (seq d) (first d) (throw (str "String index out of bounds: " i))))
     (and (seq d) (or (neg? i) (not (< i (count c))))) (first d)
+    ;; lists / lazy-seqs aren't IIndexed — nth is a linear walk (Clojure semantics).
+    (seq? c) (nth-seq c i)
     :else (-nth c i)))
 (defn conj
   ([] [])
@@ -448,14 +450,19 @@ pub const CORE: &str = r##"
           (-eq2 (%first a) (%first b)) (-seq-eq (%rest a) (%rest b)) true false)))
 (defn -eq2 [a b] (-equiv a b))
 
-;; Callable objects: keywords, maps and vectors act as functions of one arg.
+;; A 1-arg IFn protocol: a deftype implementing `clojure.lang.IFn`'s `(invoke
+;; [this a])` becomes callable; the default throws.
+(defprotocol IInvoke1 (-invoke [this a]))
+(extend-type Object IInvoke1 (-invoke [o a] (throw "value is not callable")))
+;; Callable objects: keywords, maps and vectors act as functions of one arg; a
+;; record/type implementing IFn dispatches through -invoke.
 (defn -apply-obj [o & args]
   (cond (multi? o) (-multi-call o args)
         (keyword? o) (get (first args) o)
         (map? o) (get o (first args))
         (set? o) (get o (first args))
         (vector? o) (nth o (first args))
-        true (throw "value is not callable")))
+        true (-invoke o (first args))))
 
 ;; ─────────────── reduce / into ───────────────
 ;; honors `(reduced x)`: once the accumulator is reduced, stop and unwrap it.
@@ -803,13 +810,15 @@ pub const CORE: &str = r##"
 ;; membership / equality helpers (map-aware `-eq2`)
 (defn -mem? [s x] (cond (nil? (seq s)) false (-eq2 (first s) x) true true (-mem? (rest s) x)))
 
-(defn mapcat [f coll]
-  (lazy-seq (let [s (seq coll)] (if (nil? s) nil (concat2 (f (first s)) (mapcat f (rest s)))))))
+;; mapcat is variadic over collections (like map): concat the per-item results.
+(defn mapcat [f & colls] (apply concat (apply map f colls)))
 (defn interpose [sep coll] (drop 1 (mapcat (fn [x] (list sep x)) coll)))
-(defn interleave [a b]
-  (lazy-seq (let [sa (seq a) sb (seq b)]
-              (if (if (nil? sa) true (nil? sb)) nil
-                  (%cons (first sa) (%cons (first sb) (interleave (rest sa) (rest sb))))))))
+;; interleave is variadic, stopping at the shortest collection.
+(defn interleave [& colls]
+  (lazy-seq
+    (let [ss (map seq colls)]
+      (if (or (nil? (seq ss)) (-some-nil? ss)) nil
+        (concat (map first ss) (apply interleave (map rest ss)))))))
 (defn take-nth [n coll]
   (lazy-seq (let [s (seq coll)] (if (nil? s) nil (%cons (first s) (take-nth n (drop n s)))))))
 
@@ -1095,9 +1104,20 @@ pub const CORE: &str = r##"
 (defn get-method [mf dval] (-multi-lookup mf dval))
 (defn remove-method [mf dval] (let [a (field mf 1)] (reset! a (dissoc (deref a) dval)) mf))
 (defn remove-all-methods [mf] (let [a (field mf 1)] (reset! a (hash-map)) mf))
-(defmacro defmulti (name dispatch-fn) (list 'def name (list '-make-multi dispatch-fn (list 'quote name))))
+;; (defmulti name docstring? attr-map? dispatch-fn & options) — skip an optional
+;; leading docstring and attr-map; the next form is the dispatch fn; ignore options.
+(defmacro defmulti (name & more)
+  (let [m1 (if (%num-eq (type-of (first more)) 'String) (rest more) more)
+        m2 (if (%num-eq (type-of (first m1)) 'Map) (rest m1) m1)]
+    (list 'def name (list '-make-multi (first m2) (list 'quote name)))))
 (defmacro defmethod (name dval params & body)
   (list '-add-method name dval (%cons 'fn (%cons params body))))
+
+;; `print-method` is Clojure's printing multimethod. Our printer is native (in
+;; Rust), so this exists mainly so libraries can `(defmethod print-method …)`
+;; without erroring; the registered methods are inert unless called explicitly.
+(defmulti print-method (fn [x writer] (type-of x)))
+(defmethod print-method :default [x writer] nil)
 
 ;; ─────────────── protocol reflection (satisfies? / extends? / extenders) ───────────────
 ;; A protocol is (record 'Protocol 'Name (list 'm1 'm2 …)); its methods dispatch on
@@ -1111,6 +1131,10 @@ pub const CORE: &str = r##"
   (boolean (some (fn [m] (some (fn [t] (= t ty)) (%method-types m))) (-proto-methods p))))
 (defn extenders [p]
   (-to-list (reduce (fn [acc m] (reduce conj acc (%method-types m))) #{} (-proto-methods p))))
+;; `(instance? C x)` where C resolves to a bound var: a Protocol means "does x
+;; satisfy it"; otherwise C is a deftype's own type symbol -> a type-tag check.
+(defn -instance-val [c x]
+  (if (%num-eq (type-of c) 'Protocol) (satisfies? c x) (%num-eq (type-of x) c)))
 
 ;; ─────────────── ad-hoc hierarchy (derive / isa? / parents / …) ───────────────
 ;; A hierarchy is {:parents {tag #{parents}} :ancestors {tag #{transitive}}
@@ -2066,11 +2090,13 @@ pub const CORE: &str = r##"
   ;; (extend-protocol P T1 (m [x] ..) T2 (m [x] ..)) -> (do (extend-type T1 P ..) ..)
   (%cons 'do (-extend-protocol-forms p body)))
 (defn -extend-protocol-forms [p body]
+  ;; A type marker is a symbol OR nil; the METHOD specs are lists. Group by "is a
+  ;; list" (seq?), so a `nil` type boundary isn't swallowed into the prior methods.
   (loop [b (seq body) out nil]
     (if (nil? b) (reverse out)
       (let [ty (first b)
-            impls (-to-list (take-while (fn [x] (not (symbol? x))) (rest b)))
-            rest-b (drop-while (fn [x] (not (symbol? x))) (rest b))]
+            impls (-to-list (take-while seq? (rest b)))
+            rest-b (drop-while seq? (rest b))]
         (recur (seq rest-b) (%cons (%cons 'extend-type (%cons ty (%cons p impls))) out))))))
 
 ;; ─────────────── delay / promise ───────────────

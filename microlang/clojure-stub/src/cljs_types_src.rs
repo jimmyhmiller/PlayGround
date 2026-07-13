@@ -382,7 +382,8 @@ pub const CLJS: &str = r##"
   (loop [m (-assoc m k v) s (seq kvs)]
     (if (nil? s) m (recur (-assoc m (first s) (second s)) (next (next s))))))
 (defn dissoc [m & ks]
-  (loop [m m s (seq ks)] (if (nil? s) m (recur (-dissoc m (first s)) (next s)))))
+  ;; (dissoc nil …) is nil (Clojure nil-punning).
+  (loop [m m s (seq ks)] (if (or (nil? s) (nil? m)) m (recur (-dissoc m (first s)) (next s)))))
 (defn keys [m] (map first (seq m)))
 (defn vals [m] (map second (seq m)))
 (defn key [e] (-nth e 0))

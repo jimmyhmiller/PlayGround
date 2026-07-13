@@ -266,20 +266,59 @@ fn eval_form<M: ValueModel>(
         // (defmacro name params body...) -> (def name (fn [&form &env params...] body...)).
         // Every macro fn gets the Clojure `&form`/`&env` hidden params (our macros
         // just ignore them), so our expander invokes all macros uniformly.
-        let items = rt.list_to_vec(form);
+        let mut items = rt.list_to_vec(form);
+        // Skip an optional docstring (a String) then attr-map (a Map) between the
+        // name and the param list — `(defmacro m "doc" {…} [params] …)`.
+        let is_str = |rt: &Runtime<M>, x: u64| {
+            matches!(rt.decode(x), Val::Ref(id) if matches!(&rt.heap()[id as usize], Obj::Str(_)))
+        };
+        if items.len() > 3 && is_str(rt, items[2]) {
+            items.remove(2);
+        }
+        if items.len() > 3 && record_field0(rt, items[2], reader::MAP).is_some() {
+            items.remove(2);
+        }
         let form_s = sym(rt, "&form");
         let env_s = sym(rt, "&env");
-        let orig = match record_field0(rt, items[2], reader::VECTOR) {
-            Some(l) => rt.list_to_vec(l),
-            None => rt.list_to_vec(items[2]),
-        };
-        let mut params = vec![form_s, env_s];
-        params.extend(orig);
-        let paramvec = make_vector(rt, params);
         let fn_sym = sym(rt, "fn");
-        let mut fnform = vec![fn_sym, paramvec];
-        fnform.extend_from_slice(&items[3..]);
-        let lam = rt.vec_to_list(&fnform);
+        // Prepend the hidden `&form`/`&env` params. Params come as a vector `[a b]`
+        // OR our legacy list style `(a b & c)`.
+        let with_hidden = |rt: &mut Runtime<M>, pv: u64| -> u64 {
+            let orig = match record_field0(rt, pv, reader::VECTOR) {
+                Some(l) => rt.list_to_vec(l),
+                None => rt.list_to_vec(pv),
+            };
+            let mut params = vec![form_s, env_s];
+            params.extend(orig);
+            make_vector(rt, params)
+        };
+        // Multi-arity ONLY when `items[2]` is a clause list `([params] …)` — i.e. a
+        // list whose FIRST element is a param vector (a bare-symbol list is legacy
+        // single-arity params).
+        let multi = record_field0(rt, items[2], reader::VECTOR).is_none()
+            && rt.as_cons(items[2]).is_some()
+            && rt
+                .list_to_vec(items[2])
+                .first()
+                .is_some_and(|&f| record_field0(rt, f, reader::VECTOR).is_some());
+        let lam = if !multi {
+            // single-arity: (defmacro name [params] body…) or (name (a b) body…)
+            let pv = with_hidden(rt, items[2]);
+            let mut fnform = vec![fn_sym, pv];
+            fnform.extend_from_slice(&items[3..]);
+            rt.vec_to_list(&fnform)
+        } else {
+            // multi-arity: (defmacro name ([params] body…) …) — one clause per arity.
+            let mut fnform = vec![fn_sym];
+            for &clause in &items[2..] {
+                let cparts = rt.list_to_vec(clause);
+                let pv = with_hidden(rt, cparts[0]);
+                let mut newclause = vec![pv];
+                newclause.extend_from_slice(&cparts[1..]);
+                fnform.push(rt.vec_to_list(&newclause));
+            }
+            rt.vec_to_list(&fnform)
+        };
         let def_sym = sym(rt, "def");
         let defform = rt.vec_to_list(&[def_sym, items[1], lam]);
         let r = eval1(rt, cs, macros, comp, defform);
@@ -351,7 +390,9 @@ fn expand<M: ValueModel>(
             rebuild_binder(rt, cs, macros, comp, f)
         } else if is_sym(rt, head, "loop") || is_sym(rt, head, "loop*") {
             expand_loop(rt, cs, macros, comp, f)
-        } else if is_sym(rt, head, "defprotocol") {
+        } else if is_sym(rt, head, "defprotocol") || is_sym(rt, head, "definterface") {
+            // `definterface` is treated like a protocol (its marker interfaces just
+            // register the name; any methods become protocol methods).
             let d = desugar_defprotocol(rt, comp, f);
             expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "extend-type") {
@@ -397,7 +438,7 @@ fn expand<M: ValueModel>(
             let d = rt.vec_to_list(&out);
             expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "instance?") {
-            let d = instance_rewrite(rt, f);
+            let d = instance_rewrite(rt, comp, f);
             expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "try") {
             // Desugar typed multi-catch into a single catch-all whose body is a
@@ -705,6 +746,11 @@ fn desugar_defprotocol<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form
     let sentinel = sym(rt, "-protocol-default");
     let mut method_syms = Vec::new();
     for &spec in &items[2..] {
+        // Skip a leading docstring / options map — only `(method [params] …)`
+        // method specs are lists.
+        if rt.as_cons(spec).is_none() {
+            continue;
+        }
         let parts = rt.list_to_vec(spec);
         let m = parts[0];
         let params = parts[1]; // [this ...] vector record
@@ -750,6 +796,18 @@ fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
     // reports the tag symbol `nil` — so extend against that symbol.
     let ty = if matches!(rt.decode(items[1]), Val::Nil) {
         sym(rt, "nil")
+    } else if let Val::Sym(s) = rt.decode(items[1]) {
+        // A qualified Java class name (`clojure.lang.IPersistentVector`, `java.lang.String`)
+        // maps to our runtime type tag, so extending a host interface registers
+        // against the type `type-of` actually reports.
+        let name = rt.sym_name(s).to_string();
+        if name.contains('.') {
+            let simple = name.rsplit(['.', '/']).next().unwrap_or(&name).to_string();
+            let tag = class_to_tag(&simple).unwrap_or(&simple).to_string();
+            sym(rt, &tag)
+        } else {
+            items[1]
+        }
     } else {
         items[1]
     };
@@ -807,6 +865,10 @@ fn desugar_deftype<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
 
     let dok = sym(rt, "do");
     let mut out = vec![dok, ctordef, regcall];
+    // Bind the bare type name to its type symbol, so `T` resolves as a value — used
+    // as a dispatch value (`(defmethod print-method T …)`) or in bare references.
+    let name_q = quote_form(rt, tsym);
+    out.push(rt.vec_to_list(&[defk, tsym, name_q]));
 
     // inline protocol methods: a bare symbol starts a protocol group (or `Object`);
     // lists are method impls, and consecutive same-name impls are one multi-arity fn.
@@ -836,10 +898,50 @@ fn desugar_deftype<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
         if in_object {
             continue; // host interop methods — not dispatched
         }
-        let mfn = build_method_fn(rt, &fields, &arities);
-        out.push(mk_defmethod(rt, mname, tsym, mfn));
+        // Translate a JVM `clojure.lang.*` interface method to our cljs-style
+        // protocol method (name + the arity that matches our signature), so a
+        // JVM-Clojure deftype (e.g. core.match's) participates in get/nth/seq/etc.
+        let mname_str = match rt.decode(mname) {
+            Val::Sym(s) => rt.sym_name(s).to_string(),
+            _ => String::new(),
+        };
+        let (target, use_arities) = match xlate_iface_method(&mname_str) {
+            Some((tgt, want)) => {
+                let filtered: Vec<(u64, Vec<u64>)> = arities
+                    .iter()
+                    .filter(|(pv, _)| binding_items(rt, *pv).map(|v| v.len()).unwrap_or(0) == want)
+                    .cloned()
+                    .collect();
+                (sym(rt, tgt), if filtered.is_empty() { arities } else { filtered })
+            }
+            None => (mname, arities),
+        };
+        let mfn = build_method_fn(rt, &fields, &use_arities);
+        out.push(mk_defmethod(rt, target, tsym, mfn));
     }
     rt.vec_to_list(&out)
+}
+
+/// Map a JVM `clojure.lang.*` interface method name to our protocol method name
+/// and the TOTAL param count (incl. `this`) of the arity to keep — so a deftype
+/// implementing the Java interfaces works with our cljs-style protocols.
+fn xlate_iface_method(name: &str) -> Option<(&'static str, usize)> {
+    Some(match name {
+        "valAt" => ("-lookup", 3),        // (valAt [this k nf])
+        "nth" => ("-nth", 2),             // (nth [this i])
+        "first" => ("-first", 1),
+        "more" | "rest" | "next" => ("-rest", 1),
+        "seq" => ("-seq", 1),
+        "count" => ("-count", 1),
+        "cons" | "conj" => ("-conj", 2),
+        "assoc" => ("-assoc", 3),
+        "containsKey" => ("-contains-key?", 2),
+        "empty" => ("-empty", 1),
+        "peek" => ("-peek", 1),
+        "pop" => ("-pop", 1),
+        "invoke" => ("-invoke", 2), // 1-arg IFn: (invoke [this a])
+        _ => return None,
+    })
 }
 
 fn same_sym<M: ValueModel>(rt: &Runtime<M>, a: u64, b: u64) -> bool {
@@ -1725,9 +1827,10 @@ fn handle_ns_form<M: ValueModel>(
         return Some(nil);
     }
     if is_sym(rt, head, "require") || is_sym(rt, head, "use") {
+        let use_all = is_sym(rt, head, "use");
         let items = rt.list_to_vec(form);
         for &spec in &items[1..] {
-            process_require_spec(rt, cs, macros, comp, spec);
+            process_require_spec(rt, cs, macros, comp, use_all, spec);
         }
         return Some(nil);
     }
@@ -1763,8 +1866,9 @@ fn process_ns_clause<M: ValueModel>(
         return;
     }
     if is_keyword(rt, items[0], "require") || is_keyword(rt, items[0], "use") {
+        let use_all = is_keyword(rt, items[0], "use");
         for &spec in &items[1..] {
-            process_require_spec(rt, cs, macros, comp, spec);
+            process_require_spec(rt, cs, macros, comp, use_all, spec);
         }
     }
     // :refer-clojure / :import — core is auto-referred; we model no host imports.
@@ -1777,19 +1881,27 @@ fn process_require_spec<M: ValueModel>(
     cs: &dyn CodeSpace<M>,
     macros: &mut HashSet<Sym>,
     comp: &mut Compiler,
+    refer_all: bool,
     spec: u64,
 ) {
     let spec = unquote(rt, spec);
-    // bare `(require 'foo)` — load it, nothing to alias/refer.
+    // bare `(require 'foo)` / `(use 'foo)` — load it; `use` also refers everything.
     if let Some(real) = sym_name_of(rt, spec) {
         let real = normalize_ns(&real);
         ensure_loaded(rt, cs, macros, comp, &real);
+        if refer_all {
+            comp.refer_all(rt, &real);
+        }
         return;
     }
     let Some(elems) = binding_items(rt, spec) else { return };
     let Some(real) = elems.first().and_then(|&f| sym_name_of(rt, f)) else { return };
     let real = normalize_ns(&real);
     ensure_loaded(rt, cs, macros, comp, &real);
+    // `(:use [foo …])` refers all of foo (options like :only aren't honored yet).
+    if refer_all {
+        comp.refer_all(rt, &real);
+    }
     let mut k = 1;
     while k < elems.len() {
         if is_keyword(rt, elems[k], "as") && k + 1 < elems.len() {
@@ -1907,15 +2019,31 @@ fn class_to_tag(simple: &str) -> Option<&'static str> {
 /// `(instance? Class x)` -> `(%num-eq (type-of x) 'Tag)`, mapping the (possibly
 /// package-qualified) class name to the runtime tag `type-of` reports. Panics on
 /// an unknown class rather than silently returning a wrong answer.
-fn instance_rewrite<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
+fn instance_rewrite<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
     let items = rt.list_to_vec(form);
     let Val::Sym(cs) = rt.decode(items[1]) else {
         panic!("instance?: first argument must be a class symbol");
     };
+    // If the class NAME resolves to a bound var, it may be a PROTOCOL (in which
+    // case `instance?` means "satisfies the protocol") or a deftype's own type
+    // value. `-instance-val` handles both at runtime; class names with no var
+    // (host classes like `java.lang.String`) fall through to tag equality. A
+    // Java-style dotted ref `a.b.C` may name the var `a.b/C` (e.g. a protocol).
     let cname = rt.sym_name(cs).to_string();
+    let candidates = {
+        let mut v = vec![comp.resolve_ref(rt, cs)];
+        if let Some(pos) = cname.rfind('.') {
+            let dotted_var = rt.intern(&format!("{}/{}", &cname[..pos], &cname[pos + 1..]));
+            v.push(comp.resolve_ref(rt, dotted_var));
+        }
+        v
+    };
+    if let Some(&resolved) = candidates.iter().find(|&&r| rt.global_defined(r)) {
+        let iv = sym(rt, "-instance-val");
+        let cref = rt.encode(Val::Sym(resolved));
+        return rt.vec_to_list(&[iv, cref, items[2]]);
+    }
     let simple = cname.rsplit(['.', '/']).next().unwrap_or(&cname);
-    // A deftype/record instance is tagged by its own simple name, so fall back to
-    // that when the class isn't a built-in we map.
     let tag = class_to_tag(simple).unwrap_or(simple).to_string();
     let numeq = sym(rt, "%num-eq");
     let typeof_sym = sym(rt, "type-of");
