@@ -428,8 +428,10 @@ pub struct RunOptions {
     pub aggregate: bool,
     /// Initial node radius in pixels (runtime-adjustable with +/-).
     pub node_size: f32,
-    /// Max edges drawn per frame (sampled with alpha compensation beyond this).
-    pub edge_budget: u32,
+    /// Edges rendered into the accumulation image per frame. Every edge is
+    /// always drawn; larger graphs just take total/edges_per_frame frames to
+    /// fully converge once the scene is still.
+    pub edges_per_frame: u32,
     /// Optional startup "show only" filter: (attribute key index, op, value).
     pub filter: Option<(usize, FilterOp, String)>,
     /// Start in the hierarchical (layered DAG) layout instead of force-directed.
@@ -458,7 +460,7 @@ impl Default for RunOptions {
             show_labels: false,
             aggregate: false,
             node_size: 3.0,
-            edge_budget: 1_000_000,
+            edges_per_frame: 1_000_000,
             filter: None,
             start_hierarchical: false,
             start_radial: false,
@@ -539,6 +541,14 @@ pub struct App {
     show_labels: bool,
     cached_positions: Option<Vec<Pos>>,
     show_density: bool,
+
+    // Edge-accumulation invalidation tracking: the persistent edge image must
+    // restart whenever what it depicts changes (positions, camera, colors,
+    // edge style). `edges_dirty` is set by the mutating paths; camera and edge
+    // alpha are compared against these snapshots each frame.
+    edges_dirty: bool,
+    last_cam: Option<crate::camera::CameraUniform>,
+    last_edge_alpha: f32,
 
     // Input state.
     cursor: glam::Vec2,
@@ -644,6 +654,9 @@ impl App {
             cached_positions: None,
             // Auto-enable aggregation for graphs too large to click through.
             show_density: aggregate || node_count > 2_000_000,
+            edges_dirty: true,
+            last_cam: None,
+            last_edge_alpha: 0.0,
             cursor: glam::Vec2::ZERO,
             dragging: false,
             press_pos: glam::Vec2::ZERO,
@@ -692,7 +705,7 @@ impl App {
         let mut renderer = renderer;
         renderer.draw_edges = self.opts.draw_edges;
         renderer.draw_nodes = self.opts.draw_nodes;
-        renderer.edge_budget = self.opts.edge_budget.max(1);
+        renderer.edges_per_frame = self.opts.edges_per_frame.max(1);
         // Upload the edge types to the renderer.
         let specs: Vec<crate::render::EdgeTypeInput> = self
             .edge_types
@@ -860,6 +873,7 @@ impl App {
             // Fast path: nothing to modify.
             live.graph_gpu.set_colors(&live.gpu.queue, &self.base_colors);
             live.graph_gpu.set_sizes(&live.gpu.queue, &self.base_sizes);
+            self.edges_dirty = true;
             return;
         }
 
@@ -883,6 +897,7 @@ impl App {
         }
         live.graph_gpu.set_colors(&live.gpu.queue, &colors);
         live.graph_gpu.set_sizes(&live.gpu.queue, &sizes);
+        self.edges_dirty = true;
     }
 
     /// Update the legend-hover highlight and re-push colors if it changed.
@@ -995,10 +1010,11 @@ impl App {
         let mut edge_alpha = self.render_params.edge_alpha;
         let mut draw_edges = self.live.as_ref().map(|l| l.renderer.draw_edges).unwrap_or(true);
         let mut draw_nodes = self.live.as_ref().map(|l| l.renderer.draw_nodes).unwrap_or(true);
-        let mut edge_budget =
-            self.live.as_ref().map(|l| l.renderer.edge_budget).unwrap_or(1_000_000);
+        let mut edges_per_frame =
+            self.live.as_ref().map(|l| l.renderer.edges_per_frame).unwrap_or(1_000_000);
         let visible_edges =
             self.live.as_ref().map(|l| l.renderer.visible_edge_count()).unwrap_or(0);
+        let accum_progress = self.live.as_ref().map(|l| l.renderer.edge_accum_progress());
         let mut show_density = self.show_density;
         let mut show_labels = self.show_labels;
         let cur_color = self.color_mode;
@@ -1118,20 +1134,23 @@ impl App {
                 );
                 if draw_edges && visible_edges > 100_000 {
                     ui.add(
-                        egui::Slider::new(&mut edge_budget, 50_000..=16_000_000)
+                        egui::Slider::new(&mut edges_per_frame, 50_000..=16_000_000)
                             .logarithmic(true)
-                            .text("edge budget"),
+                            .text("edges / frame"),
                     );
-                    if (edge_budget as u64) < visible_edges {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "sampling {} of {} edges",
-                                commafy(edge_budget as u64),
-                                commafy(visible_edges)
-                            ))
-                            .weak()
-                            .small(),
-                        );
+                    if let Some((done, total)) = accum_progress {
+                        if total > edges_per_frame as u64 {
+                            let txt = if done >= total {
+                                format!("all {} edges drawn", commafy(total))
+                            } else {
+                                format!(
+                                    "accumulating: {} of {} edges",
+                                    commafy(done),
+                                    commafy(total)
+                                )
+                            };
+                            ui.label(egui::RichText::new(txt).weak().small());
+                        }
                     }
                 }
 
@@ -1254,7 +1273,7 @@ impl App {
         if let Some(live) = self.live.as_mut() {
             live.renderer.draw_edges = draw_edges;
             live.renderer.draw_nodes = draw_nodes;
-            live.renderer.edge_budget = edge_budget.max(1);
+            live.renderer.edges_per_frame = edges_per_frame.max(1);
         }
         let filter_changed = filter_enabled != self.filter.enabled
             || filter_key != self.filter.key
@@ -1335,6 +1354,7 @@ impl App {
         let live = self.live.as_mut().unwrap();
 
         // Advance layout, cooling alpha so the simulation converges and stops.
+        let stepped = self.settings.running;
         if self.settings.running {
             let decay = (1.0 - self.settings.alpha_decay).powi(self.settings.substeps as i32);
             self.settings.alpha *= decay;
@@ -1357,13 +1377,26 @@ impl App {
         }
 
         // Camera uniform.
-        live.renderer.update_camera(&live.gpu.queue, &self.camera.uniform());
-        let params = effective_params(&self.render_params, &live.renderer);
-        live.renderer.update_params(&live.gpu.queue, &params);
+        let cam_uniform = self.camera.uniform();
+        live.renderer.update_camera(&live.gpu.queue, &cam_uniform);
+        live.renderer.update_params(&live.gpu.queue, &self.render_params);
         if self.show_density {
             let (vw, vh) = (live.gpu.size.width as f32, live.gpu.size.height as f32);
-            live.density.update(&live.gpu.queue, &self.camera.uniform(), vw, vh);
+            live.density.update(&live.gpu.queue, &cam_uniform, vw, vh);
         }
+
+        // Restart edge accumulation when the picture it depicts changed this
+        // frame: simulation stepped, camera moved, colors/filter/style changed.
+        let cam_moved = self
+            .last_cam
+            .map_or(true, |c| bytemuck::bytes_of(&c) != bytemuck::bytes_of(&cam_uniform));
+        let invalidate_edges = self.edges_dirty
+            || stepped
+            || cam_moved
+            || self.render_params.edge_alpha != self.last_edge_alpha;
+        self.edges_dirty = false;
+        self.last_cam = Some(cam_uniform);
+        self.last_edge_alpha = self.render_params.edge_alpha;
 
         let frame = match live.gpu.surface.get_current_texture() {
             Ok(f) => f,
@@ -1384,6 +1417,15 @@ impl App {
         // Bin nodes into screen tiles before the render pass (same encoder).
         if self.show_density {
             live.density.record_compute(&mut enc);
+        } else {
+            live.renderer.accumulate_edges(
+                &live.gpu.device,
+                &live.gpu.queue,
+                &mut enc,
+                live.gpu.size.width,
+                live.gpu.size.height,
+                invalidate_edges,
+            );
         }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1409,6 +1451,7 @@ impl App {
             if self.show_density {
                 live.density.draw(&mut pass);
             } else {
+                live.renderer.composite_edges(&mut pass);
                 live.renderer.draw(&mut pass);
             }
 
@@ -1765,8 +1808,7 @@ impl App {
         let format = live.gpu.config.format;
 
         live.renderer.update_camera(&live.gpu.queue, &self.camera.uniform());
-        let eff_params = effective_params(&self.render_params, &live.renderer);
-        live.renderer.update_params(&live.gpu.queue, &eff_params);
+        live.renderer.update_params(&live.gpu.queue, &self.render_params);
         if self.show_density {
             live.density.update(&live.gpu.queue, &self.camera.uniform(), w as f32, h as f32);
         }
@@ -1788,6 +1830,15 @@ impl App {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture") });
         if self.show_density {
             live.density.record_compute(&mut enc);
+        } else {
+            // Captures are exact: restart accumulation under the capture camera
+            // and drive it to convergence (every edge) before compositing.
+            live.renderer.accumulate_edges(&live.gpu.device, &live.gpu.queue, &mut enc, w, h, true);
+            while !live.renderer.edge_accum_converged() {
+                live.renderer
+                    .accumulate_edges(&live.gpu.device, &live.gpu.queue, &mut enc, w, h, false);
+            }
+            self.edges_dirty = true; // live view resumes with its own restart
         }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1808,6 +1859,7 @@ impl App {
             if self.show_density {
                 live.density.draw(&mut pass);
             } else {
+                live.renderer.composite_edges(&mut pass);
                 live.renderer.draw(&mut pass);
             }
             live.overlay.begin();
@@ -1866,6 +1918,7 @@ impl App {
         if let Some(live) = self.live.as_ref() {
             live.graph_gpu.set_positions(&live.gpu.queue, &pos);
         }
+        self.edges_dirty = true;
         let (min, max) = bounds(&pos);
         self.camera.fit_bounds(min, max);
         self.settings.running = true;
@@ -1905,6 +1958,7 @@ impl App {
         if let Some(live) = self.live.as_ref() {
             live.graph_gpu.set_positions(&live.gpu.queue, &pos);
         }
+        self.edges_dirty = true;
         let (min, max) = bounds(&pos);
         self.camera.fit_bounds(min, max);
         self.settings.running = false;
@@ -2107,8 +2161,7 @@ impl App {
 
     fn push_params(&mut self) {
         if let Some(live) = self.live.as_ref() {
-            let params = effective_params(&self.render_params, &live.renderer);
-            live.renderer.update_params(&live.gpu.queue, &params);
+            live.renderer.update_params(&live.gpu.queue, &self.render_params);
         }
     }
 
@@ -2239,18 +2292,6 @@ struct OverlayCmds {
     rects: Vec<(f32, f32, f32, f32, u32)>,
     texts: Vec<(f32, f32, f32, u32, String)>,
     lines: Vec<(glam::Vec2, glam::Vec2, f32, u32)>,
-}
-
-/// Render params as uploaded to the GPU: when the edge budget samples only a
-/// fraction of the edges, boost `edge_alpha` by 1/fraction (capped at 1.0) so
-/// the additively-accumulated brightness matches drawing everything.
-fn effective_params(params: &RenderParams, renderer: &Renderer) -> RenderParams {
-    let frac = renderer.edge_sample_frac();
-    let mut p = *params;
-    if frac < 1.0 {
-        p.edge_alpha = (p.edge_alpha / frac).min(1.0);
-    }
-    p
 }
 
 /// Group digits with thousands separators: 1234567 -> "1,234,567".

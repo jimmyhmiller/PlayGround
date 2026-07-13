@@ -64,9 +64,9 @@ struct EdgeTypeGpu {
 }
 
 /// Deterministic Fisher-Yates shuffle (splitmix64). Edge buffers are shuffled
-/// once at upload so that drawing any prefix of the buffer is a uniform random
-/// sample of the edge set — that's what makes the edge budget statistically
-/// honest under additive blending.
+/// once at upload so that the per-frame accumulation slices are unbiased random
+/// subsets: the picture converges uniformly everywhere instead of revealing the
+/// file's edge order region by region.
 fn shuffled(edges: &[[u32; 2]]) -> Vec<[u32; 2]> {
     let mut v = edges.to_vec();
     let mut state: u64 = 0x51ED_BEEF_2026;
@@ -93,6 +93,18 @@ fn unpack_norm(c: u32) -> [f32; 4] {
     ]
 }
 
+/// Persistent offscreen accumulation state for progressive edge rendering.
+struct EdgeAccum {
+    _tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+    /// Fraction of every visible type's edge buffer accumulated so far (0..=1).
+    /// 1.0 = the texture holds every edge; less = a converging unbiased subset.
+    frac: f32,
+    bind_group: wgpu::BindGroup,
+}
+
 pub struct Renderer {
     camera_buf: wgpu::Buffer,
     params_buf: wgpu::Buffer,
@@ -102,16 +114,21 @@ pub struct Renderer {
     /// Per-edge-type GPU state (buffers + bind groups). Set via `set_edge_types`.
     edge_types: Vec<EdgeTypeGpu>,
     node_pipeline: wgpu::RenderPipeline,
-    edge_pipeline: wgpu::RenderPipeline,
+    /// Renders edge lines additively into the float accumulation texture.
+    edge_accum_pipeline: wgpu::RenderPipeline,
+    /// Composites the accumulation texture onto the frame, brightness-normalized.
+    composite_pipeline: wgpu::RenderPipeline,
+    composite_bgl: wgpu::BindGroupLayout,
+    composite_buf: wgpu::Buffer,
+    accum: Option<EdgeAccum>,
     pick_pipeline: wgpu::RenderPipeline,
     num_nodes: u32,
     pub draw_edges: bool,
     pub draw_nodes: bool,
-    /// Max edges drawn per frame across all visible types. When the graph has
-    /// more, a uniform random sample (a prefix of the shuffled buffers) is drawn
-    /// and the app compensates by boosting `edge_alpha` — additive blending makes
-    /// the sampled image converge to the full one at a fraction of the fill cost.
-    pub edge_budget: u32,
+    /// Edges rendered into the accumulation texture per frame. Every edge is
+    /// always drawn — a graph larger than this just takes total/edges_per_frame
+    /// frames to fully converge after the scene stops changing.
+    pub edges_per_frame: u32,
 }
 
 impl Renderer {
@@ -256,8 +273,11 @@ impl Renderer {
             cache: None,
         });
 
-        let edge_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("edge_pipeline"),
+        // Edges accumulate additively into a float texture: no per-draw 8-bit
+        // saturation, and the texture persists across frames so the full edge
+        // set converges even when it is too large to draw in one frame.
+        let edge_accum_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("edge_accum_pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -269,7 +289,7 @@ impl Renderer {
                 module: &shader,
                 entry_point: Some("fs_edge"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: wgpu::TextureFormat::Rgba16Float,
                     blend: Some(additive_blend),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -277,6 +297,79 @@ impl Renderer {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // Composite: fullscreen triangle adding the normalized accumulation
+        // texture onto the scene.
+        let composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("composite_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let composite_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("composite_params"),
+            contents: bytemuck::bytes_of(&[1.0f32, 0.0, 0.0, 0.0]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let composite_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("composite_pl"),
+            bind_group_layouts: &[&composite_bgl],
+            push_constant_ranges: &[],
+        });
+        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("composite_pipeline"),
+            layout: Some(&composite_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_composite"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_composite"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
                 ..Default::default()
             },
             depth_stencil: None,
@@ -322,12 +415,16 @@ impl Renderer {
             graph_bgl,
             edge_types: Vec::new(),
             node_pipeline,
-            edge_pipeline,
+            edge_accum_pipeline,
+            composite_pipeline,
+            composite_bgl,
+            composite_buf,
+            accum: None,
             pick_pipeline,
             num_nodes: graph.num_nodes as u32,
             draw_edges: true,
             draw_nodes: true,
-            edge_budget: 1_000_000,
+            edges_per_frame: 1_000_000,
         }
     }
 
@@ -479,6 +576,7 @@ impl Renderer {
                 visible: s.visible,
             });
         }
+        self.invalidate_edge_accum();
     }
 
     /// Toggle visibility of edge type `i`.
@@ -486,9 +584,18 @@ impl Renderer {
         if let Some(et) = self.edge_types.get_mut(i) {
             et.visible = visible;
         }
+        self.invalidate_edge_accum();
     }
 
-    /// Total edges across visible types (what a budget-free frame would draw).
+    /// Restart edge accumulation (the accumulated image no longer matches what
+    /// the edges would draw).
+    pub fn invalidate_edge_accum(&mut self) {
+        if let Some(a) = self.accum.as_mut() {
+            a.frac = 0.0;
+        }
+    }
+
+    /// Total edges across visible types.
     pub fn visible_edge_count(&self) -> u64 {
         if !self.draw_edges {
             return 0;
@@ -500,40 +607,157 @@ impl Renderer {
             .sum()
     }
 
-    /// Fraction of each edge buffer drawn this frame (1.0 = everything). The
-    /// same fraction applies to every visible type so relative densities between
-    /// types stay correct.
-    pub fn edge_sample_frac(&self) -> f32 {
+    /// Edges accumulated so far vs total: `(done, total)`. `done == total`
+    /// means the current image contains every single edge.
+    pub fn edge_accum_progress(&self) -> (u64, u64) {
         let total = self.visible_edge_count();
-        if total == 0 || self.edge_budget as u64 >= total {
-            1.0
-        } else {
-            self.edge_budget as f32 / total as f32
-        }
+        let frac = self.accum.as_ref().map(|a| a.frac).unwrap_or(0.0);
+        (self.accumulated_edges(frac), total)
     }
 
-    /// Record draw calls into an already-begun render pass.
-    pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
-        pass.set_bind_group(0, &self.view_bg, &[]);
+    /// True when the accumulation texture holds the complete edge set (or there
+    /// is nothing to draw).
+    pub fn edge_accum_converged(&self) -> bool {
+        self.visible_edge_count() == 0
+            || self.accum.as_ref().map(|a| a.frac >= 1.0).unwrap_or(false)
+    }
 
-        // Edges under nodes: one draw per visible edge type (own bind group).
-        // Buffers are pre-shuffled, so drawing the first `frac` of each is a
-        // uniform sample of that type's edges.
-        if self.draw_edges {
-            let frac = self.edge_sample_frac();
-            pass.set_pipeline(&self.edge_pipeline);
+    fn accumulated_edges(&self, frac: f32) -> u64 {
+        self.edge_types
+            .iter()
+            .filter(|t| t.visible)
+            .map(|t| (t.num_edges as f64 * frac as f64).floor() as u64)
+            .sum()
+    }
+
+    /// Render the next slice of edges into the persistent accumulation texture
+    /// (encode before the main pass, same encoder). `invalidate` restarts the
+    /// accumulation — call it whenever the picture the edges describe changed:
+    /// positions moved, camera moved, colors or edge style changed. Every edge
+    /// is drawn eventually; a static scene converges to the exact full image in
+    /// ceil(total / edges_per_frame) frames.
+    pub fn accumulate_edges(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        width: u32,
+        height: u32,
+        invalidate: bool,
+    ) {
+        let total = self.visible_edge_count();
+        if total == 0 || width == 0 || height == 0 {
+            return;
+        }
+
+        // (Re)create the accumulation texture on first use / resize.
+        let needs_tex = self
+            .accum
+            .as_ref()
+            .map(|a| a.width != width || a.height != height)
+            .unwrap_or(true);
+        if needs_tex {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("edge_accum_tex"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("composite_bg"),
+                layout: &self.composite_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.composite_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                ],
+            });
+            self.accum = Some(EdgeAccum { _tex: tex, view, width, height, frac: 0.0, bind_group });
+        }
+        let accum = self.accum.as_mut().unwrap();
+        if invalidate {
+            accum.frac = 0.0;
+        }
+
+        let f0 = accum.frac;
+        if f0 < 1.0 {
+            let step = self.edges_per_frame.max(1) as f32 / total as f32;
+            let f1 = (f0 + step).min(1.0);
+            accum.frac = f1;
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("edge_accum"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &accum.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // First slice after an invalidation clears the texture.
+                        load: if f0 <= 0.0 {
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.edge_accum_pipeline);
+            pass.set_bind_group(0, &self.view_bg, &[]);
             for et in &self.edge_types {
-                if et.visible && et.num_edges > 0 {
-                    let count = ((et.num_edges as f32 * frac).ceil() as u32).min(et.num_edges);
-                    if count == 0 {
-                        continue;
-                    }
+                if !et.visible || et.num_edges == 0 {
+                    continue;
+                }
+                // This frame's slice of the (pre-shuffled) buffer.
+                let start = (et.num_edges as f64 * f0 as f64).floor() as u32;
+                let end = (et.num_edges as f64 * f1 as f64).floor() as u32;
+                if end > start {
                     pass.set_bind_group(1, &et.bind_group, &[]);
-                    pass.draw(0..(count * 2), 0..1);
+                    pass.draw(start * 2..end * 2, 0..1);
                 }
             }
         }
+
+        // Normalization factor: total / accumulated, so brightness is constant
+        // while the image sharpens toward the full edge set.
+        let frac_now = self.accum.as_ref().unwrap().frac;
+        let done = self.accumulated_edges(frac_now).max(1);
+        let factor = total as f32 / done as f32;
+        queue.write_buffer(&self.composite_buf, 0, bytemuck::bytes_of(&[factor, 0.0f32, 0.0, 0.0]));
+    }
+
+    /// Add the accumulated edge image onto the current render pass (call before
+    /// drawing nodes so edges stay underneath).
+    pub fn composite_edges<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
+        if !self.draw_edges {
+            return;
+        }
+        let Some(accum) = self.accum.as_ref() else { return };
+        if accum.frac <= 0.0 {
+            return;
+        }
+        pass.set_pipeline(&self.composite_pipeline);
+        pass.set_bind_group(0, &accum.bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Record node draw calls into an already-begun render pass.
+    pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
         if self.draw_nodes && self.num_nodes > 0 {
+            pass.set_bind_group(0, &self.view_bg, &[]);
             pass.set_bind_group(1, &self.graph_bg, &[]);
             pass.set_pipeline(&self.node_pipeline);
             pass.draw(0..6, 0..self.num_nodes);

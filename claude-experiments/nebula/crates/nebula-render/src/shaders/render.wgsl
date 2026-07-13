@@ -144,6 +144,45 @@ fn fs_edge(in: EdgeVsOut) -> @location(0) vec4<f32> {
     return in.color;
 }
 
+// ---------------- Edge accumulation composite ----------------
+// Edges are rendered additively into a persistent float texture, a slice of
+// the edge set per frame. This pass shows the running total, scaled by
+// (total edges / edges accumulated so far) so brightness stays constant while
+// the picture converges, then tone-clamped once (instead of the lossy per-draw
+// 8-bit saturation direct rendering would do).
+
+struct CompositeParams {
+    factor: f32,
+    _c0: f32,
+    _c1: f32,
+    _c2: f32,
+};
+@group(0) @binding(0) var<uniform> comp: CompositeParams;
+@group(0) @binding(1) var accum_tex: texture_2d<f32>;
+
+struct CompositeOut {
+    @builtin(position) clip: vec4<f32>,
+};
+
+@vertex
+fn vs_composite(@builtin(vertex_index) vi: u32) -> CompositeOut {
+    // Fullscreen triangle.
+    var pts = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -3.0), vec2<f32>(-1.0, 1.0), vec2<f32>(3.0, 1.0),
+    );
+    var out: CompositeOut;
+    out.clip = vec4<f32>(pts[vi], 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_composite(in: CompositeOut) -> @location(0) vec4<f32> {
+    let px = vec2<i32>(i32(in.clip.x), i32(in.clip.y));
+    let acc = textureLoad(accum_tex, px, 0).rgb;
+    let rgb = min(acc * comp.factor, vec3<f32>(1.0, 1.0, 1.0));
+    return vec4<f32>(rgb, 1.0);
+}
+
 // ---------------- Picking ----------------
 // Renders each node's id (+1) into an R32Uint target; 0 means "no node".
 struct PickOut {
