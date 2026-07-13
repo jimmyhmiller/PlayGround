@@ -473,14 +473,22 @@ pub const CORE: &str = r##"
   (lazy-seq (let [sa (seq a) sb (seq b) sc (seq c)]
               (if (if (nil? sa) true (if (nil? sb) true (nil? sc))) nil
                   (%cons (f (%first sa) (%first sb) (%first sc)) (-map3 f (%rest sa) (%rest sb) (%rest sc)))))))
-;; `map` is variadic over collections (like clojure.core), stopping at the
-;; shortest. Beyond 3 collections is unsupported (no `apply` on the interp tiers).
+;; N-ary map: apply f to the first item of each coll, stopping at the shortest.
+(defn -some-nil? [xs]
+  (let [s (seq xs)]
+    (if (nil? s) false (if (nil? (first s)) true (-some-nil? (rest s))))))
+(defn -mapn [f colls]
+  (lazy-seq
+    (let [ss (-map1 seq colls)]
+      (if (-some-nil? ss) nil
+        (%cons (apply f (-map1 first ss)) (-mapn f (-map1 rest ss)))))))
+;; `map` is variadic over collections (like clojure.core), stopping at the shortest.
 (defn map [f & colls]
   (cond (nil? colls) (fn [rf] (fn ([] (rf)) ([a] (rf a)) ([a x] (rf a (f x)))))
         (nil? (next colls)) (-map1 f (first colls))
         (nil? (next (next colls))) (-map2 f (first colls) (second colls))
         (nil? (next (next (next colls)))) (-map3 f (first colls) (second colls) (nth colls 2))
-        true (throw "map: only up to 3 collections supported")))
+        true (-mapn f colls)))
 (defn filter
   ([pred] (fn [rf] (fn ([] (rf)) ([a] (rf a)) ([a x] (if (pred x) (rf a x) a)))))
   ([f c]
@@ -529,7 +537,9 @@ pub const CORE: &str = r##"
   (lazy-seq (let [s (seq c)]
               (if (nil? s) nil (if (pred (%first s)) (drop-while pred (%rest s)) s)))))
 ;; ─────────────── infinite / generator seqs ───────────────
-(defn iterate [f x] (lazy-seq (%cons x (iterate f (f x)))))
+;; x is the immediate head; `(f x)` is deferred INSIDE the inner lazy-seq (so
+;; realizing element n applies f exactly n times, not n+1). Exactly cljs's form.
+(defn iterate [f x] (cons x (lazy-seq (iterate f (f x)))))
 (defn -repeat-inf [x] (lazy-seq (%cons x (-repeat-inf x))))
 (defn -repeat-n [n x] (lazy-seq (if (%lt 0 n) (%cons x (-repeat-n (%sub n 1) x)) nil)))
 (defn repeat [& args] (if (nil? (next args)) (-repeat-inf (first args)) (-repeat-n (first args) (second args))))
@@ -1396,8 +1406,22 @@ pub const CORE: &str = r##"
 ;; library code uses `(array-list)` + `.add`/`.isEmpty`/`.toArray`/`.clear` as a
 ;; local mutation optimization (e.g. medley's partition transducers).
 (defn array-list [] (record 'ArrayList (%atom-new [])))
-(defn -al-add! [al x] (do (%atom-set (field al 0) (conj (%atom-get (field al 0)) x)) al))
+(defn -al? [al] (%num-eq (type-of al) 'ArrayList))
+(defn -al-add! [al x]
+  (if (-al? al) (do (%atom-set (field al 0) (conj (%atom-get (field al 0)) x)) al)
+      (throw "not a mutable array-list")))
 (defn -al-clear! [al] (do (%atom-set (field al 0) []) al))
+;; remove and return the first element (JS array `.shift`).
+(defn -al-shift! [al]
+  (if (-al? al)
+    (let [v (%atom-get (field al 0))]
+      (%atom-set (field al 0) (vec (rest v)))
+      (first v))
+    (throw "not a mutable array-list")))
+;; index of item in a sequential coll, or -1 (JS array/`.indexOf` semantics).
+(defn -index-of [coll item]
+  (loop [s (seq coll) i 0]
+    (cond (nil? s) -1 (= (first s) item) i :else (recur (rest s) (%add i 1)))))
 (extend-type ArrayList
   ICounted (-count [al] (count (%atom-get (field al 0))))
   ISeqable (-seq [al] (seq (%atom-get (field al 0)))))
@@ -1590,7 +1614,7 @@ pub const CORE: &str = r##"
 (defn realized? [x] true)
 (defn chunked-seq? [x] false)
 (defn special-symbol? [x] (not (nil? (some (fn [s] (= x s)) '(if do let* fn* quote def loop* recur throw try catch finally var set! new .)))))
-(defn record? [x] false)
+;; real `record?` is defined below with the defrecord registry (-record-types).
 
 ;; ─────────────── string->number parsing ───────────────
 (defn -digit? [c] (let [n (%char-code c)] (and (%lt 47 n) (%lt n 58))))

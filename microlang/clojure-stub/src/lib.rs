@@ -495,7 +495,11 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
             }
             if !is_sym(rt, elems[k], "_") {
                 let iv = int(rt, idx);
-                let nth_expr = call2(rt, "nth", t, iv);
+                // `(nth t idx nil)` — a missing index binds nil (Clojure destructuring
+                // semantics), not an out-of-bounds error.
+                let nthk = sym(rt, "nth");
+                let niln = rt.encode(Val::Nil);
+                let nth_expr = rt.vec_to_list(&[nthk, t, iv, niln]);
                 binds.extend(destructure(rt, elems[k], nth_expr));
             }
             idx += 1;
@@ -1167,6 +1171,10 @@ fn interop_rewrite<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> Option<u64>
     // a deftype instance, resolved through the field-name registry.
     if let Some(field) = hname.strip_prefix(".-") {
         if !field.is_empty() {
+            // `.-length` (a cljs array/collection's element count) -> `(count x)`.
+            if field == "length" {
+                return Some(call1(rt, "count", items[1]));
+            }
             let fsym = sym(rt, field);
             let fq = quote_form(rt, fsym);
             let fbn = sym(rt, "%field-by-name");
@@ -1257,14 +1265,23 @@ fn shim_instance<M: ValueModel>(rt: &mut Runtime<M>, method: &str, obj: u64, arg
         "isEmpty" => call1(rt, "empty?", obj),
         "toArray" => call1(rt, "to-array", obj),
         "size" | "count" | "length" => call1(rt, "count", obj),
-        // mutable array-list (cljs `(array-list)`): add/clear mutate in place.
-        "add" => {
+        // mutable array-list / cljs `(array)`: add/push/shift/clear mutate in place.
+        "add" | "push" => {
             let h = sym(rt, "-al-add!");
             let mut out = vec![h, obj];
             out.extend_from_slice(args);
             rt.vec_to_list(&out)
         }
         "clear" => call1(rt, "-al-clear!", obj),
+        "shift" => call1(rt, "-al-shift!", obj),
+        "slice" => call1(rt, "to-array", obj),
+        // `.indexOf coll item` -> index of item in coll, or -1.
+        "indexOf" => {
+            let h = sym(rt, "-index-of");
+            let mut out = vec![h, obj];
+            out.extend_from_slice(args);
+            rt.vec_to_list(&out)
+        }
         _ => interop_unsupported(rt, format!(".{method}")),
     }
 }
