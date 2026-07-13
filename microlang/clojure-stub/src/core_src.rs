@@ -391,7 +391,10 @@ pub const CORE: &str = r##"
 ;; of lazy-seqs — e.g. a long `concat` chain — resolves in O(1) stack, not O(depth).
 (defn seq [c] (loop [c c] (if (nil? c) nil (let [s (-seq c)] (if (lazy-seq? s) (recur s) s)))))
 (defn first [c] (let [s (seq c)] (if (nil? s) nil (-first s))))
-(defn rest [c] (let [s (seq c)] (if (nil? s) nil (-rest s))))
+;; `rest` ALWAYS returns a seq — `()` when empty, never nil (Clojure semantics;
+;; use `next` for the nil-when-empty behavior). `(seq ())` is nil, so seq-guarded
+;; loops still terminate.
+(defn rest [c] (let [s (seq c)] (if (nil? s) () (let [r (-rest s)] (if (nil? r) () r)))))
 (defn next [c] (seq (rest c)))
 (defn cons [x c] (%cons x c))
 (defn empty? [c] (nil? (seq c)))
@@ -494,7 +497,10 @@ pub const CORE: &str = r##"
         (%cons (apply f (-map1 first ss)) (-mapn f (-map1 rest ss)))))))
 ;; `map` is variadic over collections (like clojure.core), stopping at the shortest.
 (defn map [f & colls]
-  (cond (nil? colls) (fn [rf] (fn ([] (rf)) ([a] (rf a)) ([a x] (rf a (f x)))))
+  ;; the 0-coll form is a TRANSDUCER; its step supports one OR many inputs
+  ;; (`(apply f x xs)`), as clojure.core's does — used by multi-coll `sequence`.
+  (cond (nil? colls) (fn [rf] (fn ([] (rf)) ([a] (rf a)) ([a x] (rf a (f x)))
+                                 ([a x & xs] (rf a (apply f x xs)))))
         (nil? (next colls)) (-map1 f (first colls))
         (nil? (next (next colls))) (-map2 f (first colls) (second colls))
         (nil? (next (next (next colls)))) (-map3 f (first colls) (second colls) (nth colls 2))
@@ -1432,7 +1438,7 @@ pub const CORE: &str = r##"
 ;; index of item in a sequential coll, or -1 (JS array/`.indexOf` semantics).
 (defn -index-of [coll item]
   (loop [s (seq coll) i 0]
-    (cond (nil? s) -1 (= (first s) item) i :else (recur (rest s) (%add i 1)))))
+    (cond (nil? s) -1 (= (first s) item) i :else (recur (next s) (%add i 1)))))
 (extend-type ArrayList
   ICounted (-count [al] (count (%atom-get (field al 0))))
   ISeqable (-seq [al] (seq (%atom-get (field al 0)))))
@@ -1516,7 +1522,7 @@ pub const CORE: &str = r##"
 (defn list* [& args] (-list*-seq args))
 (defn reduce-kv [f init coll]
   (if (vector? coll)
-    (loop [i 0 acc init s (seq coll)] (if (nil? s) acc (recur (inc i) (f acc i (first s)) (rest s))))
+    (loop [i 0 acc init s (seq coll)] (if (nil? s) acc (recur (inc i) (f acc i (first s)) (next s))))
     (reduce (fn [acc e] (f acc (first e) (second e))) init (seq coll))))
 (defn update-keys [m f] (reduce (fn [acc e] (assoc acc (f (first e)) (second e))) {} (seq m)))
 (defn update-vals [m f] (reduce (fn [acc e] (assoc acc (first e) (f (second e)))) {} (seq m)))
@@ -1818,9 +1824,10 @@ pub const CORE: &str = r##"
 (defn transduce
   ([xform f coll] (transduce xform f (f) coll))
   ([xform f init coll] (let [rf (xform f)] (rf (unreduced (-tr-reduce rf init coll))))))
+;; `sequence` yields a seq, `()` (not nil) when empty — as in Clojure.
 (defn sequence
-  ([coll] (seq coll))
-  ([xform coll] (seq (transduce xform conj [] coll))))
+  ([coll] (or (seq coll) ()))
+  ([xform coll] (or (seq (transduce xform conj [] coll)) ())))
 (defn eduction [& args] (seq (transduce (apply comp (butlast args)) conj [] (last args))))
 (defn completing
   ([f] (completing f identity))
