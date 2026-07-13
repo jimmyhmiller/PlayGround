@@ -45,6 +45,11 @@ cargo run --release -p nebula-app -- --blocks 40000 6 300000 --color communities
 - **Loads many formats.** Edge lists, CSV, Matrix Market (`.mtx`), DIMACS
   (`.gr`), GML, DOT/Graphviz, JSON (d3-style `{nodes, links}` or `{edges}`), and
   adjacency lists — auto-detected by extension and content.
+- **Typed edges.** JSON may declare multiple named, colored edge sets via
+  `{nodes, edge_types:[{name, color, edges}]}` (e.g. `children`/`deps`). Each
+  set toggles and colors independently, and a "compute over" selector chooses
+  which set the coloring/layout algorithms use. `scripts/tp-to-nebula.py`
+  converts a Turbopack task-graph dump into this format.
 - **Pluggable layouts.** A `Layout` trait with random / circle / grid / force-
   directed implementations; re-seed at runtime with `R` / `G` / `O`.
 - **In-engine HUD.** Stats, controls, a color legend, and the inspection panel are
