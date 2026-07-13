@@ -873,6 +873,42 @@ impl<M: ValueModel> Runtime<M> {
                 let nid = self.alloc(Obj::Vector(copy));
                 M::R::enc_ref(nid)
             }
+            Prim::ArrPush => {
+                let Val::Ref(id) = self.decode(args[0]) else {
+                    panic!("apush: not an array");
+                };
+                let _g = self.shared.heap_lock.lock().unwrap();
+                let Obj::Vector(elems) = &mut self.heap_mut()[id as usize] else {
+                    panic!("apush: not an array");
+                };
+                elems.push(args[1]);
+                args[0]
+            }
+            Prim::ArrShift => {
+                let Val::Ref(id) = self.decode(args[0]) else {
+                    panic!("ashift: not an array");
+                };
+                let _g = self.shared.heap_lock.lock().unwrap();
+                let Obj::Vector(elems) = &mut self.heap_mut()[id as usize] else {
+                    panic!("ashift: not an array");
+                };
+                if elems.is_empty() {
+                    self.enc_nil()
+                } else {
+                    elems.remove(0)
+                }
+            }
+            Prim::ArrClear => {
+                let Val::Ref(id) = self.decode(args[0]) else {
+                    panic!("aclear: not an array");
+                };
+                let _g = self.shared.heap_lock.lock().unwrap();
+                let Obj::Vector(elems) = &mut self.heap_mut()[id as usize] else {
+                    panic!("aclear: not an array");
+                };
+                elems.clear();
+                args[0]
+            }
             Prim::BitAnd => self.encode(Val::Int(self.as_i128(args[0]) & self.as_i128(args[1]))),
             Prim::BitOr => self.encode(Val::Int(self.as_i128(args[0]) | self.as_i128(args[1]))),
             Prim::BitXor => self.encode(Val::Int(self.as_i128(args[0]) ^ self.as_i128(args[1]))),

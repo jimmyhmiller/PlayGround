@@ -46,6 +46,14 @@ pub enum Prim {
     MakeArray,
     /// `(%aclone a)` -> a shallow copy of a mutable array (for trie path-copying).
     AClone,
+    /// `(%apush a x)` -> push `x` onto the end of a mutable array, GROWING it in
+    /// place; returns the array. Backs cljs `(array)` + `.push`/`.add`.
+    ArrPush,
+    /// `(%ashift a)` -> remove and return the FIRST element of a mutable array,
+    /// shrinking it in place (cljs `.shift`); nil if empty.
+    ArrShift,
+    /// `(%aclear a)` -> truncate a mutable array to length 0 in place; returns it.
+    ArrClear,
     /// Bitwise ops on integers, for trie index math and HAMT bitmaps.
     BitAnd,
     BitOr,

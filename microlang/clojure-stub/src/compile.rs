@@ -70,6 +70,7 @@ impl Compiler {
             // Array substrate + bitwise ops for in-language persistent structures.
             ("%make-array", MakeArray), ("%aclone", AClone), ("%alength", VectorLen),
             ("%aget", VectorRef), ("%anew", Vector),
+            ("%apush", ArrPush), ("%ashift", ArrShift), ("%aclear", ArrClear),
             ("%bit-and", BitAnd), ("%bit-or", BitOr), ("%bit-xor", BitXor),
             ("%bit-shl", BitShl), ("%bit-shr", BitShr), ("%bit-count", BitCount),
             ("%register-fields", RegisterFields), ("%field-by-name", FieldByName), ("%field-names", FieldNames), ("%make-record", MakeRecord), ("%hash", Hash),
