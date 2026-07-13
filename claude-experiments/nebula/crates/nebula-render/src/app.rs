@@ -428,6 +428,8 @@ pub struct RunOptions {
     pub aggregate: bool,
     /// Initial node radius in pixels (runtime-adjustable with +/-).
     pub node_size: f32,
+    /// Max edges drawn per frame (sampled with alpha compensation beyond this).
+    pub edge_budget: u32,
     /// Optional startup "show only" filter: (attribute key index, op, value).
     pub filter: Option<(usize, FilterOp, String)>,
     /// Start in the hierarchical (layered DAG) layout instead of force-directed.
@@ -456,6 +458,7 @@ impl Default for RunOptions {
             show_labels: false,
             aggregate: false,
             node_size: 3.0,
+            edge_budget: 1_000_000,
             filter: None,
             start_hierarchical: false,
             start_radial: false,
@@ -689,6 +692,7 @@ impl App {
         let mut renderer = renderer;
         renderer.draw_edges = self.opts.draw_edges;
         renderer.draw_nodes = self.opts.draw_nodes;
+        renderer.edge_budget = self.opts.edge_budget.max(1);
         // Upload the edge types to the renderer.
         let specs: Vec<crate::render::EdgeTypeInput> = self
             .edge_types
@@ -991,6 +995,10 @@ impl App {
         let mut edge_alpha = self.render_params.edge_alpha;
         let mut draw_edges = self.live.as_ref().map(|l| l.renderer.draw_edges).unwrap_or(true);
         let mut draw_nodes = self.live.as_ref().map(|l| l.renderer.draw_nodes).unwrap_or(true);
+        let mut edge_budget =
+            self.live.as_ref().map(|l| l.renderer.edge_budget).unwrap_or(1_000_000);
+        let visible_edges =
+            self.live.as_ref().map(|l| l.renderer.visible_edge_count()).unwrap_or(0);
         let mut show_density = self.show_density;
         let mut show_labels = self.show_labels;
         let cur_color = self.color_mode;
@@ -1108,6 +1116,24 @@ impl App {
                         .logarithmic(true)
                         .text("edge glow"),
                 );
+                if draw_edges && visible_edges > 100_000 {
+                    ui.add(
+                        egui::Slider::new(&mut edge_budget, 50_000..=16_000_000)
+                            .logarithmic(true)
+                            .text("edge budget"),
+                    );
+                    if (edge_budget as u64) < visible_edges {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "sampling {} of {} edges",
+                                commafy(edge_budget as u64),
+                                commafy(visible_edges)
+                            ))
+                            .weak()
+                            .small(),
+                        );
+                    }
+                }
 
                 // Edge types: per-type render visibility + color, and which edge
                 // set the edge-aware algorithms compute over.
@@ -1228,6 +1254,7 @@ impl App {
         if let Some(live) = self.live.as_mut() {
             live.renderer.draw_edges = draw_edges;
             live.renderer.draw_nodes = draw_nodes;
+            live.renderer.edge_budget = edge_budget.max(1);
         }
         let filter_changed = filter_enabled != self.filter.enabled
             || filter_key != self.filter.key
@@ -1331,7 +1358,8 @@ impl App {
 
         // Camera uniform.
         live.renderer.update_camera(&live.gpu.queue, &self.camera.uniform());
-        live.renderer.update_params(&live.gpu.queue, &self.render_params);
+        let params = effective_params(&self.render_params, &live.renderer);
+        live.renderer.update_params(&live.gpu.queue, &params);
         if self.show_density {
             let (vw, vh) = (live.gpu.size.width as f32, live.gpu.size.height as f32);
             live.density.update(&live.gpu.queue, &self.camera.uniform(), vw, vh);
@@ -1737,7 +1765,8 @@ impl App {
         let format = live.gpu.config.format;
 
         live.renderer.update_camera(&live.gpu.queue, &self.camera.uniform());
-        live.renderer.update_params(&live.gpu.queue, &self.render_params);
+        let eff_params = effective_params(&self.render_params, &live.renderer);
+        live.renderer.update_params(&live.gpu.queue, &eff_params);
         if self.show_density {
             live.density.update(&live.gpu.queue, &self.camera.uniform(), w as f32, h as f32);
         }
@@ -1910,39 +1939,24 @@ impl App {
         self.apply_fixed_layout(&layout, &g);
     }
 
-    /// Read back positions needed to draw the selection: the node itself and (for
-    /// modest graphs) its neighbors, so we can draw connection lines. Big graphs
-    /// only refresh the single node to stay cheap.
+    /// Read back positions needed to draw the selection: the node itself and its
+    /// neighbors, so we can draw connection lines. Uses a gather readback whose
+    /// cost scales with the neighbor cap, not the graph, so any graph size gets
+    /// live neighbor lines.
     fn refresh_selection(&mut self, sel: u32) {
-        const SMALL: u64 = 250_000;
         const MAX_LINES: usize = 512;
-        let n = self.graph.num_nodes();
-        let neighbors: Vec<u32> = self
-            .graph
-            .csr_ref()
-            .map(|c| c.neighbors(sel).iter().copied().take(MAX_LINES).collect())
-            .unwrap_or_default();
-
-        if n <= SMALL {
-            let pos = self
-                .live
-                .as_ref()
-                .and_then(|live| crate::readback::read_positions(&live.gpu, &live.graph_gpu));
-            if let Some(pos) = pos {
-                self.selected_pos = pos.get(sel as usize).map(|p| glam::vec2(p[0], p[1]));
-                self.neighbor_positions = neighbors
-                    .iter()
-                    .filter_map(|&nb| pos.get(nb as usize).map(|p| glam::vec2(p[0], p[1])))
-                    .collect();
-            }
-        } else {
-            let sp = self
-                .live
-                .as_ref()
-                .and_then(|live| crate::readback::read_one_position(&live.gpu, &live.graph_gpu, sel))
-                .map(|p| glam::vec2(p[0], p[1]));
-            self.selected_pos = sp;
-            self.neighbor_positions.clear();
+        let mut indices: Vec<u32> = vec![sel];
+        if let Some(csr) = self.graph.csr_ref() {
+            indices.extend(csr.neighbors(sel).iter().copied().take(MAX_LINES));
+        }
+        let pos = self
+            .live
+            .as_ref()
+            .and_then(|live| crate::readback::read_positions_at(&live.gpu, &live.graph_gpu, &indices));
+        if let Some(pos) = pos {
+            self.selected_pos = pos.first().map(|p| glam::vec2(p[0], p[1]));
+            self.neighbor_positions =
+                pos.iter().skip(1).map(|p| glam::vec2(p[0], p[1])).collect();
         }
     }
 
@@ -2093,7 +2107,8 @@ impl App {
 
     fn push_params(&mut self) {
         if let Some(live) = self.live.as_ref() {
-            live.renderer.update_params(&live.gpu.queue, &self.render_params);
+            let params = effective_params(&self.render_params, &live.renderer);
+            live.renderer.update_params(&live.gpu.queue, &params);
         }
     }
 
@@ -2224,6 +2239,18 @@ struct OverlayCmds {
     rects: Vec<(f32, f32, f32, f32, u32)>,
     texts: Vec<(f32, f32, f32, u32, String)>,
     lines: Vec<(glam::Vec2, glam::Vec2, f32, u32)>,
+}
+
+/// Render params as uploaded to the GPU: when the edge budget samples only a
+/// fraction of the edges, boost `edge_alpha` by 1/fraction (capped at 1.0) so
+/// the additively-accumulated brightness matches drawing everything.
+fn effective_params(params: &RenderParams, renderer: &Renderer) -> RenderParams {
+    let frac = renderer.edge_sample_frac();
+    let mut p = *params;
+    if frac < 1.0 {
+        p.edge_alpha = (p.edge_alpha / frac).min(1.0);
+    }
+    p
 }
 
 /// Group digits with thousands separators: 1234567 -> "1,234,567".

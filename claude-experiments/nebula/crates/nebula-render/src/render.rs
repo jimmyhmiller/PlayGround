@@ -63,6 +63,27 @@ struct EdgeTypeGpu {
     visible: bool,
 }
 
+/// Deterministic Fisher-Yates shuffle (splitmix64). Edge buffers are shuffled
+/// once at upload so that drawing any prefix of the buffer is a uniform random
+/// sample of the edge set — that's what makes the edge budget statistically
+/// honest under additive blending.
+fn shuffled(edges: &[[u32; 2]]) -> Vec<[u32; 2]> {
+    let mut v = edges.to_vec();
+    let mut state: u64 = 0x51ED_BEEF_2026;
+    let mut next = || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    for i in (1..v.len()).rev() {
+        let j = (next() % (i as u64 + 1)) as usize;
+        v.swap(i, j);
+    }
+    v
+}
+
 fn unpack_norm(c: u32) -> [f32; 4] {
     [
         (c & 0xff) as f32 / 255.0,
@@ -84,9 +105,13 @@ pub struct Renderer {
     edge_pipeline: wgpu::RenderPipeline,
     pick_pipeline: wgpu::RenderPipeline,
     num_nodes: u32,
-    num_edges: u32,
     pub draw_edges: bool,
     pub draw_nodes: bool,
+    /// Max edges drawn per frame across all visible types. When the graph has
+    /// more, a uniform random sample (a prefix of the shuffled buffers) is drawn
+    /// and the app compensates by boosting `edge_alpha` — additive blending makes
+    /// the sampled image converge to the full one at a fraction of the fill cost.
+    pub edge_budget: u32,
 }
 
 impl Renderer {
@@ -300,9 +325,9 @@ impl Renderer {
             edge_pipeline,
             pick_pipeline,
             num_nodes: graph.num_nodes as u32,
-            num_edges: graph.num_edges as u32,
             draw_edges: true,
             draw_nodes: true,
+            edge_budget: 1_000_000,
         }
     }
 
@@ -418,7 +443,7 @@ impl Renderer {
     pub fn set_edge_types(&mut self, device: &wgpu::Device, graph: &GpuGraph, specs: &[EdgeTypeInput]) {
         self.edge_types.clear();
         for s in specs {
-            let flat: Vec<u32> = s.edges.iter().flat_map(|&[a, b]| [a, b]).collect();
+            let flat: Vec<u32> = shuffled(s.edges).into_iter().flat_map(|[a, b]| [a, b]).collect();
             let edge_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("edge_type_buf"),
                 contents: if flat.is_empty() {
@@ -463,17 +488,48 @@ impl Renderer {
         }
     }
 
+    /// Total edges across visible types (what a budget-free frame would draw).
+    pub fn visible_edge_count(&self) -> u64 {
+        if !self.draw_edges {
+            return 0;
+        }
+        self.edge_types
+            .iter()
+            .filter(|t| t.visible)
+            .map(|t| t.num_edges as u64)
+            .sum()
+    }
+
+    /// Fraction of each edge buffer drawn this frame (1.0 = everything). The
+    /// same fraction applies to every visible type so relative densities between
+    /// types stay correct.
+    pub fn edge_sample_frac(&self) -> f32 {
+        let total = self.visible_edge_count();
+        if total == 0 || self.edge_budget as u64 >= total {
+            1.0
+        } else {
+            self.edge_budget as f32 / total as f32
+        }
+    }
+
     /// Record draw calls into an already-begun render pass.
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
         pass.set_bind_group(0, &self.view_bg, &[]);
 
         // Edges under nodes: one draw per visible edge type (own bind group).
+        // Buffers are pre-shuffled, so drawing the first `frac` of each is a
+        // uniform sample of that type's edges.
         if self.draw_edges {
+            let frac = self.edge_sample_frac();
             pass.set_pipeline(&self.edge_pipeline);
             for et in &self.edge_types {
                 if et.visible && et.num_edges > 0 {
+                    let count = ((et.num_edges as f32 * frac).ceil() as u32).min(et.num_edges);
+                    if count == 0 {
+                        continue;
+                    }
                     pass.set_bind_group(1, &et.bind_group, &[]);
-                    pass.draw(0..(et.num_edges * 2), 0..1);
+                    pass.draw(0..(count * 2), 0..1);
                 }
             }
         }

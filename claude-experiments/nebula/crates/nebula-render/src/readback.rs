@@ -39,6 +39,45 @@ pub fn read_one_position(gpu: &Gpu, graph: &GpuGraph, index: u32) -> Option<Pos>
     Some(p)
 }
 
+/// Read back the positions of a small set of nodes (selection + neighbors) via
+/// per-index buffer copies into one staging buffer. Unlike `read_positions`,
+/// cost scales with the set size, not the graph, so it is fine to call per frame
+/// while a node is selected — even on multi-million-node graphs.
+pub fn read_positions_at(gpu: &Gpu, graph: &GpuGraph, indices: &[u32]) -> Option<Vec<Pos>> {
+    if indices.is_empty() {
+        return Some(Vec::new());
+    }
+    let bytes = (indices.len() * std::mem::size_of::<Pos>()) as u64;
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("pos_gather_readback"),
+        size: bytes,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("pos_gather") });
+    for (slot, &i) in indices.iter().enumerate() {
+        if (i as u64) < graph.num_nodes {
+            enc.copy_buffer_to_buffer(&graph.positions, i as u64 * 8, &staging, slot as u64 * 8, 8);
+        }
+    }
+    gpu.queue.submit(Some(enc.finish()));
+
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    rx.recv().ok()?.ok()?;
+    let data = slice.get_mapped_range();
+    let out: Vec<Pos> = bytemuck::cast_slice(&data).to_vec();
+    drop(data);
+    staging.unmap();
+    Some(out)
+}
+
 pub fn read_positions(gpu: &Gpu, graph: &GpuGraph) -> Option<Vec<Pos>> {
     let n = graph.num_nodes as usize;
     if n == 0 {

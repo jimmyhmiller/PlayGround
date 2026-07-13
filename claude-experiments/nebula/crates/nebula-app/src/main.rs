@@ -33,6 +33,9 @@ OPTIONS:
     --labels                  Show node labels (graphs up to 50k nodes)
     --select <INDEX>          Preselect a node
     --no-edges / --no-nodes   Hide edges / nodes
+    --edge-budget <N>         Max edges drawn per frame; beyond this a random
+                              sample is drawn with brightness compensation
+                              (default 1000000)
     --frames <N>              Exit after N frames (headless)
     --screenshot <PATH>       Save a PNG of the final frame (headless)
     --help-overlay            Start with the controls overlay visible
@@ -76,6 +79,7 @@ struct Args {
     labels: bool,
     aggregate: bool,
     node_size: f32,
+    edge_budget: u32,
 }
 
 enum Gen {
@@ -220,6 +224,7 @@ fn main() -> anyhow::Result<()> {
         show_labels: args.labels,
         aggregate: args.aggregate,
         node_size: args.node_size,
+        edge_budget: args.edge_budget,
         filter,
         start_hierarchical: args.hierarchical,
         start_radial: args.radial,
@@ -255,6 +260,7 @@ fn parse_args() -> Result<Args, String> {
     let mut labels = false;
     let mut aggregate = false;
     let mut node_size = 3.0f32;
+    let mut edge_budget = 1_000_000u32;
 
     fn next_u64(it: &mut impl Iterator<Item = String>, name: &str) -> Result<u64, String> {
         it.next()
@@ -309,6 +315,7 @@ fn parse_args() -> Result<Args, String> {
             "--labels" => labels = true,
             "--aggregate" => aggregate = true,
             "--node-size" => node_size = next_f32(&mut it, "--node-size")?,
+            "--edge-budget" => edge_budget = next_u32(&mut it, "--edge-budget")?.max(1),
             "--frames" => frames = Some(next_u64(&mut it, "--frames")?),
             "--screenshot" => screenshot = Some(it.next().ok_or("--screenshot needs a path")?),
             "--color" => {
@@ -378,5 +385,6 @@ fn parse_args() -> Result<Args, String> {
         labels,
         aggregate,
         node_size,
+        edge_budget,
     })
 }
