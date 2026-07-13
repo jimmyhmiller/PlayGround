@@ -1606,6 +1606,12 @@ pub const CORE: &str = r##"
 (defn integer? [x] (int? x))
 (defn double? [x] (%num-eq (type-of x) 'Double))
 (defn float? [x] (double? x))
+;; numeric coercions: long/int truncate toward zero to an integer; double/float
+;; coerce to a Double (adding 0.0 routes through the float arithmetic path).
+(defn long [x] (%to-long x))
+(defn int [x] (%to-long x))
+(defn double [x] (%add 0.0 x))
+(defn float [x] (%add 0.0 x))
 (defn pos-int? [x] (and (int? x) (%lt 0 x)))
 (defn neg-int? [x] (and (int? x) (%lt x 0)))
 (defn nat-int? [x] (and (int? x) (not (%lt x 0))))
@@ -1759,8 +1765,18 @@ pub const CORE: &str = r##"
 (defn qualified-symbol? [x] (and (symbol? x) (not (nil? (namespace x)))))
 (defn simple-keyword? [x] (and (keyword? x) (nil? (namespace x))))
 (defn qualified-keyword? [x] (and (keyword? x) (not (nil? (namespace x)))))
-(defn ratio? [x] false)
-(defn rational? [x] (int? x))
+(defn ratio? [x] (%num-eq (type-of x) 'Ratio))
+(defn rational? [x] (or (int? x) (ratio? x)))
+(defn numerator [x] (%numerator x))
+(defn denominator [x] (%denominator x))
+(defn bigint? [x] (%bigint? x))
+;; bigint: integer -> itself (already arbitrary precision); ratio -> truncated
+;; toward zero; double -> truncated. (String parsing is left to read-string.)
+(defn bigint [x]
+  (cond (ratio? x) (quot (numerator x) (denominator x))
+        (double? x) (long x)
+        :else x))
+(defn biginteger [x] (bigint x))
 (defn decimal? [x] false)
 (defn bytes? [x] false)
 (defn class? [x] false)
@@ -1794,7 +1810,8 @@ pub const CORE: &str = r##"
       (let [ip (take-while -digit? ds)
             fp (take-while -digit? (rest (drop-while -digit? ds)))
             k (count fp)
-            v (/ (+ (* (-parse-digits ip) (-pow10-p k)) (-parse-digits fp)) (-pow10-p k))]
+            ;; parse-double yields a Double — `/` is exact (Ratio) now, so coerce.
+            v (double (/ (+ (* (-parse-digits ip) (-pow10-p k)) (-parse-digits fp)) (-pow10-p k)))]
         (if neg (- v) v))
       (let [v (-parse-digits ds)] (if neg (- v) v)))))
 (defn -pow10-p [n] (if (%num-eq n 0) 1 (* 10 (-pow10-p (- n 1)))))
@@ -1806,7 +1823,19 @@ pub const CORE: &str = r##"
 (def -' -)
 (def *' *)
 (defn num [x] x)
-(defn rationalize [x] x)
+;; convert a double to an EXACT rational from its printed decimal (e.g. 0.5 -> 1/2,
+;; 3.14 -> 157/50); integers/ratios pass through.
+(defn -char-index [cs ch]
+  (loop [s (seq cs) i 0] (cond (nil? s) -1 (%num-eq (first s) ch) i :else (recur (next s) (%add i 1)))))
+(defn -pow10 [n] (loop [i 0 acc 1] (if (%lt i n) (recur (%add i 1) (%mul acc 10)) acc)))
+(defn rationalize [x]
+  (if (double? x)
+    (let [s (str x) cs (%str->chars s) di (-char-index cs \.)]
+      (if (%lt di 0)
+        (read-string s)
+        (let [fraclen (%sub (count s) (%add di 1))]
+          (/ (read-string (str (subs s 0 di) (subs s (%add di 1)))) (-pow10 fraclen)))))
+    x))
 (defn bit-and-not [x y] (%bit-and x (bit-not y)))
 (defn unchecked-add [a b] (%add a b))
 (defn unchecked-subtract [a b] (%sub a b))

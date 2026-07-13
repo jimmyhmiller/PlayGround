@@ -28,7 +28,8 @@ pub const CLOJURE_DATA_JSON: &str = r##"
     (if (-ch= (first r1) 46)
       (let [fpart (take-while -digit? (rest r1))
             k (count fpart)
-            v (/ (+ (* ival (-pow10 k)) (-digits->int fpart)) (-pow10 k))]
+            ;; JSON numbers with a fraction are floats; `/` is exact now, so coerce.
+            v (double (/ (+ (* ival (-pow10 k)) (-digits->int fpart)) (-pow10 k)))]
         (if neg (- v) v))
       (if neg (- ival) ival))))
 (defn- -parse-number [cs]

@@ -423,6 +423,24 @@ impl Parser {
         if let Ok(i) = a.parse::<i128>() {
             return rt.encode(Val::Int(i));
         }
+        // `123N` — a (big)integer literal. This tower auto-promotes, so it is just
+        // the integer; a value beyond i128 becomes a boxed arbitrary-precision int.
+        if let Some(digits) = a.strip_suffix('N') {
+            if let Ok(i) = digits.parse::<i128>() {
+                return rt.encode(Val::Int(i));
+            }
+            if let Some(b) = microlang::bigint::BigInt::from_str(digits) {
+                return rt.alloc_bigint(b);
+            }
+        }
+        // `n/d` — a ratio literal (both parts numeric; `foo/bar` stays a symbol).
+        if let Some((np, dp)) = a.split_once('/') {
+            if let (Ok(n), Ok(d)) = (np.parse::<i128>(), dp.parse::<i128>()) {
+                if d != 0 {
+                    return rt.make_ratio(n, d);
+                }
+            }
+        }
         if let Ok(f) = a.parse::<f64>() {
             return rt.encode(Val::Float(f));
         }

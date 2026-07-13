@@ -20,6 +20,21 @@ pub struct BigInt {
 }
 
 impl BigInt {
+    /// Parse a decimal integer string (optional leading `-`). `None` if it has a
+    /// non-digit character.
+    pub fn from_str(s: &str) -> Option<BigInt> {
+        let neg = s.starts_with('-');
+        let digits = s.strip_prefix('-').unwrap_or(s);
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let mut acc = BigInt::from_i128(0);
+        let ten = BigInt::from_i128(10);
+        for ch in digits.bytes() {
+            acc = acc.mul(&ten).add(&BigInt::from_i128((ch - b'0') as i128));
+        }
+        Some(if neg { acc.neg() } else { acc })
+    }
     pub fn from_i128(x: i128) -> Self {
         let neg = x < 0;
         let mut u = x.unsigned_abs(); // handles i128::MIN without overflow

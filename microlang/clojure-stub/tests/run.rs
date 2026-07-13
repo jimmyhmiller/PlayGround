@@ -1158,10 +1158,10 @@ fn regex_engine_is_library_code() {
 fn division_and_ex_info() {
     // `/` was a genuinely missing arithmetic primitive; now complete.
     assert_eq!(run("(/ 6 3)"), "2");           // exact integer
-    assert_eq!(run("(/ 5 2)"), "2.5");         // -> float (no Ratio type)
-    assert_eq!(run("(/ 22 7)"), "3.142857142857143");
+    assert_eq!(run("(/ 5 2)"), "5/2");         // -> exact Ratio (as in Clojure)
+    assert_eq!(run("(/ 22 7)"), "22/7");
     assert_eq!(run("(/ 100 5 2)"), "10");      // left fold
-    assert_eq!(run("(/ 4)"), "0.25");          // reciprocal
+    assert_eq!(run("(/ 4)"), "1/4");           // reciprocal -> Ratio
     // ex-info (in-language): data-carrying, catchable.
     assert_eq!(run("(ex-message (ex-info \"boom\" {:x 1}))"), "\"boom\"");
     assert_eq!(run("(try (throw (ex-info \"e\" {:code 42})) (catch :default e (ex-data e)))"), "{:code 42}");

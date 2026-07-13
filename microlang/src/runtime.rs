@@ -709,6 +709,9 @@ impl<M: ValueModel> Runtime<M> {
                     }
                     // All empty lists are equal (and only to each other, never nil).
                     (Obj::EmptyList, Obj::EmptyList) => true,
+                    // Ratios are reduced, so equal iff same num & den (never = an
+                    // integer, since a reduced ratio has den > 1).
+                    (Obj::Ratio(na, da), Obj::Ratio(nb, db)) => na == nb && da == db,
                     // Structural equality for aggregates (R7RS `equal?` on
                     // strings/vectors; ordered field equality for records — the
                     // general aggregate case). Order-INSENSITIVE collections
@@ -739,6 +742,15 @@ impl<M: ValueModel> Runtime<M> {
         if let (Some(x), Some(y)) = (self.as_int_big(a), self.as_int_big(b)) {
             return x.cmp(&y) == std::cmp::Ordering::Less;
         }
+        // Exact rational comparison when a Ratio is involved and neither is a float:
+        // na/da < nb/db  <=>  na*db < nb*da (denominators are positive).
+        if self.as_ratio(a).is_some() || self.as_ratio(b).is_some() {
+            if let (Some((na, da)), Some((nb, db))) = (self.as_exact_ratio(a), self.as_exact_ratio(b)) {
+                if let (Some(l), Some(r)) = (na.checked_mul(db), nb.checked_mul(da)) {
+                    return l < r;
+                }
+            }
+        }
         let x = self.num_as_f64(a).expect("< on non-number");
         let y = self.num_as_f64(b).expect("< on non-number");
         x < y
@@ -750,9 +762,9 @@ impl<M: ValueModel> Runtime<M> {
             // The fixnum-specialized `Fx*` ops are semantically the checked op:
             // interpreter tiers give them identical meaning (only the JIT reads
             // the distinction, to skip a tag check). So they share these arms.
-            Prim::Add | Prim::FxAdd => self.arith(args[0], args[1], i64::checked_add, i128::checked_add, |a, b| a + b, BigInt::add),
-            Prim::Sub | Prim::FxSub => self.arith(args[0], args[1], i64::checked_sub, i128::checked_sub, |a, b| a - b, BigInt::sub),
-            Prim::Mul | Prim::FxMul => self.arith(args[0], args[1], i64::checked_mul, i128::checked_mul, |a, b| a * b, BigInt::mul),
+            Prim::Add | Prim::FxAdd => self.arith(args[0], args[1], 0, i64::checked_add, i128::checked_add, |a, b| a + b, BigInt::add),
+            Prim::Sub | Prim::FxSub => self.arith(args[0], args[1], 1, i64::checked_sub, i128::checked_sub, |a, b| a - b, BigInt::sub),
+            Prim::Mul | Prim::FxMul => self.arith(args[0], args[1], 2, i64::checked_mul, i128::checked_mul, |a, b| a * b, BigInt::mul),
             Prim::Quot => self.int_div(args[0], args[1], "quot", |a, b| a / b),
             Prim::Rem => self.int_div(args[0], args[1], "rem", |a, b| a % b),
             Prim::Mod => self.int_div(args[0], args[1], "mod", |a, b| ((a % b) + b) % b),
@@ -1276,6 +1288,41 @@ impl<M: ValueModel> Runtime<M> {
                 Some(b) => b.macroexpand_1(self, args[0]),
                 None => panic!("macroexpand-1: no eval bridge installed"),
             },
+            Prim::Numerator => {
+                let n = match self.as_ratio(args[0]) {
+                    Some((n, _)) => n,
+                    None => self.as_int_big(args[0]).and_then(|b| b.to_i128()).unwrap_or_else(|| {
+                        panic!("numerator: not a ratio/integer")
+                    }),
+                };
+                self.alloc_bigint(BigInt::from_i128(n))
+            }
+            Prim::Denominator => {
+                let d = self.as_ratio(args[0]).map(|(_, d)| d).unwrap_or(1);
+                self.alloc_bigint(BigInt::from_i128(d))
+            }
+            Prim::BigIntP => {
+                // A boxed integer `decode`s transparently to `Val::Int`, so check the
+                // RAW heap representation instead.
+                let is_big = M::R::tag_of(args[0]) == RawTag::Ref
+                    && matches!(
+                        &self.heap()[M::R::as_ref(args[0]) as usize],
+                        Obj::BigInt(_) | Obj::HugeInt(_)
+                    );
+                self.encode(Val::Bool(is_big))
+            }
+            Prim::ToLong => {
+                if let Some((n, d)) = self.as_ratio(args[0]) {
+                    return self.alloc_bigint(BigInt::from_i128(n / d)); // truncates toward zero
+                }
+                if let Some(b) = self.as_int_big(args[0]) {
+                    return self.alloc_bigint(b); // already an integer of any size
+                }
+                match self.num_as_f64(args[0]) {
+                    Some(f) => self.alloc_bigint(BigInt::from_i128(f.trunc() as i128)),
+                    None => panic!("long: not a number"),
+                }
+            }
             Prim::SymbolOf => {
                 let s = self.as_str(args[0], "symbol");
                 let sym = self.intern(&s);
@@ -1472,6 +1519,7 @@ impl<M: ValueModel> Runtime<M> {
                 Obj::Char(c) => mix(0xc4a_u32, *c as u32),
                 Obj::BigInt(i) => mix(FNV_OFFSET, *i as u64 as u32),
                 Obj::HugeInt(b) => mix_str(FNV_OFFSET, &b.to_string()),
+                Obj::Ratio(n, d) => mix(mix(FNV_OFFSET, *n as u64 as u32), *d as u64 as u32),
                 Obj::BoxFloat(f) => mix(FNV_OFFSET, f.to_bits() as u32),
                 Obj::Record { type_id, fields } => {
                     let mut h = mix_str(0x9e37_79b9u32, self.sym_name(*type_id));
@@ -1521,6 +1569,7 @@ impl<M: ValueModel> Runtime<M> {
                 Obj::Char(_) => "Char",
                 Obj::Closure { .. } => "Fn",
                 Obj::BigInt(_) | Obj::HugeInt(_) => "Long",
+                Obj::Ratio(..) => "Ratio",
                 Obj::BoxFloat(_) => "Double",
                 Obj::Atom(_) => "Atom",
                 Obj::Future(_) => "Future",
@@ -1601,23 +1650,23 @@ impl<M: ValueModel> Runtime<M> {
     /// division (no Ratio type). Integer division by zero errors; float `/0.0`
     /// follows IEEE (`inf`), as in Clojure.
     fn divide(&mut self, a: u64, b: u64) -> u64 {
+        // Two ratios / ratio-and-integer: exact rational division = a * (1/b).
+        if let (Some((na, da)), Some((nb, db))) = (self.as_exact_ratio(a), self.as_exact_ratio(b)) {
+            if nb == 0 {
+                panic!("Divide by zero");
+            }
+            if let (Some(n), Some(d)) = (na.checked_mul(db), da.checked_mul(nb)) {
+                return self.make_ratio(n, d);
+            }
+        }
         if let (Some(x), Some(y)) = (self.as_int_big(a), self.as_int_big(b)) {
             if let (Some(xi), Some(yi)) = (x.to_i128(), y.to_i128()) {
                 if yi == 0 {
                     panic!("Divide by zero");
                 }
-                if xi % yi == 0 {
-                    let r = xi / yi;
-                    if M::R::is_immediate(Cat::Int) {
-                        if let Ok(r64) = i64::try_from(r) {
-                            if M::R::imm_fits(r64) {
-                                return M::R::enc_int(r64);
-                            }
-                        }
-                    }
-                    let id = self.alloc(Obj::BigInt(r));
-                    return M::R::enc_ref(id);
-                }
+                // Exact integer quotient, else an exact Ratio (Clojure semantics —
+                // `(/ 1 3)` is `1/3`, not `0.333…`).
+                return self.make_ratio(xi, yi);
             }
         }
         let x = self.num_as_f64(a).expect("/: not a number");
@@ -1667,15 +1716,94 @@ impl<M: ValueModel> Runtime<M> {
         panic!("{who}: argument is not a string");
     }
 
+    /// `(num, den)` if `bits` is a Ratio, else `None`.
+    fn as_ratio(&self, bits: u64) -> Option<(i128, i128)> {
+        if let Val::Ref(id) = self.decode(bits) {
+            if let Obj::Ratio(n, d) = &self.heap()[id as usize] {
+                return Some((*n, *d));
+            }
+        }
+        None
+    }
+    /// Build a value from `num/den`: reduce to lowest terms, force `den > 0`, and
+    /// collapse a denominator of 1 back to a plain integer. Divide-by-zero panics.
+    pub fn make_ratio(&mut self, num: i128, den: i128) -> u64 {
+        if den == 0 {
+            panic!("Divide by zero");
+        }
+        let (mut n, mut d) = (num, den);
+        if d < 0 {
+            n = -n;
+            d = -d;
+        }
+        let g = {
+            let (mut a, mut b) = (n.unsigned_abs(), d as u128);
+            while b != 0 {
+                let t = a % b;
+                a = b;
+                b = t;
+            }
+            a.max(1) as i128
+        };
+        n /= g;
+        d /= g;
+        if d == 1 {
+            return self.alloc_bigint(BigInt::from_i128(n));
+        }
+        let id = self.alloc(Obj::Ratio(n, d));
+        M::R::enc_ref(id)
+    }
+    /// `(num, den)` for any exact number: an integer `x` is `x/1`; a ratio is itself.
+    /// `None` for floats / non-numbers.
+    fn as_exact_ratio(&self, bits: u64) -> Option<(i128, i128)> {
+        if let Some(r) = self.as_ratio(bits) {
+            return Some(r);
+        }
+        if let Val::Int(i) = self.decode(bits) {
+            return Some((i, 1));
+        }
+        // an i128-boxed integer counts too (huge ints don't fit and fall to float)
+        self.as_int_big(bits).and_then(|b| b.to_i128()).map(|i| (i, 1))
+    }
+    /// Exact rational arithmetic for `+`/`-`/`*` when a Ratio is involved. `op`:
+    /// 0=add, 1=sub, 2=mul. Falls back to f64 if a float operand is present or an
+    /// i128 intermediate overflows.
+    fn ratio_arith(&mut self, a: u64, b: u64, op: u8, fop: fn(f64, f64) -> f64) -> u64 {
+        if let (Some((na, da)), Some((nb, db))) = (self.as_exact_ratio(a), self.as_exact_ratio(b)) {
+            let r = match op {
+                2 => na.checked_mul(nb).zip(da.checked_mul(db)),
+                _ => da.checked_mul(db).and_then(|d| {
+                    let l = na.checked_mul(db)?;
+                    let rr = nb.checked_mul(da)?;
+                    let n = if op == 0 { l.checked_add(rr) } else { l.checked_sub(rr) }?;
+                    Some((n, d))
+                }),
+            };
+            if let Some((n, d)) = r {
+                return self.make_ratio(n, d);
+            }
+        }
+        // float involved, or overflow: degrade to f64.
+        let (x, y) = (self.num_as_f64(a), self.num_as_f64(b));
+        match (x, y) {
+            (Some(x), Some(y)) => self.encode(Val::Float(fop(x, y))),
+            _ => panic!("arith on non-numbers"),
+        }
+    }
     fn arith(
         &mut self,
         a: u64,
         b: u64,
+        op: u8,
         iop64: fn(i64, i64) -> Option<i64>,
         iop128: fn(i128, i128) -> Option<i128>,
         fop: fn(f64, f64) -> f64,
         bigop: fn(&BigInt, &BigInt) -> BigInt,
     ) -> u64 {
+        // A Ratio operand takes the exact-rational path.
+        if self.as_ratio(a).is_some() || self.as_ratio(b).is_some() {
+            return self.ratio_arith(a, b, op, fop);
+        }
         if M::R::is_immediate(Cat::Int)
             && M::R::tag_of(a) == RawTag::Int
             && M::R::tag_of(b) == RawTag::Int
@@ -1745,13 +1873,18 @@ impl<M: ValueModel> Runtime<M> {
         match self.decode(bits) {
             Val::Int(i) => Some(i as f64),
             Val::Float(x) => Some(x),
-            _ => self.as_huge(bits).map(|b| b.to_f64()),
+            _ => {
+                if let Some((n, d)) = self.as_ratio(bits) {
+                    return Some(n as f64 / d as f64);
+                }
+                self.as_huge(bits).map(|b| b.to_f64())
+            }
         }
     }
 
     /// Store a `BigInt`, normalizing down to a fixnum / `i128` box when it fits so
     /// only genuinely-huge values carry the arbitrary-precision representation.
-    fn alloc_bigint(&mut self, b: BigInt) -> u64 {
+    pub fn alloc_bigint(&mut self, b: BigInt) -> u64 {
         if let Some(i) = b.to_i128() {
             return self.encode(Val::Int(i));
         }
@@ -1820,6 +1953,7 @@ impl<M: ValueModel> Runtime<M> {
                 Obj::Closure { .. } => "#<closure>".to_string(),
                 Obj::BigInt(i) => i.to_string(),
                 Obj::HugeInt(b) => b.to_string(),
+                Obj::Ratio(n, d) => format!("{n}/{d}"),
                 Obj::BoxFloat(f) => format!("{f}"),
                 Obj::Record { type_id, fields } => {
                     let inner: Vec<String> = fields.iter().map(|&x| self.print(x)).collect();

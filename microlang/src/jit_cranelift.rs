@@ -377,9 +377,17 @@ extern "C" fn shim_dispatch<M: ValueModel>(
     let args: &[u64] =
         if argc == 0 { &[] } else { unsafe { std::slice::from_raw_parts(args, argc as usize) } };
     let ty = rt.type_tag(args[0]);
-    let imp = rt.resolve_or_default(site as usize, method, ty).unwrap_or_else(|| {
-        panic!("no method '{}' for type '{}'", rt.sym_name(method), rt.sym_name(ty))
-    });
+    let imp = match rt.resolve_or_default(site as usize, method, ty) {
+        Some(imp) => imp,
+        None => {
+            // A CATCHABLE throw (matching TreeWalk), not an abort — the caller
+            // checks `pending()` after the dispatch shim and bubbles to the try.
+            let msg = format!("no method '{}' for type '{}'", rt.sym_name(method), rt.sym_name(ty));
+            let id = rt.alloc(Obj::Str(msg));
+            rt.signal_throw(M::R::enc_ref(id));
+            return M::R::enc_nil();
+        }
+    };
     top.invoke(top, rt, imp, args)
 }
 
@@ -593,6 +601,10 @@ fn prim_tag(p: Prim) -> u32 {
         ReadString => 72,
         Eval => 73,
         MacroExpand1 => 74,
+        Numerator => 75,
+        Denominator => 76,
+        BigIntP => 77,
+        ToLong => 78,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -684,6 +696,10 @@ fn prim_from_tag(tag: u32) -> Prim {
         72 => ReadString,
         73 => Eval,
         74 => MacroExpand1,
+        75 => Numerator,
+        76 => Denominator,
+        77 => BigIntP,
+        78 => ToLong,
         64 => Div,
         other => panic!("bad prim tag {other}"),
     }
@@ -1439,6 +1455,19 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
                     slot.nparams = nparams as u32;
                 }
             }
+        }
+        // Arity mismatch is a CATCHABLE throw (matching TreeWalk / Clojure), not an
+        // abort in this non-unwinding shim.
+        let arity_ok = if variadic { args.len() >= nparams } else { args.len() == nparams };
+        if !arity_ok {
+            let msg = if variadic {
+                format!("arity: expected at least {}, got {}", nparams, args.len())
+            } else {
+                format!("arity: expected {}, got {}", nparams, args.len())
+            };
+            let sid = rt.alloc(Obj::Str(msg));
+            rt.signal_throw(M::R::enc_ref(sid));
+            return M::R::enc_nil();
         }
         let frame = self.alloc_frame(rt, nparams, variadic, args, env);
         self.run_trampoline(top, rt, compiled, frame, callee, nparams, variadic)

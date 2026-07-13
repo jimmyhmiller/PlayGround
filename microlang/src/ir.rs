@@ -223,6 +223,17 @@ pub enum Prim {
     /// `(%macroexpand-1 form)` -> expand `form` by one macro step (or return it
     /// unchanged). Routes through the frontend eval-bridge.
     MacroExpand1,
+    /// `(%numerator r)` / `(%denominator r)` -> the numerator / denominator of a
+    /// Ratio (an integer `x` is `x/1`).
+    Numerator,
+    Denominator,
+    /// `(%bigint? x)` -> is `x` a heap-boxed integer (beyond the immediate fixnum
+    /// range)? Best-effort `bigint?` (this tower auto-promotes, so there is no
+    /// distinct BigInt type — a "big" integer is simply a boxed one).
+    BigIntP,
+    /// `(%to-long x)` -> truncate any number toward zero to an integer (backs
+    /// `long`/`int`; float→int, ratio→quotient, int→itself).
+    ToLong,
     /// `(%symbol "a/b")` -> the interned symbol for a string (reverse of `%str-of`).
     SymbolOf,
     /// `(%var-arglists 'sym)` -> the var's captured `:arglists` datum, or nil.

@@ -91,6 +91,10 @@ pub enum Obj {
     /// An integer beyond `i128`: true arbitrary precision. Reached only when the
     /// `i128` arithmetic path overflows.
     HugeInt(crate::bigint::BigInt),
+    /// An exact rational `num/den`, always in lowest terms with `den > 1` (a
+    /// denominator of 1 reduces to an integer). Produced by `/` on non-divisible
+    /// integers; prints as `num/den`.
+    Ratio(i128, i128),
     BoxFloat(f64),
     Closure {
         nparams: usize,
