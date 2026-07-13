@@ -1,6 +1,6 @@
 (module safedialect)
 
-;; --- transform: desugar (inc E) -> (iadd E 1) program-wide ---
+;; --- TRANSFORM: desugar (inc E) -> (iadd E 1) program-wide (gets the FLAT program) ---
 (defn has-inc? [(f Code)] (-> bool)
   (if (code-list? f)
       (if (and (icmp-gt (code-count f) 0) (code-eq (code-nth f 0) `inc)) true (has-inc-kids? f 0 (code-count f)))
@@ -17,16 +17,19 @@
   (if (icmp-ge i n) `() `(~(dw-rewrite (code-nth f i)) ~@(dw-kids f (iadd i 1) n))))
 (defn desugar-inc [(prog Code)] (-> Code) `(do ~@(dw-kids prog 0 (code-count prog))))
 
-;; --- checker: ban (forbidden-op …) anywhere ---
+;; --- CHECKER: ban (forbidden-op …) anywhere (gets MODULES) ---
 (defn has-bad? [(f Code)] (-> bool)
   (if (code-list? f)
       (if (and (icmp-gt (code-count f) 0) (code-eq (code-nth f 0) `forbidden-op)) true (has-bad-kids? f 0 (code-count f)))
     false))
 (defn has-bad-kids? [(f Code) (i i64) (n i64)] (-> bool)
   (if (icmp-ge i n) false (if (has-bad? (code-nth f i)) true (has-bad-kids? f (iadd i 1) n))))
-(defn no-forbidden-op [(prog Code)] (-> Code)
-  (if (has-bad-kids? prog 0 (code-count prog)) (error "safedialect: (forbidden-op …) is banned") `0))
+(defn mod-has-bad [(m Code)] (-> bool) (has-bad-kids? m 1 (code-count m)))
+(defn any-mod-bad [(ms Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) false (if (mod-has-bad (code-nth ms i)) true (any-mod-bad ms (iadd i 1) n))))
+(defn no-forbidden-op [(modules Code)] (-> Code)
+  (if (any-mod-bad modules 0 (code-count modules)) (error "safedialect: (forbidden-op …) is banned") `0))
 
-;; --- THE DIALECT: register both passes ---
+;; --- THE DIALECT ---
 (transform desugar-inc)
 (checker no-forbidden-op)

@@ -314,25 +314,43 @@
        (let [it (sx-items (load f))]
          (and (icmp-eq (sx-len it) 2)
               (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "checker"))))))
+; group the flat tagged forms into per-module records `(name form…)` (contiguous by
+; module tag), so a checker is handed the program AS MODULES and decides which to look at.
+(defn opt-mod-eq [(x (Option (slice u8))) (y (Option (slice u8)))] (-> bool)
+  (match x (None [] (match y (None [] true) (Some [_] false)))
+           (Some [xs] (match y (None [] false) (Some [ys] (str-eq xs ys))))))
+(defn opt-mod-name [(m (Option (slice u8)))] (-> (slice u8)) (match m (Some [s] s) (None [] "")))
+(defn build-modules [(a (ptr Allocator)) (forms (ptr (ArrayList TaggedForm)))] (-> Sexp)
+  (let [nf (al-len [TaggedForm] (load forms)) (mut mods) (al-new [Sexp] a)
+        (mut cur) (al-new [Sexp] a) (mut curmod) (None [(slice u8)]) (mut started) false (mut i) 0]
+    (loop (if (icmp-ge (load i) nf) (break)
+      (do (let [tf (al-elem [TaggedForm] forms (load i)) fmod (load (field tf module))]
+            (if (and (load started) (not (opt-mod-eq (load curmod) fmod)))
+                (do (al-push! (mut mods) (mk-sexp (KList (box-al [Sexp] a (load cur))) -1 -1)) (store! cur (al-new [Sexp] a)) (store! started false) 0)
+              0)
+            (if (not (load started))
+                (do (store! curmod fmod) (store! started true) (al-push! (mut cur) (sx-sym (opt-mod-name fmod))) 0)
+              0)
+            (al-push! (mut cur) (load (field tf form))))
+          (store! i (iadd (load i) 1)))))
+    (if (load started) (al-push! (mut mods) (mk-sexp (KList (box-al [Sexp] a (load cur))) -1 -1)) 0)
+    (mk-sexp (KList (box-al [Sexp] a (load mods))) -1 -1)))
 (defn run-checkers [(checkers (ptr (ArrayList (slice u8)))) (checked (ptr Program)) (forms (ptr (ArrayList TaggedForm)))
                     (allfns (ptr SBox)) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum))
                     (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry))) (a (ptr Allocator))] (-> (Option Diag))
   (let [nc (al-len [(slice u8)] (load checkers))]
     (if (icmp-eq nc 0) (None [Diag])
-      (let [nf (al-len [TaggedForm] (load forms)) (mut items) (al-new [Sexp] a) (mut i) 0]
-        (loop (if (icmp-ge (load i) nf) (break)
-          ; metaprograms are fed the WHOLE program, including all imported forms
-          (do (al-push! (mut items) (load (field (al-elem [TaggedForm] forms (load i)) form)))
-              (store! i (iadd (load i) 1)))))
-        (let [proglist (mk-sexp (KList (box-al [Sexp] a (load items))) -1 -1) (mut margs) (al-new [Sexp] a)]
-          (al-push! (mut margs) proglist)
-          (let [(mut j) 0 (mut err) (None [Diag]) margsb (box-al [Sexp] a (load margs))]
-            (loop (if (or (diag-some? (load err)) (icmp-ge (load j) nc)) (break)
-              (do (match (expand-macro checked (al-get [(slice u8)] (load checkers) (load j)) margsb (field allfns items) (field gs items) (field gu items) impb expb a)
-                    (Err [d] (do (store! err (Some d)) 0))
-                    (Ok [_] 0))
-                  (store! j (iadd (load j) 1)))))
-            (load err)))))))
+      ; hand the checker the program as a LIST OF MODULES: ((name form…) …) — it owns
+      ; the loop and decides which modules to look at.
+      (let [proglist (build-modules a forms) (mut margs) (al-new [Sexp] a)]
+        (al-push! (mut margs) proglist)
+        (let [(mut j) 0 (mut err) (None [Diag]) margsb (box-al [Sexp] a (load margs))]
+          (loop (if (or (diag-some? (load err)) (icmp-ge (load j) nc)) (break)
+            (do (match (expand-macro checked (al-get [(slice u8)] (load checkers) (load j)) margsb (field allfns items) (field gs items) (field gu items) impb expb a)
+                  (Err [d] (do (store! err (Some d)) 0))
+                  (Ok [_] 0))
+                (store! j (iadd (load j) 1)))))
+          (load err))))))
 ; ── whole-program TRANSFORMERS ───────────────────────────────────────────────
 ; `(transform FN)` registers FN — a [(prog Code)] -> Code function — run once after
 ; expansion over the WHOLE program; FN returns the rewritten program as `(do form…)`
