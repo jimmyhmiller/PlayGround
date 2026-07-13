@@ -55,9 +55,13 @@ New API this project added (all shipped):
   every `icmp-*`, suggesting `< > = …`.
 - **Metaprograms are fed the WHOLE program, including all imports** (their own modules
   and bundled stdlib). A checker sees imported code too — `metaprog-poc/imports_test.coil`
-  shows the linter flag an `icmp` in an imported user module. (A linter that wants to
-  skip bundled stdlib can filter by origin — a `code-source`/`code-file` op is the clean
-  next primitive for that.)
+  shows the linter flag an `icmp` in an imported user module.
+- **`(code-file NODE)` → the source file name** of a node, and **`(code-from-user? NODE)`
+  → bool** (true for a real file, false for a bundled `<…>` source). So a linter can
+  *scope itself* — `metaprog-poc/lint.coil` warns only where `(code-from-user? f)`, which
+  skips the standard library while still linting the user's own modules. (Checkers can't
+  call imported string functions — the closure doesn't include them — so `code-from-user?`
+  does the check in the compiler and hands the checker a bool.)
 - **`(checker FN)` / `(transform FN)`** — register a whole-program metaprogram.
 - **A dialect is a single import.** A module that contains `(checker …)`/`(transform …)`
   registrations *is* a dialect — importing it applies the whole stack (import order =
