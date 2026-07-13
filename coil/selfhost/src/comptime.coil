@@ -632,6 +632,18 @@
 (defn warn-push [(d Diag)] (-> i64) (al-push! (warn-list) d) 0)
 (defn diag-errs [] (-> i64) (let [b (warn-box)] (if (icmp-eq (load (field b init)) 0) 0 (load (field b errs)))))
 (defn diag-err-bump [] (-> i64) (let [_ (warn-list) b (warn-box)] (store! (field b errs) (iadd (load (field b errs)) 1)) 0))
+; ── source table for `(code-file NODE)` — lets a checker tell WHICH file a node is
+; from (a real path = user code; "<bundled …>"/"<prelude>" = stdlib) so a linter can
+; scope itself. Set once before checkers run.
+(defstruct SrcBox [(lst (ptr (ArrayList Source)))])
+(defn src-box [] (-> (ptr SrcBox)) (alloc-static SrcBox))
+(defn set-cli-sources [(ss (ptr (ArrayList Source)))] (-> i64) (store! (field (src-box) lst) ss) 0)
+(defn code-file-of [(node Sexp)] (-> (slice u8))
+  (let [b (src-box) lst (load (field b lst))]
+    (if (icmp-eq (cast i64 lst) 0) ""
+      (let [sid (sx-source node)]
+        (if (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst)))) ""
+          (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) sid)) (load (field sp name))))))))
 (defn target-arch-str [] (-> (slice u8)) "aarch64")
 (defn ct-sum-find [(cx (ptr CtCtx)) (name (slice u8))] (-> (ptr SumDef))
   (let [lst (load (field cx sums)) n (al-len [SumDef] (load lst)) (mut i) 0 (mut r) (cast (ptr SumDef) 0)]
@@ -1034,13 +1046,24 @@
                 (None [] (Err [CtVal Diag] (derr "warn: expects (warn NODE MSG)"))))
             (Err [CtVal Diag] (derr "warn: first arg must be a Code node"))))
           (None [] (Err [CtVal Diag] (derr "warn: expects (warn NODE MSG)"))))
+    (if (icmp-eq op 33)
+        (match (cv-get args 0)
+          (Some [nodev] (if (is-ccode nodev) (Ok [CtVal Diag] (CStr (code-file-of (ccode-of nodev)))) (Err [CtVal Diag] (derr "code-file: expects a Code node"))))
+          (None [] (Err [CtVal Diag] (derr "code-file: expects (code-file NODE)"))))
+    (if (icmp-eq op 34)
+        (match (cv-get args 0)
+          (Some [nodev] (if (is-ccode nodev)
+              (let [nm (code-file-of (ccode-of nodev))]
+                (Ok [CtVal Diag] (CBool (and (icmp-gt (slice-len [u8] nm) 0) (icmp-ne (cast i64 (slice-get [u8] nm 0)) 60)))))
+            (Err [CtVal Diag] (derr "code-from-user?: expects a Code node"))))
+          (None [] (Err [CtVal Diag] (derr "code-from-user?: expects (code-from-user? NODE)"))))
     (if (or (icmp-eq op 12) (icmp-eq op 13)) (cop-concat op args cx)
     (if (or (icmp-eq op 14) (or (icmp-eq op 15) (or (icmp-eq op 16) (icmp-eq op 17)))) (cop-field op args cx)
     (if (or (icmp-eq op 18) (or (icmp-eq op 19) (or (icmp-eq op 20) (icmp-eq op 21)))) (cop-variant op args cx)
     (if (or (icmp-eq op 22) (or (icmp-eq op 23) (or (icmp-eq op 24) (or (icmp-eq op 25) (or (icmp-eq op 26) (icmp-eq op 27)))))) (cop-trait op args cx)
     (if (icmp-eq op 28) (cop-strbytes args cx)
     (if (icmp-eq op 29) (cop-bytestostr args cx)
-        (cop-codearg op args cx))))))))))))))
+        (cop-codearg op args cx))))))))))))))))
 (defn module-fns-has [(cx (ptr CtCtx)) (q (slice u8))] (-> bool)
   (let [lst (load (field cx module_fns)) n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut r) false]
     (loop (if (or (load r) (icmp-ge (load i) n)) (break)

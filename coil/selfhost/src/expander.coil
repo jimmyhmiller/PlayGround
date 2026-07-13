@@ -401,6 +401,7 @@
         (mut transformers) (al-new [(slice u8)] a)
         (mut i) 0 (mut errf) (None [Diag]) (mut depthv) 0]
     (store! impb (load (field s imports))) (store! expb (load (field s exports)))
+    (set-cli-sources (field s sources))   ; expose source names to (code-file …) in checkers
     (store! (field gs items) (al-new [StructDef] a)) (store! (field gu items) (al-new [SumDef] a))
     (store! (field result items) (al-new [TaggedForm] a))
     (store! (field env macros) macros) (store! (field env comptime) comptime)

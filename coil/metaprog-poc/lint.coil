@@ -1,5 +1,7 @@
 (module lint)
-; is head `h` one of the icmp-* comparison ops?
+; NOTE: this linter itself uses icmp-* internally — comptime checkers can't use the
+; clean operators (< > need the Ord trait, unavailable in the checker closure). So it
+; will also flag its own comparisons; that's honest. The point below is `code-from-user?`.
 (defn is-icmp? [(h Code)] (-> bool)
   (or (code-eq h `icmp-lt)
   (or (code-eq h `icmp-gt)
@@ -7,18 +9,18 @@
   (or (code-eq h `icmp-ge)
   (or (code-eq h `icmp-eq)
       (code-eq h `icmp-ne)))))))
-; walk a form; WARN (non-fatal, located) at each icmp-* call
 (defn lint-node [(f Code)] (-> Code)
   (if (code-list? f)
       (if (icmp-gt (code-count f) 0)
           (do
             (if (is-icmp? (code-nth f 0))
-                (do (warn f "prefer a clean operator (< > <= >= = !=) over icmp-* on i64") 0)
+                (if (code-from-user? f)                 ; ← skip bundled stdlib nodes
+                    (do (warn f "prefer a clean operator (< > <= >= = !=) over icmp-* on i64") 0)
+                  0)
               0)
             (lint-kids f 0 (code-count f)))
         `0)
     `0))
 (defn lint-kids [(f Code) (i i64) (n i64)] (-> Code)
   (if (icmp-ge i n) `0 (do (lint-node (code-nth f i)) (lint-kids f (iadd i 1) n))))
-; the checker: lint the whole program
 (defn lint-icmp [(prog Code)] (-> Code) (lint-kids prog 0 (code-count prog)))
