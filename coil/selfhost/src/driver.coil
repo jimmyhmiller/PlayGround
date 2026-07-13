@@ -67,7 +67,7 @@
     (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
       (Ok [forms]
-        (do (load-program (mut s) forms cwd)
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
           (if (ls-err? (mut s))
               (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
             (match (resolve-program a (mut s) true)
@@ -99,7 +99,7 @@
     (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
       (Ok [forms]
-        (do (load-program (mut s) forms cwd)
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
           (if (ls-err? (mut s))
               (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
             (match (resolve-program a (mut s) true)
@@ -127,7 +127,7 @@
     (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
       (Ok [forms]
-        (do (load-program (mut s) forms cwd)
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
           (if (ls-err? (mut s))
               (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
             (match (resolve-program a (mut s) true)
@@ -300,7 +300,7 @@
     (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
       (Ok [forms]
-        (do (load-program (mut s) forms cwd)
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
             (dump-loaded w a (mut s))))))
   0)
 
@@ -352,6 +352,46 @@
 ; value C ABI, so abi.rs is deferred (a struct-by-value extern would hard-error).
 
 ; ---- Tv: a lowered (value, Coil type) pair (Rust `Tv<'ctx>` = (BasicValueEnum, Type))
+; ── CLI-applied metaprograms: `--use PATH` imports a module (which self-registers
+; its (checker …)/(transform …)) WITHOUT editing the source — so you can run a linter
+; optionally: `coil run app.coil --use lint.coil`.
+(defstruct UsesBox [(init i64) (lst (ptr (ArrayList (slice u8))))])
+(defn uses-box [] (-> (ptr UsesBox)) (alloc-static UsesBox))
+(defn cli-uses [] (-> (ptr (ArrayList (slice u8))))
+  (let [b (uses-box)]
+    (if (icmp-eq (load (field b init)) 0)
+        (do (store! (field b lst) (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] (malloc-allocator))))
+            (store! (load (field b lst)) (al-new [(slice u8)] (malloc-allocator)))
+            (store! (field b init) 1) 0)
+      0)
+    (load (field b lst))))
+(defn cli-use-add [(p (slice u8))] (-> i64) (al-push! (cli-uses) p) 0)
+(defn is-module-form [(s (ptr Sexp))] (-> bool)
+  (and (icmp-eq (sx-tag (load s)) 6)
+       (let [it (sx-items (load s))] (and (icmp-ge (sx-len it) 1) (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "module"))))))
+; prepend `(import "PATH" :use *)` forms (one per --use) ahead of the entry forms,
+; read as their own synthetic source so entry-file diagnostics keep exact spans.
+(defn prepend-uses [(a (ptr Allocator)) (s (mut LS)) (forms (ptr (ArrayList Sexp)))] (-> (ptr (ArrayList Sexp)))
+  (let [uses (cli-uses) nu (al-len [(slice u8)] (load uses))]
+    (if (icmp-eq nu 0) forms
+      (let [(mut src) "" (mut k) 0]
+        (loop (if (icmp-ge (load k) nu) (break)
+          (do (store! src (sconcat a (load src) (sconcat3 a "(import \"" (al-get [(slice u8)] (load uses) (load k)) "\" :use *)")))
+              (store! k (iadd (load k) 1)))))
+        (let [sid (load (field s srccount))
+              _b (store! (field s srccount) (iadd sid 1))
+              _r (register-source! (mut s) "<cli-use>" (load src))]
+          (match (read-all a (load src) sid)
+            (Err [d] forms)
+            (Ok [ifs]
+              (let [(mut out) (al-new [Sexp] a) ni (al-len [Sexp] (load ifs)) nf (al-len [Sexp] (load forms))
+                    hasmod (if (icmp-gt nf 0) (is-module-form (al-elem [Sexp] forms 0)) false)
+                    (mut j) 0 (mut m) 0]
+                ; keep a leading (module …) first, then the CLI imports, then the rest
+                (if hasmod (do (al-push! (mut out) (al-get [Sexp] (load forms) 0)) (store! j 1)) 0)
+                (loop (if (icmp-ge (load m) ni) (break) (do (al-push! (mut out) (al-get [Sexp] (load ifs) (load m))) (store! m (iadd (load m) 1)))))
+                (loop (if (icmp-ge (load j) nf) (break) (do (al-push! (mut out) (al-get [Sexp] (load forms) (load j))) (store! j (iadd (load j) 1)))))
+                (box-al [Sexp] a (load out))))))))))
 (defn run-pipeline [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (w (ptr Writer)) (path (slice u8))
                     (srcpaths (ptr (ArrayList (slice u8)))) (srctexts (ptr (ArrayList (slice u8))))] (-> (Option (ptr Program)))
   (let [s (alloc-stack LS)]
@@ -369,7 +409,7 @@
     (match (read-all a src 0)
       (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
       (Ok [forms]
-        (do (load-program (mut s) forms cwd)
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
           (if (ls-err? (mut s))
               (do (report-diag w (mut s) (load (field s loaderr))) (None [(ptr Program)]))
             (match (expand-stage3 (mut s))
@@ -518,6 +558,8 @@
                   (do (al-push! (mut flags) (cstr->slice (load (index argv (iadd (load i) 1))))) (store! i (iadd (load i) 2)) 0)
                 (if (str-eq arg "--target")
                     (do (store! trip (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+                  (if (str-eq arg "--use")
+                      (do (cli-use-add (cstr->slice (load (index argv (iadd (load i) 1))))) (store! i (iadd (load i) 2)) 0)
                   (if (and (icmp-ge (slice-len [u8] arg) 2) (and (icmp-eq (slice-get [u8] arg 0) (cast u8 45)) (icmp-eq (slice-get [u8] arg 1) (cast u8 108))))
                       (do (al-push! (mut flags) arg) (store! i (iadd (load i) 1)) 0)   ; -l<lib>
                     (if (str-eq arg "--backend")
@@ -525,7 +567,7 @@
                                 (store! backend 2)
                               (store! backend 1))
                             (store! i (iadd (load i) 2)) 0)
-                      (do (store! i (iadd (load i) 1)) 0))))))))))
+                      (do (store! i (iadd (load i) 1)) 0)))))))))))
     (if (icmp-eq (cast i64 (load outp)) 0)
         (do (ps (stderr) "build: missing -o <out>\n") (abort) 0)
       0)
@@ -724,7 +766,7 @@
     (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error (stderr) dp) 1))
       (Ok [forms]
-        (do (load-program (mut s) forms cwd)
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
           (if (ls-err? (mut s))
               (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error (stderr) dp) 1)
             (match (resolve-program a (mut s) true)
