@@ -246,10 +246,18 @@ pub const CORE: &str = r##"
 ;; map/filter/take possible.
 (defn lazy-seq? [x] (%num-eq (type-of x) 'LazySeq))
 (defn -lazy-seq [thunk] (record 'LazySeq (%cell thunk) (%cell false)))
+;; run a LazySeq's thunk ONCE, returning its raw (possibly still-lazy) value.
+(defn -sval [ls]
+  (if (%cell-ref (field ls 1) 0) (%cell-ref (field ls 0) 0) ((%cell-ref (field ls 0) 0))))
+;; Realize a LazySeq. A thunk may return another LazySeq (e.g. `concat2` hands
+;; back its tail when the first coll empties); walk that chain ITERATIVELY so a
+;; deep `concat`/lazy chain resolves in O(1) stack, not O(depth) — matching
+;; Clojure's LazySeq.seq() loop. Only the outer node caches the final seq.
 (defn -force [ls]
   (if (%cell-ref (field ls 1) 0)
       (%cell-ref (field ls 0) 0)
-      (let [v (seq ((%cell-ref (field ls 0) 0)))]
+      (let [v (loop [x ((%cell-ref (field ls 0) 0))]
+                (if (lazy-seq? x) (recur (-sval x)) (seq x)))]
         (do (%cell-set! (field ls 0) 0 v) (%cell-set! (field ls 1) 0 true) v))))
 (defmacro lazy-seq (& body) (list '-lazy-seq (%cons 'fn (%cons (vector) body))))
 
@@ -379,7 +387,9 @@ pub const CORE: &str = r##"
 ;; unforced lazy seq. This is Clojure's contract, and it means every downstream
 ;; `%first`/`%rest` (which assume a cons) is correct regardless of the source
 ;; (list, vector, set, map, lazy seq): a lazy `-seq` result is forced here.
-(defn seq [c] (if (nil? c) nil (let [s (-seq c)] (if (lazy-seq? s) (seq s) s))))
+;; Force through nested lazy-seq layers ITERATIVELY (loop/recur), so a deep chain
+;; of lazy-seqs — e.g. a long `concat` chain — resolves in O(1) stack, not O(depth).
+(defn seq [c] (loop [c c] (if (nil? c) nil (let [s (-seq c)] (if (lazy-seq? s) (recur s) s)))))
 (defn first [c] (let [s (seq c)] (if (nil? s) nil (-first s))))
 (defn rest [c] (let [s (seq c)] (if (nil? s) nil (-rest s))))
 (defn next [c] (seq (rest c)))
@@ -512,9 +522,14 @@ pub const CORE: &str = r##"
         (nil? (next args)) (-range2 0 (first args))
         (nil? (next (next args))) (-range2 (first args) (second args))
         true (-range3 (first args) (second args) (nth args 2))))
+;; When a empties, hand back `b` UNFORCED (a lazy tail) — `-force` walks the chain
+;; iteratively, so a deep concat stays O(1) stack.
 (defn concat2 [a b]
-  (lazy-seq (let [s (seq a)] (if (nil? s) (seq b) (%cons (%first s) (concat2 (%rest s) b))))))
-(defn concat-lists [lls] (if (nil? lls) nil (concat2 (%first lls) (concat-lists (%rest lls)))))
+  (lazy-seq (let [s (seq a)] (if (nil? s) b (%cons (%first s) (concat2 (%rest s) b))))))
+(defn concat-lists [lls]
+  (cond (nil? lls) nil
+        (nil? (%rest lls)) (%first lls)                       ; last coll: use directly, no wrapper
+        :else (concat2 (%first lls) (concat-lists (%rest lls)))))
 (defn concat [& lls] (concat-lists lls))
 ;; EAGER concat: syntax-quote builds code forms with this, since a macro must
 ;; return a realized (non-lazy) form the expander can splice.
