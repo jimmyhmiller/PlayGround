@@ -214,6 +214,15 @@ pub enum Prim {
     /// the `-protocol-default` sentinel). Reflection over protocol extensions,
     /// used by `satisfies?`/`extends?`/`extenders`.
     MethodTypes,
+    /// `(%read-string s)` -> read the FIRST datum from string `s` (the reader as a
+    /// runtime op). Routes through the frontend eval-bridge.
+    ReadString,
+    /// `(%eval form)` -> compile & run `form` (a datum) in the current namespace,
+    /// returning its value. Routes through the frontend eval-bridge.
+    Eval,
+    /// `(%macroexpand-1 form)` -> expand `form` by one macro step (or return it
+    /// unchanged). Routes through the frontend eval-bridge.
+    MacroExpand1,
     /// `(%symbol "a/b")` -> the interned symbol for a string (reverse of `%str-of`).
     SymbolOf,
     /// `(%var-arglists 'sym)` -> the var's captured `:arglists` datum, or nil.

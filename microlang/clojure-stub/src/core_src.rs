@@ -1177,6 +1177,17 @@ pub const CORE: &str = r##"
   ([] (gensym "G__"))
   ([prefix] (symbol (str prefix (swap! -gensym-counter inc)))))
 
+;; ─────────────── read-string / eval / macroexpand (compiler bridge) ───────────────
+;; These re-enter the Rust reader + compiler via the eval-bridge prims (installed
+;; by the top-level driver), so runtime code can read data, compile & run forms in
+;; the current namespace, and inspect macro expansions.
+(defn read-string [s] (%read-string s))
+(defn eval [form] (%eval form))
+(defn macroexpand-1 [form] (%macroexpand-1 form))
+;; expand the top-level form repeatedly until its head is no longer a macro.
+(defn macroexpand [form]
+  (let [ex (macroexpand-1 form)] (if (%num-eq ex form) ex (macroexpand ex))))
+
 ;; if-let / when-let: bind the test to a fresh temp, test the TEMP, then bind the
 ;; (possibly destructuring) form to it. Using the raw binding form as the `if`
 ;; condition would break for patterns like `[k & ks]` (a vector in expression

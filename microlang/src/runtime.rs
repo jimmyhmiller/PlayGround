@@ -312,7 +312,25 @@ pub struct Runtime<M: ValueModel> {
     /// binding last; a `DYN_MARK` entry delimits each `binding` scope. Traced by the
     /// collector (self here, published via `me.dyn_roots` when parked).
     pub(crate) dyn_stack: Vec<(Sym, u64)>,
+    /// Frontend-installed bridge back into the reader + compiler, for the runtime
+    /// ops `read-string`/`eval`/`macroexpand-1`. Set on the MAIN handle only (worker
+    /// threads get `None` — they never re-enter the compiler).
+    pub(crate) eval_bridge: Option<Arc<dyn EvalBridge<M>>>,
     _pd: PhantomData<fn() -> M>,
+}
+
+/// A frontend-installed bridge letting runtime code re-enter the reader + compiler
+/// (`read-string`/`eval`/`macroexpand-1`). The frontend owns the live `Compiler` +
+/// macro set, so only it can implement this. The impl typically holds raw pointers
+/// to that compiler state and is `unsafe impl Send + Sync`; those pointers are only
+/// dereferenced on the thread that installed the bridge (the main REPL thread).
+pub trait EvalBridge<M: ValueModel>: Send + Sync {
+    /// Read the first datum from a string value `s`.
+    fn read_string(&self, rt: &mut Runtime<M>, s: u64) -> u64;
+    /// Compile & run a form (datum) in the current namespace; returns its value.
+    fn eval(&self, rt: &mut Runtime<M>, form: u64) -> u64;
+    /// Expand a form by one macro step, or return it unchanged.
+    fn macroexpand_1(&self, rt: &mut Runtime<M>, form: u64) -> u64;
 }
 
 impl<M: ValueModel> Drop for Runtime<M> {
@@ -369,7 +387,7 @@ impl<M: ValueModel> Runtime<M> {
             ..shared
         });
         let me = register_mutator(&shared);
-        Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), _pd: PhantomData }
+        Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), eval_bridge: None, _pd: PhantomData }
     }
 
     /// A fresh mutator handle for another OS thread, sharing this runtime's heap,
@@ -378,7 +396,7 @@ impl<M: ValueModel> Runtime<M> {
     /// a `std::thread`.
     pub fn thread_handle(&self) -> Self {
         let me = register_mutator(&self.shared);
-        Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), _pd: PhantomData }
+        Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), eval_bridge: None, _pd: PhantomData }
     }
 
     // ── heap access (lock-free reads to stable addresses) ───
@@ -1243,6 +1261,21 @@ impl<M: ValueModel> Runtime<M> {
                 let vals: Vec<u64> = tys.iter().map(|&t| self.encode(Val::Sym(t))).collect();
                 self.vec_to_list(&vals)
             }
+            // read-string / eval / macroexpand-1: re-enter the reader + compiler via
+            // the frontend-installed bridge. Clone the Arc out first so `self` is free
+            // to be borrowed mutably by the bridge call.
+            Prim::ReadString => match self.eval_bridge.clone() {
+                Some(b) => b.read_string(self, args[0]),
+                None => panic!("read-string: no eval bridge installed"),
+            },
+            Prim::Eval => match self.eval_bridge.clone() {
+                Some(b) => b.eval(self, args[0]),
+                None => panic!("eval: no eval bridge installed"),
+            },
+            Prim::MacroExpand1 => match self.eval_bridge.clone() {
+                Some(b) => b.macroexpand_1(self, args[0]),
+                None => panic!("macroexpand-1: no eval bridge installed"),
+            },
             Prim::SymbolOf => {
                 let s = self.as_str(args[0], "symbol");
                 let sym = self.intern(&s);
@@ -1512,6 +1545,15 @@ impl<M: ValueModel> Runtime<M> {
     pub fn set_apply_fn(&self, name: Sym) {
         self.shared.apply_fn.store(name as u64 + 1, Ordering::Relaxed);
     }
+    /// Install the reader+compiler re-entry bridge (see `EvalBridge`). Set once, on
+    /// the main handle, by the frontend's top-level driver.
+    pub fn set_eval_bridge(&mut self, b: Arc<dyn EvalBridge<M>>) {
+        self.eval_bridge = Some(b);
+    }
+    /// Drop the bridge (its raw pointers become invalid once the installer returns).
+    pub fn clear_eval_bridge(&mut self) {
+        self.eval_bridge = None;
+    }
     /// The current apply-handler fn value (re-read from globals, so GC-safe), if any.
     pub fn apply_handler(&self) -> Option<u64> {
         match self.shared.apply_fn.load(Ordering::Relaxed) {
@@ -1616,7 +1658,7 @@ impl<M: ValueModel> Runtime<M> {
     }
 
     /// The `String` behind a string value, or a clear error if it is not one.
-    fn as_str(&self, bits: u64, who: &str) -> String {
+    pub fn as_str(&self, bits: u64, who: &str) -> String {
         if let Val::Ref(id) = self.decode(bits) {
             if let Obj::Str(s) = &self.heap()[id as usize] {
                 return s.clone();

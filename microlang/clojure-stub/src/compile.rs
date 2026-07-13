@@ -71,6 +71,7 @@ impl Compiler {
             ("%make-array", MakeArray), ("%aclone", AClone), ("%alength", VectorLen),
             ("%aget", VectorRef), ("%anew", Vector),
             ("%apush", ArrPush), ("%ashift", ArrShift), ("%aclear", ArrClear),
+            ("%read-string", ReadString), ("%eval", Eval), ("%macroexpand-1", MacroExpand1),
             ("%bit-and", BitAnd), ("%bit-or", BitOr), ("%bit-xor", BitXor),
             ("%bit-shl", BitShl), ("%bit-shr", BitShr), ("%bit-count", BitCount),
             ("%register-fields", RegisterFields), ("%field-by-name", FieldByName), ("%field-names", FieldNames), ("%make-record", MakeRecord), ("%hash", Hash),

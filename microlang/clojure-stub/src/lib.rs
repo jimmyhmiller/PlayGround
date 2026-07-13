@@ -15,9 +15,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use microlang::value::Sym;
-use microlang::{CodeSpace, Obj, Runtime, Val, ValueModel};
+use microlang::{CodeSpace, EvalBridge, Obj, Runtime, Val, ValueModel};
 
 /// Monotonic counter for auto-gensym (`foo#`). Deterministic (no RNG/clock).
 static GENSYM: AtomicU64 = AtomicU64::new(0);
@@ -89,7 +90,21 @@ pub fn run_with_paths<M: ValueModel>(
     // core `-apply-obj` dispatcher, so keywords/collections are callable.
     let apply_obj = rt.intern("clojure.core/-apply-obj");
     rt.set_apply_fn(apply_obj);
+    // Install the reader+compiler re-entry bridge (read-string/eval/macroexpand-1)
+    // with raw pointers to the live `comp`/`macros`/`cs`. Valid only for this call;
+    // cleared before returning. See `FrontendBridge`.
+    // SAFETY: launder cs's lifetime to a raw pointer; the bridge is cleared before
+    // this call returns, so the pointer never outlives `cs`.
+    let cs_ptr: *const dyn CodeSpace<M> =
+        unsafe { std::mem::transmute::<&dyn CodeSpace<M>, &'static dyn CodeSpace<M>>(cs) };
+    let bridge = FrontendBridge::<M> {
+        comp: &mut comp as *mut Compiler,
+        macros: &macros as *const HashSet<Sym>,
+        cs: cs_ptr,
+    };
+    rt.set_eval_bridge(Arc::new(bridge));
     let result = run_src(rt, cs, &mut macros, &mut comp, src);
+    rt.clear_eval_bridge();
     // Force any lazy sequence in the final value so callers / the printer (which
     // can't invoke thunks) see a fully realized result.
     let slot = rt.push_root(result);
@@ -148,6 +163,74 @@ fn eval1<M: ValueModel>(
         panic!("escape continuation invoked outside its (%callec) extent");
     }
     r
+}
+
+/// One macro-expansion step: if `form` is `(macro …)`, invoke the macro once and
+/// return the result; otherwise return `form` unchanged. No recursion, no
+/// structural desugaring (that's `expand`). Backs `macroexpand-1`.
+fn macroexpand_1_form<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    cs: &dyn CodeSpace<M>,
+    macros: &HashSet<Sym>,
+    comp: &Compiler,
+    form: u64,
+) -> u64 {
+    let Some((head, _)) = rt.as_cons(form) else { return form };
+    let Val::Sym(hs) = rt.decode(head) else { return form };
+    let q = comp.resolve_ref(rt, hs);
+    if !macros.contains(&q) {
+        return form;
+    }
+    let mfn = match rt.global(q) {
+        Some(v) => v,
+        None => return form,
+    };
+    let args = rt.list_to_vec(form);
+    let nilv = rt.encode(Val::Nil);
+    let mut margs = vec![form, nilv];
+    margs.extend_from_slice(&args[1..]);
+    cs.invoke(cs, rt, mfn, &margs)
+}
+
+/// The reader+compiler re-entry bridge for `read-string`/`eval`/`macroexpand-1`
+/// (see `microlang::EvalBridge`). Holds RAW pointers to the live compiler state
+/// owned by `run_with_paths`; valid only while that call is on the stack (the
+/// bridge is cleared before it returns). Dereferenced only on the installing (main)
+/// thread, inside `eval_ir`, where the outer frame is not touching the compiler —
+/// so the aliasing is benign in practice.
+struct FrontendBridge<M: ValueModel> {
+    comp: *mut Compiler,
+    macros: *const HashSet<Sym>,
+    cs: *const dyn CodeSpace<M>,
+}
+unsafe impl<M: ValueModel> Send for FrontendBridge<M> {}
+unsafe impl<M: ValueModel> Sync for FrontendBridge<M> {}
+impl<M: ValueModel> EvalBridge<M> for FrontendBridge<M> {
+    fn read_string(&self, rt: &mut Runtime<M>, s: u64) -> u64 {
+        let src = rt.as_str(s, "read-string");
+        reader::read_all(rt, &src)
+            .first()
+            .copied()
+            .unwrap_or_else(|| rt.encode(Val::Nil))
+    }
+    fn eval(&self, rt: &mut Runtime<M>, form: u64) -> u64 {
+        let cs: &dyn CodeSpace<M> = unsafe { &*self.cs };
+        let macros: &HashSet<Sym> = unsafe { &*self.macros };
+        let comp: &mut Compiler = unsafe { &mut *self.comp };
+        let expanded = expand(rt, cs, macros, comp, form);
+        let slot = rt.push_root(expanded);
+        let ir = comp.compile(rt, rt.root_get(slot));
+        rt.truncate_roots(slot);
+        // A pending signal (uncaught throw) PROPAGATES — so `(try (eval …) (catch …))`
+        // works — rather than panicking here.
+        cs.eval_ir(cs, rt, &ir, &None)
+    }
+    fn macroexpand_1(&self, rt: &mut Runtime<M>, form: u64) -> u64 {
+        let cs: &dyn CodeSpace<M> = unsafe { &*self.cs };
+        let macros: &HashSet<Sym> = unsafe { &*self.macros };
+        let comp: &Compiler = unsafe { &*self.comp };
+        macroexpand_1_form(rt, cs, macros, comp, form)
+    }
 }
 
 fn eval_form<M: ValueModel>(

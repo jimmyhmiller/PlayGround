@@ -49,5 +49,5 @@ pub use speculation::{
 pub use model::{
     HighBit, HighBitModel, LowBit, LowBitModel, NanBox, NanBoxModel, Repr, ValueModel,
 };
-pub use runtime::Runtime;
+pub use runtime::{EvalBridge, Runtime};
 pub use value::{Cat, Obj, Val};
