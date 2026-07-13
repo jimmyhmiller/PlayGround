@@ -12,14 +12,18 @@ Distinguished only by *what they receive* and *what they return*.
 |---|---|---|---|---|
 | **Macro** | `[Code…] -> Code` | its own call site | replacement code | shipped |
 | **Generator** | `() -> Code` (via `meta`) | nothing | new top-level forms | shipped |
-| **Checker** | `Program -> Code` | the whole program | veto via `error` | **shipped** |
+| **Checker** | `Modules -> Code` | all modules, grouped | veto/report | **shipped** |
 | **Transformer** | `Program -> Program` | the whole program | a rewritten program | **shipped** |
 
 ## Applying a metaprogram
 
 - **Macros** — *call* them: `(when c body)`. Detected by their `Code` signature.
 - **Checkers / transformers** — *register* them at top level: `(checker lint-icmp)` /
-  `(transform desugar-inc)`. The compiler runs them during compilation.
+  `(transform desugar-inc)`. The compiler runs them during compilation. A **checker is
+  handed the program as a list of modules** — `((name form…) …)`, one record per module
+  (head = module name symbol, rest = its top-level forms). The checker owns the loop and
+  decides which modules to look at (e.g. skip the ones where `(code-from-user? (code-nth m 1))`
+  is false). A **transformer** still gets the flat form list (it rewrites in place).
 - **Dialects** — *import* a module that contains those registrations: one
   `(import "safe_dialect.coil")` applies its whole stack.
 - **From the CLI, optionally** — `coil run app.coil --use lint.coil` imports a
