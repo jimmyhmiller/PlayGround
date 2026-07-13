@@ -1355,55 +1355,187 @@ pub const CORE: &str = r##"
       (list 'def (list '-private-meta name) (%cons 'fn more))
       (list 'def (list '-private-meta name) (%cons 'fn (%cons p2 more))))))
 
-;; ─────────────── regex (library code over the one string primitive) ───────────────
-;; A compiled pattern is `(record 'Regex pattern-string)`; `#"…"` reads as
-;; `(re-pattern "…")`. A tiny backtracking engine supports literals, `.`, `*`,
-;; `^`, `$` — enough for common patterns; it returns the MATCH LENGTH so re-find
-;; can hand back the matched substring, not just a boolean.
-(defn regexp? [x] (%num-eq (type-of x) 'Regex))
-(defn re-pattern [s] (if (regexp? s) s (record 'Regex (str s))))
-(defn -re-pat-chars [re] (%str->chars (if (regexp? re) (field re 0) (str re))))
-;; number of leading chars of `txt` matched by `re` (both char lists), or nil.
-(defn -re-len [re txt]
+;; ─────────────── regex (a real backtracking engine, all library code) ───────────────
+;; A compiled pattern is `(record 'Regex pattern-string ast n-groups)`; `#"…"`
+;; reads as `(re-pattern "…")`. The engine is pure library code over `%str->chars`:
+;; a recursive-descent PARSER (pattern -> an AST of tagged vectors) plus a
+;; continuation-passing backtracking MATCHER. Supports literals, `.`, char classes
+;; `[...]`/`[^...]`/ranges, `\d \w \s`/`\D \W \S`, anchors `^ $`, groups `(…)` +
+;; non-capturing `(?:…)`, alternation `a|b`, and quantifiers `* + ? {n} {n,} {n,m}`
+;; (greedy, or lazy with a trailing `?`).
+
+;; ── character-class predicates ──
+(defn -rx-in-range? [ch lo hi] (if (%lt (%char-code ch) (%char-code lo)) false (not (%lt (%char-code hi) (%char-code ch)))))
+(defn -rx-digit? [ch] (-rx-in-range? ch \0 \9))
+(defn -rx-word? [ch] (or (-rx-in-range? ch \a \z) (-rx-in-range? ch \A \Z) (-rx-digit? ch) (%num-eq ch \_)))
+(defn -rx-space? [ch] (or (%num-eq ch \space) (%num-eq ch \tab) (%num-eq ch \newline) (%num-eq ch \return)))
+;; a class item is a char, a `[:range lo hi]` vector, or a `:digit`/`:word`/`:space` keyword.
+(defn -rx-item-match [item ch]
+  (cond (keyword? item) (case item :digit (-rx-digit? ch) :word (-rx-word? ch) :space (-rx-space? ch) false)
+        (vector? item) (-rx-in-range? ch (second item) (nth item 2))
+        :else (%num-eq item ch)))
+(defn -rx-any-item? [items ch]
+  (if (nil? (seq items)) false (if (-rx-item-match (first items) ch) true (-rx-any-item? (rest items) ch))))
+
+;; ── the CPS backtracking matcher: (-rx-m node s i groups k) tries to match `node`
+;;    at index i, calling k with (end-index, groups) on success; returns k's result
+;;    or nil. `or` chains the backtracking alternatives. ──
+(defn -rx-m [node s i groups k]
+  (case (first node)
+    :char  (if (if (%lt i (count s)) (%num-eq (nth s i) (second node)) false) (k (%add i 1) groups) nil)
+    :any   (if (%lt i (count s)) (k (%add i 1) groups) nil)
+    :class (if (%lt i (count s))
+             (let [neg (second node) hit (-rx-any-item? (nth node 2) (nth s i))]
+               (if (if neg (not hit) hit) (k (%add i 1) groups) nil)) nil)
+    :start (if (%num-eq i 0) (k i groups) nil)
+    :end   (if (%num-eq i (count s)) (k i groups) nil)
+    :seq   (-rx-m-seq (rest node) s i groups k)
+    :alt   (-rx-m-alt (rest node) s i groups k)
+    :group (let [idx (second node) start i]
+             (-rx-m (nth node 2) s i groups (fn [i2 g2] (k i2 (assoc g2 idx [start i2])))))
+    :ncgroup (-rx-m (second node) s i groups k)
+    :opt   (if (second node)
+             (or (-rx-m (nth node 2) s i groups k) (k i groups))
+             (or (k i groups) (-rx-m (nth node 2) s i groups k)))
+    :star  (-rx-m-star (second node) (nth node 2) s i groups k)
+    :plus  (-rx-m (nth node 2) s i groups (fn [i2 g2] (-rx-m-star (second node) (nth node 2) s i2 g2 k)))
+    :rep   (-rx-m-rep (second node) (nth node 2) (nth node 3) (nth node 4) s i groups k)
+    nil))
+(defn -rx-m-seq [nodes s i groups k]
+  (if (nil? (seq nodes)) (k i groups)
+    (-rx-m (first nodes) s i groups (fn [i2 g2] (-rx-m-seq (rest nodes) s i2 g2 k)))))
+(defn -rx-m-alt [branches s i groups k]
+  (if (nil? (seq branches)) nil
+    (or (-rx-m (first branches) s i groups k) (-rx-m-alt (rest branches) s i groups k))))
+;; greedy: match one more then recurse, else stop. `(< i i2)` blocks zero-width loops.
+(defn -rx-m-star [greedy node s i groups k]
+  (if greedy
+    (or (-rx-m node s i groups (fn [i2 g2] (if (%lt i i2) (-rx-m-star greedy node s i2 g2 k) nil))) (k i groups))
+    (or (k i groups) (-rx-m node s i groups (fn [i2 g2] (if (%lt i i2) (-rx-m-star greedy node s i2 g2 k) nil))))))
+(defn -rx-m-rep [greedy lo hi node s i groups k]
   (cond
-    (nil? (seq re)) 0
-    (and (%num-eq (first re) \$) (nil? (seq (rest re)))) (if (nil? (seq txt)) 0 nil)
-    (and (seq (rest re)) (%num-eq (first (rest re)) \*))
-      (-re-star-len (first re) (rest (rest re)) txt)
-    (and (seq txt) (or (%num-eq (first re) \.) (%num-eq (first re) (first txt))))
-      (let [n (-re-len (rest re) (rest txt))] (if (nil? n) nil (%add n 1)))
-    :else nil))
-;; `c* rest` against txt, greedy with backtracking; total consumed length or nil.
-(defn -re-star-len [c re txt]
-  (if (and (seq txt) (or (%num-eq (first txt) c) (%num-eq c \.)))
-    (let [longer (-re-star-len c re (rest txt))]
-      (if (nil? longer) (-re-len re txt) (%add longer 1)))
-    (-re-len re txt)))
-;; leftmost match of the pattern anywhere in s; returns the matched substring or nil.
-(defn re-find [re s]
-  (let [pc (-re-pat-chars re)
-        anchored (and (seq pc) (%num-eq (first pc) \^))
-        rec (if anchored (rest pc) pc)]
-    (loop [t (%str->chars s)]
-      (let [n (-re-len rec t)]
+    (%lt 0 lo) (-rx-m node s i groups (fn [i2 g2] (-rx-m-rep greedy (%sub lo 1) (if (nil? hi) nil (%sub hi 1)) node s i2 g2 k)))
+    (if (nil? hi) false (not (%lt 0 hi))) (k i groups)
+    :else (if greedy
+            (or (-rx-m node s i groups (fn [i2 g2] (if (%lt i i2) (-rx-m-rep greedy 0 (if (nil? hi) nil (%sub hi 1)) node s i2 g2 k) (k i2 g2)))) (k i groups))
+            (or (k i groups) (-rx-m node s i groups (fn [i2 g2] (if (%lt i i2) (-rx-m-rep greedy 0 (if (nil? hi) nil (%sub hi 1)) node s i2 g2 k) nil)))))))
+
+;; ── the recursive-descent parser: each fn returns [node next-pos]; `gc` is a group
+;;    counter atom (group indices assigned 1-based in open-paren order). ──
+(defn -rx-parse-int [chars] (loop [cs (seq chars) n 0] (if (nil? cs) n (recur (next cs) (%add (%mul n 10) (%sub (%char-code (first cs)) 48))))))
+(defn -rx-class-escape [c]
+  (cond (%num-eq c \d) :digit (%num-eq c \w) :word (%num-eq c \s) :space
+        (%num-eq c \n) \newline (%num-eq c \t) \tab :else c))
+(defn -rx-p-class [cs pos]
+  (let [p0 (%add pos 1) neg (%num-eq (nth cs p0) \^) p1 (if neg (%add p0 1) p0)]
+    (loop [items [] p p1]
+      (cond
+        (%num-eq (nth cs p) \]) [[:class neg items] (%add p 1)]
+        (%num-eq (nth cs p) \\) (recur (conj items (-rx-class-escape (nth cs (%add p 1)))) (%add p 2))
+        (if (%lt (%add p 2) (count cs)) (if (%num-eq (nth cs (%add p 1)) \-) (not (%num-eq (nth cs (%add p 2)) \])) false) false)
+          (recur (conj items [:range (nth cs p) (nth cs (%add p 2))]) (%add p 3))
+        :else (recur (conj items (nth cs p)) (%add p 1))))))
+(defn -rx-p-escape [cs pos]
+  (let [c (nth cs (%add pos 1))]
+    [(cond
+       (%num-eq c \d) [:class false [:digit]]  (%num-eq c \D) [:class true [:digit]]
+       (%num-eq c \w) [:class false [:word]]   (%num-eq c \W) [:class true [:word]]
+       (%num-eq c \s) [:class false [:space]]  (%num-eq c \S) [:class true [:space]]
+       (%num-eq c \n) [:char \newline] (%num-eq c \t) [:char \tab]
+       :else [:char c])
+     (%add pos 2)]))
+(defn -rx-p-atom [cs pos gc]
+  (let [c (nth cs pos)]
+    (cond
+      (%num-eq c \() (-rx-p-group cs pos gc)
+      (%num-eq c \[) (-rx-p-class cs pos)
+      (%num-eq c \\) (-rx-p-escape cs pos)
+      (%num-eq c \.) [[:any] (%add pos 1)]
+      (%num-eq c \^) [[:start] (%add pos 1)]
+      (%num-eq c \$) [[:end] (%add pos 1)]
+      :else [[:char c] (%add pos 1)])))
+(defn -rx-p-group [cs pos gc]
+  (let [after (%add pos 1)]
+    (if (if (%lt (%add after 1) (count cs)) (if (%num-eq (nth cs after) \?) (%num-eq (nth cs (%add after 1)) \:) false) false)
+      (let [r (-rx-p-alt cs (%add after 2) gc)] [[:ncgroup (first r)] (%add (second r) 1)])
+      (let [idx (swap! gc inc) r (-rx-p-alt cs after gc)] [[:group idx (first r)] (%add (second r) 1)]))))
+(defn -rx-p-brace [cs pos]
+  (loop [p pos nstr []]
+    (if (or (%num-eq (nth cs p) \,) (%num-eq (nth cs p) \}))
+      (let [lo (-rx-parse-int nstr)]
+        (if (%num-eq (nth cs p) \}) [lo lo (%add p 1)]
+          (loop [p2 (%add p 1) mstr []]
+            (if (%num-eq (nth cs p2) \}) [lo (if (nil? (seq mstr)) nil (-rx-parse-int mstr)) (%add p2 1)]
+              (recur (%add p2 1) (conj mstr (nth cs p2)))))))
+      (recur (%add p 1) (conj nstr (nth cs p))))))
+;; a trailing `?` makes a just-parsed quantifier lazy (greedy? lives at index 1).
+(defn -rx-with-lazy [node cs p]
+  (if (if (%lt p (count cs)) (%num-eq (nth cs p) \?) false) [(assoc node 1 false) (%add p 1)] [node p]))
+(defn -rx-p-quant [cs pos gc]
+  (let [r (-rx-p-atom cs pos gc) atm (first r) p (second r)]
+    (if (%lt p (count cs))
+      (let [c (nth cs p)]
         (cond
-          (not (nil? n)) (apply str (take n t))
-          (or anchored (nil? (seq t))) nil
-          :else (recur (rest t)))))))
-;; whole-string match: returns s (the match) only if the pattern matches all of s.
+          (%num-eq c \*) (-rx-with-lazy [:star true atm] cs (%add p 1))
+          (%num-eq c \+) (-rx-with-lazy [:plus true atm] cs (%add p 1))
+          (%num-eq c \?) (-rx-with-lazy [:opt true atm] cs (%add p 1))
+          (if (%num-eq c \{) (if (%lt (%add p 1) (count cs)) (-rx-digit? (nth cs (%add p 1))) false) false)
+            (let [b (-rx-p-brace cs (%add p 1))] (-rx-with-lazy [:rep true (nth b 0) (nth b 1) atm] cs (nth b 2)))
+          :else [atm p]))
+      [atm p])))
+(defn -rx-p-seq [cs pos gc]
+  (loop [nodes [] p pos]
+    (if (if (%num-eq p (count cs)) true (if (%num-eq (nth cs p) \|) true (%num-eq (nth cs p) \))))
+      [(vec (cons :seq nodes)) p]
+      (let [r (-rx-p-quant cs p gc)] (recur (conj nodes (first r)) (second r))))))
+(defn -rx-p-alt [cs pos gc]
+  (let [r (-rx-p-seq cs pos gc) first-seq (first r) p1 (second r)]
+    (loop [branches [first-seq] p p1]
+      (if (if (%lt p (count cs)) (%num-eq (nth cs p) \|) false)
+        (let [r2 (-rx-p-seq cs (%add p 1) gc)] (recur (conj branches (first r2)) (second r2)))
+        (if (%num-eq (count branches) 1) [first-seq p] [(vec (cons :alt branches)) p])))))
+(defn -rx-compile [pat]
+  (let [cs (vec (%str->chars pat)) gc (atom 0) r (-rx-p-alt cs 0 gc)] [(first r) (deref gc)]))
+
+;; ── public API ──
+(defn regexp? [x] (%num-eq (type-of x) 'Regex))
+(defn re-pattern [s]
+  (if (regexp? s) s (let [pat (str s) c (-rx-compile pat)] (record 'Regex pat (first c) (second c)))))
+(defn -rx-ast [re] (if (regexp? re) [(field re 1) (field re 2)] (-rx-compile (str re))))
+;; the whole matched substring when the pattern has 0 groups, else [whole g1 g2 …].
+(defn -rx-result [sv m ng]
+  (let [whole (apply str (subvec sv (:start m) (:end m)))]
+    (if (%num-eq ng 0) whole
+      (vec (cons whole (map (fn [idx]
+                              (let [span (get (:groups m) idx)]
+                                (if (nil? span) nil (apply str (subvec sv (first span) (second span))))))
+                            (range 1 (%add ng 1))))))))
+;; leftmost match at index >= start.
+(defn -rx-search [ast sv ng start]
+  (loop [i start]
+    (let [r (-rx-m ast sv i {} (fn [e g] {:end e :groups g}))]
+      (cond (not (nil? r)) {:start i :end (:end r) :groups (:groups r)}
+            (%lt i (count sv)) (recur (%add i 1))
+            :else nil))))
+(defn re-find [re s]
+  (let [a (-rx-ast re) sv (vec (%str->chars s)) m (-rx-search (first a) sv (second a) 0)]
+    (if (nil? m) nil (-rx-result sv m (second a)))))
 (defn re-matches [re s]
-  (let [pc (-re-pat-chars re)
-        rec (if (and (seq pc) (%num-eq (first pc) \^)) (rest pc) pc)
-        sc (%str->chars s)
-        n (-re-len rec sc)]
-    (if (and (not (nil? n)) (%num-eq n (count sc))) (apply str (take n sc)) nil)))
+  (let [a (-rx-ast re) sv (vec (%str->chars s))
+        r (-rx-m (first a) sv 0 {} (fn [e g] (if (%num-eq e (count sv)) {:end e :groups g} nil)))]
+    (if (nil? r) nil (-rx-result sv {:start 0 :end (:end r) :groups (:groups r)} (second a)))))
 (defn re-seq [re s]
-  (lazy-seq
-    (when (seq (%str->chars s))
-      (let [m (re-find re s)]
-        (if (nil? m) nil
-          (let [after (drop (max 1 (count m)) (%str->chars s))]
-            (cons m (re-seq re (apply str after)))))))))
+  (let [a (-rx-ast re) sv (vec (%str->chars s)) ast (first a) ng (second a)]
+    ((fn step [i]
+       (lazy-seq
+         (let [m (-rx-search ast sv ng i)]
+           (if (nil? m) nil
+             (let [ni (if (%lt (:start m) (:end m)) (:end m) (%add (:end m) 1))]
+               (cons (-rx-result sv m ng) (step ni))))))) 0)))
+;; leftmost match with its span; used by clojure.string/replace & re-find-index.
+(defn -rx-first [re s]
+  (let [a (-rx-ast re) sv (vec (%str->chars s)) m (-rx-search (first a) sv (second a) 0)]
+    (if (nil? m) nil {:start (:start m) :end (:end m) :match (-rx-result sv m (second a))})))
 
 ;; ─────────────── PersistentQueue (FIFO) ───────────────
 ;; `(record 'PersistentQueue items)` where items is a LIST front→back (a list, not

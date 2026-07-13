@@ -180,21 +180,27 @@ fn tokenize(src: &str) -> Vec<Tok> {
                 out.push(Tok::Str(s));
             }
             '\\' => {
-                // a character literal: \a, \newline, \space, \tab
+                // a character literal: \a, \newline, \space, \tab, and the
+                // delimiter chars \( \) \[ \] \{ \} (Clojure allows these).
                 i += 1;
-                let start = i;
-                while i < cs.len() && !cs[i].is_whitespace() && !matches!(cs[i], '(' | ')' | '[' | ']' | '{' | '}') {
+                if i < cs.len() && matches!(cs[i], '(' | ')' | '[' | ']' | '{' | '}') {
+                    out.push(Tok::Char(cs[i]));
                     i += 1;
+                } else {
+                    let start = i;
+                    while i < cs.len() && !cs[i].is_whitespace() && !matches!(cs[i], '(' | ')' | '[' | ']' | '{' | '}') {
+                        i += 1;
+                    }
+                    let name: String = cs[start..i].iter().collect();
+                    let ch = match name.as_str() {
+                        "newline" => '\n',
+                        "space" => ' ',
+                        "tab" => '\t',
+                        "return" => '\r',
+                        _ => name.chars().next().unwrap_or(' '),
+                    };
+                    out.push(Tok::Char(ch));
                 }
-                let name: String = cs[start..i].iter().collect();
-                let ch = match name.as_str() {
-                    "newline" => '\n',
-                    "space" => ' ',
-                    "tab" => '\t',
-                    "return" => '\r',
-                    _ => name.chars().next().unwrap_or(' '),
-                };
-                out.push(Tok::Char(ch));
             }
             _ => {
                 let start = i;

@@ -61,42 +61,60 @@ pub const CLOJURE_STRING: &str = r##"
 (defn includes? [s sub] (not (nil? (index-of s sub))))
 
 ;; ── split / replace ──
+;; drop trailing empty strings from a split result (limit-0 semantics).
+(defn -drop-trailing-empty [v]
+  (loop [v v] (if (and (%lt 0 (count v)) (%num-eq (count (peek v)) 0)) (recur (pop v)) v)))
+;; split s at every match of the regex re.
+(defn -split-re [s re]
+  (-drop-trailing-empty
+    (loop [pos 0 acc []]
+      (if (%lt (count s) pos) acc
+        (let [sub (subs s pos) m (-rx-first re sub)]
+          (if (nil? m) (conj acc sub)
+            (let [st (:start m) en (:end m)]
+              (if (%num-eq st en) (conj acc sub)                 ; zero-width: stop
+                (recur (%add pos en) (conj acc (subs sub 0 st)))))))))))
 (defn split [s sep]
-  (let [m (str sep) mc (count m)]
-    (loop [cur s acc []]
-      (let [i (index-of cur m)]
-        (if (nil? i)
-          (conj acc cur)
-          (recur (subs cur (+ i mc)) (conj acc (subs cur 0 i))))))))
+  (if (regexp? sep)
+    (-split-re s sep)
+    (let [m (str sep) mc (count m)]
+      (loop [cur s acc []]
+        (let [i (index-of cur m)]
+          (if (nil? i)
+            (conj acc cur)
+            (recur (subs cur (+ i mc)) (conj acc (subs cur 0 i)))))))))
 (defn split-lines [s] (split s "
 "))
+;; replace every regex match of re in s with the string rep (or (repfn match) when
+;; rep is a fn).
+(defn -replace-re [s re rep]
+  (loop [pos 0 out ""]
+    (if (%num-eq pos (count s)) out
+      (let [sub (subs s pos) m (-rx-first re sub)]
+        (if (nil? m) (str out sub)
+          (let [st (:start m) en (:end m)
+                r (if (fn? rep) (rep (:match m)) rep)]
+            (if (%num-eq st en)
+              (recur (%add pos 1) (str out (subs sub 0 1)))       ; zero-width: emit 1 char
+              (recur (%add pos en) (str out (subs sub 0 st) r)))))))))
 (defn replace [s match replacement]
-  (join replacement (split s match)))
+  (if (regexp? match)
+    (-replace-re s match replacement)
+    (join replacement (split s match))))
 (defn replace-first [s match replacement]
-  (let [m (str match) i (index-of s m)]
-    (if (nil? i) s
-        (str (subs s 0 i) replacement (subs s (+ i (count m)))))))
+  (if (regexp? match)
+    (let [m (-rx-first match s)]
+      (if (nil? m)
+        s
+        (str (subs s 0 (:start m))
+             (if (fn? replacement) (replacement (:match m)) replacement)
+             (subs s (:end m)))))
+    (let [m (str match) i (index-of s m)]
+      (if (nil? i)
+        s
+        (str (subs s 0 i) replacement (subs s (+ i (count m))))))))
 
-;; ── a tiny backtracking regex engine (Pike-style), also pure library code ──
-;; Supports literals, `.`, `*`, `^`, `$`. Operates on char lists; proves regex is
-;; library code over the same one primitive, not a builtin engine.
-(defn- -re-star [c re txt]
-  (cond (-re-here re txt) true
-        (and (seq txt) (or (= (first txt) c) (= c \.))) (-re-star c re (rest txt))
-        true false))
-(defn- -re-here [re txt]
-  (cond (nil? (seq re)) true
-        (and (seq (rest re)) (= (first (rest re)) \*)) (-re-star (first re) (rest (rest re)) txt)
-        (and (= (first re) \$) (nil? (seq (rest re)))) (nil? (seq txt))
-        (and (seq txt) (or (= (first re) \.) (= (first re) (first txt)))) (-re-here (rest re) (rest txt))
-        true false))
-;; `re-match?` — does the pattern match anywhere in s (like `re-find` as a pred)?
-(defn re-match? [pattern s]
-  (let [re (%str->chars pattern)]
-    (if (and (seq re) (= (first re) \^))
-      (-re-here (rest re) (%str->chars s))
-      (loop [t (%str->chars s)]
-        (cond (-re-here re t) true
-              (nil? (seq t)) false
-              true (recur (rest t)))))))
+;; `re-match?` — does the pattern (string or Regex) match anywhere in s? A thin
+;; predicate over the real regex engine in clojure.core.
+(defn re-match? [pattern s] (not (nil? (re-find (re-pattern pattern) s))))
 "##;
