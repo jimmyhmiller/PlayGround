@@ -15,6 +15,18 @@ Distinguished only by *what they receive* and *what they return*.
 | **Checker** | `Program -> Code` | the whole program | veto via `error` | **shipped** |
 | **Transformer** | `Program -> Program` | the whole program | a rewritten program | **shipped** |
 
+## Applying a metaprogram
+
+- **Macros** — *call* them: `(when c body)`. Detected by their `Code` signature.
+- **Checkers / transformers** — *register* them at top level: `(checker lint-icmp)` /
+  `(transform desugar-inc)`. The compiler runs them during compilation.
+- **Dialects** — *import* a module that contains those registrations: one
+  `(import "safe_dialect.coil")` applies its whole stack.
+- **From the CLI, optionally** — `coil run app.coil --use lint.coil` imports a
+  metaprogram module (which self-registers its `(checker …)`) **without editing the
+  source**. Repeatable; works on `run` and `build`. This is how you run a linter on
+  demand: `coil run app.coil --use lint-on.coil`.
+
 All four share one substrate: the `Code` value, the `code-*` operations, type
 reflection, and the comptime interpreter. The difference is **scope** (my-call-site
 vs whole-program) and **power** (produce vs reject vs rewrite). An ordered stack of
