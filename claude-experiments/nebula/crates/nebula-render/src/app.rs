@@ -436,6 +436,8 @@ pub struct RunOptions {
     pub start_radial: bool,
     /// Headless preview of the legend-hover highlight (the most frequent class).
     pub preview_highlight: bool,
+    /// Edge set for the algorithms: "all" (union) or an edge type name.
+    pub compute_over: Option<String>,
 }
 
 impl Default for RunOptions {
@@ -458,6 +460,7 @@ impl Default for RunOptions {
             start_hierarchical: false,
             start_radial: false,
             preview_highlight: false,
+            compute_over: None,
         }
     }
 }
@@ -487,8 +490,13 @@ pub struct App {
     attr_keys: Vec<String>,
     /// Named edge sets shown over the graph (e.g. children, deps).
     edge_types: Vec<EdgeType>,
-    /// Which edge type drives the hierarchical/radial DAG layout.
-    structure_type: usize,
+    /// Which edge set the edge-aware algorithms (coloring, layouts) compute over.
+    /// None = union of all types; Some(i) = edge type `i`. Applied on the next
+    /// manual recolor / relayout, not automatically.
+    algo_edge_set: Option<usize>,
+    /// Which edge set the GPU force springs currently reflect (rebuilt on reseed
+    /// when it differs from `algo_edge_set`).
+    spring_edge_set: Option<usize>,
     /// Attribute "show only" filter; non-matching nodes are hidden.
     filter: NodeFilter,
     /// Node count matching the current filter (for the UI), or None if disabled.
@@ -577,6 +585,10 @@ impl App {
                 .map(|t| EdgeType { name: t.name, color: t.color, visible: true, edges: t.edges })
                 .collect()
         };
+        let init_algo_edge_set: Option<usize> = match opts.compute_over.as_deref() {
+            None | Some("all") | Some("union") => None,
+            Some(name) => edge_types.iter().position(|t| t.name == name),
+        };
         let settings = opts.settings;
         let color_mode = opts.color_mode;
         let selected = opts.select;
@@ -598,8 +610,9 @@ impl App {
             seed_positions,
             opts,
             attr_keys: attribute_keys(node_attrs.as_deref()),
+            algo_edge_set: init_algo_edge_set,
             edge_types,
-            structure_type: 0,
+            spring_edge_set: None,
             filter: init_filter,
             filter_match_count: None,
             legend: Legend::None,
@@ -729,16 +742,18 @@ impl App {
         let n = self.graph.num_nodes() as usize;
         self.value_name = String::new();
         self.last_values = None;
+        // Edge-aware coloring computes over the chosen algorithm edge set.
+        let mut ag = self.algo_graph();
         let (colors, sizes): (Vec<u32>, Option<Vec<f32>>) = match self.color_mode {
             ColorMode::Uniform => (vec![pack_rgba(120, 170, 255, 255); n], None),
             ColorMode::Components => {
-                let labels = algorithms::connected_components(&self.graph);
+                let labels = algorithms::connected_components(&ag);
                 self.value_name = "component".to_string();
                 self.last_values = Some(labels.iter().map(|&l| l as f32).collect());
                 (coloring::categorical_colors(&labels), None)
             }
             ColorMode::Degree => {
-                let deg = self.graph.degrees();
+                let deg = ag.degrees();
                 let degf: Vec<f32> = deg.iter().map(|&d| d as f32).collect();
                 self.value_name = "degree".to_string();
                 self.last_values = Some(degf.clone());
@@ -748,7 +763,7 @@ impl App {
                 )
             }
             ColorMode::PageRank => {
-                let pr = algorithms::pagerank(&mut self.graph, 40, 0.85);
+                let pr = algorithms::pagerank(&mut ag, 40, 0.85);
                 self.value_name = "pagerank".to_string();
                 self.last_values = Some(pr.clone());
                 (
@@ -757,13 +772,13 @@ impl App {
                 )
             }
             ColorMode::Coloring => {
-                let c = algorithms::greedy_coloring(&mut self.graph);
+                let c = algorithms::greedy_coloring(&mut ag);
                 self.value_name = "color".to_string();
                 self.last_values = Some(c.iter().map(|&x| x as f32).collect());
                 (coloring::categorical_colors(&c), None)
             }
             ColorMode::Communities => {
-                let labels = algorithms::label_propagation(&mut self.graph, 20);
+                let labels = algorithms::label_propagation(&mut ag, 20);
                 self.value_name = "community".to_string();
                 self.last_values = Some(labels.iter().map(|&l| l as f32).collect());
                 (coloring::categorical_colors(&labels), None)
@@ -995,7 +1010,8 @@ impl App {
             .map(|t| (t.name.clone(), t.color, t.edges.len()))
             .collect();
         let mut edge_visible: Vec<bool> = self.edge_types.iter().map(|t| t.visible).collect();
-        let mut structure_sel = self.structure_type;
+        let mut algo_sel = self.algo_edge_set;
+        let spring_set = self.spring_edge_set;
 
         // Actions requiring heavier work (GPU recompute) are recorded and run
         // after the panel closure, when `self` is freely borrowable again.
@@ -1093,11 +1109,12 @@ impl App {
                         .text("edge glow"),
                 );
 
-                // Edge types: per-type visibility + color, plus which type drives
-                // the DAG layouts.
+                // Edge types: per-type render visibility + color, and which edge
+                // set the edge-aware algorithms compute over.
                 if edge_info.len() > 1 {
                     ui.separator();
                     ui.strong("Edge types");
+                    ui.label(egui::RichText::new("show").weak().small());
                     for (i, (name, color, count)) in edge_info.iter().enumerate() {
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut edge_visible[i], "");
@@ -1111,14 +1128,29 @@ impl App {
                             ui.label(format!("{name}  ({count})"));
                         });
                     }
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new("compute over").weak().small());
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(egui::RichText::new("layout uses:").weak().small());
+                        if ui.selectable_label(algo_sel.is_none(), "all").clicked() {
+                            algo_sel = None;
+                        }
                         for (i, (name, _, _)) in edge_info.iter().enumerate() {
-                            if ui.selectable_label(structure_sel == i, name).clicked() {
-                                structure_sel = i;
+                            if ui.selectable_label(algo_sel == Some(i), name).clicked() {
+                                algo_sel = Some(i);
                             }
                         }
                     });
+                    // Nudge when the pending selection hasn't been applied yet.
+                    let dag_stale = algo_sel != self.algo_edge_set;
+                    let force_stale = algo_sel != spring_set;
+                    if dag_stale || force_stale {
+                        ui.label(
+                            egui::RichText::new("recolor or re-layout to apply")
+                                .weak()
+                                .small()
+                                .italics(),
+                        );
+                    }
                 }
 
                 if !self.attr_keys.is_empty() {
@@ -1182,7 +1214,7 @@ impl App {
         }
         self.show_density = show_density;
         self.show_labels = show_labels;
-        self.structure_type = structure_sel.min(self.edge_types.len().saturating_sub(1));
+        self.algo_edge_set = algo_sel.filter(|&i| i < self.edge_types.len());
         for (i, &v) in edge_visible.iter().enumerate() {
             if self.edge_types.get(i).map(|t| t.visible) != Some(v) {
                 if let Some(t) = self.edge_types.get_mut(i) {
@@ -1781,7 +1813,23 @@ impl App {
 
     /// Re-seed node positions from a one-shot CPU layout and restart the sim.
     /// Demonstrates the pluggable `Layout` trait at runtime.
+    /// Rebuild the GPU force springs to reflect the current algorithm edge set,
+    /// if it differs from what the springs currently use. Called on force reseed.
+    fn rebuild_spring_edges(&mut self) {
+        if self.spring_edge_set == self.algo_edge_set {
+            return;
+        }
+        let g = self.algo_graph();
+        if let (Some(live), Some(csr)) = (self.live.as_mut(), g.csr_ref()) {
+            live.graph_gpu.set_csr(&live.gpu.device, csr);
+            live.layout.rebind(&live.gpu.device, &live.graph_gpu);
+        }
+        self.spring_edge_set = self.algo_edge_set;
+        log::info!("force springs now use '{}' edges", self.algo_edge_set_name());
+    }
+
     fn reseed(&mut self, layout: &dyn Layout) {
+        self.rebuild_spring_edges();
         let n = self.graph.num_nodes() as usize;
         let mut pos = vec![[0.0f32; 2]; n];
         let seed = 0x51ED ^ self.total_steps;
@@ -1799,13 +1847,23 @@ impl App {
         log::info!("re-seeded with {} layout", layout.name());
     }
 
-    /// A `Graph` built from the structure edge type (the one driving the DAG
-    /// layouts). Falls back to the union graph if there are no edge types.
-    fn structure_graph(&self) -> Graph {
+    /// A `Graph` over the edge set the algorithms should compute on: the union
+    /// (`algo_edge_set == None`) or a single edge type. CSR is built.
+    fn algo_graph(&self) -> Graph {
         let n = self.graph.num_nodes();
-        match self.edge_types.get(self.structure_type) {
+        let mut g = match self.algo_edge_set.and_then(|i| self.edge_types.get(i)) {
             Some(t) => Graph::new(n, t.edges.clone()),
             None => Graph::new(n, self.graph.edges().to_vec()),
+        };
+        g.ensure_csr();
+        g
+    }
+
+    /// Human name of the current algorithm edge set.
+    fn algo_edge_set_name(&self) -> &str {
+        match self.algo_edge_set.and_then(|i| self.edge_types.get(i)) {
+            Some(t) => &t.name,
+            None => "all",
         }
     }
 
@@ -1824,28 +1882,31 @@ impl App {
         if let Some(live) = self.live.as_ref() {
             live.layout.update_settings(&live.gpu.queue, &self.settings);
         }
-        let sname = self.edge_types.get(self.structure_type).map(|t| t.name.as_str()).unwrap_or("edges");
-        log::info!("applied {} layout over '{}' edges (simulation paused)", layout.name(), sname);
+        log::info!(
+            "applied {} layout over '{}' edges (simulation paused)",
+            layout.name(),
+            self.algo_edge_set_name()
+        );
     }
 
-    /// Hierarchical (layered DAG) layout over the structure edge type.
+    /// Hierarchical (layered DAG) layout over the algorithm edge set.
     fn apply_hierarchical(&mut self) {
         let layout = LayeredLayout {
             target_height: self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt(),
             aspect: 1.8,
             sweeps: 4,
         };
-        let g = self.structure_graph();
+        let g = self.algo_graph();
         self.apply_fixed_layout(&layout, &g);
     }
 
-    /// Radial (concentric) DAG layout over the structure edge type.
+    /// Radial (concentric) DAG layout over the algorithm edge set.
     fn apply_radial(&mut self) {
         let layout = RadialLayout {
             radius: self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt() * 0.6,
             sweeps: 4,
         };
-        let g = self.structure_graph();
+        let g = self.algo_graph();
         self.apply_fixed_layout(&layout, &g);
     }
 

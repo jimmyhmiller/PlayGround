@@ -200,6 +200,28 @@ impl GpuGraph {
             &vec![0u8; (self.num_nodes as usize * 8).max(4)],
         );
     }
+
+    /// Replace the CSR buffers (spring attraction edges) from a new CSR. The
+    /// buffers are recreated (sizes change with the edge set); callers must
+    /// rebind anything referencing them (e.g. `LayoutGpu::rebind`).
+    pub fn set_csr(&mut self, device: &wgpu::Device, csr: &nebula_core::Csr) {
+        let offsets_u32: Vec<u32> = csr.offsets.iter().map(|&o| o as u32).collect();
+        self.csr_offsets = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("csr_offsets"),
+            contents: bytemuck::cast_slice(&offsets_u32),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        self.csr_targets = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("csr_targets"),
+            contents: if csr.targets.is_empty() {
+                bytemuck::cast_slice(&[0u32])
+            } else {
+                bytemuck::cast_slice(&csr.targets)
+            },
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        self.num_edges = (csr.targets.len() / 2) as u64;
+    }
 }
 
 #[inline]

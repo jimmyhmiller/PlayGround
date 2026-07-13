@@ -66,6 +66,8 @@ struct Args {
     radial: bool,
     /// Headless preview of the legend-hover highlight.
     preview_highlight: bool,
+    /// Edge set for edge-aware algorithms ("all" or an edge type name).
+    compute_over: Option<String>,
     paused: bool,
     no_edges: bool,
     no_nodes: bool,
@@ -222,6 +224,7 @@ fn main() -> anyhow::Result<()> {
         start_hierarchical: args.hierarchical,
         start_radial: args.radial,
         preview_highlight: args.preview_highlight,
+        compute_over: args.compute_over.clone(),
     };
 
     let app = App::with_labels(graph, positions, opts, node_labels, node_attrs, edge_types);
@@ -243,6 +246,7 @@ fn parse_args() -> Result<Args, String> {
     let mut hierarchical = false;
     let mut radial = false;
     let mut preview_highlight = false;
+    let mut compute_over: Option<String> = None;
     let mut paused = false;
     let mut no_edges = false;
     let mut no_nodes = false;
@@ -326,6 +330,9 @@ fn parse_args() -> Result<Args, String> {
                 filter = Some(it.next().ok_or("--filter needs KEY:OP:VALUE")?);
             }
             "--highlight-demo" => preview_highlight = true,
+            "--compute-over" => {
+                compute_over = Some(it.next().ok_or("--compute-over needs a name")?);
+            }
             "--layout" => {
                 let name = it.next().ok_or("--layout needs a name")?;
                 match name.as_str() {
@@ -362,6 +369,7 @@ fn parse_args() -> Result<Args, String> {
         hierarchical,
         radial,
         preview_highlight,
+        compute_over,
         paused,
         no_edges,
         no_nodes,

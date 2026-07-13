@@ -77,6 +77,7 @@ pub struct LayoutGpu {
     params_buf: wgpu::Buffer,
     params_bg: wgpu::BindGroup,
     data_bg: wgpu::BindGroup,
+    data_bgl: wgpu::BindGroupLayout,
     clear_pipeline: wgpu::ComputePipeline,
     build_pipeline: wgpu::ComputePipeline,
     coarse_pipeline: wgpu::ComputePipeline,
@@ -169,20 +170,7 @@ impl LayoutGpu {
                 resource: params_buf.as_entire_binding(),
             }],
         });
-        let data_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("layout_data_bg"),
-            layout: &data_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: graph.positions.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: graph.velocities.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: graph.csr_offsets.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: graph.csr_targets.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: graph.grid_counts.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: graph.grid_items.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: graph.coarse_com.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 7, resource: graph.coarse_mass.as_entire_binding() },
-            ],
-        });
+        let data_bg = make_data_bg(device, &data_bgl, graph);
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("layout_pl"),
@@ -205,6 +193,7 @@ impl LayoutGpu {
             params_buf,
             params_bg,
             data_bg,
+            data_bgl,
             clear_pipeline: make("clear_grid"),
             build_pipeline: make("build_grid"),
             coarse_pipeline: make("build_coarse"),
@@ -216,6 +205,12 @@ impl LayoutGpu {
             coarse_dim: graph.coarse_dim,
             world_size: graph.world_size,
         }
+    }
+
+    /// Rebind the data bind group to the graph's current buffers. Call after
+    /// `GpuGraph::set_csr` swaps the spring edges (a different edge set).
+    pub fn rebind(&mut self, device: &wgpu::Device, graph: &GpuGraph) {
+        self.data_bg = make_data_bg(device, &self.data_bgl, graph);
     }
 
     /// Push updated physics settings to the GPU (call when the UI changes them).
@@ -290,4 +285,26 @@ pub fn dispatch_dims(total: u64) -> (u32, u32, u32) {
     // y could in theory exceed MAX only past ~4.29e9 workgroups (~1.1e12 nodes),
     // which is beyond any addressable buffer, so 2D suffices here.
     (x as u32, y as u32, 1)
+}
+
+/// Build the layout compute data bind group from a graph's buffers.
+fn make_data_bg(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    graph: &GpuGraph,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("layout_data_bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: graph.positions.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: graph.velocities.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: graph.csr_offsets.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: graph.csr_targets.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: graph.grid_counts.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 5, resource: graph.grid_items.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 6, resource: graph.coarse_com.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 7, resource: graph.coarse_mass.as_entire_binding() },
+        ],
+    })
 }
