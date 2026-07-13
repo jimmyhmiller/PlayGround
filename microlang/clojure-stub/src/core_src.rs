@@ -1401,23 +1401,19 @@ pub const CORE: &str = r##"
                          (-seq-eq (seq q) (seq o)) false))
   IEmptyableCollection (-empty [_] -empty-queue))
 
-;; ─────────────── array-list (cljs's mutable growable array) ───────────────
-;; A tiny mutable buffer (a record wrapping an atom holding a vector) — cljs
-;; library code uses `(array-list)` + `.add`/`.isEmpty`/`.toArray`/`.clear` as a
-;; local mutation optimization (e.g. medley's partition transducers).
-(defn array-list [] (record 'ArrayList (%atom-new [])))
-(defn -al? [al] (%num-eq (type-of al) 'ArrayList))
-(defn -al-add! [al x]
-  (if (-al? al) (do (%atom-set (field al 0) (conj (%atom-get (field al 0)) x)) al)
-      (throw "not a mutable array-list")))
-(defn -al-clear! [al] (do (%atom-set (field al 0) []) al))
-;; remove and return the first element (JS array `.shift`).
-(defn -al-shift! [al]
-  (if (-al? al)
-    (let [v (%atom-get (field al 0))]
-      (%atom-set (field al 0) (vec (rest v)))
-      (first v))
-    (throw "not a mutable array-list")))
+;; ─────────────── mutable growable array (cljs `(array)` / `(array-list)`) ───────────────
+;; A raw `Obj::Vector` (the same substrate PVec builds on), mutated IN PLACE via
+;; the %apush/%ashift/%aclear prims. cljs library code uses this + .add/.push/
+;; .shift/.slice/.toArray/.isEmpty/.clear/.-length as a local mutation optimization
+;; (e.g. medley's partition/window transducers).
+(defn array-list [] (%make-array 0))
+(defn -al-add! [al x] (%apush al x))
+(defn -al-clear! [al] (%aclear al))
+(defn -al-shift! [al] (%ashift al))
+(defn -al-empty? [al] (%num-eq (%alength al) 0))
+;; copy a raw array's contents into a persistent vector (`.toArray`/`.slice`).
+(defn -array->vec [a]
+  (loop [i 0 acc []] (if (%lt i (%alength a)) (recur (%add i 1) (conj acc (%aget a i))) acc)))
 ;; index of item in a sequential coll, or -1 (JS array/`.indexOf` semantics).
 (defn -index-of [coll item]
   (loop [s (seq coll) i 0]

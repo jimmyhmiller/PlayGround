@@ -587,6 +587,9 @@ fn prim_tag(p: Prim) -> u32 {
         StrChars => 63,
         FieldNames => 65,
         MakeRecord => 66,
+        ArrPush => 69,
+        ArrShift => 70,
+        ArrClear => 71,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -672,6 +675,9 @@ fn prim_from_tag(tag: u32) -> Prim {
         63 => StrChars,
         65 => FieldNames,
         66 => MakeRecord,
+        69 => ArrPush,
+        70 => ArrShift,
+        71 => ArrClear,
         64 => Div,
         other => panic!("bad prim tag {other}"),
     }

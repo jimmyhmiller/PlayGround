@@ -1171,9 +1171,9 @@ fn interop_rewrite<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> Option<u64>
     // a deftype instance, resolved through the field-name registry.
     if let Some(field) = hname.strip_prefix(".-") {
         if !field.is_empty() {
-            // `.-length` (a cljs array/collection's element count) -> `(count x)`.
+            // `.-length` (a cljs raw array's element count) -> `(%alength x)`.
             if field == "length" {
-                return Some(call1(rt, "count", items[1]));
+                return Some(call1(rt, "%alength", items[1]));
             }
             let fsym = sym(rt, field);
             let fq = quote_form(rt, fsym);
@@ -1261,11 +1261,11 @@ fn shim_instance<M: ValueModel>(rt: &mut Runtime<M>, method: &str, obj: u64, arg
             rt.vec_to_list(&out)
         }
         "meta" => call1(rt, "-meta", obj),
-        // A handful of host collection methods map cleanly to core fns.
-        "isEmpty" => call1(rt, "empty?", obj),
-        "toArray" => call1(rt, "to-array", obj),
-        "size" | "count" | "length" => call1(rt, "count", obj),
-        // mutable array-list / cljs `(array)`: add/push/shift/clear mutate in place.
+        // Host collection methods on a mutable raw array (cljs `(array)` /
+        // `(array-list)`): these mutate/read the Obj::Vector in place.
+        "isEmpty" => call1(rt, "-al-empty?", obj),
+        "toArray" | "slice" => call1(rt, "-array->vec", obj),
+        "size" | "count" | "length" => call1(rt, "%alength", obj),
         "add" | "push" => {
             let h = sym(rt, "-al-add!");
             let mut out = vec![h, obj];
@@ -1274,7 +1274,6 @@ fn shim_instance<M: ValueModel>(rt: &mut Runtime<M>, method: &str, obj: u64, arg
         }
         "clear" => call1(rt, "-al-clear!", obj),
         "shift" => call1(rt, "-al-shift!", obj),
-        "slice" => call1(rt, "to-array", obj),
         // `.indexOf coll item` -> index of item in coll, or -1.
         "indexOf" => {
             let h = sym(rt, "-index-of");
