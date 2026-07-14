@@ -596,7 +596,6 @@ impl App {
         let selected = opts.select;
         let show_help = opts.show_help;
         let show_labels = opts.show_labels;
-        let node_count = graph.num_nodes();
         let aggregate = opts.aggregate;
         let init_filter = opts
             .filter
@@ -641,8 +640,10 @@ impl App {
             show_hud: true,
             show_labels,
             cached_positions: None,
-            // Auto-enable aggregation for graphs too large to click through.
-            show_density: aggregate || node_count > 2_000_000,
+            // Density LOD is strictly opt-in (--aggregate flag or the UI
+            // checkbox). Never auto-substitute an aggregate view for the real
+            // graph — silent view changes are worse than low fps.
+            show_density: aggregate,
             cursor: glam::Vec2::ZERO,
             dragging: false,
             press_pos: glam::Vec2::ZERO,
