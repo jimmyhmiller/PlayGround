@@ -1134,7 +1134,7 @@ impl App {
                         .text("node size"),
                 );
                 ui.add(
-                    egui::Slider::new(&mut edge_alpha, 0.0..=1.0)
+                    egui::Slider::new(&mut edge_alpha, 0.01..=1.0)
                         .logarithmic(true)
                         .text("edge glow"),
                 );
@@ -2132,14 +2132,11 @@ impl App {
                 log::info!("node size: {:.1} px", self.render_params.base_radius_px);
             }
             KeyCode::BracketLeft => {
-                // Snap to fully-off below the useful range.
-                let v = self.render_params.edge_alpha / 1.4;
-                self.render_params.edge_alpha = if v < 0.005 { 0.0 } else { v };
+                self.render_params.edge_alpha = (self.render_params.edge_alpha / 1.4).max(0.01);
                 self.push_params();
             }
             KeyCode::BracketRight => {
-                let a = self.render_params.edge_alpha;
-                self.render_params.edge_alpha = if a == 0.0 { 0.01 } else { (a * 1.4).min(1.0) };
+                self.render_params.edge_alpha = (self.render_params.edge_alpha * 1.4).min(1.0);
                 self.push_params();
             }
             _ => {}
