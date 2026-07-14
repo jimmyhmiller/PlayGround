@@ -269,8 +269,20 @@ rebootstrap fixpoint, in the established style.
   making it exact per node instead of span-collidable — correct even for macro-generated
   code (demo `metaprog-poc/nofloat_macro.coil` + `sneakymac.coil`: the checker reads the
   inferred type of a node inside a macro expansion). Verified: rebootstrap fixpoint +
-  gates byte-exact. *Foundation: exact resolution (`code-decl` disambiguation) can move
-  onto `nid` next.*
+  gates byte-exact.
+
+  **S0.1 — nid-based EXACT `code-decl` — ✅ SHIPPED.** A **resolution map**
+  (`comptime.coil` `res-map-*`) records each call's resolved callee — `call-node.nid` →
+  fully-qualified callee name — populated at `do-synth` from the already-resolved
+  `ECall.func` (`res-map-record` in `check.coil`). `(code-decl NODE)` tries this first: if
+  `NODE` is a call the checker resolved, it returns that exact function's decl
+  (`cp-find-fn-exact` on the qualified name), unambiguous even when the simple name lives
+  in several modules; otherwise it falls back to the name-based lookup (which still
+  reports `:ambiguous` for a bare cross-module clash). So a checker passes the **call
+  node** (not just the head symbol) for exact answers. Demo: `metaprog-poc/dup_app.coil` —
+  `dupa` and `dupb` both define `probe`; the checker vetoes only the pointer-returning
+  `db/probe` call (name-based lookup would say `:ambiguous` and miss it). Reset per check
+  pass; rebootstrap fixpoint + gates green.
 
 - **S1 — resolution & signature reflection.** Expose `resolve-sym`, `module-of`,
   `def-site`, `fn-sig`, node-context `code-field*/variant*/trait*`. **No

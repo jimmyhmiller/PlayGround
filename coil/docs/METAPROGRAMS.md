@@ -76,13 +76,13 @@ New API this project added (all shipped):
   (rewrites a marker by the wrapped call's real return type) and `dialect.coil`/`tx_test`
   (`inc`→`iadd`).
 - **`(code-decl NODE)` → a declaration record**, read from that authoritative checked
-  program. Given a symbol or a call node it answers WHERE a name is defined and, for a
-  function, its SIGNATURE: `(decl MODULE fn [PARAM-TYPE…] RET)` for a function,
-  `(decl MODULE KIND)` for a struct/sum/trait/const/extern, `:unresolved`, or
-  `:ambiguous`. Cross-module (an imported function resolves to its defining module).
-  Demo: `metaprog-poc/sigcheck*.coil` — a checker that reads each callee's real return
-  type and vetoes calls to pointer-returning functions. (v1: simple/module-qualified
-  names, not alias-qualified; per-expression types are future work.)
+  program. `(decl MODULE fn [PARAM-TYPE…] RET)` for a function, `(decl MODULE KIND)` for
+  a struct/sum/trait/const/extern, `:unresolved`, or `:ambiguous`. **Pass a CALL node and
+  it resolves to the EXACT callee** the checker picked (via node identity), unambiguous
+  even when the simple name lives in several modules; pass a bare symbol and it does a
+  name-based lookup (which reports `:ambiguous` on a cross-module name clash). Demos:
+  `metaprog-poc/sigcheck*.coil` (vetoes pointer-returning calls) and `dup_app.coil` (two
+  modules both defining `probe`; the checker resolves each call to the right one).
 - **`(type-of NODE)` → the expression's inferred type** as `Code` (e.g. `i64`,
   `(ptr i64)`), or `:unknown`. This is the type the real type-checker inferred, not
   syntax — a call `(getf)` reports `f64` because `getf` returns `f64`. Demo:

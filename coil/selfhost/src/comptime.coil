@@ -705,6 +705,37 @@
             (match (type-map-lookup (sx-nid node))
               (None [] (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unknown") -1 -1))))
               (Some [t] (Ok [CtVal Diag] (CCode (ty->sexp a (box-type a t))))))))))))
+; ── S0/S1: the RESOLUTION MAP — call node id → the callee's fully-qualified name,
+; recorded at do-synth once the checker has the resolved ECall. Lets `(code-decl NODE)`
+; on a CALL answer with the EXACT callee (the one resolution actually picked), instead
+; of a name-based lookup that goes `:ambiguous` when the simple name lives in >1 module.
+(defstruct ResMapEntry [(nid i64) (name (slice u8))])
+(defstruct ResMapBox [(init i64) (lst (ptr (ArrayList ResMapEntry)))])
+(defn res-map-box [] (-> (ptr ResMapBox)) (alloc-static ResMapBox))
+(defn res-map-list [] (-> (ptr (ArrayList ResMapEntry)))
+  (let [b (res-map-box)]
+    (if (icmp-eq (load (field b init)) 0)
+        (do (store! (field b lst) (unwrap-ptr [(ArrayList ResMapEntry)] (create [(ArrayList ResMapEntry)] (malloc-allocator))))
+            (store! (load (field b lst)) (al-new [ResMapEntry] (malloc-allocator)))
+            (store! (field b init) 1) 0)
+      0)
+    (load (field b lst))))
+(defn res-map-reset [] (-> i64)
+  (let [_ (res-map-list) b (res-map-box)]
+    (store! (load (field b lst)) (al-new [ResMapEntry] (malloc-allocator))) 0))
+(defn res-map-record [(nid i64) (name (slice u8))] (-> i64)
+  (if (icmp-le nid 0) 0
+    (let [e (alloc-stack ResMapEntry)]
+      (store! (field e nid) nid) (store! (field e name) name)
+      (al-push! (res-map-list) (load e)) 0)))
+(defn res-map-lookup [(nid i64)] (-> (slice u8))
+  (if (icmp-le nid 0) ""
+    (let [lst (res-map-list) n (al-len [ResMapEntry] (load lst)) (mut i) (isub n 1) (mut r) ""]
+      (loop (if (icmp-lt (load i) 0) (break)
+        (do (let [e (al-elem [ResMapEntry] lst (load i))]
+              (if (icmp-eq (load (field e nid)) nid) (do (store! r (load (field e name))) (break)) 0))
+            (store! i (isub (load i) 1)))))
+      (load r))))
 ; The module part of a fully-qualified name `mod.simple` → "mod" (before last dot), else "".
 (defn qual-module-of [(name (slice u8))] (-> (slice u8))
   (let [n (slice-len [u8] name) (mut i) (isub n 1) (mut at) -1]
@@ -807,6 +838,14 @@
       (store! (field r fn) (load first))
       (store! (field r status) (if (icmp-eq (load cnt) 0) 1 (if (icmp-eq (load cnt) 1) 0 2)))
       (load r))))
+; Find a function by its EXACT fully-qualified name (what resolution recorded).
+(defn cp-find-fn-exact [(p (ptr Program)) (qname (slice u8))] (-> (ptr Func))
+  (let [fs (load (field p funcs)) n (al-len [Func] fs) (mut i) 0 (mut r) (cast (ptr Func) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [f (al-elem [Func] fs (load i))]
+            (if (str-eq (load (field f name)) qname) (do (store! r f) (break)) 0))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
 ; A (qualified-name, kind) pair, for the non-function declaration kinds.
 (defstruct NamedKind [(name (slice u8)) (kind (slice u8))])
 (defn nk-push [(dst (ptr (ArrayList NamedKind))) (name (slice u8)) (kind (slice u8))] (-> i64)
@@ -830,6 +869,11 @@
       (Some [nodev]
         (if (not (is-ccode nodev)) (Err [CtVal Diag] (derr "code-decl: expects a Code node"))
           (if (icmp-eq (cast i64 p) 0) (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unresolved") -1 -1)))
+            ; EXACT path first: if this node is a call the checker resolved, use the
+            ; recorded callee (its node id) — no ambiguity, cross-module correct.
+            (let [rqn (res-map-lookup (sx-nid (ccode-of nodev)))
+                  rfn (if (icmp-gt (slice-len [u8] rqn) 0) (cp-find-fn-exact p rqn) (cast (ptr Func) 0))]
+            (if (icmp-ne (cast i64 rfn) 0) (Ok [CtVal Diag] (CCode (fn-decl-record a rfn)))
             (let [nm (decl-node-name (ccode-of nodev))]
               (if (icmp-eq (slice-len [u8] nm) 0) (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unresolved") -1 -1)))
                 (let [simple (decl-simple-name nm) wantmod (decl-qual-module nm) fr (alloc-stack CpFn)]
@@ -847,7 +891,7 @@
                             (store! i (iadd (load i) 1)))))
                       (if (icmp-eq (load cnt) 0) (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unresolved") -1 -1)))
                       (if (icmp-gt (load cnt) 1) (Ok [CtVal Diag] (CCode (mk-sexp (KKw "ambiguous") -1 -1)))
-                          (Ok [CtVal Diag] (CCode (kind-decl-record a (load fm) (load fk))))))))))))))))))
+                          (Ok [CtVal Diag] (CCode (kind-decl-record a (load fm) (load fk))))))))))))))))))))
 (defn ct-sum-find [(cx (ptr CtCtx)) (name (slice u8))] (-> (ptr SumDef))
   (let [lst (load (field cx sums)) n (al-len [SumDef] (load lst)) (mut i) 0 (mut r) (cast (ptr SumDef) 0)]
     (loop (if (icmp-ge (load i) n) (break)

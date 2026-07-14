@@ -21,13 +21,14 @@
 (defn check-node [(f Code)] (-> Code)
   (if (code-list? f)
       (if (icmp-gt (code-count f) 0)
-          (do (let [head (code-nth f 0)]
-                (if (code-sym? head)
-                    (let [d (code-decl head)]
-                      (if (and (is-fn-decl? d) (ret-is-ptr? d))
-                          (do (report f "policy: call targets a function that returns a raw pointer — banned by this dialect") 0)
-                        0))
-                  0))
+          (do (if (code-sym? (code-nth f 0))
+                  ; pass the CALL node itself — code-decl resolves it to the EXACT
+                  ; callee via node identity (unambiguous even across modules).
+                  (let [d (code-decl f)]
+                    (if (and (is-fn-decl? d) (ret-is-ptr? d))
+                        (do (report f "policy: call targets a function that returns a raw pointer — banned by this dialect") 0)
+                      0))
+                0)
               (check-kids f 0 (code-count f)))
         `0)
     `0))

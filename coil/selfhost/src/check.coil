@@ -873,6 +873,9 @@
                ; S2: record this expression's inferred type, keyed by its NODE ID, so a
                ; metaprogram can ask `(type-of NODE)` for any expression's exact type.
                (type-map-record (load (field e nid)) (load (field r t)))
+               ; S1: record a call's RESOLVED callee (qualified name) by node id, so
+               ; `(code-decl NODE)` on the call answers with the exact function.
+               (match-else (load (field e kind)) (ECall [func targs args] (res-map-record (load (field e nid)) func)) (_ 0))
                (Ok (mk-synpair a (box-expr a (load (field r e))) (box-type a (load (field r t)))))))))
 
 (defn expected-some? [(expected (ptr Type))] (-> bool) (icmp-ne (cast i64 expected) 0))
@@ -2344,6 +2347,7 @@
         (Ok (box-al [Func] a (load out))))))
 (defn check-program [(a (ptr Allocator)) (p (ptr Program)) (s (mut LS))] (-> (Result (ptr Program) Diag))
   (type-map-reset)   ; S2: fresh per-expression type map for this check pass
+  (res-map-reset)    ; S1: fresh call→callee resolution map
   (let [impb (unwrap-ptr [(ArrayList ImpEntry)] (create [(ArrayList ImpEntry)] a))
         expb (unwrap-ptr [(ArrayList ExpEntry)] (create [(ArrayList ExpEntry)] a))
         cx (unwrap-ptr [Cx] (create [Cx] a))]

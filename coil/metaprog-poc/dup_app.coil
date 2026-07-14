@@ -1,0 +1,12 @@
+(module app)
+(import "sigcheck.coil" :use *)
+(import "dupa.coil" :as da)
+(import "dupb.coil" :as db)
+(checker check-sigs)
+; Both dupa and dupb define `probe`, so a NAME-based code-decl would say :ambiguous and
+; MISS the policy violation. With node-identity resolution, the checker resolves each
+; call exactly: da/probe → i64 (fine), db/probe → (ptr i64) (banned).
+(defn main [] (-> i64)
+  (let [p (alloc-stack i64)]
+    (store! p 0)
+    (iadd (da/probe) (load (db/probe p)))))
