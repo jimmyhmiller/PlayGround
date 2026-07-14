@@ -904,10 +904,15 @@
       (Some [nodev]
         (if (not (is-ccode nodev)) (Err [CtVal Diag] (derr "code-decl: expects a Code node"))
           (if (icmp-eq (cast i64 p) 0) (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unresolved") -1 -1)))
-            ; EXACT path first: if this node is a reference the checker resolved (call,
-            ; fn-ptr, variant construction, …), use the recorded entity (its node id) —
-            ; no ambiguity, cross-module correct.
-            (let [rqn (res-map-lookup (sx-nid (ccode-of nodev))) rd (alloc-stack CpDecl)]
+            ; EXACT path first: if this node is a reference the checker resolved — an
+            ; expression ref (call, fn-ptr, variant) via its node id, or a TYPE ref via
+            ; its (module, raw-name) → use the recorded qualified name. No ambiguity,
+            ; cross-module correct.
+            (let [node (ccode-of nodev)
+                  rq0 (res-map-lookup (sx-nid node))
+                  rqn (if (icmp-gt (slice-len [u8] rq0) 0) rq0
+                        (type-res-lookup (src-mod-lookup (sx-source node)) (decl-node-name node)))
+                  rd (alloc-stack CpDecl)]
             (store! rd (if (icmp-gt (slice-len [u8] rqn) 0) (cp-find-exact-decl a p rqn) (let [z (alloc-stack CpDecl)] (store! (field z found) false) (load z))))
             (if (load (field rd found)) (Ok [CtVal Diag] (CCode (load (field rd rec))))
             (let [nm (decl-node-name (ccode-of nodev))]

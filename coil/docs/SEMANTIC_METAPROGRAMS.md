@@ -294,9 +294,22 @@ rebootstrap fixpoint, in the established style.
   call, a `fnptr-of`, or a variant construction. Demos: `refpolicy_bad.coil` (bans a
   `fnptr-of` to a pointer-returning function that is never called), `variantcheck_test.coil`
   (a `(Jus 5)` construction resolves to its sum). Const `EVar`s use the name-based path
-  (const names are stored bare, so there is no cross-module ambiguity to disambiguate);
-  named-type references (`(ptr Foo)`) remain name-based (`Type` carries no node id yet).
+  (const names are stored bare, so there is no cross-module ambiguity to disambiguate).
   Rebootstrap fixpoint + gates green.
+
+  **S0.3 — exact NAMED-TYPE references — ✅ SHIPPED.** `Type` is a *sum* (matched all over
+  codegen/mono), so a `nid` field there would ripple across ~140 sites and risk the
+  byte-exact oracle. Instead, resolution is recorded WITHOUT touching `Type`: the resolver
+  records, at `qualify-type`, `(module, raw-name) → qualified-name` for each `TStruct`/`TApp`
+  (`ast.coil` `type-res-*`); `resolve-program` builds a `source-id → module` map
+  (`src-mod-*`). `code-decl` on a type node then resolves it in its own module context —
+  `type-res-lookup(src-mod-lookup(node.source), decl-node-name(node))` → the qualified type,
+  fed through `cp-find-exact-decl`. Authoritative (it is the real resolver's output, so it
+  handles imports/aliases), zero changes to `Type`, and the recording is a pure side effect
+  so all dumps stay byte-exact. Demo: `metaprog-poc/typecheck_test.coil` — `wa` and `wb` both
+  define `Box`; the checker bans only `wb/Box` references, resolving each to the right module.
+  So resolution now covers **every** reference — calls, fn-ptrs, variant constructions, and
+  named types. Rebootstrap fixpoint + gates green.
 
 - **S1 — resolution & signature reflection.** Expose `resolve-sym`, `module-of`,
   `def-site`, `fn-sig`, node-context `code-field*/variant*/trait*`. **No

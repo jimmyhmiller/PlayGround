@@ -327,11 +327,11 @@
         (if (set-contains tps nm) (Ok [i64 Diag] 0)
             (match (resolve c nm 1)
               (Err [d] (Err [i64 Diag] d))
-              (Ok [nn] (do (store! typ (TStruct nn)) (Ok [i64 Diag] 0))))))
+              (Ok [nn] (do (type-res-record (load (field c m)) nm nn) (store! typ (TStruct nn)) (Ok [i64 Diag] 0))))))
       (TApp [nm args]
         (let [r0 (if (set-contains tps nm) (Ok [i64 Diag] 0)
                      (match (resolve c nm 1) (Err [d] (Err [i64 Diag] d))
-                       (Ok [nn] (do (store! typ (TApp nn args)) (Ok [i64 Diag] 0)))))]
+                       (Ok [nn] (do (type-res-record (load (field c m)) nm nn) (store! typ (TApp nn args)) (Ok [i64 Diag] 0)))))]
           (match r0 (Err [d] (Err [i64 Diag] d))
             (Ok [_] (qualify-type-list c args tps)))))
       (TPtr  [inner] (qualify-type c inner tps))
@@ -879,9 +879,13 @@
     (store! impb (load (field s imports)))
     (store! expb (load (field s exports)))
     (store! (field pb items) (al-new [ParsedForm] a))
+    (type-res-reset)   ; fresh type-reference resolution registry for this pass
+    (src-mod-reset)    ; fresh source→module map
     ; pass 0: parse each tagged form into its own Program
     (loop (if (icmp-ge (load fi) nforms) (break)
       (do (let [tfp (alloc-stack TaggedForm)] (store! tfp (al-get [TaggedForm] (load out-forms) (load fi)))
+            ; record which module this source file belongs to (for type-node resolution)
+            (src-mod-record (sx-source (load (field tfp form))) (match (load (field tfp module)) (Some [m] m) (None [] "")))
             (let [single (unwrap-ptr [(ArrayList Sexp)] (create [(ArrayList Sexp)] a)) (mut sl) (al-new [Sexp] a)]
               (al-push! (mut sl) (load (field tfp form)))
               (store! single (load sl))

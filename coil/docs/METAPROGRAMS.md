@@ -84,8 +84,11 @@ New API this project added (all shipped):
   variant constructions** (which resolve to the owning sum). A bare symbol falls back to
   a name-based lookup (which reports `:ambiguous` on a cross-module name clash). Demos:
   `dup_app.coil` (two modules both defining `probe`; each call resolves to the right one),
-  `refpolicy_bad.coil` (a `fnptr-of` to a pointer-returning function, never called), and
-  `variantcheck_test.coil` (a `(Jus 5)` construction resolves to its sum).
+  `refpolicy_bad.coil` (a `fnptr-of` to a pointer-returning function, never called),
+  `variantcheck_test.coil` (a `(Jus 5)` construction resolves to its sum), and
+  `typecheck_test.coil` (a **type reference** `wb/Box` resolves to the right module even
+  though `Box` is defined in both `wa` and `wb`). So calls, fn-ptrs, variants, AND named
+  types all resolve exactly.
 - **`(type-of NODE)` → the expression's inferred type** as `Code` (e.g. `i64`,
   `(ptr i64)`), or `:unknown`. This is the type the real type-checker inferred, not
   syntax — a call `(getf)` reports `f64` because `getf` returns `f64`. Demo:

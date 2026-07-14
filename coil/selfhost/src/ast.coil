@@ -206,6 +206,60 @@
 (defn nid-cell [] (-> (ptr NidCell)) (alloc-static NidCell))
 (defn next-nid [] (-> i64)
   (let [c (nid-cell) v (iadd (load (field c n)) 1)] (store! (field c n) v) v))
+
+; ── TYPE-REFERENCE resolution registry (for exact `(code-decl TYPE-NODE)`) ────
+; Types carry no node id (adding one to the Type sum ripples across every match),
+; so instead the resolver records, at qualify-type, what each `(module, raw type
+; name)` resolves to. A metaprogram then resolves a type node exactly: its raw name
+; (the symbol) + its module (via the source→module map below) → the qualified type.
+(defstruct TypeResEntry [(module (slice u8)) (raw (slice u8)) (qual (slice u8))])
+(defstruct TypeResBox [(init i64) (lst (ptr (ArrayList TypeResEntry)))])
+(defn type-res-box [] (-> (ptr TypeResBox)) (alloc-static TypeResBox))
+(defn type-res-list [] (-> (ptr (ArrayList TypeResEntry)))
+  (let [b (type-res-box)]
+    (if (icmp-eq (load (field b init)) 0)
+        (do (store! (field b lst) (unwrap-ptr [(ArrayList TypeResEntry)] (create [(ArrayList TypeResEntry)] (malloc-allocator))))
+            (store! (load (field b lst)) (al-new [TypeResEntry] (malloc-allocator))) (store! (field b init) 1) 0)
+      0)
+    (load (field b lst))))
+(defn type-res-reset [] (-> i64)
+  (let [_ (type-res-list) b (type-res-box)] (store! (load (field b lst)) (al-new [TypeResEntry] (malloc-allocator))) 0))
+(defn type-res-record [(module (slice u8)) (raw (slice u8)) (qual (slice u8))] (-> i64)
+  (let [e (alloc-stack TypeResEntry)]
+    (store! (field e module) module) (store! (field e raw) raw) (store! (field e qual) qual)
+    (al-push! (type-res-list) (load e)) 0))
+(defn type-res-lookup [(module (slice u8)) (raw (slice u8))] (-> (slice u8))
+  (let [lst (type-res-list) n (al-len [TypeResEntry] (load lst)) (mut i) (isub n 1) (mut r) "" e (alloc-stack TypeResEntry)]
+    (loop (if (icmp-lt (load i) 0) (break)
+      (do (store! e (al-get [TypeResEntry] (load lst) (load i)))
+          (if (and (str-eq (load (field e module)) module) (str-eq (load (field e raw)) raw))
+              (do (store! r (load (field e qual))) (break)) 0)
+          (store! i (isub (load i) 1)))))
+    (load r)))
+; ── source-id → module-name map (so a node's module is known at query time) ───
+(defstruct SrcModEntry [(source i64) (module (slice u8))])
+(defstruct SrcModBox [(init i64) (lst (ptr (ArrayList SrcModEntry)))])
+(defn src-mod-box [] (-> (ptr SrcModBox)) (alloc-static SrcModBox))
+(defn src-mod-list [] (-> (ptr (ArrayList SrcModEntry)))
+  (let [b (src-mod-box)]
+    (if (icmp-eq (load (field b init)) 0)
+        (do (store! (field b lst) (unwrap-ptr [(ArrayList SrcModEntry)] (create [(ArrayList SrcModEntry)] (malloc-allocator))))
+            (store! (load (field b lst)) (al-new [SrcModEntry] (malloc-allocator))) (store! (field b init) 1) 0)
+      0)
+    (load (field b lst))))
+(defn src-mod-reset [] (-> i64)
+  (let [_ (src-mod-list) b (src-mod-box)] (store! (load (field b lst)) (al-new [SrcModEntry] (malloc-allocator))) 0))
+(defn src-mod-record [(source i64) (module (slice u8))] (-> i64)
+  (if (icmp-lt source 0) 0
+    (let [e (alloc-stack SrcModEntry)] (store! (field e source) source) (store! (field e module) module)
+      (al-push! (src-mod-list) (load e)) 0)))
+(defn src-mod-lookup [(source i64)] (-> (slice u8))
+  (let [lst (src-mod-list) n (al-len [SrcModEntry] (load lst)) (mut i) 0 (mut r) "" e (alloc-stack SrcModEntry)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! e (al-get [SrcModEntry] (load lst) (load i)))
+          (if (icmp-eq (load (field e source)) source) (do (store! r (load (field e module))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
 (defn mk-sexp [(kind SexpKind) (lo i64) (hi i64)] (-> Sexp)
   (let [p (alloc-stack Sexp)]
     (store! (field p kind) kind) (store! (field p lo) lo) (store! (field p hi) hi)
