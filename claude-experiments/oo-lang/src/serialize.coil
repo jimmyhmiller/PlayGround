@@ -623,10 +623,18 @@
     (let [hp (cast (ptr InstanceHeader) v) tid (load (field hp type-id)) m (mono-by-id tid) slot (load (field hp slot-index))]
       (if (= (cast i64 m) 0) (jb-cstr b c"null") (emit-ref-id b m slot)))))
 
+; 07-modules.md §7 Phase 3: graph() was left bare/pre-module in Phase 2 (types()/schema() got
+; "module"/"qualified", graph() did not). Two modules can coexist with the SAME bare class name
+; (tests/run/modules_coexist.scry), so the viewer's live nested-containment view needs each
+; instance's owning module + qualified type identity to build correct `<qualified>.at(slot,gen)`
+; eval sources and to group/label cross-module instances — this closes that gap. Purely additive
+; (new trailing keys only; "ref"/"type"/"refs" id format is UNCHANGED, so existing single-module
+; consumers are unaffected byte-for-byte up to these two new keys).
 (defn emit-graph-instance [(b (ptr JBuf)) (m (ptr MonoType)) (hp (ptr InstanceHeader))] (-> i64)
   (let [slot (load (field hp slot-index)) gen (load (field hp generation)) v (cast i64 hp)]
     (jb-cstr b c"{\"ref\":") (emit-ref-id b m slot)
     (jb-cstr b c",\"type\":") (jb-str b (load (field m name)) (load (field m name-len)))
+    (emit-module-qualified-for-mono b m)
     (jb-cstr b c",\"generation\":") (jb-int b gen)
     ; ---- scalars ----
     (jb-cstr b c",\"scalars\":{")
