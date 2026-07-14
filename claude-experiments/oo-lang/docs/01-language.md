@@ -216,12 +216,20 @@ mechanism owned by the runtime, not surfaced in this doc.
 
 ### 1.6 Modules and imports
 
-One file is one module; module path mirrors file path from the project root. No implicit
-global namespace beyond the current module.
+Full design: `07-modules.md` (DECISIONS.md #18). Summary: one file is one module; the
+module name is the dotted file path from the project root **including the file stem**
+(`agents/tools/shell.scry` → `agents.tools.shell`). The `module` header is optional
+checked documentation — if present it must match the derived name. Canonical names are
+qualified (`agents.tools.shell.ShellTool`); within a file, bare names resolve against the
+own module, explicit imports, and the builtins prelude; fully-qualified names work
+everywhere with no import. There is **no visibility** — no public/private, ever; modules
+are addresses and lenses (UI focus contexts), never fences. Imports are pure name-scoping;
+**no wildcard imports, ever**; cycles are legal (whole-program compilation, imports
+execute nothing).
 
 ```
 // file: agents/tools/shell.scry
-module agents.tools
+module agents.tools.shell   // optional; must match the path if present
 
 class ShellTool {
   command: String
@@ -231,11 +239,13 @@ class ShellTool {
 
 ```
 // file: main.scry
-import std.collections.{List, Map}
-import agents.tools.{ShellTool, SearchTool}
-import agents.tools.ShellTool as Shell
+import agents.tools.shell.{ShellTool}
+import agents.tools.search.SearchTool as Finder
 
-fn main() { ... }
+fn main() {
+  let t = ShellTool(command: "ls")
+  let s = agents.tools.search.SearchTool(root: ".")   // fully-qualified, no import needed
+}
 ```
 
 ### 1.7 Singleton objects

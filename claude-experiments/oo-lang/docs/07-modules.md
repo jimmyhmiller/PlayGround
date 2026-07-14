@@ -1,8 +1,9 @@
 # Scry — Module System Design
 
-**Status: PROPOSED (2026-07-13). Nothing here is pinned until it lands in DECISIONS.md.**
-Supersedes `01-language.md` §1.6 (which sketched the same direction but was never
-implemented and contains one inconsistency, noted in §2 below).
+**Status: RATIFIED (Jimmy ruling, 2026-07-13) — pinned as DECISIONS.md #18.**
+Wildcard imports are ruled out permanently (not open). Supersedes `01-language.md` §1.6
+(which sketched the same direction but was never implemented and contained one
+inconsistency, fixed there now).
 
 ## 0. Why modules, and why they look different in Scry
 
@@ -135,9 +136,10 @@ import agents.tools.search.SearchTool as Finder
 - **Cycles are legal.** `a` importing `b` importing `a` is fine: both files join the same
   whole-program closure and typecheck together. There is no initialization order to
   corrupt. The loader's existing dedup already terminates the recursion.
-- **No wildcard import** (`import m.*`): OPEN, leaning no. Explicit lists keep a file's
-  context legible — you can read the top of a file and know its vocabulary — and the
-  compiler's "add this import" errors plus qualified names remove most of the annoyance.
+- **No wildcard import** (`import m.*`): DECIDED, no — Jimmy ruling, permanent. Explicit
+  lists keep a file's context legible — you can read the top of a file and know its
+  vocabulary — and the compiler's "add this import" errors plus qualified names remove
+  most of the annoyance. The parser should reject `.*` with a message saying so.
 - **No whole-module import** (`import agents.tools.shell` then `shell.ShellTool`): OPEN,
   leaning no for the PoC. Fully-qualified names already cover the "I don't want to list
   everything" case; a second, abbreviated qualification form adds resolution rules for
@@ -227,7 +229,7 @@ Each phase lands green on the full suite before the next starts.
 
 ## 10. Open questions (flagged, not decided)
 
-- Wildcard import `import m.*` — lean **no** (§5).
+- ~~Wildcard import `import m.*`~~ — **DECIDED no, permanently** (Jimmy ruling 2026-07-13).
 - Whole-module import enabling short-qualified `shell.ShellTool` — lean **no** for PoC (§5).
 - Re-exports — lean **never**: with no visibility there is nothing to re-export; a name is
   always importable from where it lives. Listed only so nobody adds it by reflex.

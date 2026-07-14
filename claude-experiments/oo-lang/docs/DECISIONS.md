@@ -130,6 +130,27 @@ The raw project brief is in `../claude.md` — read it first; this file pins wha
     Build AFTER the in-map inspector (action buttons live there). Global (non-`for`) app-level
     actions are a possible later extension; start with `for <Type>`.
 
+18. **Module system — modules are addresses and lenses, NEVER fences** (Jimmy ruling,
+    2026-07-13; full design `07-modules.md`, which supersedes `01-language.md` §1.6).
+    One file = one module; module name = dotted file path from project root including the
+    file stem (`agents/tools/shell.scry` → `agents.tools.shell`); the `module` header is
+    optional checked documentation (mismatch = typecheck error). Canonical names are
+    qualified (`agents.tools.shell.ShellTool`) in the mono table, arenas, reflection JSON,
+    and live redefinition; bare names resolve within the own module, imports, and builtins
+    prelude; fully-qualified references work everywhere with no import. **No visibility of
+    any kind** — no public/private/export lists, no conventions with semantics — a pinned
+    anti-decision like no-inheritance (hiding fights the observability thesis). Imports
+    are pure name-scoping (`import a.b.c.{X, Y}`, `as` aliasing); **no wildcard import,
+    ever** (Jimmy ruling, explicit); cycles legal (whole-program compilation unchanged;
+    imports execute nothing). Roots: nearest `scry.toml` ancestor else entry-file dir,
+    plus a std root for `std.*` (kills the committed symlinks). Live eval: an optional
+    `module a.b.c` source-header prefix sets resolution/redefinition context — the wire op
+    stays `{id, source}`. Viewer: modules are the outermost containment ring and the unit
+    of **focus mode** (URL-addressable scoping of census/map/search/functions);
+    cross-module refs reuse the identity-color chip treatment; `view`/`action` follow the
+    type, not the declaring module. Build order: compiler namespacing → reflection + eval
+    context → viewer focus, each landing green on the full suite.
+
 ## Open (docs should propose, flag as OPEN, not silently decide)
 
 - ~~**How the viewer's eval channel interleaves with running threads**~~ **[RESOLVED
@@ -151,3 +172,4 @@ The raw project brief is in `../claude.md` — read it first; this file pins wha
 - `03-live-semantics.md` — redefinition semantics in a running statically-typed system
 - `04-viewer.md` — viewer UX + runtime↔viewer wire protocol
 - `05-milestones.md` — PoC scope, demo script, cut lines
+- `07-modules.md` — module system: identity, resolution, live semantics, viewer focus
