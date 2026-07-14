@@ -35,10 +35,12 @@ pub struct GpuGraph {
     pub grid_cap: u32,
     pub world_size: f32,
 
-    /// Coarse center-of-mass grid for far-field repulsion.
-    pub coarse_com: wgpu::Buffer,
-    pub coarse_mass: wgpu::Buffer,
-    pub coarse_dim: u32,
+    /// Center-of-mass pyramid for far-field repulsion: level 0 mirrors the fine
+    /// grid, each level above halves the dimension (power-of-two aligned), down
+    /// to 4x4. Levels are packed contiguously; `pyr_levels` holds (offset, dim).
+    pub pyr_com: wgpu::Buffer,
+    pub pyr_mass: wgpu::Buffer,
+    pub pyr_levels: Vec<(u32, u32)>,
 }
 
 impl GpuGraph {
@@ -117,10 +119,11 @@ impl GpuGraph {
         // Aim for a cell roughly the size of the optimal edge length k, with the
         // world sized to hold the natural spread (~k*sqrt(n)). Cap the dimension
         // so grid memory stays bounded for huge graphs (accuracy degrades softly
-        // via the per-cell capacity clamp).
+        // via the per-cell capacity clamp). Rounded to a power of two so the
+        // far-field COM pyramid's parent/child cells align exactly (2:1).
         let world_size = (k * (num_nodes.max(1) as f32).sqrt() * 1.6).max(k * 4.0);
         let ideal_dim = (world_size / k).ceil() as u32;
-        let grid_dim = ideal_dim.clamp(4, 2048);
+        let grid_dim = ideal_dim.next_power_of_two().clamp(4, 2048);
         let grid_cap = 32u32;
         let num_cells = (grid_dim as u64) * (grid_dim as u64);
 
@@ -137,27 +140,37 @@ impl GpuGraph {
             mapped_at_creation: false,
         });
 
-        // Coarse grid for far-field: kept small so the per-node far-field loop
-        // (coarse_dim^2 iterations) stays cheap, but large enough that a coarse
-        // cell is only a few fine cells wide.
-        let coarse_dim = grid_dim.min(64).max(1);
-        let ncoarse = (coarse_dim as u64) * (coarse_dim as u64);
-        let coarse_com = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("coarse_com"),
-            size: ncoarse * 8, // vec2<f32>
+        // Far-field COM pyramid: level 0 mirrors the fine grid, then halve down
+        // to 4x4. The forces pass walks ~27 cells per level (fast-multipole
+        // interaction lists) instead of scanning one big coarse grid.
+        let mut pyr_levels: Vec<(u32, u32)> = Vec::new();
+        let mut off = 0u32;
+        let mut d = grid_dim;
+        loop {
+            pyr_levels.push((off, d));
+            off += d * d;
+            if d <= 4 {
+                break;
+            }
+            d /= 2;
+        }
+        let pyr_cells = off as u64;
+        let pyr_com = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pyr_com"),
+            size: pyr_cells * 8, // vec2<f32>
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let coarse_mass = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("coarse_mass"),
-            size: ncoarse * 4, // f32
+        let pyr_mass = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pyr_mass"),
+            size: pyr_cells * 4, // f32
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         log::info!(
-            "GpuGraph: {} nodes, {} edges, grid {}x{} cap {}, coarse {}x{} (world {:.0})",
-            num_nodes, num_edges, grid_dim, grid_dim, grid_cap, coarse_dim, coarse_dim, world_size
+            "GpuGraph: {} nodes, {} edges, grid {}x{} cap {}, pyramid {} levels / {} cells (world {:.0})",
+            num_nodes, num_edges, grid_dim, grid_dim, grid_cap, pyr_levels.len(), pyr_cells, world_size
         );
 
         GpuGraph {
@@ -175,9 +188,9 @@ impl GpuGraph {
             grid_dim,
             grid_cap,
             world_size,
-            coarse_com,
-            coarse_mass,
-            coarse_dim,
+            pyr_com,
+            pyr_mass,
+            pyr_levels,
         }
     }
 

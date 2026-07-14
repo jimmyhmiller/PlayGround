@@ -1141,10 +1141,10 @@ impl App {
                     if let Some((done, total)) = accum_progress {
                         if total > edges_per_frame as u64 {
                             let txt = if done >= total {
-                                format!("all {} edges drawn", commafy(total))
+                                format!("all {} edges current", commafy(total))
                             } else {
                                 format!(
-                                    "accumulating: {} of {} edges",
+                                    "refreshing: {} of {} edges",
                                     commafy(done),
                                     commafy(total)
                                 )
@@ -1385,15 +1385,22 @@ impl App {
             live.density.update(&live.gpu.queue, &cam_uniform, vw, vh);
         }
 
-        // Restart edge accumulation when the picture it depicts changed this
-        // frame: simulation stepped, camera moved, colors/filter/style changed.
+        // Decide how edge accumulation restarts this frame. Scene changes
+        // (colors/filter/style) drop the displayed image; camera motion only
+        // restarts the in-flight generation (the front is reprojected); sim
+        // stepping keeps generations flowing without dropping anything.
         let cam_moved = self
             .last_cam
             .map_or(true, |c| bytemuck::bytes_of(&c) != bytemuck::bytes_of(&cam_uniform));
-        let invalidate_edges = self.edges_dirty
-            || stepped
-            || cam_moved
-            || self.render_params.edge_alpha != self.last_edge_alpha;
+        let invalidate_edges = if self.edges_dirty
+            || self.render_params.edge_alpha != self.last_edge_alpha
+        {
+            crate::render::EdgeInvalidate::Hard
+        } else if cam_moved {
+            crate::render::EdgeInvalidate::Camera
+        } else {
+            crate::render::EdgeInvalidate::Nothing
+        };
         self.edges_dirty = false;
         self.last_cam = Some(cam_uniform);
         self.last_edge_alpha = self.render_params.edge_alpha;
@@ -1424,7 +1431,9 @@ impl App {
                 &mut enc,
                 live.gpu.size.width,
                 live.gpu.size.height,
+                &cam_uniform,
                 invalidate_edges,
+                stepped,
             );
         }
         {
@@ -1832,13 +1841,30 @@ impl App {
             live.density.record_compute(&mut enc);
         } else {
             // Captures are exact: restart accumulation under the capture camera
-            // and drive it to convergence (every edge) before compositing.
-            live.renderer.accumulate_edges(&live.gpu.device, &live.gpu.queue, &mut enc, w, h, true);
-            while !live.renderer.edge_accum_converged() {
-                live.renderer
-                    .accumulate_edges(&live.gpu.device, &live.gpu.queue, &mut enc, w, h, false);
+            // and drive a full generation (every edge) before compositing.
+            let cam = self.camera.uniform();
+            live.renderer.accumulate_edges(
+                &live.gpu.device,
+                &live.gpu.queue,
+                &mut enc,
+                w,
+                h,
+                &cam,
+                crate::render::EdgeInvalidate::Hard,
+                false,
+            );
+            while !live.renderer.edge_front_ready() {
+                live.renderer.accumulate_edges(
+                    &live.gpu.device,
+                    &live.gpu.queue,
+                    &mut enc,
+                    w,
+                    h,
+                    &cam,
+                    crate::render::EdgeInvalidate::Nothing,
+                    false,
+                );
             }
-            self.edges_dirty = true; // live view resumes with its own restart
         }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
