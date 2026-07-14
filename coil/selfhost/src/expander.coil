@@ -443,16 +443,18 @@
     (match (load errf)
       (Some [d] (Err [i64 Diag] d))
       (None []
+        (do (build-decl-index (field result items))  ; S1 semantic index for (code-decl …) in transformers
         (match (run-transformers (mut transformers) checked (field result items) allfns gs gu impb expb a)
           (Err [d] (Err [i64 Diag] d))
           (Ok [tforms]
             (do (store! (field s out) (load tforms))
+                (build-decl-index tforms)             ; rebuild over the (possibly rewritten) program for checkers
                 (match (run-checkers (mut checkers) checked tforms allfns gs gu impb expb a)
                   (Some [d] (Err [i64 Diag] d))
                   (None [] (do (drain-warnings (mut s))
                                (if (icmp-gt (diag-errs) 0)
                                    (Err [i64 Diag] (derr "compilation failed: checker reported error(s) above"))
-                                 (Ok [i64 Diag] 0))))))))))))
+                                 (Ok [i64 Diag] 0)))))))))))))
 (defn do-produced [(outf (ptr Sexp)) (module (Option (slice u8))) (result (ptr SBoxTF)) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum)) (allfns (ptr SBox)) (a (ptr Allocator)) (errf (mut (Option Diag)))] (-> i64)
   (let [(mut produced) (al-new [Sexp] a)]
     (if (and (icmp-eq (sx-tag (load outf)) 6)

@@ -560,6 +560,7 @@
     (if (str-eq head "warn") (if (icmp-ne nargs 2) (Err [ExprKind Diag] (derr-at slo shi "warn: expects (warn NODE MSG)")) (Ok (ECodeOp 32 (try! (parse-exprs a args)))))
     (if (str-eq head "code-file") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "code-file: expects (code-file NODE)")) (Ok (ECodeOp 33 (try! (parse-exprs a args)))))
     (if (str-eq head "code-from-user?") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "code-from-user?: expects (code-from-user? NODE)")) (Ok (ECodeOp 34 (try! (parse-exprs a args)))))
+    (if (str-eq head "code-decl") (if (icmp-ne nargs 1) (Err [ExprKind Diag] (derr-at slo shi "code-decl: expects (code-decl NODE)")) (Ok (ECodeOp 35 (try! (parse-exprs a args)))))
     (if (icmp-ge (codeop-of head) 0) (Ok (ECodeOp (codeop-of head) (try! (parse-exprs a args))))
     (if (str-eq head "loop")
         (let [lr (alloc-stack LabelSplit)] (store! lr (split-label a args))
@@ -577,7 +578,7 @@
       (let [fv (sx-get args 0)]
         (if (opt-is-vec fv)
             (Ok (ECall head (try! (parse-types a (sx-items (opt-get fv)))) (try! (parse-exprs a (rest-from a args 1)))))
-            (Ok (ECall head (box-al [Type] a (al-new [Type] a)) (try! (parse-exprs a args)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+            (Ok (ECall head (box-al [Type] a (al-new [Type] a)) (try! (parse-exprs a args))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
 )
 ; ---- declaration parsers (src/parse.rs) ----
 (defn func-name [(f Func)] (-> (slice u8)) (let [p (alloc-stack Func)] (store! p f) (load (field p name))))

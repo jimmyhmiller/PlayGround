@@ -645,6 +645,174 @@
         (if (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst)))) ""
           (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) sid)) (load (field sp name))))))))
 (defn target-arch-str [] (-> (slice u8)) "aarch64")
+
+; ── S1 semantic layer: a program-wide DECLARATION INDEX for `(code-decl NODE)`.
+; Built (build-decl-index) before checkers/transformers run, from the whole
+; post-expansion program. It lets a metaprogram ask, for any name it sees, WHERE
+; that name is defined (which module) and — for a function — its SIGNATURE. This
+; is the first piece of "fully semantic" metaprogramming: syntax → meaning, with
+; no typechecking of bodies and no pipeline reordering (see docs/SEMANTIC_METAPROGRAMS.md).
+(defstruct DeclEntry [(name (slice u8)) (module (slice u8)) (kind (slice u8)) (form Sexp)])
+(defstruct DeclBox [(init i64) (lst (ptr (ArrayList DeclEntry)))])
+(defn decl-box [] (-> (ptr DeclBox)) (alloc-static DeclBox))
+(defn decl-list [] (-> (ptr (ArrayList DeclEntry)))
+  (let [b (decl-box)]
+    (if (icmp-eq (load (field b init)) 0)
+        (do (store! (field b lst) (unwrap-ptr [(ArrayList DeclEntry)] (create [(ArrayList DeclEntry)] (malloc-allocator))))
+            (store! (load (field b lst)) (al-new [DeclEntry] (malloc-allocator)))
+            (store! (field b init) 1) 0)
+      0)
+    (load (field b lst))))
+(defn decl-reset [] (-> i64)
+  (let [_ (decl-list) b (decl-box)]
+    (store! (load (field b lst)) (al-new [DeclEntry] (malloc-allocator))) 0))
+(defn decl-add [(name (slice u8)) (module (slice u8)) (kind (slice u8)) (form Sexp)] (-> i64)
+  (let [e (alloc-stack DeclEntry)]
+    (store! (field e name) name) (store! (field e module) module)
+    (store! (field e kind) kind) (store! (field e form) form)
+    (al-push! (decl-list) (load e)) 0))
+; The declaration kind a top-level head introduces ("" = not a definition we index).
+(defn decl-kind-of [(h (slice u8))] (-> (slice u8))
+  (if (str-eq h "defn") "fn"
+  (if (str-eq h "defstruct") "struct"
+  (if (str-eq h "defsum") "sum"
+  (if (str-eq h "deftrait") "trait"
+  (if (str-eq h "const") "const"
+  (if (str-eq h "extern") "extern" "")))))))
+; Build the index from a post-expansion tagged-form list (one call before each of
+; the transformer / checker passes, so it reflects the program those passes see).
+(defn build-decl-index [(forms (ptr (ArrayList TaggedForm)))] (-> i64)
+  (decl-reset)
+  (let [n (al-len [TaggedForm] (load forms)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [tf (al-elem [TaggedForm] forms (load i))
+                f (load (field tf form))
+                m (match (load (field tf module)) (Some [s] s) (None [] ""))]
+            (if (icmp-eq (sx-tag f) 6)
+                (let [it (sx-items f)]
+                  (if (icmp-ge (sx-len it) 2)
+                      (let [h (sx-at it 0) nm (sx-at it 1)]
+                        (if (and (icmp-eq (sx-tag h) 2) (icmp-eq (sx-tag nm) 2))
+                            (let [kind (decl-kind-of (sx-sval h))]
+                              (if (icmp-ge (slice-len [u8] kind) 1) (decl-add (sx-sval nm) m kind f) 0))
+                          0))
+                    0))
+              0))
+          (store! i (iadd (load i) 1)))))
+    0))
+; The simple (module-stripped, alias-stripped) name a query symbol refers to.
+(defn decl-simple-name [(q (slice u8))] (-> (slice u8))
+  (let [sl (find-slash q)]
+    (after-last-dot (if (icmp-ge sl 0) (subslice [u8] q (iadd sl 1) (slice-len [u8] q)) q))))
+; If the query was module-qualified (`mod.name`, no alias slash), the module part.
+(defn decl-qual-module [(q (slice u8))] (-> (slice u8))
+  (if (icmp-ge (find-slash q) 0) ""
+    (let [n (slice-len [u8] q) (mut i) (isub n 1) (mut at) -1]
+      (loop (if (icmp-lt (load i) 0) (break)
+        (do (if (icmp-eq (cast i64 (slice-get q (load i))) 46) (do (store! at (load i)) (break)) 0)
+            (store! i (isub (load i) 1)))))
+      (if (icmp-lt (load at) 0) "" (subslice [u8] q 0 (load at))))))
+; status: 0 found (idx set), 1 none, 2 ambiguous (defined in >1 module).
+(defstruct DeclFind [(status i64) (idx i64)])
+(defn decl-find [(q (slice u8))] (-> DeclFind)
+  (let [simple (decl-simple-name q) wantmod (decl-qual-module q)
+        lst (decl-list) n (al-len [DeclEntry] (load lst))
+        (mut i) 0 (mut found) -1 (mut cnt) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [e (al-elem [DeclEntry] lst (load i))]
+            (if (and (str-eq (load (field e name)) simple)
+                     (or (icmp-eq (slice-len [u8] wantmod) 0) (str-eq (load (field e module)) wantmod)))
+                (do (if (icmp-eq (load found) -1) (store! found (load i)) 0)
+                    (store! cnt (iadd (load cnt) 1)) 0)
+              0))
+          (store! i (iadd (load i) 1)))))
+    (let [r (alloc-stack DeclFind)]
+      (if (icmp-eq (load cnt) 0) (do (store! (field r status) 1) (store! (field r idx) -1) 0)
+      (if (icmp-eq (load cnt) 1) (do (store! (field r status) 0) (store! (field r idx) (load found)) 0)
+          (do (store! (field r status) 2) (store! (field r idx) -1) 0)))
+      (load r))))
+; The symbol a Code node names: a bare symbol is itself; a call/list uses its head.
+(defn decl-node-name [(node Sexp)] (-> (slice u8))
+  (if (icmp-eq (sx-tag node) 2) (sx-sval node)
+  (if (icmp-eq (sx-tag node) 6)
+      (let [it (sx-items node)]
+        (if (icmp-ge (sx-len it) 1) (let [h (sx-at it 0)] (if (icmp-eq (sx-tag h) 2) (sx-sval h) "")) ""))
+    "")))
+; Reconstruct a Type as Code (the inverse of parse-type); mirrors ty-str's spelling.
+(defn ty-list2 [(a (ptr Allocator)) (head (slice u8)) (x Sexp)] (-> Sexp)
+  (let [(mut it) (al-new [Sexp] a)] (al-push! (mut it) (sx-sym head)) (al-push! (mut it) x)
+    (mk-sexp (KList (box-al [Sexp] a (load it))) -1 -1)))
+(defn ty-list3 [(a (ptr Allocator)) (head (slice u8)) (x Sexp) (y Sexp)] (-> Sexp)
+  (let [(mut it) (al-new [Sexp] a)] (al-push! (mut it) (sx-sym head)) (al-push! (mut it) x) (al-push! (mut it) y)
+    (mk-sexp (KList (box-al [Sexp] a (load it))) -1 -1)))
+(defn ty-app-sexp [(a (ptr Allocator)) (t (ptr Type))] (-> Sexp)
+  (let [(mut it) (al-new [Sexp] a) args (t-fn-params t) n (al-len [Type] (load args)) (mut i) 0]
+    (al-push! (mut it) (sx-sym (t-app-name t)))
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut it) (ty->sexp a (al-elem [Type] args (load i)))) (store! i (iadd (load i) 1)))))
+    (mk-sexp (KList (box-al [Sexp] a (load it))) -1 -1)))
+(defn ty-fn-sexp [(a (ptr Allocator)) (t (ptr Type))] (-> Sexp)
+  (let [(mut it) (al-new [Sexp] a) ps (t-fn-params t) n (al-len [Type] (load ps)) (mut i) 0
+        (mut pv) (al-new [Sexp] a)]
+    (al-push! (mut it) (sx-sym "fnptr"))
+    (al-push! (mut it) (sx-sym (t-fn-cc t)))
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut pv) (ty->sexp a (al-elem [Type] ps (load i)))) (store! i (iadd (load i) 1)))))
+    (al-push! (mut it) (mk-sexp (KVec (box-al [Sexp] a (load pv)) ) -1 -1))
+    (al-push! (mut it) (ty->sexp a (t-fn-ret t)))
+    (mk-sexp (KList (box-al [Sexp] a (load it))) -1 -1)))
+(defn ty->sexp [(a (ptr Allocator)) (t (ptr Type))] (-> Sexp)
+  (let [tg (type-tag t)]
+    (if (icmp-eq tg 0) (sx-sym (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t))))
+    (if (icmp-eq tg 1) (sx-sym (sconcat a "f" (i64->str a (t-int-bits t))))
+    (if (icmp-eq tg 2) (sx-sym "bool")
+    (if (icmp-eq tg 3) (sx-sym "void")
+    (if (icmp-eq tg 4) (ty-list2 a "ptr" (ty->sexp a (t-inner t)))
+    (if (icmp-eq tg 5) (ty-list2 a (if (t-ref-mut t) "mut" "ref") (ty->sexp a (t-inner t)))
+    (if (icmp-eq tg 6) (sx-sym (type-struct-name t))
+    (if (icmp-eq tg 7) (ty-list3 a "array" (ty->sexp a (t-inner t)) (sx-mkint (t-arrn t)))
+    (if (icmp-eq tg 8) (ty-list2 a "slice" (ty->sexp a (t-inner t)))
+    (if (icmp-eq tg 9) (ty-list3 a "vec" (ty->sexp a (t-inner t)) (sx-mkint (t-arrn t)))
+    (if (icmp-eq tg 12) (sx-sym "!")
+    (if (icmp-eq tg 13) (sx-sym "code")
+    (if (icmp-eq tg 14) (sx-sym "externref")
+    (if (icmp-eq tg 11) (ty-app-sexp a t)
+    (if (icmp-eq tg 10) (ty-fn-sexp a t)
+      (sx-sym "?"))))))))))))))))))
+; The params-vector `[T…]` of a function's signature, as Code.
+(defn fn-params-vec [(a (ptr Allocator)) (fp (ptr Func))] (-> Sexp)
+  (let [ps (load (field fp params)) n (al-len [Param] (load ps)) (mut items) (al-new [Sexp] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut items) (ty->sexp a (field (al-elem [Param] ps (load i)) ty)))
+          (store! i (iadd (load i) 1)))))
+    (mk-sexp (KVec (box-al [Sexp] a (load items))) -1 -1)))
+; Build the `(decl MODULE KIND …)` Code record for a found declaration. For a
+; function the record carries `[param-types] ret-type` (real, walkable Code).
+(defn decl-record [(a (ptr Allocator)) (e (ptr DeclEntry))] (-> Sexp)
+  (let [(mut items) (al-new [Sexp] a)]
+    (al-push! (mut items) (sx-sym "decl"))
+    (al-push! (mut items) (sx-sym (load (field e module))))
+    (al-push! (mut items) (sx-sym (load (field e kind))))
+    (if (str-eq (load (field e kind)) "fn")
+        (match (parse-defn a (rest-from a (sx-items (load (field e form))) 1))
+          (Ok [fn0] (let [fp (alloc-stack Func)] (store! fp fn0)
+                      (al-push! (mut items) (fn-params-vec a fp))
+                      (al-push! (mut items) (ty->sexp a (field fp ret))) 0))
+          (Err [_] 0))
+      0)
+    (mk-sexp (KList (box-al [Sexp] a (load items))) -1 -1)))
+(defn cop-decl [(args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))]
+    (match (cv-get args 0)
+      (None [] (Err [CtVal Diag] (derr "code-decl: expects (code-decl NODE)")))
+      (Some [nodev]
+        (if (not (is-ccode nodev)) (Err [CtVal Diag] (derr "code-decl: expects a Code node"))
+          (let [nm (decl-node-name (ccode-of nodev))]
+            (if (icmp-eq (slice-len [u8] nm) 0) (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unresolved") -1 -1)))
+              (let [fnd (alloc-stack DeclFind)] (store! fnd (decl-find nm))
+                (if (icmp-eq (load (field fnd status)) 1) (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unresolved") -1 -1)))
+                (if (icmp-eq (load (field fnd status)) 2) (Ok [CtVal Diag] (CCode (mk-sexp (KKw "ambiguous") -1 -1)))
+                    (Ok [CtVal Diag] (CCode (decl-record a (al-elem [DeclEntry] (decl-list) (load (field fnd idx))))))))))))))))
 (defn ct-sum-find [(cx (ptr CtCtx)) (name (slice u8))] (-> (ptr SumDef))
   (let [lst (load (field cx sums)) n (al-len [SumDef] (load lst)) (mut i) 0 (mut r) (cast (ptr SumDef) 0)]
     (loop (if (icmp-ge (load i) n) (break)
@@ -1063,7 +1231,8 @@
     (if (or (icmp-eq op 22) (or (icmp-eq op 23) (or (icmp-eq op 24) (or (icmp-eq op 25) (or (icmp-eq op 26) (icmp-eq op 27)))))) (cop-trait op args cx)
     (if (icmp-eq op 28) (cop-strbytes args cx)
     (if (icmp-eq op 29) (cop-bytestostr args cx)
-        (cop-codearg op args cx))))))))))))))))
+    (if (icmp-eq op 35) (cop-decl args cx)
+        (cop-codearg op args cx)))))))))))))))))
 (defn module-fns-has [(cx (ptr CtCtx)) (q (slice u8))] (-> bool)
   (let [lst (load (field cx module_fns)) n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut r) false]
     (loop (if (or (load r) (icmp-ge (load i) n)) (break)

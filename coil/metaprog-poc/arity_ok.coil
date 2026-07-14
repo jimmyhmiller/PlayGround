@@ -1,0 +1,9 @@
+(module app)
+(import "arity.coil" :use *)
+(checker check-arity)
+
+(defn add [(x i64) (y i64)] (-> i64) (iadd x y))
+(defn twice [(n i64)] (-> i64) (add n n))
+
+(defn main [] (-> i64)
+  (isub (add (twice 21) 0) 42))   ; add/2 and twice/1 called correctly → 42-42 = 0
