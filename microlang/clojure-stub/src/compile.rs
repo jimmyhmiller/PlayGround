@@ -144,6 +144,10 @@ impl Compiler {
             // Byte-level string conversions (UTF-8, signed JVM-style bytes) — the
             // substrate wire protocols (bencode/nREPL) are written on.
             ("%str->bytes", StrToBytes), ("%bytes->str", BytesToStr),
+            // TCP sockets (blocking; used from real threads) — java.net models these.
+            ("%tcp-listen", TcpListen), ("%tcp-accept", TcpAccept),
+            ("%tcp-read", TcpRead), ("%tcp-write", TcpWrite),
+            ("%tcp-close", TcpClose), ("%tcp-local-port", TcpLocalPort),
             // Existing low-level prims surfaced for the string library (char codes
             // for case mapping, raw length) — not new primitives.
             ("%char-code", CharToInt), ("%char-of", IntToChar), ("%str-len", StrLen),

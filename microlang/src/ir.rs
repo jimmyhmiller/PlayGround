@@ -249,6 +249,22 @@ pub enum Prim {
     /// `(%bytes->str arr)` -> the string for an array of signed byte ints
     /// (UTF-8, invalid sequences replaced — java.lang.String's behavior).
     BytesToStr,
+    /// `(%tcp-listen port)` -> a listener handle (int). Binds 127.0.0.1:port
+    /// (port 0 picks a free port; read it back with `%tcp-local-port`).
+    TcpListen,
+    /// `(%tcp-accept lh)` -> a connected-stream handle. BLOCKS; safe from any
+    /// spawned thread (I/O happens outside the handle-registry lock).
+    TcpAccept,
+    /// `(%tcp-read h)` -> the next byte (unsigned 0..=255), or -1 at EOF /
+    /// on a closed or errored connection. BLOCKS.
+    TcpRead,
+    /// `(%tcp-write h arr)` -> write an array of signed byte ints, flushing.
+    /// Returns nil; throws (catchably, via panic) on a broken connection.
+    TcpWrite,
+    /// `(%tcp-close h)` -> close + drop a listener or stream handle. nil.
+    TcpClose,
+    /// `(%tcp-local-port h)` -> the local port a listener is bound to.
+    TcpLocalPort,
 
     // ── optimizer-introduced fixnum specializations ──────────────────────────
     // These are produced ONLY by the `optimize` nanopass (never by `analyze`).

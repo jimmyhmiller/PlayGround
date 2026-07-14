@@ -249,10 +249,19 @@ extern "C" fn shim_let_exit<M: ValueModel>(ctx: *mut JitCtx<M>, _unused: u32) ->
 
 extern "C" fn shim_load_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32) -> u64 {
     let ctx = unsafe { &*ctx };
-    let rt = unsafe { &*(*ctx.rc).rt };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
     match rt.global(sym as Sym) {
         Some(v) => v,
-        None => panic!("Unable to resolve symbol: {}", rt.sym_name(sym as Sym)),
+        None => {
+            // Catchable, as on the tree-walk tier: signal a throw and yield nil
+            // (the signal is observed at the next check point / try frame).
+            let id = rt.alloc(Obj::Str(format!(
+                "Unable to resolve symbol: {}",
+                rt.sym_name(sym as Sym)
+            )));
+            rt.signal_throw(M::R::enc_ref(id));
+            M::R::enc_nil()
+        }
     }
 }
 
@@ -607,6 +616,12 @@ fn prim_tag(p: Prim) -> u32 {
         ToLong => 78,
         StrToBytes => 79,
         BytesToStr => 80,
+        TcpListen => 81,
+        TcpAccept => 82,
+        TcpRead => 83,
+        TcpWrite => 84,
+        TcpClose => 85,
+        TcpLocalPort => 86,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -704,6 +719,12 @@ fn prim_from_tag(tag: u32) -> Prim {
         78 => ToLong,
         79 => StrToBytes,
         80 => BytesToStr,
+        81 => TcpListen,
+        82 => TcpAccept,
+        83 => TcpRead,
+        84 => TcpWrite,
+        85 => TcpClose,
+        86 => TcpLocalPort,
         64 => Div,
         other => panic!("bad prim tag {other}"),
     }

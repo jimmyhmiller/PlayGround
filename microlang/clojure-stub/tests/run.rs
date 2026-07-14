@@ -1455,3 +1455,59 @@ fn java_io_streams() {
     // byte[] reflection (the bencode Object-branch check)
     assert_eq!(run("(= (.getComponentType (class (byte-array 3))) Byte/TYPE)"), "true");
 }
+
+#[test]
+fn nrepl_server_end_to_end() {
+    use std::io::{Read, Write};
+    // pick a free port, then hand it to the server (bind race is acceptable in tests)
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut rt = Runtime::<LowBitModel>::new();
+        let mut session = clojure_stub::Session::new(&mut rt, &TreeWalk, vec![]);
+        for src in clojure_stub::NREPL_SOURCES {
+            session.eval(&mut rt, &TreeWalk, src);
+        }
+        session.eval(&mut rt, &TreeWalk, &format!("(microclj.nrepl-server/start-server! {port})"));
+    });
+    // retry-connect until the server is listening
+    let mut conn = None;
+    for _ in 0..100 {
+        if let Ok(c) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            conn = Some(c);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let mut conn = conn.expect("nREPL server did not come up");
+    conn.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
+
+    let mut read_until = |conn: &mut std::net::TcpStream, needle: &str| -> String {
+        let mut buf = Vec::new();
+        let mut b = [0u8; 1];
+        while !String::from_utf8_lossy(&buf).contains(needle) {
+            match conn.read(&mut b) {
+                Ok(1) => buf.push(b[0]),
+                _ => break,
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    };
+
+    // clone a session
+    conn.write_all(b"d2:op5:clone2:id1:1e").unwrap();
+    let resp = read_until(&mut conn, "done");
+    assert!(resp.contains("new-session"), "clone response: {resp}");
+
+    // eval — the response must carry the value and a done status
+    conn.write_all(b"d2:op4:eval4:code22:(reduce + (range 100))2:id1:2e").unwrap();
+    let resp = read_until(&mut conn, "done");
+    assert!(resp.contains("5:value4:4950"), "eval response: {resp}");
+
+    // an unresolvable symbol is an eval-error, and the server survives
+    conn.write_all(b"d2:op4:eval4:code6:(nope)2:id1:3e").unwrap();
+    let resp = read_until(&mut conn, "done");
+    assert!(resp.contains("eval-error"), "error response: {resp}");
+    conn.write_all(b"d2:op4:eval4:code8:(* 21 2)2:id1:4e").unwrap();
+    let resp = read_until(&mut conn, "done");
+    assert!(resp.contains("5:value2:42"), "recovery response: {resp}");
+}

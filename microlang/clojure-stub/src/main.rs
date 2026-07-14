@@ -19,6 +19,7 @@ fn usage() -> ! {
          no arguments        start a REPL (:repl/quit or ctrl-D to exit)\n\
          file.clj args…      run a file; args are *command-line-args*\n\
          -e EXPR             evaluate EXPR and print the result\n\
+         --nrepl [PORT]      start an nREPL server (default port 7888)\n\
          --jit               use the native JIT tier (requires the `jit` feature)"
     );
     std::process::exit(2)
@@ -28,6 +29,7 @@ enum Mode {
     Repl,
     Eval(String),
     File(String, Vec<String>),
+    Nrepl(u16),
 }
 
 fn main() {
@@ -44,6 +46,10 @@ fn main() {
             Some(e) => Mode::Eval(e.clone()),
             None => usage(),
         },
+        Some("--nrepl") => {
+            let port = args.get(1).and_then(|p| p.parse().ok()).unwrap_or(7888);
+            Mode::Nrepl(port)
+        }
         Some(_) => Mode::File(args[0].clone(), args[1..].to_vec()),
     };
 
@@ -96,6 +102,13 @@ fn drive(cs: &dyn microlang::CodeSpace<LowBitModel>, mode: Mode) {
             session.eval(&mut rt, cs, &src);
         }
         Mode::Repl => repl(&mut rt, cs, &mut session),
+        Mode::Nrepl(port) => {
+            // the REAL nrepl bencode + the server over it, then serve forever
+            for src in clojure_stub::NREPL_SOURCES {
+                session.eval(&mut rt, cs, src);
+            }
+            session.eval(&mut rt, cs, &format!("(microclj.nrepl-server/start-server! {port})"));
+        }
     }
 }
 

@@ -60,7 +60,17 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
             Ir::Local { up, idx } => frame_get(locals, *up, *idx),
             Ir::Global(s) => match rt.global(*s) {
                 Some(v) => v,
-                None => panic!("Unable to resolve symbol: {}", rt.sym_name(*s)),
+                None => {
+                    // An unresolved var is a CATCHABLE throw (Clojure's
+                    // CompilerException), not an abort — a REPL/server must
+                    // survive a typo'd reference.
+                    let id = rt.alloc(Obj::Str(format!(
+                        "Unable to resolve symbol: {}",
+                        rt.sym_name(*s)
+                    )));
+                    rt.signal_throw(M::R::enc_ref(id));
+                    M::R::enc_nil()
+                }
             },
             Ir::SetLocal { up, idx, val } => {
                 let v = top.eval_ir(top, rt, val, locals);

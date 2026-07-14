@@ -41,7 +41,16 @@ mod sources {
     pub const CLOJURE_ZIP: &str = include_str!("clj/clojure/zip.clj");
     pub const CLOJURE_DATA_JSON: &str = include_str!("clj/clojure/data/json.clj");
     pub const CLOJURE_TEST: &str = include_str!("clj/clojure/test.clj");
+    /// The REAL nrepl/bencode.clj (vendored, unmodified — EPL) and microclj's
+    /// nREPL server over it. Not part of the default prelude: evaluated on
+    /// demand by `microclj --nrepl` (see [`crate::NREPL_SOURCES`]).
+    pub const NREPL_BENCODE: &str = include_str!("../vendor/nrepl/nrepl/bencode.clj");
+    pub const NREPL_SERVER: &str = include_str!("clj/microclj/nrepl_server.clj");
 }
+
+/// The sources `microclj --nrepl` loads into a session before starting the
+/// server: the real nrepl bencode implementation, then the server over it.
+pub const NREPL_SOURCES: &[&str] = &[sources::NREPL_BENCODE, sources::NREPL_SERVER];
 pub use reader::read_all;
 
 use compile::Compiler;

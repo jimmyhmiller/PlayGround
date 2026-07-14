@@ -46,6 +46,14 @@ use std::sync::{Arc, Mutex};
 
 use crate::bigint::BigInt;
 use crate::dispatch::{Dispatch, Megamorphic, MethodRegistry};
+
+/// A TCP handle owned by the `%tcp-*` prims: a listener or a connected stream.
+/// `Arc` so blocking I/O runs on a clone OUTSIDE the registry lock.
+#[derive(Clone)]
+pub(crate) enum TcpHandle {
+    Listener(Arc<std::net::TcpListener>),
+    Stream(Arc<std::net::TcpStream>),
+}
 use crate::ir::{ConstId, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::value::{Cat, Frame, HeapId, Locals, Obj, RawTag, Sym, Val};
@@ -250,6 +258,11 @@ pub struct Shared<M: ValueModel> {
     pub(crate) tables: Mutex<Tables>,
     apply_fn: AtomicU64, // Sym+1, or 0 for None
     escape_tags: AtomicU64,
+    /// TCP handles for the `%tcp-*` prims (listener/stream by index). `Arc`s are
+    /// cloned OUT under the lock, then blocking I/O happens lock-free on `&TcpStream`
+    /// / `&TcpListener` (std impls Read/accept on shared refs), so a blocked reader
+    /// never stalls other threads' socket ops.
+    pub(crate) tcp: Mutex<Vec<Option<TcpHandle>>>,
     /// Set when a thread requests a stop-the-world collection; every other
     /// mutator parks at its next safepoint until it clears.
     pub(crate) gc_requested: std::sync::atomic::AtomicBool,
@@ -364,6 +377,7 @@ impl<M: ValueModel> Runtime<M> {
                 dispatch: Box::new(Megamorphic::new()),
             }),
             apply_fn: AtomicU64::new(0),
+            tcp: Mutex::new(Vec::new()),
             escape_tags: AtomicU64::new(0),
             gc_requested: std::sync::atomic::AtomicBool::new(false),
             mutators: Mutex::new(Vec::new()),
@@ -533,6 +547,28 @@ impl<M: ValueModel> Runtime<M> {
         // SAFETY: heap mutation is serialized by `heap_lock`; the segmented heap
         // never relocates existing objects on push, so lock-free readers are safe.
         self.heap_mut().push(o) as HeapId
+    }
+
+    /// Insert a TCP handle into the registry, returning its index.
+    pub(crate) fn tcp_insert(&self, h: TcpHandle) -> i64 {
+        let mut reg = self.shared.tcp.lock().unwrap();
+        reg.push(Some(h));
+        (reg.len() - 1) as i64
+    }
+
+    /// Clone the `Arc` for a live handle OUT of the registry (blocking I/O then
+    /// happens without the lock). Panics (catchably at the frontend boundary)
+    /// for a closed or bogus handle.
+    pub(crate) fn tcp_get(&self, bits: u64, who: &str) -> TcpHandle {
+        let h = match self.decode(bits) {
+            Val::Int(n) => n as usize,
+            _ => panic!("{who}: not a tcp handle"),
+        };
+        let reg = self.shared.tcp.lock().unwrap();
+        match reg.get(h) {
+            Some(Some(t)) => t.clone(),
+            _ => panic!("{who}: closed or unknown tcp handle {h}"),
+        }
     }
 
     /// Intern a literal into the constant pool, returning its id. The pool is a
@@ -1383,6 +1419,82 @@ impl<M: ValueModel> Runtime<M> {
                 let s = String::from_utf8_lossy(&bytes).into_owned();
                 let id = self.alloc(Obj::Str(s));
                 M::R::enc_ref(id)
+            }
+            Prim::TcpListen => {
+                let port = match self.decode(args[0]) {
+                    Val::Int(n) => n as u16,
+                    _ => panic!("%tcp-listen: port must be an int"),
+                };
+                let l = std::net::TcpListener::bind(("127.0.0.1", port))
+                    .unwrap_or_else(|e| panic!("%tcp-listen: {e}"));
+                M::R::enc_int(self.tcp_insert(TcpHandle::Listener(Arc::new(l))))
+            }
+            Prim::TcpAccept => {
+                let l = match self.tcp_get(args[0], "%tcp-accept") {
+                    TcpHandle::Listener(l) => l,
+                    _ => panic!("%tcp-accept: not a listener handle"),
+                };
+                // Blocking accept OUTSIDE the registry lock.
+                let (s, _) = l.accept().unwrap_or_else(|e| panic!("%tcp-accept: {e}"));
+                M::R::enc_int(self.tcp_insert(TcpHandle::Stream(Arc::new(s))))
+            }
+            Prim::TcpRead => {
+                let s = match self.tcp_get(args[0], "%tcp-read") {
+                    TcpHandle::Stream(s) => s,
+                    _ => panic!("%tcp-read: not a stream handle"),
+                };
+                use std::io::Read;
+                let mut buf = [0u8; 1];
+                // EOF and connection errors both read as -1: stream-end, the
+                // way in-language stream code already treats it.
+                match (&*s).read(&mut buf) {
+                    Ok(0) | Err(_) => M::R::enc_int(-1),
+                    Ok(_) => M::R::enc_int(buf[0] as i64),
+                }
+            }
+            Prim::TcpWrite => {
+                let s = match self.tcp_get(args[0], "%tcp-write") {
+                    TcpHandle::Stream(s) => s,
+                    _ => panic!("%tcp-write: not a stream handle"),
+                };
+                let bytes: Vec<u8> = match self.decode(args[1]) {
+                    Val::Ref(id) => match &self.heap()[id as usize] {
+                        Obj::Vector(v) => v
+                            .iter()
+                            .map(|&b| match self.decode(b) {
+                                Val::Int(n) => n as i8 as u8,
+                                _ => panic!("%tcp-write: array element is not an int"),
+                            })
+                            .collect(),
+                        _ => panic!("%tcp-write: not an array"),
+                    },
+                    _ => panic!("%tcp-write: not an array"),
+                };
+                use std::io::Write;
+                (&*s).write_all(&bytes).unwrap_or_else(|e| panic!("%tcp-write: {e}"));
+                (&*s).flush().ok();
+                M::R::enc_nil()
+            }
+            Prim::TcpClose => {
+                let h = match self.decode(args[0]) {
+                    Val::Int(n) => n as usize,
+                    _ => panic!("%tcp-close: not a handle"),
+                };
+                let mut reg = self.shared.tcp.lock().unwrap();
+                if let Some(slot) = reg.get_mut(h) {
+                    if let Some(TcpHandle::Stream(s)) = slot {
+                        s.shutdown(std::net::Shutdown::Both).ok();
+                    }
+                    *slot = None; // dropping a listener closes it
+                }
+                M::R::enc_nil()
+            }
+            Prim::TcpLocalPort => {
+                let port = match self.tcp_get(args[0], "%tcp-local-port") {
+                    TcpHandle::Listener(l) => l.local_addr().map(|a| a.port()).unwrap_or(0),
+                    TcpHandle::Stream(s) => s.local_addr().map(|a| a.port()).unwrap_or(0),
+                };
+                M::R::enc_int(port as i64)
             }
             // ── atoms: real cross-thread compare-and-set ────────────────
             Prim::AtomNew => {
