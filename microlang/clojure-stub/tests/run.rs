@@ -1211,3 +1211,86 @@ fn clojure_core_conformance_suite() {
     assert!(fails.is_empty(), "{}/{} clojure.core exprs failed:\n{}", fails.len(), total, fails.join("\n"));
     eprintln!("clojure.core conformance: {total}/{total} match real Clojure");
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Collection literals are DATA (full reader↔runtime unification, like Clojure):
+// the reader builds the real persistent collections, macros receive them as
+// data, and `quote` keeps them literal.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn collection_literals_are_data() {
+    // THE representation test: a macro sees a real vector, not construction code.
+    assert_eq!(
+        run("(defmacro vq [v] (list 'quote (list (vector? v) (type-of v)))) (vq [1 2])"),
+        "(true PersistentVector)"
+    );
+    // Maps and sets too, and the elements are the RAW (unevaluated) forms.
+    assert_eq!(run("(defmacro mq [m] (list 'quote (list (map? m) (get m :k)))) (mq {:k (f x)})"), "(true (f x))");
+    assert_eq!(run("(defmacro sq [s] (list 'quote (contains? s 'a))) (sq #{a b})"), "true");
+    assert_eq!(run("(defmacro fq [v] (list 'quote (first v))) (fq [x y])"), "x");
+    // A >32-element literal exercises the reader's trie builder.
+    assert_eq!(
+        run("(defmacro big [v] (list 'quote (list (count v) (nth v 40)))) \
+             (big [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 \
+                   27 28 29 30 31 32 33 34 35 36 37 38 39 40 41])"),
+        "(42 40)"
+    );
+    // quote is literal — a quoted literal IS the runtime collection...
+    assert_eq!(run("'[1 2 3]"), "[1 2 3]");
+    assert_eq!(run("'(a [b {:c 1}])"), "(a [b {:c 1}])");
+    // ...and equal to the evaluated literal.
+    assert_eq!(run("(= [1 2] '[1 2])"), "true");
+    assert_eq!(run("(= {:a 1} '{:a 1})"), "true");
+    // read-string/eval round-trip through the unified representation.
+    assert_eq!(run("(read-string \"[1 {:a #{2}}]\")"), "[1 {:a #{2}}]");
+    assert_eq!(run("(eval '(count [1 2 3]))"), "3");
+    // #() implicit params are found inside collection literals (trie leaves).
+    assert_eq!(run("(map #(conj [] %) [1 2])"), "([1] [2])");
+    // Protocol methods are first-class vars (Clojure semantics).
+    assert_eq!(
+        run("(defprotocol IArea (area2 [x])) (deftype Sq [s] IArea (area2 [_] (* s s))) \
+             (map area2 [(->Sq 2) (->Sq 3)])"),
+        "(4 9)"
+    );
+}
+
+/// Load a program with the VENDORED real clojure/core.match on the load path.
+fn run_match(src: &str) -> String {
+    use std::path::PathBuf;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/core.match");
+    let full = format!("(require '[clojure.core.match :refer [match]])\n{src}");
+    let r = clojure_stub::run_with_paths(&mut rt, &TreeWalk, &full, vec![dir]);
+    clojure_stub::clj_str(&rt, r)
+}
+
+#[test]
+fn real_core_match_end_to_end() {
+    // The real 2156-line clojure/core.match loads AND its expansions run
+    // correctly — the historical blocker was macros receiving collection
+    // literals as code. Answers verified against real Clojure + core.match 1.1.0.
+    assert_eq!(run_match("(let [x 1] (match [x] [1] :a :else :b))"), ":a");
+    assert_eq!(run_match("(let [x 5] (match [x] [1] :a :else :b))"), ":b");
+    assert_eq!(
+        run_match(
+            "[(let [x 1 y 2] (match [x y] [1 2] :A [_ 2] :B :else :D)) \
+              (let [x 9 y 2] (match [x y] [1 2] :A [_ 2] :B :else :D)) \
+              (let [x 9 y 9] (match [x y] [1 2] :A [_ 2] :B :else :D))]"
+        ),
+        "[:A :B :D]"
+    );
+    // vector patterns (row destructuring), map patterns, guards, :or, rest.
+    assert_eq!(run_match("(let [v [1 2 3]] (match v [_ _ 2] :a0 [1 1 3] :a1 [1 2 3] :a2 :else :a3))"), ":a2");
+    assert_eq!(run_match("(let [x {:a 1 :b 1}] (match [x] [{:a _ :b 2}] :a0 [{:a 1 :b 1}] :a1 :else :a2))"), ":a1");
+    assert_eq!(run_match("(let [y 7] (match [y] [(_ :guard even?)] :even [(_ :guard odd?)] :odd))"), ":odd");
+    assert_eq!(run_match("(let [x 4] (match [x] [(:or 1 2 3)] :small [(:or 4 5)] :mid :else :big))"), ":mid");
+    assert_eq!(run_match("(let [v [1 2 3 4]] (match v [x & r] [x r]))"), "[1 [2 3 4]]");
+    assert_eq!(run_match("(let [v [[1 2]]] (match v [[a b]] (* a b) :else :nope))"), "2");
+    assert_eq!(run_match("(let [s '(1 2 3)] (match [s] [([1 2 3] :seq)] :yes :else :no))"), ":yes");
+    // recursive fn over match (the doc's fib gate).
+    assert_eq!(
+        run_match("(defn fib [n] (match [n] [0] 0 [1] 1 :else (+ (fib (- n 1)) (fib (- n 2))))) (fib 10)"),
+        "55"
+    );
+}

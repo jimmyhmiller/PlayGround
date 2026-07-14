@@ -154,3 +154,33 @@ fn lazy_seqs_on_jit() {
     assert_eq!(jit("(reduce + (take 10 (iterate inc 1)))"), "55");
     assert_eq!(jit("(for [x (range 4) :when (even? x)] (* x 10))"), "(0 20)");
 }
+
+#[test]
+fn collection_literals_are_data_on_jit() {
+    assert_eq!(
+        jit("(defmacro vq [v] (list 'quote (list (vector? v) (type-of v)))) (vq [1 2])"),
+        "(true PersistentVector)"
+    );
+    assert_eq!(jit("(= {:a 1} '{:a 1})"), "true");
+    assert_eq!(jit("(read-string \"[1 {:a #{2}}]\")"), "[1 {:a #{2}}]");
+}
+
+#[test]
+fn real_core_match_on_jit() {
+    // The real clojure/core.match, end to end on the native tier (tail-called
+    // callable deftype records exercise the trampoline's apply-handler hook).
+    let scratch = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/core.match");
+    let run = |src: &str| {
+        let mut rt = Runtime::<LowBitModel>::new();
+        let backend = JitCranelift::<LowBitModel>::new();
+        let full = format!("(require '[clojure.core.match :refer [match]])\n{src}");
+        let r = clojure_stub::run_with_paths(&mut rt, &backend, &full, vec![scratch.clone()]);
+        clojure_stub::clj_str(&rt, r)
+    };
+    assert_eq!(
+        run("[(let [x 1] (match [x] [1] :a :else :b)) \
+             (let [v [1 2 3]] (match v [_ _ 2] :a0 [1 1 3] :a1 [1 2 3] :a2 :else :a3)) \
+             (let [x {:a 1 :b 1}] (match [x] [{:a _ :b 2}] :a0 [{:a 1 :b 1}] :a1 :else :a2))]"),
+        "[:a :a2 :a1]"
+    );
+}

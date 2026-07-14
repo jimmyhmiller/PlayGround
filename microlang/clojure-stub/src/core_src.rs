@@ -13,14 +13,20 @@ pub const CORE: &str = r##"
 ;; (defn name docstring? attr-map? fntail) — skip an optional leading
 ;; docstring and an optional leading attr-map (e.g. {:arglists '([& xs])})
 ;; before the fn body/arity-clauses, matching Clojure's defn grammar.
+;; Is `x` a map literal (any phase's representation — the reader builds 'Map
+;; records while core loads and PersistentArrayMaps once the cljs types exist)?
+;; Used by the var-defining macros to skip an attr-map at EXPANSION time.
+(def -attr-map?
+  (fn (x)
+    (if (%num-eq (type-of x) 'Map) true (%num-eq (type-of x) 'PersistentArrayMap))))
 (defmacro defn (name p2 & more)
   (if (%num-eq (type-of p2) 'String)
     (list 'do
           (list 'def name
-                (%cons 'fn (if (%num-eq (type-of (%first more)) 'Map)
+                (%cons 'fn (if (-attr-map? (%first more))
                              (%rest more) more)))
           (list '-set-var-doc! (list 'var name) p2))
-    (if (%num-eq (type-of p2) 'Map)
+    (if (-attr-map? p2)
       (list 'def name (%cons 'fn more))
       (list 'def name (%cons 'fn (%cons p2 more))))))
 (defmacro when (c & body)     (list 'if c (%cons 'do body) nil))
@@ -260,6 +266,25 @@ pub const CORE: &str = r##"
                 (if (lazy-seq? x) (recur (-sval x)) (seq x)))]
         (do (%cell-set! (field ls 0) 0 v) (%cell-set! (field ls 1) 0 true) v))))
 (defmacro lazy-seq (& body) (list '-lazy-seq (%cons 'fn (%cons (vector) body))))
+
+;; ─────────────── marker-protocol registry ───────────────
+;; `deftype`/`extend-type` emit `(-register-marker P 'T)` for each protocol
+;; GROUP symbol, so satisfaction of method-less MARKER protocols (definterface
+;; tags like core.match's IPseudoPattern) is queryable. Prims only — this must
+;; run before any collection machinery exists. Storage: a flat (ty pname …)
+;; pair list in an atom.
+(def -marker-reg (%atom-new nil))
+(defn -register-marker [p ty]
+  (if (%num-eq (type-of p) 'Protocol)
+    (%atom-set -marker-reg (%cons ty (%cons (field p 0) (%atom-get -marker-reg))))
+    nil))
+(defn -marker-satisfied? [p ty]
+  (loop [l (%atom-get -marker-reg)]
+    (if (nil? l)
+      false
+      (if (if (%num-eq (%first (%rest l)) (field p 0)) (%num-eq (%first l) ty) false)
+        true
+        (recur (%rest (%rest l)))))))
 
 ;; ─────────────── collection protocols (ClojureScript-style) ───────────────
 ;; The seq/collection abstraction is polymorphic THROUGH these protocols: the
@@ -1108,7 +1133,7 @@ pub const CORE: &str = r##"
 ;; leading docstring and attr-map; the next form is the dispatch fn; ignore options.
 (defmacro defmulti (name & more)
   (let [m1 (if (%num-eq (type-of (first more)) 'String) (rest more) more)
-        m2 (if (%num-eq (type-of (first m1)) 'Map) (rest m1) m1)]
+        m2 (if (-attr-map? (first m1)) (rest m1) m1)]
     (list 'def name (list '-make-multi (first m2) (list 'quote name)))))
 (defmacro defmethod (name dval params & body)
   (list '-add-method name dval (%cons 'fn (%cons params body))))
@@ -1123,10 +1148,15 @@ pub const CORE: &str = r##"
 ;; A protocol is (record 'Protocol 'Name (list 'm1 'm2 …)); its methods dispatch on
 ;; type via the native registry, queryable with %method-types.
 (defn -protocol? [p] (and (record? p) (= (type-of p) 'Protocol)))
+(defn -proto-name [p] (field p 0))
 (defn -proto-methods [p] (field p 1))
+;; A MARKER protocol (no methods) is satisfied only through the explicit
+;; -marker-reg registrations (see the registry defined before the protocols).
 (defn satisfies? [p x]
   (let [ty (type-of x)]
-    (boolean (some (fn [m] (some (fn [t] (= t ty)) (%method-types m))) (-proto-methods p)))))
+    (if (nil? (seq (-proto-methods p)))
+      (-marker-satisfied? p ty)
+      (boolean (some (fn [m] (some (fn [t] (= t ty)) (%method-types m))) (-proto-methods p))))))
 (defn extends? [p ty]
   (boolean (some (fn [m] (some (fn [t] (= t ty)) (%method-types m))) (-proto-methods p))))
 (defn extenders [p]
@@ -1351,6 +1381,13 @@ pub const CORE: &str = r##"
 ;; The Rust printer can't invoke thunks, so `run` calls this on the final value
 ;; to fully realize any lazy spine (and lazy elements) into eager collections.
 ;; tail-recursive so realizing/printing a large collection never overflows.
+;; Realize a (possibly lazy) code form's SPINE into an eager cons list, leaving
+;; the elements untouched. A macro's RETURN VALUE is spliced into code, and real
+;; macros build it with map/concat/mapcat — lazy seqs the compiler's cons walk
+;; can't traverse. `(seq (rest s))` each step forces a lazy tail node by node.
+(defn -force-spine [s]
+  (loop [s (seq s) acc nil]
+    (if (nil? s) (-rev acc) (recur (seq (rest s)) (%cons (first s) acc)))))
 (defn -realize-list [s]
   (-rev (loop [s (seq s) acc nil] (if (nil? s) acc (recur (next s) (%cons (-realize (%first s)) acc))))))
 ;; Persistent structures are down-converted to the list-backed display records
@@ -1359,7 +1396,11 @@ pub const CORE: &str = r##"
 (defn -realize [x]
   (cond (lazy-seq? x) (-realize-list x)
         (%num-eq (type-of x) 'List) (-realize-list x)
-        (vector? x) (record 'Vector (-realize-list (-pv-seq x)))
+        ;; `seq` (not -pv-seq): dispatches per vector type, so BOTH the
+        ;; load-time PVec and the user-time PersistentVector realize. A quoted
+        ;; core-load literal surfacing at user time is a PVec.
+        (vector? x) (record 'Vector (-realize-list (seq x)))
+        (%num-eq (type-of x) 'PVec) (record 'Vector (-realize-list (seq x)))
         (set? x) (record 'Set (-realize-list (seq x)))
         (map? x) (record 'Map (-realize-entries (seq x)))
         true x))
@@ -1384,9 +1425,9 @@ pub const CORE: &str = r##"
 (defmacro defn- (name p2 & more)
   (if (%num-eq (type-of p2) 'String)
     (list 'def (list '-private-meta name)
-          (%cons 'fn (if (%num-eq (type-of (%first more)) 'Map)
+          (%cons 'fn (if (-attr-map? (%first more))
                        (%rest more) more)))
-    (if (%num-eq (type-of p2) 'Map)
+    (if (-attr-map? p2)
       (list 'def (list '-private-meta name) (%cons 'fn more))
       (list 'def (list '-private-meta name) (%cons 'fn (%cons p2 more))))))
 
@@ -1804,6 +1845,9 @@ pub const CORE: &str = r##"
 (defn decimal? [x] false)
 (defn bytes? [x] false)
 (defn class? [x] false)
+;; `(Class/forName "X")` — class values are type-tag symbols here, so forName
+;; is symbol interning (upstream code got the string from a tag symbol).
+(defn -class-for-name [s] (symbol s))
 (defn uri? [x] false)
 (defn inst? [x] false)
 (defn NaN? [x] (not (%num-eq x x)))

@@ -4,23 +4,23 @@
 //! toolkit heap value (list / `Obj::Vector` / tagged `Obj::Record`), so the GC
 //! traces it and `analyze` self-evaluates the literal ones.
 //!
-//! Collection literals hold their sub-FORMS; the frontend's `expand` turns a
-//! code-position vector/map/set into a constructor call (evaluating elements)
-//! and leaves it literal under `quote`. Keywords/strings/chars/numbers are
+//! Collection literals are DATA, exactly as in Clojure: `[a b]` reads to the
+//! real runtime persistent vector holding the raw element forms (see `data`),
+//! so macros receive actual collections. The frontend's `expand` turns one in
+//! expression position into a constructor call (evaluating elements) and
+//! leaves it literal under `quote`. Keywords/strings/chars/numbers are
 //! self-evaluating (non-cons refs → `Ir::Const`).
 
+use crate::data;
 use microlang::value::Sym;
 use microlang::{Obj, Repr, Runtime, Val, ValueModel};
 
-/// Type tags for the Clojure data types the frontend builds on `Obj::Record`.
-/// Collections are LIST-BACKED (a record holding one field: a cons-list of its
-/// contents), so every operation is simple recursive list code — no `apply`
-/// (which is CEK-only) and no vector prims. `type-of` reports these tags, so
-/// `clojure.core` predicates dispatch on them.
+/// The type tag for keywords, which the frontend builds on `Obj::Record` (a
+/// record holding the interned name symbol). `type-of` reports this tag, so
+/// `clojure.core` predicates dispatch on it. Keywords have always had ONE
+/// representation shared by reader and runtime; vectors/maps/sets get the same
+/// treatment via `data` (the reader constructs the runtime collection itself).
 pub const KEYWORD: &str = "Keyword";
-pub const VECTOR: &str = "Vector";
-pub const MAP: &str = "Map";
-pub const SET: &str = "Set";
 
 pub fn read_all<M: ValueModel>(rt: &mut Runtime<M>, src: &str) -> Vec<u64> {
     let toks = tokenize(src);
@@ -240,18 +240,15 @@ impl Parser {
             }
             Tok::Open('[') => {
                 let items = self.until(rt, ']');
-                let lst = rt.vec_to_list(&items);
-                record(rt, VECTOR, vec![lst])
+                data::make_vector(rt, &items)
             }
             Tok::Open('{') => {
                 let items = self.until(rt, '}');
-                let lst = rt.vec_to_list(&items);
-                record(rt, MAP, vec![lst])
+                data::make_map(rt, &items)
             }
             Tok::HashBrace => {
                 let items = self.until(rt, '}');
-                let lst = rt.vec_to_list(&items);
-                record(rt, SET, vec![lst])
+                data::make_set(rt, &items)
             }
             Tok::HashParen => {
                 // `#(...)` -> `(fn [%1 %2 … & %&] (...))`. Read the body (the
@@ -278,8 +275,7 @@ impl Parser {
                     params.push(sym(rt, "&"));
                     params.push(sym(rt, "%&"));
                 }
-                let plist = rt.vec_to_list(&params);
-                let pvec = record(rt, VECTOR, vec![plist]);
+                let pvec = data::make_vector(rt, &params);
                 let fnsym = sym(rt, "fn");
                 rt.vec_to_list(&[fnsym, pvec, body])
             }
@@ -486,8 +482,7 @@ fn meta_has_key<M: ValueModel>(rt: &Runtime<M>, meta: u64, key: &str) -> bool {
     if let Some(name) = field0(rt, meta, KEYWORD) {
         return matches!(rt.decode(name), Val::Sym(s) if rt.sym_name(s) == key);
     }
-    if let Some(kvlist) = field0(rt, meta, MAP) {
-        let kvs = rt.list_to_vec(kvlist);
+    if let Some(kvs) = data::map_entries(rt, meta) {
         let mut i = 0;
         while i + 1 < kvs.len() {
             if let Some(kname) = field0(rt, kvs[i], KEYWORD) {
@@ -511,15 +506,11 @@ fn record<M: ValueModel>(rt: &mut Runtime<M>, ty: &str, fields: Vec<u64>) -> u64
     alloc(rt, Obj::Record { type_id, fields })
 }
 
-/// The members of a `#?@`-selected collection (a `[..]` Vector record or a `(..)`
+/// The members of a `#?@`-selected collection (a `[..]` vector or a `(..)`
 /// list), to splice into the enclosing seq. `nil` (no branch matched) -> empty.
 fn splice_elements<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Vec<u64> {
-    if let Val::Ref(id) = rt.decode(form) {
-        if let Obj::Record { type_id, fields } = &rt.heap()[id as usize] {
-            if rt.sym_name(*type_id) == VECTOR && !fields.is_empty() {
-                return rt.list_to_vec(fields[0]);
-            }
-        }
+    if let Some(items) = data::vector_items(rt, form) {
+        return items;
     }
     // a cons list (or nil): list_to_vec handles both (nil -> empty).
     rt.list_to_vec(form)
@@ -541,10 +532,11 @@ fn kw_name<M: ValueModel>(rt: &Runtime<M>, v: u64) -> Option<String> {
     None
 }
 
-/// Walk a `#(...)` body form (cons lists + record contents) collecting the
-/// implicit anonymous-fn params it mentions: the largest `%N`, whether `%&`
-/// (rest) appears, and whether the bare `%` appears. Purely inspects — shared
-/// borrows only.
+/// Walk a `#(...)` body form (cons lists, record contents, and raw arrays —
+/// collection tries hold their element forms in `Obj::Vector` leaves)
+/// collecting the implicit anonymous-fn params it mentions: the largest `%N`,
+/// whether `%&` (rest) appears, and whether the bare `%` appears. Purely
+/// inspects — shared borrows only.
 fn scan_pct<M: ValueModel>(
     rt: &Runtime<M>,
     form: u64,
@@ -571,6 +563,7 @@ fn scan_pct<M: ValueModel>(
             let (head, tail, fields) = match &rt.heap()[id as usize] {
                 Obj::Cons { head, tail } => (Some(*head), Some(*tail), Vec::new()),
                 Obj::Record { fields, .. } => (None, None, fields.clone()),
+                Obj::Vector(elems) => (None, None, elems.clone()),
                 _ => (None, None, Vec::new()),
             };
             if let Some(h) = head {
@@ -588,7 +581,7 @@ fn scan_pct<M: ValueModel>(
 }
 
 /// Rebuild `form`, replacing every bare `%` symbol with `pct1` (the `%1` symbol).
-/// Cons/record structure is copied; leaves are returned unchanged.
+/// Cons/record/array structure is copied; leaves are returned unchanged.
 fn rewrite_bare_pct<M: ValueModel>(rt: &mut Runtime<M>, form: u64, pct1: u64) -> u64 {
     match rt.decode(form) {
         Val::Sym(s) if rt.sym_name(s) == "%" => pct1,
@@ -604,6 +597,11 @@ fn rewrite_bare_pct<M: ValueModel>(rt: &mut Runtime<M>, form: u64, pct1: u64) ->
                     let nf: Vec<u64> =
                         fields.iter().map(|&f| rewrite_bare_pct(rt, f, pct1)).collect();
                     alloc(rt, Obj::Record { type_id, fields: nf })
+                }
+                Obj::Vector(elems) => {
+                    let ne: Vec<u64> =
+                        elems.iter().map(|&e| rewrite_bare_pct(rt, e, pct1)).collect();
+                    alloc(rt, Obj::Vector(ne))
                 }
                 _ => form,
             }

@@ -129,8 +129,11 @@ pub const CLJS: &str = r##"
       :else (let [ret (pv-clone-node node)] (pv-aset ret subidx nil) ret))))
 
 ;; HOST: seq over the vector, built back-to-front with a tail loop (replaces
-;; cljs's IndexedSeq/ChunkedSeq).
-(defn -pv-seq [pv]
+;; cljs's IndexedSeq/ChunkedSeq). Named -PV-seq (not -pv-seq): core's PVec
+;; ISeqable impl resolves `-pv-seq` by global name at CALL time, and load-time
+;; PVec data (literals read while core loads) must keep seq-ing after these
+;; types redefine the world.
+(defn -PV-seq [pv]
   (loop [i (%sub (.-cnt pv) 1) acc nil]
     (if (%lt i 0) acc (recur (%sub i 1) (%cons (aget (unchecked-array-for pv i) (bit-and i 31)) acc)))))
 
@@ -188,7 +191,7 @@ pub const CLJS: &str = r##"
   (-hash [coll] (caching-hash coll hash-ordered-coll __hash))
 
   ISeqable
-  (-seq [coll] (-pv-seq coll))
+  (-seq [coll] (-PV-seq coll))
 
   ICounted
   (-count [coll] cnt)
@@ -710,4 +713,17 @@ pub const CLJS: &str = r##"
 (defn set [coll] (reduce (fn [s x] (-conj s x)) -EMPTY-PHS (seq coll)))
 (defn hash-set [& es] (set es))
 (defn disj [s & vs] (loop [s s vs (seq vs)] (if (nil? vs) s (recur (-disjoin s (first vs)) (next vs)))))
+
+;; ─────────────── symbol metadata (side registry) ───────────────
+;; Symbols are immediates (no heap cell to hang meta on), so `with-meta` on a
+;; symbol records it in a registry keyed by the symbol. Clojure's symbol meta is
+;; per-INSTANCE; this is per-NAME — equivalent whenever meta'd symbols are
+;; gensym-unique, which is how macros (e.g. core.match's `:ocr-expr`/`:bind-expr`
+;; occurrence annotations) use it. Name resolution never sees meta, as in Clojure.
+(def -symbol-meta-reg (%atom-new (hash-map)))
+(extend-type Symbol
+  IWithMeta (-with-meta [s m]
+              (%atom-set -symbol-meta-reg (assoc (%atom-get -symbol-meta-reg) s m))
+              s)
+  IMeta (-meta [s] (get (%atom-get -symbol-meta-reg) s)))
 "##;

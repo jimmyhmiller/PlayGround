@@ -1389,6 +1389,20 @@ impl<M: ModelArithJit> JitCranelift<M> {
                     // General tail call: reclaim the old frame, resolve the callee
                     // (through the inline cache).
                     self.recycle(frame);
+                    // Callable-object hook in TAIL position too (keywords / maps /
+                    // callable deftype records): route `(obj args…)` to
+                    // `(handler obj args…)`, exactly as `invoke` does.
+                    let callee = match rt.decode(callee) {
+                        Val::Ref(id)
+                            if matches!(&rt.heap()[id as usize], Obj::Record { .. })
+                                && rt.apply_handler().is_some() =>
+                        {
+                            let h = rt.apply_handler().unwrap();
+                            args_buf.insert(0, callee);
+                            h
+                        }
+                        _ => callee,
+                    };
                     let (nparams, variadic, comp, env) = self.resolve_call(rt, callee);
                     frame = self.alloc_frame(rt, nparams, variadic, &args_buf, env);
                     compiled = comp;

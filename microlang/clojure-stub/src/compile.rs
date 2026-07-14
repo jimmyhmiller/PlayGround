@@ -323,6 +323,33 @@ impl Compiler {
                 return Ir::Global(rt.intern("clojure.core/-empty-queue"));
             }
         }
+        // A bare dotted class reference in VALUE position (`clojure.lang.
+        // IPersistentVector` as a dispatch value, real core.match does this).
+        // The dialect's class values ARE runtime tag symbols (`deftype T` binds
+        // `T` to `'T`), so: prefer a var `a.b/C` (a protocol/deftype defined in
+        // ns `a.b`), else compile to the mapped tag symbol as a constant.
+        {
+            let nm = rt.sym_name(s).to_string();
+            let classlike = !nm.contains('/')
+                && nm.contains('.')
+                && nm
+                    .rsplit('.')
+                    .next()
+                    .and_then(|seg| seg.chars().next())
+                    .is_some_and(|c| c.is_ascii_uppercase());
+            if classlike {
+                if let Some(pos) = nm.rfind('.') {
+                    let dotted_var = rt.intern(&format!("{}/{}", &nm[..pos], &nm[pos + 1..]));
+                    if rt.global_defined(dotted_var) {
+                        return Ir::Global(dotted_var);
+                    }
+                }
+                let simple = nm.rsplit('.').next().unwrap_or(&nm);
+                let tag = crate::class_to_tag(simple).unwrap_or(simple);
+                let tag_sym = rt.intern(tag);
+                return self.sym_const(rt, tag_sym);
+            }
+        }
         // A prim used in VALUE position (`(map nil? xs)`, `{:a nil?}`) has no var to
         // read — synthesize a wrapper closure so it's a first-class function. In
         // CALL position the prim still inlines (checked before this path).
@@ -518,6 +545,18 @@ impl Compiler {
                             }
                         }
                     };
+                }
+                // `(%dispatch method args…)` — an UNCONDITIONAL protocol-dispatch
+                // site. `defprotocol` defs each method as a first-class fn whose
+                // body is this form, so `(map prepend …)` / `(reduce val-at …)`
+                // work; a plain `(method …)` call may route through that var, and
+                // the wrapper must still dispatch rather than call itself.
+                "%dispatch" => {
+                    let m_raw = self.name(rt, items[1]).expect("%dispatch: method name");
+                    let method = self.resolve_global(rt, m_raw);
+                    let site = self.fresh_site();
+                    let args = items[2..].iter().map(|&f| self.compile(rt, f)).collect();
+                    return Ir::Dispatch { site, method, args };
                 }
                 "-proto-method" => {
                     let m_raw = self.name(rt, items[1]).expect("defmethod: method name");

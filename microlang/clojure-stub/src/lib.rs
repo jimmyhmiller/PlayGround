@@ -24,6 +24,7 @@ use microlang::{CodeSpace, EvalBridge, Obj, Runtime, Val, ValueModel};
 static GENSYM: AtomicU64 = AtomicU64::new(0);
 
 mod compile;
+mod data;
 mod cljs_types_src;
 mod clojure_data_json_src;
 mod clojure_set_src;
@@ -275,7 +276,7 @@ fn eval_form<M: ValueModel>(
         if items.len() > 3 && is_str(rt, items[2]) {
             items.remove(2);
         }
-        if items.len() > 3 && record_field0(rt, items[2], reader::MAP).is_some() {
+        if items.len() > 3 && data::is_map_rep(rt, items[2]) {
             items.remove(2);
         }
         let form_s = sym(rt, "&form");
@@ -284,10 +285,7 @@ fn eval_form<M: ValueModel>(
         // Prepend the hidden `&form`/`&env` params. Params come as a vector `[a b]`
         // OR our legacy list style `(a b & c)`.
         let with_hidden = |rt: &mut Runtime<M>, pv: u64| -> u64 {
-            let orig = match record_field0(rt, pv, reader::VECTOR) {
-                Some(l) => rt.list_to_vec(l),
-                None => rt.list_to_vec(pv),
-            };
+            let orig = data::vector_items(rt, pv).unwrap_or_else(|| rt.list_to_vec(pv));
             let mut params = vec![form_s, env_s];
             params.extend(orig);
             make_vector(rt, params)
@@ -295,12 +293,12 @@ fn eval_form<M: ValueModel>(
         // Multi-arity ONLY when `items[2]` is a clause list `([params] …)` — i.e. a
         // list whose FIRST element is a param vector (a bare-symbol list is legacy
         // single-arity params).
-        let multi = record_field0(rt, items[2], reader::VECTOR).is_none()
+        let multi = data::vector_items(rt, items[2]).is_none()
             && rt.as_cons(items[2]).is_some()
             && rt
                 .list_to_vec(items[2])
                 .first()
-                .is_some_and(|&f| record_field0(rt, f, reader::VECTOR).is_some());
+                .is_some_and(|&f| data::vector_items(rt, f).is_some());
         let lam = if !multi {
             // single-arity: (defmacro name [params] body…) or (name (a b) body…)
             let pv = with_hidden(rt, items[2]);
@@ -341,7 +339,10 @@ fn expand<M: ValueModel>(
     let slot = rt.push_root(form);
     // 1. head-expand while the head resolves to a macro
     loop {
-        let f = rt.root_get(slot);
+        // A form built by a macro / lazy seq op may be (or contain in its tail)
+        // a LazySeq — realize the spine so the cons walks below see all of it.
+        let f = force_spine(rt, cs, rt.root_get(slot));
+        rt.set_root(slot, f);
         let Some((head, _)) = rt.as_cons(f) else { break };
         let Val::Sym(hs) = rt.decode(head) else { break };
         // Resolve the head to its namespace-qualified var; is that a macro? This
@@ -367,15 +368,10 @@ fn expand<M: ValueModel>(
     let f = rt.root_get(slot);
     let out = if let Some((head, _)) = rt.as_cons(f) {
         if is_sym(rt, head, "quote") {
-            // A quoted collection literal must build the runtime persistent type;
-            // a plain quoted datum (symbols, lists of atoms) stays a literal.
-            let datum = rt.list_to_vec(f)[1];
-            if datum_has_coll(rt, datum) {
-                let built = build_quote(rt, datum);
-                expand(rt, cs, macros, comp, built)
-            } else {
-                f
-            }
+            // Quoted data is LITERAL, exactly as in Clojure: collection literals
+            // already ARE the runtime persistent collections (the reader builds
+            // them), so the whole datum compiles to a `Const` untouched.
+            f
         } else if is_sym(rt, head, "syntax-quote") {
             // ` template -> a form that BUILDS the data; then expand that.
             let inner = rt.list_to_vec(f)[1];
@@ -396,10 +392,10 @@ fn expand<M: ValueModel>(
             let d = desugar_defprotocol(rt, comp, f);
             expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "extend-type") {
-            let d = desugar_extend_type(rt, f);
+            let d = desugar_extend_type(rt, comp, f);
             expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "deftype") {
-            let d = desugar_deftype(rt, f);
+            let d = desugar_deftype(rt, comp, f);
             expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "var") {
             // `(var x)` / `#'x` -> a first-class Var handle `(record 'Var 'ns/x)`.
@@ -470,21 +466,48 @@ fn expand<M: ValueModel>(
         }
     } else if let Some(elems) = binding_items(rt, f) {
         // A vector in EXPRESSION position -> `(vector e0 e1 …)` so its elements
-        // evaluate. `binding_items` matches every vector representation, including
-        // a runtime PVec produced by syntax-quote/a macro (whose form-elements
-        // would otherwise be treated as self-evaluating data). Param/binding
-        // vectors are handled by fn/let/loop BEFORE reaching here, so they are safe.
-        let lst = rt.vec_to_list(&elems);
-        build_call(rt, cs, macros, comp, "vector", lst)
-    } else if let Some(lst) = record_field0(rt, f, reader::MAP) {
-        build_call(rt, cs, macros, comp, "hash-map", lst)
-    } else if let Some(lst) = record_field0(rt, f, reader::SET) {
-        build_call(rt, cs, macros, comp, "hash-set", lst)
+        // evaluate. `binding_items` matches every vector representation (the
+        // reader's phase type and anything a macro/syntax-quote returned).
+        // Param/binding vectors are handled by fn/let/loop BEFORE reaching here,
+        // so they are safe.
+        build_call(rt, cs, macros, comp, "vector", &elems)
+    } else if let Some(kvs) = data::map_entries(rt, f) {
+        build_call(rt, cs, macros, comp, "hash-map", &kvs)
+    } else if let Some(es) = data::set_items(rt, f) {
+        build_call(rt, cs, macros, comp, "hash-set", &es)
     } else {
         f // keyword / string / char / number / symbol — self-evaluating
     };
     rt.truncate_roots(slot);
     out
+}
+
+/// If `form` is a lazy seq — or a cons list whose TAIL hits a lazy node — force
+/// its spine into an eager cons list (via core's `-force-spine`), so the
+/// expander/compiler can walk it. Elements are left untouched (they are forced
+/// on recursion when they sit in code position). Anything else passes through.
+/// Before `-force-spine` exists (early core bootstrap) no macro returns lazy
+/// seqs, so the form passes through.
+fn force_spine<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, form: u64) -> u64 {
+    let mut f = form;
+    let lazy = loop {
+        match rt.decode(f) {
+            Val::Ref(id) => match &rt.heap()[id as usize] {
+                Obj::Cons { tail, .. } => f = *tail,
+                Obj::Record { type_id, .. } if rt.sym_name(*type_id) == "LazySeq" => break true,
+                _ => break false,
+            },
+            _ => break false,
+        }
+    };
+    if !lazy {
+        return form;
+    }
+    let fs = rt.intern("clojure.core/-force-spine");
+    match rt.global(fs) {
+        Some(g) => cs.invoke(cs, rt, g, &[form]),
+        None => form,
+    }
 }
 
 fn expand_each<M: ValueModel>(
@@ -497,19 +520,18 @@ fn expand_each<M: ValueModel>(
     items.iter().map(|&it| expand(rt, cs, macros, comp, it)).collect()
 }
 
-/// `(vector|hash-map|hash-set <elems>)` from a list of element forms.
+/// `(vector|hash-map|hash-set <elems>)` from the element forms.
 fn build_call<M: ValueModel>(
     rt: &mut Runtime<M>,
     cs: &dyn CodeSpace<M>,
     macros: &HashSet<Sym>,
     comp: &Compiler,
     ctor: &str,
-    arglist: u64,
+    args: &[u64],
 ) -> u64 {
-    let args = rt.list_to_vec(arglist);
     let fsym = sym(rt, ctor);
     let mut out = vec![fsym];
-    out.extend(expand_each(rt, cs, macros, comp, &args));
+    out.extend(expand_each(rt, cs, macros, comp, args));
     rt.vec_to_list(&out)
 }
 
@@ -540,7 +562,7 @@ fn rebuild_binder<M: ValueModel>(
                 params.push(g);
                 // `& {:keys …}` — the trailing args are keyword pairs; collect them
                 // into a map before destructuring the pattern.
-                let init = if prev_amp && record_field0(rt, p, reader::MAP).is_some() {
+                let init = if prev_amp && data::is_map_rep(rt, p) {
                     let kw = sym(rt, "-kwargs->map");
                     rt.vec_to_list(&[kw, g])
                 } else {
@@ -600,7 +622,7 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
                 let iv = int(rt, idx);
                 let rest_expr = call2(rt, "drop", iv, t);
                 // `& {:keys …}` — collect trailing kwargs into a map to destructure.
-                let rest_expr = if record_field0(rt, elems[k + 1], reader::MAP).is_some() {
+                let rest_expr = if data::is_map_rep(rt, elems[k + 1]) {
                     let kw = sym(rt, "-kwargs->map");
                     rt.vec_to_list(&[kw, rest_expr])
                 } else {
@@ -631,8 +653,7 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
         }
         return binds;
     }
-    if let Some(lst) = record_field0(rt, pat, reader::MAP) {
-        let kvs = rt.list_to_vec(lst);
+    if let Some(kvs) = data::map_entries(rt, pat) {
         let t = gensym(rt, "map");
         let mut binds = vec![t, init];
         // First locate `:or` defaults (a `{sym default …}` map) so any binding
@@ -641,8 +662,7 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
         let mut k = 0;
         while k + 1 < kvs.len() {
             if is_keyword(rt, kvs[k], "or") {
-                if let Some(dl) = record_field0(rt, kvs[k + 1], reader::MAP) {
-                    let dkvs = rt.list_to_vec(dl);
+                if let Some(dkvs) = data::map_entries(rt, kvs[k + 1]) {
                     let mut j = 0;
                     while j + 1 < dkvs.len() {
                         defaults.push((dkvs[j], dkvs[j + 1]));
@@ -738,7 +758,10 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
 
 /// `(defprotocol P (m1 [this]) (m2 [this x]))` -> register each method NAME so
 /// `(m1 x)` becomes a dispatch site (a sentinel `defmethod` per method; the real
-/// impls come from `extend-type`). No-impl calls then error cleanly.
+/// impls come from `extend-type`). No-impl calls then error cleanly. Each method
+/// is ALSO def'd as a first-class fn wrapping a `%dispatch` site, so methods
+/// work in value position (`(reduce prepend …)`), as in Clojure, where protocol
+/// methods are real vars.
 fn desugar_defprotocol<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
     let items = rt.list_to_vec(form);
     let dok = sym(rt, "do");
@@ -757,6 +780,29 @@ fn desugar_defprotocol<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form
         let nilv = rt.encode(Val::Nil);
         let fnf = mk_fn(rt, params, vec![nilv]);
         out.push(mk_defmethod(rt, m, sentinel, fnf));
+        // (def m (fn ([g…] (%dispatch m g…)) …)) — one clause per declared arity.
+        let arity_counts: Vec<usize> = parts[1..]
+            .iter()
+            .filter_map(|&p| binding_items(rt, p).map(|v| v.len()))
+            .collect();
+        if !arity_counts.is_empty() {
+            let dsym = sym(rt, "%dispatch");
+            let mut clauses = Vec::new();
+            for n in arity_counts {
+                let gs: Vec<u64> = (0..n).map(|_| gensym(rt, "mp")).collect();
+                let pv = make_vector(rt, gs.clone());
+                let mut call = vec![dsym, m];
+                call.extend(gs);
+                let body = rt.vec_to_list(&call);
+                clauses.push(rt.vec_to_list(&[pv, body]));
+            }
+            let fnk = sym(rt, "fn");
+            let mut fnform = vec![fnk];
+            fnform.extend(clauses);
+            let wrapper = rt.vec_to_list(&fnform);
+            let defk = sym(rt, "def");
+            out.push(rt.vec_to_list(&[defk, m, wrapper]));
+        }
         // record the RESOLVED (qualified) method name — the same sym the dispatch
         // registry is keyed by — so %method-types matches at reflection time.
         let resolved = match rt.decode(m) {
@@ -789,8 +835,9 @@ fn desugar_defprotocol<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form
 
 /// `(extend-type T P (m1 [this] body) (m2 [this x] body) [P2 ...])` -> a
 /// `(defmethod m T (fn [this ...] body))` per method. Protocol NAMES (bare
-/// symbols) are grouping only, and skipped; method impls are lists.
-fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
+/// symbols) group the methods; each that resolves to a defined protocol var is
+/// also registered as a (possibly marker) extension of T.
+fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
     let items = rt.list_to_vec(form);
     // `(extend-type nil …)`: `nil` reads as the value Nil, but `type-of nil`
     // reports the tag symbol `nil` — so extend against that symbol.
@@ -815,7 +862,12 @@ fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
     let mut out = vec![dok];
     for &item in &items[2..] {
         if matches!(rt.decode(item), Val::Sym(_)) {
-            continue; // a protocol name — grouping only
+            // a protocol name — group marker; register the extension (markers
+            // have no methods, so satisfies? needs the explicit record).
+            if let Some(reg) = marker_registration(rt, comp, item, ty) {
+                out.push(reg);
+            }
+            continue;
         }
         let parts = rt.list_to_vec(item); // (m [this ...] body...)
         let m = parts[0];
@@ -824,6 +876,27 @@ fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
         out.push(mk_defmethod(rt, m, ty, fnf));
     }
     rt.vec_to_list(&out)
+}
+
+/// `(-register-marker P 'T)` when `group` (a protocol-group symbol inside
+/// `deftype`/`extend-type`) resolves to a DEFINED var — the runtime guard in
+/// `-register-marker` keeps non-protocol values (deftype tag syms) out of the
+/// registry. `None` for unresolved names (host interfaces we don't model).
+fn marker_registration<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    comp: &Compiler,
+    group: u64,
+    ty: u64,
+) -> Option<u64> {
+    let Val::Sym(s) = rt.decode(group) else { return None };
+    let q = comp.resolve_ref(rt, s);
+    if !rt.global_defined(q) {
+        return None;
+    }
+    let reg = sym(rt, "-register-marker");
+    let pref = rt.encode(Val::Sym(q));
+    let tq = quote_form(rt, ty);
+    Some(rt.vec_to_list(&[reg, pref, tq]))
 }
 
 /// `(deftype T [f0 f1] Protocol (-m [this a] body) …)` — the full ClojureScript
@@ -835,7 +908,7 @@ fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
 /// (host interop: toString/equiv/indexOf/…) is skipped. `^:mutable` is ignored
 /// (the reader already drops the meta) — `set!` on such a "field" hits the local
 /// binding, so caching-hash degrades to recomputation rather than erroring.
-fn desugar_deftype<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
+fn desugar_deftype<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
     let items = rt.list_to_vec(form);
     let tsym = items[1];
     let tname = match rt.decode(tsym) {
@@ -878,6 +951,14 @@ fn desugar_deftype<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
         let it = items[i];
         if matches!(rt.decode(it), Val::Sym(_)) {
             in_object = is_sym(rt, it, "Object");
+            if !in_object {
+                // Register T as extending this protocol — markers (method-less
+                // interfaces like core.match's IPseudoPattern) are only
+                // satisfiable through this record.
+                if let Some(reg) = marker_registration(rt, comp, it, tsym) {
+                    out.push(reg);
+                }
+            }
             i += 1;
             continue;
         }
@@ -1422,6 +1503,9 @@ fn shim_call<M: ValueModel>(rt: &mut Runtime<M>, class: &str, method: &str, args
         ("RT", "seq") => "-rt-seq",
         ("RT", "conj") => "-rt-conj",
         ("RT", "assoc") => "-rt-assoc",
+        // No Class objects exist in this dialect — a class VALUE is its runtime
+        // type-tag symbol (compile.rs global_ref), so forName is symbol interning.
+        ("Class", "forName") => "-class-for-name",
         _ => return interop_unsupported(rt, format!("{class}/{method}")),
     };
     let h = sym(rt, head);
@@ -1459,6 +1543,15 @@ fn shim_instance<M: ValueModel>(rt: &mut Runtime<M>, method: &str, obj: u64, arg
         }
         "clear" => call1(rt, "-al-clear!", obj),
         "shift" => call1(rt, "-al-shift!", obj),
+        // `(.replace s target replacement)` — Java String.replace: LITERAL
+        // replace-all. clojure.string/replace with a string match is exactly
+        // that (and it's preloaded before any user require can call this).
+        "replace" => {
+            let h = sym(rt, "clojure.string/replace");
+            let mut out = vec![h, obj];
+            out.extend_from_slice(args);
+            rt.vec_to_list(&out)
+        }
         // `.indexOf coll item` -> index of item in coll, or -1.
         "indexOf" => {
             let h = sym(rt, "-index-of");
@@ -1494,11 +1587,10 @@ fn keyword_expr<M: ValueModel>(rt: &mut Runtime<M>, name_sym: u64) -> u64 {
     rt.vec_to_list(&[rec, tag, nm])
 }
 
+/// A REAL runtime vector (phase-appropriate) — the expander's synthesized
+/// binding/param vectors are the same data the reader produces.
 fn make_vector<M: ValueModel>(rt: &mut Runtime<M>, elems: Vec<u64>) -> u64 {
-    let lst = rt.vec_to_list(&elems);
-    let type_id = rt.intern(reader::VECTOR);
-    let id = rt.alloc(Obj::Record { type_id, fields: vec![lst] });
-    <M::R as microlang::Repr>::enc_ref(id)
+    data::make_vector(rt, &elems)
 }
 
 fn is_keyword<M: ValueModel>(rt: &Runtime<M>, k: u64, name: &str) -> bool {
@@ -1551,20 +1643,25 @@ fn syntax_quote<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64, 
                 return sq_concat(rt, comp, &items, gs);
             }
             // [..] -> (vec (concat ..))
-            if let Some(lst) = record_field0(rt, form, reader::VECTOR) {
-                let items = rt.list_to_vec(lst);
+            if let Some(items) = data::vector_items(rt, form) {
                 let inner = sq_concat(rt, comp, &items, gs);
                 return call1(rt, "vec", inner);
             }
             // {..} -> (hash-map 'k (sq v) ..)  (no splice in map position)
-            if let Some(lst) = record_field0(rt, form, reader::MAP) {
-                let items = rt.list_to_vec(lst);
+            if let Some(items) = data::map_entries(rt, form) {
                 let hm = sym(rt, "hash-map");
                 let mut out = vec![hm];
                 for &it in &items {
                     out.push(syntax_quote(rt, comp, it, gs));
                 }
                 return rt.vec_to_list(&out);
+            }
+            // #{..} -> (apply hash-set (concat ..))  (splices allowed, like lists)
+            if let Some(items) = data::set_items(rt, form) {
+                let inner = sq_concat(rt, comp, &items, gs);
+                let ap = sym(rt, "apply");
+                let hs = sym(rt, "hash-set");
+                return rt.vec_to_list(&[ap, hs, inner]);
             }
             // keyword / string / char -> themselves (self-evaluating)
             form
@@ -1596,144 +1693,15 @@ fn quote_form<M: ValueModel>(rt: &mut Runtime<M>, x: u64) -> u64 {
     rt.vec_to_list(&[q, x])
 }
 
-/// Does this quoted datum contain a collection literal (vector/map/set) anywhere?
-/// Such a datum can't stay a plain `(quote …)` literal, because collection
-/// literals must evaluate to the runtime persistent types, not the reader's
-/// list-backed records — so it is rebuilt with constructor calls instead.
-fn datum_has_coll<M: ValueModel>(rt: &Runtime<M>, datum: u64) -> bool {
-    if record_field0(rt, datum, reader::VECTOR).is_some()
-        || record_field0(rt, datum, reader::MAP).is_some()
-        || record_field0(rt, datum, reader::SET).is_some()
-    {
-        return true;
-    }
-    if rt.as_cons(datum).is_some() {
-        return rt.list_to_vec(datum).into_iter().any(|e| datum_has_coll(rt, e));
-    }
-    false
-}
-
-/// Rebuild a quoted datum as code: vector/map/set literals become `(vector …)` /
-/// `(hash-map …)` / `(hash-set …)` constructor calls (so they evaluate to the
-/// persistent runtime types), a list containing a collection becomes `(list …)`,
-/// and every leaf stays a `(quote leaf)`.
-fn build_quote<M: ValueModel>(rt: &mut Runtime<M>, datum: u64) -> u64 {
-    for (tag, ctor) in [
-        (reader::VECTOR, "vector"),
-        (reader::MAP, "hash-map"),
-        (reader::SET, "hash-set"),
-    ] {
-        if let Some(lst) = record_field0(rt, datum, tag) {
-            let elems = rt.list_to_vec(lst);
-            let mut out = vec![sym(rt, ctor)];
-            out.extend(elems.into_iter().map(|e| build_quote(rt, e)));
-            return rt.vec_to_list(&out);
-        }
-    }
-    if rt.as_cons(datum).is_some() && datum_has_coll(rt, datum) {
-        let elems = rt.list_to_vec(datum);
-        let mut out = vec![sym(rt, "list")];
-        out.extend(elems.into_iter().map(|e| build_quote(rt, e)));
-        return rt.vec_to_list(&out);
-    }
-    quote_form(rt, datum)
-}
-
 fn call1<M: ValueModel>(rt: &mut Runtime<M>, f: &str, arg: u64) -> u64 {
     let fs = sym(rt, f);
     rt.vec_to_list(&[fs, arg])
 }
 
-/// The elements of a binding/param vector, from EITHER the reader's list-backed
-/// `Vector` record OR a runtime `PVec`. Syntax-quote and the `vector` constructor
-/// both build binding forms (`(loop [~i 0] …)`, `(fn [x] …)`) as runtime PVecs,
-/// so the expander must read them structurally here. Returns `None` if `form` is
-/// neither representation.
+/// The elements of a binding/param vector — any runtime vector representation
+/// (see `data::vector_items`). Returns `None` if `form` is not a vector.
 fn binding_items<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Option<Vec<u64>> {
-    if let Some(lst) = record_field0(rt, form, reader::VECTOR) {
-        return Some(rt.list_to_vec(lst));
-    }
-    // A runtime vector built by a macro / syntax-quote. Two layouts coexist: the
-    // load-time `PVec` (macros expanded while core.clj loads) and the cljs-ported
-    // `PersistentVector` (user-time expansion, after cljs types load).
-    if record_field0(rt, form, "PVec").is_some() {
-        return Some(pvec_elems(rt, form));
-    }
-    if record_field0(rt, form, "PersistentVector").is_some() {
-        return Some(persistent_vector_elems(rt, form));
-    }
-    None
-}
-
-/// Read a cljs `PersistentVector`'s elements: fields [meta cnt shift root tail
-/// __hash], where `root` is a `VectorNode` (arr = its field 1) and `tail` is a
-/// raw array. Mirrors cljs `unchecked-array-for`.
-fn persistent_vector_elems<M: ValueModel>(rt: &Runtime<M>, pv: u64) -> Vec<u64> {
-    let cnt = pvec_int_field(rt, pv, 1);
-    let shift = pvec_int_field(rt, pv, 2);
-    let root = pvec_ref_field(rt, pv, 3);
-    let tail = pvec_ref_field(rt, pv, 4);
-    let node_arr = |rt: &Runtime<M>, node: u64| pvec_ref_field(rt, node, 1);
-    let tail_off = if cnt < 32 { 0 } else { ((cnt - 1) >> 5) << 5 };
-    let mut out = Vec::with_capacity(cnt);
-    for i in 0..cnt {
-        let arr = if i >= tail_off {
-            tail
-        } else {
-            let mut node = root;
-            let mut level = shift;
-            while level > 0 {
-                node = arr_get(rt, node_arr(rt, node), (i >> level) & 31);
-                level -= 5;
-            }
-            node_arr(rt, node)
-        };
-        out.push(arr_get(rt, arr, i & 31));
-    }
-    out
-}
-
-fn pvec_int_field<M: ValueModel>(rt: &Runtime<M>, pv: u64, i: usize) -> usize {
-    let Val::Ref(id) = rt.decode(pv) else { panic!("PVec: not a record") };
-    let Obj::Record { fields, .. } = &rt.heap()[id as usize] else { panic!("PVec: not a record") };
-    match rt.decode(fields[i]) {
-        Val::Int(n) => n as usize,
-        _ => panic!("PVec: field {i} is not an int"),
-    }
-}
-fn pvec_ref_field<M: ValueModel>(rt: &Runtime<M>, pv: u64, i: usize) -> u64 {
-    let Val::Ref(id) = rt.decode(pv) else { panic!("PVec: not a record") };
-    let Obj::Record { fields, .. } = &rt.heap()[id as usize] else { panic!("PVec: not a record") };
-    fields[i]
-}
-fn arr_get<M: ValueModel>(rt: &Runtime<M>, arr: u64, i: usize) -> u64 {
-    let Val::Ref(id) = rt.decode(arr) else { panic!("PVec node: not an array") };
-    let Obj::Vector(v) = &rt.heap()[id as usize] else { panic!("PVec node: not an array") };
-    v[i]
-}
-/// Read a PVec's logical elements by walking its trie (mirrors core's `-pv-nth`).
-fn pvec_elems<M: ValueModel>(rt: &Runtime<M>, pv: u64) -> Vec<u64> {
-    let cnt = pvec_int_field(rt, pv, 0);
-    let shift = pvec_int_field(rt, pv, 1);
-    let root = pvec_ref_field(rt, pv, 2);
-    let tail = pvec_ref_field(rt, pv, 3);
-    let tail_off = if cnt < 32 { 0 } else { ((cnt - 1) >> 5) << 5 };
-    let mut out = Vec::with_capacity(cnt);
-    for i in 0..cnt {
-        let node = if i >= tail_off {
-            tail
-        } else {
-            let mut n = root;
-            let mut level = shift;
-            while level > 0 {
-                n = arr_get(rt, n, (i >> level) & 31);
-                level -= 5;
-            }
-            n
-        };
-        out.push(arr_get(rt, node, i & 31));
-    }
-    out
+    data::vector_items(rt, form)
 }
 
 fn record_field0<M: ValueModel>(rt: &Runtime<M>, form: u64, tag: &str) -> Option<u64> {
@@ -1995,9 +1963,9 @@ fn ensure_loaded<M: ValueModel>(
 }
 
 /// Map the simple (last dotted segment of a) Java/JS class name to the runtime
-/// tag `type-of` reports, or `None` if we don't model it. Shared by `instance?`
-/// and typed `catch`.
-fn class_to_tag(simple: &str) -> Option<&'static str> {
+/// tag `type-of` reports, or `None` if we don't model it. Shared by `instance?`,
+/// typed `catch`, and class references in value position (`compile::global_ref`).
+pub(crate) fn class_to_tag(simple: &str) -> Option<&'static str> {
     Some(match simple {
         "Symbol" => "Symbol",
         "Keyword" => "Keyword",
@@ -2035,6 +2003,11 @@ fn instance_rewrite<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u
         if let Some(pos) = cname.rfind('.') {
             let dotted_var = rt.intern(&format!("{}/{}", &cname[..pos], &cname[pos + 1..]));
             v.push(comp.resolve_ref(rt, dotted_var));
+            // `clojure.lang.ILookup` etc.: the JVM interface corresponds to OUR
+            // protocol of the same simple name (a clojure.core var), so
+            // `instance?` means `satisfies?` — resolve the bare simple name too.
+            let simple = rt.intern(&cname[pos + 1..]);
+            v.push(comp.resolve_ref(rt, simple));
         }
         v
     };
