@@ -97,6 +97,125 @@ into `-registry` and `-tag->class`, (b) emits `-proto-method` forms for each
 `:method`, (c) nothing else. Statics are just data/fns in the descriptor —
 a mutable static (rare) is an atom in `:statics`.
 
+## What `defclass` expands to (no new primitives)
+
+`defclass` is an ordinary in-language macro, and everything it expands to
+**already exists**. It is not a primitive and it is not `deftype` — it sits
+beside `deftype` on the same dispatch substrate:
+
+* `deftype` = *create* a new concrete type (fresh record tag + constructor +
+  field registry).
+* `defclass` = *describe* a host type by attaching behavior to a type that
+  already exists (`String` instances are just our strings; `Math` has no
+  instances at all) — plus a registry entry for the reflective axis.
+
+The full expansion of the String example:
+
+```clojure
+(defclass java.lang.String
+  (:tag String)
+  (:extends java.lang.Object)
+  (:implements java.lang.CharSequence)
+  (:ctor ([] "") ([x] (str x)))
+  (:method charAt [s i] (nth s i))
+  (:method substring ([s b] (subs s b)) ([s b e] (subs s b e)))
+  (:static-fn valueOf [x] (str x))
+  (:static CASE_INSENSITIVE_ORDER -ci-comparator))
+
+;; ⇓ macroexpands to ⇓
+
+(do
+  ;; 1. The reflective entry: plain data into the registry atoms, via an
+  ;;    ordinary defn (-jvm-register! also indexes :tag -> FQN and registers
+  ;;    interface markers through the existing -register-marker registry).
+  (host.jvm/-jvm-register!
+    'java.lang.String
+    {:kind       :class
+     :tag        'String
+     :extends    'java.lang.Object
+     :implements '[java.lang.CharSequence]
+     :ctor       (fn ([] "") ([x] (str x)))
+     :statics    {'CASE_INSENSITIVE_ORDER -ci-comparator}
+     :static-fns {'valueOf (fn [x] (str x))}})
+
+  ;; 2. One -proto-method per :method — the SAME internal form that
+  ;;    extend-type and deftype emit today (compiles to Ir::DefMethod).
+  ;;    The dispatch key is the DOT-MUNGED name, indexed by the :tag.
+  (-proto-method .charAt   String (fn [s i] (nth s i)))
+  (-proto-method .substring String (fn ([s b] (subs s b)) ([s b e] (subs s b e)))))
+```
+
+That's the whole trick: **instance methods are protocol-method entries whose
+names happen to start with a dot.** One dispatch key (`.charAt`) with per-type
+impls is exactly JVM receiver dispatch; two classes registering `.length` on
+their own tags is precisely how our protocols already handle it.
+
+### The call-site pipeline
+
+```clojure
+(.charAt s 1)
+;; interop_rewrite (Rust, name-blind): head starts with `.` →
+(%dispatch host.jvm/.charAt s 1)
+;; compile: %dispatch (added for first-class protocol methods) resolves the
+;; qualified sym and emits Ir::Dispatch{site, method} — a fresh site id, so
+;; the call gets its OWN inline cache, same speed as any protocol call.
+```
+
+Details that make this work:
+
+* The method sym is emitted **fully qualified** (`host.jvm/.charAt`) because
+  `-proto-method` def-names methods into the namespace that's current when it
+  compiles (host.jvm). Qualifying at the lowering site makes user-ns calls
+  resolve to the same key with zero refer plumbing.
+* `%dispatch` doesn't consult the compiler's methods set, so there is no
+  registration-order dependence; an unregistered method is a **dispatch miss
+  at runtime — already a catchable error** naming the method and type (the
+  JIT-tier catchability was fixed in the core.match work).
+* Universal defaults register on `Object` (the dispatch registry's existing
+  fallback), e.g. a `.toString` default of `pr-str`. Note the limitation:
+  method lookup is exact-tag-then-Object — the `:extends` chain is walked by
+  `instance?`/`catch`, **not** by method dispatch, so an intermediate
+  superclass method must be registered per concrete tag (a `defclass` option
+  can copy parent methods down at registration time if we ever need it).
+
+### Statics and constructors
+
+Reflective path, always available:
+
+```clojure
+(Math/abs x)   ⇒ (host.jvm/invoke-static 'java.lang.Math 'abs x)   ; registry lookup + call
+Math/PI        ⇒ (host.jvm/static-field  'java.lang.Math 'PI)
+(String. x)    ⇒ (host.jvm/construct     'java.lang.String x)      ; :ctor from registry
+```
+
+These are ordinary defns over the registry — a map lookup per call, fine for
+statics. If a static ever shows up hot, the optimization is local:
+`-jvm-register!` can additionally `def` a munged var per static fn
+(`java$lang$Math$abs`) and the lowering can target it — but that's a tuning
+knob, not part of the design.
+
+### When a host class has no native representation
+
+`String`/`PersistentVector` map onto existing tags. A stateful host class with
+no analog (`StringBuilder`, `java.util.Random`) is where `deftype` re-enters:
+`defclass` grows a `(:state [fields…])` clause and expands its ctor to an
+internal `deftype` — the descriptor's `:tag` is that deftype's tag, and
+`:methods` register against it as usual. So the layering is: **defclass
+delegates to deftype when it needs storage, and to nothing when it doesn't.**
+
+### Inventory: existing vs new
+
+| piece                              | status |
+| ---------------------------------- | ------ |
+| `-proto-method` / `Ir::DefMethod` + inline-cached dispatch | exists (extend-type/deftype use it) |
+| `%dispatch` special form           | exists (added for first-class protocol methods) |
+| `Object` dispatch fallback         | exists |
+| `-register-marker` (marker interfaces) | exists (added for core.match) |
+| atoms, maps, records for the registry | exist |
+| `'Class` wrapper record + `java.lang.Class` methods (`.getName` via its own `defclass`!) | new, in-language |
+| `defclass` macro + `host.jvm` defns (`-jvm-register!`, `invoke-static`, `construct`, `class-named`, `for-name`, `instance?`, `assignable-from?`) | new, in-language |
+| generic interop lowering + per-ns import table | new, in Rust (mechanical; replaces the shim tables) |
+
 ## What the Rust expander shrinks to
 
 All the per-name tables in `interop_rewrite` delete. Lowering becomes purely
