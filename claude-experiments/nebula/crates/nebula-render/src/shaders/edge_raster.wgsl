@@ -47,16 +47,25 @@ struct EdgeStyle {
 struct AccumDims {
     w: u32,
     h: u32,
-    _p0: u32,
+    /// Threads dispatched per edge: ceil(screen diagonal / SEG_PX). Thread s
+    /// of an edge walks DDA steps [s*SEG_PX, (s+1)*SEG_PX) — bounding every
+    /// thread's walk so long lines can't stall their warp.
+    k: u32,
     _p1: u32,
 };
 @group(1) @binding(0) var<uniform> dims: AccumDims;
 @group(1) @binding(1) var<storage, read_write> accum: array<atomic<u32>>;
+// Per-pixel "all channels saturated" flag. Set when an add pushes every
+// channel past SCALE; sums are monotonic so the flag can never be wrong, and
+// checking it costs one load instead of three.
+@group(1) @binding(2) var<storage, read_write> sat_flags: array<atomic<u32>>;
 
 // Fixed-point scale for accumulation. Max contribution per edge per channel is
 // ~alpha * SCALE ≈ 500, so u32 overflows only past ~8M overlapping edges on
 // one pixel.
 const SCALE: f32 = 4096.0;
+// Max DDA steps per thread (must match SEG_PX in render.rs).
+const SEG_PX: u32 = 256u;
 
 fn unpack_color(c: u32) -> vec4<f32> {
     return vec4<f32>(
@@ -89,7 +98,9 @@ fn raster_edges(
     @builtin(num_workgroups) nwg: vec3<u32>,
     @builtin(local_invocation_index) li: u32,
 ) {
-    let e = (wg.y * nwg.x + wg.x) * 256u + li;
+    let gid = (wg.y * nwg.x + wg.x) * 256u + li;
+    let e = gid / dims.k;
+    let s = gid % dims.k;
     if (e * 2u + 1u >= arrayLength(&edges)) {
         return;
     }
@@ -133,7 +144,15 @@ fn raster_edges(
     let seg = d * (t1 - t0);
     // One pixel per major-axis step, endpoint-exclusive — approximates the
     // hardware diamond-exit rule. Sub-pixel edges still light one pixel.
+    // Thread s walks only its SEG_PX-step slice, with the identical t formula
+    // the single-thread walk used, so the slicing changes nothing about the
+    // output — it only balances the work across the warp.
     let n = max(u32(ceil(max(abs(seg.x), abs(seg.y)))), 1u);
+    let start = s * SEG_PX;
+    if (start >= n) {
+        return;
+    }
+    let end = min(n, start + SEG_PX);
     let inv_n = 1.0 / f32(n);
     // Once a pixel's sum reaches 1.0 in every channel the displayed value is
     // clamped and further adds cannot change it (the background only adds
@@ -141,20 +160,25 @@ fn raster_edges(
     // read-modify-writes in dense saturated cores into cheap reads — an
     // optimization fixed-function blending cannot express.
     let sat = u32(SCALE);
-    for (var i = 0u; i < n; i++) {
+    for (var i = start; i < end; i++) {
         let t = f32(i) * inv_n;
         let p = a_px + seg * t;
         let x = u32(clamp(p.x, 0.0, wf - 1.0));
         let y = u32(clamp(p.y, 0.0, hf - 1.0));
-        let col = mix(col_a, col_b, mix(t0, t1, t));
-        let idx = (y * dims.w + x) * 3u;
-        if (atomicLoad(&accum[idx]) >= sat &&
-            atomicLoad(&accum[idx + 1u]) >= sat &&
-            atomicLoad(&accum[idx + 2u]) >= sat) {
+        let pix = y * dims.w + x;
+        if (atomicLoad(&sat_flags[pix]) != 0u) {
             continue;
         }
-        atomicAdd(&accum[idx], u32(round(col.r * alpha * SCALE)));
-        atomicAdd(&accum[idx + 1u], u32(round(col.g * alpha * SCALE)));
-        atomicAdd(&accum[idx + 2u], u32(round(col.b * alpha * SCALE)));
+        let col = mix(col_a, col_b, mix(t0, t1, t));
+        let idx = pix * 3u;
+        let cr = u32(round(col.r * alpha * SCALE));
+        let cg = u32(round(col.g * alpha * SCALE));
+        let cb = u32(round(col.b * alpha * SCALE));
+        let old_r = atomicAdd(&accum[idx], cr);
+        let old_g = atomicAdd(&accum[idx + 1u], cg);
+        let old_b = atomicAdd(&accum[idx + 2u], cb);
+        if (old_r + cr >= sat && old_g + cg >= sat && old_b + cb >= sat) {
+            atomicStore(&sat_flags[pix], 1u);
+        }
     }
 }

@@ -117,11 +117,18 @@ pub struct Renderer {
     edge_raster: bool,
 }
 
+/// Max DDA steps each raster thread walks (must match SEG_PX in edge_raster.wgsl).
+const SEG_PX: u32 = 256;
+
 /// Fixed-point accumulation buffer for the compute raster path.
 struct AccumGpu {
     buf: wgpu::Buffer,
+    /// Per-pixel saturation flags (see sat_flags in edge_raster.wgsl).
+    flags: wgpu::Buffer,
     w: u32,
     h: u32,
+    /// Raster threads per edge: ceil(diagonal / SEG_PX).
+    k: u32,
     /// Group-1 bind group for edge_raster (dims + read_write accum).
     raster_bg: wgpu::BindGroup,
     /// Group-0 bind group for the fullscreen resolve (dims + read-only accum).
@@ -427,7 +434,7 @@ impl Renderer {
         });
         let raster_accum_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("edge_raster_accum_bgl"),
-            entries: &[compute_uniform(0), rw_storage(1)],
+            entries: &[compute_uniform(0), rw_storage(1), rw_storage(2)],
         });
         let raster_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("edge_raster_pl"),
@@ -589,10 +596,18 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let diag = ((w as f32).hypot(h as f32)).ceil() as u32;
+        let k = diag.div_ceil(SEG_PX).max(1);
         let dims = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("edge_accum_dims"),
-            contents: bytemuck::cast_slice(&[w, h, 0, 0]),
+            contents: bytemuck::cast_slice(&[w, h, k, 0]),
             usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let flags = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("edge_accum_sat_flags"),
+            size: (w as u64 * h as u64 * 4).max(16),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         let raster_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("edge_accum_raster_bg"),
@@ -600,6 +615,7 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: dims.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: flags.as_entire_binding() },
             ],
         });
         let resolve_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -610,7 +626,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 1, resource: buf.as_entire_binding() },
             ],
         });
-        self.accum = Some(AccumGpu { buf, w, h, raster_bg, resolve_bg });
+        self.accum = Some(AccumGpu { buf, flags, w, h, k, raster_bg, resolve_bg });
         self.cull_dirty = true;
     }
 
@@ -650,17 +666,20 @@ impl Renderer {
             return false;
         };
         enc.clear_buffer(&accum.buf, 0, None);
+        enc.clear_buffer(&accum.flags, 0, None);
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("edge_raster"),
             timestamp_writes,
         });
         pass.set_pipeline(&self.raster_pipeline);
         pass.set_bind_group(1, &accum.raster_bg, &[]);
+        let k = self.accum.as_ref().map_or(1, |a| a.k) as u64;
         for et in &self.edge_types {
             if !(et.visible && et.num_edges > 0) {
                 continue;
             }
-            let wgs = et.num_edges.div_ceil(256);
+            let threads = et.num_edges as u64 * k;
+            let wgs = u32::try_from(threads.div_ceil(256)).unwrap_or(u32::MAX);
             let x = wgs.min(65_535);
             let y = wgs.div_ceil(x.max(1));
             pass.set_bind_group(0, &et.raster_bg, &[]);
