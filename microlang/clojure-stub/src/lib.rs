@@ -1708,12 +1708,43 @@ fn multi_arity<M: ValueModel>(rt: &mut Runtime<M>, clauses: &[u64]) -> u64 {
         let test = if variadic {
             rt.encode(Val::Bool(true))
         } else {
+            // Arity test via the `%num-eq` PRIM (inlines to `Prim(Eq)`), not the
+            // variadic `=` fn which allocates a seq on every dispatch.
             let k = int(rt, fixed as i128);
-            call2(rt, "=", n, k)
+            call2(rt, "%num-eq", n, k)
         };
         let (paramvec, body) = wrap_fn_recur(rt, paramvec, &parts[1..]);
+        // Bind each fixed param from `g` via the `%first`/`%rest` PRIMS (no
+        // allocation) instead of `[paramvec] g`, which destructured through the
+        // variadic `nth` fn — an arg-list alloc PER PARAM, on every call to any
+        // multi-arity fn (`conj`/`nth`/`assoc`/`=`/…). A `& rest` tail binds to
+        // the remaining list directly. Destructuring-pattern params still work:
+        // the pattern is bound from the `(%first …)` expression by the let binder.
+        let plist = binding_items(rt, paramvec).unwrap_or_else(|| rt.list_to_vec(paramvec));
+        let mut binds: Vec<u64> = Vec::new();
+        let mut depth = 0usize;
+        let mut amp = false;
+        for &p in &plist {
+            if is_sym(rt, p, "&") {
+                amp = true;
+                continue;
+            }
+            let mut cursor = g;
+            for _ in 0..depth {
+                cursor = call1(rt, "%rest", cursor);
+            }
+            if amp {
+                binds.push(p);
+                binds.push(cursor);
+            } else {
+                let fe = call1(rt, "%first", cursor);
+                binds.push(p);
+                binds.push(fe);
+                depth += 1;
+            }
+        }
         let letsym = sym(rt, "let");
-        let bindvec = make_vector(rt, vec![paramvec, g]);
+        let bindvec = make_vector(rt, binds);
         let mut letf = vec![letsym, bindvec];
         letf.extend(body);
         let letform = rt.vec_to_list(&letf);
