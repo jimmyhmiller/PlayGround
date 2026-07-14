@@ -171,6 +171,9 @@ def main():
     up, uf = run_ui_smoke_test(binary, filt)
     passed += up; failed += uf
     if uf: fails.append("ui_smoke")
+    umj, umf = run_ui_smoke_modules_test(binary, filt)
+    passed += umj; failed += umf
+    if umf: fails.append("ui_smoke_modules")
     # Phase 10: the reverse-proxy portal (registry + proxy + reaping). Gated on curl present.
     pp, pf = run_portal_test(binary, filt)
     passed += pp; failed += pf
@@ -979,6 +982,37 @@ def run_ui_smoke_test(binary, filt):
         return 0, 0
     if p.returncode != 0:
         print("FAIL ui_smoke")
+        for ln in (p.stdout + p.stderr).strip().splitlines():
+            print("     " + ln)
+        return 0, 1
+    return 1, 0
+
+
+def run_ui_smoke_modules_test(binary, filt):
+    """Phase 3 (07-modules.md §7) gate: a lean sibling to run_ui_smoke_test that verifies ONLY
+    the module-system-specific viewer surface — type rail grouped by module (nesting interface
+    groups inside), clicking a module group header focuses the viewer (URL-addressable
+    #m=<module>, census scopes to that subtree, an "everywhere" toggle appears), and clearing
+    focus restores the whole-program view. Same Chrome-presence gating as run_ui_smoke_test."""
+    if filt and "ui" not in filt and "smoke" not in filt and "module" not in filt:
+        return 0, 0
+    import shutil
+    if shutil.which("node") is None:
+        print("SKIPPED ui_smoke_modules: node not found on PATH")
+        return 0, 0
+    script = os.path.join(HERE, "ui-smoke-modules.mjs")
+    if not os.path.exists(script):
+        return 0, 0
+    try:
+        p = subprocess.run(["node", script], capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        print("FAIL ui_smoke_modules\n     timed out")
+        return 0, 1
+    if "SKIPPED" in p.stdout:
+        print(p.stdout.strip().splitlines()[0])
+        return 0, 0
+    if p.returncode != 0:
+        print("FAIL ui_smoke_modules")
         for ln in (p.stdout + p.stderr).strip().splitlines():
             print("     " + ln)
         return 0, 1
