@@ -1,9 +1,32 @@
 # Scry — Module System Design
 
-**Status: RATIFIED (Jimmy ruling, 2026-07-13) — pinned as DECISIONS.md #18.**
+**Status: RATIFIED (Jimmy ruling, 2026-07-13) — pinned as DECISIONS.md #18. BUILT
+2026-07-14 (all three phases, 321 tests green).**
 Wildcard imports are ruled out permanently (not open). Supersedes `01-language.md` §1.6
 (which sketched the same direction but was never implemented and contained one
 inconsistency, fixed there now).
+
+**As-built deviations (flagged for ruling, not silently decided):**
+1. **Focus URL is a hash route (`#m=<dotted.module>`), not the path form `/p/<id>/m/…`**
+   this doc specified. The server/portal have no SPA-fallback routing — path form means
+   hand-rolled wildcard parsers in both `server.coil` and `portal.coil` for zero
+   functional gain (the hash is shareable and back/forward-navigable). Upgradeable later.
+2. **§6's claim that `agents.tools.shell.ShellTool.instances()` works is not accurate as
+   built.** Qualified names work as value refs, constructor calls, and function calls,
+   but the qualified fast path is one level deep (`<module>.<member>(...)`) — a
+   *multi-segment receiver* for reflect-static forms (`<mod>.<Class>.instances()`) and
+   enum-variant access (`<mod>.<Enum>.Variant`) falls through to "unknown identifier".
+   The working mechanism everywhere (and what the viewer uses) is the eval module header
+   (`module a.b.c` prefix, §6). OPEN follow-up: extend `compile-dotted-call` to resolve
+   the longest module prefix so #18's "fully-qualified refs work everywhere" is literal.
+3. **Unfocused map rings bucket by each ownership tree's root's module.** Types from an
+   imported module that live entirely inside another module's owned tree (e.g.
+   `agent.core` types owned by `assistant.Agent`) ride inside the owning ring with
+   per-row module tags, and get standalone roots when focused. Unconditional
+   same-module-only nesting would have broken natural cross-module ownership
+   (`Agent owns Conversation`); nesting is unrestricted unfocused, same-module while
+   focused. Module chrome renders only when ≥2 non-std top-level modules exist, so
+   single-module programs look exactly as before.
 
 ## 0. Why modules, and why they look different in Scry
 

@@ -1,6 +1,6 @@
 # Scry — Status: What Works, What Doesn't
 
-_Last updated: 2026-07-11. This is the honest source-of-truth for the current build.
+_Last updated: 2026-07-14. This is the honest source-of-truth for the current build.
 For design rulings see `DECISIONS.md`; for the as-built log + Coil friction see `06-implementation.md`._
 
 ## What Scry is
@@ -13,7 +13,7 @@ expressions against the real heap, invoke methods, run declared actions, and hot
 code, all while the program runs.
 
 Implemented in **Coil** (a Lisp-syntax low-level language). The compiler is a
-lexer → typechecker → bytecode VM; there is no JIT yet. ~301 golden + end-to-end tests
+lexer → typechecker → bytecode VM; there is no JIT yet. ~321 golden + end-to-end tests
 gate every change (`python3 tests/run-tests.py`).
 
 - **Thesis:** observability-first. The viewer is not a debugger bolted on — it's the point.
@@ -75,9 +75,37 @@ Everything in this section is implemented, typechecked, and covered by golden te
   safepoints, atomic-bump arena allocation. `readLine` and `sleep` are
   safepoint-cooperative, so the viewer stays live while a program blocks at a prompt.
 
+### Modules (DECISIONS #18, docs/07-modules.md — built 2026-07-14, all three phases)
+- **One file = one module**; name = dotted path from project root including the file stem
+  (`agents/tools/shell.scry` → `agents.tools.shell`). Optional `module` header is checked
+  documentation (mismatch = typecheck error). Project root = nearest `scry.toml` ancestor
+  else the entry file's dir; `std.*` also resolves against a std root (`SCRY_STD` or
+  next to the binary); legacy relative-to-importing-file resolution kept as a fallback.
+- **No visibility, ever** — no public/private/exports; modules are addresses and lenses.
+  **No wildcard imports, ever** (parse error, by design). Imports are pure name-scoping
+  (`import a.b.{X, Y}`, `as` aliasing); cycles are legal; unresolved names suggest the
+  exact import line to add. Two modules can declare the same bare class name and coexist.
+- **Qualified names are identity** (decl table, mono keys, live-redef); bare names are
+  display. Fully-qualified refs work with no import as value refs / constructor calls /
+  function calls — but NOT yet as multi-segment receivers of reflect-static forms
+  (`mod.Class.instances()`) or enum-variant access (one-level-deep fast path; see
+  07-modules.md as-built note 2). The eval **module header** covers those cases.
+- **Wire**: `schema()`/`types()`/`graph()`/`functions()` nodes carry `"module"` +
+  `"qualified"` (plus `refQualified` beside the bare `refTypes`); new `modules()` op
+  returns the module tree with pre-aggregated counts (live, `scry inspect`, and portal
+  static). An eval may start with a `module a.b.c` header to set resolution AND
+  redefinition context — the wire op is still just `{id, source}`.
+- **Viewer focus mode**: modules are the outermost containment ring in the map (chrome
+  only when ≥2 non-std modules; `std.*` recedes); clicking a module scopes census, map,
+  search, and functions to it — URL-addressable as `#m=<dotted.module>`, breadcrumbs to
+  zoom out, Esc clears, boundary references render as identity chips with
+  expand-focus; the type rail groups by module; the REPL dock has a module picker
+  (prepends the header). Internals rekeyed by qualified name (bare-name collisions
+  across modules render disambiguated).
+
 ### Written in Scry (not built-in)
 - `std/json.scry` — a JSON parser/serializer written in the language itself.
-- `std/agent.scry` — the `Model` interface + agent-loop scaffolding.
+- `agent/core.scry` (module `agent.core`) — the `Model` interface + agent-loop scaffolding.
 
 ---
 
