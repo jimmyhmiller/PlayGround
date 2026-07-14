@@ -16,3 +16,21 @@ To add, close, or list bugs, use:
 
 This file tracks bugs discovered during development.
 
+## balance closes missing top-level paren at EOF, nesting the rest of the file [attached-bitter-orca]
+
+**ID:** attached-bitter-orca
+**Timestamp:** 2026-07-14 00:33:25
+**Severity:** high
+**Location:** src/parinfer_simple.rs (balance() auto-close-on-dedent loop (~line 286) + EOF fallback (~line 305))
+**Tags:** balance, parinfer, corruption, non-local
+
+### Description
+
+Column-0 openers can never be auto-closed by the dedent rule: parinfer_simple.rs balance() uses 'opener_indent > next_indent' (strict) and next_indent floors at 0, so an unclosed top-level form rides the stack to the EOF fallback, which appends the closer to the LAST line. Every later top-level form becomes a child of the broken one. Output is paren-balanced but structurally corrupted; the visible diff is one char far from the edit. Hit for real during scry work (stray paren appeared in untouched scry-dump-bytecode 1300 lines below the edit). Full analysis + suggested fix: BUG_NONLOCAL_EOF_CLOSE.md; repro input: test_nonlocal_eof_close.lisp.
+
+### Minimal Reproducing Case
+
+paredit-like balance test_nonlocal_eof_close.lisp --in-place  # alpha stays open; ')' lands after gamma instead
+
+---
+
