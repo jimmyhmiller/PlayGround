@@ -961,6 +961,15 @@ impl<M: ValueModel> Runtime<M> {
                 let nid = self.alloc(Obj::Vector(copy));
                 M::R::enc_ref(nid)
             }
+            Prim::PvConj => self.pv_conj(args[0], args[1]),
+            Prim::PvNth => {
+                let Val::Int(i) = self.decode(args[1]) else { panic!("pv-nth: index must be an int"); };
+                self.pv_nth(args[0], i as i64)
+            }
+            Prim::PvAssoc => {
+                let Val::Int(i) = self.decode(args[1]) else { panic!("pv-assoc: index must be an int"); };
+                self.pv_assoc(args[0], i as i64, args[2])
+            }
             Prim::ArrPush => {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("apush: not an array");
@@ -1967,6 +1976,173 @@ impl<M: ValueModel> Runtime<M> {
             _ => panic!("arith on non-numbers"),
         }
     }
+    // ── native persistent vector ──────────────────────────────────────────
+    // `'PersistentVector [meta cnt shift root tail __hash]`; trie nodes are
+    // `'VectorNode [edit arr]` wrapping 32-wide `Obj::Vector` arrays; `tail` is a
+    // bare array. Ported byte-for-byte from cljs_types.clj so results are
+    // identical. GC-safe WITHOUT rooting: `alloc` never relocates existing objects
+    // and GC runs only at explicit safepoints (never mid-prim), so the raw `u64`
+    // refs held across the allocations below stay valid. One native call replaces
+    // the ~30 interpreted helper calls the deftype methods compiled to.
+
+    /// (meta, cnt, shift, root, tail) of a `'PersistentVector`.
+    fn pv_read(&self, pv: u64) -> (u64, i64, i64, u64, u64) {
+        let Val::Ref(id) = self.decode(pv) else { panic!("pvec: not a record") };
+        let Obj::Record { fields, .. } = &self.heap()[id as usize] else { panic!("pvec: not a record") };
+        let cnt = match self.decode(fields[1]) { Val::Int(i) => i as i64, _ => panic!("pvec cnt") };
+        let shift = match self.decode(fields[2]) { Val::Int(i) => i as i64, _ => panic!("pvec shift") };
+        (fields[0], cnt, shift, fields[3], fields[4])
+    }
+    /// The array inside a `'VectorNode` (field 1).
+    fn node_arr(&self, node: u64) -> u64 {
+        let Val::Ref(id) = self.decode(node) else { panic!("vnode: not a record") };
+        let Obj::Record { fields, .. } = &self.heap()[id as usize] else { panic!("vnode: not a record") };
+        fields[1]
+    }
+    fn arr_clone(&self, arr: u64) -> Vec<u64> {
+        let Val::Ref(id) = self.decode(arr) else { panic!("pvec: array not a ref") };
+        let Obj::Vector(v) = &self.heap()[id as usize] else { panic!("pvec: not an array") };
+        v.clone()
+    }
+    fn arr_at(&self, arr: u64, i: usize) -> u64 {
+        let Val::Ref(id) = self.decode(arr) else { panic!("pvec: array not a ref") };
+        let Obj::Vector(v) = &self.heap()[id as usize] else { panic!("pvec: not an array") };
+        v[i]
+    }
+    fn mk_array(&mut self, v: Vec<u64>) -> u64 {
+        M::R::enc_ref(self.alloc(Obj::Vector(v)))
+    }
+    fn mk_node(&mut self, arr: u64) -> u64 {
+        let nil = self.enc_nil();
+        let ty = self.intern("VectorNode");
+        M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![nil, arr] }))
+    }
+    fn mk_pv(&mut self, meta: u64, cnt: i64, shift: i64, root: u64, tail: u64) -> u64 {
+        let cntb = self.encode(Val::Int(cnt as i128));
+        let shiftb = self.encode(Val::Int(shift as i128));
+        let nil = self.enc_nil();
+        let ty = self.intern("PersistentVector");
+        M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![meta, cntb, shiftb, root, tail, nil] }))
+    }
+    #[inline]
+    fn tail_off(cnt: i64) -> i64 {
+        if cnt < 32 { 0 } else { ((cnt - 1) >> 5) << 5 }
+    }
+    /// Wrap `node` under `level/5` single-child `'VectorNode` levels.
+    fn pv_new_path(&mut self, level: i64, node: u64) -> u64 {
+        let mut ret = node;
+        let mut ll = level;
+        while ll != 0 {
+            let nil = self.enc_nil();
+            let mut a = vec![nil; 32];
+            a[0] = ret;
+            let arr = self.mk_array(a);
+            ret = self.mk_node(arr);
+            ll -= 5;
+        }
+        ret
+    }
+    /// Path-copy from `parent`, inserting `tailnode` at the leaf slot for `cnt-1`.
+    fn pv_push_tail(&mut self, cnt: i64, level: i64, parent: u64, tailnode: u64) -> u64 {
+        let subidx = (((cnt - 1) >> level) & 31) as usize;
+        let parr = self.node_arr(parent);
+        let mut ret = self.arr_clone(parr);
+        if level == 5 {
+            ret[subidx] = tailnode;
+        } else {
+            let child = self.arr_at(parr, subidx);
+            ret[subidx] = if matches!(self.decode(child), Val::Nil) {
+                self.pv_new_path(level - 5, tailnode)
+            } else {
+                self.pv_push_tail(cnt, level - 5, child, tailnode)
+            };
+        }
+        let arr = self.mk_array(ret);
+        self.mk_node(arr)
+    }
+    fn pv_conj(&mut self, pv: u64, o: u64) -> u64 {
+        let (meta, cnt, shift, root, tail) = self.pv_read(pv);
+        // Common case: room in the tail — copy the tail array and append.
+        if cnt - Self::tail_off(cnt) < 32 {
+            let mut nt = self.arr_clone(tail);
+            nt.push(o);
+            let new_tail = self.mk_array(nt);
+            return self.mk_pv(meta, cnt + 1, shift, root, new_tail);
+        }
+        // Tail full: wrap it as a trie node and push into the tree.
+        let tail_node = self.mk_node(tail);
+        let root_overflow = (cnt >> 5) > (1i64 << shift);
+        let (new_shift, new_root) = if root_overflow {
+            let path = self.pv_new_path(shift, tail_node);
+            let nil = self.enc_nil();
+            let mut a = vec![nil; 32];
+            a[0] = root;
+            a[1] = path;
+            let arr = self.mk_array(a);
+            let nr = self.mk_node(arr);
+            (shift + 5, nr)
+        } else {
+            (shift, self.pv_push_tail(cnt, shift, root, tail_node))
+        };
+        let new_tail = self.mk_array(vec![o]);
+        self.mk_pv(meta, cnt + 1, new_shift, new_root, new_tail)
+    }
+    fn pv_nth(&mut self, pv: u64, i: i64) -> u64 {
+        let (_, cnt, shift, root, tail) = self.pv_read(pv);
+        if i < 0 || i >= cnt {
+            let sid = self.alloc(Obj::Str(format!("No item {i} in vector of length {cnt}")));
+            self.signal_throw(M::R::enc_ref(sid));
+            return self.enc_nil();
+        }
+        let arr = if i >= Self::tail_off(cnt) {
+            tail
+        } else {
+            let mut node = root;
+            let mut level = shift;
+            while level > 0 {
+                let na = self.node_arr(node);
+                node = self.arr_at(na, ((i >> level) & 31) as usize);
+                level -= 5;
+            }
+            self.node_arr(node)
+        };
+        self.arr_at(arr, (i & 31) as usize)
+    }
+    /// Path-copy a node, setting index `i`'s leaf to `val`.
+    fn pv_do_assoc(&mut self, level: i64, node: u64, i: i64, val: u64) -> u64 {
+        let narr = self.node_arr(node);
+        let mut ret = self.arr_clone(narr);
+        if level == 0 {
+            ret[(i & 31) as usize] = val;
+        } else {
+            let subidx = ((i >> level) & 31) as usize;
+            let child = self.arr_at(narr, subidx);
+            ret[subidx] = self.pv_do_assoc(level - 5, child, i, val);
+        }
+        let arr = self.mk_array(ret);
+        self.mk_node(arr)
+    }
+    fn pv_assoc(&mut self, pv: u64, n: i64, val: u64) -> u64 {
+        let (meta, cnt, shift, root, tail) = self.pv_read(pv);
+        if n >= 0 && n < cnt {
+            if Self::tail_off(cnt) <= n {
+                let mut nt = self.arr_clone(tail);
+                nt[(n & 31) as usize] = val;
+                let new_tail = self.mk_array(nt);
+                self.mk_pv(meta, cnt, shift, root, new_tail)
+            } else {
+                let nr = self.pv_do_assoc(shift, root, n, val);
+                self.mk_pv(meta, cnt, shift, nr, tail)
+            }
+        } else if n == cnt {
+            self.pv_conj(pv, val)
+        } else {
+            let sid = self.alloc(Obj::Str(format!("Index {n} out of bounds  [0,{cnt}]")));
+            self.signal_throw(M::R::enc_ref(sid));
+            self.enc_nil()
+        }
+    }
+
     fn arith(
         &mut self,
         a: u64,

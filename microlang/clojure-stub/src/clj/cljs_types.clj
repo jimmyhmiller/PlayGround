@@ -160,22 +160,10 @@
                 (PersistentVector. meta cnt-1 shift new-root new-tail nil)))))
 
   ICollection
-  (-conj [coll o]
-    (if (< (- cnt (tail-off coll)) 32)
-      (let [len (alength tail)
-            new-tail (make-array (inc len))]
-        (dotimes [i len] (aset new-tail i (aget tail i)))
-        (aset new-tail len o)
-        (PersistentVector. meta (inc cnt) shift root new-tail nil))
-      (let [root-overflow? (> (bit-shift-right-zero-fill cnt 5) (bit-shift-left 1 shift))
-            new-shift (if root-overflow? (+ shift 5) shift)
-            new-root (if root-overflow?
-                       (let [n-r (pv-fresh-node nil)]
-                         (pv-aset n-r 0 root)
-                         (pv-aset n-r 1 (new-path nil shift (VectorNode. nil tail)))
-                         n-r)
-                       (push-tail coll shift root (VectorNode. nil tail)))]
-        (PersistentVector. meta (inc cnt) new-shift new-root (array o) nil))))
+  ;; conj is implemented NATIVELY (one `%pv-conj` prim: the whole tail+trie
+  ;; push in Rust). The in-language helpers above (push-tail/new-path/…) stay for
+  ;; -pop and as the reference the prim was ported from.
+  (-conj [coll o] (%pv-conj coll o))
 
   IEmptyableCollection
   (-empty [coll] (-with-meta -EMPTY-PV meta))
@@ -196,7 +184,7 @@
   (-count [coll] cnt)
 
   IIndexed
-  (-nth [coll n] (aget (array-for coll n) (bit-and n 31)))
+  (-nth [coll n] (%pv-nth coll n))
   (-nth [coll n not-found]
     (if (if (<= 0 n) (< n cnt) false)
       (aget (unchecked-array-for coll n) (bit-and n 31))
@@ -212,16 +200,7 @@
   (-contains-key? [coll k] (if (integer? k) (if (<= 0 k) (< k cnt) false) false))
 
   IVector
-  (-assoc-n [coll n val]
-    (cond
-      (if (<= 0 n) (< n cnt) false)
-      (if (<= (tail-off coll) n)
-        (let [new-tail (aclone tail)]
-          (aset new-tail (bit-and n 31) val)
-          (PersistentVector. meta cnt shift root new-tail nil))
-        (PersistentVector. meta cnt shift (do-assoc coll shift root n val) tail nil))
-      (== n cnt) (-conj coll val)
-      :else (throw (str "Index " n " out of bounds  [0," cnt "]"))))
+  (-assoc-n [coll n val] (%pv-assoc coll n val))
 
   IFn
   (-invoke [coll k] (if (number? k) (-nth coll k) (throw "Key must be integer"))))

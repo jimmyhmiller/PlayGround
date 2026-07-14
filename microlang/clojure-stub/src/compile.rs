@@ -114,6 +114,8 @@ impl Compiler {
             // Array substrate + bitwise ops for in-language persistent structures.
             ("%make-array", MakeArray), ("%aclone", AClone), ("%alength", VectorLen),
             ("%aget", VectorRef), ("%anew", Vector),
+            // Native persistent-vector ops (the trie, in Rust — see runtime `prim`).
+            ("%pv-conj", PvConj), ("%pv-nth", PvNth), ("%pv-assoc", PvAssoc),
             ("%apush", ArrPush), ("%ashift", ArrShift), ("%aclear", ArrClear),
             ("%read-string", ReadString), ("%eval", Eval), ("%macroexpand-1", MacroExpand1),
             ("%numerator", Numerator), ("%denominator", Denominator), ("%bigint?", BigIntP), ("%to-long", ToLong),

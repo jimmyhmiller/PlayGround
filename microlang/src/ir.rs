@@ -286,6 +286,13 @@ pub enum Prim {
     FxMul,
     FxLt,
     FxEq,
+    /// `(%pv-conj pv x)` / `(%pv-nth pv i)` / `(%pv-assoc pv i x)` — the persistent
+    /// vector's tail+trie operations, implemented natively over the `'PVec` record
+    /// (`cnt shift root tail`, arrays are `Obj::Vector`). One native call replaces
+    /// the ~20 interpreted helper calls the in-language trie code compiled to.
+    PvConj,
+    PvNth,
+    PvAssoc,
     /// `(%all-fixnum? a b ...)` — true iff EVERY argument is an immediate fixnum.
     /// The guard the specializer places at a lambda's entry; when it holds, the
     /// body's `Fx*` ops are valid. On the JIT it lowers to a single combined
