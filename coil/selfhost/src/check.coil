@@ -873,9 +873,12 @@
                ; S2: record this expression's inferred type, keyed by its NODE ID, so a
                ; metaprogram can ask `(type-of NODE)` for any expression's exact type.
                (type-map-record (load (field e nid)) (load (field r t)))
-               ; S1: record a call's RESOLVED callee (qualified name) by node id, so
-               ; `(code-decl NODE)` on the call answers with the exact function.
-               (match-else (load (field e kind)) (ECall [func targs args] (res-map-record (load (field e nid)) func)) (_ 0))
+               ; S1: record a reference's RESOLVED entity (qualified name) by node id, so
+               ; `(code-decl NODE)` answers with the exact function/variant/etc. it picked.
+               (match-else (load (field e kind))
+                 (ECall    [func targs args] (res-map-record (load (field e nid)) func))
+                 (EFnPtrOf [name]            (res-map-record (load (field e nid)) name))
+                 (_ 0))
                (Ok (mk-synpair a (box-expr a (load (field r e))) (box-type a (load (field r t)))))))))
 
 (defn expected-some? [(expected (ptr Type))] (-> bool) (icmp-ne (cast i64 expected) 0))

@@ -846,6 +846,41 @@
             (if (str-eq (load (field f name)) qname) (do (store! r f) (break)) 0))
           (store! i (iadd (load i) 1)))))
     (load r)))
+; The qualified name of the SUM that owns a variant whose qualified name is `qname`,
+; or "" if none. (Variant constructions resolve their ECall.func to the variant.)
+(defn cp-sum-of-variant [(p (ptr Program)) (qname (slice u8))] (-> (slice u8))
+  (let [sums (load (field p sums)) n (al-len [SumDef] sums) (mut i) 0 (mut r) ""]
+    (loop (if (or (icmp-gt (slice-len [u8] (load r)) 0) (icmp-ge (load i) n)) (break)
+      (do (let [sd (al-elem [SumDef] sums (load i)) vs (load (field sd variants)) nv (al-len [Variant] vs) (mut j) 0]
+            (loop (if (icmp-ge (load j) nv) (break)
+              (do (if (str-eq (load (field (al-elem [Variant] vs (load j)) name)) qname)
+                      (do (store! r (load (field sd name))) (break)) 0)
+                  (store! j (iadd (load j) 1))))))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+; A resolved decl: found=false → not in cp (caller falls back to name-based lookup).
+(defstruct CpDecl [(found bool) (rec Sexp)])
+; Build the decl record for the entity whose EXACT qualified name resolution recorded.
+; Searches functions, then struct/sum/trait/const/extern, then sum variants.
+(defn cp-find-exact-decl [(a (ptr Allocator)) (p (ptr Program)) (qname (slice u8))] (-> CpDecl)
+  (let [r (alloc-stack CpDecl) fn (cp-find-fn-exact p qname)]
+    (store! (field r found) false)
+    (if (icmp-ne (cast i64 fn) 0)
+        (do (store! (field r found) true) (store! (field r rec) (fn-decl-record a fn)) 0)
+      (let [nks (cp-kind-decls a p) n (al-len [NamedKind] (load nks)) (mut i) 0]
+        (loop (if (or (load (field r found)) (icmp-ge (load i) n)) (break)
+          (do (let [e (al-elem [NamedKind] nks (load i))]
+                (if (str-eq (load (field e name)) qname)
+                    (do (store! (field r found) true)
+                        (store! (field r rec) (kind-decl-record a (qual-module-of qname) (load (field e kind)))) 0)
+                  0))
+              (store! i (iadd (load i) 1)))))
+        (if (load (field r found)) 0
+          (let [sq (cp-sum-of-variant p qname)]   ; variant construction → its sum
+            (if (icmp-gt (slice-len [u8] sq) 0)
+                (do (store! (field r found) true) (store! (field r rec) (kind-decl-record a (qual-module-of sq) "sum")) 0)
+              0)))))
+    (load r)))
 ; A (qualified-name, kind) pair, for the non-function declaration kinds.
 (defstruct NamedKind [(name (slice u8)) (kind (slice u8))])
 (defn nk-push [(dst (ptr (ArrayList NamedKind))) (name (slice u8)) (kind (slice u8))] (-> i64)
@@ -869,11 +904,12 @@
       (Some [nodev]
         (if (not (is-ccode nodev)) (Err [CtVal Diag] (derr "code-decl: expects a Code node"))
           (if (icmp-eq (cast i64 p) 0) (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unresolved") -1 -1)))
-            ; EXACT path first: if this node is a call the checker resolved, use the
-            ; recorded callee (its node id) — no ambiguity, cross-module correct.
-            (let [rqn (res-map-lookup (sx-nid (ccode-of nodev)))
-                  rfn (if (icmp-gt (slice-len [u8] rqn) 0) (cp-find-fn-exact p rqn) (cast (ptr Func) 0))]
-            (if (icmp-ne (cast i64 rfn) 0) (Ok [CtVal Diag] (CCode (fn-decl-record a rfn)))
+            ; EXACT path first: if this node is a reference the checker resolved (call,
+            ; fn-ptr, variant construction, …), use the recorded entity (its node id) —
+            ; no ambiguity, cross-module correct.
+            (let [rqn (res-map-lookup (sx-nid (ccode-of nodev))) rd (alloc-stack CpDecl)]
+            (store! rd (if (icmp-gt (slice-len [u8] rqn) 0) (cp-find-exact-decl a p rqn) (let [z (alloc-stack CpDecl)] (store! (field z found) false) (load z))))
+            (if (load (field rd found)) (Ok [CtVal Diag] (CCode (load (field rd rec))))
             (let [nm (decl-node-name (ccode-of nodev))]
               (if (icmp-eq (slice-len [u8] nm) 0) (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unresolved") -1 -1)))
                 (let [simple (decl-simple-name nm) wantmod (decl-qual-module nm) fr (alloc-stack CpFn)]

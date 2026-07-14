@@ -284,6 +284,20 @@ rebootstrap fixpoint, in the established style.
   `db/probe` call (name-based lookup would say `:ambiguous` and miss it). Reset per check
   pass; rebootstrap fixpoint + gates green.
 
+  **S0.2 — resolution covers every reference — ✅ SHIPPED.** `do-synth` now records the
+  resolved entity for **`ECall`** (functions, externs, and variant constructions — the
+  input to check's `EConstruct` lowering) and **`EFnPtrOf`** (function-pointer refs); both
+  carry a resolver-qualified name. `code-decl`'s exact path (`cp-find-exact-decl`) looks
+  the recorded name up across functions, then struct/sum/trait/const/extern, then sum
+  variants (`cp-sum-of-variant` → the owning sum's decl), falling back to name-based only
+  when nothing was recorded (bare symbols, locals). So a checker gets exact answers for a
+  call, a `fnptr-of`, or a variant construction. Demos: `refpolicy_bad.coil` (bans a
+  `fnptr-of` to a pointer-returning function that is never called), `variantcheck_test.coil`
+  (a `(Jus 5)` construction resolves to its sum). Const `EVar`s use the name-based path
+  (const names are stored bare, so there is no cross-module ambiguity to disambiguate);
+  named-type references (`(ptr Foo)`) remain name-based (`Type` carries no node id yet).
+  Rebootstrap fixpoint + gates green.
+
 - **S1 — resolution & signature reflection.** Expose `resolve-sym`, `module-of`,
   `def-site`, `fn-sig`, node-context `code-field*/variant*/trait*`. **No
   reordering.** This alone answers the two questions that motivated this work

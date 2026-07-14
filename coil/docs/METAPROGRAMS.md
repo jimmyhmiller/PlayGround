@@ -77,12 +77,15 @@ New API this project added (all shipped):
   (`inc`→`iadd`).
 - **`(code-decl NODE)` → a declaration record**, read from that authoritative checked
   program. `(decl MODULE fn [PARAM-TYPE…] RET)` for a function, `(decl MODULE KIND)` for
-  a struct/sum/trait/const/extern, `:unresolved`, or `:ambiguous`. **Pass a CALL node and
-  it resolves to the EXACT callee** the checker picked (via node identity), unambiguous
-  even when the simple name lives in several modules; pass a bare symbol and it does a
-  name-based lookup (which reports `:ambiguous` on a cross-module name clash). Demos:
-  `metaprog-poc/sigcheck*.coil` (vetoes pointer-returning calls) and `dup_app.coil` (two
-  modules both defining `probe`; the checker resolves each call to the right one).
+  a struct/sum/trait/const/extern, `:unresolved`, or `:ambiguous`. **Pass a resolved
+  REFERENCE node and it resolves to the EXACT entity** the checker picked (via node
+  identity), unambiguous even when the simple name lives in several modules. This covers
+  every resolved reference: **function calls, function-pointer refs (`fnptr-of`), and
+  variant constructions** (which resolve to the owning sum). A bare symbol falls back to
+  a name-based lookup (which reports `:ambiguous` on a cross-module name clash). Demos:
+  `dup_app.coil` (two modules both defining `probe`; each call resolves to the right one),
+  `refpolicy_bad.coil` (a `fnptr-of` to a pointer-returning function, never called), and
+  `variantcheck_test.coil` (a `(Jus 5)` construction resolves to its sum).
 - **`(type-of NODE)` → the expression's inferred type** as `Code` (e.g. `i64`,
   `(ptr i64)`), or `:unknown`. This is the type the real type-checker inferred, not
   syntax — a call `(getf)` reports `f64` because `getf` returns `f64`. Demo:
