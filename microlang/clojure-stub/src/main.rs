@@ -129,8 +129,8 @@ fn drive(cs: &dyn microlang::CodeSpace<LowBitModel>, mode: Mode) {
                 eprintln!(
                     "microclj: cannot load microclj.nrepl-server.\n\
                      Add the nREPL libraries to your deps.edn, e.g.\n\
-                     {{:deps {{microclj/nrepl {{:local/root \"…/clojure-stub/libs\"}}\n\
-                             nrepl/bencode  {{:local/root \"…/clojure-stub/vendor/nrepl\"}}}}}}"
+                     {{:deps {{nrepl/nrepl {{:mvn/version \"1.3.1\"}}\n\
+                             microclj/nrepl-server {{:local/root \"…/clojure-stub/libs\"}}}}}}"
                 );
                 std::process::exit(1);
             }

@@ -1559,12 +1559,74 @@ fn deps_edn_paths_parse() {
     )
     .unwrap();
     assert_eq!(ps, vec![std::path::PathBuf::from("/proj/src"), "/proj/resources".into()]);
-    // :mvn deps are a clear ERROR (not silently skipped) until jar support
+    // :git deps are a clear ERROR (not silently skipped) until git support
     let err = clojure_stub::deps_edn_paths(
         &mut rt,
-        "{:deps {nrepl/nrepl {:mvn/version \"1.3.1\"}}}",
+        "{:deps {io.github.x/y {:git/url \"https://x\" :git/sha \"abc\"}}}",
         base,
     )
     .unwrap_err();
     assert!(err.contains("not supported yet"), "{err}");
+
+    // :mvn resolves through the local repository (hermetic: MICROCLJ_M2 fixture)
+    let m2 = std::env::temp_dir().join(format!("microclj-m2-{}", std::process::id()));
+    let adir = m2.join("acme/widget/1.0.0");
+    std::fs::create_dir_all(&adir).unwrap();
+    {
+        use std::io::Write as _;
+        let f = std::fs::File::create(adir.join("widget-1.0.0.jar")).unwrap();
+        let mut z = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        z.start_file("acme/widget.clj", opts).unwrap();
+        z.write_all(b"(ns acme.widget) (def answer 42)").unwrap();
+        z.finish().unwrap();
+    }
+    std::fs::write(adir.join("widget-1.0.0.pom"), "<project></project>").unwrap();
+    std::env::set_var("MICROCLJ_M2", &m2);
+    let ps = clojure_stub::deps_edn_paths(
+        &mut rt,
+        "{:deps {acme/widget {:mvn/version \"1.0.0\"}}}",
+        base,
+    )
+    .unwrap();
+    std::env::remove_var("MICROCLJ_M2");
+    assert_eq!(ps, vec![adir.join("widget-1.0.0.jar")]);
+    // …and the resolved jar actually serves a namespace
+    let mut rt2 = Runtime::<LowBitModel>::new();
+    let r = clojure_stub::run_with_paths(
+        &mut rt2,
+        &TreeWalk,
+        "(require 'acme.widget) acme.widget/answer",
+        ps,
+    );
+    assert_eq!(clojure_stub::clj_str(&rt2, r), "42");
+    std::fs::remove_dir_all(&m2).ok();
+}
+
+#[test]
+fn jars_on_the_load_path() {
+    // a JAR is a load-path entry, exactly Clojure's classpath model
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!("microclj-jar-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let jarpath = dir.join("tlib.jar");
+    {
+        let f = std::fs::File::create(&jarpath).unwrap();
+        let mut z = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        z.start_file("tlib/core.clj", opts).unwrap();
+        z.write_all(b"(ns tlib.core) (defn triple [x] (* 3 x))").unwrap();
+        z.finish().unwrap();
+    }
+    let mut rt = Runtime::<LowBitModel>::new();
+    let r = clojure_stub::run_with_paths(
+        &mut rt,
+        &TreeWalk,
+        "(require 'tlib.core) (tlib.core/triple 14)",
+        vec![jarpath],
+    );
+    assert_eq!(clojure_stub::clj_str(&rt, r), "42");
+    std::fs::remove_dir_all(&dir).ok();
 }

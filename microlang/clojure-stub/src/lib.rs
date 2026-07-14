@@ -25,6 +25,7 @@ static GENSYM: AtomicU64 = AtomicU64::new(0);
 
 mod compile;
 mod data;
+pub mod deps;
 mod reader;
 
 /// The embedded prelude — REAL `.clj` files under `src/clj/`, compiled into
@@ -113,12 +114,26 @@ pub fn deps_edn_paths<M: ValueModel>(
                             out.push(root.clone());
                         }
                         handled = true;
-                    } else if kw_is(rt, ckv[0], "mvn/version") || kw_is(rt, ckv[0], "git/url")
-                        || kw_is(rt, ckv[0], "git/sha")
-                    {
+                    } else if kw_is(rt, ckv[0], "mvn/version") {
+                        // `lib/name {:mvn/version "…"}` — resolve the jar (plus
+                        // transitive compile deps) from ~/.m2 / Maven Central;
+                        // jars join the load path directly (ensure_loaded reads
+                        // namespaces out of them).
+                        let version = as_string(rt, ckv[1])
+                            .ok_or_else(|| "deps.edn: :mvn/version must be a string".to_string())?;
+                        let libname = match rt.decode(dep[0]) {
+                            Val::Sym(s) => rt.sym_name(s).to_string(),
+                            _ => return Err("deps.edn: a dep key must be a symbol".to_string()),
+                        };
+                        let (group, artifact) = match libname.split_once('/') {
+                            Some((g, a)) => (g.to_string(), a.to_string()),
+                            None => (libname.clone(), libname.clone()),
+                        };
+                        out.extend(deps::resolve_mvn(&group, &artifact, &version)?);
+                        handled = true;
+                    } else if kw_is(rt, ckv[0], "git/url") || kw_is(rt, ckv[0], "git/sha") {
                         return Err(
-                            "deps.edn: :mvn/version and :git deps are not supported yet — \
-                             use {:local/root \"…\"} (jar/git resolution is a planned feature)"
+                            ":git deps are not supported yet — use :mvn/version or :local/root"
                                 .to_string(),
                         );
                     }
@@ -2299,27 +2314,35 @@ fn ensure_loaded<M: ValueModel>(
         return;
     }
     let rel = name.replace('.', "/").replace('-', "_");
-    let mut found = None;
-    for dir in comp.load_paths() {
-        for ext in ["clj", "cljc", "cljs"] {
-            let p = dir.join(format!("{rel}.{ext}"));
-            if p.is_file() {
-                found = Some(p);
-                break;
+    // A load-path entry is a DIRECTORY of sources or a JAR (a Maven dep) —
+    // exactly Clojure's classpath model.
+    let mut src = None;
+    for entry in comp.load_paths() {
+        if entry.extension().is_some_and(|e| e == "jar") {
+            if let Some(s) = deps::jar_source(entry, &rel) {
+                src = Some(s);
+            }
+        } else {
+            for ext in ["clj", "cljc", "cljs"] {
+                let p = entry.join(format!("{rel}.{ext}"));
+                if p.is_file() {
+                    src = Some(std::fs::read_to_string(&p).unwrap_or_else(|e| {
+                        panic!("require: failed reading {}: {e}", p.display())
+                    }));
+                    break;
+                }
             }
         }
-        if found.is_some() {
+        if src.is_some() {
             break;
         }
     }
-    let Some(path) = found else {
+    let Some(src) = src else {
         panic!(
             "require: cannot find namespace `{name}` (looked for `{rel}.clj` on load path {:?})",
             comp.load_paths()
         );
     };
-    let src = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("require: failed reading {}: {e}", path.display()));
     // Mark loaded BEFORE running so a cyclic require terminates.
     comp.mark_loaded(name);
     let saved = comp.current_ns().to_string();

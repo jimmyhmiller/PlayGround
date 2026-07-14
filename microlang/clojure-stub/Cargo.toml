@@ -6,6 +6,8 @@ description = "A mini-Clojure frontend with its OWN procedural macro expander, b
 
 [dependencies]
 microlang = { path = ".." }
+ureq = "3.3.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [features]
 # Run the clojure frontend on the native JIT tier (for tests/jit.rs).
