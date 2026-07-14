@@ -1,5 +1,19 @@
 # Bug: `balance` closes a missing top-level paren at EOF, silently nesting the rest of the file
 
+> **STATUS 2026-07-14: FIXED and verified** — the 9-line repro below now closes `alpha`
+> in place, valid files are byte-idempotent, and re-fuzzing the real 1400-line file shows
+> the EOF fallback never fires anymore. **One residual case of the same class remains**,
+> filed as bug `upbeat-skeletal-thrush` (repro `test_sibling_same_indent_close.lisp`):
+> the close trigger requires a *dedent* (`next_indent < line_indent`), so an unclosed
+> column-0 opener followed by another column-0 line (same indent, 0 < 0 fails) stays open
+> across every single-line sibling and gets closed at the next multi-line form's dedent
+> boundary instead — e.g. `(module compile` missing its `)` swallows all following
+> `(import …)` / `(const …)` one-liners until the end of the next `(defstruct …)`.
+> Re-fuzz: 5/132 single-paren-drop perturbations still change a line 40-70 lines away
+> (was: 100% of drops corrupted to EOF). The rule that closes both: a following line at
+> indent **≤ the opener's indent** that isn't closer-led is a sibling boundary — same
+> indent counts, dedent not required.
+
 **Severity: high** — `balance --in-place` produces paren-balanced but structurally
 corrupted output, and the visible diff is a single character far from the edit, so it
 survives review. Hit in real use (scry module-system work, 2026-07-13): an agent edited

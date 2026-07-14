@@ -16,21 +16,21 @@ To add, close, or list bugs, use:
 
 This file tracks bugs discovered during development.
 
-## balance closes missing top-level paren at EOF, nesting the rest of the file [attached-bitter-orca]
+## residual: unclosed opener followed by SAME-indent sibling defers close to next dedent boundary [upbeat-skeletal-thrush]
 
-**ID:** attached-bitter-orca
-**Timestamp:** 2026-07-14 00:33:25
-**Severity:** high
-**Location:** src/parinfer_simple.rs (balance() auto-close-on-dedent loop (~line 286) + EOF fallback (~line 305))
-**Tags:** balance, parinfer, corruption, non-local
+**ID:** upbeat-skeletal-thrush
+**Timestamp:** 2026-07-14 00:41:31
+**Severity:** medium
+**Location:** src/parinfer_simple.rs (balance() auto-close trigger: gated on next_indent < line_indent; same-indent sibling (0,0) never fires)
+**Tags:** balance, parinfer, corruption, non-local, follow-up
 
 ### Description
 
-Column-0 openers can never be auto-closed by the dedent rule: parinfer_simple.rs balance() uses 'opener_indent > next_indent' (strict) and next_indent floors at 0, so an unclosed top-level form rides the stack to the EOF fallback, which appends the closer to the LAST line. Every later top-level form becomes a child of the broken one. Output is paren-balanced but structurally corrupted; the visible diff is one char far from the edit. Hit for real during scry work (stray paren appeared in untouched scry-dump-bytecode 1300 lines below the edit). Full analysis + suggested fix: BUG_NONLOCAL_EOF_CLOSE.md; repro input: test_nonlocal_eof_close.lisp.
+Follow-up to attached-bitter-orca after the EOF fix (verified fixed: closer no longer lands at EOF; valid files idempotent; original 9-line repro now correct). Remaining case of the same class: the close trigger requires a DEDENT (next_indent < line_indent), but an unclosed column-0 opener followed by another column-0 line has no dedent (0 < 0), so the opener stays open across every single-line sibling form and the closer lands at the end of the NEXT MULTI-LINE form's dedent boundary — still nesting dozens of untouched forms. Fuzz over a real 1400-line file: 5/132 single-paren-drop perturbations still produce non-local structural changes (was: every drop corrupted to EOF). Rule needed: a following line at indent <= the OPENER's indent (not the current line's) that is not a closer-led line is a sibling boundary and must close the opener — same-indent siblings count, dedent is not required. Repro: test_sibling_same_indent_close.lisp — expected '(module compile)' closed on line 1; actual closer lands after '[(x i64)])' nesting import/const/defstruct inside module.
 
 ### Minimal Reproducing Case
 
-paredit-like balance test_nonlocal_eof_close.lisp --in-place  # alpha stays open; ')' lands after gamma instead
+paredit-like balance test_sibling_same_indent_close.lisp --in-place  # closer lands after [(x i64)]) instead of line 1
 
 ---
 
