@@ -474,6 +474,8 @@ struct Live {
     layout: LayoutGpu,
     overlay: Overlay,
     density: Density,
+    /// GPU pass timing (None when the adapter lacks timestamp queries).
+    timer: Option<crate::gputime::GpuTimer>,
 }
 
 pub struct App {
@@ -702,7 +704,11 @@ impl App {
             .collect();
         renderer.set_edge_types(&gpu.device, &graph_gpu, &specs);
         drop(specs);
-        self.live = Some(Live { window, gpu, graph_gpu, renderer, layout, overlay, density });
+        let timer = crate::gputime::GpuTimer::new(&gpu.device, &gpu.queue);
+        if timer.is_none() {
+            log::info!("timestamp queries unavailable — GPU pass timing disabled");
+        }
+        self.live = Some(Live { window, gpu, graph_gpu, renderer, layout, overlay, density, timer });
         self.apply_color_mode();
         if self.opts.start_radial {
             self.apply_radial();
@@ -1323,6 +1329,8 @@ impl App {
                 self.total_steps += 1;
             }
             live.gpu.queue.submit(Some(enc.finish()));
+            // Positions moved, so last frame's visible-edge compaction is stale.
+            live.renderer.mark_scene_dirty();
 
             if self.settings.alpha <= self.settings.alpha_min {
                 self.settings.running = false;
@@ -1359,6 +1367,18 @@ impl App {
         if self.show_density {
             live.density.record_compute(&mut enc);
         }
+        // Rebuild the compacted visible-edge sets if camera/positions/edge
+        // sets changed since the last frame (bit-exact, order-preserving cull).
+        if let Some(t) = live.timer.as_mut() {
+            t.begin_frame();
+        }
+        let cull_ran = {
+            let cull_tw = live.timer.as_ref().and_then(|t| t.cull_writes());
+            live.renderer.encode_edge_cull(&mut enc, cull_tw)
+        };
+        if let Some(t) = live.timer.as_mut() {
+            t.set_cull_ran(cull_ran);
+        }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),
@@ -1377,7 +1397,7 @@ impl App {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: live.timer.as_ref().and_then(|t| t.main_writes()),
                 occlusion_query_set: None,
             });
             if self.show_density {
@@ -1408,7 +1428,13 @@ impl App {
             ui.record(&live.gpu.device, &live.gpu.queue, size, &mut enc, &view, uf);
         }
 
+        if let Some(t) = live.timer.as_ref() {
+            t.resolve(&mut enc);
+        }
         live.gpu.queue.submit(Some(enc.finish()));
+        if let Some(t) = live.timer.as_mut() {
+            t.after_submit();
+        }
         frame.present();
 
         // Free egui textures released this frame, then restore the UI state.
@@ -1436,12 +1462,21 @@ impl App {
             self.frame_count = 0;
             self.fps_timer = now;
             self.update_title();
+            let gpu_ms = match self.live.as_ref().and_then(|l| l.timer.as_ref()) {
+                Some(t) => {
+                    let cull = t.cull_ms.map_or("n/a".into(), |v| format!("{v:.2}ms"));
+                    let main = t.main_ms.map_or("n/a".into(), |v| format!("{v:.2}ms"));
+                    format!(" · gpu: cull {cull} · main pass {main}")
+                }
+                None => String::new(),
+            };
             log::info!(
-                "{:.1} fps · {} sim-steps/frame · {} nodes · {} edges",
+                "{:.1} fps · {} sim-steps/frame · {} nodes · {} edges{}",
                 self.fps,
                 self.settings.substeps,
                 self.graph.num_nodes(),
-                self.graph.num_edges()
+                self.graph.num_edges(),
+                gpu_ms
             );
         }
         self.last_frame = now;
@@ -1762,6 +1797,7 @@ impl App {
         if self.show_density {
             live.density.record_compute(&mut enc);
         }
+        live.renderer.encode_edge_cull(&mut enc, None);
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("capture_pass"),
@@ -1836,8 +1872,9 @@ impl App {
         let mut pos = vec![[0.0f32; 2]; n];
         let seed = 0x51ED ^ self.total_steps;
         layout.place(&self.graph, &mut pos, seed);
-        if let Some(live) = self.live.as_ref() {
+        if let Some(live) = self.live.as_mut() {
             live.graph_gpu.set_positions(&live.gpu.queue, &pos);
+            live.renderer.mark_scene_dirty();
         }
         let (min, max) = bounds(&pos);
         self.camera.fit_bounds(min, max);
@@ -1875,8 +1912,9 @@ impl App {
         let n = self.graph.num_nodes() as usize;
         let mut pos = vec![[0.0f32; 2]; n];
         layout.place(graph, &mut pos, 0);
-        if let Some(live) = self.live.as_ref() {
+        if let Some(live) = self.live.as_mut() {
             live.graph_gpu.set_positions(&live.gpu.queue, &pos);
+            live.renderer.mark_scene_dirty();
         }
         let (min, max) = bounds(&pos);
         self.camera.fit_bounds(min, max);
@@ -1951,10 +1989,11 @@ impl App {
 
     /// Pick a node under a screen pixel and select it (updating the info panel).
     /// GPU id-pick the node under a screen pixel (no state mutation).
-    fn pick_id(&self, screen: glam::Vec2) -> Option<u32> {
-        let live = self.live.as_ref()?;
+    fn pick_id(&mut self, screen: glam::Vec2) -> Option<u32> {
+        let cam = self.camera.uniform();
+        let live = self.live.as_mut()?;
         // Ensure the pick pass uses the current camera.
-        live.renderer.update_camera(&live.gpu.queue, &self.camera.uniform());
+        live.renderer.update_camera(&live.gpu.queue, &cam);
         let (w, h) = (live.gpu.size.width, live.gpu.size.height);
         live.renderer.pick(
             &live.gpu.device,

@@ -51,10 +51,15 @@ impl Gpu {
             adapter_limits.max_compute_invocations_per_workgroup,
         );
 
+        // Timestamp queries (GPU pass timing) are optional — request only if
+        // the adapter has them.
+        let features =
+            adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("nebula-device"),
-                required_features: wgpu::Features::empty(),
+                required_features: features,
                 required_limits: adapter_limits.clone(),
                 memory_hints: wgpu::MemoryHints::Performance,
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),

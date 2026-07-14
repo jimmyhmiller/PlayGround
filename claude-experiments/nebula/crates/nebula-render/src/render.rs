@@ -56,9 +56,18 @@ pub struct EdgeTypeInput<'a> {
     pub edges: &'a [[u32; 2]],
 }
 
-/// GPU state for one edge type: its own edge buffer + bind group.
+/// GPU state for one edge type: its own edge buffer + bind group, plus the
+/// compacted visible-edge index buffer and indirect draw args the cull
+/// compute pass maintains.
 struct EdgeTypeGpu {
     bind_group: wgpu::BindGroup,
+    /// Bind group for the edge_cull compute passes.
+    cull_bg: wgpu::BindGroup,
+    /// Visible edges as (a, b) node-id pairs in original edge order — used as
+    /// the index buffer for the edge draw.
+    compact: wgpu::Buffer,
+    /// DrawIndexedIndirect args, written entirely on the GPU by cull_scan.
+    indirect: wgpu::Buffer,
     num_edges: u32,
     visible: bool,
 }
@@ -83,11 +92,21 @@ pub struct Renderer {
     node_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
     pick_pipeline: wgpu::RenderPipeline,
+    cull_bgl: wgpu::BindGroupLayout,
+    cull_count_pipeline: wgpu::ComputePipeline,
+    cull_scan_pipeline: wgpu::ComputePipeline,
+    cull_emit_pipeline: wgpu::ComputePipeline,
+    /// True when the compacted visible-edge sets are stale (camera moved,
+    /// positions changed, or the edge sets themselves changed).
+    cull_dirty: bool,
+    last_cam: Option<CameraUniform>,
     num_nodes: u32,
-    num_edges: u32,
     pub draw_edges: bool,
     pub draw_nodes: bool,
 }
+
+/// Edges per cull_count/cull_emit workgroup (must match CHUNK in edge_cull.wgsl).
+const CULL_CHUNK: u32 = 4096;
 
 impl Renderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, graph: &GpuGraph) -> Self {
@@ -289,6 +308,70 @@ impl Renderer {
             cache: None,
         });
 
+        // Edge cull/compaction compute pipelines (see edge_cull.wgsl).
+        let cull_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("edge_cull.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/edge_cull.wgsl").into()),
+        });
+        let rw_storage = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let cull_ro = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let cull_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("edge_cull_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                cull_ro(1),
+                cull_ro(2),
+                rw_storage(3),
+                rw_storage(4),
+                rw_storage(5),
+            ],
+        });
+        let cull_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("edge_cull_pl"),
+            bind_group_layouts: &[&cull_bgl],
+            push_constant_ranges: &[],
+        });
+        let cull_pipe = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&cull_pl),
+                module: &cull_shader,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let cull_count_pipeline = cull_pipe("cull_count");
+        let cull_scan_pipeline = cull_pipe("cull_scan");
+        let cull_emit_pipeline = cull_pipe("cull_emit");
+
         Renderer {
             camera_buf,
             params_buf,
@@ -299,15 +382,77 @@ impl Renderer {
             node_pipeline,
             edge_pipeline,
             pick_pipeline,
+            cull_bgl,
+            cull_count_pipeline,
+            cull_scan_pipeline,
+            cull_emit_pipeline,
+            cull_dirty: true,
+            last_cam: None,
             num_nodes: graph.num_nodes as u32,
-            num_edges: graph.num_edges as u32,
             draw_edges: true,
             draw_nodes: true,
         }
     }
 
-    pub fn update_camera(&self, queue: &wgpu::Queue, cam: &CameraUniform) {
-        queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(cam));
+    pub fn update_camera(&mut self, queue: &wgpu::Queue, cam: &CameraUniform) {
+        // Skip the upload and cull invalidation when the camera is unchanged —
+        // this is what lets a settled graph with a still camera reuse last
+        // frame's compacted edge set.
+        let changed = self
+            .last_cam
+            .is_none_or(|c| bytemuck::bytes_of(&c) != bytemuck::bytes_of(cam));
+        if changed {
+            self.last_cam = Some(*cam);
+            self.cull_dirty = true;
+            queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(cam));
+        }
+    }
+
+    /// Tell the renderer node positions changed (sim stepped, re-seed, …), so
+    /// the compacted visible-edge sets must be rebuilt.
+    pub fn mark_scene_dirty(&mut self) {
+        self.cull_dirty = true;
+    }
+
+    /// Encode the visible-edge compaction (3 compute dispatches per visible
+    /// edge type) if anything invalidated it. Must be encoded before the
+    /// render pass that draws edges. Returns whether it ran.
+    pub fn encode_edge_cull(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites>,
+    ) -> bool {
+        if !self.cull_dirty {
+            return false;
+        }
+        self.cull_dirty = false;
+        let any = self
+            .edge_types
+            .iter()
+            .any(|et| et.visible && et.num_edges > 0);
+        if !any {
+            return false;
+        }
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("edge_cull"),
+            timestamp_writes,
+        });
+        for et in &self.edge_types {
+            if !(et.visible && et.num_edges > 0) {
+                continue;
+            }
+            let nchunks = et.num_edges.div_ceil(CULL_CHUNK);
+            let x = nchunks.min(65_535);
+            let y = nchunks.div_ceil(x.max(1));
+            pass.set_bind_group(0, &et.cull_bg, &[]);
+            pass.set_pipeline(&self.cull_count_pipeline);
+            pass.dispatch_workgroups(x, y, 1);
+            pass.set_pipeline(&self.cull_scan_pipeline);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&self.cull_emit_pipeline);
+            pass.dispatch_workgroups(x, y, 1);
+        }
+        true
     }
 
     pub fn update_params(&self, queue: &wgpu::Queue, params: &RenderParams) {
@@ -417,8 +562,17 @@ impl Renderer {
     /// previously set types.
     pub fn set_edge_types(&mut self, device: &wgpu::Device, graph: &GpuGraph, specs: &[EdgeTypeInput]) {
         self.edge_types.clear();
+        self.cull_dirty = true;
         for s in specs {
-            let flat: Vec<u32> = s.edges.iter().flat_map(|&[a, b]| [a, b]).collect();
+            // Sort edges by endpoint ids for memory locality: consecutive
+            // vertices then fetch nearby positions/colors, and repeated node
+            // ids land close together for the post-transform vertex cache.
+            // Additive blending is order-independent in the final image (each
+            // pixel receives the same set of contributions), and the sort is
+            // stable per upload, so frames stay deterministic.
+            let mut sorted: Vec<[u32; 2]> = s.edges.to_vec();
+            sorted.sort_unstable_by_key(|&[a, b]| ((a.min(b) as u64) << 32) | a.max(b) as u64);
+            let flat: Vec<u32> = sorted.iter().flat_map(|&[a, b]| [a, b]).collect();
             let edge_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("edge_type_buf"),
                 contents: if flat.is_empty() {
@@ -448,9 +602,47 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 4, resource: style_buf.as_entire_binding() },
                 ],
             });
+
+            let num_edges = s.edges.len() as u32;
+            let compact = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("edge_compact_indices"),
+                size: (num_edges as u64 * 2 * 4).max(8),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDEX,
+                mapped_at_creation: false,
+            });
+            // GPU-written by cull_scan; init to an empty draw so a never-culled
+            // type can't draw garbage.
+            let indirect = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("edge_indirect"),
+                contents: bytemuck::cast_slice(&[0u32, 1, 0, 0, 0]),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            });
+            let nchunks = num_edges.div_ceil(CULL_CHUNK).max(1);
+            let chunk_counts = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("edge_cull_chunks"),
+                size: nchunks as u64 * 4,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+            let cull_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("edge_cull_bg"),
+                layout: &self.cull_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: graph.positions.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: edge_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: compact.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: indirect.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: chunk_counts.as_entire_binding() },
+                ],
+            });
+
             self.edge_types.push(EdgeTypeGpu {
                 bind_group,
-                num_edges: s.edges.len() as u32,
+                cull_bg,
+                compact,
+                indirect,
+                num_edges,
                 visible: s.visible,
             });
         }
@@ -460,6 +652,10 @@ impl Renderer {
     pub fn set_edge_visible(&mut self, i: usize, visible: bool) {
         if let Some(et) = self.edge_types.get_mut(i) {
             et.visible = visible;
+            if visible {
+                // Its compaction may be stale from while it was hidden.
+                self.cull_dirty = true;
+            }
         }
     }
 
@@ -467,13 +663,16 @@ impl Renderer {
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
         pass.set_bind_group(0, &self.view_bg, &[]);
 
-        // Edges under nodes: one draw per visible edge type (own bind group).
+        // Edges under nodes: one indexed indirect draw per visible edge type.
+        // The index buffer + args were compacted by the edge_cull compute pass
+        // (encode_edge_cull must have run whenever the scene/camera changed).
         if self.draw_edges {
             pass.set_pipeline(&self.edge_pipeline);
             for et in &self.edge_types {
                 if et.visible && et.num_edges > 0 {
                     pass.set_bind_group(1, &et.bind_group, &[]);
-                    pass.draw(0..(et.num_edges * 2), 0..1);
+                    pass.set_index_buffer(et.compact.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed_indirect(&et.indirect, 0);
                 }
             }
         }

@@ -113,25 +113,17 @@ struct EdgeVsOut {
     @location(0) color: vec4<f32>,
 };
 
+// Drawn indexed: the index buffer holds node ids (visible edges compacted by
+// edge_cull.wgsl in original order), so vertex_index IS the node id and the
+// output is a pure function of it — repeated endpoints hit the post-transform
+// vertex cache instead of re-running the shader. Frustum culling happened in
+// the compute pre-pass with the exact same test the old in-VS cull used.
 @vertex
 fn vs_edge(@builtin(vertex_index) vi: u32) -> EdgeVsOut {
-    let edge = vi / 2u;
-    let node = edges[vi];
+    let node = vi;
     let world = positions[node];
     let ndc = (world - cam.center) * cam.scale;
-
-    // Edge frustum cull: if both endpoints are off the same side of NDC the whole
-    // segment is offscreen. Big win for large unsettled graphs where most edges
-    // are long and off-view.
-    let other = edges[edge * 2u + (1u - (vi & 1u))];
-    let ondc = (positions[other] - cam.center) * cam.scale;
     var out: EdgeVsOut;
-    if ((ndc.x < -1.0 && ondc.x < -1.0) || (ndc.x > 1.0 && ondc.x > 1.0) ||
-        (ndc.y < -1.0 && ondc.y < -1.0) || (ndc.y > 1.0 && ondc.y > 1.0)) {
-        out.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
-        out.color = vec4<f32>(0.0);
-        return out;
-    }
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     let node_col = unpack_color(colors[node]);
     let rgb = select(node_col.rgb, edge_style.color.rgb, edge_style.mode == 1u);

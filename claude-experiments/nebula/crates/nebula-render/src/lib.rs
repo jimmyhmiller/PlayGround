@@ -11,6 +11,7 @@ pub mod coloring;
 pub mod density;
 pub mod font;
 pub mod gpu;
+pub mod gputime;
 pub mod layout_gpu;
 pub mod overlay;
 pub mod readback;
