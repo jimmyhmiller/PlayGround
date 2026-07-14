@@ -179,6 +179,10 @@ def main():
     sjp, sjf = run_schema_json_test(binary, filt)
     passed += sjp; failed += sjf
     if sjf: fails.append("schema_json")
+    # 07-modules.md §6/§7 Phase 2 item 2: modules() also served from the static schema-json dump.
+    mjp, mjf = run_modules_schema_json_test(binary, filt)
+    passed += mjp; failed += mjf
+    if mjf: fails.append("modules_schema_json")
     ppp, ppf = run_portal_projects_test(binary, filt)
     passed += ppp; failed += ppf
     if ppf: fails.append("portal_projects")
@@ -1155,6 +1159,62 @@ def run_schema_json_test(binary, filt):
     return 1, 0
 
 
+def run_modules_schema_json_test(binary, filt):
+    """07-modules.md §6/§7 Phase 2 item 2: `scry schema-json` also dumps modules() (the
+    module tree + per-module aggregates), so a static project (no process) gets the same
+    focus-tree data live() serves. Uses tests/run/modules_coexist.scry (07-modules.md Phase 1's
+    cross-module-coexistence fixture: entry module `modules_coexist` + `modpkg_a.shell` +
+    `modpkg_b.shell`, each declaring one `class Shell`) — asserts the tree shape (three
+    top-level nodes, each real leaf module aggregating typeCount 1) and that liveCount is 0
+    (schema-json never runs main(), so arenas are empty)."""
+    if filt and "modules" not in filt:
+        return 0, 0
+    import json
+    demo = os.path.abspath(os.path.join(HERE, "run", "modules_coexist.scry"))
+    try:
+        p = subprocess.run([binary, "schema-json", demo], capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        print("FAIL modules_schema_json\n     timed out"); return 0, 1
+    problems = []
+    if p.returncode != 0:
+        problems.append(f"expected exit 0, got {p.returncode}; stderr: {p.stderr.strip()!r}")
+    try:
+        d = json.loads(p.stdout)
+    except Exception as e:
+        print("FAIL modules_schema_json\n     stdout not valid JSON: " + str(e))
+        return 0, 1
+    mods = d.get("modules", {})
+    if mods.get("type") != "Modules":
+        problems.append(f"missing modules object: {mods}")
+    children = {c.get("name"): c for c in mods.get("children", [])}
+    for expect_name, expect_path in (("modules_coexist", "modules_coexist"), ("modpkg_a", "modpkg_a"), ("modpkg_b", "modpkg_b")):
+        c = children.get(expect_name)
+        if c is None:
+            problems.append(f"modules() missing top-level node {expect_name!r}: {list(children)}")
+            continue
+        if c.get("path") != expect_path:
+            problems.append(f"{expect_name} path = {c.get('path')!r}, expected {expect_path!r}")
+        if c.get("liveCount") != 0:
+            problems.append(f"{expect_name} liveCount = {c.get('liveCount')}, expected 0 (no main() ran)")
+    for pkg in ("modpkg_a", "modpkg_b"):
+        c = children.get(pkg)
+        if c is None:
+            continue
+        if c.get("typeCount") != 1:
+            problems.append(f"{pkg} typeCount = {c.get('typeCount')}, expected 1 (its Shell class)")
+        grandchildren = {gc.get("name"): gc for gc in c.get("children", [])}
+        shell = grandchildren.get("shell")
+        if shell is None:
+            problems.append(f"{pkg} missing child module 'shell': {list(grandchildren)}")
+        elif shell.get("path") != f"{pkg}.shell" or shell.get("typeCount") != 1:
+            problems.append(f"{pkg}.shell node wrong: {shell}")
+    if problems:
+        print("FAIL modules_schema_json")
+        for pr in problems: print("     " + pr)
+        return 0, 1
+    return 1, 0
+
+
 def run_portal_projects_test(binary, filt):
     """Phase V5 gate (DECISIONS #16): the portal statically inspects any DISCOVERED project with
     NO `scry inspect`/`scry run` process. Starts `scry portal` (cwd = repo root, so examples/ is
@@ -1237,6 +1297,14 @@ def run_portal_projects_test(binary, filt):
             problems.append(f"/proj types() missing Agent (rail empty statically): {rt}")
         if titems and not all(i.get("liveCount") == 0 for i in titems):
             problems.append(f"/proj types() liveCount not all 0 for a static project: {titems}")
+        # (3c) modules() — 07-modules.md §6/§7 Phase 2 item 2: served statically from the same
+        # cached schema-json dump, so the portal's static project view gets a focus-tree too.
+        rmods = proj_eval(aid, "modules()")
+        if rmods.get("value", {}).get("type") != "Modules":
+            problems.append(f"/proj modules() wrong: {rmods}")
+        mnames = [c.get("name") for c in rmods.get("value", {}).get("children", [])]
+        if "assistant" not in mnames:
+            problems.append(f"/proj modules() missing entry module 'assistant': {mnames}")
         # (4) views/actions/graph
         rv = proj_eval(aid, "views()")
         if rv.get("value", {}).get("type") != "Views":
