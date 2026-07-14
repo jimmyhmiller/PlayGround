@@ -1334,12 +1334,7 @@ impl App {
         let cam_uniform = self.camera.uniform();
         live.renderer.update_camera(&live.gpu.queue, &cam_uniform);
         live.renderer.update_params(&live.gpu.queue, &self.render_params);
-        live.renderer.update_bundles(
-            &live.gpu.queue,
-            live.gpu.size.width as f32,
-            live.gpu.size.height as f32,
-            self.render_params.edge_alpha,
-        );
+        live.renderer.update_bundles(&live.gpu.queue, &cam_uniform, self.render_params.edge_alpha);
         if self.show_density {
             let (vw, vh) = (live.gpu.size.width as f32, live.gpu.size.height as f32);
             live.density.update(&live.gpu.queue, &cam_uniform, vw, vh);
@@ -1748,12 +1743,8 @@ impl App {
 
         live.renderer.update_camera(&live.gpu.queue, &self.camera.uniform());
         live.renderer.update_params(&live.gpu.queue, &self.render_params);
-        live.renderer.update_bundles(
-            &live.gpu.queue,
-            w as f32,
-            h as f32,
-            self.render_params.edge_alpha,
-        );
+        let capture_cam = self.camera.uniform();
+        live.renderer.update_bundles(&live.gpu.queue, &capture_cam, self.render_params.edge_alpha);
         if self.show_density {
             live.density.update(&live.gpu.queue, &self.camera.uniform(), w as f32, h as f32);
         }

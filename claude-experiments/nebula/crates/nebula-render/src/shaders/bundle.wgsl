@@ -1,9 +1,15 @@
 // Edge bundling, compute side. Every edge, every frame: each edge is clipped
-// to the viewport and binned by its (source cell, target cell) pair on a
-// coarse screen grid, accumulating count, endpoint centroids, and endpoint
-// colors per pair. The draw pass then renders one line per occupied pair from
+// to the visible world rect and binned by its (source cell, target cell) pair
+// on a WORLD-SPACE grid, accumulating count, endpoint centroids, and endpoint
+// colors per pair. The draw pass renders one line per occupied pair from
 // centroid to centroid with brightness = count * edge_alpha — the same total
 // light the individual lines would have deposited, at a fraction of the fill.
+//
+// The grid lives in world coordinates (origin quantized to whole cells) so
+// camera motion never changes which cells an edge belongs to: zooming and
+// panning transform stable bundle geometry instead of re-binning it. Level of
+// detail comes from two power-of-two cell scales cross-faded by fractional
+// zoom (see BParams.weight), so scale transitions are invisible too.
 //
 // Key property: a pair holding exactly one edge reconstructs that edge's
 // endpoints EXACTLY (centroid of one point is the point), so sparse regions —
@@ -25,10 +31,18 @@ struct BParams {
     // 0 = color bundles by accumulated endpoint node colors, 1 = fixed tint.
     mode: u32,
     tint: vec4<f32>,
-    vw: f32,
-    vh: f32,
+    // World-space grid: corner, cell size (a power-of-two scale), and this
+    // level's cross-fade weight.
+    origin: vec2<f32>,
+    cell: f32,
+    weight: f32,
+    // World-space clip rect (view + one cell of margin).
+    clip_min: vec2<f32>,
+    clip_max: vec2<f32>,
     edge_alpha: f32,
-    _p: f32,
+    _p0: f32,
+    _p1: f32,
+    _p2: f32,
 };
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -39,8 +53,8 @@ struct BParams {
 @group(1) @binding(2) var<storage, read> edges: array<u32>;
 // Per pair: edge count.
 @group(1) @binding(3) var<storage, read_write> pair_count: array<atomic<u32>>;
-// Per pair: 4 sums — endpoint offsets from their cell centers, x16 fixed point
-// (a.x, a.y, b.x, b.y). Offsets are cell-relative so the sums stay small.
+// Per pair: 4 sums — endpoint offsets from their cell centers as cell
+// fractions, x128 fixed point (a.x, a.y, b.x, b.y).
 @group(1) @binding(4) var<storage, read_write> pair_geom: array<atomic<i32>>;
 // Per pair: 6 sums — endpoint colors (ra,ga,ba, rb,gb,bb), 0..255 each.
 @group(1) @binding(5) var<storage, read_write> pair_col: array<atomic<u32>>;
@@ -70,11 +84,6 @@ fn clear_pairs(
     }
 }
 
-fn to_screen(world: vec2<f32>) -> vec2<f32> {
-    let ndc = (world - cam.center) * cam.scale;
-    return vec2<f32>((ndc.x + 1.0) * 0.5 * bp.vw, (1.0 - ndc.y) * 0.5 * bp.vh);
-}
-
 @compute @workgroup_size(256)
 fn bin_edges(
     @builtin(workgroup_id) wid: vec3<u32>,
@@ -87,16 +96,12 @@ fn bin_edges(
     }
     let na = edges[e * 2u];
     let nb = edges[e * 2u + 1u];
-    var sa = to_screen(positions[na]);
-    var sb = to_screen(positions[nb]);
+    let sa = positions[na];
+    let sb = positions[nb];
 
-    // Clip to the viewport plus one cell of margin (Liang–Barsky), so edges
-    // crossing the view keep their true crossing geometry while fully
-    // offscreen edges (which contribute no pixels) are skipped.
-    let cw = bp.vw / f32(bp.cells_x);
-    let ch = bp.vh / f32(bp.cells_y);
-    let lo = vec2<f32>(-cw, -ch);
-    let hi = vec2<f32>(bp.vw + cw, bp.vh + ch);
+    // Clip to the visible world rect (Liang–Barsky), so edges crossing the
+    // view keep their true crossing geometry while fully offscreen edges
+    // (which contribute no pixels) are skipped.
     let d = sb - sa;
     var t0 = 0.0;
     var t1 = 1.0;
@@ -105,21 +110,19 @@ fn bin_edges(
         var q0: f32;
         var q1: f32;
         if (axis == 0u) {
-            p = d.x; q0 = sa.x - lo.x; q1 = hi.x - sa.x;
+            p = d.x; q0 = sa.x - bp.clip_min.x; q1 = bp.clip_max.x - sa.x;
         } else {
-            p = d.y; q0 = sa.y - lo.y; q1 = hi.y - sa.y;
+            p = d.y; q0 = sa.y - bp.clip_min.y; q1 = bp.clip_max.y - sa.y;
         }
-        if (abs(p) < 1e-6) {
+        if (abs(p) < 1e-9) {
             if (q0 < 0.0 || q1 < 0.0) {
                 return; // parallel and outside
             }
         } else {
             let ta = -q0 / p;
             let tb = q1 / p;
-            let tmin = min(ta, tb);
-            let tmax = max(ta, tb);
-            t0 = max(t0, tmin);
-            t1 = min(t1, tmax);
+            t0 = max(t0, min(ta, tb));
+            t1 = min(t1, max(ta, tb));
             if (t0 > t1) {
                 return; // fully outside
             }
@@ -128,24 +131,27 @@ fn bin_edges(
     let ca = sa + d * t0;
     let cb = sa + d * t1;
 
-    // Cell of each (clipped) endpoint.
-    let ax = clamp(i32(floor(ca.x / cw)), 0, i32(bp.cells_x) - 1);
-    let ay = clamp(i32(floor(ca.y / ch)), 0, i32(bp.cells_y) - 1);
-    let bx = clamp(i32(floor(cb.x / cw)), 0, i32(bp.cells_x) - 1);
-    let by = clamp(i32(floor(cb.y / ch)), 0, i32(bp.cells_y) - 1);
+    // World-space cell of each (clipped) endpoint.
+    let ax = clamp(i32(floor((ca.x - bp.origin.x) / bp.cell)), 0, i32(bp.cells_x) - 1);
+    let ay = clamp(i32(floor((ca.y - bp.origin.y) / bp.cell)), 0, i32(bp.cells_y) - 1);
+    let bx = clamp(i32(floor((cb.x - bp.origin.x) / bp.cell)), 0, i32(bp.cells_x) - 1);
+    let by = clamp(i32(floor((cb.y - bp.origin.y) / bp.cell)), 0, i32(bp.cells_y) - 1);
     let ncells = bp.cells_x * bp.cells_y;
     let ia = u32(ay) * bp.cells_x + u32(ax);
     let ib = u32(by) * bp.cells_x + u32(bx);
     let pair = ia * ncells + ib;
 
     atomicAdd(&pair_count[pair], 1u);
-    // Offsets from cell centers, x16 fixed point.
-    let ctra = vec2<f32>((f32(ax) + 0.5) * cw, (f32(ay) + 0.5) * ch);
-    let ctrb = vec2<f32>((f32(bx) + 0.5) * cw, (f32(by) + 0.5) * ch);
-    atomicAdd(&pair_geom[pair * 4u + 0u], i32(round((ca.x - ctra.x) * 16.0)));
-    atomicAdd(&pair_geom[pair * 4u + 1u], i32(round((ca.y - ctra.y) * 16.0)));
-    atomicAdd(&pair_geom[pair * 4u + 2u], i32(round((cb.x - ctrb.x) * 16.0)));
-    atomicAdd(&pair_geom[pair * 4u + 3u], i32(round((cb.y - ctrb.y) * 16.0)));
+    // Offsets from cell centers as cell fractions, x128 fixed point (scale
+    // independent; per-edge quantization noise averages out over a bundle).
+    let ctra = bp.origin + (vec2<f32>(f32(ax), f32(ay)) + 0.5) * bp.cell;
+    let ctrb = bp.origin + (vec2<f32>(f32(bx), f32(by)) + 0.5) * bp.cell;
+    let oa = (ca - ctra) / bp.cell;
+    let ob = (cb - ctrb) / bp.cell;
+    atomicAdd(&pair_geom[pair * 4u + 0u], i32(round(oa.x * 128.0)));
+    atomicAdd(&pair_geom[pair * 4u + 1u], i32(round(oa.y * 128.0)));
+    atomicAdd(&pair_geom[pair * 4u + 2u], i32(round(ob.x * 128.0)));
+    atomicAdd(&pair_geom[pair * 4u + 3u], i32(round(ob.y * 128.0)));
     if (bp.mode == 0u) {
         let colA = colors[na];
         let colB = colors[nb];

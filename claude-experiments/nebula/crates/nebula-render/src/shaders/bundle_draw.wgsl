@@ -2,8 +2,9 @@
 // bind these buffers read-only — same split as density.wgsl/density_render).
 // One instance per (source cell, target cell) pair; empty pairs collapse to a
 // degenerate offscreen line. Occupied pairs draw centroid->centroid with
-// alpha = count * edge_alpha (additively blended, capped), so a bundle carries
-// the same light its member edges would have.
+// alpha = count * edge_alpha * level weight (additively blended, capped), so a
+// bundle carries the same light its member edges would have, split across the
+// two cross-faded LOD scales.
 
 struct Camera {
     center: vec2<f32>,
@@ -19,10 +20,15 @@ struct BParams {
     num_edges: u32,
     mode: u32,
     tint: vec4<f32>,
-    vw: f32,
-    vh: f32,
+    origin: vec2<f32>,
+    cell: f32,
+    weight: f32,
+    clip_min: vec2<f32>,
+    clip_max: vec2<f32>,
     edge_alpha: f32,
-    _p: f32,
+    _p0: f32,
+    _p1: f32,
+    _p2: f32,
 };
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -52,24 +58,15 @@ fn vs_bundle(
     let ncells = bp.cells_x * bp.cells_y;
     let ia = pair / ncells;
     let ib = pair % ncells;
-    let cw = bp.vw / f32(bp.cells_x);
-    let ch = bp.vh / f32(bp.cells_y);
     let idx = select(ia, ib, vi == 1u);
-    let ctr = vec2<f32>(
-        (f32(idx % bp.cells_x) + 0.5) * cw,
-        (f32(idx / bp.cells_x) + 0.5) * ch,
-    );
+    let ctr = bp.origin
+        + (vec2<f32>(f32(idx % bp.cells_x), f32(idx / bp.cells_x)) + 0.5) * bp.cell;
     let g = pair * 4u + vi * 2u;
-    let inv = 1.0 / (16.0 * f32(n));
-    let px = ctr + vec2<f32>(f32(pair_geom[g]) * inv, f32(pair_geom[g + 1u]) * inv);
+    let inv = bp.cell / (128.0 * f32(n));
+    let world = ctr + vec2<f32>(f32(pair_geom[g]) * inv, f32(pair_geom[g + 1u]) * inv);
 
-    // Pixel -> NDC.
-    out.clip = vec4<f32>(
-        px.x / bp.vw * 2.0 - 1.0,
-        1.0 - px.y / bp.vh * 2.0,
-        0.0,
-        1.0,
-    );
+    let ndc = (world - cam.center) * cam.scale;
+    out.clip = vec4<f32>(ndc, 0.0, 1.0);
     var rgb: vec3<f32>;
     if (bp.mode == 1u) {
         rgb = bp.tint.rgb;
@@ -81,7 +78,7 @@ fn vs_bundle(
             f32(pair_col[c + 2u]),
         ) / (255.0 * f32(n));
     }
-    out.color = vec4<f32>(rgb, min(1.0, f32(n) * bp.edge_alpha));
+    out.color = vec4<f32>(rgb, min(1.0, f32(n) * bp.edge_alpha) * bp.weight);
     return out;
 }
 

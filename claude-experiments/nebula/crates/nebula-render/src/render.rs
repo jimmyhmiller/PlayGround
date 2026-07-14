@@ -75,11 +75,13 @@ struct EdgeTypeGpu {
 /// This is a rendering change, not a limit — nothing is skipped or deferred.
 const BUNDLE_THRESHOLD: u32 = 1_500_000;
 
-/// Screen bin grid for bundling: cells_x * cells_y cells (pairs = ncells^2).
-const BUNDLE_CELLS_X: u32 = 40;
-const BUNDLE_CELLS_Y: u32 = 24;
-const BUNDLE_NCELLS: u32 = BUNDLE_CELLS_X * BUNDLE_CELLS_Y;
-const BUNDLE_PAIRS: u64 = (BUNDLE_NCELLS as u64) * (BUNDLE_NCELLS as u64);
+/// Max bin cells per level (bounds the pair matrix). The per-frame sizing
+/// loop grows the cell size until the visible grid fits this budget.
+const BUNDLE_MAX_NCELLS: u32 = 1_500;
+const BUNDLE_MAX_PAIRS: u64 = (BUNDLE_MAX_NCELLS as u64) * (BUNDLE_MAX_NCELLS as u64);
+/// Target on-screen size of a FINE bin cell in pixels; the fine level spans
+/// (target/2, target] px, the coarse level is exactly 2x.
+const BUNDLE_TARGET_CELL_PX: f32 = 128.0;
 
 /// Matches `BParams` in bundle.wgsl / bundle_draw.wgsl.
 #[repr(C)]
@@ -90,18 +92,34 @@ struct BundleParams {
     num_edges: u32,
     mode: u32,
     tint: [f32; 4],
-    vw: f32,
-    vh: f32,
+    origin: [f32; 2],
+    cell: f32,
+    weight: f32,
+    clip_min: [f32; 2],
+    clip_max: [f32; 2],
     edge_alpha: f32,
-    _p: f32,
+    _p0: f32,
+    _p1: f32,
+    _p2: f32,
 }
 
-/// Per-type bundling state: pair accumulators + params + bind groups.
-struct BundleGpu {
+/// One LOD scale of a type's bundling: its own pair accumulators + params.
+struct BundleLevel {
     params_buf: wgpu::Buffer,
     view_bg: wgpu::BindGroup,
     bin_bg: wgpu::BindGroup,
     draw_bg: wgpu::BindGroup,
+    /// Pair count of the current frame's grid (dispatch/draw size).
+    pairs: u32,
+    /// False when this level's cross-fade weight is ~0 (skip bin + draw).
+    active: bool,
+}
+
+/// Per-type bundling state: two world-anchored power-of-two scales,
+/// cross-faded by fractional zoom so nothing ever re-bins during camera
+/// motion and scale transitions are invisible.
+struct BundleGpu {
+    levels: [BundleLevel; 2],
     mode: u32,
     tint: [f32; 4],
 }
@@ -619,57 +637,60 @@ impl Renderer {
                     Some(c) => (1u32, unpack_norm(c)),
                     None => (0u32, [0.0f32; 4]),
                 };
-                let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("bundle_params"),
-                    size: std::mem::size_of::<BundleParams>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let mk_storage = |label: &str, bytes: u64| {
-                    device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(label),
-                        size: bytes,
-                        usage: wgpu::BufferUsages::STORAGE,
+                let mk_level = || {
+                    let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("bundle_params"),
+                        size: std::mem::size_of::<BundleParams>() as u64,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
-                    })
+                    });
+                    let mk_storage = |label: &str, bytes: u64| {
+                        device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some(label),
+                            size: bytes,
+                            usage: wgpu::BufferUsages::STORAGE,
+                            mapped_at_creation: false,
+                        })
+                    };
+                    let pair_count = mk_storage("bundle_pair_count", BUNDLE_MAX_PAIRS * 4);
+                    let pair_geom = mk_storage("bundle_pair_geom", BUNDLE_MAX_PAIRS * 4 * 4);
+                    let pair_col = mk_storage("bundle_pair_col", BUNDLE_MAX_PAIRS * 6 * 4);
+                    let view_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("bundle_view_bg"),
+                        layout: &self.bundle_view_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 1, resource: params_buf.as_entire_binding() },
+                        ],
+                    });
+                    let bin_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("bundle_bin_bg"),
+                        layout: &self.bundle_bin_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: graph.positions.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 1, resource: graph.colors.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: edge_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 3, resource: pair_count.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 4, resource: pair_geom.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 5, resource: pair_col.as_entire_binding() },
+                        ],
+                    });
+                    let draw_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("bundle_draw_bg"),
+                        layout: &self.bundle_draw_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: pair_count.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 1, resource: pair_geom.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: pair_col.as_entire_binding() },
+                        ],
+                    });
+                    BundleLevel { params_buf, view_bg, bin_bg, draw_bg, pairs: 0, active: false }
                 };
-                let pair_count = mk_storage("bundle_pair_count", BUNDLE_PAIRS * 4);
-                let pair_geom = mk_storage("bundle_pair_geom", BUNDLE_PAIRS * 4 * 4);
-                let pair_col = mk_storage("bundle_pair_col", BUNDLE_PAIRS * 6 * 4);
-                let view_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("bundle_view_bg"),
-                    layout: &self.bundle_view_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: params_buf.as_entire_binding() },
-                    ],
-                });
-                let bin_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("bundle_bin_bg"),
-                    layout: &self.bundle_bin_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: graph.positions.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: graph.colors.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: edge_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: pair_count.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 4, resource: pair_geom.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 5, resource: pair_col.as_entire_binding() },
-                    ],
-                });
-                let draw_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("bundle_draw_bg"),
-                    layout: &self.bundle_draw_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: pair_count.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: pair_geom.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: pair_col.as_entire_binding() },
-                    ],
-                });
                 log::info!(
-                    "edge type '{}': {} edges -> bundled rendering ({}x{} cells)",
-                    s.name, s.edges.len(), BUNDLE_CELLS_X, BUNDLE_CELLS_Y
+                    "edge type '{}': {} edges -> bundled rendering (world-anchored, 2 LOD scales)",
+                    s.name, s.edges.len()
                 );
-                Some(BundleGpu { params_buf, view_bg, bin_bg, draw_bg, mode: bmode, tint: btint })
+                Some(BundleGpu { levels: [mk_level(), mk_level()], mode: bmode, tint: btint })
             } else {
                 None
             };
@@ -689,23 +710,76 @@ impl Renderer {
         }
     }
 
-    /// Upload per-frame bundle params (viewport + edge glow). Call once per
-    /// frame before `record_bundle_compute`.
-    pub fn update_bundles(&self, queue: &wgpu::Queue, vw: f32, vh: f32, edge_alpha: f32) {
-        for et in &self.edge_types {
-            if let Some(b) = et.bundle.as_ref() {
+    /// Upload per-frame bundle params: pick the two world-space power-of-two
+    /// cell scales bracketing the ideal on-screen cell size and their
+    /// cross-fade weights, and lay a world-anchored grid over the view for
+    /// each. Because grid cells are fixed world rectangles (origin quantized
+    /// to whole cells), camera motion never re-bins anything — bundles are
+    /// stable geometry — and the octave cross-fade makes scale changes
+    /// invisible. Call once per frame before `record_bundle_compute`.
+    pub fn update_bundles(
+        &mut self,
+        queue: &wgpu::Queue,
+        cam: &crate::camera::CameraUniform,
+        edge_alpha: f32,
+    ) {
+        let zoom = cam.zoom.max(1e-12);
+        let half = [cam.viewport[0] * 0.5 / zoom, cam.viewport[1] * 0.5 / zoom];
+        let view_min = [cam.center[0] - half[0], cam.center[1] - half[1]];
+        let view_max = [cam.center[0] + half[0], cam.center[1] + half[1]];
+
+        // Grow the target cell size until the fine grid fits the pair budget.
+        let mut target_px = BUNDLE_TARGET_CELL_PX;
+        let (fine_cell, frac) = loop {
+            let ideal = target_px / zoom;
+            let fine = 2.0f32.powf(ideal.log2().floor());
+            let cx = ((view_max[0] - view_min[0]) / fine).ceil() as u32 + 5;
+            let cy = ((view_max[1] - view_min[1]) / fine).ceil() as u32 + 5;
+            if cx * cy <= BUNDLE_MAX_NCELLS {
+                break (fine, (ideal / fine).log2().clamp(0.0, 1.0));
+            }
+            target_px *= 1.25;
+        };
+
+        // (cell size, cross-fade weight) for the two bracketing scales.
+        let scales = [(fine_cell, 1.0 - frac), (fine_cell * 2.0, frac)];
+        for et in &mut self.edge_types {
+            let Some(b) = et.bundle.as_mut() else { continue };
+            for (lvl, &(cell, weight)) in b.levels.iter_mut().zip(scales.iter()) {
+                lvl.active = weight > 0.003;
+                if !lvl.active {
+                    continue;
+                }
+                // World-anchored grid covering the view + one cell of margin.
+                let origin = [
+                    (view_min[0] / cell).floor() * cell - cell,
+                    (view_min[1] / cell).floor() * cell - cell,
+                ];
+                let clip_min = [view_min[0] - cell, view_min[1] - cell];
+                let clip_max = [view_max[0] + cell, view_max[1] + cell];
+                let cells_x = (((clip_max[0] - origin[0]) / cell).ceil() as u32 + 1)
+                    .min(BUNDLE_MAX_NCELLS);
+                let cells_y = (((clip_max[1] - origin[1]) / cell).ceil() as u32 + 1)
+                    .min(BUNDLE_MAX_NCELLS / cells_x.max(1));
+                let ncells = cells_x * cells_y;
+                lvl.pairs = ncells * ncells;
                 let params = BundleParams {
-                    cells_x: BUNDLE_CELLS_X,
-                    cells_y: BUNDLE_CELLS_Y,
+                    cells_x,
+                    cells_y,
                     num_edges: et.num_edges,
                     mode: b.mode,
                     tint: b.tint,
-                    vw,
-                    vh,
+                    origin,
+                    cell,
+                    weight,
+                    clip_min,
+                    clip_max,
                     edge_alpha,
-                    _p: 0.0,
+                    _p0: 0.0,
+                    _p1: 0.0,
+                    _p2: 0.0,
                 };
-                queue.write_buffer(&b.params_buf, 0, bytemuck::bytes_of(&params));
+                queue.write_buffer(&lvl.params_buf, 0, bytemuck::bytes_of(&params));
             }
         }
     }
@@ -717,7 +791,6 @@ impl Renderer {
         if !self.draw_edges {
             return;
         }
-        let pair_groups = crate::layout_gpu::dispatch_dims(BUNDLE_PAIRS.div_ceil(256));
         for et in &self.edge_types {
             let Some(b) = et.bundle.as_ref() else { continue };
             if !et.visible || et.num_edges == 0 {
@@ -725,25 +798,32 @@ impl Renderer {
             }
             let edge_groups =
                 crate::layout_gpu::dispatch_dims((et.num_edges as u64).div_ceil(256));
-            {
-                let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("bundle_clear"),
-                    timestamp_writes: None,
-                });
-                cp.set_pipeline(&self.bundle_clear_pipeline);
-                cp.set_bind_group(0, &b.view_bg, &[]);
-                cp.set_bind_group(1, &b.bin_bg, &[]);
-                cp.dispatch_workgroups(pair_groups.0, pair_groups.1, pair_groups.2);
-            }
-            {
-                let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("bundle_bin"),
-                    timestamp_writes: None,
-                });
-                cp.set_pipeline(&self.bundle_bin_pipeline);
-                cp.set_bind_group(0, &b.view_bg, &[]);
-                cp.set_bind_group(1, &b.bin_bg, &[]);
-                cp.dispatch_workgroups(edge_groups.0, edge_groups.1, edge_groups.2);
+            for lvl in &b.levels {
+                if !lvl.active {
+                    continue;
+                }
+                let pair_groups =
+                    crate::layout_gpu::dispatch_dims((lvl.pairs as u64).div_ceil(256));
+                {
+                    let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("bundle_clear"),
+                        timestamp_writes: None,
+                    });
+                    cp.set_pipeline(&self.bundle_clear_pipeline);
+                    cp.set_bind_group(0, &lvl.view_bg, &[]);
+                    cp.set_bind_group(1, &lvl.bin_bg, &[]);
+                    cp.dispatch_workgroups(pair_groups.0, pair_groups.1, pair_groups.2);
+                }
+                {
+                    let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("bundle_bin"),
+                        timestamp_writes: None,
+                    });
+                    cp.set_pipeline(&self.bundle_bin_pipeline);
+                    cp.set_bind_group(0, &lvl.view_bg, &[]);
+                    cp.set_bind_group(1, &lvl.bin_bg, &[]);
+                    cp.dispatch_workgroups(edge_groups.0, edge_groups.1, edge_groups.2);
+                }
             }
         }
     }
@@ -761,9 +841,13 @@ impl Renderer {
                 match et.bundle.as_ref() {
                     Some(b) => {
                         pass.set_pipeline(&self.bundle_draw_pipeline);
-                        pass.set_bind_group(0, &b.view_bg, &[]);
-                        pass.set_bind_group(1, &b.draw_bg, &[]);
-                        pass.draw(0..2, 0..(BUNDLE_PAIRS as u32));
+                        for lvl in &b.levels {
+                            if lvl.active && lvl.pairs > 0 {
+                                pass.set_bind_group(0, &lvl.view_bg, &[]);
+                                pass.set_bind_group(1, &lvl.draw_bg, &[]);
+                                pass.draw(0..2, 0..lvl.pairs);
+                            }
+                        }
                     }
                     None => {
                         pass.set_pipeline(&self.edge_pipeline);
