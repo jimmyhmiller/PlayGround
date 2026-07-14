@@ -63,6 +63,8 @@ struct EdgeTypeGpu {
     bind_group: wgpu::BindGroup,
     /// Bind group for the edge_cull compute passes.
     cull_bg: wgpu::BindGroup,
+    /// Group-0 bind group for the edge_raster compute pass.
+    raster_bg: wgpu::BindGroup,
     /// Visible edges as (a, b) node-id pairs in original edge order — used as
     /// the index buffer for the edge draw.
     compact: wgpu::Buffer,
@@ -96,13 +98,34 @@ pub struct Renderer {
     cull_count_pipeline: wgpu::ComputePipeline,
     cull_scan_pipeline: wgpu::ComputePipeline,
     cull_emit_pipeline: wgpu::ComputePipeline,
-    /// True when the compacted visible-edge sets are stale (camera moved,
-    /// positions changed, or the edge sets themselves changed).
+    raster_bgl: wgpu::BindGroupLayout,
+    raster_accum_bgl: wgpu::BindGroupLayout,
+    raster_pipeline: wgpu::ComputePipeline,
+    resolve_bgl: wgpu::BindGroupLayout,
+    resolve_pipeline: wgpu::RenderPipeline,
+    /// Accumulation target for the compute raster path (recreated on resize).
+    accum: Option<AccumGpu>,
+    /// True when the prepared edge data (compacted index sets on the hardware
+    /// path, the accumulation buffer on the compute path) is stale.
     cull_dirty: bool,
     last_cam: Option<CameraUniform>,
     num_nodes: u32,
     pub draw_edges: bool,
     pub draw_nodes: bool,
+    /// Runtime toggle: rasterize edges in a compute shader instead of the
+    /// hardware LineList pipeline. Switch via `set_edge_raster`.
+    edge_raster: bool,
+}
+
+/// Fixed-point accumulation buffer for the compute raster path.
+struct AccumGpu {
+    buf: wgpu::Buffer,
+    w: u32,
+    h: u32,
+    /// Group-1 bind group for edge_raster (dims + read_write accum).
+    raster_bg: wgpu::BindGroup,
+    /// Group-0 bind group for the fullscreen resolve (dims + read-only accum).
+    resolve_bg: wgpu::BindGroup,
 }
 
 /// Edges per cull_count/cull_emit workgroup (must match CHUNK in edge_cull.wgsl).
@@ -372,6 +395,126 @@ impl Renderer {
         let cull_scan_pipeline = cull_pipe("cull_scan");
         let cull_emit_pipeline = cull_pipe("cull_emit");
 
+        // Compute edge rasterizer (see edge_raster.wgsl / edge_resolve.wgsl).
+        let raster_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("edge_raster.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/edge_raster.wgsl").into()),
+        });
+        let resolve_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("edge_resolve.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/edge_resolve.wgsl").into()),
+        });
+        let compute_uniform = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let raster_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("edge_raster_bgl"),
+            entries: &[
+                compute_uniform(0),
+                compute_uniform(1),
+                cull_ro(2),
+                cull_ro(3),
+                cull_ro(4),
+                compute_uniform(5),
+            ],
+        });
+        let raster_accum_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("edge_raster_accum_bgl"),
+            entries: &[compute_uniform(0), rw_storage(1)],
+        });
+        let raster_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("edge_raster_pl"),
+            bind_group_layouts: &[&raster_bgl, &raster_accum_bgl],
+            push_constant_ranges: &[],
+        });
+        let raster_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("raster_edges"),
+            layout: Some(&raster_pl),
+            module: &raster_shader,
+            entry_point: Some("raster_edges"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let resolve_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("edge_resolve_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let resolve_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("edge_resolve_pl"),
+            bind_group_layouts: &[&resolve_bgl],
+            push_constant_ranges: &[],
+        });
+        // Blend One/One: the accumulator already holds premultiplied
+        // rgb * edge_alpha sums, added over the cleared background exactly
+        // like the hardware additive edge pass.
+        let resolve_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("edge_resolve_pipeline"),
+            layout: Some(&resolve_pl),
+            vertex: wgpu::VertexState {
+                module: &resolve_shader,
+                entry_point: Some("vs_fullscreen"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &resolve_shader,
+                entry_point: Some("fs_resolve"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Zero,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         Renderer {
             camera_buf,
             params_buf,
@@ -386,12 +529,32 @@ impl Renderer {
             cull_count_pipeline,
             cull_scan_pipeline,
             cull_emit_pipeline,
+            raster_bgl,
+            raster_accum_bgl,
+            raster_pipeline,
+            resolve_bgl,
+            resolve_pipeline,
+            accum: None,
             cull_dirty: true,
             last_cam: None,
             num_nodes: graph.num_nodes as u32,
             draw_edges: true,
             draw_nodes: true,
+            edge_raster: false,
         }
+    }
+
+    /// Switch between the hardware LineList path and the compute rasterizer.
+    /// Safe to flip every frame; both paths share the same dirty tracking.
+    pub fn set_edge_raster(&mut self, on: bool) {
+        if self.edge_raster != on {
+            self.edge_raster = on;
+            self.cull_dirty = true;
+        }
+    }
+
+    pub fn edge_raster(&self) -> bool {
+        self.edge_raster
     }
 
     pub fn update_camera(&mut self, queue: &wgpu::Queue, cam: &CameraUniform) {
@@ -414,10 +577,102 @@ impl Renderer {
         self.cull_dirty = true;
     }
 
+    /// (Re)create the fixed-point accumulation buffer when the surface size
+    /// changes. 12 bytes per pixel (3 × u32).
+    fn ensure_accum(&mut self, device: &wgpu::Device, w: u32, h: u32) {
+        if self.accum.as_ref().is_some_and(|a| a.w == w && a.h == h) {
+            return;
+        }
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("edge_accum"),
+            size: (w as u64 * h as u64 * 3 * 4).max(16),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let dims = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("edge_accum_dims"),
+            contents: bytemuck::cast_slice(&[w, h, 0, 0]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let raster_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("edge_accum_raster_bg"),
+            layout: &self.raster_accum_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: dims.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: buf.as_entire_binding() },
+            ],
+        });
+        let resolve_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("edge_accum_resolve_bg"),
+            layout: &self.resolve_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: dims.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: buf.as_entire_binding() },
+            ],
+        });
+        self.accum = Some(AccumGpu { buf, w, h, raster_bg, resolve_bg });
+        self.cull_dirty = true;
+    }
+
+    /// Prepare edge data for this frame on whichever path is active: compact
+    /// the visible set (hardware path) or clear + software-rasterize into the
+    /// accumulation buffer (compute path). No-op while nothing is dirty.
+    /// Must be encoded before the render pass. Returns whether work ran.
+    pub fn encode_edge_prep(
+        &mut self,
+        device: &wgpu::Device,
+        w: u32,
+        h: u32,
+        enc: &mut wgpu::CommandEncoder,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites>,
+    ) -> bool {
+        if self.edge_raster {
+            self.ensure_accum(device, w.max(1), h.max(1));
+            self.encode_edge_raster(enc, timestamp_writes)
+        } else {
+            self.encode_edge_cull(enc, timestamp_writes)
+        }
+    }
+
+    /// Compute-raster path: clear the accumulator and re-draw every visible
+    /// edge into it. Integer atomics make the result order-independent, so
+    /// this is deterministic regardless of GPU scheduling.
+    fn encode_edge_raster(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites>,
+    ) -> bool {
+        if !self.cull_dirty {
+            return false;
+        }
+        self.cull_dirty = false;
+        let Some(accum) = &self.accum else {
+            return false;
+        };
+        enc.clear_buffer(&accum.buf, 0, None);
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("edge_raster"),
+            timestamp_writes,
+        });
+        pass.set_pipeline(&self.raster_pipeline);
+        pass.set_bind_group(1, &accum.raster_bg, &[]);
+        for et in &self.edge_types {
+            if !(et.visible && et.num_edges > 0) {
+                continue;
+            }
+            let wgs = et.num_edges.div_ceil(256);
+            let x = wgs.min(65_535);
+            let y = wgs.div_ceil(x.max(1));
+            pass.set_bind_group(0, &et.raster_bg, &[]);
+            pass.dispatch_workgroups(x, y, 1);
+        }
+        true
+    }
+
     /// Encode the visible-edge compaction (3 compute dispatches per visible
     /// edge type) if anything invalidated it. Must be encoded before the
     /// render pass that draws edges. Returns whether it ran.
-    pub fn encode_edge_cull(
+    fn encode_edge_cull(
         &mut self,
         enc: &mut wgpu::CommandEncoder,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites>,
@@ -637,9 +892,23 @@ impl Renderer {
                 ],
             });
 
+            let raster_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("edge_raster_bg"),
+                layout: &self.raster_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.params_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: graph.positions.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: graph.colors.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: edge_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: style_buf.as_entire_binding() },
+                ],
+            });
+
             self.edge_types.push(EdgeTypeGpu {
                 bind_group,
                 cull_bg,
+                raster_bg,
                 compact,
                 indirect,
                 num_edges,
@@ -661,22 +930,31 @@ impl Renderer {
 
     /// Record draw calls into an already-begun render pass.
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
-        pass.set_bind_group(0, &self.view_bg, &[]);
-
-        // Edges under nodes: one indexed indirect draw per visible edge type.
-        // The index buffer + args were compacted by the edge_cull compute pass
-        // (encode_edge_cull must have run whenever the scene/camera changed).
+        // Edges under nodes. Hardware path: one indexed indirect draw per
+        // visible edge type over the compacted set. Compute path: a fullscreen
+        // triangle adds the software-rasterized accumulation onto the frame.
+        // Either way encode_edge_prep must have run when the scene changed.
         if self.draw_edges {
-            pass.set_pipeline(&self.edge_pipeline);
-            for et in &self.edge_types {
-                if et.visible && et.num_edges > 0 {
-                    pass.set_bind_group(1, &et.bind_group, &[]);
-                    pass.set_index_buffer(et.compact.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed_indirect(&et.indirect, 0);
+            if self.edge_raster {
+                if let Some(accum) = &self.accum {
+                    pass.set_pipeline(&self.resolve_pipeline);
+                    pass.set_bind_group(0, &accum.resolve_bg, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+            } else {
+                pass.set_bind_group(0, &self.view_bg, &[]);
+                pass.set_pipeline(&self.edge_pipeline);
+                for et in &self.edge_types {
+                    if et.visible && et.num_edges > 0 {
+                        pass.set_bind_group(1, &et.bind_group, &[]);
+                        pass.set_index_buffer(et.compact.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed_indirect(&et.indirect, 0);
+                    }
                 }
             }
         }
         if self.draw_nodes && self.num_nodes > 0 {
+            pass.set_bind_group(0, &self.view_bg, &[]);
             pass.set_bind_group(1, &self.graph_bg, &[]);
             pass.set_pipeline(&self.node_pipeline);
             pass.draw(0..6, 0..self.num_nodes);

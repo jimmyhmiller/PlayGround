@@ -426,6 +426,8 @@ pub struct RunOptions {
     pub show_labels: bool,
     /// Force the density-aggregation LOD on (otherwise auto for >2M nodes).
     pub aggregate: bool,
+    /// Start with the compute edge rasterizer on (runtime-toggleable in the UI).
+    pub compute_edges: bool,
     /// Initial node radius in pixels (runtime-adjustable with +/-).
     pub node_size: f32,
     /// Optional startup "show only" filter: (attribute key index, op, value).
@@ -451,6 +453,7 @@ impl Default for RunOptions {
             color_mode: ColorMode::Uniform,
             draw_edges: true,
             draw_nodes: true,
+            compute_edges: false,
             select: None,
             show_help: false,
             show_labels: false,
@@ -664,7 +667,17 @@ impl App {
     }
 
     pub fn run(self) -> anyhow::Result<()> {
-        let event_loop = EventLoop::new()?;
+        let mut builder = EventLoop::builder();
+        // Headless/benchmark runs (--frames) must not steal focus: run as an
+        // Accessory app (no Dock icon, no activation) on macOS.
+        #[cfg(target_os = "macos")]
+        if self.opts.max_frames.is_some() {
+            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+            builder
+                .with_activation_policy(ActivationPolicy::Accessory)
+                .with_activate_ignoring_other_apps(false);
+        }
+        let event_loop = builder.build()?;
         event_loop.set_control_flow(ControlFlow::Poll);
         let mut app = self;
         event_loop.run_app(&mut app)?;
@@ -674,7 +687,9 @@ impl App {
     fn init_live(&mut self, event_loop: &ActiveEventLoop) {
         let attrs = Window::default_attributes()
             .with_title(&self.opts.title)
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
+            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0))
+            // Headless/benchmark runs (--frames) must not steal focus.
+            .with_active(self.opts.max_frames.is_none());
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
         let gpu = pollster::block_on(Gpu::new(window.clone())).expect("gpu init");
@@ -694,6 +709,7 @@ impl App {
         let mut renderer = renderer;
         renderer.draw_edges = self.opts.draw_edges;
         renderer.draw_nodes = self.opts.draw_nodes;
+        renderer.set_edge_raster(self.opts.compute_edges);
         // Upload the edge types to the renderer.
         let specs: Vec<crate::render::EdgeTypeInput> = self
             .edge_types
@@ -1000,6 +1016,7 @@ impl App {
         let mut edge_alpha = self.render_params.edge_alpha;
         let mut draw_edges = self.live.as_ref().map(|l| l.renderer.draw_edges).unwrap_or(true);
         let mut draw_nodes = self.live.as_ref().map(|l| l.renderer.draw_nodes).unwrap_or(true);
+        let mut edge_raster = self.live.as_ref().map(|l| l.renderer.edge_raster()).unwrap_or(false);
 
         let mut show_density = self.show_density;
         let mut show_labels = self.show_labels;
@@ -1106,6 +1123,7 @@ impl App {
                 ui.strong("Display");
                 ui.checkbox(&mut draw_nodes, "Nodes");
                 ui.checkbox(&mut draw_edges, "Edges");
+                ui.checkbox(&mut edge_raster, "Compute edge raster");
                 ui.checkbox(&mut show_density, "Aggregate (density LOD)");
                 ui.checkbox(&mut show_labels, "Labels");
                 ui.add(
@@ -1238,6 +1256,7 @@ impl App {
         if let Some(live) = self.live.as_mut() {
             live.renderer.draw_edges = draw_edges;
             live.renderer.draw_nodes = draw_nodes;
+            live.renderer.set_edge_raster(edge_raster);
         }
         let filter_changed = filter_enabled != self.filter.enabled
             || filter_key != self.filter.key
@@ -1377,7 +1396,8 @@ impl App {
         }
         let cull_ran = {
             let cull_tw = live.timer.as_ref().and_then(|t| t.cull_writes());
-            live.renderer.encode_edge_cull(&mut enc, cull_tw)
+            let (w, h) = (live.gpu.size.width, live.gpu.size.height);
+            live.renderer.encode_edge_prep(&live.gpu.device, w, h, &mut enc, cull_tw)
         };
         if let Some(t) = live.timer.as_mut() {
             t.set_cull_ran(cull_ran);
@@ -1800,7 +1820,7 @@ impl App {
         if self.show_density {
             live.density.record_compute(&mut enc);
         }
-        live.renderer.encode_edge_cull(&mut enc, None);
+        live.renderer.encode_edge_prep(&live.gpu.device, w, h, &mut enc, None);
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("capture_pass"),

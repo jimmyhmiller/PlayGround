@@ -33,6 +33,7 @@ OPTIONS:
     --labels                  Show node labels (graphs up to 50k nodes)
     --select <INDEX>          Preselect a node
     --no-edges / --no-nodes   Hide edges / nodes
+    --compute-edges           Rasterize edges in a compute shader (UI-toggleable)
     --frames <N>              Exit after N frames (headless)
     --screenshot <PATH>       Save a PNG of the final frame (headless)
     --help-overlay            Start with the controls overlay visible
@@ -75,6 +76,7 @@ struct Args {
     help_overlay: bool,
     labels: bool,
     aggregate: bool,
+    compute_edges: bool,
     node_size: f32,
 }
 
@@ -219,6 +221,7 @@ fn main() -> anyhow::Result<()> {
         show_help: args.help_overlay,
         show_labels: args.labels,
         aggregate: args.aggregate,
+        compute_edges: args.compute_edges,
         node_size: args.node_size,
         filter,
         start_hierarchical: args.hierarchical,
@@ -254,6 +257,7 @@ fn parse_args() -> Result<Args, String> {
     let mut help_overlay = false;
     let mut labels = false;
     let mut aggregate = false;
+    let mut compute_edges = false;
     let mut node_size = 3.0f32;
 
     fn next_u64(it: &mut impl Iterator<Item = String>, name: &str) -> Result<u64, String> {
@@ -308,6 +312,7 @@ fn parse_args() -> Result<Args, String> {
             "--help-overlay" => help_overlay = true,
             "--labels" => labels = true,
             "--aggregate" => aggregate = true,
+            "--compute-edges" => compute_edges = true,
             "--node-size" => node_size = next_f32(&mut it, "--node-size")?,
             "--frames" => frames = Some(next_u64(&mut it, "--frames")?),
             "--screenshot" => screenshot = Some(it.next().ok_or("--screenshot needs a path")?),
@@ -377,6 +382,7 @@ fn parse_args() -> Result<Args, String> {
         help_overlay,
         labels,
         aggregate,
+        compute_edges,
         node_size,
     })
 }
