@@ -21,6 +21,9 @@ use microlang::{Obj, Repr, Runtime, Val, ValueModel};
 /// representation shared by reader and runtime; vectors/maps/sets get the same
 /// treatment via `data` (the reader constructs the runtime collection itself).
 pub const KEYWORD: &str = "Keyword";
+/// The unresolved `::foo` marker (field 0 = the `foo` / `alias/foo` name sym);
+/// resolved to a plain `Keyword` per the current namespace at eval time.
+pub const KEYWORD_AUTO_NS: &str = "KeywordAutoNs";
 
 pub fn read_all<M: ValueModel>(rt: &mut Runtime<M>, src: &str) -> Vec<u64> {
     let toks = tokenize(src);
@@ -439,6 +442,15 @@ impl Parser {
         }
         if let Ok(f) = a.parse::<f64>() {
             return rt.encode(Val::Float(f));
+        }
+        // `::foo` / `::alias/foo` — an AUTO-NAMESPACED keyword. The reader can't
+        // know the current namespace (forms are read before the preceding `ns`
+        // forms evaluate), so it emits a marker record that `eval_form` resolves
+        // against the compiler's namespace state just before evaluation.
+        if let Some(kw) = a.strip_prefix("::") {
+            let name = rt.intern(kw);
+            let name_v = rt.encode(Val::Sym(name));
+            return record(rt, KEYWORD_AUTO_NS, vec![name_v]);
         }
         if let Some(kw) = a.strip_prefix(':') {
             // (keyword) -> a `Keyword` record holding the interned name symbol.

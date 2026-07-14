@@ -67,66 +67,103 @@ pub fn run_with_paths<M: ValueModel>(
     src: &str,
     load_paths: Vec<std::path::PathBuf>,
 ) -> u64 {
-    let mut macros: HashSet<Sym> = HashSet::new();
-    let mut comp = Compiler::new(rt);
-    comp.set_load_paths(load_paths);
-    run_src(rt, cs, &mut macros, &mut comp, sources::CORE);
-    // Persistent data structures ported from ClojureScript (EPL-1.0), loaded after
-    // the core protocols/shim they build on. Redefines vector/vec/vector?.
-    run_src(rt, cs, &mut macros, &mut comp, sources::CLJS_TYPES);
-    // The JVM layer — every host class/method/static, as in-language data
-    // (`defclass` + `-jvm-registry`). The expander's interop lowering targets
-    // these fns; nothing in Rust knows a class name.
-    run_src(rt, cs, &mut macros, &mut comp, sources::HOST_JVM);
-    // clojure.core + the cljs types loaded into `clojure.core`; user code from
-    // here on runs in the `user` namespace. EVERY var is now ns-qualified, so the
-    // frontend's own references to core helpers use their `clojure.core/…` names.
-    comp.end_core_load();
-    // `clojure.string` — bundled, but written ENTIRELY in the language (its `(ns
-    // clojure.string)` form sets the ns + marks it loaded). Proof that the string
-    // library is library code over one primitive, not builtins.
-    run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_STRING);
-    // `clojure.data.json` — a real library, also written entirely in the language
-    // (loaded after clojure.string, which its writer uses for `join`).
-    run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_SET);
-    run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_WALK);
-    run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_ZIP);
-    run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_DATA_JSON);
-    run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_TEST);
-    comp.set_ns("user");
-    // These are provided in-process; `require` must never look for them on disk.
-    comp.mark_loaded("clojure.core");
-    comp.mark_loaded("clojure.test");
-    comp.mark_loaded("user");
-    // Route `(obj arg)` for a non-closure record (keyword/map/vector) through the
-    // core `-apply-obj` dispatcher, so keywords/collections are callable.
-    let apply_obj = rt.intern("clojure.core/-apply-obj");
-    rt.set_apply_fn(apply_obj);
-    // Install the reader+compiler re-entry bridge (read-string/eval/macroexpand-1)
-    // with raw pointers to the live `comp`/`macros`/`cs`. Valid only for this call;
-    // cleared before returning. See `FrontendBridge`.
-    // SAFETY: launder cs's lifetime to a raw pointer; the bridge is cleared before
-    // this call returns, so the pointer never outlives `cs`.
-    let cs_ptr: *const dyn CodeSpace<M> =
-        unsafe { std::mem::transmute::<&dyn CodeSpace<M>, &'static dyn CodeSpace<M>>(cs) };
-    let bridge = FrontendBridge::<M> {
-        comp: &mut comp as *mut Compiler,
-        macros: &macros as *const HashSet<Sym>,
-        cs: cs_ptr,
-    };
-    rt.set_eval_bridge(Arc::new(bridge));
-    let result = run_src(rt, cs, &mut macros, &mut comp, src);
-    rt.clear_eval_bridge();
-    // Force any lazy sequence in the final value so callers / the printer (which
-    // can't invoke thunks) see a fully realized result.
-    let slot = rt.push_root(result);
-    let realize = rt.intern("clojure.core/-realize");
-    let out = match rt.global(realize) {
-        Some(rf) => cs.invoke(cs, rt, rf, &[rt.root_get(slot)]),
-        None => rt.root_get(slot),
-    };
-    rt.truncate_roots(slot);
-    out
+    let mut session = Session::new(rt, cs, load_paths);
+    session.eval(rt, cs, src)
+}
+
+/// A LIVE evaluation session: the loaded prelude plus the compiler/macro state
+/// that persists across evals — what a REPL (and an nREPL session) sits on.
+/// Create once (loads the prelude), then `eval` any number of times; defs,
+/// namespaces, requires, and macros accumulate. Always pass the SAME
+/// `Runtime`/backend the session was created with.
+pub struct Session {
+    macros: HashSet<Sym>,
+    comp: Compiler,
+}
+
+impl Session {
+    pub fn new<M: ValueModel>(
+        rt: &mut Runtime<M>,
+        cs: &dyn CodeSpace<M>,
+        load_paths: Vec<std::path::PathBuf>,
+    ) -> Session {
+        let mut macros: HashSet<Sym> = HashSet::new();
+        let mut comp = Compiler::new(rt);
+        comp.set_load_paths(load_paths);
+        run_src(rt, cs, &mut macros, &mut comp, sources::CORE);
+        // Persistent data structures ported from ClojureScript (EPL-1.0), loaded
+        // after the core protocols/shim they build on. Redefines vector/vec/vector?.
+        run_src(rt, cs, &mut macros, &mut comp, sources::CLJS_TYPES);
+        // The JVM layer — every host class/method/static, as in-language data
+        // (`defclass` + `-jvm-registry`). The expander's interop lowering targets
+        // these fns; nothing in Rust knows a class name.
+        run_src(rt, cs, &mut macros, &mut comp, sources::HOST_JVM);
+        // clojure.core + the cljs types loaded into `clojure.core`; user code from
+        // here on runs in the `user` namespace. EVERY var is now ns-qualified, so
+        // the frontend's own references to core helpers use `clojure.core/…` names.
+        comp.end_core_load();
+        // `clojure.string` — bundled, but written ENTIRELY in the language (its
+        // `(ns clojure.string)` form sets the ns + marks it loaded). Proof that the
+        // string library is library code over one primitive, not builtins.
+        run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_STRING);
+        // `clojure.data.json` — a real library, also written entirely in the
+        // language (loaded after clojure.string, which its writer uses for `join`).
+        run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_SET);
+        run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_WALK);
+        run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_ZIP);
+        run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_DATA_JSON);
+        run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_TEST);
+        comp.set_ns("user");
+        // These are provided in-process; `require` must never look for them on disk.
+        comp.mark_loaded("clojure.core");
+        comp.mark_loaded("clojure.test");
+        comp.mark_loaded("user");
+        // Route `(obj arg)` for a non-closure record (keyword/map/vector) through
+        // the core `-apply-obj` dispatcher, so keywords/collections are callable.
+        let apply_obj = rt.intern("clojure.core/-apply-obj");
+        rt.set_apply_fn(apply_obj);
+        Session { macros, comp }
+    }
+
+    /// Evaluate source in this session, returning the last form's (realized)
+    /// value. Compiler/macro state persists to the next call.
+    pub fn eval<M: ValueModel>(
+        &mut self,
+        rt: &mut Runtime<M>,
+        cs: &dyn CodeSpace<M>,
+        src: &str,
+    ) -> u64 {
+        // Install the reader+compiler re-entry bridge (read-string/eval/
+        // macroexpand-1) with raw pointers to the live state. Valid only for this
+        // call; cleared before returning. See `FrontendBridge`.
+        // SAFETY: launder cs's lifetime to a raw pointer; the bridge is cleared
+        // before this call returns, so the pointer never outlives `cs`.
+        let cs_ptr: *const dyn CodeSpace<M> =
+            unsafe { std::mem::transmute::<&dyn CodeSpace<M>, &'static dyn CodeSpace<M>>(cs) };
+        let bridge = FrontendBridge::<M> {
+            comp: &mut self.comp as *mut Compiler,
+            macros: &self.macros as *const HashSet<Sym>,
+            cs: cs_ptr,
+        };
+        rt.set_eval_bridge(Arc::new(bridge));
+        let result = run_src(rt, cs, &mut self.macros, &mut self.comp, src);
+        rt.clear_eval_bridge();
+        // Force any lazy sequence in the final value so callers / the printer
+        // (which can't invoke thunks) see a fully realized result.
+        let slot = rt.push_root(result);
+        let realize = rt.intern("clojure.core/-realize");
+        let out = match rt.global(realize) {
+            Some(rf) => cs.invoke(cs, rt, rf, &[rt.root_get(slot)]),
+            None => rt.root_get(slot),
+        };
+        rt.truncate_roots(slot);
+        out
+    }
+
+    /// The namespace subsequent evals compile in (the REPL prompt).
+    pub fn current_ns(&self) -> &str {
+        self.comp.current_ns()
+    }
 }
 
 fn run_src<M: ValueModel>(
@@ -220,10 +257,14 @@ unsafe impl<M: ValueModel> Sync for FrontendBridge<M> {}
 impl<M: ValueModel> EvalBridge<M> for FrontendBridge<M> {
     fn read_string(&self, rt: &mut Runtime<M>, s: u64) -> u64 {
         let src = rt.as_str(s, "read-string");
-        reader::read_all(rt, &src)
+        let form = reader::read_all(rt, &src)
             .first()
             .copied()
-            .unwrap_or_else(|| rt.encode(Val::Nil))
+            .unwrap_or_else(|| rt.encode(Val::Nil));
+        // `::kw` resolves at read time in Clojure — do it here so the returned
+        // datum contains real keywords, wherever it flows next.
+        let comp: &Compiler = unsafe { &*self.comp };
+        resolve_auto_keywords(rt, comp, form)
     }
     fn eval(&self, rt: &mut Runtime<M>, form: u64) -> u64 {
         let cs: &dyn CodeSpace<M> = unsafe { &*self.cs };
@@ -245,6 +286,84 @@ impl<M: ValueModel> EvalBridge<M> for FrontendBridge<M> {
     }
 }
 
+/// Resolve `::foo` / `::alias/foo` markers (reader `KeywordAutoNs` records) to
+/// plain namespaced keywords per the CURRENT namespace — evaluation is
+/// form-by-form, so any preceding `ns`/`alias` forms have already run, giving
+/// Clojure's read-time resolution semantics. Rebuilds only when a marker is
+/// present; quoted data included (resolution happens before quote is literal).
+fn resolve_auto_keywords<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
+    if !has_auto_keyword(rt, form) {
+        return form;
+    }
+    rebuild_auto_keywords(rt, comp, form)
+}
+
+fn has_auto_keyword<M: ValueModel>(rt: &Runtime<M>, form: u64) -> bool {
+    if let Val::Ref(id) = rt.decode(form) {
+        match &rt.heap()[id as usize] {
+            Obj::Record { type_id, fields } => {
+                if rt.sym_name(*type_id) == reader::KEYWORD_AUTO_NS {
+                    return true;
+                }
+                fields.clone().iter().any(|&f| has_auto_keyword(rt, f))
+            }
+            Obj::Cons { head, tail } => {
+                let (h, t) = (*head, *tail);
+                has_auto_keyword(rt, h) || has_auto_keyword(rt, t)
+            }
+            Obj::Vector(elems) => elems.clone().iter().any(|&e| has_auto_keyword(rt, e)),
+            _ => false,
+        }
+    } else {
+        false
+    }
+}
+
+fn rebuild_auto_keywords<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
+    let Val::Ref(id) = rt.decode(form) else { return form };
+    let obj = rt.heap()[id as usize].clone();
+    match obj {
+        Obj::Record { type_id, fields } if rt.sym_name(type_id) == reader::KEYWORD_AUTO_NS => {
+            let name = match rt.decode(fields[0]) {
+                Val::Sym(s) => rt.sym_name(s).to_string(),
+                _ => panic!("::keyword marker: name must be a symbol"),
+            };
+            // `::foo` -> current ns; `::alias/foo` -> the alias's namespace.
+            let full = match name.split_once('/') {
+                Some((alias, n)) => {
+                    let ns = comp.alias_target(alias).unwrap_or_else(|| {
+                        panic!("Invalid token: ::{name} (no such namespace alias: {alias})")
+                    });
+                    format!("{ns}/{n}")
+                }
+                None => format!("{}/{name}", comp.current_ns()),
+            };
+            let s = rt.intern(&full);
+            let name_v = rt.encode(Val::Sym(s));
+            let kw = rt.intern(reader::KEYWORD);
+            let rid = rt.alloc(Obj::Record { type_id: kw, fields: vec![name_v] });
+            <M::R as microlang::Repr>::enc_ref(rid)
+        }
+        Obj::Record { type_id, fields } => {
+            let nf: Vec<u64> = fields.iter().map(|&f| rebuild_auto_keywords(rt, comp, f)).collect();
+            let rid = rt.alloc(Obj::Record { type_id, fields: nf });
+            <M::R as microlang::Repr>::enc_ref(rid)
+        }
+        Obj::Cons { head, tail } => {
+            let h = rebuild_auto_keywords(rt, comp, head);
+            let t = rebuild_auto_keywords(rt, comp, tail);
+            let rid = rt.alloc(Obj::Cons { head: h, tail: t });
+            <M::R as microlang::Repr>::enc_ref(rid)
+        }
+        Obj::Vector(elems) => {
+            let ne: Vec<u64> = elems.iter().map(|&e| rebuild_auto_keywords(rt, comp, e)).collect();
+            let rid = rt.alloc(Obj::Vector(ne));
+            <M::R as microlang::Repr>::enc_ref(rid)
+        }
+        _ => form,
+    }
+}
+
 fn eval_form<M: ValueModel>(
     rt: &mut Runtime<M>,
     cs: &dyn CodeSpace<M>,
@@ -252,6 +371,9 @@ fn eval_form<M: ValueModel>(
     comp: &mut Compiler,
     form: u64,
 ) -> u64 {
+    // `::kw` markers resolve against the CURRENT namespace, before anything
+    // else dissects the form (Clojure resolves them at read time).
+    let form = resolve_auto_keywords(rt, comp, form);
     // Namespace declarations mutate the compiler's resolution state (and may LOAD
     // required files) and yield nil. Handled before macro/def checks.
     if let Some(r) = handle_ns_form(rt, cs, macros, comp, form) {

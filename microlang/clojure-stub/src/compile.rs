@@ -277,6 +277,11 @@ impl Compiler {
         self.ns.aliases.get(&self.ns.current).is_some_and(|m| m.contains_key(alias))
     }
 
+    /// The namespace an alias points to in the current ns (for `::alias/kw`).
+    pub fn alias_target(&self, alias: &str) -> Option<String> {
+        self.ns.aliases.get(&self.ns.current).and_then(|m| m.get(alias)).cloned()
+    }
+
     /// `[foo :refer [x]]` — bare `x` now resolves to the fully-qualified `foo/x`.
     pub fn add_refer(&mut self, short: &str, fq: &str) {
         let ns = self.ns.current.clone();
