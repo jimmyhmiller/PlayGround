@@ -1,8 +1,10 @@
 ;; `clojure.core`: the mini-Clojure standard library, written in the language on
-;; top of the toolkit's primitives. Collections are LIST-BACKED tagged records
-;; (`(record 'Vector elem-list)` etc.); `type-of` drives dispatch. Internals use
-;; the un-shadowable `%`-prims (`%add`/`%first`/…); user-facing `+`/`=`/`first`
-;; are first-class fns wrapping them (so they can be passed to `map`/`reduce`).
+;; top of the toolkit's primitives. This file's bootstrap collections are the
+;; PVec trie and list-backed Map/Set records; the cljs-ported persistent types
+;; (cljs_types.clj) redefine them once their protocols exist. `type-of` drives
+;; dispatch. Internals use the un-shadowable `%`-prims (`%add`/`%first`/…);
+;; user-facing `+`/`=`/`first` are first-class fns wrapping them (so they can
+;; be passed to `map`/`reduce`).
 
 ;; ─────────────── control macros ───────────────
 ;; `(defn f [args] body…)` or `(defn f "docstring" [args] body…)`. Only PRIMS are

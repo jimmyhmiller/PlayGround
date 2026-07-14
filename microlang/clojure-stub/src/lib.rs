@@ -70,14 +70,14 @@ pub fn run_with_paths<M: ValueModel>(
     let mut macros: HashSet<Sym> = HashSet::new();
     let mut comp = Compiler::new(rt);
     comp.set_load_paths(load_paths);
-    run_src(rt, cs, &mut macros, &mut comp, core_src::CORE);
+    run_src(rt, cs, &mut macros, &mut comp, sources::CORE);
     // Persistent data structures ported from ClojureScript (EPL-1.0), loaded after
     // the core protocols/shim they build on. Redefines vector/vec/vector?.
-    run_src(rt, cs, &mut macros, &mut comp, cljs_types_src::CLJS);
+    run_src(rt, cs, &mut macros, &mut comp, sources::CLJS_TYPES);
     // The JVM layer — every host class/method/static, as in-language data
     // (`defclass` + `-jvm-registry`). The expander's interop lowering targets
     // these fns; nothing in Rust knows a class name.
-    run_src(rt, cs, &mut macros, &mut comp, host_jvm_src::HOST_JVM);
+    run_src(rt, cs, &mut macros, &mut comp, sources::HOST_JVM);
     // clojure.core + the cljs types loaded into `clojure.core`; user code from
     // here on runs in the `user` namespace. EVERY var is now ns-qualified, so the
     // frontend's own references to core helpers use their `clojure.core/…` names.
@@ -85,14 +85,14 @@ pub fn run_with_paths<M: ValueModel>(
     // `clojure.string` — bundled, but written ENTIRELY in the language (its `(ns
     // clojure.string)` form sets the ns + marks it loaded). Proof that the string
     // library is library code over one primitive, not builtins.
-    run_src(rt, cs, &mut macros, &mut comp, clojure_string_src::CLOJURE_STRING);
+    run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_STRING);
     // `clojure.data.json` — a real library, also written entirely in the language
     // (loaded after clojure.string, which its writer uses for `join`).
-    run_src(rt, cs, &mut macros, &mut comp, clojure_set_src::CLOJURE_SET);
-    run_src(rt, cs, &mut macros, &mut comp, clojure_walk_src::CLOJURE_WALK);
-    run_src(rt, cs, &mut macros, &mut comp, clojure_zip_src::CLOJURE_ZIP);
-    run_src(rt, cs, &mut macros, &mut comp, clojure_data_json_src::CLOJURE_DATA_JSON);
-    run_src(rt, cs, &mut macros, &mut comp, clojure_test_src::CLOJURE_TEST);
+    run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_SET);
+    run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_WALK);
+    run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_ZIP);
+    run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_DATA_JSON);
+    run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_TEST);
     comp.set_ns("user");
     // These are provided in-process; `require` must never look for them on disk.
     comp.mark_loaded("clojure.core");

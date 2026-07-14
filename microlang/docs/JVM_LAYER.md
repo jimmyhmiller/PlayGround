@@ -1,6 +1,6 @@
 # The JVM layer, written in the language itself (BUILT)
 
-**Status: shipped.** `clojure-stub/src/host_jvm_src.rs` is the layer;
+**Status: shipped.** `clojure-stub/src/clj/host_jvm.clj` is the layer;
 `interop_rewrite`/`global_ref` lower syntax only; the shim tables
 (`shim_call`/`shim_instance`/`shim_field`), `class_to_tag`'s substring
 heuristics, the `class? = false` stub, the `MapEntry.`/`PersistentQueue`
@@ -298,7 +298,7 @@ core.clj snippets, `(. (var x) (setMacro))`). Two-stage story:
 1. `setMacro` stays intercepted at `eval_form` (it mutates expander state —
    genuinely meta-level).
 2. A ~20-line `host.jvm` *seed* (registry atom + `invoke-static` + the RT
-   entries) sits early in `core_src`; the full class library is its own
+   entries) sits early in `clj/core.clj`; the full class library is its own
    namespace loaded after the cljs types (like `clojure.string`). Interop
    lowering emits the same generic calls in both phases — only the registry
    contents grow.
@@ -317,7 +317,7 @@ core.clj snippets, `(. (var x) (setMacro))`). Two-stage story:
 1. Import table in `compile.rs` NsState + `(:import …)` handling.
 2. Generic lowering in `interop_rewrite`; delete `shim_instance`/`shim_call`/
    `shim_field`.
-3. `host.jvm` seed in core_src; `host/jvm.clj`-style full library as embedded
+3. `host.jvm` seed in clj/core.clj; `host/jvm.clj`-style full library as embedded
    src (Math, String, Object, Exception hierarchy, RT, the ArrayList shims,
    Class itself).
 4. Port `class_to_tag` entries into `:tag`/`:protocol` declarations; delete
