@@ -1334,7 +1334,6 @@ impl App {
         let cam_uniform = self.camera.uniform();
         live.renderer.update_camera(&live.gpu.queue, &cam_uniform);
         live.renderer.update_params(&live.gpu.queue, &self.render_params);
-        live.renderer.update_bundles(&live.gpu.queue, self.render_params.edge_alpha);
         if self.show_density {
             let (vw, vh) = (live.gpu.size.width as f32, live.gpu.size.height as f32);
             live.density.update(&live.gpu.queue, &cam_uniform, vw, vh);
@@ -1359,8 +1358,6 @@ impl App {
         // Bin nodes into screen tiles before the render pass (same encoder).
         if self.show_density {
             live.density.record_compute(&mut enc);
-        } else {
-            live.renderer.record_bundle_compute(&mut enc);
         }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1743,7 +1740,6 @@ impl App {
 
         live.renderer.update_camera(&live.gpu.queue, &self.camera.uniform());
         live.renderer.update_params(&live.gpu.queue, &self.render_params);
-        live.renderer.update_bundles(&live.gpu.queue, self.render_params.edge_alpha);
         if self.show_density {
             live.density.update(&live.gpu.queue, &self.camera.uniform(), w as f32, h as f32);
         }
@@ -1765,8 +1761,6 @@ impl App {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture") });
         if self.show_density {
             live.density.record_compute(&mut enc);
-        } else {
-            live.renderer.record_bundle_compute(&mut enc);
         }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {

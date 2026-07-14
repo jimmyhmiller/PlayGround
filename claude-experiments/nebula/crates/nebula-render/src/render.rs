@@ -61,53 +61,6 @@ struct EdgeTypeGpu {
     bind_group: wgpu::BindGroup,
     num_edges: u32,
     visible: bool,
-    /// Bundled rendering state, allocated for huge edge sets (see
-    /// `BUNDLE_THRESHOLD`). Every edge is binned every frame; only the drawing
-    /// aggregates.
-    bundle: Option<BundleGpu>,
-}
-
-/// Above this many edges a type renders as per-frame computed bundles: every
-/// edge is clipped and binned by (source cell, target cell) each frame, and
-/// one centroid-to-centroid line per occupied pair carries the accumulated
-/// brightness/colors. Pairs holding a single edge reproduce it exactly, so
-/// sparse regions and zoomed-in views stay true; only dense flows aggregate.
-/// This is a rendering change, not a limit — nothing is skipped or deferred.
-const BUNDLE_THRESHOLD: u32 = 1_500_000;
-
-/// Bin grid for bundling, FIXED IN WORLD SPACE over the whole layout so the
-/// binning is a pure function of node positions — camera motion cannot change
-/// the bundle geometry, only transform it (no re-binning, no dancing, ever).
-const BUNDLE_CELLS_X: u32 = 40;
-const BUNDLE_CELLS_Y: u32 = 40;
-const BUNDLE_NCELLS: u32 = BUNDLE_CELLS_X * BUNDLE_CELLS_Y;
-const BUNDLE_PAIRS: u64 = (BUNDLE_NCELLS as u64) * (BUNDLE_NCELLS as u64);
-
-/// Matches `BParams` in bundle.wgsl / bundle_draw.wgsl.
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct BundleParams {
-    cells_x: u32,
-    cells_y: u32,
-    num_edges: u32,
-    mode: u32,
-    tint: [f32; 4],
-    origin: [f32; 2],
-    cell: f32,
-    edge_alpha: f32,
-}
-
-/// Per-type bundling state: pair accumulators + params + bind groups, plus
-/// the world-space grid geometry (fixed for the graph's lifetime).
-struct BundleGpu {
-    params_buf: wgpu::Buffer,
-    view_bg: wgpu::BindGroup,
-    bin_bg: wgpu::BindGroup,
-    draw_bg: wgpu::BindGroup,
-    mode: u32,
-    tint: [f32; 4],
-    origin: [f32; 2],
-    cell: f32,
 }
 
 fn unpack_norm(c: u32) -> [f32; 4] {
@@ -130,13 +83,6 @@ pub struct Renderer {
     node_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
     pick_pipeline: wgpu::RenderPipeline,
-    // Bundling pipelines + layouts (used by edge types over BUNDLE_THRESHOLD).
-    bundle_clear_pipeline: wgpu::ComputePipeline,
-    bundle_bin_pipeline: wgpu::ComputePipeline,
-    bundle_draw_pipeline: wgpu::RenderPipeline,
-    bundle_view_bgl: wgpu::BindGroupLayout,
-    bundle_bin_bgl: wgpu::BindGroupLayout,
-    bundle_draw_bgl: wgpu::BindGroupLayout,
     num_nodes: u32,
     num_edges: u32,
     pub draw_edges: bool,
@@ -343,116 +289,6 @@ impl Renderer {
             cache: None,
         });
 
-        // --- Bundling pipelines ------------------------------------------------
-        let bundle_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("bundle.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bundle.wgsl").into()),
-        });
-        let bundle_draw_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("bundle_draw.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bundle_draw.wgsl").into()),
-        });
-        let uniform_cv = |binding: u32| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let bundle_view_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bundle_view_bgl"),
-            entries: &[uniform_cv(0), uniform_cv(1)],
-        });
-        let storage_c = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let bundle_bin_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bundle_bin_bgl"),
-            entries: &[
-                storage_c(0, true),  // positions
-                storage_c(1, true),  // colors
-                storage_c(2, true),  // edges
-                storage_c(3, false), // pair_count
-                storage_c(4, false), // pair_geom
-                storage_c(5, false), // pair_col
-                storage_c(6, false), // pair_spread
-            ],
-        });
-        let storage_v = |binding: u32| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let bundle_draw_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bundle_draw_bgl"),
-            entries: &[storage_v(0), storage_v(1), storage_v(2), storage_v(3)],
-        });
-        let bundle_compute_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("bundle_compute_pl"),
-            bind_group_layouts: &[&bundle_view_bgl, &bundle_bin_bgl],
-            push_constant_ranges: &[],
-        });
-        let make_bundle_compute = |entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(entry),
-                layout: Some(&bundle_compute_pl),
-                module: &bundle_shader,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: None,
-            })
-        };
-        let bundle_clear_pipeline = make_bundle_compute("clear_pairs");
-        let bundle_bin_pipeline = make_bundle_compute("bin_edges");
-        let bundle_draw_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("bundle_draw_pl"),
-            bind_group_layouts: &[&bundle_view_bgl, &bundle_draw_bgl],
-            push_constant_ranges: &[],
-        });
-        let bundle_draw_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("bundle_draw_pipeline"),
-            layout: Some(&bundle_draw_pl),
-            vertex: wgpu::VertexState {
-                module: &bundle_draw_shader,
-                entry_point: Some("vs_bundle"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &bundle_draw_shader,
-                entry_point: Some("fs_bundle"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(additive_blend),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
         Renderer {
             camera_buf,
             params_buf,
@@ -463,12 +299,6 @@ impl Renderer {
             node_pipeline,
             edge_pipeline,
             pick_pipeline,
-            bundle_clear_pipeline,
-            bundle_bin_pipeline,
-            bundle_draw_pipeline,
-            bundle_view_bgl,
-            bundle_bin_bgl,
-            bundle_draw_bgl,
             num_nodes: graph.num_nodes as u32,
             num_edges: graph.num_edges as u32,
             draw_edges: true,
@@ -618,82 +448,10 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 4, resource: style_buf.as_entire_binding() },
                 ],
             });
-            // Huge edge sets also get bundling accumulators.
-            let bundle = if (s.edges.len() as u32) > BUNDLE_THRESHOLD {
-                let (bmode, btint) = match s.color {
-                    Some(c) => (1u32, unpack_norm(c)),
-                    None => (0u32, [0.0f32; 4]),
-                };
-                let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("bundle_params"),
-                    size: std::mem::size_of::<BundleParams>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let mk_storage = |label: &str, bytes: u64| {
-                    device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(label),
-                        size: bytes,
-                        usage: wgpu::BufferUsages::STORAGE,
-                        mapped_at_creation: false,
-                    })
-                };
-                let pair_count = mk_storage("bundle_pair_count", BUNDLE_PAIRS * 4);
-                let pair_geom = mk_storage("bundle_pair_geom", BUNDLE_PAIRS * 4 * 4);
-                let pair_col = mk_storage("bundle_pair_col", BUNDLE_PAIRS * 6 * 4);
-                let pair_spread = mk_storage("bundle_pair_spread", BUNDLE_PAIRS * 2 * 4);
-                let view_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("bundle_view_bg"),
-                    layout: &self.bundle_view_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: params_buf.as_entire_binding() },
-                    ],
-                });
-                let bin_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("bundle_bin_bg"),
-                    layout: &self.bundle_bin_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: graph.positions.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: graph.colors.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: edge_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: pair_count.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 4, resource: pair_geom.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 5, resource: pair_col.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 6, resource: pair_spread.as_entire_binding() },
-                    ],
-                });
-                let draw_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("bundle_draw_bg"),
-                    layout: &self.bundle_draw_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: pair_count.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: pair_geom.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: pair_col.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: pair_spread.as_entire_binding() },
-                    ],
-                });
-                // World-fixed grid: cover the layout extent generously (nodes
-                // that stray past it clamp into border cells).
-                let extent = graph.world_size * 1.2;
-                let origin = [-extent * 0.5, -extent * 0.5];
-                let cell = extent / BUNDLE_CELLS_X as f32;
-                log::info!(
-                    "edge type '{}': {} edges -> bundled rendering ({}x{} world-fixed cells)",
-                    s.name, s.edges.len(), BUNDLE_CELLS_X, BUNDLE_CELLS_Y
-                );
-                Some(BundleGpu {
-                    params_buf, view_bg, bin_bg, draw_bg,
-                    mode: bmode, tint: btint, origin, cell,
-                })
-            } else {
-                None
-            };
             self.edge_types.push(EdgeTypeGpu {
                 bind_group,
                 num_edges: s.edges.len() as u32,
                 visible: s.visible,
-                bundle,
             });
         }
     }
@@ -705,92 +463,21 @@ impl Renderer {
         }
     }
 
-    /// Upload per-frame bundle params (only the edge glow actually varies —
-    /// the grid is fixed in world space). Call before `record_bundle_compute`.
-    pub fn update_bundles(&self, queue: &wgpu::Queue, edge_alpha: f32) {
-        for et in &self.edge_types {
-            if let Some(b) = et.bundle.as_ref() {
-                let params = BundleParams {
-                    cells_x: BUNDLE_CELLS_X,
-                    cells_y: BUNDLE_CELLS_Y,
-                    num_edges: et.num_edges,
-                    mode: b.mode,
-                    tint: b.tint,
-                    origin: b.origin,
-                    cell: b.cell,
-                    edge_alpha,
-                };
-                queue.write_buffer(&b.params_buf, 0, bytemuck::bytes_of(&params));
-            }
-        }
-    }
-
-    /// Re-bin every edge of every bundled visible type for this frame (encode
-    /// before the main pass, same encoder). Fully synchronous with the current
-    /// camera and positions — no temporal state.
-    pub fn record_bundle_compute(&self, encoder: &mut wgpu::CommandEncoder) {
-        if !self.draw_edges {
-            return;
-        }
-        let pair_groups = crate::layout_gpu::dispatch_dims(BUNDLE_PAIRS.div_ceil(256));
-        for et in &self.edge_types {
-            let Some(b) = et.bundle.as_ref() else { continue };
-            if !et.visible || et.num_edges == 0 {
-                continue;
-            }
-            let edge_groups =
-                crate::layout_gpu::dispatch_dims((et.num_edges as u64).div_ceil(256));
-            {
-                let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("bundle_clear"),
-                    timestamp_writes: None,
-                });
-                cp.set_pipeline(&self.bundle_clear_pipeline);
-                cp.set_bind_group(0, &b.view_bg, &[]);
-                cp.set_bind_group(1, &b.bin_bg, &[]);
-                cp.dispatch_workgroups(pair_groups.0, pair_groups.1, pair_groups.2);
-            }
-            {
-                let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("bundle_bin"),
-                    timestamp_writes: None,
-                });
-                cp.set_pipeline(&self.bundle_bin_pipeline);
-                cp.set_bind_group(0, &b.view_bg, &[]);
-                cp.set_bind_group(1, &b.bin_bg, &[]);
-                cp.dispatch_workgroups(edge_groups.0, edge_groups.1, edge_groups.2);
-            }
-        }
-    }
-
     /// Record draw calls into an already-begun render pass.
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
+        pass.set_bind_group(0, &self.view_bg, &[]);
+
         // Edges under nodes: one draw per visible edge type (own bind group).
-        // Types over BUNDLE_THRESHOLD draw their per-frame computed bundles;
-        // the rest draw every line directly.
         if self.draw_edges {
+            pass.set_pipeline(&self.edge_pipeline);
             for et in &self.edge_types {
-                if !et.visible || et.num_edges == 0 {
-                    continue;
-                }
-                match et.bundle.as_ref() {
-                    Some(b) => {
-                        pass.set_pipeline(&self.bundle_draw_pipeline);
-                        pass.set_bind_group(0, &b.view_bg, &[]);
-                        pass.set_bind_group(1, &b.draw_bg, &[]);
-                        pass.draw(0..4, 0..(BUNDLE_PAIRS as u32));
-                    }
-                    None => {
-                        pass.set_pipeline(&self.edge_pipeline);
-                        pass.set_bind_group(0, &self.view_bg, &[]);
-                        pass.set_bind_group(1, &et.bind_group, &[]);
-                        pass.draw(0..(et.num_edges * 2), 0..1);
-                    }
+                if et.visible && et.num_edges > 0 {
+                    pass.set_bind_group(1, &et.bind_group, &[]);
+                    pass.draw(0..(et.num_edges * 2), 0..1);
                 }
             }
         }
         if self.draw_nodes && self.num_nodes > 0 {
-            pass.set_bind_group(0, &self.view_bg, &[]);
             pass.set_bind_group(1, &self.graph_bg, &[]);
             pass.set_pipeline(&self.node_pipeline);
             pass.draw(0..6, 0..self.num_nodes);
