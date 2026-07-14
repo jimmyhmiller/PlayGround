@@ -1096,8 +1096,9 @@ fn var_registry_metadata_and_namespaces() {
     // ns-publics excludes private vars.
     assert_eq!(run("(ns app) (def a 1) (defn- p [] 2) (count (ns-publics (quote app)))"), "1");
     // all-ns / find-ns see a user namespace once it has a def.
-    assert_eq!(run("(ns foo) (def x 1) (find-ns (quote foo))"), "foo");
-    assert_eq!(run("(ns foo) (def x 1) (some (fn [n] (= n (quote foo))) (all-ns))"), "true");
+    // find-ns/all-ns yield NAMESPACE objects (as in Clojure); ns-name unwraps.
+    assert_eq!(run("(ns foo) (def x 1) (ns-name (find-ns (quote foo)))"), "foo");
+    assert_eq!(run("(ns foo) (def x 1) (some (fn [n] (= (ns-name n) (quote foo))) (all-ns))"), "true");
 }
 
 #[test]
@@ -1463,10 +1464,14 @@ fn nrepl_server_end_to_end() {
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     std::thread::spawn(move || {
         let mut rt = Runtime::<LowBitModel>::new();
-        let mut session = clojure_stub::Session::new(&mut rt, &TreeWalk, vec![]);
-        for src in clojure_stub::NREPL_SOURCES {
-            session.eval(&mut rt, &TreeWalk, src);
-        }
+        // the server + the real bencode are LIBRARIES on the load path
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut session = clojure_stub::Session::new(
+            &mut rt,
+            &TreeWalk,
+            vec![base.join("vendor/nrepl"), base.join("libs")],
+        );
+        session.eval(&mut rt, &TreeWalk, "(require 'microclj.nrepl-server)");
         session.eval(&mut rt, &TreeWalk, &format!("(microclj.nrepl-server/start-server! {port})"));
     });
     // retry-connect until the server is listening
@@ -1481,7 +1486,7 @@ fn nrepl_server_end_to_end() {
     let mut conn = conn.expect("nREPL server did not come up");
     conn.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
 
-    let mut read_until = |conn: &mut std::net::TcpStream, needle: &str| -> String {
+    let read_until = |conn: &mut std::net::TcpStream, needle: &str| -> String {
         let mut buf = Vec::new();
         let mut b = [0u8; 1];
         while !String::from_utf8_lossy(&buf).contains(needle) {
@@ -1503,6 +1508,17 @@ fn nrepl_server_end_to_end() {
     let resp = read_until(&mut conn, "done");
     assert!(resp.contains("5:value4:4950"), "eval response: {resp}");
 
+    // println is captured and streamed back as an "out" message
+    conn.write_all(b"d2:op4:eval4:code26:(do (println :hi) (+ 1 2))2:id1:9e").unwrap();
+    let resp = read_until(&mut conn, "done");
+    assert!(resp.contains(":hi"), "out capture: {resp}");
+    assert!(resp.contains("5:value1:3"), "value after out: {resp}");
+
+    // the response reports the REAL namespace, and (ns …) switches it
+    conn.write_all(b"d2:op4:eval4:code12:(ns web.app)2:id2:10e").unwrap();
+    let resp = read_until(&mut conn, "done");
+    assert!(resp.contains("web.app"), "ns switch: {resp}");
+
     // an unresolvable symbol is an eval-error, and the server survives
     conn.write_all(b"d2:op4:eval4:code6:(nope)2:id1:3e").unwrap();
     let resp = read_until(&mut conn, "done");
@@ -1510,4 +1526,45 @@ fn nrepl_server_end_to_end() {
     conn.write_all(b"d2:op4:eval4:code8:(* 21 2)2:id1:4e").unwrap();
     let resp = read_until(&mut conn, "done");
     assert!(resp.contains("5:value2:42"), "recovery response: {resp}");
+}
+
+#[test]
+fn out_err_writers_and_real_ns() {
+    // *out* is a real Writer; with-out-str binds a StringWriter
+    assert_eq!(run("(with-out-str (println \"hi\") (print 42))"), "\"hi\\n42\"");
+    assert_eq!(
+        run("(binding [*err* (java.io.StringWriter.)] (binding [*out* *err*] (pr :x)) (.toString *err*))"),
+        "\":x\""
+    );
+    // *ns* is LIVE compiler state, an equatable Namespace value
+    assert_eq!(run("(name (ns-name *ns*))"), "\"user\"");
+    assert_eq!(run("(do (ns foo.bar) (name (ns-name *ns*)))"), "\"foo.bar\"");
+    assert_eq!(run("(= *ns* *ns*)"), "true");
+    // eval'd top-level `do` sequences top-level forms: ns switching + defmacro
+    assert_eq!(
+        run("(eval '(do (ns baz.qux) (name (ns-name *ns*))))"),
+        "\"baz.qux\""
+    );
+    assert_eq!(run("(eval '(do (defmacro em [x] `(+ ~x 1)) (em 4)))"), "5");
+}
+
+#[test]
+fn deps_edn_paths_parse() {
+    let mut rt = Runtime::<LowBitModel>::new();
+    let base = std::path::Path::new("/proj");
+    let ps = clojure_stub::deps_edn_paths(
+        &mut rt,
+        "{:paths [\"src\" \"resources\"]}",
+        base,
+    )
+    .unwrap();
+    assert_eq!(ps, vec![std::path::PathBuf::from("/proj/src"), "/proj/resources".into()]);
+    // :mvn deps are a clear ERROR (not silently skipped) until jar support
+    let err = clojure_stub::deps_edn_paths(
+        &mut rt,
+        "{:deps {nrepl/nrepl {:mvn/version \"1.3.1\"}}}",
+        base,
+    )
+    .unwrap_err();
+    assert!(err.contains("not supported yet"), "{err}");
 }

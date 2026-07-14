@@ -344,6 +344,11 @@ pub trait EvalBridge<M: ValueModel>: Send + Sync {
     fn eval(&self, rt: &mut Runtime<M>, form: u64) -> u64;
     /// Expand a form by one macro step, or return it unchanged.
     fn macroexpand_1(&self, rt: &mut Runtime<M>, form: u64) -> u64;
+    /// The current namespace's name symbol (`*ns*` reflection). Namespace state
+    /// is frontend policy; frontends without namespaces return nil.
+    fn current_ns(&self, rt: &mut Runtime<M>) -> u64 {
+        rt.encode(Val::Nil)
+    }
 }
 
 impl<M: ValueModel> Drop for Runtime<M> {
@@ -1099,6 +1104,17 @@ impl<M: ValueModel> Runtime<M> {
                 let _ = std::io::stdout().flush();
                 self.enc_nil()
             }
+            Prim::ErrPrint => {
+                let s = self.str_form(args[0]);
+                eprint!("{s}");
+                use std::io::Write as _;
+                let _ = std::io::stderr().flush();
+                self.enc_nil()
+            }
+            Prim::CurrentNs => match self.eval_bridge.clone() {
+                Some(b) => b.current_ns(self),
+                None => panic!("%current-ns: no eval bridge installed"),
+            },
             Prim::Gc => {
                 // The collector needs the live environment as a root, which
                 // only the backend holds (it is the safepoint). Backends

@@ -265,6 +265,12 @@ pub enum Prim {
     TcpClose,
     /// `(%tcp-local-port h)` -> the local port a listener is bound to.
     TcpLocalPort,
+    /// `(%err-print x)` -> write `x`'s str-form to STDERR, no newline. The
+    /// stderr sibling of `Print`; `*err*`'s default writer.
+    ErrPrint,
+    /// `(%current-ns)` -> the current namespace's name symbol, via the eval
+    /// bridge (namespace state is frontend policy; this is the reflection hook).
+    CurrentNs,
 
     // ── optimizer-introduced fixnum specializations ──────────────────────────
     // These are produced ONLY by the `optimize` nanopass (never by `analyze`).

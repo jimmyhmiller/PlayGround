@@ -262,6 +262,28 @@
 (defn -jvm-catch-match? [fqn simple e]
   (-jvm-instance-of? fqn simple e))
 
+;; ─────────────── namespaces as values (*ns*) ───────────────
+;; `*ns*` compiles to `(-ns-object)` (compile.rs global_ref): a `Namespace`
+;; record wrapping the CURRENT ns name from the compiler (via the eval
+;; bridge). Read-only v1 — `(binding [*ns* …])` is not supported; switch with
+;; `ns`/`in-ns`, which eval'd code handles at the top level.
+(defn -ns-object [] (record 'Namespace (%current-ns)))
+(defn ns-name [n] (if (%num-eq (type-of n) 'Namespace) (field n 0) n))
+(defn all-ns []
+  (loop [ns (%all-ns) acc nil]
+    (if (nil? ns) (-rev acc) (recur (%rest ns) (%cons (record 'Namespace (%first ns)) acc)))))
+(defn find-ns [s]
+  (loop [all (%all-ns)]
+    (if (nil? all)
+      nil
+      (if (= (%first all) s) (record 'Namespace s) (recur (%rest all))))))
+(defn the-ns [x]
+  (cond (%num-eq (type-of x) 'Namespace) x
+        (symbol? x) (or (find-ns x) (throw (str "No namespace: " x " found")))
+        :else (throw (str "the-ns: not a namespace: " (pr-str x)))))
+(extend-type Namespace
+  IEquiv (-equiv [a b] (and (%num-eq (type-of b) 'Namespace) (= (field a 0) (field b 0)))))
+
 ;; `(class x)` — the Class record for x's registered class, or a Class wrapping
 ;; the bare runtime tag for dialect/deftype values (so .getName always answers).
 (defn class [x]

@@ -148,6 +148,10 @@ impl Compiler {
             ("%tcp-listen", TcpListen), ("%tcp-accept", TcpAccept),
             ("%tcp-read", TcpRead), ("%tcp-write", TcpWrite),
             ("%tcp-close", TcpClose), ("%tcp-local-port", TcpLocalPort),
+            // stderr sibling of %print (*err*'s default writer).
+            ("%err-print", ErrPrint),
+            // the current namespace's name symbol (frontend state, via the bridge).
+            ("%current-ns", CurrentNs),
             // Existing low-level prims surfaced for the string library (char codes
             // for case mapping, raw length) — not new primitives.
             ("%char-code", CharToInt), ("%char-of", IntToChar), ("%str-len", StrLen),
@@ -403,6 +407,11 @@ impl Compiler {
     /// Compile a (non-local) symbol reference: a `^:dynamic` var reads the
     /// thread-local binding stack (`%dyn-get`); any other var is a plain global.
     fn global_ref<M: ValueModel>(&self, rt: &mut Runtime<M>, s: Sym) -> Ir {
+        // `*ns*` reflects the LIVE compiler namespace (read-only; rebinding it
+        // is not supported — switch with `ns`/`in-ns`).
+        if rt.sym_name(s) == "*ns*" {
+            return self.jvm_call(rt, "clojure.core/-ns-object", &[]);
+        }
         // `Math/PI`-style STATIC reference in value position: a capitalized,
         // non-alias left segment that is a dotted class name or an imported
         // simple name reads the class's static member through the JVM layer.

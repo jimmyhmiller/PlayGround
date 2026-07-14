@@ -56,15 +56,24 @@
              "status" ["done"]}))
 
 (defn -op-eval [req out]
-  (let [code (or (-req-str req "code") (-req-str req "file"))]
+  (let [code (or (-req-str req "code") (-req-str req "file"))
+        w (java.io.StringWriter.)
+        ew (java.io.StringWriter.)]
     (try
-      ;; wrap in `do`: clients send whole buffers, read-string reads one form
-      (let [v (eval (read-string (str "(do " code "\n)")))]
-        (-respond out req {"value" (pr-str v) "ns" "user"})
+      ;; wrap in `do`: clients send whole buffers; a top-level do evals as a
+      ;; sequence of top-level forms, so `(ns …)` in the buffer switches the
+      ;; session's namespace. *out*/*err* are captured and streamed back.
+      (let [v (binding [*out* w *err* ew]
+                (eval (read-string (str "(do " code "\n)"))))]
+        (let [os (.toString w)] (if (= os "") nil (-respond out req {"out" os})))
+        (let [es (.toString ew)] (if (= es "") nil (-respond out req {"err" es})))
+        (-respond out req {"value" (pr-str v) "ns" (name (%current-ns))})
         (-respond out req {"status" ["done"]}))
       (catch :default e
+        (let [os (.toString w)] (if (= os "") nil (-respond out req {"out" os})))
         (-respond out req {"err" (str (.getMessage e) "\n")})
         (-respond out req {"ex" (pr-str e) "root-ex" (pr-str e)
+                           "ns" (name (%current-ns))
                            "status" ["eval-error" "done"]})))))
 
 (defn -op-close [req out]

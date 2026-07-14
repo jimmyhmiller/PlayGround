@@ -1279,20 +1279,33 @@
 (defn tree-seq [branch? children root] (-tree-walk branch? children root))
 
 ;; ─────────────── printing ───────────────
-;; `*out*` = nil -> real stdout; an atom -> a capture buffer (used by with-out-str).
-(def ^:dynamic *out* nil)
-(defn -emit [s] (if (nil? *out*) (%print s) (swap! *out* str s)) nil)
+;; `*out*` / `*err*` are DYNAMIC vars holding java.io.Writer-shaped objects
+;; (`.write` a string; `.flush`). The concrete writer classes (StringWriter,
+;; the stdout/stderr writers) live in host_io.clj; the bootstrap defaults here
+;; are records of the same tags, so printing works during the core load. An
+;; ATOM still works as a capture target (a legacy shape some code binds).
+(def ^:dynamic *out* (record 'StdoutWriter 0))
+(def ^:dynamic *err* (record 'StderrWriter 0))
+(defn -emit [s]
+  (let [t (type-of *out*)]
+    (cond (%num-eq t 'StdoutWriter) (%print s)
+          (%num-eq t 'Atom) (swap! *out* str s)
+          :else (.write *out* s)))
+  nil)
+(defn -emit-err [s]
+  (if (%num-eq (type-of *err*) 'StderrWriter) (%err-print s) (.write *err* s))
+  nil)
 (def -newline-str (%str-of (%char-of 10)))
 (defn print [& xs] (-emit (apply print-str xs)))
 (defn println [& xs] (-emit (str (apply print-str xs) -newline-str)))
 (defn pr [& xs] (-emit (apply pr-str xs)))
 (defn prn [& xs] (-emit (str (apply pr-str xs) -newline-str)))
 (defn newline [] (-emit -newline-str))
-(defn flush [] nil)
+(defn flush [] (if (%num-eq (type-of *out*) 'StdoutWriter) nil (.flush *out*)) nil)
 (defmacro with-out-str (& body)
-  (list 'let (vector '-sb (list 'atom ""))
+  (list 'let (vector '-sb (list 'java.io.StringWriter.))
         (%cons 'binding (%cons (vector '*out* '-sb) body))
-        (list 'deref '-sb)))
+        (list '.toString '-sb)))
 
 ;; ─────────────── format / printf (subset of java.util.Formatter) ───────────────
 ;; Supports %[-0][width][.prec]<conv> for conv in s d x X o c b n %.
@@ -1801,10 +1814,10 @@
 ;; ─────────────── namespace reflection ───────────────
 ;; Backed by the runtime var registry (populated at every def). Namespaces are
 ;; represented by their name symbol (we have no first-class Namespace object).
-(defn all-ns [] (%all-ns))
-(defn find-ns [n] (if (some (fn [x] (= x n)) (%all-ns)) n nil))
-(defn the-ns [n] n)
-(defn ns-name [n] n)
+;; all-ns/find-ns/the-ns/ns-name return NAMESPACE objects (records wrapping
+;; the name symbol) — defined in host_jvm.clj beside *ns*. Here only the raw
+;; registry enumeration they build on:
+(defn -all-ns-names [] (%all-ns))
 ;; {unqualified-name-symbol -> Var} for a namespace's interned vars.
 (defn ns-interns [n]
   (reduce (fn [m qs] (assoc m (symbol (%sym-name qs)) (record 'Var qs)))

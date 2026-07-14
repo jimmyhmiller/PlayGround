@@ -41,16 +41,94 @@ mod sources {
     pub const CLOJURE_ZIP: &str = include_str!("clj/clojure/zip.clj");
     pub const CLOJURE_DATA_JSON: &str = include_str!("clj/clojure/data/json.clj");
     pub const CLOJURE_TEST: &str = include_str!("clj/clojure/test.clj");
-    /// The REAL nrepl/bencode.clj (vendored, unmodified — EPL) and microclj's
-    /// nREPL server over it. Not part of the default prelude: evaluated on
-    /// demand by `microclj --nrepl` (see [`crate::NREPL_SOURCES`]).
-    pub const NREPL_BENCODE: &str = include_str!("../vendor/nrepl/nrepl/bencode.clj");
-    pub const NREPL_SERVER: &str = include_str!("clj/microclj/nrepl_server.clj");
 }
 
-/// The sources `microclj --nrepl` loads into a session before starting the
-/// server: the real nrepl bencode implementation, then the server over it.
-pub const NREPL_SOURCES: &[&str] = &[sources::NREPL_BENCODE, sources::NREPL_SERVER];
+/// Read a `deps.edn` and produce the load-path directories it implies, the way
+/// the `clojure` CLI builds a classpath. Supported today: `:paths` (relative
+/// to the deps.edn's directory) and `:deps {lib {:local/root "…"}}` (the dep's
+/// own deps.edn `:paths` when it has one, else `src/`, else the root itself).
+/// `:mvn/version` / `:git` coordinates are an ERROR for now — jar/git support
+/// is a real feature, not something to silently skip.
+pub fn deps_edn_paths<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    src: &str,
+    base: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let form = reader::read_all(rt, src)
+        .first()
+        .copied()
+        .ok_or_else(|| "deps.edn: empty file".to_string())?;
+    let top = data::map_entries(rt, form).ok_or_else(|| "deps.edn: not a map".to_string())?;
+    let mut out = Vec::new();
+    let kw_is = |rt: &Runtime<M>, v: u64, name: &str| -> bool {
+        record_field0(rt, v, reader::KEYWORD)
+            .is_some_and(|f0| matches!(rt.decode(f0), Val::Sym(s) if rt.sym_name(s) == name))
+    };
+    let as_string = |rt: &Runtime<M>, v: u64| -> Option<String> {
+        if let Val::Ref(id) = rt.decode(v) {
+            if let Obj::Str(s) = &rt.heap()[id as usize] {
+                return Some(s.clone());
+            }
+        }
+        None
+    };
+    for kv in top.chunks(2) {
+        if kv.len() < 2 {
+            break;
+        }
+        if kw_is(rt, kv[0], "paths") {
+            let items = data::vector_items(rt, kv[1]).unwrap_or_else(|| rt.list_to_vec(kv[1]));
+            for p in items {
+                if let Some(s) = as_string(rt, p) {
+                    out.push(base.join(s));
+                }
+            }
+        } else if kw_is(rt, kv[0], "deps") {
+            let deps = data::map_entries(rt, kv[1])
+                .ok_or_else(|| "deps.edn: :deps is not a map".to_string())?;
+            for dep in deps.chunks(2) {
+                if dep.len() < 2 {
+                    continue;
+                }
+                let coord = data::map_entries(rt, dep[1])
+                    .ok_or_else(|| "deps.edn: a dep coordinate is not a map".to_string())?;
+                let mut handled = false;
+                for ckv in coord.chunks(2) {
+                    if ckv.len() < 2 {
+                        break;
+                    }
+                    if kw_is(rt, ckv[0], "local/root") {
+                        let root = as_string(rt, ckv[1])
+                            .ok_or_else(|| "deps.edn: :local/root must be a string".to_string())?;
+                        let root = base.join(root);
+                        // the dep's own deps.edn :paths, else src/, else the root
+                        let dep_edn = root.join("deps.edn");
+                        if dep_edn.is_file() {
+                            let dsrc = std::fs::read_to_string(&dep_edn)
+                                .map_err(|e| format!("deps.edn: reading {}: {e}", dep_edn.display()))?;
+                            out.extend(deps_edn_paths(rt, &dsrc, &root)?);
+                        } else if root.join("src").is_dir() {
+                            out.push(root.join("src"));
+                        } else {
+                            out.push(root.clone());
+                        }
+                        handled = true;
+                    } else if kw_is(rt, ckv[0], "mvn/version") || kw_is(rt, ckv[0], "git/url")
+                        || kw_is(rt, ckv[0], "git/sha")
+                    {
+                        return Err(
+                            "deps.edn: :mvn/version and :git deps are not supported yet — \
+                             use {:local/root \"…\"} (jar/git resolution is a planned feature)"
+                                .to_string(),
+                        );
+                    }
+                }
+                let _ = handled;
+            }
+        }
+    }
+    Ok(out)
+}
 pub use reader::read_all;
 
 use compile::Compiler;
@@ -154,7 +232,7 @@ impl Session {
             unsafe { std::mem::transmute::<&dyn CodeSpace<M>, &'static dyn CodeSpace<M>>(cs) };
         let bridge = FrontendBridge::<M> {
             comp: &mut self.comp as *mut Compiler,
-            macros: &self.macros as *const HashSet<Sym>,
+            macros: &mut self.macros as *mut HashSet<Sym>,
             cs: cs_ptr,
         };
         rt.set_eval_bridge(Arc::new(bridge));
@@ -193,7 +271,7 @@ fn run_src<M: ValueModel>(
     let mut last = rt.encode(Val::Nil);
     for i in 0..forms.len() {
         let f = rt.root_get(base + i);
-        last = eval_form(rt, cs, macros, comp, f);
+        last = eval_form(rt, cs, macros, comp, f, true);
     }
     rt.truncate_roots(base);
     last
@@ -201,22 +279,25 @@ fn run_src<M: ValueModel>(
 
 /// Expand, compile straight to `Ir`, and run it. The toolkit's `analyze` is
 /// never used — this frontend owns the surface -> `Ir` lowering.
+///
+/// `boundary`: at the true top level a still-pending signal is an UNCAUGHT
+/// throw — a program error that terminates (like an uncaught exception in
+/// real Clojure). Inside the eval BRIDGE the signal must PROPAGATE instead,
+/// so `(try (eval …) (catch …))` catches it.
 fn eval1<M: ValueModel>(
     rt: &mut Runtime<M>,
     cs: &dyn CodeSpace<M>,
     macros: &HashSet<Sym>,
     comp: &mut Compiler,
     form: u64,
+    boundary: bool,
 ) -> u64 {
     let expanded = expand(rt, cs, macros, comp, form);
     let slot = rt.push_root(expanded);
     let ir = comp.compile(rt, rt.root_get(slot));
     rt.truncate_roots(slot);
     let r = cs.eval_ir(cs, rt, &ir, &None);
-    // A signal still pending at the top level is an UNCAUGHT throw/escape — a
-    // program error that terminates (like an uncaught exception in real Clojure).
-    // This is the boundary, not the throw/catch mechanism (which is signal-based).
-    if rt.pending() {
+    if boundary && rt.pending() {
         let sig = rt.take_signal();
         if sig.kind == 1 {
             panic!("uncaught throw: {}", rt.print(sig.value));
@@ -261,7 +342,7 @@ fn macroexpand_1_form<M: ValueModel>(
 /// so the aliasing is benign in practice.
 struct FrontendBridge<M: ValueModel> {
     comp: *mut Compiler,
-    macros: *const HashSet<Sym>,
+    macros: *mut HashSet<Sym>,
     cs: *const dyn CodeSpace<M>,
 }
 unsafe impl<M: ValueModel> Send for FrontendBridge<M> {}
@@ -279,22 +360,25 @@ impl<M: ValueModel> EvalBridge<M> for FrontendBridge<M> {
         resolve_auto_keywords(rt, comp, form)
     }
     fn eval(&self, rt: &mut Runtime<M>, form: u64) -> u64 {
+        // Route through eval_form so eval'd code gets the full TOP-LEVEL
+        // treatment — `ns`/`require` switch the compiler, `defmacro` registers,
+        // `(do …)` sequences — exactly like source forms. Non-boundary: a
+        // pending signal (uncaught throw) PROPAGATES, so `(try (eval …))` works.
         let cs: &dyn CodeSpace<M> = unsafe { &*self.cs };
-        let macros: &HashSet<Sym> = unsafe { &*self.macros };
+        let macros: &mut HashSet<Sym> = unsafe { &mut *self.macros };
         let comp: &mut Compiler = unsafe { &mut *self.comp };
-        let expanded = expand(rt, cs, macros, comp, form);
-        let slot = rt.push_root(expanded);
-        let ir = comp.compile(rt, rt.root_get(slot));
-        rt.truncate_roots(slot);
-        // A pending signal (uncaught throw) PROPAGATES — so `(try (eval …) (catch …))`
-        // works — rather than panicking here.
-        cs.eval_ir(cs, rt, &ir, &None)
+        eval_form(rt, cs, macros, comp, form, false)
     }
     fn macroexpand_1(&self, rt: &mut Runtime<M>, form: u64) -> u64 {
         let cs: &dyn CodeSpace<M> = unsafe { &*self.cs };
         let macros: &HashSet<Sym> = unsafe { &*self.macros };
         let comp: &Compiler = unsafe { &*self.comp };
         macroexpand_1_form(rt, cs, macros, comp, form)
+    }
+    fn current_ns(&self, rt: &mut Runtime<M>) -> u64 {
+        let comp: &Compiler = unsafe { &*self.comp };
+        let s = rt.intern(comp.current_ns());
+        rt.encode(Val::Sym(s))
     }
 }
 
@@ -382,10 +466,34 @@ fn eval_form<M: ValueModel>(
     macros: &mut HashSet<Sym>,
     comp: &mut Compiler,
     form: u64,
+    boundary: bool,
 ) -> u64 {
     // `::kw` markers resolve against the CURRENT namespace, before anything
     // else dissects the form (Clojure resolves them at read time).
     let form = resolve_auto_keywords(rt, comp, form);
+    // A TOP-LEVEL `(do …)` is a sequence of top-level forms (exactly Clojure's
+    // compiler): `ns`/`defmacro`/`definline` inside it get their eval-level
+    // handling. This is what lets a REPL message body switch namespaces.
+    if let Some((h, _)) = rt.as_cons(form) {
+        if is_sym(rt, h, "do") {
+            let items = rt.list_to_vec(form);
+            let base = rt.root_depth();
+            for &f in &items[1..] {
+                rt.push_root(f);
+            }
+            let mut last = rt.encode(Val::Nil);
+            for i in 0..items.len() - 1 {
+                let f = rt.root_get(base + i);
+                last = eval_form(rt, cs, macros, comp, f, boundary);
+                // a pending (propagating) signal aborts the sequence
+                if rt.pending() {
+                    break;
+                }
+            }
+            rt.truncate_roots(base);
+            return last;
+        }
+    }
     // Namespace declarations mutate the compiler's resolution state (and may LOAD
     // required files) and yield nil. Handled before macro/def checks.
     if let Some(r) = handle_ns_form(rt, cs, macros, comp, form) {
@@ -395,7 +503,7 @@ fn eval_form<M: ValueModel>(
     // name as `(-macro-meta name)`. Define the fn, then register the macro under
     // its RESOLVED (namespace-qualified) sym.
     if let Some((name, newform)) = strip_def_macro_meta(rt, form) {
-        let r = eval1(rt, cs, macros, comp, newform);
+        let r = eval1(rt, cs, macros, comp, newform, boundary);
         let q = comp.resolve_ref(rt, name);
         macros.insert(q);
         rt.set_var_flags(q, microlang::runtime::VAR_MACRO);
@@ -440,7 +548,7 @@ fn eval_form<M: ValueModel>(
             }
             out.extend_from_slice(rest);
             let rewritten = rt.vec_to_list(&out);
-            return eval_form(rt, cs, macros, comp, rewritten);
+            return eval_form(rt, cs, macros, comp, rewritten, boundary);
         }
     }
     if let Some(name) = defmacro_name(rt, form) {
@@ -499,13 +607,13 @@ fn eval_form<M: ValueModel>(
         };
         let def_sym = sym(rt, "def");
         let defform = rt.vec_to_list(&[def_sym, items[1], lam]);
-        let r = eval1(rt, cs, macros, comp, defform);
+        let r = eval1(rt, cs, macros, comp, defform, boundary);
         let q = comp.resolve_ref(rt, name);
         macros.insert(q);
         rt.set_var_flags(q, microlang::runtime::VAR_MACRO);
         return r;
     }
-    eval1(rt, cs, macros, comp, form)
+    eval1(rt, cs, macros, comp, form, boundary)
 }
 
 /// Fully macro-expand + desugar a form.

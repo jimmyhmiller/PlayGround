@@ -102,6 +102,38 @@
   (:tag ByteArrayOutputStream)
   (:extend-tags ByteArrayOutputStream))
 
+;; ─────────────── writers (*out* / *err* targets) ───────────────
+;; The dynamic vars *out*/*err* (core.clj) hold Writer-shaped objects: `.write`
+;; a string, `.flush`. The bootstrap defaults are plain records of the tags
+;; below, so these classes give them their methods; StringWriter is what
+;; with-out-str / an nREPL eval capture binds.
+
+(defclass java.io.StringWriter
+  (:tag StringWriter)
+  (:ctor ([] (%make-record 'StringWriter (list (array)))))
+  ;; field 0 = an array of string chunks, joined at .toString (O(1) appends)
+  (:method write [w s] (-al-add! (field w 0) (str s)) nil)
+  (:method append [w s] (-al-add! (field w 0) (str s)) w)
+  (:method toString [w]
+    (loop [i 0 acc ""]
+      (if (%lt i (%alength (field w 0)))
+        (recur (%add i 1) (%str-cat acc (%aget (field w 0) i)))
+        acc)))
+  (:method flush [w] nil)
+  (:method close [w] nil))
+
+(defclass microclj.io.StdoutWriter
+  (:tag StdoutWriter)
+  (:method write [w s] (%print s) nil)
+  (:method flush [w] nil)
+  (:method close [w] nil))
+
+(defclass microclj.io.StderrWriter
+  (:tag StderrWriter)
+  (:method write [w s] (%err-print s) nil)
+  (:method flush [w] nil)
+  (:method close [w] nil))
+
 ;; ─────────────── java.net sockets (over the %tcp-* prims) ───────────────
 ;; A Socket record holds the prim handle; its streams read/write bytes with
 ;; Java's conventions (unsigned reads, -1 at EOF). Writes buffer per stream

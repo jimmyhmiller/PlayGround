@@ -78,6 +78,22 @@ fn drive(cs: &dyn microlang::CodeSpace<LowBitModel>, mode: Mode) {
             }
         }
     }
+    // ./deps.edn, exactly like the clojure CLI: its :paths and :local/root
+    // deps join the load path (nREPL etc. arrive as ordinary dependencies).
+    let deps_edn = std::path::Path::new("deps.edn");
+    if deps_edn.is_file() {
+        let src = std::fs::read_to_string(deps_edn).unwrap_or_else(|e| {
+            eprintln!("microclj: cannot read deps.edn: {e}");
+            std::process::exit(1)
+        });
+        match clojure_stub::deps_edn_paths(&mut rt, &src, std::path::Path::new(".")) {
+            Ok(mut ps) => paths.append(&mut ps),
+            Err(e) => {
+                eprintln!("microclj: {e}");
+                std::process::exit(1)
+            }
+        }
+    }
     let mut session = clojure_stub::Session::new(&mut rt, cs, paths);
 
     match mode {
@@ -103,9 +119,20 @@ fn drive(cs: &dyn microlang::CodeSpace<LowBitModel>, mode: Mode) {
         }
         Mode::Repl => repl(&mut rt, cs, &mut session),
         Mode::Nrepl(port) => {
-            // the REAL nrepl bencode + the server over it, then serve forever
-            for src in clojure_stub::NREPL_SOURCES {
-                session.eval(&mut rt, cs, src);
+            // The nREPL server is a LIBRARY, not baked into the binary: it (and
+            // the real nrepl bencode it uses) must be on the load path — via
+            // deps.edn, like any dependency.
+            let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                session.eval(&mut rt, cs, "(require 'microclj.nrepl-server)");
+            }));
+            if loaded.is_err() {
+                eprintln!(
+                    "microclj: cannot load microclj.nrepl-server.\n\
+                     Add the nREPL libraries to your deps.edn, e.g.\n\
+                     {{:deps {{microclj/nrepl {{:local/root \"…/clojure-stub/libs\"}}\n\
+                             nrepl/bencode  {{:local/root \"…/clojure-stub/vendor/nrepl\"}}}}}}"
+                );
+                std::process::exit(1);
             }
             session.eval(&mut rt, cs, &format!("(microclj.nrepl-server/start-server! {port})"));
         }
