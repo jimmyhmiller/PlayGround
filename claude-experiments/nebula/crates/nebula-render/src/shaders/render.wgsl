@@ -144,64 +144,6 @@ fn fs_edge(in: EdgeVsOut) -> @location(0) vec4<f32> {
     return in.color;
 }
 
-// ---------------- Edge accumulation composite ----------------
-// Edges are rendered additively into double-buffered float textures: the back
-// buffer accumulates a slice of the edge set per frame; once it holds every
-// edge it becomes the front buffer, which is what this pass displays. The
-// displayed image therefore always contains the complete edge set (no popping
-// subsets); it is merely up to a few frames stale while a new generation
-// builds. Because it was captured under `src_*` camera and is being shown
-// under `cur_*`, the lookup reprojects through world space — pan/zoom stays
-// geometrically aligned, softening rather than shifting.
-
-struct CompositeParams {
-    cur_center: vec2<f32>,
-    cur_scale: vec2<f32>,
-    src_center: vec2<f32>,
-    src_scale: vec2<f32>,
-    viewport: vec2<f32>,
-    // Brightness normalization: total/accumulated while a partial back buffer
-    // is shown (only before the very first generation completes), else 1.
-    factor: f32,
-    _c0: f32,
-};
-@group(0) @binding(0) var<uniform> comp: CompositeParams;
-@group(0) @binding(1) var accum_tex: texture_2d<f32>;
-@group(0) @binding(2) var accum_samp: sampler;
-
-struct CompositeOut {
-    @builtin(position) clip: vec4<f32>,
-};
-
-@vertex
-fn vs_composite(@builtin(vertex_index) vi: u32) -> CompositeOut {
-    // Fullscreen triangle.
-    var pts = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -3.0), vec2<f32>(-1.0, 1.0), vec2<f32>(3.0, 1.0),
-    );
-    var out: CompositeOut;
-    out.clip = vec4<f32>(pts[vi], 0.0, 1.0);
-    return out;
-}
-
-@fragment
-fn fs_composite(in: CompositeOut) -> @location(0) vec4<f32> {
-    // Pixel -> current NDC -> world -> capture NDC -> capture UV.
-    let ndc = vec2<f32>(
-        (in.clip.x / comp.viewport.x) * 2.0 - 1.0,
-        1.0 - (in.clip.y / comp.viewport.y) * 2.0,
-    );
-    let world = ndc / comp.cur_scale + comp.cur_center;
-    let sndc = (world - comp.src_center) * comp.src_scale;
-    let uv = vec2<f32>((sndc.x + 1.0) * 0.5, (1.0 - sndc.y) * 0.5);
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    }
-    let acc = textureSampleLevel(accum_tex, accum_samp, uv, 0.0).rgb;
-    let rgb = min(acc * comp.factor, vec3<f32>(1.0, 1.0, 1.0));
-    return vec4<f32>(rgb, 1.0);
-}
-
 // ---------------- Picking ----------------
 // Renders each node's id (+1) into an R32Uint target; 0 means "no node".
 struct PickOut {
