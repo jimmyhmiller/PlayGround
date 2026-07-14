@@ -105,14 +105,23 @@
           (do (add-kid! nd (parse-type)) (if (check TK_COMMA) (do (advance) 0) 0))))
   (expect TK_GT)
   0)
+; a type name: IDENT ('.' IDENT)*  ('<' type-args '>')?  — 07-modules.md §6: a fully-qualified
+; type reference (`agents.tools.shell.ShellTool`) is just a dotted identifier chain in type
+; position; the whole dotted text becomes the node's name and the typechecker splits it at
+; the LAST dot (module prefix vs. bare TypeName) if a plain lookup fails.
 (defn parse-type [] (-> (ptr Node))
   (if (check TK_LPAREN)
     (let [ln (cur-line) col (cur-col)]
       (advance) (expect TK_RPAREN)
       (let [nd (mk-node NK_TYPE ln col)] (store! (field nd ival) 1) nd))
-    (let [t (cur-ptr) nd (mk-node NK_TYPE (load (field t line)) (load (field t col)))]
-      (set-name! nd (load (field t start)) (load (field t len)))
+    (let [t (cur-ptr) nd (mk-node NK_TYPE (load (field t line)) (load (field t col)))
+          startaddr (cast i64 (load (field t start)))]
       (expect-ident)
+      (let [(mut endaddr) (tok-end (- (cur-idx) 1))]
+        (loop (if (and (check TK_DOT) (= (peek-kind 1) TK_IDENT))
+                (do (advance) (advance) (store! endaddr (tok-end (- (cur-idx) 1))) 0)
+                (break)))
+        (set-name! nd (cast (ptr u8) startaddr) (- (load endaddr) startaddr)))
       (if (check TK_LT) (do (parse-type-args-into nd) 0) 0)
       nd)))
 
@@ -372,6 +381,8 @@
       (loop
         (if (check TK_DOT)
           (do (advance)
+              ; 07-modules.md §5: no wildcard import, ever (Jimmy ruling, permanent).
+              (if (check TK_STAR) (perror c"wildcard imports are not supported by design — list the names you want (import a.b.{X, Y})") 0)
               (if (check TK_LBRACE)
                 (do (advance)
                     (loop (if (check TK_RBRACE) (break)

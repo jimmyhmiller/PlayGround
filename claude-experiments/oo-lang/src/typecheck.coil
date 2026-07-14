@@ -333,12 +333,52 @@
             (let [vr (find-variant nm0 len0 (expected-enum expected))]
               (if (!= (cast i64 vr) 0)
                 (construct-variant (load (field vr enum-decl)) (load (field vr vnode)) n env expected)
-                (do (err-msg-name n c"unknown name '" nm0 len0 c"'") (ty-error)))))))))
+                (do (err-head-n n) (w-cstr 2 c"unknown name '") (w-bytes 2 nm0 len0) (w-cstr 2 c"'")
+                    (write-import-suggestion 2 nm0 len0) (err-end) (ty-error)))))))))
 
-; receiver.method(args) OR Enum.Variant(args) OR Object.method(args)
+; the base NK_IDENT of a pure dotted chain of NK_IDENT/NK_FIELDACC nodes
+(defn dotted-base [(n (ptr Node))] (-> (ptr Node))
+  (if (= (nkind n) NK_FIELDACC) (dotted-base (load (field n a))) n))
+; flatten a pure dotted chain into "a.b.c" text; false (chain contains a call/index/etc)
+(defn flatten-dotted [(n (ptr Node)) (sb (ptr StrBuf))] (-> bool)
+  (cond
+    (= (nkind n) NK_IDENT) (do (sb-push-bytes sb (nm n) (nlen n)) true)
+    (= (nkind n) NK_FIELDACC)
+      (if (flatten-dotted (load (field n a)) sb)
+        (do (sb-push-str sb c".") (sb-push-bytes sb (nm n) (nlen n)) true)
+        false)
+    false))
+
+; 07-modules.md §6: `std.json.parse(text)` / `agents.tools.shell.ShellTool(...)` — the
+; ENTIRE receiver chain names a known module (never ambiguous: TypeName/fn-name never
+; contain a dot, so the outermost FIELDACC always splits module-prefix from the final
+; decl name); dispatch mname as a reference INSIDE that module.
+(defn qualified-call-dispatch [(modtxt (ptr u8)) (modlen i64) (mname (ptr u8)) (mlen i64) (call (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [d (find-decl-in-module modtxt modlen mname mlen)]
+    (if (= (cast i64 d) 0)
+      (do (err-head-n call) (w-cstr 2 c"unknown name '") (w-bytes 2 mname mlen)
+          (w-cstr 2 c"' in module '") (w-bytes 2 modtxt modlen) (w-cstr 2 c"'") (err-end) (ty-error))
+      (let [dk (load (field d kind))]
+        (cond
+          (= dk DK_FN) (call-function d call env)
+          (or (= dk DK_CLASS) (= dk DK_OBJECT))
+            (if (decl-is-generic d)
+              (do (err-msg-name call c"generic type '" mname mlen c"' needs type arguments, e.g. T<...>(...)") (ty-error))
+              (construct-class d (mk-named d (al-new [(ptr Type)] (alc-global))) call env))
+          (= dk DK_ENUM) (do (err-msg call c"cannot construct an enum directly; use a variant") (ty-error))
+          (do (err-msg-name call c"'" mname mlen c"' is not callable") (ty-error)))))))
+
+; receiver.method(args) OR Enum.Variant(args) OR Object.method(args) OR a fully-qualified
+; module.decl(...) reference (checked first — see qualified-call-dispatch)
 (defn infer-dotted-call [(facc (ptr Node)) (call (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
   (let [recv (load (field facc a)) mname (nm facc) mlen (nlen facc)
-        nsd (namespace-decl recv env)]
+        base (dotted-base recv) sb (sb-new)]
+    (if (and (and (= (nkind base) NK_IDENT) (= (cast i64 (env-lookup env (nm base) (nlen base))) 0))
+             (and (flatten-dotted recv sb) (is-known-module (load (field sb data)) (load (field sb len)))))
+      (qualified-call-dispatch (load (field sb data)) (load (field sb len)) mname mlen call env expected)
+      (infer-dotted-call-plain facc recv mname mlen call env expected))))
+(defn infer-dotted-call-plain [(facc (ptr Node)) (recv (ptr Node)) (mname (ptr u8)) (mlen i64) (call (ptr Node)) (env (ptr Env)) (expected (ptr Type))] (-> (ptr Type))
+  (let [nsd (namespace-decl recv env)]
     (if (!= (cast i64 nsd) 0)
       (let [dk (load (field nsd kind))]
         (cond
@@ -626,7 +666,8 @@
           (let [d (find-decl (nm n) (nlen n))]
             (if (!= (cast i64 d) 0)
               (do (err-msg-name n c"'" (nm n) (nlen n) c"' is a type, not a value") (ty-error))
-              (do (err-msg-name n c"unknown identifier '" (nm n) (nlen n) c"'") (ty-error)))))))))
+              (do (err-head-n n) (w-cstr 2 c"unknown identifier '") (w-bytes 2 (nm n) (nlen n)) (w-cstr 2 c"'")
+                  (write-import-suggestion 2 (nm n) (nlen n)) (err-end) (ty-error)))))))))
 
 ; ======================================================================
 ; match
@@ -976,7 +1017,7 @@
                 (and (!= (load (field id kind)) DK_INTERFACE) (!= (load (field id kind)) DK_BUILTIN_IFACE))
                   (do (err-head-n tnode) (w-cstr 2 c"cannot implement '") (w-bytes 2 (nm tnode) (nlen tnode))
                       (w-cstr 2 c"': it is not an interface") (err-end) 0)
-                (conform-to d id))
+                (do (al-push! (mut (field d impl-decls)) id) (conform-to d id)))
               (store! i (+ (load i) 1)) 0)
             (break)))
         0))))
@@ -1048,16 +1089,26 @@
 (defn decl-is-builtin [(d (ptr Decl))] (-> bool)
   (let [k (load (field d kind))] (or (or (= k DK_BUILTIN_GEN) (= k DK_BUILTIN_OBJ)) (or (= k DK_BUILTIN_CLASS) (= k DK_BUILTIN_IFACE)))))
 
+; duplicate-declaration is scoped to ONE module (07-modules.md §2/§4): two modules may
+; declare the same bare name and fully coexist. A builtin (qmod-len 0) is a separate
+; pseudo-module a real module's decl may override in place (existing behavior — the
+; override now also re-stamps qmod so the decl becomes a normal member of the
+; overriding module from then on).
 (defn collect-decl [(node (ptr Node)) (file (ptr i8)) (deep bool)] (-> i64)
-  (let [dk (dkind-of (nkind node)) existing (find-decl (nm node) (nlen node))
-        override (and (!= (cast i64 existing) 0) (decl-is-builtin existing))]
-    (if (and (!= (cast i64 existing) 0) (not (decl-is-builtin existing)))
-      (do (set-cur-file file) (err-msg-name node c"duplicate declaration '" (nm node) (nlen node) c"'") 0)
-      (let [d (if override existing (new-decl dk (nm node) (nlen node) node file))]
+  (set-cur-file file)
+  (let [dk (dkind-of (nkind node))
+        existing (find-decl-in-module (load (field (ctx) cur-module)) (load (field (ctx) cur-module-len)) (nm node) (nlen node))
+        existing-builtin (find-decl-builtin (nm node) (nlen node))
+        override (and (= (cast i64 existing) 0) (!= (cast i64 existing-builtin) 0))]
+    (if (!= (cast i64 existing) 0)
+      (do (err-msg-name node c"duplicate declaration '" (nm node) (nlen node) c"'") 0)
+      (let [d (if override existing-builtin (new-decl dk (nm node) (nlen node) node file))]
         (if override
           (do (store! (field d kind) dk) (store! (field d node) node) (store! (field d file) file)
               (store! (field d tparams) (al-new [(ptr Node)] (alc-global)))
-              (store! (field d members) (al-new [(ptr Node)] (alc-global))) 0) 0)
+              (store! (field d members) (al-new [(ptr Node)] (alc-global)))
+              (store! (field d impl-decls) (al-new [(ptr Decl)] (alc-global)))
+              (store! (field d qmod) (load (field (ctx) cur-module))) (store! (field d qmod-len) (load (field (ctx) cur-module-len))) 0) 0)
         (store! (field d deep) deep)
         ; type params (node.a is TYPEPARAMS for class/interface/enum/fn)
         (let [tps (load (field node a))]
@@ -1240,42 +1291,103 @@
     (loop (if (< (load i) mlen) (do (if (= (cast i64 (load (index mod (load i)))) \.) (do (store! last (load i)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
     (load last)))
 
-; locate a module file; returns malloc'd path or null
+; locate a module file relative to the IMPORTING file's own dir (07-modules.md §3: kept as
+; a deprecated fallback so the committed `std` symlinks and legacy layouts keep working);
+; returns malloc'd path or null.
 (defn locate-module [(dir (ptr i8)) (mod (ptr u8)) (mlen i64)] (-> (ptr i8))
   (let [c1 (path-cand dir mod 0 mlen \/) c2 (path-cand dir mod 0 mlen \-)
         ld (last-dot mod mlen) c3 (path-cand dir mod (if (< ld 0) 0 (+ ld 1)) mlen \/)]
     (cond (can-open c1) c1 (can-open c2) c2 (can-open c3) c3 (cast (ptr i8) 0))))
 
-(defn resolve-import [(imp (ptr Node)) (dir (ptr i8)) (file (ptr i8))] (-> i64)
-  (let [name (nm imp) nlen (nlen imp) has-braces (> (kid-count imp) 0)]
-    (let [mlen (if has-braces nlen (let [ld (last-dot name nlen)] (if (< ld 0) nlen ld)))
-          found (locate-module dir name mlen)]
-      (if (!= (cast i64 found) 0)
-        (do (load-file found false)
-            (validate-imports imp name nlen has-braces file) 0)
-        (validate-imports imp name nlen has-braces file)))))
+; ---- project/std roots (07-modules.md §3) ----------------------------------
+(defn join-simple [(dir (ptr i8)) (name (ptr i8))] (-> (ptr i8))
+  (let [dl (strlen dir) nl (strlen name) buf (cast (ptr i8) (malloc (+ (+ dl nl) 1)))]
+    (memcpy buf dir dl) (memcpy (index (cast (ptr u8) buf) dl) name nl)
+    (store! (index (cast (ptr u8) buf) (+ dl nl)) (cast u8 0)) buf))
+(defn ensure-trailing-slash [(s (ptr i8))] (-> (ptr i8))
+  (let [n (strlen s)]
+    (if (and (> n 0) (= (cast i64 (load (index (cast (ptr u8) s) (- n 1)))) \/)) s
+      (join-simple s c"/"))))
+; last '/' strictly before index `upto`
+(defn last-slash-before [(s (ptr i8)) (upto i64)] (-> i64)
+  (let [(mut last) -1 (mut i) 0]
+    (loop (if (< (load i) upto) (do (if (= (cast i64 (load (index (cast (ptr u8) s) (load i)))) \/) (store! last (load i)) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load last)))
+; strip one trailing path segment from a directory string that itself ends in '/'
+; ("a/b/c/" -> "a/b/"); null once there's nowhere further up to go.
+(defn parent-of-dir [(dir (ptr i8))] (-> (ptr i8))
+  (let [n (strlen dir)]
+    (if (<= n 1) (cast (ptr i8) 0)
+      (let [k (last-slash-before dir (- n 1))]
+        (if (< k 0) (cast (ptr i8) 0)
+          (let [buf (cast (ptr i8) (malloc (+ k 2)))]
+            (memcpy buf dir (+ k 1)) (store! (index (cast (ptr u8) buf) (+ k 1)) (cast u8 0)) buf))))))
+(defn has-scry-toml [(dir (ptr i8))] (-> bool) (can-open (join-simple dir c"scry.toml")))
+; nearest ancestor dir (of `startdir`, itself included) containing scry.toml, else null.
+(defn find-scry-toml-root [(startdir (ptr i8))] (-> (ptr i8))
+  (let [(mut d) startdir (mut found) (cast (ptr i8) 0) (mut steps) 0]
+    (loop
+      (if (or (!= (cast i64 (load found)) 0) (or (= (cast i64 (load d)) 0) (>= (load steps) 64)))
+        (break)
+        (do
+          (if (has-scry-toml (load d)) (store! found (load d)) (store! d (parent-of-dir (load d))))
+          (store! steps (+ (load steps) 1)) 0)))
+    (load found)))
+; called once, on the very first load-file (the entry file) — see load-file below.
+(defn establish-roots [(entry-path (ptr i8))] (-> i64)
+  (store! (field (ctx) entry-file) entry-path)
+  (let [edir (dirname entry-path) root (find-scry-toml-root edir)]
+    (store! (field (ctx) proj-root) (if (!= (cast i64 root) 0) root edir)))
+  (let [envstd (getenv c"SCRY_STD")]
+    (store! (field (ctx) std-root)
+      (if (and (!= (cast i64 envstd) 0) (> (strlen envstd) 0))
+        (ensure-trailing-slash envstd)
+        (let [a0 (load (field (ctx) argv0))]
+          (if (!= (cast i64 a0) 0) (join-simple (dirname a0) c"std/") (cast (ptr i8) c"std/"))))))
+  0)
+(defn starts-with [(path (ptr i8)) (prefix (ptr i8))] (-> bool)
+  (let [pl (strlen prefix) sl (strlen path)]
+    (if (> pl sl) false
+      (let [(mut i) 0 (mut ok) true]
+        (loop (if (and (load ok) (< (load i) pl))
+                (do (if (!= (cast i64 (load (index (cast (ptr u8) path) (load i)))) (cast i64 (load (index (cast (ptr u8) prefix) (load i))))) (do (store! ok false) 0) 0)
+                    (store! i (+ (load i) 1)) 0)
+                (break)))
+        (load ok)))))
+; "a/b/c.scry" rooted at `root` -> "a.b.c"; null if not under root or too short.
+(defn derive-module-name [(root (ptr i8)) (path (ptr i8))] (-> (ptr i8))
+  (if (not (starts-with path root)) (cast (ptr i8) 0)
+    (let [rl (strlen root) pl (strlen path)]
+      (if (< (- pl rl) 6) (cast (ptr i8) 0)
+        (let [rellen (- (- pl rl) 5) buf (cast (ptr i8) (malloc (+ rellen 1))) (mut i) 0]
+          (loop (if (< (load i) rellen)
+                  (let [ch (cast i64 (load (index (cast (ptr u8) path) (+ rl (load i)))))]
+                    (store! (index (cast (ptr u8) buf) (load i)) (cast u8 (if (= ch \/) \. ch)))
+                    (store! i (+ (load i) 1)) 0)
+                  (break)))
+          (store! (index (cast (ptr u8) buf) rellen) (cast u8 0))
+          buf)))))
 
-; validate that each imported name is a known decl (builtin or from a loaded module)
-(defn validate-imports [(imp (ptr Node)) (name (ptr u8)) (nlen i64) (has-braces bool) (file (ptr i8))] (-> i64)
-  (set-cur-file file)
-  (if has-braces
-    (let [nk (kid-count imp) (mut i) 0]
-      (loop (if (< (load i) nk)
-              (let [nm0 (kid-at imp (load i))]
-                (if (= (cast i64 (find-decl (nm nm0) (nlen nm0))) 0)
-                  (do (err-msg-name nm0 c"cannot resolve import '" (nm nm0) (nlen nm0) c"' (module not found or name not declared)") 0) 0)
-                (store! i (+ (load i) 1)) 0)
-              (break))) 0)
-    (let [ld (last-dot name nlen)]
-      (if (< ld 0) 0
-        (if (= (cast i64 (find-decl (index name (+ ld 1)) (- nlen (+ ld 1)))) 0)
-          (do (err-head-n imp) (w-cstr 2 c"cannot resolve import '") (w-bytes 2 (index name (+ ld 1)) (- nlen (+ ld 1))) (w-cstr 2 c"'") (err-end) 0)
-          0)))))
+; optional `module a.b.c` header must match the derived name (07-modules.md §2).
+(defn check-module-header [(root (ptr Node)) (path (ptr i8)) (mod (ptr u8)) (mlen i64)] (-> i64)
+  (let [n (kid-count root) (mut i) 0 (mut hdr) (cast (ptr Node) 0)]
+    (loop (if (and (= (cast i64 (load hdr)) 0) (< (load i) n))
+            (do (if (= (nkind (kid-at root (load i))) NK_MODULE) (do (store! hdr (kid-at root (load i))) 0) 0) (store! i (+ (load i) 1)) 0)
+            (break)))
+    (if (= (cast i64 (load hdr)) 0) 0
+      (if (name-eq (nm (load hdr)) (nlen (load hdr)) mod mlen) 0
+        (do (set-cur-file path) (err-head-n (load hdr))
+            (w-cstr 2 c"file ") (w-cstr 2 path) (w-cstr 2 c" declares module ")
+            (w-bytes 2 (nm (load hdr)) (nlen (load hdr))) (w-cstr 2 c" — expected ") (w-bytes 2 mod mlen)
+            (w-cstr 2 c"; did the file move?") (err-end) 0)))))
 
-(defn load-file [(path (ptr i8)) (deep bool)] (-> i64)
+; the real loader — `mod`/`mlen` is the ALREADY-KNOWN module name for `path` (either the
+; dotted import text that resolved to it, or the entry module derived by load-file below).
+(defn load-file-as [(path (ptr i8)) (deep bool) (mod (ptr u8)) (mlen i64)] (-> i64)
   (if (is-loaded path) 0
     (do
       (mark-loaded path)
+      (register-module-for-file path mod mlen)
       (let [src (try-read path)]
         (if (= (cast i64 src) 0)
           (do (set-cur-file path) (err-head 1 1) (w-cstr 2 c"could not open file") (err-end) 0)
@@ -1284,6 +1396,8 @@
             (do
               (parser-init (lexer-tokens) path)
               (let [root (parse-program) dir (dirname path)]
+                (set-cur-file path)
+                (check-module-header root path mod mlen)
                 (collect-program root path deep)
                 (let [n (kid-count root) (mut i) 0]
                   (loop
@@ -1293,6 +1407,64 @@
                         (store! i (+ (load i) 1)) 0)
                       (break))))
                 0))))))))
+
+; resolve one `import` statement: project root, then std root, then the deprecated
+; relative-to-importing-file fallback (07-modules.md §3) — first hit wins, project root
+; wins on conflict. The module name of the newly-loaded file is the dotted text that
+; found it (trivially exact for the root-based candidates; per migration pragmatics, the
+; import path used to reach it for the legacy fallback — matches existing `module std.json`
+; headers).
+(defn resolve-import [(imp (ptr Node)) (dir (ptr i8)) (file (ptr i8))] (-> i64)
+  (let [name (nm imp) nlen (nlen imp) has-braces (> (kid-count imp) 0)]
+    (let [mlen (if has-braces nlen (let [ld (last-dot name nlen)] (if (< ld 0) nlen ld)))
+          root-cand (path-cand (load (field (ctx) proj-root)) name 0 mlen \/)
+          std-cand (path-cand (load (field (ctx) std-root)) name 0 mlen \/)]
+      (cond
+        (can-open root-cand)
+          (do (load-file-as root-cand false name mlen) (validate-imports imp name nlen has-braces file name mlen) 0)
+        (can-open std-cand)
+          (do (load-file-as std-cand false name mlen) (validate-imports imp name nlen has-braces file name mlen) 0)
+        (let [legacy (locate-module dir name mlen)]
+          (if (!= (cast i64 legacy) 0)
+            (do (load-file-as legacy false name mlen) (validate-imports imp name nlen has-braces file name mlen) 0)
+            (validate-imports imp name nlen has-braces file name mlen)))))))
+
+; validate that each imported name is declared in the TARGET module specifically (not
+; anywhere globally), and register it into this file's import scope (07-modules.md §4/§5).
+(defn validate-imports [(imp (ptr Node)) (name (ptr u8)) (nlen i64) (has-braces bool) (file (ptr i8)) (modtxt (ptr u8)) (modlen i64)] (-> i64)
+  (set-cur-file file)
+  (if has-braces
+    (let [nk (kid-count imp) (mut i) 0]
+      (loop (if (< (load i) nk)
+              (let [nm0 (kid-at imp (load i)) target (find-decl-in-module modtxt modlen (nm nm0) (nlen nm0))]
+                (if (= (cast i64 target) 0)
+                  (do (err-msg-name nm0 c"cannot resolve import '" (nm nm0) (nlen nm0) c"' (module not found or name not declared)") 0)
+                  (do (register-import file (nm nm0) (nlen nm0) target) 0))
+                (store! i (+ (load i) 1)) 0)
+              (break))) 0)
+    (let [ld (last-dot name nlen)]
+      (if (< ld 0) 0
+        (let [symname (index name (+ ld 1)) symlen (- nlen (+ ld 1))
+              target (find-decl-in-module modtxt modlen symname symlen)]
+          (if (= (cast i64 target) 0)
+            (do (err-head-n imp) (w-cstr 2 c"cannot resolve import '") (w-bytes 2 symname symlen) (w-cstr 2 c"'") (err-end) 0)
+            (let [alias (load (field imp a))]
+              (if (!= (cast i64 alias) 0)
+                (register-import file (nm alias) (nlen alias) target)
+                (register-import file symname symlen target)))))))))
+
+; driver entry point: bootstraps roots + derives the entry module name on the FIRST call
+; (every driver calls this exactly once, with the entry file; recursive/import loads go
+; through load-file-as directly, which already knows its module name).
+(defn load-file [(path (ptr i8)) (deep bool)] (-> i64)
+  (if (= (cast i64 (load (field (ctx) entry-file))) 0)
+    (do
+      (establish-roots path)
+      (let [derived (derive-module-name (load (field (ctx) proj-root)) path)
+            mod (if (!= (cast i64 derived) 0) (cast (ptr u8) derived) (cast (ptr u8) c"main"))
+            mlen (strlen (if (!= (cast i64 derived) 0) derived c"main"))]
+        (load-file-as path deep mod mlen)))
+    (load-file-as path deep (cast (ptr u8) c"main") 4)))
 
 ; ======================================================================
 ; Program-declared views (DECISIONS #15b) — check a `view N for T { ... }`
@@ -1507,15 +1679,11 @@
       (if (< (load i) n)
         (let [d (al-get ds (load i))]
           (if (= (load (field d kind)) DK_CLASS)
-            (let [cn (load (field d node)) impl (if (= (cast i64 cn) 0) (cast (ptr Node) 0) (load (field cn b)))]
-              (if (= (cast i64 impl) 0) 0
-                (let [ni (kid-count impl) (mut k) 0]
-                  (loop
-                    (if (< (load k) ni)
-                      (let [tnode (kid-at impl (load k)) id (find-decl (nm tnode) (nlen tnode))]
-                        (if (!= (cast i64 id) 0) (dump-itable-pair d id) 0)
-                        (store! k (+ (load k) 1)) 0)
-                      (break)))))) 0)
+            (let [implids (load (field d impl-decls)) ni (al-len implids) (mut k) 0]
+              (loop
+                (if (< (load k) ni)
+                  (do (dump-itable-pair d (al-get implids (load k))) (store! k (+ (load k) 1)) 0)
+                  (break)))) 0)
           (store! i (+ (load i) 1)) 0)
         (break))))
   0)

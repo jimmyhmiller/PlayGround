@@ -145,6 +145,8 @@
     (scry-dump-bytecode (load (index argv 2)))))
 
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (ctx-init)
+  (set-argv0 (load (index argv 0)))   ; 07-modules.md §3: std root defaults to dir(argv0)+"std/"
   (let [n (cast i64 argc)]
     (if (< n 2)
       (do (usage) 64)

@@ -51,13 +51,22 @@
    (tparams (ArrayList (ptr Node))); type-param name nodes (TYPEPARAM or synthetic TYPE)
    (members (ArrayList (ptr Node)));  fields + methods (for builtins: synthetic FN/FIELD nodes)
    (file (ptr i8))                 ; source filename for diagnostics
-   (deep bool)])                   ; body deep-checked? (target module only)
+   (deep bool)                     ; body deep-checked? (target module only)
+   (qmod (ptr u8)) (qmod-len i64)  ; owning module's dotted name; empty (len 0) = builtin prelude
+   (impl-decls (ArrayList (ptr Decl)))]) ; resolved `implements` clause targets (class only),
+                                          ; cached at check-conformance time so later passes
+                                          ; (assignable/codegen) never re-resolve names from
+                                          ; ambient module context.
 
 (defstruct MonoField [(name (ptr u8)) (name-len i64) (ty (ptr Type))])
 
 (defstruct MonoType
   [(id i64)
-   (name (ptr u8)) (name-len i64)  ; canonical mangled name, e.g. "Inventory<Tool>"
+   (name (ptr u8)) (name-len i64)  ; BARE display mangled name, e.g. "Inventory<Tool>" —
+                                    ; reflection JSON / dump-types read this; unchanged in Phase 1.
+   (qkey (ptr u8)) (qkey-len i64)  ; QUALIFIED identity key, e.g. "a.b.Inventory<a.b.Tool>" —
+                                    ; find-mono/intern-mono dedup on THIS, never on `name`
+                                    ; (07-modules.md §4: "display names shorten to bare").
    (base (ptr Decl))
    (args (ArrayList (ptr Type)))
    (fields (ArrayList (ptr MonoField)))  ; class/object field layout in decl order
@@ -68,6 +77,16 @@
    (enum-decl (ptr Decl))
    (vnode (ptr Node))])            ; the VARIANT node
 
+; ---- module bookkeeping (07-modules.md Phase 1) ----------------------------
+; a loaded file's derived module name, recorded once at load time.
+(defstruct FileMod [(file (ptr i8)) (mod (ptr u8)) (mod-len i64)])
+; a registered module name (one per loaded file) — answers "is X a known module?"
+; for qualified-reference resolution (07-modules.md §4/§6).
+(defstruct ModEntry [(name (ptr u8)) (name-len i64)])
+; one `import` binding: bare-name-in-scope (alias if `as`, else the imported symbol)
+; -> the resolved target Decl, scoped to the importing file.
+(defstruct ImportEntry [(file (ptr i8)) (bare (ptr u8)) (bare-len i64) (target (ptr Decl))])
+
 (defstruct Ctx
   [(decls (ArrayList (ptr Decl)))
    (monos (ArrayList (ptr MonoType)))
@@ -75,6 +94,14 @@
    (views (ArrayList (ptr Node)))    ; program-declared views (NK_VIEW), in source order
    (actions (ArrayList (ptr Node)))  ; program-declared actions (NK_ACTION), in source order
    (cur-file (ptr i8))
+   (cur-module (ptr u8)) (cur-module-len i64)   ; ambient module context, tracks cur-file
+   (file-mods (ArrayList (ptr FileMod)))
+   (modules (ArrayList (ptr ModEntry)))
+   (imports (ArrayList (ptr ImportEntry)))
+   (entry-file (ptr i8))            ; the very first file passed to load-file
+   (proj-root (ptr i8))             ; nearest scry.toml ancestor, else entry file's dir
+   (std-root (ptr i8))              ; SCRY_STD env, else dir(argv0)+"std/"
+   (argv0 (ptr i8))
    (nerr i64)
    (inited bool)])
 
@@ -87,10 +114,64 @@
       (store! (field (ctx) variants) (al-new [(ptr VariantRef)] (alc-global)))
       (store! (field (ctx) views) (al-new [(ptr Node)] (alc-global)))
       (store! (field (ctx) actions) (al-new [(ptr Node)] (alc-global)))
+      (store! (field (ctx) file-mods) (al-new [(ptr FileMod)] (alc-global)))
+      (store! (field (ctx) modules) (al-new [(ptr ModEntry)] (alc-global)))
+      (store! (field (ctx) imports) (al-new [(ptr ImportEntry)] (alc-global)))
+      (store! (field (ctx) cur-module) (cast (ptr u8) c""))
+      (store! (field (ctx) cur-module-len) 0)
+      (store! (field (ctx) entry-file) (cast (ptr i8) 0))
+      (store! (field (ctx) proj-root) (cast (ptr i8) 0))
+      (store! (field (ctx) std-root) (cast (ptr i8) 0))
+      (store! (field (ctx) argv0) (cast (ptr i8) 0))
       (store! (field (ctx) nerr) 0)
       (store! (field (ctx) inited) true)
       0)))
-(defn set-cur-file [(f (ptr i8))] (-> i64) (store! (field (ctx) cur-file) f) 0)
+(defn set-argv0 [(a (ptr i8))] (-> i64) (store! (field (ctx) argv0) a) 0)
+
+; find this file's registered module (or null if never registered — e.g. the "<eval>"
+; pseudo-file, which keeps whatever cur-module was already ambient).
+(defn find-file-mod [(f (ptr i8))] (-> (ptr FileMod))
+  (let [fs (load (field (ctx) file-mods)) n (al-len fs) (mut i) 0 (mut r) (cast (ptr FileMod) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [fm (al-get fs (load i))]
+              (if (= (cast i64 (strcmp (load (field fm file)) f)) 0) (do (store! r fm) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn register-module-for-file [(f (ptr i8)) (mod (ptr u8)) (mod-len i64)] (-> i64)
+  (let [fm (cast (ptr FileMod) (xalloc (sizeof FileMod)))]
+    (store! (field fm file) f) (store! (field fm mod) mod) (store! (field fm mod-len) mod-len)
+    (al-push! (mut (field (ctx) file-mods)) fm)
+    (let [me (cast (ptr ModEntry) (xalloc (sizeof ModEntry)))]
+      (store! (field me name) mod) (store! (field me name-len) mod-len)
+      (al-push! (mut (field (ctx) modules)) me))
+    0))
+(defn is-known-module [(name (ptr u8)) (len i64)] (-> bool)
+  (let [ms (load (field (ctx) modules)) n (al-len ms) (mut i) 0 (mut ok) false]
+    (loop (if (and (not (load ok)) (< (load i) n))
+            (do (if (name-eq (load (field (al-get ms (load i)) name)) (load (field (al-get ms (load i)) name-len)) name len) (do (store! ok true) 0) 0)
+                (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load ok)))
+; cur-file drives ALL ambient name resolution (find-decl); every existing call site
+; already calls this before checking/compiling a decl's body, so hooking cur-module
+; here — rather than threading a module parameter through 20+ call sites — keeps
+; every one of them correct for free. A file with no registered module (the "<eval>"
+; pseudo-file used throughout server.coil for live-eval typechecking) defaults to the
+; ENTRY module's scope — 07-modules.md §6: "with no [module] header, context defaults
+; to the entry module".
+(defn set-cur-file [(f (ptr i8))] (-> i64)
+  (store! (field (ctx) cur-file) f)
+  (let [fm (find-file-mod f)]
+    (if (!= (cast i64 fm) 0)
+      (do (store! (field (ctx) cur-module) (load (field fm mod))) (store! (field (ctx) cur-module-len) (load (field fm mod-len))) 0)
+      (let [ef (load (field (ctx) entry-file))]
+        (if (= (cast i64 ef) 0) 0
+          (let [efm (find-file-mod ef)]
+            (if (!= (cast i64 efm) 0)
+              (do (store! (field (ctx) cur-module) (load (field efm mod))) (store! (field (ctx) cur-module-len) (load (field efm mod-len))) 0)
+              0))))))
+  0)
 
 ; ======================================================================
 ; name helpers
@@ -141,7 +222,63 @@
 ; ======================================================================
 ; Decl table
 ; ======================================================================
+; module-scoped lookup: exact (module, bare-name) match. Empty module (len 0) means
+; "the builtin prelude" (07-modules.md §4 step 4).
+(defn decl-in-module [(d (ptr Decl)) (mod (ptr u8)) (mlen i64)] (-> bool)
+  (name-eq (load (field d qmod)) (load (field d qmod-len)) mod mlen))
+(defn find-decl-in-module [(mod (ptr u8)) (mlen i64) (name (ptr u8)) (len i64)] (-> (ptr Decl))
+  (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0 (mut found) (cast (ptr Decl) 0)]
+    (loop
+      (if (and (= (cast i64 (load found)) 0) (< (load i) n))
+        (let [d (al-get ds (load i))]
+          (if (and (decl-in-module d mod mlen) (name-eq (load (field d name)) (load (field d name-len)) name len))
+            (do (store! found d) 0) 0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (load found)))
+(defn find-decl-builtin [(name (ptr u8)) (len i64)] (-> (ptr Decl)) (find-decl-in-module (cast (ptr u8) c"") 0 name len))
+
+; this file's import table entry for a bare name (07-modules.md §4 step 3)
+(defn find-import [(file (ptr i8)) (name (ptr u8)) (len i64)] (-> (ptr Decl))
+  (let [is0 (load (field (ctx) imports)) n (al-len is0) (mut i) 0 (mut found) (cast (ptr Decl) 0)]
+    (loop
+      (if (and (= (cast i64 (load found)) 0) (< (load i) n))
+        (let [e (al-get is0 (load i))]
+          (if (and (= (cast i64 (strcmp (load (field e file)) file)) 0)
+                   (name-eq (load (field e bare)) (load (field e bare-len)) name len))
+            (do (store! found (load (field e target))) 0) 0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (load found)))
+(defn register-import [(file (ptr i8)) (bare (ptr u8)) (bare-len i64) (target (ptr Decl))] (-> i64)
+  (let [e (cast (ptr ImportEntry) (xalloc (sizeof ImportEntry)))]
+    (store! (field e file) file) (store! (field e bare) bare) (store! (field e bare-len) bare-len) (store! (field e target) target)
+    (al-push! (mut (field (ctx) imports)) e) 0))
+
+; the file whose import TABLE is in scope: cur-file normally, but the synthetic "<eval>"
+; pseudo-file (server.coil, every live-eval typecheck) has no import table of its own —
+; it defaults to the entry module (see set-cur-file), so its imports come from the entry
+; FILE too (07-modules.md §6: "bare names resolve as if the source were appended to that
+; module's file").
+(defn effective-import-file [] (-> (ptr i8))
+  (let [f (load (field (ctx) cur-file))]
+    (if (= (cast i64 (strcmp f c"<eval>")) 0) (load (field (ctx) entry-file)) f)))
+
+; Bare-identifier resolution order (07-modules.md §4): own module -> this file's
+; imports -> builtin prelude. Locals/params/self-fields are handled by the caller
+; (Env) before this is ever consulted. Ambient cur-file/cur-module (set-cur-file)
+; supply the scope — see its comment for why that's safe everywhere it's called.
 (defn find-decl [(name (ptr u8)) (len i64)] (-> (ptr Decl))
+  (let [own (find-decl-in-module (load (field (ctx) cur-module)) (load (field (ctx) cur-module-len)) name len)]
+    (if (!= (cast i64 own) 0) own
+      (let [imp (find-import (effective-import-file) name len)]
+        (if (!= (cast i64 imp) 0) imp
+          (find-decl-builtin name len))))))
+(defn find-decl-c [(s (ptr i8))] (-> (ptr Decl)) (find-decl (cast (ptr u8) s) (strlen s)))
+
+; unscoped, first-match lookup — ONLY for building "name exists elsewhere, add an
+; import" diagnostics. Never use this to actually resolve a reference.
+(defn find-decl-anywhere [(name (ptr u8)) (len i64)] (-> (ptr Decl))
   (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0 (mut found) (cast (ptr Decl) 0)]
     (loop
       (if (and (= (cast i64 (load found)) 0) (< (load i) n))
@@ -151,7 +288,6 @@
           (store! i (+ (load i) 1)) 0)
         (break)))
     (load found)))
-(defn find-decl-c [(s (ptr i8))] (-> (ptr Decl)) (find-decl (cast (ptr u8) s) (strlen s)))
 
 (defn new-decl [(kind i64) (name (ptr u8)) (len i64) (node (ptr Node)) (file (ptr i8))] (-> (ptr Decl))
   (let [d (cast (ptr Decl) (xalloc (sizeof Decl)))]
@@ -161,6 +297,8 @@
     (store! (field d node) node) (store! (field d file) file)
     (store! (field d tparams) (al-new [(ptr Node)] (alc-global)))
     (store! (field d members) (al-new [(ptr Node)] (alc-global)))
+    (store! (field d impl-decls) (al-new [(ptr Decl)] (alc-global)))
+    (store! (field d qmod) (load (field (ctx) cur-module))) (store! (field d qmod-len) (load (field (ctx) cur-module-len)))
     d))
 (defn register-decl [(d (ptr Decl))] (-> i64) (al-push! (mut (field (ctx) decls)) d) 0)
 (defn register-view [(v (ptr Node))] (-> i64) (al-push! (mut (field (ctx) views)) v) 0)
@@ -246,22 +384,20 @@
       (= ka TY_VAR) (name-eq (load (field a name)) (load (field a name-len)) (load (field b name)) (load (field b name-len)))
       true)))
 
-; does classDecl implement interfaceDecl (nominal)?
+; does classDecl implement interfaceDecl (nominal)? Reads the CACHED impl-decls list
+; (populated once by check-conformance, when cur-file/cur-module correctly reflect cd's
+; own declaring scope) instead of re-resolving the implements-clause names from
+; whatever module happens to be ambient at the call site — assignable() is invoked from
+; deep inside body-checking/codegen of ARBITRARY other modules, so ambient cur-module
+; would otherwise be the wrong scope for cd's own `implements` names.
 (defn class-implements [(cd (ptr Decl)) (id (ptr Decl))] (-> bool)
-  (let [cn (load (field cd node))]
-    (if (= (cast i64 cn) 0)
-      false
-      (let [impl (load (field cn b))]  ; IMPLEMENTS node or null
-        (if (= (cast i64 impl) 0)
-          false
-          (let [m (kid-count impl) (mut i) 0 (mut ok) false]
-            (loop
-              (if (and (not (load ok)) (< (load i) m))
-                (let [tnode (kid-at impl (load i)) rd (find-decl (nm tnode) (nlen tnode))]
-                  (if (and (!= (cast i64 rd) 0) (= (cast i64 rd) (cast i64 id))) (do (store! ok true) 0) 0)
-                  (store! i (+ (load i) 1)) 0)
-                (break)))
-            (load ok)))))))
+  (let [ids (load (field cd impl-decls)) n (al-len ids) (mut i) 0 (mut ok) false]
+    (loop
+      (if (and (not (load ok)) (< (load i) n))
+        (do (if (= (cast i64 (al-get ids (load i))) (cast i64 id)) (do (store! ok true) 0) 0)
+            (store! i (+ (load i) 1)) 0)
+        (break)))
+    (load ok)))
 
 ; is `from` assignable to `to`?
 (defn assignable [(from (ptr Type)) (to (ptr Type))] (-> bool)
@@ -323,6 +459,18 @@
   (let [(mut i) 0]
     (loop (if (< (load i) n) (do (sb-byte sb (cast i64 (load (index p (load i))))) (store! i (+ (load i) 1)) 0) (break))))
   0)
+; "module.Name", or bare "Name" for a builtin (qmod-len 0) — the qualified IDENTITY
+; string used as the mono-table interning key (07-modules.md §4/§6). Display (type-write,
+; reflection JSON) stays bare everywhere else — this is the ONLY consumer of qmod for names.
+(defn decl-qname-sb [(sb (ptr StrBuf)) (d (ptr Decl))] (-> i64)
+  (if (> (load (field d qmod-len)) 0)
+    (do (sb-push-bytes sb (load (field d qmod)) (load (field d qmod-len))) (sb-push-str sb c".") 0)
+    0)
+  (sb-push-bytes sb (load (field d name)) (load (field d name-len))))
+
+; BARE display canon, e.g. "Inventory<Tool>" — reflection JSON / dump-types / error
+; messages read this (07-modules.md §4: "display names shorten to bare"). NEVER used for
+; interning/dedup identity — see type-canon-qual below for that.
 (defn type-canon [(sb (ptr StrBuf)) (t (ptr Type))] (-> i64)
   (let [k (ty-kind t)]
     (cond
@@ -348,6 +496,25 @@
                 0)))
       0)))
 
+; QUALIFIED identity canon, e.g. "a.b.Inventory<a.b.Tool>" — mono-table interning key ONLY
+; (07-modules.md §4/§6: generic args fully qualified in keys). Never displayed.
+(defn type-canon-qual [(sb (ptr StrBuf)) (t (ptr Type))] (-> i64)
+  (let [k (ty-kind t)]
+    (cond
+      (= k TY_NAMED)
+        (do (decl-qname-sb sb (load (field t decl)))
+            (let [aa (load (field t args)) n (al-len aa)]
+              (if (> n 0)
+                (do (sb-push-str sb c"<")
+                    (let [(mut i) 0]
+                      (loop (if (< (load i) n)
+                              (do (if (> (load i) 0) (sb-push-str sb c",") 0)
+                                  (type-canon-qual sb (al-get aa (load i))) (store! i (+ (load i) 1)) 0)
+                              (break))))
+                    (sb-push-str sb c">") 0)
+                0)))
+      (type-canon sb t))))
+
 ; ======================================================================
 ; Monomorphization table
 ; ======================================================================
@@ -363,12 +530,14 @@
           (load ok))
       true)))
 
+; keyed on the QUALIFIED identity (m.qkey), never the bare display name (m.name) — two
+; modules' same-named classes must intern as DISTINCT monos (07-modules.md §4).
 (defn find-mono [(cn (ptr u8)) (cnl i64)] (-> (ptr MonoType))
   (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut f) (cast (ptr MonoType) 0)]
     (loop
       (if (and (= (cast i64 (load f)) 0) (< (load i) n))
         (let [m (al-get ms (load i))]
-          (if (name-eq (load (field m name)) (load (field m name-len)) cn cnl) (do (store! f m) 0) 0)
+          (if (name-eq (load (field m qkey)) (load (field m qkey-len)) cn cnl) (do (store! f m) 0) 0)
           (store! i (+ (load i) 1)) 0)
         (break)))
     (load f)))
@@ -404,18 +573,21 @@
     t))
 
 (defn intern-mono [(t (ptr Type))] (-> i64)
-  (let [sb (sb-new)]
-    (type-canon sb t)
-    (let [cn (load (field sb data)) cnl (load (field sb len))
-          existing (find-mono cn cnl)]
+  (let [qsb (sb-new)]
+    (type-canon-qual qsb t)
+    (let [qcn (load (field qsb data)) qcnl (load (field qsb len))
+          existing (find-mono qcn qcnl)]
       (if (!= (cast i64 existing) 0)
         (load (field existing id))
         (let [d (load (field t decl))
               m (cast (ptr MonoType) (xalloc (sizeof MonoType)))
-              id (al-len (load (field (ctx) monos)))]
+              id (al-len (load (field (ctx) monos)))
+              sb (sb-new)]
+          (type-canon sb t)
           (store! m (zeroed MonoType))
           (store! (field m id) id)
-          (store! (field m name) cn) (store! (field m name-len) cnl)
+          (store! (field m name) (load (field sb data))) (store! (field m name-len) (load (field sb len)))
+          (store! (field m qkey) qcn) (store! (field m qkey-len) qcnl)
           (store! (field m base) d) (store! (field m args) (load (field t args)))
           (store! (field m fields) (al-new [(ptr MonoField)] (alc-global)))
           (store! (field m is-entity) (or (= (load (field d kind)) DK_CLASS) (= (load (field d kind)) DK_OBJECT)))
@@ -458,8 +630,25 @@
           (and (!= (cast i64 ctxt-decl) 0) (is-tparam-of ctxt-decl name len)) (ty-var name len)
           (resolve-named tn ctxt-decl))))))
 
+; last '.' index in [0,len), or -1 (07-modules.md §6: fully-qualified type names —
+; TypeName never itself contains a dot, so the LAST dot unambiguously splits
+; "<module>.<TypeName>", however deeply the module path nests).
+(defn qname-last-dot [(s (ptr u8)) (len i64)] (-> i64)
+  (let [(mut last) -1 (mut i) 0]
+    (loop (if (< (load i) len) (do (if (= (cast i64 (load (index s (load i)))) \.) (do (store! last (load i)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load last)))
+; a fully-qualified type reference with no import (07-modules.md §4/§6): try the whole
+; text as a bare name first (own module/imports/builtins); on failure, if it contains a
+; dot, split at the LAST dot and resolve <name-after-dot> inside module <prefix-before-dot>.
+(defn resolve-named-decl [(name (ptr u8)) (len i64)] (-> (ptr Decl))
+  (let [d (find-decl name len)]
+    (if (!= (cast i64 d) 0) d
+      (let [ld (qname-last-dot name len)]
+        (if (< ld 0) (cast (ptr Decl) 0)
+          (find-decl-in-module name ld (index name (+ ld 1)) (- len (+ ld 1))))))))
+
 (defn resolve-named [(tn (ptr Node)) (ctxt-decl (ptr Decl))] (-> (ptr Type))
-  (let [d (find-decl (nm tn) (nlen tn))]
+  (let [d (resolve-named-decl (nm tn) (nlen tn))]
     (if (= (cast i64 d) 0)
       (do (err-unknown-type tn) (ty-error))
       (let [want (decl-tparam-count d) got (kid-count tn)]
@@ -485,8 +674,26 @@
 (defn err-msg [(n (ptr Node)) (msg (ptr i8))] (-> i64) (err-head-n n) (w-cstr 2 msg) (err-end))
 (defn err-msg-name [(n (ptr Node)) (pre (ptr i8)) (name (ptr u8)) (len i64) (post (ptr i8))] (-> i64)
   (err-head-n n) (w-cstr 2 pre) (w-bytes 2 name len) (w-cstr 2 post) (err-end))
+; if `name` (a plain, undotted bare name) is declared in some OTHER already-loaded
+; module, print "(add `import <mod>.{<name>}` [or ...] to use it)" — else nothing.
+; 07-modules.md §4 step 5: "the error must say so and print the exact import line".
+(defn write-import-suggestion [(fd i64) (name (ptr u8)) (len i64)] (-> i64)
+  (if (>= (qname-last-dot name len) 0) 0    ; already dotted/qualified — no import would help
+    (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0 (mut any) false]
+      (loop (if (< (load i) n)
+              (let [d (al-get ds (load i))]
+                (if (and (name-eq (load (field d name)) (load (field d name-len)) name len) (> (load (field d qmod-len)) 0))
+                  (do (w-cstr fd (if (load any) c" or `import " c" (add `import "))
+                      (w-bytes fd (load (field d qmod)) (load (field d qmod-len))) (w-cstr fd c".{")
+                      (w-bytes fd name len) (w-cstr fd c"}`") (store! any true) 0)
+                  0)
+                (store! i (+ (load i) 1)) 0)
+              (break)))
+      (if (load any) (w-cstr fd c" to use it)") 0)
+      0)))
 (defn err-unknown-type [(tn (ptr Node))] (-> i64)
-  (err-head-n tn) (w-cstr 2 c"unknown type: ") (w-bytes 2 (nm tn) (nlen tn)) (err-end))
+  (err-head-n tn) (w-cstr 2 c"unknown type: ") (w-bytes 2 (nm tn) (nlen tn))
+  (write-import-suggestion 2 (nm tn) (nlen tn)) (err-end))
 (defn err-type-arity [(tn (ptr Node)) (name (ptr u8)) (len i64) (want i64) (got i64)] (-> i64)
   (err-head-n tn) (w-cstr 2 c"type ") (w-bytes 2 name len)
   (w-cstr 2 c" expects ") (w-int 2 want) (w-cstr 2 c" type argument(s), found ") (w-int 2 got) (err-end))

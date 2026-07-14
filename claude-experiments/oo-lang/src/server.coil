@@ -390,19 +390,17 @@
     (load total)))
 
 ; if d implements an interface declaring method `mname`, return that interface Decl (for a
-; conformance-flavored rejection message); else null. Uses the OLD class node's implements.
+; conformance-flavored rejection message); else null. Reads the CACHE (types.coil
+; class-implements comment), never re-resolves implements-clause names from ambient scope.
 (defn method-required-iface [(d (ptr Decl)) (mname (ptr u8)) (mlen i64)] (-> (ptr Decl))
-  (let [cn (load (field d node)) impl (if (= (cast i64 cn) 0) (cast (ptr Node) 0) (load (field cn b))) (mut r) (cast (ptr Decl) 0)]
-    (if (= (cast i64 impl) 0) (cast (ptr Decl) 0)
-      (let [ni (kid-count impl) (mut i) 0]
-        (loop (if (and (= (cast i64 (load r)) 0) (< (load i) ni))
-                (let [tn (kid-at impl (load i)) id (find-decl (nm tn) (nlen tn))]
-                  (if (!= (cast i64 id) 0)
-                    (let [mm (decl-member id mname mlen)]
-                      (if (and (!= (cast i64 mm) 0) (= (nkind mm) NK_FN)) (do (store! r id) 0) 0)) 0)
-                  (store! i (+ (load i) 1)) 0)
-                (break)))
-        (load r)))))
+  (let [implids (load (field d impl-decls)) ni (al-len implids) (mut i) 0 (mut r) (cast (ptr Decl) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) ni))
+            (let [id (al-get implids (load i))
+                  mm (decl-member id mname mlen)]
+              (if (and (!= (cast i64 mm) 0) (= (nkind mm) NK_FN)) (do (store! r id) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
 
 ; ---- rejection helpers (each leaves the running program untouched) ----
 (defn rej-unknown [(node (ptr Node)) (what (ptr i8))] (-> i64)
@@ -592,8 +590,14 @@
   (store! (ev-outcome) 0) 0)
 
 ; ---- the three redefinition entries ----
+; live-eval redefinition addressing (07-modules.md §6) is entry-module scoped in this
+; phase — full per-qualified-name addressing (an eval-source `module` header picking a
+; DIFFERENT loaded module's decl) is Phase 2 territory; this covers every existing
+; single-module program plus builtins/entry-imports, which is everything today's suite
+; (and the vast majority of real programs) exercises.
 (defn redefine-class [(errbase i64)] (-> i64)
   (block :done
+    (set-cur-file (load (field (ctx) entry-file)))
     (let [node (parse-class) d (find-decl (nm node) (nlen node))]
       (if (= (cast i64 d) 0) (do (rej-unknown node c"class") (return-from :done 0)) 0)
       (if (!= (load (field d kind)) DK_CLASS) (do (rej-notkind node c"class") (return-from :done 0)) 0)
@@ -627,6 +631,7 @@
 
 (defn redefine-fn [(errbase i64)] (-> i64)
   (block :done
+    (set-cur-file (load (field (ctx) entry-file)))
     (let [node (parse-fn true) d (find-decl (nm node) (nlen node))]
       (if (= (cast i64 d) 0) (do (rej-unknown node c"function") (return-from :done 0)) 0)
       (if (!= (load (field d kind)) DK_FN) (do (rej-notkind node c"function") (return-from :done 0)) 0)
@@ -643,6 +648,7 @@
 
 (defn redefine-interface [(errbase i64)] (-> i64)
   (block :done
+    (set-cur-file (load (field (ctx) entry-file)))
     (let [node (parse-interface) d (find-decl (nm node) (nlen node))]
       (if (= (cast i64 d) 0) (do (rej-unknown node c"interface") (return-from :done 0)) 0)
       (if (and (!= (load (field d kind)) DK_INTERFACE) (!= (load (field d kind)) DK_BUILTIN_IFACE))
