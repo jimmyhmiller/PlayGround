@@ -15,7 +15,7 @@ Defaults: binary = ../scry relative to this file. --bless (re)writes NAME.out
 for every SUCCESS-style test (a .scry with no .err sibling) from current output;
 use only after eyeballing a diff. Exits nonzero if any test fails.
 """
-import os, subprocess, sys
+import os, subprocess, sys, glob
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # LLM keys scrubbed from os.environ at startup for hermetic determinism (see main()); the
@@ -26,6 +26,7 @@ CHECK_DIR = os.path.join(HERE, "check")
 RUN_DIR = os.path.join(HERE, "run")
 RUNERR_DIR = os.path.join(HERE, "run-err")
 ARENAS_DIR = os.path.join(HERE, "run-arenas")
+RUNPROJ_DIR = os.path.join(HERE, "run-proj")
 
 
 def run(binary, subargs, scry, stdin=None):
@@ -128,6 +129,9 @@ def main():
     # and exits (identical stdout to the pre-Phase-4 `run`).
     run_dir(RUN_DIR, ["run", "--no-viewer"], True)
     run_dir(RUNERR_DIR, ["run", "--no-viewer"], True)
+    # 07-modules.md Phase 1: whole mini-projects (scry.toml root resolution).
+    rpp, rpf, rpfails = run_runproj_tests(binary, filt)
+    passed += rpp; failed += rpf; fails += rpfails
     run_dir(ARENAS_DIR, ["run", "--dump-arenas"], True)
 
     # Phase 4: eval golden tests (tests/eval/*.t) + the server smoke test.
@@ -199,6 +203,50 @@ def main():
     if fails and not verbose:
         print("Failed: " + ", ".join(fails))
     sys.exit(1 if failed else 0)
+
+
+def run_runproj_tests(binary, filt):
+    """tests/run-proj/<name>/ is a whole MINI-PROJECT (07-modules.md §3 project-root
+    resolution): its entry is <name>/main.scry or <name>/**/main.scry (so a project can
+    nest its entry under a subdirectory to exercise the scry.toml ANCESTOR walk, not just
+    the entry-file's-own-dir fallback the flat tests/run/ cases already cover). Compares
+    `scry run --no-viewer <entry>` stdout against <name>/expected.out."""
+    passed = failed = 0
+    fails = []
+    if not os.path.isdir(RUNPROJ_DIR):
+        return passed, failed, fails
+    for name in sorted(os.listdir(RUNPROJ_DIR)):
+        proj_dir = os.path.join(RUNPROJ_DIR, name)
+        if not os.path.isdir(proj_dir):
+            continue
+        tname = "run-proj/" + name
+        if filt and filt not in tname:
+            continue
+        candidates = sorted(glob.glob(os.path.join(proj_dir, "**", "main.scry"), recursive=True))
+        expected_path = os.path.join(proj_dir, "expected.out")
+        problems = []
+        if not candidates:
+            problems.append("no main.scry found under " + proj_dir)
+        else:
+            code, out, err = run(binary, ["run", "--no-viewer"], candidates[0])
+            if code != 0:
+                problems.append(f"expected exit 0, got {code}; stderr: {err.strip()!r}")
+            if not os.path.exists(expected_path):
+                problems.append(f"no golden file {name}/expected.out")
+            else:
+                expected = open(expected_path).read()
+                if out != expected:
+                    problems.append("stdout != expected.out")
+                    problems.append(f"actual: {out!r}")
+        if problems:
+            failed += 1
+            fails.append(tname)
+            print(f"FAIL {tname}")
+            for pr in problems:
+                print("     " + pr)
+        else:
+            passed += 1
+    return passed, failed, fails
 
 
 EVAL_DIR = os.path.join(HERE, "eval")

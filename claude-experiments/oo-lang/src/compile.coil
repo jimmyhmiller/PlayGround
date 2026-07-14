@@ -450,9 +450,29 @@
               (let [ed (load (field vr enum-decl)) argc (compile-args cs n)]
                 (cop cs OP_MAKE_ENUM) (cu8 cs (variant-tag ed nm0 len0)) (cu8 cs argc) (cu8 cs (enum-refmask-of cs n)) 0))))))))
 
+; codegen mirror of typecheck.coil's qualified-call-dispatch (07-modules.md §6) — compile.coil
+; re-derives call dispatch independently of the typechecker's `infer` (its own pass over the
+; AST for bytecode emission), so a fully-qualified `module.decl(...)` call needs the SAME
+; special-case here or it falls through to the plain-receiver path and hard-errors.
+(defn qualified-compile-dispatch [(cs (ptr CState)) (modtxt (ptr u8)) (modlen i64) (mname (ptr u8)) (mlen i64) (call (ptr Node))] (-> i64)
+  (let [d (find-decl-in-module modtxt modlen mname mlen)]
+    (if (= (cast i64 d) 0) (fatal-or-panic EK_RUNTIME c"compile: unresolved qualified call" 70)
+      (let [dk (load (field d kind))]
+        (cond
+          (= dk DK_FN)
+            (let [argc (compile-args cs call)] (cop cs OP_CALL_STATIC) (cu16 cs (method-index-of (load (field d node)))) (cu8 cs argc) 0)
+          (or (= dk DK_CLASS) (= dk DK_OBJECT)) (compile-construct-class cs call (tyof cs call) d)
+          (fatal-or-panic EK_RUNTIME c"compile: bad qualified call" 70))))))
+
 (defn compile-dotted-call [(cs (ptr CState)) (facc (ptr Node)) (call (ptr Node))] (-> i64)
   (let [recv (load (field facc a)) mname (nm facc) mlen (nlen facc)
-        nsd (namespace-decl recv (load (field cs env)))]
+        base (dotted-base recv) sb (sb-new)]
+    (if (and (and (= (nkind base) NK_IDENT) (= (cast i64 (env-lookup (load (field cs env)) (nm base) (nlen base))) 0))
+             (and (flatten-dotted recv sb) (is-known-module (load (field sb data)) (load (field sb len)))))
+      (qualified-compile-dispatch cs (load (field sb data)) (load (field sb len)) mname mlen call)
+      (compile-dotted-call-plain cs facc recv mname mlen call))))
+(defn compile-dotted-call-plain [(cs (ptr CState)) (facc (ptr Node)) (recv (ptr Node)) (mname (ptr u8)) (mlen i64) (call (ptr Node))] (-> i64)
+  (let [nsd (namespace-decl recv (load (field cs env)))]
     (if (!= (cast i64 nsd) 0)
       (let [dk (load (field nsd kind))]
         (cond

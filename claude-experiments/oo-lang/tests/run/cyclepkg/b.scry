@@ -1,0 +1,11 @@
+module cyclepkg.b
+
+import cyclepkg.a.{AThing}
+
+fn ping() -> String {
+  "pong"
+}
+
+fn makeA() -> AThing {
+  AThing()
+}
