@@ -480,6 +480,16 @@ async function main() {
         if (await evalPage(`!!(${actSel(label)} && ${actSel(label)}.querySelector(${JSON.stringify(sub)}))`)) return true; }
       return false;
     };
+    // the "+ create new <Type>" <option>'s VALUE is "__create__:<possibly-qualified-Type>" (Phase
+    // 3: the picker's internal value is qualified for module-collision safety, e.g.
+    // "__create__:kanban.User" — only the display label stays the short "+ create new User").
+    // Discover the real value by its visible label rather than assuming the bare form.
+    const findCreateOptionValue = (cardSel, typeName) => `(()=>{
+      const sel=${cardSel}.querySelector('select.arg-select');
+      if(!sel) return null;
+      const opt=[...sel.options].find(o=>o.textContent.trim()===${JSON.stringify("+ create new " + typeName)});
+      return opt?opt.value:null;
+    })()`;
 
     const kport = await bootProgram("kanban.scry");
     if (!kport) fails.push("T: kanban never printed a viewer URL");
@@ -527,7 +537,7 @@ async function main() {
           }
           if (!ent || ent.gone) fails.push("T: 'Reassign' action card disappeared");
           else if (!ent.hasSelect) fails.push("T: entity param 'Reassign' did not render a <select> picker");
-          else if (!ent.opts.some((o) => /^User#\d+$/.test(o))) fails.push(`T: entity picker not populated with live User#slot options (${JSON.stringify(ent.opts)})`);
+          else if (!ent.opts.some((o) => /^([\w.]+\.)?User#\d+$/.test(o))) fails.push(`T: entity picker not populated with live User#slot options (${JSON.stringify(ent.opts)})`);
           else {
             ok(`T: entity param renders a <select> of live instances (${JSON.stringify(ent.opts)})`);
             await evalPage(setControl(`${actSel("Reassign")}.querySelector('select.arg-select')`, ent.opts[0], "HTMLSelectElement"));
@@ -542,8 +552,9 @@ async function main() {
           // choose "+ create new User" and fill its ctor (name: String, role: String) inline,
           // then invoke -> a NEW User is constructed and the reassign uses it (User count += 1).
           const usersBefore = await countInstances("User");
-          const openedCreate = await evalPage(setControl(`${actSel("Reassign")}.querySelector('select.arg-select')`, "__create__:User", "HTMLSelectElement"));
-          if (openedCreate !== "__create__:User" && !await waitInCard("Reassign", ".create-form")) fails.push("T-create: 'Reassign' did not enter the User create-form");
+          const createUserVal = await evalPage(findCreateOptionValue(actSel("Reassign"), "User"));
+          const openedCreate = createUserVal && await evalPage(setControl(`${actSel("Reassign")}.querySelector('select.arg-select')`, createUserVal, "HTMLSelectElement"));
+          if (openedCreate !== createUserVal && !await waitInCard("Reassign", ".create-form")) fails.push("T-create: 'Reassign' did not enter the User create-form");
           else if (!await waitInCard("Reassign", ".create-form input.arg-input")) fails.push("T-create: User create-form exposed no ctor inputs (name/role)");
           else {
             ok("T-create: '+ create new User' reveals the inline constructor form (name, role)");
@@ -597,7 +608,7 @@ async function main() {
             if (tf.hasSelect && tf.opts.length) break;
           }
           if (!tf || tf.gone) fails.push("T: 'Transfer' action card disappeared");
-          else if (!tf.hasSelect || !tf.opts.some((o) => /^Account#\d+$/.test(o))) fails.push(`T: Transfer 'to' param is not an Account picker (${JSON.stringify(tf)})`);
+          else if (!tf.hasSelect || !tf.opts.some((o) => /^([\w.]+\.)?Account#\d+$/.test(o))) fails.push(`T: Transfer 'to' param is not an Account picker (${JSON.stringify(tf)})`);
           else {
             ok(`T: bank Transfer 'to' param is an Account picker (${JSON.stringify(tf.opts)})`);
             if (!tf.hasNum) fails.push("T: Transfer 'amount' Int param has no text input");
@@ -624,14 +635,16 @@ async function main() {
             // real amount, run -> a fresh Account (and a fresh Customer) are constructed and used.
             const acctBefore = await countInstances("Account");
             const custBefore = await countInstances("Customer");
-            await evalPage(setControl(`${actSel("Transfer")}.querySelector('.action-form select.arg-select')`, "__create__:Account", "HTMLSelectElement"));
+            const createAcctVal = await evalPage(findCreateOptionValue(`${actSel("Transfer")}.querySelector('.action-form')`, "Account"));
+            await evalPage(setControl(`${actSel("Transfer")}.querySelector('.action-form select.arg-select')`, createAcctVal, "HTMLSelectElement"));
             if (!await waitInCard("Transfer", ".create-form")) fails.push("T-create: Transfer 'to' did not enter the Account create-form");
             else {
               const title = await evalPage(`(()=>{const t=${actSel("Transfer")}.querySelector('.create-form .create-title');return t?t.textContent.trim():null;})()`);
               if (title !== "new Account") fails.push(`T-create: Account create-form title wrong (${JSON.stringify(title)})`);
               else ok("T-create: '+ create new Account' reveals the recursive constructor form (owner, kind)");
               // owner param: its picker carries a "+ create new Customer" option -> NESTED create
-              await evalPage(setControl(`${actSel("Transfer")}.querySelector('.create-form select.arg-select')`, "__create__:Customer", "HTMLSelectElement"));
+              const createCustVal = await evalPage(findCreateOptionValue(`${actSel("Transfer")}.querySelector('.create-form')`, "Customer"));
+              await evalPage(setControl(`${actSel("Transfer")}.querySelector('.create-form select.arg-select')`, createCustVal, "HTMLSelectElement"));
               if (!await waitInCard("Transfer", ".create-form .create-form")) fails.push("T-create: owner did not enter a NESTED Customer create-form");
               else {
                 ok("T-create: owner (entity ctor param) offers its own '+ create new Customer' (recursion)");
@@ -800,7 +813,10 @@ async function main() {
             if (!clicked) fails.push("portal: no 'assistant' project card to click");
             else {
               await waitFor("#nested.skeleton .cx-name", 12000);
-              const stTypes = await evalPage(`[...document.querySelectorAll('#nested .cx-name')].map(n=>n.textContent.trim())`);
+              // Phase 3: .cx-name may carry a trailing .cx-mod module tag (multi-module programs,
+              // e.g. this assistant.scry project spans assistant/agent.core/std.json) — the
+              // primary display name is the leading text node, before that child element.
+              const stTypes = await evalPage(`[...document.querySelectorAll('#nested .cx-name')].map(n=>(n.childNodes[0]?.textContent||"").trim())`);
               const hasNote = await evalPage(`!!document.querySelector('.schema-affordance')`);
               if (!stTypes.includes("Agent")) fails.push(`static project view missing Agent: ${JSON.stringify(stTypes)}`);
               else if (!hasNote) fails.push("static project view missing 'schema · not running' affordance");

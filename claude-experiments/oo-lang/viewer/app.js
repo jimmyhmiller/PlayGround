@@ -186,15 +186,100 @@ function MapView({ v }) {
   return html`<span>${`{${v.length} entries} `}${entries.map(([k, val], i) => html`<${React.Fragment} key=${i}>${i ? ", " : ""}<${ValueView} v=${k} />: <${ValueView} v=${val} /><//>`)}${more}</span>`;
 }
 
-// ===================== type rail =====================
-function TypeRail({ schema, trend, route, ifaceOpen, setIfaceOpen }) {
-  const nav = useContext(NavContext);
-  const [search, setSearch] = useState("");
-  const filt = search.toLowerCase();
+// ===================== module identity + focus mode helpers (Phase 3) =====================
+// Internal identity from here on keys on `qualified` (Phase 2 wire field on every schema()/
+// types()/graph()/functions() node) so two modules that declare the same bare class name
+// (tests/run/modules_coexist.scry: modpkg_a.shell.Shell / modpkg_b.shell.Shell) never collide in
+// a client-side Map keyed by name. `name` stays bare and is used ONLY for display — via
+// shortLabel() below, which qualifies just enough of the module path to disambiguate, never more.
+const moduleOf = (n) => (n && n.module) || "";
+const qualOf = (n) => (n && (n.qualified || n.name)) || "";
+// COMPILER GOTCHA (discovered building this phase, see the final report): a fully-qualified
+// name works as an ordinary VALUE reference or CONSTRUCTION (`agent.core.CalcTool(label: "x")`
+// resolves with no import) but NOT as the receiver of the reflect-static special forms
+// `.at()`/`.instance()`/`.instances()`, nor as an enum-variant access (`agent.core.Role.User`) —
+// `compile-dotted-call`'s qualified fast path only recognizes exactly `<module>.<member>(...)`,
+// one level deep; `<module>.<Class>.<reflectFn>(...)` falls through to plain dotted-call
+// resolution, which doesn't understand a dotted (qualified) receiver and errors "unknown
+// identifier". The INTENDED, working mechanism for exactly this (07-modules.md §6) is the eval
+// module-HEADER: `module <path>\n<bare-name-source>` sets bare-name resolution context for the
+// whole eval, and reflect-static forms + enum variants resolve correctly through it. So every
+// eval this viewer sends for .at()/.instance()/.instances()/enum-variant access uses a BARE name
+// prefixed with this header (built from the resolved schema node's `module`), never a qualified
+// receiver. Fragments EMBEDDED inside a larger expression (an entity/enum ArgInput's picked
+// value, spliced into a method-invoke source) still emit bare-only and rely on the OUTER
+// expression's single header — a value from a DIFFERENT module than the invoked instance's own
+// is a flagged, narrow edge case (no shipped example hits it).
+function moduleHeader(mod) { return mod ? `module ${mod}\n` : ""; }
+// is module `mod` inside focus module `focus` (itself, or a dotted descendant)? no focus = everywhere.
+const inFocus = (mod, focus) => !focus || mod === focus || (mod || "").startsWith(focus + ".");
+const isStdModule = (path) => path === "std" || (path || "").startsWith("std.");
+// shortest trailing run of module segments that disambiguates `node.name` from same-named
+// siblings in `all` — e.g. two `Shell`s under modpkg_a.shell / modpkg_b.shell (same last
+// segment "shell") fall through to the full path; two under agents.tools / ui.panels settle on
+// one segment ("tools.Shell" / "panels.Shell").
+function shortLabel(node, all) {
+  if (!node) return "";
+  const collide = (all || []).filter((n) => n.name === node.name);
+  if (collide.length <= 1) return node.name;
+  const segs = moduleOf(node).split(".").filter(Boolean);
+  for (let k = 1; k <= segs.length; k++) {
+    const suffix = segs.slice(-k).join(".");
+    const mine = suffix ? suffix + "." + node.name : node.name;
+    const clash = collide.some((o) => {
+      if (o === node) return false;
+      const os = moduleOf(o).split(".").filter(Boolean);
+      return os.slice(-k).join(".") === suffix;
+    });
+    if (!clash) return mine;
+  }
+  return (moduleOf(node) ? moduleOf(node) + "." : "") + node.name;
+}
+// flatten a modules() tree (children[]) into path -> node, for O(1) lookup of counts/labels.
+function flattenModules(tree) {
+  const out = new Map();
+  const walk = (n) => { out.set(n.path, n); (n.children || []).forEach(walk); };
+  (tree || []).forEach(walk);
+  return out;
+}
+// non-std top-level modules — the "≥2 modules -> show module chrome" threshold (07-modules.md §7):
+// a single-module program (the common case, and almost every existing example) must look
+// UNCHANGED, so module rings / rail grouping / breadcrumb only switch on once a real second
+// (non-std) module exists. std.* alone never trips it (every program imports std for free).
+const nonStdTop = (tree) => (tree || []).filter((n) => !isStdModule(n.path));
 
+// hash-route focus (07-modules.md §7: "/p/<id>/m/<dotted.module>" URL-addressable; see final
+// report for why this landed as a hash route, not a portal-proxied path).
+function parseHashFocus() {
+  const m = /#m=([^&]*)/.exec(location.hash);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function writeHashFocus(path) {
+  const h = path ? "#m=" + encodeURIComponent(path) : "";
+  const url = location.pathname + location.search + h;
+  if (location.hash !== h) history.pushState(null, "", url);
+}
+// "expand focus to include <module>" (07-modules.md §7): the longest common dotted prefix of
+// the current focus and the boundary-chip's module — the smallest ring that covers both. No
+// common ancestor -> clear focus entirely (everywhere).
+function lcaModule(a, b) {
+  if (!a || !b) return null;
+  const as = a.split("."), bs = b.split(".");
+  const out = [];
+  for (let i = 0; i < Math.min(as.length, bs.length) && as[i] === bs[i]; i++) out.push(as[i]);
+  return out.length ? out.join(".") : null;
+}
+
+// ===================== type rail =====================
+// interface-grouped + plain rows for ONE bucket of types (a module's own declarations, or the
+// whole flat list in the no-module-chrome case). Identical to the pre-Phase-3 behavior, just
+// keyed by `qualified` throughout instead of bare `name` (the CRITICAL rekey — 07-modules.md
+// §7): two types with the same bare name in different modules must not collide in React `key`s,
+// the active-route check, or the eval source `nav.openTable` builds.
+function typeRailRows(types, allTypes, trend, route, ifaceOpen, setIfaceOpen, nav, filt) {
   const byIface = {};
   const plain = [];
-  for (const t of schema) {
+  for (const t of types) {
     if (t.implements && t.implements.length) {
       for (const i of t.implements) (byIface[i] = byIface[i] || []).push(t);
     } else plain.push(t);
@@ -205,7 +290,7 @@ function TypeRail({ schema, trend, route, ifaceOpen, setIfaceOpen }) {
     if (filt && !iface.toLowerCase().includes(filt) && !byIface[iface].some((t) => t.name.toLowerCase().includes(filt))) continue;
     const total = byIface[iface].reduce((a, t) => a + t.liveCount, 0);
     const open = !!ifaceOpen[iface];
-    byIface[iface].forEach((t) => shown.add(t.name));
+    byIface[iface].forEach((t) => shown.add(t.qualified));
     rows.push(html`
       <li class="iface-group" key=${"iface:" + iface}>
         <div class="type-row iface" onClick=${() => setIfaceOpen(iface, !open)}>
@@ -214,31 +299,90 @@ function TypeRail({ schema, trend, route, ifaceOpen, setIfaceOpen }) {
           <span class="count">${total + " live"}</span>
         </div>
         ${open ? html`<div class="iface-children">
-          ${byIface[iface].map((t) => html`<${TypeRow} key=${t.name} t=${t} trend=${trend[t.name] || ""} active=${route.view === "table" && route.typeName === t.name} onOpen=${() => nav.openTable(t.name)} />`)}
+          ${byIface[iface].map((t) => html`<${TypeRow} key=${t.qualified} t=${t} label=${shortLabel(t, allTypes)} trend=${trend[t.qualified] || ""} active=${route.view === "table" && route.typeName === t.qualified} onOpen=${() => nav.openTable(t.qualified)} />`)}
         </div>` : ""}
       </li>`);
   }
   for (const t of plain) {
-    if (shown.has(t.name)) continue;
+    if (shown.has(t.qualified)) continue;
     if (filt && !t.name.toLowerCase().includes(filt)) continue;
-    rows.push(html`<li key=${t.name}><${TypeRow} t=${t} trend=${trend[t.name] || ""} active=${route.view === "table" && route.typeName === t.name} onOpen=${() => nav.openTable(t.name)} /></li>`);
+    rows.push(html`<li key=${t.qualified}><${TypeRow} t=${t} label=${shortLabel(t, allTypes)} trend=${trend[t.qualified] || ""} active=${route.view === "table" && route.typeName === t.qualified} onOpen=${() => nav.openTable(t.qualified)} /></li>`);
+  }
+  return rows;
+}
+// one module's rail group: collapsible, click-to-focus header showing the modules() aggregate
+// counts, own types (iface-grouped) then nested child-module groups — the modules() TREE shape
+// (07-modules.md §7 item 3). Skipped entirely if it (and its whole subtree) has no types at all.
+function RailModuleGroup({ node, byModule, allTypes, trend, route, ifaceOpen, setIfaceOpen, nav, filt, collapsed, toggle, setFocus, depth }) {
+  const own = byModule.get(node.path) || [];
+  const kids = node.children || [];
+  const hasAny = own.length > 0 || kids.some((c) => moduleHasTypes(c, byModule));
+  if (!hasAny) return null;
+  const open = !collapsed[node.path];
+  const faded = isStdModule(node.path);
+  return html`
+    <li class=${"mod-group" + (faded ? " faded" : "")} key=${"mod:" + node.path}>
+      <div class="type-row mod" onClick=${() => toggle(node.path)}>
+        <span class=${"caret" + (open ? " open" : "")}>▶</span>
+        <span class="mname" title=${"focus " + node.path}
+              onClick=${(e) => { e.stopPropagation(); setFocus(node.path); }}>${node.name}</span>
+        <span class="count">${node.liveCount} live · ${node.typeCount} types</span>
+      </div>
+      ${open ? html`<div class="mod-children" style=${{ marginLeft: (depth || 0) < 3 ? "10px" : "0" }}>
+        <ul class="type-list-inner">${typeRailRows(own, allTypes, trend, route, ifaceOpen, setIfaceOpen, nav, filt)}</ul>
+        ${kids.map((c) => html`<${RailModuleGroup} key=${c.path} node=${c} byModule=${byModule} allTypes=${allTypes}
+            trend=${trend} route=${route} ifaceOpen=${ifaceOpen} setIfaceOpen=${setIfaceOpen} nav=${nav} filt=${filt}
+            collapsed=${collapsed} toggle=${toggle} setFocus=${setFocus} depth=${(depth || 0) + 1} />`)}
+      </div>` : ""}
+    </li>`;
+}
+function moduleHasTypes(node, byModule) {
+  if ((byModule.get(node.path) || []).length) return true;
+  return (node.children || []).some((c) => moduleHasTypes(c, byModule));
+}
+
+function TypeRail({ schema, trend, route, ifaceOpen, setIfaceOpen, modTree, focus, setFocus, everywhere }) {
+  const nav = useContext(NavContext);
+  const [search, setSearch] = useState("");
+  const [collapsed, setCollapsedState] = useState({});
+  const toggle = useCallback((path) => setCollapsedState((s) => ({ ...s, [path]: !s[path] })), []);
+  const filt = search.toLowerCase();
+
+  // focus (and no "everywhere" override) scopes the whole rail to the subtree — no module
+  // headers needed once you're already inside one (07-modules.md §7 item 4).
+  const scoped = focus && !everywhere ? schema.filter((t) => inFocus(moduleOf(t), focus)) : schema;
+  const showModules = !focus && nonStdTop(modTree).length >= 2;
+
+  let body;
+  if (showModules) {
+    const byModule = new Map();
+    for (const t of schema) { const k = moduleOf(t); (byModule.get(k) || byModule.set(k, []).get(k)).push(t); }
+    body = modTree.map((node) => html`<${RailModuleGroup} key=${node.path} node=${node} byModule=${byModule} allTypes=${schema}
+        trend=${trend} route=${route} ifaceOpen=${ifaceOpen} setIfaceOpen=${setIfaceOpen} nav=${nav} filt=${filt}
+        collapsed=${collapsed} toggle=${toggle} setFocus=${setFocus} depth=${0} />`);
+  } else {
+    body = typeRailRows(scoped, schema, trend, route, ifaceOpen, setIfaceOpen, nav, filt);
   }
 
   return html`
     <nav id="rail">
       <div class="rail-head">
         <span>types</span>
+        ${focus ? html`<div class="rail-focus-chip">
+            <span class="rfc-path">${focus}</span>
+            <button class="ghost-btn rfc-clear" onClick=${() => setFocus(null)}>✕ clear focus</button>
+          </div>` : ""}
         <input id="type-search" type="text" placeholder="filter…" spellcheck="false" autocomplete="off"
                value=${search} onInput=${(e) => setSearch(e.target.value)} />
       </div>
-      <ul id="type-list">${rows}</ul>
+      <ul id="type-list">${body}</ul>
     </nav>`;
 }
-function TypeRow({ t, trend, active, onOpen }) {
+function TypeRow({ t, label, trend, active, onOpen }) {
   const arrow = trend === "up" ? "▲" : trend === "down" ? "▼" : "";
   return html`
     <div class=${"type-row" + (active ? " active" : "")} onClick=${onOpen}>
-      <span class="tname">${t.name}</span>
+      <span class="tname">${label || t.name}</span>
       <span class=${"count" + (trend ? " changed" : "")}>${t.liveCount + " live"}</span>
       <span class=${"trend " + trend}>${arrow}</span>
     </div>`;
@@ -285,7 +429,8 @@ function TablePaneSchema({ sc, name, error }) {
 
 function TablePane({ name, schema }) {
   const nav = useContext(NavContext);
-  const sc = schema.find((t) => t.name === name);
+  const sc = schema.find((t) => t.qualified === name);
+  const label = sc ? shortLabel(sc, schema) : name;
   const [filterInput, setFilterInput] = useState("");   // what you type
   const [applied, setApplied] = useState("");           // what the poll queries
   const [data, setData] = useState(null);
@@ -296,10 +441,12 @@ function TablePane({ name, schema }) {
 
   usePoll(async () => {
     const f = applied.replace(/"/g, '\\"');
-    const r = await evalSource(`${name}.instances(filter: "${f}", offset: 0, limit: 200)`);
+    const bare = sc ? sc.name : name;
+    const src = moduleHeader(sc && sc.module) + `${bare}.instances(filter: "${f}", offset: 0, limit: 200)`;
+    const r = await evalSource(src);
     if (r.error) { setError(r.error); setData(null); }
     else { setError(null); setData(r.value); }
-  }, 750, [name, applied]);
+  }, 750, [name, applied, sc && sc.module, sc && sc.name]);
 
   const items = data ? (data.items || []) : [];
   const cols = sc ? sc.fields.map((f) => f.name) : (items[0] ? Object.keys(items[0].fields) : []);
@@ -307,8 +454,8 @@ function TablePane({ name, schema }) {
 
   return html`
     <div>
-      <div class="pane-title">${name}</div>
-      <div class="pane-sub">${sc ? `${sc.fields.length} fields · ${sc.methods.length} methods` : ""}</div>
+      <div class="pane-title">${label}</div>
+      <div class="pane-sub">${sc ? `${sc.fields.length} fields · ${sc.methods.length} methods` : ""}${sc && sc.module ? html` · <span class="mod-tag">${sc.module}</span>` : ""}</div>
       <div class="tbl-tools">
         <input class="filter-box" spellcheck="false" autocomplete="off"
                placeholder=${'filter, e.g.  name == "coder"  or  status contains "run"'}
@@ -341,7 +488,8 @@ function TablePane({ name, schema }) {
 
 // ===================== instance detail =====================
 function DetailPane({ cls, slot, gen, schema, onEditSource }) {
-  const sc = schema.find((t) => t.name === cls);
+  const sc = schema.find((t) => t.qualified === cls);
+  const dispCls = sc ? shortLabel(sc, schema) : cls;
   const [inst, setInst] = useState(null);
   const [error, setError] = useState(null);
   const [actions, setActions] = useState([]);   // this type's declared actions (actions())
@@ -349,16 +497,21 @@ function DetailPane({ cls, slot, gen, schema, onEditSource }) {
   const flashKeys = useRef({});         // field name -> nonce; bump => value cell remounts => flash replays
 
   // Program-declared actions are static (the desugar is fixed at build) — fetch once per type.
+  // actions()'s "target" is a BARE name (unqualified in the wire, unlike schema/types nodes), so
+  // match against sc.name (the resolved type's own bare name), never the qualified `cls`.
   useEffect(() => {
     let live = true;
+    const bareTarget = sc ? sc.name : cls;
     evalSource("actions()").then((r) => {
-      if (live && r.value && r.value.actions) setActions(r.value.actions.filter((a) => a.target === cls));
+      if (live && r.value && r.value.actions) setActions(r.value.actions.filter((a) => a.target === bareTarget));
     });
     return () => { live = false; };
-  }, [cls]);
+  }, [cls, sc && sc.name]);
 
   const fetchDetail = useCallback(async () => {
-    const r = await evalSource(`${cls}.at(${slot}, ${gen})`);
+    const bare = sc ? sc.name : cls;
+    const src = moduleHeader(sc && sc.module) + `${bare}.at(${slot}, ${gen})`;
+    const r = await evalSource(src);
     if (r.error) { setError(r.error); return; }
     setError(null);
     const next = r.value;
@@ -372,7 +525,7 @@ function DetailPane({ cls, slot, gen, schema, onEditSource }) {
     }
     prevFields.current = next.fields;
     setInst(next);
-  }, [cls, slot, gen]);
+  }, [cls, slot, gen, sc && sc.module, sc && sc.name]);
 
   // fresh identity => drop the flash baseline so we don't flash the whole record on arrival
   useEffect(() => { prevFields.current = null; flashKeys.current = {}; setInst(null); setError(null); }, [cls, slot, gen]);
@@ -385,20 +538,21 @@ function DetailPane({ cls, slot, gen, schema, onEditSource }) {
   useEffect(() => detailBus.subscribe(() => { if (!document.hidden) fetchRef.current(); }), []);
 
   if (error) {
-    return html`<div><div class="pane-title">${cls + "#" + slot}</div>
+    return html`<div><div class="pane-title">${dispCls + "#" + slot}</div>
       <div class="invoke-result invoke-error">${error.kind}: ${error.message}</div></div>`;
   }
-  if (!inst) return html`<div><div class="pane-title">${cls + "#" + slot}</div></div>`;
+  if (!inst) return html`<div><div class="pane-title">${dispCls + "#" + slot}</div></div>`;
 
   const typeOf = (n) => sc ? (sc.fields.find((f) => f.name === n) || {}).type : "";
   const implementsLine = sc && sc.implements && sc.implements.length
     ? html` · implements <span class="impl">${sc.implements.join(", ")}</span>` : "";
+  const modLine = sc && sc.module ? html` · <span class="mod-tag">${sc.module}</span>` : "";
 
   return html`
     <div>
-      <div class="pane-title">${inst.ref}</div>
+      <div class="pane-title">${dispCls}<span class="pane-title-sub">#${slot}</span></div>
       <div class="pane-sub">
-        generation ${inst.generation}${implementsLine}
+        generation ${inst.generation}${implementsLine}${modLine}
         ${sc ? html`<button class="ghost-btn edit-src" onClick=${() => onEditSource(cls, sc)}>✎ edit source</button>` : ""}
       </div>
 
@@ -443,16 +597,18 @@ function ActionCard({ cls, slot, gen, a, schema }) {
   const flash = useRef(0);
   const hasParams = a.params.length > 0;
   const allValid = a.params.every((p) => argValid(p, args[p.name], schema));
+  const sc = schema.find((t) => t.qualified === cls);
 
   const doInvoke = useCallback(async () => {
     if (!a.params.every((p) => argValid(p, args[p.name], schema))) return;  // never send bad source
     const argList = a.params.map((p) => literalFor(args[p.name] || "", p.type)).join(", ");
-    const src = `${cls}.at(${slot}, ${gen}).${a.invoke}(${argList})`;
+    const bare = sc ? sc.name : cls;
+    const src = moduleHeader(sc && sc.module) + `${bare}.at(${slot}, ${gen}).${a.invoke}(${argList})`;
     const r = await evalSource(src);
     flash.current += 1;
     setResult({ ...r, flash: flash.current });
     setTimeout(bumpDetail, 60); // read the mutation back immediately
-  }, [args, cls, slot, gen, a, schema]);
+  }, [args, cls, slot, gen, a, schema, sc && sc.module, sc && sc.name]);
 
   return html`
     <div class=${"action-card" + (open ? " open" : "")}>
@@ -480,16 +636,18 @@ function MethodCard({ cls, slot, gen, m, schema }) {
   const [result, setResult] = useState(null);           // {error|value, flash}
   const flash = useRef(0);
   const allValid = m.params.every((p) => argValid(p, args[p.name], schema));
+  const sc = schema.find((t) => t.qualified === cls);
 
   const doInvoke = useCallback(async () => {
     if (!m.params.every((p) => argValid(p, args[p.name], schema))) return;  // never send bad source
     const argList = m.params.map((p) => literalFor(args[p.name] || "", p.type)).join(", ");
-    const src = `${cls}.at(${slot}, ${gen}).${m.name}(${argList})`;
+    const bare = sc ? sc.name : cls;
+    const src = moduleHeader(sc && sc.module) + `${bare}.at(${slot}, ${gen}).${m.name}(${argList})`;
     const r = await evalSource(src);
     flash.current += 1;
     setResult({ ...r, flash: flash.current });
     setTimeout(bumpDetail, 60); // read the mutation back immediately
-  }, [args, cls, slot, gen, m, schema]);
+  }, [args, cls, slot, gen, m, schema, sc && sc.module, sc && sc.name]);
 
   const params = m.params.map((p) => `${p.name}: ${p.type}`).join(", ");
 
@@ -558,12 +716,16 @@ function literalFor(v, type) {
   if (t === "Int") { const n = parseInt(v, 10); return Number.isFinite(n) ? String(n) : "0"; }
   if (t === "Float") { const f = parseFloat(v); return Number.isFinite(f) ? String(f) : "0.0"; }
   if (v === "") return "0";
-  // an instance reference typed as "Agent#3" -> Agent.at(3, 0)
-  const rm = /^([A-Za-z_]\w*)#(\d+)$/.exec(v);
-  if (rm) return `${rm[1]}.at(${rm[2]}, 0)`;
-  // enum variant already qualified ("AgentStatus.Running") passes through; the ArgInput widgets
-  // below already emit qualified enum variants / Type#slot ids / quoted strings, so literalFor is
-  // just the FINAL mapper — a bare word only survives for the free-text fallback types.
+  // an instance reference typed as "Agent#3" (ArgInput may hand in a QUALIFIED "a.b.Agent#3" —
+  // strip to the bare last segment: .at() is a reflect-static form that only accepts a bare
+  // receiver, see the moduleHeader() comment; this fragment is spliced into a larger expression
+  // that carries ITS OWN module header, set from the instance being invoked on).
+  const rm = /^([A-Za-z_][\w.]*)#(\d+)$/.exec(v);
+  if (rm) return `${rm[1].split(".").pop()}.at(${rm[2]}, 0)`;
+  // enum variant emitted bare ("AgentStatus.Running") for the same reflect-static-form reason;
+  // the ArgInput widgets below emit bare enum variants / (possibly qualified) Type#slot ids /
+  // quoted strings, so literalFor is just the FINAL mapper — a bare word only survives for the
+  // free-text fallback types.
   return v;
 }
 
@@ -584,6 +746,10 @@ function classifyParam(type, schema) {
   if (t === "Int") return { kind: "int" };
   if (t === "Float") return { kind: "float" };
   if (t === "String") return { kind: "string" };
+  // param/field/ctor `type` strings are BARE display types (ast-ty-str on the wire — no
+  // qualified twin, unlike schema/types nodes), so this lookup stays bare-name. Flagged
+  // limitation: two visible types sharing this bare name is ambiguous here (rare in practice —
+  // see the final Phase 3 report).
   const node = (schema || []).find((n) => n.name === t);
   if (node) {
     if (node.kind === "enum") return { kind: "enum", node };
@@ -617,6 +783,9 @@ function ArgInput({ param, value, onChange, schema, active, onEnter, depth }) {
   }
   if (info.kind === "enum") {
     const variants = info.node.variants || [];
+    // enum variant emitted BARE (embedded fragment, relies on the enclosing eval's module
+    // header — see moduleHeader()'s comment; a qualified receiver breaks this reflect-like form
+    // the same way it breaks .at()/.instances()).
     return html`<div class="arg-row">${label}
       <select class="arg-select" value=${value || ""} onChange=${(e) => onChange(e.target.value)}>
         <option value="">— select —</option>
@@ -624,9 +793,16 @@ function ArgInput({ param, value, onChange, schema, active, onEnter, depth }) {
       </select></div>`;
   }
   if (info.kind === "entity" || info.kind === "interface") {
+    // resolve to QUALIFIED type identifiers (schema is available here) so the eval sources
+    // EntityArgInput builds (.instances()/.at()/construction) are collision-safe even when an
+    // interface's implementors — or the plain entity itself — share a bare name across modules.
+    const qualFor = (bareName) => {
+      const n = (schema || []).find((x) => x.name === bareName);
+      return n ? n.qualified : bareName;
+    };
     const types = info.kind === "interface"
-      ? ((info.node.implementors && info.node.implementors.length) ? info.node.implementors : [info.node.name])
-      : [info.node.name];
+      ? ((info.node.implementors && info.node.implementors.length) ? info.node.implementors.map(qualFor) : [info.node.qualified || info.node.name])
+      : [info.node.qualified || info.node.name];
     return html`<${EntityArgInput} label=${label} types=${types}
       value=${value} onChange=${onChange} active=${active} onEnter=${onEnter}
       schema=${schema} depth=${depth || 0} />`;
@@ -662,15 +838,25 @@ function EntityArgInput({ label, types, value, onChange, active, onEnter, schema
   const [createType, setCreateType] = useState(null); // null = pick mode; else the Type being built
   const [ctorArgs, setCtorArgs] = useState({});       // ctor param name -> string
   const key = types.join(",");
+  // `types` are QUALIFIED identifiers now (ArgInput resolves them); label with the short
+  // (disambiguated-if-needed) display name instead of the full qualified string.
+  const shortFor = (tn) => { const n = (schema || []).find((x) => x.qualified === tn); return n ? shortLabel(n, schema) : tn; };
   const fetchNow = useCallback(async () => {
     const all = [];
     for (const tn of types) {
-      const r = await evalSource(`${tn}.instances(filter: "", offset: 0, limit: 50)`);
+      // `tn` is qualified for CLIENT identity, but .instances() needs a bare receiver + a
+      // `module` eval header (see the moduleHeader() comment — reflect-static forms don't
+      // understand a qualified receiver, only ordinary value/construction positions do).
+      const node = (schema || []).find((x) => x.qualified === tn);
+      const bare = node ? node.name : tn;
+      const src = moduleHeader(node && node.module) + `${bare}.instances(filter: "", offset: 0, limit: 50)`;
+      const r = await evalSource(src);
       const items = (r && r.value && r.value.items) || [];
+      const disp = shortFor(tn);
       for (const it of items) {
         const m = /#(\d+)$/.exec(it.ref); const slot = m ? +m[1] : 0;
         const s = instSummary(it);
-        all.push({ value: `${tn}#${slot}`, label: `${tn}#${slot}` + (s ? ` · ${s}` : "") });
+        all.push({ value: `${tn}#${slot}`, label: `${disp}#${slot}` + (s ? ` · ${s}` : "") });
       }
     }
     setOpts(all);
@@ -683,7 +869,7 @@ function EntityArgInput({ label, types, value, onChange, active, onEnter, schema
   }, [active, createType, fetchNow]);
 
   // ctor param list for the type currently being constructed (from schema()'s `ctor`).
-  const ctorNode = createType ? (schema || []).find((n) => n.name === createType) : null;
+  const ctorNode = createType ? (schema || []).find((n) => n.qualified === createType) : null;
   const ctorParams = (ctorNode && ctorNode.ctor) || [];
   // Continuously push the construction expression (or "" while incomplete) up to the parent.
   useEffect(() => {
@@ -705,14 +891,14 @@ function EntityArgInput({ label, types, value, onChange, active, onEnter, schema
     onChange(val);
   };
   const createOpts = canCreate
-    ? types.map((tn) => html`<option key=${"__c:" + tn} value=${"__create__:" + tn}>+ create new ${tn}</option>`)
+    ? types.map((tn) => html`<option key=${"__c:" + tn} value=${"__create__:" + tn}>+ create new ${shortFor(tn)}</option>`)
     : "";
 
   // ---- create mode: inline constructor form ----
   if (createType) {
     return html`<div class="arg-row create-form">${label}
       <div class="create-head">
-        <span class="create-title">new ${createType}</span>
+        <span class="create-title">new ${shortFor(createType)}</span>
         <button type="button" class="create-back" onClick=${() => { setCreateType(null); onChange(""); }}>use existing</button>
       </div>
       ${ctorParams.length === 0 ? html`<span class="arg-note">no constructor arguments</span>` : ""}
@@ -755,28 +941,50 @@ function Breadcrumbs({ crumbs }) {
 }
 
 // ===================== repl dock =====================
-function ReplDock({ open, setOpen, route }) {
+// flatten a modules() tree into a depth-indented option list for the REPL module picker.
+function flattenModuleOptions(tree, depth) {
+  depth = depth || 0;
+  const out = [];
+  for (const n of (tree || [])) {
+    out.push({ path: n.path, name: n.name, depth });
+    out.push(...flattenModuleOptions(n.children, depth + 1));
+  }
+  return out;
+}
+function ReplDock({ open, setOpen, route, modTree, schema }) {
   const [entries, setEntries] = useState([]);       // {expr, out?, error?}
   const [input, setInput] = useState("");
+  // module picker (07-modules.md §7 item 5): "" = default (entry module, i.e. no header).
+  // Selecting one prepends a `module <path>` header to every eval this dock sends.
+  const [replModule, setReplModule] = useState("");
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
+  const modOptions = useMemo(() => flattenModuleOptions(modTree), [modTree]);
 
   useEffect(() => { if (open) inputRef.current && inputRef.current.focus(); }, [open]);
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [entries]);
 
   const submit = useCallback((src) => {
     let source = src;
+    let header = replModule ? moduleHeader(replModule) : "";
     if (route.view === "detail" && route.ref) {
       const { class: c, slot, gen } = route.ref;
-      source = src.replace(/\bself\b/g, `${c}.at(${slot}, ${gen})`);
+      // `self` binds to a BARE-name reflect-static .at() (see moduleHeader()'s comment) — the
+      // instance's OWN module always wins the header so `self` itself is guaranteed to resolve,
+      // even if the module picker is set to something else.
+      const sc = (schema || []).find((t) => t.qualified === c);
+      const bare = sc ? sc.name : c;
+      source = src.replace(/\bself\b/g, `${bare}.at(${slot}, ${gen})`);
+      header = moduleHeader(sc && sc.module);
     }
+    source = header + source;
     const idx = entries.length;
     setEntries((es) => [...es, { expr: src, pending: true }]);
     evalSource(source).then((r) => {
       setEntries((es) => es.map((e, i) => i === idx ? { expr: src, error: r.error, value: r.value } : e));
       if (route.view === "detail") setTimeout(bumpDetail, 60);
     });
-  }, [entries.length, route]);
+  }, [entries.length, route, replModule, schema]);
 
   const ctx = route.view === "detail" && route.ref ? `self = ${route.ref.class}#${route.ref.slot}` : "";
 
@@ -785,6 +993,11 @@ function ReplDock({ open, setOpen, route }) {
       <div class="repl-head">
         <span class="repl-title">repl</span>
         <span class="repl-context">${ctx}</span>
+        ${modOptions.length ? html`<select class="repl-mod-select" title="module context — prepends 'module <path>' to every eval"
+              value=${replModule} onChange=${(e) => setReplModule(e.target.value)}>
+            <option value="">module: (entry)</option>
+            ${modOptions.map((m) => html`<option key=${m.path} value=${m.path}>${"·".repeat(m.depth)} ${m.path}</option>`)}
+          </select>` : ""}
         <span class="repl-hint">bound to <code>self</code> · press <kbd>\`</kbd> to toggle</span>
       </div>
       <div id="repl-scroll" ref=${scrollRef}>
@@ -812,9 +1025,16 @@ function ReplDock({ open, setOpen, route }) {
 
 // ===================== code panel (live redefinition) =====================
 function cleanType(t) { return String(t).replace(/^\w+:/, ""); }
+// A redefinition eval's class name is always BARE (source syntax, not a qualified reference) —
+// module CONTEXT rides in an optional `module a.b.c` source header instead (07-modules.md §6),
+// which addresses the redefinition at the right qualified name even under a bare-name collision
+// across modules. `cls` may be either bare or qualified (callers vary); `sc.name`/`sc.module` are
+// always the authoritative bare name / owning module, so the skeleton is built from those.
 function classSkeleton(cls, sc) {
+  const bare = (sc && sc.name) || cls;
+  const header = sc && sc.module ? `module ${sc.module}\n\n` : "";
   const impl = sc.implements && sc.implements.length ? " implements " + sc.implements.join(", ") : "";
-  let s = `class ${cls}${impl} {\n`;
+  let s = `${header}class ${bare}${impl} {\n`;
   for (const f of sc.fields) s += `  ${f.name}: ${cleanType(f.type)}\n`;
   if (sc.methods.length) s += "\n";
   for (const m of sc.methods) {
@@ -845,7 +1065,7 @@ function CodePanel({ session, text, setText, onClose }) {
     }
   }, [text]);
 
-  const cls = session ? session.cls : "";
+  const cls = session ? ((session.sc && session.sc.name) || session.cls) : "";
   const resClass = "code-result"
     + (res && res.ok ? " ok flash" : "") + (res && res.error ? " err" : "");
   const resText = !res ? "" : res.pending ? "defining…"
@@ -893,7 +1113,7 @@ function ConnIndicator() {
   const label = s === "down" ? "reconnecting…" : s === "slow" ? "live (slow)" : "● live";
   return html`<div class=${cls}><span class="dot"></span><span class="conn-label">${label}</span></div>`;
 }
-function TopBar({ onGlobalSearch, onToggleTranscript, mode, setMode, onBack, programName }) {
+function TopBar({ onGlobalSearch, onToggleTranscript, mode, setMode, onBack, programName, focus, everywhere, setEverywhere }) {
   const [q, setQ] = useState("");
   return html`
     <header id="topbar">
@@ -904,9 +1124,12 @@ function TopBar({ onGlobalSearch, onToggleTranscript, mode, setMode, onBack, pro
         <button class=${"vt-btn" + (mode === "browse" ? " active" : "")} onClick=${() => setMode("browse")}>List</button>
       </div>
       <input id="global-search" type="text" spellcheck="false" autocomplete="off"
-             placeholder="jump to Agent#7 or search field values…"
+             placeholder=${focus && !everywhere ? `search in ${focus}…` : "jump to Agent#7 or search field values…"}
              value=${q} onInput=${(e) => setQ(e.target.value)}
              onKeyDown=${(e) => { if (e.key === "Enter") onGlobalSearch(q); }} />
+      ${focus ? html`<label class="everywhere-toggle" title="search/filter the whole program, not just the focused module">
+          <input type="checkbox" checked=${everywhere} onChange=${(e) => setEverywhere(e.target.checked)} /> everywhere
+        </label>` : ""}
       <div class="topbar-right">
         <button class="ghost-btn" title="eval transcript" onClick=${onToggleTranscript}>transcript</button>
         <${ConnIndicator} />
@@ -948,36 +1171,60 @@ const displayName = (inst) =>
   sVal(inst, "name") || sVal(inst, "title") ||
   (sVal(inst, "content") ? truncate(sVal(inst, "content"), 40) : null) || inst.ref;
 const refParts = (id) => { const m = /^(.+)#(\d+)$/.exec(id); return m ? { cls: m[1], slot: +m[2] } : null; };
+// open a graph()/instances() record's detail: prefer its wire "qualified" (Phase 3 addition,
+// collision-safe) and fall back to the bare id-parsed class name only if absent (e.g. an
+// un-rebuilt server) — the CRITICAL rekey applied at every drill-in call site.
+function openInst(inst, onOpen) {
+  if (!inst) return;
+  const p = refParts(inst.ref);
+  if (!p) return;
+  onOpen(inst.qualified || p.cls, p.slot, inst.generation);
+}
 
 // The whole derivation: ownership (nesting) vs sharing (identity chips) vs infrastructure,
 // from the live instance list + the static schema. Pure + deterministic.
-function computeNested(instances, schema) {
+// `moduleAware` (true only while a module FOCUS is scoping the view — see NestedView): ownership
+// nesting additionally requires the owner and the owned instance to share a module, so the
+// focused module's own content stands alone as roots even when normally nested inside a
+// cross-module parent. UNSET by default: ordinary ownership nesting crosses module lines freely
+// (an Agent in module `assistant` naturally nests a Conversation from `agent.core`) — genuine
+// sharing (>=2 owners) already gets the identity-chip treatment module-blind, which is the
+// entirety of "cross-module references reuse the existing shared-entity treatment" (07-modules.md
+// §7 item 2) — nothing module-specific needed there.
+function computeNested(instances, schema, moduleAware) {
   const byId = new Map(instances.map((i) => [i.ref, i]));
-  const typeOf = (id) => (byId.get(id) || {}).type;
+  // graph() instances carry "qualified" (Phase 3 wire addition); fall back to bare "type" so an
+  // un-rebuilt server still renders (degraded: bare-name collisions are then possible, as before).
+  const qOf = (inst) => (inst && (inst.qualified || inst.type)) || null;
+  const typeOf = (id) => qOf(byId.get(id));
   const nodes = schema || [];
-  const byName = new Map(nodes.map((n) => [n.name, n]));
-  const entityTypes = nodes.filter((n) => n.kind === "class" || n.kind === "object").map((n) => n.name);
+  // CRITICAL rekey (07-modules.md §7): keyed by `qualified`, never bare `name` — two modules can
+  // declare the same bare class name (tests/run/modules_coexist.scry) and must not collide here.
+  const byName = new Map(nodes.map((n) => [n.qualified, n]));
+  const entityTypes = nodes.filter((n) => n.kind === "class" || n.kind === "object").map((n) => n.qualified);
   const liveCount = (t) => (byName.get(t) || {}).liveCount || 0;
+  const modOf = (t) => moduleOf(byName.get(t));
 
-  // ---- static type-reference graph, interfaces expanded to their implementors ----
+  // ---- static type-reference graph (qualified), interfaces expanded to their implementors ----
   const implementorsOf = new Map();
-  for (const n of nodes) if (n.kind === "interface") implementorsOf.set(n.name, n.implementors || []);
+  for (const n of nodes) if (n.kind === "interface") {
+    const impl = (n.implementors || []).map((bareNm) => { const x = nodes.find((y) => y.name === bareNm); return x ? x.qualified : bareNm; });
+    implementorsOf.set(n.qualified, impl);
+  }
   const expand = (t) => implementorsOf.has(t) ? implementorsOf.get(t) : [t];
-  const refOut = new Map();                       // entity type -> Set(entity type) it can point at
+  const refOut = new Map();                       // qualified entity type -> Set(qualified entity type)
   for (const n of nodes) {
     if (n.kind !== "class" && n.kind !== "object") continue;
     const outs = new Set();
-    for (const f of n.fields || []) for (const rt of f.refTypes || []) for (const e of expand(rt)) outs.add(e);
-    refOut.set(n.name, outs);
+    for (const f of n.fields || []) for (const rt of (f.refQualified && f.refQualified.length ? f.refQualified : f.refTypes) || []) for (const e of expand(rt)) outs.add(e);
+    refOut.set(n.qualified, outs);
   }
   const referenced = new Set();
   for (const [, outs] of refOut) for (const t of outs) referenced.add(t);
   // worker/scaffolding types (those implementing a BUILTIN interface, i.e. Runnable thread
   // bodies) are execution machinery, not domain roots — they hold a domain object to run it,
-  // but the domain owner (Orchestrator) is the real container. Excluding them as root
-  // candidates keeps them (and their held instances' second owner) out of the domain spine, so
-  // e.g. a sub-agent held by BOTH the Orchestrator and its worker still nests under the
-  // Orchestrator instead of counting as "shared". They recede to the infrastructure strip.
+  // but the domain owner (Orchestrator) is the real container. `implements` stays bare on the
+  // wire (a class's own property, not a cross-module lookup key), so this stays bare-matched.
   const builtinIfaces = new Set(nodes.filter((n) => n.kind === "interface" && n.builtin).map((n) => n.name));
   const isWorker = (t) => ((byName.get(t) || {}).implements || []).some((i) => builtinIfaces.has(i));
 
@@ -1004,7 +1251,7 @@ function computeNested(instances, schema) {
   const isDomainInst = (id) => byId.has(id) && domainTypes.has(typeOf(id));
 
   // ---- instance-level ownership (only among domain instances) ----
-  const owners = new Map();                        // targetId -> Set(ownerId)
+  const owners = new Map();                        // targetId -> Set(ownerId), ALL modules
   for (const inst of instances) {
     if (!isDomainInst(inst.ref)) continue;
     for (const r of inst.refs || []) for (const tid of r.ids) {
@@ -1012,8 +1259,16 @@ function computeNested(instances, schema) {
       (owners.get(tid) || owners.set(tid, new Set()).get(tid)).add(inst.ref);
     }
   }
-  const ownerCount = (id) => (owners.get(id) || new Set()).size;
-  const sharedIds = new Set();                     // >= 2 distinct domain owners
+  // module-aware ownership scopes "owner" to same-module owners ONLY — a cross-module owner
+  // never counts toward nesting/sharing (it gets the boundary-chip treatment in buildNode below).
+  const ownerCount = (id) => {
+    const all = owners.get(id) || new Set();
+    if (!moduleAware) return all.size;
+    const om = modOf(typeOf(id));
+    let n = 0; for (const oid of all) if (modOf(typeOf(oid)) === om) n++;
+    return n;
+  };
+  const sharedIds = new Set();                     // >= 2 distinct SAME-MODULE domain owners
   for (const inst of instances) if (isDomainInst(inst.ref) && ownerCount(inst.ref) >= 2) sharedIds.add(inst.ref);
 
   // ---- nesting tree from the domain roots (inCount 0) ----
@@ -1022,21 +1277,23 @@ function computeNested(instances, schema) {
     const inst = byId.get(id);
     placed.add(id);
     const children = [], chipIds = [];
+    const myMod = modOf(typeOf(id));
     for (const r of inst.refs || []) for (const tid of r.ids) {
       if (!byId.has(tid) || tid === id) continue;
-      if (sharedIds.has(tid)) { chipIds.push(tid); continue; }
+      const crossModule = moduleAware && modOf(typeOf(tid)) !== myMod;
+      if (crossModule || sharedIds.has(tid)) { if (!chipIds.includes(tid)) chipIds.push(tid); continue; }
       if (!isDomainInst(tid)) continue;            // reference into infra -> ignore here
       if (ownerCount(tid) === 1 && !placed.has(tid)) children.push(buildNode(tid));
     }
     let subtree = 1;
     for (const c of children) subtree += c.subtree;
-    return { id, inst, children, chipIds, subtree };
+    return { id, inst, children, chipIds, subtree, module: myMod };
   };
   const rootIds = instances.filter((i) => isDomainInst(i.ref) && ownerCount(i.ref) === 0).map((i) => i.ref);
   // singleton objects (a leaf like Session): unreferenced, no entity fields, exactly 1 live.
   const singletonTypes = new Set(entityTypes.filter((t) =>
     !domainTypes.has(t) && liveCount(t) === 1 && (refOut.get(t) || new Set()).size === 0 && !referenced.has(t)));
-  const singletons = instances.filter((i) => singletonTypes.has(i.type));
+  const singletons = instances.filter((i) => singletonTypes.has(qOf(i)));
   // container roots become the stage; leaf roots that are singleton-objects go to the header.
   const roots = rootIds.filter((id) => !singletonTypes.has(typeOf(id))).map(buildNode)
     .sort((a, b) => b.subtree - a.subtree);
@@ -1047,17 +1304,17 @@ function computeNested(instances, schema) {
   // ---- infrastructure types: entity types with no presence in the domain (nor singletons) ----
   const infraTypes = entityTypes
     .filter((t) => !domainTypes.has(t) && !singletonTypes.has(t) && liveCount(t) > 0)
-    .map((t) => ({ name: t, count: liveCount(t) }))
+    .map((t) => ({ qualified: t, name: (byName.get(t) || {}).name || t, module: modOf(t), count: liveCount(t) }))
     .sort((a, b) => b.count - a.count);
-  const infraSet = new Set(infraTypes.map((x) => x.name));
+  const infraSet = new Set(infraTypes.map((x) => x.qualified));
 
   // ---- census: every entity type with a live instance, mass by count ----
   const census = entityTypes
     .filter((t) => liveCount(t) > 0)
-    .map((t) => ({ name: t, count: liveCount(t), util: infraSet.has(t) }))
+    .map((t) => ({ qualified: t, name: (byName.get(t) || {}).name || t, module: modOf(t), count: liveCount(t), util: infraSet.has(t) }))
     .sort((a, b) => b.count - a.count);
 
-  return { byId, roots, singletons, sharedIds, idColor, infraTypes, census, ownerCount };
+  return { byId, roots, singletons, sharedIds, idColor, infraTypes, census, ownerCount, byName, moduleAware };
 }
 
 // ===================== type-level containment skeleton (Phase V3) =====================
@@ -1069,15 +1326,20 @@ function computeNested(instances, schema) {
 // infrastructure types faded in the strip, `object`-kind singletons as obj chips. It mirrors
 // computeNested's exact static reachability/ownership rules, just at the TYPE level (owner =
 // a domain type whose field references the target type, interfaces expanded to implementors).
-function computeTypeSkeleton(schema) {
+function computeTypeSkeleton(schema, moduleAware) {
   const nodes = schema || [];
-  const byName = new Map(nodes.map((n) => [n.name, n]));
+  // CRITICAL rekey (07-modules.md §7): qualified, not bare name — see computeNested.
+  const byName = new Map(nodes.map((n) => [n.qualified, n]));
   const isEntity = (t) => { const n = byName.get(t); return !!n && (n.kind === "class" || n.kind === "object"); };
-  const entityTypes = nodes.filter((n) => n.kind === "class" || n.kind === "object").map((n) => n.name);
+  const entityTypes = nodes.filter((n) => n.kind === "class" || n.kind === "object").map((n) => n.qualified);
+  const modOf = (t) => moduleOf(byName.get(t));
 
   // interface -> implementors, so a `Tool` field expands to ShellTool/SearchTool/…
   const implementorsOf = new Map();
-  for (const n of nodes) if (n.kind === "interface") implementorsOf.set(n.name, n.implementors || []);
+  for (const n of nodes) if (n.kind === "interface") {
+    const impl = (n.implementors || []).map((bareNm) => { const x = nodes.find((y) => y.name === bareNm); return x ? x.qualified : bareNm; });
+    implementorsOf.set(n.qualified, impl);
+  }
   const expand = (t) => implementorsOf.has(t) ? implementorsOf.get(t) : [t];
 
   // type -> Set(entity type) it references through a field (interfaces expanded)
@@ -1085,8 +1347,8 @@ function computeTypeSkeleton(schema) {
   for (const n of nodes) {
     if (n.kind !== "class" && n.kind !== "object") continue;
     const outs = new Set();
-    for (const f of n.fields || []) for (const rt of f.refTypes || []) for (const e of expand(rt)) if (isEntity(e)) outs.add(e);
-    refOut.set(n.name, outs);
+    for (const f of n.fields || []) for (const rt of (f.refQualified && f.refQualified.length ? f.refQualified : f.refTypes) || []) for (const e of expand(rt)) if (isEntity(e)) outs.add(e);
+    refOut.set(n.qualified, outs);
   }
   const referenced = new Set();
   for (const [, outs] of refOut) for (const t of outs) referenced.add(t);
@@ -1100,7 +1362,7 @@ function computeTypeSkeleton(schema) {
     return seen;
   };
   // primary domain root TYPE = unreferenced non-worker container with the largest reachable set;
-  // ties broken by name (no live counts to break them, unlike computeNested). Deterministic.
+  // ties broken by qualified name (no live counts to break them, unlike computeNested). Deterministic.
   const rootCands = entityTypes.filter((t) => (refOut.get(t) || new Set()).size > 0 && !referenced.has(t) && !isWorker(t));
   let domainTypes = new Set(entityTypes), rootTypes = [];
   if (rootCands.length) {
@@ -1108,13 +1370,20 @@ function computeTypeSkeleton(schema) {
     domainTypes = scored[0].s; rootTypes = [scored[0].c];
   }
 
-  // type-level ownership: owners(U) = domain types T (≠U) whose refOut contains U
-  const ownerTypes = new Map();
+  // type-level ownership: owners(U) = domain types T (≠U) whose refOut contains U, same-module
+  // only when moduleAware (a cross-module type reference gets the boundary-chip treatment).
+  const ownerTypesAll = new Map();
   for (const t of domainTypes) for (const u of (refOut.get(t) || [])) {
     if (!domainTypes.has(u) || u === t) continue;
-    (ownerTypes.get(u) || ownerTypes.set(u, new Set()).get(u)).add(t);
+    (ownerTypesAll.get(u) || ownerTypesAll.set(u, new Set()).get(u)).add(t);
   }
-  const ownerCount = (t) => (ownerTypes.get(t) || new Set()).size;
+  const ownerCount = (t) => {
+    const all = ownerTypesAll.get(t) || new Set();
+    if (!moduleAware) return all.size;
+    const om = modOf(t);
+    let n = 0; for (const o of all) if (modOf(o) === om) n++;
+    return n;
+  };
   const sharedTypes = new Set([...domainTypes].filter((t) => ownerCount(t) >= 2));
 
   // message-like TYPE: has a `role` scalar AND a body scalar (content/text/body) — same shape
@@ -1122,20 +1391,22 @@ function computeTypeSkeleton(schema) {
   const isMsgType = (t) => { const fs = new Set(((byName.get(t) || {}).fields || []).map((f) => f.name));
     return fs.has("role") && (fs.has("content") || fs.has("text") || fs.has("body")); };
 
-  // nesting tree from the root type: a type with exactly ONE domain owner nests inside it;
-  // shared types (≥2 owners) become chips; refs into infra are ignored here.
+  // nesting tree from the root type: a type with exactly ONE (same-module) owner nests inside
+  // it; shared / cross-module types become chips; refs into infra are ignored here.
   const placed = new Set();
   const buildNode = (name) => {
     placed.add(name);
     const children = [], chipTypes = [];
+    const myMod = modOf(name);
     for (const u of [...(refOut.get(name) || [])].sort()) {
       if (u === name) continue;
-      if (sharedTypes.has(u)) { if (!chipTypes.includes(u)) chipTypes.push(u); continue; }
+      const crossModule = moduleAware && modOf(u) !== myMod;
+      if (crossModule || sharedTypes.has(u)) { if (!chipTypes.includes(u)) chipTypes.push(u); continue; }
       if (!domainTypes.has(u)) continue;
       if (ownerCount(u) === 1 && !placed.has(u)) children.push(buildNode(u));
     }
     let subtree = 1; for (const c of children) subtree += c.subtree;
-    return { name, node: byName.get(name), children, chipTypes, subtree };
+    return { name, node: byName.get(name), children, chipTypes, subtree, module: myMod };
   };
   let roots = rootTypes.filter((t) => !placed.has(t)).map(buildNode).sort((a, b) => b.subtree - a.subtree);
   // DEFAULT when the program has no ownership hierarchy (flat types with no entity-to-entity
@@ -1146,7 +1417,7 @@ function computeTypeSkeleton(schema) {
     roots.sort((a, b) => b.subtree - a.subtree || a.name.localeCompare(b.name));
   }
 
-  // identity color per shared TYPE (stable: sorted name -> slot), same palette as the live view.
+  // identity color per shared TYPE (stable: sorted qualified name -> slot), same palette as live.
   const idColor = new Map([...sharedTypes].sort().map((t, i) => [t, i % N_ID]));
 
   // singleton objects: `object`-kind entity types (language-level singletons like std `Json`).
@@ -1158,19 +1429,20 @@ function computeTypeSkeleton(schema) {
   // infrastructure: entity types outside the domain (and not singleton objects) — faded strip.
   const infraTypes = entityTypes
     .filter((t) => !domainTypes.has(t) && !singletonSet.has(t))
-    .map((t) => ({ name: t }))
+    .map((t) => ({ qualified: t, name: (byName.get(t) || {}).name || t, module: modOf(t) }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
   // census: every entity type, domain first (root order then name), then singletons, then infra.
   // No live counts, so mass is unknown — the ribbon shows types with no bar.
   const domainOrder = [...domainTypes].sort((a, b) => (rootTypes.includes(b) ? 1 : 0) - (rootTypes.includes(a) ? 1 : 0) || a.localeCompare(b));
+  const dispOf = (t) => (byName.get(t) || {}).name || t;
   const census = [
-    ...domainOrder.map((t) => ({ name: t, util: false })),
-    ...singletonTypes.map((t) => ({ name: t, util: true })),
-    ...infraTypes.map((x) => ({ name: x.name, util: true })),
+    ...domainOrder.map((t) => ({ qualified: t, name: dispOf(t), module: modOf(t), util: false })),
+    ...singletonTypes.map((t) => ({ qualified: t, name: dispOf(t), module: modOf(t), util: true })),
+    ...infraTypes.map((x) => ({ qualified: x.qualified, name: x.name, module: x.module, util: true })),
   ];
 
-  return { byName, roots, singletonTypes, sharedTypes, idColor, infraTypes, census, ownerCount, domainTypes, refOut, expand, isMsgType };
+  return { byName, roots, singletonTypes, sharedTypes, idColor, infraTypes, census, ownerCount, domainTypes, refOut, expand, isMsgType, moduleAware };
 }
 // follow a dotted field-path over the TYPE graph -> the distinct element TYPES at the end.
 // `all` = the target type itself (every instance of it, at runtime). Interfaces are expanded.
@@ -1182,7 +1454,7 @@ function followTypePath(startType, pathStr, model) {
     for (const t of cur) {
       const n = model.byName.get(t); if (!n) continue;
       const f = (n.fields || []).find((x) => x.name === hop);
-      if (f) for (const rt of f.refTypes || []) for (const e of model.expand(rt)) next.push(e);
+      if (f) for (const rt of (f.refQualified && f.refQualified.length ? f.refQualified : f.refTypes) || []) for (const e of model.expand(rt)) next.push(e);
     }
     cur = next;
   }
@@ -1192,18 +1464,25 @@ const scalarFieldNames = (model, t) =>
   ((model.byName.get(t) || {}).fields || []).filter((f) => !(f.refTypes && f.refTypes.length)).map((f) => f.name);
 
 // an identity chip for a shared instance (colored, hover-highlights all its appearances)
-function IdChip({ id, model, small, onEnter, onLeave, onClick }) {
+function IdChip({ id, model, small, onEnter, onLeave, onClick, focus, onExpandFocus }) {
   const slot = model.idColor.get(id) ?? 0;
   const inst = model.byId.get(id);
   const label = inst ? (sVal(inst, "name") || sVal(inst, "title") || inst.type) : id;
   const held = model.ownerCount(id);
+  // boundary chip: this reference crosses OUT of the current focus (07-modules.md §7 item 2's
+  // "expand focus to include <module>" affordance).
+  const outside = focus && inst && inst.module && !inFocus(inst.module, focus);
   return html`
-    <button class=${"chip" + (small ? " sm" : "")} data-identity=${id} data-slot=${slot}
-            style=${{ "--c": `var(--id-${slot})` }}
-            title=${`${id} · shared instance · held by ${held}`}
-            onMouseEnter=${() => onEnter(id)} onMouseLeave=${onLeave}
-            onClick=${(e) => { e.stopPropagation(); onClick(id); }}>
-      <span class="knob"></span>${label}</button>`;
+    <span class="chip-wrap">
+      <button class=${"chip" + (small ? " sm" : "") + (outside ? " boundary" : "")} data-identity=${id} data-slot=${slot}
+              style=${{ "--c": `var(--id-${slot})` }}
+              title=${`${id} · shared instance · held by ${held}` + (outside ? ` · outside focus (${inst.module})` : "")}
+              onMouseEnter=${() => onEnter(id)} onMouseLeave=${onLeave}
+              onClick=${(e) => { e.stopPropagation(); onClick(id); }}>
+        <span class="knob"></span>${label}</button>
+      ${outside && onExpandFocus ? html`<button class="mod-expand" title=${"expand focus to include " + inst.module}
+          onClick=${(e) => { e.stopPropagation(); onExpandFocus(inst.module); }}>⤢</button>` : ""}
+    </span>`;
 }
 
 // ---------- program-declared views (V2): follow a dotted field-path over graph() records ----------
@@ -1239,7 +1518,7 @@ function Representation({ clause, node, model, targetType, onEnter, onLeave, onC
   if (rep === "timeline") {
     return html`<div class="timeline">
       ${insts.map((m) => html`<div class=${"tl drill " + roleClass(sVal(m, "role"))} data-mrow=${m.ref} key=${m.ref}
-        onClick=${(e) => { e.stopPropagation(); const p = refParts(m.ref); if (p) onOpen(p.cls, p.slot, m.generation); }}>
+        onClick=${(e) => { e.stopPropagation(); openInst(m, onOpen); }}>
         <span class="role">${sVal(m, "role") || m.type}</span>
         <span class="msg">${truncate(sVal(m, "content") || sVal(m, "text") || displayName(m), 160)}</span></div>`)}
     </div>`;
@@ -1249,14 +1528,14 @@ function Representation({ clause, node, model, targetType, onEnter, onLeave, onC
       ${insts.map((it) => model.sharedIds.has(it.ref)
         ? html`<${IdChip} key=${it.ref} id=${it.ref} model=${model} onEnter=${onEnter} onLeave=${onLeave} onClick=${onChip} />`
         : html`<button class="chip" key=${it.ref} style=${{ "--c": "var(--fg-faint)" }}
-              onClick=${(e) => { e.stopPropagation(); const p = refParts(it.ref); if (p) onOpen(p.cls, p.slot, it.generation); }}>
+              onClick=${(e) => { e.stopPropagation(); openInst(it, onOpen); }}>
             <span class="knob"></span>${sVal(it, "name") || sVal(it, "title") || it.type}</button>`)}
     </div>`;
   }
   if (rep === "rows") {
     return html`<div class="vrows">
       ${insts.map((it) => html`<div class="vrow" key=${it.ref}
-          onClick=${() => { const p = refParts(it.ref); if (p) onOpen(p.cls, p.slot, it.generation); }}>
+          onClick=${() => openInst(it, onOpen)}>
         <span class="vr-kind">${it.type}</span>${displayName(it)}</div>`)}
     </div>`;
   }
@@ -1277,7 +1556,7 @@ function Representation({ clause, node, model, targetType, onEnter, onLeave, onC
       </div>
       <div class="heat">
         ${insts.map((it, i) => html`<div class=${"hcell drill " + roleClass(sVal(it, byField))} data-hcell=${it.ref} key=${it.ref}
-          title=${displayName(it)} onClick=${(e) => { e.stopPropagation(); const p = refParts(it.ref); if (p) onOpen(p.cls, p.slot, it.generation); }}
+          title=${displayName(it)} onClick=${(e) => { e.stopPropagation(); openInst(it, onOpen); }}
           style=${{ "--mc": `var(--m-${roleClass(sVal(it, byField))})`, "--o": (0.55 + (i % 5) * 0.09).toFixed(2) }}></div>`)}
       </div></div>`;
   }
@@ -1319,7 +1598,7 @@ function BoardView({ view, node, model, depth, onEnter, onLeave, onChip, onOpen,
 
 // a nested region (recursive): header + owned children + a dense message stack + identity chips.
 // When the instance's type has a declared `view`, a ▤ cell / ▧ board toggle flips to the bespoke board.
-function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen, viewsByType, viewMode, setViewMode }) {
+function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen, viewsByType, viewMode, setViewMode, focus, onExpandFocus }) {
   const { inst } = node;
   const view = viewsByType && viewsByType.get(inst.type);
   const boardOn = !!(view && viewMode[node.id] === "board");
@@ -1338,9 +1617,10 @@ function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen, viewsByT
   const st = status ? String(status).toLowerCase() : "";
   const badgeCls = "badge " + (st.includes("run") ? "running" : st.includes("paus") ? "paused" : st.includes("done") ? "done" : "waiting");
   const p = refParts(node.id);
+  const qcls = inst.qualified || (p && p.cls);
   return html`
     <div class=${cls} data-region=${node.id}>
-      <div class="region-head" onClick=${() => p && onOpen(p.cls, p.slot, inst.generation)}>
+      <div class="region-head" onClick=${() => p && onOpen(qcls, p.slot, inst.generation)}>
         <span class="node-kind">${inst.type}</span>
         <span class="region-name">${displayName(inst)}</span>
         ${role ? html`<span class="region-role">${role}</span>` : ""}
@@ -1352,9 +1632,9 @@ function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen, viewsByT
           <div class="conv-label"><span class="k">owns ▸ ${msgKids[0].inst.type}</span>
             <span class="n">count <b>${msgKids.length}</b></span></div>
           <div class="mstack">
-            ${msgKids.map((c) => { const mp = refParts(c.id); return html`<div class=${"mrow drill " + roleClass(sVal(c.inst, "role"))} key=${c.id}
+            ${msgKids.map((c) => { const mp = refParts(c.id); const mq = c.inst.qualified || (mp && mp.cls); return html`<div class=${"mrow drill " + roleClass(sVal(c.inst, "role"))} key=${c.id}
               data-mrow=${c.id} title=${displayName(c.inst)}
-              onClick=${(e) => { e.stopPropagation(); if (mp) onOpen(mp.cls, mp.slot, c.inst.generation); }}>
+              onClick=${(e) => { e.stopPropagation(); if (mp) onOpen(mq, mp.slot, c.inst.generation); }}>
               <span class="tick"></span><span class="fill"></span></div>`; })}
           </div>
         </div>` : ""}
@@ -1362,12 +1642,12 @@ function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen, viewsByT
         <div class=${"subregions" + (subKids.length > 1 && depth === 0 ? " grid" : "")}>
           ${subKids.map((c) => html`<${Region} key=${c.id} node=${c} model=${model} depth=${depth + 1}
             onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${onOpen}
-            viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} />`)}
+            viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} focus=${focus} onExpandFocus=${onExpandFocus} />`)}
         </div>` : ""}
       ${node.chipIds.length ? html`
         <div class="refs"><span class="rk">references ▸ shared</span>
           ${node.chipIds.map((id) => html`<${IdChip} key=${id} id=${id} model=${model} small=${true}
-            onEnter=${onEnter} onLeave=${onLeave} onClick=${onChip} />`)}
+            onEnter=${onEnter} onLeave=${onLeave} onClick=${onChip} focus=${focus} onExpandFocus=${onExpandFocus} />`)}
         </div>` : ""}
     </div>`;
 }
@@ -1375,16 +1655,27 @@ function Region({ node, model, depth, onEnter, onLeave, onChip, onOpen, viewsByT
 // ---------- type-level (skeleton) renderers: the SAME bespoke vocabulary, drawn from TYPES ----------
 // A shared-TYPE chip (colored by the type-name identity slot). Reuses the .chip data-identity
 // contract so the live hover-highlight effect lights up every appearance of the SAME type.
-function TypeChip({ name, model, small, onEnter, onLeave, onOpen }) {
+function TypeChip({ name, model, small, onEnter, onLeave, onOpen, focus, onExpandFocus }) {
+  // `name` is the QUALIFIED type identity (model.byName/idColor are qualified-keyed); the chip
+  // DISPLAYS the short/disambiguated label only.
+  const node = model.byName.get(name);
+  const label = node ? shortLabel(node, [...model.byName.values()]) : name;
   const slot = model.idColor.get(name) ?? 0;
-  const kind = (model.byName.get(name) || {}).kind || "type";
+  const kind = (node || {}).kind || "type";
+  const nodeMod = moduleOf(node);
+  const outside = focus && nodeMod && !inFocus(nodeMod, focus);
   return html`
-    <button class=${"chip" + (small ? " sm" : "")} data-identity=${name} data-slot=${slot}
-            style=${{ "--c": `var(--id-${slot})` }}
-            title=${`${name} · shared ${kind} · referenced by ${model.ownerCount(name)} owners`}
-            onMouseEnter=${() => onEnter(name)} onMouseLeave=${onLeave}
-            onClick=${(e) => { e.stopPropagation(); onOpen(name); }}>
-      <span class="knob"></span>${name}</button>`;
+    <span class="chip-wrap">
+      <button class=${"chip" + (small ? " sm" : "") + (outside ? " boundary" : "")} data-identity=${name} data-slot=${slot}
+              style=${{ "--c": `var(--id-${slot})` }}
+              title=${`${name} · shared ${kind} · referenced by ${model.ownerCount(name)} owners`
+                + (outside ? ` · outside focus (${nodeMod})` : "")}
+              onMouseEnter=${() => onEnter(name)} onMouseLeave=${onLeave}
+              onClick=${(e) => { e.stopPropagation(); onOpen(name); }}>
+        <span class="knob"></span>${label}</button>
+      ${outside && onExpandFocus ? html`<button class="mod-expand" title=${"expand focus to include " + nodeMod}
+          onClick=${(e) => { e.stopPropagation(); onExpandFocus(nodeMod); }}>⤢</button>` : ""}
+    </span>`;
 }
 
 // a template representation for a declared-view section, resolved over the TYPE graph. Shows the
@@ -1456,7 +1747,7 @@ function TypeBoardView({ view, node, model, depth, onEnter, onLeave, onChip, onO
       <div class="board tmpl" data-view=${view.name}>
         <div class="board-head">
           <div>
-            <div class="board-title">${node.name}<span class="tmpl-wire"> title ⟵ ${titleC ? titleC.path : "—"}</span></div>
+            <div class="board-title">${node.node ? shortLabel(node.node, [...model.byName.values()]) : node.name}<span class="tmpl-wire"> title ⟵ ${titleC ? titleC.path : "—"}</span></div>
             <div class="board-sub">view ${view.name} · template · fills at runtime</div>
           </div>
           ${badgeC ? html`<span class="badge tmpl" style=${{ marginLeft: "auto" }}><span class="bd"></span>badge ⟵ ${badgeC.path}</span>` : ""}
@@ -1475,8 +1766,10 @@ function TypeBoardView({ view, node, model, depth, onEnter, onLeave, onChip, onO
 
 // a nested TYPE region (recursive): a representative cell per domain type. Owned message-like
 // types render as a labeled placeholder stack; owned sub-types recurse; shared types are chips.
-function TypeRegion({ node, model, depth, onEnter, onLeave, onChip, onOpenType, viewsByType, viewMode, setViewMode }) {
-  const view = viewsByType && viewsByType.get(node.name);
+function TypeRegion({ node, model, depth, onEnter, onLeave, onChip, onOpenType, viewsByType, viewMode, setViewMode, focus, onExpandFocus }) {
+  const bareName = (node.node || {}).name || node.name;
+  const label = node.node ? shortLabel(node.node, [...model.byName.values()]) : bareName;
+  const view = viewsByType && viewsByType.get(bareName);
   const boardOn = !!(view && viewMode[node.name] === "board");
   const toggle = view ? html`
     <div class="vtoggle" onClick=${(e) => e.stopPropagation()}>
@@ -1493,7 +1786,7 @@ function TypeRegion({ node, model, depth, onEnter, onLeave, onChip, onOpenType, 
     <div class=${cls} data-region=${node.name} data-type-cell=${node.name}>
       <div class="region-head" onClick=${() => onOpenType(node.name)}>
         <span class="node-kind">${kind}</span>
-        <span class="region-name">${node.name}</span>
+        <span class="region-name">${label}</span>
         <span class="region-role">type</span>
         ${toggle}
       </div>
@@ -1509,7 +1802,7 @@ function TypeRegion({ node, model, depth, onEnter, onLeave, onChip, onOpenType, 
       })()}
       ${msgKids.map((c) => html`
         <div class="conv" key=${c.name}>
-          <div class="conv-label"><span class="k">owns ▸ ${c.name}</span>
+          <div class="conv-label"><span class="k">owns ▸ ${(c.node || {}).name || c.name}</span>
             <span class="n">count <b>⟵ runtime</b></span></div>
           <div class="mstack">
             ${["user", "asst", "tool", "tres", "user", "asst"].map((r, i) => html`<div class=${"mrow tmpl " + r} key=${i}>
@@ -1520,12 +1813,12 @@ function TypeRegion({ node, model, depth, onEnter, onLeave, onChip, onOpenType, 
         <div class=${"subregions" + (subKids.length > 1 && depth === 0 ? " grid" : "")}>
           ${subKids.map((c) => html`<${TypeRegion} key=${c.name} node=${c} model=${model} depth=${depth + 1}
             onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpenType=${onOpenType}
-            viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} />`)}
+            viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} focus=${focus} onExpandFocus=${onExpandFocus} />`)}
         </div>` : ""}
       ${node.chipTypes.length ? html`
         <div class="refs"><span class="rk">references ▸ shared types</span>
           ${node.chipTypes.map((t) => html`<${TypeChip} key=${t} name=${t} model=${model} small=${true}
-            onEnter=${onEnter} onLeave=${onLeave} onOpen=${onChip} />`)}
+            onEnter=${onEnter} onLeave=${onLeave} onOpen=${onChip} focus=${focus} onExpandFocus=${onExpandFocus} />`)}
         </div>` : ""}
     </div>`;
 }
@@ -1537,16 +1830,22 @@ function TypeRegion({ node, model, depth, onEnter, onLeave, onChip, onOpenType, 
 // overriding NavContext.navigateRef for everything rendered inside the panel. A target is either an
 // instance {kind:"instance",cls,slot,gen} or, in static/inspect mode, a type {kind:"type",name}.
 function TypeStaticDetail({ name, schema, onEditSource, onOpenType }) {
-  const sc = schema.find((t) => t.name === name);
+  const sc = schema.find((t) => t.qualified === name);
   if (!sc) return html`<div><div class="pane-title">${name}</div>
     <div class="pane-sub">type not in schema</div></div>`;
+  const label = shortLabel(sc, schema);
+  // implementors (and any bare-name field elsewhere on this node) are BARE in the wire — resolve
+  // to qualified before handing off navigation so a same-named type in another module can't be
+  // silently mis-picked.
+  const qualFor = (bareName) => { const n = schema.find((x) => x.name === bareName); return n ? n.qualified : bareName; };
   const isIface = sc.kind === "interface" || (sc.implementors && sc.implementors.length);
   return html`
     <div>
-      <div class="pane-title">${name}</div>
+      <div class="pane-title">${label}</div>
       <div class="pane-sub">
         ${isIface ? "interface" : "type"}${sc.implements && sc.implements.length
           ? html` · implements <span class="impl">${sc.implements.join(", ")}</span>` : ""} · static template
+        ${sc.module ? html` · <span class="mod-tag">${sc.module}</span>` : ""}
         <button class="ghost-btn edit-src" onClick=${() => onEditSource(name, sc)}>✎ edit source</button>
       </div>
       ${sc.fields && sc.fields.length ? html`
@@ -1574,7 +1873,7 @@ function TypeStaticDetail({ name, schema, onEditSource, onOpenType }) {
           <h3>implementors</h3>
           <div class="vchips">
             ${sc.implementors.map((t) => html`<button class="chip" key=${t}
-              onClick=${() => onOpenType(t)}><span class="knob"></span>${t}</button>`)}
+              onClick=${() => onOpenType(qualFor(t))}><span class="knob"></span>${t}</button>`)}
           </div>
         </div>` : ""}
     </div>`;
@@ -1593,19 +1892,24 @@ function instSummary(it) {
 // when there are no instances (inspect / static-project mode).
 function TypeLiveDetail({ name, schema, onEditSource, onNavRef }) {
   const [items, setItems] = useState(null);
+  const scForFetch = schema.find((t) => t.qualified === name);
   usePoll(async () => {
-    const r = await evalSource(`${name}.instances(filter: "", offset: 0, limit: 200)`);
+    const bare = scForFetch ? scForFetch.name : name;
+    const src = moduleHeader(scForFetch && scForFetch.module) + `${bare}.instances(filter: "", offset: 0, limit: 200)`;
+    const r = await evalSource(src);
     setItems(r && r.value && r.value.items ? r.value.items : []);
-  }, 900, [name]);
+  }, 900, [name, scForFetch && scForFetch.module, scForFetch && scForFetch.name]);
   if (items === null) return html`<div class="pane-title">${name}</div><div class="pane-sub">loading…</div>`;
   if (items.length === 0)
     return html`<${TypeStaticDetail} name=${name} schema=${schema} onEditSource=${onEditSource}
       onOpenType=${(n) => onNavRef({ kind: "type", name: n })} />`;
-  const sc = schema.find((t) => t.name === name);
+  const sc = schema.find((t) => t.qualified === name);
+  const label = sc ? shortLabel(sc, schema) : name;
   return html`
     <div>
-      <div class="pane-title">${name}</div>
+      <div class="pane-title">${label}</div>
       <div class="pane-sub">${items.length} live instance${items.length > 1 ? "s" : ""} · click one to inspect
+        ${sc && sc.module ? html` · <span class="mod-tag">${sc.module}</span>` : ""}
         ${sc ? html`<button class="ghost-btn edit-src" onClick=${() => onEditSource(name, sc)}>✎ edit source</button>` : ""}</div>
       <div class="detail-section">
         <h3>instances</h3>
@@ -1624,15 +1928,25 @@ function TypeLiveDetail({ name, schema, onEditSource, onNavRef }) {
 
 function InspectorPanel({ stack, schema, onEditSource, onNavRef, onCrumb, onBack, onClose, nav }) {
   const top = stack[stack.length - 1];
-  const crumbLabel = (t) => t.kind === "instance" ? `${t.cls}#${t.slot}` : t.kind === "function" ? `${t.name}()` : t.name;
+  const crumbLabel = (t) => {
+    if (t.kind === "instance") { const sc = schema.find((n) => n.qualified === t.cls); return `${sc ? shortLabel(sc, schema) : t.cls}#${t.slot}`; }
+    if (t.kind === "function") return `${t.name}()`;
+    const sc = schema.find((n) => n.qualified === t.name); return sc ? shortLabel(sc, schema) : t.name;
+  };
   // refs anywhere in the inspector (field values, method results, REPL) push a new target here.
   const inspNav = useMemo(() => ({
     ...nav,
     navigateRef: (v) => {
       const m = /^(.+)#(\d+)$/.exec(v.ref);
-      if (m) onNavRef({ kind: "instance", cls: v.class || v.type, slot: +m[2], gen: v.generation ?? 0 });
+      if (!m) return;
+      // a value's "ref" is BARE on the wire (serialize-entity, untouched by Phase 3 — flagged in
+      // the report); best-effort resolve to the qualified identity via schema so navigation stays
+      // collision-safe whenever the bare name happens to be unambiguous (the common case).
+      const bare = v.class || v.type;
+      const n = (schema || []).find((x) => x.name === bare);
+      onNavRef({ kind: "instance", cls: n ? n.qualified : bare, slot: +m[2], gen: v.generation ?? 0 });
     },
-  }), [nav, onNavRef]);
+  }), [nav, onNavRef, schema]);
   return html`
     <aside id="inspector">
       <div class="insp-head">
@@ -1661,7 +1975,38 @@ function InspectorPanel({ stack, schema, onEditSource, onNavRef, onCrumb, onBack
     </aside>`;
 }
 
-function NestedView({ onInspect, selectedId }) {
+// ===================== module rings — the map's outermost containment level (Phase 3) =====================
+// "Map view: module = the outermost containment ring" (07-modules.md §7 item 1). One deterministic
+// region per top-level module, sized by aggregate live mass, nesting sub-modules exactly as the
+// modules() tree dictates. Shared for both the live (roots tagged `.module`) and the static
+// skeleton (roots tagged `.module` too) stages — `renderRoot` is the only thing that differs.
+function moduleRingHasContent(node, rootsByModule) {
+  if ((rootsByModule.get(node.path) || []).length) return true;
+  return (node.children || []).some((c) => moduleRingHasContent(c, rootsByModule));
+}
+function ModuleRing({ node, rootsByModule, renderRoot, depth, collapsed, toggle, setFocus }) {
+  const own = rootsByModule.get(node.path) || [];
+  const kids = node.children || [];
+  if (!own.length && !kids.some((c) => moduleRingHasContent(c, rootsByModule))) return null;
+  const faded = isStdModule(node.path);
+  const open = !collapsed[node.path];
+  return html`
+    <div class=${"module-ring" + (faded ? " faded" : "") + (depth === 0 ? " top" : "")} data-module=${node.path}>
+      <div class="module-ring-head" onClick=${() => toggle(node.path)}>
+        <span class=${"caret" + (open ? " open" : "")}>▶</span>
+        <span class="mr-path" title=${"focus " + node.path}
+              onClick=${(e) => { e.stopPropagation(); setFocus(node.path); }}>${node.path}</span>
+        <span class="mr-meta">${node.liveCount} live · ${node.typeCount} types${node.fnCount ? ` · ${node.fnCount} fns` : ""}</span>
+      </div>
+      ${open ? html`<div class="module-ring-body">
+        ${own.map(renderRoot)}
+        ${kids.map((c) => html`<${ModuleRing} key=${c.path} node=${c} rootsByModule=${rootsByModule}
+            renderRoot=${renderRoot} depth=${(depth || 0) + 1} collapsed=${collapsed} toggle=${toggle} setFocus=${setFocus} />`)}
+      </div>` : ""}
+    </div>`;
+}
+
+function NestedView({ onInspect, selectedId, modTree, focus, setFocus, everywhere }) {
   const [instances, setInstances] = useState([]);
   const [schema, setSchema] = useState([]);
   const [functions, setFunctions] = useState([]);  // top-level functions (functions()) — first-class Map citizens
@@ -1669,6 +2014,8 @@ function NestedView({ onInspect, selectedId }) {
   const [viewMode, setViewModeState] = useState({});// instance id -> "cell" | "board"
   const [hoverId, setHoverId] = useState(null);
   const [infraOpen, setInfraOpen] = useState(false);
+  const [ringCollapsed, setRingCollapsed] = useState({});  // module path -> collapsed (default open)
+  const toggleRing = useCallback((path) => setRingCollapsed((s) => ({ ...s, [path]: !s[path] })), []);
   const prevCounts = useRef({});
   const [live, setLive] = useState({});           // type -> true when its count just climbed
   const freshRef = useRef(new Set());             // instance ids seen last poll (for pulse)
@@ -1680,9 +2027,10 @@ function NestedView({ onInspect, selectedId }) {
     if (s.value && s.value.nodes) {
       const nl = {};
       for (const n of s.value.nodes) {
-        const prev = prevCounts.current[n.name];
-        nl[n.name] = prev != null && (n.liveCount || 0) > prev;
-        prevCounts.current[n.name] = n.liveCount || 0;
+        // CRITICAL rekey: trend/live-climb tracking by `qualified`, not bare name.
+        const prev = prevCounts.current[n.qualified];
+        nl[n.qualified] = prev != null && (n.liveCount || 0) > prev;
+        prevCounts.current[n.qualified] = n.liveCount || 0;
       }
       setLive(nl); setSchema(s.value.nodes);
     }
@@ -1690,7 +2038,9 @@ function NestedView({ onInspect, selectedId }) {
     if (v.value && v.value.views) setViews(v.value.views);
   }, 800, []);
 
-  // first declared view per target type — the type's default custom board
+  // first declared view per target type — the type's default custom board. views()' "target" is
+  // BARE (follows the type, not the declaring module — 07-modules.md §7 last bullet); matched
+  // against bare inst.type / the resolved schema node's bare name elsewhere, so stays bare here.
   const viewsByType = useMemo(() => {
     const m = new Map();
     for (const v of views) if (!m.has(v.target)) m.set(v.target, v);
@@ -1698,13 +2048,32 @@ function NestedView({ onInspect, selectedId }) {
   }, [views]);
   const setViewMode = useCallback((id, m) => setViewModeState((s) => ({ ...s, [id]: m })), []);
 
-  const model = useMemo(() => computeNested(instances, schema), [instances, schema]);
+  // >=2 non-std top-level modules -> module rings (chrome only). Below that threshold every
+  // existing single-module program renders IDENTICALLY to pre-Phase-3 (07-modules.md §7 item 1's
+  // "must look essentially unchanged").
+  const moduleAware = nonStdTop(modTree).length >= 2;
+  // focus scopes census/map/infra/functions to the subtree (07-modules.md §7 item 4), unless the
+  // "everywhere" toggle is on. Rings render only when UNFOCUSED — focusing already zooms to one
+  // subtree, so the outer ring chrome (and its siblings) would be redundant chrome around it.
+  const scoping = !!focus && !everywhere;
+  const showModuleChrome = moduleAware && !scoping;
+  // Ownership-nesting itself is UNRESTRICTED by default (exactly the pre-Phase-3 algorithm — a
+  // root nests its owned instances regardless of which module declares their TYPE, e.g. an
+  // Agent in module `assistant` naturally nests a Conversation from `agent.core`; genuine
+  // sharing already gets the identity-chip treatment module-blind, which is what
+  // "cross-module references reuse the existing shared-entity treatment" means — nothing new to
+  // build there). Nesting is restricted to same-module-only ONLY while a focus is actively
+  // scoping the view, so a leaf module's own content can stand alone as roots under that focus
+  // even when it's normally nested inside a cross-module parent (otherwise focusing a leaf
+  // module would show an empty stage — its instances are all non-roots of the whole-program tree).
+  const model = useMemo(() => computeNested(instances, schema, scoping), [instances, schema, scoping]);
   // the static TYPE-level template (from schema alone). When there are no live instances
   // (`scry inspect`, or the split-second before main() populates the arenas) we render THIS —
   // the same bespoke view at zero fill. Once instances arrive, the live model above takes over.
-  const typeModel = useMemo(() => computeTypeSkeleton(schema), [schema]);
+  const typeModel = useMemo(() => computeTypeSkeleton(schema, scoping), [schema, scoping]);
   const noInstances = instances.length === 0;
   const showSkeleton = noInstances && typeModel.roots.length > 0;
+  const onExpandFocus = useCallback((mod) => setFocus(lcaModule(focus, mod)), [focus, setFocus]);
 
   // fresh-instance pulse: mark the DOM rows/regions that are new since the previous poll.
   useEffect(() => {
@@ -1743,21 +2112,30 @@ function NestedView({ onInspect, selectedId }) {
   const openDetail = useCallback((cls, slot, gen) => onInspect({ kind: "instance", cls, slot, gen: gen ?? 0 }), [onInspect]);
   const openType = useCallback((name) => onInspect({ kind: "type", name }), [onInspect]);
   // functions are first-class Map citizens: clicking one opens a trace view in the same in-map inspector.
-  const openFn = useCallback((f) => onInspect({ kind: "function", name: f.name, params: f.params || [], returns: f.returns }), [onInspect]);
-  const onChip = useCallback((id) => { const p = refParts(id); if (p) openDetail(p.cls, p.slot, (model.byId.get(id) || {}).generation); }, [model, openDetail]);
+  const openFn = useCallback((f) => onInspect({ kind: "function", name: f.name, params: f.params || [], returns: f.returns, module: f.module }), [onInspect]);
+  const onChip = useCallback((id) => openInst(model.byId.get(id), openDetail), [model, openDetail]);
 
   const maxCount = Math.max(1, ...model.census.map((c) => c.count));
   const barW = (n) => Math.max(3, Math.pow(n / maxCount, 0.72) * 100);
 
   // --- census: live mass by count, OR (skeleton) the static type roster with no bars ---
-  const census = showSkeleton ? typeModel.census : model.census;
-  const infra = showSkeleton ? typeModel.infraTypes : model.infraTypes;
+  // Scoped to the current focus (unless "everywhere"), per 07-modules.md §7 item 4.
+  const inScope = (m) => !scoping || inFocus(m, focus);
+  const census = (showSkeleton ? typeModel.census : model.census).filter((c) => inScope(c.module));
+  const infra = (showSkeleton ? typeModel.infraTypes : model.infraTypes).filter((u) => inScope(u.module));
+  const scopedFunctions = functions.filter((f) => inScope(f.module));
+  const roots = (showSkeleton ? typeModel.roots : model.roots).filter((r) => inScope(r.module));
+  const singletons = showSkeleton
+    ? typeModel.singletonTypes.filter((t) => inScope(moduleOf(typeModel.byName.get(t))))
+    : model.singletons.filter((s) => inScope(s.module));
 
   return html`
     <div id="nested" class=${(hoverId ? "id-active " : "") + (showSkeleton ? "skeleton" : "")} ref=${wrapRef}>
       <div class="nested-bar">
         <span class="nested-title">structure <span class="nsub">${showSkeleton ? "ownership = nesting · this is the type-level template live data fills in" : "ownership = nesting · size = mass"}</span></span>
         ${showSkeleton ? html`<span class="schema-affordance"><span class="sdot"></span>schema · not running</span>` : ""}
+        ${focus ? html`<span class="focus-badge">focused: <b>${focus}</b>${everywhere ? " · showing everywhere" : ""}
+            <button class="ghost-btn" onClick=${() => setFocus(null)}>✕</button></span>` : ""}
       </div>
 
       <div class="census">
@@ -1765,13 +2143,13 @@ function NestedView({ onInspect, selectedId }) {
           <span class="meta">${showSkeleton ? "static schema · 0 instances" : "watching · refresh 800ms"}</span></div>
         <div class="census-grid">
           ${census.map((c) => html`
-            <div class=${"cx-row" + (c.util ? " util" : "")} key=${c.name}
-                 onClick=${() => openType(c.name)} title=${"inspect " + c.name}>
-              <div class="cx-name">${c.name}</div>
-              <div class=${"cx-track" + (showSkeleton ? " tmpl" : "")}>${showSkeleton ? "" : html`<div class=${"cx-bar" + (live[c.name] ? " live" : "")} style=${{ width: barW(c.count) + "%" }}></div>`}</div>
+            <div class=${"cx-row" + (c.util ? " util" : "")} key=${c.qualified}
+                 onClick=${() => openType(c.qualified)} title=${"inspect " + c.qualified}>
+              <div class="cx-name">${c.name}${moduleAware && c.module ? html`<span class="cx-mod">${c.module}</span>` : ""}</div>
+              <div class=${"cx-track" + (showSkeleton ? " tmpl" : "")}>${showSkeleton ? "" : html`<div class=${"cx-bar" + (live[c.qualified] ? " live" : "")} style=${{ width: barW(c.count) + "%" }}></div>`}</div>
               ${showSkeleton
                 ? html`<div class="cx-count tmpl">×<b>—</b></div>`
-                : html`<div class=${"cx-count" + (live[c.name] ? " live" : "")}>×<b>${c.count}</b>${live[c.name] ? html`<span class="trend">▲</span>` : ""}</div>`}
+                : html`<div class=${"cx-count" + (live[c.qualified] ? " live" : "")}>×<b>${c.count}</b>${live[c.qualified] ? html`<span class="trend">▲</span>` : ""}</div>`}
             </div>`)}
         </div>
       </div>
@@ -1780,43 +2158,57 @@ function NestedView({ onInspect, selectedId }) {
         ? (typeModel.sharedTypes.size ? html`
             <div class="legend"><span class="lbl">shared types</span>
               ${[...typeModel.sharedTypes].sort().map((t) => html`<${TypeChip} key=${t} name=${t} model=${typeModel}
-                onEnter=${onEnter} onLeave=${onLeave} onOpen=${openType} />`)}
+                onEnter=${onEnter} onLeave=${onLeave} onOpen=${openType} focus=${focus} onExpandFocus=${onExpandFocus} />`)}
             </div>` : "")
         : (model.sharedIds.size ? html`
             <div class="legend"><span class="lbl">shared instances</span>
               ${[...model.sharedIds].sort().map((id) => html`<${IdChip} key=${id} id=${id} model=${model}
-                onEnter=${onEnter} onLeave=${onLeave} onClick=${onChip} />`)}
+                onEnter=${onEnter} onLeave=${onLeave} onClick=${onChip} focus=${focus} onExpandFocus=${onExpandFocus} />`)}
             </div>` : "")}
 
       <div class="stage-wrap">
+        ${singletons.length ? html`
+          <div class="singletons">
+            ${showSkeleton
+              ? singletons.map((t) => html`
+                  <button class="singleton-obj" key=${t} onClick=${() => openType(t)}>
+                    <span class="node-kind">obj</span>${(typeModel.byName.get(t) || {}).name || t} <span class="dim">singleton</span></button>`)
+              : singletons.map((s) => html`
+                  <button class="singleton-obj" key=${s.ref} onClick=${() => openInst(s, openDetail)}>
+                    <span class="node-kind">obj</span>${s.type} <span class="dim">×1</span></button>`)}
+          </div>` : ""}
+
         ${showSkeleton ? html`
-          ${typeModel.singletonTypes.length ? html`
-            <div class="singletons">
-              ${typeModel.singletonTypes.map((t) => html`
-                <button class="singleton-obj" key=${t} onClick=${() => openType(t)}>
-                  <span class="node-kind">obj</span>${t} <span class="dim">singleton</span></button>`)}
-            </div>` : ""}
-          ${typeModel.roots.map((r) => html`
-            <div class="orch" key=${r.name}>
-              <${TypeRegion} node=${r} model=${typeModel} depth=${0}
-                onEnter=${onEnter} onLeave=${onLeave} onChip=${openType} onOpenType=${openType}
-                viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} />
-            </div>`)}
+          ${roots.length === 0 ? html`<div class="stage-empty">nothing in focus.</div>` : ""}
+          ${showModuleChrome
+            ? modTree.map((n) => html`<${ModuleRing} key=${n.path} node=${n}
+                rootsByModule=${(() => { const m = new Map(); for (const r of roots) (m.get(r.module) || m.set(r.module, []).get(r.module)).push(
+                  html`<div class="orch" key=${r.name}><${TypeRegion} node=${r} model=${typeModel} depth=${0}
+                    onEnter=${onEnter} onLeave=${onLeave} onChip=${openType} onOpenType=${openType}
+                    viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} focus=${focus} onExpandFocus=${onExpandFocus} /></div>`); return m; })()}
+                renderRoot=${(x) => x} depth=${0} collapsed=${ringCollapsed} toggle=${toggleRing} setFocus=${setFocus} />`)
+            : roots.map((r) => html`
+                <div class="orch" key=${r.name}>
+                  <${TypeRegion} node=${r} model=${typeModel} depth=${0}
+                    onEnter=${onEnter} onLeave=${onLeave} onChip=${openType} onOpenType=${openType}
+                    viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} focus=${focus} onExpandFocus=${onExpandFocus} />
+                </div>`)}
         ` : html`
-          ${model.roots.length === 0 ? html`
-            <div class="stage-empty">no live instances yet — run the program, or switch to <b>List</b> to browse types.</div>` : ""}
-          ${model.roots.map((r) => html`
-            <div class="orch" key=${r.id}>
-              ${model.singletons.length && r === model.roots[0] ? html`
-                <div class="singletons">
-                  ${model.singletons.map((s) => { const p = refParts(s.ref); return html`
-                    <button class="singleton-obj" key=${s.ref} onClick=${() => p && openDetail(p.cls, p.slot, s.generation)}>
-                      <span class="node-kind">obj</span>${s.type} <span class="dim">×1</span></button>`; })}
-                </div>` : ""}
-              <${Region} node=${r} model=${model} depth=${0}
-                onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${openDetail}
-                viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} />
-            </div>`)}
+          ${roots.length === 0 ? html`
+            <div class="stage-empty">${instances.length === 0 ? "no live instances yet — run the program, or switch to " : "nothing in focus — switch to "}<b>List</b> to browse types.</div>` : ""}
+          ${showModuleChrome
+            ? modTree.map((n) => html`<${ModuleRing} key=${n.path} node=${n}
+                rootsByModule=${(() => { const m = new Map(); for (const r of roots) (m.get(r.module) || m.set(r.module, []).get(r.module)).push(
+                  html`<div class="orch" key=${r.id}><${Region} node=${r} model=${model} depth=${0}
+                    onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${openDetail}
+                    viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} focus=${focus} onExpandFocus=${onExpandFocus} /></div>`); return m; })()}
+                renderRoot=${(x) => x} depth=${0} collapsed=${ringCollapsed} toggle=${toggleRing} setFocus=${setFocus} />`)
+            : roots.map((r) => html`
+                <div class="orch" key=${r.id}>
+                  <${Region} node=${r} model=${model} depth=${0}
+                    onEnter=${onEnter} onLeave=${onLeave} onChip=${onChip} onOpen=${openDetail}
+                    viewsByType=${viewsByType} viewMode=${viewMode} setViewMode=${setViewMode} focus=${focus} onExpandFocus=${onExpandFocus} />
+                </div>`)}
         `}
 
         ${infra.length ? html`
@@ -1829,25 +2221,26 @@ function NestedView({ onInspect, selectedId }) {
               <p class="infra-note">Transport &amp; parsing noise — present and browsable, but they don't own domain state, so the default view keeps them out of the way.</p>
               <div class="infra-grid">
                 ${infra.map((u) => html`
-                  <button class="util" key=${u.name} onClick=${() => openType(u.name)}>
-                    <span class="un">${u.name}</span>
-                    <span class=${"uc" + (live[u.name] ? " live" : "")}>${showSkeleton ? "type" : "×" + u.count}${live[u.name] ? " ▲" : ""}</span>
+                  <button class="util" key=${u.qualified} onClick=${() => openType(u.qualified)}>
+                    <span class="un">${u.name}${moduleAware && u.module ? html`<span class="cx-mod">${u.module}</span>` : ""}</span>
+                    <span class=${"uc" + (live[u.qualified] ? " live" : "")}>${showSkeleton ? "type" : "×" + u.count}${live[u.qualified] ? " ▲" : ""}</span>
                   </button>`)}
               </div>
             </div>
           </div>` : ""}
 
-        ${functions.length ? html`
+        ${scopedFunctions.length ? html`
           <div class="fnsec">
             <div class="fnsec-head">
               <span class="k">functions</span>
-              <span class="sub">${functions.length} top-level function${functions.length === 1 ? "" : "s"} · ${showSkeleton ? "run the program to trace a call — click to open" : "click one to trace a call"}</span>
+              <span class="sub">${scopedFunctions.length} top-level function${scopedFunctions.length === 1 ? "" : "s"} · ${showSkeleton ? "run the program to trace a call — click to open" : "click one to trace a call"}</span>
             </div>
             <div class="fnsec-grid">
-              ${functions.map((f) => html`
-                <button class="fn-item" key=${f.name} onClick=${() => openFn(f)} title=${"trace " + f.name}>
+              ${scopedFunctions.map((f) => html`
+                <button class="fn-item" key=${f.qualified || f.name} onClick=${() => openFn(f)} title=${"trace " + f.name}>
                   <span class="fn-name">${f.name}</span><span class="fn-sig">(${(f.params || []).map((p) => `${p.name}: ${cleanType(p.type)}`).join(", ")})</span>
                   <span class="fn-ret">→ ${f.returns}</span>
+                  ${moduleAware && f.module ? html`<span class="fn-mod">${f.module}</span>` : ""}
                 </button>`)}
             </div>
           </div>` : ""}
@@ -1889,7 +2282,10 @@ function FnTraceView({ fn }) {
     src = (src || "").trim();
     if (!src) return;
     setBusy(true); setError(null); setStaticNote(false);
-    const r = await evalSource(`trace(${src})`);
+    // an ordinary (non reflect-static) bare function call resolves via normal §4 rules — own
+    // module, then imports — so a function from a non-entry module needs its OWN module's header
+    // or it reads as "unknown name" (functions() now carries `.module` for exactly this).
+    const r = await evalSource(moduleHeader(fn.module) + `trace(${src})`);
     setBusy(false);
     // static/portal-static: the program isn't running, so a trace can't execute — show the
     // signature + a "run to trace" note rather than surfacing the raw StaticInspection error.
@@ -2032,6 +2428,21 @@ function App({ onBack, programName } = {}) {
   const codeDraftCls = useRef(null);
   // V4 in-map inspector: a back-stack of targets ({kind:"instance"|...}). null = closed.
   const [inspect, setInspect] = useState(null);
+  // Phase 3: module focus + "everywhere" search/filter override, and the modules() tree that
+  // drives the rail groups, map rings, and the REPL module picker.
+  const [focus, setFocusState] = useState(parseHashFocus);
+  const [everywhere, setEverywhere] = useState(false);
+  const [modTree, setModTree] = useState([]);
+  useEffect(() => {
+    const onHash = () => setFocusState(parseHashFocus());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const setFocus = useCallback((path) => { setFocusState(path || null); writeHashFocus(path || null); }, []);
+  usePoll(async () => {
+    const r = await evalSource("modules()");
+    if (r.value && r.value.children) setModTree(r.value.children);
+  }, 3000, []);
 
   // rail: refresh type counts every 500ms, always (matches vanilla)
   usePoll(async () => {
@@ -2040,10 +2451,11 @@ function App({ onBack, programName } = {}) {
     const items = r.value.items || [];
     const nt = {};
     for (const t of items) {
-      const prev = lastCounts.current[t.name];
-      if (prev != null && t.liveCount !== prev) nt[t.name] = t.liveCount > prev ? "up" : "down";
-      else nt[t.name] = trendRef.current[t.name] || "";
-      lastCounts.current[t.name] = t.liveCount;
+      // CRITICAL rekey (07-modules.md §7): trend keyed by `qualified`, never bare `name`.
+      const prev = lastCounts.current[t.qualified];
+      if (prev != null && t.liveCount !== prev) nt[t.qualified] = t.liveCount > prev ? "up" : "down";
+      else nt[t.qualified] = trendRef.current[t.qualified] || "";
+      lastCounts.current[t.qualified] = t.liveCount;
     }
     trendRef.current = nt;
     setTrend(nt);
@@ -2061,16 +2473,23 @@ function App({ onBack, programName } = {}) {
 
   const setIfaceOpen = useCallback((iface, v) => setIfaceOpenState((m) => ({ ...m, [iface]: v })), []);
 
+  // breadcrumb/rail labels always show the short (bare-unless-ambiguous) display name; `name`/
+  // `cls` themselves are QUALIFIED (the CRITICAL rekey — every route/nav identifier from here on).
+  const labelFor = useCallback((qualified) => {
+    const sc = schema.find((t) => t.qualified === qualified);
+    return sc ? shortLabel(sc, schema) : qualified;
+  }, [schema]);
+
   const goIndex = useCallback(() => {
     setRoute({ view: "index", typeName: null, ref: null });
     setCrumbs([{ label: "types" }]);
   }, []);
   const openTable = useCallback((name) => {
     setRoute({ view: "table", typeName: name, ref: null });
-    setCrumbs([{ label: "types", target: { kind: "index" } }, { label: name }]);
-  }, []);
+    setCrumbs([{ label: "types", target: { kind: "index" } }, { label: labelFor(name) }]);
+  }, [labelFor]);
   const openDetail = useCallback((cls, slot, gen, pushCrumb) => {
-    const crumbLabel = `${cls}#${slot}`;
+    const crumbLabel = `${labelFor(cls)}#${slot}`;
     setRoute({ view: "detail", typeName: cls, ref: { class: cls, slot, gen } });
     setCrumbs((prev) => {
       if (!pushCrumb) return prev.length ? prev : [{ label: "types", target: { kind: "index" } }, { label: crumbLabel, target: { kind: "detail", cls, slot, gen } }];
@@ -2079,12 +2498,17 @@ function App({ onBack, programName } = {}) {
       filtered.push({ label: crumbLabel, target: { kind: "detail", cls, slot, gen } });
       return filtered;
     });
-  }, []);
+  }, [labelFor]);
   const navigateRef = useCallback((v) => {
     const m = /^(.+)#(\d+)$/.exec(v.ref);
     if (!m) return;
-    openDetail(v.class || v.type, +m[2], v.generation ?? 0, true);
-  }, [openDetail]);
+    // a value's "ref"/"class"/"type" stay BARE on the wire (serialize-entity, flagged in the
+    // Phase 3 report as a deliberately-not-fixed gap) — best-effort resolve to qualified via the
+    // rail's schema so navigation stays collision-safe whenever the bare name is unambiguous.
+    const bare = v.class || v.type;
+    const sc = schema.find((t) => t.name === bare);
+    openDetail(sc ? sc.qualified : bare, +m[2], v.generation ?? 0, true);
+  }, [openDetail, schema]);
   const goCrumb = useCallback((target) => {
     if (target.kind === "index") goIndex();
     else if (target.kind === "table") openTable(target.name);
@@ -2096,19 +2520,27 @@ function App({ onBack, programName } = {}) {
     setCodeSession({ cls, sc });
   }, []);
 
+  // Search scopes to the current focus unless "everywhere" is on (07-modules.md §7 item 4).
   const globalSearch = useCallback(async (q) => {
     q = q.trim();
     if (!q) return;
-    const m = /^([A-Za-z_][\w<>,]*)#(\d+)$/.exec(q);
-    if (m) { openDetail(m[1], +m[2], 0, true); return; }
-    for (const t of schema) {
-      const r = await evalSource(`${t.name}.instances(filter: "", offset: 0, limit: 200)`);
-      const hit = (r.value?.items || []).find((it) => JSON.stringify(it.fields).toLowerCase().includes(q.toLowerCase()));
-      if (hit) { const mm = /#(\d+)$/.exec(hit.ref); openDetail(t.name, +mm[1], hit.generation, true); return; }
+    const scoped = focus && !everywhere ? schema.filter((t) => inFocus(moduleOf(t), focus)) : schema;
+    const m = /^([A-Za-z_][\w.<>,]*)#(\d+)$/.exec(q);
+    if (m) {
+      const sc = scoped.find((t) => t.name === m[1] || t.qualified === m[1]);
+      openDetail(sc ? sc.qualified : m[1], +m[2], 0, true);
+      return;
     }
-  }, [schema, openDetail]);
+    for (const t of scoped) {
+      const src = moduleHeader(t.module) + `${t.name}.instances(filter: "", offset: 0, limit: 200)`;
+      const r = await evalSource(src);
+      const hit = (r.value?.items || []).find((it) => JSON.stringify(it.fields).toLowerCase().includes(q.toLowerCase()));
+      if (hit) { const mm = /#(\d+)$/.exec(hit.ref); openDetail(t.qualified, +mm[1], hit.generation, true); return; }
+    }
+  }, [schema, openDetail, focus, everywhere]);
 
-  // global keys: backtick toggles repl (unless typing in another input); Esc closes repl
+  // global keys: backtick toggles repl (unless typing in another input); Esc closes repl and,
+  // if no repl was open (or after closing it), clears module focus (07-modules.md §7 item 2).
   useEffect(() => {
     const onKey = (e) => {
       const ae = document.activeElement;
@@ -2116,7 +2548,10 @@ function App({ onBack, programName } = {}) {
       if (e.key === "`") {
         if (!inInput) { e.preventDefault(); setReplOpen((o) => !o); }
         else if (ae.id === "repl-input" && ae.value === "") { e.preventDefault(); setReplOpen((o) => !o); }
-      } else if (e.key === "Escape") { setReplOpen(false); }
+      } else if (e.key === "Escape") {
+        setReplOpen(false);
+        if (!inInput) setFocus(null);
+      }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -2135,7 +2570,13 @@ function App({ onBack, programName } = {}) {
   const changeMode = useCallback((m) => { setMode(m); if (m !== "map") setInspect(null); }, []);
 
   const inspTop = inspect && inspect.stack[inspect.stack.length - 1];
-  const inspSelId = inspTop && inspTop.kind === "instance" ? `${inspTop.cls}#${inspTop.slot}` : null;
+  // selectedId must match graph()'s BARE ref id format ("Type#slot" — data-region/data-mrow/chip
+  // data-identity are all still bare there, Phase 3 left graph()'s ref/type id shape unchanged),
+  // so resolve inspTop.cls (qualified) back to its bare display name via schema for the DOM match.
+  const inspBareCls = inspTop && inspTop.kind === "instance"
+    ? ((fullSchema.length ? fullSchema : schema).find((t) => t.qualified === inspTop.cls) || {}).name || inspTop.cls
+    : null;
+  const inspSelId = inspTop && inspTop.kind === "instance" ? `${inspBareCls}#${inspTop.slot}` : null;
   // the shared bottom REPL dock binds `self` to the inspector's open instance while it's up in Map.
   const replRoute = (mode === "map" && inspTop && inspTop.kind === "instance")
     ? { view: "detail", ref: { class: inspTop.cls, slot: inspTop.slot, gen: inspTop.gen } }
@@ -2148,21 +2589,24 @@ function App({ onBack, programName } = {}) {
 
   return html`
     <${NavContext.Provider} value=${nav}>
-      <${TopBar} onGlobalSearch=${globalSearch} onToggleTranscript=${() => setTxOpen((o) => !o)} mode=${mode} setMode=${changeMode} onBack=${onBack} programName=${programName} />
+      <${TopBar} onGlobalSearch=${globalSearch} onToggleTranscript=${() => setTxOpen((o) => !o)} mode=${mode} setMode=${changeMode} onBack=${onBack} programName=${programName}
+        focus=${focus} everywhere=${everywhere} setEverywhere=${setEverywhere} />
       ${mode === "map"
         ? html`<div id="layout" class=${"nested-layout" + (inspect ? " has-inspector" : "")}>
-            <div class="nested-stage-col"><${NestedView} onInspect=${openInspect} selectedId=${inspSelId} /></div>
+            <div class="nested-stage-col"><${NestedView} onInspect=${openInspect} selectedId=${inspSelId}
+                modTree=${modTree} focus=${focus} setFocus=${setFocus} everywhere=${everywhere} /></div>
             ${inspect ? html`<${InspectorPanel} stack=${inspect.stack} schema=${fullSchema.length ? fullSchema : schema} onEditSource=${openCodePanel}
                 onNavRef=${inspectPush} onCrumb=${inspectGoto} onBack=${inspectBack} onClose=${inspectClose} nav=${nav} />` : ""}
           </div>`
         : html`<div id="layout">
-            <${TypeRail} schema=${schema} trend=${trend} route=${route} ifaceOpen=${ifaceOpen} setIfaceOpen=${setIfaceOpen} />
+            <${TypeRail} schema=${schema} trend=${trend} route=${route} ifaceOpen=${ifaceOpen} setIfaceOpen=${setIfaceOpen}
+                modTree=${modTree} focus=${focus} setFocus=${setFocus} everywhere=${everywhere} />
             <main id="content">
               <${Breadcrumbs} crumbs=${crumbs} />
               <div id="pane">${pane}</div>
             </main>
           </div>`}
-      <${ReplDock} open=${replOpen} setOpen=${setReplOpen} route=${replRoute} />
+      <${ReplDock} open=${replOpen} setOpen=${setReplOpen} route=${replRoute} modTree=${modTree} schema=${fullSchema.length ? fullSchema : schema} />
       <${CodePanel} session=${codeSession} text=${codeText} setText=${setCodeText} onClose=${() => setCodeSession(null)} />
       <${TranscriptDrawer} open=${txOpen} onClose=${() => setTxOpen(false)} />
     <//>`;

@@ -802,3 +802,75 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
 .tnode-badge { margin-left: 8px; font-size: 10.5px; color: var(--fg-dim); background: var(--bg); border: 1px solid var(--line);
   border-radius: 10px; padding: 0 7px; align-self: center; }
 .detail-section h3.sec-gap { margin-top: 18px; }
+
+/* ===================== Phase 3: module system — rail groups, focus mode, map rings ===================== */
+/* a small dotted-module label appended next to a bare display name wherever it helps (pane
+   subtitles, census/infra/function rows) — never louder than the primary label. */
+.mod-tag { color: var(--fg-faint); font-family: var(--mono); font-size: 10.5px; }
+.pane-title-sub { color: var(--fg-faint); font-weight: 400; font-size: 13px; margin-left: 2px; }
+
+/* type rail: module groups (collapsible, click-to-focus header) nesting the existing iface groups */
+.rail-focus-chip { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 6px;
+  padding: 4px 8px; margin-bottom: 2px; text-transform: none; letter-spacing: 0; }
+.rail-focus-chip .rfc-path { font-family: var(--mono); font-size: 11px; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-focus-chip .rfc-clear { flex: none; padding: 2px 7px; font-size: 10px; }
+.type-row.mod { font-weight: 600; }
+.type-row.mod .mname { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--fg); cursor: pointer; }
+.type-row.mod .mname:hover { color: var(--accent); text-decoration: underline; }
+.type-row.mod .count { font-size: 10.5px; }
+.mod-group.faded > .type-row.mod .mname { color: var(--fg-faint); }
+.mod-group.faded > .type-row.mod .count { color: var(--fg-faint); }
+.mod-children { border-left: 1px solid var(--line); padding-left: 4px; margin: 2px 0 4px 10px; }
+.type-list-inner { list-style: none; margin: 0; padding: 0; }
+
+/* module-scoped search ("everywhere" override) */
+.everywhere-toggle { display: flex; align-items: center; gap: 5px; color: var(--fg-dim); font-size: 11.5px;
+  white-space: nowrap; user-select: none; cursor: pointer; }
+.everywhere-toggle input { accent-color: var(--accent); }
+
+/* focus badge in the Map header */
+.focus-badge { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; font-size: 11px;
+  color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 20px;
+  padding: 3px 6px 3px 11px; font-family: var(--mono); }
+.focus-badge b { font-weight: 700; }
+.focus-badge .ghost-btn { padding: 1px 7px; font-size: 10px; border-color: var(--accent); color: var(--accent); }
+
+/* census / infra / functions: a faint per-row module tag when module chrome is active */
+.cx-name { display: flex; align-items: center; gap: 7px; }
+.cx-mod, .fn-mod { color: var(--fg-faint); font-family: var(--mono); font-size: 9.5px; }
+.util .un { display: flex; flex-direction: column; gap: 1px; }
+.fn-item { position: relative; }
+.fn-mod { position: absolute; top: 6px; right: 9px; }
+
+/* module rings — the map's outermost containment level (07-modules.md §7 item 1) */
+.module-ring { border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 14px; overflow: hidden; background: var(--bg-rail); }
+.module-ring.top { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
+.module-ring-head { display: flex; align-items: center; gap: 9px; padding: 10px 14px; cursor: pointer;
+  background: var(--bg-elev); border-bottom: 1px solid var(--line); }
+.module-ring-head:hover { background: var(--bg-elev2); }
+.module-ring-head .mr-path { font-family: var(--mono); font-weight: 650; font-size: 13px; color: var(--fg); cursor: pointer; }
+.module-ring-head .mr-path:hover { color: var(--accent); text-decoration: underline; }
+.module-ring-head .mr-meta { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--fg-dim); white-space: nowrap; }
+.module-ring-body { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.module-ring .module-ring { margin-bottom: 0; }
+/* faded module (std.* and other never-instantiated utility modules) recedes to the periphery,
+   collapsed by default via the shared .caret mechanism — reuses the infra-strip visual language. */
+.module-ring.faded { opacity: .55; border-style: dashed; }
+.module-ring.faded:hover { opacity: .85; }
+.module-ring.faded .module-ring-head { background: transparent; }
+
+/* boundary chip — a cross-module reference (07-modules.md §7 item 2): the existing identity-chip
+   treatment, plus a small "expand focus to include <module>" affix when it points outside focus. */
+.chip-wrap { display: inline-flex; align-items: center; gap: 3px; }
+#nested .chip.boundary { border-style: dashed; }
+.mod-expand { flex: none; width: 18px; height: 18px; line-height: 1; border-radius: 50%;
+  background: var(--bg-elev2); border: 1px solid var(--fg-faint); color: var(--fg-dim); font-size: 10px;
+  cursor: pointer; display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+.mod-expand:hover { border-color: var(--accent); color: var(--accent); }
+
+/* REPL dock module picker */
+.repl-mod-select { background: var(--bg-elev2); border: 1px solid var(--line); color: var(--fg-dim);
+  border-radius: 5px; padding: 2px 7px; font-family: var(--mono); font-size: 11px; outline: none;
+  text-transform: none; letter-spacing: 0; max-width: 220px; }
+.repl-mod-select:focus { border-color: var(--accent); }
