@@ -1151,6 +1151,16 @@ function TopBar({ onGlobalSearch, onToggleTranscript, mode, setMode, onBack, pro
 // faded, collapsible infrastructure strip. See docs/DECISIONS.md #15 + docs/06-implementation.md.
 
 const N_ID = 8;                                  // identity palette slots (--id-0 .. --id-7)
+// stable fallback color for an id NOT in model.idColor — a cross-module BOUNDARY chip (single
+// owner, so not "shared" by the >=2-owner definition) still deserves its own identity color
+// rather than collapsing to slot 0 with every other boundary chip. Deterministic (same id always
+// -> same slot); occasional collisions with an unrelated id are a cosmetic non-issue since chips
+// are still independently hoverable/clickable by their own data-identity.
+function hashSlot(id) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  return ((h % N_ID) + N_ID) % N_ID;
+}
 const roleClass = (r) => {                       // normalize a Message role -> mrow tint class
   const s = String(r || "").toLowerCase();
   if (s.startsWith("assist") || s === "asst") return "asst";
@@ -1472,7 +1482,7 @@ const scalarFieldNames = (model, t) =>
 
 // an identity chip for a shared instance (colored, hover-highlights all its appearances)
 function IdChip({ id, model, small, onEnter, onLeave, onClick, focus, onExpandFocus }) {
-  const slot = model.idColor.get(id) ?? 0;
+  const slot = model.idColor.has(id) ? model.idColor.get(id) : hashSlot(id);
   const inst = model.byId.get(id);
   const label = inst ? (sVal(inst, "name") || sVal(inst, "title") || inst.type) : id;
   const held = model.ownerCount(id);
@@ -1667,7 +1677,7 @@ function TypeChip({ name, model, small, onEnter, onLeave, onOpen, focus, onExpan
   // DISPLAYS the short/disambiguated label only.
   const node = model.byName.get(name);
   const label = node ? shortLabel(node, [...model.byName.values()]) : name;
-  const slot = model.idColor.get(name) ?? 0;
+  const slot = model.idColor.has(name) ? model.idColor.get(name) : hashSlot(name);
   const kind = (node || {}).kind || "type";
   const nodeMod = moduleOf(node);
   const outside = focus && nodeMod && !inFocus(nodeMod, focus);
