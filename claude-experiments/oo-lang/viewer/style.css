@@ -522,7 +522,7 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
 .census-head .h { text-transform: uppercase; letter-spacing: 1.2px; font-size: 10px; color: var(--fg-faint); }
 .census-head .meta { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
 .census-grid { display: flex; flex-direction: column; gap: 3px; }
-.cx-row { display: grid; grid-template-columns: 148px 1fr auto; gap: 0 14px; align-items: center; cursor: pointer; padding: 3px 7px; margin: 0 -7px; border-radius: 5px; transition: background .12s; }
+.cx-row { display: grid; grid-template-columns: 190px 1fr auto; gap: 0 14px; align-items: center; cursor: pointer; padding: 3px 7px; margin: 0 -7px; border-radius: 5px; transition: background .12s; }
 .cx-row:hover { background: var(--line-soft); }
 .cx-name { font-family: var(--mono); font-size: 12px; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cx-row.util .cx-name { color: var(--fg-faint); }
@@ -837,11 +837,11 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
 .focus-badge .ghost-btn { padding: 1px 7px; font-size: 10px; border-color: var(--accent); color: var(--accent); }
 
 /* census / infra / functions: a faint per-row module tag when module chrome is active */
-.cx-name { display: flex; align-items: center; gap: 7px; }
-.cx-mod, .fn-mod { color: var(--fg-faint); font-family: var(--mono); font-size: 9.5px; }
+.cx-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.cx-primary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.cx-mod, .fn-mod { color: var(--fg-faint); font-family: var(--mono); font-size: 9.5px; flex: none;
+  border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; white-space: nowrap; }
 .util .un { display: flex; flex-direction: column; gap: 1px; }
-.fn-item { position: relative; }
-.fn-mod { position: absolute; top: 6px; right: 9px; }
 
 /* module rings — the map's outermost containment level (07-modules.md §7 item 1) */
 .module-ring { border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 14px; overflow: hidden; background: var(--bg-rail); }

@@ -329,10 +329,12 @@ function RailModuleGroup({ node, byModule, allTypes, trend, route, ifaceOpen, se
         <span class="count">${node.liveCount} live · ${node.typeCount} types</span>
       </div>
       ${open ? html`<div class="mod-children" style=${{ marginLeft: (depth || 0) < 3 ? "10px" : "0" }}>
-        <ul class="type-list-inner">${typeRailRows(own, allTypes, trend, route, ifaceOpen, setIfaceOpen, nav, filt)}</ul>
-        ${kids.map((c) => html`<${RailModuleGroup} key=${c.path} node=${c} byModule=${byModule} allTypes=${allTypes}
-            trend=${trend} route=${route} ifaceOpen=${ifaceOpen} setIfaceOpen=${setIfaceOpen} nav=${nav} filt=${filt}
-            collapsed=${collapsed} toggle=${toggle} setFocus=${setFocus} depth=${(depth || 0) + 1} />`)}
+        <ul class="type-list-inner">
+          ${typeRailRows(own, allTypes, trend, route, ifaceOpen, setIfaceOpen, nav, filt)}
+          ${kids.map((c) => html`<${RailModuleGroup} key=${c.path} node=${c} byModule=${byModule} allTypes=${allTypes}
+              trend=${trend} route=${route} ifaceOpen=${ifaceOpen} setIfaceOpen=${setIfaceOpen} nav=${nav} filt=${filt}
+              collapsed=${collapsed} toggle=${toggle} setFocus=${setFocus} depth=${(depth || 0) + 1} />`)}
+        </ul>
       </div>` : ""}
     </li>`;
 }
@@ -2145,7 +2147,9 @@ function NestedView({ onInspect, selectedId, modTree, focus, setFocus, everywher
           ${census.map((c) => html`
             <div class=${"cx-row" + (c.util ? " util" : "")} key=${c.qualified}
                  onClick=${() => openType(c.qualified)} title=${"inspect " + c.qualified}>
-              <div class="cx-name">${c.name}${moduleAware && c.module ? html`<span class="cx-mod">${c.module}</span>` : ""}</div>
+              <div class="cx-name" title=${c.module ? `${c.name} · ${c.module}` : c.name}>
+                <span class="cx-primary">${c.name}</span>${moduleAware && c.module ? html`<span class="cx-mod">${c.module}</span>` : ""}
+              </div>
               <div class=${"cx-track" + (showSkeleton ? " tmpl" : "")}>${showSkeleton ? "" : html`<div class=${"cx-bar" + (live[c.qualified] ? " live" : "")} style=${{ width: barW(c.count) + "%" }}></div>`}</div>
               ${showSkeleton
                 ? html`<div class="cx-count tmpl">×<b>—</b></div>`
@@ -2222,7 +2226,7 @@ function NestedView({ onInspect, selectedId, modTree, focus, setFocus, everywher
               <div class="infra-grid">
                 ${infra.map((u) => html`
                   <button class="util" key=${u.qualified} onClick=${() => openType(u.qualified)}>
-                    <span class="un">${u.name}${moduleAware && u.module ? html`<span class="cx-mod">${u.module}</span>` : ""}</span>
+                    <span class="un" title=${u.module ? `${u.name} · ${u.module}` : u.name}>${u.name}${moduleAware && u.module ? html`<span class="cx-mod">${u.module}</span>` : ""}</span>
                     <span class=${"uc" + (live[u.qualified] ? " live" : "")}>${showSkeleton ? "type" : "×" + u.count}${live[u.qualified] ? " ▲" : ""}</span>
                   </button>`)}
               </div>
@@ -2238,9 +2242,9 @@ function NestedView({ onInspect, selectedId, modTree, focus, setFocus, everywher
             <div class="fnsec-grid">
               ${scopedFunctions.map((f) => html`
                 <button class="fn-item" key=${f.qualified || f.name} onClick=${() => openFn(f)} title=${"trace " + f.name}>
-                  <span class="fn-name">${f.name}</span><span class="fn-sig">(${(f.params || []).map((p) => `${p.name}: ${cleanType(p.type)}`).join(", ")})</span>
+                  <span class="fn-name">${f.name}</span>${moduleAware && f.module ? html`<span class="fn-mod">${f.module}</span>` : ""}
+                  <span class="fn-sig">(${(f.params || []).map((p) => `${p.name}: ${cleanType(p.type)}`).join(", ")})</span>
                   <span class="fn-ret">→ ${f.returns}</span>
-                  ${moduleAware && f.module ? html`<span class="fn-mod">${f.module}</span>` : ""}
                 </button>`)}
             </div>
           </div>` : ""}
