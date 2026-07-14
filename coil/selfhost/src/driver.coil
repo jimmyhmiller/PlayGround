@@ -420,7 +420,10 @@
                   (Ok [prog]
                     (match (frontend-check a (mut s) prog)
                       (Err [d] (do (report-check-diags w (mut s) d) (None [(ptr Program)])))
-                      (Ok [cp]
+                      (Ok [cp0]
+                        (match (run-semantic-transforms a (mut s) cp0)  ; semantic transformers: rewrite reading the checked program, re-check to a fixpoint
+                          (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
+                          (Ok [cp]
                         (match (run-registered-checkers a (mut s) cp)  ; semantic checkers: read the authoritative checked program
                           (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
                           (Ok [_]
@@ -436,7 +439,7 @@
                                               (al-push! (mut srcpaths) (load (field sp name)))
                                               (al-push! (mut srctexts) (load (field sp text))))
                                             (store! i (iadd (load i) 1))))))
-                                    (Some mp)))))))))))))))))))
+                                    (Some mp)))))))))))))))))))))
 
 ; The LLVM entry points (dump-ir-program / build-object / build-ir-program) live in
 ; selfhost/src/main.coil and are injected here as function pointers (see driver-main /

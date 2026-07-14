@@ -63,8 +63,15 @@ New API this project added (all shipped):
 - **Checkers run AFTER resolve + typecheck** (the *semantic* layer; see
   `docs/SEMANTIC_METAPROGRAMS.md`). A checker is registered at `expand-stage3` but
   executed later, once the whole program is checked, so it reads the compiler's
-  authoritative output. (Transformers still run at `expand-stage3` — they are
-  syntactic.) A checker therefore layers *policy* on a program that already typechecks.
+  authoritative output. A checker therefore layers *policy* on a program that already
+  typechecks.
+- **`(semantic-transform FN)`** — a transformer that ALSO runs post-typecheck: it reads
+  the checked program (via `code-decl` etc.) to decide its rewrite, and the pipeline
+  re-resolves + re-typechecks its output to a fixpoint. Use it when a rewrite needs
+  types/signatures. Plain **`(transform FN)`** stays syntactic (runs at `expand-stage3`,
+  pre-resolution) for desugarings that *produce* typeable code (e.g. `inc`→`iadd`).
+  Demo: `metaprog-poc/retkind*.coil` rewrites a marker based on the wrapped call's real
+  return type.
 - **`(code-decl NODE)` → a declaration record**, read from that authoritative checked
   program. Given a symbol or a call node it answers WHERE a name is defined and, for a
   function, its SIGNATURE: `(decl MODULE fn [PARAM-TYPE…] RET)` for a function,

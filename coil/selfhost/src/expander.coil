@@ -358,14 +358,14 @@
 ; the checker names + the compiled metaprogram closure here; run-registered-checkers
 ; (invoked from run-pipeline after frontend-check) sets the semantic model and runs them.
 (defstruct CheckerReg
-  [(active i64) (checkers (ptr (ArrayList (slice u8)))) (checked (ptr Program))
+  [(active i64) (checkers (ptr (ArrayList (slice u8)))) (semtx (ptr (ArrayList (slice u8)))) (checked (ptr Program))
    (allfns (ptr SBox)) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum))])
 (defstruct CheckerRegBox [(init i64) (reg CheckerReg)])
 (defn checker-reg-box [] (-> (ptr CheckerRegBox)) (alloc-static CheckerRegBox))
-(defn register-checkers [(checkers (ptr (ArrayList (slice u8)))) (checked (ptr Program))
+(defn register-checkers [(checkers (ptr (ArrayList (slice u8)))) (semtx (ptr (ArrayList (slice u8)))) (checked (ptr Program))
                          (allfns (ptr SBox)) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum))] (-> i64)
   (let [b (checker-reg-box) r (field b reg)]
-    (store! (field r active) 1) (store! (field r checkers) checkers) (store! (field r checked) checked)
+    (store! (field r active) 1) (store! (field r checkers) checkers) (store! (field r semtx) semtx) (store! (field r checked) checked)
     (store! (field r allfns) allfns) (store! (field r gs) gs) (store! (field r gu) gu)
     (store! (field b init) 1) 0))
 ; Run the registered checkers over the authoritative checked Program `cp`. Called
@@ -387,6 +387,57 @@
                            (if (icmp-gt (diag-errs) 0)
                                (Err [i64 Diag] (derr "compilation failed: checker reported error(s) above"))
                              (Ok [i64 Diag] 0)))))))))))
+; Two tagged-form lists are equal iff their forms are structurally equal (spans
+; ignored) — the fixpoint test for the semantic-transform loop.
+(defn forms-equal [(xs (ptr (ArrayList TaggedForm))) (ys (ptr (ArrayList TaggedForm)))] (-> bool)
+  (let [nx (al-len [TaggedForm] (load xs)) ny (al-len [TaggedForm] (load ys))]
+    (if (icmp-ne nx ny) false
+      (let [(mut i) 0 (mut ok) true]
+        (loop (if (or (not (load ok)) (icmp-ge (load i) nx)) (break)
+          (do (if (not (sexp-eq (load (field (al-elem [TaggedForm] xs (load i)) form)) (load (field (al-elem [TaggedForm] ys (load i)) form))))
+                  (do (store! ok false) 0) 0)
+              (store! i (iadd (load i) 1)))))
+        (load ok)))))
+; ── SEMANTIC TRANSFORMERS: run post-typecheck, to a fixpoint ─────────────────
+; `(semantic-transform FN)` runs AFTER resolve + typecheck, so FN reads the
+; authoritative checked program (via the semantic model) to decide its rewrite.
+; Run the transformers over the current program; if it changed, WRITE the rewritten
+; forms into s.out and return 1, else return 0. The store lives in its own function
+; so it is flushed on return — the next round's resolve-program (a separate frame)
+; then reads it. (Storing s.out and re-reading it through a call in the SAME frame is
+; miscompiled by the arm64 backend, so we split the two across the call boundary.)
+(defn sem-tx-apply-once [(a (ptr Allocator)) (s (mut LS)) (r (ptr CheckerReg))] (-> (Result i64 Diag))
+  (let [forms (box-al [TaggedForm] a (load (field s out)))
+        impb (unwrap-ptr [(ArrayList ImpEntry)] (create [(ArrayList ImpEntry)] a))
+        expb (unwrap-ptr [(ArrayList ExpEntry)] (create [(ArrayList ExpEntry)] a))]
+    (store! impb (load (field s imports))) (store! expb (load (field s exports)))
+    (match (run-transformers (load (field r semtx)) (load (field r checked)) forms (load (field r allfns)) (load (field r gs)) (load (field r gu)) impb expb a)
+      (Err [d] (Err [i64 Diag] d))
+      (Ok [newforms]
+        (if (forms-equal newforms forms) (Ok [i64 Diag] 0)
+          (do (store! (field s out) (load newforms))
+              (Ok [i64 Diag] 1)))))))
+; One fixpoint round: model ← current checked program, apply the transformers; if the
+; program changed, re-resolve + re-typecheck s.out and recurse; else return the program.
+(defn sem-tx-round [(a (ptr Allocator)) (s (mut LS)) (r (ptr CheckerReg)) (cur (ptr Program)) (iters i64)] (-> (Result (ptr Program) Diag))
+  (do (set-sem-model cur)
+    (match (sem-tx-apply-once a (mut s) r)
+      (Err [d] (Err [(ptr Program) Diag] d))
+      (Ok [changed]
+        (if (icmp-eq changed 0) (Ok [(ptr Program) Diag] cur)
+          (if (icmp-ge iters 16) (Err [(ptr Program) Diag] (derr "semantic-transform: did not reach a fixpoint after 16 iterations"))
+            (match (resolve-program a (mut s) (not (ls-has-meta (mut s))))
+              (Err [d] (Err [(ptr Program) Diag] d))
+              (Ok [prog]
+                (match (frontend-check a (mut s) prog)
+                  (Err [d] (Err [(ptr Program) Diag] d))
+                  (Ok [cp2] (sem-tx-round a (mut s) r cp2 (iadd iters 1))))))))))))
+(defn run-semantic-transforms [(a (ptr Allocator)) (s (mut LS)) (cp0 (ptr Program))] (-> (Result (ptr Program) Diag))
+  (let [b (checker-reg-box)]
+    (if (icmp-eq (load (field b init)) 0) (Ok [(ptr Program) Diag] cp0)
+      (let [r (field b reg) semtx (load (field r semtx))]
+        (if (icmp-eq (al-len [(slice u8)] (load semtx)) 0) (Ok [(ptr Program) Diag] cp0)
+          (sem-tx-round a (mut s) r cp0 0))))))
 ; ── whole-program TRANSFORMERS ───────────────────────────────────────────────
 ; `(transform FN)` registers FN — a [(prog Code)] -> Code function — run once after
 ; expansion over the WHOLE program; FN returns the rewritten program as `(do form…)`
@@ -397,6 +448,14 @@
        (let [it (sx-items (load f))]
          (and (icmp-eq (sx-len it) 2)
               (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "transform"))))))
+; `(semantic-transform FN)` — a transformer that runs AFTER resolve + typecheck, so
+; it reads the authoritative program (types/signatures) to decide its rewrite; the
+; pipeline re-resolves + re-typechecks its output to a fixpoint (run-semantic-transforms).
+(defn is-sem-transform-form [(f (ptr Sexp))] (-> bool)
+  (and (icmp-eq (sx-tag (load f)) 6)
+       (let [it (sx-items (load f))]
+         (and (icmp-eq (sx-len it) 2)
+              (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "semantic-transform"))))))
 (defn unpack-do [(s (ptr Sexp)) (a (ptr Allocator))] (-> (ptr (ArrayList Sexp)))
   (let [(mut out) (al-new [Sexp] a)]
     (if (and (icmp-eq (sx-tag (load s)) 6)
@@ -453,6 +512,7 @@
         result (unwrap-ptr [SBoxTF] (create [SBoxTF] a))
         (mut checkers) (al-new [(slice u8)] a)
         (mut transformers) (al-new [(slice u8)] a)
+        (mut sem-transformers) (al-new [(slice u8)] a)
         (mut i) 0 (mut errf) (None [Diag]) (mut depthv) 0]
     (store! impb (load (field s imports))) (store! expb (load (field s exports)))
     (set-cli-sources (field s sources))   ; expose source names to (code-file …) in checkers
@@ -467,6 +527,10 @@
                   (match (resolve-macro (sx-sval (sx-at (sx-items (load (field tf form))) 1)) module macros impb expb a)
                     (Some [q] (do (al-push! (mut checkers) q) 0))
                     (None [] (do (store! errf (Some (derr "checker: FN must be a [(prog Code)] -> Code function in scope"))) 0)))
+                (if (is-sem-transform-form (field tf form))
+                    (match (resolve-macro (sx-sval (sx-at (sx-items (load (field tf form))) 1)) module macros impb expb a)
+                      (Some [q] (do (al-push! (mut sem-transformers) q) 0))
+                      (None [] (do (store! errf (Some (derr "semantic-transform: FN must be a [(prog Code)] -> Code function in scope"))) 0)))
                 (if (is-transform-form (field tf form))
                     (match (resolve-macro (sx-sval (sx-at (sx-items (load (field tf form))) 1)) module macros impb expb a)
                       (Some [q] (do (al-push! (mut transformers) q) 0))
@@ -474,7 +538,7 @@
                   (match (expand-top-form (field tf form) module env (field allfns items) (field gs items) (field gu items) (mut depthv) (mut s))
                     (Err [d] (do (store! errf (Some d)) 0))
                     (Ok [outf]
-                      (do-produced (box-sexp a outf) module result gs gu allfns a (mut errf))))))))
+                      (do-produced (box-sexp a outf) module result gs gu allfns a (mut errf)))))))))
           (store! i (iadd (load i) 1)))))
     (match (load errf)
       (Some [d] (Err [i64 Diag] d))
@@ -489,7 +553,7 @@
                 ; authoritative work (see run-registered-checkers, called from run-pipeline).
                 (if (icmp-gt (diag-errs) 0)
                     (do (drain-warnings (mut s)) (Err [i64 Diag] (derr "compilation failed: checker reported error(s) above")))
-                  (do (register-checkers (box-al [(slice u8)] a (load checkers)) checked allfns gs gu)
+                  (do (register-checkers (box-al [(slice u8)] a (load checkers)) (box-al [(slice u8)] a (load sem-transformers)) checked allfns gs gu)
                       (Ok [i64 Diag] 0))))))))))
 (defn do-produced [(outf (ptr Sexp)) (module (Option (slice u8))) (result (ptr SBoxTF)) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum)) (allfns (ptr SBox)) (a (ptr Allocator)) (errf (mut (Option Diag)))] (-> i64)
   (let [(mut produced) (al-new [Sexp] a)]

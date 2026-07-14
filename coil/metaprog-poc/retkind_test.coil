@@ -1,0 +1,17 @@
+(module app)
+(import "retkind.coil" :use *)
+(semantic-transform retkind-dialect)
+
+; retkind is a generic identity returning 0 — so WITHOUT the transform this program
+; typechecks and main returns 0.
+(defn retkind [T] [(x T)] (-> i64) 0)
+
+(defn pfn [(p (ptr i64))] (-> (ptr i64)) p)   ; returns a pointer
+(defn ifn [] (-> i32) 7)                       ; returns a non-pointer
+
+(defn main [] (-> i64)
+  (let [n (alloc-stack i64)]
+    (store! n 0)
+    ; retkind(pfn …) → 1 (pfn returns a pointer); retkind(ifn) → 2 (i32 is not a pointer)
+    ; So with the semantic transform: 1*10 + 2 = 12. Without it: 0*10 + 0 = 0.
+    (iadd (imul (retkind (pfn n)) 10) (retkind (ifn)))))

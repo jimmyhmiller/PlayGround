@@ -295,8 +295,28 @@ rebootstrap fixpoint, in the established style.
   **Note vs the original plan:** the first cut of this used a parallel declaration
   index built at `expand-stage3` (a second, approximate resolver). That was replaced
   by the post-typecheck phase above so the metaprogram reads the *one* authoritative
-  result. Only **checkers** moved; transformers stay syntactic (a semantic transformer
-  needs the S2 best-effort fixpoint loop, still future work).
+  result.
+
+  **S1.1 — semantic transformers (`(semantic-transform FN)`) — ✅ SHIPPED.** A
+  transformer that runs in the same post-typecheck phase: it reads the authoritative
+  checked program (via `code-decl` etc.) to decide its rewrite, returns rewritten
+  code, and the pipeline **re-resolves + re-typechecks to a fixpoint** before codegen.
+  This is the Wall-A resolution in practice — the transformer's *input* must typecheck
+  (so it layers on a valid program), and each rewrite is re-checked. `expander.coil::
+  run-semantic-transforms` drives the loop (`sem-tx-apply-once` runs the transformers
+  and writes `s.out`; `sem-tx-round` re-resolves/re-checks and recurses until the
+  program stabilizes or a 16-round guard trips). Syntactic `(transform FN)` still runs
+  at `expand-stage3` (pre-resolution) for desugarings that *produce* typeable code
+  (e.g. `inc`→`iadd`); semantic transformers are for rewrites that *need* types.
+  Ordering: syntactic transforms → resolve → check → semantic transforms (fixpoint) →
+  checkers → mono. Demo: `metaprog-poc/retkind{,_test}.coil` — reads each wrapped
+  call's real return type and rewrites a marker to `1` (pointer) / `2` (non-pointer),
+  observable in the exit code (12 = `1*10 + 2`; 0 without the transform). Verified:
+  rebootstrap fixpoint + gates green; existing syntactic-transform/checker demos
+  unchanged. **Implementation note:** the fixpoint must be written as a *recursion*
+  with the `s.out` store isolated in its own function (`sem-tx-apply-once`) that
+  returns before the next `resolve-program` reads it — a mutable-accumulator loop that
+  stores `s.out` and re-reads it through a call in the same frame miscompiles.
 
 - **S2 — the semantic loop + type map.** Reorder to parse/resolve/best-effort-
   check before transformers/checkers; build the `nid→Type` map; expose
