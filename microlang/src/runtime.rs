@@ -778,6 +778,13 @@ impl<M: ValueModel> Runtime<M> {
         }
     }
     fn num_lt(&self, a: u64, b: u64) -> bool {
+        // Fast path: two immediate fixnums — raw i64 compare, no BigInt allocation.
+        if M::R::is_immediate(Cat::Int)
+            && M::R::tag_of(a) == RawTag::Int
+            && M::R::tag_of(b) == RawTag::Int
+        {
+            return M::R::imm_int(a) < M::R::imm_int(b);
+        }
         // Exact when both are integers of any size; falls back to f64 only when a
         // float is involved.
         if let (Some(x), Some(y)) = (self.as_int_big(a), self.as_int_big(b)) {
@@ -829,6 +836,16 @@ impl<M: ValueModel> Runtime<M> {
                 M::R::enc_ref(id)
             }
             Prim::Lt | Prim::FxLt => {
+                // Fast path: two immediate fixnums compare as raw i64 — no BigInt
+                // for the type check OR the comparison. Without this, every `<` in a
+                // hot loop allocated FOUR transient BigInts (two in the non-number
+                // guard below, two more in `num_lt`), which dominated numeric code.
+                if M::R::is_immediate(Cat::Int)
+                    && M::R::tag_of(args[0]) == RawTag::Int
+                    && M::R::tag_of(args[1]) == RawTag::Int
+                {
+                    return self.encode(Val::Bool(M::R::imm_int(args[0]) < M::R::imm_int(args[1])));
+                }
                 // `<` on a non-number is a CATCHABLE error (Clojure throws a
                 // ClassCastException), not a hard abort.
                 if self.as_int_big(args[0]).is_none() && self.num_as_f64(args[0]).is_none()

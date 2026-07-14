@@ -35,9 +35,15 @@ enum Mode {
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut jit = false;
-    if args.first().map(String::as_str) == Some("--jit") {
-        jit = true;
-        args.remove(0);
+    let mut opt = false;
+    // Consume leading tier flags in any order: --jit selects the native tier,
+    // --opt wraps the chosen tier in the fixnum-specializing nanopass optimizer.
+    loop {
+        match args.first().map(String::as_str) {
+            Some("--jit") => { jit = true; args.remove(0); }
+            Some("--opt") => { opt = true; args.remove(0); }
+            _ => break,
+        }
     }
     let mode = match args.first().map(String::as_str) {
         None => Mode::Repl,
@@ -57,6 +63,9 @@ fn main() {
         #[cfg(feature = "jit")]
         {
             let backend = microlang::jit_cranelift::JitCranelift::<LowBitModel>::new();
+            if opt {
+                return drive(&microlang::Optimized::new(backend), mode);
+            }
             return drive(&backend, mode);
         }
         #[cfg(not(feature = "jit"))]
@@ -64,6 +73,9 @@ fn main() {
             eprintln!("--jit requires building with `--features jit`");
             std::process::exit(2);
         }
+    }
+    if opt {
+        return drive(&microlang::Optimized::new(TreeWalk), mode);
     }
     drive(&TreeWalk, mode)
 }

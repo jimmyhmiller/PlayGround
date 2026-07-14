@@ -719,6 +719,21 @@ impl Compiler {
                     return Ir::DefMethod { name: m, ty, imp: Box::new(imp) };
                 }
                 _ => {
+                    // Inline core arithmetic/comparison to prims (Clojure's `:inline`):
+                    // `(+ a b)` compiles straight to `Ir::Prim(Add,…)`, skipping the
+                    // variadic operator fn's rest-arg list + seq fold — the single
+                    // biggest cost in numeric code. Fires ONLY when the head is not a
+                    // local and resolves to the canonical `clojure.core` var, so a
+                    // local binding or a user redefinition still calls the real fn.
+                    if self.resolve_local(hs).is_none() {
+                        let resolved = self.resolve_global(rt, hs);
+                        let rname = rt.sym_name(resolved).to_string();
+                        if let Some(op) = rname.strip_prefix("clojure.core/") {
+                            if let Some(ir) = self.try_inline_op(rt, op, &items[1..]) {
+                                return ir;
+                            }
+                        }
+                    }
                     // A binding (local or a def'd var) shadows a prim; a prim is
                     // otherwise its default. The var check uses the RESOLVED sym.
                     let shadowed =
@@ -761,6 +776,68 @@ impl Compiler {
         let f = self.compile(rt, items[0]);
         let args = items[1..].iter().map(|&a| self.compile(rt, a)).collect();
         Ir::Call(Box::new(f), args)
+    }
+
+    /// The `:inline` table: a core operator applied at a fixed low arity lowers to
+    /// the matching `%`-prim directly. `None` = not inlinable at this arity (0/1-arg
+    /// `+`, negation, chained `<`, `=`, `/`, …) — the caller falls back to the fn.
+    /// Semantics are byte-identical to the operator fns in `core.clj`: the prims
+    /// carry the numeric tower (int/ratio/bigint promotion), so results match.
+    fn try_inline_op<M: ValueModel>(
+        &mut self,
+        rt: &mut Runtime<M>,
+        op: &str,
+        arg_forms: &[u64],
+    ) -> Option<Ir> {
+        use Prim::{Add, Lt, Mul, Sub};
+        let argc = arg_forms.len();
+        let konst = |rt: &mut Runtime<M>, v: Val| {
+            let h = rt.encode(v);
+            Ir::Const(rt.intern_const(h))
+        };
+        match op {
+            // n-ary fold, 2+ args: (+ a b c) -> (add (add a b) c). 0/1-arg keep the fn.
+            "+" | "-" | "*" if argc >= 2 => {
+                let prim = match op {
+                    "+" => Add,
+                    "-" => Sub,
+                    _ => Mul,
+                };
+                let mut acc = self.compile(rt, arg_forms[0]);
+                for &a in &arg_forms[1..] {
+                    let r = self.compile(rt, a);
+                    acc = Ir::Prim(prim, vec![acc, r]);
+                }
+                Some(acc)
+            }
+            // Two-arg comparisons; chained (>2) forms keep the fn.
+            "<" | ">" if argc == 2 => {
+                let a = self.compile(rt, arg_forms[0]);
+                let b = self.compile(rt, arg_forms[1]);
+                Some(if op == "<" {
+                    Ir::Prim(Lt, vec![a, b])
+                } else {
+                    Ir::Prim(Lt, vec![b, a])
+                })
+            }
+            "<=" | ">=" if argc == 2 => {
+                // x <= y  ==  not (y < x);  x >= y  ==  not (x < y).
+                let a = self.compile(rt, arg_forms[0]);
+                let b = self.compile(rt, arg_forms[1]);
+                let (lo, hi) = if op == "<=" { (b, a) } else { (a, b) };
+                let lt = Ir::Prim(Lt, vec![lo, hi]);
+                let f = konst(rt, Val::Bool(false));
+                let t = konst(rt, Val::Bool(true));
+                Some(Ir::If(Box::new(lt), Box::new(f), Box::new(t)))
+            }
+            "inc" | "dec" if argc == 1 => {
+                let a = self.compile(rt, arg_forms[0]);
+                let one = konst(rt, Val::Int(1));
+                let prim = if op == "inc" { Add } else { Sub };
+                Some(Ir::Prim(prim, vec![a, one]))
+            }
+            _ => None,
+        }
     }
 
     fn compile_fn<M: ValueModel>(&mut self, rt: &mut Runtime<M>, items: &[u64]) -> Ir {
