@@ -835,6 +835,12 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
   padding: 3px 6px 3px 11px; font-family: var(--mono); }
 .focus-badge b { font-weight: 700; }
 .focus-badge .ghost-btn { padding: 1px 7px; font-size: 10px; border-color: var(--accent); color: var(--accent); }
+/* breadcrumb segments (07-modules.md §7: "Breadcrumbs (agents ▸ tools) zoom out") — each
+   ancestor segment is clickable to re-focus one level up; the last segment is the current focus. */
+.fb-sep { opacity: .55; }
+.fb-crumb { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+.fb-crumb:hover { color: var(--fg); }
+.fb-everywhere { opacity: .8; }
 
 /* census / infra / functions: a faint per-row module tag when module chrome is active */
 .cx-name { display: flex; align-items: center; gap: 6px; min-width: 0; }

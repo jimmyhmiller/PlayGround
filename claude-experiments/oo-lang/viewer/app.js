@@ -1410,7 +1410,12 @@ function computeTypeSkeleton(schema, moduleAware) {
     let subtree = 1; for (const c of children) subtree += c.subtree;
     return { name, node: byName.get(name), children, chipTypes, subtree, module: myMod };
   };
-  let roots = rootTypes.filter((t) => !placed.has(t)).map(buildNode).sort((a, b) => b.subtree - a.subtree);
+  // when moduleAware (focused), roots are every domain type with NO same-module owner — mirrors
+  // computeNested's per-instance rootIds exactly, so a leaf module's own types stand alone as
+  // roots under focus even though `rootTypes` (the single whole-program primary root, e.g.
+  // `assistant.Agent`) belongs to a DIFFERENT module and is filtered out of view.
+  const rootSet = moduleAware ? [...domainTypes].filter((t) => ownerCount(t) === 0).sort() : rootTypes;
+  let roots = rootSet.filter((t) => !placed.has(t)).map(buildNode).sort((a, b) => b.subtree - a.subtree);
   // DEFAULT when the program has no ownership hierarchy (flat types with no entity-to-entity
   // references, or a pure reference cycle with no unreferenced root): rather than an empty stage,
   // show every domain type as its own standalone cell. Gives any program a map to look at.
@@ -2136,7 +2141,19 @@ function NestedView({ onInspect, selectedId, modTree, focus, setFocus, everywher
       <div class="nested-bar">
         <span class="nested-title">structure <span class="nsub">${showSkeleton ? "ownership = nesting · this is the type-level template live data fills in" : "ownership = nesting · size = mass"}</span></span>
         ${showSkeleton ? html`<span class="schema-affordance"><span class="sdot"></span>schema · not running</span>` : ""}
-        ${focus ? html`<span class="focus-badge">focused: <b>${focus}</b>${everywhere ? " · showing everywhere" : ""}
+        ${focus ? html`<span class="focus-badge">
+            focused:
+            ${focus.split(".").map((seg, i, segs) => {
+              const path = segs.slice(0, i + 1).join(".");
+              const isLast = i === segs.length - 1;
+              return html`<${React.Fragment} key=${path}>
+                ${i ? html`<span class="fb-sep">▸</span>` : ""}
+                ${isLast
+                  ? html`<b>${seg}</b>`
+                  : html`<span class="fb-crumb" onClick=${() => setFocus(path)}>${seg}</span>`}
+              <//>`;
+            })}
+            ${everywhere ? html`<span class="fb-everywhere">· showing everywhere</span>` : ""}
             <button class="ghost-btn" onClick=${() => setFocus(null)}>✕</button></span>` : ""}
       </div>
 
