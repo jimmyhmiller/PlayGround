@@ -112,6 +112,9 @@ pub struct Renderer {
     /// path, the accumulation buffer on the compute path) is stale.
     cull_dirty: bool,
     last_cam: Option<CameraUniform>,
+    /// edge_alpha is baked into the compute-raster accumulation, so a change
+    /// must re-raster (the hardware path reads it live and doesn't care).
+    last_edge_alpha: Option<f32>,
     num_nodes: u32,
     pub draw_edges: bool,
     pub draw_nodes: bool,
@@ -583,6 +586,7 @@ impl Renderer {
             accum: None,
             cull_dirty: true,
             last_cam: None,
+            last_edge_alpha: None,
             num_nodes: graph.num_nodes as u32,
             draw_edges: true,
             draw_nodes: true,
@@ -857,8 +861,22 @@ impl Renderer {
         true
     }
 
-    pub fn update_params(&self, queue: &wgpu::Queue, params: &RenderParams) {
+    pub fn update_params(&mut self, queue: &wgpu::Queue, params: &RenderParams) {
+        if self.last_edge_alpha != Some(params.edge_alpha) {
+            self.last_edge_alpha = Some(params.edge_alpha);
+            if self.edge_raster {
+                self.cull_dirty = true;
+            }
+        }
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(params));
+    }
+
+    /// Node colors are baked into the compute-raster accumulation; call this
+    /// after rewriting the color buffer so the raster path re-draws.
+    pub fn mark_colors_dirty(&mut self) {
+        if self.edge_raster {
+            self.cull_dirty = true;
+        }
     }
 
     /// Pick the node under a cursor pixel by rendering node ids to an R32Uint

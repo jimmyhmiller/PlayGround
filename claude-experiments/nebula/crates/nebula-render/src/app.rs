@@ -875,12 +875,13 @@ impl App {
                 .collect()
         });
 
-        let Some(live) = self.live.as_ref() else { return };
+        let Some(live) = self.live.as_mut() else { return };
 
         if mask.is_none() && matched.is_none() {
             // Fast path: nothing to modify.
             live.graph_gpu.set_colors(&live.gpu.queue, &self.base_colors);
             live.graph_gpu.set_sizes(&live.gpu.queue, &self.base_sizes);
+            live.renderer.mark_colors_dirty();
             return;
         }
 
@@ -904,6 +905,7 @@ impl App {
         }
         live.graph_gpu.set_colors(&live.gpu.queue, &colors);
         live.graph_gpu.set_sizes(&live.gpu.queue, &sizes);
+        live.renderer.mark_colors_dirty();
     }
 
     /// Update the legend-hover highlight and re-push colors if it changed.
@@ -1132,7 +1134,7 @@ impl App {
                         .text("node size"),
                 );
                 ui.add(
-                    egui::Slider::new(&mut edge_alpha, 0.01..=1.0)
+                    egui::Slider::new(&mut edge_alpha, 0.0..=1.0)
                         .logarithmic(true)
                         .text("edge glow"),
                 );
@@ -2130,11 +2132,14 @@ impl App {
                 log::info!("node size: {:.1} px", self.render_params.base_radius_px);
             }
             KeyCode::BracketLeft => {
-                self.render_params.edge_alpha = (self.render_params.edge_alpha / 1.4).max(0.01);
+                // Snap to fully-off below the useful range.
+                let v = self.render_params.edge_alpha / 1.4;
+                self.render_params.edge_alpha = if v < 0.005 { 0.0 } else { v };
                 self.push_params();
             }
             KeyCode::BracketRight => {
-                self.render_params.edge_alpha = (self.render_params.edge_alpha * 1.4).min(1.0);
+                let a = self.render_params.edge_alpha;
+                self.render_params.edge_alpha = if a == 0.0 { 0.01 } else { (a * 1.4).min(1.0) };
                 self.push_params();
             }
             _ => {}
@@ -2142,7 +2147,7 @@ impl App {
     }
 
     fn push_params(&mut self) {
-        if let Some(live) = self.live.as_ref() {
+        if let Some(live) = self.live.as_mut() {
             live.renderer.update_params(&live.gpu.queue, &self.render_params);
         }
     }
