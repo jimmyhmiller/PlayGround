@@ -23,7 +23,11 @@
   (KList  [(items (ptr (ArrayList Sexp)))])
   (KVec   [(items (ptr (ArrayList Sexp)))]))
 
-(defstruct Sexp [(kind SexpKind) (lo i64) (hi i64) (source i64) (ctxt i64)])
+; `nid` = a stable, unique NODE ID assigned at construction (see next-nid / mk-sexp).
+; It is NEVER emitted by the canonical dumper, so the oracle stays byte-exact; it lets
+; a metaprogram key on node IDENTITY (exact `type-of`) rather than the source span,
+; which macro-duplicated subtrees can share.
+(defstruct Sexp [(kind SexpKind) (lo i64) (hi i64) (source i64) (ctxt i64) (nid i64)])
 
 (defsum TokKind
   (TOpen   [(c i64)])

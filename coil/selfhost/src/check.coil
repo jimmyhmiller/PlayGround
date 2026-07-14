@@ -870,9 +870,9 @@
   (match (synth a e expected env cx tps fname)
     (Err [d] (Err [SynPair Diag] d))
     (Ok [rv] (let [r (alloc-stack EvalPair)] (store! r rv)
-               ; S2: record this expression's inferred type, keyed by its source span,
-               ; so a metaprogram can ask `(type-of NODE)` for any expression's type.
-               (type-map-record (load (field e source)) (load (field e lo)) (load (field e hi)) (load (field e ctxt)) (load (field r t)))
+               ; S2: record this expression's inferred type, keyed by its NODE ID, so a
+               ; metaprogram can ask `(type-of NODE)` for any expression's exact type.
+               (type-map-record (load (field e nid)) (load (field r t)))
                (Ok (mk-synpair a (box-expr a (load (field r e))) (box-type a (load (field r t)))))))))
 
 (defn expected-some? [(expected (ptr Type))] (-> bool) (icmp-ne (cast i64 expected) 0))

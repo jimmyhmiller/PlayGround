@@ -667,7 +667,7 @@
 ; inferred Type keyed by the expression's source span. A metaprogram then asks
 ; `(type-of NODE)` for the type of any expression it sees (the surface Code node
 ; shares the span the checker recorded). Reset at the start of each check pass.
-(defstruct TypeMapEntry [(source i64) (lo i64) (hi i64) (ctxt i64) (ty Type)])
+(defstruct TypeMapEntry [(nid i64) (ty Type)])
 (defstruct TypeMapBox [(init i64) (lst (ptr (ArrayList TypeMapEntry)))])
 (defn type-map-box [] (-> (ptr TypeMapBox)) (alloc-static TypeMapBox))
 (defn type-map-list [] (-> (ptr (ArrayList TypeMapEntry)))
@@ -681,23 +681,20 @@
 (defn type-map-reset [] (-> i64)
   (let [_ (type-map-list) b (type-map-box)]
     (store! (load (field b lst)) (al-new [TypeMapEntry] (malloc-allocator))) 0))
-(defn type-map-record [(source i64) (lo i64) (hi i64) (ctxt i64) (ty Type)] (-> i64)
-  (if (icmp-lt lo 0) 0   ; skip synthesized / dummy-span nodes
+(defn type-map-record [(nid i64) (ty Type)] (-> i64)
+  (if (icmp-le nid 0) 0   ; skip synthesized nodes (nid -1) / the "no id" sentinel
     (let [e (alloc-stack TypeMapEntry)]
-      (store! (field e source) source) (store! (field e lo) lo) (store! (field e hi) hi)
-      (store! (field e ctxt) ctxt) (store! (field e ty) ty)
+      (store! (field e nid) nid) (store! (field e ty) ty)
       (al-push! (type-map-list) (load e)) 0)))
-; Look up a span's type; scan from the END so the last (most-refined) record wins.
-(defn type-map-lookup [(source i64) (lo i64) (hi i64) (ctxt i64)] (-> (Option Type))
-  (let [lst (type-map-list) n (al-len [TypeMapEntry] (load lst)) (mut i) (isub n 1) (mut r) (None [Type])]
-    (loop (if (icmp-lt (load i) 0) (break)
-      (do (let [e (al-elem [TypeMapEntry] lst (load i))]
-            (if (and (icmp-eq (load (field e source)) source)
-                     (and (icmp-eq (load (field e lo)) lo)
-                          (and (icmp-eq (load (field e hi)) hi) (icmp-eq (load (field e ctxt)) ctxt))))
-                (do (store! r (Some (load (field e ty)))) (break)) 0))
-          (store! i (isub (load i) 1)))))
-    (load r)))
+; Look up a node id's type; scan from the END so the last (most-refined) record wins.
+(defn type-map-lookup [(nid i64)] (-> (Option Type))
+  (if (icmp-le nid 0) (None [Type])
+    (let [lst (type-map-list) n (al-len [TypeMapEntry] (load lst)) (mut i) (isub n 1) (mut r) (None [Type])]
+      (loop (if (icmp-lt (load i) 0) (break)
+        (do (let [e (al-elem [TypeMapEntry] lst (load i))]
+              (if (icmp-eq (load (field e nid)) nid) (do (store! r (Some (load (field e ty)))) (break)) 0))
+            (store! i (isub (load i) 1)))))
+      (load r))))
 (defn cop-type-of [(args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
   (let [a (load (field cx a))]
     (match (cv-get args 0)
@@ -705,7 +702,7 @@
       (Some [nodev]
         (if (not (is-ccode nodev)) (Err [CtVal Diag] (derr "type-of: expects a Code node"))
           (let [node (ccode-of nodev)]
-            (match (type-map-lookup (sx-source node) (sx-lo node) (sx-hi node) (sx-ctxt node))
+            (match (type-map-lookup (sx-nid node))
               (None [] (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unknown") -1 -1))))
               (Some [t] (Ok [CtVal Diag] (CCode (ty->sexp a (box-type a t))))))))))))
 ; The module part of a fully-qualified name `mod.simple` → "mod" (before last dot), else "".

@@ -259,9 +259,18 @@ Four load-bearing properties:
 Each phase is independently shippable and gated by `selfhost/oracle/*.sh` +
 rebootstrap fixpoint, in the established style.
 
-- **S0 — node identity.** Add non-dumped `nid` to `Sexp`/`Expr`; assign at
-  read/expand; propagate through `parse-program`. Oracle stays byte-exact.
-  *Foundation for all per-node joins.* (Skippable for S1 if we use span-keys.)
+- **S0 — node identity — ✅ SHIPPED.** A non-dumped `nid : i64` on `Sexp` and `Expr`,
+  assigned by a monotonic counter (`ast.coil` `next-nid`) in the central constructors
+  `mk-sexp`/`mk-sexp-src` (every node — source-read and macro-generated — gets a unique
+  id); `parse-expr` copies `Sexp.nid` → `Expr.nid` (`mk-expr-nid`; synthesized exprs get
+  `-1`). The canonical dumpers emit only the span, never `nid`, so the oracle stays
+  byte-exact; assignment is deterministic, so the rebootstrap fixpoint holds. **`type-of`
+  now keys the type map on `nid`** (`type-map-*` + `do-synth` record `e.nid → type`),
+  making it exact per node instead of span-collidable — correct even for macro-generated
+  code (demo `metaprog-poc/nofloat_macro.coil` + `sneakymac.coil`: the checker reads the
+  inferred type of a node inside a macro expansion). Verified: rebootstrap fixpoint +
+  gates byte-exact. *Foundation: exact resolution (`code-decl` disambiguation) can move
+  onto `nid` next.*
 
 - **S1 — resolution & signature reflection.** Expose `resolve-sym`, `module-of`,
   `def-site`, `fn-sig`, node-context `code-field*/variant*/trait*`. **No

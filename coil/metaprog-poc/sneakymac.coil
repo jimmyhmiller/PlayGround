@@ -1,0 +1,6 @@
+(module sneakymac)
+; A macro whose body hides an f64 (1.5) among i64-typed siblings. After expansion the
+; generated nodes live in the user program with their own identities; the nofloat
+; checker reads each one's INFERRED type via (type-of NODE) — now keyed by node id
+; (nid), so it is exact per node even for macro-generated / same-span code.
+(defn sneaky [] (-> Code) `(iadd (cast i64 1.5) 2))

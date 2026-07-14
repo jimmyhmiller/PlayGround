@@ -61,6 +61,7 @@
 (defn sx-hi [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p hi))))
 (defn sx-source [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p source))))
 (defn sx-ctxt [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p ctxt))))
+(defn sx-nid [(s Sexp)] (-> i64) (let [p (alloc-stack Sexp)] (store! p s) (load (field p nid))))
 (defn sx-len [(l (ptr (ArrayList Sexp)))] (-> i64) (al-len [Sexp] (load l)))
 (defn sx-at  [(l (ptr (ArrayList Sexp))) (i i64)] (-> Sexp) (al-get [Sexp] (load l) i))
 (defn sx-get [(l (ptr (ArrayList Sexp))) (i i64)] (-> (Option Sexp))
@@ -421,7 +422,7 @@
 (defn parse-expr [(a (ptr Allocator)) (s Sexp)] (-> (Result Expr Diag))
   (match (parse-expr-inner a s)
     (Err [d] (Err (dwspan d (sx-source s) (sx-lo s) (sx-hi s) (sx-ctxt s))))
-    (Ok [kind] (Ok (mk-expr kind (sx-lo s) (sx-hi s) (sx-source s) (sx-ctxt s))))))
+    (Ok [kind] (Ok (mk-expr-nid kind (sx-lo s) (sx-hi s) (sx-source s) (sx-ctxt s) (sx-nid s))))))
 (defn parse-expr-inner [(a (ptr Allocator)) (s Sexp)] (-> (Result ExprKind Diag))
   (let [tg (sx-tag s) slo (sx-lo s) shi (sx-hi s)]
     (if (icmp-eq tg 0) (Ok (EInt (sx-ival s)))
