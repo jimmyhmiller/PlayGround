@@ -175,12 +175,26 @@ aborting, so metaprograms can run over not-yet-valid programs (Wall A).
   context disambiguates. This directly removes today's "ambiguous type '…' —
   multiple modules define it" wall.
 
-### S2 — expression types (requires the semantic loop, §5)
+### S2 — expression types
 
-- `(type-of NODE)` → inferred `Type` as `Code`, or `:unknown`.
-- `(kind-of NODE)` → the kind tag (int/float/struct/…) of `NODE`'s type,
-  generalizing `code-*-kind` from named types to any expression.
-- The `type-*` deconstructors from §3.2.
+- **`(type-of NODE)` — ✅ SHIPPED.** Returns the inferred `Type` of an expression as
+  `Code` (e.g. `i64`, `(ptr i64)`), or `:unknown` for a node the checker never typed.
+  Backed by a **type map** (`comptime.coil` `type-map-*`): the checker records each
+  expression's inferred type at `do-synth` (its single per-expression entry), keyed by
+  the expression's source span; `type-of` looks the span up. Reset per check pass
+  (`check-program`); the map a metaprogram reads is from the authoritative final check
+  (checkers) or the current fixpoint round (transforms). Op code **36**; parser
+  recognizes `type-of`; no checker-typing change (`TCode`). Reads INFERRED types, not
+  syntax — a call `(getf)` reports `f64` because `getf`'s return type is `f64`, invisible
+  at the call site. Demo: `metaprog-poc/nofloat*.coil` — a checker that bans any
+  floating-point-typed expression, flagging `(getf)` by its inferred result type.
+  Verified: rebootstrap fixpoint + gates byte-exact (the type map is a side table, not
+  dumped). **Known limit (v1):** the join key is the source span
+  `(source,lo,hi,ctxt)` — macro-duplicated subtrees that share a span can collide (last
+  write wins); a stable node id (S0) would make it exact. No best-effort typing of
+  broken programs yet (a not-yet-valid round yields `:unknown`, all-or-nothing).
+- Future: `(kind-of NODE)` and the `type-*` deconstructors from §3.2 (the metaprogram
+  can already inspect the returned type with the existing `code-*` ops).
 
 ### S3 — whole-program relations (semantic indices)
 

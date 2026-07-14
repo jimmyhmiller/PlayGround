@@ -83,6 +83,10 @@ New API this project added (all shipped):
   Demo: `metaprog-poc/sigcheck*.coil` — a checker that reads each callee's real return
   type and vetoes calls to pointer-returning functions. (v1: simple/module-qualified
   names, not alias-qualified; per-expression types are future work.)
+- **`(type-of NODE)` → the expression's inferred type** as `Code` (e.g. `i64`,
+  `(ptr i64)`), or `:unknown`. This is the type the real type-checker inferred, not
+  syntax — a call `(getf)` reports `f64` because `getf` returns `f64`. Demo:
+  `metaprog-poc/nofloat*.coil` bans floating-point-typed expressions.
 - **`(code-file NODE)` → the source file name** of a node, and **`(code-from-user? NODE)`
   → bool** (true for a real file, false for a bundled `<…>` source). So a linter can
   *scope itself* — `metaprog-poc/lint.coil` warns only where `(code-from-user? f)`, which

@@ -1,0 +1,5 @@
+(module app)
+(import "nofloat.coil" :use *)
+(checker check-nofloat)
+(defn geti [] (-> i64) 7)
+(defn main [] (-> i64) (isub (geti) 7))
