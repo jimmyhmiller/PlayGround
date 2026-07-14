@@ -1844,10 +1844,9 @@ pub const CORE: &str = r##"
 (defn biginteger [x] (bigint x))
 (defn decimal? [x] false)
 (defn bytes? [x] false)
-(defn class? [x] false)
-;; `(Class/forName "X")` — class values are type-tag symbols here, so forName
-;; is symbol interning (upstream code got the string from a tag symbol).
-(defn -class-for-name [s] (symbol s))
+;; Class VALUES are `(record 'Class fqn)` wrappers over the JVM layer's
+;; registry (host_jvm_src) — so class? is a real, per-instance check.
+(defn class? [x] (%num-eq (type-of x) 'Class))
 (defn uri? [x] false)
 (defn inst? [x] false)
 (defn NaN? [x] (not (%num-eq x x)))

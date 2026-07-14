@@ -1294,3 +1294,86 @@ fn real_core_match_end_to_end() {
         "55"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// The JVM layer (host_jvm_src): every host class/method/static is in-language
+// data (`defclass` + `-jvm-registry`); the expander lowers interop SYNTAX only.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn jvm_layer_statics_methods_ctors() {
+    assert_eq!(run("Math/PI"), "3.141592653589793");
+    assert_eq!(run("(Math/abs -4)"), "4");
+    assert_eq!(run("(String/valueOf 42)"), "\"42\"");
+    assert_eq!(run("(.charAt \"hello\" 1)"), "\\e");
+    assert_eq!(run("(.substring \"hello\" 1 3)"), "\"el\"");
+    assert_eq!(run("(String. 42)"), "\"42\"");
+    assert_eq!(run("(. clojure.lang.RT (cons 1 nil))"), "(1)");
+    // an UNKNOWN static is a catchable error, not a compile-time abort
+    assert_eq!(run("(try (Nope/thing 1) (catch Exception e :caught))"), ":caught");
+    // per-ns (import …) resolves bare simple names
+    assert_eq!(run("(import '(java.lang Math)) (Math/abs -9)"), "9");
+}
+
+#[test]
+fn jvm_layer_class_values_are_honest() {
+    // Class VALUES are real objects: class? is a per-instance check and
+    // forName is a registry lookup whose miss THROWS catchably.
+    assert_eq!(run("(class? (Class/forName \"java.lang.String\"))"), "true");
+    assert_eq!(run("(class? \"just a string\")"), "false");
+    assert_eq!(run("(.getName (Class/forName \"java.lang.String\"))"), "\"java.lang.String\""); 
+    assert_eq!(
+        run("(try (Class/forName \"java.lang.Nope\") (catch Exception e :cnfe))"),
+        ":cnfe"
+    );
+    assert_eq!(run("(.getName (class 5))"), "\"java.lang.Long\"");
+    assert_eq!(run("(.getSimpleName (class {:a 1}))"), "\"PersistentArrayMap\"");
+    assert_eq!(run("(.isInterface (Class/forName \"clojure.lang.ISeq\"))"), "true");
+}
+
+#[test]
+fn jvm_layer_instance_and_inheritance() {
+    // interfaces delegate to predicates/protocols; classes to tag + :extends walk
+    assert_eq!(run("(instance? java.lang.String \"a\")"), "true");
+    assert_eq!(run("(instance? Long 5)"), "true");
+    assert_eq!(run("(instance? clojure.lang.IPersistentVector [1 2])"), "true");
+    assert_eq!(run("(instance? clojure.lang.IPersistentMap {:a 1})"), "true");
+    assert_eq!(run("(instance? clojure.lang.IFn :kw)"), "true");
+    assert_eq!(run("(instance? java.lang.Number \"nope\")"), "false");
+    // a runtime Class VALUE works too (instance? is fully dynamic)
+    assert_eq!(run("(instance? (Class/forName \"java.lang.String\") \"a\")"), "true");
+    // catch by SUPERCLASS: IllegalArgumentException extends RuntimeException
+    assert_eq!(
+        run("(try (throw (IllegalArgumentException. \"bad\")) \
+             (catch RuntimeException e (.getMessage e)))"),
+        "\"bad\""
+    );
+    // …but not the other way around
+    assert_eq!(
+        run("(try (throw (RuntimeException. \"r\")) \
+             (catch IllegalArgumentException e :iae) (catch RuntimeException e :rte))"),
+        ":rte"
+    );
+    // the roots still catch EVERYTHING (thrown strings included)
+    assert_eq!(run("(try (throw \"plain\") (catch Exception e :any))"), ":any");
+}
+
+#[test]
+fn jvm_layer_defclass_is_userland() {
+    // defclass is an ordinary macro — user code can model its own host classes.
+    assert_eq!(
+        run("(defclass acme.Widget
+               (:tag Widget)
+               (:extends java.lang.Object)
+               (:ctor ([n] (%make-record 'Widget (list n))))
+               (:method spin [w] (* 2 (field w 0)))
+               (:static-fn make [n] (acme.Widget. n))
+               (:static ANSWER 42))
+             [(.spin (Widget. 10))
+              (.spin (acme.Widget/make 4))
+              acme.Widget/ANSWER
+              (instance? acme.Widget (Widget. 1))
+              (.getName (class (Widget. 1)))]"),
+        "[20 8 42 true \"acme.Widget\"]"
+    );
+}

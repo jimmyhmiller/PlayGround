@@ -1,4 +1,39 @@
-# Sketch: a JVM layer written in the language itself
+# The JVM layer, written in the language itself (BUILT)
+
+**Status: shipped.** `clojure-stub/src/host_jvm_src.rs` is the layer;
+`interop_rewrite`/`global_ref` lower syntax only; the shim tables
+(`shim_call`/`shim_instance`/`shim_field`), `class_to_tag`'s substring
+heuristics, the `class? = false` stub, the `MapEntry.`/`PersistentQueue`
+special cases, and `Class/forName`-as-interning are all deleted. Gate: run
+70/70 (4 new `jvm_layer_*` tests incl. userland `defclass`), jit 13/13,
+coresuite 620/620 both tiers, medley 287/288, core.match end-to-end.
+
+Deviations from the sketch below, from building it:
+
+* **Descriptors are `JvmClass` records, not maps, and the registry/static
+  tables are flat `(k v …)` plists** — the layer loads at every prelude boot,
+  and in-language hash-map machinery cost ~8ms per class in a debug tree-walk
+  (profiled); prim-style eager code brought the whole layer to ~70ms debug /
+  ~15ms release. Same lesson as core's own bootstrap macros, now written down.
+* **Dot-method dispatch keys are un-namespaced** (`.charAt`, raw): JVM method
+  names aren't namespaced, and it frees registrations to come from any ns.
+  `%dispatch` / `-proto-method` special-case names starting with `.`.
+* **Interfaces may carry `:pred`** (`(defclass clojure.lang.IPersistentMap
+  (:kind :interface) (:tag PersistentArrayMap) (:pred map?))`): instance? by
+  predicate covers all backing types (PAM + PHM + legacy), while `:tag` remains
+  for `extend-type`-on-interface method registration (the compile-time consumer
+  reads it from the registry via `jvm_registry_tag` — Rust walking in-language
+  data).
+* **The throwable ROOTS (Throwable/Exception/Error/Object) stay compile-time
+  catch-alls** in the expander: thrown values include strings and plain
+  records, so the roots must catch everything — dialect semantics, not
+  registry data. Specific classes go through `-jvm-catch-match?` and get real
+  superclass/interface walking (`(catch RuntimeException e)` now catches an
+  `IllegalArgumentException.` — an upgrade from tag equality).
+* Extra registrations discovered by the suites: `js.Error`/`js.RegExp` &
+  friends (cljs-targeted `.cljc` branches), `cljs.core/PersistentQueue.EMPTY`
+  (the `ns/Class.MEMBER` value shape got general lowering support), and
+  `cljs.core.MapEntry`/`cljs.core.PersistentQueue` as default imports.
 
 ## The idea
 

@@ -57,7 +57,51 @@ struct NsState {
     aliases: HashMap<String, HashMap<String, String>>,
     /// per-ns: short name -> fully-qualified sym string
     refers: HashMap<String, HashMap<String, String>>,
+    /// per-ns: `(:import …)` — simple class name -> fully-qualified class name.
+    /// NAME RESOLUTION only; all class SEMANTICS live in the in-language
+    /// `-jvm-registry` (see host_jvm_src).
+    imports: HashMap<String, HashMap<String, String>>,
 }
+
+/// The auto-imported class names (Clojure auto-imports `java.lang.*`; this
+/// dialect's finite equivalent, plus its own host types). Pure NAME table —
+/// what these classes *mean* is defined by `defclass` entries in the registry.
+const DEFAULT_IMPORTS: &[(&str, &str)] = &[
+    ("Object", "java.lang.Object"),
+    ("String", "java.lang.String"),
+    ("CharSequence", "java.lang.CharSequence"),
+    ("Character", "java.lang.Character"),
+    ("Number", "java.lang.Number"),
+    ("Long", "java.lang.Long"),
+    ("Integer", "java.lang.Integer"),
+    ("Short", "java.lang.Short"),
+    ("Byte", "java.lang.Byte"),
+    ("Double", "java.lang.Double"),
+    ("Float", "java.lang.Float"),
+    ("Boolean", "java.lang.Boolean"),
+    ("Math", "java.lang.Math"),
+    ("Class", "java.lang.Class"),
+    ("Throwable", "java.lang.Throwable"),
+    ("Exception", "java.lang.Exception"),
+    ("RuntimeException", "java.lang.RuntimeException"),
+    ("IllegalArgumentException", "java.lang.IllegalArgumentException"),
+    ("IllegalStateException", "java.lang.IllegalStateException"),
+    ("UnsupportedOperationException", "java.lang.UnsupportedOperationException"),
+    ("IndexOutOfBoundsException", "java.lang.IndexOutOfBoundsException"),
+    ("ArithmeticException", "java.lang.ArithmeticException"),
+    ("NullPointerException", "java.lang.NullPointerException"),
+    ("ClassCastException", "java.lang.ClassCastException"),
+    ("NumberFormatException", "java.lang.NumberFormatException"),
+    ("Error", "java.lang.Error"),
+    ("AssertionError", "java.lang.AssertionError"),
+    ("StackOverflowError", "java.lang.StackOverflowError"),
+    ("Symbol", "clojure.lang.Symbol"),
+    ("Keyword", "clojure.lang.Keyword"),
+    ("Pattern", "java.util.regex.Pattern"),
+    // dialect-native host types (cljs heritage)
+    ("MapEntry", "cljs.core.MapEntry"),
+    ("PersistentQueue", "cljs.core.PersistentQueue"),
+];
 
 impl Compiler {
     pub fn new<M: ValueModel>(rt: &mut Runtime<M>) -> Self {
@@ -210,6 +254,29 @@ impl Compiler {
         self.ns.aliases.entry(ns).or_default().insert(alias.to_string(), real.to_string());
     }
 
+    /// `(:import (java.util UUID))` — the bare simple name now resolves to the
+    /// fully-qualified class name in interop positions.
+    pub fn add_import(&mut self, simple: &str, fqn: &str) {
+        let ns = self.ns.current.clone();
+        self.ns.imports.entry(ns).or_default().insert(simple.to_string(), fqn.to_string());
+    }
+
+    /// Resolve a bare class-ish name to a fully-qualified class name: explicit
+    /// per-ns imports first, then the auto-import table. `None` = not a known
+    /// class name (a deftype / dialect record tag).
+    pub fn resolve_class(&self, simple: &str) -> Option<String> {
+        if let Some(f) = self.ns.imports.get(&self.ns.current).and_then(|m| m.get(simple)) {
+            return Some(f.clone());
+        }
+        DEFAULT_IMPORTS.iter().find(|(s, _)| *s == simple).map(|(_, f)| f.to_string())
+    }
+
+    /// Is `alias` a registered namespace alias in the current ns? (A capitalized
+    /// alias must win over class-name interpretation of `Alias/member`.)
+    pub fn has_alias(&self, alias: &str) -> bool {
+        self.ns.aliases.get(&self.ns.current).is_some_and(|m| m.contains_key(alias))
+    }
+
     /// `[foo :refer [x]]` — bare `x` now resolves to the fully-qualified `foo/x`.
     pub fn add_refer(&mut self, short: &str, fq: &str) {
         let ns = self.ns.current.clone();
@@ -312,22 +379,64 @@ impl Compiler {
         rt.intern(&format!("{ns}/{name}"))
     }
 
+    /// `(f 'a 'b …)` — a call to a (clojure.core) runtime fn with symbol
+    /// constants for arguments; how compile-time name resolution hands a class
+    /// reference to the in-language JVM layer.
+    fn jvm_call<M: ValueModel>(&self, rt: &mut Runtime<M>, f: &str, syms: &[Sym]) -> Ir {
+        let g = Ir::Global(rt.intern(f));
+        let args = syms.iter().map(|&x| self.sym_const(rt, x)).collect();
+        Ir::Call(Box::new(g), args)
+    }
+
     /// Compile a (non-local) symbol reference: a `^:dynamic` var reads the
     /// thread-local binding stack (`%dyn-get`); any other var is a plain global.
     fn global_ref<M: ValueModel>(&self, rt: &mut Runtime<M>, s: Sym) -> Ir {
-        // `PersistentQueue/EMPTY` (or cljs's `…PersistentQueue.EMPTY`) is the empty
-        // persistent queue — map it to our `-empty-queue` value.
+        // `Math/PI`-style STATIC reference in value position: a capitalized,
+        // non-alias left segment that is a dotted class name or an imported
+        // simple name reads the class's static member through the JVM layer.
+        // Also `ns/Class.MEMBER` (cljs style: `cljs.core/PersistentQueue.EMPTY`)
+        // — a dotted, capitalized RIGHT side is class + member under the ns.
         {
-            let nm = rt.sym_name(s);
-            if nm.ends_with("PersistentQueue/EMPTY") || nm.ends_with("PersistentQueue.EMPTY") {
-                return Ir::Global(rt.intern("clojure.core/-empty-queue"));
+            let nm = rt.sym_name(s).to_string();
+            if let Some(slash) = nm.find('/') {
+                let (left, right) = (&nm[..slash], &nm[slash + 1..]);
+                let left_caps = left
+                    .rsplit('.')
+                    .next()
+                    .and_then(|x| x.chars().next())
+                    .is_some_and(|c| c.is_ascii_uppercase());
+                if !right.is_empty() && left_caps && !self.has_alias(left) {
+                    let fqn = if left.contains('.') {
+                        Some(left.to_string())
+                    } else {
+                        self.resolve_class(left)
+                    };
+                    if let Some(fqn) = fqn {
+                        let fq = rt.intern(&fqn);
+                        let mem = rt.intern(right);
+                        return self.jvm_call(rt, "clojure.core/-jvm-static-member", &[fq, mem]);
+                    }
+                }
+                if !left_caps && right.contains('.') {
+                    if let Some(dot) = right.rfind('.') {
+                        let (cls, mem) = (&right[..dot], &right[dot + 1..]);
+                        if cls.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                            && !mem.is_empty()
+                        {
+                            let fq = rt.intern(&format!("{left}.{cls}"));
+                            let mem = rt.intern(mem);
+                            return self.jvm_call(rt, "clojure.core/-jvm-static-member", &[fq, mem]);
+                        }
+                    }
+                }
             }
         }
         // A bare dotted class reference in VALUE position (`clojure.lang.
-        // IPersistentVector` as a dispatch value, real core.match does this).
-        // The dialect's class values ARE runtime tag symbols (`deftype T` binds
-        // `T` to `'T`), so: prefer a var `a.b/C` (a protocol/deftype defined in
-        // ns `a.b`), else compile to the mapped tag symbol as a constant.
+        // IPersistentVector` as a dispatch value — real core.match does this).
+        // Prefer a var `a.b/C` (a protocol/deftype defined in ns `a.b`); else
+        // hand the name to the JVM layer, which yields a `Class` record for
+        // registered classes, a static member for `pkg.Class.MEMBER` js-style
+        // refs, or the bare tag symbol for unknown names (legacy behavior).
         {
             let nm = rt.sym_name(s).to_string();
             let classlike = !nm.contains('/')
@@ -344,10 +453,12 @@ impl Compiler {
                         return Ir::Global(dotted_var);
                     }
                 }
-                let simple = nm.rsplit('.').next().unwrap_or(&nm);
-                let tag = crate::class_to_tag(simple).unwrap_or(simple);
-                let tag_sym = rt.intern(tag);
-                return self.sym_const(rt, tag_sym);
+                let simple = nm.rsplit('.').next().unwrap_or(&nm).to_string();
+                let parent = nm[..nm.len() - simple.len()].trim_end_matches('.').to_string();
+                let fq = rt.intern(&nm);
+                let sim = rt.intern(&simple);
+                let par = rt.intern(&parent);
+                return self.jvm_call(rt, "clojure.core/-jvm-class-value", &[fq, sim, par]);
             }
         }
         // A prim used in VALUE position (`(map nil? xs)`, `{:a nil?}`) has no var to
@@ -553,7 +664,14 @@ impl Compiler {
                 // the wrapper must still dispatch rather than call itself.
                 "%dispatch" => {
                     let m_raw = self.name(rt, items[1]).expect("%dispatch: method name");
-                    let method = self.resolve_global(rt, m_raw);
+                    // A DOT-name (`.charAt` — a host instance method) is its own
+                    // dispatch key, un-namespaced: JVM method names aren't
+                    // namespaced, and registrations from any ns must share it.
+                    let method = if rt.sym_name(m_raw).starts_with('.') {
+                        m_raw
+                    } else {
+                        self.resolve_global(rt, m_raw)
+                    };
                     let site = self.fresh_site();
                     let args = items[2..].iter().map(|&f| self.compile(rt, f)).collect();
                     return Ir::Dispatch { site, method, args };
@@ -566,7 +684,11 @@ impl Compiler {
                     // sentinel) DEFINES it in the current ns; an `extend-type` impl
                     // RESOLVES it (own -> refer -> auto-referred clojure.core). The
                     // TYPE tag stays bare — it's a `type-of` record tag, not a var.
-                    let m = if rt.sym_name(ty) == "-protocol-default" {
+                    // A DOT-name (host instance method, from `defclass`) stays a
+                    // bare un-namespaced key (see `%dispatch`).
+                    let m = if rt.sym_name(m_raw).starts_with('.') {
+                        m_raw
+                    } else if rt.sym_name(ty) == "-protocol-default" {
                         self.def_name(rt, m_raw)
                     } else {
                         self.resolve_global(rt, m_raw)

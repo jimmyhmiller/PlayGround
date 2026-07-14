@@ -25,6 +25,7 @@ static GENSYM: AtomicU64 = AtomicU64::new(0);
 
 mod compile;
 mod data;
+mod host_jvm_src;
 mod cljs_types_src;
 mod clojure_data_json_src;
 mod clojure_set_src;
@@ -67,6 +68,10 @@ pub fn run_with_paths<M: ValueModel>(
     // Persistent data structures ported from ClojureScript (EPL-1.0), loaded after
     // the core protocols/shim they build on. Redefines vector/vec/vector?.
     run_src(rt, cs, &mut macros, &mut comp, cljs_types_src::CLJS);
+    // The JVM layer — every host class/method/static, as in-language data
+    // (`defclass` + `-jvm-registry`). The expander's interop lowering targets
+    // these fns; nothing in Rust knows a class name.
+    run_src(rt, cs, &mut macros, &mut comp, host_jvm_src::HOST_JVM);
     // clojure.core + the cljs types loaded into `clojure.core`; user code from
     // here on runs in the `user` namespace. EVERY var is now ns-qualified, so the
     // frontend's own references to core helpers use their `clojure.core/…` names.
@@ -439,7 +444,7 @@ fn expand<M: ValueModel>(
         } else if is_sym(rt, head, "try") {
             // Desugar typed multi-catch into a single catch-all whose body is a
             // type-dispatch (ClojureScript's model); expand the result.
-            let d = desugar_try(rt, f);
+            let d = desugar_try(rt, comp, f);
             expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "binding") {
             // `(binding [*x* v] body…)` — thread-local dynamic-var bindings via a
@@ -457,7 +462,7 @@ fn expand<M: ValueModel>(
             let getsym = sym(rt, "get");
             let g = rt.vec_to_list(&[getsym, items[1], head]);
             expand(rt, cs, macros, comp, g)
-        } else if let Some(rw) = interop_rewrite(rt, f) {
+        } else if let Some(rw) = interop_rewrite(rt, comp, f) {
             expand(rt, cs, macros, comp, rw)
         } else {
             let items = rt.list_to_vec(f);
@@ -844,14 +849,18 @@ fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form
     let ty = if matches!(rt.decode(items[1]), Val::Nil) {
         sym(rt, "nil")
     } else if let Val::Sym(s) = rt.decode(items[1]) {
-        // A qualified Java class name (`clojure.lang.IPersistentVector`, `java.lang.String`)
-        // maps to our runtime type tag, so extending a host interface registers
-        // against the type `type-of` actually reports.
+        // A qualified Java class name (`clojure.lang.IPersistentVector`,
+        // `java.lang.String`) maps to our runtime type tag through the JVM
+        // layer's registry (its `:tag`), so extending a host interface
+        // registers against the type `type-of` actually reports. Method
+        // registration needs the tag at COMPILE time, so this reads the
+        // in-language registry atom from Rust (policy stays in the data).
         let name = rt.sym_name(s).to_string();
         if name.contains('.') {
             let simple = name.rsplit(['.', '/']).next().unwrap_or(&name).to_string();
-            let tag = class_to_tag(&simple).unwrap_or(&simple).to_string();
-            sym(rt, &tag)
+            let tag = jvm_registry_tag(rt, &name.replace('/', "."))
+                .unwrap_or_else(|| rt.intern(&simple));
+            rt.encode(Val::Sym(tag))
         } else {
             items[1]
         }
@@ -1399,42 +1408,98 @@ fn multi_arity<M: ValueModel>(rt: &mut Runtime<M>, clauses: &[u64]) -> u64 {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Java-interop shim: rewrite `(. Class …)` / `Class/method` / `.method` to our
-// own primitives. We don't implement the JVM — we map each Java method to our
-// reimplementation (the `-rt-*` host runtime). The table GROWS as we walk real
-// clojure/core.clj; unknown interop panics loudly, naming the next gap.
+// Java-interop lowering — SYNTAX only. The expander knows no class or method
+// names: instance calls become dispatch sites on dot-munged method names
+// (registered by `defclass`, same inline-cached machinery as protocols), and
+// statics/constructors/class values become calls into the in-language JVM
+// layer's registry (see host_jvm_src). Misses are catchable runtime errors.
 // ─────────────────────────────────────────────────────────────────────────
 
-fn interop_rewrite<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> Option<u64> {
+/// `(%dispatch .method obj args…)` — an instance-method call site.
+fn dot_dispatch<M: ValueModel>(rt: &mut Runtime<M>, method: &str, obj: u64, args: &[u64]) -> u64 {
+    let d = sym(rt, "%dispatch");
+    let m = sym(rt, &format!(".{method}"));
+    let mut out = vec![d, m, obj];
+    out.extend_from_slice(args);
+    rt.vec_to_list(&out)
+}
+
+/// `(f 'a 'b args…)` — a call to a JVM-layer fn with leading quoted symbols.
+fn jvm_layer_call<M: ValueModel>(
+    rt: &mut Runtime<M>,
+    f: &str,
+    syms: &[&str],
+    args: &[u64],
+) -> u64 {
+    let fs = sym(rt, f);
+    let mut out = vec![fs];
+    for s in syms {
+        let sv = sym(rt, s);
+        out.push(quote_form(rt, sv));
+    }
+    out.extend_from_slice(args);
+    rt.vec_to_list(&out)
+}
+
+/// If `target` (the first arg of a `(. target …)` form) names a CLASS — a
+/// dotted name with a capitalized last segment, or a bare imported simple
+/// name — its fully-qualified name. `None` = an instance expression.
+fn static_class_fqn<M: ValueModel>(rt: &Runtime<M>, comp: &Compiler, target: u64) -> Option<String> {
+    let Val::Sym(s) = rt.decode(target) else { return None };
+    let name = rt.sym_name(s);
+    let simple = last_seg(name);
+    if !simple.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
+    if name.contains('.') {
+        return Some(name.to_string());
+    }
+    comp.resolve_class(&simple)
+}
+
+fn interop_rewrite<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> Option<u64> {
     let items = rt.list_to_vec(form);
     let Val::Sym(hs) = rt.decode(items[0]) else { return None };
     let hname = rt.sym_name(hs).to_string();
 
-    if hname == "." {
-        let class = last_seg(&sym_str(rt, items[1]));
-        if rt.as_cons(items[2]).is_some() {
+    if hname == "." && items.len() >= 3 {
+        // `(. target member)` / `(. target member args…)` / `(. target (member args…))`
+        let (method, margs): (String, Vec<u64>) = if rt.as_cons(items[2]).is_some() {
             let call = rt.list_to_vec(items[2]);
-            let method = sym_str(rt, call[0]);
-            return Some(shim_call(rt, &class, &method, &call[1..]));
-        }
-        let method = sym_str(rt, items[2]);
-        if items.len() > 3 {
-            return Some(shim_call(rt, &class, &method, &items[3..]));
-        }
-        return Some(shim_field(rt, &class, &method));
+            (sym_str(rt, call[0]), call[1..].to_vec())
+        } else {
+            (sym_str(rt, items[2]), items[3..].to_vec())
+        };
+        return Some(match static_class_fqn(rt, comp, items[1]) {
+            Some(fqn) => {
+                if margs.is_empty() && rt.as_cons(items[2]).is_none() {
+                    // `(. Class member)` — a static field read (or 0-arg static fn)
+                    jvm_layer_call(rt, "-jvm-static-member", &[&fqn, &method], &[])
+                } else {
+                    jvm_layer_call(rt, "-jvm-invoke-static", &[&fqn, &method], &margs)
+                }
+            }
+            None => dot_dispatch(rt, &method, items[1], &margs),
+        });
     }
     if let Some(slash) = hname.find('/') {
-        let class = last_seg(&hname[..slash]);
-        // `Foo/bar` with an UPPERCASE leading segment is a host static call; a
-        // lowercase prefix (`m/square`, `util.math/square`) is a namespace- or
-        // alias-qualified VAR reference — leave it for the compiler to resolve.
-        if class.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-            let method = hname[slash + 1..].to_string();
-            return Some(shim_call(rt, &class, &method, &items[1..]));
+        // `Foo/bar` / `pkg.Foo/bar` with a capitalized (non-alias) class segment
+        // is a static call; a lowercase prefix is a ns/alias var reference.
+        let left = &hname[..slash];
+        let simple = last_seg(left);
+        if simple.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && !comp.has_alias(left) {
+            let fqn = if left.contains('.') {
+                left.to_string()
+            } else {
+                comp.resolve_class(&simple).unwrap_or_else(|| simple.clone())
+            };
+            let method = &hname[slash + 1..];
+            return Some(jvm_layer_call(rt, "-jvm-invoke-static", &[&fqn, method], &items[1..]));
         }
     }
     // `(.-field x)` -> `(%field-by-name x 'field)` — ClojureScript field access on
-    // a deftype instance, resolved through the field-name registry.
+    // a deftype instance, resolved through the field-name registry. NOT part of
+    // the JVM layer: these are the dialect's own record fields.
     if let Some(field) = hname.strip_prefix(".-") {
         if !field.is_empty() {
             // `.-length` (a cljs raw array's element count) -> `(%alength x)`.
@@ -1448,18 +1513,22 @@ fn interop_rewrite<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> Option<u64>
         }
     }
     if hname.starts_with('.') && hname.len() > 1 {
-        let method = hname[1..].to_string();
-        return Some(shim_instance(rt, &method, items[1], &items[2..]));
+        return Some(dot_dispatch(rt, &hname[1..], items[1], &items[2..]));
     }
-    // Constructor `(Class. args…)` -> a record tagged by the class's simple name,
-    // so `type-of` / typed `catch` can identify it (e.g. `(RuntimeException. m)`).
+    // Constructor `(Class. args…)`. A known class (dotted, `ns/Class`-qualified,
+    // or imported) constructs through the registry; a bare unknown name is a
+    // deftype/dialect record — build it directly (`(PersistentVector. …)` is the
+    // collection hot path, so no registry indirection).
     if hname.ends_with('.') && hname.len() > 1 && hname != ".." {
-        let simple = last_seg(&hname[..hname.len() - 1]);
-        // A map entry is a `[k v]` vector in this dialect (as it is everywhere
-        // else here), so `(MapEntry. k v _hash)` builds the 2-vector.
-        if simple == "MapEntry" && items.len() >= 3 {
-            let veck = sym(rt, "vector");
-            return Some(rt.vec_to_list(&[veck, items[1], items[2]]));
+        let cname = &hname[..hname.len() - 1];
+        let simple = last_seg(cname);
+        let fqn = if cname.contains('.') || cname.contains('/') {
+            Some(cname.replace('/', "."))
+        } else {
+            comp.resolve_class(&simple)
+        };
+        if let Some(fqn) = fqn {
+            return Some(jvm_layer_call(rt, "-jvm-construct", &[&fqn], &items[1..]));
         }
         let rec = sym(rt, "record");
         let tag = sym(rt, &simple);
@@ -1483,83 +1552,27 @@ fn last_seg(s: &str) -> String {
     s.rsplit(['.', '/']).next().unwrap_or(s).to_string()
 }
 
-/// Compile an unsupported host-interop form to a RUNTIME throw (not a compile-time
-/// panic), so a library that only touches host interop in a few (platform-specific)
-/// functions still LOADS and its pure functions work; only calling the interop one
-/// throws a clear, catchable error.
-fn interop_unsupported<M: ValueModel>(rt: &mut Runtime<M>, what: String) -> u64 {
-    let id = rt.alloc(Obj::Str(format!("unsupported host interop: {what}")));
-    let msgv = <M::R as microlang::Repr>::enc_ref(id);
-    let throwk = sym(rt, "throw");
-    rt.vec_to_list(&[throwk, msgv])
-}
-
-fn shim_call<M: ValueModel>(rt: &mut Runtime<M>, class: &str, method: &str, args: &[u64]) -> u64 {
-    let head = match (class, method) {
-        ("RT", "cons") => "%cons",
-        ("RT", "first") => "-rt-first",
-        ("RT", "next") => "-rt-next",
-        ("RT", "more") => "-rt-rest",
-        ("RT", "seq") => "-rt-seq",
-        ("RT", "conj") => "-rt-conj",
-        ("RT", "assoc") => "-rt-assoc",
-        // No Class objects exist in this dialect — a class VALUE is its runtime
-        // type-tag symbol (compile.rs global_ref), so forName is symbol interning.
-        ("Class", "forName") => "-class-for-name",
-        _ => return interop_unsupported(rt, format!("{class}/{method}")),
-    };
-    let h = sym(rt, head);
-    let mut out = vec![h];
-    out.extend_from_slice(args);
-    rt.vec_to_list(&out)
-}
-
-fn shim_field<M: ValueModel>(rt: &mut Runtime<M>, class: &str, field: &str) -> u64 {
-    match (class, field) {
-        ("PersistentList", "creator") => sym(rt, "-list"),
-        _ => interop_unsupported(rt, format!("{class}/{field}")),
-    }
-}
-
-fn shim_instance<M: ValueModel>(rt: &mut Runtime<M>, method: &str, obj: u64, args: &[u64]) -> u64 {
-    match method {
-        "withMeta" => {
-            let h = sym(rt, "-with-meta");
-            let mut out = vec![h, obj];
-            out.extend_from_slice(args);
-            rt.vec_to_list(&out)
-        }
-        "meta" => call1(rt, "-meta", obj),
-        // Host collection methods on a mutable raw array (cljs `(array)` /
-        // `(array-list)`): these mutate/read the Obj::Vector in place.
-        "isEmpty" => call1(rt, "-al-empty?", obj),
-        "toArray" | "slice" => call1(rt, "-array->vec", obj),
-        "size" | "count" | "length" => call1(rt, "%alength", obj),
-        "add" | "push" => {
-            let h = sym(rt, "-al-add!");
-            let mut out = vec![h, obj];
-            out.extend_from_slice(args);
-            rt.vec_to_list(&out)
-        }
-        "clear" => call1(rt, "-al-clear!", obj),
-        "shift" => call1(rt, "-al-shift!", obj),
-        // `(.replace s target replacement)` — Java String.replace: LITERAL
-        // replace-all. clojure.string/replace with a string match is exactly
-        // that (and it's preloaded before any user require can call this).
-        "replace" => {
-            let h = sym(rt, "clojure.string/replace");
-            let mut out = vec![h, obj];
-            out.extend_from_slice(args);
-            rt.vec_to_list(&out)
-        }
-        // `.indexOf coll item` -> index of item in coll, or -1.
-        "indexOf" => {
-            let h = sym(rt, "-index-of");
-            let mut out = vec![h, obj];
-            out.extend_from_slice(args);
-            rt.vec_to_list(&out)
-        }
-        _ => interop_unsupported(rt, format!(".{method}")),
+/// The `:tag` of a registered class, read from the IN-LANGUAGE JVM registry
+/// (`clojure.core/-jvm-registry`: an atom holding a flat `(fqn desc …)` plist
+/// of `JvmClass` descriptor records — tag is field 2; see host_jvm_src). The
+/// expander needs this at compile time for `extend-type` on a host class, but
+/// the knowledge itself stays in the language — Rust just walks the data.
+fn jvm_registry_tag<M: ValueModel>(rt: &Runtime<M>, fqn: &str) -> Option<Sym> {
+    let regsym = rt.intern("clojure.core/-jvm-registry");
+    let regv = rt.global(regsym)?;
+    let Val::Ref(id) = rt.decode(regv) else { return None };
+    let Obj::Atom(a) = &rt.heap()[id as usize] else { return None };
+    let plist = rt.list_to_vec(a.load(Ordering::Acquire));
+    let want = rt.intern(fqn);
+    let desc = plist
+        .chunks(2)
+        .find(|kv| kv.len() == 2 && matches!(rt.decode(kv[0]), Val::Sym(s) if s == want))
+        .map(|kv| kv[1])?;
+    let Val::Ref(did) = rt.decode(desc) else { return None };
+    let Obj::Record { fields, .. } = &rt.heap()[did as usize] else { return None };
+    match rt.decode(*fields.get(2)?) {
+        Val::Sym(tag) => Some(tag),
+        _ => None,
     }
 }
 
@@ -1818,7 +1831,33 @@ fn handle_ns_form<M: ValueModel>(
         }
         return Some(nil);
     }
+    if is_sym(rt, head, "import") {
+        let items = rt.list_to_vec(form);
+        for &spec in &items[1..] {
+            let spec = unquote(rt, spec);
+            process_import_spec(rt, comp, spec);
+        }
+        return Some(nil);
+    }
     None
+}
+
+/// One import spec: `java.io.File` (a full class name) or `(java.util Date
+/// UUID)` / `[java.util Date]` (a package + simple names). Registers simple ->
+/// FQN in the current ns's import table; class SEMANTICS come from the
+/// in-language registry when the name is used.
+fn process_import_spec<M: ValueModel>(rt: &mut Runtime<M>, comp: &mut Compiler, spec: u64) {
+    if let Some(full) = sym_name_of(rt, spec) {
+        comp.add_import(&last_seg(&full), &full);
+        return;
+    }
+    let parts = binding_items(rt, spec).unwrap_or_else(|| rt.list_to_vec(spec));
+    let Some(pkg) = parts.first().and_then(|&p| sym_name_of(rt, p)) else { return };
+    for &name in &parts[1..] {
+        if let Some(simple) = sym_name_of(rt, name) {
+            comp.add_import(&simple, &format!("{pkg}.{simple}"));
+        }
+    }
 }
 
 /// A `(:require …)` / `(:use …)` clause inside an `ns` form.
@@ -1839,7 +1878,14 @@ fn process_ns_clause<M: ValueModel>(
             process_require_spec(rt, cs, macros, comp, use_all, spec);
         }
     }
-    // :refer-clojure / :import — core is auto-referred; we model no host imports.
+    // `(:import (java.util Date) java.io.File)` — per-ns simple-name -> FQN.
+    if is_keyword(rt, items[0], "import") {
+        for &spec in &items[1..] {
+            let spec = unquote(rt, spec);
+            process_import_spec(rt, comp, spec);
+        }
+    }
+    // :refer-clojure — core is auto-referred already.
 }
 
 /// A single require spec: `foo`, `[foo :as bar]`, or `[foo :refer [x y]]`. LOADS
@@ -1962,35 +2008,32 @@ fn ensure_loaded<M: ValueModel>(
     comp.set_ns(&saved);
 }
 
-/// Map the simple (last dotted segment of a) Java/JS class name to the runtime
-/// tag `type-of` reports, or `None` if we don't model it. Shared by `instance?`,
-/// typed `catch`, and class references in value position (`compile::global_ref`).
-pub(crate) fn class_to_tag(simple: &str) -> Option<&'static str> {
-    Some(match simple {
-        "Symbol" => "Symbol",
-        "Keyword" => "Keyword",
-        "String" | "CharSequence" => "String",
-        "Character" => "Char",
-        "Long" | "Integer" | "Short" | "Byte" | "BigInteger" | "BigInt" => "Long",
-        "Double" | "Float" | "BigDecimal" => "Double",
-        "Boolean" => "Boolean",
-        "RegExp" | "Pattern" | "Regex" => "Regex",
-        s if s.contains("Vector") => "PersistentVector",
-        s if s.contains("Map") => "PersistentArrayMap",
-        s if s.contains("Set") => "PersistentHashSet",
-        s if s.contains("List") || s == "ISeq" || s == "Seqable" || s == "Cons" => "List",
-        s if s == "IFn" || s == "AFn" || s == "Fn" => "Fn",
-        _ => return None,
-    })
+/// The fully-qualified class name for a class reference: dotted (or
+/// `ns/Class`-qualified) names pass through; a bare simple name resolves via
+/// the current ns's imports + the auto-import table, else stays itself
+/// (deftype tags resolve at runtime by tag equality).
+fn class_fqn<M: ValueModel>(rt: &Runtime<M>, comp: &Compiler, class_sym: Sym) -> (String, String) {
+    let cname = rt.sym_name(class_sym).to_string();
+    let simple = last_seg(&cname);
+    let fqn = if cname.contains('.') || cname.contains('/') {
+        cname.replace('/', ".")
+    } else {
+        comp.resolve_class(&simple).unwrap_or_else(|| simple.clone())
+    };
+    (fqn, simple)
 }
 
-/// `(instance? Class x)` -> `(%num-eq (type-of x) 'Tag)`, mapping the (possibly
-/// package-qualified) class name to the runtime tag `type-of` reports. Panics on
-/// an unknown class rather than silently returning a wrong answer.
+/// `(instance? Class x)`. A class name resolving to a defined VAR (a protocol
+/// or a deftype's type value) checks through `-instance-val`; anything else
+/// asks the in-language JVM layer (`-jvm-instance-of?`: registered classes by
+/// tag + inheritance walk, interfaces by protocol satisfaction, unknown names
+/// by tag equality). A non-symbol class expression is a runtime class VALUE
+/// (`Class` record / protocol / tag sym) — fully dynamic, like Clojure's fn.
 fn instance_rewrite<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
     let items = rt.list_to_vec(form);
     let Val::Sym(cs) = rt.decode(items[1]) else {
-        panic!("instance?: first argument must be a class symbol");
+        let iv = sym(rt, "-jvm-instance?");
+        return rt.vec_to_list(&[iv, items[1], items[2]]);
     };
     // If the class NAME resolves to a bound var, it may be a PROTOCOL (in which
     // case `instance?` means "satisfies the protocol") or a deftype's own type
@@ -2016,15 +2059,8 @@ fn instance_rewrite<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u
         let cref = rt.encode(Val::Sym(resolved));
         return rt.vec_to_list(&[iv, cref, items[2]]);
     }
-    let simple = cname.rsplit(['.', '/']).next().unwrap_or(&cname);
-    let tag = class_to_tag(simple).unwrap_or(simple).to_string();
-    let numeq = sym(rt, "%num-eq");
-    let typeof_sym = sym(rt, "type-of");
-    let quote_sym = sym(rt, "quote");
-    let tag_sym = sym(rt, &tag);
-    let tag_quoted = rt.vec_to_list(&[quote_sym, tag_sym]);
-    let typeof_call = rt.vec_to_list(&[typeof_sym, items[2]]);
-    rt.vec_to_list(&[numeq, typeof_call, tag_quoted])
+    let (fqn, simple) = class_fqn(rt, comp, cs);
+    jvm_layer_call(rt, "-jvm-instance-of?", &[&fqn, &simple], &items[2..3])
 }
 
 /// Desugar `(try body… (catch Class e h…)… (catch :default e h…) (finally f…))`
@@ -2035,7 +2071,7 @@ fn instance_rewrite<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u
 /// match. A `:default` clause, or a base class (`Throwable`/`Exception`/`Error`/
 /// `Object`), matches anything. `try*`/`EXC`/`DISPATCH`/`finally` are `nil` when
 /// the corresponding part is absent.
-fn desugar_try<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
+fn desugar_try<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
     let items = rt.list_to_vec(form);
     let mut body_forms: Vec<u64> = Vec::new();
     let mut catches: Vec<Vec<u64>> = Vec::new();
@@ -2065,7 +2101,7 @@ fn desugar_try<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
             // clause = (catch <class-or-:default> <bind> body…)
             let class = clause[1];
             let bind = clause[2];
-            let test = catch_test(rt, class, exc);
+            let test = catch_test(rt, comp, class, exc);
             // (let (bind exc) body…)
             let letsym = sym(rt, "let");
             let bindlist = rt.vec_to_list(&[bind, exc]);
@@ -2188,9 +2224,13 @@ fn desugar_with_redefs<M: ValueModel>(rt: &mut Runtime<M>, form: u64) -> u64 {
     rt.vec_to_list(&letform)
 }
 
-/// The test form for one catch clause: `true` for a catch-all (`:default` or a
-/// base class), else `(%num-eq (type-of exc) 'Tag)`.
-fn catch_test<M: ValueModel>(rt: &mut Runtime<M>, class: u64, exc: u64) -> u64 {
+/// The test form for one catch clause. `:default` and the throwable ROOTS
+/// (Throwable/Exception/Error/Object) are compile-time `true` — thrown values
+/// in this dialect include strings and plain records, so the roots must catch
+/// EVERYTHING (dialect semantics, not a registry question). A specific class
+/// asks the JVM layer: tag match, or superclass/interface walk through the
+/// registry, or plain tag equality for unregistered (deftype) names.
+fn catch_test<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, class: u64, exc: u64) -> u64 {
     let catch_all = if is_keyword(rt, class, "default") {
         true
     } else if let Val::Sym(s) = rt.decode(class) {
@@ -2205,14 +2245,8 @@ fn catch_test<M: ValueModel>(rt: &mut Runtime<M>, class: u64, exc: u64) -> u64 {
     let Val::Sym(s) = rt.decode(class) else {
         panic!("catch: expected a class symbol or :default");
     };
-    let simple = last_seg(rt.sym_name(s));
-    let tag = class_to_tag(&simple).unwrap_or(&simple).to_string();
-    let numeq = sym(rt, "%num-eq");
-    let typeof_sym = sym(rt, "type-of");
-    let typeof_call = rt.vec_to_list(&[typeof_sym, exc]);
-    let tag_sym = sym(rt, &tag);
-    let tag_q = quote_form(rt, tag_sym);
-    rt.vec_to_list(&[numeq, typeof_call, tag_q])
+    let (fqn, simple) = class_fqn(rt, comp, s);
+    jvm_layer_call(rt, "-jvm-catch-match?", &[&fqn, &simple], &[exc])
 }
 
 /// `(def (-macro-meta name) val…)` -> `(name, (def name val…))`, else None.
