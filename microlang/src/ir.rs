@@ -242,6 +242,13 @@ pub enum Prim {
     /// introspection primitive: with it (plus `str`/`str-cat` to rebuild), all of
     /// `clojure.string`, regex, and a reader can be written in the language.
     StrChars,
+    /// `(%str->bytes s)` -> a fresh mutable array of the string's UTF-8 bytes as
+    /// SIGNED ints (-128..=127, the JVM's byte), so byte-level protocol code
+    /// (bencode, wire formats) can be written in the language.
+    StrToBytes,
+    /// `(%bytes->str arr)` -> the string for an array of signed byte ints
+    /// (UTF-8, invalid sequences replaced — java.lang.String's behavior).
+    BytesToStr,
 
     // ── optimizer-introduced fixnum specializations ──────────────────────────
     // These are produced ONLY by the `optimize` nanopass (never by `analyze`).

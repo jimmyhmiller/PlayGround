@@ -24,7 +24,8 @@
 ;; Loaded into `clojure.core` right after the cljs persistent types.
 
 ;; ─────────────── registry ───────────────
-;; descriptor: (record 'JvmClass simple kind tag protocol pred extends implements ctor statics static-fns)
+;; descriptor: (record 'JvmClass simple kind tag protocol pred extends
+;;                     implements ctor statics static-fns component extend-tags)
 (defn -jvm-c-simple     [d] (field d 0))  ;; 'String — the simple name symbol
 (defn -jvm-c-kind       [d] (field d 1))  ;; :class | :interface | :static
 (defn -jvm-c-tag        [d] (field d 2))  ;; runtime type tag its instances carry (or nil)
@@ -35,6 +36,12 @@
 (defn -jvm-c-ctor       [d] (field d 7))  ;; constructor fn (or nil = tagged record)
 (defn -jvm-c-statics    [d] (field d 8))  ;; ('NAME value …) plist
 (defn -jvm-c-static-fns [d] (field d 9))  ;; ('name fn …) plist
+(defn -jvm-c-component  [d] (field d 10)) ;; array component class FQN (or nil)
+;; field 11 = :extend-tags — the CONCRETE tags an `extend-type` on this
+;; interface registers against (read at compile time by the Rust expander:
+;; jvm_registry_tags). An interface spans several runtime types here (Named =
+;; Symbol + Keyword), and this list IS the dispatch-specificity policy.
+(defn -jvm-c-extend-tags [d] (field d 11))
 
 (def -jvm-registry (%atom-new nil))   ;; (fqn desc fqn desc …) plist
 (def -jvm-tag-index (%atom-new nil))  ;; (tag fqn tag fqn …) plist
@@ -129,6 +136,8 @@
         extc    (-jvm-clause clauses 'extends)
         implc   (-jvm-clause clauses 'implements)
         ctorc   (-jvm-clause clauses 'ctor)
+        compc   (-jvm-clause clauses 'component)
+        etagsc  (-jvm-clause clauses 'extend-tags)
         statics (-jvm-clauses clauses 'static)
         sfns    (-jvm-clauses clauses 'static-fn)
         methods (-jvm-clauses clauses 'method)
@@ -148,7 +157,9 @@
                 (if implc (list 'quote (%rest implc)) nil)
                 (if ctorc (%cons 'fn (%rest ctorc)) nil)
                 (if statics (%cons 'list (-jvm-static-kvs statics false)) nil)
-                (if sfns (%cons 'list (-jvm-static-kvs sfns true)) nil)))
+                (if sfns (%cons 'list (-jvm-static-kvs sfns true)) nil)
+                (if compc (list 'quote (second* compc)) nil)
+                (if etagsc (list 'quote (%rest etagsc)) nil)))
         (-jvm-method-forms methods tag)))))
 
 ;; ─────────────── the reflective operations ───────────────
@@ -264,10 +275,23 @@
   (:tag Class)
   (:method getName [c] (name (field c 0)))
   (:method getSimpleName [c] (-jvm-simple-str (name (field c 0))))
-  (:method isArray [c] false)
+  (:method isArray [c]
+    (let [d (-jvm-descriptor (field c 0))]
+      (if d (if (nil? (-jvm-c-component d)) false true) false)))
+  (:method getComponentType [c]
+    (let [d (-jvm-descriptor (field c 0))]
+      (if (nil? d)
+        nil
+        (let [comp (-jvm-c-component d)]
+          (if (nil? comp) nil (-jvm-class-named comp))))))
   (:method isInterface [c] (-jvm-kw? (-jvm-c-kind (-jvm-descriptor (field c 0))) 'interface))
   (:method toString [c] (str "class " (name (field c 0))))
   (:static-fn forName [n] (-jvm-for-name n)))
+
+;; Class VALUES compare by the class they name (Byte/TYPE = the component
+;; class of a byte array, wherever each record was made).
+(extend-type Class
+  IEquiv (-equiv [a b] (and (class? b) (= (field a 0) (field b 0)))))
 
 ;; ─────────────── universal defaults (dispatch root = Object) ───────────────
 ;; `nfields` answers 0 for any non-record, so message extraction is total.
@@ -284,11 +308,17 @@
   (:method toString [o] (str o))
   (:method equals [a b] (= a b))
   (:method hashCode [o] (hash o))
+  (:method count [o] (count o))
+  (:method nth ([o i] (nth o i)) ([o i nf] (nth o i nf)))
   (:method getMessage [e] (-jvm-message-of e)))
 
-;; mutable raw-array ("array-list") methods — cljs host-array interop
+;; mutable raw-array ("array-list") methods — cljs host-array interop.
+;; `:component java.lang.Byte`: raw arrays answer as byte[] to reflective
+;; array checks (`(-> o class .getComponentType (= Byte/TYPE))`, the bencode
+;; Object branch) — this dialect's wire code keeps bytes in raw arrays.
 (defclass cljs.core.ArrayList
   (:tag Vector)
+  (:component java.lang.Byte)
   (:method isEmpty [a] (-al-empty? a))
   (:method toArray [a] (-array->vec a))
   (:method slice [a] (-array->vec a))
@@ -305,14 +335,48 @@
   (:tag String)
   (:extends java.lang.Object)
   (:implements java.lang.CharSequence)
-  (:ctor ([] "") ([x] (str x)))
+  ;; `(String. byte-array charset)` / `(String. byte-array)` decode UTF-8, as
+  ;; wire code expects; anything else stringifies.
+  (:ctor ([] "")
+         ([x] (if (%num-eq (type-of x) 'Vector) (%bytes->str x) (str x)))
+         ([b cs] (%bytes->str b)))
   (:method length [s] (count s))
   (:method charAt [s i] (nth s i))
   (:method substring ([s b] (subs s b)) ([s b e] (subs s b e)))
   (:method replace [s t r] (clojure.string/replace s t r))
+  (:method getBytes ([s] (%str->bytes s)) ([s charset] (%str->bytes s)))
   (:method toString [s] s)
   (:method isEmpty [s] (= 0 (count s)))
   (:static-fn valueOf [x] (str x)))
+
+(defn -jvm-array-sort! [arr cmp]
+  ;; a Clojure comparator may return an int (-1/0/1) or a boolean less?
+  (let [cmp (fn [a b] (let [r (cmp a b)] (if (number? r) (neg? r) r)))
+        sorted (sort cmp (-array->vec arr))]
+    (loop [i 0 s (seq sorted)]
+      (if (nil? s)
+        arr
+        (do (%cell-set! arr i (first s)) (recur (%add i 1) (next s)))))))
+
+(defclass java.nio.charset.StandardCharsets
+  (:kind :static)
+  ;; charset markers — every string<->bytes conversion here IS UTF-8
+  (:static UTF_8 :charset/utf-8)
+  (:static ISO_8859_1 :charset/iso-8859-1))
+
+(defclass java.util.Arrays
+  (:kind :static)
+  ;; in-place sort of a raw array, optionally by comparator
+  (:static-fn sort
+    ([arr] (-jvm-array-sort! arr compare))
+    ([arr cmp] (-jvm-array-sort! arr cmp)))
+  (:static-fn equals [a b]
+    (if (%num-eq (%alength a) (%alength b))
+      (loop [i 0]
+        (if (%lt i (%alength a))
+          (if (= (%aget a i) (%aget b i)) (recur (%add i 1)) false)
+          true))
+      false)))
 
 (defclass java.lang.Math
   (:kind :static)
@@ -325,11 +389,16 @@
 ;; value wrappers / interfaces mapping onto the dialect's native types
 (defclass java.lang.CharSequence (:kind :interface) (:tag String) (:pred string?))
 (defclass java.lang.Character (:tag Char))
-(defclass java.lang.Number (:kind :interface) (:tag Long) (:pred number?))
+(defclass java.lang.Number (:kind :interface) (:tag Long) (:pred number?)
+  (:extend-tags Long Double Ratio))
 (defclass java.lang.Long (:tag Long) (:extends java.lang.Number))
 (defclass java.lang.Integer (:tag Long) (:extends java.lang.Number))
 (defclass java.lang.Short (:tag Long) (:extends java.lang.Number))
-(defclass java.lang.Byte (:tag Long) (:extends java.lang.Number))
+(defclass java.lang.Byte (:tag Long) (:extends java.lang.Number)
+  ;; Byte/TYPE — the byte primitive's class object (what a byte[]'s
+  ;; getComponentType answers). Built directly: statics evaluate DURING this
+  ;; class's own registration, so -jvm-class-named would still answer nil.
+  (:static TYPE (record 'Class 'java.lang.Byte)))
 (defclass java.math.BigInteger (:tag Long) (:extends java.lang.Number))
 (defclass clojure.lang.BigInt (:tag Long) (:extends java.lang.Number))
 (defclass java.lang.Double (:tag Double) (:extends java.lang.Number))
@@ -366,6 +435,14 @@
 (defclass js.Error (:tag Error) (:extends java.lang.Throwable))
 (defclass js.TypeError (:tag TypeError) (:extends js.Error))
 (defclass js.RangeError (:tag RangeError) (:extends js.Error))
+;; java.io exceptions (wire/stream code throws + catches these)
+(defclass java.io.IOException (:tag IOException) (:extends java.lang.Exception))
+(defclass java.io.EOFException (:tag EOFException) (:extends java.io.IOException))
+(defclass java.net.SocketException (:tag SocketException) (:extends java.io.IOException))
+(defclass java.nio.channels.ClosedChannelException
+  (:tag ClosedChannelException) (:extends java.io.IOException))
+(defclass java.lang.InterruptedException
+  (:tag InterruptedException) (:extends java.lang.Exception))
 
 ;; ─────────────── clojure.lang ───────────────
 (defclass clojure.lang.RT
@@ -379,7 +456,14 @@
   (:static-fn assoc [m k v] (-rt-assoc m k v)))
 
 (defclass clojure.lang.Symbol (:tag Symbol))
-(defclass clojure.lang.Keyword (:tag Keyword))
+(defclass clojure.lang.Keyword (:tag Keyword)
+  ;; `(.sym kw)` — the keyword's underlying (possibly ns-qualified) symbol.
+  (:method sym [k] (field k 0)))
+;; Named spans TWO concrete types: `extend-type Named` registers on both.
+(defclass clojure.lang.Named
+  (:kind :interface)
+  (:extend-tags Symbol Keyword)
+  (:pred (fn [x] (or (symbol? x) (keyword? x)))))
 (defclass clojure.lang.PersistentVector (:tag PersistentVector))
 (defclass clojure.lang.IPersistentVector
   (:kind :interface) (:tag PersistentVector) (:pred vector?))
@@ -388,7 +472,16 @@
 (defclass clojure.lang.PersistentArrayMap (:tag PersistentArrayMap))
 (defclass clojure.lang.PersistentHashMap (:tag PersistentHashMap))
 (defclass clojure.lang.IPersistentMap
-  (:kind :interface) (:tag PersistentArrayMap) (:pred map?))
+  (:kind :interface) (:tag PersistentArrayMap) (:pred map?)
+  (:extend-tags PersistentArrayMap PersistentHashMap Map SortedMap))
+;; IPersistentCollection = every non-map collection tag. Maps are collections
+;; too on the JVM, but protocol dispatch there picks the MOST SPECIFIC
+;; interface — here the split of extend-tags between IPersistentMap and this
+;; IS that specificity policy (extend-protocol registers each on its own tags).
+(defclass clojure.lang.IPersistentCollection
+  (:kind :interface) (:tag PersistentVector) (:pred coll?)
+  (:extend-tags PersistentVector PVec Vector List EmptyList LazySeq
+                PersistentHashSet Set SortedSet PersistentQueue))
 (defclass clojure.lang.APersistentMap
   (:kind :interface) (:tag PersistentArrayMap) (:pred map?))
 (defclass clojure.lang.PersistentHashSet (:tag PersistentHashSet))

@@ -141,6 +141,9 @@ impl Compiler {
             ("%symbol", SymbolOf), ("%var-arglists", VarArglists),
             // THE string-introspection primitive; clojure.string/regex build on it.
             ("%str->chars", StrChars), ("%method-types", MethodTypes),
+            // Byte-level string conversions (UTF-8, signed JVM-style bytes) — the
+            // substrate wire protocols (bencode/nREPL) are written on.
+            ("%str->bytes", StrToBytes), ("%bytes->str", BytesToStr),
             // Existing low-level prims surfaced for the string library (char codes
             // for case mapping, raw length) — not new primitives.
             ("%char-code", CharToInt), ("%char-of", IntToChar), ("%str-len", StrLen),

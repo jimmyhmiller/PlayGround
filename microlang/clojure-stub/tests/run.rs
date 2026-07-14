@@ -1377,3 +1377,81 @@ fn jvm_layer_defclass_is_userland() {
         "[20 8 42 true \"acme.Widget\"]"
     );
 }
+
+/// Load a program with the VENDORED real nrepl sources on the load path.
+fn run_nrepl(src: &str) -> String {
+    use std::path::PathBuf;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/nrepl");
+    let r = clojure_stub::run_with_paths(&mut rt, &TreeWalk, src, vec![dir]);
+    clojure_stub::clj_str(&rt, r)
+}
+
+#[test]
+fn real_nrepl_bencode_end_to_end() {
+    // The REAL nrepl/bencode.clj (unmodified) over the in-language java.io
+    // layer. Encoded bytes verified against nrepl 1.3.1 on the JVM.
+    assert_eq!(
+        run_nrepl(
+            "(require '[nrepl.bencode :as ben])
+             (let [out (java.io.ByteArrayOutputStream.)]
+               (ben/write-bencode out {\"op\" \"eval\" \"code\" \"(+ 1 2)\" \"id\" 1})
+               (.toString out))"
+        ),
+        "\"d4:code7:(+ 1 2)2:idi1e2:op4:evale\""
+    );
+    assert_eq!(
+        run_nrepl(
+            "(require '[nrepl.bencode :as ben])
+             (let [out (java.io.ByteArrayOutputStream.)]
+               (ben/write-bencode out {\"status\" [:done] \"value\" \"3\" \"n\" 42})
+               (.toString out))"
+        ),
+        "\"d1:ni42e6:statusl4:donee5:value1:3e\""
+    );
+    // full round-trip: write, read back, and decode a client's raw wire bytes
+    assert_eq!(
+        run_nrepl(
+            "(require '[nrepl.bencode :as ben])
+             (let [out (java.io.ByteArrayOutputStream.)
+                   _ (ben/write-bencode out {\"op\" \"eval\" \"ns\" (symbol \"user\") \"args\" [\"a\" \"b\"] \"n\" -7})
+                   in (java.io.PushbackInputStream. (java.io.ByteArrayInputStream. (.toByteArray out)))
+                   m (ben/read-bencode in)]
+               [(String. (get m \"op\")) (String. (get m \"ns\"))
+                (mapv (fn [b] (String. b)) (get m \"args\")) (get m \"n\")])"
+        ),
+        "[\"eval\" \"user\" [\"a\" \"b\"] -7]"
+    );
+    assert_eq!(
+        run_nrepl(
+            "(require '[nrepl.bencode :as ben])
+             (let [in (java.io.PushbackInputStream.
+                       (java.io.ByteArrayInputStream.
+                        (.getBytes \"d2:id1:14:code7:(+ 1 2)2:op4:evale\")))
+                   m (ben/read-nrepl-message in)]
+               (sort-by first (map (fn [kv] [(key kv) (String. (val kv))]) m)))"
+        ),
+        "([\"code\" \"(+ 1 2)\"] [\"id\" \"1\"] [\"op\" \"eval\"])"
+    );
+}
+
+#[test]
+fn java_io_streams() {
+    assert_eq!(
+        run("(let [out (java.io.ByteArrayOutputStream.)]
+              (.write out 104) (.write out (.getBytes \"ello\"))
+              (String. (.toByteArray out) \"UTF-8\"))"),
+        "\"hello\""
+    );
+    // pushback + unsigned reads + EOF as -1
+    assert_eq!(
+        run("(let [in (java.io.PushbackInputStream. (java.io.ByteArrayInputStream. (.getBytes \"hi\")))]
+              (let [a (.read in)] (.unread in a) [(.read in) (.read in) (.read in)]))"),
+        "[104 105 -1]"
+    );
+    // signed JVM bytes: UTF-8 multibyte round-trip
+    assert_eq!(run("(String. (.getBytes \"héllo\") \"UTF-8\")"), "\"héllo\""); 
+    assert_eq!(run("(unchecked-byte 200)"), "-56");
+    // byte[] reflection (the bencode Object-branch check)
+    assert_eq!(run("(= (.getComponentType (class (byte-array 3))) Byte/TYPE)"), "true");
+}

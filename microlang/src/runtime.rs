@@ -1352,6 +1352,38 @@ impl<M: ValueModel> Runtime<M> {
                     .collect();
                 self.vec_to_list(&vals)
             }
+            Prim::StrToBytes => {
+                let bytes: Vec<u64> = match self.decode(args[0]) {
+                    Val::Ref(id) => match &self.heap()[id as usize] {
+                        // SIGNED bytes (the JVM's `byte`), so in-language wire
+                        // code round-trips exactly like Java's.
+                        Obj::Str(s) => s.bytes().map(|b| M::R::enc_int(b as i8 as i64)).collect(),
+                        _ => panic!("%str->bytes: not a string"),
+                    },
+                    _ => panic!("%str->bytes: not a string"),
+                };
+                let id = self.alloc(Obj::Vector(bytes));
+                M::R::enc_ref(id)
+            }
+            Prim::BytesToStr => {
+                let bytes: Vec<u8> = match self.decode(args[0]) {
+                    Val::Ref(id) => match &self.heap()[id as usize] {
+                        Obj::Vector(v) => v
+                            .iter()
+                            .map(|&b| match self.decode(b) {
+                                Val::Int(n) => n as i8 as u8,
+                                _ => panic!("%bytes->str: array element is not an int"),
+                            })
+                            .collect(),
+                        _ => panic!("%bytes->str: not an array"),
+                    },
+                    _ => panic!("%bytes->str: not an array"),
+                };
+                // Invalid UTF-8 becomes U+FFFD, matching java.lang.String.
+                let s = String::from_utf8_lossy(&bytes).into_owned();
+                let id = self.alloc(Obj::Str(s));
+                M::R::enc_ref(id)
+            }
             // ── atoms: real cross-thread compare-and-set ────────────────
             Prim::AtomNew => {
                 let id = self.alloc(Obj::Atom(Arc::new(AtomicU64::new(args[0]))));

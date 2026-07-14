@@ -2159,3 +2159,39 @@
   (cond (%num-eq (type-of x) 'Delay) (%cell-ref (field x 1) 0)
         (%num-eq (type-of x) 'Promise) (deref (field x 1))
         :else true))
+
+;; ─────────────── host-parity numerics + byte arrays ───────────────
+;; `unchecked-*`: this tower doesn't overflow (ints auto-promote), so the
+;; unchecked arithmetic ops are the checked ones. `unchecked-byte` is the one
+;; with real semantics: the JVM's signed 8-bit narrowing, which byte-level
+;; wire code (bencode) genuinely relies on.
+(defn unchecked-int [x] x)
+(defn unchecked-long [x] x)
+(defn unchecked-add [a b] (+ a b))
+(defn unchecked-subtract [a b] (- a b))
+(defn unchecked-multiply [a b] (* a b))
+(defn unchecked-inc [x] (+ x 1))
+(defn unchecked-dec [x] (- x 1))
+(defn unchecked-byte [x] (- (mod (+ x 128) 256) 128))
+(defn -fill-array! [a v]
+  (loop [i 0]
+    (if (%lt i (%alength a)) (do (%cell-set! a i v) (recur (%add i 1))) a)))
+;; (byte-array n) -> n zero bytes; (byte-array coll) / (byte-array n coll) fill.
+(defn byte-array
+  ([n] (if (number? n)
+         (-fill-array! (%make-array n) 0)
+         (byte-array (count n) n)))
+  ([n coll]
+   (let [a (-fill-array! (%make-array n) 0)]
+     (loop [i 0 s (seq coll)]
+       (if (nil? s) a (do (%cell-set! a i (first s)) (recur (%add i 1) (next s))))))))
+(defn object-array [n] (%make-array n))
+
+;; `(with-open [in (open…)] body…)` — close in reverse order, even on throw.
+(defmacro with-open [bindings & body]
+  (if (nil? (seq bindings))
+    (%cons 'do body)
+    (list 'let (vector (first bindings) (second bindings))
+          (list 'try
+                (%cons 'with-open (%cons (vec (drop 2 bindings)) body))
+                (list 'finally (list '.close (first bindings)))))))

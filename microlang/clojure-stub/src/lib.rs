@@ -34,6 +34,7 @@ mod sources {
     pub const CORE: &str = include_str!("clj/core.clj");
     pub const CLJS_TYPES: &str = include_str!("clj/cljs_types.clj");
     pub const HOST_JVM: &str = include_str!("clj/host_jvm.clj");
+    pub const HOST_IO: &str = include_str!("clj/host_io.clj");
     pub const CLOJURE_STRING: &str = include_str!("clj/clojure/string.clj");
     pub const CLOJURE_SET: &str = include_str!("clj/clojure/set.clj");
     pub const CLOJURE_WALK: &str = include_str!("clj/clojure/walk.clj");
@@ -98,6 +99,8 @@ impl Session {
         // (`defclass` + `-jvm-registry`). The expander's interop lowering targets
         // these fns; nothing in Rust knows a class name.
         run_src(rt, cs, &mut macros, &mut comp, sources::HOST_JVM);
+        // java.io byte streams + clojure.java.io, over the JVM layer.
+        run_src(rt, cs, &mut macros, &mut comp, sources::HOST_IO);
         // clojure.core + the cljs types loaded into `clojure.core`; user code from
         // here on runs in the `user` namespace. EVERY var is now ns-qualified, so
         // the frontend's own references to core helpers use `clojure.core/…` names.
@@ -395,6 +398,41 @@ fn eval_form<M: ValueModel>(
         macros.insert(q);
         rt.set_var_flags(q, microlang::runtime::VAR_MACRO);
         return rt.encode(Val::Nil);
+    }
+    // `(definline name [args] `template)` — an inline fn IS a macro in this
+    // dialect (the template splices at call sites); registration must happen
+    // here at eval level, exactly like defmacro. Call-position only (real
+    // definline also defs a fn; none of the code we run passes them around).
+    if let Some((h, _)) = rt.as_cons(form) {
+        if is_sym(rt, h, "definline") {
+            let items = rt.list_to_vec(form);
+            // the name may arrive wrapped by reader meta (`^:private read-byte`)
+            let mut name = items[1];
+            while let Some((mh, _)) = rt.as_cons(name) {
+                let parts = rt.list_to_vec(name);
+                if parts.len() == 2
+                    && (is_sym(rt, mh, "-private-meta")
+                        || is_sym(rt, mh, "-macro-meta")
+                        || is_sym(rt, mh, "-dynamic-meta"))
+                {
+                    name = parts[1];
+                } else {
+                    break;
+                }
+            }
+            let dm = sym(rt, "defmacro");
+            let mut out = vec![dm, name];
+            // skip an optional docstring before the param vector
+            let mut rest = &items[2..];
+            if rest.len() > 1
+                && matches!(rt.decode(rest[0]), Val::Ref(id) if matches!(&rt.heap()[id as usize], Obj::Str(_)))
+            {
+                rest = &rest[1..];
+            }
+            out.extend_from_slice(rest);
+            let rewritten = rt.vec_to_list(&out);
+            return eval_form(rt, cs, macros, comp, rewritten);
+        }
     }
     if let Some(name) = defmacro_name(rt, form) {
         // (defmacro name params body...) -> (def name (fn [&form &env params...] body...)).
@@ -974,26 +1012,40 @@ fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form
     let items = rt.list_to_vec(form);
     // `(extend-type nil …)`: `nil` reads as the value Nil, but `type-of nil`
     // reports the tag symbol `nil` — so extend against that symbol.
-    let ty = if matches!(rt.decode(items[1]), Val::Nil) {
-        sym(rt, "nil")
+    let tys: Vec<u64> = if matches!(rt.decode(items[1]), Val::Nil) {
+        vec![sym(rt, "nil")]
     } else if let Val::Sym(s) = rt.decode(items[1]) {
         // A qualified Java class name (`clojure.lang.IPersistentVector`,
-        // `java.lang.String`) maps to our runtime type tag through the JVM
-        // layer's registry (its `:tag`), so extending a host interface
-        // registers against the type `type-of` actually reports. Method
-        // registration needs the tag at COMPILE time, so this reads the
-        // in-language registry atom from Rust (policy stays in the data).
+        // `java.lang.String`) maps to our runtime type tag(s) through the JVM
+        // layer's registry: `:extend-tags` when the interface covers several
+        // concrete types (Named = Symbol + Keyword; IPersistentCollection =
+        // every collection tag), else its `:tag`. Method registration needs
+        // tags at COMPILE time, so this reads the in-language registry atom
+        // from Rust (the policy stays in the data).
         let name = rt.sym_name(s).to_string();
-        if name.contains('.') {
-            let simple = name.rsplit(['.', '/']).next().unwrap_or(&name).to_string();
-            let tag = jvm_registry_tag(rt, &name.replace('/', "."))
-                .unwrap_or_else(|| rt.intern(&simple));
-            rt.encode(Val::Sym(tag))
+        // A dotted name is host-class-like as-is; a BARE name may be an
+        // imported class (`(:import (clojure.lang IPersistentMap))` + bare
+        // `extend-protocol` targets — nrepl.bencode's shape). Unresolvable
+        // names stay bare dialect tags (core's `(extend-type Vector …)`).
+        let fqn = if name.contains('.') {
+            Some(name.replace('/', "."))
         } else {
-            items[1]
+            comp.resolve_class(&name)
+        };
+        if let Some(fqn) = fqn {
+            let tags = jvm_registry_tags(rt, &fqn);
+            if tags.is_empty() {
+                let simple = name.rsplit(['.', '/']).next().unwrap_or(&name).to_string();
+                let t = rt.intern(&simple);
+                vec![rt.encode(Val::Sym(t))]
+            } else {
+                tags.into_iter().map(|t| rt.encode(Val::Sym(t))).collect()
+            }
+        } else {
+            vec![items[1]]
         }
     } else {
-        items[1]
+        vec![items[1]]
     };
     let dok = sym(rt, "do");
     let mut out = vec![dok];
@@ -1001,16 +1053,20 @@ fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form
         if matches!(rt.decode(item), Val::Sym(_)) {
             // a protocol name — group marker; register the extension (markers
             // have no methods, so satisfies? needs the explicit record).
-            if let Some(reg) = marker_registration(rt, comp, item, ty) {
-                out.push(reg);
+            for &ty in &tys {
+                if let Some(reg) = marker_registration(rt, comp, item, ty) {
+                    out.push(reg);
+                }
             }
             continue;
         }
         let parts = rt.list_to_vec(item); // (m [this ...] body...)
         let m = parts[0];
         let params = parts[1];
-        let fnf = mk_fn(rt, params, parts[2..].to_vec());
-        out.push(mk_defmethod(rt, m, ty, fnf));
+        for &ty in &tys {
+            let fnf = mk_fn(rt, params, parts[2..].to_vec());
+            out.push(mk_defmethod(rt, m, ty, fnf));
+        }
     }
     rt.vec_to_list(&out)
 }
@@ -1680,27 +1736,46 @@ fn last_seg(s: &str) -> String {
     s.rsplit(['.', '/']).next().unwrap_or(s).to_string()
 }
 
-/// The `:tag` of a registered class, read from the IN-LANGUAGE JVM registry
+/// The runtime tag(s) an `extend-type` on a registered host class should
+/// register methods against, read from the IN-LANGUAGE JVM registry
 /// (`clojure.core/-jvm-registry`: an atom holding a flat `(fqn desc …)` plist
-/// of `JvmClass` descriptor records — tag is field 2; see host_jvm_src). The
-/// expander needs this at compile time for `extend-type` on a host class, but
-/// the knowledge itself stays in the language — Rust just walks the data.
-fn jvm_registry_tag<M: ValueModel>(rt: &Runtime<M>, fqn: &str) -> Option<Sym> {
+/// of `JvmClass` descriptor records; see clj/host_jvm.clj). Prefers the
+/// descriptor's `:extend-tags` list (field 11 — an interface spanning several
+/// concrete types), else its single `:tag` (field 2). Empty = unregistered.
+/// The expander needs this at compile time, but the knowledge itself stays in
+/// the language — Rust just walks the data.
+fn jvm_registry_tags<M: ValueModel>(rt: &Runtime<M>, fqn: &str) -> Vec<Sym> {
     let regsym = rt.intern("clojure.core/-jvm-registry");
-    let regv = rt.global(regsym)?;
-    let Val::Ref(id) = rt.decode(regv) else { return None };
-    let Obj::Atom(a) = &rt.heap()[id as usize] else { return None };
+    let Some(regv) = rt.global(regsym) else { return vec![] };
+    let Val::Ref(id) = rt.decode(regv) else { return vec![] };
+    let Obj::Atom(a) = &rt.heap()[id as usize] else { return vec![] };
     let plist = rt.list_to_vec(a.load(Ordering::Acquire));
     let want = rt.intern(fqn);
-    let desc = plist
+    let Some(desc) = plist
         .chunks(2)
         .find(|kv| kv.len() == 2 && matches!(rt.decode(kv[0]), Val::Sym(s) if s == want))
-        .map(|kv| kv[1])?;
-    let Val::Ref(did) = rt.decode(desc) else { return None };
-    let Obj::Record { fields, .. } = &rt.heap()[did as usize] else { return None };
-    match rt.decode(*fields.get(2)?) {
-        Val::Sym(tag) => Some(tag),
-        _ => None,
+        .map(|kv| kv[1])
+    else {
+        return vec![];
+    };
+    let Val::Ref(did) = rt.decode(desc) else { return vec![] };
+    let Obj::Record { fields, .. } = &rt.heap()[did as usize] else { return vec![] };
+    let (tag, ext) = (fields.get(2).copied(), fields.get(11).copied());
+    if let Some(ext) = ext {
+        if !matches!(rt.decode(ext), Val::Nil) {
+            return rt
+                .list_to_vec(ext)
+                .into_iter()
+                .filter_map(|t| match rt.decode(t) {
+                    Val::Sym(s) => Some(s),
+                    _ => None,
+                })
+                .collect();
+        }
+    }
+    match tag.map(|t| rt.decode(t)) {
+        Some(Val::Sym(s)) => vec![s],
+        _ => vec![],
     }
 }
 
