@@ -115,9 +115,13 @@
 (defn ev-fail [(kind i64) (msg (ptr i8)) (line i64) (col i64)] (-> i64)
   (store! (ev-outcome) 1) (store! (ev-kind) kind) (store! (ev-line) line) (store! (ev-col) col) (ev-set-msg msg) 0)
 
-; is the leading token a top-level definition (live code change -> Phase 6)?
+; is the leading token a top-level definition (live code change -> Phase 6)? NOTE:
+; TK_MODULE is deliberately absent — eval-exec strips a leading `module a.b.c` header
+; (if present) BEFORE this check ever runs (07-modules.md §6 Phase 2), so by the time
+; is-def-token looks at the current token it is always the real definition/expression
+; that followed the header, never TK_MODULE itself.
 (defn is-def-token [(k i64)] (-> bool)
-  (or (= k TK_CLASS) (or (= k TK_INTERFACE) (or (= k TK_ENUM) (or (= k TK_OBJECT) (or (= k TK_FN) (or (= k TK_MIGRATE) (or (= k TK_IMPORT) (= k TK_MODULE)))))))))
+  (or (= k TK_CLASS) (or (= k TK_INTERFACE) (or (= k TK_ENUM) (or (= k TK_OBJECT) (or (= k TK_FN) (or (= k TK_MIGRATE) (= k TK_IMPORT))))))))
 
 ; parse the eval source into a single BLOCK node (statements, last is the value).
 (defn parse-eval-block [] (-> (ptr Node))
@@ -204,6 +208,9 @@
                     (do (reflect-actions (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"functions") (= (arg-count e) 0))
                     (do (reflect-functions (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                  ; 07-modules.md §6/§7 Phase 2: the module tree with per-module aggregates.
+                  (and (node-name-eq callee c"modules") (= (arg-count e) 0))
+                    (do (reflect-modules (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"generation") (= (arg-count e) 0))
                     (do (jb-cstr (load (ev-valbuf)) c"{\"type\":\"Int\",\"value\":") (jb-int (load (ev-valbuf)) (current-generation)) (jb-byte (load (ev-valbuf)) \}) (store! (ev-outcome) 0) 1)
                   ; gc() / minorGc() — force a full major / young-only minor collection and report
@@ -213,10 +220,17 @@
                     (do (reflect-gc (load (ev-valbuf)) (load (srv-program)) 1) (store! (ev-outcome) 0) 1)
                   (and (node-name-eq callee c"minorGc") (= (arg-count e) 0))
                     (do (reflect-gc (load (ev-valbuf)) (load (srv-program)) 0) (store! (ev-outcome) 0) 1)
+                  ; 07-modules.md §6 Phase 2 item 4: the name arg is bare-or-qualified —
+                  ; resolve-entity-lookup does entry-module-first / unique-across-program /
+                  ; ambiguous-is-an-error resolution (serialize.coil resolve-entity-mono-named).
                   (and (node-name-eq callee c"fields") (= (arg-count e) 1))
-                    (let [s (str-arg e 0)] (if (= (cast i64 s) 0) 0 (do (reflect-fields (load (ev-valbuf)) (load (field s s-name)) (load (field s s-len))) (store! (ev-outcome) 0) 1)))
+                    (let [s (str-arg e 0)]
+                      (if (= (cast i64 s) 0) 0
+                        (resolve-entity-lookup-fields (load (field s s-name)) (load (field s s-len)))))
                   (and (node-name-eq callee c"methods") (= (arg-count e) 1))
-                    (let [s (str-arg e 0)] (if (= (cast i64 s) 0) 0 (do (reflect-methods (load (ev-valbuf)) (load (field s s-name)) (load (field s s-len))) (store! (ev-outcome) 0) 1)))
+                    (let [s (str-arg e 0)]
+                      (if (= (cast i64 s) 0) 0
+                        (resolve-entity-lookup-methods (load (field s s-name)) (load (field s s-len)))))
                   ; F1: trace(<expr>) — compile+run the argument expression with the call recorder ON
                   (and (node-name-eq callee c"trace") (= (arg-count e) 1))
                     (do (eval-trace (arg-val (arg-at e 0))) 1)
@@ -227,6 +241,27 @@
     (if (and (= (load (field v kind)) NK_STRING) (= (kid-count v) 1))
       (let [c (kid-at v 0)] (if (= (load (field c kind)) NK_STRCHUNK) c (cast (ptr Node) 0)))
       (if (= (load (field v kind)) NK_STRCHUNK) v (cast (ptr Node) 0)))))
+
+; ---- fields()/methods() name-arg resolution (07-modules.md §6 Phase 2 item 4) ----
+; ambiguous bare name: fail cleanly through the eval error channel — NEVER silently
+; pick one. `cand` already holds the comma-joined qualified candidates from
+; resolve-entity-mono-named/write-ambiguous-candidates.
+(defn fail-ambiguous-entity [(nm0 (ptr u8)) (len i64) (cand (ptr StrBuf))] (-> i64)
+  (sb-byte cand 0)
+  (let [buf (defbuf)]
+    (snprintf buf 512 c"ambiguous type name '%.*s' — declared in more than one module; use a fully-qualified name (candidates: %s)"
+      (cast i32 len) (cast (ptr i8) nm0) (cast (ptr i8) (load (field cand data))))
+    (ev-fail EK_NOTIMPL buf 0 0)) 0)
+(defn resolve-entity-lookup-fields [(nm0 (ptr u8)) (len i64)] (-> i64)
+  (let [cand (sb-new) m (resolve-entity-mono-named nm0 len cand)]
+    (if (and (= (cast i64 m) 0) (> (load (field cand len)) 0))
+      (do (fail-ambiguous-entity nm0 len cand) 1)
+      (do (reflect-fields (load (ev-valbuf)) m) (store! (ev-outcome) 0) 1))))
+(defn resolve-entity-lookup-methods [(nm0 (ptr u8)) (len i64)] (-> i64)
+  (let [cand (sb-new) m (resolve-entity-mono-named nm0 len cand)]
+    (if (and (= (cast i64 m) 0) (> (load (field cand len)) 0))
+      (do (fail-ambiguous-entity nm0 len cand) 1)
+      (do (reflect-methods (load (ev-valbuf)) m) (store! (ev-outcome) 0) 1))))
 
 ; ============================ F1: trace(<expr>) — function EXECUTION visualization ============================
 ; The compute analogue of graph()/instances(): run one expression with the call recorder ON and
@@ -590,14 +625,16 @@
   (store! (ev-outcome) 0) 0)
 
 ; ---- the three redefinition entries ----
-; live-eval redefinition addressing (07-modules.md §6) is entry-module scoped in this
-; phase — full per-qualified-name addressing (an eval-source `module` header picking a
-; DIFFERENT loaded module's decl) is Phase 2 territory; this covers every existing
-; single-module program plus builtins/entry-imports, which is everything today's suite
-; (and the vast majority of real programs) exercises.
+; live-eval redefinition addressing (07-modules.md §6, Phase 2): looks up the target
+; name in the CURRENT eval's module context — eval-fallback-file, which is the entry
+; module by default or the module named by this eval source's `module a.b.c` header
+; (eval-module-header, set before eval-definition ever runs). own-module -> that
+; module's imports -> builtins, exactly find-decl's normal order — so redefining a
+; method of a class declared in a non-entry module works once the eval source is
+; prefixed with that module's header.
 (defn redefine-class [(errbase i64)] (-> i64)
   (block :done
-    (set-cur-file (load (field (ctx) entry-file)))
+    (set-cur-file (eval-fallback-file))
     (let [node (parse-class) d (find-decl (nm node) (nlen node))]
       (if (= (cast i64 d) 0) (do (rej-unknown node c"class") (return-from :done 0)) 0)
       (if (!= (load (field d kind)) DK_CLASS) (do (rej-notkind node c"class") (return-from :done 0)) 0)
@@ -631,7 +668,7 @@
 
 (defn redefine-fn [(errbase i64)] (-> i64)
   (block :done
-    (set-cur-file (load (field (ctx) entry-file)))
+    (set-cur-file (eval-fallback-file))
     (let [node (parse-fn true) d (find-decl (nm node) (nlen node))]
       (if (= (cast i64 d) 0) (do (rej-unknown node c"function") (return-from :done 0)) 0)
       (if (!= (load (field d kind)) DK_FN) (do (rej-notkind node c"function") (return-from :done 0)) 0)
@@ -648,7 +685,7 @@
 
 (defn redefine-interface [(errbase i64)] (-> i64)
   (block :done
-    (set-cur-file (load (field (ctx) entry-file)))
+    (set-cur-file (eval-fallback-file))
     (let [node (parse-interface) d (find-decl (nm node) (nlen node))]
       (if (= (cast i64 d) 0) (do (rej-unknown node c"interface") (return-from :done 0)) 0)
       (if (and (!= (load (field d kind)) DK_INTERFACE) (!= (load (field d kind)) DK_BUILTIN_IFACE))
@@ -680,8 +717,26 @@
       (= k TK_ENUM) (ev-fail EK_NOTIMPL c"live enum redefinition is not supported in this build (M4)" 0 0)
       (= k TK_OBJECT) (ev-fail EK_NOTIMPL c"live object redefinition is not supported in this build (M4)" 0 0)
       (= k TK_IMPORT) (ev-fail EK_NOTIMPL c"import is not allowed in a live eval" 0 0)
-      (= k TK_MODULE) (ev-fail EK_NOTIMPL c"module is not allowed in a live eval" 0 0)
       (ev-fail EK_NOTIMPL c"unsupported definition in a live eval" 0 0))))
+
+; ---- eval module-header context (07-modules.md §6 Phase 2) ----
+; An eval source may open with `module a.b.c` to set the resolution/redefinition
+; context for THIS eval only: bare names resolve as if the rest of the source were
+; appended to a.b.c's file (own decls -> that file's imports -> builtins, via
+; eval-fallback-file/effective-import-file), and a redefinition targets (a.b.c, name).
+; Consumes the header from the parser; on success points eval-mod-file at the target
+; module's file and returns 1. On an unknown module it calls ev-fail (a clean eval
+; error naming the module — never a crash) and returns 0; the caller must stop.
+(defn rej-unknown-module [(node (ptr Node))] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"unknown module '%.*s' in eval header — no loaded file declares it"
+      (cast i32 (nlen node)) (cast (ptr i8) (nm node)))
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn eval-module-header [] (-> i64)
+  (let [node (parse-module)]
+    (if (is-known-module (nm node) (nlen node))
+      (do (set-eval-mod-file (find-file-for-module (nm node) (nlen node))) 1)
+      (do (rej-unknown-module node) 0))))
 
 ; compile a typechecked eval block into a standalone nullary MethodInfo.
 (defn compile-eval-method [(blk (ptr Node)) (vty (ptr Type))] (-> (ptr MethodInfo))
@@ -741,6 +796,14 @@
   (block :done
     (if (= (lex-file src c"<eval>") 1) (do (ev-fail EK_SYNTAX c"syntax error in eval source" 0 0) (return-from :done 0)) 0)
     (parser-init (lexer-tokens) c"<eval>")
+    ; 07-modules.md §6 Phase 2: reset to the entry module for THIS eval, then let a
+    ; leading `module a.b.c` header override it — before anything else looks at
+    ; eval-fallback-file (is-def-token/eval-definition, and the plain-expression path
+    ; below both read it via set-cur-file/effective-import-file).
+    (reset-eval-mod-file)
+    (if (= (cur-kind) TK_MODULE)
+      (if (= (eval-module-header) 0) (return-from :done 0) 0)
+      0)
     (if (is-def-token (cur-kind))
       (do (eval-definition errbase) (return-from :done 0)) 0)
     (let [blk (parse-eval-block)]
@@ -818,7 +881,7 @@
 (defn refl-name [(idx i64)] (-> (ptr i8))
   (cond (= idx 0) c"types()" (= idx 1) c"schema()" (= idx 2) c"graph()"
         (= idx 3) c"views()" (= idx 4) c"actions()" (= idx 5) c"functions()"
-        (= idx 6) c"generation()" c""))
+        (= idx 6) c"generation()" (= idx 7) c"modules()" c""))
 (defn src-eq-trimmed [(src (ptr u8)) (len i64) (lit (ptr i8))] (-> bool)
   (let [(mut s) 0 (mut e) len]
     (loop (if (and (< (load s) (load e)) (let [c (cast i64 (load (index src (load s))))] (or (= c \space) (or (= c \tab) (or (= c \newline) (= c \return)))))) (do (store! s (+ (load s) 1)) 0) (break)))
@@ -830,7 +893,7 @@
           (load ok))))))
 (defn classify-reflection [(src (ptr u8)) (len i64)] (-> i64)
   (let [(mut r) -1 (mut i) 0]
-    (loop (if (and (< (load r) 0) (< (load i) 7))
+    (loop (if (and (< (load r) 0) (< (load i) 8))
             (do (if (src-eq-trimmed src len (refl-name (load i))) (do (store! r (load i)) 0) 0) (store! i (+ (load i) 1)) 0)
             (break)))
     (load r)))
@@ -845,6 +908,7 @@
       (= idx 3) (reflect-views b p)
       (= idx 4) (reflect-actions b p)
       (= idx 5) (reflect-functions b p)
+      (= idx 7) (reflect-modules b p)
       (= idx 6) (do (jb-cstr b c"{\"type\":\"Int\",\"value\":") (jb-int b (current-generation)) (jb-byte b \}))
       0)))
 
@@ -1197,6 +1261,9 @@
         ; types() drives the browse-mode type rail; dump it too (arenas empty here -> liveCount 0)
         ; so a static portal project's List view populates without a running process.
         (jb-cstr b c",\"types\":") (reflect-types b p)
+        ; modules() — the module tree + aggregates; same "works with zero process" reasoning
+        ; (07-modules.md §6/§7 Phase 2), so a static project gets a focus-tree-ready dump too.
+        (jb-cstr b c",\"modules\":") (reflect-modules b p)
         (jb-byte b \})
         (write-all 1 (load (field b data)) (load (field b len)))
         (w-cstr 1 c"\n")

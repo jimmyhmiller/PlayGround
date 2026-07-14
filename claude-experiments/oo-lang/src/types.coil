@@ -102,6 +102,11 @@
    (proj-root (ptr i8))             ; nearest scry.toml ancestor, else entry file's dir
    (std-root (ptr i8))              ; SCRY_STD env, else dir(argv0)+"std/"
    (argv0 (ptr i8))
+   (eval-mod-file (ptr i8))         ; 07-modules.md §6 Phase 2: the file whose module context
+                                     ; the CURRENT eval resolves "<eval>" against — entry-file
+                                     ; by default, re-pointed per-eval by a `module a.b.c`
+                                     ; source header (server.coil eval-module-header). Read by
+                                     ; set-cur-file/effective-import-file's "<eval>" fallback.
    (nerr i64)
    (inited bool)])
 
@@ -123,6 +128,7 @@
       (store! (field (ctx) proj-root) (cast (ptr i8) 0))
       (store! (field (ctx) std-root) (cast (ptr i8) 0))
       (store! (field (ctx) argv0) (cast (ptr i8) 0))
+      (store! (field (ctx) eval-mod-file) (cast (ptr i8) 0))
       (store! (field (ctx) nerr) 0)
       (store! (field (ctx) inited) true)
       0)))
@@ -153,19 +159,41 @@
                 (store! i (+ (load i) 1)) 0)
             (break)))
     (load ok)))
+; reverse of register-module-for-file: the loaded file whose derived module is exactly
+; `name` (07-modules.md §6 Phase 2 — resolving an eval `module a.b.c` header to the real
+; file whose scope the eval should borrow). Null if `name` names no loaded module.
+(defn find-file-for-module [(name (ptr u8)) (len i64)] (-> (ptr i8))
+  (let [fs (load (field (ctx) file-mods)) n (al-len fs) (mut i) 0 (mut r) (cast (ptr i8) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [fm (al-get fs (load i))]
+              (if (name-eq (load (field fm mod)) (load (field fm mod-len)) name len) (do (store! r (load (field fm file))) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+; the file whose scope "<eval>" should borrow when it has no registered FileMod of its
+; own: the CURRENT eval's module context if one has been set (a `module a.b.c` header —
+; server.coil eval-module-header sets eval-mod-file), else the entry file (07-modules.md
+; §6: "with no [module] header, context defaults to the entry module"). Both set-cur-file
+; and effective-import-file read this so the header's effect reaches decl lookup AND
+; import-table lookup identically.
+(defn eval-fallback-file [] (-> (ptr i8))
+  (let [emf (load (field (ctx) eval-mod-file))]
+    (if (!= (cast i64 emf) 0) emf (load (field (ctx) entry-file)))))
+(defn set-eval-mod-file [(f (ptr i8))] (-> i64) (store! (field (ctx) eval-mod-file) f) 0)
+(defn reset-eval-mod-file [] (-> i64) (store! (field (ctx) eval-mod-file) (load (field (ctx) entry-file))) 0)
 ; cur-file drives ALL ambient name resolution (find-decl); every existing call site
 ; already calls this before checking/compiling a decl's body, so hooking cur-module
 ; here — rather than threading a module parameter through 20+ call sites — keeps
 ; every one of them correct for free. A file with no registered module (the "<eval>"
-; pseudo-file used throughout server.coil for live-eval typechecking) defaults to the
-; ENTRY module's scope — 07-modules.md §6: "with no [module] header, context defaults
-; to the entry module".
+; pseudo-file used throughout server.coil for live-eval typechecking) falls back to
+; eval-fallback-file's scope — the entry module by default, or the eval's `module`
+; header target when one was set for this eval (07-modules.md §6).
 (defn set-cur-file [(f (ptr i8))] (-> i64)
   (store! (field (ctx) cur-file) f)
   (let [fm (find-file-mod f)]
     (if (!= (cast i64 fm) 0)
       (do (store! (field (ctx) cur-module) (load (field fm mod))) (store! (field (ctx) cur-module-len) (load (field fm mod-len))) 0)
-      (let [ef (load (field (ctx) entry-file))]
+      (let [ef (eval-fallback-file)]
         (if (= (cast i64 ef) 0) 0
           (let [efm (find-file-mod ef)]
             (if (!= (cast i64 efm) 0)
@@ -257,12 +285,12 @@
 
 ; the file whose import TABLE is in scope: cur-file normally, but the synthetic "<eval>"
 ; pseudo-file (server.coil, every live-eval typecheck) has no import table of its own —
-; it defaults to the entry module (see set-cur-file), so its imports come from the entry
-; FILE too (07-modules.md §6: "bare names resolve as if the source were appended to that
-; module's file").
+; it borrows eval-fallback-file's imports instead (the entry file by default, or the
+; eval's `module` header target — see set-cur-file's comment and 07-modules.md §6:
+; "bare names resolve as if the source were appended to that module's file").
 (defn effective-import-file [] (-> (ptr i8))
   (let [f (load (field (ctx) cur-file))]
-    (if (= (cast i64 (strcmp f c"<eval>")) 0) (load (field (ctx) entry-file)) f)))
+    (if (= (cast i64 (strcmp f c"<eval>")) 0) (eval-fallback-file) f)))
 
 ; Bare-identifier resolution order (07-modules.md §4): own module -> this file's
 ; imports -> builtin prelude. Locals/params/self-fields are handled by the caller

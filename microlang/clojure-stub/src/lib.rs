@@ -25,16 +25,22 @@ static GENSYM: AtomicU64 = AtomicU64::new(0);
 
 mod compile;
 mod data;
-mod host_jvm_src;
-mod cljs_types_src;
-mod clojure_data_json_src;
-mod clojure_set_src;
-mod clojure_walk_src;
-mod clojure_zip_src;
-mod clojure_string_src;
-mod clojure_test_src;
-mod core_src;
 mod reader;
+
+/// The embedded prelude — REAL `.clj` files under `src/clj/`, compiled into
+/// the binary with `include_str!` so the frontend stays self-contained while
+/// the sources stay ordinary, editable Clojure files.
+mod sources {
+    pub const CORE: &str = include_str!("clj/core.clj");
+    pub const CLJS_TYPES: &str = include_str!("clj/cljs_types.clj");
+    pub const HOST_JVM: &str = include_str!("clj/host_jvm.clj");
+    pub const CLOJURE_STRING: &str = include_str!("clj/clojure/string.clj");
+    pub const CLOJURE_SET: &str = include_str!("clj/clojure/set.clj");
+    pub const CLOJURE_WALK: &str = include_str!("clj/clojure/walk.clj");
+    pub const CLOJURE_ZIP: &str = include_str!("clj/clojure/zip.clj");
+    pub const CLOJURE_DATA_JSON: &str = include_str!("clj/clojure/data/json.clj");
+    pub const CLOJURE_TEST: &str = include_str!("clj/clojure/test.clj");
+}
 pub use reader::read_all;
 
 use compile::Compiler;

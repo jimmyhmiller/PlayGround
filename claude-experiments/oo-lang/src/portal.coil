@@ -396,6 +396,9 @@
             ; types() — drives the browse-mode type rail; served statically from the cached dump
             ; (liveCount 0, arenas empty) so a static project's List view populates with no process.
             (src-is-call srcbuf (load srclen) c"types")   (do (jb-cstr resp c"\"value\":") (proj-emit-value resp e c"types") 0)
+            ; modules() — the module tree + aggregates (07-modules.md §6/§7 Phase 2), same
+            ; static-dump treatment as types()/functions().
+            (src-is-call srcbuf (load srclen) c"modules") (do (jb-cstr resp c"\"value\":") (proj-emit-value resp e c"modules") 0)
             (src-is-call srcbuf (load srclen) c"graph")   (do (jb-cstr resp c"\"value\":{\"type\":\"Graph\",\"instances\":[]}") 0)
             (do (jb-cstr resp c"\"error\":{\"kind\":\"StaticInspection\",\"message\":\"static inspection \\u2014 run the project to interact\"}") 0))
           (jb-byte resp \})

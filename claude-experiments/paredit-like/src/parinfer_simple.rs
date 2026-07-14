@@ -285,10 +285,30 @@ impl Parinfer {
                 // If we used col_pos, we'd wrongly close scf.if after first region
                 // because 4 < 12. But both regions are children of scf.if!
                 if !next_line_has_closers {
+                    // Does the next significant (non-blank, non-comment) line begin a
+                    // NEW form — an opener token, not a continuation atom? Parinfer
+                    // indent-mode's core rule: a line that starts a new form at
+                    // indentation <= an open delimiter's opening indent closes that
+                    // delimiter first. This is what lets the equal-indent case count
+                    // (`>=`, not strict `>`). Without it, a column-0 opener has
+                    // line_indent 0, `0 > 0` is false, so it can NEVER be closed by
+                    // dedent — it rides the stack to the EOF fallback below, which
+                    // appends its closer after the LAST line and silently nests every
+                    // following top-level form inside it (bug: non-local EOF close).
+                    // For continuation/atom-led lines we keep the strict `>` so we
+                    // don't over-close forms whose body merely dedents to column 0.
+                    let next_line_starts_form = Self::find_next_significant_char(&lines, line_idx)
+                        .map(|c| matches!(c, '(' | '[' | '{'))
+                        .unwrap_or(false);
                     while let Some(open_info) = delim_stack.last() {
                         // Only use line_indent, not col_pos, for determining nesting level
                         let opener_indent = open_info.line_indent;
-                        if next_indent < line_indent && opener_indent > next_indent {
+                        let dedents_past_opener = if next_line_starts_form {
+                            opener_indent >= next_indent
+                        } else {
+                            opener_indent > next_indent
+                        };
+                        if next_indent < line_indent && dedents_past_opener {
                             let delim_type = open_info.delim_type;
                             delim_stack.pop();
                             new_line.push(delim_type.close_char());
@@ -325,6 +345,20 @@ impl Parinfer {
             }
         }
         0 // End of file
+    }
+
+    /// First non-whitespace character of the next significant line (skipping
+    /// blank and comment-only lines), or `None` at end of file. Uses the same
+    /// notion of "significant line" as `find_next_indent`, so the opener check
+    /// in the dedent loop lines up with the indent it is compared against.
+    fn find_next_significant_char(lines: &[&str], current_idx: usize) -> Option<char> {
+        for line in lines.iter().skip(current_idx + 1) {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with(';') {
+                return trimmed.chars().next();
+            }
+        }
+        None
     }
 }
 
@@ -651,6 +685,85 @@ mod tests {
         let once = Parinfer::new(source).balance().unwrap();
         assert_eq!(once, source, "dangling backslash left as-is");
         assert_eq!(Parinfer::new(&once).balance().unwrap(), once, "idempotent");
+    }
+
+    #[test]
+    fn test_nonlocal_eof_close_repro() {
+        // The reported bug: `alpha` is missing its final `)`; `beta` and `gamma`
+        // are complete column-0 top-level forms. A new column-0 opener means
+        // everything open must close first, so `alpha` closes at the end of its
+        // own body — the synthesized `)` must NOT be appended after `gamma`.
+        let source = "\
+(defn alpha [x] (-> i64)
+  (+ x 1)
+
+(defn beta [y] (-> i64)
+  (* y 2))
+
+(defn gamma [z] (-> i64)
+  (- z 3))";
+        let expected = "\
+(defn alpha [x] (-> i64)
+  (+ x 1))
+
+(defn beta [y] (-> i64)
+  (* y 2))
+
+(defn gamma [z] (-> i64)
+  (- z 3))";
+        assert_eq!(Parinfer::new(source).balance().unwrap(), expected);
+    }
+
+    #[test]
+    fn test_nonlocal_eof_close_broken_form_in_middle() {
+        // Same bug with the broken form (`beta`) in the middle of three forms.
+        // Only `beta` should gain its missing closer; `gamma` must be untouched.
+        let source = "\
+(defn alpha [x] (-> i64)
+  (+ x 1))
+
+(defn beta [y] (-> i64)
+  (* y 2)
+
+(defn gamma [z] (-> i64)
+  (- z 3))";
+        let expected = "\
+(defn alpha [x] (-> i64)
+  (+ x 1))
+
+(defn beta [y] (-> i64)
+  (* y 2))
+
+(defn gamma [z] (-> i64)
+  (- z 3))";
+        assert_eq!(Parinfer::new(source).balance().unwrap(), expected);
+    }
+
+    #[test]
+    fn test_nonlocal_eof_close_is_local() {
+        // Locality: balancing a file with one broken function must change ONLY
+        // that function. Drop the trailing `)` from `beta` and confirm every
+        // other line round-trips unchanged.
+        let good = "\
+(defn alpha [x] (-> i64)
+  (+ x 1))
+
+(defn beta [y] (-> i64)
+  (* y 2))
+
+(defn gamma [z] (-> i64)
+  (- z 3))";
+        let broken = good.replacen("  (* y 2))", "  (* y 2)", 1);
+        let fixed = Parinfer::new(&broken).balance().unwrap();
+        assert_eq!(fixed, good);
+        // The only differing line between broken input and fixed output is the
+        // perturbed one — nothing at EOF moved.
+        let diffs: Vec<_> = broken
+            .lines()
+            .zip(fixed.lines())
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(diffs, vec![("  (* y 2)", "  (* y 2))")]);
     }
 
     #[test]
