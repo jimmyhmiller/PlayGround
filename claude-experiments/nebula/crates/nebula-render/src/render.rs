@@ -100,7 +100,10 @@ pub struct Renderer {
     cull_emit_pipeline: wgpu::ComputePipeline,
     raster_bgl: wgpu::BindGroupLayout,
     raster_accum_bgl: wgpu::BindGroupLayout,
-    raster_pipeline: wgpu::ComputePipeline,
+    tile_count_pipeline: wgpu::ComputePipeline,
+    tile_scan_pipeline: wgpu::ComputePipeline,
+    tile_emit_pipeline: wgpu::ComputePipeline,
+    tile_raster_pipeline: wgpu::ComputePipeline,
     resolve_bgl: wgpu::BindGroupLayout,
     resolve_pipeline: wgpu::RenderPipeline,
     /// Accumulation target for the compute raster path (recreated on resize).
@@ -117,19 +120,30 @@ pub struct Renderer {
     edge_raster: bool,
 }
 
-/// Max DDA steps each raster thread walks (must match SEG_PX in edge_raster.wgsl).
-const SEG_PX: u32 = 256;
+/// Screen-tile edge length in pixels (must match TILE in edge_raster.wgsl).
+const TILE: u32 = 32;
+/// Capacity of the (tile, edge) pair scratch, in pairs. Edges are processed
+/// in batches sized so a batch's worst-case pair count fits; batching cannot
+/// change the image because integer accumulation commutes.
+const PAIRS_CAP: u64 = 64 << 20;
+/// Max batches per frame (batch params buffer stride slots).
+const MAX_BATCHES: usize = 1024;
+/// Dynamic-offset stride for the per-batch uniform.
+const BATCH_STRIDE: u64 = 256;
 
-/// Fixed-point accumulation buffer for the compute raster path.
+/// GPU state for the tiled compute raster path (recreated on resize or when
+/// the edge sets change).
 struct AccumGpu {
     buf: wgpu::Buffer,
-    /// Per-pixel saturation flags (see sat_flags in edge_raster.wgsl).
-    flags: wgpu::Buffer,
+    batch_buf: wgpu::Buffer,
     w: u32,
     h: u32,
-    /// Raster threads per edge: ceil(diagonal / SEG_PX).
-    k: u32,
-    /// Group-1 bind group for edge_raster (dims + read_write accum).
+    tiles_x: u32,
+    tiles_y: u32,
+    /// Pair scratch capacity actually allocated (≤ PAIRS_CAP).
+    pairs_cap: u64,
+    /// Group-1 bind group for the tile passes (dims, accum, tile scratch,
+    /// pairs, batch uniform with dynamic offset).
     raster_bg: wgpu::BindGroup,
     /// Group-0 bind group for the fullscreen resolve (dims + read-only accum).
     resolve_bg: wgpu::BindGroup,
@@ -434,21 +448,43 @@ impl Renderer {
         });
         let raster_accum_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("edge_raster_accum_bgl"),
-            entries: &[compute_uniform(0), rw_storage(1), rw_storage(2)],
+            entries: &[
+                compute_uniform(0),
+                rw_storage(1),
+                rw_storage(2),
+                rw_storage(3),
+                rw_storage(4),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(16),
+                    },
+                    count: None,
+                },
+            ],
         });
         let raster_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("edge_raster_pl"),
             bind_group_layouts: &[&raster_bgl, &raster_accum_bgl],
             push_constant_ranges: &[],
         });
-        let raster_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("raster_edges"),
-            layout: Some(&raster_pl),
-            module: &raster_shader,
-            entry_point: Some("raster_edges"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let tile_pipe = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&raster_pl),
+                module: &raster_shader,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let tile_count_pipeline = tile_pipe("tile_count");
+        let tile_scan_pipeline = tile_pipe("tile_scan");
+        let tile_emit_pipeline = tile_pipe("tile_emit");
+        let tile_raster_pipeline = tile_pipe("tile_raster");
         let resolve_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("edge_resolve_bgl"),
             entries: &[
@@ -538,7 +574,10 @@ impl Renderer {
             cull_emit_pipeline,
             raster_bgl,
             raster_accum_bgl,
-            raster_pipeline,
+            tile_count_pipeline,
+            tile_scan_pipeline,
+            tile_emit_pipeline,
+            tile_raster_pipeline,
             resolve_bgl,
             resolve_pipeline,
             accum: None,
@@ -584,8 +623,10 @@ impl Renderer {
         self.cull_dirty = true;
     }
 
-    /// (Re)create the fixed-point accumulation buffer when the surface size
-    /// changes. 12 bytes per pixel (3 × u32).
+    /// (Re)create the tiled-raster GPU state when the surface size changes
+    /// (or after set_edge_types dropped it): the 12-byte-per-pixel fixed-point
+    /// accumulator, the per-tile scratch, the (tile, edge) pair scratch, and
+    /// the per-batch uniform.
     fn ensure_accum(&mut self, device: &wgpu::Device, w: u32, h: u32) {
         if self.accum.as_ref().is_some_and(|a| a.w == w && a.h == h) {
             return;
@@ -596,17 +637,41 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let diag = ((w as f32).hypot(h as f32)).ceil() as u32;
-        let k = diag.div_ceil(SEG_PX).max(1);
+        let tiles_x = w.div_ceil(TILE);
+        let tiles_y = h.div_ceil(TILE);
+        let ntiles = tiles_x as u64 * tiles_y as u64;
         let dims = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("edge_accum_dims"),
-            contents: bytemuck::cast_slice(&[w, h, k, 0]),
+            contents: bytemuck::cast_slice(&[w, h, tiles_x, tiles_y]),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-        let flags = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("edge_accum_sat_flags"),
-            size: (w as u64 * h as u64 * 4).max(16),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        let tile_counts = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("edge_tile_counts"),
+            size: (ntiles * 4).max(16),
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let tile_offsets = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("edge_tile_offsets"),
+            size: (ntiles * 4).max(16),
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        // Worst-case pairs for the largest edge type in one batch; a batch
+        // never needs more than max_edges * (tiles_x + tiles_y + 1).
+        let max_edges = self.edge_types.iter().map(|t| t.num_edges as u64).max().unwrap_or(0);
+        let max_tiles_per_edge = (tiles_x + tiles_y + 1) as u64;
+        let pairs_cap = (max_edges * max_tiles_per_edge).clamp(1, PAIRS_CAP);
+        let pairs = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("edge_tile_pairs"),
+            size: pairs_cap * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let batch_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("edge_batch_params"),
+            size: MAX_BATCHES as u64 * BATCH_STRIDE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let raster_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -615,7 +680,17 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: dims.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: flags.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: tile_counts.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: tile_offsets.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: pairs.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &batch_buf,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(16),
+                    }),
+                },
             ],
         });
         let resolve_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -626,7 +701,17 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 1, resource: buf.as_entire_binding() },
             ],
         });
-        self.accum = Some(AccumGpu { buf, flags, w, h, k, raster_bg, resolve_bg });
+        self.accum = Some(AccumGpu {
+            buf,
+            batch_buf,
+            w,
+            h,
+            tiles_x,
+            tiles_y,
+            pairs_cap,
+            raster_bg,
+            resolve_bg,
+        });
         self.cull_dirty = true;
     }
 
@@ -637,6 +722,7 @@ impl Renderer {
     pub fn encode_edge_prep(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         w: u32,
         h: u32,
         enc: &mut wgpu::CommandEncoder,
@@ -644,17 +730,19 @@ impl Renderer {
     ) -> bool {
         if self.edge_raster {
             self.ensure_accum(device, w.max(1), h.max(1));
-            self.encode_edge_raster(enc, timestamp_writes)
+            self.encode_edge_raster(queue, enc, timestamp_writes)
         } else {
             self.encode_edge_cull(enc, timestamp_writes)
         }
     }
 
-    /// Compute-raster path: clear the accumulator and re-draw every visible
-    /// edge into it. Integer atomics make the result order-independent, so
-    /// this is deterministic regardless of GPU scheduling.
+    /// Tiled compute-raster path: clear the accumulator, then per edge type
+    /// and per batch run count → scan → emit → tile_raster (see
+    /// edge_raster.wgsl). Integer accumulation commutes, so pair order, batch
+    /// split, and scheduling cannot change the image.
     fn encode_edge_raster(
         &mut self,
+        queue: &wgpu::Queue,
         enc: &mut wgpu::CommandEncoder,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites>,
     ) -> bool {
@@ -665,25 +753,65 @@ impl Renderer {
         let Some(accum) = &self.accum else {
             return false;
         };
+
+        // Plan batches: (edge type index, start, count) with per-batch pair
+        // demand bounded by the pair scratch.
+        let max_tiles_per_edge = (accum.tiles_x + accum.tiles_y + 1) as u64;
+        let batch_edges = u32::try_from((accum.pairs_cap / max_tiles_per_edge).max(1))
+            .unwrap_or(u32::MAX);
+        let mut plan: Vec<(usize, u32, u32)> = Vec::new();
+        for (ti, et) in self.edge_types.iter().enumerate() {
+            if !(et.visible && et.num_edges > 0) {
+                continue;
+            }
+            let mut start = 0u32;
+            while start < et.num_edges {
+                let count = (et.num_edges - start).min(batch_edges);
+                plan.push((ti, start, count));
+                start += count;
+            }
+        }
+        if plan.is_empty() {
+            enc.clear_buffer(&accum.buf, 0, None);
+            return false;
+        }
+        assert!(
+            plan.len() <= MAX_BATCHES,
+            "edge raster: {} batches exceeds MAX_BATCHES ({}); grow PAIRS_CAP or MAX_BATCHES",
+            plan.len(),
+            MAX_BATCHES
+        );
+        let mut params = vec![0u32; plan.len() * (BATCH_STRIDE as usize / 4)];
+        for (i, &(_, start, count)) in plan.iter().enumerate() {
+            let o = i * (BATCH_STRIDE as usize / 4);
+            params[o] = start;
+            params[o + 1] = count;
+        }
+        queue.write_buffer(&accum.batch_buf, 0, bytemuck::cast_slice(&params));
+
         enc.clear_buffer(&accum.buf, 0, None);
-        enc.clear_buffer(&accum.flags, 0, None);
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("edge_raster"),
             timestamp_writes,
         });
-        pass.set_pipeline(&self.raster_pipeline);
-        pass.set_bind_group(1, &accum.raster_bg, &[]);
-        let k = self.accum.as_ref().map_or(1, |a| a.k) as u64;
-        for et in &self.edge_types {
-            if !(et.visible && et.num_edges > 0) {
-                continue;
+        let mut bound_type = usize::MAX;
+        for (i, &(ti, _, count)) in plan.iter().enumerate() {
+            if ti != bound_type {
+                pass.set_bind_group(0, &self.edge_types[ti].raster_bg, &[]);
+                bound_type = ti;
             }
-            let threads = et.num_edges as u64 * k;
-            let wgs = u32::try_from(threads.div_ceil(256)).unwrap_or(u32::MAX);
+            pass.set_bind_group(1, &accum.raster_bg, &[(i as u32) * BATCH_STRIDE as u32]);
+            let wgs = count.div_ceil(256);
             let x = wgs.min(65_535);
             let y = wgs.div_ceil(x.max(1));
-            pass.set_bind_group(0, &et.raster_bg, &[]);
+            pass.set_pipeline(&self.tile_count_pipeline);
             pass.dispatch_workgroups(x, y, 1);
+            pass.set_pipeline(&self.tile_scan_pipeline);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&self.tile_emit_pipeline);
+            pass.dispatch_workgroups(x, y, 1);
+            pass.set_pipeline(&self.tile_raster_pipeline);
+            pass.dispatch_workgroups(accum.tiles_x, accum.tiles_y, 1);
         }
         true
     }
@@ -837,6 +965,9 @@ impl Renderer {
     pub fn set_edge_types(&mut self, device: &wgpu::Device, graph: &GpuGraph, specs: &[EdgeTypeInput]) {
         self.edge_types.clear();
         self.cull_dirty = true;
+        // The pair scratch is sized from the largest edge type; rebuild the
+        // tiled-raster state lazily on the next compute-path frame.
+        self.accum = None;
         for s in specs {
             // Sort edges by endpoint ids for memory locality: consecutive
             // vertices then fetch nearby positions/colors, and repeated node

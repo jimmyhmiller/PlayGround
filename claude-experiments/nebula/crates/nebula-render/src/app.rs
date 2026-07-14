@@ -1397,7 +1397,8 @@ impl App {
         let cull_ran = {
             let cull_tw = live.timer.as_ref().and_then(|t| t.cull_writes());
             let (w, h) = (live.gpu.size.width, live.gpu.size.height);
-            live.renderer.encode_edge_prep(&live.gpu.device, w, h, &mut enc, cull_tw)
+            live.renderer
+                .encode_edge_prep(&live.gpu.device, &live.gpu.queue, w, h, &mut enc, cull_tw)
         };
         if let Some(t) = live.timer.as_mut() {
             t.set_cull_ran(cull_ran);
@@ -1820,7 +1821,7 @@ impl App {
         if self.show_density {
             live.density.record_compute(&mut enc);
         }
-        live.renderer.encode_edge_prep(&live.gpu.device, w, h, &mut enc, None);
+        live.renderer.encode_edge_prep(&live.gpu.device, &live.gpu.queue, w, h, &mut enc, None);
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("capture_pass"),
