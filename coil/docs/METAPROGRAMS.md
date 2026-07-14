@@ -65,13 +65,16 @@ New API this project added (all shipped):
   executed later, once the whole program is checked, so it reads the compiler's
   authoritative output. A checker therefore layers *policy* on a program that already
   typechecks.
-- **`(semantic-transform FN)`** — a transformer that ALSO runs post-typecheck: it reads
-  the checked program (via `code-decl` etc.) to decide its rewrite, and the pipeline
-  re-resolves + re-typechecks its output to a fixpoint. Use it when a rewrite needs
-  types/signatures. Plain **`(transform FN)`** stays syntactic (runs at `expand-stage3`,
-  pre-resolution) for desugarings that *produce* typeable code (e.g. `inc`→`iadd`).
-  Demo: `metaprog-poc/retkind*.coil` rewrites a marker based on the wrapped call's real
-  return type.
+- **`(transform FN)`** — there is ONE kind of transform, and it is semantic. It runs
+  to a fixpoint: each round it reads the checked program (via `code-decl` etc.) to
+  decide its rewrite, then the pipeline re-resolves + re-typechecks. It also TOLERATES
+  a program that doesn't yet typecheck — then the model is empty (`code-decl` →
+  `:unresolved`) and the transform rewrites purely syntactically until the program
+  becomes valid (e.g. `inc`→`iadd`, where `inc` is undefined until the rewrite). The
+  authoritative strict check happens once, after the fixpoint. So one primitive covers
+  both type-aware rewrites and syntactic desugarings. Demos: `metaprog-poc/retkind*.coil`
+  (rewrites a marker by the wrapped call's real return type) and `dialect.coil`/`tx_test`
+  (`inc`→`iadd`).
 - **`(code-decl NODE)` → a declaration record**, read from that authoritative checked
   program. Given a symbol or a call node it answers WHERE a name is defined and, for a
   function, its SIGNATURE: `(decl MODULE fn [PARAM-TYPE…] RET)` for a function,

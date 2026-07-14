@@ -1,6 +1,6 @@
 (module app)
 (import "retkind.coil" :use *)
-(semantic-transform retkind-dialect)
+(transform retkind-dialect)
 
 ; retkind is a generic identity returning 0 — so WITHOUT the transform this program
 ; typechecks and main returns 0.

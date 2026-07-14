@@ -656,6 +656,10 @@
 (defn sem-model-box [] (-> (ptr SemModelBox)) (alloc-static SemModelBox))
 (defn set-sem-model [(p (ptr Program))] (-> i64)
   (let [b (sem-model-box)] (store! (field b prog) p) (store! (field b init) 1) 0))
+; No authoritative program available this round (the current program does not yet
+; typecheck) — `code-decl` and friends then answer `:unresolved`. A transform can
+; still rewrite syntactically until the program becomes valid.
+(defn clear-sem-model [] (-> i64) (set-sem-model (cast (ptr Program) 0)))
 (defn sem-model [] (-> (ptr Program))
   (let [b (sem-model-box)] (if (icmp-eq (load (field b init)) 0) (cast (ptr Program) 0) (load (field b prog)))))
 ; The module part of a fully-qualified name `mod.simple` → "mod" (before last dot), else "".

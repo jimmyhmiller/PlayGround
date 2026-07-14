@@ -297,26 +297,28 @@ rebootstrap fixpoint, in the established style.
   by the post-typecheck phase above so the metaprogram reads the *one* authoritative
   result.
 
-  **S1.1 — semantic transformers (`(semantic-transform FN)`) — ✅ SHIPPED.** A
-  transformer that runs in the same post-typecheck phase: it reads the authoritative
-  checked program (via `code-decl` etc.) to decide its rewrite, returns rewritten
-  code, and the pipeline **re-resolves + re-typechecks to a fixpoint** before codegen.
-  This is the Wall-A resolution in practice — the transformer's *input* must typecheck
-  (so it layers on a valid program), and each rewrite is re-checked. `expander.coil::
-  run-semantic-transforms` drives the loop (`sem-tx-apply-once` runs the transformers
-  and writes `s.out`; `sem-tx-round` re-resolves/re-checks and recurses until the
-  program stabilizes or a 16-round guard trips). Syntactic `(transform FN)` still runs
-  at `expand-stage3` (pre-resolution) for desugarings that *produce* typeable code
-  (e.g. `inc`→`iadd`); semantic transformers are for rewrites that *need* types.
-  Ordering: syntactic transforms → resolve → check → semantic transforms (fixpoint) →
-  checkers → mono. Demo: `metaprog-poc/retkind{,_test}.coil` — reads each wrapped
-  call's real return type and rewrites a marker to `1` (pointer) / `2` (non-pointer),
-  observable in the exit code (12 = `1*10 + 2`; 0 without the transform). Verified:
-  rebootstrap fixpoint + gates green; existing syntactic-transform/checker demos
-  unchanged. **Implementation note:** the fixpoint must be written as a *recursion*
-  with the `s.out` store isolated in its own function (`sem-tx-apply-once`) that
-  returns before the next `resolve-program` reads it — a mutable-accumulator loop that
-  stores `s.out` and re-reads it through a call in the same frame miscompiles.
+  **S1.1 — one unified `(transform FN)`, semantic + tolerant — ✅ SHIPPED.** There is
+  exactly ONE kind of transform, and it is semantic. It runs to a **fixpoint**: each
+  round it reads the authoritative checked program (via `code-decl` etc.) to decide its
+  rewrite, then the pipeline **re-resolves + re-typechecks**. Crucially it **tolerates**
+  a program that does not yet typecheck — that round the semantic model is empty
+  (`code-decl` → `:unresolved`) and the transform rewrites purely syntactically until
+  the program becomes valid (e.g. `inc`→`iadd`, where `inc` is undefined until the
+  rewrite). One authoritative **strict** resolve+check runs once, after the fixpoint.
+  So a single primitive covers both type-aware rewrites *and* syntactic desugarings —
+  there is no separate syntactic transform. Pipeline: `driver.coil::run-pipeline` →
+  `expander.coil::run-transforms-and-check` (fixpoint via `run-transform-fixpoint`, then
+  the strict check) → checkers → mono. `try-resolve-check` builds the per-round model
+  (swallowing errors, resetting `check_diags`); `clear-sem-model` empties it when the
+  program is not yet valid. Demos: `metaprog-poc/retkind{,_test}.coil` (rewrites a marker
+  to `1`/`2` by the wrapped call's real return type — exit 12 = `1*10 + 2`, 0 without)
+  and `dialect.coil`/`tx_test.coil` (`inc`→`iadd` via the tolerant path). Verified:
+  rebootstrap fixpoint + gates green; every existing transform/checker demo unchanged.
+
+  **Note (a debugging lesson, not a real bug):** an earlier round of this work chased a
+  phantom "arm64 store/reload miscompile" in the fixpoint. It did not exist — every
+  failure was a **stale binary** (the compiler wasn't reliably rebuilt between edits). A
+  plain mutable-accumulator loop is correct; always rebuild before testing.
 
 - **S2 — the semantic loop + type map.** Reorder to parse/resolve/best-effort-
   check before transformers/checkers; build the `nid→Type` map; expose
