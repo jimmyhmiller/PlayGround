@@ -806,9 +806,15 @@
 ;   { "type":"Functions", "functions":[
 ;     {"name":"fib","params":[{"name":"n","type":"Int"}],"returns":"Int"},
 ;     {"name":"main","params":[],"returns":"Void"} ] }
+; 07-modules.md §7 Phase 3: functions() was left bare/pre-module in Phase 2 (it lists EVERY
+; top-level function across the whole program, not just the entry module — agent.core/std.json
+; helpers all show up flat). The viewer's focus mode needs to scope "functions" per §7's list to
+; the focused subtree, which needs a module on each entry. Additive only (mirrors the
+; module/qualified fields already on schema()/types()/graph() nodes).
 (defn emit-function [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
   (let [fnn (load (field d node))]
     (jb-cstr b c"{\"name\":") (jb-str b (load (field d name)) (load (field d name-len)))
+    (emit-module-qualified-for-decl b d)
     (jb-cstr b c",\"params\":[")
     (let [ps (load (field fnn b)) np (if (= (cast i64 ps) 0) 0 (kid-count ps)) (mut j) 0]
       (loop (if (< (load j) np)

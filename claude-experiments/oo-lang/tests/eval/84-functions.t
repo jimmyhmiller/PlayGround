@@ -1,9 +1,9 @@
 file: examples/functions.scry
 expr: functions()
 contains: "type":"Functions"
-contains: {"name":"fib","params":[{"name":"n","type":"Int"}],"returns":"Int"}
-contains: {"name":"fact","params":[{"name":"n","type":"Int"}],"returns":"Int"}
-contains: {"name":"gcd","params":[{"name":"a","type":"Int"},{"name":"b","type":"Int"}],"returns":"Int"}
-contains: {"name":"ack","params":[{"name":"m","type":"Int"},{"name":"n","type":"Int"}],"returns":"Int"}
-contains: {"name":"main","params":[],"returns":"Void"}
+contains: {"name":"fib","module":"functions","qualified":"functions.fib","params":[{"name":"n","type":"Int"}],"returns":"Int"}
+contains: {"name":"fact","module":"functions","qualified":"functions.fact","params":[{"name":"n","type":"Int"}],"returns":"Int"}
+contains: {"name":"gcd","module":"functions","qualified":"functions.gcd","params":[{"name":"a","type":"Int"},{"name":"b","type":"Int"}],"returns":"Int"}
+contains: {"name":"ack","module":"functions","qualified":"functions.ack","params":[{"name":"m","type":"Int"},{"name":"n","type":"Int"}],"returns":"Int"}
+contains: {"name":"main","module":"functions","qualified":"functions.main","params":[],"returns":"Void"}
 notcontains: __action_
