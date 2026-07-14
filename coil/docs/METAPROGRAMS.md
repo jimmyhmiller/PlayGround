@@ -60,15 +60,19 @@ New API this project added (all shipped):
 - **Metaprograms are fed the WHOLE program, including all imports** (their own modules
   and bundled stdlib). A checker sees imported code too — `metaprog-poc/imports_test.coil`
   shows the linter flag an `icmp` in an imported user module.
-- **`(code-decl NODE)` → a declaration record** — the first piece of the *semantic*
-  layer (see `docs/SEMANTIC_METAPROGRAMS.md`). Given a symbol or a call node it
-  answers WHERE a name is defined and, for a function, its SIGNATURE:
-  `(decl MODULE fn [PARAM-TYPE…] RET)` for a function, `(decl MODULE KIND)` for a
-  struct/sum/trait/const/extern, `:unresolved`, or `:ambiguous`. Cross-module (an
-  imported function resolves to its defining module). Demo: `metaprog-poc/arity*.coil`
-  — a semantic arity checker that reads each callee's declared signature and vetoes
-  wrong-arity calls. (v1: simple/module-qualified names, not alias-qualified;
-  `defn` signatures only; no expression types yet.)
+- **Checkers run AFTER resolve + typecheck** (the *semantic* layer; see
+  `docs/SEMANTIC_METAPROGRAMS.md`). A checker is registered at `expand-stage3` but
+  executed later, once the whole program is checked, so it reads the compiler's
+  authoritative output. (Transformers still run at `expand-stage3` — they are
+  syntactic.) A checker therefore layers *policy* on a program that already typechecks.
+- **`(code-decl NODE)` → a declaration record**, read from that authoritative checked
+  program. Given a symbol or a call node it answers WHERE a name is defined and, for a
+  function, its SIGNATURE: `(decl MODULE fn [PARAM-TYPE…] RET)` for a function,
+  `(decl MODULE KIND)` for a struct/sum/trait/const/extern, `:unresolved`, or
+  `:ambiguous`. Cross-module (an imported function resolves to its defining module).
+  Demo: `metaprog-poc/sigcheck*.coil` — a checker that reads each callee's real return
+  type and vetoes calls to pointer-returning functions. (v1: simple/module-qualified
+  names, not alias-qualified; per-expression types are future work.)
 - **`(code-file NODE)` → the source file name** of a node, and **`(code-from-user? NODE)`
   → bool** (true for a real file, false for a bundled `<…>` source). So a linter can
   *scope itself* — `metaprog-poc/lint.coil` warns only where `(code-from-user? f)`, which

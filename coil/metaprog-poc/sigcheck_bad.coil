@@ -1,0 +1,12 @@
+(module app)
+(import "sigcheck.coil" :use *)
+(checker check-sigs)
+
+; `at` returns a raw pointer — perfectly type-correct, so it compiles and typechecks.
+; The checker reads `at`'s real declared return type `(ptr i64)` and vetoes the call.
+(defn at [(p (ptr i64))] (-> (ptr i64)) p)
+
+(defn main [] (-> i64)
+  (let [p (alloc-stack i64)]
+    (store! p 0)
+    (load (at p))))

@@ -255,30 +255,48 @@ rebootstrap fixpoint, in the established style.
   ("where does `foo` live," "what's its signature") and disambiguates cross-module
   reflection. **Ship first — largest value, lowest risk, additive to the dumps.**
 
-  **S1.0 — `(code-decl NODE)` — ✅ SHIPPED.** A single op that folds "where does it
-  live" + "what's its type" into one query. Given a Code node (a symbol, or a call
-  whose head is a symbol) it returns a Code record
+  **S1.0 — checkers run post-typecheck + `(code-decl NODE)` — ✅ SHIPPED.** The
+  load-bearing change is **phase ordering**: checkers now run in a dedicated phase
+  *after* the whole program is resolved + typechecked, so they read the compiler's
+  **authoritative** output — not a parallel resolver. Concretely, `expander.coil::
+  run-expand` no longer runs checkers; it *registers* them (their names + the compiled
+  metaprogram closure) via `register-checkers`, and still runs macros + transformers
+  (which are syntactic, pre-resolution). Then `driver.coil::run-pipeline`, right after
+  `frontend-check` produces the checked `Program`, calls `run-registered-checkers`,
+  which stashes that program as the **semantic model** (`set-sem-model`) and runs each
+  checker against it. Consequence: a checker can only veto programs that already
+  typecheck — it layers *policy* on a valid program (exactly what a dialect wants).
+
+  On top of that phase sits `(code-decl NODE)` — one op folding "where does it live"
+  + "what's its type". Given a Code node (a symbol, or a call whose head is a symbol)
+  it returns a Code record read straight from the checked program:
 
   ```
+  (decl MODULE fn [PARAM-TYPE…] RET) ; function: real module + real signature, walkable Code
   (decl MODULE KIND)                 ; struct / sum / trait / const / extern
-  (decl MODULE fn [PARAM-TYPE…] RET) ; function: module + full signature, as walkable Code
   :unresolved                        ; no such top-level definition
   :ambiguous                         ; defined in >1 module, can't disambiguate
   ```
 
-  Backed by a program-wide **declaration index** (`comptime.coil`
-  `build-decl-index`/`decl-find`) built from the whole post-expansion program plus
-  a `Type`→`Code` reconstructor (`ty->sexp`). Op code **35**; parser recognizes
-  `code-decl`; no checker change (defaults to `TCode`); the index is (re)built in
-  `expander.coil::run-expand` before the transformer and checker passes. No
-  reordering, no oracle re-bless — rebootstrap fixpoint + all gates green. Demo:
-  `metaprog-poc/arity{,_ok,_bad,_cross}.coil` — a semantic **arity checker** that
-  reads each callee's declared signature (including for a function imported from
-  another module) and vetoes wrong-arity calls. **Known limits (v1):** looks up by
-  simple/module-qualified name, not alias-qualified (`str/split`); indexes `defn`
-  signatures (other kinds carry module + kind only); no expression types yet (S2).
-  Next S1 ergonomics: `fn-sig`, `module-of`, `def-site` as thin wrappers, and
-  alias-aware resolution via the import tables.
+  Backed by lookups over the authoritative checked `Program` (`comptime.coil`
+  `cp-find-fn`/`cp-kind-decls`, keyed on the resolver's fully-qualified names) plus a
+  `Type`→`Code` reconstructor (`ty->sexp`). Op code **35**; parser recognizes
+  `code-decl`; no checker-typing change (defaults to `TCode`). No oracle re-bless —
+  rebootstrap fixpoint + all gates green; every existing checker/transformer demo
+  unchanged. Demo: `metaprog-poc/sigcheck{,_ok,_bad,_cross}.coil` — a policy checker
+  that reads each callee's real declared **return type** (incl. a function imported
+  from another module) and vetoes calls to pointer-returning functions (type-correct
+  code the policy forbids). **Known limits (v1):** looks up by simple/module-qualified
+  name, not alias-qualified (`str/split`); functions carry the full signature, other
+  kinds carry module + kind only; no per-*expression* types yet (that's S2). Next S1
+  ergonomics: `fn-sig`, `module-of`, `def-site` as thin wrappers, and alias-aware
+  resolution.
+
+  **Note vs the original plan:** the first cut of this used a parallel declaration
+  index built at `expand-stage3` (a second, approximate resolver). That was replaced
+  by the post-typecheck phase above so the metaprogram reads the *one* authoritative
+  result. Only **checkers** moved; transformers stay syntactic (a semantic transformer
+  needs the S2 best-effort fixpoint loop, still future work).
 
 - **S2 — the semantic loop + type map.** Reorder to parse/resolve/best-effort-
   check before transformers/checkers; build the `nid→Type` map; expose

@@ -351,6 +351,42 @@
                   (Ok [_] 0))
                 (store! j (iadd (load j) 1)))))
           (load err))))))
+; ── deferred CHECKER registry ────────────────────────────────────────────────
+; Checkers are SEMANTIC: they run after the whole program is resolved + typechecked,
+; so they read the compiler's authoritative output (real qualified names, real
+; signatures) via the semantic model — not a parallel resolver. run-expand collects
+; the checker names + the compiled metaprogram closure here; run-registered-checkers
+; (invoked from run-pipeline after frontend-check) sets the semantic model and runs them.
+(defstruct CheckerReg
+  [(active i64) (checkers (ptr (ArrayList (slice u8)))) (checked (ptr Program))
+   (allfns (ptr SBox)) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum))])
+(defstruct CheckerRegBox [(init i64) (reg CheckerReg)])
+(defn checker-reg-box [] (-> (ptr CheckerRegBox)) (alloc-static CheckerRegBox))
+(defn register-checkers [(checkers (ptr (ArrayList (slice u8)))) (checked (ptr Program))
+                         (allfns (ptr SBox)) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum))] (-> i64)
+  (let [b (checker-reg-box) r (field b reg)]
+    (store! (field r active) 1) (store! (field r checkers) checkers) (store! (field r checked) checked)
+    (store! (field r allfns) allfns) (store! (field r gs) gs) (store! (field r gu) gu)
+    (store! (field b init) 1) 0))
+; Run the registered checkers over the authoritative checked Program `cp`. Called
+; from run-pipeline AFTER frontend-check. Always sets the semantic model (so
+; `code-decl` reads real work) and drains collected warnings/errors.
+(defn run-registered-checkers [(a (ptr Allocator)) (s (mut LS)) (cp (ptr Program))] (-> (Result i64 Diag))
+  (set-sem-model cp)
+  (let [b (checker-reg-box)]
+    (if (icmp-eq (load (field b init)) 0) (Ok [i64 Diag] 0)
+      (let [r (field b reg)]
+        (if (icmp-eq (load (field r active)) 0) (Ok [i64 Diag] 0)
+          (let [forms (box-al [TaggedForm] a (load (field s out)))
+                impb (unwrap-ptr [(ArrayList ImpEntry)] (create [(ArrayList ImpEntry)] a))
+                expb (unwrap-ptr [(ArrayList ExpEntry)] (create [(ArrayList ExpEntry)] a))]
+            (store! impb (load (field s imports))) (store! expb (load (field s exports)))
+            (match (run-checkers (load (field r checkers)) (load (field r checked)) forms (load (field r allfns)) (load (field r gs)) (load (field r gu)) impb expb a)
+              (Some [d] (do (drain-warnings (mut s)) (Err [i64 Diag] d)))
+              (None [] (do (drain-warnings (mut s))
+                           (if (icmp-gt (diag-errs) 0)
+                               (Err [i64 Diag] (derr "compilation failed: checker reported error(s) above"))
+                             (Ok [i64 Diag] 0)))))))))))
 ; ── whole-program TRANSFORMERS ───────────────────────────────────────────────
 ; `(transform FN)` registers FN — a [(prog Code)] -> Code function — run once after
 ; expansion over the WHOLE program; FN returns the rewritten program as `(do form…)`
@@ -443,18 +479,18 @@
     (match (load errf)
       (Some [d] (Err [i64 Diag] d))
       (None []
-        (do (build-decl-index (field result items))  ; S1 semantic index for (code-decl …) in transformers
         (match (run-transformers (mut transformers) checked (field result items) allfns gs gu impb expb a)
           (Err [d] (Err [i64 Diag] d))
           (Ok [tforms]
             (do (store! (field s out) (load tforms))
-                (build-decl-index tforms)             ; rebuild over the (possibly rewritten) program for checkers
-                (match (run-checkers (mut checkers) checked tforms allfns gs gu impb expb a)
-                  (Some [d] (Err [i64 Diag] d))
-                  (None [] (do (drain-warnings (mut s))
-                               (if (icmp-gt (diag-errs) 0)
-                                   (Err [i64 Diag] (derr "compilation failed: checker reported error(s) above"))
-                                 (Ok [i64 Diag] 0)))))))))))))
+                ; Transformers are syntactic (they run before resolution). CHECKERS are
+                ; semantic — they are REGISTERED here and run later, in a phase where the
+                ; whole program has been resolved + typechecked, so they read the compiler's
+                ; authoritative work (see run-registered-checkers, called from run-pipeline).
+                (if (icmp-gt (diag-errs) 0)
+                    (do (drain-warnings (mut s)) (Err [i64 Diag] (derr "compilation failed: checker reported error(s) above")))
+                  (do (register-checkers (box-al [(slice u8)] a (load checkers)) checked allfns gs gu)
+                      (Ok [i64 Diag] 0))))))))))
 (defn do-produced [(outf (ptr Sexp)) (module (Option (slice u8))) (result (ptr SBoxTF)) (gs (ptr SBoxStruct)) (gu (ptr SBoxSum)) (allfns (ptr SBox)) (a (ptr Allocator)) (errf (mut (Option Diag)))] (-> i64)
   (let [(mut produced) (al-new [Sexp] a)]
     (if (and (icmp-eq (sx-tag (load outf)) 6)

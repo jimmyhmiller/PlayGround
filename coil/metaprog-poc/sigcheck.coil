@@ -1,0 +1,46 @@
+(module sigcheck)
+; A SEMANTIC checker that reads the compiler's AUTHORITATIVE work. It runs after the
+; whole program is resolved + typechecked, so `(code-decl HEAD)` returns the real
+; declaration — the module a name lives in and its real signature
+; `(decl MODULE fn [param-types] ret-type)` — straight from the checked program, not
+; a parallel resolver.
+;
+; Policy: a call may not target a function whose declared RETURN TYPE is a raw
+; pointer `(ptr …)`. This is perfectly type-correct Coil; the checker adds a policy
+; ON TOP of a valid program, using the callee's real signature (incl. across module
+; boundaries). This is the "does the metaprogram know where it lives / its type?"
+; question — now answered from finished work.
+
+; A `(code-decl …)` fn record: (decl MOD fn [T…] RET). RET is index 4.
+(defn is-fn-decl? [(d Code)] (-> bool)
+  (and (code-list? d) (and (icmp-ge (code-count d) 5) (code-eq (code-nth d 2) `fn))))
+(defn ret-is-ptr? [(d Code)] (-> bool)
+  (let [ret (code-nth d 4)]
+    (and (code-list? ret) (and (icmp-gt (code-count ret) 0) (code-eq (code-nth ret 0) `ptr)))))
+
+(defn check-node [(f Code)] (-> Code)
+  (if (code-list? f)
+      (if (icmp-gt (code-count f) 0)
+          (do (let [head (code-nth f 0)]
+                (if (code-sym? head)
+                    (let [d (code-decl head)]
+                      (if (and (is-fn-decl? d) (ret-is-ptr? d))
+                          (do (report f "policy: call targets a function that returns a raw pointer — banned by this dialect") 0)
+                        0))
+                  0))
+              (check-kids f 0 (code-count f)))
+        `0)
+    `0))
+(defn check-kids [(f Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `0 (do (check-node (code-nth f i)) (check-kids f (iadd i 1) n))))
+
+; A module is `(name form…)`; only inspect USER modules.
+(defn look-at? [(m Code)] (-> bool)
+  (if (icmp-gt (code-count m) 1) (code-from-user? (code-nth m 1)) false))
+(defn check-forms [(m Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `0 (do (check-node (code-nth m i)) (check-forms m (iadd i 1) n))))
+(defn check-mods [(ms Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `0
+    (do (let [m (code-nth ms i)] (if (look-at? m) (check-forms m 1 (code-count m)) `0))
+        (check-mods ms (iadd i 1) n))))
+(defn check-sigs [(modules Code)] (-> Code) (check-mods modules 0 (code-count modules)))

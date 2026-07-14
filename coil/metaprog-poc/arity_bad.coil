@@ -1,8 +1,0 @@
-(module app)
-(import "arity.coil" :use *)
-(checker check-arity)
-
-(defn add [(x i64) (y i64)] (-> i64) (iadd x y))
-
-(defn main [] (-> i64)
-  (add 1 2 3))   ; add/2 called with THREE args → checker vetoes with a located error
