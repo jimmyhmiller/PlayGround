@@ -1630,3 +1630,30 @@ fn jars_on_the_load_path() {
     assert_eq!(clojure_stub::clj_str(&rt, r), "42");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Stage F3: a transient built ACROSS moving collections — the edit-session
+/// stamps and the in-place-edited nodes must survive relocation (the session
+/// value and every node's edit field are ordinary traced values, rewritten
+/// together by the collector, so ownership comparisons stay coherent). The
+/// trigger is squeezed AFTER the library loads so pressure collections fire
+/// inside the transient builds themselves.
+#[test]
+fn transients_survive_moving_collections() {
+    let mut rt = Runtime::<LowBitModel>::new();
+    let _ = clojure_stub::run(&mut rt, &TreeWalk, "1"); // load the library first
+    let used = rt.heap().used();
+    rt.heap().set_trigger_bytes(used + 256 * 1024);
+    let r = clojure_stub::run(
+        &mut rt,
+        &TreeWalk,
+        "[(count (persistent! (reduce conj! (transient []) (range 5000))))
+          (nth (persistent! (reduce conj! (transient []) (range 5000))) 4321)
+          (count (persistent! (reduce (fn [m i] (assoc! m i (* i 2))) (transient {}) (range 2000))))
+          (get (persistent! (reduce (fn [m i] (assoc! m i (* i 2))) (transient {}) (range 2000))) 1234)]",
+    );
+    assert_eq!(clojure_stub::clj_str(&rt, r), "[5000 4321 2000 2468]");
+    assert!(
+        rt.heap().collections.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "no collection fired mid-transient — the test proved nothing"
+    );
+}

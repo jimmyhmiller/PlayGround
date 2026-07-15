@@ -707,6 +707,172 @@
 (defn hash-set [& es] (set es))
 (defn disj [s & vs] (loop [s s vs (seq vs)] (if (nil? vs) s (recur (-disjoin s (first vs)) (next vs)))))
 
+;; ─────────────── Stage F3: TRANSIENTS (real semantics, native-managed) ──────
+;; TransientVector / TransientArrayMap / TransientHashMap are records built and
+;; MUTATED IN PLACE by the %tv-*/%tam-*/%thm-* prims (edit-session ownership
+;; stamping in the nodes' `edit` slots — see runtime.rs). Clojure's contract
+;; holds: single-threaded, use the RETURN VALUE of every assoc!/conj! (a
+;; TransientArrayMap PROMOTES to a TransientHashMap past 8 entries), and any
+;; use after persistent! throws. A transient set wraps a transient map through
+;; a one-slot cell (the wrapped map's identity can change on promotion).
+(deftype TransientHashSet [cell])
+;; Protocol seam so hot builders dispatch through the (inline-cached) protocol
+;; machinery instead of a type-of cond chain per element.
+(defprotocol ITransientCollection (-conj! [tcoll x]) (-persistent! [tcoll]))
+(defprotocol ITransientAssociative (-assoc! [tcoll k v]))
+
+(defn transient [coll]
+  (let [t (type-of coll)]
+    (cond (%num-eq t 'PersistentVector) (%tv-new coll)
+          (%num-eq t 'PersistentArrayMap) (%tam-new coll)
+          (%num-eq t 'PersistentHashMap) (%thm-new coll)
+          (%num-eq t 'PersistentHashSet) (TransientHashSet. (array (transient (.-hash-map coll))))
+          :else (throw "transient: collection is not editable"))))
+
+(defn persistent! [coll] (-persistent! coll))
+(defn assoc! [coll k v] (-assoc! coll k v))
+
+(defn dissoc! [coll k]
+  (let [t (type-of coll)]
+    (cond (%num-eq t 'TransientArrayMap) (%tam-dissoc! coll k)
+          (%num-eq t 'TransientHashMap) (%thm-dissoc! coll k)
+          :else (throw "dissoc!: not a transient map"))))
+
+(extend-type TransientVector
+  ITransientCollection
+  (-conj! [c x] (%tv-conj! c x))
+  (-persistent! [c] (%tv-persistent! c))
+  ITransientAssociative (-assoc! [c k v] (%tv-assoc! c k v)))
+(extend-type TransientArrayMap
+  ITransientCollection
+  (-conj! [c e]
+    (if (vector? e) (%tam-assoc! c (%pv-nth e 0) (%pv-nth e 1))
+        (throw "conj! on a transient map takes a map entry")))
+  (-persistent! [c] (%tam-persistent! c))
+  ITransientAssociative (-assoc! [c k v] (%tam-assoc! c k v)))
+(extend-type TransientHashMap
+  ITransientCollection
+  (-conj! [c e]
+    (if (vector? e) (%thm-assoc! c (%pv-nth e 0) (%pv-nth e 1))
+        (throw "conj! on a transient map takes a map entry")))
+  (-persistent! [c] (%thm-persistent! c))
+  ITransientAssociative (-assoc! [c k v] (%thm-assoc! c k v)))
+(extend-type TransientHashSet
+  ITransientCollection
+  (-conj! [c x]
+    (let [cell (.-cell c)]
+      (%cell-set! cell 0 (-assoc! (%aget cell 0) x nil))
+      c))
+  (-persistent! [c] (PersistentHashSet. nil (persistent! (%aget (.-cell c) 0)) nil)))
+
+(defn conj!
+  ([] (transient []))
+  ([coll] coll)
+  ([coll x] (-conj! coll x)))
+
+(defn pop! [coll]
+  (if (%num-eq (type-of coll) 'TransientVector)
+    (%tv-pop! coll)
+    (throw "pop!: not a transient vector")))
+
+(defn disj! [coll x]
+  (if (%num-eq (type-of coll) 'TransientHashSet)
+    (let [cell (.-cell coll)]
+      (%cell-set! cell 0 (dissoc! (%aget cell 0) x))
+      coll)
+    (throw "disj!: not a transient set")))
+
+;; count / get / nth work on transients, as in Clojure.
+(extend-type TransientVector
+  ICounted (-count [c] (field c 1))
+  IIndexed
+  (-nth [c n] (%tv-nth c n))
+  (-nth [c n not-found] (if (if (<= 0 n) (< n (field c 1)) false) (%tv-nth c n) not-found))
+  ILookup
+  (-lookup [c k] (-lookup c k nil))
+  (-lookup [c k not-found] (if (number? k) (-nth c k not-found) not-found))
+  IFn (-invoke [c k] (%tv-nth c k)))
+(extend-type TransientArrayMap
+  ICounted (-count [c] (field c 2))
+  ILookup
+  (-lookup [c k] (-lookup c k nil))
+  (-lookup [c k not-found]
+    (let [arr (field c 1) len (alength arr)]
+      (loop [i 0]
+        (cond (>= i len) not-found
+              (= (aget arr i) k) (aget arr (inc i))
+              :else (recur (+ i 2))))))
+  IFn (-invoke [c k] (-lookup c k nil)))
+(extend-type TransientHashMap
+  ICounted (-count [c] (field c 2))
+  ILookup
+  (-lookup [c k] (-lookup c k nil))
+  (-lookup [c k not-found]
+    (if (nil? k)
+      (if (field c 3) (field c 4) not-found)
+      (%hamt-lookup (field c 1) k not-found)))
+  IFn (-invoke [c k] (-lookup c k nil)))
+(extend-type TransientHashSet
+  ICounted (-count [c] (-count (%aget (.-cell c) 0)))
+  ILookup
+  (-lookup [c k] (-lookup c k nil))
+  (-lookup [c k not-found]
+    (if (identical? (-lookup (%aget (.-cell c) 0) k -lookup-sentinel) -lookup-sentinel)
+      not-found
+      k)))
+
+;; Transient-fused builders: into / group-by / frequencies build through a
+;; transient and freeze once (real Clojure does exactly this). The seq walk
+;; is chunk-aware; the TransientVector loop calls the native conj! directly
+;; (its type is stable — no promotion), the map/set path goes through conj!
+;; (whose return value carries a possible TAM→THM promotion).
+(defn -rtvconj-chunk [acc arr off end]
+  (loop [i off]
+    (if (%lt i end) (do (%tv-conj! acc (%aget arr i)) (recur (%add i 1))) acc)))
+(defn -rtvconj-seq [acc s]
+  (let [s (seq s)]
+    (cond (nil? s) acc
+          (chunked? s) (-rtvconj-seq (-rtvconj-chunk acc (field s 0) (field s 1) (field s 2)) (field s 3))
+          true (-rtvconj-seq (%tv-conj! acc (%first s)) (%rest s)))))
+(defn -rtconj-chunk [acc arr off end]
+  (loop [i off acc acc]
+    (if (%lt i end) (recur (%add i 1) (-conj! acc (%aget arr i))) acc)))
+(defn -rtconj-seq [acc s]
+  (let [s (seq s)]
+    (cond (nil? s) acc
+          (chunked? s) (-rtconj-seq (-rtconj-chunk acc (field s 0) (field s 1) (field s 2)) (field s 3))
+          true (-rtconj-seq (-conj! acc (%first s)) (%rest s)))))
+(defn -editable? [coll]
+  (let [t (type-of coll)]
+    (or (%num-eq t 'PersistentVector) (%num-eq t 'PersistentArrayMap)
+        (%num-eq t 'PersistentHashMap) (%num-eq t 'PersistentHashSet))))
+(defn into
+  ([] [])
+  ([to] to)
+  ([to from]
+   (let [t (type-of to)]
+     (cond (%num-eq t 'PersistentVector)
+             ;; empty -> the O(n) bottom-up build (%pv-from-array); non-empty
+             ;; -> transient tail-pushes.
+             (if (%num-eq (-count to) 0)
+               (vec from)
+               (%tv-persistent! (-rtvconj-seq (%tv-new to) from)))
+           (or (%num-eq t 'PersistentArrayMap) (%num-eq t 'PersistentHashMap)
+               (%num-eq t 'PersistentHashSet))
+             (persistent! (-rtconj-seq (transient to) from))
+           :else (reduce conj to from))))
+  ([to xform from]
+   (if (-editable? to)
+     (persistent! (transduce xform conj! (transient to) from))
+     (transduce xform conj to from))))
+(defn group-by [f coll]
+  (persistent!
+    (reduce (fn [m x] (let [k (f x)] (-assoc! m k (conj (-lookup m k []) x))))
+            (transient (hash-map)) coll)))
+(defn frequencies [coll]
+  (persistent!
+    (reduce (fn [m x] (-assoc! m x (inc (-lookup m x 0)))) (transient (hash-map)) coll)))
+
 ;; ─────────────── symbol metadata (side registry) ───────────────
 ;; Symbols are immediates (no heap cell to hang meta on), so `with-meta` on a
 ;; symbol records it in a registry keyed by the symbol. Clojure's symbol meta is

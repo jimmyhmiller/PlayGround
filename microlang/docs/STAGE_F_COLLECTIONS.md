@@ -90,3 +90,46 @@ PvConj/PvNth/PvAssoc/HamtAssoc/HamtLookup/ArrPush (+ Cons/First/Rest for the
 non-inline models), PARKING-classified and excluded from `body_pure_loop` so
 loops around them use precise demotion. Gates: all four suites + gc-stress
 battery green.
+
+## F3 results (measured 2026-07-15, same harness; before = F1+F2 numbers)
+
+| workload | F1+F2 | F3 | Δ |
+|---|---|---|---|
+| vecbuild via transient (10k conj!) | 151 (persistent conj) | **24** | **6.3×** |
+| assoc-build via transient (10k assoc!) | 779 (persistent assoc) | **64** | **12×** (30× vs pre-F1) |
+| into [1] (range 10k) | — | 43 | (transient tail-pushes) |
+| into-xform | 272 | **155** | 1.8× |
+| group-by (8 groups) | 1421 | 1733 | 0.82× (see below) |
+| persistent conj / assoc / lookups | 151 / 779 | 153 / 788 | unchanged |
+| core band (raw/calls/captures) | 3 / 4 / 5 | 3 / 4 / 5 | unchanged |
+
+Implementation: native `%tv-*` / `%tam-*` / `%thm-*` prims over three transient
+record types; the edit-session stamp lives in the trie nodes' EXISTING `edit`
+field (field 0 — the slot the cljs port reserved), NOT the header spare u16: a
+u16 wraps after 65k transients (group-by makes one per call — a real-program
+killer), the layouts already had the slot, and a traced value field is
+GC-neutral for free (mid-transient collections rewrite the session value and
+every stamp coherently — pinned by `transients_survive_moving_collections`).
+Sessions come from a per-runtime u64 counter (loud panic at 2^59 — never).
+persistent! is an O(1) session invalidation; stale stamps are inert (ids never
+repeat). TransientVector owns a 32-capacity tail from birth (31/32 conj!s are
+one in-place array push — the "real tail"); TransientArrayMap edits its kv
+array in place and PROMOTES to TransientHashMap past 8 pairs under the same
+session (so `persistent!` of small maps returns an insertion-ordered
+PersistentArrayMap — the conformance-visible property); TransientHashMap
+edits session-owned HAMT nodes in place, copy-on-first-touch otherwise.
+Surface: transient/persistent!/conj!/assoc!/dissoc!/disj!/pop! with real
+Clojure semantics (use-after-persistent! throws catchably; conj!/assoc!
+return values must be used), ITransientCollection/ITransientAssociative
+protocols for IC-dispatched hot paths, count/get/nth on transients, and
+into/group-by/frequencies build through transients (exactly clojure.core's
+own definitions).
+
+group-by honesty: the 8-group microbench got 22% SLOWER — its per-element
+cost is dominated by the inner `(conj (get m k []) x)` persistent-vector
+build (which real Clojure's group-by shares, and which transients cannot help
+— the vectors are persistent VALUES inside the map), so the outer map's
+transient win is noise here while the transient/protocol plumbing adds a
+little. Workloads with many distinct keys (frequencies-shaped) get the full
+assoc! win. The remaining group-by gap is the inner-collection build + call
+glue (F4).

@@ -334,6 +334,14 @@ pub struct Shared<M: ValueModel> {
     sym_cache_vector_node: AtomicU32,
     sym_cache_persistent_vector: AtomicU32,
     sym_cache_chunked_cons: AtomicU32,
+    sym_cache_transient_vector: AtomicU32,
+    sym_cache_transient_array_map: AtomicU32,
+    sym_cache_transient_hash_map: AtomicU32,
+    sym_cache_persistent_hash_map: AtomicU32,
+    sym_cache_persistent_array_map: AtomicU32,
+    /// Stage F3: the EDIT-SESSION counter for transients (see
+    /// `Runtime::fresh_session`). Starts at 1 and never repeats.
+    edit_sessions: AtomicU64,
     /// Same lock-free-on-hit cache, for `type_tag`'s BUILT-IN category names
     /// (see the `TYPE_TAG_*` indices below) — `type_tag` backs `type-of`,
     /// which nearly every predicate (`vector?`, `map?`, `string?`, `seq?`, a
@@ -474,6 +482,12 @@ impl<M: ValueModel> Runtime<M> {
             sym_cache_vector_node: AtomicU32::new(u32::MAX),
             sym_cache_persistent_vector: AtomicU32::new(u32::MAX),
             sym_cache_chunked_cons: AtomicU32::new(u32::MAX),
+            sym_cache_transient_vector: AtomicU32::new(u32::MAX),
+            sym_cache_transient_array_map: AtomicU32::new(u32::MAX),
+            sym_cache_transient_hash_map: AtomicU32::new(u32::MAX),
+            sym_cache_persistent_hash_map: AtomicU32::new(u32::MAX),
+            sym_cache_persistent_array_map: AtomicU32::new(u32::MAX),
+            edit_sessions: AtomicU64::new(1),
             type_tag_cache: std::array::from_fn(|_| AtomicU32::new(u32::MAX)),
             _pd: PhantomData,
         };
@@ -1689,6 +1703,27 @@ impl<M: ValueModel> Runtime<M> {
             }
             Prim::HamtLookup => self.hamt_map_lookup(args[0], args[1], args[2]),
             Prim::HamtWithout => self.hamt_map_without(args[0], args[1]),
+            // Stage F3 transients (see the `tv_*`/`tam_*`/`thm_*` methods).
+            Prim::TvNew => self.tv_new(args[0]),
+            Prim::TvConj => self.tv_conj(args[0], args[1]),
+            Prim::TvAssoc => {
+                let i = self.raw_i64(args[1], "assoc!: index must be an int");
+                self.tv_assoc(args[0], i, args[2])
+            }
+            Prim::TvNth => {
+                let i = self.raw_i64(args[1], "tv-nth: index must be an int");
+                self.tv_nth(args[0], i)
+            }
+            Prim::TvPop => self.tv_pop(args[0]),
+            Prim::TvPersistent => self.tv_persistent(args[0]),
+            Prim::TamNew => self.tam_new(args[0]),
+            Prim::TamAssoc => self.tam_assoc(args[0], args[1], args[2]),
+            Prim::TamDissoc => self.tam_dissoc(args[0], args[1]),
+            Prim::TamPersistent => self.tam_persistent(args[0]),
+            Prim::ThmNew => self.thm_new(args[0]),
+            Prim::ThmAssoc => self.thm_assoc(args[0], args[1], args[2]),
+            Prim::ThmDissoc => self.thm_dissoc(args[0], args[1]),
+            Prim::ThmPersistent => self.thm_persistent(args[0]),
             // Join an array of already-stringified elements in ONE native pass
             // (see `Prim::StrJoinArr`'s doc comment in ir.rs).
             Prim::StrJoinArr => {
@@ -3235,6 +3270,11 @@ impl<M: ValueModel> Runtime<M> {
     }
     pub(crate) fn pv_nth(&mut self, pv: u64, i: i64) -> u64 {
         let (_, cnt, shift, root, tail) = self.pv_read(pv);
+        self.pv_nth_inner(cnt, shift, root, tail, i)
+    }
+    /// The nth walk over (cnt, shift, root, tail) — shared by the persistent
+    /// vector and the transient (whose record layout differs).
+    fn pv_nth_inner(&mut self, cnt: i64, shift: i64, root: u64, tail: u64, i: i64) -> u64 {
         if i < 0 || i >= cnt {
             let sid = self.alloc(Obj::Str(format!("No item {i} in vector of length {cnt}")));
             self.signal_throw(M::R::enc_ref(sid));
@@ -3670,6 +3710,744 @@ impl<M: ValueModel> Runtime<M> {
     fn hamt_map_without(&mut self, root: u64, key: u64) -> u64 {
         let hash = self.hash_masked(key);
         self.hamt_without(root, 0, hash, key)
+    }
+
+    // ── Stage F3: TRANSIENTS — ownership-stamped in-place builders ─────────
+    //
+    // An EDIT SESSION id (one fresh value per `transient`, from a per-runtime
+    // counter that never repeats) marks ownership. Trie nodes carry it in
+    // their existing `edit` slot (field 0 — the field the cljs port already
+    // reserved and always left nil), NOT in the header's spare u16: a u16
+    // stamp wraps after 65k transients (a real-program killer — group-by
+    // creates one per call), the node layouts already have the slot, and a
+    // traced value field is copied by the collector like any other value, so
+    // GC neutrality is free (a collection mid-transient rewrites the session
+    // box and every stamp consistently — under NaN-boxing the session is a
+    // boxed int and all stamps share the ONE box, so bit-equality survives
+    // relocation by construction).
+    //
+    // Rules (exactly Clojure's): a node is EDITABLE by a session iff its edit
+    // field == the session bits; editable nodes are mutated in place (their
+    // arrays are exclusively owned — every copy-on-first-touch clones the
+    // array too); everything else is copied on first touch and the copy is
+    // stamped. `persistent!` clears the TRANSIENT's own session field (O(1)
+    // freeze) — stale stamps on nodes are inert because ids never repeat.
+    // Transients are single-threaded by contract; use-after-persistent!
+    // throws catchably with cljs' messages. Like every collection prim,
+    // these run between safepoints (no collection can interleave).
+
+    /// A fresh session id, ENCODED (fixnum, or one shared box under models
+    /// that box ints — bit-identical across all its uses either way).
+    fn fresh_session(&mut self) -> u64 {
+        let n = self.shared.edit_sessions.fetch_add(1, Ordering::Relaxed);
+        assert!(n < (1 << 59), "transient edit-session counter overflow (2^59 sessions?!)");
+        self.encode(Val::Int(n as i128))
+    }
+    /// Is `node` (a trie node record) editable by `session`?
+    fn node_editable(&self, node: u64, session: u64) -> bool {
+        match self.raw_rec(node) {
+            Some((_, f)) => f[0] == session,
+            None => false,
+        }
+    }
+    fn rec_set(&self, rec: u64, i: usize, v: u64) {
+        let g = self.raw_gc(rec).expect("transient: not a record");
+        self.values_mut(g)[i] = v;
+    }
+    fn arr_set(&self, arr: u64, i: usize, v: u64) {
+        let h = self.arr_handle(arr);
+        self.arr_slice_mut(h)[i] = v;
+    }
+    fn mk_node_edited(&mut self, session: u64, arr: u64) -> u64 {
+        let ty = self.intern_cached(&self.shared.sym_cache_vector_node, "VectorNode");
+        M::R::enc_ref(self.alloc_record(ty, &[session, arr]))
+    }
+    fn mk_bitmap_node_edited(&mut self, session: u64, bitmap: u32, arr: Vec<u64>) -> u64 {
+        let bm = self.encode(Val::Int(bitmap as i128));
+        let arrb = self.mk_array(arr);
+        let ty = self.intern_cached(&self.shared.sym_cache_bitmap_node, "BitmapIndexedNode");
+        M::R::enc_ref(self.alloc_record(ty, &[session, bm, arrb]))
+    }
+    fn mk_array_node_edited(&mut self, session: u64, cnt: i64, arr: Vec<u64>) -> u64 {
+        let cb = self.encode(Val::Int(cnt as i128));
+        let arrb = self.mk_array(arr);
+        let ty = self.intern_cached(&self.shared.sym_cache_array_node, "ArrayNode");
+        M::R::enc_ref(self.alloc_record(ty, &[session, cb, arrb]))
+    }
+    fn mk_collision_node_edited(&mut self, session: u64, chash: u32, cnt: i64, arr: Vec<u64>) -> u64 {
+        let hb = self.encode(Val::Int(chash as i128));
+        let cb = self.encode(Val::Int(cnt as i128));
+        let arrb = self.mk_array(arr);
+        let ty = self.intern_cached(&self.shared.sym_cache_collision_node, "HashCollisionNode");
+        M::R::enc_ref(self.alloc_record(ty, &[session, hb, cb, arrb]))
+    }
+    /// Read a transient record's fields, checking type + liveness. Throws
+    /// catchably (Clojure semantics) and returns None on a dead session.
+    fn transient_fields(&mut self, t: u64, want: Sym, name: &str, op: &str) -> Option<&'static [u64]> {
+        let Some((ty, f)) = self.raw_rec(t) else {
+            let sid = self.alloc(Obj::Str(format!("{op}: not a {name}")));
+            self.signal_throw(M::R::enc_ref(sid));
+            return None;
+        };
+        if ty != want {
+            let sid = self.alloc(Obj::Str(format!("{op}: not a {name}")));
+            self.signal_throw(M::R::enc_ref(sid));
+            return None;
+        }
+        if self.is_nil_bits(f[0]) {
+            let sid = self.alloc(Obj::Str(format!("{op} after persistent!")));
+            self.signal_throw(M::R::enc_ref(sid));
+            return None;
+        }
+        Some(f)
+    }
+
+    // ── TransientVector [session cnt shift root tail meta] ──
+    pub(crate) fn tv_new(&mut self, pv: u64) -> u64 {
+        let (meta, cnt, shift, root, tail) = self.pv_read(pv);
+        let session = self.fresh_session();
+        // The tail is OWNED from birth: a copy at full 32 capacity, so conj!
+        // appends in place (this is the "real 32-wide tail" — 31 of 32 conj!s
+        // are one in-place array push).
+        let telems = self.arr_slice(self.arr_handle(tail)).to_vec();
+        let ntail = M::R::enc_ref(self.alloc_vector_cap(&telems, 32));
+        let cntb = self.encode(Val::Int(cnt as i128));
+        let shiftb = self.encode(Val::Int(shift as i128));
+        let ty = self.intern_cached(&self.shared.sym_cache_transient_vector, "TransientVector");
+        M::R::enc_ref(self.alloc_record(ty, &[session, cntb, shiftb, root, ntail, meta]))
+    }
+    pub(crate) fn tv_conj(&mut self, tv: u64, x: u64) -> u64 {
+        let want = self.intern_cached(&self.shared.sym_cache_transient_vector, "TransientVector");
+        let Some(f) = self.transient_fields(tv, want, "TransientVector", "conj!") else {
+            return self.enc_nil();
+        };
+        let session = f[0];
+        let cnt = self.raw_i64(f[1], "tv cnt");
+        let shift = self.raw_i64(f[2], "tv shift");
+        let (root, tail) = (f[3], f[4]);
+        let th = self.arr_handle(tail);
+        if (unsafe { th.aux() } as i64) < 32 {
+            self.arr_extend(th, &[x]);
+            let ncnt = self.encode(Val::Int((cnt + 1) as i128));
+            self.rec_set(tv, 1, ncnt);
+            return tv;
+        }
+        // Tail full: spill it into the trie as an EDITED node (the tail array
+        // moves in wholesale — it was ours), start a fresh owned tail.
+        let tail_node = self.mk_node_edited(session, tail);
+        let root_overflow = (cnt >> 5) > (1i64 << shift);
+        let (new_shift, new_root) = if root_overflow {
+            let path = self.tv_new_path(session, shift, tail_node);
+            let nil = self.enc_nil();
+            let mut a = vec![nil; 32];
+            a[0] = root;
+            a[1] = path;
+            let arr = self.mk_array(a);
+            let nr = self.mk_node_edited(session, arr);
+            (shift + 5, nr)
+        } else {
+            (shift, self.tv_push_tail(session, cnt, shift, root, tail_node))
+        };
+        let ntail = M::R::enc_ref(self.alloc_vector_cap(&[x], 32));
+        let ncnt = self.encode(Val::Int((cnt + 1) as i128));
+        let nshift = self.encode(Val::Int(new_shift as i128));
+        let g = self.raw_gc(tv).expect("tv");
+        let fs = self.values_mut(g);
+        fs[1] = ncnt;
+        fs[2] = nshift;
+        fs[3] = new_root;
+        fs[4] = ntail;
+        tv
+    }
+    fn tv_new_path(&mut self, session: u64, level: i64, node: u64) -> u64 {
+        let mut ret = node;
+        let mut ll = level;
+        while ll != 0 {
+            let nil = self.enc_nil();
+            let mut a = vec![nil; 32];
+            a[0] = ret;
+            let arr = self.mk_array(a);
+            ret = self.mk_node_edited(session, arr);
+            ll -= 5;
+        }
+        ret
+    }
+    /// `pv_push_tail`, transient: mutate session-owned nodes in place, copy
+    /// (and stamp) on first touch.
+    fn tv_push_tail(&mut self, session: u64, cnt: i64, level: i64, parent: u64, tailnode: u64) -> u64 {
+        let subidx = (((cnt - 1) >> level) & 31) as usize;
+        let editable = self.node_editable(parent, session);
+        let parr = self.node_arr(parent);
+        let newchild = if level == 5 {
+            tailnode
+        } else {
+            let child = self.arr_at(parr, subidx);
+            if self.is_nil_bits(child) {
+                self.tv_new_path(session, level - 5, tailnode)
+            } else {
+                self.tv_push_tail(session, cnt, level - 5, child, tailnode)
+            }
+        };
+        if editable {
+            self.arr_set(parr, subidx, newchild);
+            parent
+        } else {
+            let mut ret = self.arr_clone(parr);
+            ret[subidx] = newchild;
+            let arr = self.mk_array(ret);
+            self.mk_node_edited(session, arr)
+        }
+    }
+    pub(crate) fn tv_assoc(&mut self, tv: u64, n: i64, val: u64) -> u64 {
+        let want = self.intern_cached(&self.shared.sym_cache_transient_vector, "TransientVector");
+        let Some(f) = self.transient_fields(tv, want, "TransientVector", "assoc!") else {
+            return self.enc_nil();
+        };
+        let session = f[0];
+        let cnt = self.raw_i64(f[1], "tv cnt");
+        let shift = self.raw_i64(f[2], "tv shift");
+        let (root, tail) = (f[3], f[4]);
+        if n >= 0 && n < cnt {
+            if Self::tail_off(cnt) <= n {
+                self.arr_set(tail, (n & 31) as usize, val);
+            } else {
+                let nr = self.tv_do_assoc(session, shift, root, n, val);
+                if nr != root {
+                    self.rec_set(tv, 3, nr);
+                }
+            }
+            tv
+        } else if n == cnt {
+            self.tv_conj(tv, val)
+        } else {
+            let sid = self.alloc(Obj::Str(format!("Index {n} out of bounds  [0,{cnt}]")));
+            self.signal_throw(M::R::enc_ref(sid));
+            self.enc_nil()
+        }
+    }
+    fn tv_do_assoc(&mut self, session: u64, level: i64, node: u64, n: i64, val: u64) -> u64 {
+        let editable = self.node_editable(node, session);
+        let arr = self.node_arr(node);
+        let subidx = ((n >> level) & 31) as usize;
+        let newchild = if level == 0 {
+            val
+        } else {
+            let child = self.arr_at(arr, subidx);
+            self.tv_do_assoc(session, level - 5, child, n, val)
+        };
+        if editable {
+            self.arr_set(arr, subidx, newchild);
+            node
+        } else {
+            let mut na = self.arr_clone(arr);
+            na[subidx] = newchild;
+            let a = self.mk_array(na);
+            self.mk_node_edited(session, a)
+        }
+    }
+    pub(crate) fn tv_nth(&mut self, tv: u64, n: i64) -> u64 {
+        let Some((_, f)) = self.raw_rec(tv) else { panic!("tv-nth: not a transient vector") };
+        let cnt = self.raw_i64(f[1], "tv cnt");
+        let shift = self.raw_i64(f[2], "tv shift");
+        self.pv_nth_inner(cnt, shift, f[3], f[4], n)
+    }
+    pub(crate) fn tv_pop(&mut self, tv: u64) -> u64 {
+        let want = self.intern_cached(&self.shared.sym_cache_transient_vector, "TransientVector");
+        let Some(f) = self.transient_fields(tv, want, "TransientVector", "pop!") else {
+            return self.enc_nil();
+        };
+        let session = f[0];
+        let cnt = self.raw_i64(f[1], "tv cnt");
+        let shift = self.raw_i64(f[2], "tv shift");
+        let (root, tail) = (f[3], f[4]);
+        if cnt == 0 {
+            let sid = self.alloc(Obj::Str("Can't pop empty vector".to_string()));
+            self.signal_throw(M::R::enc_ref(sid));
+            return self.enc_nil();
+        }
+        let th = self.arr_handle(tail);
+        let tlen = unsafe { th.aux() } as i64;
+        if cnt == 1 || tlen > 1 {
+            // Shrink the owned tail in place (cnt == 1 empties it).
+            unsafe { th.set_aux((tlen - 1) as u32) };
+            let ncnt = self.encode(Val::Int((cnt - 1) as i128));
+            self.rec_set(tv, 1, ncnt);
+            return tv;
+        }
+        // The tail had one element: the previous leaf becomes the new OWNED tail
+        // (copied at capacity 32) and the trie pops it.
+        let leaf = {
+            // The leaf array holding index cnt-2 (which is below tail_off here).
+            let i = cnt - 2;
+            let mut node = root;
+            let mut level = shift;
+            while level > 0 {
+                let na = self.node_arr(node);
+                node = self.arr_at(na, ((i >> level) & 31) as usize);
+                level -= 5;
+            }
+            self.node_arr(node)
+        };
+        let lelems = self.arr_slice(self.arr_handle(leaf)).to_vec();
+        let ntail = M::R::enc_ref(self.alloc_vector_cap(&lelems, 32));
+        let nr = self.tv_pop_tail(session, cnt, shift, root);
+        let (new_shift, new_root) = if self.is_nil_bits(nr) {
+            let nil = self.enc_nil();
+            let a = self.mk_array(vec![nil; 32]);
+            (shift, self.mk_node_edited(session, a))
+        } else if shift > 5 && self.is_nil_bits(self.arr_at(self.node_arr(nr), 1)) {
+            (shift - 5, self.arr_at(self.node_arr(nr), 0))
+        } else {
+            (shift, nr)
+        };
+        let ncnt = self.encode(Val::Int((cnt - 1) as i128));
+        let nshift = self.encode(Val::Int(new_shift as i128));
+        let g = self.raw_gc(tv).expect("tv");
+        let fs = self.values_mut(g);
+        fs[1] = ncnt;
+        fs[2] = nshift;
+        fs[3] = new_root;
+        fs[4] = ntail;
+        tv
+    }
+    /// `pop_tail`, transient: editable-aware (mirror of the persistent
+    /// `pop_tail` used by `-pop`).
+    fn tv_pop_tail(&mut self, session: u64, cnt: i64, level: i64, node: u64) -> u64 {
+        let subidx = (((cnt - 2) >> level) & 31) as usize;
+        let nil = self.enc_nil();
+        if level > 5 {
+            let child = self.arr_at(self.node_arr(node), subidx);
+            let nchild = self.tv_pop_tail(session, cnt, level - 5, child);
+            if self.is_nil_bits(nchild) && subidx == 0 {
+                nil
+            } else if self.node_editable(node, session) {
+                self.arr_set(self.node_arr(node), subidx, nchild);
+                node
+            } else {
+                let mut na = self.arr_clone(self.node_arr(node));
+                na[subidx] = nchild;
+                let a = self.mk_array(na);
+                self.mk_node_edited(session, a)
+            }
+        } else if subidx == 0 {
+            nil
+        } else if self.node_editable(node, session) {
+            self.arr_set(self.node_arr(node), subidx, nil);
+            node
+        } else {
+            let mut na = self.arr_clone(self.node_arr(node));
+            na[subidx] = nil;
+            let a = self.mk_array(na);
+            self.mk_node_edited(session, a)
+        }
+    }
+    pub(crate) fn tv_persistent(&mut self, tv: u64) -> u64 {
+        let want = self.intern_cached(&self.shared.sym_cache_transient_vector, "TransientVector");
+        let Some(f) = self.transient_fields(tv, want, "TransientVector", "persistent!") else {
+            return self.enc_nil();
+        };
+        let cnt = self.raw_i64(f[1], "tv cnt");
+        let shift = self.raw_i64(f[2], "tv shift");
+        let (root, tail, meta) = (f[3], f[4], f[5]);
+        let nil = self.enc_nil();
+        self.rec_set(tv, 0, nil); // O(1) freeze: the session dies here
+        self.mk_pv(meta, cnt, shift, root, tail)
+    }
+
+    // ── TransientArrayMap [session arr cnt meta] ──
+    pub(crate) fn tam_new(&mut self, pam: u64) -> u64 {
+        let Some((_, f)) = self.raw_rec(pam) else { panic!("tam-new: not a record") };
+        // PAM layout: [meta cnt arr __hash]
+        let (meta, cnt, arr) = (f[0], f[1], f[2]);
+        let session = self.fresh_session();
+        let elems = self.arr_slice(self.arr_handle(arr)).to_vec();
+        let narr = M::R::enc_ref(self.alloc_vector_cap(&elems, 16));
+        let ty = self.intern_cached(&self.shared.sym_cache_transient_array_map, "TransientArrayMap");
+        M::R::enc_ref(self.alloc_record(ty, &[session, narr, cnt, meta]))
+    }
+    /// assoc! on an array-map transient. Past the 8-pair threshold this
+    /// PROMOTES: the return value is a `'TransientHashMap` carrying the SAME
+    /// session (cljs' TransientArrayMap behavior) — callers use the return
+    /// value, per the transient contract.
+    pub(crate) fn tam_assoc(&mut self, tam: u64, k: u64, v: u64) -> u64 {
+        let want = self.intern_cached(&self.shared.sym_cache_transient_array_map, "TransientArrayMap");
+        let Some(f) = self.transient_fields(tam, want, "TransientArrayMap", "assoc!") else {
+            return self.enc_nil();
+        };
+        let session = f[0];
+        let (arr, cnt, meta) = (f[1], self.raw_i64(f[2], "tam cnt"), f[3]);
+        let h = self.arr_handle(arr);
+        let n = unsafe { h.aux() } as usize;
+        // Linear key scan (same comparator as the persistent PAM/HAMT).
+        let mut i = 0usize;
+        while i < n {
+            let ki = self.arr_slice(h)[i];
+            if self.equal(k, ki) {
+                self.arr_slice_mut(h)[i + 1] = v;
+                return tam;
+            }
+            i += 2;
+        }
+        if cnt < 8 {
+            self.arr_extend(h, &[k, v]);
+            let ncnt = self.encode(Val::Int((cnt + 1) as i128));
+            self.rec_set(tam, 2, ncnt);
+            return tam;
+        }
+        // Promote to a TransientHashMap under the same session.
+        let pairs = self.arr_slice(h).to_vec();
+        let nil = self.enc_nil();
+        let mut root = nil;
+        let mut count = 0i64;
+        let mut j = 0usize;
+        while j < pairs.len() {
+            let (added, nr) = {
+                let hash = self.hash_masked(pairs[j]);
+                let r = self.hamt_assoc_t(session, root, 0, hash, pairs[j], pairs[j + 1]);
+                (r.1, r.0)
+            };
+            root = nr;
+            count += added as i64;
+            j += 2;
+        }
+        let hash = self.hash_masked(k);
+        let (nr, added) = self.hamt_assoc_t(session, root, 0, hash, k, v);
+        root = nr;
+        count += added as i64;
+        // Invalidate the TAM (it must not be used again) and hand back a THM.
+        self.rec_set(tam, 0, nil);
+        let cntb = self.encode(Val::Int(count as i128));
+        let fal = self.encode(Val::Bool(false));
+        let ty = self.intern_cached(&self.shared.sym_cache_transient_hash_map, "TransientHashMap");
+        M::R::enc_ref(self.alloc_record(ty, &[session, root, cntb, fal, nil, meta]))
+    }
+    pub(crate) fn tam_dissoc(&mut self, tam: u64, k: u64) -> u64 {
+        let want = self.intern_cached(&self.shared.sym_cache_transient_array_map, "TransientArrayMap");
+        let Some(f) = self.transient_fields(tam, want, "TransientArrayMap", "dissoc!") else {
+            return self.enc_nil();
+        };
+        let (arr, cnt) = (f[1], self.raw_i64(f[2], "tam cnt"));
+        let h = self.arr_handle(arr);
+        let n = unsafe { h.aux() } as usize;
+        let mut i = 0usize;
+        while i < n {
+            let ki = self.arr_slice(h)[i];
+            if self.equal(k, ki) {
+                // Order-preserving in-place removal: shift left by one pair.
+                let ws = self.arr_slice_mut(h);
+                ws.copy_within(i + 2.., i);
+                unsafe { h.set_aux((n - 2) as u32) };
+                let ncnt = self.encode(Val::Int((cnt - 1) as i128));
+                self.rec_set(tam, 2, ncnt);
+                return tam;
+            }
+            i += 2;
+        }
+        tam
+    }
+    pub(crate) fn tam_persistent(&mut self, tam: u64) -> u64 {
+        let want = self.intern_cached(&self.shared.sym_cache_transient_array_map, "TransientArrayMap");
+        let Some(f) = self.transient_fields(tam, want, "TransientArrayMap", "persistent!") else {
+            return self.enc_nil();
+        };
+        let (arr, cnt, meta) = (f[1], f[2], f[3]);
+        let nil = self.enc_nil();
+        self.rec_set(tam, 0, nil);
+        let ty = self.intern_cached(&self.shared.sym_cache_persistent_array_map, "PersistentArrayMap");
+        M::R::enc_ref(self.alloc_record(ty, &[meta, cnt, arr, nil]))
+    }
+
+    // ── TransientHashMap [session root cnt has-nil? nil-val meta] ──
+    pub(crate) fn thm_new(&mut self, phm: u64) -> u64 {
+        let Some((_, f)) = self.raw_rec(phm) else { panic!("thm-new: not a record") };
+        // PHM layout: [meta cnt root has-nil? nil-val __hash]
+        let (meta, cnt, root, has_nil, nil_val) = (f[0], f[1], f[2], f[3], f[4]);
+        let session = self.fresh_session();
+        let ty = self.intern_cached(&self.shared.sym_cache_transient_hash_map, "TransientHashMap");
+        M::R::enc_ref(self.alloc_record(ty, &[session, root, cnt, has_nil, nil_val, meta]))
+    }
+    pub(crate) fn thm_assoc(&mut self, thm: u64, k: u64, v: u64) -> u64 {
+        let want = self.intern_cached(&self.shared.sym_cache_transient_hash_map, "TransientHashMap");
+        let Some(f) = self.transient_fields(thm, want, "TransientHashMap", "assoc!") else {
+            return self.enc_nil();
+        };
+        let session = f[0];
+        let (root, cnt) = (f[1], self.raw_i64(f[2], "thm cnt"));
+        if self.is_nil_bits(k) {
+            let had = f[3] == self.encode(Val::Bool(true));
+            self.rec_set(thm, 4, v);
+            if !had {
+                let tru = self.encode(Val::Bool(true));
+                self.rec_set(thm, 3, tru);
+                let ncnt = self.encode(Val::Int((cnt + 1) as i128));
+                self.rec_set(thm, 2, ncnt);
+            }
+            return thm;
+        }
+        let hash = self.hash_masked(k);
+        let (nroot, added) = self.hamt_assoc_t(session, root, 0, hash, k, v);
+        if nroot != root {
+            self.rec_set(thm, 1, nroot);
+        }
+        if added {
+            let ncnt = self.encode(Val::Int((cnt + 1) as i128));
+            self.rec_set(thm, 2, ncnt);
+        }
+        thm
+    }
+    pub(crate) fn thm_dissoc(&mut self, thm: u64, k: u64) -> u64 {
+        let want = self.intern_cached(&self.shared.sym_cache_transient_hash_map, "TransientHashMap");
+        let Some(f) = self.transient_fields(thm, want, "TransientHashMap", "dissoc!") else {
+            return self.enc_nil();
+        };
+        let (root, cnt) = (f[1], self.raw_i64(f[2], "thm cnt"));
+        if self.is_nil_bits(k) {
+            if f[3] == self.encode(Val::Bool(true)) {
+                let fal = self.encode(Val::Bool(false));
+                let nil = self.enc_nil();
+                self.rec_set(thm, 3, fal);
+                self.rec_set(thm, 4, nil);
+                let ncnt = self.encode(Val::Int((cnt - 1) as i128));
+                self.rec_set(thm, 2, ncnt);
+            }
+            return thm;
+        }
+        // Persistent trie removal (copies; sound — the copies are unstamped
+        // and get copy-on-touch semantics from later assoc!s). dissoc! is not
+        // the transient hot path.
+        let nroot = self.hamt_map_without(root, k);
+        if nroot != root {
+            self.rec_set(thm, 1, nroot);
+            let ncnt = self.encode(Val::Int((cnt - 1) as i128));
+            self.rec_set(thm, 2, ncnt);
+        }
+        thm
+    }
+    pub(crate) fn thm_persistent(&mut self, thm: u64) -> u64 {
+        let want = self.intern_cached(&self.shared.sym_cache_transient_hash_map, "TransientHashMap");
+        let Some(f) = self.transient_fields(thm, want, "TransientHashMap", "persistent!") else {
+            return self.enc_nil();
+        };
+        let (root, cnt, has_nil, nil_val, meta) = (f[1], f[2], f[3], f[4], f[5]);
+        let nil = self.enc_nil();
+        self.rec_set(thm, 0, nil);
+        let ty = self.intern_cached(&self.shared.sym_cache_persistent_hash_map, "PersistentHashMap");
+        M::R::enc_ref(self.alloc_record(ty, &[meta, cnt, root, has_nil, nil_val, nil]))
+    }
+
+    /// `-inode-assoc!` — the transient trie descent: session-owned nodes are
+    /// edited in place; others are copied-and-stamped on first touch. Same
+    /// algorithm and thresholds as `hamt_assoc` otherwise.
+    fn hamt_assoc_t(&mut self, session: u64, node: u64, shift: u32, hash: u32, key: u64, val: u64) -> (u64, bool) {
+        if self.is_nil_bits(node) {
+            let bit = 1u32 << ((hash >> shift) & 31);
+            return (self.mk_bitmap_node_edited(session, bit, vec![key, val]), true);
+        }
+        let Some((type_id, fields)) = self.raw_rec(node) else { panic!("hamt-assoc!: not a node") };
+        let editable = fields[0] == session;
+        match self.hamt_kind(type_id) {
+            HamtKind::Bitmap => {
+                let bitmap = self.raw_i64(fields[1], "hamt bitmap") as u32;
+                let arrb = fields[2];
+                let bit = 1u32 << ((hash >> shift) & 31);
+                let idx = (bitmap & bit.wrapping_sub(1)).count_ones() as usize;
+                if bitmap & bit == 0 {
+                    let n = bitmap.count_ones();
+                    if n >= 16 {
+                        // Promote to an (edited) ArrayNode — always fresh.
+                        let arr = self.arr_clone(arrb);
+                        let nil = self.enc_nil();
+                        let mut nodes = vec![nil; 32];
+                        let jdx = ((hash >> shift) & 31) as usize;
+                        nodes[jdx] = {
+                            let bit2 = 1u32 << ((hash >> (shift + 5)) & 31);
+                            self.mk_bitmap_node_edited(session, bit2, vec![key, val])
+                        };
+                        let mut j = 0usize;
+                        for i in 0..32u32 {
+                            if (bitmap >> i) & 1 == 0 {
+                                continue;
+                            }
+                            let key_or_nil = arr[j];
+                            let val_or_node = arr[j + 1];
+                            nodes[i as usize] = if !self.is_nil_bits(key_or_nil) {
+                                let h2 = self.hash_masked(key_or_nil);
+                                let (sub, _) = self.hamt_assoc_t(
+                                    session,
+                                    self.enc_nil(),
+                                    shift + 5,
+                                    h2,
+                                    key_or_nil,
+                                    val_or_node,
+                                );
+                                sub
+                            } else {
+                                val_or_node
+                            };
+                            j += 2;
+                        }
+                        (self.mk_array_node_edited(session, (n + 1) as i64, nodes), true)
+                    } else if editable {
+                        // In-place pair insertion: grow by 2, shift right.
+                        let h = self.arr_handle(arrb);
+                        let nil = self.enc_nil();
+                        self.arr_extend(h, &[nil, nil]);
+                        let ws = self.arr_slice_mut(h);
+                        ws.copy_within(2 * idx..ws.len() - 2, 2 * idx + 2);
+                        ws[2 * idx] = key;
+                        ws[2 * idx + 1] = val;
+                        let bm = self.encode(Val::Int((bitmap | bit) as i128));
+                        self.rec_set(node, 1, bm);
+                        (node, true)
+                    } else {
+                        let arr = self.arr_clone(arrb);
+                        let mut new_arr = Vec::with_capacity(arr.len() + 2);
+                        new_arr.extend_from_slice(&arr[0..2 * idx]);
+                        new_arr.push(key);
+                        new_arr.push(val);
+                        new_arr.extend_from_slice(&arr[2 * idx..]);
+                        (self.mk_bitmap_node_edited(session, bitmap | bit, new_arr), true)
+                    }
+                } else {
+                    let key_or_nil = self.arr_at(arrb, 2 * idx);
+                    let val_or_node = self.arr_at(arrb, 2 * idx + 1);
+                    if self.is_nil_bits(key_or_nil) {
+                        let (nsub, added) = self.hamt_assoc_t(session, val_or_node, shift + 5, hash, key, val);
+                        if nsub == val_or_node {
+                            (node, added)
+                        } else if editable {
+                            self.arr_set(arrb, 2 * idx + 1, nsub);
+                            (node, added)
+                        } else {
+                            let mut na = self.arr_clone(arrb);
+                            na[2 * idx + 1] = nsub;
+                            (self.mk_bitmap_node_edited(session, bitmap, na), added)
+                        }
+                    } else if self.equal(key, key_or_nil) {
+                        if val == val_or_node {
+                            (node, false)
+                        } else if editable {
+                            self.arr_set(arrb, 2 * idx + 1, val);
+                            (node, false)
+                        } else {
+                            let mut na = self.arr_clone(arrb);
+                            na[2 * idx + 1] = val;
+                            (self.mk_bitmap_node_edited(session, bitmap, na), false)
+                        }
+                    } else {
+                        let sub = self.hamt_create_node_t(session, shift + 5, key_or_nil, val_or_node, hash, key, val);
+                        let nil = self.enc_nil();
+                        if editable {
+                            self.arr_set(arrb, 2 * idx, nil);
+                            self.arr_set(arrb, 2 * idx + 1, sub);
+                            (node, true)
+                        } else {
+                            let mut na = self.arr_clone(arrb);
+                            na[2 * idx] = nil;
+                            na[2 * idx + 1] = sub;
+                            (self.mk_bitmap_node_edited(session, bitmap, na), true)
+                        }
+                    }
+                }
+            }
+            HamtKind::Array => {
+                let cnt = self.raw_i64(fields[1], "hamt cnt");
+                let arrb = fields[2];
+                let idx = ((hash >> shift) & 31) as usize;
+                let child = self.arr_at(arrb, idx);
+                if self.is_nil_bits(child) {
+                    let (sub, _) = self.hamt_assoc_t(session, self.enc_nil(), shift + 5, hash, key, val);
+                    if editable {
+                        self.arr_set(arrb, idx, sub);
+                        let cb = self.encode(Val::Int((cnt + 1) as i128));
+                        self.rec_set(node, 1, cb);
+                        (node, true)
+                    } else {
+                        let mut na = self.arr_clone(arrb);
+                        na[idx] = sub;
+                        (self.mk_array_node_edited(session, cnt + 1, na), true)
+                    }
+                } else {
+                    let (nsub, added) = self.hamt_assoc_t(session, child, shift + 5, hash, key, val);
+                    if nsub == child {
+                        (node, added)
+                    } else if editable {
+                        self.arr_set(arrb, idx, nsub);
+                        (node, added)
+                    } else {
+                        let mut na = self.arr_clone(arrb);
+                        na[idx] = nsub;
+                        (self.mk_array_node_edited(session, cnt, na), added)
+                    }
+                }
+            }
+            HamtKind::Collision => {
+                let chash = self.raw_i64(fields[1], "hamt chash") as u32;
+                let cnt = self.raw_i64(fields[2], "hamt cnt");
+                let arrb = fields[3];
+                if hash == chash {
+                    let n = unsafe { self.arr_handle(arrb).aux() } as usize;
+                    let mut found = None;
+                    let mut i = 0usize;
+                    while i < n {
+                        let ki = self.arr_at(arrb, i);
+                        if self.equal(key, ki) {
+                            found = Some(i);
+                            break;
+                        }
+                        i += 2;
+                    }
+                    match found {
+                        None => {
+                            if editable {
+                                let h = self.arr_handle(arrb);
+                                self.arr_extend(h, &[key, val]);
+                                let cb = self.encode(Val::Int((cnt + 1) as i128));
+                                self.rec_set(node, 2, cb);
+                                (node, true)
+                            } else {
+                                let mut na = self.arr_clone(arrb);
+                                na.push(key);
+                                na.push(val);
+                                (self.mk_collision_node_edited(session, chash, cnt + 1, na), true)
+                            }
+                        }
+                        Some(i) => {
+                            if self.arr_at(arrb, i + 1) == val {
+                                (node, false)
+                            } else if editable {
+                                self.arr_set(arrb, i + 1, val);
+                                (node, false)
+                            } else {
+                                let mut na = self.arr_clone(arrb);
+                                na[i + 1] = val;
+                                (self.mk_collision_node_edited(session, chash, cnt, na), false)
+                            }
+                        }
+                    }
+                } else {
+                    let nil = self.enc_nil();
+                    let wrapper = self.mk_bitmap_node_edited(
+                        session,
+                        1u32 << ((chash >> shift) & 31),
+                        vec![nil, node],
+                    );
+                    self.hamt_assoc_t(session, wrapper, shift, hash, key, val)
+                }
+            }
+            HamtKind::Other => panic!("hamt-assoc!: not a HAMT node"),
+        }
+    }
+    /// Transient `create-node`: both fresh subnodes are session-stamped.
+    fn hamt_create_node_t(&mut self, session: u64, shift: u32, key1: u64, val1: u64, key2hash: u32, key2: u64, val2: u64) -> u64 {
+        let key1hash = self.hash_masked(key1);
+        if key1hash == key2hash {
+            self.mk_collision_node_edited(session, key1hash, 2, vec![key1, val1, key2, val2])
+        } else {
+            let nil = self.enc_nil();
+            let (n1, _) = self.hamt_assoc_t(session, nil, shift, key1hash, key1, val1);
+            self.hamt_assoc_t(session, n1, shift, key2hash, key2, val2).0
+        }
     }
 
     fn arith(

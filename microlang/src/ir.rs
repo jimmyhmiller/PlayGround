@@ -348,6 +348,41 @@ pub enum Prim {
     /// array `arr` in one native call (a Rust extend), returning `arr`. Lets a
     /// chunked seq be collected into a flat array a whole chunk at a time.
     ApushChunk,
+    /// Stage F3 TRANSIENTS — ownership-stamped in-place builders (see
+    /// `Runtime::fresh_session` for the design). `(%tv-new pv)` -> a
+    /// `'TransientVector [session cnt shift root tail meta]` whose tail is an
+    /// owned 32-capacity array; `(%tv-conj! tv x)` appends IN PLACE (tail
+    /// push, or an editable trie spill 1/32 of the time); `(%tv-assoc! tv n
+    /// x)` writes in place through editable nodes; `(%tv-nth tv n)` reads;
+    /// `(%tv-persistent! tv)` invalidates the session (O(1)) and returns a
+    /// `'PersistentVector` sharing the structure.
+    TvNew,
+    TvConj,
+    TvAssoc,
+    TvNth,
+    TvPop,
+    TvPersistent,
+    /// `(%tam-new pam)` -> `'TransientArrayMap [session arr cnt meta]` (owned
+    /// flat kv array); `(%tam-assoc! tam k v)` updates/appends in place —
+    /// past the 8-pair threshold it PROMOTES to (and returns) a
+    /// `'TransientHashMap` carrying the same session, exactly like cljs'
+    /// TransientArrayMap (callers must use the return value, the transient
+    /// contract); `(%tam-dissoc! tam k)` removes in place (order-preserving);
+    /// `(%tam-persistent! tam)` -> `'PersistentArrayMap` (insertion order —
+    /// the small-map conformance point — preserved).
+    TamNew,
+    TamAssoc,
+    TamDissoc,
+    TamPersistent,
+    /// `(%thm-new phm)` -> `'TransientHashMap [session root cnt has-nil?
+    /// nil-val meta]`; `(%thm-assoc! thm k v)` edits session-owned trie nodes
+    /// in place (copy-on-first-touch otherwise); `(%thm-dissoc! thm k)`
+    /// removes (persistent trie op; root swapped in place); `(%thm-persistent!
+    /// thm)` -> `'PersistentHashMap`.
+    ThmNew,
+    ThmAssoc,
+    ThmDissoc,
+    ThmPersistent,
     /// `(%sort-arr arr)` -> a FRESH array of `arr`'s elements sorted by the
     /// DEFAULT total order, natively — but only when the elements are
     /// homogeneous fixnums or homogeneous strings (the overwhelmingly common

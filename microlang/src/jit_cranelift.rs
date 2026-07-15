@@ -401,6 +401,24 @@ extern "C" fn shim_arr_push<M: ModelArithJit>(ctx: *mut JitCtx<M>, arr: u64, v: 
     arr
 }
 
+extern "C" fn shim_tv_conj<M: ModelArithJit>(ctx: *mut JitCtx<M>, tv: u64, x: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.tv_conj(tv, x)
+}
+
+extern "C" fn shim_tam_assoc<M: ModelArithJit>(ctx: *mut JitCtx<M>, tam: u64, k: u64, v: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.tam_assoc(tam, k, v)
+}
+
+extern "C" fn shim_thm_assoc<M: ModelArithJit>(ctx: *mut JitCtx<M>, thm: u64, k: u64, v: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.thm_assoc(thm, k, v)
+}
+
 extern "C" fn shim_cons2<M: ModelArithJit>(ctx: *mut JitCtx<M>, h: u64, t: u64) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
@@ -884,6 +902,20 @@ fn prim_tag(p: Prim) -> u32 {
         ApushChunk => 101,
         MultiFnNew => 102,
         SortArr => 103,
+        TvNew => 117,
+        TvConj => 118,
+        TvAssoc => 119,
+        TvNth => 120,
+        TvPersistent => 121,
+        TamNew => 122,
+        TamAssoc => 123,
+        TamDissoc => 124,
+        TamPersistent => 125,
+        ThmNew => 126,
+        ThmAssoc => 127,
+        ThmDissoc => 128,
+        ThmPersistent => 129,
+        TvPop => 130,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -1006,6 +1038,20 @@ fn prim_from_tag(tag: u32) -> Prim {
         101 => ApushChunk,
         102 => MultiFnNew,
         103 => SortArr,
+        117 => TvNew,
+        118 => TvConj,
+        119 => TvAssoc,
+        120 => TvNth,
+        121 => TvPersistent,
+        122 => TamNew,
+        123 => TamAssoc,
+        124 => TamDissoc,
+        125 => TamPersistent,
+        126 => ThmNew,
+        127 => ThmAssoc,
+        128 => ThmDissoc,
+        129 => ThmPersistent,
+        130 => TvPop,
         other => panic!("bad prim tag {other}"),
     }
 }
@@ -1045,6 +1091,9 @@ struct Shims {
     cons2: FuncId,
     first1: FuncId,
     rest1: FuncId,
+    tv_conj: FuncId,
+    tam_assoc: FuncId,
+    thm_assoc: FuncId,
 }
 
 #[derive(Clone, Copy)]
@@ -1077,6 +1126,9 @@ struct ShimRefs {
     cons2: cranelift_codegen::ir::FuncRef,
     first1: cranelift_codegen::ir::FuncRef,
     rest1: cranelift_codegen::ir::FuncRef,
+    tv_conj: cranelift_codegen::ir::FuncRef,
+    tam_assoc: cranelift_codegen::ir::FuncRef,
+    thm_assoc: cranelift_codegen::ir::FuncRef,
 }
 
 /// A finished, runnable body.
@@ -1131,7 +1183,7 @@ fn body_pure_loop(ir: &Ir, tail: bool) -> bool {
         // anyway, so fencing would only add churn.
         Ir::Prim(
             Prim::PvConj | Prim::PvNth | Prim::PvAssoc | Prim::HamtAssoc | Prim::HamtLookup
-            | Prim::ArrPush,
+            | Prim::ArrPush | Prim::TvConj | Prim::TamAssoc | Prim::ThmAssoc,
             _,
         ) => false,
         Ir::If(c, t, e) => {
@@ -1658,6 +1710,9 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let cn2: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_cons2::<M>;
         let fs1: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_first1::<M>;
         let rs1: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_rest1::<M>;
+        let tvc: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_tv_conj::<M>;
+        let tma: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_tam_assoc::<M>;
+        let tha: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_thm_assoc::<M>;
         builder.symbol("ml_load_local", ll as *const u8);
         builder.symbol("ml_load_global", lg as *const u8);
         builder.symbol("ml_def_global", dg as *const u8);
@@ -1686,6 +1741,9 @@ impl<M: ModelArithJit> JitCranelift<M> {
         builder.symbol("ml_cons2", cn2 as *const u8);
         builder.symbol("ml_first1", fs1 as *const u8);
         builder.symbol("ml_rest1", rs1 as *const u8);
+        builder.symbol("ml_tv_conj", tvc as *const u8);
+        builder.symbol("ml_tam_assoc", tma as *const u8);
+        builder.symbol("ml_thm_assoc", tha as *const u8);
 
         let mut module = JITModule::new(builder);
 
@@ -1755,6 +1813,9 @@ impl<M: ModelArithJit> JitCranelift<M> {
             cons2: decl(&mut module, "ml_cons2", &s_v2),
             first1: decl(&mut module, "ml_first1", &s_v1),
             rest1: decl(&mut module, "ml_rest1", &s_v1),
+            tv_conj: decl(&mut module, "ml_tv_conj", &s_v2),
+            tam_assoc: decl(&mut module, "ml_tam_assoc", &s_v3),
+            thm_assoc: decl(&mut module, "ml_thm_assoc", &s_v3),
         };
 
         JitCranelift {
@@ -2387,6 +2448,9 @@ fn build_body<M: ModelArithJit>(
         cons2: module.declare_func_in_func(shims.cons2, fb.func),
         first1: module.declare_func_in_func(shims.first1, fb.func),
         rest1: module.declare_func_in_func(shims.rest1, fb.func),
+        tv_conj: module.declare_func_in_func(shims.tv_conj, fb.func),
+        tam_assoc: module.declare_func_in_func(shims.tam_assoc, fb.func),
+        thm_assoc: module.declare_func_in_func(shims.thm_assoc, fb.func),
     };
 
     let mut c = Compiler {
@@ -3669,7 +3733,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // (Cons/First/Rest here serve the models without inline object
             // paths and any site the inline guards reject — the arms above
             // take precedence under LowBit.)
-            Ir::Prim(p @ (Prim::PvConj | Prim::PvNth | Prim::ArrPush | Prim::Cons), args) => {
+            Ir::Prim(p @ (Prim::PvConj | Prim::PvNth | Prim::ArrPush | Prim::Cons | Prim::TvConj), args) => {
                 let a = self.compile::<M>(&args[0], false);
                 let b = self.compile::<M>(&args[1], false);
                 let f = match p {
@@ -3677,12 +3741,17 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     Prim::PvNth => self.refs.pv_nth,
                     Prim::ArrPush => self.refs.arr_push,
                     Prim::Cons => self.refs.cons2,
+                    Prim::TvConj => self.refs.tv_conj,
                     _ => unreachable!(),
                 };
                 let ctx = self.ctx_val;
                 self.call_shim_checked(f, &[ctx, a, b])
             }
-            Ir::Prim(p @ (Prim::PvAssoc | Prim::HamtAssoc | Prim::HamtLookup), args) => {
+            Ir::Prim(
+                p @ (Prim::PvAssoc | Prim::HamtAssoc | Prim::HamtLookup | Prim::TamAssoc
+                | Prim::ThmAssoc),
+                args,
+            ) => {
                 let a = self.compile::<M>(&args[0], false);
                 let b = self.compile::<M>(&args[1], false);
                 let c = self.compile::<M>(&args[2], false);
@@ -3690,6 +3759,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     Prim::PvAssoc => self.refs.pv_assoc,
                     Prim::HamtAssoc => self.refs.hamt_assoc,
                     Prim::HamtLookup => self.refs.hamt_lookup,
+                    Prim::TamAssoc => self.refs.tam_assoc,
+                    Prim::ThmAssoc => self.refs.thm_assoc,
                     _ => unreachable!(),
                 };
                 let ctx = self.ctx_val;
