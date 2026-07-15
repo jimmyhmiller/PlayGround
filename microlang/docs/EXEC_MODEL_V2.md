@@ -28,18 +28,22 @@ record for the performance re-architecture and the map of what remains.
   apply rest-arg passthrough is UNSOUND here — variadic bodies may walk rest
   args with raw %first/%rest prims, so rest args must stay realized lists.
 
-## Stage D (LANDED except D5, 2026-07-15): the REAL heap — gc-rust-shaped
+## Stage D (COMPLETE, 2026-07-15): the REAL heap — gc-rust-shaped
 
-Status: D1–D4 are IN (commits 3ed239050, f52feec1a, 57b49db79 + frontends).
-The Vec<Obj> enum table, the word arena, the 96MB fast-target table, and the
-Atom Arc are DELETED; refs are real tagged addresses in all three value
-models; the GC is a true flip-and-reuse semi-space driven by ONE generic
-TypeInfo scan (verify mode = poisoned evacuated space + armed precise-layout
-detector). The emitted call path reads header/meta/code straight off the
-closure object. All gates green: cargo test (default + jit), scheme
-(61/61 R7RS), clojure-stub (76-test oracle suite). Sweep rules + full design:
-docs/STAGE_D_MIGRATION.md. REMAINING: D5 (JIT inline tag tests, code-level
-dispatch ICs, inline field/aget, AllocWindow inline bump) + benchmarks.
+Status: D1–D5 are IN (3ed239050, f52feec1a, 57b49db79, e1c1a4e4c,
+aa16f1b3f). The Vec<Obj> enum table, the word arena, the 96MB fast-target
+table, and the Atom Arc are DELETED; refs are real tagged addresses in all
+three value models; the GC is a true flip-and-reuse semi-space driven by ONE
+generic TypeInfo scan (verify mode = poisoned evacuated space + armed
+precise-layout detector). The emitted call path reads header/meta/code
+straight off the closure object; D5 added inline AllocWindow allocation
+(%cons, Lambda creation), inline-type-tested first/rest/alength/aget/aset,
+and per-site code-level dispatch ICs (LowBit; the other models keep their
+opt-out). vs the D4 shim baseline: cons-build/list-walk 2.3×, aget+aset
+4.9×, alength 4.1×, record dispatch 2.1×. All gates green: cargo test
+(default + jit), scheme (61/61 R7RS), clojure-stub (76-test oracle suite).
+Design + sweep rules: docs/STAGE_D_MIGRATION.md. NEXT: re-run the
+JVM-comparison microbenches to re-rank the gap list below.
 
 Decision (Jimmy): no enum object table, no Rust side-layers for data — a
 proper raw heap, modeled on `claude-experiments/gc-rust/crates/gcrust-rt`
