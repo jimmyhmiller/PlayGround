@@ -938,14 +938,31 @@
 (defn every? [pred c] (every-seq pred c))
 (defn mapv [f c] (vec (map f c)))
 (defn filterv [f c] (vec (filter f c)))
-(defn -comp2 [f g] (fn [& args] (f (apply g args))))
+;; Fixed arities up to 3 (like upstream comp): a composed fn call allocates
+;; nothing on the common paths — the variadic clause is the >3-arg fallback.
+(defn -comp2 [f g]
+  (fn ([] (f (g)))
+      ([x] (f (g x)))
+      ([x y] (f (g x y)))
+      ([x y z] (f (g x y z)))
+      ([x y z & more] (f (apply g x y z more)))))
 (defn comp [& fns]
   (cond (nil? (seq fns)) identity
         (nil? (next fns)) (first fns)
         true (reduce -comp2 (first fns) (rest fns))))
-(defn partial [f & pre] (fn [& args] (apply f (concat pre args))))
-(defn constantly [x] (fn [& _] x))
-(defn complement [f] (fn [& args] (not (apply f args))))
+(defn partial
+  ([f] f)
+  ([f a]
+   (fn ([] (f a)) ([x] (f a x)) ([x y] (f a x y)) ([x y z] (f a x y z))
+       ([x y z & more] (apply f a x y z more))))
+  ([f a b]
+   (fn ([] (f a b)) ([x] (f a b x)) ([x y] (f a b x y)) ([x y z] (f a b x y z))
+       ([x y z & more] (apply f a b x y z more))))
+  ([f a b & pre] (fn [& args] (apply f a b (concat pre args)))))
+(defn constantly [x] (fn ([] x) ([_] x) ([_ _] x) ([_ _ _] x) ([_ _ _ & _] x)))
+(defn complement [f]
+  (fn ([] (not (f))) ([x] (not (f x))) ([x y] (not (f x y)))
+      ([x y & more] (not (apply f x y more)))))
 (defn max [a & more] (reduce (fn [x y] (if (%lt x y) y x)) a more))
 (defn min [a & more] (reduce (fn [x y] (if (%lt x y) x y)) a more))
 ;; Chunk-aware: map `(f index element)` over a chunk into a fresh chunk, carrying
@@ -1373,7 +1390,14 @@
 (defn -arr->list [arr]
   (loop [i (%sub (%alength arr) 1) acc (list)]
     (if (%lt i 0) acc (recur (%sub i 1) (%cons (%aget arr i) acc)))))
-(defn -sort-with [less coll] (-arr->list (-msort-arr less (-to-array coll))))
+;; Native fast path for the DEFAULT ordering on homogeneous fixnum/string
+;; arrays (%sort-arr; nil = mixed/other input -> in-language merge sort).
+(defn -sort-with [less coll]
+  (let [arr (-to-array coll)]
+    (if (identical? less -default-less)
+        (let [sa (%sort-arr arr)]
+          (if (nil? sa) (-arr->list (-msort-arr less arr)) (-arr->list sa)))
+        (-arr->list (-msort-arr less arr)))))
 (defn sort [& args]
   (if (nil? (next args)) (-sort-with -default-less (first args)) (-sort-with (first args) (second args))))
 (defn sort-by [k & args]
@@ -1382,7 +1406,11 @@
       (-sort-with (fn [a b] ((first args) (k a) (k b))) (second args))))
 
 ;; misc combinators
-(defn juxt [& fns] (fn [& args] (vec (map (fn [f] (apply f args)) fns))))
+(defn juxt [& fns]
+  (fn ([] (vec (map (fn [f] (f)) fns)))
+      ([x] (vec (map (fn [f] (f x)) fns)))
+      ([x y] (vec (map (fn [f] (f x y)) fns)))
+      ([x y & more] (vec (map (fn [f] (apply f x y more)) fns)))))
 ;; Cache the key of the current best (`bv`) instead of recomputing `(k best)`
 ;; every element — the old version called `k` TWICE per element (once on best,
 ;; once on the candidate), doubling the (often non-trivial) key work.
@@ -2187,7 +2215,11 @@
   (if (nil? (next args))
     (let [x (first args)] (if (keyword? x) x (record 'Keyword (symbol (if (string? x) x (name x))))))
     (record 'Keyword (symbol (first args) (second args)))))
-(defn fnil [f x] (fn [a & args] (apply f (if (nil? a) x a) args)))
+(defn fnil [f x]
+  (fn ([a] (f (if (nil? a) x a)))
+      ([a b] (f (if (nil? a) x a) b))
+      ([a b c] (f (if (nil? a) x a) b c))
+      ([a b c & args] (apply f (if (nil? a) x a) b c args))))
 (defn char [n] (%char-of n))
 (defn char? [x] (%num-eq (type-of x) 'Char))
 (defn associative? [x] (or (map? x) (vector? x) (%num-eq (type-of x) 'SortedMap)))
@@ -2530,9 +2562,10 @@
 (defn volatile! [x] (record 'Volatile (%cell x)))
 (defn vreset! [v x] (do (%cell-set! (field v 0) 0 x) x))
 (defn vswap! [v f & args] (vreset! v (apply f (%cell-ref (field v 0) 0) args)))
-(defn -tr-reduce [rf init coll]
-  (loop [acc init s (seq coll)]
-    (if (if (nil? s) true (reduced? acc)) acc (recur (rf acc (first s)) (next s)))))
+;; Chunk-aware (reduce-seq walks whole chunk arrays with %aget and honors
+;; `reduced?` per element) — the per-element first/next walk allocated a seq
+;; cell per step and made transduce ~8x the cost of reduce.
+(defn -tr-reduce [rf init coll] (reduce-seq rf init coll))
 (defn transduce
   ([xform f coll] (transduce xform f (f) coll))
   ([xform f init coll] (let [rf (xform f)] (rf (unreduced (-tr-reduce rf init coll))))))

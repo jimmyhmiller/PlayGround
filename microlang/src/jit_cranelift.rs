@@ -143,6 +143,10 @@ pub struct JitCtx<'a, M: ValueModel> {
     /// The GLOBAL closure-template registry (owned by the backend, append-only),
     /// read through `rc` by `shim_make_closure`.
     tregistry: *const RefCell<Vec<ClosureTemplate>>,
+    /// The backend itself (type-erased `*const JitCranelift<M>`), so shims can
+    /// consult its compiled-body cache / fast-target table. Null when the
+    /// running backend is wrapped (non-direct) — callers must check.
+    jit: *const (),
     /// Proper-tail-call signalling. A tail `Call` stashes its (callee, args) here
     /// and returns; the `invoke` trampoline reuses this native frame for the next
     /// body instead of recursing — so a million-deep tail loop runs in O(1) stack,
@@ -253,7 +257,7 @@ extern "C" fn shim_def_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32, val:
 /// its SSA registers / frame slots / own captures, per the template's capture
 /// list) and spilled them, in order, at `caps_ptr`. The shim just copies
 /// `ncaps` words into a fresh capture array.
-extern "C" fn shim_make_closure<M: ValueModel>(
+extern "C" fn shim_make_closure<M: ModelArithJit>(
     ctx: *mut JitCtx<M>,
     template_id: u32,
     caps_ptr: *const u64,
@@ -272,7 +276,28 @@ extern "C" fn shim_make_closure<M: ValueModel>(
         let vals = unsafe { std::slice::from_raw_parts(caps_ptr, ncaps) };
         vals.iter().map(|&v| AtomicU64::new(v)).collect()
     };
-    let id = rt.alloc(Obj::Closure { nparams, variadic, nslots, body, caps });
+    let id = rt.alloc(Obj::Closure { nparams, variadic, nslots, body: body.clone(), caps: caps.clone() });
+    // Publish the register entry NOW when the body is already compiled: a
+    // freshly-allocated closure (new heap id, empty table slot) that is called
+    // once — every lazy-seq thunk, every per-element step fn — would otherwise
+    // take the slow invoke on its only call.
+    let jitp = unsafe { (*ctx.rc).jit };
+    if !jitp.is_null() && !variadic && nparams <= MAX_REG_ARGS {
+        let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
+        if let Some(compiled) = jit.cache.borrow().get(&Arc::as_ptr(&body)) {
+            if compiled.entry_arity == Some(nparams) {
+                if let Some(slot) = jit.fast_targets.borrow_mut().get_mut(id as usize) {
+                    slot.code = compiled.code;
+                    slot.caps = if caps.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        caps.as_ptr() as *const u64
+                    };
+                    slot.arity = nparams as u32;
+                }
+            }
+        }
+    }
     M::R::enc_ref(id)
 }
 
@@ -306,8 +331,14 @@ extern "C" fn shim_call<M: ValueModel>(
     } else {
         unsafe { std::slice::from_raw_parts(args, argc as usize) }
     };
-    // Recurse through `top` so composition / macro-reentrancy hold, exactly like
-    // the other tiers' `invoke` call sites.
+    // Direct fast path (multifn arity selection + register entry) with the
+    // caller's run context; falls back through `top` so composition /
+    // macro-reentrancy hold, exactly like the other tiers' `invoke` call sites.
+    if unsafe { (*ctx.rc).direct.get() } != 0 {
+        if let Some(r) = shim_fast_invoke::<M>(ctx.rc, rt, callee, args) {
+            return r;
+        }
+    }
     top.invoke(top, rt, callee, args)
 }
 
@@ -361,6 +392,94 @@ extern "C" fn shim_field_get<M: ValueModel>(
 
 /// A protocol/method dispatch: resolve the impl for the receiver's type (with the
 /// `Object` default) and invoke it through `top` — identical to TreeWalk.
+/// Invoke `callee` with `args` REUSING the caller's run context: multifn
+/// arity selection, a fast-table lookup, a minimal child context, and a
+/// register-arg `call_indirect`-equivalent — no `make_ctx`, no trampoline, no
+/// `resolve_call`. `None` when the callee has no matching register entry (the
+/// caller falls back to `top.invoke`). Only sound when `direct` (checked by
+/// the caller): it bypasses `top`.
+fn shim_fast_invoke<M: ValueModel>(
+    rc: *const JitCtx<M>,
+    rt: &mut Runtime<M>,
+    callee: u64,
+    args: &[u64],
+) -> Option<u64> {
+    let rcr = unsafe { &*rc };
+    let n = args.len();
+    if n > MAX_REG_ARGS {
+        return None;
+    }
+    // Multi-arity: select the clause serving this arg count (cheap heap read;
+    // errors pend a signal and yield nil like every shim error path).
+    let callee = match rt.multifn_select(callee, n) {
+        Some(sel) => {
+            if rt.pending() {
+                return Some(M::R::enc_nil());
+            }
+            sel
+        }
+        None => callee,
+    };
+    if M::R::tag_of(callee) != crate::value::RawTag::Ref {
+        return None;
+    }
+    let id = M::R::as_ref(callee) as usize;
+    if id >= rcr.fast_len.get() {
+        return None;
+    }
+    let entry = unsafe { *rcr.fast_base.get().add(id) };
+    if entry.code.is_null() || entry.arity as usize != n {
+        return None;
+    }
+    // Minimal child context: everything shared rides through `rc`.
+    let mut ctx = JitCtx {
+        rc,
+        top: rcr.top,
+        rt: rt as *mut Runtime<M>,
+        cur_slots: Cell::new(std::ptr::null()),
+        consts_base: Cell::new(std::ptr::null()),
+        global_base: Cell::new(std::ptr::null()),
+        global_len: Cell::new(0),
+        fast_base: Cell::new(std::ptr::null()),
+        fast_len: Cell::new(0),
+        direct: Cell::new(1),
+        self_closure: Cell::new(callee),
+        caps_base: Cell::new(entry.caps),
+        cur: RefCell::new(None),
+        tregistry: rcr.tregistry,
+        jit: rcr.jit,
+        tail_pending: Cell::new(false),
+        tail_callee: Cell::new(0),
+        tail_args: rcr.tail_args,
+    };
+    let cp = &mut ctx as *mut JitCtx<M> as u64;
+    let code = entry.code;
+    let a = args;
+    let ret = unsafe {
+        match n {
+            0 => std::mem::transmute::<*const u8, extern "C" fn(u64) -> u64>(code)(cp),
+            1 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64) -> u64>(code)(cp, a[0]),
+            2 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64) -> u64>(code)(cp, a[0], a[1]),
+            3 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2]),
+            4 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3]),
+            5 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4]),
+            6 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5]),
+            7 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5], a[6]),
+            8 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]),
+            _ => unreachable!(),
+        }
+    };
+    if ctx.tail_pending.get() {
+        // The callee ended in a non-self tail call (rare here): finish it
+        // through `top`, exactly like shim_finish_tail.
+        let top = rcr.top;
+        let next = ctx.tail_callee.get();
+        let targs = unsafe { (*rcr.tail_args).clone() };
+        return Some(top.invoke(top, rt, next, &targs));
+    }
+    Some(ret)
+}
+
 extern "C" fn shim_dispatch<M: ValueModel>(
     ctx: *mut JitCtx<M>,
     site: u32,
@@ -385,6 +504,13 @@ extern "C" fn shim_dispatch<M: ValueModel>(
             return M::R::enc_nil();
         }
     };
+    // Direct fast path: call the impl's register entry with the caller's run
+    // context (no make_ctx / trampoline / resolve). Only when unwrapped.
+    if unsafe { (*ctx.rc).direct.get() } != 0 {
+        if let Some(r) = shim_fast_invoke::<M>(ctx.rc, rt, imp, args) {
+            return r;
+        }
+    }
     top.invoke(top, rt, imp, args)
 }
 
@@ -626,6 +752,7 @@ fn prim_tag(p: Prim) -> u32 {
         PvFromArray => 100,
         ApushChunk => 101,
         MultiFnNew => 102,
+        SortArr => 103,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -746,6 +873,7 @@ fn prim_from_tag(tag: u32) -> Prim {
         100 => PvFromArray,
         101 => ApushChunk,
         102 => MultiFnNew,
+        103 => SortArr,
         other => panic!("bad prim tag {other}"),
     }
 }
@@ -1386,6 +1514,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             }),
             cur: RefCell::new(cur),
             tregistry: &*self.templates as *const RefCell<Vec<ClosureTemplate>>,
+            jit: self as *const JitCranelift<M> as *const (),
             tail_pending: Cell::new(false),
             tail_callee: Cell::new(0),
             tail_args: args_buf as *mut Vec<u64>,

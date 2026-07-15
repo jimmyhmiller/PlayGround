@@ -1251,6 +1251,46 @@ impl<M: ValueModel> Runtime<M> {
                 pv
             }
             Prim::PvFromArray => self.pv_from_array(args[0]),
+            Prim::SortArr => {
+                let Val::Ref(id) = self.decode(args[0]) else { panic!("sort-arr: not an array") };
+                let &Obj::Vector { off, len, .. } = &self.heap()[id as usize] else {
+                    panic!("sort-arr: not an array")
+                };
+                let elems = self.words(off, len).to_vec();
+                // Homogeneous immediate fixnums?
+                if elems.iter().all(|&e| matches!(M::R::tag_of(e), RawTag::Int)) {
+                    let mut keyed: Vec<(i64, u64)> = elems
+                        .iter()
+                        .map(|&e| match self.decode(e) {
+                            Val::Int(i) => (i as i64, e),
+                            _ => unreachable!("tag-checked"),
+                        })
+                        .collect();
+                    keyed.sort_by_key(|&(k, _)| k);
+                    let sorted: Vec<u64> = keyed.into_iter().map(|(_, e)| e).collect();
+                    return M::R::enc_ref(self.alloc_vector(&sorted));
+                }
+                // Homogeneous strings? (code-point order == `%str-cmp` == Rust str cmp)
+                let all_str = elems.iter().all(|&e| {
+                    matches!(self.decode(e), Val::Ref(i) if matches!(&self.heap()[i as usize], Obj::Str(_)))
+                });
+                if all_str {
+                    let mut v = elems;
+                    v.sort_by(|&a, &b| {
+                        let (Val::Ref(ia), Val::Ref(ib)) = (self.decode(a), self.decode(b)) else {
+                            unreachable!("checked str")
+                        };
+                        let (Obj::Str(sa), Obj::Str(sb)) =
+                            (&self.heap()[ia as usize], &self.heap()[ib as usize])
+                        else {
+                            unreachable!("checked str")
+                        };
+                        sa.cmp(sb)
+                    });
+                    return M::R::enc_ref(self.alloc_vector(&v));
+                }
+                self.enc_nil()
+            }
             Prim::MultiFnNew => {
                 // Build a multi-arity fn from per-clause closures: each fixed
                 // clause registers under its own param count; the (at most one)

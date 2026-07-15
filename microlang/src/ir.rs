@@ -344,6 +344,13 @@ pub enum Prim {
     /// array `arr` in one native call (a Rust extend), returning `arr`. Lets a
     /// chunked seq be collected into a flat array a whole chunk at a time.
     ApushChunk,
+    /// `(%sort-arr arr)` -> a FRESH array of `arr`'s elements sorted by the
+    /// DEFAULT total order, natively — but only when the elements are
+    /// homogeneous fixnums or homogeneous strings (the overwhelmingly common
+    /// `sort` inputs; code-point string order matches `%str-cmp`). Returns
+    /// nil for anything else — the caller falls back to the in-language
+    /// comparator merge sort. Zero comparator callbacks.
+    SortArr,
     /// `(%multifn f g ...)` — build a MULTI-ARITY function value from closure
     /// arguments: each fixed-arity closure is selectable by its own param
     /// count; at most one variadic closure serves every higher/unmatched count.
