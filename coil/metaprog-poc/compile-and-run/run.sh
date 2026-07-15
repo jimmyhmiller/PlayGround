@@ -46,7 +46,16 @@ echo "       strlen, all AT EXPANSION TIME (every one impossible in the interpre
 COIL_META=compiled $COIL run $D/arbitrary_test.coil || { echo "compiled-engine arbitrary test FAILED"; exit 1; }
 echo "arbitrary-code metaprogram: OK (exit 0)"
 
-echo "=== 6. A GUI AT COMPILE TIME: the Mandelbrot viewer metaprogram ==="
+echo "=== 6. THE SAME-CODE PROOF: eight computations, one definition, two phases ==="
+echo "       fnv, fnptr sort, hashmap, a parser, THE COMPILER'S OWN READER, f64 by"
+echo "       BITS, libc snprintf, POSIX threads — each run at COMPILE TIME (in the"
+echo "       metaprogram dylib) and at RUN TIME, results compared bit-for-bit"
+$COIL run $D/samecode_test.coil 2>/dev/null > "$OUT/samecode.txt"; rc=$?
+[ $rc -eq 0 ] || { cat "$OUT/samecode.txt"; echo "same-code proof FAILED (exit $rc)"; exit 1; }
+grep -q "ALL IDENTICAL" "$OUT/samecode.txt" || { echo "same-code output missing"; exit 1; }
+cat "$OUT/samecode.txt"
+
+echo "=== 7. A GUI AT COMPILE TIME: the Mandelbrot viewer metaprogram ==="
 echo "       a Cocoa window opens ON THE MAIN THREAD during expansion, renders the"
 echo "       set live, and the accepted view's coordinates become the program's"
 echo "       constants (COIL_MANDEL_AUTO=1 scripts the session; drop it to drive"

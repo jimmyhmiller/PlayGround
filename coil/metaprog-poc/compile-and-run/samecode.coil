@@ -1,0 +1,189 @@
+; ============================================================================
+; THE SAME-CODE PROOF, part 1: the shared functions.
+;
+; Every function in this module is executed TWICE by samecode_test.coil — once
+; AT COMPILE TIME (called from a metaprogram, running as native code in the
+; metaprogram dylib) and once AT RUNTIME (called from main, running in the
+; compiled program) — on identical inputs, and the results are compared
+; BIT-FOR-BIT. One definition, two phases, one behavior.
+;
+; The set is chosen to cover the language: integer + f64 arithmetic (compared
+; by BITS), strings and StrBuf, generic ArrayList with a FUNCTION-POINTER
+; comparator, string-keyed HashMap, a hand-written recursive-descent parser,
+; THE COMPILER'S OWN READER (selfhost/src/reader.coil — the compiler's code is
+; the shared code), libc snprintf through real FFI, and POSIX THREADS.
+; ============================================================================
+(module samecode)
+(import "lib/alloc.coil" :use *)
+(import "lib/slice.coil" :use *)
+(import "lib/str.coil" :use *)
+(import "lib/arraylist.coil" :use *)
+(import "lib/hashmap.coil" :use *)
+(import "lib/thread.coil" :use *)
+(import "lib/control.coil" :use *)
+(import "../../selfhost/src/reader.coil" :use *)   ; the compiler's own reader
+(import "../../selfhost/src/parser.coil" :use *)   ; its Sexp accessors (sx-*)
+
+(extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
+
+; ---- shared inputs (both phases read these constants) ------------------------
+(const SC-TEXT "the same code, run at compile time and at run time")
+(const SC-ARITH "((7+3)*(5+1))+2*(3+4)")
+(const SC-COIL-SRC "(defn f [(x i64)] (-> i64) (iadd x 1)) (defstruct P [(a i64) (b f64)]) (const K 42)")
+
+; 1 ---- FNV-1a over bytes ------------------------------------------------------
+(defn sc-fnv [(s (slice u8))] (-> i64)
+  (let [(mut h) -3750763034362895579 (mut i) 0 n (slice-len s)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! h (imul (ixor (load h) (cast i64 (slice-get s (load i)))) 1099511628211))
+          (store! i (iadd (load i) 1)))))
+    (load h)))
+
+; 2 ---- generic ArrayList sorted with a FUNCTION-POINTER comparator ------------
+(defn sc-less [(x i64) (y i64)] (-> i64) (if (icmp-lt x y) 1 0))
+(defn sc-sort-sum [(n i64)] (-> i64)
+  (let [a (malloc-allocator) (mut xs) (al-new [i64] a) (mut seed) 88172645463325252 (mut i) 0
+        cmp (fnptr-of sc-less)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! seed (iadd (imul (load seed) 6364136223846793005) 1442695040888963407))
+          (al-push! (mut xs) (irem (load seed) 100000))
+          (store! i (iadd (load i) 1)))))
+    ; insertion sort THROUGH the pointer
+    (let [(mut j) 1]
+      (loop (if (icmp-ge (load j) n) (break)
+        (do (let [v (al-get [i64] (load xs) (load j)) (mut k) (isub (load j) 1)]
+              (loop (if (icmp-lt (load k) 0) (break)
+                (if (icmp-eq (call-ptr (cast (fnptr c [i64 i64] i64) cmp) v (al-get [i64] (load xs) (load k))) 1)
+                    (do (al-set! (mut xs) (iadd (load k) 1) (al-get [i64] (load xs) (load k)))
+                        (store! k (isub (load k) 1)))
+                  (break))))
+              (al-set! (mut xs) (iadd (load k) 1) v))
+            (store! j (iadd (load j) 1))))))
+    (let [(mut acc) 0 (mut m) 0]
+      (loop (if (icmp-ge (load m) n) (break)
+        (do (store! acc (iadd (load acc) (imul (iadd (load m) 1) (al-get [i64] (load xs) (load m)))))
+            (store! m (iadd (load m) 1)))))
+      (load acc))))
+
+; 3 ---- string-keyed HashMap ---------------------------------------------------
+(defn sc-i2s [(a (ptr Allocator)) (v i64)] (-> (slice u8))
+  (if (icmp-eq v 0) "0"
+    (let [(mut digits) (al-new [u8] a) (mut x) v (mut sb) (sb-new a)]
+      (loop (if (icmp-le (load x) 0) (break)
+        (do (al-push! (mut digits) (cast u8 (iadd 48 (irem (load x) 10))))
+            (store! x (udiv (load x) 10)))))
+      (let [(mut k) (isub (al-len [u8] (load digits)) 1)]
+        (loop (if (icmp-lt (load k) 0) (break)
+          (do (sb-push-byte! (mut sb) (al-get [u8] (load digits) (load k)))
+              (store! k (isub (load k) 1))))))
+      (sb-str (load sb)))))
+(defn sc-map-stats [(n i64)] (-> i64)
+  (let [a (malloc-allocator) (mut m) (hm-new [(slice u8) i64] a (str-keyops)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (hm-put! (mut m) (sc-i2s a (imul (load i) 7)) (imul (load i) (load i)))
+          (store! i (iadd (load i) 1)))))
+    (let [(mut acc) 0 (mut j) 0]
+      (loop (if (icmp-ge (load j) n) (break)
+        (do (match (hm-get [(slice u8) i64] (load m) (sc-i2s a (imul (load j) 7)))
+              (Some [v] (store! acc (iadd (load acc) (imul v (iadd (load j) 3)))))
+              (None [] (store! acc -999999)))
+            (store! j (iadd (load j) 1)))))
+      (load acc))))
+
+; 4 ---- a hand-written recursive-descent parser/evaluator ----------------------
+(defstruct ScP [(src (slice u8)) (pos i64)])
+(defn scp-peek [(p (ptr ScP))] (-> i64)
+  (if (icmp-ge (load (field p pos)) (slice-len (load (field p src)))) -1
+    (cast i64 (slice-get (load (field p src)) (load (field p pos))))))
+(defn scp-adv [(p (ptr ScP))] (-> i64) (store! (field p pos) (iadd (load (field p pos)) 1)) 0)
+(defn sc-factor [(p (ptr ScP))] (-> i64)
+  (if (icmp-eq (scp-peek p) 40)   ; (
+      (do (scp-adv p)
+          (let [v (sc-expr p)] (scp-adv p) v))   ; consume )
+    (let [(mut acc) 0]
+      (loop (if (and (icmp-ge (scp-peek p) 48) (icmp-le (scp-peek p) 57))
+                (do (store! acc (iadd (imul (load acc) 10) (isub (scp-peek p) 48))) (scp-adv p) 0)
+              (break)))
+      (load acc))))
+(defn sc-term [(p (ptr ScP))] (-> i64)
+  (let [(mut v) (sc-factor p)]
+    (loop (if (icmp-eq (scp-peek p) 42)   ; *
+              (do (scp-adv p) (store! v (imul (load v) (sc-factor p))) 0)
+            (break)))
+    (load v)))
+(defn sc-expr [(p (ptr ScP))] (-> i64)
+  (let [(mut v) (sc-term p)]
+    (loop
+      (if (icmp-eq (scp-peek p) 43)       ; +
+          (do (scp-adv p) (store! v (iadd (load v) (sc-term p))) 0)
+        (if (icmp-eq (scp-peek p) 45)     ; -
+            (do (scp-adv p) (store! v (isub (load v) (sc-term p))) 0)
+          (break))))
+    (load v)))
+(defn sc-arith [(s (slice u8))] (-> i64)
+  (let [p (alloc-stack ScP)]
+    (store! (field p src) s) (store! (field p pos) 0)
+    (sc-expr p)))
+
+; 5 ---- THE COMPILER'S OWN READER as shared code --------------------------------
+; read Coil source with selfhost/src/reader.coil (the code the compiler itself
+; runs) and fold the tree's shape: tags, symbol/string bytes, integer values.
+(defn sc-sexp-fold [(x Sexp) (h i64)] (-> i64)
+  (let [tg (sx-tag x) (mut acc) (iadd (imul h 31) tg)]
+    (if (or (icmp-eq tg 0) (icmp-eq tg 1)) (store! acc (iadd (load acc) (sx-ival x)))
+      (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+          (let [items (sx-items x) n (sx-len items) (mut i) 0]
+            (loop (if (icmp-ge (load i) n) (break)
+              (do (store! acc (sc-sexp-fold (sx-at items (load i)) (load acc)))
+                  (store! i (iadd (load i) 1))))) 0)
+        (store! acc (ixor (load acc) (sc-fnv (sx-sval x))))))
+    (load acc)))
+(defn sc-reader-fold [(src (slice u8))] (-> i64)
+  (match (read-all (malloc-allocator) src 0)
+    (Err [d] -1)
+    (Ok [forms]
+      (let [n (al-len [Sexp] (load forms)) (mut h) 7 (mut i) 0]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (store! h (sc-sexp-fold (al-get [Sexp] (load forms) (load i)) (load h)))
+              (store! i (iadd (load i) 1)))))
+        (load h)))))
+
+; 6/7 ---- f64: an iterated float computation, compared by BITS ------------------
+(defn sc-f64-iter [(re f64) (im f64) (steps i64)] (-> f64)
+  (let [(mut zr) 0.0 (mut zi) 0.0 (mut k) 0]
+    (loop (if (icmp-ge (load k) steps) (break)
+      (let [nzr (fadd (fsub (fmul (load zr) (load zr)) (fmul (load zi) (load zi))) re)
+            nzi (fadd (fmul 2.0 (fmul (load zr) (load zi))) im)]
+        (do (store! zr nzr) (store! zi nzi) (store! k (iadd (load k) 1))))))
+    (load zr)))
+(defn sc-f64-bits [(x f64)] (-> i64)
+  (let [p (alloc-stack i64)]
+    (store! (cast (ptr f64) p) x)
+    (load p)))
+
+; 8 ---- libc snprintf through real FFI ------------------------------------------
+(defn sc-libc-fmt [(x f64)] (-> (slice u8))
+  (let [a (malloc-allocator)
+        buf (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 64 1)))
+        n (snprintf (cast (ptr i8) buf) 64 c"%.17g" x)]
+    (slice-new buf (cast i64 n))))
+
+; 9 ---- POSIX threads ------------------------------------------------------------
+(defstruct SumJob [(lo i64) (hi i64) (out i64)])
+(defn sc-sum-worker [(argp (ptr i8))] (-> (ptr i8))
+  (let [j (cast (ptr SumJob) argp) (mut acc) 0 (mut i) (load (field j lo))]
+    (loop (if (icmp-ge (load i) (load (field j hi))) (break)
+      (do (store! acc (iadd (load acc) (imul (load i) (load i))))
+          (store! i (iadd (load i) 1)))))
+    (store! (field j out) (load acc))
+    (cast (ptr i8) 0)))
+(defn sc-thread-sum [(n i64)] (-> i64)
+  (let [j1 (alloc-stack SumJob) j2 (alloc-stack SumJob)
+        t1 (alloc-stack Thread) t2 (alloc-stack Thread)
+        half (udiv n 2)]
+    (store! (field j1 lo) 0)    (store! (field j1 hi) half) (store! (field j1 out) 0)
+    (store! (field j2 lo) half) (store! (field j2 hi) n)    (store! (field j2 out) 0)
+    (thread-spawn t1 (fnptr-of sc-sum-worker) (cast (ptr i8) j1))
+    (thread-spawn t2 (fnptr-of sc-sum-worker) (cast (ptr i8) j2))
+    (thread-join t1) (thread-join t2)
+    (iadd (load (field j1 out)) (load (field j2 out)))))
