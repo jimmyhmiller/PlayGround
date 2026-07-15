@@ -531,12 +531,39 @@
               (let [acc (-reduce-chunk f acc (field s 0) (field s 1) (field s 2))]
                 (if (reduced? acc) (field acc 0) (reduce-seq f acc (field s 3))))
             true (reduce-seq f (f acc (%first s)) (%rest s))))))
+;; Fused reducers for the VERY common (reduce + …) / (reduce * …): the operator is
+;; applied via the %add/%mul PRIM directly — no per-element variadic `+`/`*` call
+;; and its arg-list allocation. Chunk-aware, mirroring reduce-seq. (`+`/`*` never
+;; return `reduced`, so early-termination handling is unnecessary here.)
+(defn -radd-chunk [acc arr off end]
+  (loop [i off acc acc] (if (%lt i end) (recur (%add i 1) (%add acc (%aget arr i))) acc)))
+(defn -radd-seq [acc s]
+  (let [s (seq s)]
+    (cond (nil? s) acc
+          (chunked? s) (-radd-seq (-radd-chunk acc (field s 0) (field s 1) (field s 2)) (field s 3))
+          true (-radd-seq (%add acc (%first s)) (%rest s)))))
+(defn -rmul-chunk [acc arr off end]
+  (loop [i off acc acc] (if (%lt i end) (recur (%add i 1) (%mul acc (%aget arr i))) acc)))
+(defn -rmul-seq [acc s]
+  (let [s (seq s)]
+    (cond (nil? s) acc
+          (chunked? s) (-rmul-seq (-rmul-chunk acc (field s 0) (field s 1) (field s 2)) (field s 3))
+          true (-rmul-seq (%mul acc (%first s)) (%rest s)))))
 ;; `reduce` is 2- or 3-arity (like clojure.core): `(reduce f coll)` seeds with the
 ;; first element (or `(f)` when empty); `(reduce f init coll)` seeds with `init`.
 (defn reduce [f & args]
-  (if (nil? (next args))
+  (cond
+    (identical? f +)
+      (if (nil? (next args))
+          (let [s (seq (first args))] (if (nil? s) 0 (-radd-seq (%first s) (%rest s))))
+          (-radd-seq (first args) (second args)))
+    (identical? f *)
+      (if (nil? (next args))
+          (let [s (seq (first args))] (if (nil? s) 1 (-rmul-seq (%first s) (%rest s))))
+          (-rmul-seq (first args) (second args)))
+    (nil? (next args))
       (let [s (seq (first args))] (if (nil? s) (f) (reduce-seq f (%first s) (%rest s))))
-      (reduce-seq f (first args) (seq (second args)))))
+    true (reduce-seq f (first args) (seq (second args)))))
 (defn into
   ([] [])
   ([to] to)
