@@ -560,6 +560,16 @@
     (cond (nil? s) acc
           (chunked? s) (-rconj-seq (-rconj-chunk acc (field s 0) (field s 1) (field s 2)) (field s 3))
           true (-rconj-seq (-conj acc (%first s)) (%rest s)))))
+;; When the accumulator is a PersistentVector (conj on a vector always yields a
+;; vector, so the type is stable) call the native %pv-conj prim DIRECTLY — no
+;; per-element -conj protocol dispatch at all. This is the (into [] …) / vec path.
+(defn -rpvconj-chunk [acc arr off end]
+  (loop [i off acc acc] (if (%lt i end) (recur (%add i 1) (%pv-conj acc (%aget arr i))) acc)))
+(defn -rpvconj-seq [acc s]
+  (let [s (seq s)]
+    (cond (nil? s) acc
+          (chunked? s) (-rpvconj-seq (-rpvconj-chunk acc (field s 0) (field s 1) (field s 2)) (field s 3))
+          true (-rpvconj-seq (%pv-conj acc (%first s)) (%rest s)))))
 ;; `reduce` is 2- or 3-arity (like clojure.core): `(reduce f coll)` seeds with the
 ;; first element (or `(f)` when empty); `(reduce f init coll)` seeds with `init`.
 (defn reduce [f & args]
@@ -573,9 +583,12 @@
           (let [s (seq (first args))] (if (nil? s) 1 (-rmul-seq (%first s) (%rest s))))
           (-rmul-seq (first args) (second args)))
     (identical? f conj)
-      (if (nil? (next args))
-          (let [s (seq (first args))] (if (nil? s) [] (-rconj-seq (%first s) (%rest s))))
-          (-rconj-seq (first args) (second args)))
+      (let [init (if (nil? (next args)) nil (first args))
+            coll (if (nil? (next args)) (first args) (second args))]
+        (if (nil? (next args))
+            (let [s (seq coll)] (if (nil? s) [] (-rconj-seq (%first s) (%rest s))))
+            ;; vector accumulator -> native %pv-conj loop (no protocol dispatch)
+            (if (vector? init) (-rpvconj-seq init coll) (-rconj-seq init coll))))
     (nil? (next args))
       (let [s (seq (first args))] (if (nil? s) (f) (reduce-seq f (%first s) (%rest s))))
     true (reduce-seq f (first args) (seq (second args)))))
