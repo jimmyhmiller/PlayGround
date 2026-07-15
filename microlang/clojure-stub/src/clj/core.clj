@@ -481,7 +481,9 @@
 (defn contains? [c k] (-contains-key? c k))
 (defn peek [c] (-peek c))
 (defn pop [c] (-pop c))
-(defn get [c k & r] (-lookup c k (if (nil? r) nil (%first r))))
+;; Real fixed arities: `get` runs per element in every map-walking loop; the
+;; variadic form allocated a rest list per call.
+(defn get ([c k] (-lookup c k nil)) ([c k d] (-lookup c k d)))
 (defn dissoc [m k] (record 'Map (kv-without (field m 0) k)))
 (defn keys [m] (kv-keys (field m 0)))
 (defn vals [m] (kv-vals (field m 0)))
@@ -1314,9 +1316,10 @@
 
 ;; map building: group-by / frequencies / zipmap / merge / select-keys / update-in
 (defn group-by [f coll]
-  (reduce (fn [m x] (let [k (f x)] (assoc m k (conj (if (contains? m k) (get m k) (vector)) x)))) (hash-map) coll))
+  ;; One lookup per element (3-arity get), not contains? + get.
+  (reduce (fn [m x] (let [k (f x)] (assoc m k (conj (get m k []) x)))) (hash-map) coll))
 (defn frequencies [coll]
-  (reduce (fn [m x] (assoc m x (inc (if (contains? m x) (get m x) 0)))) (hash-map) coll))
+  (reduce (fn [m x] (assoc m x (inc (get m x 0)))) (hash-map) coll))
 (defn zipmap [ks vs]
   (loop [ks (seq ks) vs (seq vs) m (hash-map)]
     (if (if (nil? ks) true (nil? vs)) m (recur (next ks) (next vs) (assoc m (first ks) (first vs))))))

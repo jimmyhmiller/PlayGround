@@ -182,6 +182,15 @@ const WCHUNK: usize = 1 << WCHUNK_BITS;
 /// chunks while another thread appends new ones).
 const WCHUNKS_CAP: usize = 1 << 15;
 
+/// A HAMT trie node's kind, classified by interned-sym compare.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum HamtKind {
+    Bitmap,
+    Array,
+    Collision,
+    Other,
+}
+
 /// The bump WORD ARENA holding hot object payloads (`Vector`/`Values`/
 /// `Record` elements). Allocation is an atomic bump — no malloc, no free, no
 /// lock on the fast path; a span is owned by exactly one Obj. Semi-space
@@ -2686,12 +2695,31 @@ impl<M: ValueModel> Runtime<M> {
     /// (arr, off, end, more) of a `'ChunkedCons` record, or None. Lets the cons
     /// prims (`%first`/`%rest`) treat a chunk transparently as a seq — only on the
     /// as_cons-miss path, so the common cons case pays nothing.
+    /// HAMT node kind by interned-sym compare (no string allocation/compare).
+    fn hamt_kind(&self, type_id: Sym) -> HamtKind {
+
+        if type_id == self.intern_cached(&self.shared.sym_cache_bitmap_node, "BitmapIndexedNode") {
+            HamtKind::Bitmap
+        } else if type_id == self.intern_cached(&self.shared.sym_cache_array_node, "ArrayNode") {
+            HamtKind::Array
+        } else if type_id
+            == self.intern_cached(&self.shared.sym_cache_collision_node, "HashCollisionNode")
+        {
+            HamtKind::Collision
+        } else {
+            HamtKind::Other
+        }
+    }
+
     pub(crate) fn as_chunked(&self, bits: u64) -> Option<(u64, i64, i64, u64)> {
         let Val::Ref(id) = self.decode(bits) else { return None };
         let &Obj::Record { type_id, off: foff, len: flen } = &self.heap()[id as usize] else {
             return None;
         };
-        if self.sym_name(type_id) != "ChunkedCons" {
+        // ONE interned-sym compare (this runs per seq step — a string compare
+        // here dominated chunk iteration).
+        let cc = self.intern_cached(&self.shared.sym_cache_chunked_cons, "ChunkedCons");
+        if type_id != cc {
             return None;
         }
         let fields = self.words(foff, flen);
@@ -2958,9 +2986,9 @@ impl<M: ValueModel> Runtime<M> {
         let Val::Ref(id) = self.decode(node) else { panic!("hamt-assoc: not a node") };
         let &Obj::Record { type_id, off: foff, len: flen } = &self.heap()[id as usize] else { panic!("hamt-assoc: not a node") };
         let fields: Vec<u64> = self.words(foff, flen).to_vec();
-        let kind = self.sym_name(type_id).to_string();
-        match kind.as_str() {
-            "BitmapIndexedNode" => {
+        let kind = self.hamt_kind(type_id);
+        match kind {
+            HamtKind::Bitmap => {
                 let bitmap = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => panic!("bitmap") };
                 let arr = self.arr_clone(fields[2]);
                 let bit = 1u32 << ((hash >> shift) & 31);
@@ -3025,7 +3053,7 @@ impl<M: ValueModel> Runtime<M> {
                     }
                 }
             }
-            "ArrayNode" => {
+            HamtKind::Array => {
                 let cnt = match self.decode(fields[1]) { Val::Int(i) => i as i64, _ => panic!("cnt") };
                 let arr = self.arr_clone(fields[2]);
                 let idx = ((hash >> shift) & 31) as usize;
@@ -3046,7 +3074,7 @@ impl<M: ValueModel> Runtime<M> {
                     }
                 }
             }
-            "HashCollisionNode" => {
+            HamtKind::Collision => {
                 let chash = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => panic!("chash") };
                 let cnt = match self.decode(fields[2]) { Val::Int(i) => i as i64, _ => panic!("cnt") };
                 let arr = self.arr_clone(fields[3]);
@@ -3082,7 +3110,7 @@ impl<M: ValueModel> Runtime<M> {
                     self.hamt_assoc(wrapper, shift, hash, key, val)
                 }
             }
-            _ => panic!("hamt-assoc: unknown node kind {kind}"),
+            HamtKind::Other => panic!("hamt-assoc: not a HAMT node"),
         }
     }
     /// `(-inode-lookup node shift hash key not-found)`.
@@ -3090,8 +3118,8 @@ impl<M: ValueModel> Runtime<M> {
         let Val::Ref(id) = self.decode(node) else { return not_found };
         let &Obj::Record { type_id, off: foff, len: flen } = &self.heap()[id as usize] else { return not_found };
         let fields = self.words(foff, flen);
-        match self.sym_name(type_id) {
-            "BitmapIndexedNode" => {
+        match self.hamt_kind(type_id) {
+            HamtKind::Bitmap => {
                 let bitmap = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => return not_found };
                 let bit = 1u32 << ((hash >> shift) & 31);
                 if bitmap & bit == 0 {
@@ -3108,7 +3136,7 @@ impl<M: ValueModel> Runtime<M> {
                     not_found
                 }
             }
-            "ArrayNode" => {
+            HamtKind::Array => {
                 let idx = ((hash >> shift) & 31) as usize;
                 let child = self.arr_at(fields[2], idx);
                 if self.is_nil_bits(child) {
@@ -3117,7 +3145,7 @@ impl<M: ValueModel> Runtime<M> {
                     self.hamt_lookup(child, shift + 5, hash, key, not_found)
                 }
             }
-            "HashCollisionNode" => {
+            HamtKind::Collision => {
                 let cnt = match self.decode(fields[2]) { Val::Int(i) => i as usize, _ => return not_found };
                 let arr = self.arr_clone(fields[3]);
                 let mut i = 0usize;
@@ -3153,8 +3181,8 @@ impl<M: ValueModel> Runtime<M> {
         let &Obj::Record { type_id, off: foff, len: flen } = &self.heap()[id as usize] else { return node };
         let fields: Vec<u64> = self.words(foff, flen).to_vec();
         let fields = &fields[..];
-        match self.sym_name(type_id) {
-            "BitmapIndexedNode" => {
+        match self.hamt_kind(type_id) {
+            HamtKind::Bitmap => {
                 let bitmap = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => return node };
                 let bit = 1u32 << ((hash >> shift) & 31);
                 if bitmap & bit == 0 {
@@ -3189,7 +3217,7 @@ impl<M: ValueModel> Runtime<M> {
                     node
                 }
             }
-            "ArrayNode" => {
+            HamtKind::Array => {
                 let cnt = match self.decode(fields[1]) { Val::Int(i) => i as i64, _ => return node };
                 let idx = ((hash >> shift) & 31) as usize;
                 let arr = self.arr_clone(fields[2]);
@@ -3214,7 +3242,7 @@ impl<M: ValueModel> Runtime<M> {
                     self.mk_array_node(cnt, na)
                 }
             }
-            "HashCollisionNode" => {
+            HamtKind::Collision => {
                 let chash = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => return node };
                 let cnt = match self.decode(fields[2]) { Val::Int(i) => i as i64, _ => return node };
                 let arr = self.arr_clone(fields[3]);
