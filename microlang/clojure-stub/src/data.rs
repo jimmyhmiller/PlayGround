@@ -21,6 +21,7 @@
 //! the HAMT, as cljs does. Duplicate literal keys are not detected (real
 //! Clojure throws at read time); the first occurrence wins on lookup.
 
+use microlang::runtime::ObjView;
 use microlang::value::Sym;
 use microlang::{Obj, Repr, Runtime, Val, ValueModel};
 
@@ -168,8 +169,8 @@ fn build_persistent_vector<M: ValueModel>(rt: &mut Runtime<M>, elems: &[u64]) ->
 /// The record's `(tag, fields)` if `v` is a Record, else None.
 fn record_parts<M: ValueModel>(rt: &Runtime<M>, v: u64) -> Option<(String, Vec<u64>)> {
     if let Val::Ref(id) = rt.decode(v) {
-        if let &Obj::Record { type_id, off, len } = &rt.heap()[id as usize] {
-            return Some((rt.sym_name(type_id).to_string(), rt.words(off, len).to_vec()));
+        if let ObjView::Record { type_id, fields } = rt.view_gc(id) {
+            return Some((rt.sym_name(type_id).to_string(), fields.to_vec()));
         }
     }
     None
@@ -188,16 +189,16 @@ fn int_of<M: ValueModel>(rt: &Runtime<M>, v: u64) -> usize {
 
 fn arr_elems<M: ValueModel>(rt: &Runtime<M>, arr: u64) -> Vec<u64> {
     let Val::Ref(id) = rt.decode(arr) else { panic!("collection layout: expected an array") };
-    let &Obj::Vector { off, len, .. } = &rt.heap()[id as usize] else {
+    let ObjView::Vector { elems, .. } = rt.view_gc(id) else {
         panic!("collection layout: expected an array")
     };
-    rt.words(off, len).to_vec()
+    elems.to_vec()
 }
 
 fn arr_get<M: ValueModel>(rt: &Runtime<M>, arr: u64, i: usize) -> u64 {
     let Val::Ref(id) = rt.decode(arr) else { panic!("trie node: not an array") };
-    let &Obj::Vector { off, len, .. } = &rt.heap()[id as usize] else { panic!("trie node: not an array") };
-    rt.words(off, len)[i]
+    let ObjView::Vector { elems, .. } = rt.view_gc(id) else { panic!("trie node: not an array") };
+    elems[i]
 }
 
 /// The elements of any vector representation: `PVec`, `PersistentVector`, or

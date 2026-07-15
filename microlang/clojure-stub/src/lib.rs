@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use microlang::runtime::ObjView;
 use microlang::value::Sym;
 use microlang::{CodeSpace, EvalBridge, Obj, Runtime, Val, ValueModel};
 
@@ -65,14 +66,7 @@ pub fn deps_edn_paths<M: ValueModel>(
         record_field0(rt, v, reader::KEYWORD)
             .is_some_and(|f0| matches!(rt.decode(f0), Val::Sym(s) if rt.sym_name(s) == name))
     };
-    let as_string = |rt: &Runtime<M>, v: u64| -> Option<String> {
-        if let Val::Ref(id) = rt.decode(v) {
-            if let Obj::Str(s) = &rt.heap()[id as usize] {
-                return Some(s.clone());
-            }
-        }
-        None
-    };
+    let as_string = |rt: &Runtime<M>, v: u64| -> Option<String> { rt.str_view(v).map(|s| s.to_string()) };
     for kv in top.chunks(2) {
         if kv.len() < 2 {
             break;
@@ -415,20 +409,15 @@ fn resolve_auto_keywords<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, fo
 
 fn has_auto_keyword<M: ValueModel>(rt: &Runtime<M>, form: u64) -> bool {
     if let Val::Ref(id) = rt.decode(form) {
-        match &rt.heap()[id as usize] {
-            &Obj::Record { type_id, off, len } => {
+        match rt.view_gc(id) {
+            ObjView::Record { type_id, fields } => {
                 if rt.sym_name(type_id) == reader::KEYWORD_AUTO_NS {
                     return true;
                 }
-                rt.words(off, len).to_vec().iter().any(|&f| has_auto_keyword(rt, f))
+                fields.iter().any(|&f| has_auto_keyword(rt, f))
             }
-            Obj::Cons { head, tail } => {
-                let (h, t) = (*head, *tail);
-                has_auto_keyword(rt, h) || has_auto_keyword(rt, t)
-            }
-            &Obj::Vector { off, len, .. } => {
-                rt.words(off, len).to_vec().iter().any(|&e| has_auto_keyword(rt, e))
-            }
+            ObjView::Cons { head, tail } => has_auto_keyword(rt, head) || has_auto_keyword(rt, tail),
+            ObjView::Vector { elems, .. } => elems.iter().any(|&e| has_auto_keyword(rt, e)),
             _ => false,
         }
     } else {
@@ -438,10 +427,26 @@ fn has_auto_keyword<M: ValueModel>(rt: &Runtime<M>, form: u64) -> bool {
 
 fn rebuild_auto_keywords<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
     let Val::Ref(id) = rt.decode(form) else { return form };
-    let obj = rt.heap()[id as usize].clone();
-    match obj {
-        Obj::Record { type_id, off, len } if rt.sym_name(type_id) == reader::KEYWORD_AUTO_NS => {
-            let fields = rt.words(off, len).to_vec();
+    // Copy the shape out of the view first: the recursive calls below need
+    // `&mut rt`, which a live borrow from `view_gc` would block.
+    enum Shape {
+        AutoNsKeyword(Vec<u64>),
+        Record(Sym, Vec<u64>),
+        Cons(u64, u64),
+        Vector(Vec<u64>),
+        Other,
+    }
+    let shape = match rt.view_gc(id) {
+        ObjView::Record { type_id, fields } if rt.sym_name(type_id) == reader::KEYWORD_AUTO_NS => {
+            Shape::AutoNsKeyword(fields.to_vec())
+        }
+        ObjView::Record { type_id, fields } => Shape::Record(type_id, fields.to_vec()),
+        ObjView::Cons { head, tail } => Shape::Cons(head, tail),
+        ObjView::Vector { elems, .. } => Shape::Vector(elems.to_vec()),
+        _ => Shape::Other,
+    };
+    match shape {
+        Shape::AutoNsKeyword(fields) => {
             let name = match rt.decode(fields[0]) {
                 Val::Sym(s) => rt.sym_name(s).to_string(),
                 _ => panic!("::keyword marker: name must be a symbol"),
@@ -462,25 +467,23 @@ fn rebuild_auto_keywords<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, fo
             let rid = rt.alloc_record(kw, &[name_v]);
             <M::R as microlang::Repr>::enc_ref(rid)
         }
-        Obj::Record { type_id, off, len } => {
-            let fields = rt.words(off, len).to_vec();
+        Shape::Record(type_id, fields) => {
             let nf: Vec<u64> = fields.iter().map(|&f| rebuild_auto_keywords(rt, comp, f)).collect();
             let rid = rt.alloc_record(type_id, &nf);
             <M::R as microlang::Repr>::enc_ref(rid)
         }
-        Obj::Cons { head, tail } => {
+        Shape::Cons(head, tail) => {
             let h = rebuild_auto_keywords(rt, comp, head);
             let t = rebuild_auto_keywords(rt, comp, tail);
             let rid = rt.alloc(Obj::Cons { head: h, tail: t });
             <M::R as microlang::Repr>::enc_ref(rid)
         }
-        Obj::Vector { off, len, .. } => {
-            let elems = rt.words(off, len).to_vec();
+        Shape::Vector(elems) => {
             let ne: Vec<u64> = elems.iter().map(|&e| rebuild_auto_keywords(rt, comp, e)).collect();
             let rid = rt.alloc_vector(&ne);
             <M::R as microlang::Repr>::enc_ref(rid)
         }
-        _ => form,
+        Shape::Other => form,
     }
 }
 
@@ -565,9 +568,7 @@ fn eval_form<M: ValueModel>(
             let mut out = vec![dm, name];
             // skip an optional docstring before the param vector
             let mut rest = &items[2..];
-            if rest.len() > 1
-                && matches!(rt.decode(rest[0]), Val::Ref(id) if matches!(&rt.heap()[id as usize], Obj::Str(_)))
-            {
+            if rest.len() > 1 && rt.str_view(rest[0]).is_some() {
                 rest = &rest[1..];
             }
             out.extend_from_slice(rest);
@@ -582,9 +583,7 @@ fn eval_form<M: ValueModel>(
         let mut items = rt.list_to_vec(form);
         // Skip an optional docstring (a String) then attr-map (a Map) between the
         // name and the param list — `(defmacro m "doc" {…} [params] …)`.
-        let is_str = |rt: &Runtime<M>, x: u64| {
-            matches!(rt.decode(x), Val::Ref(id) if matches!(&rt.heap()[id as usize], Obj::Str(_)))
-        };
+        let is_str = |rt: &Runtime<M>, x: u64| rt.str_view(x).is_some();
         if items.len() > 3 && is_str(rt, items[2]) {
             items.remove(2);
         }
@@ -804,9 +803,9 @@ fn force_spine<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, form: 
     let mut f = form;
     let lazy = loop {
         match rt.decode(f) {
-            Val::Ref(id) => match &rt.heap()[id as usize] {
-                Obj::Cons { tail, .. } => f = *tail,
-                Obj::Record { type_id, .. } if rt.sym_name(*type_id) == "LazySeq" => break true,
+            Val::Ref(id) => match rt.view_gc(id) {
+                ObjView::Cons { tail, .. } => f = tail,
+                ObjView::Record { type_id, .. } if rt.sym_name(type_id) == "LazySeq" => break true,
                 _ => break false,
             },
             _ => break false,
@@ -1881,7 +1880,7 @@ fn jvm_registry_tags<M: ValueModel>(rt: &Runtime<M>, fqn: &str) -> Vec<Sym> {
     let regsym = rt.intern("clojure.core/-jvm-registry");
     let Some(regv) = rt.global(regsym) else { return vec![] };
     let Val::Ref(id) = rt.decode(regv) else { return vec![] };
-    let Obj::Atom(a) = &rt.heap()[id as usize] else { return vec![] };
+    let ObjView::Atom(a) = rt.view_gc(id) else { return vec![] };
     let plist = rt.list_to_vec(a.load(Ordering::Acquire));
     let want = rt.intern(fqn);
     let Some(desc) = plist
@@ -1892,8 +1891,7 @@ fn jvm_registry_tags<M: ValueModel>(rt: &Runtime<M>, fqn: &str) -> Vec<Sym> {
         return vec![];
     };
     let Val::Ref(did) = rt.decode(desc) else { return vec![] };
-    let &Obj::Record { off, len, .. } = &rt.heap()[did as usize] else { return vec![] };
-    let fields = rt.words(off, len);
+    let ObjView::Record { fields, .. } = rt.view_gc(did) else { return vec![] };
     let (tag, ext) = (fields.get(2).copied(), fields.get(11).copied());
     if let Some(ext) = ext {
         if !matches!(rt.decode(ext), Val::Nil) {
@@ -2056,9 +2054,9 @@ fn binding_items<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Option<Vec<u64>> 
 
 fn record_field0<M: ValueModel>(rt: &Runtime<M>, form: u64, tag: &str) -> Option<u64> {
     if let Val::Ref(id) = rt.decode(form) {
-        if let &Obj::Record { type_id, off, len } = &rt.heap()[id as usize] {
+        if let ObjView::Record { type_id, fields } = rt.view_gc(id) {
             if rt.sym_name(type_id) == tag {
-                return rt.words(off, len).first().copied();
+                return fields.first().copied();
             }
         }
     }
@@ -2674,10 +2672,9 @@ fn defmacro_name<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Option<Sym> {
 /// sets, `:kw` keywords, `(..)` lists.
 pub fn clj_str<M: ValueModel>(rt: &Runtime<M>, v: u64) -> String {
     match rt.decode(v) {
-        Val::Ref(id) => match &rt.heap()[id as usize] {
-            &Obj::Record { type_id, off, len } => {
+        Val::Ref(id) => match rt.view_gc(id) {
+            ObjView::Record { type_id, fields } => {
                 let tag = rt.sym_name(type_id);
-                let fields = rt.words(off, len);
                 match tag {
                     "Keyword" => format!(":{}", rt.print(fields[0])),
                     "Vector" => format!("[{}]", list_items(rt, fields[0], " ")),
@@ -2689,10 +2686,10 @@ pub fn clj_str<M: ValueModel>(rt: &Runtime<M>, v: u64) -> String {
                     _ => rt.print(v),
                 }
             }
-            Obj::Cons { .. } => format!("({})", list_items(rt, v, " ")),
+            ObjView::Cons { .. } => format!("({})", list_items(rt, v, " ")),
             // A char prints readably as `\a` (like Clojure's pr), distinct from
             // `(str \a)` -> "a".
-            Obj::Char(c) => match c {
+            ObjView::Char(c) => match c {
                 ' ' => "\\space".to_string(),
                 '\n' => "\\newline".to_string(),
                 '\t' => "\\tab".to_string(),

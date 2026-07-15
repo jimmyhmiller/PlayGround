@@ -362,7 +362,14 @@ unsafe impl Sync for AtomicBumpAllocator {}
 impl AtomicBumpAllocator {
     pub fn new(size: usize) -> Self {
         let size = align8(size);
-        let layout = std::alloc::Layout::from_size_align(size, 4096).unwrap();
+        // Alignment 8 (all an object needs), NOT the page size: keeping the
+        // align at or under the allocator's MIN_ALIGN routes `alloc_zeroed`
+        // to `calloc`, whose large-allocation path is fresh mmap'd zero pages
+        // — reserved up front, COMMITTED LAZILY as touched. A larger align
+        // takes Rust's aligned-alloc + eager-memset path instead, which would
+        // commit (and zero) the whole space at construction — gigabytes per
+        // Runtime the design promises never to touch.
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
         let base = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!base.is_null(), "heap: reserving a {size}-byte space failed");
         AtomicBumpAllocator { base, cursor: AtomicUsize::new(0), size }
@@ -435,7 +442,7 @@ impl AtomicBumpAllocator {
 
 impl Drop for AtomicBumpAllocator {
     fn drop(&mut self) {
-        let layout = std::alloc::Layout::from_size_align(self.size, 4096).unwrap();
+        let layout = std::alloc::Layout::from_size_align(self.size, 8).unwrap();
         unsafe { std::alloc::dealloc(self.base, layout) };
     }
 }

@@ -72,6 +72,10 @@ pub fn read<M: ValueModel>(rt: &mut Runtime<M>, src: &str) -> Vec<u64> {
 /// primitives — the "language as a library" discipline. Auto-injected before
 /// every program so they are always in scope.
 const PRELUDE: &str = "
+;; The runtime has TWO empty-list-ish values: nil (the cons-chain terminator,
+;; what '() reads as) and the distinct () singleton that (list) with no args
+;; returns. R7RS null? is true for both; the core's nil? only sees nil.
+(define (null? x) (if (nil? x) #t (= x (list))))
 (define (map f xs)
   (if (null? xs) '() (cons (f (car xs)) (map f (cdr xs)))))
 (define (for-each f xs)
@@ -652,7 +656,6 @@ fn alias(name: &str) -> Option<&'static str> {
         "display" => "println",
         "car" => "first",
         "cdr" => "rest",
-        "null?" => "nil?",
         "equal?" => "=", // the core's `=` is structural equality
         "eq?" => "%eq",  // identity (bit equality)
         "eqv?" => "%eq",

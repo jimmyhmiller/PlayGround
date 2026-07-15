@@ -28,7 +28,18 @@ record for the performance re-architecture and the map of what remains.
   apply rest-arg passthrough is UNSOUND here — variadic bodies may walk rest
   args with raw %first/%rest prims, so rest args must stay realized lists.
 
-## Stage D (NEXT, decided): the REAL heap — gc-rust-shaped
+## Stage D (LANDED except D5, 2026-07-15): the REAL heap — gc-rust-shaped
+
+Status: D1–D4 are IN (commits 3ed239050, f52feec1a, 57b49db79 + frontends).
+The Vec<Obj> enum table, the word arena, the 96MB fast-target table, and the
+Atom Arc are DELETED; refs are real tagged addresses in all three value
+models; the GC is a true flip-and-reuse semi-space driven by ONE generic
+TypeInfo scan (verify mode = poisoned evacuated space + armed precise-layout
+detector). The emitted call path reads header/meta/code straight off the
+closure object. All gates green: cargo test (default + jit), scheme
+(61/61 R7RS), clojure-stub (76-test oracle suite). Sweep rules + full design:
+docs/STAGE_D_MIGRATION.md. REMAINING: D5 (JIT inline tag tests, code-level
+dispatch ICs, inline field/aget, AllocWindow inline bump) + benchmarks.
 
 Decision (Jimmy): no enum object table, no Rust side-layers for data — a
 proper raw heap, modeled on `claude-experiments/gc-rust/crates/gcrust-rt`
