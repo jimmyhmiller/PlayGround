@@ -252,20 +252,24 @@
 ;; through further lazy layers), and cache it — this makes infinite seqs and lazy
 ;; map/filter/take possible.
 (defn lazy-seq? [x] (%num-eq (type-of x) 'LazySeq))
-(defn -lazy-seq [thunk] (record 'LazySeq (%cell thunk) (%cell false)))
+;; A LazySeq is ONE mutable record `(LazySeq thunk realized?)`: field 0 holds the
+;; thunk (then, once realized, the value), field 1 the realized flag. Realizing
+;; mutates it in place via `%lazy-realize!` — 1 allocation per lazy step instead
+;; of a record + two mutable `%cell` arrays (3).
+(defn -lazy-seq [thunk] (record 'LazySeq thunk false))
 ;; run a LazySeq's thunk ONCE, returning its raw (possibly still-lazy) value.
 (defn -sval [ls]
-  (if (%cell-ref (field ls 1) 0) (%cell-ref (field ls 0) 0) ((%cell-ref (field ls 0) 0))))
+  (if (field ls 1) (field ls 0) ((field ls 0))))
 ;; Realize a LazySeq. A thunk may return another LazySeq (e.g. `concat2` hands
 ;; back its tail when the first coll empties); walk that chain ITERATIVELY so a
 ;; deep `concat`/lazy chain resolves in O(1) stack, not O(depth) — matching
 ;; Clojure's LazySeq.seq() loop. Only the outer node caches the final seq.
 (defn -force [ls]
-  (if (%cell-ref (field ls 1) 0)
-      (%cell-ref (field ls 0) 0)
-      (let [v (loop [x ((%cell-ref (field ls 0) 0))]
+  (if (field ls 1)
+      (field ls 0)
+      (let [v (loop [x ((field ls 0))]
                 (if (lazy-seq? x) (recur (-sval x)) (seq x)))]
-        (do (%cell-set! (field ls 0) 0 v) (%cell-set! (field ls 1) 0 true) v))))
+        (%lazy-realize! ls v))))
 (defmacro lazy-seq (& body) (list '-lazy-seq (%cons 'fn (%cons (vector) body))))
 
 ;; ─────────────── marker-protocol registry ───────────────

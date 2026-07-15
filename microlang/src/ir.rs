@@ -293,6 +293,12 @@ pub enum Prim {
     PvConj,
     PvNth,
     PvAssoc,
+    /// `(%lazy-realize! ls v)` — cache a LazySeq's forced value IN PLACE: set the
+    /// `'LazySeq` record's field 0 = `v` and field 1 = `true`, then return `v`. Lets
+    /// a LazySeq be one record (mutated on realize) instead of a record + two mutable
+    /// `%cell` arrays — 1 allocation per lazy step instead of 3. GC-safe (the heap is
+    /// non-relocating; the mutation happens between safepoints).
+    LazyRealize,
     /// `(%all-fixnum? a b ...)` — true iff EVERY argument is an immediate fixnum.
     /// The guard the specializer places at a lambda's entry; when it holds, the
     /// body's `Fx*` ops are valid. On the JIT it lowers to a single combined

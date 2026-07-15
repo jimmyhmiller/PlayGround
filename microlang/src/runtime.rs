@@ -970,6 +970,18 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Int(i) = self.decode(args[1]) else { panic!("pv-assoc: index must be an int"); };
                 self.pv_assoc(args[0], i as i64, args[2])
             }
+            // Cache a LazySeq's forced value in place: field 0 = v, field 1 = true.
+            Prim::LazyRealize => {
+                let Val::Ref(id) = self.decode(args[0]) else { panic!("lazy-realize!: not a record"); };
+                let tru = self.encode(Val::Bool(true));
+                if let Obj::Record { fields, .. } = &mut self.heap_mut()[id as usize] {
+                    fields[0] = args[1];
+                    fields[1] = tru;
+                } else {
+                    panic!("lazy-realize!: not a record");
+                }
+                args[1]
+            }
             Prim::ArrPush => {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("apush: not an array");
