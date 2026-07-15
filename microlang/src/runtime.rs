@@ -1532,6 +1532,13 @@ impl<M: ValueModel> Runtime<M> {
                 self.encode(Val::Bool(is_big))
             }
             Prim::ToLong => {
+                // `(int \a)` => 97: a char coerces to its code point, same as
+                // `(int c)` does in real Clojure.
+                if let Val::Ref(id) = self.decode(args[0]) {
+                    if let Obj::Char(c) = &self.heap()[id as usize] {
+                        return self.encode(Val::Int(*c as i128));
+                    }
+                }
                 if let Some((n, d)) = self.as_ratio(args[0]) {
                     return self.alloc_bigint(BigInt::from_i128(n / d)); // truncates toward zero
                 }

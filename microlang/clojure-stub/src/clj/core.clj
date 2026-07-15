@@ -435,14 +435,31 @@
   (let [cs (%str->chars s)
         e (if (nil? end) (%str-len s) (first end))]
     (apply str (take (- e start) (drop start cs)))))
+;; Sequential-but-not-indexed `nth` with a default: walk up to `i` elements
+;; and stop the moment the seq runs out — NEVER compute `(count s)` first.
+;; `nth`'s generic default-bounds-check below (`(not (< i (count c)))`) is
+;; fine for O(1)-counted things (vectors) but is a correctness-preserving,
+;; PERFORMANCE trap for a lazy/chunked seq: `(nth lazy-seq 0 nil)` inside a
+;; DESTRUCTURING pattern (`[[a b] & r]` etc — see `destructure` in lib.rs,
+;; every fixed position compiles to `(nth t idx nil)`) called `(count c)` on
+;; every single call, and `count` on a lazy seq is O(remaining length) — so a
+;; loop that destructures once per element and shrinks the seq by one each
+;; time was O(N) `count` calls of average O(N/2) each: O(N^2) overall.
+(defn -nth-seq-or [s i d]
+  (let [s (seq s)]
+    (cond (nil? s) (if (seq d) (first d) (throw (str "Index out of bounds: " i)))
+          (%num-eq i 0) (%first s)
+          true (-nth-seq-or (%rest s) (%sub i 1) d))))
 (defn nth [c i & d]
   (cond
     (string? c) (if (and (>= i 0) (< i (%str-len c)))
                   (nth-seq (%str->chars c) i)
                   (if (seq d) (first d) (throw (str "String index out of bounds: " i))))
-    (and (seq d) (or (neg? i) (not (< i (count c))))) (first d)
     ;; lists / lazy-seqs aren't IIndexed — nth is a linear walk (Clojure semantics).
-    (seq? c) (nth-seq c i)
+    (seq? c) (if (neg? i)
+                  (if (seq d) (first d) (throw (str "Index out of bounds: " i)))
+                  (-nth-seq-or c i d))
+    (and (seq d) (or (neg? i) (not (< i (count c))))) (first d)
     :else (-nth c i)))
 (defn conj
   ([] [])
