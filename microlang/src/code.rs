@@ -182,7 +182,13 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
             // GC (next phase) must also scan future slots.
             Ir::Prim(Prim::Spawn, args) => {
                 let f = top.eval_ir(top, rt, &args[0], locals);
-                let child = rt.thread_handle();
+                let mut child = rt.thread_handle();
+                // Root the thunk in the CHILD's shadow before the thread exists
+                // (Stage E): no collection can COMPLETE until the worker parks,
+                // and parking publishes (and rewrites) this slot — so the
+                // worker's re-read always sees the thunk's current address. A
+                // bare moved `u64` would go stale under pressure GC.
+                let f_slot = child.push_root(f);
                 let slot = std::sync::Arc::new(std::sync::Mutex::new(
                     crate::value::FutureSlot { handle: None, result: None },
                 ));
@@ -191,6 +197,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 let handle = std::thread::spawn(move || {
                     let cs = TreeWalk;
                     let mut crt = child;
+                    let f = crt.root_get(f_slot);
                     let r = cs.invoke(&cs, &mut crt, f, &[]);
                     // Publish the result into the shared slot BEFORE the worker's
                     // handle drops (deregistering it), so it is GC-rooted via the

@@ -96,9 +96,12 @@ impl<M: ValueModel> Runtime<M> {
             .compare_exchange(false, true, AcqRel, Acquire)
             .is_err()
         {
-            self.park(live_env);
+            self.park_with_kont(live_env, live_kont);
             return;
         }
+        // Mirror the request into the one-byte poll word the JIT polls and
+        // every tier's safepoint checks first (Stage E).
+        shared.heap.poll.fetch_or(crate::heap::POLL_REQUESTED, Release);
         // We are the sole collector. Wait until every other mutator is parked
         // (published its roots, stopped touching the heap).
         loop {
@@ -115,6 +118,7 @@ impl<M: ValueModel> Runtime<M> {
         }
         self.collect_inner(live_env, live_kont);
         // Release the world; parked threads take their rewritten roots back.
+        shared.heap.poll.fetch_and(!crate::heap::POLL_REQUESTED, Release);
         shared.gc_requested.store(false, Release);
     }
 
@@ -132,10 +136,12 @@ impl<M: ValueModel> Runtime<M> {
         if let Some(r) = slot.lock().unwrap().result {
             return r;
         }
-        // Publish roots + the whole env chain and mark parked before blocking.
+        // Publish roots + the whole env chain (and any native frames below us,
+        // Stage E) and mark parked before blocking.
         *self.me.roots.lock().unwrap() = std::mem::take(&mut self.shadow);
         *self.me.envs.lock().unwrap() = self.published_envs(locals);
         *self.me.dyn_roots.lock().unwrap() = std::mem::take(&mut self.dyn_stack);
+        *self.me.native_roots.lock().unwrap() = crate::runtime::native_roots_now();
         self.me.parked.store(true, Release);
         let handle = slot.lock().unwrap().handle.take();
         if let Some(h) = handle {
@@ -149,6 +155,7 @@ impl<M: ValueModel> Runtime<M> {
         self.shadow = std::mem::take(&mut *self.me.roots.lock().unwrap());
         self.dyn_stack = std::mem::take(&mut *self.me.dyn_roots.lock().unwrap());
         self.me.envs.lock().unwrap().clear();
+        self.me.native_roots.lock().unwrap().clear();
         self.me.parked.store(false, Release);
         let r = slot.lock().unwrap().result.expect("future produced no result");
         r
@@ -162,14 +169,46 @@ impl<M: ValueModel> Runtime<M> {
         envs
     }
 
-    /// Poll a safepoint: if a collection is pending, park until it finishes. Call
-    /// this where the mutator holds no heap borrow across it (function entry,
-    /// alloc). `locals` is published so the collector can trace this thread's env.
+    /// Poll a safepoint: one cheap poll-word load; on REQUESTED park until the
+    /// sibling's collection finishes, on allocation PRESSURE (Stage E, when
+    /// enabled) run a collection ourselves — exactly what the explicit `(gc)`
+    /// prim does. Call this where the mutator holds no heap borrow and no
+    /// unrooted value bits across it (function entry, call boundaries).
+    /// `locals` is published so the collector can trace this thread's env.
     #[inline]
     pub fn safepoint(&mut self, locals: &Locals) {
         use std::sync::atomic::Ordering::Acquire;
-        if self.shared.gc_requested.load(Acquire) {
-            self.park(locals);
+        let poll = self.shared.heap.poll.load(Acquire);
+        if poll == 0 {
+            return;
+        }
+        self.safepoint_slow(poll, locals, None);
+    }
+
+    /// The CEK step loop's safepoint: same poll, but the live continuation
+    /// rides along — it is rooted by a self-triggered collection and published
+    /// when parking (its `done` cells hold value bits the collector must see).
+    #[inline]
+    pub fn safepoint_cek(&mut self, locals: &Locals, kont: &Arc<Kont>) {
+        use std::sync::atomic::Ordering::Acquire;
+        let poll = self.shared.heap.poll.load(Acquire);
+        if poll == 0 {
+            return;
+        }
+        self.safepoint_slow(poll, locals, Some(kont));
+    }
+
+    #[cold]
+    fn safepoint_slow(&mut self, poll: u8, locals: &Locals, kont: Option<&Arc<Kont>>) {
+        if poll & crate::heap::POLL_REQUESTED != 0 {
+            self.park_with_kont(locals, kont);
+            return;
+        }
+        // PRESSURE: allocation crossed the soft threshold since the last
+        // collection. Collect here (this thread claims the collector role; a
+        // race with a sibling degenerates into parking for theirs).
+        if self.shared.pressure_gc {
+            self.stw_collect(locals, kont);
         }
     }
 
@@ -178,10 +217,20 @@ impl<M: ValueModel> Runtime<M> {
     /// in place (shared `Arc` frames), so `locals` sees the new addresses without
     /// a copy-back.
     pub fn park(&mut self, locals: &Locals) {
+        self.park_with_kont(locals, None);
+    }
+
+    pub(crate) fn park_with_kont(&mut self, locals: &Locals, kont: Option<&Arc<Kont>>) {
         use std::sync::atomic::Ordering::{Acquire, Release};
         *self.me.roots.lock().unwrap() = std::mem::take(&mut self.shadow);
         *self.me.envs.lock().unwrap() = self.published_envs(locals);
         *self.me.dyn_roots.lock().unwrap() = std::mem::take(&mut self.dyn_stack);
+        *self.me.kont.lock().unwrap() = kont.cloned();
+        // Stage E: publish this thread's NATIVE roots — the JIT stack-map spill
+        // slots of every native frame below us on the stack (empty without a
+        // JIT). The collector rewrites the slots in place; the emitted code
+        // reloads them when its call resumes.
+        *self.me.native_roots.lock().unwrap() = crate::runtime::native_roots_now();
         self.me.parked.store(true, Release);
         while self.shared.gc_requested.load(Acquire) {
             std::thread::yield_now();
@@ -189,6 +238,8 @@ impl<M: ValueModel> Runtime<M> {
         self.shadow = std::mem::take(&mut *self.me.roots.lock().unwrap());
         self.dyn_stack = std::mem::take(&mut *self.me.dyn_roots.lock().unwrap());
         self.me.envs.lock().unwrap().clear();
+        *self.me.kont.lock().unwrap() = None;
+        self.me.native_roots.lock().unwrap().clear();
         self.me.parked.store(false, Release);
     }
 
@@ -220,7 +271,9 @@ impl<M: ValueModel> Runtime<M> {
                 for (_, v) in dyn_stack.iter_mut() {
                     visit(v as *mut u64);
                 }
-                // 3. Every OTHER (parked) thread's PUBLISHED roots.
+                // 3. Every OTHER (parked) thread's PUBLISHED roots — including
+                //    its live CEK continuation (if it parked from the step
+                //    loop) and its NATIVE stack-map slots (Stage E).
                 {
                     let ms = shared.mutators.lock().unwrap();
                     for m in ms.iter() {
@@ -236,7 +289,19 @@ impl<M: ValueModel> Runtime<M> {
                         for env in m.envs.lock().unwrap().iter() {
                             visit_env(env, visit);
                         }
+                        if let Some(k) = m.kont.lock().unwrap().as_ref() {
+                            visit_kont(k, visit);
+                        }
+                        for &slot in m.native_roots.lock().unwrap().iter() {
+                            visit(slot as *mut u64);
+                        }
                     }
+                }
+                // 3b. THIS (collector) thread's own native frames: a JIT poll
+                //     or shim triggered this collection, so our stack below
+                //     the trigger point holds live stack-map slots too.
+                for slot in crate::runtime::native_roots_now() {
+                    visit(slot as *mut u64);
                 }
                 // 4. Constant pool.
                 for c in (*shared.consts.get()).iter_mut() {

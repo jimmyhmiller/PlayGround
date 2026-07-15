@@ -84,11 +84,30 @@ impl<M: ValueModel> CodeSpace<M> for CekMachine {
 fn run<M: ValueModel>(rt: &mut Runtime<M>, mut step: Step) -> u64 {
     loop {
         step = match step {
-            Step::Eval(ir, env, k) => eval_step::<M>(rt, ir, env, k),
+            // The CEK's safepoint (Stage E): each step polls (one load when
+            // idle); on pressure it collects with the live env AND the live
+            // continuation rooted (collect_cek), on a sibling's request it
+            // parks with both published. `Ir` carries no heap pointers, so
+            // the step payloads themselves need no rooting.
+            Step::Eval(ir, env, k) => {
+                rt.safepoint_cek(&env, &k);
+                eval_step::<M>(rt, ir, env, k)
+            }
             Step::Apply(v, k) => {
                 if matches!(&*k, Kont::Done) {
                     return v;
                 }
+                // `v` is a bare value word: root it across a possible
+                // park/collection at this step's safepoint, then re-read.
+                let v = if rt.heap().poll.load(std::sync::atomic::Ordering::Acquire) != 0 {
+                    let s = rt.push_root(v);
+                    rt.safepoint_cek(&None, &k);
+                    let v = rt.root_get(s);
+                    rt.pop_root();
+                    v
+                } else {
+                    v
+                };
                 apply_step::<M>(rt, v, &k)
             }
         };

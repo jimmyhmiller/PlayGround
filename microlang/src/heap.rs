@@ -38,7 +38,7 @@
 //! └──────────────────────┘
 //! ```
 
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 // ─── Header ──────────────────────────────────────────────────────────────
 
@@ -495,6 +495,14 @@ impl AllocWindow {
 /// runtime's GC is explicit/safepoint-driven, unchanged from before).
 const DEFAULT_SPACE_MB: usize = 4096;
 
+/// Bits of the ONE cheap poll word (`Heap::poll`) every tier checks at its
+/// safepoints and the JIT polls from emitted code (Stage E). Bit 0 mirrors the
+/// runtime's `gc_requested` (a sibling wants to collect: park). Bit 1 is
+/// allocation PRESSURE: the bump cursor crossed the soft threshold, so the
+/// next safepoint should trigger a collection itself.
+pub const POLL_REQUESTED: u8 = 1;
+pub const POLL_PRESSURE: u8 = 2;
+
 /// The Stage-D heap: two equal bump spaces, explicit Cheney evacuation, flip
 /// and reuse. Shared across mutator threads (allocation is an atomic bump);
 /// `collect` must run under the runtime's existing STW discipline (all other
@@ -510,6 +518,18 @@ pub struct Heap {
     pub last_live_bytes: AtomicUsize,
     /// The JIT's inline-allocation mirror (D5); re-pointed at every flip.
     pub window: AllocWindow,
+    /// The safepoint poll word (`POLL_*` bits). Allocation sets PRESSURE when
+    /// it crosses `soft_limit`; the STW rendezvous mirrors REQUESTED here so
+    /// one byte answers "should this safepoint do anything".
+    pub poll: AtomicU8,
+    /// Soft trigger in bytes (`MICROLANG_GC_TRIGGER_PCT` of a space, default
+    /// 50%). Atomic so tests can lower it on a live heap. Allocation NEVER
+    /// collects and never fails before the hard wall — crossing this only
+    /// raises the pressure bit for the next safepoint.
+    soft_limit: AtomicUsize,
+    /// gc-stress (`MICROLANG_GC_STRESS=1`): the pressure bit is permanently
+    /// set, so every safepoint collects. The bug hammer.
+    stress: bool,
 }
 
 fn verify_armed_default() -> bool {
@@ -529,6 +549,12 @@ impl Heap {
     }
 
     pub fn with_space_size(bytes: usize) -> Self {
+        let pct = std::env::var("MICROLANG_GC_TRIGGER_PCT")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|p| (1..=100).contains(p))
+            .unwrap_or(50);
+        let stress = std::env::var("MICROLANG_GC_STRESS").is_ok_and(|v| v != "0" && !v.is_empty());
         // The window stays EMPTY (limit 0 = closed, every inline allocation
         // takes the slow path) until `arm_window` — the cursor mirror is a
         // pointer INTO this struct's inline spaces, so arming here would
@@ -540,6 +566,9 @@ impl Heap {
             collections: AtomicU64::new(0),
             last_live_bytes: AtomicUsize::new(0),
             window: AllocWindow::empty(),
+            poll: AtomicU8::new(if stress { POLL_PRESSURE } else { 0 }),
+            soft_limit: AtomicUsize::new(bytes / 100 * pct),
+            stress,
         }
     }
 
@@ -548,7 +577,15 @@ impl Heap {
     /// the window's cursor pointer is only stable from then on. (Collections
     /// re-point it at every flip.)
     pub fn arm_window(&self) {
-        self.window.point_at(self.from_space(), self.from_space().size());
+        self.window.point_at(self.from_space(), self.window_limit());
+    }
+
+    /// The window's allocation limit: the SOFT trigger, not the space size —
+    /// an inline allocation crossing it falls to the out-of-line shim, which
+    /// raises the pressure bit (Stage E). That is how JIT-allocated garbage
+    /// drives collections without any extra emitted code per allocation.
+    fn window_limit(&self) -> usize {
+        self.soft_limit.load(Ordering::Relaxed).min(self.from_space().size())
     }
 
     #[inline(always)]
@@ -589,17 +626,33 @@ impl Heap {
             info.name
         );
         let size = info.allocation_size(aux);
-        let p = self.from_space().alloc_raw(size);
+        let space = self.from_space();
+        let p = space.alloc_raw(size);
         if p.is_null() {
             panic!(
-                "heap space exhausted ({} MiB used of {} MiB): explicit-GC-only runtime — \
-                 collect more often or raise MICROLANG_HEAP_MB",
-                self.from_space().used() >> 20,
-                self.from_space().size() >> 20
+                "heap space exhausted ({} MiB used of {} MiB): raise MICROLANG_HEAP_MB \
+                 (allocation never collects; collections run at safepoints)",
+                space.used() >> 20,
+                space.size() >> 20
             );
+        }
+        // Allocation-driven collection (Stage E): crossing the soft threshold
+        // raises the PRESSURE bit; the NEXT safepoint collects. Never here.
+        if space.used() > self.soft_limit.load(Ordering::Relaxed)
+            && self.poll.load(Ordering::Relaxed) & POLL_PRESSURE == 0
+        {
+            self.poll.fetch_or(POLL_PRESSURE, Ordering::Relaxed);
         }
         unsafe { *(p as *mut u64) = make_header(info.type_id, 0, aux) };
         Gc(p)
+    }
+
+    /// Lower/raise the soft pressure trigger (tests drive collections without
+    /// filling a multi-GiB space). Bytes, per space. Re-gates the inline
+    /// allocation window at the new trigger too.
+    pub fn set_trigger_bytes(&self, bytes: usize) {
+        self.soft_limit.store(bytes, Ordering::Relaxed);
+        self.window.limit.store(self.window_limit(), Ordering::Release);
     }
 
     /// Cheney evacuation. `roots` must enumerate EVERY live root slot (the
@@ -654,7 +707,14 @@ impl Heap {
         }
         self.active.store(1 - self.active.load(Ordering::Acquire), Ordering::Release);
         self.collections.fetch_add(1, Ordering::Relaxed);
-        self.window.point_at(self.from_space(), self.from_space().size());
+        self.window.point_at(self.from_space(), self.window_limit());
+        // Pressure is spent: this collection was the response. It re-arms when
+        // an allocation crosses the soft threshold again (immediately, if the
+        // live set alone exceeds it — the heap is genuinely tight then). In
+        // stress mode the bit stays up so EVERY safepoint keeps collecting.
+        if !self.stress {
+            self.poll.fetch_and(!POLL_PRESSURE, Ordering::Relaxed);
+        }
     }
 
     /// Forward one traced slot: if it holds a pointer into from-space, copy

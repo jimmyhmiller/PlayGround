@@ -140,11 +140,17 @@ pre-Stage-D table; same-file ratios are the comparable number.)
    register-arity apply fast path for small known lists.
 4. **Param-value specialization** — transducer residue (transduce ~24×):
    per-element calls through PARAMETER-held closures + reduced? checks.
-5. **GC stack maps** — still explicit-`(gc)`-only; allocation-triggered GC
-   needs native-frame root maps (Cranelift user stack maps exist in 0.133).
-   (Also retires the carried caps_base/SSA-staleness gap.)
 
-(The old #1 — "full header arena" — IS Stage D and is done.)
+(The old #1 — "full header arena" — IS Stage D and is done. The old #5 —
+"GC stack maps" — IS Stage E and is DONE, 2026-07-15: real Cranelift user
+stack maps + an FP-chain frame walker + safepoint polls at body entries and
+self-tail back-edges; collections are allocation-pressure-driven by default
+(`MICROLANG_PRESSURE_GC=0` opts out, `MICROLANG_GC_STRESS=1` collects at
+every safepoint). This ALSO retired the carried caps_base/SSA-staleness gap
+— capture reads re-derive from the stack-mapped self bits — and the
+"concurrent `(gc)` vs a native loop never parks" hole. Measured cost: the
+back-edge poll puts raw loop arithmetic at ~4ns/iter (was ~2); calls,
+captures unchanged; pipelines +5-10%. See docs/STAGE_E_SAFEPOINT_GC.md.)
 
 ## Why (measured, 2026-07)
 

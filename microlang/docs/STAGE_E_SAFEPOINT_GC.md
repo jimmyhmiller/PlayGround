@@ -5,6 +5,24 @@ frames get real root maps; collections are driven by allocation pressure.
 This retires EXEC_MODEL_V2 gap "GC stack maps" AND the carried
 caps_base/SSA-staleness gap for good.
 
+STATUS (2026-07-15): **SHIPPED, E1–E4.** Pressure GC is ON by default
+(`MICROLANG_PRESSURE_GC=0` opts out; `MICROLANG_GC_STRESS=1` collects at
+every safepoint). The SP arithmetic was pinned empirically on arm64:
+`slot = fp − active_size + entry_off` (a live SSA value and a live capture
+both survived 9 mid-loop moving collections under the verify heap before the
+formula was trusted). Notes vs the plan: the safepoint shim reads NO ctx
+fields beyond `rc` (a fast-call child ctx is a minimal 3-store; its `cur` is
+uninitialized memory), memory-mode frames ride the dynamic env chain
+(`run_ctx_entry` pushes them), the trampoline's bounce loop polls too (the
+back-edge of mutual/variadic tail loops), spawn roots the thunk in the
+child's shadow before the thread exists, and the AllocWindow's limit sits at
+the SOFT trigger so inline allocations drive pressure through the slow shim.
+Gates: all four suites + the gc-stress battery
+(`cargo test --features jit --test gc_stress -- --ignored`) green.
+Measured cost: back-edge poll puts raw loop arithmetic at ~4ns/iter (was
+~2); calls/captures unchanged (4/5 ns); reduce+map ~56ns/el (was 51),
+vecbuild ~157ns/el (was 150).
+
 ## The key insight that makes this tractable
 
 Collections ALREADY only happen with every thread at a safepoint (the STW

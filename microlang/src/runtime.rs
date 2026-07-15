@@ -152,7 +152,50 @@ pub(crate) struct MutatorState {
     /// moving collector traces (and rewrites) the bound values. `(Sym, value)`;
     /// `Sym == u32::MAX` is a `binding`-scope delimiter (see `DYN_MARK`).
     pub(crate) dyn_roots: Mutex<Vec<(Sym, u64)>>,
+    /// The live CEK continuation, when this thread parked from the CEK step
+    /// loop — its `done` cells and captured frames are roots (Stage E: the
+    /// CEK now parks/collects at its step safepoint, so the kont must ride
+    /// along like the env chain does).
+    pub(crate) kont: Mutex<Option<Arc<crate::cek::Kont>>>,
+    /// NATIVE root slot addresses (Stage E): the addresses of this thread's
+    /// JIT stack-map spill slots, published by the frame walker when the
+    /// thread parks inside native frames. The collector rewrites them in
+    /// place; emitted code reloads them after its call returns.
+    pub(crate) native_roots: Mutex<Vec<usize>>,
     pub(crate) parked: std::sync::atomic::AtomicBool,
+}
+
+/// The installed NATIVE frame walker (Stage E): a `fn() -> Vec<usize>` (stored
+/// as a usize; 0 = none) that walks the CURRENT thread's frame-pointer chain,
+/// resolves return addresses against the JIT's code-map registry, and returns
+/// the addresses of every live stack-map slot. Installed once by the JIT
+/// backend; the runtime calls it at every park and at collection time (for the
+/// collector's own frames). Without a JIT there are no native frames and the
+/// hook stays 0.
+pub static NATIVE_ROOT_WALKER: AtomicU64 = AtomicU64::new(0);
+
+/// Is allocation-driven collection on? Stage E4 flipped the default: ON.
+/// `MICROLANG_PRESSURE_GC=0` restores the explicit-`(gc)`-only behavior.
+fn pressure_gc_default() -> bool {
+    // gc-stress is a pressure mode: it needs the response enabled too.
+    if std::env::var("MICROLANG_GC_STRESS").is_ok_and(|v| v != "0" && !v.is_empty()) {
+        return true;
+    }
+    match std::env::var("MICROLANG_PRESSURE_GC") {
+        Ok(v) => v != "0" && !v.is_empty(),
+        Err(_) => true,
+    }
+}
+
+/// Run the installed native walker (empty when none is installed).
+pub(crate) fn native_roots_now() -> Vec<usize> {
+    let f = NATIVE_ROOT_WALKER.load(Ordering::Acquire);
+    if f == 0 {
+        Vec::new()
+    } else {
+        let f: fn() -> Vec<usize> = unsafe { std::mem::transmute::<usize, fn() -> Vec<usize>>(f as usize) };
+        f()
+    }
 }
 
 /// Delimiter sentinel on the dynamic-binding stack (never a real interned `Sym`,
@@ -261,6 +304,11 @@ pub struct Shared<M: ValueModel> {
     /// Set when a thread requests a stop-the-world collection; every other
     /// mutator parks at its next safepoint until it clears.
     pub(crate) gc_requested: std::sync::atomic::AtomicBool,
+    /// Allocation-driven collection enabled (Stage E)? Default ON;
+    /// `MICROLANG_PRESSURE_GC=0` opts out. When off, only the explicit `(gc)`
+    /// prim collects (the pre-Stage-E behavior); parking at safepoints for a
+    /// sibling's collection is always on.
+    pub(crate) pressure_gc: bool,
     /// Every live mutator handle, so the collector can find + rewrite all roots.
     pub(crate) mutators: Mutex<Vec<Arc<MutatorState>>>,
     /// Frontend var/namespace registry (metadata only — `Sym`s, flag bits, and
@@ -307,6 +355,8 @@ fn register_mutator<M: ValueModel>(shared: &Arc<Shared<M>>) -> Arc<MutatorState>
         roots: Mutex::new(Vec::new()),
         envs: Mutex::new(Vec::new()),
         dyn_roots: Mutex::new(Vec::new()),
+        kont: Mutex::new(None),
+        native_roots: Mutex::new(Vec::new()),
         parked: std::sync::atomic::AtomicBool::new(false),
     });
     shared.mutators.lock().unwrap().push(me.clone());
@@ -413,6 +463,7 @@ impl<M: ValueModel> Runtime<M> {
             tcp: Mutex::new(Vec::new()),
             escape_tags: AtomicU64::new(0),
             gc_requested: std::sync::atomic::AtomicBool::new(false),
+            pressure_gc: pressure_gc_default(),
             mutators: Mutex::new(Vec::new()),
             var_flags: Mutex::new(HashMap::new()),
             ns_vars: Mutex::new(HashMap::new()),

@@ -132,6 +132,9 @@ pub struct JitCtx<'a, M: ValueModel> {
     /// Address of `Shared.dispatch_version` (bumped per `register_method`) —
     /// the other epoch half, so a redefinition invalidates immediately.
     dispver_ptr: Cell<*const u64>,
+    /// Address of the heap's one-byte safepoint poll word (`Heap::poll`) —
+    /// emitted code polls it at body entry and loop back-edges (Stage E).
+    poll_ptr: Cell<*const u8>,
     /// Is the native fast call path enabled? True only when this backend is the
     /// OUTERMOST one (`top == self`). When wrapped (e.g. by `Traced`, which must
     /// observe every call, or a future router), this is 0 and every call takes the
@@ -141,13 +144,10 @@ pub struct JitCtx<'a, M: ValueModel> {
     /// call to THIS same closure becomes an in-place native loop (redefine the
     /// SSA loop variables, branch back) — O(1) stack, no FFI. A tail call to
     /// anything else falls back to the shim + trampoline, so mutual tail
-    /// recursion keeps full TCO.
+    /// recursion keeps full TCO. Emitted bodies read this ONCE at entry into a
+    /// stack-mapped SSA variable; capture reads derive the capture base from
+    /// it per read (Stage E — no cached derived pointer can go stale).
     self_closure: Cell<u64>,
-    /// Base pointer of the RUNNING closure's inline capture array — Stage D:
-    /// `addr(self_closure) + CLOSURE_CAPS_OFF`, or null when nothing is running.
-    /// `Capture(i)` compiles to `*(caps_base + i)`; captures live IN the closure
-    /// object now, so this is a plain derived pointer, no separate `Caps` array.
-    caps_base: Cell<*const u64>,
     /// The activation frame, as an `Arc` handle — only for MEMORY-mode bodies
     /// (those containing `try`/`(gc)`/`%await`, whose locals must be GC roots /
     /// interpreter-visible). SSA-mode bodies never touch it.
@@ -425,7 +425,6 @@ fn shim_fast_invoke<M: ValueModel>(
     if code.is_null() {
         return None;
     }
-    let caps_base = unsafe { g.0.add(CLOSURE_CAPS_OFF) as *const u64 };
     // Minimal child context: everything shared rides through `rc`.
     let mut ctx = JitCtx {
         rc,
@@ -438,9 +437,9 @@ fn shim_fast_invoke<M: ValueModel>(
         alloc_window: Cell::new(std::ptr::null()),
         reloc_ptr: Cell::new(std::ptr::null()),
         dispver_ptr: Cell::new(std::ptr::null()),
+        poll_ptr: Cell::new(std::ptr::null()),
         direct: Cell::new(1),
         self_closure: Cell::new(callee),
-        caps_base: Cell::new(caps_base),
         cur: RefCell::new(None),
         jit: rcr.jit,
         tail_pending: Cell::new(false),
@@ -574,7 +573,13 @@ extern "C" fn shim_apply<M: ModelArithJit>(
 extern "C" fn shim_spawn<M: ModelArithJit>(ctx: *mut JitCtx<M>, thunk: u64) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
-    let child = rt.thread_handle();
+    let mut child = rt.thread_handle();
+    // Root the thunk in the CHILD's shadow stack before the thread exists
+    // (Stage E): a collection can fire before the worker's first safepoint
+    // only after the worker PARKS — and by then the rooted slot has been
+    // published and rewritten, so the re-read below always sees the current
+    // address. A bare moved `u64` would go stale.
+    let thunk_slot = child.push_root(thunk);
     let slot = std::sync::Arc::new(std::sync::Mutex::new(crate::value::FutureSlot {
         handle: None,
         result: None,
@@ -584,6 +589,7 @@ extern "C" fn shim_spawn<M: ModelArithJit>(ctx: *mut JitCtx<M>, thunk: u64) -> u
     let handle = std::thread::spawn(move || {
         let cs = JitCranelift::<M>::new();
         let mut crt = child;
+        let thunk = crt.root_get(thunk_slot);
         let r = cs.invoke(&cs, &mut crt, thunk, &[]);
         // Publish the result before the worker's handle drops (see TreeWalk Spawn).
         slot_worker.lock().unwrap().result = Some(r);
@@ -606,16 +612,35 @@ extern "C" fn shim_await<M: ValueModel>(ctx: *mut JitCtx<M>, fut: u64) -> u64 {
 
 /// `(gc)` — a modeled safepoint for the JIT tier. `ctx.cur` is the live frame
 /// chain; `collect` walks its whole parent chain (`update_env`), so every JIT
-/// local is a root and survives the move (its slot is rewritten in place). The
-/// only values NOT rooted are native-register temporaries mid-expression, but a
-/// `(gc)` statement has no live operands, so there are none. Concurrent `(gc)`
-/// calls rendezvous via `stw_collect` (losers park + participate).
+/// local is a root and survives the move (its slot is rewritten in place).
+/// Native-register temporaries in FRAMES BELOW us are covered by the stack
+/// maps + frame walker (Stage E). Concurrent `(gc)` calls rendezvous via
+/// `stw_collect` (losers park + participate).
 extern "C" fn shim_gc<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
     let locals = ctx.cur.borrow().clone();
     rt.collect(&locals);
     M::R::enc_nil()
+}
+
+/// The emitted POLL's cold path (Stage E): a body's entry or a self-loop
+/// back-edge saw a nonzero poll word. This is an ordinary call, so Cranelift
+/// spilled every live stack-mapped value around it — parking here (or
+/// collecting, on allocation pressure) walks those spill slots via the frame
+/// walker and the collector rewrites them in place; the body reloads them
+/// when this returns.
+///
+/// NO `ctx.cur` read here: a native fast call builds a MINIMAL 3-store child
+/// context whose other fields (including `cur`) are uninitialized stack
+/// memory. Fast bodies' roots live in the stack maps, and memory-mode bodies'
+/// frames ride the dynamic env chain (`run_ctx_entry` pushes them), so the
+/// safepoint needs no locals of its own.
+extern "C" fn shim_safepoint<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.safepoint(&None);
+    0
 }
 
 /// `(try body (catch e handler) (finally f))` — the body/catch/finally Ir nodes
@@ -922,6 +947,7 @@ struct Shims {
     spawn: FuncId,
     await_: FuncId,
     gc: FuncId,
+    safepoint: FuncId,
 }
 
 #[derive(Clone, Copy)]
@@ -944,6 +970,7 @@ struct ShimRefs {
     spawn: cranelift_codegen::ir::FuncRef,
     await_: cranelift_codegen::ir::FuncRef,
     gc: cranelift_codegen::ir::FuncRef,
+    safepoint: cranelift_codegen::ir::FuncRef,
 }
 
 /// A finished, runnable body.
@@ -1032,6 +1059,13 @@ pub trait ModelArithJit: ModelEmit {
     /// site then always takes the shim path); NanBox/HighBit do this today.
     fn emit_ref_addr(c: &mut Compiler, v: Value) -> (Value, Value);
 
+    /// Emit the raw heap ADDRESS of `v`, which the caller has already PROVEN
+    /// is a ref — a mask, no tag test. Unlike `emit_ref_addr` (whose opt-out
+    /// only disables native fast CALLS), every model implements this: capture
+    /// reads derive the running closure's capture base from its stack-mapped
+    /// bits on every model (Stage E).
+    fn emit_ref_addr_unchecked(c: &mut Compiler, v: Value) -> Value;
+
     /// May emitted code read, write, and ALLOCATE heap objects inline under
     /// this model (D5)? Requires a real `emit_ref_addr`, a working
     /// `emit_tag`/`emit_untag` (immediate ints), and `emit_enc_ref`. LowBit
@@ -1070,6 +1104,9 @@ impl ModelArithJit for crate::model::LowBitModel {
         let addr = c.fb.ins().band_imm(v, !0b111i64);
         (is_ref, addr)
     }
+    fn emit_ref_addr_unchecked(c: &mut Compiler, v: Value) -> Value {
+        c.fb.ins().band_imm(v, !0b111i64)
+    }
 
     const INLINE_OBJECTS: bool = true;
     fn emit_enc_ref(c: &mut Compiler, addr: Value) -> Value {
@@ -1099,6 +1136,10 @@ impl ModelArithJit for crate::model::HighBitModel {
         let z = c.fb.ins().iconst(I64, 0);
         (f, z)
     }
+    fn emit_ref_addr_unchecked(c: &mut Compiler, v: Value) -> Value {
+        // HighBit ref: address in the low 61 bits (matches `HighBit::as_ref`).
+        c.fb.ins().band_imm(v, (1i64 << 61) - 1)
+    }
 }
 
 impl ModelArithJit for crate::model::NanBoxModel {
@@ -1117,6 +1158,10 @@ impl ModelArithJit for crate::model::NanBoxModel {
         let f = c.fb.ins().iconst(cranelift_codegen::ir::types::I8, 0);
         let z = c.fb.ins().iconst(I64, 0);
         (f, z)
+    }
+    fn emit_ref_addr_unchecked(c: &mut Compiler, v: Value) -> Value {
+        // NaN-box ref: address in the 47-bit payload (matches `NanBox::as_ref`).
+        c.fb.ins().band_imm(v, (1i64 << 47) - 1)
     }
 }
 
@@ -1196,6 +1241,115 @@ fn dispatch_epoch(reloc: u64, ver: u64) -> u64 {
     reloc.wrapping_mul(DISPATCH_EPOCH_MIX) ^ ver
 }
 const DISPATCH_EPOCH_MIX: u64 = 0x9E37_79B9_7F4A_7C15;
+
+// ─────────────────────────────────────────────────────────────────────────
+// Stage E: the native STACK-MAP registry + frame walker.
+//
+// Every compiled body registers its Cranelift user stack maps here (process-
+// global — JIT code is never freed, so the ranges stay valid for the process
+// lifetime, across every backend instance and worker thread). At park time
+// the walker runs on the CURRENT thread: it follows the frame-pointer chain
+// (preserve_frame_pointers is set; Rust keeps FP on the supported targets),
+// resolves each return address against the registry, and yields the address
+// of every live stack-map spill slot so the collector can rewrite the tagged
+// values in place — Cranelift's emitted code reloads them after its call
+// resumes, which is exactly the moving-GC contract of
+// `declare_value_needs_stack_map`.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// One safepoint (= call site) of a compiled body: the return address as a
+/// code offset, the frame's active size (SP-to-FP distance in bytes at that
+/// PC), and the SP-relative byte offsets of the live root slots.
+struct SiteMap {
+    ret_off: u32,
+    active_size: u32,
+    slots: Box<[u32]>,
+}
+
+/// One compiled body's code range + its safepoint sites (sorted by `ret_off`,
+/// which Cranelift guarantees on emission).
+struct CodeMap {
+    start: usize,
+    end: usize,
+    sites: Vec<SiteMap>,
+}
+
+/// All compiled bodies, sorted by start address (disjoint ranges — the JIT
+/// memory is append-only).
+static CODE_MAPS: std::sync::RwLock<Vec<CodeMap>> = std::sync::RwLock::new(Vec::new());
+
+fn register_code_map(start: usize, size: usize, sites: Vec<SiteMap>) {
+    if sites.is_empty() {
+        return; // nothing to resolve at any PC in this body
+    }
+    let mut maps = CODE_MAPS.write().unwrap();
+    let at = maps.partition_point(|m| m.start < start);
+    maps.insert(at, CodeMap { start, end: start + size, sites });
+}
+
+/// The current frame pointer — the anchor of the walk. Supported targets keep
+/// the FP chain by ABI (aarch64) or rustc default (x86_64 frame pointers).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn current_fp() -> usize {
+    let fp: usize;
+    unsafe { core::arch::asm!("mov {}, x29", out(reg) fp, options(nostack, nomem)) };
+    fp
+}
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn current_fp() -> usize {
+    let fp: usize;
+    unsafe { core::arch::asm!("mov {}, rbp", out(reg) fp, options(nostack, nomem)) };
+    fp
+}
+
+/// Walk the CURRENT thread's frame-pointer chain and collect the addresses of
+/// every live JIT stack-map slot (installed as `runtime::NATIVE_ROOT_WALKER`).
+///
+/// Chain shape (identical on aarch64 and x86_64): the FP register points at a
+/// saved `(caller_fp, return_address)` pair; the return address identifies the
+/// CALL SITE in the caller — precisely the key Cranelift's user stack maps are
+/// recorded under — and the caller's frame pointer value gives that frame's
+/// FP. A JIT frame's SP at the call is `fp - active_size` (pinned empirically:
+/// the aarch64 prologue is `stp fp, lr; mov fp, sp; sub sp, #active`, and
+/// `active_size == sp_to_fp` in Cranelift's FrameLayout), so each root slot
+/// lives at `fp - active_size + slot_off`. Rust frames in between simply fail
+/// to resolve and are skipped; the chain ends at the thread's base (fp 0) or
+/// on any non-ascending/misaligned link.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn walk_native_roots() -> Vec<usize> {
+    let maps = CODE_MAPS.read().unwrap();
+    if maps.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut fp = current_fp();
+    let mut hops = 0usize;
+    while fp != 0 && fp & 7 == 0 && hops < (1 << 20) {
+        let caller_fp = unsafe { *(fp as *const usize) };
+        let ra = unsafe { *((fp + 8) as *const usize) };
+        let i = maps.partition_point(|m| m.end <= ra);
+        if let Some(m) = maps.get(i) {
+            if ra >= m.start {
+                let off = (ra - m.start) as u32;
+                if let Ok(s) = m.sites.binary_search_by_key(&off, |s| s.ret_off) {
+                    let site = &m.sites[s];
+                    let sp = caller_fp.wrapping_sub(site.active_size as usize);
+                    for &slot in site.slots.iter() {
+                        out.push(sp + slot as usize);
+                    }
+                }
+            }
+        }
+        if caller_fp <= fp {
+            break; // the chain must ascend (stack grows down)
+        }
+        fp = caller_fp;
+        hops += 1;
+    }
+    out
+}
 
 /// Most args that ride in a register-arg entry signature. Bodies with more
 /// params (rare) use the ctx-entry + frame-loads prologue instead.
@@ -1283,6 +1437,21 @@ fn call_ic_way(callee: u64) -> usize {
 
 impl<M: ModelArithJit> JitCranelift<M> {
     pub fn new() -> Self {
+        // Stage E: install the native frame walker so the runtime can find
+        // JIT stack-map roots at every park/collection. Without it, a
+        // collection concurrent with native frames would corrupt them — on an
+        // unsupported target that is exactly what would happen, so refuse
+        // loudly instead.
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        crate::runtime::NATIVE_ROOT_WALKER
+            .store(walk_native_roots as *const () as usize as u64, std::sync::atomic::Ordering::Release);
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        panic!(
+            "JitCranelift: Stage E native-frame GC walking is implemented for \
+             aarch64/x86_64 only; this target has no walker, so JIT + moving GC \
+             would be unsound"
+        );
+
         let mut flags = settings::builder();
         flags.set("use_colocated_libcalls", "false").unwrap();
         flags.set("is_pic", "false").unwrap();
@@ -1294,6 +1463,10 @@ impl<M: ModelArithJit> JitCranelift<M> {
         // speculative inliner grew per-body code. The test suites are the
         // correctness gate — skip verification in the built product.
         flags.set("enable_verifier", "false").unwrap();
+        // Stage E: the native frame WALKER resolves live GC roots by walking
+        // the FP chain from a parked thread's Rust frames up through its JIT
+        // frames — every emitted function must keep the frame-pointer linkage.
+        flags.set("preserve_frame_pointers", "true").unwrap();
         let isa = cranelift_native::builder()
             .expect("host machine is not supported by Cranelift")
             .finish(settings::Flags::new(flags))
@@ -1321,6 +1494,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let spwn: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_spawn::<M>;
         let awt: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_await::<M>;
         let gcf: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_gc::<M>;
+        let sfp: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_safepoint::<M>;
         builder.symbol("ml_load_local", ll as *const u8);
         builder.symbol("ml_load_global", lg as *const u8);
         builder.symbol("ml_def_global", dg as *const u8);
@@ -1339,6 +1513,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         builder.symbol("ml_spawn", spwn as *const u8);
         builder.symbol("ml_await", awt as *const u8);
         builder.symbol("ml_gc", gcf as *const u8);
+        builder.symbol("ml_safepoint", sfp as *const u8);
 
         let mut module = JITModule::new(builder);
 
@@ -1395,6 +1570,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             spawn: decl(&mut module, "ml_spawn", &s_spawn),
             await_: decl(&mut module, "ml_await", &s_await),
             gc: decl(&mut module, "ml_gc", &s_gc),
+            safepoint: decl(&mut module, "ml_safepoint", &s_gc),
         };
 
         JitCranelift {
@@ -1460,9 +1636,27 @@ impl<M: ModelArithJit> JitCranelift<M> {
             .declare_function(&name, Linkage::Local, &ctx.func.signature)
             .expect("declare body");
         module.define_function(id, &mut ctx).expect("define body");
+        // Stage E: lift this body's user stack maps out of the compile context
+        // BEFORE it is cleared — (return-address offset, frame active size,
+        // SP-relative root slot offsets) per safepoint.
+        let (sites, code_size) = {
+            let cc = ctx.compiled_code().expect("compiled code available after define_function");
+            let sites: Vec<SiteMap> = cc
+                .buffer
+                .user_stack_maps()
+                .iter()
+                .map(|(ret_off, active, map)| SiteMap {
+                    ret_off: *ret_off,
+                    active_size: *active,
+                    slots: map.entries().map(|(_ty, off)| off).collect(),
+                })
+                .collect();
+            (sites, cc.buffer.data().len())
+        };
         module.clear_context(&mut ctx);
         module.finalize_definitions().expect("finalize");
         let code = module.get_finalized_function(id);
+        register_code_map(code as usize, code_size, sites);
         Arc::new(Compiled { code, entry_arity: shape.entry_arity, mem_mode: shape.mem_mode })
     }
 
@@ -1548,11 +1742,6 @@ impl<M: ModelArithJit> JitCranelift<M> {
             self as *const JitCranelift<M> as *const u8,
         ) as u8;
         let cur = if needs_cur { frame.clone() } else { None };
-        let caps_base = if self_closure == 0 {
-            std::ptr::null()
-        } else {
-            unsafe { M::R::as_ref(self_closure).0.add(CLOSURE_CAPS_OFF) as *const u64 }
-        };
         JitCtx {
             rc: std::ptr::null(),
             top,
@@ -1567,9 +1756,9 @@ impl<M: ModelArithJit> JitCranelift<M> {
             // code observe a coherent value.
             reloc_ptr: Cell::new(&rt.shared.relocated as *const AtomicU64 as *const u64),
             dispver_ptr: Cell::new(&rt.shared.dispatch_version as *const AtomicU64 as *const u64),
+            poll_ptr: Cell::new(&rt.heap().poll as *const std::sync::atomic::AtomicU8 as *const u8),
             direct: Cell::new(direct),
             self_closure: Cell::new(self_closure),
-            caps_base: Cell::new(caps_base),
             cur: RefCell::new(cur),
             jit: self as *const JitCranelift<M> as *const (),
             tail_pending: Cell::new(false),
@@ -1590,12 +1779,18 @@ impl<M: ModelArithJit> JitCranelift<M> {
         args_buf: &mut Vec<u64>,
         self_closure: u64,
     ) -> Result<u64, u64> {
+        // Stage E: a collection triggered anywhere inside the body must trace
+        // this frame (its slots are the body's locals in memory mode, and the
+        // SSA prologue reads them at entry) — push it on the dynamic env
+        // chain exactly like the interpreter tiers do around invoke.
+        rt.env_stack.push(frame.clone());
         let mut ctx =
             self.make_ctx(top, rt, frame, args_buf, self_closure, compiled.mem_mode);
         ctx.rc = &ctx as *const JitCtx<M>;
         let f: extern "C" fn(*mut JitCtx<M>) -> u64 =
             unsafe { std::mem::transmute::<*const u8, _>(compiled.code) };
         let ret = f(&mut ctx as *mut JitCtx<M>);
+        rt.env_stack.pop();
         if ctx.tail_pending.get() {
             Err(ctx.tail_callee.get())
         } else {
@@ -1789,6 +1984,26 @@ impl<M: ModelArithJit> JitCranelift<M> {
                         return M::R::enc_nil();
                     }
                     self.recycle(std::mem::take(&mut frame));
+                    // TRAMPOLINE SAFEPOINT (Stage E): this loop is the back-edge
+                    // of every non-self tail recursion (mutual loops, variadic /
+                    // memory-mode loops), so it must poll too. The in-flight
+                    // callee + args are bare bits — root them across the park /
+                    // collection and read the (possibly relocated) values back.
+                    let callee = if rt.heap().poll.load(Ordering::Acquire) != 0 {
+                        let base = rt.push_root(callee);
+                        for &a in args_buf.iter() {
+                            rt.push_root(a);
+                        }
+                        rt.safepoint(&None);
+                        let c = rt.root_get(base);
+                        for (i, a) in args_buf.iter_mut().enumerate() {
+                            *a = rt.root_get(base + 1 + i);
+                        }
+                        rt.truncate_roots(base);
+                        c
+                    } else {
+                        callee
+                    };
                     // Callable-object hook in TAIL position too (keywords / maps /
                     // callable deftype records): route `(obj args…)` to
                     // `(handler obj args…)`, exactly as `invoke` does.
@@ -1978,6 +2193,7 @@ fn build_body<M: ModelArithJit>(
         spawn: module.declare_func_in_func(shims.spawn, fb.func),
         await_: module.declare_func_in_func(shims.await_, fb.func),
         gc: module.declare_func_in_func(shims.gc, fb.func),
+        safepoint: module.declare_func_in_func(shims.safepoint, fb.func),
     };
 
     let mut c = Compiler {
@@ -2001,7 +2217,7 @@ fn build_body<M: ModelArithJit>(
         off_dispver_ptr: core::mem::offset_of!(JitCtx<'static, M>, dispver_ptr) as i32,
         off_direct: core::mem::offset_of!(JitCtx<'static, M>, direct) as i32,
         off_self_closure: core::mem::offset_of!(JitCtx<'static, M>, self_closure) as i32,
-        off_caps_base: core::mem::offset_of!(JitCtx<'static, M>, caps_base) as i32,
+        off_poll_ptr: core::mem::offset_of!(JitCtx<'static, M>, poll_ptr) as i32,
         off_tail_pending: core::mem::offset_of!(JitCtx<'static, M>, tail_pending) as i32,
         off_rc,
         off_rt: core::mem::offset_of!(JitCtx<'static, M>, rt) as i32,
@@ -2010,16 +2226,28 @@ fn build_body<M: ModelArithJit>(
         loop_header: None,
         loop_nparams: shape.nparams,
         vars: Vec::new(),
+        self_var: cranelift_frontend::Variable::from_u32(0), // placeholder; set right below
         rc_val,
     };
 
+    // The RUNNING CLOSURE's bits, read ONCE into a stack-mapped variable
+    // (Stage E): a collection at any safepoint rewrites the spill slot, so
+    // capture reads (which re-derive the capture base from this) always see
+    // the object's CURRENT address. Top-level bodies carry 0 (no closure —
+    // never a ref under any model, so the collector ignores it).
+    c.self_var = c.declare_root_var();
+    let sc0 = c.load_ctx_field(c.off_self_closure);
+    c.fb.def_var(c.self_var, sc0);
+
     // SSA mode: every activation slot is a Cranelift variable (register-
-    // allocated). Params come from the entry's register args (fast entries) or
-    // a frame-load prologue (ctx entries: variadic / >MAX_REG_ARGS); let/catch
-    // slots start nil. Memory mode leaves locals in the heap frame.
+    // allocated), DECLARED for the stack maps — locals hold tagged value bits
+    // and must survive a moving collection at any safepoint. Params come from
+    // the entry's register args (fast entries) or a frame-load prologue (ctx
+    // entries: variadic / >MAX_REG_ARGS); let/catch slots start nil. Memory
+    // mode leaves locals in the heap frame (traced via env publication).
     if !shape.mem_mode {
         for _ in 0..shape.nslots {
-            let var = c.fb.declare_var(I64);
+            let var = c.declare_root_var();
             c.vars.push(var);
         }
         let nfixed = shape.nparams + shape.variadic as usize;
@@ -2045,6 +2273,12 @@ fn build_body<M: ModelArithJit>(
             }
         }
     }
+
+    // ENTRY SAFEPOINT POLL (Stage E): with the locals in place, check the poll
+    // word; a pending request/pressure takes the cold shim (a call — the live
+    // declared values get a stack map there). This is what bounds a native
+    // thread's time-to-park.
+    c.emit_poll();
 
     // A self-tail-recursive SSA body gets a loop header: a tail call to the same
     // closure redefines the param variables in place and branches here (an
@@ -2095,7 +2329,7 @@ pub struct Compiler<'a, 'b> {
     off_dispver_ptr: i32,
     off_direct: i32,
     off_self_closure: i32,
-    off_caps_base: i32,
+    off_poll_ptr: i32,
     off_tail_pending: i32,
     off_rc: i32,
     /// Offset of the `rt` pointer within `JitCtx`, and of the throw/escape flag
@@ -2111,14 +2345,52 @@ pub struct Compiler<'a, 'b> {
     loop_header: Option<cranelift_codegen::ir::Block>,
     loop_nparams: usize,
     /// SSA mode: one variable per activation slot (params first). Empty in
-    /// memory mode.
+    /// memory mode. All stack-mapped (`declare_root_var`).
     vars: Vec<cranelift_frontend::Variable>,
+    /// The running closure's bits, loaded once at entry (stack-mapped): the
+    /// self-tail-call compare and every capture read go through this, so both
+    /// see the closure's CURRENT address after any safepoint (Stage E).
+    self_var: cranelift_frontend::Variable,
 }
 
 impl<'a, 'b> Compiler<'a, 'b> {
     fn call_shim(&mut self, f: cranelift_codegen::ir::FuncRef, args: &[Value]) -> Value {
         let inst = self.fb.ins().call(f, args);
         self.fb.inst_results(inst)[0]
+    }
+
+    /// Declare an I64 variable whose every definition carries TAGGED VALUE
+    /// BITS: marked for the stack maps, so any definition live across a
+    /// safepoint (= any call) is spilled, rewritten by a moving collection,
+    /// and reloaded — the whole Stage E rooting story for SSA locals, loop
+    /// vars, and merge results.
+    fn declare_root_var(&mut self) -> cranelift_frontend::Variable {
+        let var = self.fb.declare_var(I64);
+        self.fb.declare_var_needs_stack_map(var);
+        var
+    }
+
+    /// The SAFEPOINT POLL (Stage E): one load of the heap's poll byte and a
+    /// branch to a cold `shim_safepoint` call when it is nonzero (a sibling
+    /// requested a collection, or allocation pressure crossed the threshold).
+    /// The cold path is an ordinary call, so every live stack-mapped value
+    /// gets spilled around it with a map — parking or collecting there is
+    /// exactly as safe as at any shim call. Emitted at body entry and at
+    /// every self-tail back-edge, which bounds a native loop's time-to-park.
+    fn emit_poll(&mut self) {
+        let pp = self.load_rc_field(self.off_poll_ptr);
+        let b = self.fb.ins().load(I8, MemFlagsData::trusted(), pp, 0);
+        let cold = self.fb.create_block();
+        let cont = self.fb.create_block();
+        self.fb.set_cold_block(cold);
+        self.fb.ins().brif(b, cold, &[], cont, &[]);
+        self.fb.switch_to_block(cold);
+        self.fb.seal_block(cold);
+        let ctx = self.ctx_val;
+        self.call_shim(self.refs.safepoint, &[ctx]);
+        self.fb.ins().jump(cont, &[]);
+        self.fb.switch_to_block(cont);
+        self.fb.seal_block(cont);
     }
 
     /// After an operation that can raise a `throw`/escape, check the runtime's
@@ -2185,6 +2457,17 @@ impl<'a, 'b> Compiler<'a, 'b> {
     fn emit_local0_store(&mut self, idx: u16, v: Value) {
         let base = self.load_ctx_field(self.off_cur_slots);
         self.fb.ins().store(MemFlagsData::trusted(), v, base, (idx as i32) * 8);
+    }
+
+    /// Read capture `idx` of the RUNNING closure: mask the stack-mapped self
+    /// bits to the object's current address, load the inline capture word
+    /// (Stage E — the derived pointer never crosses a safepoint; it is built
+    /// and consumed within this straight-line sequence).
+    fn emit_capture<M: ModelArithJit>(&mut self, idx: u16) -> Value {
+        let sc = self.fb.use_var(self.self_var);
+        let base = M::emit_ref_addr_unchecked(self, sc);
+        let off = (CLOSURE_CAPS_OFF as i32) + (idx as i32) * 8;
+        self.fb.ins().load(I64, MemFlagsData::trusted(), base, off)
     }
 
     /// Inline bump allocation through the heap's `AllocWindow` (D5): claim
@@ -2347,7 +2630,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let saved_header = self.loop_header.take();
         let saved_nparams = self.loop_nparams;
         for i in 0..plan.nslots as usize {
-            let var = self.fb.declare_var(I64);
+            let var = self.declare_root_var();
             if i < plan.nparams {
                 self.fb.def_var(var, argvals[i]);
             } else {
@@ -2413,7 +2696,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
         let guard1 = self.fb.ins().band(is_ref, direct);
 
-        let result = self.fb.declare_var(I64);
+        let result = self.declare_root_var();
         let checkb = self.fb.create_block();
         let fastb = self.fb.create_block();
         let slowb = self.fb.create_block();
@@ -2439,23 +2722,22 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let guard2 = self.fb.ins().band(kind_ok, has_code);
         self.fb.ins().brif(guard2, fastb, &[], slowb, &[]);
 
-        // ── native fast path: 4-store context, args in registers ──
+        // ── native fast path: 3-store context, args in registers ──
         self.fb.switch_to_block(fastb);
         self.fb.seal_block(fastb);
-        let caps_base = self.fb.ins().iadd_imm(addr, CLOSURE_CAPS_OFF as i64);
         let words = self.ctx_size.div_ceil(8) as i32;
         let ctx_ss = self.fb.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             (words * 8) as u32,
             3,
         ));
-        // Four stores: the shared run-context pointer, the callee's own bits (for
-        // its self-tail loop), its capture base (a derived pointer: addr + 24 —
-        // no separate caps array to fetch), and a clear tail-pending flag. The
-        // callee reads everything else through `rc`.
+        // Three stores: the shared run-context pointer, the callee's own bits
+        // (the callee loads them into its stack-mapped self variable — its
+        // self-tail loop AND its capture reads derive from that, Stage E), and
+        // a clear tail-pending flag. The callee reads everything else through
+        // `rc`.
         self.fb.ins().stack_store(rc, ctx_ss, self.off_rc);
         self.fb.ins().stack_store(callee, ctx_ss, self.off_self_closure);
-        self.fb.ins().stack_store(caps_base, ctx_ss, self.off_caps_base);
         let zero8 = self.fb.ins().iconst(I8, 0);
         self.fb.ins().stack_store(zero8, ctx_ss, self.off_tail_pending);
         let new_ctx = self.fb.ins().stack_addr(I64, ctx_ss, 0);
@@ -2519,7 +2801,20 @@ impl<'a, 'b> Compiler<'a, 'b> {
         (addr, count)
     }
 
+    /// Compile one node and DECLARE its value for the stack maps (Stage E):
+    /// every expression yields TAGGED VALUE BITS, so anything live across a
+    /// safepoint (= any call — a later argument's nested call, a shim, a poll)
+    /// is spilled with a map entry, rewritten by a moving collection, and
+    /// reloaded. Untagged arithmetic intermediates and derived addresses stay
+    /// inside their emitting arm and are never declared — exactly the
+    /// tagged-bits-only contract.
     fn compile<M: ModelArithJit>(&mut self, ir: &Ir, tail: bool) -> Value {
+        let v = self.compile_node::<M>(ir, tail);
+        self.fb.declare_value_needs_stack_map(v);
+        v
+    }
+
+    fn compile_node<M: ModelArithJit>(&mut self, ir: &Ir, tail: bool) -> Value {
         match ir {
             // Inline load from the constant-pool base — no shim call.
             Ir::Const(id) | Ir::Quote(id) => {
@@ -2539,16 +2834,14 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     self.fb.use_var(self.vars[*idx as usize])
                 }
             }
-            // A captured value: one load off the closure's capture array. The
-            // base is a per-call constant; in SSA mode the CONTENTS are immutable
-            // too (no GC can rewrite them mid-body), so the load is readonly and
-            // hoistable out of loops.
-            Ir::Capture(idx) => {
-                let ro = MemFlagsData::trusted().with_readonly();
-                let base = self.fb.ins().load(I64, ro, self.ctx_val, self.off_caps_base);
-                let flags = if self.mem_mode { MemFlagsData::trusted() } else { ro };
-                self.fb.ins().load(I64, flags, base, (*idx as i32) * 8)
-            }
+            // A captured value: RE-DERIVE the capture base from the running
+            // closure's (stack-mapped) bits on every read, then one load off
+            // the object (Stage E). A safepoint anywhere reloads `self_var`
+            // with the closure's post-move address, so this can never read
+            // through a stale derived pointer — the carried caps_base gap is
+            // gone. (Loop-hoisting the derivation can return later behind a
+            // "no safepoint in loop body" analysis.)
+            Ir::Capture(idx) => self.emit_capture::<M>(*idx),
             // Inline global read: load the value straight from the dense mirror
             // (the symbol was interned, so its slot exists — no bounds check). If
             // the slot is still `GLOBAL_UNBOUND` (a forward reference not yet
@@ -2560,7 +2853,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let unbound = self.iconst(crate::runtime::GLOBAL_UNBOUND);
                 let is_unbound = self.fb.ins().icmp(IntCC::Equal, raw, unbound);
 
-                let result = self.fb.declare_var(I64);
+                let result = self.declare_root_var();
                 let slow = self.fb.create_block();
                 let ok = self.fb.create_block();
                 let merge = self.fb.create_block();
@@ -2617,7 +2910,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     self.fb.ins().band(not_nil, not_fal)
                 };
 
-                let result = self.fb.declare_var(I64);
+                let result = self.declare_root_var();
                 let then_b = self.fb.create_block();
                 let else_b = self.fb.create_block();
                 let merge = self.fb.create_block();
@@ -2671,13 +2964,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
                                 self.fb.use_var(self.vars[*i as usize])
                             }
                         }
-                        CapSrc::Cap(j) => {
-                            let ro = MemFlagsData::trusted().with_readonly();
-                            let base =
-                                self.fb.ins().load(I64, ro, self.ctx_val, self.off_caps_base);
-                            let flags = if self.mem_mode { MemFlagsData::trusted() } else { ro };
-                            self.fb.ins().load(I64, flags, base, (*j as i32) * 8)
-                        }
+                        // Transitive capture: read our OWN capture, deriving
+                        // the base from the stack-mapped self bits (Stage E).
+                        CapSrc::Cap(j) => self.emit_capture::<M>(*j),
                     })
                     .collect();
                 if M::INLINE_OBJECTS {
@@ -2688,7 +2977,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     // stores. Window closed/exhausted → the shim.
                     let flags = MemFlagsData::trusted();
                     let ncaps = vals.len();
-                    let result = self.fb.declare_var(I64);
+                    let result = self.declare_root_var();
                     let slow = self.fb.create_block();
                     let merge = self.fb.create_block();
                     let size = (CLOSURE_CAPS_OFF + ncaps * 8) as i64;
@@ -2767,7 +3056,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                             let rc = self.rc_val;
                             let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
                             let same = self.fb.ins().band(bits_ok, direct);
-                            let result = self.fb.declare_var(I64);
+                            let result = self.declare_root_var();
                             let inlb = self.fb.create_block();
                             let slowb = self.fb.create_block();
                             let merge = self.fb.create_block();
@@ -2807,8 +3096,10 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     // shim + trampoline, keeping full mutual-recursion TCO.
                     match self.loop_header {
                         Some(header) if argvals.len() == self.loop_nparams => {
-                            let flags = MemFlagsData::trusted();
-                            let sc = self.fb.ins().load(I64, flags, ctx, self.off_self_closure);
+                            // Compare against the STACK-MAPPED self bits, so a
+                            // collection mid-body (which moved this closure —
+                            // and rewrote both copies) still recognizes itself.
+                            let sc = self.fb.use_var(self.self_var);
                             let is_self = self.fb.ins().icmp(IntCC::Equal, callee, sc);
                             let selfloop = self.fb.create_block();
                             let notself = self.fb.create_block();
@@ -2821,6 +3112,12 @@ impl<'a, 'b> Compiler<'a, 'b> {
                             for (i, &a) in argvals.iter().enumerate() {
                                 self.fb.def_var(self.vars[i], a);
                             }
+                            // BACK-EDGE SAFEPOINT POLL (Stage E): a native
+                            // self-loop must come to a safepoint in bounded
+                            // time — this is what lets another thread's
+                            // collection (or our own allocation pressure)
+                            // interrupt a pure-arithmetic loop.
+                            self.emit_poll();
                             self.fb.ins().jump(header, &[]);
 
                             // Non-self: the shim tail-call, whose result flows to
@@ -2908,7 +3205,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let tail = self.compile::<M>(&args[1], false);
                 let flags = MemFlagsData::trusted();
                 // tail2 = tail, unless tail is the `()` object → nil.
-                let tailv = self.fb.declare_var(I64);
+                let tailv = self.declare_root_var();
                 self.fb.def_var(tailv, tail);
                 let (t_is_ref, t_addr) = M::emit_ref_addr(self, tail);
                 let chk = self.fb.create_block();
@@ -2928,7 +3225,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.seal_block(cont);
                 let tail2 = self.fb.use_var(tailv);
 
-                let result = self.fb.declare_var(I64);
+                let result = self.declare_root_var();
                 let slow = self.fb.create_block();
                 let merge = self.fb.create_block();
                 let header = crate::heap::make_header(kind::CONS, 0, 0);
@@ -2954,7 +3251,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // use-after-move panic) keeps the shim's exact semantics.
             Ir::Prim(p @ (Prim::First | Prim::Rest), args) if M::INLINE_OBJECTS => {
                 let v = self.compile::<M>(&args[0], false);
-                let result = self.fb.declare_var(I64);
+                let result = self.declare_root_var();
                 let slow = self.fb.create_block();
                 let merge = self.fb.create_block();
                 let (addr, _hdr) = self.emit_typed_addr::<M>(v, kind::CONS, slow);
@@ -2977,7 +3274,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // header aux: one type guard + a shift + retag (D5).
             Ir::Prim(Prim::VectorLen, args) if M::INLINE_OBJECTS => {
                 let v = self.compile::<M>(&args[0], false);
-                let result = self.fb.declare_var(I64);
+                let result = self.declare_root_var();
                 let slow = self.fb.create_block();
                 let merge = self.fb.create_block();
                 let (_addr, hdr) = self.emit_typed_addr::<M>(v, kind::ARRAY, slow);
@@ -3006,7 +3303,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let argvals: Vec<Value> =
                     args.iter().map(|a| self.compile::<M>(a, false)).collect();
                 let flags = MemFlagsData::trusted();
-                let result = self.fb.declare_var(I64);
+                let result = self.declare_root_var();
                 let slow = self.fb.create_block();
                 let merge = self.fb.create_block();
                 let (addr, hdr) = self.emit_typed_addr::<M>(argvals[0], kind::ARRAY, slow);
@@ -3105,7 +3402,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 }
                 let flags = MemFlagsData::trusted();
                 let ro = MemFlagsData::trusted().with_readonly();
-                let result = self.fb.declare_var(I64);
+                let result = self.declare_root_var();
                 let slow = self.fb.create_block();
                 let merge = self.fb.create_block();
 
@@ -3218,7 +3515,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
     fn emit_guarded_arith<M: ModelArithJit>(&mut self, op: Prim, a: Value, b: Value) -> Value {
         let both = M::emit_both_int(self, a, b);
 
-        let result = self.fb.declare_var(I64);
+        let result = self.declare_root_var();
         let fast = self.fb.create_block();
         let slow = self.fb.create_block();
         let merge = self.fb.create_block();
@@ -3331,7 +3628,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.ins().select(cw, t, f)
             }
             Prim::Add | Prim::Sub => {
-                let result = self.fb.declare_var(I64);
+                let result = self.declare_root_var();
                 let slow = self.fb.create_block();
                 let merge = self.fb.create_block();
                 let r = if let Prim::Add = op {
@@ -3350,7 +3647,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.use_var(result)
             }
             Prim::Mul => {
-                let result = self.fb.declare_var(I64);
+                let result = self.declare_root_var();
                 let slow = self.fb.create_block();
                 let merge = self.fb.create_block();
                 let x128 = self.fb.ins().sextend(I128, x);

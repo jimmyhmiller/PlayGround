@@ -327,3 +327,93 @@ fn jit_dispatch_ic_sees_redefinition() {
     assert_eq!(jit::<LowBitModel>(src), "15");
     assert_eq!(jit::<LowBitModel>(src), walk::<LowBitModel>(src));
 }
+
+// ── Stage E: allocation-driven GC with real stack maps ──────────────
+
+/// Allocation PRESSURE collects mid-JIT-loop with NO explicit (gc): a live
+/// SSA value (`x`, held across the churning call) and a live CAPTURE (`c`)
+/// must survive the moving collections — the stack maps + frame walker found
+/// their spill slots and the closure's self bits, or (verify heap, on in
+/// debug) this dies loudly with use-after-move.
+#[test]
+fn jit_pressure_gc_collects_mid_loop_with_values_intact() {
+    let mut rt = Runtime::<LowBitModel>::new();
+    rt.heap().set_trigger_bytes(16 * 1024);
+    let cs = JitCranelift::<LowBitModel>::new();
+    let r = microlang::sexpr::eval_str(
+        &mut rt,
+        &cs,
+        "(def churn (fn (n) (if (= n 0) nil (do (cons 1 2) (churn (- n 1))))))
+         (def probe (fn (x) (do (churn 3000) (first x))))          ; x live across the call
+         (def mk (fn (c) (fn () (do (churn 3000) (first c)))))     ; c captured
+         (+ (probe (cons 42 nil)) ((mk (cons 58 nil))))",
+    );
+    assert_eq!(rt.print(r), "100");
+    let collections = rt.heap().collections.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(collections > 0, "pressure never collected: the test proved nothing");
+}
+
+/// Capture reads AFTER a move: a self-tail-looping CLOSURE reads its captures
+/// on every iteration while pressure collections relocate the closure object
+/// out from under it (back-edge polls fire mid-loop). Every read re-derives
+/// the capture base from the stack-mapped self bits — the caps_base staleness
+/// class Stage E retired. Wrong plumbing = use-after-move panic (verify heap)
+/// or a wrong sum.
+#[test]
+fn jit_capture_reads_survive_moves_mid_body() {
+    let mut rt = Runtime::<LowBitModel>::new();
+    rt.heap().set_trigger_bytes(16 * 1024);
+    let cs = JitCranelift::<LowBitModel>::new();
+    let r = microlang::sexpr::eval_str(
+        &mut rt,
+        &cs,
+        "(def mk (fn (a b)
+           (let (go nil)
+             (set! go (fn (n acc)
+               (if (= n 0) acc
+                   (go (- n 1) (do (cons 1 2) (+ acc (+ a b)))))))
+             go)))
+         ((mk 3 4) 4000 0)",
+    );
+    assert_eq!(rt.print(r), "28000");
+    let collections = rt.heap().collections.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(collections > 0, "no collection fired mid-loop");
+}
+
+/// THE concurrency test the pre-Stage-E model could not pass: one thread spins
+/// in a pure-arithmetic NATIVE self-loop (no shims inside) while the main
+/// thread runs explicit (gc)s. The back-edge polls bring the looping thread to
+/// a safepoint in bounded time — the program must terminate with the right
+/// answer and a moved heap. Before the polls, the collector would wait on the
+/// looping thread forever.
+#[test]
+fn jit_native_loop_parks_for_concurrent_gc() {
+    use microlang::{Repr, Val};
+    let mut rt = Runtime::<LowBitModel>::new();
+    let cs = JitCranelift::<LowBitModel>::new();
+    microlang::sexpr::eval_str(
+        &mut rt,
+        &cs,
+        "(def spin (fn (n acc) (if (= n 0) acc (spin (- n 1) (+ acc 1)))))",
+    );
+    let spin = rt.global(rt.intern("spin")).expect("spin defined");
+    let mut child = rt.thread_handle();
+    // Root the closure bits in the child's shadow: no collection can COMPLETE
+    // before the worker parks, and parking rewrites this slot.
+    let slot = child.push_root(spin);
+    let worker = std::thread::spawn(move || {
+        let wcs = JitCranelift::<LowBitModel>::new();
+        let mut crt = child;
+        let f = crt.root_get(slot);
+        let n = <LowBitModel as microlang::ValueModel>::R::enc_int(30_000_000);
+        let z = <LowBitModel as microlang::ValueModel>::R::enc_int(0);
+        wcs.invoke(&wcs, &mut crt, f, &[n, z])
+    });
+    // Let the worker get deep into its native loop, then collect under it.
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    microlang::sexpr::eval_str(&mut rt, &cs, "(gc)");
+    microlang::sexpr::eval_str(&mut rt, &cs, "(gc)");
+    let r = worker.join().expect("worker terminated");
+    assert_eq!(rt.decode(r), Val::Int(30_000_000));
+    assert!(rt.relocated() > 0, "the concurrent collections never ran");
+}
