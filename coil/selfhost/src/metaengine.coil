@@ -29,6 +29,7 @@
 (import "parser.coil" :use *)
 (import "loader.coil" :use *)
 (import "ast.coil" :use *)
+(import "astdump.coil" :use *)
 (import "resolve.coil" :use *)
 (import "comptime.coil" :use *)
 (import "mono.coil" :use *)
@@ -38,6 +39,9 @@
 
 (extern dlopen :cc c [(ptr i8) i64] (-> (ptr i8)))
 (extern dlsym  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern access :cc c [(ptr i8) i64] (-> i32))     ; F_OK=0: does the path exist
+(extern rename :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern unlink :cc c [(ptr i8)] (-> i32))
 
 ; ---- the engine flag ------------------------------------------------------------
 (defn meta-compiled? [] (-> bool)
@@ -122,40 +126,114 @@
             (store! j (iadd (load j) 1))))))
     (box-al [(slice u8)] a (load out))))
 
+; ---- the content-addressed dylib cache ---------------------------------------------
+; Key = FNV-1a over the DUMPED mono'd metaprogram program (astdump's d-program, the
+; deterministic oracle dumper) + the entry symbol map. SELF-VALIDATING against
+; compiler changes: any change that alters what would be compiled alters the dump;
+; a change that leaves the dump identical produces an identical dylib anyway.
+; Location: $HOME/.cache/coil/metaprog/. Kill switch: COIL_META_CACHE=0.
+(defstruct FnvCell [(h i64)])
+(defn me-fnv-write [(ctx (ptr i8)) (buf (ptr i8)) (n i64)] (-> (Result i64 IoError))
+  (let [c (cast (ptr FnvCell) ctx) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! (field c h) (imul (ixor (load (field c h)) (iand (cast i64 (load (index buf (load i)))) 255))
+                                    1099511628211))
+          (store! i (iadd (load i) 1)))))
+    (Ok [i64 IoError] n)))
+(defn me-fnv-str [(c (ptr FnvCell)) (s (slice u8))] (-> i64)
+  (let [n (slice-len s) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! (field c h) (imul (ixor (load (field c h)) (cast i64 (slice-get s (load i))))
+                                    1099511628211))
+          (store! i (iadd (load i) 1)))))
+    0))
+(defn me-hex [(a (ptr Allocator)) (v i64)] (-> (slice u8))
+  (let [buf (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 16 1))) (mut i) 0]
+    (loop (if (icmp-ge (load i) 16) (break)
+      (do (let [d (iand (ishr v (imul (isub 15 (load i)) 4)) 15)]
+            (store! (index buf (load i)) (cast u8 (if (icmp-lt d 10) (iadd 48 d) (iadd 87 d)))))
+          (store! i (iadd (load i) 1)))))
+    (slice-new buf 16)))
+(defn me-program-key [(a (ptr Allocator)) (mp (ptr Program)) (entries (ptr (ArrayList MLEntry)))] (-> (slice u8))
+  (let [c (alloc-stack FnvCell) w (alloc-stack Writer)]
+    (store! (field c h) -3750763034362895579)          ; FNV-1a offset basis
+    (me-fnv-str c "coil-metaprog-v1|")
+    (store! (field w write-fn) (fnptr-of me-fnv-write))
+    (store! (field w ctx) (cast (ptr i8) c))
+    (d-program w mp a)
+    (let [n (al-len [MLEntry] (load entries)) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (me-fnv-str c (load (field (al-elem [MLEntry] entries (load i)) name)))
+            (me-fnv-str c "=")
+            (me-fnv-str c (load (field (al-elem [MLEntry] entries (load i)) symbol)))
+            (me-fnv-str c ";")
+            (store! i (iadd (load i) 1))))))
+    (me-hex a (load (field c h)))))
+(defn me-cache-on? [] (-> bool)
+  (let [v (getenv c"COIL_META_CACHE")]
+    (if (icmp-eq (cast i64 v) 0) true (not (str-eq (cstr->slice v) "0")))))
+(defn me-cache-dir [(a (ptr Allocator))] (-> (Option (slice u8)))
+  (let [h (getenv c"HOME")]
+    (if (icmp-eq (cast i64 h) 0) (None [(slice u8)])
+      (Some (sconcat a (cstr->slice h) "/.cache/coil/metaprog")))))
+
+; dlopen + the vtable handshake (hand the dylib the host callbacks BEFORE any
+; entry can run — see metashim.coil coil_mp_init)
+(defn me-open-dylib [(a (ptr Allocator)) (path (slice u8))] (-> (Result (ptr i8) Diag))
+  (let [h (dlopen (slice->cstr a path) 2)]
+    (if (icmp-eq (cast i64 h) 0)
+        (Err [(ptr i8) Diag] (derr "metaengine: dlopen of the metaprogram dylib failed"))
+      (let [ini (dlsym h (slice->cstr a "coil_mp_init"))]
+        (if (icmp-eq (cast i64 ini) 0)
+            (Err [(ptr i8) Diag] (derr "metaengine: coil_mp_init missing from the metaprogram dylib (compiler bug)"))
+          (do (call-ptr (cast (fnptr c [(ptr i8)] i64) ini) (meta-vtable))
+              (Ok [(ptr i8) Diag] h)))))))
+
 ; ---- build the metaprogram dylib ---------------------------------------------------
-(defn meta-build-dylib [(a (ptr Allocator)) (lowered (ptr Program))] (-> (Result (ptr i8) Diag))
+(defn meta-build-dylib [(a (ptr Allocator)) (lowered (ptr Program)) (entries (ptr (ArrayList MLEntry)))] (-> (Result (ptr i8) Diag))
   (try (do
     (let [bb (meta-build-box)]
       (if (icmp-eq (load (field bb isset)) 0)
           (return-from :try (Err [(ptr i8) Diag] (derr "metaengine: no backend object builder registered (compiler bug)"))) 0)
       (let [mp (try! (monomorphize a lowered))]
         (sort-mono-program a mp)
-        (let [id (me-unique a)
-              obj-s (sconcat3 a "/tmp/coil-mp-" id ".o")
-              dylib-s (sconcat3 a "/tmp/coil-mp-" id ".dylib")]
-          (call-ptr (load (field bb fp)) a mp (slice->cstr a obj-s))
-          (let [cmd (sconcat a (sconcat a (sconcat3 a "cc -dynamiclib " obj-s " -o ")
-                                        (sconcat a dylib-s " -Wl,-undefined,dynamic_lookup"))
-                               "")]
-            (if (icmp-ne (cast i64 (system (slice->cstr a cmd))) 0)
-                (Err [(ptr i8) Diag] (derr "metaengine: linking the metaprogram dylib failed"))
-              (let [h (dlopen (slice->cstr a dylib-s) 2)]
-                (if (icmp-eq (cast i64 h) 0)
-                    (Err [(ptr i8) Diag] (derr "metaengine: dlopen of the metaprogram dylib failed"))
-                  ; the vtable handshake: hand the dylib the host callbacks BEFORE
-                  ; any entry can run (see metashim.coil coil_mp_init)
-                  (let [ini (dlsym h (slice->cstr a "coil_mp_init"))]
-                    (if (icmp-eq (cast i64 ini) 0)
-                        (Err [(ptr i8) Diag] (derr "metaengine: coil_mp_init missing from the metaprogram dylib (compiler bug)"))
-                      (do (call-ptr (cast (fnptr c [(ptr i8)] i64) ini) (meta-vtable))
-                          (Ok [(ptr i8) Diag] h))))))))))))))
+        (let [cdir (if (me-cache-on?) (me-cache-dir a) (None [(slice u8)]))
+              cpath (match cdir
+                      (None [] (None [(slice u8)]))
+                      (Some [d] (Some (sconcat a (sconcat3 a d "/" (me-program-key a mp entries)) ".dylib"))))]
+          ; cache hit: the dylib for this exact program already exists
+          (match cpath
+            (Some [p] (if (icmp-eq (cast i64 (access (slice->cstr a p) 0)) 0)
+                          (return-from :try (me-open-dylib a p)) 0))
+            (None [] 0))
+          (let [id (me-unique a)
+                obj-s (sconcat3 a "/tmp/coil-mp-" id ".o")
+                tmp-s (sconcat3 a "/tmp/coil-mp-" id ".dylib")]
+            (call-ptr (load (field bb fp)) a mp (slice->cstr a obj-s))
+            (let [cmd (sconcat a (sconcat3 a "cc -dynamiclib " obj-s " -o ")
+                                 (sconcat a tmp-s " -Wl,-undefined,dynamic_lookup"))]
+              (if (icmp-ne (cast i64 (system (slice->cstr a cmd))) 0)
+                  (Err [(ptr i8) Diag] (derr "metaengine: linking the metaprogram dylib failed"))
+                (do
+                  (unlink (slice->cstr a obj-s))
+                  ; move into the cache (mkdir -p once; rename is atomic on one fs)
+                  (match cpath
+                    (Some [p]
+                      (match cdir
+                        (Some [d] (do (system (slice->cstr a (sconcat a "mkdir -p " d)))
+                                      (if (icmp-eq (cast i64 (rename (slice->cstr a tmp-s) (slice->cstr a p))) 0)
+                                          (return-from :try (me-open-dylib a p)) 0)))
+                        (None [] 0)))
+                    (None [] 0))
+                  ; no cache (or rename failed): open the temp dylib directly
+                  (me-open-dylib a tmp-s)))))))))))
 
 ; ---- one-time engine setup (from expand-stage3, after check-program) ----------------
 (defn meta-engine-setup [(a (ptr Allocator)) (checked (ptr Program)) (quals (ptr (ArrayList (slice u8))))] (-> (Option Diag))
   (match (metalower-program a checked quals)
     (Err [d] (Some d))
     (Ok [mo]
-      (match (meta-build-dylib a (load (field mo prog)))
+      (match (meta-build-dylib a (load (field mo prog)) (load (field mo entries)))
         (Err [d] (Some d))
         (Ok [h]
           (let [es (load (field mo entries)) n (al-len [MLEntry] (load es))
