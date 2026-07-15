@@ -105,6 +105,31 @@ New API this project added (all shipped):
   pass order; transformers run before checkers). No new syntax; the module is the
   manifest. See `metaprog-poc/safe_dialect.coil`.
 
+## The engines: interpreter (default) and COMPILED (`COIL_META=compiled`)
+
+Metaprograms run on one of two engines with **one semantics**:
+
+- **Interpreter** (default): the comptime interpreter in `comptime.coil` evaluates
+  the checked metaprogram AST. Its long-standing gaps: no generics, no collection
+  instantiation, no function pointers, no FFI, no raw memory.
+- **Compiled** (`COIL_META=compiled`): expand-stage3 lowers the metaprogram
+  sub-program to a normal program (`metalower.coil`: `Code` -> opaque handle, code
+  ops -> boundary calls), compiles it to a dylib with the ordinary pipeline, dlopens
+  it, and runs every macro/checker/transform entry as **native code**. Everything
+  the language can do, a metaprogram can now do — generics, HashMap, `malloc`, libc
+  FFI at expansion time (`metaprog-poc/compile-and-run/arbitrary.coil`). Code-op
+  semantics stay shared: the host side (`metahost.coil`) dispatches every op to the
+  interpreter's own `code-op`, so the two engines are byte-identical — verified by
+  `metaprog-poc/compile-and-run/parity.sh` (112/112 corpus files, identical IR and
+  identical diagnostics, including the compiler compiling itself).
+
+Known limits of the compiled engine (both engines actually share the first):
+metaprogram bodies cannot yet *call macros* (`fmt`/`when`/`try!` inside a macro
+body — the expansion tower is the next step), entries are capped at 8 parameters,
+and the metaprogram dylib is built by the LLVM backend (the arm64 backend lacks
+`export-c`). See `metaprog-poc/compile-and-run/README.md` for the design and the
+road to deleting the interpreter.
+
 ## What today's metaprograms can and can't do
 
 Can: read any form's syntax; generate code (inline + new top-level defs); compute at

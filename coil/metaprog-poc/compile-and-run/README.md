@@ -59,15 +59,60 @@ no special language surface at all.
   compiled the same way.
 - The 1892-line interpreter in `comptime.coil` deletes.
 
-## The hard part (not proven here)
+## THE ENGINE IS BUILT — `COIL_META=compiled`
 
-The compiler bootstraps on macros: `try!` appears 56 times in `resolve.coil`, 45 in
-`check.coil`, and it is a library macro over `block`/`return-from`, themselves macros
-over `loop`/`break`. To expand `try!` you must run it; to run it you must compile it;
-compiling it needs macros expanded.
+The design above is now real (with one deliberate deviation): set
+`COIL_META=compiled` and expand-stage3 compiles the checked metaprogram sub-program
+into a dylib and runs every macro/checker/transform entry as native code. The
+interpreter stays the default engine and the oracle.
 
-It terminates because macro definitions form a DAG whose leaves bottom out in core
-forms, so the tower compiles in dependency order, each stratum built with the strata
-below it. The cost is a compile+link+dlopen per build, answered by a content-addressed
-cache keyed on the closure source: same macros, same dylib, reuse it. Paid once per
-macro-library version, not per build.
+    COIL_META=compiled coil run app.coil        # any program; same output
+    metaprog-poc/compile-and-run/parity.sh ./coil   # the proof
+
+The pieces (all in `selfhost/src/`):
+
+- **`metalower.coil`** — after `check-program`, rewrites the sub-program:
+  `Code` -> `(ptr i8)` (opaque host-Sexp handle), `ECodeOp` -> shim arg-builder
+  chains typed from the checker's type map, `EQuote`/`QLit` -> a host quote
+  registry (original nodes, exact spans), `EQuasi` -> nested builder calls,
+  `(error …)` -> a never-typed call-then-`(loop 0)`.
+- **`metashim.coil`** — injected into the sub-program; ptr/i64/f64-only crossings.
+- **`metahost.coil`** — the host side wraps arguments back into real CtVals and
+  dispatches to the interpreter's own `code-op`: one semantics, by construction.
+  An op `Err` (and `(error …)`) records the Diag and `pthread_exit`s the
+  metaprogram thread; the engine joins and reports it like the interpreter would.
+- **`metaengine.coil`** — dlopen + a **vtable handshake** (`coil_mp_init`) instead
+  of `-export_dynamic`/compiler `export-c` (the arm64 backend has no export-c, and
+  the compiler must keep bootstrapping through it). Each entry call runs on its own
+  32 MiB pthread.
+
+The deviation from the sketch above: `ECodeOp`/`TCode` are **lowered**, not
+deleted, and quasiquote lowers in `metalower`, not as a macro — so the interpreter
+and the compiled engine coexist and can be diffed. Deleting the interpreter comes
+after the tower (below).
+
+**Verified**: `parity.sh` — 112/112 files (examples/, lib/, all of metaprog-poc:
+checkers, transforms + fixpoint, `code-decl`/`type-of`, `report`/`warn`/`error`,
+quasiquote hygiene, gensym) produce **byte-identical** emit-ir output and
+byte-identical diagnostics under both engines. The compiler compiling **itself**
+under the compiled engine emits byte-identical IR at the same wall clock. The
+rebootstrap fixpoint and both gates pass untouched.
+
+**The payoff** — `arbitrary.coil` / `arbitrary_test.coil` (run.sh mechanism 4): a
+macro that builds a generic `ArrayList`, looks up a compile-time string-keyed
+`HashMap` (through `fnptr-of` KeyOps — exactly where the interpreter dies), calls
+**libc `strlen` at expansion time**, and builds binder names with `StrBuf`. The
+interpreter cannot run any of it; the compiled engine runs all of it, because it is
+just a program.
+
+## The remaining hard part: the tower
+
+Metaprogram BODIES still cannot *call macros* (`fmt`, `when`, `try!` inside a
+macro's own body) — the sub-program is resolved unexpanded, same as the
+interpreter's restriction today. Fixing it means recursively expanding the
+sub-program's forms before resolve (macro definitions form a DAG bottoming out in
+core forms, so it terminates), with the gensym counter snapshotted around the inner
+expansion so the main program's expansion stays byte-identical, and per-level
+expansion tables kept coherent for diagnostics. That, plus a content-addressed
+dylib cache keyed on the closure source (today the dylib is rebuilt per compile),
+is what stands between here and deleting the 1892-line interpreter.
