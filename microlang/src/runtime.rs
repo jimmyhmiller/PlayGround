@@ -1044,6 +1044,34 @@ impl<M: ValueModel> Runtime<M> {
                 pv
             }
             Prim::PvFromArray => self.pv_from_array(args[0]),
+            Prim::MultiFnNew => {
+                // Build a multi-arity fn from per-clause closures: each fixed
+                // clause registers under its own param count; the (at most one)
+                // variadic clause serves every count >= its fixed params.
+                let mut fixed: Vec<u64> = Vec::new();
+                let mut variadic: Option<(usize, u64)> = None;
+                for &f in args {
+                    let Val::Ref(id) = self.decode(f) else {
+                        panic!("%multifn: argument is not a closure");
+                    };
+                    let (np, va) = match &self.heap()[id as usize] {
+                        Obj::Closure { nparams, variadic, .. } => (*nparams, *variadic),
+                        _ => panic!("%multifn: argument is not a closure"),
+                    };
+                    if va {
+                        assert!(variadic.is_none(), "%multifn: two variadic clauses");
+                        variadic = Some((np, f));
+                    } else {
+                        if fixed.len() <= np {
+                            fixed.resize(np + 1, 0);
+                        }
+                        assert!(fixed[np] == 0, "%multifn: duplicate arity {np}");
+                        fixed[np] = f;
+                    }
+                }
+                let id = self.alloc(Obj::MultiFn { fixed, variadic });
+                M::R::enc_ref(id)
+            }
             Prim::ApushChunk => {
                 let src = self.arr_clone(args[1]);
                 let off = match self.decode(args[2]) { Val::Int(i) => i as usize, _ => panic!("apush-chunk: off") };
@@ -1961,7 +1989,7 @@ impl<M: ValueModel> Runtime<M> {
                 Obj::Vector(_) => (TYPE_TAG_VECTOR, "Vector"),
                 Obj::Str(_) => (TYPE_TAG_STRING, "String"),
                 Obj::Char(_) => (TYPE_TAG_CHAR, "Char"),
-                Obj::Closure { .. } => (TYPE_TAG_FN, "Fn"),
+                Obj::Closure { .. } | Obj::MultiFn { .. } => (TYPE_TAG_FN, "Fn"),
                 Obj::BigInt(_) | Obj::HugeInt(_) => (TYPE_TAG_LONG, "Long"),
                 Obj::Ratio(..) => (TYPE_TAG_RATIO, "Ratio"),
                 Obj::BoxFloat(_) => (TYPE_TAG_DOUBLE, "Double"),
@@ -2005,6 +2033,42 @@ impl<M: ValueModel> Runtime<M> {
             v => self.global((v - 1) as Sym),
         }
     }
+    /// If `callee` is a multi-arity fn, the closure serving `argc` arguments
+    /// (fixed arity first, else the variadic clause). `None` when `callee` is
+    /// not a MultiFn; a catchable arity throw when no clause matches.
+    pub fn multifn_select(&mut self, callee: u64, argc: usize) -> Option<u64> {
+        let Val::Ref(id) = self.decode(callee) else { return None };
+        let (sel, known) = match &self.heap()[id as usize] {
+            Obj::MultiFn { fixed, variadic } => {
+                let f = fixed.get(argc).copied().unwrap_or(0);
+                if f != 0 {
+                    (f, true)
+                } else if let Some((min, vf)) = variadic {
+                    if argc >= *min {
+                        (*vf, true)
+                    } else {
+                        (0, true)
+                    }
+                } else {
+                    (0, true)
+                }
+            }
+            _ => (0, false),
+        };
+        if !known {
+            return None;
+        }
+        if sel == 0 {
+            let msg = format!("arity: no clause for {argc} args");
+            let sid = self.alloc(Obj::Str(msg));
+            let thrown = M::R::enc_ref(sid);
+            self.signal_throw(thrown);
+            // Callers observe the pending signal and unwind.
+            return Some(self.encode(Val::Nil));
+        }
+        Some(sel)
+    }
+
     /// Resolve a call site via the current dispatch strategy (reads registry +
     /// updates the strategy's per-site cache), then invoke happens in the backend.
     /// The impl is copied out and the lock dropped before the caller invokes it.
@@ -2989,6 +3053,7 @@ impl<M: ValueModel> Runtime<M> {
                     inner.join(" ")
                 }
                 Obj::Closure { .. } => "#<closure>".to_string(),
+                Obj::MultiFn { .. } => "#<closure>".to_string(),
                 Obj::BigInt(i) => i.to_string(),
                 Obj::HugeInt(b) => b.to_string(),
                 Obj::Ratio(n, d) => format!("{n}/{d}"),

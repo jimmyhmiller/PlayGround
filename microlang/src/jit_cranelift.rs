@@ -625,6 +625,7 @@ fn prim_tag(p: Prim) -> u32 {
         PvConjChunk => 99,
         PvFromArray => 100,
         ApushChunk => 101,
+        MultiFnNew => 102,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -744,6 +745,7 @@ fn prim_from_tag(tag: u32) -> Prim {
         99 => PvConjChunk,
         100 => PvFromArray,
         101 => ApushChunk,
+        102 => MultiFnNew,
         other => panic!("bad prim tag {other}"),
     }
 }
@@ -1016,6 +1018,58 @@ impl Default for FastTarget {
 /// params (rare) use the ctx-entry + frame-loads prologue instead.
 const MAX_REG_ARGS: usize = 8;
 
+/// Speculative-inlining limits: a callee body inlines only when it is at most
+/// this many Ir nodes, and one compiled body stops inlining after this total
+/// (which is also what terminates recursive inlining — each nested inline
+/// strictly consumes budget).
+const INLINE_MAX_CALLEE_NODES: usize = 64;
+const INLINE_TOTAL_BUDGET: usize = 600;
+
+/// Count Ir nodes up to `limit`; `None` if the tree is bigger. (Not descending
+/// into nested `Lambda` bodies — they compile separately and only cost their
+/// closure-creation site here.)
+fn node_count_capped(ir: &Ir, limit: usize) -> Option<usize> {
+    fn walk(ir: &Ir, left: &mut isize) -> bool {
+        *left -= 1;
+        if *left < 0 {
+            return false;
+        }
+        match ir {
+            Ir::Const(_) | Ir::Quote(_) | Ir::Local { .. } | Ir::Capture(_) | Ir::Global(_)
+            | Ir::Lambda { .. } => true,
+            Ir::SetLocal { val, .. } | Ir::SetGlobal { val, .. } => walk(val, left),
+            Ir::If(a, b, c) => walk(a, left) && walk(b, left) && walk(c, left),
+            Ir::Do(xs) | Ir::Prim(_, xs) => xs.iter().all(|x| walk(x, left)),
+            Ir::Def { init, .. } => walk(init, left),
+            Ir::Call(f, args) => walk(f, left) && args.iter().all(|x| walk(x, left)),
+            Ir::DefMethod { imp, .. } => walk(imp, left),
+            Ir::Dispatch { args, .. } => args.iter().all(|x| walk(x, left)),
+            Ir::FieldGet { obj, .. } => walk(obj, left),
+            Ir::Try { body, catch, finally, .. } => {
+                walk(body, left)
+                    && catch.as_ref().is_none_or(|c| walk(c, left))
+                    && finally.as_ref().is_none_or(|f| walk(f, left))
+            }
+            Ir::Let(..) => false, // unflattened — never inline
+        }
+    }
+    let mut left = limit as isize;
+    if walk(ir, &mut left) {
+        Some((limit as isize - left) as usize)
+    } else {
+        None
+    }
+}
+
+/// What the speculative inliner needs to splice a known global callee into a
+/// call site: the guard bits and the callee's (capture-free) body + frame size.
+struct InlinePlan {
+    bits: u64,
+    nparams: usize,
+    nslots: u16,
+    body: Arc<Ir>,
+}
+
 /// Extra `FastTarget` slots reserved past the live heap size at each top-level
 /// form's start, so heap objects THIS form allocates while running still land
 /// in range (see the comment at the `eval_ir` resize site). 4M slots * 24 bytes
@@ -1055,6 +1109,10 @@ impl<M: ModelArithJit> JitCranelift<M> {
         // Bodies compile once and run many times, so optimize the emitted code
         // (register allocation, redundancy elimination) — worth the compile cost.
         flags.set("opt_level", "speed").unwrap();
+        // The IR verifier is a development aid; it showed up in profiles once the
+        // speculative inliner grew per-body code. The test suites are the
+        // correctness gate — skip verification in the built product.
+        flags.set("enable_verifier", "false").unwrap();
         let isa = cranelift_native::builder()
             .expect("host machine is not supported by Cranelift")
             .finish(settings::Flags::new(flags))
@@ -1189,7 +1247,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         {
             let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
             let shape = BodyShape { entry_arity: None, nparams: 0, variadic: false, nslots: 0, mem_mode: true, tail_root: true };
-            build_body::<M>(&mut module, &mut fb, self.shims, ir, &self.templates, shape);
+            build_body::<M>(&mut module, &mut fb, self.shims, None, ir, &self.templates, shape);
             fb.finalize();
         }
         let out = ctx.func.display().to_string();
@@ -1197,7 +1255,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         out
     }
 
-    fn compile(&self, ir: &Ir, shape: BodyShape) -> Arc<Compiled> {
+    fn compile(&self, rt: Option<&Runtime<M>>, ir: &Ir, shape: BodyShape) -> Arc<Compiled> {
         let mut module = self.module.borrow_mut();
         let mut fbctx = self.fbctx.borrow_mut();
         let mut ctx = module.make_context();
@@ -1210,7 +1268,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
 
         {
             let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
-            build_body::<M>(&mut module, &mut fb, self.shims, ir, &self.templates, shape);
+            build_body::<M>(&mut module, &mut fb, self.shims, rt, ir, &self.templates, shape);
             fb.finalize();
         }
 
@@ -1240,12 +1298,12 @@ impl<M: ModelArithJit> JitCranelift<M> {
         BodyShape { entry_arity, nparams, variadic, nslots, mem_mode, tail_root: true }
     }
 
-    fn compiled_body(&self, body: &Arc<Ir>, nparams: usize, variadic: bool, nslots: u16) -> Arc<Compiled> {
+    fn compiled_body(&self, rt: &Runtime<M>, body: &Arc<Ir>, nparams: usize, variadic: bool, nslots: u16) -> Arc<Compiled> {
         let key = Arc::as_ptr(body);
         if let Some(c) = self.cache.borrow().get(&key) {
             return c.clone();
         }
-        let c = self.compile(body, Self::body_shape(body, nparams, variadic, nslots));
+        let c = self.compile(Some(rt), body, Self::body_shape(body, nparams, variadic, nslots));
         self.cache.borrow_mut().insert(key, c.clone());
         c
     }
@@ -1268,7 +1326,9 @@ impl<M: ModelArithJit> JitCranelift<M> {
             }
             _ => panic!("value not callable: {}", rt.print(callee)),
         };
-        let compiled = self.compiled_body(&body, nparams, variadic, nslots);
+        let compiled = self.compiled_body(rt, &body, nparams, variadic, nslots);
+        // (MultiFn callees never reach here: `invoke`/the trampoline select the
+        // arity clause BEFORE resolution, so `callee` is always a closure.)
         self.call_ic.borrow_mut()[way] = Some(CallTarget {
             callee,
             nparams,
@@ -1536,6 +1596,15 @@ impl<M: ModelArithJit> JitCranelift<M> {
                         }
                         _ => callee,
                     };
+                    let callee = match rt.multifn_select(callee, args_buf.len()) {
+                        Some(sel) => {
+                            if rt.pending() {
+                                return M::R::enc_nil();
+                            }
+                            sel
+                        }
+                        None => callee,
+                    };
                     let (nparams, variadic, nslots, comp, ncaps) = self.resolve_call(rt, callee);
                     let arity_ok = if variadic {
                         args_buf.len() >= nparams
@@ -1579,7 +1648,7 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
             mem_mode: true,
             tail_root: false,
         };
-        let compiled = self.compile(ir, shape);
+        let compiled = self.compile(Some(rt), ir, shape);
         // Size the fast-call table to cover every closure that already exists, so
         // its base is stable for this whole form's run (it is only ever written,
         // never grown, during execution). Doing it here (form start) means no
@@ -1633,12 +1702,26 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
             }
             _ => (callee, args),
         };
+        // Multi-arity fn: select the clause serving this arg count. Remember the
+        // MultiFn's own bits — emitted call sites see THOSE as the callee, so
+        // its fast-table entry must carry the selected clause's entry.
+        let orig_callee = callee;
+        let callee = match rt.multifn_select(callee, args.len()) {
+            Some(sel) => {
+                if rt.pending() {
+                    return M::R::enc_nil();
+                }
+                sel
+            }
+            None => callee,
+        };
         // Resolve through the monomorphic inline cache (decode + heap + compiled +
         // caps all skipped on a repeat callee).
         let (nparams, variadic, nslots, compiled, caps) = self.resolve_call(rt, callee);
-        // Publish this closure's native fast entry so future call sites can jump
-        // to it directly.
-        self.publish_fast_target(callee, &compiled, &caps);
+        // Publish the native fast entry so future call sites can jump to it
+        // directly — under the value call sites actually see (the MultiFn id
+        // when routing happened, the closure id otherwise).
+        self.publish_fast_target(orig_callee, &compiled, &caps);
         // Arity mismatch is a CATCHABLE throw (matching TreeWalk / Clojure), not an
         // abort in this non-unwinding shim.
         let arity_ok = if variadic { args.len() >= nparams } else { args.len() == nparams };
@@ -1681,6 +1764,7 @@ fn build_body<M: ModelArithJit>(
     module: &mut JITModule,
     fb: &mut FunctionBuilder,
     shims: Shims,
+    rt: Option<&Runtime<M>>,
     ir: &Ir,
     tregistry: &RefCell<Vec<ClosureTemplate>>,
     shape: BodyShape,
@@ -1725,6 +1809,10 @@ fn build_body<M: ModelArithJit>(
         ctx_val,
         tregistry,
         entry_sigs: HashMap::new(),
+        // Type-erased (the `Compiler` struct is not generic over M; the
+        // M-generic methods cast it back). Never outlives this call.
+        rt_ptr: rt.map_or(std::ptr::null(), |r| r as *const Runtime<M> as *const ()),
+        inline_budget: Cell::new(INLINE_TOTAL_BUDGET),
         mem_mode: shape.mem_mode,
         // Stable byte offsets of `JitCtx` fields (repr(C)) for inline reads and for
         // building a callee context on the stack at a native call site.
@@ -1809,6 +1897,13 @@ pub struct Compiler<'a, 'b> {
     /// Imported `fn(ctx, a0..a{k-1}) -> u64` signatures for native fast calls,
     /// built lazily per arity.
     entry_sigs: HashMap<usize, cranelift_codegen::ir::SigRef>,
+    /// The runtime at COMPILE time (type-erased; may be null when unavailable,
+    /// e.g. `dump_ir`) — the var-guarded speculative inliner resolves `Global`
+    /// callees through it.
+    rt_ptr: *const (),
+    /// Remaining inlined-node allowance for THIS body (bounds code growth and
+    /// terminates recursive inlining).
+    inline_budget: Cell<usize>,
     /// Locals live in the heap frame (via `cur_slots`) instead of SSA variables.
     mem_mode: bool,
     off_cur_slots: i32,
@@ -1908,6 +2003,78 @@ impl<'a, 'b> Compiler<'a, 'b> {
     fn emit_local0_store(&mut self, idx: u16, v: Value) {
         let base = self.load_ctx_field(self.off_cur_slots);
         self.fb.ins().store(MemFlagsData::trusted(), v, base, (idx as i32) * 8);
+    }
+
+    /// Can `(s args…)` be speculatively inlined here? Requires: a compile-time
+    /// resolvable global bound to a NON-variadic, CAPTURE-FREE closure of
+    /// matching arity whose body is SSA-eligible and small, in an SSA-mode
+    /// caller, within budget. Consumes budget on success.
+    fn try_inline_plan<M: ModelArithJit>(&self, s: Sym, argc: usize) -> Option<InlinePlan> {
+        if self.mem_mode || self.rt_ptr.is_null() {
+            return None;
+        }
+        let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+        let bits = rt.global(s)?;
+        let Val::Ref(id) = rt.decode(bits) else { return None };
+        // See through a multi-arity fn: this call site's arg count statically
+        // selects one fixed clause. The guard still compares the GLOBAL's bits
+        // (the MultiFn), so redefinition deopts as usual.
+        let target = match &rt.heap()[id as usize] {
+            Obj::MultiFn { fixed, .. } => {
+                let f = fixed.get(argc).copied().unwrap_or(0);
+                if f == 0 {
+                    return None; // variadic / no such arity: not inlinable
+                }
+                f
+            }
+            _ => bits,
+        };
+        let Val::Ref(tid) = rt.decode(target) else { return None };
+        let (nparams, nslots, body) = match &rt.heap()[tid as usize] {
+            Obj::Closure { nparams, variadic: false, nslots, body, caps }
+                if caps.is_empty() && *nparams == argc =>
+            {
+                (*nparams, *nslots, body.clone())
+            }
+            _ => return None,
+        };
+        if body_mem_mode(&body) {
+            return None;
+        }
+        let cost = node_count_capped(&body, INLINE_MAX_CALLEE_NODES)?;
+        let budget = self.inline_budget.get();
+        if budget < cost {
+            return None;
+        }
+        self.inline_budget.set(budget - cost);
+        Some(InlinePlan { bits, nparams, nslots, body })
+    }
+
+    /// Splice an inlined callee body into the current function: fresh SSA vars
+    /// for its activation slots (params seeded from the evaluated args, the
+    /// rest nil), compiled in NON-tail position with no self-loop — its own
+    /// tail calls become ordinary calls, which preserves semantics (and one
+    /// inlined level never grows the stack unboundedly).
+    fn emit_inlined_body<M: ModelArithJit>(&mut self, plan: &InlinePlan, argvals: &[Value]) -> Value {
+        let saved_vars = std::mem::take(&mut self.vars);
+        let saved_header = self.loop_header.take();
+        let saved_nparams = self.loop_nparams;
+        for i in 0..plan.nslots as usize {
+            let var = self.fb.declare_var(I64);
+            if i < plan.nparams {
+                self.fb.def_var(var, argvals[i]);
+            } else {
+                let nil = self.fb.ins().iconst(I64, M::R::enc_nil() as i64);
+                self.fb.def_var(var, nil);
+            }
+            self.vars.push(var);
+        }
+        self.loop_nparams = plan.nparams;
+        let v = self.compile::<M>(&plan.body, false);
+        self.vars = saved_vars;
+        self.loop_header = saved_header;
+        self.loop_nparams = saved_nparams;
+        v
     }
 
     /// The imported signature for a native fast entry of arity `k`:
@@ -2224,6 +2391,59 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.call_shim(self.refs.make_closure, &[ctx, tidv, addr])
             }
             Ir::Call(f, args) => {
+                // Var-guarded speculative inlining: a non-tail call of a global
+                // bound (NOW, at compile time) to a small capture-free closure
+                // splices the callee body inline behind a one-compare guard on
+                // the global slot. Redefinition (or a GC move) fails the guard
+                // and takes the general path — never a wrong answer.
+                if !tail {
+                    if let Ir::Global(gsym) = f.as_ref() {
+                        if let Some(plan) = self.try_inline_plan::<M>(*gsym, args.len()) {
+                            let argvals: Vec<Value> =
+                                args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                            let base = self.load_rc_field(self.off_global_base);
+                            let raw = self.fb.ins().load(
+                                I64,
+                                MemFlagsData::trusted(),
+                                base,
+                                (*gsym as i32) * 8,
+                            );
+                            let want = self.iconst(plan.bits);
+                            let bits_ok = self.fb.ins().icmp(IntCC::Equal, raw, want);
+                            // Composition: an inlined call is invisible to `top`,
+                            // so it is only legal when no wrapper is observing
+                            // calls — the same `direct` rule as the fast-call path.
+                            let ro = MemFlagsData::trusted().with_readonly();
+                            let rc = self.rc_val;
+                            let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
+                            let same = self.fb.ins().band(bits_ok, direct);
+                            let result = self.fb.declare_var(I64);
+                            let inlb = self.fb.create_block();
+                            let slowb = self.fb.create_block();
+                            let merge = self.fb.create_block();
+                            self.fb.ins().brif(same, inlb, &[], slowb, &[]);
+
+                            self.fb.switch_to_block(inlb);
+                            self.fb.seal_block(inlb);
+                            let iv = self.emit_inlined_body::<M>(&plan, &argvals);
+                            self.fb.def_var(result, iv);
+                            self.fb.ins().jump(merge, &[]);
+
+                            // Deopt: the general callee compile (handles unbound
+                            // too) + the ordinary call path.
+                            self.fb.switch_to_block(slowb);
+                            self.fb.seal_block(slowb);
+                            let callee = self.compile::<M>(f, false);
+                            let sv = self.emit_call::<M>(callee, &argvals);
+                            self.fb.def_var(result, sv);
+                            self.fb.ins().jump(merge, &[]);
+
+                            self.fb.switch_to_block(merge);
+                            self.fb.seal_block(merge);
+                            return self.fb.use_var(result);
+                        }
+                    }
+                }
                 let callee = self.compile::<M>(f, false);
                 let argvals: Vec<Value> =
                     args.iter().map(|a| self.compile::<M>(a, false)).collect();
@@ -2693,6 +2913,17 @@ impl<M: ModelArithJit> CodeSpace<M> for Tiered<M> {
         let native = match rt.decode(callee) {
             Val::Ref(id) => match &rt.heap()[id as usize] {
                 Obj::Closure { body, .. } => jit_can_compile(body),
+                // Route a multi-arity fn on the clause this call selects.
+                Obj::MultiFn { .. } => match rt.multifn_select(callee, args.len()) {
+                    Some(sel) if !rt.pending() => match rt.decode(sel) {
+                        Val::Ref(cid) => match &rt.heap()[cid as usize] {
+                            Obj::Closure { body, .. } => jit_can_compile(body),
+                            _ => true,
+                        },
+                        _ => true,
+                    },
+                    _ => true,
+                },
                 _ => true, // non-closure callables (escape conts) are the JIT's error path
             },
             _ => true,

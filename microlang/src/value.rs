@@ -108,6 +108,17 @@ pub enum Obj {
         /// heap refs they hold in place.
         caps: Caps,
     },
+    /// A MULTI-ARITY function: per-arity closures selected by argument count at
+    /// call time (real Clojure's `IFn.invoke(a, b, …)` overloads). `fixed[k]`
+    /// holds the k-param closure's bits (0 = no such arity); `variadic` is the
+    /// `[… & rest]` clause (min fixed count, closure bits). Selecting a fixed
+    /// arity costs one index — no rest-list allocation, and the selected
+    /// closure is an ordinary fixed-arity closure (register-callable,
+    /// inlinable). Built by the `%multifn` prim.
+    MultiFn {
+        fixed: Vec<u64>,
+        variadic: Option<(usize, u64)>,
+    },
     /// A user record: a type tag (interned symbol) plus positional fields. The
     /// thing polymorphic dispatch dispatches ON.
     Record {

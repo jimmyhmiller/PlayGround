@@ -358,6 +358,20 @@ fn scan_obj<M: ValueModel>(
         }
         return;
     }
+    // MultiFn: forward each per-arity closure ref.
+    if let Obj::MultiFn { fixed, variadic } = &to[i] {
+        let (fs, va) = (fixed.clone(), *variadic);
+        let nf: Vec<u64> = fs
+            .into_iter()
+            .map(|f| if f == 0 { 0 } else { fw::<M>(heap, from_len, to, reloc, f) })
+            .collect();
+        let nv = va.map(|(min, f)| (min, fw::<M>(heap, from_len, to, reloc, f)));
+        if let Obj::MultiFn { fixed, variadic } = &mut to[i] {
+            *fixed = nf;
+            *variadic = nv;
+        }
+        return;
+    }
     // Record: forward each field.
     if let Obj::Record { fields, .. } = &to[i] {
         let fs = fields.clone();

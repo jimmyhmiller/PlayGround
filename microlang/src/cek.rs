@@ -271,6 +271,13 @@ fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Arc<Kont>) -> Step
 /// body; a continuation RE-INSTALLS itself with the argument (the multi-shot
 /// jump — it discards `next` and resumes the captured `Kont`).
 fn apply_callable<M: ValueModel>(rt: &mut Runtime<M>, callee: u64, args: &[u64], next: Arc<Kont>) -> Step {
+    let mut callee = callee;
+    if let Some(sel) = rt.multifn_select(callee, args.len()) {
+        if rt.pending() {
+            return Step::Apply(M::R::enc_nil(), next);
+        }
+        callee = sel;
+    }
     let Val::Ref(id) = rt.decode(callee) else {
         panic!("value not callable: {}", rt.print(callee));
     };

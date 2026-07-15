@@ -378,6 +378,15 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                     continue;
                 }
             }
+            // Multi-arity fn: select the clause serving this arg count and loop.
+            if matches!(&rt.heap()[id as usize], Obj::MultiFn { .. }) {
+                let sel = rt.multifn_select(callee, args.len()).expect("checked MultiFn");
+                if rt.pending() {
+                    return M::R::enc_nil(); // no matching clause: arity throw
+                }
+                callee = sel;
+                continue;
+            }
             let (nparams, variadic, nslots, body, caps) = match &rt.heap()[id as usize] {
                 Obj::Closure {
                     nparams,

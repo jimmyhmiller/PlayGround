@@ -261,6 +261,13 @@ impl<M: ValueModel> CodeSpace<M> for ClosureComp<M> {
         callee: u64,
         args: &[u64],
     ) -> u64 {
+        let mut callee = callee;
+        if let Some(sel) = rt.multifn_select(callee, args.len()) {
+            if rt.pending() {
+                return M::R::enc_nil();
+            }
+            callee = sel;
+        }
         let Val::Ref(id) = rt.decode(callee) else {
             panic!("value not callable: {}", rt.print(callee));
         };

@@ -344,6 +344,11 @@ pub enum Prim {
     /// array `arr` in one native call (a Rust extend), returning `arr`. Lets a
     /// chunked seq be collected into a flat array a whole chunk at a time.
     ApushChunk,
+    /// `(%multifn f g ...)` — build a MULTI-ARITY function value from closure
+    /// arguments: each fixed-arity closure is selectable by its own param
+    /// count; at most one variadic closure serves every higher/unmatched count.
+    /// The frontend's multi-arity `fn` desugars to per-clause closures + this.
+    MultiFnNew,
     /// `(%all-fixnum? a b ...)` — true iff EVERY argument is an immediate fixnum.
     /// The guard the specializer places at a lambda's entry; when it holds, the
     /// body's `Fx*` ops are valid. On the JIT it lowers to a single combined

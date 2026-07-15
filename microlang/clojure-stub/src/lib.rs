@@ -1697,71 +1697,24 @@ fn has_recur<M: ValueModel>(rt: &Runtime<M>, form: u64) -> bool {
 /// Multiple arities -> `(fn* [& g] (let [n (count g)] (cond (= n k0) (let [pv0 g] b0) … true (let [pvV g] bV))))`.
 /// Each arity's params destructure `g`; a variadic clause is the catch-all.
 fn multi_arity<M: ValueModel>(rt: &mut Runtime<M>, clauses: &[u64]) -> u64 {
-    let g = gensym(rt, "args");
-    let n = gensym(rt, "n");
-    let condsym = sym(rt, "cond");
-    let mut cond = vec![condsym];
+    // Per-arity BODIES, selected by argument count in the runtime (`%multifn`)
+    // — real Clojure's IFn.invoke(a, b, …) overloads. Each fixed-arity clause
+    // becomes an ordinary fixed-arity fn (register-callable on the JIT,
+    // inlinable, no rest-list allocation); the variadic clause stays a
+    // variadic fn serving every higher count.
+    //   (fn ([a] e1) ([a b] e2) ([a b & r] e3))
+    //   => (%multifn (fn* [a] e1') (fn* [a b] e2') (fn* [a b & r] e3'))
+    let fnstar = sym(rt, "fn*");
+    let mf = sym(rt, "%multifn");
+    let mut out = vec![mf];
     for &clause in clauses {
         let parts = rt.list_to_vec(clause);
-        let paramvec = parts[0];
-        let params = binding_items(rt, paramvec).unwrap_or_default();
-        let variadic = params.iter().any(|&p| is_sym(rt, p, "&"));
-        let fixed = params.iter().position(|&p| is_sym(rt, p, "&")).unwrap_or(params.len());
-        let test = if variadic {
-            rt.encode(Val::Bool(true))
-        } else {
-            // Arity test via the `%num-eq` PRIM (inlines to `Prim(Eq)`), not the
-            // variadic `=` fn which allocates a seq on every dispatch.
-            let k = int(rt, fixed as i128);
-            call2(rt, "%num-eq", n, k)
-        };
-        let (paramvec, body) = wrap_fn_recur(rt, paramvec, &parts[1..]);
-        // Bind each fixed param from `g` via the `%first`/`%rest` PRIMS (no
-        // allocation) instead of `[paramvec] g`, which destructured through the
-        // variadic `nth` fn — an arg-list alloc PER PARAM, on every call to any
-        // multi-arity fn (`conj`/`nth`/`assoc`/`=`/…). A `& rest` tail binds to
-        // the remaining list directly. Destructuring-pattern params still work:
-        // the pattern is bound from the `(%first …)` expression by the let binder.
-        let plist = binding_items(rt, paramvec).unwrap_or_else(|| rt.list_to_vec(paramvec));
-        let mut binds: Vec<u64> = Vec::new();
-        let mut depth = 0usize;
-        let mut amp = false;
-        for &p in &plist {
-            if is_sym(rt, p, "&") {
-                amp = true;
-                continue;
-            }
-            let mut cursor = g;
-            for _ in 0..depth {
-                cursor = call1(rt, "%rest", cursor);
-            }
-            if amp {
-                binds.push(p);
-                binds.push(cursor);
-            } else {
-                let fe = call1(rt, "%first", cursor);
-                binds.push(p);
-                binds.push(fe);
-                depth += 1;
-            }
-        }
-        let letsym = sym(rt, "let");
-        let bindvec = make_vector(rt, binds);
-        let mut letf = vec![letsym, bindvec];
-        letf.extend(body);
-        let letform = rt.vec_to_list(&letf);
-        cond.push(test);
-        cond.push(letform);
+        let (paramvec, body) = wrap_fn_recur(rt, parts[0], &parts[1..]);
+        let mut f = vec![fnstar, paramvec];
+        f.extend(body);
+        out.push(rt.vec_to_list(&f));
     }
-    let condform = rt.vec_to_list(&cond);
-    let letsym = sym(rt, "let");
-    let countg = call1(rt, "count", g);
-    let bindn = make_vector(rt, vec![n, countg]);
-    let letn = rt.vec_to_list(&[letsym, bindn, condform]);
-    let fnstar = sym(rt, "fn*");
-    let amp = sym(rt, "&");
-    let paramvec = make_vector(rt, vec![amp, g]);
-    rt.vec_to_list(&[fnstar, paramvec, letn])
+    rt.vec_to_list(&out)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
