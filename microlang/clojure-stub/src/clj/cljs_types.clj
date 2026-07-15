@@ -219,7 +219,10 @@
 (def -EMPTY-PV (PersistentVector. nil 0 5 -EMPTY-NODE (array) empty-ordered-hash))
 
 (defn vector? [x] (%num-eq (type-of x) 'PersistentVector))
-(defn vec [coll] (reduce conj -EMPTY-PV (seq coll)))
+;; Build the vector bottom-up from a flat array in one native pass (O(n), no
+;; per-conj tail clone) instead of reduce-conj (O(32n)). -to-array collects the
+;; coll (chunk at a time); %pv-from-array assembles the trie.
+(defn vec [coll] (%pv-from-array (-to-array coll)))
 (defn vector [& args] (vec args))
 
 ;; metadata now flows through IMeta/IWithMeta (PersistentVector carries it in its

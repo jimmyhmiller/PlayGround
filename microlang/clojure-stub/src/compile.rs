@@ -119,6 +119,7 @@ impl Compiler {
             ("%lazy-realize!", LazyRealize), ("%range-fill", RangeFill),
             ("%hamt-assoc", HamtAssoc), ("%hamt-lookup", HamtLookup), ("%hamt-without", HamtWithout),
             ("%str-join-arr", StrJoinArr), ("%str-cmp", StrCmp), ("%pv-conj-chunk", PvConjChunk),
+            ("%pv-from-array", PvFromArray), ("%apush-chunk", ApushChunk),
             ("%apush", ArrPush), ("%ashift", ArrShift), ("%aclear", ArrClear),
             ("%read-string", ReadString), ("%eval", Eval), ("%macroexpand-1", MacroExpand1),
             ("%numerator", Numerator), ("%denominator", Denominator), ("%bigint?", BigIntP), ("%to-long", ToLong),

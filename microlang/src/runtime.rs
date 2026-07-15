@@ -1034,6 +1034,17 @@ impl<M: ValueModel> Runtime<M> {
                 }
                 pv
             }
+            Prim::PvFromArray => self.pv_from_array(args[0]),
+            Prim::ApushChunk => {
+                let src = self.arr_clone(args[1]);
+                let off = match self.decode(args[2]) { Val::Int(i) => i as usize, _ => panic!("apush-chunk: off") };
+                let end = match self.decode(args[3]) { Val::Int(i) => i as usize, _ => panic!("apush-chunk: end") };
+                let Val::Ref(id) = self.decode(args[0]) else { panic!("apush-chunk: not an array"); };
+                let _g = self.shared.heap_lock.lock().unwrap();
+                let Obj::Vector(elems) = &mut self.heap_mut()[id as usize] else { panic!("apush-chunk: not an array"); };
+                elems.extend_from_slice(&src[off..end]);
+                args[0]
+            }
             Prim::PvNth => {
                 let Val::Int(i) = self.decode(args[1]) else { panic!("pv-nth: index must be an int"); };
                 self.pv_nth(args[0], i as i64)
@@ -2290,6 +2301,55 @@ impl<M: ValueModel> Runtime<M> {
         };
         let new_tail = self.mk_array(vec![o]);
         self.mk_pv(meta, cnt + 1, new_shift, new_root, new_tail)
+    }
+    /// Build a PersistentVector from a flat element array, bottom-up: chunk the
+    /// non-tail elements into 32-wide leaves, then group nodes 32-at-a-time up to
+    /// a single root. O(n) with no per-element tail clone. `shift` tracks the
+    /// depth so nth/seq/pop stay consistent (the exact tree need not match what
+    /// incremental conj builds — both are valid tries over the same elements).
+    fn pv_from_array(&mut self, arr_bits: u64) -> u64 {
+        let elems = self.arr_clone(arr_bits);
+        let n = elems.len() as i64;
+        let nil = self.enc_nil();
+        let tailoff = Self::tail_off(n);
+        let tail_vec: Vec<u64> = elems[tailoff as usize..].to_vec();
+        let tail = self.mk_array(tail_vec);
+        if tailoff == 0 {
+            // All elements (0..32) live in the tail; root is an empty leaf level.
+            let en = self.mk_array(vec![nil; 32]);
+            let root = self.mk_node(en);
+            return self.mk_pv(nil, n, 5, root, tail);
+        }
+        // Leaf nodes: each wraps an exactly-32 run of elements.
+        let mut level: Vec<u64> = Vec::new();
+        let mut i = 0i64;
+        while i < tailoff {
+            let leaf_vec: Vec<u64> = elems[i as usize..(i + 32) as usize].to_vec();
+            let la = self.mk_array(leaf_vec);
+            level.push(self.mk_node(la));
+            i += 32;
+        }
+        // Group nodes into 32-wide (nil-padded) parents until one root remains.
+        let mut shift = 5i64;
+        loop {
+            let mut parents: Vec<u64> = Vec::new();
+            let mut j = 0usize;
+            while j < level.len() {
+                let end = (j + 32).min(level.len());
+                let mut pa = vec![nil; 32];
+                for (k, idx) in (j..end).enumerate() {
+                    pa[k] = level[idx];
+                }
+                let paa = self.mk_array(pa);
+                parents.push(self.mk_node(paa));
+                j += 32;
+            }
+            if parents.len() == 1 {
+                return self.mk_pv(nil, n, shift, parents[0], tail);
+            }
+            level = parents;
+            shift += 5;
+        }
     }
     fn pv_nth(&mut self, pv: u64, i: i64) -> u64 {
         let (_, cnt, shift, root, tail) = self.pv_read(pv);

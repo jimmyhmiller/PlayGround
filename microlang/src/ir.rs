@@ -334,6 +334,16 @@ pub enum Prim {
     /// chunk. Vectors are ORDERED, so there is no print-order/type ambiguity to
     /// preserve (unlike a native map batch-build).
     PvConjChunk,
+    /// `(%pv-from-array arr)` -> a PersistentVector holding `arr`'s elements,
+    /// built BOTTOM-UP (leaves then parent levels) in one native pass — O(n),
+    /// with NO per-element tail-array clone (unlike repeated conj, which is
+    /// O(32n)). The trie is internally consistent (shift == depth); exact shape
+    /// need not match incremental conj since nth/seq/count/pop all key off shift.
+    PvFromArray,
+    /// `(%apush-chunk arr src off end)` -> append `src[off..end]` to the growable
+    /// array `arr` in one native call (a Rust extend), returning `arr`. Lets a
+    /// chunked seq be collected into a flat array a whole chunk at a time.
+    ApushChunk,
     /// `(%all-fixnum? a b ...)` — true iff EVERY argument is an immediate fixnum.
     /// The guard the specializer places at a lambda's entry; when it holds, the
     /// body's `Fx*` ops are valid. On the JIT it lowers to a single combined

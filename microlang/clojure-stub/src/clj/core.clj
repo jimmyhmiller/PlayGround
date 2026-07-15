@@ -1325,10 +1325,18 @@
 ;; native-comparator sort; it fixes the STACK SAFETY and the allocation
 ;; pattern, not the per-comparison interpreted-call cost.
 (defn -default-less [a b] (%lt (compare a b) 0))
+;; Collect a coll into a flat growable array, appending a whole ChunkedCons run
+;; at a time (%apush-chunk) rather than one %apush per element.
 (defn -to-array [coll]
   (let [arr (%make-array 0)]
     (loop [s (seq coll)]
-      (if (nil? s) arr (do (%apush arr (%first s)) (recur (next s)))))))
+      (cond (nil? s) arr
+            ;; `(seq (field s 3))` normalizes the tail: a chunk's tail is an
+            ;; unforced LazySeq that may realize to nil (end of seq) — recurring
+            ;; with it raw would slip past the `(nil? s)` guard and append a
+            ;; spurious `(%first empty)` = nil.
+            (chunked? s) (do (%apush-chunk arr (field s 0) (field s 1) (field s 2)) (recur (seq (field s 3))))
+            true (do (%apush arr (%first s)) (recur (next s)))))))
 ;; Merge the two runs [lo,mid) and [mid,hi) of `src` into `dst` at [lo,hi).
 ;; Ties (neither `less` the other) take from the LEFT run first, so equal
 ;; elements keep their original relative order — `sort`/`sort-by` are stable.

@@ -635,6 +635,8 @@ fn prim_tag(p: Prim) -> u32 {
         StrJoinArr => 97,
         StrCmp => 98,
         PvConjChunk => 99,
+        PvFromArray => 100,
+        ApushChunk => 101,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -752,6 +754,8 @@ fn prim_from_tag(tag: u32) -> Prim {
         97 => StrJoinArr,
         98 => StrCmp,
         99 => PvConjChunk,
+        100 => PvFromArray,
+        101 => ApushChunk,
         other => panic!("bad prim tag {other}"),
     }
 }
