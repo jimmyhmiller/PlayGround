@@ -321,6 +321,12 @@ pub enum Prim {
     /// (each intermediate concat touched a string as long as everything
     /// built so far) with one O(total length) native pass.
     StrJoinArr,
+    /// `(%str-cmp a b)` -> -1 / 0 / 1 comparing two strings. Rust byte-wise
+    /// `str::cmp` equals code-point order for all valid UTF-8, which is exactly
+    /// what the in-language char-by-char `-str<` computed — one native call
+    /// instead of building two char lists and walking them per comparison
+    /// (`sort`/`sort-by` on strings called that O(len) helper per comparison).
+    StrCmp,
     /// `(%all-fixnum? a b ...)` — true iff EVERY argument is an immediate fixnum.
     /// The guard the specializer places at a lambda's entry; when it holds, the
     /// body's `Fx*` ops are valid. On the JIT it lowers to a single combined

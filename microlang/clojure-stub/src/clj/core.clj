@@ -2100,14 +2100,9 @@
 (defn ifn? [x] (or (fn? x) (keyword? x) (map? x) (set? x) (vector? x) (symbol? x)))
 (defn distinct? [& xs] (%num-eq (count xs) (count (distinct xs))))
 ;; comparison: numbers and strings (char-code lexicographic).
-(defn -str< [a b]
-  (let [as (%str->chars a) bs (%str->chars b)]
-    (loop [as as bs bs]
-      (cond (nil? (seq as)) (if (nil? (seq bs)) 0 -1)
-            (nil? (seq bs)) 1
-            (%lt (%char-code (first as)) (%char-code (first bs))) -1
-            (%lt (%char-code (first bs)) (%char-code (first as))) 1
-            true (recur (rest as) (rest bs))))))
+;; Native comparison (Rust byte order == code-point order for valid UTF-8),
+;; replacing the char-by-char seq walk that ran per sort comparison.
+(defn -str< [a b] (%str-cmp a b))
 (defn compare [a b]
   (cond (nil? a) (if (nil? b) 0 -1)
         (nil? b) 1

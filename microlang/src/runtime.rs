@@ -1092,6 +1092,30 @@ impl<M: ValueModel> Runtime<M> {
                 let sid = self.alloc(Obj::Str(out));
                 M::R::enc_ref(sid)
             }
+            // clojure.core's `compare` on strings is Java String.compareTo: the
+            // code-point difference at the first mismatch, else the length
+            // difference (NOT clamped to ±1). Matches for all BMP text (Rust
+            // char == UTF-16 unit there); the previous in-language `-str<` only
+            // returned ±1/0, so this is strictly closer to Clojure.
+            Prim::StrCmp => {
+                let a = self.as_str(args[0], "str-cmp");
+                let b = self.as_str(args[1], "str-cmp");
+                let mut ai = a.chars();
+                let mut bi = b.chars();
+                let c: i32 = loop {
+                    match (ai.next(), bi.next()) {
+                        (Some(x), Some(y)) => {
+                            if x != y {
+                                break x as i32 - y as i32;
+                            }
+                        }
+                        (Some(_), None) => break 1 + ai.count() as i32,
+                        (None, Some(_)) => break -1 - bi.count() as i32,
+                        (None, None) => break 0,
+                    }
+                };
+                self.encode(Val::Int(c as i128))
+            }
             Prim::ArrPush => {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("apush: not an array");

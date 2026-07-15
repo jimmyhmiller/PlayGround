@@ -633,6 +633,7 @@ fn prim_tag(p: Prim) -> u32 {
         HamtLookup => 95,
         HamtWithout => 96,
         StrJoinArr => 97,
+        StrCmp => 98,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -748,6 +749,7 @@ fn prim_from_tag(tag: u32) -> Prim {
         95 => HamtLookup,
         96 => HamtWithout,
         97 => StrJoinArr,
+        98 => StrCmp,
         other => panic!("bad prim tag {other}"),
     }
 }
