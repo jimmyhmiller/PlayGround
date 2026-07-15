@@ -529,16 +529,26 @@ impl Heap {
     }
 
     pub fn with_space_size(bytes: usize) -> Self {
-        let h = Heap {
+        // The window stays EMPTY (limit 0 = closed, every inline allocation
+        // takes the slow path) until `arm_window` — the cursor mirror is a
+        // pointer INTO this struct's inline spaces, so arming here would
+        // dangle the moment the constructed Heap is moved to its final home.
+        Heap {
             spaces: [AtomicBumpAllocator::new(bytes), AtomicBumpAllocator::new(bytes)],
             active: AtomicUsize::new(0),
             verify: verify_armed_default(),
             collections: AtomicU64::new(0),
             last_live_bytes: AtomicUsize::new(0),
             window: AllocWindow::empty(),
-        };
-        h.window.point_at(&h.spaces[0], bytes);
-        h
+        }
+    }
+
+    /// Open the JIT's inline-allocation window. Must be called (once) AFTER
+    /// the heap has reached its final address — `self`'s spaces are inline, so
+    /// the window's cursor pointer is only stable from then on. (Collections
+    /// re-point it at every flip.)
+    pub fn arm_window(&self) {
+        self.window.point_at(self.from_space(), self.from_space().size());
     }
 
     #[inline(always)]
@@ -1261,6 +1271,7 @@ mod tests {
     #[test]
     fn alloc_window_mirrors_active_space() {
         let (h, t) = small_heap();
+        h.arm_window(); // the heap is at its final address now
         let base0 = h.window.base.load(Ordering::Acquire);
         assert_eq!(base0, h.from_space().base());
         let mut root = imm(0);

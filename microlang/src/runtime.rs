@@ -440,6 +440,10 @@ impl<M: ValueModel> Runtime<M> {
             field_ic: fic,
             ..shared
         });
+        // The heap has its FINAL address now (inside the Arc): open the JIT's
+        // inline-allocation window. Arming any earlier would leave its cursor
+        // mirror pointing at a moved-from temporary.
+        shared.heap.arm_window();
         let me = register_mutator(&shared);
         Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), site_ic: std::cell::RefCell::new(Vec::new()), eval_bridge: None, _pd: PhantomData }
     }

@@ -219,3 +219,111 @@ fn jit_rejects_callcc_clearly() {
     let cs = JitCranelift::<LowBitModel>::new();
     microlang::sexpr::eval_str(&mut rt, &cs, "(%callcc (fn (k) 1))");
 }
+
+/// A program mixing every inline allocation site (cons cells, closures) plus
+/// first/rest walks — the D5 fast paths and the empty-list tail normalization.
+const ALLOC_HEAVY: &str = "
+    (def build (fn (n acc) (if (= n 0) acc (build (- n 1) (cons n acc)))))
+    (def sum (fn (xs acc) (if (nil? xs) acc (sum (rest xs) (+ acc (first xs))))))
+    (def make-adder (fn (n) (fn (m) (+ n m))))
+    (+ (sum (build 100 nil) 0)
+       (+ ((make-adder 5) 10)
+          (first (cons 7 (list)))))"; // (cons x ()) => (7): tail normalized
+
+/// Inline allocation under GC-STRESS: closing the AllocWindow (`limit = 0`)
+/// forces EVERY emitted allocation through the out-of-line shim; results are
+/// identical to the open-window run. This pins the emitted `limit == 0` guard
+/// (heap.rs's documented gc-stress mode).
+#[test]
+fn jit_inline_alloc_matches_under_gc_stress() {
+    // window open (armed by Runtime::new): the inline fast path runs
+    assert_eq!(jit::<LowBitModel>(ALLOC_HEAVY), "5072");
+    assert_eq!(jit::<LowBitModel>(ALLOC_HEAVY), walk::<LowBitModel>(ALLOC_HEAVY));
+    // window closed: same program, every site falls to the shim
+    let mut rt = Runtime::<LowBitModel>::new();
+    rt.heap().window.limit.store(0, std::sync::atomic::Ordering::Release);
+    let cs = JitCranelift::<LowBitModel>::new();
+    let r = microlang::sexpr::eval_str(&mut rt, &cs, ALLOC_HEAVY);
+    assert_eq!(rt.print(r), "5072");
+}
+
+/// Assert that evaluating `src` on the JIT dies LOUDLY with `expected` in its
+/// stderr. A runtime panic crosses an `extern "C"` shim frame, which cannot
+/// unwind — the process aborts (that IS the loudness contract) — so the panic
+/// must be observed from a subprocess, not `#[should_panic]`. The child is
+/// this same test binary re-running the named test with `MICROLANG_JIT_DIE=src`.
+fn assert_dies_loudly(test_name: &str, expected: &str) {
+    let src = std::env::var("MICROLANG_JIT_DIE").ok();
+    if let Some(src) = src {
+        jit::<LowBitModel>(&src);
+        unreachable!("expected a loud panic evaluating {src}");
+    }
+    let exe = std::env::current_exe().unwrap();
+    let src = match test_name {
+        "jit_aget_out_of_bounds_still_panics" => "(let (v (vector 1 2 3)) (vector-ref v 10))",
+        "jit_aset_out_of_bounds_still_panics" => "(let (v (vector 1 2 3)) (vector-set! v -1 0))",
+        other => panic!("assert_dies_loudly: unknown test {other}"),
+    };
+    let out = std::process::Command::new(exe)
+        .args([test_name, "--exact", "--nocapture", "--test-threads=1"])
+        .env("MICROLANG_JIT_DIE", src)
+        .output()
+        .expect("spawn child test process");
+    assert!(!out.status.success(), "child must die on out-of-bounds access");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(expected), "expected loud '{expected}' panic, got:\n{err}");
+}
+
+/// The inline %aget path bounds-checks against the handle's logical length and
+/// routes violations to the shim — the loud out-of-range panic is preserved.
+#[test]
+fn jit_aget_out_of_bounds_still_panics() {
+    assert_dies_loudly("jit_aget_out_of_bounds_still_panics", "out of range");
+}
+
+/// Same for %aset — and a negative index (which untags to a huge unsigned
+/// value in the inline check) also lands on the shim's panic.
+#[test]
+fn jit_aset_out_of_bounds_still_panics() {
+    assert_dies_loudly("jit_aset_out_of_bounds_still_panics", "out of range");
+}
+
+/// The emitted dispatch inline cache is epoch-checked against the relocation
+/// count: an explicit (gc) MOVES the receiver and the impl, so a cached entry
+/// must never be called stale — the site misses, re-resolves through the shim
+/// (finding the moved impl via its root), and refills.
+#[test]
+fn jit_dispatch_ic_survives_moving_gc() {
+    let mut rt = Runtime::<LowBitModel>::new();
+    let cs = JitCranelift::<LowBitModel>::new();
+    let r = microlang::sexpr::eval_str(
+        &mut rt,
+        &cs,
+        r#"
+        (defmethod area Circle (fn (s) (* (field s 0) (field s 0))))
+        (def c (record 'Circle 3))
+        (def go (fn (x n acc) (if (= n 0) acc (go x (- n 1) (+ acc (area x))))))
+        (def a (go c 10 0)) ; hot loop: fills + hits the emitted IC
+        (gc)                ; relocates c + the impl closure
+        (+ a (go c 10 0))   ; must re-resolve, not call the moved-from impl
+        "#,
+    );
+    assert_eq!(rt.print(r), "180");
+    assert!(rt.relocated() > 0);
+}
+
+/// The IC epoch also folds the dispatch VERSION: redefining a method between
+/// hot loops invalidates immediately (no stale impl from the cache).
+#[test]
+fn jit_dispatch_ic_sees_redefinition() {
+    let src = r#"
+        (defmethod area Circle (fn (s) 1))
+        (def c (record 'Circle 3))
+        (def go (fn (x n acc) (if (= n 0) acc (go x (- n 1) (+ acc (area x))))))
+        (def a (go c 5 0))
+        (defmethod area Circle (fn (s) 2))
+        (+ a (go c 5 0))
+    "#;
+    assert_eq!(jit::<LowBitModel>(src), "15");
+    assert_eq!(jit::<LowBitModel>(src), walk::<LowBitModel>(src));
+}

@@ -62,7 +62,9 @@ use std::sync::Arc;
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I128, I64, I8};
-use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{
+    AbiParam, AtomicRmwOp, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Value,
+};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -118,6 +120,18 @@ pub struct JitCtx<'a, M: ValueModel> {
     /// yet" and the compiled code falls back to the slow late-binding lookup.
     global_base: Cell<*const u64>,
     global_len: Cell<usize>,
+    /// Address of the heap's `AllocWindow` (cursor ptr / base / limit at
+    /// offsets 0/8/16 — ABI, see heap.rs), for the inline allocation fast path
+    /// (D5). Emitted code re-reads the fields on every allocation: they change
+    /// at space flips (under STW) and `limit == 0` is gc-stress mode.
+    alloc_window: Cell<*const u8>,
+    /// Address of `Shared.relocated` (the collection counter) — one half of the
+    /// dispatch-IC epoch. Stable for the runtime's lifetime; mutated only under
+    /// STW, so a plain load is sound.
+    reloc_ptr: Cell<*const u64>,
+    /// Address of `Shared.dispatch_version` (bumped per `register_method`) —
+    /// the other epoch half, so a redefinition invalidates immediately.
+    dispver_ptr: Cell<*const u64>,
     /// Is the native fast call path enabled? True only when this backend is the
     /// OUTERMOST one (`top == self`). When wrapped (e.g. by `Traced`, which must
     /// observe every call, or a future router), this is 0 and every call takes the
@@ -421,6 +435,9 @@ fn shim_fast_invoke<M: ValueModel>(
         consts_base: Cell::new(std::ptr::null()),
         global_base: Cell::new(std::ptr::null()),
         global_len: Cell::new(0),
+        alloc_window: Cell::new(std::ptr::null()),
+        reloc_ptr: Cell::new(std::ptr::null()),
+        dispver_ptr: Cell::new(std::ptr::null()),
         direct: Cell::new(1),
         self_closure: Cell::new(callee),
         caps_base: Cell::new(caps_base),
@@ -457,7 +474,7 @@ fn shim_fast_invoke<M: ValueModel>(
     Some(ret)
 }
 
-extern "C" fn shim_dispatch<M: ValueModel>(
+extern "C" fn shim_dispatch<M: ModelArithJit>(
     ctx: *mut JitCtx<M>,
     site: u32,
     method: u32,
@@ -481,6 +498,26 @@ extern "C" fn shim_dispatch<M: ValueModel>(
             return M::R::enc_nil();
         }
     };
+    // Refill this site's emitted 2-way IC — but only when the installed
+    // dispatch strategy is a pure lookup (`thread_cacheable`): an OBSERVING
+    // strategy (per-site ICs, speculation counters) must keep seeing every
+    // repeat dispatch, exactly the rule `resolve_or_default` applies to the
+    // runtime's own per-thread cache. A slot exists only for sites compiled
+    // with the inline path (INLINE_OBJECTS models).
+    let jitp = unsafe { (*ctx.rc).jit };
+    if !jitp.is_null() {
+        let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
+        let mut ics = jit.dispatch_ic.borrow_mut();
+        if let Some(slot) = ics.get_mut(site as usize) {
+            if rt.shared.tables.lock().unwrap().dispatch.thread_cacheable() {
+                let reloc = rt.relocated();
+                let ver = rt.shared.dispatch_version.load(Ordering::Relaxed);
+                let way = (ty as usize) & (DISPATCH_IC_WAYS - 1);
+                slot[way] =
+                    DispatchIcEntry { epoch: dispatch_epoch(reloc, ver), ty: ty as u64, imp };
+            }
+        }
+    }
     // Direct fast path: call the impl's register entry with the caller's run
     // context (no make_ctx / trampoline / resolve). Only when unwrapped.
     if unsafe { (*ctx.rc).direct.get() } != 0 {
@@ -992,6 +1029,19 @@ pub trait ModelArithJit: ModelEmit {
     /// `is_ref` to opt out of native fast calls entirely (correct — the call
     /// site then always takes the shim path); NanBox/HighBit do this today.
     fn emit_ref_addr(c: &mut Compiler, v: Value) -> (Value, Value);
+
+    /// May emitted code read, write, and ALLOCATE heap objects inline under
+    /// this model (D5)? Requires a real `emit_ref_addr`, a working
+    /// `emit_tag`/`emit_untag` (immediate ints), and `emit_enc_ref`. LowBit
+    /// only today; the models that opt out keep every object op on the shims —
+    /// correct, just not inline.
+    const INLINE_OBJECTS: bool = false;
+    /// Emit: encode a raw heap ADDRESS into this model's ref word. Only called
+    /// when `INLINE_OBJECTS`; the default is a loud dead-end so a model can
+    /// never silently flip the const on without supplying the encoder.
+    fn emit_enc_ref(_c: &mut Compiler, _addr: Value) -> Value {
+        panic!("emit_enc_ref: INLINE_OBJECTS is on but the model supplied no ref encoder")
+    }
 }
 
 const FIXNUM_MIN: i64 = -(1 << 60);
@@ -1017,6 +1067,11 @@ impl ModelArithJit for crate::model::LowBitModel {
         let is_ref = c.fb.ins().icmp_imm(IntCC::Equal, tag, 0b001);
         let addr = c.fb.ins().band_imm(v, !0b111i64);
         (is_ref, addr)
+    }
+
+    const INLINE_OBJECTS: bool = true;
+    fn emit_enc_ref(c: &mut Compiler, addr: Value) -> Value {
+        c.fb.ins().bor_imm(addr, 0b001) // matches `LowBit::enc_ref`
     }
 }
 
@@ -1094,10 +1149,51 @@ pub struct JitCranelift<M: ModelArithJit> {
     /// itself is the fast-call table from then on (see
     /// `docs/STAGE_D_MIGRATION.md`'s "Closure object ABI") — this map exists
     /// only to seed THAT stamp, never consulted by emitted call sites directly.
-    /// `null` = not yet compiled.
+    /// `null` = not yet compiled. Reserved (`TEMPLATE_CODE_CAP`) so the buffer
+    /// NEVER reallocates: emitted `Ir::Lambda` sites bake a slot's address as
+    /// an immediate (the creation-time code stamp reads through it). Growth
+    /// past the cap panics loudly.
     template_code: RefCell<Vec<*const u8>>,
+    /// Per-`Ir::Dispatch`-site inline caches for emitted code: 2 ways of
+    /// `(epoch, receiver type, impl)`, indexed by site id. Reserved
+    /// (`DISPATCH_SITE_CAP`) so emitted sites can bake their entry's address;
+    /// FILLED by `shim_dispatch` on the slow path (and only when the installed
+    /// strategy is `thread_cacheable` — an observing strategy must see every
+    /// repeat dispatch, exactly the runtime's own site-cache rule). The epoch
+    /// folds the relocation count and the dispatch version, so a moved impl or
+    /// a redefinition never false-hits.
+    dispatch_ic: RefCell<Vec<DispatchSiteIc>>,
     _pd: std::marker::PhantomData<fn() -> M>,
 }
+
+/// One way of a dispatch-site IC: the folded epoch at fill time, the receiver
+/// type `Sym` (as u64; `u64::MAX` = empty, never a real sym), and the impl's
+/// bits. Layout is ABI: emitted code reads the three words at 0/8/16.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DispatchIcEntry {
+    epoch: u64,
+    ty: u64,
+    imp: u64,
+}
+
+const DISPATCH_IC_WAYS: usize = 2;
+type DispatchSiteIc = [DispatchIcEntry; DISPATCH_IC_WAYS];
+
+const DISPATCH_IC_EMPTY: DispatchIcEntry = DispatchIcEntry { epoch: 0, ty: u64::MAX, imp: 0 };
+
+/// Reserved capacities for the two JIT-owned, address-baked tables (see the
+/// field docs). Exceeding either is a loud panic, never a silent reallocation
+/// under baked pointers.
+const TEMPLATE_CODE_CAP: usize = 1 << 20;
+const DISPATCH_SITE_CAP: usize = 1 << 17;
+
+/// The dispatch-IC epoch: the same fold `Runtime::resolve_or_default` uses for
+/// its own per-site cache (relocation count mixed with the registry version).
+fn dispatch_epoch(reloc: u64, ver: u64) -> u64 {
+    reloc.wrapping_mul(DISPATCH_EPOCH_MIX) ^ ver
+}
+const DISPATCH_EPOCH_MIX: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// Most args that ride in a register-arg entry signature. Bodies with more
 /// params (rare) use the ctx-entry + frame-loads prologue instead.
@@ -1306,7 +1402,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
             cache: RefCell::new(HashMap::default()),
             frame_pool: RefCell::new(Vec::new()),
             call_ic: RefCell::new(std::array::from_fn(|_| None)),
-            template_code: RefCell::new(Vec::new()),
+            template_code: RefCell::new(Vec::with_capacity(TEMPLATE_CODE_CAP)),
+            dispatch_ic: RefCell::new(Vec::with_capacity(DISPATCH_SITE_CAP)),
             counter: Cell::new(0),
             _pd: std::marker::PhantomData,
         }
@@ -1329,7 +1426,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         {
             let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
             let shape = BodyShape { entry_arity: None, nparams: 0, variadic: false, nslots: 0, mem_mode: true, tail_root: true };
-            build_body::<M>(&mut module, &mut fb, self.shims, None, ir, shape);
+            build_body::<M>(&mut module, &mut fb, self.shims, None, self as *const Self as *const (), ir, shape);
             fb.finalize();
         }
         let out = ctx.func.display().to_string();
@@ -1350,7 +1447,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
 
         {
             let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
-            build_body::<M>(&mut module, &mut fb, self.shims, rt, ir, shape);
+            build_body::<M>(&mut module, &mut fb, self.shims, rt, self as *const Self as *const (), ir, shape);
             fb.finalize();
         }
 
@@ -1462,6 +1559,12 @@ impl<M: ModelArithJit> JitCranelift<M> {
             consts_base: Cell::new(consts_base),
             global_base: Cell::new(global_base),
             global_len: Cell::new(global_len),
+            alloc_window: Cell::new(&rt.heap().window as *const crate::heap::AllocWindow as *const u8),
+            // AtomicU64 is repr(transparent) over u64; both counters are only
+            // written under STW / the registry lock, so plain loads in emitted
+            // code observe a coherent value.
+            reloc_ptr: Cell::new(&rt.shared.relocated as *const AtomicU64 as *const u64),
+            dispver_ptr: Cell::new(&rt.shared.dispatch_version as *const AtomicU64 as *const u64),
             direct: Cell::new(direct),
             self_closure: Cell::new(self_closure),
             caps_base: Cell::new(caps_base),
@@ -1609,6 +1712,12 @@ impl<M: ModelArithJit> JitCranelift<M> {
         {
             let mut tc = self.template_code.borrow_mut();
             if tc.len() <= template as usize {
+                // The buffer must NEVER reallocate: emitted Lambda sites bake
+                // slot addresses (see `template_code_slot`).
+                assert!(
+                    (template as usize) < TEMPLATE_CODE_CAP,
+                    "template_code overflow: template id {template} exceeds TEMPLATE_CODE_CAP — raise it"
+                );
                 tc.resize(template as usize + 1, std::ptr::null());
             }
             if tc[template as usize].is_null() {
@@ -1831,6 +1940,7 @@ fn build_body<M: ModelArithJit>(
     fb: &mut FunctionBuilder,
     shims: Shims,
     rt: Option<&Runtime<M>>,
+    jit_ptr: *const (),
     ir: &Ir,
     shape: BodyShape,
 ) {
@@ -1876,6 +1986,7 @@ fn build_body<M: ModelArithJit>(
         // Type-erased (the `Compiler` struct is not generic over M; the
         // M-generic methods cast it back). Never outlives this call.
         rt_ptr: rt.map_or(std::ptr::null(), |r| r as *const Runtime<M> as *const ()),
+        jit_ptr,
         inline_budget: Cell::new(INLINE_TOTAL_BUDGET),
         mem_mode: shape.mem_mode,
         // Stable byte offsets of `JitCtx` fields (repr(C)) for inline reads and for
@@ -1883,6 +1994,9 @@ fn build_body<M: ModelArithJit>(
         off_cur_slots: core::mem::offset_of!(JitCtx<'static, M>, cur_slots) as i32,
         off_consts_base: core::mem::offset_of!(JitCtx<'static, M>, consts_base) as i32,
         off_global_base: core::mem::offset_of!(JitCtx<'static, M>, global_base) as i32,
+        off_alloc_window: core::mem::offset_of!(JitCtx<'static, M>, alloc_window) as i32,
+        off_reloc_ptr: core::mem::offset_of!(JitCtx<'static, M>, reloc_ptr) as i32,
+        off_dispver_ptr: core::mem::offset_of!(JitCtx<'static, M>, dispver_ptr) as i32,
         off_direct: core::mem::offset_of!(JitCtx<'static, M>, direct) as i32,
         off_self_closure: core::mem::offset_of!(JitCtx<'static, M>, self_closure) as i32,
         off_caps_base: core::mem::offset_of!(JitCtx<'static, M>, caps_base) as i32,
@@ -1962,6 +2076,10 @@ pub struct Compiler<'a, 'b> {
     /// e.g. `dump_ir`) — the var-guarded speculative inliner resolves `Global`
     /// callees through it.
     rt_ptr: *const (),
+    /// The owning backend at COMPILE time (type-erased `*const JitCranelift<M>`,
+    /// never null) — `Ir::Lambda`/`Ir::Dispatch` sites size + bake addresses
+    /// into its reserved `template_code` / `dispatch_ic` tables.
+    jit_ptr: *const (),
     /// Remaining inlined-node allowance for THIS body (bounds code growth and
     /// terminates recursive inlining).
     inline_budget: Cell<usize>,
@@ -1970,6 +2088,9 @@ pub struct Compiler<'a, 'b> {
     off_cur_slots: i32,
     off_consts_base: i32,
     off_global_base: i32,
+    off_alloc_window: i32,
+    off_reloc_ptr: i32,
+    off_dispver_ptr: i32,
     off_direct: i32,
     off_self_closure: i32,
     off_caps_base: i32,
@@ -2062,6 +2183,101 @@ impl<'a, 'b> Compiler<'a, 'b> {
     fn emit_local0_store(&mut self, idx: u16, v: Value) {
         let base = self.load_ctx_field(self.off_cur_slots);
         self.fb.ins().store(MemFlagsData::trusted(), v, base, (idx as i32) * 8);
+    }
+
+    /// Inline bump allocation through the heap's `AllocWindow` (D5): claim
+    /// `size` bytes (a compile-time constant, 8-aligned) with one atomic
+    /// fetch_add on the active space's cursor and write the header word.
+    /// Branches to `slow` when the window is CLOSED (`limit == 0` — gc-stress
+    /// mode) or the claim exceeds the limit; the shim slow path owns the
+    /// loud-exhaustion panic, so falling through preserves it. An overshooting
+    /// claim is NOT undone: `heap.rs` clamps `used()` to the space, so the
+    /// dead partial claim is harmless (same discipline as the CAS-free plan in
+    /// the AllocWindow docs). Allocation NEVER collects (explicit-GC-only
+    /// runtime), so no safepoint is needed here. Returns the object's raw
+    /// ADDRESS in a fresh, sealed block; the claimed memory is zeroed (bump
+    /// spaces are re-zeroed on reset), so untouched fields read as zero.
+    fn emit_alloc(&mut self, size: i64, header: u64, slow: cranelift_codegen::ir::Block) -> Value {
+        debug_assert_eq!(size & 7, 0, "inline alloc size must be 8-aligned");
+        let flags = MemFlagsData::trusted();
+        let win = self.load_rc_field(self.off_alloc_window);
+        let limit = self.fb.ins().load(I64, flags, win, 16);
+        let openb = self.fb.create_block();
+        let nz = self.fb.ins().icmp_imm(IntCC::NotEqual, limit, 0);
+        self.fb.ins().brif(nz, openb, &[], slow, &[]);
+        self.fb.switch_to_block(openb);
+        self.fb.seal_block(openb);
+        let cursor_ptr = self.fb.ins().load(I64, flags, win, 0);
+        let sz = self.fb.ins().iconst(I64, size);
+        let old = self.fb.ins().atomic_rmw(I64, flags, AtomicRmwOp::Add, cursor_ptr, sz);
+        let end = self.fb.ins().iadd_imm(old, size);
+        let fits = self.fb.ins().icmp(IntCC::UnsignedLessThanOrEqual, end, limit);
+        let okb = self.fb.create_block();
+        self.fb.ins().brif(fits, okb, &[], slow, &[]);
+        self.fb.switch_to_block(okb);
+        self.fb.seal_block(okb);
+        let base = self.fb.ins().load(I64, flags, win, 8);
+        let addr = self.fb.ins().iadd(base, old);
+        let hv = self.iconst(header);
+        self.fb.ins().store(flags, hv, addr, 0);
+        addr
+    }
+
+    /// Inline type guard (D5): `v` is a ref whose header `type_id == want`.
+    /// Branches to `slow` otherwise; returns `(addr, header)` in a fresh,
+    /// sealed continuation block. The header read doubles as the aux source
+    /// (array lengths, capture counts) for the caller.
+    fn emit_typed_addr<M: ModelArithJit>(
+        &mut self,
+        v: Value,
+        want: u16,
+        slow: cranelift_codegen::ir::Block,
+    ) -> (Value, Value) {
+        let (is_ref, addr) = M::emit_ref_addr(self, v);
+        let chk = self.fb.create_block();
+        self.fb.ins().brif(is_ref, chk, &[], slow, &[]);
+        self.fb.switch_to_block(chk);
+        self.fb.seal_block(chk);
+        let hdr = self.fb.ins().load(I64, MemFlagsData::trusted(), addr, 0);
+        let tid = self.fb.ins().band_imm(hdr, 0xffff);
+        let ok = self.fb.ins().icmp_imm(IntCC::Equal, tid, want as i64);
+        let okb = self.fb.create_block();
+        self.fb.ins().brif(ok, okb, &[], slow, &[]);
+        self.fb.switch_to_block(okb);
+        self.fb.seal_block(okb);
+        (addr, hdr)
+    }
+
+    /// The (stable) address of `template_code[tid]`, sizing the reserved table
+    /// so the slot exists. Baked as an immediate by `Ir::Lambda` sites — the
+    /// creation-time code stamp is one load through it.
+    fn template_code_slot<M: ModelArithJit>(&self, tid: u32) -> *const *const u8 {
+        let jit = unsafe { &*(self.jit_ptr as *const JitCranelift<M>) };
+        let mut tc = jit.template_code.borrow_mut();
+        if tc.len() <= tid as usize {
+            assert!(
+                (tid as usize) < TEMPLATE_CODE_CAP,
+                "template_code overflow: template id {tid} exceeds TEMPLATE_CODE_CAP — raise it"
+            );
+            tc.resize(tid as usize + 1, std::ptr::null());
+        }
+        unsafe { tc.as_ptr().add(tid as usize) }
+    }
+
+    /// The (stable) address of dispatch site `site`'s 2-way IC, sizing the
+    /// reserved table so the slot exists. Baked as an immediate by
+    /// `Ir::Dispatch` sites; `shim_dispatch` fills the ways on the slow path.
+    fn dispatch_ic_slot<M: ModelArithJit>(&self, site: usize) -> *const DispatchIcEntry {
+        let jit = unsafe { &*(self.jit_ptr as *const JitCranelift<M>) };
+        let mut ics = jit.dispatch_ic.borrow_mut();
+        if ics.len() <= site {
+            assert!(
+                site < DISPATCH_SITE_CAP,
+                "dispatch_ic overflow: site {site} exceeds DISPATCH_SITE_CAP — raise it"
+            );
+            ics.resize(site + 1, [DISPATCH_IC_EMPTY; DISPATCH_IC_WAYS]);
+        }
+        ics[site].as_ptr()
     }
 
     /// Can `(s args…)` be speculatively inlined here? Requires: a compile-time
@@ -2462,14 +2678,65 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         }
                     })
                     .collect();
-                let (addr, _count) = self.spill_args(&vals);
-                let tidv = self.i32const(tid);
-                let npv = self.i32const(*nparams as u32);
-                let varv = self.i32const(*variadic as u32);
-                let nsv = self.i32const(*nslots as u32);
-                let ncapsv = self.i32const(captures.len() as u32);
-                let ctx = self.ctx_val;
-                self.call_shim(self.refs.make_closure, &[ctx, tidv, npv, varv, nsv, addr, ncapsv])
+                if M::INLINE_OBJECTS {
+                    // Inline the whole closure allocation (D5): header, meta,
+                    // the creation-time code stamp (one load through the baked
+                    // `template_code` slot — 0 until the body compiles, exactly
+                    // like the shim), and the capture values, all straight-line
+                    // stores. Window closed/exhausted → the shim.
+                    let flags = MemFlagsData::trusted();
+                    let ncaps = vals.len();
+                    let result = self.fb.declare_var(I64);
+                    let slow = self.fb.create_block();
+                    let merge = self.fb.create_block();
+                    let size = (CLOSURE_CAPS_OFF + ncaps * 8) as i64;
+                    let header = crate::heap::make_header(kind::CLOSURE, 0, ncaps as u32);
+                    let addr = self.emit_alloc(size, header, slow);
+                    let meta =
+                        crate::heap::closure_meta(tid, *nparams as u16, *nslots, *variadic);
+                    let metav = self.iconst(meta);
+                    self.fb.ins().store(flags, metav, addr, CLOSURE_META_OFF as i32);
+                    let slotp = self.template_code_slot::<M>(tid) as u64;
+                    let sp = self.iconst(slotp);
+                    // NOT readonly: the slot is stamped when the body compiles.
+                    let code = self.fb.ins().load(I64, flags, sp, 0);
+                    self.fb.ins().store(flags, code, addr, CLOSURE_CODE_OFF as i32);
+                    for (i, &v) in vals.iter().enumerate() {
+                        self.fb.ins().store(flags, v, addr, (CLOSURE_CAPS_OFF + i * 8) as i32);
+                    }
+                    let r = M::emit_enc_ref(self, addr);
+                    self.fb.def_var(result, r);
+                    self.fb.ins().jump(merge, &[]);
+
+                    self.fb.switch_to_block(slow);
+                    self.fb.seal_block(slow);
+                    let (caddr, _count) = self.spill_args(&vals);
+                    let tidv = self.i32const(tid);
+                    let npv = self.i32const(*nparams as u32);
+                    let varv = self.i32const(*variadic as u32);
+                    let nsv = self.i32const(*nslots as u32);
+                    let ncapsv = self.i32const(ncaps as u32);
+                    let ctx = self.ctx_val;
+                    let sv = self.call_shim(
+                        self.refs.make_closure,
+                        &[ctx, tidv, npv, varv, nsv, caddr, ncapsv],
+                    );
+                    self.fb.def_var(result, sv);
+                    self.fb.ins().jump(merge, &[]);
+
+                    self.fb.switch_to_block(merge);
+                    self.fb.seal_block(merge);
+                    self.fb.use_var(result)
+                } else {
+                    let (addr, _count) = self.spill_args(&vals);
+                    let tidv = self.i32const(tid);
+                    let npv = self.i32const(*nparams as u32);
+                    let varv = self.i32const(*variadic as u32);
+                    let nsv = self.i32const(*nslots as u32);
+                    let ncapsv = self.i32const(captures.len() as u32);
+                    let ctx = self.ctx_val;
+                    self.call_shim(self.refs.make_closure, &[ctx, tidv, npv, varv, nsv, addr, ncapsv])
+                }
             }
             Ir::Call(f, args) => {
                 // Var-guarded speculative inlining: a non-tail call of a global
@@ -2630,6 +2897,154 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let ctx = self.ctx_val;
                 self.call_shim_checked(self.refs.apply, &[ctx, addr, count])
             }
+            // `(%cons h t)` — inline allocation (D5): normalize a `()` tail to
+            // nil (exactly `Runtime::cons`), bump-allocate 24 bytes through the
+            // AllocWindow, store head/tail, encode. Window closed/exhausted →
+            // the prim shim (which also owns the loud-exhaustion panic).
+            Ir::Prim(Prim::Cons, args) if M::INLINE_OBJECTS => {
+                let head = self.compile::<M>(&args[0], false);
+                let tail = self.compile::<M>(&args[1], false);
+                let flags = MemFlagsData::trusted();
+                // tail2 = tail, unless tail is the `()` object → nil.
+                let tailv = self.fb.declare_var(I64);
+                self.fb.def_var(tailv, tail);
+                let (t_is_ref, t_addr) = M::emit_ref_addr(self, tail);
+                let chk = self.fb.create_block();
+                let cont = self.fb.create_block();
+                self.fb.ins().brif(t_is_ref, chk, &[], cont, &[]);
+                self.fb.switch_to_block(chk);
+                self.fb.seal_block(chk);
+                let thdr = self.fb.ins().load(I64, flags, t_addr, 0);
+                let ttid = self.fb.ins().band_imm(thdr, 0xffff);
+                let is_empty =
+                    self.fb.ins().icmp_imm(IntCC::Equal, ttid, kind::EMPTY_LIST as i64);
+                let nil = self.iconst(M::R::enc_nil());
+                let norm = self.fb.ins().select(is_empty, nil, tail);
+                self.fb.def_var(tailv, norm);
+                self.fb.ins().jump(cont, &[]);
+                self.fb.switch_to_block(cont);
+                self.fb.seal_block(cont);
+                let tail2 = self.fb.use_var(tailv);
+
+                let result = self.fb.declare_var(I64);
+                let slow = self.fb.create_block();
+                let merge = self.fb.create_block();
+                let header = crate::heap::make_header(kind::CONS, 0, 0);
+                let addr = self.emit_alloc(24, header, slow);
+                self.fb.ins().store(flags, head, addr, 8);
+                self.fb.ins().store(flags, tail2, addr, 16);
+                let r = M::emit_enc_ref(self, addr);
+                self.fb.def_var(result, r);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(Prim::Cons, &[head, tail]);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // `(%first x)` / `(%rest x)` — for a genuine CONS, one type guard +
+            // one field load (D5). Anything else (chunked seqs, nil, `()`, the
+            // use-after-move panic) keeps the shim's exact semantics.
+            Ir::Prim(p @ (Prim::First | Prim::Rest), args) if M::INLINE_OBJECTS => {
+                let v = self.compile::<M>(&args[0], false);
+                let result = self.fb.declare_var(I64);
+                let slow = self.fb.create_block();
+                let merge = self.fb.create_block();
+                let (addr, _hdr) = self.emit_typed_addr::<M>(v, kind::CONS, slow);
+                let off = if matches!(p, Prim::First) { 8 } else { 16 };
+                let r = self.fb.ins().load(I64, MemFlagsData::trusted(), addr, off);
+                self.fb.def_var(result, r);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(*p, &[v]);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // `(%alength v)` — the logical length rides the ARRAY handle's
+            // header aux: one type guard + a shift + retag (D5).
+            Ir::Prim(Prim::VectorLen, args) if M::INLINE_OBJECTS => {
+                let v = self.compile::<M>(&args[0], false);
+                let result = self.fb.declare_var(I64);
+                let slow = self.fb.create_block();
+                let merge = self.fb.create_block();
+                let (_addr, hdr) = self.emit_typed_addr::<M>(v, kind::ARRAY, slow);
+                let len = self.fb.ins().ushr_imm(hdr, 32);
+                let r = M::emit_tag(self, len);
+                self.fb.def_var(result, r);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(Prim::VectorLen, &[v]);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // `(%aget v i)` / `(%aset v i x)` — ARRAY handle guard, immediate-
+            // int index guard, unsigned bounds check against the handle's
+            // logical length (a negative index untags huge and fails it), then
+            // a direct indexed load/store through the data blob (D5). Any
+            // failed guard — including out-of-bounds — takes the shim, which
+            // owns the loud range panic.
+            Ir::Prim(p @ (Prim::VectorRef | Prim::VectorSet), args) if M::INLINE_OBJECTS => {
+                let argvals: Vec<Value> =
+                    args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                let flags = MemFlagsData::trusted();
+                let result = self.fb.declare_var(I64);
+                let slow = self.fb.create_block();
+                let merge = self.fb.create_block();
+                let (addr, hdr) = self.emit_typed_addr::<M>(argvals[0], kind::ARRAY, slow);
+                let is_int = M::emit_both_int(self, argvals[1], argvals[1]);
+                let okb = self.fb.create_block();
+                self.fb.ins().brif(is_int, okb, &[], slow, &[]);
+                self.fb.switch_to_block(okb);
+                self.fb.seal_block(okb);
+                let i = M::emit_untag(self, argvals[1]);
+                let len = self.fb.ins().ushr_imm(hdr, 32);
+                let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, i, len);
+                let okb2 = self.fb.create_block();
+                self.fb.ins().brif(inb, okb2, &[], slow, &[]);
+                self.fb.switch_to_block(okb2);
+                self.fb.seal_block(okb2);
+                // handle field 0 = the encoded DATA blob ref; its varlen tail
+                // starts right after the blob header (ARRAY_DATA has no fields).
+                let blob_bits = self.fb.ins().load(I64, flags, addr, 8);
+                let (_ir, blob_addr) = M::emit_ref_addr(self, blob_bits);
+                let byteoff = self.fb.ins().ishl_imm(i, 3);
+                let slot = self.fb.ins().iadd(blob_addr, byteoff);
+                let r = if matches!(p, Prim::VectorRef) {
+                    self.fb.ins().load(I64, flags, slot, 8)
+                } else {
+                    self.fb.ins().store(flags, argvals[2], slot, 8);
+                    self.iconst(M::R::enc_nil())
+                };
+                self.fb.def_var(result, r);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(*p, &argvals);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
             // Every other prim: compute args, escape to the runtime (the native
             // analogue of the bytecode tier's `Slow`).
             Ir::Prim(p, args) => {
@@ -2667,16 +3082,98 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let ctx = self.ctx_val;
                 self.call_shim(self.refs.field_get, &[ctx, sitev, fieldv, o])
             }
-            // Protocol/method dispatch: args spilled like a call, resolved + invoked
-            // in the shim (which reaches `top`).
+            // Protocol/method dispatch. D5 fast path: when unwrapped (`direct`)
+            // and the receiver is a RECORD, read its type sym straight off the
+            // object and probe this site's baked 2-way inline cache (filled by
+            // the shim; epoch = relocation count ⊕ dispatch version, so a moved
+            // impl or a redefinition never false-hits). A hit calls the impl
+            // through the ordinary native call sequence; every miss — non-record
+            // receivers (built-in categories), wrapped backends, cold/invalidated
+            // sites — takes the shim, which resolves AND refills.
             Ir::Dispatch { site, method, args } => {
                 let argvals: Vec<Value> =
                     args.iter().map(|a| self.compile::<M>(a, false)).collect();
-                let (addr, count) = self.spill_args(&argvals);
+                if !M::INLINE_OBJECTS || argvals.is_empty() {
+                    let (addr, count) = self.spill_args(&argvals);
+                    let sitev = self.i32const(*site as u32);
+                    let methodv = self.i32const(*method);
+                    let ctx = self.ctx_val;
+                    return self
+                        .call_shim_checked(self.refs.dispatch, &[ctx, sitev, methodv, addr, count]);
+                }
+                let flags = MemFlagsData::trusted();
+                let ro = MemFlagsData::trusted().with_readonly();
+                let result = self.fb.declare_var(I64);
+                let slow = self.fb.create_block();
+                let merge = self.fb.create_block();
+
+                let recv = argvals[0];
+                let (is_ref, addr) = M::emit_ref_addr(self, recv);
+                let rc = self.rc_val;
+                let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
+                let g1 = self.fb.ins().band(is_ref, direct);
+                let chk = self.fb.create_block();
+                self.fb.ins().brif(g1, chk, &[], slow, &[]);
+                self.fb.switch_to_block(chk);
+                self.fb.seal_block(chk);
+                let hdr = self.fb.ins().load(I64, flags, addr, 0);
+                let tid = self.fb.ins().band_imm(hdr, 0xffff);
+                let is_rec = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::RECORD as i64);
+                let chk2 = self.fb.create_block();
+                self.fb.ins().brif(is_rec, chk2, &[], slow, &[]);
+                self.fb.switch_to_block(chk2);
+                self.fb.seal_block(chk2);
+                // The record's type sym (its raw word) IS `type_tag(recv)`.
+                let ty = self.fb.ins().load(I64, flags, addr, 8);
+                let rp = self.load_rc_field(self.off_reloc_ptr);
+                let reloc = self.fb.ins().load(I64, flags, rp, 0);
+                let vp = self.load_rc_field(self.off_dispver_ptr);
+                let ver = self.fb.ins().load(I64, flags, vp, 0);
+                let mixed = self.fb.ins().imul_imm(reloc, DISPATCH_EPOCH_MIX as i64);
+                let epoch = self.fb.ins().bxor(mixed, ver);
+                let sitep = self.iconst(self.dispatch_ic_slot::<M>(*site) as u64);
+                let probe = |c: &mut Self, way: i32, miss: cranelift_codegen::ir::Block| {
+                    let base = way * 24;
+                    let e = c.fb.ins().load(I64, flags, sitep, base);
+                    let t = c.fb.ins().load(I64, flags, sitep, base + 8);
+                    let imp = c.fb.ins().load(I64, flags, sitep, base + 16);
+                    let e_ok = c.fb.ins().icmp(IntCC::Equal, e, epoch);
+                    let t_ok = c.fb.ins().icmp(IntCC::Equal, t, ty);
+                    let hit = c.fb.ins().band(e_ok, t_ok);
+                    let hitb = c.fb.create_block();
+                    c.fb.ins().brif(hit, hitb, &[], miss, &[]);
+                    c.fb.switch_to_block(hitb);
+                    c.fb.seal_block(hitb);
+                    (imp, hitb)
+                };
+                let way1b = self.fb.create_block();
+                let (imp0, _b0) = probe(self, 0, way1b);
+                let r0 = self.emit_call::<M>(imp0, &argvals);
+                self.fb.def_var(result, r0);
+                self.fb.ins().jump(merge, &[]);
+                self.fb.switch_to_block(way1b);
+                self.fb.seal_block(way1b);
+                let (imp1, _b1) = probe(self, 1, slow);
+                let r1 = self.emit_call::<M>(imp1, &argvals);
+                self.fb.def_var(result, r1);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let (aaddr, count) = self.spill_args(&argvals);
                 let sitev = self.i32const(*site as u32);
                 let methodv = self.i32const(*method);
                 let ctx = self.ctx_val;
-                self.call_shim_checked(self.refs.dispatch, &[ctx, sitev, methodv, addr, count])
+                let sr = self.call_shim(self.refs.dispatch, &[ctx, sitev, methodv, aaddr, count]);
+                self.fb.def_var(result, sr);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                // Either path may have raised (a hit's impl, a miss's resolve
+                // failure); propagate exactly as the shim-only emission did.
+                let r = self.fb.use_var(result);
+                self.emit_pending_check(r)
             }
             // Register a deftype/protocol method impl.
             Ir::DefMethod { name, ty, imp } => {
