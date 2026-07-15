@@ -192,14 +192,28 @@ pub struct WordArena {
     /// Next free word index (atomic bump). May briefly exceed the initialized
     /// area during a chunk race; `word_alloc` repairs under the heap lock.
     len: AtomicU64,
+    /// OVERSIZE spans (> one chunk): exact-size boxed slices, addressed as
+    /// `BIG_BIT | index`. Rare (big flat arrays); appended under the heap lock.
+    big: Vec<Box<[u64]>>,
 }
+
+/// High bit of a span offset marks an oversize allocation (index into `big`).
+const BIG_BIT: u32 = 1 << 31;
 
 impl WordArena {
     fn new() -> Self {
-        WordArena { chunks: Vec::with_capacity(WCHUNKS_CAP), len: AtomicU64::new(0) }
+        WordArena {
+            chunks: Vec::with_capacity(WCHUNKS_CAP),
+            len: AtomicU64::new(0),
+            big: Vec::with_capacity(1 << 12),
+        }
     }
     #[inline]
     pub(crate) fn slice(&self, off: u32, len: u32) -> &[u64] {
+        if off & BIG_BIT != 0 {
+            let b = &self.big[(off & !BIG_BIT) as usize];
+            return &b[..len as usize];
+        }
         let (c, o) = ((off as usize) >> WCHUNK_BITS, (off as usize) & (WCHUNK - 1));
         // Spans never cross a chunk boundary (word_alloc pads); bounds are
         // guaranteed by construction, mirroring `Heap`'s unchecked access.
@@ -208,6 +222,12 @@ impl WordArena {
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub(crate) fn slice_mut(&self, off: u32, len: u32) -> &mut [u64] {
+        if off & BIG_BIT != 0 {
+            unsafe {
+                let base = self.big[(off & !BIG_BIT) as usize].as_ptr() as *mut u64;
+                return std::slice::from_raw_parts_mut(base, len as usize);
+            }
+        }
         let (c, o) = ((off as usize) >> WCHUNK_BITS, (off as usize) & (WCHUNK - 1));
         unsafe {
             let base = self.chunks.get_unchecked(c).as_ptr() as *mut u64;
@@ -551,8 +571,16 @@ impl<M: ValueModel> Runtime<M> {
     /// path; takes the heap lock only to append a chunk.
     pub fn word_alloc(&self, n: usize) -> u32 {
         use std::sync::atomic::Ordering::Relaxed;
-        assert!(n <= WCHUNK, "word_alloc: span larger than an arena chunk");
         let n = n.max(1); // zero-length spans still get a distinct off
+        if n > WCHUNK {
+            // Oversize: an exact-size boxed slice in the side table.
+            let _g = self.shared.heap_lock.lock().unwrap();
+            let a = unsafe { &mut *self.shared.words.get() };
+            let idx = a.big.len() as u32;
+            assert!(idx < BIG_BIT, "word arena: big-span index overflow");
+            a.big.push(vec![0u64; n].into_boxed_slice());
+            return BIG_BIT | idx;
+        }
         loop {
             let a = self.arena();
             let cur = a.len.load(Relaxed) as usize;
@@ -612,27 +640,45 @@ impl<M: ValueModel> Runtime<M> {
     /// past it, bump-allocate a doubled span and re-point the SAME Obj (object
     /// identity is the heap slot, so every reference observes the growth).
     pub fn arr_extend(&self, id: HeapId, xs: &[u64]) {
-        let _g = self.shared.heap_lock.lock().unwrap();
-        let (off, len, cap) = match &self.heap()[id as usize] {
-            &Obj::Vector { off, len, cap } => (off, len, cap),
-            _ => panic!("apush: not an array"),
-        };
-        let need = len as usize + xs.len();
-        if need <= cap as usize {
-            self.arena().slice_mut(off + len, xs.len() as u32).copy_from_slice(xs);
-            if let Obj::Vector { len, .. } = &mut self.heap_mut()[id as usize] {
-                *len = need as u32;
+        loop {
+            let (off, len, cap) = match &self.heap()[id as usize] {
+                &Obj::Vector { off, len, cap } => (off, len, cap),
+                _ => panic!("apush: not an array"),
+            };
+            let need = len as usize + xs.len();
+            if need <= cap as usize {
+                let _g = self.shared.heap_lock.lock().unwrap();
+                // Re-check under the lock (a concurrent extend may have won).
+                match &self.heap()[id as usize] {
+                    &Obj::Vector { off: o2, len: l2, cap: c2 }
+                        if (o2, l2, c2) == (off, len, cap) => {}
+                    _ => continue,
+                }
+                self.arena().slice_mut(off, need as u32)[len as usize..].copy_from_slice(xs);
+                if let Obj::Vector { len, .. } = &mut self.heap_mut()[id as usize] {
+                    *len = need as u32;
+                }
+                return;
             }
-        } else {
+            // Growth: bump-allocate the new span OUTSIDE the heap lock
+            // (`word_alloc` may itself take it to append a chunk).
             let ncap = need.next_power_of_two().max(4);
             let noff = self.word_alloc(ncap);
-            self.arena().slice_mut(noff, len).copy_from_slice(self.arena().slice(off, len));
-            self.arena().slice_mut(noff + len, xs.len() as u32).copy_from_slice(xs);
+            let _g = self.shared.heap_lock.lock().unwrap();
+            match &self.heap()[id as usize] {
+                &Obj::Vector { off: o2, len: l2, cap: c2 }
+                    if (o2, l2, c2) == (off, len, cap) => {}
+                _ => continue, // lost a race: retry (the fresh span is abandoned)
+            }
+            let dst = self.arena().slice_mut(noff, need as u32);
+            dst[..len as usize].copy_from_slice(self.arena().slice(off, len));
+            dst[len as usize..].copy_from_slice(xs);
             if let Obj::Vector { off, len, cap } = &mut self.heap_mut()[id as usize] {
                 *off = noff;
                 *len = need as u32;
                 *cap = ncap as u32;
             }
+            return;
         }
     }
     /// The heap for MUTATION. Callers MUST hold `heap_lock` (alloc/GC/set take it).

@@ -1,7 +1,35 @@
 # Execution Model v2 — flat closures, native calling convention, arena heap
 
-Status: IN PROGRESS. This doc is the plan of record for the performance
-re-architecture. It is written so work can resume mid-stage.
+Status: LANDED (stages A1–A3, C, B-hybrid; 2026-07). This doc is the plan of
+record for the performance re-architecture and the map of what remains.
+
+## Results (per-op, microclj --jit vs warmed JVM Clojure, arm64)
+
+| workload | before | after |
+|---|---|---|
+| capturing-closure call | 40ns (~8×) | 6.6ns (~1.3×) |
+| non-capturing call | 10ns (~2×) | ~3ns (≤1×) |
+| loop+conj vecbuild | 2.75µs (~105×) | ~190-240ns (~11×) |
+| reduce+map pipeline | 270ns/el (~30×) | ~110ns/el (~11×) |
+| into-xform (transducers) | ~1040× | ~137× |
+| comp chain | ~950× | ~259× |
+
+## Remaining known gaps (next efforts, in value order)
+
+1. **Param-value specialization** — the transducer/HOF cluster (still ~130-260×)
+   is per-element calls through PARAMETER-held closures (`reduce`'s f, comp'd
+   fns). The inliner only sees `Global` callees; specializing hot HOF bodies
+   per callee identity (clone + guard on f's bits, or trace-style) is the fix.
+2. **Full header arena** — decode/tag_of on the fat `Obj` enum is ~20% of hot
+   profiles. Objects-with-header-words inline would also unlock JIT-inline
+   type tests (code-level dispatch ICs) and inline bump allocation.
+3. **Sort/strings** (`sort-strings` ~125×): in-language merge sort over seqs;
+   a native sort-on-span + batch str-of would close most of it.
+4. **GC stack maps** — still explicit-`(gc)`-only; allocation-triggered GC
+   needs native-frame root maps (Cranelift user stack maps exist in 0.133).
+5. **Trampoline/invoke ceremony** — slow-path invokes still build a fresh
+   JitCtx + args Vec; pooling and a slimmer rc-reusing path would cut the
+   dispatch-heavy residue.
 
 ## Why (measured, 2026-07)
 
