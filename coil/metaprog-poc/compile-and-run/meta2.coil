@@ -2,11 +2,12 @@
 ; A COMPILED metaprogram using the real code-* library (selfhost/src/codelib.coil).
 ;
 ; It reaches the library only through its NON-RESERVED entry points, because every
-; `code-nth`/`code-count`/`code-rest`/... name is a special form at parse time
-; (parser.coil:411): `(code-nth c i)` becomes ECodeOp before resolution, so those
-; functions exist but are not callable until codeop-id is deleted. That deletion is
-; the atomic engine swap. What runs here is real library code either way: Sexp
-; walking, allocation, and Sexp construction.
+; `code-nth`/`code-count`/... name is a special form at parse time (parser.coil:411):
+; `(code-nth c i)` becomes ECodeOp before resolution, so those functions are not
+; callable from SOURCE. That is a property of source, not of the design: the real
+; path lowers ECodeOp to these functions in CODEGEN, leaving the interpreter's
+; ECodeOp case untouched, so both engines coexist during the migration. What runs
+; here is real library code either way: Sexp walking, allocation, construction.
 (import "alloc.coil" :use *)
 (import "slice.coil" :use *)
 (import "io.coil" :use *)

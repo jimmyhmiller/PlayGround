@@ -16,20 +16,19 @@
 ; Semantics mirror the interpreter's ops EXACTLY (op numbers in comments refer to
 ; the `code-op` dispatch in comptime.coil), so the two agree while both exist.
 ;
-; ATOMICITY. Every name below is a RESERVED special form at PARSE time
-; (parser.coil:411 maps ~29 `code-*` heads to opcodes before resolution ever runs).
-; So these functions can be DEFINED but not CALLED: `(code-nth c i)` parses as
-; ECodeOp, not as a call to `code-nth`. The library and the special forms therefore
-; cannot coexist, and the engine swap is ATOMIC: deleting codeop-id from the parser
-; is what makes these callable. Until then this module is compiled and tested but
-; reached only through its non-reserved entry points. For the same reason nothing
-; here calls a reserved name internally -- it would become an ECodeOp.
-;
-; NOT here: the ops that need compiler STATE rather than data — `report`, `warn`,
-; `type-of`, `code-decl`, `code-file`, and the struct/sum/trait reflection. Those
-; become externs the compiler exports, resolved at dlopen (mechanism 1 in
-; metaprog-poc/compile-and-run/). Data ops are pure; state ops are extern. That is
-; the whole ABI.
+; RESERVED NAMES, and why that does NOT force an atomic swap. Every name below is a
+; special form at PARSE time: parser.coil:411 maps ~29 `code-*` heads to opcodes
+; before resolution runs, so `(code-nth c i)` becomes ECodeOp regardless of what is
+; in scope, and these functions cannot be called from SOURCE while that holds. That
+; does not matter, because the lowering belongs in CODEGEN, not in source: ECodeOp
+; stays exactly as it is and gains a codegen case emitting a call to the matching
+; function here (exported by the compiler as `coil_code_*`, bound at dlopen -- see
+; mechanism 1 in metaprog-poc/compile-and-run/). The interpreter keeps executing
+; ECodeOp; compiled metaprograms execute the same op through this library. Both
+; engines coexist, so the migration is incremental and each step stays gate-safe.
+; For the same parse-time reason, nothing here calls a reserved name internally --
+; it would become an ECodeOp. Hence code-tag/code-listish? as the internal spine.
+
 (import "alloc.coil" :use *)
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
