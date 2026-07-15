@@ -366,6 +366,168 @@
                       (Ok [Sexp Diag] (mk-sexp-src (if (icmp-eq tg 7) (KVec (box-al [Sexp] a (load xs))) (KList (box-al [Sexp] a (load xs)))) node)))
                   (Ok [Sexp Diag] (load node))))))))))))
 
+; ── the PARSE-LEVEL tower trigger ────────────────────────────────────────────
+; A macro call whose arguments are not expression syntax at all — objc's
+; (msg (ptr i8) recv sel [CGRect i64] …) with its naked type vectors — makes the
+; whole enclosing defn UNPARSEABLE, so the tolerant resolve skips it and the
+; check-driven tower never sees a diagnostic. This is the type-directed rule's
+; syntactic BASE CASE: a macro-headed call that does not even parse as an
+; expression cannot be a function call — expand it. Applied OUTERMOST-first,
+; only inside defns the tolerant resolve skipped (zero cost when everything
+; parses), never inside quote/quasiquote templates.
+(defn tower-unparseable? [(a (ptr Allocator)) (node (ptr Sexp))] (-> bool)
+  (match (parse-expr a (load node)) (Err [d] true) (Ok [e] false)))
+; BATCHED: expand EVERY unparseable macro-headed call in the subtree (outermost
+; per nesting) in one pass, so a defn full of them converges in one round.
+(defn tower-parse-rewrite [(tc (ptr TowerCx)) (s (mut LS)) (node (ptr Sexp))] (-> (Result Sexp Diag))
+  (try (do
+    (let [a (load (field tc a)) tg (sx-tag (load node))]
+      (if (not (or (icmp-eq tg 6) (icmp-eq tg 7))) (Ok [Sexp Diag] (load node))
+        (let [items (sx-items (load node)) n (sx-len items)
+              head (if (and (icmp-eq tg 6) (and (icmp-ge n 1) (icmp-eq (sx-tag (sx-at items 0)) 2)))
+                       (sx-sval (sx-at items 0)) "")]
+          (if (or (str-eq head "quote") (str-eq head "quasiquote"))
+              (Ok [Sexp Diag] (load node))
+            (match (if (str-eq head "") (None [(slice u8)])
+                     (resolve-macro head (load (field tc module)) (load (field tc quals)) (load (field tc impb)) (load (field tc expb)) a))
+              (Some [q] (if (tower-unparseable? a node)
+                            (tower-expand-call tc (mut s) node q)
+                          (tower-parse-kids tc (mut s) node)))
+              (None [] (tower-parse-kids tc (mut s) node))))))))))
+(defn tower-parse-kids [(tc (ptr TowerCx)) (s (mut LS)) (node (ptr Sexp))] (-> (Result Sexp Diag))
+  (try (do
+    (let [a (load (field tc a)) tg (sx-tag (load node)) items (sx-items (load node)) n (sx-len items)
+          (mut any) false (mut xs) (al-new [Sexp] a) (mut i) 0 (mut before) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (store! before (load (field tc hit)))
+            (let [r (try! (tower-parse-rewrite tc (mut s) (al-elem [Sexp] items (load i))))]
+              (if (icmp-ne (load (field tc hit)) (load before))
+                  (do (store! any true) (al-push! (mut xs) r) 0)
+                (al-push! (mut xs) (sx-at items (load i)))))
+            (store! i (iadd (load i) 1)))))
+      (if (load any)
+          (Ok [Sexp Diag] (mk-sexp-src (if (icmp-eq tg 7) (KVec (box-al [Sexp] a (load xs))) (KList (box-al [Sexp] a (load xs)))) node))
+        (Ok [Sexp Diag] (load node)))))))
+; Is this raw (pre-parse) form a Code-signature defn — i.e. a METAPROGRAM whose
+; body may legitimately contain unparseable macro syntax (objc `msg`)? Judged on
+; the Sexp: (defn NAME [(p Code)…& (r Code)] (-> Code) …).
+(defn raw-code-sig? [(f (ptr Sexp))] (-> bool)
+  (if (icmp-ne (sx-tag (load f)) 6) false
+    (let [it (sx-items (load f)) n (sx-len it)]
+      (if (icmp-lt n 4) false
+        (if (not (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "defn"))) false
+          (let [pi (if (icmp-eq (sx-tag (sx-at it 2)) 7) 2
+                     (if (and (icmp-gt n 4) (icmp-eq (sx-tag (sx-at it 3)) 7)) 3 -1))]
+            (if (icmp-lt pi 0) false
+              (if (icmp-ne pi 2) false   ; generic metaprograms don't exist; [T] first = not one
+                (let [params (sx-items (sx-at it 2)) np (sx-len params) reti 3]
+                  (if (icmp-ge reti n) false
+                    (let [r (sx-at it reti)
+                          retok (and (icmp-eq (sx-tag r) 6)
+                                 (and (icmp-eq (sx-len (sx-items r)) 2)
+                                  (and (icmp-eq (sx-tag (sx-at (sx-items r) 0)) 2)
+                                   (and (str-eq (sx-sval (sx-at (sx-items r) 0)) "->")
+                                    (and (icmp-eq (sx-tag (sx-at (sx-items r) 1)) 2)
+                                         (str-eq (sx-sval (sx-at (sx-items r) 1)) "Code"))))))]
+                      (if (not retok) false
+                        (let [(mut i) 0 (mut ok) true]
+                          (loop (if (or (not (load ok)) (icmp-ge (load i) np)) (break)
+                            (do (let [p (sx-at params (load i))]
+                                  (if (and (icmp-eq (sx-tag p) 2) (str-eq (sx-sval p) "&")) 0
+                                    (if (and (icmp-eq (sx-tag p) 6)
+                                         (and (icmp-eq (sx-len (sx-items p)) 2)
+                                          (and (icmp-eq (sx-tag (sx-at (sx-items p) 1)) 2)
+                                               (str-eq (sx-sval (sx-at (sx-items p) 1)) "Code")))) 0
+                                      (do (store! ok false) 0))))
+                                (store! i (iadd (load i) 1)))))
+                          (load ok))))))))))))))
+; recover ONE skipped defn (batched inside it); shared by both triggers
+(defn tower-recover-form! [(tc (ptr TowerCx)) (s (mut LS)) (tf (ptr TaggedForm))] (-> (Result i64 Diag))
+  (try (do
+    (store! (field tc module) (load (field tf module)))
+    (let [nf (try! (tower-parse-rewrite tc (mut s) (field tf form)))]
+      (if (icmp-ne (load (field tc hit)) 0) (do (store! (field tf form) nf) 0) 0)
+      (Ok [i64 Diag] (load (field tc hit)))))))
+; trigger (a): a skipped defn whose RAW signature is Code-shaped IS a metaprogram
+; — recover it eagerly (nothing else will ever name it in a diagnostic).
+; Skipped ORDINARY defns (the compiler's own try/block/return-from bodies have
+; never parsed pre-expansion) are left alone unless trigger (b) demands them.
+(defn tower-parse-pass [(tc (ptr TowerCx)) (s (mut LS)) (sub-forms (ptr (ArrayList TaggedForm))) (macroctx (ptr Program))] (-> (Result i64 Diag))
+  (try (do
+    (let [a (load (field tc a)) n (al-len [TaggedForm] (load sub-forms)) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [tf (al-elem [TaggedForm] sub-forms (load i))]
+              (match (defn-name-of (field tf form))
+                (None [] 0)
+                (Some [nm]
+                  (let [q (qualify-name a nm (load (field tf module)))]
+                    (if (icmp-ne (cast i64 (prog-fn-find macroctx q)) 0) 0
+                      (if (not (raw-code-sig? (field tf form))) 0
+                        (do (try! (tower-recover-form! tc (mut s) tf)) 0)))))))
+            (store! i (iadd (load i) 1)))))
+      (Ok [i64 Diag] (load (field tc hit)))))))
+; trigger (b): the sub-check failed with a call to a name that matches a SKIPPED
+; defn (a metaprogram reached an ordinary helper whose body has macro syntax) —
+; recover that helper on demand.
+(defn tower-find-head-at [(tc (ptr TowerCx)) (node (ptr Sexp))] (-> (Option (slice u8)))
+  (let [tg (sx-tag (load node))]
+    (if (not (or (icmp-eq tg 6) (icmp-eq tg 7))) (None [(slice u8)])
+      (let [items (sx-items (load node)) n (sx-len items)]
+        (if (and (icmp-eq tg 6)
+             (and (icmp-eq (sx-lo (load node)) (load (field tc dlo)))
+              (and (icmp-eq (sx-hi (load node)) (load (field tc dhi)))
+               (and (icmp-eq (sx-source (load node)) (load (field tc dsrc)))
+                    (and (icmp-ge n 1) (icmp-eq (sx-tag (sx-at items 0)) 2))))))
+            (Some (sx-sval (sx-at items 0)))
+          (let [(mut i) 0 (mut r) (None [(slice u8)])]
+            (loop (if (icmp-ge (load i) n) (break)
+              (do (match (tower-find-head-at tc (al-elem [Sexp] items (load i)))
+                    (Some [h] (do (store! r (Some h)) (break)))
+                    (None [] 0))
+                  (store! i (iadd (load i) 1)))))
+            (load r)))))))
+(defn tower-recover-called [(tc (ptr TowerCx)) (s (mut LS)) (sub-forms (ptr (ArrayList TaggedForm))) (macroctx (ptr Program))] (-> (Result i64 Diag))
+  (try (do
+    (let [a (load (field tc a)) n (al-len [TaggedForm] (load sub-forms))
+          (mut headn) (None [(slice u8)]) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (match (tower-find-head-at tc (field (al-elem [TaggedForm] sub-forms (load i)) form))
+              (Some [h] (do (store! headn (Some h)) (break)))
+              (None [] 0))
+            (store! i (iadd (load i) 1)))))
+      (match (load headn)
+        (None [] (Ok [i64 Diag] 0))
+        (Some [h]
+          (let [(mut j) 0]
+            (loop (if (icmp-ge (load j) n) (break)
+              (do (let [tf (al-elem [TaggedForm] sub-forms (load j))]
+                    (match (defn-name-of (field tf form))
+                      (None [] 0)
+                      (Some [nm]
+                        (if (not (str-eq nm h)) 0
+                          (if (icmp-ne (cast i64 (prog-fn-find macroctx (qualify-name a nm (load (field tf module))))) 0) 0
+                            (do (try! (tower-recover-form! tc (mut s) tf)) 0))))))
+                  (store! j (iadd (load j) 1)))))
+            (Ok [i64 Diag] (load (field tc hit))))))))))
+(defn mk-tower-cx [(s (mut LS)) (sub-forms (ptr (ArrayList TaggedForm))) (macroctx (ptr Program)) (quals (ptr (ArrayList (slice u8)))) (a (ptr Allocator)) (dlo i64) (dhi i64) (dsrc i64)] (-> (ptr TowerCx))
+  (let [tc (unwrap-ptr [TowerCx] (create [TowerCx] a)) allfns (all-defn-names sub-forms a)
+        impb (unwrap-ptr [(ArrayList ImpEntry)] (create [(ArrayList ImpEntry)] a))
+        expb (unwrap-ptr [(ArrayList ExpEntry)] (create [(ArrayList ExpEntry)] a))]
+    (store! impb (load (field s imports))) (store! expb (load (field s exports)))
+    (store! (field tc a) a)
+    (store! (field tc dlo) dlo) (store! (field tc dhi) dhi) (store! (field tc dsrc) dsrc)
+    (store! (field tc macroctx) macroctx)
+    (store! (field tc quals) quals)
+    (store! (field tc allfns) (field allfns items))
+    (store! (field tc impb) impb)
+    (store! (field tc expb) expb)
+    (store! (field tc module) (None [(slice u8)]))
+    (store! (field tc hit) 0)
+    tc))
+(defn stage3-parse-recover [(s (mut LS)) (sub-forms (ptr (ArrayList TaggedForm))) (macroctx (ptr Program)) (quals (ptr (ArrayList (slice u8)))) (a (ptr Allocator))] (-> (Result i64 Diag))
+  (let [tc (mk-tower-cx (mut s) sub-forms macroctx quals a -2 -2 -2)]
+    (tower-parse-pass tc (mut s) sub-forms macroctx)))
+
 (defn tower-pass [(tc (ptr TowerCx)) (s (mut LS)) (sub-forms (ptr (ArrayList TaggedForm)))] (-> (Result i64 Diag))
   (try (do
     (let [n (al-len [TaggedForm] (load sub-forms)) (mut i) 0]
@@ -411,6 +573,16 @@
       (Ok [macroctx]
         (let [quals (code-sig-funcs macroctx a)]
           (if (icmp-eq (al-len [(slice u8)] (load quals)) 0) (Ok [i64 Diag] 0)
+            ; PARSE-level tower: a defn the tolerant resolve SKIPPED may contain a
+            ; macro call whose arguments are not expression syntax (objc `msg`
+            ; type vectors) — expand it and re-resolve before anything else.
+            (match (stage3-parse-recover (mut s) sub-forms macroctx quals a)
+              (Err [d] (Err [i64 Diag] d))
+              (Ok [phit]
+                (if (icmp-ne phit 0)
+                    (if (icmp-ge round 64)
+                        (Err [i64 Diag] (derr "metaprogram definition-time expansion did not reach a fixpoint after 64 rounds"))
+                      (let [rr (stage3-round (mut s) sub-forms a (iadd round 1))] rr))
             ; the closure seeds gain the shim functions under the compiled engine:
             ; lowering creates calls to them AFTER this walk runs.
             (let [seeds (if (meta-compiled?) (meta-shim-seeds a macroctx quals) quals)
@@ -432,33 +604,25 @@
                           (run-expand (mut s) quals wanted checked a)))))
                 (Err [d]
                   ; the tower: if the check rejected the sub-program AT a
-                  ; macro-headed call form, expand that call and go again
+                  ; macro-headed call form, expand that call and go again; if it
+                  ; rejected a call to a SKIPPED defn, recover that defn.
                   (if (icmp-ge round 64)
                       (Err [i64 Diag] (derr "metaprogram definition-time expansion did not reach a fixpoint after 64 rounds"))
-                    (let [tc (alloc-stack TowerCx) allfns (all-defn-names sub-forms a) dp (alloc-stack Diag)
-                          impb (unwrap-ptr [(ArrayList ImpEntry)] (create [(ArrayList ImpEntry)] a))
-                          expb (unwrap-ptr [(ArrayList ExpEntry)] (create [(ArrayList ExpEntry)] a))]
-                      (store! impb (load (field s imports))) (store! expb (load (field s exports)))
+                    (let [dp (alloc-stack Diag)]
                       (store! dp d)
-                      (store! (field tc a) a)
-                      (store! (field tc dlo) (load (field dp lo)))
-                      (store! (field tc dhi) (load (field dp hi)))
-                      (store! (field tc dsrc) (load (field dp source)))
-                      (store! (field tc macroctx) macroctx)
-                      (store! (field tc quals) quals)
-                      (store! (field tc allfns) (field allfns items))
-                      (store! (field tc impb) impb)
-                      (store! (field tc expb) expb)
-                      (store! (field tc module) (None [(slice u8)]))
-                      (store! (field tc hit) 0)
+                      (let [tc (mk-tower-cx (mut s) sub-forms macroctx quals a
+                                            (load (field dp lo)) (load (field dp hi)) (load (field dp source)))]
                       (match (tower-pass tc (mut s) sub-forms)
                         (Err [d2] (Err [i64 Diag] d2))
                         (Ok [hit]
-                          (if (icmp-eq hit 0)
-                              (Err [i64 Diag] d)     ; a real error — surface it untouched
-                            ; the let defeats self-tail-call elimination (musttail
-                            ; rejects this frame); depth is bounded by the 64-round cap
-                            (let [rr (stage3-round (mut s) sub-forms a (iadd round 1))] rr)))))))))))))))
+                          (match (if (icmp-eq hit 0) (tower-recover-called tc (mut s) sub-forms macroctx) (Ok [i64 Diag] hit))
+                            (Err [d3] (Err [i64 Diag] d3))
+                            (Ok [hit2]
+                              (if (icmp-eq hit2 0)
+                                  (Err [i64 Diag] d)     ; a real error — surface it untouched
+                                ; the let defeats self-tail-call elimination (musttail
+                                ; rejects this frame); depth is bounded by the 64-round cap
+                                (let [rr (stage3-round (mut s) sub-forms a (iadd round 1))] rr)))))))))))))))))))))
 ; ── whole-program CHECKERS ───────────────────────────────────────────────────
 ; `(checker FN)` registers FN — a [(prog Code)] -> Code function — to be run once,
 ; after expansion, over the WHOLE program (all top-level forms as one Code list).

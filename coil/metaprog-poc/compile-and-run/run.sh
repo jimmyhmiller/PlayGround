@@ -35,7 +35,10 @@ COIL_META=interp $COIL run $D/tower_test.coil; rc=$?
 [ $rc -eq 45 ] || { echo "tower test FAILED (interpreter engine, exit $rc, want 45)"; exit 1; }
 $COIL run $D/tower_fmt_test.coil 2>/dev/null; rc=$?
 [ $rc -eq 70 ] || { echo "tower fmt test FAILED (exit $rc, want 70)"; exit 1; }
-echo "tower: OK (45/45 both engines; fmt-in-a-macro logged at expansion time)"
+$COIL run $D/tower_msg_test.coil >/dev/null 2>&1; rc=$?
+[ $rc -eq 0 ] || { echo "tower msg test FAILED (exit $rc, want 0)"; exit 1; }
+echo "tower: OK (45/45 both engines; fmt-in-a-macro logged; objc-style msg macro with"
+echo "       TYPE-SYNTAX arguments works in a metaprogram body — the parse-level trigger)"
 
 echo "=== 5. ARBITRARY CODE in a metaprogram, via the real compiled engine ==="
 echo "       generics + ArrayList + string-keyed HashMap + StrBuf + malloc + libc"

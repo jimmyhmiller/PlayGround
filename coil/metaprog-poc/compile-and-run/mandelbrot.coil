@@ -44,25 +44,16 @@
 
 (defstruct CGRect [(x f64) (y f64) (w f64) (h f64)])
 
-; objc_msgSend retyped per call shape — fixed-signature wrapper FUNCTIONS (a
-; metaprogram body walks through the type-directed tower, so type-syntax macro
-; arguments like the classic `msg` macro's would be misread; these are plain fns)
+; the CLASSIC objc `msg` macro (apps/chip8/objc.coil), used INSIDE a metaprogram
+; body: its type-syntax arguments ((ptr i8) returns, [CGRect i64 …] argtype
+; vectors) make the raw call unparseable as an expression, which is exactly the
+; tower's syntactic trigger — it expands here at definition time like anywhere else
 (defn mcls [(n (ptr i8))] (-> (ptr i8)) (objc_getClass n))
 (defn msel [(n (ptr i8))] (-> (ptr i8)) (sel_registerName n))
-(defn msg0 [(r (ptr i8)) (s (ptr i8))] (-> (ptr i8))
-  (call-ptr (cast (fnptr c [(ptr i8) (ptr i8)] (ptr i8)) (fnptr-of objc_msgSend)) r s))
-(defn msgp [(r (ptr i8)) (s (ptr i8)) (a0 (ptr i8))] (-> (ptr i8))
-  (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) (ptr i8)] (ptr i8)) (fnptr-of objc_msgSend)) r s a0))
-(defn msgi [(r (ptr i8)) (s (ptr i8)) (a0 i64)] (-> (ptr i8))
-  (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) i64] (ptr i8)) (fnptr-of objc_msgSend)) r s a0))
-(defn msg-ret-i [(r (ptr i8)) (s (ptr i8))] (-> i64)
-  (call-ptr (cast (fnptr c [(ptr i8) (ptr i8)] i64) (fnptr-of objc_msgSend)) r s))
-(defn msg-initrect [(r (ptr i8)) (s (ptr i8)) (rect CGRect) (style i64) (backing i64) (defer i64)] (-> (ptr i8))
-  (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) CGRect i64 i64 i64] (ptr i8)) (fnptr-of objc_msgSend))
-            r s rect style backing defer))
-(defn msg-nextev [(r (ptr i8)) (s (ptr i8)) (mask i64) (until (ptr i8)) (mode (ptr i8)) (deq i64)] (-> (ptr i8))
-  (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) i64 (ptr i8) (ptr i8) i64] (ptr i8)) (fnptr-of objc_msgSend))
-            r s mask until mode deq))
+(defn msg [(ret Code) (recv Code) (selector Code) (argtypes Code) & (args Code)] (-> Code)
+  `(call-ptr
+     (cast (fnptr c [(ptr i8) (ptr i8) ~@argtypes] ~ret) (fnptr-of objc_msgSend))
+     ~recv ~selector ~@args))
 
 ; ---- the view ----------------------------------------------------------------
 (defstruct MView [(cx f64) (cy f64) (scale f64) (iters i64) (done i64)])
@@ -117,15 +108,15 @@
   (let [space (CGColorSpaceCreateDeviceRGB)
         ctx (CGBitmapContextCreate (cast (ptr i8) buf) MW MH 8 (imul MW 4) space 1)
         img (CGBitmapContextCreateImage ctx)]
-    (msgp layer (msel c"setContents:") img)
+    (msg (ptr i8) layer (msel c"setContents:") [(ptr i8)] img)
     (CGImageRelease img) (CGContextRelease ctx) (CGColorSpaceRelease space)
     0))
 
 ; keyDown handling: WASD pan, Z/X zoom, I/O iteration budget, Q or RETURN done
 (defn mandel-key [(v (ptr MView)) (ev (ptr i8))] (-> i64)
-  (let [chars (msg0 ev (msel c"characters"))]
+  (let [chars (msg (ptr i8) ev (msel c"characters") [])]
     (if (icmp-eq (cast i64 chars) 0) 0
-      (let [utf (msg0 chars (msel c"UTF8String"))
+      (let [utf (msg (ptr i8) chars (msel c"UTF8String") [])
             ch (cast i64 (load (cast (ptr u8) utf)))
             pan (fdiv (load (field v scale)) 8.0)]
         (cond
@@ -144,11 +135,11 @@
 
 (defn mandel-pump [(app (ptr i8)) (v (ptr MView)) (mode (ptr i8))] (-> i64)
   (while 1
-    (let [ev (msg-nextev app (msel c"nextEventMatchingMask:untilDate:inMode:dequeue:")
-                         -1 (cast (ptr i8) 0) mode 1)]
+    (let [ev (msg (ptr i8) app (msel c"nextEventMatchingMask:untilDate:inMode:dequeue:")
+                  [i64 (ptr i8) (ptr i8) i64] -1 (cast (ptr i8) 0) mode 1)]
       (if (icmp-eq (cast i64 ev) 0) (break 0)
-        (do (when (icmp-eq (msg-ret-i ev (msel c"type")) 10) (mandel-key v ev))
-            (msgp app (msel c"sendEvent:") ev)
+        (do (when (icmp-eq (msg i64 ev (msel c"type") []) 10) (mandel-key v ev))
+            (msg (ptr i8) app (msel c"sendEvent:") [(ptr i8)] ev)
             0)))))
 
 ; ---- THE METAPROGRAM: a GUI session at expansion time -------------------------
@@ -157,7 +148,7 @@
         auto (icmp-ne (cast i64 (getenv c"COIL_MANDEL_AUTO")) 0)
         v (unwrap-ptr [MView] (create [MView] a))
         buf (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a (imul (imul MW MH) 4) 1)))
-        app (msg0 (mcls c"NSApplication") (msel c"sharedApplication"))
+        app (msg (ptr i8) (mcls c"NSApplication") (msel c"sharedApplication") [])
         rect (alloc-stack CGRect)]
     (store! (field v cx) -0.6) (store! (field v cy) 0.0)
     (store! (field v scale) 3.2) (store! (field v iters) 96) (store! (field v done) 0)
@@ -165,17 +156,17 @@
     (store! (field rect w) (cast f64 MW)) (store! (field rect h) (cast f64 MH))
     (fmt (stderr) "[mandelbrot] compile-time viewer{s}: WASD pan, Z/X zoom, I/O iters, Q/RETURN accept\n"
          (if auto " (auto)" ""))
-    (let [win (msg-initrect (msg0 (mcls c"NSWindow") (msel c"alloc"))
-                            (msel c"initWithContentRect:styleMask:backing:defer:")
-                            (load rect) 15 2 0)
-          mode (msgp (mcls c"NSString") (msel c"stringWithUTF8String:") c"kCFRunLoopDefaultMode")]
+    (let [win (msg (ptr i8) (msg (ptr i8) (mcls c"NSWindow") (msel c"alloc") [])
+                     (msel c"initWithContentRect:styleMask:backing:defer:")
+                     [CGRect i64 i64 i64] (load rect) 15 2 0)
+          mode (msg (ptr i8) (mcls c"NSString") (msel c"stringWithUTF8String:") [(ptr i8)] c"kCFRunLoopDefaultMode")]
       ; auto mode: accessory policy, no focus steal; interactive: regular + activate
-      (msgi app (msel c"setActivationPolicy:") (if auto 1 0))
-      (msgi (msg0 win (msel c"contentView")) (msel c"setWantsLayer:") 1)
-      (msgp win (msel c"makeKeyAndOrderFront:") (cast (ptr i8) 0))
-      (when (not auto) (do (msgi app (msel c"activateIgnoringOtherApps:") 1) 0))
-      (msg0 app (msel c"finishLaunching"))
-      (let [layer (msg0 (msg0 win (msel c"contentView")) (msel c"layer"))
+      (msg (ptr i8) app (msel c"setActivationPolicy:") [i64] (if auto 1 0))
+      (msg (ptr i8) (msg (ptr i8) win (msel c"contentView") []) (msel c"setWantsLayer:") [i64] 1)
+      (msg (ptr i8) win (msel c"makeKeyAndOrderFront:") [(ptr i8)] (cast (ptr i8) 0))
+      (when (not auto) (do (msg (ptr i8) app (msel c"activateIgnoringOtherApps:") [i64] 1) 0))
+      (msg (ptr i8) app (msel c"finishLaunching") [])
+      (let [layer (msg (ptr i8) (msg (ptr i8) win (msel c"contentView") []) (msel c"layer") [])
             (mut frame) 0]
         (while (icmp-eq (load (field v done)) 0)
           (mandel-render v buf)
@@ -189,7 +180,7 @@
                 (when (icmp-ge (load frame) 40) (store! (field v done) 1))))
           (store! frame (iadd (load frame) 1))
           (usleep 16000))
-        (msg0 win (msel c"close"))
+        (msg (ptr i8) win (msel c"close") [])
         (fmt (stderr) "[mandelbrot] accepted view: center=({f}, {f}) scale={f} iters={d} after {d} frames\n"
              (load (field v cx)) (load (field v cy)) (load (field v scale)) (load (field v iters)) (load frame))
         `(mandel-chosen ~(load (field v cx)) ~(load (field v cy)) ~(load (field v scale)) ~(load (field v iters)))))))
