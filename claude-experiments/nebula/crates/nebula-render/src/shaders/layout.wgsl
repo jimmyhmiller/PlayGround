@@ -2,7 +2,13 @@
 // for O(N) approximate repulsion. The passes each simulation step:
 //
 //   clear_grid  -> zero per-cell counters
-//   build_grid  -> bucket each node into its cell (atomic append, capacity-clamped)
+//   count_grid  -> count how many nodes fall in each cell
+//   scan_cells / scan_sums0 / scan_sums1 / add_sums0 / add_cells
+//               -> exclusive prefix sum of the counts, giving each cell the
+//                  offset of its run inside node_order
+//   init_cursor -> per-cell insert cursor, starting at the run's offset
+//   scatter_nodes
+//               -> counting-sort node ids into node_order, grouped by cell
 //   build_pyr_l0 / reduce_pyr (per level)
 //               -> build the center-of-mass pyramid from the fine grid counts
 //   forces      -> read positions (read-only), accumulate repulsion+attraction+
@@ -12,6 +18,17 @@
 // Splitting force computation (reads positions) from integration (writes
 // positions) makes the whole step race-free without double-buffering: within
 // `forces` every invocation only reads positions and writes its own velocity.
+//
+// WHY THE SORT. `forces` is latency-bound, not bandwidth-bound: its gathers are
+// only a few hundred MB per step but each one is a cache miss, and it stalls on
+// them one at a time. Iterating nodes in *cell order* (thread g handles
+// node_order[g], not node g) means a workgroup's threads sit in neighbouring
+// cells, so they hit the same grid runs and the same pyramid entries and the
+// cache absorbs the gathers. It computes exactly the same forces for exactly the
+// same nodes — only which thread handles which node changes.
+//
+// The sort also replaces a fixed-capacity `grid_items` (dim^2 * cap entries,
+// mostly empty) with an exact run per cell in an N-entry array.
 
 struct Params {
     num_nodes: u32,
@@ -32,7 +49,7 @@ struct Params {
     _p1: f32,
     _p2: f32,
     _p3: f32,
-    // COM pyramid level table: x = cell offset into pyr_com/pyr_mass, y = dim.
+    // COM pyramid level table: x = cell offset into pyr, y = dim.
     // Level 0 mirrors the fine grid; each level halves (power-of-two aligned).
     levels: array<vec4<u32>, 12>,
 };
@@ -44,10 +61,59 @@ struct Params {
 @group(1) @binding(2) var<storage, read> csr_offsets: array<u32>;
 @group(1) @binding(3) var<storage, read> csr_targets: array<u32>;
 @group(1) @binding(4) var<storage, read_write> grid_counts: array<atomic<u32>>;
-@group(1) @binding(5) var<storage, read_write> grid_items: array<u32>;
+// Node ids counting-sorted by cell: cell c owns the run
+// node_order[cell_starts[c] .. cell_starts[c] + grid_counts[c]].
+@group(1) @binding(5) var<storage, read_write> node_order: array<u32>;
+// Exclusive prefix sum of grid_counts — where each cell's run begins.
+@group(1) @binding(7) var<storage, read_write> cell_starts: array<u32>;
+// Scratch for the scatter: each cell's next free slot, walked up from its start.
+@group(1) @binding(8) var<storage, read_write> cell_cursor: array<atomic<u32>>;
+// Per-block totals for the multi-level scan. Two levels packed back to back:
+// [0, nblocks0) holds one total per 256-cell block, and [nblocks0, ...) holds one
+// total per 256-block group. Two levels reach 256^3 = 16.7M cells, above any
+// grid_dim we allow.
+@group(1) @binding(9) var<storage, read_write> scan_sums: array<u32>;
 // Center-of-mass pyramid for far-field repulsion (all levels packed).
-@group(1) @binding(6) var<storage, read_write> pyr_com: array<vec2<f32>>;
-@group(1) @binding(7) var<storage, read_write> pyr_mass: array<f32>;
+//
+// One 8-byte entry per cell: .x = center of mass, .y = mass (a node count).
+// The far-field walk is memory-bound — it reads ~27 cells per level per node,
+// scattered — so the entry is packed to keep that traffic down:
+//
+//   * COM is stored *cell-relative*, as two 16-bit fixed-point fractions of the
+//     cell's own extent. A COM always lies inside its cell, so [0,1] per axis is
+//     the exact range, and the quantization is cell_size/65535 — at the coarsest
+//     level (4x4 of a ~100k world) that is sub-world-unit against a cell tens of
+//     thousands of units across. Absolute f32 would spend 8 bytes to describe a
+//     point we already know the neighborhood of.
+//   * Mass is an exact u32 count (level 0 counts nodes; reduce sums children), so
+//     it needs no float at all.
+//
+// Together: 12 bytes in two buffers -> 8 bytes in one, halving both the bytes and
+// the number of scattered loads per cell.
+@group(1) @binding(6) var<storage, read_write> pyr: array<vec2<u32>>;
+
+// COM of a cell whose mass is spread evenly: the cell center. Level 0 uses this.
+const COM_CELL_CENTER: u32 = 0x80008000u; // (0.5, 0.5) in 16-bit fixed point
+
+// Decode a packed COM back to world space. Callers pass the cell's own (cx, cy)
+// and side length, which they already have — recomputing them from a linear cell
+// index would cost an integer divide per cell read.
+fn pyr_com_at(cx: f32, cy: f32, cs: f32, packed: u32) -> vec2<f32> {
+    let half = params.world_size * 0.5;
+    let fx = f32(packed & 0xffffu) * (1.0 / 65535.0);
+    let fy = f32(packed >> 16u) * (1.0 / 65535.0);
+    return vec2<f32>((cx + fx) * cs - half, (cy + fy) * cs - half);
+}
+
+// Encode a world-space COM as a fraction of cell (cx, cy). The clamp guards only
+// against float rounding at the cell boundary; the COM is inside the cell by
+// construction.
+fn pyr_pack_com(cx: f32, cy: f32, cs: f32, com: vec2<f32>) -> u32 {
+    let half = params.world_size * 0.5;
+    let fx = clamp((com.x + half) / cs - cx, 0.0, 1.0);
+    let fy = clamp((com.y + half) / cs - cy, 0.0, 1.0);
+    return u32(round(fx * 65535.0)) | (u32(round(fy * 65535.0)) << 16u);
+}
 
 // Which pyramid level a reduce_pyr pass writes (bound with a dynamic offset).
 struct ReduceLevel {
@@ -87,7 +153,7 @@ fn clear_grid(
 }
 
 @compute @workgroup_size(256)
-fn build_grid(
+fn count_grid(
     @builtin(workgroup_id) wid: vec3<u32>,
     @builtin(num_workgroups) nwg: vec3<u32>,
     @builtin(local_invocation_index) lidx: u32,
@@ -98,10 +164,164 @@ fn build_grid(
     }
     let c = cell_coord(positions[i]);
     let cell = u32(c.y) * params.grid_dim + u32(c.x);
-    let slot = atomicAdd(&grid_counts[cell], 1u);
-    if (slot < params.grid_cap) {
-        grid_items[cell * params.grid_cap + slot] = i;
+    atomicAdd(&grid_counts[cell], 1u);
+}
+
+// --- Multi-level exclusive prefix sum over the per-cell counts ---------------
+// Standard three-stage scan: scan each 256-wide block locally, scan the block
+// totals, then fold the scanned totals back in. `cells` can reach 4.19M, so the
+// block totals need scanning too — hence two levels of sums.
+
+fn num_blocks(n: u32) -> u32 {
+    return (n + 255u) / 256u;
+}
+
+var<workgroup> scan_tmp: array<u32, 256>;
+
+// Hillis–Steele scan across the workgroup. Every invocation must call this (the
+// barriers require uniform control flow), so out-of-range threads pass v = 0.
+// Returns (exclusive prefix for this lane, total for the whole block).
+fn block_scan(lidx: u32, v: u32) -> vec2<u32> {
+    scan_tmp[lidx] = v;
+    workgroupBarrier();
+    for (var off = 1u; off < 256u; off = off * 2u) {
+        var add = 0u;
+        if (lidx >= off) {
+            add = scan_tmp[lidx - off];
+        }
+        workgroupBarrier(); // all reads land before any write
+        scan_tmp[lidx] = scan_tmp[lidx] + add;
+        workgroupBarrier(); // all writes land before the next round reads
     }
+    let inclusive = scan_tmp[lidx];
+    let total = scan_tmp[255];
+    return vec2<u32>(inclusive - v, total);
+}
+
+// Level 0: scan the cell counts into cell_starts, emitting one total per block.
+@compute @workgroup_size(256)
+fn scan_cells(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(num_workgroups) nwg: vec3<u32>,
+    @builtin(local_invocation_index) lidx: u32,
+) {
+    let cells = params.grid_dim * params.grid_dim;
+    let i = linear_index(wid, nwg, lidx);
+    var v = 0u;
+    if (i < cells) {
+        v = atomicLoad(&grid_counts[i]);
+    }
+    let r = block_scan(lidx, v);
+    if (i < cells) {
+        cell_starts[i] = r.x;
+    }
+    // The dispatch is tiled into 2D and can overshoot, so bound the sums write.
+    let block = wid.x + wid.y * nwg.x + wid.z * nwg.x * nwg.y;
+    if (lidx == 0u && block < num_blocks(cells)) {
+        scan_sums[block] = r.y;
+    }
+}
+
+// Level 1: scan those block totals in place, emitting one total per 256 blocks
+// into the second region of scan_sums.
+@compute @workgroup_size(256)
+fn scan_sums0(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(num_workgroups) nwg: vec3<u32>,
+    @builtin(local_invocation_index) lidx: u32,
+) {
+    let n0 = num_blocks(params.grid_dim * params.grid_dim);
+    let i = linear_index(wid, nwg, lidx);
+    var v = 0u;
+    if (i < n0) {
+        v = scan_sums[i];
+    }
+    let r = block_scan(lidx, v);
+    if (i < n0) {
+        scan_sums[i] = r.x;
+    }
+    let block = wid.x + wid.y * nwg.x + wid.z * nwg.x * nwg.y;
+    if (lidx == 0u && block < num_blocks(n0)) {
+        scan_sums[n0 + block] = r.y;
+    }
+}
+
+// Level 2: scan the second region in place. It is at most 256 entries (256^3
+// cells), so one workgroup finishes it and its grand total is just N.
+@compute @workgroup_size(256)
+fn scan_sums1(@builtin(local_invocation_index) lidx: u32) {
+    let n0 = num_blocks(params.grid_dim * params.grid_dim);
+    let n1 = num_blocks(n0);
+    var v = 0u;
+    if (lidx < n1) {
+        v = scan_sums[n0 + lidx];
+    }
+    let r = block_scan(lidx, v);
+    if (lidx < n1) {
+        scan_sums[n0 + lidx] = r.x;
+    }
+}
+
+// Fold level 2 back into level 1.
+@compute @workgroup_size(256)
+fn add_sums0(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(num_workgroups) nwg: vec3<u32>,
+    @builtin(local_invocation_index) lidx: u32,
+) {
+    let n0 = num_blocks(params.grid_dim * params.grid_dim);
+    let i = linear_index(wid, nwg, lidx);
+    if (i >= n0) {
+        return;
+    }
+    scan_sums[i] = scan_sums[i] + scan_sums[n0 + i / 256u];
+}
+
+// Fold level 1 back into the per-cell offsets. cell_starts is now the exclusive
+// prefix sum of grid_counts across the whole grid.
+@compute @workgroup_size(256)
+fn add_cells(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(num_workgroups) nwg: vec3<u32>,
+    @builtin(local_invocation_index) lidx: u32,
+) {
+    let cells = params.grid_dim * params.grid_dim;
+    let i = linear_index(wid, nwg, lidx);
+    if (i >= cells) {
+        return;
+    }
+    cell_starts[i] = cell_starts[i] + scan_sums[i / 256u];
+}
+
+@compute @workgroup_size(256)
+fn init_cursor(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(num_workgroups) nwg: vec3<u32>,
+    @builtin(local_invocation_index) lidx: u32,
+) {
+    let i = linear_index(wid, nwg, lidx);
+    let cells = params.grid_dim * params.grid_dim;
+    if (i >= cells) {
+        return;
+    }
+    atomicStore(&cell_cursor[i], cell_starts[i]);
+}
+
+// Place every node id into its cell's run. Order within a run is whatever the
+// atomics decide, which is fine: the run is a set, and the near field sums it.
+@compute @workgroup_size(256)
+fn scatter_nodes(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(num_workgroups) nwg: vec3<u32>,
+    @builtin(local_invocation_index) lidx: u32,
+) {
+    let i = linear_index(wid, nwg, lidx);
+    if (i >= params.num_nodes) {
+        return;
+    }
+    let c = cell_coord(positions[i]);
+    let cell = u32(c.y) * params.grid_dim + u32(c.x);
+    node_order[atomicAdd(&cell_cursor[cell], 1u)] = i;
 }
 
 // Pyramid level 0: one cell per fine-grid cell, mass = node count, COM = cell
@@ -117,16 +337,7 @@ fn build_pyr_l0(
     if (ci >= cells) {
         return;
     }
-    let cs = params.world_size / f32(params.grid_dim);
-    let half = params.world_size * 0.5;
-    let cx = ci % params.grid_dim;
-    let cy = ci / params.grid_dim;
-    let cnt = f32(atomicLoad(&grid_counts[ci]));
-    pyr_com[ci] = vec2<f32>(
-        (f32(cx) + 0.5) * cs - half,
-        (f32(cy) + 0.5) * cs - half,
-    );
-    pyr_mass[ci] = cnt;
+    pyr[ci] = vec2<u32>(COM_CELL_CENTER, atomicLoad(&grid_counts[ci]));
 }
 
 // Reduce pyramid level dst-1 into level dst: each destination cell is the
@@ -147,23 +358,30 @@ fn reduce_pyr(
     }
     let soff = params.levels[dst - 1u].x;
     let sdim = params.levels[dst - 1u].y;
+    let scs = params.world_size / f32(sdim);
+    let dcs = params.world_size / f32(ddim);
     let dx = ci % ddim;
     let dy = ci / ddim;
     var sum = vec2<f32>(0.0, 0.0);
-    var mass = 0.0;
+    var mass = 0u;
     for (var sy = dy * 2u; sy < dy * 2u + 2u; sy = sy + 1u) {
         for (var sx = dx * 2u; sx < dx * 2u + 2u; sx = sx + 1u) {
-            let m = pyr_mass[soff + sy * sdim + sx];
-            sum = sum + pyr_com[soff + sy * sdim + sx] * m;
+            let child = pyr[soff + sy * sdim + sx];
+            let m = child.y;
+            if (m == 0u) {
+                continue; // empty: its packed COM is meaningless
+            }
+            sum = sum + pyr_com_at(f32(sx), f32(sy), scs, child.x) * f32(m);
             mass = mass + m;
         }
     }
-    if (mass > 0.0) {
-        pyr_com[doff + ci] = sum / mass;
-    } else {
-        pyr_com[doff + ci] = vec2<f32>(0.0, 0.0);
+    // An empty parent's COM is never read (the far-field walk skips mass == 0),
+    // so leave it at the cell origin rather than inventing a position.
+    var packed = 0u;
+    if (mass > 0u) {
+        packed = pyr_pack_com(f32(dx), f32(dy), dcs, sum / f32(mass));
     }
-    pyr_mass[doff + ci] = mass;
+    pyr[doff + ci] = vec2<u32>(packed, mass);
 }
 
 @compute @workgroup_size(256)
@@ -172,10 +390,13 @@ fn forces(
     @builtin(num_workgroups) nwg: vec3<u32>,
     @builtin(local_invocation_index) lidx: u32,
 ) {
-    let i = linear_index(wid, nwg, lidx);
-    if (i >= params.num_nodes) {
+    let g = linear_index(wid, nwg, lidx);
+    if (g >= params.num_nodes) {
         return;
     }
+    // Walk nodes in cell order rather than index order — see WHY THE SORT above.
+    // Same nodes, same forces; only the thread that computes each one changes.
+    let i = node_order[g];
     let pi = positions[i];
     let k = params.k;
     let k2 = k * k;
@@ -198,11 +419,16 @@ fn forces(
             }
             let cell = u32(ny) * params.grid_dim + u32(nx);
             let true_cnt = atomicLoad(&grid_counts[cell]);
+            // The run is exact, but still only sample up to grid_cap of it: that
+            // bounds the worst case when a transient pile-up puts thousands of
+            // nodes in one cell. Occupancy averages ~1, so this almost never
+            // binds — and raising the cap is now free, since node_order costs N
+            // entries whatever the cap is.
             let cnt = min(true_cnt, params.grid_cap);
-            let base = cell * params.grid_cap;
+            let base = cell_starts[cell];
             var cell_rep = vec2<f32>(0.0, 0.0);
             for (var s = 0u; s < cnt; s = s + 1u) {
-                let j = grid_items[base + s];
+                let j = node_order[base + s];
                 if (j == i) {
                     continue;
                 }
@@ -256,17 +482,17 @@ fn forces(
                 if (abs(x - cx) <= 1 && abs(y - cy) <= 1) {
                     continue; // covered one level finer (or by the near-field)
                 }
-                let cell = off + u32(y) * u32(ldim) + u32(x);
-                let mass = pyr_mass[cell];
-                if (mass <= 0.0) {
+                let entry = pyr[off + u32(y) * u32(ldim) + u32(x)];
+                let mass = entry.y;
+                if (mass == 0u) {
                     continue;
                 }
-                var delta = pi - pyr_com[cell];
+                var delta = pi - pyr_com_at(f32(x), f32(y), lcs, entry.x);
                 var d2 = dot(delta, delta);
                 if (d2 < 1.0) {
                     d2 = 1.0;
                 }
-                force = force + delta * (params.repulsion * mass * k2 / d2);
+                force = force + delta * (params.repulsion * f32(mass) * k2 / d2);
             }
         }
     }

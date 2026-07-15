@@ -2,7 +2,7 @@
 //! layout stepping, rendering, and wiring graph algorithms to node colors.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nebula_core::{algorithms, Graph, Pos};
 use nebula_layout::{CircleLayout, GridLayout, Layout, LayeredLayout, RadialLayout, RandomLayout};
@@ -417,6 +417,16 @@ pub struct RunOptions {
     /// Color mode to apply on startup.
     pub color_mode: ColorMode,
     pub draw_edges: bool,
+    /// Hide edges while the force layout is stepping, and bring them back when it
+    /// settles or is paused.
+    ///
+    /// An unsettled layout is the worst case for edge rendering — every edge is a
+    /// long screen-crossing line, and additive blending makes overdraw dominate
+    /// (~212 ms/frame at 10M edges, against ~5 ms for the simulation itself). While
+    /// the graph is still rearranging, that picture is a hairball nobody can read
+    /// anyway. Skipping it makes the layout phase fast and the window responsive,
+    /// and the moment it settles every edge comes back, exactly.
+    pub hide_edges_while_simulating: bool,
     pub draw_nodes: bool,
     /// Preselect a node (mainly for scripted/headless captures).
     pub select: Option<u32>,
@@ -452,7 +462,11 @@ impl Default for RunOptions {
             screenshot: None,
             color_mode: ColorMode::Uniform,
             draw_edges: true,
+            hide_edges_while_simulating: true,
             draw_nodes: true,
+            // Off: measured on an unsettled 1M/10M graph the compute rasterizer is
+            // only ~1.4x the hardware path (~170 ms vs ~242 ms), not enough to
+            // justify being the default. `--compute-edges` still selects it.
             compute_edges: false,
             select: None,
             show_help: false,
@@ -553,6 +567,15 @@ pub struct App {
 
     // Timing / stats.
     last_frame: Instant,
+    /// Earliest time the sim may take another step. See `LayoutSettings::sim_duty`.
+    next_sim_at: Instant,
+    /// `total_steps` at the last fps report, for a real steps/s rate.
+    steps_at_fps_mark: u64,
+    /// Whether the user wants edges shown. The renderer's `draw_edges` is the
+    /// *effective* value, which also folds in `hide_edges_while_simulating`.
+    draw_edges_pref: bool,
+    /// See `RunOptions::hide_edges_while_simulating`.
+    hide_edges_while_simulating: bool,
     frame_count: u64,
     fps_timer: Instant,
     fps: f32,
@@ -562,6 +585,10 @@ pub struct App {
 }
 
 impl App {
+    /// A frame at or below this is responsive enough that the sim need not yield.
+    /// Above it, `LayoutSettings::sim_duty` starts inserting idle frames.
+    const RESPONSIVE_FRAME_MS: f32 = 33.0;
+
     pub fn new(graph: Graph, seed_positions: Vec<Pos>, opts: RunOptions) -> Self {
         Self::with_labels(graph, seed_positions, opts, None, None, Vec::new())
     }
@@ -610,6 +637,9 @@ impl App {
             base_radius_px: opts.node_size.clamp(0.5, 64.0),
             ..RenderParams::default()
         };
+        // Read before `opts` moves into the struct.
+        let draw_edges_pref = opts.draw_edges;
+        let hide_edges_while_simulating = opts.hide_edges_while_simulating;
         App {
             graph,
             seed_positions,
@@ -657,6 +687,10 @@ impl App {
             last_click: Instant::now(),
             last_click_pos: glam::Vec2::splat(-1e6),
             last_frame: Instant::now(),
+            next_sim_at: Instant::now(),
+            steps_at_fps_mark: 0,
+            draw_edges_pref,
+            hide_edges_while_simulating,
             frame_count: 0,
             fps_timer: Instant::now(),
             fps: 0.0,
@@ -1014,9 +1048,11 @@ impl App {
 
         let mut running = self.settings.running;
         let mut substeps = self.settings.substeps;
+        let mut sim_duty = self.settings.sim_duty;
         let mut node_size = self.render_params.base_radius_px;
         let mut edge_alpha = self.render_params.edge_alpha;
-        let mut draw_edges = self.live.as_ref().map(|l| l.renderer.draw_edges).unwrap_or(true);
+        let mut draw_edges = self.draw_edges_pref;
+        let mut hide_edges_sim = self.hide_edges_while_simulating;
         let mut draw_nodes = self.live.as_ref().map(|l| l.renderer.draw_nodes).unwrap_or(true);
         let mut edge_raster = self.live.as_ref().map(|l| l.renderer.edge_raster()).unwrap_or(false);
 
@@ -1070,6 +1106,23 @@ impl App {
                     }
                 });
                 ui.add(egui::Slider::new(&mut substeps, 1..=16).text("steps / frame"));
+                ui.add(
+                    egui::Slider::new(&mut sim_duty, 0.05..=1.0)
+                        .text("sim share of time")
+                        .custom_formatter(|v, _| {
+                            if v >= 1.0 {
+                                "all (locks UI)".to_string()
+                            } else {
+                                format!("{:.0}%", v * 100.0)
+                            }
+                        }),
+                )
+                .on_hover_text(
+                    "How much wall-clock time the simulation may take. Stepping \
+                     redraws every edge; below 100% the sim yields the rest of the \
+                     time so panning and the UI stay responsive, and the layout \
+                     takes correspondingly longer. Only slow frames are throttled.",
+                );
                 ui.separator();
 
                 ui.strong("Layout");
@@ -1125,6 +1178,16 @@ impl App {
                 ui.strong("Display");
                 ui.checkbox(&mut draw_nodes, "Nodes");
                 ui.checkbox(&mut draw_edges, "Edges");
+                ui.add_enabled_ui(draw_edges, |ui| {
+                    ui.checkbox(&mut hide_edges_sim, "  hide while simulating")
+                        .on_hover_text(
+                            "An unsettled layout is the worst case for edge drawing \
+                             (every edge is a long screen-crossing line) and it is an \
+                             unreadable hairball until it settles. Hiding edges while \
+                             the sim runs keeps the layout fast and the window \
+                             responsive; all of them return, exactly, once it settles.",
+                        );
+                });
                 ui.checkbox(&mut edge_raster, "Compute edge raster");
                 ui.checkbox(&mut show_density, "Aggregate (density LOD)");
                 ui.checkbox(&mut show_labels, "Labels");
@@ -1234,6 +1297,7 @@ impl App {
             }
         }
         self.settings.substeps = substeps;
+        self.settings.sim_duty = sim_duty;
         if node_size != self.render_params.base_radius_px {
             self.render_params.base_radius_px = node_size;
             self.push_params();
@@ -1255,8 +1319,9 @@ impl App {
                 }
             }
         }
+        self.draw_edges_pref = draw_edges;
+        self.hide_edges_while_simulating = hide_edges_sim;
         if let Some(live) = self.live.as_mut() {
-            live.renderer.draw_edges = draw_edges;
             live.renderer.draw_nodes = draw_nodes;
             live.renderer.set_edge_raster(edge_raster);
         }
@@ -1336,10 +1401,28 @@ impl App {
         let mut ui_taken = self.ui.take();
         let ui_frame = self.ui_frame.take();
 
+        // Edges are hidden while the layout is still moving (see
+        // `RunOptions::hide_edges_while_simulating`). Keyed on `running`, not on
+        // whether this particular frame stepped, so paced frames don't flicker
+        // them on and off. The moment the sim settles or is paused, every edge
+        // comes back.
+        let edges_now =
+            self.draw_edges_pref && !(self.settings.running && self.hide_edges_while_simulating);
+
         let live = self.live.as_mut().unwrap();
+        if live.renderer.draw_edges != edges_now {
+            live.renderer.draw_edges = edges_now;
+            live.renderer.mark_scene_dirty();
+        }
+
+        // Only step when the pacer says the sim has waited its turn. Stepping
+        // dirties the scene, which forces a full edge rasterization; skipping lets
+        // the renderer reuse the cached one, so the window stays interactive
+        // between steps. See `LayoutSettings::sim_duty`.
+        let stepping = self.settings.running && Instant::now() >= self.next_sim_at;
 
         // Advance layout, cooling alpha so the simulation converges and stops.
-        if self.settings.running {
+        if stepping {
             let decay = (1.0 - self.settings.alpha_decay).powi(self.settings.substeps as i32);
             self.settings.alpha *= decay;
             live.layout.update_settings(&live.gpu.queue, &self.settings);
@@ -1483,8 +1566,24 @@ impl App {
         // FPS.
         self.frame_count += 1;
         let now = Instant::now();
+
+        // Pace the next step off what this one actually cost. A stepping frame on
+        // a dense graph is dominated by re-rasterizing every edge, so the sim
+        // "owes" the UI proportionally more idle time the more expensive it was.
+        if stepping {
+            let cost_ms = now.duration_since(self.last_frame).as_secs_f32() * 1000.0;
+            let duty = self.settings.sim_duty.clamp(0.05, 1.0);
+            // Fast frames are not the sim's fault — do not throttle them.
+            let idle_ms = if cost_ms > Self::RESPONSIVE_FRAME_MS && duty < 1.0 {
+                cost_ms * (1.0 - duty) / duty
+            } else {
+                0.0
+            };
+            self.next_sim_at = now + Duration::from_secs_f32(idle_ms / 1000.0);
+        }
         if now.duration_since(self.fps_timer).as_secs_f32() >= 0.5 {
-            self.fps = self.frame_count as f32 / now.duration_since(self.fps_timer).as_secs_f32();
+            let elapsed = now.duration_since(self.fps_timer).as_secs_f32();
+            self.fps = self.frame_count as f32 / elapsed;
             self.frame_count = 0;
             self.fps_timer = now;
             self.update_title();
@@ -1496,10 +1595,17 @@ impl App {
                 }
                 None => String::new(),
             };
+            // Report steps actually taken, not the substeps setting: with the sim
+            // pacer the two differ, and steps/s is what decides how long a layout
+            // takes to settle.
+            let steps_per_s = (self.total_steps - self.steps_at_fps_mark) as f32 / elapsed;
+            self.steps_at_fps_mark = self.total_steps;
             log::info!(
-                "{:.1} fps · {} sim-steps/frame · {} nodes · {} edges{}",
+                "{:.1} fps · {:.1} sim-steps/s ({} /frame, {:.0}% duty) · {} nodes · {} edges{}",
                 self.fps,
+                steps_per_s,
                 self.settings.substeps,
+                self.settings.sim_duty * 100.0,
                 self.graph.num_nodes(),
                 self.graph.num_edges(),
                 gpu_ms
@@ -1724,10 +1830,19 @@ impl App {
         c
     }
 
-    /// Human-readable simulation status for the HUD.
+    /// Human-readable simulation status for the HUD. ASCII only — the bitmap font
+    /// has no glyphs beyond it.
     fn sim_status(&self) -> String {
         if self.settings.running {
-            format!("cooling a={:.3}", self.settings.alpha)
+            // Steps left is what you actually want to know; alpha is a number you
+            // then have to convert into "how much longer" in your head. Say so when
+            // edges are being withheld — a hidden view substitution is never OK.
+            let edges_hidden = self.draw_edges_pref && self.hide_edges_while_simulating;
+            format!(
+                "cooling, {} steps left{}",
+                self.settings.steps_to_settle(),
+                if edges_hidden { " [edges hidden]" } else { "" }
+            )
         } else if self.settings.alpha <= self.settings.alpha_min {
             "settled".to_string()
         } else {
@@ -2076,11 +2191,7 @@ impl App {
             KeyCode::Digit4 => self.set_color_mode(ColorMode::PageRank),
             KeyCode::Digit5 => self.set_color_mode(ColorMode::Coloring),
             KeyCode::Digit6 => self.set_color_mode(ColorMode::Communities),
-            KeyCode::KeyE => {
-                if let Some(live) = self.live.as_mut() {
-                    live.renderer.draw_edges = !live.renderer.draw_edges;
-                }
-            }
+            KeyCode::KeyE => self.draw_edges_pref = !self.draw_edges_pref,
             KeyCode::KeyN => {
                 if let Some(live) = self.live.as_mut() {
                     live.renderer.draw_nodes = !live.renderer.draw_nodes;

@@ -34,6 +34,8 @@ OPTIONS:
     --select <INDEX>          Preselect a node
     --no-edges / --no-nodes   Hide edges / nodes
     --compute-edges           Rasterize edges in a compute shader (UI-toggleable)
+    --edges-while-simulating  Keep drawing edges while the force layout runs
+                              (default: edges are hidden until it settles)
     --frames <N>              Exit after N frames (headless)
     --screenshot <PATH>       Save a PNG of the final frame (headless)
     --help-overlay            Start with the controls overlay visible
@@ -77,6 +79,7 @@ struct Args {
     labels: bool,
     aggregate: bool,
     compute_edges: bool,
+    edges_while_simulating: bool,
     node_size: f32,
 }
 
@@ -207,6 +210,15 @@ fn main() -> anyhow::Result<()> {
     if let Some(dt) = args.dt {
         settings.dt = dt;
     }
+    // Give the cooling schedule a step budget that matches the graph's size,
+    // instead of freezing every graph after the same ~366 steps.
+    settings.set_cooling_for(graph.num_nodes());
+    log::info!(
+        "cooling: alpha_decay {:.5} -> ~{} steps to settle ({} nodes)",
+        settings.alpha_decay,
+        settings.steps_to_settle(),
+        graph.num_nodes(),
+    );
 
     let opts = RunOptions {
         title: format!("nebula · {what}"),
@@ -222,6 +234,7 @@ fn main() -> anyhow::Result<()> {
         show_labels: args.labels,
         aggregate: args.aggregate,
         compute_edges: args.compute_edges,
+        hide_edges_while_simulating: !args.edges_while_simulating,
         node_size: args.node_size,
         filter,
         start_hierarchical: args.hierarchical,
@@ -258,6 +271,7 @@ fn parse_args() -> Result<Args, String> {
     let mut labels = false;
     let mut aggregate = false;
     let mut compute_edges = false;
+    let mut edges_while_simulating = false;
     let mut node_size = 3.0f32;
 
     fn next_u64(it: &mut impl Iterator<Item = String>, name: &str) -> Result<u64, String> {
@@ -313,6 +327,7 @@ fn parse_args() -> Result<Args, String> {
             "--labels" => labels = true,
             "--aggregate" => aggregate = true,
             "--compute-edges" => compute_edges = true,
+            "--edges-while-simulating" => edges_while_simulating = true,
             "--node-size" => node_size = next_f32(&mut it, "--node-size")?,
             "--frames" => frames = Some(next_u64(&mut it, "--frames")?),
             "--screenshot" => screenshot = Some(it.next().ok_or("--screenshot needs a path")?),
@@ -383,6 +398,7 @@ fn parse_args() -> Result<Args, String> {
         labels,
         aggregate,
         compute_edges,
+        edges_while_simulating,
         node_size,
     })
 }

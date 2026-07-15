@@ -5,10 +5,18 @@ Built to lay out and render *very* large graphs interactively — the layout phy
 and the rendering both run on the GPU, and node positions never leave GPU memory
 between simulating and drawing.
 
-On an Apple M2 Max it lays out **1,000,000 nodes / 3,000,000 edges with full
-force-directed physics every frame at ~8 fps**, and renders **10,000,000 nodes at
-30–40 fps**. It aims at the billion-node regime by architecture (see
-[Scaling](#scaling-to-a-billion-nodes)).
+On an Apple M2 Max it lays out **5,000,000 nodes / 50,000,000 edges with full
+force-directed physics at ~40 simulation steps per second** (24.8 ms/step, GPU
+otherwise idle), and renders **10,000,000 nodes at 30–40 fps**. It aims at the
+billion-node regime by architecture (see [Scaling](#scaling-to-a-billion-nodes)).
+
+Two caveats on that number, because a step rate is easy to quote misleadingly.
+Step cost rises about **1.4x** once a layout contracts into clusters (dense cells
+mean more near-field neighbours per node) — the figure above is for the evenly
+spread state. And *settling* is not one step: a graph this size is given ~3,660
+steps (see [cooling](#converging-and-stopping)), so a full 5M layout takes minutes,
+not seconds. It is interactive throughout, and `space` stops it whenever it looks
+right.
 
 ```
 cargo run --release -p nebula-app -- --blocks 40000 6 300000 --color communities
@@ -18,12 +26,15 @@ cargo run --release -p nebula-app -- --blocks 40000 6 300000 --color communities
 
 - **GPU force-directed layout that converges and stops.** A Fruchterman–Reingold
   simulation runs entirely in compute shaders. Repulsion is approximated with a
-  uniform spatial grid for the near field plus a coarse center-of-mass grid (a
-  single-level Barnes–Hut) for the far field — this is what lets a grid unfold
-  into a flat sheet and lets communities separate, instead of everything
-  collapsing into a ball. A global **alpha** cooling factor scales the forces down
-  to zero (d3-force style) so the layout settles and auto-pauses; `space` reheats
-  it, `R`/`G`/`O` restart from a fresh seed.
+  uniform spatial grid for the near field plus a center-of-mass pyramid
+  (fast-multipole-style interaction lists) for the far field — this is what lets a
+  grid unfold into a flat sheet and lets communities separate, instead of
+  everything collapsing into a ball. Nodes are counting-sorted into their grid
+  cells every step so the force pass walks them in spatial order: the gathers hit
+  cache instead of stalling, which is worth ~3x at 5M nodes. A global **alpha**
+  cooling factor scales the forces down to zero (d3-force style) so the layout
+  settles and auto-pauses; `space` reheats it, `R`/`G`/`O` restart from a fresh
+  seed.
 - **GPU rendering.** Nodes are instanced SDF circles (crisp at any zoom); edges
   are additively-blended lines so dense regions read as luminous bundles.
   Positions are shared by *binding* between the compute and render passes — zero
@@ -139,25 +150,60 @@ A cargo workspace of four crates:
 
 ### The layout compute pipeline
 
-Each simulation step is four (well, five) compute passes, each in its own pass so
-wgpu inserts the right memory barriers:
+Each simulation step is a chain of compute passes, each in its own pass so wgpu
+inserts the right memory barriers:
 
-1. `clear_grid` — zero the per-cell counters.
-2. `build_grid` — bucket each node into a uniform spatial cell (atomic append,
-   capacity-clamped to a fixed per-cell sample).
-3. `build_coarse` — reduce the fine grid into a coarse center-of-mass grid (no
-   float atomics needed: coarse mass is derived from the fine cell counts, using
-   fine-cell centers as mass locations).
-4. `forces` — read positions (read-only), accumulate near-field repulsion (fine
-   3×3 neighborhood, scaled by *true* cell population so dense cells don't
-   saturate), far-field repulsion (coarse COM grid), edge attraction (CSR
-   neighbors), and gravity; write velocities.
+1. `clear_grid` / `count_grid` — count how many nodes fall in each uniform
+   spatial cell.
+2. **The counting sort** — `scan_cells`, `scan_sums0`, `scan_sums1`, `add_sums0`,
+   `add_cells` prefix-sum those counts (a three-stage scan, since 2048² cells is
+   far past one workgroup), `init_cursor` and `scatter_nodes` then place every
+   node id into its cell's run in `node_order`.
+3. `build_pyr_l0` / `reduce_pyr` (per level) — build the center-of-mass pyramid
+   from the cell counts. Level 0 uses cell centers, so no float atomics are needed;
+   each level above merges 2×2 children.
+4. `forces` — read positions (read-only), accumulate near-field repulsion (3×3
+   cell neighborhood), far-field repulsion (fast-multipole-style interaction lists
+   down the pyramid, ~27 cells per level), edge attraction (CSR neighbors), and
+   gravity; write velocities.
 5. `integrate` — advance positions from velocities.
 
 Splitting force accumulation (positions read-only) from integration (positions
 write) makes the whole step race-free without double-buffering. Dispatches are
 tiled across a 2D workgroup grid so the ~4M workgroups a billion nodes need fit
 under the 65,535-per-dimension limit; the shader reconstructs a linear index.
+
+**Why sort every step.** `forces` is latency-bound, not bandwidth-bound: it moves
+only a few hundred MB per step, but each gather is a cache miss and it stalls on
+them one at a time. Walking nodes in *cell order* (thread `g` handles
+`node_order[g]`, not node `g`) puts a workgroup's threads in neighbouring cells, so
+they hit the same grid runs and pyramid entries and the cache absorbs the gathers.
+It is exact — the same forces for the same nodes, only a different thread computes
+each — and it is worth ~2.9x at 1M nodes. The sort also replaced a fixed-capacity
+per-cell list (`dim²·cap`, 537 MB and mostly empty) with an exact run per cell in
+an N-entry array.
+
+### Converging and stopping
+
+A global **alpha** scales every force and decays each step, so the layout cools,
+settles, and auto-pauses (d3-force style). The decay rate *is* a step budget:
+`steps = ln(alpha_min) / ln(1 - decay)`.
+
+That budget scales with **√N**. Forces travel about a cell per step and a layout is
+~√N cells across (`world = 1.6·k·√N`, cell ≈ k), so structure needs ~√N steps to
+propagate. A fixed decay — d3's, tuned for a few hundred nodes — would freeze a 5M
+graph after the same ~366 steps a 50k graph gets, leaving it visibly half-finished
+and needing manual reheats. The constant is pinned so 50k still gets exactly its
+~366 steps:
+
+| nodes | steps to settle |
+|-------|-----------------|
+| 50,000 | 366 |
+| 1,000,000 | 1,637 |
+| 5,000,000 | 3,660 |
+
+`space` reheats a settled layout (or stops a running one); `R`/`G`/`O` restart from
+a fresh seed. The HUD shows how many steps remain.
 
 ## Scaling to a billion nodes
 
@@ -167,8 +213,8 @@ tiling that already handles billion-scale workgroup counts.
 
 The honest limit today is **memory**. See [docs/MEMORY.md](docs/MEMORY.md) for the
 exact per-buffer byte accounting: at average degree 4 a billion nodes costs
-~60 GB on the GPU (and the current build also keeps a ~40 GB CPU copy, so ~100 GB
-total — not yet optimal). The document works out the ~28-32 GB optimal floor and
+~64 GB on the GPU (and the current build also keeps a ~40 GB CPU copy, so ~104 GB
+total — not yet optimal). The document works out the ~28-36 GB optimal floor and
 the mechanical wins to get there (render edges from CSR, GPU-side algorithms to
 drop the CPU copy, derive sizes/colors, fp16 velocities), plus where compression
 and out-of-core tiling become necessary past degree 4. nebula demonstrates at the
@@ -179,6 +225,23 @@ draws a graph in O(screen tiles), independent of N — so "can it be shown" is
 solved even where "can it be held in memory" is not.
 
 ## Performance (Apple M2 Max)
+
+**Layout only**, measured headless with no window and nothing else on the GPU
+(`cargo run --release -p nebula-render --example layout_bench -- <nodes> <edges>`),
+so these isolate simulation cost from raster cost. Evenly-spread state; add ~1.4x
+once the layout contracts into clusters.
+
+| Graph | ms / step | steps / s | before the counting sort |
+|-------|-----------|-----------|--------------------------|
+| 500k nodes / 5M edges | 3.7 | ~270 | 6.8 ms |
+| 1M nodes / 10M edges | 5.0 | ~200 | 14.4 ms |
+| 2M nodes / 20M edges | 8.6 | ~116 | 26.9 ms |
+| 5M nodes / 50M edges | 24.8 | ~40 | 78.5 ms |
+
+These numbers are sensitive to GPU contention — a browser with an active GPU
+process roughly halves them. Measure with the GPU idle.
+
+**In-app** (simulation *and* rendering every frame):
 
 | Graph | What's running | Throughput |
 |-------|----------------|------------|

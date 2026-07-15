@@ -22,10 +22,21 @@ CPU buffers in `crates/nebula-core/src/graph.rs`.
 | edges (flat)| `u32`       | 2E    | 4 | 8E  | **16 GB** | ❌❌ 100% redundant with CSR — render from CSR → 0 |
 | csr_targets | `u32`       | 2E    | 4 | 8E  | **16 GB** | ~ floor for exact random adjacency (needs ~30 bits/target); delta+varint → ~6E |
 | grid_counts | `u32`       | gridDim² (≤2048²) | 4 | fixed | 0.016 GB | ✅ fixed, tiny |
-| grid_items  | `u32`       | gridDim²·cap | 4 | fixed | 0.5 GB | ⚠️ fixed; at 1e9 nodes cap=32 under-samples (a quality knob, not a leak) |
-| coarse com/mass | `vec2<f32>`,`f32` | 64² | 12 | fixed | ~0 | ✅ |
+| node_order  | `u32`       | N     | 4 | 4N  | **4 GB**  | ⚠️ node ids counting-sorted by cell — this is what makes `forces` cache-coherent (3.3x at 5M). Scales with N, unlike the fixed capped list it replaced: cheaper below ~130M nodes, dearer above |
+| cell_starts | `u32`       | gridDim² (≤2048²) | 4 | fixed | 0.016 GB | ✅ fixed, tiny |
+| cell_cursor | `u32`       | gridDim² | 4 | fixed | 0.016 GB | ⚠️ scatter scratch; could alias cell_starts if the near field derived `start = cursor - count` |
+| scan_sums   | `u32`       | ~gridDim²/256 | 4 | fixed | 0.00007 GB | ✅ two levels of block totals for the prefix sum |
+| pyr (com+mass) | `vec2<u32>` | ~1.33·gridDim² | 8 | fixed | 0.045 GB | ✅ fixed; COM packed cell-relative (16-bit/axis) + mass as an exact count, so 8 B/cell not 12 |
 
-**GPU total ≈ 28 B/node + 16E = (28 + 8d) B/node → 60.5 GB at d=4.**
+**GPU total ≈ 32 B/node + 16E = (32 + 8d) B/node → 64 GB at d=4.**
+
+The counting sort traded a *fixed* 0.5 GB `grid_items` (`gridDim²·cap`, mostly empty
+at real occupancies) for a *per-node* 4N `node_order`. Below ~130M nodes that is a
+straight win — 537 MB → 20 MB at 5M — and it buys a 3.3x layout speedup plus an exact
+per-cell run instead of a 32-node sample. Past ~130M nodes it costs more than it saved,
+which is the honest price of the speedup at the billion-node target. The old capped list
+was not really an alternative there anyway: at 1e9 nodes it held 32 of ~238 nodes per
+cell and leaned entirely on the true/sampled scaling to stay stable.
 
 ## CPU buffers (nebula-core `Graph`, resident at the same time)
 
@@ -40,9 +51,9 @@ CPU today), so this is **not** freed after upload.
 
 **CPU total ≈ 40 GB.**
 
-## The real current number: ~100 GB at d=4
+## The real current number: ~104 GB at d=4
 
-Steady state = **60 GB GPU + 40 GB CPU ≈ 100 GB**. The frequently-quoted "64 GB"
+Steady state = **64 GB GPU + 40 GB CPU ≈ 104 GB**. The frequently-quoted "64 GB"
 is GPU-only and understates it. The current layout is **not optimal**; the two
 dominant redundancies are:
 
@@ -67,10 +78,12 @@ csr_targets 8E
 12N + 8E = (12 + 4d) B/node  →  28 GB at d=4
 ```
 
-**During simulation**, add fp16 velocities `4N` → **32 GB at d=4**.
+**During simulation**, add fp16 velocities `4N` and the sort's `node_order` `4N`
+→ **36 GB at d=4**. (`node_order` is not free, but it buys 3.3x on the step and
+the grid it replaced cost 0.5 GB fixed regardless.)
 
-So the honest target is **~28–32 GB optimal vs. ~100 GB today** — a 3.4× cut, all
-mechanical:
+So the honest target is **~28–36 GB optimal vs. ~104 GB today** — roughly a 3× cut,
+all mechanical:
 
 | Win | Saves @1e9, d=4 |
 |-----|-----------------|
