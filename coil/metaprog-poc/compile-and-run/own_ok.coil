@@ -1,0 +1,28 @@
+(module own_ok)
+; A well-behaved program under the ownership dialect: every acquired resource is
+; released exactly once, and a SHADOWED name reuses the identifier legally.
+(import "metaprog-poc/compile-and-run/ownership.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/control.coil" :use *)
+
+; model a linear resource as an i64 handle
+(defn acquire [(id i64)] (-> i64) id)
+(defn release [(h i64)] (-> i64) 0)
+(defn use-handle [(h i64)] (-> i64) h)
+
+(defn one-resource [] (-> i64)
+  (let [h (acquire 7)]
+    (use-handle h)      ; ok: still owned
+    (release h)         ; consumed exactly once
+    0))
+
+(defn shadowing-is-fine [] (-> i64)
+  (let [h (acquire 1)]
+    (release h)         ; release the OUTER h
+    (let [h (acquire 2)]   ; a NEW binding, same name
+      (use-handle h)    ; uses the INNER h — legal, distinct resource
+      (release h)
+      0)))
+
+(defn main [] (-> :i64)
+  (iadd (one-resource) (shadowing-is-fine)))
