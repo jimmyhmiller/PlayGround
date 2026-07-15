@@ -111,9 +111,15 @@
     (CBool [x] (if x 1 0))
     (_ (do (mh-bug "code-op result is not an int/bool") 0))))
 (defn mh-op-h [(op i64) (b (ptr i8))] (-> (ptr i8))
-  (match-else (mh-run op b)
-    (CCode [c] (mh-box-sexp c))
-    (_ (do (mh-bug "code-op result is not Code") (cast (ptr i8) 0)))))
+  ; Some ops are TYPED Code but the interpreter returns a scalar (report/warn
+  ; yield CInt 0). Coerce exactly as the interpreter would: ctval->sexp — its
+  ; own value->code conversion, including its own error on aggregates.
+  (let [v (mh-run op b)]
+    (match-else v
+      (CCode [c] (mh-box-sexp c))
+      (_ (match (ctval->sexp v)
+           (Ok [sx] (mh-box-sexp sx))
+           (Err [d] (do (mh-halt d) (cast (ptr i8) 0))))))))
 (defn mh-op-s [(op i64) (b (ptr i8))] (-> (ptr i8))
   (match-else (mh-run op b)
     (CStr [s] (mh-buf s))

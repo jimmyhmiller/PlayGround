@@ -1,0 +1,56 @@
+(module borrowlike)
+; a mini USE-AFTER-FREE checker with REAL dataflow state: a string-keyed
+; HashMap of liveness threaded through a recursive walk of the checked program
+; — the data-structure + helper shape a real borrow checker needs.
+(import "lib/alloc.coil" :use *)
+(import "lib/str.coil" :use *)
+(import "lib/hashmap.coil" :use *)
+(import "lib/control.coil" :use *)
+
+; depth-first, in-order scan; `killed` is REAL mutable analysis state shared
+; across the whole walk (a mixed-signature helper: Code + pointer params)
+(defn bc-scan [(form Code) (killed (ptr (HashMap (slice u8) i64)))] (-> i64)
+  (if (not (code-list? form)) 0
+    (let [n (code-count form) (mut i) 0]
+      ; a (my-free X) statement kills X
+      (if (and (icmp-eq n 2)
+           (and (code-sym? (code-nth form 0))
+            (and (str-eq (code-sym (code-nth form 0)) "my-free")
+                 (code-sym? (code-nth form 1)))))
+          (do (hm-put! killed (code-sym (code-nth form 1)) 1) 0)
+        ; otherwise: flag killed symbols used as call arguments, then recurse
+        (do (loop (if (icmp-ge (load i) n) (break)
+              (do (let [c (code-nth form (load i))]
+                    (if (and (icmp-gt (load i) 0) (code-sym? c))
+                        (match (hm-get [(slice u8) i64] (load killed) (code-sym c))
+                          (Some [v] (do (report c "use after my-free") 0))
+                          (None [] 0))
+                      (bc-scan c killed)))
+                  (store! i (iadd (load i) 1)))))
+            0)))))
+
+(defn bc-body [(f Code)] (-> Code)
+  (if (and (code-list? f) (icmp-ge (code-count f) 5))
+      (if (and (code-sym? (code-nth f 0)) (str-eq (code-sym (code-nth f 0)) "defn"))
+          (let [a (malloc-allocator)
+                (mut killed) (hm-new [(slice u8) i64] a (str-keyops))
+                n (code-count f) (mut i) 4]
+            (loop (if (icmp-ge (load i) n) (break)
+              (do (bc-scan (code-nth f (load i)) (mut killed))
+                  (store! i (iadd (load i) 1)))))
+            `0)
+        `0)
+    `0))
+
+(defn bc-check [(mods Code)] (-> Code)
+  (let [nm (code-count mods) (mut i) 0]
+    (loop (if (icmp-ge (load i) nm) (break)
+      (do (let [m (code-nth mods (load i)) nf (code-count m) (mut j) 1]
+            (if (code-from-user? (code-nth m 1))
+                (loop (if (icmp-ge (load j) nf) (break)
+                  (do (bc-body (code-nth m (load j)))
+                      (store! j (iadd (load j) 1)))))
+              0))
+          (store! i (iadd (load i) 1)))))
+    `0))
+(checker bc-check)

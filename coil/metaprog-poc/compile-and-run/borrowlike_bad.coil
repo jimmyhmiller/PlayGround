@@ -1,0 +1,13 @@
+(module borrowlike_bad)
+; expect TWO located "use after my-free" errors and a vetoed build — a
+; HashMap-dataflow checker (the borrow-checker shape) running compiled.
+(import "metaprog-poc/compile-and-run/borrowlike.coil" :use *)
+(defn my-free [(x i64)] (-> i64) 0)
+(defn use1 [(x i64)] (-> i64) x)
+(defn bad [] (-> i64)
+  (let [p 42]
+    (use1 p)
+    (my-free p)
+    (use1 p)
+    (use1 p)))
+(defn main [] (-> :i64) (bad))
