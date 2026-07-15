@@ -2383,17 +2383,46 @@
   ([pred retf] (fn [rf] (fn ([] (rf)) ([a] (rf a))
                             ([a x] (if (pred x) (reduced (if retf (retf a x) x)) (rf a x)))))))
 ;; take/drop with a transducer arity (stateful via volatile), keeping the seq arity.
+;; This is THE runtime take/drop (the earlier defs above are shadowed by these
+;; transducer-arity versions). The 2-arg seq forms are CHUNK-AWARE:
+;;  - take passes a whole chunk that fits within `n` through as a ChunkedCons
+;;    (only the count carries into the tail), or yields a partial `arr[off..off+n)`
+;;    chunk when the limit straddles it — so `(reduce f (take n coll))` chunk-scans
+;;    instead of walking a fresh cons per element.
+;;  - drop skips a whole chunk at once when `n` covers it, instead of stepping
+;;    `%rest` once per element.
+;; take/drop are on the hot path of take-drop, repeat-take, iterate, partition,
+;; cycle, subvec's old path, etc.
 (defn take
   ([n] (fn [rf] (let [nv (volatile! n)]
                   (fn ([] (rf)) ([a] (rf a))
                       ([a x] (let [k (deref nv)] (vreset! nv (- k 1))
                                (if (%lt 0 k) (if (%lt 1 k) (rf a x) (ensure-reduced (rf a x))) (ensure-reduced a))))))))
-  ([n c] (lazy-seq (if (%lt 0 n) (let [s (seq c)] (if (nil? s) nil (%cons (%first s) (take (%sub n 1) (%rest s))))) nil))))
+  ([n c] (lazy-seq
+           (if (%lt 0 n)
+               (let [s (seq c)]
+                 (cond (nil? s) nil
+                       (chunked? s)
+                         (let [off (field s 1) end (field s 2) avail (%sub end off)]
+                           (if (%lt n avail)
+                               (record 'ChunkedCons (field s 0) off (%add off n) nil)
+                               (record 'ChunkedCons (field s 0) off end (take (%sub n avail) (field s 3)))))
+                       true (%cons (%first s) (take (%sub n 1) (%rest s)))))
+               nil))))
 (defn drop
   ([n] (fn [rf] (let [nv (volatile! n)]
                   (fn ([] (rf)) ([a] (rf a))
                       ([a x] (let [k (deref nv)] (vreset! nv (- k 1)) (if (%lt 0 k) a (rf a x))))))))
-  ([n c] (if (%lt 0 n) (let [s (seq c)] (if (nil? s) nil (drop (%sub n 1) (%rest s)))) (seq c))))
+  ([n c] (if (%lt 0 n)
+             (let [s (seq c)]
+               (cond (nil? s) nil
+                     (chunked? s)
+                       (let [avail (%sub (field s 2) (field s 1))]
+                         (if (%lt n avail)
+                             (record 'ChunkedCons (field s 0) (%add (field s 1) n) (field s 2) (field s 3))
+                             (drop (%sub n avail) (field s 3))))
+                     true (drop (%sub n 1) (%rest s))))
+             (seq c))))
 
 ;; ─────────────── defrecord / reify / protocols ───────────────
 ;; A defrecord is a deftype registered as a record; map behaviour (get/keys/seq/
