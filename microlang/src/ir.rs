@@ -305,6 +305,15 @@ pub enum Prim {
     /// whichever comes first. One native call fills a whole range chunk instead of
     /// 32 interpreted `%cell-set!` calls — the chunk producer for `range`.
     RangeFill,
+    /// `(%hamt-assoc root key val)` -> `[new-root, added?]` (a 2-elem array; see
+    /// `Runtime::hamt_map_assoc`). Native port of PersistentHashMap's
+    /// `-inode-assoc` trie descent (BitmapIndexedNode/ArrayNode/HashCollisionNode).
+    HamtAssoc,
+    /// `(%hamt-lookup root key not-found)` -> the value, or `not-found`.
+    HamtLookup,
+    /// `(%hamt-without root key)` -> the new root (or `nil` if now empty), or
+    /// `root` itself (bit-identical) if `key` was not present.
+    HamtWithout,
     /// `(%all-fixnum? a b ...)` — true iff EVERY argument is an immediate fixnum.
     /// The guard the specializer places at a lambda's entry; when it holds, the
     /// body's `Fx*` ops are valid. On the JIT it lowers to a single combined

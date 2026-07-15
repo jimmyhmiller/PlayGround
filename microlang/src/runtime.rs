@@ -7,7 +7,7 @@
 //! they box a non-immediate category and unbox on the way out, and `allocs`
 //! counts the boxing so the micro-languages can *show* the cost.
 
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::collections::{HashMap, HashSet};
 
 /// Memory ordering for the global-slot array. A global's VALUE is often a heap
@@ -278,6 +278,19 @@ pub struct Shared<M: ValueModel> {
     /// qualified sym -> its `:arglists` value (a heap datum captured at `def` time,
     /// so it IS traced by the collector, unlike the flags/ns tables above).
     pub(crate) var_arglists: Mutex<HashMap<Sym, u64>>,
+    /// Cached `Sym`s for the record-type tags native prims stamp on every node
+    /// they allocate (HAMT trie nodes, PersistentVector trie nodes, chunked
+    /// seqs). `intern` takes a process-wide mutex + does a `HashMap<String,_>`
+    /// lookup even on a hit; these ops allocate one such node per trie LEVEL on
+    /// every `assoc`/`conj`, so re-interning the same handful of literal type
+    /// names on every call was showing up as real time in a profile. `u32::MAX`
+    /// = "not yet cached" (never a real `Sym`, since `TABLE_CAP` is far smaller).
+    sym_cache_bitmap_node: AtomicU32,
+    sym_cache_array_node: AtomicU32,
+    sym_cache_collision_node: AtomicU32,
+    sym_cache_vector_node: AtomicU32,
+    sym_cache_persistent_vector: AtomicU32,
+    sym_cache_chunked_cons: AtomicU32,
     _pd: PhantomData<fn() -> M>,
 }
 
@@ -389,6 +402,12 @@ impl<M: ValueModel> Runtime<M> {
             var_flags: Mutex::new(HashMap::new()),
             ns_vars: Mutex::new(HashMap::new()),
             var_arglists: Mutex::new(HashMap::new()),
+            sym_cache_bitmap_node: AtomicU32::new(u32::MAX),
+            sym_cache_array_node: AtomicU32::new(u32::MAX),
+            sym_cache_collision_node: AtomicU32::new(u32::MAX),
+            sym_cache_vector_node: AtomicU32::new(u32::MAX),
+            sym_cache_persistent_vector: AtomicU32::new(u32::MAX),
+            sym_cache_chunked_cons: AtomicU32::new(u32::MAX),
             _pd: PhantomData,
         };
         // Pre-size the global array to its reserved cap so its base is stable and
@@ -447,6 +466,19 @@ impl<M: ValueModel> Runtime<M> {
         names.push(s.to_string());
         ids.insert(s.to_string(), id);
         id
+    }
+    /// `intern(name)`, but through a lock-free cache slot for a name a native
+    /// prim re-interns on every call (see the `sym_cache_*` fields' doc comment).
+    /// A benign race on first use (two threads both miss and both `intern`) just
+    /// stores the same `Sym` twice — `intern` itself is the source of truth.
+    fn intern_cached(&self, cache: &AtomicU32, name: &str) -> Sym {
+        let v = cache.load(Ordering::Relaxed);
+        if v != u32::MAX {
+            return v;
+        }
+        let s = self.intern(name);
+        cache.store(s, Ordering::Relaxed);
+        s
     }
 
     /// Read a global's value, or `None` if unbound. THE global read path — the
@@ -1004,6 +1036,15 @@ impl<M: ValueModel> Runtime<M> {
                 }
                 self.mk_array(v)
             }
+            // Native HAMT trie ops — see the `hamt_*` methods below for the
+            // full port of PersistentHashMap's -inode-assoc/-lookup/-without.
+            Prim::HamtAssoc => {
+                let (new_root, added) = self.hamt_map_assoc(args[0], args[1], args[2]);
+                let addedb = self.encode(Val::Bool(added));
+                self.mk_array(vec![new_root, addedb])
+            }
+            Prim::HamtLookup => self.hamt_map_lookup(args[0], args[1], args[2]),
+            Prim::HamtWithout => self.hamt_map_without(args[0], args[1]),
             Prim::ArrPush => {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("apush: not an array");
@@ -2082,19 +2123,19 @@ impl<M: ValueModel> Runtime<M> {
     fn mk_chunked(&mut self, arr: u64, off: i64, end: i64, more: u64) -> u64 {
         let offb = self.encode(Val::Int(off as i128));
         let endb = self.encode(Val::Int(end as i128));
-        let ty = self.intern("ChunkedCons");
+        let ty = self.intern_cached(&self.shared.sym_cache_chunked_cons, "ChunkedCons");
         M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![arr, offb, endb, more] }))
     }
     fn mk_node(&mut self, arr: u64) -> u64 {
         let nil = self.enc_nil();
-        let ty = self.intern("VectorNode");
+        let ty = self.intern_cached(&self.shared.sym_cache_vector_node, "VectorNode");
         M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![nil, arr] }))
     }
     fn mk_pv(&mut self, meta: u64, cnt: i64, shift: i64, root: u64, tail: u64) -> u64 {
         let cntb = self.encode(Val::Int(cnt as i128));
         let shiftb = self.encode(Val::Int(shift as i128));
         let nil = self.enc_nil();
-        let ty = self.intern("PersistentVector");
+        let ty = self.intern_cached(&self.shared.sym_cache_persistent_vector, "PersistentVector");
         M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![meta, cntb, shiftb, root, tail, nil] }))
     }
     #[inline]
@@ -2214,6 +2255,382 @@ impl<M: ValueModel> Runtime<M> {
             self.signal_throw(M::R::enc_ref(sid));
             self.enc_nil()
         }
+    }
+
+    // ── native HAMT (PersistentHashMap's BitmapIndexedNode / ArrayNode /
+    // HashCollisionNode trie) ──────────────────────────────────────────────
+    // A faithful port of the `-inode-assoc`/`-inode-without`/`-inode-lookup`
+    // algorithm in cljs_types.clj (itself ported from cljs/core.cljs) — same
+    // node shapes, same bit tricks, same promotion/packing thresholds — just
+    // run natively instead of walking the trie through interpreted protocol
+    // dispatch + per-level allocation via `aset`/`aclone` calls. One native
+    // call replaces the whole recursive interpreted descent.
+    //
+    // Key equality: `self.equal` (== the `%num-eq` prim == clojure.core's
+    // `-eq2` default `Object` impl — see `extend-type Object IEquiv (-equiv
+    // [a b] (%num-eq a b))` in core.clj). This matches for every ordinary key
+    // (numbers, strings, keywords/syms, chars, nested vectors of these). It
+    // does NOT replicate `-equiv`'s CROSS-TYPE sequential override (a vector
+    // key is never `equal` to an `=`-equal list here) or a custom deftype's
+    // hand-written `-equiv` — both are exceedingly rare as hash-map keys, and
+    // this is a documented, honest limitation, not a silent wrong answer for
+    // the common case.
+    fn hash_masked(&self, k: u64) -> u32 {
+        self.hash_value(k) & 0x7fff_ffff
+    }
+    fn is_nil_bits(&self, b: u64) -> bool {
+        matches!(self.decode(b), Val::Nil)
+    }
+    fn mk_bitmap_node(&mut self, bitmap: u32, arr: Vec<u64>) -> u64 {
+        let nil = self.enc_nil();
+        let bm = self.encode(Val::Int(bitmap as i128));
+        let arrb = self.mk_array(arr);
+        let ty = self.intern_cached(&self.shared.sym_cache_bitmap_node, "BitmapIndexedNode");
+        M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![nil, bm, arrb] }))
+    }
+    fn mk_array_node(&mut self, cnt: i64, arr: Vec<u64>) -> u64 {
+        let nil = self.enc_nil();
+        let cb = self.encode(Val::Int(cnt as i128));
+        let arrb = self.mk_array(arr);
+        let ty = self.intern_cached(&self.shared.sym_cache_array_node, "ArrayNode");
+        M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![nil, cb, arrb] }))
+    }
+    fn mk_collision_node(&mut self, chash: u32, cnt: i64, arr: Vec<u64>) -> u64 {
+        let nil = self.enc_nil();
+        let hb = self.encode(Val::Int(chash as i128));
+        let cb = self.encode(Val::Int(cnt as i128));
+        let arrb = self.mk_array(arr);
+        let ty = self.intern_cached(&self.shared.sym_cache_collision_node, "HashCollisionNode");
+        M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![nil, hb, cb, arrb] }))
+    }
+    /// A brand-new single-entry `BitmapIndexedNode` — what
+    /// `(-inode-assoc -EMPTY-BIN shift hash key val _)` always produces (an
+    /// empty bitmap node's assoc always takes the "new bit, n=0 < 16" path).
+    fn hamt_single(&mut self, hash: u32, shift: u32, key: u64, val: u64) -> u64 {
+        let bit = 1u32 << ((hash >> shift) & 31);
+        self.mk_bitmap_node(bit, vec![key, val])
+    }
+    /// `create-node`: build the 2-entry subtree resolving a collision between
+    /// an existing leaf (`key1`/`val1`, whose hash we must compute) and a new
+    /// leaf (`key2`/`val2`, hash already known).
+    fn hamt_create_node(&mut self, shift: u32, key1: u64, val1: u64, key2hash: u32, key2: u64, val2: u64) -> u64 {
+        let key1hash = self.hash_masked(key1);
+        if key1hash == key2hash {
+            self.mk_collision_node(key1hash, 2, vec![key1, val1, key2, val2])
+        } else {
+            let n1 = self.hamt_single(key1hash, shift, key1, val1);
+            self.hamt_assoc(n1, shift, key2hash, key2, val2).0
+        }
+    }
+    /// `(-inode-assoc node shift hash key val)` -> `(new_node, added_leaf?)`.
+    /// `added_leaf?` is true iff `key` was NOT already present (so the caller
+    /// should bump `cnt`); when nothing changed at all, `new_node == node`
+    /// (raw bit identity — matches the original's `identical?` short-circuit).
+    fn hamt_assoc(&mut self, node: u64, shift: u32, hash: u32, key: u64, val: u64) -> (u64, bool) {
+        let Val::Ref(id) = self.decode(node) else { panic!("hamt-assoc: not a node") };
+        let Obj::Record { type_id, fields } = &self.heap()[id as usize] else { panic!("hamt-assoc: not a node") };
+        let kind = self.sym_name(*type_id).to_string();
+        match kind.as_str() {
+            "BitmapIndexedNode" => {
+                let bitmap = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => panic!("bitmap") };
+                let arr = self.arr_clone(fields[2]);
+                let bit = 1u32 << ((hash >> shift) & 31);
+                let idx = (bitmap & bit.wrapping_sub(1)).count_ones() as usize;
+                if bitmap & bit == 0 {
+                    let n = bitmap.count_ones();
+                    if n >= 16 {
+                        let nil = self.enc_nil();
+                        let mut nodes = vec![nil; 32];
+                        let jdx = ((hash >> shift) & 31) as usize;
+                        nodes[jdx] = self.hamt_single(hash, shift + 5, key, val);
+                        let mut j = 0usize;
+                        for i in 0..32u32 {
+                            if (bitmap >> i) & 1 == 0 {
+                                continue;
+                            }
+                            let key_or_nil = arr[j];
+                            let val_or_node = arr[j + 1];
+                            nodes[i as usize] = if !self.is_nil_bits(key_or_nil) {
+                                let h2 = self.hash_masked(key_or_nil);
+                                self.hamt_single(h2, shift + 5, key_or_nil, val_or_node)
+                            } else {
+                                val_or_node
+                            };
+                            j += 2;
+                        }
+                        (self.mk_array_node((n + 1) as i64, nodes), true)
+                    } else {
+                        let mut new_arr = Vec::with_capacity(arr.len() + 2);
+                        new_arr.extend_from_slice(&arr[0..2 * idx]);
+                        new_arr.push(key);
+                        new_arr.push(val);
+                        new_arr.extend_from_slice(&arr[2 * idx..]);
+                        (self.mk_bitmap_node(bitmap | bit, new_arr), true)
+                    }
+                } else {
+                    let key_or_nil = arr[2 * idx];
+                    let val_or_node = arr[2 * idx + 1];
+                    if self.is_nil_bits(key_or_nil) {
+                        let (n, added) = self.hamt_assoc(val_or_node, shift + 5, hash, key, val);
+                        if n == val_or_node {
+                            (node, false)
+                        } else {
+                            let mut na = arr.clone();
+                            na[2 * idx + 1] = n;
+                            (self.mk_bitmap_node(bitmap, na), added)
+                        }
+                    } else if self.equal(key, key_or_nil) {
+                        if val == val_or_node {
+                            (node, false)
+                        } else {
+                            let mut na = arr.clone();
+                            na[2 * idx + 1] = val;
+                            (self.mk_bitmap_node(bitmap, na), false)
+                        }
+                    } else {
+                        let sub = self.hamt_create_node(shift + 5, key_or_nil, val_or_node, hash, key, val);
+                        let mut na = arr.clone();
+                        na[2 * idx] = self.enc_nil();
+                        na[2 * idx + 1] = sub;
+                        (self.mk_bitmap_node(bitmap, na), true)
+                    }
+                }
+            }
+            "ArrayNode" => {
+                let cnt = match self.decode(fields[1]) { Val::Int(i) => i as i64, _ => panic!("cnt") };
+                let arr = self.arr_clone(fields[2]);
+                let idx = ((hash >> shift) & 31) as usize;
+                let child = arr[idx];
+                if self.is_nil_bits(child) {
+                    let sub = self.hamt_single(hash, shift + 5, key, val);
+                    let mut na = arr.clone();
+                    na[idx] = sub;
+                    (self.mk_array_node(cnt + 1, na), true)
+                } else {
+                    let (n, added) = self.hamt_assoc(child, shift + 5, hash, key, val);
+                    if n == child {
+                        (node, false)
+                    } else {
+                        let mut na = arr.clone();
+                        na[idx] = n;
+                        (self.mk_array_node(cnt, na), added)
+                    }
+                }
+            }
+            "HashCollisionNode" => {
+                let chash = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => panic!("chash") };
+                let cnt = match self.decode(fields[2]) { Val::Int(i) => i as i64, _ => panic!("cnt") };
+                let arr = self.arr_clone(fields[3]);
+                if hash == chash {
+                    let mut found = None;
+                    let mut i = 0usize;
+                    while i < arr.len() {
+                        if self.equal(key, arr[i]) {
+                            found = Some(i);
+                            break;
+                        }
+                        i += 2;
+                    }
+                    match found {
+                        None => {
+                            let mut na = arr.clone();
+                            na.push(key);
+                            na.push(val);
+                            (self.mk_collision_node(chash, cnt + 1, na), true)
+                        }
+                        Some(i) => {
+                            if self.equal(arr[i + 1], val) {
+                                (node, false)
+                            } else {
+                                let mut na = arr.clone();
+                                na[i + 1] = val;
+                                (self.mk_collision_node(chash, cnt, na), false)
+                            }
+                        }
+                    }
+                } else {
+                    let wrapper = self.mk_bitmap_node(1u32 << ((chash >> shift) & 31), vec![self.enc_nil(), node]);
+                    self.hamt_assoc(wrapper, shift, hash, key, val)
+                }
+            }
+            _ => panic!("hamt-assoc: unknown node kind {kind}"),
+        }
+    }
+    /// `(-inode-lookup node shift hash key not-found)`.
+    fn hamt_lookup(&self, node: u64, shift: u32, hash: u32, key: u64, not_found: u64) -> u64 {
+        let Val::Ref(id) = self.decode(node) else { return not_found };
+        let Obj::Record { type_id, fields } = &self.heap()[id as usize] else { return not_found };
+        match self.sym_name(*type_id) {
+            "BitmapIndexedNode" => {
+                let bitmap = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => return not_found };
+                let bit = 1u32 << ((hash >> shift) & 31);
+                if bitmap & bit == 0 {
+                    return not_found;
+                }
+                let idx = (bitmap & bit.wrapping_sub(1)).count_ones() as usize;
+                let key_or_nil = self.arr_at(fields[2], 2 * idx);
+                let val_or_node = self.arr_at(fields[2], 2 * idx + 1);
+                if self.is_nil_bits(key_or_nil) {
+                    self.hamt_lookup(val_or_node, shift + 5, hash, key, not_found)
+                } else if self.equal(key, key_or_nil) {
+                    val_or_node
+                } else {
+                    not_found
+                }
+            }
+            "ArrayNode" => {
+                let idx = ((hash >> shift) & 31) as usize;
+                let child = self.arr_at(fields[2], idx);
+                if self.is_nil_bits(child) {
+                    not_found
+                } else {
+                    self.hamt_lookup(child, shift + 5, hash, key, not_found)
+                }
+            }
+            "HashCollisionNode" => {
+                let cnt = match self.decode(fields[2]) { Val::Int(i) => i as usize, _ => return not_found };
+                let arr = self.arr_clone(fields[3]);
+                let mut i = 0usize;
+                while i < 2 * cnt {
+                    if self.equal(key, arr[i]) {
+                        return arr[i + 1];
+                    }
+                    i += 2;
+                }
+                not_found
+            }
+            _ => not_found,
+        }
+    }
+    fn hamt_pack_array_node(&mut self, arr: &[u64], cnt: i64, skip_idx: usize) -> u64 {
+        let mut new_arr = vec![self.enc_nil(); 2 * (cnt as usize - 1)];
+        let mut j = 1usize;
+        let mut bitmap = 0u32;
+        for (i, &child) in arr.iter().enumerate() {
+            if i == skip_idx || self.is_nil_bits(child) {
+                continue;
+            }
+            new_arr[j] = child;
+            j += 2;
+            bitmap |= 1u32 << i;
+        }
+        self.mk_bitmap_node(bitmap, new_arr)
+    }
+    /// `(-inode-without node shift hash key)` -> the new node, `node` itself
+    /// (raw bit identity) if nothing changed, or `nil` if `node` becomes empty.
+    fn hamt_without(&mut self, node: u64, shift: u32, hash: u32, key: u64) -> u64 {
+        let Val::Ref(id) = self.decode(node) else { return node };
+        let Obj::Record { type_id, fields } = &self.heap()[id as usize] else { return node };
+        match self.sym_name(*type_id) {
+            "BitmapIndexedNode" => {
+                let bitmap = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => return node };
+                let bit = 1u32 << ((hash >> shift) & 31);
+                if bitmap & bit == 0 {
+                    return node;
+                }
+                let idx = (bitmap & bit.wrapping_sub(1)).count_ones() as usize;
+                let arr = self.arr_clone(fields[2]);
+                let key_or_nil = arr[2 * idx];
+                let val_or_node = arr[2 * idx + 1];
+                if self.is_nil_bits(key_or_nil) {
+                    let n = self.hamt_without(val_or_node, shift + 5, hash, key);
+                    if n == val_or_node {
+                        node
+                    } else if !self.is_nil_bits(n) {
+                        let mut na = arr.clone();
+                        na[2 * idx + 1] = n;
+                        self.mk_bitmap_node(bitmap, na)
+                    } else if bitmap == bit {
+                        self.enc_nil()
+                    } else {
+                        let na = self.hamt_remove_pair(&arr, idx);
+                        self.mk_bitmap_node(bitmap ^ bit, na)
+                    }
+                } else if self.equal(key, key_or_nil) {
+                    if bitmap == bit {
+                        self.enc_nil()
+                    } else {
+                        let na = self.hamt_remove_pair(&arr, idx);
+                        self.mk_bitmap_node(bitmap ^ bit, na)
+                    }
+                } else {
+                    node
+                }
+            }
+            "ArrayNode" => {
+                let cnt = match self.decode(fields[1]) { Val::Int(i) => i as i64, _ => return node };
+                let idx = ((hash >> shift) & 31) as usize;
+                let arr = self.arr_clone(fields[2]);
+                let child = arr[idx];
+                if self.is_nil_bits(child) {
+                    return node;
+                }
+                let n = self.hamt_without(child, shift + 5, hash, key);
+                if n == child {
+                    node
+                } else if self.is_nil_bits(n) {
+                    if cnt <= 8 {
+                        self.hamt_pack_array_node(&arr, cnt, idx)
+                    } else {
+                        let mut na = arr.clone();
+                        na[idx] = n;
+                        self.mk_array_node(cnt - 1, na)
+                    }
+                } else {
+                    let mut na = arr.clone();
+                    na[idx] = n;
+                    self.mk_array_node(cnt, na)
+                }
+            }
+            "HashCollisionNode" => {
+                let chash = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => return node };
+                let cnt = match self.decode(fields[2]) { Val::Int(i) => i as i64, _ => return node };
+                let arr = self.arr_clone(fields[3]);
+                let mut found = None;
+                let mut i = 0usize;
+                while i < arr.len() {
+                    if self.equal(key, arr[i]) {
+                        found = Some(i);
+                        break;
+                    }
+                    i += 2;
+                }
+                match found {
+                    None => node,
+                    Some(_) if cnt == 1 => self.enc_nil(),
+                    Some(i) => {
+                        let na = self.hamt_remove_pair(&arr, i / 2);
+                        self.mk_collision_node(chash, cnt - 1, na)
+                    }
+                }
+            }
+            _ => node,
+        }
+    }
+    fn hamt_remove_pair(&self, arr: &[u64], i: usize) -> Vec<u64> {
+        let mut na = Vec::with_capacity(arr.len() - 2);
+        na.extend_from_slice(&arr[0..2 * i]);
+        na.extend_from_slice(&arr[2 * (i + 1)..]);
+        na
+    }
+    /// Map-level entry points (`root` may be `nil`, the empty-map case the
+    /// per-node functions above don't handle on their own): compute the key's
+    /// hash once and start the trie descent at `shift = 0`.
+    fn hamt_map_assoc(&mut self, root: u64, key: u64, val: u64) -> (u64, bool) {
+        let hash = self.hash_masked(key);
+        if self.is_nil_bits(root) {
+            (self.hamt_single(hash, 0, key, val), true)
+        } else {
+            self.hamt_assoc(root, 0, hash, key, val)
+        }
+    }
+    fn hamt_map_lookup(&self, root: u64, key: u64, not_found: u64) -> u64 {
+        let hash = self.hash_masked(key);
+        self.hamt_lookup(root, 0, hash, key, not_found)
+    }
+    fn hamt_map_without(&mut self, root: u64, key: u64) -> u64 {
+        let hash = self.hash_masked(key);
+        self.hamt_without(root, 0, hash, key)
     }
 
     fn arith(

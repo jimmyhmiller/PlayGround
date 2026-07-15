@@ -604,32 +604,35 @@
   ICounted
   (-count [coll] cnt)
 
+  ;; ILookup/IAssociative/IMap now call the NATIVE %hamt-assoc/%hamt-lookup/
+  ;; %hamt-without (see runtime.rs `hamt_map_assoc` et al.) instead of walking
+  ;; the BitmapIndexedNode/ArrayNode/HashCollisionNode trie through interpreted
+  ;; INode protocol dispatch — same algorithm (a direct Rust port), one native
+  ;; call per op instead of a per-level allocation + protocol-dispatch descent.
+  ;; The prims handle `root = nil` (the empty-map case) themselves, so the
+  ;; in-language side no longer special-cases it.
   ILookup
   (-lookup [coll k] (-lookup coll k nil))
   (-lookup [coll k not-found]
     (cond (nil? k) (if has-nil? nil-val not-found)
-          (nil? root) not-found
-          :else (-inode-lookup root 0 (hash k) k not-found)))
+          :else (%hamt-lookup root k not-found)))
 
   IAssociative
   (-assoc [coll k v]
     (if (nil? k)
       (if (if has-nil? (identical? v nil-val) false) coll
           (PersistentHashMap. meta (if has-nil? cnt (inc cnt)) root true v nil))
-      (let [added-leaf? (-box false)
-            new-root (-inode-assoc (if (nil? root) -EMPTY-BIN root) 0 (hash k) k v added-leaf?)]
+      (let [r (%hamt-assoc root k v) new-root (%aget r 0) added? (%aget r 1)]
         (if (identical? new-root root) coll
-            (PersistentHashMap. meta (if (-box-val added-leaf?) (inc cnt) cnt) new-root has-nil? nil-val nil)))))
+            (PersistentHashMap. meta (if added? (inc cnt) cnt) new-root has-nil? nil-val nil)))))
   (-contains-key? [coll k]
     (cond (nil? k) has-nil?
-          (nil? root) false
-          :else (not (identical? (-inode-lookup root 0 (hash k) k -lookup-sentinel) -lookup-sentinel))))
+          :else (not (identical? (%hamt-lookup root k -lookup-sentinel) -lookup-sentinel))))
 
   IMap
   (-dissoc [coll k]
     (cond (nil? k) (if has-nil? (PersistentHashMap. meta (dec cnt) root false nil nil) coll)
-          (nil? root) coll
-          :else (let [new-root (-inode-without root 0 (hash k) k)]
+          :else (let [new-root (%hamt-without root k)]
                   (if (identical? new-root root) coll
                       (PersistentHashMap. meta (dec cnt) new-root has-nil? nil-val nil)))))
 
