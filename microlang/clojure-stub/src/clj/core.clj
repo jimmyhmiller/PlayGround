@@ -849,9 +849,14 @@
         nil)))
 (defn repeat [& args] (if (nil? (next args)) (-repeat-inf (first args)) (-repeat-n (first args) (second args))))
 (defn repeatedly [f] (lazy-seq (%cons (f) (repeatedly f))))
+;; Chunk-preserving: pass a chunk of the source straight through, restart from
+;; `orig` when it empties — so `(reduce f (take n (cycle coll)))` chunk-scans.
 (defn -cycle [orig s]
-  (lazy-seq (let [s (seq s)]
-              (if (nil? s) (-cycle orig orig) (%cons (%first s) (-cycle orig (%rest s)))))))
+  (lazy-seq
+    (let [s (seq s)]
+      (cond (nil? s) (-cycle orig orig)
+            (chunked? s) (record 'ChunkedCons (field s 0) (field s 1) (field s 2) (-cycle orig (field s 3)))
+            true (%cons (%first s) (-cycle orig (%rest s)))))))
 (defn cycle [c] (if (nil? (seq c)) nil (-cycle c c)))
 (defn second [c] (nth c 1))
 (defn last [c] (let [s (seq c)] (if (nil? s) nil (if (nil? (next s)) (%first s) (last (%rest s))))))
@@ -907,8 +912,22 @@
 (defn complement [f] (fn [& args] (not (apply f args))))
 (defn max [a & more] (reduce (fn [x y] (if (%lt x y) y x)) a more))
 (defn min [a & more] (reduce (fn [x y] (if (%lt x y) x y)) a more))
+;; Chunk-aware: map `(f index element)` over a chunk into a fresh chunk, carrying
+;; the running index across chunks — so `(reduce g (map-indexed f (range …)))`
+;; chunk-scans instead of consing per element.
 (defn map-indexed-h [f i s]
-  (lazy-seq (let [s (seq s)] (if (nil? s) nil (%cons (f i (%first s)) (map-indexed-h f (%add i 1) (%rest s)))))))
+  (lazy-seq
+    (let [s (seq s)]
+      (cond
+        (nil? s) nil
+        (chunked? s)
+          (let [arr (field s 0) off (field s 1) end (field s 2)
+                narr (%make-array (%sub end off))]
+            (loop [j off k 0 idx i]
+              (if (%lt j end)
+                  (do (%cell-set! narr k (f idx (%aget arr j))) (recur (%add j 1) (%add k 1) (%add idx 1)))
+                  (record 'ChunkedCons narr 0 k (map-indexed-h f idx (field s 3))))))
+        true (%cons (f i (%first s)) (map-indexed-h f (%add i 1) (%rest s)))))))
 (defn map-indexed [f c] (map-indexed-h f 0 c))
 
 ;; if-let / when-let are defined below, after `gensym` (they need a fresh temp so
