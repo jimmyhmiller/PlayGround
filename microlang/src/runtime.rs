@@ -1819,6 +1819,12 @@ impl<M: ValueModel> Runtime<M> {
                 Some(b) => b.current_ns(self),
                 None => panic!("%current-ns: no eval bridge installed"),
             },
+            Prim::Nanos => {
+                // Monotonic, arbitrary origin (first use) — System/nanoTime's shape.
+                static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+                let e = EPOCH.get_or_init(std::time::Instant::now);
+                self.encode(Val::Int(e.elapsed().as_nanos() as i128))
+            }
             Prim::Gc => {
                 // The collector needs the live environment as a root, which
                 // only the backend holds (it is the safepoint). Backends

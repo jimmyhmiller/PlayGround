@@ -101,20 +101,50 @@ Migration order (each phase suite-gated):
 Expected: removes the ~40% decode/tag/prim tax everywhere + the remaining
 shim traffic; the 7-25× band should land ~2-6×.
 
-## Remaining known gaps (next efforts, in value order)
+## Post-Stage-D results (measured 2026-07-15, matched files, in-language
+## `%nanos` timing, best-of-4 after warmup; ns/op, microclj --jit vs warmed
+## JVM Clojure, arm64)
 
-1. **Full header arena** — decode/tag_of on the fat `Obj` enum is now the
-   dominant shared tax (~20-30% of hot profiles). Header words inline would
-   also unlock JIT-inline type tests (code-level dispatch ICs, cheap
-   `reduced?`) and inline bump allocation. Biggest single remaining lever.
-2. **group-by / assoc-heavy maps** (~55×): per-element HAMT path-copy churn;
-   transient-style batched building or arena-aware HAMT nodes.
-3. **Param-value specialization** — remaining transducer residue (~37×) is
+| workload | microclj | JVM | ratio |
+|---|---|---|---|
+| raw loop arithmetic | 2 | <1 | ~3× |
+| non-capturing defn call | 4 | 4 | ~1× |
+| capturing closure call | 5 | 2 | ~2.5× |
+| reduce+map pipeline | 51 | 19 | ~2.7× |
+| loop+conj vecbuild | 150 | 11 | ~14× |
+| into-xform | 279 | 7 | ~40× |
+| comp chain (5×inc) | 186 | 15 | ~12× |
+| transduce | 121 | 5 | ~24× |
+| apply (+ 3-list) | 885 | 37 | ~24× |
+| group-by | 1150 | 26 | ~44× |
+| assoc map-build | 1761 | 149 | ~12× |
+| interleave | 1875 | 71 | ~26× |
+
+The CORE of the model is where it was aimed: calls (capturing and not),
+arithmetic, and simple seq pipelines sit at ~1-3× — the Stage-D prediction
+("the 7-25× band lands ~2-6×") held for everything call- and
+representation-bound. What remains is COLLECTION-OP dominated: every
+workload still >10× spends its time in per-element HAMT/vector node churn,
+lazy-seq stepping, or the apply/transducer glue — library-level algorithms,
+not the value/execution axes. (Bench shapes differ slightly from the
+pre-Stage-D table; same-file ratios are the comparable number.)
+
+## Remaining known gaps (re-ranked 2026-07-15, post-Stage-D)
+
+1. **HAMT/collection node churn** — group-by (~44×), assoc-build (~12×),
+   vecbuild (~14×): per-element path-copy allocation. Transient-style
+   batched building (and conj chunking) is now the single biggest lever.
+2. **Lazy-seq producer costs** — interleave (~26×), into-xform (~40×):
+   per-step cell allocation + 2-seq lockstep; chunked producers close most.
+3. **apply glue** (~24×): seq_flatten + arg-vector rebuild per call; a
+   register-arity apply fast path for small known lists.
+4. **Param-value specialization** — transducer residue (transduce ~24×):
    per-element calls through PARAMETER-held closures + reduced? checks.
-4. **GC stack maps** — still explicit-`(gc)`-only; allocation-triggered GC
+5. **GC stack maps** — still explicit-`(gc)`-only; allocation-triggered GC
    needs native-frame root maps (Cranelift user stack maps exist in 0.133).
-5. **interleave/lazy-seq producers** (~26×): per-step 2-seq lockstep allocs;
-   a chunked interleave producer would close most of it.
+   (Also retires the carried caps_base/SSA-staleness gap.)
+
+(The old #1 — "full header arena" — IS Stage D and is done.)
 
 ## Why (measured, 2026-07)
 

@@ -271,6 +271,10 @@ pub enum Prim {
     /// `(%current-ns)` -> the current namespace's name symbol, via the eval
     /// bridge (namespace state is frontend policy; this is the reflection hook).
     CurrentNs,
+    /// `(%nanos)` -> monotonic nanoseconds since an arbitrary process-local
+    /// origin (the shape of `System/nanoTime`): elapsed-time measurement, not
+    /// wall-clock time.
+    Nanos,
 
     // ── optimizer-introduced fixnum specializations ──────────────────────────
     // These are produced ONLY by the `optimize` nanopass (never by `analyze`).

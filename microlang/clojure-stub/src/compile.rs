@@ -159,6 +159,8 @@ impl Compiler {
             ("%err-print", ErrPrint),
             // the current namespace's name symbol (frontend state, via the bridge).
             ("%current-ns", CurrentNs),
+            // monotonic nanoseconds (System/nanoTime's shape) — benchmarking.
+            ("%nanos", Nanos),
             // Existing low-level prims surfaced for the string library (char codes
             // for case mapping, raw length) — not new primitives.
             ("%char-code", CharToInt), ("%char-of", IntToChar), ("%str-len", StrLen),
