@@ -26,7 +26,18 @@ $COIL build $D/meta2.coil  --shared -o "$OUT/meta2.dylib" $DL || exit 1
 $COIL build $D/mhost2.coil -o "$OUT/mhost2" $EX || exit 1
 ( cd "$OUT" && ./mhost2 ) || exit 1
 
-echo "=== 4. ARBITRARY CODE in a metaprogram, via the real compiled engine ==="
+echo "=== 4. THE TOWER: macros in macro bodies (type-directed definition-time expansion) ==="
+echo "       when-as-statement + cond-in-Code-position expand; a Code->Code helper"
+echo "       called with Code args stays a FUNCTION call — under BOTH engines"
+$COIL run $D/tower_test.coil; rc=$?
+[ $rc -eq 45 ] || { echo "tower test FAILED (compiled engine, exit $rc, want 45)"; exit 1; }
+COIL_META=interp $COIL run $D/tower_test.coil; rc=$?
+[ $rc -eq 45 ] || { echo "tower test FAILED (interpreter engine, exit $rc, want 45)"; exit 1; }
+$COIL run $D/tower_fmt_test.coil 2>/dev/null; rc=$?
+[ $rc -eq 70 ] || { echo "tower fmt test FAILED (exit $rc, want 70)"; exit 1; }
+echo "tower: OK (45/45 both engines; fmt-in-a-macro logged at expansion time)"
+
+echo "=== 5. ARBITRARY CODE in a metaprogram, via the real compiled engine ==="
 echo "       generics + ArrayList + string-keyed HashMap + StrBuf + malloc + libc"
 echo "       strlen, all AT EXPANSION TIME (every one impossible in the interpreter)"
 COIL_META=compiled $COIL run $D/arbitrary_test.coil || { echo "compiled-engine arbitrary test FAILED"; exit 1; }

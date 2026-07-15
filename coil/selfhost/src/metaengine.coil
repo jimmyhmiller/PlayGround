@@ -90,36 +90,40 @@
     (store! (field c n) (iadd k 1))
     (sconcat3 a (dec->str a (udiv (cast i64 (me-counter)) 16)) "-" (dec->str a k))))
 
-; ---- shim injection (BEFORE the sub-program resolve) ------------------------------
-; Returns a FRESH form list = the program's forms + metashim.coil's forms (module
-; tag "metashim") for the macro-context resolve. It must never mutate (or alias
-; growth into) s.out's buffer — the main program's own list is read again later.
-; The embedded text is registered as a real source (id from srccount, exactly like
-; the loader) so spans in shim diagnostics point somewhere meaningful.
-(defn meta-shim-forms [(a (ptr Allocator)) (s (mut LS)) (base (ptr (ArrayList TaggedForm)))] (-> (Result (ptr (ArrayList TaggedForm)) Diag))
-  (let [text (include-str "metashim.coil")
-        sid (load (field s srccount))]
-    (store! (field s srccount) (iadd sid 1))
-    (register-source! (mut s) "<metashim>" text)
-    (match (read-all a text sid)
-      (Err [d] (Err [(ptr (ArrayList TaggedForm)) Diag] d))
-      (Ok [forms]
-        (let [(mut out) (al-new [TaggedForm] a)
-              nb (al-len [TaggedForm] (load base)) (mut k) 0]
-          (loop (if (icmp-ge (load k) nb) (break)
-            (do (al-push! (mut out) (al-get [TaggedForm] (load base) (load k)))
-                (store! k (iadd (load k) 1)))))
-          (let [n (al-len [Sexp] (load forms)) (mut i) 0]
-            (loop (if (icmp-ge (load i) n) (break)
-              (do (let [f (al-elem [Sexp] forms (load i))
-                        ismod (and (icmp-eq (sx-tag (load f)) 6)
-                                   (and (icmp-ge (sx-len (sx-items (load f))) 1)
-                                        (and (icmp-eq (sx-tag (sx-at (sx-items (load f)) 0)) 2)
-                                             (str-eq (sx-sval (sx-at (sx-items (load f)) 0)) "module"))))]
-                    (if ismod 0
-                        (do (al-push! (mut out) (mk-tagged (load f) (Some "metashim"))) 0)))
-                  (store! i (iadd (load i) 1))))))
-          (Ok [(ptr (ArrayList TaggedForm)) Diag] (box-al [TaggedForm] a (load out))))))))
+; ---- the sub-program's form list (BEFORE its resolve) ------------------------------
+; ALWAYS a FRESH list: both the shim (compiled engine) and the definition-time
+; expansion tower (expander.coil) replace entries/subtrees for the SUB-PROGRAM
+; only — s.out and its buffer must stay untouched (box-al shares the buffer, and
+; growing or writing through the copy corrupts the main program's forms).
+; Under the compiled engine, metashim.coil's forms (module tag "metashim") are
+; appended so metalower's rewritten code ops resolve; the embedded text is
+; registered as a real source (id from srccount, exactly like the loader) so spans
+; in shim diagnostics point somewhere meaningful.
+(defn meta-sub-forms [(a (ptr Allocator)) (s (mut LS)) (base (ptr (ArrayList TaggedForm)))] (-> (Result (ptr (ArrayList TaggedForm)) Diag))
+  (let [(mut out) (al-new [TaggedForm] a)
+        nb (al-len [TaggedForm] (load base)) (mut k) 0]
+    (loop (if (icmp-ge (load k) nb) (break)
+      (do (al-push! (mut out) (al-get [TaggedForm] (load base) (load k)))
+          (store! k (iadd (load k) 1)))))
+    (if (not (meta-compiled?)) (Ok [(ptr (ArrayList TaggedForm)) Diag] (box-al [TaggedForm] a (load out)))
+      (let [text (include-str "metashim.coil")
+            sid (load (field s srccount))]
+        (store! (field s srccount) (iadd sid 1))
+        (register-source! (mut s) "<metashim>" text)
+        (match (read-all a text sid)
+          (Err [d] (Err [(ptr (ArrayList TaggedForm)) Diag] d))
+          (Ok [forms]
+            (let [n (al-len [Sexp] (load forms)) (mut i) 0]
+              (loop (if (icmp-ge (load i) n) (break)
+                (do (let [f (al-elem [Sexp] forms (load i))
+                          ismod (and (icmp-eq (sx-tag (load f)) 6)
+                                     (and (icmp-ge (sx-len (sx-items (load f))) 1)
+                                          (and (icmp-eq (sx-tag (sx-at (sx-items (load f)) 0)) 2)
+                                               (str-eq (sx-sval (sx-at (sx-items (load f)) 0)) "module"))))]
+                      (if ismod 0
+                          (do (al-push! (mut out) (mk-tagged (load f) (Some "metashim"))) 0)))
+                    (store! i (iadd (load i) 1)))))
+              (Ok [(ptr (ArrayList TaggedForm)) Diag] (box-al [TaggedForm] a (load out))))))))))
 
 ; closure seeds for the engine: the metaprogram entries PLUS every metashim
 ; function (the lowering's calls to them are created after the closure walk runs).
