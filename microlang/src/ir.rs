@@ -299,6 +299,12 @@ pub enum Prim {
     /// `%cell` arrays — 1 allocation per lazy step instead of 3. GC-safe (the heap is
     /// non-relocating; the mutation happens between safepoints).
     LazyRealize,
+    /// `(%range-fill start end step)` -> a fresh array (`Obj::Vector`) holding up to
+    /// 32 fixnums `start, start+step, start+2*step, ...`, stopping before `end`
+    /// (`step > 0`: while `< end`; `step < 0`: while `> end`) or after 32 elements,
+    /// whichever comes first. One native call fills a whole range chunk instead of
+    /// 32 interpreted `%cell-set!` calls — the chunk producer for `range`.
+    RangeFill,
     /// `(%all-fixnum? a b ...)` — true iff EVERY argument is an immediate fixnum.
     /// The guard the specializer places at a lambda's entry; when it holds, the
     /// body's `Fx*` ops are valid. On the JIT it lowers to a single combined

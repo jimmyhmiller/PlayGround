@@ -982,6 +982,28 @@ impl<M: ValueModel> Runtime<M> {
                 }
                 args[1]
             }
+            // Fill a whole range chunk (up to 32 fixnums) in one native call — the
+            // producer for `range`'s ChunkedCons, replacing 32 interpreted
+            // `%cell-set!` calls with one Rust loop.
+            Prim::RangeFill => {
+                let Val::Int(start) = self.decode(args[0]) else { panic!("range-fill: start must be an int"); };
+                let Val::Int(end) = self.decode(args[1]) else { panic!("range-fill: end must be an int"); };
+                let Val::Int(step) = self.decode(args[2]) else { panic!("range-fill: step must be an int"); };
+                let mut v = Vec::with_capacity(32);
+                let mut j = start;
+                if step > 0 {
+                    while j < end && v.len() < 32 {
+                        v.push(self.encode(Val::Int(j)));
+                        j += step;
+                    }
+                } else {
+                    while j > end && v.len() < 32 {
+                        v.push(self.encode(Val::Int(j)));
+                        j += step;
+                    }
+                }
+                self.mk_array(v)
+            }
             Prim::ArrPush => {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("apush: not an array");

@@ -511,7 +511,17 @@
       (if (%lt (%add off 1) end)
           (record 'ChunkedCons (field c 0) (%add off 1) end (field c 3))
           (seq (field c 3)))))
-  ISeqable (-seq [c] c))
+  ISeqable (-seq [c] c)
+  ;; `seq` NORMALIZES a `ChunkedCons`'s own LazySeq wrapper away (see `seq`
+  ;; above), so `(count (seq (range n)))` / `(count (seq some-vector))` dispatch
+  ;; `-count` on the raw ChunkedCons directly, not through LazySeq's -count.
+  ;; count-seq is chunk-aware nowhere else so this is O(n), same as Clojure's
+  ;; own O(n) count of a lazy/chunked seq.
+  ICounted (-count [c] (%add (%sub (field c 2) (field c 1)) (count-seq (field c 3) 0)))
+  ;; `(seq [1 2])` normalizes to a raw ChunkedCons (see `seq` above), so it must
+  ;; be `=` to any sequential coll with the same elements — same contract as
+  ;; List/LazySeq's IEquiv below.
+  IEquiv (-equiv [c o] (if (-seqlike? o) (-seq-eq c o) false)))
 (def -chunk-size 32)
 
 ;; ─────────────── reduce / into ───────────────
@@ -674,22 +684,21 @@
                     (if (nil? v) (keep f (%rest s)) (%cons v (keep f (%rest s)))))))))
 ;; range produces CHUNKED seqs — a 32-element array per lazy step (each still a
 ;; normal seq via ChunkedCons), so `(reduce f (range n))` scans arrays, not conses.
+;; `%range-fill` fills a whole chunk (up to 32 ints) in ONE native call instead of
+;; 32 interpreted `%cell-set!` calls; `%alength` reads back how many it filled so
+;; the in-language side never re-decides the stepping/bounds logic.
 (defn -range-inf [i]
   (lazy-seq
-    (let [arr (%make-array 32)]
-      (loop [j i k 0]
-        (if (%lt k 32)
-            (do (%cell-set! arr k j) (recur (%add j 1) (%add k 1)))
-            (record 'ChunkedCons arr 0 32 (-range-inf j)))))))
+    ;; no upper bound: pass an `end` far enough away that the 32-element cap is
+    ;; always what stops the fill, never the (nonexistent) limit.
+    (let [arr (%range-fill i (%add i 64) 1)]
+      (record 'ChunkedCons arr 0 32 (-range-inf (%add i 32))))))
 (defn -range2 [i n]
   (lazy-seq
     (if (%lt i n)
-        (let [end (let [e (%add i 32)] (if (%lt e n) e n))
-              arr (%make-array (%sub end i))]
-          (loop [j i k 0]
-            (if (%lt j end)
-                (do (%cell-set! arr k j) (recur (%add j 1) (%add k 1)))
-                (record 'ChunkedCons arr 0 k (-range2 j n)))))
+        (let [arr (%range-fill i n 1)
+              k (%alength arr)]
+          (record 'ChunkedCons arr 0 k (-range2 (%add i k) n)))
         nil)))
 ;; 3-arg range handles BOTH directions: ascending while j<n (step>0), descending
 ;; while j>n (step<0). (The pre-chunking version was ascending-only, so
@@ -697,11 +706,9 @@
 (defn -range3 [i n step]
   (lazy-seq
     (if (if (%lt 0 step) (%lt i n) (%lt n i))
-        (let [arr (%make-array 32)]
-          (loop [j i k 0]
-            (if (if (%lt k 32) (if (%lt 0 step) (%lt j n) (%lt n j)) false)
-                (do (%cell-set! arr k j) (recur (%add j step) (%add k 1)))
-                (record 'ChunkedCons arr 0 k (-range3 j n step)))))
+        (let [arr (%range-fill i n step)
+              k (%alength arr)]
+          (record 'ChunkedCons arr 0 k (-range3 (%add i (%mul k step)) n step)))
         nil)))
 (defn range [& args]
   (cond (nil? (seq args)) (-range-inf 0)
@@ -772,10 +779,15 @@
             (and (associative? m) (contains? m (first ks))) (recur (get m (first ks)) (next ks))
             (nil? (next ks)) (get m (first ks) nf)
             true nf))))
+;; NOTE: uses `next`/`first` (the normalizing public wrappers), not raw
+;; `%rest`/`%first` — raw `%rest` on an about-to-exhaust ChunkedCons hands back
+;; an UNFORCED lazy tail (not literal `nil`), so a bare `(nil? (%rest ...))`
+;; check is wrong once `ks` can be a chunked seq (any vector, since PV seqs
+;; chunk). `next` forces+normalizes, so this stays correct for every coll type.
 (defn assoc-in [m ks v]
-  (if (nil? (%rest (seq ks)))
-      (assoc m (%first (seq ks)) v)
-      (assoc m (%first (seq ks)) (assoc-in (get m (%first (seq ks))) (%rest (seq ks)) v))))
+  (if (nil? (next ks))
+      (assoc m (first ks) v)
+      (assoc m (first ks) (assoc-in (get m (first ks)) (next ks) v))))
 (defn update [m k f & args] (assoc m k (apply f (get m k) args)))
 (defn some-seq [pred s] (let [s (seq s)] (if (nil? s) nil (let [r (pred (%first s))] (if r r (some-seq pred (%rest s)))))))
 (defn some [pred c] (some-seq pred c))

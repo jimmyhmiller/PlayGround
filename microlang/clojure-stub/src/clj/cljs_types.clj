@@ -127,14 +127,23 @@
       (zero? subidx) nil
       :else (let [ret (pv-clone-node node)] (pv-aset ret subidx nil) ret))))
 
-;; HOST: seq over the vector, built back-to-front with a tail loop (replaces
-;; cljs's IndexedSeq/ChunkedSeq). Named -PV-seq (not -pv-seq): core's PVec
-;; ISeqable impl resolves `-pv-seq` by global name at CALL time, and load-time
-;; PVec data (literals read while core loads) must keep seq-ing after these
-;; types redefine the world.
-(defn -PV-seq [pv]
-  (loop [i (%sub (.-cnt pv) 1) acc nil]
-    (if (%lt i 0) acc (recur (%sub i 1) (%cons (aget (unchecked-array-for pv i) (bit-and i 31)) acc)))))
+;; HOST: seq over the vector. CHUNKED (replaces cljs's IndexedSeq/ChunkedSeq):
+;; a PersistentVector's trie leaf arrays are ALREADY 32-wide chunks (only the
+;; in-progress tail may be shorter), so yield them directly as `ChunkedCons`
+;; nodes — one `array-for` trie walk per 32 elements instead of one `%cons`
+;; allocation PER element. `reduce` (core.clj `-reduce-chunk` et al.) then
+;; bulk-scans these chunks the same way it does `range`/`map`/`filter` output.
+;; Named -PV-seq (not -pv-seq): core's PVec ISeqable impl resolves `-pv-seq` by
+;; global name at CALL time, and load-time PVec data (literals read while core
+;; loads) must keep seq-ing after these types redefine the world.
+(defn -PV-chunk-seq [pv i]
+  (lazy-seq
+    (if (%lt i (.-cnt pv))
+      (let [arr (unchecked-array-for pv i)
+            alen (%alength arr)]
+        (record 'ChunkedCons arr 0 alen (-PV-chunk-seq pv (%add i alen))))
+      nil)))
+(defn -PV-seq [pv] (-PV-chunk-seq pv 0))
 
 (deftype PersistentVector [meta cnt shift root tail __hash]
   IWithMeta

@@ -628,6 +628,7 @@ fn prim_tag(p: Prim) -> u32 {
         PvNth => 90,
         PvAssoc => 91,
         LazyRealize => 92,
+        RangeFill => 93,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -738,6 +739,7 @@ fn prim_from_tag(tag: u32) -> Prim {
         90 => PvNth,
         91 => PvAssoc,
         92 => LazyRealize,
+        93 => RangeFill,
         other => panic!("bad prim tag {other}"),
     }
 }
