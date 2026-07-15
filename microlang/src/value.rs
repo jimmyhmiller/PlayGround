@@ -4,28 +4,35 @@
 //! fast-path selection; `Val` names each. Everything unbounded lives behind
 //! `Ref` + a heap object. Symbols are immediate.
 //!
-//! For the MOVING collector, the key design choice is here: lexical frames stay
-//! `Rc`-managed (not in the moving heap), but their slots are `Cell<u64>`. The
-//! `Rc` pointer never moves, so the mutator's `locals` reference survives a
-//! collection; the GC rewrites the heap pointers *inside* the cells in place, so
-//! reading a variable through `frame_get` always sees the relocated address.
-//! The only values that go stale on a move are bare `u64`s the mutator holds
-//! directly (the compiler's in-flight form) — which is exactly what handles fix.
+//! Stage D: a reference IS an address into the real heap (`heap::Gc`). `Obj`
+//! is no longer the heap's storage — it is the ALLOCATION REQUEST vocabulary:
+//! a constructor-shaped description the runtime's `alloc` lowers into a raw
+//! heap object (header + inline fields). Reading heap data goes through
+//! `Runtime::view`, which reconstructs the same shapes as borrows.
+//!
+//! For the MOVING collector, the key design choice is here: lexical frames
+//! stay `Arc`-managed (not in the moving heap), but their slots are atomics.
+//! The `Arc` pointer never moves, so the mutator's `locals` reference survives
+//! a collection; the GC rewrites the heap pointers *inside* the slots in
+//! place, so reading a variable through `frame_get` always sees the relocated
+//! address. The only values that go stale on a move are bare `u64`s the
+//! mutator holds directly — which is exactly what handles fix.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::heap::{Gc, CLOSURE_CAPS_OFF};
 use crate::ir::Ir;
+use crate::model::Repr;
 
 /// Memory ordering for frame/cell slot access. A frame can be captured by a
-/// closure that runs on ANOTHER thread, so a slot holding a heap id is a
+/// closure that runs on ANOTHER thread, so a slot holding a heap ref is a
 /// cross-thread channel: the store must publish the pointed-to object (`Release`)
 /// and the load acquire it (`Acquire`). Cheap on x86, and correct on weaker isas.
 const SLOT_LOAD: Ordering = Ordering::Acquire;
 const SLOT_STORE: Ordering = Ordering::Release;
 
 pub type Sym = u32;
-pub type HeapId = u32;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Cat {
@@ -58,50 +65,44 @@ pub enum Val {
     Bool(bool),
     Nil,
     Sym(Sym),
-    Ref(HeapId),
+    Ref(Gc),
 }
 
-/// Heap objects. Frames are NOT here (they are `Rc`-managed, see `Frame`), so a
-/// closure's only heap child is nothing structural in its body — `Ir` carries
-/// no heap pointers (literals live in the constant pool). A `Closure`'s captured
-/// `env` is an `Rc<Frame>` the collector reaches to rewrite its cells.
-#[derive(Clone)]
+/// ALLOCATION REQUESTS: the constructor vocabulary `Runtime::alloc` lowers
+/// into raw heap objects (see `heap::kind` for the layouts). Cold/simple call
+/// sites build one of these; hot paths use the typed `alloc_*` constructors
+/// directly and never materialize the enum.
 pub enum Obj {
     Cons {
         head: u64,
         tail: u64,
     },
     /// The empty list `()` — a distinct value from `nil` (Clojure's
-    /// `PersistentList/EMPTY`). `list?`/`seq?` are true for it, it prints as `()`,
-    /// and it is NOT `= nil`. Cons chains still terminate in `nil` (not this), so
-    /// iteration is unaffected; `%cons` normalizes an `EmptyList` tail back to nil.
+    /// `PersistentList/EMPTY`). One canonical singleton per runtime.
     EmptyList,
     Str(String),
     /// A character (R7RS `char?`), disjoint from integers and strings.
     Char(char),
-    /// A vector: a fixed, mutable, index-addressed sequence of values. The
-    /// elements live in the runtime's bump WORD ARENA at `off..off+len`
-    /// (`Runtime::words`/`words_mut`); `cap` is the reserved span so `%apush`
-    /// can grow in place up to it (past it, a fresh span is bump-allocated and
-    /// `off`/`cap` updated — object identity is this Obj slot, so every
-    /// reference observes the growth).
-    Vector { off: u32, len: u32, cap: u32 },
+    /// A growable, index-addressed sequence: lowered to a HANDLE object (the
+    /// identity, carrying the logical length) plus a DATA blob (the elements,
+    /// carrying the capacity) — the ArrayList shape. Growth allocates a new
+    /// blob and re-points the handle, so every reference observes it.
+    Vector(Vec<u64>),
     /// A multiple-values packet produced by `(values …)` and consumed by
     /// `call-with-values`. Distinct from a list so `(values (list 1 2))` (one
     /// value that is a list) differs from `(values 1 2)` (two values).
-    /// Elements in the word arena, like `Vector`.
-    Values { off: u32, len: u32 },
+    Values(Vec<u64>),
     /// A promoted integer that did not fit the immediate fixnum range (but still
     /// fits `i128` — the common promotion).
     BigInt(i128),
-    /// An integer beyond `i128`: true arbitrary precision. Reached only when the
-    /// `i128` arithmetic path overflows.
+    /// An integer beyond `i128`: true arbitrary precision, limbs stored inline.
     HugeInt(crate::bigint::BigInt),
-    /// An exact rational `num/den`, always in lowest terms with `den > 1` (a
-    /// denominator of 1 reduces to an integer). Produced by `/` on non-divisible
-    /// integers; prints as `num/den`.
+    /// An exact rational `num/den`, always in lowest terms with `den > 1`.
     Ratio(i128, i128),
     BoxFloat(f64),
+    /// A flat closure: the body is registered in the append-only TEMPLATE
+    /// registry (code, like gc-rust's type table); the captured VALUES are
+    /// copied inline into the object at creation.
     Closure {
         nparams: usize,
         variadic: bool,
@@ -109,66 +110,41 @@ pub enum Obj {
         /// rest arg, every let/catch slot) — assigned by the `flatten` pass.
         nslots: u16,
         body: Arc<Ir>,
-        /// The captured VALUES, copied at closure-creation time (flat closures;
-        /// no environment chain). `AtomicU64` so the moving GC can forward the
-        /// heap refs they hold in place.
-        caps: Caps,
+        caps: Vec<u64>,
     },
     /// A MULTI-ARITY function: per-arity closures selected by argument count at
-    /// call time (real Clojure's `IFn.invoke(a, b, …)` overloads). `fixed[k]`
-    /// holds the k-param closure's bits (0 = no such arity); `variadic` is the
-    /// `[… & rest]` clause (min fixed count, closure bits). Selecting a fixed
-    /// arity costs one index — no rest-list allocation, and the selected
-    /// closure is an ordinary fixed-arity closure (register-callable,
-    /// inlinable). Built by the `%multifn` prim.
+    /// call time. `fixed[k]` holds the k-param closure's bits (0 = no such
+    /// arity); `variadic` is the `[… & rest]` clause (min fixed count, closure
+    /// bits).
     MultiFn {
         fixed: Vec<u64>,
         variadic: Option<(usize, u64)>,
     },
-    /// A user record: a type tag (interned symbol) plus positional fields
-    /// (in the word arena, like `Vector`). The thing polymorphic dispatch
-    /// dispatches ON.
+    /// A user record: a type tag (interned symbol) plus positional fields.
     Record {
         type_id: Sym,
-        off: u32,
-        len: u32,
+        fields: Vec<u64>,
     },
     /// An escape continuation: invoking it does a non-local exit back to the
     /// `call-with-escaping-continuation` that created it (matched by `tag`).
-    /// One-shot, upward-only — enough for early exit and generators-lite; full
-    /// multi-shot continuations would need CPS or stack copying.
     Escape {
         tag: u64,
     },
     /// A FULL, multi-shot continuation: a reified `CekMachine` continuation.
-    /// Because it is an immutable `Rc`-linked structure, invoking it re-installs
-    /// the captured continuation any number of times — enabling generators,
-    /// coroutines, and backtracking. Only the stackless machine produces these.
+    /// The `Arc<Kont>` is execution-machine state (never raw heap data); the
+    /// object stores an index into the runtime's kont registry.
     Cont(Arc<crate::cek::Kont>),
-    /// A COMPOSABLE (delimited) continuation: the slice of a `CekMachine`
-    /// continuation between a `%shift` and its enclosing `%reset`. Unlike `Cont`,
-    /// invoking it does NOT abort — it splices the captured slice onto the
-    /// caller's continuation under a fresh prompt and RETURNS, so it composes and
-    /// can be invoked any number of times. Only the stackless machine produces
-    /// these. Its captured frames are traced by the moving GC (see `gc.rs`), so
-    /// it survives collection like any other heap value.
+    /// A COMPOSABLE (delimited) continuation — same registry shape as `Cont`;
+    /// invoking it splices rather than aborts (see cek.rs).
     PartialCont(Arc<crate::cek::Kont>),
-    /// An ATOM: a single atomically-updated cell holding a value (a heap id or
-    /// immediate). `Arc<AtomicU64>` so `Obj` stays `Clone` (the GC copies objects)
-    /// while the cell itself supports a real cross-thread compare-and-set. The
-    /// collector forwards the contained value under STW (see `scan_obj`).
-    Atom(Arc<AtomicU64>),
-    /// A FUTURE: the pending result of a thunk running on another OS thread. The
-    /// `Arc<Mutex<..>>` is shared with the worker; `%await` joins the thread and
-    /// caches its value. Cloneable (Arc), so the GC can relocate the enclosing
-    /// object; the contained result is a raw heap id (see the rooting note in the
-    /// spawn handler).
+    /// An ATOM: a single atomically-updated cell, initialized to the given
+    /// value. The object is `[hdr | slot]` and swap!/CAS operate on the slot
+    /// word directly (STW keeps a moving collector safe).
+    Atom(u64),
+    /// A FUTURE: the pending result of a thunk running on another OS thread.
+    /// The `Arc<Mutex<..>>` is an OS resource: it lives in the runtime's
+    /// future registry and the object stores its index.
     Future(Arc<std::sync::Mutex<FutureSlot>>),
-    /// Forwarding marker left in from-space by the copying collector: the object
-    /// now lives at index `.0` (or `u32::MAX` for reclaimed garbage). Any
-    /// attempt to dereference a stale from-space pointer hits this and errors
-    /// loudly — the moving-GC analogue of use-after-free.
-    Moved(u32),
 }
 
 /// The shared state of a `Future`: the worker's join handle (taken on first
@@ -178,27 +154,19 @@ pub struct FutureSlot {
     pub result: Option<u64>,
 }
 
-/// A closure's capture array: values copied at creation time. Immutable in
-/// SHAPE once created; the cells are atomics only so the moving GC can forward
-/// the heap refs they hold in place (and so the array is `Send + Sync`).
-pub type Caps = Arc<[AtomicU64]>;
-
-/// The shared empty capture array (cloning an `Arc` beats allocating one per
-/// capture-free closure/call).
-pub fn no_caps() -> Caps {
-    static EMPTY: std::sync::OnceLock<Caps> = std::sync::OnceLock::new();
-    EMPTY.get_or_init(|| Arc::from(Vec::<AtomicU64>::new())).clone()
-}
-
 /// ONE flat activation frame per call — no parent chain (the `flatten` pass
 /// resolves every variable to a slot of the single frame or to a closure
 /// capture). `AtomicU64` slots so the GC can rewrite the heap pointers they
 /// hold in place, and so a frame published at a safepoint (or captured by a
-/// CEK continuation) can be traced from another thread. `caps` is the running
-/// closure's capture array, attached at call time (one `Arc` bump).
+/// CEK continuation) can be traced from another thread.
+///
+/// `caps_src` holds the RUNNING CLOSURE's bits (0 = none): captures are read
+/// through it out of the closure object itself. It is an atomic root slot the
+/// collector forwards, so capture reads re-decode the closure's CURRENT
+/// address — GC-safe by construction, with no capture-array copy per call.
 pub struct Frame {
     pub slots: Vec<AtomicU64>,
-    pub caps: Caps,
+    pub caps_src: AtomicU64,
 }
 
 pub type Locals = Option<Arc<Frame>>;
@@ -242,28 +210,43 @@ pub fn frame_set(env: &Locals, up: u16, idx: u16, v: u64) {
     f.slots[idx as usize].store(v, SLOT_STORE);
 }
 
-/// Read capture `idx` of the running closure (attached to the activation frame).
-pub fn frame_cap(env: &Locals, idx: u16) -> u64 {
+/// Read capture `idx` of the running closure: decode the frame's `caps_src`
+/// (kept current by the collector) and load the capture word straight out of
+/// the closure object's inline cap array.
+pub fn frame_cap<R: Repr>(env: &Locals, idx: u16) -> u64 {
     let f = env.as_ref().expect("capture reference in empty environment");
-    f.caps[idx as usize].load(SLOT_LOAD)
+    let bits = f.caps_src.load(SLOT_LOAD);
+    assert_ne!(bits, 0, "capture read in a frame with no running closure");
+    let g = R::as_ref(bits);
+    unsafe { *(g.0.add(CLOSURE_CAPS_OFF + idx as usize * 8) as *const u64) }
 }
 
-/// Build a closure's capture array at creation time: copy each source value
+/// Read capture `idx` directly off a CLOSURE OBJECT (creation-time transitive
+/// capture; the shared building block under `frame_cap` and `build_caps`).
+#[inline(always)]
+pub fn closure_cap(g: Gc, idx: u16) -> u64 {
+    unsafe { *(g.0.add(CLOSURE_CAPS_OFF + idx as usize * 8) as *const u64) }
+}
+
+/// Compute a new closure's capture VALUES at creation time: copy each source
 /// out of the current activation (its slots, or the running closure's own
-/// captures for transitive capture). Shared by every backend.
-pub fn build_caps(captures: &[crate::ir::CapSrc], env: &Locals) -> Caps {
+/// captures for transitive capture). The values are written inline into the
+/// closure object by `alloc`. Shared by every backend.
+pub fn build_caps<R: Repr>(captures: &[crate::ir::CapSrc], env: &Locals) -> Vec<u64> {
     use crate::ir::CapSrc;
     if captures.is_empty() {
-        return no_caps();
+        return Vec::new();
     }
     let f = env.as_ref().expect("closure captures in empty environment");
     captures
         .iter()
-        .map(|c| {
-            AtomicU64::new(match c {
-                CapSrc::Slot(i) => f.slots[*i as usize].load(SLOT_LOAD),
-                CapSrc::Cap(i) => f.caps[*i as usize].load(SLOT_LOAD),
-            })
+        .map(|c| match c {
+            CapSrc::Slot(i) => f.slots[*i as usize].load(SLOT_LOAD),
+            CapSrc::Cap(i) => {
+                let bits = f.caps_src.load(SLOT_LOAD);
+                assert_ne!(bits, 0, "transitive capture with no running closure");
+                closure_cap(R::as_ref(bits), *i)
+            }
         })
         .collect()
 }

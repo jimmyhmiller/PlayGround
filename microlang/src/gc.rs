@@ -1,33 +1,31 @@
-//! A MOVING (semi-space copying) collector, plus the shadow-stack handle
-//! discipline. This is where the value and execution axes fully fuse.
+//! The MOVING (semi-space copying) collector's runtime face: root
+//! enumeration, the stop-the-world rendezvous, and the shadow-stack handle
+//! discipline. The copying machinery itself lives in `heap.rs` (Cheney
+//! evacuation over the `TypeInfo` table); this file's job is to hand it every
+//! live root slot.
 //!
-//! Reachable objects are copied to fresh addresses; the old slots become
-//! `Obj::Moved` forwarding markers. Every root is rewritten to the new address:
-//! the globals, the constant pool (which is why `Ir` holds no embedded heap
-//! pointers), the shadow stack, and the live environment. Lexical frames stay
-//! `Arc`-managed with `Cell` slots, so their heap pointers are rewritten in place
-//! and the mutator's `locals` reference stays valid across a collection.
+//! Reachable objects are evacuated to the other space; every root slot is
+//! rewritten in place: the globals, the constant pool (which is why `Ir`
+//! holds no embedded heap pointers), the shadow stacks, dynamic-var bindings,
+//! activation frames (slots + the running closure's `caps_src`), reified
+//! continuations, future results, method impls, and the `()` singleton.
+//! Lexical frames stay `Arc`-managed with atomic slots, so their heap
+//! pointers are rewritten in place and the mutator's `locals` reference stays
+//! valid across a collection.
 //!
 //! The one thing a moving collector cannot fix for free: a bare `u64` the
-//! mutator holds directly in a Rust local. After a move it points into
-//! from-space (now a `Moved` marker) and dereferencing it is a loud
-//! use-after-move. The fix is the handle: publish the value to the shadow stack
-//! and re-read it (`root_get`) after anything that may allocate. The compiler
-//! (`macroexpand`, `analyze`) does exactly this for the form it is expanding —
-//! the direct remedy for the clojure-jvm form-609 relocation bug.
-//!
-//! Simplification vs. a production semi-space: we append to-space to one growing
-//! arena and leave from-space as poisoned `Moved` markers (so stale reads stay
-//! loud) instead of flipping two fixed buffers and reusing from-space. The
-//! relocation semantics — copy, forward, rewrite roots, re-read via handle — are
-//! faithful.
+//! mutator holds directly in a Rust local. After a move it points into the
+//! evacuated space and dereferencing it errors loudly (verify mode poisons
+//! the space; the header type_id check catches it). The fix is the handle:
+//! publish the value to the shadow stack and re-read it (`root_get`) after
+//! anything that may allocate.
 
 use std::sync::Arc;
 
 use crate::cek::Kont;
-use crate::model::{Repr, ValueModel};
-use crate::runtime::Runtime;
-use crate::value::{slot_load, slot_store, Locals, Obj, RawTag};
+use crate::model::ValueModel;
+use crate::runtime::{Runtime, GLOBAL_UNBOUND};
+use crate::value::Locals;
 
 /// A handle to a rooted value. `get` re-reads the shadow slot, so it yields the
 /// value's CURRENT address even after the collector relocated it.
@@ -67,7 +65,7 @@ impl<M: ValueModel> Runtime<M> {
     }
 
     /// A moving collection. `live_env` is the currently executing environment
-    /// (the safepoint's live frame chain); its cells are rewritten in place.
+    /// (the safepoint's live frame); its slots are rewritten in place.
     /// STOP-THE-WORLD: every OTHER live mutator is brought to a safepoint and
     /// parked (publishing its roots) before any object moves.
     pub fn collect(&mut self, live_env: &Locals) {
@@ -82,9 +80,9 @@ impl<M: ValueModel> Runtime<M> {
 
     /// The stop-the-world rendezvous around a collection: request a stop, wait
     /// for all sibling mutators to park at a safepoint (so no one is reading or
-    /// mutating the heap), collect, then release them. One collector at a time
-    /// (`gc_lock`). The requesting thread scans its OWN live roots directly; the
-    /// parked threads' roots come from their published slots.
+    /// mutating the heap), collect, then release them. One collector at a time.
+    /// The requesting thread scans its OWN live roots directly; the parked
+    /// threads' roots come from their published slots.
     fn stw_collect(&mut self, live_env: &Locals, live_kont: Option<&Arc<Kont>>) {
         use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
         let shared = self.shared.clone();
@@ -123,13 +121,12 @@ impl<M: ValueModel> Runtime<M> {
     /// Await a future, publishing this thread's roots and marking it parked while
     /// blocked on the worker's join — so a collection requested by another thread
     /// (possibly the worker) can proceed instead of deadlocking. The worker stores
-    /// its result into the future slot (GC-rooted via the reachable object), so we
-    /// read it back after the join even if a collection relocated it.
+    /// its result into the future slot (GC-rooted via the registry), so we read it
+    /// back after the join even if a collection relocated it.
     pub fn await_future(&mut self, fut: u64, locals: &Locals) -> u64 {
         use std::sync::atomic::Ordering::{Acquire, Release};
-        let id = M::R::as_ref(fut) as usize;
-        let slot = match &self.heap()[id] {
-            Obj::Future(s) => s.clone(),
+        let slot = match self.view(fut) {
+            crate::runtime::ObjView::Future(s) => s,
             _ => panic!("await: not a future"),
         };
         if let Some(r) = slot.lock().unwrap().result {
@@ -166,7 +163,7 @@ impl<M: ValueModel> Runtime<M> {
     }
 
     /// Poll a safepoint: if a collection is pending, park until it finishes. Call
-    /// this where the mutator holds no `&Obj` borrow across it (function entry,
+    /// this where the mutator holds no heap borrow across it (function entry,
     /// alloc). `locals` is published so the collector can trace this thread's env.
     #[inline]
     pub fn safepoint(&mut self, locals: &Locals) {
@@ -177,7 +174,7 @@ impl<M: ValueModel> Runtime<M> {
     }
 
     /// Publish this thread's roots and block until the pending collection clears,
-    /// then take the (rewritten) roots back. The env's frame cells are rewritten
+    /// then take the (rewritten) roots back. The env's frame slots are rewritten
     /// in place (shared `Arc` frames), so `locals` sees the new addresses without
     /// a copy-back.
     pub fn park(&mut self, locals: &Locals) {
@@ -195,255 +192,130 @@ impl<M: ValueModel> Runtime<M> {
         self.me.parked.store(false, Release);
     }
 
+    /// Enumerate every root slot and run the Cheney evacuation (`heap.rs`).
+    /// Runs with the world stopped (all sibling mutators parked).
     fn collect_inner(&mut self, live_env: &Locals, live_kont: Option<&Arc<Kont>>) {
         use std::sync::atomic::Ordering::Relaxed;
-        // Serialize heap mutation. (Under the full safepoint protocol this is where
-        // all mutators are already parked; here it is the single heap-write lock.)
+        // Serialize against in-place heap mutators (array extend) that might
+        // hold the lock right now on THIS thread's behalf — cheap insurance;
+        // the real exclusion is the park rendezvous.
         let _g = self.shared.heap_lock.lock().unwrap();
-        // SAFETY: exclusive heap access is held via `heap_lock`; the resulting
-        // `&mut Heap` is raw-pointer-derived, so it does not alias the other
-        // `self.shared` field borrows below.
-        let heap: &mut crate::runtime::Heap = unsafe { &mut *self.shared.heap.get() };
-        let from_len = heap.len();
-        let real_before = heap.iter().filter(|o| !matches!(o, Obj::Moved(_))).count();
-        let mut to: Vec<Obj> = Vec::new();
-        let mut reloc = 0u64;
-
-        // 1. Forward the direct roots. The dense global array IS the global store;
-        //    forward every bound slot (skip the unbound sentinel).
-        for a in self.shared.global_slots.iter() {
-            let v = a.load(Relaxed);
-            if v != crate::runtime::GLOBAL_UNBOUND {
-                a.store(fw::<M>(heap, from_len, &mut to, &mut reloc, v), Relaxed);
-            }
-        }
-        // This thread's shadow stack (its transient roots).
-        for s in self.shadow.iter_mut() {
-            *s = fw::<M>(heap, from_len, &mut to, &mut reloc, *s);
-        }
-        // This thread's dynamic-var bindings (the `Sym` keys don't move).
-        for (_, v) in self.dyn_stack.iter_mut() {
-            *v = fw::<M>(heap, from_len, &mut to, &mut reloc, *v);
-        }
-        // Every OTHER (parked) thread's PUBLISHED roots: its shadow snapshot
-        // (rewritten in place, taken back on resume) and its live env frames.
-        {
-            let ms = self.shared.mutators.lock().unwrap();
-            for m in ms.iter() {
-                if Arc::ptr_eq(m, &self.me) {
-                    continue;
+        let shared = self.shared.clone();
+        let shadow = &mut self.shadow;
+        let dyn_stack = &mut self.dyn_stack;
+        let env_stack = &self.env_stack;
+        let me = &self.me;
+        unsafe {
+            shared.heap.collect::<M::R>(&shared.types, &mut |visit| {
+                // 1. Globals: the dense array IS the store; skip unbound slots.
+                for a in shared.global_slots.iter() {
+                    if a.load(Relaxed) != GLOBAL_UNBOUND {
+                        visit(a.as_ptr());
+                    }
                 }
-                let mut roots = m.roots.lock().unwrap();
-                for r in roots.iter_mut() {
-                    *r = fw::<M>(heap, from_len, &mut to, &mut reloc, *r);
+                // 2. This thread's shadow stack + dynamic-var bindings.
+                for s in shadow.iter_mut() {
+                    visit(s as *mut u64);
                 }
-                let mut dyn_roots = m.dyn_roots.lock().unwrap();
-                for (_, v) in dyn_roots.iter_mut() {
-                    *v = fw::<M>(heap, from_len, &mut to, &mut reloc, *v);
+                for (_, v) in dyn_stack.iter_mut() {
+                    visit(v as *mut u64);
                 }
-                let envs = m.envs.lock().unwrap();
-                for env in envs.iter() {
-                    update_env::<M>(heap, from_len, &mut to, &mut reloc, env);
+                // 3. Every OTHER (parked) thread's PUBLISHED roots.
+                {
+                    let ms = shared.mutators.lock().unwrap();
+                    for m in ms.iter() {
+                        if Arc::ptr_eq(m, me) {
+                            continue;
+                        }
+                        for r in m.roots.lock().unwrap().iter_mut() {
+                            visit(r as *mut u64);
+                        }
+                        for (_, v) in m.dyn_roots.lock().unwrap().iter_mut() {
+                            visit(v as *mut u64);
+                        }
+                        for env in m.envs.lock().unwrap().iter() {
+                            visit_env(env, visit);
+                        }
+                    }
                 }
-            }
-        }
-        // Constant pool.
-        let consts = unsafe { &mut *self.shared.consts.get() };
-        for c in consts.iter_mut() {
-            *c = fw::<M>(heap, from_len, &mut to, &mut reloc, *c);
-        }
-        // Method impls are roots (the dispatch registry is truth).
-        {
-            let mut t = self.shared.tables.lock().unwrap();
-            for imp in t.methods.values_mut() {
-                *imp = fw::<M>(heap, from_len, &mut to, &mut reloc, *imp);
-            }
-        }
-        // Captured `:arglists` data (the only heap values in the var registry).
-        {
-            let mut al = self.shared.var_arglists.lock().unwrap();
-            for v in al.values_mut() {
-                *v = fw::<M>(heap, from_len, &mut to, &mut reloc, *v);
-            }
-        }
-        // This (collector) thread's OWN live environments: the innermost env plus
-        // every frame in its dynamic call chain.
-        update_env::<M>(heap, from_len, &mut to, &mut reloc, live_env);
-        for env in self.env_stack.iter() {
-            update_env::<M>(heap, from_len, &mut to, &mut reloc, env);
-        }
-        // The live continuation, if we are at a CEK safepoint.
-        if let Some(k) = live_kont {
-            walk_kont::<M>(heap, from_len, &mut to, &mut reloc, k);
-        }
-
-        // 2. Cheney scan.
-        let arena = unsafe { &*self.shared.words.get() };
-        let mut scan = 0;
-        while scan < to.len() {
-            scan_obj::<M>(heap, arena, from_len, &mut to, &mut reloc, scan);
-            scan += 1;
-        }
-
-        // 3. Commit to-space; poison remaining from-space.
-        for o in to.drain(..) {
-            heap.push(o);
-        }
-        for i in 0..from_len {
-            if !matches!(heap[i], Obj::Moved(_)) {
-                heap[i] = Obj::Moved(u32::MAX);
-            }
+                // 4. Constant pool.
+                for c in (*shared.consts.get()).iter_mut() {
+                    visit(c as *mut u64);
+                }
+                // 5. Method impls (the dispatch registry is truth) + arglists.
+                for imp in shared.tables.lock().unwrap().methods.values_mut() {
+                    visit(imp as *mut u64);
+                }
+                for v in shared.var_arglists.lock().unwrap().values_mut() {
+                    visit(v as *mut u64);
+                }
+                // 6. The `()` singleton.
+                if shared.empty_list.load(Relaxed) != 0 {
+                    visit(shared.empty_list.as_ptr());
+                }
+                // 7. Reified continuations (registry = root set; append-only).
+                for k in shared.konts.lock().unwrap().iter() {
+                    visit_kont(k, visit);
+                }
+                // 8. Future results (the registry is the OS-resource table).
+                for slot in shared.futures.lock().unwrap().iter() {
+                    if let Ok(mut s) = slot.lock() {
+                        if let Some(r) = s.result.as_mut() {
+                            visit(r as *mut u64);
+                        }
+                    }
+                }
+                // 9. This (collector) thread's OWN live environments.
+                visit_env(live_env, visit);
+                for env in env_stack.iter() {
+                    visit_env(env, visit);
+                }
+                // 10. The live continuation, if we are at a CEK safepoint.
+                if let Some(k) = live_kont {
+                    visit_kont(k, visit);
+                }
+            });
         }
 
         // Dispatch caches hold impl pointers that just moved: invalidate them
         // (they refill on the next call). The registry, forwarded above, is truth.
-        self.shared.tables.lock().unwrap().dispatch.on_gc();
-
-        self.shared.relocated.fetch_add(reloc, Relaxed);
-        self.shared.freed.fetch_add((real_before as u64).saturating_sub(reloc), Relaxed);
+        shared.tables.lock().unwrap().dispatch.on_gc();
+        // Epoch for per-site ICs: any cached heap pointer is now stale.
+        shared.relocated.fetch_add(1, Relaxed);
     }
 }
 
-/// Copy `bits`'s object to to-space if needed, returning its new ref. Idempotent
-/// via `Moved` markers, so shared objects are copied once.
-fn fw<M: ValueModel>(
-    heap: &mut crate::runtime::Heap,
-    from_len: usize,
-    to: &mut Vec<Obj>,
-    reloc: &mut u64,
-    bits: u64,
-) -> u64 {
-    if M::R::tag_of(bits) != RawTag::Ref {
-        return bits;
-    }
-    let idx = M::R::as_ref(bits) as usize;
-    if idx >= from_len {
-        return bits; // already in to-space
-    }
-    if let Obj::Moved(n) = heap[idx] {
-        return M::R::enc_ref(n);
-    }
-    let abs = (from_len + to.len()) as u32;
-    let obj = heap[idx].clone();
-    heap[idx] = Obj::Moved(abs);
-    to.push(obj);
-    *reloc += 1;
-    M::R::enc_ref(abs)
-}
-
-/// Forward the internal pointers of the just-copied object `to[i]`.
-fn scan_obj<M: ValueModel>(
-    heap: &mut crate::runtime::Heap,
-    arena: &crate::runtime::WordArena,
-    from_len: usize,
-    to: &mut Vec<Obj>,
-    reloc: &mut u64,
-    i: usize,
-) {
-    // Cons: forward head and tail (extract first to release the borrow).
-    if let Obj::Cons { head, tail } = &to[i] {
-        let (h, t) = (*head, *tail);
-        let nh = fw::<M>(heap, from_len, to, reloc, h);
-        let nt = fw::<M>(heap, from_len, to, reloc, t);
-        if let Obj::Cons { head, tail } = &mut to[i] {
-            *head = nh;
-            *tail = nt;
+/// Visit an activation frame's root slots: every local plus the running
+/// closure's `caps_src`. Idempotent (a re-visited slot forwards to itself), so
+/// frames shared with continuations need no visited set.
+fn visit_env(env: &Locals, visit: &mut dyn FnMut(*mut u64)) {
+    if let Some(f) = env {
+        for cell in &f.slots {
+            visit(cell.as_ptr());
         }
-        return;
-    }
-    // Closure: forward its captured values in place (flat closures — the
-    // capture array is the closure's only heap-reaching edge).
-    if let Obj::Closure { caps, .. } = &to[i] {
-        let caps = caps.clone();
-        for cell in caps.iter() {
-            slot_store(cell, fw::<M>(heap, from_len, to, reloc, slot_load(cell)));
-        }
-        return;
-    }
-    // MultiFn: forward each per-arity closure ref.
-    if let Obj::MultiFn { fixed, variadic } = &to[i] {
-        let (fs, va) = (fixed.clone(), *variadic);
-        let nf: Vec<u64> = fs
-            .into_iter()
-            .map(|f| if f == 0 { 0 } else { fw::<M>(heap, from_len, to, reloc, f) })
-            .collect();
-        let nv = va.map(|(min, f)| (min, fw::<M>(heap, from_len, to, reloc, f)));
-        if let Obj::MultiFn { fixed, variadic } = &mut to[i] {
-            *fixed = nf;
-            *variadic = nv;
-        }
-        return;
-    }
-    // Record: forward each field IN PLACE in its arena span (the span is
-    // exclusively owned by this — just-copied — object, so rewriting the words
-    // is sound; span compaction is a follow-up).
-    if let &Obj::Record { off, len, .. } = &to[i] {
-        for k in 0..len as usize {
-            let f = arena.slice(off, len)[k];
-            arena.slice_mut(off, len)[k] = fw::<M>(heap, from_len, to, reloc, f);
-        }
-        return;
-    }
-    // Atom: forward the value it currently holds (atomic load/store; the
-    // collector runs stop-the-world, but keep it atomic for tidiness).
-    if let Obj::Atom(a) = &to[i] {
-        let a = a.clone();
-        let v = a.load(std::sync::atomic::Ordering::Relaxed);
-        a.store(fw::<M>(heap, from_len, to, reloc, v), std::sync::atomic::Ordering::Relaxed);
-        return;
-    }
-    // Future: forward its cached result (a worker stores the value here before
-    // ending, so it stays rooted via the reachable `Future` object).
-    if let Obj::Future(slot) = &to[i] {
-        let slot = slot.clone();
-        let mut g = slot.lock().unwrap();
-        if let Some(r) = g.result {
-            g.result = Some(fw::<M>(heap, from_len, to, reloc, r));
-        }
-        return;
-    }
-    // Vector / multiple-values packet: forward each element in place.
-    if let (&Obj::Vector { off, len, .. } | &Obj::Values { off, len }) = &to[i] {
-        for k in 0..len as usize {
-            let e = arena.slice(off, len)[k];
-            arena.slice_mut(off, len)[k] = fw::<M>(heap, from_len, to, reloc, e);
-        }
-        return;
-    }
-    // A reified continuation (full or delimited): walk its whole `Kont` chain,
-    // forwarding the `done` cells and captured frames it holds. `Ir` inside the
-    // chain holds no heap pointers (const pool), so only cells and frames move.
-    if let Obj::Cont(k) | Obj::PartialCont(k) = &to[i] {
-        let k = k.clone();
-        walk_kont::<M>(heap, from_len, to, reloc, &k);
+        visit(f.caps_src.as_ptr());
     }
 }
 
-/// Trace a `Kont` chain: forward every `done`-slot cell in place and rewrite the
-/// cells of every captured frame. In-place and idempotent (like `update_env`), so
-/// shared continuation tails and multi-shot resumptions need no visited set.
-fn walk_kont<M: ValueModel>(
-    heap: &mut crate::runtime::Heap,
-    from_len: usize,
-    to: &mut Vec<Obj>,
-    reloc: &mut u64,
-    k: &Arc<Kont>,
-) {
+/// Trace a `Kont` chain: every `done`-slot cell and every captured frame.
+/// In-place and idempotent (like `visit_env`), so shared continuation tails
+/// and multi-shot resumptions need no visited set.
+fn visit_kont(k: &Arc<Kont>, visit: &mut dyn FnMut(*mut u64)) {
     let mut cur = k.clone();
     loop {
         let next = match &*cur {
             Kont::Done => return,
             Kont::CallK { done, env, next, .. } | Kont::PrimK { done, env, next, .. } => {
                 for cell in done {
-                    slot_store(cell, fw::<M>(heap, from_len, to, reloc, slot_load(cell)));
+                    visit(cell.as_ptr());
                 }
-                update_env::<M>(heap, from_len, to, reloc, env);
+                visit_env(env, visit);
                 next.clone()
             }
             Kont::If { env, next, .. }
             | Kont::Seq { env, next, .. }
             | Kont::SetLoc { env, next, .. } => {
-                update_env::<M>(heap, from_len, to, reloc, env);
+                visit_env(env, visit);
                 next.clone()
             }
             Kont::Def { next, .. }
@@ -453,26 +325,5 @@ fn walk_kont<M: ValueModel>(
             | Kont::ShiftK { next, .. } => next.clone(),
         };
         cur = next;
-    }
-}
-
-/// Rewrite an activation frame's slots (and its attached capture array) to the
-/// forwarded addresses. Idempotent (a re-visited, already-forwarded slot
-/// forwards to itself), so frames shared with continuations and capture arrays
-/// shared with closures need no visited set.
-fn update_env<M: ValueModel>(
-    heap: &mut crate::runtime::Heap,
-    from_len: usize,
-    to: &mut Vec<Obj>,
-    reloc: &mut u64,
-    env: &Locals,
-) {
-    if let Some(f) = env {
-        for cell in &f.slots {
-            slot_store(cell, fw::<M>(heap, from_len, to, reloc, slot_load(cell)));
-        }
-        for cell in f.caps.iter() {
-            slot_store(cell, fw::<M>(heap, from_len, to, reloc, slot_load(cell)));
-        }
     }
 }

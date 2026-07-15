@@ -11,10 +11,16 @@
 //! and the collection library would be generic over `ValueModel`; here the
 //! tree-walk executor is.
 
-use crate::value::{Cat, HeapId, RawTag, Sym, Val};
+use crate::heap::{Gc, PtrPolicy};
+use crate::value::{Cat, RawTag, Sym, Val};
 
 /// Bit-level representation. The load-bearing method is `is_immediate`.
-pub trait Repr: Copy + 'static {
+///
+/// Stage D: references carry REAL heap ADDRESSES (8-aligned, from the bump
+/// spaces), not indices — decode is mask-and-load. `PtrPolicy` is the same
+/// axis seen from the collector's side (which slots are pointers, how to
+/// re-encode after relocation), so it is a supertrait: one impl per scheme.
+pub trait Repr: Copy + PtrPolicy + 'static {
     const NAME: &'static str;
 
     /// Which categories live inline (no heap indirection). This is the ONE
@@ -36,7 +42,8 @@ pub trait Repr: Copy + 'static {
     fn imm_float(bits: u64) -> f64;
     fn as_bool(bits: u64) -> bool;
     fn as_sym(bits: u64) -> Sym;
-    fn as_ref(bits: u64) -> HeapId;
+    /// Decode a reference to the heap object it addresses (mask, no table).
+    fn as_ref(bits: u64) -> Gc;
 
     // Encoders for immediates. `enc_int`/`enc_float` are only called when the
     // category is immediate for this Repr; otherwise the runtime boxes.
@@ -45,7 +52,7 @@ pub trait Repr: Copy + 'static {
     fn enc_bool(b: bool) -> u64;
     fn enc_nil() -> u64;
     fn enc_sym(s: Sym) -> u64;
-    fn enc_ref(id: HeapId) -> u64;
+    fn enc_ref(g: Gc) -> u64;
 }
 
 /// The full value model: a `Repr` plus host semantics. Everything above the
@@ -125,8 +132,9 @@ impl Repr for LowBit {
     fn as_sym(bits: u64) -> Sym {
         (bits >> LB_TAG_BITS) as Sym
     }
-    fn as_ref(bits: u64) -> HeapId {
-        (bits >> LB_TAG_BITS) as HeapId
+    fn as_ref(bits: u64) -> Gc {
+        // Objects are 8-aligned, so the address IS the payload: mask the tag.
+        Gc((bits & !LB_TAG_MASK) as *mut u8)
     }
 
     fn enc_int(i: i64) -> u64 {
@@ -144,8 +152,24 @@ impl Repr for LowBit {
     fn enc_sym(s: Sym) -> u64 {
         ((s as u64) << LB_TAG_BITS) | LB_SYM
     }
-    fn enc_ref(id: HeapId) -> u64 {
-        ((id as u64) << LB_TAG_BITS) | LB_REF
+    fn enc_ref(g: Gc) -> u64 {
+        debug_assert_eq!(g.addr() & (LB_TAG_MASK as usize), 0, "unaligned heap address");
+        (g.addr() as u64) | LB_REF
+    }
+}
+
+impl PtrPolicy for LowBit {
+    #[inline(always)]
+    fn try_decode_ptr(bits: u64) -> Option<*mut u8> {
+        if bits & LB_TAG_MASK == LB_REF {
+            Some((bits & !LB_TAG_MASK) as *mut u8)
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
+    fn encode_ptr(ptr: *mut u8) -> u64 {
+        ptr as u64 | LB_REF
     }
 }
 
@@ -218,8 +242,8 @@ impl Repr for NanBox {
     fn as_sym(bits: u64) -> Sym {
         (bits & NB_PAYLOAD_MASK) as Sym
     }
-    fn as_ref(bits: u64) -> HeapId {
-        (bits & NB_PAYLOAD_MASK) as HeapId
+    fn as_ref(bits: u64) -> Gc {
+        Gc((bits & NB_PAYLOAD_MASK) as *mut u8)
     }
 
     fn enc_int(_i: i64) -> u64 {
@@ -242,8 +266,27 @@ impl Repr for NanBox {
     fn enc_sym(s: Sym) -> u64 {
         NB_QNAN | NB_SYM | (s as u64 & NB_PAYLOAD_MASK)
     }
-    fn enc_ref(id: HeapId) -> u64 {
-        NB_QNAN | NB_REF | (id as u64 & NB_PAYLOAD_MASK)
+    fn enc_ref(g: Gc) -> u64 {
+        let a = g.addr() as u64;
+        // NaN-box payloads carry 47 bits; user-space addresses fit (asserted,
+        // not masked — a truncated pointer must never be encoded silently).
+        assert!(a & !NB_PAYLOAD_MASK == 0, "NanBox: heap address {a:#x} exceeds 47-bit payload");
+        NB_QNAN | NB_REF | a
+    }
+}
+
+impl PtrPolicy for NanBox {
+    #[inline(always)]
+    fn try_decode_ptr(bits: u64) -> Option<*mut u8> {
+        if (bits & NB_QNAN) == NB_QNAN && (bits & NB_TAG_MASK) == NB_REF {
+            Some((bits & NB_PAYLOAD_MASK) as *mut u8)
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
+    fn encode_ptr(ptr: *mut u8) -> u64 {
+        NB_QNAN | NB_REF | (ptr as u64)
     }
 }
 
@@ -309,8 +352,8 @@ impl Repr for HighBit {
     fn as_sym(bits: u64) -> Sym {
         (bits & HB_MASK) as Sym
     }
-    fn as_ref(bits: u64) -> HeapId {
-        (bits & HB_MASK) as HeapId
+    fn as_ref(bits: u64) -> Gc {
+        Gc((bits & HB_MASK) as *mut u8)
     }
 
     fn enc_int(i: i64) -> u64 {
@@ -328,8 +371,25 @@ impl Repr for HighBit {
     fn enc_sym(s: Sym) -> u64 {
         HB_SYM | (s as u64 & HB_MASK)
     }
-    fn enc_ref(id: HeapId) -> u64 {
-        HB_REF | (id as u64 & HB_MASK)
+    fn enc_ref(g: Gc) -> u64 {
+        let a = g.addr() as u64;
+        debug_assert!(a & !HB_MASK == 0, "HighBit: address exceeds 61-bit payload");
+        HB_REF | a
+    }
+}
+
+impl PtrPolicy for HighBit {
+    #[inline(always)]
+    fn try_decode_ptr(bits: u64) -> Option<*mut u8> {
+        if bits >> HB_SHIFT == 1 {
+            Some((bits & HB_MASK) as *mut u8)
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
+    fn encode_ptr(ptr: *mut u8) -> u64 {
+        HB_REF | (ptr as u64)
     }
 }
 

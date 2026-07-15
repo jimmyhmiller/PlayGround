@@ -27,7 +27,7 @@ use std::sync::Arc;
 use crate::code::CodeSpace;
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
-use crate::runtime::Runtime;
+use crate::runtime::{ObjView, Runtime};
 use crate::value::{build_caps, clone_slots, frame_cap, frame_get, frame_set, slot_load, Locals, Obj, Sym, Val};
 
 /// The reified continuation: "what to do with the value of the current
@@ -99,7 +99,7 @@ fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Arc<Kon
     match ir {
         Ir::Const(id) | Ir::Quote(id) => Step::Apply(rt.get_const(id), k),
         Ir::Local { up, idx } => Step::Apply(frame_get(&env, up, idx), k),
-        Ir::Capture(idx) => Step::Apply(frame_cap(&env, idx), k),
+        Ir::Capture(idx) => Step::Apply(frame_cap::<M::R>(&env, idx), k),
         Ir::Global(s) => {
             let v = rt
                 .global(s)
@@ -107,7 +107,7 @@ fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Arc<Kon
             Step::Apply(v, k)
         }
         Ir::Lambda { nparams, variadic, nslots, captures, body } => {
-            let caps = build_caps(&captures, &env);
+            let caps = build_caps::<M::R>(&captures, &env);
             let id = rt.alloc(Obj::Closure { nparams, variadic, nslots, body, caps });
             Step::Apply(M::R::enc_ref(id), k)
         }
@@ -285,22 +285,22 @@ fn apply_callable<M: ValueModel>(rt: &mut Runtime<M>, callee: u64, args: &[u64],
         panic!("value not callable: {}", rt.print(callee));
     };
     enum What {
-        Closure(usize, bool, u16, Arc<Ir>, crate::value::Caps),
+        Closure(usize, bool, u16, Arc<Ir>),
         Cont(Arc<Kont>),
         PartialCont(Arc<Kont>),
         Bad,
     }
-    let what = match &rt.heap()[id as usize] {
-        Obj::Closure { nparams, variadic, nslots, body, caps } => {
-            What::Closure(*nparams, *variadic, *nslots, body.clone(), caps.clone())
+    let what = match rt.view_gc(id) {
+        ObjView::Closure { nparams, variadic, nslots, template, .. } => {
+            What::Closure(nparams, variadic, nslots, rt.template(template).clone())
         }
-        Obj::Cont(c) => What::Cont(c.clone()),
-        Obj::PartialCont(c) => What::PartialCont(c.clone()),
+        ObjView::Cont(c) => What::Cont(c),
+        ObjView::PartialCont(c) => What::PartialCont(c),
         _ => What::Bad,
     };
     match what {
-        What::Closure(nparams, variadic, nslots, body, caps) => {
-            let frame = rt.build_call_frame(nparams, variadic, nslots, args, caps);
+        What::Closure(nparams, variadic, nslots, body) => {
+            let frame = rt.build_call_frame(nparams, variadic, nslots, args, callee);
             Step::Eval((*body).clone(), frame, next)
         }
         What::Cont(captured) => {

@@ -436,6 +436,16 @@ pub struct RunOptions {
     pub show_labels: bool,
     /// Force the density-aggregation LOD on (otherwise auto for >2M nodes).
     pub aggregate: bool,
+    /// Draw the density LOD while the force layout is stepping, and return to the
+    /// real node view when it settles.
+    ///
+    /// While the graph is rearranging, per-node detail is a moving blob nobody can
+    /// read, and drawing 1M instanced circles every step costs more than binning
+    /// them into screen tiles: measured on 1M/10M, the same 1640 steps settle in
+    /// ~9-10 s aggregated against ~11-12 s node-by-node. Like
+    /// `hide_edges_while_simulating`, this is disclosed in the HUD and reverts the
+    /// instant the layout settles.
+    pub aggregate_while_simulating: bool,
     /// Start with the compute edge rasterizer on (runtime-toggleable in the UI).
     pub compute_edges: bool,
     /// Initial node radius in pixels (runtime-adjustable with +/-).
@@ -472,6 +482,7 @@ impl Default for RunOptions {
             show_help: false,
             show_labels: false,
             aggregate: false,
+            aggregate_while_simulating: true,
             node_size: 3.0,
             filter: None,
             start_hierarchical: false,
@@ -576,6 +587,8 @@ pub struct App {
     draw_edges_pref: bool,
     /// See `RunOptions::hide_edges_while_simulating`.
     hide_edges_while_simulating: bool,
+    /// See `RunOptions::aggregate_while_simulating`.
+    aggregate_while_simulating: bool,
     frame_count: u64,
     fps_timer: Instant,
     fps: f32,
@@ -585,6 +598,14 @@ pub struct App {
 }
 
 impl App {
+    /// Whether the density LOD is what actually gets drawn this frame: either the
+    /// user asked for it, or the layout is running and we substitute it. Keyed on
+    /// `running` rather than on whether this frame stepped, so paced frames do not
+    /// flip the view back and forth.
+    fn density_active(&self) -> bool {
+        self.show_density || (self.settings.running && self.aggregate_while_simulating)
+    }
+
     /// A frame at or below this is responsive enough that the sim need not yield.
     /// Above it, `LayoutSettings::sim_duty` starts inserting idle frames.
     const RESPONSIVE_FRAME_MS: f32 = 33.0;
@@ -640,6 +661,7 @@ impl App {
         // Read before `opts` moves into the struct.
         let draw_edges_pref = opts.draw_edges;
         let hide_edges_while_simulating = opts.hide_edges_while_simulating;
+        let aggregate_while_simulating = opts.aggregate_while_simulating;
         App {
             graph,
             seed_positions,
@@ -691,6 +713,7 @@ impl App {
             steps_at_fps_mark: 0,
             draw_edges_pref,
             hide_edges_while_simulating,
+            aggregate_while_simulating,
             frame_count: 0,
             fps_timer: Instant::now(),
             fps: 0.0,
@@ -1057,6 +1080,7 @@ impl App {
         let mut edge_raster = self.live.as_ref().map(|l| l.renderer.edge_raster()).unwrap_or(false);
 
         let mut show_density = self.show_density;
+        let mut aggregate_sim = self.aggregate_while_simulating;
         let mut show_labels = self.show_labels;
         let cur_color = self.color_mode;
         let n = self.graph.num_nodes();
@@ -1190,6 +1214,17 @@ impl App {
                 });
                 ui.checkbox(&mut edge_raster, "Compute edge raster");
                 ui.checkbox(&mut show_density, "Aggregate (density LOD)");
+                ui.add_enabled_ui(!show_density, |ui| {
+                    ui.checkbox(&mut aggregate_sim, "  while simulating")
+                        .on_hover_text(
+                            "Draw the density heatmap while the force layout runs. \
+                             Binning nodes into screen tiles is cheaper than drawing \
+                             every node, so the layout settles faster (~9-10s vs \
+                             ~11-12s on 1M/10M); per-node detail is a moving blob \
+                             until it settles anyway. The real node view returns the \
+                             moment it does.",
+                        );
+                });
                 ui.checkbox(&mut show_labels, "Labels");
                 ui.add(
                     egui::Slider::new(&mut node_size, 0.5..=64.0)
@@ -1307,6 +1342,7 @@ impl App {
             self.push_params();
         }
         self.show_density = show_density;
+        self.aggregate_while_simulating = aggregate_sim;
         self.show_labels = show_labels;
         self.algo_edge_set = algo_sel.filter(|&i| i < self.edge_types.len());
         for (i, &v) in edge_visible.iter().enumerate() {
@@ -1408,6 +1444,9 @@ impl App {
         // comes back.
         let edges_now =
             self.draw_edges_pref && !(self.settings.running && self.hide_edges_while_simulating);
+        // Likewise the density LOD: substituted while the layout runs, back to real
+        // nodes when it settles. Bound once so every pass this frame agrees.
+        let density_now = self.density_active();
 
         let live = self.live.as_mut().unwrap();
         if live.renderer.draw_edges != edges_now {
@@ -1449,7 +1488,7 @@ impl App {
         let cam_uniform = self.camera.uniform();
         live.renderer.update_camera(&live.gpu.queue, &cam_uniform);
         live.renderer.update_params(&live.gpu.queue, &self.render_params);
-        if self.show_density {
+        if density_now {
             let (vw, vh) = (live.gpu.size.width as f32, live.gpu.size.height as f32);
             live.density.update(&live.gpu.queue, &cam_uniform, vw, vh);
         }
@@ -1471,7 +1510,7 @@ impl App {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("draw") });
         // Bin nodes into screen tiles before the render pass (same encoder).
-        if self.show_density {
+        if density_now {
             live.density.record_compute(&mut enc);
         }
         // Rebuild the compacted visible-edge sets if camera/positions/edge
@@ -1509,7 +1548,7 @@ impl App {
                 timestamp_writes: live.timer.as_ref().and_then(|t| t.main_writes()),
                 occlusion_query_set: None,
             });
-            if self.show_density {
+            if density_now {
                 live.density.draw(&mut pass);
             } else {
                 live.renderer.draw(&mut pass);
@@ -1642,7 +1681,7 @@ impl App {
                         self.fps,
                         self.color_mode.label(),
                         self.sim_status(),
-                        if self.show_density { "   [aggregated]" } else { "" }
+                        if self.density_active() { "   [aggregated]" } else { "" }
                     ),
                 ),
             ];
@@ -1905,6 +1944,8 @@ impl App {
         // Refresh the egui panel so captured screenshots include the UI.
         self.run_ui();
         let overlay_cmds = self.build_overlay();
+        // Resolve before `live` is borrowed mutably below.
+        let density_now = self.density_active();
         let mut ui_taken = self.ui.take();
         let ui_frame = self.ui_frame.take();
         let Some(live) = self.live.as_mut() else {
@@ -1916,7 +1957,7 @@ impl App {
 
         live.renderer.update_camera(&live.gpu.queue, &self.camera.uniform());
         live.renderer.update_params(&live.gpu.queue, &self.render_params);
-        if self.show_density {
+        if density_now {
             live.density.update(&live.gpu.queue, &self.camera.uniform(), w as f32, h as f32);
         }
 
@@ -1935,7 +1976,7 @@ impl App {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture") });
-        if self.show_density {
+        if density_now {
             live.density.record_compute(&mut enc);
         }
         live.renderer.encode_edge_prep(&live.gpu.device, &live.gpu.queue, w, h, &mut enc, None);
@@ -1955,7 +1996,7 @@ impl App {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if self.show_density {
+            if density_now {
                 live.density.draw(&mut pass);
             } else {
                 live.renderer.draw(&mut pass);

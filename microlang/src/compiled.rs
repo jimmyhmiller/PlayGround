@@ -28,7 +28,7 @@ use std::sync::Arc;
 use crate::code::CodeSpace;
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
-use crate::runtime::Runtime;
+use crate::runtime::{ObjView, Runtime};
 use crate::value::{build_caps, frame_cap, frame_get, frame_set, Locals, Obj, Val};
 
 /// A compiled expression: run it with the runtime, a lexical frame, and the
@@ -74,7 +74,7 @@ impl<M: ValueModel> ClosureComp<M> {
             }
             Ir::Capture(idx) => {
                 let idx = *idx;
-                Arc::new(move |_rt, env, _top| frame_cap(env, idx))
+                Arc::new(move |_rt, env, _top| frame_cap::<M::R>(env, idx))
             }
             Ir::Global(s) => {
                 let s = *s;
@@ -146,7 +146,7 @@ impl<M: ValueModel> ClosureComp<M> {
                 let captures = captures.clone();
                 let body = body.clone();
                 Arc::new(move |rt, env, _top| {
-                    let caps = build_caps(&captures, env);
+                    let caps = build_caps::<M::R>(&captures, env);
                     let id = rt.alloc(Obj::Closure {
                         nparams,
                         variadic,
@@ -271,20 +271,16 @@ impl<M: ValueModel> CodeSpace<M> for ClosureComp<M> {
         let Val::Ref(id) = rt.decode(callee) else {
             panic!("value not callable: {}", rt.print(callee));
         };
-        let (nparams, variadic, nslots, body, caps) = match &rt.heap()[id as usize] {
-            Obj::Closure {
-                nparams,
-                variadic,
-                nslots,
-                body,
-                caps,
-            } => (*nparams, *variadic, *nslots, body.clone(), caps.clone()),
+        let (nparams, variadic, nslots, body) = match rt.view_gc(id) {
+            ObjView::Closure { nparams, variadic, nslots, template, .. } => {
+                (nparams, variadic, nslots, rt.template(template).clone())
+            }
             _ => panic!("value not callable: {}", rt.print(callee)),
         };
 
         // Compile-once: cached by body identity across all calls.
         let compiled = self.compiled_body(&body);
-        let frame = rt.build_call_frame(nparams, variadic, nslots, args, caps);
+        let frame = rt.build_call_frame(nparams, variadic, nslots, args, callee);
         compiled(rt, &frame, top)
     }
 }

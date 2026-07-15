@@ -46,6 +46,19 @@ impl BigInt {
         BigInt { neg, mag }.normalized()
     }
 
+    /// Reassemble from heap-stored parts (sign + little-endian base-10^9 limbs).
+    /// The inverse of `is_negative`/`limbs` — used by the heap view, which
+    /// stores a HugeInt as a sign byte plus its limb words inline.
+    pub fn from_parts(neg: bool, mag: Vec<u32>) -> Self {
+        BigInt { neg, mag }.normalized()
+    }
+    pub fn is_negative(&self) -> bool {
+        self.neg
+    }
+    pub fn limbs(&self) -> &[u32] {
+        &self.mag
+    }
+
     /// The exact value as `i128`, or `None` if it does not fit. Accumulates with
     /// the sign applied so `i128::MIN` (whose magnitude is not a valid positive
     /// `i128`) round-trips.

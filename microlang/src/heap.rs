@@ -258,6 +258,24 @@ impl Gc {
     pub unsafe fn set_raw_word(self, info: &TypeInfo, w: usize, v: u64) {
         unsafe { *(self.raw_ptr(info).add(w * 8) as *mut u64) = v }
     }
+    /// Read a raw u32 at the start of the raw section (Char codepoints).
+    #[inline(always)]
+    pub unsafe fn raw_word_u32(self, info: &TypeInfo) -> u32 {
+        unsafe { *(self.raw_ptr(info) as *const u32) }
+    }
+    #[inline(always)]
+    pub unsafe fn set_raw_word_u32(self, info: &TypeInfo, v: u32) {
+        unsafe { *(self.raw_ptr(info) as *mut u32) = v }
+    }
+    /// Read/write an i128 at raw-section byte offset `off` (BigInt, Ratio).
+    #[inline(always)]
+    pub unsafe fn raw_i128(self, info: &TypeInfo, off: usize) -> i128 {
+        unsafe { (self.raw_ptr(info).add(off) as *const i128).read_unaligned() }
+    }
+    #[inline(always)]
+    pub unsafe fn set_raw_i128(self, info: &TypeInfo, off: usize, v: i128) {
+        unsafe { (self.raw_ptr(info).add(off) as *mut i128).write_unaligned(v) }
+    }
 
     /// The varlen tail as a value-word slice (`varlen == Values`); length is
     /// the header's aux.
@@ -712,6 +730,50 @@ impl TypeInfo {
         self.aux_metadata = true;
         self
     }
+}
+
+// ─── Closure object ABI ──────────────────────────────────────────────────
+// The JIT's emitted call sequence reads these offsets directly (tag check →
+// header type_id check → meta arity check → code-word call), which is what
+// retires the old heap-id-keyed fast-target table. Keep in sync with
+// `kind::CLOSURE`'s TypeInfo (raw16 + varlen values).
+
+/// Byte offset of the closure META word: `[template u32 | nparams u16 |
+/// nslots u15 | variadic bit63]`.
+pub const CLOSURE_META_OFF: usize = 8;
+/// Byte offset of the closure's native CODE pointer (0 = not yet compiled —
+/// callers take the slow/shim path).
+pub const CLOSURE_CODE_OFF: usize = 16;
+/// Byte offset of the inline capture array (varlen values; length = aux).
+pub const CLOSURE_CAPS_OFF: usize = 24;
+
+pub const META_VARIADIC_BIT: u64 = 1 << 63;
+const META_NSLOTS_SHIFT: u64 = 48;
+const META_NPARAMS_SHIFT: u64 = 32;
+
+#[inline(always)]
+pub fn closure_meta(template: u32, nparams: u16, nslots: u16, variadic: bool) -> u64 {
+    assert!(nslots < (1 << 15), "closure nslots {nslots} exceeds the 15-bit meta field");
+    (template as u64)
+        | ((nparams as u64) << META_NPARAMS_SHIFT)
+        | ((nslots as u64) << META_NSLOTS_SHIFT)
+        | if variadic { META_VARIADIC_BIT } else { 0 }
+}
+#[inline(always)]
+pub const fn meta_template(m: u64) -> u32 {
+    m as u32
+}
+#[inline(always)]
+pub const fn meta_nparams(m: u64) -> usize {
+    ((m >> META_NPARAMS_SHIFT) & 0xffff) as usize
+}
+#[inline(always)]
+pub const fn meta_nslots(m: u64) -> u16 {
+    ((m >> META_NSLOTS_SHIFT) & 0x7fff) as u16
+}
+#[inline(always)]
+pub const fn meta_variadic(m: u64) -> bool {
+    m & META_VARIADIC_BIT != 0
 }
 
 // ─── microlang's type table (kinds) ──────────────────────────────────────

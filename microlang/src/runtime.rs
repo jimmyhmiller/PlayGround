@@ -56,7 +56,8 @@ pub(crate) enum TcpHandle {
 }
 use crate::ir::{ConstId, Prim};
 use crate::model::{Repr, ValueModel};
-use crate::value::{Caps, Cat, Frame, HeapId, Locals, Obj, RawTag, Sym, Val};
+use crate::heap::Gc;
+use crate::value::{Cat, Frame, Locals, Obj, RawTag, Sym, Val};
 
 /// Sentinel for an unbound slot in `global_slots`. `u64::MAX` has an invalid tag
 /// under every value model (`LowBit`/`HighBit`/`NanBox`), so it can never collide
@@ -82,106 +83,6 @@ pub struct Signal {
     pub tag: u64,
 }
 
-/// Objects per heap chunk. A power of two so index split is shift/mask.
-const CHUNK_BITS: u32 = 12;
-const CHUNK: usize = 1 << CHUNK_BITS;
-/// Reserved slots in the chunk INDEX. The index Vec must never reallocate: a
-/// lock-free reader traverses `chunks[c]` while another thread (under `heap_lock`)
-/// may be appending a new chunk, and an index realloc would move the chunk
-/// headers out from under the reader. Reserving a large index avoids that
-/// (soft cap = CHUNKS_CAP * CHUNK objects; a lock-free/STW-growable index is the
-/// clean unbounded fix, a later-phase item). Cheap: 24 bytes/slot.
-const CHUNKS_CAP: usize = 1 << 16;
-
-/// A SEGMENTED heap: a vector of fixed-capacity chunks. Appending only ever adds
-/// to (or pushes) a chunk, so the buffer holding any existing object NEVER moves
-/// — an `&Obj` stays valid while other objects are allocated. That address
-/// stability is what makes a shared heap safe to read concurrently (only chunk
-/// acquisition needs synchronization) and is the prerequisite for true
-/// system-thread parallelism over one heap. A `HeapId` is a flat index; the
-/// chunk is `id >> CHUNK_BITS`, the offset `id & (CHUNK-1)`. `Index`/`IndexMut`
-/// preserve the `heap[id]` call sites verbatim.
-pub struct Heap {
-    chunks: Vec<Vec<Obj>>,
-    len: usize,
-}
-
-impl Heap {
-    pub fn new() -> Self {
-        Heap { chunks: Vec::with_capacity(CHUNKS_CAP), len: 0 }
-    }
-    pub fn len(&self) -> usize {
-        self.len
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-    /// Append an object; returns its flat id. A new chunk is PRE-INITIALIZED to
-    /// sentinels (never `Vec::with_capacity`), so a lock-free reader never touches
-    /// uninitialized memory or the mutable `Vec` length; allocation ASSIGNS an
-    /// existing slot rather than pushing, and existing object addresses are stable.
-    pub fn push(&mut self, o: Obj) -> usize {
-        let i = self.len;
-        let c = i >> CHUNK_BITS;
-        if c >= self.chunks.len() {
-            assert!(c < CHUNKS_CAP, "heap chunk index overflow: raise CHUNKS_CAP");
-            self.chunks.push(vec![Obj::Moved(u32::MAX); CHUNK]);
-        }
-        // Assign the (already-initialized) slot via the unchecked path.
-        *std::ops::IndexMut::index_mut(self, i) = o;
-        self.len += 1;
-        i
-    }
-    pub fn iter(&self) -> impl Iterator<Item = &Obj> {
-        self.chunks.iter().flat_map(|c| c.iter())
-    }
-}
-
-impl Default for Heap {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::ops::Index<usize> for Heap {
-    type Output = Obj;
-    #[inline]
-    fn index(&self, i: usize) -> &Obj {
-        // UNCHECKED on purpose: a bounds check reads the (inner and outer) Vec
-        // `len`, which a concurrent `push` on the current fill-chunk WRITES — a
-        // data race even when the two touch different objects (TSan-confirmed).
-        // A `HeapId` is only ever handed out by `push`, so it is always in range;
-        // `get_unchecked` reads the stable base pointer + a computed offset and
-        // never the mutable length. (Object addresses are stable — segmented
-        // heap — so the returned `&Obj` is sound while other objects allocate.)
-        unsafe {
-            self.chunks
-                .get_unchecked(i >> CHUNK_BITS)
-                .get_unchecked(i & (CHUNK - 1))
-        }
-    }
-}
-
-impl std::ops::IndexMut<usize> for Heap {
-    #[inline]
-    fn index_mut(&mut self, i: usize) -> &mut Obj {
-        unsafe {
-            self.chunks
-                .get_unchecked_mut(i >> CHUNK_BITS)
-                .get_unchecked_mut(i & (CHUNK - 1))
-        }
-    }
-}
-
-/// Words per arena chunk (2^18 = 262144 words = 2 MiB). Powers of two so the
-/// split is shift/mask; big enough that chunk turnover is rare.
-const WCHUNK_BITS: u32 = 18;
-const WCHUNK: usize = 1 << WCHUNK_BITS;
-/// Reserved slots in the arena chunk INDEX (same never-realloc discipline as
-/// the object heap's chunk index — lock-free readers hold `&[u64]` into
-/// chunks while another thread appends new ones).
-const WCHUNKS_CAP: usize = 1 << 15;
-
 /// A HAMT trie node's kind, classified by interned-sym compare.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum HamtKind {
@@ -191,58 +92,34 @@ enum HamtKind {
     Other,
 }
 
-/// The bump WORD ARENA holding hot object payloads (`Vector`/`Values`/
-/// `Record` elements). Allocation is an atomic bump — no malloc, no free, no
-/// lock on the fast path; a span is owned by exactly one Obj. Semi-space
-/// discipline matches the object heap: the GC copies live spans to the top
-/// and abandons the old words.
-pub struct WordArena {
-    chunks: Vec<Box<[u64]>>,
-    /// Next free word index (atomic bump). May briefly exceed the initialized
-    /// area during a chunk race; `word_alloc` repairs under the heap lock.
-    len: AtomicU64,
-    /// OVERSIZE spans (> one chunk): exact-size boxed slices, addressed as
-    /// `BIG_BIT | index`. Rare (big flat arrays); appended under the heap lock.
-    big: Vec<Box<[u64]>>,
-}
-
-/// High bit of a span offset marks an oversize allocation (index into `big`).
-const BIG_BIT: u32 = 1 << 31;
-
-impl WordArena {
-    fn new() -> Self {
-        WordArena {
-            chunks: Vec::with_capacity(WCHUNKS_CAP),
-            len: AtomicU64::new(0),
-            big: Vec::with_capacity(1 << 12),
-        }
-    }
-    #[inline]
-    pub(crate) fn slice(&self, off: u32, len: u32) -> &[u64] {
-        if off & BIG_BIT != 0 {
-            let b = &self.big[(off & !BIG_BIT) as usize];
-            return &b[..len as usize];
-        }
-        let (c, o) = ((off as usize) >> WCHUNK_BITS, (off as usize) & (WCHUNK - 1));
-        // Spans never cross a chunk boundary (word_alloc pads); bounds are
-        // guaranteed by construction, mirroring `Heap`'s unchecked access.
-        unsafe { self.chunks.get_unchecked(c).get_unchecked(o..o + len as usize) }
-    }
-    #[inline]
-    #[allow(clippy::mut_from_ref)]
-    pub(crate) fn slice_mut(&self, off: u32, len: u32) -> &mut [u64] {
-        if off & BIG_BIT != 0 {
-            unsafe {
-                let base = self.big[(off & !BIG_BIT) as usize].as_ptr() as *mut u64;
-                return std::slice::from_raw_parts_mut(base, len as usize);
-            }
-        }
-        let (c, o) = ((off as usize) >> WCHUNK_BITS, (off as usize) & (WCHUNK - 1));
-        unsafe {
-            let base = self.chunks.get_unchecked(c).as_ptr() as *mut u64;
-            std::slice::from_raw_parts_mut(base.add(o), len as usize)
-        }
-    }
+/// A read VIEW of a heap object: the enum shape the old `Vec<Obj>` heap used
+/// to store, reconstructed as borrows from the raw object (`Runtime::view`).
+/// Slices borrow the heap — valid until the next collection (same discipline
+/// as every raw `u64` value word: re-read through a root across safepoints).
+pub enum ObjView<'h> {
+    Cons { head: u64, tail: u64 },
+    EmptyList,
+    Str(&'h str),
+    Char(char),
+    /// A growable array: `elems` is the LIVE prefix (logical length) of the
+    /// data blob; `gc` is the handle (identity, for mutation); `cap` the
+    /// blob's capacity.
+    Vector { elems: &'h [u64], gc: Gc, cap: u32 },
+    Values(&'h [u64]),
+    BigInt(i128),
+    /// Reassembled from the inline sign + limbs (cold path by construction).
+    HugeInt(BigInt),
+    Ratio(i128, i128),
+    BoxFloat(f64),
+    Closure { nparams: usize, variadic: bool, nslots: u16, template: u32, gc: Gc },
+    MultiFn { fixed: &'h [u64], variadic: Option<(usize, u64)> },
+    Record { type_id: Sym, fields: &'h [u64] },
+    Escape { tag: u64 },
+    Cont(Arc<crate::cek::Kont>),
+    PartialCont(Arc<crate::cek::Kont>),
+    /// The atom's slot word, CAS-able in place.
+    Atom(&'h AtomicU64),
+    Future(Arc<std::sync::Mutex<crate::value::FutureSlot>>),
 }
 
 /// Reserved capacity for the append-only, stable-base tables (`consts`,
@@ -319,10 +196,31 @@ const TYPE_TAG_CACHE_LEN: usize = 15;
 /// No lock is ever held across a callback into the interpreter, so a thread
 /// blocked in `deref` holds nothing another thread needs.
 pub struct Shared<M: ValueModel> {
-    pub(crate) heap: UnsafeCell<Heap>,
-    pub(crate) words: UnsafeCell<WordArena>,
-    /// Serializes heap MUTATION (alloc, GC, in-place vector set). Reads are
-    /// lock-free (segmented heap => stable object addresses).
+    /// THE heap: raw objects in bump semi-spaces (`heap.rs`). Allocation is a
+    /// lock-free atomic bump; objects move only under the STW rendezvous.
+    pub(crate) heap: crate::heap::Heap,
+    /// The `TypeInfo` table driving allocation sizes + the generic GC scan.
+    pub(crate) types: Vec<crate::heap::TypeInfo>,
+    /// Closure BODY registry: templates are CODE (like gc-rust's type table),
+    /// append-only with a reserved stable base for lock-free reads.
+    templates: UnsafeCell<Vec<Arc<crate::ir::Ir>>>,
+    /// Also the dedup map for `register_template`: `Arc::as_ptr(body) -> id`.
+    /// The SAME lock serializes both the map and the `templates` append, so a
+    /// racing pair of `Ir::Lambda` evaluations of the same closure body always
+    /// converge on one id (the `Arc` the map keys on is kept alive by the
+    /// registry's own clone in `templates`, so the pointer key never dangles).
+    templates_lock: Mutex<HashMap<*const crate::ir::Ir, u32>>,
+    /// Reified CEK continuations (`Cont`/`PartialCont` objects hold an index).
+    /// Execution-machine state, never raw heap data; every entry is traced as
+    /// a root (append-only — entries are never reclaimed, a bounded leak).
+    pub(crate) konts: Mutex<Vec<Arc<crate::cek::Kont>>>,
+    /// Future slots (OS resources: join handles + cached results). The cached
+    /// results are traced as roots.
+    pub(crate) futures: Mutex<Vec<Arc<std::sync::Mutex<crate::value::FutureSlot>>>>,
+    /// The canonical `()` singleton's bits (a GC root; 0 until first use).
+    pub(crate) empty_list: AtomicU64,
+    /// Serializes MULTI-WORD in-place heap mutation (growable-array extend).
+    /// Single-word stores/CAS and allocation need no lock.
     pub(crate) heap_lock: Mutex<()>,
     allocs: AtomicU64,
     pub(crate) relocated: AtomicU64,
@@ -485,8 +383,13 @@ impl<M: ValueModel> Drop for Runtime<M> {
 impl<M: ValueModel> Runtime<M> {
     pub fn new() -> Self {
         let shared = Shared {
-            heap: UnsafeCell::new(Heap::new()),
-            words: UnsafeCell::new(WordArena::new()),
+            heap: crate::heap::Heap::new(),
+            types: crate::heap::type_table(),
+            templates: UnsafeCell::new(Vec::with_capacity(TABLE_CAP)),
+            templates_lock: Mutex::new(HashMap::new()),
+            konts: Mutex::new(Vec::new()),
+            futures: Mutex::new(Vec::new()),
+            empty_list: AtomicU64::new(0),
             heap_lock: Mutex::new(()),
             allocs: AtomicU64::new(0),
             relocated: AtomicU64::new(0),
@@ -550,152 +453,292 @@ impl<M: ValueModel> Runtime<M> {
         Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), site_ic: std::cell::RefCell::new(Vec::new()), eval_bridge: None, _pd: PhantomData }
     }
 
-    // ── heap access (lock-free reads to stable addresses) ───
-    /// The heap for READING. Object addresses are stable (segmented), so a shared
-    /// reference is sound even while another thread allocates.
+    // ── heap access ─────────────────────────────────────────
+    /// The raw heap (allocation is `&self`, lock-free atomic bump; objects
+    /// move only under the STW rendezvous, so reads between safepoints are
+    /// sound exactly as before).
     #[inline]
-    pub fn heap(&self) -> &Heap {
-        unsafe { &*self.shared.heap.get() }
+    pub fn heap(&self) -> &crate::heap::Heap {
+        &self.shared.heap
+    }
+    /// The `TypeInfo` for a heap object.
+    #[inline]
+    pub(crate) fn type_info(&self, g: Gc) -> &crate::heap::TypeInfo {
+        &self.shared.types[unsafe { g.type_id() } as usize]
     }
 
-    /// The payload word arena (see `WordArena`).
+    /// Reconstruct the enum-shaped VIEW of the object `bits` references.
+    /// Panics loudly (verify-style) on a non-ref or a poisoned/invalid header.
     #[inline]
-    pub fn arena(&self) -> &WordArena {
-        unsafe { &*self.shared.words.get() }
+    pub fn view(&self, bits: u64) -> ObjView<'_> {
+        debug_assert_eq!(M::R::tag_of(bits), RawTag::Ref, "view of a non-ref");
+        self.view_gc(M::R::as_ref(bits))
     }
-    /// Read a payload span.
-    #[inline]
-    pub fn words(&self, off: u32, len: u32) -> &[u64] {
-        self.arena().slice(off, len)
-    }
-    /// Mutate a payload span in place (array `%aset` etc.). Sound under the
-    /// same discipline as `Heap`'s unchecked access: spans are exclusively
-    /// owned, addresses are stable, and cross-thread visibility rides the
-    /// existing safepoint/park protocol.
-    #[inline]
-    #[allow(clippy::mut_from_ref)]
-    pub fn words_mut(&self, off: u32, len: u32) -> &mut [u64] {
-        self.arena().slice_mut(off, len)
-    }
-    /// Bump-allocate `n` UNINITIALIZED-to-zero words; the span never crosses a
-    /// chunk boundary (the boundary remainder is padded away). Lock-free fast
-    /// path; takes the heap lock only to append a chunk.
-    pub fn word_alloc(&self, n: usize) -> u32 {
-        use std::sync::atomic::Ordering::Relaxed;
-        let n = n.max(1); // zero-length spans still get a distinct off
-        if n > WCHUNK {
-            // Oversize: an exact-size boxed slice in the side table.
-            let _g = self.shared.heap_lock.lock().unwrap();
-            let a = unsafe { &mut *self.shared.words.get() };
-            let idx = a.big.len() as u32;
-            assert!(idx < BIG_BIT, "word arena: big-span index overflow");
-            a.big.push(vec![0u64; n].into_boxed_slice());
-            return BIG_BIT | idx;
-        }
-        loop {
-            let a = self.arena();
-            let cur = a.len.load(Relaxed) as usize;
-            // Pad to the next chunk when the span would cross a boundary.
-            let start = if (cur & (WCHUNK - 1)) + n > WCHUNK {
-                ((cur >> WCHUNK_BITS) + 1) << WCHUNK_BITS
-            } else {
-                cur
-            };
-            let end = start + n;
-            if (end - 1) >> WCHUNK_BITS >= a.chunks.len() {
-                // Missing chunk: append under the heap lock, then retry.
-                let _g = self.shared.heap_lock.lock().unwrap();
-                let a = unsafe { &mut *self.shared.words.get() };
-                while (end - 1) >> WCHUNK_BITS >= a.chunks.len() {
-                    assert!(a.chunks.len() < WCHUNKS_CAP, "word arena chunk index overflow");
-                    a.chunks.push(vec![0u64; WCHUNK].into_boxed_slice());
+
+    /// The view, from an already-decoded object pointer.
+    pub fn view_gc(&self, g: Gc) -> ObjView<'_> {
+        use crate::heap::kind;
+        unsafe {
+            let tid = g.type_id();
+            match tid {
+                kind::CONS => ObjView::Cons { head: g.field(0), tail: g.field(1) },
+                kind::EMPTY_LIST => ObjView::EmptyList,
+                kind::STR => {
+                    let info = &self.shared.types[kind::STR as usize];
+                    ObjView::Str(std::str::from_utf8_unchecked(g.bytes(info)))
                 }
-                continue;
-            }
-            if a.len.compare_exchange_weak(cur as u64, end as u64, Relaxed, Relaxed).is_ok() {
-                return start as u32;
+                kind::CHAR => {
+                    let info = &self.shared.types[kind::CHAR as usize];
+                    ObjView::Char(char::from_u32_unchecked(g.raw_word_u32(info)))
+                }
+                kind::ARRAY => {
+                    let len = g.aux();
+                    // The handle's one traced field is an ENCODED ref to the blob.
+                    let data = M::R::as_ref(g.field(0));
+                    let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
+                    let cap = data.aux();
+                    ObjView::Vector { elems: &data.values(dinfo)[..len as usize], gc: g, cap }
+                }
+                kind::VALUES => {
+                    let info = &self.shared.types[kind::VALUES as usize];
+                    ObjView::Values(g.values(info))
+                }
+                kind::BIGINT => {
+                    let info = &self.shared.types[kind::BIGINT as usize];
+                    ObjView::BigInt(g.raw_i128(info, 0))
+                }
+                kind::HUGEINT => {
+                    let info = &self.shared.types[kind::HUGEINT as usize];
+                    let neg = g.raw_word(info, 0) != 0;
+                    let bytes = g.bytes(info);
+                    let mag: Vec<u32> = bytes
+                        .chunks_exact(4)
+                        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect();
+                    ObjView::HugeInt(BigInt::from_parts(neg, mag))
+                }
+                kind::RATIO => {
+                    let info = &self.shared.types[kind::RATIO as usize];
+                    ObjView::Ratio(g.raw_i128(info, 0), g.raw_i128(info, 16))
+                }
+                kind::BOXFLOAT => {
+                    let info = &self.shared.types[kind::BOXFLOAT as usize];
+                    ObjView::BoxFloat(f64::from_bits(g.raw_word(info, 0)))
+                }
+                kind::CLOSURE => {
+                    let meta = *(g.0.add(crate::heap::CLOSURE_META_OFF) as *const u64);
+                    ObjView::Closure {
+                        nparams: crate::heap::meta_nparams(meta),
+                        variadic: crate::heap::meta_variadic(meta),
+                        nslots: crate::heap::meta_nslots(meta),
+                        template: crate::heap::meta_template(meta),
+                        gc: g,
+                    }
+                }
+                kind::MULTIFN => {
+                    let info = &self.shared.types[kind::MULTIFN as usize];
+                    let vbits = g.field(0);
+                    let vmin = g.raw_word(info, 0);
+                    let variadic = if vmin == u64::MAX { None } else { Some((vmin as usize, vbits)) };
+                    ObjView::MultiFn { fixed: g.values(info), variadic }
+                }
+                kind::RECORD => {
+                    let info = &self.shared.types[kind::RECORD as usize];
+                    ObjView::Record { type_id: g.raw_word(info, 0) as Sym, fields: g.values(info) }
+                }
+                kind::ESCAPE => {
+                    let info = &self.shared.types[kind::ESCAPE as usize];
+                    ObjView::Escape { tag: g.raw_word(info, 0) }
+                }
+                kind::CONT | kind::PARTIAL_CONT => {
+                    let info = &self.shared.types[tid as usize];
+                    let idx = g.raw_word(info, 0) as usize;
+                    let k = self.shared.konts.lock().unwrap()[idx].clone();
+                    if tid == kind::CONT { ObjView::Cont(k) } else { ObjView::PartialCont(k) }
+                }
+                kind::ATOM => ObjView::Atom(g.field_atomic(0)),
+                kind::FUTURE => {
+                    let info = &self.shared.types[kind::FUTURE as usize];
+                    let idx = g.raw_word(info, 0) as usize;
+                    ObjView::Future(self.shared.futures.lock().unwrap()[idx].clone())
+                }
+                other => panic!(
+                    "view: object at {:p} has type_id {other} — {} (stale pointer into a \
+                     collected space, or heap corruption)",
+                    g.0,
+                    if other == kind::INVALID || other == 0x5A5A { "poisoned/invalid" } else { "unknown" }
+                ),
             }
         }
     }
 
-    /// Bump-allocate a span holding `xs` (with `extra` reserved words after it,
-    /// for growable arrays); `(off, len, cap)`.
-    pub fn word_alloc_from(&self, xs: &[u64], extra: usize) -> (u32, u32, u32) {
-        let cap = xs.len() + extra;
-        let off = self.word_alloc(cap);
-        self.words_mut(off, xs.len() as u32).copy_from_slice(xs);
-        (off, xs.len() as u32, cap as u32)
+    /// The template registry: a closure BODY, by id (append-only, stable base).
+    #[inline]
+    pub fn template(&self, id: u32) -> &Arc<crate::ir::Ir> {
+        // SAFETY: id was handed out by `register_template` (< len); reserved
+        // buffer never reallocates; a slot is written before its id escapes.
+        unsafe { (&*self.shared.templates.get()).get_unchecked(id as usize) }
     }
-    /// Allocate a Vector object over a copy of `xs`.
-    pub fn alloc_vector(&self, xs: &[u64]) -> HeapId {
-        let (off, len, cap) = self.word_alloc_from(xs, 0);
-        self.alloc(Obj::Vector { off, len, cap })
+    pub fn register_template(&self, body: &Arc<crate::ir::Ir>) -> u32 {
+        // Registering the same Arc'd body again returns the existing id (bodies
+        // are compiled once per template; an `Ir::Lambda` re-evaluates many
+        // times — once per closure creation — but always over the SAME body
+        // `Arc`, so a naive append would grow the registry unboundedly in a
+        // hot loop). Dedup by pointer identity under the same lock that
+        // serializes the append, so a race between two threads registering the
+        // same body converges on one id.
+        let key = Arc::as_ptr(body);
+        let mut ids = self.shared.templates_lock.lock().unwrap();
+        if let Some(&id) = ids.get(&key) {
+            return id;
+        }
+        let ts = unsafe { &mut *self.shared.templates.get() };
+        assert!(ts.len() < TABLE_CAP, "template registry overflow: raise TABLE_CAP");
+        ts.push(body.clone());
+        let id = (ts.len() - 1) as u32;
+        ids.insert(key, id);
+        id
     }
-    /// Allocate a Vector of `n` nil slots.
-    pub fn alloc_vector_nil(&self, n: usize, nil: u64) -> HeapId {
-        let off = self.word_alloc(n);
-        self.words_mut(off, n as u32).fill(nil);
-        self.alloc(Obj::Vector { off, len: n as u32, cap: n as u32 })
+
+    // ── typed allocation (writes headers + fields; hot paths) ──
+    /// Allocate a growable ARRAY (handle + data blob) over a copy of `xs`.
+    pub fn alloc_vector(&self, xs: &[u64]) -> Gc {
+        self.alloc_vector_cap(xs, xs.len())
+    }
+    /// Allocate an ARRAY with logical contents `xs` and capacity `cap >= xs.len()`.
+    pub fn alloc_vector_cap(&self, xs: &[u64], cap: usize) -> Gc {
+        use crate::heap::kind;
+        self.shared.allocs.fetch_add(1, Ordering::Relaxed);
+        let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
+        let data = self.shared.heap.alloc(dinfo, cap as u32);
+        unsafe {
+            data.values_mut(dinfo)[..xs.len()].copy_from_slice(xs);
+            let ainfo = &self.shared.types[kind::ARRAY as usize];
+            let h = self.shared.heap.alloc(ainfo, xs.len() as u32);
+            h.set_field(0, M::R::enc_ref(data));
+            h
+        }
+    }
+    /// Allocate an ARRAY of `n` `nil` slots.
+    pub fn alloc_vector_nil(&self, n: usize, nil: u64) -> Gc {
+        use crate::heap::kind;
+        self.shared.allocs.fetch_add(1, Ordering::Relaxed);
+        let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
+        let data = self.shared.heap.alloc(dinfo, n as u32);
+        unsafe {
+            data.values_mut(dinfo).fill(nil);
+            let ainfo = &self.shared.types[kind::ARRAY as usize];
+            let h = self.shared.heap.alloc(ainfo, n as u32);
+            h.set_field(0, M::R::enc_ref(data));
+            h
+        }
     }
     /// Allocate a Values packet over a copy of `xs`.
-    pub fn alloc_values(&self, xs: &[u64]) -> HeapId {
-        let (off, len, _cap) = self.word_alloc_from(xs, 0);
-        self.alloc(Obj::Values { off, len })
+    pub fn alloc_values(&self, xs: &[u64]) -> Gc {
+        use crate::heap::kind;
+        self.shared.allocs.fetch_add(1, Ordering::Relaxed);
+        let info = &self.shared.types[kind::VALUES as usize];
+        let g = self.shared.heap.alloc(info, xs.len() as u32);
+        unsafe { g.values_mut(info).copy_from_slice(xs) };
+        g
     }
     /// Allocate a Record over a copy of `fields`.
-    pub fn alloc_record(&self, type_id: Sym, fields: &[u64]) -> HeapId {
-        let (off, len, _cap) = self.word_alloc_from(fields, 0);
-        self.alloc(Obj::Record { type_id, off, len })
+    pub fn alloc_record(&self, type_id: Sym, fields: &[u64]) -> Gc {
+        use crate::heap::kind;
+        self.shared.allocs.fetch_add(1, Ordering::Relaxed);
+        let info = &self.shared.types[kind::RECORD as usize];
+        let g = self.shared.heap.alloc(info, fields.len() as u32);
+        unsafe {
+            g.set_raw_word(info, 0, type_id as u64);
+            g.values_mut(info).copy_from_slice(fields);
+        }
+        g
     }
-    /// Append `xs` to a growable array in place: within `cap`, extend the span;
-    /// past it, bump-allocate a doubled span and re-point the SAME Obj (object
-    /// identity is the heap slot, so every reference observes the growth).
-    pub fn arr_extend(&self, id: HeapId, xs: &[u64]) {
-        loop {
-            let (off, len, cap) = match &self.heap()[id as usize] {
-                &Obj::Vector { off, len, cap } => (off, len, cap),
-                _ => panic!("apush: not an array"),
-            };
-            let need = len as usize + xs.len();
-            if need <= cap as usize {
-                let _g = self.shared.heap_lock.lock().unwrap();
-                // Re-check under the lock (a concurrent extend may have won).
-                match &self.heap()[id as usize] {
-                    &Obj::Vector { off: o2, len: l2, cap: c2 }
-                        if (o2, l2, c2) == (off, len, cap) => {}
-                    _ => continue,
-                }
-                self.arena().slice_mut(off, need as u32)[len as usize..].copy_from_slice(xs);
-                if let Obj::Vector { len, .. } = &mut self.heap_mut()[id as usize] {
-                    *len = need as u32;
-                }
-                return;
-            }
-            // Growth: bump-allocate the new span OUTSIDE the heap lock
-            // (`word_alloc` may itself take it to append a chunk).
-            let ncap = need.next_power_of_two().max(4);
-            let noff = self.word_alloc(ncap);
-            let _g = self.shared.heap_lock.lock().unwrap();
-            match &self.heap()[id as usize] {
-                &Obj::Vector { off: o2, len: l2, cap: c2 }
-                    if (o2, l2, c2) == (off, len, cap) => {}
-                _ => continue, // lost a race: retry (the fresh span is abandoned)
-            }
-            let dst = self.arena().slice_mut(noff, need as u32);
-            dst[..len as usize].copy_from_slice(self.arena().slice(off, len));
-            dst[len as usize..].copy_from_slice(xs);
-            if let Obj::Vector { off, len, cap } = &mut self.heap_mut()[id as usize] {
-                *off = noff;
-                *len = need as u32;
-                *cap = ncap as u32;
-            }
-            return;
+    /// Allocate a flat CLOSURE: body registered as a template, captures inline.
+    pub fn alloc_closure(
+        &self,
+        nparams: usize,
+        variadic: bool,
+        nslots: u16,
+        template: u32,
+        caps: &[u64],
+    ) -> Gc {
+        use crate::heap::{closure_meta, kind, CLOSURE_CAPS_OFF, CLOSURE_META_OFF};
+        self.shared.allocs.fetch_add(1, Ordering::Relaxed);
+        let info = &self.shared.types[kind::CLOSURE as usize];
+        let g = self.shared.heap.alloc(info, caps.len() as u32);
+        unsafe {
+            *(g.0.add(CLOSURE_META_OFF) as *mut u64) =
+                closure_meta(template, nparams as u16, nslots, variadic);
+            // code word stays 0 (not compiled); the JIT fills it on publish.
+            let base = g.0.add(CLOSURE_CAPS_OFF) as *mut u64;
+            std::ptr::copy_nonoverlapping(caps.as_ptr(), base, caps.len());
+        }
+        g
+    }
+    /// Read a growable array's live elements (logical length off the handle).
+    #[inline]
+    pub fn arr_slice(&self, g: Gc) -> &[u64] {
+        use crate::heap::kind;
+        unsafe {
+            debug_assert_eq!(g.type_id(), kind::ARRAY);
+            let len = g.aux() as usize;
+            let data = M::R::as_ref(g.field(0));
+            let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
+            &data.values(dinfo)[..len]
         }
     }
-    /// The heap for MUTATION. Callers MUST hold `heap_lock` (alloc/GC/set take it).
+    /// Mutate a growable array's live elements in place (`%aset`).
     #[inline]
-    fn heap_mut(&self) -> &mut Heap {
-        unsafe { &mut *self.shared.heap.get() }
+    #[allow(clippy::mut_from_ref)]
+    pub fn arr_slice_mut(&self, g: Gc) -> &mut [u64] {
+        use crate::heap::kind;
+        unsafe {
+            debug_assert_eq!(g.type_id(), kind::ARRAY);
+            let len = g.aux() as usize;
+            let data = M::R::as_ref(g.field(0));
+            let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
+            &mut data.values_mut(dinfo)[..len]
+        }
+    }
+    /// Mutable access to a fixed-shape object's varlen Values tail (record
+    /// fields, a Values packet, ...) — the non-ARRAY mirror of `arr_slice_mut`
+    /// (records/values are fixed-length once allocated, so there is no
+    /// separate handle/data-blob split to go through).
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub(crate) fn values_mut(&self, g: Gc) -> &mut [u64] {
+        let info = self.type_info(g);
+        unsafe { g.values_mut(info) }
+    }
+    /// Append `xs` to a growable array: within capacity, write into the blob
+    /// and bump the handle's logical length; past it, allocate a doubled blob
+    /// and re-point the handle (identity is the handle, so every reference
+    /// observes the growth). Serialized by `heap_lock` against racing extends.
+    pub fn arr_extend(&self, g: Gc, xs: &[u64]) {
+        use crate::heap::kind;
+        let _lk = self.shared.heap_lock.lock().unwrap();
+        unsafe {
+            assert_eq!(g.type_id(), kind::ARRAY, "apush: not an array");
+            let len = g.aux() as usize;
+            let data = M::R::as_ref(g.field(0));
+            let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
+            let cap = data.aux() as usize;
+            let need = len + xs.len();
+            if need <= cap {
+                data.values_mut(dinfo)[len..need].copy_from_slice(xs);
+                g.set_aux(need as u32);
+                return;
+            }
+            let ncap = need.next_power_of_two().max(4);
+            self.shared.allocs.fetch_add(1, Ordering::Relaxed);
+            let ndata = self.shared.heap.alloc(dinfo, ncap as u32);
+            let dst = ndata.values_mut(dinfo);
+            dst[..len].copy_from_slice(&data.values(dinfo)[..len]);
+            dst[len..need].copy_from_slice(xs);
+            g.set_field(0, M::R::enc_ref(ndata));
+            g.set_aux(need as u32);
+        }
     }
 
     // ── symbols ─────────────────────────────────────────────
@@ -826,12 +869,141 @@ impl<M: ValueModel> Runtime<M> {
     }
 
     // ── heap ────────────────────────────────────────────────
-    pub fn alloc(&self, o: Obj) -> HeapId {
-        let _g = self.shared.heap_lock.lock().unwrap();
+    /// Lower an allocation REQUEST into a raw heap object (header + inline
+    /// fields). Cold/simple call sites use this; hot paths call the typed
+    /// `alloc_*` constructors directly.
+    pub fn alloc(&self, o: Obj) -> Gc {
+        use crate::heap::kind;
         self.shared.allocs.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: heap mutation is serialized by `heap_lock`; the segmented heap
-        // never relocates existing objects on push, so lock-free readers are safe.
-        self.heap_mut().push(o) as HeapId
+        let heap = &self.shared.heap;
+        let t = |k: u16| &self.shared.types[k as usize];
+        unsafe {
+            match o {
+                Obj::Cons { head, tail } => {
+                    let g = heap.alloc(t(kind::CONS), 0);
+                    g.set_field(0, head);
+                    g.set_field(1, tail);
+                    g
+                }
+                Obj::EmptyList => heap.alloc(t(kind::EMPTY_LIST), 0),
+                Obj::Str(s) => {
+                    let info = t(kind::STR);
+                    let g = heap.alloc(info, s.len() as u32);
+                    g.bytes_mut(info).copy_from_slice(s.as_bytes());
+                    g
+                }
+                Obj::Char(c) => {
+                    let info = t(kind::CHAR);
+                    let g = heap.alloc(info, 0);
+                    g.set_raw_word_u32(info, c as u32);
+                    g
+                }
+                Obj::Vector(xs) => {
+                    self.shared.allocs.fetch_sub(1, Ordering::Relaxed); // counted below
+                    self.alloc_vector(&xs)
+                }
+                Obj::Values(xs) => {
+                    self.shared.allocs.fetch_sub(1, Ordering::Relaxed);
+                    self.alloc_values(&xs)
+                }
+                Obj::BigInt(i) => {
+                    let info = t(kind::BIGINT);
+                    let g = heap.alloc(info, 0);
+                    g.set_raw_i128(info, 0, i);
+                    g
+                }
+                Obj::HugeInt(b) => {
+                    let info = t(kind::HUGEINT);
+                    let limbs = b.limbs();
+                    let g = heap.alloc(info, (limbs.len() * 4) as u32);
+                    g.set_raw_word(info, 0, b.is_negative() as u64);
+                    let bytes = g.bytes_mut(info);
+                    for (i, l) in limbs.iter().enumerate() {
+                        bytes[i * 4..i * 4 + 4].copy_from_slice(&l.to_le_bytes());
+                    }
+                    g
+                }
+                Obj::Ratio(n, d) => {
+                    let info = t(kind::RATIO);
+                    let g = heap.alloc(info, 0);
+                    g.set_raw_i128(info, 0, n);
+                    g.set_raw_i128(info, 16, d);
+                    g
+                }
+                Obj::BoxFloat(f) => {
+                    let info = t(kind::BOXFLOAT);
+                    let g = heap.alloc(info, 0);
+                    g.set_raw_word(info, 0, f.to_bits());
+                    g
+                }
+                Obj::Closure { nparams, variadic, nslots, body, caps } => {
+                    self.shared.allocs.fetch_sub(1, Ordering::Relaxed);
+                    let template = self.register_template(&body);
+                    self.alloc_closure(nparams, variadic, nslots, template, &caps)
+                }
+                Obj::MultiFn { fixed, variadic } => {
+                    let info = t(kind::MULTIFN);
+                    let g = heap.alloc(info, fixed.len() as u32);
+                    let (min, vbits) = match variadic {
+                        Some((m, v)) => (m as u64, v),
+                        None => (u64::MAX, 0),
+                    };
+                    g.set_field(0, vbits);
+                    g.set_raw_word(info, 0, min);
+                    g.values_mut(info).copy_from_slice(&fixed);
+                    g
+                }
+                Obj::Record { type_id, fields } => {
+                    self.shared.allocs.fetch_sub(1, Ordering::Relaxed);
+                    self.alloc_record(type_id, &fields)
+                }
+                Obj::Escape { tag } => {
+                    let info = t(kind::ESCAPE);
+                    let g = heap.alloc(info, 0);
+                    g.set_raw_word(info, 0, tag);
+                    g
+                }
+                Obj::Cont(k) => {
+                    let idx = self.register_kont(k);
+                    let info = t(kind::CONT);
+                    let g = heap.alloc(info, 0);
+                    g.set_raw_word(info, 0, idx as u64);
+                    g
+                }
+                Obj::PartialCont(k) => {
+                    let idx = self.register_kont(k);
+                    let info = t(kind::PARTIAL_CONT);
+                    let g = heap.alloc(info, 0);
+                    g.set_raw_word(info, 0, idx as u64);
+                    g
+                }
+                Obj::Atom(init) => {
+                    let g = heap.alloc(t(kind::ATOM), 0);
+                    g.set_field(0, init);
+                    g
+                }
+                Obj::Future(slot) => {
+                    let idx = {
+                        let mut fs = self.shared.futures.lock().unwrap();
+                        fs.push(slot);
+                        fs.len() - 1
+                    };
+                    let info = t(kind::FUTURE);
+                    let g = heap.alloc(info, 0);
+                    g.set_raw_word(info, 0, idx as u64);
+                    g
+                }
+            }
+        }
+    }
+
+    /// Register a reified continuation, returning its registry index. Entries
+    /// are roots (traced every collection) and never reclaimed — reifying a
+    /// continuation is rare and this keeps heap objects free of Rust `Arc`s.
+    pub(crate) fn register_kont(&self, k: Arc<crate::cek::Kont>) -> usize {
+        let mut ks = self.shared.konts.lock().unwrap();
+        ks.push(k);
+        ks.len() - 1
     }
 
     /// Insert a TCP handle into the registry, returning its index.
@@ -932,15 +1104,23 @@ impl<M: ValueModel> Runtime<M> {
             RawTag::Nil => Val::Nil,
             RawTag::Sym => Val::Sym(M::R::as_sym(bits)),
             RawTag::Ref => {
-                let id = M::R::as_ref(bits);
-                match &self.heap()[id as usize] {
-                    Obj::BigInt(i) => Val::Int(*i),
-                    Obj::BoxFloat(f) => Val::Float(*f),
-                    Obj::Moved(_) => panic!(
-                        "use-after-move: 0x{bits:x} is a stale pointer into from-space; \
-                         the collector relocated it — re-read through its root/handle"
-                    ),
-                    _ => Val::Ref(id),
+                let g = M::R::as_ref(bits);
+                match unsafe { g.type_id() } {
+                    crate::heap::kind::BIGINT => Val::Int(unsafe {
+                        g.raw_i128(&self.shared.types[crate::heap::kind::BIGINT as usize], 0)
+                    }),
+                    crate::heap::kind::BOXFLOAT => Val::Float(unsafe {
+                        f64::from_bits(
+                            g.raw_word(&self.shared.types[crate::heap::kind::BOXFLOAT as usize], 0),
+                        )
+                    }),
+                    t if t == crate::heap::kind::INVALID || t as usize >= crate::heap::kind::COUNT => {
+                        panic!(
+                            "use-after-move: 0x{bits:x} points into a collected space \
+                             (header type_id {t}); re-read through its root/handle"
+                        )
+                    }
+                    _ => Val::Ref(g),
                 }
             }
         }
@@ -948,46 +1128,75 @@ impl<M: ValueModel> Runtime<M> {
 
     /// Allocate a string value (used by the frontend reader for string literals).
     pub fn alloc_str(&mut self, s: String) -> u64 {
-        let id = self.alloc(Obj::Str(s));
-        M::R::enc_ref(id)
+        let g = self.alloc(Obj::Str(s));
+        M::R::enc_ref(g)
     }
     /// Allocate a character value (used by the frontend reader for `#\c` literals).
     pub fn alloc_char(&mut self, c: char) -> u64 {
-        let id = self.alloc(Obj::Char(c));
-        M::R::enc_ref(id)
+        let g = self.alloc(Obj::Char(c));
+        M::R::enc_ref(g)
+    }
+    /// A string's bytes as `&str` (hot read path; `view` in one step).
+    #[inline]
+    pub fn str_view(&self, bits: u64) -> Option<&str> {
+        if M::R::tag_of(bits) != RawTag::Ref {
+            return None;
+        }
+        let g = M::R::as_ref(bits);
+        unsafe {
+            if g.type_id() != crate::heap::kind::STR {
+                return None;
+            }
+            let info = &self.shared.types[crate::heap::kind::STR as usize];
+            Some(std::str::from_utf8_unchecked(g.bytes(info)))
+        }
     }
 
     // ── lists ───────────────────────────────────────────────
-    /// The empty list `()` — a heap value distinct from nil.
+    /// The empty list `()` — a heap value distinct from nil. ONE canonical
+    /// singleton per runtime (its bits are a GC root, re-encoded on moves).
     pub fn enc_empty_list(&mut self) -> u64 {
-        let id = self.alloc(Obj::EmptyList);
-        M::R::enc_ref(id)
+        let cur = self.shared.empty_list.load(GLOBAL_LOAD);
+        if cur != 0 {
+            return cur;
+        }
+        let bits = M::R::enc_ref(self.alloc(Obj::EmptyList));
+        // A racing thread may have won; keep whichever landed first.
+        match self.shared.empty_list.compare_exchange(0, bits, GLOBAL_STORE, GLOBAL_LOAD) {
+            Ok(_) => bits,
+            Err(existing) => existing,
+        }
     }
     pub fn is_empty_list(&self, bits: u64) -> bool {
-        if let RawTag::Ref = M::R::tag_of(bits) {
-            return matches!(&self.heap()[M::R::as_ref(bits) as usize], Obj::EmptyList);
-        }
-        false
+        M::R::tag_of(bits) == RawTag::Ref
+            && unsafe { M::R::as_ref(bits).type_id() } == crate::heap::kind::EMPTY_LIST
     }
     pub fn cons(&mut self, head: u64, tail: u64) -> u64 {
         // A cons chain terminates in nil, never in the standalone `()` value — so
         // `(cons x ())` is `(x)` and iteration (which stops at nil) is unaffected.
         let tail = if self.is_empty_list(tail) { self.enc_nil() } else { tail };
-        let id = self.alloc(Obj::Cons { head, tail });
-        M::R::enc_ref(id)
+        let g = self.alloc(Obj::Cons { head, tail });
+        M::R::enc_ref(g)
     }
     pub fn as_cons(&self, bits: u64) -> Option<(u64, u64)> {
-        if let RawTag::Ref = M::R::tag_of(bits) {
-            match &self.heap()[M::R::as_ref(bits) as usize] {
-                Obj::Cons { head, tail } => return Some((*head, *tail)),
-                Obj::Moved(_) => panic!(
-                    "use-after-move: 0x{bits:x} is a stale pointer into from-space; \
-                     the collector relocated it — re-read through its root/handle"
-                ),
-                _ => {}
+        if M::R::tag_of(bits) != RawTag::Ref {
+            return None;
+        }
+        let g = M::R::as_ref(bits);
+        unsafe {
+            match g.type_id() {
+                crate::heap::kind::CONS => Some((g.field(0), g.field(1))),
+                t if t == crate::heap::kind::INVALID
+                    || t as usize >= crate::heap::kind::COUNT =>
+                {
+                    panic!(
+                        "use-after-move: 0x{bits:x} points into a collected space \
+                         (header type_id {t}); re-read through its root/handle"
+                    )
+                }
+                _ => None,
             }
         }
-        None
     }
     pub fn list_to_vec(&self, mut bits: u64) -> Vec<u64> {
         let mut out = Vec::new();
@@ -1022,42 +1231,34 @@ impl<M: ValueModel> Runtime<M> {
                 if x == y {
                     return true; // same object
                 }
-                match (&self.heap()[x as usize], &self.heap()[y as usize]) {
-                    (Obj::Cons { .. }, Obj::Cons { .. }) => {
+                match (self.view_gc(x), self.view_gc(y)) {
+                    (ObjView::Cons { .. }, ObjView::Cons { .. }) => {
                         let (ha, ta) = self.as_cons(a).unwrap();
                         let (hb, tb) = self.as_cons(b).unwrap();
                         self.equal(ha, hb) && self.equal(ta, tb)
                     }
                     // All empty lists are equal (and only to each other, never nil).
-                    (Obj::EmptyList, Obj::EmptyList) => true,
+                    (ObjView::EmptyList, ObjView::EmptyList) => true,
                     // Ratios are reduced, so equal iff same num & den (never = an
                     // integer, since a reduced ratio has den > 1).
-                    (Obj::Ratio(na, da), Obj::Ratio(nb, db)) => na == nb && da == db,
+                    (ObjView::Ratio(na, da), ObjView::Ratio(nb, db)) => na == nb && da == db,
                     // Structural equality for aggregates (R7RS `equal?` on
                     // strings/vectors; ordered field equality for records — the
                     // general aggregate case). Order-INSENSITIVE collections
                     // (e.g. a hash-map) are a frontend concern layered on top.
-                    (Obj::Str(sa), Obj::Str(sb)) => sa == sb,
-                    (Obj::Char(ca), Obj::Char(cb)) => ca == cb,
-                    (&Obj::Vector { off: oa, len: la, .. }, &Obj::Vector { off: ob, len: lb, .. }) => {
-                        la == lb
-                            && (0..la).all(|k| {
-                                let (x, y) =
-                                    (self.words(oa, la)[k as usize], self.words(ob, lb)[k as usize]);
-                                self.equal(x, y)
-                            })
+                    (ObjView::Str(sa), ObjView::Str(sb)) => sa == sb,
+                    (ObjView::Char(ca), ObjView::Char(cb)) => ca == cb,
+                    (ObjView::Vector { elems: ea, .. }, ObjView::Vector { elems: eb, .. }) => {
+                        ea.len() == eb.len()
+                            && ea.iter().zip(eb.iter()).all(|(&x, &y)| self.equal(x, y))
                     }
                     (
-                        &Obj::Record { type_id: ta, off: oa, len: la },
-                        &Obj::Record { type_id: tb, off: ob, len: lb },
+                        ObjView::Record { type_id: ta, fields: fa },
+                        ObjView::Record { type_id: tb, fields: fb },
                     ) => {
                         ta == tb
-                            && la == lb
-                            && (0..la).all(|k| {
-                                let (x, y) =
-                                    (self.words(oa, la)[k as usize], self.words(ob, lb)[k as usize]);
-                                self.equal(x, y)
-                            })
+                            && fa.len() == fb.len()
+                            && fa.iter().zip(fb.iter()).all(|(&x, &y)| self.equal(x, y))
                     }
                     _ => false, // identity already handled; distinct other objects differ
                 }
@@ -1114,8 +1315,8 @@ impl<M: ValueModel> Runtime<M> {
                 // A string is its own raw content; anything else uses the neutral
                 // printer (correct for int/float/bool/nil/sym/char).
                 let s = match self.decode(args[0]) {
-                    Val::Ref(id) => match &self.heap()[id as usize] {
-                        Obj::Str(s) => s.clone(),
+                    Val::Ref(id) => match self.view_gc(id) {
+                        ObjView::Str(s) => s.to_string(),
                         _ => self.print(args[0]),
                     },
                     _ => self.print(args[0]),
@@ -1168,7 +1369,7 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("string-length: not a string");
                 };
-                let Obj::Str(s) = &self.heap()[id as usize] else {
+                let ObjView::Str(s) = self.view_gc(id) else {
                     panic!("string-length: not a string");
                 };
                 let n = s.chars().count() as i128;
@@ -1178,10 +1379,10 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("char->integer: not a char");
                 };
-                let Obj::Char(c) = &self.heap()[id as usize] else {
+                let ObjView::Char(c) = self.view_gc(id) else {
                     panic!("char->integer: not a char");
                 };
-                self.encode(Val::Int(*c as i128))
+                self.encode(Val::Int(c as i128))
             }
             Prim::IntToChar => {
                 let Val::Int(n) = self.decode(args[0]) else {
@@ -1203,11 +1404,10 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Int(i) = self.decode(args[1]) else {
                     panic!("vector-ref: index must be an int");
                 };
-                let &Obj::Vector { off, len, .. } = &self.heap()[id as usize] else {
+                let ObjView::Vector { elems, .. } = self.view_gc(id) else {
                     panic!("vector-ref: not a vector");
                 };
-                *self
-                    .words(off, len)
+                *elems
                     .get(i as usize)
                     .unwrap_or_else(|| panic!("vector-ref: index {i} out of range"))
             }
@@ -1218,11 +1418,9 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Int(i) = self.decode(args[1]) else {
                     panic!("vector-set!: index must be an int");
                 };
-                let &Obj::Vector { off, len, .. } = &self.heap()[id as usize] else {
-                    panic!("vector-set!: not a vector");
-                };
+                assert_eq!(unsafe { id.type_id() }, crate::heap::kind::ARRAY, "vector-set!: not a vector");
                 let slot = self
-                    .words_mut(off, len)
+                    .arr_slice_mut(id)
                     .get_mut(i as usize)
                     .unwrap_or_else(|| panic!("vector-set!: index {i} out of range"));
                 *slot = args[2];
@@ -1240,12 +1438,10 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("aclone: not an array");
                 };
-                let &Obj::Vector { off, len, .. } = &self.heap()[id as usize] else {
+                let ObjView::Vector { elems, .. } = self.view_gc(id) else {
                     panic!("aclone: not an array");
                 };
-                let noff = self.word_alloc(len.max(1) as usize);
-                self.arena().slice_mut(noff, len).copy_from_slice(self.words(off, len));
-                let nid = self.alloc(Obj::Vector { off: noff, len, cap: len });
+                let nid = self.alloc_vector(elems);
                 M::R::enc_ref(nid)
             }
             Prim::PvConj => self.pv_conj(args[0], args[1]),
@@ -1264,10 +1460,10 @@ impl<M: ValueModel> Runtime<M> {
             Prim::PvFromArray => self.pv_from_array(args[0]),
             Prim::SortArr => {
                 let Val::Ref(id) = self.decode(args[0]) else { panic!("sort-arr: not an array") };
-                let &Obj::Vector { off, len, .. } = &self.heap()[id as usize] else {
+                let ObjView::Vector { elems, .. } = self.view_gc(id) else {
                     panic!("sort-arr: not an array")
                 };
-                let elems = self.words(off, len).to_vec();
+                let elems = elems.to_vec();
                 // Homogeneous immediate fixnums?
                 if elems.iter().all(|&e| matches!(M::R::tag_of(e), RawTag::Int)) {
                     let mut keyed: Vec<(i64, u64)> = elems
@@ -1283,7 +1479,7 @@ impl<M: ValueModel> Runtime<M> {
                 }
                 // Homogeneous strings? (code-point order == `%str-cmp` == Rust str cmp)
                 let all_str = elems.iter().all(|&e| {
-                    matches!(self.decode(e), Val::Ref(i) if matches!(&self.heap()[i as usize], Obj::Str(_)))
+                    matches!(self.decode(e), Val::Ref(i) if matches!(self.view_gc(i), ObjView::Str(_)))
                 });
                 if all_str {
                     let mut v = elems;
@@ -1291,8 +1487,7 @@ impl<M: ValueModel> Runtime<M> {
                         let (Val::Ref(ia), Val::Ref(ib)) = (self.decode(a), self.decode(b)) else {
                             unreachable!("checked str")
                         };
-                        let (Obj::Str(sa), Obj::Str(sb)) =
-                            (&self.heap()[ia as usize], &self.heap()[ib as usize])
+                        let (ObjView::Str(sa), ObjView::Str(sb)) = (self.view_gc(ia), self.view_gc(ib))
                         else {
                             unreachable!("checked str")
                         };
@@ -1312,8 +1507,8 @@ impl<M: ValueModel> Runtime<M> {
                     let Val::Ref(id) = self.decode(f) else {
                         panic!("%multifn: argument is not a closure");
                     };
-                    let (np, va) = match &self.heap()[id as usize] {
-                        Obj::Closure { nparams, variadic, .. } => (*nparams, *variadic),
+                    let (np, va) = match self.view_gc(id) {
+                        ObjView::Closure { nparams, variadic, .. } => (nparams, variadic),
                         _ => panic!("%multifn: argument is not a closure"),
                     };
                     if va {
@@ -1350,10 +1545,8 @@ impl<M: ValueModel> Runtime<M> {
             Prim::LazyRealize => {
                 let Val::Ref(id) = self.decode(args[0]) else { panic!("lazy-realize!: not a record"); };
                 let tru = self.encode(Val::Bool(true));
-                let &Obj::Record { off, len, .. } = &self.heap()[id as usize] else {
-                    panic!("lazy-realize!: not a record");
-                };
-                let fs = self.words_mut(off, len);
+                assert_eq!(unsafe { id.type_id() }, crate::heap::kind::RECORD, "lazy-realize!: not a record");
+                let fs = self.values_mut(id);
                 fs[0] = args[1];
                 fs[1] = tru;
                 args[1]
@@ -1393,8 +1586,8 @@ impl<M: ValueModel> Runtime<M> {
             // (see `Prim::StrJoinArr`'s doc comment in ir.rs).
             Prim::StrJoinArr => {
                 let Val::Ref(id) = self.decode(args[0]) else { panic!("str-join-arr: not an array"); };
-                let elems: Vec<u64> = match &self.heap()[id as usize] {
-                    &Obj::Vector { off, len, .. } => self.words(off, len).to_vec(),
+                let elems: Vec<u64> = match self.view_gc(id) {
+                    ObjView::Vector { elems, .. } => elems.to_vec(),
                     _ => panic!("str-join-arr: not an array"),
                 };
                 let sep = self.as_str(args[1], "str-join-arr");
@@ -1443,20 +1636,18 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("ashift: not an array");
                 };
-                let &Obj::Vector { off, len, .. } = &self.heap()[id as usize] else {
-                    panic!("ashift: not an array");
-                };
-                if len == 0 {
+                assert_eq!(unsafe { id.type_id() }, crate::heap::kind::ARRAY, "ashift: not an array");
+                // Shift left in place and shrink (object identity preserved).
+                // Held for the whole read-modify-write, like `arr_extend`.
+                let _g = self.shared.heap_lock.lock().unwrap();
+                let ws = self.arr_slice_mut(id);
+                if ws.is_empty() {
                     self.enc_nil()
                 } else {
-                    let first = self.words(off, len)[0];
-                    // Shift left in place and shrink (object identity preserved).
-                    let ws = self.words_mut(off, len);
+                    let first = ws[0];
+                    let len = ws.len();
                     ws.copy_within(1.., 0);
-                    let _g = self.shared.heap_lock.lock().unwrap();
-                    if let Obj::Vector { len, .. } = &mut self.heap_mut()[id as usize] {
-                        *len -= 1;
-                    }
+                    unsafe { id.set_aux((len - 1) as u32) };
                     first
                 }
             }
@@ -1465,10 +1656,8 @@ impl<M: ValueModel> Runtime<M> {
                     panic!("aclear: not an array");
                 };
                 let _g = self.shared.heap_lock.lock().unwrap();
-                let Obj::Vector { len, .. } = &mut self.heap_mut()[id as usize] else {
-                    panic!("aclear: not an array");
-                };
-                *len = 0;
+                assert_eq!(unsafe { id.type_id() }, crate::heap::kind::ARRAY, "aclear: not an array");
+                unsafe { id.set_aux(0) };
                 args[0]
             }
             Prim::BitAnd => self.encode(Val::Int(self.as_i128(args[0]) & self.as_i128(args[1]))),
@@ -1531,10 +1720,10 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("field access on non-record");
                 };
-                let &Obj::Record { off, len, .. } = &self.heap()[id as usize] else {
+                let ObjView::Record { fields, .. } = self.view_gc(id) else {
                     panic!("field access on non-record");
                 };
-                self.words(off, len)[idx]
+                fields[idx]
             }
             Prim::Hash => {
                 let h = self.hash_value(args[0]);
@@ -1544,10 +1733,10 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("vector-length: not a vector");
                 };
-                let &Obj::Vector { len, .. } = &self.heap()[id as usize] else {
+                let ObjView::Vector { elems, .. } = self.view_gc(id) else {
                     panic!("vector-length: not a vector");
                 };
-                self.encode(Val::Int(len as i128))
+                self.encode(Val::Int(elems.len() as i128))
             }
             Prim::Values => {
                 let id = self.alloc_values(args);
@@ -1557,8 +1746,8 @@ impl<M: ValueModel> Runtime<M> {
                 // Unpack a `values` packet into a list; a lone value becomes a
                 // one-element list so single-valued producers work too.
                 if let Val::Ref(id) = self.decode(args[0]) {
-                    if let &Obj::Values { off, len } = &self.heap()[id as usize] {
-                        let vals = self.words(off, len).to_vec();
+                    if let ObjView::Values(vals) = self.view_gc(id) {
+                        let vals = vals.to_vec();
                         return self.vec_to_list(&vals);
                     }
                 }
@@ -1665,8 +1854,8 @@ impl<M: ValueModel> Runtime<M> {
             }
             Prim::NFields => {
                 let n = match self.decode(args[0]) {
-                    Val::Ref(id) => match &self.heap()[id as usize] {
-                        Obj::Record { len, .. } => *len as i128,
+                    Val::Ref(id) => match self.view_gc(id) {
+                        ObjView::Record { fields, .. } => fields.len() as i128,
                         _ => 0,
                     },
                     _ => 0,
@@ -1676,9 +1865,8 @@ impl<M: ValueModel> Runtime<M> {
             // Join a future's worker thread and cache its value. No backend
             // needed — this only blocks and reads a shared slot.
             Prim::Await => {
-                let id = M::R::as_ref(args[0]);
-                let slot = match &self.heap()[id as usize] {
-                    Obj::Future(s) => s.clone(),
+                let slot = match self.view(args[0]) {
+                    ObjView::Future(s) => s,
                     _ => panic!("await: not a future"),
                 };
                 let mut g = slot.lock().unwrap();
@@ -1867,18 +2055,15 @@ impl<M: ValueModel> Runtime<M> {
                 // A boxed integer `decode`s transparently to `Val::Int`, so check the
                 // RAW heap representation instead.
                 let is_big = M::R::tag_of(args[0]) == RawTag::Ref
-                    && matches!(
-                        &self.heap()[M::R::as_ref(args[0]) as usize],
-                        Obj::BigInt(_) | Obj::HugeInt(_)
-                    );
+                    && matches!(self.view(args[0]), ObjView::BigInt(_) | ObjView::HugeInt(_));
                 self.encode(Val::Bool(is_big))
             }
             Prim::ToLong => {
                 // `(int \a)` => 97: a char coerces to its code point, same as
                 // `(int c)` does in real Clojure.
                 if let Val::Ref(id) = self.decode(args[0]) {
-                    if let Obj::Char(c) = &self.heap()[id as usize] {
-                        return self.encode(Val::Int(*c as i128));
+                    if let ObjView::Char(c) = self.view_gc(id) {
+                        return self.encode(Val::Int(c as i128));
                     }
                 }
                 if let Some((n, d)) = self.as_ratio(args[0]) {
@@ -1906,8 +2091,8 @@ impl<M: ValueModel> Runtime<M> {
             }
             Prim::StrChars => {
                 let cs: Vec<char> = match self.decode(args[0]) {
-                    Val::Ref(id) => match &self.heap()[id as usize] {
-                        Obj::Str(s) => s.chars().collect(),
+                    Val::Ref(id) => match self.view_gc(id) {
+                        ObjView::Str(s) => s.chars().collect(),
                         _ => panic!("%str->chars: not a string"),
                     },
                     _ => panic!("%str->chars: not a string"),
@@ -1923,10 +2108,10 @@ impl<M: ValueModel> Runtime<M> {
             }
             Prim::StrToBytes => {
                 let bytes: Vec<u64> = match self.decode(args[0]) {
-                    Val::Ref(id) => match &self.heap()[id as usize] {
+                    Val::Ref(id) => match self.view_gc(id) {
                         // SIGNED bytes (the JVM's `byte`), so in-language wire
                         // code round-trips exactly like Java's.
-                        Obj::Str(s) => s.bytes().map(|b| M::R::enc_int(b as i8 as i64)).collect(),
+                        ObjView::Str(s) => s.bytes().map(|b| M::R::enc_int(b as i8 as i64)).collect(),
                         _ => panic!("%str->bytes: not a string"),
                     },
                     _ => panic!("%str->bytes: not a string"),
@@ -1936,9 +2121,8 @@ impl<M: ValueModel> Runtime<M> {
             }
             Prim::BytesToStr => {
                 let bytes: Vec<u8> = match self.decode(args[0]) {
-                    Val::Ref(id) => match &self.heap()[id as usize] {
-                        &Obj::Vector { off, len, .. } => self
-                            .words(off, len)
+                    Val::Ref(id) => match self.view_gc(id) {
+                        ObjView::Vector { elems, .. } => elems
                             .iter()
                             .map(|&b| match self.decode(b) {
                                 Val::Int(n) => n as i8 as u8,
@@ -1992,9 +2176,8 @@ impl<M: ValueModel> Runtime<M> {
                     _ => panic!("%tcp-write: not a stream handle"),
                 };
                 let bytes: Vec<u8> = match self.decode(args[1]) {
-                    Val::Ref(id) => match &self.heap()[id as usize] {
-                        &Obj::Vector { off, len, .. } => self
-                            .words(off, len)
+                    Val::Ref(id) => match self.view_gc(id) {
+                        ObjView::Vector { elems, .. } => elems
                             .iter()
                             .map(|&b| match self.decode(b) {
                                 Val::Int(n) => n as i8 as u8,
@@ -2033,24 +2216,24 @@ impl<M: ValueModel> Runtime<M> {
             }
             // ── atoms: real cross-thread compare-and-set ────────────────
             Prim::AtomNew => {
-                let id = self.alloc(Obj::Atom(Arc::new(AtomicU64::new(args[0]))));
+                let id = self.alloc(Obj::Atom(args[0]));
                 M::R::enc_ref(id)
             }
             Prim::AtomGet => {
-                let Obj::Atom(a) = &self.heap()[M::R::as_ref(args[0]) as usize] else {
+                let ObjView::Atom(a) = self.view(args[0]) else {
                     panic!("atom-get: not an atom");
                 };
                 a.load(Ordering::Acquire)
             }
             Prim::AtomSet => {
-                let Obj::Atom(a) = &self.heap()[M::R::as_ref(args[0]) as usize] else {
+                let ObjView::Atom(a) = self.view(args[0]) else {
                     panic!("atom-set: not an atom");
                 };
                 a.store(args[1], Ordering::Release);
                 args[1]
             }
             Prim::AtomCas => {
-                let Obj::Atom(a) = &self.heap()[M::R::as_ref(args[0]) as usize] else {
+                let ObjView::Atom(a) = self.view(args[0]) else {
                     panic!("atom-cas: not an atom");
                 };
                 let ok = a
@@ -2065,8 +2248,8 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Int(i) = self.decode(args[1]) else {
                     panic!("field: index must be an int");
                 };
-                match &self.heap()[id as usize] {
-                    &Obj::Record { off, len, .. } => self.words(off, len)[i as usize],
+                match self.view_gc(id) {
+                    ObjView::Record { fields, .. } => fields[i as usize],
                     _ => panic!("field: not a record"),
                 }
             }
@@ -2091,8 +2274,8 @@ impl<M: ValueModel> Runtime<M> {
     /// The receiver's type tag (a record's `type_id`). `None` for non-records.
     pub fn type_of(&self, bits: u64) -> Option<Sym> {
         if let Val::Ref(id) = self.decode(bits) {
-            if let Obj::Record { type_id, .. } = &self.heap()[id as usize] {
-                return Some(*type_id);
+            if let ObjView::Record { type_id, .. } = self.view_gc(id) {
+                return Some(type_id);
             }
         }
         None
@@ -2129,10 +2312,10 @@ impl<M: ValueModel> Runtime<M> {
         let Val::Ref(id) = self.decode(obj) else {
             panic!("field access on non-record");
         };
-        let &Obj::Record { off, len, .. } = &self.heap()[id as usize] else {
+        let ObjView::Record { fields, .. } = self.view_gc(id) else {
             panic!("field access on non-record");
         };
-        self.words(off, len)[idx]
+        fields[idx]
     }
 
     // ── non-local control-flow signal (throw / escape) ──────────────────────
@@ -2196,37 +2379,35 @@ impl<M: ValueModel> Runtime<M> {
             Val::Int(i) => mix(FNV_OFFSET, (i as u64 as u32) ^ ((i as u64 >> 32) as u32)),
             Val::Float(f) => mix(FNV_OFFSET, f.to_bits() as u32 ^ (f.to_bits() >> 32) as u32),
             Val::Sym(s) => mix_str(0x53_9d_11u32, self.sym_name(s)),
-            Val::Ref(id) => match &self.heap()[id as usize] {
-                Obj::Str(s) => mix_str(FNV_OFFSET, s),
-                Obj::Char(c) => mix(0xc4a_u32, *c as u32),
-                Obj::BigInt(i) => mix(FNV_OFFSET, *i as u64 as u32),
-                Obj::HugeInt(b) => mix_str(FNV_OFFSET, &b.to_string()),
-                Obj::Ratio(n, d) => mix(mix(FNV_OFFSET, *n as u64 as u32), *d as u64 as u32),
-                Obj::BoxFloat(f) => mix(FNV_OFFSET, f.to_bits() as u32),
-                &Obj::Record { type_id, off, len } => {
+            Val::Ref(id) => match self.view_gc(id) {
+                ObjView::Str(s) => mix_str(FNV_OFFSET, s),
+                ObjView::Char(c) => mix(0xc4a_u32, c as u32),
+                ObjView::BigInt(i) => mix(FNV_OFFSET, i as u64 as u32),
+                ObjView::HugeInt(b) => mix_str(FNV_OFFSET, &b.to_string()),
+                ObjView::Ratio(n, d) => mix(mix(FNV_OFFSET, n as u64 as u32), d as u64 as u32),
+                ObjView::BoxFloat(f) => mix(FNV_OFFSET, f.to_bits() as u32),
+                ObjView::Record { type_id, fields } => {
                     let mut h = mix_str(0x9e37_79b9u32, self.sym_name(type_id));
-                    for k in 0..len {
-                        let f = self.words(off, len)[k as usize];
+                    for &f in fields {
                         h = mix(h, self.hash_value(f));
                     }
                     h
                 }
-                Obj::Cons { .. } => {
+                ObjView::Cons { .. } => {
                     let mut h = 0x1000_193u32;
                     for x in self.list_to_vec(bits) {
                         h = mix(h, self.hash_value(x));
                     }
                     h
                 }
-                &Obj::Vector { off, len, .. } => {
+                ObjView::Vector { elems, .. } => {
                     let mut h = 0x27d4_eb2fu32;
-                    for k in 0..len {
-                        let x = self.words(off, len)[k as usize];
+                    for &x in elems {
                         h = mix(h, self.hash_value(x));
                     }
                     h
                 }
-                _ => mix(FNV_OFFSET, id),
+                _ => mix(FNV_OFFSET, id.addr() as u32),
             },
         }
     }
@@ -2243,19 +2424,19 @@ impl<M: ValueModel> Runtime<M> {
             Val::Bool(_) => (TYPE_TAG_BOOLEAN, "Boolean"),
             Val::Nil => (TYPE_TAG_NIL, "nil"),
             Val::Sym(_) => (TYPE_TAG_SYMBOL, "Symbol"),
-            Val::Ref(id) => match &self.heap()[id as usize] {
-                Obj::Record { type_id, .. } => return *type_id,
-                Obj::Cons { .. } => (TYPE_TAG_LIST, "List"),
-                Obj::EmptyList => (TYPE_TAG_EMPTYLIST, "EmptyList"),
-                Obj::Vector { .. } => (TYPE_TAG_VECTOR, "Vector"),
-                Obj::Str(_) => (TYPE_TAG_STRING, "String"),
-                Obj::Char(_) => (TYPE_TAG_CHAR, "Char"),
-                Obj::Closure { .. } | Obj::MultiFn { .. } => (TYPE_TAG_FN, "Fn"),
-                Obj::BigInt(_) | Obj::HugeInt(_) => (TYPE_TAG_LONG, "Long"),
-                Obj::Ratio(..) => (TYPE_TAG_RATIO, "Ratio"),
-                Obj::BoxFloat(_) => (TYPE_TAG_DOUBLE, "Double"),
-                Obj::Atom(_) => (TYPE_TAG_ATOM, "Atom"),
-                Obj::Future(_) => (TYPE_TAG_FUTURE, "Future"),
+            Val::Ref(id) => match self.view_gc(id) {
+                ObjView::Record { type_id, .. } => return type_id,
+                ObjView::Cons { .. } => (TYPE_TAG_LIST, "List"),
+                ObjView::EmptyList => (TYPE_TAG_EMPTYLIST, "EmptyList"),
+                ObjView::Vector { .. } => (TYPE_TAG_VECTOR, "Vector"),
+                ObjView::Str(_) => (TYPE_TAG_STRING, "String"),
+                ObjView::Char(_) => (TYPE_TAG_CHAR, "Char"),
+                ObjView::Closure { .. } | ObjView::MultiFn { .. } => (TYPE_TAG_FN, "Fn"),
+                ObjView::BigInt(_) | ObjView::HugeInt(_) => (TYPE_TAG_LONG, "Long"),
+                ObjView::Ratio(..) => (TYPE_TAG_RATIO, "Ratio"),
+                ObjView::BoxFloat(_) => (TYPE_TAG_DOUBLE, "Double"),
+                ObjView::Atom(_) => (TYPE_TAG_ATOM, "Atom"),
+                ObjView::Future(_) => (TYPE_TAG_FUTURE, "Future"),
                 _ => (TYPE_TAG_OBJECT, "Object"),
             },
         };
@@ -2303,9 +2484,9 @@ impl<M: ValueModel> Runtime<M> {
             match self.decode(cur) {
                 Val::Nil => return Some(None),
                 Val::Ref(cid) => {
-                    match &self.heap()[cid as usize] {
-                        Obj::Cons { head, tail } => return Some(Some((*head, *tail))),
-                        Obj::EmptyList => return Some(None),
+                    match self.view_gc(cid) {
+                        ObjView::Cons { head, tail } => return Some(Some((head, tail))),
+                        ObjView::EmptyList => return Some(None),
                         _ => {}
                     }
                     if let Some((arr, off, end, more)) = self.as_chunked(cur) {
@@ -2341,9 +2522,8 @@ impl<M: ValueModel> Runtime<M> {
         loop {
             // Whole realized chunks copy in one extend (no per-element step).
             if let Some((arr, coff, cend, more)) = self.as_chunked(cur) {
-                let (aoff, alen) = self.arr_span_pub(arr);
-                let words = self.words(aoff, alen);
-                out.extend_from_slice(&words[coff as usize..cend as usize]);
+                let elems = self.arr_elems_pub(arr);
+                out.extend_from_slice(&elems[coff as usize..cend as usize]);
                 cur = more;
                 continue;
             }
@@ -2386,14 +2566,14 @@ impl<M: ValueModel> Runtime<M> {
     /// not a MultiFn; a catchable arity throw when no clause matches.
     pub fn multifn_select(&mut self, callee: u64, argc: usize) -> Option<u64> {
         let Val::Ref(id) = self.decode(callee) else { return None };
-        let (sel, known) = match &self.heap()[id as usize] {
-            Obj::MultiFn { fixed, variadic } => {
+        let (sel, known) = match self.view_gc(id) {
+            ObjView::MultiFn { fixed, variadic } => {
                 let f = fixed.get(argc).copied().unwrap_or(0);
                 if f != 0 {
                     (f, true)
                 } else if let Some((min, vf)) = variadic {
-                    if argc >= *min {
-                        (*vf, true)
+                    if argc >= min {
+                        (vf, true)
                     } else {
                         (0, true)
                     }
@@ -2548,8 +2728,8 @@ impl<M: ValueModel> Runtime<M> {
     /// The `String` behind a string value, or a clear error if it is not one.
     pub fn as_str(&self, bits: u64, who: &str) -> String {
         if let Val::Ref(id) = self.decode(bits) {
-            if let Obj::Str(s) = &self.heap()[id as usize] {
-                return s.clone();
+            if let ObjView::Str(s) = self.view_gc(id) {
+                return s.to_string();
             }
         }
         panic!("{who}: argument is not a string");
@@ -2558,8 +2738,8 @@ impl<M: ValueModel> Runtime<M> {
     /// `(num, den)` if `bits` is a Ratio, else `None`.
     fn as_ratio(&self, bits: u64) -> Option<(i128, i128)> {
         if let Val::Ref(id) = self.decode(bits) {
-            if let Obj::Ratio(n, d) = &self.heap()[id as usize] {
-                return Some((*n, *d));
+            if let ObjView::Ratio(n, d) = self.view_gc(id) {
+                return Some((n, d));
             }
         }
         None
@@ -2641,8 +2821,7 @@ impl<M: ValueModel> Runtime<M> {
     /// (meta, cnt, shift, root, tail) of a `'PersistentVector`.
     fn pv_read(&self, pv: u64) -> (u64, i64, i64, u64, u64) {
         let Val::Ref(id) = self.decode(pv) else { panic!("pvec: not a record") };
-        let &Obj::Record { off, len, .. } = &self.heap()[id as usize] else { panic!("pvec: not a record") };
-        let fields = self.words(off, len);
+        let ObjView::Record { fields, .. } = self.view_gc(id) else { panic!("pvec: not a record") };
         let cnt = match self.decode(fields[1]) { Val::Int(i) => i as i64, _ => panic!("pvec cnt") };
         let shift = match self.decode(fields[2]) { Val::Int(i) => i as i64, _ => panic!("pvec shift") };
         (fields[0], cnt, shift, fields[3], fields[4])
@@ -2650,47 +2829,43 @@ impl<M: ValueModel> Runtime<M> {
     /// The array inside a `'VectorNode` (field 1).
     fn node_arr(&self, node: u64) -> u64 {
         let Val::Ref(id) = self.decode(node) else { panic!("vnode: not a record") };
-        let &Obj::Record { off, len, .. } = &self.heap()[id as usize] else { panic!("vnode: not a record") };
-        self.words(off, len)[1]
+        let ObjView::Record { fields, .. } = self.view_gc(id) else { panic!("vnode: not a record") };
+        fields[1]
     }
-    /// The (off, len) span of an array value.
-    fn arr_span(&self, arr: u64) -> (u32, u32) {
+    /// The ARRAY handle backing an array value (identity for mutation/growth).
+    fn arr_handle(&self, arr: u64) -> Gc {
         let Val::Ref(id) = self.decode(arr) else { panic!("pvec: array not a ref") };
-        let &Obj::Vector { off, len, .. } = &self.heap()[id as usize] else { panic!("pvec: not an array") };
-        (off, len)
+        assert_eq!(unsafe { id.type_id() }, crate::heap::kind::ARRAY, "pvec: not an array");
+        id
     }
     fn arr_clone(&self, arr: u64) -> Vec<u64> {
-        let (off, len) = self.arr_span(arr);
-        self.words(off, len).to_vec()
+        self.arr_slice(self.arr_handle(arr)).to_vec()
     }
     fn arr_at(&self, arr: u64, i: usize) -> u64 {
-        let (off, len) = self.arr_span(arr);
-        self.words(off, len)[i]
+        self.arr_slice(self.arr_handle(arr))[i]
     }
     pub(crate) fn arr_at_pub(&self, arr: u64, i: usize) -> u64 {
         self.arr_at(arr, i)
     }
-    pub(crate) fn arr_span_pub(&self, arr: u64) -> (u32, u32) {
-        self.arr_span(arr)
+    /// The live elements of an array value (replaces the old off/len "span"
+    /// pair now that arrays are addressed by handle, not a word-arena range).
+    pub(crate) fn arr_elems_pub(&self, arr: u64) -> &[u64] {
+        self.arr_slice(self.arr_handle(arr))
     }
     fn mk_array(&mut self, v: Vec<u64>) -> u64 {
         M::R::enc_ref(self.alloc_vector(&v))
     }
-    /// A fresh array = `arr` ++ [x], copied span-to-span (no Vec temporary).
-    /// The tail-conj hot path.
+    /// A fresh array = `arr` ++ [x]. The tail-conj hot path.
     fn mk_array_append1(&mut self, arr: u64, x: u64) -> u64 {
-        let (soff, slen) = self.arr_span(arr);
-        let noff = self.word_alloc(slen as usize + 1);
-        let dst = self.arena().slice_mut(noff, slen + 1);
-        dst[..slen as usize].copy_from_slice(self.arena().slice(soff, slen));
-        dst[slen as usize] = x;
-        M::R::enc_ref(self.alloc(Obj::Vector { off: noff, len: slen + 1, cap: slen + 1 }))
+        let src = self.arr_slice(self.arr_handle(arr));
+        let mut v = Vec::with_capacity(src.len() + 1);
+        v.extend_from_slice(src);
+        v.push(x);
+        M::R::enc_ref(self.alloc_vector(&v))
     }
-    /// A fresh one-element array (no Vec temporary).
+    /// A fresh one-element array.
     fn mk_array1(&mut self, x: u64) -> u64 {
-        let noff = self.word_alloc(1);
-        self.arena().slice_mut(noff, 1)[0] = x;
-        M::R::enc_ref(self.alloc(Obj::Vector { off: noff, len: 1, cap: 1 }))
+        M::R::enc_ref(self.alloc_vector(&[x]))
     }
     /// (arr, off, end, more) of a `'ChunkedCons` record, or None. Lets the cons
     /// prims (`%first`/`%rest`) treat a chunk transparently as a seq — only on the
@@ -2713,7 +2888,7 @@ impl<M: ValueModel> Runtime<M> {
 
     pub(crate) fn as_chunked(&self, bits: u64) -> Option<(u64, i64, i64, u64)> {
         let Val::Ref(id) = self.decode(bits) else { return None };
-        let &Obj::Record { type_id, off: foff, len: flen } = &self.heap()[id as usize] else {
+        let ObjView::Record { type_id, fields } = self.view_gc(id) else {
             return None;
         };
         // ONE interned-sym compare (this runs per seq step — a string compare
@@ -2722,7 +2897,6 @@ impl<M: ValueModel> Runtime<M> {
         if type_id != cc {
             return None;
         }
-        let fields = self.words(foff, flen);
         let (f0, f1, f2, f3) = (fields[0], fields[1], fields[2], fields[3]);
         let off = match self.decode(f1) { Val::Int(i) => i as i64, _ => return None };
         let end = match self.decode(f2) { Val::Int(i) => i as i64, _ => return None };
@@ -2984,8 +3158,8 @@ impl<M: ValueModel> Runtime<M> {
     /// (raw bit identity — matches the original's `identical?` short-circuit).
     fn hamt_assoc(&mut self, node: u64, shift: u32, hash: u32, key: u64, val: u64) -> (u64, bool) {
         let Val::Ref(id) = self.decode(node) else { panic!("hamt-assoc: not a node") };
-        let &Obj::Record { type_id, off: foff, len: flen } = &self.heap()[id as usize] else { panic!("hamt-assoc: not a node") };
-        let fields: Vec<u64> = self.words(foff, flen).to_vec();
+        let ObjView::Record { type_id, fields } = self.view_gc(id) else { panic!("hamt-assoc: not a node") };
+        let fields: Vec<u64> = fields.to_vec();
         let kind = self.hamt_kind(type_id);
         match kind {
             HamtKind::Bitmap => {
@@ -3116,8 +3290,7 @@ impl<M: ValueModel> Runtime<M> {
     /// `(-inode-lookup node shift hash key not-found)`.
     fn hamt_lookup(&self, node: u64, shift: u32, hash: u32, key: u64, not_found: u64) -> u64 {
         let Val::Ref(id) = self.decode(node) else { return not_found };
-        let &Obj::Record { type_id, off: foff, len: flen } = &self.heap()[id as usize] else { return not_found };
-        let fields = self.words(foff, flen);
+        let ObjView::Record { type_id, fields } = self.view_gc(id) else { return not_found };
         match self.hamt_kind(type_id) {
             HamtKind::Bitmap => {
                 let bitmap = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => return not_found };
@@ -3178,8 +3351,8 @@ impl<M: ValueModel> Runtime<M> {
     /// (raw bit identity) if nothing changed, or `nil` if `node` becomes empty.
     fn hamt_without(&mut self, node: u64, shift: u32, hash: u32, key: u64) -> u64 {
         let Val::Ref(id) = self.decode(node) else { return node };
-        let &Obj::Record { type_id, off: foff, len: flen } = &self.heap()[id as usize] else { return node };
-        let fields: Vec<u64> = self.words(foff, flen).to_vec();
+        let ObjView::Record { type_id, fields } = self.view_gc(id) else { return node };
+        let fields: Vec<u64> = fields.to_vec();
         let fields = &fields[..];
         match self.hamt_kind(type_id) {
             HamtKind::Bitmap => {
@@ -3358,13 +3531,16 @@ impl<M: ValueModel> Runtime<M> {
         if let Val::Int(i) = self.decode(bits) {
             return Some(BigInt::from_i128(i));
         }
-        self.as_huge(bits).cloned()
+        self.as_huge(bits)
     }
 
-    /// The `BigInt` behind a `HugeInt` heap value, if `bits` is one.
-    fn as_huge(&self, bits: u64) -> Option<&BigInt> {
+    /// The `BigInt` behind a `HugeInt` heap value, if `bits` is one. Owned:
+    /// the view reassembles it from the object's sign word + limb bytes on
+    /// every call (a cold path — huge integers are the rare arbitrary-
+    /// precision overflow case), so there is no live `&BigInt` to borrow.
+    fn as_huge(&self, bits: u64) -> Option<BigInt> {
         if let RawTag::Ref = M::R::tag_of(bits) {
-            if let Obj::HugeInt(b) = &self.heap()[M::R::as_ref(bits) as usize] {
+            if let ObjView::HugeInt(b) = self.view(bits) {
                 return Some(b);
             }
         }
@@ -3400,8 +3576,8 @@ impl<M: ValueModel> Runtime<M> {
     /// everything else uses the neutral printer. Mirrors `StrOf`.
     pub fn str_form(&self, bits: u64) -> String {
         if let Val::Ref(id) = self.decode(bits) {
-            if let Obj::Str(s) = &self.heap()[id as usize] {
-                return s.clone();
+            if let ObjView::Str(s) = self.view_gc(id) {
+                return s.to_string();
             }
         }
         self.print(bits)
@@ -3419,14 +3595,14 @@ impl<M: ValueModel> Runtime<M> {
             Val::Bool(b) => b.to_string(),
             Val::Nil => "nil".to_string(),
             Val::Sym(s) => self.sym_name(s).to_string(),
-            Val::Ref(id) => match &self.heap()[id as usize] {
-                Obj::Cons { .. } => {
+            Val::Ref(id) => match self.view_gc(id) {
+                ObjView::Cons { .. } => {
                     let items = self.list_to_vec(bits);
                     let inner: Vec<String> = items.iter().map(|&x| self.print(x)).collect();
                     format!("({})", inner.join(" "))
                 }
-                Obj::EmptyList => "()".to_string(),
-                Obj::Str(s) => {
+                ObjView::EmptyList => "()".to_string(),
+                ObjView::Str(s) => {
                     // Readable form: escape the reader-significant chars so the
                     // output round-trips (matches Clojure's pr on strings).
                     let mut out = String::with_capacity(s.len() + 2);
@@ -3444,34 +3620,30 @@ impl<M: ValueModel> Runtime<M> {
                     out.push('"');
                     out
                 }
-                Obj::Char(c) => c.to_string(),
-                &Obj::Vector { off, len, .. } => {
-                    let inner: Vec<String> =
-                        self.words(off, len).to_vec().iter().map(|&x| self.print(x)).collect();
+                ObjView::Char(c) => c.to_string(),
+                ObjView::Vector { elems, .. } => {
+                    let inner: Vec<String> = elems.iter().map(|&x| self.print(x)).collect();
                     format!("#({})", inner.join(" "))
                 }
-                &Obj::Values { off, len } => {
-                    let inner: Vec<String> =
-                        self.words(off, len).to_vec().iter().map(|&x| self.print(x)).collect();
+                ObjView::Values(vals) => {
+                    let inner: Vec<String> = vals.iter().map(|&x| self.print(x)).collect();
                     inner.join(" ")
                 }
-                Obj::Closure { .. } => "#<closure>".to_string(),
-                Obj::MultiFn { .. } => "#<closure>".to_string(),
-                Obj::BigInt(i) => i.to_string(),
-                Obj::HugeInt(b) => b.to_string(),
-                Obj::Ratio(n, d) => format!("{n}/{d}"),
-                Obj::BoxFloat(f) => format!("{f}"),
-                &Obj::Record { type_id, off, len } => {
-                    let inner: Vec<String> =
-                        self.words(off, len).to_vec().iter().map(|&x| self.print(x)).collect();
+                ObjView::Closure { .. } => "#<closure>".to_string(),
+                ObjView::MultiFn { .. } => "#<closure>".to_string(),
+                ObjView::BigInt(i) => i.to_string(),
+                ObjView::HugeInt(b) => b.to_string(),
+                ObjView::Ratio(n, d) => format!("{n}/{d}"),
+                ObjView::BoxFloat(f) => format!("{f}"),
+                ObjView::Record { type_id, fields } => {
+                    let inner: Vec<String> = fields.iter().map(|&x| self.print(x)).collect();
                     format!("#{}[{}]", self.sym_name(type_id), inner.join(" "))
                 }
-                Obj::Escape { .. } => "#<continuation>".to_string(),
-                Obj::Cont(_) => "#<continuation>".to_string(),
-                Obj::PartialCont(_) => "#<partial-continuation>".to_string(),
-                Obj::Atom(_) => "#<atom>".to_string(),
-                Obj::Future(_) => "#<future>".to_string(),
-                Obj::Moved(_) => "#<moved>".to_string(),
+                ObjView::Escape { .. } => "#<continuation>".to_string(),
+                ObjView::Cont(_) => "#<continuation>".to_string(),
+                ObjView::PartialCont(_) => "#<partial-continuation>".to_string(),
+                ObjView::Atom(_) => "#<atom>".to_string(),
+                ObjView::Future(_) => "#<future>".to_string(),
             },
         }
     }
@@ -3480,15 +3652,18 @@ impl<M: ValueModel> Runtime<M> {
     /// `0..nparams` are the positional args; a variadic rest arg is the slot
     /// after them, holding the collected list; the remaining slots (up to
     /// `nslots`, assigned by the `flatten` pass for the body's let/catch
-    /// bindings) start nil. The closure's capture array rides along (one `Arc`
-    /// bump). Shared by every backend so the frame layout has one definition.
+    /// bindings) start nil. `callee_bits` is the CALLEE closure's own encoded
+    /// bits (0 for a top-level/no-closure frame) — stored into the frame's
+    /// `caps_src` root slot, which `frame_cap` decodes to load captures
+    /// straight out of the closure object (no per-call capture-array copy).
+    /// Shared by every backend so the frame layout has one definition.
     pub fn build_call_frame(
         &mut self,
         nparams: usize,
         variadic: bool,
         nslots: u16,
         args: &[u64],
-        caps: Caps,
+        callee_bits: u64,
     ) -> Locals {
         let nfixed = nparams + variadic as usize;
         debug_assert!(
@@ -3518,7 +3693,7 @@ impl<M: ValueModel> Runtime<M> {
         while slots.len() < nslots {
             slots.push(AtomicU64::new(nil));
         }
-        Some(Arc::new(Frame { slots, caps }))
+        Some(Arc::new(Frame { slots, caps_src: AtomicU64::new(callee_bits) }))
     }
 
 }

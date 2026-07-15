@@ -35,7 +35,7 @@ use std::sync::Arc;
 use crate::code::CodeSpace;
 use crate::ir::{CapSrc, ConstId, Ir, Prim};
 use crate::model::{Repr, ValueModel};
-use crate::runtime::Runtime;
+use crate::runtime::{ObjView, Runtime};
 use crate::value::{build_caps, frame_cap, frame_get, frame_set, Locals, Obj, Sym, Val};
 
 /// A bytecode instruction. The operand stack holds tagged values; the
@@ -279,7 +279,7 @@ impl<M: ModelEmit> BytecodeVm<M> {
                 Op::Const(id) => stack.push(rt.get_const(*id)),
                 Op::Nil => stack.push(M::R::enc_nil()),
                 Op::LoadLocal(up, idx) => stack.push(frame_get(locals, *up, *idx)),
-                Op::LoadCap(idx) => stack.push(frame_cap(locals, *idx)),
+                Op::LoadCap(idx) => stack.push(frame_cap::<M::R>(locals, *idx)),
                 Op::StoreLocal(idx) => {
                     let v = *stack.last().expect("set!: empty stack");
                     frame_set(locals, 0, *idx, v);
@@ -291,7 +291,7 @@ impl<M: ModelEmit> BytecodeVm<M> {
                     stack.push(v);
                 }
                 Op::MakeClosure { nparams, variadic, nslots, captures, body } => {
-                    let caps = build_caps(captures, locals);
+                    let caps = build_caps::<M::R>(captures, locals);
                     let id = rt.alloc(Obj::Closure {
                         nparams: *nparams,
                         variadic: *variadic,
@@ -387,13 +387,13 @@ impl<M: ModelEmit> CodeSpace<M> for BytecodeVm<M> {
         let Val::Ref(id) = rt.decode(callee) else {
             panic!("value not callable: {}", rt.print(callee));
         };
-        let (nparams, variadic, nslots, body, caps) = match &rt.heap()[id as usize] {
-            Obj::Closure { nparams, variadic, nslots, body, caps } => {
-                (*nparams, *variadic, *nslots, body.clone(), caps.clone())
+        let (nparams, variadic, nslots, body) = match rt.view_gc(id) {
+            ObjView::Closure { nparams, variadic, nslots, template, .. } => {
+                (nparams, variadic, nslots, rt.template(template).clone())
             }
             _ => panic!("value not callable: {}", rt.print(callee)),
         };
-        let frame = rt.build_call_frame(nparams, variadic, nslots, args, caps);
+        let frame = rt.build_call_frame(nparams, variadic, nslots, args, callee);
         let chunk = self.compiled_body(&body);
         self.run(top, rt, &chunk, &frame)
     }

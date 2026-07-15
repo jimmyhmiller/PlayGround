@@ -27,7 +27,7 @@ use std::cell::Cell;
 
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
-use crate::runtime::Runtime;
+use crate::runtime::{ObjView, Runtime};
 use crate::value::{build_caps, frame_cap, frame_get, frame_set, Locals, Obj, Val};
 
 pub trait CodeSpace<M: ValueModel> {
@@ -56,7 +56,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
         match ir {
             Ir::Const(id) | Ir::Quote(id) => rt.get_const(*id),
             Ir::Local { up, idx } => frame_get(locals, *up, *idx),
-            Ir::Capture(idx) => frame_cap(locals, *idx),
+            Ir::Capture(idx) => frame_cap::<M::R>(locals, *idx),
             Ir::Global(s) => match rt.global(*s) {
                 Some(v) => v,
                 None => {
@@ -122,7 +122,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 panic!("unflattened Ir reached a tier: Let survives only before flatten::flatten")
             }
             Ir::Lambda { nparams, variadic, nslots, captures, body } => {
-                let caps = build_caps(captures, locals);
+                let caps = build_caps::<M::R>(captures, locals);
                 let id = rt.alloc(Obj::Closure {
                     nparams: *nparams,
                     variadic: *variadic,
@@ -369,7 +369,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
             };
             // Callable-object hook: a non-closure record invoked with a registered
             // apply handler redirects to `(handler object args…)` (e.g. keywords).
-            if let Obj::Record { .. } = &rt.heap()[id as usize] {
+            if let ObjView::Record { .. } = rt.view_gc(id) {
                 if let Some(h) = rt.apply_handler() {
                     let mut new_args = vec![callee];
                     new_args.extend_from_slice(&args);
@@ -379,7 +379,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 }
             }
             // Multi-arity fn: select the clause serving this arg count and loop.
-            if matches!(&rt.heap()[id as usize], Obj::MultiFn { .. }) {
+            if matches!(rt.view_gc(id), ObjView::MultiFn { .. }) {
                 let sel = rt.multifn_select(callee, args.len()).expect("checked MultiFn");
                 if rt.pending() {
                     return M::R::enc_nil(); // no matching clause: arity throw
@@ -387,18 +387,13 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 callee = sel;
                 continue;
             }
-            let (nparams, variadic, nslots, body, caps) = match &rt.heap()[id as usize] {
-                Obj::Closure {
-                    nparams,
-                    variadic,
-                    nslots,
-                    body,
-                    caps,
-                } => (*nparams, *variadic, *nslots, body.clone(), caps.clone()),
-                Obj::Escape { tag } => {
+            let (nparams, variadic, nslots, body) = match rt.view_gc(id) {
+                ObjView::Closure { nparams, variadic, nslots, template, .. } => {
+                    (nparams, variadic, nslots, rt.template(template).clone())
+                }
+                ObjView::Escape { tag } => {
                     // Invoking an escape continuation: raise an ESCAPE signal to its
                     // `%callec`; the dummy return propagates up like any signal.
-                    let tag = *tag;
                     let v = args.first().copied().unwrap_or_else(M::R::enc_nil);
                     rt.signal_escape(tag, v);
                     return M::R::enc_nil();
@@ -418,7 +413,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 rt.signal_throw(M::R::enc_ref(sid));
                 return M::R::enc_nil();
             }
-            let frame = rt.build_call_frame(nparams, variadic, nslots, &args, caps);
+            let frame = rt.build_call_frame(nparams, variadic, nslots, &args, callee);
             match eval_tail(top, rt, &body, &frame) {
                 Bounce::Done(v) => return v,
                 Bounce::Tail(next, next_args) => {
