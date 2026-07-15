@@ -1,0 +1,43 @@
+(module meta2)
+; A COMPILED metaprogram using the real code-* library (selfhost/src/codelib.coil).
+;
+; It reaches the library only through its NON-RESERVED entry points, because every
+; `code-nth`/`code-count`/`code-rest`/... name is a special form at parse time
+; (parser.coil:411): `(code-nth c i)` becomes ECodeOp before resolution, so those
+; functions exist but are not callable until codeop-id is deleted. That deletion is
+; the atomic engine swap. What runs here is real library code either way: Sexp
+; walking, allocation, and Sexp construction.
+(import "alloc.coil" :use *)
+(import "slice.coil" :use *)
+(import "io.coil" :use *)
+(import "selfhost/src/reader.coil" :use *)
+(import "selfhost/src/parser.coil" :use *)
+(import "selfhost/src/codelib.coil" :use *)
+
+; recursive tree-walk that ACCUMULATES -- the thing no interpreted checker could do,
+; since it had no collections. Uses code-tag/code-listish? (not reserved).
+(defn count-syms [(c (ptr Sexp))] (-> :i64)
+  (if (icmp-eq (code-tag c) 2) 1
+    (if (not (code-listish? c)) 0
+      (let [items (sx-items (load c)) n (sx-len items)
+            (mut acc) 0 (mut i) 0
+            cur (unwrap-ptr [Sexp] (create [Sexp] (malloc-allocator)))]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (store! cur (sx-at items (load i)))
+              (store! acc (iadd (load acc) (count-syms cur)))
+              (store! i (iadd (load i) 1)))))
+        (load acc)))))
+(defn meta-syms [(s (ptr Sexp))] (-> :i64) (count-syms s))
+(export-c [meta-syms :as "meta_syms"])
+
+; build real Sexp with the library's constructors, then read it back.
+(defn meta-build [] (-> :i64)
+  (let [l (code-list-new)]
+    (code-list-push! l (code-mk-sym "defn"))
+    (code-list-push! l (code-mk-sym "f"))
+    (code-list-push! l (code-mk-int 42))
+    (let [form (code-list-done l)]
+      (if (not (code-listish? form)) (isub 0 1)
+        (iadd (imul (sx-len (sx-items (load form))) 100)
+              (sx-ival (sx-at (sx-items (load form)) 2)))))))
+(export-c [meta-build :as "meta_build"])

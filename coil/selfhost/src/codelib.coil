@@ -1,0 +1,145 @@
+(module codelib)
+; The `code-*` vocabulary as ORDINARY COIL FUNCTIONS over `(ptr Sexp)`.
+;
+; This is the metaprogram API for the compile-and-run design (see
+; metaprog-poc/compile-and-run/README.md). Today the same vocabulary exists as
+; `ECodeOp` special forms that ONLY the comptime interpreter can execute
+; (comptime.coil:1309+), and `Code`/`ECodeOp` hard-fail in every backend
+; (codegen.coil:730, codegen_a64.coil:1508). That is the whole reason a
+; metaprogram is not a normal program: a different engine runs it.
+;
+; Nothing here needs a special form, a `Code` type, or an interpreter. `Sexp` is
+; already an ordinary struct and `sx-tag`/`sx-items`/`sx-sval` are already ordinary
+; functions, so the entire pure vocabulary is just... functions. A metaprogram that
+; imports this module compiles like any other program.
+;
+; Semantics mirror the interpreter's ops EXACTLY (op numbers in comments refer to
+; the `code-op` dispatch in comptime.coil), so the two agree while both exist.
+;
+; ATOMICITY. Every name below is a RESERVED special form at PARSE time
+; (parser.coil:411 maps ~29 `code-*` heads to opcodes before resolution ever runs).
+; So these functions can be DEFINED but not CALLED: `(code-nth c i)` parses as
+; ECodeOp, not as a call to `code-nth`. The library and the special forms therefore
+; cannot coexist, and the engine swap is ATOMIC: deleting codeop-id from the parser
+; is what makes these callable. Until then this module is compiled and tested but
+; reached only through its non-reserved entry points. For the same reason nothing
+; here calls a reserved name internally -- it would become an ECodeOp.
+;
+; NOT here: the ops that need compiler STATE rather than data — `report`, `warn`,
+; `type-of`, `code-decl`, `code-file`, and the struct/sum/trait reflection. Those
+; become externs the compiler exports, resolved at dlopen (mechanism 1 in
+; metaprog-poc/compile-and-run/). Data ops are pure; state ops are extern. That is
+; the whole ABI.
+(import "alloc.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "fmt.coil" :use *)
+(import "control.coil" :use *)
+(import "reader.coil" :use *)
+(import "parser.coil" :use *)
+(import "ast.coil" :use *)
+(import "comptime.coil" :use *)
+
+; A metaprogram that misuses the vocabulary is a bug in the metaprogram. Fail HARD
+; and say exactly what happened; never return a sentinel that turns a type error at
+; the call site into a mystery ten frames away.
+(defn code-die [(msg (slice u8))] (-> i64)
+  (fmt (stderr) "metaprogram error: {s}\n" msg)
+  (abort))
+
+; `Code` is a `(ptr Sexp)`. Tags (SexpKind order, reader.coil:16):
+;   0=KInt 1=KFloat 2=KSym 3=KKw 4=KStr 5=KCStr 6=KList 7=KVec
+(defn code-tag [(c (ptr Sexp))] (-> i64) (sx-tag (load c)))
+(defn code-listish? [(c (ptr Sexp))] (-> bool)
+  (let [t (code-tag c)] (or (icmp-eq t 6) (icmp-eq t 7))))
+
+; op 0
+(defn code-list? [(c (ptr Sexp))] (-> bool) (code-listish? c))
+; op 1
+(defn code-sym? [(c (ptr Sexp))] (-> bool) (icmp-eq (code-tag c) 2))
+; op 2
+(defn code-int? [(c (ptr Sexp))] (-> bool) (icmp-eq (code-tag c) 0))
+; op 11
+(defn code-keyword? [(c (ptr Sexp))] (-> bool) (icmp-eq (code-tag c) 3))
+
+; op 3
+(defn code-count [(c (ptr Sexp))] (-> i64)
+  (if (not (code-listish? c)) (code-die "code-count expects a list/vector")
+    (sx-len (sx-items (load c)))))
+
+; op 5
+(defn code-sym [(c (ptr Sexp))] (-> (slice u8))
+  (if (icmp-ne (code-tag c) 2) (do (code-die "code-sym expects a symbol") "")
+    (sx-sval (load c))))
+
+; op 6
+(defn code-int [(c (ptr Sexp))] (-> i64)
+  (if (icmp-ne (code-tag c) 0) (code-die "code-int expects an integer")
+    (sx-ival (load c))))
+
+; op 4 — bounds-checked, like the interpreter's.
+(defn code-nth [(c (ptr Sexp)) (i i64)] (-> (ptr Sexp))
+  (if (not (code-listish? c)) (do (code-die "code-nth expects a list/vector") (cast (ptr Sexp) 0))
+    (let [items (sx-items (load c)) n (sx-len items)]
+      (if (or (icmp-lt i 0) (icmp-ge i n))
+          (do (code-die "code-nth index out of range") (cast (ptr Sexp) 0))
+        (let [p (unwrap-ptr [Sexp] (create [Sexp] (malloc-allocator)))]
+          (store! p (sx-at items i))
+          p)))))
+
+; op 7 — every element but the head, as a fresh list.
+(defn code-rest [(c (ptr Sexp))] (-> (ptr Sexp))
+  (if (not (code-listish? c)) (do (code-die "code-rest expects a list") (cast (ptr Sexp) 0))
+    (let [a (malloc-allocator)
+          items (sx-items (load c)) n (sx-len items)
+          (mut xs) (al-new [Sexp] a) (mut i) 1]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (al-push! (mut xs) (sx-at items (load i))) (store! i (iadd (load i) 1)))))
+      (let [p (unwrap-ptr [Sexp] (create [Sexp] a))]
+        (store! p (mk-sexp (KList (box-al [Sexp] a (load xs))) -1 -1))
+        p))))
+
+; op 10 — structural equality; shares the interpreter's sexp-eq rather than
+; growing a second implementation of it.
+(defn code-eq [(x (ptr Sexp)) (y (ptr Sexp))] (-> bool) (sexp-eq (load x) (load y)))
+
+; op 12 — build a symbol by concatenating a symbol's name with a suffix.
+(defn code-symbol [(c (ptr Sexp)) (suffix (slice u8))] (-> (ptr Sexp))
+  (let [a (malloc-allocator)
+        base (if (icmp-eq (code-tag c) 2) (sx-sval (load c))
+               (if (icmp-eq (code-tag c) 4) (sx-sval (load c))
+                 (do (code-die "code-symbol expects a symbol or string") "")))
+        p (unwrap-ptr [Sexp] (create [Sexp] a))]
+    (store! p (mk-sexp (KSym (sconcat a base suffix)) -1 -1))
+    p))
+
+; op 8 — a fresh hygienic name. Shares the interpreter's counter so the two agree.
+(defn code-gensym [] (-> (ptr Sexp))
+  (let [a (malloc-allocator) p (unwrap-ptr [Sexp] (create [Sexp] a))]
+    (store! p (mk-sexp (KSym (sconcat a "$g" (dec->str a (next-gensym)))) -1 -1))
+    p))
+
+; ---- constructors (what quasiquote lowers to) -------------------------------
+(defn code-mk-int [(v i64)] (-> (ptr Sexp))
+  (let [a (malloc-allocator) p (unwrap-ptr [Sexp] (create [Sexp] a))]
+    (store! p (mk-sexp (KInt v) -1 -1)) p))
+(defn code-mk-sym [(s (slice u8))] (-> (ptr Sexp))
+  (let [a (malloc-allocator) p (unwrap-ptr [Sexp] (create [Sexp] a))]
+    (store! p (mk-sexp (KSym s) -1 -1)) p))
+(defn code-mk-str [(s (slice u8))] (-> (ptr Sexp))
+  (let [a (malloc-allocator) p (unwrap-ptr [Sexp] (create [Sexp] a))]
+    (store! p (mk-sexp (KStr s) -1 -1)) p))
+
+; A growable list under construction, so quasiquote and code-walking metaprograms
+; can build forms without reaching into ArrayList generics at every call site.
+(defstruct CodeList [(items (ptr (ArrayList Sexp)))])
+(defn code-list-new [] (-> (ptr CodeList))
+  (let [a (malloc-allocator) p (unwrap-ptr [CodeList] (create [CodeList] a))]
+    (store! (field p items) (box-al [Sexp] a (al-new [Sexp] a))) p))
+(defn code-list-push! [(l (ptr CodeList)) (c (ptr Sexp))] (-> i64)
+  (al-push! [Sexp] (load (field l items)) (load c)) 0)
+(defn code-list-done [(l (ptr CodeList))] (-> (ptr Sexp))
+  (let [a (malloc-allocator) p (unwrap-ptr [Sexp] (create [Sexp] a))]
+    (store! p (mk-sexp (KList (load (field l items))) -1 -1)) p))

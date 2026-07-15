@@ -1,0 +1,43 @@
+(module mhost2)
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "slice.coil" :use *)
+(import "io.coil"  :use *)
+(import "fmt.coil" :use *)
+(import "result.coil" :use *)
+(import "selfhost/src/reader.coil" :use *)
+
+(extern dlopen :cc c [(ptr i8) :i64] (-> (ptr i8)))
+(extern dlsym  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+
+(defn mk-cstr [(a (ptr Allocator)) (s (slice u8))] (-> (ptr i8))
+  (let [n (slice-len s)
+        buf (unwrap-ptr [i8] (raw-alloc a (iadd n 1) 1))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! (index buf (load i)) (cast i8 (slice-get s (load i))))
+          (store! i (iadd (load i) 1)))))
+    (store! (index buf n) (cast i8 0))
+    buf))
+
+(defn main [] (-> :i64)
+  (let [al (malloc-allocator)]
+    ; build a REAL Sexp with the compiler's real reader
+    (match (read-all al "(defn f [x] (iadd x 1))" 0)
+      (Err [d] (do (fmt (stdout) "read failed\n") 1))
+      (Ok [forms]
+        (let [sp (unwrap-ptr [Sexp] (create [Sexp] al))
+              h  (dlopen (mk-cstr al "meta2.dylib") 2)]
+          (store! sp (al-get [Sexp] (load forms) 0))
+          (if (icmp-eq (cast :i64 h) 0)
+              (do (fmt (stdout) "dlopen FAILED\n") 1)
+            (let [f (dlsym h (mk-cstr al "meta_syms"))]
+              (if (icmp-eq (cast :i64 f) 0)
+                  (do (fmt (stdout) "dlsym FAILED\n") 1)
+                (do (do
+                      (fmt (stdout) "codelib walk: syms in (defn f [x] (iadd x 1)) = {d} (expect 5)\n"
+                           (call-ptr (cast (fnptr c [(ptr Sexp)] :i64) f) sp))
+                      (let [g (dlsym h (mk-cstr al "meta_build"))]
+                        (fmt (stdout) "codelib build: len*100 + third = {d} (expect 342)\n"
+                             (call-ptr (cast (fnptr c [] :i64) g)))))
+                    0)))))))))

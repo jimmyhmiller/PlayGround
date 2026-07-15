@@ -20,5 +20,11 @@ $COIL build $D/meta.coil  --shared -o "$OUT/meta.dylib" $DL || exit 1
 $COIL build $D/mhost.coil -o "$OUT/mhost" $EX || exit 1
 ( cd "$OUT" && ./mhost ) || exit 1
 
+echo "=== 3. the same, through the REAL code-* library (selfhost/src/codelib.coil):"
+echo "       a compiled metaprogram walking and BUILDING Sexp with the shipped vocabulary ==="
+$COIL build $D/meta2.coil  --shared -o "$OUT/meta2.dylib" $DL || exit 1
+$COIL build $D/mhost2.coil -o "$OUT/mhost2" $EX || exit 1
+( cd "$OUT" && ./mhost2 ) || exit 1
+
 rm -rf "$OUT"
-echo "=== both mechanisms verified ==="
+echo "=== all mechanisms verified ==="
