@@ -128,12 +128,18 @@ Metaprograms run on one of two engines with **one semantics**:
   no generics, no collection instantiation, no function pointers, no FFI, no raw
   memory — are why it is no longer the default. It remains the parity oracle.
 
-Known limits of the compiled engine (both engines actually share the first):
-metaprogram bodies cannot yet *call macros* (`fmt`/`when`/`try!` inside a macro
-body — the expansion tower is the next step), entries are capped at 8 parameters,
-and the metaprogram dylib is built by the LLVM backend (the arm64 backend lacks
-`export-c`). See `metaprog-poc/compile-and-run/README.md` for the design and the
-road to deleting the interpreter.
+**Macro bodies can call macros** (the TOWER): `when`/`cond`/`try!`/`fmt` inside a
+metaprogram's own body expand at definition time, type-directedly — a call to a
+Code-signature function whose arguments all typecheck as Code stays a FUNCTION
+call (passing code values, e.g. cond-arms' recursion); one with non-Code
+arguments is surface syntax and is expanded, with the checker as the only judge.
+`fmt` in a macro body logs at expansion time (compiled engine).
+
+Known limits: definition-time expansion itself runs on the interpreter (a macro
+used inside another macro's body must be interpretable); entries are capped at 8
+parameters; the metaprogram dylib is built by the LLVM backend (the arm64
+backend lacks `export-c`). See `metaprog-poc/compile-and-run/README.md` for the
+design and the road to deleting the interpreter.
 
 ## What today's metaprograms can and can't do
 

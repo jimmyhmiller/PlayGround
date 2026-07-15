@@ -116,35 +116,40 @@ compiler change that would alter the compiled metaprogram alters the dump/key;
 `COIL_META_CACHE=0` disables). The rebootstrap fixpoint and all gates run through
 the compiled engine now.
 
-## The remaining hard part: the tower
+## THE TOWER IS BUILT: macro bodies call macros
 
-Metaprogram BODIES still cannot *call macros* (`fmt`, `when`, `try!` inside a
-macro's own body) — the sub-program is resolved unexpanded, the same restriction
-the interpreter always had (its `is-comptime-defn` skip in expand-top-form exists
-to protect quasiquote templates from expansion).
+A metaprogram body may now use `when`/`cond`/`try!`/`fmt`/… for its OWN control
+flow and logging (`tower_test.coil`, `tower_fmt_test.coil` — run.sh mechanism 4).
 
-The core design problem is NOT recursion bookkeeping — it is that **a call to a
-Code-signature function inside a metaprogram body is ambiguous**. `(cond-arms cs)`
-inside `cond` is a FUNCTION call (evaluate it: `cs` is a Code value, recursion over
-runtime lists); `(when (icmp-eq (code-count b) 2) X)` inside some macro is meant as
-a MACRO call (expand it: the condition is a bool, not Code). Nothing syntactic
-distinguishes them — both heads are `[Code…] -> Code` functions. Expanding
-everything syntactically breaks `cond-arms` (it would receive the SYNTAX
-`(code-rest cs)` instead of the value); evaluating everything breaks `when` (it
-would receive a bool where it expects Code) — which is today's failure.
+The core design problem was never recursion bookkeeping — it is that **a call to
+a Code-signature function inside a metaprogram body is ambiguous**. `(cond-arms
+cs)` inside `cond` is a FUNCTION call (evaluate it: `cs` is a Code value);
+`(when (icmp-eq (code-count b) 2) X)` is meant as a MACRO call (expand it: the
+condition is a bool, not Code). Nothing syntactic distinguishes them.
 
-The rule that fits Coil's signature-driven design: **type-directed expansion**. In
-a metaprogram body, a call to a code-sig function whose arguments all typecheck as
-`Code` is a function call (you are passing code values — ordinary metaprogramming);
-one whose arguments do NOT typecheck as Code is surface syntax — expand it as a
-macro at definition-processing time. Implementation shape: iterate
-tolerant-check -> find code-sig calls that fail as function calls -> expand those
-(quote/quasiquote-aware walking: never descend into templates, do descend into
-`~`/`~@` payloads) -> re-check, to a fixpoint. The strata order themselves
-naturally: a macro whose body already typechecks (bottom stratum, macro-free) is
-compilable and can expand the next stratum. The gensym counter must be snapshotted
-around definition-time expansion so the main program's expansion stays
-byte-identical, and expansion-context tables are per-level (LS holds them by
-value — sharing aliases).
+The shipped rule is **type-directed, with the checker as the only judge**
+(expander.coil `stage3-round` + `tower-*`): expand-stage3 checks the metaprogram
+sub-program; when the check rejects it AT a macro-headed call form (its diag
+spans exactly the call — i.e. a non-Code argument reached a Code-signature
+function), that one call is expanded at definition time, deepest-first, and the
+sub-program is re-resolved and re-checked to a fixpoint (64-round cap). Calls
+whose arguments all typecheck as Code never fail that way and remain function
+calls, so `cond-arms`-style recursion is untouched. A program whose sub-check
+passes first try — every previously-valid program — pays nothing. Expanded
+bodies are mirrored back into the main form list (index-aligned, value-identical
+where nothing fired) so the authoritative check sees them too, and residual
+errors carry real "in expansion of macro …" notes.
 
-That tower is what stands between here and deleting the 1892-line interpreter.
+Definition-time expansion currently runs on the interpreter (the engine for that
+stratum isn't built yet at that point) — so a macro USED inside another macro's
+body must itself be interpretable. The expanded body then runs on whichever
+engine is active; `fmt`-in-a-macro executes only under the compiled engine (its
+expansion calls through Writer function pointers).
+
+## What remains before deleting the interpreter
+
+- Definition-time (tower) expansion through the COMPILED engine — a recursive
+  engine build per stratum — so macros used inside macro bodies may themselves
+  need arbitrary code.
+- `export-c` in the arm64 backend, so the LLVM-free compiler can build
+  metaprogram dylibs; the 8-parameter entry cap.
