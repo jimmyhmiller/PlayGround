@@ -2188,9 +2188,18 @@
 (defn -list*-seq [args] (if (nil? (next args)) (seq (first args)) (%cons (first args) (-list*-seq (next args)))))
 (defn list* [& args] (-list*-seq args))
 (defn reduce-kv [f init coll]
-  (if (vector? coll)
-    (loop [i 0 acc init s (seq coll)] (if (nil? s) acc (recur (inc i) (f acc i (first s)) (next s))))
-    (reduce (fn [acc e] (f acc (first e) (second e))) init (seq coll))))
+  (cond
+    (vector? coll)
+      (loop [i 0 acc init s (seq coll)] (if (nil? s) acc (recur (inc i) (f acc i (first s)) (next s))))
+    ;; PersistentHashMap: walk the trie nodes directly via -inode-kv-reduce,
+    ;; calling `(f acc k v)` at each leaf — no [k v] entry vector materialized,
+    ;; no per-entry first/second. (-inode-kv-reduce is the same node walk the
+    ;; map's own -seq uses; here we hand it the USER'S f instead of a cons-builder.)
+    (%num-eq (type-of coll) 'PersistentHashMap)
+      (let [acc (if (.-has-nil? coll) (f init nil (.-nil-val coll)) init)
+            root (.-root coll)]
+        (if (nil? root) acc (-inode-kv-reduce root f acc)))
+    true (reduce (fn [acc e] (f acc (first e) (second e))) init (seq coll))))
 (defn update-keys [m f] (reduce (fn [acc e] (assoc acc (f (first e)) (second e))) {} (seq m)))
 (defn update-vals [m f] (reduce (fn [acc e] (assoc acc (first e) (f (second e)))) {} (seq m)))
 (defn every-pred [& preds] (fn [& args] (every? (fn [p] (every? (fn [a] (p a)) args)) preds)))
