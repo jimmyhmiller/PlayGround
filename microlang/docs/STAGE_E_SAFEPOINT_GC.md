@@ -19,9 +19,26 @@ child's shadow before the thread exists, and the AllocWindow's limit sits at
 the SOFT trigger so inline allocations drive pressure through the slow shim.
 Gates: all four suites + the gc-stress battery
 (`cargo test --features jit --test gc_stress -- --ignored`) green.
-Measured cost: back-edge poll puts raw loop arithmetic at ~4ns/iter (was
-~2); calls/captures unchanged (4/5 ns); reduce+map ~56ns/el (was 51),
-vecbuild ~157ns/el (was 150).
+
+FOLLOW-UP (same day): the poll/rooting cost was clawed back to PRE-Stage-E
+levels. Three pieces: (1) back-edge polls are COUNTDOWN-COARSENED
+(`BACKEDGE_POLL_INTERVAL` = 1024 — an untagged, unmapped register dec+brif
+per iteration; time-to-safepoint stays bounded); (2) the discovery that
+Cranelift's `declare_*_needs_stack_map` DEMOTES a value to a stack slot for
+its whole lifetime once it is live across ANY call — so pure self-loop
+bodies (`body_pure_loop`) FENCE their non-parking shim calls
+(`call_shim_fenced`: copy every local + self into fresh mapped values, call,
+redefine — the hot values' ranges end at the fence and the loop stays in
+registers), while call-dense bodies keep plain calls + Cranelift's precise
+demotion; (3) `spill_roots` also covers the ENCLOSING frames' variables
+during speculative inlining (`inline_outer_vars`) — without it a collection
+under an inlined deopt call missed the outer locals (caught by the pressure
+test: a probe value came back as recycled churn memory). Non-parking =
+shims that can never reach a safepoint (`rt.prim` has no `top`, pure
+runtime-table ops); the poll's own shim parks but its fence copies are
+var-bound and therefore mapped. Measured after: raw loop arithmetic
+2ns/iter (= pre-E), calls 4/5ns (= pre-E), count-loop 150ms vs 135 pre-E
+(was 298), sum-tail 31ms vs 27 (was 67), fib/tak/ack within ~10% of pre-E.
 
 ## The key insight that makes this tractable
 

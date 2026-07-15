@@ -1001,6 +1001,46 @@ fn has_tail_call(ir: &Ir) -> bool {
     }
 }
 
+/// Is this body a PURE self-loop candidate: every `Call`/`Dispatch` is in tail
+/// position (so the only non-tail calls the body makes are non-parking shims —
+/// arithmetic slow paths, prim escapes, the poll)? Such bodies profit from
+/// FENCING those shims (`call_shim_fenced`): their loop variables never cross
+/// an unfenced call and stay in registers. Bodies with non-tail calls demote
+/// their live values at those calls anyway, so fencing would only add
+/// merge/spill churn — they use plain calls throughout.
+fn body_pure_loop(ir: &Ir, tail: bool) -> bool {
+    match ir {
+        // A call is pure-loop-compatible only in TAIL position (the self-loop
+        // back-edge or a trampolined tail), with a simple callee reference and
+        // call-free arguments — a call anywhere else parks.
+        Ir::Call(f, args) => {
+            tail
+                && matches!(f.as_ref(), Ir::Global(_) | Ir::Local { .. } | Ir::Capture(_))
+                && args.iter().all(|a| body_pure_loop(a, false))
+        }
+        Ir::Dispatch { .. } => false,
+        Ir::Prim(Prim::Apply | Prim::CallCc | Prim::CallEc | Prim::Reset | Prim::Shift, _) => false,
+        Ir::If(c, t, e) => {
+            body_pure_loop(c, false) && body_pure_loop(t, tail) && body_pure_loop(e, tail)
+        }
+        Ir::Do(xs) => match xs.split_last() {
+            None => true,
+            Some((last, init)) => {
+                init.iter().all(|x| body_pure_loop(x, false)) && body_pure_loop(last, tail)
+            }
+        },
+        Ir::SetLocal { val, .. } | Ir::SetGlobal { val, .. } => body_pure_loop(val, false),
+        Ir::Def { init, .. } => body_pure_loop(init, false),
+        Ir::DefMethod { imp, .. } => body_pure_loop(imp, false),
+        Ir::FieldGet { obj, .. } => body_pure_loop(obj, false),
+        Ir::Prim(_, xs) => xs.iter().all(|x| body_pure_loop(x, false)),
+        Ir::Try { .. } => false,
+        Ir::Lambda { .. } => true, // creation only; its body compiles separately
+        Ir::Const(_) | Ir::Quote(_) | Ir::Local { .. } | Ir::Capture(_) | Ir::Global(_) => true,
+        Ir::Let(..) => false,
+    }
+}
+
 /// MEMORY mode? True iff the body (not descending into nested `Lambda` bodies —
 /// those compile separately) contains a construct whose locals must be visible
 /// outside the compiled code: `try` (the interpreter runs the catch against the
@@ -2226,25 +2266,32 @@ fn build_body<M: ModelArithJit>(
         loop_header: None,
         loop_nparams: shape.nparams,
         vars: Vec::new(),
+        fence_shims: false, // set below once the loop shape is known
+        inline_outer_vars: Vec::new(),
         self_var: cranelift_frontend::Variable::from_u32(0), // placeholder; set right below
+        poll_counter: cranelift_frontend::Variable::from_u32(0), // placeholder; set with the loop header
         rc_val,
     };
 
-    // The RUNNING CLOSURE's bits, read ONCE into a stack-mapped variable
-    // (Stage E): a collection at any safepoint rewrites the spill slot, so
-    // capture reads (which re-derive the capture base from this) always see
-    // the object's CURRENT address. Top-level bodies carry 0 (no closure —
-    // never a ref under any model, so the collector ignores it).
+    // The RUNNING CLOSURE's bits, read ONCE into a tracked variable (Stage
+    // E): its reads are stack-map-declared and the poll sites copy-spill it,
+    // so a collection at any safepoint rewrites the mapped slot and capture
+    // reads (which re-derive the capture base from this) always see the
+    // object's CURRENT address. Top-level bodies carry 0 (no closure — never
+    // a ref under any model, so the collector ignores it).
     c.self_var = c.declare_root_var();
     let sc0 = c.load_ctx_field(c.off_self_closure);
     c.fb.def_var(c.self_var, sc0);
 
     // SSA mode: every activation slot is a Cranelift variable (register-
-    // allocated), DECLARED for the stack maps — locals hold tagged value bits
-    // and must survive a moving collection at any safepoint. Params come from
-    // the entry's register args (fast entries) or a frame-load prologue (ctx
-    // entries: variadic / >MAX_REG_ARGS); let/catch slots start nil. Memory
-    // mode leaves locals in the heap frame (traced via env publication).
+    // allocated). Locals hold tagged value bits and survive moving
+    // collections through TWO routes: any value READ across a real call is
+    // stack-map-declared (the blanket declare in `compile`), and the poll
+    // sites copy-spill every variable explicitly (`emit_poll`). Params come
+    // from the entry's register args (fast entries) or a frame-load prologue
+    // (ctx entries: variadic / >MAX_REG_ARGS); let/catch slots start nil.
+    // Memory mode leaves locals in the heap frame (traced via env
+    // publication).
     if !shape.mem_mode {
         for _ in 0..shape.nslots {
             let var = c.declare_root_var();
@@ -2283,8 +2330,13 @@ fn build_body<M: ModelArithJit>(
     // A self-tail-recursive SSA body gets a loop header: a tail call to the same
     // closure redefines the param variables in place and branches here (an
     // O(1)-stack native loop in REGISTERS), with the shim/trampoline as the
-    // fallback for any other tail call.
+    // fallback for any other tail call. Its back-edge polls are COARSENED
+    // through a countdown (see `BACKEDGE_POLL_INTERVAL`), seeded here.
     if !shape.mem_mode && shape.tail_root && !shape.variadic && has_tail_call(ir) {
+        c.fence_shims = body_pure_loop(ir, true);
+        c.poll_counter = c.fb.declare_var(I64); // untagged: NOT stack-mapped
+        let n = c.fb.ins().iconst(I64, BACKEDGE_POLL_INTERVAL);
+        c.fb.def_var(c.poll_counter, n);
         let header = c.fb.create_block();
         c.fb.ins().jump(header, &[]);
         c.fb.switch_to_block(header);
@@ -2345,25 +2397,109 @@ pub struct Compiler<'a, 'b> {
     loop_header: Option<cranelift_codegen::ir::Block>,
     loop_nparams: usize,
     /// SSA mode: one variable per activation slot (params first). Empty in
-    /// memory mode. All stack-mapped (`declare_root_var`).
+    /// memory mode. Rooted via the blanket read-declares + poll copy-spills.
     vars: Vec<cranelift_frontend::Variable>,
+    /// FENCE non-parking shim calls (`call_shim_fenced` actually fences only
+    /// when set): true for pure self-loop bodies, whose variables then never
+    /// cross an unfenced call and stay in registers. See `body_pure_loop`.
+    fence_shims: bool,
+    /// The ENCLOSING frames' variables while a speculative inline is being
+    /// spliced (`emit_inlined_body` swaps `vars`): `spill_roots` must keep
+    /// copy-spilling the outer locals around calls inside the inlined region,
+    /// or a collection under an inlined deopt call would miss them.
+    inline_outer_vars: Vec<Vec<cranelift_frontend::Variable>>,
     /// The running closure's bits, loaded once at entry (stack-mapped): the
     /// self-tail-call compare and every capture read go through this, so both
     /// see the closure's CURRENT address after any safepoint (Stage E).
     self_var: cranelift_frontend::Variable,
+    /// The back-edge poll COUNTDOWN (self-loop bodies only): the loop checks
+    /// the poll word every `BACKEDGE_POLL_INTERVAL` iterations instead of
+    /// every iteration — one register decrement + branch on the hot path.
+    /// An untagged integer: deliberately NOT stack-mapped.
+    poll_counter: cranelift_frontend::Variable,
 }
 
+/// Self-tail back-edges poll every N iterations. Time-to-safepoint for a
+/// native loop is bounded by N iterations of straight-line arithmetic
+/// (microseconds); entry polls still fire on EVERY call, so recursion and
+/// call-heavy loops park immediately. 1024 makes the per-iteration cost one
+/// dec+brif (~amortized nothing) while keeping gc-stress collections dense.
+const BACKEDGE_POLL_INTERVAL: i64 = 1024;
+
 impl<'a, 'b> Compiler<'a, 'b> {
+    /// A PARKING shim call (invoke/dispatch/apply/try/await/gc/poll targets —
+    /// anywhere a collection can actually happen): plain. The variables'
+    /// values live across it are stack-mapped by Cranelift's own
+    /// declare-based spilling (`declare_root_var`), with precise liveness.
     fn call_shim(&mut self, f: cranelift_codegen::ir::FuncRef, args: &[Value]) -> Value {
         let inst = self.fb.ins().call(f, args);
         self.fb.inst_results(inst)[0]
     }
 
-    /// Declare an I64 variable whose every definition carries TAGGED VALUE
-    /// BITS: marked for the stack maps, so any definition live across a
-    /// safepoint (= any call) is spilled, rewritten by a moving collection,
-    /// and reloaded — the whole Stage E rooting story for SSA locals, loop
-    /// vars, and merge results.
+    /// A NON-PARKING shim call, FENCED (Stage E): `rt.prim` and the other
+    /// pure-runtime shims can never reach a safepoint (no `top`, no park), so
+    /// no value can move across them — but Cranelift cannot know that, and a
+    /// declared value live across ANY call is demoted to memory for its whole
+    /// life. The fence: copy every local + the self bits into fresh values
+    /// before the call and REDEFINE the variables after, so the hot values'
+    /// live ranges END here — a tight loop whose only in-body calls are
+    /// fenced (arithmetic slow paths, the safepoint poll's cold shim) keeps
+    /// its variables in registers. The copies are themselves var-bound (and
+    /// so mapped), which also makes fencing SOUND even at the one fenced
+    /// target that does park: the poll's `shim_safepoint`.
+    fn call_shim_fenced(&mut self, f: cranelift_codegen::ir::FuncRef, args: &[Value]) -> Value {
+        if !self.fence_shims {
+            return self.call_shim(f, args);
+        }
+        let (roots, copies) = self.spill_roots();
+        let inst = self.fb.ins().call(f, args);
+        let r = self.fb.inst_results(inst)[0];
+        self.reload_roots(&roots, &copies);
+        r
+    }
+
+    /// Fenced + the pending-signal check (the fenced counterpart of
+    /// `call_shim_checked`).
+    fn call_shim_fenced_checked(&mut self, f: cranelift_codegen::ir::FuncRef, args: &[Value]) -> Value {
+        let result = self.call_shim_fenced(f, args);
+        self.emit_pending_check(result)
+    }
+
+    /// The pre-call half of the root discipline: copy every variable-held
+    /// root into a fresh, declared SSA value (a real instruction, so the
+    /// safepoint pass can demote the copy in isolation).
+    fn spill_roots(&mut self) -> (Vec<cranelift_frontend::Variable>, Vec<Value>) {
+        let mut roots: Vec<cranelift_frontend::Variable> = self.vars.clone();
+        for outer in &self.inline_outer_vars {
+            roots.extend_from_slice(outer);
+        }
+        roots.push(self.self_var);
+        let mut copies = Vec::with_capacity(roots.len());
+        for var in &roots {
+            let x = self.fb.use_var(*var);
+            let x2 = self.fb.ins().iadd_imm(x, 0);
+            self.fb.declare_value_needs_stack_map(x2);
+            copies.push(x2);
+        }
+        (roots, copies)
+    }
+
+    /// The post-call half: the variables take the (possibly relocated)
+    /// values back from the mapped copies.
+    fn reload_roots(&mut self, roots: &[cranelift_frontend::Variable], copies: &[Value]) {
+        for (var, x2) in roots.iter().zip(copies) {
+            self.fb.def_var(*var, *x2);
+        }
+    }
+
+    /// Declare an I64 variable whose bindings carry TAGGED VALUE BITS, marked
+    /// for the stack maps: any of its values live across a PARKING call (a
+    /// real invoke, where a collection can happen) is spilled with a map
+    /// entry, rewritten by a moving collection, and reloaded — with
+    /// Cranelift-precise liveness, so call-dense code pays only for what is
+    /// actually live. The demotion this implies is kept OFF the hot loops by
+    /// FENCING every non-parking call (`call_shim_fenced`): a value whose
+    /// only crossings are fenced never demotes.
     fn declare_root_var(&mut self) -> cranelift_frontend::Variable {
         let var = self.fb.declare_var(I64);
         self.fb.declare_var_needs_stack_map(var);
@@ -2373,10 +2509,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
     /// The SAFEPOINT POLL (Stage E): one load of the heap's poll byte and a
     /// branch to a cold `shim_safepoint` call when it is nonzero (a sibling
     /// requested a collection, or allocation pressure crossed the threshold).
-    /// The cold path is an ordinary call, so every live stack-mapped value
-    /// gets spilled around it with a map — parking or collecting there is
-    /// exactly as safe as at any shim call. Emitted at body entry and at
-    /// every self-tail back-edge, which bounds a native loop's time-to-park.
+    /// Emitted at body entry and (countdown-coarsened) at every self-tail
+    /// back-edge, which bounds a native loop's time-to-park. Rooting comes
+    /// from `call_shim`'s copy-spill discipline.
     fn emit_poll(&mut self) {
         let pp = self.load_rc_field(self.off_poll_ptr);
         let b = self.fb.ins().load(I8, MemFlagsData::trusted(), pp, 0);
@@ -2387,7 +2522,31 @@ impl<'a, 'b> Compiler<'a, 'b> {
         self.fb.switch_to_block(cold);
         self.fb.seal_block(cold);
         let ctx = self.ctx_val;
-        self.call_shim(self.refs.safepoint, &[ctx]);
+        self.call_shim_fenced(self.refs.safepoint, &[ctx]);
+        self.fb.ins().jump(cont, &[]);
+        self.fb.switch_to_block(cont);
+        self.fb.seal_block(cont);
+    }
+
+    /// The COARSENED self-loop back-edge poll: decrement the (untagged,
+    /// unmapped) countdown; only every `BACKEDGE_POLL_INTERVAL`-th iteration
+    /// checks the poll word (and reseeds the countdown). Hot path = one
+    /// dec + one branch — this is what keeps a tight arithmetic loop at
+    /// its pre-Stage-E speed while still bounding time-to-safepoint.
+    fn emit_backedge_poll(&mut self) {
+        let c = self.fb.use_var(self.poll_counter);
+        let c1 = self.fb.ins().iadd_imm(c, -1);
+        self.fb.def_var(self.poll_counter, c1);
+        let cold = self.fb.create_block();
+        let cont = self.fb.create_block();
+        self.fb.set_cold_block(cold);
+        // nonzero countdown → skip the poll entirely.
+        self.fb.ins().brif(c1, cont, &[], cold, &[]);
+        self.fb.switch_to_block(cold);
+        self.fb.seal_block(cold);
+        let n = self.fb.ins().iconst(I64, BACKEDGE_POLL_INTERVAL);
+        self.fb.def_var(self.poll_counter, n);
+        self.emit_poll();
         self.fb.ins().jump(cont, &[]);
         self.fb.switch_to_block(cont);
         self.fb.seal_block(cont);
@@ -2465,6 +2624,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
     /// and consumed within this straight-line sequence).
     fn emit_capture<M: ModelArithJit>(&mut self, idx: u16) -> Value {
         let sc = self.fb.use_var(self.self_var);
+        // Not a `compile()` result, so the blanket declare misses it: mark the
+        // self bits here so a read AFTER a real call is in that call's map.
+        self.fb.declare_value_needs_stack_map(sc);
         let base = M::emit_ref_addr_unchecked(self, sc);
         let off = (CLOSURE_CAPS_OFF as i32) + (idx as i32) * 8;
         self.fb.ins().load(I64, MemFlagsData::trusted(), base, off)
@@ -2627,6 +2789,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
     /// inlined level never grows the stack unboundedly).
     fn emit_inlined_body<M: ModelArithJit>(&mut self, plan: &InlinePlan, argvals: &[Value]) -> Value {
         let saved_vars = std::mem::take(&mut self.vars);
+        self.inline_outer_vars.push(saved_vars.clone());
         let saved_header = self.loop_header.take();
         let saved_nparams = self.loop_nparams;
         for i in 0..plan.nslots as usize {
@@ -2641,6 +2804,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         }
         self.loop_nparams = plan.nparams;
         let v = self.compile::<M>(&plan.body, false);
+        self.inline_outer_vars.pop();
         self.vars = saved_vars;
         self.loop_header = saved_header;
         self.loop_nparams = saved_nparams;
@@ -2868,7 +3032,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.seal_block(slow);
                 let sv = self.i32const(*s);
                 let ctx = self.ctx_val;
-                let v = self.call_shim(self.refs.load_global, &[ctx, sv]);
+                let v = self.call_shim_fenced(self.refs.load_global, &[ctx, sv]);
                 self.fb.def_var(result, v);
                 self.fb.ins().jump(merge, &[]);
 
@@ -2937,7 +3101,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let v = self.compile::<M>(init, false);
                 let namev = self.i32const(*name);
                 let ctx = self.ctx_val;
-                self.call_shim(self.refs.def_global, &[ctx, namev, v])
+                self.call_shim_fenced(self.refs.def_global, &[ctx, namev, v])
             }
             Ir::Lambda { nparams, variadic, nslots, captures, body } => {
                 // Register this Lambda's BODY once (compile time) in the runtime's
@@ -3008,7 +3172,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     let nsv = self.i32const(*nslots as u32);
                     let ncapsv = self.i32const(ncaps as u32);
                     let ctx = self.ctx_val;
-                    let sv = self.call_shim(
+                    let sv = self.call_shim_fenced(
                         self.refs.make_closure,
                         &[ctx, tidv, npv, varv, nsv, caddr, ncapsv],
                     );
@@ -3026,7 +3190,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     let nsv = self.i32const(*nslots as u32);
                     let ncapsv = self.i32const(captures.len() as u32);
                     let ctx = self.ctx_val;
-                    self.call_shim(self.refs.make_closure, &[ctx, tidv, npv, varv, nsv, addr, ncapsv])
+                    self.call_shim_fenced(self.refs.make_closure, &[ctx, tidv, npv, varv, nsv, addr, ncapsv])
                 }
             }
             Ir::Call(f, args) => {
@@ -3096,10 +3260,11 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     // shim + trampoline, keeping full mutual-recursion TCO.
                     match self.loop_header {
                         Some(header) if argvals.len() == self.loop_nparams => {
-                            // Compare against the STACK-MAPPED self bits, so a
+                            // Compare against the tracked self bits, so a
                             // collection mid-body (which moved this closure —
                             // and rewrote both copies) still recognizes itself.
                             let sc = self.fb.use_var(self.self_var);
+                            self.fb.declare_value_needs_stack_map(sc); // not a compile() result
                             let is_self = self.fb.ins().icmp(IntCC::Equal, callee, sc);
                             let selfloop = self.fb.create_block();
                             let notself = self.fb.create_block();
@@ -3116,8 +3281,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
                             // self-loop must come to a safepoint in bounded
                             // time — this is what lets another thread's
                             // collection (or our own allocation pressure)
-                            // interrupt a pure-arithmetic loop.
-                            self.emit_poll();
+                            // interrupt a pure-arithmetic loop. Coarsened to
+                            // every `BACKEDGE_POLL_INTERVAL` iterations.
+                            self.emit_backedge_poll();
                             self.fb.ins().jump(header, &[]);
 
                             // Non-self: the shim tail-call, whose result flows to
@@ -3126,11 +3292,11 @@ impl<'a, 'b> Compiler<'a, 'b> {
                             self.fb.switch_to_block(notself);
                             self.fb.seal_block(notself);
                             let (addr, count) = self.spill_args(&argvals);
-                            self.call_shim(self.refs.tail_call, &[ctx, callee, addr, count])
+                            self.call_shim_fenced(self.refs.tail_call, &[ctx, callee, addr, count])
                         }
                         _ => {
                             let (addr, count) = self.spill_args(&argvals);
-                            self.call_shim(self.refs.tail_call, &[ctx, callee, addr, count])
+                            self.call_shim_fenced(self.refs.tail_call, &[ctx, callee, addr, count])
                         }
                     }
                 } else {
@@ -3352,7 +3518,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let (addr, count) = self.spill_args(&argvals);
                 let tagv = self.i32const(prim_tag(*p));
                 let ctx = self.ctx_val;
-                self.call_shim_checked(self.refs.prim, &[ctx, tagv, addr, count])
+                self.call_shim_fenced_checked(self.refs.prim, &[ctx, tagv, addr, count])
             }
             Ir::Let(..) => {
                 panic!("unflattened Ir reached the JIT: Let survives only before flatten::flatten")
@@ -3371,7 +3537,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let v = self.compile::<M>(val, false);
                 let namev = self.i32const(*name);
                 let ctx = self.ctx_val;
-                self.call_shim(self.refs.set_global, &[ctx, namev, v])
+                self.call_shim_fenced(self.refs.set_global, &[ctx, namev, v])
             }
             // `(.-field obj)` — inline-cached field read via the shim.
             Ir::FieldGet { site, field, obj } => {
@@ -3379,7 +3545,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let sitev = self.i32const(*site as u32);
                 let fieldv = self.i32const(*field);
                 let ctx = self.ctx_val;
-                self.call_shim(self.refs.field_get, &[ctx, sitev, fieldv, o])
+                self.call_shim_fenced(self.refs.field_get, &[ctx, sitev, fieldv, o])
             }
             // Protocol/method dispatch. D5 fast path: when unwrapped (`direct`)
             // and the receiver is a RECORD, read its type sym straight off the
@@ -3480,7 +3646,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let namev = self.i32const(*name);
                 let tyv = self.i32const(*ty);
                 let ctx = self.ctx_val;
-                self.call_shim(self.refs.def_method, &[ctx, namev, tyv, impv])
+                self.call_shim_fenced(self.refs.def_method, &[ctx, namev, tyv, impv])
             }
             // try/catch/finally: pass the body/catch/finally Ir by pointer (they
             // outlive the compiled code) and let the shim run them via `top` under
@@ -3505,7 +3671,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let (addr, count) = self.spill_args(args);
         let tagv = self.i32const(prim_tag(op));
         let ctx = self.ctx_val;
-        self.call_shim_checked(self.refs.prim, &[ctx, tagv, addr, count])
+        self.call_shim_fenced_checked(self.refs.prim, &[ctx, tagv, addr, count])
     }
 
     /// Emit guarded arithmetic: the per-model fixnum fast path when both operands
