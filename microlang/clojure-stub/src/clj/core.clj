@@ -801,7 +801,18 @@
 (defn -concat2 [a b] (let [s (seq a)] (if (nil? s) (-to-list b) (%cons (%first s) (-concat2 (%rest s) b)))))
 (defn -concat-lists [lls] (if (nil? lls) nil (-concat2 (%first lls) (-concat-lists (%rest lls)))))
 (defn -concat [& lls] (-concat-lists lls))
-(defn reverse-onto [s acc] (let [s (seq s)] (if (nil? s) acc (reverse-onto (%rest s) (%cons (%first s) acc)))))
+;; Chunk-aware: cons a chunk's elements onto acc by reading its array directly
+;; (native loop), instead of one seq/%rest/%first step per element. Still builds
+;; a cons list (reverse is inherently O(n) materialization), just skips the
+;; per-element seq-abstraction overhead.
+(defn reverse-onto [s acc]
+  (let [s (seq s)]
+    (cond (nil? s) acc
+          (%num-eq (type-of s) 'ChunkedCons)
+            (let [arr (field s 0) end (field s 2)]
+              (loop [i (field s 1) a acc]
+                (if (%lt i end) (recur (%add i 1) (%cons (%aget arr i) a)) (reverse-onto (field s 3) a))))
+          true (reverse-onto (%rest s) (%cons (%first s) acc)))))
 (defn reverse [c] (reverse-onto c nil))
 (defn drop [n c]
   (if (%lt 0 n) (let [s (seq c)] (if (nil? s) nil (drop (%sub n 1) (%rest s)))) (seq c)))
