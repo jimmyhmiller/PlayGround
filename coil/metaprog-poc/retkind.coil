@@ -41,5 +41,11 @@
 (defn rewrite-kids [(f Code) (i i64) (n i64)] (-> Code)
   (if (icmp-ge i n) `()
     `(~(rewrite (code-nth f i)) ~@(rewrite-kids f (iadd i 1) n))))
+; MODULE-SHAPED: rewrite each module's forms (index 0 is the module name).
+(defn retkind-mod [(m Code)] (-> Code)
+  `(~(code-nth m 0) ~@(rewrite-kids m 1 (code-count m))))
+(defn retkind-mods [(mods Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `()
+    `(~(retkind-mod (code-nth mods i)) ~@(retkind-mods mods (iadd i 1) n))))
 (defn retkind-dialect [(prog Code)] (-> Code)
-  `(do ~@(rewrite-kids prog 0 (code-count prog))))
+  `(do ~@(retkind-mods prog 0 (code-count prog))))

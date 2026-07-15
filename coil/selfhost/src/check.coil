@@ -50,7 +50,9 @@
 (defstruct MethodEntry [(name (slice u8)) (trait (slice u8)) (self_idx i64)])
 (defstruct ImplPair [(trait (slice u8)) (for_type (slice u8))])
 (defstruct LoopFrame [(label (Option (slice u8))) (break_ty (Option Type)) (expected (Option Type))])
-(defstruct EnvEntry [(name (slice u8)) (ty Type)])
+; `bid` is the local-binding identity (see comptime.coil binding-map): a fresh id
+; per let-binding / parameter, so `(binding-of REF)` distinguishes shadows.
+(defstruct EnvEntry [(name (slice u8)) (ty Type) (bid i64)])
 (defstruct EvalPair [(e Expr) (t Type)])
 (defstruct FBox [(items (ArrayList Func))])
 
@@ -779,6 +781,7 @@
       (do (let [pp (al-elem [Param] ps (load i)) ee (alloc-stack EnvEntry)]
             (store! (field ee name) (load (field pp name)))
             (store! (field ee ty) (param-ref-type cx (field pp ty) tps))
+            (store! (field ee bid) (next-bid))
             (al-push! (mut out) (load ee)))
           (store! i (iadd (load i) 1)))))
     (box-al [EnvEntry] a (load out))))
@@ -882,6 +885,9 @@
                (match-else (load (field e kind))
                  (ECall    [func targs args] (res-map-record (load (field e nid)) func))
                  (EFnPtrOf [name]            (res-map-record (load (field e nid)) name))
+                 ; S3: record which LOCAL binding a reference resolves to, so
+                 ; `(binding-of NODE)` distinguishes shadowed locals for a borrow checker.
+                 (EVar     [name]            (bind-map-record (load (field e nid)) (env-get-bid env name)))
                  (_ 0))
                (Ok (mk-synpair a (box-expr a (load (field r e))) (box-type a (load (field r t)))))))))
 
@@ -898,7 +904,16 @@
     (load r)))
 (defn env-insert! [(env (ptr (ArrayList EnvEntry))) (name (slice u8)) (ty (ptr Type))] (-> i64)
   (let [ee (alloc-stack EnvEntry)] (store! (field ee name) name) (store! (field ee ty) (load ty))
+    (store! (field ee bid) (next-bid))
     (al-push! [EnvEntry] env (load ee))))
+; the binding id a name resolves to in the current env (0 = not a local)
+(defn env-get-bid [(env (ptr (ArrayList EnvEntry))) (name (slice u8))] (-> i64)
+  (let [n (al-len [EnvEntry] (load env)) (mut i) (isub n 1) (mut r) 0]
+    (loop (if (icmp-lt (load i) 0) (break)
+      (do (if (str-eq (load (field (al-elem [EnvEntry] env (load i)) name)) name)
+              (do (store! r (load (field (al-elem [EnvEntry] env (load i)) bid))) (break)) 0)
+          (store! i (isub (load i) 1)))))
+    (load r)))
 (defn env-truncate! [(env (ptr (ArrayList EnvEntry))) (newlen i64)] (-> i64)
   (store! (field env len) newlen) 0)
 
@@ -1916,7 +1931,7 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [(ptr (ArrayList Expr)) Diag] (load err)) (Ok (box-al [Expr] a (load out))))))
 (defn codeop-rty [(op i64)] (-> Type)
-  (if (or (icmp-eq op 3) (or (icmp-eq op 6) (or (icmp-eq op 14) (or (icmp-eq op 16) (or (icmp-eq op 19) (or (icmp-eq op 21) (or (icmp-eq op 22) (icmp-eq op 24)))))))) (TInt 64 true)
+  (if (or (icmp-eq op 37) (or (icmp-eq op 3) (or (icmp-eq op 6) (or (icmp-eq op 14) (or (icmp-eq op 16) (or (icmp-eq op 19) (or (icmp-eq op 21) (or (icmp-eq op 22) (icmp-eq op 24))))))))) (TInt 64 true)
   (if (or (icmp-eq op 5) (or (icmp-eq op 13) (icmp-eq op 33))) (TSlice (box-type (malloc-allocator) (TInt 8 false)))
   (if (or (icmp-eq op 0) (or (icmp-eq op 1) (or (icmp-eq op 2) (or (icmp-eq op 10) (or (icmp-eq op 11) (icmp-eq op 34)))))) (TBool)
   (if (icmp-eq op 9) (TNever)
@@ -2354,6 +2369,7 @@
         (Ok (box-al [Func] a (load out))))))
 (defn check-program [(a (ptr Allocator)) (p (ptr Program)) (s (mut LS))] (-> (Result (ptr Program) Diag))
   (type-map-reset)   ; S2: fresh per-expression type map for this check pass
+  (bind-map-reset)   ; S3: fresh local-binding map + id counter for this check pass
   (res-map-reset)    ; S1: fresh call→callee resolution map
   (let [impb (unwrap-ptr [(ArrayList ImpEntry)] (create [(ArrayList ImpEntry)] a))
         expb (unwrap-ptr [(ArrayList ExpEntry)] (create [(ArrayList ExpEntry)] a))

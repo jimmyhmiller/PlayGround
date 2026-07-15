@@ -1,0 +1,16 @@
+(module genrefl_test)
+(import "lib/control.coil" :use *)
+(defstruct Pair [T U] [(first T) (second U) (tag i64)])
+; MACRO reflecting on a generic instantiation: field 0's type of (Pair i64 (ptr u8))
+; should be i64; field 1 should be (ptr u8); field 2 stays i64.
+; Return an encoding: is field0 == `i64` ? and is field1 == `(ptr u8)` ?
+(defn probe [] (-> Code)
+  (let [t0 (code-field-type `(Pair i64 (ptr u8)) 0)
+        t1 (code-field-type `(Pair i64 (ptr u8)) 1)
+        t2 (code-field-type `(Pair i64 (ptr u8)) 2)]
+    (if (code-eq t0 `i64)
+        (if (code-eq t1 `(ptr u8))
+            (if (code-eq t2 `i64) `111 `110)
+          `100)
+      `0)))
+(defn main [] (-> :i64) (probe))

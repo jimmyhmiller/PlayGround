@@ -1,0 +1,7 @@
+(module addforms_test)
+; `the-answer` is NEVER defined here. The add-answer transform emits it as a NEW
+; top-level defn (and rewrites the marker to call it). Exit 42 proves a
+; metaprogram added a real top-level form that the program then ran.
+;   coil run metaprog-poc/compile-and-run/addforms_test.coil   ; -> exit 42
+(import "metaprog-poc/compile-and-run/addforms.coil" :use *)
+(defn main [] (-> :i64) (gen-answer))

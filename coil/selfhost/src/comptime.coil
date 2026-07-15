@@ -729,6 +729,48 @@
               (if (icmp-eq (load (field e nid)) nid) (do (store! r (Some (load (field e ty)))) (break)) 0))
             (store! i (isub (load i) 1)))))
       (load r))))
+; ── S3: the BINDING MAP — per-reference local-binding identity for a borrow/
+; ownership checker. The type-checker records, at every resolved `EVar`, the ID
+; of the LET-binding or parameter it resolves to (0 = a global const/function or
+; unbound). Two references with the same positive id name the SAME local — so
+; shadowing is exact, which name-matching cannot do. `(binding-of NODE)` reads it.
+; The counter is monotonic and reset per check pass, so ids are deterministic
+; across identical rebuilds (the fixpoint holds).
+(defstruct BidCell [(n i64)])
+(defn bid-cell [] (-> (ptr BidCell)) (alloc-static BidCell))
+(defn next-bid [] (-> i64) (let [c (bid-cell) v (iadd (load (field c n)) 1)] (store! (field c n) v) v))
+(defstruct BindMapEntry [(nid i64) (bid i64)])
+(defstruct BindMapBox [(init i64) (lst (ptr (ArrayList BindMapEntry)))])
+(defn bind-map-box [] (-> (ptr BindMapBox)) (alloc-static BindMapBox))
+(defn bind-map-list [] (-> (ptr (ArrayList BindMapEntry)))
+  (let [b (bind-map-box)]
+    (if (icmp-eq (load (field b init)) 0)
+        (do (store! (field b lst) (unwrap-ptr [(ArrayList BindMapEntry)] (create [(ArrayList BindMapEntry)] (malloc-allocator))))
+            (store! (load (field b lst)) (al-new [BindMapEntry] (malloc-allocator)))
+            (store! (field b init) 1) 0)
+      0)
+    (load (field b lst))))
+(defn bind-map-reset [] (-> i64)
+  (let [_ (bind-map-list) b (bind-map-box) c (bid-cell)]
+    (store! (load (field b lst)) (al-new [BindMapEntry] (malloc-allocator)))
+    (store! (field c n) 0) 0))
+(defn bind-map-record [(nid i64) (bid i64)] (-> i64)
+  (if (icmp-le nid 0) 0
+    (let [e (alloc-stack BindMapEntry)] (store! (field e nid) nid) (store! (field e bid) bid)
+      (al-push! (bind-map-list) (load e)) 0)))
+(defn bind-map-lookup [(nid i64)] (-> i64)
+  (if (icmp-le nid 0) 0
+    (let [lst (bind-map-list) n (al-len [BindMapEntry] (load lst)) (mut i) (isub n 1) (mut r) 0]
+      (loop (if (icmp-lt (load i) 0) (break)
+        (do (let [e (al-elem [BindMapEntry] lst (load i))]
+              (if (icmp-eq (load (field e nid)) nid) (do (store! r (load (field e bid))) (break)) 0))
+            (store! i (isub (load i) 1)))))
+      (load r))))
+(defn cop-binding-of [(args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (match (cv-get args 0)
+    (Some [v] (if (is-ccode v) (Ok [CtVal Diag] (CInt (bind-map-lookup (sx-nid (ccode-of v)))))
+                (Err [CtVal Diag] (derr "binding-of: expects a Code node"))))
+    (None [] (Err [CtVal Diag] (derr "binding-of: expects (binding-of NODE)")))))
 (defn cop-type-of [(args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
   (let [a (load (field cx a))]
     (match (cv-get args 0)
@@ -1200,9 +1242,42 @@
 (defn cop-concat [(op i64) (args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
   (let [a (load (field cx a)) (mut buf) (al-new [u8] a) e (concat-into! args 0 (al-len [CtVal] (load args)) a (mut buf))]
     (cop-concat-finish op (al-slice [u8] (load buf)) e)))
+; substitute type-parameter symbols in a type Code tree with the given arg forms:
+; `(ptr T)` with T->i64 becomes `(ptr i64)`. The engine of GENERIC REFLECTION —
+; `code-field-type` on an instantiation `(Gen A B)` reports concrete field types.
+(defn subst-type-code [(node Sexp) (params (ptr (ArrayList (slice u8)))) (targs (ptr (ArrayList Sexp)))] (-> Sexp)
+  (let [tg (sx-tag node)]
+    (if (icmp-eq tg 2)
+        (let [nm (sx-sval node) np (al-len [(slice u8)] (load params)) nt (al-len [Sexp] (load targs))
+              (mut idx) -1 (mut i) 0]
+          (loop (if (or (icmp-ge (load idx) 0) (icmp-ge (load i) np)) (break)
+            (do (if (and (str-eq (al-get [(slice u8)] (load params) (load i)) nm) (icmp-lt (load i) nt))
+                    (store! idx (load i)) 0)
+                (store! i (iadd (load i) 1)))))
+          (if (icmp-ge (load idx) 0) (al-get [Sexp] (load targs) (load idx)) node))
+      (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+          (let [a (malloc-allocator) items (sx-items node) n (sx-len items) (mut xs) (al-new [Sexp] a) (mut i) 0]
+            (loop (if (icmp-ge (load i) n) (break)
+              (do (al-push! (mut xs) (subst-type-code (sx-at items (load i)) params targs)) (store! i (iadd (load i) 1)))))
+            (mk-sexp (if (icmp-eq tg 7) (KVec (box-al [Sexp] a (load xs))) (KList (box-al [Sexp] a (load xs)))) -1 -1))
+        node))))
+; arg0 of a reflection op: a bare type symbol `Node` OR an instantiation `(Gen A B)`.
+; Returns the base name; fills `targs` with the type-argument forms (empty if none).
+(defn refl-type-inst [(args (ptr (ArrayList CtVal))) (targs (ptr (ArrayList Sexp)))] (-> (slice u8))
+  (match (cv-get args 0)
+    (None [] "")
+    (Some [v]
+      (if (not (is-ccode v)) ""
+        (let [node (ccode-of v) tg (sx-tag node)]
+          (if (and (or (icmp-eq tg 6) (icmp-eq tg 7))
+               (and (icmp-ge (sx-len (sx-items node)) 1) (icmp-eq (sx-tag (sx-at (sx-items node) 0)) 2)))
+              (let [items (sx-items node) n (sx-len items) (mut i) 1]
+                (loop (if (icmp-ge (load i) n) (break) (do (al-push! [Sexp] targs (sx-at items (load i))) (store! i (iadd (load i) 1)))))
+                (sx-sval (sx-at items 0)))
+            (if (icmp-eq tg 2) (sx-sval node) "")))))))
 (defn cop-field [(op i64) (args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
-  (let [a (load (field cx a)) tname (code-symname args)]
-    (if (str-eq tname "") (Err [CtVal Diag] (derr "comptime: code-field-* expects a type symbol"))
+  (let [a (load (field cx a)) targs (box-al [Sexp] a (al-new [Sexp] a)) tname (refl-type-inst args targs)]
+    (if (str-eq tname "") (Err [CtVal Diag] (derr "comptime: code-field-* expects a type symbol or instantiation (Gen …)"))
       (let [fsp (alloc-stack FindS)]
         (store! fsp (find-struct-flex cx tname))
         (if (icmp-eq (load (field fsp status)) 1) (Err [CtVal Diag] (derr (sconcat3 a "comptime: '" tname "' is not a struct (field reflection needs a struct; sums unsupported)")))
@@ -1215,10 +1290,19 @@
                 (if (icmp-ne (ct-tag iv) 0) (Err [CtVal Diag] (derr "comptime: code-field-* index must be an integer"))
                   (let [i (cint-of iv) flds (load (field sd fields)) nf (al-len [Field] (load flds))]
                     (if (or (icmp-lt i 0) (icmp-ge i nf)) (Err [CtVal Diag] (derr (sconcat3 a "comptime: field index " (dec->str a i) " out of range")))
-                      (let [fp (al-elem [Field] flds i) fname (load (field fp name)) ftyp (field fp ty)]
+                      (let [fp (al-elem [Field] flds i) fname (load (field fp name)) ftyp (field fp ty)
+                            hasargs (icmp-gt (al-len [Sexp] (load targs)) 0)]
                         (if (icmp-eq op 15) (Ok [CtVal Diag] (CCode (sx-sym fname)))
-                        (if (icmp-eq op 16) (Ok [CtVal Diag] (CInt (type-kind-tag (load ftyp) cx)))
-                            (Ok [CtVal Diag] (CCode (sx-sym (type-name-str a ftyp))))))))))))))))))))
+                        (if (icmp-eq op 16)
+                            ; kind: substituted when an instantiation was given, else EXACTLY as before
+                            (if (not hasargs) (Ok [CtVal Diag] (CInt (type-kind-tag (load ftyp) cx)))
+                              (match (parse-type a (subst-type-code (type->code ftyp) (load (field sd type_params)) targs))
+                                (Ok [st] (Ok [CtVal Diag] (CInt (type-kind-tag st cx))))
+                                (Err [d] (Ok [CtVal Diag] (CInt (type-kind-tag (load ftyp) cx))))))
+                            ; type: structured & substituted for a generic instantiation,
+                            ; else the historical bare-name symbol (byte-identical to before)
+                            (if hasargs (Ok [CtVal Diag] (CCode (subst-type-code (type->code ftyp) (load (field sd type_params)) targs)))
+                              (Ok [CtVal Diag] (CCode (sx-sym (type-name-str a ftyp)))))))))))))))))))))
 (defn cop-variant [(op i64) (args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
   (let [a (load (field cx a)) arg (code-symname args)]
     (if (str-eq arg "") (Err [CtVal Diag] (derr "comptime: code-variant-* expects a symbol"))
@@ -1387,7 +1471,8 @@
     (if (icmp-eq op 29) (cop-bytestostr args cx)
     (if (icmp-eq op 35) (cop-decl args cx)
     (if (icmp-eq op 36) (cop-type-of args cx)
-        (cop-codearg op args cx))))))))))))))))))
+    (if (icmp-eq op 37) (cop-binding-of args cx)
+        (cop-codearg op args cx)))))))))))))))))))
 (defn module-fns-has [(cx (ptr CtCtx)) (q (slice u8))] (-> bool)
   (let [lst (load (field cx module_fns)) n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut r) false]
     (loop (if (or (load r) (icmp-ge (load i) n)) (break)

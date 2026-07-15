@@ -55,16 +55,29 @@ $COIL run $D/samecode_test.coil 2>/dev/null > "$OUT/samecode.txt"; rc=$?
 grep -q "ALL IDENTICAL" "$OUT/samecode.txt" || { echo "same-code output missing"; exit 1; }
 cat "$OUT/samecode.txt"
 
-echo "=== 7. A BORROW-CHECKER-SHAPED ANALYSIS as a compiled checker ==="
-echo "       a use-after-free checker whose dataflow state is a REAL string-keyed"
-echo "       HashMap threaded through a recursive walk — two located errors, veto"
+echo "=== 7. ADD TOP-LEVEL FORMS: a transform that EMITS a new defn ==="
+echo "       add-answer emits (defn the-answer …) into a module and rewrites a"
+echo "       marker to call it — undefined without the transform; exit 42 with it"
+$COIL run $D/addforms_test.coil >/dev/null 2>&1; rc=$?
+[ $rc -eq 42 ] || { echo "add-forms transform FAILED (exit $rc, want 42)"; exit 1; }
+echo "add-top-level-forms: OK (transform emitted a real defn; exit 42)"
+
+echo "=== 8. THE BINDING ORACLE: a use-after-free checker keyed on binding identity ==="
+echo "       (binding-of NODE) distinguishes a SHADOWED local from its namesake —"
+echo "       exactly 2 real errors in bad(), none in ok()'s shadow (name-matching fails)"
 $COIL run $D/borrowlike_bad.coil > "$OUT/borrow.txt" 2>&1; rc=$?
 [ $rc -ne 0 ] || { echo "borrowlike checker FAILED to veto"; exit 1; }
 n=$(grep -c "use after my-free" "$OUT/borrow.txt")
 [ "$n" -eq 2 ] || { cat "$OUT/borrow.txt"; echo "expected 2 located errors, got $n"; exit 1; }
-echo "borrow-shaped checker: OK (2 located errors, build vetoed)"
+echo "binding-oracle checker: OK (2 errors in bad, shadow in ok correctly ignored, veto)"
 
-echo "=== 8. A GUI AT COMPILE TIME: the Mandelbrot viewer metaprogram ==="
+echo "=== 9. GENERIC REFLECTION: field types through an instantiation ==="
+echo "       code-field-type on (Pair i64 (ptr u8)) substitutes T,U -> i64,(ptr u8)"
+$COIL run $D/genrefl_test.coil >/dev/null 2>&1; rc=$?
+[ $rc -eq 111 ] || { echo "generic reflection FAILED (exit $rc, want 111)"; exit 1; }
+echo "generic-reflection: OK (substituted field types match; exit 111)"
+
+echo "=== 10. A GUI AT COMPILE TIME: the Mandelbrot viewer metaprogram ==="
 echo "       a Cocoa window opens ON THE MAIN THREAD during expansion, renders the"
 echo "       set live, and the accepted view's coordinates become the program's"
 echo "       constants (COIL_MANDEL_AUTO=1 scripts the session; drop it to drive"

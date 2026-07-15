@@ -1,0 +1,59 @@
+(module addforms)
+; A transform that ADDS TOP-LEVEL FORMS — the capability a GC dialect needs (emit
+; a per-type `trace-T`, a runtime import, a root table). Here, minimally: for each
+; user module containing a `(gen-answer)` marker, EMIT a new top-level function
+; `the-answer` returning 42, into that same module, and rewrite the marker to a
+; call `(the-answer)`. Without the transform, `the-answer` is undefined and the
+; program does not compile — so a green build proves a real top-level defn was
+; added by the metaprogram.
+;
+; The transform is MODULE-SHAPED: it receives ((name form…) …) and returns the
+; same shape, so an emitted form is tagged with the module it names.
+(import "lib/control.coil" :use *)
+
+; does form `f` contain a (gen-answer) marker anywhere?
+(defn has-gen? [(f Code)] (-> bool)
+  (if (code-list? f)
+      (if (and (icmp-gt (code-count f) 0) (code-eq (code-nth f 0) `gen-answer)) true
+        (has-gen-kids? f 0 (code-count f)))
+    false))
+(defn has-gen-kids? [(f Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) false (if (has-gen? (code-nth f i)) true (has-gen-kids? f (iadd i 1) n))))
+
+; rewrite (gen-answer) -> (the-answer); leave marker-free subtrees exactly as-is
+(defn rw [(f Code)] (-> Code)
+  (if (code-list? f)
+      (if (and (icmp-gt (code-count f) 0) (code-eq (code-nth f 0) `gen-answer))
+          `(the-answer)
+        (if (has-gen? f) `(~@(rw-kids f 0 (code-count f))) f))
+    f))
+(defn rw-kids [(f Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `()
+    `(~(rw (code-nth f i)) ~@(rw-kids f (iadd i 1) n))))
+
+; does this module (name form…) use the marker? (idempotence: after we rewrite it
+; away AND add the-answer, a second pass finds no marker and adds nothing)
+(defn mod-uses-gen? [(m Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) false (if (has-gen? (code-nth m i)) true (mod-uses-gen? m (iadd i 1) n))))
+; already has a `the-answer` defn? (don't add twice)
+(defn defines-answer? [(m Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) false
+    (let [f (code-nth m i)]
+      (if (and (code-list? f)
+           (and (icmp-ge (code-count f) 2)
+            (and (code-eq (code-nth f 0) `defn) (code-eq (code-nth f 1) `the-answer)))) true
+        (defines-answer? m (iadd i 1) n)))))
+
+; rewrite a module's forms; if it used the marker and doesn't yet define the-answer,
+; APPEND the new top-level defn
+(defn xform-mod [(m Code)] (-> Code)
+  (let [rewritten `(~(code-nth m 0) ~@(rw-kids m 1 (code-count m)))]
+    (if (and (mod-uses-gen? m 1 (code-count m)) (not (defines-answer? m 1 (code-count m))))
+        `(~@rewritten (defn the-answer [] (-> i64) 42))
+      rewritten)))
+(defn xform-mods [(ms Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `()
+    `(~(xform-mod (code-nth ms i)) ~@(xform-mods ms (iadd i 1) n))))
+(defn add-answer [(modules Code)] (-> Code)
+  `(do ~@(xform-mods modules 0 (code-count modules))))
+(transform add-answer)

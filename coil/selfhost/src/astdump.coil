@@ -82,7 +82,8 @@
         (if (icmp-eq op 21) "cvariantfields" (if (icmp-eq op 22) "ctraitmethodcount" (if (icmp-eq op 23) "ctraitmethodname"
         (if (icmp-eq op 24) "ctraitarity" (if (icmp-eq op 25) "ctraitparamname" (if (icmp-eq op 26) "ctraitparamtype"
         (if (icmp-eq op 27) "ctraitrettype" (if (icmp-eq op 28) "strbytes" (if (icmp-eq op 29) "bytestostr"
-        (if (icmp-eq op 30) "targetarch" (if (icmp-eq op 31) "report" (if (icmp-eq op 32) "warn" (if (icmp-eq op 33) "codefile" "codefromuser"))))))))))))))))))))))))))))))))))))
+        (if (icmp-eq op 30) "targetarch" (if (icmp-eq op 31) "report" (if (icmp-eq op 32) "warn" (if (icmp-eq op 33) "codefile"
+        (if (icmp-eq op 34) "codefromuser" (if (icmp-eq op 35) "codedecl" (if (icmp-eq op 36) "typeof" (if (icmp-eq op 37) "bindingof" "codefromuser"))))))))))))))))))))))))))))))))))))))))
 
 ; ---- exprs ----
 (defn d-exprs [(w (ptr Writer)) (v (ptr (ArrayList Expr)))] (-> i64)

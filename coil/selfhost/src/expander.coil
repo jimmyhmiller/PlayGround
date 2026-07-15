@@ -767,9 +767,75 @@
         (Ok [_] (strict-resolve-check a (mut s)))))))
 ; ── whole-program TRANSFORMERS ───────────────────────────────────────────────
 ; `(transform FN)` registers FN — a [(prog Code)] -> Code function — run once after
-; expansion over the WHOLE program; FN returns the rewritten program as `(do form…)`
-; and it REPLACES the program. v1: FN must return the same number of top-level forms
-; (an in-place rewrite), so each output form inherits the module tag it replaces.
+; expansion over the WHOLE program; FN returns the rewritten program and it REPLACES
+; the program. The pipeline re-resolves + re-typechecks to a fixpoint.
+;
+; MODULE-SHAPED (symmetric with checkers): FN is handed the program AS MODULES —
+; `((name form…) (name2 form…) …)`, one record per module (head = module-name
+; symbol, rest = its top-level forms) — and returns the SAME shape. Because each
+; returned module names itself, a transform may ADD or REMOVE forms freely (a GC
+; dialect emits a `trace-T` per type; a desugarer rewrites in place): every form in
+; a returned module record is tagged with that module. Order within the program is
+; irrelevant (the whole program is resolved together), so emitted forms may go
+; anywhere in their module. FN must be idempotent — it runs each fixpoint round.
+; A representative source id per module (captured from the input) is stamped onto
+; freshly-built forms so `(code-from-user? …)` classifies generated code correctly.
+(defstruct ModRep [(name (slice u8)) (source i64) (lo i64) (hi i64)])
+(defn mod-reps [(a (ptr Allocator)) (forms (ptr (ArrayList TaggedForm)))] (-> (ptr (ArrayList ModRep)))
+  (let [nf (al-len [TaggedForm] (load forms)) (mut out) (al-new [ModRep] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) nf) (break)
+      (do (let [tf (al-elem [TaggedForm] forms (load i)) nm (opt-mod-name (load (field tf module)))
+                (mut seen) false (mut j) 0 nout (al-len [ModRep] (load out))]
+            (loop (if (icmp-ge (load j) nout) (break)
+              (do (if (str-eq (load (field (al-elem [ModRep] out (load j)) name)) nm) (do (store! seen true) 0) 0)
+                  (store! j (iadd (load j) 1)))))
+            (if (load seen) 0
+              (let [mr (alloc-stack ModRep) fp (field tf form)]
+                (store! (field mr name) nm) (store! (field mr source) (sx-source (load fp)))
+                (store! (field mr lo) (sx-lo (load fp))) (store! (field mr hi) (sx-hi (load fp)))
+                (al-push! (mut out) (load mr)) 0)))
+          (store! i (iadd (load i) 1)))))
+    (box-al [ModRep] a (load out))))
+(defn mod-rep-find [(reps (ptr (ArrayList ModRep))) (nm (slice u8))] (-> (ptr ModRep))
+  (let [n (al-len [ModRep] (load reps)) (mut i) 0 (mut r) (cast (ptr ModRep) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [ModRep] reps (load i)) name)) nm) (do (store! r (al-elem [ModRep] reps (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+; module-name symbol -> Option tag ("" = the no-module top level -> None)
+(defn mod-name->opt [(nm (slice u8))] (-> (Option (slice u8)))
+  (if (icmp-eq (slice-len nm) 0) (None [(slice u8)]) (Some nm)))
+; append one module record `(name form…)` to `out`; err into errf on a bad shape
+(defn append-module-forms! [(a (ptr Allocator)) (out (ptr (ArrayList TaggedForm))) (rec (ptr Sexp)) (reps (ptr (ArrayList ModRep))) (errf (ptr (Option Diag)))] (-> i64)
+  (if (not (or (icmp-eq (sx-tag (load rec)) 6) (icmp-eq (sx-tag (load rec)) 7)))
+      (do (store! errf (Some (derr "transform: each module must be a list (name form…)"))) 0)
+    (let [items (sx-items (load rec)) ni (sx-len items)]
+      (if (or (icmp-eq ni 0) (icmp-ne (sx-tag (sx-at items 0)) 2))
+          (do (store! errf (Some (derr "transform: a module record's head must be its name symbol"))) 0)
+        (let [nmname (sx-sval (sx-at items 0)) tag (mod-name->opt nmname)
+              rep (mod-rep-find reps nmname) (mut k) 1]
+          (loop (if (icmp-ge (load k) ni) (break)
+            (do (let [fp (box-sexp a (sx-at items (load k))) tf (alloc-stack TaggedForm)]
+                  ; freshly-built forms carry dummy spans — stamp them with the
+                  ; module's representative source so `(code-from-user? …)` works
+                  (if (and (icmp-lt (sx-lo (load fp)) 0) (icmp-ne (cast i64 rep) 0))
+                      (stamp-expansion fp (load (field rep source)) (load (field rep lo)) (load (field rep hi)) 0) 0)
+                  (store! (field tf form) (load fp)) (store! (field tf module) tag)
+                  (al-push! [TaggedForm] out (load tf)))
+                (store! k (iadd (load k) 1)))))
+          0)))))
+; rebuild the tagged-form list from a returned `((name form…) …)` module list
+(defn forms-from-modules [(a (ptr Allocator)) (modlist (ptr (ArrayList Sexp))) (reps (ptr (ArrayList ModRep)))] (-> (Result (ptr (ArrayList TaggedForm)) Diag))
+  (let [nm (al-len [Sexp] (load modlist)) outbox (unwrap-ptr [(ArrayList TaggedForm)] (create [(ArrayList TaggedForm)] a))
+        errbox (alloc-stack (Option Diag)) (mut i) 0]
+    (store! outbox (al-new [TaggedForm] a))
+    (store! errbox (None [Diag]))
+    (loop (if (or (diag-some? (load errbox)) (icmp-ge (load i) nm)) (break)
+      (do (append-module-forms! a outbox (al-elem [Sexp] modlist (load i)) reps errbox)
+          (store! i (iadd (load i) 1)))))
+    (match (load errbox)
+      (Some [d] (Err [(ptr (ArrayList TaggedForm)) Diag] d))
+      (None []  (Ok [(ptr (ArrayList TaggedForm)) Diag] outbox)))))
 (defn is-transform-form [(f (ptr Sexp))] (-> bool)
   (and (icmp-eq (sx-tag (load f)) 6)
        (let [it (sx-items (load f))]
@@ -790,28 +856,18 @@
     (if (icmp-eq nt 0) (Ok [(ptr (ArrayList TaggedForm)) Diag] forms)
       (let [(mut cur) forms (mut ti) 0 (mut errf) (None [Diag])]
         (loop (if (or (diag-some? (load errf)) (icmp-ge (load ti) nt)) (break)
-          (do (let [nf (al-len [TaggedForm] (load cur)) (mut items) (al-new [Sexp] a) (mut i) 0]
-                (loop (if (icmp-ge (load i) nf) (break) (do (al-push! (mut items) (load (field (al-elem [TaggedForm] cur (load i)) form))) (store! i (iadd (load i) 1)))))
-                (let [proglist (mk-sexp (KList (box-al [Sexp] a (load items))) -1 -1) (mut margs) (al-new [Sexp] a)]
-                  (al-push! (mut margs) proglist)
-                  (match (expand-macro checked (al-get [(slice u8)] (load transformers) (load ti)) (box-al [Sexp] a (load margs)) (field allfns items) (field gs items) (field gu items) impb expb a)
-                    (Err [d] (do (store! errf (Some d)) 0))
-                    (Ok [outs]
-                      (let [newsexps (unpack-do (box-sexp a outs) a)]
-                        (if (icmp-ne (al-len [Sexp] (load newsexps)) nf)
-                            (do (store! errf (Some (derr "transform: FN must return the same number of top-level forms"))) 0)
-                          (let [(mut newforms) (al-new [TaggedForm] a) (mut k) 0]
-                            (loop (if (icmp-ge (load k) nf) (break)
-                              (do (let [tf (alloc-stack TaggedForm)]
-                                    (store! (field tf form) (al-get [Sexp] (load newsexps) (load k)))
-                                    (let [of (field (al-elem [TaggedForm] cur (load k)) form)]
-                                      ; rebuilt forms get dummy spans — stamp them with the original
-                                      ; form's source so checker scoping (by source) still sees them
-                                      (stamp-expansion (field tf form) (sx-source (load of)) (sx-lo (load of)) (sx-hi (load of)) 0))
-                                    (store! (field tf module) (load (field (al-elem [TaggedForm] cur (load k)) module)))
-                                    (al-push! (mut newforms) (load tf)))
-                                  (store! k (iadd (load k) 1)))))
-                            (store! cur (box-al [TaggedForm] a (load newforms))) 0)))))))
+          (do (let [reps (mod-reps a (load cur))
+                    proglist (build-modules a (load cur))          ; ((name form…) …)
+                    (mut margs) (al-new [Sexp] a)]
+                (al-push! (mut margs) proglist)
+                (match (expand-macro checked (al-get [(slice u8)] (load transformers) (load ti)) (box-al [Sexp] a (load margs)) (field allfns items) (field gs items) (field gu items) impb expb a)
+                  (Err [d] (do (store! errf (Some d)) 0))
+                  (Ok [outs]
+                    ; the returned program is a module list (optionally do-wrapped)
+                    (let [modlist (unpack-do (box-sexp a outs) a)]
+                      (match (forms-from-modules a modlist reps)
+                        (Err [d] (do (store! errf (Some d)) 0))
+                        (Ok [newforms] (do (store! cur newforms) 0)))))))
               (store! ti (iadd (load ti) 1)))))
         (match (load errf) (Some [d] (Err [(ptr (ArrayList TaggedForm)) Diag] d)) (None [] (Ok [(ptr (ArrayList TaggedForm)) Diag] (load cur))))))))
 ; print all collected `(warn …)` diagnostics (located, non-fatal) to stderr.
