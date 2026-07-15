@@ -70,7 +70,7 @@
         (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
           (if (ls-err? (mut s))
               (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
-            (match (resolve-program a (mut s) true)
+            (match (resolve-program a (mut s) true false)
               (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
               (Ok [prog]
                 (match (check-program a prog (mut s))
@@ -102,7 +102,7 @@
         (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
           (if (ls-err? (mut s))
               (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
-            (match (resolve-program a (mut s) true)
+            (match (resolve-program a (mut s) true false)
               (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
               (Ok [prog]
                 (match (check-program a prog (mut s))
@@ -130,7 +130,7 @@
         (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
           (if (ls-err? (mut s))
               (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
-            (match (resolve-program a (mut s) true)
+            (match (resolve-program a (mut s) true false)
               (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
               (Ok [prog] (d-program w prog a))))))))
   0)
@@ -770,7 +770,7 @@
         (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
           (if (ls-err? (mut s))
               (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error (stderr) dp) 1)
-            (match (resolve-program a (mut s) true)
+            (match (resolve-program a (mut s) true false)
               (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error (stderr) dp) 1))
               (Ok [prog]
                 (match (check-program a prog (mut s))

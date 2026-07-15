@@ -870,7 +870,16 @@
   0)
 
 ; ---- resolve-program (src/resolve.rs::resolve_program), strict=true --------
-(defn resolve-program [(a (ptr Allocator)) (s (mut LS)) (strict bool)] (-> (Result (ptr Program) Diag))
+; `tolerant` = SKIP a top-level form that does not parse, instead of aborting. Only
+; the macro-context build (expander.coil::expand-stage3) passes true: at that point
+; macros are not yet expanded, so a top-level macro CALL — `(gctype Node)` — is not
+; yet a `defn` and cannot parse. Skipping those leaves every real definition in the
+; context, so the comptime closure walk can reach ordinary functions rather than
+; being restricted to a syntactic `Code`-signature subset. Every other caller passes
+; false and still reports a genuine syntax error. NOTE: deliberately NOT keyed on
+; `strict` — the authoritative resolve runs with strict=false whenever the program
+; has metaprograms, and must still fail loudly on a real parse error.
+(defn resolve-program [(a (ptr Allocator)) (s (mut LS)) (strict bool) (tolerant bool)] (-> (Result (ptr Program) Diag))
   (let [impb (unwrap-ptr [(ArrayList ImpEntry)] (create [(ArrayList ImpEntry)] a))
         expb (unwrap-ptr [(ArrayList ExpEntry)] (create [(ArrayList ExpEntry)] a))
         out-forms (field s out) nforms (al-len [TaggedForm] (load out-forms))
@@ -890,7 +899,7 @@
               (al-push! (mut sl) (load (field tfp form)))
               (store! single (load sl))
               (match (parse-program a single)
-                (Err [d] (do (store! perr d) (store! pfailed true) (break)))
+                (Err [d] (if tolerant 0 (do (store! perr d) (store! pfailed true) (break))))
                 (Ok [prog]
                   (let [pp (unwrap-ptr [Program] (create [Program] a)) pf (alloc-stack ParsedForm)]
                     (store! pp prog)

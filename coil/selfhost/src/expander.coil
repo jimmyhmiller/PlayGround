@@ -277,18 +277,22 @@
     sb))
 (defn expand-stage3 [(s (mut LS))] (-> (Result i64 Diag))
   (let [a (load (field s a)) out-forms (box-al [TaggedForm] a (load (field s out))) nforms (al-len [TaggedForm] (load out-forms))
-        ; 1. macro detection subset
-        subls (alloc-stack LS) (mut subset) (al-new [TaggedForm] a) (mut i) 0]
-    (loop (if (icmp-ge (load i) nforms) (break)
-      (do (let [tf (al-elem [TaggedForm] out-forms (load i))]
-            (if (keep-for-macro-detection (field tf form)) (do (al-push! (mut subset) (load tf)) 0) 0))
-          (store! i (iadd (load i) 1)))))
+        ; 1. the macro context is the WHOLE program. It used to be a syntactic subset
+        ;    (only defns whose signature mentioned `Code`), which is why a metaprogram
+        ;    could not call an ordinary function: a plain `[(k i64)] -> i64` helper was
+        ;    deleted from the universe before the closure walk ever ran, so the walk
+        ;    could not reach it even through a Code-signature shim. The subset existed
+        ;    solely because resolve-program aborted on the not-yet-expanded top-level
+        ;    macro calls; `tolerant` skips those instead, so the filter has no job.
+        ;    Size is unaffected: closure-funcs below already prunes to what the
+        ;    metaprograms actually reach.
+        subls (alloc-stack LS)]
     (store! (field subls a) a)
-    (store! (field subls out) (load subset))
+    (store! (field subls out) (load out-forms))
     (store! (field subls loaded) (al-new [(slice u8)] a))
     (store! (field subls imports) (load (field s imports)))
     (store! (field subls exports) (load (field s exports)))
-    (match (resolve-program a (mut subls) false)
+    (match (resolve-program a (mut subls) false true)
       (Err [d] (Err [i64 Diag] d))
       (Ok [macroctx]
         (let [quals (code-sig-funcs macroctx a)]
@@ -406,7 +410,7 @@
 ; the program becomes valid (e.g. a desugaring that introduces the very ops that make
 ; it typecheck). The AUTHORITATIVE strict check happens once, after the fixpoint.
 (defn strict-resolve-check [(a (ptr Allocator)) (s (mut LS))] (-> (Result (ptr Program) Diag))
-  (match (resolve-program a (mut s) (not (ls-has-meta (mut s))))
+  (match (resolve-program a (mut s) (not (ls-has-meta (mut s))) false)
     (Err [d] (Err [(ptr Program) Diag] d))
     (Ok [prog] (frontend-check a (mut s) prog))))
 ; Best-effort resolve+check for the model: swallow errors, returning None on failure.

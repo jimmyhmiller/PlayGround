@@ -296,6 +296,27 @@
     (match (load errf)
       (Some [d] (Err [(ptr (ArrayList (ptr CtVal))) Diag] d))
       (None []  (Ok [(ptr (ArrayList (ptr CtVal))) Diag] (box-al [(ptr CtVal)] a (load out)))))))
+; T := concrete substitution built from a generic def's type params and the type
+; args of an application, so `(ArrayList i64)` can be zeroed by zeroing ArrayList's
+; fields with T bound to i64.
+(defn subst-from-targs [(a (ptr Allocator)) (tps (ptr (ArrayList (slice u8)))) (targs (ptr (ArrayList Type)))] (-> (ptr (ArrayList SubstEntry)))
+  (let [s (subst-new a) ntp (al-len [(slice u8)] (load tps)) nta (al-len [Type] (load targs)) (mut i) 0]
+    (loop (if (icmp-ge (load i) ntp) (break)
+      (do (if (icmp-lt (load i) nta)
+              (subst-insert! s (al-get [(slice u8)] (load tps) (load i)) (al-elem [Type] targs (load i)))
+            0)
+          (store! i (iadd (load i) 1)))))
+    s))
+(defn zeroed-struct-cells-subst [(flds (ptr (ArrayList Field))) (subst (ptr (ArrayList SubstEntry))) (cx (ptr CtCtx))] (-> (Result (ptr (ArrayList (ptr CtVal))) Diag))
+  (let [a (load (field cx a)) nf (al-len [Field] (load flds)) (mut out) (al-new [(ptr CtVal)] a) (mut i) 0 (mut errf) (None [Diag])]
+    (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) nf)) (break)
+      (do (match (zeroed-content (subst-apply a (field (al-elem [Field] flds (load i)) ty) subst) cx)
+            (Err [d] (do (store! errf (Some d)) 0))
+            (Ok  [c] (do (al-push! (mut out) (new-cell c)) 0)))
+          (store! i (iadd (load i) 1)))))
+    (match (load errf)
+      (Some [d] (Err [(ptr (ArrayList (ptr CtVal))) Diag] d))
+      (None []  (Ok [(ptr (ArrayList (ptr CtVal))) Diag] (box-al [(ptr CtVal)] a (load out)))))))
 (defn zeroed-content [(ty Type) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
   (let [a (load (field cx a))]
     (match ty
@@ -315,11 +336,24 @@
           (Err [d]    (Err [CtVal Diag] d))
           (Ok [cells] (Ok [CtVal Diag] (CArray (load el) cells)))))
       (TVoid  []      (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet")))
-      (TPtr   [i]     (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet")))
+      ; A zeroed pointer is NULL. Represented as CInt 0 — the interpreter models a
+      ; live pointer as CRef (a cell), which a null pointer by definition has not got.
+      ; Needed because every generic container has a `(ptr T)` data field.
+      (TPtr   [i]     (Ok [CtVal Diag] (CInt 0)))
       (TRef   [m i]   (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet")))
       (TVec   [e k]   (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet")))
-      (TFn    [c p r] (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet")))
-      (TApp   [nm ar] (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet")))
+      ; A zeroed function pointer is NULL, same as TPtr. `Allocator` is a struct of
+      ; fnptr fields, so every allocator-shaped value needs this to be zeroable.
+      (TFn    [c p r] (Ok [CtVal Diag] (CInt 0)))
+      ; A generic struct application, e.g. (ArrayList i64): find the generic def and
+      ; zero its fields under T := the type args.
+      (TApp   [nm ar]
+        (let [sd (ct-struct-find cx nm)]
+          (if (icmp-eq (cast i64 sd) 0)
+              (Err [CtVal Diag] (derr (sconcat3 a "comptime: unknown generic struct '" nm "'")))
+              (match (zeroed-struct-cells-subst (load (field sd fields)) (subst-from-targs a (load (field sd type_params)) ar) cx)
+                (Err [d]    (Err [CtVal Diag] d))
+                (Ok [cells] (Ok [CtVal Diag] (CStruct nm cells)))))))
       (TNever []      (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet")))
       (TCode  []      (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet"))) (TExternRef [] (Err [CtVal Diag] (derr "comptime: `zeroed` of this type isn't supported yet"))))))
 (defn zeroed-value [(ty Type) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
@@ -1439,37 +1473,6 @@
           (let [out (try! (eval-quasi-items items env cx))]
             (Ok [Sexp Diag] (mk-sexp (KVec out) -1 -1))))))))
 (defn type-is-code [(t (ptr Type))] (-> bool) (match-else (load t) (TCode [] true) (_ false)))
-(defn defn-involves-code [(items (ptr (ArrayList Sexp)))] (-> bool)
-  (let [n (sx-len items) (mut i) 0 (mut r) false]
-    (loop (if (or (load r) (icmp-ge (load i) n)) (break)
-      (do (let [it (sx-at items (load i)) tg (sx-tag it)]
-            (if (icmp-eq tg 6)  ; list: (-> Code) ?
-                (let [l (sx-items it)]
-                  (if (and (icmp-ge (sx-len l) 2)
-                           (and (icmp-eq (sx-tag (sx-at l 0)) 2) (str-eq (sx-sval (sx-at l 0)) "->")))
-                      (if (and (icmp-eq (sx-tag (sx-at l 1)) 2) (str-eq (sx-sval (sx-at l 1)) "Code")) (do (store! r true) 0) 0) 0))
-            (if (icmp-eq tg 7)  ; vector of params: any (name Code) ?
-                (let [ps (sx-items it) np (sx-len ps) (mut j) 0]
-                  (loop (if (or (load r) (icmp-ge (load j) np)) (break)
-                    (do (let [p (sx-at ps (load j))]
-                          (if (icmp-eq (sx-tag p) 6)
-                              (let [pl (sx-items p)]
-                                (if (and (icmp-ge (sx-len pl) 2) (and (icmp-eq (sx-tag (sx-at pl 1)) 2) (str-eq (sx-sval (sx-at pl 1)) "Code"))) (do (store! r true) 0) 0)) 0))
-                        (store! j (iadd (load j) 1)))))) 0)))
-          (store! i (iadd (load i) 1)))))
-    (load r)))
-(defn keep-for-macro-detection [(f (ptr Sexp))] (-> bool)
-  (if (icmp-ne (sx-tag (load f)) 6) true
-    (let [items (sx-items (load f))]
-      (if (icmp-eq (sx-len items) 0) true
-        (let [h (sx-at items 0)]
-          (if (icmp-ne (sx-tag h) 2) true
-            (let [head (sx-sval h)]
-              (if (str-eq head "defn") (defn-involves-code items)
-              (if (or (str-eq head "defstruct") (or (str-eq head "defsum") (or (str-eq head "deftrait")
-                  (or (str-eq head "extern") (or (str-eq head "module") (or (str-eq head "import")
-                  (or (str-eq head "include") (or (str-eq head "export") (or (str-eq head "export-c") (str-eq head "defcc"))))))))))
-                  true false)))))))))
 (defn cc-push! [(out (ptr SBox)) (names (ptr (ArrayList (slice u8)))) (func (slice u8))] (-> i64)
   (if (set-contains names func) (do (al-push! (mut (field out items)) func) 0) 0))
 (defn cc-list [(es (ptr (ArrayList Expr))) (names (ptr (ArrayList (slice u8)))) (out (ptr SBox))] (-> i64)
@@ -1496,6 +1499,11 @@
 (defn collect-calls [(e (ptr Expr)) (names (ptr (ArrayList (slice u8)))) (out (ptr SBox))] (-> i64)
   (match-else (load (field e kind))
     (ECall    [func ta args] (do (cc-push! out names func) (cc-list args names out)))
+    ; A function reached ONLY through `fnptr-of` is just as reachable as one that is
+    ; called: `malloc-allocator` builds its vtable with (fnptr-of ma-alloc) and never
+    ; calls ma-alloc directly. Missing this leaves the target out of the comptime
+    ; sub-program and checking it fails with "fnptr-of unknown function".
+    (EFnPtrOf [name] (cc-push! out names name))
     (EBorrow  [m place] (collect-calls place names out))
     (ESpillRef [x] (collect-calls x names out))
     (ENot     [x] (collect-calls x names out))
@@ -1873,7 +1881,7 @@
               (Err [d] (Err [(ptr Program) Diag] d))
               (Ok [gen]
                 (do (splice-metas (mut s) gen a)
-                    (match (resolve-program a (mut s) true)
+                    (match (resolve-program a (mut s) true false)
                       (Err [d] (Err [(ptr Program) Diag] d))
                       (Ok [prog2] (check-program a prog2 (mut s)))))))))))))
 ; src/lib.rs::elaborate — check the resolved program, running the (meta …) staged-macro
