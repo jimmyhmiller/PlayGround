@@ -549,6 +549,17 @@
     (cond (nil? s) acc
           (chunked? s) (-rmul-seq (-rmul-chunk acc (field s 0) (field s 1) (field s 2)) (field s 3))
           true (-rmul-seq (%mul acc (%first s)) (%rest s)))))
+;; `(reduce conj init coll)` — building a collection — is the most common reduce.
+;; Fused to call the `-conj` PROTOCOL METHOD directly (a monomorphic inline-cached
+;; dispatch), skipping the variadic multi-arity `conj` wrapper (arg-list alloc +
+;; count + arity dispatch) on every element.
+(defn -rconj-chunk [acc arr off end]
+  (loop [i off acc acc] (if (%lt i end) (recur (%add i 1) (-conj acc (%aget arr i))) acc)))
+(defn -rconj-seq [acc s]
+  (let [s (seq s)]
+    (cond (nil? s) acc
+          (chunked? s) (-rconj-seq (-rconj-chunk acc (field s 0) (field s 1) (field s 2)) (field s 3))
+          true (-rconj-seq (-conj acc (%first s)) (%rest s)))))
 ;; `reduce` is 2- or 3-arity (like clojure.core): `(reduce f coll)` seeds with the
 ;; first element (or `(f)` when empty); `(reduce f init coll)` seeds with `init`.
 (defn reduce [f & args]
@@ -561,6 +572,10 @@
       (if (nil? (next args))
           (let [s (seq (first args))] (if (nil? s) 1 (-rmul-seq (%first s) (%rest s))))
           (-rmul-seq (first args) (second args)))
+    (identical? f conj)
+      (if (nil? (next args))
+          (let [s (seq (first args))] (if (nil? s) [] (-rconj-seq (%first s) (%rest s))))
+          (-rconj-seq (first args) (second args)))
     (nil? (next args))
       (let [s (seq (first args))] (if (nil? s) (f) (reduce-seq f (%first s) (%rest s))))
     true (reduce-seq f (first args) (seq (second args)))))
