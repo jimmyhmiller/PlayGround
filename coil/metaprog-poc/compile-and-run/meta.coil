@@ -1,0 +1,13 @@
+(module meta)
+; A METAPROGRAM AS A NORMAL PROGRAM. No Code type, no ECodeOp, no special forms.
+; It imports the compiler's REAL reader/parser and walks a real Sexp.
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "selfhost/src/reader.coil" :use *)
+(import "selfhost/src/parser.coil" :use *)
+
+; the compiler will hand us a (ptr Sexp); count the children of a list form.
+(defn meta-count [(s (ptr Sexp))] (-> :i64)
+  (if (icmp-ne (sx-tag (load s)) 6) (isub 0 1)
+    (sx-len (sx-items (load s)))))
+(export-c [meta-count :as "meta_count"])
