@@ -757,9 +757,16 @@
         (nil? (next (next args))) (-range2 (first args) (second args))
         true (-range3 (first args) (second args) (nth args 2))))
 ;; When a empties, hand back `b` UNFORCED (a lazy tail) — `-force` walks the chain
-;; iteratively, so a deep concat stays O(1) stack.
+;; iteratively, so a deep concat stays O(1) stack. CHUNK-PRESERVING: a chunked
+;; run of `a` is passed through as a whole `ChunkedCons` (only its tail is
+;; re-wrapped), so `(reduce f (concat (range …) (range …)))` chunk-scans both
+;; halves instead of walking a fresh cons per element (concat used to de-chunk).
 (defn concat2 [a b]
-  (lazy-seq (let [s (seq a)] (if (nil? s) b (%cons (%first s) (concat2 (%rest s) b))))))
+  (lazy-seq
+    (let [s (seq a)]
+      (cond (nil? s) b
+            (chunked? s) (record 'ChunkedCons (field s 0) (field s 1) (field s 2) (concat2 (field s 3) b))
+            true (%cons (%first s) (concat2 (%rest s) b))))))
 (defn concat-lists [lls]
   (cond (nil? lls) nil
         (nil? (%rest lls)) (%first lls)                       ; last coll: use directly, no wrapper
