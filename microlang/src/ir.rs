@@ -314,6 +314,13 @@ pub enum Prim {
     /// `(%hamt-without root key)` -> the new root (or `nil` if now empty), or
     /// `root` itself (bit-identical) if `key` was not present.
     HamtWithout,
+    /// `(%str-join-arr arr sep)` -> ONE fresh string joining every element of
+    /// `arr` (already-stringified, via a Rust `String::push_str` loop) with
+    /// `sep` between them. Replaces the O(N^2) `%str-cat`-chain join every
+    /// `str`/`apply str`/`clojure.string/join`/collection-printing path used
+    /// (each intermediate concat touched a string as long as everything
+    /// built so far) with one O(total length) native pass.
+    StrJoinArr,
     /// `(%all-fixnum? a b ...)` — true iff EVERY argument is an immediate fixnum.
     /// The guard the specializer places at a lambda's entry; when it holds, the
     /// body's `Fx*` ops are valid. On the JIT it lowers to a single combined

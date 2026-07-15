@@ -1031,13 +1031,17 @@
 (defn take-nth [n coll]
   (lazy-seq (let [s (seq coll)] (if (nil? s) nil (%cons (first s) (take-nth n (drop n s)))))))
 
+;; `seen` is a HASH-SET (native `contains?`/`conj`, O(log32 n) — see the HAMT
+;; prims), not a cons list with linear `-mem?` scanning: the old version's
+;; per-element `-mem?` walk over an ever-growing `seen` list made `distinct`
+;; O(N^2) (it was the single worst benchmark in a sweep — ~4472x off Clojure).
 (defn -distinct [seen coll]
   (lazy-seq (let [s (seq coll)]
               (if (nil? s) nil
                   (let [x (first s)]
-                    (if (-mem? seen x) (-distinct seen (rest s))
-                        (%cons x (-distinct (%cons x seen) (rest s)))))))))
-(defn distinct [coll] (-distinct nil coll))
+                    (if (contains? seen x) (-distinct seen (rest s))
+                        (%cons x (-distinct (conj seen x) (rest s)))))))))
+(defn distinct [coll] (-distinct #{} coll))
 (def -none (record 'None nil))
 (defn -dedupe [prev coll]
   (lazy-seq (let [s (seq coll)]
@@ -1221,29 +1225,33 @@
 
 ;; ─────────────── str (value -> string) ───────────────
 ;; Clojure-style `str`: strings raw, collections formatted structurally here (so
-;; the toolkit stays frontend-neutral); leaf atoms go through `%str-of`. Uses
-;; `%str-cat` to concatenate. `nil` stringifies to "" (as in clojure.core).
-(defn -str-join [sep coll]
-  (let [s (seq coll)]
-    (cond (nil? s) ""
-          (nil? (next s)) (-str1 (first s))
-          true (%str-cat (-str1 (first s)) (%str-cat sep (-str-join sep (rest s)))))))
-(defn -str-map-join [kvs]
-  (cond (nil? (seq kvs)) ""
-        (nil? (seq (rest (rest kvs))))
-          (%str-cat (-str1 (first kvs)) (%str-cat " " (-str1 (second kvs))))
-        true (%str-cat (-str1 (first kvs))
-                       (%str-cat " " (%str-cat (-str1 (second kvs))
-                                               (%str-cat ", " (-str-map-join (rest (rest kvs)))))))))
+;; the toolkit stays frontend-neutral); leaf atoms go through `%str-of`. `nil`
+;; stringifies to "" (as in clojure.core).
+;;
+;; Joining is done by materializing the (already-stringified) elements into a
+;; native growable array (`%apush`, O(1) amortized per element) and handing
+;; the WHOLE array to the native `%str-join-arr` prim for ONE O(total length)
+;; pass — NOT a right- or left-recursive chain of `%str-cat`s. A `%str-cat`
+;; chain is O(N^2) in element count: each intermediate concat touches a
+;; string as long as everything joined so far (`str`/`apply str`, `-str-join`
+;; and hence `clojure.string/join` and vector/set/list/lazy-seq PRINTING all
+;; used to go through exactly that chain).
+(defn -to-str-array [coll]
+  (let [arr (%make-array 0)]
+    (loop [s (seq coll)]
+      (if (nil? s)
+          arr
+          (do (%apush arr (-str1 (%first s))) (recur (next s)))))))
+(defn -str-join [sep coll] (%str-join-arr (-to-str-array coll) sep))
 ;; Format a seq of [k v] map entries as "k v, k v" (map keys are unordered).
 (defn -str-entries [es]
-  (let [es (seq es)]
-    (cond (nil? es) ""
-          (nil? (next es)) (let [e (first es)] (%str-cat (-str1 (first e)) (%str-cat " " (-str1 (second e)))))
-          true (let [e (first es)]
-                 (%str-cat (-str1 (first e))
-                           (%str-cat " " (%str-cat (-str1 (second e))
-                                                   (%str-cat ", " (-str-entries (rest es))))))))))
+  (let [arr (%make-array 0)]
+    (loop [es (seq es)]
+      (if (nil? es)
+          (%str-join-arr arr ", ")
+          (let [e (first es)]
+            (%apush arr (%str-cat (-str1 (first e)) (%str-cat " " (-str1 (second e)))))
+            (recur (next es)))))))
 (defn -str1 [x]
   (cond (nil? x) ""
         (string? x) x
@@ -1254,8 +1262,14 @@
         (lazy-seq? x) (%str-cat "(" (%str-cat (-str-join " " x) ")"))
         (list? x) (%str-cat "(" (%str-cat (-str-join " " x) ")"))
         true (%str-of x)))
-(defn -str-seq [acc s] (if (nil? (seq s)) acc (-str-seq (%str-cat acc (-str1 (first s))) (rest s))))
-(defn str [& xs] (-str-seq "" xs))
+;; Fast path for 0/1 args (the overwhelmingly common shape — `(str x)` is a
+;; routine coercion, called per-element all over the stdlib, e.g.
+;; `(map str coll)`): skip the array-materialize + native-join machinery
+;; entirely, it's pure overhead when there is nothing to JOIN.
+(defn str [& xs]
+  (cond (nil? xs) ""
+        (nil? (next xs)) (-str1 (first xs))
+        true (%str-join-arr (-to-str-array xs) "")))
 
 ;; ─────────────── apply ───────────────
 ;; `(apply f a b ... coll)` — call `f` with the leading args followed by the

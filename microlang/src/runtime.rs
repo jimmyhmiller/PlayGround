@@ -219,6 +219,26 @@ pub(crate) struct Tables {
     pub(crate) dispatch: Box<dyn Dispatch>,
 }
 
+/// Indices into `Shared::type_tag_cache` for `type_tag`'s built-in category
+/// names (everything that isn't a `Record`, which returns its own `type_id`
+/// directly with no interning at all).
+const TYPE_TAG_LONG: usize = 0;
+const TYPE_TAG_DOUBLE: usize = 1;
+const TYPE_TAG_BOOLEAN: usize = 2;
+const TYPE_TAG_NIL: usize = 3;
+const TYPE_TAG_SYMBOL: usize = 4;
+const TYPE_TAG_LIST: usize = 5;
+const TYPE_TAG_EMPTYLIST: usize = 6;
+const TYPE_TAG_VECTOR: usize = 7;
+const TYPE_TAG_STRING: usize = 8;
+const TYPE_TAG_CHAR: usize = 9;
+const TYPE_TAG_FN: usize = 10;
+const TYPE_TAG_RATIO: usize = 11;
+const TYPE_TAG_ATOM: usize = 12;
+const TYPE_TAG_FUTURE: usize = 13;
+const TYPE_TAG_OBJECT: usize = 14;
+const TYPE_TAG_CACHE_LEN: usize = 15;
+
 /// State SHARED by every thread over one `Arc`. Its interior mutability is the
 /// whole game: the heap is read lock-free (stable segmented addresses) and
 /// mutated only under `heap_lock` (alloc / GC / in-place set); the append-only
@@ -291,6 +311,13 @@ pub struct Shared<M: ValueModel> {
     sym_cache_vector_node: AtomicU32,
     sym_cache_persistent_vector: AtomicU32,
     sym_cache_chunked_cons: AtomicU32,
+    /// Same lock-free-on-hit cache, for `type_tag`'s BUILT-IN category names
+    /// (see the `TYPE_TAG_*` indices below) — `type_tag` backs `type-of`,
+    /// which nearly every predicate (`vector?`, `map?`, `string?`, `seq?`, a
+    /// LazySeq's `-seq`, `chunked?`, ...) calls on every single invocation, so
+    /// this was showing up as real time in profiles even outside string/HAMT
+    /// code.
+    type_tag_cache: [AtomicU32; TYPE_TAG_CACHE_LEN],
     _pd: PhantomData<fn() -> M>,
 }
 
@@ -408,6 +435,7 @@ impl<M: ValueModel> Runtime<M> {
             sym_cache_vector_node: AtomicU32::new(u32::MAX),
             sym_cache_persistent_vector: AtomicU32::new(u32::MAX),
             sym_cache_chunked_cons: AtomicU32::new(u32::MAX),
+            type_tag_cache: std::array::from_fn(|_| AtomicU32::new(u32::MAX)),
             _pd: PhantomData,
         };
         // Pre-size the global array to its reserved cap so its base is stable and
@@ -1045,6 +1073,25 @@ impl<M: ValueModel> Runtime<M> {
             }
             Prim::HamtLookup => self.hamt_map_lookup(args[0], args[1], args[2]),
             Prim::HamtWithout => self.hamt_map_without(args[0], args[1]),
+            // Join an array of already-stringified elements in ONE native pass
+            // (see `Prim::StrJoinArr`'s doc comment in ir.rs).
+            Prim::StrJoinArr => {
+                let Val::Ref(id) = self.decode(args[0]) else { panic!("str-join-arr: not an array"); };
+                let elems = match &self.heap()[id as usize] {
+                    Obj::Vector(v) => v.clone(),
+                    _ => panic!("str-join-arr: not an array"),
+                };
+                let sep = self.as_str(args[1], "str-join-arr");
+                let mut out = String::new();
+                for (i, &e) in elems.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(&sep);
+                    }
+                    out.push_str(&self.as_str(e, "str-join-arr"));
+                }
+                let sid = self.alloc(Obj::Str(out));
+                M::R::enc_ref(sid)
+            }
             Prim::ArrPush => {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("apush: not an array");
@@ -1835,29 +1882,29 @@ impl<M: ValueModel> Runtime<M> {
     /// so protocol/method dispatch can target primitives and built-in containers —
     /// exactly what an in-language collection library needs.
     pub fn type_tag(&self, bits: u64) -> Sym {
-        let name = match self.decode(bits) {
-            Val::Int(_) => "Long",
-            Val::Float(_) => "Double",
-            Val::Bool(_) => "Boolean",
-            Val::Nil => "nil",
-            Val::Sym(_) => "Symbol",
+        let (idx, name) = match self.decode(bits) {
+            Val::Int(_) => (TYPE_TAG_LONG, "Long"),
+            Val::Float(_) => (TYPE_TAG_DOUBLE, "Double"),
+            Val::Bool(_) => (TYPE_TAG_BOOLEAN, "Boolean"),
+            Val::Nil => (TYPE_TAG_NIL, "nil"),
+            Val::Sym(_) => (TYPE_TAG_SYMBOL, "Symbol"),
             Val::Ref(id) => match &self.heap()[id as usize] {
                 Obj::Record { type_id, .. } => return *type_id,
-                Obj::Cons { .. } => "List",
-                Obj::EmptyList => "EmptyList",
-                Obj::Vector(_) => "Vector",
-                Obj::Str(_) => "String",
-                Obj::Char(_) => "Char",
-                Obj::Closure { .. } => "Fn",
-                Obj::BigInt(_) | Obj::HugeInt(_) => "Long",
-                Obj::Ratio(..) => "Ratio",
-                Obj::BoxFloat(_) => "Double",
-                Obj::Atom(_) => "Atom",
-                Obj::Future(_) => "Future",
-                _ => "Object",
+                Obj::Cons { .. } => (TYPE_TAG_LIST, "List"),
+                Obj::EmptyList => (TYPE_TAG_EMPTYLIST, "EmptyList"),
+                Obj::Vector(_) => (TYPE_TAG_VECTOR, "Vector"),
+                Obj::Str(_) => (TYPE_TAG_STRING, "String"),
+                Obj::Char(_) => (TYPE_TAG_CHAR, "Char"),
+                Obj::Closure { .. } => (TYPE_TAG_FN, "Fn"),
+                Obj::BigInt(_) | Obj::HugeInt(_) => (TYPE_TAG_LONG, "Long"),
+                Obj::Ratio(..) => (TYPE_TAG_RATIO, "Ratio"),
+                Obj::BoxFloat(_) => (TYPE_TAG_DOUBLE, "Double"),
+                Obj::Atom(_) => (TYPE_TAG_ATOM, "Atom"),
+                Obj::Future(_) => (TYPE_TAG_FUTURE, "Future"),
+                _ => (TYPE_TAG_OBJECT, "Object"),
             },
         };
-        self.intern(name)
+        self.intern_cached(&self.shared.type_tag_cache[idx], name)
     }
     pub fn register_method(&self, name: Sym, ty: Sym, imp: u64) {
         let mut t = self.shared.tables.lock().unwrap();
