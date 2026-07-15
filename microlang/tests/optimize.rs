@@ -21,9 +21,12 @@ fn walk<M: ValueModel>(src: &str) -> String {
 
 /// Analyze one core-surface form to `Ir` (no scheme desugar needed for the
 /// `fn`/`def`/`if`/`+`/`<` forms used here).
+/// The FRONTEND (chain-scoped, pre-flatten) Ir for one form — the shape the
+/// structural pass-level tests (`inline`/`propagate_copies`/DCE) operate on.
 fn to_ir<M: ValueModel>(rt: &mut Runtime<M>, src: &str) -> Ir {
     let forms = microlang::sexpr::read_all(rt, src);
-    microlang::sexpr::analyze(rt, &TreeWalk, forms[0])
+    let mut sx = microlang::sexpr::Sexpr::new(rt);
+    sx.analyze(rt, &TreeWalk, forms[0])
 }
 
 /// Optimized JIT: the pass pipeline in front of the native tier.

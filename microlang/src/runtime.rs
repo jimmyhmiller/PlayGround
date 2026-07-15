@@ -253,6 +253,9 @@ pub struct Shared<M: ValueModel> {
     pub(crate) heap_lock: Mutex<()>,
     allocs: AtomicU64,
     pub(crate) relocated: AtomicU64,
+    /// Bumped on every `register_method`, so per-site dispatch caches see
+    /// protocol (re)definitions immediately.
+    pub(crate) dispatch_version: AtomicU64,
     pub(crate) freed: AtomicU64,
     /// Constant pool (reserved, stable base for the JIT's inline reads).
     pub(crate) consts: UnsafeCell<Vec<u64>>,
@@ -365,6 +368,11 @@ pub struct Runtime<M: ValueModel> {
     /// binding last; a `DYN_MARK` entry delimits each `binding` scope. Traced by the
     /// collector (self here, published via `me.dyn_roots` when parked).
     pub(crate) dyn_stack: Vec<(Sym, u64)>,
+    /// Per-HANDLE (thread-local, lock-free) dispatch-site inline cache:
+    /// `site -> (gc_epoch, receiver type, impl)`. A hit skips the registry
+    /// mutex + hash lookup entirely. Epoch-invalidated: `relocated` advances on
+    /// every moving collection, so an entry holding a moved impl never hits.
+    site_ic: std::cell::RefCell<Vec<(u64, Sym, u64)>>,
     /// Frontend-installed bridge back into the reader + compiler, for the runtime
     /// ops `read-string`/`eval`/`macroexpand-1`. Set on the MAIN handle only (worker
     /// threads get `None` — they never re-enter the compiler).
@@ -407,6 +415,7 @@ impl<M: ValueModel> Runtime<M> {
             heap_lock: Mutex::new(()),
             allocs: AtomicU64::new(0),
             relocated: AtomicU64::new(0),
+            dispatch_version: AtomicU64::new(0),
             freed: AtomicU64::new(0),
             consts: UnsafeCell::new(Vec::with_capacity(TABLE_CAP)),
             consts_lock: Mutex::new(()),
@@ -453,7 +462,7 @@ impl<M: ValueModel> Runtime<M> {
             ..shared
         });
         let me = register_mutator(&shared);
-        Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), eval_bridge: None, _pd: PhantomData }
+        Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), site_ic: std::cell::RefCell::new(Vec::new()), eval_bridge: None, _pd: PhantomData }
     }
 
     /// A fresh mutator handle for another OS thread, sharing this runtime's heap,
@@ -462,7 +471,7 @@ impl<M: ValueModel> Runtime<M> {
     /// a `std::thread`.
     pub fn thread_handle(&self) -> Self {
         let me = register_mutator(&self.shared);
-        Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), eval_bridge: None, _pd: PhantomData }
+        Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), site_ic: std::cell::RefCell::new(Vec::new()), eval_bridge: None, _pd: PhantomData }
     }
 
     // ── heap access (lock-free reads to stable addresses) ───
@@ -1784,6 +1793,9 @@ impl<M: ValueModel> Runtime<M> {
     /// Swap the dispatch strategy. Nothing else changes — the axis is free.
     pub fn set_dispatch(&self, d: Box<dyn Dispatch>) {
         self.shared.tables.lock().unwrap().dispatch = d;
+        // Swapping strategies invalidates every per-thread site cache (the new
+        // strategy may resolve differently or need to observe every call).
+        self.shared.dispatch_version.fetch_add(1, Ordering::Relaxed);
     }
     pub fn dispatch_stats(&self) -> crate::dispatch::DispatchStats {
         self.shared.tables.lock().unwrap().dispatch.stats()
@@ -1964,6 +1976,7 @@ impl<M: ValueModel> Runtime<M> {
         let mut t = self.shared.tables.lock().unwrap();
         t.method_names.insert(name);
         t.methods.insert((name, ty), imp);
+        self.shared.dispatch_version.fetch_add(1, Ordering::Relaxed);
     }
     /// Is `name` a registered method (so a frontend should compile `(name recv)`
     /// to a `Dispatch`)? The dispatch axis's compile-time query.
@@ -2006,8 +2019,40 @@ impl<M: ValueModel> Runtime<M> {
     /// / `Object` does), so e.g. `=` works on any value without every type
     /// implementing `IEquiv`.
     pub fn resolve_or_default(&self, site: usize, method: Sym, ty: Sym) -> Option<u64> {
-        self.resolve_method(site, method, ty)
-            .or_else(|| self.resolve_method(site, method, self.intern("Object")))
+        // Per-site, per-thread monomorphic cache: one epoch load + two compares
+        // on the (overwhelmingly common) repeat-type case, instead of a mutex +
+        // SipHash registry lookup per dispatch. The epoch folds the GC's
+        // relocation count (a moved impl never hits) with the registry version
+        // (a redefinition invalidates immediately).
+        let reloc = self.shared.relocated.load(Ordering::Relaxed);
+        let ver = self.shared.dispatch_version.load(Ordering::Relaxed);
+        let epoch = reloc.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ver;
+        {
+            let ic = self.site_ic.borrow();
+            if let Some(&(e, t, imp)) = ic.get(site) {
+                if e == epoch && t == ty {
+                    return Some(imp);
+                }
+            }
+        }
+        let resolved = self
+            .resolve_method(site, method, ty)
+            .or_else(|| self.resolve_method(site, method, self.intern("Object")));
+        // Fill the per-thread cache only when the installed strategy is a pure
+        // registry lookup (see `Dispatch::thread_cacheable`) — an observing
+        // strategy (ICs, speculation) must see every repeat call.
+        let cacheable = self.shared.tables.lock().unwrap().dispatch.thread_cacheable();
+        if cacheable {
+            if let Some(imp) = resolved {
+                let mut ic = self.site_ic.borrow_mut();
+                if ic.len() <= site {
+                    // `Sym::MAX` is never a real type tag, so a fresh slot can't hit.
+                    ic.resize(site + 1, (0, Sym::MAX, 0));
+                }
+                ic[site] = (epoch, ty, imp);
+            }
+        }
+        resolved
     }
 
     /// A fresh tag for an escape continuation.

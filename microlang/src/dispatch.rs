@@ -42,6 +42,14 @@ pub trait Dispatch {
     fn stats(&self) -> DispatchStats {
         DispatchStats::default()
     }
+    /// May the runtime layer a lock-free per-thread `(site, type) -> impl`
+    /// cache in FRONT of this strategy? Sound only for a strategy that is a
+    /// pure registry lookup; a strategy that OBSERVES resolutions (ICs,
+    /// speculation counters) must decline, or the cache would hide repeat
+    /// calls from it. Default: decline.
+    fn thread_cacheable(&self) -> bool {
+        false
+    }
     fn name(&self) -> &'static str;
 }
 
@@ -61,6 +69,11 @@ impl Dispatch for Megamorphic {
     }
     fn stats(&self) -> DispatchStats {
         DispatchStats { hits: 0, misses: self.lookups.get() }
+    }
+    fn thread_cacheable(&self) -> bool {
+        // Pure registry lookup (the counter is a diagnostic, not semantics):
+        // fronting it with a per-thread cache cannot change any resolution.
+        true
     }
     fn name(&self) -> &'static str {
         "Megamorphic"
