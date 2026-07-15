@@ -65,6 +65,23 @@ New API this project added (all shipped):
   executed later, once the whole program is checked, so it reads the compiler's
   authoritative output. A checker therefore layers *policy* on a program that already
   typechecks.
+- **Transforms are MODULE-SHAPED and may ADD/REMOVE top-level forms.** `(transform
+  FN)` hands FN the program as `((name form…) …)` (one record per module, like a
+  checker) and FN returns the same shape; every form in a returned module record is
+  tagged with that module, so a transform may EMIT new top-level defns (a GC dialect's
+  per-type `trace-T`, a root table, a runtime import) or drop forms. Demo:
+  `metaprog-poc/compile-and-run/addforms.coil` emits a whole new defn.
+- **`(binding-of NODE)` → the local-binding identity** a reference resolves to (an
+  i64; 0 = a global const/function), recorded by the type-checker per reference.
+  Two references with the same positive id name the SAME local, so a checker
+  distinguishes a **shadowed** local from its outer namesake — which name-matching
+  cannot. This is what a borrow/move checker keys its dataflow on. Demo:
+  `metaprog-poc/compile-and-run/borrowlike.coil` (a use-after-free checker).
+- **Generic reflection.** `code-field-type`/`code-field-kind` accept a type
+  **instantiation** `(Gen A B)`, not only a bare name, and substitute the type
+  parameters — `code-field-type (Pair i64 (ptr u8)) 1` → `(ptr u8)`. So a derive/
+  trace generator sees concrete field types through a generic. Demo:
+  `metaprog-poc/compile-and-run/genrefl_test.coil`.
 - **`(transform FN)`** — there is ONE kind of transform, and it is semantic. It runs
   to a fixpoint: each round it reads the checked program (via `code-decl` etc.) to
   decide its rewrite, then the pipeline re-resolves + re-typechecks. It also TOLERATES
