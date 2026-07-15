@@ -23,6 +23,7 @@ pub mod compiled;
 pub mod dispatch;
 pub mod flatten;
 pub mod gc;
+pub mod heap;
 pub mod ir;
 #[cfg(feature = "jit")]
 pub mod jit_cranelift;
