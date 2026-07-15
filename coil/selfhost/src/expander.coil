@@ -972,3 +972,81 @@
               (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
               (Ok [_] (d-expanded w a (mut s))))))))
   0)
+
+; ── `coil expand FILE` — the program AS SOURCE after macros AND transforms ────
+; Reprints the user file's top-level forms once every macro has expanded and every
+; registered transform has rewritten the program (the state a checker/mono sees),
+; so a metaprogram's effect is directly readable. An Sexp → source pretty-printer.
+(defn sx-atom-text [(w (ptr Writer)) (a (ptr Allocator)) (x Sexp)] (-> i64)
+  (let [tg (sx-tag x)]
+    (if (icmp-eq tg 0) (ps w (i64->str a (sx-ival x)))
+    (if (icmp-eq tg 2) (ps w (sx-sval x))
+    (if (icmp-eq tg 3) (do (wb w 58) (ps w (sx-sval x)) 0)
+    (if (icmp-eq tg 4) (do (wb w 34) (ps w (sx-sval x)) (wb w 34) 0)
+    (if (icmp-eq tg 5) (do (wb w 99) (wb w 34) (ps w (sx-sval x)) (wb w 34) 0)
+        (do (ps w "<") (ps w (i64->str a tg)) (ps w ">") 0))))))))
+; rendered inline width of a node — used to decide whether to break a list
+(defn sx-width [(a (ptr Allocator)) (x Sexp)] (-> i64)
+  (let [tg (sx-tag x)]
+    (if (icmp-eq tg 0) (slice-len (i64->str a (sx-ival x)))
+    (if (icmp-eq tg 2) (slice-len (sx-sval x))
+    (if (icmp-eq tg 3) (iadd 1 (slice-len (sx-sval x)))
+    (if (icmp-eq tg 4) (iadd 2 (slice-len (sx-sval x)))
+    (if (icmp-eq tg 5) (iadd 3 (slice-len (sx-sval x)))
+    (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+        (let [items (sx-items x) n (sx-len items) (mut wsum) 2 (mut i) 0]
+          (loop (if (icmp-ge (load i) n) (break)
+            (do (store! wsum (iadd (iadd (load wsum) (if (icmp-gt (load i) 0) 1 0)) (sx-width a (sx-at items (load i))))) (store! i (iadd (load i) 1)))))
+          (load wsum))
+        3))))))))
+(defn sx-emit [(w (ptr Writer)) (a (ptr Allocator)) (x Sexp) (col i64)] (-> i64)
+  (let [tg (sx-tag x)]
+    (if (not (or (icmp-eq tg 6) (icmp-eq tg 7))) (sx-atom-text w a x)
+      (let [items (sx-items x) n (sx-len items) open (if (icmp-eq tg 7) 91 40) close (if (icmp-eq tg 7) 93 41)]
+        (if (icmp-eq n 0) (do (wb w open) (wb w close) 0)
+          ; inline if it fits within the line budget from the current column
+          (if (icmp-le (iadd col (sx-width a x)) 92)
+              (do (wb w open)
+                  (let [(mut i) 0]
+                    (loop (if (icmp-ge (load i) n) (break)
+                      (do (if (icmp-gt (load i) 0) (wb w 32) 0) (sx-emit w a (sx-at items (load i)) 0) (store! i (iadd (load i) 1))))))
+                  (wb w close) 0)
+            (do (wb w open)
+                (sx-emit w a (sx-at items 0) (iadd col 1))
+                (let [(mut i) 1]
+                  (loop (if (icmp-ge (load i) n) (break)
+                    (do (wb w 10) (let [(mut j) 0] (loop (if (icmp-ge (load j) (iadd col 2)) (break) (do (wb w 32) (store! j (iadd (load j) 1))))))
+                        (sx-emit w a (sx-at items (load i)) (iadd col 2)) (store! i (iadd (load i) 1))))))
+                (wb w close) 0)))))))
+(defn expand-src-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64)
+  (let [w (stdout) s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) path src)              ; real path -> code-from-user? true
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (do (load-program (mut s) forms cwd)
+            (match (expand-stage3 (mut s))
+              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+              (Ok [_]
+                ; run the transform fixpoint (mutates s.out to the rewritten program);
+                ; print regardless of whether the final strict check passes.
+                (do (match (run-transforms-and-check a (mut s)) (Err [d] 0) (Ok [_] 0))
+                    (let [out (field s out) n (al-len [TaggedForm] (load out)) (mut i) 0]
+                      (loop (if (icmp-ge (load i) n) (break)
+                        (do (let [tf (al-elem [TaggedForm] out (load i)) fp (field tf form)]
+                              ; the file's OWN top-level forms are source 0
+                              (if (icmp-eq (sx-source (load fp)) 0)
+                                  (do (sx-emit w a (load fp) 0) (wb w 10) (wb w 10) 0) 0))
+                            (store! i (iadd (load i) 1)))))
+                      0))))))))
+  0)

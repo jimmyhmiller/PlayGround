@@ -1188,6 +1188,8 @@
               (let [path (load (index argv 2))] (dump-ast-program a (read-file a path)))
            (if (str-eq sub "dump-load")
                (let [path (load (index argv 2))] (dump-load-program a (read-file a path) (cwd-slice a)))
+            (if (str-eq sub "expand")
+                (let [path (load (index argv 2))] (expand-src-program a (read-file a path) (cwd-slice a) (cstr->slice path)))
             (if (str-eq sub "dump-expand")
                 (let [path (load (index argv 2))] (dump-expand-program a (read-file a path) (cwd-slice a)))
              (if (str-eq sub "dump-resolved")
@@ -1217,5 +1219,5 @@
             (store! (field ctx emitir-fn) emitir-fn)
             ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
             ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
-            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))))))))))
+            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0))))))))))))))))))))))
   );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====
