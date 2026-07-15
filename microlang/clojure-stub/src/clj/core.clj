@@ -1144,27 +1144,65 @@
       (assoc m k (apply f (get m k) args))
       (assoc m k (apply update-in (get m k) (rest ks) f args)))))
 
-;; sorting (tortoise/hare split + merge; numeric default via %lt)
+;; sorting: BOTTOM-UP iterative merge sort over a native array (numeric
+;; default via `compare`/%lt). The old top-down version merged with
+;; `(%cons x (-merge-lists ... ))` — a NON-tail recursion whose depth was the
+;; size of the merged run, so the outermost (n-element) merge recursed n deep
+;; and stack-overflowed past a few thousand elements (a real crash, not just
+;; slow: `(sort (shuffle (vec (range 5000))))` never returned). Bottom-up
+;; merge sort does the same O(n log n) comparisons but as `loop`s (register
+;; loops, O(1) native stack) over a `%make-array` buffer, ping-ponging
+;; between two buffers pass by pass — no recursion depth tied to n. `less` is
+;; still an arbitrary user comparator (a real closure call per comparison, as
+;; it must be — a Rust prim can't invoke a Clojure fn), so this isn't a
+;; native-comparator sort; it fixes the STACK SAFETY and the allocation
+;; pattern, not the per-comparison interpreted-call cost.
 (defn -default-less [a b] (%lt (compare a b) 0))
-(defn -merge-lists [less a b]
-  (cond (nil? (seq a)) (seq b)
-        (nil? (seq b)) (seq a)
-        (less (first b) (first a)) (%cons (first b) (-merge-lists less a (rest b)))
-        true (%cons (first a) (-merge-lists less (rest a) b))))
-(defn -halve [slow fast acc]
-  (if (if (nil? (seq fast)) true (nil? (next fast))) (vector (reverse acc) slow)
-      (-halve (rest slow) (rest (rest fast)) (%cons (first slow) acc))))
-(defn -msort [less s]
-  (let [s (-to-list s)]
-    (if (if (nil? s) true (nil? (next s))) s
-        (let [parts (-halve s s nil)]
-          (-merge-lists less (-msort less (nth parts 0)) (-msort less (nth parts 1)))))))
+(defn -to-array [coll]
+  (let [arr (%make-array 0)]
+    (loop [s (seq coll)]
+      (if (nil? s) arr (do (%apush arr (%first s)) (recur (next s)))))))
+;; Merge the two runs [lo,mid) and [mid,hi) of `src` into `dst` at [lo,hi).
+;; Ties (neither `less` the other) take from the LEFT run first, so equal
+;; elements keep their original relative order — `sort`/`sort-by` are stable.
+(defn -merge-range! [less src dst lo mid hi]
+  (loop [i lo j mid k lo]
+    (if (%lt k hi)
+        (cond
+          ;; left run exhausted -> must take from the right
+          (not (%lt i mid)) (do (%cell-set! dst k (%aget src j)) (recur i (%add j 1) (%add k 1)))
+          ;; right run exhausted -> must take from the left
+          (not (%lt j hi)) (do (%cell-set! dst k (%aget src i)) (recur (%add i 1) j (%add k 1)))
+          (less (%aget src j) (%aget src i)) (do (%cell-set! dst k (%aget src j)) (recur i (%add j 1) (%add k 1)))
+          true (do (%cell-set! dst k (%aget src i)) (recur (%add i 1) j (%add k 1))))
+        nil)))
+(defn -msort-arr [less arr]
+  (let [n (%alength arr)]
+    (if (%lt n 2)
+        arr
+        (loop [width 1 src arr dst (%make-array n)]
+          (if (%lt width n)
+              (do (loop [lo 0]
+                    (if (%lt lo n)
+                        (let [mid (let [m (%add lo width)] (if (%lt m n) m n))
+                              hi (let [h (%add lo (%mul width 2))] (if (%lt h n) h n))]
+                          (-merge-range! less src dst lo mid hi)
+                          (recur (%add lo (%mul width 2))))
+                        nil))
+                  (recur (%mul width 2) dst src))
+              src)))))
+;; `()`, not `nil`, for an empty result — `(sort [])` is `()` in real Clojure
+;; (a distinct, seq?/list?-true empty seq), same as `(list)`.
+(defn -arr->list [arr]
+  (loop [i (%sub (%alength arr) 1) acc (list)]
+    (if (%lt i 0) acc (recur (%sub i 1) (%cons (%aget arr i) acc)))))
+(defn -sort-with [less coll] (-arr->list (-msort-arr less (-to-array coll))))
 (defn sort [& args]
-  (if (nil? (next args)) (-msort -default-less (first args)) (-msort (first args) (second args))))
+  (if (nil? (next args)) (-sort-with -default-less (first args)) (-sort-with (first args) (second args))))
 (defn sort-by [k & args]
   (if (nil? (next args))
-      (-msort (fn [a b] (%lt (compare (k a) (k b)) 0)) (first args))
-      (-msort (fn [a b] ((first args) (k a) (k b))) (second args))))
+      (-sort-with (fn [a b] (%lt (compare (k a) (k b)) 0)) (first args))
+      (-sort-with (fn [a b] ((first args) (k a) (k b))) (second args))))
 
 ;; misc combinators
 (defn juxt [& fns] (fn [& args] (vec (map (fn [f] (apply f args)) fns))))
