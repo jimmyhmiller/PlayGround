@@ -1271,6 +1271,36 @@ impl<M: ValueModel> Runtime<M> {
 
     // ── equality / compare ──────────────────────────────────
     pub fn equal(&self, a: u64, b: u64) -> bool {
+        // Stage F1 fast paths: `equal` is the HAMT's key comparator, called
+        // per probed entry — the decode/view glue here was a top profile
+        // frame. Identical bits are equal for every category except a FLOAT
+        // (NaN != NaN — immediate or boxed), and two non-ref words can only
+        // be equal bit-identically (immediates are canonical) or as two
+        // floats (+0.0 == -0.0). Everything else falls to the slow structure
+        // below, whose semantics are unchanged.
+        if a == b {
+            match M::R::tag_of(a) {
+                RawTag::Float => {} // possibly NaN: value compare below
+                RawTag::Ref => {
+                    let g = M::R::as_ref(a);
+                    if self.raw_type_id(g) != crate::heap::kind::BOXFLOAT {
+                        return true; // same object (non-float): equal
+                    }
+                    // The identical BOXED float: NaN must still be unequal.
+                    let info = &self.shared.types[crate::heap::kind::BOXFLOAT as usize];
+                    let f = f64::from_bits(unsafe { g.raw_word(info, 0) });
+                    return f == f;
+                }
+                _ => return true,
+            }
+        }
+        let (ta, tb) = (M::R::tag_of(a), M::R::tag_of(b));
+        if ta != RawTag::Ref && tb != RawTag::Ref {
+            return match (ta, tb) {
+                (RawTag::Float, RawTag::Float) => M::R::imm_float(a) == M::R::imm_float(b),
+                _ => false, // bit-unequal immediates: unequal (or cross-category)
+            };
+        }
         // Huge integers decode to opaque refs; compare them by value (two equal
         // huge results live at different heap addresses).
         if let (Some(x), Some(y)) = (self.as_huge(a), self.as_huge(b)) {
@@ -1286,36 +1316,58 @@ impl<M: ValueModel> Runtime<M> {
                 if x == y {
                     return true; // same object
                 }
-                match (self.view_gc(x), self.view_gc(y)) {
-                    (ObjView::Cons { .. }, ObjView::Cons { .. }) => {
-                        let (ha, ta) = self.as_cons(a).unwrap();
-                        let (hb, tb) = self.as_cons(b).unwrap();
-                        self.equal(ha, hb) && self.equal(ta, tb)
+                // RAW structural dispatch (Stage F1): one type_id load each —
+                // no ObjView construction per node. BigInt/BoxFloat never
+                // reach here (`decode` peels them to Int/Float above); HugeInt
+                // was peeled by `as_huge`.
+                use crate::heap::kind;
+                let (tx, ty) = (self.raw_type_id(x), self.raw_type_id(y));
+                if tx != ty {
+                    return false;
+                }
+                unsafe {
+                    match tx {
+                        kind::CONS => {
+                            self.equal(x.field(0), y.field(0)) && self.equal(x.field(1), y.field(1))
+                        }
+                        // All empty lists are equal (and only to each other, never nil).
+                        kind::EMPTY_LIST => true,
+                        // Ratios are reduced, so equal iff same num & den (never = an
+                        // integer, since a reduced ratio has den > 1).
+                        kind::RATIO => {
+                            let info = &self.shared.types[kind::RATIO as usize];
+                            x.raw_i128(info, 0) == y.raw_i128(info, 0)
+                                && x.raw_i128(info, 16) == y.raw_i128(info, 16)
+                        }
+                        // Structural equality for aggregates (R7RS `equal?` on
+                        // strings/vectors; ordered field equality for records — the
+                        // general aggregate case). Order-INSENSITIVE collections
+                        // (e.g. a hash-map) are a frontend concern layered on top.
+                        kind::STR => {
+                            let info = &self.shared.types[kind::STR as usize];
+                            x.bytes(info) == y.bytes(info)
+                        }
+                        kind::CHAR => {
+                            let info = &self.shared.types[kind::CHAR as usize];
+                            x.raw_word_u32(info) == y.raw_word_u32(info)
+                        }
+                        kind::ARRAY => {
+                            let ea = self.arr_slice(x);
+                            let eb = self.arr_slice(y);
+                            ea.len() == eb.len()
+                                && ea.iter().zip(eb.iter()).all(|(&p, &q)| self.equal(p, q))
+                        }
+                        kind::RECORD => {
+                            let info = &self.shared.types[kind::RECORD as usize];
+                            x.raw_word(info, 0) == y.raw_word(info, 0)
+                                && x.aux() == y.aux()
+                                && x.values(info)
+                                    .iter()
+                                    .zip(y.values(info).iter())
+                                    .all(|(&p, &q)| self.equal(p, q))
+                        }
+                        _ => false, // identity already handled; distinct other objects differ
                     }
-                    // All empty lists are equal (and only to each other, never nil).
-                    (ObjView::EmptyList, ObjView::EmptyList) => true,
-                    // Ratios are reduced, so equal iff same num & den (never = an
-                    // integer, since a reduced ratio has den > 1).
-                    (ObjView::Ratio(na, da), ObjView::Ratio(nb, db)) => na == nb && da == db,
-                    // Structural equality for aggregates (R7RS `equal?` on
-                    // strings/vectors; ordered field equality for records — the
-                    // general aggregate case). Order-INSENSITIVE collections
-                    // (e.g. a hash-map) are a frontend concern layered on top.
-                    (ObjView::Str(sa), ObjView::Str(sb)) => sa == sb,
-                    (ObjView::Char(ca), ObjView::Char(cb)) => ca == cb,
-                    (ObjView::Vector { elems: ea, .. }, ObjView::Vector { elems: eb, .. }) => {
-                        ea.len() == eb.len()
-                            && ea.iter().zip(eb.iter()).all(|(&x, &y)| self.equal(x, y))
-                    }
-                    (
-                        ObjView::Record { type_id: ta, fields: fa },
-                        ObjView::Record { type_id: tb, fields: fb },
-                    ) => {
-                        ta == tb
-                            && fa.len() == fb.len()
-                            && fa.iter().zip(fb.iter()).all(|(&x, &y)| self.equal(x, y))
-                    }
-                    _ => false, // identity already handled; distinct other objects differ
                 }
             }
             _ => false,
@@ -2317,7 +2369,7 @@ impl<M: ValueModel> Runtime<M> {
         }
     }
 
-    fn enc_nil(&self) -> u64 {
+    pub(crate) fn enc_nil(&self) -> u64 {
         M::R::enc_nil()
     }
 
@@ -2440,36 +2492,60 @@ impl<M: ValueModel> Runtime<M> {
             Val::Int(i) => mix(FNV_OFFSET, (i as u64 as u32) ^ ((i as u64 >> 32) as u32)),
             Val::Float(f) => mix(FNV_OFFSET, f.to_bits() as u32 ^ (f.to_bits() >> 32) as u32),
             Val::Sym(s) => mix_str(0x53_9d_11u32, self.sym_name(s)),
-            Val::Ref(id) => match self.view_gc(id) {
-                ObjView::Str(s) => mix_str(FNV_OFFSET, s),
-                ObjView::Char(c) => mix(0xc4a_u32, c as u32),
-                ObjView::BigInt(i) => mix(FNV_OFFSET, i as u64 as u32),
-                ObjView::HugeInt(b) => mix_str(FNV_OFFSET, &b.to_string()),
-                ObjView::Ratio(n, d) => mix(mix(FNV_OFFSET, n as u64 as u32), d as u64 as u32),
-                ObjView::BoxFloat(f) => mix(FNV_OFFSET, f.to_bits() as u32),
-                ObjView::Record { type_id, fields } => {
-                    let mut h = mix_str(0x9e37_79b9u32, self.sym_name(type_id));
-                    for &f in fields {
-                        h = mix(h, self.hash_value(f));
+            // RAW dispatch on the header type id (Stage F1): hashing runs per
+            // HAMT probe — no ObjView per object. BigInt/BoxFloat never reach
+            // here (`decode` peeled them to Int/Float above).
+            Val::Ref(id) => {
+                use crate::heap::kind;
+                match self.raw_type_id(id) {
+                    kind::STR => {
+                        let info = &self.shared.types[kind::STR as usize];
+                        mix_str(FNV_OFFSET, unsafe {
+                            std::str::from_utf8_unchecked(id.bytes(info))
+                        })
                     }
-                    h
-                }
-                ObjView::Cons { .. } => {
-                    let mut h = 0x1000_193u32;
-                    for x in self.list_to_vec(bits) {
-                        h = mix(h, self.hash_value(x));
+                    kind::CHAR => {
+                        let info = &self.shared.types[kind::CHAR as usize];
+                        mix(0xc4a_u32, unsafe { id.raw_word_u32(info) })
                     }
-                    h
-                }
-                ObjView::Vector { elems, .. } => {
-                    let mut h = 0x27d4_eb2fu32;
-                    for &x in elems {
-                        h = mix(h, self.hash_value(x));
+                    kind::HUGEINT => {
+                        // Cold by construction: reassemble via the view.
+                        match self.view_gc(id) {
+                            ObjView::HugeInt(b) => mix_str(FNV_OFFSET, &b.to_string()),
+                            _ => unreachable!("type-checked"),
+                        }
                     }
-                    h
+                    kind::RATIO => {
+                        let info = &self.shared.types[kind::RATIO as usize];
+                        let (n, d) = unsafe { (id.raw_i128(info, 0), id.raw_i128(info, 16)) };
+                        mix(mix(FNV_OFFSET, n as u64 as u32), d as u64 as u32)
+                    }
+                    kind::RECORD => {
+                        let info = &self.shared.types[kind::RECORD as usize];
+                        let ty = unsafe { id.raw_word(info, 0) } as Sym;
+                        let mut h = mix_str(0x9e37_79b9u32, self.sym_name(ty));
+                        for &f in unsafe { id.values(info) } {
+                            h = mix(h, self.hash_value(f));
+                        }
+                        h
+                    }
+                    kind::CONS => {
+                        let mut h = 0x1000_193u32;
+                        for x in self.list_to_vec(bits) {
+                            h = mix(h, self.hash_value(x));
+                        }
+                        h
+                    }
+                    kind::ARRAY => {
+                        let mut h = 0x27d4_eb2fu32;
+                        for &x in self.arr_slice(id) {
+                            h = mix(h, self.hash_value(x));
+                        }
+                        h
+                    }
+                    _ => mix(FNV_OFFSET, id.addr() as u32),
                 }
-                _ => mix(FNV_OFFSET, id.addr() as u32),
-            },
+            }
         }
     }
 
@@ -2542,12 +2618,18 @@ impl<M: ValueModel> Runtime<M> {
     ) -> Option<Option<(u64, u64)>> {
         let mut cur = cur;
         loop {
-            match self.decode(cur) {
-                Val::Nil => return Some(None),
-                Val::Ref(cid) => {
-                    match self.view_gc(cid) {
-                        ObjView::Cons { head, tail } => return Some(Some((head, tail))),
-                        ObjView::EmptyList => return Some(None),
+            // RAW dispatch (Stage F1): this runs once per SEQ ELEMENT.
+            if self.is_nil_bits(cur) {
+                return Some(None);
+            }
+            match self.raw_gc(cur) {
+                Some(cid) => {
+                    use crate::heap::kind;
+                    match self.raw_type_id(cid) {
+                        kind::CONS => {
+                            return Some(Some(unsafe { (cid.field(0), cid.field(1)) }))
+                        }
+                        kind::EMPTY_LIST => return Some(None),
                         _ => {}
                     }
                     if let Some((arr, off, end, more)) = self.as_chunked(cur) {
@@ -2571,7 +2653,7 @@ impl<M: ValueModel> Runtime<M> {
                     }
                     cur = forced;
                 }
-                _ => None?,
+                None => None?,
             }
         }
     }
@@ -2870,6 +2952,70 @@ impl<M: ValueModel> Runtime<M> {
             _ => panic!("arith on non-numbers"),
         }
     }
+    // ── Stage F1: RAW accessors for the measured-hot collection internals ──
+    // The profile said it plainly (docs/STAGE_F_COLLECTIONS.md): the
+    // collection cluster's cost was per-node GLUE — every trie/PV node
+    // touched constructed and dropped a full ObjView, plus `decode` for
+    // category tests — not the algorithms and not copying. These few helpers
+    // read the object layout DIRECTLY (one type_id check, then field/values
+    // loads), mirroring the judgment the JIT's emitted fast paths already
+    // apply. ObjView remains the general seam everywhere else; only the
+    // measured-hot paths below (pv_*/hamt_*/equal/hash_value/seq_step) sit
+    // on this raw layer. Soundness: every entry point still CHECKS the
+    // header type_id and panics loudly on a mismatch or a poisoned header —
+    // exactly where the view would have — and these prims run between
+    // safepoints, so no collection can interleave (the existing contract).
+
+    /// The raw object address of `bits`, if it is a reference at all.
+    #[inline(always)]
+    pub(crate) fn raw_gc(&self, bits: u64) -> Option<Gc> {
+        <M::R as crate::heap::PtrPolicy>::try_decode_ptr(bits).map(Gc)
+    }
+    /// A reference's header type id, with the loud poison/corruption check
+    /// `view_gc` would have performed.
+    #[inline(always)]
+    fn raw_type_id(&self, g: Gc) -> u16 {
+        let t = unsafe { g.type_id() };
+        if t == crate::heap::kind::INVALID || t as usize >= crate::heap::kind::COUNT {
+            panic!(
+                "raw read: object at {:p} has type_id {t} — poisoned/stale pointer or heap \
+                 corruption (use-after-move?)",
+                g.0
+            );
+        }
+        t
+    }
+    /// A record's `(type sym, fields)` read raw; `None` for any other object.
+    /// The 'static slice borrows the heap — valid between safepoints, same
+    /// discipline as every raw value word (and as `ObjView`'s slices).
+    #[inline(always)]
+    fn raw_rec(&self, bits: u64) -> Option<(Sym, &'static [u64])> {
+        let g = self.raw_gc(bits)?;
+        if self.raw_type_id(g) != crate::heap::kind::RECORD {
+            return None;
+        }
+        let info = &self.shared.types[crate::heap::kind::RECORD as usize];
+        unsafe { Some((g.raw_word(info, 0) as Sym, g.values(info))) }
+    }
+    /// An integer field's value without constructing `Val`: immediate fixnum
+    /// or promoted BigInt (the only shapes an int-valued record field takes).
+    #[inline(always)]
+    pub(crate) fn raw_i64(&self, bits: u64, what: &str) -> i64 {
+        match M::R::tag_of(bits) {
+            RawTag::Int => M::R::imm_int(bits),
+            RawTag::Ref => {
+                let g = M::R::as_ref(bits);
+                if self.raw_type_id(g) == crate::heap::kind::BIGINT {
+                    let info = &self.shared.types[crate::heap::kind::BIGINT as usize];
+                    unsafe { g.raw_i128(info, 0) as i64 }
+                } else {
+                    panic!("{what}: expected an int")
+                }
+            }
+            _ => panic!("{what}: expected an int"),
+        }
+    }
+
     // ── native persistent vector ──────────────────────────────────────────
     // `'PersistentVector [meta cnt shift root tail __hash]`; trie nodes are
     // `'VectorNode [edit arr]` wrapping 32-wide `Obj::Vector` arrays; `tail` is a
@@ -2881,23 +3027,19 @@ impl<M: ValueModel> Runtime<M> {
 
     /// (meta, cnt, shift, root, tail) of a `'PersistentVector`.
     fn pv_read(&self, pv: u64) -> (u64, i64, i64, u64, u64) {
-        let Val::Ref(id) = self.decode(pv) else { panic!("pvec: not a record") };
-        let ObjView::Record { fields, .. } = self.view_gc(id) else { panic!("pvec: not a record") };
-        let cnt = match self.decode(fields[1]) { Val::Int(i) => i as i64, _ => panic!("pvec cnt") };
-        let shift = match self.decode(fields[2]) { Val::Int(i) => i as i64, _ => panic!("pvec shift") };
-        (fields[0], cnt, shift, fields[3], fields[4])
+        let Some((_, f)) = self.raw_rec(pv) else { panic!("pvec: not a record") };
+        (f[0], self.raw_i64(f[1], "pvec cnt"), self.raw_i64(f[2], "pvec shift"), f[3], f[4])
     }
     /// The array inside a `'VectorNode` (field 1).
     fn node_arr(&self, node: u64) -> u64 {
-        let Val::Ref(id) = self.decode(node) else { panic!("vnode: not a record") };
-        let ObjView::Record { fields, .. } = self.view_gc(id) else { panic!("vnode: not a record") };
-        fields[1]
+        let Some((_, f)) = self.raw_rec(node) else { panic!("vnode: not a record") };
+        f[1]
     }
     /// The ARRAY handle backing an array value (identity for mutation/growth).
     fn arr_handle(&self, arr: u64) -> Gc {
-        let Val::Ref(id) = self.decode(arr) else { panic!("pvec: array not a ref") };
-        assert_eq!(unsafe { id.type_id() }, crate::heap::kind::ARRAY, "pvec: not an array");
-        id
+        let Some(g) = self.raw_gc(arr) else { panic!("pvec: array not a ref") };
+        assert_eq!(self.raw_type_id(g), crate::heap::kind::ARRAY, "pvec: not an array");
+        g
     }
     fn arr_clone(&self, arr: u64) -> Vec<u64> {
         self.arr_slice(self.arr_handle(arr)).to_vec()
@@ -2948,20 +3090,19 @@ impl<M: ValueModel> Runtime<M> {
     }
 
     pub(crate) fn as_chunked(&self, bits: u64) -> Option<(u64, i64, i64, u64)> {
-        let Val::Ref(id) = self.decode(bits) else { return None };
-        let ObjView::Record { type_id, fields } = self.view_gc(id) else {
-            return None;
-        };
+        let (type_id, fields) = self.raw_rec(bits)?;
         // ONE interned-sym compare (this runs per seq step — a string compare
         // here dominated chunk iteration).
         let cc = self.intern_cached(&self.shared.sym_cache_chunked_cons, "ChunkedCons");
         if type_id != cc {
             return None;
         }
-        let (f0, f1, f2, f3) = (fields[0], fields[1], fields[2], fields[3]);
-        let off = match self.decode(f1) { Val::Int(i) => i as i64, _ => return None };
-        let end = match self.decode(f2) { Val::Int(i) => i as i64, _ => return None };
-        Some((f0, off, end, f3))
+        Some((
+            fields[0],
+            self.raw_i64(fields[1], "chunked off"),
+            self.raw_i64(fields[2], "chunked end"),
+            fields[3],
+        ))
     }
     pub(crate) fn mk_chunked(&mut self, arr: u64, off: i64, end: i64, more: u64) -> u64 {
         let offb = self.encode(Val::Int(off as i128));
@@ -3017,7 +3158,7 @@ impl<M: ValueModel> Runtime<M> {
         let arr = self.mk_array(ret);
         self.mk_node(arr)
     }
-    fn pv_conj(&mut self, pv: u64, o: u64) -> u64 {
+    pub(crate) fn pv_conj(&mut self, pv: u64, o: u64) -> u64 {
         let (meta, cnt, shift, root, tail) = self.pv_read(pv);
         // Common case: room in the tail — copy the tail array and append,
         // span-to-span (no heap-allocating temporary).
@@ -3092,7 +3233,7 @@ impl<M: ValueModel> Runtime<M> {
             shift += 5;
         }
     }
-    fn pv_nth(&mut self, pv: u64, i: i64) -> u64 {
+    pub(crate) fn pv_nth(&mut self, pv: u64, i: i64) -> u64 {
         let (_, cnt, shift, root, tail) = self.pv_read(pv);
         if i < 0 || i >= cnt {
             let sid = self.alloc(Obj::Str(format!("No item {i} in vector of length {cnt}")));
@@ -3127,7 +3268,7 @@ impl<M: ValueModel> Runtime<M> {
         let arr = self.mk_array(ret);
         self.mk_node(arr)
     }
-    fn pv_assoc(&mut self, pv: u64, n: i64, val: u64) -> u64 {
+    pub(crate) fn pv_assoc(&mut self, pv: u64, n: i64, val: u64) -> u64 {
         let (meta, cnt, shift, root, tail) = self.pv_read(pv);
         if n >= 0 && n < cnt {
             if Self::tail_off(cnt) <= n {
@@ -3170,7 +3311,8 @@ impl<M: ValueModel> Runtime<M> {
         self.hash_value(k) & 0x7fff_ffff
     }
     fn is_nil_bits(&self, b: u64) -> bool {
-        matches!(self.decode(b), Val::Nil)
+        // nil has exactly ONE encoding under every model: a bit compare.
+        b == M::R::enc_nil()
     }
     fn mk_bitmap_node(&mut self, bitmap: u32, arr: Vec<u64>) -> u64 {
         let nil = self.enc_nil();
@@ -3218,13 +3360,17 @@ impl<M: ValueModel> Runtime<M> {
     /// should bump `cnt`); when nothing changed at all, `new_node == node`
     /// (raw bit identity — matches the original's `identical?` short-circuit).
     fn hamt_assoc(&mut self, node: u64, shift: u32, hash: u32, key: u64, val: u64) -> (u64, bool) {
-        let Val::Ref(id) = self.decode(node) else { panic!("hamt-assoc: not a node") };
-        let ObjView::Record { type_id, fields } = self.view_gc(id) else { panic!("hamt-assoc: not a node") };
-        let fields: Vec<u64> = fields.to_vec();
+        // RAW node reads (Stage F1): the trie descent touches a record header
+        // + two int fields per level — the ObjView/decode glue here was the
+        // top of the assoc-build profile. The `fields` slice stays valid
+        // across the allocations below (alloc never moves objects; no
+        // safepoints mid-prim — the same contract the old `to_vec` relied on,
+        // minus the copy).
+        let Some((type_id, fields)) = self.raw_rec(node) else { panic!("hamt-assoc: not a node") };
         let kind = self.hamt_kind(type_id);
         match kind {
             HamtKind::Bitmap => {
-                let bitmap = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => panic!("bitmap") };
+                let bitmap = self.raw_i64(fields[1], "hamt bitmap") as u32;
                 let arr = self.arr_clone(fields[2]);
                 let bit = 1u32 << ((hash >> shift) & 31);
                 let idx = (bitmap & bit.wrapping_sub(1)).count_ones() as usize;
@@ -3289,7 +3435,7 @@ impl<M: ValueModel> Runtime<M> {
                 }
             }
             HamtKind::Array => {
-                let cnt = match self.decode(fields[1]) { Val::Int(i) => i as i64, _ => panic!("cnt") };
+                let cnt = self.raw_i64(fields[1], "hamt cnt");
                 let arr = self.arr_clone(fields[2]);
                 let idx = ((hash >> shift) & 31) as usize;
                 let child = arr[idx];
@@ -3310,8 +3456,8 @@ impl<M: ValueModel> Runtime<M> {
                 }
             }
             HamtKind::Collision => {
-                let chash = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => panic!("chash") };
-                let cnt = match self.decode(fields[2]) { Val::Int(i) => i as i64, _ => panic!("cnt") };
+                let chash = self.raw_i64(fields[1], "hamt chash") as u32;
+                let cnt = self.raw_i64(fields[2], "hamt cnt");
                 let arr = self.arr_clone(fields[3]);
                 if hash == chash {
                     let mut found = None;
@@ -3350,11 +3496,11 @@ impl<M: ValueModel> Runtime<M> {
     }
     /// `(-inode-lookup node shift hash key not-found)`.
     fn hamt_lookup(&self, node: u64, shift: u32, hash: u32, key: u64, not_found: u64) -> u64 {
-        let Val::Ref(id) = self.decode(node) else { return not_found };
-        let ObjView::Record { type_id, fields } = self.view_gc(id) else { return not_found };
+        // RAW node reads (Stage F1) — see `hamt_assoc`.
+        let Some((type_id, fields)) = self.raw_rec(node) else { return not_found };
         match self.hamt_kind(type_id) {
             HamtKind::Bitmap => {
-                let bitmap = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => return not_found };
+                let bitmap = self.raw_i64(fields[1], "hamt bitmap") as u32;
                 let bit = 1u32 << ((hash >> shift) & 31);
                 if bitmap & bit == 0 {
                     return not_found;
@@ -3380,8 +3526,9 @@ impl<M: ValueModel> Runtime<M> {
                 }
             }
             HamtKind::Collision => {
-                let cnt = match self.decode(fields[2]) { Val::Int(i) => i as usize, _ => return not_found };
-                let arr = self.arr_clone(fields[3]);
+                let cnt = self.raw_i64(fields[2], "hamt cnt") as usize;
+                // No clone: lookup only READS (and `equal` allocates nothing).
+                let arr = self.arr_slice(self.arr_handle(fields[3]));
                 let mut i = 0usize;
                 while i < 2 * cnt {
                     if self.equal(key, arr[i]) {
@@ -3411,13 +3558,11 @@ impl<M: ValueModel> Runtime<M> {
     /// `(-inode-without node shift hash key)` -> the new node, `node` itself
     /// (raw bit identity) if nothing changed, or `nil` if `node` becomes empty.
     fn hamt_without(&mut self, node: u64, shift: u32, hash: u32, key: u64) -> u64 {
-        let Val::Ref(id) = self.decode(node) else { return node };
-        let ObjView::Record { type_id, fields } = self.view_gc(id) else { return node };
-        let fields: Vec<u64> = fields.to_vec();
-        let fields = &fields[..];
+        // RAW node reads (Stage F1) — see `hamt_assoc`.
+        let Some((type_id, fields)) = self.raw_rec(node) else { return node };
         match self.hamt_kind(type_id) {
             HamtKind::Bitmap => {
-                let bitmap = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => return node };
+                let bitmap = self.raw_i64(fields[1], "hamt bitmap") as u32;
                 let bit = 1u32 << ((hash >> shift) & 31);
                 if bitmap & bit == 0 {
                     return node;
@@ -3452,7 +3597,7 @@ impl<M: ValueModel> Runtime<M> {
                 }
             }
             HamtKind::Array => {
-                let cnt = match self.decode(fields[1]) { Val::Int(i) => i as i64, _ => return node };
+                let cnt = self.raw_i64(fields[1], "hamt cnt");
                 let idx = ((hash >> shift) & 31) as usize;
                 let arr = self.arr_clone(fields[2]);
                 let child = arr[idx];
@@ -3477,8 +3622,8 @@ impl<M: ValueModel> Runtime<M> {
                 }
             }
             HamtKind::Collision => {
-                let chash = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => return node };
-                let cnt = match self.decode(fields[2]) { Val::Int(i) => i as i64, _ => return node };
+                let chash = self.raw_i64(fields[1], "hamt chash") as u32;
+                let cnt = self.raw_i64(fields[2], "hamt cnt");
                 let arr = self.arr_clone(fields[3]);
                 let mut found = None;
                 let mut i = 0usize;
@@ -3510,7 +3655,7 @@ impl<M: ValueModel> Runtime<M> {
     /// Map-level entry points (`root` may be `nil`, the empty-map case the
     /// per-node functions above don't handle on their own): compute the key's
     /// hash once and start the trie descent at `shift = 0`.
-    fn hamt_map_assoc(&mut self, root: u64, key: u64, val: u64) -> (u64, bool) {
+    pub(crate) fn hamt_map_assoc(&mut self, root: u64, key: u64, val: u64) -> (u64, bool) {
         let hash = self.hash_masked(key);
         if self.is_nil_bits(root) {
             (self.hamt_single(hash, 0, key, val), true)
@@ -3518,7 +3663,7 @@ impl<M: ValueModel> Runtime<M> {
             self.hamt_assoc(root, 0, hash, key, val)
         }
     }
-    fn hamt_map_lookup(&self, root: u64, key: u64, not_found: u64) -> u64 {
+    pub(crate) fn hamt_map_lookup(&self, root: u64, key: u64, not_found: u64) -> u64 {
         let hash = self.hash_masked(key);
         self.hamt_lookup(root, 0, hash, key, not_found)
     }

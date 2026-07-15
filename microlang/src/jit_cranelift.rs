@@ -350,6 +350,93 @@ extern "C" fn shim_tail_call<M: ValueModel>(
     0
 }
 
+// ── Stage F2: MONOMORPHIC register-arg shims for the hot collection prims ──
+// The generic `shim_prim` costs an arg spill to a stack slot, a
+// `prim_from_tag` round trip, and the giant prim match — per element in
+// collection-building loops (the vecbuild/group-by profile). These call the
+// runtime methods directly with register args, exactly the treatment the
+// arithmetic slow paths got in Stage A3. They ALLOCATE, and are classified
+// PARKING for the fence policy (plain `call_shim`; `body_pure_loop` treats
+// them as impure), so loops around them use Cranelift's precise demotion.
+
+extern "C" fn shim_pv_conj<M: ModelArithJit>(ctx: *mut JitCtx<M>, pv: u64, o: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.pv_conj(pv, o)
+}
+
+extern "C" fn shim_pv_nth<M: ModelArithJit>(ctx: *mut JitCtx<M>, pv: u64, i: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let i = rt.raw_i64(i, "pv-nth: index must be an int");
+    rt.pv_nth(pv, i)
+}
+
+extern "C" fn shim_pv_assoc<M: ModelArithJit>(ctx: *mut JitCtx<M>, pv: u64, i: u64, val: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let i = rt.raw_i64(i, "pv-assoc: index must be an int");
+    rt.pv_assoc(pv, i, val)
+}
+
+extern "C" fn shim_hamt_assoc<M: ModelArithJit>(ctx: *mut JitCtx<M>, root: u64, key: u64, val: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let (new_root, added) = rt.hamt_map_assoc(root, key, val);
+    let addedb = rt.encode(Val::Bool(added));
+    M::R::enc_ref(rt.alloc_vector(&[new_root, addedb]))
+}
+
+extern "C" fn shim_hamt_lookup<M: ModelArithJit>(ctx: *mut JitCtx<M>, root: u64, key: u64, nf: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.hamt_map_lookup(root, key, nf)
+}
+
+extern "C" fn shim_arr_push<M: ModelArithJit>(ctx: *mut JitCtx<M>, arr: u64, v: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let Some(g) = rt.raw_gc(arr) else { panic!("apush: not an array") };
+    rt.arr_extend(g, &[v]);
+    arr
+}
+
+extern "C" fn shim_cons2<M: ModelArithJit>(ctx: *mut JitCtx<M>, h: u64, t: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.cons(h, t)
+}
+
+extern "C" fn shim_first1<M: ModelArithJit>(ctx: *mut JitCtx<M>, v: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    // Exactly `rt.prim(Prim::First, ..)`'s arm.
+    if let Some((h, _)) = rt.as_cons(v) {
+        h
+    } else if let Some((arr, off, _, _)) = rt.as_chunked(v) {
+        rt.arr_at_pub(arr, off as usize)
+    } else {
+        rt.enc_nil()
+    }
+}
+
+extern "C" fn shim_rest1<M: ModelArithJit>(ctx: *mut JitCtx<M>, v: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    // Exactly `rt.prim(Prim::Rest, ..)`'s arm.
+    if let Some((_, t)) = rt.as_cons(v) {
+        t
+    } else if let Some((arr, off, end, more)) = rt.as_chunked(v) {
+        if off + 1 < end {
+            rt.mk_chunked(arr, off + 1, end, more)
+        } else {
+            more
+        }
+    } else {
+        rt.enc_nil()
+    }
+}
+
 extern "C" fn shim_prim<M: ValueModel>(
     ctx: *mut JitCtx<M>,
     prim_tag: u32,
@@ -948,6 +1035,16 @@ struct Shims {
     await_: FuncId,
     gc: FuncId,
     safepoint: FuncId,
+    // Stage F2 monomorphic collection shims.
+    pv_conj: FuncId,
+    pv_nth: FuncId,
+    pv_assoc: FuncId,
+    hamt_assoc: FuncId,
+    hamt_lookup: FuncId,
+    arr_push: FuncId,
+    cons2: FuncId,
+    first1: FuncId,
+    rest1: FuncId,
 }
 
 #[derive(Clone, Copy)]
@@ -971,6 +1068,15 @@ struct ShimRefs {
     await_: cranelift_codegen::ir::FuncRef,
     gc: cranelift_codegen::ir::FuncRef,
     safepoint: cranelift_codegen::ir::FuncRef,
+    pv_conj: cranelift_codegen::ir::FuncRef,
+    pv_nth: cranelift_codegen::ir::FuncRef,
+    pv_assoc: cranelift_codegen::ir::FuncRef,
+    hamt_assoc: cranelift_codegen::ir::FuncRef,
+    hamt_lookup: cranelift_codegen::ir::FuncRef,
+    arr_push: cranelift_codegen::ir::FuncRef,
+    cons2: cranelift_codegen::ir::FuncRef,
+    first1: cranelift_codegen::ir::FuncRef,
+    rest1: cranelift_codegen::ir::FuncRef,
 }
 
 /// A finished, runnable body.
@@ -1020,6 +1126,14 @@ fn body_pure_loop(ir: &Ir, tail: bool) -> bool {
         }
         Ir::Dispatch { .. } => false,
         Ir::Prim(Prim::Apply | Prim::CallCc | Prim::CallEc | Prim::Reset | Prim::Shift, _) => false,
+        // The Stage F2 monomorphic collection shims are PARKING-classified
+        // (plain calls) — a loop around them demotes its live values there
+        // anyway, so fencing would only add churn.
+        Ir::Prim(
+            Prim::PvConj | Prim::PvNth | Prim::PvAssoc | Prim::HamtAssoc | Prim::HamtLookup
+            | Prim::ArrPush,
+            _,
+        ) => false,
         Ir::If(c, t, e) => {
             body_pure_loop(c, false) && body_pure_loop(t, tail) && body_pure_loop(e, tail)
         }
@@ -1535,6 +1649,15 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let awt: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_await::<M>;
         let gcf: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_gc::<M>;
         let sfp: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_safepoint::<M>;
+        let pvc: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_pv_conj::<M>;
+        let pvn: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_pv_nth::<M>;
+        let pva: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_pv_assoc::<M>;
+        let hma: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_hamt_assoc::<M>;
+        let hml: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_hamt_lookup::<M>;
+        let apu: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_arr_push::<M>;
+        let cn2: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_cons2::<M>;
+        let fs1: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_first1::<M>;
+        let rs1: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_rest1::<M>;
         builder.symbol("ml_load_local", ll as *const u8);
         builder.symbol("ml_load_global", lg as *const u8);
         builder.symbol("ml_def_global", dg as *const u8);
@@ -1554,6 +1677,15 @@ impl<M: ModelArithJit> JitCranelift<M> {
         builder.symbol("ml_await", awt as *const u8);
         builder.symbol("ml_gc", gcf as *const u8);
         builder.symbol("ml_safepoint", sfp as *const u8);
+        builder.symbol("ml_pv_conj", pvc as *const u8);
+        builder.symbol("ml_pv_nth", pvn as *const u8);
+        builder.symbol("ml_pv_assoc", pva as *const u8);
+        builder.symbol("ml_hamt_assoc", hma as *const u8);
+        builder.symbol("ml_hamt_lookup", hml as *const u8);
+        builder.symbol("ml_arr_push", apu as *const u8);
+        builder.symbol("ml_cons2", cn2 as *const u8);
+        builder.symbol("ml_first1", fs1 as *const u8);
+        builder.symbol("ml_rest1", rs1 as *const u8);
 
         let mut module = JITModule::new(builder);
 
@@ -1585,6 +1717,9 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let s_spawn = sig(&[ptr, I64]);
         let s_await = sig(&[ptr, I64]);
         let s_gc = sig(&[ptr]);
+        let s_v1 = sig(&[ptr, I64]);
+        let s_v2 = sig(&[ptr, I64, I64]);
+        let s_v3 = sig(&[ptr, I64, I64, I64]);
 
         let decl = |module: &mut JITModule, name: &str, sig: &cranelift_codegen::ir::Signature| {
             module
@@ -1611,6 +1746,15 @@ impl<M: ModelArithJit> JitCranelift<M> {
             await_: decl(&mut module, "ml_await", &s_await),
             gc: decl(&mut module, "ml_gc", &s_gc),
             safepoint: decl(&mut module, "ml_safepoint", &s_gc),
+            pv_conj: decl(&mut module, "ml_pv_conj", &s_v2),
+            pv_nth: decl(&mut module, "ml_pv_nth", &s_v2),
+            pv_assoc: decl(&mut module, "ml_pv_assoc", &s_v3),
+            hamt_assoc: decl(&mut module, "ml_hamt_assoc", &s_v3),
+            hamt_lookup: decl(&mut module, "ml_hamt_lookup", &s_v3),
+            arr_push: decl(&mut module, "ml_arr_push", &s_v2),
+            cons2: decl(&mut module, "ml_cons2", &s_v2),
+            first1: decl(&mut module, "ml_first1", &s_v1),
+            rest1: decl(&mut module, "ml_rest1", &s_v1),
         };
 
         JitCranelift {
@@ -2234,6 +2378,15 @@ fn build_body<M: ModelArithJit>(
         await_: module.declare_func_in_func(shims.await_, fb.func),
         gc: module.declare_func_in_func(shims.gc, fb.func),
         safepoint: module.declare_func_in_func(shims.safepoint, fb.func),
+        pv_conj: module.declare_func_in_func(shims.pv_conj, fb.func),
+        pv_nth: module.declare_func_in_func(shims.pv_nth, fb.func),
+        pv_assoc: module.declare_func_in_func(shims.pv_assoc, fb.func),
+        hamt_assoc: module.declare_func_in_func(shims.hamt_assoc, fb.func),
+        hamt_lookup: module.declare_func_in_func(shims.hamt_lookup, fb.func),
+        arr_push: module.declare_func_in_func(shims.arr_push, fb.func),
+        cons2: module.declare_func_in_func(shims.cons2, fb.func),
+        first1: module.declare_func_in_func(shims.first1, fb.func),
+        rest1: module.declare_func_in_func(shims.rest1, fb.func),
     };
 
     let mut c = Compiler {
@@ -3509,6 +3662,44 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.switch_to_block(merge);
                 self.fb.seal_block(merge);
                 self.fb.use_var(result)
+            }
+            // Stage F2: the hot COLLECTION prims get monomorphic register-arg
+            // shims — no arg spill, no prim tag, no giant match. PARKING-
+            // classified (plain call): their live-across values ride the maps.
+            // (Cons/First/Rest here serve the models without inline object
+            // paths and any site the inline guards reject — the arms above
+            // take precedence under LowBit.)
+            Ir::Prim(p @ (Prim::PvConj | Prim::PvNth | Prim::ArrPush | Prim::Cons), args) => {
+                let a = self.compile::<M>(&args[0], false);
+                let b = self.compile::<M>(&args[1], false);
+                let f = match p {
+                    Prim::PvConj => self.refs.pv_conj,
+                    Prim::PvNth => self.refs.pv_nth,
+                    Prim::ArrPush => self.refs.arr_push,
+                    Prim::Cons => self.refs.cons2,
+                    _ => unreachable!(),
+                };
+                let ctx = self.ctx_val;
+                self.call_shim_checked(f, &[ctx, a, b])
+            }
+            Ir::Prim(p @ (Prim::PvAssoc | Prim::HamtAssoc | Prim::HamtLookup), args) => {
+                let a = self.compile::<M>(&args[0], false);
+                let b = self.compile::<M>(&args[1], false);
+                let c = self.compile::<M>(&args[2], false);
+                let f = match p {
+                    Prim::PvAssoc => self.refs.pv_assoc,
+                    Prim::HamtAssoc => self.refs.hamt_assoc,
+                    Prim::HamtLookup => self.refs.hamt_lookup,
+                    _ => unreachable!(),
+                };
+                let ctx = self.ctx_val;
+                self.call_shim_checked(f, &[ctx, a, b, c])
+            }
+            Ir::Prim(p @ (Prim::First | Prim::Rest), args) => {
+                let v = self.compile::<M>(&args[0], false);
+                let f = if matches!(p, Prim::First) { self.refs.first1 } else { self.refs.rest1 };
+                let ctx = self.ctx_val;
+                self.call_shim_checked(f, &[ctx, v])
             }
             // Every other prim: compute args, escape to the runtime (the native
             // analogue of the bytecode tier's `Slow`).

@@ -60,3 +60,33 @@ Gates per phase: all four suites + gc-stress battery (collection prims
 mutate/allocate mid-walk — the stress battery is the soundness hammer for
 F3's ownership stamping in particular) + the %nanos micro suite re-run with
 before/after in this doc.
+
+## F1+F2 results (measured 2026-07-15, %nanos micro suite, microclj --jit,
+## best-of-4, ns/op; before = Stage-E-final binary, same harness/machine)
+
+| workload | before | after | Δ |
+|---|---|---|---|
+| assoc-build (10k) | 1943 | 779 | **2.5×** |
+| vecbuild (10k) | 163 | 151 | 1.08× |
+| into-xform (10k) | 289 | 272 | 1.06× |
+| group-by (10k) | 1454 | 1421 | ~1× |
+| reduce+map | 56 | 55 | ~1× |
+| raw-loop / calls / captures | 3 / 4 / 5 | 3 / 4 / 5 | unchanged |
+
+Profile (sample, assoc-build, after): view_gc 841→219, drop_in_place<ObjView>
+222→73, prim(generic) 284→153; the stacks now bottom out in
+shim_hamt_assoc→hamt_assoc as they should. Remaining top frames: `equal`
+(the comparator itself — now the bit/tag fast path, high call volume),
+`arr_clone`+malloc/free (the per-node Vec round trip that F3's transients
+eliminate), and residual view_gc/decode from the INTERPRETED record glue
+AROUND the prims (map-record field reads / MakeRecord — the F4 producer/glue
+cluster, also why group-by barely moved: its time is call glue + lazy-seq
+stepping, not the trie ops).
+
+F1 = raw `Gc` internals for pv_*/hamt_*/equal/hash_value/seq_step/as_chunked
+(one type_id check, loud poison panic, no ObjView/decode per node; ObjView
+stays the seam everywhere else). F2 = monomorphic register-arg shims for
+PvConj/PvNth/PvAssoc/HamtAssoc/HamtLookup/ArrPush (+ Cons/First/Rest for the
+non-inline models), PARKING-classified and excluded from `body_pure_loop` so
+loops around them use precise demotion. Gates: all four suites + gc-stress
+battery green.
