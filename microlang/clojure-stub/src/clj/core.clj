@@ -813,13 +813,18 @@
       (list (-asig fdecl))))
 
 ;; ─────────────── more clojure.core ───────────────
+;; ONE `get`-with-sentinel per level, not `associative?` + `contains?` + `get`
+;; (three lookups where one suffices): `get` on a non-associative or missing-key
+;; `m` already returns the sentinel, which we map to `nf` — same result, a third
+;; of the per-level dispatch. (`-lookup-sentinel` is a fresh unshareable record
+;; from cljs_types.clj, resolved late by name since get-in only runs after load.)
 (defn get-in [m ks & d]
   (let [nf (if (nil? d) nil (first d))]
     (loop [m m ks (seq ks)]
-      (cond (nil? ks) m
-            (and (associative? m) (contains? m (first ks))) (recur (get m (first ks)) (next ks))
-            (nil? (next ks)) (get m (first ks) nf)
-            true nf))))
+      (if (nil? ks)
+          m
+          (let [v (get m (first ks) -lookup-sentinel)]
+            (if (identical? v -lookup-sentinel) nf (recur v (next ks))))))))
 ;; NOTE: uses `next`/`first` (the normalizing public wrappers), not raw
 ;; `%rest`/`%first` — raw `%rest` on an about-to-exhaust ChunkedCons hands back
 ;; an UNFORCED lazy tail (not literal `nil`), so a bare `(nil? (%rest ...))`
@@ -1985,7 +1990,18 @@
 (defn nthnext [coll n] (loop [n n xs (seq coll)] (if (and (%lt 0 n) xs) (recur (- n 1) (next xs)) xs)))
 (defn nthrest [coll n] (loop [n n xs coll] (if (and (%lt 0 n) (seq xs)) (recur (- n 1) (rest xs)) xs)))
 (defn find [m k] (if (contains? m k) [k (get m k)] nil))
-(defn subvec [v start & e] (vec (let [end (if (nil? e) (count v) (first e))] (take (- end start) (drop start v)))))
+;; For a real PersistentVector, copy the range directly with native %pv-nth
+;; reads into a fresh vector via %pv-conj — O(end-start) native ops, no lazy
+;; machinery. The old `(vec (take n (drop start v)))` went through `drop`
+;; (chunked seq walk) then `take` (which CONSES one cell PER ELEMENT, breaking
+;; chunking) then `vec` (re-conj element-by-element) — three passes and a
+;; cons-per-element allocation the direct copy skips. Non-vector args keep the
+;; general seq path (subvec is documented for vectors, but stay lenient).
+(defn subvec [v start & e]
+  (let [end (if (nil? e) (count v) (first e))]
+    (if (vector? v)
+        (loop [i start acc []] (if (%lt i end) (recur (%add i 1) (%pv-conj acc (%pv-nth v i))) acc))
+        (vec (take (- end start) (drop start v))))))
 (defn keyword [& args]
   (if (nil? (next args))
     (let [x (first args)] (if (keyword? x) x (record 'Keyword (symbol (if (string? x) x (name x))))))
