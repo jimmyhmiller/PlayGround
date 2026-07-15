@@ -20,11 +20,11 @@
 ; ---- the transform ----------------------------------------------------------
 ; is form `f` a gc-managed marker?  (defn G [(gc$marker T)] (-> i64) 0)
 (defn marker-type [(f Code)] (-> Code)
-  (if (and (code-list? f) (and (icmp-ge (code-count f) 4) (code-eq (code-nth f 0) `defn)))
+  (if (and (code-list? f) (and (>= (code-count f) 4) (code-eq (code-nth f 0) `defn)))
       (let [ps (code-nth f 2)]
-        (if (and (code-list? ps) (icmp-eq (code-count ps) 1))
+        (if (and (code-list? ps) (= (code-count ps) 1))
             (let [p0 (code-nth ps 0)]
-              (if (and (code-list? p0) (and (icmp-eq (code-count p0) 2) (code-eq (code-nth p0 0) `gc$marker)))
+              (if (and (code-list? p0) (and (= (code-count p0) 2) (code-eq (code-nth p0 0) `gc$marker)))
                   (code-nth p0 1)
                 `#f))
           `#f))
@@ -33,16 +33,16 @@
 
 ; a defn named NAME already present in the module's forms?
 (defn defines? [(m Code) (name Code) (i i64) (n i64)] (-> bool)
-  (if (icmp-ge i n) false
+  (if (>= i n) false
     (let [f (code-nth m i)]
-      (if (and (code-list? f) (and (icmp-ge (code-count f) 2) (and (code-eq (code-nth f 0) `defn) (code-eq (code-nth f 1) name))))
-          true (defines? m name (iadd i 1) n)))))
+      (if (and (code-list? f) (and (>= (code-count f) 2) (and (code-eq (code-nth f 0) `defn) (code-eq (code-nth f 1) name))))
+          true (defines? m name (+ i 1) n)))))
 
 ; per-pointer-field (gc-mark …), generated from reflection (kind 5 = ptr)
 (defn trace-fields [(T Code) (p Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-eq i n) `0
-    (let [rest (trace-fields T p (iadd i 1) n)]
-      (if (icmp-eq (code-field-kind T i) 5)
+  (if (= i n) `0
+    (let [rest (trace-fields T p (+ i 1) n)]
+      (if (= (code-field-kind T i) 5)
           `(do (gc-mark (cast (ptr u8) (load (field ~p ~(code-field-name T i))))) ~rest)
         rest))))
 (defn emit-trace [(T Code)] (-> Code)
@@ -51,11 +51,11 @@
        (let [~q (cast (ptr ~T) pp)]
          ~(trace-fields T q 0 (code-field-count T))))))
 
-; collect: for each marker in the module not yet traced, an emit-trace form;
-; returns them appended after the module's existing forms, plus a count function.
-(defn emit-for-markers [(m Code) (i i64) (n i64) (cnt i64)] (-> Code)
-  (if (icmp-ge i n) `()
-    (let [f (code-nth m i) rest (emit-for-markers m (iadd i 1) n cnt)]
+; for each marker in the module not yet traced, an emit-trace form, appended
+; after the module's existing forms; plus a whole-program count function.
+(defn emit-for-markers [(m Code) (i i64) (n i64)] (-> Code)
+  (if (>= i n) `()
+    (let [f (code-nth m i) rest (emit-for-markers m (+ i 1) n)]
       (if (is-marker? f)
           (let [T (marker-type f)]
             (if (defines? m (code-symbol T "-trace") 1 (code-count m))
@@ -63,19 +63,19 @@
               `(~(emit-trace T) ~@rest)))
         rest))))
 (defn count-markers [(m Code) (i i64) (n i64)] (-> i64)
-  (if (icmp-ge i n) 0
-    (iadd (if (is-marker? (code-nth m i)) 1 0) (count-markers m (iadd i 1) n))))
+  (if (>= i n) 0
+    (+ (if (is-marker? (code-nth m i)) 1 0) (count-markers m (+ i 1) n))))
 
 (defn xform-mod [(m Code)] (-> Code)
   (let [nc (count-markers m 1 (code-count m))
-        emitted (emit-for-markers m 1 (code-count m) nc)
-        with-count (if (or (icmp-eq nc 0) (defines? m `gc-managed-count 1 (code-count m)))
+        emitted (emit-for-markers m 1 (code-count m))
+        with-count (if (or (= nc 0) (defines? m `gc-managed-count 1 (code-count m)))
                        m
                      `(~@m (defn gc-managed-count [] (-> :i64) ~nc)))]
     `(~@with-count ~@emitted)))
 (defn xform-mods [(ms Code) (i i64) (n i64)] (-> Code)
-  (if (icmp-ge i n) `()
-    `(~(xform-mod (code-nth ms i)) ~@(xform-mods ms (iadd i 1) n))))
+  (if (>= i n) `()
+    `(~(xform-mod (code-nth ms i)) ~@(xform-mods ms (+ i 1) n))))
 (defn gc-generate [(mods Code)] (-> Code)
   `(do ~@(xform-mods mods 0 (code-count mods))))
 (transform gc-generate)

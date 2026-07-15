@@ -15,46 +15,41 @@
 ; released: bid -> 1 once a binding has been released
 (defn own-scan [(form Code) (released (ptr (HashMap i64 i64)))] (-> i64)
   (if (not (code-list? form)) 0
-    (let [n (code-count form) h0 (if (icmp-gt n 0) (code-nth form 0) form)]
-      (if (and (icmp-eq n 2) (and (code-sym? h0) (and (code-eq h0 `release) (code-sym? (code-nth form 1)))))
+    (let [n (code-count form) head (if (> n 0) (code-nth form 0) form)]
+      (if (and (= n 2) (and (code-sym? head) (and (code-eq head `release) (code-sym? (code-nth form 1)))))
           ; (release X): double-release if already released, else mark released
           (let [bid (binding-of (code-nth form 1))]
-            (if (icmp-le bid 0) 0
+            (if (<= bid 0) 0
               (match (hm-get [i64 i64] (load released) bid)
                 (Some [s] (do (report (code-nth form 1) "double release (value already released)") 0))
                 (None [] (do (hm-put! released bid 1) 0)))))
         ; otherwise: any reference to a released binding is a use-after-release
-        (let [(mut i) 0]
-          (loop (if (icmp-ge (load i) n) (break)
-            (do (let [c (code-nth form (load i))]
-                  (if (and (icmp-gt (load i) 0) (code-sym? c))
-                      (let [bid (binding-of c)]
-                        (if (icmp-gt bid 0)
-                            (match (hm-get [i64 i64] (load released) bid)
-                              (Some [s] (do (report c "use after release") 0))
-                              (None [] 0))
-                          0))
-                    (own-scan c released)))
-                (store! i (iadd (load i) 1)))))
+        (do
+          (for [i 0 n]
+            (let [c (code-nth form i)]
+              (if (and (> i 0) (code-sym? c))
+                  (let [bid (binding-of c)]
+                    (if (> bid 0)
+                        (match (hm-get [i64 i64] (load released) bid)
+                          (Some [s] (do (report c "use after release") 0))
+                          (None [] 0))
+                      0))
+                (own-scan c released))))
           0)))))
 
 (defn own-body [(f Code)] (-> Code)
-  (if (and (code-list? f) (and (icmp-ge (code-count f) 5) (and (code-sym? (code-nth f 0)) (code-eq (code-nth f 0) `defn))))
-      (let [a (malloc-allocator) (mut released) (hm-new-scalar [i64 i64] a)
-            n (code-count f) (mut i) 4]
-        (loop (if (icmp-ge (load i) n) (break)
-          (do (own-scan (code-nth f (load i)) (mut released)) (store! i (iadd (load i) 1)))))
+  (if (and (code-list? f) (and (>= (code-count f) 5) (and (code-sym? (code-nth f 0)) (code-eq (code-nth f 0) `defn))))
+      (let [(mut released) (hm-new-scalar [i64 i64] (malloc-allocator)) n (code-count f)]
+        (for [i 4 n] (own-scan (code-nth f i) (mut released)))
         `0)
     `0))
 
 (defn own-check [(mods Code)] (-> Code)
-  (let [nm (code-count mods) (mut i) 0]
-    (loop (if (icmp-ge (load i) nm) (break)
-      (do (let [m (code-nth mods (load i)) nf (code-count m) (mut j) 1]
-            (if (code-from-user? (code-nth m 1))
-                (loop (if (icmp-ge (load j) nf) (break)
-                  (do (own-body (code-nth m (load j))) (store! j (iadd (load j) 1)))))
-              0))
-          (store! i (iadd (load i) 1)))))
-    `0))
+  (let [nm (code-count mods)]
+    (for [i 0 nm]
+      (let [m (code-nth mods i) nf (code-count m)]
+        (if (code-from-user? (code-nth m 1))
+            (for [j 1 nf] (own-body (code-nth m j)))
+          0))))
+  `0)
 (checker own-check)
