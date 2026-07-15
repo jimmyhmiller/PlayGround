@@ -1052,11 +1052,27 @@
 (defn mapcat [f & colls] (apply concat (apply map f colls)))
 (defn interpose [sep coll] (drop 1 (mapcat (fn [x] (list sep x)) coll)))
 ;; interleave is variadic, stopping at the shortest collection.
-(defn interleave [& colls]
+;; Direct two-collection interleave (the overwhelmingly common case): cons the
+;; two heads and recurse on the two tails. The general n-ary path below rebuilt
+;; `(concat (map first ss) (apply interleave (map rest ss)))` EVERY round — two
+;; lazy `map`s + a variadic `apply` + a `concat` per element-pair — so a plain
+;; `(interleave a b)` paid all that per element; this path allocates only the
+;; two cons cells and one lazy-seq thunk it actually needs.
+(defn -interleave2 [a b]
   (lazy-seq
-    (let [ss (map seq colls)]
-      (if (or (nil? (seq ss)) (-some-nil? ss)) nil
-        (concat (map first ss) (apply interleave (map rest ss)))))))
+    (let [sa (seq a) sb (seq b)]
+      (if (if (nil? sa) true (nil? sb)) nil
+          (%cons (%first sa) (%cons (%first sb) (-interleave2 (%rest sa) (%rest sb))))))))
+(defn interleave [& colls]
+  (cond
+    ;; exactly two colls -> the direct fast path; 0 / 1 / 3+ keep the general
+    ;; n-ary algorithm (unchanged behavior for those arities).
+    (if (nil? colls) false (if (nil? (next colls)) false (nil? (next (next colls)))))
+      (-interleave2 (first colls) (second colls))
+    true (lazy-seq
+           (let [ss (map seq colls)]
+             (if (or (nil? (seq ss)) (-some-nil? ss)) nil
+               (concat (map first ss) (apply interleave (map rest ss))))))))
 (defn take-nth [n coll]
   (lazy-seq (let [s (seq coll)] (if (nil? s) nil (%cons (first s) (take-nth n (drop n s)))))))
 
