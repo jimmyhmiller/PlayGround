@@ -583,6 +583,13 @@
     (cond (nil? s) acc
           (chunked? s) (-rmul-seq (-rmul-chunk acc (field s 0) (field s 1) (field s 2)) (field s 3))
           true (-rmul-seq (%mul acc (%first s)) (%rest s)))))
+;; REDEFINE + and * with real fixed arities (the bare variadic bootstrap forms
+;; above walked a seq per call — an arg-list allocation and a per-element
+;; %first/%rest walk on every value-position use) and CHUNK-AWARE variadic
+;; tails via the fused reducers. Placed here so -radd-seq/-rmul-seq exist;
+;; every earlier reference is late-bound and picks these up.
+(defn + ([] 0) ([x] x) ([x y] (%add x y)) ([x y & xs] (-radd-seq (%add x y) xs)))
+(defn * ([] 1) ([x] x) ([x y] (%mul x y)) ([x y & xs] (-rmul-seq (%mul x y) xs)))
 ;; `(reduce conj init coll)` — building a collection — is the most common reduce.
 ;; Fused to call the `-conj` PROTOCOL METHOD directly (a monomorphic inline-cached
 ;; dispatch), skipping the variadic multi-arity `conj` wrapper (arg-list alloc +
@@ -1552,9 +1559,15 @@
 ;; are consed on front, and the `%apply` prim spreads that list into the call.
 (defn -apply-flatten [args]
   (if (nil? (next args))
-      (-to-list (first args))
+      ;; NO -to-list copy: the native %apply walks cons/chunked spines and
+      ;; forces lazy nodes through the registered `seq` — passing the seq
+      ;; through as the callee's rest arg when it can.
+      (seq (first args))
       (%cons (first args) (-apply-flatten (rest args)))))
-(defn apply [f & args] (%apply f (-apply-flatten args)))
+;; `seq` forces the HEAD node so the native %apply can walk a realized
+;; cons/chunked front (it takes the callee's fixed params off the front and
+;; passes the remaining tail through as the rest arg — no O(n) flatten).
+(defn apply [f & args] (%apply f (seq (-apply-flatten args))))
 
 ;; ─────────────── multimethods (defmulti / defmethod) ───────────────
 ;; A multimethod is a callable record `(MultiFn dispatch-fn table-atom)` where the

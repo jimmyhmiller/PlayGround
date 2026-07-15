@@ -344,6 +344,7 @@ pub struct Shared<M: ValueModel> {
     field_ic: Vec<AtomicU64>,
     pub(crate) tables: Mutex<Tables>,
     apply_fn: AtomicU64, // Sym+1, or 0 for None
+    seq_fn: AtomicU64,   // Sym+1, or 0 for None — the frontend's `seq` (forces one lazy node)
     escape_tags: AtomicU64,
     /// TCP handles for the `%tcp-*` prims (listener/stream by index). `Arc`s are
     /// cloned OUT under the lock, then blocking I/O happens lock-free on `&TcpStream`
@@ -496,6 +497,7 @@ impl<M: ValueModel> Runtime<M> {
                 dispatch: Box::new(Megamorphic::new()),
             }),
             apply_fn: AtomicU64::new(0),
+            seq_fn: AtomicU64::new(0),
             tcp: Mutex::new(Vec::new()),
             escape_tags: AtomicU64::new(0),
             gc_requested: std::sync::atomic::AtomicBool::new(false),
@@ -2267,6 +2269,93 @@ impl<M: ValueModel> Runtime<M> {
     pub fn set_apply_fn(&self, name: Sym) {
         self.shared.apply_fn.store(name as u64 + 1, Ordering::Relaxed);
     }
+    /// Register the frontend's `seq` fn: backends call it (via `top`) to force
+    /// a lazy node when they need to WALK a sequence natively (apply flatten).
+    pub fn set_seq_fn(&self, name: Sym) {
+        self.shared.seq_fn.store(name as u64 + 1, Ordering::Relaxed);
+    }
+    /// The current seq-fn value (re-read from globals, so GC-safe), if any.
+    pub fn seq_handler(&self) -> Option<u64> {
+        match self.shared.seq_fn.load(Ordering::Relaxed) {
+            0 => None,
+            v => self.global((v - 1) as Sym),
+        }
+    }
+    /// One realized step of a sequence: `Some(None)` = end, `Some(Some((head,
+    /// tail)))` = an element, `None` = an unrealizable node (no seq fn
+    /// registered / not a sequence).
+    pub fn seq_step(
+        &mut self,
+        top: &dyn crate::code::CodeSpace<M>,
+        cur: u64,
+    ) -> Option<Option<(u64, u64)>> {
+        let mut cur = cur;
+        loop {
+            match self.decode(cur) {
+                Val::Nil => return Some(None),
+                Val::Ref(cid) => {
+                    match &self.heap()[cid as usize] {
+                        Obj::Cons { head, tail } => return Some(Some((*head, *tail))),
+                        Obj::EmptyList => return Some(None),
+                        _ => {}
+                    }
+                    if let Some((arr, off, end, more)) = self.as_chunked(cur) {
+                        let h = self.arr_at_pub(arr, off as usize);
+                        let t = if off + 1 < end {
+                            self.mk_chunked(arr, off + 1, end, more)
+                        } else {
+                            more
+                        };
+                        return Some(Some((h, t)));
+                    }
+                    // Lazy / frontend node: force ONE step through the
+                    // registered `seq` and retry (it yields cons/chunked/nil).
+                    let sf = self.seq_handler()?;
+                    let forced = top.invoke(top, self, sf, &[cur]);
+                    if self.pending() {
+                        return Some(None);
+                    }
+                    if forced == cur {
+                        return None; // seq made no progress: not a sequence
+                    }
+                    cur = forced;
+                }
+                _ => None?,
+            }
+        }
+    }
+    /// Flatten a whole sequence (cons / chunked / lazy) into a Vec, forcing
+    /// through the registered `seq` fn as needed. The general `apply` path.
+    pub fn seq_flatten(&mut self, top: &dyn crate::code::CodeSpace<M>, bits: u64) -> Vec<u64> {
+        let mut out = Vec::new();
+        let mut cur = bits;
+        loop {
+            // Whole realized chunks copy in one extend (no per-element step).
+            if let Some((arr, coff, cend, more)) = self.as_chunked(cur) {
+                let (aoff, alen) = self.arr_span_pub(arr);
+                let words = self.words(aoff, alen);
+                out.extend_from_slice(&words[coff as usize..cend as usize]);
+                cur = more;
+                continue;
+            }
+            match self.seq_step(top, cur) {
+                Some(Some((h, t))) => {
+                    out.push(h);
+                    cur = t;
+                }
+                Some(None) => return out,
+                None => {
+                    // A node we cannot walk and cannot force is a configuration
+                    // error (frontend forgot set_seq_fn) — fail LOUDLY rather
+                    // than silently truncating the argument list.
+                    panic!(
+                        "seq_flatten: unwalkable sequence node {} (no seq fn registered?)",
+                        self.print(cur)
+                    );
+                }
+            }
+        }
+    }
     /// Install the reader+compiler re-entry bridge (see `EvalBridge`). Set once, on
     /// the main handle, by the frontend's top-level driver.
     pub fn set_eval_bridge(&mut self, b: Arc<dyn EvalBridge<M>>) {
@@ -2569,6 +2658,12 @@ impl<M: ValueModel> Runtime<M> {
         let (off, len) = self.arr_span(arr);
         self.words(off, len)[i]
     }
+    pub(crate) fn arr_at_pub(&self, arr: u64, i: usize) -> u64 {
+        self.arr_at(arr, i)
+    }
+    pub(crate) fn arr_span_pub(&self, arr: u64) -> (u32, u32) {
+        self.arr_span(arr)
+    }
     fn mk_array(&mut self, v: Vec<u64>) -> u64 {
         M::R::enc_ref(self.alloc_vector(&v))
     }
@@ -2591,7 +2686,7 @@ impl<M: ValueModel> Runtime<M> {
     /// (arr, off, end, more) of a `'ChunkedCons` record, or None. Lets the cons
     /// prims (`%first`/`%rest`) treat a chunk transparently as a seq — only on the
     /// as_cons-miss path, so the common cons case pays nothing.
-    fn as_chunked(&self, bits: u64) -> Option<(u64, i64, i64, u64)> {
+    pub(crate) fn as_chunked(&self, bits: u64) -> Option<(u64, i64, i64, u64)> {
         let Val::Ref(id) = self.decode(bits) else { return None };
         let &Obj::Record { type_id, off: foff, len: flen } = &self.heap()[id as usize] else {
             return None;
@@ -2605,7 +2700,7 @@ impl<M: ValueModel> Runtime<M> {
         let end = match self.decode(f2) { Val::Int(i) => i as i64, _ => return None };
         Some((f0, off, end, f3))
     }
-    fn mk_chunked(&mut self, arr: u64, off: i64, end: i64, more: u64) -> u64 {
+    pub(crate) fn mk_chunked(&mut self, arr: u64, off: i64, end: i64, more: u64) -> u64 {
         let offb = self.encode(Val::Int(off as i128));
         let endb = self.encode(Val::Int(end as i128));
         let ty = self.intern_cached(&self.shared.sym_cache_chunked_cons, "ChunkedCons");

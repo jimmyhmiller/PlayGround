@@ -284,7 +284,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 let rest = &argv[1..];
                 let mut flat: Vec<u64> = rest[..rest.len().saturating_sub(1)].to_vec();
                 if let Some(&last) = rest.last() {
-                    flat.extend(rt.list_to_vec(last));
+                    flat.extend(rt.seq_flatten(top, last));
                 }
                 top.invoke(top, rt, f, &flat)
             }

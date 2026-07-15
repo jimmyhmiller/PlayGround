@@ -527,9 +527,13 @@ extern "C" fn shim_def_method<M: ValueModel>(
     rt.encode(Val::Nil)
 }
 
-/// `(apply f a … lst)` — flatten the leading args with the final list and invoke
-/// `f` through `top`, exactly as the TreeWalk `Prim::Apply` arm does.
-extern "C" fn shim_apply<M: ValueModel>(
+/// `(apply f a … lst)` — invoke `f` on the leading args + the elements of the
+/// final sequence, flattened NATIVELY (`seq_flatten` walks cons/chunked spines
+/// and forces lazy nodes through the registered `seq` fn). The rest arg is
+/// deliberately re-materialized as a realized list by the invoke path: this
+/// dialect's variadic bodies may walk their rest arg with raw `%first`/`%rest`
+/// prims, so handing them a lazy-tailed seq would break them.
+extern "C" fn shim_apply<M: ModelArithJit>(
     ctx: *mut JitCtx<M>,
     args: *const u64,
     argc: u32,
@@ -543,7 +547,7 @@ extern "C" fn shim_apply<M: ValueModel>(
     let rest = &argv[1..];
     let mut flat: Vec<u64> = rest[..rest.len().saturating_sub(1)].to_vec();
     if let Some(&last) = rest.last() {
-        flat.extend(rt.list_to_vec(last));
+        flat.extend(rt.seq_flatten(top, last));
     }
     top.invoke(top, rt, f, &flat)
 }

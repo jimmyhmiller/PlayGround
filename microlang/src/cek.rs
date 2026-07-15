@@ -232,7 +232,10 @@ fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Arc<Kont>) -> Step
                     let (f, rest) = (vals[0], &vals[1..]);
                     let mut flat: Vec<u64> = rest[..rest.len().saturating_sub(1)].to_vec();
                     if let Some(&last) = rest.last() {
-                        flat.extend(rt.list_to_vec(last));
+                        // CEK is self-contained (no `top`); force lazy nodes
+                        // through itself.
+                        let cek = CekMachine;
+                        flat.extend(rt.seq_flatten(&cek, last));
                     }
                     return apply_callable(rt, f, &flat, next.clone());
                 }

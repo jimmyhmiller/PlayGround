@@ -227,6 +227,8 @@ impl Session {
         // the core `-apply-obj` dispatcher, so keywords/collections are callable.
         let apply_obj = rt.intern("clojure.core/-apply-obj");
         rt.set_apply_fn(apply_obj);
+        let seq_sym = rt.intern("clojure.core/seq");
+        rt.set_seq_fn(seq_sym);
         Session { macros, comp }
     }
 
