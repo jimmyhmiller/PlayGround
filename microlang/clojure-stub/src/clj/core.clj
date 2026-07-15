@@ -233,7 +233,14 @@
 (defn entries [kvs]
   (if (nil? kvs) nil
       (%cons (vector (%first kvs) (%first (%rest kvs))) (entries (%rest (%rest kvs))))))
-(defn count-seq [s n] (let [s (seq s)] (if (nil? s) n (count-seq (%rest s) (%add n 1)))))
+;; Chunk-aware: a `ChunkedCons` run is counted by SIZE and we jump to its tail,
+;; instead of stepping `%rest` once per element. `type-of` inline check (rather
+;; than `chunked?`, which isn't defined until later in this file).
+(defn count-seq [s n]
+  (let [s (seq s)]
+    (cond (nil? s) n
+          (%num-eq (type-of s) 'ChunkedCons) (count-seq (field s 3) (%add n (%sub (field s 2) (field s 1))))
+          true (count-seq (%rest s) (%add n 1)))))
 (defn nth-seq [s i] (let [s (seq s)] (if (%num-eq i 0) (%first s) (nth-seq (%rest s) (%sub i 1)))))
 (defn mget [kvs k]
   (cond (nil? kvs) nil (%num-eq (%first kvs) k) (%first (%rest kvs)) true (mget (%rest (%rest kvs)) k)))
@@ -785,10 +792,24 @@
   (lazy-seq (if (%lt 0 n)
                 (let [s (seq c)] (if (nil? s) nil (%cons (%first s) (take (%sub n 1) (%rest s)))))
                 nil)))
+;; Chunk-aware: scan a whole chunk natively; if every element passes, pass the
+;; chunk through and recurse; on the first failure yield the passing prefix
+;; (partial chunk) and stop. `(reduce/count (take-while pred (range …)))` then
+;; chunk-scans instead of consing + calling `pred` through the seq abstraction
+;; per element.
 (defn take-while [pred c]
-  (lazy-seq (let [s (seq c)]
-              (if (nil? s) nil
-                  (if (pred (%first s)) (%cons (%first s) (take-while pred (%rest s))) nil)))))
+  (lazy-seq
+    (let [s (seq c)]
+      (cond (nil? s) nil
+            (chunked? s)
+              (let [arr (field s 0) off (field s 1) end (field s 2)]
+                (loop [i off]
+                  (cond (%num-eq i end) (record 'ChunkedCons arr off end (take-while pred (field s 3)))
+                        (pred (%aget arr i)) (recur (%add i 1))
+                        (%num-eq i off) nil
+                        true (record 'ChunkedCons arr off i nil))))
+            (pred (%first s)) (%cons (%first s) (take-while pred (%rest s)))
+            true nil))))
 (defn drop-while [pred c]
   (lazy-seq (let [s (seq c)]
               (if (nil? s) nil (if (pred (%first s)) (drop-while pred (%rest s)) s)))))
@@ -796,8 +817,19 @@
 ;; x is the immediate head; `(f x)` is deferred INSIDE the inner lazy-seq (so
 ;; realizing element n applies f exactly n times, not n+1). Exactly cljs's form.
 (defn iterate [f x] (cons x (lazy-seq (iterate f (f x)))))
-(defn -repeat-inf [x] (lazy-seq (%cons x (-repeat-inf x))))
-(defn -repeat-n [n x] (lazy-seq (if (%lt 0 n) (%cons x (-repeat-n (%sub n 1) x)) nil)))
+;; repeat produces CHUNKED seqs (a 32-wide run of `x` per lazy step), so
+;; `(reduce f (take n (repeat x)))` / `(reduce f (repeat n x))` chunk-scan
+;; instead of walking a cons per element.
+(defn -repeat-chunk [x k]
+  (let [arr (%make-array k)]
+    (loop [i 0] (if (%lt i k) (do (%cell-set! arr i x) (recur (%add i 1))) arr))))
+(defn -repeat-inf [x] (lazy-seq (record 'ChunkedCons (-repeat-chunk x 32) 0 32 (-repeat-inf x))))
+(defn -repeat-n [n x]
+  (lazy-seq
+    (if (%lt 0 n)
+        (let [k (if (%lt n 32) n 32)]
+          (record 'ChunkedCons (-repeat-chunk x k) 0 k (-repeat-n (%sub n k) x)))
+        nil)))
 (defn repeat [& args] (if (nil? (next args)) (-repeat-inf (first args)) (-repeat-n (first args) (second args))))
 (defn repeatedly [f] (lazy-seq (%cons (f) (repeatedly f))))
 (defn -cycle [orig s]
