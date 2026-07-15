@@ -19,6 +19,7 @@
 (import "parser.coil" :use *)
 (import "reader.coil" :use *)
 (import "resolve.coil" :use *)
+(import "metaengine.coil" :use *)
 
 (defn defn-name-of [(f (ptr Sexp))] (-> (Option (slice u8)))
   (if (icmp-ne (sx-tag (load f)) 6) (None [(slice u8)])
@@ -168,13 +169,18 @@
                           (store! k (iadd (load k) 1)))))
                   (finish-macro callee (box-al [EnvBind] a (load env)) cx a fn-name)))))))))
 (defn finish-macro [(callee (ptr Func)) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx)) (a (ptr Allocator)) (fn-name (slice u8))] (-> (Result Sexp Diag))
-  (match (eval-seq (load (field callee body)) env cx)
-    (Err [d] (Err [Sexp Diag] d))
-    (Ok [fl]
-      (match fl
-        (FVal [v] (if (is-ccode v) (Ok [Sexp Diag] (ccode-of v)) (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' did not return Code")))))
-        (FBrk [vv ll] (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "': stray control flow"))))
-        (FCont [ll]   (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "': stray control flow"))))))))
+  ; compiled engine: the env (param -> CCode arg, variadic already packed) IS the
+  ; argument list — run the dylib entry instead of interpreting the body.
+  (let [fp (meta-engine-lookup fn-name)]
+    (if (icmp-ne (cast i64 fp) 0)
+        (meta-engine-run-env a fp cx env)
+      (match (eval-seq (load (field callee body)) env cx)
+        (Err [d] (Err [Sexp Diag] d))
+        (Ok [fl]
+          (match fl
+            (FVal [v] (if (is-ccode v) (Ok [Sexp Diag] (ccode-of v)) (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' did not return Code")))))
+            (FBrk [vv ll] (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "': stray control flow"))))
+            (FCont [ll]   (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "': stray control flow"))))))))))
 (defstruct ExpEnv
   [(macros (ptr (ArrayList (slice u8)))) (comptime (ptr (ArrayList (slice u8))))
    (sub (ptr Program)) (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry))) (a (ptr Allocator))])
@@ -287,8 +293,15 @@
         ;    Size is unaffected: closure-funcs below already prunes to what the
         ;    metaprograms actually reach.
         subls (alloc-stack LS)]
+    ; compiled engine (COIL_META=compiled): the boundary shim (metashim.coil)
+    ; joins the macro context so metalower's rewritten code ops resolve. The shim
+    ; forms live in a FRESH list — s.out (and its buffer) stay untouched.
+    (match (if (meta-compiled?) (meta-shim-forms a (mut s) out-forms) (Ok [(ptr (ArrayList TaggedForm)) Diag] out-forms))
+      (Err [d] (Err [i64 Diag] d))
+      (Ok [sub-forms]
+    (do
     (store! (field subls a) a)
-    (store! (field subls out) (load out-forms))
+    (store! (field subls out) (load sub-forms))
     (store! (field subls loaded) (al-new [(slice u8)] a))
     (store! (field subls imports) (load (field s imports)))
     (store! (field subls exports) (load (field s exports)))
@@ -297,7 +310,10 @@
       (Ok [macroctx]
         (let [quals (code-sig-funcs macroctx a)]
           (if (icmp-eq (al-len [(slice u8)] (load quals)) 0) (Ok [i64 Diag] 0)
-            (let [wanted (closure-funcs macroctx quals a) sub (closure-subprogram macroctx wanted a)
+            ; the closure seeds gain the shim functions under the compiled engine:
+            ; lowering creates calls to them AFTER this walk runs.
+            (let [seeds (if (meta-compiled?) (meta-shim-seeds a macroctx quals) quals)
+                  wanted (closure-funcs macroctx seeds a) sub (closure-subprogram macroctx wanted a)
                   checkls (alloc-stack LS)]
               (store! (field checkls a) a)
               (store! (field checkls out) (al-new [TaggedForm] a))
@@ -306,7 +322,12 @@
               (store! (field checkls exports) (al-new [ExpEntry] a))
               (match (check-program a sub (mut checkls))
                 (Err [d] (Err [i64 Diag] d))
-                (Ok [checked] (run-expand (mut s) quals wanted checked a))))))))))
+                (Ok [checked]
+                  ; compiled engine: lower + build + dlopen the metaprogram dylib
+                  ; ONCE; finish-macro then routes every entry through it.
+                  (match (if (meta-compiled?) (meta-engine-setup a checked quals) (None [Diag]))
+                    (Some [d] (Err [i64 Diag] d))
+                    (None [] (run-expand (mut s) quals wanted checked a)))))))))))))))
 ; ── whole-program CHECKERS ───────────────────────────────────────────────────
 ; `(checker FN)` registers FN — a [(prog Code)] -> Code function — to be run once,
 ; after expansion, over the WHOLE program (all top-level forms as one Code list).

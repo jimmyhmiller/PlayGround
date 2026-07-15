@@ -873,6 +873,10 @@
                ; S2: record this expression's inferred type, keyed by its NODE ID, so a
                ; metaprogram can ask `(type-of NODE)` for any expression's exact type.
                (type-map-record (load (field e nid)) (load (field r t)))
+               ; The checked output node inherits the INPUT node's id (never dumped, so
+               ; oracles are unaffected): metalower reads the type map through the
+               ; checked AST, and without this every rebuilt node would be nid -1.
+               (store! (field (field r e) nid) (load (field e nid)))
                ; S1: record a reference's RESOLVED entity (qualified name) by node id, so
                ; `(code-decl NODE)` answers with the exact function/variant/etc. it picked.
                (match-else (load (field e kind))

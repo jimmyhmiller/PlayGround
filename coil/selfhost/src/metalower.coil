@@ -1,0 +1,502 @@
+; selfhost/src/metalower.coil — lower a CHECKED metaprogram sub-program to a
+; normal, compilable program (the compile-and-run metaprogram engine's core pass).
+;
+; Runs AFTER check-program (so every code-op argument's inferred type is in the
+; type map) and BEFORE monomorphize. It rewrites, everywhere:
+;   - the type `Code`            -> (ptr i8)   (an opaque handle to a host Sexp)
+;   - (ECodeOp op args)          -> metashim arg-builder chain + mp-op-RET call
+;   - (EQuote form) / QLit       -> (mp-quoted k) against the host quote registry
+;   - (EQuasi q)                 -> nested mp-qq-* builder calls
+;   - (error MSG) (op 9, never)  -> (do (mp-op-int 9 ...) (loop 0))  — never-typed
+; and appends an ExportC per metaprogram entry so the dylib exposes coil_mp_<k>.
+;
+; PARITY RULES. The interpreter fails many misuses only WHEN EVALUATED (wrong-typed
+; op arguments, unquoting an aggregate, splicing a non-list). Lowering preserves
+; that: wrong-typed args still cross the boundary as real CtVals and fail with the
+; interpreter's own message; evaluation-order side effects are kept by nesting the
+; builder calls (argument chains evaluate left-to-right, like eval-seq). The only
+; compile-time rejections here are values that CANNOT cross (structs, refs), which
+; the interpreter would also reject on every evaluation.
+(module metalower)
+
+(import "alloc.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "result.coil" :use *)
+(import "match.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "reader.coil" :use *)
+(import "parser.coil" :use *)
+(import "ast.coil" :use *)
+(import "resolve.coil" :use *)
+(import "comptime.coil" :use *)
+(import "check.coil" :use *)
+
+; ---- pass state ----------------------------------------------------------------
+(defstruct MLS
+  [(a (ptr Allocator))
+   (reg (ptr (ArrayList (ptr Sexp))))])   ; quote registry, in lowering order
+
+(defstruct MLEntry [(name (slice u8)) (symbol (slice u8))])
+(defstruct MLOut
+  [(prog (ptr Program))
+   (entries (ptr (ArrayList MLEntry)))
+   (registry (ptr (ArrayList (ptr Sexp))))])
+
+; ---- types: Code -> (ptr i8), recursively ---------------------------------------
+(defn ml-code-ty [(a (ptr Allocator))] (-> Type) (TPtr (box-type a (TInt 8 true))))
+(defn ml-type [(a (ptr Allocator)) (t (ptr Type))] (-> Type)
+  (match-else (load t)
+    (TCode  [] (ml-code-ty a))
+    (TPtr   [inner] (TPtr (box-type a (ml-type a inner))))
+    (TRef   [m inner] (TRef m (box-type a (ml-type a inner))))
+    (TArray [e n] (TArray (box-type a (ml-type a e)) n))
+    (TSlice [e] (TSlice (box-type a (ml-type a e))))
+    (TVec   [e n] (TVec (box-type a (ml-type a e)) n))
+    (TFn    [cc ps ret] (TFn cc (ml-type-list a ps) (box-type a (ml-type a ret))))
+    (TApp   [nm args] (TApp nm (ml-type-list a args)))
+    (_ (load t))))
+(defn ml-type-list [(a (ptr Allocator)) (ts (ptr (ArrayList Type)))] (-> (ptr (ArrayList Type)))
+  (let [n (al-len [Type] (load ts)) (mut out) (al-new [Type] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut out) (ml-type a (al-elem [Type] ts (load i))))
+          (store! i (iadd (load i) 1)))))
+    (box-al [Type] a (load out))))
+(defn ml-type-opt [(a (ptr Allocator)) (t (Option Type))] (-> (Option Type))
+  (match t
+    (None [] (None [Type]))
+    (Some [tv] (let [tp (alloc-stack Type)] (store! tp tv) (Some (ml-type a tp))))))
+
+; ---- small expr constructors -----------------------------------------------------
+; Every synthesized node inherits the ORIGINAL node's span, so diagnostics keep
+; pointing at real source.
+(defn ml-call1 [(st (ptr MLS)) (fname (slice u8)) (x Expr) (proto (ptr Expr))] (-> Expr)
+  (let [a (load (field st a)) (mut args) (al-new [Expr] a)]
+    (al-push! (mut args) x)
+    (mk-expr (ECall fname (box-al [Type] a (al-new [Type] a)) (box-al [Expr] a (load args)))
+             (load (field proto lo)) (load (field proto hi)) (load (field proto source)) (load (field proto ctxt)))))
+(defn ml-call2 [(st (ptr MLS)) (fname (slice u8)) (x Expr) (y Expr) (proto (ptr Expr))] (-> Expr)
+  (let [a (load (field st a)) (mut args) (al-new [Expr] a)]
+    (al-push! (mut args) x) (al-push! (mut args) y)
+    (mk-expr (ECall fname (box-al [Type] a (al-new [Type] a)) (box-al [Expr] a (load args)))
+             (load (field proto lo)) (load (field proto hi)) (load (field proto source)) (load (field proto ctxt)))))
+(defn ml-call0 [(st (ptr MLS)) (fname (slice u8)) (proto (ptr Expr))] (-> Expr)
+  (let [a (load (field st a))]
+    (mk-expr (ECall fname (box-al [Type] a (al-new [Type] a)) (box-al [Expr] a (al-new [Expr] a)))
+             (load (field proto lo)) (load (field proto hi)) (load (field proto source)) (load (field proto ctxt)))))
+(defn ml-int [(st (ptr MLS)) (v i64) (proto (ptr Expr))] (-> Expr)
+  (mk-expr (EInt v) (load (field proto lo)) (load (field proto hi)) (load (field proto source)) (load (field proto ctxt))))
+(defn ml-do2 [(st (ptr MLS)) (x Expr) (y Expr) (proto (ptr Expr))] (-> Expr)
+  (let [a (load (field st a)) (mut body) (al-new [Expr] a)]
+    (al-push! (mut body) x) (al-push! (mut body) y)
+    (mk-expr (EDo (box-al [Expr] a (load body)))
+             (load (field proto lo)) (load (field proto hi)) (load (field proto source)) (load (field proto ctxt)))))
+; a break-less loop: the never-typed tail after a host call that cannot return
+(defn ml-diverge [(st (ptr MLS)) (proto (ptr Expr))] (-> Expr)
+  (let [a (load (field st a)) (mut body) (al-new [Expr] a)]
+    (al-push! (mut body) (ml-int st 0 proto))
+    (mk-expr (ELoop (None [(slice u8)]) (box-al [Expr] a (load body)))
+             (load (field proto lo)) (load (field proto hi)) (load (field proto source)) (load (field proto ctxt)))))
+
+; ---- argument classification ------------------------------------------------------
+; kinds: 1=Code 2=int 3=str 4=bool 5=float 6=never 0=cannot-cross
+(defn ml-kind-of-type [(t (ptr Type))] (-> i64)
+  (match-else (load t)
+    (TCode [] 1)
+    (TInt [b s] 2)
+    (TBool [] 4)
+    (TFloat [b] 5)
+    (TNever [] 6)
+    (TSlice [e] (match-else (load e) (TInt [b s] (if (and (icmp-eq b 8) (not s)) 3 0)) (_ 0)))
+    (_ 0)))
+; The checked type of an ORIGINAL (pre-lowering) expr: type map by nid, else a
+; structural fallback for the node kinds whose type is intrinsic.
+(defn ml-node-type [(st (ptr MLS)) (e (ptr Expr))] (-> (Result Type Diag))
+  (match (type-map-lookup (load (field e nid)))
+    (Some [t] (Ok [Type Diag] t))
+    (None []
+      (match-else (load (field e kind))
+        (EInt [v] (Ok [Type Diag] (TInt 64 true)))
+        (EBool [b] (Ok [Type Diag] (TBool)))
+        (EFloat [bits] (Ok [Type Diag] (TFloat 64)))
+        (EStr [s] (Ok [Type Diag] (TSlice (box-type (load (field st a)) (TInt 8 false)))))
+        (EQuote [f] (Ok [Type Diag] (TCode)))
+        (EQuasi [q] (Ok [Type Diag] (TCode)))
+        (ECodeOp [op args] (Ok [Type Diag] (codeop-rty op)))
+        (_ (Err [Type Diag] (derr-at (load (field e lo)) (load (field e hi))
+             "metalower: no inferred type recorded for a code-op argument (compiler bug)")))))))
+
+; widen an int/float argument to the boundary's i64/f64
+(defn ml-widen-int [(st (ptr MLS)) (t Type) (le Expr) (proto (ptr Expr))] (-> Expr)
+  (match-else t
+    (TInt [b s] (if (icmp-eq b 64) le
+                  (mk-expr (ECast (TInt 64 true) (box-expr (load (field st a)) le))
+                           (load (field proto lo)) (load (field proto hi)) (load (field proto source)) (load (field proto ctxt)))))
+    (_ le)))
+(defn ml-widen-float [(st (ptr MLS)) (t Type) (le Expr) (proto (ptr Expr))] (-> Expr)
+  (match-else t
+    (TFloat [b] (if (icmp-eq b 64) le
+                  (mk-expr (ECast (TFloat 64) (box-expr (load (field st a)) le))
+                           (load (field proto lo)) (load (field proto hi)) (load (field proto source)) (load (field proto ctxt)))))
+    (_ le)))
+
+; ---- ECodeOp lowering --------------------------------------------------------------
+; (op a0 a1 ...) -> (mp-op-RET op (mp-arg-K (mp-arg-K (mp-arg-new) A0) A1))
+; If an argument is never-typed, evaluation stops there (like the interpreter's
+; arg-evaluation loop): the whole node becomes (do A0 .. ANEVER), itself never-typed.
+(defn ml-codeop [(st (ptr MLS)) (op i64) (args (ptr (ArrayList Expr))) (proto (ptr Expr))] (-> (Result Expr Diag))
+  (try (do
+    (let [a (load (field st a)) n (al-len [Expr] (load args))
+          (mut chain) (ml-call0 st "metashim.mp-arg-new" proto)
+          (mut i) 0 (mut diverged) (None [Expr]) (mut evald) (al-new [Expr] a)]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [ap (al-elem [Expr] args (load i))
+                  t (try! (ml-node-type st ap))
+                  k (let [tp (alloc-stack Type)] (store! tp t) (ml-kind-of-type tp))
+                  le (try! (ml-expr st ap))]
+              (if (icmp-eq k 6)
+                  ; never-typed argument: evaluate the chain so far, then it
+                  (do (al-push! (mut evald) (load chain))
+                      (al-push! (mut evald) le)
+                      (store! diverged (Some (mk-expr (EDo (box-al [Expr] a (load evald)))
+                                                      (load (field proto lo)) (load (field proto hi))
+                                                      (load (field proto source)) (load (field proto ctxt)))))
+                      (break))
+                (if (icmp-eq k 1) (store! chain (ml-call2 st "metashim.mp-arg-c" (load chain) le proto))
+                (if (icmp-eq k 2) (store! chain (ml-call2 st "metashim.mp-arg-i" (load chain) (ml-widen-int st t le proto) proto))
+                (if (icmp-eq k 3) (store! chain (ml-call2 st "metashim.mp-arg-s" (load chain) le proto))
+                (if (icmp-eq k 4) (store! chain (ml-call2 st "metashim.mp-arg-b" (load chain) le proto))
+                (if (icmp-eq k 5) (store! chain (ml-call2 st "metashim.mp-arg-f" (load chain) (ml-widen-float st t le proto) proto))
+                    (return-from :try (Err [Expr Diag] (derr-at (load (field ap lo)) (load (field ap hi))
+                      "metalower: this value cannot cross into a code op (only Code, integers, bools, floats and (slice u8) can; the interpreter rejects it at run time too)")))))))))
+            (store! i (iadd (load i) 1))))))
+      (match (load diverged)
+        (Some [de] (Ok [Expr Diag] de))
+        (None []
+          (let [opx (ml-int st op proto)]
+            ; result shape = codeop-rty (check.coil), the op's static type
+            (match-else (codeop-rty op)
+              (TNever [] (Ok [Expr Diag]
+                (ml-do2 st (ml-call2 st "metashim.mp-op-int" opx (load chain) proto)
+                          (ml-diverge st proto) proto)))
+              (TBool [] (Ok [Expr Diag] (ml-call2 st "metashim.mp-op-bool" opx (load chain) proto)))
+              (TInt [b s] (Ok [Expr Diag] (ml-call2 st "metashim.mp-op-int" opx (load chain) proto)))
+              (TSlice [e] (Ok [Expr Diag] (ml-call2 st "metashim.mp-op-str" opx (load chain) proto)))
+              (_ (Ok [Expr Diag] (ml-call2 st "metashim.mp-op-code" opx (load chain) proto)))))))))))
+
+; ---- quote/quasiquote ---------------------------------------------------------------
+(defn ml-quoted [(st (ptr MLS)) (form (ptr Sexp)) (proto (ptr Expr))] (-> Expr)
+  (let [k (al-len [(ptr Sexp)] (load (load (field st reg))))]
+    (al-push! [(ptr Sexp)] (load (field st reg)) form)
+    (ml-call1 st "metashim.mp-quoted" (ml-int st k proto) proto)))
+
+(defn ml-unquote [(st (ptr MLS)) (e (ptr Expr)) (proto (ptr Expr))] (-> (Result Expr Diag))
+  (try (do
+    (let [t (try! (ml-node-type st e))
+          k (let [tp (alloc-stack Type)] (store! tp t) (ml-kind-of-type tp))
+          le (try! (ml-expr st e))]
+      (if (icmp-eq k 1) (Ok [Expr Diag] le)
+      (if (icmp-eq k 2) (Ok [Expr Diag] (ml-call1 st "metashim.mp-unq-int" (ml-widen-int st t le proto) proto))
+      (if (icmp-eq k 4) (Ok [Expr Diag] (ml-call1 st "metashim.mp-unq-bool" le proto))
+      (if (icmp-eq k 5) (Ok [Expr Diag] (ml-call1 st "metashim.mp-unq-float" (ml-widen-float st t le proto) proto))
+      (if (icmp-eq k 3) (Ok [Expr Diag] (ml-call1 st "metashim.mp-unq-str" le proto))
+      (if (icmp-eq k 6) (Ok [Expr Diag] le)
+          ; aggregate: evaluate it (side effects first, like the interpreter's
+          ; eval-then-convert), then fail with ctval->sexp's own message
+          (Ok [Expr Diag] (ml-do2 st le (ml-call1 st "metashim.mp-parity-fail" (ml-int st 1 proto) proto) proto))))))))))))
+
+; the builder chain for a quasi list/vector's items
+(defn ml-quasi-items [(st (ptr MLS)) (items (ptr (ArrayList Quasi))) (proto (ptr Expr))] (-> (Result Expr Diag))
+  (try (do
+    (let [a (load (field st a)) n (al-len [Quasi] (load items))
+          (mut chain) (ml-call0 st "metashim.mp-qq-new" proto) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [qp (al-elem [Quasi] items (load i))]
+              (match-else (load qp)
+                (QSplice [e]
+                  (let [t (try! (ml-node-type st e))
+                        k (let [tp (alloc-stack Type)] (store! tp t) (ml-kind-of-type tp))
+                        le (try! (ml-expr st e))]
+                    (if (icmp-eq k 1) (store! chain (ml-call2 st "metashim.mp-qq-splice" (load chain) le proto))
+                      (if (icmp-eq k 6)
+                          (store! chain (ml-do2 st (load chain) le proto))
+                        ; non-Code splice value: evaluate, then the interpreter's error
+                        (store! chain (ml-do2 st (ml-do2 st (load chain) le proto)
+                                              (ml-call1 st "metashim.mp-parity-fail" (ml-int st 2 proto) proto) proto))))))
+                (_ (store! chain (ml-call2 st "metashim.mp-qq-push" (load chain) (try! (ml-quasi st qp proto)) proto)))))
+            (store! i (iadd (load i) 1)))))
+      (Ok [Expr Diag] (load chain))))))
+
+(defn ml-quasi [(st (ptr MLS)) (q (ptr Quasi)) (proto (ptr Expr))] (-> (Result Expr Diag))
+  (try (do
+    (match (load q)
+      (QLit [fp] (Ok [Expr Diag] (ml-quoted st fp proto)))
+      (QUnquote [e] (ml-unquote st e proto))
+      (QSplice [e]
+        ; a top-level ~@: the interpreter rejects it when evaluated, before
+        ; evaluating e — same here
+        (Ok [Expr Diag] (ml-call1 st "metashim.mp-parity-fail" (ml-int st 3 proto) proto)))
+      (QList [items]
+        (let [chain (try! (ml-quasi-items st items proto))
+              fin (if (quasi-head-is-lit-sym items) "metashim.mp-qq-listq" "metashim.mp-qq-list")]
+          (Ok [Expr Diag] (ml-call1 st fin chain proto))))
+      (QVector [items]
+        (let [chain (try! (ml-quasi-items st items proto))]
+          (Ok [Expr Diag] (ml-call1 st "metashim.mp-qq-vec" chain proto))))))))
+
+; ---- the expression walk -------------------------------------------------------------
+(defn ml-expr-list [(st (ptr MLS)) (es (ptr (ArrayList Expr)))] (-> (Result (ptr (ArrayList Expr)) Diag))
+  (try (do
+    (let [a (load (field st a)) n (al-len [Expr] (load es)) (mut out) (al-new [Expr] a) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (al-push! (mut out) (try! (ml-expr st (al-elem [Expr] es (load i)))))
+            (store! i (iadd (load i) 1)))))
+      (Ok [(ptr (ArrayList Expr)) Diag] (box-al [Expr] a (load out)))))))
+(defn ml-expr-opt [(st (ptr MLS)) (o (Option (ptr Expr)))] (-> (Result (Option (ptr Expr)) Diag))
+  (try (do
+    (match o
+      (None [] (Ok [(Option (ptr Expr)) Diag] (None [(ptr Expr)])))
+      (Some [e] (Ok [(Option (ptr Expr)) Diag] (Some (box-expr (load (field st a)) (try! (ml-expr st e))))))))))
+(defn ml-binds [(st (ptr MLS)) (bs (ptr (ArrayList Bind)))] (-> (Result (ptr (ArrayList Bind)) Diag))
+  (try (do
+    (let [a (load (field st a)) n (al-len [Bind] (load bs)) (mut out) (al-new [Bind] a) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [bp (al-elem [Bind] bs (load i)) nb (alloc-stack Bind)]
+              (store! (field nb name) (load (field bp name)))
+              (store! (field nb mutable) (load (field bp mutable)))
+              (store! (field nb value) (try! (ml-expr st (field bp value))))
+              (al-push! (mut out) (load nb)))
+            (store! i (iadd (load i) 1)))))
+      (Ok [(ptr (ArrayList Bind)) Diag] (box-al [Bind] a (load out)))))))
+(defn ml-arms [(st (ptr MLS)) (as (ptr (ArrayList Arm)))] (-> (Result (ptr (ArrayList Arm)) Diag))
+  (try (do
+    (let [a (load (field st a)) n (al-len [Arm] (load as)) (mut out) (al-new [Arm] a) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [ap (al-elem [Arm] as (load i)) na (alloc-stack Arm)]
+              (store! (field na variant) (load (field ap variant)))
+              (store! (field na binds) (load (field ap binds)))
+              (store! (field na body) (try! (ml-expr st (field ap body))))
+              (al-push! (mut out) (load na)))
+            (store! i (iadd (load i) 1)))))
+      (Ok [(ptr (ArrayList Arm)) Diag] (box-al [Arm] a (load out)))))))
+
+(defn ml-rewrap [(proto (ptr Expr)) (k ExprKind)] (-> Expr)
+  (mk-expr-nid k (load (field proto lo)) (load (field proto hi)) (load (field proto source)) (load (field proto ctxt)) (load (field proto nid))))
+
+(defn ml-expr [(st (ptr MLS)) (e (ptr Expr))] (-> (Result Expr Diag))
+  (try (do
+    (let [a (load (field st a))]
+      (match-else (load (field e kind))
+        ; ---- the four lowered kinds ----
+        (ECodeOp [op args] (ml-codeop st op args e))
+        (EQuote [form] (Ok [Expr Diag] (ml-quoted st form e)))
+        (EQuasi [q] (let [qp (alloc-stack Quasi)] (store! qp q) (ml-quasi st qp e)))
+        (EComptime [inner] (Err [Expr Diag] (derr-at (load (field e lo)) (load (field e hi))
+          "metalower: (comptime ...) survived the check fold (compiler bug)")))
+        ; ---- types embedded in exprs ----
+        (EZeroed [ty] (Ok [Expr Diag] (ml-rewrap e (EZeroed (ml-type a (let [tp (alloc-stack Type)] (store! tp ty) tp))))))
+        (EAlloc [storage ty] (Ok [Expr Diag] (ml-rewrap e (EAlloc storage (ml-type a (let [tp (alloc-stack Type)] (store! tp ty) tp))))))
+        (ECast [ty inner] (Ok [Expr Diag] (ml-rewrap e (ECast (ml-type a (let [tp (alloc-stack Type)] (store! tp ty) tp)) (box-expr a (try! (ml-expr st inner)))))))
+        (ESizeOf [ty] (Ok [Expr Diag] (ml-rewrap e (ESizeOf (ml-type a (let [tp (alloc-stack Type)] (store! tp ty) tp))))))
+        (EAlignOf [ty] (Ok [Expr Diag] (ml-rewrap e (EAlignOf (ml-type a (let [tp (alloc-stack Type)] (store! tp ty) tp))))))
+        (EOffsetOf [ty fname] (Ok [Expr Diag] (ml-rewrap e (EOffsetOf (ml-type a (let [tp (alloc-stack Type)] (store! tp ty) tp)) fname))))
+        (ELlvmIr [result args body] (Ok [Expr Diag] (ml-rewrap e (ELlvmIr (ml-type a (let [tp (alloc-stack Type)] (store! tp result) tp)) (try! (ml-expr-list st args)) body))))
+        (ETypeQuery [q ty] (Ok [Expr Diag] (ml-rewrap e (ETypeQuery q (ml-type a (let [tp (alloc-stack Type)] (store! tp ty) tp))))))
+        (EFieldMeta [meta ty idx] (Ok [Expr Diag] (ml-rewrap e (EFieldMeta meta (ml-type a (let [tp (alloc-stack Type)] (store! tp ty) tp)) (box-expr a (try! (ml-expr st idx)))))))
+        (EFieldIndex [ty nm] (Ok [Expr Diag] (ml-rewrap e (EFieldIndex (ml-type a (let [tp (alloc-stack Type)] (store! tp ty) tp)) (box-expr a (try! (ml-expr st nm)))))))
+        (ECall [f targs args] (Ok [Expr Diag] (ml-rewrap e (ECall f (ml-type-list a targs) (try! (ml-expr-list st args))))))
+        (EDynDispatch [ds vs mi cc params ret recv args]
+          (Ok [Expr Diag] (ml-rewrap e (EDynDispatch ds vs mi cc (ml-type-list a params)
+            (ml-type a (let [tp (alloc-stack Type)] (store! tp ret) tp))
+            (box-expr a (try! (ml-expr st recv))) (try! (ml-expr-list st args))))))
+        ; ---- pure structural recursion ----
+        (EBorrow [m place] (Ok [Expr Diag] (ml-rewrap e (EBorrow m (box-expr a (try! (ml-expr st place)))))))
+        (ELet [binds body] (Ok [Expr Diag] (ml-rewrap e (ELet (try! (ml-binds st binds)) (try! (ml-expr-list st body))))))
+        (EBin [op lhs rhs] (Ok [Expr Diag] (ml-rewrap e (EBin op (box-expr a (try! (ml-expr st lhs))) (box-expr a (try! (ml-expr st rhs)))))))
+        (ENot [inner] (Ok [Expr Diag] (ml-rewrap e (ENot (box-expr a (try! (ml-expr st inner)))))))
+        (ECmp [op lhs rhs] (Ok [Expr Diag] (ml-rewrap e (ECmp op (box-expr a (try! (ml-expr st lhs))) (box-expr a (try! (ml-expr st rhs)))))))
+        (EIf [cnd thn els] (Ok [Expr Diag] (ml-rewrap e (EIf (box-expr a (try! (ml-expr st cnd))) (box-expr a (try! (ml-expr st thn))) (box-expr a (try! (ml-expr st els)))))))
+        (EDo [body] (Ok [Expr Diag] (ml-rewrap e (EDo (try! (ml-expr-list st body))))))
+        (EField [p fname] (Ok [Expr Diag] (ml-rewrap e (EField (box-expr a (try! (ml-expr st p))) fname))))
+        (ELoad [inner] (Ok [Expr Diag] (ml-rewrap e (ELoad (box-expr a (try! (ml-expr st inner)))))))
+        (EStore [p val] (Ok [Expr Diag] (ml-rewrap e (EStore (box-expr a (try! (ml-expr st p))) (box-expr a (try! (ml-expr st val)))))))
+        (EIndex [p idx] (Ok [Expr Diag] (ml-rewrap e (EIndex (box-expr a (try! (ml-expr st p))) (box-expr a (try! (ml-expr st idx)))))))
+        (EBitGet [p fname] (Ok [Expr Diag] (ml-rewrap e (EBitGet (box-expr a (try! (ml-expr st p))) fname))))
+        (EBitSet [p fname val] (Ok [Expr Diag] (ml-rewrap e (EBitSet (box-expr a (try! (ml-expr st p))) fname (box-expr a (try! (ml-expr st val)))))))
+        (EFree [inner] (Ok [Expr Diag] (ml-rewrap e (EFree (box-expr a (try! (ml-expr st inner)))))))
+        (EErase [tn inner] (Ok [Expr Diag] (ml-rewrap e (EErase tn (box-expr a (try! (ml-expr st inner)))))))
+        (EMatch [scrut arms] (Ok [Expr Diag] (ml-rewrap e (EMatch (box-expr a (try! (ml-expr st scrut))) (try! (ml-arms st arms))))))
+        (ECallPtr [fp args] (Ok [Expr Diag] (ml-rewrap e (ECallPtr (box-expr a (try! (ml-expr st fp))) (try! (ml-expr-list st args))))))
+        (ELoop [label body] (Ok [Expr Diag] (ml-rewrap e (ELoop label (try! (ml-expr-list st body))))))
+        (EBreak [label value] (Ok [Expr Diag] (ml-rewrap e (EBreak label (try! (ml-expr-opt st value))))))
+        (ESpillRef [inner] (Ok [Expr Diag] (ml-rewrap e (ESpillRef (box-expr a (try! (ml-expr st inner)))))))
+        (EConstruct [sum variant args] (Ok [Expr Diag] (ml-rewrap e (EConstruct sum variant (try! (ml-expr-list st args))))))
+        (ETraitCall [tn method stp args] (Ok [Expr Diag] (ml-rewrap e (ETraitCall tn method stp (try! (ml-expr-list st args))))))
+        (EMakeDyn [ds vs methods inner] (Ok [Expr Diag] (ml-rewrap e (EMakeDyn ds vs methods (box-expr a (try! (ml-expr st inner)))))))
+        ; leaves: EInt EStr ECStr EVar EFloat EBool EFnPtrOf EContinue EStaticRef
+        (_ (Ok [Expr Diag] (load e))))))))
+
+; ---- funcs / defs / the whole program ----------------------------------------------
+(defn ml-params [(a (ptr Allocator)) (ps (ptr (ArrayList Param)))] (-> (ptr (ArrayList Param)))
+  (let [n (al-len [Param] (load ps)) (mut out) (al-new [Param] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [pp (al-elem [Param] ps (load i)) np (alloc-stack Param)]
+            (store! (field np name) (load (field pp name)))
+            (store! (field np ty) (ml-type a (field pp ty)))
+            (al-push! (mut out) (load np)))
+          (store! i (iadd (load i) 1)))))
+    (box-al [Param] a (load out))))
+(defn ml-fields [(a (ptr Allocator)) (fs (ptr (ArrayList Field)))] (-> (ptr (ArrayList Field)))
+  (let [n (al-len [Field] (load fs)) (mut out) (al-new [Field] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [fp (al-elem [Field] fs (load i)) nf (alloc-stack Field)]
+            (store! (field nf name) (load (field fp name)))
+            (store! (field nf ty) (ml-type a (field fp ty)))
+            (al-push! (mut out) (load nf)))
+          (store! i (iadd (load i) 1)))))
+    (box-al [Field] a (load out))))
+
+(defn ml-func [(st (ptr MLS)) (f (ptr Func))] (-> (Result Func Diag))
+  (try (do
+    (let [a (load (field st a)) nf (alloc-stack Func)]
+      (store! nf (load f))
+      (store! (field nf params) (ml-params a (load (field f params))))
+      (store! (field nf ret) (ml-type a (field f ret)))
+      (store! (field nf body) (try! (ml-expr-list st (load (field f body)))))
+      (Ok [Func Diag] (load nf))))))
+(defn ml-funcs [(st (ptr MLS)) (fs (ptr (ArrayList Func)))] (-> (Result (ptr (ArrayList Func)) Diag))
+  (try (do
+    (let [a (load (field st a)) n (al-len [Func] (load fs)) (mut out) (al-new [Func] a) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (al-push! (mut out) (try! (ml-func st (al-elem [Func] fs (load i)))))
+            (store! i (iadd (load i) 1)))))
+      (Ok [(ptr (ArrayList Func)) Diag] (box-al [Func] a (load out)))))))
+
+(defn ml-structs [(a (ptr Allocator)) (ss (ptr (ArrayList StructDef)))] (-> (ptr (ArrayList StructDef)))
+  (let [n (al-len [StructDef] (load ss)) (mut out) (al-new [StructDef] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [sp (al-elem [StructDef] ss (load i)) ns (alloc-stack StructDef)]
+            (store! ns (load sp))
+            (store! (field ns fields) (ml-fields a (load (field sp fields))))
+            (al-push! (mut out) (load ns)))
+          (store! i (iadd (load i) 1)))))
+    (box-al [StructDef] a (load out))))
+(defn ml-sums [(a (ptr Allocator)) (ss (ptr (ArrayList SumDef)))] (-> (ptr (ArrayList SumDef)))
+  (let [n (al-len [SumDef] (load ss)) (mut out) (al-new [SumDef] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [sp (al-elem [SumDef] ss (load i)) ns (alloc-stack SumDef) vs (load (field sp variants))
+                nv (al-len [Variant] (load vs)) (mut vout) (al-new [Variant] a) (mut j) 0]
+            (store! ns (load sp))
+            (loop (if (icmp-ge (load j) nv) (break)
+              (do (let [vp (al-elem [Variant] vs (load j)) nvr (alloc-stack Variant)]
+                    (store! (field nvr name) (load (field vp name)))
+                    (store! (field nvr fields) (ml-fields a (load (field vp fields))))
+                    (al-push! (mut vout) (load nvr)))
+                  (store! j (iadd (load j) 1)))))
+            (store! (field ns variants) (box-al [Variant] a (load vout)))
+            (al-push! (mut out) (load ns)))
+          (store! i (iadd (load i) 1)))))
+    (box-al [SumDef] a (load out))))
+(defn ml-externs [(a (ptr Allocator)) (es (ptr (ArrayList Extern)))] (-> (ptr (ArrayList Extern)))
+  (let [n (al-len [Extern] (load es)) (mut out) (al-new [Extern] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [ep (al-elem [Extern] es (load i)) ne (alloc-stack Extern)]
+            (store! ne (load ep))
+            (store! (field ne params) (ml-type-list a (load (field ep params))))
+            (store! (field ne ret) (ml-type a (field ep ret)))
+            (al-push! (mut out) (load ne)))
+          (store! i (iadd (load i) 1)))))
+    (box-al [Extern] a (load out))))
+(defn ml-consts [(st (ptr MLS)) (cs (ptr (ArrayList Const)))] (-> (Result (ptr (ArrayList Const)) Diag))
+  (try (do
+    (let [a (load (field st a)) n (al-len [Const] (load cs)) (mut out) (al-new [Const] a) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [cp (al-elem [Const] cs (load i)) nc (alloc-stack Const)]
+              (store! nc (load cp))
+              (store! (field nc ty) (ml-type-opt a (load (field cp ty))))
+              (store! (field nc value) (try! (ml-expr st (field cp value))))
+              (al-push! (mut out) (load nc)))
+            (store! i (iadd (load i) 1)))))
+      (Ok [(ptr (ArrayList Const)) Diag] (box-al [Const] a (load out)))))))
+(defn ml-traits [(a (ptr Allocator)) (ts (ptr (ArrayList TraitDef)))] (-> (ptr (ArrayList TraitDef)))
+  (let [n (al-len [TraitDef] (load ts)) (mut out) (al-new [TraitDef] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [tp (al-elem [TraitDef] ts (load i)) nt (alloc-stack TraitDef) ms (load (field tp methods))
+                nm (al-len [TraitMethod] (load ms)) (mut mout) (al-new [TraitMethod] a) (mut j) 0]
+            (store! nt (load tp))
+            (loop (if (icmp-ge (load j) nm) (break)
+              (do (let [mp (al-elem [TraitMethod] ms (load j)) nmr (alloc-stack TraitMethod)]
+                    (store! (field nmr name) (load (field mp name)))
+                    (store! (field nmr params) (ml-params a (load (field mp params))))
+                    (store! (field nmr ret) (ml-type a (field mp ret)))
+                    (al-push! (mut mout) (load nmr)))
+                  (store! j (iadd (load j) 1)))))
+            (store! (field nt methods) (box-al [TraitMethod] a (load mout)))
+            (al-push! (mut out) (load nt)))
+          (store! i (iadd (load i) 1)))))
+    (box-al [TraitDef] a (load out))))
+(defn ml-impls [(st (ptr MLS)) (is (ptr (ArrayList ImplDef)))] (-> (Result (ptr (ArrayList ImplDef)) Diag))
+  (try (do
+    (let [a (load (field st a)) n (al-len [ImplDef] (load is)) (mut out) (al-new [ImplDef] a) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [ip (al-elem [ImplDef] is (load i)) ni (alloc-stack ImplDef)]
+              (store! ni (load ip))
+              (store! (field ni self_type) (ml-type a (field ip self_type)))
+              (store! (field ni methods) (try! (ml-funcs st (load (field ip methods)))))
+              (al-push! (mut out) (load ni)))
+            (store! i (iadd (load i) 1)))))
+      (Ok [(ptr (ArrayList ImplDef)) Diag] (box-al [ImplDef] a (load out)))))))
+
+; entry exports: one C symbol per metaprogram function; params left empty like the
+; parser's own export-c records (codegen derives the thunk from the Func itself)
+(defn ml-exports [(a (ptr Allocator)) (p (ptr Program)) (quals (ptr (ArrayList (slice u8))))] (-> (ptr (ArrayList MLEntry)))
+  ; the vtable-handshake entry (metashim.coil mp-init) — closure-subprogram builds
+  ; the sub-program with empty exports, so the shim's record is re-created here
+  (let [ip (alloc-stack ExportC)]
+    (store! (field ip name) "metashim.mp-init")
+    (store! (field ip symbol) (Some "coil_mp_init"))
+    (store! (field ip params) (box-al [Type] a (al-new [Type] a)))
+    (store! (field ip lo) -1) (store! (field ip hi) -1)
+    (store! (field ip source) -1) (store! (field ip ctxt) 0)
+    (al-push! [ExportC] (load (field p exports)) (load ip)))
+  (let [n (al-len [(slice u8)] (load quals)) (mut entries) (al-new [MLEntry] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [q (al-get [(slice u8)] (load quals) (load i))
+                sym (sconcat a "coil_mp_" (dec->str a (load i)))
+                ep (alloc-stack ExportC) me (alloc-stack MLEntry)]
+            (store! (field ep name) q)
+            (store! (field ep symbol) (Some sym))
+            (store! (field ep params) (box-al [Type] a (al-new [Type] a)))
+            (store! (field ep lo) -1) (store! (field ep hi) -1)
+            (store! (field ep source) -1) (store! (field ep ctxt) 0)
+            (al-push! [ExportC] (load (field p exports)) (load ep))
+            (store! (field me name) q) (store! (field me symbol) sym)
+            (al-push! (mut entries) (load me)))
+          (store! i (iadd (load i) 1)))))
+    (box-al [MLEntry] a (load entries))))
+
+(defn metalower-program [(a (ptr Allocator)) (checked (ptr Program)) (quals (ptr (ArrayList (slice u8))))] (-> (Result (ptr MLOut) Diag))
+  (try (do
+    (let [st (alloc-stack MLS)]
+      (store! (field st a) a)
+      (store! (field st reg) (box-al [(ptr Sexp)] a (al-new [(ptr Sexp)] a)))
+      (let [out (unwrap-ptr [Program] (create [Program] a))]
+        (store! (field out conventions) (load (field checked conventions)))
+        (store! (field out structs) (ml-structs a (load (field checked structs))))
+        (store! (field out sums) (ml-sums a (load (field checked sums))))
+        (store! (field out externs) (ml-externs a (load (field checked externs))))
+        (store! (field out funcs) (try! (ml-funcs st (load (field checked funcs)))))
+        (store! (field out asserts) (load (field checked asserts)))
+        (store! (field out consts) (try! (ml-consts st (load (field checked consts)))))
+        (store! (field out traits) (ml-traits a (load (field checked traits))))
+        (store! (field out impls) (try! (ml-impls st (load (field checked impls)))))
+        (store! (field out metas) (load (field checked metas)))
+        (store! (field out exports) (box-al [ExportC] a (al-new [ExportC] a)))
+        (let [entries (ml-exports a out quals)
+              mo (unwrap-ptr [MLOut] (create [MLOut] a))]
+          (store! (field mo prog) out)
+          (store! (field mo entries) entries)
+          (store! (field mo registry) (load (field st reg)))
+          (Ok [(ptr MLOut) Diag] mo)))))))

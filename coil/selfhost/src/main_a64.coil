@@ -27,6 +27,7 @@
 (import "selfhost/src/mono.coil" :use *)
 (import "selfhost/src/diag.coil" :use *)
 (import "selfhost/src/comptime.coil" :use *)
+(import "selfhost/src/metaengine.coil" :use *)
 (import "selfhost/src/expander.coil" :use *)
 (import "selfhost/src/codegen_a64.coil" :use *)
 (import "selfhost/src/driver.coil" :use *)
@@ -54,7 +55,15 @@
 (defn do-cimport [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (ci/cimport-cli a argc argv 2))
 
+; the compiled-metaprogram engine's object builder (metaengine.coil): a mono'd
+; metaprogram Program -> object file, via the native arm64 backend (no DWARF).
+(defn meta-build-obj-a64 [(a (ptr Allocator)) (mp (ptr Program)) (obj (ptr i8))] (-> i64)
+  (cga64-build-object a mp obj "" ""
+                      (box-al [(slice u8)] a (al-new [(slice u8)] a))
+                      (box-al [(slice u8)] a (al-new [(slice u8)] a))))
+
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (set-meta-build-obj! (fnptr-of meta-build-obj-a64))
   (driver-main argc argv
                (fnptr-of no-llvm-build)
                (fnptr-of no-llvm-emitir)

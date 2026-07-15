@@ -29,6 +29,7 @@
 (import "selfhost/src/normalize.coil" :use *)
 (import "selfhost/src/diag.coil" :use *)
 (import "selfhost/src/comptime.coil" :use *)
+(import "selfhost/src/metaengine.coil" :use *)
 (import "selfhost/src/expander.coil" :use *)
 (import "selfhost/src/codegen_a64.coil" :use *)
 (import "selfhost/src/driver.coil" :use *)
@@ -94,7 +95,13 @@
 (defn do-cimport [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (ci/cimport-cli a argc argv 2))
 
+; the compiled-metaprogram engine's object builder (metaengine.coil): a mono'd
+; metaprogram Program -> object file, via the LLVM backend (host triple).
+(defn meta-build-obj-llvm [(a (ptr Allocator)) (mp (ptr Program)) (obj (ptr i8))] (-> i64)
+  (build-object a mp obj (cast (ptr i8) 0)))
+
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (set-meta-build-obj! (fnptr-of meta-build-obj-llvm))
   (driver-main argc argv
                (fnptr-of build-ir-program)
                (fnptr-of dump-ir-program)
