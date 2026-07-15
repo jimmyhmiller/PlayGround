@@ -151,6 +151,16 @@ bodies are mirrored back into the main form list (index-aligned, value-identical
 where nothing fired) so the authoritative check sees them too, and residual
 errors carry real "in expansion of macro …" notes.
 
+The rule's syntactic BASE CASE covers type-syntax macro arguments (objc's
+`(msg (ptr i8) recv sel [CGRect i64 …] …)`): a macro-headed call that does not
+even parse as an expression cannot be a function call — expand it. Such calls
+make their whole enclosing defn unparseable (the tolerant resolve skips it), so
+recovery is demand-driven: a skipped defn is recovered when its raw signature is
+Code-shaped (it IS a metaprogram) or when the sub-check fails on a call to it (a
+metaprogram needs it) — the compiler's own harmlessly-unparseable
+`try`/`block :label` call sites stay untouched. `mandelbrot.coil` uses the
+classic `msg` macro directly in its metaprogram; `tower_msg_test.coil` pins it.
+
 Definition-time expansion currently runs on the interpreter (the engine for that
 stratum isn't built yet at that point) — so a macro USED inside another macro's
 body must itself be interpretable. The expanded body then runs on whichever
