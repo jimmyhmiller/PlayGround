@@ -642,10 +642,12 @@
             coll (if (nil? (next args)) (first args) (second args))]
         (if (nil? (next args))
             (let [s (seq coll)] (if (nil? s) [] (-rconj-seq (%first s) (%rest s))))
-            ;; vector accumulator -> native %pv-conj loop; map accumulator ->
-            ;; native %hamt-assoc loop reading entries via %pv-nth (both skip
-            ;; per-element protocol dispatch — see the fused reducers above).
-            (cond (vector? init) (-rpvconj-seq init coll)
+            ;; EMPTY vector accumulator -> `(reduce conj [] coll)` is exactly
+            ;; `(vec coll)`, so build it BOTTOM-UP in one O(n) pass (the
+            ;; vecbuild / into-[] path) instead of an O(32n) per-element conj.
+            ;; Non-empty vector -> native %pv-conj loop; map -> native %hamt-assoc
+            ;; loop reading entries via %pv-nth (both skip per-element dispatch).
+            (cond (vector? init) (if (%num-eq (count init) 0) (vec coll) (-rpvconj-seq init coll))
                   (map? init) (-rmapconj-seq init coll)
                   true (-rconj-seq init coll))))
     (nil? (next args))
