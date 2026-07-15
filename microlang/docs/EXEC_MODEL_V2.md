@@ -11,25 +11,37 @@ record for the performance re-architecture and the map of what remains.
 | non-capturing call | 10ns (~2×) | ~3ns (≤1×) |
 | loop+conj vecbuild | 2.75µs (~105×) | ~190-240ns (~11×) |
 | reduce+map pipeline | 270ns/el (~30×) | ~110ns/el (~11×) |
-| into-xform (transducers) | ~1040× | ~137× |
-| comp chain | ~950× | ~259× |
+| into-xform (transducers) | ~1040× | ~38× |
+| comp chain | ~950× | ~9× |
+| transduce | ~718× | ~37× |
+| apply | ~569× | ~13× |
+
+## Round 2 (same session): what closed the tail
+
+- Fast-table entries publish at CLOSURE CREATION (per-element lazy-seq
+  thunks/step fns were slow-invoked on their single call — 30× fewer slow
+  resolves), and shim_dispatch/shim_call gained a rc-reusing direct fast
+  invoke. comp/partial/juxt/complement/fnil/constantly and +/* got real
+  fixed arities; -tr-reduce chunk-aware; %sort-arr native homogeneous sort;
+  apply flattens natively with registered-seq forcing (set_seq_fn).
+- LESSON (removed after the interpreter tier caught it): a structure-sharing
+  apply rest-arg passthrough is UNSOUND here — variadic bodies may walk rest
+  args with raw %first/%rest prims, so rest args must stay realized lists.
 
 ## Remaining known gaps (next efforts, in value order)
 
-1. **Param-value specialization** — the transducer/HOF cluster (still ~130-260×)
-   is per-element calls through PARAMETER-held closures (`reduce`'s f, comp'd
-   fns). The inliner only sees `Global` callees; specializing hot HOF bodies
-   per callee identity (clone + guard on f's bits, or trace-style) is the fix.
-2. **Full header arena** — decode/tag_of on the fat `Obj` enum is ~20% of hot
-   profiles. Objects-with-header-words inline would also unlock JIT-inline
-   type tests (code-level dispatch ICs) and inline bump allocation.
-3. **Sort/strings** (`sort-strings` ~125×): in-language merge sort over seqs;
-   a native sort-on-span + batch str-of would close most of it.
+1. **Full header arena** — decode/tag_of on the fat `Obj` enum is now the
+   dominant shared tax (~20-30% of hot profiles). Header words inline would
+   also unlock JIT-inline type tests (code-level dispatch ICs, cheap
+   `reduced?`) and inline bump allocation. Biggest single remaining lever.
+2. **group-by / assoc-heavy maps** (~55×): per-element HAMT path-copy churn;
+   transient-style batched building or arena-aware HAMT nodes.
+3. **Param-value specialization** — remaining transducer residue (~37×) is
+   per-element calls through PARAMETER-held closures + reduced? checks.
 4. **GC stack maps** — still explicit-`(gc)`-only; allocation-triggered GC
    needs native-frame root maps (Cranelift user stack maps exist in 0.133).
-5. **Trampoline/invoke ceremony** — slow-path invokes still build a fresh
-   JitCtx + args Vec; pooling and a slimmer rc-reusing path would cut the
-   dispatch-heavy residue.
+5. **interleave/lazy-seq producers** (~26×): per-step 2-seq lockstep allocs;
+   a chunked interleave producer would close most of it.
 
 ## Why (measured, 2026-07)
 
