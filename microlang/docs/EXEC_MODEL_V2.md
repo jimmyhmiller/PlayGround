@@ -28,6 +28,64 @@ record for the performance re-architecture and the map of what remains.
   apply rest-arg passthrough is UNSOUND here — variadic bodies may walk rest
   args with raw %first/%rest prims, so rest args must stay realized lists.
 
+## Stage D (NEXT, decided): the REAL heap — gc-rust-shaped
+
+Decision (Jimmy): no enum object table, no Rust side-layers for data — a
+proper raw heap, modeled on `claude-experiments/gc-rust/crates/gcrust-rt`
+(read its `gc/{header,type_info,scan,alloc,semi_space}.rs` first; the designs
+map almost 1:1).
+
+What today's "heap" actually is: a chunked `Vec<Obj>` of 48-byte Rust ENUMS
+(the discriminant is the "header" — unspecified layout, unreadable from JIT
+code), plus the stage-B word arena for three variants' payloads, plus
+Rust-managed satellites (String/Arc). Stage D replaces all of it:
+
+1. **Tagged POINTERS, not indices.** `Repr::enc_ref/as_ref` encode real
+   addresses (8-aligned → 3 free low bits under LowBit: `ptr|0b001`; NaN-box
+   carries 48-bit addresses in the payload). Decode = mask + load — the
+   chunk-of-chunks indexing dies. This is gc-rust's `PtrPolicy`, and it IS
+   the ValueModel axis — the GC stays tag-scheme-agnostic.
+2. **8-byte header + fields inline.** `[type_id u16 | spare u16 | aux/len
+   u32]`, then value words. A `TypeInfo` table (value_field_count,
+   raw_byte_count, VarLenKind Values/Bytes, per-type) drives a GENERIC
+   `scan_object` — no per-variant GC code. Forwarding = header high bit +
+   to-space address (gc-rust's `FORWARDING_BIT`).
+3. **Everything inline, no data side-tables.** Str = varlen bytes; HugeInt =
+   varlen limbs; BigInt/Ratio/Char/BoxFloat = raw bytes; Record/Values/fixed
+   arrays = varlen values; GROWABLE arrays = handle object {len, dataref} +
+   separate data blob (identity lives in the handle; growth allocates a new
+   blob — the JVM ArrayList shape). Closure = [hdr | template_id |
+   nparams/nslots/variadic | CODE PTR | caps…] — the code pointer lives IN
+   the object, which retires the whole 96MB fast-target table (call site:
+   tag check, load code word + arity, call). Atom = [hdr][slot] with CAS on
+   the slot — the Arc dies (STW keeps moving safe). The only Rust that
+   remains: Arc<Ir> bodies behind an append-only template registry (that's
+   CODE, like gc-rust's type table), OS resources (Future join handles, TCP)
+   in handle registries, and CEK Konts/frames — execution-machine state that
+   was never heap data.
+4. **Real semi-space.** Two alloc_zeroed regions, flip + reuse (today's
+   append-and-poison stays as a debug/verify mode — adopt gc-rust's armed
+   `GCR_GC_VERIFY` detector pattern). Existing STW park/rendezvous protocol
+   unchanged. Roots (shadow stack, globals, consts, frame/cap atomics,
+   dispatch registry) forward exactly as today.
+5. **AtomicBumpAllocator + AllocWindow** (cursor/base/limit three-word
+   mirror in the JIT run context) → inline allocation fast path in emitted
+   code, slow-path shim on limit; gc-stress mode via limit=0.
+
+Migration order (each phase suite-gated):
+  D1 `src/heap.rs`: header/TypeInfo/scan/bump/semispace + forwarding, unit
+     tests, self-contained (port the gc-rust shapes).
+  D2 Repr → address-based refs (HeapId dies; `Gc` ptr newtype); model.rs ×3;
+     matrix pins agreement.
+  D3 ObjView seam (`heap.view(ptr)` reconstructs enum-shaped views) + sweep
+     the ~200 match sites; alloc_* constructors write headers.
+  D4 GC evacuation over TypeInfo scan; retire Vec<Obj> + word arena +
+     fast-target table + Atom Arc.
+  D5 JIT: inline tag tests, code-level dispatch ICs, inline field/aget,
+     AllocWindow inline bump.
+Expected: removes the ~40% decode/tag/prim tax everywhere + the remaining
+shim traffic; the 7-25× band should land ~2-6×.
+
 ## Remaining known gaps (next efforts, in value order)
 
 1. **Full header arena** — decode/tag_of on the fat `Obj` enum is now the
