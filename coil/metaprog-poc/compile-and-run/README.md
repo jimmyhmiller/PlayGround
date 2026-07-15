@@ -2,8 +2,18 @@
 
 The one-command proof: `metaprog-poc/compile-and-run/verify-all.sh` (rebootstrap
 fixpoint + gates, 112-file engine parity, and every mechanism in `run.sh` — up to
-and including **a GUI at compile time**: `mandel_test.coil`'s constants come from
-a Mandelbrot viewer you drive during expansion).
+and including **the same-code proof** and **a GUI at compile time**).
+
+**The same-code proof** (`samecode.coil` + `samecode_test.coil`): one shared
+module of eight real computations — fnv hashing, a generic ArrayList sorted
+through a FUNCTION POINTER, a string-keyed HashMap, a recursive-descent parser,
+**the compiler's own reader** (`selfhost/src/reader.coil` — the compiler's code
+is the shared code), a 64-step f64 iteration compared by RAW BITS, libc
+`snprintf` through real FFI, and TWO POSIX THREADS — each executed at compile
+time (called from a metaprogram, native code in the dylib) and at run time
+(called from `main`), on identical inputs, every result identical bit-for-bit.
+One definition, two phases, one behavior. Exit 0 says so:
+`coil run metaprog-poc/compile-and-run/samecode_test.coil`.
 
     COIL_META_MAIN=1 coil run metaprog-poc/compile-and-run/mandel_test.coil \
       --link-flag -framework --link-flag AppKit --link-flag -lobjc
