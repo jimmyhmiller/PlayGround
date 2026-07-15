@@ -26,5 +26,11 @@ $COIL build $D/meta2.coil  --shared -o "$OUT/meta2.dylib" $DL || exit 1
 $COIL build $D/mhost2.coil -o "$OUT/mhost2" $EX || exit 1
 ( cd "$OUT" && ./mhost2 ) || exit 1
 
+echo "=== 4. ARBITRARY CODE in a metaprogram, via the real compiled engine ==="
+echo "       generics + ArrayList + string-keyed HashMap + StrBuf + malloc + libc"
+echo "       strlen, all AT EXPANSION TIME (every one impossible in the interpreter)"
+COIL_META=compiled $COIL run $D/arbitrary_test.coil || { echo "compiled-engine arbitrary test FAILED"; exit 1; }
+echo "arbitrary-code metaprogram: OK (exit 0)"
+
 rm -rf "$OUT"
 echo "=== all mechanisms verified ==="
