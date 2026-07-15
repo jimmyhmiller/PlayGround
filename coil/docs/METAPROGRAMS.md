@@ -105,23 +105,28 @@ New API this project added (all shipped):
   pass order; transformers run before checkers). No new syntax; the module is the
   manifest. See `metaprog-poc/safe_dialect.coil`.
 
-## The engines: interpreter (default) and COMPILED (`COIL_META=compiled`)
+## The engines: COMPILED (default) and interpreter (`COIL_META=interp`)
 
 Metaprograms run on one of two engines with **one semantics**:
 
-- **Interpreter** (default): the comptime interpreter in `comptime.coil` evaluates
-  the checked metaprogram AST. Its long-standing gaps: no generics, no collection
-  instantiation, no function pointers, no FFI, no raw memory.
-- **Compiled** (`COIL_META=compiled`): expand-stage3 lowers the metaprogram
-  sub-program to a normal program (`metalower.coil`: `Code` -> opaque handle, code
-  ops -> boundary calls), compiles it to a dylib with the ordinary pipeline, dlopens
-  it, and runs every macro/checker/transform entry as **native code**. Everything
-  the language can do, a metaprogram can now do — generics, HashMap, `malloc`, libc
+- **Compiled** (the DEFAULT in the full compiler): expand-stage3 lowers the
+  metaprogram sub-program to a normal program (`metalower.coil`: `Code` -> opaque
+  handle, code ops -> boundary calls), compiles it to a dylib with the ordinary
+  pipeline (cached content-addressed under `~/.cache/coil/metaprog`), dlopens it,
+  and runs every macro/checker/transform entry as **native code**. Everything the
+  language can do, a metaprogram can now do — generics, HashMap, `malloc`, libc
   FFI at expansion time (`metaprog-poc/compile-and-run/arbitrary.coil`). Code-op
   semantics stay shared: the host side (`metahost.coil`) dispatches every op to the
   interpreter's own `code-op`, so the two engines are byte-identical — verified by
   `metaprog-poc/compile-and-run/parity.sh` (112/112 corpus files, identical IR and
-  identical diagnostics, including the compiler compiling itself).
+  identical diagnostics, including the compiler compiling itself). Warm-cache
+  builds are at parity with (small programs) or faster than (macro-heavy programs)
+  the interpreter.
+- **Interpreter** (`COIL_META=interp`; also the default in the LLVM-free
+  `main_a64` compiler, whose backend has no export-c): the comptime interpreter in
+  `comptime.coil` evaluates the checked metaprogram AST. Its long-standing gaps —
+  no generics, no collection instantiation, no function pointers, no FFI, no raw
+  memory — are why it is no longer the default. It remains the parity oracle.
 
 Known limits of the compiled engine (both engines actually share the first):
 metaprogram bodies cannot yet *call macros* (`fmt`/`when`/`try!` inside a macro

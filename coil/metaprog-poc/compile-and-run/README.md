@@ -105,14 +105,46 @@ macro that builds a generic `ArrayList`, looks up a compile-time string-keyed
 interpreter cannot run any of it; the compiled engine runs all of it, because it is
 just a program.
 
+## Status: the engine is the DEFAULT
+
+`COIL_META` unset = compiled engine (in the full compiler; the LLVM-free
+`main_a64` build has no export-c in its backend, registers no object builder, and
+stays on the interpreter). `COIL_META=interp` opts back in to the interpreter;
+`COIL_META=compiled` forces the engine. The dylib is cached content-addressed
+(`~/.cache/coil/metaprog/<fnv-of-d-program-dump>.dylib` — self-validating: any
+compiler change that would alter the compiled metaprogram alters the dump/key;
+`COIL_META_CACHE=0` disables). The rebootstrap fixpoint and all gates run through
+the compiled engine now.
+
 ## The remaining hard part: the tower
 
 Metaprogram BODIES still cannot *call macros* (`fmt`, `when`, `try!` inside a
-macro's own body) — the sub-program is resolved unexpanded, same as the
-interpreter's restriction today. Fixing it means recursively expanding the
-sub-program's forms before resolve (macro definitions form a DAG bottoming out in
-core forms, so it terminates), with the gensym counter snapshotted around the inner
-expansion so the main program's expansion stays byte-identical, and per-level
-expansion tables kept coherent for diagnostics. That, plus a content-addressed
-dylib cache keyed on the closure source (today the dylib is rebuilt per compile),
-is what stands between here and deleting the 1892-line interpreter.
+macro's own body) — the sub-program is resolved unexpanded, the same restriction
+the interpreter always had (its `is-comptime-defn` skip in expand-top-form exists
+to protect quasiquote templates from expansion).
+
+The core design problem is NOT recursion bookkeeping — it is that **a call to a
+Code-signature function inside a metaprogram body is ambiguous**. `(cond-arms cs)`
+inside `cond` is a FUNCTION call (evaluate it: `cs` is a Code value, recursion over
+runtime lists); `(when (icmp-eq (code-count b) 2) X)` inside some macro is meant as
+a MACRO call (expand it: the condition is a bool, not Code). Nothing syntactic
+distinguishes them — both heads are `[Code…] -> Code` functions. Expanding
+everything syntactically breaks `cond-arms` (it would receive the SYNTAX
+`(code-rest cs)` instead of the value); evaluating everything breaks `when` (it
+would receive a bool where it expects Code) — which is today's failure.
+
+The rule that fits Coil's signature-driven design: **type-directed expansion**. In
+a metaprogram body, a call to a code-sig function whose arguments all typecheck as
+`Code` is a function call (you are passing code values — ordinary metaprogramming);
+one whose arguments do NOT typecheck as Code is surface syntax — expand it as a
+macro at definition-processing time. Implementation shape: iterate
+tolerant-check -> find code-sig calls that fail as function calls -> expand those
+(quote/quasiquote-aware walking: never descend into templates, do descend into
+`~`/`~@` payloads) -> re-check, to a fixpoint. The strata order themselves
+naturally: a macro whose body already typechecks (bottom stratum, macro-free) is
+compilable and can expand the next stratum. The gensym counter must be snapshotted
+around definition-time expansion so the main program's expansion stays
+byte-identical, and expansion-context tables are per-level (LS holds them by
+value — sharing aliases).
+
+That tower is what stands between here and deleting the 1892-line interpreter.
