@@ -1011,6 +1011,14 @@ impl Default for FastTarget {
     }
 }
 
+/// Extra `FastTarget` slots reserved past the live heap size at each top-level
+/// form's start, so heap objects THIS form allocates while running still land
+/// in range (see the comment at the `eval_ir` resize site). 4M slots * 16 bytes
+/// = 64MiB, paid once (the table only ever grows), amortized over the process's
+/// whole lifetime — cheap next to what it unlocks (fast-calling a `map`/`filter`
+/// callback allocated mid-form instead of every call going through `shim_call`).
+const FAST_TARGET_SLACK: usize = 4_000_000;
+
 /// A resolved call target (the payload of the monomorphic inline cache).
 struct CallTarget {
     callee: u64,
@@ -1464,8 +1472,20 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
         // its base is stable for this whole form's run (it is only ever written,
         // never grown, during execution). Doing it here (form start) means no
         // native frame is holding a stale base when it (re)allocates.
+        //
+        // SLACK: a single top-level form (e.g. one big `reduce`/`loop` expression)
+        // can allocate hundreds of thousands of heap objects of its own — every
+        // lazy-seq chunk, every `map`/`filter` step — while it runs, all with ids
+        // past `heap.len()` at this sizing point. Without slack those ids are
+        // permanently out of `[0, flen)`, so a closure allocated mid-form (e.g. a
+        // `map`/`filter` callback used across an entire collection) can NEVER take
+        // the native fast-call path even on its 1000th call with the SAME id,
+        // because `id < flen` never holds. Padding the table lets ids allocated
+        // during this run stay in range, so the existing "lazily fill on first
+        // slow call, fast-path every call after" caching actually applies to them.
+        // One-time cost (monotonic, never shrinks): FAST_TARGET_SLACK * 16 bytes.
         {
-            let n = rt.heap().len();
+            let n = rt.heap().len() + FAST_TARGET_SLACK;
             let mut t = self.fast_targets.borrow_mut();
             if t.len() < n {
                 t.resize(n, FastTarget::default());
