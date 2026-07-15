@@ -1,0 +1,24 @@
+(module demo)
+; NORMAL code that assumes a garbage collector. No `ptr`. No allocation calls.
+; No rooting. `Pair` is used as a plain value type; `cons`/`car`/`cdr`/`nil` are
+; the ambient list primitives. The gc-transform (gcauto.coil) makes it real.
+(import "gcrun.coil" :use *)     ; cons car cdr nil nil?  (the assumed runtime)
+(import "gcauto.coil" :use *)    ; the transform that inserts the GC plumbing
+(import "io.coil"  :use *)
+(import "fmt.coil" :use *)
+(import "control.coil" :use *)
+
+(defn build [(k i64) (i i64)] (-> Pair)              ; returns Pair, not (ptr Pair)
+  (if (>= i k) (nil)
+    (cons i (build k (+ i 1)))))                     ; cons allocates — implicitly
+
+(defn sum [(xs Pair)] (-> i64)
+  (if (nil? xs) 0 (+ (car xs) (sum (cdr xs)))))
+
+(defn main [] (-> :i64)
+  (let [(mut total) 0]
+    (for [m 0 2000]
+      (store! total (+ total (sum (build 50 0)))))
+    (fmt (stdout) "sum={d} (expect 2450000)  peak_live={d}  collections={d}  total_alloc={d}\n"
+         total (gc-peak) (gc-collections) (gc-total))
+    0))

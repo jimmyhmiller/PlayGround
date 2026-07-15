@@ -663,6 +663,51 @@ extern "C" fn shim_apply<M: ModelArithJit>(
         if argc == 0 { &[] } else { unsafe { std::slice::from_raw_parts(args, argc as usize) } };
     let f = argv[0];
     let rest = &argv[1..];
+    // F4 FAST PATH: a SHORT, fully REALIZED cons-list tail (the overwhelmingly
+    // common shape — an `&`-rest list or a literal list) flattens into a stack
+    // buffer and invokes directly: no Vec round trip, no seq forcing, and the
+    // register-arity fast invoke when unwrapped. Anything else — chunked,
+    // lazy, vectors, > 8 total args — takes the general seq_flatten path
+    // unchanged. Semantics identical (a realized list stays realized; the
+    // callee's rest-arg materialization in build_call_frame is the same).
+    let lead = rest.len().saturating_sub(1);
+    if lead < 8 {
+        if let Some(&last) = rest.last() {
+            let mut buf = [0u64; 8];
+            buf[..lead].copy_from_slice(&rest[..lead]);
+            let mut n = lead;
+            let mut cur = last;
+            let realized_short = loop {
+                if M::R::tag_of(cur) == RawTag::Nil {
+                    break true;
+                }
+                if let Some(g) = rt.raw_gc(cur) {
+                    if unsafe { g.type_id() } == kind::EMPTY_LIST {
+                        break true;
+                    }
+                }
+                match rt.as_cons(cur) {
+                    Some((h, t)) => {
+                        if n >= 8 {
+                            break false;
+                        }
+                        buf[n] = h;
+                        n += 1;
+                        cur = t;
+                    }
+                    None => break false,
+                }
+            };
+            if realized_short {
+                if unsafe { (*ctx.rc).direct.get() } != 0 {
+                    if let Some(r) = shim_fast_invoke::<M>(ctx.rc, rt, f, &buf[..n]) {
+                        return r;
+                    }
+                }
+                return top.invoke(top, rt, f, &buf[..n]);
+            }
+        }
+    }
     let mut flat: Vec<u64> = rest[..rest.len().saturating_sub(1)].to_vec();
     if let Some(&last) = rest.last() {
         flat.extend(rt.seq_flatten(top, last));
@@ -2196,24 +2241,37 @@ impl<M: ModelArithJit> JitCranelift<M> {
         mut cur_nslots: u16,
         first_args: &[u64],
     ) -> u64 {
-        let mut args_buf: Vec<u64> = first_args.to_vec();
+        // The bounce buffer starts EMPTY (no allocation — `Vec::new` is
+        // malloc-free): the first iteration reads the caller's slice, and the
+        // buffer is only ever filled by a tail bounce (`shim_tail_call`). The
+        // per-invoke `to_vec` this replaces was a malloc/free pair on EVERY
+        // call through `invoke` — a top frame of the transduce/comp profile.
+        let mut args_buf: Vec<u64> = Vec::new();
+        let mut from_buf = false;
         loop {
             let outcome = if let Some(k) = compiled.entry_arity {
-                debug_assert_eq!(args_buf.len(), k);
                 let mut regs = [0u64; MAX_REG_ARGS];
-                regs[..k].copy_from_slice(&args_buf[..k]);
+                {
+                    let src: &[u64] = if from_buf { &args_buf } else { first_args };
+                    debug_assert_eq!(src.len(), k);
+                    regs[..k].copy_from_slice(&src[..k]);
+                }
                 self.run_reg_entry(top, rt, &compiled, k, &regs, &mut args_buf, cur_callee)
             } else {
                 // Ctx entry: needs a real activation frame.
                 if frame.is_none() {
-                    frame = self.alloc_frame(
+                    let src: &[u64] = if from_buf { &args_buf } else { first_args };
+                    // (alloc_frame reads `src` before the entry runs; the
+                    // buffer is handed out mutably only after this borrow ends.)
+                    let built = self.alloc_frame(
                         rt,
                         cur_nparams,
                         cur_variadic,
                         cur_nslots,
-                        &args_buf,
+                        src,
                         cur_callee,
                     );
+                    frame = built;
                 }
                 self.run_ctx_entry(top, rt, &compiled, &frame, &mut args_buf, cur_callee)
             };
@@ -2223,6 +2281,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
                     return v;
                 }
                 Err(callee) => {
+                    // The bounce wrote the next call's args into the buffer.
+                    from_buf = true;
                     // A signal raised while evaluating the tail call's args: stop.
                     if rt.pending() {
                         self.recycle(frame);

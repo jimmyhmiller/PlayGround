@@ -1188,11 +1188,36 @@
 ;; lazy `map`s + a variadic `apply` + a `concat` per element-pair — so a plain
 ;; `(interleave a b)` paid all that per element; this path allocates only the
 ;; two cons cells and one lazy-seq thunk it actually needs.
+;; Advance a ChunkedCons by k elements (falling into `more` when exhausted).
+(defn -chunk-rest-n [s k]
+  (let [off (%add (field s 1) k)]
+    (if (%lt off (field s 2))
+      (record 'ChunkedCons (field s 0) off (field s 2) (field s 3))
+      (field s 3))))
 (defn -interleave2 [a b]
   (lazy-seq
     (let [sa (seq a) sb (seq b)]
-      (if (if (nil? sa) true (nil? sb)) nil
-          (%cons (%first sa) (%cons (%first sb) (-interleave2 (%rest sa) (%rest sb))))))))
+      (cond
+        (if (nil? sa) true (nil? sb)) nil
+        ;; both chunked -> zip one output CHUNK (16 pairs) instead of 32 cons
+        ;; cells + 16 lazy thunks: one buffer + one ChunkedCons + one thunk.
+        (if (chunked? sa) (chunked? sb) false)
+          (let [avail-a (%sub (field sa 2) (field sa 1))
+                avail-b (%sub (field sb 2) (field sb 1))
+                n (if (%lt avail-a avail-b) avail-a avail-b)
+                take-n (if (%lt n 16) n 16)
+                aa (field sa 0) ao (field sa 1)
+                ba (field sb 0) bo (field sb 1)
+                buf (%make-array (%mul 2 take-n))]
+            (loop [i 0]
+              (if (%lt i take-n)
+                (do (%cell-set! buf (%mul 2 i) (%aget aa (%add ao i)))
+                    (%cell-set! buf (%add (%mul 2 i) 1) (%aget ba (%add bo i)))
+                    (recur (%add i 1)))
+                nil))
+            (record 'ChunkedCons buf 0 (%mul 2 take-n)
+                    (-interleave2 (-chunk-rest-n sa take-n) (-chunk-rest-n sb take-n))))
+        true (%cons (%first sa) (%cons (%first sb) (-interleave2 (%rest sa) (%rest sb))))))))
 (defn interleave [& colls]
   (cond
     ;; exactly two colls -> the direct fast path; 0 / 1 / 3+ keep the general
@@ -1570,7 +1595,16 @@
 ;; `seq` forces the HEAD node so the native %apply can walk a realized
 ;; cons/chunked front (it takes the callee's fixed params off the front and
 ;; passes the remaining tail through as the rest arg — no O(n) flatten).
-(defn apply [f & args] (%apply f (seq (-apply-flatten args))))
+;; Fixed arities for the common shapes (like clojure.core): the 2-arity pays
+;; ONE multifn select + the native %apply — no per-call rest-list allocation,
+;; no -apply-flatten walk, no seq dispatch (the native %apply forces lazy
+;; nodes itself, and short realized tails take its register-arity fast path).
+(defn apply
+  ([f args] (%apply f args))
+  ([f a args] (%apply f (%cons a args)))
+  ([f a b args] (%apply f (%cons a (%cons b args))))
+  ([f a b c args] (%apply f (%cons a (%cons b (%cons c args)))))
+  ([f a b c d & more] (%apply f (%cons a (%cons b (%cons c (%cons d (-apply-flatten more))))))))
 
 ;; ─────────────── multimethods (defmulti / defmethod) ───────────────
 ;; A multimethod is a callable record `(MultiFn dispatch-fn table-atom)` where the

@@ -1,0 +1,150 @@
+(module gcauto)
+; THE TRANSPARENCY: a transform that takes ordinary GC-assuming code and inserts
+; everything a precise collector needs — turning the managed type `Pair` into a
+; heap reference and AUTO-ROOTING every managed value across allocation. The user
+; writes NO pointers, NO allocation calls, NO roots. This is what "GC as a
+; metaprogram" means: normal code in, GC-correct code out.
+;
+; What it does to each user function (module != gcrun):
+;   • rewrites the managed type `Pair` -> `(ptr Pair)` in every signature
+;   • frames the body: save the root-stack top on entry, restore on exit
+;   • roots every managed PARAMETER for the body's duration
+;   • A-normalizes managed CALL ARGUMENTS into rooted temporaries, so a value
+;     produced by one call is rooted before the next call can allocate & collect
+(import "control.coil" :use *)
+
+; ---- managed type test / rewrite --------------------------------------------
+(defn managed-type? [(T Code)] (-> bool)
+  (or (code-eq T `Pair)
+      (and (code-list? T) (and (>= (code-count T) 2)
+           (and (code-eq (code-nth T 0) `ptr) (code-eq (code-nth T 1) `Pair))))))
+(defn rewrite-type [(T Code)] (-> Code)
+  (if (code-eq T `Pair) `(ptr Pair) T))
+
+; ---- the set of managed-returning functions (for detecting managed calls) ----
+; a global Code list of names; seeded with the runtime prims, extended per module.
+(defstruct MgBox [(init i64) (lst Code)])
+(defn mg-box [] (-> (ptr MgBox)) (alloc-static MgBox))
+(defn mg-list [] (-> Code)
+  (let [b (mg-box)]
+    (if (= (load (field b init)) 0) (do (store! (field b lst) `(cons cdr nil)) (store! (field b init) 1) 0) 0)
+    (load (field b lst))))
+(defn mg-add! [(name Code)] (-> i64)
+  (store! (field (mg-box) lst) `(~name ~@(mg-list))) 0)
+(defn mg-member? [(name Code) (l Code) (i i64) (n i64)] (-> bool)
+  (if (>= i n) false (if (code-eq (code-nth l i) name) true (mg-member? name l (+ i 1) n))))
+(defn managed-call? [(e Code)] (-> bool)
+  (and (code-list? e) (and (> (code-count e) 0) (and (code-sym? (code-nth e 0))
+       (mg-member? (code-nth e 0) (mg-list) 0 (code-count (mg-list)))))))
+
+; ---- the rooting walk -------------------------------------------------------
+; snoc: append x to a Code list
+(defn snoc [(lst Code) (x Code)] (-> Code) `(~@lst ~x))
+; place call args left-to-right; a managed-call arg becomes a rooted temporary so
+; it survives the allocation of any LATER arg or of the call itself.
+(defn wrap-args [(head Code) (args Code) (i i64) (n i64) (placed Code)] (-> Code)
+  (if (>= i n) `(~head ~@placed)
+    (let [a (root-expr (code-nth args i))]
+      (if (managed-call? a)
+          (let [g (gensym)]
+            `(let [~g ~a] (gc-root ~g) ~(wrap-args head args (+ i 1) n (snoc placed g))))
+        (wrap-args head args (+ i 1) n (snoc placed a))))))
+(defn root-exprs [(e Code) (i i64) (n i64)] (-> Code)
+  (if (>= i n) `() `(~(root-expr (code-nth e i)) ~@(root-exprs e (+ i 1) n))))
+; recurse into a (let [binds] body...) preserving the binding vector
+(defn root-binds [(bv Code) (i i64) (n i64)] (-> Code)
+  (if (>= i n) `[]
+    ; binding vector is [name val name val …]; root the VALUES only
+    (if (= (% i 2) 0)
+        `[~(code-nth bv i) ~@(root-binds bv (+ i 1) n)]
+      `[~(root-expr (code-nth bv i)) ~@(root-binds bv (+ i 1) n)])))
+(defn root-arms [(e Code) (i i64) (n i64)] (-> Code)
+  ; match arms are (Variant [binds] body); root the body
+  (if (>= i n) `()
+    (let [arm (code-nth e i)]
+      `(~(if (and (code-list? arm) (>= (code-count arm) 3))
+             `(~(code-nth arm 0) ~(code-nth arm 1) ~(root-expr (code-nth arm 2)))
+           arm)
+        ~@(root-arms e (+ i 1) n)))))
+(defn root-expr [(e Code)] (-> Code)
+  (if (not (code-list? e)) e
+    (if (= (code-count e) 0) e
+      (let [h (code-nth e 0)]
+        (if (not (code-sym? h)) `(~@(root-exprs e 0 (code-count e)))
+        (if (code-eq h `if)
+            `(if ~(root-expr (code-nth e 1)) ~(root-expr (code-nth e 2)) ~(root-expr (code-nth e 3)))
+        (if (code-eq h `do)  `(do ~@(root-exprs e 1 (code-count e)))
+        (if (code-eq h `loop) `(loop ~@(root-exprs e 1 (code-count e)))
+        (if (code-eq h `break)
+            (if (= (code-count e) 1) e `(break ~(root-expr (code-nth e 1))))
+        (if (code-eq h `continue) e
+        (if (code-eq h `let)
+            `(let ~(root-binds (code-nth e 1) 0 (code-count (code-nth e 1))) ~@(root-exprs e 2 (code-count e)))
+        (if (code-eq h `match)
+            `(match ~(root-expr (code-nth e 1)) ~@(root-arms e 2 (code-count e)))
+        (if (or (code-eq h `quote) (code-eq h `quasiquote)) e
+        ; any other symbol-headed list = a call: A-normalize its managed args
+          (wrap-args h e 1 (code-count e) `()))))))))))))))
+
+; ---- rewrite one function ---------------------------------------------------
+(defn rewrite-params [(ps Code) (i i64) (n i64)] (-> Code)
+  (if (>= i n) `[]
+    (let [p (code-nth ps i) rest (rewrite-params ps (+ i 1) n)]
+      `[~(code-nth p 0) ~(rewrite-type (code-nth p 1)) ~@rest])))
+(defn param-roots [(ps Code) (i i64) (n i64)] (-> Code)
+  (if (>= i n) `()
+    (let [p (code-nth ps i) rest (param-roots ps (+ i 1) n)]
+      (if (managed-type? (code-nth p 1))
+          `((gc-root ~(code-nth p 0)) ~@rest)
+        rest))))
+(defn rewrite-defn [(f Code)] (-> Code)
+  (let [name (code-nth f 1)
+        ps (code-nth f 2)
+        ret (code-nth f 3)                              ; (-> T)
+        new-ps (rewrite-params ps 0 (code-count ps))
+        new-ret `(-> ~(rewrite-type (code-nth ret 1)))
+        proots (param-roots ps 0 (code-count ps))
+        body (root-exprs f 4 (code-count f))
+        r (gensym) sp (gensym)]
+    `(defn ~name ~new-ps ~new-ret
+       (let [~sp (gc-sp)]
+         (do ~@proots
+             (let [~r (do ~@body)]
+               (gc-sp-set ~sp)
+               ~r))))))
+
+; ---- the transform (module-shaped) ------------------------------------------
+(defn is-defn? [(f Code)] (-> bool)
+  (and (code-list? f) (and (>= (code-count f) 4) (and (code-sym? (code-nth f 0)) (code-eq (code-nth f 0) `defn)))))
+(defn returns-managed? [(f Code)] (-> bool)
+  (and (is-defn? f) (let [ret (code-nth f 3)] (and (code-list? ret) (and (= (code-count ret) 2) (managed-type? (code-nth ret 1)))))))
+; register managed-returning fns in a module (so calls to them are detected)
+(defn register-mod [(m Code) (i i64) (n i64)] (-> i64)
+  (if (>= i n) 0
+    (do (if (returns-managed? (code-nth m i)) (mg-add! (code-nth (code-nth m i) 1)) 0)
+        (register-mod m (+ i 1) n))))
+(defn xform-forms [(m Code) (i i64) (n i64)] (-> Code)
+  (if (>= i n) `()
+    (let [f (code-nth m i) rest (xform-forms m (+ i 1) n)]
+      (if (is-defn? f) `(~(rewrite-defn f) ~@rest) `(~f ~@rest)))))
+; process a module unless it is the runtime itself
+; process only the USER's modules — never the runtime, the transform, or stdlib
+(defn process-mod? [(m Code)] (-> bool)
+  (let [name (code-nth m 0)]
+    (and (> (code-count m) 1)
+         (and (code-from-user? (code-nth m 1))
+              (and (not (code-eq name `gcrun)) (not (code-eq name `gcauto)))))))
+(defn xform-mod [(m Code)] (-> Code)
+  (if (process-mod? m) `(~(code-nth m 0) ~@(xform-forms m 1 (code-count m))) m))
+(defn xform-mods [(ms Code) (i i64) (n i64)] (-> Code)
+  (if (>= i n) `()
+    `(~(xform-mod (code-nth ms i)) ~@(xform-mods ms (+ i 1) n))))
+(defn gc-transform [(mods Code)] (-> Code)
+  ; pass 1: learn every managed-returning function across the whole program
+  (let [nm (code-count mods)]
+    (for [i 0 nm]
+      (if (process-mod? (code-nth mods i))
+          (register-mod (code-nth mods i) 1 (code-count (code-nth mods i))) 0)))
+  ; pass 2: rewrite user functions
+  `(do ~@(xform-mods mods 0 (code-count mods))))
+(transform gc-transform)

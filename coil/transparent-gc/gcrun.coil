@@ -1,0 +1,82 @@
+(module gcrun)
+; The runtime a GC'd program ASSUMES exists — cons/car/cdr/nil over a precise
+; mark-sweep heap. User code never sees any of this; it just writes cons-lists.
+; Pointers, allocation, and rooting are the transform's job (gcauto.coil).
+(import "control.coil" :use *)
+(extern malloc :cc c [i64] (-> (ptr u8)))
+(extern free   :cc c [(ptr u8)] (-> i64))
+
+; a cons cell: car is a value, cdr is a managed reference
+(defstruct Pair [(car i64) (cdr (ptr Pair))])
+
+(defstruct GcHeader [(next (ptr GcHeader)) (mark i64)])
+(defn g-list [] (-> (ptr (ptr GcHeader))) (alloc-static (ptr GcHeader)))
+(defn g-roots [] (-> (ptr (array (ptr u8) 65536))) (alloc-static (array (ptr u8) 65536)))
+(defn g-rtop [] (-> (ptr i64)) (alloc-static i64))
+(defn g-live [] (-> (ptr i64)) (alloc-static i64))
+(defn g-peak [] (-> (ptr i64)) (alloc-static i64))
+(defn g-ncol [] (-> (ptr i64)) (alloc-static i64))
+(defn g-total [] (-> (ptr i64)) (alloc-static i64))
+
+(defn hdr-of [(payload (ptr u8))] (-> (ptr GcHeader))
+  (cast (ptr GcHeader) (- (cast i64 payload) (sizeof GcHeader))))
+
+; --- the root stack primitives the TRANSFORM emits ---
+(defn gc-sp [] (-> i64) (load (g-roots-top)))
+(defn g-roots-top [] (-> (ptr i64)) (g-rtop))
+(defn gc-sp-set [(n i64)] (-> i64) (store! (g-rtop) n) 0)
+(defn gc-root [(p (ptr Pair))] (-> i64)
+  (let [t (load (g-rtop))]
+    (store! (index (g-roots) t) (cast (ptr u8) p))
+    (store! (g-rtop) (+ t 1)) 0))
+
+; --- mark / sweep ---
+(defn gc-mark [(payload (ptr u8))] (-> i64)
+  (if (= (cast i64 payload) 0) 0
+    (let [h (hdr-of payload)]
+      (if (= (load (field h mark)) 1) 0
+        (do (store! (field h mark) 1)
+            (gc-mark (cast (ptr u8) (load (field (cast (ptr Pair) payload) cdr)))))))))
+(defn gc-collect [] (-> i64)
+  (let [top (load (g-rtop))]
+    (for [i 0 top] (gc-mark (load (index (g-roots) i)))))
+  ; sweep: rebuild the all-objects list from the survivors. `cur`/`newhead` are
+  ; pointer muts, so cast/field/store take (load …) explicitly (mut auto-deref is
+  ; only for clean operators and function args, not these special forms).
+  (let [(mut cur) (load (g-list)) (mut newhead) (cast (ptr GcHeader) 0)]
+    (loop
+      (if (= (cast i64 (load cur)) 0) (break)
+        (let [nxt (load (field (load cur) next))]
+          (if (= (load (field (load cur) mark)) 1)
+              (do (store! (field (load cur) mark) 0)
+                  (store! (field (load cur) next) (load newhead))
+                  (store! newhead (load cur)) 0)
+            (do (free (cast (ptr u8) (load cur)))
+                (store! (g-live) (- (load (g-live)) 1)) 0))
+          (store! cur nxt))))
+    (store! (g-list) (load newhead)))
+  (store! (g-ncol) (+ (load (g-ncol)) 1)) 0)
+
+; --- the prims a Scheme-ish program uses (allocation is IMPLICIT in cons) ---
+(defn nil [] (-> (ptr Pair)) (cast (ptr Pair) 0))
+(defn nil? [(p (ptr Pair))] (-> bool) (= (cast i64 p) 0))
+(defn cons [(a i64) (d (ptr Pair))] (-> (ptr Pair))
+  (if (>= (load (g-live)) 32) (gc-collect) 0)
+  (let [raw (malloc (+ (sizeof GcHeader) (sizeof Pair)))
+        h (cast (ptr GcHeader) raw)
+        p (cast (ptr Pair) (+ (cast i64 raw) (sizeof GcHeader)))]
+    (store! (field h next) (load (g-list)))
+    (store! (field h mark) 0)
+    (store! (g-list) h)
+    (store! (g-total) (+ (load (g-total)) 1))
+    (store! (g-live) (+ (load (g-live)) 1))
+    (if (> (load (g-live)) (load (g-peak))) (store! (g-peak) (load (g-live))) 0)
+    (store! (field p car) a)
+    (store! (field p cdr) d)
+    p))
+(defn car [(p (ptr Pair))] (-> i64) (load (field p car)))
+(defn cdr [(p (ptr Pair))] (-> (ptr Pair)) (load (field p cdr)))
+
+(defn gc-peak [] (-> i64) (load (g-peak)))
+(defn gc-collections [] (-> i64) (load (g-ncol)))
+(defn gc-total [] (-> i64) (load (g-total)))

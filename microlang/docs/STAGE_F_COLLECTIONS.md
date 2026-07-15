@@ -161,3 +161,44 @@ structural answer (future stage); not an F1-F3 regression.
 Explicit transient use (conj!/assoc!) is at 24/64 ns/op — within 2.2x/0.4x
 of the JVM PERSISTENT numbers — so the remaining persistent-path gap is
 per-op glue the F4 cluster (call/lazy-seq/apply) shares.
+
+## F4 results (measured 2026-07-15, same harness; before = post-F3 scoreboard)
+
+| workload | post-F3 | F4 | JVM | Δ |
+|---|---|---|---|---|
+| apply | 877 | **25** | 37 | **35× — beats the JVM** |
+| interleave (isolated) | 1865 | **101** | 71 | **18×** |
+| transduce | 121 | 106 | 5 | 1.14× |
+| into-xform | 151 | 134 | 7 | 1.13× |
+| reduce-map | 53 | 52 | 19 | ~ |
+| comp-chain | 194 | 191 | 15 | unchanged (see below) |
+| core band / transients / persistents | | unchanged (2-3 / 4 / 5; 23 / 63; 147 / 798) | | |
+
+What landed:
+1. APPLY: profiled first — the cost was CLJ-SIDE GLUE (the old
+   `(defn apply [f & args] …)` paid a variadic rest-list allocation, an
+   `-apply-flatten` walk, and a `seq` protocol dispatch PER CALL) plus the
+   shim's Vec round trip. Fixes: clojure.core-style fixed arities
+   (`[f args]` pays one multifn select + the prim — the native %apply forces
+   lazy nodes itself, so the `seq` wrapper was redundant), and a shim fast
+   path — a ≤8-element fully REALIZED cons-list tail flattens into a stack
+   buffer and register-arity fast-invokes (chunked/lazy/vector/long tails
+   keep the general seq_flatten path; the realized-list rest-arg contract is
+   untouched).
+2. INTERLEAVE: `-interleave2` now zips one output CHUNK (16 pairs) per lazy
+   step when BOTH inputs are chunked — one buffer + one ChunkedCons + one
+   thunk instead of 32 cons + 16 thunks — reusing the existing chunk
+   machinery (`chunked?`/ChunkedCons/`-chunk-rest-n`). map/filter were
+   already chunk-aware (checked; nothing to do).
+3. Call-glue bonus found by the transduce profile: `run_trampoline`
+   allocated `first_args.to_vec()` on EVERY invoke (a malloc/free pair per
+   call — a top profile frame). The bounce buffer now starts EMPTY and is
+   only filled by actual tail bounces. This shaved transduce/into-xform/
+   reduce-map across the board.
+
+SCOPE PUNT (pre-authorized): comp/transduce PARAM-VALUE SPECIALIZATION
+(EXEC_MODEL_V2 gap #4) is a deep cut — per-body specialization variants
+keyed on parameter-held closure bits, entry guards, and profiling/blacklist
+plumbing through the Decision policy. comp-chain's remaining ~190ns/el is
+exactly that shape (5 chained closure invokes ≈ 35ns of per-invoke glue
+each). Not attempted here; it is the headline item for the next stage.
