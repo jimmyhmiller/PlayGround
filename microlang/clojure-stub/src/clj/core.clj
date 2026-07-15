@@ -1258,11 +1258,31 @@
                   (let [v (f i (first s))]
                     (if (nil? v) (-keep-indexed f (inc i) (rest s)) (%cons v (-keep-indexed f (inc i) (rest s)))))))))
 (defn keep-indexed [f coll] (-keep-indexed f 0 coll))
-(defn -reductions [f init s]
-  (lazy-seq (%cons init (let [s (seq s)] (if (nil? s) nil (-reductions f (f init (first s)) (rest s)))))))
+;; Chunk-aware: fold across an input chunk into an output chunk of running
+;; accumulators (threading `acc` across chunks), so `(reduce/last (reductions
+;; f init coll))` chunk-scans. -reductions emits `init` then the running folds
+;; (same sequence the old single-recursion form produced: init, (f init c0),
+;; (f (f init c0) c1), …), just batched.
+(defn -reductions-rest [f acc s]
+  (lazy-seq
+    (let [s (seq s)]
+      (cond
+        (nil? s) nil
+        (chunked? s)
+          (let [arr (field s 0) off (field s 1) end (field s 2)
+                out (%make-array (%sub end off))]
+            (loop [i off k 0 a acc]
+              (if (%lt i end)
+                  (let [na (f a (%aget arr i))]
+                    (%cell-set! out k na)
+                    (recur (%add i 1) (%add k 1) na))
+                  (record 'ChunkedCons out 0 k (-reductions-rest f a (field s 3))))))
+        true (let [na (f acc (%first s))] (%cons na (-reductions-rest f na (%rest s))))))))
+(defn -reductions [f init s] (%cons init (-reductions-rest f init s)))
 (defn reductions [f & args]
   (if (nil? (next args))
-      (let [s (seq (first args))] (if (nil? s) nil (-reductions f (first s) (rest s))))
+      ;; empty single-arg coll -> `((f))`, matching clojure.core (was nil).
+      (let [s (seq (first args))] (if (nil? s) (list (f)) (-reductions f (first s) (rest s))))
       (-reductions f (first args) (second args))))
 
 ;; map building: group-by / frequencies / zipmap / merge / select-keys / update-in
