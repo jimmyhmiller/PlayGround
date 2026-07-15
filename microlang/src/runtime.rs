@@ -1124,8 +1124,28 @@ impl<M: ValueModel> Runtime<M> {
                 }
             }
             Prim::Cons => self.cons(args[0], args[1]),
-            Prim::First => self.as_cons(args[0]).map(|(h, _)| h).unwrap_or_else(|| self.enc_nil()),
-            Prim::Rest => self.as_cons(args[0]).map(|(_, t)| t).unwrap_or_else(|| self.enc_nil()),
+            Prim::First => {
+                if let Some((h, _)) = self.as_cons(args[0]) {
+                    h
+                } else if let Some((arr, off, _, _)) = self.as_chunked(args[0]) {
+                    self.arr_at(arr, off as usize)
+                } else {
+                    self.enc_nil()
+                }
+            }
+            Prim::Rest => {
+                if let Some((_, t)) = self.as_cons(args[0]) {
+                    t
+                } else if let Some((arr, off, end, more)) = self.as_chunked(args[0]) {
+                    if off + 1 < end {
+                        self.mk_chunked(arr, off + 1, end, more)
+                    } else {
+                        more
+                    }
+                } else {
+                    self.enc_nil()
+                }
+            }
             Prim::IsNil => {
                 let r = matches!(self.decode(args[0]), Val::Nil);
                 self.encode(Val::Bool(r))
@@ -2023,6 +2043,25 @@ impl<M: ValueModel> Runtime<M> {
     }
     fn mk_array(&mut self, v: Vec<u64>) -> u64 {
         M::R::enc_ref(self.alloc(Obj::Vector(v)))
+    }
+    /// (arr, off, end, more) of a `'ChunkedCons` record, or None. Lets the cons
+    /// prims (`%first`/`%rest`) treat a chunk transparently as a seq — only on the
+    /// as_cons-miss path, so the common cons case pays nothing.
+    fn as_chunked(&self, bits: u64) -> Option<(u64, i64, i64, u64)> {
+        let Val::Ref(id) = self.decode(bits) else { return None };
+        let Obj::Record { type_id, fields } = &self.heap()[id as usize] else { return None };
+        if self.sym_name(*type_id) != "ChunkedCons" {
+            return None;
+        }
+        let off = match self.decode(fields[1]) { Val::Int(i) => i as i64, _ => return None };
+        let end = match self.decode(fields[2]) { Val::Int(i) => i as i64, _ => return None };
+        Some((fields[0], off, end, fields[3]))
+    }
+    fn mk_chunked(&mut self, arr: u64, off: i64, end: i64, more: u64) -> u64 {
+        let offb = self.encode(Val::Int(off as i128));
+        let endb = self.encode(Val::Int(end as i128));
+        let ty = self.intern("ChunkedCons");
+        M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![arr, offb, endb, more] }))
     }
     fn mk_node(&mut self, arr: u64) -> u64 {
         let nil = self.enc_nil();

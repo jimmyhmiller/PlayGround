@@ -337,7 +337,7 @@
 ;; NOT with sets/maps.
 (defn -seqlike? [x]
   (let [t (type-of x)]
-    (or (%num-eq t 'List) (%num-eq t 'LazySeq) (%num-eq t 'EmptyList) (vector? x))))
+    (or (%num-eq t 'List) (%num-eq t 'LazySeq) (%num-eq t 'EmptyList) (%num-eq t 'ChunkedCons) (vector? x))))
 (extend-type List
   ISeqable (-seq [l] l)
   ISeq (-first [l] (%first l)) (-rest [l] (%rest l))
@@ -494,12 +494,43 @@
         (vector? o) (nth o (first args))
         true (-invoke o (first args))))
 
+;; ─────────────── chunked sequences ───────────────
+;; A `ChunkedCons` holds a run of elements in an array — `arr[off..end)` — then a
+;; lazy tail `more`. It is an ORDINARY seq (ISeq below), so every consumer works
+;; unchanged; `reduce` additionally bulk-scans the chunk (32 elements per lazy
+;; step instead of one), amortizing the per-element lazy-seq/cons/thunk allocation
+;; the way Clojure's chunked seqs do. Producers that chunk: `range`, `map`,
+;; `filter` (below). Everything else stays element-at-a-time and still reduces
+;; correctly via the ISeq fallback.
+(defn chunked? [x] (%num-eq (type-of x) 'ChunkedCons))
+(extend-type ChunkedCons
+  ISeq
+  (-first [c] (%aget (field c 0) (field c 1)))
+  (-rest [c]
+    (let [off (field c 1) end (field c 2)]
+      (if (%lt (%add off 1) end)
+          (record 'ChunkedCons (field c 0) (%add off 1) end (field c 3))
+          (seq (field c 3)))))
+  ISeqable (-seq [c] c))
+(def -chunk-size 32)
+
 ;; ─────────────── reduce / into ───────────────
 ;; honors `(reduced x)`: once the accumulator is reduced, stop and unwrap it.
+(defn -reduce-chunk [f acc arr off end]
+  (loop [i off acc acc]
+    (if (%lt i end)
+        (let [acc (f acc (%aget arr i))]
+          (if (reduced? acc) acc (recur (%add i 1) acc)))
+        acc)))
 (defn reduce-seq [f acc s]
   (if (reduced? acc)
     (field acc 0)
-    (let [s (seq s)] (if (nil? s) acc (reduce-seq f (f acc (%first s)) (%rest s))))))
+    (let [s (seq s)]
+      (cond (nil? s) acc
+            (chunked? s)
+              (let [acc (-reduce-chunk f acc (field s 0) (field s 1) (field s 2))]
+                (if (reduced? acc) (field acc 0) (reduce-seq f acc (field s 3))))
+            true (reduce-seq f (f acc (%first s)) (%rest s))))))
 ;; `reduce` is 2- or 3-arity (like clojure.core): `(reduce f coll)` seeds with the
 ;; first element (or `(f)` when empty); `(reduce f init coll)` seeds with `init`.
 (defn reduce [f & args]
@@ -514,7 +545,20 @@
 
 ;; ─────────────── higher-order seq fns (lazy) ───────────────
 (defn -map1 [f c]
-  (lazy-seq (let [s (seq c)] (if (nil? s) nil (%cons (f (%first s)) (-map1 f (%rest s)))))))
+  (lazy-seq
+    (let [s (seq c)]
+      (cond
+        (nil? s) nil
+        ;; chunked input -> map the chunk array into a fresh chunk (amortizes the
+        ;; lazy-seq/cons overhead over the whole 32-element run).
+        (chunked? s)
+          (let [arr (field s 0) off (field s 1) end (field s 2)
+                narr (%make-array (%sub end off))]
+            (loop [i off k 0]
+              (if (%lt i end)
+                  (do (%cell-set! narr k (f (%aget arr i))) (recur (%add i 1) (%add k 1)))
+                  (record 'ChunkedCons narr 0 k (-map1 f (field s 3))))))
+        true (%cons (f (%first s)) (-map1 f (%rest s)))))))
 (defn -map2 [f a b]
   (lazy-seq (let [sa (seq a) sb (seq b)]
               (if (if (nil? sa) true (nil? sb)) nil
@@ -545,10 +589,26 @@
 (defn filter
   ([pred] (fn [rf] (fn ([] (rf)) ([a] (rf a)) ([a x] (if (pred x) (rf a x) a)))))
   ([f c]
-   (lazy-seq (let [s (seq c)]
-               (cond (nil? s) nil
-                     (f (%first s)) (%cons (%first s) (filter f (%rest s)))
-                     true (filter f (%rest s)))))))
+   (lazy-seq
+     (let [s (seq c)]
+       (cond
+         (nil? s) nil
+         ;; chunked input -> collect the KEPT elements of the chunk into a buffer,
+         ;; producing one chunk (or skipping to the next if none survive).
+         (chunked? s)
+           (let [arr (field s 0) off (field s 1) end (field s 2)
+                 buf (%make-array (%sub end off))]
+             (loop [i off k 0]
+               (if (%lt i end)
+                   (let [x (%aget arr i)]
+                     (if (f x)
+                         (do (%cell-set! buf k x) (recur (%add i 1) (%add k 1)))
+                         (recur (%add i 1) k)))
+                   (if (%num-eq k 0)
+                       (filter f (field s 3))
+                       (record 'ChunkedCons buf 0 k (filter f (field s 3)))))))
+         (f (%first s)) (%cons (%first s) (filter f (%rest s)))
+         true (filter f (%rest s)))))))
 (defn remove
   ([pred] (filter (fn [x] (not (pred x)))))
   ([f c] (filter (fn [x] (not (f x))) c)))
@@ -557,9 +617,37 @@
               (if (nil? s) nil
                   (let [v (f (%first s))]
                     (if (nil? v) (keep f (%rest s)) (%cons v (keep f (%rest s)))))))))
-(defn -range-inf [i] (lazy-seq (%cons i (-range-inf (%add i 1)))))
-(defn -range2 [i n] (lazy-seq (if (%lt i n) (%cons i (-range2 (%add i 1) n)) nil)))
-(defn -range3 [i n step] (lazy-seq (if (%lt i n) (%cons i (-range3 (%add i step) n step)) nil)))
+;; range produces CHUNKED seqs — a 32-element array per lazy step (each still a
+;; normal seq via ChunkedCons), so `(reduce f (range n))` scans arrays, not conses.
+(defn -range-inf [i]
+  (lazy-seq
+    (let [arr (%make-array 32)]
+      (loop [j i k 0]
+        (if (%lt k 32)
+            (do (%cell-set! arr k j) (recur (%add j 1) (%add k 1)))
+            (record 'ChunkedCons arr 0 32 (-range-inf j)))))))
+(defn -range2 [i n]
+  (lazy-seq
+    (if (%lt i n)
+        (let [end (let [e (%add i 32)] (if (%lt e n) e n))
+              arr (%make-array (%sub end i))]
+          (loop [j i k 0]
+            (if (%lt j end)
+                (do (%cell-set! arr k j) (recur (%add j 1) (%add k 1)))
+                (record 'ChunkedCons arr 0 k (-range2 j n)))))
+        nil)))
+;; 3-arg range handles BOTH directions: ascending while j<n (step>0), descending
+;; while j>n (step<0). (The pre-chunking version was ascending-only, so
+;; `(range 20 0 -1)` wrongly gave nil.)
+(defn -range3 [i n step]
+  (lazy-seq
+    (if (if (%lt 0 step) (%lt i n) (%lt n i))
+        (let [arr (%make-array 32)]
+          (loop [j i k 0]
+            (if (if (%lt k 32) (if (%lt 0 step) (%lt j n) (%lt n j)) false)
+                (do (%cell-set! arr k j) (recur (%add j step) (%add k 1)))
+                (record 'ChunkedCons arr 0 k (-range3 j n step)))))
+        nil)))
 (defn range [& args]
   (cond (nil? (seq args)) (-range-inf 0)
         (nil? (next args)) (-range2 0 (first args))
@@ -608,7 +696,7 @@
 (defn cycle [c] (if (nil? (seq c)) nil (-cycle c c)))
 (defn second [c] (nth c 1))
 (defn last [c] (let [s (seq c)] (if (nil? s) nil (if (nil? (next s)) (%first s) (last (%rest s))))))
-(defn seq? [x] (let [t (type-of x)] (or (%num-eq t 'List) (%num-eq t 'EmptyList) (%num-eq t 'LazySeq))))
+(defn seq? [x] (let [t (type-of x)] (or (%num-eq t 'List) (%num-eq t 'EmptyList) (%num-eq t 'LazySeq) (%num-eq t 'ChunkedCons))))
 (defn butlast-seq [s] (let [s (seq s)] (if (nil? (next s)) nil (%cons (%first s) (butlast-seq (%rest s))))))
 (defn butlast [c] (butlast-seq c))
 ;; `sigs` computes the :arglists metadata for `defn`: the parameter vector of a
@@ -1413,6 +1501,7 @@
 ;; printer stays oblivious to the trie layout.
 (defn -realize [x]
   (cond (lazy-seq? x) (-realize-list x)
+        (chunked? x) (-realize-list x)
         (%num-eq (type-of x) 'List) (-realize-list x)
         ;; `seq` (not -pv-seq): dispatches per vector type, so BOTH the
         ;; load-time PVec and the user-time PersistentVector realize. A quoted
