@@ -28,7 +28,7 @@ use crate::code::CodeSpace;
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::runtime::Runtime;
-use crate::value::{clone_slots, frame_get, frame_set, slot_load, Frame, Locals, Obj, Sym, Val};
+use crate::value::{build_caps, clone_slots, frame_cap, frame_get, frame_set, slot_load, Locals, Obj, Sym, Val};
 
 /// The reified continuation: "what to do with the value of the current
 /// subexpression." An `Arc`-linked stack of frames. Immutable, so re-installable
@@ -48,7 +48,6 @@ pub enum Kont {
     CallK { pending: Vec<Ir>, done: Vec<AtomicU64>, env: Locals, next: Arc<Kont> },
     PrimK { op: Prim, pending: Vec<Ir>, done: Vec<AtomicU64>, env: Locals, next: Arc<Kont> },
     CallCc { next: Arc<Kont> },
-    LetSlot { inits: Vec<Ir>, i: usize, frame: Locals, body: Ir, next: Arc<Kont> },
     /// A continuation delimiter, installed by `%reset`. Marks how far a `%shift`
     /// capture reaches; when a value flows into it, the prompt is transparent
     /// (the value passes straight through to `next`).
@@ -100,14 +99,16 @@ fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Arc<Kon
     match ir {
         Ir::Const(id) | Ir::Quote(id) => Step::Apply(rt.get_const(id), k),
         Ir::Local { up, idx } => Step::Apply(frame_get(&env, up, idx), k),
+        Ir::Capture(idx) => Step::Apply(frame_cap(&env, idx), k),
         Ir::Global(s) => {
             let v = rt
                 .global(s)
                 .unwrap_or_else(|| panic!("Unable to resolve symbol: {}", rt.sym_name(s)));
             Step::Apply(v, k)
         }
-        Ir::Lambda { nparams, variadic, body } => {
-            let id = rt.alloc(Obj::Closure { nparams, variadic, body, env: env.clone() });
+        Ir::Lambda { nparams, variadic, nslots, captures, body } => {
+            let caps = build_caps(&captures, &env);
+            let id = rt.alloc(Obj::Closure { nparams, variadic, nslots, body, caps });
             Step::Apply(M::R::enc_ref(id), k)
         }
         Ir::If(c, t, e) => {
@@ -168,18 +169,8 @@ fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Arc<Kon
                 }
             }
         }
-        Ir::Let(inits, body) => {
-            let n = inits.len();
-            let frame: Locals = Some(Arc::new(Frame {
-                slots: (0..n).map(|_| AtomicU64::new(M::R::enc_nil())).collect(),
-                parent: env,
-            }));
-            if n == 0 {
-                Step::Eval(*body, frame, k)
-            } else {
-                let first = inits[0].clone();
-                Step::Eval(first, frame.clone(), Arc::new(Kont::LetSlot { inits, i: 0, frame, body: *body, next: k }))
-            }
+        Ir::Let(..) => {
+            panic!("unflattened Ir reached a tier: Let survives only before flatten::flatten")
         }
         Ir::Dispatch { .. } | Ir::DefMethod { .. } | Ir::FieldGet { .. } => {
             panic!("CekMachine: dispatch not supported; run on the tree-walker")
@@ -273,18 +264,6 @@ fn apply_step<M: ValueModel>(rt: &mut Runtime<M>, v: u64, k: &Arc<Kont>) -> Step
             let cref = M::R::enc_ref(cont_id);
             apply_callable(rt, v, &[cref], next.clone())
         }
-        Kont::LetSlot { inits, i, frame, body, next } => {
-            if let Some(f) = frame {
-                crate::value::slot_store(&f.slots[*i], v);
-            }
-            let ni = i + 1;
-            if ni >= inits.len() {
-                Step::Eval(body.clone(), frame.clone(), next.clone())
-            } else {
-                let init = inits[ni].clone();
-                Step::Eval(init, frame.clone(), Arc::new(Kont::LetSlot { inits: inits.clone(), i: ni, frame: frame.clone(), body: body.clone(), next: next.clone() }))
-            }
-        }
     }
 }
 
@@ -296,22 +275,22 @@ fn apply_callable<M: ValueModel>(rt: &mut Runtime<M>, callee: u64, args: &[u64],
         panic!("value not callable: {}", rt.print(callee));
     };
     enum What {
-        Closure(usize, bool, Arc<Ir>, Locals),
+        Closure(usize, bool, u16, Arc<Ir>, crate::value::Caps),
         Cont(Arc<Kont>),
         PartialCont(Arc<Kont>),
         Bad,
     }
     let what = match &rt.heap()[id as usize] {
-        Obj::Closure { nparams, variadic, body, env } => {
-            What::Closure(*nparams, *variadic, body.clone(), env.clone())
+        Obj::Closure { nparams, variadic, nslots, body, caps } => {
+            What::Closure(*nparams, *variadic, *nslots, body.clone(), caps.clone())
         }
         Obj::Cont(c) => What::Cont(c.clone()),
         Obj::PartialCont(c) => What::PartialCont(c.clone()),
         _ => What::Bad,
     };
     match what {
-        What::Closure(nparams, variadic, body, env) => {
-            let frame = rt.build_call_frame(nparams, variadic, args, env);
+        What::Closure(nparams, variadic, nslots, body, caps) => {
+            let frame = rt.build_call_frame(nparams, variadic, nslots, args, caps);
             Step::Eval((*body).clone(), frame, next)
         }
         What::Cont(captured) => {
@@ -360,7 +339,6 @@ fn kont_next(k: &Kont) -> Option<&Arc<Kont>> {
         | Kont::CallK { next, .. }
         | Kont::PrimK { next, .. }
         | Kont::CallCc { next, .. }
-        | Kont::LetSlot { next, .. }
         | Kont::Prompt { next, .. }
         | Kont::ShiftK { next, .. } => Some(next),
     }
@@ -398,8 +376,5 @@ fn regraft(k: &Arc<Kont>, new_tail: Arc<Kont>) -> Arc<Kont> {
         }),
         Kont::CallCc { next } => Arc::new(Kont::CallCc { next: regraft(next, new_tail) }),
         Kont::ShiftK { next } => Arc::new(Kont::ShiftK { next: regraft(next, new_tail) }),
-        Kont::LetSlot { inits, i, frame, body, next } => Arc::new(Kont::LetSlot {
-            inits: inits.clone(), i: *i, frame: frame.clone(), body: body.clone(), next: regraft(next, new_tail),
-        }),
     }
 }

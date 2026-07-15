@@ -24,13 +24,11 @@
 //! mutability so `&self` still holds.
 
 use std::cell::Cell;
-use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
 
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::runtime::Runtime;
-use crate::value::{clone_slots, frame_get, frame_set, Frame, Locals, Obj, Val};
+use crate::value::{build_caps, frame_cap, frame_get, frame_set, Locals, Obj, Val};
 
 pub trait CodeSpace<M: ValueModel> {
     /// Evaluate one IR node. `top` is the outermost backend to recurse through.
@@ -58,6 +56,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
         match ir {
             Ir::Const(id) | Ir::Quote(id) => rt.get_const(*id),
             Ir::Local { up, idx } => frame_get(locals, *up, *idx),
+            Ir::Capture(idx) => frame_cap(locals, *idx),
             Ir::Global(s) => match rt.global(*s) {
                 Some(v) => v,
                 None => {
@@ -119,39 +118,17 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 rt.define_global(*name, v);
                 rt.encode(Val::Sym(*name))
             }
-            Ir::Let(inits, body) => {
-                // One growing frame (matching `analyze`), rebuilt each binding
-                // from the PREVIOUS frame's current cell values (not a bare
-                // Vec) so a GC during an init leaves the earlier bindings sound.
-                let mut cur: Locals = Some(Arc::new(Frame {
-                    slots: Vec::new(),
-                    parent: locals.clone(),
-                }));
-                for iexpr in inits {
-                    let v = top.eval_ir(top, rt, iexpr, &cur);
-                    if rt.pending() {
-                        return v;
-                    }
-                    let prev = cur.as_ref().unwrap();
-                    let mut slots = clone_slots(&prev.slots);
-                    slots.push(AtomicU64::new(v));
-                    cur = Some(Arc::new(Frame {
-                        slots,
-                        parent: locals.clone(),
-                    }));
-                }
-                top.eval_ir(top, rt, body, &cur)
+            Ir::Let(..) => {
+                panic!("unflattened Ir reached a tier: Let survives only before flatten::flatten")
             }
-            Ir::Lambda {
-                nparams,
-                variadic,
-                body,
-            } => {
+            Ir::Lambda { nparams, variadic, nslots, captures, body } => {
+                let caps = build_caps(captures, locals);
                 let id = rt.alloc(Obj::Closure {
                     nparams: *nparams,
                     variadic: *variadic,
+                    nslots: *nslots,
                     body: body.clone(),
-                    env: locals.clone(),
+                    caps,
                 });
                 M::R::enc_ref(id)
             }
@@ -253,17 +230,16 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 }
                 v // normal return, or a throw / other escape that keeps propagating
             }
-            Ir::Try { body, catch, finally } => {
+            Ir::Try { body, catch, finally, cslot } => {
                 let mut result = top.eval_ir(top, rt, body, locals);
                 // Catch a THROW (kind 1) if there is a handler; escapes pass through.
                 if rt.pending_throw() {
                     if let Some(cbody) = catch {
                         let thrown = rt.take_signal().value;
-                        let frame: Locals = Some(Arc::new(Frame {
-                            slots: vec![AtomicU64::new(thrown)],
-                            parent: locals.clone(),
-                        }));
-                        result = top.eval_ir(top, rt, cbody, &frame); // may re-raise
+                        // The thrown value's binding was re-homed by `flatten` to
+                        // a slot of THIS activation frame — no fresh frame.
+                        frame_set(locals, 0, *cslot, thrown);
+                        result = top.eval_ir(top, rt, cbody, locals); // may re-raise
                     }
                     // no catch: the throw signal stays pending and propagates below
                 }
@@ -402,13 +378,14 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                     continue;
                 }
             }
-            let (nparams, variadic, body, env) = match &rt.heap()[id as usize] {
+            let (nparams, variadic, nslots, body, caps) = match &rt.heap()[id as usize] {
                 Obj::Closure {
                     nparams,
                     variadic,
+                    nslots,
                     body,
-                    env,
-                } => (*nparams, *variadic, body.clone(), env.clone()),
+                    caps,
+                } => (*nparams, *variadic, *nslots, body.clone(), caps.clone()),
                 Obj::Escape { tag } => {
                     // Invoking an escape continuation: raise an ESCAPE signal to its
                     // `%callec`; the dummy return propagates up like any signal.
@@ -432,7 +409,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 rt.signal_throw(M::R::enc_ref(sid));
                 return M::R::enc_nil();
             }
-            let frame = rt.build_call_frame(nparams, variadic, &args, env);
+            let frame = rt.build_call_frame(nparams, variadic, nslots, &args, caps);
             match eval_tail(top, rt, &body, &frame) {
                 Bounce::Done(v) => return v,
                 Bounce::Tail(next, next_args) => {
@@ -489,26 +466,6 @@ fn eval_tail<M: ValueModel>(
                 eval_tail(top, rt, last, locals)
             }
         },
-        Ir::Let(inits, body) => {
-            let mut cur: Locals = Some(Arc::new(Frame {
-                slots: Vec::new(),
-                parent: locals.clone(),
-            }));
-            for iexpr in inits {
-                let v = top.eval_ir(top, rt, iexpr, &cur);
-                if rt.pending() {
-                    return Bounce::Done(v);
-                }
-                let prev = cur.as_ref().unwrap();
-                let mut slots = clone_slots(&prev.slots);
-                slots.push(AtomicU64::new(v));
-                cur = Some(Arc::new(Frame {
-                    slots,
-                    parent: locals.clone(),
-                }));
-            }
-            eval_tail(top, rt, body, &cur)
-        }
         Ir::Call(f, args) => {
             // Precise rooting across arg evaluation, exactly as the eval_ir `Call`
             // arm: the already-evaluated callee/args are bare u64s a collection

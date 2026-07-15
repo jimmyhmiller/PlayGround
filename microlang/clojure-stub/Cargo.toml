@@ -19,3 +19,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "microclj"
 path = "src/main.rs"
+
+[[example]]
+name = "coresuite"
+required-features = ["jit"]
+
+[[example]]
+name = "jitone"
+required-features = ["jit"]

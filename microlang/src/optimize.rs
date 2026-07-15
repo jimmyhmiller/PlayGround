@@ -45,7 +45,7 @@ fn const_is_fixnum<M: ValueModel>(rt: &Runtime<M>, id: u32) -> bool {
 /// pass recurses over.
 fn children(ir: &Ir) -> Vec<&Ir> {
     match ir {
-        Ir::Const(_) | Ir::Quote(_) | Ir::Local { .. } | Ir::Global(_) => vec![],
+        Ir::Const(_) | Ir::Quote(_) | Ir::Local { .. } | Ir::Capture(_) | Ir::Global(_) => vec![],
         Ir::SetLocal { val, .. } | Ir::SetGlobal { val, .. } => vec![val],
         Ir::If(c, t, e) => vec![c, t, e],
         Ir::Do(xs) => xs.iter().collect(),
@@ -65,7 +65,7 @@ fn children(ir: &Ir) -> Vec<&Ir> {
         Ir::DefMethod { imp, .. } => vec![imp],
         Ir::Dispatch { args, .. } => args.iter().collect(),
         Ir::FieldGet { obj, .. } => vec![obj],
-        Ir::Try { body, catch, finally } => {
+        Ir::Try { body, catch, finally, .. } => {
             let mut v = vec![body.as_ref()];
             if let Some(c) = catch {
                 v.push(c.as_ref());
@@ -82,16 +82,20 @@ fn children(ir: &Ir) -> Vec<&Ir> {
 /// a post-order pass rides.
 fn map_children(ir: &Ir, f: &mut impl FnMut(&Ir) -> Ir) -> Ir {
     match ir {
-        Ir::Const(_) | Ir::Quote(_) | Ir::Local { .. } | Ir::Global(_) => ir.clone(),
+        Ir::Const(_) | Ir::Quote(_) | Ir::Local { .. } | Ir::Capture(_) | Ir::Global(_) => ir.clone(),
         Ir::SetLocal { up, idx, val } => Ir::SetLocal { up: *up, idx: *idx, val: Box::new(f(val)) },
         Ir::SetGlobal { name, val } => Ir::SetGlobal { name: *name, val: Box::new(f(val)) },
         Ir::If(c, t, e) => Ir::If(Box::new(f(c)), Box::new(f(t)), Box::new(f(e))),
         Ir::Do(xs) => Ir::Do(xs.iter().map(|x| f(x)).collect()),
         Ir::Def { name, init } => Ir::Def { name: *name, init: Box::new(f(init)) },
         Ir::Let(inits, body) => Ir::Let(inits.iter().map(|x| f(x)).collect(), Box::new(f(body))),
-        Ir::Lambda { nparams, variadic, body } => {
-            Ir::Lambda { nparams: *nparams, variadic: *variadic, body: Arc::new(f(body)) }
-        }
+        Ir::Lambda { nparams, variadic, nslots, captures, body } => Ir::Lambda {
+            nparams: *nparams,
+            variadic: *variadic,
+            nslots: *nslots,
+            captures: captures.clone(),
+            body: Arc::new(f(body)),
+        },
         Ir::Call(g, args) => Ir::Call(Box::new(f(g)), args.iter().map(|x| f(x)).collect()),
         Ir::Prim(p, args) => Ir::Prim(*p, args.iter().map(|x| f(x)).collect()),
         Ir::DefMethod { name, ty, imp } => Ir::DefMethod { name: *name, ty: *ty, imp: Box::new(f(imp)) },
@@ -101,10 +105,11 @@ fn map_children(ir: &Ir, f: &mut impl FnMut(&Ir) -> Ir) -> Ir {
         Ir::FieldGet { site, field, obj } => {
             Ir::FieldGet { site: *site, field: *field, obj: Box::new(f(obj)) }
         }
-        Ir::Try { body, catch, finally } => Ir::Try {
+        Ir::Try { body, catch, finally, cslot } => Ir::Try {
             body: Box::new(f(body)),
             catch: catch.as_ref().map(|c| Box::new(f(c))),
             finally: finally.as_ref().map(|fin| Box::new(f(fin))),
+            cslot: *cslot,
         },
     }
 }
@@ -137,9 +142,11 @@ fn shift(ir: &Ir, by: u16, cutoff: u16) -> Ir {
             inits.iter().map(|i| shift(i, by, cutoff + 1)).collect(),
             Box::new(shift(body, by, cutoff + 1)),
         ),
-        Ir::Lambda { nparams, variadic, body } => Ir::Lambda {
+        Ir::Lambda { nparams, variadic, nslots, captures, body } => Ir::Lambda {
             nparams: *nparams,
             variadic: *variadic,
+            nslots: *nslots,
+            captures: captures.clone(),
             body: Arc::new(shift(body, by, cutoff + 1)),
         },
         other => map_children(other, &mut |c| shift(c, by, cutoff)),
@@ -213,9 +220,11 @@ fn subst_params(body: &Ir, depth: u16, args: &[Ir]) -> Ir {
             inits.iter().map(|i| subst_params(i, depth + 1, args)).collect(),
             Box::new(subst_params(b, depth + 1, args)),
         ),
-        Ir::Lambda { nparams, variadic, body: b } => Ir::Lambda {
+        Ir::Lambda { nparams, variadic, nslots, captures, body: b } => Ir::Lambda {
             nparams: *nparams,
             variadic: *variadic,
+            nslots: *nslots,
+            captures: captures.clone(),
             body: Arc::new(subst_params(b, depth + 1, args)),
         },
         other => map_children(other, &mut |c| subst_params(c, depth, args)),
@@ -233,7 +242,7 @@ fn subst_params(body: &Ir, depth: u16, args: &[Ir]) -> Ir {
 pub fn inline(ir: &Ir) -> Ir {
     let n = map_children(ir, &mut |c| inline(c));
     if let Ir::Call(f, args) = &n {
-        if let Ir::Lambda { nparams, variadic: false, body } = f.as_ref() {
+        if let Ir::Lambda { nparams, variadic: false, body, .. } = f.as_ref() {
             if *nparams == args.len() {
                 // A variable arg is only substitutable if the body never mutates
                 // (see `is_var`); literals always are. And no param may be `set!`
@@ -296,7 +305,8 @@ pub fn fold_const<M: ValueModel>(rt: &mut Runtime<M>, ir: &Ir) -> Ir {
 /// `cons`/`vector` — dropping unused garbage is fine) are pure.
 fn is_pure(ir: &Ir) -> bool {
     match ir {
-        Ir::Const(_) | Ir::Quote(_) | Ir::Local { .. } | Ir::Global(_) | Ir::Lambda { .. } => true,
+        Ir::Const(_) | Ir::Quote(_) | Ir::Local { .. } | Ir::Capture(_) | Ir::Global(_)
+        | Ir::Lambda { .. } => true,
         Ir::If(c, t, e) => is_pure(c) && is_pure(t) && is_pure(e),
         Ir::Do(xs) => xs.iter().all(is_pure),
         Ir::Let(inits, body) => inits.iter().all(is_pure) && is_pure(body),
@@ -353,9 +363,11 @@ fn renumber_frame(ir: &Ir, depth: u16, map: &[Option<u16>]) -> Ir {
             inits.iter().map(|x| renumber_frame(x, depth + 1, map)).collect(),
             Box::new(renumber_frame(body, depth + 1, map)),
         ),
-        Ir::Lambda { nparams, variadic, body } => Ir::Lambda {
+        Ir::Lambda { nparams, variadic, nslots, captures, body } => Ir::Lambda {
             nparams: *nparams,
             variadic: *variadic,
+            nslots: *nslots,
+            captures: captures.clone(),
             body: Arc::new(renumber_frame(body, depth + 1, map)),
         },
         other => map_children(other, &mut |c| renumber_frame(c, depth, map)),
@@ -435,9 +447,11 @@ fn subst_slots(ir: &Ir, depth: u16, vals: &[Option<Ir>]) -> Ir {
             inits.iter().map(|i| subst_slots(i, depth + 1, vals)).collect(),
             Box::new(subst_slots(body, depth + 1, vals)),
         ),
-        Ir::Lambda { nparams, variadic, body } => Ir::Lambda {
+        Ir::Lambda { nparams, variadic, nslots, captures, body } => Ir::Lambda {
             nparams: *nparams,
             variadic: *variadic,
+            nslots: *nslots,
+            captures: captures.clone(),
             body: Arc::new(subst_slots(body, depth + 1, vals)),
         },
         other => map_children(other, &mut |c| subst_slots(c, depth, vals)),
@@ -514,9 +528,9 @@ fn to_fx(op: Prim) -> Prim {
 pub fn specialize_fixnums<M: ValueModel>(rt: &Runtime<M>, ir: &Ir) -> Ir {
     let n = map_children(ir, &mut |c| specialize_fixnums::<M>(rt, c));
     match n {
-        Ir::Lambda { nparams, variadic, body } => {
+        Ir::Lambda { nparams, variadic, nslots, captures, body } => {
             let guarded = guard_lambda::<M>(rt, nparams, variadic, &body);
-            Ir::Lambda { nparams, variadic, body: Arc::new(guarded) }
+            Ir::Lambda { nparams, variadic, nslots, captures, body: Arc::new(guarded) }
         }
         other => other,
     }
@@ -723,15 +737,15 @@ fn mark_fast<M: ValueModel>(rt: &Runtime<M>, ir: &Ir, guarded: &[usize]) -> Ir {
 // The Optimized wrapper.
 // ─────────────────────────────────────────────────────────────────────────
 
-/// One cleanup round: inline, fold, propagate copies, simplify, DCE. Each pass
-/// exposes work for the next (inlining exposes constant args → folding →
-/// propagation → dead bindings), so the round is iterated to a fixpoint.
+/// One cleanup round over FLAT Ir (the shape reaching an eval-time wrapper is
+/// post-`flatten`): constant folding + simplification. The chain-scoped passes
+/// (`inline`, `propagate_copies`, `eliminate_dead_lets`) operate on the
+/// frontend's pre-flatten shape (de Bruijn `up` levels, `Let` frames) and are
+/// exercised directly on that shape; a flat-model inliner is the Stage C
+/// speculative inliner in the JIT.
 fn cleanup_round<M: ValueModel>(rt: &mut Runtime<M>, ir: &Ir) -> Ir {
-    let a = inline(ir);
-    let b = fold_const::<M>(rt, &a);
-    let c = propagate_copies(&b);
-    let d = simplify::<M>(rt, &c);
-    eliminate_dead_lets(&d)
+    let b = fold_const::<M>(rt, ir);
+    simplify::<M>(rt, &b)
 }
 
 /// Run the pipeline to a fixpoint, then specialize profitable fixnum loops once

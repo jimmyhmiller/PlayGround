@@ -33,10 +33,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::code::CodeSpace;
-use crate::ir::{ConstId, Ir, Prim};
+use crate::ir::{CapSrc, ConstId, Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::runtime::Runtime;
-use crate::value::{frame_get, Locals, Obj, Sym, Val};
+use crate::value::{build_caps, frame_cap, frame_get, frame_set, Locals, Obj, Sym, Val};
 
 /// A bytecode instruction. The operand stack holds tagged values; the
 /// model-emitted arithmetic ops (`AddRaw`, `Sar`, ...) operate on the raw bits
@@ -46,10 +46,17 @@ pub enum Op {
     Const(ConstId),
     Nil,
     LoadLocal(u16, u16),
+    /// Read capture `i` of the running closure.
+    LoadCap(u16),
+    /// Store the TOP of stack (peek, not pop — `set!` yields its value) into
+    /// activation slot `i`.
+    StoreLocal(u16),
     LoadGlobal(Sym),
     MakeClosure {
         nparams: usize,
         variadic: bool,
+        nslots: u16,
+        captures: Vec<CapSrc>,
         body: Arc<Ir>,
     },
     DefGlobal(Sym),
@@ -176,6 +183,7 @@ impl<M: ModelEmit> BytecodeVm<M> {
         match ir {
             Ir::Const(id) | Ir::Quote(id) => ops.push(Op::Const(*id)),
             Ir::Local { up, idx } => ops.push(Op::LoadLocal(*up, *idx)),
+            Ir::Capture(idx) => ops.push(Op::LoadCap(*idx)),
             Ir::Global(s) => ops.push(Op::LoadGlobal(*s)),
             Ir::Do(xs) => {
                 if xs.is_empty() {
@@ -207,11 +215,15 @@ impl<M: ModelEmit> BytecodeVm<M> {
                 Self::compile(init, ops);
                 ops.push(Op::DefGlobal(*name));
             }
-            Ir::Lambda { nparams, variadic, body } => ops.push(Op::MakeClosure {
-                nparams: *nparams,
-                variadic: *variadic,
-                body: body.clone(),
-            }),
+            Ir::Lambda { nparams, variadic, nslots, captures, body } => {
+                ops.push(Op::MakeClosure {
+                    nparams: *nparams,
+                    variadic: *variadic,
+                    nslots: *nslots,
+                    captures: captures.clone(),
+                    body: body.clone(),
+                })
+            }
             Ir::Call(f, args) => {
                 Self::compile(f, ops);
                 for a in args {
@@ -235,9 +247,16 @@ impl<M: ModelEmit> BytecodeVm<M> {
                 }
                 ops.push(Op::Slow(*p, args.len() as u8));
             }
-            Ir::Let(..) => panic!("bytecode tier: `let` not supported; run on the tree-walker"),
-            Ir::SetLocal { .. } | Ir::SetGlobal { .. } => {
-                panic!("bytecode tier: `set!` not supported; run on the tree-walker")
+            Ir::Let(..) => {
+                panic!("unflattened Ir reached a tier: Let survives only before flatten::flatten")
+            }
+            Ir::SetLocal { up, idx, val } => {
+                assert_eq!(*up, 0, "unflattened Ir reached the bytecode tier: SetLocal up={up}");
+                Self::compile(val, ops);
+                ops.push(Op::StoreLocal(*idx));
+            }
+            Ir::SetGlobal { .. } => {
+                panic!("bytecode tier: global `set!` not supported; run on the tree-walker")
             }
             Ir::DefMethod { .. } | Ir::Dispatch { .. } | Ir::FieldGet { .. } => {
                 panic!("bytecode tier: dispatch not supported; run on the tree-walker")
@@ -260,18 +279,25 @@ impl<M: ModelEmit> BytecodeVm<M> {
                 Op::Const(id) => stack.push(rt.get_const(*id)),
                 Op::Nil => stack.push(M::R::enc_nil()),
                 Op::LoadLocal(up, idx) => stack.push(frame_get(locals, *up, *idx)),
+                Op::LoadCap(idx) => stack.push(frame_cap(locals, *idx)),
+                Op::StoreLocal(idx) => {
+                    let v = *stack.last().expect("set!: empty stack");
+                    frame_set(locals, 0, *idx, v);
+                }
                 Op::LoadGlobal(s) => {
                     let v = rt
                         .global(*s)
                         .unwrap_or_else(|| panic!("Unable to resolve symbol: {}", rt.sym_name(*s)));
                     stack.push(v);
                 }
-                Op::MakeClosure { nparams, variadic, body } => {
+                Op::MakeClosure { nparams, variadic, nslots, captures, body } => {
+                    let caps = build_caps(captures, locals);
                     let id = rt.alloc(Obj::Closure {
                         nparams: *nparams,
                         variadic: *variadic,
+                        nslots: *nslots,
                         body: body.clone(),
-                        env: locals.clone(),
+                        caps,
                     });
                     stack.push(M::R::enc_ref(id));
                 }
@@ -354,13 +380,13 @@ impl<M: ModelEmit> CodeSpace<M> for BytecodeVm<M> {
         let Val::Ref(id) = rt.decode(callee) else {
             panic!("value not callable: {}", rt.print(callee));
         };
-        let (nparams, variadic, body, env) = match &rt.heap()[id as usize] {
-            Obj::Closure { nparams, variadic, body, env } => {
-                (*nparams, *variadic, body.clone(), env.clone())
+        let (nparams, variadic, nslots, body, caps) = match &rt.heap()[id as usize] {
+            Obj::Closure { nparams, variadic, nslots, body, caps } => {
+                (*nparams, *variadic, *nslots, body.clone(), caps.clone())
             }
             _ => panic!("value not callable: {}", rt.print(callee)),
         };
-        let frame = rt.build_call_frame(nparams, variadic, args, env);
+        let frame = rt.build_call_frame(nparams, variadic, nslots, args, caps);
         let chunk = self.compiled_body(&body);
         self.run(top, rt, &chunk, &frame)
     }
@@ -371,6 +397,8 @@ fn op_name(op: &Op) -> String {
         Op::Const(id) => format!("Const #{id}"),
         Op::Nil => "Nil".into(),
         Op::LoadLocal(u, i) => format!("LoadLocal {u},{i}"),
+        Op::LoadCap(i) => format!("LoadCap {i}"),
+        Op::StoreLocal(i) => format!("StoreLocal {i}"),
         Op::LoadGlobal(s) => format!("LoadGlobal ${s}"),
         Op::MakeClosure { nparams, .. } => format!("MakeClosure/{nparams}"),
         Op::DefGlobal(s) => format!("DefGlobal ${s}"),

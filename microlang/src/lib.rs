@@ -21,6 +21,7 @@ pub mod cek;
 pub mod code;
 pub mod compiled;
 pub mod dispatch;
+pub mod flatten;
 pub mod gc;
 pub mod ir;
 #[cfg(feature = "jit")]
@@ -37,6 +38,7 @@ pub mod value;
 pub use bytecode::{BytecodeVm, ModelEmit};
 pub use cek::CekMachine;
 pub use code::{CodeSpace, Traced, TreeWalk};
+pub use flatten::flatten;
 pub use optimize::Optimized;
 pub use compiled::ClosureComp;
 #[cfg(feature = "jit")]

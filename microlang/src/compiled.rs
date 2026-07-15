@@ -23,14 +23,13 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use crate::code::CodeSpace;
 use crate::ir::{Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::runtime::Runtime;
-use crate::value::{clone_slots, frame_get, frame_set, Frame, Locals, Obj, Val};
+use crate::value::{build_caps, frame_cap, frame_get, frame_set, Locals, Obj, Val};
 
 /// A compiled expression: run it with the runtime, a lexical frame, and the
 /// outermost backend (for re-entrant, composable calls). Captures only owned
@@ -72,6 +71,10 @@ impl<M: ValueModel> ClosureComp<M> {
             Ir::Local { up, idx } => {
                 let (up, idx) = (*up, *idx);
                 Arc::new(move |_rt, env, _top| frame_get(env, up, idx))
+            }
+            Ir::Capture(idx) => {
+                let idx = *idx;
+                Arc::new(move |_rt, env, _top| frame_cap(env, idx))
             }
             Ir::Global(s) => {
                 let s = *s;
@@ -133,43 +136,23 @@ impl<M: ValueModel> ClosureComp<M> {
                     rt.encode(Val::Sym(name))
                 })
             }
-            Ir::Let(inits, body) => {
-                let cinits: Vec<Compiled<M>> = inits.iter().map(|ie| self.compile(ie)).collect();
-                let cbody = self.compile(body);
-                Arc::new(move |rt, env, top| {
-                    // Rebuild each frame from the previous frame's current cell
-                    // values, so a GC during an init keeps earlier bindings sound.
-                    let mut cur: Locals = Some(Arc::new(Frame {
-                        slots: Vec::new(),
-                        parent: env.clone(),
-                    }));
-                    for ci in &cinits {
-                        let v = ci(rt, &cur, top);
-                        let prev = cur.as_ref().unwrap();
-                        let mut slots = clone_slots(&prev.slots);
-                        slots.push(AtomicU64::new(v));
-                        cur = Some(Arc::new(Frame {
-                            slots,
-                            parent: env.clone(),
-                        }));
-                    }
-                    cbody(rt, &cur, top)
-                })
+            Ir::Let(..) => {
+                panic!("unflattened Ir reached a tier: Let survives only before flatten::flatten")
             }
-            Ir::Lambda {
-                nparams,
-                variadic,
-                body,
-            } => {
+            Ir::Lambda { nparams, variadic, nslots, captures, body } => {
                 let nparams = *nparams;
                 let variadic = *variadic;
+                let nslots = *nslots;
+                let captures = captures.clone();
                 let body = body.clone();
                 Arc::new(move |rt, env, _top| {
+                    let caps = build_caps(&captures, env);
                     let id = rt.alloc(Obj::Closure {
                         nparams,
                         variadic,
+                        nslots,
                         body: body.clone(),
-                        env: env.clone(),
+                        caps,
                     });
                     M::R::enc_ref(id)
                 })
@@ -281,19 +264,20 @@ impl<M: ValueModel> CodeSpace<M> for ClosureComp<M> {
         let Val::Ref(id) = rt.decode(callee) else {
             panic!("value not callable: {}", rt.print(callee));
         };
-        let (nparams, variadic, body, env) = match &rt.heap()[id as usize] {
+        let (nparams, variadic, nslots, body, caps) = match &rt.heap()[id as usize] {
             Obj::Closure {
                 nparams,
                 variadic,
+                nslots,
                 body,
-                env,
-            } => (*nparams, *variadic, body.clone(), env.clone()),
+                caps,
+            } => (*nparams, *variadic, *nslots, body.clone(), caps.clone()),
             _ => panic!("value not callable: {}", rt.print(callee)),
         };
 
         // Compile-once: cached by body identity across all calls.
         let compiled = self.compiled_body(&body);
-        let frame = rt.build_call_frame(nparams, variadic, args, env);
+        let frame = rt.build_call_frame(nparams, variadic, nslots, args, caps);
         compiled(rt, &frame, top)
     }
 }

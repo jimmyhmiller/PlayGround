@@ -866,7 +866,8 @@ impl Compiler {
         self.scope.push(names);
         let body: Vec<Ir> = items[2..].iter().map(|&f| self.compile(rt, f)).collect();
         self.scope.pop();
-        Ir::Lambda { nparams, variadic, body: Arc::new(Ir::Do(body)) }
+        // Placeholders; the `flatten` pass computes the real nslots/captures.
+        Ir::Lambda { nparams, variadic, nslots: 0, captures: Vec::new(), body: Arc::new(Ir::Do(body)) }
     }
 
     /// `(try* body EXC dispatch finally)` — the fixed shape the expander lowers
@@ -890,7 +891,7 @@ impl Compiler {
         } else {
             Some(Box::new(self.compile(rt, items[4])))
         };
-        Ir::Try { body, catch, finally }
+        Ir::Try { body, catch, finally, cslot: 0 }
     }
 
     fn compile_let<M: ValueModel>(&mut self, rt: &mut Runtime<M>, items: &[u64]) -> Ir {
@@ -942,11 +943,24 @@ fn prim_value_wrapper(p: Prim) -> Option<Ir> {
     let local = |i: u16| Ir::Local { up: 0, idx: i };
     let fixed = |p: Prim, n: u16| {
         let args = (0..n).map(local).collect();
-        Ir::Lambda { nparams: n as usize, variadic: false, body: Arc::new(Ir::Prim(p, args)) }
+        // Already flat: params are the only slots, nothing captured.
+        Ir::Lambda {
+            nparams: n as usize,
+            variadic: false,
+            nslots: n,
+            captures: Vec::new(),
+            body: Arc::new(Ir::Prim(p, args)),
+        }
     };
     match p {
         // `(fn [& xs] xs)` — the collected rest IS the list.
-        Prim::List => Some(Ir::Lambda { nparams: 0, variadic: true, body: Arc::new(local(0)) }),
+        Prim::List => Some(Ir::Lambda {
+            nparams: 0,
+            variadic: true,
+            nslots: 1,
+            captures: Vec::new(),
+            body: Arc::new(local(0)),
+        }),
         Prim::IsNil | Prim::TypeOf | Prim::Throw | Prim::Hash | Prim::NFields => Some(fixed(p, 1)),
         Prim::Field => Some(fixed(p, 2)),
         _ => None,

@@ -99,8 +99,14 @@ pub enum Obj {
     Closure {
         nparams: usize,
         variadic: bool,
+        /// Size of the ONE flat activation frame a call allocates (params, the
+        /// rest arg, every let/catch slot) — assigned by the `flatten` pass.
+        nslots: u16,
         body: Arc<Ir>,
-        env: Locals,
+        /// The captured VALUES, copied at closure-creation time (flat closures;
+        /// no environment chain). `AtomicU64` so the moving GC can forward the
+        /// heap refs they hold in place.
+        caps: Caps,
     },
     /// A user record: a type tag (interned symbol) plus positional fields. The
     /// thing polymorphic dispatch dispatches ON.
@@ -153,13 +159,27 @@ pub struct FutureSlot {
     pub result: Option<u64>,
 }
 
-/// A lexical frame: `AtomicU64` slots (so the GC can rewrite the heap pointers
-/// they hold in place, and so a frame captured by a closure can be shared across
-/// threads) plus a parent. `Arc` so closures capture it cheaply, the pointer is
-/// stable across a collection, and it is `Send + Sync`.
+/// A closure's capture array: values copied at creation time. Immutable in
+/// SHAPE once created; the cells are atomics only so the moving GC can forward
+/// the heap refs they hold in place (and so the array is `Send + Sync`).
+pub type Caps = Arc<[AtomicU64]>;
+
+/// The shared empty capture array (cloning an `Arc` beats allocating one per
+/// capture-free closure/call).
+pub fn no_caps() -> Caps {
+    static EMPTY: std::sync::OnceLock<Caps> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(|| Arc::from(Vec::<AtomicU64>::new())).clone()
+}
+
+/// ONE flat activation frame per call — no parent chain (the `flatten` pass
+/// resolves every variable to a slot of the single frame or to a closure
+/// capture). `AtomicU64` slots so the GC can rewrite the heap pointers they
+/// hold in place, and so a frame published at a safepoint (or captured by a
+/// CEK continuation) can be traced from another thread. `caps` is the running
+/// closure's capture array, attached at call time (one `Arc` bump).
 pub struct Frame {
     pub slots: Vec<AtomicU64>,
-    pub parent: Locals,
+    pub caps: Caps,
 }
 
 pub type Locals = Option<Arc<Frame>>;
@@ -184,22 +204,47 @@ pub fn slot_store(a: &AtomicU64, v: u64) {
     a.store(v, SLOT_STORE)
 }
 
-/// Read slot `idx` in the frame `up` levels out. Reads through the atomic, so a
-/// value relocated by a prior collection is seen at its new address.
+/// Read slot `idx` of the activation frame. Reads through the atomic, so a
+/// value relocated by a prior collection is seen at its new address. `up` must
+/// be 0 — the `flatten` pass eliminated frame chains; a non-zero `up` means
+/// unflattened Ir reached an execution tier.
 pub fn frame_get(env: &Locals, up: u16, idx: u16) -> u64 {
-    let mut f = env.as_ref().expect("local reference in empty environment");
-    for _ in 0..up {
-        f = f.parent.as_ref().expect("local reference past root frame");
-    }
+    assert_eq!(up, 0, "unflattened Ir reached a tier: Local up={up} (run flatten::flatten)");
+    let f = env.as_ref().expect("local reference in empty environment");
     f.slots[idx as usize].load(SLOT_LOAD)
 }
 
-/// Mutate slot `idx` in the frame `up` levels out. The slots are already atomics
-/// (for GC + sharing), so local assignment is just an atomic store.
+/// Mutate slot `idx` of the activation frame (see `frame_get` for the `up`
+/// contract). The slots are already atomics (for GC + sharing), so local
+/// assignment is just an atomic store.
 pub fn frame_set(env: &Locals, up: u16, idx: u16, v: u64) {
-    let mut f = env.as_ref().expect("assignment in empty environment");
-    for _ in 0..up {
-        f = f.parent.as_ref().expect("assignment past root frame");
-    }
+    assert_eq!(up, 0, "unflattened Ir reached a tier: SetLocal up={up} (run flatten::flatten)");
+    let f = env.as_ref().expect("assignment in empty environment");
     f.slots[idx as usize].store(v, SLOT_STORE);
+}
+
+/// Read capture `idx` of the running closure (attached to the activation frame).
+pub fn frame_cap(env: &Locals, idx: u16) -> u64 {
+    let f = env.as_ref().expect("capture reference in empty environment");
+    f.caps[idx as usize].load(SLOT_LOAD)
+}
+
+/// Build a closure's capture array at creation time: copy each source value
+/// out of the current activation (its slots, or the running closure's own
+/// captures for transitive capture). Shared by every backend.
+pub fn build_caps(captures: &[crate::ir::CapSrc], env: &Locals) -> Caps {
+    use crate::ir::CapSrc;
+    if captures.is_empty() {
+        return no_caps();
+    }
+    let f = env.as_ref().expect("closure captures in empty environment");
+    captures
+        .iter()
+        .map(|c| {
+            AtomicU64::new(match c {
+                CapSrc::Slot(i) => f.slots[*i as usize].load(SLOT_LOAD),
+                CapSrc::Cap(i) => f.caps[*i as usize].load(SLOT_LOAD),
+            })
+        })
+        .collect()
 }

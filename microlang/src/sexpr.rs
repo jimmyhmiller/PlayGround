@@ -97,6 +97,8 @@ impl Sexpr {
 
     pub fn eval_top<M: ValueModel>(&mut self, rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, form: u64) -> u64 {
         let ir = self.analyze(rt, cs, form);
+        // Closure-convert to the flat shape the tiers execute.
+        let ir = crate::flatten::flatten(&ir);
         cs.eval_ir(cs, rt, &ir, &None)
     }
 
@@ -293,7 +295,14 @@ impl Sexpr {
             body.push(self.analyze(rt, cs, f));
         }
         self.scope.pop();
-        Ir::Lambda { nparams, variadic: variadic.is_some(), body: Arc::new(Ir::Do(body)) }
+        // Placeholders; the `flatten` pass computes the real nslots/captures.
+        Ir::Lambda {
+            nparams,
+            variadic: variadic.is_some(),
+            nslots: 0,
+            captures: Vec::new(),
+            body: Arc::new(Ir::Do(body)),
+        }
     }
 
     fn parse_params<M: ValueModel>(&self, rt: &Runtime<M>, form: u64) -> (Vec<Sym>, Option<Sym>) {
@@ -335,10 +344,11 @@ pub fn eval_str<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, src: 
     s.eval_str(rt, cs, src)
 }
 
-/// Compile one form to `Ir`.
+/// Compile one form to (flat, runnable) `Ir`.
 pub fn analyze<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, form: u64) -> Ir {
     let mut s = Sexpr::new(rt);
-    s.analyze(rt, cs, form)
+    let ir = s.analyze(rt, cs, form);
+    crate::flatten::flatten(&ir)
 }
 
 // ── reader: &str -> Vec<Val> (code is data) ─────────────────────────────────

@@ -368,15 +368,31 @@ impl Prim {
     }
 }
 
+/// Where a closure's captured value comes from, in the terms of the ENCLOSING
+/// activation at closure-creation time: a slot of the enclosing frame, or a
+/// capture of the enclosing closure (for transitive capture). Produced by the
+/// `flatten` closure-conversion pass; frontends never build these directly.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CapSrc {
+    Slot(u16),
+    Cap(u16),
+}
+
 #[derive(Clone, PartialEq)]
 pub enum Ir {
     /// A literal, held in the constant pool (no embedded heap pointer).
     Const(ConstId),
     /// A quoted datum, held in the constant pool.
     Quote(ConstId),
-    /// Lexical variable, resolved to a slot at analyze time: `up` frames out,
-    /// slot `idx`. No name, no search — a pointer walk plus an index.
+    /// Lexical variable, resolved to a slot at analyze time. Frontends produce
+    /// chain-scoped references (`up` frames out, slot `idx`); the `flatten`
+    /// pass rewrites every reference to the FLAT form (`up == 0`, idx = a slot
+    /// of the single per-call activation frame), which is the only shape the
+    /// execution tiers accept.
     Local { up: u16, idx: u16 },
+    /// Read slot `idx` of the CURRENT closure's capture array (a value copied
+    /// at closure-creation time). Only the `flatten` pass produces these.
+    Capture(u16),
     /// Global variable: resolved through the Var table at RUN time, so a
     /// reference can precede the definition (late binding).
     Global(Sym),
@@ -392,12 +408,20 @@ pub enum Ir {
         init: Box<Ir>,
     },
     /// `let*`: binding inits in order (each occupies the next slot of a single
-    /// frame and can see earlier ones), then the body.
+    /// frame and can see earlier ones), then the body. FRONTEND-ONLY: the
+    /// `flatten` pass rewrites every `Let` into `SetLocal` stores against the
+    /// function-level activation frame; tiers reject a surviving `Let` loudly.
     Let(Vec<Ir>, Box<Ir>),
-    /// A closure: arity only; the body's locals are already slot-resolved.
+    /// A closure. Frontends emit `nslots: 0, captures: []` placeholders; the
+    /// `flatten` pass fills them in: `nslots` is the size of the ONE flat
+    /// activation frame a call allocates (params, rest arg, every let/catch
+    /// slot), and `captures` says which enclosing values to COPY into the
+    /// closure at creation time (flat closures — no environment chain).
     Lambda {
         nparams: usize,
         variadic: bool,
+        nslots: u16,
+        captures: Vec<CapSrc>,
         body: Arc<Ir>,
     },
     Call(Box<Ir>, Vec<Ir>),
@@ -431,8 +455,13 @@ pub enum Ir {
     /// tied to any one frontend; only stack-based tiers (TreeWalk) implement it.
     Try {
         body: Box<Ir>,
-        /// The catch handler; its body sees the thrown value at `Local{up:0,idx:0}`.
+        /// The catch handler. Frontends compile it so the thrown value reads as
+        /// `Local{up:0, idx:0}` in a fresh 1-slot frame; the `flatten` pass
+        /// re-homes that binding to activation slot `cslot` of the SAME frame.
         catch: Option<Box<Ir>>,
         finally: Option<Box<Ir>>,
+        /// The activation slot the thrown value is stored into before the catch
+        /// body runs. Assigned by `flatten` (0 until then).
+        cslot: u16,
     },
 }

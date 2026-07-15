@@ -311,6 +311,8 @@ fn eval1<M: ValueModel>(
     let slot = rt.push_root(expanded);
     let ir = comp.compile(rt, rt.root_get(slot));
     rt.truncate_roots(slot);
+    // Closure-convert to the flat shape the tiers execute.
+    let ir = microlang::flatten(&ir);
     let r = cs.eval_ir(cs, rt, &ir, &None);
     if boundary && rt.pending() {
         let sig = rt.take_signal();

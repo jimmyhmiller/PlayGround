@@ -349,10 +349,13 @@ fn scan_obj<M: ValueModel>(
         }
         return;
     }
-    // Closure: rewrite the cells of its captured env chain.
-    if let Obj::Closure { env, .. } = &to[i] {
-        let env = env.clone();
-        update_env::<M>(heap, from_len, to, reloc, &env);
+    // Closure: forward its captured values in place (flat closures — the
+    // capture array is the closure's only heap-reaching edge).
+    if let Obj::Closure { caps, .. } = &to[i] {
+        let caps = caps.clone();
+        for cell in caps.iter() {
+            slot_store(cell, fw::<M>(heap, from_len, to, reloc, slot_load(cell)));
+        }
         return;
     }
     // Record: forward each field.
@@ -433,10 +436,6 @@ fn walk_kont<M: ValueModel>(
                 update_env::<M>(heap, from_len, to, reloc, env);
                 next.clone()
             }
-            Kont::LetSlot { frame, next, .. } => {
-                update_env::<M>(heap, from_len, to, reloc, frame);
-                next.clone()
-            }
             Kont::Def { next, .. }
             | Kont::SetGlob { next, .. }
             | Kont::CallCc { next, .. }
@@ -447,9 +446,10 @@ fn walk_kont<M: ValueModel>(
     }
 }
 
-/// Walk a frame chain, rewriting each `Cell` slot to the forwarded address.
-/// Idempotent (a re-visited, already-forwarded slot forwards to itself), so
-/// frames shared between closures need no visited set.
+/// Rewrite an activation frame's slots (and its attached capture array) to the
+/// forwarded addresses. Idempotent (a re-visited, already-forwarded slot
+/// forwards to itself), so frames shared with continuations and capture arrays
+/// shared with closures need no visited set.
 fn update_env<M: ValueModel>(
     heap: &mut crate::runtime::Heap,
     from_len: usize,
@@ -457,11 +457,12 @@ fn update_env<M: ValueModel>(
     reloc: &mut u64,
     env: &Locals,
 ) {
-    let mut cur = env.clone();
-    while let Some(f) = cur {
+    if let Some(f) = env {
         for cell in &f.slots {
             slot_store(cell, fw::<M>(heap, from_len, to, reloc, slot_load(cell)));
         }
-        cur = f.parent.clone();
+        for cell in f.caps.iter() {
+            slot_store(cell, fw::<M>(heap, from_len, to, reloc, slot_load(cell)));
+        }
     }
 }

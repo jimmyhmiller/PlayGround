@@ -56,7 +56,7 @@ pub(crate) enum TcpHandle {
 }
 use crate::ir::{ConstId, Prim};
 use crate::model::{Repr, ValueModel};
-use crate::value::{Cat, Frame, HeapId, Locals, Obj, RawTag, Sym, Val};
+use crate::value::{Caps, Cat, Frame, HeapId, Locals, Obj, RawTag, Sym, Val};
 
 /// Sentinel for an unbound slot in `global_slots`. `u64::MAX` has an invalid tag
 /// under every value model (`LowBit`/`HighBit`/`NanBox`), so it can never collide
@@ -2962,18 +2962,27 @@ impl<M: ValueModel> Runtime<M> {
         }
     }
 
-    /// Build a callee's slot frame from evaluated args. Slots `0..nparams` are
-    /// the positional args; a variadic rest arg is the slot after them, holding
-    /// the collected list. Shared by every backend so the frame layout has one
-    /// definition matching what `analyze` assigned.
+    /// Build a callee's FLAT activation frame from evaluated args. Slots
+    /// `0..nparams` are the positional args; a variadic rest arg is the slot
+    /// after them, holding the collected list; the remaining slots (up to
+    /// `nslots`, assigned by the `flatten` pass for the body's let/catch
+    /// bindings) start nil. The closure's capture array rides along (one `Arc`
+    /// bump). Shared by every backend so the frame layout has one definition.
     pub fn build_call_frame(
         &mut self,
         nparams: usize,
         variadic: bool,
+        nslots: u16,
         args: &[u64],
-        env: Locals,
+        caps: Caps,
     ) -> Locals {
-        let mut slots: Vec<AtomicU64> = Vec::with_capacity(nparams + variadic as usize);
+        let nfixed = nparams + variadic as usize;
+        debug_assert!(
+            nslots as usize >= nfixed,
+            "unflattened Lambda reached a call: nslots={nslots} < params={nfixed} (run flatten::flatten)"
+        );
+        let nslots = (nslots as usize).max(nfixed);
+        let mut slots: Vec<AtomicU64> = Vec::with_capacity(nslots);
         if variadic {
             assert!(
                 args.len() >= nparams,
@@ -2991,7 +3000,11 @@ impl<M: ValueModel> Runtime<M> {
             );
             slots.extend(args.iter().map(|&a| AtomicU64::new(a)));
         }
-        Some(Arc::new(Frame { slots, parent: env }))
+        let nil = self.encode(Val::Nil);
+        while slots.len() < nslots {
+            slots.push(AtomicU64::new(nil));
+        }
+        Some(Arc::new(Frame { slots, caps }))
     }
 
 }
