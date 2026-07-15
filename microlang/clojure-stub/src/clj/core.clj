@@ -597,8 +597,9 @@
 ;; When the accumulator is a PersistentVector (conj on a vector always yields a
 ;; vector, so the type is stable) call the native %pv-conj prim DIRECTLY — no
 ;; per-element -conj protocol dispatch at all. This is the (into [] …) / vec path.
-(defn -rpvconj-chunk [acc arr off end]
-  (loop [i off acc acc] (if (%lt i end) (recur (%add i 1) (%pv-conj acc (%aget arr i))) acc)))
+;; Conj the whole chunk run in ONE native call (a Rust pv_conj loop) instead of
+;; a %pv-conj FFI per element — the vec / mapv / into-[] / filterv build path.
+(defn -rpvconj-chunk [acc arr off end] (%pv-conj-chunk acc arr off end))
 (defn -rpvconj-seq [acc s]
   (let [s (seq s)]
     (cond (nil? s) acc

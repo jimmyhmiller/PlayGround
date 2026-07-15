@@ -1022,6 +1022,18 @@ impl<M: ValueModel> Runtime<M> {
                 M::R::enc_ref(nid)
             }
             Prim::PvConj => self.pv_conj(args[0], args[1]),
+            // Conj a whole chunk's run onto a PV in one native call (a pv_conj
+            // loop in Rust), avoiding a %pv-conj FFI per element.
+            Prim::PvConjChunk => {
+                let arr = self.arr_clone(args[1]);
+                let off = match self.decode(args[2]) { Val::Int(i) => i as usize, _ => panic!("pv-conj-chunk: off") };
+                let end = match self.decode(args[3]) { Val::Int(i) => i as usize, _ => panic!("pv-conj-chunk: end") };
+                let mut pv = args[0];
+                for &e in &arr[off..end] {
+                    pv = self.pv_conj(pv, e);
+                }
+                pv
+            }
             Prim::PvNth => {
                 let Val::Int(i) = self.decode(args[1]) else { panic!("pv-nth: index must be an int"); };
                 self.pv_nth(args[0], i as i64)

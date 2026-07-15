@@ -327,6 +327,13 @@ pub enum Prim {
     /// instead of building two char lists and walking them per comparison
     /// (`sort`/`sort-by` on strings called that O(len) helper per comparison).
     StrCmp,
+    /// `(%pv-conj-chunk pv arr off end)` -> the PersistentVector `pv` with
+    /// `arr[off..end]` conj'd on, the whole run done in ONE native call (a Rust
+    /// `pv_conj` loop) instead of a `%pv-conj` FFI per element. The vec/mapv/
+    /// into-[]/filterv build path (chunk-scanned) uses it — one call per 32-elem
+    /// chunk. Vectors are ORDERED, so there is no print-order/type ambiguity to
+    /// preserve (unlike a native map batch-build).
+    PvConjChunk,
     /// `(%all-fixnum? a b ...)` — true iff EVERY argument is an immediate fixnum.
     /// The guard the specializer places at a lambda's entry; when it holds, the
     /// body's `Fx*` ops are valid. On the JIT it lowers to a single combined
