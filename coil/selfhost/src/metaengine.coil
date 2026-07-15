@@ -44,9 +44,17 @@
 (extern unlink :cc c [(ptr i8)] (-> i32))
 
 ; ---- the engine flag ------------------------------------------------------------
+; DEFAULT = compiled, whenever a backend object builder is registered (main.coil
+; registers the LLVM one; the LLVM-free main_a64.coil registers none — its native
+; backend has no export-c yet, so it stays on the interpreter by default and an
+; explicit COIL_META=compiled fails loudly at engine setup instead of degrading).
+; COIL_META=interp opts back into the interpreter; COIL_META=compiled forces the
+; engine. Both engines are byte-identical (metaprog-poc/compile-and-run/parity.sh).
 (defn meta-compiled? [] (-> bool)
   (let [v (getenv c"COIL_META")]
-    (if (icmp-eq (cast i64 v) 0) false (str-eq (cstr->slice v) "compiled"))))
+    (if (icmp-ne (cast i64 v) 0)
+        (str-eq (cstr->slice v) "compiled")
+      (icmp-ne (load (field (meta-build-box) isset)) 0))))
 
 ; ---- engine state ----------------------------------------------------------------
 (defstruct MEEntry [(name (slice u8)) (fp (ptr i8))])
@@ -194,7 +202,7 @@
   (try (do
     (let [bb (meta-build-box)]
       (if (icmp-eq (load (field bb isset)) 0)
-          (return-from :try (Err [(ptr i8) Diag] (derr "metaengine: no backend object builder registered (compiler bug)"))) 0)
+          (return-from :try (Err [(ptr i8) Diag] (derr "metaengine: this compiler build cannot compile metaprograms (the arm64-only compiler has no export-c yet) — unset COIL_META to use the interpreter"))) 0)
       (let [mp (try! (monomorphize a lowered))]
         (sort-mono-program a mp)
         (let [cdir (if (me-cache-on?) (me-cache-dir a) (None [(slice u8)]))

@@ -13,7 +13,7 @@ pass=0; fail=0; skip=0
 check() {
   local f="$1"
   local ref cmp rc1 rc2
-  ref=$("$COIL" emit-ir "$f" 2>&1); rc1=$?
+  ref=$(COIL_META=interp "$COIL" emit-ir "$f" 2>&1); rc1=$?
   cmp=$(COIL_META=compiled "$COIL" emit-ir "$f" 2>&1); rc2=$?
   if [ $rc1 -ne 0 ] && [ $rc2 -ne 0 ]; then
     # both engines reject it — the DIAGNOSTIC must match too
