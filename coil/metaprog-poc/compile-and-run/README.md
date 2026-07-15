@@ -1,6 +1,17 @@
-# Compile-and-run metaprograms — the two load-bearing mechanisms, proven
+# Compile-and-run metaprograms — built, default, and proven
 
-Run from the repo root: `metaprog-poc/compile-and-run/run.sh [coil-binary]`
+The one-command proof: `metaprog-poc/compile-and-run/verify-all.sh` (rebootstrap
+fixpoint + gates, 112-file engine parity, and every mechanism in `run.sh` — up to
+and including **a GUI at compile time**: `mandel_test.coil`'s constants come from
+a Mandelbrot viewer you drive during expansion).
+
+    COIL_META_MAIN=1 coil run metaprog-poc/compile-and-run/mandel_test.coil \
+      --link-flag -framework --link-flag AppKit --link-flag -lobjc
+    # a Cocoa window opens DURING THE BUILD: WASD pan, Z/X zoom, I/O iters,
+    # Q/RETURN accept — the program then renders the view you chose.
+    # (COIL_MANDEL_AUTO=1 scripts the session for reproducible builds.)
+
+Historical PoC below; run.sh runs everything.
 
 ## Why
 
