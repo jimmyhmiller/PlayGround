@@ -56,7 +56,7 @@
 //! the next honest step).
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -70,10 +70,11 @@ use cranelift_module::{FuncId, Linkage, Module};
 
 use crate::bytecode::ModelEmit;
 use crate::code::CodeSpace;
+use crate::heap::{kind, CLOSURE_CAPS_OFF, CLOSURE_CODE_OFF, CLOSURE_META_OFF};
 use crate::ir::{CapSrc, Ir, Prim};
 use crate::model::{Repr, ValueModel};
-use crate::runtime::Runtime;
-use crate::value::{frame_get, frame_set, no_caps, Caps, Frame, Locals, Obj, Sym, Val};
+use crate::runtime::{ObjView, Runtime};
+use crate::value::{frame_get, frame_set, Frame, Locals, Obj, RawTag, Sym, Val};
 
 // ─────────────────────────────────────────────────────────────────────────
 // The runtime-interaction ABI.
@@ -117,11 +118,6 @@ pub struct JitCtx<'a, M: ValueModel> {
     /// yet" and the compiled code falls back to the slow late-binding lookup.
     global_base: Cell<*const u64>,
     global_len: Cell<usize>,
-    /// Base + length of the native fast-call table (`JitCranelift::fast_targets`),
-    /// so a call site can resolve a callee to its native entry inline. Copied into
-    /// each caller-built child context so nested fast calls keep resolving.
-    fast_base: Cell<*const FastTarget>,
-    fast_len: Cell<usize>,
     /// Is the native fast call path enabled? True only when this backend is the
     /// OUTERMOST one (`top == self`). When wrapped (e.g. by `Traced`, which must
     /// observe every call, or a future router), this is 0 and every call takes the
@@ -133,19 +129,18 @@ pub struct JitCtx<'a, M: ValueModel> {
     /// anything else falls back to the shim + trampoline, so mutual tail
     /// recursion keeps full TCO.
     self_closure: Cell<u64>,
-    /// Base pointer of the RUNNING closure's capture array (`Caps`), null when
-    /// nothing is captured. `Capture(i)` compiles to `*(caps_base + i)`.
+    /// Base pointer of the RUNNING closure's inline capture array — Stage D:
+    /// `addr(self_closure) + CLOSURE_CAPS_OFF`, or null when nothing is running.
+    /// `Capture(i)` compiles to `*(caps_base + i)`; captures live IN the closure
+    /// object now, so this is a plain derived pointer, no separate `Caps` array.
     caps_base: Cell<*const u64>,
     /// The activation frame, as an `Arc` handle — only for MEMORY-mode bodies
     /// (those containing `try`/`(gc)`/`%await`, whose locals must be GC roots /
     /// interpreter-visible). SSA-mode bodies never touch it.
     cur: RefCell<Locals>,
-    /// The GLOBAL closure-template registry (owned by the backend, append-only),
-    /// read through `rc` by `shim_make_closure`.
-    tregistry: *const RefCell<Vec<ClosureTemplate>>,
     /// The backend itself (type-erased `*const JitCranelift<M>`), so shims can
-    /// consult its compiled-body cache / fast-target table. Null when the
-    /// running backend is wrapped (non-direct) — callers must check.
+    /// consult its compiled-body cache / per-template compiled-code map. Null
+    /// when the running backend is wrapped (non-direct) — callers must check.
     jit: *const (),
     /// Proper-tail-call signalling. A tail `Call` stashes its (callee, args) here
     /// and returns; the `invoke` trampoline reuses this native frame for the next
@@ -190,17 +185,6 @@ impl std::hash::Hasher for PtrHasher {
     }
 }
 type PtrBuildHasher = std::hash::BuildHasherDefault<PtrHasher>;
-
-/// A closure this body can construct: the arity/frame metadata + shared `Ir`
-/// body + capture list, registered once at compile time so the emitted code
-/// passes only a small integer (plus the capture VALUES, spilled at the site).
-struct ClosureTemplate {
-    nparams: usize,
-    variadic: bool,
-    nslots: u16,
-    ncaps: u16,
-    body: Arc<Ir>,
-}
 
 extern "C" fn shim_load_local<M: ValueModel>(ctx: *mut JitCtx<M>, up: u32, idx: u32) -> u64 {
     let ctx = unsafe { &*ctx };
@@ -253,52 +237,42 @@ extern "C" fn shim_def_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32, val:
     rt.encode(Val::Sym(sym as Sym))
 }
 
-/// Allocate a closure: the caller has already RESOLVED the capture values (from
-/// its SSA registers / frame slots / own captures, per the template's capture
-/// list) and spilled them, in order, at `caps_ptr`. The shim just copies
-/// `ncaps` words into a fresh capture array.
+/// Allocate a closure: the caller (emitted `Ir::Lambda` code) has already
+/// RESOLVED the capture values (from its SSA registers / frame slots / own
+/// captures) and spilled them, in order, at `caps_ptr`; `nparams`/`variadic`/
+/// `nslots` are the Lambda node's own (compile-time-constant) arity, baked in
+/// as immediates. `template_id` is the STABLE, GLOBAL id `rt.register_template`
+/// handed out for this Lambda's body at compile time — the SAME id
+/// `ObjView::Closure::template` reports, and the index into `template_code`.
 extern "C" fn shim_make_closure<M: ModelArithJit>(
     ctx: *mut JitCtx<M>,
     template_id: u32,
+    nparams: u32,
+    variadic: u32,
+    nslots: u32,
     caps_ptr: *const u64,
+    ncaps: u32,
 ) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
-    let reg = unsafe { &*(*ctx.rc).tregistry };
-    let (nparams, variadic, nslots, ncaps, body) = {
-        let reg = reg.borrow();
-        let t = &reg[template_id as usize];
-        (t.nparams, t.variadic, t.nslots, t.ncaps as usize, t.body.clone())
-    };
-    let caps: Caps = if ncaps == 0 {
-        no_caps()
-    } else {
-        let vals = unsafe { std::slice::from_raw_parts(caps_ptr, ncaps) };
-        vals.iter().map(|&v| AtomicU64::new(v)).collect()
-    };
-    let id = rt.alloc(Obj::Closure { nparams, variadic, nslots, body: body.clone(), caps: caps.clone() });
-    // Publish the register entry NOW when the body is already compiled: a
-    // freshly-allocated closure (new heap id, empty table slot) that is called
-    // once — every lazy-seq thunk, every per-element step fn — would otherwise
-    // take the slow invoke on its only call.
+    let caps: &[u64] =
+        if ncaps == 0 { &[] } else { unsafe { std::slice::from_raw_parts(caps_ptr, ncaps as usize) } };
+    let variadic = variadic != 0;
+    let g = rt.alloc_closure(nparams as usize, variadic, nslots as u16, template_id, caps);
+    // Stamp the new closure's CODE word NOW when the body is already compiled:
+    // a freshly-allocated closure that is called once — every lazy-seq thunk,
+    // every per-element step fn — would otherwise take the slow invoke on its
+    // only call. The object IS the fast-call table (see
+    // docs/STAGE_D_MIGRATION.md), so this is a single conditional store.
     let jitp = unsafe { (*ctx.rc).jit };
-    if !jitp.is_null() && !variadic && nparams <= MAX_REG_ARGS {
+    if !jitp.is_null() && !variadic && (nparams as usize) <= MAX_REG_ARGS {
         let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
-        if let Some(compiled) = jit.cache.borrow().get(&Arc::as_ptr(&body)) {
-            if compiled.entry_arity == Some(nparams) {
-                if let Some(slot) = jit.fast_targets.borrow_mut().get_mut(id as usize) {
-                    slot.code = compiled.code;
-                    slot.caps = if caps.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        caps.as_ptr() as *const u64
-                    };
-                    slot.arity = nparams as u32;
-                }
-            }
+        let code = jit.template_code.borrow().get(template_id as usize).copied().unwrap_or(std::ptr::null());
+        if !code.is_null() {
+            unsafe { *(g.0.add(CLOSURE_CODE_OFF) as *mut u64) = code as u64 };
         }
     }
-    M::R::enc_ref(id)
+    M::R::enc_ref(g)
 }
 
 /// Finish a NON-self tail call left by a natively-called fast body: it set
@@ -393,11 +367,13 @@ extern "C" fn shim_field_get<M: ValueModel>(
 /// A protocol/method dispatch: resolve the impl for the receiver's type (with the
 /// `Object` default) and invoke it through `top` — identical to TreeWalk.
 /// Invoke `callee` with `args` REUSING the caller's run context: multifn
-/// arity selection, a fast-table lookup, a minimal child context, and a
-/// register-arg `call_indirect`-equivalent — no `make_ctx`, no trampoline, no
-/// `resolve_call`. `None` when the callee has no matching register entry (the
-/// caller falls back to `top.invoke`). Only sound when `direct` (checked by
-/// the caller): it bypasses `top`.
+/// arity selection, a fast-path read straight off the callee OBJECT (header
+/// type_id, meta arity, code word — the SAME table the emitted call site
+/// reads), a minimal child context, and a register-arg `call_indirect`-
+/// equivalent — no `make_ctx`, no trampoline, no `resolve_call`. `None` when
+/// the callee is not a compiled, matching-arity closure (the caller falls
+/// back to `top.invoke`). Only sound when `direct` (checked by the caller):
+/// it bypasses `top`.
 fn shim_fast_invoke<M: ValueModel>(
     rc: *const JitCtx<M>,
     rt: &mut Runtime<M>,
@@ -420,17 +396,22 @@ fn shim_fast_invoke<M: ValueModel>(
         }
         None => callee,
     };
-    if M::R::tag_of(callee) != crate::value::RawTag::Ref {
+    if M::R::tag_of(callee) != RawTag::Ref {
         return None;
     }
-    let id = M::R::as_ref(callee) as usize;
-    if id >= rcr.fast_len.get() {
+    let g = M::R::as_ref(callee);
+    if unsafe { g.type_id() } != kind::CLOSURE {
         return None;
     }
-    let entry = unsafe { *rcr.fast_base.get().add(id) };
-    if entry.code.is_null() || entry.arity as usize != n {
+    let meta = unsafe { *(g.0.add(CLOSURE_META_OFF) as *const u64) };
+    if crate::heap::meta_variadic(meta) || crate::heap::meta_nparams(meta) != n {
         return None;
     }
+    let code = unsafe { *(g.0.add(CLOSURE_CODE_OFF) as *const u64) } as *const u8;
+    if code.is_null() {
+        return None;
+    }
+    let caps_base = unsafe { g.0.add(CLOSURE_CAPS_OFF) as *const u64 };
     // Minimal child context: everything shared rides through `rc`.
     let mut ctx = JitCtx {
         rc,
@@ -440,20 +421,16 @@ fn shim_fast_invoke<M: ValueModel>(
         consts_base: Cell::new(std::ptr::null()),
         global_base: Cell::new(std::ptr::null()),
         global_len: Cell::new(0),
-        fast_base: Cell::new(std::ptr::null()),
-        fast_len: Cell::new(0),
         direct: Cell::new(1),
         self_closure: Cell::new(callee),
-        caps_base: Cell::new(entry.caps),
+        caps_base: Cell::new(caps_base),
         cur: RefCell::new(None),
-        tregistry: rcr.tregistry,
         jit: rcr.jit,
         tail_pending: Cell::new(false),
         tail_callee: Cell::new(0),
         tail_args: rcr.tail_args,
     };
     let cp = &mut ctx as *mut JitCtx<M> as u64;
-    let code = entry.code;
     let a = args;
     let ret = unsafe {
         match n {
@@ -1007,11 +984,14 @@ pub trait ModelArithJit: ModelEmit {
     fn emit_untag(c: &mut Compiler, v: Value) -> Value;
     /// Emit: encode signed i64 `x` back into an immediate int word.
     fn emit_tag(c: &mut Compiler, x: Value) -> Value;
-    /// Emit `(is_ref, heap_id)` for `v`: `is_ref` is a branch-ready bool, `id` is
-    /// meaningful only when it holds. Used to resolve a native call target inline.
-    /// A model may return a constant-false `is_ref` to opt out of native fast
-    /// calls entirely (correct — the call site then always takes the shim path).
-    fn emit_ref_id(c: &mut Compiler, v: Value) -> (Value, Value);
+    /// Emit `(is_ref, addr)` for `v`: `is_ref` is a branch-ready bool, `addr` is
+    /// the REAL heap address (mask off the tag — Stage D refs ARE addresses),
+    /// meaningful only when `is_ref` holds. Used to resolve a native call target
+    /// inline by reading the callee OBJECT directly (header type_id, meta arity,
+    /// code word — see `emit_call`). A model may return a constant-false
+    /// `is_ref` to opt out of native fast calls entirely (correct — the call
+    /// site then always takes the shim path); NanBox/HighBit do this today.
+    fn emit_ref_addr(c: &mut Compiler, v: Value) -> (Value, Value);
 }
 
 const FIXNUM_MIN: i64 = -(1 << 60);
@@ -1030,12 +1010,13 @@ impl ModelArithJit for crate::model::LowBitModel {
     fn emit_tag(c: &mut Compiler, x: Value) -> Value {
         c.fb.ins().ishl_imm(x, 3) // tag bits are 0 for an int
     }
-    fn emit_ref_id(c: &mut Compiler, v: Value) -> (Value, Value) {
-        // LowBit ref: tag `LB_REF` = 0b001 in the low 3 bits, id in the rest.
+    fn emit_ref_addr(c: &mut Compiler, v: Value) -> (Value, Value) {
+        // LowBit ref: tag `LB_REF` = 0b001 in the low 3 bits; objects are
+        // 8-aligned, so the address IS the payload — mask the tag bits off.
         let tag = c.fb.ins().band_imm(v, 0b111);
         let is_ref = c.fb.ins().icmp_imm(IntCC::Equal, tag, 0b001);
-        let id = c.fb.ins().ushr_imm(v, 3);
-        (is_ref, id)
+        let addr = c.fb.ins().band_imm(v, !0b111i64);
+        (is_ref, addr)
     }
 }
 
@@ -1055,7 +1036,7 @@ impl ModelArithJit for crate::model::HighBitModel {
         // keep the low 61 bits (top 3 = tag 0), matching `enc_int`
         c.fb.ins().band_imm(x, (1i64 << 61) - 1)
     }
-    fn emit_ref_id(c: &mut Compiler, _v: Value) -> (Value, Value) {
+    fn emit_ref_addr(c: &mut Compiler, _v: Value) -> (Value, Value) {
         // Opt out of native fast calls under HighBit (always take the shim path).
         let f = c.fb.ins().iconst(cranelift_codegen::ir::types::I8, 0);
         let z = c.fb.ins().iconst(I64, 0);
@@ -1074,7 +1055,7 @@ impl ModelArithJit for crate::model::NanBoxModel {
     fn emit_tag(_c: &mut Compiler, x: Value) -> Value {
         x
     }
-    fn emit_ref_id(c: &mut Compiler, _v: Value) -> (Value, Value) {
+    fn emit_ref_addr(c: &mut Compiler, _v: Value) -> (Value, Value) {
         // Opt out of native fast calls under NaN-boxing (always take the shim path).
         let f = c.fb.ins().iconst(cranelift_codegen::ir::types::I8, 0);
         let z = c.fb.ins().iconst(I64, 0);
@@ -1106,44 +1087,16 @@ pub struct JitCranelift<M: ModelArithJit> {
     /// bounces), so a single entry thrashes; eight direct-mapped ways keep the
     /// hot mix resident. A hit skips decode + heap lookup + compile-cache hash.
     call_ic: RefCell<[Option<CallTarget>; CALL_IC_WAYS]>,
-    /// Dense, heap-id-indexed table of NATIVE fast-call entries: for a closure
-    /// whose body is directly callable (see `FastTarget`), the call site jumps to
-    /// its compiled code with `call_indirect`, passing args in registers — no
-    /// FFI, no `invoke`, no frame. Sized once per top-level form (to
-    /// `heap.len()`), so its base is stable for the whole run; filled lazily on
-    /// the slow path. `code == null` (the default) means "not a fast target, use
-    /// the shim path", which is what keeps continuations / wrappers composable.
-    fast_targets: RefCell<Vec<FastTarget>>,
-    /// The GLOBAL closure-template registry: every `Lambda` site of every
-    /// compiled body appends here once, at compile time; `shim_make_closure`
-    /// reads it through the run context. Append-only, bounded by code size.
-    templates: Box<RefCell<Vec<ClosureTemplate>>>,
+    /// Per-TEMPLATE compiled-code map, indexed by the STABLE, GLOBAL template id
+    /// `Runtime::register_template` hands out (the same id `ObjView::Closure`
+    /// reports). A freshly-created closure of an already-compiled template is
+    /// stamped with its code word at creation (`shim_make_closure`); the object
+    /// itself is the fast-call table from then on (see
+    /// `docs/STAGE_D_MIGRATION.md`'s "Closure object ABI") — this map exists
+    /// only to seed THAT stamp, never consulted by emitted call sites directly.
+    /// `null` = not yet compiled.
+    template_code: RefCell<Vec<*const u8>>,
     _pd: std::marker::PhantomData<fn() -> M>,
-}
-
-/// One entry of the fast-call table, keyed by closure heap id. `code` is the
-/// compiled body's REGISTER-ARG entry `fn(*mut JitCtx, a0..a{n-1}) -> u64`; the
-/// call site builds a minimal 4-store `JitCtx` on its own stack, passes the args
-/// in registers, and jumps to it. `caps` is THIS closure instance's capture
-/// array base (stable — the `Arc<[AtomicU64]>` allocation never moves, and the
-/// GC's to-space clone shares it), stored so the call site can hand the callee
-/// its captures without touching the heap object. Eligible bodies are SSA-mode
-/// (no try/(gc)/%await) and non-variadic with ≤ MAX_REG_ARGS params; everything
-/// else keeps `code == null` and goes through the shim path.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct FastTarget {
-    code: *const u8,
-    caps: *const u64,
-    /// nparams; the call-site guard is one compare against the arg count.
-    arity: u32,
-    _pad: u32,
-}
-
-impl Default for FastTarget {
-    fn default() -> Self {
-        FastTarget { code: std::ptr::null(), caps: std::ptr::null(), arity: 0, _pad: 0 }
-    }
 }
 
 /// Most args that ride in a register-arg entry signature. Bodies with more
@@ -1202,22 +1155,20 @@ struct InlinePlan {
     body: Arc<Ir>,
 }
 
-/// Extra `FastTarget` slots reserved past the live heap size at each top-level
-/// form's start, so heap objects THIS form allocates while running still land
-/// in range (see the comment at the `eval_ir` resize site). 4M slots * 24 bytes
-/// = 96MiB, paid once (the table only ever grows), amortized over the process's
-/// whole lifetime — cheap next to what it unlocks (fast-calling a `map`/`filter`
-/// callback allocated mid-form instead of every call going through `shim_call`).
-const FAST_TARGET_SLACK: usize = 4_000_000;
-
 /// A resolved call target (the payload of the monomorphic inline cache).
+/// `epoch` is the collection count (`Runtime::relocated`) at fill time: a
+/// moving collection can relocate a closure AND recycle its old address for a
+/// different object (semi-space flip — unlike the old append-only heap ids,
+/// addresses DO get reused), so a hit also requires the epoch to match. Same
+/// invalidation discipline as the runtime's per-site dispatch IC.
 struct CallTarget {
     callee: u64,
+    epoch: u64,
     nparams: usize,
     variadic: bool,
     nslots: u16,
+    template: u32,
     compiled: Arc<Compiled>,
-    caps: Caps,
 }
 
 /// Cap on pooled frames — plenty for realistic recursion depth, bounded memory.
@@ -1226,8 +1177,8 @@ const FRAME_POOL_CAP: usize = 1024;
 /// Ways in the direct-mapped resolved-callee cache.
 const CALL_IC_WAYS: usize = 8;
 
-/// The cache way for a callee: heap ids are the high bits, so shift past the
-/// tag and fold.
+/// The cache way for a callee: refs are 8-aligned heap ADDRESSES (Stage D), so
+/// shift past the always-equal low tag/alignment bits and fold.
 fn call_ic_way(callee: u64) -> usize {
     ((callee >> 3) as usize) & (CALL_IC_WAYS - 1)
 }
@@ -1257,7 +1208,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let ll: extern "C" fn(*mut JitCtx<M>, u32, u32) -> u64 = shim_load_local::<M>;
         let lg: extern "C" fn(*mut JitCtx<M>, u32) -> u64 = shim_load_global::<M>;
         let dg: extern "C" fn(*mut JitCtx<M>, u32, u64) -> u64 = shim_def_global::<M>;
-        let mk: extern "C" fn(*mut JitCtx<M>, u32, *const u64) -> u64 = shim_make_closure::<M>;
+        let mk: extern "C" fn(*mut JitCtx<M>, u32, u32, u32, u32, *const u64, u32) -> u64 = shim_make_closure::<M>;
         let ca: extern "C" fn(*mut JitCtx<M>, u64, *const u64, u32) -> u64 = shim_call::<M>;
         let tc: extern "C" fn(*mut JitCtx<M>, u64, *const u64, u32) -> u64 = shim_tail_call::<M>;
         let ft: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_finish_tail::<M>;
@@ -1303,16 +1254,16 @@ impl<M: ModelArithJit> JitCranelift<M> {
             s
         };
         let ptr = module.target_config().pointer_type();
-        let s_load_local = sig(&[ptr, cranelift_codegen::ir::types::I32, cranelift_codegen::ir::types::I32]);
-        let s_load_global = sig(&[ptr, cranelift_codegen::ir::types::I32]);
-        let s_def_global = sig(&[ptr, cranelift_codegen::ir::types::I32, I64]);
-        let s_make_closure = sig(&[ptr, cranelift_codegen::ir::types::I32, ptr]);
-        let s_call = sig(&[ptr, I64, ptr, cranelift_codegen::ir::types::I32]);
-        let s_prim = sig(&[ptr, cranelift_codegen::ir::types::I32, ptr, cranelift_codegen::ir::types::I32]);
-        let s_finish_tail = sig(&[ptr]);
-        let s_set_local = sig(&[ptr, cranelift_codegen::ir::types::I32, cranelift_codegen::ir::types::I32, I64]);
-        let s_set_global = sig(&[ptr, cranelift_codegen::ir::types::I32, I64]);
         let i32t = cranelift_codegen::ir::types::I32;
+        let s_load_local = sig(&[ptr, i32t, i32t]);
+        let s_load_global = sig(&[ptr, i32t]);
+        let s_def_global = sig(&[ptr, i32t, I64]);
+        let s_make_closure = sig(&[ptr, i32t, i32t, i32t, i32t, ptr, i32t]);
+        let s_call = sig(&[ptr, I64, ptr, i32t]);
+        let s_prim = sig(&[ptr, i32t, ptr, i32t]);
+        let s_finish_tail = sig(&[ptr]);
+        let s_set_local = sig(&[ptr, i32t, i32t, I64]);
+        let s_set_global = sig(&[ptr, i32t, I64]);
         let s_field_get = sig(&[ptr, i32t, i32t, I64]);
         let s_dispatch = sig(&[ptr, i32t, i32t, ptr, i32t]);
         let s_def_method = sig(&[ptr, i32t, i32t, I64]);
@@ -1355,8 +1306,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             cache: RefCell::new(HashMap::default()),
             frame_pool: RefCell::new(Vec::new()),
             call_ic: RefCell::new(std::array::from_fn(|_| None)),
-            fast_targets: RefCell::new(Vec::new()),
-            templates: Box::new(RefCell::new(Vec::new())),
+            template_code: RefCell::new(Vec::new()),
             counter: Cell::new(0),
             _pd: std::marker::PhantomData,
         }
@@ -1379,7 +1329,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         {
             let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
             let shape = BodyShape { entry_arity: None, nparams: 0, variadic: false, nslots: 0, mem_mode: true, tail_root: true };
-            build_body::<M>(&mut module, &mut fb, self.shims, None, ir, &self.templates, shape);
+            build_body::<M>(&mut module, &mut fb, self.shims, None, ir, shape);
             fb.finalize();
         }
         let out = ctx.func.display().to_string();
@@ -1400,7 +1350,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
 
         {
             let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
-            build_body::<M>(&mut module, &mut fb, self.shims, rt, ir, &self.templates, shape);
+            build_body::<M>(&mut module, &mut fb, self.shims, rt, ir, shape);
             fb.finalize();
         }
 
@@ -1442,45 +1392,49 @@ impl<M: ModelArithJit> JitCranelift<M> {
 
     /// Resolve a callee through the monomorphic inline cache (the common repeat
     /// case skips decode + heap read + cache lookups entirely).
-    fn resolve_call(&self, rt: &mut Runtime<M>, callee: u64) -> (usize, bool, u16, Arc<Compiled>, Caps) {
+    fn resolve_call(&self, rt: &mut Runtime<M>, callee: u64) -> (usize, bool, u16, u32, Arc<Compiled>) {
         let way = call_ic_way(callee);
+        let epoch = rt.relocated();
         if let Some(t) = self.call_ic.borrow()[way].as_ref() {
-            if t.callee == callee {
-                return (t.nparams, t.variadic, t.nslots, t.compiled.clone(), t.caps.clone());
+            if t.callee == callee && t.epoch == epoch {
+                return (t.nparams, t.variadic, t.nslots, t.template, t.compiled.clone());
             }
         }
-        let Val::Ref(id) = rt.decode(callee) else {
+        if M::R::tag_of(callee) != RawTag::Ref {
             panic!("value not callable: {}", rt.print(callee));
-        };
-        let (nparams, variadic, nslots, body, caps) = match &rt.heap()[id as usize] {
-            Obj::Closure { nparams, variadic, nslots, body, caps } => {
-                (*nparams, *variadic, *nslots, body.clone(), caps.clone())
+        }
+        let (nparams, variadic, nslots, template) = match rt.view(callee) {
+            ObjView::Closure { nparams, variadic, nslots, template, .. } => {
+                (nparams, variadic, nslots, template)
             }
             _ => panic!("value not callable: {}", rt.print(callee)),
         };
+        let body = rt.template(template).clone();
         let compiled = self.compiled_body(rt, &body, nparams, variadic, nslots);
         // (MultiFn callees never reach here: `invoke`/the trampoline select the
         // arity clause BEFORE resolution, so `callee` is always a closure.)
         self.call_ic.borrow_mut()[way] = Some(CallTarget {
             callee,
+            epoch,
             nparams,
             variadic,
             nslots,
+            template,
             compiled: compiled.clone(),
-            caps: caps.clone(),
         });
-        (nparams, variadic, nslots, compiled, caps)
+        (nparams, variadic, nslots, template, compiled)
     }
 
-    /// Build the per-run `JitCtx` for one body execution. `caps` is the running
-    /// closure's capture array (empty for a top-level expression).
+    /// Build the per-run `JitCtx` for one body execution. `self_closure` is the
+    /// running closure's bits (0 = none / top-level); `caps_base` — the inline
+    /// capture array's address — is derived straight from it (captures live IN
+    /// the closure object, Stage D), no separate `Caps` array to carry.
     #[allow(clippy::too_many_arguments)]
     fn make_ctx<'a>(
         &'a self,
         top: &'a dyn CodeSpace<M>,
         rt: &mut Runtime<M>,
         frame: &Locals,
-        caps: &Caps,
         args_buf: &mut Vec<u64>,
         self_closure: u64,
         needs_cur: bool,
@@ -1488,10 +1442,6 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let consts_base = rt.consts_ptr();
         let global_base = rt.global_slots_ptr();
         let global_len = rt.global_slots_len();
-        let (fast_base, fast_len) = {
-            let t = self.fast_targets.borrow();
-            (t.as_ptr(), t.len())
-        };
         // Native fast calls bypass `top`, so only enable them when we ARE the top
         // (no wrapper is observing calls).
         let direct = std::ptr::eq(
@@ -1499,6 +1449,11 @@ impl<M: ModelArithJit> JitCranelift<M> {
             self as *const JitCranelift<M> as *const u8,
         ) as u8;
         let cur = if needs_cur { frame.clone() } else { None };
+        let caps_base = if self_closure == 0 {
+            std::ptr::null()
+        } else {
+            unsafe { M::R::as_ref(self_closure).0.add(CLOSURE_CAPS_OFF) as *const u64 }
+        };
         JitCtx {
             rc: std::ptr::null(),
             top,
@@ -1507,17 +1462,10 @@ impl<M: ModelArithJit> JitCranelift<M> {
             consts_base: Cell::new(consts_base),
             global_base: Cell::new(global_base),
             global_len: Cell::new(global_len),
-            fast_base: Cell::new(fast_base),
-            fast_len: Cell::new(fast_len),
             direct: Cell::new(direct),
             self_closure: Cell::new(self_closure),
-            caps_base: Cell::new(if caps.is_empty() {
-                std::ptr::null()
-            } else {
-                caps.as_ptr() as *const u64
-            }),
+            caps_base: Cell::new(caps_base),
             cur: RefCell::new(cur),
-            tregistry: &*self.templates as *const RefCell<Vec<ClosureTemplate>>,
             jit: self as *const JitCranelift<M> as *const (),
             tail_pending: Cell::new(false),
             tail_callee: Cell::new(0),
@@ -1534,12 +1482,11 @@ impl<M: ModelArithJit> JitCranelift<M> {
         rt: &mut Runtime<M>,
         compiled: &Compiled,
         frame: &Locals,
-        caps: &Caps,
         args_buf: &mut Vec<u64>,
         self_closure: u64,
     ) -> Result<u64, u64> {
         let mut ctx =
-            self.make_ctx(top, rt, frame, caps, args_buf, self_closure, compiled.mem_mode);
+            self.make_ctx(top, rt, frame, args_buf, self_closure, compiled.mem_mode);
         ctx.rc = &ctx as *const JitCtx<M>;
         let f: extern "C" fn(*mut JitCtx<M>) -> u64 =
             unsafe { std::mem::transmute::<*const u8, _>(compiled.code) };
@@ -1559,12 +1506,11 @@ impl<M: ModelArithJit> JitCranelift<M> {
         compiled: &Compiled,
         arity: usize,
         args: &[u64; MAX_REG_ARGS],
-        caps: &Caps,
         args_buf: &mut Vec<u64>,
         self_closure: u64,
     ) -> Result<u64, u64> {
         let none: Locals = None;
-        let mut ctx = self.make_ctx(top, rt, &none, caps, args_buf, self_closure, false);
+        let mut ctx = self.make_ctx(top, rt, &none, args_buf, self_closure, false);
         ctx.rc = &ctx as *const JitCtx<M>;
         // Pass the context pointer as a plain word so the per-arity fn-pointer
         // types need no lifetime parameters.
@@ -1603,12 +1549,12 @@ impl<M: ModelArithJit> JitCranelift<M> {
         variadic: bool,
         nslots: u16,
         args: &[u64],
-        caps: Caps,
+        callee_bits: u64,
     ) -> Locals {
         let popped = self.frame_pool.borrow_mut().pop();
         let mut rc = match popped {
             Some(rc) => rc,
-            None => return rt.build_call_frame(nparams, variadic, nslots, args, caps),
+            None => return rt.build_call_frame(nparams, variadic, nslots, args, callee_bits),
         };
         let f = Arc::get_mut(&mut rc).expect("pooled frame is uniquely owned");
         f.slots.clear();
@@ -1625,7 +1571,10 @@ impl<M: ModelArithJit> JitCranelift<M> {
         while f.slots.len() < nslots as usize {
             f.slots.push(AtomicU64::new(nil));
         }
-        f.caps = caps;
+        // `caps_src` is the traced GC root the collector rewrites on a move and
+        // `frame_cap`/other backends decode to reach this frame's captures — the
+        // Stage D replacement for the old per-frame `Caps` array (see `value.rs`).
+        f.caps_src.store(callee_bits, Ordering::Release);
         Some(rc)
     }
 
@@ -1637,7 +1586,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         if let Some(mut rc) = frame {
             if let Some(f) = Arc::get_mut(&mut rc) {
                 f.slots.clear();
-                f.caps = no_caps(); // don't pin a capture array alive in the pool
+                f.caps_src.store(0, Ordering::Release); // don't pin a closure alive in the pool
                 let mut pool = self.frame_pool.borrow_mut();
                 if pool.len() < FRAME_POOL_CAP {
                     pool.push(rc);
@@ -1646,20 +1595,35 @@ impl<M: ModelArithJit> JitCranelift<M> {
         }
     }
 
-    /// Publish a closure's native fast entry so emitted call sites can jump to
-    /// its compiled code directly (once; a filled slot is left as-is).
-    fn publish_fast_target(&self, callee: u64, compiled: &Compiled, caps: &Caps) {
-        let Some(arity) = compiled.entry_arity else { return };
-        let id = M::R::as_ref(callee) as usize;
-        if let Some(slot) = self.fast_targets.borrow_mut().get_mut(id) {
-            if slot.code.is_null() {
-                slot.code = compiled.code;
-                slot.caps = if caps.is_empty() {
-                    std::ptr::null()
-                } else {
-                    caps.as_ptr() as *const u64
-                };
-                slot.arity = arity as u32;
+    /// Publish a closure's native fast entry: seed the per-TEMPLATE compiled-
+    /// code map (so a LATER closure created from the same template is stamped
+    /// at creation by `shim_make_closure`) and, when `callee` is itself a
+    /// genuine CLOSURE object (a MultiFn's own bits reach here too — it has no
+    /// code word, so it is left alone and always takes the shim path, which
+    /// re-selects the arity clause anyway), stamp ITS code word — the object
+    /// IS the fast-call table from then on (see docs/STAGE_D_MIGRATION.md).
+    fn publish_fast_target(&self, callee: u64, template: u32, compiled: &Compiled) {
+        if compiled.entry_arity.is_none() {
+            return;
+        }
+        {
+            let mut tc = self.template_code.borrow_mut();
+            if tc.len() <= template as usize {
+                tc.resize(template as usize + 1, std::ptr::null());
+            }
+            if tc[template as usize].is_null() {
+                tc[template as usize] = compiled.code;
+            }
+        }
+        if M::R::tag_of(callee) == RawTag::Ref {
+            let g = M::R::as_ref(callee);
+            if unsafe { g.type_id() } == kind::CLOSURE {
+                unsafe {
+                    let code_slot = g.0.add(CLOSURE_CODE_OFF) as *mut u64;
+                    if *code_slot == 0 {
+                        *code_slot = compiled.code as u64;
+                    }
+                }
             }
         }
     }
@@ -1675,7 +1639,6 @@ impl<M: ModelArithJit> JitCranelift<M> {
         rt: &mut Runtime<M>,
         mut compiled: Arc<Compiled>,
         mut frame: Locals,
-        mut caps: Caps,
         mut cur_callee: u64,
         mut cur_nparams: usize,
         mut cur_variadic: bool,
@@ -1688,7 +1651,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
                 debug_assert_eq!(args_buf.len(), k);
                 let mut regs = [0u64; MAX_REG_ARGS];
                 regs[..k].copy_from_slice(&args_buf[..k]);
-                self.run_reg_entry(top, rt, &compiled, k, &regs, &caps, &mut args_buf, cur_callee)
+                self.run_reg_entry(top, rt, &compiled, k, &regs, &mut args_buf, cur_callee)
             } else {
                 // Ctx entry: needs a real activation frame.
                 if frame.is_none() {
@@ -1698,10 +1661,10 @@ impl<M: ModelArithJit> JitCranelift<M> {
                         cur_variadic,
                         cur_nslots,
                         &args_buf,
-                        caps.clone(),
+                        cur_callee,
                     );
                 }
-                self.run_ctx_entry(top, rt, &compiled, &frame, &caps, &mut args_buf, cur_callee)
+                self.run_ctx_entry(top, rt, &compiled, &frame, &mut args_buf, cur_callee)
             };
             match outcome {
                 Ok(v) => {
@@ -1718,16 +1681,12 @@ impl<M: ModelArithJit> JitCranelift<M> {
                     // Callable-object hook in TAIL position too (keywords / maps /
                     // callable deftype records): route `(obj args…)` to
                     // `(handler obj args…)`, exactly as `invoke` does.
-                    let callee = match rt.decode(callee) {
-                        Val::Ref(id)
-                            if matches!(&rt.heap()[id as usize], Obj::Record { .. })
-                                && rt.apply_handler().is_some() =>
-                        {
-                            let h = rt.apply_handler().unwrap();
-                            args_buf.insert(0, callee);
-                            h
-                        }
-                        _ => callee,
+                    let callee = if is_record_ref::<M>(callee) && rt.apply_handler().is_some() {
+                        let h = rt.apply_handler().unwrap();
+                        args_buf.insert(0, callee);
+                        h
+                    } else {
+                        callee
                     };
                     let callee = match rt.multifn_select(callee, args_buf.len()) {
                         Some(sel) => {
@@ -1738,7 +1697,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
                         }
                         None => callee,
                     };
-                    let (nparams, variadic, nslots, comp, ncaps) = self.resolve_call(rt, callee);
+                    let (nparams, variadic, nslots, template, comp) = self.resolve_call(rt, callee);
                     let arity_ok = if variadic {
                         args_buf.len() >= nparams
                     } else {
@@ -1754,9 +1713,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
                         rt.signal_throw(M::R::enc_ref(sid));
                         return M::R::enc_nil();
                     }
-                    self.publish_fast_target(callee, &comp, &ncaps);
+                    self.publish_fast_target(callee, template, &comp);
                     compiled = comp;
-                    caps = ncaps;
                     cur_callee = callee;
                     cur_nparams = nparams;
                     cur_variadic = variadic;
@@ -1765,6 +1723,14 @@ impl<M: ModelArithJit> JitCranelift<M> {
             }
         }
     }
+}
+
+/// Does `bits` reference a user RECORD? The callable-object hook (keywords /
+/// maps / vectors / sets / multimethods, all frontend records with a
+/// registered apply handler) keys off exactly this check — read straight off
+/// the object's own header, no runtime handle needed.
+fn is_record_ref<M: ValueModel>(bits: u64) -> bool {
+    M::R::tag_of(bits) == RawTag::Ref && unsafe { M::R::as_ref(bits).type_id() } == kind::RECORD
 }
 
 impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
@@ -1782,38 +1748,9 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
             tail_root: false,
         };
         let compiled = self.compile(Some(rt), ir, shape);
-        // Size the fast-call table to cover every closure that already exists, so
-        // its base is stable for this whole form's run (it is only ever written,
-        // never grown, during execution). Doing it here (form start) means no
-        // native frame is holding a stale base when it (re)allocates.
-        //
-        // SLACK: a single top-level form (e.g. one big `reduce`/`loop` expression)
-        // can allocate hundreds of thousands of heap objects of its own while it
-        // runs, all with ids past `heap.len()` at this sizing point. Padding the
-        // table lets ids allocated during this run stay in range, so a closure
-        // allocated mid-form (a `map` callback used across a whole collection)
-        // still gets the "fill once, fast-path every call after" caching.
-        {
-            let n = rt.heap().len() + FAST_TARGET_SLACK;
-            let mut t = self.fast_targets.borrow_mut();
-            if t.len() < n {
-                t.resize(n, FastTarget::default());
-            }
-        }
         // A top-level expr is not a closure body: no current callee (0), so the
         // self-tail-call fast path is inert here (it engages once inside a fn).
-        self.run_trampoline(
-            top,
-            rt,
-            compiled,
-            locals.clone(),
-            no_caps(),
-            0,
-            0,
-            false,
-            0,
-            &[],
-        )
+        self.run_trampoline(top, rt, compiled, locals.clone(), 0, 0, false, 0, &[])
     }
 
     fn invoke(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, callee: u64, args: &[u64]) -> u64 {
@@ -1821,23 +1758,21 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
         // non-closure record with a registered apply handler routes to
         // `(handler object args…)`, exactly like the TreeWalk `invoke`.
         let routed;
-        let (callee, args) = match rt.decode(callee) {
-            Val::Ref(id)
-                if matches!(&rt.heap()[id as usize], Obj::Record { .. })
-                    && rt.apply_handler().is_some() =>
-            {
-                let h = rt.apply_handler().unwrap();
-                let mut v = Vec::with_capacity(args.len() + 1);
-                v.push(callee);
-                v.extend_from_slice(args);
-                routed = v;
-                (h, routed.as_slice())
-            }
-            _ => (callee, args),
+        let (callee, args) = if is_record_ref::<M>(callee) && rt.apply_handler().is_some() {
+            let h = rt.apply_handler().unwrap();
+            let mut v = Vec::with_capacity(args.len() + 1);
+            v.push(callee);
+            v.extend_from_slice(args);
+            routed = v;
+            (h, routed.as_slice())
+        } else {
+            (callee, args)
         };
         // Multi-arity fn: select the clause serving this arg count. Remember the
-        // MultiFn's own bits — emitted call sites see THOSE as the callee, so
-        // its fast-table entry must carry the selected clause's entry.
+        // MultiFn's own bits — emitted call sites see THOSE as the callee, but a
+        // MultiFn object has no code word (only genuine CLOSURE objects do), so
+        // `publish_fast_target` below only ever stamps the per-template map for
+        // this branch, never the MultiFn's own header.
         let orig_callee = callee;
         let callee = match rt.multifn_select(callee, args.len()) {
             Some(sel) => {
@@ -1848,13 +1783,13 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
             }
             None => callee,
         };
-        // Resolve through the monomorphic inline cache (decode + heap + compiled +
-        // caps all skipped on a repeat callee).
-        let (nparams, variadic, nslots, compiled, caps) = self.resolve_call(rt, callee);
+        // Resolve through the monomorphic inline cache (decode + heap + compiled
+        // all skipped on a repeat callee).
+        let (nparams, variadic, nslots, template, compiled) = self.resolve_call(rt, callee);
         // Publish the native fast entry so future call sites can jump to it
         // directly — under the value call sites actually see (the MultiFn id
         // when routing happened, the closure id otherwise).
-        self.publish_fast_target(orig_callee, &compiled, &caps);
+        self.publish_fast_target(orig_callee, template, &compiled);
         // Arity mismatch is a CATCHABLE throw (matching TreeWalk / Clojure), not an
         // abort in this non-unwinding shim.
         let arity_ok = if variadic { args.len() >= nparams } else { args.len() == nparams };
@@ -1868,9 +1803,7 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
             rt.signal_throw(M::R::enc_ref(sid));
             return M::R::enc_nil();
         }
-        self.run_trampoline(
-            top, rt, compiled, None, caps, callee, nparams, variadic, nslots, args,
-        )
+        self.run_trampoline(top, rt, compiled, None, callee, nparams, variadic, nslots, args)
     }
 }
 
@@ -1899,7 +1832,6 @@ fn build_body<M: ModelArithJit>(
     shims: Shims,
     rt: Option<&Runtime<M>>,
     ir: &Ir,
-    tregistry: &RefCell<Vec<ClosureTemplate>>,
     shape: BodyShape,
 ) {
     let entry = fb.create_block();
@@ -1940,7 +1872,6 @@ fn build_body<M: ModelArithJit>(
         fb,
         refs,
         ctx_val,
-        tregistry,
         entry_sigs: HashMap::new(),
         // Type-erased (the `Compiler` struct is not generic over M; the
         // M-generic methods cast it back). Never outlives this call.
@@ -1952,8 +1883,6 @@ fn build_body<M: ModelArithJit>(
         off_cur_slots: core::mem::offset_of!(JitCtx<'static, M>, cur_slots) as i32,
         off_consts_base: core::mem::offset_of!(JitCtx<'static, M>, consts_base) as i32,
         off_global_base: core::mem::offset_of!(JitCtx<'static, M>, global_base) as i32,
-        off_fast_base: core::mem::offset_of!(JitCtx<'static, M>, fast_base) as i32,
-        off_fast_len: core::mem::offset_of!(JitCtx<'static, M>, fast_len) as i32,
         off_direct: core::mem::offset_of!(JitCtx<'static, M>, direct) as i32,
         off_self_closure: core::mem::offset_of!(JitCtx<'static, M>, self_closure) as i32,
         off_caps_base: core::mem::offset_of!(JitCtx<'static, M>, caps_base) as i32,
@@ -2026,7 +1955,6 @@ pub struct Compiler<'a, 'b> {
     fb: &'a mut FunctionBuilder<'b>,
     refs: ShimRefs,
     ctx_val: Value,
-    tregistry: &'a RefCell<Vec<ClosureTemplate>>,
     /// Imported `fn(ctx, a0..a{k-1}) -> u64` signatures for native fast calls,
     /// built lazily per arity.
     entry_sigs: HashMap<usize, cranelift_codegen::ir::SigRef>,
@@ -2042,8 +1970,6 @@ pub struct Compiler<'a, 'b> {
     off_cur_slots: i32,
     off_consts_base: i32,
     off_global_base: i32,
-    off_fast_base: i32,
-    off_fast_len: i32,
     off_direct: i32,
     off_self_closure: i32,
     off_caps_base: i32,
@@ -2148,29 +2074,39 @@ impl<'a, 'b> Compiler<'a, 'b> {
         }
         let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
         let bits = rt.global(s)?;
-        let Val::Ref(id) = rt.decode(bits) else { return None };
+        if M::R::tag_of(bits) != RawTag::Ref {
+            return None;
+        }
+        let g = M::R::as_ref(bits);
         // See through a multi-arity fn: this call site's arg count statically
         // selects one fixed clause. The guard still compares the GLOBAL's bits
         // (the MultiFn), so redefinition deopts as usual.
-        let target = match &rt.heap()[id as usize] {
-            Obj::MultiFn { fixed, .. } => {
-                let f = fixed.get(argc).copied().unwrap_or(0);
-                if f == 0 {
-                    return None; // variadic / no such arity: not inlinable
-                }
-                f
+        let target = if unsafe { g.type_id() } == kind::MULTIFN {
+            let ObjView::MultiFn { fixed, .. } = rt.view_gc(g) else { unreachable!() };
+            let f = fixed.get(argc).copied().unwrap_or(0);
+            if f == 0 {
+                return None; // variadic / no such arity: not inlinable
             }
-            _ => bits,
+            f
+        } else {
+            bits
         };
-        let Val::Ref(tid) = rt.decode(target) else { return None };
-        let (nparams, nslots, body) = match &rt.heap()[tid as usize] {
-            Obj::Closure { nparams, variadic: false, nslots, body, caps }
-                if caps.is_empty() && *nparams == argc =>
-            {
-                (*nparams, *nslots, body.clone())
-            }
-            _ => return None,
+        if M::R::tag_of(target) != RawTag::Ref {
+            return None;
+        }
+        let tg = M::R::as_ref(target);
+        if unsafe { tg.type_id() } != kind::CLOSURE {
+            return None;
+        }
+        let (nparams, variadic, nslots, template) = match rt.view_gc(tg) {
+            ObjView::Closure { nparams, variadic, nslots, template, .. } => (nparams, variadic, nslots, template),
+            _ => unreachable!(),
         };
+        // Capture-free (aux == ncaps == 0), non-variadic, matching arity.
+        if variadic || nparams != argc || unsafe { tg.aux() } != 0 {
+            return None;
+        }
+        let body = rt.template(template).clone();
         if body_mem_mode(&body) {
             return None;
         }
@@ -2229,14 +2165,18 @@ impl<'a, 'b> Compiler<'a, 'b> {
         sig
     }
 
-    /// A non-tail call. Try the NATIVE fast path — resolve the callee to its
-    /// compiled register-arg entry inline through the fast-call table, build a
-    /// minimal 4-store context ON THIS STACK, and `call_indirect` with the args
-    /// in registers (no FFI, no `invoke`, no frame). Fall back to the shim path
+    /// A non-tail call. Try the NATIVE fast path — the callee bits ARE its heap
+    /// address (Stage D), so the call site reads the CLOSURE OBJECT directly: a
+    /// tag test, the header's type_id, the meta word's arity + variadic bit, and
+    /// the code word — no side table at all (the object IS the fast-call table;
+    /// see `docs/STAGE_D_MIGRATION.md`'s "Closure object ABI"). On a hit, build a
+    /// minimal 4-store context ON THIS STACK and `call_indirect` with the args in
+    /// registers (no FFI, no `invoke`, no frame). Fall back to the shim path
     /// (`top.invoke`) for anything ineligible, which is what preserves
     /// composition: the guard requires `direct` (so a wrapped backend never
-    /// fast-paths) and a filled, arity-matching table entry (so continuation /
-    /// variadic / memory-mode callees, whose entries stay null, go through `top`).
+    /// fast-paths) and a compiled, matching-arity, non-variadic closure (so
+    /// continuation / variadic / memory-mode / not-yet-compiled callees, whose
+    /// code word stays 0, go through `top`).
     fn emit_call<M: ModelArithJit>(&mut self, callee: Value, argvals: &[Value]) -> Value {
         let n = argvals.len();
         let ctx = self.ctx_val;
@@ -2248,15 +2188,12 @@ impl<'a, 'b> Compiler<'a, 'b> {
             return self.emit_pending_check(sr);
         }
 
-        // guard1 = value is a ref AND its id is in range AND direct calls enabled
-        let (is_ref, id) = M::emit_ref_id(self, callee);
+        // guard1 = value is a ref AND direct calls enabled.
+        let (is_ref, addr) = M::emit_ref_addr(self, callee);
         let rc = self.rc_val;
         let ro = MemFlagsData::trusted().with_readonly();
         let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
-        let flen = self.fb.ins().load(I64, ro, rc, self.off_fast_len);
-        let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, id, flen);
-        let g = self.fb.ins().band(is_ref, inb);
-        let guard1 = self.fb.ins().band(g, direct);
+        let guard1 = self.fb.ins().band(is_ref, direct);
 
         let result = self.fb.declare_var(I64);
         let checkb = self.fb.create_block();
@@ -2265,23 +2202,29 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let merge = self.fb.create_block();
         self.fb.ins().brif(guard1, checkb, &[], slowb, &[]);
 
-        // ── id is in range: load the entry, check code present + arity match ──
+        // ── a ref: header type_id == CLOSURE, meta arity matches + !variadic, code present ──
         self.fb.switch_to_block(checkb);
         self.fb.seal_block(checkb);
-        let fbase = self.fb.ins().load(I64, ro, rc, self.off_fast_base);
-        let idx = self.fb.ins().imul_imm(id, core::mem::size_of::<FastTarget>() as i64);
-        let entry = self.fb.ins().iadd(fbase, idx);
-        let code = self.fb.ins().load(I64, flags, entry, 0);
-        let caps = self.fb.ins().load(I64, flags, entry, 8);
-        let arity = self.fb.ins().load(cranelift_codegen::ir::types::I32, flags, entry, 16);
+        let hdr = self.fb.ins().load(I64, flags, addr, 0);
+        let tid = self.fb.ins().band_imm(hdr, 0xffff);
+        let is_closure = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::CLOSURE as i64);
+        let meta = self.fb.ins().load(I64, flags, addr, CLOSURE_META_OFF as i32);
+        let nparams_raw = self.fb.ins().ushr_imm(meta, 32);
+        let nparams = self.fb.ins().band_imm(nparams_raw, 0xffff);
+        let arity_ok = self.fb.ins().icmp_imm(IntCC::Equal, nparams, n as i64);
+        let variadic_bit = self.fb.ins().band_imm(meta, crate::heap::META_VARIADIC_BIT as i64);
+        let not_variadic = self.fb.ins().icmp_imm(IntCC::Equal, variadic_bit, 0);
+        let meta_ok = self.fb.ins().band(arity_ok, not_variadic);
+        let code = self.fb.ins().load(I64, flags, addr, CLOSURE_CODE_OFF as i32);
         let has_code = self.fb.ins().icmp_imm(IntCC::NotEqual, code, 0);
-        let arity_ok = self.fb.ins().icmp_imm(IntCC::Equal, arity, n as i64);
-        let guard2 = self.fb.ins().band(has_code, arity_ok);
+        let kind_ok = self.fb.ins().band(is_closure, meta_ok);
+        let guard2 = self.fb.ins().band(kind_ok, has_code);
         self.fb.ins().brif(guard2, fastb, &[], slowb, &[]);
 
         // ── native fast path: 4-store context, args in registers ──
         self.fb.switch_to_block(fastb);
         self.fb.seal_block(fastb);
+        let caps_base = self.fb.ins().iadd_imm(addr, CLOSURE_CAPS_OFF as i64);
         let words = self.ctx_size.div_ceil(8) as i32;
         let ctx_ss = self.fb.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
@@ -2289,11 +2232,12 @@ impl<'a, 'b> Compiler<'a, 'b> {
             3,
         ));
         // Four stores: the shared run-context pointer, the callee's own bits (for
-        // its self-tail loop), its capture base, and a clear tail-pending flag.
-        // The callee reads everything else through `rc`.
+        // its self-tail loop), its capture base (a derived pointer: addr + 24 —
+        // no separate caps array to fetch), and a clear tail-pending flag. The
+        // callee reads everything else through `rc`.
         self.fb.ins().stack_store(rc, ctx_ss, self.off_rc);
         self.fb.ins().stack_store(callee, ctx_ss, self.off_self_closure);
-        self.fb.ins().stack_store(caps, ctx_ss, self.off_caps_base);
+        self.fb.ins().stack_store(caps_base, ctx_ss, self.off_caps_base);
         let zero8 = self.fb.ins().iconst(I8, 0);
         self.fb.ins().stack_store(zero8, ctx_ss, self.off_tail_pending);
         let new_ctx = self.fb.ins().stack_addr(I64, ctx_ss, 0);
@@ -2323,8 +2267,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
         // ── shim fallback: through `top`, preserving CEK routing / Traced / etc. ──
         self.fb.switch_to_block(slowb);
         self.fb.seal_block(slowb);
-        let (addr, count) = self.spill_args(argvals);
-        let sr = self.call_shim(self.refs.call, &[ctx, callee, addr, count]);
+        let (saddr, count) = self.spill_args(argvals);
+        let sr = self.call_shim(self.refs.call, &[ctx, callee, saddr, count]);
         self.fb.def_var(result, sr);
         self.fb.ins().jump(merge, &[]);
 
@@ -2485,19 +2429,19 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.call_shim(self.refs.def_global, &[ctx, namev, v])
             }
             Ir::Lambda { nparams, variadic, nslots, captures, body } => {
-                // Register the template once (compile time), then emit: resolve
-                // each capture VALUE here (registers / frame slots / own caps),
-                // spill them in order, and let the shim copy + allocate.
-                let tid = {
-                    let mut reg = self.tregistry.borrow_mut();
-                    reg.push(ClosureTemplate {
-                        nparams: *nparams,
-                        variadic: *variadic,
-                        nslots: *nslots,
-                        ncaps: captures.len() as u16,
-                        body: body.clone(),
-                    });
-                    (reg.len() - 1) as u32
+                // Register this Lambda's BODY once (compile time) in the runtime's
+                // GLOBAL, stable template registry (dedup by `Arc<Ir>` pointer —
+                // the SAME id `ObjView::Closure::template` reports and `alloc`
+                // uses for `Obj::Closure`), then emit: resolve each capture VALUE
+                // here (registers / frame slots / own caps), spill them in order,
+                // and let the shim copy + allocate. `nparams`/`variadic`/`nslots`
+                // are this Lambda node's own compile-time-constant arity — baked
+                // in as immediates, no per-template metadata table needed.
+                let tid = if self.rt_ptr.is_null() {
+                    0 // dump_ir only: this body is never executed.
+                } else {
+                    let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                    rt.register_template(body)
                 };
                 let vals: Vec<Value> = captures
                     .iter()
@@ -2520,8 +2464,12 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     .collect();
                 let (addr, _count) = self.spill_args(&vals);
                 let tidv = self.i32const(tid);
+                let npv = self.i32const(*nparams as u32);
+                let varv = self.i32const(*variadic as u32);
+                let nsv = self.i32const(*nslots as u32);
+                let ncapsv = self.i32const(captures.len() as u32);
                 let ctx = self.ctx_val;
-                self.call_shim(self.refs.make_closure, &[ctx, tidv, addr])
+                self.call_shim(self.refs.make_closure, &[ctx, tidv, npv, varv, nsv, addr, ncapsv])
             }
             Ir::Call(f, args) => {
                 // Var-guarded speculative inlining: a non-tail call of a global
@@ -3043,23 +2991,27 @@ impl<M: ModelArithJit> CodeSpace<M> for Tiered<M> {
 
     fn invoke(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, callee: u64, args: &[u64]) -> u64 {
         // Route on the callee's own body: native if it compiles, CEK if not.
-        let native = match rt.decode(callee) {
-            Val::Ref(id) => match &rt.heap()[id as usize] {
-                Obj::Closure { body, .. } => jit_can_compile(body),
+        let native = if M::R::tag_of(callee) == RawTag::Ref {
+            match rt.view(callee) {
+                ObjView::Closure { template, .. } => jit_can_compile(rt.template(template)),
                 // Route a multi-arity fn on the clause this call selects.
-                Obj::MultiFn { .. } => match rt.multifn_select(callee, args.len()) {
-                    Some(sel) if !rt.pending() => match rt.decode(sel) {
-                        Val::Ref(cid) => match &rt.heap()[cid as usize] {
-                            Obj::Closure { body, .. } => jit_can_compile(body),
-                            _ => true,
-                        },
-                        _ => true,
-                    },
+                ObjView::MultiFn { .. } => match rt.multifn_select(callee, args.len()) {
+                    Some(sel) if !rt.pending() => {
+                        if M::R::tag_of(sel) == RawTag::Ref {
+                            match rt.view(sel) {
+                                ObjView::Closure { template, .. } => jit_can_compile(rt.template(template)),
+                                _ => true,
+                            }
+                        } else {
+                            true
+                        }
+                    }
                     _ => true,
                 },
                 _ => true, // non-closure callables (escape conts) are the JIT's error path
-            },
-            _ => true,
+            }
+        } else {
+            true
         };
         if native {
             self.jit.invoke(top, rt, callee, args)
