@@ -1156,11 +1156,28 @@
                         (%cons x (-distinct (conj seen x) (rest s)))))))))
 (defn distinct [coll] (-distinct #{} coll))
 (def -none (record 'None nil))
+;; Chunk-aware: scan a chunk natively, collecting elements that differ from the
+;; immediately-preceding one into a buffer -> one output chunk, threading `prev`
+;; across chunks. `(count (dedupe (map … (range …))))` chunk-scans.
 (defn -dedupe [prev coll]
-  (lazy-seq (let [s (seq coll)]
-              (if (nil? s) nil
-                  (let [x (first s)]
-                    (if (-eq2 x prev) (-dedupe prev (rest s)) (%cons x (-dedupe x (rest s)))))))))
+  (lazy-seq
+    (let [s (seq coll)]
+      (cond
+        (nil? s) nil
+        (chunked? s)
+          (let [arr (field s 0) off (field s 1) end (field s 2)
+                buf (%make-array (%sub end off))]
+            (loop [i off k 0 p prev]
+              (if (%lt i end)
+                  (let [x (%aget arr i)]
+                    (if (-eq2 x p)
+                        (recur (%add i 1) k p)
+                        (do (%cell-set! buf k x) (recur (%add i 1) (%add k 1) x))))
+                  (if (%num-eq k 0)
+                      (-dedupe p (field s 3))
+                      (record 'ChunkedCons buf 0 k (-dedupe (%aget buf (%sub k 1)) (field s 3)))))))
+        true (let [x (first s)]
+               (if (-eq2 x prev) (-dedupe prev (rest s)) (%cons x (-dedupe x (rest s)))))))))
 (defn dedupe [coll] (-dedupe -none coll))
 
 (defn -seqable? [x] (cond (nil? x) true (list? x) true (vector? x) true (set? x) true (lazy-seq? x) true true false))
@@ -1302,10 +1319,24 @@
 
 ;; misc combinators
 (defn juxt [& fns] (fn [& args] (vec (map (fn [f] (apply f args)) fns))))
-(defn -maxk [k best s] (let [s (seq s)] (if (nil? s) best (-maxk k (if (%lt (k best) (k (first s))) (first s) best) (rest s)))))
-(defn max-key [k a & more] (-maxk k a more))
-(defn -mink [k best s] (let [s (seq s)] (if (nil? s) best (-mink k (if (%lt (k (first s)) (k best)) (first s) best) (rest s)))))
-(defn min-key [k a & more] (-mink k a more))
+;; Cache the key of the current best (`bv`) instead of recomputing `(k best)`
+;; every element — the old version called `k` TWICE per element (once on best,
+;; once on the candidate), doubling the (often non-trivial) key work.
+;; On a TIE (equal key), take the LATER element — matching clojure.core, which
+;; returns the last x achieving the extreme. (`>=`/`<=` via `not <`, so tie
+;; updates the best.)
+(defn -maxk [k best bv s]
+  (let [s (seq s)]
+    (if (nil? s) best
+        (let [x (first s) xv (k x)]
+          (if (%lt xv bv) (-maxk k best bv (rest s)) (-maxk k x xv (rest s)))))))
+(defn max-key [k a & more] (-maxk k a (k a) more))
+(defn -mink [k best bv s]
+  (let [s (seq s)]
+    (if (nil? s) best
+        (let [x (first s) xv (k x)]
+          (if (%lt bv xv) (-mink k best bv (rest s)) (-mink k x xv (rest s)))))))
+(defn min-key [k a & more] (-mink k a (k a) more))
 
 ;; ─────────────── for (list comprehension) ───────────────
 ;; Each collection binding drives `-for-drive`, which concats the sub-seqs its
