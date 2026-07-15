@@ -725,11 +725,28 @@
 (defn remove
   ([pred] (filter (fn [x] (not (pred x)))))
   ([f c] (filter (fn [x] (not (f x))) c)))
+;; Chunk-aware, mirroring `filter`: map `f` over a chunk natively, collecting the
+;; non-nil results into a buffer -> one output chunk (or skip to the next chunk
+;; when none survive). So `(reduce g (keep f (range …)))` chunk-scans.
 (defn keep [f c]
-  (lazy-seq (let [s (seq c)]
-              (if (nil? s) nil
-                  (let [v (f (%first s))]
-                    (if (nil? v) (keep f (%rest s)) (%cons v (keep f (%rest s)))))))))
+  (lazy-seq
+    (let [s (seq c)]
+      (cond
+        (nil? s) nil
+        (chunked? s)
+          (let [arr (field s 0) off (field s 1) end (field s 2)
+                buf (%make-array (%sub end off))]
+            (loop [i off k 0]
+              (if (%lt i end)
+                  (let [v (f (%aget arr i))]
+                    (if (nil? v)
+                        (recur (%add i 1) k)
+                        (do (%cell-set! buf k v) (recur (%add i 1) (%add k 1)))))
+                  (if (%num-eq k 0)
+                      (keep f (field s 3))
+                      (record 'ChunkedCons buf 0 k (keep f (field s 3)))))))
+        true (let [v (f (%first s))]
+               (if (nil? v) (keep f (%rest s)) (%cons v (keep f (%rest s)))))))))
 ;; range produces CHUNKED seqs — a 32-element array per lazy step (each still a
 ;; normal seq via ChunkedCons), so `(reduce f (range n))` scans arrays, not conses.
 ;; `%range-fill` fills a whole chunk (up to 32 ints) in ONE native call instead of
