@@ -896,9 +896,31 @@
       (assoc m (first ks) v)
       (assoc m (first ks) (assoc-in (get m (first ks)) (next ks) v))))
 (defn update [m k f & args] (assoc m k (apply f (get m k) args)))
-(defn some-seq [pred s] (let [s (seq s)] (if (nil? s) nil (let [r (pred (%first s))] (if r r (some-seq pred (%rest s)))))))
+;; Chunk-aware short-circuit scans: test pred over a chunk's array directly
+;; (native loop, no per-element seq/%rest dispatch), returning early on the
+;; first hit (some) / miss (every?); only cross to the next chunk when the whole
+;; current chunk is exhausted.
+(defn some-seq [pred s]
+  (let [s (seq s)]
+    (cond (nil? s) nil
+          (%num-eq (type-of s) 'ChunkedCons)
+            (let [arr (field s 0) end (field s 2)]
+              (loop [i (field s 1)]
+                (if (%lt i end)
+                    (let [r (pred (%aget arr i))] (if r r (recur (%add i 1))))
+                    (some-seq pred (field s 3)))))
+          true (let [r (pred (%first s))] (if r r (some-seq pred (%rest s)))))))
 (defn some [pred c] (some-seq pred c))
-(defn every-seq [pred s] (let [s (seq s)] (if (nil? s) true (if (pred (%first s)) (every-seq pred (%rest s)) false))))
+(defn every-seq [pred s]
+  (let [s (seq s)]
+    (cond (nil? s) true
+          (%num-eq (type-of s) 'ChunkedCons)
+            (let [arr (field s 0) end (field s 2)]
+              (loop [i (field s 1)]
+                (if (%lt i end)
+                    (if (pred (%aget arr i)) (recur (%add i 1)) false)
+                    (every-seq pred (field s 3)))))
+          true (if (pred (%first s)) (every-seq pred (%rest s)) false))))
 (defn every? [pred c] (every-seq pred c))
 (defn mapv [f c] (vec (map f c)))
 (defn filterv [f c] (vec (filter f c)))
