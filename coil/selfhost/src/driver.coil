@@ -35,6 +35,7 @@
 (import "mono.coil" :use *)
 (import "diag.coil" :use *)
 (import "comptime.coil" :use *)
+(import "metaengine.coil" :use *)
 (import "expander.coil" :use *)
 (import "codegen_a64.coil" :use *)
 (import "wasm.coil" :use *)
@@ -479,6 +480,8 @@
                 (call-ptr (load (field ctx build-fn))  (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)) (load (field ctx triple)) (load (field ctx path)))
               (call-ptr (load (field ctx emitir-fn)) (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx triple)) (load (field ctx path)))))]
     (store! (field ctx ok) r)
+    ; release the main thread if it is servicing metaprogram calls (COIL_META_MAIN=1)
+    (main-svc-finish!)
     (cast (ptr i8) 0)))
 
 ; Run the (emit-ir or build) pipeline on a 512 MiB pthread, given a fully-populated
@@ -493,8 +496,13 @@
     ; the entry block (see cg-entry-alloca) instead of growing the stack per loop
     ; iteration. Was 512 MiB before that fix.
     (pthread_attr_setstacksize (cast (ptr i8) attr) 33554432)   ; 32 MiB
+    ; COIL_META_MAIN=1: this (the MAIN) thread services metaprogram calls while
+    ; the pipeline runs — AppKit metaprograms need the real main thread. The loop
+    ; is a no-op when the service was never initialized.
+    (if (meta-main?) (main-svc-init!) 0)
     (pthread_create (cast (ptr i8) tid) (cast (ptr i8) attr)
                     (fnptr-of dump-thread-entry) (cast (ptr i8) ctx))
+    (main-svc-loop)
     (pthread_join (load tid) (cast (ptr i8) 0))
     ; the thread wrote its pipeline result (1 ok / 0 failed) into ctx.ok.
     (load (field ctx ok))))
@@ -586,6 +594,8 @@
         (store! (field ctx ok) 0)
         (store! (field ctx build-fn)  build-fn)
         (store! (field ctx emitir-fn) emitir-fn)
+        ; metaprogram dylibs link the SAME flags as the program (FFI frameworks)
+        (set-meta-link-flags! (box-al [(slice u8)] a (load flags)))
         ; HALT on a compile error: run-on-big-stack returns 0 when the pipeline
         ; reported a diagnostic. Mirror Rust — the diagnostic was already printed;
         ; return FAILURE (1) BEFORE the link step so no spurious `cc: no such

@@ -28,6 +28,8 @@
 (import "ast.coil" :use *)
 (import "resolve.coil" :use *)
 (import "comptime.coil" :use *)
+(import "diag.coil" :use *)
+(import "ffi.coil" :use *)
 
 (extern pthread_exit :cc c [(ptr i8)] (-> i64))
 
@@ -39,12 +41,15 @@
   [(cx (ptr CtCtx))
    (registry (ptr (ArrayList (ptr Sexp))))
    (errset i64)
-   (err Diag)])
+   (err Diag)
+   (onmain i64)])
 (defn meta-host-box [] (-> (ptr MetaHostBox)) (alloc-static MetaHostBox))
 (defn meta-host-set! [(cx (ptr CtCtx)) (registry (ptr (ArrayList (ptr Sexp))))] (-> i64)
   (let [b (meta-host-box)]
     (store! (field b cx) cx) (store! (field b registry) registry)
     (store! (field b errset) 0) 0))
+(defn meta-host-onmain! [(v i64)] (-> i64)
+  (store! (field (meta-host-box) onmain) v) 0)
 (defn meta-host-err [] (-> (Option Diag))
   (let [b (meta-host-box)]
     (if (icmp-eq (load (field b errset)) 0) (None [Diag]) (Some (load (field b err))))))
@@ -57,10 +62,15 @@
 
 ; A metaprogram-level failure: exactly what the interpreter would have returned as
 ; Err. Record it and end the metaprogram thread; the engine reports it identically.
+; Under COIL_META_MAIN=1 the metaprogram runs on the process MAIN thread — there is
+; no thread to end, so print the diagnostic and fail the build directly.
 (defn mh-halt [(d Diag)] (-> i64)
   (let [b (meta-host-box)]
-    (store! (field b err) d) (store! (field b errset) 1)
-    (pthread_exit (cast (ptr i8) 1))))
+    (if (icmp-ne (load (field b onmain)) 0)
+        (do (fmt (stderr) "error: {s}\n" (load (field d msg)))
+            (exit 1) 0)
+      (do (store! (field b err) d) (store! (field b errset) 1)
+          (pthread_exit (cast (ptr i8) 1))))))
 
 (defn mh-cx [] (-> (ptr CtCtx))
   (let [b (meta-host-box) cx (load (field b cx))]

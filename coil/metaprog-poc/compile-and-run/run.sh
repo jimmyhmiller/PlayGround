@@ -43,5 +43,17 @@ echo "       strlen, all AT EXPANSION TIME (every one impossible in the interpre
 COIL_META=compiled $COIL run $D/arbitrary_test.coil || { echo "compiled-engine arbitrary test FAILED"; exit 1; }
 echo "arbitrary-code metaprogram: OK (exit 0)"
 
+echo "=== 6. A GUI AT COMPILE TIME: the Mandelbrot viewer metaprogram ==="
+echo "       a Cocoa window opens ON THE MAIN THREAD during expansion, renders the"
+echo "       set live, and the accepted view's coordinates become the program's"
+echo "       constants (COIL_MANDEL_AUTO=1 scripts the session; drop it to drive"
+echo "       the viewer yourself: WASD pan, Z/X zoom, I/O iters, Q/RETURN accept)"
+COIL_META_MAIN=1 COIL_MANDEL_AUTO=1 $COIL run $D/mandel_test.coil \
+  --link-flag -framework --link-flag AppKit --link-flag -lobjc > "$OUT/mandel.txt" 2>/dev/null; rc=$?
+[ $rc -eq 0 ] || { echo "mandelbrot GUI metaprogram FAILED (exit $rc)"; exit 1; }
+grep -q "COMPILE-TIME GUI" "$OUT/mandel.txt" || { echo "mandelbrot output missing"; exit 1; }
+head -6 "$OUT/mandel.txt"
+echo "compile-time GUI: OK"
+
 rm -rf "$OUT"
 echo "=== all mechanisms verified ==="

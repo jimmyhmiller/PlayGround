@@ -333,34 +333,38 @@
           (store! (field tc hit) 1)
           (Ok [Sexp Diag] (load op)))))))
 
-; rewrite at most ONE call per pass, DEEPEST first (children before self — after a
-; stamp, nested nodes share the call-site span, so depth picks the inner macro)
+; rewrite at most ONE call per pass, OUTERMOST first: a macro call that CONTAINS
+; the diag span owns that syntax wholesale — `(when (not b) …)` must expand
+; before its `(not b)` argument does, or the inner expansion lands as a non-Code
+; value in the outer macro's Code-typed argument slot and the round wedges.
 (defn tower-rewrite [(tc (ptr TowerCx)) (s (mut LS)) (node (ptr Sexp))] (-> (Result Sexp Diag))
   (try (do
     (let [a (load (field tc a)) tg (sx-tag (load node))]
       (if (not (or (icmp-eq tg 6) (icmp-eq tg 7))) (Ok [Sexp Diag] (load node))
         (let [items (sx-items (load node)) n (sx-len items)
-              (mut kid) -1 (mut nc) (zeroed Sexp) (mut i) 0]
-          (loop (if (or (icmp-ne (load (field tc hit)) 0) (icmp-ge (load i) n)) (break)
-            (do (let [r (try! (tower-rewrite tc (mut s) (al-elem [Sexp] items (load i))))]
-                  (if (icmp-ne (load (field tc hit)) 0) (do (store! kid (load i)) (store! nc r) 0) 0))
-                (store! i (iadd (load i) 1)))))
-          (if (icmp-ge (load kid) 0)
-              ; a child was rewritten: rebuild this list around it (shared spans)
-              (let [(mut xs) (al-new [Sexp] a) (mut j) 0]
-                (loop (if (icmp-ge (load j) n) (break)
-                  (do (al-push! (mut xs) (if (icmp-eq (load j) (load kid)) (load nc) (sx-at items (load j))))
-                      (store! j (iadd (load j) 1)))))
-                (Ok [Sexp Diag] (mk-sexp-src (if (icmp-eq tg 7) (KVec (box-al [Sexp] a (load xs))) (KList (box-al [Sexp] a (load xs)))) node)))
-            (if (and (icmp-eq tg 6)
-                 (and (icmp-eq (sx-lo (load node)) (load (field tc dlo)))
-                  (and (icmp-eq (sx-hi (load node)) (load (field tc dhi)))
-                   (and (icmp-eq (sx-source (load node)) (load (field tc dsrc)))
-                    (and (icmp-ge n 1) (icmp-eq (sx-tag (sx-at items 0)) 2))))))
-                (match (resolve-macro (sx-sval (sx-at items 0)) (load (field tc module)) (load (field tc quals)) (load (field tc impb)) (load (field tc expb)) a)
-                  (None [] (Ok [Sexp Diag] (load node)))
-                  (Some [q] (tower-expand-call tc (mut s) node q)))
-              (Ok [Sexp Diag] (load node))))))))))
+              contains (and (icmp-eq (sx-source (load node)) (load (field tc dsrc)))
+                         (and (icmp-ge (sx-lo (load node)) 0)
+                          (and (icmp-le (sx-lo (load node)) (load (field tc dlo)))
+                               (icmp-ge (sx-hi (load node)) (load (field tc dhi))))))
+              headq (if (and contains (and (icmp-eq tg 6) (and (icmp-ge n 1) (icmp-eq (sx-tag (sx-at items 0)) 2))))
+                        (resolve-macro (sx-sval (sx-at items 0)) (load (field tc module)) (load (field tc quals)) (load (field tc impb)) (load (field tc expb)) a)
+                      (None [(slice u8)]))]
+          (match headq
+            (Some [q] (tower-expand-call tc (mut s) node q))
+            (None []
+              (let [(mut kid) -1 (mut nc) (zeroed Sexp) (mut i) 0]
+                (loop (if (or (icmp-ne (load (field tc hit)) 0) (icmp-ge (load i) n)) (break)
+                  (do (let [r (try! (tower-rewrite tc (mut s) (al-elem [Sexp] items (load i))))]
+                        (if (icmp-ne (load (field tc hit)) 0) (do (store! kid (load i)) (store! nc r) 0) 0))
+                      (store! i (iadd (load i) 1)))))
+                (if (icmp-ge (load kid) 0)
+                    ; a child was rewritten: rebuild this list around it
+                    (let [(mut xs) (al-new [Sexp] a) (mut j) 0]
+                      (loop (if (icmp-ge (load j) n) (break)
+                        (do (al-push! (mut xs) (if (icmp-eq (load j) (load kid)) (load nc) (sx-at items (load j))))
+                            (store! j (iadd (load j) 1)))))
+                      (Ok [Sexp Diag] (mk-sexp-src (if (icmp-eq tg 7) (KVec (box-al [Sexp] a (load xs))) (KList (box-al [Sexp] a (load xs)))) node)))
+                  (Ok [Sexp Diag] (load node))))))))))))
 
 (defn tower-pass [(tc (ptr TowerCx)) (s (mut LS)) (sub-forms (ptr (ArrayList TaggedForm)))] (-> (Result i64 Diag))
   (try (do

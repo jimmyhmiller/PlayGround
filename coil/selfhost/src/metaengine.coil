@@ -42,6 +42,9 @@
 (extern access :cc c [(ptr i8) i64] (-> i32))     ; F_OK=0: does the path exist
 (extern rename :cc c [(ptr i8) (ptr i8)] (-> i32))
 (extern unlink :cc c [(ptr i8)] (-> i32))
+(extern dispatch_semaphore_create :cc c [i64] (-> (ptr i8)))
+(extern dispatch_semaphore_wait   :cc c [(ptr i8) i64] (-> i64))   ; -1 = DISPATCH_TIME_FOREVER
+(extern dispatch_semaphore_signal :cc c [(ptr i8)] (-> i64))
 
 ; ---- the engine flag ------------------------------------------------------------
 ; DEFAULT = compiled, whenever a backend object builder is registered (main.coil
@@ -73,6 +76,55 @@
                   (do (store! r (load (field (al-elem [MEEntry] es (load i)) fp))) (break)) 0)
               (store! i (iadd (load i) 1)))))
         (load r)))))
+
+; ---- MAIN-THREAD execution (COIL_META_MAIN=1) --------------------------------------
+; AppKit windows only work on the process main thread, so a GUI metaprogram cannot
+; run on the engine's per-call worker thread. With COIL_META_MAIN=1, the driver's
+; main thread (normally parked in pthread_join) runs this job loop instead, and
+; every metaprogram entry is dispatched to it. The trade: `(error ...)` in this
+; mode prints its diagnostic and exits the process (there is no thread to end),
+; which is behaviorally the same failed build, minus multi-metaprogram continuation.
+(defn meta-main? [] (-> bool)
+  (let [v (getenv c"COIL_META_MAIN")]
+    (if (icmp-eq (cast i64 v) 0) false (str-eq (cstr->slice v) "1"))))
+(defstruct MainSvc [(isinit i64) (jobsem (ptr i8)) (donesem (ptr i8)) (finished i64) (call (ptr i8))])
+(defn main-svc [] (-> (ptr MainSvc)) (alloc-static MainSvc))
+(defn main-svc-init! [] (-> i64)
+  (let [b (main-svc)]
+    (if (icmp-ne (load (field b isinit)) 0) 0
+      (do (store! (field b jobsem) (dispatch_semaphore_create 0))
+          (store! (field b donesem) (dispatch_semaphore_create 0))
+          (store! (field b isinit) 1) 0))))
+; the driver's main thread sits here servicing metaprogram calls until the
+; pipeline thread signals it is done (no-op unless main-svc-init! ran)
+(defn main-svc-loop [] (-> i64)
+  (let [b (main-svc)]
+    (if (icmp-eq (load (field b isinit)) 0) 0
+      (loop
+        (do (dispatch_semaphore_wait (load (field b jobsem)) -1)
+            (if (icmp-ne (load (field b finished)) 0) (break 0) 0)
+            (me-tramp (load (field b call)))
+            (dispatch_semaphore_signal (load (field b donesem))))))))
+(defn main-svc-finish! [] (-> i64)
+  (let [b (main-svc)]
+    (if (icmp-eq (load (field b isinit)) 0) 0
+      (do (store! (field b finished) 1)
+          (dispatch_semaphore_signal (load (field b jobsem))) 0))))
+(defn main-svc-run [(c (ptr i8))] (-> i64)
+  (let [b (main-svc)]
+    (store! (field b call) c)
+    (dispatch_semaphore_signal (load (field b jobsem)))
+    (dispatch_semaphore_wait (load (field b donesem)) -1)
+    0))
+
+; ---- the program's --link-flag list (set by the driver) ----------------------------
+; A metaprogram doing FFI needs the same frameworks/libraries the program would
+; link (the dylib binds them at ITS link, not against the compiler process). They
+; are part of the dylib cache key.
+(defstruct MetaLinkBox [(isset i64) (flags (ptr (ArrayList (slice u8))))])
+(defn meta-link-box [] (-> (ptr MetaLinkBox)) (alloc-static MetaLinkBox))
+(defn set-meta-link-flags! [(fl (ptr (ArrayList (slice u8))))] (-> i64)
+  (let [b (meta-link-box)] (store! (field b flags) fl) (store! (field b isset) 1) 0))
 
 ; ---- backend object-builder injection (main.coil / main_a64.coil register one) ---
 (defstruct MetaBuildBox [(isset i64) (fp (fnptr c [(ptr Allocator) (ptr Program) (ptr i8)] i64))])
@@ -180,7 +232,25 @@
             (me-fnv-str c (load (field (al-elem [MLEntry] entries (load i)) symbol)))
             (me-fnv-str c ";")
             (store! i (iadd (load i) 1))))))
+    ; the link flags are part of what the dylib IS (frameworks a metaprogram binds)
+    (let [lb (meta-link-box)]
+      (if (icmp-eq (load (field lb isset)) 0) 0
+        (let [fl (load (field lb flags)) n (al-len [(slice u8)] (load fl)) (mut i) 0]
+          (loop (if (icmp-ge (load i) n) (break)
+            (do (me-fnv-str c (al-get [(slice u8)] (load fl) (load i)))
+                (me-fnv-str c "|")
+                (store! i (iadd (load i) 1)))))
+          0)))
     (me-hex a (load (field c h)))))
+; the program's --link-flag list, space-joined (empty string if none)
+(defn me-link-flags-str [(a (ptr Allocator))] (-> (slice u8))
+  (let [lb (meta-link-box)]
+    (if (icmp-eq (load (field lb isset)) 0) ""
+      (let [fl (load (field lb flags)) n (al-len [(slice u8)] (load fl)) (mut out) "" (mut i) 0]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (store! out (sconcat a (sconcat a (load out) " ") (al-get [(slice u8)] (load fl) (load i))))
+              (store! i (iadd (load i) 1)))))
+        (load out)))))
 (defn me-cache-on? [] (-> bool)
   (let [v (getenv c"COIL_META_CACHE")]
     (if (icmp-eq (cast i64 v) 0) true (not (str-eq (cstr->slice v) "0")))))
@@ -222,8 +292,9 @@
                 obj-s (sconcat3 a "/tmp/coil-mp-" id ".o")
                 tmp-s (sconcat3 a "/tmp/coil-mp-" id ".dylib")]
             (call-ptr (load (field bb fp)) a mp (slice->cstr a obj-s))
-            (let [cmd (sconcat a (sconcat3 a "cc -dynamiclib " obj-s " -o ")
-                                 (sconcat a tmp-s " -Wl,-undefined,dynamic_lookup"))]
+            (let [cmd (sconcat a (sconcat a (sconcat3 a "cc -dynamiclib " obj-s " -o ")
+                                          (sconcat a tmp-s " -Wl,-undefined,dynamic_lookup"))
+                                 (me-link-flags-str a))]
               (if (icmp-ne (cast i64 (system (slice->cstr a cmd))) 0)
                   (Err [(ptr i8) Diag] (derr "metaengine: linking the metaprogram dylib failed"))
                 (do
@@ -310,12 +381,18 @@
         (store! (field c a5) (if (icmp-gt n 5) (me-box-arg a (al-get [Sexp] (load argv) 5)) (cast (ptr i8) 0)))
         (store! (field c a6) (if (icmp-gt n 6) (me-box-arg a (al-get [Sexp] (load argv) 6)) (cast (ptr i8) 0)))
         (store! (field c a7) (if (icmp-gt n 7) (me-box-arg a (al-get [Sexp] (load argv) 7)) (cast (ptr i8) 0)))
-        (let [attr (alloc-stack (array i8 64)) tid (alloc-stack (ptr i8)) rv (alloc-stack (ptr i8))]
-          (pthread_attr_init (cast (ptr i8) attr))
-          (pthread_attr_setstacksize (cast (ptr i8) attr) 33554432)   ; 32 MiB, like run-on-big-stack
-          (pthread_create (cast (ptr i8) tid) (cast (ptr i8) attr) (fnptr-of me-tramp) (cast (ptr i8) c))
-          (pthread_join (load tid) (cast (ptr i8) rv))
-          (if (icmp-ne (cast i64 (load rv)) 0)
+        (let [failed
+              (if (meta-main?)
+                  ; COIL_META_MAIN=1: run on the process MAIN thread (AppKit
+                  ; metaprograms); an (error ...) there prints and exits.
+                  (do (meta-host-onmain! 1) (main-svc-run (cast (ptr i8) c)) false)
+                (let [attr (alloc-stack (array i8 64)) tid (alloc-stack (ptr i8)) rv (alloc-stack (ptr i8))]
+                  (pthread_attr_init (cast (ptr i8) attr))
+                  (pthread_attr_setstacksize (cast (ptr i8) attr) 33554432)   ; 32 MiB, like run-on-big-stack
+                  (pthread_create (cast (ptr i8) tid) (cast (ptr i8) attr) (fnptr-of me-tramp) (cast (ptr i8) c))
+                  (pthread_join (load tid) (cast (ptr i8) rv))
+                  (icmp-ne (cast i64 (load rv)) 0)))]
+          (if failed
               (match (meta-host-err)
                 (Some [d] (Err [Sexp Diag] d))
                 (None [] (Err [Sexp Diag] (derr "metaengine: metaprogram thread failed without recording a diagnostic (compiler bug)"))))
