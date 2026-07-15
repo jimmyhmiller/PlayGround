@@ -79,12 +79,18 @@ pub enum Obj {
     Str(String),
     /// A character (R7RS `char?`), disjoint from integers and strings.
     Char(char),
-    /// A vector: a fixed, mutable, index-addressed sequence of values.
-    Vector(Vec<u64>),
+    /// A vector: a fixed, mutable, index-addressed sequence of values. The
+    /// elements live in the runtime's bump WORD ARENA at `off..off+len`
+    /// (`Runtime::words`/`words_mut`); `cap` is the reserved span so `%apush`
+    /// can grow in place up to it (past it, a fresh span is bump-allocated and
+    /// `off`/`cap` updated — object identity is this Obj slot, so every
+    /// reference observes the growth).
+    Vector { off: u32, len: u32, cap: u32 },
     /// A multiple-values packet produced by `(values …)` and consumed by
     /// `call-with-values`. Distinct from a list so `(values (list 1 2))` (one
     /// value that is a list) differs from `(values 1 2)` (two values).
-    Values(Vec<u64>),
+    /// Elements in the word arena, like `Vector`.
+    Values { off: u32, len: u32 },
     /// A promoted integer that did not fit the immediate fixnum range (but still
     /// fits `i128` — the common promotion).
     BigInt(i128),
@@ -119,11 +125,13 @@ pub enum Obj {
         fixed: Vec<u64>,
         variadic: Option<(usize, u64)>,
     },
-    /// A user record: a type tag (interned symbol) plus positional fields. The
-    /// thing polymorphic dispatch dispatches ON.
+    /// A user record: a type tag (interned symbol) plus positional fields
+    /// (in the word arena, like `Vector`). The thing polymorphic dispatch
+    /// dispatches ON.
     Record {
         type_id: Sym,
-        fields: Vec<u64>,
+        off: u32,
+        len: u32,
     },
     /// An escape continuation: invoking it does a non-local exit back to the
     /// `call-with-escaping-continuation` that created it (matched by `tag`).

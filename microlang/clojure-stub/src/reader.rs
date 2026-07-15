@@ -469,9 +469,9 @@ fn sym<M: ValueModel>(rt: &mut Runtime<M>, n: &str) -> u64 {
 
 fn field0<M: ValueModel>(rt: &Runtime<M>, v: u64, tag: &str) -> Option<u64> {
     if let Val::Ref(id) = rt.decode(v) {
-        if let Obj::Record { type_id, fields } = &rt.heap()[id as usize] {
-            if rt.sym_name(*type_id) == tag {
-                return fields.first().copied();
+        if let &Obj::Record { type_id, off, len } = &rt.heap()[id as usize] {
+            if rt.sym_name(type_id) == tag {
+                return rt.words(off, len).first().copied();
             }
         }
     }
@@ -515,7 +515,8 @@ fn alloc<M: ValueModel>(rt: &mut Runtime<M>, o: Obj) -> u64 {
 
 fn record<M: ValueModel>(rt: &mut Runtime<M>, ty: &str, fields: Vec<u64>) -> u64 {
     let type_id: Sym = rt.intern(ty);
-    alloc(rt, Obj::Record { type_id, fields })
+    let id = rt.alloc_record(type_id, &fields);
+    <M::R as Repr>::enc_ref(id)
 }
 
 /// The members of a `#?@`-selected collection (a `[..]` vector or a `(..)`
@@ -531,9 +532,9 @@ fn splice_elements<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Vec<u64> {
 /// The name of a `:keyword` value (a `Keyword` record), or `None` for anything else.
 fn kw_name<M: ValueModel>(rt: &Runtime<M>, v: u64) -> Option<String> {
     if let Val::Ref(id) = rt.decode(v) {
-        if let Obj::Record { type_id, fields } = &rt.heap()[id as usize] {
-            if rt.sym_name(*type_id) == KEYWORD {
-                if let Some(&f0) = fields.first() {
+        if let &Obj::Record { type_id, off, len } = &rt.heap()[id as usize] {
+            if rt.sym_name(type_id) == KEYWORD {
+                if let Some(&f0) = rt.words(off, len).first() {
                     if let Val::Sym(s) = rt.decode(f0) {
                         return Some(rt.sym_name(s).to_string());
                     }
@@ -574,8 +575,8 @@ fn scan_pct<M: ValueModel>(
         Val::Ref(id) => {
             let (head, tail, fields) = match &rt.heap()[id as usize] {
                 Obj::Cons { head, tail } => (Some(*head), Some(*tail), Vec::new()),
-                Obj::Record { fields, .. } => (None, None, fields.clone()),
-                Obj::Vector(elems) => (None, None, elems.clone()),
+                &Obj::Record { off, len, .. } => (None, None, rt.words(off, len).to_vec()),
+                &Obj::Vector { off, len, .. } => (None, None, rt.words(off, len).to_vec()),
                 _ => (None, None, Vec::new()),
             };
             if let Some(h) = head {
@@ -605,15 +606,19 @@ fn rewrite_bare_pct<M: ValueModel>(rt: &mut Runtime<M>, form: u64, pct1: u64) ->
                     let t = rewrite_bare_pct(rt, tail, pct1);
                     alloc(rt, Obj::Cons { head: h, tail: t })
                 }
-                Obj::Record { type_id, fields } => {
+                Obj::Record { type_id, off, len } => {
+                    let fields = rt.words(off, len).to_vec();
                     let nf: Vec<u64> =
                         fields.iter().map(|&f| rewrite_bare_pct(rt, f, pct1)).collect();
-                    alloc(rt, Obj::Record { type_id, fields: nf })
+                    let rid = rt.alloc_record(type_id, &nf);
+                    <M::R as Repr>::enc_ref(rid)
                 }
-                Obj::Vector(elems) => {
+                Obj::Vector { off, len, .. } => {
+                    let elems = rt.words(off, len).to_vec();
                     let ne: Vec<u64> =
                         elems.iter().map(|&e| rewrite_bare_pct(rt, e, pct1)).collect();
-                    alloc(rt, Obj::Vector(ne))
+                    let rid = rt.alloc_vector(&ne);
+                    <M::R as Repr>::enc_ref(rid)
                 }
                 _ => form,
             }

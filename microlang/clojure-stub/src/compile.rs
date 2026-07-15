@@ -566,7 +566,7 @@ impl Compiler {
     fn vector_of<M: ValueModel>(&self, rt: &mut Runtime<M>, params: u64) -> u64 {
         if rt.as_cons(params).is_some() {
             let vsym = rt.intern("Vector");
-            let id = rt.alloc(Obj::Record { type_id: vsym, fields: vec![params] });
+            let id = rt.alloc_record(vsym, &[params]);
             rt.encode(Val::Ref(id))
         } else {
             params

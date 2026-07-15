@@ -173,6 +173,49 @@ impl std::ops::IndexMut<usize> for Heap {
     }
 }
 
+/// Words per arena chunk (2^18 = 262144 words = 2 MiB). Powers of two so the
+/// split is shift/mask; big enough that chunk turnover is rare.
+const WCHUNK_BITS: u32 = 18;
+const WCHUNK: usize = 1 << WCHUNK_BITS;
+/// Reserved slots in the arena chunk INDEX (same never-realloc discipline as
+/// the object heap's chunk index — lock-free readers hold `&[u64]` into
+/// chunks while another thread appends new ones).
+const WCHUNKS_CAP: usize = 1 << 15;
+
+/// The bump WORD ARENA holding hot object payloads (`Vector`/`Values`/
+/// `Record` elements). Allocation is an atomic bump — no malloc, no free, no
+/// lock on the fast path; a span is owned by exactly one Obj. Semi-space
+/// discipline matches the object heap: the GC copies live spans to the top
+/// and abandons the old words.
+pub struct WordArena {
+    chunks: Vec<Box<[u64]>>,
+    /// Next free word index (atomic bump). May briefly exceed the initialized
+    /// area during a chunk race; `word_alloc` repairs under the heap lock.
+    len: AtomicU64,
+}
+
+impl WordArena {
+    fn new() -> Self {
+        WordArena { chunks: Vec::with_capacity(WCHUNKS_CAP), len: AtomicU64::new(0) }
+    }
+    #[inline]
+    pub(crate) fn slice(&self, off: u32, len: u32) -> &[u64] {
+        let (c, o) = ((off as usize) >> WCHUNK_BITS, (off as usize) & (WCHUNK - 1));
+        // Spans never cross a chunk boundary (word_alloc pads); bounds are
+        // guaranteed by construction, mirroring `Heap`'s unchecked access.
+        unsafe { self.chunks.get_unchecked(c).get_unchecked(o..o + len as usize) }
+    }
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub(crate) fn slice_mut(&self, off: u32, len: u32) -> &mut [u64] {
+        let (c, o) = ((off as usize) >> WCHUNK_BITS, (off as usize) & (WCHUNK - 1));
+        unsafe {
+            let base = self.chunks.get_unchecked(c).as_ptr() as *mut u64;
+            std::slice::from_raw_parts_mut(base.add(o), len as usize)
+        }
+    }
+}
+
 /// Reserved capacity for the append-only, stable-base tables (`consts`,
 /// `sym_names`, `global_slots`). They must never reallocate, because concurrent
 /// readers hold raw/unsafe references into them (the JIT reads `consts`/globals
@@ -248,6 +291,7 @@ const TYPE_TAG_CACHE_LEN: usize = 15;
 /// blocked in `deref` holds nothing another thread needs.
 pub struct Shared<M: ValueModel> {
     pub(crate) heap: UnsafeCell<Heap>,
+    pub(crate) words: UnsafeCell<WordArena>,
     /// Serializes heap MUTATION (alloc, GC, in-place vector set). Reads are
     /// lock-free (segmented heap => stable object addresses).
     pub(crate) heap_lock: Mutex<()>,
@@ -412,6 +456,7 @@ impl<M: ValueModel> Runtime<M> {
     pub fn new() -> Self {
         let shared = Shared {
             heap: UnsafeCell::new(Heap::new()),
+            words: UnsafeCell::new(WordArena::new()),
             heap_lock: Mutex::new(()),
             allocs: AtomicU64::new(0),
             relocated: AtomicU64::new(0),
@@ -480,6 +525,115 @@ impl<M: ValueModel> Runtime<M> {
     #[inline]
     pub fn heap(&self) -> &Heap {
         unsafe { &*self.shared.heap.get() }
+    }
+
+    /// The payload word arena (see `WordArena`).
+    #[inline]
+    pub fn arena(&self) -> &WordArena {
+        unsafe { &*self.shared.words.get() }
+    }
+    /// Read a payload span.
+    #[inline]
+    pub fn words(&self, off: u32, len: u32) -> &[u64] {
+        self.arena().slice(off, len)
+    }
+    /// Mutate a payload span in place (array `%aset` etc.). Sound under the
+    /// same discipline as `Heap`'s unchecked access: spans are exclusively
+    /// owned, addresses are stable, and cross-thread visibility rides the
+    /// existing safepoint/park protocol.
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub fn words_mut(&self, off: u32, len: u32) -> &mut [u64] {
+        self.arena().slice_mut(off, len)
+    }
+    /// Bump-allocate `n` UNINITIALIZED-to-zero words; the span never crosses a
+    /// chunk boundary (the boundary remainder is padded away). Lock-free fast
+    /// path; takes the heap lock only to append a chunk.
+    pub fn word_alloc(&self, n: usize) -> u32 {
+        use std::sync::atomic::Ordering::Relaxed;
+        assert!(n <= WCHUNK, "word_alloc: span larger than an arena chunk");
+        let n = n.max(1); // zero-length spans still get a distinct off
+        loop {
+            let a = self.arena();
+            let cur = a.len.load(Relaxed) as usize;
+            // Pad to the next chunk when the span would cross a boundary.
+            let start = if (cur & (WCHUNK - 1)) + n > WCHUNK {
+                ((cur >> WCHUNK_BITS) + 1) << WCHUNK_BITS
+            } else {
+                cur
+            };
+            let end = start + n;
+            if (end - 1) >> WCHUNK_BITS >= a.chunks.len() {
+                // Missing chunk: append under the heap lock, then retry.
+                let _g = self.shared.heap_lock.lock().unwrap();
+                let a = unsafe { &mut *self.shared.words.get() };
+                while (end - 1) >> WCHUNK_BITS >= a.chunks.len() {
+                    assert!(a.chunks.len() < WCHUNKS_CAP, "word arena chunk index overflow");
+                    a.chunks.push(vec![0u64; WCHUNK].into_boxed_slice());
+                }
+                continue;
+            }
+            if a.len.compare_exchange_weak(cur as u64, end as u64, Relaxed, Relaxed).is_ok() {
+                return start as u32;
+            }
+        }
+    }
+
+    /// Bump-allocate a span holding `xs` (with `extra` reserved words after it,
+    /// for growable arrays); `(off, len, cap)`.
+    pub fn word_alloc_from(&self, xs: &[u64], extra: usize) -> (u32, u32, u32) {
+        let cap = xs.len() + extra;
+        let off = self.word_alloc(cap);
+        self.words_mut(off, xs.len() as u32).copy_from_slice(xs);
+        (off, xs.len() as u32, cap as u32)
+    }
+    /// Allocate a Vector object over a copy of `xs`.
+    pub fn alloc_vector(&self, xs: &[u64]) -> HeapId {
+        let (off, len, cap) = self.word_alloc_from(xs, 0);
+        self.alloc(Obj::Vector { off, len, cap })
+    }
+    /// Allocate a Vector of `n` nil slots.
+    pub fn alloc_vector_nil(&self, n: usize, nil: u64) -> HeapId {
+        let off = self.word_alloc(n);
+        self.words_mut(off, n as u32).fill(nil);
+        self.alloc(Obj::Vector { off, len: n as u32, cap: n as u32 })
+    }
+    /// Allocate a Values packet over a copy of `xs`.
+    pub fn alloc_values(&self, xs: &[u64]) -> HeapId {
+        let (off, len, _cap) = self.word_alloc_from(xs, 0);
+        self.alloc(Obj::Values { off, len })
+    }
+    /// Allocate a Record over a copy of `fields`.
+    pub fn alloc_record(&self, type_id: Sym, fields: &[u64]) -> HeapId {
+        let (off, len, _cap) = self.word_alloc_from(fields, 0);
+        self.alloc(Obj::Record { type_id, off, len })
+    }
+    /// Append `xs` to a growable array in place: within `cap`, extend the span;
+    /// past it, bump-allocate a doubled span and re-point the SAME Obj (object
+    /// identity is the heap slot, so every reference observes the growth).
+    pub fn arr_extend(&self, id: HeapId, xs: &[u64]) {
+        let _g = self.shared.heap_lock.lock().unwrap();
+        let (off, len, cap) = match &self.heap()[id as usize] {
+            &Obj::Vector { off, len, cap } => (off, len, cap),
+            _ => panic!("apush: not an array"),
+        };
+        let need = len as usize + xs.len();
+        if need <= cap as usize {
+            self.arena().slice_mut(off + len, xs.len() as u32).copy_from_slice(xs);
+            if let Obj::Vector { len, .. } = &mut self.heap_mut()[id as usize] {
+                *len = need as u32;
+            }
+        } else {
+            let ncap = need.next_power_of_two().max(4);
+            let noff = self.word_alloc(ncap);
+            self.arena().slice_mut(noff, len).copy_from_slice(self.arena().slice(off, len));
+            self.arena().slice_mut(noff + len, xs.len() as u32).copy_from_slice(xs);
+            if let Obj::Vector { off, len, cap } = &mut self.heap_mut()[id as usize] {
+                *off = noff;
+                *len = need as u32;
+                *cap = ncap as u32;
+            }
+        }
     }
     /// The heap for MUTATION. Callers MUST hold `heap_lock` (alloc/GC/set take it).
     #[inline]
@@ -828,17 +982,25 @@ impl<M: ValueModel> Runtime<M> {
                     // (e.g. a hash-map) are a frontend concern layered on top.
                     (Obj::Str(sa), Obj::Str(sb)) => sa == sb,
                     (Obj::Char(ca), Obj::Char(cb)) => ca == cb,
-                    (Obj::Vector(va), Obj::Vector(vb)) => {
-                        va.len() == vb.len()
-                            && va.clone().iter().zip(vb.clone().iter()).all(|(&x, &y)| self.equal(x, y))
+                    (&Obj::Vector { off: oa, len: la, .. }, &Obj::Vector { off: ob, len: lb, .. }) => {
+                        la == lb
+                            && (0..la).all(|k| {
+                                let (x, y) =
+                                    (self.words(oa, la)[k as usize], self.words(ob, lb)[k as usize]);
+                                self.equal(x, y)
+                            })
                     }
                     (
-                        Obj::Record { type_id: ta, fields: fa },
-                        Obj::Record { type_id: tb, fields: fb },
+                        &Obj::Record { type_id: ta, off: oa, len: la },
+                        &Obj::Record { type_id: tb, off: ob, len: lb },
                     ) => {
                         ta == tb
-                            && fa.len() == fb.len()
-                            && fa.clone().iter().zip(fb.clone().iter()).all(|(&x, &y)| self.equal(x, y))
+                            && la == lb
+                            && (0..la).all(|k| {
+                                let (x, y) =
+                                    (self.words(oa, la)[k as usize], self.words(ob, lb)[k as usize]);
+                                self.equal(x, y)
+                            })
                     }
                     _ => false, // identity already handled; distinct other objects differ
                 }
@@ -974,7 +1136,7 @@ impl<M: ValueModel> Runtime<M> {
                 M::R::enc_ref(id)
             }
             Prim::Vector => {
-                let id = self.alloc(Obj::Vector(args.to_vec()));
+                let id = self.alloc_vector(args);
                 M::R::enc_ref(id)
             }
             Prim::VectorRef => {
@@ -984,10 +1146,11 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Int(i) = self.decode(args[1]) else {
                     panic!("vector-ref: index must be an int");
                 };
-                let Obj::Vector(elems) = &self.heap()[id as usize] else {
+                let &Obj::Vector { off, len, .. } = &self.heap()[id as usize] else {
                     panic!("vector-ref: not a vector");
                 };
-                *elems
+                *self
+                    .words(off, len)
                     .get(i as usize)
                     .unwrap_or_else(|| panic!("vector-ref: index {i} out of range"))
             }
@@ -998,14 +1161,11 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Int(i) = self.decode(args[1]) else {
                     panic!("vector-set!: index must be an int");
                 };
-                // In-place heap mutation MUST take the heap lock: without it, this
-                // `&mut Heap` aliases a concurrent `alloc`'s `&mut Heap` (data-race
-                // UB), and it must never overlap a collection.
-                let _g = self.shared.heap_lock.lock().unwrap();
-                let Obj::Vector(elems) = &mut self.heap_mut()[id as usize] else {
+                let &Obj::Vector { off, len, .. } = &self.heap()[id as usize] else {
                     panic!("vector-set!: not a vector");
                 };
-                let slot = elems
+                let slot = self
+                    .words_mut(off, len)
                     .get_mut(i as usize)
                     .unwrap_or_else(|| panic!("vector-set!: index {i} out of range"));
                 *slot = args[2];
@@ -1016,18 +1176,19 @@ impl<M: ValueModel> Runtime<M> {
                     panic!("make-array: size must be an int");
                 };
                 let nil = self.enc_nil();
-                let id = self.alloc(Obj::Vector(vec![nil; n as usize]));
+                let id = self.alloc_vector_nil(n as usize, nil);
                 M::R::enc_ref(id)
             }
             Prim::AClone => {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("aclone: not an array");
                 };
-                let Obj::Vector(elems) = &self.heap()[id as usize] else {
+                let &Obj::Vector { off, len, .. } = &self.heap()[id as usize] else {
                     panic!("aclone: not an array");
                 };
-                let copy = elems.clone();
-                let nid = self.alloc(Obj::Vector(copy));
+                let noff = self.word_alloc(len.max(1) as usize);
+                self.arena().slice_mut(noff, len).copy_from_slice(self.words(off, len));
+                let nid = self.alloc(Obj::Vector { off: noff, len, cap: len });
                 M::R::enc_ref(nid)
             }
             Prim::PvConj => self.pv_conj(args[0], args[1]),
@@ -1077,9 +1238,7 @@ impl<M: ValueModel> Runtime<M> {
                 let off = match self.decode(args[2]) { Val::Int(i) => i as usize, _ => panic!("apush-chunk: off") };
                 let end = match self.decode(args[3]) { Val::Int(i) => i as usize, _ => panic!("apush-chunk: end") };
                 let Val::Ref(id) = self.decode(args[0]) else { panic!("apush-chunk: not an array"); };
-                let _g = self.shared.heap_lock.lock().unwrap();
-                let Obj::Vector(elems) = &mut self.heap_mut()[id as usize] else { panic!("apush-chunk: not an array"); };
-                elems.extend_from_slice(&src[off..end]);
+                self.arr_extend(id, &src[off..end]);
                 args[0]
             }
             Prim::PvNth => {
@@ -1094,12 +1253,12 @@ impl<M: ValueModel> Runtime<M> {
             Prim::LazyRealize => {
                 let Val::Ref(id) = self.decode(args[0]) else { panic!("lazy-realize!: not a record"); };
                 let tru = self.encode(Val::Bool(true));
-                if let Obj::Record { fields, .. } = &mut self.heap_mut()[id as usize] {
-                    fields[0] = args[1];
-                    fields[1] = tru;
-                } else {
+                let &Obj::Record { off, len, .. } = &self.heap()[id as usize] else {
                     panic!("lazy-realize!: not a record");
-                }
+                };
+                let fs = self.words_mut(off, len);
+                fs[0] = args[1];
+                fs[1] = tru;
                 args[1]
             }
             // Fill a whole range chunk (up to 32 fixnums) in one native call — the
@@ -1137,8 +1296,8 @@ impl<M: ValueModel> Runtime<M> {
             // (see `Prim::StrJoinArr`'s doc comment in ir.rs).
             Prim::StrJoinArr => {
                 let Val::Ref(id) = self.decode(args[0]) else { panic!("str-join-arr: not an array"); };
-                let elems = match &self.heap()[id as usize] {
-                    Obj::Vector(v) => v.clone(),
+                let elems: Vec<u64> = match &self.heap()[id as usize] {
+                    &Obj::Vector { off, len, .. } => self.words(off, len).to_vec(),
                     _ => panic!("str-join-arr: not an array"),
                 };
                 let sep = self.as_str(args[1], "str-join-arr");
@@ -1180,25 +1339,28 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("apush: not an array");
                 };
-                let _g = self.shared.heap_lock.lock().unwrap();
-                let Obj::Vector(elems) = &mut self.heap_mut()[id as usize] else {
-                    panic!("apush: not an array");
-                };
-                elems.push(args[1]);
+                self.arr_extend(id, &[args[1]]);
                 args[0]
             }
             Prim::ArrShift => {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("ashift: not an array");
                 };
-                let _g = self.shared.heap_lock.lock().unwrap();
-                let Obj::Vector(elems) = &mut self.heap_mut()[id as usize] else {
+                let &Obj::Vector { off, len, .. } = &self.heap()[id as usize] else {
                     panic!("ashift: not an array");
                 };
-                if elems.is_empty() {
+                if len == 0 {
                     self.enc_nil()
                 } else {
-                    elems.remove(0)
+                    let first = self.words(off, len)[0];
+                    // Shift left in place and shrink (object identity preserved).
+                    let ws = self.words_mut(off, len);
+                    ws.copy_within(1.., 0);
+                    let _g = self.shared.heap_lock.lock().unwrap();
+                    if let Obj::Vector { len, .. } = &mut self.heap_mut()[id as usize] {
+                        *len -= 1;
+                    }
+                    first
                 }
             }
             Prim::ArrClear => {
@@ -1206,10 +1368,10 @@ impl<M: ValueModel> Runtime<M> {
                     panic!("aclear: not an array");
                 };
                 let _g = self.shared.heap_lock.lock().unwrap();
-                let Obj::Vector(elems) = &mut self.heap_mut()[id as usize] else {
+                let Obj::Vector { len, .. } = &mut self.heap_mut()[id as usize] else {
                     panic!("aclear: not an array");
                 };
-                elems.clear();
+                *len = 0;
                 args[0]
             }
             Prim::BitAnd => self.encode(Val::Int(self.as_i128(args[0]) & self.as_i128(args[1]))),
@@ -1242,7 +1404,7 @@ impl<M: ValueModel> Runtime<M> {
             Prim::MakeRecord => {
                 let Val::Sym(type_id) = self.decode(args[0]) else { panic!("make-record: type must be a symbol"); };
                 let fields = self.list_to_vec(args[1]);
-                let id = self.alloc(Obj::Record { type_id, fields });
+                let id = self.alloc_record(type_id, &fields);
                 M::R::enc_ref(id)
             }
             Prim::FieldNames => {
@@ -1272,10 +1434,10 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("field access on non-record");
                 };
-                let Obj::Record { fields, .. } = &self.heap()[id as usize] else {
+                let &Obj::Record { off, len, .. } = &self.heap()[id as usize] else {
                     panic!("field access on non-record");
                 };
-                fields[idx]
+                self.words(off, len)[idx]
             }
             Prim::Hash => {
                 let h = self.hash_value(args[0]);
@@ -1285,21 +1447,21 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Ref(id) = self.decode(args[0]) else {
                     panic!("vector-length: not a vector");
                 };
-                let Obj::Vector(elems) = &self.heap()[id as usize] else {
+                let &Obj::Vector { len, .. } = &self.heap()[id as usize] else {
                     panic!("vector-length: not a vector");
                 };
-                self.encode(Val::Int(elems.len() as i128))
+                self.encode(Val::Int(len as i128))
             }
             Prim::Values => {
-                let id = self.alloc(Obj::Values(args.to_vec()));
+                let id = self.alloc_values(args);
                 M::R::enc_ref(id)
             }
             Prim::ValuesToList => {
                 // Unpack a `values` packet into a list; a lone value becomes a
                 // one-element list so single-valued producers work too.
                 if let Val::Ref(id) = self.decode(args[0]) {
-                    if let Obj::Values(vals) = &self.heap()[id as usize] {
-                        let vals = vals.clone();
+                    if let &Obj::Values { off, len } = &self.heap()[id as usize] {
+                        let vals = self.words(off, len).to_vec();
                         return self.vec_to_list(&vals);
                     }
                 }
@@ -1390,8 +1552,7 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Sym(type_id) = self.decode(args[0]) else {
                     panic!("record: first arg must be a (quoted) type symbol");
                 };
-                let fields = args[1..].to_vec();
-                let id = self.alloc(Obj::Record { type_id, fields });
+                let id = self.alloc_record(type_id, &args[1..]);
                 M::R::enc_ref(id)
             }
             Prim::TypeOf => {
@@ -1408,7 +1569,7 @@ impl<M: ValueModel> Runtime<M> {
             Prim::NFields => {
                 let n = match self.decode(args[0]) {
                     Val::Ref(id) => match &self.heap()[id as usize] {
-                        Obj::Record { fields, .. } => fields.len() as i128,
+                        Obj::Record { len, .. } => *len as i128,
                         _ => 0,
                     },
                     _ => 0,
@@ -1673,13 +1834,14 @@ impl<M: ValueModel> Runtime<M> {
                     },
                     _ => panic!("%str->bytes: not a string"),
                 };
-                let id = self.alloc(Obj::Vector(bytes));
+                let id = self.alloc_vector(&bytes);
                 M::R::enc_ref(id)
             }
             Prim::BytesToStr => {
                 let bytes: Vec<u8> = match self.decode(args[0]) {
                     Val::Ref(id) => match &self.heap()[id as usize] {
-                        Obj::Vector(v) => v
+                        &Obj::Vector { off, len, .. } => self
+                            .words(off, len)
                             .iter()
                             .map(|&b| match self.decode(b) {
                                 Val::Int(n) => n as i8 as u8,
@@ -1734,7 +1896,8 @@ impl<M: ValueModel> Runtime<M> {
                 };
                 let bytes: Vec<u8> = match self.decode(args[1]) {
                     Val::Ref(id) => match &self.heap()[id as usize] {
-                        Obj::Vector(v) => v
+                        &Obj::Vector { off, len, .. } => self
+                            .words(off, len)
                             .iter()
                             .map(|&b| match self.decode(b) {
                                 Val::Int(n) => n as i8 as u8,
@@ -1806,7 +1969,7 @@ impl<M: ValueModel> Runtime<M> {
                     panic!("field: index must be an int");
                 };
                 match &self.heap()[id as usize] {
-                    Obj::Record { fields, .. } => fields[i as usize],
+                    &Obj::Record { off, len, .. } => self.words(off, len)[i as usize],
                     _ => panic!("field: not a record"),
                 }
             }
@@ -1869,10 +2032,10 @@ impl<M: ValueModel> Runtime<M> {
         let Val::Ref(id) = self.decode(obj) else {
             panic!("field access on non-record");
         };
-        let Obj::Record { fields, .. } = &self.heap()[id as usize] else {
+        let &Obj::Record { off, len, .. } = &self.heap()[id as usize] else {
             panic!("field access on non-record");
         };
-        fields[idx]
+        self.words(off, len)[idx]
     }
 
     // ── non-local control-flow signal (throw / escape) ──────────────────────
@@ -1943,9 +2106,10 @@ impl<M: ValueModel> Runtime<M> {
                 Obj::HugeInt(b) => mix_str(FNV_OFFSET, &b.to_string()),
                 Obj::Ratio(n, d) => mix(mix(FNV_OFFSET, *n as u64 as u32), *d as u64 as u32),
                 Obj::BoxFloat(f) => mix(FNV_OFFSET, f.to_bits() as u32),
-                Obj::Record { type_id, fields } => {
-                    let mut h = mix_str(0x9e37_79b9u32, self.sym_name(*type_id));
-                    for &f in fields {
+                &Obj::Record { type_id, off, len } => {
+                    let mut h = mix_str(0x9e37_79b9u32, self.sym_name(type_id));
+                    for k in 0..len {
+                        let f = self.words(off, len)[k as usize];
                         h = mix(h, self.hash_value(f));
                     }
                     h
@@ -1957,10 +2121,10 @@ impl<M: ValueModel> Runtime<M> {
                     }
                     h
                 }
-                Obj::Vector(elems) => {
-                    let elems = elems.clone();
+                &Obj::Vector { off, len, .. } => {
                     let mut h = 0x27d4_eb2fu32;
-                    for x in elems {
+                    for k in 0..len {
+                        let x = self.words(off, len)[k as usize];
                         h = mix(h, self.hash_value(x));
                     }
                     h
@@ -1986,7 +2150,7 @@ impl<M: ValueModel> Runtime<M> {
                 Obj::Record { type_id, .. } => return *type_id,
                 Obj::Cons { .. } => (TYPE_TAG_LIST, "List"),
                 Obj::EmptyList => (TYPE_TAG_EMPTYLIST, "EmptyList"),
-                Obj::Vector(_) => (TYPE_TAG_VECTOR, "Vector"),
+                Obj::Vector { .. } => (TYPE_TAG_VECTOR, "Vector"),
                 Obj::Str(_) => (TYPE_TAG_STRING, "String"),
                 Obj::Char(_) => (TYPE_TAG_CHAR, "Char"),
                 Obj::Closure { .. } | Obj::MultiFn { .. } => (TYPE_TAG_FN, "Fn"),
@@ -2293,7 +2457,8 @@ impl<M: ValueModel> Runtime<M> {
     /// (meta, cnt, shift, root, tail) of a `'PersistentVector`.
     fn pv_read(&self, pv: u64) -> (u64, i64, i64, u64, u64) {
         let Val::Ref(id) = self.decode(pv) else { panic!("pvec: not a record") };
-        let Obj::Record { fields, .. } = &self.heap()[id as usize] else { panic!("pvec: not a record") };
+        let &Obj::Record { off, len, .. } = &self.heap()[id as usize] else { panic!("pvec: not a record") };
+        let fields = self.words(off, len);
         let cnt = match self.decode(fields[1]) { Val::Int(i) => i as i64, _ => panic!("pvec cnt") };
         let shift = match self.decode(fields[2]) { Val::Int(i) => i as i64, _ => panic!("pvec shift") };
         (fields[0], cnt, shift, fields[3], fields[4])
@@ -2301,52 +2466,76 @@ impl<M: ValueModel> Runtime<M> {
     /// The array inside a `'VectorNode` (field 1).
     fn node_arr(&self, node: u64) -> u64 {
         let Val::Ref(id) = self.decode(node) else { panic!("vnode: not a record") };
-        let Obj::Record { fields, .. } = &self.heap()[id as usize] else { panic!("vnode: not a record") };
-        fields[1]
+        let &Obj::Record { off, len, .. } = &self.heap()[id as usize] else { panic!("vnode: not a record") };
+        self.words(off, len)[1]
+    }
+    /// The (off, len) span of an array value.
+    fn arr_span(&self, arr: u64) -> (u32, u32) {
+        let Val::Ref(id) = self.decode(arr) else { panic!("pvec: array not a ref") };
+        let &Obj::Vector { off, len, .. } = &self.heap()[id as usize] else { panic!("pvec: not an array") };
+        (off, len)
     }
     fn arr_clone(&self, arr: u64) -> Vec<u64> {
-        let Val::Ref(id) = self.decode(arr) else { panic!("pvec: array not a ref") };
-        let Obj::Vector(v) = &self.heap()[id as usize] else { panic!("pvec: not an array") };
-        v.clone()
+        let (off, len) = self.arr_span(arr);
+        self.words(off, len).to_vec()
     }
     fn arr_at(&self, arr: u64, i: usize) -> u64 {
-        let Val::Ref(id) = self.decode(arr) else { panic!("pvec: array not a ref") };
-        let Obj::Vector(v) = &self.heap()[id as usize] else { panic!("pvec: not an array") };
-        v[i]
+        let (off, len) = self.arr_span(arr);
+        self.words(off, len)[i]
     }
     fn mk_array(&mut self, v: Vec<u64>) -> u64 {
-        M::R::enc_ref(self.alloc(Obj::Vector(v)))
+        M::R::enc_ref(self.alloc_vector(&v))
+    }
+    /// A fresh array = `arr` ++ [x], copied span-to-span (no Vec temporary).
+    /// The tail-conj hot path.
+    fn mk_array_append1(&mut self, arr: u64, x: u64) -> u64 {
+        let (soff, slen) = self.arr_span(arr);
+        let noff = self.word_alloc(slen as usize + 1);
+        let dst = self.arena().slice_mut(noff, slen + 1);
+        dst[..slen as usize].copy_from_slice(self.arena().slice(soff, slen));
+        dst[slen as usize] = x;
+        M::R::enc_ref(self.alloc(Obj::Vector { off: noff, len: slen + 1, cap: slen + 1 }))
+    }
+    /// A fresh one-element array (no Vec temporary).
+    fn mk_array1(&mut self, x: u64) -> u64 {
+        let noff = self.word_alloc(1);
+        self.arena().slice_mut(noff, 1)[0] = x;
+        M::R::enc_ref(self.alloc(Obj::Vector { off: noff, len: 1, cap: 1 }))
     }
     /// (arr, off, end, more) of a `'ChunkedCons` record, or None. Lets the cons
     /// prims (`%first`/`%rest`) treat a chunk transparently as a seq — only on the
     /// as_cons-miss path, so the common cons case pays nothing.
     fn as_chunked(&self, bits: u64) -> Option<(u64, i64, i64, u64)> {
         let Val::Ref(id) = self.decode(bits) else { return None };
-        let Obj::Record { type_id, fields } = &self.heap()[id as usize] else { return None };
-        if self.sym_name(*type_id) != "ChunkedCons" {
+        let &Obj::Record { type_id, off: foff, len: flen } = &self.heap()[id as usize] else {
+            return None;
+        };
+        if self.sym_name(type_id) != "ChunkedCons" {
             return None;
         }
-        let off = match self.decode(fields[1]) { Val::Int(i) => i as i64, _ => return None };
-        let end = match self.decode(fields[2]) { Val::Int(i) => i as i64, _ => return None };
-        Some((fields[0], off, end, fields[3]))
+        let fields = self.words(foff, flen);
+        let (f0, f1, f2, f3) = (fields[0], fields[1], fields[2], fields[3]);
+        let off = match self.decode(f1) { Val::Int(i) => i as i64, _ => return None };
+        let end = match self.decode(f2) { Val::Int(i) => i as i64, _ => return None };
+        Some((f0, off, end, f3))
     }
     fn mk_chunked(&mut self, arr: u64, off: i64, end: i64, more: u64) -> u64 {
         let offb = self.encode(Val::Int(off as i128));
         let endb = self.encode(Val::Int(end as i128));
         let ty = self.intern_cached(&self.shared.sym_cache_chunked_cons, "ChunkedCons");
-        M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![arr, offb, endb, more] }))
+        M::R::enc_ref(self.alloc_record(ty, &[arr, offb, endb, more]))
     }
     fn mk_node(&mut self, arr: u64) -> u64 {
         let nil = self.enc_nil();
         let ty = self.intern_cached(&self.shared.sym_cache_vector_node, "VectorNode");
-        M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![nil, arr] }))
+        M::R::enc_ref(self.alloc_record(ty, &[nil, arr]))
     }
     fn mk_pv(&mut self, meta: u64, cnt: i64, shift: i64, root: u64, tail: u64) -> u64 {
         let cntb = self.encode(Val::Int(cnt as i128));
         let shiftb = self.encode(Val::Int(shift as i128));
         let nil = self.enc_nil();
         let ty = self.intern_cached(&self.shared.sym_cache_persistent_vector, "PersistentVector");
-        M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![meta, cntb, shiftb, root, tail, nil] }))
+        M::R::enc_ref(self.alloc_record(ty, &[meta, cntb, shiftb, root, tail, nil]))
     }
     #[inline]
     fn tail_off(cnt: i64) -> i64 {
@@ -2386,11 +2575,10 @@ impl<M: ValueModel> Runtime<M> {
     }
     fn pv_conj(&mut self, pv: u64, o: u64) -> u64 {
         let (meta, cnt, shift, root, tail) = self.pv_read(pv);
-        // Common case: room in the tail — copy the tail array and append.
+        // Common case: room in the tail — copy the tail array and append,
+        // span-to-span (no heap-allocating temporary).
         if cnt - Self::tail_off(cnt) < 32 {
-            let mut nt = self.arr_clone(tail);
-            nt.push(o);
-            let new_tail = self.mk_array(nt);
+            let new_tail = self.mk_array_append1(tail, o);
             return self.mk_pv(meta, cnt + 1, shift, root, new_tail);
         }
         // Tail full: wrap it as a trie node and push into the tree.
@@ -2408,7 +2596,7 @@ impl<M: ValueModel> Runtime<M> {
         } else {
             (shift, self.pv_push_tail(cnt, shift, root, tail_node))
         };
-        let new_tail = self.mk_array(vec![o]);
+        let new_tail = self.mk_array1(o);
         self.mk_pv(meta, cnt + 1, new_shift, new_root, new_tail)
     }
     /// Build a PersistentVector from a flat element array, bottom-up: chunk the
@@ -2545,14 +2733,14 @@ impl<M: ValueModel> Runtime<M> {
         let bm = self.encode(Val::Int(bitmap as i128));
         let arrb = self.mk_array(arr);
         let ty = self.intern_cached(&self.shared.sym_cache_bitmap_node, "BitmapIndexedNode");
-        M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![nil, bm, arrb] }))
+        M::R::enc_ref(self.alloc_record(ty, &[nil, bm, arrb]))
     }
     fn mk_array_node(&mut self, cnt: i64, arr: Vec<u64>) -> u64 {
         let nil = self.enc_nil();
         let cb = self.encode(Val::Int(cnt as i128));
         let arrb = self.mk_array(arr);
         let ty = self.intern_cached(&self.shared.sym_cache_array_node, "ArrayNode");
-        M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![nil, cb, arrb] }))
+        M::R::enc_ref(self.alloc_record(ty, &[nil, cb, arrb]))
     }
     fn mk_collision_node(&mut self, chash: u32, cnt: i64, arr: Vec<u64>) -> u64 {
         let nil = self.enc_nil();
@@ -2560,7 +2748,7 @@ impl<M: ValueModel> Runtime<M> {
         let cb = self.encode(Val::Int(cnt as i128));
         let arrb = self.mk_array(arr);
         let ty = self.intern_cached(&self.shared.sym_cache_collision_node, "HashCollisionNode");
-        M::R::enc_ref(self.alloc(Obj::Record { type_id: ty, fields: vec![nil, hb, cb, arrb] }))
+        M::R::enc_ref(self.alloc_record(ty, &[nil, hb, cb, arrb]))
     }
     /// A brand-new single-entry `BitmapIndexedNode` — what
     /// `(-inode-assoc -EMPTY-BIN shift hash key val _)` always produces (an
@@ -2587,8 +2775,9 @@ impl<M: ValueModel> Runtime<M> {
     /// (raw bit identity — matches the original's `identical?` short-circuit).
     fn hamt_assoc(&mut self, node: u64, shift: u32, hash: u32, key: u64, val: u64) -> (u64, bool) {
         let Val::Ref(id) = self.decode(node) else { panic!("hamt-assoc: not a node") };
-        let Obj::Record { type_id, fields } = &self.heap()[id as usize] else { panic!("hamt-assoc: not a node") };
-        let kind = self.sym_name(*type_id).to_string();
+        let &Obj::Record { type_id, off: foff, len: flen } = &self.heap()[id as usize] else { panic!("hamt-assoc: not a node") };
+        let fields: Vec<u64> = self.words(foff, flen).to_vec();
+        let kind = self.sym_name(type_id).to_string();
         match kind.as_str() {
             "BitmapIndexedNode" => {
                 let bitmap = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => panic!("bitmap") };
@@ -2718,8 +2907,9 @@ impl<M: ValueModel> Runtime<M> {
     /// `(-inode-lookup node shift hash key not-found)`.
     fn hamt_lookup(&self, node: u64, shift: u32, hash: u32, key: u64, not_found: u64) -> u64 {
         let Val::Ref(id) = self.decode(node) else { return not_found };
-        let Obj::Record { type_id, fields } = &self.heap()[id as usize] else { return not_found };
-        match self.sym_name(*type_id) {
+        let &Obj::Record { type_id, off: foff, len: flen } = &self.heap()[id as usize] else { return not_found };
+        let fields = self.words(foff, flen);
+        match self.sym_name(type_id) {
             "BitmapIndexedNode" => {
                 let bitmap = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => return not_found };
                 let bit = 1u32 << ((hash >> shift) & 31);
@@ -2779,8 +2969,10 @@ impl<M: ValueModel> Runtime<M> {
     /// (raw bit identity) if nothing changed, or `nil` if `node` becomes empty.
     fn hamt_without(&mut self, node: u64, shift: u32, hash: u32, key: u64) -> u64 {
         let Val::Ref(id) = self.decode(node) else { return node };
-        let Obj::Record { type_id, fields } = &self.heap()[id as usize] else { return node };
-        match self.sym_name(*type_id) {
+        let &Obj::Record { type_id, off: foff, len: flen } = &self.heap()[id as usize] else { return node };
+        let fields: Vec<u64> = self.words(foff, flen).to_vec();
+        let fields = &fields[..];
+        match self.sym_name(type_id) {
             "BitmapIndexedNode" => {
                 let bitmap = match self.decode(fields[1]) { Val::Int(i) => i as u32, _ => return node };
                 let bit = 1u32 << ((hash >> shift) & 31);
@@ -3044,12 +3236,14 @@ impl<M: ValueModel> Runtime<M> {
                     out
                 }
                 Obj::Char(c) => c.to_string(),
-                Obj::Vector(elems) => {
-                    let inner: Vec<String> = elems.iter().map(|&x| self.print(x)).collect();
+                &Obj::Vector { off, len, .. } => {
+                    let inner: Vec<String> =
+                        self.words(off, len).to_vec().iter().map(|&x| self.print(x)).collect();
                     format!("#({})", inner.join(" "))
                 }
-                Obj::Values(vals) => {
-                    let inner: Vec<String> = vals.iter().map(|&x| self.print(x)).collect();
+                &Obj::Values { off, len } => {
+                    let inner: Vec<String> =
+                        self.words(off, len).to_vec().iter().map(|&x| self.print(x)).collect();
                     inner.join(" ")
                 }
                 Obj::Closure { .. } => "#<closure>".to_string(),
@@ -3058,9 +3252,10 @@ impl<M: ValueModel> Runtime<M> {
                 Obj::HugeInt(b) => b.to_string(),
                 Obj::Ratio(n, d) => format!("{n}/{d}"),
                 Obj::BoxFloat(f) => format!("{f}"),
-                Obj::Record { type_id, fields } => {
-                    let inner: Vec<String> = fields.iter().map(|&x| self.print(x)).collect();
-                    format!("#{}[{}]", self.sym_name(*type_id), inner.join(" "))
+                &Obj::Record { type_id, off, len } => {
+                    let inner: Vec<String> =
+                        self.words(off, len).to_vec().iter().map(|&x| self.print(x)).collect();
+                    format!("#{}[{}]", self.sym_name(type_id), inner.join(" "))
                 }
                 Obj::Escape { .. } => "#<continuation>".to_string(),
                 Obj::Cont(_) => "#<continuation>".to_string(),

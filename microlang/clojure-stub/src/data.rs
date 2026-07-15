@@ -31,7 +31,13 @@ fn alloc<M: ValueModel>(rt: &mut Runtime<M>, o: Obj) -> u64 {
 
 fn record<M: ValueModel>(rt: &mut Runtime<M>, ty: &str, fields: Vec<u64>) -> u64 {
     let type_id: Sym = rt.intern(ty);
-    alloc(rt, Obj::Record { type_id, fields })
+    let id = rt.alloc_record(type_id, &fields);
+    <M::R as Repr>::enc_ref(id)
+}
+
+fn array<M: ValueModel>(rt: &mut Runtime<M>, elems: &[u64]) -> u64 {
+    let id = rt.alloc_vector(elems);
+    <M::R as Repr>::enc_ref(id)
 }
 
 /// Are the cljs-ported persistent types loaded yet? Before that boundary the
@@ -85,7 +91,7 @@ pub fn make_set<M: ValueModel>(rt: &mut Runtime<M>, elems: &[u64]) -> u64 {
 fn build_pam<M: ValueModel>(rt: &mut Runtime<M>, kvs: &[u64]) -> u64 {
     let nil = rt.encode(Val::Nil);
     let cnt = rt.encode(Val::Int((kvs.len() / 2) as i128));
-    let arr = alloc(rt, Obj::Vector(kvs.to_vec()));
+    let arr = array(rt, kvs);
     record(rt, "PersistentArrayMap", vec![nil, cnt, arr, nil])
 }
 
@@ -95,7 +101,7 @@ fn node_array<M: ValueModel>(rt: &mut Runtime<M>, children: &[u64]) -> u64 {
     let nil = rt.encode(Val::Nil);
     let mut v = vec![nil; 32];
     v[..children.len()].copy_from_slice(children);
-    alloc(rt, Obj::Vector(v))
+    array(rt, &v)
 }
 
 /// Split `elems` into the trie body (full 32-wide leaves) and the tail, exactly
@@ -111,10 +117,10 @@ fn trie_split(elems: &[u64]) -> (usize, &[u64]) {
 /// trie level). Mirrors `-empty-pvec` / `-pv-conj`'s invariants.
 fn build_pvec<M: ValueModel>(rt: &mut Runtime<M>, elems: &[u64]) -> u64 {
     let (tail_off, tail_elems) = trie_split(elems);
-    let tail = alloc(rt, Obj::Vector(tail_elems.to_vec()));
+    let tail = array(rt, tail_elems);
     // Leaves are always FULL 32-wide arrays (tail_off is a multiple of 32).
     let mut level: Vec<u64> =
-        elems[..tail_off].chunks(32).map(|c| alloc(rt, Obj::Vector(c.to_vec()))).collect();
+        elems[..tail_off].chunks(32).map(|c| array(rt, c)).collect();
     let mut shift = 5i128;
     while level.len() > 32 {
         level = level.chunks(32).map(|c| node_array(rt, c)).collect();
@@ -132,7 +138,7 @@ fn build_pvec<M: ValueModel>(rt: &mut Runtime<M>, elems: &[u64]) -> u64 {
 fn build_persistent_vector<M: ValueModel>(rt: &mut Runtime<M>, elems: &[u64]) -> u64 {
     let nil = rt.encode(Val::Nil);
     let (tail_off, tail_elems) = trie_split(elems);
-    let tail = alloc(rt, Obj::Vector(tail_elems.to_vec()));
+    let tail = array(rt, tail_elems);
     let mk_node = |rt: &mut Runtime<M>, children: &[u64]| -> u64 {
         let arr = node_array(rt, children);
         record(rt, "VectorNode", vec![nil, arr])
@@ -140,7 +146,7 @@ fn build_persistent_vector<M: ValueModel>(rt: &mut Runtime<M>, elems: &[u64]) ->
     let mut level: Vec<u64> = elems[..tail_off]
         .chunks(32)
         .map(|c| {
-            let arr = alloc(rt, Obj::Vector(c.to_vec()));
+            let arr = array(rt, c);
             record(rt, "VectorNode", vec![nil, arr])
         })
         .collect();
@@ -162,8 +168,8 @@ fn build_persistent_vector<M: ValueModel>(rt: &mut Runtime<M>, elems: &[u64]) ->
 /// The record's `(tag, fields)` if `v` is a Record, else None.
 fn record_parts<M: ValueModel>(rt: &Runtime<M>, v: u64) -> Option<(String, Vec<u64>)> {
     if let Val::Ref(id) = rt.decode(v) {
-        if let Obj::Record { type_id, fields } = &rt.heap()[id as usize] {
-            return Some((rt.sym_name(*type_id).to_string(), fields.clone()));
+        if let &Obj::Record { type_id, off, len } = &rt.heap()[id as usize] {
+            return Some((rt.sym_name(type_id).to_string(), rt.words(off, len).to_vec()));
         }
     }
     None
@@ -182,16 +188,16 @@ fn int_of<M: ValueModel>(rt: &Runtime<M>, v: u64) -> usize {
 
 fn arr_elems<M: ValueModel>(rt: &Runtime<M>, arr: u64) -> Vec<u64> {
     let Val::Ref(id) = rt.decode(arr) else { panic!("collection layout: expected an array") };
-    let Obj::Vector(v) = &rt.heap()[id as usize] else {
+    let &Obj::Vector { off, len, .. } = &rt.heap()[id as usize] else {
         panic!("collection layout: expected an array")
     };
-    v.clone()
+    rt.words(off, len).to_vec()
 }
 
 fn arr_get<M: ValueModel>(rt: &Runtime<M>, arr: u64, i: usize) -> u64 {
     let Val::Ref(id) = rt.decode(arr) else { panic!("trie node: not an array") };
-    let Obj::Vector(v) = &rt.heap()[id as usize] else { panic!("trie node: not an array") };
-    v[i]
+    let &Obj::Vector { off, len, .. } = &rt.heap()[id as usize] else { panic!("trie node: not an array") };
+    rt.words(off, len)[i]
 }
 
 /// The elements of any vector representation: `PVec`, `PersistentVector`, or

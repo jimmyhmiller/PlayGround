@@ -278,9 +278,10 @@ impl<M: ValueModel> Runtime<M> {
         }
 
         // 2. Cheney scan.
+        let arena = unsafe { &*self.shared.words.get() };
         let mut scan = 0;
         while scan < to.len() {
-            scan_obj::<M>(heap, from_len, &mut to, &mut reloc, scan);
+            scan_obj::<M>(heap, arena, from_len, &mut to, &mut reloc, scan);
             scan += 1;
         }
 
@@ -333,6 +334,7 @@ fn fw<M: ValueModel>(
 /// Forward the internal pointers of the just-copied object `to[i]`.
 fn scan_obj<M: ValueModel>(
     heap: &mut crate::runtime::Heap,
+    arena: &crate::runtime::WordArena,
     from_len: usize,
     to: &mut Vec<Obj>,
     reloc: &mut u64,
@@ -372,15 +374,13 @@ fn scan_obj<M: ValueModel>(
         }
         return;
     }
-    // Record: forward each field.
-    if let Obj::Record { fields, .. } = &to[i] {
-        let fs = fields.clone();
-        let forwarded: Vec<u64> = fs
-            .into_iter()
-            .map(|f| fw::<M>(heap, from_len, to, reloc, f))
-            .collect();
-        if let Obj::Record { fields, .. } = &mut to[i] {
-            *fields = forwarded;
+    // Record: forward each field IN PLACE in its arena span (the span is
+    // exclusively owned by this — just-copied — object, so rewriting the words
+    // is sound; span compaction is a follow-up).
+    if let &Obj::Record { off, len, .. } = &to[i] {
+        for k in 0..len as usize {
+            let f = arena.slice(off, len)[k];
+            arena.slice_mut(off, len)[k] = fw::<M>(heap, from_len, to, reloc, f);
         }
         return;
     }
@@ -402,15 +402,11 @@ fn scan_obj<M: ValueModel>(
         }
         return;
     }
-    // Vector / multiple-values packet: forward each element.
-    if let Obj::Vector(elems) | Obj::Values(elems) = &to[i] {
-        let es = elems.clone();
-        let forwarded: Vec<u64> = es
-            .into_iter()
-            .map(|e| fw::<M>(heap, from_len, to, reloc, e))
-            .collect();
-        if let Obj::Vector(elems) | Obj::Values(elems) = &mut to[i] {
-            *elems = forwarded;
+    // Vector / multiple-values packet: forward each element in place.
+    if let (&Obj::Vector { off, len, .. } | &Obj::Values { off, len }) = &to[i] {
+        for k in 0..len as usize {
+            let e = arena.slice(off, len)[k];
+            arena.slice_mut(off, len)[k] = fw::<M>(heap, from_len, to, reloc, e);
         }
         return;
     }

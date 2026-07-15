@@ -414,17 +414,19 @@ fn resolve_auto_keywords<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, fo
 fn has_auto_keyword<M: ValueModel>(rt: &Runtime<M>, form: u64) -> bool {
     if let Val::Ref(id) = rt.decode(form) {
         match &rt.heap()[id as usize] {
-            Obj::Record { type_id, fields } => {
-                if rt.sym_name(*type_id) == reader::KEYWORD_AUTO_NS {
+            &Obj::Record { type_id, off, len } => {
+                if rt.sym_name(type_id) == reader::KEYWORD_AUTO_NS {
                     return true;
                 }
-                fields.clone().iter().any(|&f| has_auto_keyword(rt, f))
+                rt.words(off, len).to_vec().iter().any(|&f| has_auto_keyword(rt, f))
             }
             Obj::Cons { head, tail } => {
                 let (h, t) = (*head, *tail);
                 has_auto_keyword(rt, h) || has_auto_keyword(rt, t)
             }
-            Obj::Vector(elems) => elems.clone().iter().any(|&e| has_auto_keyword(rt, e)),
+            &Obj::Vector { off, len, .. } => {
+                rt.words(off, len).to_vec().iter().any(|&e| has_auto_keyword(rt, e))
+            }
             _ => false,
         }
     } else {
@@ -436,7 +438,8 @@ fn rebuild_auto_keywords<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, fo
     let Val::Ref(id) = rt.decode(form) else { return form };
     let obj = rt.heap()[id as usize].clone();
     match obj {
-        Obj::Record { type_id, fields } if rt.sym_name(type_id) == reader::KEYWORD_AUTO_NS => {
+        Obj::Record { type_id, off, len } if rt.sym_name(type_id) == reader::KEYWORD_AUTO_NS => {
+            let fields = rt.words(off, len).to_vec();
             let name = match rt.decode(fields[0]) {
                 Val::Sym(s) => rt.sym_name(s).to_string(),
                 _ => panic!("::keyword marker: name must be a symbol"),
@@ -454,12 +457,13 @@ fn rebuild_auto_keywords<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, fo
             let s = rt.intern(&full);
             let name_v = rt.encode(Val::Sym(s));
             let kw = rt.intern(reader::KEYWORD);
-            let rid = rt.alloc(Obj::Record { type_id: kw, fields: vec![name_v] });
+            let rid = rt.alloc_record(kw, &[name_v]);
             <M::R as microlang::Repr>::enc_ref(rid)
         }
-        Obj::Record { type_id, fields } => {
+        Obj::Record { type_id, off, len } => {
+            let fields = rt.words(off, len).to_vec();
             let nf: Vec<u64> = fields.iter().map(|&f| rebuild_auto_keywords(rt, comp, f)).collect();
-            let rid = rt.alloc(Obj::Record { type_id, fields: nf });
+            let rid = rt.alloc_record(type_id, &nf);
             <M::R as microlang::Repr>::enc_ref(rid)
         }
         Obj::Cons { head, tail } => {
@@ -468,9 +472,10 @@ fn rebuild_auto_keywords<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, fo
             let rid = rt.alloc(Obj::Cons { head: h, tail: t });
             <M::R as microlang::Repr>::enc_ref(rid)
         }
-        Obj::Vector(elems) => {
+        Obj::Vector { off, len, .. } => {
+            let elems = rt.words(off, len).to_vec();
             let ne: Vec<u64> = elems.iter().map(|&e| rebuild_auto_keywords(rt, comp, e)).collect();
-            let rid = rt.alloc(Obj::Vector(ne));
+            let rid = rt.alloc_vector(&ne);
             <M::R as microlang::Repr>::enc_ref(rid)
         }
         _ => form,
@@ -1885,7 +1890,8 @@ fn jvm_registry_tags<M: ValueModel>(rt: &Runtime<M>, fqn: &str) -> Vec<Sym> {
         return vec![];
     };
     let Val::Ref(did) = rt.decode(desc) else { return vec![] };
-    let Obj::Record { fields, .. } = &rt.heap()[did as usize] else { return vec![] };
+    let &Obj::Record { off, len, .. } = &rt.heap()[did as usize] else { return vec![] };
+    let fields = rt.words(off, len);
     let (tag, ext) = (fields.get(2).copied(), fields.get(11).copied());
     if let Some(ext) = ext {
         if !matches!(rt.decode(ext), Val::Nil) {
@@ -2048,9 +2054,9 @@ fn binding_items<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Option<Vec<u64>> 
 
 fn record_field0<M: ValueModel>(rt: &Runtime<M>, form: u64, tag: &str) -> Option<u64> {
     if let Val::Ref(id) = rt.decode(form) {
-        if let Obj::Record { type_id, fields } = &rt.heap()[id as usize] {
-            if rt.sym_name(*type_id) == tag {
-                return fields.first().copied();
+        if let &Obj::Record { type_id, off, len } = &rt.heap()[id as usize] {
+            if rt.sym_name(type_id) == tag {
+                return rt.words(off, len).first().copied();
             }
         }
     }
@@ -2667,8 +2673,9 @@ fn defmacro_name<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Option<Sym> {
 pub fn clj_str<M: ValueModel>(rt: &Runtime<M>, v: u64) -> String {
     match rt.decode(v) {
         Val::Ref(id) => match &rt.heap()[id as usize] {
-            Obj::Record { type_id, fields } => {
-                let tag = rt.sym_name(*type_id);
+            &Obj::Record { type_id, off, len } => {
+                let tag = rt.sym_name(type_id);
+                let fields = rt.words(off, len);
                 match tag {
                     "Keyword" => format!(":{}", rt.print(fields[0])),
                     "Vector" => format!("[{}]", list_items(rt, fields[0], " ")),

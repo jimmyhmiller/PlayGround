@@ -89,17 +89,26 @@ Output: FLAT Ir — the only shape tiers execute:
 - Dispatch: per-site monomorphic cache inside the shim now; code-level IC
   needs Stage B's readable type headers.
 
-## Stage B — arena heap
+## Stage B — payload word-arena (hybrid; landed design)
 
-Replace `Vec<Obj>` (48-byte enum slots + inner Vec mallocs + heap lock per
-alloc) with a chunked bump arena: header word {tag, len}, fields inline.
-POD objects (Cons/Vector/Record/Str/Char/BoxFloat/Ratio/BigInt/Values, and
-Closure as {template_id, caps inline} via an append-only template table)
-live inline; exotics (Atom/Future/Cont/PartialCont/HugeInt) via side tables
-swept at GC. `ObjView` decode seam keeps the ~200 match-site migration
-mechanical. Per-thread allocation chunks (no lock per alloc). Cheney copy
-becomes exact-size memcpy. Then in the JIT: inline type-tag loads → real
-per-site dispatch ICs, and inline bump allocation for hot shapes.
+Status note (mid-flight): stages A1–A3 and C are DONE and committed
+(flat closures; register-arg SSA JIT; speculative inlining; per-arity
+MultiFn). vecbuild went 2.75µs → 290ns/op. The remaining vecbuild profile is
+~55% malloc/free/memmove from the INNER `Vec` payloads of hot objects.
+
+Hybrid design (this stage): keep the `Vec<Obj>` object table and the enum,
+but move the HOT payloads into a chunked bump WORD ARENA (`Vec<Box<[u64]>>`,
+stable addresses, atomic bump, no per-alloc malloc/free/lock):
+  * `Obj::Vector { off, len, cap }` (cap allows in-place `%apush` growth by
+    re-spanning — object identity is the Obj slot, so growth just updates
+    off/cap), `Obj::Values { off, len }`, `Obj::Record { type_id, off, len }`.
+  * Spans are exclusively owned by their Obj; GC's `scan_obj` copies the live
+    span to the arena top and updates `off` (append-style semi-space, same
+    discipline as the object heap).
+  * `Str` stays `String` this round (string paths already have native bulk
+    prims; revisit).
+Full header-arena (objects themselves inline, readable type tags for
+JIT-inline dispatch ICs + inline bump allocation) remains the follow-up.
 
 ## Stage C — var-guarded speculative inlining
 
