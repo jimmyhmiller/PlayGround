@@ -133,3 +133,31 @@ transient win is noise here while the transient/protocol plumbing adds a
 little. Workloads with many distinct keys (frequencies-shaped) get the full
 assoc! win. The remaining group-by gap is the inner-collection build + call
 glue (F4).
+
+## Post-F3 matched-suite scoreboard (2026-07-15, same harness as the
+## EXEC_MODEL_V2 post-Stage-D table; pressure GC LIVE during the runs)
+
+| workload | post-D | post-F3 | JVM | note |
+|---|---|---|---|---|
+| loop-arith | 2 | 3 | <1 | poll residual |
+| defn-call | 4 | 4 | 4 | parity |
+| closure-call | 5 | 6 | 2 | |
+| reduce-map | 51 | 53 | 19 | |
+| vecbuild (persistent conj) | 150 | 147 | 11 | conj! path = 24 |
+| into-xform | 279 | 151 | 7 | transient into |
+| comp-chain | 186 | 194 | 15 | F4 |
+| transduce | 121 | 121 | 5 | F4 |
+| apply | 885 | 877 | 37 | F4 |
+| group-by | 1150 | 1039 | 26 | inner per-key conj |
+| assoc-build (persistent) | 1761 | 1036 | 149 | assoc! path = 64 |
+| interleave | 1875 | 3000* | 71 | *suite-order effect |
+
+*interleave isolated = 1865 (unchanged; pressure on/off within noise). The
+suite number includes collections copying the ACCUMULATED live data of
+earlier workloads — the non-generational semi-space tax, now visible
+because the runtime actually collects. A nursery/generational split is the
+structural answer (future stage); not an F1-F3 regression.
+
+Explicit transient use (conj!/assoc!) is at 24/64 ns/op — within 2.2x/0.4x
+of the JVM PERSISTENT numbers — so the remaining persistent-path gap is
+per-op glue the F4 cluster (call/lazy-seq/apply) shares.
