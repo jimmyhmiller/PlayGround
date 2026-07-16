@@ -161,13 +161,28 @@ impl<M: ValueModel> ClosureComp<M> {
                 let cf = self.compile(f);
                 let cargs: Vec<Compiled<M>> = args.iter().map(|a| self.compile(a)).collect();
                 Arc::new(move |rt, env, top| {
+                    // Precise rooting, exactly as code.rs's `Call` arm: the callee is
+                    // a bare `u64` while the args evaluate (a nested call in a later
+                    // arg reaches a safepoint and would relocate it), and each earlier
+                    // arg is bare while later ones evaluate. Publish each on the shadow
+                    // stack as computed and re-read after; the collector rewrites them.
+                    rt.safepoint(env);
                     let callee = cf(rt, env, top);
-                    let mut argv: Vec<u64> = Vec::with_capacity(cargs.len());
+                    let base = rt.push_root(callee);
                     for c in &cargs {
-                        argv.push(c(rt, env, top));
+                        let v = c(rt, env, top);
+                        rt.push_root(v);
                     }
-                    // through `top`: composable + late-bound dispatch
-                    top.invoke(top, rt, callee, &argv)
+                    let calleer = rt.root_get(base);
+                    let argv: Vec<u64> = (1..=cargs.len()).map(|i| rt.root_get(base + i)).collect();
+                    rt.truncate_roots(base);
+                    // Publish this frame's env so a collection deep inside the callee
+                    // traces our still-live locals (mirrors code.rs). through `top`:
+                    // composable + late-bound dispatch.
+                    rt.env_stack.push(env.clone());
+                    let r = top.invoke(top, rt, calleer, &argv);
+                    rt.env_stack.pop();
+                    r
                 })
             }
             Ir::Prim(Prim::Gc, _) => {
@@ -181,10 +196,18 @@ impl<M: ValueModel> ClosureComp<M> {
                 let op = *op;
                 let cargs: Vec<Compiled<M>> = args.iter().map(|a| self.compile(a)).collect();
                 Arc::new(move |rt, env, top| {
-                    let mut argv: Vec<u64> = Vec::with_capacity(cargs.len());
+                    // Precise rooting across arg evaluation (see code.rs's `Prim` arm):
+                    // an already-evaluated earlier arg is a bare `u64` a collection
+                    // fired at a LATER arg's nested-call safepoint would relocate — and
+                    // `rt.prim` then stores them into a heap object (e.g. `cons`),
+                    // where the next collection would trip over the stale bits.
+                    let base = rt.root_depth();
                     for c in &cargs {
-                        argv.push(c(rt, env, top));
+                        let v = c(rt, env, top);
+                        rt.push_root(v);
                     }
+                    let argv: Vec<u64> = (0..cargs.len()).map(|i| rt.root_get(base + i)).collect();
+                    rt.truncate_roots(base);
                     rt.prim(op, &argv)
                 })
             }
@@ -201,10 +224,16 @@ impl<M: ValueModel> ClosureComp<M> {
                 let (site, method) = (*site, *method);
                 let cargs: Vec<Compiled<M>> = args.iter().map(|a| self.compile(a)).collect();
                 Arc::new(move |rt, env, top| {
-                    let mut argv: Vec<u64> = Vec::with_capacity(cargs.len());
+                    // Precise rooting across arg evaluation (see code.rs's `Dispatch`
+                    // arm): earlier args are bare `u64`s a later arg's nested-call
+                    // safepoint would relocate. Publish each as computed, re-read after.
+                    let base = rt.root_depth();
                     for c in &cargs {
-                        argv.push(c(rt, env, top));
+                        let v = c(rt, env, top);
+                        rt.push_root(v);
                     }
+                    let argv: Vec<u64> = (0..cargs.len()).map(|i| rt.root_get(base + i)).collect();
+                    rt.truncate_roots(base);
                     let ty = rt
                         .type_of(argv[0])
                         .unwrap_or_else(|| panic!("dispatch: receiver is not a record"));
@@ -215,7 +244,12 @@ impl<M: ValueModel> ClosureComp<M> {
                             rt.sym_name(ty)
                         )
                     });
-                    top.invoke(top, rt, imp, &argv)
+                    // Publish this frame's env across the call (mirrors code.rs): a
+                    // collection inside the impl must trace our still-live locals.
+                    rt.env_stack.push(env.clone());
+                    let r = top.invoke(top, rt, imp, &argv);
+                    rt.env_stack.pop();
+                    r
                 })
             }
             Ir::FieldGet { site, field, obj } => {

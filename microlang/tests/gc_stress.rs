@@ -18,7 +18,10 @@
 //! fn: `set_var` must happen before any `Runtime` exists and must not race
 //! other threads' env reads.
 
-use microlang::{CodeSpace, HighBitModel, LowBitModel, NanBoxModel, Runtime, TreeWalk, ValueModel};
+use microlang::{
+    BytecodeVm, ClosureComp, CodeSpace, HighBitModel, LowBitModel, NanBoxModel, Runtime, TreeWalk,
+    ValueModel,
+};
 
 /// (name, source, expected) — a battery covering the axes that carry heap
 /// pointers across safepoints: closures + captures, lists, vectors, dispatch,
@@ -233,6 +236,32 @@ fn gc_stress_battery_across_tiers_and_models() {
     run_battery::<NanBoxModel>(&|| Box::new(TreeWalk), "TreeWalk/NanBox", &[]);
     run_battery::<LowBitModel>(&|| Box::new(microlang::CekMachine), "CEK/LowBit", &["dispatch"]);
     run_battery::<NanBoxModel>(&|| Box::new(microlang::CekMachine), "CEK/NanBox", &["dispatch"]);
+
+    // The EMIT tier (bytecode VM) and the closure-compiler tier: same rooting
+    // hammer. The VM's operand `Vec<u64>` is invisible to the collector, so its
+    // live entries must be published across every call safepoint; the compiler
+    // builds `argv`/`callee` bare across arg evaluation. Both reach the pressure
+    // safepoint at their call boundary now (they polled none before).
+    //
+    // The bytecode tier genuinely lacks record dispatch and field access
+    // (DefMethod/Dispatch/FieldGet panic loudly; TreeWalk/ClosureComp cover
+    // them), so every model skips the two dispatch/field entries.
+    //
+    // `bignum` additionally skips on the LowBit/HighBit models: their
+    // model-EMITTED multiply is a raw `MulRaw` on the tagged bits (the whole
+    // point of the capstone — arithmetic that differs by representation), which
+    // wraps at 64 bits with NO overflow-to-BigInt promotion. That promotion
+    // lives only on the `Slow` → `rt.prim` path, which is exactly what the
+    // NanBox model emits for arithmetic — so Bytecode/NanBox keeps `bignum`.
+    // (bignum still runs on TreeWalk/CEK/JIT/ClosureComp and Bytecode/NanBox.)
+    let bc_raw_skip = &["bignum", "dispatch", "oldyoung-records"];
+    let bc_nanbox_skip = &["dispatch", "oldyoung-records"];
+    run_battery::<LowBitModel>(&|| Box::new(BytecodeVm::<LowBitModel>::new()), "Bytecode/LowBit", bc_raw_skip);
+    run_battery::<HighBitModel>(&|| Box::new(BytecodeVm::<HighBitModel>::new()), "Bytecode/HighBit", bc_raw_skip);
+    run_battery::<NanBoxModel>(&|| Box::new(BytecodeVm::<NanBoxModel>::new()), "Bytecode/NanBox", bc_nanbox_skip);
+    run_battery::<LowBitModel>(&|| Box::new(ClosureComp::<LowBitModel>::new()), "ClosureComp/LowBit", &[]);
+    run_battery::<HighBitModel>(&|| Box::new(ClosureComp::<HighBitModel>::new()), "ClosureComp/HighBit", &[]);
+    run_battery::<NanBoxModel>(&|| Box::new(ClosureComp::<NanBoxModel>::new()), "ClosureComp/NanBox", &[]);
 
     #[cfg(feature = "jit")]
     {

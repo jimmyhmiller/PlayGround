@@ -327,10 +327,40 @@ impl<M: ModelEmit> BytecodeVm<M> {
                     stack.push(M::R::enc_bool(r != 0));
                 }
                 Op::Call(argc) => {
+                    // The operand stack is a plain `Vec<u64>` the collector cannot
+                    // see, so every live tagged value on it (this call's callee and
+                    // args, AND every completed sub-expression result sitting below —
+                    // e.g. a partly-built enclosing call's earlier arg) would dangle
+                    // across the pressure-GC safepoint this call reaches. Publish the
+                    // WHOLE stack on the shadow stack, which the collector rewrites in
+                    // place, then re-read every slot after. (At a call boundary the
+                    // stack holds only completed, TAGGED results: the raw transients
+                    // from `Truthy`/`CmpLtRaw`/`Sar` are always consumed within their
+                    // own emitted sequence with no call between, so none is live here.)
                     let n = *argc as usize;
-                    let args = stack.split_off(stack.len() - n);
-                    let callee = stack.pop().expect("call: empty stack");
+                    let sp = stack.len();
+                    let base = rt.root_depth();
+                    for &v in stack.iter() {
+                        rt.push_root(v);
+                    }
+                    // Publish this caller frame's env so a collection fired DEEP inside
+                    // the callee traces our still-live locals (the callee's lexical
+                    // parent chain does not reach its caller) — mirrors code.rs.
+                    rt.env_stack.push(locals.clone());
+                    // The safepoint: pressure GC (on by default) may collect here and
+                    // relocate everything just rooted; the rooted slots are rewritten.
+                    rt.safepoint(locals);
+                    let callee = rt.root_get(base + sp - n - 1);
+                    let args: Vec<u64> = (base + sp - n..base + sp).map(|i| rt.root_get(i)).collect();
                     let r = top.invoke(top, rt, callee, &args);
+                    rt.env_stack.pop();
+                    // Copy the surviving lower stack back from its (rewritten) roots,
+                    // drop the rooted region, and push the result.
+                    for i in 0..sp - n - 1 {
+                        stack[i] = rt.root_get(base + i);
+                    }
+                    stack.truncate(sp - n - 1);
+                    rt.truncate_roots(base);
                     stack.push(r);
                 }
                 Op::Ret => return stack.pop().unwrap_or_else(M::R::enc_nil),
