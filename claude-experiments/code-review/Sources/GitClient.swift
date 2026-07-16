@@ -61,9 +61,16 @@ enum GitClient {
         }
     }
 
+    /// Read-only git invocation. `--no-optional-locks` keeps this app's
+    /// background polling from ever taking .git/index.lock, which would
+    /// collide with the user's own commits in the same repo.
+    private static func readOnly(_ args: [String]) -> [String] {
+        ["git", "--no-optional-locks"] + args
+    }
+
     /// "owner/repo" if origin points at GitHub.
     static func remoteSlug(repo: URL) async -> String? {
-        let r = await Shell.run(["git", "remote", "get-url", "origin"], cwd: repo)
+        let r = await Shell.run(readOnly(["remote", "get-url", "origin"]), cwd: repo)
         guard r.ok else { return nil }
         let url = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let range = url.range(of: "github.com") else { return nil }
@@ -78,7 +85,7 @@ enum GitClient {
     // MARK: - Working tree
 
     static func status(repo: URL) async -> [StatusEntry] {
-        let r = await Shell.run(["git", "status", "--porcelain"], cwd: repo)
+        let r = await Shell.run(readOnly(["status", "--porcelain"]), cwd: repo)
         guard r.ok else { return [] }
         var entries: [StatusEntry] = []
         for line in r.stdout.components(separatedBy: "\n") where line.count > 3 {
@@ -98,8 +105,8 @@ enum GitClient {
 
     static func workingTree(repo: URL) async -> WorkingTreeState {
         async let statusEntries = status(repo: repo)
-        async let unstagedRun = Shell.run(["git", "diff", "--no-ext-diff"], cwd: repo)
-        async let stagedRun = Shell.run(["git", "diff", "--cached", "--no-ext-diff"], cwd: repo)
+        async let unstagedRun = Shell.run(readOnly(["diff", "--no-ext-diff"]), cwd: repo)
+        async let stagedRun = Shell.run(readOnly(["diff", "--cached", "--no-ext-diff"]), cwd: repo)
 
         var state = WorkingTreeState()
         state.entries = await statusEntries

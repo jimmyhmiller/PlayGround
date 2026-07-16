@@ -27,6 +27,9 @@ struct PersistedState: Codable {
         "Use a descriptive name here.",
     ]
     var reviews: [String: ReviewLocalState] = [:]
+    // Optional so older state files still decode.
+    var hiddenProjects: Set<String>?
+    var projectOrder: [String]?
 }
 
 enum Persistence {

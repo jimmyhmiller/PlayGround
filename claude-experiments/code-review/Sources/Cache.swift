@@ -7,6 +7,7 @@ struct AppCache: Codable {
     var prs: [String: [PullRequest]] = [:]
     var wtCounts: [String: Int] = [:]
     var needsAuth: Set<String> = []
+    var authIssues: [String: AccessIssue]?
     var expanded: Set<String> = []
     var prDiffs: [String: String] = [:]
     var prComments: [String: [RemoteComment]] = [:]

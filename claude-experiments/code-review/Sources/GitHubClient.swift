@@ -4,6 +4,42 @@ struct GHError: Error {
     let message: String
 }
 
+/// Why a repo's pull requests can't be read with the current credentials.
+/// Each case has a different fix, so they're kept apart.
+enum AccessIssue: Equatable, Codable {
+    /// The org enforces SAML SSO and this token isn't authorized for it.
+    /// GitHub hands back the exact authorization URL — use it.
+    case sso(url: String?, org: String?)
+    /// Private/nonexistent to this account: needs a different login.
+    case denied
+
+    var shortLabel: String {
+        switch self {
+        case .sso(_, let org):
+            return org.map { "\($0) SSO required" } ?? "org SSO required"
+        case .denied:
+            return "no access"
+        }
+    }
+
+    var actionLabel: String {
+        switch self {
+        case .sso: return "Authorize…"
+        case .denied: return "Sign in…"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .sso(_, let org):
+            let name = org ?? "this organization"
+            return "Your GitHub token isn't authorized for \(name) (SAML SSO). Opens GitHub in your browser to grant access."
+        case .denied:
+            return "This account can't see this repo's pull requests. Sign in with a GitHub account that can."
+        }
+    }
+}
+
 enum GitHubClient {
     static func currentLogin() async -> String? {
         let r = await Shell.run(["gh", "api", "user", "-q", ".login"])
@@ -111,15 +147,40 @@ enum GitHubClient {
         URL(string: "https://github.com/\(slug)/pull/\(number)")
     }
 
-    /// True when the failure smells like "this account can't see that repo"
-    /// (private repo, missing SSO grant, expired credentials) rather than a
-    /// transient or parsing problem.
-    static func isAccessError(_ message: String) -> Bool {
+    /// Classifies a gh failure as an access problem the user can fix, or nil
+    /// when it's something else (network, rate limit, parse) that deserves a
+    /// real error rather than being quietly hidden.
+    static func accessIssue(from message: String) -> AccessIssue? {
         let m = message.lowercased()
-        return m.contains("could not resolve to a repository")
+        if m.contains("saml") || m.contains("sso") {
+            return .sso(url: ssoURL(in: message), org: ssoOrg(in: message))
+        }
+        if m.contains("could not resolve to a repository")
             || m.contains("http 404") || m.contains("http 403") || m.contains("http 401")
-            || m.contains("not found") || m.contains("saml") || m.contains("sso")
-            || m.contains("authentication") || m.contains("gh auth login")
-            || m.contains("bad credentials")
+            || m.contains("bad credentials") || m.contains("gh auth login")
+            || m.contains("requires authentication") {
+            return .denied
+        }
+        return nil
+    }
+
+    /// Pulls the "Authorize in your web browser: <url>" link out of gh's message.
+    private static func ssoURL(in message: String) -> String? {
+        guard let range = message.range(of: "https://github.com/", options: .caseInsensitive) else { return nil }
+        let tail = message[range.lowerBound...]
+        let url = tail.prefix { !$0.isWhitespace }
+        return url.isEmpty ? nil : String(url)
+    }
+
+    /// "https://github.com/enterprises/vercel/sso?…" -> "vercel"
+    private static func ssoOrg(in message: String) -> String? {
+        guard let urlStr = ssoURL(in: message),
+              let url = URL(string: urlStr) else { return nil }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        if let idx = parts.firstIndex(where: { $0 == "enterprises" || $0 == "orgs" }),
+           idx + 1 < parts.count {
+            return parts[idx + 1]
+        }
+        return nil
     }
 }

@@ -46,6 +46,10 @@ final class AppStore: ObservableObject {
     @Published var wtCounts: [String: Int] = [:]
     @Published var projectFilter: String = ""
     @Published var needsAuth: Set<String> = []
+    @Published var authIssues: [String: AccessIssue] = [:]
+    @Published var hiddenProjects: Set<String> = []
+    @Published var projectOrder: [String] = []
+    @Published var showHidden = false
 
     // Selection & screens
     @Published var selection: Selection = .none
@@ -88,11 +92,14 @@ final class AppStore: ObservableObject {
         persisted = Persistence.load()
         cache = CacheStore.load()
         savedReplies = persisted.savedReplies
+        hiddenProjects = persisted.hiddenProjects ?? []
+        projectOrder = persisted.projectOrder ?? []
         // Render instantly from the last known state; refresh in the background.
         slugs = cache.slugs
         prsByProject = cache.prs
         wtCounts = cache.wtCounts
         needsAuth = cache.needsAuth
+        authIssues = cache.authIssues ?? [:]
         expanded = cache.expanded
         Task { await bootstrap() }
     }
@@ -105,22 +112,16 @@ final class AppStore: ObservableObject {
             expanded.insert(first.id)
         }
         if let l = await GitHubClient.currentLogin() { login = l }
-        // Refresh expanded projects plus the most recently active repos.
-        for project in projects where expanded.contains(project.id) {
-            ensureProjectLoaded(project)
-        }
-        for project in projects.prefix(6) {
-            ensureProjectLoaded(project)
-        }
+        // Load tree + PR status for every project (throttled) so the sidebar
+        // colors are meaningful at a glance; cached results show instantly.
+        await loadAllProjects()
     }
 
     func refresh() {
         refreshedThisSession.removeAll()
-        Task { projects = await GitClient.discoverProjects(root: Self.codeRoot) }
-        for id in Array(expanded) {
-            if let p = projects.first(where: { $0.id == id }) {
-                ensureProjectLoaded(p, force: true)
-            }
+        Task {
+            projects = await GitClient.discoverProjects(root: Self.codeRoot)
+            await loadAllProjects(force: true)
         }
         switch selection {
         case .none:
@@ -146,50 +147,206 @@ final class AppStore: ObservableObject {
         if prsByProject[project.id] == nil {
             loadingPRs.insert(project.id)
         }
-        Task {
-            async let slugTask = GitClient.remoteSlug(repo: project.path)
-            async let statusTask = GitClient.status(repo: project.path)
-            let slug = await slugTask
-            let statusEntries = await statusTask
+        Task { await loadProject(project) }
+    }
 
-            var prs: [PullRequest]?
-            var error: String?
-            var denied = false
-            if slug != nil {
-                switch await GitHubClient.prList(repo: project.path) {
-                case .success(let list):
-                    prs = list
-                case .failure(let e):
-                    if GitHubClient.isAccessError(e.message) {
-                        denied = true
-                    } else {
-                        error = e.message.isEmpty ? "could not load pull requests" : e.message
-                    }
+    /// How many projects get an eager GitHub PR fetch on launch/refresh. The
+    /// tree scan finds every clone under ~/Documents/Code (third-party ones
+    /// included), and hitting GitHub for all of them would be slow and
+    /// pointless — the rest load when expanded.
+    private static let prPriorityLimit = 30
+
+    /// Refreshes every project's local git status (cheap), then fetches PRs for
+    /// the projects nearest the top of the user's order. Hidden projects are
+    /// skipped entirely.
+    private func loadAllProjects(force: Bool = false) async {
+        let targets = orderedProjects.filter {
+            (force || !refreshedThisSession.contains($0.id)) && !hiddenProjects.contains($0.id)
+        }
+        for t in targets { refreshedThisSession.insert(t.id) }
+
+        // Phase 1 — local only, so dirty dots light up across the whole list fast.
+        await runLimited(targets, limit: 12) { await self.loadLocal($0) }
+
+        // Phase 2 — GitHub, for the projects the user actually keeps on top.
+        let priority = targets.filter { slugs[$0.id] != nil }.prefix(Self.prPriorityLimit)
+        await runLimited(Array(priority), limit: 6) { await self.loadPRs($0) }
+
+        for p in targets where !priority.contains(where: { $0.id == p.id }) {
+            loadingPRs.remove(p.id)
+        }
+        CacheStore.save(cache)
+    }
+
+    private func runLimited(_ items: [Project], limit: Int, work: @escaping (Project) async -> Void) async {
+        await withTaskGroup(of: Void.self) { group in
+            var idx = 0
+            while idx < items.count, idx < limit {
+                let p = items[idx]
+                group.addTask { await work(p) }
+                idx += 1
+            }
+            for await _ in group {
+                if idx < items.count {
+                    let p = items[idx]
+                    group.addTask { await work(p) }
+                    idx += 1
                 }
             }
-            if let slug {
-                slugs[project.id] = slug
-                cache.slugs[project.id] = slug
-            }
-            wtCounts[project.id] = statusEntries.count
-            cache.wtCounts[project.id] = statusEntries.count
+        }
+    }
 
-            if denied {
+    /// Local git facts: remote slug + working-tree dirtiness. No network.
+    private func loadLocal(_ project: Project) async {
+        async let slugTask = GitClient.remoteSlug(repo: project.path)
+        async let statusTask = GitClient.status(repo: project.path)
+        let slug = await slugTask
+        let statusEntries = await statusTask
+
+        if let slug {
+            slugs[project.id] = slug
+            cache.slugs[project.id] = slug
+        }
+        wtCounts[project.id] = statusEntries.count
+        cache.wtCounts[project.id] = statusEntries.count
+        if slug == nil, prsByProject[project.id] == nil {
+            prsByProject[project.id] = []
+            loadingPRs.remove(project.id)
+        }
+    }
+
+    /// Open pull requests from GitHub for one project.
+    private func loadPRs(_ project: Project) async {
+        guard slugs[project.id] != nil else {
+            loadingPRs.remove(project.id)
+            return
+        }
+        var error: String?
+        switch await GitHubClient.prList(repo: project.path) {
+        case .success(let list):
+            needsAuth.remove(project.id)
+            cache.needsAuth.remove(project.id)
+            authIssues[project.id] = nil
+            cache.authIssues?[project.id] = nil
+            prsByProject[project.id] = list
+            cache.prs[project.id] = list
+        case .failure(let e):
+            if let issue = GitHubClient.accessIssue(from: e.message) {
                 needsAuth.insert(project.id)
                 cache.needsAuth.insert(project.id)
+                authIssues[project.id] = issue
+                cache.authIssues = (cache.authIssues ?? [:]).merging([project.id: issue]) { _, new in new }
                 if prsByProject[project.id] == nil { prsByProject[project.id] = [] }
-            } else if let prs {
-                needsAuth.remove(project.id)
-                cache.needsAuth.remove(project.id)
-                prsByProject[project.id] = prs
-                cache.prs[project.id] = prs
-            } else if slug == nil, prsByProject[project.id] == nil {
-                prsByProject[project.id] = []
+            } else {
+                error = e.message.isEmpty ? "could not load pull requests" : e.message
             }
-            prErrors[project.id] = error
-            loadingPRs.remove(project.id)
+        }
+        prErrors[project.id] = error
+        loadingPRs.remove(project.id)
+        scheduleCacheSave()
+    }
+
+    private func loadProject(_ project: Project) async {
+        await loadLocal(project)
+        await loadPRs(project)
+    }
+
+    private var cacheSavePending = false
+    private func scheduleCacheSave() {
+        guard !cacheSavePending else { return }
+        cacheSavePending = true
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            cacheSavePending = false
             CacheStore.save(cache)
         }
+    }
+
+    // MARK: - Project ordering & hiding
+
+    /// Projects in the user's chosen order; anything unordered falls back to
+    /// most-recently-active.
+    var orderedProjects: [Project] {
+        let orderIndex = Dictionary(uniqueKeysWithValues: projectOrder.enumerated().map { ($1, $0) })
+        return projects.sorted { a, b in
+            switch (orderIndex[a.id], orderIndex[b.id]) {
+            case let (x?, y?): return x < y
+            case (.some, .none): return true
+            case (.none, .some): return false
+            case (.none, .none): return a.modified > b.modified
+            }
+        }
+    }
+
+    func moveProject(_ id: String, before targetID: String) {
+        var order = orderedProjects.map(\.id)
+        guard let from = order.firstIndex(of: id),
+              let to = order.firstIndex(of: targetID),
+              from != to else { return }
+        order.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+        projectOrder = order
+        persistProjectPrefs()
+    }
+
+    func moveProjectToTop(_ id: String) {
+        var order = orderedProjects.map(\.id)
+        order.removeAll { $0 == id }
+        order.insert(id, at: 0)
+        projectOrder = order
+        persistProjectPrefs()
+    }
+
+    func moveProjectToBottom(_ id: String) {
+        var order = orderedProjects.map(\.id)
+        order.removeAll { $0 == id }
+        order.append(id)
+        projectOrder = order
+        persistProjectPrefs()
+    }
+
+    func hideProject(_ id: String) {
+        hiddenProjects.insert(id)
+        expanded.remove(id)
+        cache.expanded = expanded
+        persistProjectPrefs()
+        scheduleCacheSave()
+    }
+
+    func unhideProject(_ id: String) {
+        hiddenProjects.remove(id)
+        persistProjectPrefs()
+        if let p = projects.first(where: { $0.id == id }) {
+            ensureProjectLoaded(p)
+        }
+    }
+
+    private func persistProjectPrefs() {
+        persisted.hiddenProjects = hiddenProjects
+        persisted.projectOrder = projectOrder
+        Persistence.save(persisted)
+    }
+
+    // MARK: - At-a-glance project status
+
+    /// Sidebar square color summarizing GitHub state, plus a dirty-tree flag.
+    func glance(for project: Project) -> (color: Color, dirty: Bool) {
+        let dirty = (wtCounts[project.id] ?? 0) > 0
+        guard let prs = prsByProject[project.id] else {
+            return (Color(hex: 0x3a3a40), dirty) // not loaded yet
+        }
+        let open = prs.filter { $0.state == "OPEN" }
+        if open.isEmpty {
+            return (Color(hex: 0x5a5a60), dirty)
+        }
+        if open.contains(where: { $0.checks.failed > 0 || $0.reviewDecision == "CHANGES_REQUESTED" }) {
+            return (Th.red, dirty)
+        }
+        let allSettled = open.allSatisfy { $0.checks.pending == 0 }
+        let allApproved = open.allSatisfy { $0.reviewDecision == "APPROVED" }
+        if allSettled && allApproved {
+            return (Th.green, dirty)
+        }
+        return (Th.yellow, dirty)
     }
 
     func toggleProject(_ project: Project) {
@@ -204,6 +361,23 @@ final class AppStore: ObservableObject {
     }
 
     // MARK: - GitHub auth
+
+    /// Resolves an access problem the way GitHub actually wants it resolved:
+    /// SSO grants happen in the browser, missing logins go through `gh auth login`.
+    func resolveAccess(for projectID: String) {
+        switch authIssues[projectID] {
+        case .sso(let urlString, let org):
+            if let urlString, let url = URL(string: urlString) {
+                NSWorkspace.shared.open(url)
+                showToast("Authorize \(org ?? "the org") in your browser, then press ⌘R")
+            } else {
+                // gh didn't hand back a link; re-running the request prints one.
+                startGitHubAuth()
+            }
+        case .denied, .none:
+            startGitHubAuth()
+        }
+    }
 
     /// Hands the interactive `gh auth login` flow to Terminal (it needs a TTY),
     /// so the user can add the account this machine is missing.
