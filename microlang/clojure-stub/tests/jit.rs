@@ -24,6 +24,34 @@ fn arithmetic_and_fns() {
     assert_eq!(jit("(map inc [1 2 3])"), "(2 3 4)");
 }
 
+/// The INLINED bitwise fast path (`emit_guarded_arith`), which `even?`/`odd?`
+/// ride once per element in any filtered pipeline. It untags to raw i64, does
+/// the op, and retags with NO range check — sound only because the fixnum range
+/// is closed under and/or/xor. These are the cases where an untag/retag or
+/// sign-handling slip would hide: negatives (two's complement), both fixnum
+/// boundaries, and operands that are NOT fixnums (a promoted bigint), which
+/// must fall through the guard to the runtime and still answer correctly.
+#[test]
+fn bitwise_fast_path_on_jit() {
+    // two's complement: the sign bit participates
+    assert_eq!(jit("(bit-and -3 1)"), "1");
+    assert_eq!(jit("(bit-or -5 3)"), "-5");
+    assert_eq!(jit("(bit-xor -7 2)"), "-5");
+    assert_eq!(jit("(bit-and -1 -1)"), "-1");
+    assert_eq!(jit("(bit-xor -1 0)"), "-1");
+    assert_eq!(jit("[(bit-and 12 10) (bit-or 12 10) (bit-xor 12 10)]"), "[8 14 6]");
+    // the fixnum boundaries stay in range (no retag overflow)
+    assert_eq!(jit("(bit-and 4611686018427387903 -1)"), "4611686018427387903");
+    assert_eq!(jit("(bit-and -4611686018427387904 -1)"), "-4611686018427387904");
+    // a promoted bigint is not a fixnum: the guard must route it to the runtime
+    assert_eq!(jit("(bit-and 10000000000000000000001N 1)"), "1");
+    assert_eq!(jit("(even? 10000000000000000000000N)"), "true");
+    // even?/odd? are `(zero? (bit-and n 1))`, and agree on negatives
+    assert_eq!(jit("[(even? -4) (odd? -3) (even? 0) (odd? 7)]"), "[true true true true]");
+    // and a non-integer is a CATCHABLE throw, not a process panic
+    assert_eq!(jit("(try (even? 1.5) (catch Exception e :caught))"), ":caught");
+}
+
 #[test]
 fn persistent_vector_on_jit() {
     assert_eq!(jit("(conj [1 2] 3)"), "[1 2 3]");

@@ -22,20 +22,95 @@ Or inspect one entry graph:
 cargo run -- build fixtures/incremental/01-initial/entry.js
 ```
 
+Build and execute an actual single-chunk bundle:
+
+```console
+cargo run -- bundle fixtures/bundle/entry.ts dist/bundle.js
+node dist/bundle.js
+```
+
+Keep the dataflow and module-fact store alive while watching for edits:
+
+```console
+cargo run -- watch fixtures/bundle/entry.ts dist/bundle.js
+```
+
+The watch path reparses and transforms only changed or newly discovered modules,
+sends weighted module/edge updates to a persistent Differential session, and
+rewrites the deterministic single output chunk after the revision frontier is
+complete.
+
 Run the test suite:
 
 ```console
 cargo test
 ```
 
+Run a release-mode scale test with 100,000 modules, a fanout of eight, and four
+imports per module:
+
+```console
+cargo build --release
+/usr/bin/time -l target/release/diffpack scale 100000 8 4
+```
+
+The CSV output separates weighted input updates, Differential propagation, and
+output-delta handling. Peak resident memory is reported by `/usr/bin/time` on
+macOS. The benchmark applies one initial fact batch, changes one module's
+content hash with two updates, then retracts one leaf module and its edges.
+
+Recorded results and methodology are in [docs/SCALING.md](docs/SCALING.md).
+
+Run the full on-disk bundler benchmark, including Oxc transformation, resolution,
+Differential loading, and chunk emission:
+
+```console
+cargo build --release
+/usr/bin/time -l target/release/diffpack bundle-scale 10000 4
+```
+
+Run the same build and edit without constructing a Differential dataflow. This
+mode recomputes reachability using a conventional parallel traversal:
+
+```console
+/usr/bin/time -l target/release/diffpack bundle-scale-direct 10000 4
+```
+
+Compare both approaches on an edit that removes an entry import and makes part
+of the module graph unreachable:
+
+```console
+target/release/diffpack bundle-scale-direct-deps 10000 4
+target/release/diffpack bundle-scale-deps 10000 4
+```
+
+Module discovery, Oxc transformation, dependency resolution, benchmark corpus
+generation, and chunk rendering run on Rayon's worker pool. It defaults to the
+machine's available parallelism; set `RAYON_NUM_THREADS` to control it, including
+`RAYON_NUM_THREADS=1` for a single-thread baseline. The persistent Differential
+session supports multiple Timely workers via `DIFFPACK_DATAFLOW_THREADS`; it
+defaults to one because this recursive module-graph workload benchmarks faster
+without cross-worker coordination.
+
+End-to-end results are in
+[docs/BUNDLER_SCALING.md](docs/BUNDLER_SCALING.md).
+
 ## Current boundary
 
-- Only relative imports are resolved. Bare package imports produce diagnostics.
+- Relative imports and packages are resolved with `oxc_resolver`, including
+  package `exports`, extension aliases, and `node_modules` traversal.
+- Oxc strips TypeScript and lowers JSX before module linking.
+- Static ESM, CommonJS `require`, JSON, re-exports, and literal dynamic imports
+  are supported by the single-chunk runtime.
 - Source and AST payloads do not enter the dataflow; tuples contain owned module
   IDs and content hashes.
 - Logical time is a monotonically increasing revision number. Inputs advance
   after each revision, allowing Differential's traces to compact old history.
-- The output is a deterministic reachable-module manifest, not executable code.
+- Dynamic imports are currently folded into the single chunk rather than split.
+- Imported bindings are lowered to runtime property reads at module evaluation;
+  full ESM live-import semantics and top-level await are not implemented yet.
+- CSS, assets, source maps, tree shaking, minification, and production chunk
+  splitting are not implemented.
 
-The next useful increment is a persistent watch loop plus Oxc transform/codegen
-artifacts keyed by `(module, content hash, build context)`.
+The next useful increment is symbol-level linking/tree shaking followed by a
+real chunk graph for dynamic imports and shared dependencies.

@@ -260,8 +260,24 @@
 (defn neg? [n] (%lt n 0))
 (defn zero? [n] (%num-eq n 0))
 (defn identity [x] x)
-(defn even? [n] (%num-eq (%mod n 2) 0))
-(defn odd? [n] (%num-eq (%mod n 2) 1))
+;; `(bit-and n 1)`, NOT `(mod n 2)` — exactly as clojure.core and cljs.core
+;; both write it, and for a blunt reason: ints here are i128, and `%mod` on an
+;; i128 is a SOFTWARE division (compiler_builtins' u128_div_rem), hundreds of
+;; cycles. `even?` is a per-element predicate — it was the single hottest frame
+;; in the `transduce` benchmark, above every closure call in the xform chain.
+;; Two's complement makes the bitwise form agree on negatives, and `%bit-and`
+;; carries the tower (a promoted bigint answers correctly).
+;;
+;; The `integer?` guard is what clojure.core's own `even?` uses, and both hosts
+;; throw on a non-integer. `(even? 1.5)` used to reach `%mod` and PANIC the
+;; process — uncatchable — where Clojure raises a catchable
+;; IllegalArgumentException. (`integer?` is defined further down and resolves
+;; late; nothing on the bootstrap path calls `even?`/`odd?`.)
+(defn even? [n]
+  (if (integer? n)
+      (%num-eq (%bit-and n 1) 0)
+      (throw (str "Argument must be an integer: " n))))
+(defn odd? [n] (not (even? n)))
 
 ;; ─────────────── low-level helpers (prim-based; used by the protocol impls) ────
 (defn elems [c] (field c 0))

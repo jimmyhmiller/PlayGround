@@ -1175,7 +1175,7 @@ Artifacts
   cimport  <header.h>                      generate Coil bindings from a C header
 
 Reference
-  guide                                    the full language guide (docs/LANGUAGE_GUIDE.md)
+  guide                                    the full language guide
   --help, -h                               this message
 
 Common flags (build / run / emit-obj)
@@ -1189,7 +1189,15 @@ Common flags (build / run / emit-obj)
   --emit-header <h>     also write a C header
   --use <file.coil>     load a metaprogram
 
-Compiler internals (dump-*) exist for debugging; see selfhost/RECIPE.md.
+Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
+  dump-read      the reader's s-expressions
+  dump-ast       the parsed AST
+  dump-load      the AST with imports resolved
+  expand         macro-expanded source
+  dump-expand    the expanded AST
+  dump-resolved  after name resolution
+  dump-checked   after type checking
+  dump-mono      after monomorphization
 ")
 
 ; argv[2] for the commands that take a <file>. Missing => NULL, and every caller

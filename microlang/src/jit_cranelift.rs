@@ -4161,7 +4161,22 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // the runtime's promoting arithmetic on overflow / non-fixnum operands.
             // That gives the JIT the full numeric tower (bignum promotion, floats,
             // mixed) the tree-walker has. This is the emit half of codegen axis #2.
-            Ir::Prim(p @ (Prim::Add | Prim::Sub | Prim::Mul | Prim::Lt | Prim::Eq), args) => {
+            // BitAnd/Or/Xor ride the same guard: `even?`/`odd?` are
+            // `(zero? (bit-and n 1))` (as in clojure.core), so a bitwise op is a
+            // PER-ELEMENT predicate in any filtered pipeline. Through the slow
+            // prim shim it measured ~10ns; the arithmetic ops beside it were
+            // already inlined and it was not.
+            Ir::Prim(
+                p @ (Prim::Add
+                | Prim::Sub
+                | Prim::Mul
+                | Prim::Lt
+                | Prim::Eq
+                | Prim::BitAnd
+                | Prim::BitOr
+                | Prim::BitXor),
+                args,
+            ) => {
                 let a = self.compile::<M>(&args[0], false);
                 let b = self.compile::<M>(&args[1], false);
                 self.emit_guarded_arith::<M>(*p, a, b)
@@ -4761,7 +4776,23 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.def_var(result, tagged);
                 self.fb.ins().jump(merge, &[]);
             }
-            _ => unreachable!("emit_guarded_arith only handles +,-,*,<"),
+            Prim::BitAnd | Prim::BitOr | Prim::BitXor => {
+                // No range check: the fixnum range is symmetric about 0 and
+                // closed under and/or/xor, so a bitwise op on two in-range
+                // values is always in range. (Sign bits included — the
+                // encoding is two's complement, so `(bit-and -3 1)` is 1.)
+                let x = M::emit_untag(self, a);
+                let y = M::emit_untag(self, b);
+                let r = match op {
+                    Prim::BitAnd => self.fb.ins().band(x, y),
+                    Prim::BitOr => self.fb.ins().bor(x, y),
+                    _ => self.fb.ins().bxor(x, y),
+                };
+                let tagged = M::emit_tag(self, r);
+                self.fb.def_var(result, tagged);
+                self.fb.ins().jump(merge, &[]);
+            }
+            _ => unreachable!("emit_guarded_arith only handles +,-,*,<,=,and/or/xor"),
         }
 
         // ── slow path: promote / handle non-fixnum operands in the runtime ──

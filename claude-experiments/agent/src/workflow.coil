@@ -1,0 +1,572 @@
+(module workflow)
+
+(const MAX_NODES 7)
+(const OUTPUT_CAPACITY 4096)
+(const STATUS_PENDING 0)
+(const STATUS_READY 1)
+(const STATUS_RUNNING 2)
+(const STATUS_DONE 3)
+(const STATUS_WAITING 4)
+(const STATUS_FAILED 5)
+(const KIND_AGENT 0)
+(const KIND_APPROVAL 1)
+(const MAX_WORKFLOWS 8)
+
+(extern open :cc c [(ptr i8) i32] (-> i32))
+(extern read :cc c [i32 (ptr i8) i64] (-> i64))
+(extern close :cc c [i32] (-> i32))
+(extern malloc :cc c [i64] (-> (ptr i8)))
+(extern fopen :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern fread :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
+(extern fwrite :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
+(extern fclose :cc c [(ptr i8)] (-> i32))
+(extern system :cc c [(ptr i8)] (-> i32))
+(extern printf :cc c [(ptr i8) ...] (-> i32))
+
+(defstruct WorkflowNode
+  [(name (ptr i8))
+   (title (ptr i8))
+   (prompt (ptr i8))
+   (kind i64)
+   (dependencyNameA (ptr i8))
+   (dependencyNameB (ptr i8))
+   (dependencyA i64)
+   (dependencyB i64)])
+
+(defstruct WorkflowProgram
+  [(name (ptr i8))
+   (runner (ptr i8))
+   (path (ptr i8))
+   (nodeCount i64)
+   (nodes (array WorkflowNode 7))
+   (source (ptr i8))])
+
+(defstruct Runtime
+  [(program WorkflowProgram)
+   (statuses (array i64 7))
+   (started i64)
+   (outputs (ptr i8))])
+
+(defstruct Catalog [(count i64) (runtimes (array (ptr Runtime) 8))])
+
+(defn string-length [(text (ptr i8))] (-> i64)
+  (let [(mut length) 0]
+    (loop (if (icmp-eq (load (index text (load length))) (cast i8 0))
+            (break)
+            (store! length (+ (load length) 1))))
+    (load length)))
+
+(defn strings-equal [(left (ptr i8)) (right (ptr i8))] (-> bool)
+  (let [(mut position) 0]
+    (loop (let [leftByte (load (index left (load position)))
+                rightByte (load (index right (load position)))]
+            (if (icmp-ne leftByte rightByte)
+              (break false)
+              (if (icmp-eq leftByte (cast i8 0))
+                (break true)
+                (store! position (+ (load position) 1))))))))
+
+(defn starts-with [(text (ptr i8)) (prefix (ptr i8))] (-> bool)
+  (let [(mut position) 0]
+    (loop (let [prefixByte (load (index prefix (load position)))]
+            (if (icmp-eq prefixByte (cast i8 0))
+              (break true)
+              (if (icmp-ne (load (index text (load position))) prefixByte)
+                (break false)
+                (store! position (+ (load position) 1))))))))
+
+(defn trim-left [(text (ptr i8))] (-> (ptr i8))
+  (if (icmp-eq (load text) (cast i8 32)) (trim-left (index text 1)) text))
+
+(defn read-source [(path (ptr i8))] (-> (ptr i8))
+  (let [descriptor (open path (cast i32 0))
+        buffer (malloc 65536)]
+    (if (icmp-lt descriptor (cast i32 0))
+      (do (store! buffer (cast i8 0)) buffer)
+      (let [count (read descriptor buffer 65535)]
+        (do
+          (close descriptor)
+          (store! (index buffer (if (icmp-lt count 0) 0 count)) (cast i8 0))
+          buffer)))))
+
+(defn allocate-buffer [(capacity i64)] (-> (ptr i8))
+  (malloc capacity))
+
+(defn node-at [(program (mut WorkflowProgram)) (node i64)] (-> (mut WorkflowNode))
+  (index (field program nodes) node))
+
+(defn find-node [(program WorkflowProgram) (name (ptr i8))] (-> i64)
+  (let [(mut node) 0]
+    (loop (if (>= (load node) (load (field program nodeCount)))
+            (break -1)
+            (if (strings-equal (load (field (index (field program nodes) (load node)) name)) name)
+              (break (load node))
+              (store! node (+ (load node) 1)))))))
+
+(defn initialize-node [(node (mut WorkflowNode)) (name (ptr i8)) (kind i64)] (-> i64)
+  (do
+    (store! (field node name) name)
+    (store! (field node title) name)
+    (store! (field node prompt) c"")
+    (store! (field node kind) kind)
+    (store! (field node dependencyNameA) (cast (ptr i8) 0))
+    (store! (field node dependencyNameB) (cast (ptr i8) 0))
+    (store! (field node dependencyA) -1)
+    (store! (field node dependencyB) -1)
+    0))
+
+(defn parse-dependencies [(node (mut WorkflowNode)) (text (ptr i8))] (-> i64)
+  (if (strings-equal text c"none")
+    0
+    (let [(mut position) 0]
+      (do
+        (store! (field node dependencyNameA) text)
+        (loop (let [byte (load (index text (load position)))]
+                (if (icmp-eq byte (cast i8 0))
+                  (break)
+                  (if (icmp-eq byte (cast i8 44))
+                    (do
+                      (store! (index text (load position)) (cast i8 0))
+                      (store! (field node dependencyNameB) (trim-left (index text (+ (load position) 1))))
+                      (break))
+                    (store! position (+ (load position) 1))))))
+        0))))
+
+(defn parse-line [(program (mut WorkflowProgram)) (line (ptr i8)) (current i64)] (-> i64)
+  (cond (or (icmp-eq (load line) (cast i8 0)) (icmp-eq (load line) (cast i8 35))) current
+        (starts-with line c"workflow ") (do (store! (field program name) (index line 9)) current)
+        (starts-with line c"runner ") (do (store! (field program runner) (index line 7)) current)
+        (starts-with line c"agent ")
+          (let [nodeIndex (load (field program nodeCount))]
+            (if (>= nodeIndex MAX_NODES)
+              current
+              (do
+                (initialize-node (mut (node-at (mut program) nodeIndex)) (index line 6) KIND_AGENT)
+                (store! (field program nodeCount) (+ nodeIndex 1))
+                nodeIndex)))
+        (starts-with line c"approval ")
+          (let [nodeIndex (load (field program nodeCount))]
+            (if (>= nodeIndex MAX_NODES)
+              current
+              (do
+                (initialize-node (mut (node-at (mut program) nodeIndex)) (index line 9) KIND_APPROVAL)
+                (store! (field program nodeCount) (+ nodeIndex 1))
+                nodeIndex)))
+        (< current 0) current
+        (starts-with line c"title ") (do (store! (field (node-at (mut program) current) title) (index line 6)) current)
+        (starts-with line c"prompt ")
+          (do (store! (field (node-at (mut program) current) prompt) (index line 7)) current)
+        (starts-with line c"after ")
+          (do (parse-dependencies (mut (node-at (mut program) current)) (index line 6)) current)
+        current))
+
+(defn resolve-dependencies [(program (mut WorkflowProgram))] (-> i64)
+  (for [nodeIndex 0
+        7]
+    (if (< nodeIndex (load (field program nodeCount)))
+      (let [(mut node) (node-at (mut program) nodeIndex)
+            firstName (load (field node dependencyNameA))
+            secondName (load (field node dependencyNameB))]
+        (do
+          (if (icmp-ne (cast i64 firstName) 0)
+            (store! (field node dependencyA) (find-node program firstName))
+            0)
+          (if (icmp-ne (cast i64 secondName) 0)
+            (store! (field node dependencyB) (find-node program secondName))
+            0)
+          0))
+      0))
+  0)
+
+(defn parse-program [(path (ptr i8))] (-> WorkflowProgram)
+  (let [(mut program) (zeroed WorkflowProgram)
+        source (read-source path)
+        (mut lineStart) source
+        (mut cursor) source
+        (mut current) -1]
+    (do
+      (store! (field program name) c"invalid-workflow")
+      (store! (field program runner) c"codex")
+      (store! (field program path) path)
+      (store! (field program source) source)
+      (loop (let [byte (load (load cursor))]
+              (if (or (icmp-eq byte (cast i8 10)) (icmp-eq byte (cast i8 0)))
+                (do
+                  (if (and (!= (load cursor) source)
+                           (icmp-eq (load (index (load cursor) -1)) (cast i8 13)))
+                    (store! (index (load cursor) -1) (cast i8 0))
+                    0)
+                  (store! (load cursor) (cast i8 0))
+                  (store! current (parse-line (mut program) (load lineStart) (load current)))
+                  (if (icmp-eq byte (cast i8 0))
+                    (break)
+                    (do
+                      (store! cursor (index (load cursor) 1))
+                      (store! lineStart (load cursor))
+                      0)))
+                (do (store! cursor (index (load cursor) 1)) 0))))
+      (resolve-dependencies (mut program))
+      (load program))))
+
+(defn load-runtime [(path (ptr i8))] (-> Runtime)
+  (let [(mut runtime) (zeroed Runtime)]
+    (do
+      (store! (field runtime program) (parse-program path))
+      (store! (field runtime outputs) (malloc (* MAX_NODES OUTPUT_CAPACITY)))
+      (for [node 0
+            7]
+        (store! (index (field runtime statuses) node) STATUS_PENDING))
+      (load runtime))))
+
+(defn catalog-runtime [(catalog Catalog) (workflowIndex i64)] (-> (ptr Runtime))
+  (if (and (>= workflowIndex 0) (< workflowIndex (load (field catalog count))))
+    (load (index (field catalog runtimes) workflowIndex))
+    (cast (ptr Runtime) 0)))
+
+(defn catalog-count [(catalog Catalog)] (-> i64)
+  (load (field catalog count)))
+
+(defn catalog-name [(catalog Catalog) (workflowIndex i64)] (-> (ptr i8))
+  (let [runtime (catalog-runtime catalog workflowIndex)]
+    (if (= (cast i64 runtime) 0)
+      c"No workflow"
+      (load (field (field runtime program) name)))))
+
+(defn catalog-path [(catalog Catalog) (workflowIndex i64)] (-> (ptr i8))
+  (let [runtime (catalog-runtime catalog workflowIndex)]
+    (if (= (cast i64 runtime) 0)
+      c""
+      (load (field (field runtime program) path)))))
+
+(defn refresh-catalog [(catalog (mut Catalog))] (-> i64)
+  (do
+    (system c"mkdir -p .flowline workflows; find workflows -maxdepth 1 -type f -name '*.flow' -print | sort > .flowline/catalog.txt")
+    (let [source (read-source c".flowline/catalog.txt")
+          (mut lineStart) source
+          (mut cursor) source]
+      (do
+        (store! (field catalog count) 0)
+        (loop (let [byte (load (load cursor))]
+                (if (or (icmp-eq byte (cast i8 10)) (icmp-eq byte (cast i8 0)))
+                  (do
+                    (store! (load cursor) (cast i8 0))
+                    (if (and (icmp-ne (load (load lineStart)) (cast i8 0))
+                             (< (load (field catalog count)) MAX_WORKFLOWS))
+                      (let [runtime (cast (ptr Runtime) (malloc (sizeof Runtime)))
+                            runtimeValue (load-runtime (load lineStart))]
+                        (if (> (load (field (field runtimeValue program) nodeCount)) 0)
+                          (do
+                            (store! runtime runtimeValue)
+                            (store! (index (field catalog runtimes) (load (field catalog count))) runtime)
+                            (store! (field catalog count) (+ (load (field catalog count)) 1))
+                            0)
+                          0))
+                      0)
+                    (if (icmp-eq byte (cast i8 0))
+                      (break)
+                      (do
+                        (store! cursor (index (load cursor) 1))
+                        (store! lineStart (load cursor))
+                        0)))
+                  (do (store! cursor (index (load cursor) 1)) 0))))
+        (load (field catalog count))))))
+
+(defn load-catalog [] (-> Catalog)
+  (let [(mut catalog) (zeroed Catalog)]
+    (do
+      (refresh-catalog (mut catalog))
+      (load catalog))))
+
+(defn write-text-file [(path (ptr i8)) (text (ptr i8))] (-> i64)
+  (let [file (fopen path c"wb")]
+    (if (= (cast i64 file) 0)
+      -1
+      (do
+        (fwrite text 1 (string-length text) file)
+        (fclose file)
+        0))))
+
+(defn start-creation [(request (ptr i8))] (-> i64)
+  (do
+    (system c"mkdir -p .flowline workflows; rm -f .flowline/create.done .flowline/create.failed .flowline/create.output .flowline/created.path")
+    (write-text-file c".flowline/create.request" request)
+    (system c"(codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/create.output - < prompts/create-workflow.md > .flowline/create.events 2>&1 && find workflows -maxdepth 1 -type f -name '*.flow' -newer .flowline/create.request -print | sort | head -n 1 > .flowline/created.path && test -s .flowline/created.path && touch .flowline/create.done || touch .flowline/create.failed) &")
+    0))
+
+(defn creation-state [] (-> i64)
+  (cond (file-exists c".flowline/create.done") 2
+        (file-exists c".flowline/create.failed") 3
+        1))
+
+(defn program-name [(runtime Runtime)] (-> (ptr i8))
+  (load (field (field runtime program) name)))
+
+(defn program-path [(runtime Runtime)] (-> (ptr i8))
+  (load (field (field runtime program) path)))
+
+(defn node-count [(runtime Runtime)] (-> i64)
+  (load (field (field runtime program) nodeCount)))
+
+(defn created-workflow-index [(catalog Catalog)] (-> i64)
+  (let [createdPath (read-source c".flowline/created.path")
+        (mut position) 0]
+    (do
+      (loop (let [byte (load (index createdPath (load position)))]
+              (if (or (icmp-eq byte (cast i8 0))
+                      (or (icmp-eq byte (cast i8 10)) (icmp-eq byte (cast i8 13))))
+                (do
+                  (store! (index createdPath (load position)) (cast i8 0))
+                  (break))
+                (store! position (+ (load position) 1)))))
+      (let [(mut workflowIndex) 0]
+        (loop (if (>= (load workflowIndex) (load (field catalog count)))
+                (break -1)
+                (if (strings-equal createdPath (catalog-path catalog (load workflowIndex)))
+                  (break (load workflowIndex))
+                  (store! workflowIndex (+ (load workflowIndex) 1)))))))))
+
+(defn prompt-path [(node i64)] (-> (ptr i8))
+  (case node 0
+        c".flowline/node0.prompt" 1
+        c".flowline/node1.prompt" 2
+        c".flowline/node2.prompt" 3
+        c".flowline/node3.prompt" 4
+        c".flowline/node4.prompt" 5
+        c".flowline/node5.prompt" c".flowline/node6.prompt"))
+
+(defn output-path [(node i64)] (-> (ptr i8))
+  (case node 0
+        c".flowline/node0.output" 1
+        c".flowline/node1.output" 2
+        c".flowline/node2.output" 3
+        c".flowline/node3.output" 4
+        c".flowline/node4.output" 5
+        c".flowline/node5.output" c".flowline/node6.output"))
+
+(defn done-path [(node i64)] (-> (ptr i8))
+  (case node 0
+        c".flowline/node0.done" 1
+        c".flowline/node1.done" 2
+        c".flowline/node2.done" 3
+        c".flowline/node3.done" 4
+        c".flowline/node4.done" 5
+        c".flowline/node5.done" c".flowline/node6.done"))
+
+(defn failed-path [(node i64)] (-> (ptr i8))
+  (case node 0
+        c".flowline/node0.failed" 1
+        c".flowline/node1.failed" 2
+        c".flowline/node2.failed" 3
+        c".flowline/node3.failed" 4
+        c".flowline/node4.failed" 5
+        c".flowline/node5.failed" c".flowline/node6.failed"))
+
+(defn launch-command [(node i64)] (-> (ptr i8))
+  (case node 0
+        c"rm -f .flowline/node0.done .flowline/node0.failed .flowline/node0.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node0.output - < .flowline/node0.prompt > .flowline/node0.events 2>&1 && touch .flowline/node0.done || touch .flowline/node0.failed) &"
+          1
+        c"rm -f .flowline/node1.done .flowline/node1.failed .flowline/node1.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node1.output - < .flowline/node1.prompt > .flowline/node1.events 2>&1 && touch .flowline/node1.done || touch .flowline/node1.failed) &"
+          2
+        c"rm -f .flowline/node2.done .flowline/node2.failed .flowline/node2.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node2.output - < .flowline/node2.prompt > .flowline/node2.events 2>&1 && touch .flowline/node2.done || touch .flowline/node2.failed) &"
+          3
+        c"rm -f .flowline/node3.done .flowline/node3.failed .flowline/node3.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node3.output - < .flowline/node3.prompt > .flowline/node3.events 2>&1 && touch .flowline/node3.done || touch .flowline/node3.failed) &"
+          4
+        c"rm -f .flowline/node4.done .flowline/node4.failed .flowline/node4.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node4.output - < .flowline/node4.prompt > .flowline/node4.events 2>&1 && touch .flowline/node4.done || touch .flowline/node4.failed) &"
+          5
+        c"rm -f .flowline/node5.done .flowline/node5.failed .flowline/node5.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node5.output - < .flowline/node5.prompt > .flowline/node5.events 2>&1 && touch .flowline/node5.done || touch .flowline/node5.failed) &"
+          c"rm -f .flowline/node6.done .flowline/node6.failed .flowline/node6.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node6.output - < .flowline/node6.prompt > .flowline/node6.events 2>&1 && touch .flowline/node6.done || touch .flowline/node6.failed) &"))
+
+(defn file-exists [(path (ptr i8))] (-> bool)
+  (let [file (fopen path c"rb")]
+    (if (icmp-eq (cast i64 file) 0)
+      false
+      (do (fclose file) true))))
+
+(defn write-prompt [(node i64) (prompt (ptr i8))] (-> i64)
+  (let [file (fopen (prompt-path node) c"wb")]
+    (if (icmp-eq (cast i64 file) 0)
+      -1
+      (do
+        (fwrite prompt 1 (string-length prompt) file)
+        (fclose file)
+        0))))
+
+(defn output-buffer [(runtime (mut Runtime)) (node i64)] (-> (ptr i8))
+  (index (load (field runtime outputs)) (* node OUTPUT_CAPACITY)))
+
+(defn load-output [(runtime (mut Runtime)) (node i64)] (-> i64)
+  (let [file (fopen (output-path node) c"rb")
+        buffer (output-buffer (mut runtime) node)]
+    (if (icmp-eq (cast i64 file) 0)
+      (do (store! buffer (cast i8 0)) 0)
+      (let [count (fread buffer 1 (- OUTPUT_CAPACITY 1) file)]
+        (do
+          (store! (index buffer count) (cast i8 0))
+          (fclose file)
+          count)))))
+
+(defn dependency-complete [(runtime Runtime) (dependency i64)] (-> bool)
+  (or (< dependency 0) (= (load (index (field runtime statuses) dependency)) STATUS_DONE)))
+
+(defn dependencies-complete [(runtime Runtime) (node i64)] (-> bool)
+  (let [programNode (index (field (field runtime program) nodes) node)]
+    (and (dependency-complete runtime (load (field programNode dependencyA)))
+         (dependency-complete runtime (load (field programNode dependencyB))))))
+
+(defn dependency-failed [(runtime Runtime) (dependency i64)] (-> bool)
+  (and (>= dependency 0) (= (load (index (field runtime statuses) dependency)) STATUS_FAILED)))
+
+(defn dependencies-failed [(runtime Runtime) (node i64)] (-> bool)
+  (let [programNode (index (field (field runtime program) nodes) node)]
+    (or (dependency-failed runtime (load (field programNode dependencyA)))
+        (dependency-failed runtime (load (field programNode dependencyB))))))
+
+(defn start [(runtime (mut Runtime))] (-> i64)
+  (do
+    (system c"mkdir -p .flowline")
+    (for [node 0
+          7]
+      (do
+        (store! (index (field runtime statuses) node) STATUS_PENDING)
+        (store! (output-buffer (mut runtime) node) (cast i8 0))
+        0))
+    (store! (field runtime started) 1)
+    0))
+
+(defn approve [(runtime (mut Runtime)) (node i64)] (-> i64)
+  (if (= (load (index (field runtime statuses) node)) STATUS_WAITING)
+    (do (store! (index (field runtime statuses) node) STATUS_DONE) 0)
+    0))
+
+(defn tick [(runtime (mut Runtime))] (-> i64)
+  (if (= (load (field runtime started)) 0)
+    0
+    (do
+      (for [node 0
+            7]
+        (if (= (load (index (field runtime statuses) node)) STATUS_RUNNING)
+          (cond (file-exists (done-path node))
+                  (do
+                    (load-output (mut runtime) node)
+                    (store! (index (field runtime statuses) node) STATUS_DONE)
+                    0)
+                (file-exists (failed-path node))
+                  (do
+                    (load-output (mut runtime) node)
+                    (store! (index (field runtime statuses) node) STATUS_FAILED)
+                    0)
+                0)
+          0))
+      (for [node 0
+            7]
+        (if (and (< node (load (field (field runtime program) nodeCount)))
+                 (= (load (index (field runtime statuses) node)) STATUS_PENDING))
+          (cond (dependencies-failed runtime node) (do (store! (index (field runtime statuses) node) STATUS_FAILED) 0)
+                (dependencies-complete runtime node)
+                  (if (= (load (field (index (field (field runtime program) nodes) node) kind)) KIND_APPROVAL)
+                    (do (store! (index (field runtime statuses) node) STATUS_WAITING) 0)
+                    (do (store! (index (field runtime statuses) node) STATUS_READY) 0))
+                0)
+          0))
+      (for [node 0
+            7]
+        (if (= (load (index (field runtime statuses) node)) STATUS_READY)
+          (let [programNode (index (field (field runtime program) nodes) node)]
+            (do
+              (write-prompt node (load (field programNode prompt)))
+              (if (= (cast i64 (system (launch-command node))) 0)
+                (store! (index (field runtime statuses) node) STATUS_RUNNING)
+                (store! (index (field runtime statuses) node) STATUS_FAILED))
+              0))
+          0))
+      0)))
+
+(defn node-title [(runtime Runtime) (node i64)] (-> (ptr i8))
+  (if (and (>= node 0) (< node (load (field (field runtime program) nodeCount))))
+    (load (field (index (field (field runtime program) nodes) node) title))
+    c"Unknown node"))
+
+(defn node-status [(runtime Runtime) (node i64)] (-> i64)
+  (if (and (>= node 0) (< node MAX_NODES))
+    (load (index (field runtime statuses) node))
+    STATUS_PENDING))
+
+(defn node-kind [(runtime Runtime) (node i64)] (-> i64)
+  (if (and (>= node 0) (< node (load (field (field runtime program) nodeCount))))
+    (load (field (index (field (field runtime program) nodes) node) kind))
+    KIND_AGENT))
+
+(defn node-dependency [(runtime Runtime) (node i64) (dependencySlot i64)] (-> i64)
+  (if (and (>= node 0) (< node (load (field (field runtime program) nodeCount))))
+    (let [programNode (index (field (field runtime program) nodes) node)]
+      (if (= dependencySlot 0)
+        (load (field programNode dependencyA))
+        (load (field programNode dependencyB))))
+    -1))
+
+(defn node-output [(runtime (ptr Runtime)) (node i64)] (-> (ptr i8))
+  (index (load (field runtime outputs)) (* node OUTPUT_CAPACITY)))
+
+(defn is-started [(runtime Runtime)] (-> bool)
+  (= (load (field runtime started)) 1))
+
+(defn is-finished [(runtime Runtime)] (-> bool)
+  (let [(mut finished) (load (field runtime started))]
+    (do
+      (for [node 0
+            7]
+        (if (< node (load (field (field runtime program) nodeCount)))
+          (let [status (load (index (field runtime statuses) node))]
+            (if (and (!= status STATUS_DONE) (!= status STATUS_FAILED))
+              (store! finished 0)
+              0))
+          0))
+      (= (load finished) 1))))
+
+(defn status-label [(status i64)] (-> (ptr i8))
+  (case status 0
+        c"PENDING" 1
+        c"READY" 2
+        c"RUNNING" 3
+        c"DONE" 4
+        c"AWAITING" c"FAILED"))
+
+(defn dump [(runtime Runtime)] (-> i64)
+  (do
+    (printf c"{\"workflow\":\"%s\",\"runner\":\"%s\",\"nodes\":["
+            (load (field (field runtime program) name))
+            (load (field (field runtime program) runner)))
+    (for [node 0
+          7]
+      (if (< node (load (field (field runtime program) nodeCount)))
+        (let [programNode (index (field (field runtime program) nodes) node)]
+          (do
+            (if (> node 0) (do (printf c",") 0) 0)
+            (printf c"{\"name\":\"%s\",\"title\":\"%s\",\"kind\":%lld,\"after\":[%lld,%lld]}"
+                    (load (field programNode name))
+                    (load (field programNode title))
+                    (load (field programNode kind))
+                    (load (field programNode dependencyA))
+                    (load (field programNode dependencyB)))
+            0))
+        0))
+    (printf c"]}\n")
+    0))
+
+(defn dump-catalog [(catalog Catalog)] (-> i64)
+  (do
+    (printf c"{\"count\":%lld,\"workflows\":[" (load (field catalog count)))
+    (for [workflowIndex 0
+          8]
+      (if (< workflowIndex (load (field catalog count)))
+        (let [runtime (load (index (field catalog runtimes) workflowIndex))]
+          (do
+            (if (> workflowIndex 0) (do (printf c",") 0) 0)
+            (printf c"{\"name\":\"%s\",\"path\":\"%s\",\"nodes\":%lld}"
+                    (load (field (field runtime program) name))
+                    (load (field (field runtime program) path))
+                    (load (field (field runtime program) nodeCount)))
+            0))
+        0))
+    (printf c"]}\n")
+    0))

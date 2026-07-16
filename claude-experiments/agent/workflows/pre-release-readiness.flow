@@ -1,0 +1,36 @@
+workflow Flowline Pre-Release Readiness
+runner codex
+
+agent inspect-workflow-engine
+title Inspect workflow DSL and runtime
+prompt Inspect README.md, src/workflow.coil, prompts/create-workflow.md, and workflows/refund.flow. Review parsing, dependency resolution, concurrent readiness, agent launching, output capture, catalog refresh, approval handling, and the documented DSL limits; report concrete release blockers, risks, and supporting file references. Do not modify files.
+after none
+
+agent verify-native-build
+title Verify native build and checks
+prompt Inspect Coil.toml, src/main.coil, src/workflow.coil, and src/raylib.coil, then run coil build, ./flowline --check-workflow, and ./flowline --check-catalog from the repository root. Report exact commands, exit results, structured check output, Raylib linkage or asset failures, and any release blocker; do not change source files.
+after none
+
+agent review-interface-behavior
+title Review Raylib interface behavior
+prompt Inspect README.md, src/main.coil, and src/raylib.coil. Trace AppState and InputFrame transitions through workflow selection, run requests, node inspection, creation modal input, approval, resizing, and rendering; assess whether visible behavior matches the documented interface and report concrete usability or correctness risks with file references. Do not modify files or launch the graphical application.
+after none
+
+agent combine-technical-evidence
+title Combine engine and build evidence
+prompt Read .flowline/node0.output and .flowline/node1.output produced by this run. Reconcile the workflow-engine review with native build and CLI evidence, identify contradictions or missing verification, and return a concise technical go or no-go assessment with blockers. Do not modify files and do not draft a release summary.
+after inspect-workflow-engine, verify-native-build
+
+agent prepare-approval-evidence
+title Prepare approval evidence
+prompt Read .flowline/node2.output and .flowline/node3.output produced by this run. Check that interface findings and technical evidence are complete enough for a human release decision, then list only unresolved blockers, material risks, and missing evidence. Do not modify files and do not draft a release summary.
+after review-interface-behavior, combine-technical-evidence
+
+approval approve-release-summary
+title Approve release summary preparation
+after prepare-approval-evidence
+
+agent prepare-release-summary
+title Prepare release summary
+prompt Human approval to prepare the release summary has been granted. Read .flowline/node0.output, .flowline/node1.output, .flowline/node2.output, .flowline/node3.output, and .flowline/node4.output from this run, then produce a concise pre-release summary covering workflow DSL and runtime findings, native build and CLI results, interface behavior, blockers, residual risks, and a final go or no-go recommendation. Do not modify files or publish a release.
+after approve-release-summary

@@ -2,9 +2,10 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ExportAllDeclaration, ExportNamedDeclaration, Expression, ImportDeclaration, ImportExpression,
+    CallExpression, ExportAllDeclaration, ExportNamedDeclaration, Expression, ImportDeclaration,
+    ImportExpression,
 };
-use oxc_ast_visit::Visit;
+use oxc_ast_visit::{Visit, walk::walk_call_expression};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
@@ -38,6 +39,13 @@ impl<'a> Visit<'a> for DependencyVisitor {
         if let Some(source) = &declaration.source {
             self.dependencies.push(source.value.to_string());
         }
+    }
+
+    fn visit_call_expression(&mut self, expression: &CallExpression<'a>) {
+        if let Some(literal) = expression.common_js_require() {
+            self.dependencies.push(literal.value.to_string());
+        }
+        walk_call_expression(self, expression);
     }
 }
 
@@ -77,13 +85,14 @@ mod tests {
                 export * from "./c.js";
                 const d = import("./d.js");
                 const ignored = import(`./${name}.js`);
+                const commonjs = require("./e.cjs");
             "#,
         );
 
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         assert_eq!(
             parsed.dependencies,
-            ["./a.js", "./b.js", "./c.js", "./d.js"]
+            ["./a.js", "./b.js", "./c.js", "./d.js", "./e.cjs"]
         );
     }
 }

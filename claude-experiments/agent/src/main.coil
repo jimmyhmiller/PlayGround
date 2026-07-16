@@ -1,0 +1,931 @@
+(module app)
+(import "src/raylib.coil" :as raylib)
+(import "src/workflow.coil" :as workflow)
+
+(extern sin :cc c [f64] (-> f64))
+(extern fmod :cc c [f64 f64] (-> f64))
+
+(const WINDOW_FLAGS 8292)
+(const LEFT_WIDTH 244)
+(const RIGHT_WIDTH 476)
+(const HEADER_HEIGHT 64)
+(const KEY_ENTER 257)
+(const KEY_BACKSPACE 259)
+(const CREATION_CAPACITY 2048)
+
+(defstruct AppState
+  [(selectedProject i64)
+   (selectedNode i64)
+   (approvalGranted i64)
+   (runRequested i64)
+   (approvalRequested i64)
+   (catalog (ptr workflow.Catalog))
+   (runtime (ptr workflow.Runtime))
+   (activeRuntime (ptr workflow.Runtime))
+   (creationOpen i64)
+   (creationRequested i64)
+   (creationState i64)
+   (creationLength i64)
+   (creationText (ptr i8))
+   (mono raylib.Font)
+   (monoMedium raylib.Font)
+   (sans raylib.Font)])
+
+(defstruct InputFrame
+  [(mouseHorizontal f64)
+   (mouseVertical f64)
+   (pressed i64)
+   (typedCharacter i64)
+   (backspacePressed i64)
+   (enterPressed i64)])
+
+(defn color-alpha [(red i64) (green i64) (blue i64) (alpha i64)] (-> raylib.Color)
+  (let [value (alloc-stack raylib.Color)]
+    (do
+      (store! (field value r) (cast u8 red))
+      (store! (field value g) (cast u8 green))
+      (store! (field value b) (cast u8 blue))
+      (store! (field value a) (cast u8 alpha))
+      (load value))))
+
+(defn color [(red i64) (green i64) (blue i64)] (-> raylib.Color)
+  (color-alpha red green blue 255))
+
+(defn vector [(horizontal f64) (vertical f64)] (-> raylib.Vector2)
+  (let [value (alloc-stack raylib.Vector2)]
+    (do
+      (store! (field value x) (cast f32 horizontal))
+      (store! (field value y) (cast f32 vertical))
+      (load value))))
+
+(defn rectangle [(left f64) (top f64) (width f64) (height f64)] (-> raylib.Rectangle)
+  (let [value (alloc-stack raylib.Rectangle)]
+    (do
+      (store! (field value x) (cast f32 left))
+      (store! (field value y) (cast f32 top))
+      (store! (field value width) (cast f32 width))
+      (store! (field value height) (cast f32 height))
+      (load value))))
+
+(defn draw-text [(font raylib.Font) (text (ptr i8)) (left f64) (top f64) (size f64) (tint raylib.Color)] (-> i64)
+  (do
+    (raylib.DrawTextEx (load font) text (vector left top) (cast f32 (* size 1.16)) (cast f32 0.18) tint)
+    0))
+
+(defn fill-rectangle [(left f64) (top f64) (width f64) (height f64) (tint raylib.Color)] (-> i64)
+  (do (raylib.DrawRectangleRec (rectangle left top width height) tint) 0))
+
+(defn stroke-rectangle [(left f64) (top f64) (width f64) (height f64) (thickness f64) (tint raylib.Color)] (-> i64)
+  (do (raylib.DrawRectangleLinesEx (rectangle left top width height) (cast f32 thickness) tint) 0))
+
+(defn line [(fromHorizontal f64)
+            (fromVertical f64)
+            (toHorizontal f64)
+            (toVertical f64)
+            (thickness f64)
+            (tint raylib.Color)] (-> i64)
+  (do
+    (raylib.DrawLineEx (vector fromHorizontal fromVertical) (vector toHorizontal toVertical) (cast f32 thickness) tint)
+    0))
+
+(defn project-name [(project i64)] (-> (ptr i8))
+  (case project 0
+        c"Refund Resolver" 1
+        c"Contract Analyzer" 2
+        c"Support Triage" 3
+        c"Data Migration" c"Release Notes"))
+
+(defn project-subtitle [(project i64)] (-> (ptr i8))
+  (case project 0
+        c"billing / duplicate charge" 1
+        c"legal / MSA review" 2
+        c"support / iOS session bug" 3
+        c"infra / orders table" c"eng / shipping v2.14"))
+
+(defn project-path [(project i64)] (-> (ptr i8))
+  (case project 0
+        c"refund-resolver" 1
+        c"contract-analyzer" 2
+        c"support-triage" 3
+        c"data-migration" c"release-notes"))
+
+(defn display-project-name [(state AppState) (project i64)] (-> (ptr i8))
+  (workflow.catalog-name (load (field state catalog)) project))
+
+(defn display-project-path [(state AppState) (project i64)] (-> (ptr i8))
+  (workflow.catalog-path (load (field state catalog)) project))
+
+(defn display-project-subtitle [(state AppState) (project i64)] (-> (ptr i8))
+  c"project workflow / codex")
+
+(defn accent [(project i64)] (-> raylib.Color)
+  (case project 0
+        (color 224 165 58) 1
+        (color 191 135 223) 2
+        (color 104 207 167) 3
+        (color 102 158 229) (color 224 113 98)))
+
+(defn refund-title [(node i64)] (-> (ptr i8))
+  (case node 0
+        c"Intake request" 1
+        c"Classify & route" 2
+        c"Policy lookup" 3
+        c"Account history" 4
+        c"Draft resolution" 5
+        c"Human approval" c"Issue refund"))
+
+(defn contract-title [(node i64)] (-> (ptr i8))
+  (case node 0
+        c"Ingest contract" 1
+        c"Classify clauses" 2
+        c"Risk scan" 3
+        c"Term extraction" 4
+        c"Draft summary" 5
+        c"Legal review" c"Export report"))
+
+(defn support-title [(node i64)] (-> (ptr i8))
+  (case node 0
+        c"Intake ticket" 1
+        c"Classify intent" 2
+        c"KB search" 3
+        c"Sentiment read" 4
+        c"Draft reply" 5
+        c"Agent review" c"Send reply"))
+
+(defn data-title [(node i64)] (-> (ptr i8))
+  (case node 0
+        c"Snapshot source" 1
+        c"Plan batches" 2
+        c"Schema mapping" 3
+        c"Validation" 4
+        c"Transform batch" 5
+        c"Approve cutover" c"Apply migration"))
+
+(defn release-title [(node i64)] (-> (ptr i8))
+  (case node 0
+        c"Collect PRs" 1
+        c"Group changes" 2
+        c"Summarize PRs" 3
+        c"Impact analysis" 4
+        c"Draft notes" 5
+        c"Editor review" c"Publish notes"))
+
+(defn node-title [(project i64) (node i64)] (-> (ptr i8))
+  (case project 0
+        (refund-title node) 1
+        (contract-title node) 2
+        (support-title node) 3
+        (data-title node) (release-title node)))
+
+(defn display-node-title [(state AppState) (project i64) (node i64)] (-> (ptr i8))
+  (workflow.node-title (load (field state runtime)) node))
+
+(defn refund-tag [(node i64)] (-> (ptr i8))
+  (case node 0
+        c"REQ-4821" 1
+        c"route" 2
+        c"policy-agent" 3
+        c"history-agent" 4
+        c"compose" 5
+        c"review" c"payout"))
+
+(defn project-tag [(project i64) (node i64)] (-> (ptr i8))
+  (if (= project 0)
+    (refund-tag node)
+    (case node 0
+          c"intake" 1
+          c"route" 2
+          c"sub-agent-a" 3
+          c"sub-agent-b" 4
+          c"compose" 5
+          c"review" c"execute")))
+
+(defn configure-font [(font raylib.Font)] (-> i64)
+  (do
+    (raylib.SetTextureFilter (load (field font texture)) (cast i32 TEXTURE_FILTER_BILINEAR))
+    0))
+
+(defn in-bounds [(horizontal f64) (vertical f64) (left f64) (top f64) (width f64) (height f64)] (-> bool)
+  (and (>= horizontal left)
+       (and (< horizontal (+ left width)) (and (>= vertical top) (< vertical (+ top height))))))
+
+(defn node-horizontal [(node i64) (center f64)] (-> f64)
+  (case node 2
+        (- center 150.0) 3
+        (+ center 150.0) center))
+
+(defn node-vertical [(node i64)] (-> f64)
+  (case node 0
+        144.0 1
+        279.0 2
+        424.0 3
+        424.0 4
+        569.0 5
+        704.0 839.0))
+
+(defn edit-creation-text [(state (mut AppState)) (input InputFrame)] (-> i64)
+  (let [text (load (field state creationText))
+        length (load (field state creationLength))
+        typedCharacter (load (field input typedCharacter))]
+    (do
+      (if (and (>= typedCharacter 32) (and (<= typedCharacter 126) (< length (- CREATION_CAPACITY 1))))
+        (do
+          (store! (index text length) (cast i8 typedCharacter))
+          (store! (index text (+ length 1)) (cast i8 0))
+          (store! (field state creationLength) (+ length 1))
+          0)
+        0)
+      (if (and (= (load (field input backspacePressed)) 1) (> (load (field state creationLength)) 0))
+        (let [nextLength (- (load (field state creationLength)) 1)]
+          (do
+            (store! (field state creationLength) nextLength)
+            (store! (index text nextLength) (cast i8 0))
+            0))
+        0)
+      0)))
+
+(defn apply-input [(state (mut AppState)) (input InputFrame) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (let [mouseHorizontal (load (field input mouseHorizontal))
+        mouseVertical (load (field input mouseVertical))
+        rightStart (- screenWidth RIGHT_WIDTH)
+        center (/ (cast f64 (+ LEFT_WIDTH rightStart)) 2.0)
+        catalog (load (field state catalog))]
+    (if (= (load (field state creationOpen)) 1)
+      (do
+        (edit-creation-text (mut state) input)
+        (if (or (= (load (field input enterPressed)) 1)
+                (and (= (load (field input pressed)) 1)
+                     (in-bounds mouseHorizontal
+                                mouseVertical
+                                (- (/ (cast f64 screenWidth) 2.0) 92.0)
+                                487.0
+                                184.0
+                                40.0)))
+          (if (> (load (field state creationLength)) 4)
+            (do
+              (store! (field state creationRequested) 1)
+              (store! (field state creationOpen) 0)
+              0)
+            0)
+          0)
+        0)
+      (if (= (load (field input pressed)) 0)
+        0
+        (do
+          (if (in-bounds mouseHorizontal mouseVertical 8.0 (cast f64 (- screenHeight 86)) 228.0 34.0)
+            (do
+              (store! (field state creationOpen) 1)
+              (store! (field state creationState) 0)
+              0)
+            0)
+          (for [project 0
+                8]
+            (if (and (< project (workflow.catalog-count catalog))
+                     (in-bounds mouseHorizontal mouseVertical 8.0 (cast f64 (+ 76 (* project 58))) 228.0 51.0))
+              (do
+                (store! (field state selectedProject) project)
+                (store! (field state runtime) (workflow.catalog-runtime catalog project))
+                (store! (field state selectedNode) 0)
+                (store! (field state approvalGranted) 0)
+                0)
+              0))
+          (for [node 0
+                7]
+            (if (and (< node (workflow.node-count (load (field state runtime))))
+                     (in-bounds mouseHorizontal
+                                mouseVertical
+                                (- (node-horizontal node center) 20.0)
+                                (- (node-vertical node) 20.0)
+                                40.0
+                                40.0))
+              (do (store! (field state selectedNode) node) 0)
+              0))
+          (if (and (= (workflow.node-status (load (field state runtime)) (load (field state selectedNode))) 4)
+                   (in-bounds mouseHorizontal
+                              mouseVertical
+                              (cast f64 (+ rightStart 20))
+                              (cast f64 (- screenHeight 174))
+                              112.0
+                              34.0))
+            (do (store! (field state approvalRequested) 1) 0)
+            0)
+          (if (in-bounds mouseHorizontal mouseVertical (cast f64 (- rightStart 214)) 14.0 116.0 34.0)
+            (do (store! (field state runRequested) 1) 0)
+            0)
+          0)))))
+
+(defn draw-grid [(left i64) (right i64) (height i64)] (-> i64)
+  (let [gridHorizontal (alloc-stack i64)
+        gridVertical (alloc-stack i64)]
+    (do
+      (store! gridHorizontal left)
+      (store! gridVertical HEADER_HEIGHT)
+      (while (< (load gridHorizontal) right)
+        (do
+          (line (cast f64 (load gridHorizontal))
+                (cast f64 HEADER_HEIGHT)
+                (cast f64 (load gridHorizontal))
+                (cast f64 height)
+                1.0
+                (color-alpha 14 20 27 150))
+          (store! gridHorizontal (+ (load gridHorizontal) 32))))
+      (while (< (load gridVertical) height)
+        (do
+          (line (cast f64 left)
+                (cast f64 (load gridVertical))
+                (cast f64 right)
+                (cast f64 (load gridVertical))
+                1.0
+                (color-alpha 14 20 27 150))
+          (store! gridVertical (+ (load gridVertical) 32))))
+      0)))
+
+(defn draw-projects [(state AppState) (height i64)] (-> i64)
+  (let [selected (load (field state selectedProject))
+        catalog (load (field state catalog))]
+    (do
+      (fill-rectangle 0.0 0.0 (cast f64 LEFT_WIDTH) (cast f64 height) (color 9 12 17))
+      (line (cast f64 (- LEFT_WIDTH 1)) 0.0 (cast f64 (- LEFT_WIDTH 1)) (cast f64 height) 1.0 (color 23 30 39))
+      (line 0.0 55.0 (cast f64 LEFT_WIDTH) 55.0 1.0 (color 20 26 34))
+      (stroke-rectangle 18.0 19.0 15.0 15.0 1.0 (accent selected))
+      (fill-rectangle 23.0 24.0 5.0 5.0 (accent selected))
+      (draw-text (field state monoMedium) c"flowline" 43.0 18.0 13.0 (color 223 229 236))
+      (draw-text (field state mono) c"v0.4" 198.0 21.0 9.0 (color 69 78 90))
+      (draw-text (field state monoMedium) c"PROJECTS" 16.0 64.0 9.0 (color 61 69 79))
+      (for [project 0
+            8]
+        (if (< project (workflow.catalog-count catalog))
+          (let [rowTop (+ 76 (* project 58))
+                active (= project selected)]
+            (do
+              (if active
+                (do
+                  (fill-rectangle 8.0 (cast f64 rowTop) 228.0 51.0 (color-alpha 224 165 58 17))
+                  (fill-rectangle 8.0 (cast f64 (+ rowTop 8)) 2.0 35.0 (accent project))
+                  0)
+                0)
+              (if active
+                (fill-rectangle 20.0 (cast f64 (+ rowTop 17)) 8.0 8.0 (accent project))
+                (stroke-rectangle 20.0 (cast f64 (+ rowTop 17)) 8.0 8.0 1.0 (accent project)))
+              (draw-text (field state monoMedium)
+                         (display-project-name state project)
+                         39.0
+                         (cast f64 (+ rowTop 10))
+                         12.0
+                         (if active (color 238 242 246) (color 107 116 128)))
+              (draw-text (field state mono)
+                         (display-project-subtitle state project)
+                         39.0
+                         (cast f64 (+ rowTop 29))
+                         9.5
+                         (color 76 85 97))
+              (if active
+                (do
+                  (raylib.DrawCircle (cast i32 220) (cast i32 (+ rowTop 22)) (cast f32 3.0) (accent project))
+                  0)
+                (do
+                  (raylib.DrawCircleLines (cast i32 220) (cast i32 (+ rowTop 22)) (cast f32 3.0) (color 42 51 63))
+                  0))
+              0))
+          0))
+      (stroke-rectangle 8.0 (cast f64 (- height 86)) 228.0 34.0 1.0 (color 35 44 56))
+      (draw-text (field state monoMedium)
+                 (case (load (field state creationState)) 1
+                       c"... CREATING WORKFLOW" 2
+                       c"+  WORKFLOW CREATED" 3
+                       c"!  CREATION FAILED" c"+  NEW WORKFLOW")
+                 20.0
+                 (cast f64 (- height 76))
+                 10.0
+                 (accent selected))
+      (line 0.0 (cast f64 (- height 41)) (cast f64 LEFT_WIDTH) (cast f64 (- height 41)) 1.0 (color 20 26 34))
+      (fill-rectangle 16.0 (cast f64 (- height 22)) 6.0 6.0 (color 42 51 63))
+      (draw-text (field state mono) c"DISK-BACKED WORKFLOW CATALOG" 30.0 (cast f64 (- height 26)) 8.5 (color 61 69 79))
+      0)))
+
+(defn draw-edge [(fromHorizontal f64)
+                 (fromVertical f64)
+                 (toHorizontal f64)
+                 (toVertical f64)
+                 (active bool)
+                 (tint raylib.Color)] (-> i64)
+  (let [middleVertical (/ (+ fromVertical toVertical) 2.0)
+        edgeColor (if active (load tint) (color-alpha 87 97 113 125))
+        thickness (if active 1.8 1.2)]
+    (do
+      (if (fcmp-eq fromHorizontal toHorizontal)
+        (line fromHorizontal fromVertical toHorizontal toVertical thickness edgeColor)
+        (do
+          (line fromHorizontal fromVertical fromHorizontal middleVertical thickness edgeColor)
+          (line fromHorizontal middleVertical toHorizontal middleVertical thickness edgeColor)
+          (line toHorizontal middleVertical toHorizontal toVertical thickness edgeColor)
+          0))
+      (if active
+        (let [travel (fmod (* (raylib.GetTime) 72.0) 34.0)]
+          (fill-rectangle (- toHorizontal 2.5) (- toVertical travel) 5.0 5.0 tint))
+        0)
+      0)))
+
+(defn draw-node-symbol [(horizontal f64) (vertical f64) (node i64) (status i64) (pulse f64) (tint raylib.Color)] (-> i64)
+  (cond (= status 2)
+          (do
+            (stroke-rectangle (- horizontal (+ 12.0 (* pulse 5.0)))
+                              (- vertical (+ 12.0 (* pulse 5.0)))
+                              (* 2.0 (+ 12.0 (* pulse 5.0)))
+                              (* 2.0 (+ 12.0 (* pulse 5.0)))
+                              1.0
+                              (color-alpha 224 165 58 (cast i64 (+ 55.0 (* pulse 55.0)))))
+            (fill-rectangle (- horizontal 7.5) (- vertical 7.5) 15.0 15.0 tint)
+            0)
+        (= status 3) (fill-rectangle (- horizontal 7.0) (- vertical 7.0) 14.0 14.0 (color-alpha 224 165 58 155))
+        (= status 4) (stroke-rectangle (- horizontal 7.0) (- vertical 7.0) 14.0 14.0 1.5 tint)
+        (= status 5) (stroke-rectangle (- horizontal 7.0) (- vertical 7.0) 14.0 14.0 1.5 (color 211 91 85))
+        (= node 1)
+          (do
+            (for [square 0
+                  3]
+              (fill-rectangle (+ (- horizontal 12.0) (cast f64 (* square 10)))
+                              (- vertical 2.5)
+                              5.0
+                              5.0
+                              (color-alpha 224 165 58 110)))
+            0)
+        (stroke-rectangle (- horizontal 6.5) (- vertical 6.5) 13.0 13.0 1.5 (color 61 69 79))))
+
+(defn draw-flow [(state AppState) (rightStart i64)] (-> i64)
+  (let [project (load (field state selectedProject))
+        selected (load (field state selectedNode))
+        center (/ (cast f64 (+ LEFT_WIDTH rightStart)) 2.0)
+        tint (accent project)
+        time (raylib.GetTime)
+        pulse (+ 1.0 (* 0.5 (sin (* time 4.0))))
+        runtime (load (field state runtime))]
+    (do
+      (for [node 0
+            7]
+        (if (< node (workflow.node-count runtime))
+          (do
+            (for [dependencySlot 0
+                  2]
+              (let [dependency (workflow.node-dependency runtime node dependencySlot)]
+                (if (>= dependency 0)
+                  (draw-edge (node-horizontal dependency center)
+                             (+ (node-vertical dependency) 20.0)
+                             (node-horizontal node center)
+                             (- (node-vertical node) 20.0)
+                             (or (= (workflow.node-status runtime node) 2)
+                                 (= (workflow.node-status runtime node) 4))
+                             tint)
+                  0)))
+            0)
+          0))
+      (line center 68.0 center 124.0 1.0 (color-alpha 224 165 58 80))
+      (line center 859.0 center 892.0 1.0 (color-alpha 224 165 58 80))
+      (for [node 0
+            7]
+        (if (< node (workflow.node-count runtime))
+          (let [horizontal (node-horizontal node center)
+                vertical (node-vertical node)
+                chosen (= node selected)
+                status (workflow.node-status runtime node)]
+            (do
+              (if chosen (stroke-rectangle (- horizontal 16.0) (- vertical 16.0) 32.0 32.0 1.0 tint) 0)
+              (draw-node-symbol horizontal vertical node status pulse tint)
+              (if (= node 2)
+                (do
+                  (draw-text (field state mono)
+                             (display-node-title state project node)
+                             (- horizontal 175.0)
+                             (- vertical 6.0)
+                             10.5
+                             (if chosen (load tint) (color 88 97 113)))
+                  (draw-text (field state monoMedium)
+                             c"[3]"
+                             (- horizontal 62.0)
+                             (- vertical 6.0)
+                             10.0
+                             (if chosen (load tint) (color 127 136 148)))
+                  (line (- horizontal 34.0) vertical (- horizontal 10.0) vertical 1.0 (color-alpha 224 165 58 100))
+                  0)
+                (do
+                  (line (+ horizontal 10.0) vertical (+ horizontal 34.0) vertical 1.0 (color-alpha 224 165 58 100))
+                  (draw-text (field state monoMedium)
+                             (case node 0 c"[1]" 1 c"[2]" 3 c"[4]" 4 c"[5]" 5 c"[6]" c"[7]")
+                             (+ horizontal 42.0)
+                             (- vertical 6.0)
+                             10.0
+                             (if chosen (load tint) (color 127 136 148)))
+                  (draw-text (field state mono)
+                             (display-node-title state project node)
+                             (+ horizontal 70.0)
+                             (- vertical 6.0)
+                             10.5
+                             (if chosen (load tint) (color 88 97 113)))
+                  0))
+              0))
+          0))
+      0)))
+
+(defn draw-center [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (let [rightStart (- screenWidth RIGHT_WIDTH)
+        centerWidth (- rightStart LEFT_WIDTH)
+        project (load (field state selectedProject))
+        tint (accent project)]
+    (do
+      (fill-rectangle (cast f64 LEFT_WIDTH) 0.0 (cast f64 centerWidth) (cast f64 screenHeight) (color 7 10 14))
+      (draw-grid LEFT_WIDTH rightStart screenHeight)
+      (fill-rectangle (cast f64 LEFT_WIDTH) 0.0 (cast f64 centerWidth) (cast f64 HEADER_HEIGHT) (color 7 10 14))
+      (line (cast f64 LEFT_WIDTH) 63.0 (cast f64 rightStart) 63.0 1.0 (color 20 26 34))
+      (draw-text (field state monoMedium) (display-project-name state project) 268.0 14.0 15.0 (color 223 229 236))
+      (stroke-rectangle 421.0 13.0 88.0 20.0 1.0 (color-alpha 224 165 58 100))
+      (draw-text (field state monoMedium) c"4/7 / running" 428.0 18.0 9.0 tint)
+      (draw-text (field state mono) c"~/" 268.0 39.0 10.5 (color 76 85 97))
+      (draw-text (field state mono) (display-project-path state project) 289.0 39.0 10.5 (color 76 85 97))
+      (draw-text (field state mono) c">" 420.0 39.0 10.5 tint)
+      (draw-text (field state mono) (display-project-subtitle state project) 436.0 39.0 10.5 (color 76 85 97))
+      (stroke-rectangle (cast f64 (- rightStart 214)) 14.0 116.0 34.0 1.0 (color-alpha 224 165 58 130))
+      (draw-text (field state monoMedium)
+                 (if (workflow.is-started (load (field state runtime))) c"RUN AGAIN" c"RUN WORKFLOW")
+                 (cast f64 (- rightStart 199))
+                 24.0
+                 9.5
+                 tint)
+      (fill-rectangle (cast f64 (- rightStart 76)) 23.0 7.0 7.0 tint)
+      (draw-text (field state monoMedium) c"LIVE" (cast f64 (- rightStart 58)) 21.0 10.0 tint)
+      (draw-flow state rightStart)
+      0)))
+
+(defn draw-card-background [(left f64) (top f64) (width f64) (height f64) (leftAccent bool) (tint raylib.Color)] (-> i64)
+  (do
+    (fill-rectangle left top width height (color 13 18 25))
+    (stroke-rectangle left top width height 1.0 (color 27 35 46))
+    (if leftAccent (fill-rectangle left top 2.0 height tint) 0)
+    0))
+
+(defn draw-refund-composition [(state AppState) (left f64) (width f64) (tint raylib.Color)] (-> i64)
+  (do
+    (line (+ left 3.0) 145.0 (+ left 3.0) 213.0 1.0 (color 35 44 56))
+    (draw-text (field state monoMedium) c"// REASONING" (+ left 15.0) 145.0 9.0 (color 76 85 97))
+    (draw-text (field state sans)
+               c"Both sub-agents returned: eligible and confirmed\nduplicate. Composing a $48.00 refund to the original\ncard plus a customer reply with an apology."
+               (+ left 15.0)
+               166.0
+               12.0
+               (color 107 116 128))
+    (draw-card-background left 232.0 width 99.0 false tint)
+    (fill-rectangle left 232.0 width 34.0 (color 13 18 25))
+    (line left 266.0 (+ left width) 266.0 1.0 (color 20 26 34))
+    (draw-text (field state monoMedium) c">" (+ left 12.0) 243.0 11.0 tint)
+    (draw-text (field state monoMedium) c"draft_reply" (+ left 31.0) 242.0 11.0 (color 207 214 222))
+    (draw-text (field state mono) c"TOOL" (+ left (- width 42.0)) 243.0 9.0 (color 61 69 79))
+    (draw-text (field state mono)
+               c"in   { amount: 48.00, tone: apologetic }"
+               (+ left 12.0)
+               276.0
+               10.5
+               (color 127 136 148))
+    (draw-text (field state mono) c"out  Draft generated." (+ left 12.0) 305.0 10.5 (color 167 176 187))
+    (draw-card-background left 347.0 width 82.0 true tint)
+    (fill-rectangle (+ left 13.0) 360.0 6.0 6.0 tint)
+    (draw-text (field state monoMedium) c"ORCHESTRATOR" (+ left 27.0) 356.0 9.0 (color 127 136 148))
+    (draw-text (field state sans)
+               c"Draft ready: refund $48.00 to the original card,\n5-7 business day ETA, with an apology."
+               (+ left 13.0)
+               381.0
+               12.5
+               (color 200 207 216))
+    (draw-card-background left 445.0 190.0 47.0 false tint)
+    (stroke-rectangle (+ left 11.0) 455.0 22.0 27.0 1.0 (color 42 51 63))
+    (draw-text (field state monoMedium) c"draft_reply.md" (+ left 45.0) 453.0 11.5 tint)
+    (draw-text (field state mono) c"1.2 KB / markdown" (+ left 45.0) 473.0 9.5 (color 76 85 97))
+    (draw-text (field state mono) c"tokens  2,481" left 511.0 9.5 (color 127 136 148))
+    (draw-text (field state mono) c"time  1.8s" (+ left 118.0) 511.0 9.5 (color 127 136 148))
+    (draw-text (field state mono) c"cost  $0.011" (+ left 222.0) 511.0 9.5 (color 127 136 148))
+    0))
+
+(defn draw-approval [(state AppState) (left f64) (width f64) (height i64) (tint raylib.Color)] (-> i64)
+  (let [approved (load (field state approvalGranted))
+        cardY (cast f64 (- height 244))]
+    (do
+      (draw-card-background left 148.0 width 82.0 true tint)
+      (fill-rectangle (+ left 13.0) 161.0 6.0 6.0 tint)
+      (draw-text (field state monoMedium) c"ORCHESTRATOR" (+ left 27.0) 157.0 9.0 (color 127 136 148))
+      (draw-text (field state sans)
+                 c"Refund is under threshold, but this account was flagged\nfor a billing spot-check before payout."
+                 (+ left 13.0)
+                 182.0
+                 12.5
+                 (color 200 207 216))
+      (fill-rectangle left cardY width 122.0 (color 20 16 10))
+      (stroke-rectangle left cardY width 122.0 1.0 (color 74 58 26))
+      (stroke-rectangle (+ left 13.0) (+ cardY 14.0) 9.0 9.0 1.5 tint)
+      (draw-text (field state monoMedium)
+                 (if (= approved 1) c"APPROVAL RECORDED" c"HUMAN APPROVAL REQUIRED")
+                 (+ left 31.0)
+                 (+ cardY 11.0)
+                 9.0
+                 tint)
+      (draw-text (field state sans)
+                 (if (= approved 1)
+                   c"Approved. The payout step is ready to continue."
+                   c"Issue a $48.00 refund to card ending 4821 and send\nthe drafted reply?")
+                 (+ left 13.0)
+                 (+ cardY 40.0)
+                 12.5
+                 (color 185 172 147))
+      (fill-rectangle left (cast f64 (- height 174)) 112.0 34.0 (if (= approved 1) (color 58 82 67) (load tint)))
+      (draw-text (field state monoMedium)
+                 (if (= approved 1) c"APPROVED" c"APPROVE  >")
+                 (+ left 15.0)
+                 (cast f64 (- height 164))
+                 10.5
+                 (color 10 14 19))
+      0)))
+
+(defn draw-generic-feed [(state AppState) (left f64) (width f64) (project i64) (node i64) (tint raylib.Color)] (-> i64)
+  (let [runtime (load (field state runtime))
+        status (workflow.node-status runtime node)
+        output (workflow.node-output runtime node)]
+    (do
+      (draw-card-background left 148.0 width 84.0 true tint)
+      (fill-rectangle (+ left 13.0) 161.0 6.0 6.0 tint)
+      (draw-text (field state monoMedium) c"ORCHESTRATOR" (+ left 27.0) 157.0 9.0 (color 127 136 148))
+      (draw-text (field state sans)
+                 c"This step is backed by the loaded workflow program. Its\nstate changes only when dependencies and agents complete."
+                 (+ left 13.0)
+                 182.0
+                 12.5
+                 (color 200 207 216))
+      (line (+ left 3.0) 258.0 (+ left 3.0) 326.0 1.0 (color 35 44 56))
+      (draw-text (field state monoMedium) c"// STATE" (+ left 15.0) 258.0 9.0 (color 76 85 97))
+      (draw-text (field state mono) (display-project-name state project) (+ left 15.0) 281.0 11.0 tint)
+      (draw-text (field state mono)
+                 (display-node-title state project node)
+                 (+ left 15.0)
+                 303.0
+                 11.0
+                 (color 127 136 148))
+      (draw-card-background left 349.0 width 73.0 false tint)
+      (draw-text (field state monoMedium) c"> workflow.inspect" (+ left 13.0) 362.0 11.0 (color 207 214 222))
+      (draw-text (field state mono)
+                 (workflow.status-label status)
+                 (+ left 13.0)
+                 393.0
+                 10.5
+                 (color 167 176 187))
+      (if (icmp-ne (load output) (cast i8 0))
+        (do
+          (draw-text (field state monoMedium) c"// AGENT OUTPUT" left 453.0 9.0 (color 76 85 97))
+          (draw-text (field state sans) output left 478.0 11.0 (color 184 193 204))
+          0)
+        0)
+      0)))
+
+(defn draw-right [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (let [rightStart (- screenWidth RIGHT_WIDTH)
+        contentLeft (cast f64 (+ rightStart 20))
+        width (cast f64 (- RIGHT_WIDTH 40))
+        project (load (field state selectedProject))
+        node (load (field state selectedNode))
+        tint (accent project)]
+    (do
+      (fill-rectangle (cast f64 rightStart) 0.0 (cast f64 RIGHT_WIDTH) (cast f64 screenHeight) (color 9 12 17))
+      (line (cast f64 rightStart) 0.0 (cast f64 rightStart) (cast f64 screenHeight) 1.0 (color 23 30 39))
+      (line (cast f64 rightStart) 112.0 (cast f64 screenWidth) 112.0 1.0 (color 20 26 34))
+      (draw-text (field state mono) (display-project-path state project) contentLeft 15.0 9.5 (color 61 69 79))
+      (draw-text (field state mono) c"/" (+ contentLeft 132.0) 15.0 9.5 tint)
+      (draw-text (field state mono)
+                 (display-node-title state project node)
+                 (+ contentLeft 146.0)
+                 15.0
+                 9.5
+                 (color 107 116 128))
+      (draw-text (field state monoMedium)
+                 (case node 0 c"[1]" 1 c"[2]" 2 c"[3]" 3 c"[4]" 4 c"[5]" 5 c"[6]" c"[7]")
+                 contentLeft
+                 50.0
+                 15.0
+                 tint)
+      (draw-text (field state monoMedium)
+                 (display-node-title state project node)
+                 (+ contentLeft 38.0)
+                 50.0
+                 15.0
+                 (color 223 229 236))
+      (stroke-rectangle (cast f64 (- screenWidth 117))
+                        45.0
+                        97.0
+                        23.0
+                        1.0
+                        (if (= node 4) (color-alpha 224 165 58 120) (color 38 49 61)))
+      (draw-text (field state monoMedium)
+                 (workflow.status-label (workflow.node-status (load (field state runtime)) node))
+                 (cast f64 (- screenWidth 104))
+                 51.0
+                 9.5
+                 (if (>= node 4) (load tint) (color 111 154 126)))
+      (if (= (workflow.node-kind (load (field state runtime)) node) 1)
+        (draw-approval state contentLeft width screenHeight tint)
+        (draw-generic-feed state contentLeft width project node tint))
+      (fill-rectangle (cast f64 rightStart) (cast f64 (- screenHeight 49)) (cast f64 RIGHT_WIDTH) 49.0 (color 9 12 17))
+      (line (cast f64 rightStart)
+            (cast f64 (- screenHeight 49))
+            (cast f64 screenWidth)
+            (cast f64 (- screenHeight 49))
+            1.0
+            (color 20 26 34))
+      (draw-text (field state monoMedium) c">" (cast f64 (+ rightStart 16)) (cast f64 (- screenHeight 31)) 12.0 tint)
+      (draw-text (field state mono)
+                 c"add a note to this step"
+                 (cast f64 (+ rightStart 38))
+                 (cast f64 (- screenHeight 31))
+                 12.0
+                 (color 69 78 90))
+      (fill-rectangle (cast f64 (- screenWidth 29)) (cast f64 (- screenHeight 33)) 8.0 15.0 tint)
+      0)))
+
+(defn capture-input [(input (mut InputFrame))] (-> i64)
+  (let [mouse (raylib.GetMousePosition)]
+    (do
+      (store! (field input mouseHorizontal) (cast f64 (load (field mouse x))))
+      (store! (field input mouseVertical) (cast f64 (load (field mouse y))))
+      (store! (field input pressed)
+              (if (icmp-ne (raylib.IsMouseButtonPressed (cast i32 0)) (cast u8 0)) 1 0))
+      (store! (field input typedCharacter) (cast i64 (raylib.GetCharPressed)))
+      (store! (field input backspacePressed)
+              (if (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_BACKSPACE)) (cast u8 0)) 1 0))
+      (store! (field input enterPressed)
+              (if (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_ENTER)) (cast u8 0)) 1 0))
+      0)))
+
+(defn draw-creation-modal [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (if (= (load (field state creationOpen)) 0)
+    0
+    (let [left (- (/ (cast f64 screenWidth) 2.0) 370.0)
+          top 176.0
+          tint (accent (load (field state selectedProject)))]
+      (do
+        (fill-rectangle 0.0 0.0 (cast f64 screenWidth) (cast f64 screenHeight) (color-alpha 2 4 7 205))
+        (fill-rectangle left top 740.0 372.0 (color 9 12 17))
+        (stroke-rectangle left top 740.0 372.0 1.0 tint)
+        (draw-text (field state monoMedium)
+                   c"CREATE A PROJECT WORKFLOW"
+                   (+ left 28.0)
+                   (+ top 25.0)
+                   16.0
+                   (color 223 229 236))
+        (draw-text (field state sans)
+                   c"Describe an outcome. A creator agent will inspect this project, design the DAG,\nand save an executable workflow program to the catalog."
+                   (+ left 28.0)
+                   (+ top 63.0)
+                   12.0
+                   (color 154 164 176))
+        (draw-text (field state monoMedium) c"WORKFLOW REQUEST" (+ left 28.0) (+ top 121.0) 9.0 (color 76 85 97))
+        (fill-rectangle (+ left 28.0) (+ top 146.0) 684.0 126.0 (color 7 10 14))
+        (stroke-rectangle (+ left 28.0) (+ top 146.0) 684.0 126.0 1.0 (color 35 44 56))
+        (raylib.BeginScissorMode (cast i32 (+ left 42.0)) (cast i32 (+ top 159.0)) (cast i32 656) (cast i32 98))
+        (draw-text (field state sans)
+                   (if (= (load (field state creationLength)) 0)
+                     c"Example: Create a release workflow that reviews changes, runs checks, and asks me before publishing."
+                     (load (field state creationText)))
+                   (+ left 42.0)
+                   (+ top 160.0)
+                   12.0
+                   (if (= (load (field state creationLength)) 0) (color 69 78 90) (color 207 214 222)))
+        (raylib.EndScissorMode)
+        (fill-rectangle (- (/ (cast f64 screenWidth) 2.0) 92.0) 487.0 184.0 40.0 tint)
+        (draw-text (field state monoMedium)
+                   c"CREATE WORKFLOW  >"
+                   (- (/ (cast f64 screenWidth) 2.0) 72.0)
+                   499.0
+                   10.5
+                   (color 10 14 19))
+        (draw-text (field state mono) c"ENTER TO CREATE" (+ left 28.0) (+ top 330.0) 9.0 (color 76 85 97))
+        0))))
+
+(defn draw-app [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (do
+    (raylib.ClearBackground (color 7 10 14))
+    (draw-projects state screenHeight)
+    (draw-center state screenWidth screenHeight)
+    (draw-right state screenWidth screenHeight)
+    (draw-creation-modal state screenWidth screenHeight)
+    0))
+
+(defn run-interface [] (-> i64)
+  (do
+    (raylib.SetConfigFlags (cast u32 WINDOW_FLAGS))
+    (raylib.InitWindow (cast i32 1440) (cast i32 900) c"flowline - agent workflow designer")
+    (raylib.SetTargetFPS (cast i32 60))
+    (let [mono (raylib.LoadFontEx c"assets/fonts/IBMPlexMono-Regular.ttf" (cast i32 42) (cast (ptr i32) 0) (cast i32 0))
+          monoMedium
+            (raylib.LoadFontEx c"assets/fonts/IBMPlexMono-Medium.ttf" (cast i32 42) (cast (ptr i32) 0) (cast i32 0))
+          sans (raylib.LoadFontEx c"assets/fonts/IBMPlexSans-Regular.ttf" (cast i32 42) (cast (ptr i32) 0) (cast i32 0))
+          catalogValue (workflow.load-catalog)
+          catalog (alloc-stack workflow.Catalog)
+          state (alloc-stack AppState)
+          input (alloc-stack InputFrame)
+          creationText (workflow.allocate-buffer CREATION_CAPACITY)]
+      (store! catalog catalogValue)
+      (store! creationText (cast i8 0))
+      (store! (field state selectedProject) 0)
+      (store! (field state selectedNode) 0)
+      (store! (field state approvalGranted) 0)
+      (store! (field state runRequested) 0)
+      (store! (field state approvalRequested) 0)
+      (store! (field state catalog) catalog)
+      (store! (field state runtime) (workflow.catalog-runtime catalog 0))
+      (store! (field state activeRuntime) (cast (ptr workflow.Runtime) 0))
+      (store! (field state creationOpen) 0)
+      (store! (field state creationRequested) 0)
+      (store! (field state creationState) 0)
+      (store! (field state creationLength) 0)
+      (store! (field state creationText) creationText)
+      (store! (field state mono) mono)
+      (store! (field state monoMedium) monoMedium)
+      (store! (field state sans) sans)
+      (configure-font (field state mono))
+      (configure-font (field state monoMedium))
+      (configure-font (field state sans))
+      (loop (if (icmp-ne (raylib.WindowShouldClose) (cast u8 0))
+              (break)
+              (let [screenWidth (cast i64 (raylib.GetScreenWidth))
+                    screenHeight (cast i64 (raylib.GetScreenHeight))]
+                (do
+                  (capture-input (mut input))
+                  (apply-input (mut state) input screenWidth screenHeight)
+                  (if (= (load (field state runRequested)) 1)
+                    (let [selectedRuntime (load (field state runtime))
+                          activeRuntime (load (field state activeRuntime))]
+                      (do
+                        (if (or (= (cast i64 activeRuntime) 0) (workflow.is-finished activeRuntime))
+                          (do
+                            (workflow.start (mut selectedRuntime))
+                            (store! (field state activeRuntime) selectedRuntime)
+                            0)
+                          0)
+                        (store! (field state runRequested) 0)
+                        0))
+                    0)
+                  (if (= (load (field state approvalRequested)) 1)
+                    (let [selectedRuntime (load (field state runtime))]
+                      (do
+                        (workflow.approve (mut selectedRuntime) (load (field state selectedNode)))
+                        (if (= (workflow.node-status selectedRuntime (load (field state selectedNode))) 3)
+                          (store! (field state approvalGranted) 1)
+                          0)
+                        (store! (field state approvalRequested) 0)
+                        0))
+                    0)
+                  (if (= (load (field state creationRequested)) 1)
+                    (do
+                      (workflow.start-creation (load (field state creationText)))
+                      (store! (field state creationRequested) 0)
+                      (store! (field state creationState) 1)
+                      0)
+                    0)
+                  (if (= (load (field state creationState)) 1)
+                    (let [creationState (workflow.creation-state)]
+                      (if (= creationState 2)
+                        (do
+                          (workflow.refresh-catalog (mut catalog))
+                          (let [createdWorkflowIndex (workflow.created-workflow-index catalog)]
+                            (store! (field state selectedProject)
+                                    (if (>= createdWorkflowIndex 0)
+                                      createdWorkflowIndex
+                                      (- (workflow.catalog-count catalog) 1))))
+                          (store! (field state runtime)
+                                  (workflow.catalog-runtime catalog (load (field state selectedProject))))
+                          (store! (field state selectedNode) 0)
+                          (store! (field state creationState) 2)
+                          (store! (field state creationLength) 0)
+                          (store! creationText (cast i8 0))
+                          0)
+                        (if (= creationState 3)
+                          (do (store! (field state creationState) 3) 0)
+                          0)))
+                    0)
+                  (let [activeRuntime (load (field state activeRuntime))]
+                    (if (!= (cast i64 activeRuntime) 0)
+                      (workflow.tick (mut activeRuntime))
+                      0))
+                  (raylib.BeginDrawing)
+                  (draw-app state screenWidth screenHeight)
+                  (raylib.EndDrawing)
+                  (continue)))))
+      (raylib.UnloadFont (load (field state mono)))
+      (raylib.UnloadFont (load (field state monoMedium)))
+      (raylib.UnloadFont (load (field state sans))))
+    (raylib.CloseWindow)
+    0))
+
+(defn main [(argumentCount i32) (arguments (ptr (ptr i8)))] (-> i64)
+  (if (and (> (cast i64 argumentCount) 1)
+           (workflow.strings-equal (load (index arguments 1)) c"--check-workflow"))
+    (let [runtime (workflow.load-runtime c"workflows/refund.flow")]
+      (workflow.dump runtime))
+    (if (and (> (cast i64 argumentCount) 1)
+             (workflow.strings-equal (load (index arguments 1)) c"--check-catalog"))
+      (let [catalog (workflow.load-catalog)]
+        (workflow.dump-catalog catalog))
+      (run-interface))))

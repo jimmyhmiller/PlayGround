@@ -1,0 +1,98 @@
+(module raylib)
+
+(const FLAG_WINDOW_RESIZABLE 4)
+(const FLAG_MSAA_4X_HINT 32)
+(const FLAG_VSYNC_HINT 64)
+(const FLAG_WINDOW_HIGHDPI 8192)
+(const MOUSE_BUTTON_LEFT 0)
+(const MOUSE_CURSOR_DEFAULT 0)
+(const MOUSE_CURSOR_POINTING_HAND 4)
+(const TEXTURE_FILTER_BILINEAR 1)
+
+(defstruct Vector2 [(x f32) (y f32)])
+(defstruct Color [(r u8) (g u8) (b u8) (a u8)])
+(defstruct Rectangle [(x f32) (y f32) (width f32) (height f32)])
+(defstruct Image [(data (ptr i8)) (width i32) (height i32) (mipmaps i32) (format i32)])
+(defstruct Texture [(id u32) (width i32) (height i32) (mipmaps i32) (format i32)])
+(defstruct GlyphInfo [(value i32) (offsetX i32) (offsetY i32) (advanceX i32) (image Image)])
+(defstruct Font
+  [(baseSize i32) (glyphCount i32) (glyphPadding i32) (texture Texture) (recs (ptr Rectangle)) (glyphs (ptr GlyphInfo))])
+
+(extern InitWindow :cc c [i32 i32 (ptr i8)] (-> void))
+(extern CloseWindow :cc c [] (-> void))
+(extern WindowShouldClose :cc c [] (-> u8))
+(extern SetConfigFlags :cc c [u32] (-> void))
+(extern SetTargetFPS :cc c [i32] (-> void))
+(extern GetScreenWidth :cc c [] (-> i32))
+(extern GetScreenHeight :cc c [] (-> i32))
+(extern GetTime :cc c [] (-> f64))
+(extern BeginDrawing :cc c [] (-> void))
+(extern EndDrawing :cc c [] (-> void))
+(extern ClearBackground :cc c [Color] (-> void))
+(extern BeginScissorMode :cc c [i32 i32 i32 i32] (-> void))
+(extern EndScissorMode :cc c [] (-> void))
+(extern LoadFontEx :cc c [(ptr i8) i32 (ptr i32) i32] (-> Font))
+(extern IsFontValid :cc c [Font] (-> u8))
+(extern UnloadFont :cc c [Font] (-> void))
+(extern SetTextureFilter :cc c [Texture i32] (-> void))
+(extern DrawTextEx :cc c [Font (ptr i8) Vector2 f32 f32 Color] (-> void))
+(extern MeasureTextEx :cc c [Font (ptr i8) f32 f32] (-> Vector2))
+(extern DrawRectangle :cc c [i32 i32 i32 i32 Color] (-> void))
+(extern DrawRectangleRec :cc c [Rectangle Color] (-> void))
+(extern DrawRectangleLinesEx :cc c [Rectangle f32 Color] (-> void))
+(extern DrawLineEx :cc c [Vector2 Vector2 f32 Color] (-> void))
+(extern DrawCircle :cc c [i32 i32 f32 Color] (-> void))
+(extern DrawCircleLines :cc c [i32 i32 f32 Color] (-> void))
+(extern GetMousePosition :cc c [] (-> Vector2))
+(extern IsMouseButtonPressed :cc c [i32] (-> u8))
+(extern IsKeyPressed :cc c [i32] (-> u8))
+(extern GetCharPressed :cc c [] (-> i32))
+(extern CheckCollisionPointRec :cc c [Vector2 Rectangle] (-> u8))
+(extern SetMouseCursor :cc c [i32] (-> void))
+
+(export FLAG_WINDOW_RESIZABLE
+        FLAG_MSAA_4X_HINT
+        FLAG_VSYNC_HINT
+        FLAG_WINDOW_HIGHDPI
+        MOUSE_BUTTON_LEFT
+        MOUSE_CURSOR_DEFAULT
+        MOUSE_CURSOR_POINTING_HAND
+        TEXTURE_FILTER_BILINEAR
+        Vector2
+        Color
+        Rectangle
+        Image
+        Texture
+        GlyphInfo
+        Font
+        InitWindow
+        CloseWindow
+        WindowShouldClose
+        SetConfigFlags
+        SetTargetFPS
+        GetScreenWidth
+        GetScreenHeight
+        GetTime
+        BeginDrawing
+        EndDrawing
+        ClearBackground
+        BeginScissorMode
+        EndScissorMode
+        LoadFontEx
+        IsFontValid
+        UnloadFont
+        SetTextureFilter
+        DrawTextEx
+        MeasureTextEx
+        DrawRectangle
+        DrawRectangleRec
+        DrawRectangleLinesEx
+        DrawLineEx
+        DrawCircle
+        DrawCircleLines
+        GetMousePosition
+        IsMouseButtonPressed
+        CheckCollisionPointRec
+        SetMouseCursor
+        IsKeyPressed
+        GetCharPressed)
