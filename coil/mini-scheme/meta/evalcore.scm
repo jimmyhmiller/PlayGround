@@ -2,7 +2,7 @@
 ;; the exact subset our Scheme->Coil metaprogram compiles. Closures/prims are DATA
 ;; (tagged lists); the global environment is a single mutable variable.
 (define genv (quote ()))
-(define (defvar! name val) (set! genv (cons (cons name val) genv)))
+(define (defvar! name val) (set! genv (cons (cons name val) genv)) name)
 (define (cadr* x) (car (cdr x)))
 (define (caddr* x) (car (cdr (cdr x))))
 (define (cadddr* x) (car (cdr (cdr (cdr x)))))
