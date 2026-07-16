@@ -72,7 +72,7 @@ use cranelift_module::{FuncId, Linkage, Module};
 
 use crate::bytecode::ModelEmit;
 use crate::code::CodeSpace;
-use crate::heap::{kind, CLOSURE_CAPS_OFF, CLOSURE_CODE_OFF, CLOSURE_META_OFF};
+use crate::heap::{kind, CLOSURE_CAPS_OFF, CLOSURE_CODE_OFF, CLOSURE_META_OFF, HEADER_SIZE, MULTIFN_FIXED_OFF};
 use crate::ir::{CapSrc, Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::runtime::{ObjView, Runtime};
@@ -298,11 +298,92 @@ extern "C" fn shim_make_closure<M: ModelArithJit>(
 extern "C" fn shim_finish_tail<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
-    let top = unsafe { (*ctx.rc).top };
-    let callee = ctx.tail_callee.get();
-    let args = unsafe { (*(*ctx.rc).tail_args).clone() };
-    ctx.tail_pending.set(false);
-    top.invoke(top, rt, callee, &args)
+    finish_tail_fast::<M>(ctx.rc, rt, ctx)
+}
+
+/// Finish a pending NON-SELF tail chain on the register path. This is the
+/// per-element shape of every transducer/protocol step fn (`(rf a (inc x))`
+/// ends in a tail call to `rf`), so bounce it in a LOOP — bounded stack,
+/// exactly like the trampoline's bounce but without the frame/resolve
+/// machinery: select the arity clause, jump straight to stamped code.
+/// Anything the register path can't take (rest-arity clause, unstamped code,
+/// oversize arity, non-direct top) finishes through `top.invoke` as before.
+///
+/// `ctx` is reused for the bounced calls; only the fields the emitted
+/// fast-call path initializes (`rc`, `self_closure`, `tail_pending`,
+/// `tail_callee`) are touched — the 3-store stack contexts are valid here.
+fn finish_tail_fast<M: ValueModel>(
+    rc: *const JitCtx<M>,
+    rt: &mut Runtime<M>,
+    ctx: &JitCtx<M>,
+) -> u64 {
+    let rcr = unsafe { &*rc };
+    let top = rcr.top;
+    let cp = ctx as *const JitCtx<M> as u64;
+    'bounce: loop {
+        ctx.tail_pending.set(false);
+        let next = ctx.tail_callee.get();
+        let tbuf = unsafe { &*rcr.tail_args };
+        'fast: {
+            if rcr.direct.get() == 0 {
+                break 'fast; // a wrapper is observing calls: through `top`
+            }
+            let tn = tbuf.len();
+            if tn > MAX_REG_ARGS {
+                break 'fast;
+            }
+            // Same guards as the register call sites: arity clause, real
+            // closure, fixed arity match, stamped code.
+            let sel = match rt.multifn_select_raw(next, tn) {
+                Some(sel) => {
+                    if rt.pending() {
+                        return M::R::enc_nil();
+                    }
+                    sel
+                }
+                None => next,
+            };
+            if M::R::tag_of(sel) != RawTag::Ref {
+                break 'fast;
+            }
+            let g = M::R::as_ref(sel);
+            if unsafe { g.type_id() } != kind::CLOSURE {
+                break 'fast;
+            }
+            let meta = unsafe { *(g.0.add(CLOSURE_META_OFF) as *const u64) };
+            if crate::heap::meta_variadic(meta) || crate::heap::meta_nparams(meta) != tn {
+                break 'fast;
+            }
+            let code = unsafe { *(g.0.add(CLOSURE_CODE_OFF) as *const u64) } as *const u8;
+            if code.is_null() {
+                break 'fast;
+            }
+            let mut a = [0u64; MAX_REG_ARGS];
+            a[..tn].copy_from_slice(tbuf);
+            ctx.self_closure.set(sel);
+            let ret = unsafe {
+                match tn {
+                    0 => std::mem::transmute::<*const u8, extern "C" fn(u64) -> u64>(code)(cp),
+                    1 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64) -> u64>(code)(cp, a[0]),
+                    2 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64) -> u64>(code)(cp, a[0], a[1]),
+                    3 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2]),
+                    4 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3]),
+                    5 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4]),
+                    6 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5]),
+                    7 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5], a[6]),
+                    8 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]),
+                    _ => unreachable!(),
+                }
+            };
+            if !ctx.tail_pending.get() {
+                return ret;
+            }
+            continue 'bounce;
+        }
+        // Slow finish: through `top`, preserving composition.
+        let targs = tbuf.clone();
+        return top.invoke(top, rt, next, &targs);
+    }
 }
 
 extern "C" fn shim_call<M: ValueModel>(
@@ -506,7 +587,7 @@ fn shim_fast_invoke<M: ValueModel>(
     }
     // Multi-arity: select the clause serving this arg count (cheap heap read;
     // errors pend a signal and yield nil like every shim error path).
-    let callee = match rt.multifn_select(callee, n) {
+    let callee = match rt.multifn_select_raw(callee, n) {
         Some(sel) => {
             if rt.pending() {
                 return Some(M::R::enc_nil());
@@ -568,12 +649,9 @@ fn shim_fast_invoke<M: ValueModel>(
         }
     };
     if ctx.tail_pending.get() {
-        // The callee ended in a non-self tail call (rare here): finish it
-        // through `top`, exactly like shim_finish_tail.
-        let top = rcr.top;
-        let next = ctx.tail_callee.get();
-        let targs = unsafe { (*rcr.tail_args).clone() };
-        return Some(top.invoke(top, rt, next, &targs));
+        // The callee ended in a NON-self tail call: bounce the chain on the
+        // register path (see `finish_tail_fast`).
+        return Some(finish_tail_fast::<M>(rc, rt, &ctx));
     }
     Some(ret)
 }
@@ -1297,6 +1375,16 @@ pub trait ModelArithJit: ModelEmit {
     /// integers this is constant-`false`, so the guard always takes the runtime
     /// slow path — correct, since there is no fast one.)
     fn emit_both_int(c: &mut Compiler, a: Value, b: Value) -> Value;
+    /// Emit: may `(%num-eq a b)` be decided by comparing the two words' BITS?
+    /// True whenever NEITHER operand is a heap ref AND the model has no
+    /// immediate float (immediates are canonical, so bit-equality is value
+    /// equality — exactly `Runtime::equal`'s immediate fast path). The default
+    /// is the both-int guard (always sound); a model widens it only when its
+    /// non-ref immediates are all canonical (LowBit: int/bool/nil/sym, floats
+    /// boxed).
+    fn emit_eq_immediates(c: &mut Compiler, a: Value, b: Value) -> Value {
+        Self::emit_both_int(c, a, b)
+    }
     /// Emit: the signed i64 VALUE of immediate int `v` (untagged).
     fn emit_untag(c: &mut Compiler, v: Value) -> Value;
     /// Emit: encode signed i64 `x` back into an immediate int word.
@@ -1329,6 +1417,13 @@ pub trait ModelArithJit: ModelEmit {
     fn emit_enc_ref(_c: &mut Compiler, _addr: Value) -> Value {
         panic!("emit_enc_ref: INLINE_OBJECTS is on but the model supplied no ref encoder")
     }
+    /// Emit: encode a raw `Sym` word (an i64 holding the interner id) into this
+    /// model's sym value. Only called when `INLINE_OBJECTS` (the inline
+    /// `type-of` fast path reads a record's type sym straight off the object);
+    /// same loud dead-end contract as `emit_enc_ref`.
+    fn emit_enc_sym(_c: &mut Compiler, _sym: Value) -> Value {
+        panic!("emit_enc_sym: INLINE_OBJECTS is on but the model supplied no sym encoder")
+    }
 }
 
 const FIXNUM_MIN: i64 = -(1 << 60);
@@ -1340,6 +1435,15 @@ impl ModelArithJit for crate::model::LowBitModel {
         let or = c.fb.ins().bor(a, b);
         let masked = c.fb.ins().band_imm(or, 0b111);
         c.fb.ins().icmp_imm(IntCC::Equal, masked, 0)
+    }
+    fn emit_eq_immediates(c: &mut Compiler, a: Value, b: Value) -> Value {
+        // Neither is a ref (tag 0b001): int/bool/nil/sym are all canonical
+        // immediates under LowBit (no immediate float), so bits decide `=`.
+        let ta = c.fb.ins().band_imm(a, 0b111);
+        let na = c.fb.ins().icmp_imm(IntCC::NotEqual, ta, 0b001);
+        let tb = c.fb.ins().band_imm(b, 0b111);
+        let nb = c.fb.ins().icmp_imm(IntCC::NotEqual, tb, 0b001);
+        c.fb.ins().band(na, nb)
     }
     fn emit_untag(c: &mut Compiler, v: Value) -> Value {
         c.fb.ins().sshr_imm(v, 3) // arithmetic shift drops the tag, keeps sign
@@ -1362,6 +1466,11 @@ impl ModelArithJit for crate::model::LowBitModel {
     const INLINE_OBJECTS: bool = true;
     fn emit_enc_ref(c: &mut Compiler, addr: Value) -> Value {
         c.fb.ins().bor_imm(addr, 0b001) // matches `LowBit::enc_ref`
+    }
+    fn emit_enc_sym(c: &mut Compiler, sym: Value) -> Value {
+        // matches `LowBit::enc_sym`: id << 3 | LB_SYM
+        let sh = c.fb.ins().ishl_imm(sym, 3);
+        c.fb.ins().bor_imm(sh, 0b100)
     }
 }
 
@@ -1658,6 +1767,42 @@ struct InlinePlan {
     body: Arc<Ir>,
 }
 
+/// Stage G2 — the VALUES a first compile observes: the triggering invoke's
+/// argument words plus the invoked closure's capture words. `(f …)` call
+/// sites whose callee is a parameter/capture read look the actual closure up
+/// here and specialize on its TEMPLATE (see `try_value_inline_plan`). Pure
+/// compile-time observation — the words are only used to pick a plan; the
+/// emitted guard re-checks the live value's meta word, so a stale
+/// observation can only mean a failed guard, never a wrong answer.
+struct SpecEnv {
+    args: Vec<u64>,
+    caps: Vec<u64>,
+}
+
+/// A value-observed inline plan (Stage G2): splice the observed callee's
+/// clause body inline behind a TEMPLATE guard — one header + one meta-word
+/// compare against the live value (plus the arity-clause load when the
+/// observed value was a MultiFn). Guarding on the meta word (template id,
+/// arity, nslots, non-variadic — all baked into one u64) instead of the
+/// value's bits makes the specialization survive GC moves AND apply to every
+/// closure of the template, and is immune to address reuse: a different
+/// object at the same address fails the meta compare. Captures are NOT baked
+/// — the inlined body reads them off the live guarded value.
+struct ValuePlan {
+    /// The clause's full meta word (`closure_meta(template, nparams, nslots,
+    /// variadic=false)`) — the guard constant.
+    meta: u64,
+    /// The observed value was a MultiFn: guard selects `fixed[argc]` first.
+    multifn: bool,
+    nparams: usize,
+    nslots: u16,
+    body: Arc<Ir>,
+    /// Snapshot of the CLAUSE closure's captures at plan time — used only to
+    /// plan nested specializations (each nested guard re-checks its own live
+    /// value), never emitted as constants.
+    caps: Vec<u64>,
+}
+
 /// A resolved call target (the payload of the monomorphic inline cache).
 /// `epoch` is the collection count (`Runtime::relocated`) at fill time: a
 /// moving collection can relocate a closure AND recycle its old address for a
@@ -1894,7 +2039,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         {
             let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
             let shape = BodyShape { entry_arity: None, nparams: 0, variadic: false, nslots: 0, mem_mode: true, tail_root: true };
-            build_body::<M>(&mut module, &mut fb, self.shims, None, self as *const Self as *const (), ir, shape);
+            build_body::<M>(&mut module, &mut fb, self.shims, None, self as *const Self as *const (), ir, shape, None);
             fb.finalize();
         }
         let out = ctx.func.display().to_string();
@@ -1903,6 +2048,16 @@ impl<M: ModelArithJit> JitCranelift<M> {
     }
 
     fn compile(&self, rt: Option<&Runtime<M>>, ir: &Ir, shape: BodyShape) -> Arc<Compiled> {
+        self.compile_spec(rt, ir, shape, None)
+    }
+
+    fn compile_spec(
+        &self,
+        rt: Option<&Runtime<M>>,
+        ir: &Ir,
+        shape: BodyShape,
+        spec: Option<SpecEnv>,
+    ) -> Arc<Compiled> {
         let mut module = self.module.borrow_mut();
         let mut fbctx = self.fbctx.borrow_mut();
         let mut ctx = module.make_context();
@@ -1915,12 +2070,15 @@ impl<M: ModelArithJit> JitCranelift<M> {
 
         {
             let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
-            build_body::<M>(&mut module, &mut fb, self.shims, rt, self as *const Self as *const (), ir, shape);
+            build_body::<M>(&mut module, &mut fb, self.shims, rt, self as *const Self as *const (), ir, shape, spec);
             fb.finalize();
         }
 
         let n = self.counter.get();
         self.counter.set(n + 1);
+        if std::env::var_os("MICROLANG_JIT_TRACE").is_some() {
+            eprintln!("[jit-compile] #{n} arity={:?} mem={} nparams={} var={} ir_ptr={:p}", shape.entry_arity, shape.mem_mode, shape.nparams, shape.variadic, ir as *const Ir);
+        }
         let name = format!("ml_body_{n}");
         let id = module
             .declare_function(&name, Linkage::Local, &ctx.func.signature)
@@ -1963,19 +2121,31 @@ impl<M: ModelArithJit> JitCranelift<M> {
         BodyShape { entry_arity, nparams, variadic, nslots, mem_mode, tail_root: true }
     }
 
-    fn compiled_body(&self, rt: &Runtime<M>, body: &Arc<Ir>, nparams: usize, variadic: bool, nslots: u16) -> Arc<Compiled> {
+    fn compiled_body(
+        &self,
+        rt: &Runtime<M>,
+        body: &Arc<Ir>,
+        nparams: usize,
+        variadic: bool,
+        nslots: u16,
+        spec: Option<SpecEnv>,
+    ) -> Arc<Compiled> {
         let key = Arc::as_ptr(body);
         if let Some(c) = self.cache.borrow().get(&key) {
             return c.clone();
         }
-        let c = self.compile(Some(rt), body, Self::body_shape(body, nparams, variadic, nslots));
+        let c = self.compile_spec(Some(rt), body, Self::body_shape(body, nparams, variadic, nslots), spec);
         self.cache.borrow_mut().insert(key, c.clone());
         c
     }
 
     /// Resolve a callee through the monomorphic inline cache (the common repeat
-    /// case skips decode + heap read + cache lookups entirely).
-    fn resolve_call(&self, rt: &mut Runtime<M>, callee: u64) -> (usize, bool, u16, u32, Arc<Compiled>) {
+    /// case skips decode + heap read + cache lookups entirely). `args` — the
+    /// triggering invoke's argument values, when the caller has them — seeds
+    /// PARAM-VALUE SPECIALIZATION (Stage G2): a first compile observes the
+    /// actual closures sitting in the parameters and splices their bodies
+    /// inline behind template guards.
+    fn resolve_call(&self, rt: &mut Runtime<M>, callee: u64, args: Option<&[u64]>) -> (usize, bool, u16, u32, Arc<Compiled>) {
         let way = call_ic_way(callee);
         let epoch = rt.relocated();
         if let Some(t) = self.call_ic.borrow()[way].as_ref() {
@@ -1993,7 +2163,23 @@ impl<M: ModelArithJit> JitCranelift<M> {
             _ => panic!("value not callable: {}", rt.print(callee)),
         };
         let body = rt.template(template).clone();
-        let compiled = self.compiled_body(rt, &body, nparams, variadic, nslots);
+        // Spec env for a first compile: the invoke's arg values (only when the
+        // arity actually matches — a mismatch is thrown right after resolution)
+        // plus this closure's own capture values, so `(f …)` callees held in
+        // params OR captures can be observed.
+        let spec = args.filter(|a| !variadic && a.len() == nparams).map(|a| SpecEnv {
+            args: a.to_vec(),
+            caps: {
+                // The capture array lives inline in the closure (Stage D):
+                // aux = ncaps, values at CLOSURE_CAPS_OFF.
+                let g = M::R::as_ref(callee);
+                let n = unsafe { g.aux() } as usize;
+                (0..n)
+                    .map(|i| unsafe { *(g.0.add(CLOSURE_CAPS_OFF + i * 8) as *const u64) })
+                    .collect()
+            },
+        });
+        let compiled = self.compiled_body(rt, &body, nparams, variadic, nslots, spec);
         // (MultiFn callees never reach here: `invoke`/the trampoline select the
         // arity clause BEFORE resolution, so `callee` is always a closure.)
         self.call_ic.borrow_mut()[way] = Some(CallTarget {
@@ -2319,7 +2505,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
                     } else {
                         callee
                     };
-                    let callee = match rt.multifn_select(callee, args_buf.len()) {
+                    let callee = match rt.multifn_select_raw(callee, args_buf.len()) {
                         Some(sel) => {
                             if rt.pending() {
                                 return M::R::enc_nil();
@@ -2328,7 +2514,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
                         }
                         None => callee,
                     };
-                    let (nparams, variadic, nslots, template, comp) = self.resolve_call(rt, callee);
+                    let (nparams, variadic, nslots, template, comp) =
+                        self.resolve_call(rt, callee, Some(&args_buf));
                     let arity_ok = if variadic {
                         args_buf.len() >= nparams
                     } else {
@@ -2405,7 +2592,7 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
         // `publish_fast_target` below only ever stamps the per-template map for
         // this branch, never the MultiFn's own header.
         let orig_callee = callee;
-        let callee = match rt.multifn_select(callee, args.len()) {
+        let callee = match rt.multifn_select_raw(callee, args.len()) {
             Some(sel) => {
                 if rt.pending() {
                     return M::R::enc_nil();
@@ -2416,11 +2603,19 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
         };
         // Resolve through the monomorphic inline cache (decode + heap + compiled
         // all skipped on a repeat callee).
-        let (nparams, variadic, nslots, template, compiled) = self.resolve_call(rt, callee);
+        let (nparams, variadic, nslots, template, compiled) = self.resolve_call(rt, callee, Some(args));
         // Publish the native fast entry so future call sites can jump to it
         // directly — under the value call sites actually see (the MultiFn id
-        // when routing happened, the closure id otherwise).
+        // when routing happened, the closure id otherwise). When routing DID
+        // happen, ALSO stamp the selected CLAUSE object: `shim_fast_invoke`
+        // re-selects per call and reads the clause's code word — leaving it
+        // null sent every multifn-routed call (the `(xf rf)` step fns, `+`,
+        // `conj`, `get`, …) down the resolve/trampoline slow path PER ELEMENT
+        // (the Stage G1 finding).
         self.publish_fast_target(orig_callee, template, &compiled);
+        if callee != orig_callee {
+            self.publish_fast_target(callee, template, &compiled);
+        }
         // Arity mismatch is a CATCHABLE throw (matching TreeWalk / Clojure), not an
         // abort in this non-unwinding shim.
         let arity_ok = if variadic { args.len() >= nparams } else { args.len() == nparams };
@@ -2457,6 +2652,7 @@ struct BodyShape {
 }
 
 /// Compile `ir` as a whole function body into an already-prepared builder.
+#[allow(clippy::too_many_arguments)]
 fn build_body<M: ModelArithJit>(
     module: &mut JITModule,
     fb: &mut FunctionBuilder,
@@ -2465,6 +2661,7 @@ fn build_body<M: ModelArithJit>(
     jit_ptr: *const (),
     ir: &Ir,
     shape: BodyShape,
+    spec: Option<SpecEnv>,
 ) {
     let entry = fb.create_block();
     fb.append_block_params_for_function_params(entry);
@@ -2545,6 +2742,8 @@ fn build_body<M: ModelArithJit>(
         vars: Vec::new(),
         fence_shims: false, // set below once the loop shape is known
         inline_outer_vars: Vec::new(),
+        inline_ctx: Vec::new(),
+        spec,
         self_var: cranelift_frontend::Variable::from_u32(0), // placeholder; set right below
         poll_counter: cranelift_frontend::Variable::from_u32(0), // placeholder; set with the loop header
         rc_val,
@@ -2685,6 +2884,16 @@ pub struct Compiler<'a, 'b> {
     /// copy-spilling the outer locals around calls inside the inlined region,
     /// or a collection under an inlined deopt call would miss them.
     inline_outer_vars: Vec<Vec<cranelift_frontend::Variable>>,
+    /// Stage G2 — one entry per active inline level: the guarded callee VALUE
+    /// (`Ir::Capture` inside the inlined body reads THROUGH it — a live,
+    /// stack-mapped SSA value, so capture reads always see the post-move
+    /// object) and the plan-time capture snapshot (drives NESTED value plans;
+    /// never emitted). The legacy capture-free global inliner pushes `None`s.
+    inline_ctx: Vec<(Option<Value>, Option<Vec<u64>>)>,
+    /// Stage G2 — the values the triggering invoke observed (args + the
+    /// invoked closure's captures), when this body's first compile happened
+    /// under a real call. `None` for top-level/eval bodies.
+    spec: Option<SpecEnv>,
     /// The running closure's bits, loaded once at entry (stack-mapped): the
     /// self-tail-call compare and every capture read go through this, so both
     /// see the closure's CURRENT address after any safepoint (Stage E).
@@ -2899,11 +3108,27 @@ impl<'a, 'b> Compiler<'a, 'b> {
     /// bits to the object's current address, load the inline capture word
     /// (Stage E — the derived pointer never crosses a safepoint; it is built
     /// and consumed within this straight-line sequence).
+    ///
+    /// Inside a value-observed inline (Stage G2), "the running closure" is the
+    /// GUARDED CALLEE, not this function — read through the inline level's
+    /// self value instead (also live + stack-mapped, so also post-move-safe).
     fn emit_capture<M: ModelArithJit>(&mut self, idx: u16) -> Value {
-        let sc = self.fb.use_var(self.self_var);
-        // Not a `compile()` result, so the blanket declare misses it: mark the
-        // self bits here so a read AFTER a real call is in that call's map.
-        self.fb.declare_value_needs_stack_map(sc);
+        let sc = match self.inline_ctx.last() {
+            Some((Some(v), _)) => *v,
+            Some((None, _)) => panic!(
+                "emit_capture inside a capture-free inline: the global inliner \
+                 rejects capture-carrying callees, so this body cannot contain \
+                 Ir::Capture — planner bug"
+            ),
+            None => {
+                let sc = self.fb.use_var(self.self_var);
+                // Not a `compile()` result, so the blanket declare misses it:
+                // mark the self bits here so a read AFTER a real call is in
+                // that call's map.
+                self.fb.declare_value_needs_stack_map(sc);
+                sc
+            }
+        };
         let base = M::emit_ref_addr_unchecked(self, sc);
         let off = (CLOSURE_CAPS_OFF as i32) + (idx as i32) * 8;
         self.fb.ins().load(I64, MemFlagsData::trusted(), base, off)
@@ -3059,19 +3284,113 @@ impl<'a, 'b> Compiler<'a, 'b> {
         Some(InlinePlan { bits, nparams, nslots, body })
     }
 
+    /// Stage G2 — the compile-time-OBSERVED value of a callee expression, when
+    /// there is one: a parameter read resolves through the triggering invoke's
+    /// args, a capture read through the invoked closure's captures; inside a
+    /// value-observed inline level, through that level's capture snapshot.
+    /// Observation only — the emitted guard re-validates against the live value.
+    fn spec_value_of(&self, f: &Ir) -> Option<u64> {
+        if self.mem_mode {
+            return None;
+        }
+        match self.inline_ctx.last() {
+            Some((_, caps)) => match f {
+                Ir::Capture(j) => caps.as_ref()?.get(*j as usize).copied(),
+                _ => None, // an inlinee's params/locals: values not observed
+            },
+            None => match f {
+                Ir::Capture(j) => self.spec.as_ref()?.caps.get(*j as usize).copied(),
+                // `args.len() == nparams` (resolve_call only builds the env on an
+                // arity match), so an in-range idx IS a parameter slot.
+                Ir::Local { up: 0, idx } => self.spec.as_ref()?.args.get(*idx as usize).copied(),
+                _ => None,
+            },
+        }
+    }
+
+    /// Stage G2 — can a call of OBSERVED value `bits` at an `argc`-arg site be
+    /// spliced inline? Like `try_inline_plan` but value-driven: multi-arity
+    /// values select their fixed clause, CAPTURE-CARRYING closures are allowed
+    /// (reads go through the guarded live value), and the guard is the clause's
+    /// meta word rather than the value's bits. Consumes budget on success.
+    fn try_value_inline_plan<M: ModelArithJit>(&self, bits: u64, argc: usize) -> Option<ValuePlan> {
+        if self.mem_mode || self.rt_ptr.is_null() {
+            return None;
+        }
+        let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+        if M::R::tag_of(bits) != RawTag::Ref {
+            return None;
+        }
+        let g = M::R::as_ref(bits);
+        let (target, multifn) = if unsafe { g.type_id() } == kind::MULTIFN {
+            let nfixed = unsafe { g.aux() } as usize;
+            if argc >= nfixed {
+                return None;
+            }
+            let f = unsafe { *(g.0.add(MULTIFN_FIXED_OFF + argc * 8) as *const u64) };
+            if f == 0 {
+                return None; // variadic-only at this arity: not inlinable
+            }
+            (f, true)
+        } else {
+            (bits, false)
+        };
+        if M::R::tag_of(target) != RawTag::Ref {
+            return None;
+        }
+        let tg = M::R::as_ref(target);
+        if unsafe { tg.type_id() } != kind::CLOSURE {
+            return None;
+        }
+        let meta = unsafe { *(tg.0.add(CLOSURE_META_OFF) as *const u64) };
+        if crate::heap::meta_variadic(meta) || crate::heap::meta_nparams(meta) != argc {
+            return None;
+        }
+        let nslots = crate::heap::meta_nslots(meta);
+        let body = rt.template(crate::heap::meta_template(meta)).clone();
+        if body_mem_mode(&body) {
+            return None;
+        }
+        let cost = node_count_capped(&body, INLINE_MAX_CALLEE_NODES)?;
+        let budget = self.inline_budget.get();
+        if budget < cost {
+            return None;
+        }
+        self.inline_budget.set(budget - cost);
+        let ncaps = unsafe { tg.aux() } as usize;
+        let caps = (0..ncaps)
+            .map(|i| unsafe { *(tg.0.add(CLOSURE_CAPS_OFF + i * 8) as *const u64) })
+            .collect();
+        Some(ValuePlan { meta, multifn, nparams: argc, nslots, body, caps })
+    }
+
     /// Splice an inlined callee body into the current function: fresh SSA vars
     /// for its activation slots (params seeded from the evaluated args, the
     /// rest nil), compiled in NON-tail position with no self-loop — its own
     /// tail calls become ordinary calls, which preserves semantics (and one
     /// inlined level never grows the stack unboundedly).
-    fn emit_inlined_body<M: ModelArithJit>(&mut self, plan: &InlinePlan, argvals: &[Value]) -> Value {
+    ///
+    /// `self_val`/`caps` (Stage G2): for a value-observed inlinee, the guarded
+    /// callee VALUE its capture reads go through, and the plan-time capture
+    /// snapshot for nested planning. The capture-free global inliner passes
+    /// `None`s.
+    fn emit_inlined_body<M: ModelArithJit>(
+        &mut self,
+        nparams: usize,
+        nslots: u16,
+        body: &Ir,
+        argvals: &[Value],
+        self_val: Option<Value>,
+        caps: Option<Vec<u64>>,
+    ) -> Value {
         let saved_vars = std::mem::take(&mut self.vars);
         self.inline_outer_vars.push(saved_vars.clone());
+        self.inline_ctx.push((self_val, caps));
         let saved_header = self.loop_header.take();
         let saved_nparams = self.loop_nparams;
-        for i in 0..plan.nslots as usize {
+        for i in 0..nslots as usize {
             let var = self.declare_root_var();
-            if i < plan.nparams {
+            if i < nparams {
                 self.fb.def_var(var, argvals[i]);
             } else {
                 let nil = self.fb.ins().iconst(I64, M::R::enc_nil() as i64);
@@ -3079,13 +3398,118 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             self.vars.push(var);
         }
-        self.loop_nparams = plan.nparams;
-        let v = self.compile::<M>(&plan.body, false);
+        self.loop_nparams = nparams;
+        let v = self.compile::<M>(body, false);
+        self.inline_ctx.pop();
         self.inline_outer_vars.pop();
         self.vars = saved_vars;
         self.loop_header = saved_header;
         self.loop_nparams = saved_nparams;
         v
+    }
+
+    /// Stage G2 — emit a value-specialized call: the plan's clause body spliced
+    /// inline behind a TEMPLATE guard on the live callee value (`fval`). Guard
+    /// chain (each failure exits to the generic `emit_call` path — never a
+    /// wrong answer): direct + ref, then either header == CLOSURE and meta ==
+    /// plan.meta, or (multifn shape) header == MULTIFN, `fixed[argc]` present,
+    /// and the CLAUSE's meta == plan.meta. Captures inside the inlined body
+    /// read through the guarded value (declared for the stack maps), so a
+    /// collection mid-body is safe.
+    fn emit_value_specialized<M: ModelArithJit>(
+        &mut self,
+        fval: Value,
+        argvals: &[Value],
+        plan: &ValuePlan,
+    ) -> Value {
+        let flags = MemFlagsData::trusted();
+        let ro = MemFlagsData::trusted().with_readonly();
+        let result = self.declare_root_var();
+        let inlb = self.fb.create_block();
+        // The inlined body's capture reads go through the guarded CLAUSE value.
+        self.fb.append_block_param(inlb, I64);
+        let slowb = self.fb.create_block();
+        let merge = self.fb.create_block();
+
+        let (is_ref, addr) = M::emit_ref_addr(self, fval);
+        let rc = self.rc_val;
+        let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
+        let g1 = self.fb.ins().band(is_ref, direct);
+        let hdrb = self.fb.create_block();
+        self.fb.ins().brif(g1, hdrb, &[], slowb, &[]);
+
+        self.fb.switch_to_block(hdrb);
+        self.fb.seal_block(hdrb);
+        let hdr = self.fb.ins().load(I64, flags, addr, 0);
+        let tid = self.fb.ins().band_imm(hdr, 0xffff);
+        if plan.multifn {
+            let mfl = self.fb.create_block();
+            let metab = self.fb.create_block();
+            let is_mf = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::MULTIFN as i64);
+            let aux = self.fb.ins().ushr_imm(hdr, 32);
+            let in_range =
+                self.fb.ins().icmp_imm(IntCC::UnsignedGreaterThan, aux, plan.nparams as i64);
+            let mf_ok = self.fb.ins().band(is_mf, in_range);
+            self.fb.ins().brif(mf_ok, mfl, &[], slowb, &[]);
+            self.fb.switch_to_block(mfl);
+            self.fb.seal_block(mfl);
+            let clause = self.fb.ins().load(
+                I64,
+                flags,
+                addr,
+                MULTIFN_FIXED_OFF as i32 + (plan.nparams as i32) * 8,
+            );
+            // The clause value feeds capture reads across safepoints inside the
+            // inlined body: declare it so it is spilled + rewritten on a move.
+            self.fb.declare_value_needs_stack_map(clause);
+            let has_clause = self.fb.ins().icmp_imm(IntCC::NotEqual, clause, 0);
+            self.fb.ins().brif(has_clause, metab, &[], slowb, &[]);
+            self.fb.switch_to_block(metab);
+            self.fb.seal_block(metab);
+            let caddr = M::emit_ref_addr_unchecked(self, clause);
+            let cmeta = self.fb.ins().load(I64, flags, caddr, CLOSURE_META_OFF as i32);
+            let want = self.iconst(plan.meta);
+            let meta_ok = self.fb.ins().icmp(IntCC::Equal, cmeta, want);
+            self.fb.ins().brif(meta_ok, inlb, &[clause.into()], slowb, &[]);
+        } else {
+            let metab = self.fb.create_block();
+            let is_cl = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::CLOSURE as i64);
+            self.fb.ins().brif(is_cl, metab, &[], slowb, &[]);
+            self.fb.switch_to_block(metab);
+            self.fb.seal_block(metab);
+            let meta = self.fb.ins().load(I64, flags, addr, CLOSURE_META_OFF as i32);
+            let want = self.iconst(plan.meta);
+            let meta_ok = self.fb.ins().icmp(IntCC::Equal, meta, want);
+            self.fb.ins().brif(meta_ok, inlb, &[fval.into()], slowb, &[]);
+        }
+
+        self.fb.switch_to_block(inlb);
+        self.fb.seal_block(inlb);
+        let target = self.fb.block_params(inlb)[0];
+        // A block param is not a `compile()` result: declare it so capture
+        // reads after an inner safepoint see the post-move bits.
+        self.fb.declare_value_needs_stack_map(target);
+        let iv = self.emit_inlined_body::<M>(
+            plan.nparams,
+            plan.nslots,
+            &plan.body,
+            argvals,
+            Some(target),
+            Some(plan.caps.clone()),
+        );
+        self.fb.def_var(result, iv);
+        self.fb.ins().jump(merge, &[]);
+
+        // Deopt: the ordinary call path on the SAME live value.
+        self.fb.switch_to_block(slowb);
+        self.fb.seal_block(slowb);
+        let sv = self.emit_call::<M>(fval, argvals);
+        self.fb.def_var(result, sv);
+        self.fb.ins().jump(merge, &[]);
+
+        self.fb.switch_to_block(merge);
+        self.fb.seal_block(merge);
+        self.fb.use_var(result)
     }
 
     /// The imported signature for a native fast entry of arity `k`:
@@ -3139,28 +3563,67 @@ impl<'a, 'b> Compiler<'a, 'b> {
 
         let result = self.declare_root_var();
         let checkb = self.fb.create_block();
+        // `closb` re-runs the closure checks over EITHER the original callee or
+        // an inline-selected multifn clause: params are (callee bits, address).
+        let closb = self.fb.create_block();
+        self.fb.append_block_param(closb, I64);
+        self.fb.append_block_param(closb, I64);
+        let mfb = self.fb.create_block();
+        let mfload = self.fb.create_block();
+        let clprep = self.fb.create_block();
         let fastb = self.fb.create_block();
         let slowb = self.fb.create_block();
         let merge = self.fb.create_block();
         self.fb.ins().brif(guard1, checkb, &[], slowb, &[]);
 
-        // ── a ref: header type_id == CLOSURE, meta arity matches + !variadic, code present ──
+        // ── a ref: closure? straight to the checks. MultiFn? select the fixed
+        // clause for this arity INLINE (one bounds check + one load — Stage G1:
+        // value-called multi-arity fns like `+`, `conj`, transducer step fns
+        // took the shim per element) and run the same checks on the clause. ──
         self.fb.switch_to_block(checkb);
         self.fb.seal_block(checkb);
         let hdr = self.fb.ins().load(I64, flags, addr, 0);
         let tid = self.fb.ins().band_imm(hdr, 0xffff);
         let is_closure = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::CLOSURE as i64);
-        let meta = self.fb.ins().load(I64, flags, addr, CLOSURE_META_OFF as i32);
+        self.fb.ins().brif(is_closure, closb, &[callee.into(), addr.into()], mfb, &[]);
+
+        self.fb.switch_to_block(mfb);
+        self.fb.seal_block(mfb);
+        let is_mf = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::MULTIFN as i64);
+        let aux = self.fb.ins().ushr_imm(hdr, 32); // fixed-clause table length
+        let in_range = self.fb.ins().icmp_imm(IntCC::UnsignedGreaterThan, aux, n as i64);
+        let mf_ok = self.fb.ins().band(is_mf, in_range);
+        self.fb.ins().brif(mf_ok, mfload, &[], slowb, &[]);
+
+        // fixed[n] lives in the varlen tail: [hdr | variadic closure | raw8 vmin | clauses…].
+        self.fb.switch_to_block(mfload);
+        self.fb.seal_block(mfload);
+        let clause = self.fb.ins().load(I64, flags, addr, MULTIFN_FIXED_OFF as i32 + (n as i32) * 8);
+        let has_clause = self.fb.ins().icmp_imm(IntCC::NotEqual, clause, 0);
+        self.fb.ins().brif(has_clause, clprep, &[], slowb, &[]);
+        self.fb.switch_to_block(clprep);
+        self.fb.seal_block(clprep);
+        let caddr = M::emit_ref_addr_unchecked(self, clause);
+        self.fb.ins().jump(closb, &[clause.into(), caddr.into()]);
+
+        // ── the closure checks: meta arity matches + !variadic, code present ──
+        // (`target`/`taddr` — NOT the original `callee`, which the slow path
+        // below still needs: the fast path invokes the CLAUSE when routing
+        // happened, and its bits become the callee's stack-mapped self.)
+        self.fb.switch_to_block(closb);
+        self.fb.seal_block(closb);
+        let target = self.fb.block_params(closb)[0];
+        let taddr = self.fb.block_params(closb)[1];
+        let meta = self.fb.ins().load(I64, flags, taddr, CLOSURE_META_OFF as i32);
         let nparams_raw = self.fb.ins().ushr_imm(meta, 32);
         let nparams = self.fb.ins().band_imm(nparams_raw, 0xffff);
         let arity_ok = self.fb.ins().icmp_imm(IntCC::Equal, nparams, n as i64);
         let variadic_bit = self.fb.ins().band_imm(meta, crate::heap::META_VARIADIC_BIT as i64);
         let not_variadic = self.fb.ins().icmp_imm(IntCC::Equal, variadic_bit, 0);
         let meta_ok = self.fb.ins().band(arity_ok, not_variadic);
-        let code = self.fb.ins().load(I64, flags, addr, CLOSURE_CODE_OFF as i32);
+        let code = self.fb.ins().load(I64, flags, taddr, CLOSURE_CODE_OFF as i32);
         let has_code = self.fb.ins().icmp_imm(IntCC::NotEqual, code, 0);
-        let kind_ok = self.fb.ins().band(is_closure, meta_ok);
-        let guard2 = self.fb.ins().band(kind_ok, has_code);
+        let guard2 = self.fb.ins().band(meta_ok, has_code);
         self.fb.ins().brif(guard2, fastb, &[], slowb, &[]);
 
         // ── native fast path: 3-store context, args in registers ──
@@ -3178,7 +3641,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         // a clear tail-pending flag. The callee reads everything else through
         // `rc`.
         self.fb.ins().stack_store(rc, ctx_ss, self.off_rc);
-        self.fb.ins().stack_store(callee, ctx_ss, self.off_self_closure);
+        self.fb.ins().stack_store(target, ctx_ss, self.off_self_closure);
         let zero8 = self.fb.ins().iconst(I8, 0);
         self.fb.ins().stack_store(zero8, ctx_ss, self.off_tail_pending);
         let new_ctx = self.fb.ins().stack_addr(I64, ctx_ss, 0);
@@ -3505,7 +3968,14 @@ impl<'a, 'b> Compiler<'a, 'b> {
 
                             self.fb.switch_to_block(inlb);
                             self.fb.seal_block(inlb);
-                            let iv = self.emit_inlined_body::<M>(&plan, &argvals);
+                            let iv = self.emit_inlined_body::<M>(
+                                plan.nparams,
+                                plan.nslots,
+                                &plan.body,
+                                &argvals,
+                                None,
+                                None,
+                            );
                             self.fb.def_var(result, iv);
                             self.fb.ins().jump(merge, &[]);
 
@@ -3521,6 +3991,21 @@ impl<'a, 'b> Compiler<'a, 'b> {
                             self.fb.switch_to_block(merge);
                             self.fb.seal_block(merge);
                             return self.fb.use_var(result);
+                        }
+                    }
+                    // Stage G2 — param-value specialization: a non-tail call
+                    // through a PARAMETER or CAPTURE whose actual value this
+                    // compile observed (the triggering invoke's args / the
+                    // invoked closure's captures) splices the observed clause
+                    // body inline behind a template guard on the live value.
+                    // This is the per-element `(f acc x)` / `(rf a (inc x))`
+                    // shape of every reduce/transducer step.
+                    if let Some(vbits) = self.spec_value_of(f) {
+                        if let Some(plan) = self.try_value_inline_plan::<M>(vbits, args.len()) {
+                            let fval = self.compile::<M>(f, false);
+                            let argvals: Vec<Value> =
+                                args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                            return self.emit_value_specialized::<M>(fval, &argvals, &plan);
                         }
                     }
                 }
@@ -3638,6 +4123,62 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let (addr, count) = self.spill_args(&argvals);
                 let ctx = self.ctx_val;
                 self.call_shim_checked(self.refs.apply, &[ctx, addr, count])
+            }
+            // `(type-of x)` — inline the two shapes every dispatch predicate
+            // hits per element (Stage G1: `reduced?` is `(%num-eq (type-of x)
+            // 'Reduced)` inside every reduce loop): an immediate fixnum is
+            // 'Long (a compile-time constant sym), a RECORD ref's type sym is
+            // one load off the object. Everything else (bignum refs, builtin
+            // containers, bools, nil, …) keeps the runtime's `type_tag`.
+            Ir::Prim(Prim::TypeOf, args) if M::INLINE_OBJECTS && !self.rt_ptr.is_null() => {
+                let v = self.compile::<M>(&args[0], false);
+                let long_bits = {
+                    let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                    M::R::enc_sym(rt.intern("Long"))
+                };
+                let flags = MemFlagsData::trusted();
+                let result = self.declare_root_var();
+                let intb = self.fb.create_block();
+                let refchk = self.fb.create_block();
+                let hdrb = self.fb.create_block();
+                let recb = self.fb.create_block();
+                let slowb = self.fb.create_block();
+                let merge = self.fb.create_block();
+                // immediate fixnum → 'Long (exactly `type_tag`'s Val::Int arm;
+                // promoted bignums are refs and take the slow path).
+                let is_int = M::emit_both_int(self, v, v);
+                self.fb.ins().brif(is_int, intb, &[], refchk, &[]);
+                self.fb.switch_to_block(intb);
+                self.fb.seal_block(intb);
+                let lc = self.iconst(long_bits);
+                self.fb.def_var(result, lc);
+                self.fb.ins().jump(merge, &[]);
+                // ref → RECORD? its type sym is the raw word right after the
+                // header (RECORD layout: [hdr | raw8 sym | fields…]).
+                self.fb.switch_to_block(refchk);
+                self.fb.seal_block(refchk);
+                let (is_ref, addr) = M::emit_ref_addr(self, v);
+                self.fb.ins().brif(is_ref, hdrb, &[], slowb, &[]);
+                self.fb.switch_to_block(hdrb);
+                self.fb.seal_block(hdrb);
+                let hdr = self.fb.ins().load(I64, flags, addr, 0);
+                let tid = self.fb.ins().band_imm(hdr, 0xffff);
+                let is_rec = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::RECORD as i64);
+                self.fb.ins().brif(is_rec, recb, &[], slowb, &[]);
+                self.fb.switch_to_block(recb);
+                self.fb.seal_block(recb);
+                let sym_w = self.fb.ins().load(I64, flags, addr, HEADER_SIZE as i32);
+                let enc = M::emit_enc_sym(self, sym_w);
+                self.fb.def_var(result, enc);
+                self.fb.ins().jump(merge, &[]);
+                self.fb.switch_to_block(slowb);
+                self.fb.seal_block(slowb);
+                let sp = self.slow_prim(Prim::TypeOf, &[v]);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
             }
             // `(%cons h t)` — inline allocation (D5): normalize a `()` tail to
             // nil (exactly `Runtime::cons`), bump-allocate 24 bytes through the
@@ -4001,7 +4542,14 @@ impl<'a, 'b> Compiler<'a, 'b> {
     /// runtime's promoting `prim` (bignum / float / mixed). The emit half of the
     /// numeric-overflow axis — what makes the JIT match the tree-walker's tower.
     fn emit_guarded_arith<M: ModelArithJit>(&mut self, op: Prim, a: Value, b: Value) -> Value {
-        let both = M::emit_both_int(self, a, b);
+        // `=`'s guard is wider than the arithmetic ops': ANY two non-ref
+        // immediates compare by bits (Stage G1 — `(%num-eq (type-of x) 'Reduced)`
+        // runs per element in every reduce, and syms took the shim).
+        let both = if let Prim::Eq = op {
+            M::emit_eq_immediates(self, a, b)
+        } else {
+            M::emit_both_int(self, a, b)
+        };
 
         let result = self.declare_root_var();
         let fast = self.fb.create_block();
@@ -4009,18 +4557,21 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let merge = self.fb.create_block();
         self.fb.ins().brif(both, fast, &[], slow, &[]);
 
-        // ── fast path: both operands are immediate fixnums ──
+        // ── fast path: both operands are immediate fixnums (Eq: any immediates) ──
         self.fb.switch_to_block(fast);
         self.fb.seal_block(fast);
-        let x = M::emit_untag(self, a);
-        let y = M::emit_untag(self, b);
         match op {
             Prim::Lt | Prim::Eq => {
-                // `<` / `=` don't overflow. For two immediate fixnums, `=` is just
-                // bit-equality of the untagged values (the slow `equal?` path is
-                // only needed for non-fixnums, which the guard already routed away).
-                let cc = if let Prim::Eq = op { IntCC::Equal } else { IntCC::SignedLessThan };
-                let c = self.fb.ins().icmp(cc, x, y);
+                // `<` / `=` don't overflow. `=` on two immediates is bit-equality
+                // of the WORDS (canonical encodings; the slow `equal?` path is
+                // only needed for refs, which the guard already routed away).
+                let c = if let Prim::Eq = op {
+                    self.fb.ins().icmp(IntCC::Equal, a, b)
+                } else {
+                    let x = M::emit_untag(self, a);
+                    let y = M::emit_untag(self, b);
+                    self.fb.ins().icmp(IntCC::SignedLessThan, x, y)
+                };
                 let cw = self.fb.ins().uextend(I64, c);
                 let t = self.iconst(M::R::enc_bool(true));
                 let f = self.iconst(M::R::enc_bool(false));
@@ -4031,6 +4582,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
             Prim::Add | Prim::Sub => {
                 // Both operands are < 2^60, so the i64 op can't overflow i64; it
                 // only needs a fixnum-range check.
+                let x = M::emit_untag(self, a);
+                let y = M::emit_untag(self, b);
                 let r = if let Prim::Add = op {
                     self.fb.ins().iadd(x, y)
                 } else {
@@ -4041,6 +4594,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
             Prim::Mul => {
                 // The product of two 61-bit values can exceed i64; widen to i128,
                 // range-check, then narrow.
+                let x = M::emit_untag(self, a);
+                let y = M::emit_untag(self, b);
                 let x128 = self.fb.ins().sextend(I128, x);
                 let y128 = self.fb.ins().sextend(I128, y);
                 let r128 = self.fb.ins().imul(x128, y128);

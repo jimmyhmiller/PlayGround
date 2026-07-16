@@ -1,0 +1,89 @@
+use std::path::Path;
+
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{
+    ExportAllDeclaration, ExportNamedDeclaration, Expression, ImportDeclaration, ImportExpression,
+};
+use oxc_ast_visit::Visit;
+use oxc_parser::Parser;
+use oxc_span::SourceType;
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ParseResult {
+    pub dependencies: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Default)]
+struct DependencyVisitor {
+    dependencies: Vec<String>,
+}
+
+impl<'a> Visit<'a> for DependencyVisitor {
+    fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'a>) {
+        self.dependencies.push(declaration.source.value.to_string());
+    }
+
+    fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
+        if let Expression::StringLiteral(literal) = &expression.source {
+            self.dependencies.push(literal.value.to_string());
+        }
+    }
+
+    fn visit_export_all_declaration(&mut self, declaration: &ExportAllDeclaration<'a>) {
+        self.dependencies.push(declaration.source.value.to_string());
+    }
+
+    fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
+        if let Some(source) = &declaration.source {
+            self.dependencies.push(source.value.to_string());
+        }
+    }
+}
+
+pub fn parse_dependencies(path: &Path, source: &str) -> ParseResult {
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path)
+        .unwrap_or_default()
+        .with_module(true);
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+
+    let mut visitor = DependencyVisitor::default();
+    visitor.visit_program(&parsed.program);
+    visitor.dependencies.sort();
+    visitor.dependencies.dedup();
+
+    ParseResult {
+        dependencies: visitor.dependencies,
+        errors: parsed
+            .diagnostics
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_static_reexport_and_literal_dynamic_dependencies() {
+        let parsed = parse_dependencies(
+            Path::new("example.ts"),
+            r#"
+                import { a } from "./a.js";
+                export { b } from "./b.js";
+                export * from "./c.js";
+                const d = import("./d.js");
+                const ignored = import(`./${name}.js`);
+            "#,
+        );
+
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert_eq!(
+            parsed.dependencies,
+            ["./a.js", "./b.js", "./c.js", "./d.js"]
+        );
+    }
+}

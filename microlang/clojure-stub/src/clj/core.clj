@@ -182,21 +182,54 @@
 (defn -add-seq [acc s] (if (nil? s) acc (-add-seq (%add acc (%first s)) (%rest s))))
 (defn -mul-seq [acc s] (if (nil? s) acc (-mul-seq (%mul acc (%first s)) (%rest s))))
 (defn -sub-seq [acc s] (if (nil? s) acc (-sub-seq (%sub acc (%first s)) (%rest s))))
-(defn + [& xs] (-add-seq 0 (seq xs)))
-(defn * [& xs] (-mul-seq 1 (seq xs)))
-(defn - [x & xs] (if (nil? (seq xs)) (%sub 0 x) (-sub-seq x (seq xs))))
+;; Fixed arities up front (like real clojure.core): a value-call `(f a b)` on a
+;; pure-variadic fn can only run through the rest-list trampoline — the JIT's
+;; register fast-invoke needs a FIXED clause to select. These run per element in
+;; every transduce/reduce that folds with `+` as a value.
+(defn +
+  ([] 0)
+  ([x] (%add 0 x))
+  ([x y] (%add x y))
+  ([x y & more] (-add-seq (%add x y) (seq more))))
+(defn *
+  ([] 1)
+  ([x] (%mul 1 x))
+  ([x y] (%mul x y))
+  ([x y & more] (-mul-seq (%mul x y) (seq more))))
+(defn -
+  ([x] (%sub 0 x))
+  ([x y] (%sub x y))
+  ([x y & more] (-sub-seq (%sub x y) (seq more))))
 ;; Chained comparisons: each adjacent pair must satisfy the relation.
 (defn -lt-seq [prev s] (if (nil? s) true (if (%lt prev (%first s)) (-lt-seq (%first s) (%rest s)) false)))
 (defn -gt-seq [prev s] (if (nil? s) true (if (%lt (%first s) prev) (-gt-seq (%first s) (%rest s)) false)))
 (defn -le-seq [prev s] (if (nil? s) true (if (%lt (%first s) prev) false (-le-seq (%first s) (%rest s)))))
 (defn -ge-seq [prev s] (if (nil? s) true (if (%lt prev (%first s)) false (-ge-seq (%first s) (%rest s)))))
 (defn -eq-seq [a s] (if (nil? s) true (if (-eq2 a (%first s)) (-eq-seq a (%rest s)) false)))
-(defn < [x & xs] (-lt-seq x (seq xs)))
-(defn > [x & xs] (-gt-seq x (seq xs)))
-(defn <= [x & xs] (-le-seq x (seq xs)))
-(defn >= [x & xs] (-ge-seq x (seq xs)))
-(defn = [x & xs] (-eq-seq x (seq xs)))
-(defn not= [x & xs] (not (-eq-seq x (seq xs))))
+(defn <
+  ([x] true)
+  ([x y] (%lt x y))
+  ([x y & more] (if (%lt x y) (-lt-seq y (seq more)) false)))
+(defn >
+  ([x] true)
+  ([x y] (%lt y x))
+  ([x y & more] (if (%lt y x) (-gt-seq y (seq more)) false)))
+(defn <=
+  ([x] true)
+  ([x y] (if (%lt y x) false true))
+  ([x y & more] (if (%lt y x) false (-le-seq y (seq more)))))
+(defn >=
+  ([x] true)
+  ([x y] (if (%lt x y) false true))
+  ([x y & more] (if (%lt x y) false (-ge-seq y (seq more)))))
+(defn =
+  ([x] true)
+  ([x y] (-eq2 x y))
+  ([x y & more] (if (-eq2 x y) (-eq-seq x (seq more)) false)))
+(defn not=
+  ([x] false)
+  ([x y] (not (-eq2 x y)))
+  ([x y & more] (not (if (-eq2 x y) (-eq-seq x (seq more)) false))))
 (defn inc [n] (%add n 1))
 (defn dec [n] (%sub n 1))
 ;; integer division family (quot truncates toward zero; rem follows the dividend's
@@ -206,8 +239,10 @@
 (defn mod [a b] (%mod a b))
 ;; `/` — 1-arg is reciprocal; otherwise a left fold. Exact when integers divide
 ;; evenly, else float (no Ratio type).
-(defn / [x & more]
-  (if (nil? more) (%div 1 x) (-div-seq x (seq more))))
+(defn /
+  ([x] (%div 1 x))
+  ([x y] (%div x y))
+  ([x y & more] (-div-seq (%div x y) (seq more))))
 (defn -div-seq [acc s] (if (nil? s) acc (-div-seq (%div acc (first s)) (next s))))
 
 ;; ── ex-info: a data-carrying exception (throw/catch already take any value) ──
@@ -972,8 +1007,14 @@
 (defn complement [f]
   (fn ([] (not (f))) ([x] (not (f x))) ([x y] (not (f x y)))
       ([x y & more] (not (apply f x y more)))))
-(defn max [a & more] (reduce (fn [x y] (if (%lt x y) y x)) a more))
-(defn min [a & more] (reduce (fn [x y] (if (%lt x y) x y)) a more))
+(defn max
+  ([a] a)
+  ([a b] (if (%lt a b) b a))
+  ([a b & more] (reduce (fn [x y] (if (%lt x y) y x)) (if (%lt a b) b a) more)))
+(defn min
+  ([a] a)
+  ([a b] (if (%lt a b) a b))
+  ([a b & more] (reduce (fn [x y] (if (%lt x y) x y)) (if (%lt a b) a b) more)))
 ;; Chunk-aware: map `(f index element)` over a chunk into a fresh chunk, carrying
 ;; the running index across chunks — so `(reduce g (map-indexed f (range …)))`
 ;; chunk-scans instead of consing per element.

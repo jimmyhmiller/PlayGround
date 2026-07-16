@@ -1,0 +1,18 @@
+[package]
+name = "diffpack"
+version = "0.1.0"
+edition = "2024"
+description = "A proof-of-concept incremental JavaScript module graph built with Oxc and Differential Dataflow"
+license = "MIT"
+
+[dependencies]
+differential-dataflow = "0.25.1"
+oxc_allocator = "0.140.0"
+oxc_ast = "0.140.0"
+oxc_ast_visit = "0.140.0"
+oxc_parser = "0.140.0"
+oxc_span = "0.140.0"
+timely = "0.31.0"
+
+[dev-dependencies]
+tempfile = "3.23.0"

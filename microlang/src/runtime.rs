@@ -2742,6 +2742,35 @@ impl<M: ValueModel> Runtime<M> {
     /// If `callee` is a multi-arity fn, the closure serving `argc` arguments
     /// (fixed arity first, else the variadic clause). `None` when `callee` is
     /// not a MultiFn; a catchable arity throw when no clause matches.
+    /// `multifn_select` on the raw accessor layer (Stage G1): the select runs
+    /// per BOUNCE in the JIT's tail chains — the decode/ObjView glue was a top
+    /// profile frame. One type_id check (loud poison panic via `raw_type_id`),
+    /// then direct reads of the clause table. Semantics identical to
+    /// `multifn_select` below. (All callers live in the JIT tier.)
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub(crate) fn multifn_select_raw(&mut self, callee: u64, argc: usize) -> Option<u64> {
+        let g = self.raw_gc(callee)?;
+        if self.raw_type_id(g) != crate::heap::kind::MULTIFN {
+            return None;
+        }
+        let info = &self.shared.types[crate::heap::kind::MULTIFN as usize];
+        let fixed = unsafe { g.values(info) };
+        let mut sel = fixed.get(argc).copied().unwrap_or(0);
+        if sel == 0 {
+            let vmin = unsafe { g.raw_word(info, 0) };
+            if vmin != u64::MAX && argc as u64 >= vmin {
+                sel = unsafe { g.field(0) };
+            }
+        }
+        if sel == 0 {
+            let msg = format!("arity: no clause for {argc} args");
+            let sid = self.alloc(Obj::Str(msg));
+            self.signal_throw(M::R::enc_ref(sid));
+            return Some(self.encode(Val::Nil));
+        }
+        Some(sel)
+    }
+
     pub fn multifn_select(&mut self, callee: u64, argc: usize) -> Option<u64> {
         let Val::Ref(id) = self.decode(callee) else { return None };
         let (sel, known) = match self.view_gc(id) {

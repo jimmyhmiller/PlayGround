@@ -202,3 +202,106 @@ keyed on parameter-held closure bits, entry guards, and profiling/blacklist
 plumbing through the Decision policy. comp-chain's remaining ~190ns/el is
 exactly that shape (5 chained closure invokes ≈ 35ns of per-invoke glue
 each). Not attempted here; it is the headline item for the next stage.
+
+## Stage G results (measured 2026-07-15, same harness; before = post-F4)
+
+The punt above is closed. G1 (fast-invoke coverage) turned out to be the
+whole story; G2 (param-value specialization) landed on top and is real but
+modest, for a structural reason recorded below.
+
+| workload | post-F4 | G1 | G1+G2 (suite) | isolated | JVM |
+|---|---|---|---|---|---|
+| transduce | 106 | 39 | 36 | **24** | 5 |
+| comp-chain | 191 | 60 | 53 | 55 | 15 |
+| group-by | 1039 | 632 | ~630 | 647 | 26 |
+| into-xform | 134 | 59 | 57 | 45 | 7 |
+| reduce-map | 52 | 35 | 33 | | 19 |
+| interleave (isolated) | 101 | 67 | 66 | | 71 |
+| apply | 25 | 21 | 21 | | 37 |
+| core band / transients / persistents | | unchanged (2-3 / 4 / 4-5; 23 / 63; ~148 / ~790) | | | |
+
+### G1 — why per-element calls missed the fast path (four distinct holes)
+
+Profiling the isolated transduce/group-by drivers bottomed out in
+`run_trampoline`/`resolve_call`/`invoke` PER ELEMENT. Four causes, fixed in
+order, each re-measured:
+
+1. **The selected multifn CLAUSE was never stamped.** `invoke` published the
+   fast entry under the value call sites see (the MultiFn), but
+   `shim_fast_invoke` re-selects per call and reads the CLAUSE's code word —
+   which stayed null forever, so every multifn-routed call took the
+   resolve/trampoline path. One-line fix: publish under BOTH.
+2. **The operator fns were pure-variadic.** `(defn + [& xs] …)` (likewise
+   `- * / < > <= >= = not=`, `max`/`min`) meant every VALUE call `(rf a x)`
+   with `rf = +` selected a variadic clause — which the register fast path
+   can, by design, never take (rest-list + frame per call). clojure.core
+   answer applied: real fixed arities up front, variadic tail preserved
+   byte-for-byte (`core.clj`). This alone halved group-by.
+3. **Non-self TAIL BOUNCES went through the trampoline.** The per-element
+   shape of every step fn is `(rf a (inc x))` — a tail call to a callee
+   that is NOT self, which `shim_fast_invoke`/`shim_finish_tail` finished
+   via `top.invoke` (full resolve + frame) per element. Now
+   `finish_tail_fast` bounces the whole chain in a register-path LOOP
+   (bounded stack, same guards as the call sites; anything ineligible still
+   finishes through `top`).
+4. **The emitted call site rejected MULTIFN callees outright**, shimming per
+   element. `emit_call` now selects the fixed clause INLINE — one bounds
+   check + one load off the MultiFn object (`MULTIFN_FIXED_OFF`) — and runs
+   the same closure checks on the clause (block-param re-dispatch).
+
+Two supporting inline emissions the same profiles demanded (`reduced?` =
+`(%num-eq (type-of x) 'Reduced)` ran two GENERIC prim shims per element in
+every reduce loop):
+
+- `%num-eq` fast path widened from both-fixnums to ANY two non-ref
+  immediates — LowBit has no immediate float, so bit-equality is exact
+  (`emit_eq_immediates`, per-model; default stays both-int).
+- `type-of` inlined for the two shapes dispatch predicates actually hit:
+  immediate fixnum → the interned `'Long` sym as a compile-time constant;
+  RECORD ref → one load of the type sym off the object. Everything else
+  keeps the runtime's `type_tag`.
+
+Plus `multifn_select_raw` (F1-style raw accessor: one type_id check, direct
+clause-table reads) replacing the decode/ObjView select on all hot paths.
+
+### G2 — param-value specialization (landed, honest scope)
+
+`resolve_call` now passes the triggering invoke's ARGUMENT VALUES and the
+invoked closure's CAPTURE VALUES into a first compile (`SpecEnv`). A
+non-tail `(f …)` whose callee is a parameter or capture read looks up the
+observed value and, if it is a closure (or a multifn with a fixed clause at
+this arity) within the existing inline budget, splices the clause body
+inline behind a guard — `try_value_inline_plan` / `emit_value_specialized`.
+
+Two deliberate deviations from the sketched design, both for soundness:
+
+- **The guard is the clause's META WORD (template id + arity + nslots +
+  non-variadic in one u64), not the value's bits.** A bits-equality guard
+  dies at the first GC move and — worse — is ABA-unsound under semi-space
+  address reuse (a DIFFERENT closure landing at the guarded address would
+  pass). The meta compare survives moves, applies to EVERY closure of the
+  template, and a different object at the same address fails it.
+- **Captures are never baked as constants.** The inlined body reads them
+  through the live guarded value (a declared, stack-mapped SSA value — so
+  reads after an inner safepoint see the post-move object). The plan-time
+  capture snapshot only drives NESTED plans; each nested guard re-validates
+  its own live value.
+
+The stack-map interplay stayed clean: inlined slots are `declare_root_var`d
+like the existing global inliner (which now shares `emit_inlined_body`),
+the guarded callee/clause values are explicitly declared, and
+`inline_outer_vars` keeps enclosing frames spilled — no new walker work.
+
+**Why the win is modest (~3-7 ns/el on the suite): first-caller bias.**
+Bodies compile ONCE per template, so the specialization is frozen to
+whatever values the FIRST invoke of that template observed. Library
+reducers (`-reduce-chunk`, `reduce-seq`) first run during core.clj load
+under some unrelated `f`, so the hot caller's step fn often isn't the
+observed one. The isolated transduce driver — where the first observation
+IS the hot one — shows the real ceiling: **24 ns/el**. The structural
+answer is per-observation specialized COPIES (a compiled-variant cache
+keyed on observed templates + recompilation triggers), i.e. real tiering —
+out of scope here.
+
+Gates: default + jit suites, gc-stress battery, scheme (incl. conformance),
+clojure-stub jit + default (incl. the oracle suite) — all green.

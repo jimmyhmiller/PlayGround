@@ -823,6 +823,11 @@ pub const CLOSURE_META_OFF: usize = 8;
 pub const CLOSURE_CODE_OFF: usize = 16;
 /// Byte offset of the inline capture array (varlen values; length = aux).
 pub const CLOSURE_CAPS_OFF: usize = 24;
+/// Byte offset of a MultiFn's fixed-clause table, indexed by arity (varlen
+/// values; length = header aux): `[hdr | variadic closure | raw8 vmin |
+/// clauses…]`. The JIT's call sites select the clause for a compile-time
+/// arity with one bounds check + one load.
+pub const MULTIFN_FIXED_OFF: usize = 24;
 
 pub const META_VARIADIC_BIT: u64 = 1 << 63;
 const META_NSLOTS_SHIFT: u64 = 48;

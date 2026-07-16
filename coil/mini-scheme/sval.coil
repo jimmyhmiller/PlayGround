@@ -117,6 +117,24 @@
       (do (al-push! [(slice u8)] ns name) n))))
 (defn sym-name [(id i64)] (-> (slice u8)) (al-get [(slice u8)] (load (sym-names)) id))
 
+; --- Scheme primitives as Val->Val ops (what the compiled evaluator calls) ---
+(defn s-add [(a (ptr Val)) (b (ptr Val))] (-> (ptr Val)) (mk-int (+ (ival a) (ival b))))
+(defn s-sub [(a (ptr Val)) (b (ptr Val))] (-> (ptr Val)) (mk-int (- (ival a) (ival b))))
+(defn s-mul [(a (ptr Val)) (b (ptr Val))] (-> (ptr Val)) (mk-int (* (ival a) (ival b))))
+(defn s-lt  [(a (ptr Val)) (b (ptr Val))] (-> (ptr Val)) (mk-bool (if (< (ival a) (ival b)) 1 0)))
+(defn s-eqn [(a (ptr Val)) (b (ptr Val))] (-> (ptr Val)) (mk-bool (if (= (ival a) (ival b)) 1 0)))
+(defn s-null [(a (ptr Val))] (-> (ptr Val)) (mk-bool (if (nullp a) 1 0)))
+(defn s-pair [(a (ptr Val))] (-> (ptr Val)) (mk-bool (if (pairp a) 1 0)))
+(defn s-num  [(a (ptr Val))] (-> (ptr Val)) (mk-bool (if (= (tag-of a) 1) 1 0)))
+(defn s-symp [(a (ptr Val))] (-> (ptr Val)) (mk-bool (if (symp a) 1 0)))
+(defn s-not  [(a (ptr Val))] (-> (ptr Val)) (mk-bool (if (truthy a) 0 1)))
+(defn s-eq [(a (ptr Val)) (b (ptr Val))] (-> (ptr Val))
+  (mk-bool (if (= (tag-of a) (tag-of b))
+               (if (= (tag-of a) 1) (if (= (ival a) (ival b)) 1 0)
+               (if (= (tag-of a) 3) (if (= (sym-id a) (sym-id b)) 1 0)
+               (if (= (tag-of a) 0) 1
+               (if (= (cast i64 a) (cast i64 b)) 1 0)))) 0)))
+
 ; --- the mutable global environment (a permanent GC root) ---
 (defn genv-cell [] (-> (ptr (ptr Val))) (alloc-static (ptr Val)))
 (defn genv [] (-> (ptr Val)) (load (genv-cell)))
