@@ -24,27 +24,37 @@
 //!   (D5) an inline allocation fast path; `limit = 0` is gc-stress mode
 //!   (every allocation takes the out-of-line slow path).
 //!
-//! Stage I makes the heap GENERATIONAL. Everything is born in a NURSERY (the
-//! only space `alloc` and the JIT's window ever bump) and is PROMOTED ON FIRST
-//! SURVIVAL into the old gen — which is the semi-space pair above, unchanged.
-//! Two collections now:
+//! Stage I made the heap GENERATIONAL; Stage M gave the young generation a
+//! SURVIVOR SPACE + AGING. Everything is born in EDEN (the only space `alloc`
+//! and the JIT's window ever bump). The young gen is now three regions —
+//! eden plus two SURVIVOR bump spaces (one active FROM, one idle TO) — over the
+//! old semi-space pair, unchanged. Two collections:
 //!
-//! - a MINOR (`collect_minor`) evacuates the nursery into the active old
-//!   space. Its root set is the caller's enumeration PLUS a scan of the old
-//!   gen's DIRTY CARDS, because an old object's field can name a young object
-//!   and no root does. That is the whole reason the write barrier exists.
+//! - a MINOR (`collect_minor`) evacuates the live young set (eden ∪
+//!   survivor-FROM) into survivor-TO, ageing each object by one; an object that
+//!   has survived `tenure` minors — or that overflows survivor-TO — is PROMOTED
+//!   to the old gen instead. Its root set is the caller's enumeration PLUS a
+//!   scan of the old gen's DIRTY CARDS, because an old object's field can name
+//!   a young object (in eden or survivor-FROM) and no root does. That is the
+//!   whole reason the write barrier exists. Stage I promoted on FIRST survival,
+//!   which over-tenured mid-iteration transients into the old gen where they
+//!   died at once; aging is the fix — a short-lived object now dies in a
+//!   survivor space and never reaches the old gen.
 //! - a MAJOR (`collect`) is Stage D's Cheney over the old gen — extended to
-//!   treat the nursery as a second from-space, so it is a complete collection
-//!   in any heap state and needs no minor to run first.
+//!   treat the WHOLE young gen (eden + both survivors) as extra from-spaces, so
+//!   it is a complete collection in any heap state and needs no minor first.
 //!
-//! The invariant everything else rests on: **a minor fully evacuates the
-//! nursery**, so afterwards no old→young edge exists and clearing EVERY card
-//! is correct. It is also checkable, which is what makes this shippable: in
-//! verify mode a minor ends by walking the whole old gen and asserting that no
-//! object holds a nursery pointer. A missed barrier is otherwise silent and
-//! corrupts the heap arbitrarily later (beagle shipped exactly this bug and
-//! found it via a crash in unrelated code); here it dies naming the object,
-//! its type, the slot, and the target — at the collection that caused it.
+//! The invariant everything else rests on: **a minor fully evacuates eden and
+//! survivor-FROM** (an exact evacuation still — a survivor now lives in
+//! survivor-TO rather than the old gen), so afterwards the only old→young edges
+//! are old→survivor-TO ones and clearing EVERY card is correct (survivor-TO is
+//! itself fully scanned as from-space every minor). It is also checkable, which
+//! is what makes this shippable: in verify mode a minor ends by walking the
+//! whole old gen and asserting that no object holds a pointer into eden or
+//! survivor-FROM. A missed barrier is otherwise silent and corrupts the heap
+//! arbitrarily later (beagle shipped exactly this bug and found it via a crash
+//! in unrelated code); here it dies naming the object, its type, the slot, and
+//! the target — at the collection that caused it.
 //!
 //! Object layout (all offsets from the object start):
 //!
@@ -93,6 +103,36 @@ pub const fn header_spare(hdr: u64) -> u16 {
 #[inline(always)]
 pub const fn header_aux(hdr: u64) -> u32 {
     (hdr >> 32) as u32
+}
+
+// ─── Object age (Stage M: survivor + aging) ───────────────────────────────
+//
+// A young object's AGE counts the minor collections it has survived. It rides
+// in the low bits of the header's `spare` u16 — free today: the runtime's
+// transient stamps deliberately went to a value slot, not here (see the note
+// on `hamt` transients in runtime.rs), and the closure variadic bit lives in
+// the meta word, not spare. At `TENURE_THRESHOLD` an object is promoted to the
+// old gen and the age goes inert (minors never move old objects again).
+
+/// Bits of `spare` the age uses. 8 is far more than any tenure threshold
+/// needs, and leaves the high half of `spare` for a future use.
+pub const AGE_BITS: u16 = 8;
+/// Mask selecting the age within `spare`.
+pub const AGE_MASK: u16 = (1 << AGE_BITS) - 1;
+
+/// The age recorded in a (non-forwarded) header.
+#[inline(always)]
+pub const fn header_age(hdr: u64) -> u16 {
+    header_spare(hdr) & AGE_MASK
+}
+
+/// The header word with its age field replaced, every other bit — type_id,
+/// aux, and any non-age spare bit — preserved. Used to stamp the NEW copy of a
+/// surviving object; it must NEVER be written to the forwarding word, which
+/// lives in the OLD header after evacuation.
+#[inline(always)]
+pub const fn header_with_age(hdr: u64, age: u16) -> u64 {
+    (hdr & !((AGE_MASK as u64) << 16)) | (((age & AGE_MASK) as u64) << 16)
 }
 
 // ─── TypeInfo ────────────────────────────────────────────────────────────
@@ -228,6 +268,12 @@ impl Gc {
     #[inline(always)]
     pub unsafe fn aux(self) -> u32 {
         header_aux(unsafe { self.header() })
+    }
+    /// The object's age — minors survived (Stage M). Only meaningful for young
+    /// objects; inert once promoted.
+    #[inline(always)]
+    pub unsafe fn age(self) -> u16 {
+        header_age(unsafe { self.header() })
     }
     /// Rewrite the header's aux field (a growable handle's logical length).
     ///
@@ -722,6 +768,16 @@ impl CardTable {
         }
     }
 
+    /// Is the card holding old-gen address `addr` dirty? (Verify-mode check that
+    /// a retained old→survivor edge kept its card — the same unsigned-bounds
+    /// trick as `mark`.) A non-old address is trivially not dirty.
+    #[inline]
+    fn is_dirty_addr(&self, addr: usize) -> bool {
+        let off = addr.wrapping_sub(self.win.base.load(Ordering::Relaxed));
+        off < self.win.size.load(Ordering::Relaxed)
+            && self.cards[off >> CARD_SHIFT].load(Ordering::Relaxed) != CARD_CLEAN
+    }
+
     /// Every card index that could be dirty or indexed: nothing above the
     /// active cursor or the recorded high-water has ever been written, because
     /// the barrier only marks a real old object's BASE, which is below the
@@ -778,9 +834,11 @@ impl CardTable {
         }
     }
 
-    /// Clean every card. Correct unconditionally after a minor because the
-    /// minor fully evacuates the nursery, so no old→young edge survives it —
-    /// HotSpot-style selective card *cleaning* is moot here.
+    /// Clean every card. A minor calls this and then RE-ARMS (via `mark`) the
+    /// cards of old objects that still point into survivor-TO: Stage M made
+    /// survivors that move across minors, so HotSpot-style card cleaning — moot
+    /// under Stage I's promote-straight-to-old — is now load-bearing. (A major
+    /// calls this too, and rebuilds from scratch, so no card survives it.)
     ///
     /// # Safety
     /// STW.
@@ -824,6 +882,23 @@ const DEFAULT_SPACE_MB: usize = 4096;
 /// more expensive — the win Stage I was supposed to deliver but the tuning
 /// undid. 64 MiB fills to `size - HEADROOM` before collecting.
 const DEFAULT_NURSERY_MB: usize = 64;
+
+/// Default SURVIVOR size in MiB per space when `MICROLANG_SURVIVOR_MB` is unset
+/// — ~1/8 of the default eden (64 MiB). A survivor holds only what actually
+/// survived a minor (a small fraction of the eden it drained) and is copied
+/// whole every minor, so it is far smaller than eden. It is a TUNING knob, not
+/// a correctness bound: overflow spills to the old gen (see `evacuate_young`),
+/// so an undersized survivor only tenures things a little early. Sized as a
+/// FRACTION of the nursery so the tiny test heaps get a proportionally tiny
+/// survivor rather than one larger than the nursery they share a heap with.
+const DEFAULT_SURVIVOR_DIVISOR: usize = 8;
+
+/// Default tenuring threshold (`MICROLANG_TENURE` overrides). An object is
+/// promoted to the old gen only after surviving this many minors as a
+/// survivor. The whole point of Stage M: a transient that dies within its
+/// first few minors — the mid-iteration garbage that promote-on-first-survival
+/// over-tenured — NEVER reaches the old gen. 3 is HotSpot's small-heap order.
+pub const TENURE_THRESHOLD: u16 = 3;
 
 /// Reserved tail of the nursery kept BELOW the soft trigger: the most a single
 /// expression can allocate between two safepoints (which is where a
@@ -875,17 +950,27 @@ pub struct MinorOutcome {
 /// must run under the runtime's existing STW discipline (all other mutators
 /// parked, heap_lock held).
 pub struct Heap {
-    /// The NURSERY: the ONE space `alloc` and the JIT's inline window bump
-    /// into. Everything is born here and either dies or is promoted on its
-    /// first survival — there are no survivor spaces and no age field (the
-    /// header's `spare` stays free). That is what makes "the nursery is empty
-    /// after a minor" an invariant, which is what makes clearing every card
-    /// correct and the missed-barrier walk exact. Aging is a later tuning
-    /// refinement; the invariant comes first.
+    /// EDEN: the ONE space `alloc` and the JIT's inline window bump into.
+    /// Everything is born here. Stage M made the young generation three
+    /// regions (eden + two survivor spaces); eden is still the only one any
+    /// allocation touches, and the window still points here, unchanged.
     nursery: AtomicBumpAllocator,
+    /// The two SURVIVOR spaces (Stage M): one active FROM, one empty TO. A
+    /// minor evacuates the live young set (eden ∪ survivor-FROM) into
+    /// survivor-TO, ageing each object by one; an object that reaches
+    /// `tenure` (or overflows survivor-TO) promotes to the old gen instead.
+    /// This is what stops the over-promotion of promote-on-first-survival: a
+    /// transient that dies within a few minors never leaves the young gen.
+    survivor: [AtomicBumpAllocator; 2],
+    /// Index of the active survivor FROM-space (the one holding last minor's
+    /// survivors). Swapped with TO at the end of every minor, under STW.
+    survivor_active: AtomicUsize,
+    /// Tenuring threshold: age at which a survivor is promoted to the old gen.
+    /// `MICROLANG_TENURE`, default `TENURE_THRESHOLD`.
+    tenure: u16,
     /// The OLD gen: Stage D's semi-space pair, unchanged. Only the collector
-    /// fills it — a minor appends promoted objects to the active space, a major
-    /// Cheney-copies that space into the other and flips.
+    /// fills it — a minor appends promoted (tenured or spilled) objects to the
+    /// active space, a major Cheney-copies that space into the other and flips.
     spaces: [AtomicBumpAllocator; 2],
     /// Index of the active (from) space. Flipped only under STW.
     active: AtomicUsize,
@@ -951,12 +1036,29 @@ impl Heap {
         Self::with_sizes(bytes, bytes)
     }
 
+    /// Survivor size is derived (env or a fraction of the nursery). This
+    /// forwards to `with_sizes_survivor` with that default; tests that want to
+    /// force survivor-TO overflow pass an explicit tiny survivor there.
     pub fn with_sizes(old_bytes: usize, nursery_bytes: usize) -> Self {
+        let survivor_bytes = std::env::var("MICROLANG_SURVIVOR_MB")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .map(|mb| mb << 20)
+            .unwrap_or_else(|| (nursery_bytes / DEFAULT_SURVIVOR_DIVISOR).max(8));
+        Self::with_sizes_survivor(old_bytes, nursery_bytes, survivor_bytes)
+    }
+
+    pub fn with_sizes_survivor(old_bytes: usize, nursery_bytes: usize, survivor_bytes: usize) -> Self {
         let pct_explicit = std::env::var("MICROLANG_GC_TRIGGER_PCT")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|p| (1..=100).contains(p));
         let pct = pct_explicit.unwrap_or(50);
+        let tenure = std::env::var("MICROLANG_TENURE")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .filter(|&t| t <= AGE_MASK)
+            .unwrap_or(TENURE_THRESHOLD);
         let stress = std::env::var("MICROLANG_GC_STRESS").is_ok_and(|v| v != "0" && !v.is_empty());
         let spaces = [AtomicBumpAllocator::new(old_bytes), AtomicBumpAllocator::new(old_bytes)];
         // Sized for ONE old space (both are equal) and pointed at the active
@@ -969,6 +1071,12 @@ impl Heap {
         // dangle the moment the constructed Heap is moved to its final home.
         Heap {
             nursery: AtomicBumpAllocator::new(nursery_bytes),
+            survivor: [
+                AtomicBumpAllocator::new(survivor_bytes),
+                AtomicBumpAllocator::new(survivor_bytes),
+            ],
+            survivor_active: AtomicUsize::new(0),
+            tenure,
             spaces,
             active: AtomicUsize::new(0),
             cards,
@@ -1059,14 +1167,30 @@ impl Heap {
     fn to_space(&self) -> &AtomicBumpAllocator {
         &self.spaces[1 - self.active.load(Ordering::Acquire)]
     }
-
-    /// Bytes held across the WHOLE heap: the nursery's fill plus the old gen's.
-    pub fn used(&self) -> usize {
-        self.nursery.used() + self.from_space().used()
+    /// The active survivor FROM-space: last minor's survivors live here, and a
+    /// minor drains it alongside eden.
+    #[inline(always)]
+    fn survivor_from(&self) -> &AtomicBumpAllocator {
+        &self.survivor[self.survivor_active.load(Ordering::Acquire)]
     }
-    /// Bytes allocated in the nursery since the last collection.
+    /// The idle survivor TO-space: empty between minors, filled with this
+    /// minor's aged survivors, then swapped to become the next FROM.
+    #[inline(always)]
+    fn survivor_to(&self) -> &AtomicBumpAllocator {
+        &self.survivor[1 - self.survivor_active.load(Ordering::Acquire)]
+    }
+
+    /// Bytes held across the WHOLE heap: eden + the active survivor + old gen.
+    pub fn used(&self) -> usize {
+        self.nursery.used() + self.survivor_from().used() + self.from_space().used()
+    }
+    /// Bytes allocated in EDEN since the last collection.
     pub fn nursery_used(&self) -> usize {
         self.nursery.used()
+    }
+    /// Bytes of survivors held in the active survivor space (Stage M).
+    pub fn survivor_used(&self) -> usize {
+        self.survivor_from().used()
     }
     /// Bytes of promoted objects in the active old space.
     pub fn old_used(&self) -> usize {
@@ -1086,16 +1210,37 @@ impl Heap {
     pub fn set_verify(&mut self, on: bool) {
         self.verify = on;
     }
+    /// Set the tenuring threshold (tests; the CLI leaves the env-var default).
+    pub fn set_tenure(&mut self, tenure: u16) {
+        assert!(tenure <= AGE_MASK, "tenure {tenure} exceeds the age field's {AGE_MASK}");
+        self.tenure = tenure;
+    }
+    /// The tenuring threshold in effect.
+    pub fn tenure(&self) -> u16 {
+        self.tenure
+    }
 
-    /// Does `ptr` name live heap — the nursery or the active old space?
+    /// Does `ptr` name live heap — any young region or the active old space?
     /// (Verify-mode stale-pointer check.)
     pub fn contains(&self, ptr: *const u8) -> bool {
-        self.nursery.contains(ptr) || self.from_space().contains(ptr)
+        self.young_contains(ptr) || self.from_space().contains(ptr)
     }
-    /// Is `ptr` young? The one question a minor asks of every traced slot.
+    /// Is `ptr` young — in EDEN specifically? (The historical `nursery`
+    /// question, kept for callers/tests that mean "born-here, not yet copied".)
     #[inline(always)]
     pub fn nursery_contains(&self, ptr: *const u8) -> bool {
         self.nursery.contains(ptr)
+    }
+    /// Is `ptr` in the young generation at all — eden or EITHER survivor space?
+    /// This is the from-space test a MAJOR uses, and it is why a store into a
+    /// survivor object still needs no write barrier: survivor addresses are not
+    /// in the old gen, so the barrier's unsigned compare skips them exactly as
+    /// it skips eden. Both survivors are covered because between collections
+    /// only the active one holds objects, but a check that spans both is robust
+    /// and costs one more compare on a cold (verify/major) path.
+    #[inline(always)]
+    pub fn young_contains(&self, ptr: *const u8) -> bool {
+        self.nursery.contains(ptr) || self.survivor[0].contains(ptr) || self.survivor[1].contains(ptr)
     }
 
     /// Allocate an object of type `info` with varlen length `aux` IN THE
@@ -1150,15 +1295,19 @@ impl Heap {
         self.old_soft_limit.store(bytes, Ordering::Relaxed);
     }
 
-    /// Can a minor's promotions fit in what is left of the old space?
+    /// Can a minor complete without exhausting the old space?
     ///
-    /// A minor copies each live nursery object at exactly the size it already
-    /// occupies, so promoted bytes ≤ `nursery.used()`. When this holds the
-    /// minor CANNOT exhaust the old space — which is why `collect_minor` needs
-    /// no mid-evacuation escape hatch (there is no safe one: the object graph
-    /// is half-forwarded at that point).
+    /// The WORST case a minor can force into the old gen is EVERY live young
+    /// byte: survivor-TO could be too small, so all of it spills. Since a minor
+    /// copies each object at exactly the size it already occupies, that worst
+    /// case is bounded by `eden.used() + survivor-FROM.used()` (the two regions
+    /// a minor drains). When the old space has room for that, the minor cannot
+    /// exhaust it however the aging/spill split falls out — which is why
+    /// `collect_minor` needs no mid-evacuation escape hatch (there is no safe
+    /// one: the object graph is half-forwarded at that point). Whatever
+    /// survivor-TO does absorb only lowers the old-gen demand below this bound.
     pub fn minor_will_fit(&self) -> bool {
-        self.nursery.used() <= self.from_space().remaining()
+        self.nursery.used() + self.survivor_from().used() <= self.from_space().remaining()
     }
 
     /// A MAJOR collection: Cheney evacuation of the whole live set into the old
@@ -1167,15 +1316,17 @@ impl Heap {
     /// roots …); each slot is rewritten in place when its target moves.
     ///
     /// This is Stage D/E's `collect` and still means "collect EVERYTHING": it
-    /// treats the nursery as a second from-space, so it is complete in any heap
-    /// state and needs no minor to run first. That matters twice — it is what
-    /// the explicit `(gc)` prim wants, and it is the answer when
-    /// `minor_will_fit` says no (a minor into a nearly-full old space would be
-    /// pointless anyway: this reclaims the old garbage AND the nursery in one
-    /// pass, rather than promoting survivors twice).
+    /// treats ALL THREE young regions — eden and BOTH survivor spaces — as
+    /// additional from-spaces (Stage M), so it is complete in any heap state
+    /// and needs no minor to run first. That matters twice — it is what the
+    /// explicit `(gc)` prim wants, and it is the answer when `minor_will_fit`
+    /// says no (a minor into a nearly-full old space would be pointless anyway:
+    /// this reclaims the old garbage AND the whole young gen in one pass,
+    /// rather than promoting survivors twice). A major does not preserve age or
+    /// the survivor split — everything that lives goes straight to the old gen.
     ///
-    /// Afterwards the nursery is empty, every card is clean, and the object
-    /// start index is rebuilt against the new active space.
+    /// Afterwards eden and both survivor spaces are empty, every card is clean,
+    /// and the object start index is rebuilt against the new active space.
     ///
     /// # Safety
     /// Stop-the-world: no other thread may read or mutate the heap during
@@ -1234,6 +1385,12 @@ impl Heap {
             from.reset_zeroed();
         }
         self.reset_nursery();
+        // Both survivor spaces were from-spaces for this major (all live young
+        // objects went to the old gen), so both are empty now — reset them like
+        // the old from-space. `survivor_active` is untouched: both are empty, so
+        // the next minor's TO (the inactive one) is empty as it requires.
+        self.reset_survivor(&self.survivor[0]);
+        self.reset_survivor(&self.survivor[1]);
         self.active.store(1 - self.active.load(Ordering::Acquire), Ordering::Release);
         // The card table follows the flip; the start index it now holds was
         // rebuilt above, in to-space offsets, and to-space is the active space
@@ -1253,24 +1410,31 @@ impl Heap {
         }
     }
 
-    /// A MINOR collection: evacuate the live nursery into the ACTIVE old space,
-    /// promoting on first survival. This is the hot path Stage I exists for —
-    /// it copies only what survived a 32 MiB nursery, never the accumulated
-    /// live set.
+    /// A MINOR collection (Stage M: survivor + aging): evacuate the live young
+    /// set — eden ∪ survivor-FROM — into survivor-TO, ageing each object by one;
+    /// an object that has reached `tenure` (or that overflows survivor-TO)
+    /// promotes to the ACTIVE old space instead. This is the hot path: it
+    /// copies only what actually survived a young collection, and — the whole
+    /// point of Stage M — a transient that dies within its first `tenure`
+    /// minors NEVER reaches the old gen, so promotion stops filling the old gen
+    /// with garbage that dies immediately.
     ///
     /// The root set is `enumerate_roots` PLUS the old gen's DIRTY CARDS: an old
-    /// object's field can be the only reference to a young object, and no root
-    /// names it. Missing that edge is the bug this whole stage is built around.
+    /// object's field can be the only reference to a young object (in eden OR in
+    /// survivor-FROM), and no root names it. Missing that edge is the bug this
+    /// whole family of stages is built around.
     ///
-    /// Afterwards: the nursery is empty, every card is clean, and the start
-    /// index covers the promoted range.
+    /// Afterwards: eden and survivor-FROM are empty (an exact evacuation still),
+    /// the survivor roles are swapped so this minor's survivor-TO is the next
+    /// minor's survivor-FROM, every card is clean, and the start index covers
+    /// the promoted range.
     ///
     /// The caller owns the policy, in two pieces:
     /// - BEFORE: if `minor_will_fit()` is false, call `collect` instead. A
     ///   minor cannot grow the old space, and there is no safe way to bail out
     ///   half-way through an evacuation. Calling anyway is a loud panic.
     /// - AFTER: if the returned `needs_major` is set, follow with `collect`.
-    ///   The nursery is empty at that point, so the major only sees old
+    ///   The young gen is empty at that point, so the major only sees old
     ///   objects — this is the spec's "minor first, then major if over
     ///   threshold".
     ///
@@ -1282,61 +1446,134 @@ impl Heap {
         enumerate_roots: &mut dyn FnMut(&mut dyn FnMut(*mut u64)),
     ) -> MinorOutcome {
         let old = self.from_space();
+        let survivor_from = self.survivor_from();
+        let survivor_to = self.survivor_to();
+        debug_assert_eq!(
+            survivor_to.used(),
+            0,
+            "survivor-TO must be empty at the start of a minor (the previous minor reset it)"
+        );
         assert!(
             self.minor_will_fit(),
-            "minor GC: {} bytes of nursery would not fit in the old space's {} remaining bytes. \
-             Promotion cannot fail half-way (the graph is already part-forwarded), so the caller \
-             must check `minor_will_fit()` and run `collect` (a major) instead.",
+            "minor GC: {} live young bytes (eden {} + survivor {}) could not all spill into the \
+             old space's {} remaining bytes. Evacuation cannot fail half-way (the graph is already \
+             part-forwarded), so the caller must check `minor_will_fit()` and run `collect` (a \
+             major) instead.",
+            self.nursery.used() + survivor_from.used(),
             self.nursery.used(),
+            survivor_from.used(),
             old.remaining()
         );
         // Everything already in the old gen sits below this; everything the
-        // minor promotes lands at or above it. It bounds the dirty-card walk
-        // (promoted objects are scanned by the Cheney phase, not as old
-        // objects) and starts the Cheney scan.
+        // minor PROMOTES (tenured or spilled) lands at or above it. It bounds
+        // the dirty-card walk (promoted objects are scanned by the Cheney phase,
+        // not re-scanned as pre-existing old objects) and starts the old Cheney
+        // scan.
         let promote_from = old.used();
 
-        // Phase 1: promote from the roots.
-        enumerate_roots(&mut |slot| unsafe { self.promote_slot::<P>(types, old, slot) });
+        // Old-gen object bases that still point into survivor-TO after this
+        // minor. Their cards must be RE-ARMED (see the card-cleaning note at the
+        // clear below): a GC move creates no store, so the barrier cannot know a
+        // survivor shifted, and blindly clearing the card would lose an edge
+        // whose target keeps moving until it tenures. Collector scratch, not a
+        // barrier structure — the beagle "no aux Vec" rule is about the mutator
+        // barrier, and this runs STW.
+        let mut remembered: Vec<usize> = Vec::new();
 
-        // Phase 2: the OTHER root set — old objects that were written since the
-        // last collection. This is the only thing standing between a young
-        // object reachable solely from the old gen and oblivion.
-        unsafe { self.scan_dirty_cards::<P>(types, old, promote_from) };
+        // Phase 1: evacuate from the roots. (Roots are re-scanned every minor,
+        // so a root→survivor edge needs no card — only old→survivor does.)
+        enumerate_roots(&mut |slot| unsafe {
+            self.evacuate_young_slot::<P>(types, old, survivor_from, survivor_to, slot)
+        });
 
-        // Phase 3: Cheney scan over the promoted range — promotion appends, so
-        // this walks forward over objects whose own fields may still name
-        // nursery objects that must be promoted transitively.
-        let mut scan = promote_from;
-        while scan < old.used() {
-            let obj = Gc(unsafe { old.base().add(scan) });
-            let hdr = unsafe { obj.header() };
-            debug_assert_eq!(hdr & FORWARDING_BIT, 0, "forwarded header among promoted objects");
-            let tid = header_type_id(hdr) as usize;
-            assert!(
-                tid != 0 && tid < types.len(),
-                "GC: promoted object at {:p} has type_id {tid} out of range — heap corruption",
-                obj.0
-            );
-            let info = &types[tid];
-            unsafe {
-                scan_object(obj, info, |slot| self.promote_slot::<P>(types, old, slot));
+        // Phase 2: the OTHER root set — old objects written since the last
+        // collection. This is the only thing standing between a young object
+        // reachable solely from the old gen and oblivion.
+        unsafe {
+            self.scan_dirty_cards::<P>(types, old, survivor_from, survivor_to, promote_from, &mut remembered)
+        };
+
+        // Phase 3: Cheney over BOTH to-regions to a fixpoint. A survivor's field
+        // can name an object that tenures to the old gen, and a freshly-promoted
+        // object's field can name one that stays in survivor-TO, so appending to
+        // either region can create more work in either — neither scan is
+        // complete until both are drained. Each object is copied at most once
+        // (the forwarding bit), so the totals are bounded and the loop
+        // terminates when a full pass appends nothing.
+        let mut sscan = 0usize;
+        let mut oscan = promote_from;
+        loop {
+            let mut progressed = false;
+            while sscan < survivor_to.used() {
+                let obj = Gc(unsafe { survivor_to.base().add(sscan) });
+                let hdr = unsafe { obj.header() };
+                debug_assert_eq!(hdr & FORWARDING_BIT, 0, "forwarded header among survivors");
+                let info = self.checked_info(types, hdr, obj, "survivor-TO");
+                unsafe {
+                    scan_object(obj, info, |slot| {
+                        self.evacuate_young_slot::<P>(types, old, survivor_from, survivor_to, slot)
+                    });
+                }
+                sscan += info.allocation_size(header_aux(hdr));
+                progressed = true;
             }
-            scan += info.allocation_size(header_aux(hdr));
+            while oscan < old.used() {
+                let obj = Gc(unsafe { old.base().add(oscan) });
+                let hdr = unsafe { obj.header() };
+                debug_assert_eq!(hdr & FORWARDING_BIT, 0, "forwarded header among promoted objects");
+                let info = self.checked_info(types, hdr, obj, "promoted");
+                unsafe {
+                    scan_object(obj, info, |slot| {
+                        self.evacuate_young_slot::<P>(types, old, survivor_from, survivor_to, slot)
+                    });
+                    // A freshly-promoted object that ended up holding a survivor
+                    // must remember it (see `remembered`).
+                    if self.holds_pointer_into::<P>(obj, info, survivor_to) {
+                        remembered.push(obj.addr());
+                    }
+                }
+                oscan += info.allocation_size(header_aux(hdr));
+                progressed = true;
+            }
+            if !progressed {
+                break;
+            }
         }
 
         let promoted = old.used() - promote_from;
-        // THE missed-barrier detector. The invariant is exact — a minor fully
-        // evacuates the nursery — so any surviving old→young pointer means an
-        // edge was never card-marked. Run it before the nursery reset, while
-        // the target is still a readable object we can name.
-        if self.verify {
-            unsafe { self.verify_no_old_to_young::<P>(types) };
-        }
+
+        // Empty the just-evacuated young regions, then swap survivor roles: the
+        // survivor-TO we just filled becomes the next minor's survivor-FROM, and
+        // the now-empty survivor-FROM becomes the next minor's (empty) TO. (The
+        // reset only zeroes/poisons; the address RANGES the detector checks are
+        // unchanged, so it can still run afterwards.)
         self.reset_nursery();
-        // Correct unconditionally: the nursery is empty, so no old→young edge
-        // exists to remember.
+        self.reset_survivor(survivor_from);
+        self.survivor_active
+            .store(1 - self.survivor_active.load(Ordering::Acquire), Ordering::Release);
+
+        // CARD CLEANING. Eden and survivor-FROM are empty, so a card is needed
+        // now ONLY for an old object that points into survivor-TO (this minor's
+        // survivors, which move again next minor). Clear everything, then RE-ARM
+        // exactly those. beagle's note called HotSpot-style card cleaning "moot"
+        // because Stage I promoted young straight to old — but survivors keep an
+        // old→young edge live across minors WITHOUT any new store, so the
+        // collector, not the barrier, must retain it. Every such edge was
+        // written this minor (survivor-TO is all new), so re-arming the objects
+        // touched in phases 2-3 is complete; the verify walk below proves it.
         unsafe { self.cards.clear_cards(old.used()) };
+        for &base in &remembered {
+            self.cards.mark(base);
+        }
+
+        // THE missed-barrier detector, re-aimed: no old object may point into
+        // the just-EVACUATED eden or survivor-FROM (both empty now), and every
+        // old→survivor-TO edge MUST have a live card (the card-cleaning above).
+        // A survivor now lives in the post-swap active survivor space
+        // (`survivor_to` here), which is legal to hold.
+        if self.verify {
+            unsafe { self.verify_no_old_to_young::<P>(types, survivor_from, survivor_to) };
+        }
 
         self.promoted_bytes.fetch_add(promoted as u64, Ordering::Relaxed);
         self.collections.fetch_add(1, Ordering::Relaxed);
@@ -1350,6 +1587,39 @@ impl Heap {
         }
     }
 
+    /// Read + range-check an object's `TypeInfo` from its header, with a loud
+    /// panic naming the region on a corrupt type_id. Shared by the two Cheney
+    /// scan loops so their bounds check reads identically.
+    #[inline]
+    fn checked_info<'a>(&self, types: &'a [TypeInfo], hdr: u64, obj: Gc, region: &str) -> &'a TypeInfo {
+        let tid = header_type_id(hdr) as usize;
+        assert!(
+            tid != 0 && tid < types.len(),
+            "GC: {region} object at {:p} has type_id {tid} out of range — heap corruption",
+            obj.0
+        );
+        &types[tid]
+    }
+
+    /// Does `obj` hold a traced pointer into `space`? Used to decide whether an
+    /// old object must retain a card for the survivor it points at.
+    ///
+    /// # Safety
+    /// `obj` matches `info`; no concurrent mutation.
+    unsafe fn holds_pointer_into<P: PtrPolicy>(&self, obj: Gc, info: &TypeInfo, space: &AtomicBumpAllocator) -> bool {
+        let mut found = false;
+        unsafe {
+            scan_object(obj, info, |slot| {
+                if !found {
+                    if let Some(p) = P::try_decode_ptr(*slot) {
+                        found = space.contains(p);
+                    }
+                }
+            });
+        }
+        found
+    }
+
     /// Empty the nursery: one zeroing pass, in both modes. See
     /// `reset_nursery_space` for why poison would be unobservable here (and
     /// would cost a second full-nursery memset on the hottest GC path).
@@ -1357,33 +1627,120 @@ impl Heap {
         self.nursery.reset_nursery_space();
     }
 
-    /// Promote one traced slot: if it points into the NURSERY, copy the target
-    /// into the old gen and rewrite the slot. Old-gen targets stay put — a
-    /// minor moves nothing that is already old.
-    unsafe fn promote_slot<P: PtrPolicy>(&self, types: &[TypeInfo], old: &AtomicBumpAllocator, slot: *mut u64) {
+    /// Empty a just-evacuated survivor space. Unlike the nursery, a survivor is
+    /// filled ONLY by whole-object copies and sits idle until the next minor
+    /// re-fills it — the same shape as the old semi-space — so poison earns its
+    /// keep here: a stale pointer into it reads type_id 0x5A5A for the whole
+    /// idle window. No `alloc` ever touches a survivor, so nothing relies on it
+    /// being zero the way the nursery does.
+    fn reset_survivor(&self, s: &AtomicBumpAllocator) {
+        if self.verify {
+            s.reset_poisoned();
+        } else {
+            s.reset_zeroed();
+        }
+    }
+
+    /// Evacuate one traced slot's young target (Stage M). If it points into
+    /// eden OR survivor-FROM, copy/age/tenure the target and rewrite the slot.
+    /// A pointer into survivor-TO is left alone — it is a slot in an already-
+    /// evacuated object pointing at another already-evacuated one, in its final
+    /// place for this minor. Old-gen targets stay put — a minor moves nothing
+    /// that is already old.
+    unsafe fn evacuate_young_slot<P: PtrPolicy>(
+        &self,
+        types: &[TypeInfo],
+        old: &AtomicBumpAllocator,
+        survivor_from: &AtomicBumpAllocator,
+        survivor_to: &AtomicBumpAllocator,
+        slot: *mut u64,
+    ) {
         let bits = unsafe { *slot };
         if let Some(ptr) = P::try_decode_ptr(bits) {
-            if self.nursery.contains(ptr) {
-                let new = unsafe { self.copy_or_forward(types, old, ptr) };
+            if self.nursery.contains(ptr) || survivor_from.contains(ptr) {
+                let new = unsafe { self.evacuate_young(types, old, survivor_to, ptr) };
                 unsafe { *slot = P::encode_ptr(new) };
-            } else if self.verify && !old.contains(ptr) {
+            } else if self.verify && !old.contains(ptr) && !survivor_to.contains(ptr) {
                 panic!(
-                    "GC verify: traced slot holds {bits:#x} -> {ptr:p}, in neither the nursery nor \
-                     the old gen (stale pointer or non-pointer decoded as a ref)"
+                    "GC verify: traced slot holds {bits:#x} -> {ptr:p}, in none of eden, \
+                     survivor-FROM, survivor-TO, or the old gen (stale pointer or non-pointer \
+                     decoded as a ref)"
                 );
             }
         }
     }
 
-    /// Walk the old objects living in dirty cards and promote whatever young
-    /// objects they name. `old_end` is the old space's fill BEFORE this minor
-    /// promoted anything — objects above it are promotions, and the Cheney
-    /// phase owns those.
+    /// Copy one live young object out of the from-set and return its new
+    /// address, installing forwarding so shared referrers and cycles converge.
+    /// The aging decision:
+    /// - already forwarded → return the existing target.
+    /// - `age >= tenure` → PROMOTE to the old gen (age goes inert).
+    /// - else copy to survivor-TO with `age += 1`; if survivor-TO is FULL,
+    ///   SPILL to the old gen instead (a minor must always complete — there is
+    ///   no safe bail-out from a half-forwarded graph, and `minor_will_fit`
+    ///   guaranteed the old gen can absorb the whole young set if it must).
+    unsafe fn evacuate_young(
+        &self,
+        types: &[TypeInfo],
+        old: &AtomicBumpAllocator,
+        survivor_to: &AtomicBumpAllocator,
+        ptr: *mut u8,
+    ) -> *mut u8 {
+        let hdr = unsafe { *(ptr as *const u64) };
+        if hdr & FORWARDING_BIT != 0 {
+            return (hdr & !FORWARDING_BIT) as *mut u8;
+        }
+        let tid = header_type_id(hdr) as usize;
+        // PRECISE-LAYOUT DETECTOR: a traced slot pointing into the young gen
+        // always targets a real object; an out-of-range type_id means a scalar
+        // leaked into a traced slot. Loud, never a silent conservative skip.
+        assert!(
+            tid != 0 && tid < types.len(),
+            "GC precise-layout violation: traced slot points at {ptr:p} whose header \
+             type_id={tid} is out of range (table len {}). A non-pointer reached a traced slot.",
+            types.len()
+        );
+        let info = &types[tid];
+        let size = info.allocation_size(header_aux(hdr));
+        let age = header_age(hdr);
+
+        // Tenured, or spilled because survivor-TO is full → the old gen.
+        // `copy_or_forward` copies, forwards the OLD header, and records the
+        // start; the age rides along in the copy and is thereafter inert.
+        if age >= self.tenure {
+            return unsafe { self.copy_or_forward(types, old, ptr) };
+        }
+        let dest = survivor_to.alloc_raw(size);
+        if dest.is_null() {
+            return unsafe { self.copy_or_forward(types, old, ptr) };
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(ptr, dest, size);
+            // Forwarding goes in the OLD header. This must happen only after the
+            // copy, and it must not be confused with the age bump below: the
+            // forwarding word names `dest`, the aged header IS `dest`'s header.
+            *(ptr as *mut u64) = (dest as u64) | FORWARDING_BIT;
+            // Bump the age on the NEW object's header (dest currently holds a
+            // verbatim copy of the original, non-forwarded header). The masked
+            // write preserves type_id and aux, so a varlen object keeps its
+            // length; bit 63 stays clear because age lives in bits 16..24.
+            *(dest as *mut u64) = header_with_age(hdr, age + 1);
+        }
+        dest
+    }
+
+    /// Walk the old objects living in dirty cards and evacuate whatever young
+    /// objects they name (eden or survivor-FROM). `old_end` is the old space's
+    /// fill BEFORE this minor promoted anything — objects above it are this
+    /// minor's promotions, and the Cheney phase owns those.
     unsafe fn scan_dirty_cards<P: PtrPolicy>(
         &self,
         types: &[TypeInfo],
         old: &AtomicBumpAllocator,
+        survivor_from: &AtomicBumpAllocator,
+        survivor_to: &AtomicBumpAllocator,
         old_end: usize,
+        remembered: &mut Vec<usize>,
     ) {
         let base = old.base();
         unsafe {
@@ -1416,27 +1773,44 @@ impl Heap {
                          object start index does not match the heap"
                     );
                     let info = &types[tid];
-                    scan_object(obj, info, |slot| self.promote_slot::<P>(types, old, slot));
+                    scan_object(obj, info, |slot| {
+                        self.evacuate_young_slot::<P>(types, old, survivor_from, survivor_to, slot)
+                    });
+                    // If this old object still points into survivor-TO after
+                    // evacuation, its card must survive the coming clear.
+                    if self.holds_pointer_into::<P>(obj, info, survivor_to) {
+                        remembered.push(obj.addr());
+                    }
                     off += info.allocation_size(header_aux(hdr));
                 }
             })
         }
     }
 
-    /// After a minor, NO old object may hold a nursery pointer: the minor
-    /// evacuated the nursery whole, so such a pointer is a dangling reference
-    /// to memory we just recycled, and it exists only because the store that
-    /// created the edge never marked the card.
+    /// After a minor, NO old object may hold a pointer into either JUST-
+    /// EVACUATED young region — eden or survivor-FROM. The minor drained both
+    /// whole, so such a pointer is a dangling reference to memory we are about
+    /// to recycle, and it exists only because the store that created the edge
+    /// never marked the card. (An old→survivor-TO pointer is NOT a violation:
+    /// survivor-TO holds this minor's fresh survivors and the edge is legal,
+    /// card-marked like any old→young store.)
     ///
     /// This is O(old gen), hence verify-only — but the gc-stress battery runs
     /// with verify armed, which is where it earns its keep. Without it a missed
     /// barrier is silent and surfaces later as corruption somewhere unrelated
     /// (beagle's "Struct not found by ID", hunted through a crash in another
     /// subsystem entirely).
-    unsafe fn verify_no_old_to_young<P: PtrPolicy>(&self, types: &[TypeInfo]) {
+    unsafe fn verify_no_old_to_young<P: PtrPolicy>(
+        &self,
+        types: &[TypeInfo],
+        survivor_from: &AtomicBumpAllocator,
+        survivor_to: &AtomicBumpAllocator,
+    ) {
         let old = self.from_space();
         let nbase = self.nursery.base() as usize;
         let nsize = self.nursery.size();
+        let sbase = survivor_from.base() as usize;
+        let ssize = survivor_from.size();
         let mut off = 0usize;
         let used = old.used();
         while off < used {
@@ -1448,24 +1822,51 @@ impl Heap {
                 "GC verify: old-gen object at offset {off} has type_id {tid} out of range"
             );
             let info = &types[tid];
+            let mut points_at_survivor = false;
             unsafe {
                 scan_object(obj, info, |slot| {
                     let bits = *slot;
                     if let Some(p) = P::try_decode_ptr(bits) {
-                        if (p as usize).wrapping_sub(nbase) < nsize {
+                        let a = p as usize;
+                        let region = if a.wrapping_sub(nbase) < nsize {
+                            Some("EDEN")
+                        } else if a.wrapping_sub(sbase) < ssize {
+                            Some("SURVIVOR-FROM")
+                        } else {
+                            None
+                        };
+                        if let Some(region) = region {
                             panic!(
                                 "GC verify: MISSED WRITE BARRIER — old-gen {} at {:p} (offset \
-                                 {off}) still holds a NURSERY pointer {bits:#x} -> {p:p} in slot \
-                                 +{} after a minor GC. A minor evacuates the nursery whole, so \
-                                 this edge was never card-marked: the store that created it did \
-                                 not call Heap::write_barrier.",
+                                 {off}) still holds a {region} pointer {bits:#x} -> {p:p} in slot \
+                                 +{} after a minor GC. A minor evacuates eden and survivor-FROM \
+                                 whole, so this edge was never card-marked: the store that created \
+                                 it did not call Heap::write_barrier.",
                                 info.name,
                                 obj.0,
                                 slot as usize - obj.addr()
                             );
                         }
+                        if survivor_to.contains(p) {
+                            points_at_survivor = true;
+                        }
                     }
                 });
+            }
+            // Card-cleaning completeness: an old→survivor-TO edge that lost its
+            // card would be found by NO minor next time (the survivor keeps
+            // moving), corrupting the heap exactly as a missed barrier does.
+            // This makes the retention loud instead of silent.
+            if points_at_survivor {
+                assert!(
+                    self.cards.is_dirty_addr(obj.addr()),
+                    "GC verify: DROPPED REMEMBERED-SET ENTRY — old-gen {} at {:p} (offset {off}) \
+                     points into survivor-TO but its card is CLEAN after a minor. The card-cleaning \
+                     re-arm missed it; the next minor will not scan this object and its survivor \
+                     will be lost.",
+                    info.name,
+                    obj.0
+                );
             }
             off += info.allocation_size(header_aux(hdr));
         }
@@ -1482,10 +1883,11 @@ impl Heap {
     ) {
         let bits = unsafe { *slot };
         if let Some(ptr) = P::try_decode_ptr(bits) {
-            // A major has TWO from-spaces: the old one and the nursery. Both
-            // evacuate into the same to-space, which is what makes a major
-            // complete on its own and safe with a non-empty nursery.
-            if from.contains(ptr) || self.nursery.contains(ptr) {
+            // A major has FOUR from-spaces: the old one and the whole young gen
+            // (eden + both survivors). All evacuate into the same old to-space,
+            // which is what makes a major complete on its own and safe with a
+            // non-empty young gen.
+            if from.contains(ptr) || self.young_contains(ptr) {
                 let new = unsafe { self.copy_or_forward(types, to, ptr) };
                 unsafe { *slot = P::encode_ptr(new) };
             } else if self.verify && !to.contains(ptr) {
@@ -1533,14 +1935,16 @@ impl Heap {
         new
     }
 
-    /// Walk every object in the nursery and then the active old space:
-    /// `visitor(obj, info)`.
+    /// Walk every live object — eden, the active survivor space, then the
+    /// active old space: `visitor(obj, info)`. (The idle survivor-TO is empty
+    /// between collections, so it is skipped.)
     ///
     /// # Safety
     /// All objects must have valid headers; no concurrent mutation.
     pub unsafe fn walk(&self, types: &[TypeInfo], visitor: &mut dyn FnMut(Gc, &TypeInfo)) {
         unsafe {
             self.walk_space(&self.nursery, types, visitor);
+            self.walk_space(self.survivor_from(), types, visitor);
             self.walk_space(self.from_space(), types, visitor);
         }
     }
@@ -2182,8 +2586,12 @@ mod tests {
         v
     }
 
+    /// Stage M: a first-survival object ages into the SURVIVOR space, NOT the
+    /// old gen (that is the whole fix — promote-on-first-survival over-tenured
+    /// mid-iteration transients). The garbage still dies; the survivor is
+    /// evacuated out of eden whole, now carrying age 1.
     #[test]
-    fn minor_promotes_live_nursery_objects_and_drops_the_rest() {
+    fn minor_moves_survivors_to_the_survivor_space_and_drops_the_rest() {
         let (h, t) = small_heap();
         let cons = &t[kind::CONS as usize];
         let live = h.alloc(cons, 0);
@@ -2195,28 +2603,31 @@ mod tests {
         let mut roots = [enc(live)];
         let out = minor(&h, &t, &mut roots);
 
-        assert_eq!(out.promoted_bytes, cons.allocation_size(0), "only the live cons survives");
-        assert_ne!(roots[0], enc(live), "the root is rewritten to the promoted address");
-        assert!(h.nursery_contains(live.0), "the original address was young…");
-        assert!(!h.nursery_contains(dec(roots[0]).0), "…and the survivor is now old");
-        assert_eq!(h.old_used(), cons.allocation_size(0));
-        assert_eq!(h.nursery_used(), 0, "a minor evacuates the nursery WHOLE");
-        unsafe { assert_eq!(dec(roots[0]).field(0), imm(7), "contents came along") };
+        assert_eq!(out.promoted_bytes, 0, "a first-survival object is NOT promoted to old");
+        assert_eq!(h.old_used(), 0, "the old gen is untouched");
+        assert_eq!(h.survivor_used(), cons.allocation_size(0), "only the live cons survives, in survivor");
+        assert_ne!(roots[0], enc(live), "the root is rewritten to the survivor address");
+        assert!(h.nursery_contains(live.0), "the original address was in eden…");
+        assert!(!h.nursery_contains(dec(roots[0]).0), "…and the survivor lives elsewhere");
+        assert_eq!(h.nursery_used(), 0, "a minor evacuates eden WHOLE");
+        unsafe {
+            assert_eq!(dec(roots[0]).field(0), imm(7), "contents came along");
+            assert_eq!(dec(roots[0]).age(), 1, "and its age advanced to 1");
+        }
         assert_eq!(h.minor_collections.load(Ordering::Relaxed), 1);
         assert_eq!(h.major_collections.load(Ordering::Relaxed), 0);
-        assert_eq!(h.promoted_bytes.load(Ordering::Relaxed), cons.allocation_size(0) as u64);
+        assert_eq!(h.promoted_bytes.load(Ordering::Relaxed), 0);
     }
 
-    /// Promotion is transitive: a promoted object's fields still name nursery
-    /// objects, and the Cheney scan over the promoted range must chase them.
-    /// Without phase 3 only `a` moves and `b`/`c` are left in a space that is
-    /// about to be recycled.
+    /// Evacuation is transitive: a survivor's fields still name eden objects,
+    /// and the Cheney scan over survivor-TO must chase them. Without it only `a`
+    /// moves and `b`/`c` are left in a space that is about to be recycled.
     #[test]
-    fn minor_promotes_transitively() {
+    fn minor_evacuates_transitively() {
         let (h, t) = small_heap();
         let cons = &t[kind::CONS as usize];
         // c is 3 hops from the only root, and each hop is discovered only by
-        // scanning the object promoted on the hop before.
+        // scanning the object copied on the hop before.
         let c = h.alloc(cons, 0);
         let b = h.alloc(cons, 0);
         let a = h.alloc(cons, 0);
@@ -2229,14 +2640,15 @@ mod tests {
         }
         let mut roots = [enc(a)];
         let out = minor(&h, &t, &mut roots);
-        assert_eq!(out.promoted_bytes, 3 * cons.allocation_size(0), "the whole chain promoted");
+        assert_eq!(out.promoted_bytes, 0, "first survival: the chain ages into survivor, not old");
+        assert_eq!(h.survivor_used(), 3 * cons.allocation_size(0), "the whole chain survived");
         assert_eq!(h.nursery_used(), 0);
         unsafe {
             let na = dec(roots[0]);
             let nb = dec(na.field(1));
             let nc = dec(nb.field(1));
             for (o, want) in [(na, imm(1)), (nb, imm(2)), (nc, imm(3))] {
-                assert!(!h.nursery_contains(o.0), "every hop is old now");
+                assert!(!h.nursery_contains(o.0), "every hop is a survivor now");
                 assert_eq!(o.field(0), want);
             }
         }
@@ -2248,7 +2660,11 @@ mod tests {
     /// only path to it.
     #[test]
     fn dirty_card_finds_an_edge_no_root_names() {
-        let (h, t) = small_heap();
+        // tenure 0 = promote-on-first-survival: this test is about the OLD→young
+        // dirty-card path, so it needs the holder (and the found edge) in the
+        // old gen, not the survivor space. Aging is exercised elsewhere.
+        let (mut h, t) = small_heap();
+        h.set_tenure(0);
         let cons = &t[kind::CONS as usize];
         let mut roots = [enc(h.alloc(cons, 0))];
         minor(&h, &t, &mut roots);
@@ -2272,21 +2688,53 @@ mod tests {
         }
     }
 
-    /// The missed-barrier detector: the SAME store as above with the barrier
-    /// left out. This is beagle's shipped bug, and it must die at the
-    /// collection that caused it rather than as corruption somewhere later.
+    /// The missed-barrier detector, on an old→EDEN store: the SAME store as
+    /// above with the barrier left out. This is beagle's shipped bug, and it
+    /// must die at the collection that caused it rather than as corruption
+    /// somewhere later.
     #[test]
-    #[should_panic(expected = "MISSED WRITE BARRIER")]
-    fn missed_barrier_detector_fires() {
-        let (h, t) = small_heap();
+    #[should_panic(expected = "EDEN pointer")]
+    fn missed_barrier_detector_fires_on_an_eden_store() {
+        let (mut h, t) = small_heap();
+        h.set_tenure(0); // the holder must be OLD for the store to be old→young
         let cons = &t[kind::CONS as usize];
         let mut roots = [enc(h.alloc(cons, 0))];
         minor(&h, &t, &mut roots);
         let old = dec(roots[0]);
 
-        let young = h.alloc(cons, 0);
+        let young = h.alloc(cons, 0); // in eden
         unsafe { old.set_field(1, enc(young)) }; // no write_barrier: the bug
         minor(&h, &t, &mut roots);
+    }
+
+    /// The re-aimed detector also fires on an old→SURVIVOR-FROM store. Stage M
+    /// made old→survivor-TO edges LEGAL (a fresh survivor held by an old
+    /// object, card-marked), but an old object pointing into the JUST-EVACUATED
+    /// survivor-FROM is the same missed-barrier bug: that region is empty now.
+    #[test]
+    #[should_panic(expected = "SURVIVOR-FROM pointer")]
+    fn missed_barrier_detector_fires_on_a_survivor_from_store() {
+        let (mut h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        // An OLD holder (promote it directly with tenure 0)…
+        h.set_tenure(0);
+        let mut roots = [enc(h.alloc(cons, 0))];
+        minor(&h, &t, &mut roots);
+        let old = dec(roots[0]);
+        assert_eq!(h.old_used(), cons.allocation_size(0), "holder is old");
+        // …and a young object that becomes a SURVIVOR (default aging).
+        h.set_tenure(TENURE_THRESHOLD);
+        let mut sroots = vec![roots[0], enc(h.alloc(cons, 0))];
+        minor(&h, &t, &mut sroots);
+        let survivor = dec(sroots[1]);
+        assert_eq!(h.survivor_used(), cons.allocation_size(0), "the young object is a survivor now");
+
+        // The old→survivor store, WITHOUT the barrier: the bug. The survivor is
+        // reachable ONLY through this unbarriered edge, so the next minor cannot
+        // find it and leaves it in the evacuated survivor-FROM → detector fires.
+        unsafe { old.set_field(1, enc(survivor)) };
+        let mut froots = [sroots[0]];
+        minor(&h, &t, &mut froots);
     }
 
     /// The scan reads 8 card bytes as one word and skips the run on zero, so
@@ -2337,11 +2785,13 @@ mod tests {
         assert_eq!(seen, vec![0, 63], "…and both ends of the range do");
     }
 
-    /// The same property on a real heap: barriering a nursery object is a
-    /// no-op, barriering the promoted one is not.
+    /// The same property on a real heap: barriering a young object (eden OR
+    /// survivor) is a no-op, barriering the promoted one is not. tenure 0 puts
+    /// the object in the old gen after one minor so the second half has teeth.
     #[test]
     fn barrier_on_a_young_object_remembers_nothing() {
-        let (h, t) = small_heap();
+        let (mut h, t) = small_heap();
+        h.set_tenure(0);
         let cons = &t[kind::CONS as usize];
         let young = h.alloc(cons, 0);
         h.write_barrier(young);
@@ -2358,7 +2808,10 @@ mod tests {
     /// to a young object.
     #[test]
     fn dirty_cards_across_word_boundaries_promote_their_edges() {
-        let (h, t) = small_heap();
+        // tenure 0: the 400 holders and the edges they name all live in the OLD
+        // gen, which is what the card-address arithmetic below depends on.
+        let (mut h, t) = small_heap();
+        h.set_tenure(0);
         let cons = &t[kind::CONS as usize];
         // ~9.6 KiB of old gen = cards 0..18, enough to straddle two word edges.
         let mut roots: Vec<u64> = (0..400)
@@ -2407,7 +2860,10 @@ mod tests {
 
     #[test]
     fn minor_leaves_the_nursery_empty_and_every_card_clean() {
-        let (h, t) = small_heap();
+        // tenure 0 so the 100 objects are OLD after one minor and can be
+        // barriered (a survivor store has nothing to remember).
+        let (mut h, t) = small_heap();
+        h.set_tenure(0);
         let cons = &t[kind::CONS as usize];
         let mut roots: Vec<u64> = (0..100).map(|_| enc(h.alloc(cons, 0))).collect();
         minor(&h, &t, &mut roots);
@@ -2417,7 +2873,7 @@ mod tests {
         assert!(!dirty_cards(&h).is_empty(), "the barrier marked cards to begin with");
 
         minor(&h, &t, &mut roots);
-        assert_eq!(h.nursery_used(), 0, "nursery empty");
+        assert_eq!(h.nursery_used(), 0, "eden empty");
         assert_eq!(dirty_cards(&h), Vec::<usize>::new(), "and every card clean");
         // A major clears them too, and rebuilds the index against the new space.
         for &r in &roots {
@@ -2441,7 +2897,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "has no object start in the index")]
     fn dirty_card_without_an_object_start_is_a_hard_panic() {
-        let (h, t) = small_heap();
+        // tenure 0 so the big object promotes to the OLD gen (where cards and
+        // the object-start index live) on its first minor.
+        let (mut h, t) = small_heap();
+        h.set_tenure(0);
         let vinfo = &t[kind::VALUES as usize];
         let big = h.alloc(vinfo, 200); // 1608 bytes: begins in card 0, ends in card 3
         let mut roots = [enc(big)];
@@ -2466,20 +2925,21 @@ mod tests {
         }
         let mut roots = [enc(a)];
         let out = minor(&h, &t, &mut roots);
-        assert_eq!(out.promoted_bytes, 2 * cons.allocation_size(0), "each object promoted once");
+        assert_eq!(out.promoted_bytes, 0, "a first-survival cycle goes to survivor, not old");
+        assert_eq!(h.survivor_used(), 2 * cons.allocation_size(0), "each object copied once");
         unsafe {
             let na = dec(roots[0]);
             let nb = dec(na.field(1));
             assert_eq!(na.field(0), imm(1));
             assert_eq!(nb.field(0), imm(2));
-            assert_eq!(dec(nb.field(1)), na, "the cycle closes back on the promoted a");
+            assert_eq!(dec(nb.field(1)), na, "the cycle closes back on the copied a");
         }
     }
 
-    /// A shared child reached twice must be promoted once — the forwarding
-    /// header, through the promotion path this time.
+    /// A shared child reached twice must be copied once — the forwarding
+    /// header, through the survivor-evacuation path this time.
     #[test]
-    fn minor_promotes_a_shared_child_once() {
+    fn minor_evacuates_a_shared_child_once() {
         let (h, t) = small_heap();
         let cons = &t[kind::CONS as usize];
         let shared = h.alloc(cons, 0);
@@ -2492,11 +2952,12 @@ mod tests {
         }
         let mut roots = [enc(a), enc(b)];
         let out = minor(&h, &t, &mut roots);
-        assert_eq!(out.promoted_bytes, 3 * cons.allocation_size(0));
+        assert_eq!(out.promoted_bytes, 0, "first survival: to survivor, not old");
+        assert_eq!(h.survivor_used(), 3 * cons.allocation_size(0), "shared child copied exactly once");
         unsafe {
             let sa = dec(dec(roots[0]).field(0));
             let sb = dec(dec(roots[1]).field(0));
-            assert_eq!(sa, sb, "shared child promoted exactly once");
+            assert_eq!(sa, sb, "shared child copied exactly once");
             assert_eq!(sa.field(0), imm(9));
         }
     }
@@ -2563,7 +3024,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "would not fit")]
+    #[should_panic(expected = "could not all spill")]
     fn calling_a_minor_that_cannot_fit_is_loud() {
         let h = Heap::with_sizes(1 << 12, 1 << 16);
         let t = type_table();
@@ -2577,10 +3038,13 @@ mod tests {
 
     /// The other half of the policy: a minor that fits still reports when
     /// promotion has filled the old gen past its threshold, so the caller can
-    /// follow with a major. The nursery is empty by then, so it is safe.
+    /// follow with a major. The young gen is empty by then, so it is safe.
+    /// `needs_major` keys on the OLD gen, so this needs promotion to old —
+    /// tenure 0 gives it (a survivor that never promotes could never trip it).
     #[test]
     fn minor_reports_when_the_old_gen_needs_a_major() {
-        let (h, t) = small_heap();
+        let (mut h, t) = small_heap();
+        h.set_tenure(0);
         let cons = &t[kind::CONS as usize];
         h.set_old_trigger_bytes(1 << 20); // far away
         let mut roots = [enc(h.alloc(cons, 0))];
@@ -2600,11 +3064,14 @@ mod tests {
         assert_eq!(h.old_used(), 2 * cons.allocation_size(0));
     }
 
-    /// A minor moves nothing that is already old — promotion is on FIRST
-    /// survival, and the old gen is untouched until a major.
+    /// A minor moves nothing that is ALREADY OLD — the old gen is untouched
+    /// until a major. (A SURVIVOR does move across minors, until it tenures;
+    /// that is covered by the aging tests. Here tenure 0 puts the object in the
+    /// old gen after one minor so its address must then stay fixed.)
     #[test]
     fn minors_do_not_move_old_objects() {
-        let (h, t) = small_heap();
+        let (mut h, t) = small_heap();
+        h.set_tenure(0);
         let cons = &t[kind::CONS as usize];
         let mut roots = [enc(h.alloc(cons, 0))];
         minor(&h, &t, &mut roots);
@@ -2633,10 +3100,24 @@ mod tests {
             }
             minor(&h, &t, &mut roots);
             assert_eq!(h.nursery_used(), 0, "round {round}");
-            assert_eq!(h.old_used(), cons.allocation_size(0), "round {round}: only the root ever survived");
+            // Only the root ever survives — early rounds in the survivor space,
+            // later ones (once it tenures) in the old gen, but always exactly
+            // one cons live somewhere.
+            assert_eq!(
+                h.survivor_used() + h.old_used(),
+                cons.allocation_size(0),
+                "round {round}: only the root ever survived, wherever it now lives"
+            );
         }
         unsafe { assert_eq!(dec(roots[0]).field(0), imm(5)) };
-        assert_eq!(h.promoted_bytes.load(Ordering::Relaxed), cons.allocation_size(0) as u64);
+        // By now it long since crossed TENURE and settled in the old gen.
+        assert_eq!(h.old_used(), cons.allocation_size(0), "tenured to old and stays put");
+        assert_eq!(h.survivor_used(), 0);
+        assert_eq!(
+            h.promoted_bytes.load(Ordering::Relaxed),
+            cons.allocation_size(0) as u64,
+            "promoted exactly once, when it crossed TENURE"
+        );
     }
 
     /// The precise-layout detector covers the promotion path too, not just the
@@ -2714,5 +3195,303 @@ mod tests {
             h.used(),
             8 * 2000 * type_table()[kind::CONS as usize].allocation_size(0)
         );
+    }
+
+    // ─── Stage M: survivor space + aging ─────────────────────────────────
+
+    /// An object is promoted to the old gen ONLY after surviving `tenure`
+    /// minors — the age threshold. It ages one step per minor in the survivor
+    /// space and never touches the old gen until then. Break `age >= tenure`
+    /// (e.g. to `>`) and the final promotion never happens: this fails.
+    #[test]
+    fn an_object_is_promoted_only_after_surviving_tenure_minors() {
+        let (h, t) = small_heap();
+        assert_eq!(h.tenure(), TENURE_THRESHOLD, "the default tenure is in effect");
+        let cons = &t[kind::CONS as usize];
+        let live = h.alloc(cons, 0);
+        unsafe { live.set_field(0, imm(7)) };
+        let mut roots = [enc(live)];
+
+        // Minors 1..=TENURE: survives in the survivor space, ageing each time.
+        for age in 1..=TENURE_THRESHOLD {
+            for _ in 0..10 {
+                h.alloc(cons, 0); // fresh garbage each round
+            }
+            let out = minor(&h, &t, &mut roots);
+            assert_eq!(out.promoted_bytes, 0, "age {age}: still a survivor, not promoted");
+            assert_eq!(h.old_used(), 0, "age {age}: the old gen is still empty");
+            assert_eq!(h.survivor_used(), cons.allocation_size(0), "age {age}: held in survivor");
+            unsafe { assert_eq!(dec(roots[0]).age(), age, "age advances by one per minor") };
+        }
+
+        // The next minor finds it at age == TENURE and promotes it.
+        let out = minor(&h, &t, &mut roots);
+        assert_eq!(out.promoted_bytes, cons.allocation_size(0), "promoted once age reached TENURE");
+        assert_eq!(h.old_used(), cons.allocation_size(0), "now in the old gen");
+        assert_eq!(h.survivor_used(), 0, "and no longer a survivor");
+        unsafe { assert_eq!(dec(roots[0]).field(0), imm(7), "contents intact through it all") };
+    }
+
+    /// A short-lived object survives one minor (into the survivor space), then
+    /// is dropped — it dies in survivor WITHOUT ever reaching the old gen.
+    /// That is the whole win: promote-on-first-survival would have tenured it.
+    #[test]
+    fn a_short_lived_object_dies_in_survivor_without_reaching_old() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let mut root = [enc(h.alloc(cons, 0))]; // a long-lived root, always kept
+
+        let transient = h.alloc(cons, 0);
+        unsafe { transient.set_field(0, imm(42)) };
+        let mut both = [root[0], enc(transient)];
+        minor(&h, &t, &mut both); // transient → survivor (age 1)
+        assert_eq!(h.survivor_used(), 2 * cons.allocation_size(0), "root + transient both survive");
+        assert_eq!(h.old_used(), 0);
+        root[0] = both[0];
+
+        // Drop the transient (not in the root set) and collect again.
+        minor(&h, &t, &mut root);
+        assert_eq!(h.survivor_used(), cons.allocation_size(0), "only the root survives the second minor");
+        assert_eq!(h.old_used(), 0, "the transient NEVER reached the old gen — it died in survivor");
+        assert_eq!(h.promoted_bytes.load(Ordering::Relaxed), 0, "nothing was ever promoted");
+    }
+
+    /// survivor-TO overflow SPILLS to the old gen: a minor must always complete,
+    /// so when the survivor space fills the remaining survivors promote early
+    /// rather than the collector getting stuck on a half-forwarded graph. With
+    /// a 64-byte survivor only a couple of conses fit; the rest spill. Nothing
+    /// is lost, and every object is intact wherever it landed.
+    #[test]
+    fn survivor_overflow_spills_to_the_old_gen() {
+        let mut h = Heap::with_sizes_survivor(1 << 16, 1 << 16, 64);
+        h.set_verify(true);
+        let t = type_table();
+        let cons = &t[kind::CONS as usize];
+        let n = 20usize;
+        let sz = cons.allocation_size(0);
+        let mut roots: Vec<u64> = (0..n)
+            .map(|i| {
+                let c = h.alloc(cons, 0);
+                unsafe { c.set_field(0, imm(i as u64)) };
+                enc(c)
+            })
+            .collect();
+        let out = minor(&h, &t, &mut roots);
+
+        assert!(h.survivor_used() > 0, "survivor took some");
+        assert!(h.survivor_used() < n * sz, "…but not all — the rest had to spill");
+        assert_eq!(out.promoted_bytes, n * sz - h.survivor_used(), "the overflow spilled to old");
+        assert_eq!(h.survivor_used() + h.old_used(), n * sz, "every live object landed somewhere");
+        assert_eq!(h.nursery_used(), 0, "eden emptied whole");
+        for (i, &r) in roots.iter().enumerate() {
+            unsafe { assert_eq!(dec(r).field(0), imm(i as u64), "contents intact across the split") };
+        }
+    }
+
+    /// Age is PRESERVED and INCREMENTED across a minor — read it back — and the
+    /// bump must not disturb the rest of the header (type_id, and a varlen
+    /// object's aux length). The age write lands on the NEW copy, never the
+    /// forwarding word.
+    #[test]
+    fn age_is_preserved_and_incremented_across_a_minor() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let live = h.alloc(cons, 0);
+        unsafe { assert_eq!(live.age(), 0, "born at age 0") };
+        let mut roots = [enc(live)];
+        minor(&h, &t, &mut roots);
+        unsafe { assert_eq!(dec(roots[0]).age(), 1, "the first minor incremented age to 1") };
+        minor(&h, &t, &mut roots);
+        unsafe { assert_eq!(dec(roots[0]).age(), 2, "and the second to 2") };
+
+        // A varlen object: its aux (length) must ride through the age bump.
+        let vinfo = &t[kind::VALUES as usize];
+        let v = h.alloc(vinfo, 5);
+        unsafe { v.values_mut(vinfo).copy_from_slice(&[imm(1), imm(2), imm(3), imm(4), imm(5)]) };
+        let mut vroots = [roots[0], enc(v)];
+        minor(&h, &t, &mut vroots);
+        unsafe {
+            let nv = dec(vroots[1]);
+            assert_eq!(nv.age(), 1, "the varlen object aged too");
+            assert_eq!(nv.type_id(), kind::VALUES, "type_id preserved across the age bump");
+            assert_eq!(nv.aux(), 5, "aux (varlen length) preserved across the age bump");
+            assert_eq!(nv.values(vinfo), &[imm(1), imm(2), imm(3), imm(4), imm(5)], "contents intact");
+        }
+    }
+
+    /// A MAJOR evacuates all three young/old regions at once — eden, the
+    /// survivor space, and the old gen — into the fresh old space. Build one
+    /// live object in each, then collect: all three end up old, intact, and
+    /// eden + survivor are empty.
+    #[test]
+    fn a_major_evacuates_eden_survivor_and_old_together() {
+        let (mut h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+
+        // An OLD object (promote directly with tenure 0).
+        h.set_tenure(0);
+        let old_obj = h.alloc(cons, 0);
+        unsafe { old_obj.set_field(0, imm(100)) };
+        let mut roots = vec![enc(old_obj)];
+        minor(&h, &t, &mut roots);
+        assert_eq!(h.old_used(), cons.allocation_size(0), "old_obj is in the old gen");
+
+        // A SURVIVOR object (default aging).
+        h.set_tenure(TENURE_THRESHOLD);
+        let surv = h.alloc(cons, 0);
+        unsafe { surv.set_field(0, imm(200)) };
+        roots.push(enc(surv));
+        minor(&h, &t, &mut roots);
+        assert_eq!(h.survivor_used(), cons.allocation_size(0), "surv is in the survivor space");
+
+        // An EDEN object (no collection since).
+        let eden = h.alloc(cons, 0);
+        unsafe { eden.set_field(0, imm(300)) };
+        roots.push(enc(eden));
+        assert!(
+            h.nursery_used() > 0 && h.survivor_used() > 0 && h.old_used() > 0,
+            "one live object in each of the three regions"
+        );
+
+        unsafe {
+            h.collect::<TestPolicy>(&t, &mut |visit| {
+                for r in roots.iter_mut() {
+                    visit(r as *mut u64);
+                }
+            });
+        }
+        assert_eq!(h.nursery_used(), 0, "eden emptied by the major");
+        assert_eq!(h.survivor_used(), 0, "survivor emptied by the major");
+        assert_eq!(h.old_used(), 3 * cons.allocation_size(0), "all three are old now");
+        unsafe {
+            assert_eq!(dec(roots[0]).field(0), imm(100), "old object intact");
+            assert_eq!(dec(roots[1]).field(0), imm(200), "survivor evacuated intact");
+            assert_eq!(dec(roots[2]).field(0), imm(300), "eden object evacuated intact");
+        }
+    }
+
+    /// Cycles AND varlen objects survive AGING: several minors re-copy the whole
+    /// live survivor set, and on the last one the graph tenures to the old gen.
+    /// A broken forwarding or age path corrupts the cycle on any pass.
+    #[test]
+    fn cycles_and_varlen_survive_aging() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let vinfo = &t[kind::VALUES as usize];
+        let a = h.alloc(cons, 0);
+        let b = h.alloc(cons, 0);
+        let v = h.alloc(vinfo, 3);
+        unsafe {
+            a.set_field(0, imm(1));
+            a.set_field(1, enc(b));
+            b.set_field(0, imm(2));
+            b.set_field(1, enc(a)); // cycle a <-> b
+            v.values_mut(vinfo).copy_from_slice(&[enc(a), imm(9), enc(b)]);
+        }
+        let mut roots = [enc(v)];
+        for round in 1..=TENURE_THRESHOLD + 1 {
+            for _ in 0..5 {
+                h.alloc(cons, 0); // garbage
+            }
+            minor(&h, &t, &mut roots);
+            assert_eq!(h.nursery_used(), 0, "round {round}: eden empty");
+            unsafe {
+                let nv = dec(roots[0]);
+                let vals = nv.values(vinfo);
+                let na = dec(vals[0]);
+                let nb = dec(vals[2]);
+                assert_eq!(vals[1], imm(9), "round {round}: untraced slot intact");
+                assert_eq!(na.field(0), imm(1));
+                assert_eq!(nb.field(0), imm(2));
+                assert_eq!(dec(na.field(1)), nb, "round {round}: a→b");
+                assert_eq!(dec(nb.field(1)), na, "round {round}: b→a closes on the re-copied a");
+            }
+        }
+        // On the (TENURE+1)-th minor the whole graph reached age TENURE and
+        // tenured to the old gen; it is intact there.
+        assert_eq!(h.survivor_used(), 0, "tenured out of survivor");
+        assert_eq!(
+            h.old_used(),
+            2 * cons.allocation_size(0) + vinfo.allocation_size(3),
+            "the whole graph is in the old gen"
+        );
+    }
+
+    /// The Stage M invariant: after a minor, eden and the JUST-EVACUATED
+    /// survivor-FROM are BOTH empty (an exact evacuation still — a survivor is
+    /// simply in survivor-TO now rather than the old gen). The survivor roles
+    /// swapped, so the space we drained is the idle survivor-TO afterwards.
+    #[test]
+    fn eden_and_survivor_from_empty_after_a_minor() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        // Fill eden with survivors + garbage; keep some as roots.
+        let mut roots: Vec<u64> = (0..10).map(|_| enc(h.alloc(cons, 0))).collect();
+        for _ in 0..40 {
+            h.alloc(cons, 0);
+        }
+        minor(&h, &t, &mut roots); // survivors now populate survivor-FROM
+        assert!(h.survivor_used() > 0, "a survivor set exists to re-evacuate");
+        for _ in 0..40 {
+            h.alloc(cons, 0); // refill eden
+        }
+
+        let active_before = h.survivor_active.load(Ordering::Acquire);
+        minor(&h, &t, &mut roots);
+        // Eden empty, and the survivor space we evacuated FROM (now the idle TO
+        // after the swap) empty. The survivors live in the new active FROM.
+        assert_eq!(h.nursery_used(), 0, "eden empty");
+        assert_eq!(
+            h.survivor[active_before].used(),
+            0,
+            "the just-evacuated survivor-FROM is empty (exact evacuation)"
+        );
+        assert_ne!(
+            h.survivor_active.load(Ordering::Acquire),
+            active_before,
+            "survivor roles swapped"
+        );
+        assert_eq!(h.survivor_used(), 10 * cons.allocation_size(0), "survivors are in the new FROM");
+    }
+
+    /// CARD CLEANING: an old→SURVIVOR edge must survive REPEATED minors. The
+    /// survivor moves survivor→survivor on every minor until it tenures, and no
+    /// STORE happens on a GC move, so the barrier cannot re-arm the card — the
+    /// COLLECTOR must. Blind card-clearing (correct only when survivors went
+    /// straight to old, as in Stage I) would lose this edge on the SECOND minor.
+    /// The child is reachable ONLY through the old holder, so a lost card is a
+    /// lost object — caught here by the value read-back and the detector alike.
+    #[test]
+    fn an_old_to_survivor_edge_is_kept_across_repeated_minors() {
+        let (mut h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        // An OLD holder (tenure 0 to promote it directly)…
+        h.set_tenure(0);
+        let mut roots = [enc(h.alloc(cons, 0))];
+        minor(&h, &t, &mut roots);
+        let old = dec(roots[0]);
+        assert_eq!(h.old_used(), cons.allocation_size(0), "holder is old");
+        // …and a child that AGES in survivor for many minors (high tenure), held
+        // ONLY by the old object, remembered by ONE barrier at store time.
+        h.set_tenure(100);
+        let young = h.alloc(cons, 0);
+        unsafe {
+            young.set_field(0, imm(55));
+            old.set_field(1, enc(young)); // the old→young store…
+        }
+        h.write_barrier(old); // …remembered once; the collector re-arms it after
+
+        for round in 0..5 {
+            minor(&h, &t, &mut roots);
+            assert_eq!(dec(roots[0]), old, "the old holder itself never moves");
+            unsafe {
+                let child = dec(old.field(1));
+                assert!(!h.nursery_contains(child.0), "round {round}: child evacuated out of eden");
+                assert_eq!(child.field(0), imm(55), "round {round}: child found via the retained card");
+                assert_eq!(child.age(), round as u16 + 1, "round {round}: it is ageing in survivor");
+            }
+            assert_eq!(h.old_used(), cons.allocation_size(0), "round {round}: only the holder is old");
+            assert!(h.survivor_used() > 0, "round {round}: the child lives on in survivor");
+        }
     }
 }
