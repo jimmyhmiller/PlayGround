@@ -101,17 +101,19 @@
     (load s)))
 
 ; ---- trait_method_fn / type_impl_name (src/ast.rs) --------------------------
+; Delegates to check's `tmfn` — the ONE definition. These were two hand-synced copies
+; of the same scheme; a mangler that drifts from the one used to EMIT the impl's
+; functions produces calls to symbols that don't exist.
 (defn trait-method-fn [(a (ptr Allocator)) (trait (slice u8)) (type-name (slice u8)) (method (slice u8))] (-> (slice u8))
-  (sconcat a trait (sconcat a "$" (sconcat a type-name (sconcat a "$" method)))))
+  (tmfn a trait type-name method))
+; The dispatch key for a deferred trait call whose Self resolved to a concrete type.
+; Delegates to the ONE definition (`parser.coil::impl-base-name`) — this was a third
+; hand-synced copy, and it silently lagged the other two: `(!= p q)` on a pointer is a
+; bounded generic, so `Eq` for `(ptr T)` is resolved HERE, and a copy that didn't know
+; about pointers type-checked fine and then hit the `unimplemented` below at mono time.
 (defn mono-impl-name [(a (ptr Allocator)) (t (ptr Type))] (-> (Option (slice u8)))
-  (let [tg (type-tag t)]
-    (if (icmp-eq tg 6) (Some (type-struct-name t))
-    (if (icmp-eq tg 11) (Some (t-app-name t))
-    (if (icmp-eq tg 0) (Some (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t))))
-    (if (icmp-eq tg 2) (Some "bool")
-    (if (icmp-eq tg 1) (Some (sconcat a "f" (i64->str a (t-int-bits t))))
-    (if (icmp-eq tg 8) (Some "slice")
-      (None [(slice u8)])))))))))
+  (let [n (impl-base-name a t)]
+    (if (icmp-eq (slice-len n) 0) (None [(slice u8)]) (Some n))))
 
 ; ---- generic-impl resolution for deferred trait calls (src/mono.rs) ----------
 (defn impl-lookup [(m (ptr MonoCtx)) (tr (slice u8)) (base (slice u8))] (-> (ptr ImplDef))
@@ -122,45 +124,19 @@
                 (do (store! r ip) (break)) 0))
           (store! i (iadd (load i) 1)))))
     (load r)))
-(defn binds-find [(bn (ptr (ArrayList (slice u8)))) (nm (slice u8))] (-> i64)
-  (let [n (al-len [(slice u8)] (load bn)) (mut i) 0 (mut r) -1]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (if (str-eq (al-get [(slice u8)] (load bn) (load i)) nm) (do (store! r (load i)) (break)) 0)
-          (store! i (iadd (load i) 1)))))
-    (load r)))
-; Match a generic impl's implementing-type pattern against a concrete receiver,
-; binding the impl's type params (parallel bn/bt lists). First binding wins; a
-; repeated param must match consistently (equality via type-key).
-(defn mip-list [(a (ptr Allocator)) (pa (ptr (ArrayList Type))) (ca (ptr (ArrayList Type))) (params (ptr (ArrayList (slice u8)))) (bn (ptr (ArrayList (slice u8)))) (bt (ptr (ArrayList Type)))] (-> bool)
-  (let [np (al-len [Type] (load pa)) nc (al-len [Type] (load ca)) (mut i) 0 (mut ok) (icmp-eq np nc)]
-    (loop (if (or (not (load ok)) (icmp-ge (load i) np)) (break)
-      (do (if (match-impl-pattern a (al-elem [Type] pa (load i)) (al-elem [Type] ca (load i)) params bn bt) 0 (do (store! ok false) 0))
-          (store! i (iadd (load i) 1)))))
-    (load ok)))
-(defn match-impl-pattern [(a (ptr Allocator)) (pat (ptr Type)) (actual (ptr Type)) (params (ptr (ArrayList (slice u8)))) (bn (ptr (ArrayList (slice u8)))) (bt (ptr (ArrayList Type)))] (-> bool)
-  (match-else (load pat)
-    (TStruct [n]
-      (if (set-contains params n)
-          (let [bi (binds-find bn n)]
-            (if (icmp-ge bi 0)
-                (str-eq (type-key a (al-elem [Type] bt bi)) (type-key a actual))
-                (do (al-push! bn n) (al-push! bt (load actual)) true)))
-          (str-eq (type-key a pat) (type-key a actual))))
-    (TApp [nw aw] (match-else (load actual)
-      (TApp [ng ag] (and (str-eq nw ng) (mip-list a aw ag params bn bt)))
-      (_ false)))
-    (TPtr [pw] (match-else (load actual) (TPtr [pg] (match-impl-pattern a pw pg params bn bt)) (_ false)))
-    (TSlice [pw] (match-else (load actual) (TSlice [pg] (match-impl-pattern a pw pg params bn bt)) (_ false)))
-    (TRef [mw pw] (match-else (load actual)
-      (TRef [mg pg] (and (if mw mg (not mg)) (match-impl-pattern a pw pg params bn bt)))
-      (_ false)))
-    (TArray [pw nw] (match-else (load actual)
-      (TArray [pg ng] (and (icmp-eq nw ng) (match-impl-pattern a pw pg params bn bt)))
-      (_ false)))
-    (TVec [pw nw] (match-else (load actual)
-      (TVec [pg ng] (and (icmp-eq nw ng) (match-impl-pattern a pw pg params bn bt)))
-      (_ false)))
-    (_ (str-eq (type-key a pat) (type-key a actual)))))
+; Several impls can share a key, so "first one with this key" is not good enough here
+; either: pick the most specific whose pattern accepts the receiver. That is exactly
+; `check.coil::impl-select`, called with mono's own impl table — NOT a second copy of
+; the rule. A parallel implementation here would be free to disagree with the one that
+; type-checked the program, which is the whole failure mode this phase keeps hitting.
+(defn impl-lookup-sel [(a (ptr Allocator)) (m (ptr MonoCtx)) (tr (slice u8)) (recv (ptr Type))] (-> (ptr ImplDef))
+  (let [s (alloc-stack ImplSel)]
+    (store! s (impl-select a (load (field m impls)) tr recv))
+    (load (field s ip))))
+; NOTE: the impl-pattern matcher lives in check.coil (`unify-trait-extras`) and mono
+; uses it directly. There was a second one here (`match-impl-pattern`/`mip-list`),
+; which is how a receiver could be accepted by the selector and then rejected by the
+; binder. One matcher, one answer.
 
 ; ---- generic-template lookups (the gfuncs/gstructs/gsums HashMaps) -----------
 (defn find-struct-named [(lst (ptr (ArrayList StructDef))) (nm (slice u8))] (-> i64)
@@ -459,31 +435,45 @@
                     (match (mono-impl-name a styp)
                       (None [] (do (unimplemented "mono/trait-call: Self resolved to a type with no impl name") 0))
                       (Some [tn] (do (store! base tn) 0))))
-                (let [ip (impl-lookup m trait_name (load base))
-                      (mut targs) (box-items-type a)]
+                (let [rtyp (alloc-stack Type)]
+                 (store! rtyp (load mty))
+                 ; the most specific impl accepting this receiver; fall back to the
+                 ; plain key lookup when nothing matches, which is the pre-specialization
+                 ; behaviour (and a general impl's key IS the plain key)
+                 (let [ipsel (impl-lookup-sel a m trait_name rtyp)
+                       ip (if (icmp-eq (cast i64 ipsel) 0) (impl-lookup m trait_name (load base)) ipsel)
+                       mkey (if (icmp-eq (cast i64 ipsel) 0) (load base)
+                              (impl-mangle-key a (field ipsel self_type) (load (field ipsel type_params))))
+                       (mut targs) (box-items-type a)]
                   (if (if (icmp-ne (cast i64 ip) 0) (icmp-gt (al-len [(slice u8)] (load (load (field ip type_params)))) 0) false)
-                      (let [(mut bn) (al-new [(slice u8)] a) (mut bt) (al-new [Type] a)
-                            mtyp (alloc-stack Type)]
+                      ; Bind the impl's type params from the receiver with the SAME
+                      ; matcher that selected the impl (`unify-trait-extras`). Mono used
+                      ; to run its own `match-impl-pattern` here — a second matcher, free
+                      ; to disagree with the selecting one and then reject a receiver the
+                      ; selector had just accepted. (It also compared types by mono's
+                      ; `type-key`, which renders a TRef without its mutability flag and
+                      ; so equates `(mut T)` with `(ref T)`; unify-trait-extras checks it.)
+                      (let [binds (subst-new a) mtyp (alloc-stack Type)]
                         (store! mtyp (load mty))
-                        (if (not (match-impl-pattern a (field ip self_type) mtyp (load (field ip type_params)) (mut bn) (mut bt)))
+                        (if (not (unify-trait-extras a (field ip self_type) mtyp (load (field ip type_params)) binds))
                             (return-from :try (Err [ExprKind Diag] (derr (sconcat3 a "trait call '" method "': receiver doesn't match the impl's implementing type")))) 0)
                         (let [ps (load (field ip type_params)) np (al-len [(slice u8)] (load ps)) (mut k) 0 (mut ta) (al-new [Type] a)]
                           (loop (if (icmp-ge (load k) np) (break)
-                            (let [pn (al-get [(slice u8)] (load ps) (load k)) bi (binds-find (mut bn) pn)]
-                              (if (icmp-lt bi 0)
+                            (let [pn (al-get [(slice u8)] (load ps) (load k)) bp (subst-get binds pn)]
+                              (if (icmp-eq (cast i64 bp) 0)
                                   (return-from :try (Err [ExprKind Diag] (derr (sconcat a (sconcat3 a "trait call '" method "': impl type parameter '") (sconcat a pn "' not determined by the receiver"))))) 0)
-                              (al-push! (mut ta) (al-get [Type] (load bt) bi))
+                              (al-push! (mut ta) (load bp))
                               (store! k (iadd (load k) 1)))))
                           (store! targs (box-al [Type] a (load ta)))
                           0))
                       0)
-                  (let [basefn (trait-method-fn a trait_name (load base) method)
+                  (let [basefn (trait-method-fn a trait_name mkey method)
                         rargs (try! (resolve-expr-list m args map))]
                     (if (icmp-gt (al-len [Type] (load (load targs))) 0)
                         (let [mng (mangle a basefn (load targs))]
                           (queue-func m basefn (load targs))
                           (Ok (ECall mng (box-items-type a) rargs)))
-                        (Ok (ECall basefn (box-items-type a) rargs)))))))))
+                        (Ok (ECall basefn (box-items-type a) rargs))))))))))
         ; comptime-only / unresolved nodes: a compiler bug if they reach mono.
         (EComptime  [inner] (Err [ExprKind Diag] (derr "mono: unresolved comptime node (compiler bug)")))
         (ETypeQuery [q t] (Err [ExprKind Diag] (derr "mono: unresolved type-query (compiler bug)")))

@@ -86,6 +86,22 @@
   (>  [(a f64) (b f64)] (-> bool) (fcmp-gt a b))
   (>= [(a f64) (b f64)] (-> bool) (fcmp-ge a b)))
 
+; ---- pointers are ordered and compared BY ADDRESS ---------------------------
+; Like Rust's `*const T`. `T` is irrelevant to an address comparison, so these are
+; UNBOUNDED — `(ptr T)` for any T at all, including a T that is itself unordered.
+; One blanket impl covers every pointer type (dispatch keys all pointers as "ptr").
+; Casting to u64, NOT i64: `icmp-*` signedness is read off the operand type, and an
+; address is unsigned — a signed compare would invert above 2^63.
+; Dispatch tries the receiver's own type before auto-dereferencing, so `(< p q)`
+; reaches THESE impls and compares addresses; it never peels to the pointee's `Ord`.
+(impl [T] Eq (ptr T)
+  (= [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-eq (cast u64 a) (cast u64 b))))
+(impl [T] Ord (ptr T)
+  (<  [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-lt (cast u64 a) (cast u64 b)))
+  (<= [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-le (cast u64 a) (cast u64 b)))
+  (>  [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-gt (cast u64 a) (cast u64 b)))
+  (>= [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-ge (cast u64 a) (cast u64 b))))
+
 ; ---- bitwise, as traits ----------------------------------------------------
 ; Rust-style bit operators `& | ^ << >>`, dispatched by type and inlined to the
 ; core op — so `(& op 0xC7)` reads like C's `op & 0xC7` with no overhead. (Unary

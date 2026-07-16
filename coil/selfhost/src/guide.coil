@@ -38,7 +38,7 @@ imported must start with `(module NAME)`. `Coil.toml`:
 The Wasm target produces an instantiable module. The compiler performs the final
 Wasm-object conversion itself; this target does not invoke a linker process, and
 native libraries cannot be linked into the module. It is otherwise a full target
-for **the browser** — enough to build interactive pages in Coil (see `web/`):
+for **the browser** — enough to build interactive pages in Coil:
 
 - **Exports.** `main` and its linear `memory` are always exported. Every
   `(export-c [f :as \"name\"])` function is also exported, so JS can call into Coil:
@@ -60,9 +60,9 @@ for **the browser** — enough to build interactive pages in Coil (see `web/`):
   one across calls, hand it to a host retain-table and keep the returned `i32`
   index. Transient `externref`s are collected automatically — nothing to free.
 
-`web/coil-runtime.js` instantiates a module and wires the `env.dom_*` imports from
-`web/dom.coil` to a real `document`; `web/counter.coil` is a worked interactive
-example (build with `--target wasm32-unknown-unknown`).
+To run one: instantiate the `.wasm` from JS and supply each `env.*` import the
+module declares (the DOM calls you `extern`-declared), then call
+`instance.exports.main()`. Build with `--target wasm32-unknown-unknown`.
 
 ## Modules & imports
 
@@ -85,9 +85,73 @@ extern in ONE module and `:use *` it, or two importers colliding will fail to li
 - **Clean prelude operators**: `+ - * / %`, `= != < <= > >=`, `& | ^ << >>`.
   Implemented on `i64` (all of them) and `bool` (`=` / `!=`). `f64` has `+ - * /`
   and `< <= > >=` but **deliberately no `Eq`** — like Rust, because `NaN != NaN`
-  breaks reflexivity; use `fcmp-eq` / `fcmp-ne` for float equality. For `u8`/`u32`
-  and other widths, use the metal ops. Prefer clean operators on `i64`/`bool`;
-  drop to metal for other widths.
+  breaks reflexivity; use `fcmp-eq` / `fcmp-ne` for float equality. **`(ptr T)` has
+  `= != < <= > >=` for any `T`, comparing ADDRESSES** (like Rust's `*const T`) — the
+  metal `icmp-*` ops reject pointers, so these operators are the way to compare them.
+  For `u8`/`u32` and other widths, use the metal ops. Prefer clean operators on
+  `i64`/`bool`/pointers; drop to metal for other widths.
+
+These operators are not builtins — they are **trait methods** (see Traits & impls),
+so they work on your own types the moment you write an `impl`.
+
+## Traits & impls
+
+Rust-style, and the source of every clean operator: `Eq` (`=`), `Ord` (`< <= > >=`),
+`Add`/`Sub`/`Mul`/`Div`/`Rem`, `BitAnd`/…, `Hash`, and the collection traits `Len`
+(`len`), `Get` (`get`), `Set` (`set!`), `Push` (`push!`), `Pop` (`pop!`). The trait
+names are in scope with no import.
+
+    (deftrait Show [Self] (show [(x Self)] (-> i64)))   ; Self = the implementing type
+    (impl Show Point (show [(p Point)] (-> i64) 1))     ; concrete
+    (impl [T] Show (Box T) (show [(b (Box T))] (-> i64) 2))   ; generic: [T] first
+    (impl [(T Eq)] Eq (Box T) …)                        ; with a bound on T
+    (defn tell [(T Show)] [(x T)] (-> i64) (show x))    ; bounded generic: [(T Show)]
+
+An impl's `[T …]` entries take bounds in the same `(name Trait…)` form `defn` uses —
+write `(impl [(T Eq)] Eq (Box T) …)` when the body needs `T: Eq`. The bound is checked
+where the impl is used, so `(Box f64)` is rejected (`f64` has no `Eq`) at the call site
+rather than inside the impl.
+
+**Any type can carry an impl** — a struct, sum, scalar, generic instance, and the
+structural types `(ptr T)`, `(slice T)`, `(array T N)`, `(vec T N)`, `(fnptr c […] R)`.
+A generic impl's `[T …]` params are inferred from the receiver, and every declared
+param must appear in the implementing type.
+
+    (impl [T] Show (ptr T)   (show [(x (ptr T))]   (-> i64) 3))   ; all pointers
+    (impl [T] Show (slice T) (show [(x (slice T))] (-> i64) 4))   ; all slices
+    (impl Show (Pair i64 i64) (show [(p (Pair i64 i64))] (-> i64) 5))  ; ONE instance
+
+That last one applies to `(Pair i64 i64)` **only** — calling `show` on a `(Pair u8
+bool)` is \"does not implement\", not a silent mismatch.
+
+**Specialization.** Several impls may cover the same type constructor; the **most
+specific** one matching the receiver wins. `(Pair i64 i64)` is more specific than
+`(Pair A B)` because the general pattern matches the concrete type and not the reverse.
+
+    (impl [A B] Len (Pair A B)   (len [(p (Pair A B))]   (-> i64) 1))
+    (impl     Len (Pair i64 i64) (len [(p (Pair i64 i64))] (-> i64) 2))
+    ; (Pair i64 i64) -> 2 ;  (Pair u8 bool) -> 1
+
+Disjoint instances are fine too — `(slice i64)` and `(slice u8)` can never both match.
+Two impls that *do* overlap with neither more specific (`(Pair i64 B)` and
+`(Pair A bool)`) are only an error where something actually instantiates the overlap:
+\"ambiguous impls … none is more specific\". Two impls with the same pattern (up to
+renaming) are always a \"duplicate impl\".
+
+**Dispatch** picks the impl by matching the receiver's type, trying the receiver's own
+type first and then auto-dereferencing through `(ptr …)`/`(mut …)` layers. So `(len p)`
+on a `(ptr (ArrayList i64))` finds `ArrayList`'s `Len` (pointers have none), while
+`(< p q)` finds the pointer's own `Ord` and compares addresses rather than peeling to
+the pointee's.
+
+⚠ You cannot impl on a reference type `(mut T)` — impl on `T` itself.
+
+**Trait objects:** `(defdyn Trait)` after the trait reflects its methods into a vtable.
+A `(dyn Trait)` param then accepts a pointer to *any* implementer — the coercion is
+automatic at call/return sites, or explicit with `(make-dyn Trait p)`. The trait's
+methods must take `(self (ptr Self))`. ⚠ `defdyn` lives in the `dyn` module, which —
+unlike every other library listed at the end — is **not** bundled into the compiler;
+you need its source alongside your program.
 
 ## Numbers, bool, casts
 
@@ -189,7 +253,13 @@ Three allocation *operations*, each yields `(ptr T)`:
 `(index p i)` → `(ptr T)` at element i (pointer arithmetic, scaled by `sizeof T`);
 `(index p -1)` is p−1. Null: `(cast (ptr T) 0)`; null test `(= (cast i64 p) 0)`.
 
-**Allocator API** (`lib/alloc.coil`, thread a `(ptr Allocator)`):
+**Comparing pointers:** `= != < <= > >=` work on any `(ptr T)` and compare
+**addresses** — `(= p q)` is identity (same slot), never a comparison of pointees.
+⚠ The metal `icmp-*` ops *reject* pointers (\"comparison requires integers\"), so these
+operators are how you compare them. Ordering makes range checks direct — e.g.
+`(and (>= p lo) (< p hi))` to test that `p` points inside a buffer.
+
+**Allocator API** (`alloc.coil`, thread a `(ptr Allocator)`):
 
     (malloc-allocator)                 ; stable global libc allocator
     (arena-allocator cap)              ; bump allocator
@@ -204,12 +274,12 @@ Three allocation *operations*, each yields `(ptr T)`:
 
 ## Collections (bundled)
 
-**ArrayList** (`lib/arraylist.coil`): `(al-new [T] a)`, `(al-len [T] l)`,
+**ArrayList** (`arraylist.coil`): `(al-new [T] a)`, `(al-len [T] l)`,
 `(al-get [T] l i)`, `(al-set! [T] (mut l) i v)`, `(al-push! [T] (mut l) v)`,
 `(al-pop! [T] (mut l))`, `(al-free! [T] (mut l))`. Mutators take `(mut …)`.
-**HashMap** (`lib/hashmap.coil`): `(hm-new [K V] a ops)`, `(hm-new-scalar [K V] a)`,
+**HashMap** (`hashmap.coil`): `(hm-new [K V] a ops)`, `(hm-new-scalar [K V] a)`,
 `(hm-get [K V] m k)` → `(Option V)`, `(hm-put! [K V] (mut m) k v)`,
-`(hm-remove! [K V] (mut m) k)`. For string keys use `(str-keyops)` from `lib/str.coil`.
+`(hm-remove! [K V] (mut m) k)`. For string keys use `(str-keyops)` from `str.coil`.
 Type args `[T]` come right after the name; usually inferable, so often omittable.
 
 ## Strings & bytes
@@ -220,7 +290,7 @@ Type args `[T]` come right after the name; usually inferable, so often omittable
 
 `(slice T)` is a fat pointer `{data, len}`. `(slice-data s)`, `(slice-len s)`,
 `(slice-get s i)`, `(subslice s lo hi)`, `(slice-new [T] ptr n)`. String helpers
-(`lib/str.coil`): `(str-len s)`, `(char-at s i)`, `(str-eq a b)`, `(str-hash s)`,
+(`str.coil`): `(str-len s)`, `(char-at s i)`, `(str-eq a b)`, `(str-hash s)`,
 `(substr s lo hi)`, `(str-concat a x y)`.
 
 ## Character literals
@@ -294,8 +364,67 @@ arrives as a Code symbol) use the `code-*` family: `code-field-count`/`-name`/`-
 /`-type`, `code-variant-sum`/`-count`/`-name`/`-fields`, and trait reflection
 `code-trait-method-count`/`-name`/`-arity`/`-param-type`/`-ret-type` (for generating
 vtables). Take Code apart with `code-count`/`code-nth`/`code-rest`/`code-sym`
-/`code-list?`/`code-sym?`/`code-int?`. This makes `derive` (lib/derive.coil:
+/`code-list?`/`code-sym?`/`code-int?`. This makes `derive` (`derive.coil`:
 eq/hash/keyops) a pure library, not a compiler builtin.
+
+## Metaprograms: whole-program checkers & transforms
+
+A **metaprogram** is an ordinary Coil function that runs at compile time and operates
+on the program. There is no metalanguage — it is Coil over Coil, and it is compiled
+and run as native code. Four kinds, told apart only by what they receive:
+
+| kind | signature | receives | does |
+|---|---|---|---|
+| macro | `[Code…] (-> Code)` | its own call site | expands inline |
+| generator | via `(meta …)` | nothing | adds top-level forms |
+| **checker** | `[(prog Code)] (-> Code)` | every module | reports / vetoes |
+| **transform** | `[(prog Code)] (-> Code)` | every module | rewrites the program |
+
+Macros you *call*; checkers and transforms you **register** at top level:
+
+    (checker   my-lint)      ; run it over the whole program
+    (transform my-lowering)  ; rewrite the whole program
+
+Both are handed the program as a list of modules — `((name form…) …)`, one record per
+module, head = module name — and see **everything**, including imported and bundled
+code. Scope yourself with `(code-from-user? NODE)` (false for bundled stdlib) or
+`(code-file NODE)`.
+
+**Reporting.** `(warn NODE MSG)` is a located, non-fatal warning; `(report NODE MSG)`
+is a located error. Both **collect** — you get every diagnostic in one pass, with the
+source span underlined, and the build fails after printing them all if any was a
+`report`.
+
+**Checkers run after the program is resolved and typechecked**, so they read the
+compiler's authoritative output and layer *policy* on code that already typechecks:
+
+- `(code-decl NODE)` → `(decl MODULE fn [PARAM-TYPE…] RET)` for a function, or
+  `(decl MODULE KIND)` for a struct/sum/trait/const/extern; `:unresolved`/`:ambiguous`
+  otherwise. Pass the **reference node** (a call, `fnptr-of`, variant construction, or
+  type reference) and it resolves to the exact entity the checker picked — correct even
+  when the same simple name exists in several modules.
+- `(type-of NODE)` → the expression's **inferred** type as Code (`i64`, `(ptr i64)`), or
+  `:unknown`. Inferred, not syntactic: `(getf)` reports `f64` because that's what `getf`
+  returns.
+- `(binding-of NODE)` → the local-binding identity a reference resolves to (0 = a
+  global). Two references with the same positive id name the same local, so a shadowed
+  local is distinguishable from its outer namesake — what a borrow/move checker keys on.
+
+**Transforms** run to a fixpoint before checkers: each round reads the checked program,
+rewrites, and the program is re-resolved and re-typechecked. A transform also *tolerates*
+a program that doesn't typecheck yet (the model is empty, `code-decl` → `:unresolved`),
+so it can be the thing that makes the program valid — e.g. rewriting `(inc E)` to
+`(iadd E 1)` where `inc` is otherwise undefined. It may add or remove top-level forms.
+
+**A dialect is a single import.** A module containing `(checker …)`/`(transform …)`
+registrations *is* a dialect; importing it applies the whole stack, in import order,
+transforms before checkers. To apply one without editing the source:
+
+    coil run app.coil --use lint.coil       # repeatable; works on run and build
+
+Metaprograms compile to native code by default, so they can use the whole language —
+generics, collections, FFI, allocation. `COIL_META=interp` selects the interpreter
+instead (no generics/FFI/raw memory; it exists as the parity oracle).
 
 ## I/O & FFI
 
@@ -307,7 +436,7 @@ eq/hash/keyops) a pure library, not a compiler builtin.
 `(printf c\"%d\\n\" 42)`. Floats cross the C ABI correctly; structs pass/return by
 value with the real C ABI. To call a Coil fn from C (e.g. `qsort` comparator) pass
 `(fnptr-of f)`. Ambient `print`/`println` (over stdout) need no import.
-`lib/io.coil`/`lib/fmt.coil` give a `(ptr Writer)` API: `(stdout)`, `(stderr)`,
+`io.coil`/`fmt.coil` give a `(ptr Writer)` API: `(stdout)`, `(stderr)`,
 `(print-str w s)`, `(fmt w \"n={d} s={s} f={f}\\n\" a b c)`. ⚠ `{f}` is a fixed
 6-digit display, NOT C `%g`; for exact float formatting call libc `snprintf` with
 `c\"%g\"`. `coil cimport header.h` auto-generates bindings from a real C header.

@@ -346,6 +346,25 @@
       (Ok (TApp head (try! (parse-types a (rest-from a items 1)))))))))))))))))
 
 ; ---- type parameters (src/parse.rs parse_type_params) ----
+; ONE type-parameter entry: a bare `T`, or `(T Trait…)` carrying bounds. Shared by
+; `defn`'s `[T (U Ord)]` vector and `impl`'s, so the two spellings cannot drift apart.
+(defstruct TPEntry [(name (slice u8)) (traits (ptr (ArrayList (slice u8))))])
+(defn mk-tpentry [(a (ptr Allocator)) (nm (slice u8)) (traits (ptr (ArrayList (slice u8))))] (-> TPEntry)
+  (let [r (alloc-stack TPEntry)] (store! (field r name) nm) (store! (field r traits) traits) (load r)))
+(defn parse-tparam-entry [(a (ptr Allocator)) (entry Sexp)] (-> (Result TPEntry Diag))
+  (try
+    (if (icmp-eq (sx-tag entry) 2)
+        (Ok (mk-tpentry a (sx-sval entry) (box-al [(slice u8)] a (al-new [(slice u8)] a))))
+      (if (icmp-eq (sx-tag entry) 6)
+          (let [eitems (sx-items entry)
+                pname (try! (sym-of a (try! (need [Sexp] (sx-get eitems 0) "type parameter: empty () bound")) "type parameter"))
+                (mut traits) (al-new [(slice u8)] a) tn (sx-len eitems) (mut ti) 1]
+            (loop (if (icmp-ge (load ti) tn) (break)
+              (do (al-push! (mut traits) (try! (sym-of a (sx-at eitems (load ti)) "bound trait")))
+                  (store! ti (iadd (load ti) 1)))))
+            (Ok (mk-tpentry a pname (box-al [(slice u8)] a (load traits)))))
+        (Err [TPEntry Diag] (derr-at (sx-lo entry) (sx-hi entry) "type parameter must be a name or (name Trait…)"))))))
+
 (defstruct TPResult [(params (ptr (ArrayList (slice u8)))) (bounds (ptr (ArrayList Bound))) (consumed bool)])
 (defn parse-type-params [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp))) (i i64)] (-> (Result TPResult Diag))
   (try (let [a0 (sx-get rest i) a1 (sx-get rest (iadd i 1))]
@@ -358,16 +377,15 @@
           (loop (if (icmp-ge (load k) n) (break)
             (let [entry (sx-at tp (load k))]
               (store! k (iadd (load k) 1))
-              (if (icmp-eq (sx-tag entry) 2) (al-push! (mut params) (sx-sval entry))
-                (if (icmp-eq (sx-tag entry) 6)
-                    (let [eitems (sx-items entry)
-                          pname (try! (sym-of a (try! (need [Sexp] (sx-get eitems 0) "type parameter: empty () bound")) "type parameter"))
-                          (mut traits) (al-new [(slice u8)] a) tn (sx-len eitems) (mut ti) 1]
-                      (loop (if (icmp-ge (load ti) tn) (break) (do (al-push! (mut traits) (try! (sym-of a (sx-at eitems (load ti)) "bound trait"))) (store! ti (iadd (load ti) 1)))))
-                      (if (icmp-gt (al-len [(slice u8)] (load traits)) 0)
-                          (let [bp (alloc-stack Bound)] (store! (field bp name) pname) (store! (field bp traits) (box-al [(slice u8)] a (load traits))) (al-push! (mut bounds) (load bp))) 0)
-                      (al-push! (mut params) pname))
-                  (return-from :try (Err [TPResult Diag] (derr-at (sx-lo entry) (sx-hi entry) "type parameter must be a name or (name Trait…)"))))))))
+              (let [ep (alloc-stack TPEntry)]
+                (store! ep (try! (parse-tparam-entry a entry)))
+                (al-push! (mut params) (load (field ep name)))
+                (if (icmp-gt (al-len [(slice u8)] (load (load (field ep traits)))) 0)
+                    (let [bp (alloc-stack Bound)]
+                      (store! (field bp name) (load (field ep name)))
+                      (store! (field bp traits) (load (field ep traits)))
+                      (al-push! (mut bounds) (load bp)) 0)
+                  0)))))
           (Ok (let [r (alloc-stack TPResult)]
                 (store! (field r params) (box-al [(slice u8)] a (load params)))
                 (store! (field r bounds) (box-al [Bound] a (load bounds)))
@@ -831,9 +849,16 @@
                       (store! (field f body) body) (store! (field f macro_variadic) (load macrov)) (store! (field f lo) -1) (store! (field f hi) -1) (store! (field f source) -1) (store! (field f ctxt) 0) (load f))))))))))))
 
 ; ---- impl-target helpers (src/ast.rs type_impl_name / type_mentions_name) ----
-; The dispatch base name a type carries an impl under: nominal types by (base)
-; name, scalars by spelling, (slice T) by the pseudo-name "slice". "" = the
-; type can't carry an impl (pointers, arrays, fnptrs, vectors).
+; The dispatch KEY a type carries an impl under: nominal types by (base) name,
+; scalars by spelling, and each structural type by a pseudo-name ("slice", "ptr",
+; "array", "vec", "fn") — so structural types are first-class impl targets, not
+; second-class ones. "" = can't carry an impl (void/ref/never/code/externref).
+;
+; The key names only the head CONSTRUCTOR: `(Pair i64 i64)` and `(Pair A B)` both
+; key to "Pair", and every pointer type keys to "ptr". So the key is an INDEX, not
+; an identity — it narrows the candidates, and `check.coil::impl-match` then matches
+; the receiver against the impl's own `self_type` pattern. Keep this in sync with
+; `check.coil::type-impl-name`/`has-impl-name`, which mirror it on type tags.
 (defn impl-base-name [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
   (match-else (load t)
     (TStruct [n] n)
@@ -842,6 +867,10 @@
     (TBool [] "bool")
     (TFloat [b] (sconcat a "f" (i64->str a b)))
     (TSlice [_e] "slice")
+    (TPtr [_e] "ptr")
+    (TArray [_e _n] "array")
+    (TVec [_e _n] "vec")
+    (TFn [_cc _p _r] "fn")
     (_ "")))
 
 ; Does `t` mention `nm` as a nominal type reference (a type parameter is a bare
@@ -908,13 +937,23 @@
 (defn parse-impl [(a (ptr Allocator)) (rest0 (ptr (ArrayList Sexp))) (slo i64) (shi i64) (ssrc i64) (sctxt i64)] (-> (Result ImplDef Diag))
   (try (let [has-tps (opt-is-vec (sx-get rest0 0))
              (mut type-params) (al-new [(slice u8)] a)
+             (mut bounds) (al-new [Bound] a)
              base (if has-tps 1 0)]
-    ; optional leading [T …] type-parameter vector
+    ; optional leading [T …] type-parameter vector; entries may carry bounds —
+    ; `(impl [(T Eq)] Eq (Box T) …)` — parsed by the same entry parser `defn` uses.
     (if has-tps
         (let [v (sx-items (opt-get (sx-get rest0 0))) nv (sx-len v) (mut vi) 0]
           (if (icmp-eq nv 0) (return-from :try (Err [ImplDef Diag] (derr "impl: the type-parameter vector may not be empty"))) 0)
           (loop (if (icmp-ge (load vi) nv) (break)
-            (do (al-push! (mut type-params) (try! (sym-of a (sx-at v (load vi)) "impl type parameter")))
+            (do (let [ep (alloc-stack TPEntry)]
+                  (store! ep (try! (parse-tparam-entry a (sx-at v (load vi)))))
+                  (al-push! (mut type-params) (load (field ep name)))
+                  (if (icmp-gt (al-len [(slice u8)] (load (load (field ep traits)))) 0)
+                      (let [bp (alloc-stack Bound)]
+                        (store! (field bp name) (load (field ep name)))
+                        (store! (field bp traits) (load (field ep traits)))
+                        (al-push! (mut bounds) (load bp)) 0)
+                    0))
                 (store! vi (iadd (load vi) 1)))))
           0)
         0)
@@ -925,7 +964,7 @@
       (store! stp self-type)
       (let [for-type (impl-base-name a stp)]
         (if (icmp-eq (slice-len for-type) 0)
-            (return-from :try (Err [ImplDef Diag] (derr-at (sx-lo target) (sx-hi target) "impl: this type can't carry an impl (pointers/arrays/fnptrs can't — name a struct, sum, scalar, generic instance, or (slice T))")))
+            (return-from :try (Err [ImplDef Diag] (derr-at (sx-lo target) (sx-hi target) "impl: this type can't carry an impl (name a struct, sum, scalar, generic instance, (slice T), (ptr T), array, vector, or fn type)")))
             0)
         ; every impl type param must be inferable from the implementing type
         (let [ntp2 (al-len [(slice u8)] (load type-params)) (mut ck) 0]
@@ -946,6 +985,11 @@
                       (return-from :try (Err [ImplDef Diag] (derr-at (sx-lo m) (sx-hi m) (sconcat3 a "impl method '" (load (field fp name)) "': declare type parameters on the impl, not the method"))))
                       0)
                   (store! (field fp type_params) (box-al [(slice u8)] a (load type-params)))
+                  ; The impl's bounds become each lowered method's own bounds. Methods
+                  ; are ordinary generic functions, so this is all it takes: the body
+                  ; typechecks against the bound (cur_bounds), and every call site is
+                  ; verified by the existing `ca-check-bounds` on the method's Sig.
+                  (store! (field fp bounds) (box-al [Bound] a (load bounds)))
                   (store! (field fp lo) slo) (store! (field fp hi) shi) (store! (field fp source) ssrc) (store! (field fp ctxt) sctxt) (al-push! (mut methods) (load fp)))))))
           (Ok (let [im (alloc-stack ImplDef)] (store! (field im trait_name) trait-name) (store! (field im for_type) for-type) (store! (field im type_params) (box-al [(slice u8)] a (load type-params))) (store! (field im self_type) self-type) (store! (field im methods) (box-al [Func] a (load methods))) (load im)))))))))
 

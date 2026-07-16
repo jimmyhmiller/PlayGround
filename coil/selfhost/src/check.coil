@@ -48,7 +48,12 @@
 (defstruct VtoS [(variant (slice u8)) (sum (slice u8))])
 (defstruct ConstEntry [(name (slice u8)) (value Expr) (ty Type)])
 (defstruct MethodEntry [(name (slice u8)) (trait (slice u8)) (self_idx i64)])
-(defstruct ImplPair [(trait (slice u8)) (for_type (slice u8))])
+; NOTE: registered impls are stored as plain `ImplDef`s (see `Cx.impls`). There used to
+; be a cut-down `ImplPair {trait, for_type, self_type, type_params}` here — a strict
+; SUBSET of ImplDef — and having two record types for one concept forced two copies of
+; everything that reasons about impls (specificity, selection), one per type. Mono
+; already had `ImplDef`; check now uses it too, so those functions exist once and both
+; phases share them.
 (defstruct LoopFrame [(label (Option (slice u8))) (break_ty (Option Type)) (expected (Option Type))])
 ; `bid` is the local-binding identity (see comptime.coil binding-map): a fresh id
 ; per let-binding / parameter, so `(binding-of REF)` distinguishes shadows.
@@ -66,7 +71,7 @@
    (static_consts (ArrayList (slice u8)))
    (trait_defs (ArrayList TraitDef))
    (methods (ArrayList MethodEntry))
-   (impls (ArrayList ImplPair))
+   (impls (ArrayList ImplDef))
    (imports (ptr (ArrayList ImpEntry)))
    (exports (ptr (ArrayList ExpEntry)))
    (conventions (ptr (ArrayList Convention)))
@@ -124,10 +129,10 @@
           (store! i (iadd (load i) 1)))))
     (load r)))
 (defn impl-has [(cx (ptr Cx)) (tr (slice u8)) (forty (slice u8))] (-> bool)
-  (let [n (al-len [ImplPair] (load (field cx impls))) (mut i) 0 (mut f) false]
+  (let [n (al-len [ImplDef] (load (field cx impls))) (mut i) 0 (mut f) false]
     (loop (if (icmp-ge (load i) n) (break)
-      (do (let [ip (al-elem [ImplPair] (field cx impls) (load i))]
-            (if (and (str-eq (load (field ip trait)) tr) (str-eq (load (field ip for_type)) forty)) (do (store! f true) (break)) 0))
+      (do (let [ip (al-elem [ImplDef] (field cx impls) (load i))]
+            (if (and (str-eq (load (field ip trait_name)) tr) (str-eq (load (field ip for_type)) forty)) (do (store! f true) (break)) 0))
           (store! i (iadd (load i) 1)))))
     (load f)))
 
@@ -404,7 +409,7 @@
   (store! (field cx static_consts) (al-new [(slice u8)] a))
   (store! (field cx trait_defs) (al-new [TraitDef] a))
   (store! (field cx methods) (al-new [MethodEntry] a))
-  (store! (field cx impls) (al-new [ImplPair] a))
+  (store! (field cx impls) (al-new [ImplDef] a))
   (store! (field cx cur_bounds) (al-new [Bound] a))
   (store! (field cx loops) (al-new [LoopFrame] a))
   0)
@@ -475,6 +480,78 @@
     0))
 (defn tmfn [(a (ptr Allocator)) (tr (slice u8)) (ty (slice u8)) (m (slice u8))] (-> (slice u8))
   (sconcat3 a (sconcat3 a tr "$" ty) "$" m))
+
+; ---- impl mangling: one symbol per IMPL, not per (trait, key) ----------------
+; Several impls can now share a dispatch key — `(Pair A B)` and `(Pair i64 i64)` both
+; key to "Pair" — so `Trait$key$method` no longer names a unique function. The `ty`
+; passed to `tmfn` is therefore the IMPL's key (`impl-mangle-key`), not the bare
+; dispatch key.
+;
+; A faithful, injective rendering of a Type. Deterministic and independent of
+; declaration order, so the rebootstrap fixpoint holds.
+(defn ty-mangle-list [(a (ptr Allocator)) (v (ptr (ArrayList Type)))] (-> (slice u8))
+  (let [n (al-len [Type] (load v)) (mut i) 0 (mut s) ""]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (do (store! s (sconcat a (load s) ",")) 0) 0)
+          (store! s (sconcat a (load s) (ty-mangle a (al-elem [Type] v (load i)))))
+          (store! i (iadd (load i) 1)))))
+    (load s)))
+(defn ty-mangle [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
+  (match-else (load t)
+    (TInt   [b s] (sconcat a (if s "i" "u") (i64->str a b)))
+    (TFloat [b]   (sconcat a "f" (i64->str a b)))
+    (TBool  [] "bool")
+    (TVoid  [] "void")
+    (TStruct [n] n)
+    (TApp   [n args] (sconcat a n (sconcat3 a "<" (ty-mangle-list a args) ">")))
+    (TPtr   [i]   (sconcat3 a "ptr<"   (ty-mangle a i) ">"))
+    (TSlice [i]   (sconcat3 a "slice<" (ty-mangle a i) ">"))
+    (TRef   [m i] (sconcat3 a (if m "mut<" "ref<") (ty-mangle a i) ">"))
+    (TArray [i n] (sconcat a "array<" (sconcat a (ty-mangle a i) (sconcat3 a "," (i64->str a n) ">"))))
+    (TVec   [i n] (sconcat a "vec<"   (sconcat a (ty-mangle a i) (sconcat3 a "," (i64->str a n) ">"))))
+    (TFn    [cc ps r] (sconcat a "fn<" (sconcat a cc (sconcat a "," (sconcat a (ty-mangle-list a ps)
+                        (sconcat3 a "," (ty-mangle a r) ">"))))))
+    (_ "?")))
+
+(defn is-tparam? [(t (ptr Type)) (params (ptr (ArrayList (slice u8))))] (-> bool)
+  (if (icmp-eq (type-tag t) 6) (set-contains params (type-struct-name t)) false))
+; every arg a type param, and no param used twice (so `(Pair A A)` is NOT general —
+; it is a diagonal specialization of `(Pair A B)`)
+(defn args-distinct-params? [(a (ptr Allocator)) (v (ptr (ArrayList Type))) (params (ptr (ArrayList (slice u8))))] (-> bool)
+  (let [n (al-len [Type] (load v)) (mut i) 0 (mut ok) true]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (not (load ok)) (break) 0)
+          (let [e (al-elem [Type] v (load i))]
+            (if (not (is-tparam? e params)) (do (store! ok false) (break))
+              ; distinct: no EARLIER arg names the same param (all earlier args are
+              ; known tparams — we'd have bailed otherwise, so type-struct-name is safe)
+              (let [nm (type-struct-name e) (mut j) 0]
+                (loop (if (icmp-ge (load j) (load i)) (break)
+                  (do (if (str-eq (type-struct-name (al-elem [Type] v (load j))) nm)
+                          (do (store! ok false) (break)) 0)
+                      (store! j (iadd (load j) 1))))))))
+          (store! i (iadd (load i) 1)))))
+    (load ok)))
+; Is this impl the CANONICAL GENERAL one for its key — the head constructor applied to
+; distinct type params, with nothing concrete anywhere? Those keep the plain,
+; undecorated key. That is what makes this change symbol-compatible: every impl that
+; existed before (scalars, plain structs, `(slice T)`, `(ArrayList T)`, `(ptr T)`, …)
+; is general, so its mangled name is byte-identical to before and the blessed IR
+; snapshots still match. Only genuinely specialized impls get a decorated name.
+(defn impl-general? [(a (ptr Allocator)) (t (ptr Type)) (params (ptr (ArrayList (slice u8))))] (-> bool)
+  (match-else (load t)
+    (TInt   [_ _] true)
+    (TFloat [_]   true)
+    (TBool  []    true)
+    (TStruct [n]  (not (set-contains params n)))
+    (TPtr   [i]   (is-tparam? i params))
+    (TSlice [i]   (is-tparam? i params))
+    (TApp   [_ args] (args-distinct-params? a args params))
+    ; array/vec carry a length and fn a signature — always part of the pattern, so
+    ; these are never "the general impl" and always get a decorated name.
+    (_ false)))
+(defn impl-mangle-key [(a (ptr Allocator)) (t (ptr Type)) (params (ptr (ArrayList (slice u8))))] (-> (slice u8))
+  (if (impl-general? a t params) (impl-base-name a t) (ty-mangle a t)))
 (defn impl-find-method [(im (ptr ImplDef)) (mname (slice u8))] (-> (ptr Func))
   (let [ms (load (field im methods)) n (al-len [Func] (load ms)) (mut i) 0 (mut r) (cast (ptr Func) 0)]
     (loop (if (icmp-ge (load i) n) (break)
@@ -559,7 +636,10 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 (defn append-impl-methods [(a (ptr Allocator)) (im (ptr ImplDef)) (fb (ptr FBox))] (-> i64)
-  (let [tr (load (field im trait_name)) forty (load (field im for_type)) ms (load (field im methods)) n (al-len [Func] (load ms)) (mut i) 0]
+  ; the IMPL's key, not the bare dispatch key — several impls can share the latter
+  (let [tr (load (field im trait_name))
+        forty (impl-mangle-key a (field im self_type) (load (field im type_params)))
+        ms (load (field im methods)) n (al-len [Func] (load ms)) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
       (do (let [lf (alloc-stack Func)]
             (store! lf (al-get [Func] (load ms) (load i)))
@@ -573,9 +653,15 @@
     (let [tr (load (field im trait_name)) forty (load (field im for_type))]
       (if (icmp-eq (cast i64 (trait-find cx tr)) 0)
           (return-from :try (Err [i64 Diag] (derr (sconcat3 a "impl: unknown trait '" tr "'")))) 0)
-      (if (impl-has cx tr forty)
-          (return-from :try (Err [i64 Diag] (derr (sconcat a (sconcat3 a "duplicate impl of '" tr "' for '") (sconcat a forty "'"))))) 0)
-      (let [ip (alloc-stack ImplPair)] (store! (field ip trait) tr) (store! (field ip for_type) forty) (al-push! (mut (field cx impls)) (load ip)))
+      ; Several impls may share a dispatch key — `(Pair A B)` and `(Pair i64 i64)` both
+      ; key to "Pair" — so a key clash is no longer a duplicate. Only two impls with the
+      ; SAME PATTERN (each matching the other) are. Overlaps that are neither disjoint
+      ; nor ordered (`(Pair i64 B)` vs `(Pair A bool)`) are reported at the use site
+      ; that actually instantiates the overlap, not banned here.
+      (if (impl-dup? a cx tr (field im self_type) (load (field im type_params)))
+          (return-from :try (Err [i64 Diag] (derr (sconcat a (sconcat3 a "duplicate impl of '" tr "' for '")
+                                                    (sconcat a (ty-str a (field im self_type)) "'"))))) 0)
+      (al-push! (mut (field cx impls)) (load im))
       (let [td (trait-find cx tr) cty (box-type a (load (field im self_type)))]
         (try! (check-impl-methods a cx im td cty)))
       (append-impl-methods a im fb)
@@ -955,16 +1041,94 @@
     (if (icmp-eq tg 6) (icmp-ne (cast i64 (struct-find cx (type-struct-name t))) 0)
     (if (icmp-eq tg 11) (icmp-ne (cast i64 (struct-find cx (t-app-name t))) 0)
     (if (icmp-eq tg 7) true false)))))
-(defn has-impl-name [(t (ptr Type))] (-> bool)
-  (let [tg (type-tag t)] (or (icmp-eq tg 6) (or (icmp-eq tg 11) (or (icmp-eq tg 0) (or (icmp-eq tg 2) (or (icmp-eq tg 1) (icmp-eq tg 8))))))))
+; The dispatch key. There is exactly ONE definition of it — `parser.coil::impl-base-name`
+; — and check/mono both delegate here. This used to be three hand-synced copies (here,
+; the parser, and `mono.coil::mono-impl-name`); adding pointers to two of the three
+; shipped a compiler that type-checked `(!= p q)` and then died in mono. One key, one
+; place. "" = the type can't carry an impl.
 (defn type-impl-name [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
-  (let [tg (type-tag t)]
-    (if (or (icmp-eq tg 6) (icmp-eq tg 11)) (struct-name t)
-    (if (icmp-eq tg 0) (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t)))
-    (if (icmp-eq tg 2) "bool"
-    (if (icmp-eq tg 1) (sconcat a "f" (i64->str a (t-int-bits t)))
-    (if (icmp-eq tg 8) "slice"
-    "")))))))
+  (impl-base-name a t))
+(defn has-impl-name [(a (ptr Allocator)) (t (ptr Type))] (-> bool)
+  (icmp-ne (slice-len (impl-base-name a t)) 0))
+
+; ---- impl selection ---------------------------------------------------------
+; The key (type-impl-name) names only the head constructor, so a key hit alone would
+; answer "yes" for EVERY instantiation of it — `impl Len (Pair i64 i64)` would claim
+; `(Pair u8 bool)`, and the mismatch would only surface later as a confusing
+; argument-type error rather than "does not implement Len". So the key merely narrows
+; the candidates; selection then matches the receiver against each candidate's own
+; self_type pattern, binding that impl's type params (unify-trait-extras).
+
+; Does pattern `pt` (with variables `pp`) match the type `t`? One-way: only `pp`'s
+; names bind. Used both to test a receiver and to compare two impls' generality.
+(defn pat-matches? [(a (ptr Allocator)) (pt (ptr Type)) (pp (ptr (ArrayList (slice u8)))) (t (ptr Type))] (-> bool)
+  (unify-trait-extras a pt t pp (subst-new a)))
+; Is `x` at least as specific as `y`? Exactly: y's pattern matches x's self_type, so
+; every type x accepts, y accepts too. `(Pair i64 i64)` <= `(Pair A B)` because
+; `(Pair A B)` matches `(Pair i64 i64)` but not conversely. `(Pair A A)` <= `(Pair A B)`
+; for the same reason (A binds twice, and the second binding must agree).
+(defn impl-le? [(a (ptr Allocator)) (x (ptr ImplDef)) (y (ptr ImplDef))] (-> bool)
+  (pat-matches? a (field y self_type) (load (field y type_params)) (field x self_type)))
+
+; The impls of `tr` whose pattern accepts `recv`, reduced to the single most specific
+; one. `ambiguous` = two candidates matched and neither is more specific than the other
+; (e.g. `(Pair i64 B)` and `(Pair A bool)` at `(Pair i64 bool)`), which is reported at
+; the use site rather than forbidden at definition — disjoint or ordered impls are fine,
+; only an actually-instantiated overlap is an error.
+(defstruct ImplSel [(ip (ptr ImplDef)) (ambiguous bool)])
+; Does candidate `ip` of `tr` accept `recv`? (`key` narrows by head constructor first)
+(defn impl-cand? [(a (ptr Allocator)) (tr (slice u8)) (key (slice u8)) (recv (ptr Type)) (ip (ptr ImplDef))] (-> bool)
+  (and (and (str-eq (load (field ip trait_name)) tr) (str-eq (load (field ip for_type)) key))
+       (pat-matches? a (field ip self_type) (load (field ip type_params)) recv)))
+; Takes the impl LIST, not a Cx — so mono can call the very same selection with its own
+; table instead of keeping a parallel copy that can drift out of agreement with this one.
+(defn impl-select [(a (ptr Allocator)) (impls (ptr (ArrayList ImplDef))) (tr (slice u8)) (recv (ptr Type))] (-> ImplSel)
+  (let [r (alloc-stack ImplSel)]
+    (store! (field r ip) (cast (ptr ImplDef) 0)) (store! (field r ambiguous) false)
+    (if (not (has-impl-name a recv)) (load r)
+      (let [key (type-impl-name a recv) n (al-len [ImplDef] (load impls))]
+        ; pass 1 — greedy minimum under the specificity order
+        (let [(mut i) 0]
+          (loop (if (icmp-ge (load i) n) (break)
+            (do (let [ip (al-elem [ImplDef] impls (load i))]
+                  (if (impl-cand? a tr key recv ip)
+                      (let [best (load (field r ip))]
+                        (if (icmp-eq (cast i64 best) 0) (do (store! (field r ip) ip) 0)
+                          (if (impl-le? a ip best) (do (store! (field r ip) ip) 0) 0)))
+                      0))
+                (store! i (iadd (load i) 1))))))
+        ; pass 2 — the winner must be at least as specific as EVERY candidate, not just
+        ; the ones it happened to be compared against. A single greedy scan would let
+        ; `(Pair i64 B)` and `(Pair A bool)` at `(Pair i64 bool)` silently pick whichever
+        ; came last instead of reporting the overlap.
+        (let [best (load (field r ip)) (mut j) 0]
+          (if (icmp-eq (cast i64 best) 0) 0
+            (loop (if (icmp-ge (load j) n) (break)
+              (do (let [ip (al-elem [ImplDef] impls (load j))]
+                    (if (impl-cand? a tr key recv ip)
+                        (if (impl-le? a best ip) 0 (do (store! (field r ambiguous) true) (break)))
+                        0))
+                  (store! j (iadd (load j) 1)))))))
+        (load r)))))
+(defn cx-impl-select [(a (ptr Allocator)) (cx (ptr Cx)) (tr (slice u8)) (recv (ptr Type))] (-> ImplSel)
+  (impl-select a (field cx impls) tr recv))
+(defn impl-match [(a (ptr Allocator)) (cx (ptr Cx)) (tr (slice u8)) (recv (ptr Type))] (-> bool)
+  (let [s (alloc-stack ImplSel)] (store! s (cx-impl-select a cx tr recv))
+    (icmp-ne (cast i64 (load (field s ip))) 0)))
+
+; Is an impl of `tr` with this exact pattern already registered? Two patterns are the
+; same iff each matches the other (`(Pair A B)` and `(Pair X Y)` are the same impl
+; modulo renaming, and must still collide).
+(defn impl-dup? [(a (ptr Allocator)) (cx (ptr Cx)) (tr (slice u8)) (st (ptr Type)) (params (ptr (ArrayList (slice u8))))] (-> bool)
+  (let [n (al-len [ImplDef] (load (field cx impls))) (mut i) 0 (mut f) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [ip (al-elem [ImplDef] (field cx impls) (load i))]
+            (if (and (str-eq (load (field ip trait_name)) tr)
+                     (and (pat-matches? a (field ip self_type) (load (field ip type_params)) st)
+                          (pat-matches? a st params (field ip self_type))))
+                (do (store! f true) (break)) 0))
+          (store! i (iadd (load i) 1)))))
+    (load f)))
 
 (defn subst-apply-list [(a (ptr Allocator)) (v (ptr (ArrayList Type))) (subst (ptr (ArrayList SubstEntry)))] (-> (ptr (ArrayList Type)))
   (let [(mut out) (al-new [Type] a) n (al-len [Type] (load v)) (mut i) 0]
@@ -1156,13 +1320,17 @@
         (if (icmp-eq dt 5) (unify a (t-inner decl) actual tpset subst fname)
         (if (icmp-eq at2 5) (unify a decl (t-inner actual) tpset subst fname)
         (if (and (icmp-eq dt 7) (icmp-eq at2 7)) (unify a (t-inner decl) (t-inner actual) tpset subst fname)
+        ; TVec(9), same as the array arm above. Absent until structural impls made
+        ; `(impl [T] Trait (vec T N))` expressible: nothing had ever been generic over
+        ; a vector, so `(vec T 4)` vs `(vec i64 4)` fell through and T went unsolved.
+        (if (and (icmp-eq dt 9) (icmp-eq at2 9)) (unify a (t-inner decl) (t-inner actual) tpset subst fname)
         (if (and (icmp-eq dt 8) (icmp-eq at2 8)) (unify a (t-inner decl) (t-inner actual) tpset subst fname)
         (if (and (and (icmp-eq dt 11) (icmp-eq at2 11)) (and (str-eq (t-app-name decl) (t-app-name actual)) (icmp-eq (al-len [Type] (load (t-fn-params decl))) (al-len [Type] (load (t-fn-params actual))))))
             (unify-list a (t-fn-params decl) (t-fn-params actual) tpset subst fname)
         (if (and (and (icmp-eq dt 10) (icmp-eq at2 10)) (icmp-eq (al-len [Type] (load (t-fn-params decl))) (al-len [Type] (load (t-fn-params actual)))))
             (match (unify-list a (t-fn-params decl) (t-fn-params actual) tpset subst fname)
               (Err [d] (Err [i64 Diag] d)) (Ok [_] (unify a (t-fn-ret decl) (t-fn-ret actual) tpset subst fname)))
-          (Ok [i64 Diag] 0)))))))))))))
+          (Ok [i64 Diag] 0))))))))))))))
 (defn unify-list [(a (ptr Allocator)) (xs (ptr (ArrayList Type))) (ys (ptr (ArrayList Type))) (tpset (ptr (ArrayList (slice u8)))) (subst (ptr (ArrayList SubstEntry))) (fname (slice u8))] (-> (Result i64 Diag))
   (let [n (al-len [Type] (load xs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -1336,16 +1504,24 @@
       (if (not (type-is-ptr inner_ty))
           (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat3 a "in '" fname "': make-dyn expects a pointer to an implementer, got ") (ty-str a inner_ty))))
         (let [pointee (t-inner inner_ty)]
-          (if (not (has-impl-name pointee))
+          (if (not (has-impl-name a pointee))
               (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat4 a "in '" fname "': make-dyn: " (ty-str a pointee)) " cannot implement a trait") "")))
-            (let [tn (type-impl-name a pointee)]
-              (if (not (impl-has cx tr tn))
-                  (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat a (sconcat5 a "in '" fname "': '" (display-name tn) "' does not implement '") (display-name tr)) "' (needed for (dyn ") (sconcat a (display-name tr) "))"))))
-                (let [dyn_struct (sconcat a tr "-dyn") vtable_struct (sconcat a tr "-vtable")]
-                  (if (icmp-eq (cast i64 (struct-find cx dyn_struct)) 0)
-                      (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat5 a "in '" fname "': trait '" (display-name tr) "' has no trait object — call (defdyn ") (display-name tr)) ") after the trait")))
-                    (let [td (trait-find cx tr) methods (dyn-method-names a td tr tn)]
-                      (Ok (mk-synpair a (box-expr a (mk-expr (EMakeDyn dyn_struct vtable_struct methods inner) lo hi src ctxt)) (box-type a (TStruct dyn_struct)))))))))))))))
+            ; the vtable must point at the SELECTED impl's functions — a specialized
+            ; impl on the pointee has a decorated name, so the bare key would name a
+            ; function that doesn't exist
+            (let [sel (alloc-stack ImplSel)]
+              (store! sel (cx-impl-select a cx tr pointee))
+              (if (icmp-eq (cast i64 (load (field sel ip))) 0)
+                  (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat a (sconcat5 a "in '" fname "': '" (ty-str a pointee) "' does not implement '") (display-name tr)) "' (needed for (dyn ") (sconcat a (display-name tr) "))"))))
+                (if (load (field sel ambiguous))
+                    (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat5 a "in '" fname "': ambiguous impls of '" (display-name tr) "' for '") (ty-str a pointee)) "' — several match and none is more specific")))
+                  (let [dyn_struct (sconcat a tr "-dyn") vtable_struct (sconcat a tr "-vtable")]
+                    (if (icmp-eq (cast i64 (struct-find cx dyn_struct)) 0)
+                        (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat5 a "in '" fname "': trait '" (display-name tr) "' has no trait object — call (defdyn ") (display-name tr)) ") after the trait")))
+                      (let [ipp (load (field sel ip))
+                            td (trait-find cx tr)
+                            methods (dyn-method-names a td tr (impl-mangle-key a (field ipp self_type) (load (field ipp type_params))))]
+                        (Ok (mk-synpair a (box-expr a (mk-expr (EMakeDyn dyn_struct vtable_struct methods inner) lo hi src ctxt)) (box-type a (TStruct dyn_struct))))))))))))))))
 (defn maybe-coerce-dyn [(a (ptr Allocator)) (cx (ptr Cx)) (ae (ptr Expr)) (at (ptr Type)) (want (ptr Type)) (lo i64) (hi i64) (src i64) (ctxt i64) (fname (slice u8))] (-> (Result SynPair Diag))
   (let [wtg (type-tag want)
         wdname (if (icmp-eq wtg 6) (type-struct-name want) (if (and (icmp-eq wtg 5) (icmp-eq (type-tag (t-inner want)) 6)) (type-struct-name (t-inner want)) ""))]
@@ -1483,6 +1659,32 @@
     (loop (let [tg (type-tag (load r))] (if (or (icmp-eq tg 4) (icmp-eq tg 5)) (do (store! r (t-inner (load r))) 0) (break))))
     (load r)))
 
+; Can a call to a `tr` method dispatch on a receiver of type `t`? Either an impl
+; matches it, `t` is a (bounded) type parameter, or it's a `(dyn Trait)` receiver.
+(defn dispatch-here? [(a (ptr Allocator)) (cx (ptr Cx)) (tr (slice u8)) (t (ptr Type)) (tps (ptr (ArrayList (slice u8))))] (-> bool)
+  (if (not (has-impl-name a t)) false
+    (let [nm (type-impl-name a t)]
+      (or (set-contains tps nm)
+      (or (icmp-gt (slice-len [u8] (dyn-struct-trait cx nm)) 0)
+          (impl-match a cx tr t))))))
+
+; Method-dispatch autoderef. This was a single full `peel-ref-ptr`, which was fine
+; while pointers couldn't carry impls — the pointee was the only possible receiver.
+; Now that they can, a pointer's OWN impl must win: `(< p q)` with `Ord (ptr T)` in
+; scope compares ADDRESSES, and must not silently peel to the pointee's `Ord`. So we
+; try the receiver's own type first and peel one ptr/ref layer at a time, stopping at
+; the first level that dispatches — Rust's rule (the receiver type is tried before any
+; autoderef step). `(len xs)` on `(ptr (ArrayList T))` still works: "ptr" has no `Len`
+; impl, so the chain peels to the ArrayList exactly as before. If nothing in the chain
+; dispatches, fall back to the fully-peeled type so existing diagnostics are unchanged.
+(defn deref-to-impl [(a (ptr Allocator)) (cx (ptr Cx)) (tr (slice u8)) (t0 (ptr Type)) (tps (ptr (ArrayList (slice u8))))] (-> (ptr Type))
+  (let [(mut r) t0 (mut found) false]
+    (loop
+      (if (dispatch-here? a cx tr (load r) tps) (do (store! found true) (break))
+        (let [tg (type-tag (load r))]
+          (if (or (icmp-eq tg 4) (icmp-eq tg 5)) (do (store! r (t-inner (load r))) 0) (break)))))
+    (if (load found) (load r) (peel-ref-ptr t0))))
+
 ; trait type-parameter Self deferred args (check.rs:1424)
 (defn trait-tp-args [(a (ptr Allocator)) (tm (ptr TraitMethod)) (self_pname (slice u8)) (self_as_ty (ptr Type)) (args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (func (slice u8))] (-> (Result (ptr (ArrayList Expr)) Diag))
   (let [ps (load (field tm params)) n (al-len [Expr] (load args)) (mut out) (al-new [Expr] a) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
@@ -1551,7 +1753,7 @@
                 (let [trs (load (field bp traits)) m (al-len [(slice u8)] (load trs)) (mut k) 0]
                   (loop (if (icmp-ge (load k) m) (break)
                     (do (let [tr (al-get [(slice u8)] (load trs) (load k))
-                              ok (and (has-impl-name tyr) (impl-has cx tr (type-impl-name a tyr)))]
+                              ok (impl-match a cx tr tyr)]
                           (if (not ok)
                               (do (store! err (derr (sconcat a (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': '" (sconcat a (ty-str a tyr) "' does not implement '")) (display-name tr)) "' (required by '") func) (sconcat a "' bound on '" (sconcat a param "')"))))) (store! failed true) (break)) 0))
                         (store! k (iadd (load k) 1)))))
@@ -1663,8 +1865,8 @@
               (if (not (icmp-eq (al-len [Expr] (load args)) (al-len [Param] (load (field tm params)))))
                   (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': '" (sconcat a func "' expects ")) (i64->str a (al-len [Param] (load (field tm params))))) " args, got ") (i64->str a (al-len [Expr] (load args))))))) 0)
               (let [selfsp (try! (do-synth a (al-elem [Expr] args self_idx) (null-type) env cx tps fname)) ssp (alloc-stack SynPair)] (store! ssp selfsp)
-                (let [self_ty (peel-ref-ptr (load (field ssp t)))]
-                  (if (not (has-impl-name self_ty))
+                (let [self_ty (deref-to-impl a cx trait_name (load (field ssp t)) tps)]
+                  (if (not (has-impl-name a self_ty))
                       (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat4 a "in '" fname "': trait method '" (sconcat a func "' called on a type that can't carry an impl: ")) (ty-str a self_ty)) "")))) 0)
                   (let [self_name (type-impl-name a self_ty)]
                     (if (icmp-gt (slice-len [u8] (dyn-struct-trait cx self_name)) 0)
@@ -1681,9 +1883,20 @@
                                 new_args (try! (trait-tp-args a tm self_pname self_as_ty args env cx tps fname func))
                                 ret (subst-self a (field tm ret) self_pname self_as_ty)]
                             (return-from :try (ok-ep (mk-expr (ETraitCall trait_name func self_name new_args) elo ehi esrc ectxt) ret)))))
-                      (do (if (not (impl-has cx trait_name self_name))
-                              (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat5 a "in '" fname "': '" (display-name self_name) "' does not implement '") (display-name trait_name)) "'")))) 0)
-                          (store! call_func (tmfn a trait_name self_name func)) 0)))))))
+                      ; Pick the most specific impl accepting this receiver, and call
+                      ; THAT impl's function. Errors name the RECEIVER TYPE, not the
+                      ; dispatch key: selection matches type arguments, so `(Pair u8 bool)`
+                      ; can fail while `(Pair i64 i64)` succeeds — "'app.Pair' does not
+                      ; implement" would be a lie in exactly the case this catches.
+                      (let [sel (alloc-stack ImplSel)] (store! sel (cx-impl-select a cx trait_name self_ty))
+                        (if (icmp-eq (cast i64 (load (field sel ip))) 0)
+                            (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat5 a "in '" fname "': '" (ty-str a self_ty) "' does not implement '") (display-name trait_name)) "'")))) 0)
+                        (if (load (field sel ambiguous))
+                            (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat5 a "in '" fname "': ambiguous impls of '" (display-name trait_name) "' for '") (ty-str a self_ty)) "' — several match and none is more specific")))) 0)
+                        (let [ipp (load (field sel ip))]
+                          (store! call_func (tmfn a trait_name
+                                              (impl-mangle-key a (field ipp self_type) (load (field ipp type_params)))
+                                              func)) 0))))))))
           0)
       (synth-call-general a func (load call_func) type_args args expected env cx tps fname elo ehi esrc ectxt)))))
 ; ELet (src/check.rs:1231)

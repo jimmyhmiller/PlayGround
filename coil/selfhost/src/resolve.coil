@@ -562,7 +562,10 @@
       (qualify-trait-methods c (load (field tp methods)) tlb))))
 (defn qualify-impl-method [(c (ptr Ctx)) (fp (ptr Func)) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (try
-    (do (try! (qualify-param-types c (load (field fp params)) tps))
+    ; bounds too — an impl method now carries its impl's bounds (`(impl [(T Eq)] …)`),
+    ; and an unqualified `Eq` here would never match the checker's `coil.core.Eq`
+    (do (try! (qualify-bound-list c (load (field fp bounds))))
+        (try! (qualify-param-types c (load (field fp params)) tps))
         (try! (qualify-type c (field fp ret) tps))
         (try! (qualify-expr-list c (load (field fp body)) tps))
         (Ok 0))))

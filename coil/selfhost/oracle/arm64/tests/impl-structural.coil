@@ -1,0 +1,115 @@
+; Trait impls: structural targets, selection by type ARGUMENTS, specialization, bounds.
+; Four properties, all of which used to be impossible or broken:
+;
+;  1. Structural types carry impls. Dispatch keys a type by its head constructor —
+;     nominal types by qualified name, and now `(ptr T)`/`(slice T)`/arrays/vectors/
+;     fn types by a pseudo-name. Pointers were previously unkeyable ("" = no impl),
+;     so `(< p q)` was a hard error; now the prelude's blanket `Ord (ptr T)` compares
+;     ADDRESSES. Dispatch tries the receiver's own type before auto-dereferencing, so
+;     a pointer's own impl wins over the pointee's — but a receiver with no impl of
+;     its own still peels (`(len p)` on `(ptr (ArrayList i64))` finds ArrayList's).
+;
+;  2. Selection matches type arguments, not just the constructor. `impl Len (Pair i64
+;     i64)` must NOT claim `(Pair u8 bool)`. The key alone can't tell them apart —
+;     both key to "Pair" — so the key only narrows candidates and selection then
+;     matches the receiver against each impl's own self_type.
+;
+;  3. Specialization. Several impls may share a key; the most specific one matching
+;     the receiver wins. Verified on BOTH paths — the direct call and the deferred
+;     trait call inside a bounded generic, which mono resolves separately.
+;
+;  4. Bounds on an impl's type params — `(impl [(T Eq)] Eq (Box T) …)`, whose body
+;     needs T: Eq.
+;
+; The negative halves (a concrete impl refusing another instantiation, an ambiguous
+; overlap, an unsatisfied bound) are compile errors, so they live in the checker
+; rather than here; this test proves the positive halves dispatch to the right method.
+(module t)
+(import "lib/alloc.coil" :use *)
+(import "lib/arraylist.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/fmt.coil" :use *)
+
+(defn out [(w (ptr Writer)) (l (slice u8)) (v i64)] (-> i64)
+  (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
+
+; --- SPECIALIZATION: a general impl and a concrete one for the same constructor -
+; Both key to "app.Pair"; the concrete one is strictly more specific (the general
+; pattern matches it, not conversely), so it wins for (Pair i64 i64) while
+; (Pair u8 bool) falls back to the general one.
+(defstruct Pair [A B] [(x A) (y B)])
+(impl [A B] Len (Pair A B)   (len [(p (Pair A B))]   (-> i64) 6))
+(impl     Len (Pair i64 i64) (len [(p (Pair i64 i64))] (-> i64) 7))
+; a DEFERRED trait call: `len` resolves at MONO time against whatever T becomes,
+; and must select the same impl the direct call does
+(defn tell [(T Len)] [(x T)] (-> i64) (len x))
+
+; --- BOUNDS on an impl's type params -----------------------------------------
+; The body needs T: Eq, so the impl declares it. f64 has no Eq, so `(Box f64)`
+; is rejected at the use site rather than miscompiling here.
+(defstruct Box [T] [(v T)])
+(impl [(T Eq)] Eq (Box T)
+  (= [(a (Box T)) (b (Box T))] (-> bool)
+    (let [pa (alloc-stack (Box T)) pb (alloc-stack (Box T))]
+      (store! pa a) (store! pb b)
+      (= (load (field pa v)) (load (field pb v))))))
+(defn mk-box [T] [(v T)] (-> (Box T))
+  (let [p (alloc-stack (Box T))] (store! (field p v) v) (load p)))
+
+; --- user impls on STRUCTURAL types: every one of them is a valid impl target -
+; (a trait the prelude doesn't touch, so these are the user's own impls)
+(deftrait Tag [Self] (tag [(x Self)] (-> i64)))
+(impl [T] Tag (slice T)   (tag [(x (slice T))]   (-> i64) 100))
+(impl [T] Tag (ptr T)     (tag [(x (ptr T))]     (-> i64) 200))
+(impl [T] Tag (array T 4) (tag [(x (array T 4))] (-> i64) 300))
+(impl [T] Tag (vec T 4)   (tag [(x (vec T 4))]   (-> i64) 400))
+(impl Tag (fnptr c [i64] i64) (tag [(x (fnptr c [i64] i64))] (-> i64) 500))
+(defn a-fn [(n i64)] (-> i64) n)
+
+(defn main [] (-> i64)
+  (let [w (stdout)]
+    ; 1. pointer ordering compares ADDRESSES. Two distinct stack slots: exactly one
+    ;    of < / > holds, and a pointer is never < itself but is always <= itself.
+    (let [p (alloc-stack i64) q (alloc-stack i64)]
+      (store! p 42) (store! q 42)
+      (out w "ord-total"  (if (!= (< p q) (> p q)) 1 0))
+      (out w "lt-self"    (if (< p p) 1 0))
+      (out w "le-self"    (if (<= p p) 1 0))
+      ; 2. pointer equality is IDENTITY, not the pointee: same value, different slots.
+      (out w "eq-distinct" (if (= p q) 1 0))
+      (out w "eq-self"     (if (= p p) 1 0))
+      (out w "ne-distinct" (if (!= p q) 1 0)))
+
+    ; 3. autoderef still peels when the pointer itself has no impl of that trait:
+    ;    "ptr" has no Len impl, so (len ap) must find (ArrayList i64)'s.
+    (let [a (malloc-allocator) (mut xs) (al-new [i64] a)]
+      (al-push! (mut xs) 5) (al-push! (mut xs) 6) (al-push! (mut xs) 7)
+      (let [ap (alloc-stack (ArrayList i64))] (store! ap (load xs))
+        (out w "peel-len" (len ap))))
+
+    ; 4. specialization: the concrete impl wins for (Pair i64 i64), the general one
+    ;    covers (Pair u8 bool) — on the direct path AND through a bounded generic
+    ;    (which resolves the impl at mono time, a separate code path).
+    (let [pr (alloc-stack (Pair i64 i64)) pg (alloc-stack (Pair u8 bool))]
+      (out w "spec-direct"   (len (load pr)))
+      (out w "gen-direct"    (len (load pg)))
+      (out w "spec-viageneric" (tell (load pr)))
+      (out w "gen-viageneric"  (tell (load pg))))
+
+    ; 5. an impl with a bound on its type param (T: Eq) dispatches for T=i64.
+    (out w "bounded-eq-same" (if (= (mk-box [i64] 5) (mk-box [i64] 5)) 1 0))
+    (out w "bounded-eq-diff" (if (= (mk-box [i64] 5) (mk-box [i64] 6)) 1 0))
+
+    ; 6. user impls on EVERY structural type dispatch. Note tag-ptr: the pointer's
+    ;    OWN impl wins over the pointee's, even though both exist for Tag — dispatch
+    ;    tries the receiver's type before auto-dereferencing.
+    (let [s "abc" ip (alloc-stack i64)
+          arr (alloc-stack (array i64 4)) vv (alloc-stack (vec i64 4))
+          fp (fnptr-of a-fn)]
+      (store! ip 1)
+      (out w "tag-slice" (tag s))
+      (out w "tag-ptr"   (tag ip))
+      (out w "tag-array" (tag (load arr)))
+      (out w "tag-vec"   (tag (load vv)))
+      (out w "tag-fnptr" (tag fp)))
+    0))
