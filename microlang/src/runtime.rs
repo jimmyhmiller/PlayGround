@@ -390,6 +390,22 @@ fn register_mutator<M: ValueModel>(shared: &Arc<Shared<M>>) -> Arc<MutatorState>
 unsafe impl<M: ValueModel> Send for Shared<M> {}
 unsafe impl<M: ValueModel> Sync for Shared<M> {}
 
+/// How `apply` should call a callee, decided BEFORE the frame is built (see
+/// `Runtime::plan_apply`). The split exists because Clojure's `apply` shares
+/// structure: the rest arg is the applied seq, not a copy of it, and knowing
+/// that requires resolving the callee's arity up front.
+pub(crate) enum ApplyPlan {
+    /// Call with these exact positional args — a non-variadic callee, or one
+    /// whose arity is wrong (`invoke` raises the arity throw).
+    Flat { callee: u64, args: Vec<u64> },
+    /// Call `callee` (an already-resolved variadic Closure — never a MultiFn,
+    /// whose clause selection has already happened) with `fixed` positional
+    /// args and `rest` installed verbatim as the rest slot.
+    WithRest { callee: u64, fixed: Vec<u64>, rest: u64 },
+    /// A signal (arity throw / escape) was raised while planning.
+    Signal,
+}
+
 pub struct Runtime<M: ValueModel> {
     /// State shared with sibling threads (heap, globals, interner, dispatch).
     pub(crate) shared: Arc<Shared<M>>,
@@ -400,6 +416,22 @@ pub struct Runtime<M: ValueModel> {
     /// collection traces every live frame in the whole call chain (see `invoke`,
     /// which pushes/pops it). Published to `me.envs` when the thread parks.
     pub(crate) env_stack: Vec<Locals>,
+    /// `apply`'s pending rest arg: the SHADOW-STACK SLOT holding the seq that
+    /// the next variadic frame must install verbatim, instead of collecting
+    /// `args[nparams..]` into a fresh spine. `Prim::Apply` sets it immediately
+    /// before invoking an already-resolved variadic callee; `mk_rest_seq` —
+    /// the ONE place any backend materializes a rest arg — takes it.
+    ///
+    /// This is what makes `apply` share structure the way Clojure does:
+    /// `(apply f coll)` hands `coll`'s seq to `f` untouched, so `identical?`
+    /// holds, a lazy tail stays unforced, and the rest arg keeps the source's
+    /// shape (chunked stays chunked, a list stays a list).
+    ///
+    /// A SLOT, not the bits: allocation sets `gc_requested`, so a collection
+    /// can land at the next safepoint and relocate the seq. The shadow stack
+    /// is traced and rewritten; a bare `u64` here would silently go stale the
+    /// day someone adds a safepoint between the set and the frame build.
+    pub(crate) apply_rest_slot: Option<usize>,
     /// This thread's slot in the STW registry (where it publishes roots to park).
     pub(crate) me: Arc<MutatorState>,
     /// This thread's pending non-local control-flow signal (throw / escape). See
@@ -522,7 +554,7 @@ impl<M: ValueModel> Runtime<M> {
         // mirror pointing at a moved-from temporary.
         shared.heap.arm_window();
         let me = register_mutator(&shared);
-        Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), site_ic: std::cell::RefCell::new(Vec::new()), eval_bridge: None, _pd: PhantomData }
+        Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), apply_rest_slot: None, me, signal: Signal::default(), dyn_stack: Vec::new(), site_ic: std::cell::RefCell::new(Vec::new()), eval_bridge: None, _pd: PhantomData }
     }
 
     /// A fresh mutator handle for another OS thread, sharing this runtime's heap,
@@ -531,7 +563,7 @@ impl<M: ValueModel> Runtime<M> {
     /// a `std::thread`.
     pub fn thread_handle(&self) -> Self {
         let me = register_mutator(&self.shared);
-        Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), me, signal: Signal::default(), dyn_stack: Vec::new(), site_ic: std::cell::RefCell::new(Vec::new()), eval_bridge: None, _pd: PhantomData }
+        Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), apply_rest_slot: None, me, signal: Signal::default(), dyn_stack: Vec::new(), site_ic: std::cell::RefCell::new(Vec::new()), eval_bridge: None, _pd: PhantomData }
     }
 
     // ── heap access ─────────────────────────────────────────
@@ -2854,6 +2886,240 @@ impl<M: ValueModel> Runtime<M> {
     }
     /// Flatten a whole sequence (cons / chunked / lazy) into a Vec, forcing
     /// through the registered `seq` fn as needed. The general `apply` path.
+    /// The FIXED arities `callee` could serve, +1 — how far `plan_apply` must
+    /// count the arglist before it can pick a clause. Clojure never counts the
+    /// whole applied seq (`RestFn.applyTo` uses `RT.boundedLength`), and
+    /// neither may we: `(apply + (range 1e9))` must not walk a billion
+    /// elements to discover it wants the variadic clause, and an applied
+    /// INFINITE seq must still work at all.
+    fn apply_arity_bound(&mut self, callee: u64) -> usize {
+        let Val::Ref(id) = self.decode(callee) else { return 1 };
+        match self.view_gc(id) {
+            ObjView::MultiFn { fixed, variadic } => {
+                let vmin = variadic.map(|(min, _)| min + 1).unwrap_or(0);
+                fixed.len().max(vmin)
+            }
+            ObjView::Closure { nparams, .. } => nparams + 1,
+            _ => 1,
+        }
+    }
+
+    /// Walk `seq` up to `bound` elements, forcing lazy nodes, and return
+    /// `(count, tail_after_them)`. `count < bound` means the seq ENDED (an
+    /// exact length); `count == bound` means "at least `bound`".
+    fn seq_bounded_take(
+        &mut self,
+        top: &dyn crate::code::CodeSpace<M>,
+        seq: u64,
+        bound: usize,
+    ) -> (Vec<u64>, u64) {
+        // `seq_step` may INVOKE a lazy thunk (a safepoint), relocating both the
+        // cursor and everything taken so far — same discipline as seq_flatten:
+        // both live in the shadow stack for the walk.
+        let cur_slot = self.push_root(seq);
+        let out_base = self.root_depth();
+        while self.root_depth() - out_base < bound {
+            let cur = self.root_get(cur_slot);
+            match self.seq_step(top, cur) {
+                Some(Some((h, t))) => {
+                    self.push_root(h);
+                    self.set_root(cur_slot, t);
+                }
+                Some(None) => break,
+                None => panic!(
+                    "apply: unwalkable sequence node {} (no seq fn registered?)",
+                    self.print(self.root_get(cur_slot))
+                ),
+            }
+        }
+        let taken: Vec<u64> = (out_base..self.root_depth()).map(|i| self.root_get(i)).collect();
+        let tail = self.root_get(cur_slot);
+        self.truncate_roots(cur_slot);
+        (taken, tail)
+    }
+
+    /// `(apply callee leading… last)`. THE apply path — every backend's
+    /// `Prim::Apply` calls this one, so the sharing semantics cannot drift
+    /// between tiers.
+    ///
+    /// The rest arg rides `apply_rest_slot` rather than an extra `invoke`
+    /// parameter, because that lands it at `mk_rest_seq` — the single point
+    /// where ANY backend materializes a rest arg. One change, five tiers, no
+    /// way for one of them to quietly keep copying.
+    pub(crate) fn invoke_apply(
+        &mut self,
+        top: &dyn crate::code::CodeSpace<M>,
+        callee: u64,
+        leading: &[u64],
+        last: u64,
+    ) -> u64 {
+        match self.plan_apply(top, callee, leading, last) {
+            ApplyPlan::Signal => M::R::enc_nil(),
+            ApplyPlan::Flat { callee, args } => top.invoke(top, self, callee, &args),
+            ApplyPlan::WithRest { callee, fixed, rest } => {
+                let slot = self.push_root(rest);
+                self.apply_rest_slot = Some(slot);
+                let r = top.invoke(top, self, callee, &fixed);
+                // Clear unconditionally: an arity throw can return before any
+                // frame is built, and a stale slot would silently become the
+                // NEXT variadic call's rest arg.
+                self.apply_rest_slot = None;
+                self.truncate_roots(slot);
+                r
+            }
+        }
+    }
+
+    /// Resolve `(apply callee leading… last)` into a concrete call.
+    ///
+    /// Clojure's `apply` does NOT copy: the callee's rest arg IS the applied
+    /// seq (minus the fixed params taken off the front), so `identical?`
+    /// holds, laziness survives, and the shape is preserved. Reproducing that
+    /// means resolving the callee's arity HERE — before the frame is built —
+    /// which is what this does.
+    pub(crate) fn plan_apply(
+        &mut self,
+        top: &dyn crate::code::CodeSpace<M>,
+        callee: u64,
+        leading: &[u64],
+        last: u64,
+    ) -> ApplyPlan {
+        let base = self.root_depth();
+        let callee_slot = self.push_root(callee);
+        for &a in leading {
+            self.push_root(a);
+        }
+        let lead_base = base + 1;
+        let last_slot = self.push_root(last);
+
+        // `(seq last)` — Clojure applies the SEQ of the collection, which is
+        // why `identical?` holds for a value that is its own seq (a list) but
+        // not for a LazySeq (whose seq is the forced node, a different
+        // object). Forces the HEAD only: an applied lazy tail must stay lazy.
+        if let Some(sf) = self.seq_handler() {
+            let l = self.root_get(last_slot);
+            let seqd = top.invoke(top, self, sf, &[l]);
+            if self.pending() {
+                self.truncate_roots(base);
+                return ApplyPlan::Signal;
+            }
+            self.set_root(last_slot, seqd);
+        }
+
+        let plan = loop {
+            let c = self.root_get(callee_slot);
+            let Val::Ref(id) = self.decode(c) else {
+                panic!("value not callable: {}", self.print(c));
+            };
+            // Callable-object hook (e.g. keywords): redirect to
+            // `(handler object args…)`, exactly as `invoke` does.
+            if let ObjView::Record { .. } = self.view_gc(id) {
+                if let Some(h) = self.apply_handler() {
+                    let mut lead = vec![c];
+                    lead.extend((lead_base..last_slot).map(|i| self.root_get(i)));
+                    let last_now = self.root_get(last_slot);
+                    self.truncate_roots(base);
+                    return self.plan_apply(top, h, &lead, last_now);
+                }
+            }
+            let bound = self.apply_arity_bound(c);
+            // Only as far as arity selection needs — never the whole seq. The
+            // probe's TAIL is discarded on purpose: the real split re-takes
+            // from `last_slot` once the clause (and so `nparams`) is known.
+            let want = bound.saturating_sub(last_slot - lead_base);
+            let (taken, _probe_tail) =
+                self.seq_bounded_take(top, self.root_get(last_slot), want);
+            let argc_at_least = (last_slot - lead_base) + taken.len();
+
+            // The take above forces lazy nodes, which INVOKES user code — a
+            // safepoint. `c`/`id` were read BEFORE it and now point into
+            // collected space, so re-read the callee through its root and
+            // re-decode. (The verify heap catches this instantly: "stale
+            // pointer into a collected space" out of the very next view_gc.)
+            let c = self.root_get(callee_slot);
+            let Val::Ref(id) = self.decode(c) else {
+                panic!("value not callable: {}", self.print(c));
+            };
+
+            if matches!(self.view_gc(id), ObjView::MultiFn { .. }) {
+                let sel = self.multifn_select(c, argc_at_least);
+                if self.pending() {
+                    break ApplyPlan::Signal;
+                }
+                let Some(sel) = sel else { break ApplyPlan::Signal };
+                self.set_root(callee_slot, sel);
+                continue;
+            }
+            // Escapes/continuations and non-variadic closures take every arg
+            // positionally: flatten, and let `invoke` do the rest.
+            //
+            // ORDER MATTERS: `seq_flatten` forces lazy nodes, which INVOKES
+            // user code — a safepoint that relocates the callee and the
+            // leading args. So flatten FIRST, then re-read both through the
+            // shadow stack, which the collector rewrites.
+            let plain = match self.view_gc(id) {
+                ObjView::Closure { variadic, .. } => !variadic,
+                _ => true,
+            };
+            if plain {
+                let rest = self.seq_flatten(top, self.root_get(last_slot));
+                let mut args: Vec<u64> =
+                    (lead_base..last_slot).map(|i| self.root_get(i)).collect();
+                args.extend(rest);
+                break ApplyPlan::Flat { callee: self.root_get(callee_slot), args };
+            }
+            let ObjView::Closure { nparams, .. } = self.view_gc(id) else {
+                unreachable!("non-closure took the `plain` path above")
+            };
+            // Variadic: `nparams` come off the front of the arglist (leading
+            // args first, then the seq); the REST IS THE REMAINING SEQ.
+            let nlead = last_slot - lead_base;
+            if taken.len() + nlead < nparams {
+                // Too few args for this clause — `invoke` raises the arity
+                // throw when it sees the short arg list.
+                let mut args: Vec<u64> =
+                    (lead_base..last_slot).map(|i| self.root_get(i)).collect();
+                args.extend(taken);
+                break ApplyPlan::Flat { callee: self.root_get(callee_slot), args };
+            }
+            // DROP the fixed params off the seq rather than re-consing the
+            // ones the arity probe took: dropping preserves the shape (a
+            // chunked tail stays chunked, which is exactly what Clojure
+            // reports), whereas re-consing would hand the callee a Cons and
+            // silently destroy the chunking.
+            let need = nparams.saturating_sub(nlead);
+            let (from_seq, tail) = self.seq_bounded_take(top, self.root_get(last_slot), need);
+            // Read the leading args AFTER that take: it forces lazy nodes, and
+            // forcing INVOKES user code — a safepoint that relocates every one
+            // of them. Values read before it are stale the moment it returns;
+            // the shadow stack is what the collector rewrites, so re-read from
+            // there. (`from_seq`/`tail` are the take's own fresh results.)
+            let leads: Vec<u64> = (lead_base..last_slot).map(|i| self.root_get(i)).collect();
+            let mut fixed: Vec<u64> = Vec::with_capacity(nparams);
+            fixed.extend_from_slice(&leads[..nparams.min(nlead)]);
+            fixed.extend_from_slice(&from_seq);
+            // Un-consumed LEADING args do go back on the front — Clojure conses
+            // them too, which is why `(apply f 1 2 coll)` reports a plain Cons
+            // rather than coll's shape.
+            let rooted_rest = self.push_root(tail);
+            for &e in leads[nparams.min(nlead)..].iter().rev() {
+                let r = self.root_get(rooted_rest);
+                let c2 = self.cons(e, r);
+                self.set_root(rooted_rest, c2);
+            }
+            let rest = self.root_get(rooted_rest);
+            self.truncate_roots(rooted_rest);
+            // `(apply f [])` must give the callee nil, not `()` — Clojure's
+            // rest arg is `next`-shaped: nil when exhausted.
+            let rest = if self.is_nil_bits(rest) { self.enc_nil() } else { rest };
+            // Re-read: the takes above safepoint, so `c` (read before them) is
+            // stale. `fixed`/`rest` are already post-safepoint values.
+            break ApplyPlan::WithRest { callee: self.root_get(callee_slot), fixed, rest };
+        };
+        self.truncate_roots(base);
+        plan
+    }
+
     pub fn seq_flatten(&mut self, top: &dyn crate::code::CodeSpace<M>, bits: u64) -> Vec<u64> {
         // `seq_step` INVOKES the frontend's seq fn to force a lazy node — a
         // safepoint, which relocates BOTH the cursor and every element already
@@ -4850,6 +5116,13 @@ impl<M: ValueModel> Runtime<M> {
     /// 100)))` false — a semantic that varies with arg count is a bug, however
     /// fast it is.
     pub(crate) fn mk_rest_seq(&mut self, xs: &[u64]) -> u64 {
+        // An `apply` in progress has already computed this callee's rest arg —
+        // the applied seq itself, shared. `take` so only the FIRST frame built
+        // consumes it: the callee's own. A tail call out of that body builds
+        // further frames, and those must collect their rest args normally.
+        if let Some(slot) = self.apply_rest_slot.take() {
+            return self.root_get(slot);
+        }
         self.vec_to_list(xs)
     }
 

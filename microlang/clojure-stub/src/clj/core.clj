@@ -838,15 +838,25 @@
       (cond (nil? s) b
             (chunked? s) (record 'ChunkedCons (field s 0) (field s 1) (field s 2) (concat2 (field s 3) b))
             true (%cons (%first s) (concat2 (%rest s) b))))))
+;; `next`/`first`, NOT raw `%rest`/`%first`: `lls` is a REST ARG, and `apply`
+;; hands the callee the applied seq itself (Clojure's structure sharing), so it
+;; may be lazy or chunked rather than a realized cons list. Raw `%rest` does not
+;; force, so `(nil? (%rest lls))` read TRUE on the first element of a lazy
+;; `(apply concat (map f coll))` and concat returned only its first collection.
+;; `next` forces + normalizes, so this is correct for every seq shape.
 (defn concat-lists [lls]
-  (cond (nil? lls) nil
-        (nil? (%rest lls)) (%first lls)                       ; last coll: use directly, no wrapper
-        :else (concat2 (%first lls) (concat-lists (%rest lls)))))
+  (let [s (seq lls)]
+    (cond (nil? s) nil
+          (nil? (next s)) (first s)                           ; last coll: use directly, no wrapper
+          :else (concat2 (first s) (concat-lists (next s))))))
 (defn concat [& lls] (concat-lists lls))
 ;; EAGER concat: syntax-quote builds code forms with this, since a macro must
 ;; return a realized (non-lazy) form the expander can splice.
 (defn -concat2 [a b] (let [s (seq a)] (if (nil? s) (-to-list b) (%cons (%first s) (-concat2 (%rest s) b)))))
-(defn -concat-lists [lls] (if (nil? lls) nil (-concat2 (%first lls) (-concat-lists (%rest lls)))))
+;; `next`/`first` for the same reason as `concat-lists` above: `lls` is a rest
+;; arg and may be a lazy or chunked seq, which raw `%rest` does not force.
+(defn -concat-lists [lls]
+  (let [s (seq lls)] (if (nil? s) nil (-concat2 (first s) (-concat-lists (next s))))))
 (defn -concat [& lls] (-concat-lists lls))
 ;; Chunk-aware: cons a chunk's elements onto acc by reading its array directly
 ;; (native loop), instead of one seq/%rest/%first step per element. Still builds
@@ -1631,9 +1641,19 @@
 
 ;; ─────────────── apply ───────────────
 ;; `(apply f a b ... coll)` — call `f` with the leading args followed by the
-;; elements of the final collection. The final collection is realized into a
-;; plain cons-list (so vectors / maps / lazy seqs all spread), the leading args
-;; are consed on front, and the `%apply` prim spreads that list into the call.
+;; elements of the final collection.
+;;
+;; The final collection is NOT copied. `%apply` resolves f's arity, takes its
+;; fixed params off the front of `(seq coll)`, and installs the REMAINING SEQ
+;; as f's rest arg — Clojure's structure sharing, so `identical?` holds, a lazy
+;; tail stays unforced, and the rest arg keeps coll's shape. See
+;; `Runtime::plan_apply`. (It used to realize coll into a cons list, which
+;; forced lazy tails and made every rest arg look like a list.)
+;;
+;; A COROLLARY, and the reason this was once thought unsound: a rest arg is now
+;; whatever seq was applied, so a variadic body must walk it with `seq`/`first`/
+;; `next` — raw `%first`/`%rest` do not force a lazy node. `concat-lists` was
+;; caught doing exactly that.
 (defn -apply-flatten [args]
   (if (nil? (next args))
       ;; NO -to-list copy: the native %apply walks cons/chunked spines and

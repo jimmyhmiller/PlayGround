@@ -510,7 +510,10 @@ impl Compiler {
         // read — synthesize a wrapper closure so it's a first-class function. In
         // CALL position the prim still inlines (checked before this path).
         if let Some(&p) = self.prims.get(&s) {
-            if let Some(wrap) = prim_value_wrapper(p) {
+            // `-to-list` is resolved (not inlined) so `list`'s wrapper can call
+            // it; it is late-bound like any global, so bootstrap order is fine.
+            let to_list = self.resolve_global(rt, rt.intern("-to-list"));
+            if let Some(wrap) = prim_value_wrapper(p, to_list) {
                 return wrap;
             }
         }
@@ -956,7 +959,7 @@ impl Compiler {
 /// A first-class wrapper closure for a prim referenced in VALUE position, so
 /// `nil?`/`list`/etc. can be passed around like any function. `None` for prims
 /// that are only ever internal (`%`-prefixed) and never used as bare values.
-fn prim_value_wrapper(p: Prim) -> Option<Ir> {
+fn prim_value_wrapper(p: Prim, to_list: Sym) -> Option<Ir> {
     // body references the wrapper's params via Local{up:0, idx:i}
     let local = |i: u16| Ir::Local { up: 0, idx: i };
     let fixed = |p: Prim, n: u16| {
@@ -971,13 +974,20 @@ fn prim_value_wrapper(p: Prim) -> Option<Ir> {
         }
     };
     match p {
-        // `(fn [& xs] xs)` — the collected rest IS the list.
+        // `(fn [& xs] (-to-list xs))`. NOT `(fn [& xs] xs)`: a rest arg is no
+        // longer necessarily a list. `apply` hands the callee the applied seq
+        // itself (Clojure's structure sharing), so returning it raw made
+        // `(apply list (range 3))` answer a ChunkedCons where Clojure gives a
+        // PersistentList. `list` must BUILD one, as PersistentList/create does.
         Prim::List => Some(Ir::Lambda {
             nparams: 0,
             variadic: true,
             nslots: 1,
             captures: Vec::new(),
-            body: Arc::new(local(0)),
+            body: Arc::new(Ir::Call(
+                Box::new(Ir::Global(to_list)),
+                vec![local(0)],
+            )),
         }),
         Prim::IsNil | Prim::TypeOf | Prim::Throw | Prim::Hash | Prim::NFields => Some(fixed(p, 1)),
         Prim::Field => Some(fixed(p, 2)),

@@ -21,41 +21,35 @@ use std::process::Command;
 /// Lines where microclj knowingly differs from Clojure, and why. DELETE an
 /// entry when you fix it — the test fails if a listed line starts matching.
 const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    // ── `apply` copies its seq instead of passing it through ──────────────
-    // Clojure hands the applied seq to the callee UNTOUCHED: `identical?`
-    // holds, laziness survives, and the rest arg keeps the source's shape
-    // (chunked stays chunked, a list stays a list). microclj flattens it into
-    // a fresh cons list, so every shape predicate reads "cons list" and a
-    // lazy source is forced. Fixing this needs `apply` to resolve the callee's
-    // arity and install the remaining seq as the rest slot — a change to the
-    // call convention across all five backends.
-    ("apply/range-3", "apply copies the seq; no passthrough"),
-    ("apply/range-100", "apply copies the seq; no passthrough"),
-    ("apply/vec-100", "apply copies the seq; no passthrough"),
-    ("apply/lazy-map", "apply copies the seq; no passthrough"),
-    ("apply/req1-range", "apply copies the seq; no passthrough"),
-    ("apply/leading+seq", "apply copies the seq; no passthrough"),
-    ("identical/range", "apply copies the seq; no passthrough"),
-    // Only became visible once `identical?` stopped being structural `=`: it
-    // used to answer true here because the COPY compared equal to its source.
-    // Two bugs cancelling; fixing identical? unmasked this one.
-    ("identical/list", "apply copies the seq; no passthrough"),
-    ("lazy/unforced-after-apply", "apply FORCES the seq it should pass through"),
     // ── a direct variadic call builds a cons list, not an ArraySeq ────────
-    // Clojure's rest arg for a direct call is an ArraySeq: `list?` is FALSE.
+    // Clojure's rest arg for a DIRECT call is an ArraySeq: `list?` is FALSE.
     // microclj conses, so `list?` is true. Only `list?` differs — every other
-    // predicate and value already agrees.
+    // predicate and value already agrees. (`apply` no longer comes through
+    // here: it shares the applied seq, so these are the direct calls only.)
     ("direct/1-extra", "rest arg is a cons list, not an ArraySeq: list? true"),
     ("direct/3-extra", "rest arg is a cons list, not an ArraySeq: list? true"),
-    ("direct/40-extra", "rest arg is a cons list, not an ArraySeq: list? true"),
     ("req1/direct", "rest arg is a cons list, not an ArraySeq: list? true"),
     ("req2/direct", "rest arg is a cons list, not an ArraySeq: list? true"),
+    // ── one cons type where Clojure has Cons and PersistentList ───────────
+    // `apply` conses un-consumed leading args onto the seq, as Clojure does.
+    // Clojure's result is a `Cons` (list? FALSE); this dialect's `%cons`
+    // always builds a 'List, so list? reads true.
+    ("apply/leading+seq", "one cons type; Clojure's Cons is not a PersistentList"),
     // ── seq TYPES this dialect does not model ────────────────────────────
     // `counted?`/`chunked-seq?` are `instance?` checks on Clojure's concrete
-    // seq classes. `range` is a LongRange there (chunked AND counted); here it
-    // is a plain LazySeq. And Clojure splits vector chunks (ChunkedSeq, which
-    // IS Counted) from lazy chunks (ChunkedCons, which is not) — this dialect
-    // has ONE ChunkedCons, so it cannot answer both ways.
+    // seq classes. `range` is a LongRange there (chunked AND counted, and its
+    // own seq — hence identical/range); here it is a plain LazySeq. And
+    // Clojure splits vector chunks (ChunkedSeq, which IS Counted) from lazy
+    // chunks (ChunkedCons, which is not) — this dialect has ONE ChunkedCons,
+    // so it cannot answer counted? both ways.
+    //
+    // These are the last of the apply/* lines: their shape now matches, and
+    // only `counted?` differs, entirely because of the types above.
+    ("apply/range-3", "ChunkedCons is not Counted; Clojure's LongRange is"),
+    ("apply/range-100", "ChunkedCons is not Counted; Clojure's LongRange is"),
+    ("apply/vec-100", "one ChunkedCons type; Clojure's vector ChunkedSeq is Counted"),
+    ("apply/req1-range", "ChunkedCons is not Counted; Clojure's LongRange is"),
+    ("identical/range", "range is a LazySeq here; Clojure's LongRange is its own seq"),
     ("chunked/range", "range is a LazySeq here, not a chunked LongRange"),
     ("counted/range", "range is a LazySeq here, not a counted LongRange"),
     ("counted/vec-seq", "one ChunkedCons type; Clojure's vector ChunkedSeq is Counted"),

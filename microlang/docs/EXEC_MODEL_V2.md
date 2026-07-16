@@ -27,6 +27,16 @@ record for the performance re-architecture and the map of what remains.
 - LESSON (removed after the interpreter tier caught it): a structure-sharing
   apply rest-arg passthrough is UNSOUND here — variadic bodies may walk rest
   args with raw %first/%rest prims, so rest args must stay realized lists.
+  - SUPERSEDED (2026-07-16). The passthrough is IN, and it is what Clojure
+    actually does — `identical?` holds, laziness survives, and the rest arg
+    keeps the applied seq's shape (all pinned by `tests/seq_oracle`, which
+    diffs against real Clojure). The diagnosis above was right but the
+    conclusion was too strong: the fix is not "rest args must stay realized",
+    it is "a variadic body must walk its rest arg with `seq`/`first`/`next`,
+    never raw `%first`/`%rest`". Exactly ONE body was doing that
+    (`concat-lists`); an audit of every variadic in core.clj found no others.
+    `apply` no longer copies, so `(apply + (range 200000))` now costs what
+    `reduce` costs (25.7ms -> 1.4ms), because the copy WAS the cost.
 
 ## Stage D (COMPLETE, 2026-07-15): the REAL heap — gc-rust-shaped
 

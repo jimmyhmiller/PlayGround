@@ -795,26 +795,28 @@ extern "C" fn shim_apply<M: ModelArithJit>(
             }
         }
     }
-    // SLOW PATH. `seq_flatten` INVOKES the seq fn to force a lazy tail — a
-    // SAFEPOINT, which relocates the callee and every leading arg. They must be
-    // ROOTED across it and re-read after; the bare `f`/`rest` copied out above
-    // point into the collected space once it returns. (Exactly the TreeWalk
+    // GENERAL PATH. `invoke_apply` plans the call (resolving arity so the
+    // applied seq can be handed to the callee as its rest arg, uncopied) and
+    // invokes. It INVOKES the seq fn to force the head — a SAFEPOINT, which
+    // relocates the callee and every leading arg — so they are ROOTED across
+    // it and re-read after; the bare `f`/`rest` copied out above point into
+    // the collected space once it returns. (Exactly the TreeWalk
     // `Prim::Apply` arm's discipline — see `code.rs`.)
     let base = rt.root_depth();
     for &a in argv {
         rt.push_root(a);
     }
-    let mut flat: Vec<u64> = Vec::new();
-    if argc >= 2 {
-        let last_slot = base + argc as usize - 1;
-        let last = rt.root_get(last_slot);
-        let tail = rt.seq_flatten(top, last);
-        flat.extend((base + 1..last_slot).map(|i| rt.root_get(i)));
-        flat.extend(tail);
+    if argc < 2 {
+        let f = rt.root_get(base);
+        rt.truncate_roots(base);
+        return top.invoke(top, rt, f, &[]);
     }
+    let last_slot = base + argc as usize - 1;
+    let last = rt.root_get(last_slot);
+    let leading: Vec<u64> = (base + 1..last_slot).map(|i| rt.root_get(i)).collect();
     let f = rt.root_get(base);
     rt.truncate_roots(base);
-    top.invoke(top, rt, f, &flat)
+    rt.invoke_apply(top, f, &leading, last)
 }
 
 /// `(%spawn thunk)` — spawn an OS thread that runs `thunk` on the JIT. The worker

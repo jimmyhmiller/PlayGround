@@ -164,6 +164,46 @@ const BATTERY: &[(&str, &str, &str)] = &[
              (catch Exception e (str e)))"#,
         r#""boom-01234""#,
     ),
+    // `apply`'s SHARING path. `apply` hands the applied seq to the callee
+    // rather than copying it, so `plan_apply` must resolve the callee's arity
+    // BEFORE the frame exists — forcing lazy nodes as it goes. Every force
+    // invokes user code = a safepoint that relocates the callee, the leading
+    // args and the seq cursor. Writing that passthrough introduced exactly two
+    // stale-pointer bugs (a stale `id` across the arity probe, and stale
+    // leading args across the split); both were invisible without this stress
+    // and named themselves instantly with it. Each entry below reaches a
+    // different branch: leading args (consumed and left over), lazy vs
+    // realized sources, multi-arity clause selection, and apply-of-an-apply.
+    (
+        "apply-lazy-and-leading",
+        r#"(defn v0 [& xs] (reduce + 0 xs))
+           (defn v2 [a b & xs] (+ a b (reduce + 0 xs)))
+           (dotimes [i 5]
+             (assert (= 45 (apply v0 (map identity (range 10)))))
+             (assert (= 45 (apply v2 (map identity (range 10)))))
+             (assert (= 55 (apply v0 10 (map identity (range 10)))))
+             (assert (= 45 (apply v0 0 1 2 (map identity (range 3 10))))))
+           :ok"#,
+        ":ok",
+    ),
+    (
+        "apply-arity-select-and-nested",
+        r#"(defn multi ([a] :one) ([a b] :two) ([a b & r] (count r)))
+           (defn ident [& xs] xs)
+           (defn v0 [& xs] (reduce + 0 xs))
+           (dotimes [i 5]
+             (assert (= :one (apply multi (map identity [1]))))
+             (assert (= :two (apply multi (map identity [1 2]))))
+             (assert (= 3 (apply multi (map identity [1 2 3 4 5]))))
+             (assert (= 3 (apply multi 1 (map identity [2 3 4 5]))))
+             (assert (= 0 (apply v0 [])))
+             (assert (= nil (apply ident [])))
+             ;; the seq an apply passes through, applied again
+             (assert (= 45 (apply v0 (apply ident (map identity (range 10))))))
+             (assert (= 45 (apply v0 (apply concat [(range 5) (range 5 10)])))))
+           :ok"#,
+        ":ok",
+    ),
     // clojure.test: a real library, and the one that runs assertions through
     // macros + dynamic vars (`binding`) + try/catch.
     (

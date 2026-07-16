@@ -315,17 +315,18 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 //    locals must be traced for it.
                 rt.env_stack.push(locals.clone());
                 let n = args.len();
-                let mut flat: Vec<u64> = Vec::new();
-                if n >= 2 {
+                let r = if n >= 2 {
                     let last_slot = base + n - 1;
                     let last = rt.root_get(last_slot);
-                    let tail = rt.seq_flatten(top, last);
-                    flat.extend((base + 1..last_slot).map(|i| rt.root_get(i)));
-                    flat.extend(tail);
-                }
-                let f = rt.root_get(base);
-                rt.truncate_roots(base);
-                let r = top.invoke(top, rt, f, &flat);
+                    let leading: Vec<u64> = (base + 1..last_slot).map(|i| rt.root_get(i)).collect();
+                    let f = rt.root_get(base);
+                    rt.truncate_roots(base);
+                    rt.invoke_apply(top, f, &leading, last)
+                } else {
+                    let f = rt.root_get(base);
+                    rt.truncate_roots(base);
+                    top.invoke(top, rt, f, &[])
+                };
                 rt.env_stack.pop();
                 r
             }
