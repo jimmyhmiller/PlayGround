@@ -62,11 +62,11 @@
       (defvar! (mk-sym (intern "<")) (mkprim "<"))
       (defvar! (mk-sym (intern "=")) (mkprim "="))))
 
-; the target program (fib 25) built as data — mirrors evalcore.scm's `target`.
+; the target program (fib 30) built as data — mirrors evalcore.scm's `target`.
 ; parse it once from text with the compiler's own reader (no giant hand-cons).
 (defn build-target [] (-> Val)
   (match (read-all (malloc-allocator)
-                   "(begin (define fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))) (fib 25))" 0)
+                   "(begin (define fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))) (fib 30))" 0)
     (Err [d] (snil))
     (Ok [fs] (sexp->val (forms-nth fs 0)))))
 ; Sexp -> Val (same as scheme.coil)
@@ -84,7 +84,7 @@
   (setup)
   (let [tgt (build-target)]
     (seval (cadr2 tgt) (snil))              ; (define fib ...)
-    (print-val (seval (caddr2 tgt) (snil))) ; (fib 25)
+    (print-val (seval (caddr2 tgt) (snil))) ; (fib 30)
     (fmt (stdout) "\n")
     (fmt (stderr) "[gc] peak_live={d} collections={d} total_alloc={d}\n" (gc-peak) (gc-collections) (gc-total))
     0))

@@ -51,11 +51,11 @@
 (define target
   (quote (begin
     (define fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))
-    (fib 25))))
+    (fib 30))))
 
 (define (run)
   (setup)
   (seval (cadr* target) (quote ()))              ; the (define fib ...)
-  (seval (caddr* target) (quote ())))            ; the (fib 25)
+  (seval (caddr* target) (quote ())))            ; the (fib 30)
 (display (run))
 (newline)
