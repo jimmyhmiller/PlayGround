@@ -201,6 +201,23 @@ fn arr_get<M: ValueModel>(rt: &Runtime<M>, arr: u64, i: usize) -> u64 {
     elems[i]
 }
 
+/// Is `form` a collection in the FINAL (cljs-ported) representation — i.e. the
+/// one its own constructor builds today? False for a bootstrap-phase `PVec` /
+/// list-backed `Map`/`Set` and for the legacy `Vector` print shim, and false for
+/// non-collections.
+///
+/// The ambient phase (`user_phase`) does NOT answer this question: `clojure.core`
+/// is READ in the bootstrap phase but some of its datums — the ones baked into
+/// macro templates — are not EXPANDED until user phase, so they are phase-1
+/// objects arriving under a user-phase flag. Only the datum itself is the truth.
+pub fn is_final_rep<M: ValueModel>(rt: &Runtime<M>, form: u64) -> bool {
+    let Some((tag, _)) = record_parts(rt, form) else { return false };
+    matches!(
+        tag.as_str(),
+        "PersistentVector" | "PersistentArrayMap" | "PersistentHashMap" | "PersistentHashSet"
+    )
+}
+
 /// The elements of any vector representation: `PVec`, `PersistentVector`, or
 /// the legacy `Vector` display record (kept only as a print shim for
 /// `:arglists` / `-realize`). `None` if `form` is not a vector.

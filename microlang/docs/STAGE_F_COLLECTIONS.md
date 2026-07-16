@@ -305,3 +305,150 @@ out of scope here.
 
 Gates: default + jit suites, gc-stress battery, scheme (incl. conformance),
 clojure-stub jit + default (incl. the oracle suite) — all green.
+
+## Stage H results (measured 2026-07-15, same harness; before = Stage-G binary
+## re-run on this machine, so the "before" column is the honest baseline, not
+## the Stage-G table above — suite-order effects move apply/interleave a lot)
+
+Target: vecbuild (147 vs JVM 11) and group-by (~630 vs JVM 26) down to the rest
+of the suite's band — vecbuild ≤45, group-by ≤160.
+
+| workload | before | after | JVM | Δ |
+|---|---|---|---|---|
+| vecbuild (persistent conj) | 144 | **57** | 12 | **2.5×** |
+| group-by | 522 | **197** | 27 | **2.6×** |
+| reduce-map | 30 | 26 | 20 | 1.15× |
+| into-xform | 41 | 39 | 7 | ~ |
+| transduce | 22 | 21 | 5 | ~ |
+| comp-chain | 55 | 57 | 16 | ~ |
+| assoc-build | 1052 | 1017 | 146 | ~ |
+| apply | 193 | 207 | 39 | ~ (suite-order noise) |
+| interleave | 725 | 622 | 83 | ~ |
+| core band (loop/defn/closure) | 3 / 4 / 6 | 3 / 4 / 6 | 0 / 4 / 2 | unchanged |
+
+Isolated: conj 148→58 (the prim alone is 56); group-by 443→190.
+
+Both targets are MISSED (57 vs 45, 197 vs 160). The attribution is below and it
+is the same wall in both cases; read it before proposing a next step.
+
+### The profile overturned the hypothesis list again (the useful part)
+
+H1 said PV nodes pay a 2-object ARRAY (handle + data blob) where the JVM pays
+one, and that this is structural. MEASURED: it is not the lever. `Heap::alloc`
+is the single top frame (1111/3900 samples, 28%), but its cost tracks BYTES
+(cold-page first touch + `__bzero`), not the call count — the handle is 16B of
+the ~336B a conj allocates. Cutting one alloc in three would buy ~5ns and cost
+the mutable-array contract (`%aget`/`%aset`/`%apush`, the D5 JIT inline arms,
+and F3's in-place transient tail). NOT DONE, deliberately.
+
+H2 said the conj CALL PATH still had glue. It did — but not the protocol
+dispatch itself (the 2-way IC hits; `shim_dispatch` was 28/3238 samples). See
+H-1 below.
+
+H3 said group-by's inner PERSISTENT conj was its cost and transient inner
+vectors were the fix. MEASURED: wrong twice over. Decomposing group-by
+(reduce-noop 14 / +keyfn 33 / +get 319 / +assoc 348) put the cost in `get` and
+`assoc`, not `conj`. The `[]` DEFAULT ARGUMENT was ~370ns/op on its own.
+
+### What landed, in profile order
+
+1. **`(field r i)` was a generic prim shim** — the top frame of BOTH profiles.
+   Every deftype method body opens with `(let [f0 (field this 0) …] …)` for
+   EVERY field, so a protocol call ran ~6 generic `shim_prim`→`prim`→
+   `prim_from_tag`→`decode`/`view_gc`/`tag_of` round trips before its body
+   started. `(-count v)` on a 3-element vector cost **75 ns/op**. Now inlined
+   under `INLINE_OBJECTS` exactly like `%aget`: RECORD guard, immediate-int
+   guard, unsigned bounds check against the header aux, one indexed load off
+   `RECORD_FIELDS_OFF` (pinned to RECORD's TypeInfo by
+   `record_fields_off_matches_type_info`; a failed guard takes the shim, which
+   keeps the loud panic). `-count` 75→13, `-nth` 84→21, `(field v 1)` 24→11.
+2. **`pv_conj` round-tripped a `Vec` per conj** — `Vec::with_capacity` +
+   `extend_from_slice` + `alloc_vector` = a malloc/free pair and a SECOND
+   memmove. Fused into `alloc_vector_append1` / `alloc_vector_set1` (one
+   heap→heap copy; allocation never collects, so the source borrow is live
+   across the alloc), used by the tail conj and every trie path-copy
+   (`pv_push_tail`, `pv_do_assoc`, `pv_assoc`). conj 148→77→58.
+3. **Collection literals of constants are now CONSTANTS**, as in Clojure
+   (`Compiler.java` parses a constant vector/map/set to a `ConstantExpr`).
+   `(get m k [])` was rebuilding an empty vector through a real `vector` call
+   per element. `[]` 393→24 ns/op; `(get m2 k [])` 501→79.
+   The gate is `data::is_final_rep` — the DATUM's representation, not the
+   ambient phase. Two wrong gates were tried and caught by a smoke test: no
+   gate, and `user_phase`. `clojure.core` is READ while only core's `PVec`
+   exists but its bodies RUN after `cljs_types` installs `PersistentVector`,
+   so freezing those datums hands a `PVec` out of `group-by`; and the ambient
+   phase does not decide it either, because core datums baked into MACRO
+   TEMPLATES are expanded in user phase and are still phase-1 objects. Quoting
+   is sound only when the datum already IS what its constructor would build.
+4. **`vector` was pure-variadic** — `(defn vector [& args] (vec args))`, so a
+   literal cost a rest-list + `-to-array` seq walk + `%pv-from-array` trie
+   assembly. Real fixed arities 0-4 up front, variadic tail preserved (the
+   Stage-G1 medicine, and clojure.core's own shape); `[]` is now the shared
+   `-EMPTY-PV`, as `[]` is `PersistentVector/EMPTY` on the JVM. This is what
+   fixed core.clj's OWN literals, which the representation gate can never
+   quote: core group-by 443→204, i.e. exactly to the user-phase copy's 222.
+5. **group-by/frequencies/zipmap build through a transient** and `persistent!`
+   on the way out — clojure.core's own definitions. Justified by measurement,
+   not by symmetry: `assoc!` on a 2-key map is 34 ns/op vs `assoc`'s 309.
+   (This corrects the F3 note above, which said the outer transient was "noise
+   here": it was not — `assoc`, not the inner conj, was group-by's cost. H3's
+   suggestion of transient INNER vectors was NOT taken: it deviates from
+   clojure.core, and the profile does not justify it.)
+6. **TransientArrayMap's `-lookup` hand-rolled its scan** out of the generic
+   `=`/`>=`/`inc` fns instead of `array-index-of`, the prim-style helper its
+   own persistent counterpart uses (same `-eq2` comparator, same bound). Now
+   shared. `get` on a transient 69→61.
+
+### The wall (why 45/160 were not reached)
+
+Both remainders are ALLOCATION-BOUND, and the evidence is a heap-size sweep,
+not an argument. `Heap::alloc` is 28% of vecbuild; a conj allocates ~336B (a
+~144B tail blob + a 16B handle + a 64B PV record) — the same shape the JVM
+allocates, and the JVM does it in 12ns. The difference is not the algorithm: it
+is a 4 GiB non-generational semi-space bumping through virgin pages (kernel
+faults + `__bzero`, both visible in the profile) versus a TLAB in a nursery
+that never leaves L2.
+
+Sweeping `MICROLANG_HEAP_MB` (trigger = 50% of a space) isolates it:
+
+| MICROLANG_HEAP_MB | vecbuild | group-by | apply | interleave |
+|---|---|---|---|---|
+| 4096 (default) | 57 | 192 | 202 | 617 |
+| 512 | 62 | 233 | 239 | 771 |
+| 256 | **48** | 252 | 243 | 751 |
+| 128 | 53 | 201 | 245 | 741 |
+
+vecbuild reaches the ≤45 band on page locality ALONE (57→48) — but group-by,
+apply and interleave pay for it in collection frequency. That is the whole
+finding: it is a real trade, not a tuning win, so the default is UNCHANGED. A
+nursery/generational split is what buys both ends at once, and it is already
+named as the structural answer in the post-F3 scoreboard above. It is the
+honest next stage; nothing at the library or JIT level closes this gap.
+
+group-by's residual 197 is diffuse — no frame over ~4%. Per element it is
+still ~3 protocol dispatches (`get`, `assoc!`, `conj`), a 2-entry `-eq2` scan,
+and 3 allocations. The two structural items behind it are the same two the
+scoreboard already names: per-element dispatch (2-way IC, `DISPATCH_IC_WAYS`)
+and allocation throughput.
+
+### Conformance
+
+25 new oracle lines in `tests/core_suite/`, every expectation generated by REAL
+Clojure and matching on the default tier: group-by/frequencies/zipmap ORDERING
+(key order and vector element order, including the >8-key HAMT-promotion path
+via `(into (sorted-map) (group-by #(mod % 9) (range 30)))`), `vector` at every
+new arity plus `apply vector` over 100 elements, and the literal-as-constant
+value/type lines.
+
+Real Clojure confirms the constant rule exactly, including its edges:
+`(identical? [] [])` and `(let [f (fn [] [1 2])] (identical? (f) (f)))` are
+TRUE on the JVM, and `(let [f (fn [] [(inc 0)])] (identical? (f) (f)))` is
+FALSE — constant elements only. Those four lines are NOT in the corpus: this
+dialect's `identical?` is `%num-eq` ("pointer identity approximated by
+structural =", cljs_types.clj:42), a pre-existing documented deviation that
+answers true regardless, so they cannot discriminate and one of them fails for
+an unrelated reason.
+
+Gates: default + jit suites, gc-stress battery (mandatory — H-1 changes what
+the GC-visible RECORD load reads), scheme, clojure-stub jit + default (78
+tests incl. the oracle suite) — all green.

@@ -1381,14 +1381,22 @@
       (-reductions f (first args) (second args))))
 
 ;; map building: group-by / frequencies / zipmap / merge / select-keys / update-in
+;; These three accumulate into a map they alone can see until they return it, so
+;; they build through a TRANSIENT and `persistent!` on the way out — exactly
+;; clojure.core's own definitions. It is not a micro-optimization: a persistent
+;; `assoc` per element was ~9x the cost of the `assoc!` (path-copy + a fresh map
+;; record per element vs one in-place edit), and it dominated group-by.
+;; One lookup per element (3-arity `get`), not `contains?` + `get`.
 (defn group-by [f coll]
-  ;; One lookup per element (3-arity get), not contains? + get.
-  (reduce (fn [m x] (let [k (f x)] (assoc m k (conj (get m k []) x)))) (hash-map) coll))
+  (persistent!
+   (reduce (fn [m x] (let [k (f x)] (assoc! m k (conj (get m k []) x)))) (transient (hash-map)) coll)))
 (defn frequencies [coll]
-  (reduce (fn [m x] (assoc m x (inc (get m x 0)))) (hash-map) coll))
+  (persistent!
+   (reduce (fn [m x] (assoc! m x (inc (get m x 0)))) (transient (hash-map)) coll)))
 (defn zipmap [ks vs]
-  (loop [ks (seq ks) vs (seq vs) m (hash-map)]
-    (if (if (nil? ks) true (nil? vs)) m (recur (next ks) (next vs) (assoc m (first ks) (first vs))))))
+  (persistent!
+   (loop [ks (seq ks) vs (seq vs) m (transient (hash-map))]
+     (if (if (nil? ks) true (nil? vs)) m (recur (next ks) (next vs) (assoc! m (first ks) (first vs)))))))
 (defn -merge2 [a b]
   (if (nil? b) a (reduce (fn [m kv] (assoc m (first kv) (second kv))) a (seq b))))
 (defn merge [& maps]

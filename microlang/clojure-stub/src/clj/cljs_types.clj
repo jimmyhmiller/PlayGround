@@ -223,7 +223,20 @@
 ;; per-conj tail clone) instead of reduce-conj (O(32n)). -to-array collects the
 ;; coll (chunk at a time); %pv-from-array assembles the trie.
 (defn vec [coll] (%pv-from-array (-to-array coll)))
-(defn vector [& args] (vec args))
+;; Real FIXED arities up front, exactly as clojure.core's `vector` has them (the
+;; variadic tail is preserved). Not cosmetic: a vector LITERAL in expression
+;; position lowers to a `vector` call, so a pure-variadic `vector` charged every
+;; `[]`/`[x]`/`[x y]` a rest-list allocation + `-to-array` seq walk +
+;; `%pv-from-array` trie assembly — ~370ns for an EMPTY vector, and `(get m k [])`
+;; pays it PER ELEMENT. `[]` is now the shared -EMPTY-PV (as `[]` is
+;; PersistentVector/EMPTY on the JVM), and small vectors are tail conjes.
+(defn vector
+  ([] -EMPTY-PV)
+  ([a] (%pv-conj -EMPTY-PV a))
+  ([a b] (%pv-conj (%pv-conj -EMPTY-PV a) b))
+  ([a b c] (%pv-conj (%pv-conj (%pv-conj -EMPTY-PV a) b) c))
+  ([a b c d] (%pv-conj (%pv-conj (%pv-conj (%pv-conj -EMPTY-PV a) b) c) d))
+  ([a b c d & args] (vec (%cons a (%cons b (%cons c (%cons d args)))))))
 
 ;; metadata now flows through IMeta/IWithMeta (PersistentVector carries it in its
 ;; `meta` field); most values drop meta (the Object default).
@@ -796,12 +809,13 @@
   ICounted (-count [c] (field c 2))
   ILookup
   (-lookup [c k] (-lookup c k nil))
+  ;; The SAME scan its persistent counterpart uses (`array-index-of`, `-eq2`) —
+  ;; this had a hand-rolled duplicate built out of the generic `=`/`>=`/`inc`
+  ;; fns rather than the prim-style shared helper, and `get` on a transient runs
+  ;; once per element in group-by/frequencies. Same comparator, same bound.
   (-lookup [c k not-found]
-    (let [arr (field c 1) len (alength arr)]
-      (loop [i 0]
-        (cond (>= i len) not-found
-              (= (aget arr i) k) (aget arr (inc i))
-              :else (recur (+ i 2))))))
+    (let [arr (field c 1) idx (array-index-of arr k)]
+      (if (== idx -1) not-found (aget arr (inc idx)))))
   IFn (-invoke [c k] (-lookup c k nil)))
 (extend-type TransientHashMap
   ICounted (-count [c] (field c 2))

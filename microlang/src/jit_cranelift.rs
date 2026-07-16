@@ -72,7 +72,10 @@ use cranelift_module::{FuncId, Linkage, Module};
 
 use crate::bytecode::ModelEmit;
 use crate::code::CodeSpace;
-use crate::heap::{kind, CLOSURE_CAPS_OFF, CLOSURE_CODE_OFF, CLOSURE_META_OFF, HEADER_SIZE, MULTIFN_FIXED_OFF};
+use crate::heap::{
+    kind, CLOSURE_CAPS_OFF, CLOSURE_CODE_OFF, CLOSURE_META_OFF, HEADER_SIZE, MULTIFN_FIXED_OFF,
+    RECORD_FIELDS_OFF,
+};
 use crate::ir::{CapSrc, Ir, Prim};
 use crate::model::{Repr, ValueModel};
 use crate::runtime::{ObjView, Runtime};
@@ -4247,6 +4250,54 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.switch_to_block(slow);
                 self.fb.seal_block(slow);
                 let sp = self.slow_prim(*p, &[v]);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // `(field r i)` — a RECORD guard, an immediate-int index guard, an
+            // unsigned bounds check against the record's field count (its header
+            // aux — a negative index untags huge and fails it), then one indexed
+            // load off the varlen tail. Stage H: every deftype method body opens
+            // with `(let [f0 (field this 0) …] …)`, so this prim ran through the
+            // generic shim several times per PROTOCOL CALL — the top frame of
+            // both the vecbuild and group-by profiles. Any failed guard takes the
+            // shim, which owns the loud non-record/bad-index panic.
+            Ir::Prim(Prim::Field, args) if M::INLINE_OBJECTS => {
+                let argvals: Vec<Value> =
+                    args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                let flags = MemFlagsData::trusted();
+                let result = self.declare_root_var();
+                let slow = self.fb.create_block();
+                let merge = self.fb.create_block();
+                let (addr, hdr) = self.emit_typed_addr::<M>(argvals[0], kind::RECORD, slow);
+                let is_int = M::emit_both_int(self, argvals[1], argvals[1]);
+                let okb = self.fb.create_block();
+                self.fb.ins().brif(is_int, okb, &[], slow, &[]);
+                self.fb.switch_to_block(okb);
+                self.fb.seal_block(okb);
+                let i = M::emit_untag(self, argvals[1]);
+                // RECORD's varlen count IS its field count (header aux; bit 63
+                // is the forwarding bit and is clear on any live object).
+                let n = self.fb.ins().ushr_imm(hdr, 32);
+                let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, i, n);
+                let okb2 = self.fb.create_block();
+                self.fb.ins().brif(inb, okb2, &[], slow, &[]);
+                self.fb.switch_to_block(okb2);
+                self.fb.seal_block(okb2);
+                // RECORD layout = [hdr | raw8 type sym | fields…]: the varlen
+                // tail starts at `RECORD_FIELDS_OFF`.
+                let byteoff = self.fb.ins().ishl_imm(i, 3);
+                let slot = self.fb.ins().iadd(addr, byteoff);
+                let r = self.fb.ins().load(I64, flags, slot, RECORD_FIELDS_OFF as i32);
+                self.fb.def_var(result, r);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(Prim::Field, &argvals);
                 self.fb.def_var(result, sp);
                 self.fb.ins().jump(merge, &[]);
 

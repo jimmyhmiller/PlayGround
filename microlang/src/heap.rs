@@ -828,6 +828,11 @@ pub const CLOSURE_CAPS_OFF: usize = 24;
 /// clauses…]`. The JIT's call sites select the clause for a compile-time
 /// arity with one bounds check + one load.
 pub const MULTIFN_FIXED_OFF: usize = 24;
+/// Byte offset of a RECORD's inline field array (varlen values; length = header
+/// aux): `[hdr | raw8 type sym | fields…]`. The JIT's inline `(field r i)` arm
+/// indexes off this. Keep in sync with `kind::RECORD`'s TypeInfo (raw8 + varlen
+/// values) — `record_fields_off_matches_type_info` pins it.
+pub const RECORD_FIELDS_OFF: usize = 16;
 
 pub const META_VARIADIC_BIT: u64 = 1 << 63;
 const META_NSLOTS_SHIFT: u64 = 48;
@@ -1021,6 +1026,15 @@ mod tests {
         let rec = &t[kind::RECORD as usize];
         assert_eq!(rec.varlen_offset(), 16);
         assert_eq!(rec.allocation_size(2), 32);
+    }
+
+    /// The JIT's inline `(field r i)` arm bakes `RECORD_FIELDS_OFF` as an
+    /// immediate; if RECORD's TypeInfo ever grows a fixed field or a wider raw
+    /// section, the emitted load would read the wrong word. Pin them together.
+    #[test]
+    fn record_fields_off_matches_type_info() {
+        let t = type_table();
+        assert_eq!(t[kind::RECORD as usize].varlen_offset(), RECORD_FIELDS_OFF);
     }
 
     #[test]

@@ -131,9 +131,17 @@ pre-Stage-D table; same-file ratios are the comparable number.)
 
 ## Remaining known gaps (re-ranked 2026-07-15, post-Stage-D)
 
-1. **HAMT/collection node churn** — group-by (~44×), assoc-build (~12×),
-   vecbuild (~14×): per-element path-copy allocation. Transient-style
-   batched building (and conj chunking) is now the single biggest lever.
+1. **ALLOCATION THROUGHPUT — the non-generational semi-space** (Stage H's
+   finding; supersedes the old "collection node churn" item, which the
+   profile disproved). vecbuild (~5×) and group-by (~7×) now allocate the
+   SAME shape the JVM does and run the same algorithms; `Heap::alloc` is 28%
+   of vecbuild and its cost is cold-page first touch (kernel faults +
+   `__bzero`) in a 4 GiB space bumping through virgin pages, not the CAS or
+   the node count. A `MICROLANG_HEAP_MB` sweep isolates it: vecbuild 57→48 at
+   256 MiB purely on page locality, while group-by/apply/interleave regress
+   on collection frequency — a real trade, so the default is unchanged. A
+   nursery/generational split (TLAB-shaped) buys both ends and is THE next
+   structural stage. See docs/STAGE_F_COLLECTIONS.md "Stage H results".
 2. **Lazy-seq producer costs** — interleave (~26×), into-xform (~40×):
    per-step cell allocation + 2-seq lockstep; chunked producers close most.
 3. **apply glue** (~24×): seq_flatten + arg-vector rebuild per call; a

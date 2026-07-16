@@ -775,6 +775,21 @@ fn expand<M: ValueModel>(
             let ex = expand_each(rt, cs, macros, comp, &items);
             rt.vec_to_list(&ex)
         }
+    } else if constant_literal(rt, f) {
+        // A collection literal whose elements are ALL constants IS a constant:
+        // quote it, so the datum the reader already built is the value. This is
+        // Clojure's own rule (`Compiler.java`: a vector/map/set expression with
+        // constant parts parses to a `ConstantExpr`), and it matters — `[]` in
+        // `(get m k [])` was rebuilding an empty vector through a real `vector`
+        // call PER ELEMENT (~390ns/op, the top cost in group-by).
+        //
+        // Sharing one object across evaluations is sound because these
+        // collections are immutable: conj/assoc path-copy, `-with-meta` builds a
+        // new record, `caching-hash` recomputes (no ^:mutable field), and
+        // `transient` copies the tail + treats un-stamped nodes as copy-on-write.
+        // Identity now matches Clojure's too (`(identical? (f) (f))` for
+        // `(fn [] [])` is true on the JVM).
+        quote_form(rt, f)
     } else if let Some(elems) = binding_items(rt, f) {
         // A vector in EXPRESSION position -> `(vector e0 e1 …)` so its elements
         // evaluate. `binding_items` matches every vector representation (the
@@ -791,6 +806,62 @@ fn expand<M: ValueModel>(
     };
     rt.truncate_roots(slot);
     out
+}
+
+/// Is `f` a COLLECTION literal all of whose elements are themselves constants —
+/// i.e. would evaluating it just rebuild the datum the reader already made?
+///
+/// Mirrors `expand`'s own classification, in its order: a cons list is a call or
+/// special form and a symbol is a variable reference (neither is constant);
+/// a vector/map/set is constant exactly when every element is; anything else
+/// (number, string, char, keyword, bool, nil, `()`) is self-evaluating and so
+/// already constant. Only COLLECTIONS are asked — the scalars reach `expand`'s
+/// self-evaluating arm regardless, and answering true for them here would wrap
+/// them in a pointless `quote`.
+///
+/// REPRESENTATION GATE (`data::is_final_rep`) — the reason this is not simply
+/// "is it a collection of constants". Quoting a datum is only equivalent to
+/// evaluating its constructor call when the datum IS what that call would build.
+/// The reader builds the representation of the phase it runs IN, but the
+/// constructor runs LATER: `clojure.core` is read while only core's own `PVec`
+/// exists, yet its bodies run once `cljs_types` has installed
+/// `PersistentVector`. Freezing those datums hands a `PVec` back out of
+/// `group-by` where every other vector in the system is a `PersistentVector`
+/// (observed — this is not hypothetical). The ambient phase does NOT decide it
+/// either: core datums baked into MACRO TEMPLATES are expanded in user phase and
+/// are still phase-1 objects. So every collection, at every nesting depth, must
+/// itself already be in the final representation; a bootstrap-phase literal
+/// keeps the constructor-call route and is unchanged.
+fn constant_literal<M: ValueModel>(rt: &Runtime<M>, f: u64) -> bool {
+    fn is_const<M: ValueModel>(rt: &Runtime<M>, f: u64) -> bool {
+        if rt.as_cons(f).is_some() {
+            return false; // a call / special form
+        }
+        if matches!(rt.decode(f), Val::Sym(_)) {
+            return false; // a variable reference
+        }
+        let is_coll = binding_items(rt, f).is_some()
+            || data::map_entries(rt, f).is_some()
+            || data::set_items(rt, f).is_some();
+        if !is_coll {
+            return true; // number / string / char / keyword / bool / nil / `()`
+        }
+        if !data::is_final_rep(rt, f) {
+            return false; // a bootstrap-phase datum: its constructor rebuilds it
+        }
+        if let Some(elems) = binding_items(rt, f) {
+            return elems.iter().all(|&e| is_const(rt, e));
+        }
+        if let Some(kvs) = data::map_entries(rt, f) {
+            return kvs.iter().all(|&e| is_const(rt, e));
+        }
+        let es = data::set_items(rt, f).expect("collection with no reader");
+        es.iter().all(|&e| is_const(rt, e))
+    }
+    let is_coll = binding_items(rt, f).is_some()
+        || data::map_entries(rt, f).is_some()
+        || data::set_items(rt, f).is_some();
+    is_coll && is_const(rt, f)
 }
 
 /// If `form` is a lazy seq — or a cons list whose TAIL hits a lazy node — force

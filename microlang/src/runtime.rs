@@ -688,6 +688,47 @@ impl<M: ValueModel> Runtime<M> {
             h
         }
     }
+    /// Allocate an ARRAY holding `xs ++ [x]` — the persistent-vector tail conj.
+    /// Fused (Stage H) so the copy goes heap→heap ONCE: the obvious
+    /// `Vec::with_capacity` + `extend_from_slice` + `alloc_vector` spelling paid
+    /// a malloc/free pair and a SECOND memmove per conj, and both were top
+    /// frames of the vecbuild profile.
+    pub fn alloc_vector_append1(&self, xs: &[u64], x: u64) -> Gc {
+        use crate::heap::kind;
+        self.shared.allocs.fetch_add(1, Ordering::Relaxed);
+        let n = xs.len();
+        let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
+        let data = self.shared.heap.alloc(dinfo, (n + 1) as u32);
+        unsafe {
+            let slots = data.values_mut(dinfo);
+            slots[..n].copy_from_slice(xs);
+            slots[n] = x;
+            let ainfo = &self.shared.types[kind::ARRAY as usize];
+            let h = self.shared.heap.alloc(ainfo, (n + 1) as u32);
+            h.set_field(0, M::R::enc_ref(data));
+            h
+        }
+    }
+    /// Allocate an ARRAY holding `xs` with index `i` replaced by `x` — the
+    /// trie path-copy step. Fused for the same reason as `alloc_vector_append1`
+    /// (the `arr_clone` + mutate + `mk_array` spelling round-tripped a Vec).
+    pub fn alloc_vector_set1(&self, xs: &[u64], i: usize, x: u64) -> Gc {
+        use crate::heap::kind;
+        assert!(i < xs.len(), "alloc_vector_set1: index {i} out of bounds (len {})", xs.len());
+        self.shared.allocs.fetch_add(1, Ordering::Relaxed);
+        let n = xs.len();
+        let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
+        let data = self.shared.heap.alloc(dinfo, n as u32);
+        unsafe {
+            let slots = data.values_mut(dinfo);
+            slots[..n].copy_from_slice(xs);
+            slots[i] = x;
+            let ainfo = &self.shared.types[kind::ARRAY as usize];
+            let h = self.shared.heap.alloc(ainfo, n as u32);
+            h.set_field(0, M::R::enc_ref(data));
+            h
+        }
+    }
     /// Allocate an ARRAY of `n` `nil` slots.
     pub fn alloc_vector_nil(&self, n: usize, nil: u64) -> Gc {
         use crate::heap::kind;
@@ -3122,13 +3163,18 @@ impl<M: ValueModel> Runtime<M> {
     fn mk_array(&mut self, v: Vec<u64>) -> u64 {
         M::R::enc_ref(self.alloc_vector(&v))
     }
-    /// A fresh array = `arr` ++ [x]. The tail-conj hot path.
+    /// A fresh array = `arr` ++ [x]. The tail-conj hot path — one heap→heap
+    /// copy, no Vec (allocation never collects, so the source borrow is live
+    /// across the alloc).
     fn mk_array_append1(&mut self, arr: u64, x: u64) -> u64 {
         let src = self.arr_slice(self.arr_handle(arr));
-        let mut v = Vec::with_capacity(src.len() + 1);
-        v.extend_from_slice(src);
-        v.push(x);
-        M::R::enc_ref(self.alloc_vector(&v))
+        M::R::enc_ref(self.alloc_vector_append1(src, x))
+    }
+    /// A fresh array = `arr` with index `i` replaced by `x`. The trie
+    /// path-copy hot path (same fusion as `mk_array_append1`).
+    fn mk_array_set1(&mut self, arr: u64, i: usize, x: u64) -> u64 {
+        let src = self.arr_slice(self.arr_handle(arr));
+        M::R::enc_ref(self.alloc_vector_set1(src, i, x))
     }
     /// A fresh one-element array.
     fn mk_array1(&mut self, x: u64) -> u64 {
@@ -3208,18 +3254,17 @@ impl<M: ValueModel> Runtime<M> {
     fn pv_push_tail(&mut self, cnt: i64, level: i64, parent: u64, tailnode: u64) -> u64 {
         let subidx = (((cnt - 1) >> level) & 31) as usize;
         let parr = self.node_arr(parent);
-        let mut ret = self.arr_clone(parr);
-        if level == 5 {
-            ret[subidx] = tailnode;
+        let slot = if level == 5 {
+            tailnode
         } else {
             let child = self.arr_at(parr, subidx);
-            ret[subidx] = if matches!(self.decode(child), Val::Nil) {
+            if matches!(self.decode(child), Val::Nil) {
                 self.pv_new_path(level - 5, tailnode)
             } else {
                 self.pv_push_tail(cnt, level - 5, child, tailnode)
-            };
-        }
-        let arr = self.mk_array(ret);
+            }
+        };
+        let arr = self.mk_array_set1(parr, subidx, slot);
         self.mk_node(arr)
     }
     pub(crate) fn pv_conj(&mut self, pv: u64, o: u64) -> u64 {
@@ -3326,24 +3371,21 @@ impl<M: ValueModel> Runtime<M> {
     /// Path-copy a node, setting index `i`'s leaf to `val`.
     fn pv_do_assoc(&mut self, level: i64, node: u64, i: i64, val: u64) -> u64 {
         let narr = self.node_arr(node);
-        let mut ret = self.arr_clone(narr);
-        if level == 0 {
-            ret[(i & 31) as usize] = val;
+        let (subidx, slot) = if level == 0 {
+            ((i & 31) as usize, val)
         } else {
             let subidx = ((i >> level) & 31) as usize;
             let child = self.arr_at(narr, subidx);
-            ret[subidx] = self.pv_do_assoc(level - 5, child, i, val);
-        }
-        let arr = self.mk_array(ret);
+            (subidx, self.pv_do_assoc(level - 5, child, i, val))
+        };
+        let arr = self.mk_array_set1(narr, subidx, slot);
         self.mk_node(arr)
     }
     pub(crate) fn pv_assoc(&mut self, pv: u64, n: i64, val: u64) -> u64 {
         let (meta, cnt, shift, root, tail) = self.pv_read(pv);
         if n >= 0 && n < cnt {
             if Self::tail_off(cnt) <= n {
-                let mut nt = self.arr_clone(tail);
-                nt[(n & 31) as usize] = val;
-                let new_tail = self.mk_array(nt);
+                let new_tail = self.mk_array_set1(tail, (n & 31) as usize, val);
                 self.mk_pv(meta, cnt, shift, root, new_tail)
             } else {
                 let nr = self.pv_do_assoc(shift, root, n, val);
