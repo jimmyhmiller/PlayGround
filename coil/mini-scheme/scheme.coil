@@ -1,0 +1,116 @@
+(module scheme)
+; A metacircular Scheme evaluator, written in the TRANSPARENT-GC style: every
+; value is `Val`, no pointers, no allocation calls beyond the primitives, NO
+; rooting. gcauto2 (the transform) inserts all the GC plumbing. It reads a Scheme
+; program from stdin, evaluates the top-level forms, and prints the last result.
+(import "sval.coil" :use *)
+(import "gcauto2.coil" :use *)              ; the transform (self-registers)
+(import "../selfhost/src/reader.coil" :use *)   ; the compiler's own reader
+(import "../selfhost/src/parser.coil" :use *)   ; sx-* accessors
+(import "io.coil" :use *)
+(import "fmt.coil" :use *)
+(import "control.coil" :use *)
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "slice.coil" :use *)
+(import "result.coil" :use *)
+
+; ---- Coil-Sexp -> Val ----
+(defn sexp->val [(x Sexp)] (-> Val)
+  (let [tg (sx-tag x)]
+    (if (icmp-eq tg 0) (mk-int (sx-ival x))
+    (if (icmp-eq tg 2) (mk-sym (intern (sx-sval x)))
+    (if (or (icmp-eq tg 6) (icmp-eq tg 7)) (sexp-list->val (sx-items x) 0 (sx-len (sx-items x)))
+        (mk-int 0))))))
+(defn sexp-list->val [(items (ptr (ArrayList Sexp))) (i i64) (n i64)] (-> Val)
+  (if (icmp-ge i n) (snil)
+    (cons (sexp->val (sx-at items i)) (sexp-list->val items (+ i 1) n))))
+
+; ---- list helpers ----
+(defn cadr   [(x Val)] (-> Val) (car (cdr x)))
+(defn caddr  [(x Val)] (-> Val) (car (cdr (cdr x))))
+(defn cadddr [(x Val)] (-> Val) (car (cdr (cdr (cdr x)))))
+(defn is-sym [(v Val) (name (slice u8))] (-> bool) (and (symp v) (= (sym-id v) (intern name))))
+
+; ---- environment: local assoc list + the mutable global (genv) ----
+(defn assq [(sym Val) (alist Val)] (-> Val)
+  (if (nullp alist) (snil)
+    (let [pr (car alist)]
+      (if (= (sym-id (car pr)) (sym-id sym)) pr (assq sym (cdr alist))))))
+(defn lookup [(sym Val) (env Val)] (-> Val)
+  (let [pr (assq sym env)]
+    (if (nullp pr)
+        (let [gpr (assq sym (genv))] (if (nullp gpr) sym (cdr gpr)))
+      (cdr pr))))
+(defn extend-env [(params Val) (args Val) (env Val)] (-> Val)
+  (if (nullp params) env
+    (extend-env (cdr params) (cdr args) (cons (cons (car params) (car args)) env))))
+
+; ---- primitives ----
+(defn sum-args [(args Val)] (-> i64) (if (nullp args) 0 (+ (ival (car args)) (sum-args (cdr args)))))
+(defn mul-args [(args Val)] (-> i64) (if (nullp args) 1 (* (ival (car args)) (mul-args (cdr args)))))
+(defn prim-apply [(op i64) (args Val)] (-> Val)
+  (if (= op 0) (mk-int (sum-args args))
+  (if (= op 1) (mk-int (- (ival (car args)) (ival (cadr args))))
+  (if (= op 2) (mk-int (mul-args args))
+  (if (= op 3) (mk-bool (if (= (ival (car args)) (ival (cadr args))) 1 0))
+  (if (= op 4) (mk-bool (if (< (ival (car args)) (ival (cadr args))) 1 0))
+  (if (= op 5) (cons (car args) (cadr args))
+  (if (= op 6) (car (car args))
+  (if (= op 7) (cdr (car args))
+  (if (= op 8) (mk-bool (if (nullp (car args)) 1 0))
+  (if (= op 9) (mk-bool (if (pairp (car args)) 1 0))
+  (if (= op 10) (mk-bool (if (and (symp (car args)) (and (symp (cadr args)) (= (sym-id (car args)) (sym-id (cadr args))))) 1 0))
+  (if (= op 11) (mk-bool (if (truthy (car args)) 0 1))
+      (snil))))))))))))))
+
+; ---- eval / apply ----
+(defn eval-args [(exprs Val) (env Val)] (-> Val)
+  (if (nullp exprs) (snil)
+    (cons (seval (car exprs) env) (eval-args (cdr exprs) env))))
+(defn eval-seq [(exprs Val) (env Val)] (-> Val)
+  (if (nullp (cdr exprs)) (seval (car exprs) env)
+    (let [ignore (seval (car exprs) env)] (eval-seq (cdr exprs) env))))
+(defn apply-fn [(fn Val) (args Val)] (-> Val)
+  (if (= (tag-of fn) 6) (prim-apply (prim-op fn) args)
+    (if (= (tag-of fn) 5)
+        (let [pbe (clos-pbe fn) params (car pbe) body (cadr pbe) cenv (cdr (cdr pbe))]
+          (seval body (extend-env params args cenv)))
+      fn)))
+(defn seval [(expr Val) (env Val)] (-> Val)
+  (let [tg (tag-of expr)]
+    (if (= tg 3) (lookup expr env)
+    (if (not (= tg 2)) expr                               ; int/bool/nil/closure/prim self-eval
+      (let [head (car expr)]
+        (if (is-sym head "quote") (cadr expr)
+        (if (is-sym head "if")
+            (if (truthy (seval (cadr expr) env)) (seval (caddr expr) env) (seval (cadddr expr) env))
+        (if (is-sym head "lambda") (mk-closure (cons (cadr expr) (cons (caddr expr) env)))
+        (if (is-sym head "define")
+            (let [v (seval (caddr expr) env)] (set-genv! (cons (cons (cadr expr) v) (genv))) (cadr expr))
+        (if (is-sym head "begin") (eval-seq (cdr expr) env)
+            (apply-fn (seval head env) (eval-args (cdr expr) env))))))))))))
+
+; ---- primitive installation ----
+(defn def-prim [(name (slice u8)) (op i64)] (-> i64)
+  (set-genv! (cons (cons (mk-sym (intern name)) (mk-prim op)) (genv))) 0)
+(defn setup-prims [] (-> i64)
+  (def-prim "+" 0) (def-prim "-" 1) (def-prim "*" 2) (def-prim "=" 3) (def-prim "<" 4)
+  (def-prim "cons" 5) (def-prim "car" 6) (def-prim "cdr" 7)
+  (def-prim "null?" 8) (def-prim "pair?" 9) (def-prim "eq?" 10) (def-prim "not" 11) 0)
+
+; evaluate every top-level form (earlier ones for effect, e.g. define), returning
+; the LAST result. Recursion (no reassigned mut) so the transform roots it soundly.
+(defn run-forms [(fs (ptr (ArrayList Sexp))) (i i64) (n i64)] (-> Val)
+  (if (icmp-ge i (- n 1)) (seval (sexp->val (forms-nth fs i)) (snil))
+    (let [ignore (seval (sexp->val (forms-nth fs i)) (snil))]
+      (run-forms fs (+ i 1) n))))
+(defn main [] (-> :i64)
+  (set-genv! (snil))
+  (setup-prims)
+  (let [a (malloc-allocator) src (read-stdin a)]
+    (match (read-all a src 0)
+      (Err [d] (do (fmt (stderr) "parse error\n") 1))
+      (Ok [fs]
+        (do (print-val (run-forms fs 0 (forms-count fs))) (fmt (stdout) "\n")
+            (fmt (stderr) "[gc] peak_live={d}  collections={d}  total_alloc={d}\n" (gc-peak) (gc-collections) (gc-total)) 0)))))
