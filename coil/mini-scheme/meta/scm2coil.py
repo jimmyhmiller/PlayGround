@@ -163,6 +163,14 @@ def main():
     out.append('(import "io.coil" :use *)')
     out.append('(import "fmt.coil" :use *)')
     out.append('')
+    # monotonic-clock timer so each program reports its own COMPUTE time (the actual
+    # evaluation), separate from process startup/teardown that a wall-clock also sees.
+    out.append('(extern clock_gettime :cc c [i32 (ptr i8)] (-> i32))')       # CLOCK_MONOTONIC = 6
+    out.append('(defn ts-buf [] (-> (ptr (array i64 2))) (alloc-static (array i64 2)))')
+    out.append('(defn now-ns [] (-> i64) (let [ts (ts-buf)] '
+               '(do (clock_gettime 6 (cast (ptr i8) ts)) '
+               '(+ (* (load (index ts 0)) 1000000000) (load (index ts 1))))))')
+    out.append('')
     # cached special-form ids: intern ONCE (lazy, +1 sentinel so 0 == uninit),
     # then compare (car e) by i64 instead of re-interning + re-boxing per dispatch.
     out.append('(defn hid [(v Val)] (-> i64) (if (symp v) (sym-id v) -1))')
@@ -172,13 +180,20 @@ def main():
                    f'(do (if (= (load c) 0) (store! c (+ (intern "{name}") 1)) 0) (- (load c) 1))))')
     out.append('')
     out.extend(body_out)
-    # main: init genv, run top-level display forms
-    mainbody=['(set-genv! (snil))']
+    # main: init genv, TIME the top-level display forms (the compute), report both
+    # compute (internal clock) and the gc stats to stderr; stdout stays the value.
+    compute=[]
     for t in toplevel:
         h=head(t)
-        if h=='display': mainbody.append(f'(print-val {cexpr(t[1],set(),gvals)})')
-        elif h=='newline': mainbody.append('(fmt (stdout) "\\n")')
-    mainbody.append('(fmt (stderr) "[gc] peak_live={d}  collections={d}  total_alloc={d}\\n" (gc-peak) (gc-collections) (gc-total))'); mainbody.append('0')
-    out.append('(defn main [] (-> :i64) (do '+' '.join(mainbody)+'))')
+        if h=='display': compute.append(f'(print-val {cexpr(t[1],set(),gvals)})')
+        elif h=='newline': compute.append('(fmt (stdout) "\\n")')
+    body=('(do (set-genv! (snil)) '
+          '(let [__t0 (now-ns)] '
+          '(do '+' '.join(compute)+' '
+          '(let [__t1 (now-ns)] '
+          '(do (fmt (stderr) "[time] compute_ns={d}\\n" (- __t1 __t0)) '
+          '(fmt (stderr) "[gc] peak_live={d}  collections={d}  total_alloc={d}\\n" (gc-peak) (gc-collections) (gc-total)) '
+          '0)))))')
+    out.append(f'(defn main [] (-> :i64) {body})')
     print('\n'.join(out))
 main()

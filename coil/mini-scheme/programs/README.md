@@ -23,20 +23,36 @@ These exercise deep recursion, non-tail recursion, heavy consing (`sum-range` bu
 1000-element list under GC), mutual recursion, and list printing — all reclaimed by the
 metaprogram's collector, with no pointers or rooting in the source.
 
-## Speed: on par with Chez's compiler on compute, far faster on startup
+## Timing: total vs compute
 
-Our programs are AOT native binaries (~1.5 ms startup); `chez --script` has a ~35 ms
-startup floor. So short programs look lopsided (tak 1.4 ms vs 36 ms = ~23×). On a
-compute-dominated run that dwarfs startup, the generated code is roughly level with Chez:
+Each compiled program reads a monotonic clock (`clock_gettime`) around the actual
+evaluation and prints `[time] compute_ns=…` to stderr, so we can separate the pure
+**compute** from process **startup/teardown** that a wall-clock also sees. `./run.sh`
+prints the compute time next to each result; `total` below is `hyperfine` wall-clock.
 
-| fib(33)        | wall-clock (min) | minus ~startup |
-|----------------|------------------|----------------|
-| our native     | 21.0 ms          | ~19.5 ms       |
-| chez --script  | 56.8 ms          | ~21.8 ms       |
+| program     | ours total | ours compute | chez total |
+|-------------|-----------:|-------------:|-----------:|
+| fact        | 1.3 ms     | 0.007 ms     | 34.6 ms    |
+| gcd         | 1.2 ms     | 0.005 ms     | 34.8 ms    |
+| reverse     | 1.3 ms     | 0.014 ms     | 34.9 ms    |
+| append-len  | 1.3 ms     | 0.012 ms     | 35.1 ms    |
+| evenodd     | 1.3 ms     | 0.053 ms     | 35.7 ms    |
+| sum-range   | 1.4 ms     | 0.030 ms     | 35.4 ms    |
+| ackermann   | 2.0 ms     | 0.656 ms     | 35.4 ms    |
+| tak         | 1.6 ms     | 0.135 ms     | 35.6 ms    |
+| fib-direct  | 6.0 ms     | 4.21 ms      | 40.0 ms    |
 
-So the Scheme the metaprogram compiles is genuine native code, competitive with Chez's
-own compiler — and `fib(30)` compiled directly (6 ms) vs run through the metacircular
-evaluator (~330 ms) shows the ~55× gap between compiling and interpreting the same fib.
+Two things fall out. (1) Our binaries are AOT natives: ~1.3 ms of process startup plus the
+compute, versus Chez's ~35 ms `--script` startup floor — so most small-program wall-clock
+on both sides is startup, not work. (2) On compute, the generated code is genuine fast
+native: fib(30) runs in 4.2 ms (and fib compiled directly, 6 ms wall, vs ~330 ms through
+the metacircular evaluator, is the ~55× compile-vs-interpret gap on the same source). A
+compute-dominated run where work dwarfs startup — fib(33) — puts our native ~19.5 ms
+against Chez's ~21.8 ms (startup subtracted): level with Chez's own compiler.
+
+Caveat: our `compute` is run-only (compilation happened ahead of time); Chez's `--script`
+compiles at load, so its wall-clock also carries compile time. The comparison is native
+AOT vs compile-and-go, which is why our startup is tiny.
 
 ## Frontend scope
 
