@@ -131,6 +131,55 @@ missed edge dies at the collection that caused it instead of a mystery
 corruption later. This check is O(old gen) so it is verify-only, but the
 gc-stress battery must run WITH it armed.
 
+## STATUS
+
+**I2 LANDED (2026-07-16): minors are LIVE.** The pressure safepoint runs a
+minor (`GcKind::Auto`), escalating to a major on `MinorOutcome::needs_major` or
+when `minor_will_fit()` says no; the explicit `(gc)` prim stays a MAJOR (tests
+and the bench battery are written against "collect everything now"). `relocated`
+— the IC epoch — is bumped by minors too, because promotion is a copy; one bump
+covers a minor+major pair (nothing reads it between them, the world is stopped).
+gc-stress = a minor at EVERY safepoint + a major every 8th (the majors are what
+keep the flip and the card-table rebuild under the hammer).
+
+The barrier is routed at THREE CHOKE POINTS rather than at each store, so it
+cannot be forgotten: `Runtime::arr_slice_mut` (marks the DATA BLOB — that is
+where array elements live, not the handle), `Runtime::values_mut` (marks the
+record/values object; this is what covers the F3 transients, promoted mid-edit),
+and `Runtime::arr_extend` (marks BOTH: the blob it writes elements into, and the
+handle whose field it re-points on the grow path). Plus `%atom-set`/`%atom-cas`,
+which take the atom's base explicitly. Fresh-object initializing stores stay
+barrier-free — the D5 inline alloc paths pay nothing. Each choke point was
+mutation-tested: deleting its barrier makes the detector fire, naming the
+object and the slot.
+
+**I3 IS NOT OPTIONAL FOR PERF.** I2 had to DE-INLINE the JIT's `%aset` arm
+(`Prim::VectorSet` now takes `slow_prim`), because emitted code cannot yet mark
+a card and an unbarriered inline store is a lost old→young edge. Measured cost:
+`reduce-map` 28→35 ns/op — ALL of it the de-inline, none of it generational
+(pinned by measuring the de-inline alone against I1). I3's `emit_card_mark`
+recovers it; the guards it needs are still in place in that arm.
+
+### Two PRE-EXISTING gaps found while gating I2 (NOT Stage I bugs)
+Both are rooting holes in the **clojure-stub frontend's compiler** — it threads
+bare `u64` form pointers through `compile`, and a macro expansion evaluates
+code, which reaches a safepoint, which collects and relocates them. Both
+reproduce at I1 (779529155), before minors existed, so they bound what the
+detector can be pointed at rather than being caused by it:
+1. `MICROLANG_GC_STRESS=1` cannot boot `clojure.core` at all — `Session::new`
+   dies in `compile_fn` with "fn: params must be symbols" (a relocated param
+   list). So the Clojure-side barrier suite drives minors through the ordinary
+   PRESSURE path (a lowered nursery trigger) instead.
+2. Even on the pressure path, a low trigger use-after-moves: for EVERY program
+   on the JIT tier, and for `(reduce (fn [acc i] (assoc acc i ..)) {} ..)` on
+   TreeWalk. `clojure-stub/tests/gc_generational.rs` therefore runs TreeWalk
+   (covering atoms, both transient tiers, the HAMT, records, the growable
+   array) and carries the JIT half `#[ignore]`d with this reason — it should
+   start passing the day the gap closes.
+Closing these is a frontend rooting audit, in the shape of Stage E's work on the
+tiers. It is worth doing: until it is, the gc-stress hammer cannot be swung at
+the real Clojure library code at all.
+
 ## Phases (each suite-gated)
 - I1: `heap.rs` — nursery space, promotion/minor evacuation, card table
   (word-at-a-time dirty scan, per-card object-start index rebuilt during

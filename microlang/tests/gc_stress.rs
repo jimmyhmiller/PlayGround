@@ -1,7 +1,17 @@
 //! Stage E gc-stress: `MICROLANG_GC_STRESS=1` keeps the pressure bit
-//! permanently up, so EVERY safepoint runs a full moving collection with the
-//! verify heap armed (debug default) — the bug hammer for the rooting
-//! discipline of every tier, the JIT stack maps, and the native frame walker.
+//! permanently up, so EVERY safepoint collects with the verify heap armed
+//! (debug default) — the bug hammer for the rooting discipline of every tier,
+//! the JIT stack maps, and the native frame walker.
+//!
+//! Stage I2 sharpened it into the WRITE BARRIER's hammer as well: every
+//! safepoint now runs a MINOR, and every minor ends in the missed-barrier walk
+//! (`Heap::verify_no_old_to_young`) — a walk of the whole old gen asserting no
+//! old object still points into the nursery a minor just evacuated. So a store
+//! that forgot its barrier dies HERE, naming the object and the slot, instead
+//! of silently losing an edge and corrupting the heap somewhere unrelated
+//! hours later (which is beagle's shipped bug, hunted through a crash in
+//! another subsystem entirely). Every 8th collection also runs a major, so the
+//! old gen's Cheney, the flip, and the card table's rebuild stay covered.
 //!
 //! This lives in its OWN integration-test binary (= its own process), so the
 //! env var cannot leak into the other suites. Everything runs inside ONE test
@@ -13,6 +23,14 @@ use microlang::{CodeSpace, HighBitModel, LowBitModel, NanBoxModel, Runtime, Tree
 /// (name, source, expected) — a battery covering the axes that carry heap
 /// pointers across safepoints: closures + captures, lists, vectors, dispatch,
 /// arithmetic promotion, try/catch, deep and mutual tail recursion.
+///
+/// The `oldyoung-*` entries are Stage I2's: each one deliberately builds an
+/// OLD→YOUNG edge — a long-lived container that outlives collections (so it is
+/// promoted) being re-pointed at a value allocated after that promotion. Those
+/// edges are reachable ONLY through the card table, so each entry fails (loudly
+/// — the detector, or a wrong answer) if its store's barrier is missing. They
+/// recurse non-tail on purpose: a self-tail loop is one interpreter frame with
+/// no call boundary, so it reaches no safepoint and would collect nothing.
 const BATTERY: &[(&str, &str, &str)] = &[
     ("arith", "(+ (* 2 3) (* 4 5))", "26"),
     ("bignum", "(* 100000000000 100000000000)", "10000000000000000000000"),
@@ -82,10 +100,80 @@ const BATTERY: &[(&str, &str, &str)] = &[
         "(char->integer (integer->char 65))",
         "65",
     ),
+    // BEAGLE'S EXACT CRASH SHAPE: a long-lived atom `swap!`-ed to a freshly
+    // allocated value on every iteration. After the first collection the atom
+    // is old and the cons is young, and the atom's field is the ONLY reference
+    // to it — no root names it. Reading the value back afterwards is the whole
+    // point: an unbarriered store leaves the atom pointing at recycled nursery.
+    (
+        "oldyoung-atom",
+        "(def a (%atom-new nil))
+         (def go (fn (n) (if (= n 0) 0
+                    (do (%atom-set a (cons n (cons (* n 2) nil)))
+                        (+ 0 (go (- n 1)))))))
+         (go 60)
+         (+ (first (%atom-get a)) (first (rest (%atom-get a))))",
+        "3",
+    ),
+    // The same edge through a CAS rather than a store (`swap!` is built on it).
+    (
+        "oldyoung-atom-cas",
+        "(def a (%atom-new nil))
+         (def go (fn (n) (if (= n 0) 0
+                    (do (%atom-cas a (%atom-get a) (cons n nil))
+                        (+ 0 (go (- n 1)))))))
+         (go 60)
+         (first (%atom-get a))",
+        "1",
+    ),
+    // A long-lived VECTOR (so: a promoted ARRAY handle over a promoted DATA
+    // blob) whose elements are re-pointed at young conses. The write lands in
+    // the BLOB, not the handle, which is exactly what the barrier has to mark.
+    (
+        "oldyoung-vector",
+        "(def v (vector 0 0 0))
+         (def go (fn (n) (if (= n 0) 0
+                    (do (vector-set! v 1 (cons n nil))
+                        (vector-set! v 2 (cons (* n 2) nil))
+                        (+ 0 (go (- n 1)))))))
+         (go 60)
+         (+ (first (vector-ref v 1)) (first (vector-ref v 2)))",
+        "3",
+    ),
+    // A long-lived vector holding RECORDS built after it was promoted — the
+    // young target is a record whose own fields point at more young objects, so
+    // the card-scan has to promote TRANSITIVELY out of the dirty card.
+    (
+        "oldyoung-records",
+        "(def v (vector 0 0))
+         (def go (fn (n) (if (= n 0) 0
+                    (do (vector-set! v 0 (record 'Box (cons n nil)))
+                        (+ 0 (go (- n 1)))))))
+         (go 60)
+         (first (field (vector-ref v 0) 0))",
+        "1",
+    ),
+    // The edge pointing the OTHER way through a chain: a long-lived vector slot
+    // re-pointed at a young cons whose tail is the PREVIOUS (already promoted)
+    // value. Mixes an old target and a young target under one dirty card.
+    (
+        "oldyoung-accumulate",
+        "(def v (vector nil))
+         (def go (fn (n) (if (= n 0) 0
+                    (do (vector-set! v 0 (cons n (vector-ref v 0)))
+                        (+ 0 (go (- n 1)))))))
+         (def len (fn (xs acc) (if (nil? xs) acc (len (rest xs) (+ acc 1)))))
+         (go 60)
+         (+ (first (vector-ref v 0)) (len (vector-ref v 0) 0))",
+        "61",
+    ),
 ];
 
 fn run_battery<M: ValueModel>(mk: &dyn Fn() -> Box<dyn CodeSpace<M>>, tier: &str, skip: &[&str]) {
+    use std::sync::atomic::Ordering::Relaxed;
     let mut total_collections = 0u64;
+    let mut total_minors = 0u64;
+    let mut total_majors = 0u64;
     for (name, src, want) in BATTERY {
         if skip.contains(name) {
             continue; // a capability the tier genuinely lacks (it panics loudly)
@@ -98,13 +186,33 @@ fn run_battery<M: ValueModel>(mk: &dyn Fn() -> Box<dyn CodeSpace<M>>, tier: &str
             *want,
             "gc-stress mismatch: {tier} / {name}"
         );
-        total_collections += rt.heap().collections.load(std::sync::atomic::Ordering::Relaxed);
+        total_collections += rt.heap().collections.load(Relaxed);
+        total_minors += rt.heap().minor_collections.load(Relaxed);
+        total_majors += rt.heap().major_collections.load(Relaxed);
+        // Per program, not just in aggregate: an `oldyoung-*` entry that
+        // reached no safepoint would return the right answer having proved
+        // nothing at all about the barrier, and would do it silently.
+        if name.starts_with("oldyoung-") {
+            assert!(
+                rt.heap().minor_collections.load(Relaxed) > 0,
+                "gc-stress {tier} / {name}: no minor ran, so the missed-barrier \
+                 detector never looked — this entry proved nothing"
+            );
+        }
     }
     // Pure-prim programs have no safepoints, but across the battery the
     // hammer must actually have been swinging — hundreds of collections.
     assert!(
         total_collections > 100,
         "gc-stress ran only {total_collections} collections across the {tier} battery"
+    );
+    // Both halves of the collector, not just whichever one the policy happened
+    // to pick: the minors are what run the missed-barrier walk, the majors are
+    // what flip the semi-spaces and rebuild the card table's start index.
+    assert!(
+        total_minors > 100 && total_majors > 0,
+        "gc-stress {tier}: {total_minors} minors / {total_majors} majors — the \
+         hammer is not swinging at both"
     );
 }
 

@@ -4328,13 +4328,22 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.seal_block(merge);
                 self.fb.use_var(result)
             }
-            // `(%aget v i)` / `(%aset v i x)` — ARRAY handle guard, immediate-
-            // int index guard, unsigned bounds check against the handle's
-            // logical length (a negative index untags huge and fails it), then
-            // a direct indexed load/store through the data blob (D5). Any
-            // failed guard — including out-of-bounds — takes the shim, which
-            // owns the loud range panic.
-            Ir::Prim(p @ (Prim::VectorRef | Prim::VectorSet), args) if M::INLINE_OBJECTS => {
+            // `(%aget v i)` — ARRAY handle guard, immediate-int index guard,
+            // unsigned bounds check against the handle's logical length (a
+            // negative index untags huge and fails it), then a direct indexed
+            // load through the data blob (D5). Any failed guard — including
+            // out-of-bounds — takes the shim, which owns the loud range panic.
+            //
+            // `%aset` USED TO SHARE THIS ARM and is deliberately not here: its
+            // inline store puts a (possibly young) value into a (possibly
+            // promoted) data blob, and emitted code cannot yet mark the card —
+            // that is I3's `emit_card_mark` plus the RunCtx mirrors. An
+            // unbarriered store is not a slow `%aset`, it is a lost old→young
+            // edge, so until I3 lands `%aset` goes through `slow_prim` and the
+            // barriered `arr_slice_mut` choke point. The guards below are I3's
+            // starting point: re-add `Prim::VectorSet` here and emit the mark
+            // on `blob_addr` right before the store.
+            Ir::Prim(p @ Prim::VectorRef, args) if M::INLINE_OBJECTS => {
                 let argvals: Vec<Value> =
                     args.iter().map(|a| self.compile::<M>(a, false)).collect();
                 let flags = MemFlagsData::trusted();
@@ -4360,12 +4369,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let (_ir, blob_addr) = M::emit_ref_addr(self, blob_bits);
                 let byteoff = self.fb.ins().ishl_imm(i, 3);
                 let slot = self.fb.ins().iadd(blob_addr, byteoff);
-                let r = if matches!(p, Prim::VectorRef) {
-                    self.fb.ins().load(I64, flags, slot, 8)
-                } else {
-                    self.fb.ins().store(flags, argvals[2], slot, 8);
-                    self.iconst(M::R::enc_nil())
-                };
+                let r = self.fb.ins().load(I64, flags, slot, 8);
                 self.fb.def_var(result, r);
                 self.fb.ins().jump(merge, &[]);
 

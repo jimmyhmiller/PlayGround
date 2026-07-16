@@ -70,6 +70,12 @@ impl Sexpr {
             ("vector-length", VectorLen), ("values", Values), ("%values->list", ValuesToList),
             ("apply", Apply), ("%callec", CallEc), ("%callcc", CallCc),
             ("%reset", Reset), ("%shift", Shift),
+            // Atoms: the mutable cell. Here because a long-lived atom re-pointed
+            // at a freshly allocated value is THE old→young edge (beagle shipped
+            // exactly that bug), so the gc-stress battery has to be able to
+            // write it in this dialect.
+            ("%atom-new", AtomNew), ("%atom-get", AtomGet),
+            ("%atom-set", AtomSet), ("%atom-cas", AtomCas),
         ] {
             let s = rt.intern(name);
             prims.insert(s, p);

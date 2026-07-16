@@ -27,6 +27,28 @@ use crate::model::ValueModel;
 use crate::runtime::{Runtime, GLOBAL_UNBOUND};
 use crate::value::Locals;
 
+/// What a collection is being asked for (Stage I2).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GcKind {
+    /// Collect EVERYTHING: a major over the old gen with the nursery as a
+    /// second from-space. What the explicit `(gc)` prim means, and what the
+    /// tests and the bench battery are written against.
+    Major,
+    /// The GC's own choice — a minor, escalating to a major per the policy in
+    /// `collect_inner`. This is what allocation pressure asks for.
+    Auto,
+}
+
+/// gc-stress: every safepoint runs a MINOR (each one ending in the
+/// missed-barrier walk — that is the hammer this mode exists to swing), and
+/// every 8th ALSO runs a major. Majors have to keep getting hit because they
+/// are what exercises the old gen's Cheney, the semi-space flip, and the card
+/// table's re-point + start-index rebuild against a new base — none of which a
+/// minor touches. 8 is chosen so the battery's cost stays dominated by the
+/// minors (the thing under test) while a major still lands inside every
+/// short-lived program the battery runs.
+const STRESS_MAJOR_EVERY: u64 = 8;
+
 /// A handle to a rooted value. `get` re-reads the shadow slot, so it yields the
 /// value's CURRENT address even after the collector relocated it.
 pub struct Root(usize);
@@ -64,18 +86,24 @@ impl<M: ValueModel> Runtime<M> {
         Root(self.push_root(v))
     }
 
-    /// A moving collection. `live_env` is the currently executing environment
-    /// (the safepoint's live frame); its slots are rewritten in place.
-    /// STOP-THE-WORLD: every OTHER live mutator is brought to a safepoint and
-    /// parked (publishing its roots) before any object moves.
+    /// A FULL moving collection — the explicit `(gc)` prim. `live_env` is the
+    /// currently executing environment (the safepoint's live frame); its slots
+    /// are rewritten in place. STOP-THE-WORLD: every OTHER live mutator is
+    /// brought to a safepoint and parked (publishing its roots) before any
+    /// object moves.
+    ///
+    /// Stage I keeps this a MAJOR: `(gc)` has always meant "collect everything
+    /// now", which is what makes it usable as a test instrument (a value that
+    /// survives it survived a real evacuation) — a minor would quietly promote
+    /// the live set and reclaim nothing old.
     pub fn collect(&mut self, live_env: &Locals) {
-        self.stw_collect(live_env, None);
+        self.stw_collect(live_env, None, GcKind::Major);
     }
 
     /// A moving collection from a `CekMachine` safepoint: additionally roots the
     /// live continuation `live_kont` (its `done` cells and captured frames).
     pub fn collect_cek(&mut self, live_env: &Locals, live_kont: &Arc<Kont>) {
-        self.stw_collect(live_env, Some(live_kont));
+        self.stw_collect(live_env, Some(live_kont), GcKind::Major);
     }
 
     /// The stop-the-world rendezvous around a collection: request a stop, wait
@@ -83,7 +111,7 @@ impl<M: ValueModel> Runtime<M> {
     /// mutating the heap), collect, then release them. One collector at a time.
     /// The requesting thread scans its OWN live roots directly; the parked
     /// threads' roots come from their published slots.
-    fn stw_collect(&mut self, live_env: &Locals, live_kont: Option<&Arc<Kont>>) {
+    fn stw_collect(&mut self, live_env: &Locals, live_kont: Option<&Arc<Kont>>, kind: GcKind) {
         use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
         let shared = self.shared.clone();
         // Claim the collector role with ONE atomic step. If another thread already
@@ -91,6 +119,11 @@ impl<M: ValueModel> Runtime<M> {
         // happened to ask for a GC too — just park and participate in theirs. This
         // is what makes concurrent `(gc)` calls safe instead of deadlocking on a
         // lock while un-parked.
+        // (A `(gc)` that loses this race participates in the winner's
+        // collection, which may be a minor rather than the major it asked for.
+        // That has always been the deal — "someone else is collecting, join
+        // them" — and `(gc)` is a test/bench instrument driven single-threaded,
+        // where it always wins.)
         if shared
             .gc_requested
             .compare_exchange(false, true, AcqRel, Acquire)
@@ -116,7 +149,7 @@ impl<M: ValueModel> Runtime<M> {
             }
             std::thread::yield_now();
         }
-        self.collect_inner(live_env, live_kont);
+        self.collect_inner(live_env, live_kont, kind);
         // Release the world; parked threads take their rewritten roots back.
         shared.heap.poll.fetch_and(!crate::heap::POLL_REQUESTED, Release);
         shared.gc_requested.store(false, Release);
@@ -206,9 +239,12 @@ impl<M: ValueModel> Runtime<M> {
         }
         // PRESSURE: allocation crossed the soft threshold since the last
         // collection. Collect here (this thread claims the collector role; a
-        // race with a sibling degenerates into parking for theirs).
+        // race with a sibling degenerates into parking for theirs). Auto, not
+        // Major — this is the nursery filling up, which is exactly what a minor
+        // answers, and answering it with a full evacuation of the accumulated
+        // live set is the cost Stage I exists to stop paying.
         if self.shared.pressure_gc {
-            self.stw_collect(locals, kont);
+            self.stw_collect(locals, kont, GcKind::Auto);
         }
     }
 
@@ -243,9 +279,15 @@ impl<M: ValueModel> Runtime<M> {
         self.me.parked.store(false, Release);
     }
 
-    /// Enumerate every root slot and run the Cheney evacuation (`heap.rs`).
-    /// Runs with the world stopped (all sibling mutators parked).
-    fn collect_inner(&mut self, live_env: &Locals, live_kont: Option<&Arc<Kont>>) {
+    /// Enumerate every root slot and run the evacuation (`heap.rs`). Runs with
+    /// the world stopped (all sibling mutators parked).
+    ///
+    /// The root enumeration is the same for a minor and a major — the ONLY
+    /// difference is what the heap does with a slot it is handed (promote out
+    /// of the nursery, versus evacuate from-space) and that a minor asks the
+    /// card table for the old→young edges no root names. So it is written once
+    /// and handed to whichever collection(s) run.
+    fn collect_inner(&mut self, live_env: &Locals, live_kont: Option<&Arc<Kont>>, kind: GcKind) {
         use std::sync::atomic::Ordering::Relaxed;
         // Serialize against in-place heap mutators (array extend) that might
         // hold the lock right now on THIS thread's behalf — cheap insurance;
@@ -256,8 +298,8 @@ impl<M: ValueModel> Runtime<M> {
         let dyn_stack = &mut self.dyn_stack;
         let env_stack = &self.env_stack;
         let me = &self.me;
-        unsafe {
-            shared.heap.collect::<M::R>(&shared.types, &mut |visit| {
+        let mut enumerate_roots = |visit: &mut dyn FnMut(*mut u64)| {
+            unsafe {
                 // 1. Globals: the dense array IS the store; skip unbound slots.
                 for a in shared.global_slots.iter() {
                     if a.load(Relaxed) != GLOBAL_UNBOUND {
@@ -339,13 +381,47 @@ impl<M: ValueModel> Runtime<M> {
                 if let Some(k) = live_kont {
                     visit_kont(k, visit);
                 }
-            });
+            }
+        };
+
+        let heap = &shared.heap;
+        let types = &shared.types;
+        // THE POLICY. A minor is the answer to a full nursery; a major is the
+        // answer to a full OLD gen, and the only thing that reclaims old
+        // garbage. `minor_will_fit` is a precondition, not a preference:
+        // promotion cannot fail half-way through an evacuation, so when the
+        // nursery could not fit in what is left of the old space we go straight
+        // to a major — which reclaims the old garbage AND the nursery in one
+        // pass, rather than promoting survivors twice.
+        let minor = match kind {
+            GcKind::Auto if heap.minor_will_fit() => {
+                Some(unsafe { heap.collect_minor::<M::R>(types, &mut enumerate_roots) })
+            }
+            _ => None,
+        };
+        // After a minor the nursery is empty, so a major here only sees old
+        // objects — the spec's "minor first, then major if over threshold".
+        let needs_major = match minor {
+            None => true,
+            // gc-stress additionally forces a periodic major so the whole
+            // major path stays hammered, not just the minor path.
+            Some(out) => {
+                out.needs_major
+                    || (heap.stress_mode()
+                        && heap.minor_collections.load(Relaxed) % STRESS_MAJOR_EVERY == 0)
+            }
+        };
+        if needs_major {
+            unsafe { heap.collect::<M::R>(types, &mut enumerate_roots) };
         }
 
         // Dispatch caches hold impl pointers that just moved: invalidate them
         // (they refill on the next call). The registry, forwarded above, is truth.
         shared.tables.lock().unwrap().dispatch.on_gc();
-        // Epoch for per-site ICs: any cached heap pointer is now stale.
+        // Epoch for per-site ICs: any cached heap pointer is now stale. A MINOR
+        // moves objects too — promotion is a copy — so it must bump this exactly
+        // like a major does, and one bump covers a minor+major pair because
+        // nothing reads the epoch between them (the world is stopped).
         shared.relocated.fetch_add(1, Relaxed);
     }
 }

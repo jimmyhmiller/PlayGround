@@ -798,7 +798,38 @@ impl<M: ValueModel> Runtime<M> {
             &data.values(dinfo)[..len]
         }
     }
+    /// THE WRITE BARRIER, runtime-side (Stage I2). Remember that `g` — an
+    /// OBJECT BASE — was written, so a minor GC finds the young objects it now
+    /// names even though no root does.
+    ///
+    /// Every barriered site in this file goes through one of the three CHOKE
+    /// POINTS below (`arr_slice_mut`, `values_mut`, `arr_extend`) or the two
+    /// atom prims, rather than calling this directly at each store: an edge is
+    /// only lost ONCE and then corrupts the heap arbitrarily later, so the
+    /// invariant has to live where the capability is handed out, not where each
+    /// caller remembers it.
+    #[inline(always)]
+    pub(crate) fn write_barrier(&self, g: Gc) {
+        self.shared.heap.write_barrier(g);
+    }
+
+    /// The ATOM object behind `bits` — `ObjView::Atom` hands out the cell but
+    /// not the base, and the barrier marks the base.
+    fn atom_gc(&self, bits: u64, op: &str) -> Gc {
+        match self.decode(bits) {
+            Val::Ref(g) if unsafe { g.type_id() } == crate::heap::kind::ATOM => g,
+            _ => panic!("{op}: not an atom"),
+        }
+    }
+
     /// Mutate a growable array's live elements in place (`%aset`).
+    ///
+    /// BARRIERED: the words live in the DATA BLOB, so the blob — not the handle
+    /// — is the object that gets written and therefore the base that is marked.
+    /// The mark happens when the `&mut` is handed out rather than at each store
+    /// through it, which is what makes it impossible for a caller to forget;
+    /// the price is marking a card for a caller that only writes non-pointers
+    /// (a scan of that card's objects at the next minor, which finds nothing).
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub fn arr_slice_mut(&self, g: Gc) -> &mut [u64] {
@@ -808,6 +839,7 @@ impl<M: ValueModel> Runtime<M> {
             let len = g.aux() as usize;
             let data = M::R::as_ref(g.field(0));
             let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
+            self.write_barrier(data);
             &mut data.values_mut(dinfo)[..len]
         }
     }
@@ -815,16 +847,28 @@ impl<M: ValueModel> Runtime<M> {
     /// fields, a Values packet, ...) — the non-ARRAY mirror of `arr_slice_mut`
     /// (records/values are fixed-length once allocated, so there is no
     /// separate handle/data-blob split to go through).
+    ///
+    /// BARRIERED, on the same handing-out-the-capability principle. This is the
+    /// one that covers the F3 transients: a transient record can be PROMOTED
+    /// between two `assoc!`s, so from then on every in-place edit of it is an
+    /// old→young store.
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub(crate) fn values_mut(&self, g: Gc) -> &mut [u64] {
         let info = self.type_info(g);
+        self.write_barrier(g);
         unsafe { g.values_mut(info) }
     }
     /// Append `xs` to a growable array: within capacity, write into the blob
     /// and bump the handle's logical length; past it, allocate a doubled blob
     /// and re-point the handle (identity is the handle, so every reference
     /// observes the growth). Serialized by `heap_lock` against racing extends.
+    ///
+    /// BARRIERED on BOTH objects, because it writes both: `xs` goes into the
+    /// DATA BLOB (which an earlier minor may have promoted while `xs` is fresh
+    /// from the nursery), and the grow path re-points the HANDLE's field 0 at a
+    /// brand-new blob — a long-lived handle acquiring a young child, which is
+    /// the same shape as the atom swap! that beagle shipped.
     pub fn arr_extend(&self, g: Gc, xs: &[u64]) {
         use crate::heap::kind;
         let _lk = self.shared.heap_lock.lock().unwrap();
@@ -836,6 +880,7 @@ impl<M: ValueModel> Runtime<M> {
             let cap = data.aux() as usize;
             let need = len + xs.len();
             if need <= cap {
+                self.write_barrier(data);
                 data.values_mut(dinfo)[len..need].copy_from_slice(xs);
                 g.set_aux(need as u32);
                 return;
@@ -846,7 +891,10 @@ impl<M: ValueModel> Runtime<M> {
             let dst = ndata.values_mut(dinfo);
             dst[..len].copy_from_slice(&data.values(dinfo)[..len]);
             dst[len..need].copy_from_slice(xs);
+            // `ndata` is fresh (nursery), so its own initializing stores above
+            // need nothing; the handle is what may be old.
             g.set_field(0, M::R::enc_ref(ndata));
+            self.write_barrier(g);
             g.set_aux(need as u32);
         }
     }
@@ -2414,20 +2462,31 @@ impl<M: ValueModel> Runtime<M> {
                 };
                 a.load(Ordering::Acquire)
             }
+            // BEAGLE'S EXACT CRASH SHAPE: a long-lived (so, promoted) atom
+            // `swap!`-ed to a value freshly allocated this frame. The atom is
+            // then the ONLY reference to that young object and no root names
+            // it, so without the barrier the next minor reclaims it under the
+            // atom's feet. Both stores are barriered — a failed CAS wrote
+            // nothing, but marking a card costs one byte store and a spurious
+            // card scan, where reasoning about "did the CAS win" costs a bug.
             Prim::AtomSet => {
+                let g = self.atom_gc(args[0], "atom-set");
                 let ObjView::Atom(a) = self.view(args[0]) else {
                     panic!("atom-set: not an atom");
                 };
                 a.store(args[1], Ordering::Release);
+                self.write_barrier(g);
                 args[1]
             }
             Prim::AtomCas => {
+                let g = self.atom_gc(args[0], "atom-cas");
                 let ObjView::Atom(a) = self.view(args[0]) else {
                     panic!("atom-cas: not an atom");
                 };
                 let ok = a
                     .compare_exchange(args[1], args[2], Ordering::AcqRel, Ordering::Acquire)
                     .is_ok();
+                self.write_barrier(g);
                 M::R::enc_bool(ok)
             }
             Prim::Field => {

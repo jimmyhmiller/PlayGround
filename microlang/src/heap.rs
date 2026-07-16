@@ -1009,6 +1009,13 @@ impl Heap {
     pub fn verify_armed(&self) -> bool {
         self.verify
     }
+    /// gc-stress (`MICROLANG_GC_STRESS=1`). The runtime's collection policy
+    /// reads this to force a periodic MAJOR on top of the minor it runs at
+    /// every safepoint — a minor never flips the semi-spaces, so without that
+    /// the hammer would leave half the collector untouched.
+    pub fn stress_mode(&self) -> bool {
+        self.stress
+    }
     /// Arm/disarm verify mode (tests; the CLI leaves the env-var default).
     pub fn set_verify(&mut self, on: bool) {
         self.verify = on;
