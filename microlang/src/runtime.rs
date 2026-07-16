@@ -4789,6 +4789,23 @@ impl<M: ValueModel> Runtime<M> {
         }
     }
 
+    /// Materialize a DIRECT variadic call's rest arg from its evaluated args.
+    /// THE definition — every backend's frame builder calls this one, because
+    /// a second copy of this policy is a silent divergence between tiers.
+    ///
+    /// `apply` does NOT come through here: Clojure hands the applied seq to
+    /// the callee untouched (see `Prim::Apply`), and copying it into a fresh
+    /// spine here would break `identical?` and force lazy tails.
+    ///
+    /// NB: the shape must not depend on how MANY args there are. An earlier
+    /// attempt returned a chunked seq above a length threshold, which made
+    /// `(list? (apply list (range 3)))` true and `(list? (apply list (range
+    /// 100)))` false — a semantic that varies with arg count is a bug, however
+    /// fast it is.
+    pub(crate) fn mk_rest_seq(&mut self, xs: &[u64]) -> u64 {
+        self.vec_to_list(xs)
+    }
+
     /// Build a callee's FLAT activation frame from evaluated args. Slots
     /// `0..nparams` are the positional args; a variadic rest arg is the slot
     /// after them, holding the collected list; the remaining slots (up to
@@ -4820,8 +4837,8 @@ impl<M: ValueModel> Runtime<M> {
                 args.len()
             );
             slots.extend(args[..nparams].iter().map(|&a| AtomicU64::new(a)));
-            let restlist = self.vec_to_list(&args[nparams..]);
-            slots.push(AtomicU64::new(restlist));
+            let restseq = self.mk_rest_seq(&args[nparams..]);
+            slots.push(AtomicU64::new(restseq));
         } else {
             assert!(
                 args.len() == nparams,

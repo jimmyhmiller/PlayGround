@@ -2459,7 +2459,12 @@
 (defn delay? [x] (%num-eq (type-of x) 'Delay))
 (defn reduced? [x] (%num-eq (type-of x) 'Reduced))
 (defn realized? [x] true)
-(defn chunked-seq? [x] false)
+;; A ChunkedCons IS this dialect's chunked seq — the same object `chunk-first`/
+;; `chunk-rest` destructure and every `-radd-chunk`-style bulk loop branches on.
+;; Verified against real Clojure (tests/seq_oracle): true for `(seq (range n))`,
+;; `(seq (vec …))` and a forced chunking lazy seq; false for lists, conses,
+;; vectors, strings, nil, and an UNFORCED lazy seq.
+(defn chunked-seq? [x] (chunked? x))
 (defn special-symbol? [x] (not (nil? (some (fn [s] (= x s)) '(if do let* fn* quote def loop* recur throw try catch finally var set! new .)))))
 ;; real `record?` is defined below with the defrecord registry (-record-types).
 
@@ -2788,9 +2793,13 @@
 (defn promise [] (record 'Promise (atom '-unset) (atom false)))
 (defn deliver [p v] (if (deref (field p 1)) nil (do (reset! (field p 0) v) (reset! (field p 1) true) p)))
 (defn -await-promise [p] (loop [] (if (deref (field p 1)) (deref (field p 0)) (recur))))
+;; A LazySeq caches its realized flag in field 1 (see `-lazy-seq`), so this is
+;; a read, not an approximation. Reporting an UNFORCED lazy seq as realized —
+;; as this did — is exactly the lie that hides a missing force.
 (defn realized? [x]
   (cond (%num-eq (type-of x) 'Delay) (%cell-ref (field x 1) 0)
         (%num-eq (type-of x) 'Promise) (deref (field x 1))
+        (%num-eq (type-of x) 'LazySeq) (field x 1)
         :else true))
 
 ;; ─────────────── host-parity numerics + byte arrays ───────────────

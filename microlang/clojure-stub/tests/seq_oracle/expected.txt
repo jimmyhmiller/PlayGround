@@ -1,0 +1,44 @@
+direct/0-extra	[false false false false false]
+direct/1-extra	[true false true false true]
+direct/3-extra	[true false true false true]
+direct/40-extra	[true false false true true]
+req1/direct	[true false true false true]
+req2/direct	[true false true false true]
+apply/range-3	[true false true true true]
+apply/range-100	[true false true true true]
+apply/vec-100	[true false true true true]
+apply/list-100	[true true true false true]
+apply/lazy-map	[true false false true true]
+apply/empty-vec	[false false false false false]
+apply/nil	[false false false false false]
+apply/req1-range	[true false true true true]
+apply/leading+seq	[true false false false true]
+identical/range	true
+identical/lazy	false
+identical/list	true
+vals/direct	[4 5 6 8 [5 6 7]]
+vals/apply-range	[50 0 1 49 [0 1 2]]
+vals/apply-lazy	[50 1 2 50 [1 2 3]]
+vals/leading	[6 100 0 4 [100 0 1]]
+eq/rest-vs-list	true
+eq/rest-vs-vec	true
+rest-is-seqable	[1 2 3]
+empty-rest-nil	[true nil]
+chunked/range	true
+chunked/seq-range	true
+chunked/vec-seq	true
+chunked/list	false
+chunked/lazy-map	false
+chunked/seq-lazy-map	true
+chunked/cons	false
+chunked/nil	false
+chunked/vector	false
+chunked/string-seq	false
+counted/range	true
+counted/vec	true
+counted/list	true
+counted/lazy-map	false
+counted/cons	true
+counted/vec-seq	true
+lazy/unforced-after-apply	true
+lazy/forces-on-demand	true

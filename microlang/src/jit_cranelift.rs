@@ -2371,7 +2371,10 @@ impl<M: ModelArithJit> JitCranelift<M> {
         if variadic {
             assert!(args.len() >= nparams, "arity: expected at least {nparams}, got {}", args.len());
             f.slots.extend(args[..nparams].iter().map(|&a| AtomicU64::new(a)));
-            let rest = rt.vec_to_list(&args[nparams..]);
+            // Same rest-arg policy as `build_call_frame` — ONE definition, on
+            // the runtime. (This pooled-frame path is only a slot-allocation
+            // shortcut; it must not become a second set of call semantics.)
+            let rest = rt.mk_rest_seq(&args[nparams..]);
             f.slots.push(AtomicU64::new(rest));
         } else {
             assert!(args.len() == nparams, "arity: expected {nparams}, got {}", args.len());
