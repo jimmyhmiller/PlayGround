@@ -1,44 +1,58 @@
-;; Seq / rest-arg semantics probe — ONE file, run byte-identically by BOTH
-;; microclj and real JVM Clojure, and diffed line-for-line:
+;; Seq / rest-arg / identity probe — ONE file, run byte-identically by THREE
+;; runtimes and diffed line-for-line:
 ;;
 ;;   ./target/release/microclj --jit clojure-stub/tests/seq_oracle/probe.clj
-;;   cd /tmp && clojure -M .../clojure-stub/tests/seq_oracle/probe.clj
+;;   cd /tmp && clojure -M .../probe.clj                             -> expected.txt
+;;   cd /tmp && clojure -Sdeps '{:deps {org.clojure/clojurescript
+;;                {:mvn/version "1.11.132"}}}' -M -m cljs.main -re node -O none
+;;                -i .../probe.clj                                   -> expected_cljs.txt
 ;;
-;; Real Clojure IS the specification here, so the expected output is not
-;; hand-written — it is whatever `clojure` prints. `expected.txt` is that
-;; output, captured; `seq_oracle.rs` asserts microclj reproduces it exactly.
+;; (`seq_oracle/refresh.sh` does the latter two.) The specs are NOT hand-written
+;; — they are what those implementations actually print.
 ;;
-;; Scope: the observable shape of rest args and seqs. `class`/`type` are
-;; deliberately NOT probed — the host class names legitimately differ. What
-;; must match is every PREDICATE and value a Clojure program can branch on.
-
-(defn probe [xs]
-  [(seq? xs) (list? xs) (counted? xs) (chunked-seq? xs) (sequential? xs)])
+;; TWO specs because the rule is "match what Clojure and ClojureScript AGREE on;
+;; where they disagree it is a host artifact, not the language". See
+;; ../seq_oracle.rs. This is why nothing here probes `class`/`type`: host class
+;; names legitimately differ. What must match is every PREDICATE and value a
+;; program can branch on.
 
 (defn show [label v] (println (str label "\t" (pr-str v))))
 
-;; ── what a rest arg IS ────────────────────────────────────────────────
-(defn v [& xs] (probe xs))
-(defn v1 [a & xs] (probe xs))
-(defn v2 [a b & xs] (probe xs))
+;; ONE PREDICATE PER LINE, deliberately. These get classified against BOTH
+;; Clojure and ClojureScript, and the two hosts can legitimately disagree about
+;; one predicate of a value while agreeing about another: on `(apply f 1 2
+;; coll)` they disagree about `list?` (a host artifact) but AGREE that
+;; `counted?` is false. Bundling the five into one vector made that line
+;; unclassifiable — and hid a real microclj bug behind the artifact.
+(defn probe [label xs]
+  (show (str label "/seq?") (seq? xs))
+  (show (str label "/list?") (list? xs))
+  (show (str label "/counted?") (counted? xs))
+  (show (str label "/chunked?") (chunked-seq? xs))
+  (show (str label "/sequential?") (sequential? xs)))
 
-(show "direct/0-extra" (v))
-(show "direct/1-extra" (v 1))
-(show "direct/3-extra" (v 1 2 3))
-(show "direct/40-extra" (apply v (doall (map identity (range 40)))))
-(show "req1/direct" (v1 :a 1 2 3))
-(show "req2/direct" (v2 :a :b 1 2 3))
+;; ── what a rest arg IS ────────────────────────────────────────────────
+(defn v [lbl & xs] (probe lbl xs))
+(defn v1 [lbl a & xs] (probe lbl xs))
+(defn v2 [lbl a b & xs] (probe lbl xs))
+
+(v "direct/0-extra")
+(v "direct/1-extra" 1)
+(v "direct/3-extra" 1 2 3)
+(apply v "direct/40-extra" (doall (map identity (range 40))))
+(v1 "req1/direct" :a 1 2 3)
+(v2 "req2/direct" :a :b 1 2 3)
 
 ;; apply passes the seq THROUGH: the rest arg keeps the source's shape.
-(show "apply/range-3" (apply v (range 3)))
-(show "apply/range-100" (apply v (range 100)))
-(show "apply/vec-100" (apply v (vec (range 100))))
-(show "apply/list-100" (apply v (apply list (range 100))))
-(show "apply/lazy-map" (apply v (map inc (range 100))))
-(show "apply/empty-vec" (apply v []))
-(show "apply/nil" (apply v nil))
-(show "apply/req1-range" (apply v1 (range 100)))
-(show "apply/leading+seq" (apply v 1 2 (range 10)))
+(apply v "apply/range-3" (range 3))
+(apply v "apply/range-100" (range 100))
+(apply v "apply/vec-100" (vec (range 100)))
+(apply v "apply/list-100" (apply list (range 100)))
+(apply v "apply/lazy-map" (map inc (range 100)))
+(apply v "apply/empty-vec" [])
+(apply v "apply/nil" nil)
+(apply v1 "apply/req1-range" (range 100))
+(apply v "apply/leading+seq" 1 2 (range 10))
 
 ;; structure sharing: apply must not copy.
 (show "identical/range" (let [r (range 100)] (identical? r (apply (fn [& xs] xs) r))))

@@ -3089,11 +3089,42 @@ impl<M: ValueModel> Runtime<M> {
             // silently destroy the chunking.
             let need = nparams.saturating_sub(nlead);
             let (from_seq, tail) = self.seq_bounded_take(top, self.root_get(last_slot), need);
-            // Read the leading args AFTER that take: it forces lazy nodes, and
-            // forcing INVOKES user code — a safepoint that relocates every one
-            // of them. Values read before it are stale the moment it returns;
-            // the shadow stack is what the collector rewrites, so re-read from
-            // there. (`from_seq`/`tail` are the take's own fresh results.)
+            // NORMALIZE the tail to a seq — Clojure's rest arg is `next`-shaped.
+            // Only when we actually dropped something: with `need == 0` the tail
+            // IS the top-level `(seq last)` already, and re-seq'ing it would
+            // force a lazy node the callee has not asked for.
+            //
+            // This matters because `%cons` does NOT seq its tail (Clojure's
+            // `RT.cons` does), and core's `apply` conses the leading args on:
+            // `(apply f "L" (vec …))` reaches here as `(cons "L" <vector>)`, so
+            // dropping "L" leaves the raw VECTOR. Handing that over made the
+            // callee's rest arg a PersistentVector — `(seq? xs)` false.
+            //
+            // Everything the take produced rides the shadow stack across that
+            // invoke: it is a safepoint like any other force.
+            let scratch = self.root_depth();
+            for &e in &from_seq {
+                self.push_root(e);
+            }
+            let tail_slot = self.push_root(tail);
+            if need > 0 {
+                if let Some(sf) = self.seq_handler() {
+                    let t = self.root_get(tail_slot);
+                    let s = top.invoke(top, self, sf, &[t]);
+                    if self.pending() {
+                        self.truncate_roots(base);
+                        return ApplyPlan::Signal;
+                    }
+                    self.set_root(tail_slot, s);
+                }
+            }
+            let from_seq: Vec<u64> = (scratch..tail_slot).map(|i| self.root_get(i)).collect();
+            let tail = self.root_get(tail_slot);
+            self.truncate_roots(scratch);
+            // Read the leading args AFTER all of the above: forcing INVOKES user
+            // code — a safepoint that relocates every one of them. Values read
+            // before it are stale the moment it returns; the shadow stack is
+            // what the collector rewrites, so re-read from there.
             let leads: Vec<u64> = (lead_base..last_slot).map(|i| self.root_get(i)).collect();
             let mut fixed: Vec<u64> = Vec::with_capacity(nparams);
             fixed.extend_from_slice(&leads[..nparams.min(nlead)]);
