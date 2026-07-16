@@ -21,10 +21,16 @@ Fix: intern each special-form name **once** (lazy, cached in a static i64 cell) 
 are plain i64s, so there is no GC-root problem (a cached *boxed* symbol would be collected —
 it isn't a root). Effect at fib(30):
 
-| metric            | before  | after   |
-|-------------------|---------|---------|
-| allocations       | 377 M   | **237 M** (−37%) |
-| GC collections    | 19 047  | **11 972** (−37%) |
+| metric              | before  | after   |
+|---------------------|---------|---------|
+| fib(30) wall-clock  | 9.45 s  | **5.17 s** (1.83× faster) |
+| vs Chez (295 ms)    | 32.0×   | **17.5×** |
+| allocations         | 377 M   | **237 M** (−37%) |
+| GC collections      | 19 047  | **11 972** (−37%) |
+
+(Measured with hyperfine at load ~3; the pre-fix binary rebuilt from git for an
+apples-to-apples run. The wall-clock win exceeds the alloc drop because removing the
+per-dispatch `intern` also removes a linear symbol-table scan, not just an allocation.)
 
 ## What's left is genuinely the representation, not a bug
 
