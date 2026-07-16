@@ -815,11 +815,40 @@ unsafe impl Sync for CardTable {}
 const DEFAULT_SPACE_MB: usize = 4096;
 
 /// Default NURSERY size in MiB when `MICROLANG_NURSERY_MB` is unset. Every
-/// object is born here; a minor evacuates it whole. Small enough that a minor's
-/// live set is tiny and the space stays cache-resident, which is the entire
-/// point of Stage I — Stage H proved the wall is allocation throughput through
-/// virgin pages of a 4 GiB semi-space.
-const DEFAULT_NURSERY_MB: usize = 32;
+/// object is born here; a minor evacuates it whole. Stage I first shipped 32
+/// with a 50%-of-nursery trigger — but that is TWO mistakes for a fully
+/// evacuated space (not a flip semi-space, where 50% is right): it fires a
+/// minor every 16 MiB and leaves half the nursery cold. A minor's cost is the
+/// LIVE set it copies, not the dead garbage it skips, so a bigger nursery with
+/// a fill-it-up trigger cuts minor FREQUENCY without making any single minor
+/// more expensive — the win Stage I was supposed to deliver but the tuning
+/// undid. 64 MiB fills to `size - HEADROOM` before collecting.
+const DEFAULT_NURSERY_MB: usize = 64;
+
+/// Reserved tail of the nursery kept BELOW the soft trigger: the most a single
+/// expression can allocate between two safepoints (which is where a
+/// pressure-raised collection actually fires). A `%pv-from-array` / big-literal
+/// burst must still fit here after the trigger trips, or `alloc` hits the hard
+/// wall mid-expression. 16 MiB matches the headroom the original 32 MiB@50%
+/// default happened to leave, so this raises the fill fraction without
+/// shrinking the safety margin.
+const NURSERY_HEADROOM_MB: usize = 16;
+
+/// The nursery's soft trigger in bytes. An explicit `MICROLANG_GC_TRIGGER_PCT`
+/// (the stress/low-trigger tests) wins and applies as a percentage. Otherwise
+/// fill to `size - HEADROOM`, but never above half of a nursery too small to
+/// hold the headroom (the tiny test heaps), so it still collects.
+fn nursery_soft_limit(nursery_bytes: usize, pct_explicit: Option<usize>) -> usize {
+    if let Some(pct) = pct_explicit {
+        return nursery_bytes / 100 * pct;
+    }
+    let headroom = NURSERY_HEADROOM_MB << 20;
+    if nursery_bytes > headroom * 2 {
+        nursery_bytes - headroom
+    } else {
+        nursery_bytes / 2
+    }
+}
 
 /// Bits of the ONE cheap poll word (`Heap::poll`) every tier checks at its
 /// safepoints and the JIT polls from emitted code (Stage E). Bit 0 mirrors the
@@ -923,11 +952,11 @@ impl Heap {
     }
 
     pub fn with_sizes(old_bytes: usize, nursery_bytes: usize) -> Self {
-        let pct = std::env::var("MICROLANG_GC_TRIGGER_PCT")
+        let pct_explicit = std::env::var("MICROLANG_GC_TRIGGER_PCT")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
-            .filter(|p| (1..=100).contains(p))
-            .unwrap_or(50);
+            .filter(|p| (1..=100).contains(p));
+        let pct = pct_explicit.unwrap_or(50);
         let stress = std::env::var("MICROLANG_GC_STRESS").is_ok_and(|v| v != "0" && !v.is_empty());
         let spaces = [AtomicBumpAllocator::new(old_bytes), AtomicBumpAllocator::new(old_bytes)];
         // Sized for ONE old space (both are equal) and pointed at the active
@@ -951,7 +980,15 @@ impl Heap {
             last_live_bytes: AtomicUsize::new(0),
             window: AllocWindow::empty(),
             poll: AtomicU8::new(if stress { POLL_PRESSURE } else { 0 }),
-            soft_limit: AtomicUsize::new(nursery_bytes / 100 * pct),
+            // The NURSERY fills to `size - headroom` before a minor (it is
+            // evacuated whole, so filling it costs nothing extra — see
+            // DEFAULT_NURSERY_MB). An EXPLICIT `MICROLANG_GC_TRIGGER_PCT` still
+            // wins (the stress/low-trigger tests set it to 1), and a nursery too
+            // small to hold the headroom (the tiny test heaps) falls back to
+            // half-full so it still collects. The OLD gen keeps the percentage
+            // trigger: its threshold gates when a minor defers to a major, and
+            // leaving real headroom there is correct.
+            soft_limit: AtomicUsize::new(nursery_soft_limit(nursery_bytes, pct_explicit)),
             old_soft_limit: AtomicUsize::new(old_bytes / 100 * pct),
             stress,
         }

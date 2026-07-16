@@ -2751,25 +2751,24 @@ impl<M: ValueModel> Runtime<M> {
         top: &dyn crate::code::CodeSpace<M>,
         cur: u64,
     ) -> Option<Option<(u64, u64)>> {
-        // The lazy/frontend arm INVOKES the registered `seq` fn — a safepoint,
-        // which relocates `cur`. So the cursor rides the shadow stack and is
-        // re-read after the invoke. This also fixes the NO-PROGRESS check: it
-        // compares addresses, and comparing the post-invoke `forced` against a
-        // PRE-invoke `cur` would miss "seq returned the same node" whenever a
-        // collection moved it — looping forever instead of erroring loudly.
-        let slot = self.push_root(cur);
-        let out = loop {
-            let cur = self.root_get(slot);
-            // RAW dispatch (Stage F1): this runs once per SEQ ELEMENT.
+        // Only the LAZY/FRONTEND arm invokes (a safepoint that relocates `cur`);
+        // the CONS/chunked/nil arms neither allocate nor safepoint. This runs
+        // once per SEQ ELEMENT, so the common case must pay NO rooting — root
+        // ONLY across the invoke, not for the whole walk. (Stage J rooted the
+        // whole walk with a flat push_root per element on EVERY sequence, lazy
+        // or not; that showed up as the per-element tax on lazy-seq-heavy code
+        // like `interleave`.)
+        let mut cur = cur;
+        loop {
             if self.is_nil_bits(cur) {
-                break Some(None);
+                return Some(None);
             }
             match self.raw_gc(cur) {
                 Some(cid) => {
                     use crate::heap::kind;
                     match self.raw_type_id(cid) {
-                        kind::CONS => break Some(Some(unsafe { (cid.field(0), cid.field(1)) })),
-                        kind::EMPTY_LIST => break Some(None),
+                        kind::CONS => return Some(Some(unsafe { (cid.field(0), cid.field(1)) })),
+                        kind::EMPTY_LIST => return Some(None),
                         _ => {}
                     }
                     if let Some((arr, off, end, more)) = self.as_chunked(cur) {
@@ -2779,25 +2778,32 @@ impl<M: ValueModel> Runtime<M> {
                         } else {
                             more
                         };
-                        break Some(Some((h, t)));
+                        return Some(Some((h, t)));
                     }
-                    // Lazy / frontend node: force ONE step through the
-                    // registered `seq` and retry (it yields cons/chunked/nil).
-                    let Some(sf) = self.seq_handler() else { break None };
+                    // Lazy / frontend node: force ONE step through the registered
+                    // `seq` — an INVOKE (safepoint), so `cur` rides the shadow
+                    // stack ACROSS it and is re-read after. The no-progress check
+                    // compares the post-invoke `forced` against the RE-READ `cur`;
+                    // against a pre-invoke address it would miss "seq returned the
+                    // same node" whenever a collection moved it — looping forever
+                    // instead of erroring loudly. (`forced` is the invoke's return,
+                    // current with no safepoint before the next iteration reads it.)
+                    let Some(sf) = self.seq_handler() else { return None };
+                    let slot = self.push_root(cur);
                     let forced = top.invoke(top, self, sf, &[cur]);
+                    let cur_now = self.root_get(slot);
+                    self.truncate_roots(slot);
                     if self.pending() {
-                        break Some(None);
+                        return Some(None);
                     }
-                    if forced == self.root_get(slot) {
-                        break None; // seq made no progress: not a sequence
+                    if forced == cur_now {
+                        return None; // seq made no progress: not a sequence
                     }
-                    self.set_root(slot, forced);
+                    cur = forced;
                 }
-                None => break None,
+                None => return None,
             }
-        };
-        self.truncate_roots(slot);
-        out
+        }
     }
     /// Flatten a whole sequence (cons / chunked / lazy) into a Vec, forcing
     /// through the registered `seq` fn as needed. The general `apply` path.
