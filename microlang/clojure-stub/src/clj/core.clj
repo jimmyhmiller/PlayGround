@@ -799,29 +799,34 @@
 ;; `%range-fill` fills a whole chunk (up to 32 ints) in ONE native call instead of
 ;; 32 interpreted `%cell-set!` calls; `%alength` reads back how many it filled so
 ;; the in-language side never re-decides the stepping/bounds logic.
+;; The FIRST chunk is built eagerly and the TAIL stays lazy — so `(range n)` IS
+;; a seq (a ChunkedCons), not a LazySeq wrapping one. That is what Clojure's
+;; LongRange and ClojureScript's Range both are, and it is observable: a range
+;; must answer `chunked-seq?` true, and `(seq r)` must be `r` itself (so
+;; `(identical? r (apply (fn [& xs] xs) r))` holds, since apply shares the seq
+;; it is given). Wrapping in `lazy-seq` made `seq` force to a DIFFERENT object
+;; and both read false. The eager chunk is at most 32 elements; the tail is as
+;; lazy as it ever was, so `(range)` and `(range 1e9)` cost the same as before.
 (defn -range-inf [i]
-  (lazy-seq
-    ;; no upper bound: pass an `end` far enough away that the 32-element cap is
-    ;; always what stops the fill, never the (nonexistent) limit.
-    (let [arr (%range-fill i (%add i 64) 1)]
-      (record 'ChunkedCons arr 0 32 (-range-inf (%add i 32))))))
+  ;; no upper bound: pass an `end` far enough away that the 32-element cap is
+  ;; always what stops the fill, never the (nonexistent) limit.
+  (let [arr (%range-fill i (%add i 64) 1)]
+    (record 'ChunkedCons arr 0 32 (lazy-seq (-range-inf (%add i 32))))))
 (defn -range2 [i n]
-  (lazy-seq
-    (if (%lt i n)
-        (let [arr (%range-fill i n 1)
-              k (%alength arr)]
-          (record 'ChunkedCons arr 0 k (-range2 (%add i k) n)))
-        nil)))
+  (if (%lt i n)
+      (let [arr (%range-fill i n 1)
+            k (%alength arr)]
+        (record 'ChunkedCons arr 0 k (lazy-seq (-range2 (%add i k) n))))
+      nil))
 ;; 3-arg range handles BOTH directions: ascending while j<n (step>0), descending
 ;; while j>n (step<0). (The pre-chunking version was ascending-only, so
 ;; `(range 20 0 -1)` wrongly gave nil.)
 (defn -range3 [i n step]
-  (lazy-seq
-    (if (if (%lt 0 step) (%lt i n) (%lt n i))
-        (let [arr (%range-fill i n step)
-              k (%alength arr)]
-          (record 'ChunkedCons arr 0 k (-range3 (%add i (%mul k step)) n step)))
-        nil)))
+  (if (if (%lt 0 step) (%lt i n) (%lt n i))
+      (let [arr (%range-fill i n step)
+            k (%alength arr)]
+        (record 'ChunkedCons arr 0 k (lazy-seq (-range3 (%add i (%mul k step)) n step))))
+      nil))
 (defn range [& args]
   (cond (nil? (seq args)) (-range-inf 0)
         (nil? (next args)) (-range2 0 (first args))

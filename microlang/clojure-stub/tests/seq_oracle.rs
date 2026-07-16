@@ -33,18 +33,17 @@ use std::process::Command;
 /// AGREED lines where microclj still differs from both real implementations,
 /// and why. DELETE an entry when you fix it.
 const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    // ── `range` is a LazySeq, not a counted+chunked first-class Range ─────
-    // Clojure's LongRange and ClojureScript's Range agree: a range is CHUNKED,
-    // COUNTED, and is its OWN seq (so `(seq r)` is `r`, and `apply` passing it
-    // through keeps `identical?` true). Here `range` is a plain LazySeq whose
-    // `seq` forces to a different ChunkedCons object, so all of these read
-    // false. Fixing it is one type, and closes every line below.
-    ("chunked/range", "range is a LazySeq, not a chunked Range"),
-    ("counted/range", "range is a LazySeq, not a counted Range"),
-    ("identical/range", "range is a LazySeq; a real Range is its own seq"),
-    ("apply/range-3/counted?", "range is a LazySeq: its seq is an uncounted ChunkedCons"),
-    ("apply/range-100/counted?", "range is a LazySeq: its seq is an uncounted ChunkedCons"),
-    ("apply/req1-range/counted?", "range is a LazySeq: its seq is an uncounted ChunkedCons"),
+    // ── a range is chunked and is its own seq, but is not COUNTED ─────────
+    // Clojure's LongRange and ClojureScript's Range agree that a range is
+    // CHUNKED, COUNTED, and its OWN seq. The first and third now hold (the
+    // first chunk is built eagerly, so `(range n)` IS a ChunkedCons rather
+    // than a LazySeq wrapping one). `counted?` still does not: a ChunkedCons
+    // chain has no O(1) length, which is the one thing a real Range type
+    // would add.
+    ("counted/range", "a ChunkedCons chain has no O(1) count; a real Range would"),
+    ("apply/range-3/counted?", "a ChunkedCons chain has no O(1) count"),
+    ("apply/range-100/counted?", "a ChunkedCons chain has no O(1) count"),
+    ("apply/req1-range/counted?", "a ChunkedCons chain has no O(1) count"),
     // ── a direct variadic call conses instead of building an ArraySeq ─────
     // Clojure (ArraySeq) and ClojureScript (IndexedSeq) agree: a rest arg is
     // seq? true, counted? true, and list? FALSE. microclj conses, so only
