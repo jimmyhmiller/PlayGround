@@ -128,7 +128,13 @@
                  ~(tail-expr (code-nth e (- (code-count e) 1)) base mg))
         (if (code-eq h `let) (tail-let e base mg)
         (if (or (code-eq h `quote) (code-eq h `quasiquote)) `(do (gc-sp-set ~base) ~e)
-        (if (or (code-eq h `match) (or (code-eq h `loop) (or (code-eq h `break) (code-eq h `continue))))
+        ; Resetting the shadow stack BEFORE the call is only safe if the callee
+        ; re-roots its args before it can trigger a GC. Transformed functions do
+        ; (gc-root params on entry); non-allocating leaves never GC. But a base
+        ; ALLOCATOR (cons/mk-*) allocates WITHOUT rooting its args, so a tail call
+        ; to one must keep the args rooted across the call -> fall back (reset-after).
+        (if (or (code-eq h `match) (or (code-eq h `loop) (or (code-eq h `break) (or (code-eq h `continue)
+                (mg-member? h (base-allocs) 0 (code-count (base-allocs)))))))
             (tail-fallback e base mg)
           (tail-wrap-args h e 1 (code-count e) `() base mg)))))))))))
 
