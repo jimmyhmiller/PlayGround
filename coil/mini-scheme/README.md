@@ -25,3 +25,26 @@ garbage collector — heap references, allocation, and root management — autom
 Every result is identical to Chez Scheme. The headline is `fib 25`: **4,248,846 cells
 allocated, 214 collections, 20,000 peak live** — the transparent GC reclaims millions
 of allocations under real pressure, and the answer (`75025`) matches Chez exactly.
+
+## Benchmark (vs Chez Scheme)
+
+`./bench.sh` (needs hyperfine, `chez`, `petite`). mini-scheme is a naive tree-walking
+interpreter; Chez is a production native-code compiler; Petite is Chez's interpreter.
+Numbers below are startup-subtracted compute on **fib(30)** (2.7M calls, **47M heap
+allocations** in mini-scheme):
+
+| implementation                    | startup | fib(30) compute | vs mini-scheme  |
+|-----------------------------------|---------|-----------------|-----------------|
+| mini-scheme (tree-walker + GC)    | 1.8 ms  | ~2700 ms        | 1×              |
+| Petite Chez (interpreter)         | 24 ms   | ~33 ms          | ~82× faster     |
+| Chez (native compiler)            | 36 ms   | ~4 ms           | ~630× faster    |
+
+Two honest takeaways:
+
+- **The transparent metaprogram GC costs ~18% of runtime.** A no-collection build runs
+  fib(30) in 2.22 s vs 2.70 s with the collector on (47M allocations, 2381 collections,
+  20 000 peak live). The precise mark-sweep + shadow-stack the transform inserted is
+  cheap; the ~82× gap to Petite is the *interpreter design* (linear env lookups, boxed
+  integers, consed argument lists, tree-walking), not the GC or the metaprogram.
+- **mini-scheme starts up fastest** — it's a native binary; the Chez runtimes pay
+  20–36 ms of init before running anything.
