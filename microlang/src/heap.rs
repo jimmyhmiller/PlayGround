@@ -24,6 +24,28 @@
 //!   (D5) an inline allocation fast path; `limit = 0` is gc-stress mode
 //!   (every allocation takes the out-of-line slow path).
 //!
+//! Stage I makes the heap GENERATIONAL. Everything is born in a NURSERY (the
+//! only space `alloc` and the JIT's window ever bump) and is PROMOTED ON FIRST
+//! SURVIVAL into the old gen — which is the semi-space pair above, unchanged.
+//! Two collections now:
+//!
+//! - a MINOR (`collect_minor`) evacuates the nursery into the active old
+//!   space. Its root set is the caller's enumeration PLUS a scan of the old
+//!   gen's DIRTY CARDS, because an old object's field can name a young object
+//!   and no root does. That is the whole reason the write barrier exists.
+//! - a MAJOR (`collect`) is Stage D's Cheney over the old gen — extended to
+//!   treat the nursery as a second from-space, so it is a complete collection
+//!   in any heap state and needs no minor to run first.
+//!
+//! The invariant everything else rests on: **a minor fully evacuates the
+//! nursery**, so afterwards no old→young edge exists and clearing EVERY card
+//! is correct. It is also checkable, which is what makes this shippable: in
+//! verify mode a minor ends by walking the whole old gen and asserting that no
+//! object holds a nursery pointer. A missed barrier is otherwise silent and
+//! corrupts the heap arbitrarily later (beagle shipped exactly this bug and
+//! found it via a crash in unrelated code); here it dies naming the object,
+//! its type, the slot, and the target — at the collection that caused it.
+//!
 //! Object layout (all offsets from the object start):
 //!
 //! ```text
@@ -418,6 +440,33 @@ impl AtomicBumpAllocator {
         self.cursor.store(0, Ordering::Release);
     }
 
+    /// Why the NURSERY is only ever zeroed, never poisoned:
+    ///
+    /// Poison earns its keep on a semi-space, which sits idle until the next
+    /// flip and is refilled only by whole-object copies — the pattern survives
+    /// the whole idle window, so a stale read lands on it. The nursery is the
+    /// opposite: `alloc` bumps into it the instant we return and writes only
+    /// the header, promising the rest is zero (`alloc_closure` leans on that
+    /// directly — an unwritten code word MUST read 0, or the JIT's `code != 0`
+    /// guard would call into the pattern). Poisoning it would therefore have to
+    /// be undone by a zeroing pass in the same breath, under STW, with no
+    /// observation point in between: the stamp could never be read by anyone,
+    /// and it would cost a SECOND full-nursery memset on the hottest GC path.
+    ///
+    /// A stale nursery read is still loud without it: the zeroed header is
+    /// `type_id` 0 = `kind::INVALID`, which every reader already panics on.
+    /// So the nursery gets exactly one zeroing pass, in both modes.
+    ///
+    /// (Historical trap, fixed in Stage I: `reset_poisoned(); reset_zeroed();`
+    /// does NOT poison-then-zero — the first call clears the cursor, so the
+    /// second sees `used() == 0` and zeroes nothing. The old semi-space reset
+    /// read as "poison, then re-zero" and in fact left the space poisoned;
+    /// `alloc` then handed out non-zero memory after a flip.)
+    #[inline]
+    fn reset_nursery_space(&self) {
+        self.reset_zeroed();
+    }
+
     /// Bump-allocate `size` bytes (already 8-aligned). Returns null when the
     /// space is exhausted. Memory is NOT re-zeroed here: the space is zeroed
     /// at construction and re-zeroed by `reset_zeroed`, so a fresh claim is
@@ -487,13 +536,250 @@ impl AllocWindow {
     }
 }
 
-// ─── The heap: two spaces + Cheney evacuation ────────────────────────────
+// ─── Card table (Stage I) ────────────────────────────────────────────────
+
+/// 512 bytes of old gen per card — gc-rust's `card_table.rs` shift, and
+/// HotSpot's.
+pub const CARD_SHIFT: usize = 9;
+pub const CARD_SIZE: usize = 1 << CARD_SHIFT;
+pub const CARD_CLEAN: u8 = 0;
+pub const CARD_DIRTY: u8 = 1;
+
+/// A zeroed `Vec<AtomicU8>`, allocated the way the spaces are.
+///
+/// `vec![0u8; n]` routes to `alloc_zeroed`/calloc, whose large-allocation path
+/// is fresh mmap'd zero pages — reserved up front, COMMITTED LAZILY as touched.
+/// That matters because the tables are sized against the OLD GEN, which is
+/// multi-GiB by default (4 GiB/space = 8 MiB of cards + 64 MiB of start
+/// offsets). Building them element-by-element — the only way to `collect()` a
+/// `Vec` of atomics — would touch, and therefore commit, every one of those
+/// pages per `Runtime` before a single card is ever marked.
+fn zeroed_atomic_u8s(n: usize) -> Vec<AtomicU8> {
+    let mut v = std::mem::ManuallyDrop::new(vec![0u8; n]);
+    // SAFETY: AtomicU8 has the size and alignment of u8 and an all-zero byte
+    // is a valid AtomicU8, so the buffer — and the Layout it will be freed
+    // with — are identical under either element type.
+    unsafe { Vec::from_raw_parts(v.as_mut_ptr().cast::<AtomicU8>(), v.len(), v.capacity()) }
+}
+
+/// The same trick for the object-start index. See `zeroed_atomic_u8s`.
+fn zeroed_atomic_usizes(n: usize) -> Vec<AtomicUsize> {
+    let mut v = std::mem::ManuallyDrop::new(vec![0usize; n]);
+    // SAFETY: AtomicUsize has the size and alignment of usize and an all-zero
+    // word is a valid AtomicUsize.
+    unsafe { Vec::from_raw_parts(v.as_mut_ptr().cast::<AtomicUsize>(), v.len(), v.capacity()) }
+}
+
+/// The remembered set — and there is no other one.
+///
+/// beagle's post-mortem is the design here: its barrier pushed to a
+/// `dirty_card_indices` Vec AND a `remembered_set` Vec on every old→young
+/// store, unsynchronized, which is a real data race under ≥2 mutators. Lost
+/// edges → a young object referenced only from the old gen is never promoted →
+/// a stale/forwarded pointer surfaces as a crash in unrelated code. So:
+///
+/// - the card BYTE array is the single source of truth,
+/// - marked with ONE idempotent `Relaxed` store (concurrent same-value marks
+///   are benign; visibility comes from the STW safepoint, not a per-barrier
+///   fence — and NOT from a mutex, which Jimmy explicitly rejected),
+/// - dirty cards are DISCOVERED by scanning the array at STW, word-at-a-time.
+///   The table is 1/512 of the old gen; we never walk the old gen itself.
+///
+/// `starts` is what keeps the dirty-card scan O(dirty objects) instead of
+/// O(old gen). beagle needed a full Block Offset Table because its old gen is
+/// a free-list mark-and-sweep; ours is copying/compact, so objects run
+/// contiguously from base to `used` and "the object starts in this card" is a
+/// forward walk from one known offset. It is written ONLY at the placement
+/// chokepoint (`copy_or_forward`) and read ONLY at STW — the barrier never
+/// touches it, which is the property beagle's design lacked.
+pub struct CardTable {
+    cards: Vec<AtomicU8>,
+    /// Per card: 1 + the byte offset of the FIRST object that BEGINS in it, or
+    /// 0 for "no object begins here". The +1 bias is what lets the table be
+    /// `alloc_zeroed` (offset 0 is a real object start), and a dirty card whose
+    /// entry is 0 is a HARD PANIC — never a silent skip. That is sound only
+    /// because the barrier marks the OBJECT BASE, not the field address: an
+    /// object spanning cards 3..7 is only ever marked on card 3, so cards 4..6
+    /// are never dirtied without a start.
+    starts: Vec<AtomicUsize>,
+    /// Base of the ACTIVE old space. Re-pointed at every flip, under STW.
+    base: AtomicUsize,
+    /// Size of one old space, in bytes. Both are equal, so one table serves
+    /// whichever is active.
+    size: usize,
+    /// Exclusive high-water of every offset that has a `starts` entry. Nothing
+    /// above `scan_cards()` has ever been written, so the scans and clears
+    /// never touch — and so never commit — the lazily-reserved pages past it.
+    indexed: AtomicUsize,
+}
+
+impl CardTable {
+    fn new(base: usize, size: usize) -> Self {
+        let ncards = size.div_ceil(CARD_SIZE);
+        CardTable {
+            cards: zeroed_atomic_u8s(ncards),
+            starts: zeroed_atomic_usizes(ncards),
+            base: AtomicUsize::new(base),
+            size,
+            indexed: AtomicUsize::new(0),
+        }
+    }
+
+    /// THE write barrier. Mark the card holding `addr` — an OBJECT BASE —
+    /// dirty, if `addr` is in the old gen at all.
+    ///
+    /// One unsigned compare does both bounds: a nursery (or any non-old)
+    /// address wraps `addr - base` to a huge offset and fails `< size`. This is
+    /// the sequence the JIT mirrors inline in I3 (load base/size/cards from the
+    /// RunCtx, sub, unsigned compare, shift, byte store), so keep it this
+    /// shape.
+    #[inline(always)]
+    pub fn mark(&self, addr: usize) {
+        let off = addr.wrapping_sub(self.base.load(Ordering::Relaxed));
+        if off < self.size {
+            // SAFETY: `off < size` and `cards.len() == size.div_ceil(CARD_SIZE)`,
+            // so `off >> CARD_SHIFT < cards.len()`. The single compare above IS
+            // the bounds check; a second one is pure cost on the hot path.
+            unsafe { self.cards.get_unchecked(off >> CARD_SHIFT) }.store(CARD_DIRTY, Ordering::Relaxed);
+        }
+    }
+
+    /// Point the table at `space` (the active old space) after a flip. STW.
+    fn point_at(&self, space: &AtomicBumpAllocator) {
+        debug_assert_eq!(space.size(), self.size, "card table sized for a different old space");
+        self.base.store(space.base() as usize, Ordering::Release);
+    }
+
+    /// Record that an object BEGINS at old-gen byte `off`. Called once per
+    /// placement, from the collector only.
+    ///
+    /// Placement is bump allocation, so offsets ascend and the first object
+    /// placed in a card IS the first one that begins in it — the entry is
+    /// written once and never lowered.
+    #[inline]
+    fn record_start(&self, off: usize) {
+        let c = off >> CARD_SHIFT;
+        if self.starts[c].load(Ordering::Relaxed) == 0 {
+            self.starts[c].store(off + 1, Ordering::Relaxed);
+        }
+        if off + 1 > self.indexed.load(Ordering::Relaxed) {
+            self.indexed.store(off + 1, Ordering::Relaxed);
+        }
+    }
+
+    /// Byte offset of the first object beginning in card `c`, if any.
+    #[inline]
+    fn start_of(&self, c: usize) -> Option<usize> {
+        match self.starts[c].load(Ordering::Relaxed) {
+            0 => None,
+            biased => Some(biased - 1),
+        }
+    }
+
+    /// Every card index that could be dirty or indexed: nothing above the
+    /// active cursor or the recorded high-water has ever been written, because
+    /// the barrier only marks a real old object's BASE, which is below the
+    /// cursor by construction, and `record_start` only runs below it too.
+    /// Scanning or clearing the full table instead would touch — and so commit
+    /// — all 8 MiB of cards and 64 MiB of starts on every collection.
+    ///
+    /// A barrier called with a bogus address ABOVE this bound is therefore not
+    /// scanned. That loses nothing: there is no object up there to find an edge
+    /// from, and the edge that the call was *supposed* to remember is by
+    /// construction still unmarked — which the missed-barrier walk catches.
+    /// (A bogus address that lands below the bound hits `start_of`'s hard
+    /// panic.) Both bad-barrier shapes stay loud; neither is skipped silently.
+    fn scan_cards(&self, active_used: usize) -> usize {
+        active_used
+            .max(self.indexed.load(Ordering::Relaxed))
+            .div_ceil(CARD_SIZE)
+            .min(self.cards.len())
+    }
+
+    /// Call `f` with every dirty card index, ascending.
+    ///
+    /// WORD-AT-A-TIME: eight card bytes are read as one `u64` and the whole run
+    /// is skipped on zero — one compare instead of eight branches. beagle's
+    /// first cut scanned byte-by-byte into a per-GC `HashSet` and went
+    /// pathological under gc-stress (a collection per allocation).
+    ///
+    /// # Safety
+    /// STW: no mutator may be marking. The `u64` reads alias the `AtomicU8`
+    /// buffer, which is only race-free because nothing else is running.
+    unsafe fn for_each_dirty(&self, active_used: usize, mut f: impl FnMut(usize)) {
+        let n = self.scan_cards(active_used);
+        let p = self.cards.as_ptr().cast::<u8>();
+        let mut i = 0;
+        while i + 8 <= n {
+            // Unaligned: the table is a byte array, and on every target we
+            // care about this is one ordinary load.
+            if unsafe { p.add(i).cast::<u64>().read_unaligned() } == 0 {
+                i += 8;
+                continue;
+            }
+            for k in i..i + 8 {
+                if unsafe { *p.add(k) } != CARD_CLEAN {
+                    f(k);
+                }
+            }
+            i += 8;
+        }
+        while i < n {
+            if unsafe { *p.add(i) } != CARD_CLEAN {
+                f(i);
+            }
+            i += 1;
+        }
+    }
+
+    /// Clean every card. Correct unconditionally after a minor because the
+    /// minor fully evacuates the nursery, so no old→young edge survives it —
+    /// HotSpot-style selective card *cleaning* is moot here.
+    ///
+    /// # Safety
+    /// STW.
+    unsafe fn clear_cards(&self, active_used: usize) {
+        let n = self.scan_cards(active_used);
+        unsafe { std::ptr::write_bytes(self.cards.as_ptr() as *mut u8, CARD_CLEAN, n) };
+    }
+
+    /// Drop the object-start index. Only a MAJOR does this: it relocates every
+    /// object, so it rebuilds the index from scratch as it copies.
+    ///
+    /// # Safety
+    /// STW, and the caller must re-record every surviving object.
+    unsafe fn clear_starts(&self, active_used: usize) {
+        let n = self.scan_cards(active_used);
+        unsafe { std::ptr::write_bytes(self.starts.as_ptr() as *mut usize, 0, n) };
+        self.indexed.store(0, Ordering::Relaxed);
+    }
+
+    /// Base address of the card byte array — the JIT loads this into its
+    /// RunCtx mirror in I3.
+    pub fn card_base(&self) -> *const u8 {
+        self.cards.as_ptr().cast()
+    }
+}
+
+// SAFETY: `cards`/`starts` are atomics; `base` is atomic and written only at
+// STW flips. Everything except `mark` is STW-only.
+unsafe impl Send for CardTable {}
+unsafe impl Sync for CardTable {}
+
+// ─── The heap: nursery + old semi-spaces + Cheney evacuation ─────────────
 
 /// Default per-space size in MiB when `MICROLANG_HEAP_MB` is unset. Virtual
 /// reservation (lazily committed), so big is cheap; this is a CAP, and
 /// exhausting it is a loud panic (allocation never triggers GC here — the
 /// runtime's GC is explicit/safepoint-driven, unchanged from before).
 const DEFAULT_SPACE_MB: usize = 4096;
+
+/// Default NURSERY size in MiB when `MICROLANG_NURSERY_MB` is unset. Every
+/// object is born here; a minor evacuates it whole. Small enough that a minor's
+/// live set is tiny and the space stays cache-resident, which is the entire
+/// point of Stage I — Stage H proved the wall is allocation throughput through
+/// virgin pages of a 4 GiB semi-space.
+const DEFAULT_NURSERY_MB: usize = 32;
 
 /// Bits of the ONE cheap poll word (`Heap::poll`) every tier checks at its
 /// safepoints and the JIT polls from emitted code (Stage E). Bit 0 mirrors the
@@ -503,30 +789,68 @@ const DEFAULT_SPACE_MB: usize = 4096;
 pub const POLL_REQUESTED: u8 = 1;
 pub const POLL_PRESSURE: u8 = 2;
 
-/// The Stage-D heap: two equal bump spaces, explicit Cheney evacuation, flip
-/// and reuse. Shared across mutator threads (allocation is an atomic bump);
-/// `collect` must run under the runtime's existing STW discipline (all other
-/// mutators parked, heap_lock held).
+/// What a minor GC did, and what the caller must do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinorOutcome {
+    /// Bytes copied out of the nursery into the old gen.
+    pub promoted_bytes: usize,
+    /// The old gen crossed its own soft threshold, so promotion is now the
+    /// thing filling the heap: follow with `collect` (a major). Safe to do
+    /// immediately — the nursery is empty, so the major only sees old objects.
+    pub needs_major: bool,
+}
+
+/// The Stage-I heap: a nursery every object is born in, plus Stage D's two
+/// equal old bump spaces with Cheney evacuation, flip and reuse. Shared across
+/// mutator threads (allocation is an atomic bump); `collect`/`collect_minor`
+/// must run under the runtime's existing STW discipline (all other mutators
+/// parked, heap_lock held).
 pub struct Heap {
+    /// The NURSERY: the ONE space `alloc` and the JIT's inline window bump
+    /// into. Everything is born here and either dies or is promoted on its
+    /// first survival — there are no survivor spaces and no age field (the
+    /// header's `spare` stays free). That is what makes "the nursery is empty
+    /// after a minor" an invariant, which is what makes clearing every card
+    /// correct and the missed-barrier walk exact. Aging is a later tuning
+    /// refinement; the invariant comes first.
+    nursery: AtomicBumpAllocator,
+    /// The OLD gen: Stage D's semi-space pair, unchanged. Only the collector
+    /// fills it — a minor appends promoted objects to the active space, a major
+    /// Cheney-copies that space into the other and flips.
     spaces: [AtomicBumpAllocator; 2],
     /// Index of the active (from) space. Flipped only under STW.
     active: AtomicUsize,
-    /// Armed: poison evacuated space, check every traced slot's target header.
+    /// Old→young edges, one byte per 512-byte card of the ACTIVE old space.
+    cards: CardTable,
+    /// Armed: poison evacuated space, check every traced slot's target header,
+    /// and walk the old gen after every minor hunting a missed barrier.
     verify: bool,
+    /// Total collections, minor + major. (Stage D/E callers count `collect`
+    /// calls with this; it keeps meaning "how many times did the GC run".)
     pub collections: AtomicU64,
-    /// Live bytes copied by the last collection.
+    pub minor_collections: AtomicU64,
+    pub major_collections: AtomicU64,
+    /// Bytes copied out of the nursery into the old gen, all time.
+    pub promoted_bytes: AtomicU64,
+    /// Live bytes copied by the last MAJOR collection.
     pub last_live_bytes: AtomicUsize,
-    /// The JIT's inline-allocation mirror (D5); re-pointed at every flip.
+    /// The JIT's inline-allocation mirror (D5). It points at the NURSERY, which
+    /// never flips — so unlike Stage D it is armed once and never re-pointed.
+    /// The D5 inline sequence is unchanged; it just bumps a different space.
     pub window: AllocWindow,
     /// The safepoint poll word (`POLL_*` bits). Allocation sets PRESSURE when
     /// it crosses `soft_limit`; the STW rendezvous mirrors REQUESTED here so
     /// one byte answers "should this safepoint do anything".
     pub poll: AtomicU8,
-    /// Soft trigger in bytes (`MICROLANG_GC_TRIGGER_PCT` of a space, default
-    /// 50%). Atomic so tests can lower it on a live heap. Allocation NEVER
-    /// collects and never fails before the hard wall — crossing this only
+    /// Soft trigger in bytes (`MICROLANG_GC_TRIGGER_PCT` of the NURSERY,
+    /// default 50%). Atomic so tests can lower it on a live heap. Allocation
+    /// NEVER collects and never fails before the hard wall — crossing this only
     /// raises the pressure bit for the next safepoint.
     soft_limit: AtomicUsize,
+    /// The same trigger for the OLD gen (percent of one old space). A minor
+    /// promotes into the old gen, so the old gen fills too; crossing this is
+    /// what `MinorOutcome::needs_major` reports.
+    old_soft_limit: AtomicUsize,
     /// gc-stress (`MICROLANG_GC_STRESS=1`): the pressure bit is permanently
     /// set, so every safepoint collects. The bug hammer.
     stress: bool,
@@ -545,29 +869,50 @@ impl Heap {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(DEFAULT_SPACE_MB);
-        Self::with_space_size(mb << 20)
+        let nmb = std::env::var("MICROLANG_NURSERY_MB")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_NURSERY_MB);
+        Self::with_sizes(mb << 20, nmb << 20)
     }
 
+    /// The test constructor: `bytes` sizes the nursery AND each old semi-space
+    /// alike, so a small heap collects (and exhausts) at a predictable point.
     pub fn with_space_size(bytes: usize) -> Self {
+        Self::with_sizes(bytes, bytes)
+    }
+
+    pub fn with_sizes(old_bytes: usize, nursery_bytes: usize) -> Self {
         let pct = std::env::var("MICROLANG_GC_TRIGGER_PCT")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|p| (1..=100).contains(p))
             .unwrap_or(50);
         let stress = std::env::var("MICROLANG_GC_STRESS").is_ok_and(|v| v != "0" && !v.is_empty());
+        let spaces = [AtomicBumpAllocator::new(old_bytes), AtomicBumpAllocator::new(old_bytes)];
+        // Sized for ONE old space (both are equal) and pointed at the active
+        // one; the flip re-points it. `AtomicBumpAllocator::new` rounds, so
+        // take the size it actually reserved rather than the request.
+        let cards = CardTable::new(spaces[0].base() as usize, spaces[0].size());
         // The window stays EMPTY (limit 0 = closed, every inline allocation
         // takes the slow path) until `arm_window` — the cursor mirror is a
         // pointer INTO this struct's inline spaces, so arming here would
         // dangle the moment the constructed Heap is moved to its final home.
         Heap {
-            spaces: [AtomicBumpAllocator::new(bytes), AtomicBumpAllocator::new(bytes)],
+            nursery: AtomicBumpAllocator::new(nursery_bytes),
+            spaces,
             active: AtomicUsize::new(0),
+            cards,
             verify: verify_armed_default(),
             collections: AtomicU64::new(0),
+            minor_collections: AtomicU64::new(0),
+            major_collections: AtomicU64::new(0),
+            promoted_bytes: AtomicU64::new(0),
             last_live_bytes: AtomicUsize::new(0),
             window: AllocWindow::empty(),
             poll: AtomicU8::new(if stress { POLL_PRESSURE } else { 0 }),
-            soft_limit: AtomicUsize::new(bytes / 100 * pct),
+            soft_limit: AtomicUsize::new(nursery_bytes / 100 * pct),
+            old_soft_limit: AtomicUsize::new(old_bytes / 100 * pct),
             stress,
         }
     }
@@ -577,7 +922,7 @@ impl Heap {
     /// the window's cursor pointer is only stable from then on. (Collections
     /// re-point it at every flip.)
     pub fn arm_window(&self) {
-        self.window.point_at(self.from_space(), self.window_limit());
+        self.window.point_at(&self.nursery, self.window_limit());
     }
 
     /// The window's allocation limit: the SOFT trigger, not the space size —
@@ -585,7 +930,59 @@ impl Heap {
     /// raises the pressure bit (Stage E). That is how JIT-allocated garbage
     /// drives collections without any extra emitted code per allocation.
     fn window_limit(&self) -> usize {
-        self.soft_limit.load(Ordering::Relaxed).min(self.from_space().size())
+        self.soft_limit.load(Ordering::Relaxed).min(self.nursery.size())
+    }
+
+    /// The nursery — where every object is born and the window points.
+    #[inline(always)]
+    pub fn nursery(&self) -> &AtomicBumpAllocator {
+        &self.nursery
+    }
+    /// The remembered set. `write_barrier` is the entry point callers want;
+    /// this is here for the JIT's RunCtx mirror (I3).
+    #[inline(always)]
+    pub fn card_table(&self) -> &CardTable {
+        &self.cards
+    }
+    /// Base of the active old space — the JIT mirrors this next to the
+    /// AllocWindow for its inline card mark (I3), re-read at every flip.
+    #[inline(always)]
+    pub fn old_base(&self) -> *mut u8 {
+        self.from_space().base()
+    }
+    /// Size of one old space, the other half of the barrier's single unsigned
+    /// bounds compare (I3).
+    #[inline(always)]
+    pub fn old_size(&self) -> usize {
+        self.from_space().size()
+    }
+    /// Base of the card byte array (I3).
+    #[inline(always)]
+    pub fn card_base(&self) -> *const u8 {
+        self.cards.card_base()
+    }
+
+    /// THE WRITE BARRIER. Call this AFTER storing a heap pointer into a field
+    /// of `obj` — `obj` being the OBJECT BASE, never the field address.
+    ///
+    /// Needed on every store into an object that might be OLD: `Gc::set_field`,
+    /// `values_mut`/`arr_slice_mut` element stores, the atom store/CAS (a
+    /// long-lived atom `swap!`-ed to a fresh young value every frame is
+    /// beagle's exact crash shape), `arr_extend`, the transient in-place edits,
+    /// and the JIT's inline `aset` arm. (I2/I3 route those; I1 only provides
+    /// the entry point.)
+    ///
+    /// NOT needed for the initializing stores of a freshly allocated object: it
+    /// is in the nursery by construction, so those are young→anything. That is
+    /// what keeps the D5 inline allocation sequences barrier-free — the hot
+    /// paths pay nothing.
+    ///
+    /// Marking the base rather than the field is what makes the dirty-card scan
+    /// tractable: a dirty card then always has an object starting in it, so
+    /// `starts` needs one entry per card and a missing one is a real bug.
+    #[inline(always)]
+    pub fn write_barrier(&self, obj: Gc) {
+        self.cards.mark(obj.addr());
     }
 
     #[inline(always)]
@@ -597,7 +994,16 @@ impl Heap {
         &self.spaces[1 - self.active.load(Ordering::Acquire)]
     }
 
+    /// Bytes held across the WHOLE heap: the nursery's fill plus the old gen's.
     pub fn used(&self) -> usize {
+        self.nursery.used() + self.from_space().used()
+    }
+    /// Bytes allocated in the nursery since the last collection.
+    pub fn nursery_used(&self) -> usize {
+        self.nursery.used()
+    }
+    /// Bytes of promoted objects in the active old space.
+    pub fn old_used(&self) -> usize {
         self.from_space().used()
     }
     pub fn verify_armed(&self) -> bool {
@@ -608,15 +1014,25 @@ impl Heap {
         self.verify = on;
     }
 
-    /// Does `ptr` lie in the active space? (Verify-mode stale-pointer check.)
+    /// Does `ptr` name live heap — the nursery or the active old space?
+    /// (Verify-mode stale-pointer check.)
     pub fn contains(&self, ptr: *const u8) -> bool {
-        self.from_space().contains(ptr)
+        self.nursery.contains(ptr) || self.from_space().contains(ptr)
+    }
+    /// Is `ptr` young? The one question a minor asks of every traced slot.
+    #[inline(always)]
+    pub fn nursery_contains(&self, ptr: *const u8) -> bool {
+        self.nursery.contains(ptr)
     }
 
-    /// Allocate an object of type `info` with varlen length `aux`; the header
-    /// is written, everything else is zero. Panics loudly on exhaustion —
-    /// allocation NEVER triggers a collection (the runtime's GC is explicit /
-    /// safepoint-driven; stack maps are future work).
+    /// Allocate an object of type `info` with varlen length `aux` IN THE
+    /// NURSERY; the header is written, everything else is zero. Panics loudly
+    /// on exhaustion — allocation NEVER triggers a collection (the runtime's GC
+    /// is explicit / safepoint-driven).
+    ///
+    /// Nothing is ever allocated straight into the old gen: promotion is the
+    /// only way in. That is what lets the initializing stores of a fresh object
+    /// skip the write barrier.
     #[inline]
     pub fn alloc(&self, info: &TypeInfo, aux: u32) -> Gc {
         assert!(aux <= MAX_AUX, "heap: varlen length {aux} exceeds MAX_AUX");
@@ -626,12 +1042,12 @@ impl Heap {
             info.name
         );
         let size = info.allocation_size(aux);
-        let space = self.from_space();
+        let space = &self.nursery;
         let p = space.alloc_raw(size);
         if p.is_null() {
             panic!(
-                "heap space exhausted ({} MiB used of {} MiB): raise MICROLANG_HEAP_MB \
-                 (allocation never collects; collections run at safepoints)",
+                "heap space exhausted: nursery full ({} MiB of {} MiB): raise \
+                 MICROLANG_NURSERY_MB (allocation never collects; collections run at safepoints)",
                 space.used() >> 20,
                 space.size() >> 20
             );
@@ -655,9 +1071,38 @@ impl Heap {
         self.window.limit.store(self.window_limit(), Ordering::Release);
     }
 
-    /// Cheney evacuation. `roots` must enumerate EVERY live root slot (the
+    /// Lower/raise the OLD gen's soft threshold — what `MinorOutcome`
+    /// reports against. Bytes, per old space.
+    pub fn set_old_trigger_bytes(&self, bytes: usize) {
+        self.old_soft_limit.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Can a minor's promotions fit in what is left of the old space?
+    ///
+    /// A minor copies each live nursery object at exactly the size it already
+    /// occupies, so promoted bytes ≤ `nursery.used()`. When this holds the
+    /// minor CANNOT exhaust the old space — which is why `collect_minor` needs
+    /// no mid-evacuation escape hatch (there is no safe one: the object graph
+    /// is half-forwarded at that point).
+    pub fn minor_will_fit(&self) -> bool {
+        self.nursery.used() <= self.from_space().remaining()
+    }
+
+    /// A MAJOR collection: Cheney evacuation of the whole live set into the old
+    /// to-space, then flip. `roots` must enumerate EVERY live root slot (the
     /// runtime's shadow stacks, globals, consts, frames, published mutator
     /// roots …); each slot is rewritten in place when its target moves.
+    ///
+    /// This is Stage D/E's `collect` and still means "collect EVERYTHING": it
+    /// treats the nursery as a second from-space, so it is complete in any heap
+    /// state and needs no minor to run first. That matters twice — it is what
+    /// the explicit `(gc)` prim wants, and it is the answer when
+    /// `minor_will_fit` says no (a minor into a nearly-full old space would be
+    /// pointless anyway: this reclaims the old garbage AND the nursery in one
+    /// pass, rather than promoting survivors twice).
+    ///
+    /// Afterwards the nursery is empty, every card is clean, and the object
+    /// start index is rebuilt against the new active space.
     ///
     /// # Safety
     /// Stop-the-world: no other thread may read or mutate the heap during
@@ -670,6 +1115,15 @@ impl Heap {
         let from = self.from_space();
         let to = self.to_space();
         debug_assert_eq!(to.used(), 0, "to-space not empty at collection start");
+
+        // A major relocates every object, so the start index it inherits is
+        // about to be meaningless: drop it now and let `copy_or_forward` rebuild
+        // it against to-space as it places. The dirty marks go too — a major
+        // scans everything, so no card can survive it.
+        unsafe {
+            self.cards.clear_cards(from.used());
+            self.cards.clear_starts(from.used());
+        }
 
         // Phase 1: forward the roots.
         enumerate_roots(&mut |slot| unsafe { self.process_slot::<P>(types, from, to, slot) });
@@ -693,27 +1147,254 @@ impl Heap {
             scan += info.allocation_size(header_aux(hdr));
         }
 
-        // Phase 3: flip. The old from-space is re-zeroed (or poisoned when
-        // verify is armed) and becomes the next to-space.
+        // Phase 3: flip. The evacuated old from-space becomes the next
+        // to-space; the nursery restarts at zero.
         self.last_live_bytes.store(to.used(), Ordering::Relaxed);
         if self.verify {
+            // Stage I: the poison now STAYS. `alloc` no longer touches this
+            // space — the nursery serves every allocation and only whole-object
+            // copies ever land here — so the space can sit poisoned for its
+            // entire idle window, which is what the poison is for: a stale
+            // pointer into it reads type_id 0x5A5A instead of recycled memory.
             from.reset_poisoned();
-            // A poisoned space must still hand out ZEROED memory when it next
-            // becomes from-space; re-zero now (still under STW, so this is
-            // simply eager instead of lazy).
-            from.reset_zeroed();
         } else {
             from.reset_zeroed();
         }
+        self.reset_nursery();
         self.active.store(1 - self.active.load(Ordering::Acquire), Ordering::Release);
+        // The card table follows the flip; the start index it now holds was
+        // rebuilt above, in to-space offsets, and to-space is the active space
+        // from this store on. Offsets are base-agnostic, which is why the
+        // rebuild could run before the flip.
+        self.cards.point_at(self.from_space());
         self.collections.fetch_add(1, Ordering::Relaxed);
-        self.window.point_at(self.from_space(), self.window_limit());
+        self.major_collections.fetch_add(1, Ordering::Relaxed);
+        // The window is NOT re-pointed: it names the nursery, which does not
+        // flip. Only the limit can move (`set_trigger_bytes`).
         // Pressure is spent: this collection was the response. It re-arms when
         // an allocation crosses the soft threshold again (immediately, if the
         // live set alone exceeds it — the heap is genuinely tight then). In
         // stress mode the bit stays up so EVERY safepoint keeps collecting.
         if !self.stress {
             self.poll.fetch_and(!POLL_PRESSURE, Ordering::Relaxed);
+        }
+    }
+
+    /// A MINOR collection: evacuate the live nursery into the ACTIVE old space,
+    /// promoting on first survival. This is the hot path Stage I exists for —
+    /// it copies only what survived a 32 MiB nursery, never the accumulated
+    /// live set.
+    ///
+    /// The root set is `enumerate_roots` PLUS the old gen's DIRTY CARDS: an old
+    /// object's field can be the only reference to a young object, and no root
+    /// names it. Missing that edge is the bug this whole stage is built around.
+    ///
+    /// Afterwards: the nursery is empty, every card is clean, and the start
+    /// index covers the promoted range.
+    ///
+    /// The caller owns the policy, in two pieces:
+    /// - BEFORE: if `minor_will_fit()` is false, call `collect` instead. A
+    ///   minor cannot grow the old space, and there is no safe way to bail out
+    ///   half-way through an evacuation. Calling anyway is a loud panic.
+    /// - AFTER: if the returned `needs_major` is set, follow with `collect`.
+    ///   The nursery is empty at that point, so the major only sees old
+    ///   objects — this is the spec's "minor first, then major if over
+    ///   threshold".
+    ///
+    /// # Safety
+    /// Stop-the-world, as `collect`.
+    pub unsafe fn collect_minor<P: PtrPolicy>(
+        &self,
+        types: &[TypeInfo],
+        enumerate_roots: &mut dyn FnMut(&mut dyn FnMut(*mut u64)),
+    ) -> MinorOutcome {
+        let old = self.from_space();
+        assert!(
+            self.minor_will_fit(),
+            "minor GC: {} bytes of nursery would not fit in the old space's {} remaining bytes. \
+             Promotion cannot fail half-way (the graph is already part-forwarded), so the caller \
+             must check `minor_will_fit()` and run `collect` (a major) instead.",
+            self.nursery.used(),
+            old.remaining()
+        );
+        // Everything already in the old gen sits below this; everything the
+        // minor promotes lands at or above it. It bounds the dirty-card walk
+        // (promoted objects are scanned by the Cheney phase, not as old
+        // objects) and starts the Cheney scan.
+        let promote_from = old.used();
+
+        // Phase 1: promote from the roots.
+        enumerate_roots(&mut |slot| unsafe { self.promote_slot::<P>(types, old, slot) });
+
+        // Phase 2: the OTHER root set — old objects that were written since the
+        // last collection. This is the only thing standing between a young
+        // object reachable solely from the old gen and oblivion.
+        unsafe { self.scan_dirty_cards::<P>(types, old, promote_from) };
+
+        // Phase 3: Cheney scan over the promoted range — promotion appends, so
+        // this walks forward over objects whose own fields may still name
+        // nursery objects that must be promoted transitively.
+        let mut scan = promote_from;
+        while scan < old.used() {
+            let obj = Gc(unsafe { old.base().add(scan) });
+            let hdr = unsafe { obj.header() };
+            debug_assert_eq!(hdr & FORWARDING_BIT, 0, "forwarded header among promoted objects");
+            let tid = header_type_id(hdr) as usize;
+            assert!(
+                tid != 0 && tid < types.len(),
+                "GC: promoted object at {:p} has type_id {tid} out of range — heap corruption",
+                obj.0
+            );
+            let info = &types[tid];
+            unsafe {
+                scan_object(obj, info, |slot| self.promote_slot::<P>(types, old, slot));
+            }
+            scan += info.allocation_size(header_aux(hdr));
+        }
+
+        let promoted = old.used() - promote_from;
+        // THE missed-barrier detector. The invariant is exact — a minor fully
+        // evacuates the nursery — so any surviving old→young pointer means an
+        // edge was never card-marked. Run it before the nursery reset, while
+        // the target is still a readable object we can name.
+        if self.verify {
+            unsafe { self.verify_no_old_to_young::<P>(types) };
+        }
+        self.reset_nursery();
+        // Correct unconditionally: the nursery is empty, so no old→young edge
+        // exists to remember.
+        unsafe { self.cards.clear_cards(old.used()) };
+
+        self.promoted_bytes.fetch_add(promoted as u64, Ordering::Relaxed);
+        self.collections.fetch_add(1, Ordering::Relaxed);
+        self.minor_collections.fetch_add(1, Ordering::Relaxed);
+        if !self.stress {
+            self.poll.fetch_and(!POLL_PRESSURE, Ordering::Relaxed);
+        }
+        MinorOutcome {
+            promoted_bytes: promoted,
+            needs_major: old.used() > self.old_soft_limit.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Empty the nursery: one zeroing pass, in both modes. See
+    /// `reset_nursery_space` for why poison would be unobservable here (and
+    /// would cost a second full-nursery memset on the hottest GC path).
+    fn reset_nursery(&self) {
+        self.nursery.reset_nursery_space();
+    }
+
+    /// Promote one traced slot: if it points into the NURSERY, copy the target
+    /// into the old gen and rewrite the slot. Old-gen targets stay put — a
+    /// minor moves nothing that is already old.
+    unsafe fn promote_slot<P: PtrPolicy>(&self, types: &[TypeInfo], old: &AtomicBumpAllocator, slot: *mut u64) {
+        let bits = unsafe { *slot };
+        if let Some(ptr) = P::try_decode_ptr(bits) {
+            if self.nursery.contains(ptr) {
+                let new = unsafe { self.copy_or_forward(types, old, ptr) };
+                unsafe { *slot = P::encode_ptr(new) };
+            } else if self.verify && !old.contains(ptr) {
+                panic!(
+                    "GC verify: traced slot holds {bits:#x} -> {ptr:p}, in neither the nursery nor \
+                     the old gen (stale pointer or non-pointer decoded as a ref)"
+                );
+            }
+        }
+    }
+
+    /// Walk the old objects living in dirty cards and promote whatever young
+    /// objects they name. `old_end` is the old space's fill BEFORE this minor
+    /// promoted anything — objects above it are promotions, and the Cheney
+    /// phase owns those.
+    unsafe fn scan_dirty_cards<P: PtrPolicy>(
+        &self,
+        types: &[TypeInfo],
+        old: &AtomicBumpAllocator,
+        old_end: usize,
+    ) {
+        let base = old.base();
+        unsafe {
+            self.cards.for_each_dirty(old_end, |c| {
+                let Some(start) = self.cards.start_of(c) else {
+                    // Never a silent skip. The barrier marks object BASES, so a
+                    // dirty card must contain one; if it does not, someone
+                    // barriered a field address, an interior pointer, or an
+                    // address outside the old gen — and some other card that
+                    // SHOULD be dirty probably is not.
+                    panic!(
+                        "GC: dirty card {c} (old-gen bytes {}..{}) has no object start in the \
+                         index. The barrier marks the OBJECT BASE, so every dirty card must have \
+                         one — a barrier was called with a field address or a non-old-gen address.",
+                        c << CARD_SHIFT,
+                        (c + 1) << CARD_SHIFT
+                    );
+                };
+                // The card's objects, and only them: an object BEGINNING in this
+                // card is scanned whole even if it runs past the card's end.
+                let card_end = ((c + 1) << CARD_SHIFT).min(old_end);
+                let mut off = start;
+                while off < card_end {
+                    let obj = Gc(base.add(off));
+                    let hdr = obj.header();
+                    let tid = header_type_id(hdr) as usize;
+                    assert!(
+                        tid != 0 && tid < types.len(),
+                        "GC: dirty-card walk found type_id {tid} at old-gen offset {off} — the \
+                         object start index does not match the heap"
+                    );
+                    let info = &types[tid];
+                    scan_object(obj, info, |slot| self.promote_slot::<P>(types, old, slot));
+                    off += info.allocation_size(header_aux(hdr));
+                }
+            })
+        }
+    }
+
+    /// After a minor, NO old object may hold a nursery pointer: the minor
+    /// evacuated the nursery whole, so such a pointer is a dangling reference
+    /// to memory we just recycled, and it exists only because the store that
+    /// created the edge never marked the card.
+    ///
+    /// This is O(old gen), hence verify-only — but the gc-stress battery runs
+    /// with verify armed, which is where it earns its keep. Without it a missed
+    /// barrier is silent and surfaces later as corruption somewhere unrelated
+    /// (beagle's "Struct not found by ID", hunted through a crash in another
+    /// subsystem entirely).
+    unsafe fn verify_no_old_to_young<P: PtrPolicy>(&self, types: &[TypeInfo]) {
+        let old = self.from_space();
+        let nbase = self.nursery.base() as usize;
+        let nsize = self.nursery.size();
+        let mut off = 0usize;
+        let used = old.used();
+        while off < used {
+            let obj = Gc(unsafe { old.base().add(off) });
+            let hdr = unsafe { obj.header() };
+            let tid = header_type_id(hdr) as usize;
+            assert!(
+                tid != 0 && tid < types.len(),
+                "GC verify: old-gen object at offset {off} has type_id {tid} out of range"
+            );
+            let info = &types[tid];
+            unsafe {
+                scan_object(obj, info, |slot| {
+                    let bits = *slot;
+                    if let Some(p) = P::try_decode_ptr(bits) {
+                        if (p as usize).wrapping_sub(nbase) < nsize {
+                            panic!(
+                                "GC verify: MISSED WRITE BARRIER — old-gen {} at {:p} (offset \
+                                 {off}) still holds a NURSERY pointer {bits:#x} -> {p:p} in slot \
+                                 +{} after a minor GC. A minor evacuates the nursery whole, so \
+                                 this edge was never card-marked: the store that created it did \
+                                 not call Heap::write_barrier.",
+                                info.name,
+                                obj.0,
+                                slot as usize - obj.addr()
+                            );
+                        }
+                    }
+                });
+            }
+            off += info.allocation_size(header_aux(hdr));
         }
     }
 
@@ -728,11 +1409,14 @@ impl Heap {
     ) {
         let bits = unsafe { *slot };
         if let Some(ptr) = P::try_decode_ptr(bits) {
-            if from.contains(ptr) {
+            // A major has TWO from-spaces: the old one and the nursery. Both
+            // evacuate into the same to-space, which is what makes a major
+            // complete on its own and safe with a non-empty nursery.
+            if from.contains(ptr) || self.nursery.contains(ptr) {
                 let new = unsafe { self.copy_or_forward(types, to, ptr) };
                 unsafe { *slot = P::encode_ptr(new) };
             } else if self.verify && !to.contains(ptr) {
-                // A traced slot pointing at neither space is a stale pointer
+                // A traced slot pointing at no space at all is a stale pointer
                 // from a previous cycle (or a scalar that decoded as a ref).
                 panic!(
                     "GC verify: traced slot holds {bits:#x} -> {ptr:p}, outside both spaces \
@@ -742,7 +1426,10 @@ impl Heap {
         }
     }
 
-    /// Copy `old` to to-space (or return its existing forwarding target).
+    /// Copy `old` into the old gen at `to` (or return its existing forwarding
+    /// target). `to` is the old to-space for a major and the ACTIVE old space
+    /// for a minor's promotion — either way the destination is the old gen, so
+    /// every placement extends the per-card object start index.
     unsafe fn copy_or_forward(&self, types: &[TypeInfo], to: &AtomicBumpAllocator, old: *mut u8) -> *mut u8 {
         let hdr = unsafe { *(old as *const u64) };
         if hdr & FORWARDING_BIT != 0 {
@@ -767,15 +1454,30 @@ impl Heap {
             std::ptr::copy_nonoverlapping(old, new, size);
             *(old as *mut u64) = (new as u64) | FORWARDING_BIT;
         }
+        // Keyed by OFFSET, not address, so the entry survives the flip that a
+        // major ends with — and so one table serves both semi-spaces.
+        self.cards.record_start(new as usize - to.base() as usize);
         new
     }
 
-    /// Walk every live object in the active space: `visitor(obj, info)`.
+    /// Walk every object in the nursery and then the active old space:
+    /// `visitor(obj, info)`.
     ///
     /// # Safety
     /// All objects must have valid headers; no concurrent mutation.
     pub unsafe fn walk(&self, types: &[TypeInfo], visitor: &mut dyn FnMut(Gc, &TypeInfo)) {
-        let space = self.from_space();
+        unsafe {
+            self.walk_space(&self.nursery, types, visitor);
+            self.walk_space(self.from_space(), types, visitor);
+        }
+    }
+
+    unsafe fn walk_space(
+        &self,
+        space: &AtomicBumpAllocator,
+        types: &[TypeInfo],
+        visitor: &mut dyn FnMut(Gc, &TypeInfo),
+    ) {
         let mut off = 0usize;
         let used = space.used();
         while off < used {
@@ -1347,23 +2049,564 @@ mod tests {
         }
     }
 
+    /// Stage I re-points the window at the NURSERY. It was Stage D's active
+    /// semi-space, and the D5 inline sequence is unchanged — it just bumps a
+    /// different space. The consequence worth pinning: the nursery does not
+    /// flip, so unlike Stage D the window is armed once and stays put across
+    /// collections of both kinds. If the window ever tracked the old spaces
+    /// again, emitted code would allocate straight into the old gen and every
+    /// barrier-free initializing store would become a missed edge.
     #[test]
-    fn alloc_window_mirrors_active_space() {
+    fn alloc_window_follows_the_nursery() {
         let (h, t) = small_heap();
         h.arm_window(); // the heap is at its final address now
         let base0 = h.window.base.load(Ordering::Acquire);
-        assert_eq!(base0, h.from_space().base());
+        assert_eq!(base0, h.nursery().base(), "window points at the nursery");
+        assert_ne!(base0, h.from_space().base(), "…and not at an old space");
         let mut root = imm(0);
         unsafe {
             h.collect::<TestPolicy>(&t, &mut |visit| visit(&mut root as *mut u64));
         }
-        let base1 = h.window.base.load(Ordering::Acquire);
-        assert_eq!(base1, h.from_space().base(), "window re-pointed at flip");
-        assert_ne!(base0, base1, "flip changed the active space");
+        assert_eq!(
+            h.window.base.load(Ordering::Acquire),
+            base0,
+            "a major flips the OLD spaces; the nursery — and so the window — stays put"
+        );
+        unsafe {
+            h.collect_minor::<TestPolicy>(&t, &mut |visit| visit(&mut root as *mut u64));
+        }
+        assert_eq!(h.window.base.load(Ordering::Acquire), base0, "a minor does not move the nursery");
+        // The window's cursor is the nursery's, so emitted code and `alloc`
+        // bump the same word.
+        assert_eq!(
+            h.window.cursor.load(Ordering::Acquire) as usize,
+            &h.nursery().cursor as *const AtomicUsize as usize
+        );
         // gc-stress: limit 0 forces the slow path in emitted code (D5 uses
         // this; here we just pin the ABI field).
         h.window.limit.store(0, Ordering::Release);
         assert_eq!(h.window.limit.load(Ordering::Acquire), 0);
+    }
+
+    // ─── Stage I: generational ───────────────────────────────────────────
+
+    /// Run a minor with `roots` as the entire root set, rewriting them.
+    fn minor(h: &Heap, t: &[TypeInfo], roots: &mut [u64]) -> MinorOutcome {
+        unsafe {
+            h.collect_minor::<TestPolicy>(t, &mut |visit| {
+                for r in roots.iter_mut() {
+                    visit(r as *mut u64);
+                }
+            })
+        }
+    }
+
+    /// Every dirty card, ascending — the collector's own view of the
+    /// remembered set.
+    fn dirty_cards(h: &Heap) -> Vec<usize> {
+        let mut v = Vec::new();
+        unsafe { h.cards.for_each_dirty(h.old_used(), |c| v.push(c)) };
+        v
+    }
+
+    #[test]
+    fn minor_promotes_live_nursery_objects_and_drops_the_rest() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let live = h.alloc(cons, 0);
+        unsafe { live.set_field(0, imm(7)) };
+        for _ in 0..50 {
+            h.alloc(cons, 0); // garbage: reachable from nothing
+        }
+        assert!(h.nursery_used() > 50 * cons.allocation_size(0));
+        let mut roots = [enc(live)];
+        let out = minor(&h, &t, &mut roots);
+
+        assert_eq!(out.promoted_bytes, cons.allocation_size(0), "only the live cons survives");
+        assert_ne!(roots[0], enc(live), "the root is rewritten to the promoted address");
+        assert!(h.nursery_contains(live.0), "the original address was young…");
+        assert!(!h.nursery_contains(dec(roots[0]).0), "…and the survivor is now old");
+        assert_eq!(h.old_used(), cons.allocation_size(0));
+        assert_eq!(h.nursery_used(), 0, "a minor evacuates the nursery WHOLE");
+        unsafe { assert_eq!(dec(roots[0]).field(0), imm(7), "contents came along") };
+        assert_eq!(h.minor_collections.load(Ordering::Relaxed), 1);
+        assert_eq!(h.major_collections.load(Ordering::Relaxed), 0);
+        assert_eq!(h.promoted_bytes.load(Ordering::Relaxed), cons.allocation_size(0) as u64);
+    }
+
+    /// Promotion is transitive: a promoted object's fields still name nursery
+    /// objects, and the Cheney scan over the promoted range must chase them.
+    /// Without phase 3 only `a` moves and `b`/`c` are left in a space that is
+    /// about to be recycled.
+    #[test]
+    fn minor_promotes_transitively() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        // c is 3 hops from the only root, and each hop is discovered only by
+        // scanning the object promoted on the hop before.
+        let c = h.alloc(cons, 0);
+        let b = h.alloc(cons, 0);
+        let a = h.alloc(cons, 0);
+        unsafe {
+            c.set_field(0, imm(3));
+            b.set_field(0, imm(2));
+            b.set_field(1, enc(c));
+            a.set_field(0, imm(1));
+            a.set_field(1, enc(b));
+        }
+        let mut roots = [enc(a)];
+        let out = minor(&h, &t, &mut roots);
+        assert_eq!(out.promoted_bytes, 3 * cons.allocation_size(0), "the whole chain promoted");
+        assert_eq!(h.nursery_used(), 0);
+        unsafe {
+            let na = dec(roots[0]);
+            let nb = dec(na.field(1));
+            let nc = dec(nb.field(1));
+            for (o, want) in [(na, imm(1)), (nb, imm(2)), (nc, imm(3))] {
+                assert!(!h.nursery_contains(o.0), "every hop is old now");
+                assert_eq!(o.field(0), want);
+            }
+        }
+    }
+
+    /// THE reason the write barrier exists. `young` is reachable ONLY from an
+    /// old object's field — no root names it, so the root enumeration cannot
+    /// find it and the minor does not scan old objects. The dirty card is the
+    /// only path to it.
+    #[test]
+    fn dirty_card_finds_an_edge_no_root_names() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let mut roots = [enc(h.alloc(cons, 0))];
+        minor(&h, &t, &mut roots);
+        let old = dec(roots[0]);
+        assert!(!h.nursery_contains(old.0), "the holder is old now");
+
+        let young = h.alloc(cons, 0);
+        unsafe {
+            young.set_field(0, imm(99));
+            old.set_field(1, enc(young)); // the old→young store…
+        }
+        h.write_barrier(old); // …and the barrier that remembers it
+        assert_eq!(dirty_cards(&h), vec![0], "the barrier marked the holder's card");
+
+        let out = minor(&h, &t, &mut roots);
+        assert_eq!(out.promoted_bytes, cons.allocation_size(0), "the young object was promoted");
+        unsafe {
+            let promoted = dec(dec(roots[0]).field(1));
+            assert!(!h.nursery_contains(promoted.0), "…into the old gen");
+            assert_eq!(promoted.field(0), imm(99), "…with its contents intact");
+        }
+    }
+
+    /// The missed-barrier detector: the SAME store as above with the barrier
+    /// left out. This is beagle's shipped bug, and it must die at the
+    /// collection that caused it rather than as corruption somewhere later.
+    #[test]
+    #[should_panic(expected = "MISSED WRITE BARRIER")]
+    fn missed_barrier_detector_fires() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let mut roots = [enc(h.alloc(cons, 0))];
+        minor(&h, &t, &mut roots);
+        let old = dec(roots[0]);
+
+        let young = h.alloc(cons, 0);
+        unsafe { old.set_field(1, enc(young)) }; // no write_barrier: the bug
+        minor(&h, &t, &mut roots);
+    }
+
+    /// The scan reads 8 card bytes as one word and skips the run on zero, so
+    /// the indices that can go missing are the ones at word edges — and the
+    /// ragged tail, which the word loop never reaches. 100 cards = 12 whole
+    /// words + a 4-card tail.
+    #[test]
+    fn dirty_scan_finds_cards_at_word_boundaries_and_in_the_tail() {
+        let ct = CardTable::new(0x1000, 100 * CARD_SIZE);
+        let want = [0usize, 7, 8, 15, 16, 88, 95, 96, 99];
+        for &c in &want {
+            ct.cards[c].store(CARD_DIRTY, Ordering::Relaxed);
+        }
+        let mut seen = Vec::new();
+        unsafe { ct.for_each_dirty(100 * CARD_SIZE, |c| seen.push(c)) };
+        assert_eq!(seen, want, "every dirty card, ascending, across word edges and the tail");
+
+        // …and an all-clean table yields nothing (the skip-the-run path).
+        let ct = CardTable::new(0x1000, 100 * CARD_SIZE);
+        let mut n = 0;
+        unsafe { ct.for_each_dirty(100 * CARD_SIZE, |_| n += 1) };
+        assert_eq!(n, 0);
+    }
+
+    /// The barrier's single unsigned compare must reject every address that is
+    /// not in the old gen — below the base (which wraps to a huge offset) and
+    /// at or past the limit alike. I2 routes EVERY field store through it, so
+    /// the overwhelmingly common call is a store into a young object, which has
+    /// nothing to remember; a compare that let those through would dirty
+    /// arbitrary cards and turn `starts` misses into spurious hard panics.
+    #[test]
+    fn barrier_bounds_are_one_unsigned_compare() {
+        let base = 0x10_000usize;
+        let ct = CardTable::new(base, 64 * CARD_SIZE);
+        ct.mark(base - 8); // below: wraps
+        ct.mark(base + 64 * CARD_SIZE); // at the limit
+        ct.mark(base + 64 * CARD_SIZE + 4096); // past it
+        ct.mark(0);
+        ct.mark(usize::MAX);
+        let mut n = 0;
+        unsafe { ct.for_each_dirty(64 * CARD_SIZE, |_| n += 1) };
+        assert_eq!(n, 0, "only old-gen addresses may dirty a card");
+
+        ct.mark(base); // first byte in range
+        ct.mark(base + 64 * CARD_SIZE - 1); // last
+        let mut seen = Vec::new();
+        unsafe { ct.for_each_dirty(64 * CARD_SIZE, |c| seen.push(c)) };
+        assert_eq!(seen, vec![0, 63], "…and both ends of the range do");
+    }
+
+    /// The same property on a real heap: barriering a nursery object is a
+    /// no-op, barriering the promoted one is not.
+    #[test]
+    fn barrier_on_a_young_object_remembers_nothing() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let young = h.alloc(cons, 0);
+        h.write_barrier(young);
+        assert_eq!(dirty_cards(&h), Vec::<usize>::new(), "a young store has nothing to remember");
+
+        let mut roots = [enc(young)];
+        minor(&h, &t, &mut roots);
+        h.write_barrier(dec(roots[0]));
+        assert_eq!(dirty_cards(&h), vec![0], "the same object, once old, does");
+    }
+
+    /// The same boundaries, end to end: real old objects spread over cards
+    /// either side of the scan's word edges, each holding the only reference
+    /// to a young object.
+    #[test]
+    fn dirty_cards_across_word_boundaries_promote_their_edges() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        // ~9.6 KiB of old gen = cards 0..18, enough to straddle two word edges.
+        let mut roots: Vec<u64> = (0..400)
+            .map(|i| {
+                let c = h.alloc(cons, 0);
+                unsafe { c.set_field(0, imm(i)) };
+                enc(c)
+            })
+            .collect();
+        minor(&h, &t, &mut roots);
+        assert_eq!(h.nursery_used(), 0);
+
+        let base = h.old_base() as usize;
+        let card_of = |bits: u64| (dec(bits).addr() - base) >> CARD_SHIFT;
+        // Cards 7/8 and 15/16 straddle the scan's word edges; 18 is the last.
+        let targets: Vec<u64> = [0usize, 1, 7, 8, 9, 15, 16, 18]
+            .iter()
+            .filter_map(|&want| roots.iter().copied().find(|&r| card_of(r) == want))
+            .collect();
+        assert_eq!(targets.len(), 8, "test needs an old object in each probed card");
+
+        for (i, &tgt) in targets.iter().enumerate() {
+            let young = h.alloc(cons, 0);
+            unsafe {
+                young.set_field(0, imm(1000 + i as u64));
+                dec(tgt).set_field(1, enc(young));
+            }
+            h.write_barrier(dec(tgt));
+        }
+        assert_eq!(
+            dirty_cards(&h),
+            vec![0, 1, 7, 8, 9, 15, 16, 18],
+            "one dirty card per barriered object's base"
+        );
+
+        let out = minor(&h, &t, &mut roots);
+        assert_eq!(out.promoted_bytes, targets.len() * cons.allocation_size(0));
+        for (i, &tgt) in targets.iter().enumerate() {
+            unsafe {
+                let child = dec(dec(tgt).field(1));
+                assert!(!h.nursery_contains(child.0), "card {} edge missed", card_of(tgt));
+                assert_eq!(child.field(0), imm(1000 + i as u64));
+            }
+        }
+    }
+
+    #[test]
+    fn minor_leaves_the_nursery_empty_and_every_card_clean() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let mut roots: Vec<u64> = (0..100).map(|_| enc(h.alloc(cons, 0))).collect();
+        minor(&h, &t, &mut roots);
+        for &r in &roots {
+            h.write_barrier(dec(r));
+        }
+        assert!(!dirty_cards(&h).is_empty(), "the barrier marked cards to begin with");
+
+        minor(&h, &t, &mut roots);
+        assert_eq!(h.nursery_used(), 0, "nursery empty");
+        assert_eq!(dirty_cards(&h), Vec::<usize>::new(), "and every card clean");
+        // A major clears them too, and rebuilds the index against the new space.
+        for &r in &roots {
+            h.write_barrier(dec(r));
+        }
+        unsafe {
+            h.collect::<TestPolicy>(&t, &mut |visit| {
+                for r in roots.iter_mut() {
+                    visit(r as *mut u64);
+                }
+            });
+        }
+        assert_eq!(dirty_cards(&h), Vec::<usize>::new(), "a major scans everything: no card survives");
+        assert_eq!(h.nursery_used(), 0);
+    }
+
+    /// The card→object lookup rests on the barrier marking OBJECT BASES. Mark
+    /// a card in the middle of a multi-card object — what barriering a field
+    /// address would do — and the scan must panic rather than silently skip a
+    /// card that might have held a real edge.
+    #[test]
+    #[should_panic(expected = "has no object start in the index")]
+    fn dirty_card_without_an_object_start_is_a_hard_panic() {
+        let (h, t) = small_heap();
+        let vinfo = &t[kind::VALUES as usize];
+        let big = h.alloc(vinfo, 200); // 1608 bytes: begins in card 0, ends in card 3
+        let mut roots = [enc(big)];
+        minor(&h, &t, &mut roots);
+        assert!(h.old_used() > 3 * CARD_SIZE, "the object must span cards for this to mean anything");
+
+        h.cards.mark(h.old_base() as usize + 2 * CARD_SIZE + 8);
+        minor(&h, &t, &mut roots);
+    }
+
+    #[test]
+    fn minor_preserves_cycles() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let a = h.alloc(cons, 0);
+        let b = h.alloc(cons, 0);
+        unsafe {
+            a.set_field(0, imm(1));
+            a.set_field(1, enc(b));
+            b.set_field(0, imm(2));
+            b.set_field(1, enc(a)); // cycle: the forwarding bit is what stops it
+        }
+        let mut roots = [enc(a)];
+        let out = minor(&h, &t, &mut roots);
+        assert_eq!(out.promoted_bytes, 2 * cons.allocation_size(0), "each object promoted once");
+        unsafe {
+            let na = dec(roots[0]);
+            let nb = dec(na.field(1));
+            assert_eq!(na.field(0), imm(1));
+            assert_eq!(nb.field(0), imm(2));
+            assert_eq!(dec(nb.field(1)), na, "the cycle closes back on the promoted a");
+        }
+    }
+
+    /// A shared child reached twice must be promoted once — the forwarding
+    /// header, through the promotion path this time.
+    #[test]
+    fn minor_promotes_a_shared_child_once() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let shared = h.alloc(cons, 0);
+        unsafe { shared.set_field(0, imm(9)) };
+        let a = h.alloc(cons, 0);
+        let b = h.alloc(cons, 0);
+        unsafe {
+            a.set_field(0, enc(shared));
+            b.set_field(0, enc(shared));
+        }
+        let mut roots = [enc(a), enc(b)];
+        let out = minor(&h, &t, &mut roots);
+        assert_eq!(out.promoted_bytes, 3 * cons.allocation_size(0));
+        unsafe {
+            let sa = dec(dec(roots[0]).field(0));
+            let sb = dec(dec(roots[1]).field(0));
+            assert_eq!(sa, sb, "shared child promoted exactly once");
+            assert_eq!(sa.field(0), imm(9));
+        }
+    }
+
+    #[test]
+    fn minor_moves_varlen_objects_intact() {
+        let (h, t) = small_heap();
+        let vinfo = &t[kind::VALUES as usize];
+        let sinfo = &t[kind::STR as usize];
+        let cons = &t[kind::CONS as usize];
+        let child = h.alloc(cons, 0);
+        unsafe { child.set_field(0, imm(77)) };
+        let s = h.alloc(sinfo, 11);
+        unsafe { s.bytes_mut(sinfo).copy_from_slice(b"hello world") };
+        let v = h.alloc(vinfo, 4);
+        unsafe { v.values_mut(vinfo).copy_from_slice(&[imm(1), enc(child), enc(s), imm(4)]) };
+
+        let mut roots = [enc(v)];
+        minor(&h, &t, &mut roots);
+        assert_eq!(h.nursery_used(), 0);
+        unsafe {
+            let nv = dec(roots[0]);
+            assert_eq!(nv.aux(), 4, "varlen length rides the header through promotion");
+            let vals = nv.values(vinfo);
+            assert_eq!(vals[0], imm(1));
+            assert_eq!(vals[3], imm(4));
+            // The Values tail is traced: both refs promoted…
+            assert_eq!(dec(vals[1]).field(0), imm(77));
+            // …and the Bytes tail is not, but still copies verbatim.
+            assert_eq!(dec(vals[2]).bytes(sinfo), b"hello world");
+        }
+    }
+
+    /// Promotion cannot fail half-way — the graph is already part-forwarded —
+    /// so the caller checks `minor_will_fit` first. `collect` is the answer
+    /// when it says no: it reclaims the old garbage AND the nursery in one
+    /// pass, so it makes progress where a minor could not.
+    #[test]
+    fn a_minor_that_would_not_fit_defers_to_a_major() {
+        // 4 KiB old spaces, 64 KiB nursery: the nursery outgrows the old gen.
+        let h = {
+            let mut h = Heap::with_sizes(1 << 12, 1 << 16);
+            h.set_verify(true);
+            h
+        };
+        let t = type_table();
+        let cons = &t[kind::CONS as usize];
+        assert!(h.minor_will_fit(), "an empty nursery always fits");
+        let live = h.alloc(cons, 0);
+        unsafe { live.set_field(0, imm(5)) };
+        for _ in 0..300 {
+            h.alloc(cons, 0); // 7.2 KiB of garbage: more than the old space holds
+        }
+        assert!(!h.minor_will_fit(), "the bound is nursery USED, not live — we cannot know live yet");
+
+        let mut roots = [enc(live)];
+        unsafe {
+            h.collect::<TestPolicy>(&t, &mut |visit| visit(&mut roots[0] as *mut u64));
+        }
+        assert_eq!(h.nursery_used(), 0, "the major evacuated the nursery too");
+        assert_eq!(h.old_used(), cons.allocation_size(0), "…keeping only what was live");
+        unsafe { assert_eq!(dec(roots[0]).field(0), imm(5)) };
+        assert!(h.minor_will_fit(), "and minors are viable again");
+    }
+
+    #[test]
+    #[should_panic(expected = "would not fit")]
+    fn calling_a_minor_that_cannot_fit_is_loud() {
+        let h = Heap::with_sizes(1 << 12, 1 << 16);
+        let t = type_table();
+        let cons = &t[kind::CONS as usize];
+        let mut roots = [enc(h.alloc(cons, 0))];
+        for _ in 0..300 {
+            h.alloc(cons, 0);
+        }
+        minor(&h, &t, &mut roots);
+    }
+
+    /// The other half of the policy: a minor that fits still reports when
+    /// promotion has filled the old gen past its threshold, so the caller can
+    /// follow with a major. The nursery is empty by then, so it is safe.
+    #[test]
+    fn minor_reports_when_the_old_gen_needs_a_major() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        h.set_old_trigger_bytes(1 << 20); // far away
+        let mut roots = [enc(h.alloc(cons, 0))];
+        assert!(!minor(&h, &t, &mut roots).needs_major);
+
+        h.set_old_trigger_bytes(0); // anything promoted is over
+        let mut roots = vec![roots[0], enc(h.alloc(cons, 0))];
+        assert!(minor(&h, &t, &mut roots).needs_major, "old gen over threshold");
+        // And the major it asks for runs cleanly on the (now empty) nursery.
+        unsafe {
+            h.collect::<TestPolicy>(&t, &mut |visit| {
+                for r in roots.iter_mut() {
+                    visit(r as *mut u64);
+                }
+            });
+        }
+        assert_eq!(h.old_used(), 2 * cons.allocation_size(0));
+    }
+
+    /// A minor moves nothing that is already old — promotion is on FIRST
+    /// survival, and the old gen is untouched until a major.
+    #[test]
+    fn minors_do_not_move_old_objects() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let mut roots = [enc(h.alloc(cons, 0))];
+        minor(&h, &t, &mut roots);
+        let settled = roots[0];
+        for _ in 0..5 {
+            h.alloc(cons, 0);
+            minor(&h, &t, &mut roots);
+            assert_eq!(roots[0], settled, "an old object keeps its address across minors");
+        }
+        assert_eq!(h.old_used(), cons.allocation_size(0), "and nothing re-promotes it");
+        assert_eq!(h.minor_collections.load(Ordering::Relaxed), 6);
+    }
+
+    /// Many minors against a small nursery: the old gen grows only by what
+    /// actually survives, and the nursery is reused every time — an
+    /// append-only nursery would have blown 64 KiB many times over.
+    #[test]
+    fn nursery_is_reused_across_many_minors() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let mut roots = [enc(h.alloc(cons, 0))];
+        unsafe { dec(roots[0]).set_field(0, imm(5)) };
+        for round in 0..50 {
+            for _ in 0..500 {
+                h.alloc(cons, 0); // 12 KiB of garbage per round
+            }
+            minor(&h, &t, &mut roots);
+            assert_eq!(h.nursery_used(), 0, "round {round}");
+            assert_eq!(h.old_used(), cons.allocation_size(0), "round {round}: only the root ever survived");
+        }
+        unsafe { assert_eq!(dec(roots[0]).field(0), imm(5)) };
+        assert_eq!(h.promoted_bytes.load(Ordering::Relaxed), cons.allocation_size(0) as u64);
+    }
+
+    /// The precise-layout detector covers the promotion path too, not just the
+    /// major's.
+    #[test]
+    #[should_panic(expected = "precise-layout violation")]
+    fn minor_catches_a_scalar_in_a_traced_slot() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let c = h.alloc(cons, 0);
+        let bogus = TestPolicy::encode_ptr(unsafe { c.0.add(16) });
+        unsafe { c.set_field(0, bogus) };
+        let mut roots = [enc(c)];
+        minor(&h, &t, &mut roots);
+    }
+
+    /// The nursery is recycled, so a stale young pointer must not read as a
+    /// live object — the zeroed header reads `kind::INVALID`, which every
+    /// reader panics on — AND `alloc`'s zeroed-fields contract must still hold
+    /// for the next object to claim that memory. `alloc_closure` leans on the
+    /// second half directly: an unwritten code word must read 0 or the JIT's
+    /// `code != 0` guard calls into whatever is there (the Stage-D reset bug
+    /// this pins against; see `reset_nursery_space`).
+    #[test]
+    fn recycled_nursery_reads_invalid_and_stays_zeroed() {
+        let (h, t) = small_heap();
+        let cons = &t[kind::CONS as usize];
+        let stale = h.alloc(cons, 0);
+        unsafe { stale.set_field(0, imm(1234)) };
+        let mut roots = [imm(0)]; // nothing live
+        minor(&h, &t, &mut roots);
+        unsafe {
+            // Read the recycled header BEFORE anything reclaims the address.
+            assert_eq!(stale.type_id(), kind::INVALID, "a recycled header reads INVALID");
+        }
+        // The next object claims that same memory and must find it zeroed.
+        let fresh = h.alloc(cons, 0);
+        assert_eq!(fresh.addr(), stale.addr(), "the nursery restarted at zero");
+        unsafe {
+            assert_eq!(fresh.type_id(), kind::CONS);
+            assert_eq!(fresh.field(0), 0, "unwritten fields read 0 (alloc's contract)");
+            assert_eq!(fresh.field(1), 0);
+        }
     }
 
     #[test]
