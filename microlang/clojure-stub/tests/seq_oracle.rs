@@ -36,6 +36,10 @@ const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
     ("apply/req1-range", "apply copies the seq; no passthrough"),
     ("apply/leading+seq", "apply copies the seq; no passthrough"),
     ("identical/range", "apply copies the seq; no passthrough"),
+    // Only became visible once `identical?` stopped being structural `=`: it
+    // used to answer true here because the COPY compared equal to its source.
+    // Two bugs cancelling; fixing identical? unmasked this one.
+    ("identical/list", "apply copies the seq; no passthrough"),
     ("lazy/unforced-after-apply", "apply FORCES the seq it should pass through"),
     // ── a direct variadic call builds a cons list, not an ArraySeq ────────
     // Clojure's rest arg for a direct call is an ArraySeq: `list?` is FALSE.

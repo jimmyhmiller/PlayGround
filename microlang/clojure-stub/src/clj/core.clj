@@ -2247,9 +2247,14 @@
   (uuid (str "00000000-0000-4000-8000-" (swap! -uuid-counter inc))))
 (extend-type UUID
   IEquiv (-equiv [u o] (if (%num-eq (type-of o) 'UUID) (= (field u 0) (field o 0)) false)))
-(defn identical? [a b] (%num-eq a b))
-;; keywords aren't reference-identical here (they're records), so compare by value.
-(defn keyword-identical? [a b] (= a b))
+;; `%eq` is encoded-bits equality: value equality for immediates, POINTER
+;; identity for heap objects — what `identical?` means. This used to be
+;; `%num-eq`, which is Prim::Eq = structural `equal?`, making `identical?` a
+;; synonym for `=`: `(identical? (list 1 2 3) (list 1 2 3))` answered true.
+(defn identical? [a b] (%eq a b))
+;; Keywords ARE reference-identical now (interned, like Clojure/ClojureScript),
+;; so this is just `identical?` — no value-compare workaround needed.
+(defn keyword-identical? [a b] (%eq a b))
 (defn abs [n] (if (%lt n 0) (%sub 0 n) n))
 (defn boolean? [x] (or (true? x) (false? x)))
 (defn int? [x] (%num-eq (type-of x) 'Long))
@@ -2310,10 +2315,13 @@
     (if (vector? v)
         (loop [i start acc []] (if (%lt i end) (recur (%add i 1) (%pv-conj acc (%pv-nth v i))) acc))
         (vec (take (- end start) (drop start v))))))
+;; `%keyword` INTERNS: `(keyword "a")` is the same object as the literal `:a`,
+;; not a distinct record that merely `=`s it. Building the record directly here
+;; (as this did) is what made `(identical? (keyword "a") :a)` false.
 (defn keyword [& args]
   (if (nil? (next args))
-    (let [x (first args)] (if (keyword? x) x (record 'Keyword (symbol (if (string? x) x (name x))))))
-    (record 'Keyword (symbol (first args) (second args)))))
+    (let [x (first args)] (if (keyword? x) x (%keyword (symbol (if (string? x) x (name x))))))
+    (%keyword (symbol (first args) (second args)))))
 (defn fnil [f x]
   (fn ([a] (f (if (nil? a) x a)))
       ([a b] (f (if (nil? a) x a) b))

@@ -39,7 +39,10 @@
 (defn bit-count [a] (%bit-count a))
 (defn hash [x] (%hash x))
 (defn == [a b] (%num-eq a b))
-(defn identical? [a b] (%num-eq a b))   ;; HOST: pointer identity approximated by structural =
+;; NOT redefined here: `identical?` is REAL pointer identity (`%eq`) in
+;; core.clj. This file used to override it with `%num-eq` — structural `=`
+;; wearing an identity name — which silently won, because it loads after core.
+;; `(identical? (list 1 2 3) (list 1 2 3))` answered true.
 (defn integer? [x] (%num-eq (type-of x) 'Long))
 ;; caching-hash degrades to recomputation (no ^:mutable field caching).
 (defmacro caching-hash [coll hash-fn hash-key] (list hash-fn coll))

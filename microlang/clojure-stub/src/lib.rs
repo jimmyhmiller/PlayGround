@@ -464,11 +464,10 @@ fn rebuild_auto_keywords<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, fo
                 }
                 None => format!("{}/{name}", comp.current_ns()),
             };
+            // Interned like any other keyword: `::foo` and the `:cur.ns/foo`
+            // it resolves to MUST be the same object.
             let s = rt.intern(&full);
-            let name_v = rt.encode(Val::Sym(s));
-            let kw = rt.intern(reader::KEYWORD);
-            let rid = rt.alloc_record(kw, &[name_v]);
-            <M::R as microlang::Repr>::enc_ref(rid)
+            rt.intern_keyword(s)
         }
         Shape::Record(type_id, fields) => {
             let nf: Vec<u64> = fields.iter().map(|&f| rebuild_auto_keywords(rt, comp, f)).collect();

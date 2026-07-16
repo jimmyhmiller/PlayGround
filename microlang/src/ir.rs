@@ -154,6 +154,11 @@ pub enum Prim {
     /// are equal. For immediates that is value equality; for heap values it is
     /// pointer identity. (Contrast `Eq`, which is structural `equal?`.)
     Identical,
+    /// `(%keyword name-sym)` -> THE canonical keyword object for that name.
+    /// Keywords are INTERNED (as in Clojure and ClojureScript), so every
+    /// construction of `:foo` — reader literal, `::foo` resolution, or a
+    /// runtime `(keyword "foo")` — must come through here or identity breaks.
+    Keyword,
     /// `(%callcc f)` — full call-with-current-continuation. Only the stackless
     /// `CekMachine` supports it (the continuation is a first-class, multi-shot,
     /// re-installable value); host-stack tiers cannot.

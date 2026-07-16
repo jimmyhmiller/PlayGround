@@ -75,6 +75,31 @@
 (show "counted/cons" (counted? (cons 1 nil)))
 (show "counted/vec-seq" (counted? (seq (vec (range 100)))))
 
+;; ── identical? is POINTER identity ────────────────────────────────────
+;; Where Clojure and ClojureScript AGREE, that is the semantics and we match
+;; it. Where they disagree the answer is a host artifact, and matching the JVM
+;; would mean copying its accidents — so those cases are excluded on purpose:
+;;   (identical? 100000 100000)  JVM false (Long cache) / CLJS true (primitive)
+;;   (identical? (str "a" "b") (str "a" "b"))  JVM false / CLJS true
+;; Keywords, by contrast, are interned in BOTH — so we intern them too.
+(show "ident/list-vs-list" (identical? (list 1 2 3) (list 1 2 3)))
+(show "ident/vec-vs-vec" (identical? [1 2] [1 2]))
+(show "ident/same-obj" (let [a (list 1 2)] (identical? a a)))
+(show "ident/fresh-per-call" (let [f (fn [x] (list x 2))] (identical? (f 1) (f 1))))
+(show "ident/kw-literal" (identical? :a :a))
+(show "ident/kw-bound" (let [k :foo] (identical? k :foo)))
+(show "ident/kw-built" (identical? (keyword "ab") (keyword "ab")))
+(show "ident/kw-built-vs-literal" (identical? (keyword "ab") :ab))
+(show "ident/kw-ns" (identical? (keyword "n" "ab") :n/ab))
+(show "ident/kw-distinct" (identical? :a :b))
+(show "ident/str-built" (identical? (str "a" "b") (str "a" "b")))
+(show "ident/small-int" (identical? 1 1))
+(show "ident/nil" (identical? nil nil))
+(show "ident/empty-list" (identical? () ()))
+;; NB: no `keyword-identical?` probe — it is a ClojureScript-only fn, absent
+;; from JVM clojure.core, so it cannot be oracled here. (It crashed the run and
+;; silently truncated expected.txt until refresh.sh learned to fail loudly.)
+
 ;; ── laziness must survive apply ───────────────────────────────────────
 ;; If apply forced/copied the seq, the counter would read 100, not 0/3.
 (def side (atom 0))

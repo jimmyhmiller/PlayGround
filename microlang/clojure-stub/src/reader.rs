@@ -454,10 +454,13 @@ impl Parser {
             return record(rt, KEYWORD_AUTO_NS, vec![name_v]);
         }
         if let Some(kw) = a.strip_prefix(':') {
-            // (keyword) -> a `Keyword` record holding the interned name symbol.
+            // `:foo` -> THE canonical keyword object for that name. Interning
+            // here (rather than building a record per token) is what makes
+            // `(identical? :a :a)` true, as in Clojure and ClojureScript: two
+            // occurrences of `:foo` are the same object, not two records that
+            // merely compare equal.
             let name = rt.intern(kw);
-            let name_v = rt.encode(Val::Sym(name));
-            return record(rt, KEYWORD, vec![name_v]);
+            return rt.intern_keyword(name);
         }
         sym(rt, a)
     }

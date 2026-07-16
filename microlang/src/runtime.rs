@@ -279,6 +279,17 @@ pub struct Shared<M: ValueModel> {
     sym_names: UnsafeCell<Vec<String>>,
     sym_ids: UnsafeCell<HashMap<String, Sym>>,
     sym_lock: Mutex<()>,
+    /// Keyword interner: name `Sym` -> the ONE canonical keyword object for
+    /// that name, held as a `ConstId` rather than raw bits. The const pool is
+    /// a GC root that the collector rewrites on a move, so going through it
+    /// keeps this table valid across a collection for free — a `HashMap<Sym,
+    /// u64>` of bare bits would go stale the first time a keyword moved.
+    ///
+    /// Interning is what makes `(identical? :a :a)` true, as it is in BOTH
+    /// Clojure and ClojureScript. It also makes a keyword literal FREE: `:foo`
+    /// resolves to a constant instead of allocating a fresh record on every
+    /// single evaluation, which is what it used to do.
+    keywords: Mutex<HashMap<Sym, ConstId>>,
     /// Global environment: atomic slots, reserved stable base (see `global`).
     pub global_slots: Vec<AtomicU64>,
     /// Record type tag (`Sym`) -> a leaked, immutable `Vec<Sym>` of its field
@@ -458,6 +469,7 @@ impl<M: ValueModel> Runtime<M> {
             sym_names: UnsafeCell::new(Vec::with_capacity(TABLE_CAP)),
             sym_ids: UnsafeCell::new(HashMap::new()),
             sym_lock: Mutex::new(()),
+            keywords: Mutex::new(HashMap::new()),
             global_slots: (0..0).map(|_| AtomicU64::new(GLOBAL_UNBOUND)).collect(),
             field_names: Vec::new(),
             field_ic: Vec::new(),
@@ -1188,6 +1200,35 @@ impl<M: ValueModel> Runtime<M> {
 
     /// Intern a literal into the constant pool, returning its id. The pool is a
     /// GC root, so the literal survives collection and is rewritten if it moves.
+    /// The ONE canonical keyword object named `name` — allocating it on first
+    /// use and returning that same object forever after. Every keyword
+    /// construction funnels here (the reader's `:foo`, `::foo` resolution, and
+    /// the `keyword` fn), which is what makes keyword identity work:
+    /// `(identical? :a :a)`, `(identical? (keyword "a") :a)` are true, exactly
+    /// as in Clojure AND ClojureScript.
+    ///
+    /// Keyword identity IS name identity: `name` is the interned name symbol
+    /// (already namespace-qualified for `:ns/foo`), so two spellings of the
+    /// same keyword agree by construction.
+    pub fn intern_keyword(&mut self, name: Sym) -> u64 {
+        if let Some(&id) = self.shared.keywords.lock().unwrap().get(&name) {
+            return self.get_const(id);
+        }
+        // Build OUTSIDE the lock: `alloc_record` can take heap locks, and
+        // holding the keyword lock across them is a lock-order inversion.
+        let ty = self.intern("Keyword");
+        let namebits = self.encode(Val::Sym(name));
+        let bits = M::R::enc_ref(self.alloc_record(ty, &[namebits]));
+        let id = self.intern_const(bits);
+        // Re-check under the lock: a sibling thread may have interned the same
+        // name while we were building. First writer wins, so the canonical
+        // object stays unique; ours is garbage the collector will take.
+        let mut tbl = self.shared.keywords.lock().unwrap();
+        let winner = *tbl.entry(name).or_insert(id);
+        drop(tbl);
+        self.get_const(winner)
+    }
+
     pub fn intern_const(&self, bits: u64) -> ConstId {
         let _g = self.shared.consts_lock.lock().unwrap();
         // SAFETY: appends serialized by `consts_lock`; reserved buffer never
@@ -1574,6 +1615,12 @@ impl<M: ValueModel> Runtime<M> {
             Prim::Identical => {
                 let r = args[0] == args[1];
                 self.encode(Val::Bool(r))
+            }
+            Prim::Keyword => {
+                let Val::Sym(name) = self.decode(args[0]) else {
+                    panic!("%keyword: name must be a symbol, got {}", self.print(args[0]))
+                };
+                self.intern_keyword(name)
             }
             Prim::StrLen => {
                 let Val::Ref(id) = self.decode(args[0]) else {

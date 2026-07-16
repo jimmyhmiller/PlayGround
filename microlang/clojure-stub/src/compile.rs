@@ -110,6 +110,14 @@ impl Compiler {
         let mut prims = HashMap::new();
         for (name, p) in [
             ("%add", Add), ("%sub", Sub), ("%mul", Mul), ("%lt", Lt), ("%num-eq", Eq),
+            // `%eq` is object IDENTITY (encoded-bits equality) — what
+            // `identical?` means. `%num-eq` above is Prim::Eq, which is
+            // structural `equal?`; defining `identical?` in terms of it made
+            // `identical?` a synonym for `=`.
+            ("%eq", Identical),
+            // Keywords are INTERNED: `(keyword "a")` must return the very same
+            // object as the literal `:a`, never an equal-but-distinct record.
+            ("%keyword", Keyword),
             ("%quot", Quot), ("%rem", Rem), ("%mod", Mod), ("%div", Div), ("%str-cat", StrCat), ("%str-of", StrOf),
             ("%apply", Apply),
             // Array substrate + bitwise ops for in-language persistent structures.
