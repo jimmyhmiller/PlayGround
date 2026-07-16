@@ -1316,6 +1316,22 @@ fn jvm_layer_statics_methods_ctors() {
     assert_eq!(run("(import '(java.lang Math)) (Math/abs -9)"), "9");
 }
 
+/// `System/nanoTime` is what the bench suite (clojure-stub/bench) times with,
+/// and the reason that suite can be ONE file both this dialect and real
+/// Clojure run. It is `%nanos`: monotonic, arbitrary origin.
+#[test]
+fn jvm_layer_system_nanotime_is_monotonic() {
+    assert_eq!(run("(number? (System/nanoTime))"), "true");
+    // monotonic and non-decreasing across two reads
+    assert_eq!(run("(let [a (System/nanoTime) b (System/nanoTime)] (>= b a))"), "true");
+    // There is no wall-clock prim, so currentTimeMillis is deliberately NOT
+    // registered: a catchable miss, never a fabricated time.
+    assert_eq!(
+        run("(try (System/currentTimeMillis) (catch Exception e :caught))"),
+        ":caught"
+    );
+}
+
 #[test]
 fn jvm_layer_class_values_are_honest() {
     // Class VALUES are real objects: class? is a per-instance check and

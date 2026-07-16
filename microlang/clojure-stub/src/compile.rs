@@ -80,6 +80,7 @@ const DEFAULT_IMPORTS: &[(&str, &str)] = &[
     ("Float", "java.lang.Float"),
     ("Boolean", "java.lang.Boolean"),
     ("Math", "java.lang.Math"),
+    ("System", "java.lang.System"),
     ("Class", "java.lang.Class"),
     ("Throwable", "java.lang.Throwable"),
     ("Exception", "java.lang.Exception"),

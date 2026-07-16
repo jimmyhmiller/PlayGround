@@ -408,6 +408,15 @@
   (:static-fn max [a b] (if (< a b) b a))
   (:static-fn min [a b] (if (< a b) a b)))
 
+;; Only the members backed by a real primitive are registered: `nanoTime` is
+;; `%nanos` (monotonic, arbitrary origin — nanoTime's contract exactly). There
+;; is no wall-clock prim, so `currentTimeMillis` is deliberately ABSENT and a
+;; call to it throws "No such static method" rather than returning a lie.
+(defclass java.lang.System
+  (:kind :static)
+  (:static-fn nanoTime [] (%nanos))
+  (:static-fn gc [] (gc)))
+
 ;; value wrappers / interfaces mapping onto the dialect's native types
 (defclass java.lang.CharSequence (:kind :interface) (:tag String) (:pred string?))
 (defclass java.lang.Character (:tag Char))
