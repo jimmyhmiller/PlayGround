@@ -111,6 +111,45 @@
          (do ~@proots
              (let [~r (do ~@body)] (gc-sp-set ~sp) ~r))))))
 
+; ---- allocation-effect analysis ----
+; A GC can only be triggered inside alloc-val, i.e. only by the runtime allocators
+; cons/mk-sym/mk-prim/mk-closure (mk-int/mk-bool/snil are immediate = no alloc). A
+; function that never (transitively) calls one of those cannot trigger a GC, so its
+; params never need rooting and it needs no frame at all. The analysis OVER-
+; approximates (scanning any subtree, even data), which only costs optimisation,
+; never soundness: a false "allocates" just keeps the frame.
+(defn base-allocs [] (-> Code) `(cons mk-sym mk-prim mk-closure))
+(defn expr-allocs? [(e Code) (as Code)] (-> bool)
+  (if (not (code-list? e)) false
+    (if (= (code-count e) 0) false
+      (let [h (code-nth e 0)]
+        (if (and (code-sym? h) (mg-member? h as 0 (code-count as))) true
+          (children-alloc? e 0 (code-count e) as))))))
+(defn children-alloc? [(e Code) (i i64) (n i64) (as Code)] (-> bool)
+  (if (>= i n) false
+    (if (expr-allocs? (code-nth e i) as) true (children-alloc? e (+ i 1) n as))))
+(defn defn-allocs? [(f Code) (as Code)] (-> bool) (children-alloc? f 4 (code-count f) as))
+; one pass: add each scheme fn (not already known) whose body allocates under `as`
+(defn grow-pass [(m Code) (i i64) (n i64) (as Code)] (-> Code)
+  (if (>= i n) as
+    (let [f (code-nth m i)]
+      (grow-pass m (+ i 1) n
+        (if (and (is-defn? f) (and (defn-allocs? f as)
+                                   (not (mg-member? (code-nth f 1) as 0 (code-count as)))))
+            (snoc as (code-nth f 1)) as)))))
+; fixpoint (bounded by #forms) — set only grows, so it converges
+(defn fixpoint-allocs [(m Code) (iter i64) (as Code)] (-> Code)
+  (if (<= iter 0) as
+    (let [as2 (grow-pass m 1 (code-count m) as)]
+      (if (= (code-count as2) (code-count as)) as2 (fixpoint-allocs m (- iter 1) as2)))))
+; thin emission: types rewritten, but NO frame / NO roots (function can't trigger GC)
+(defn body-forms [(f Code) (i i64) (n i64)] (-> Code)
+  (if (>= i n) `() `(~(code-nth f i) ~@(body-forms f (+ i 1) n))))
+(defn rewrite-defn-thin [(f Code)] (-> Code)
+  (let [name (code-nth f 1) ps (code-nth f 2) ret (code-nth f 3)]
+    `(defn ~name ~(rewrite-params ps 0 (code-count ps)) (-> ~(rewrite-type (code-nth ret 1)))
+       ~@(body-forms f 4 (code-count f)))))
+
 (defn is-defn? [(f Code)] (-> bool)
   (and (code-list? f) (and (>= (code-count f) 4) (and (code-sym? (code-nth f 0)) (code-eq (code-nth f 0) `defn)))))
 (defn returns-managed? [(f Code)] (-> bool)
@@ -136,12 +175,19 @@
         (let [bv (code-nth b 1)]
           (and (code-list? bv) (and (>= (code-count bv) 2)
             (let [v (code-nth bv 1)] (and (code-list? v) (and (> (code-count v) 0) (code-eq (code-nth v 0) `gc-sp)))))))))))))
-(defn xform-forms [(m Code) (i i64) (n i64) (mg Code)] (-> Code)
+(defn xform-forms [(m Code) (i i64) (n i64) (mg Code) (as Code)] (-> Code)
   (if (>= i n) `()
-    (let [f (code-nth m i) rest (xform-forms m (+ i 1) n mg)]
-      (if (and (is-defn? f) (not (already-rooted? f))) `(~(rewrite-defn f mg) ~@rest) `(~f ~@rest)))))
+    (let [f (code-nth m i) rest (xform-forms m (+ i 1) n mg as)]
+      (if (and (is-defn? f) (not (already-rooted? f)))
+          (if (mg-member? (code-nth f 1) as 0 (code-count as))
+              `(~(rewrite-defn f mg) ~@rest)      ; allocates -> full frame + roots
+            `(~(rewrite-defn-thin f) ~@rest))     ; can't trigger GC -> no frame
+        `(~f ~@rest)))))
 (defn xform-mod [(m Code) (mg Code)] (-> Code)
-  (if (rewrite-mod? m) `(~(code-nth m 0) ~@(xform-forms m 1 (code-count m) mg)) m))
+  (if (rewrite-mod? m)
+      (let [as (fixpoint-allocs m (code-count m) (base-allocs))]
+        `(~(code-nth m 0) ~@(xform-forms m 1 (code-count m) mg as)))
+    m))
 (defn xform-mods [(ms Code) (i i64) (n i64) (mg Code)] (-> Code)
   (if (>= i n) `() `(~(xform-mod (code-nth ms i) mg) ~@(xform-mods ms (+ i 1) n mg))))
 (defn gc-transform [(mods Code)] (-> Code)
