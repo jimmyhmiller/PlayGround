@@ -570,6 +570,32 @@ fn zeroed_atomic_usizes(n: usize) -> Vec<AtomicUsize> {
     unsafe { Vec::from_raw_parts(v.as_mut_ptr().cast::<AtomicUsize>(), v.len(), v.capacity()) }
 }
 
+/// The three words the write barrier reads, mirrored into emitted code by the
+/// JIT (I3) exactly as `AllocWindow` is by the inline allocator. Layout is ABI:
+/// emitted code reads the fields at fixed offsets.
+///
+///   offset 0: base  — base of the ACTIVE old space; the barrier's bounds
+///             compare is relative to it, so it MUST follow a major flip
+///   offset 8: size  — size of one old space (both are equal, so one table
+///             serves whichever is active)
+///   offset 16: cards — base of the card byte array
+///
+/// This is not a *copy* of the barrier's inputs, it is the only one: `mark`
+/// reads these same words. A mirror the Rust barrier did not itself read could
+/// drift from it silently, and "the JIT marks a card in the wrong table" is
+/// precisely the class of bug this stage exists to make impossible.
+///
+/// All three are atomics because a `*const u8` field would cost `Heap` its
+/// auto `Sync` — the same reason `AllocWindow` is all-atomic. Only `base`
+/// actually changes (at flips, under STW); `size` and `cards` are set once, so
+/// their relaxed loads are plain loads.
+#[repr(C)]
+struct CardWindow {
+    base: AtomicUsize,
+    size: AtomicUsize,
+    cards: AtomicPtr<u8>,
+}
+
 /// The remembered set — and there is no other one.
 ///
 /// beagle's post-mortem is the design here: its barrier pushed to a
@@ -593,6 +619,9 @@ fn zeroed_atomic_usizes(n: usize) -> Vec<AtomicUsize> {
 /// chokepoint (`copy_or_forward`) and read ONLY at STW — the barrier never
 /// touches it, which is the property beagle's design lacked.
 pub struct CardTable {
+    /// The three words the barrier needs — and the ONLY copy of them, read by
+    /// `mark` and by the JIT's inline mirror alike. See `CardWindow`.
+    win: CardWindow,
     cards: Vec<AtomicU8>,
     /// Per card: 1 + the byte offset of the FIRST object that BEGINS in it, or
     /// 0 for "no object begins here". The +1 bias is what lets the table be
@@ -602,11 +631,6 @@ pub struct CardTable {
     /// object spanning cards 3..7 is only ever marked on card 3, so cards 4..6
     /// are never dirtied without a start.
     starts: Vec<AtomicUsize>,
-    /// Base of the ACTIVE old space. Re-pointed at every flip, under STW.
-    base: AtomicUsize,
-    /// Size of one old space, in bytes. Both are equal, so one table serves
-    /// whichever is active.
-    size: usize,
     /// Exclusive high-water of every offset that has a `starts` entry. Nothing
     /// above `scan_cards()` has ever been written, so the scans and clears
     /// never touch — and so never commit — the lazily-reserved pages past it.
@@ -616,11 +640,20 @@ pub struct CardTable {
 impl CardTable {
     fn new(base: usize, size: usize) -> Self {
         let ncards = size.div_ceil(CARD_SIZE);
+        let cards = zeroed_atomic_u8s(ncards);
         CardTable {
-            cards: zeroed_atomic_u8s(ncards),
+            // The window's `cards` pointer names the Vec's buffer, which is
+            // allocated once and never grown — so this is stable for the
+            // table's life, and stable across the `Heap` move that `arm_window`
+            // waits for (moving a Vec does not move its buffer, unlike the
+            // AllocWindow's cursor, which points INTO the Heap).
+            win: CardWindow {
+                base: AtomicUsize::new(base),
+                size: AtomicUsize::new(size),
+                cards: AtomicPtr::new(cards.as_ptr() as *mut u8),
+            },
+            cards,
             starts: zeroed_atomic_usizes(ncards),
-            base: AtomicUsize::new(base),
-            size,
             indexed: AtomicUsize::new(0),
         }
     }
@@ -629,14 +662,17 @@ impl CardTable {
     /// dirty, if `addr` is in the old gen at all.
     ///
     /// One unsigned compare does both bounds: a nursery (or any non-old)
-    /// address wraps `addr - base` to a huge offset and fails `< size`. This is
-    /// the sequence the JIT mirrors inline in I3 (load base/size/cards from the
-    /// RunCtx, sub, unsigned compare, shift, byte store), so keep it this
-    /// shape.
+    /// address wraps `addr - base` to a huge offset and fails `< size`. That is
+    /// why no generation test is needed.
+    ///
+    /// The JIT mirrors this sequence instruction-for-instruction in
+    /// `emit_card_mark` — load base/size/cards from the `CardWindow`, sub,
+    /// unsigned compare, shift, byte store — reading the SAME `win` words this
+    /// does. Keep the two in step: they are one barrier with two emitters.
     #[inline(always)]
     pub fn mark(&self, addr: usize) {
-        let off = addr.wrapping_sub(self.base.load(Ordering::Relaxed));
-        if off < self.size {
+        let off = addr.wrapping_sub(self.win.base.load(Ordering::Relaxed));
+        if off < self.win.size.load(Ordering::Relaxed) {
             // SAFETY: `off < size` and `cards.len() == size.div_ceil(CARD_SIZE)`,
             // so `off >> CARD_SHIFT < cards.len()`. The single compare above IS
             // the bounds check; a second one is pure cost on the hot path.
@@ -646,8 +682,18 @@ impl CardTable {
 
     /// Point the table at `space` (the active old space) after a flip. STW.
     fn point_at(&self, space: &AtomicBumpAllocator) {
-        debug_assert_eq!(space.size(), self.size, "card table sized for a different old space");
-        self.base.store(space.base() as usize, Ordering::Release);
+        debug_assert_eq!(
+            space.size(),
+            self.win.size.load(Ordering::Relaxed),
+            "card table sized for a different old space"
+        );
+        self.win.base.store(space.base() as usize, Ordering::Release);
+    }
+
+    /// Address of the `CardWindow` — what the JIT holds in its RunCtx so its
+    /// inline mark reads the live base at every flip (I3).
+    pub fn window(&self) -> *const u8 {
+        &self.win as *const CardWindow as *const u8
     }
 
     /// Record that an object BEGINS at old-gen byte `off`. Called once per
@@ -752,12 +798,6 @@ impl CardTable {
         let n = self.scan_cards(active_used);
         unsafe { std::ptr::write_bytes(self.starts.as_ptr() as *mut usize, 0, n) };
         self.indexed.store(0, Ordering::Relaxed);
-    }
-
-    /// Base address of the card byte array — the JIT loads this into its
-    /// RunCtx mirror in I3.
-    pub fn card_base(&self) -> *const u8 {
-        self.cards.as_ptr().cast()
     }
 }
 
@@ -938,28 +978,17 @@ impl Heap {
     pub fn nursery(&self) -> &AtomicBumpAllocator {
         &self.nursery
     }
-    /// The remembered set. `write_barrier` is the entry point callers want;
-    /// this is here for the JIT's RunCtx mirror (I3).
-    #[inline(always)]
-    pub fn card_table(&self) -> &CardTable {
-        &self.cards
-    }
-    /// Base of the active old space — the JIT mirrors this next to the
-    /// AllocWindow for its inline card mark (I3), re-read at every flip.
+    /// Base of the active old space.
     #[inline(always)]
     pub fn old_base(&self) -> *mut u8 {
         self.from_space().base()
     }
-    /// Size of one old space, the other half of the barrier's single unsigned
-    /// bounds compare (I3).
+    /// Address of the card table's `CardWindow` — the barrier's three words, at
+    /// ABI offsets. The JIT holds this in its RunCtx and marks inline against
+    /// the very words `write_barrier` reads (I3).
     #[inline(always)]
-    pub fn old_size(&self) -> usize {
-        self.from_space().size()
-    }
-    /// Base of the card byte array (I3).
-    #[inline(always)]
-    pub fn card_base(&self) -> *const u8 {
-        self.cards.card_base()
+    pub fn card_window(&self) -> *const u8 {
+        self.cards.window()
     }
 
     /// THE WRITE BARRIER. Call this AFTER storing a heap pointer into a field

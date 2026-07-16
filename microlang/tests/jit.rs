@@ -417,3 +417,103 @@ fn jit_native_loop_parks_for_concurrent_gc() {
     assert_eq!(rt.decode(r), Val::Int(30_000_000));
     assert!(rt.relocated() > 0, "the concurrent collections never ran");
 }
+
+/// STAGE I3: the inline `%aset`'s WRITE BARRIER, on the tier that emits it.
+///
+/// `%aset` is the one emitted store that can put a heap word into an object
+/// that is already OLD, so it is the one place emitted code must mark a card.
+/// A missing mark is not a slow store, it is a LOST old→young edge: the young
+/// cons below is reachable ONLY through the promoted vector's data blob, so if
+/// the card is not dirty the next minor never scans that blob, never promotes
+/// the cons, and resets the nursery out from under a live reference.
+///
+/// Two independent things must therefore hold, and both are asserted:
+///  - `verify_no_old_to_young` (the missed-barrier walk after every minor) stays
+///    silent — this is what fires in debug, naming the object and the slot;
+///  - the value read back afterwards is intact. This is the half that does not
+///    depend on the walk: with verify off the same missing mark still dies, on
+///    the nursery poison ("use-after-move: points into a collected space"),
+///    because the slot now names reclaimed nursery. `churn` is what earns this
+///    half — it guarantees a minor runs AFTER the last `vector-set!`, while the
+///    edge is live. Without it the last store might never be collected under.
+///
+/// LowBit is the model under test because `INLINE_OBJECTS` gates the inline arm;
+/// HighBit/NanBox route `%aset` through the barriered `arr_slice_mut` shim, and
+/// the interpreter tiers cover that path in `gc_stress.rs`.
+///
+/// The explicit `(gc)` prim would prove NOTHING here: it is a MAJOR, which
+/// traces the old gen from the roots and so finds the edge whether or not its
+/// card was ever marked. Only a MINOR consults the card table, so this drives
+/// minors through the ordinary pressure path (a lowered nursery trigger).
+///
+/// MUTATION-TESTED: deleting the `emit_card_mark` call from the inline `%aset`
+/// arm makes this fail. That is also what proves it is not vacuous — it is the
+/// evidence that the inline arm, not the shim, is what runs here.
+#[test]
+fn jit_inline_aset_marks_its_card() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut rt = Runtime::<LowBitModel>::new();
+    assert!(
+        rt.heap().verify_armed(),
+        "this test wants the missed-barrier walk armed: run in debug, or set \
+         MICROLANG_GC_VERIFY=1"
+    );
+    // Small enough that the programs below cross it many times over: each
+    // `go` iteration allocates two 24-byte conses, so 400 of them is ~19 KiB
+    // against a 4 KiB trigger. (`go`'s depth is what is capped — it recurses
+    // non-tail, so 400 is about what the test thread's stack takes; the
+    // trigger, not the iteration count, is what buys the collections.) The
+    // inline allocation window is re-gated to the trigger, so allocation still
+    // runs inline right up to it.
+    rt.heap().set_trigger_bytes(4 * 1024);
+    let cs = JitCranelift::<LowBitModel>::new();
+    // Phase 1 — build the edge. `go` recurses NON-tail on purpose: it is the
+    // call boundary that reaches a safepoint. `v` outlives the early minors, so
+    // it is promoted, and every `vector-set!` after that promotion is an
+    // old→young store into its DATA BLOB (the words live in the blob, not the
+    // handle, which is why the blob is the base the mark has to name). The
+    // depth is capped at 200: 400 native frames with a collection under them
+    // overflow a debug test thread, and the trigger — not the iteration count —
+    // is what buys the collections anyway.
+    microlang::sexpr::eval_str(
+        &mut rt,
+        &cs,
+        "(def v (vector 0 0 0))
+         (def go (fn (n) (if (= n 0) 0
+                    (do (vector-set! v 1 (cons n (cons (* n 2) nil)))
+                        (+ 0 (go (- n 1)))))))
+         (go 200)",
+    );
+    // v is promoted and the edge v[1] -> young cons now exists, named by nothing
+    // else. Asserted, not assumed: with no minor here, `v` would still be young
+    // and the barrier would have had nothing to do.
+    let after_go = rt.heap().minor_collections.load(Relaxed);
+    assert!(
+        after_go > 0,
+        "no minor ran during `go`, so `v` was never promoted and no store into \
+         it was ever old→young — this test would prove nothing"
+    );
+    // Phase 2 — collect under the edge. `churn` is a self-tail loop (O(1) stack,
+    // polling its back-edge), so it can allocate freely; it exists only to force
+    // minors AFTER the last `vector-set!`, while the edge is live. That is what
+    // makes the value assertion below bite in release, where the missed-barrier
+    // walk is off.
+    let r = microlang::sexpr::eval_str(
+        &mut rt,
+        &cs,
+        "(def churn (fn (n acc) (if (= n 0) acc (churn (- n 1) (cons n acc)))))
+         (churn 4000 nil)
+         (+ (first (vector-ref v 1)) (first (rest (vector-ref v 1))))",
+    );
+    assert!(
+        rt.heap().minor_collections.load(Relaxed) > after_go,
+        "no minor ran after the last %aset, so nothing ever had to find the \
+         young value through the card table — this test proved nothing"
+    );
+    // `n` counts down, so the surviving store is n=1: (cons 1 (cons 2 nil)).
+    assert_eq!(
+        rt.print(r),
+        "3",
+        "the young value stored by the inline %aset did not survive the minor"
+    );
+}

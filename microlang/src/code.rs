@@ -230,7 +230,11 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 let tag = rt.fresh_escape_tag();
                 let kid = rt.alloc(Obj::Escape { tag });
                 let kref = M::R::enc_ref(kid);
+                // Publish THIS frame's env across the call (see the `Call` arm):
+                // a collection fired inside `f` must trace our still-live locals.
+                rt.env_stack.push(locals.clone());
                 let v = top.invoke(top, rt, f, &[kref]);
+                rt.env_stack.pop();
                 // Caught our escape? (kind 2 == escape, matching tag.)
                 if rt.signal.kind == 2 && rt.signal_tag() == tag {
                     return rt.take_signal().value;
@@ -254,11 +258,22 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 // the suspended throw/escape (if any) is restored.
                 if let Some(fbody) = finally {
                     let suspended = rt.take_signal();
+                    // `finally` runs ARBITRARY code — safepoints included — and
+                    // TWO bare heap pointers are live across it, named by nothing
+                    // else: `result` (the body's/handler's value, which we return
+                    // BELOW) and the suspended signal's payload (taken OUT of the
+                    // signal, so not even the signal root covers it). Root both,
+                    // re-read both.
+                    let base = rt.push_root(result);
+                    rt.push_root(suspended.value);
                     let fv = top.eval_ir(top, rt, fbody, locals);
+                    result = rt.root_get(base);
+                    let value = rt.root_get(base + 1);
+                    rt.truncate_roots(base);
                     if rt.pending() {
-                        return fv;
+                        return fv; // a signal raised BY `finally` supersedes
                     }
-                    rt.signal = suspended;
+                    rt.signal = crate::runtime::Signal { value, ..suspended };
                 }
                 result
             }
@@ -285,15 +300,34 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                     }
                     rt.push_root(v);
                 }
-                let argv: Vec<u64> = (0..args.len()).map(|i| rt.root_get(base + i)).collect();
-                rt.truncate_roots(base);
-                let f = argv[0];
-                let rest = &argv[1..];
-                let mut flat: Vec<u64> = rest[..rest.len().saturating_sub(1)].to_vec();
-                if let Some(&last) = rest.last() {
-                    flat.extend(rt.seq_flatten(top, last));
+                // EVERYTHING below is inside one safepoint-reaching region:
+                // `seq_flatten` INVOKES the seq fn to force a lazy tail, which
+                // RUNS USER CODE (`(apply str (map f xs))` calls `f` in there —
+                // this is how core's `pr-str` is written). So:
+                //  * the callee + leading args stay ROOTED across the flatten and
+                //    are re-read after. Copying them out to bare locals first (as
+                //    this arm used to) leaves them pointing into the collected
+                //    space, and `invoke` then stores them into the callee's frame,
+                //    where the next collection trips over them in `visit_env`.
+                //  * THIS frame's env is published for the WHOLE region (see the
+                //    `Call` arm) — not just around the invoke, since a collection
+                //    can equally fire inside the flatten, and our still-live
+                //    locals must be traced for it.
+                rt.env_stack.push(locals.clone());
+                let n = args.len();
+                let mut flat: Vec<u64> = Vec::new();
+                if n >= 2 {
+                    let last_slot = base + n - 1;
+                    let last = rt.root_get(last_slot);
+                    let tail = rt.seq_flatten(top, last);
+                    flat.extend((base + 1..last_slot).map(|i| rt.root_get(i)));
+                    flat.extend(tail);
                 }
-                top.invoke(top, rt, f, &flat)
+                let f = rt.root_get(base);
+                rt.truncate_roots(base);
+                let r = top.invoke(top, rt, f, &flat);
+                rt.env_stack.pop();
+                r
             }
             Ir::Prim(op, args) => {
                 // Precise rooting of already-evaluated args across the remaining
@@ -350,7 +384,11 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                         return M::R::enc_nil();
                     }
                 };
-                top.invoke(top, rt, imp, &argv)
+                // Publish THIS frame's env across the call (see the `Call` arm).
+                rt.env_stack.push(locals.clone());
+                let r = top.invoke(top, rt, imp, &argv);
+                rt.env_stack.pop();
+                r
             }
         }
     }

@@ -128,6 +128,11 @@ pub struct JitCtx<'a, M: ValueModel> {
     /// (D5). Emitted code re-reads the fields on every allocation: they change
     /// at space flips (under STW) and `limit == 0` is gc-stress mode.
     alloc_window: Cell<*const u8>,
+    /// Address of the card table's `CardWindow` (old base / old size / card
+    /// array base at offsets 0/8/16 — ABI, see heap.rs), for the inline write
+    /// barrier (I3). Emitted code re-reads the fields on every mark: the base
+    /// follows the old gen's major flip (under STW).
+    card_window: Cell<*const u8>,
     /// Address of `Shared.relocated` (the collection counter) — one half of the
     /// dispatch-IC epoch. Stable for the runtime's lifetime; mutated only under
     /// STW, so a plain load is sound.
@@ -624,6 +629,7 @@ fn shim_fast_invoke<M: ValueModel>(
         global_base: Cell::new(std::ptr::null()),
         global_len: Cell::new(0),
         alloc_window: Cell::new(std::ptr::null()),
+        card_window: Cell::new(std::ptr::null()),
         reloc_ptr: Cell::new(std::ptr::null()),
         dispver_ptr: Cell::new(std::ptr::null()),
         poll_ptr: Cell::new(std::ptr::null()),
@@ -789,10 +795,25 @@ extern "C" fn shim_apply<M: ModelArithJit>(
             }
         }
     }
-    let mut flat: Vec<u64> = rest[..rest.len().saturating_sub(1)].to_vec();
-    if let Some(&last) = rest.last() {
-        flat.extend(rt.seq_flatten(top, last));
+    // SLOW PATH. `seq_flatten` INVOKES the seq fn to force a lazy tail — a
+    // SAFEPOINT, which relocates the callee and every leading arg. They must be
+    // ROOTED across it and re-read after; the bare `f`/`rest` copied out above
+    // point into the collected space once it returns. (Exactly the TreeWalk
+    // `Prim::Apply` arm's discipline — see `code.rs`.)
+    let base = rt.root_depth();
+    for &a in argv {
+        rt.push_root(a);
     }
+    let mut flat: Vec<u64> = Vec::new();
+    if argc >= 2 {
+        let last_slot = base + argc as usize - 1;
+        let last = rt.root_get(last_slot);
+        let tail = rt.seq_flatten(top, last);
+        flat.extend((base + 1..last_slot).map(|i| rt.root_get(i)));
+        flat.extend(tail);
+    }
+    let f = rt.root_get(base);
+    rt.truncate_roots(base);
     top.invoke(top, rt, f, &flat)
 }
 
@@ -909,11 +930,20 @@ extern "C" fn shim_try<M: ValueModel>(
     if !finally.is_null() {
         let fbody = unsafe { &*finally };
         let suspended = rt.take_signal();
+        // Mirrors TreeWalk's `Ir::Try` exactly, rooting included: `finally` runs
+        // ARBITRARY code (safepoints), and both `result` (returned below) and the
+        // suspended signal's payload (taken OUT of the signal, so the signal root
+        // does not cover it) are bare heap pointers across it.
+        let base = rt.push_root(result);
+        rt.push_root(suspended.value);
         let fv = top.eval_ir(top, rt, fbody, &locals);
+        result = rt.root_get(base);
+        let value = rt.root_get(base + 1);
+        rt.truncate_roots(base);
         if rt.pending() {
             return fv;
         }
-        rt.signal = suspended;
+        rt.signal = crate::runtime::Signal { value, ..suspended };
     }
     result
 }
@@ -2230,6 +2260,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             global_base: Cell::new(global_base),
             global_len: Cell::new(global_len),
             alloc_window: Cell::new(&rt.heap().window as *const crate::heap::AllocWindow as *const u8),
+            card_window: Cell::new(rt.heap().card_window()),
             // AtomicU64 is repr(transparent) over u64; both counters are only
             // written under STW / the registry lock, so plain loads in emitted
             // code observe a coherent value.
@@ -2730,6 +2761,7 @@ fn build_body<M: ModelArithJit>(
         off_consts_base: core::mem::offset_of!(JitCtx<'static, M>, consts_base) as i32,
         off_global_base: core::mem::offset_of!(JitCtx<'static, M>, global_base) as i32,
         off_alloc_window: core::mem::offset_of!(JitCtx<'static, M>, alloc_window) as i32,
+        off_card_window: core::mem::offset_of!(JitCtx<'static, M>, card_window) as i32,
         off_reloc_ptr: core::mem::offset_of!(JitCtx<'static, M>, reloc_ptr) as i32,
         off_dispver_ptr: core::mem::offset_of!(JitCtx<'static, M>, dispver_ptr) as i32,
         off_direct: core::mem::offset_of!(JitCtx<'static, M>, direct) as i32,
@@ -2856,6 +2888,7 @@ pub struct Compiler<'a, 'b> {
     off_consts_base: i32,
     off_global_base: i32,
     off_alloc_window: i32,
+    off_card_window: i32,
     off_reloc_ptr: i32,
     off_dispver_ptr: i32,
     off_direct: i32,
@@ -3173,6 +3206,51 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let hv = self.iconst(header);
         self.fb.ins().store(flags, hv, addr, 0);
         addr
+    }
+
+    /// THE INLINE WRITE BARRIER (I3) — `CardTable::mark` emitted straight-line:
+    /// dirty the card holding `obj_addr`, an OBJECT BASE, if it is old at all.
+    ///
+    /// Call this on any emitted store of a heap word into an object that might
+    /// be OLD. NOT on a freshly allocated object's initializing stores: it is
+    /// nursery by construction, so those are young→anything, and keeping the
+    /// D5 inline `%cons`/closure sequences barrier-free is the entire point of
+    /// the generational design — do not "play it safe" and add one there.
+    ///
+    /// `obj_addr` must be the object BASE, not the field address. That is what
+    /// makes the dirty-card scan tractable: a dirty card then always has an
+    /// object starting in it, and `starts` needs one entry per card (heap.rs
+    /// panics on a dirty card with no start rather than skipping it).
+    ///
+    /// ONE unsigned compare does both bounds — a nursery address wraps
+    /// `addr - old_base` to a huge offset and fails `< old_size` — so there is
+    /// no generation test and no second branch. The three inputs are re-read
+    /// per mark because `base` follows the old gen's major flip; they are the
+    /// same `CardWindow` words the Rust barrier loads, so the two cannot drift.
+    fn emit_card_mark(&mut self, obj_addr: Value) {
+        let flags = MemFlagsData::trusted();
+        let cw = self.load_rc_field(self.off_card_window);
+        let base = self.fb.ins().load(I64, flags, cw, 0);
+        let size = self.fb.ins().load(I64, flags, cw, 8);
+        let cards = self.fb.ins().load(I64, flags, cw, 16);
+        let off = self.fb.ins().isub(obj_addr, base);
+        let is_old = self.fb.ins().icmp(IntCC::UnsignedLessThan, off, size);
+        let markb = self.fb.create_block();
+        let contb = self.fb.create_block();
+        self.fb.ins().brif(is_old, markb, &[], contb, &[]);
+        self.fb.switch_to_block(markb);
+        self.fb.seal_block(markb);
+        let ci = self.fb.ins().ushr_imm(off, crate::heap::CARD_SHIFT as i64);
+        let slot = self.fb.ins().iadd(cards, ci);
+        // ONE relaxed byte store, idempotent — concurrent same-value marks are
+        // benign and visibility comes from the STW safepoint, not from a fence
+        // here. (`Vec<AtomicU8>` has `Vec<u8>`'s layout, which is what makes a
+        // raw byte store into it valid; heap.rs pins that property.)
+        let dirty = self.fb.ins().iconst(I8, crate::heap::CARD_DIRTY as i64);
+        self.fb.ins().store(flags, dirty, slot, 0);
+        self.fb.ins().jump(contb, &[]);
+        self.fb.switch_to_block(contb);
+        self.fb.seal_block(contb);
     }
 
     /// Inline type guard (D5): `v` is a ref whose header `type_id == want`.
@@ -4328,22 +4406,22 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.seal_block(merge);
                 self.fb.use_var(result)
             }
-            // `(%aget v i)` — ARRAY handle guard, immediate-int index guard,
-            // unsigned bounds check against the handle's logical length (a
-            // negative index untags huge and fails it), then a direct indexed
-            // load through the data blob (D5). Any failed guard — including
-            // out-of-bounds — takes the shim, which owns the loud range panic.
+            // `(%aget v i)` / `(%aset v i x)` — ARRAY handle guard, immediate-
+            // int index guard, unsigned bounds check against the handle's
+            // logical length (a negative index untags huge and fails it), then
+            // a direct indexed load/store through the data blob (D5). Any
+            // failed guard — including out-of-bounds — takes the shim, which
+            // owns the loud range panic.
             //
-            // `%aset` USED TO SHARE THIS ARM and is deliberately not here: its
-            // inline store puts a (possibly young) value into a (possibly
-            // promoted) data blob, and emitted code cannot yet mark the card —
-            // that is I3's `emit_card_mark` plus the RunCtx mirrors. An
-            // unbarriered store is not a slow `%aset`, it is a lost old→young
-            // edge, so until I3 lands `%aset` goes through `slow_prim` and the
-            // barriered `arr_slice_mut` choke point. The guards below are I3's
-            // starting point: re-add `Prim::VectorSet` here and emit the mark
-            // on `blob_addr` right before the store.
-            Ir::Prim(p @ Prim::VectorRef, args) if M::INLINE_OBJECTS => {
+            // `%aset` is BARRIERED (I3): its store puts a possibly-young value
+            // into a possibly-promoted blob, and an unbarriered one would not
+            // be a slow `%aset` but a LOST old→young edge — silent until the
+            // heap corrupts arbitrarily later. The mark names `blob_addr`, not
+            // the handle: the words live in the DATA BLOB, so the blob is the
+            // object holding the young pointer and the only base whose card
+            // names it. (This is exactly what the `arr_slice_mut` choke point
+            // marks on the shim path — the two agree by construction.)
+            Ir::Prim(p @ (Prim::VectorRef | Prim::VectorSet), args) if M::INLINE_OBJECTS => {
                 let argvals: Vec<Value> =
                     args.iter().map(|a| self.compile::<M>(a, false)).collect();
                 let flags = MemFlagsData::trusted();
@@ -4369,7 +4447,13 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let (_ir, blob_addr) = M::emit_ref_addr(self, blob_bits);
                 let byteoff = self.fb.ins().ishl_imm(i, 3);
                 let slot = self.fb.ins().iadd(blob_addr, byteoff);
-                let r = self.fb.ins().load(I64, flags, slot, 8);
+                let r = if matches!(p, Prim::VectorRef) {
+                    self.fb.ins().load(I64, flags, slot, 8)
+                } else {
+                    self.emit_card_mark(blob_addr);
+                    self.fb.ins().store(flags, argvals[2], slot, 8);
+                    self.iconst(M::R::enc_nil())
+                };
                 self.fb.def_var(result, r);
                 self.fb.ins().jump(merge, &[]);
 

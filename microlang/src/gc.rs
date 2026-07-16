@@ -298,6 +298,7 @@ impl<M: ValueModel> Runtime<M> {
         let dyn_stack = &mut self.dyn_stack;
         let env_stack = &self.env_stack;
         let me = &self.me;
+        let signal = &mut self.signal;
         let mut enumerate_roots = |visit: &mut dyn FnMut(*mut u64)| {
             unsafe {
                 // 1. Globals: the dense array IS the store; skip unbound slots.
@@ -380,6 +381,15 @@ impl<M: ValueModel> Runtime<M> {
                 // 10. The live continuation, if we are at a CEK safepoint.
                 if let Some(k) = live_kont {
                     visit_kont(k, visit);
+                }
+                // 11. A PENDING signal's payload: the thrown value / the escape's
+                //     result. While a throw propagates it is a live heap pointer
+                //     that NO other root names, so a safepoint reached with the
+                //     signal up would leave it dangling. (`tag` is a plain
+                //     counter, not a value — visiting it would hand the collector
+                //     a non-pointer.)
+                if signal.kind != 0 {
+                    visit(&mut signal.value as *mut u64);
                 }
             }
         };

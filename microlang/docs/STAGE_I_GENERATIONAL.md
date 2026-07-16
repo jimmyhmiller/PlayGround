@@ -153,32 +153,77 @@ barrier-free — the D5 inline alloc paths pay nothing. Each choke point was
 mutation-tested: deleting its barrier makes the detector fire, naming the
 object and the slot.
 
-**I3 IS NOT OPTIONAL FOR PERF.** I2 had to DE-INLINE the JIT's `%aset` arm
-(`Prim::VectorSet` now takes `slow_prim`), because emitted code cannot yet mark
-a card and an unbarriered inline store is a lost old→young edge. Measured cost:
-`reduce-map` 28→35 ns/op — ALL of it the de-inline, none of it generational
-(pinned by measuring the de-inline alone against I1). I3's `emit_card_mark`
-recovers it; the guards it needs are still in place in that arm.
+**I3 LANDED (2026-07-16): the JIT marks its own cards.** `%aset` is RE-INLINED
+and the de-inline's cost is paid back — `reduce-map` 35→27 ns/op (better than
+I1's 28; before/after measured on one machine against the same bench).
 
-### Two PRE-EXISTING gaps found while gating I2 (NOT Stage I bugs)
-Both are rooting holes in the **clojure-stub frontend's compiler** — it threads
-bare `u64` form pointers through `compile`, and a macro expansion evaluates
-code, which reaches a safepoint, which collects and relocates them. Both
-reproduce at I1 (779529155), before minors existed, so they bound what the
-detector can be pointed at rather than being caused by it:
-1. `MICROLANG_GC_STRESS=1` cannot boot `clojure.core` at all — `Session::new`
-   dies in `compile_fn` with "fn: params must be symbols" (a relocated param
-   list). So the Clojure-side barrier suite drives minors through the ordinary
-   PRESSURE path (a lowered nursery trigger) instead.
-2. Even on the pressure path, a low trigger use-after-moves: for EVERY program
+`emit_card_mark(obj_base)` is `CardTable::mark` emitted straight-line: load
+base/size/cards, sub, ONE unsigned compare, shift, relaxed byte store. No
+generation test — a nursery address wraps to a huge offset and fails the
+compare, exactly as in Rust.
+
+The three inputs are NOT a copy. `CardTable`'s first field is now a `#[repr(C)]`
+`CardWindow` (base/size/cards at 0/8/16) that `mark` itself reads, and the JIT
+holds its address in the RunCtx beside the `AllocWindow` pointer. A mirror the
+Rust barrier did not itself read could drift from it silently, and "the JIT
+marked a card in the wrong table" is the exact class of bug this stage exists to
+make impossible. `base` follows the major flip (`CardTable::point_at`, STW) and
+emitted code re-reads it per mark, so there is one re-point, not two.
+
+The inline arm marks the DATA BLOB — the object that actually holds the words —
+not the ARRAY handle it dereferenced to get there. That agrees with
+`arr_slice_mut` by construction, and the mutation test proves it: deleting the
+`emit_card_mark` call makes the detector name `old-gen array-data ... slot +16`,
+the blob at the index the program wrote.
+
+Audited for other emitted stores that could hit an old object: there are none.
+The only other emitted stores are frame slots (`cur_slots` — Rust-side, traced
+as roots, not heap objects) and the writes into `emit_alloc`'s fresh address
+(inline cons head/tail, closure meta/code/captures). Those are nursery by
+construction, so they stay barrier-free — that is the whole point of the design,
+and adding a mark there to "be safe" would be a regression, not caution.
+`INLINE_OBJECTS` still gates all of it: NanBox/HighBit route `%aset` through the
+barriered `arr_slice_mut` shim, unchanged.
+
+Proof: `tests/jit.rs::jit_inline_aset_marks_its_card` — a promoted vector, a
+`%aset` of a fresh young cons from JIT'd code, then a minor forced through the
+pressure path. It asserts a minor ran DURING the build (so `v` really was
+promoted and the store really was old→young) and another AFTER the last store
+(so something really had to find the young value through the card table); either
+missing and the test would pass having proved nothing. The explicit `(gc)` prim
+is useless here and is not used: it is a MAJOR, which traces the old gen from
+the roots and finds the edge whether or not its card was marked. Only a minor
+consults the table.
+
+### Two PRE-EXISTING gaps found while gating I2 (NOT Stage I bugs) — NOW CLOSED
+Both were rooting holes reached from the **clojure-stub frontend** — bare `u64`
+values held across a macro expansion / a lazy-seq force, which evaluate code,
+which reach a safepoint, which collects and relocates them. Both reproduced at
+I1 (779529155), before minors existed, so they bounded what the detector could
+be pointed at rather than being caused by it:
+1. `MICROLANG_GC_STRESS=1` could not boot `clojure.core` at all — `Session::new`
+   died in `compile_fn` with "fn: params must be symbols" (a relocated param
+   list).
+2. Even on the pressure path, a low trigger use-after-moved: for EVERY program
    on the JIT tier, and for `(reduce (fn [acc i] (assoc acc i ..)) {} ..)` on
-   TreeWalk. `clojure-stub/tests/gc_generational.rs` therefore runs TreeWalk
-   (covering atoms, both transient tiers, the HAMT, records, the growable
-   array) and carries the JIT half `#[ignore]`d with this reason — it should
-   start passing the day the gap closes.
-Closing these is a frontend rooting audit, in the shape of Stage E's work on the
-tiers. It is worth doing: until it is, the gc-stress hammer cannot be swung at
-the real Clojure library code at all.
+   TreeWalk.
+
+The audit that closed them found the causes were only PARTLY in the frontend;
+the rest were in the toolkit, exposed the moment the frontend stopped dying
+first. In the frontend (`clojure-stub/src/roots.rs` — a `RootVec` shadow-stack
+handle; `expand_each` takes `&mut RootVec`, so a caller with a bare `Vec<u64>`
+cannot call it): the expander's element walks, `rebuild_binder`'s param/binding
+lists, and the `require` path (a load RUNS a file). In the toolkit: `seq_step`/
+`seq_flatten` accumulated bare values across the seq fn's invoke; the
+`Prim::Apply`, `Prim::CallEc` and `Ir::Dispatch` arms invoked WITHOUT publishing
+the caller's env (only `Ir::Call` did), so a collection inside the callee never
+traced the caller's still-live frame; `Ir::Try` held both the body's result and
+the suspended signal's payload bare across an allocating `finally`; and the
+pending signal was not a root at all.
+
+Result: `gc_generational.rs`'s JIT half is un-`#[ignore]`d and the `reduce`/
+`assoc` map shape is back in its battery, and the hammer now swings at the real
+standard library — `clojure-stub/tests/gc_stress_library.rs`.
 
 ## Phases (each suite-gated)
 - I1: `heap.rs` — nursery space, promotion/minor evacuation, card table
@@ -191,7 +236,7 @@ the real Clojure library code at all.
   the pressure safepoint; `MICROLANG_GC_STRESS` = minor at every safepoint
   (+ a major every N); counters (minor/major/promoted bytes).
 - I3: JIT — AllocWindow points at the nursery; `emit_card_mark` + the inline
-  `aset` arm; RunCtx mirrors for old_base/old_size/card_base.
+  `aset` arm; the RunCtx's `CardWindow` pointer (base/size/cards). DONE.
 - I4: gates + measurement. Targets: vecbuild ≤45, group-by ≤160, no core
   band regression, and the suite-order effect (Stage F scoreboard's
   interleave 3000 vs 1865 isolated) should largely vanish because

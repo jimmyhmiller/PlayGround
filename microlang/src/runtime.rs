@@ -2751,20 +2751,25 @@ impl<M: ValueModel> Runtime<M> {
         top: &dyn crate::code::CodeSpace<M>,
         cur: u64,
     ) -> Option<Option<(u64, u64)>> {
-        let mut cur = cur;
-        loop {
+        // The lazy/frontend arm INVOKES the registered `seq` fn — a safepoint,
+        // which relocates `cur`. So the cursor rides the shadow stack and is
+        // re-read after the invoke. This also fixes the NO-PROGRESS check: it
+        // compares addresses, and comparing the post-invoke `forced` against a
+        // PRE-invoke `cur` would miss "seq returned the same node" whenever a
+        // collection moved it — looping forever instead of erroring loudly.
+        let slot = self.push_root(cur);
+        let out = loop {
+            let cur = self.root_get(slot);
             // RAW dispatch (Stage F1): this runs once per SEQ ELEMENT.
             if self.is_nil_bits(cur) {
-                return Some(None);
+                break Some(None);
             }
             match self.raw_gc(cur) {
                 Some(cid) => {
                     use crate::heap::kind;
                     match self.raw_type_id(cid) {
-                        kind::CONS => {
-                            return Some(Some(unsafe { (cid.field(0), cid.field(1)) }))
-                        }
-                        kind::EMPTY_LIST => return Some(None),
+                        kind::CONS => break Some(Some(unsafe { (cid.field(0), cid.field(1)) })),
+                        kind::EMPTY_LIST => break Some(None),
                         _ => {}
                     }
                     if let Some((arr, off, end, more)) = self.as_chunked(cur) {
@@ -2774,54 +2779,70 @@ impl<M: ValueModel> Runtime<M> {
                         } else {
                             more
                         };
-                        return Some(Some((h, t)));
+                        break Some(Some((h, t)));
                     }
                     // Lazy / frontend node: force ONE step through the
                     // registered `seq` and retry (it yields cons/chunked/nil).
-                    let sf = self.seq_handler()?;
+                    let Some(sf) = self.seq_handler() else { break None };
                     let forced = top.invoke(top, self, sf, &[cur]);
                     if self.pending() {
-                        return Some(None);
+                        break Some(None);
                     }
-                    if forced == cur {
-                        return None; // seq made no progress: not a sequence
+                    if forced == self.root_get(slot) {
+                        break None; // seq made no progress: not a sequence
                     }
-                    cur = forced;
+                    self.set_root(slot, forced);
                 }
-                None => None?,
+                None => break None,
             }
-        }
+        };
+        self.truncate_roots(slot);
+        out
     }
     /// Flatten a whole sequence (cons / chunked / lazy) into a Vec, forcing
     /// through the registered `seq` fn as needed. The general `apply` path.
     pub fn seq_flatten(&mut self, top: &dyn crate::code::CodeSpace<M>, bits: u64) -> Vec<u64> {
-        let mut out = Vec::new();
-        let mut cur = bits;
+        // `seq_step` INVOKES the frontend's seq fn to force a lazy node — a
+        // safepoint, which relocates BOTH the cursor and every element already
+        // collected. A bare `Vec<u64>` of accumulated elements would go stale
+        // mid-walk and then be stored into the callee's frame by `invoke`, where
+        // the NEXT collection trips over it in `visit_env`. So the cursor and the
+        // accumulator both live in the shadow stack for the duration.
+        let cur_slot = self.push_root(bits);
+        let out_base = self.root_depth();
         loop {
+            let cur = self.root_get(cur_slot);
             // Whole realized chunks copy in one extend (no per-element step).
             if let Some((arr, coff, cend, more)) = self.as_chunked(cur) {
-                let elems = self.arr_elems_pub(arr);
-                out.extend_from_slice(&elems[coff as usize..cend as usize]);
-                cur = more;
+                // Copy out before pushing: `arr_elems_pub` borrows the heap.
+                let elems: Vec<u64> =
+                    self.arr_elems_pub(arr)[coff as usize..cend as usize].to_vec();
+                for e in elems {
+                    self.push_root(e);
+                }
+                self.set_root(cur_slot, more);
                 continue;
             }
             match self.seq_step(top, cur) {
                 Some(Some((h, t))) => {
-                    out.push(h);
-                    cur = t;
+                    self.push_root(h);
+                    self.set_root(cur_slot, t);
                 }
-                Some(None) => return out,
+                Some(None) => break,
                 None => {
                     // A node we cannot walk and cannot force is a configuration
                     // error (frontend forgot set_seq_fn) — fail LOUDLY rather
                     // than silently truncating the argument list.
                     panic!(
                         "seq_flatten: unwalkable sequence node {} (no seq fn registered?)",
-                        self.print(cur)
+                        self.print(self.root_get(cur_slot))
                     );
                 }
             }
         }
+        let out: Vec<u64> = (out_base..self.root_depth()).map(|i| self.root_get(i)).collect();
+        self.truncate_roots(cur_slot);
+        out
     }
     /// Install the reader+compiler re-entry bridge (see `EvalBridge`). Set once, on
     /// the main handle, by the frontend's top-level driver.
