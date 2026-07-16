@@ -32,19 +32,35 @@ it isn't a root). Effect at fib(30):
 apples-to-apples run. The wall-clock win exceeds the alloc drop because removing the
 per-dispatch `intern` also removes a linear symbol-table scan, not just an allocation.)
 
-## What's left is genuinely the representation, not a bug
+## Then: the GC runtime, not the representation, was the rest of the gap
 
-The remaining ~237 M allocations are dominated by `mk-int`: every arithmetic result in fib
-boxes a fresh heap `Val`. That boxing is inherent to the transparent-GC transform, which
-roots every value uniformly as `(ptr Val)` — the uniformity is exactly what makes GC
-automatic. So the residual gap to Chez (which uses unboxed fixnums) is the value
-representation the metaprogram requires, not a fixable interpreter bug. The unboxed
-`proper/` version (no uniform-rooting requirement) runs the same interpreter at parity
-with Chez.
+I first assumed the residual 17.5× was the value representation (boxing every integer).
+Profiling proved that wrong: `malloc`/`free` per object dominated, and ints were only ~4 M
+of 233 M allocations — **cons cells** (arg lists + assoc-list env frames) are the bulk. So
+the fix was the *metaprogram's collector* (`sval.coil`), leaving the Scheme source and the
+transform untouched:
+
+| runtime change                                             | fib(30) |
+|------------------------------------------------------------|---------|
+| intern fix (above)                                         | 5.17 s  |
+| + pool/slab allocator (no malloc/free per object)          | 1.68 s  |
+| + gc-threshold 20 000 → 500 000 (11 972 → 465 collections) | 1.68 s  |
+| + fixnum tagging (immediate ints, no box, GC skips them)   | 1.66 s  |
+| + no live-list: linear-slab sweep, alloc writes only the object | **1.357 s** |
+
+That is **4.6× Chez** (0.295 s) — within the goal, down from 32× originally. GC soundness
+stress-tested at threshold 3000 (82 515 collections, still 832040).
+
+What actually remains is inherent to a metacircular tree-walker: the allocation fast path
+(233 M cons), the assoc-list environment lookups, and the eval/apply core — the same
+algorithm Chez runs, just with a better code generator. Closing 4.6×→1× would take a
+compiling interpreter or a copying/generational GC, not a localized change. The unboxed
+`proper/` version (no uniform `(ptr Val)` rooting requirement, arena instead of GC) already
+runs the same interpreter at parity with Chez.
 
 Note: `native/schemenative.coil` (hand-written boxed) and `scheme.coil` (stdin tree-walker,
-boxed) still contain the same `(mk-sym (intern …))`-per-dispatch pattern; they are demos,
-not the benchmarked path, and can be fixed the same way.
+boxed) still contain the `(mk-sym (intern …))`-per-dispatch pattern; they are demos, not the
+benchmarked path, and can be fixed the same way. Both benefit from the `sval.coil` GC rewrite.
 
     python3 scm2coil.py evalcore.scm > evalcore.coil
     ../../coil build evalcore.coil -o /tmp/evalcore && /tmp/evalcore
