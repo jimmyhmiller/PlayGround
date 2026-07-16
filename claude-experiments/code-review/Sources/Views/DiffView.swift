@@ -105,8 +105,8 @@ private struct DiffRowView: View {
         switch row {
         case .hunk(let hunk):
             HunkHeaderView(hunk: hunk, file: file)
-        case .uline(_, let line):
-            UnifiedLineView(line: line, path: file.path)
+        case .uline(_, let line, let hunk, let index):
+            UnifiedLineView(line: line, path: file.path, hunk: hunk, index: index)
         case .pair(_, let left, let right):
             SplitPairView(left: left, right: right, path: file.path)
         case .thread(let thread):
@@ -127,31 +127,73 @@ private struct HunkHeaderView: View {
     let file: DisplayFile
 
     var body: some View {
-        HStack(spacing: 10) {
+        let selected = store.selection(for: hunk)
+        let editable = store.isWorkingTree && !file.untracked
+
+        HStack(spacing: 8) {
             Text(hunk.header)
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundColor(Th.hunkText)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            if store.isWorkingTree && !file.untracked {
-                Button(action: { store.toggleHunk(hunk) }) {
-                    Text(hunk.staged ? "✓ Staged" : "Stage hunk")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(hunk.staged ? Th.greenSoft : Th.text2)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 3)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(hunk.staged ? Th.green.opacity(0.15) : Color.white.opacity(0.05))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .strokeBorder(hunk.staged ? Th.green.opacity(0.4) : Color.white.opacity(0.14), lineWidth: 1)
-                                )
+            if editable {
+                if !selected.isEmpty {
+                    // Line picking is active: staging applies to the picks.
+                    Button(action: { store.clearSelection(in: hunk) }) {
+                        HunkChipLabel(text: "Clear", color: Th.text2)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear the selected lines")
+
+                    Button(action: { store.applySelectedLines(in: hunk) }) {
+                        HunkChipLabel(
+                            text: "\(hunk.staged ? "Unstage" : "Stage") \(selected.count) line\(selected.count == 1 ? "" : "s")",
+                            color: .white,
+                            fill: Th.accent,
+                            border: Th.accent
                         )
+                    }
+                    .buttonStyle(.plain)
+                    .help("Apply only the selected lines")
+                } else {
+                    if store.isSubHunk(hunk) {
+                        Button(action: { store.unsplitHunk(hunk) }) {
+                            HunkChipLabel(text: "Rejoin", color: Th.text2)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Undo the split and show the original hunk")
+                    } else if hunk.isSplittable {
+                        Button(action: { store.splitHunk(hunk) }) {
+                            HunkChipLabel(text: "Split", color: Th.text2)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Split into smaller hunks at context boundaries")
+                    }
+
+                    Button(action: { store.selectAllLines(in: hunk) }) {
+                        HunkChipLabel(text: "Pick lines", color: Th.text2)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Select individual lines to stage (or click a line's +/− sign)")
+
+                    Button(action: { store.beginHunkEdit(hunk) }) {
+                        HunkChipLabel(text: "Edit", color: Th.text2)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Edit the raw patch before applying (git add -e)")
+                }
+
+                Button(action: { store.toggleHunk(hunk) }) {
+                    HunkChipLabel(
+                        text: hunk.staged ? "✓ Staged" : "Stage hunk",
+                        color: hunk.staged ? Th.greenSoft : Th.text2,
+                        fill: hunk.staged ? Th.green.opacity(0.15) : Color.white.opacity(0.05),
+                        border: hunk.staged ? Th.green.opacity(0.4) : Color.white.opacity(0.14)
+                    )
                 }
                 .buttonStyle(.plain)
-                .help(hunk.staged ? "Unstage this hunk" : "Stage this hunk (git apply --cached)")
+                .help(hunk.staged ? "Unstage this whole hunk" : "Stage this whole hunk")
             }
         }
         .padding(.horizontal, 14)
@@ -162,11 +204,38 @@ private struct HunkHeaderView: View {
     }
 }
 
+private struct HunkChipLabel: View {
+    let text: String
+    var color: Color = Th.text2
+    var fill: Color = Color.white.opacity(0.05)
+    var border: Color = Color.white.opacity(0.14)
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(color)
+            .lineLimit(1)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(fill)
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(border, lineWidth: 1))
+            )
+    }
+}
+
 private struct UnifiedLineView: View {
     @EnvironmentObject var store: AppStore
     let line: DiffLine
     let path: String
+    let hunk: Hunk
+    let index: Int
     @State private var hovered = false
+
+    private var isChange: Bool { line.kind != .ctx }
+    private var selectable: Bool { store.isWorkingTree && isChange && !hunk.fileHeader.isEmpty }
+    private var isSelected: Bool { store.selection(for: hunk).contains(index) }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -182,10 +251,45 @@ private struct UnifiedLineView: View {
                 .frame(width: 44, alignment: .trailing)
                 .padding(.trailing, 8)
                 .background(gutterColor)
-            Text(sign)
-                .font(.system(size: 12.5, design: .monospaced))
-                .foregroundColor(signColor)
-                .frame(width: 20)
+
+            // The sign column doubles as the line picker in working-tree mode.
+            Group {
+                if selectable {
+                    Button(action: { store.toggleLineSelection(hunk: hunk, index: index) }) {
+                        ZStack {
+                            if isSelected {
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(Th.accent)
+                                    .frame(width: 15, height: 15)
+                                Text("✓")
+                                    .font(.system(size: 9, weight: .heavy))
+                                    .foregroundColor(.white)
+                            } else if hovered {
+                                RoundedRectangle(cornerRadius: 3)
+                                    .strokeBorder(Th.accent.opacity(0.7), lineWidth: 1)
+                                    .frame(width: 15, height: 15)
+                                Text(sign)
+                                    .font(.system(size: 12.5, design: .monospaced))
+                                    .foregroundColor(signColor)
+                            } else {
+                                Text(sign)
+                                    .font(.system(size: 12.5, design: .monospaced))
+                                    .foregroundColor(signColor)
+                            }
+                        }
+                        .frame(width: 20)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(isSelected ? "Deselect this line" : "Select this line to stage on its own")
+                } else {
+                    Text(sign)
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .foregroundColor(signColor)
+                        .frame(width: 20)
+                }
+            }
+
             Text(line.text.isEmpty ? " " : line.text)
                 .font(.system(size: 12.5, design: .monospaced))
                 .foregroundColor(Th.codeText)
@@ -193,16 +297,21 @@ private struct UnifiedLineView: View {
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.trailing, 12)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    store.openComposer(path: path, line: line.newNo ?? line.oldNo)
+                }
+                .help("Click to comment on this line")
         }
         .frame(minHeight: 20)
         .background(rowColor)
-        .overlay(hovered ? Color.white.opacity(0.04) : Color.clear)
-        .contentShape(Rectangle())
-        .onHover { hovered = $0 }
-        .onTapGesture {
-            store.openComposer(path: path, line: line.newNo ?? line.oldNo)
+        .overlay(isSelected ? Th.accent.opacity(0.14) : (hovered ? Color.white.opacity(0.04) : Color.clear))
+        .overlay(alignment: .leading) {
+            if isSelected {
+                Rectangle().fill(Th.accent).frame(width: 2)
+            }
         }
-        .help("Click to comment on this line")
+        .onHover { hovered = $0 }
     }
 
     private var sign: String {

@@ -20,6 +20,14 @@ struct ContentView: View {
             }
         }
         .animation(.easeOut(duration: 0.18), value: store.toast)
+        .sheet(item: $store.editingHunk) { hunk in
+            HunkEditorSheet(hunk: hunk)
+                .environmentObject(store)
+        }
+        .sheet(isPresented: $store.showRepliesEditor) {
+            SavedRepliesEditor()
+                .environmentObject(store)
+        }
     }
 
     @ViewBuilder

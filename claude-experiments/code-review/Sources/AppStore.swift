@@ -13,7 +13,8 @@ struct ThreadModel: Identifiable {
 
 enum DiffRowModel: Identifiable {
     case hunk(Hunk)
-    case uline(String, DiffLine)
+    /// row id, line, owning hunk, index within that hunk (for line selection)
+    case uline(String, DiffLine, Hunk, Int)
     case pair(String, DiffLine?, DiffLine?)
     case thread(ThreadModel)
     case note(String, String)
@@ -21,7 +22,7 @@ enum DiffRowModel: Identifiable {
     var id: String {
         switch self {
         case .hunk(let h): return "h:" + h.id
-        case .uline(let id, _): return id
+        case .uline(let id, _, _, _): return id
         case .pair(let id, _, _): return id
         case .thread(let t): return t.id
         case .note(let id, _): return id
@@ -71,6 +72,14 @@ final class AppStore: ObservableObject {
     @Published var composer: ComposerState?
     @Published var editingID: String?
     @Published var editText: String = ""
+
+    // Hunk splitting / line-level staging
+    @Published var splitHunks: Set<String> = []
+    @Published var selectedLines: [String: Set<Int>] = [:]
+    @Published var editingHunk: Hunk?
+    @Published var editingPatchText: String = ""
+    @Published var editingPatchError: String?
+    @Published var showRepliesEditor = false
 
     // Misc UI
     @Published var toast: String?
@@ -627,6 +636,9 @@ final class AppStore: ObservableObject {
         Task {
             let state = await GitClient.workingTree(repo: project.path)
             applyWorkingTree(state, project: project, keepPath: keep)
+            // Hunks are rebuilt from the new diff, so old line indices no
+            // longer refer to the same lines.
+            selectedLines.removeAll()
             rebuildEntries()
         }
     }
@@ -688,6 +700,131 @@ final class AppStore: ObservableObject {
                 showToast("git apply: " + result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
             }
             reloadWorkingTree()
+        }
+    }
+
+    // MARK: - Splitting & line-level staging
+
+    /// Hunks as rendered: split ones expand into their sub-hunks.
+    func displayHunks(for file: DisplayFile) -> [Hunk] {
+        file.hunks.flatMap { splitHunks.contains($0.id) ? $0.split() : [$0] }
+    }
+
+    func splitHunk(_ hunk: Hunk) {
+        guard hunk.isSplittable else {
+            showToast("Nothing to split — this hunk is one change group.")
+            return
+        }
+        splitHunks.insert(hunk.id)
+        selectedLines[hunk.id] = nil
+    }
+
+    func unsplitHunk(_ hunk: Hunk) {
+        // A sub-hunk id looks like "<parent>/s0"; rejoin the parent.
+        let parent = hunk.id.contains("/s") ? String(hunk.id.split(separator: "/").dropLast().joined(separator: "/")) : hunk.id
+        splitHunks.remove(parent)
+        selectedLines[hunk.id] = nil
+    }
+
+    func isSubHunk(_ hunk: Hunk) -> Bool { hunk.id.contains("/s") }
+
+    func selection(for hunk: Hunk) -> Set<Int> { selectedLines[hunk.id] ?? [] }
+
+    func toggleLineSelection(hunk: Hunk, index: Int) {
+        guard isWorkingTree, hunk.lines.indices.contains(index),
+              hunk.lines[index].kind != .ctx else { return }
+        var current = selectedLines[hunk.id] ?? []
+        if current.contains(index) { current.remove(index) } else { current.insert(index) }
+        selectedLines[hunk.id] = current.isEmpty ? nil : current
+    }
+
+    func selectAllLines(in hunk: Hunk) {
+        selectedLines[hunk.id] = Set(hunk.changeIndices)
+    }
+
+    func clearSelection(in hunk: Hunk) {
+        selectedLines[hunk.id] = nil
+    }
+
+    /// Stages (or unstages) only the selected lines of a hunk.
+    func applySelectedLines(in hunk: Hunk) {
+        guard let project = currentProject, isWorkingTree else { return }
+        let selected = selection(for: hunk)
+        guard !selected.isEmpty else { return }
+        guard !hunk.fileHeader.isEmpty else {
+            showToast("Untracked file — stage the whole file from the list on the left.")
+            return
+        }
+        guard let patch = hunk.partialPatch(selecting: selected, reverse: hunk.staged) else {
+            showToast("Select at least one added or removed line.")
+            return
+        }
+        let count = selected.count
+        let staging = !hunk.staged
+        Task {
+            let result = staging
+                ? await GitClient.stageHunk(repo: project.path, patch: patch)
+                : await GitClient.unstageHunk(repo: project.path, patch: patch)
+            if result.ok {
+                showToast("\(staging ? "Staged" : "Unstaged") \(count) line\(count == 1 ? "" : "s")")
+                selectedLines[hunk.id] = nil
+            } else {
+                showToast("git apply: " + result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            reloadWorkingTree()
+        }
+    }
+
+    // MARK: - Raw patch editing (git add -e)
+
+    func beginHunkEdit(_ hunk: Hunk) {
+        guard !hunk.rawPatch.isEmpty else {
+            showToast("Untracked file — stage the whole file from the list on the left.")
+            return
+        }
+        let selected = selection(for: hunk)
+        // Seed with the current selection when there is one, so "edit" picks up
+        // where the line picking left off.
+        let seed = selected.isEmpty
+            ? hunk.rawPatch
+            : (hunk.partialPatch(selecting: selected, reverse: hunk.staged) ?? hunk.rawPatch)
+        editingHunk = hunk
+        editingPatchText = seed
+        editingPatchError = nil
+    }
+
+    func cancelHunkEdit() {
+        editingHunk = nil
+        editingPatchText = ""
+        editingPatchError = nil
+    }
+
+    func resetHunkEdit() {
+        guard let hunk = editingHunk else { return }
+        editingPatchText = hunk.rawPatch
+        editingPatchError = nil
+    }
+
+    func applyHunkEdit() {
+        guard let project = currentProject, let hunk = editingHunk else { return }
+        var patch = editingPatchText
+        if !patch.hasSuffix("\n") { patch += "\n" }
+        let staged = hunk.staged
+        Task {
+            let result = staged
+                ? await GitClient.unstageHunk(repo: project.path, patch: patch)
+                : await GitClient.stageHunk(repo: project.path, patch: patch)
+            if result.ok {
+                editingHunk = nil
+                editingPatchText = ""
+                editingPatchError = nil
+                showToast(staged ? "Edited patch unstaged" : "Edited patch staged")
+                reloadWorkingTree()
+            } else {
+                // Keep the sheet open so the edit isn't lost.
+                let err = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                editingPatchError = err.isEmpty ? "git apply rejected this patch." : err
+            }
         }
     }
 
@@ -831,6 +968,39 @@ final class AppStore: ObservableObject {
 
     func removeReply(_ reply: String) {
         savedReplies.removeAll { $0 == reply }
+        persistReplies()
+    }
+
+    func updateReply(at index: Int, to text: String) {
+        guard savedReplies.indices.contains(index) else { return }
+        savedReplies[index] = text
+        persistReplies()
+    }
+
+    func addBlankReply() {
+        savedReplies.append("")
+        persistReplies()
+    }
+
+    func removeReplies(at offsets: IndexSet) {
+        savedReplies.remove(atOffsets: offsets)
+        persistReplies()
+    }
+
+    func moveReplies(from source: IndexSet, to destination: Int) {
+        savedReplies.move(fromOffsets: source, toOffset: destination)
+        persistReplies()
+    }
+
+    /// Drops blank rows left behind by the editor.
+    func tidyReplies() {
+        savedReplies = savedReplies
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        persistReplies()
+    }
+
+    private func persistReplies() {
         persisted.savedReplies = savedReplies
         Persistence.save(persisted)
     }
@@ -838,10 +1008,13 @@ final class AppStore: ObservableObject {
     func saveCurrentReply() {
         guard let c = composer else { return }
         let text = c.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !savedReplies.contains(text) else { return }
+        guard !text.isEmpty else { return }
+        guard !savedReplies.contains(text) else {
+            showToast("Already saved")
+            return
+        }
         savedReplies.append(text)
-        persisted.savedReplies = savedReplies
-        Persistence.save(persisted)
+        persistReplies()
         showToast("Saved reply added")
     }
 
@@ -979,11 +1152,11 @@ final class AppStore: ObservableObject {
             rows.append(.note("empty:\(file.path)", "No changes to show for this file."))
         }
 
-        for hunk in file.hunks {
+        for hunk in displayHunks(for: file) {
             rows.append(.hunk(hunk))
             if mode == .unified {
                 for (idx, line) in hunk.lines.enumerated() {
-                    rows.append(.uline("\(hunk.id):\(idx)", line))
+                    rows.append(.uline("\(hunk.id):\(idx)", line, hunk, idx))
                     maybeThread(after: line.newNo ?? line.oldNo)
                 }
             } else {

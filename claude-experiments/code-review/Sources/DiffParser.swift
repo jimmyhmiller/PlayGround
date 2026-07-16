@@ -41,6 +41,8 @@ enum DiffParser {
                 let header = lines[i]
                 var raw = [header]
                 var (o, n) = parseHunkHeader(header)
+                let hunkOldStart = o
+                let hunkNewStart = n
                 var dls: [DiffLine] = []
                 i += 1
 
@@ -50,6 +52,9 @@ enum DiffParser {
                     switch first {
                     case "\\":
                         raw.append(l)
+                        // Belongs to the line just emitted; rebuilt patches
+                        // must carry it or they'd add a trailing newline.
+                        if !dls.isEmpty { dls[dls.count - 1].noNewline = true }
                     case "+":
                         raw.append(l)
                         dls.append(DiffLine(kind: .add, oldNo: nil, newNo: n, text: String(l.dropFirst())))
@@ -73,8 +78,12 @@ enum DiffParser {
                     id: "\(path)#\(hunks.count)#\(staged ? "s" : "u")",
                     header: header,
                     lines: dls,
+                    fileHeader: fileHeader,
                     rawPatch: rawPatch,
-                    staged: staged
+                    staged: staged,
+                    oldStart: hunkOldStart,
+                    newStart: hunkNewStart,
+                    contextSuffix: hunkContextSuffix(header)
                 ))
             }
 
@@ -111,8 +120,12 @@ enum DiffParser {
             id: "\(path)#0#untracked",
             header: "@@ -0,0 +1,\(dls.count) @@",
             lines: dls,
+            fileHeader: "",
             rawPatch: "",
-            staged: false
+            staged: false,
+            oldStart: 0,
+            newStart: 1,
+            contextSuffix: ""
         )
         return DisplayFile(path: path, status: "A", additions: dls.count, deletions: 0,
                            hunks: dls.isEmpty ? [] : [hunk], isBinary: false, untracked: true)
@@ -135,6 +148,14 @@ enum DiffParser {
         // diff --git a/foo b/foo
         guard let range = line.range(of: " b/") else { return nil }
         return String(line[range.upperBound...])
+    }
+
+    /// The function-context text git prints after the closing @@.
+    private static func hunkContextSuffix(_ header: String) -> String {
+        // @@ -14,9 +14,22 @@ createSession(user)
+        let parts = header.components(separatedBy: "@@")
+        guard parts.count >= 3 else { return "" }
+        return parts[2...].joined(separator: "@@").trimmingCharacters(in: .whitespaces)
     }
 
     private static func parseHunkHeader(_ header: String) -> (Int, Int) {

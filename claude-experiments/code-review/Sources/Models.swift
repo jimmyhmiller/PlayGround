@@ -91,16 +91,28 @@ struct DiffLine: Hashable {
     let oldNo: Int?
     let newNo: Int?
     let text: String
+    /// The file ends here with no trailing newline (git's "\ No newline at end
+    /// of file"). Must survive into rebuilt patches or applying one would
+    /// silently add a newline the author didn't write.
+    var noNewline: Bool = false
 }
 
 struct Hunk: Identifiable, Hashable {
     let id: String
     let header: String
     let lines: [DiffLine]
+    /// The `diff --git a/x b/x` preamble, kept so patches can be rebuilt for
+    /// split hunks and partial staging.
+    let fileHeader: String
     /// Self-contained patch (file header + this hunk) usable with `git apply --cached`.
     let rawPatch: String
     /// Working-tree mode: whether this hunk came from the index (`git diff --cached`).
     let staged: Bool
+    /// First line numbers on each side, from the @@ header.
+    let oldStart: Int
+    let newStart: Int
+    /// Trailing text after the second @@ (the function context git shows).
+    let contextSuffix: String
 }
 
 struct FileDiff: Identifiable, Hashable {

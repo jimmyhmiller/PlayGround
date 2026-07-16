@@ -203,6 +203,17 @@ struct ComposerView: View {
                     }
                     .buttonStyle(.plain)
                     .help("Save the current draft as a reusable reply")
+
+                    Button(action: { store.showRepliesEditor = true }) {
+                        Text("Manage…")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundColor(Th.dim)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 3)
+                            .background(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Edit, reorder, or delete saved replies")
                 }
             }
             .padding(.horizontal, 10)

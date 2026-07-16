@@ -14,6 +14,11 @@ let package = Package(
             swiftSettings: [
                 .unsafeFlags(["-parse-as-library"])
             ]
+        ),
+        .testTarget(
+            name: "AgentReviewTests",
+            dependencies: ["AgentReview"],
+            path: "Tests"
         )
     ]
 )
