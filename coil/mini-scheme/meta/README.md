@@ -1,39 +1,44 @@
-# meta — the SAME metacircular Scheme evaluator, run by Chez and by our Coil scheme metaprogram
+# meta — the SAME Scheme source run by our Coil and by Chez
 
-This is the fair comparison. `evalcore.scm` is a first-order metacircular Scheme
-evaluator (a tree-walking `seval`/`sapply` over an assoc-list environment, closures
-and primitives as tagged data). It is **portable Scheme** — Chez and Petite run it
-directly — and it is written in the exact subset our Coil "scheme mode" compiles.
+`evalcore.scm` is a first-order metacircular Scheme evaluator (seval/sapply, assoc-list
+env, closures/prims as tagged data, mutable global env). The exact same source is:
+- native-compiled by **Chez** (`chez --script evalcore.scm`), and
+- compiled to native Coil by **us**: `scm2coil.py` maps the Scheme subset onto the Val
+  runtime (`sval.coil`) so the transparent-GC metaprogram (`gcauto2.coil`) inserts GC.
 
-- **`sval.coil` + `gcauto2.coil`** are the *scheme metaprogram*: the GC-managed `Val`
-  runtime (cons/car/…/arithmetic as Val ops) and the transparent-GC transform. This
-  is the metaprogram that "lets us do scheme" — it adds precise GC and the Val APIs,
-  nothing else.
-- **`scm2coil.py`** is a thin syntactic frontend: it maps the Scheme subset onto the
-  Val runtime (a number → `(mk-int n)`, `(if c t e)` → `(if (truthy c') …)`, `(+ a b)`
-  → `(s-add a' b')`, a function → a `defn` over `Val`, …). The generated Coil is then
-  compiled to native by the GC metaprogram. (It could equally be a Coil `(meta …)`;
-  the substance — GC + Val APIs — is the Coil metaprogram.)
+Same interpreter, same target (fib 30), different host — a compiler-quality comparison.
 
-So both Chez and our system run **the same evaluator source** over the same target
-program. `./run.sh bench` reproduces the numbers below (target: `(fib 30)`):
+## The interning bug (answering "does the boxed path have it too?")
 
-| host running evalcore.scm                     | fib(30) via the interpreter | vs Chez |
-|-----------------------------------------------|-----------------------------|---------|
-| Chez (native compiler)                        | 306 ms                      | 1×      |
-| Petite Chez (interpreter)                     | 4.4 s                       | ~14×    |
-| **our Coil** (scheme metaprogram → native+GC) | 9.5 s                       | **~31×**|
+Yes — and worse than the unboxed `proper/` version. `scm2coil.py`'s `cquote` lowered a
+special-form literal like `(quote if)` to `(mk-sym (intern "if"))` **inline at every use
+site**, so each `seval`/`sapply`/`doprim` dispatch re-scanned the symbol table (`intern`
+is a linear `str-eq` walk) AND allocated a fresh boxed symbol (`mk-sym` calls `alloc-val`),
+up to four times per expression.
 
-What the numbers say:
+Fix: intern each special-form name **once** (lazy, cached in a static i64 cell) and compare
+`(car e)` by its interned **id** (`hid` = symp?→sym-id else -1) instead of re-boxing. Ids
+are plain i64s, so there is no GC-root problem (a cached *boxed* symbol would be collected —
+it isn't a root). Effect at fib(30):
 
-- **The transparent metaprogram GC is effectively free.** Our evaluator makes
-  **377 million allocations** (every integer is boxed). With the collector on it runs
-  in 9.2 s holding 20 000 live; with collection DISABLED it runs *slower* (9.8 s),
-  because 377M un-freed objects (~9 GB) thrash malloc. The precise mark-sweep the
-  transform inserted pays for itself.
-- **The ~31× gap to Chez is compiler quality, not the GC or the metaprogram.** Chez
-  is an optimizing native compiler (unboxed fixnums, register allocation, inlining);
-  our frontend boxes every value and runs zero optimization passes. ~31× off Chez —
-  and *faster to start up and within ~2× of Petite's optimized interpreter* — is a
-  good showing for a naive box-everything compilation whose only cleverness is that a
-  metaprogram wrote the garbage collector.
+| metric            | before  | after   |
+|-------------------|---------|---------|
+| allocations       | 377 M   | **237 M** (−37%) |
+| GC collections    | 19 047  | **11 972** (−37%) |
+
+## What's left is genuinely the representation, not a bug
+
+The remaining ~237 M allocations are dominated by `mk-int`: every arithmetic result in fib
+boxes a fresh heap `Val`. That boxing is inherent to the transparent-GC transform, which
+roots every value uniformly as `(ptr Val)` — the uniformity is exactly what makes GC
+automatic. So the residual gap to Chez (which uses unboxed fixnums) is the value
+representation the metaprogram requires, not a fixable interpreter bug. The unboxed
+`proper/` version (no uniform-rooting requirement) runs the same interpreter at parity
+with Chez.
+
+Note: `native/schemenative.coil` (hand-written boxed) and `scheme.coil` (stdin tree-walker,
+boxed) still contain the same `(mk-sym (intern …))`-per-dispatch pattern; they are demos,
+not the benchmarked path, and can be fixed the same way.
+
+    python3 scm2coil.py evalcore.scm > evalcore.coil
+    ../../coil build evalcore.coil -o /tmp/evalcore && /tmp/evalcore

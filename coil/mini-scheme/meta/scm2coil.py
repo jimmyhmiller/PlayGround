@@ -54,6 +54,25 @@ PRIMS={'car':'car','cdr':'cdr','cons':'cons','eq?':'s-eq','null?':'s-null',
 def is_atom(x): return isinstance(x,tuple)
 def head(x): return x[0][1] if (isinstance(x,list) and x and is_atom(x[0]) and x[0][0]=='sym') else None
 
+# symbols compared against a (quote sym) literal — we cache their interned id once
+# and compare by i64 instead of re-interning + re-boxing on every dispatch.
+QSYMS={}          # name -> sanitized ident
+_SAN={'+':'plus','-':'minus','*':'star','/':'slash','<':'lt','>':'gt','=':'eq',
+      '<=':'le','>=':'ge','?':'q','!':'bang'}
+def sanitize(name):
+    return ''.join(_SAN.get(c,c) if not (c.isalnum()) else c for c in name) or 'sym'
+def qid_of(name):
+    san=QSYMS.get(name)
+    if san is None:
+        base='qid-'+sanitize(name); san=base; k=2
+        while san in QSYMS.values(): san=base+str(k); k+=1
+        QSYMS[name]=san
+    return f'({QSYMS[name]})'
+def quoted_sym(x):        # (quote <symbol>) -> its name, else None
+    if isinstance(x,list) and len(x)==2 and head(x)=='quote' \
+       and is_atom(x[1]) and x[1][0]=='sym': return x[1][1]
+    return None
+
 def cquote(x):
     if is_atom(x):
         if x[0]=='int': return f'(mk-int {x[1]})'
@@ -62,6 +81,17 @@ def cquote(x):
     r='(snil)'
     for e in reversed(x): r=f'(cons {cquote(e)} {r})'
     return r
+
+# If `x` is `(eq? A (quote sym))` (either order), return a raw-bool comparison by
+# interned id — no re-intern, no boxing. Used only in condition position, where the
+# surrounding `if` wants a bool directly (not a Val passed through `truthy`).
+def bool_cond(x, locals, gvals):
+    if head(x)=='eq?' and isinstance(x,list) and len(x)==3:
+        for a,b in ((x[1],x[2]),(x[2],x[1])):
+            s=quoted_sym(b)
+            if s is not None:
+                return f'(= (hid {cexpr(a,locals,gvals)}) {qid_of(s)})'
+    return None
 
 def cexpr(x, locals, gvals):
     if is_atom(x):
@@ -74,8 +104,10 @@ def cexpr(x, locals, gvals):
     h=head(x)
     if h=='quote': return cquote(x[1])
     if h=='if':
-        c=cexpr(x[1],locals,gvals); t=cexpr(x[2],locals,gvals); e=cexpr(x[3],locals,gvals)
-        return f'(if (truthy {c}) {t} {e})'
+        cond=x[1]; bc=bool_cond(cond,locals,gvals)
+        c=bc if bc is not None else f'(truthy {cexpr(cond,locals,gvals)})'
+        t=cexpr(x[2],locals,gvals); e=cexpr(x[3],locals,gvals)
+        return f'(if {c} {t} {e})'
     if h=='begin':
         return '(do '+' '.join(cexpr(e,locals,gvals) for e in x[1:])+')'
     if h=='set!':
@@ -108,19 +140,13 @@ def main():
     # gather all fn + gval names for reference resolution
     for f in fns:
         pass
-    out=[]
-    out.append('(module scheme)')
-    out.append('(import "../sval.coil" :use *)')
-    out.append('(import "../gcauto2.coil" :use *)   ; the GC metaprogram')
-    out.append('(import "io.coil" :use *)')
-    out.append('(import "fmt.coil" :use *)')
-    out.append('')
+    body_out=[]
     # value globals as zero-arg fns (except genv)
     for kind,f in defs:
         name=f[1][1]
         if name=='genv': continue
         body=cexpr(f[2], set(), gvals)
-        out.append(f'(defn {name} [] (-> Val) {body})')
+        body_out.append(f'(defn {name} [] (-> Val) {body})')
     # functions
     for f in fns:
         sig=f[1]; name=sig[0][1]; params=[p[1] for p in sig[1:]]
@@ -128,7 +154,24 @@ def main():
         pdecl=' '.join(f'({p} Val)' for p in params)
         bodies=[cexpr(b,locs,gvals) for b in f[2:]]
         body=bodies[0] if len(bodies)==1 else '(do '+' '.join(bodies)+')'
-        out.append(f'(defn {name} [{pdecl}] (-> Val) {body})')
+        body_out.append(f'(defn {name} [{pdecl}] (-> Val) {body})')
+
+    out=[]
+    out.append('(module scheme)')
+    out.append('(import "../sval.coil" :use *)')
+    out.append('(import "../gcauto2.coil" :use *)   ; the GC metaprogram')
+    out.append('(import "io.coil" :use *)')
+    out.append('(import "fmt.coil" :use *)')
+    out.append('')
+    # cached special-form ids: intern ONCE (lazy, +1 sentinel so 0 == uninit),
+    # then compare (car e) by i64 instead of re-interning + re-boxing per dispatch.
+    out.append('(defn hid [(v Val)] (-> i64) (if (symp v) (sym-id v) -1))')
+    for name,san in QSYMS.items():
+        out.append(f'(defn {san}-cell [] (-> (ptr i64)) (alloc-static i64))')
+        out.append(f'(defn {san} [] (-> i64) (let [c ({san}-cell)] '
+                   f'(do (if (= (load c) 0) (store! c (+ (intern "{name}") 1)) 0) (- (load c) 1))))')
+    out.append('')
+    out.extend(body_out)
     # main: init genv, run top-level display forms
     mainbody=['(set-genv! (snil))']
     for t in toplevel:
