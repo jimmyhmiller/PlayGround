@@ -41,10 +41,13 @@
 (defn g-end  [] (-> (ptr i64)) (alloc-static i64))                        ; slab end address
 ; object size = sizeof GcHeader (16) + sizeof Val (24) = 40; slab = 40 * 1M = 41943040
 
-; --- fixnum tagging: an integer Val is an IMMEDIATE tagged word (low bit 1,
-;     value = word >> 1), not a heap box. Heap objects are malloc'd (8-byte
-;     aligned) so their low bit is always 0. This removes int allocation entirely
-;     and drops ints from the GC's live-list / sweep. ---
+; --- immediate values: nil, booleans, and integers are IMMEDIATE tagged words,
+;     not heap boxes. Heap objects are malloc'd (8-byte aligned) so their low bit
+;     is always 0; low bit 1 marks an immediate. Two-bit encoding:
+;       ...01  fixnum   value = word >> 2 (arithmetic)
+;       ...11  special  #f = 3, #t = 7, nil = 11  (payload = word >> 2)
+;     This removes ALL int/bool/nil allocation — including the two boxed bools the
+;     generated env lookups allocated per iteration — and the GC skips them. ---
 (defn is-imm [(p (ptr Val))] (-> bool) (= (iand (cast i64 p) 1) 1))
 
 ; --- root-stack primitives the transform emits ---
@@ -107,28 +110,31 @@
     p))
 
 ; --- constructors (managed: return Val) ---
-(defn mk-int [(v i64)] (-> (ptr Val)) (cast (ptr Val) (ior (ishl v 1) 1)))  ; immediate, no alloc
-(defn mk-bool [(v i64)] (-> (ptr Val)) (alloc-val 4 v 0))
+(defn mk-int [(v i64)] (-> (ptr Val)) (cast (ptr Val) (ior (ishl v 2) 1)))   ; immediate fixnum
+(defn mk-bool [(v i64)] (-> (ptr Val)) (cast (ptr Val) (if (= v 0) 3 7)))    ; immediate #f/#t
 (defn mk-sym [(id i64)] (-> (ptr Val)) (alloc-val 3 id 0))
 (defn mk-prim [(op i64)] (-> (ptr Val)) (alloc-val 6 op 0))
-(defn snil [] (-> (ptr Val)) (alloc-val 0 0 0))
+(defn snil [] (-> (ptr Val)) (cast (ptr Val) 11))                            ; immediate nil
 (defn cons [(x (ptr Val)) (y (ptr Val))] (-> (ptr Val)) (alloc-val 2 (cast i64 x) (cast i64 y)))
 (defn mk-closure [(pbe (ptr Val))] (-> (ptr Val)) (alloc-val 5 (cast i64 pbe) 0))
 
 ; --- accessors (unmanaged: return i64 / bool) ---
-(defn tag-of [(p (ptr Val))] (-> i64) (if (is-imm p) 1 (load (field p tag))))       ; immediate = int tag
-(defn ival [(p (ptr Val))] (-> i64) (if (is-imm p) (ishr (cast i64 p) 1) (load (field p a))))
+(defn tag-of [(p (ptr Val))] (-> i64)
+  (if (is-imm p)
+      (if (= (iand (cast i64 p) 3) 1) 1              ; fixnum -> int tag 1
+        (if (= (cast i64 p) 11) 0 4))                ; nil -> 0, #f/#t -> bool tag 4
+    (load (field p tag))))
+(defn ival [(p (ptr Val))] (-> i64) (if (is-imm p) (ishr (cast i64 p) 2) (load (field p a))))
 (defn sym-id [(p (ptr Val))] (-> i64) (load (field p a)))
 (defn prim-op [(p (ptr Val))] (-> i64) (load (field p a)))
 (defn car [(p (ptr Val))] (-> (ptr Val)) (cast (ptr Val) (load (field p a))))
 (defn cdr [(p (ptr Val))] (-> (ptr Val)) (cast (ptr Val) (load (field p b))))
 (defn clos-pbe [(p (ptr Val))] (-> (ptr Val)) (cast (ptr Val) (load (field p a))))
 (defn set-car! [(p (ptr Val)) (v (ptr Val))] (-> i64) (store! (field p a) (cast i64 v)) 0)
-(defn nullp [(p (ptr Val))] (-> bool) (= (tag-of p) 0))
+(defn nullp [(p (ptr Val))] (-> bool) (= (cast i64 p) 11))    ; nil is the immediate 11
 (defn pairp [(p (ptr Val))] (-> bool) (= (tag-of p) 2))
 (defn symp  [(p (ptr Val))] (-> bool) (= (tag-of p) 3))
-(defn truthy [(p (ptr Val))] (-> bool)                       ; scheme: only #f is false
-  (not (and (= (tag-of p) 4) (= (ival p) 0))))
+(defn truthy [(p (ptr Val))] (-> bool) (not (= (cast i64 p) 3)))  ; scheme: only #f (word 3) is false
 
 ; --- symbol interning: global growable name table; id = index ---
 (defstruct SymTab [(init i64) (names (ptr (ArrayList (slice u8))))])
