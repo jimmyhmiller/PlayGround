@@ -43,7 +43,7 @@ struct Project: Identifiable, Hashable {
     var id: String { path.path }
 }
 
-struct ChecksSummary: Hashable {
+struct ChecksSummary: Hashable, Codable {
     var passed = 0
     var failed = 0
     var pending = 0
@@ -51,7 +51,7 @@ struct ChecksSummary: Hashable {
     var total: Int { passed + failed + pending }
 }
 
-struct PullRequest: Identifiable, Hashable {
+struct PullRequest: Identifiable, Hashable, Codable {
     let number: Int
     let title: String
     let author: String
@@ -154,7 +154,7 @@ struct FileEntry: Identifiable, Hashable {
 // MARK: - Comments
 
 /// A review comment as fetched from GitHub (raw, before local curation).
-struct RemoteComment: Identifiable, Hashable {
+struct RemoteComment: Identifiable, Hashable, Codable {
     let id: Int
     let author: String
     let isBot: Bool

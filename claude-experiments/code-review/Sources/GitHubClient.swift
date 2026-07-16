@@ -1,5 +1,9 @@
 import Foundation
 
+struct GHError: Error {
+    let message: String
+}
+
 enum GitHubClient {
     static func currentLogin() async -> String? {
         let r = await Shell.run(["gh", "api", "user", "-q", ".login"])
@@ -8,18 +12,18 @@ enum GitHubClient {
         return login.isEmpty ? nil : login
     }
 
-    static func prList(repo: URL) async -> Result<[PullRequest], String> {
+    static func prList(repo: URL) async -> Result<[PullRequest], GHError> {
         let fields = "number,title,author,headRefName,updatedAt,state,isDraft,reviewDecision,additions,deletions,statusCheckRollup"
         let r = await Shell.run(
-            ["gh", "pr", "list", "--state", "all", "--limit", "30", "--json", fields],
+            ["gh", "pr", "list", "--state", "open", "--limit", "30", "--json", fields],
             cwd: repo
         )
         guard r.ok else {
-            return .failure(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+            return .failure(GHError(message: r.stderr.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
         guard let data = r.stdout.data(using: .utf8),
               let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
-            return .failure("could not parse gh pr list output")
+            return .failure(GHError(message: "could not parse gh pr list output"))
         }
         let prs = arr.map { obj -> PullRequest in
             let author = (obj["author"] as? [String: Any])
@@ -55,10 +59,10 @@ enum GitHubClient {
         return .success(prs)
     }
 
-    static func prDiff(repo: URL, number: Int) async -> Result<String, String> {
+    static func prDiff(repo: URL, number: Int) async -> Result<String, GHError> {
         let r = await Shell.run(["gh", "pr", "diff", String(number)], cwd: repo)
         guard r.ok else {
-            return .failure(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+            return .failure(GHError(message: r.stderr.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
         return .success(r.stdout)
     }
@@ -91,7 +95,7 @@ enum GitHubClient {
         }
     }
 
-    static func submitReview(repo: URL, number: Int, verdict: Verdict, body: String) async -> Result<String, String> {
+    static func submitReview(repo: URL, number: Int, verdict: Verdict, body: String) async -> Result<String, GHError> {
         let r = await Shell.run(
             ["gh", "pr", "review", String(number), verdict.ghFlag, "--body-file", "-"],
             cwd: repo,
@@ -100,10 +104,22 @@ enum GitHubClient {
         if r.ok {
             return .success("Review submitted to GitHub")
         }
-        return .failure(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        return .failure(GHError(message: r.stderr.trimmingCharacters(in: .whitespacesAndNewlines)))
     }
 
     static func prURL(slug: String, number: Int) -> URL? {
         URL(string: "https://github.com/\(slug)/pull/\(number)")
+    }
+
+    /// True when the failure smells like "this account can't see that repo"
+    /// (private repo, missing SSO grant, expired credentials) rather than a
+    /// transient or parsing problem.
+    static func isAccessError(_ message: String) -> Bool {
+        let m = message.lowercased()
+        return m.contains("could not resolve to a repository")
+            || m.contains("http 404") || m.contains("http 403") || m.contains("http 401")
+            || m.contains("not found") || m.contains("saml") || m.contains("sso")
+            || m.contains("authentication") || m.contains("gh auth login")
+            || m.contains("bad credentials")
     }
 }
