@@ -188,12 +188,38 @@ extern "C" fn init() {
     // backpressure rather than overwriting).
     memscope_core::set_ring_mode(memscope_core::RingMode::Reliable);
 
+    // If MEMSCOPE_RECORD is set, stream the full allocation trace to that path
+    // as a self-contained `.mscope` (binary, or `.json`/`.jsonl` if the extension
+    // matches). This is what `memscope perfetto|flamegraph|analyze` consume for
+    // churn / timeline / perfetto — not just the final live-heap HPROF.
+    //
+    // The preload lib already links memscope-agent + memscope-core, so it can
+    // call record_to_file directly without the target needing #[global_allocator].
+    // This makes zero-instrumentation injection produce a full alloc-stream,
+    // not just a live-heap snapshot.
+    if let Ok(rec_path) = std::env::var("MEMSCOPE_RECORD") {
+        if !rec_path.is_empty() {
+            // Start the file recorder; it switches the ring to Reliable and spawns
+            // its own pump. Ignore errors — falling back to HPROF mode is still
+            // useful for live-heap debugging.
+            if let Err(e) = memscope_agent::record_to_file(&rec_path) {
+                eprintln!("[memscope-preload] MEMSCOPE_RECORD={rec_path}: failed to start file recorder: {e}");
+            } else {
+                eprintln!("[memscope-preload] recording full alloc-stream to {rec_path}");
+            }
+        }
+    }
+
     // SIGUSR1 -> request a dump (handled off-signal by the dumper thread).
     unsafe {
         libc::signal(libc::SIGUSR1, on_sigusr1 as *const () as usize);
     }
     // Optional dump-at-exit.
-    if std::env::var_os("MEMSCOPE_HPROF_ON_EXIT").is_some() {
+    if std::env::var_os("MEMSCOPE_HPROF_ON_EXIT").is_some()
+        || std::env::var_os("MEMSCOPE_RECORD").is_some()
+    {
+        // When recording to a file we also want to flush the stream at exit so
+        // the trace is complete. The HPROF at_exit path is still useful for live.
         unsafe {
             libc::atexit(at_exit);
         }
@@ -212,7 +238,17 @@ extern "C" fn on_sigusr1(_sig: c_int) {
 }
 
 extern "C" fn at_exit() {
+    // Always finish any active file recording on exit (when MEMSCOPE_RECORD was set)
+    // so the trace is fully flushed before the process tears down.
+    // The FileRecorder's flush is called from its EventSink::flush on pump stop;
+    // we also request a heap dump if HPROF mode was enabled, which is orthogonal.
     do_dump();
+
+    // Allow the recording pump a moment to flush remaining events after main
+    // returns but before the remaining static destructors run. This avoids
+    // truncating the tail of the trace on short-lived programs like
+    // turbopack-cli build.
+    std::thread::sleep(std::time::Duration::from_millis(150));
 }
 
 /// Resolve the output path from `MEMSCOPE_HPROF_OUT` (default

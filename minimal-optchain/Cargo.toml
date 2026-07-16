@@ -24,3 +24,6 @@ swc_ecma_ast = "25"
 swc_ecma_parser = "41"
 swc_ecma_codegen = "28"
 swc_ecma_visit = "25"
+# resolver pass — stamps every ident's SyntaxContext so `to_id()` names a binding.
+# oxc's equivalent (SemanticBuilder) ships inside the `oxc` umbrella's `full` feature.
+swc_ecma_transforms_base = "45"

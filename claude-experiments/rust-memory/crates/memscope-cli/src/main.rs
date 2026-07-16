@@ -1995,20 +1995,55 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     let lib = preload_lib()?;
     let env_var = if cfg!(target_os = "macos") { "DYLD_INSERT_LIBRARIES" } else { "LD_PRELOAD" };
 
+    // Infer whether the caller wants an alloc-stream (.mscope) or a live-heap dump
+    // (.hprof). We do this from the extension of --out: if it ends with .mscope,
+    // .json, or .jsonl we produce a full churn trace via MEMSCOPE_RECORD (perfetto-ready).
+    // Otherwise we keep the legacy HPROF behavior. When only --at-bytes/--after is
+    // used we still default to HPROF; the new path is explicitly opt-in via .mscope/.json.
+    let wants_mscope = out
+        .map(|o| {
+            let lo = o.to_ascii_lowercase();
+            lo.ends_with(".mscope")
+                || lo.ends_with(".json")
+                || lo.ends_with(".jsonl")
+                || lo.ends_with(".trace")
+        })
+        .unwrap_or(false);
+
     let mut child = std::process::Command::new(&cmd[0]);
     child.args(&cmd[1..]);
     child.env(env_var, &lib);
-    if let Some(o) = out {
-        child.env("MEMSCOPE_HPROF_OUT", o);
-    }
-    if on_exit || default_on_exit {
-        child.env("MEMSCOPE_HPROF_ON_EXIT", "1");
-    }
-    if let Some(n) = at_bytes {
-        child.env("MEMSCOPE_HPROF_AT_BYTES", n);
+    if wants_mscope {
+        // Full alloc-stream. memscope-preload now honors MEMSCOPE_RECORD and starts a
+        // FileRecorder directly, so we get a self-contained .mscope with raw sites + slide.
+        // That file is what `memscope perfetto|flamegraph|flamechart|analyze|diff` consume.
+        if let Some(o) = out {
+            child.env("MEMSCOPE_RECORD", o);
+            // Also keep the HPROF env pointed at the same stem for `--on-exit` diagnostics,
+            // but don't require it — the .mscope path is the primary artifact.
+            child.env("MEMSCOPE_HPROF_ON_EXIT", "1");
+        }
+    } else {
+        if let Some(o) = out {
+            child.env("MEMSCOPE_HPROF_OUT", o);
+        }
+        if on_exit || default_on_exit {
+            child.env("MEMSCOPE_HPROF_ON_EXIT", "1");
+        }
+        if let Some(n) = at_bytes {
+            child.env("MEMSCOPE_HPROF_AT_BYTES", n);
+        }
     }
 
-    eprintln!("[memscope] launching `{}` under memscope ({env_var})", cmd.join(" "));
+    if wants_mscope {
+        eprintln!(
+            "[memscope] launching `{}` under memscope ({env_var}) — recording full alloc-stream to {}",
+            cmd.join(" "),
+            out.unwrap_or("/tmp/memscope-{pid}-0.mscope")
+        );
+    } else {
+        eprintln!("[memscope] launching `{}` under memscope ({env_var})", cmd.join(" "));
+    }
     let mut handle = child.spawn().map_err(|e| format!("failed to launch {}: {e}", cmd[0]))?;
     let pid = handle.id();
 
@@ -2025,18 +2060,35 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     }
 
     let status = handle.wait().map_err(|e| e.to_string())?;
-    // Give the dumper thread a moment to finish an exit/threshold dump.
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Give the dumper thread a moment to finish an exit/threshold dump, or the
+    // file recorder to flush the tail of the trace (important for short programs).
+    std::thread::sleep(std::time::Duration::from_millis(if wants_mscope { 600 } else { 300 }));
 
     let expected = match out {
         Some(o) => o.replace("{pid}", &pid.to_string()).replace("{n}", "0"),
-        None => format!("/tmp/memscope-{pid}-0.hprof"),
+        None => {
+            if wants_mscope {
+                format!("/tmp/memscope-{pid}-0.mscope")
+            } else {
+                format!("/tmp/memscope-{pid}-0.hprof")
+            }
+        }
     };
     if std::path::Path::new(&expected).exists() {
-        eprintln!("[memscope] heap dump: {expected}");
-        eprintln!("           analyze it:  memscope analyze {expected}   (or open in MAT / heapster)");
+        if wants_mscope {
+            eprintln!("[memscope] alloc-stream trace: {expected}");
+            eprintln!("           perfetto: memscope perfetto {expected} --out trace.json && open https://ui.perfetto.dev");
+            eprintln!("           flamegraph: memscope flamegraph {expected} --out fg.json");
+            eprintln!("           analyze:   memscope analyze {expected}");
+        } else {
+            eprintln!("[memscope] heap dump: {expected}");
+            eprintln!("           analyze it:  memscope analyze {expected}   (or open in MAT / heapster)");
+        }
     } else {
         eprintln!("[memscope] no dump found at {expected} — was a trigger reached? (--on-exit/--after/--at-bytes)");
+        if wants_mscope {
+            eprintln!("           note: MEMSCOPE_RECORD path should have been written by the preload lib; check that {env_var} injection worked");
+        }
     }
     std::process::exit(status.code().unwrap_or(0));
 }

@@ -9,6 +9,7 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use minimal_optchain::generic::desugar;
+use minimal_optchain::import_map::ImportMap;
 use minimal_optchain::{Backend, Oxc, Swc};
 
 // ---------------------------------------------------------------------------
@@ -57,6 +58,80 @@ fn correctness_check() {
         assert_eq!(norm(&sg), norm(&sd), "swc generic vs direct differ for {src}");
         assert_eq!(norm(&og), norm(&sg), "oxc vs swc differ for {src}");
         println!("{:<14} -> {}", src, og.trim());
+    }
+    println!();
+}
+
+// ---------------------------------------------------------------------------
+// ImportMap: the generic binding-resolution analysis, proven identical across
+// backends. For each expression we record how the ImportMap resolves it; oxc
+// (SymbolId side-table) and swc (SyntaxContext on the ident) must agree.
+// ---------------------------------------------------------------------------
+
+/// One resolution line per interesting expression: `<free>` for a global,
+/// `source#name` for an import reference, `source#*` for a namespace binding.
+fn collect_resolution<'a, B: Backend>(
+    map: &ImportMap<B>,
+    sem: &B::Semantics<'a>,
+    e: &B::Expr<'a>,
+    out: &mut Vec<String>,
+) {
+    if let Some(name) = B::ident_name(e) {
+        if B::is_free_ident(sem, e) {
+            out.push(format!("{name} = <free>"));
+        } else if let Some(desc) = map.describe(sem, e) {
+            out.push(format!("{name} = {desc}"));
+        }
+    } else if let Some((obj, prop)) = B::as_static_member(e) {
+        if let (Some(oname), Some(desc)) = (B::ident_name(obj), map.describe(sem, e)) {
+            out.push(format!("{oname}.{prop} = {desc}"));
+        }
+    }
+}
+
+fn import_report_oxc(src: &str) -> Vec<String> {
+    let arena = Default::default();
+    let prog = Oxc::parse(&arena, src);
+    let sem = Oxc::build_semantics(&prog);
+    let map = ImportMap::<Oxc>::analyze(&prog, &sem);
+    let mut out = Vec::new();
+    Oxc::visit_exprs(&prog, |e| collect_resolution::<Oxc>(&map, &sem, e, &mut out));
+    out.sort();
+    out
+}
+
+fn import_report_swc(src: &str) -> Vec<String> {
+    let prog = Swc::parse(&(), src);
+    let sem = Swc::build_semantics(&prog);
+    let map = ImportMap::<Swc>::analyze(&prog, &sem);
+    let mut out = Vec::new();
+    Swc::visit_exprs(&prog, |e| collect_resolution::<Swc>(&map, &sem, e, &mut out));
+    out.sort();
+    out
+}
+
+fn import_correctness_check() {
+    // Every import shape, plus a global, a re-used import, and a plain local.
+    let src = concat!(
+        "import { useState } from \"react\";\n",
+        "import { foo as bar } from \"lib\";\n",
+        "import def from \"mod\";\n",
+        "import * as ns from \"ns\";\n",
+        "useState(unknownGlobal);\n", // callee is an import; arg is a free global
+        "bar;\n",                     // renamed named import
+        "def;\n",                     // default import
+        "ns.thing;\n",                // namespace member access
+        "ns.other;\n",
+        "useState;\n",                // same import, second reference
+        "let local = 1;\n",
+        "local;\n",                   // a resolved local: not free, not an import
+    );
+    let o = import_report_oxc(src);
+    let s = import_report_swc(src);
+    assert_eq!(o, s, "oxc and swc ImportMap disagree:\n oxc={o:#?}\n swc={s:#?}");
+    println!("ImportMap resolution — oxc and swc agree on all {} sites:", o.len());
+    for line in &o {
+        println!("  {line}");
     }
     println!();
 }
@@ -136,12 +211,13 @@ fn time_swc_direct(src: &str) -> Duration {
 
 fn main() {
     correctness_check();
+    import_correctness_check();
 
     let mut args = std::env::args().skip(1);
     // Large workload so each timed transform runs for milliseconds — the fast
     // oxc path is otherwise swamped by timer/cache jitter.
     let n: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(20_000);
-    let iters: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(100);
+    let iters: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(1000);
     let src = workload(n);
     println!("workload: {n} optional-chain statements, {iters} iters (transform only)\n");
 
