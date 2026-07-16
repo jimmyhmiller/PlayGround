@@ -11,26 +11,21 @@
 //! the object and the slot. Each entry has been mutation-tested — deleting the
 //! barrier from `values_mut`/`arr_slice_mut`/`arr_extend` makes it fire.
 //!
-//! TWO PRE-EXISTING GAPS BOUND WHAT THIS CAN COVER. Both are rooting holes in
-//! THIS frontend's compiler — it threads bare `u64` form pointers through
-//! `compile`, and a macro expansion evaluates code, which reaches a safepoint,
-//! which collects and relocates them. Neither has anything to do with Stage I;
-//! both reproduce at Stage I1 (779529155), which is why this suite is shaped
-//! around them rather than blocked on them:
+//! THE TWO GAPS THIS SUITE WAS SHAPED AROUND ARE CLOSED. Both were rooting
+//! holes reached from this frontend — bare `u64` values held across a macro
+//! expansion / a lazy-seq force, which evaluate code, which reach a safepoint,
+//! which collects and relocates them. Neither ever had anything to do with
+//! Stage I (both reproduced at Stage I1, 779529155). With them fixed:
 //!
-//!  1. `MICROLANG_GC_STRESS=1` (collect at EVERY safepoint) cannot even boot
-//!     `clojure.core` — `Session::new` dies in `compile_fn` with "fn: params
-//!     must be symbols" (a relocated param list). So this suite drives minors
-//!     through the ordinary PRESSURE path instead, by lowering the nursery
-//!     trigger. That is deterministic, not a race: single-threaded, and every
+//!  1. `MICROLANG_GC_STRESS=1` (collect at EVERY safepoint) now boots
+//!     `clojure.core` and runs real library code on BOTH tiers — see
+//!     `gc_stress_library.rs`, which is the hammer this suite could not swing.
+//!     This suite still drives minors through the ordinary PRESSURE path (a
+//!     lowered nursery trigger): deterministic, single-threaded, and every
 //!     program below allocates far past the trigger.
-//!  2. Even on the pressure path, a low trigger makes the frontend fault with
-//!     "use-after-move" — for EVERY program on the JIT tier, and for
-//!     `(reduce (fn [acc i] (assoc acc i ..)) {} (range 600))` on TreeWalk. So
-//!     the JIT half is `#[ignore]`d below (it is written, and will pass the day
-//!     the gap closes) and that one shape is left out. TreeWalk still runs the
-//!     whole barrier surface: atoms, both transient tiers, the HAMT, records,
-//!     and the growable array.
+//!  2. The JIT half below is no longer `#[ignore]`d, and the map spelling of
+//!     the accumulate shape (`(reduce (fn [acc i] (assoc acc i ..)) {} ..)`) —
+//!     which used to use-after-move on TreeWalk — is back in the battery.
 
 use microlang::{LowBitModel, Runtime, TreeWalk};
 
@@ -117,14 +112,22 @@ const BATTERY: &[(&str, &str, &str)] = &[
         "\"200/399\"",
     ),
     // A long-lived PERSISTENT vector taking fresh young values: the accumulator
-    // is promoted, each path-copied node is young. (The map spelling of this —
-    // `(reduce (fn [acc i] (assoc acc i {:v (list i)})) {} ..)` — is gap 2
-    // above: it use-after-moves at HEAD too, so it is not written here.)
+    // is promoted, each path-copied node is young.
     (
         "persistent-vector-grow",
         "(def v (reduce (fn [acc i] (conj acc (list i))) [] (range 800)))
          (str (count v) \"/\" (first (nth v 799)))",
         "\"800/799\"",
+    ),
+    // The MAP spelling of the same shape — a promoted HAMT accumulator taking
+    // freshly allocated young keys AND values on every step. This is the exact
+    // program that use-after-moved on TreeWalk before the rooting fix (gap 2 in
+    // this file's header), so it is the regression gate for it.
+    (
+        "persistent-map-grow",
+        "(def m (reduce (fn [acc i] (assoc acc i {:v (list i)})) {} (range 600)))
+         (str (count m) \"/\" (first (:v (get m 599))))",
+        "\"600/599\"",
     ),
     // RECORDS holding young values, reachable only from a long-lived vector.
     (
@@ -191,17 +194,12 @@ fn old_to_young_edges_survive_minors_treewalk() {
     run_battery(false);
 }
 
-/// The same battery on the JIT tier. IGNORED, and not because of Stage I: with
-/// a low nursery trigger this frontend faults with "use-after-move" on the JIT
-/// for EVERY program here — including at Stage I1 (779529155), before minors
-/// existed. That is gap 2 in this file's header: the frontend's compiler holds
-/// bare form pointers across collections. Kept (rather than deleted) so it
-/// starts passing the day that gap closes; un-ignore it then.
+/// The same battery on the JIT tier. This was `#[ignore]`d for gap 2 in this
+/// file's header — the frontend use-after-moved on the JIT for EVERY program
+/// here, under a low nursery trigger, all the way back to Stage I1 (779529155).
+/// That gap is closed, so the hammer swings: this now runs for real.
 #[cfg(feature = "jit")]
 #[test]
-#[ignore = "PRE-EXISTING (reproduces at I1/779529155): clojure-stub's compiler \
-            use-after-moves on the JIT tier under a low nursery trigger — a \
-            frontend rooting gap, not a write-barrier gap"]
 fn old_to_young_edges_survive_minors_jit() {
     run_battery(true);
 }

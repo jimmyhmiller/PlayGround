@@ -28,6 +28,9 @@ mod compile;
 mod data;
 pub mod deps;
 mod reader;
+mod roots;
+
+use roots::RootVec;
 
 /// The embedded prelude — REAL `.clj` files under `src/clj/`, compiled into
 /// the binary with `include_str!` so the frontend stays self-contained while
@@ -647,13 +650,13 @@ fn expand<M: ValueModel>(
     comp: &Compiler,
     form: u64,
 ) -> u64 {
-    let slot = rt.push_root(form);
+    let slot = RootVec::one(rt, form);
     // 1. head-expand while the head resolves to a macro
     loop {
         // A form built by a macro / lazy seq op may be (or contain in its tail)
         // a LazySeq — realize the spine so the cons walks below see all of it.
-        let f = force_spine(rt, cs, rt.root_get(slot));
-        rt.set_root(slot, f);
+        let f = force_spine(rt, cs, slot.get(rt, 0));
+        slot.set(rt, 0, f);
         let Some((head, _)) = rt.as_cons(f) else { break };
         let Val::Sym(hs) = rt.decode(head) else { break };
         // Resolve the head to its namespace-qualified var; is that a macro? This
@@ -673,10 +676,10 @@ fn expand<M: ValueModel>(
         let mut margs = vec![f, nilv];
         margs.extend_from_slice(&args[1..]);
         let result = cs.invoke(cs, rt, mfn, &margs);
-        rt.set_root(slot, result);
+        slot.set(rt, 0, result);
     }
     // 2. structural desugar / recurse
-    let f = rt.root_get(slot);
+    let f = slot.get(rt, 0);
     let out = if let Some((head, _)) = rt.as_cons(f) {
         if is_sym(rt, head, "quote") {
             // Quoted data is LITERAL, exactly as in Clojure: collection literals
@@ -771,9 +774,15 @@ fn expand<M: ValueModel>(
         } else if let Some(rw) = interop_rewrite(rt, comp, f) {
             expand(rt, cs, macros, comp, rw)
         } else {
-            let items = rt.list_to_vec(f);
-            let ex = expand_each(rt, cs, macros, comp, &items);
-            rt.vec_to_list(&ex)
+            // Ordinary call `(f args…)`: every element has to survive the
+            // expansion of every OTHER element (each one can invoke a macro).
+            let its = rt.list_to_vec(f);
+            let mut items = RootVec::new(rt, &its);
+            expand_each(rt, cs, macros, comp, &mut items);
+            let snap = items.snapshot(rt);
+            let out = rt.vec_to_list(&snap);
+            items.release(rt);
+            out
         }
     } else if constant_literal(rt, f) {
         // A collection literal whose elements are ALL constants IS a constant:
@@ -796,15 +805,24 @@ fn expand<M: ValueModel>(
         // reader's phase type and anything a macro/syntax-quote returned).
         // Param/binding vectors are handled by fn/let/loop BEFORE reaching here,
         // so they are safe.
-        build_call(rt, cs, macros, comp, "vector", &elems)
+        let mut elems = RootVec::new(rt, &elems);
+        let r = build_call(rt, cs, macros, comp, "vector", &mut elems);
+        elems.release(rt);
+        r
     } else if let Some(kvs) = data::map_entries(rt, f) {
-        build_call(rt, cs, macros, comp, "hash-map", &kvs)
+        let mut kvs = RootVec::new(rt, &kvs);
+        let r = build_call(rt, cs, macros, comp, "hash-map", &mut kvs);
+        kvs.release(rt);
+        r
     } else if let Some(es) = data::set_items(rt, f) {
-        build_call(rt, cs, macros, comp, "hash-set", &es)
+        let mut es = RootVec::new(rt, &es);
+        let r = build_call(rt, cs, macros, comp, "hash-set", &mut es);
+        es.release(rt);
+        r
     } else {
         f // keyword / string / char / number / symbol — self-evaluating
     };
-    rt.truncate_roots(slot);
+    slot.release(rt);
     out
 }
 
@@ -892,14 +910,26 @@ fn force_spine<M: ValueModel>(rt: &mut Runtime<M>, cs: &dyn CodeSpace<M>, form: 
     }
 }
 
+/// Expand every form in `items`, IN PLACE in its shadow slot.
+///
+/// THE rooting choke point of the expander. Expanding form `i` invokes macros —
+/// a safepoint, which relocates every OTHER form in the list: both the ones not
+/// yet expanded and the results already produced. So the whole list lives in the
+/// shadow stack for the duration of the walk and each slot is re-read at the
+/// point of use. Taking `&mut RootVec` (not `&[u64]`) is what makes this
+/// impossible to call wrong: a caller with a bare `Vec<u64>` must root it first.
 fn expand_each<M: ValueModel>(
     rt: &mut Runtime<M>,
     cs: &dyn CodeSpace<M>,
     macros: &HashSet<Sym>,
     comp: &Compiler,
-    items: &[u64],
-) -> Vec<u64> {
-    items.iter().map(|&it| expand(rt, cs, macros, comp, it)).collect()
+    items: &mut RootVec,
+) {
+    for i in 0..items.len() {
+        let it = items.get(rt, i);
+        let ex = expand(rt, cs, macros, comp, it);
+        items.set(rt, i, ex);
+    }
 }
 
 /// `(vector|hash-map|hash-set <elems>)` from the element forms.
@@ -909,11 +939,14 @@ fn build_call<M: ValueModel>(
     macros: &HashSet<Sym>,
     comp: &Compiler,
     ctor: &str,
-    args: &[u64],
+    args: &mut RootVec,
 ) -> u64 {
+    expand_each(rt, cs, macros, comp, args);
+    // Interned so AFTER the expansion: `fsym` is an immediate and could not move
+    // anyway, but building it here keeps the snapshot the only cross-cutting read.
     let fsym = sym(rt, ctor);
     let mut out = vec![fsym];
-    out.extend(expand_each(rt, cs, macros, comp, args));
+    out.extend(args.snapshot(rt));
     rt.vec_to_list(&out)
 }
 
@@ -926,10 +959,14 @@ fn rebuild_binder<M: ValueModel>(
     comp: &Compiler,
     form: u64,
 ) -> u64 {
-    let items = rt.list_to_vec(form);
-    let bind_forms = binding_items(rt, items[1]).unwrap_or_else(|| rt.list_to_vec(items[1]));
+    let its = rt.list_to_vec(form);
+    // The form's own items must survive the `expand_each` calls below (macro
+    // invocation = a safepoint = a move). `its[2..]` — the body — is read AFTER
+    // one of them on the let/loop path, so the whole list is rooted up front.
+    let items = RootVec::new(rt, &its);
+    let bind_forms = binding_items(rt, its[1]).unwrap_or_else(|| rt.list_to_vec(its[1]));
 
-    if is_sym(rt, items[0], "fn") || is_sym(rt, items[0], "fn*") {
+    if is_sym(rt, its[0], "fn") || is_sym(rt, its[0], "fn*") {
         // Params: a destructuring param becomes a fresh param + a `let` in the
         // body binding the pattern to it. (Symbols and `&` pass through.)
         let mut params = Vec::new();
@@ -956,7 +993,7 @@ fn rebuild_binder<M: ValueModel>(
             }
         }
         let paramlist = rt.vec_to_list(&params);
-        let body: Vec<u64> = items[2..].to_vec();
+        let body: Vec<u64> = its[2..].to_vec();
         let inner = if wrap.is_empty() {
             body
         } else {
@@ -967,9 +1004,18 @@ fn rebuild_binder<M: ValueModel>(
             letf.extend(body);
             vec![rt.vec_to_list(&letf)]
         };
-        let mut out = vec![items[0], paramlist];
-        out.extend(expand_each(rt, cs, macros, comp, &inner));
-        return rt.vec_to_list(&out);
+        // `paramlist` is a freshly built cons list — it must survive the body's
+        // expansion below, which invokes macros.
+        let held = RootVec::one(rt, paramlist);
+        let mut inner = RootVec::new(rt, &inner);
+        expand_each(rt, cs, macros, comp, &mut inner);
+        let mut out = vec![items.get(rt, 0), held.get(rt, 0)];
+        out.extend(inner.snapshot(rt));
+        let r = rt.vec_to_list(&out);
+        inner.release(rt);
+        held.release(rt);
+        items.release(rt);
+        return r;
     }
 
     // let / loop: destructure each (pattern, init) pair.
@@ -980,11 +1026,25 @@ fn rebuild_binder<M: ValueModel>(
         binds.extend(pairs);
         i += 2;
     }
-    let exbinds = expand_each(rt, cs, macros, comp, &binds);
-    let bindlist = rt.vec_to_list(&exbinds);
-    let mut out = vec![items[0], bindlist];
-    out.extend(expand_each(rt, cs, macros, comp, &items[2..]));
-    rt.vec_to_list(&out)
+    let mut binds = RootVec::new(rt, &binds);
+    expand_each(rt, cs, macros, comp, &mut binds);
+    let snap = binds.snapshot(rt);
+    let bindlist = rt.vec_to_list(&snap);
+    binds.release(rt);
+    // `bindlist` (just built) and the BODY forms (read out of `items`, which the
+    // binding expansion above may already have relocated) both have to survive
+    // the second expansion.
+    let held = RootVec::one(rt, bindlist);
+    let body: Vec<u64> = (2..items.len()).map(|i| items.get(rt, i)).collect();
+    let mut body = RootVec::new(rt, &body);
+    expand_each(rt, cs, macros, comp, &mut body);
+    let mut out = vec![items.get(rt, 0), held.get(rt, 0)];
+    out.extend(body.snapshot(rt));
+    let r = rt.vec_to_list(&out);
+    body.release(rt);
+    held.release(rt);
+    items.release(rt);
+    r
 }
 
 /// Desugar one binding `(pat, init)` into a flat `[sym expr sym expr ...]` list
@@ -2200,9 +2260,14 @@ fn handle_ns_form<M: ValueModel>(
             // This ns is being defined here (not from a file); don't re-load it.
             comp.mark_loaded(&name);
         }
-        for &clause in items.get(2..).unwrap_or(&[]) {
-            process_ns_clause(rt, cs, macros, comp, clause);
+        // A clause may `require` a namespace, which LOADS AND RUNS a file — a
+        // safepoint that relocates every clause still to be processed.
+        let clauses = RootVec::new(rt, items.get(2..).unwrap_or(&[]));
+        for i in 0..clauses.len() {
+            let c = clauses.get(rt, i);
+            process_ns_clause(rt, cs, macros, comp, c);
         }
+        clauses.release(rt);
         return Some(nil);
     }
     if is_sym(rt, head, "in-ns") {
@@ -2216,9 +2281,13 @@ fn handle_ns_form<M: ValueModel>(
     if is_sym(rt, head, "require") || is_sym(rt, head, "use") {
         let use_all = is_sym(rt, head, "use");
         let items = rt.list_to_vec(form);
-        for &spec in &items[1..] {
-            process_require_spec(rt, cs, macros, comp, use_all, spec);
+        // Each spec load runs a file (a safepoint) — root the remaining specs.
+        let specs = RootVec::new(rt, &items[1..]);
+        for i in 0..specs.len() {
+            let s = specs.get(rt, i);
+            process_require_spec(rt, cs, macros, comp, use_all, s);
         }
+        specs.release(rt);
         return Some(nil);
     }
     if is_sym(rt, head, "alias") {
@@ -2274,24 +2343,30 @@ fn process_ns_clause<M: ValueModel>(
     comp: &mut Compiler,
     clause: u64,
 ) {
-    let items = rt.list_to_vec(clause);
-    if items.is_empty() {
+    let its = rt.list_to_vec(clause);
+    if its.is_empty() {
         return;
     }
-    if is_keyword(rt, items[0], "require") || is_keyword(rt, items[0], "use") {
-        let use_all = is_keyword(rt, items[0], "use");
-        for &spec in &items[1..] {
+    // A require spec LOADS AND RUNS a file — a safepoint. Everything read after
+    // one moves: the specs still to be processed, AND `items[0]`, which the
+    // `:import` check below re-reads once the require loop has already run.
+    let items = RootVec::new(rt, &its);
+    if is_keyword(rt, items.get(rt, 0), "require") || is_keyword(rt, items.get(rt, 0), "use") {
+        let use_all = is_keyword(rt, items.get(rt, 0), "use");
+        for i in 1..items.len() {
+            let spec = items.get(rt, i);
             process_require_spec(rt, cs, macros, comp, use_all, spec);
         }
     }
     // `(:import (java.util Date) java.io.File)` — per-ns simple-name -> FQN.
-    if is_keyword(rt, items[0], "import") {
-        for &spec in &items[1..] {
-            let spec = unquote(rt, spec);
+    if is_keyword(rt, items.get(rt, 0), "import") {
+        for i in 1..items.len() {
+            let spec = unquote(rt, items.get(rt, i));
             process_import_spec(rt, comp, spec);
         }
     }
     // :refer-clojure — core is auto-referred already.
+    items.release(rt);
 }
 
 /// A single require spec: `foo`, `[foo :as bar]`, or `[foo :refer [x y]]`. LOADS
@@ -2317,6 +2392,10 @@ fn process_require_spec<M: ValueModel>(
     let Some(elems) = binding_items(rt, spec) else { return };
     let Some(real) = elems.first().and_then(|&f| sym_name_of(rt, f)) else { return };
     let real = normalize_ns(&real);
+    // `ensure_loaded` READS AND RUNS the required file — a safepoint that
+    // relocates every element of this spec, which the `:as`/`:refer` walk below
+    // still reads.
+    let elems = RootVec::new(rt, &elems);
     ensure_loaded(rt, cs, macros, comp, &real);
     // `(:use [foo …])` refers all of foo (options like :only aren't honored yet).
     if refer_all {
@@ -2324,21 +2403,24 @@ fn process_require_spec<M: ValueModel>(
     }
     let mut k = 1;
     while k < elems.len() {
-        if is_keyword(rt, elems[k], "as") && k + 1 < elems.len() {
-            if let Some(alias) = sym_name_of(rt, elems[k + 1]) {
+        if is_keyword(rt, elems.get(rt, k), "as") && k + 1 < elems.len() {
+            if let Some(alias) = sym_name_of(rt, elems.get(rt, k + 1)) {
                 comp.add_alias(&alias, &real);
             }
             k += 2;
         // `:refer` and cljs's `:refer-macros` both bring names into scope.
-        } else if (is_keyword(rt, elems[k], "refer") || is_keyword(rt, elems[k], "refer-macros"))
+        } else if (is_keyword(rt, elems.get(rt, k), "refer")
+            || is_keyword(rt, elems.get(rt, k), "refer-macros"))
             && k + 1 < elems.len()
         {
-            refer_names(rt, comp, &[elems[k + 1]], &real, "");
+            let list = elems.get(rt, k + 1);
+            refer_names(rt, comp, &[list], &real, "");
             k += 2;
         } else {
             k += 1;
         }
     }
+    elems.release(rt);
 }
 
 /// Map a ClojureScript-namespace to its bundled `clojure.*` equivalent — this
