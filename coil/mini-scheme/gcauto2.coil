@@ -90,6 +90,48 @@
                      (gc-sp-set ~sp) ~res)))
             (wrap-args h e 1 (code-count e) `() mg)))))))))))))))
 
+; ---- TAIL-POSITION handling: reset the shadow stack to the frame base BEFORE a
+; tail call (not after), so the call stays in tail position and LLVM can TCO it.
+; Otherwise a tail-recursive ALLOCATING function recurses deeply, every frame keeps
+; its params rooted, and the heap can never be reclaimed (unbounded live set). The
+; frame base `sp` is stable across TCO iterations precisely because each iteration
+; resets to it before jumping. Constructs we don't specialise fall back to the old
+; (correct, non-tail) form. ----
+(defn tail-fallback [(e Code) (base Code) (mg Code)] (-> Code)
+  (let [r (gensym)] `(let [~r ~(root-expr e mg)] (gc-sp-set ~base) ~r)))
+; a tail call: eval args (rooting managed ones), reset sp to base, then call in tail pos
+(defn tail-wrap-args [(head Code) (args Code) (i i64) (n i64) (placed Code) (base Code) (mg Code)] (-> Code)
+  (if (>= i n) `(do (gc-sp-set ~base) (~head ~@placed))
+    (let [orig (code-nth args i) a (root-expr orig mg)]
+      (if (managed-call? orig mg)
+          (let [g (gensym)]
+            `(let [~g ~a] (gc-root ~g) ~(tail-wrap-args head args (+ i 1) n (snoc placed g) base mg)))
+        (tail-wrap-args head args (+ i 1) n (snoc placed a) base mg)))))
+(defn tail-let [(e Code) (base Code) (mg Code)] (-> Code)
+  (let [bv (code-nth e 1) nb (code-count bv) cnt (code-count e)
+        tailbody (tail-expr (code-nth e (- cnt 1)) base mg)
+        mid (root-exprs e 2 (- cnt 1) mg)]
+    (if (has-managed-bind? bv 0 nb mg)
+        (build-let bv 0 nb `(do ~@mid ~tailbody) mg)
+      `(let ~(root-binds bv 0 nb mg) ~@mid ~tailbody))))
+(defn tail-expr [(e Code) (base Code) (mg Code)] (-> Code)
+  (if (not (code-list? e)) `(do (gc-sp-set ~base) ~e)
+    (if (= (code-count e) 0) `(do (gc-sp-set ~base) ~e)
+      (let [h (code-nth e 0)]
+        (if (not (code-sym? h)) (tail-fallback e base mg)
+        (if (code-eq h `if)
+            `(if ~(root-expr (code-nth e 1) mg)
+                 ~(tail-expr (code-nth e 2) base mg)
+                 ~(tail-expr (code-nth e 3) base mg))
+        (if (code-eq h `do)
+            `(do ~@(root-exprs e 1 (- (code-count e) 1) mg)
+                 ~(tail-expr (code-nth e (- (code-count e) 1)) base mg))
+        (if (code-eq h `let) (tail-let e base mg)
+        (if (or (code-eq h `quote) (code-eq h `quasiquote)) `(do (gc-sp-set ~base) ~e)
+        (if (or (code-eq h `match) (or (code-eq h `loop) (or (code-eq h `break) (code-eq h `continue))))
+            (tail-fallback e base mg)
+          (tail-wrap-args h e 1 (code-count e) `() base mg)))))))))))
+
 ; ---- rewrite one function (frame + param roots + rooted body) ----
 (defn rewrite-params [(ps Code) (i i64) (n i64)] (-> Code)
   (if (>= i n) `[]
@@ -104,12 +146,13 @@
         new-ps (rewrite-params ps 0 (code-count ps))
         new-ret `(-> ~(rewrite-type (code-nth ret 1)))
         proots (param-roots ps 0 (code-count ps))
-        body (root-exprs f 4 (code-count f) mg)
-        r (gensym) sp (gensym)]
+        cnt (code-count f)
+        mid (root-exprs f 4 (- cnt 1) mg)                     ; body forms but the last (non-tail)
+        sp (gensym)
+        tail (tail-expr (code-nth f (- cnt 1)) sp mg)]        ; last form in TAIL position
     `(defn ~name ~new-ps ~new-ret
        (let [~sp (gc-sp)]
-         (do ~@proots
-             (let [~r (do ~@body)] (gc-sp-set ~sp) ~r))))))
+         (do ~@proots ~@mid ~tail)))))
 
 ; ---- allocation-effect analysis ----
 ; A GC can only be triggered inside alloc-val, i.e. only by the runtime allocators
