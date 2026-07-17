@@ -604,10 +604,27 @@
 ;; says true. (Clojure reaches the same answer by accident — it boxes the
 ;; primitive twice, so its own `k1 == k2` misses.) Everything else — keywords,
 ;; strings, records, collections — means equal when it is the same object.
+;; SCALAR fast-path (skips the -equiv protocol dispatch). The built-in scalar
+;; types — Long/Double/Char/Boolean/Ratio/Symbol/Keyword/String and any integer
+;; (bignums also report 'Long here) — do NOT define their own IEquiv; they all
+;; fall to the Object default, which IS `(%num-eq a b)`. So for a scalar `a`,
+;; `(-equiv a b)` == `(%num-eq a b)` by construction, and the protocol dispatch
+;; (a `%proto-has-type?` resolution per call — 7M of them in core.match's map/
+;; literal comparisons) is pure overhead. `%num-eq` is `equal?`, which is exact
+;; Clojure `=` for every scalar: cross-category is false (`(= 1 1.0)`, `(= "a" 42)`),
+;; integers compare by value (`(= 5 5N)`), floats by value (NaN handled by the
+;; identity branch above). Only COLLECTIONS (vectors/lists/maps/sets/lazy-seqs)
+;; and `nil` — which DO define custom IEquiv (cross-type seq equality, order-
+;; insensitive map/set equality, `(= nil x)`) — must keep the dispatch, so they
+;; are excluded from the allowlist and fall through to `-equiv` unchanged.
+(defn -scalar-eq-type? [t]
+  (or (%num-eq t 'Long) (%num-eq t 'Keyword) (%num-eq t 'String)
+      (%num-eq t 'Double) (%num-eq t 'Char) (%num-eq t 'Symbol)
+      (%num-eq t 'Boolean) (%num-eq t 'Ratio)))
 (defn -eq2 [a b]
   (if (%eq a b)
     (if (%num-eq (type-of a) 'Double) (-equiv a b) true)
-    (-equiv a b)))
+    (if (-scalar-eq-type? (type-of a)) (%num-eq a b) (-equiv a b))))
 
 ;; A 1-arg IFn protocol: a deftype implementing `clojure.lang.IFn`'s `(invoke
 ;; [this a])` becomes callable; the default throws.
