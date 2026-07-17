@@ -478,7 +478,12 @@
 ;; Force through nested lazy-seq layers ITERATIVELY (loop/recur), so a deep chain
 ;; of lazy-seqs — e.g. a long `concat` chain — resolves in O(1) stack, not O(depth).
 (defn seq [c] (loop [c c] (if (nil? c) nil (let [s (-seq c)] (if (lazy-seq? s) (recur s) s)))))
-(defn first [c] (let [s (seq c)] (if (nil? s) nil (-first s))))
+;; A vector `first` allocated a seq view just to read element 0; the fast path
+;; reads cnt (field 1) and %pv-nth directly. Everything else keeps the seq path.
+(defn first [c]
+  (if (%num-eq (type-of c) 'PersistentVector)
+    (if (%num-eq (field c 1) 0) nil (%pv-nth c 0))
+    (let [s (seq c)] (if (nil? s) nil (-first s)))))
 ;; `rest` ALWAYS returns a seq — `()` when empty, never nil (Clojure semantics;
 ;; use `next` for the nil-when-empty behavior). `(seq ())` is nil, so seq-guarded
 ;; loops still terminate.
@@ -508,17 +513,31 @@
     (cond (nil? s) (if (seq d) (first d) (throw (str "Index out of bounds: " i)))
           (%num-eq i 0) (%first s)
           true (-nth-seq-or (%rest s) (%sub i 1) d))))
-(defn nth [c i & d]
+;; `nth` was variadic (`& d`), so EVERY call allocated a rest-arg list for the
+;; default even when absent — ~94ns on a vector. Split into fixed 2- and 3-arg
+;; clauses, and fast-path a vector to `%pv-nth` (which bounds-checks and throws)
+;; / a bounds test with the default, skipping the string?/seq?/count cond.
+(defn -nth3 [c i d]
+  (cond
+    (string? c) (if (and (>= i 0) (< i (%str-len c))) (nth-seq (%str->chars c) i) d)
+    (seq? c) (if (neg? i) d (-nth-seq-or c i (list d)))
+    (or (neg? i) (not (< i (count c)))) d
+    :else (-nth c i)))
+(defn -nth2 [c i]
   (cond
     (string? c) (if (and (>= i 0) (< i (%str-len c)))
                   (nth-seq (%str->chars c) i)
-                  (if (seq d) (first d) (throw (str "String index out of bounds: " i))))
-    ;; lists / lazy-seqs aren't IIndexed — nth is a linear walk (Clojure semantics).
+                  (throw (str "String index out of bounds: " i)))
     (seq? c) (if (neg? i)
-                  (if (seq d) (first d) (throw (str "Index out of bounds: " i)))
-                  (-nth-seq-or c i d))
-    (and (seq d) (or (neg? i) (not (< i (count c))))) (first d)
+                (throw (str "Index out of bounds: " i))
+                (-nth-seq-or c i nil))
     :else (-nth c i)))
+(defn nth
+  ([c i] (if (%num-eq (type-of c) 'PersistentVector) (%pv-nth c i) (-nth2 c i)))
+  ([c i d]
+   (if (%num-eq (type-of c) 'PersistentVector)
+     (if (if (%lt -1 i) (%lt i (field c 1)) false) (%pv-nth c i) d)
+     (-nth3 c i d))))
 (defn conj
   ([] [])
   ([c] c)
