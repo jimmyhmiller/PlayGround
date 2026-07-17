@@ -92,6 +92,12 @@
 ; reports "can't emit a file of this type"). Rust's Target::initialize_all does it.
 (extern LLVMInitializeAArch64AsmPrinter    :cc c [] (-> void))
 (extern LLVMInitializeX86AsmPrinter        :cc c [] (-> void))
+; AsmParser init is required to emit INLINE ASM — which is how a `:lower shim`
+; calling convention is realized (a naked trampoline). Without it LLVM hard-errors
+; ("Inline asm not supported by this streamer because we don't have an asm parser
+; for this target") and aborts, so every `:shim` cc failed to build on the LLVM path.
+(extern LLVMInitializeAArch64AsmParser     :cc c [] (-> void))
+(extern LLVMInitializeX86AsmParser         :cc c [] (-> void))
 (extern LLVMInitializeWebAssemblyTargetInfo :cc c [] (-> void))
 (extern LLVMInitializeWebAssemblyTarget     :cc c [] (-> void))
 (extern LLVMInitializeWebAssemblyTargetMC   :cc c [] (-> void))

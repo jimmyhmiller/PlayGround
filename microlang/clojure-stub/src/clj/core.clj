@@ -1772,17 +1772,28 @@
 ;; interface, so `satisfies?`) several times per `match`, making the "reflective
 ;; ops are cold" assumption in host_jvm.clj false. A prim-style loop, no lazy
 ;; seqs and no per-element closures, to keep it that way.
+;; RAW `%first`/`%rest`, not `seq`/`first`/`next`: the method list is built
+;; eagerly by `defprotocol` and is a plain nil-terminated cons list, never lazy.
+;; The wrappers are each a protocol dispatch, and at one method they cost ~4x
+;; the lookup they were guarding (243ns for a ONE-method protocol, of which the
+;; actual `%method-has-type?` was 49ns).
+;;
+;; `%first` answers nil for BOTH nil and `()`, and a method name is never nil,
+;; so that single test terminates the loop for either shape — which matters
+;; because `extends?` reaches here with a marker protocol's `()`.
 (defn -proto-has-type? [ms ty]
-  (loop [l (seq ms)]
-    (if (nil? l)
-      false
-      (if (%method-has-type? (first l) ty) true (recur (next l))))))
+  (loop [l ms]
+    (let [m (%first l)]
+      (if (nil? m)
+        false
+        (if (%method-has-type? m ty) true (recur (%rest l)))))))
 (defn satisfies? [p x]
-  (let [ty (type-of x)
-        ms (-proto-methods p)]
-    (if (nil? (seq ms))
-      (-marker-satisfied? p ty)
-      (-proto-has-type? ms ty))))
+  (let [ms (-proto-methods p)]
+    ;; A MARKER protocol has no methods — `()`, not nil. `%first` distinguishes
+    ;; it without a `seq` call (which was ~80ns on the hot path).
+    (if (nil? (%first ms))
+      (-marker-satisfied? p (type-of x))
+      (-proto-has-type? ms (type-of x)))))
 (defn extends? [p ty] (-proto-has-type? (-proto-methods p) ty))
 (defn extenders [p]
   (-to-list (reduce (fn [acc m] (reduce conj acc (%method-types m))) #{} (-proto-methods p))))

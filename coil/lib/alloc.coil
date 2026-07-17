@@ -109,16 +109,26 @@
 ; Build an arena over a caller-provided buffer — no malloc, so it works
 ; FREESTANDING (the buffer can be an `alloc-static` array in .bss). The malloc-backed
 ; `arena-allocator` below is the convenience wrapper; this is the primitive.
-(defn arena-over-buffer [(buf (ptr i8)) (cap :i64)] (-> (ptr Allocator))
-  (let [ar (alloc-static Arena)
-        a  (alloc-static Allocator)]
-    (store! (field ar base) buf)
-    (store! (field ar off) 0)
-    (store! (field ar cap) cap)
-    (store! (field a alloc)  (fnptr-of ar-alloc))
-    (store! (field a resize) (fnptr-of ar-resize))
-    (store! (field a free)   (fnptr-of ar-free))
-    (store! (field a ctx)    (cast (ptr i8) ar))
-    a))
+; The caller owns the Arena and Allocator cells. This used to build both with
+; `alloc-static`, which gives ONE cell per CALL SITE — not per call — so every arena in
+; the program shared one Arena: a second `arena-allocator` silently reset the first and
+; orphaned its buffer, and a scratch arena inside a helper stomped its caller's. Instance
+; state can never come from a static. (`alloc-static` at the CALLER's own site is the
+; correct use: one static per arena the caller actually writes. `malloc-allocator` below
+; keeps its static legitimately — it is a genuine singleton.)
+(defn arena-over-buffer [(ar (ptr Arena)) (a (ptr Allocator)) (buf (ptr i8)) (cap :i64)]
+    (-> (ptr Allocator))
+  (store! (field ar base) buf)
+  (store! (field ar off) 0)
+  (store! (field ar cap) cap)
+  (store! (field a alloc)  (fnptr-of ar-alloc))
+  (store! (field a resize) (fnptr-of ar-resize))
+  (store! (field a free)   (fnptr-of ar-free))
+  (store! (field a ctx)    (cast (ptr i8) ar))
+  a)
+; convenience: malloc the backing buffer AND the arena's own state, so each call yields
+; an independent arena rather than a fresh view onto one shared static.
 (defn arena-allocator [(cap :i64)] (-> (ptr Allocator))
-  (arena-over-buffer (malloc cap) cap))      ; convenience: malloc the backing buffer
+  (arena-over-buffer (cast (ptr Arena) (malloc (sizeof Arena)))
+                     (cast (ptr Allocator) (malloc (sizeof Allocator)))
+                     (malloc cap) cap))

@@ -89,6 +89,18 @@ fi
 ( cd "$T/proj" && "$COIL" build --target not-a-real-triple >/dev/null 2>&1 )
 [ $? = 1 ] && ok "project bogus --target is rejected" || bad "project bogus --target" "want rc=1"
 
+echo "== object emission on the DEFAULT (LLVM) backend =="
+# Nothing else covers this: gate-full stops at emit-ir, and arm64/gate-run.sh only
+# exercises --backend arm64. So `:shim` — a naked trampoline, i.e. INLINE ASM, and the
+# language's headline calling-convention-as-a-type feature — silently could not build on
+# the default backend at all (LLVM aborts without an AsmParser). A committed example
+# (examples/shim.coil) failed to build and no gate noticed.
+for e in examples/shim.coil examples/everything.coil; do
+  out=$("$COIL" run "$e" 2>&1); rc=$?
+  [ "$rc" = 42 ] && ok "$e builds+runs on the LLVM backend (42)" \
+                 || bad "$e on the LLVM backend" "rc=$rc: $(echo "$out" | head -1)"
+done
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL

@@ -57,6 +57,9 @@
         errout    (alloc-stack (ptr i8))]
     ; AsmPrinter init (targets themselves were initialized inside codegen-module).
     (LLVMInitializeAArch64AsmPrinter) (LLVMInitializeX86AsmPrinter) (LLVMInitializeWebAssemblyAsmPrinter)
+    ; AsmParser init: `:lower shim` conventions emit inline asm, which LLVM cannot
+    ; stream without a parser for the target — it hard-errors and aborts the process.
+    (LLVMInitializeAArch64AsmParser) (LLVMInitializeX86AsmParser)
     ; see codegen-module: the status and errout are load-bearing, not decoration.
     (if (icmp-ne (LLVMGetTargetFromTriple triple targetout errout) 0)
         (let [w (stderr)]

@@ -1,6 +1,7 @@
 (module app)
 (import "src/raylib.coil" :as raylib)
 (import "src/workflow.coil" :as workflow)
+(import "src/native.coil" :as native)
 
 (extern sin :cc c [f64] (-> f64))
 (extern fmod :cc c [f64 f64] (-> f64))

@@ -1,0 +1,274 @@
+(module native)
+(import "raylib.coil" :as raylib)
+
+(defstruct Frame
+  [(left f64) (top f64) (width f64) (height f64)])
+
+(defstruct Interaction
+  [(hovered i64) (pressed i64) (focused i64) (disabled i64)])
+
+(defn color-alpha [(red i64) (green i64) (blue i64) (alpha i64)] (-> raylib.Color)
+  (let [value (alloc-stack raylib.Color)]
+    (do
+      (store! (field value r) (cast u8 red))
+      (store! (field value g) (cast u8 green))
+      (store! (field value b) (cast u8 blue))
+      (store! (field value a) (cast u8 alpha))
+      (load value))))
+
+(defn color [(red i64) (green i64) (blue i64)] (-> raylib.Color)
+  (color-alpha red green blue 255))
+
+(defn smaller [(left f64) (right f64)] (-> f64)
+  (if (< left right) left right))
+
+(defn larger [(left f64) (right f64)] (-> f64)
+  (if (> left right) left right))
+
+(defn vector [(horizontal f64) (vertical f64)] (-> raylib.Vector2)
+  (let [value (alloc-stack raylib.Vector2)]
+    (do
+      (store! (field value x) (cast f32 horizontal))
+      (store! (field value y) (cast f32 vertical))
+      (load value))))
+
+(defn rectangle [(frame Frame)] (-> raylib.Rectangle)
+  (let [value (alloc-stack raylib.Rectangle)]
+    (do
+      (store! (field value x) (cast f32 (load (field frame left))))
+      (store! (field value y) (cast f32 (load (field frame top))))
+      (store! (field value width) (cast f32 (load (field frame width))))
+      (store! (field value height) (cast f32 (load (field frame height))))
+      (load value))))
+
+(defn frame [(left f64) (top f64) (width f64) (height f64)] (-> Frame)
+  (let [value (alloc-stack Frame)]
+    (do
+      (store! (field value left) left)
+      (store! (field value top) top)
+      (store! (field value width) width)
+      (store! (field value height) height)
+      (load value))))
+
+(defn interaction [(hovered i64) (pressed i64) (focused i64) (disabled i64)] (-> Interaction)
+  (let [value (alloc-stack Interaction)]
+    (do
+      (store! (field value hovered) hovered)
+      (store! (field value pressed) pressed)
+      (store! (field value focused) focused)
+      (store! (field value disabled) disabled)
+      (load value))))
+
+(defn contains [(bounds Frame) (horizontal f64) (vertical f64)] (-> bool)
+  (and (>= horizontal (load (field bounds left)))
+       (and (<= horizontal (+ (load (field bounds left)) (load (field bounds width))))
+            (and (>= vertical (load (field bounds top)))
+                 (<= vertical (+ (load (field bounds top)) (load (field bounds height))))))))
+
+(defn background [] (-> raylib.Color) (color 10 10 10))
+(defn surface [] (-> raylib.Color) (color 23 23 23))
+(defn surface-subtle [] (-> raylib.Color) (color 38 38 38))
+(defn surface-pressed [] (-> raylib.Color) (color-alpha 255 255 255 38))
+(defn text [] (-> raylib.Color) (color 250 250 250))
+(defn text-muted [] (-> raylib.Color) (color 161 161 161))
+(defn border [] (-> raylib.Color) (color-alpha 255 255 255 26))
+(defn accent [] (-> raylib.Color) (color 229 229 229))
+(defn accent-text [] (-> raylib.Color) (color 23 23 23))
+(defn focus-ring [] (-> raylib.Color) (color 115 115 115))
+
+(defn rounded-fill [(bounds Frame) (radius f64) (tint raylib.Color)] (-> i64)
+  (do
+    (raylib.DrawRectangleRounded (rectangle bounds) (cast f32 (/ radius (smaller (load (field bounds width)) (load (field bounds height))))) (cast i32 8) tint)
+    0))
+
+(defn rounded-stroke [(bounds Frame) (radius f64) (thickness f64) (tint raylib.Color)] (-> i64)
+  (do
+    (raylib.DrawRectangleRoundedLinesEx (rectangle bounds)
+                                         (cast f32 (/ radius (smaller (load (field bounds width)) (load (field bounds height)))))
+                                         (cast i32 8)
+                                         (cast f32 thickness)
+                                         tint)
+    0))
+
+(defn draw-label [(font raylib.Font) (label (ptr i8)) (left f64) (top f64) (size f64) (tint raylib.Color)] (-> i64)
+  (do
+    (raylib.DrawTextEx (load font) label (vector left top) (cast f32 size) (cast f32 0.0) tint)
+    0))
+
+(defn draw-centered-label [(font raylib.Font) (label (ptr i8)) (bounds Frame) (size f64) (tint raylib.Color)] (-> i64)
+  (let [measured (raylib.MeasureTextEx (load font) label (cast f32 size) (cast f32 0.0))]
+    (draw-label font
+                label
+                (+ (load (field bounds left)) (/ (- (load (field bounds width)) (cast f64 (load (field measured x)))) 2.0))
+                (+ (load (field bounds top)) (/ (- (load (field bounds height)) size) 2.0))
+                size
+                tint)))
+
+(defn draw-focus [(bounds Frame) (radius f64) (focused i64)] (-> i64)
+  (if (= focused 1)
+    (rounded-stroke (frame (- (load (field bounds left)) 3.0)
+                           (- (load (field bounds top)) 3.0)
+                           (+ (load (field bounds width)) 6.0)
+                           (+ (load (field bounds height)) 6.0))
+                    (+ radius 3.0)
+                    2.0
+                    (focus-ring))
+    0))
+
+(defn draw-button [(font raylib.Font) (label (ptr i8)) (bounds Frame) (state Interaction)] (-> i64)
+  (let [disabled (= (load (field state disabled)) 1)
+        fill (if disabled
+               (color 70 70 70)
+               (if (= (load (field state pressed)) 1) (color 199 199 199) (accent)))
+        ink (if disabled (text-muted) (accent-text))]
+    (do
+      (rounded-fill bounds 6.0 fill)
+      (draw-focus bounds 6.0 (load (field state focused)))
+      (draw-centered-label font label bounds 14.0 ink)
+      0)))
+
+(defn draw-input [(font raylib.Font) (value (ptr i8)) (placeholder (ptr i8)) (bounds Frame) (state Interaction)] (-> i64)
+  (let [hasValue (icmp-ne (load value) (cast i8 0))]
+    (do
+      (rounded-fill bounds 6.0 (surface))
+      (rounded-stroke bounds 6.0 1.0 (border))
+      (draw-focus bounds 6.0 (load (field state focused)))
+      (draw-label font
+                  (if hasValue value placeholder)
+                  (+ (load (field bounds left)) 10.0)
+                  (+ (load (field bounds top)) 8.0)
+                  14.0
+                  (if hasValue (text) (text-muted)))
+      0)))
+
+(defn draw-textarea [(font raylib.Font) (value (ptr i8)) (placeholder (ptr i8)) (bounds Frame) (state Interaction)] (-> i64)
+  (let [hasValue (icmp-ne (load value) (cast i8 0))]
+    (do
+      (rounded-fill bounds 6.0 (surface))
+      (rounded-stroke bounds 6.0 1.0 (border))
+      (draw-focus bounds 6.0 (load (field state focused)))
+      (draw-label font
+                  (if hasValue value placeholder)
+                  (+ (load (field bounds left)) 10.0)
+                  (+ (load (field bounds top)) 9.0)
+                  14.0
+                  (if hasValue (text) (text-muted)))
+      0)))
+
+(defn draw-checkbox [(font raylib.Font) (label (ptr i8)) (bounds Frame) (checked i64) (state Interaction)] (-> i64)
+  (let [box (frame (load (field bounds left))
+                   (+ (load (field bounds top)) (/ (- (load (field bounds height)) 16.0) 2.0))
+                   16.0
+                   16.0)]
+    (do
+      (rounded-fill box 4.0 (if (= checked 1) (accent) (surface)))
+      (rounded-stroke box 4.0 1.0 (border))
+      (draw-focus box 4.0 (load (field state focused)))
+      (if (= checked 1)
+        (do
+          (raylib.DrawLineEx (vector (+ (load (field box left)) 4.0) (+ (load (field box top)) 8.5))
+                             (vector (+ (load (field box left)) 7.0) (+ (load (field box top)) 11.0))
+                             (cast f32 2.0)
+                             (accent-text))
+          (raylib.DrawLineEx (vector (+ (load (field box left)) 7.0) (+ (load (field box top)) 11.0))
+                             (vector (+ (load (field box left)) 12.0) (+ (load (field box top)) 5.0))
+                             (cast f32 2.0)
+                             (accent-text))
+          0)
+        0)
+      (draw-label font label (+ (load (field bounds left)) 24.0) (+ (load (field bounds top)) 5.0) 14.0 (text))
+      0)))
+
+(defn draw-switch [(font raylib.Font) (label (ptr i8)) (bounds Frame) (checked i64) (state Interaction)] (-> i64)
+  (let [track (frame (load (field bounds left))
+                     (+ (load (field bounds top)) (/ (- (load (field bounds height)) 24.0) 2.0))
+                     44.0
+                     24.0)
+        knobLeft (if (= checked 1) (+ (load (field track left)) 22.0) (+ (load (field track left)) 2.0))]
+    (do
+      (rounded-fill track 12.0 (if (= checked 1) (accent) (surface-pressed)))
+      (raylib.DrawCircle (cast i32 (+ knobLeft 10.0))
+                         (cast i32 (+ (load (field track top)) 12.0))
+                         (cast f32 10.0)
+                         (if (= checked 1) (accent-text) (text)))
+      (draw-focus track 12.0 (load (field state focused)))
+      (draw-label font label (+ (load (field bounds left)) 54.0) (+ (load (field bounds top)) 5.0) 14.0 (text))
+      0)))
+
+(defn draw-slider [(bounds Frame) (value f64) (state Interaction)] (-> i64)
+  (let [clamped (larger 0.0 (smaller 1.0 value))
+        trackTop (+ (load (field bounds top)) (/ (- (load (field bounds height)) 4.0) 2.0))
+        activeWidth (* (load (field bounds width)) clamped)
+        knobHorizontal (+ (load (field bounds left)) (* (load (field bounds width)) clamped))]
+    (do
+      (rounded-fill (frame (load (field bounds left)) trackTop (load (field bounds width)) 4.0) 2.0 (surface-subtle))
+      (if (> activeWidth 0.0)
+        (rounded-fill (frame (load (field bounds left)) trackTop activeWidth 4.0) 2.0 (accent))
+        0)
+      (raylib.DrawCircle (cast i32 knobHorizontal)
+                         (cast i32 (+ (load (field bounds top)) (/ (load (field bounds height)) 2.0)))
+                         (cast f32 6.0)
+                         (color 255 255 255))
+      (raylib.DrawCircleLines (cast i32 knobHorizontal)
+                              (cast i32 (+ (load (field bounds top)) (/ (load (field bounds height)) 2.0)))
+                              (cast f32 6.0)
+                              (focus-ring))
+      (if (= (load (field state focused)) 1)
+        (do
+          (raylib.DrawCircleLines (cast i32 knobHorizontal)
+                                  (cast i32 (+ (load (field bounds top)) (/ (load (field bounds height)) 2.0)))
+                                  (cast f32 9.0)
+                                  (focus-ring))
+          0)
+        0)
+      0)))
+
+(defn draw-toggle [(font raylib.Font) (label (ptr i8)) (bounds Frame) (checked i64) (state Interaction)] (-> i64)
+  (do
+    (rounded-fill bounds 6.0 (if (= checked 1) (surface-pressed) (surface)))
+    (if (= checked 1) 0 (rounded-stroke bounds 6.0 1.0 (border)))
+    (draw-focus bounds 6.0 (load (field state focused)))
+    (draw-centered-label font label bounds 14.0 (text))
+    0))
+
+(defn draw-radio [(font raylib.Font) (label (ptr i8)) (bounds Frame) (selected i64) (state Interaction)] (-> i64)
+  (let [centerHorizontal (+ (load (field bounds left)) 8.0)
+        centerVertical (+ (load (field bounds top)) (/ (load (field bounds height)) 2.0))]
+    (do
+      (raylib.DrawCircle (cast i32 centerHorizontal) (cast i32 centerVertical) (cast f32 8.0) (surface))
+      (raylib.DrawCircleLines (cast i32 centerHorizontal) (cast i32 centerVertical) (cast f32 8.0) (border))
+      (if (= selected 1)
+        (do
+          (raylib.DrawCircle (cast i32 centerHorizontal) (cast i32 centerVertical) (cast f32 4.0) (accent))
+          0)
+        0)
+      (if (= (load (field state focused)) 1)
+        (do
+          (raylib.DrawCircleLines (cast i32 centerHorizontal) (cast i32 centerVertical) (cast f32 11.0) (focus-ring))
+          0)
+        0)
+      (draw-label font label (+ (load (field bounds left)) 24.0) (+ (load (field bounds top)) 5.0) 14.0 (text))
+      0)))
+
+(export Frame
+        Interaction
+        frame
+        interaction
+        contains
+        background
+        surface
+        surface-subtle
+        text
+        text-muted
+        border
+        accent
+        accent-text
+        focus-ring
+        draw-button
+        draw-input
+        draw-textarea
+        draw-checkbox
+        draw-switch
+        draw-slider
+        draw-toggle
+        draw-radio)

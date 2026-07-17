@@ -3,6 +3,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc;
+use std::time::Instant;
 
 use diffpack::benchmark::synthetic_revisions;
 use diffpack::bundle_benchmark::{
@@ -10,9 +11,7 @@ use diffpack::bundle_benchmark::{
     run_bundle_scale_direct_dependency_edit,
 };
 use diffpack::bundler::Bundler;
-use diffpack::{
-    DeltaSession, Revision, RevisionResult, run_delta_revisions, run_revisions, scan_graph,
-};
+use diffpack::{Revision, RevisionResult, run_delta_revisions, run_revisions, scan_graph};
 use notify::{RecursiveMode, Watcher};
 
 fn main() -> ExitCode {
@@ -118,7 +117,7 @@ fn run() -> Result<(), String> {
                 .next()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("dist/bundle.js"));
-            let (bundler, update) = Bundler::discover(Path::new(&entry))?;
+            let (bundler, update) = Bundler::discover_direct(Path::new(&entry))?;
             if !update.diagnostics.is_empty() {
                 return Err(format!(
                     "bundle produced {} diagnostic(s); first: {}",
@@ -126,17 +125,7 @@ fn run() -> Result<(), String> {
                     update.diagnostics[0]
                 ));
             }
-            let result = run_delta_revisions(vec![update.delta])
-                .pop()
-                .ok_or_else(|| "dataflow returned no build result".to_string())?;
-            let reachable = bundler.all_modules();
-            if result.reachable_facts != reachable.len() {
-                return Err(format!(
-                    "graph disagreement: dataflow reached {} modules, discovery loaded {}",
-                    result.reachable_facts,
-                    reachable.len()
-                ));
-            }
+            let reachable = bundler.reachable_modules_direct();
             bundler.emit(&reachable, &output)?;
             println!(
                 "bundled {} modules to {} (transformed {})",
@@ -222,10 +211,9 @@ fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mod
 }
 
 fn watch_bundle(entry: &Path, output: &Path) -> Result<(), String> {
-    let (mut bundler, initial) = Bundler::discover(entry)?;
-    let session = DeltaSession::new();
-    let initial_result = session.apply(initial.delta)?;
-    let mut reachable = initial_result.added;
+    let (mut bundler, initial) = Bundler::discover_direct(entry)?;
+    let mut session = bundler.direct_reachability();
+    let mut reachable = session.reachable_modules();
     bundler.emit(&reachable, output)?;
     println!(
         "watching {} ({} modules); wrote {}",
@@ -263,18 +251,20 @@ fn watch_bundle(entry: &Path, output: &Path) -> Result<(), String> {
             {
                 continue;
             }
-            let result = session.apply(update.delta)?;
+            let reachability_started = Instant::now();
+            let result = session.apply(&update.delta);
+            let reachability_ms = reachability_started.elapsed().as_secs_f64() * 1_000.0;
             for module in result.removed {
                 reachable.remove(&module);
             }
             reachable.extend(result.added);
             bundler.emit(&reachable, output)?;
             println!(
-                "rebuilt {}: reachable={} transformed={} dataflow={:.3}ms",
+                "rebuilt {}: reachable={} transformed={} reachability={:.3}ms",
                 path.display(),
                 reachable.len(),
                 update.transformed_modules,
-                result.dataflow_micros as f64 / 1_000.0
+                reachability_ms
             );
             for diagnostic in update.diagnostics {
                 eprintln!("diagnostic: {diagnostic}");

@@ -2786,6 +2786,20 @@ impl<M: ValueModel> Runtime<M> {
     /// so protocol/method dispatch can target primitives and built-in containers —
     /// exactly what an in-language collection library needs.
     pub fn type_tag(&self, bits: u64) -> Sym {
+        // FAST PATH: a RECORD's type sym is ONE load off the object. This is the
+        // overwhelmingly common case — every deftype, and in this dialect that
+        // means every map, vector and set — and it is what protocol dispatch
+        // asks for per call.
+        //
+        // The general arm below reaches it through `view_gc`, which materializes
+        // a whole `ObjView` (field slice and all) and immediately drops it, just
+        // to read one word. Profiling predicate-heavy code (`(map? x)`,
+        // `(get x :k)` in a loop) put `view_gc` + `type_tag` +
+        // `ObjView::drop_in_place` at the very top — bigger than the dispatch it
+        // was serving. `raw_rec` keeps the same poison/corruption check.
+        if let Some((type_id, _)) = self.raw_rec(bits) {
+            return type_id;
+        }
         let (idx, name) = match self.decode(bits) {
             Val::Int(_) => (TYPE_TAG_LONG, "Long"),
             Val::Float(_) => (TYPE_TAG_DOUBLE, "Double"),

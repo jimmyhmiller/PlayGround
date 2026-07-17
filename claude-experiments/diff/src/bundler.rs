@@ -1,26 +1,32 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use oxc_resolver::{ResolveOptions, Resolver};
 use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::dataflow::DeltaRevision;
 use crate::frontend_profile::{self, Phase};
 use crate::graph::ModuleId;
 use crate::transform::transform_module;
 
+type DenseModuleId = usize;
+type SharedModuleId = Arc<str>;
+
 #[derive(Debug, Clone)]
 struct ModuleState {
     hash: u64,
-    dependencies: BTreeMap<String, ModuleId>,
+    dependencies: Vec<(String, DenseModuleId)>,
     code: String,
 }
 
 struct LoadedModule {
-    state: ModuleState,
+    hash: u64,
+    dependencies: Vec<(String, SharedModuleId)>,
+    code: String,
     diagnostics: Vec<String>,
 }
 
@@ -31,7 +37,7 @@ struct ResolutionKey {
 }
 
 struct ResolutionCache {
-    shards: [Mutex<HashMap<ResolutionKey, Result<ModuleId, String>>>; 64],
+    shards: [Mutex<HashMap<ResolutionKey, Result<SharedModuleId, String>>>; 64],
 }
 
 impl ResolutionCache {
@@ -46,7 +52,7 @@ impl ResolutionCache {
         resolver: &Resolver,
         importer: &Path,
         specifier: &str,
-    ) -> Result<ModuleId, String> {
+    ) -> Result<SharedModuleId, String> {
         let key = ResolutionKey {
             importer_directory: importer
                 .parent()
@@ -90,7 +96,7 @@ impl ResolutionCache {
     fn shard(
         &self,
         key: &ResolutionKey,
-    ) -> &Mutex<HashMap<ResolutionKey, Result<ModuleId, String>>> {
+    ) -> &Mutex<HashMap<ResolutionKey, Result<SharedModuleId, String>>> {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         &self.shards[hasher.finish() as usize % self.shards.len()]
@@ -118,8 +124,8 @@ pub struct DirectReachabilityUpdate {
 /// subtree, unless that subtree is large enough that a dense full traversal is
 /// cheaper.
 pub struct DirectReachability {
-    ids: Vec<ModuleId>,
-    indices: HashMap<ModuleId, usize>,
+    ids: Vec<SharedModuleId>,
+    indices: HashMap<SharedModuleId, usize>,
     outgoing: Vec<Vec<usize>>,
     incoming: Vec<Vec<usize>>,
     reachable: Vec<bool>,
@@ -132,34 +138,65 @@ pub struct DirectReachability {
 }
 
 pub struct Bundler {
-    entry: ModuleId,
+    entry: DenseModuleId,
+    ids: Vec<SharedModuleId>,
+    indices: HashMap<SharedModuleId, DenseModuleId>,
     resolver: Resolver,
     resolution_cache: ResolutionCache,
-    modules: HashMap<ModuleId, ModuleState>,
+    frontend_pool: ThreadPool,
+    modules: Vec<Option<ModuleState>>,
 }
 
 impl Bundler {
     pub fn discover(entry: &Path) -> Result<(Self, BuildUpdate), String> {
+        Self::discover_inner(entry, true)
+    }
+
+    pub fn discover_direct(entry: &Path) -> Result<(Self, BuildUpdate), String> {
+        Self::discover_inner(entry, false)
+    }
+
+    fn discover_inner(
+        entry: &Path,
+        record_initial_delta: bool,
+    ) -> Result<(Self, BuildUpdate), String> {
         let entry_path = entry
             .canonicalize()
             .map_err(|error| format!("cannot open entry {}: {error}", entry.display()))?;
         let entry_id = module_id(&entry_path);
         let resolver = Resolver::new(resolve_options());
+        let frontend_threads = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(4);
         let mut bundler = Self {
-            entry: entry_id.clone(),
+            entry: 0,
+            ids: Vec::new(),
+            indices: HashMap::new(),
             resolver,
             resolution_cache: ResolutionCache::new(),
-            modules: HashMap::new(),
+            frontend_pool: ThreadPoolBuilder::new()
+                .num_threads(frontend_threads)
+                .thread_name(|index| format!("diffpack-frontend-{index}"))
+                .build()
+                .map_err(|error| format!("cannot create frontend worker pool: {error}"))?,
+            modules: Vec::new(),
         };
+        bundler.entry = bundler.intern(entry_id.clone());
 
         let mut delta = DeltaRevision {
             label: "initial-build".into(),
-            entry_updates: vec![(entry_id, 1)],
             ..DeltaRevision::default()
         };
+        if record_initial_delta {
+            delta.entry_updates.push((entry_id.to_string(), 1));
+        }
         let mut diagnostics = Vec::new();
-        let transformed_modules =
-            bundler.discover_from(vec![entry_path], &mut delta, &mut diagnostics)?;
+        let transformed_modules = bundler.discover_from(
+            vec![entry_path],
+            &mut delta,
+            &mut diagnostics,
+            record_initial_delta,
+        )?;
         Ok((
             bundler,
             BuildUpdate {
@@ -173,7 +210,17 @@ impl Bundler {
     pub fn rebuild_path(&mut self, path: &Path) -> Result<BuildUpdate, String> {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let id = module_id(&path);
-        let Some(old) = self.modules.get(&id).cloned() else {
+        let Some(&index) = self.indices.get(id.as_ref()) else {
+            return Ok(BuildUpdate {
+                delta: DeltaRevision {
+                    label: format!("ignored:{}", path.display()),
+                    ..DeltaRevision::default()
+                },
+                transformed_modules: 0,
+                diagnostics: Vec::new(),
+            });
+        };
+        let Some(old) = self.modules[index].clone() else {
             return Ok(BuildUpdate {
                 delta: DeltaRevision {
                     label: format!("ignored:{}", path.display()),
@@ -190,11 +237,13 @@ impl Bundler {
         };
         let mut diagnostics = Vec::new();
         if !path.is_file() {
-            delta.module_updates.push(((id.clone(), old.hash), -1));
-            for target in old.dependencies.values() {
-                delta.edge_updates.push(((id.clone(), target.clone()), -1));
+            delta.module_updates.push(((id.to_string(), old.hash), -1));
+            for (_, target) in &old.dependencies {
+                delta
+                    .edge_updates
+                    .push(((id.to_string(), self.ids[*target].to_string()), -1));
             }
-            self.modules.remove(&id);
+            self.modules[index] = None;
             return Ok(BuildUpdate {
                 delta,
                 transformed_modules: 0,
@@ -204,21 +253,21 @@ impl Bundler {
 
         let new = self.load_module(&path, &mut diagnostics)?;
         if old.hash != new.hash {
-            delta.module_updates.push(((id.clone(), old.hash), -1));
-            delta.module_updates.push(((id.clone(), new.hash), 1));
-            delta.changed.insert(id.clone());
+            delta.module_updates.push(((id.to_string(), old.hash), -1));
+            delta.module_updates.push(((id.to_string(), new.hash), 1));
+            delta.changed.insert(id.to_string());
         }
         let old_edges = old
             .dependencies
-            .values()
-            .cloned()
-            .map(|target| (id.clone(), target))
+            .iter()
+            .map(|(_, target)| target)
+            .map(|target| (id.to_string(), self.ids[*target].to_string()))
             .collect::<BTreeSet<_>>();
         let new_edges = new
             .dependencies
-            .values()
-            .cloned()
-            .map(|target| (id.clone(), target))
+            .iter()
+            .map(|(_, target)| target)
+            .map(|target| (id.to_string(), self.ids[*target].to_string()))
             .collect::<BTreeSet<_>>();
         delta.edge_updates.extend(
             old_edges
@@ -234,13 +283,14 @@ impl Bundler {
         );
         let new_paths = new
             .dependencies
-            .values()
-            .filter(|dependency| !self.modules.contains_key(*dependency))
-            .map(PathBuf::from)
+            .iter()
+            .map(|(_, target)| target)
+            .filter(|dependency| self.modules[**dependency].is_none())
+            .map(|dependency| PathBuf::from(self.ids[*dependency].as_ref()))
             .collect::<Vec<_>>();
-        self.modules.insert(id, new);
+        self.modules[index] = Some(new);
         let transformed_modules =
-            1 + self.discover_from(new_paths, &mut delta, &mut diagnostics)?;
+            1 + self.discover_from(new_paths, &mut delta, &mut diagnostics, true)?;
 
         Ok(BuildUpdate {
             delta,
@@ -260,7 +310,12 @@ impl Bundler {
     }
 
     pub fn all_modules(&self) -> BTreeSet<ModuleId> {
-        self.modules.keys().cloned().collect()
+        self.modules
+            .iter()
+            .enumerate()
+            .filter(|(_, module)| module.is_some())
+            .map(|(index, _)| self.ids[index].to_string())
+            .collect()
     }
 
     /// Builds a persistent dense reachability index for incremental edits.
@@ -274,14 +329,14 @@ impl Bundler {
     }
 
     pub fn watch_root(&self) -> PathBuf {
-        PathBuf::from(&self.entry)
+        PathBuf::from(self.ids[self.entry].as_ref())
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf()
     }
 
     pub fn worker_count(&self) -> usize {
-        rayon::current_num_threads()
+        self.frontend_pool.current_num_threads()
     }
 
     fn discover_from(
@@ -289,45 +344,81 @@ impl Bundler {
         paths: Vec<PathBuf>,
         delta: &mut DeltaRevision,
         diagnostics: &mut Vec<String>,
+        record_delta: bool,
     ) -> Result<usize, String> {
         let mut frontier = paths.into_iter().collect::<BTreeSet<_>>();
         let mut transformed = 0;
         while !frontier.is_empty() {
             let paths = frontier
                 .into_iter()
-                .filter(|path| !self.modules.contains_key(&module_id(path)))
-                .collect::<Vec<_>>();
-            let mut loaded = paths
-                .into_par_iter()
-                .map(|path| {
-                    let result = load_uncached(&self.resolver, &self.resolution_cache, &path);
-                    (path, result)
+                .filter(|path| {
+                    path.to_str()
+                        .and_then(|id| self.indices.get(id))
+                        .is_none_or(|index| self.modules[*index].is_none())
                 })
                 .collect::<Vec<_>>();
+            let mut loaded = self.frontend_pool.install(|| {
+                paths
+                    .into_par_iter()
+                    .map(|path| {
+                        let result = load_uncached(&self.resolver, &self.resolution_cache, &path);
+                        (path, result)
+                    })
+                    .collect::<Vec<_>>()
+            });
             loaded.sort_by(|left, right| left.0.cmp(&right.0));
             frontier = BTreeSet::new();
 
             for (path, result) in loaded {
                 let id = module_id(&path);
-                if self.modules.contains_key(&id) {
+                if self
+                    .indices
+                    .get(id.as_ref())
+                    .is_some_and(|index| self.modules[*index].is_some())
+                {
                     continue;
                 }
                 let loaded = result?;
-                diagnostics.extend(loaded.diagnostics.iter().cloned());
+                diagnostics.extend(loaded.diagnostics);
                 transformed += 1;
-                delta
-                    .module_updates
-                    .push(((id.clone(), loaded.state.hash), 1));
-                for target in loaded.state.dependencies.values() {
-                    delta.edge_updates.push(((id.clone(), target.clone()), 1));
-                    if !self.modules.contains_key(target) {
-                        frontier.insert(PathBuf::from(target));
-                    }
+                let source = self.intern(id.clone());
+                if record_delta {
+                    delta
+                        .module_updates
+                        .push(((id.to_string(), loaded.hash), 1));
                 }
-                self.modules.insert(id, loaded.state);
+                let mut dependencies = Vec::with_capacity(loaded.dependencies.len());
+                for (specifier, target) in loaded.dependencies {
+                    let target_index = self.intern(target.clone());
+                    if record_delta {
+                        delta
+                            .edge_updates
+                            .push(((id.to_string(), target.to_string()), 1));
+                    }
+                    if self.modules[target_index].is_none() {
+                        frontier.insert(PathBuf::from(target.as_ref()));
+                    }
+                    dependencies.push((specifier, target_index));
+                }
+                self.modules[source] = Some(ModuleState {
+                    hash: loaded.hash,
+                    dependencies,
+                    code: loaded.code,
+                });
             }
         }
         Ok(transformed)
+    }
+
+    fn intern(&mut self, id: SharedModuleId) -> DenseModuleId {
+        if let Some(&index) = self.indices.get(id.as_ref()) {
+            return index;
+        }
+        let index = self.ids.len();
+        self.ids.push(id.clone());
+        self.indices.insert(id, index);
+        self.modules.push(None);
+        index
     }
 
     fn load_module(
@@ -341,7 +432,10 @@ impl Bundler {
         frontend_profile::finish(Phase::Read, read_started);
         let id = module_id(path);
         let hash = content_hash(source.as_bytes());
-        if let Some(current) = self.modules.get(&id)
+        if let Some(current) = self
+            .indices
+            .get(id.as_ref())
+            .and_then(|index| self.modules[*index].as_ref())
             && current.hash == hash
         {
             return Ok(current.clone());
@@ -354,13 +448,17 @@ impl Bundler {
                 .map(|diagnostic| format!("{}: {diagnostic}", path.display())),
         );
 
-        let dependencies = resolve_dependencies(
+        let resolved_dependencies = resolve_dependencies(
             &self.resolver,
             &self.resolution_cache,
             path,
             &transformed.dependencies,
             diagnostics,
         );
+        let dependencies = resolved_dependencies
+            .into_iter()
+            .map(|(specifier, target)| (specifier, self.intern(target)))
+            .collect();
 
         Ok(ModuleState {
             hash,
@@ -370,27 +468,36 @@ impl Bundler {
     }
 
     fn render(&self, reachable: &BTreeSet<ModuleId>) -> String {
-        let mut fragments = reachable
+        let reachable = reachable
+            .iter()
+            .filter_map(|id| self.indices.get(id.as_str()).copied())
+            .collect::<Vec<_>>();
+        let mut runtime_indices = vec![None; self.ids.len()];
+        for (runtime_index, &dense_index) in reachable.iter().enumerate() {
+            runtime_indices[dense_index] = Some(runtime_index);
+        }
+        let fragments = reachable
             .par_iter()
-            .filter_map(|id| {
-                let module = self.modules.get(id)?;
+            .enumerate()
+            .filter_map(|(index, &dense_index)| {
+                let module = self.modules[dense_index].as_ref()?;
                 let module_fragment = format!(
-                    "{}:function(module,exports,require,__toESM,__export,__reExport,__import,__esmNamespace,__seal){{\n{}\n}},\n",
-                    quote(id),
+                    "{index}:function(module,exports,require,__toESM,__export,__reExport,__import,__esmNamespace,__seal){{\n{}\n}},\n",
                     module.code
                 );
-                let mut map_fragment = format!("{}:{{", quote(id));
+                let mut map_fragment = format!("{index}:{{");
                 for (specifier, target) in &module.dependencies {
-                    map_fragment.push_str(&format!("{}:{},", quote(specifier), quote(target)));
+                    let target = runtime_indices[*target]
+                        .expect("a reachable module dependency must also be reachable");
+                    map_fragment.push_str(&format!("{}:{target},", quote(specifier)));
                 }
                 map_fragment.push_str("},\n");
-                Some((id.clone(), module_fragment, map_fragment))
+                Some((module_fragment, map_fragment))
             })
             .collect::<Vec<_>>();
-        fragments.sort_by(|left, right| left.0.cmp(&right.0));
         let mut modules = String::new();
         let mut maps = String::new();
-        for (_, module, map) in fragments {
+        for (module, map) in fragments {
             modules.push_str(&module);
             maps.push_str(&map);
         }
@@ -430,7 +537,7 @@ function __require(id){{
 return __require({entry});
 }})();
 "#,
-            entry = quote(&self.entry)
+            entry = runtime_indices[self.entry].expect("entry module must be reachable")
         )
     }
 }
@@ -440,26 +547,27 @@ impl DirectReachability {
     const RECOMPUTE_DENOMINATOR: usize = 4;
 
     fn new(bundler: &Bundler) -> Self {
+        let node_count = bundler.ids.len();
         let mut graph = Self {
-            ids: Vec::new(),
-            indices: HashMap::new(),
-            outgoing: Vec::new(),
-            incoming: Vec::new(),
-            reachable: Vec::new(),
-            parent: Vec::new(),
-            tree_children: Vec::new(),
-            subtree_marks: Vec::new(),
+            ids: bundler.ids.clone(),
+            indices: bundler.indices.clone(),
+            outgoing: vec![Vec::new(); node_count],
+            incoming: vec![Vec::new(); node_count],
+            reachable: vec![false; node_count],
+            parent: vec![None; node_count],
+            tree_children: vec![Vec::new(); node_count],
+            subtree_marks: vec![0; node_count],
             mark_epoch: 0,
-            entry: 0,
+            entry: bundler.entry,
             reachable_count: 0,
         };
 
-        graph.entry = graph.intern(&bundler.entry);
-        for (source, module) in &bundler.modules {
-            let source = graph.intern(source);
-            for target in module.dependencies.values() {
-                let target = graph.intern(target);
-                graph.insert_edge(source, target);
+        for (source, module) in bundler.modules.iter().enumerate() {
+            let Some(module) = module else {
+                continue;
+            };
+            for (_, target) in &module.dependencies {
+                graph.insert_edge(source, *target);
             }
         }
         graph.recompute();
@@ -471,7 +579,7 @@ impl DirectReachability {
             .iter()
             .enumerate()
             .filter(|(_, reachable)| **reachable)
-            .map(|(index, _)| self.ids[index].clone())
+            .map(|(index, _)| self.ids[index].to_string())
             .collect()
     }
 
@@ -494,10 +602,10 @@ impl DirectReachability {
         }
         for ((source, target), diff) in &revision.edge_updates {
             if *diff < 0 {
-                let Some(&source) = self.indices.get(source) else {
+                let Some(&source) = self.indices.get(source.as_str()) else {
                     continue;
                 };
-                let Some(&target) = self.indices.get(target) else {
+                let Some(&target) = self.indices.get(target.as_str()) else {
                     continue;
                 };
                 if self.remove_edge(source, target) && self.parent[target] == Some(source) {
@@ -514,7 +622,7 @@ impl DirectReachability {
             return index;
         }
         let index = self.ids.len();
-        let id = id.to_owned();
+        let id = SharedModuleId::from(id);
         self.ids.push(id.clone());
         self.indices.insert(id, index);
         self.outgoing.push(Vec::new());
@@ -692,13 +800,13 @@ impl DirectReachability {
     }
 
     fn record_change(&self, node: usize, reachable: bool, update: &mut DirectReachabilityUpdate) {
-        let id = &self.ids[node];
+        let id = self.ids[node].as_ref();
         if reachable {
             if !update.removed.remove(id) {
-                update.added.insert(id.clone());
+                update.added.insert(id.to_owned());
             }
         } else if !update.added.remove(id) {
-            update.removed.insert(id.clone());
+            update.removed.insert(id.to_owned());
         }
     }
 }
@@ -727,11 +835,9 @@ fn load_uncached(
         &mut diagnostics,
     );
     Ok(LoadedModule {
-        state: ModuleState {
-            hash,
-            dependencies,
-            code: transformed.code,
-        },
+        hash,
+        dependencies,
+        code: transformed.code,
         diagnostics,
     })
 }
@@ -742,13 +848,19 @@ fn resolve_dependencies(
     path: &Path,
     dependency_specifiers: &[String],
     diagnostics: &mut Vec<String>,
-) -> BTreeMap<String, ModuleId> {
+) -> Vec<(String, SharedModuleId)> {
     let resolve_started = frontend_profile::start();
-    let mut dependencies = BTreeMap::new();
+    let mut dependencies = Vec::with_capacity(dependency_specifiers.len());
     for specifier in dependency_specifiers {
+        if dependencies
+            .iter()
+            .any(|(existing, _)| existing == specifier)
+        {
+            continue;
+        }
         match resolution_cache.resolve(resolver, path, specifier) {
             Ok(resolved) => {
-                dependencies.insert(specifier.clone(), resolved);
+                dependencies.push((specifier.clone(), resolved));
             }
             Err(error) => diagnostics.push(format!(
                 "{}: cannot resolve {specifier:?}: {error}",
@@ -780,8 +892,8 @@ fn resolve_options() -> ResolveOptions {
     }
 }
 
-fn module_id(path: &Path) -> ModuleId {
-    path.to_string_lossy().into_owned()
+fn module_id(path: &Path) -> SharedModuleId {
+    SharedModuleId::from(path.to_string_lossy().into_owned())
 }
 
 fn content_hash(bytes: &[u8]) -> u64 {

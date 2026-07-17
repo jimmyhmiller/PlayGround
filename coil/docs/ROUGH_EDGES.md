@@ -107,12 +107,22 @@ Found independently by two agents from opposite directions. `alloc-static` is on
 call site**, not per call, so constructors that use it return the same object every time.
 `malloc-allocator` uses it *legitimately* (a true singleton) — copying that pattern is what broke these.
 
-- [ ] **std-1 / mem-4** `arena-allocator`: every call returns the same arena; the second arena
+- [x] **std-1 / mem-4** `arena-allocator`: every call returns the same arena; the second arena
       silently destroys the first and leaks its buffer. Carve `Arena`/`Allocator` out of the
       caller's buffer, or take a caller-owned `(ptr Arena)`.
-- [ ] **std-2** `fixed-buffer-writer` shares one static `Writer` — two live writers merge.
+- [x] **std-2** `fixed-buffer-writer` shares one static `Writer` — two live writers merge.
       Same fix; also `null-writer`/`fd-writer`.
-- [ ] Audit every `alloc-static` in a constructor position across `lib/`.
+- [x] Audit every `alloc-static` in a constructor position across `lib/`.
+
+- [x] **NEW (found while fixing Batch 3): `:lower shim` could not build on the LLVM backend
+      AT ALL.** No `AsmParser` was ever initialized, so the inline asm a naked trampoline
+      lowers to made LLVM hard-error and abort — killing the language's headline
+      calling-convention-as-a-type feature on the default backend. `examples/shim.coil`, a
+      committed example, did not build. Ungated because `gate-full` stops at emit-ir and
+      `arm64/gate-run.sh` only exercises `--backend arm64` (which bypasses LLVM's asm
+      printer and worked fine). Fixed + now covered by gate-cli.
+- [x] **NEW: `stdin` aliased any other `fd-reader`** — the same static-sharing io.coil had
+      already patched for stdout/stderr, still live for stdin. Fixed by the same change.
 
 ## Batch 4 — Dies with zero output (no depth/fuel guards)
 

@@ -20,7 +20,7 @@
         fb  (alloc-static FixBuf)]
     (store! (field fb data) buf)
     (store! (field fb cap) 64)
-    (greet (fixed-buffer-writer fb) 42)            ; format into the buffer
+    (greet (fixed-buffer-writer (alloc-stack Writer) fb) 42)            ; format into the buffer
     (match (write-all (stdout)                     ; flush the captured bytes
                       (load (field fb data))
                       (load (field fb len)))

@@ -13,17 +13,13 @@ target triple = "arm64-apple-darwin25.5.0"
 
 %io.Writer = type { ptr, ptr }
 
-@g.0 = global %io.Reader zeroinitializer
+@g.0 = global %io.Writer zeroinitializer
 
 @g.1 = global %io.Writer zeroinitializer
 
-@g.2 = global %io.Writer zeroinitializer
+@g.2 = global %io.Reader zeroinitializer
 
 @g.3 = global %io.Writer zeroinitializer
-
-@g.4 = global %io.Writer zeroinitializer
-
-@g.5 = global %io.Writer zeroinitializer
 
 @str.0 = private constant [4 x i8] c"inf\00"
 
@@ -890,12 +886,14 @@ else:                                             ; preds = %entry
   ret %coil.core.Result__i64__io.IoError %sum10
 }
 
-define ptr @io.fd-reader(i64 %fd) {
+define ptr @io.fd-reader(ptr %r, i64 %fd) {
 entry:
-  store ptr @io.fd-read, ptr @g.0, align 8
+  %field = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 0
+  store ptr @io.fd-read, ptr %field, align 8
+  %field1 = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 1
   %inttoptr = inttoptr i64 %fd to ptr
-  store ptr %inttoptr, ptr getelementptr inbounds nuw (%io.Reader, ptr @g.0, i32 0, i32 1), align 8
-  ret ptr @g.0
+  store ptr %inttoptr, ptr %field1, align 8
+  ret ptr %r
 }
 
 define %coil.core.Result__i64__io.IoError @io.fd-write(ptr %ctx, ptr %buf, i64 %len) {
@@ -934,21 +932,25 @@ else:                                             ; preds = %entry
   ret %coil.core.Result__i64__io.IoError %sum10
 }
 
-define ptr @io.fd-writer(i64 %fd) {
+define ptr @io.fd-writer(ptr %w, i64 %fd) {
 entry:
-  store ptr @io.fd-write, ptr @g.1, align 8
+  %field = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 0
+  store ptr @io.fd-write, ptr %field, align 8
+  %field1 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 1
   %inttoptr = inttoptr i64 %fd to ptr
-  store ptr %inttoptr, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.1, i32 0, i32 1), align 8
-  ret ptr @g.1
+  store ptr %inttoptr, ptr %field1, align 8
+  ret ptr %w
 }
 
-define ptr @io.fixed-buffer-writer(ptr %fb) {
+define ptr @io.fixed-buffer-writer(ptr %w, ptr %fb) {
 entry:
   %field = getelementptr inbounds nuw %io.FixBuf, ptr %fb, i32 0, i32 1
   store i64 0, ptr %field, align 8
-  store ptr @io.fb-write, ptr @g.2, align 8
-  store ptr %fb, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.2, i32 0, i32 1), align 8
-  ret ptr @g.2
+  %field1 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 0
+  store ptr @io.fb-write, ptr %field1, align 8
+  %field2 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 1
+  store ptr %fb, ptr %field2, align 8
+  ret ptr %w
 }
 
 define %coil.core.Result__i64__io.IoError @io.null-write(ptr %ctx, ptr %buf, i64 %len) {
@@ -965,9 +967,9 @@ entry:
 
 define ptr @io.null-writer() {
 entry:
-  store ptr @io.null-write, ptr @g.3, align 8
-  store ptr null, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.3, i32 0, i32 1), align 8
-  ret ptr @g.3
+  store ptr @io.null-write, ptr @g.0, align 8
+  store ptr null, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.0, i32 0, i32 1), align 8
+  ret ptr @g.0
 }
 
 define %coil.core.Result__i64__io.IoError @io.print-cstr(ptr %w, ptr %s) {
@@ -1019,22 +1021,20 @@ entry:
 
 define ptr @io.stderr() {
 entry:
-  store ptr @io.fd-write, ptr @g.4, align 8
-  store ptr inttoptr (i64 2 to ptr), ptr getelementptr inbounds nuw (%io.Writer, ptr @g.4, i32 0, i32 1), align 8
-  ret ptr @g.4
+  %call = call ptr @io.fd-writer(ptr @g.1, i64 2)
+  ret ptr %call
 }
 
 define ptr @io.stdin() {
 entry:
-  %call = call ptr @io.fd-reader(i64 0)
+  %call = call ptr @io.fd-reader(ptr @g.2, i64 0)
   ret ptr %call
 }
 
 define ptr @io.stdout() {
 entry:
-  store ptr @io.fd-write, ptr @g.5, align 8
-  store ptr inttoptr (i64 1 to ptr), ptr getelementptr inbounds nuw (%io.Writer, ptr @g.5, i32 0, i32 1), align 8
-  ret ptr @g.5
+  %call = call ptr @io.fd-writer(ptr @g.3, i64 1)
+  ret ptr %call
 }
 
 define %coil.core.Result__i64__io.IoError @io.write-all(ptr %w, ptr %buf, i64 %len) {

@@ -91,7 +91,11 @@ fn run_bundle_scale_inner(
     let output = workspace.path.join("dist/bundle.js");
     frontend_profile::reset();
     let discover_started = Instant::now();
-    let (mut bundler, initial) = Bundler::discover(&entry)?;
+    let (mut bundler, initial) = if use_dataflow {
+        Bundler::discover(&entry)?
+    } else {
+        Bundler::discover_direct(&entry)?
+    };
     let discover_transform_resolve_ms = elapsed_ms(discover_started);
     let frontend_profile = frontend_profile::snapshot();
     if !initial.diagnostics.is_empty() {

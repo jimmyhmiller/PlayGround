@@ -29,25 +29,17 @@ target triple = "arm64-apple-darwin25.5.0"
 
 %io.Writer = type { ptr, ptr }
 
-@g.0 = global %alloc.Arena zeroinitializer
+@g.0 = global %alloc.Allocator zeroinitializer
 
-@g.1 = global %alloc.Allocator zeroinitializer
+@g.1 = global %hashmap.KeyOps zeroinitializer
 
-@g.2 = global %alloc.Allocator zeroinitializer
+@g.2 = global %io.Writer zeroinitializer
 
-@g.3 = global %hashmap.KeyOps zeroinitializer
+@g.3 = global %io.Writer zeroinitializer
 
 @g.4 = global %io.Reader zeroinitializer
 
 @g.5 = global %io.Writer zeroinitializer
-
-@g.6 = global %io.Writer zeroinitializer
-
-@g.7 = global %io.Writer zeroinitializer
-
-@g.8 = global %io.Writer zeroinitializer
-
-@g.9 = global %io.Writer zeroinitializer
 
 @str.0 = private constant [4 x i8] c"inf\00"
 
@@ -671,21 +663,30 @@ entry:
 
 define internal ptr @alloc.arena-allocator(i64 %cap) {
 entry:
-  %call = call ptr @malloc(i64 %cap)
-  %call1 = call ptr @alloc.arena-over-buffer(ptr %call, i64 %cap)
-  ret ptr %call1
+  %call = call ptr @malloc(i64 24)
+  %call1 = call ptr @malloc(i64 32)
+  %call2 = call ptr @malloc(i64 %cap)
+  %call3 = call ptr @alloc.arena-over-buffer(ptr %call, ptr %call1, ptr %call2, i64 %cap)
+  ret ptr %call3
 }
 
-define internal ptr @alloc.arena-over-buffer(ptr %buf, i64 %cap) {
+define internal ptr @alloc.arena-over-buffer(ptr %ar, ptr %a, ptr %buf, i64 %cap) {
 entry:
-  store ptr %buf, ptr @g.0, align 8
-  store i64 0, ptr getelementptr inbounds nuw (%alloc.Arena, ptr @g.0, i32 0, i32 1), align 8
-  store i64 %cap, ptr getelementptr inbounds nuw (%alloc.Arena, ptr @g.0, i32 0, i32 2), align 8
-  store ptr @alloc.ar-alloc, ptr @g.1, align 8
-  store ptr @alloc.ar-resize, ptr getelementptr inbounds nuw (%alloc.Allocator, ptr @g.1, i32 0, i32 1), align 8
-  store ptr @alloc.ar-free, ptr getelementptr inbounds nuw (%alloc.Allocator, ptr @g.1, i32 0, i32 2), align 8
-  store ptr @g.0, ptr getelementptr inbounds nuw (%alloc.Allocator, ptr @g.1, i32 0, i32 3), align 8
-  ret ptr @g.1
+  %field = getelementptr inbounds nuw %alloc.Arena, ptr %ar, i32 0, i32 0
+  store ptr %buf, ptr %field, align 8
+  %field1 = getelementptr inbounds nuw %alloc.Arena, ptr %ar, i32 0, i32 1
+  store i64 0, ptr %field1, align 8
+  %field2 = getelementptr inbounds nuw %alloc.Arena, ptr %ar, i32 0, i32 2
+  store i64 %cap, ptr %field2, align 8
+  %field3 = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 0
+  store ptr @alloc.ar-alloc, ptr %field3, align 8
+  %field4 = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 1
+  store ptr @alloc.ar-resize, ptr %field4, align 8
+  %field5 = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 2
+  store ptr @alloc.ar-free, ptr %field5, align 8
+  %field6 = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 3
+  store ptr %ar, ptr %field6, align 8
+  ret ptr %a
 }
 
 define internal %coil.core.Option__ptr_i8 @alloc.ma-alloc(ptr %ctx, i64 %size, i64 %align) {
@@ -750,11 +751,11 @@ else:                                             ; preds = %entry
 
 define internal ptr @alloc.malloc-allocator() {
 entry:
-  store ptr @alloc.ma-alloc, ptr @g.2, align 8
-  store ptr @alloc.ma-resize, ptr getelementptr inbounds nuw (%alloc.Allocator, ptr @g.2, i32 0, i32 1), align 8
-  store ptr @alloc.ma-free, ptr getelementptr inbounds nuw (%alloc.Allocator, ptr @g.2, i32 0, i32 2), align 8
-  store ptr @g.2, ptr getelementptr inbounds nuw (%alloc.Allocator, ptr @g.2, i32 0, i32 3), align 8
-  ret ptr @g.2
+  store ptr @alloc.ma-alloc, ptr @g.0, align 8
+  store ptr @alloc.ma-resize, ptr getelementptr inbounds nuw (%alloc.Allocator, ptr @g.0, i32 0, i32 1), align 8
+  store ptr @alloc.ma-free, ptr getelementptr inbounds nuw (%alloc.Allocator, ptr @g.0, i32 0, i32 2), align 8
+  store ptr @g.0, ptr getelementptr inbounds nuw (%alloc.Allocator, ptr @g.0, i32 0, i32 3), align 8
+  ret ptr @g.0
 }
 
 define internal i64 @alloc.oom() {
@@ -1712,10 +1713,10 @@ entry:
 
 define internal ptr @hashmap.scalar-keyops__i64() {
 entry:
-  store ptr @hashmap.bytewise-hash, ptr @g.3, align 8
-  store ptr @hashmap.bytewise-eq, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.3, i32 0, i32 1), align 8
-  store i64 8, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.3, i32 0, i32 2), align 8
-  ret ptr @g.3
+  store ptr @hashmap.bytewise-hash, ptr @g.1, align 8
+  store ptr @hashmap.bytewise-eq, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.1, i32 0, i32 1), align 8
+  store i64 8, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.1, i32 0, i32 2), align 8
+  ret ptr @g.1
 }
 
 define internal %coil.core.Result__i64__io.IoError @io.fb-write(ptr %ctx, ptr %buf, i64 %len) {
@@ -1812,12 +1813,14 @@ else:                                             ; preds = %entry
   ret %coil.core.Result__i64__io.IoError %sum10
 }
 
-define internal ptr @io.fd-reader(i64 %fd) {
+define internal ptr @io.fd-reader(ptr %r, i64 %fd) {
 entry:
-  store ptr @io.fd-read, ptr @g.4, align 8
+  %field = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 0
+  store ptr @io.fd-read, ptr %field, align 8
+  %field1 = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 1
   %inttoptr = inttoptr i64 %fd to ptr
-  store ptr %inttoptr, ptr getelementptr inbounds nuw (%io.Reader, ptr @g.4, i32 0, i32 1), align 8
-  ret ptr @g.4
+  store ptr %inttoptr, ptr %field1, align 8
+  ret ptr %r
 }
 
 define internal %coil.core.Result__i64__io.IoError @io.fd-write(ptr %ctx, ptr %buf, i64 %len) {
@@ -1856,21 +1859,25 @@ else:                                             ; preds = %entry
   ret %coil.core.Result__i64__io.IoError %sum10
 }
 
-define internal ptr @io.fd-writer(i64 %fd) {
+define internal ptr @io.fd-writer(ptr %w, i64 %fd) {
 entry:
-  store ptr @io.fd-write, ptr @g.5, align 8
+  %field = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 0
+  store ptr @io.fd-write, ptr %field, align 8
+  %field1 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 1
   %inttoptr = inttoptr i64 %fd to ptr
-  store ptr %inttoptr, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.5, i32 0, i32 1), align 8
-  ret ptr @g.5
+  store ptr %inttoptr, ptr %field1, align 8
+  ret ptr %w
 }
 
-define internal ptr @io.fixed-buffer-writer(ptr %fb) {
+define internal ptr @io.fixed-buffer-writer(ptr %w, ptr %fb) {
 entry:
   %field = getelementptr inbounds nuw %io.FixBuf, ptr %fb, i32 0, i32 1
   store i64 0, ptr %field, align 8
-  store ptr @io.fb-write, ptr @g.6, align 8
-  store ptr %fb, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.6, i32 0, i32 1), align 8
-  ret ptr @g.6
+  %field1 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 0
+  store ptr @io.fb-write, ptr %field1, align 8
+  %field2 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 1
+  store ptr %fb, ptr %field2, align 8
+  ret ptr %w
 }
 
 define internal %coil.core.Result__i64__io.IoError @io.null-write(ptr %ctx, ptr %buf, i64 %len) {
@@ -1887,9 +1894,9 @@ entry:
 
 define internal ptr @io.null-writer() {
 entry:
-  store ptr @io.null-write, ptr @g.7, align 8
-  store ptr null, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.7, i32 0, i32 1), align 8
-  ret ptr @g.7
+  store ptr @io.null-write, ptr @g.2, align 8
+  store ptr null, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.2, i32 0, i32 1), align 8
+  ret ptr @g.2
 }
 
 define internal %coil.core.Result__i64__io.IoError @io.print-cstr(ptr %w, ptr %s) {
@@ -1941,22 +1948,20 @@ entry:
 
 define internal ptr @io.stderr() {
 entry:
-  store ptr @io.fd-write, ptr @g.8, align 8
-  store ptr inttoptr (i64 2 to ptr), ptr getelementptr inbounds nuw (%io.Writer, ptr @g.8, i32 0, i32 1), align 8
-  ret ptr @g.8
+  %call = call ptr @io.fd-writer(ptr @g.3, i64 2)
+  ret ptr %call
 }
 
 define internal ptr @io.stdin() {
 entry:
-  %call = call ptr @io.fd-reader(i64 0)
+  %call = call ptr @io.fd-reader(ptr @g.4, i64 0)
   ret ptr %call
 }
 
 define internal ptr @io.stdout() {
 entry:
-  store ptr @io.fd-write, ptr @g.9, align 8
-  store ptr inttoptr (i64 1 to ptr), ptr getelementptr inbounds nuw (%io.Writer, ptr @g.9, i32 0, i32 1), align 8
-  ret ptr @g.9
+  %call = call ptr @io.fd-writer(ptr @g.5, i64 1)
+  ret ptr %call
 }
 
 define internal %coil.core.Result__i64__io.IoError @io.write-all(ptr %w, ptr %buf, i64 %len) {

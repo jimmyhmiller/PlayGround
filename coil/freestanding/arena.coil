@@ -25,7 +25,9 @@ ret i64 0"))
 
 (defn start [] (-> i64)
   (let [buf (alloc-static (array u8 4096))
-        a   (arena-over-buffer (cast (ptr i8) (index buf 0)) 4096)   ; stdlib arena, no malloc
+        ; the arena's own state is ours: one static per arena, at our call site.
+        a   (arena-over-buffer (alloc-static Arena) (alloc-static Allocator)
+                               (cast (ptr i8) (index buf 0)) 4096)   ; stdlib arena, no malloc
         p   (unwrap-ptr [i64] (create [i64] a))]                      ; allocate an i64 from it
     (store! p 42)
     (uart-str c"stdlib arena on bare metal: " 28)
