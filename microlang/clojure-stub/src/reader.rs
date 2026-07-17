@@ -309,11 +309,11 @@ impl Parser {
                 }
             }
             Tok::ReaderCond => {
-                // `#?(:platform form :platform form …)`. This dialect is JVM-free
-                // like ClojureScript, so we prefer the `:cljs` branch (its forms
-                // avoid Java interop that the `:clj` branch uses), then `:default`,
-                // then `:clj`, else the first form. All branches are READ (harmless)
-                // but only the selected one is kept.
+                // `#?(:platform form :platform form …)`. This dialect models the JVM, so it
+                // selects the `:clj` branch — see `select_reader_cond`. (It used to prefer
+                // `:cljs`, from before the JVM layer existed.) All branches are READ
+                // (harmless); only the selected one is kept.
+                
                 match self.toks.get(self.pos) {
                     Some(Tok::Open('(')) => self.pos += 1,
                     _ => panic!("reader: #? must be followed by `(`"),
@@ -366,8 +366,22 @@ impl Parser {
     /// Pick a reader-conditional branch from `[kw form kw form …]`. Priority:
     /// `:cljs` (JVM-free, like us), then `:default`, then `:clj`; if no platform
     /// matches, the form vanishes (reads as `nil`).
+    /// `:clj` first, then `:default` — the platform order JVM Clojure itself
+    /// uses.
+    ///
+    /// This preferred `:cljs` back when the dialect had no JVM layer. It has
+    /// one now (`java.lang.System`, `clojure.lang.*`, `defclass`), it resolves
+    /// `deps.edn` Maven coordinates, and the goal is a drop-in for JVM Clojure
+    /// — so a `.cljc` library's `:cljs` branch is the wrong half: it targets a
+    /// host we are not (`js/…`, `goog`, `cljs.pprint`). meander/epsilon fails
+    /// to load for exactly that reason: its `:cljs` branch requires
+    /// `cljs.pprint`.
+    ///
+    /// `:cljs` is NOT in the list at all: selecting it would mean claiming to be
+    /// a JavaScript host, and a library that offers only a `:cljs` branch has
+    /// nothing to run here.
     fn select_reader_cond<M: ValueModel>(&mut self, rt: &mut Runtime<M>, items: &[u64]) -> u64 {
-        for pref in ["cljs", "default", "clj"] {
+        for pref in ["clj", "default"] {
             let mut i = 0;
             while i + 1 < items.len() {
                 if kw_name(rt, items[i]).as_deref() == Some(pref) {

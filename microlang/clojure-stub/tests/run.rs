@@ -1317,6 +1317,27 @@ fn real_core_match_end_to_end() {
     );
 }
 
+/// `#?(…)` selects the `:clj` branch — this dialect models the JVM.
+///
+/// It preferred `:cljs` (from before the JVM layer existed), which is the wrong
+/// half of every real `.cljc` library: that branch targets a host we are not.
+/// meander/epsilon could not load because its `:cljs` branch requires
+/// `cljs.pprint`. There was no test for this at all, which is how it went
+/// unnoticed.
+#[test]
+fn reader_conditionals_select_clj() {
+    assert_eq!(run("#?(:clj :jvm :cljs :js)"), ":jvm");
+    assert_eq!(run("#?(:cljs :js :clj :jvm)"), ":jvm"); // order in the form must not matter
+    // :default is the fallback, but never beats an explicit :clj
+    assert_eq!(run("#?(:cljs :js :default :fallback)"), ":fallback");
+    assert_eq!(run("#?(:clj :jvm :default :fallback)"), ":jvm");
+    // a :cljs-only form has nothing to run here
+    assert_eq!(run("(nil? #?(:cljs :js))"), "true");
+    // splicing picks the same branch
+    assert_eq!(run("[1 #?@(:clj [2 3] :cljs [:no])]"), "[1 2 3]");
+    assert_eq!(run("(vec (concat [0] #?@(:cljs [[:no]] :clj [[9]])))"), "[0 9]");
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // The JVM layer (host_jvm_src): every host class/method/static is in-language
 // data (`defclass` + `-jvm-registry`); the expander lowers interop SYNTAX only.
