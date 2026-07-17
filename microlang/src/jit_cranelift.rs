@@ -1454,6 +1454,24 @@ pub trait ModelArithJit: ModelEmit {
     fn emit_eq_immediates(c: &mut Compiler, a: Value, b: Value) -> Value {
         Self::emit_both_int(c, a, b)
     }
+    /// Emit a TAGGED add/sub of two words already known to be immediate ints,
+    /// with a branch-ready "overflowed the fixnum range" bool — or `None` if this
+    /// model has no such shortcut (callers then untag, operate, range-check and
+    /// retag).
+    ///
+    /// A model whose int tag is a zero-valued LOW field can do this directly: the
+    /// tagged words ARE `v << k`, so `(a<<k) + (b<<k) == (a+b)<<k` — already
+    /// tagged, no untag and no retag — and the i64 signed overflow of that add is
+    /// EXACTLY the fixnum-range check, because the sum fits in `64-k` bits signed
+    /// iff the shifted sum fits in i64. The two-sided range compare is redundant.
+    fn emit_tagged_addsub_checked(
+        _c: &mut Compiler,
+        _a: Value,
+        _b: Value,
+        _is_sub: bool,
+    ) -> Option<(Value, Value)> {
+        None
+    }
     /// Emit: the signed i64 VALUE of immediate int `v` (untagged).
     fn emit_untag(c: &mut Compiler, v: Value) -> Value;
     /// Emit: encode signed i64 `x` back into an immediate int word.
@@ -1513,6 +1531,29 @@ impl ModelArithJit for crate::model::LowBitModel {
         let tb = c.fb.ins().band_imm(b, 0b111);
         let nb = c.fb.ins().icmp_imm(IntCC::NotEqual, tb, 0b001);
         c.fb.ins().band(na, nb)
+    }
+    fn emit_tagged_addsub_checked(
+        c: &mut Compiler,
+        a: Value,
+        b: Value,
+        is_sub: bool,
+    ) -> Option<(Value, Value)> {
+        // LB_INT is 0b000, so a tagged fixnum IS `v << 3` and the tagged words add
+        // directly: the result carries the right tag with no shifting either way.
+        let r = if is_sub { c.fb.ins().isub(a, b) } else { c.fb.ins().iadd(a, b) };
+        // Signed i64 overflow, which here IS the fixnum-range check (FIXNUM_MAX is
+        // 2^60-1 and 8*(2^60-1) is i64::MAX-7): the operands' signs agree with each
+        // other and disagree with the result's.
+        //   add: (a ^ r) & (b ^ r) < 0
+        //   sub: (a ^ b) & (a ^ r) < 0
+        let (x, y) = if is_sub {
+            (c.fb.ins().bxor(a, b), c.fb.ins().bxor(a, r))
+        } else {
+            (c.fb.ins().bxor(a, r), c.fb.ins().bxor(b, r))
+        };
+        let both = c.fb.ins().band(x, y);
+        let ovf = c.fb.ins().icmp_imm(IntCC::SignedLessThan, both, 0);
+        Some((r, ovf))
     }
     fn emit_untag(c: &mut Compiler, v: Value) -> Value {
         c.fb.ins().sshr_imm(v, 3) // arithmetic shift drops the tag, keeps sign
@@ -5006,16 +5047,30 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.ins().jump(merge, &[]);
             }
             Prim::Add | Prim::Sub => {
-                // Both operands are < 2^60, so the i64 op can't overflow i64; it
-                // only needs a fixnum-range check.
-                let x = M::emit_untag(self, a);
-                let y = M::emit_untag(self, b);
-                let r = if let Prim::Add = op {
-                    self.fb.ins().iadd(x, y)
+                let is_sub = matches!(op, Prim::Sub);
+                if let Some((r, ovf)) = M::emit_tagged_addsub_checked(self, a, b, is_sub) {
+                    // Tagged add + one overflow test: no untag, no retag, no
+                    // two-sided range compare. (See emit_tagged_addsub_checked —
+                    // the disassembly of `(loop [i 0] (if (< i n) (recur (inc i)) i))`
+                    // spent more on the range check than on the loop.)
+                    let ok = self.fb.create_block();
+                    self.fb.ins().brif(ovf, slow, &[], ok, &[]);
+                    self.fb.switch_to_block(ok);
+                    self.fb.seal_block(ok);
+                    self.fb.def_var(result, r);
+                    self.fb.ins().jump(merge, &[]);
                 } else {
-                    self.fb.ins().isub(x, y)
-                };
-                self.emit_range_check_and_retag::<M>(r, result, slow, merge);
+                    // Both operands are < 2^60, so the i64 op can't overflow i64; it
+                    // only needs a fixnum-range check.
+                    let x = M::emit_untag(self, a);
+                    let y = M::emit_untag(self, b);
+                    let r = if let Prim::Add = op {
+                        self.fb.ins().iadd(x, y)
+                    } else {
+                        self.fb.ins().isub(x, y)
+                    };
+                    self.emit_range_check_and_retag::<M>(r, result, slow, merge);
+                }
             }
             Prim::Mul => {
                 // The product of two 61-bit values can exceed i64; widen to i128,
