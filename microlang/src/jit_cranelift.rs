@@ -890,6 +890,14 @@ extern "C" fn shim_gc<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
 /// memory. Fast bodies' roots live in the stack maps, and memory-mode bodies'
 /// frames ride the dynamic env chain (`run_ctx_entry` pushes them), so the
 /// safepoint needs no locals of its own.
+/// Take the pending signal and hand back its carried value. Only ever reached on
+/// the throwing edge of an INLINED `try`, so it costs nothing on the normal path.
+extern "C" fn shim_take_signal<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.take_signal().value
+}
+
 extern "C" fn shim_safepoint<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
@@ -1273,6 +1281,7 @@ struct Shims {
     await_: FuncId,
     gc: FuncId,
     safepoint: FuncId,
+    take_signal: FuncId,
     // Stage F2 monomorphic collection shims.
     pv_conj: FuncId,
     pv_nth: FuncId,
@@ -1309,6 +1318,7 @@ struct ShimRefs {
     await_: cranelift_codegen::ir::FuncRef,
     gc: cranelift_codegen::ir::FuncRef,
     safepoint: cranelift_codegen::ir::FuncRef,
+    take_signal: cranelift_codegen::ir::FuncRef,
     pv_conj: cranelift_codegen::ir::FuncRef,
     pv_nth: cranelift_codegen::ir::FuncRef,
     pv_assoc: cranelift_codegen::ir::FuncRef,
@@ -2007,6 +2017,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let awt: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_await::<M>;
         let gcf: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_gc::<M>;
         let sfp: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_safepoint::<M>;
+        let tsg: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_take_signal::<M>;
         let pvc: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_pv_conj::<M>;
         let pvn: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_pv_nth::<M>;
         let pva: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_pv_assoc::<M>;
@@ -2038,6 +2049,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         builder.symbol("ml_await", awt as *const u8);
         builder.symbol("ml_gc", gcf as *const u8);
         builder.symbol("ml_safepoint", sfp as *const u8);
+        builder.symbol("ml_take_signal", tsg as *const u8);
         builder.symbol("ml_pv_conj", pvc as *const u8);
         builder.symbol("ml_pv_nth", pvn as *const u8);
         builder.symbol("ml_pv_assoc", pva as *const u8);
@@ -2111,6 +2123,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             await_: decl(&mut module, "ml_await", &s_await),
             gc: decl(&mut module, "ml_gc", &s_gc),
             safepoint: decl(&mut module, "ml_safepoint", &s_gc),
+            take_signal: decl(&mut module, "ml_take_signal", &s_gc),
             pv_conj: decl(&mut module, "ml_pv_conj", &s_v2),
             pv_nth: decl(&mut module, "ml_pv_nth", &s_v2),
             pv_assoc: decl(&mut module, "ml_pv_assoc", &s_v3),
@@ -2887,6 +2900,7 @@ fn build_body<M: ModelArithJit>(
         await_: module.declare_func_in_func(shims.await_, fb.func),
         gc: module.declare_func_in_func(shims.gc, fb.func),
         safepoint: module.declare_func_in_func(shims.safepoint, fb.func),
+        take_signal: module.declare_func_in_func(shims.take_signal, fb.func),
         pv_conj: module.declare_func_in_func(shims.pv_conj, fb.func),
         pv_nth: module.declare_func_in_func(shims.pv_nth, fb.func),
         pv_assoc: module.declare_func_in_func(shims.pv_assoc, fb.func),
@@ -2933,6 +2947,7 @@ fn build_body<M: ModelArithJit>(
         loop_nparams: shape.nparams,
         vars: Vec::new(),
         fence_shims: false, // set below once the loop shape is known
+        catch_handlers: Vec::new(),
         inline_outer_vars: Vec::new(),
         inline_ctx: Vec::new(),
         spec,
@@ -3072,6 +3087,11 @@ pub struct Compiler<'a, 'b> {
     /// when set): true for pure self-loop bodies, whose variables then never
     /// cross an unfenced call and stay in registers. See `body_pure_loop`.
     fence_shims: bool,
+    /// Innermost INLINED `try`'s handler block, if any. A pending signal inside
+    /// the body branches HERE instead of returning out of the compiled body —
+    /// which is what lets the try be straight-line code rather than a separate
+    /// body reached through a shim + trampoline.
+    catch_handlers: Vec<Block>,
     /// The ENCLOSING frames' variables while a speculative inline is being
     /// spliced (`emit_inlined_body` swaps `vars`): `spill_roots` must keep
     /// copy-spilling the outer locals around calls inside the inlined region,
@@ -3244,14 +3264,24 @@ impl<'a, 'b> Compiler<'a, 'b> {
             rt_ptr,
             self.signal_kind_off,
         );
-        let ret_b = self.fb.create_block();
         let cont_b = self.fb.create_block();
-        // `result` is computed in the current (dominating) block, so it is live in
-        // both successors — no block params needed.
-        self.fb.ins().brif(kind, ret_b, &[], cont_b, &[]);
-        self.fb.switch_to_block(ret_b);
-        self.fb.seal_block(ret_b);
-        self.fb.ins().return_(&[result]);
+        // Inside an INLINED `try`, a pending signal is that try's business: branch
+        // to its handler rather than returning out of the whole body. Outside one,
+        // return early and let whoever checks `pending()` deal with it.
+        match self.catch_handlers.last().copied() {
+            Some(h) => {
+                self.fb.ins().brif(kind, h, &[], cont_b, &[]);
+            }
+            None => {
+                let ret_b = self.fb.create_block();
+                // `result` is computed in the current (dominating) block, so it is
+                // live in both successors — no block params needed.
+                self.fb.ins().brif(kind, ret_b, &[], cont_b, &[]);
+                self.fb.switch_to_block(ret_b);
+                self.fb.seal_block(ret_b);
+                self.fb.ins().return_(&[result]);
+            }
+        }
         self.fb.switch_to_block(cont_b);
         self.fb.seal_block(cont_b);
         result
@@ -4985,6 +5015,109 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // try/catch/finally: pass the body/catch/finally Ir by pointer (they
             // outlive the compiled code) and let the shim run them via `top` under
             // a catch_unwind — so the whole construct is one shim call.
+            // `(try body (catch e h))` with NO finally — emitted INLINE.
+            //
+            // `throw` is a signal FLAG, not an unwind, so a try needs no machinery:
+            // run the body, and if a throw is pending, bind it and run the handler.
+            // The only thing that forced the old shape — each arm compiled as its
+            // own body, reached through a shim + trampoline + frame — was that a
+            // pending check RETURNS out of the compiled body. `catch_handlers`
+            // redirects those to the handler block instead, so the whole construct
+            // is straight-line code plus a branch.
+            //
+            // It measured 65ns for a try that never throws (the JVM: free — its
+            // exception tables cost nothing until something throws). core.match
+            // wraps EVERY clause in one.
+            //
+            // `finally` keeps the shim: it has to run on both edges while carrying
+            // a suspended signal across arbitrary code, which is real work and not
+            // what the hot path needs. A wrapped backend (Traced/Tiered) also keeps
+            // the shim — an inlined arm is invisible to `top`, the same rule the
+            // other inliners follow via `direct`.
+            Ir::Try { body, catch: Some(catch), finally: None, cslot, site }
+                if self.mem_mode =>
+            {
+                let result = self.declare_root_var();
+                let handler = self.fb.create_block();
+                let merge = self.fb.create_block();
+                let ro = MemFlagsData::trusted().with_readonly();
+                let rc = self.rc_val;
+                let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
+                let inl = self.fb.create_block();
+                let shimb = self.fb.create_block();
+                self.fb.ins().brif(direct, inl, &[], shimb, &[]);
+
+                // ── inline ──
+                self.fb.switch_to_block(inl);
+                self.fb.seal_block(inl);
+                self.catch_handlers.push(handler);
+                let bv = self.compile::<M>(body, false);
+                self.catch_handlers.pop();
+                self.fb.def_var(result, bv);
+                self.fb.ins().jump(merge, &[]);
+
+                // ── a signal is pending: catch a THROW, propagate anything else ──
+                self.fb.switch_to_block(handler);
+                self.fb.seal_block(handler);
+                let rtp = self.load_rc_field(self.off_rt);
+                let kind = self.fb.ins().load(
+                    I8,
+                    MemFlagsData::trusted(),
+                    rtp,
+                    self.signal_kind_off,
+                );
+                // kind 1 = throw; 2 = escape continuation, which a `catch` must NOT
+                // intercept.
+                let is_throw = self.fb.ins().icmp_imm(IntCC::Equal, kind, 1);
+                let do_catch = self.fb.create_block();
+                let propagate = self.fb.create_block();
+                self.fb.ins().brif(is_throw, do_catch, &[], propagate, &[]);
+
+                self.fb.switch_to_block(do_catch);
+                self.fb.seal_block(do_catch);
+                let ctxv = self.ctx_val;
+                let thrown = self.call_shim(self.refs.take_signal, &[ctxv]);
+                // `flatten` re-homed the catch binding to a slot of THIS frame.
+                self.emit_local0_store(*cslot, thrown);
+                let cv = self.compile::<M>(catch, false);
+                self.fb.def_var(result, cv);
+                self.fb.ins().jump(merge, &[]);
+
+                // Not ours: leave it pending and unwind as a pending check would.
+                self.fb.switch_to_block(propagate);
+                self.fb.seal_block(propagate);
+                match self.catch_handlers.last().copied() {
+                    Some(outer) => {
+                        self.fb.ins().jump(outer, &[]);
+                    }
+                    None => {
+                        let nilv = self.iconst(M::R::enc_nil());
+                        self.fb.ins().return_(&[nilv]);
+                    }
+                }
+
+                // ── shim (a wrapper is observing) ──
+                self.fb.switch_to_block(shimb);
+                self.fb.seal_block(shimb);
+                let bp = (&**body as *const Ir) as i64;
+                let cp = (&**catch as *const Ir) as i64;
+                let bpv = self.fb.ins().iconst(I64, bp);
+                let cpv = self.fb.ins().iconst(I64, cp);
+                let fpv = self.fb.ins().iconst(I64, 0);
+                let csv = self.i32const(*cslot as u32);
+                // The REAL site: the arm cache is keyed by it, and a shared key is
+                // how distinct tries silently answered for each other before.
+                let sitev = self.fb.ins().iconst(I64, *site as i64);
+                let ctx = self.ctx_val;
+                let sv =
+                    self.call_shim_checked(self.refs.try_, &[ctx, bpv, cpv, fpv, csv, sitev]);
+                self.fb.def_var(result, sv);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
             Ir::Try { body, catch, finally, cslot, site } => {
                 let bp = (&**body as *const Ir) as i64;
                 let cp = catch.as_deref().map_or(std::ptr::null::<Ir>(), |c| c as *const Ir) as i64;
