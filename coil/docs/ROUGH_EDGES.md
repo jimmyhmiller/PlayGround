@@ -283,7 +283,7 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
 
 ## Batch 12 — Diagnostic quality (the typechecker is already the best part)
 
-- [ ] **diag-7** Non-exhaustive match counts missing variants but never names them — the compiler
+- [x] **diag-7** Non-exhaustive match counts missing variants but never names them — the compiler
       computed the set to produce the count. Cheapest large win available.
 - [ ] **diag-6** No "did you mean", and no "you forgot to import" hint — *even though the stdlib is
       bundled inside the compiler and its export tables are a static lookup*.

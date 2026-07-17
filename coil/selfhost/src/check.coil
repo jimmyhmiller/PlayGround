@@ -2024,6 +2024,23 @@
     (load r)))
 (defn covered-has [(cov (ptr (ArrayList (slice u8)))) (name (slice u8))] (-> bool) (set-contains cov name))
 
+; the variant names in `variants` not present in `covered`, formatted as
+; "`Blue`" / "`Blue`, `Yellow`" / "`Blue`, `Yellow`, `Cyan` … and 4 more".
+(defn missing-variants-str [(a (ptr Allocator)) (variants (ptr (ArrayList Variant))) (covered (ptr (ArrayList (slice u8))))] (-> (slice u8))
+  (let [n (al-len [Variant] (load variants)) (mut i) 0 (mut out) "" (mut shown) 0 (mut extra) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [nm (load (field (al-elem [Variant] variants (load i)) name))]
+            (if (set-contains covered nm) 0
+              (if (icmp-lt (load shown) 5)
+                  (do (if (icmp-gt (load shown) 0) (do (store! out (sconcat a (load out) ", ")) 0) 0)
+                      (store! out (sconcat a (load out) (sconcat3 a "`" nm "`")))
+                      (store! shown (iadd (load shown) 1)) 0)
+                (store! extra (iadd (load extra) 1)))))
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-gt (load extra) 0)
+        (sconcat a (load out) (sconcat3 a " … and " (i64->str a (load extra)) " more"))
+      (load out))))
+
 (defn match-arms-loop [(a (ptr Allocator)) (arms (ptr (ArrayList Arm))) (variants (ptr (ArrayList Variant))) (sumname (slice u8)) (expected (ptr Type)) (covered (ptr (ArrayList (slice u8)))) (checked (ptr (ArrayList Arm))) (synb (ptr (ArrayList Branch))) (metav (ptr (ArrayList (slice u8)))) (metab (ptr (ArrayList (ptr (ArrayList (slice u8)))))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result i64 Diag))
   (let [narms (al-len [Arm] (load arms)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) narms) (break)
@@ -2083,7 +2100,10 @@
                   metab (box-al [(ptr (ArrayList (slice u8)))] a (al-new [(ptr (ArrayList (slice u8)))] a))]
               (try! (match-arms-loop a arms variants sumname expected covered checked synb metav metab env cx tps fname))
               (if (not (icmp-eq (al-len [(slice u8)] (load covered)) (al-len [Variant] (load variants))))
-                  (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': non-exhaustive match on '" (sconcat a sumname "' (")) (i64->str a (al-len [(slice u8)] (load covered)))) " of ") (i64->str a (al-len [Variant] (load variants)))) " variants)")))) 0)
+                  ; the exhaustiveness check already knows WHICH variants are uncovered —
+                  ; name them instead of just counting. For a 20-variant sum, "18 of 20"
+                  ; told you nothing you didn't already know.
+                  (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat4 a "in '" fname "': non-exhaustive match on '" (sconcat a sumname "': ")) (missing-variants-str a variants covered)) " not covered")))) 0)
               (if (expected-some? expected)
                   (ok-ep (mk-expr (EMatch (load se) checked) elo ehi esrc ectxt) (load expected))
                 (let [outl (box-al [Expr] a (al-new [Expr] a))
