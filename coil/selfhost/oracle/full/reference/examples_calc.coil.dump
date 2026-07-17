@@ -342,9 +342,51 @@ else3:                                            ; preds = %else
   ret i1 true
 }
 
+define internal i1 @"coil.core.Eq$i16$="(i16 %a, i16 %b) {
+entry:
+  %cmp = icmp eq i16 %a, %b
+  ret i1 %cmp
+}
+
+define internal i1 @"coil.core.Eq$i32$="(i32 %a, i32 %b) {
+entry:
+  %cmp = icmp eq i32 %a, %b
+  ret i1 %cmp
+}
+
 define internal i1 @"coil.core.Eq$i64$="(i64 %a, i64 %b) {
 entry:
   %cmp = icmp eq i64 %a, %b
+  ret i1 %cmp
+}
+
+define internal i1 @"coil.core.Eq$i8$="(i8 %a, i8 %b) {
+entry:
+  %cmp = icmp eq i8 %a, %b
+  ret i1 %cmp
+}
+
+define internal i1 @"coil.core.Eq$u16$="(i16 %a, i16 %b) {
+entry:
+  %cmp = icmp eq i16 %a, %b
+  ret i1 %cmp
+}
+
+define internal i1 @"coil.core.Eq$u32$="(i32 %a, i32 %b) {
+entry:
+  %cmp = icmp eq i32 %a, %b
+  ret i1 %cmp
+}
+
+define internal i1 @"coil.core.Eq$u64$="(i64 %a, i64 %b) {
+entry:
+  %cmp = icmp eq i64 %a, %b
+  ret i1 %cmp
+}
+
+define internal i1 @"coil.core.Eq$u8$="(i8 %a, i8 %b) {
+entry:
+  %cmp = icmp eq i8 %a, %b
   ret i1 %cmp
 }
 
