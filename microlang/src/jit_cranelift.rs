@@ -1773,6 +1773,15 @@ const DISPATCH_IC_EMPTY: DispatchIcEntry = DispatchIcEntry { epoch: 0, ty: u64::
 const TEMPLATE_CODE_CAP: usize = 1 << 20;
 const DISPATCH_SITE_CAP: usize = 1 << 17;
 
+/// InstanceCheck cache key tag for a NON-record reference receiver. A record's
+/// key is its type Sym (a `u32`, so it occupies bits 0..31); a non-record ref's
+/// key is its header kind byte (bits 0..15) OR'd with this bit, keeping the two
+/// key-spaces provably disjoint (and both disjoint from the `u64::MAX` empty
+/// sentinel). The kind byte is injective on the built-in type, and `instance?`'s
+/// answer depends only on the receiver's type — so all values of one kind share
+/// one correct cached bool.
+const INSTANCE_NONREC_KEY_BIT: u64 = 1 << 40;
+
 /// The dispatch-IC epoch: the same fold `Runtime::resolve_or_default` uses for
 /// its own per-site cache (relocation count mixed with the registry version).
 fn dispatch_epoch(reloc: u64, ver: u64) -> u64 {
@@ -5016,12 +5025,16 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let result = self.declare_root_var();
                 let merge = self.fb.create_block();
                 // The authoritative slow path: call the real `-instance-val`.
-                // Reached on a non-record receiver, a cache miss, or a wrapped
-                // backend — so the answer is ALWAYS the function's.
+                // Reached on a non-ref (immediate) receiver, a cache miss, or a
+                // wrapped backend — so the answer is ALWAYS the function's.
                 let slowb = self.fb.create_block();
 
-                // Only a RECORD receiver (map / vector / defrecord — the common
-                // instance? targets) uses the cache; everything else is the shim.
+                // ANY reference receiver uses the cache: a record keys on its
+                // type Sym (+8), every other kind keys on its header kind byte
+                // (see `INSTANCE_NONREC_KEY_BIT`). Only immediates (Long / nil /
+                // interned keyword — no header to read) and wrapped backends take
+                // the shim. This is what lets core.match's string / list / seq
+                // receivers hit the cache instead of re-running `satisfies?`.
                 let (is_ref, addr) = M::emit_ref_addr(self, xv);
                 let rc = self.rc_val;
                 let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
@@ -5034,13 +5047,29 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let hdr = self.fb.ins().load(I64, flags, addr, 0);
                 let tid = self.fb.ins().band_imm(hdr, 0xffff);
                 let is_rec = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::RECORD as i64);
+                // `cacheb` takes the cache key `ty` as a block param, filled by
+                // the record / non-record edges below so it never reads +8 on an
+                // object that may be header-only.
                 let cacheb = self.fb.create_block();
-                self.fb.ins().brif(is_rec, cacheb, &[], slowb, &[]);
+                let ty = self.fb.append_block_param(cacheb, I64);
+                let recty = self.fb.create_block();
+                let nonrecty = self.fb.create_block();
+                self.fb.ins().brif(is_rec, recty, &[], nonrecty, &[]);
+
+                // ── record: the type sym IS its raw word at +8 ──
+                self.fb.switch_to_block(recty);
+                self.fb.seal_block(recty);
+                let tyr = self.fb.ins().load(I64, flags, addr, 8);
+                self.fb.ins().jump(cacheb, &[tyr.into()]);
+
+                // ── other ref kind: key on the header kind byte, tagged ──
+                self.fb.switch_to_block(nonrecty);
+                self.fb.seal_block(nonrecty);
+                let tyn = self.fb.ins().bor_imm(tid, INSTANCE_NONREC_KEY_BIT as i64);
+                self.fb.ins().jump(cacheb, &[tyn.into()]);
 
                 self.fb.switch_to_block(cacheb);
                 self.fb.seal_block(cacheb);
-                // The record's type sym IS its raw word at +8.
-                let ty = self.fb.ins().load(I64, flags, addr, 8);
                 // The cached bool depends only on the receiver type (`ty`) and the
                 // dispatch VERSION — never on GC relocation (see `instance_epoch` /
                 // `shim_instance_fill`). So the epoch is the dispatch version alone;
@@ -5078,7 +5107,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.def_var(result, r0);
                 self.fb.ins().jump(merge, &[]);
 
-                // ── slow: non-record / non-direct — just call -instance-val ──
+                // ── slow: immediate receiver / non-direct — call -instance-val ──
                 self.fb.switch_to_block(slowb);
                 self.fb.seal_block(slowb);
                 let base2 = self.load_rc_field(self.off_global_base);
