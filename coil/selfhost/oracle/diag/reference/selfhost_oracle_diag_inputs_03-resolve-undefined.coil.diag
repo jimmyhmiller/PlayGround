@@ -1,1 +1,5 @@
-error: in module 'm': call to undefined function 'nonexistent-fn'
+error: in 'main': call to undefined function 'nonexistent-fn'
+  --> selfhost/oracle/diag/inputs/03-resolve-undefined.coil:2:24
+  |
+2 | (defn main [] (-> i64) (nonexistent-fn 1 2))
+  |                        ^^^^^^^^^^^^^^^^^^^^

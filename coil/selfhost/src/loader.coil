@@ -89,6 +89,13 @@
    ; All type-check body errors (build path renders every one; the dump-checked
    ; oracle still reports [0]). A heap-boxed list so the checker can push through it.
    (check_diags (ptr (ArrayList Diag)))
+   ; All RESOLVE body errors, same treatment: resolve collects per function and
+   ; continues instead of aborting the pipeline on the first, so a batch of mistakes
+   ; is reported in one pass (the checker already did this; resolve did not). The
+   ; qualified names of functions whose BODY failed to resolve — the checker skips
+   ; their bodies but keeps their SIGNATURES in the table, so callers don't cascade.
+   (resolve_diags    (ptr (ArrayList Diag)))
+   (resolve_poisoned (ptr (ArrayList (slice u8))))
    ; The loader's first error, as a framed Diag (src/macros.rs returns Result<_,
    ; Diag>). Threaded via a slot (not a Result return) so the loop-heavy loader
    ; keeps its i64 signatures; set once, then process-forms/-import bail early and

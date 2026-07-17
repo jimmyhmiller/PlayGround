@@ -44,7 +44,12 @@
    ; the function whose body is being qualified, so a resolve error can name it the
    ; way the checker's identical error already does ("in 'big.buried'") instead of
    ; naming the module. Empty outside a function body (const/meta/assert).
-   (fname (slice u8))])
+   (fname (slice u8))
+   ; the collect-and-continue sink for recoverable body errors: every diagnostic, and
+   ; the qualified names of the functions whose bodies failed (so the checker skips
+   ; them). Shared across modules — resolve-program allocates them once.
+   (diags    (ptr (ArrayList Diag)))
+   (poisoned (ptr (ArrayList (slice u8))))])
 
 ; The merged output program, sections as BY-VALUE ArrayLists so merge can push.
 (defstruct Out
@@ -501,25 +506,35 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 
-(defn qualify-one-func [(c (ptr Ctx)) (fp (ptr Func))] (-> (Result i64 Diag))
+; The SIGNATURE (name, cc, bounds, param/return types). An error here is FATAL: an
+; unqualified name or a bad type corrupts the shared tables the checker reads, so
+; continuing past it cascades. These abort the pipeline as before.
+(defn qualify-func-sig [(c (ptr Ctx)) (fp (ptr Func))] (-> (Result i64 Diag))
   (let [a (load (field c a)) m (load (field c m)) tps (load (field fp type_params))]
     (try
       (do
         (if (not (str-eq (load (field fp name)) "main"))
             (do (store! (field fp name) (sconcat3 a m "." (load (field fp name)))) 0) 0)
-        ; record whose body we are about to qualify, so an error inside it can name the
-        ; function. Set AFTER qualification so it reads the same as the checker's ('big.buried').
-        (store! (field c fname) (load (field fp name)))
         (store! (field fp cc) (try! (resolve c (load (field fp cc)) 3)))
         (try! (qualify-bound-list c (load (field fp bounds))))
         (try! (qualify-param-types c (load (field fp params)) tps))
         (try! (qualify-type c (field fp ret) tps))
+        (Ok 0)))))
+
+; The BODY. An error here is RECOVERABLE: one function's body cannot corrupt another,
+; so q-funcs collects it and moves on, and the checker skips this body while keeping
+; the (already-resolved) signature. `fname` names the enclosing function in any error.
+(defn qualify-func-body [(c (ptr Ctx)) (fp (ptr Func))] (-> (Result i64 Diag))
+  (let [tps (load (field fp type_params))]
+    (try
+      (do
+        (store! (field c fname) (load (field fp name)))
         (try! (qualify-expr-list c (load (field fp body)) tps))
-        ; leave the body: a later const/meta/assert error must not claim to be inside
-        ; this function. (An error inside the body returns early via try!, which is fine
-        ; — the diagnostic is already built by then and the pipeline stops.)
         (store! (field c fname) "")
         (Ok 0)))))
+
+(defn qualify-one-func [(c (ptr Ctx)) (fp (ptr Func))] (-> (Result i64 Diag))
+  (try (do (try! (qualify-func-sig c fp)) (try! (qualify-func-body c fp)) (Ok 0))))
 (defn qualify-one-struct [(c (ptr Ctx)) (sp (ptr StructDef))] (-> (Result i64 Diag))
   (let [a (load (field c a)) m (load (field c m)) tps (load (field sp type_params))]
     (store! (field sp name) (sconcat3 a m "." (load (field sp name))))
@@ -614,11 +629,22 @@
           (try! (qualify-impl-methods c (load (field ip methods))))
           (Ok 0)))))
 
+; SIGNATURE errors abort (fatal, corrupt shared tables); BODY errors are collected
+; into the sink and the loop continues, so a batch of undefined-function mistakes is
+; reported in ONE pass instead of one-recompile-at-a-time. The checker later skips
+; every poisoned body while keeping its resolved signature, so callers don't cascade.
 (defn q-funcs [(c (ptr Ctx)) (p (ptr Program))] (-> (Result i64 Diag))
   (let [fs (load (field p funcs)) n (al-len [Func] (load fs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
-      (do (match (qualify-one-func c (al-elem [Func] fs (load i)))
-            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+      (do (let [fp (al-elem [Func] fs (load i))]
+            (match (qualify-func-sig c fp)
+              (Err [d] (do (store! err d) (store! failed true) (break)))
+              (Ok [_]
+                (match (qualify-func-body c fp)
+                  (Err [d] (do (al-push! (mut (load (field c diags))) d)
+                               (al-push! (mut (load (field c poisoned))) (load (field fp name)))
+                               (store! (field c fname) "") 0))
+                  (Ok [_] 0)))))
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 (defn q-structs [(c (ptr Ctx)) (p (ptr Program))] (-> (Result i64 Diag))
@@ -891,10 +917,11 @@
     (store! (field pp metas) (box-al [Expr] a (load (field o metas))))
     (store! (field pp exports) (box-al [ExportC] a (load (field o exports))))
     pp))
-(defn init-ctx [(c (ptr Ctx)) (a (ptr Allocator)) (m (slice u8)) (imp (ptr ImpEntry)) (table (ptr (ArrayList DefEntry))) (exp (ptr (ArrayList ExpEntry))) (bareok (ptr (ArrayList (slice u8)))) (strict bool)] (-> i64)
+(defn init-ctx [(c (ptr Ctx)) (a (ptr Allocator)) (m (slice u8)) (imp (ptr ImpEntry)) (table (ptr (ArrayList DefEntry))) (exp (ptr (ArrayList ExpEntry))) (bareok (ptr (ArrayList (slice u8)))) (strict bool) (diags (ptr (ArrayList Diag))) (poisoned (ptr (ArrayList (slice u8))))] (-> i64)
   (store! (field c a) a) (store! (field c m) m) (store! (field c imp) imp)
   (store! (field c table) table) (store! (field c exp) exp) (store! (field c strict) strict) (store! (field c bareok) bareok)
   (store! (field c fname) "")
+  (store! (field c diags) diags) (store! (field c poisoned) poisoned)
   0)
 
 ; ---- resolve-program (src/resolve.rs::resolve_program), strict=true --------
@@ -937,14 +964,21 @@
     (if (load pfailed) (Err (load perr))
         (let [table (build-deftable a parsed) bareok (build-bareok a parsed)
               o (alloc-stack Out) np (al-len [ParsedForm] (load parsed))
+              ; the collect-and-continue sink, allocated once and shared across modules.
+              rdiags (unwrap-ptr [(ArrayList Diag)] (create [(ArrayList Diag)] a))
+              rpoison (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))
               (mut qerr) (zeroed Diag) (mut qfailed) false (mut qi) 0]
+          (store! rdiags (al-new [Diag] a))
+          (store! rpoison (al-new [(slice u8)] a))
+          (store! (field s resolve_diags) rdiags)
+          (store! (field s resolve_poisoned) rpoison)
           (init-out o a)
           (loop (if (icmp-ge (load qi) np) (break)
             (do (let [pf (al-elem [ParsedForm] parsed (load qi)) prog (load (field pf prog))]
                   (match (load (field pf module))
                     (Some [m]
                       (let [imp (imports-find impb m) cx (alloc-stack Ctx)]
-                        (init-ctx cx a m imp table expb bareok strict)
+                        (init-ctx cx a m imp table expb bareok strict rdiags rpoison)
                         (match (qualify-program cx prog)
                           (Err [d] (do (store! qerr d) (store! qfailed true) (break)))
                           (Ok [_] 0))))

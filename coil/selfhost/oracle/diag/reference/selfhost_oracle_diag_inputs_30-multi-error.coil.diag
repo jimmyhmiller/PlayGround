@@ -1,0 +1,25 @@
+error: in 'app30.g': argument 1 to 'app30.f' has type f64 but expected i64
+  --> selfhost/oracle/diag/inputs/30-multi-error.coil:3:21
+  |
+3 | (defn g [] (-> i64) (f 1.5))
+  |                     ^^^^^^^
+
+error: in 'app30.h': 'app30.f' expects 1 args, got 2
+  --> selfhost/oracle/diag/inputs/30-multi-error.coil:4:21
+  |
+4 | (defn h [] (-> i64) (f 1 2))
+  |                     ^^^^^^^
+
+error: in 'app30.i2': call to undefined function 'nosuchfn'
+  --> selfhost/oracle/diag/inputs/30-multi-error.coil:5:22
+  |
+5 | (defn i2 [] (-> i64) (nosuchfn 3))
+  |                      ^^^^^^^^^^^^
+
+error: in 'app30.j': argument 1 to 'app30.f' has type (slice u8) but expected i64
+  --> selfhost/oracle/diag/inputs/30-multi-error.coil:6:21
+  |
+6 | (defn j [] (-> i64) (f "x"))
+  |                     ^^^^^^^
+
+4 errors

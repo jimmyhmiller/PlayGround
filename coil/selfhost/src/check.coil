@@ -2577,12 +2577,26 @@
 ; ALL body errors (checking continues past a failing function) into `diags`, so the
 ; build path can render every error (`N errors`). The single-Diag return keeps the
 ; dump-checked oracle unchanged (it reports diagnostics[0]).
+; a function whose BODY failed to resolve (resolve poisoned it): its signature is in the
+; table so callers resolve, but there is no point type-checking a body full of unresolved
+; names — that only produces derivative noise on top of the resolve error already reported.
+(defn func-poisoned? [(s (mut LS)) (nm (slice u8))] (-> bool)
+  (let [pp (load (field s resolve_poisoned))]
+    (if (icmp-eq (cast i64 pp) 0) false
+      (let [n (al-len [(slice u8)] pp) (mut i) 0 (mut r) false]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (if (str-eq (al-get [(slice u8)] pp (load i)) nm) (do (store! r true) (break)) 0)
+              (store! i (iadd (load i) 1)))))
+        (load r)))))
+
 (defn check-all-funcs [(a (ptr Allocator)) (cx (ptr Cx)) (allf (ptr (ArrayList Func))) (s (mut LS))] (-> (Result (ptr (ArrayList Func)) Diag))
   (let [n (al-len [Func] (load allf)) (mut out) (al-new [Func] a) (mut dgs) (al-new [Diag] a) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
-      (do (match (check-func a cx (al-elem [Func] allf (load i)))
-            (Err [d] (al-push! (mut dgs) d))
-            (Ok [f] (al-push! (mut out) f)))
+      (do (let [fp (al-elem [Func] allf (load i))]
+            (if (func-poisoned? (mut s) (load (field fp name))) 0
+              (match (check-func a cx fp)
+                (Err [d] (al-push! (mut dgs) d))
+                (Ok [f] (al-push! (mut out) f)))))
           (store! i (iadd (load i) 1)))))
     (store! (field s check_diags) (box-al [Diag] a (load dgs)))
     (if (icmp-gt (al-len [Diag] (load dgs)) 0)

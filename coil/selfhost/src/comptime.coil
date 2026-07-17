@@ -1959,6 +1959,10 @@
         (store! (field checkls loaded) (al-new [(slice u8)] a))
         (store! (field checkls imports) (al-new [ImpEntry] a))
         (store! (field checkls exports) (al-new [ExpEntry] a))
+        ; checks a sub-program with no resolve pass — null the poison list (see expander).
+        (store! (field checkls check_diags) (box-al [Diag] a (al-new [Diag] a)))
+        (store! (field checkls resolve_diags) (cast (ptr (ArrayList Diag)) 0))
+        (store! (field checkls resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
         (match (check-program a sub (mut checkls))
           (Err [d] (Err [(ptr Program) Diag] d))
           (Ok [checked]

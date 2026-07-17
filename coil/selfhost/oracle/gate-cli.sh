@@ -114,6 +114,30 @@ echo "$out" | grep -q "never reaches a fixpoint" && ok "…and explains the grow
 } > "$T/deep.coil"
 expect_rc 5 "an 800-clause cond builds and runs (was: SIGSEGV)" "$COIL" run "$T/deep.coil"
 
+echo "== independent mistakes are reported in ONE pass, across phases =="
+# resolve used to abort on its first error, so a batch of mistakes surfaced one
+# recompile at a time — and the one that survived was the span-less resolve error.
+cat > "$T/multi.coil" <<'EOF'
+(module m)
+(defn f [(a i64)] (-> i64) a)
+(defn g [] (-> i64) (f 1.5))
+(defn h [] (-> i64) (f 1 2))
+(defn i2 [] (-> i64) (nosuchfn 3))
+(defn j [] (-> i64) (f "x"))
+(defn main [] (-> i64) 0)
+EOF
+out=$("$COIL" build "$T/multi.coil" -o "$T/x" 2>&1)
+echo "$out" | grep -q "4 errors" && ok "4 independent errors in one pass (1 resolve + 3 type)" \
+                                 || bad "multi-error report" "no '4 errors': $(echo "$out" | tail -1)"
+# a resolve error with NO type errors must still fail the build, not reach codegen
+cat > "$T/resonly.coil" <<'EOF'
+(module m)
+(defn ok [(x i64)] (-> i64) (+ x 1))
+(defn bad [] (-> i64) (nosuchfn 3))
+(defn main [] (-> i64) (ok 5))
+EOF
+expect_rc 1 "a resolve-only error still fails the build" "$COIL" build "$T/resonly.coil" -o "$T/x"
+
 echo "== object emission on the DEFAULT (LLVM) backend =="
 # Nothing else covers this: gate-full stops at emit-ir, and arm64/gate-run.sh only
 # exercises --backend arm64. So `:shim` — a naked trampoline, i.e. INLINE ASM, and the

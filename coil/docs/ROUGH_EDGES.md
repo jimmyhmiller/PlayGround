@@ -176,7 +176,7 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
       error is perfect — directly contradicting "a macro is just a function".
 - [x] **mac-9** Resolve errors in generated code get no expansion note; type errors get a great one.
 - [x] **gen-11** `derive` over a generic type fails with a leaked mangled internal name, no span.
-- [ ] **diag-8** One resolve error suppresses every typecheck error; the survivor is the unspanned one.
+- [x] **diag-8** One resolve error suppresses every typecheck error; the survivor is the unspanned one.
 
 ## Batch 6 — Bounds are parsed and thrown away
 

@@ -603,6 +603,11 @@
               (store! (field checkls loaded) (al-new [(slice u8)] a))
               (store! (field checkls imports) (al-new [ImpEntry] a))
               (store! (field checkls exports) (al-new [ExpEntry] a))
+              ; this LS checks a closure sub-program WITHOUT a resolve pass, so the
+              ; poison list must be nulled or func-poisoned? reads garbage.
+              (store! (field checkls check_diags) (box-al [Diag] a (al-new [Diag] a)))
+              (store! (field checkls resolve_diags) (cast (ptr (ArrayList Diag)) 0))
+              (store! (field checkls resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
               (match (check-program a sub (mut checkls))
                 (Ok [checked]
                   ; compiled engine: lower + build + dlopen the metaprogram dylib
@@ -735,10 +740,47 @@
 ; empty (`code-decl` → `:unresolved`) and the transform rewrites syntactically until
 ; the program becomes valid (e.g. a desugaring that introduces the very ops that make
 ; it typecheck). The AUTHORITATIVE strict check happens once, after the fixpoint.
+(defn diag-before [(x Diag) (y Diag)] (-> bool)
+  (if (icmp-lt (load (field x source)) (load (field y source))) true
+    (if (icmp-gt (load (field x source)) (load (field y source))) false
+      (icmp-le (load (field x lo)) (load (field y lo))))))
+
+; merge the recoverable resolve errors into check_diags, in source order, so the build
+; path's one renderer shows every diagnostic from both phases with an `N errors` summary.
+(defn merge-resolve-diags [(a (ptr Allocator)) (s (mut LS))] (-> i64)
+  (let [rd (load (field s resolve_diags)) cd (load (field s check_diags))
+        nr (al-len [Diag] rd) nc (al-len [Diag] cd)
+        (mut out) (al-new [Diag] a) (mut ri) 0 (mut ci) 0]
+    ; each list is already in source order within itself; classic two-list merge.
+    (loop (if (and (icmp-lt (load ri) nr) (icmp-lt (load ci) nc))
+              (let [dr (al-get [Diag] rd (load ri)) dc (al-get [Diag] cd (load ci))]
+                (if (diag-before dr dc)
+                    (do (al-push! (mut out) dr) (store! ri (iadd (load ri) 1)) 0)
+                  (do (al-push! (mut out) dc) (store! ci (iadd (load ci) 1)) 0)))
+            (break)))
+    (loop (if (icmp-lt (load ri) nr)
+              (do (al-push! (mut out) (al-get [Diag] rd (load ri))) (store! ri (iadd (load ri) 1)) 0)
+            (break)))
+    (loop (if (icmp-lt (load ci) nc)
+              (do (al-push! (mut out) (al-get [Diag] cd (load ci))) (store! ci (iadd (load ci) 1)) 0)
+            (break)))
+    (store! (load (field s check_diags)) (load out))
+    0))
+
 (defn strict-resolve-check [(a (ptr Allocator)) (s (mut LS))] (-> (Result (ptr Program) Diag))
   (match (resolve-program a (mut s) (not (ls-has-meta (mut s))) false)
+    ; a FATAL resolve error (parse / signature / struct / sum) aborts as before.
     (Err [d] (Err [(ptr Program) Diag] d))
-    (Ok [prog] (frontend-check a (mut s) prog))))
+    (Ok [prog]
+      ; recoverable body errors, if any, are in resolve_diags; run the check anyway so
+      ; its errors are collected too, then report both. The build FAILS whenever resolve
+      ; had any error, even if the type check of the rest happened to pass — otherwise a
+      ; program with a half-resolved body would sail into mono/codegen.
+      (let [cres (frontend-check a (mut s) prog)
+            nrd  (al-len [Diag] (load (field s resolve_diags)))]
+        (if (icmp-eq nrd 0) cres
+          (do (merge-resolve-diags a (mut s))
+              (Err [(ptr Program) Diag] (al-get [Diag] (load (field s check_diags)) 0))))))))
 ; Best-effort resolve+check for the model: swallow errors, returning None on failure.
 ; Reset the collected check diagnostics so a failed attempt never pollutes the final
 ; (authoritative) error report.
@@ -971,6 +1013,7 @@
     (store! (field s sources) (al-new [Source] a))
     (store! (field s expansions) (al-new [Expansion] a))
     (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s resolve_diags) (cast (ptr (ArrayList Diag)) 0)) (store! (field s resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
     (store! (field s loaderr_set) false)
     (store! (field s srccount) 1)
     (register-source! (mut s) "<source>" src)
@@ -1038,6 +1081,7 @@
     (store! (field s sources) (al-new [Source] a))
     (store! (field s expansions) (al-new [Expansion] a))
     (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s resolve_diags) (cast (ptr (ArrayList Diag)) 0)) (store! (field s resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
     (store! (field s loaderr_set) false)
     (store! (field s srccount) 1)
     (register-source! (mut s) path src)              ; real path -> code-from-user? true

@@ -1,0 +1,7 @@
+(module app30)
+(defn f [(a i64)] (-> i64) a)
+(defn g [] (-> i64) (f 1.5))
+(defn h [] (-> i64) (f 1 2))
+(defn i2 [] (-> i64) (nosuchfn 3))
+(defn j [] (-> i64) (f "x"))
+(defn main [] (-> i64) 0)
