@@ -1540,19 +1540,16 @@ impl ModelArithJit for crate::model::LowBitModel {
     ) -> Option<(Value, Value)> {
         // LB_INT is 0b000, so a tagged fixnum IS `v << 3` and the tagged words add
         // directly: the result carries the right tag with no shifting either way.
-        let r = if is_sub { c.fb.ins().isub(a, b) } else { c.fb.ins().iadd(a, b) };
-        // Signed i64 overflow, which here IS the fixnum-range check (FIXNUM_MAX is
-        // 2^60-1 and 8*(2^60-1) is i64::MAX-7): the operands' signs agree with each
-        // other and disagree with the result's.
-        //   add: (a ^ r) & (b ^ r) < 0
-        //   sub: (a ^ b) & (a ^ r) < 0
-        let (x, y) = if is_sub {
-            (c.fb.ins().bxor(a, b), c.fb.ins().bxor(a, r))
+        // The machine's own signed-overflow flag IS the fixnum-range check here
+        // (FIXNUM_MAX is 2^60-1 and 8*(2^60-1) is i64::MAX-7), so this is one
+        // `adds`/`subs` plus a flag read — no sign-juggling to synthesize it.
+        let (r, ovf) = if is_sub {
+            let v = c.fb.ins().ssub_overflow(a, b);
+            (v.0, v.1)
         } else {
-            (c.fb.ins().bxor(a, r), c.fb.ins().bxor(b, r))
+            let v = c.fb.ins().sadd_overflow(a, b);
+            (v.0, v.1)
         };
-        let both = c.fb.ins().band(x, y);
-        let ovf = c.fb.ins().icmp_imm(IntCC::SignedLessThan, both, 0);
         Some((r, ovf))
     }
     fn emit_untag(c: &mut Compiler, v: Value) -> Value {
