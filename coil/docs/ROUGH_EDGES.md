@@ -205,7 +205,7 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
       redesign — see Deferred.)*
 - [x] **std-10** fmt `{x}` routes to signed `print-hex` and emits a garbage byte for negatives;
       `print-uhex` is unreachable from fmt. Point `x` at `print-uhex`.
-- [ ] **gen-5** Blanket `(impl [T] Show T)` accepted, silently does nothing. Reject it, or support it
+- [x] **gen-5** Blanket `(impl [T] Show T)` accepted, silently does nothing. Reject it, or support it
       (a bare `T` is just the bottom of the specialization lattice that already exists).
 - [ ] **diag-10** `:use [name]` with a name the module doesn't export is silently accepted.
 - [ ] **mac-4** Binder hygiene: macros capture silently (200 instead of 105) while free identifiers

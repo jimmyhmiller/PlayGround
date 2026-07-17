@@ -638,6 +638,15 @@
   (let [a (load (field c a))]
     (try
       (do (store! (field ip trait_name) (try! (resolve c (load (field ip trait_name)) 2)))
+          ; A blanket impl — `(impl [T] Show T)`, the implementing type IS a bare type
+          ; param — was accepted and then never matched any receiver, so it was dead code
+          ; that looked live: the user got no error at the impl and "does not implement" at
+          ; every call. Reject it at the impl (blanket impls / specialization over a bare
+          ; param are not supported).
+          (match-else (load (field ip self_type))
+            (TStruct [nm] (if (set-contains (load (field ip type_params)) nm)
+                              (return-from :try (Err (derr (sconcat3 a "cannot impl on a bare type parameter '" nm "'; the implementing type must be a concrete type or type constructor")))) 0))
+            (_ 0))
           ; Qualify the implementing type (the impl's own type params stay
           ; unqualified — scalars and `slice` are structurally exempt), then
           ; re-derive the dispatch base name from the qualified type
