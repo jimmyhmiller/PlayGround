@@ -430,7 +430,10 @@
             _ignore (store! (field s srccount) (iadd inc-id 1))
             _reg (register-source! (mut s) (load (field rp disp)) text)]
         (match (read-all a text inc-id)
-          (Err [d] (do (loader-abort "import: read error in imported file") 0))
+          ; `d` is already anchored in the imported file (read-all stamped inc-id),
+          ; so hand it to the driver verbatim — it points at the unclosed form. A
+          ; generic abort here would drop the one span that locates the mistake.
+          (Err [d] (do (ls-set-err! (mut s) d) 0))
           (Ok [inc-forms]
             (let [modname (match (declared-module inc-forms)
                             (Some [m] m)

@@ -1500,24 +1500,24 @@
 (defn build-make-dyn [(a (ptr Allocator)) (cx (ptr Cx)) (trait_name (slice u8)) (inner (ptr Expr)) (inner_ty (ptr Type)) (lo i64) (hi i64) (src i64) (ctxt i64) (fname (slice u8))] (-> (Result SynPair Diag))
   (let [tr (resolve-trait-name cx trait_name)]
     (if (icmp-eq (slice-len [u8] tr) 0)
-        (Err [SynPair Diag] (derr-at lo hi (sconcat1 a (sconcat4 a "in '" fname "': make-dyn: unknown trait '" (sconcat a trait_name "'")))))
+        (Err [SynPair Diag] (derr-at-src src lo hi (sconcat1 a (sconcat4 a "in '" fname "': make-dyn: unknown trait '" (sconcat a trait_name "'")))))
       (if (not (type-is-ptr inner_ty))
-          (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat3 a "in '" fname "': make-dyn expects a pointer to an implementer, got ") (ty-str a inner_ty))))
+          (Err [SynPair Diag] (derr-at-src src lo hi (sconcat a (sconcat3 a "in '" fname "': make-dyn expects a pointer to an implementer, got ") (ty-str a inner_ty))))
         (let [pointee (t-inner inner_ty)]
           (if (not (has-impl-name a pointee))
-              (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat4 a "in '" fname "': make-dyn: " (ty-str a pointee)) " cannot implement a trait") "")))
+              (Err [SynPair Diag] (derr-at-src src lo hi (sconcat a (sconcat a (sconcat4 a "in '" fname "': make-dyn: " (ty-str a pointee)) " cannot implement a trait") "")))
             ; the vtable must point at the SELECTED impl's functions — a specialized
             ; impl on the pointee has a decorated name, so the bare key would name a
             ; function that doesn't exist
             (let [sel (alloc-stack ImplSel)]
               (store! sel (cx-impl-select a cx tr pointee))
               (if (icmp-eq (cast i64 (load (field sel ip))) 0)
-                  (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat a (sconcat5 a "in '" fname "': '" (ty-str a pointee) "' does not implement '") (display-name tr)) "' (needed for (dyn ") (sconcat a (display-name tr) "))"))))
+                  (Err [SynPair Diag] (derr-at-src src lo hi (sconcat a (sconcat a (sconcat a (sconcat5 a "in '" fname "': '" (ty-str a pointee) "' does not implement '") (display-name tr)) "' (needed for (dyn ") (sconcat a (display-name tr) "))"))))
                 (if (load (field sel ambiguous))
-                    (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat5 a "in '" fname "': ambiguous impls of '" (display-name tr) "' for '") (ty-str a pointee)) "' — several match and none is more specific")))
+                    (Err [SynPair Diag] (derr-at-src src lo hi (sconcat a (sconcat a (sconcat5 a "in '" fname "': ambiguous impls of '" (display-name tr) "' for '") (ty-str a pointee)) "' — several match and none is more specific")))
                   (let [dyn_struct (sconcat a tr "-dyn") vtable_struct (sconcat a tr "-vtable")]
                     (if (icmp-eq (cast i64 (struct-find cx dyn_struct)) 0)
-                        (Err [SynPair Diag] (derr-at lo hi (sconcat a (sconcat a (sconcat5 a "in '" fname "': trait '" (display-name tr) "' has no trait object — call (defdyn ") (display-name tr)) ") after the trait")))
+                        (Err [SynPair Diag] (derr-at-src src lo hi (sconcat a (sconcat a (sconcat5 a "in '" fname "': trait '" (display-name tr) "' has no trait object — call (defdyn ") (display-name tr)) ") after the trait")))
                       (let [ipp (load (field sel ip))
                             td (trait-find cx tr)
                             methods (dyn-method-names a td tr (impl-mangle-key a (field ipp self_type) (load (field ipp type_params))))]
@@ -2480,21 +2480,22 @@
 (defn validate-export [(a (ptr Allocator)) (cx (ptr Cx)) (prog (ptr Program)) (ep (ptr ExportC))] (-> (Result ExportC Diag))
   (try
     (let [ename (load (field ep name)) dn (display-name ename) elo (load (field ep lo)) ehi (load (field ep hi))
+          esrc (load (field ep source))
           f (prog-fn-find prog ename)]
       (if (icmp-eq (cast i64 f) 0)
-          (return-from :try (Err [ExportC Diag] (derr-at elo ehi (sconcat3 a "export-c: unknown function '" dn "'")))) 0)
+          (return-from :try (Err [ExportC Diag] (derr-at-src esrc elo ehi (sconcat3 a "export-c: unknown function '" dn "'")))) 0)
       (if (icmp-gt (al-len [(slice u8)] (load (field f type_params))) 0)
-          (return-from :try (Err [ExportC Diag] (derr-at elo ehi (sconcat3 a "export-c: '" dn "' is generic — a generic function has no single C symbol; export a concrete wrapper instead")))) 0)
+          (return-from :try (Err [ExportC Diag] (derr-at-src esrc elo ehi (sconcat3 a "export-c: '" dn "' is generic — a generic function has no single C symbol; export a concrete wrapper instead")))) 0)
       (if (conv-cc-is-shim cx (load (field f cc)))
-          (return-from :try (Err [ExportC Diag] (derr-at elo ehi (sconcat3 a "export-c: '" dn "' uses a :shim convention, which isn't the C ABI")))) 0)
+          (return-from :try (Err [ExportC Diag] (derr-at-src esrc elo ehi (sconcat3 a "export-c: '" dn "' uses a :shim convention, which isn't the C ABI")))) 0)
       (let [bp (export-first-bad-param cx (load (field f params)))]
         (if (icmp-ne (cast i64 bp) 0)
-            (return-from :try (Err [ExportC Diag] (derr-at elo ehi (export-param-msg a dn (load (field bp name)) (field bp ty))))) 0))
+            (return-from :try (Err [ExportC Diag] (derr-at-src esrc elo ehi (export-param-msg a dn (load (field bp name)) (field bp ty))))) 0))
       (if (not (export-ret-ok cx (field f ret)))
-          (return-from :try (Err [ExportC Diag] (derr-at elo ehi (sconcat a (sconcat3 a "export-c: '" dn "' returns ") (sconcat a (ty-str a (field f ret)) ", which has no C representation"))))) 0)
+          (return-from :try (Err [ExportC Diag] (derr-at-src esrc elo ehi (sconcat a (sconcat3 a "export-c: '" dn "' returns ") (sconcat a (ty-str a (field f ret)) ", which has no C representation"))))) 0)
       (let [sym (match (load (field ep symbol)) (Some [s] s) (None [] (default-c-symbol a ename)))]
         (if (not (is-c-ident sym))
-            (return-from :try (Err [ExportC Diag] (derr-at elo ehi (sconcat a (sconcat3 a "export-c: '" dn "' → '") (sconcat a sym "' isn't a valid C identifier; give one with :as \"name\""))))) 0)
+            (return-from :try (Err [ExportC Diag] (derr-at-src esrc elo ehi (sconcat a (sconcat3 a "export-c: '" dn "' → '") (sconcat a sym "' isn't a valid C identifier; give one with :as \"name\""))))) 0)
         (let [ec (alloc-stack ExportC)]
           (store! (field ec name) ename)
           (store! (field ec symbol) (Some [(slice u8)] sym))
@@ -2526,7 +2527,7 @@
             (Ok [ec0] (let [ec (alloc-stack ExportC)] (store! ec ec0)
                         (let [sym (match (load (field ec symbol)) (Some [s] s) (None [] ""))]
                           (if (set-contains (field seenb items) sym)
-                              (do (store! err (derr-at (load (field ec lo)) (load (field ec hi)) (sconcat3 a "export-c: two functions export the same C symbol '" sym "'"))) (store! failed true) (break))
+                              (do (store! err (derr-at-src (load (field ec source)) (load (field ec lo)) (load (field ec hi)) (sconcat3 a "export-c: two functions export the same C symbol '" sym "'"))) (store! failed true) (break))
                             (do (al-push! (mut (field seenb items)) sym) (al-push! (mut out) (load ec))))))))
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [(ptr (ArrayList ExportC)) Diag] (load err)) (Ok (box-al [ExportC] a (load out))))))

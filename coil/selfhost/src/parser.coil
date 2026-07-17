@@ -226,10 +226,16 @@
 ; ---- diagnostics ----
 (defn derr    [(msg (slice u8))] (-> Diag) (mk-diag -1 -1 msg))
 (defn derr-at [(lo i64) (hi i64) (msg (slice u8))] (-> Diag) (mk-diag lo hi msg))
+(defn derr-at-src [(source i64) (lo i64) (hi i64) (msg (slice u8))] (-> Diag) (mk-diag-src source lo hi msg))
+; Fill in whatever the inner diagnostic left unset, from the enclosing node.
+; Span and source are INDEPENDENT: `derr-at` pins a precise span but cannot know
+; which file it is in, so a diag with a real span still needs its source stamped.
+; Guarding the source store on `lo < 0` would leave those attributed to nothing.
 (defn dwspan  [(d Diag) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> Diag)
   (let [p (alloc-stack Diag)] (store! p d)
     (if (icmp-lt (load (field p lo)) 0)
-        (do (store! (field p source) source) (store! (field p lo) lo) (store! (field p hi) hi) (store! (field p ctxt) ctxt)) 0)
+        (do (store! (field p lo) lo) (store! (field p hi) hi) (store! (field p ctxt) ctxt)) 0)
+    (if (icmp-lt (load (field p source)) 0) (store! (field p source) source) 0)
     (load p)))
 
 ; ---- Option -> Result with a message (mirrors `.ok_or(msg)?`) ----
@@ -512,9 +518,43 @@
         (if (not (icmp-eq (sx-tag bv) 4)) (return-from :try (Err [ExprKind Diag] (derr-at (sx-lo bv) (sx-hi bv) "llvm-ir: body must be a string literal"))) 0)
         (Ok (ELlvmIr result operands (sx-sval bv))))))))
 
+; Heads that are only ever valid at the top level — none of them is also an
+; expression head (a definition never nests inside a value), so seeing one in
+; expression position is unambiguous. Keep in sync with the top-level dispatch in
+; parse-program and the loader's own (module/import/export/cimport) handling.
+(defn toplevel-only-head? [(h (slice u8))] (-> bool)
+  (if (str-eq h "defn")          true
+  (if (str-eq h "defstruct")     true
+  (if (str-eq h "defsum")        true
+  (if (str-eq h "defcc")         true
+  (if (str-eq h "extern")        true
+  (if (str-eq h "export-c")      true
+  (if (str-eq h "const")         true
+  (if (str-eq h "deftrait")      true
+  (if (str-eq h "impl")          true
+  (if (str-eq h "static-assert") true
+  (if (str-eq h "meta")          true
+  (if (str-eq h "module")        true
+  (if (str-eq h "import")        true
+  (if (str-eq h "export")        true
+  (if (str-eq h "cimport")       true
+    false))))))))))))))))
+
+; A top-level definition in expression position is never legal, and in practice it
+; means an earlier form lost a ')' and swallowed this one. Say that, anchored at the
+; swallowed definition. Without this the head falls through to the call path and the
+; failure surfaces from its parameter list as "unexpected vector in expression" —
+; a symptom several lines away from the missing paren, in a form that is itself fine.
+(defn nested-toplevel-diag [(a (ptr Allocator)) (head (slice u8)) (args (ptr (ArrayList Sexp))) (slo i64) (shi i64)] (-> Diag)
+  (let [named (if (icmp-eq (sx-len args) 0) false (icmp-eq (sx-tag (sx-at args 0)) 2))
+        what  (if named (sconcat3 a "'" head (sconcat3 a " " (sx-sval (sx-at args 0)) "'")) (sconcat3 a "'" head "'"))]
+    (derr-at slo shi
+      (sconcat a what " is a top-level definition, but it appears inside an expression — an enclosing form is missing a ')'"))))
+
 ; the big head dispatch (src/parse.rs parse_list_expr).
 (defn parse-list-expr [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (slo i64) (shi i64) (ssrc i64) (sctxt i64)] (-> (Result ExprKind Diag))
   (try (let [head (try! (head-sym a items)) args (rest-from a items 1) nargs (sx-len args)]
+    (if (toplevel-only-head? head) (return-from :try (Err [ExprKind Diag] (nested-toplevel-diag a head args slo shi))) 0)
     (let [bop (binop-of head)]
     (if (icmp-ge bop 0) (mk-bin a args head bop)
     (let [cop (cmpop-of head)]

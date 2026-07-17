@@ -270,10 +270,19 @@
   (let [p (alloc-stack Tok)]
     (store! (field p kind) kind) (store! (field p lo) lo) (store! (field p hi) hi)
     (load p)))
+; source = -1 means "not yet attributed to a file"; the span is file-relative, so
+; it is meaningless until a caller stamps the source that `lo`/`hi` are offsets
+; into (dwspan / diag-with-source). Defaulting to 0 instead would silently claim
+; every diagnostic came from the entry file, rendering the right offsets against
+; the wrong source text.
 (defn mk-diag [(lo i64) (hi i64) (msg (slice u8))] (-> Diag)
   (let [p (alloc-stack Diag)]
     (store! (field p lo) lo) (store! (field p hi) hi) (store! (field p msg) msg)
-    (store! (field p source) (if (icmp-lt lo 0) -1 0)) (store! (field p ctxt) 0)
+    (store! (field p source) -1) (store! (field p ctxt) 0)
+    (load p)))
+(defn mk-diag-src [(source i64) (lo i64) (hi i64) (msg (slice u8))] (-> Diag)
+  (let [p (alloc-stack Diag)] (store! p (mk-diag lo hi msg))
+    (store! (field p source) source)
     (load p)))
 (defn mk-strread [(s (slice u8)) (end i64)] (-> StrRead)
   (let [p (alloc-stack StrRead)]

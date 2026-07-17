@@ -125,7 +125,7 @@
         (EQuote [f] (Ok [Type Diag] (TCode)))
         (EQuasi [q] (Ok [Type Diag] (TCode)))
         (ECodeOp [op args] (Ok [Type Diag] (codeop-rty op)))
-        (_ (Err [Type Diag] (derr-at (load (field e lo)) (load (field e hi))
+        (_ (Err [Type Diag] (derr-at-src (load (field e source)) (load (field e lo)) (load (field e hi))
              "metalower: no inferred type recorded for a code-op argument (compiler bug)")))))))
 
 ; widen an int/float argument to the boundary's i64/f64
@@ -169,7 +169,7 @@
                 (if (icmp-eq k 3) (store! chain (ml-call2 st "metashim.mp-arg-s" (load chain) le proto))
                 (if (icmp-eq k 4) (store! chain (ml-call2 st "metashim.mp-arg-b" (load chain) le proto))
                 (if (icmp-eq k 5) (store! chain (ml-call2 st "metashim.mp-arg-f" (load chain) (ml-widen-float st t le proto) proto))
-                    (return-from :try (Err [Expr Diag] (derr-at (load (field ap lo)) (load (field ap hi))
+                    (return-from :try (Err [Expr Diag] (derr-at-src (load (field ap source)) (load (field ap lo)) (load (field ap hi))
                       "metalower: this value cannot cross into a code op (only Code, integers, bools, floats and (slice u8) can; the interpreter rejects it at run time too)")))))))))
             (store! i (iadd (load i) 1))))))
       (match (load diverged)
@@ -293,7 +293,7 @@
         (ECodeOp [op args] (ml-codeop st op args e))
         (EQuote [form] (Ok [Expr Diag] (ml-quoted st form e)))
         (EQuasi [q] (let [qp (alloc-stack Quasi)] (store! qp q) (ml-quasi st qp e)))
-        (EComptime [inner] (Err [Expr Diag] (derr-at (load (field e lo)) (load (field e hi))
+        (EComptime [inner] (Err [Expr Diag] (derr-at-src (load (field e source)) (load (field e lo)) (load (field e hi))
           "metalower: (comptime ...) survived the check fold (compiler bug)")))
         ; ---- types embedded in exprs ----
         (EZeroed [ty] (Ok [Expr Diag] (ml-rewrap e (EZeroed (ml-type a (let [tp (alloc-stack Type)] (store! tp ty) tp))))))
