@@ -245,6 +245,22 @@ impl Compiler {
         self.resolve_global_checked(rt, s, false)
     }
 
+/// Names `syntax-quote` must NOT namespace-qualify: this dialect's special forms
+/// and the expander-level forms, which the compiler matches by BARE name. (Clojure
+/// qualifies `fn`/`let`/… to clojure.core because they are macros there; here they
+/// are compiler forms, so they stay bare.) `&` is in the list because it is param
+/// syntax, not a value. Interop names (`.m`, `Ctor.`) are handled by shape.
+const SYNTAX_QUOTE_BARE: &[&str] = &[
+    // compile.rs forms
+    "def", "do", "if", "quote", "set!", "try*", "-proto-method",
+    // lib.rs expander forms
+    "alias", "binding", "definterface", "defprotocol", "deftype", "extend-type", "fn", "fn*",
+    "import", "in-ns", "instance?", "let", "let*", "loop", "loop*", "new", "ns", "refer",
+    "require", "syntax-quote", "try", "use", "var", "with-redefs",
+    // control forms matched by name
+    "recur", "throw", "catch", "finally", "&",
+];
+
     /// Namespace-qualify a symbol the way `syntax-quote` does (Clojure macro
     /// hygiene): a symbol that resolves to a KNOWN var (own def, refer, or
     /// clojure.core) becomes its fully-qualified name, so a macro's references to
@@ -268,9 +284,29 @@ impl Compiler {
             rt.intern(fq)
         } else if self.ns.ns_defs.get("clojure.core").is_some_and(|d| d.contains(name)) {
             rt.intern(&format!("clojure.core/{name}"))
-        } else {
-            // Special form or unknown: leave bare.
+        } else if Self::SYNTAX_QUOTE_BARE.contains(&name)
+            || name.starts_with('.')
+            || name.ends_with('.')
+        {
+            // A SPECIAL FORM (or interop syntax) — the compiler matches these by
+            // bare name, so qualifying them would break dispatch. Clojure leaves
+            // its specials bare here for the same reason.
             return s;
+        } else if let Some(fqn) = self.resolve_class(name) {
+            // A class name resolves to the fully-qualified class, as in Clojure:
+            // `` `Exception `` is java.lang.Exception, so a macro's catch clause
+            // means the same class at the expansion site.
+            rt.intern(&fqn)
+        } else {
+            // Genuinely unknown: qualify with the CURRENT namespace. This is
+            // Clojure's rule and it is not cosmetic — it is what makes a
+            // syntax-quoted symbol name the same thing at every expansion site.
+            // Leaving it bare silently produced a DIFFERENT symbol: meander
+            // registers its `with` parser under `` `with ``, expecting
+            // meander.syntax.epsilon/with, and looked it up by that name — the
+            // bare key never matched, so `with` was not recognized as syntax at
+            // all ("Unbound reference %x").
+            rt.intern(&format!("{ns}/{name}"))
         };
         // Protocol methods (`-conj`, `-seq`, …) dispatch by NAME — a qualified
         // reference won't resolve as a method, so keep them bare.

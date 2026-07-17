@@ -1262,10 +1262,22 @@
 ;; name is nil. It answered nil for EVERY resolvable symbol before, which is
 ;; silent and wrong in the worst way — callers read "no such var", so meander's
 ;; resolve-symbol qualified every symbol into the current ns.
-(defn ns-resolve [n s]
-  (let [q (%resolve-in-ns (ns-name (the-ns n)) s)]
-    (if (nil? q) nil (find-var q))))
-(defn resolve [s] (ns-resolve (-ns-object) s))
+;; The `env` arities take a macro's `&env` — a map whose KEYS are the locals in
+;; scope. A symbol shadowed by a local is not a var, so it resolves to nil; this
+;; is how macro code asks "does this symbol name a var here, or a local?".
+;; meander's IR compiler decides whether a `(pred? x)` test is a known type
+;; predicate with `(resolve *env* pred-value)`, and without the 2-arity it was an
+;; arity error, not a wrong answer.
+(defn ns-resolve
+  ([n s] (ns-resolve n nil s))
+  ([n env s]
+   (if (contains? env s)
+     nil
+     (let [q (%resolve-in-ns (ns-name (the-ns n)) s)]
+       (if (nil? q) nil (find-var q))))))
+(defn resolve
+  ([s] (ns-resolve (-ns-object) nil s))
+  ([env s] (ns-resolve (-ns-object) env s)))
 ;; Reflectively read/rebind the var's ROOT (throws if unbound; sets on rebind).
 (defn var-get [v] (%global-get (-var-sym v)))
 (defn var-set [v val] (%global-set (-var-sym v) val))

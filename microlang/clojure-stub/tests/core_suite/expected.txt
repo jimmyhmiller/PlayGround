@@ -684,3 +684,25 @@
 (when-some [x nil] [:body x])	nil
 (if-some [[a b] [false false]] [a b] :else)	[false false]
 (let [a (atom 0)] (if-some [x (do (swap! a inc) 1)] @a :else))	1
+(.valAt {:a 1} :a)	1
+(.valAt {:a 1} :z :d)	:d
+(.entryAt {:a 1} :a)	[:a 1]
+(.containsKey {:a 1} :a)	true
+(.assoc {:a 1} :b 2)	{:a 1, :b 2}
+(.without {:a 1 :b 2} :a)	{:b 2}
+(.disjoin #{1 2} 1)	#{2}
+(.cons [1] 2)	[1 2]
+(.empty [1 2])	[]
+(.equiv [1 2] [1 2])	true
+(.seq [1 2])	(1 2)
+(.key (first {:a 1}))	:a
+(.val (first {:a 1}))	1
+(some? (resolve {} 'inc))	true
+(resolve '{inc :local} 'inc)	nil
+(ns-resolve *ns* '{inc :local} 'inc)	nil
+(some? (ns-resolve *ns* {} 'inc))	true
+(resolve {} 'no-such-var)	nil
+(str `foo)	"user/foo"
+(str `Exception)	"java.lang.Exception"
+(str `(a b))	"(user/a user/b)"
+(str `[quote if do let* fn* recur try catch finally new set! var def throw &])	"[quote if do let* fn* recur try catch finally new set! var def throw &]"

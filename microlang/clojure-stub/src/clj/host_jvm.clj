@@ -390,6 +390,22 @@
   (:method hashCode [o] (hash o))
   (:method count [o] (count o))
   (:method nth ([o i] (nth o i)) ([o i nf] (nth o i nf)))
+  ;; The collection interfaces' host entry points. GENERATED code calls these by
+  ;; name rather than through clojure.core — meander's map patterns compile to
+  ;; `(.valAt target k)`, and its substitute layer uses .without/.disjoin/.val.
+  ;; Each is the method Clojure's corresponding fn is defined in terms of.
+  (:method valAt ([o k] (get o k)) ([o k nf] (get o k nf)))   ;; ILookup
+  (:method entryAt [o k] (find o k))                          ;; Associative
+  (:method containsKey [o k] (contains? o k))
+  (:method assoc [o k v] (assoc o k v))
+  (:method without [o k] (dissoc o k))                        ;; IPersistentMap
+  (:method disjoin [o x] (disj o x))                          ;; IPersistentSet
+  (:method cons [o x] (conj o x))                             ;; IPersistentCollection
+  (:method empty [o] (empty o))
+  (:method equiv [a b] (= a b))
+  (:method seq [o] (seq o))                                   ;; Seqable
+  (:method key [e] (key e))                                   ;; IMapEntry
+  (:method val [e] (val e))
   (:method getMessage [e] (-jvm-message-of e)))
 
 ;; mutable raw-array ("array-list") methods — cljs host-array interop.
