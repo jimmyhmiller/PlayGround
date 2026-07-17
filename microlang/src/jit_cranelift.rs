@@ -1416,6 +1416,13 @@ fn body_pure_loop(ir: &Ir, tail: bool) -> bool {
 /// thread). Everything else runs its locals in SSA registers.
 fn body_mem_mode(ir: &Ir) -> bool {
     match ir {
+        // A try/catch with NO finally is emitted INLINE (see the Try arm), so its
+        // catch binding is an ordinary SSA slot and nothing runs against a frame —
+        // it no longer forces the whole body into memory. `finally` still goes
+        // through the shim, which evaluates its arms against the frame.
+        Ir::Try { catch: Some(c), finally: None, body, .. } => {
+            body_mem_mode(body) || body_mem_mode(c)
+        }
         Ir::Try { .. } => true,
         Ir::Prim(Prim::Await | Prim::Gc, _) => true,
         Ir::Lambda { .. } => false,
@@ -5034,22 +5041,15 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // what the hot path needs. A wrapped backend (Traced/Tiered) also keeps
             // the shim — an inlined arm is invisible to `top`, the same rule the
             // other inliners follow via `direct`.
-            Ir::Try { body, catch: Some(catch), finally: None, cslot, site }
-                if self.mem_mode =>
-            {
+            // Always inline — no `direct` gate. An inlined try is CONTROL FLOW, not
+            // a call: every call inside it still routes through `top`, so a wrapper
+            // observes exactly what it did before. (The other inliners gate on
+            // `direct` because they splice a CALLEE, which really would vanish from
+            // `top`'s view.) Not gating is what lets the body drop `mem_mode`.
+            Ir::Try { body, catch: Some(catch), finally: None, cslot, .. } => {
                 let result = self.declare_root_var();
                 let handler = self.fb.create_block();
                 let merge = self.fb.create_block();
-                let ro = MemFlagsData::trusted().with_readonly();
-                let rc = self.rc_val;
-                let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
-                let inl = self.fb.create_block();
-                let shimb = self.fb.create_block();
-                self.fb.ins().brif(direct, inl, &[], shimb, &[]);
-
-                // ── inline ──
-                self.fb.switch_to_block(inl);
-                self.fb.seal_block(inl);
                 self.catch_handlers.push(handler);
                 let bv = self.compile::<M>(body, false);
                 self.catch_handlers.pop();
@@ -5077,8 +5077,15 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.seal_block(do_catch);
                 let ctxv = self.ctx_val;
                 let thrown = self.call_shim(self.refs.take_signal, &[ctxv]);
-                // `flatten` re-homed the catch binding to a slot of THIS frame.
-                self.emit_local0_store(*cslot, thrown);
+                // `flatten` re-homed the catch binding to a slot of THIS activation.
+                // In memory mode that slot is a frame word; in SSA mode it is just
+                // one of this body's variables.
+                if self.mem_mode {
+                    self.emit_local0_store(*cslot, thrown);
+                } else {
+                    let v = self.vars[*cslot as usize];
+                    self.fb.def_var(v, thrown);
+                }
                 let cv = self.compile::<M>(catch, false);
                 self.fb.def_var(result, cv);
                 self.fb.ins().jump(merge, &[]);
@@ -5095,24 +5102,6 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         self.fb.ins().return_(&[nilv]);
                     }
                 }
-
-                // ── shim (a wrapper is observing) ──
-                self.fb.switch_to_block(shimb);
-                self.fb.seal_block(shimb);
-                let bp = (&**body as *const Ir) as i64;
-                let cp = (&**catch as *const Ir) as i64;
-                let bpv = self.fb.ins().iconst(I64, bp);
-                let cpv = self.fb.ins().iconst(I64, cp);
-                let fpv = self.fb.ins().iconst(I64, 0);
-                let csv = self.i32const(*cslot as u32);
-                // The REAL site: the arm cache is keyed by it, and a shared key is
-                // how distinct tries silently answered for each other before.
-                let sitev = self.fb.ins().iconst(I64, *site as i64);
-                let ctx = self.ctx_val;
-                let sv =
-                    self.call_shim_checked(self.refs.try_, &[ctx, bpv, cpv, fpv, csv, sitev]);
-                self.fb.def_var(result, sv);
-                self.fb.ins().jump(merge, &[]);
 
                 self.fb.switch_to_block(merge);
                 self.fb.seal_block(merge);
