@@ -241,7 +241,7 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 }
                 v // normal return, or a throw / other escape that keeps propagating
             }
-            Ir::Try { body, catch, finally, cslot } => {
+            Ir::Try { body, catch, finally, cslot, .. } => {
                 let mut result = top.eval_ir(top, rt, body, locals);
                 // Catch a THROW (kind 1) if there is a handler; escapes pass through.
                 if rt.pending_throw() {

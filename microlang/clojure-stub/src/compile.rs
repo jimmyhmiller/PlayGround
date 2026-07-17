@@ -961,7 +961,7 @@ impl Compiler {
         } else {
             Some(Box::new(self.compile(rt, items[4])))
         };
-        Ir::Try { body, catch, finally, cslot: 0 }
+        Ir::Try { body, catch, finally, cslot: 0, site: microlang::ir::fresh_try_site() }
     }
 
     fn compile_let<M: ValueModel>(&mut self, rt: &mut Runtime<M>, items: &[u64]) -> Ir {

@@ -1063,7 +1063,12 @@
                     (every-seq pred (field s 3)))))
           true (if (pred (%first s)) (every-seq pred (%rest s)) false))))
 (defn every? [pred c] (every-seq pred c))
-(defn mapv [f c] (vec (map f c)))
+;; `mapv` zips over ANY number of colls, like `map` — it was fixed at one, so
+;; `(mapv f xs ys)` was an arity error. meander walks a pattern matrix's column
+;; against its rows with exactly that.
+(defn mapv
+  ([f c] (vec (map f c)))
+  ([f c & colls] (vec (apply map f c colls))))
 (defn filterv [f c] (vec (filter f c)))
 ;; Fixed arities up to 3 (like upstream comp): a composed fn call allocates
 ;; nothing on the common paths — the variadic clause is the >3-arg fallback.
@@ -2953,10 +2958,29 @@
 (defn transduce
   ([xform f coll] (transduce xform f (f) coll))
   ([xform f init coll] (let [rf (xform f)] (rf (unreduced (-tr-reduce rf init coll))))))
+;; Step `rf` over N colls in LOCKSTEP, passing one element of each per step —
+;; `(rf acc x1 x2 … xn)` — and stopping at the SHORTEST, so an infinite coll
+;; paired with a finite one terminates. This is the multi-input reduce that the
+;; multi-coll `sequence` needs; the `map` transducer's `([a x & xs] …)` arm is
+;; what receives those extra inputs.
+(defn -tr-reduce-multi [rf init colls]
+  (loop [acc init ss (map seq colls)]
+    (if (some nil? ss)
+      acc
+      (let [acc (apply rf acc (map first ss))]
+        (if (reduced? acc) acc (recur acc (map next ss)))))))
 ;; `sequence` yields a seq, `()` (not nil) when empty — as in Clojure.
+;;
+;; The multi-coll arity was MISSING, so `(sequence xform c1 c2)` was an arity
+;; error rather than a zip — meander's pattern-matrix `columns` is exactly
+;; `(sequence (map nth-column) (repeat matrix) (range (width matrix)))`, and
+;; every `match` it compiles goes through it.
 (defn sequence
   ([coll] (or (seq coll) ()))
-  ([xform coll] (or (seq (transduce xform conj [] coll)) ())))
+  ([xform coll] (or (seq (transduce xform conj [] coll)) ()))
+  ([xform coll & colls]
+   (let [rf (xform conj)]
+     (or (seq (rf (unreduced (-tr-reduce-multi rf [] (%cons coll colls))))) ()))))
 (defn eduction [& args] (seq (transduce (apply comp (butlast args)) conj [] (last args))))
 (defn completing
   ([f] (completing f identity))

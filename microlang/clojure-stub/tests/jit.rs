@@ -76,6 +76,61 @@ fn try_arms_compile_once_not_per_execution() {
     );
 }
 
+/// DISTINCT `try` forms must not answer for each other.
+///
+/// The cache above was keyed by the arm's `Ir` ADDRESS. An `Ir` tree is dropped
+/// when its form finishes, and the allocator hands the same address to the next
+/// tree — so a later, unrelated `try` hit the earlier one's compiled code. It is
+/// a silent wrong ANSWER, which is why the "compile once" test above sailed past
+/// it: three sequential `(try N (finally nil))` returned 1, 2, 2, and
+/// `(vector (try 1 (finally nil)))` after any other try returned `[nil]`.
+/// `Ir::Try` now carries a process-unique `site`, and ids are never recycled.
+///
+/// Every case here is one program, because the bug needs one try's Ir to be
+/// FREED before the next is built — a fresh runtime per expression cannot see it.
+#[test]
+fn distinct_try_forms_do_not_share_compiled_code() {
+    // Each try is its OWN top-level form: that is what lets the first tree be
+    // dropped before the next is built, so the addresses collide. Written as one
+    // form (a single vector) all three Ir trees are alive at once, get distinct
+    // addresses, and the bug hides — this test passed against the unsound key
+    // until the tries were split apart like this.
+    assert_eq!(
+        jit("(def r1 (try 1 (finally nil)))
+             (def r2 (try 2 (finally nil)))
+             (def r3 (try 3 (finally nil)))
+             [r1 r2 r3]"),
+        "[1 2 3]"
+    );
+    // The original repro: a try at top level, then the same shape as an ARGUMENT.
+    assert_eq!(
+        jit("(def a (try 1 (finally nil)))
+             (def b (vector (try 1 (finally nil))))
+             [a b]"),
+        "[1 [1]]"
+    );
+    // Distinct catch arms must not swap either.
+    assert_eq!(
+        jit("(def c1 (try (throw \"x\") (catch Exception e :a)))
+             (def c2 (try (throw \"y\") (catch Exception e :b)))
+             [c1 c2]"),
+        "[:a :b]"
+    );
+    // `binding` desugars to try/finally, so this is where it surfaced: nested
+    // bindings returned [:seq nil :vector] instead of [:seq :vector :seq].
+    assert_eq!(
+        jit("(def ^:dynamic *v* nil) (defn rd [] *v*) \
+             (binding [*v* :seq] [(rd) (binding [*v* :vector] (rd)) (rd)])"),
+        "[:seq :vector :seq]"
+    );
+    // ...and the outer binding must still unwind to the root.
+    assert_eq!(
+        jit("(def ^:dynamic *w* :root) (defn rd2 [] *w*) \
+             (binding [*w* 1] (binding [*w* 2] (rd2))) (rd2)"),
+        ":root"
+    );
+}
+
 /// The INLINED bitwise fast path (`emit_guarded_arith`), which `even?`/`odd?`
 /// ride once per element in any filtered pipeline. It untags to raw i64, does
 /// the op, and retags with NO range check — sound only because the fixnum range

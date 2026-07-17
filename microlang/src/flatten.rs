@@ -360,7 +360,13 @@ impl<'a> Flat<'a> {
                     }
                 };
                 let finally2 = finally.as_ref().map(|f| Box::new(self.walk(f)));
-                Ir::Try { body: body2, catch: catch2, finally: finally2, cslot }
+                Ir::Try {
+                    body: body2,
+                    catch: catch2,
+                    finally: finally2,
+                    cslot,
+                    site: crate::ir::fresh_try_site(),
+                }
             }
         }
     }

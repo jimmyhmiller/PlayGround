@@ -3345,7 +3345,21 @@ impl<M: ValueModel> Runtime<M> {
             }
         }
         if sel == 0 {
-            let msg = format!("arity: no clause for {argc} args");
+            // Name the arities this fn DOES take: a multi-arity fn object carries
+            // no name, so "no clause for 3 args" alone identifies nothing in a
+            // deep library call. The shape is usually enough to find the callee.
+            let have: Vec<String> = fixed
+                .iter()
+                .enumerate()
+                .filter(|(_, &c)| c != 0)
+                .map(|(i, _)| i.to_string())
+                .collect();
+            let vmin = unsafe { g.raw_word(info, 0) };
+            let mut have = have;
+            if vmin != u64::MAX {
+                have.push(format!("{vmin}+"));
+            }
+            let msg = format!("arity: no clause for {argc} args (takes {})", have.join(", "));
             let sid = self.alloc(Obj::Str(msg));
             self.signal_throw(M::R::enc_ref(sid));
             return Some(self.encode(Val::Nil));
@@ -3355,8 +3369,15 @@ impl<M: ValueModel> Runtime<M> {
 
     pub fn multifn_select(&mut self, callee: u64, argc: usize) -> Option<u64> {
         let Val::Ref(id) = self.decode(callee) else { return None };
+        let mut have: Vec<String> = Vec::new();
         let (sel, known) = match self.view_gc(id) {
             ObjView::MultiFn { fixed, variadic } => {
+                have.extend(
+                    fixed.iter().enumerate().filter(|(_, &c)| c != 0).map(|(i, _)| i.to_string()),
+                );
+                if let Some((min, _)) = variadic {
+                    have.push(format!("{min}+"));
+                }
                 let f = fixed.get(argc).copied().unwrap_or(0);
                 if f != 0 {
                     (f, true)
@@ -3376,7 +3397,7 @@ impl<M: ValueModel> Runtime<M> {
             return None;
         }
         if sel == 0 {
-            let msg = format!("arity: no clause for {argc} args");
+            let msg = format!("arity: no clause for {argc} args (takes {})", have.join(", "));
             let sid = self.alloc(Obj::Str(msg));
             let thrown = M::R::enc_ref(sid);
             self.signal_throw(thrown);

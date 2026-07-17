@@ -909,6 +909,7 @@ extern "C" fn shim_try<M: ModelArithJit>(
     catch: *const Ir,
     finally: *const Ir,
     cslot: u32,
+    site: u64,
 ) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
@@ -924,12 +925,14 @@ extern "C" fn shim_try<M: ModelArithJit>(
     // when it is wrapped (Traced/Tiered — `jit` is null), keep going through
     // `top` so the wrapper still observes the arm.
     let jitp = unsafe { (*ctx.rc).jit };
-    let run = |rt: &mut Runtime<M>, ir: &Ir, locals: &Locals| -> u64 {
+    // The three arms are three distinct bodies under ONE site, so each gets its
+    // own cache key derived from it (`arm`: 0 body, 1 catch, 2 finally).
+    let run = |rt: &mut Runtime<M>, ir: &Ir, locals: &Locals, arm: u64| -> u64 {
         if jitp.is_null() {
             top.eval_ir(top, rt, ir, locals)
         } else {
             let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
-            jit.run_nested_body(top, rt, ir, locals)
+            jit.run_nested_body(top, rt, ir, locals, site * 4 + arm)
         }
     };
 
@@ -937,14 +940,14 @@ extern "C" fn shim_try<M: ModelArithJit>(
     // signal-checking logic of TreeWalk's `Ir::Try`, no unwinding involved. The
     // body/handlers run on `top` (the JIT), which propagates the flag natively via
     // the per-call pending checks; this shim just checks + routes.
-    let mut result = run(rt, body, &locals);
+    let mut result = run(rt, body, &locals, 0);
     if rt.pending_throw() && !catch.is_null() {
         let thrown = rt.take_signal().value;
         let cbody = unsafe { &*catch };
         // The catch binding was re-homed by `flatten` to a slot of THIS
         // activation frame (no fresh frame).
         frame_set(&locals, 0, cslot as u16, thrown);
-        result = run(rt, cbody, &locals);
+        result = run(rt, cbody, &locals, 1);
     }
     if !finally.is_null() {
         let fbody = unsafe { &*finally };
@@ -955,7 +958,7 @@ extern "C" fn shim_try<M: ModelArithJit>(
         // does not cover it) are bare heap pointers across it.
         let base = rt.push_root(result);
         rt.push_root(suspended.value);
-        let fv = run(rt, fbody, &locals);
+        let fv = run(rt, fbody, &locals, 2);
         result = rt.root_get(base);
         let value = rt.root_get(base + 1);
         rt.truncate_roots(base);
@@ -1600,6 +1603,14 @@ pub struct JitCranelift<M: ModelArithJit> {
     /// Compiled closure bodies, keyed by the `Arc<Ir>` identity (compile-once,
     /// like the bytecode tier's chunk cache).
     cache: RefCell<HashMap<*const Ir, Arc<Compiled>, PtrBuildHasher>>,
+    /// Compiled try arms, keyed by `Ir::Try`'s process-unique `site` (times 4,
+    /// plus the arm index) — NOT by the arm's address. An `Ir` tree is freed when
+    /// its form finishes and the allocator hands the same address to the next
+    /// tree, so an address-keyed entry silently answered for an unrelated try:
+    /// three distinct `(try N (finally nil))` in sequence returned 1, 2, 2, and
+    /// `(vector (try 1 (finally nil)))` after any other try returned [nil].
+    /// Site ids are never recycled, so a stale entry cannot be hit.
+    try_cache: RefCell<HashMap<u64, Arc<Compiled>, PtrBuildHasher>>,
     counter: Cell<u32>,
     /// A free list of `Arc<Frame>` whose call has returned without being captured
     /// (`strong_count == 1`). Refilled via `Arc::get_mut` on the next call instead
@@ -1950,7 +1961,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let disp: extern "C" fn(*mut JitCtx<M>, u32, u32, *const u64, u32) -> u64 = shim_dispatch::<M>;
         let dmeth: extern "C" fn(*mut JitCtx<M>, u32, u32, u64) -> u64 = shim_def_method::<M>;
         let apl: extern "C" fn(*mut JitCtx<M>, *const u64, u32) -> u64 = shim_apply::<M>;
-        let tryf: extern "C" fn(*mut JitCtx<M>, *const Ir, *const Ir, *const Ir, u32) -> u64 = shim_try::<M>;
+        let tryf: extern "C" fn(*mut JitCtx<M>, *const Ir, *const Ir, *const Ir, u32, u64) -> u64 =
+            shim_try::<M>;
         let spwn: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_spawn::<M>;
         let awt: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_await::<M>;
         let gcf: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_gc::<M>;
@@ -2025,7 +2037,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let s_dispatch = sig(&[ptr, i32t, i32t, ptr, i32t]);
         let s_def_method = sig(&[ptr, i32t, i32t, I64]);
         let s_apply = sig(&[ptr, ptr, i32t]);
-        let s_try = sig(&[ptr, ptr, ptr, ptr, i32t]);
+        // (ctx, body, catch, finally, cslot, site)
+        let s_try = sig(&[ptr, ptr, ptr, ptr, i32t, I64]);
         let s_spawn = sig(&[ptr, I64]);
         let s_await = sig(&[ptr, I64]);
         let s_gc = sig(&[ptr]);
@@ -2077,6 +2090,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             fbctx: RefCell::new(FunctionBuilderContext::new()),
             shims,
             cache: RefCell::new(HashMap::default()),
+            try_cache: RefCell::new(HashMap::default()),
             frame_pool: RefCell::new(Vec::new()),
             call_ic: RefCell::new(std::array::from_fn(|_| None)),
             template_code: RefCell::new(Vec::with_capacity(TEMPLATE_CODE_CAP)),
@@ -2240,6 +2254,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         rt: &mut Runtime<M>,
         ir: &Ir,
         locals: &Locals,
+        try_site: u64,
     ) -> u64 {
         let shape = BodyShape {
             entry_arity: None,
@@ -2249,17 +2264,22 @@ impl<M: ModelArithJit> JitCranelift<M> {
             mem_mode: true,
             tail_root: false,
         };
-        let key = ir as *const Ir;
+        // Keyed by the try's own site id. Keying by `ir as *const Ir` was
+        // UNSOUND: an Ir tree is freed when its form finishes and the next tree
+        // reuses the address, so the entry answered for an unrelated try — three
+        // distinct `(try N (finally nil))` in sequence gave 1, 2, 2, and
+        // `(vector (try 1 (finally nil)))` after any other try gave [nil].
+        let key = try_site;
         // NB: bind the lookup to its own `let` so the shared borrow guard is
         // dropped HERE. Written as `if let Some(c) = self.cache.borrow()…` the
         // guard would live across the whole if/else and the `borrow_mut` below
         // would panic (already-borrowed) on the first miss.
-        let hit = self.cache.borrow().get(&key).cloned();
+        let hit = self.try_cache.borrow().get(&key).cloned();
         let compiled = match hit {
             Some(c) => c,
             None => {
                 let c = self.compile(Some(rt), ir, shape);
-                self.cache.borrow_mut().insert(key, c.clone());
+                self.try_cache.borrow_mut().insert(key, c.clone());
                 c
             }
         };
@@ -4859,7 +4879,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // try/catch/finally: pass the body/catch/finally Ir by pointer (they
             // outlive the compiled code) and let the shim run them via `top` under
             // a catch_unwind — so the whole construct is one shim call.
-            Ir::Try { body, catch, finally, cslot } => {
+            Ir::Try { body, catch, finally, cslot, site } => {
                 let bp = (&**body as *const Ir) as i64;
                 let cp = catch.as_deref().map_or(std::ptr::null::<Ir>(), |c| c as *const Ir) as i64;
                 let fp = finally.as_deref().map_or(std::ptr::null::<Ir>(), |c| c as *const Ir) as i64;
@@ -4867,8 +4887,10 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let cpv = self.fb.ins().iconst(I64, cp);
                 let fpv = self.fb.ins().iconst(I64, fp);
                 let csv = self.i32const(*cslot as u32);
+                // The arm cache is keyed by this, not by the Ir pointers above.
+                let sitev = self.fb.ins().iconst(I64, *site as i64);
                 let ctx = self.ctx_val;
-                self.call_shim_checked(self.refs.try_, &[ctx, bpv, cpv, fpv, csv])
+                self.call_shim_checked(self.refs.try_, &[ctx, bpv, cpv, fpv, csv, sitev])
             }
         }
     }

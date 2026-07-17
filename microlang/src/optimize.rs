@@ -105,11 +105,14 @@ fn map_children(ir: &Ir, f: &mut impl FnMut(&Ir) -> Ir) -> Ir {
         Ir::FieldGet { site, field, obj } => {
             Ir::FieldGet { site: *site, field: *field, obj: Box::new(f(obj)) }
         }
-        Ir::Try { body, catch, finally, cslot } => Ir::Try {
+        // A rebuilt Try is a NEW node whose body may differ from the original's,
+        // so it must not inherit the original's site and answer from its cache.
+        Ir::Try { body, catch, finally, cslot, .. } => Ir::Try {
             body: Box::new(f(body)),
             catch: catch.as_ref().map(|c| Box::new(f(c))),
             finally: finally.as_ref().map(|fin| Box::new(f(fin))),
             cslot: *cslot,
+            site: crate::ir::fresh_try_site(),
         },
     }
 }

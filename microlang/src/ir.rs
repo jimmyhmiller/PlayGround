@@ -542,5 +542,23 @@ pub enum Ir {
         /// The activation slot the thrown value is stored into before the catch
         /// body runs. Assigned by `flatten` (0 until then).
         cslot: u16,
+        /// A process-unique id for THIS Try node, stamped by `fresh_try_site` at
+        /// every construction. The JIT caches a try arm's compiled code, and this
+        /// is what identifies the arm.
+        ///
+        /// It cannot be the node's ADDRESS. An `Ir` tree is dropped when its form
+        /// finishes, and the allocator reuses that address for the NEXT tree, so
+        /// an address-keyed entry silently answers for a different try: three
+        /// distinct `(try N (finally nil))` forms evaluated in sequence returned
+        /// 1, 2, 2. Ids are never recycled, so a stale entry cannot be hit.
+        site: u64,
     },
+}
+
+/// Mint a process-unique id for a `Ir::Try` node. Monotonic and never reused —
+/// that is the whole point (see `Ir::Try::site`).
+pub fn fresh_try_site() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
