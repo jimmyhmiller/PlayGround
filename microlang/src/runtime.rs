@@ -2801,6 +2801,10 @@ impl<M: ValueModel> Runtime<M> {
     pub fn signal_kind_offset() -> usize {
         core::mem::offset_of!(Runtime<M>, signal) + core::mem::offset_of!(Signal, kind)
     }
+    /// Byte offset of `signal.value`, for the JIT's inline `throw`.
+    pub fn signal_value_offset() -> usize {
+        core::mem::offset_of!(Runtime<M>, signal) + core::mem::offset_of!(Signal, value)
+    }
 
     /// A deterministic 32-bit content hash of any value (for the HAMT). Equal
     /// values (by `equal`) hash equal: ints by value, strings/symbols/chars by

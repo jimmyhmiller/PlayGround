@@ -2951,6 +2951,7 @@ fn build_body<M: ModelArithJit>(
         off_rc,
         off_rt: core::mem::offset_of!(JitCtx<'static, M>, rt) as i32,
         signal_kind_off: Runtime::<M>::signal_kind_offset() as i32,
+        signal_value_off: Runtime::<M>::signal_value_offset() as i32,
         ctx_size: core::mem::size_of::<JitCtx<'static, M>>() as u32,
         loop_header: None,
         loop_nparams: shape.nparams,
@@ -3081,6 +3082,7 @@ pub struct Compiler<'a, 'b> {
     /// (`signal.kind`) within `Runtime` — for the per-call pending check.
     off_rt: i32,
     signal_kind_off: i32,
+    signal_value_off: i32,
     ctx_size: u32,
     /// The run-context pointer, loaded once at entry; shared-field reads use it.
     rc_val: Value,
@@ -4544,6 +4546,36 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.switch_to_block(merge);
                 self.fb.seal_block(merge);
                 self.fb.use_var(result)
+            }
+            // `(throw v)` — set the signal in line and jump straight to the
+            // innermost catch handler (or return out of the body). `throw` is a
+            // FLAG store, not an unwind, so the generic prim shim's arg-spill +
+            // tag-dispatch was pure overhead — and core.match THROWS on every
+            // failed clause (1.7M `throw`s in the benchmark, its single hottest
+            // prim). Pairs with the inlined `try`: a backtrack is now two stores
+            // and a jump.
+            Ir::Prim(Prim::Throw, args) if args.len() == 1 => {
+                let v = self.compile::<M>(&args[0], false);
+                let rtp = self.load_rc_field(self.off_rt);
+                let flags = MemFlagsData::trusted();
+                self.fb.ins().store(flags, v, rtp, self.signal_value_off);
+                let one = self.fb.ins().iconst(I8, 1); // Signal::kind = 1 (throw)
+                self.fb.ins().store(flags, one, rtp, self.signal_kind_off);
+                match self.catch_handlers.last().copied() {
+                    Some(h) => {
+                        self.fb.ins().jump(h, &[]);
+                    }
+                    None => {
+                        let nil = self.iconst(M::R::enc_nil());
+                        self.fb.ins().return_(&[nil]);
+                    }
+                }
+                // `throw` never falls through — but the compiler expects a value
+                // for the current block. A fresh unreachable block supplies one.
+                let dead = self.fb.create_block();
+                self.fb.switch_to_block(dead);
+                self.fb.seal_block(dead);
+                self.iconst(M::R::enc_nil())
             }
             // `(record 'Tag f…)` — inline allocation. Records are THE allocation of
             // this runtime: every lazy-seq step is a `(record 'LazySeq thunk false)`,
