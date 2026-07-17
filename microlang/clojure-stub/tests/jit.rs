@@ -24,6 +24,58 @@ fn arithmetic_and_fns() {
     assert_eq!(jit("(map inc [1 2 3])"), "(2 3 4)");
 }
 
+/// A `try` arm must be Cranelift'd ONCE, not on every execution.
+///
+/// `shim_try` ran its arms through `top.eval_ir`, which deliberately does not
+/// cache (top-level `Ir`s are transient). Try arms are not transient — the emit
+/// site keeps them alive as long as the code — so every `try` re-ran the whole
+/// compiler, regalloc included: 74.7µs per execution against 24ns for the same
+/// expression without the `try`. core.match compiles pattern backtracking into
+/// try/catch, which made it ~5900x JVM Clojure and effectively unusable.
+///
+/// A correctness suite cannot see this: the answers were always right. So the
+/// assertion is on `compiled_bodies()` — the compile-once counter — and on the
+/// property that actually matters: it must not SCALE with how many times a
+/// `try` runs. (Asserting an absolute count would just encode today's prelude;
+/// running the same program at two very different iteration counts isolates the
+/// per-execution term, which is the bug.)
+fn compiles_for(iterations: usize) -> u32 {
+    let mut rt = Runtime::<LowBitModel>::new();
+    let backend = JitCranelift::<LowBitModel>::new();
+    let src = format!(
+        "(defn f [x] (try (+ x 1) (catch Exception e 0)))
+         (defn g [x] (try (+ x 1) (finally nil)))
+         (f 1) (g 1)
+         (dotimes [i {iterations}] (f i) (g i))"
+    );
+    clojure_stub::run(&mut rt, &backend, &src);
+    // total_compiles, NOT compiled_bodies: the latter is cache.len(), and the
+    // bug was a body recompiled WITHOUT ever being cached — invisible to it.
+    // (This test passed against the un-fixed compiler until it counted the
+    // right thing.)
+    backend.total_compiles()
+}
+
+#[test]
+fn try_arms_compile_once_not_per_execution() {
+    let few = compiles_for(10);
+    let many = compiles_for(2000);
+    assert_eq!(
+        few, many,
+        "running try/catch+finally 2000x compiled {} more bodies than running it 10x \
+         — the try arms are being recompiled per execution",
+        many.saturating_sub(few)
+    );
+    // and it still means the same thing
+    assert_eq!(jit("(try (+ 1 1) (catch Exception e :caught))"), "2");
+    assert_eq!(jit("(try (throw \"boom\") (catch Exception e :caught))"), ":caught");
+    assert_eq!(jit("(let [a (atom 0)] (try 1 (finally (reset! a 9))) @a)"), "9");
+    assert_eq!(
+        jit("(try (try (throw \"x\") (finally 1)) (catch Exception e :outer))"),
+        ":outer"
+    );
+}
+
 /// The INLINED bitwise fast path (`emit_guarded_arith`), which `even?`/`odd?`
 /// ride once per element in any filtered pipeline. It untags to raw i64, does
 /// the op, and retags with NO range check — sound only because the fixnum range

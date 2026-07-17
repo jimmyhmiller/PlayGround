@@ -2078,8 +2078,23 @@ impl<M: ModelArithJit> JitCranelift<M> {
 
     /// How many distinct bodies have been compiled to native code (a compile-once
     /// counter, like the bytecode tier's `compiled_bodies`).
+    ///
+    /// NB: this is `cache.len()` — DISTINCT bodies. It cannot see a body that is
+    /// compiled repeatedly without ever being cached, which is exactly what the
+    /// `try` arms used to do. Use `total_compiles` to catch that.
     pub fn compiled_bodies(&self) -> usize {
         self.cache.borrow().len()
+    }
+
+    /// How many times Cranelift has ACTUALLY been run — cached or not. The
+    /// number the `MICROLANG_JIT_TRACE` lines are stamped with.
+    ///
+    /// The honest counterpart to `compiled_bodies`: a re-compile of an
+    /// already-compiled body leaves that one unchanged and bumps this one. If
+    /// this grows with how often code RUNS rather than with how much code
+    /// EXISTS, something is recompiling per execution.
+    pub fn total_compiles(&self) -> u32 {
+        self.counter.get()
     }
 
     /// Human-readable Cranelift IR for one expression — evidence the emitted code
