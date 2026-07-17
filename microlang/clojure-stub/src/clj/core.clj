@@ -2001,6 +2001,13 @@
   ([h child parent]
    (boolean
     (or (= child parent)
+        ;; Class-to-class, which the JVM answers with `isAssignableFrom` and the
+        ;; global hierarchy knows nothing about. Real code leans on it: meander
+        ;; decides whether a `vector?` test is redundant by asking
+        ;; `(isa? (type x) clojure.lang.IPersistentVector)`, and a wrong FALSE
+        ;; there compiles the whole pattern match into an unconditional fail.
+        (and (class? child) (class? parent)
+             (-jvm-assignable? (field parent 0) (field child 0)))
         (contains? (get (:ancestors h) child) parent)
         (and (vector? child) (vector? parent)
              (= (count child) (count parent))
@@ -2040,7 +2047,13 @@
 
 ;; ─────────────── type / gensym / boolean ───────────────
 (defn boolean [x] (if x true false))
-(defn type [x] (let [m (meta x)] (if (and m (contains? m :type)) (:type m) (type-of x))))
+;; `(type x)` is `(or (:type (meta x)) (class x))` — the CLASS. It used to answer
+;; with the bare runtime TAG (the symbol `PersistentVector` where Clojure says
+;; clojure.lang.PersistentVector), which is not a class at all: `(isa? (type x)
+;; <any interface>)` was then false for everything, and callers that reason about
+;; types silently drew the wrong conclusion rather than erroring. `type-of` is
+;; still the tag, and is what this dialect's own internals dispatch on.
+(defn type [x] (let [m (meta x)] (if (and m (contains? m :type)) (:type m) (class x))))
 (def -gensym-counter (atom 0))
 (defn gensym
   ([] (gensym "G__"))

@@ -254,6 +254,33 @@
               true
               (recur (-jvm-c-extends d)))))))))
 
+;; Class-to-class assignability — `Class.isAssignableFrom`, which is what `isa?`
+;; asks (`(isa? (type []) clojure.lang.IPersistentVector)`) with NO instance in
+;; hand. So it cannot consult the interfaces' `:pred`s, which need a value.
+;;
+;; It must not use `:extend-tags` either: that list is the protocol-dispatch
+;; SPECIFICITY policy — IPersistentCollection deliberately omits the map tags so
+;; that maps dispatch to IPersistentMap — which is a different question from "is a
+;; map an IPersistentCollection". On the JVM it is. So this walks DECLARED edges
+;; only: `:implements` (transitively — interfaces extend interfaces) and
+;; `:extends`. An undeclared edge reads as false, so the edges below are the
+;; contract; a class that gains an interface must say so.
+(defn -jvm-assignable? [parent child]
+  (if (%num-eq parent child)
+    true
+    (let [d (-jvm-descriptor child)]
+      (if (nil? d)
+        false
+        (if (-jvm-any-assignable? parent (-jvm-c-implements d))
+          true
+          (let [e (-jvm-c-extends d)]
+            (if (nil? e) false (-jvm-assignable? parent e))))))))
+(defn -jvm-any-assignable? [parent l]
+  (loop [l l]
+    (if (nil? l)
+      false
+      (if (-jvm-assignable? parent (%first l)) true (recur (%rest l))))))
+
 ;; `(instance? pkg.Class x)` — interfaces by :pred / :protocol, classes by tag
 ;; match or inheritance walk; an UNREGISTERED name is a deftype/dialect record
 ;; tag: plain tag equality.
@@ -580,13 +607,25 @@
   (:kind :interface)
   (:extend-tags Symbol Keyword)
   (:pred (fn [x] (or (symbol? x) (keyword? x)))))
-(defclass clojure.lang.PersistentVector (:tag PersistentVector))
+(defclass clojure.lang.PersistentVector (:tag PersistentVector)
+  (:implements clojure.lang.IPersistentVector clojure.lang.APersistentVector
+               clojure.lang.IPersistentCollection clojure.lang.Seqable
+               clojure.lang.Associative clojure.lang.ILookup clojure.lang.Indexed
+               clojure.lang.Counted clojure.lang.Sequential clojure.lang.IFn))
 (defclass clojure.lang.IPersistentVector
   (:kind :interface) (:tag PersistentVector) (:pred vector?))
 (defclass clojure.lang.APersistentVector
   (:kind :interface) (:tag PersistentVector) (:pred vector?))
-(defclass clojure.lang.PersistentArrayMap (:tag PersistentArrayMap))
-(defclass clojure.lang.PersistentHashMap (:tag PersistentHashMap))
+(defclass clojure.lang.PersistentArrayMap (:tag PersistentArrayMap)
+  (:implements clojure.lang.IPersistentMap clojure.lang.APersistentMap
+               clojure.lang.IPersistentCollection clojure.lang.Seqable
+               clojure.lang.Associative clojure.lang.ILookup
+               clojure.lang.Counted clojure.lang.IFn))
+(defclass clojure.lang.PersistentHashMap (:tag PersistentHashMap)
+  (:implements clojure.lang.IPersistentMap clojure.lang.APersistentMap
+               clojure.lang.IPersistentCollection clojure.lang.Seqable
+               clojure.lang.Associative clojure.lang.ILookup
+               clojure.lang.Counted clojure.lang.IFn))
 (defclass clojure.lang.IPersistentMap
   (:kind :interface) (:tag PersistentArrayMap) (:pred map?)
   (:extend-tags PersistentArrayMap PersistentHashMap Map SortedMap))
@@ -600,15 +639,22 @@
                 PersistentHashSet Set SortedSet PersistentQueue))
 (defclass clojure.lang.APersistentMap
   (:kind :interface) (:tag PersistentArrayMap) (:pred map?))
-(defclass clojure.lang.PersistentHashSet (:tag PersistentHashSet))
+(defclass clojure.lang.PersistentHashSet (:tag PersistentHashSet)
+  (:implements clojure.lang.IPersistentSet clojure.lang.IPersistentCollection
+               clojure.lang.Seqable clojure.lang.Counted clojure.lang.IFn))
 (defclass clojure.lang.IPersistentSet
   (:kind :interface) (:tag PersistentHashSet) (:pred set?))
 (defclass clojure.lang.ISeq (:kind :interface) (:tag List) (:pred seq?))
 (defclass clojure.lang.Seqable (:kind :interface) (:tag List) (:pred -seqable?))
-(defclass clojure.lang.Cons (:tag List))
+(defclass clojure.lang.Cons (:tag List)
+  (:implements clojure.lang.ISeq clojure.lang.IPersistentCollection
+               clojure.lang.Seqable clojure.lang.Sequential))
 (defclass clojure.lang.IPersistentList (:kind :interface) (:tag List) (:pred list?))
 (defclass clojure.lang.PersistentList
   (:tag List)
+  (:implements clojure.lang.ISeq clojure.lang.IPersistentList
+               clojure.lang.IPersistentCollection clojure.lang.Seqable
+               clojure.lang.Sequential clojure.lang.Counted)
   (:static creator -list))
 (defclass clojure.lang.IFn (:kind :interface) (:tag Fn) (:pred ifn?))
 (defclass clojure.lang.ILookup (:kind :interface) (:protocol ILookup))

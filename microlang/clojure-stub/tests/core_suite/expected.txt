@@ -654,3 +654,20 @@
 (conj (get {} :missing []) 1)	[1]
 (let [v []] (conj v 1))	[1]
 (count (reduce conj [] (range 100)))	100
+(isa? (type [1 2]) clojure.lang.IPersistentVector)	true
+(isa? (type [1 2]) clojure.lang.IPersistentCollection)	true
+(isa? (type [1 2]) clojure.lang.ISeq)	false
+(isa? (type [1 2]) clojure.lang.IPersistentMap)	false
+(isa? (type {:a 1}) clojure.lang.IPersistentMap)	true
+(isa? (type {:a 1}) clojure.lang.IPersistentCollection)	true
+(isa? (type {:a 1}) clojure.lang.IPersistentVector)	false
+(isa? (type #{1}) clojure.lang.IPersistentSet)	true
+(isa? (type #{1}) clojure.lang.IPersistentCollection)	true
+(isa? (type (list 1)) clojure.lang.ISeq)	true
+(isa? (type (list 1)) clojure.lang.IPersistentCollection)	true
+(isa? (type (list 1)) clojure.lang.IPersistentVector)	false
+(= (type [1 2]) (class [1 2]))	true
+(isa? (type "s") clojure.lang.IPersistentVector)	false
+(.getName (type [1 2]))	"clojure.lang.PersistentVector"
+(.getName (type {:a 1}))	"clojure.lang.PersistentArrayMap"
+(.getName (type #{1}))	"clojure.lang.PersistentHashSet"
