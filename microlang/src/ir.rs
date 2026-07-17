@@ -227,6 +227,13 @@ pub enum Prim {
     /// `(%proto-has-type? methods ty)` — does any method sym in the cons list have
     /// an impl for `ty`? The native `satisfies?` inner loop.
     ProtoHasType,
+    /// `(%scalar-type? x)` — is `x`'s `type-of` one of the built-in SCALAR types
+    /// (Long/Keyword/String/Double/Char/Symbol/Boolean/Ratio)? These share the
+    /// `Object` default `IEquiv` (= `%num-eq`), so `=` can skip protocol dispatch
+    /// for them. One native check replaces `-scalar-eq-type?`'s up-to-8 symbol
+    /// `%num-eq`s per non-identical `=`. Mirrors `type_tag`'s classification
+    /// EXACTLY (bignums report `Long`; only keyword records count among records).
+    ScalarType,
     /// `(%method-types 'method)` -> a list of the type-name symbols that have a
     /// concrete impl registered for `method` in the dispatch registry (excluding
     /// the `-protocol-default` sentinel). Reflection over protocol extensions,

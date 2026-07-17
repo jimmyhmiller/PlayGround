@@ -617,14 +617,15 @@
 ;; and `nil` — which DO define custom IEquiv (cross-type seq equality, order-
 ;; insensitive map/set equality, `(= nil x)`) — must keep the dispatch, so they
 ;; are excluded from the allowlist and fall through to `-equiv` unchanged.
-(defn -scalar-eq-type? [t]
-  (or (%num-eq t 'Long) (%num-eq t 'Keyword) (%num-eq t 'String)
-      (%num-eq t 'Double) (%num-eq t 'Char) (%num-eq t 'Symbol)
-      (%num-eq t 'Boolean) (%num-eq t 'Ratio)))
+;; `%scalar-type?` is the native one-shot form of the type-membership test above:
+;; true iff `(type-of a)` is Long/Keyword/String/Double/Char/Symbol/Boolean/Ratio.
+;; It collapses `-scalar-eq-type?`'s up-to-8 symbol `%num-eq`s (each a full prim
+;; dispatch) into a single header-kind check — the dominant `=` cost in
+;; predicate-heavy code like core.match's per-element classification.
 (defn -eq2 [a b]
   (if (%eq a b)
     (if (%num-eq (type-of a) 'Double) (-equiv a b) true)
-    (if (-scalar-eq-type? (type-of a)) (%num-eq a b) (-equiv a b))))
+    (if (%scalar-type? a) (%num-eq a b) (-equiv a b))))
 
 ;; A 1-arg IFn protocol: a deftype implementing `clojure.lang.IFn`'s `(invoke
 ;; [this a])` becomes callable; the default throws.

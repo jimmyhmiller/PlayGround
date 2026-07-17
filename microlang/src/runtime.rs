@@ -351,6 +351,10 @@ pub struct Shared<M: ValueModel> {
     sym_cache_transient_hash_map: AtomicU32,
     sym_cache_persistent_hash_map: AtomicU32,
     sym_cache_persistent_array_map: AtomicU32,
+    /// The interned `Keyword` type symbol — a keyword record stores this as its
+    /// type sym, so `%scalar-type?` uses it to recognize keywords (the one
+    /// scalar shape that lives as a RECORD) without re-interning per call.
+    sym_cache_keyword: AtomicU32,
     /// Stage F3: the EDIT-SESSION counter for transients (see
     /// `Runtime::fresh_session`). Starts at 1 and never repeats.
     edit_sessions: AtomicU64,
@@ -545,6 +549,7 @@ impl<M: ValueModel> Runtime<M> {
             sym_cache_transient_hash_map: AtomicU32::new(u32::MAX),
             sym_cache_persistent_hash_map: AtomicU32::new(u32::MAX),
             sym_cache_persistent_array_map: AtomicU32::new(u32::MAX),
+            sym_cache_keyword: AtomicU32::new(u32::MAX),
             edit_sessions: AtomicU64::new(1),
             type_tag_cache: std::array::from_fn(|_| AtomicU32::new(u32::MAX)),
             _pd: PhantomData,
@@ -2184,6 +2189,39 @@ impl<M: ValueModel> Runtime<M> {
                     hit
                 };
                 self.encode(Val::Bool(found))
+            }
+            Prim::ScalarType => {
+                // `(%scalar-type? x)` — true iff `(type-of x)` is one of the
+                // built-in scalar types the `=` fast-path allowlists:
+                // Long/Keyword/String/Double/Char/Symbol/Boolean/Ratio. This
+                // mirrors `type_tag`'s kind classification EXACTLY, collapsing
+                // `-scalar-eq-type?`'s up-to-8 symbol `%num-eq`s into one native
+                // check. Among RECORD-kind objects ONLY keywords are scalar
+                // (they store the interned `Keyword` type sym); every other
+                // record (ExInfo, user deftypes) keeps its custom `-equiv`.
+                use crate::heap::kind;
+                let x = args[0];
+                let scalar = if let Some(g) = self.raw_gc(x) {
+                    match self.raw_type_id(g) {
+                        kind::BIGINT | kind::HUGEINT | kind::BOXFLOAT | kind::STR
+                        | kind::CHAR | kind::RATIO => true,
+                        kind::RECORD => {
+                            let tsym = {
+                                let info = &self.shared.types[kind::RECORD as usize];
+                                unsafe { g.raw_word(info, 0) as Sym }
+                            };
+                            tsym
+                                == self.intern_cached(&self.shared.sym_cache_keyword, "Keyword")
+                        }
+                        _ => false,
+                    }
+                } else {
+                    matches!(
+                        M::R::tag_of(x),
+                        RawTag::Int | RawTag::Float | RawTag::Bool | RawTag::Sym
+                    )
+                };
+                self.encode(Val::Bool(scalar))
             }
             Prim::AmapGet => {
                 // Scan a key/value array pairwise for `k`, structural `equal` per
