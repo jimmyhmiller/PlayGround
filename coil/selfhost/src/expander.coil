@@ -134,6 +134,16 @@
   (let [n (slice-len name) (mut i) (isub n 1) (mut at) -1]
     (loop (if (icmp-lt (load i) 0) (break) (do (if (and (icmp-lt (load at) 0) (icmp-eq (cast i64 (slice-get name (load i))) 46)) (store! at (load i)) 0) (store! i (isub (load i) 1)))))
     (if (icmp-lt (load at) 0) (None [(slice u8)]) (Some (subslice name 0 (load at))))))
+; Anything escaping a macro invocation WITHOUT a span of its own gets the macro call
+; site stamped on it. `error` — the diagnostic the whole stdlib uses (derive, match) —
+; takes only a message and so can never carry a span; the same went for macro arity
+; errors, while the byte-identical error for an ordinary function is perfectly located.
+; `report` DOES take a node and produces a better span, so a located diag is left alone
+; (derr builds lo = -1; that is the "unlocated" marker).
+(defn stamp-call-site [(d Diag) (node Sexp)] (-> Diag)
+  (if (icmp-ge (load (field d lo)) 0) d
+    (dwspan d (sx-source node) (sx-lo node) (sx-hi node) (sx-ctxt node))))
+
 (defn expand-macro [(sub (ptr Program)) (fn-name (slice u8)) (margs (ptr (ArrayList Sexp))) (allfns (ptr (ArrayList (slice u8)))) (genstructs (ptr (ArrayList StructDef))) (gensums (ptr (ArrayList SumDef))) (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry))) (a (ptr Allocator))] (-> (Result Sexp Diag))
   (let [smap (merge-structs-gen sub genstructs a) sumap (merge-sums-gen sub gensums a)
         cx (alloc-stack CtCtx) callee (prog-fn-find sub fn-name)]
@@ -153,7 +163,7 @@
     (if (icmp-eq (cast i64 callee) 0) (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' not found")))
       (let [pparams (load (field callee params)) np (al-len [Param] (load pparams)) na (al-len [Sexp] (load margs)) (mut env) (al-new [EnvBind] a)]
         (if (load (field callee macro_variadic))
-            (if (icmp-lt na (isub np 1)) (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' arity (variadic) mismatch")))
+            (if (icmp-lt na (isub np 1)) (Err [Sexp Diag] (derr (sconcat a (sconcat a (sconcat a (sconcat3 a "macro '" fn-name "' expects at least ") (i64->str a (isub np 1))) " args, got ") (i64->str a na))))
               (do (let [(mut k) 0]
                     (loop (if (icmp-ge (load k) (isub np 1)) (break)
                       (do (let [eb (alloc-stack EnvBind)] (store! (field eb name) (load (field (al-elem [Param] pparams (load k)) name))) (store! (field eb val) (CCode (al-get [Sexp] (load margs) (load k)))) (al-push! (mut env) (load eb)))
@@ -162,7 +172,7 @@
                     (loop (if (icmp-ge (load r) na) (break) (do (al-push! (mut rest) (al-get [Sexp] (load margs) (load r))) (store! r (iadd (load r) 1)))))
                     (let [eb (alloc-stack EnvBind)] (store! (field eb name) (load (field (al-elem [Param] pparams (isub np 1)) name))) (store! (field eb val) (CCode (mk-sexp (KList (box-al [Sexp] a (load rest))) -1 -1))) (al-push! (mut env) (load eb))))
                   (finish-macro callee (box-al [EnvBind] a (load env)) cx a fn-name))))
-            (if (icmp-ne np na) (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' arity mismatch")))
+            (if (icmp-ne np na) (Err [Sexp Diag] (derr (sconcat a (sconcat a (sconcat a (sconcat3 a "macro '" fn-name "' expects ") (i64->str a np)) " args, got ") (i64->str a na))))
               (do (let [(mut k) 0]
                     (loop (if (icmp-ge (load k) np) (break)
                       (do (let [eb (alloc-stack EnvBind)] (store! (field eb name) (load (field (al-elem [Param] pparams (load k)) name))) (store! (field eb val) (CCode (al-get [Sexp] (load margs) (load k)))) (al-push! (mut env) (load eb)))
@@ -208,7 +218,7 @@
                   (do (store! depth (iadd (load depth) 1))
                       (if (icmp-gt (load depth) 100000) (break (Err [Sexp Diag] (derr "macro expansion did not terminate")))
                         (match (expand-macro (load (field env sub)) q (rest-from a items 1) allfns gs gu (load (field env impb)) (load (field env expb)) a)
-                          (Err [d] (break (Err [Sexp Diag] d)))
+                          (Err [d] (break (Err [Sexp Diag] (stamp-call-site d (load (load cur))))))
                           (Ok [outs]
                             (let [op (box-sexp a outs)
                                   dfp (find-func-ptr (load (field env sub)) q)
@@ -317,7 +327,7 @@
         gu (box-al [SumDef] a (al-new [SumDef] a))]
     (match (expand-macro (load (field tc macroctx)) q (rest-from a items 1) (load (field tc allfns))
                          gs gu (load (field tc impb)) (load (field tc expb)) a)
-      (Err [d] (Err [Sexp Diag] d))
+      (Err [d] (Err [Sexp Diag] (stamp-call-site d (load node))))
       (Ok [outs]
         (let [op (box-sexp a outs)
               dfp (find-func-ptr (load (field tc macroctx)) q)

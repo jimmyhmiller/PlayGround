@@ -170,9 +170,9 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
       The **unknown type in a param/field/return** half is NOT fixed and needs an AST change:
       `Param`, `Field` and `Type` carry **no span at all** (ast.coil:33/35), so there is nothing
       to point at. The parser must stamp spans on type nodes first — real work, not a call-site fix.
-- [ ] **mac-2** `error` in a macro is unlocated — while `report` is perfect and undocumented for
+- [x] **mac-2** `error` in a macro is unlocated — while `report` is perfect and undocumented for
       macros. The whole stdlib uses `error`. Give `error` the call-site span; document `report`.
-- [ ] **mac-7** Macro arity errors unlocated and countless, while the *identical* ordinary-function
+- [x] **mac-7** Macro arity errors unlocated and countless, while the *identical* ordinary-function
       error is perfect — directly contradicting "a macro is just a function".
 - [ ] **mac-9** Resolve errors in generated code get no expansion note; type errors get a great one.
 - [ ] **gen-11** `derive` over a generic type fails with a leaked mangled internal name, no span.
