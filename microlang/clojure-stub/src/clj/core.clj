@@ -1868,6 +1868,20 @@
 ;; table-atom holds a map from dispatch-value -> method fn (with a `:default` entry
 ;; as the fallback). Calling it computes `(dispatch-fn args...)`, looks the value
 ;; up, and applies the chosen method to the same args. Dispatch values compare by
+;; The reader lowers `^:private x` / `^:dynamic x` / `^:macro x` to a WRAPPER form
+;; — `(-private-meta x)` etc. (see reader.rs) — which `def` understands. Any macro
+;; that needs the NAME as a symbol must unwrap first: `(defonce ^:private x 1)`
+;; handed the whole wrapper to `(var …)` and died inside `%global-bound?` with a
+;; Rust panic ("not a symbol"), because a var name is a symbol, not a list.
+;; Only the three marker heads unwrap; anything else is returned untouched.
+(defn -def-name [n]
+  (if (seq? n)
+    (let [h (first n)]
+      (if (if (%num-eq h '-private-meta) true
+            (if (%num-eq h '-dynamic-meta) true (%num-eq h '-macro-meta)))
+        (-def-name (second n))
+        n))
+    n))
 ;; structural equality (so keywords / numbers / vectors all work as keys).
 ;; MultiFn record: (record 'MultiFn dispatch-fn method-table-atom prefers-atom).
 ;; field 4 = the DEFAULT dispatch value (`:default` unless defmulti overrides
@@ -1936,7 +1950,7 @@
       nil
       (throw (%str-cat "defmulti " (%sym-name name)
                        ": the :hierarchy option is not supported (dispatch uses the global hierarchy)")))
-    (list 'def name (list '-make-multi (first m2) (list 'quote name)
+    (list 'def name (list '-make-multi (first m2) (list 'quote (-def-name name))
                           (-defmulti-opt opts :default :default)))))
 (defmacro defmethod (name dval params & body)
   (list '-add-method name dval (%cons 'fn (%cons params body))))
@@ -2272,7 +2286,7 @@
   (%cons 'do (map (fn [n] (list 'def n)) names)))
 ;; `(defonce name val)` defs only if the var is not already bound.
 (defmacro defonce (name val)
-  (list 'if (list 'bound? (list 'var name)) nil (list 'def name val)))
+  (list 'if (list 'bound? (list 'var (-def-name name))) nil (list 'def name val)))
 ;; `(defn- name [docstring] params body…)` — a PRIVATE fn (cross-namespace access
 ;; errors). Like `defn`, a leading docstring is skipped (so `params` is always the
 ;; real arg vector / multi-arity clauses).

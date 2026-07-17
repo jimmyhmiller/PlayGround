@@ -2141,6 +2141,13 @@ impl<M: ValueModel> Runtime<M> {
                 Some(b) => b.ns_aliases(self, args[0]),
                 None => panic!("%ns-aliases: no eval bridge installed"),
             },
+            Prim::CpuCount => {
+                // What `Runtime.availableProcessors` answers: the parallelism this
+                // process may actually use (respects cgroup/affinity limits), not
+                // the machine's core count. core.async sizes its thread pool from it.
+                let n = std::thread::available_parallelism().map_or(1, |n| n.get());
+                self.encode(Val::Int(n as i128))
+            }
             Prim::Rand => {
                 // xorshift64*, seeded once per thread from the clock. `rand` only
                 // has to be unpredictable-ish and uniform in [0,1); it is not a
@@ -2330,7 +2337,7 @@ impl<M: ValueModel> Runtime<M> {
             Prim::GlobalBound => {
                 let s = match self.decode(args[0]) {
                     Val::Sym(s) => s,
-                    _ => panic!("%global-bound?: not a symbol"),
+                    other => panic!("%global-bound?: not a symbol: {other:?} = {}", self.print(args[0])),
                 };
                 M::R::enc_bool(self.global_defined(s))
             }

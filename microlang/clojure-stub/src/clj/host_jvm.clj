@@ -491,6 +491,15 @@
 ;; `%nanos` (monotonic, arbitrary origin — nanoTime's contract exactly). There
 ;; is no wall-clock prim, so `currentTimeMillis` is deliberately ABSENT and a
 ;; call to it throws "No such static method" rather than returning a lie.
+;; java.lang.Runtime — a SINGLETON, so `(= (Runtime/getRuntime) (Runtime/getRuntime))`
+;; is true as on the JVM. core.async sizes its dispatch thread pool from
+;; `(.availableProcessors (Runtime/getRuntime))`.
+(def -jvm-runtime (record 'Runtime 0))
+(defclass java.lang.Runtime
+  (:tag Runtime)
+  (:method availableProcessors [_] (%cpu-count))
+  (:static-fn getRuntime [] -jvm-runtime))
+
 (defclass java.lang.System
   (:kind :static)
   (:static-fn nanoTime [] (%nanos))

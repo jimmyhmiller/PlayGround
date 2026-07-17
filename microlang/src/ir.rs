@@ -220,6 +220,8 @@ pub enum Prim {
     ResolveInNs,
     /// `(%rand)` — a pseudorandom float in [0.0, 1.0).
     Rand,
+    /// `(%cpu-count)` — usable hardware parallelism (Runtime.availableProcessors).
+    CpuCount,
     /// `(%method-types 'method)` -> a list of the type-name symbols that have a
     /// concrete impl registered for `method` in the dispatch registry (excluding
     /// the `-protocol-default` sentinel). Reflection over protocol extensions,

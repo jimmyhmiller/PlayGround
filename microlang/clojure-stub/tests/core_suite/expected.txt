@@ -706,3 +706,15 @@
 (str `Exception)	"java.lang.Exception"
 (str `(a b))	"(user/a user/b)"
 (str `[quote if do let* fn* recur try catch finally new set! var def throw &])	"[quote if do let* fn* recur try catch finally new set! var def throw &]"
+(do (defonce ^:private dop1 3) dop1)	3
+(do (defonce dop2 4) dop2)	4
+(do (defonce ^:dynamic *dop3* 6) *dop3*)	6
+(do (declare ^:private dop4) :ok)	:ok
+(do (def ^:private dop5 1) dop5)	1
+(do (defn ^:private dop6 [] 2) (dop6))	2
+[1 #_2 3]	[1 3]
+(+ 1 #_9 2)	3
+(pos? (.availableProcessors (Runtime/getRuntime)))	true
+(= (Runtime/getRuntime) (Runtime/getRuntime))	true
+(do (defmulti ^:private dop7 (fn [x] x)) (defmethod dop7 :default [x] [:d x]) (dop7 :q))	[:d :q]
+(do #_(inc :bad) :done)	:done

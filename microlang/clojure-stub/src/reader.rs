@@ -31,6 +31,16 @@ pub fn read_all<M: ValueModel>(rt: &mut Runtime<M>, src: &str) -> Vec<u64> {
     let mut p = Parser { toks, pos: 0 };
     let mut forms = Vec::new();
     while p.pos < p.toks.len() {
+        // A TOP-LEVEL `#_` discards the next form and yields nothing — it does not
+        // stand for the form after it. `Parser::form` cannot express "no value", so
+        // the skip has to happen here, exactly as the collection reader does it.
+        // Handling it there meant a trailing `#_(…)` at EOF read off the end of the
+        // token stream and panicked (core.async's mutex.clj ends with one).
+        if p.toks[p.pos] == Tok::Discard {
+            p.pos += 1;
+            p.form(rt); // read & drop
+            continue;
+        }
         forms.push(p.form(rt));
     }
     forms
@@ -366,7 +376,10 @@ impl Parser {
                 let elems = self.read_cond_splice(rt);
                 rt.vec_to_list(&elems)
             }
-            // `#_` discards the next form; the value here is the form AFTER it.
+            // `#_` in a VALUE position: the discarded form is dropped and the value
+            // is the form after it (`(f #_a b)` passes b). Top level and collection
+            // elements handle their own skipping — there a discard yields nothing at
+            // all, and there may be no following form.
             Tok::Discard => {
                 self.form(rt); // read & drop the discarded form
                 self.form(rt)
