@@ -4506,6 +4506,73 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.seal_block(merge);
                 self.fb.use_var(result)
             }
+            // `(record 'Tag f…)` — inline allocation. Records are THE allocation of
+            // this runtime: every lazy-seq step is a `(record 'LazySeq thunk false)`,
+            // every vector conj a PVec, plus Volatile/Reduced/ChunkedCons/Map/Set.
+            // Every one of them was a shim call with its args spilled to a buffer —
+            // only closures and cons cells allocated inline. Layout is
+            // `[hdr | raw8 type sym | fields…]` (RECORD_FIELDS_OFF, pinned by
+            // `record_fields_off_matches_type_info`).
+            //
+            // The tag must be a compile-time-known symbol, which every site in
+            // practice is (`(record 'LazySeq …)`); anything else takes the shim.
+            // No write barrier: the object is fresh, so it is in the nursery and
+            // nothing old can point into it yet — the same reason the cons arm
+            // below stores head/tail bare.
+            Ir::Prim(Prim::Record, args) if M::INLINE_OBJECTS && !args.is_empty() => {
+                let tag = if self.rt_ptr.is_null() {
+                    None
+                } else {
+                    let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                    match args[0] {
+                        Ir::Const(id) | Ir::Quote(id) => match rt.decode(rt.const_bits(id)) {
+                            Val::Sym(sy) => Some(sy),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                };
+                let Some(tag) = tag else {
+                    let vals: Vec<Value> =
+                        args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                    return self.slow_prim(Prim::Record, &vals);
+                };
+                let tagv = self.compile::<M>(&args[0], false);
+                let vals: Vec<Value> =
+                    args[1..].iter().map(|a| self.compile::<M>(a, false)).collect();
+                let flags = MemFlagsData::trusted();
+                let nfields = vals.len();
+                let result = self.declare_root_var();
+                let slow = self.fb.create_block();
+                let merge = self.fb.create_block();
+                let header = crate::heap::make_header(kind::RECORD, 0, nfields as u32);
+                let size = (crate::heap::RECORD_FIELDS_OFF + nfields * 8) as i64;
+                let addr = self.emit_alloc(size, header, slow);
+                // The type sym is stored RAW (`alloc_record`'s set_raw_word), not
+                // as a tagged word.
+                let symv = self.iconst(tag as u64);
+                self.fb.ins().store(flags, symv, addr, 8);
+                for (i, v) in vals.iter().enumerate() {
+                    let off = (crate::heap::RECORD_FIELDS_OFF + i * 8) as i32;
+                    self.fb.ins().store(flags, *v, addr, off);
+                }
+                let r = M::emit_enc_ref(self, addr);
+                self.fb.def_var(result, r);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let mut all = Vec::with_capacity(nfields + 1);
+                all.push(tagv);
+                all.extend_from_slice(&vals);
+                let sp = self.slow_prim(Prim::Record, &all);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
             // `(%cons h t)` — inline allocation (D5): normalize a `()` tail to
             // nil (exactly `Runtime::cons`), bump-allocate 24 bytes through the
             // AllocWindow, store head/tail, encode. Window closed/exhausted →
