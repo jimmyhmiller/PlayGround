@@ -70,24 +70,41 @@ small records, so parallel Timely execution is available but not forced.
 
 `bundle-scale-direct` runs the same parallel corpus generation, Oxc transforms,
 resolution, edit, and complete chunk writes without constructing a
-Timely/Differential dataflow. It recomputes reachability from the entry after
-every revision using a conventional Rayon-parallel frontier traversal.
+Timely/Differential dataflow. It interns module paths into dense integer IDs and
+stores forward and reverse adjacency lists. Initial reachability is a
+cache-friendly sequential traversal that also selects a spanning-tree parent
+for every reachable module.
+
+On an edit, adding an edge activates only newly reachable descendants. Removing
+a non-tree edge requires no reachability work. Removing a tree edge detaches its
+tree subtree, finds alternative incoming edges from the still-reachable graph,
+and traverses only from those seeds. Cycles without an external incoming edge
+are retracted correctly. If the detached subtree contains at least 25% of the
+reachable modules, the implementation adaptively falls back to a complete dense
+traversal.
 
 The dependency-edit variants remove one import from the entry module, forcing
 both implementations to identify and retract the same unreachable region:
 
 | Modules | Mode | Initial reachable | Final reachable | Initial reachability | Dependency-edit reachability |
 | ---: | --- | ---: | ---: | ---: | ---: |
-| 10,000 | Parallel traversal | 8,944 | 8,859 | 26.7 ms | 53.8 ms |
+| 10,000 | Dense incremental | 8,944 | 8,859 | 8.58 ms | 0.165 ms |
 | 10,000 | Differential | 8,944 | 8,859 | 77.6 ms | 88.9 ms |
-| 50,000 | Parallel traversal | 44,300 | 44,007 | 184 ms | 299 ms |
+| 50,000 | Dense incremental | 44,300 | 44,007 | 36.5 ms | 0.911 ms |
 | 50,000 | Differential | 44,300 | 44,007 | 488 ms | 642 ms |
 
-The outputs agree, but the conventional full recomputation wins at these sizes.
-The current Differential formulation pays arrangement, iteration, consolidation,
-and progress-tracking costs that outweigh maintaining the small output delta.
-This is stronger evidence than the earlier content-only baseline: Differential
-does not yet earn back its machinery even when reachability actually changes.
+The dense initial traversal is about 3–5 times faster than the previous
+string-based parallel traversal. More importantly, the dependency deletion is
+repaired in under one millisecond at both tested sizes: about 326 times faster
+than the previous direct traversal at 10,000 modules and 328 times faster at
+50,000 modules. A content-only 10,000-module edit takes approximately 0.001 ms
+in the reachability phase because its edge delta is empty.
+
+The outputs agree with Differential and with a fresh dense traversal after the
+edit. Tests also cover local collection of a detached import cycle and the
+constant-work non-tree-edge deletion case. The current Differential formulation
+pays arrangement, iteration, consolidation, and progress-tracking costs that a
+specialized single-entry reachability index avoids.
 
 The ordinary dependency/specifier maps still exist because resolving imports
 and generating executable `require` mappings is part of doing the same bundling

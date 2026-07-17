@@ -532,6 +532,28 @@
   (if (icmp-eq (cast i64 triple) 0) false
     (starts-with (cstr->slice triple) "wasm32-")))
 
+; ---- reading a source file the user named ------------------------------------
+; `read-file` maps ENOENT to "" — right for the loader's disk-first/embedded-module
+; probing, WRONG for a path a user typed. An empty program compiles clean to an object
+; with no `main`, so a mistyped filename surfaced as an arm64 linker error about `_main`
+; that named neither the file nor the mistake — and `fmt --write` on a missing path
+; FABRICATED the file. `read-file-opt` already separates "missing" from "empty" and its
+; own comment says so; this is the one door every user-supplied path goes through.
+; `rc` is the process exit code for a missing file: 1 for build/emit (what clang and
+; rustc do), 2 for `fmt --check`, where 1 already means "this file is not formatted"
+; and a CI gate must be able to tell that apart from a broken invocation.
+(defn read-src-rc [(a (ptr Allocator)) (path (ptr i8)) (rc i64)] (-> (slice u8))
+  (match (read-file-opt a path)
+    (Some [s] s)
+    (None []
+      (let [w (stderr)]
+        (ps w "error: no such file: '") (ps w (cstr->slice path)) (ps w "'") (wb w 10)
+        (exit (cast i32 rc))
+        ""))))
+
+(defn read-src [(a (ptr Allocator)) (path (ptr i8))] (-> (slice u8))
+  (read-src-rc a path 1))
+
 ; ---- child exit status ------------------------------------------------------
 ; `system` returns a raw wait(2) status, NOT an exit code. The low 7 bits hold the
 ; terminating signal (0 when the child exited normally); the exit code sits in the
@@ -626,7 +648,7 @@
       (let [obj-cstr  (slice->cstr a obj-slice)
             ctx       (alloc-stack DumpCtx)]
         (store! (field ctx a)    a)
-        (store! (field ctx src)  (read-file a file))
+        (store! (field ctx src)  (read-src a file))
         (store! (field ctx cwd)  (cwd-slice a))
         (store! (field ctx path) (cstr->slice file))
         (store! (field ctx mode) (load backend))
@@ -666,7 +688,7 @@
                     (ps w "error: linker/ar failed with exit status: ") (dump-dec w code) (wb w 10) 1)
                 (do (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10))
                     (match ehdr
-                      (Some [h] (cheader-program a (read-file a file) (cwd-slice a) (Some h)))
+                      (Some [h] (cheader-program a (read-src a file) (cwd-slice a) (Some h)))
                       (None [] 0)))))))))))
 
 ; ============================ cheader (export-c → C header) =================
@@ -1078,7 +1100,7 @@
       (if (and (or check write) (icmp-lt (cast i64 argc) 4))
           (do (ps (stderr) "usage: coil fmt [--check|--write] <file.coil>\n") 1)
         (let [pathc (if (or check write) (load (index argv 3)) (load (index argv 2)))
-              src   (read-file a pathc)
+              src   (read-src-rc a pathc 2)
               out   (fmtr/format-src a src 120)
               same  (str-eq src out)]
           (if check
@@ -1123,7 +1145,7 @@
           obj-cstr  (slice->cstr a out-slice)
           ctx       (alloc-stack DumpCtx)]
       (store! (field ctx a)    a)
-      (store! (field ctx src)  (read-file a file))
+      (store! (field ctx src)  (read-src a file))
       (store! (field ctx cwd)  (cwd-slice a))
       (store! (field ctx path) (cstr->slice file))
       (store! (field ctx mode) (load backend))
@@ -1197,7 +1219,7 @@
         (do (if (and (icmp-lt (iadd (load i) 1) (cast i64 argc)) (str-eq (cstr->slice (load (index argv (load i)))) "-o"))
                 (do (store! outp (Some (cstr->slice (load (index argv (iadd (load i) 1)))))) (store! i (iadd (load i) 2)) 0)
               (do (store! i (iadd (load i) 1)) 0)))))
-      (cheader-program a (read-file a file) (cwd-slice a) (load outp)))))
+      (cheader-program a (read-src a file) (cwd-slice a) (load outp)))))
 
 ; `coil` (no args) / `coil --help` / `-h` / `help`. Lists only what driver-main
 ; actually dispatches — an unimplemented command in here is a lie the CLI tells.
@@ -1274,7 +1296,7 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
       (if (str-eq sub "guide")
           (do (ps (stdout) (guide-text)) 0)
       (if (str-eq sub "__normalize")
-          (let [path (need-file argc argv sub) src (read-file a path)]
+          (let [path (need-file argc argv sub) src (read-src a path)]
             (call-ptr normalize-fn a src))
        (if (str-eq sub "cimport")
            (call-ptr cimport-fn a argc argv)
@@ -1293,21 +1315,21 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
         (if (str-eq sub "build")
             (if (manifest-mode? argc argv) (manifest-cmd a "build" argc argv) (build-cmd a argc argv build-fn emitir-fn default-backend))
          (if (str-eq sub "dump-read")
-             (let [path (need-file argc argv sub)] (dump-read-program a (read-file a path)))
+             (let [path (need-file argc argv sub)] (dump-read-program a (read-src a path)))
           (if (str-eq sub "dump-ast")
-              (let [path (need-file argc argv sub)] (dump-ast-program a (read-file a path)))
+              (let [path (need-file argc argv sub)] (dump-ast-program a (read-src a path)))
            (if (str-eq sub "dump-load")
-               (let [path (need-file argc argv sub)] (dump-load-program a (read-file a path) (cwd-slice a)))
+               (let [path (need-file argc argv sub)] (dump-load-program a (read-src a path) (cwd-slice a)))
             (if (str-eq sub "expand")
-                (let [path (need-file argc argv sub)] (expand-src-program a (read-file a path) (cwd-slice a) (cstr->slice path)))
+                (let [path (need-file argc argv sub)] (expand-src-program a (read-src a path) (cwd-slice a) (cstr->slice path)))
             (if (str-eq sub "dump-expand")
-                (let [path (need-file argc argv sub)] (dump-expand-program a (read-file a path) (cwd-slice a)))
+                (let [path (need-file argc argv sub)] (dump-expand-program a (read-src a path) (cwd-slice a)))
              (if (str-eq sub "dump-resolved")
-                 (let [path (need-file argc argv sub)] (dump-resolved-program a (read-file a path) (cwd-slice a)))
+                 (let [path (need-file argc argv sub)] (dump-resolved-program a (read-src a path) (cwd-slice a)))
               (if (str-eq sub "dump-checked")
-                  (let [path (need-file argc argv sub)] (dump-checked-program a (read-file a path) (cwd-slice a)))
+                  (let [path (need-file argc argv sub)] (dump-checked-program a (read-src a path) (cwd-slice a)))
                (if (str-eq sub "dump-mono")
-                   (let [path (need-file argc argv sub)] (dump-mono-program a (read-file a path) (cwd-slice a)))
+                   (let [path (need-file argc argv sub)] (dump-mono-program a (read-src a path) (cwd-slice a)))
           ; fallthrough = emit-ir / dump-ir. Anything else is a typo, not an
           ; alias for emit-ir — report it instead of compiling argv[2] (NULL).
           (if (not (or (str-eq sub "emit-ir") (str-eq sub "dump-ir")))
@@ -1323,7 +1345,7 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
                   (do (store! trip (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
                 (do (store! i (iadd (load i) 1)) 0))))
             (store! (field ctx a)    a)
-            (store! (field ctx src)  (read-file a path))
+            (store! (field ctx src)  (read-src a path))
             (store! (field ctx cwd)  (cwd-slice a))
             (store! (field ctx path) (cstr->slice path))
             (store! (field ctx mode) 0)

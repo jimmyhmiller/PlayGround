@@ -293,6 +293,52 @@
     (system c"(codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/create.output - < prompts/create-workflow.md > .flowline/create.events 2>&1 && find workflows -maxdepth 1 -type f -name '*.flow' -newer .flowline/create.request -print | sort | head -n 1 > .flowline/created.path && test -s .flowline/created.path && touch .flowline/create.done || touch .flowline/create.failed) &")
     0))
 
+(defn start-design-turn [(request (ptr i8)) (turn i64)] (-> i64)
+  (do
+    (system c"mkdir -p .flowline; rm -f .flowline/design.done .flowline/design.failed .flowline/design.output")
+    (if (= turn 0)
+      (write-text-file c".flowline/design.transcript" c"")
+      0)
+    (write-text-file c".flowline/design.request" request)
+    (system c"(codex exec --ephemeral --sandbox read-only --skip-git-repo-check -o .flowline/design.output - < prompts/design-workflow.md > .flowline/design.events 2>&1 && touch .flowline/design.done || touch .flowline/design.failed) &")
+    0))
+
+(defn design-state [] (-> i64)
+  (cond (file-exists c".flowline/design.done") 2
+        (file-exists c".flowline/design.failed") 3
+        1))
+
+(defn append-text-file [(path (ptr i8)) (text (ptr i8))] (-> i64)
+  (let [file (fopen path c"ab")]
+    (if (= (cast i64 file) 0)
+      -1
+      (do
+        (fwrite text 1 (string-length text) file)
+        (fclose file)
+        0))))
+
+(defn finish-design-turn [(response (ptr i8))] (-> i64)
+  (let [request (read-source c".flowline/design.request")
+        output (read-source c".flowline/design.output")
+        outputLength (string-length output)
+        copyLength (if (< outputLength 4095) outputLength 4095)]
+    (do
+      (for [position 0
+            4095]
+        (if (< position copyLength)
+          (store! (index response position) (load (index output position)))
+          0))
+      (store! (index response copyLength) (cast i8 0))
+      (append-text-file c".flowline/design.transcript" c"\nUSER:\n")
+      (append-text-file c".flowline/design.transcript" request)
+      (append-text-file c".flowline/design.transcript" c"\nDESIGNER:\n")
+      (append-text-file c".flowline/design.transcript" output)
+      (append-text-file c".flowline/design.transcript" c"\n")
+      0)))
+
+(defn start-creation-from-design [] (-> i64)
+  (start-creation (read-source c".flowline/design.transcript")))
+
 (defn creation-state [] (-> i64)
   (cond (file-exists c".flowline/create.done") 2
         (file-exists c".flowline/create.failed") 3

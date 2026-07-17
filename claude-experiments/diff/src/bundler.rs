@@ -50,6 +50,8 @@ pub struct DirectReachability {
     reachable: Vec<bool>,
     parent: Vec<Option<usize>>,
     tree_children: Vec<Vec<usize>>,
+    subtree_marks: Vec<u32>,
+    mark_epoch: u32,
     entry: usize,
     reachable_count: usize,
 }
@@ -364,6 +366,8 @@ impl DirectReachability {
             reachable: Vec::new(),
             parent: Vec::new(),
             tree_children: Vec::new(),
+            subtree_marks: Vec::new(),
+            mark_epoch: 0,
             entry: 0,
             reachable_count: 0,
         };
@@ -436,6 +440,7 @@ impl DirectReachability {
         self.reachable.push(false);
         self.parent.push(None);
         self.tree_children.push(Vec::new());
+        self.subtree_marks.push(0);
         index
     }
 
@@ -546,9 +551,13 @@ impl DirectReachability {
             return;
         }
 
-        let mut in_subtree = vec![false; self.ids.len()];
+        self.mark_epoch = self.mark_epoch.wrapping_add(1);
+        if self.mark_epoch == 0 {
+            self.subtree_marks.fill(0);
+            self.mark_epoch = 1;
+        }
         for &node in &subtree {
-            in_subtree[node] = true;
+            self.subtree_marks[node] = self.mark_epoch;
             self.set_reachable(node, false, update);
             self.parent[node] = None;
             self.tree_children[node].clear();
@@ -571,7 +580,7 @@ impl DirectReachability {
         while let Some(source) = queue.pop_front() {
             for edge_index in 0..self.outgoing[source].len() {
                 let target = self.outgoing[source][edge_index];
-                if !in_subtree[target] || self.reachable[target] {
+                if self.subtree_marks[target] != self.mark_epoch || self.reachable[target] {
                     continue;
                 }
                 self.set_reachable(target, true, update);
@@ -902,6 +911,28 @@ mod tests {
         assert!(update.added.is_empty());
         assert!(update.removed.is_empty());
         assert!(!update.used_full_recompute);
+        assert_eq!(
+            direct.reachable_modules(),
+            bundler.reachable_modules_direct()
+        );
+    }
+
+    #[test]
+    fn direct_reachability_falls_back_for_a_large_detached_subtree() {
+        let directory = tempdir().unwrap();
+        let entry = directory.path().join("entry.js");
+        fs::write(&entry, "import './a.js';").unwrap();
+        fs::write(directory.path().join("a.js"), "import './b.js';").unwrap();
+        fs::write(directory.path().join("b.js"), "export const b = 1;").unwrap();
+
+        let (mut bundler, _) = Bundler::discover(&entry).unwrap();
+        let mut direct = bundler.direct_reachability();
+        fs::write(&entry, "export const entry = 1;").unwrap();
+        let revision = bundler.rebuild_path(&entry).unwrap();
+        let update = direct.apply(&revision.delta);
+
+        assert!(update.used_full_recompute);
+        assert_eq!(update.removed.len(), 2);
         assert_eq!(
             direct.reachable_modules(),
             bundler.reachable_modules_direct()

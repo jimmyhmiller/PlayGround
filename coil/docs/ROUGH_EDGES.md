@@ -36,7 +36,7 @@ root cause, and one small fix at the bottom of the stack makes the rest observab
 
 ## Batch 0 — Observability first (unblocks verifying everything else)
 
-- [ ] **mem-1** `coil run` reports EXIT=0 for a program that dies by signal. The documented
+- [x] **mem-1** `coil run` reports EXIT=0 for a program that dies by signal. The documented
       dev loop discards the only signal an unsafe-by-design language ever produces, and every
       example's `echo $?` convention depends on it. Inspect the child's wait status; if
       `WIFSIGNALED`, print `program terminated by signal N (SIGABRT)` and exit `128+WTERMSIG`.
@@ -47,12 +47,12 @@ root cause, and one small fix at the bottom of the stack makes the rest observab
 `loader.coil:21 read-file` turns ENOENT into `""`. **`read-file-opt` (loader.coil:36) already
 exists and its comment already states this exact rationale** — these are call sites not using it.
 
-- [ ] **tool-2** A nonexistent source file compiles as empty → ld error about `_main`.
-- [ ] **diag-2** Same, via `coil build` — the first wall a user can hit, pointing 100% wrong.
-- [ ] **tool-3** `coil fmt --write ghost.coil` **fabricates** the file; `--check` claims a
+- [x] **tool-2** A nonexistent source file compiles as empty → ld error about `_main`.
+- [x] **diag-2** Same, via `coil build` — the first wall a user can hit, pointing 100% wrong.
+- [x] **tool-3** `coil fmt --write ghost.coil` **fabricates** the file; `--check` claims a
       missing file is "not formatted". A formatter must never invent a file.
-- [ ] Coil.toml `entry = "src/nope.coil"` → same linker error instead of "entry not found".
-- [ ] Make `--check` exit 2 on error (vs 1 unformatted, 0 clean) — the gofmt/black convention.
+- [x] Coil.toml `entry = "src/nope.coil"` → same linker error instead of "entry not found".
+- [x] Make `--check` exit 2 on error (vs 1 unformatted, 0 clean) — the gofmt/black convention.
 
 ## Batch 2 — One argv fix closes four more
 

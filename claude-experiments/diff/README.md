@@ -46,6 +46,21 @@ Run the test suite:
 cargo test
 ```
 
+Run the behavioral compatibility oracle. It executes the same tagged fixtures
+through Diffpack and a pinned Rolldown reference, then compares both with an
+explicit expected result:
+
+```console
+cd oracle
+npm ci
+npm test
+```
+
+The Rust test suite separately verifies that an incremental edit produces the
+same reachable set, emitted bytes, and runtime behavior as a clean rebuild.
+The current compatibility target and oracle contract are documented in
+[docs/ORACLE.md](docs/ORACLE.md).
+
 Run a release-mode scale test with 100,000 modules, a fanout of eight, and four
 imports per module:
 
@@ -70,7 +85,8 @@ cargo build --release
 ```
 
 Run the same build and edit without constructing a Differential dataflow. This
-mode recomputes reachability using a conventional parallel traversal:
+mode uses a persistent dense integer graph and incrementally repairs a
+reachability spanning tree:
 
 ```console
 /usr/bin/time -l target/release/diffpack bundle-scale-direct 10000 4
@@ -112,5 +128,7 @@ End-to-end results are in
 - CSS, assets, source maps, tree shaking, minification, and production chunk
   splitting are not implemented.
 
-The next useful increment is symbol-level linking/tree shaking followed by a
-real chunk graph for dynamic imports and shared dependencies.
+The next compatibility target is complete single-chunk ESM linking semantics.
+After that, the next architectural increment is symbol-level linking/tree
+shaking followed by a real chunk graph for dynamic imports and shared
+dependencies.

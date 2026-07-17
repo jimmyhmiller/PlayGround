@@ -35,38 +35,55 @@ Run commands from the repository root so the bundled fonts resolve from `assets/
 
 All durable application state lives in `AppState`. Raylib input is captured into an `InputFrame`, and `apply-input` is the single transition boundary.
 
+## Create your first workflow
+
+Start the app from the repository root:
+
+```sh
+coil build
+./flowline
+```
+
+The catalog intentionally starts empty.
+
+1. Click `+ NEW WORKFLOW` in the left sidebar or the center of the empty screen.
+2. Use the workflow designer chat to describe a rough outcome, ask questions, and iterate. The designer can inspect this repository and recommend project-specific steps.
+3. When the design is ready, click `BUILD THIS WORKFLOW`.
+4. Wait for the creator status to change to `WORKFLOW CREATED`. The new workflow is selected automatically and appears in the sidebar.
+5. Click `RUN WORKFLOW`. Select nodes to inspect their status and output, and approve explicit human-approval nodes when they pause.
+
+Design and creation require the `codex` CLI to be installed and authenticated. The design conversation is recorded beneath `.flowline/`, and the creator turns that conversation into one project-specific program beneath `workflows/` only after you ask it to build.
+
 ## Workflow DSL
 
-The included program demonstrates sequential nodes, parallel-ready branches, a join, and a human approval:
+Generated programs use a line-oriented DSL supporting sequential nodes, parallel-ready branches, joins, and human approval:
 
 ```text
-workflow refund-resolver
+workflow Release Readiness
 runner codex
 
-agent policy
-title Policy lookup
-prompt Read the request and policy, then decide eligibility.
-after route
-
-agent compose
-title Draft resolution
-prompt Compose the final decision and customer response.
-after policy, history
+agent build
+title Build project
+prompt Run the project build and report failures. Do not modify files.
+after none
 
 approval review
-title Human approval
-after compose
+title Human review
+after build
+
+agent summary
+title Prepare summary
+prompt Read the build output and prepare the approved release summary.
+after review
 ```
 
 `after none` creates a root. Two dependency names separated by a comma create a join. Nodes that become ready together are launched concurrently.
-
-Click `+ NEW WORKFLOW`, describe what the workflow should accomplish in this project, and press Enter or `CREATE WORKFLOW`. A creator agent inspects the repository, writes a new DSL program under `workflows/`, and the interface refreshes the project catalog when creation completes.
 
 Click `RUN WORKFLOW` to execute the selected program. Agent processes use `codex exec --ephemeral --sandbox workspace-write`. Prompts, event logs, completion sentinels, and final messages are written beneath `.flowline/`.
 
 Inspect the parsed graph without opening the UI or running agents:
 
 ```sh
-./flowline --check-workflow
 ./flowline --check-catalog
+./flowline --check-workflow workflows/my-workflow.flow
 ```

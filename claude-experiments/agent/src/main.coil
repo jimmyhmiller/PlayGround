@@ -27,6 +27,10 @@
    (creationState i64)
    (creationLength i64)
    (creationText (ptr i8))
+   (designRequested i64)
+   (designState i64)
+   (designTurn i64)
+   (designResponse (ptr i8))
    (mono raylib.Font)
    (monoMedium raylib.Font)
    (sans raylib.Font)])
@@ -249,33 +253,60 @@
         mouseVertical (load (field input mouseVertical))
         rightStart (- screenWidth RIGHT_WIDTH)
         center (/ (cast f64 (+ LEFT_WIDTH rightStart)) 2.0)
-        catalog (load (field state catalog))]
+        catalog (load (field state catalog))
+        catalogCount (workflow.catalog-count catalog)]
     (if (= (load (field state creationOpen)) 1)
       (do
         (edit-creation-text (mut state) input)
-        (if (or (= (load (field input enterPressed)) 1)
-                (and (= (load (field input pressed)) 1)
-                     (in-bounds mouseHorizontal
-                                mouseVertical
-                                (- (/ (cast f64 screenWidth) 2.0) 92.0)
-                                487.0
-                                184.0
-                                40.0)))
-          (if (> (load (field state creationLength)) 4)
+        (if (and (!= (load (field state designState)) 1)
+                 (or (= (load (field input enterPressed)) 1)
+                     (and (= (load (field input pressed)) 1)
+                          (in-bounds mouseHorizontal
+                                     mouseVertical
+                                     (cast f64 (- screenWidth 48))
+                                     (cast f64 (- screenHeight 41))
+                                     28.0
+                                     28.0))))
+          (if (> (load (field state creationLength)) 0)
             (do
-              (store! (field state creationRequested) 1)
-              (store! (field state creationOpen) 0)
+              (store! (field state designRequested) 1)
+              (store! (field state designState) 1)
               0)
+            0)
+          0)
+        (if (and (= (load (field input pressed)) 1)
+                 (and (> (load (field state designTurn)) 0)
+                      (in-bounds mouseHorizontal
+                                 mouseVertical
+                                 (cast f64 (- rightStart 214))
+                                 14.0
+                                 184.0
+                                 34.0)))
+          (do
+            (store! (field state creationRequested) 1)
+            (store! (field state creationOpen) 0)
             0)
           0)
         0)
       (if (= (load (field input pressed)) 0)
         0
         (do
-          (if (in-bounds mouseHorizontal mouseVertical 8.0 (cast f64 (- screenHeight 86)) 228.0 34.0)
+          (if (or (in-bounds mouseHorizontal mouseVertical 8.0 (cast f64 (- screenHeight 86)) 228.0 34.0)
+                  (and (= catalogCount 0)
+                       (in-bounds mouseHorizontal
+                                  mouseVertical
+                                  (- (/ (cast f64 (+ LEFT_WIDTH screenWidth)) 2.0) 116.0)
+                                  477.0
+                                  232.0
+                                  42.0)))
             (do
               (store! (field state creationOpen) 1)
               (store! (field state creationState) 0)
+              (store! (field state creationLength) 0)
+              (store! (field state designState) 0)
+              (store! (field state designTurn) 0)
+              (store! (load (field state creationText)) (cast i8 0))
+              (store! (load (field state designResponse)) (cast i8 0))
               0)
             0)
           (for [project 0
@@ -287,29 +318,33 @@
                 (store! (field state runtime) (workflow.catalog-runtime catalog project))
                 (store! (field state selectedNode) 0)
                 (store! (field state approvalGranted) 0)
+                (store! (field state creationOpen) 0)
                 0)
               0))
           (for [node 0
                 7]
-            (if (and (< node (workflow.node-count (load (field state runtime))))
-                     (in-bounds mouseHorizontal
-                                mouseVertical
-                                (- (node-horizontal node center) 20.0)
-                                (- (node-vertical node) 20.0)
-                                40.0
-                                40.0))
+            (if (and (> catalogCount 0)
+                     (and (< node (workflow.node-count (load (field state runtime))))
+                          (in-bounds mouseHorizontal
+                                     mouseVertical
+                                     (- (node-horizontal node center) 20.0)
+                                     (- (node-vertical node) 20.0)
+                                     40.0
+                                     40.0)))
               (do (store! (field state selectedNode) node) 0)
               0))
-          (if (and (= (workflow.node-status (load (field state runtime)) (load (field state selectedNode))) 4)
-                   (in-bounds mouseHorizontal
-                              mouseVertical
-                              (cast f64 (+ rightStart 20))
-                              (cast f64 (- screenHeight 174))
-                              112.0
-                              34.0))
+          (if (and (> catalogCount 0)
+                   (and (= (workflow.node-status (load (field state runtime)) (load (field state selectedNode))) 4)
+                        (in-bounds mouseHorizontal
+                                   mouseVertical
+                                   (cast f64 (+ rightStart 20))
+                                   (cast f64 (- screenHeight 174))
+                                   112.0
+                                   34.0)))
             (do (store! (field state approvalRequested) 1) 0)
             0)
-          (if (in-bounds mouseHorizontal mouseVertical (cast f64 (- rightStart 214)) 14.0 116.0 34.0)
+          (if (and (> catalogCount 0)
+                   (in-bounds mouseHorizontal mouseVertical (cast f64 (- rightStart 214)) 14.0 116.0 34.0))
             (do (store! (field state runRequested) 1) 0)
             0)
           0)))))
@@ -758,58 +793,161 @@
               (if (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_ENTER)) (cast u8 0)) 1 0))
       0)))
 
-(defn draw-creation-modal [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
-  (if (= (load (field state creationOpen)) 0)
-    0
-    (let [left (- (/ (cast f64 screenWidth) 2.0) 370.0)
-          top 176.0
-          tint (accent (load (field state selectedProject)))]
-      (do
-        (fill-rectangle 0.0 0.0 (cast f64 screenWidth) (cast f64 screenHeight) (color-alpha 2 4 7 205))
-        (fill-rectangle left top 740.0 372.0 (color 9 12 17))
-        (stroke-rectangle left top 740.0 372.0 1.0 tint)
-        (draw-text (field state monoMedium)
-                   c"CREATE A PROJECT WORKFLOW"
-                   (+ left 28.0)
-                   (+ top 25.0)
-                   16.0
-                   (color 223 229 236))
-        (draw-text (field state sans)
-                   c"Describe an outcome. A creator agent will inspect this project, design the DAG,\nand save an executable workflow program to the catalog."
-                   (+ left 28.0)
-                   (+ top 63.0)
-                   12.0
-                   (color 154 164 176))
-        (draw-text (field state monoMedium) c"WORKFLOW REQUEST" (+ left 28.0) (+ top 121.0) 9.0 (color 76 85 97))
-        (fill-rectangle (+ left 28.0) (+ top 146.0) 684.0 126.0 (color 7 10 14))
-        (stroke-rectangle (+ left 28.0) (+ top 146.0) 684.0 126.0 1.0 (color 35 44 56))
-        (raylib.BeginScissorMode (cast i32 (+ left 42.0)) (cast i32 (+ top 159.0)) (cast i32 656) (cast i32 98))
-        (draw-text (field state sans)
-                   (if (= (load (field state creationLength)) 0)
-                     c"Example: Create a release workflow that reviews changes, runs checks, and asks me before publishing."
-                     (load (field state creationText)))
-                   (+ left 42.0)
-                   (+ top 160.0)
-                   12.0
-                   (if (= (load (field state creationLength)) 0) (color 69 78 90) (color 207 214 222)))
-        (raylib.EndScissorMode)
-        (fill-rectangle (- (/ (cast f64 screenWidth) 2.0) 92.0) 487.0 184.0 40.0 tint)
-        (draw-text (field state monoMedium)
-                   c"CREATE WORKFLOW  >"
-                   (- (/ (cast f64 screenWidth) 2.0) 72.0)
-                   499.0
-                   10.5
-                   (color 10 14 19))
-        (draw-text (field state mono) c"ENTER TO CREATE" (+ left 28.0) (+ top 330.0) 9.0 (color 76 85 97))
-        0))))
+(defn draw-design-workspace [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (let [rightStart (- screenWidth RIGHT_WIDTH)
+        center (/ (cast f64 (+ LEFT_WIDTH rightStart)) 2.0)
+        contentLeft (cast f64 (+ rightStart 20))
+        tint (accent 0)]
+    (do
+      (fill-rectangle (cast f64 LEFT_WIDTH)
+                      0.0
+                      (cast f64 (- rightStart LEFT_WIDTH))
+                      (cast f64 screenHeight)
+                      (color 7 10 14))
+      (draw-grid LEFT_WIDTH rightStart screenHeight)
+      (fill-rectangle (cast f64 LEFT_WIDTH) 0.0 (cast f64 (- rightStart LEFT_WIDTH)) 64.0 (color 7 10 14))
+      (line (cast f64 LEFT_WIDTH) 63.0 (cast f64 rightStart) 63.0 1.0 (color 20 26 34))
+      (draw-text (field state monoMedium) c"UNTITLED WORKFLOW" 268.0 14.0 15.0 (color 223 229 236))
+      (draw-text (field state mono) c"DRAFT / NOT SAVED" 268.0 39.0 9.5 (color 76 85 97))
+      (if (> (load (field state designTurn)) 0)
+        (do
+          (stroke-rectangle (cast f64 (- rightStart 214)) 14.0 184.0 34.0 1.0 tint)
+          (draw-text (field state monoMedium) c"BUILD THIS WORKFLOW  >" (cast f64 (- rightStart 198)) 24.0 9.5 tint)
+          0)
+        0)
+      (stroke-rectangle (- center 28.0) 214.0 56.0 56.0 1.5 (color 42 51 63))
+      (fill-rectangle (- center 4.0) 238.0 8.0 8.0 tint)
+      (draw-text (field state monoMedium)
+                 c"YOUR WORKFLOW WILL TAKE SHAPE HERE"
+                 (- center 208.0)
+                 310.0
+                 16.0
+                 (color 207 214 222))
+      (draw-text (field state sans)
+                 c"Talk through the outcome, constraints, and unknowns. The designer can\ninspect this repository and recommend useful steps as you iterate."
+                 (- center 255.0)
+                 351.0
+                 13.0
+                 (color 127 136 148))
+      (draw-text (field state mono) c"NO NODES YET" (- center 53.0) 421.0 10.0 (color 61 69 79))
+      (fill-rectangle (cast f64 rightStart) 0.0 (cast f64 RIGHT_WIDTH) (cast f64 screenHeight) (color 9 12 17))
+      (line (cast f64 rightStart) 0.0 (cast f64 rightStart) (cast f64 screenHeight) 1.0 (color 23 30 39))
+      (line (cast f64 rightStart) 78.0 (cast f64 screenWidth) 78.0 1.0 (color 20 26 34))
+      (draw-text (field state monoMedium) c"WORKFLOW DESIGNER" contentLeft 18.0 14.0 (color 223 229 236))
+      (fill-rectangle contentLeft 49.0 6.0 6.0 (if (= (load (field state designState)) 1) tint (color 104 207 167)))
+      (draw-text (field state mono)
+                 (if (= (load (field state designState)) 1) c"INSPECTING REPOSITORY..." c"READY TO DISCOVER")
+                 (+ contentLeft 16.0)
+                 43.0
+                 9.0
+                 (color 76 85 97))
+      (draw-card-background contentLeft 104.0 (cast f64 (- RIGHT_WIDTH 40)) 116.0 true tint)
+      (draw-text (field state monoMedium) c"DESIGNER" (+ contentLeft 14.0) 118.0 9.0 tint)
+      (draw-text (field state sans)
+                 c"What are you hoping this workflow will accomplish?\nYou can start with a rough idea. I'll inspect the project,\nidentify what matters, and suggest concrete next steps."
+                 (+ contentLeft 14.0)
+                 145.0
+                 12.0
+                 (color 190 198 208))
+      (if (> (load (field state designTurn)) 0)
+        (do
+          (draw-card-background contentLeft 244.0 (cast f64 (- RIGHT_WIDTH 40)) 292.0 true tint)
+          (draw-text (field state monoMedium) c"DESIGNER / RECOMMENDATION" (+ contentLeft 14.0) 258.0 9.0 tint)
+          (raylib.BeginScissorMode (cast i32 (+ contentLeft 14.0))
+                                   (cast i32 286)
+                                   (cast i32 (- RIGHT_WIDTH 68))
+                                   (cast i32 232))
+          (draw-text (field state sans)
+                     (load (field state designResponse))
+                     (+ contentLeft 14.0)
+                     286.0
+                     11.5
+                     (color 190 198 208))
+          (raylib.EndScissorMode)
+          0)
+        0)
+      (fill-rectangle (cast f64 rightStart) (cast f64 (- screenHeight 76)) (cast f64 RIGHT_WIDTH) 76.0 (color 9 12 17))
+      (line (cast f64 rightStart)
+            (cast f64 (- screenHeight 76))
+            (cast f64 screenWidth)
+            (cast f64 (- screenHeight 76))
+            1.0
+            (color 20 26 34))
+      (stroke-rectangle contentLeft
+                        (cast f64 (- screenHeight 58))
+                        (cast f64 (- RIGHT_WIDTH 40))
+                        40.0
+                        1.0
+                        (color 35 44 56))
+      (draw-text (field state monoMedium) c">" (+ contentLeft 12.0) (cast f64 (- screenHeight 47)) 12.0 tint)
+      (raylib.BeginScissorMode (cast i32 (+ contentLeft 34.0))
+                               (cast i32 (- screenHeight 52))
+                               (cast i32 (- RIGHT_WIDTH 102))
+                               (cast i32 30))
+      (draw-text (field state sans)
+                 (if (= (load (field state creationLength)) 0)
+                   c"Describe the outcome or ask a question..."
+                   (load (field state creationText)))
+                 (+ contentLeft 34.0)
+                 (cast f64 (- screenHeight 47))
+                 11.5
+                 (if (= (load (field state creationLength)) 0) (color 69 78 90) (color 207 214 222)))
+      (raylib.EndScissorMode)
+      (fill-rectangle (cast f64 (- screenWidth 48)) (cast f64 (- screenHeight 41)) 28.0 28.0 tint)
+      (draw-text (field state monoMedium)
+                 c">"
+                 (cast f64 (- screenWidth 39))
+                 (cast f64 (- screenHeight 35))
+                 12.0
+                 (color 10 14 19))
+      0)))
+
+(defn draw-empty-workspace [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (let [left (cast f64 LEFT_WIDTH)
+        width (cast f64 (- screenWidth LEFT_WIDTH))
+        center (/ (cast f64 (+ LEFT_WIDTH screenWidth)) 2.0)
+        tint (accent 0)]
+    (do
+      (fill-rectangle left 0.0 width (cast f64 screenHeight) (color 7 10 14))
+      (draw-grid LEFT_WIDTH screenWidth screenHeight)
+      (fill-rectangle left 0.0 width (cast f64 HEADER_HEIGHT) (color 7 10 14))
+      (line left 63.0 (cast f64 screenWidth) 63.0 1.0 (color 20 26 34))
+      (draw-text (field state monoMedium) c"WORKFLOW CATALOG" (+ left 24.0) 18.0 14.0 (color 223 229 236))
+      (stroke-rectangle (- center 31.0) 178.0 62.0 62.0 1.5 tint)
+      (line (- center 13.0) 209.0 (+ center 13.0) 209.0 2.0 tint)
+      (line center 196.0 center 222.0 2.0 tint)
+      (draw-text (field state monoMedium) c"CREATE YOUR FIRST WORKFLOW" (- center 174.0) 281.0 19.0 (color 230 235 241))
+      (draw-text (field state sans)
+                 c"Describe an outcome for this project. A creator agent will inspect the\nrepository, design an executable DAG, and add it to this catalog."
+                 (- center 274.0)
+                 330.0
+                 14.0
+                 (color 142 153 166))
+      (draw-text (field state mono) c"1  CLICK + NEW WORKFLOW" (- center 168.0) 406.0 11.0 tint)
+      (draw-text (field state mono) c"2  DESCRIBE THE OUTCOME" (- center 168.0) 433.0 11.0 (color 107 116 128))
+      (draw-text (field state mono) c"3  PRESS ENTER TO CREATE" (- center 168.0) 460.0 11.0 (color 107 116 128))
+      (fill-rectangle (- center 116.0) 477.0 232.0 42.0 tint)
+      (draw-text (field state monoMedium) c"+  NEW WORKFLOW" (- center 78.0) 490.0 12.0 (color 10 14 19))
+      (draw-text (field state mono)
+                 c"No templates or demo workflows are loaded."
+                 (- center 156.0)
+                 550.0
+                 10.0
+                 (color 61 69 79))
+      0)))
 
 (defn draw-app [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
   (do
     (raylib.ClearBackground (color 7 10 14))
     (draw-projects state screenHeight)
-    (draw-center state screenWidth screenHeight)
-    (draw-right state screenWidth screenHeight)
-    (draw-creation-modal state screenWidth screenHeight)
+    (if (= (load (field state creationOpen)) 1)
+      (draw-design-workspace state screenWidth screenHeight)
+      (if (= (workflow.catalog-count (load (field state catalog))) 0)
+        (draw-empty-workspace state screenWidth screenHeight)
+        (do
+          (draw-center state screenWidth screenHeight)
+          (draw-right state screenWidth screenHeight)
+          0)))
     0))
 
 (defn run-interface [] (-> i64)
@@ -825,9 +963,11 @@
           catalog (alloc-stack workflow.Catalog)
           state (alloc-stack AppState)
           input (alloc-stack InputFrame)
-          creationText (workflow.allocate-buffer CREATION_CAPACITY)]
+          creationText (workflow.allocate-buffer CREATION_CAPACITY)
+          designResponse (workflow.allocate-buffer 4096)]
       (store! catalog catalogValue)
       (store! creationText (cast i8 0))
+      (store! designResponse (cast i8 0))
       (store! (field state selectedProject) 0)
       (store! (field state selectedNode) 0)
       (store! (field state approvalGranted) 0)
@@ -841,6 +981,10 @@
       (store! (field state creationState) 0)
       (store! (field state creationLength) 0)
       (store! (field state creationText) creationText)
+      (store! (field state designRequested) 0)
+      (store! (field state designState) 0)
+      (store! (field state designTurn) 0)
+      (store! (field state designResponse) designResponse)
       (store! (field state mono) mono)
       (store! (field state monoMedium) monoMedium)
       (store! (field state sans) sans)
@@ -879,10 +1023,30 @@
                     0)
                   (if (= (load (field state creationRequested)) 1)
                     (do
-                      (workflow.start-creation (load (field state creationText)))
+                      (workflow.start-creation-from-design)
                       (store! (field state creationRequested) 0)
                       (store! (field state creationState) 1)
                       0)
+                    0)
+                  (if (= (load (field state designRequested)) 1)
+                    (do
+                      (workflow.start-design-turn (load (field state creationText)) (load (field state designTurn)))
+                      (store! (field state designRequested) 0)
+                      (store! (field state creationLength) 0)
+                      (store! creationText (cast i8 0))
+                      0)
+                    0)
+                  (if (= (load (field state designState)) 1)
+                    (let [designState (workflow.design-state)]
+                      (if (= designState 2)
+                        (do
+                          (workflow.finish-design-turn designResponse)
+                          (store! (field state designTurn) (+ (load (field state designTurn)) 1))
+                          (store! (field state designState) 2)
+                          0)
+                        (if (= designState 3)
+                          (do (store! (field state designState) 3) 0)
+                          0)))
                     0)
                   (if (= (load (field state creationState)) 1)
                     (let [creationState (workflow.creation-state)]
@@ -920,9 +1084,9 @@
     0))
 
 (defn main [(argumentCount i32) (arguments (ptr (ptr i8)))] (-> i64)
-  (if (and (> (cast i64 argumentCount) 1)
+  (if (and (> (cast i64 argumentCount) 2)
            (workflow.strings-equal (load (index arguments 1)) c"--check-workflow"))
-    (let [runtime (workflow.load-runtime c"workflows/refund.flow")]
+    (let [runtime (workflow.load-runtime (load (index arguments 2)))]
       (workflow.dump runtime))
     (if (and (> (cast i64 argumentCount) 1)
              (workflow.strings-equal (load (index arguments 1)) c"--check-catalog"))

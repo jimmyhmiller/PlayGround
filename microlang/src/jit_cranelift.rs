@@ -903,7 +903,7 @@ extern "C" fn shim_safepoint<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
 /// a `Thrown` bind the value in a fresh one-slot frame and run the handler, run
 /// finally on every path, re-raise anything else. Requires unwind info on the
 /// emitted frames so the panic can cross them (enabled in the ISA flags).
-extern "C" fn shim_try<M: ValueModel>(
+extern "C" fn shim_try<M: ModelArithJit>(
     ctx: *mut JitCtx<M>,
     body: *const Ir,
     catch: *const Ir,
@@ -916,18 +916,35 @@ extern "C" fn shim_try<M: ValueModel>(
     let locals = ctx.cur.borrow().clone();
     let body = unsafe { &*body };
 
+    // Run a try arm. Through `top.eval_ir` this Cranelift-compiled the arm on
+    // EVERY execution (74.7µs/call vs 24ns without the `try`, ~3000x) — that
+    // path deliberately does not cache, because top-level `Ir`s are transient.
+    // These arms are not: the emit site keeps them alive as long as the code.
+    // So when the backend is the bare JIT, compile them ONCE (`run_nested_body`);
+    // when it is wrapped (Traced/Tiered — `jit` is null), keep going through
+    // `top` so the wrapper still observes the arm.
+    let jitp = unsafe { (*ctx.rc).jit };
+    let run = |rt: &mut Runtime<M>, ir: &Ir, locals: &Locals| -> u64 {
+        if jitp.is_null() {
+            top.eval_ir(top, rt, ir, locals)
+        } else {
+            let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
+            jit.run_nested_body(top, rt, ir, locals)
+        }
+    };
+
     // `throw` is a flag on the runtime now, not a panic — so this is the exact
     // signal-checking logic of TreeWalk's `Ir::Try`, no unwinding involved. The
     // body/handlers run on `top` (the JIT), which propagates the flag natively via
     // the per-call pending checks; this shim just checks + routes.
-    let mut result = top.eval_ir(top, rt, body, &locals);
+    let mut result = run(rt, body, &locals);
     if rt.pending_throw() && !catch.is_null() {
         let thrown = rt.take_signal().value;
         let cbody = unsafe { &*catch };
         // The catch binding was re-homed by `flatten` to a slot of THIS
         // activation frame (no fresh frame).
         frame_set(&locals, 0, cslot as u16, thrown);
-        result = top.eval_ir(top, rt, cbody, &locals);
+        result = run(rt, cbody, &locals);
     }
     if !finally.is_null() {
         let fbody = unsafe { &*finally };
@@ -938,7 +955,7 @@ extern "C" fn shim_try<M: ValueModel>(
         // does not cover it) are bare heap pointers across it.
         let base = rt.push_root(result);
         rt.push_root(suspended.value);
-        let fv = top.eval_ir(top, rt, fbody, &locals);
+        let fv = run(rt, fbody, &locals);
         result = rt.root_get(base);
         let value = rt.root_get(base + 1);
         rt.truncate_roots(base);
@@ -2174,6 +2191,54 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let c = self.compile_spec(Some(rt), body, Self::body_shape(body, nparams, variadic, nslots), spec);
         self.cache.borrow_mut().insert(key, c.clone());
         c
+    }
+
+    /// Compile-and-run a NESTED body whose `Ir` is owned by the enclosing
+    /// template — a `try`/`catch`/`finally` arm. Cached by `Ir` address, so the
+    /// body is Cranelift'd ONCE instead of on every execution.
+    ///
+    /// Why this exists, and why `eval_ir` cannot simply cache instead: `eval_ir`
+    /// is also the TOP-LEVEL entry (one fresh `Ir` per form, dropped after it
+    /// runs), and a pointer key there would be a use-after-free waiting to
+    /// happen — the allocator reuses the address and the next form silently
+    /// executes the previous form's code. Try arms are different, and the `Try`
+    /// emit site says so explicitly: their `Ir` OUTLIVES the compiled code.
+    ///
+    /// Without this, `shim_try` ran a FULL Cranelift compile (regalloc included)
+    /// every time a `try` executed: measured at 74.7µs per call against 24ns for
+    /// the same expression without the `try` — ~3000x. It made core.match, which
+    /// compiles pattern backtracking into try/catch, effectively unusable
+    /// (2.2ms per `match`, ~5900x JVM Clojure).
+    fn run_nested_body(
+        &self,
+        top: &dyn CodeSpace<M>,
+        rt: &mut Runtime<M>,
+        ir: &Ir,
+        locals: &Locals,
+    ) -> u64 {
+        let shape = BodyShape {
+            entry_arity: None,
+            nparams: 0,
+            variadic: false,
+            nslots: 0,
+            mem_mode: true,
+            tail_root: false,
+        };
+        let key = ir as *const Ir;
+        // NB: bind the lookup to its own `let` so the shared borrow guard is
+        // dropped HERE. Written as `if let Some(c) = self.cache.borrow()…` the
+        // guard would live across the whole if/else and the `borrow_mut` below
+        // would panic (already-borrowed) on the first miss.
+        let hit = self.cache.borrow().get(&key).cloned();
+        let compiled = match hit {
+            Some(c) => c,
+            None => {
+                let c = self.compile(Some(rt), ir, shape);
+                self.cache.borrow_mut().insert(key, c.clone());
+                c
+            }
+        };
+        self.run_trampoline(top, rt, compiled, locals.clone(), 0, 0, false, 0, &[])
     }
 
     /// Resolve a callee through the monomorphic inline cache (the common repeat

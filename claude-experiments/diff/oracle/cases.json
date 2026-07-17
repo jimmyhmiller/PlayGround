@@ -1,0 +1,44 @@
+[
+  {
+    "name": "static-typescript",
+    "entry": "fixtures/static-typescript/entry.ts",
+    "tags": ["baseline", "esm", "typescript"],
+    "stdout": "sum:5\n"
+  },
+  {
+    "name": "reexports",
+    "entry": "fixtures/reexports/entry.js",
+    "tags": ["baseline", "esm", "reexport"],
+    "stdout": "answer:42:default-ok\n"
+  },
+  {
+    "name": "commonjs-interop",
+    "entry": "fixtures/commonjs-interop/entry.js",
+    "tags": ["baseline", "commonjs", "interop"],
+    "stdout": "cjs:7\n"
+  },
+  {
+    "name": "json-module",
+    "entry": "fixtures/json-module/entry.js",
+    "tags": ["baseline", "json"],
+    "stdout": "oracle:3\n"
+  },
+  {
+    "name": "literal-dynamic-import",
+    "entry": "fixtures/literal-dynamic-import/entry.js",
+    "tags": ["baseline", "dynamic-import"],
+    "stdout": "before\nlazy:loaded\n"
+  },
+  {
+    "name": "package-exports",
+    "entry": "fixtures/package-exports/entry.js",
+    "tags": ["baseline", "package", "resolution"],
+    "stdout": "package:exports-ok\n"
+  },
+  {
+    "name": "side-effect-order",
+    "entry": "fixtures/side-effect-order/entry.js",
+    "tags": ["baseline", "esm", "evaluation-order"],
+    "stdout": "first\nsecond\nentry\n"
+  }
+]
