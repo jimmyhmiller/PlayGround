@@ -234,6 +234,13 @@ pub enum Prim {
     /// `%num-eq`s per non-identical `=`. Mirrors `type_tag`'s classification
     /// EXACTLY (bignums report `Long`; only keyword records count among records).
     ScalarType,
+    /// `(%eq2 a b)` — the whole `-eq2` fast path in one native call: Clojure `=`
+    /// for the scalar / identity cases, `nil` (a MISS sentinel) for the
+    /// collection / nil / identical-Double cases the caller must route to the
+    /// full `-equiv` protocol dispatch. Returns `true`/`false` when it can decide,
+    /// `nil` otherwise. Collapses the hot `%scalar-type?` + `%num-eq` pair (5.8M
+    /// each in core.match's per-element classification) into a single prim.
+    Eq2,
     /// `(%method-types 'method)` -> a list of the type-name symbols that have a
     /// concrete impl registered for `method` in the dispatch registry (excluding
     /// the `-protocol-default` sentinel). Reflection over protocol extensions,

@@ -622,10 +622,13 @@
 ;; It collapses `-scalar-eq-type?`'s up-to-8 symbol `%num-eq`s (each a full prim
 ;; dispatch) into a single header-kind check — the dominant `=` cost in
 ;; predicate-heavy code like core.match's per-element classification.
+;; `%eq2` is the whole decision tree above in ONE native prim: it returns
+;; `true`/`false` for the identity and scalar cases (the 5.8M-each `%scalar-type?`
+;; + `%num-eq` pair collapsed into one shim call), and `nil` — a MISS — only for
+;; the collection / nil / identical-Double cases that must reach `-equiv`.
 (defn -eq2 [a b]
-  (if (%eq a b)
-    (if (%num-eq (type-of a) 'Double) (-equiv a b) true)
-    (if (%scalar-type? a) (%num-eq a b) (-equiv a b))))
+  (let [r (%eq2 a b)]
+    (if (%eq r nil) (-equiv a b) r)))
 
 ;; A 1-arg IFn protocol: a deftype implementing `clojure.lang.IFn`'s `(invoke
 ;; [this a])` becomes callable; the default throws.

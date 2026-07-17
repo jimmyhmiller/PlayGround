@@ -2223,6 +2223,64 @@ impl<M: ValueModel> Runtime<M> {
                 };
                 self.encode(Val::Bool(scalar))
             }
+            Prim::Eq2 => {
+                // The whole `-eq2` fast path natively. Mirrors, EXACTLY:
+                //   (if (%eq a b)
+                //     (if (%num-eq (type-of a) 'Double) MISS true)
+                //     (if (%scalar-type? a) (%num-eq a b) MISS))
+                // where MISS is `nil` and tells the caller to run `-equiv`.
+                // `%eq` is identity (encoded-bit compare); `%num-eq` is `equal`.
+                use crate::heap::kind;
+                let a = args[0];
+                let b = args[1];
+                if a == b {
+                    // Identical bits. A Double must still go to `-equiv` because
+                    // `(= NaN NaN)` is false even though `NaN` is one boxed float.
+                    let is_double = if let Some(g) = self.raw_gc(a) {
+                        self.raw_type_id(g) == kind::BOXFLOAT
+                    } else {
+                        matches!(M::R::tag_of(a), RawTag::Float)
+                    };
+                    if is_double {
+                        self.encode(Val::Nil)
+                    } else {
+                        self.encode(Val::Bool(true))
+                    }
+                } else {
+                    // Not identical. Scalars share the `Object` default IEquiv
+                    // (= `equal`); collections / nil keep their custom `-equiv`.
+                    // This membership test mirrors `Prim::ScalarType` EXACTLY.
+                    let scalar = if let Some(g) = self.raw_gc(a) {
+                        match self.raw_type_id(g) {
+                            kind::BIGINT | kind::HUGEINT | kind::BOXFLOAT | kind::STR
+                            | kind::CHAR | kind::RATIO => true,
+                            kind::RECORD => {
+                                let tsym = {
+                                    let info = &self.shared.types[kind::RECORD as usize];
+                                    unsafe { g.raw_word(info, 0) as Sym }
+                                };
+                                tsym
+                                    == self.intern_cached(
+                                        &self.shared.sym_cache_keyword,
+                                        "Keyword",
+                                    )
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        matches!(
+                            M::R::tag_of(a),
+                            RawTag::Int | RawTag::Float | RawTag::Bool | RawTag::Sym
+                        )
+                    };
+                    if scalar {
+                        let r = self.equal(a, b);
+                        self.encode(Val::Bool(r))
+                    } else {
+                        self.encode(Val::Nil)
+                    }
+                }
+            }
             Prim::AmapGet => {
                 // Scan a key/value array pairwise for `k`, structural `equal` per
                 // key (interned keywords short-circuit to a pointer compare inside
