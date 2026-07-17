@@ -162,11 +162,14 @@ real; the **recursion** half does not exist, and neither does any depth guard on
 
 Coil's span renderer is genuinely excellent. Every finding here is a site bypassing it.
 
-- [ ] **diag-1** Adding `(module …)` — which every multi-file project must do — **strips the span**
+- [x] **diag-1** Adding `(module …)` — which every multi-file project must do — **strips the span**
       off `call to undefined function`, the most common error in the language. Proven by deleting
       one line from a byte-identical file.
-- [ ] **diag-9** Signature-level errors (unknown param/field/return type, body/return mismatch)
-      bypass the renderer entirely.
+- [~] **diag-9** PARTIAL. The **body/return mismatch** now points at the offending tail
+      expression (the case that mattered: "which of a 60-line body's expressions is the tail?").
+      The **unknown type in a param/field/return** half is NOT fixed and needs an AST change:
+      `Param`, `Field` and `Type` carry **no span at all** (ast.coil:33/35), so there is nothing
+      to point at. The parser must stamp spans on type nodes first — real work, not a call-site fix.
 - [ ] **mac-2** `error` in a macro is unlocated — while `report` is perfect and undocumented for
       macros. The whole stdlib uses `error`. Give `error` the call-site span; document `report`.
 - [ ] **mac-7** Macro arity errors unlocated and countless, while the *identical* ordinary-function

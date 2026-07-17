@@ -40,7 +40,11 @@
 (defstruct Ctx
   [(a (ptr Allocator)) (m (slice u8)) (imp (ptr ImpEntry))
    (table (ptr (ArrayList DefEntry))) (exp (ptr (ArrayList ExpEntry)))
-   (strict bool) (bareok (ptr (ArrayList (slice u8))))])
+   (strict bool) (bareok (ptr (ArrayList (slice u8))))
+   ; the function whose body is being qualified, so a resolve error can name it the
+   ; way the checker's identical error already does ("in 'big.buried'") instead of
+   ; naming the module. Empty outside a function body (const/meta/assert).
+   (fname (slice u8))])
 
 ; The merged output program, sections as BY-VALUE ArrayLists so merge can push.
 (defstruct Out
@@ -104,8 +108,15 @@
   (let [p1 (sconcat3 a "in module '" m "': '")
         p2 (sconcat3 a p1 rest "' is private to module '")]
     (sconcat3 a p2 target "' (add it to that module's (export …))")))
-(defn undef-msg [(a (ptr Allocator)) (m (slice u8)) (func (slice u8))] (-> (slice u8))
-  (let [p1 (sconcat3 a "in module '" m "': call to undefined function '")]
+; `where` is the enclosing function when there is one, else the module. The checker
+; emits this exact error for the same mistake and names the function; resolve named the
+; module, so the message a user saw depended on which phase happened to catch it — i.e.
+; on whether the file had a (module …) declaration.
+(defn undef-msg [(a (ptr Allocator)) (m (slice u8)) (fname (slice u8)) (func (slice u8))] (-> (slice u8))
+  (let [where (if (icmp-gt (slice-len [u8] fname) 0)
+                  (sconcat3 a "in '" fname "'")
+                (sconcat3 a "in module '" m "'"))
+        p1 (sconcat3 a where ": call to undefined function '" "")]
     (sconcat3 a p1 func "'")))
 (defn extern-conflict-msg [(a (ptr Allocator)) (nm (slice u8))] (-> (slice u8))
   (sconcat3 a "extern '" nm "' declared with conflicting signatures"))
@@ -408,7 +419,13 @@
             (do (let [nf (try! (resolve c func 0))]
                   (store! (field ep kind) (ECall nf type_args args))
                   (if (and (load (field c strict)) (and (not (has-dot nf)) (not (set-contains (load (field c bareok)) nf))))
-                      (return-from :try (Err (derr (undef-msg a (load (field c m)) nf))))
+                      ; `ep` IS the call node — its span was right here and simply unused,
+                      ; so the language's most common error lost its location the moment a
+                      ; file declared a module (i.e. in every real multi-file project).
+                      (return-from :try
+                        (Err (dwspan (derr (undef-msg a (load (field c m)) (load (field c fname)) nf))
+                                     (load (field ep source)) (load (field ep lo))
+                                     (load (field ep hi)) (load (field ep ctxt)))))
                       0))
                 (try! (qualify-type-list c type_args tps))
                 (try! (qualify-expr-list c args tps))
@@ -490,11 +507,18 @@
       (do
         (if (not (str-eq (load (field fp name)) "main"))
             (do (store! (field fp name) (sconcat3 a m "." (load (field fp name)))) 0) 0)
+        ; record whose body we are about to qualify, so an error inside it can name the
+        ; function. Set AFTER qualification so it reads the same as the checker's ('big.buried').
+        (store! (field c fname) (load (field fp name)))
         (store! (field fp cc) (try! (resolve c (load (field fp cc)) 3)))
         (try! (qualify-bound-list c (load (field fp bounds))))
         (try! (qualify-param-types c (load (field fp params)) tps))
         (try! (qualify-type c (field fp ret) tps))
         (try! (qualify-expr-list c (load (field fp body)) tps))
+        ; leave the body: a later const/meta/assert error must not claim to be inside
+        ; this function. (An error inside the body returns early via try!, which is fine
+        ; — the diagnostic is already built by then and the pipeline stops.)
+        (store! (field c fname) "")
         (Ok 0)))))
 (defn qualify-one-struct [(c (ptr Ctx)) (sp (ptr StructDef))] (-> (Result i64 Diag))
   (let [a (load (field c a)) m (load (field c m)) tps (load (field sp type_params))]
@@ -870,6 +894,7 @@
 (defn init-ctx [(c (ptr Ctx)) (a (ptr Allocator)) (m (slice u8)) (imp (ptr ImpEntry)) (table (ptr (ArrayList DefEntry))) (exp (ptr (ArrayList ExpEntry))) (bareok (ptr (ArrayList (slice u8)))) (strict bool)] (-> i64)
   (store! (field c a) a) (store! (field c m) m) (store! (field c imp) imp)
   (store! (field c table) table) (store! (field c exp) exp) (store! (field c strict) strict) (store! (field c bareok) bareok)
+  (store! (field c fname) "")
   0)
 
 ; ---- resolve-program (src/resolve.rs::resolve_program), strict=true --------

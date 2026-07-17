@@ -892,7 +892,14 @@
                   (Ok [rv]
                     (let [r (alloc-stack EvalPair)] (store! r rv)
                       (match (coerce a (load (field r e)) (box-type a (load (field r t))) (field fp ret) false fnm "body")
-                        (Err [_] (do (store! err (derr (sconcat a (sconcat a (sconcat a (sconcat3 a "function '" fnm "': body has type ") (ty-str a (box-type a (load (field r t))))) " but the declared return type is ") (ty-str a (field fp ret))))) (store! failed true) (break)))
+                        ; point at the TAIL expression: `ep` is it, and its span was right
+                        ; here unused. Without it the message names a type mismatch but not
+                        ; which of a 60-line body's expressions is the offending tail —
+                        ; exactly the question the reader is asking.
+                        (Err [_] (do (store! err (dwspan (derr (sconcat a (sconcat a (sconcat a (sconcat3 a "function '" fnm "': body has type ") (ty-str a (box-type a (load (field r t))))) " but the declared return type is ") (ty-str a (field fp ret))))
+                                                         (load (field ep source)) (load (field ep lo))
+                                                         (load (field ep hi)) (load (field ep ctxt))))
+                                     (store! failed true) (break)))
                         (Ok [ee] (al-push! (mut out) ee))))))
                 (match (synth a ep (cast (ptr Type) 0) env cx tps fnm)
                   (Err [d] (do (store! err d) (store! failed true) (break)))
