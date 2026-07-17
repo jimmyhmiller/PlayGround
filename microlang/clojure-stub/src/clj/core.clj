@@ -534,7 +534,21 @@
 (defn pop [c] (-pop c))
 ;; Real fixed arities: `get` runs per element in every map-walking loop; the
 ;; variadic form allocated a rest list per call.
-(defn get ([c k] (-lookup c k nil)) ([c k d] (-lookup c k d)))
+(defn get
+  ;; Array maps are the default small-map, so array-map lookup is the common get.
+  ;; Its whole cost was a 3-arg protocol dispatch (~43ns) wrapping a clojure-layer
+  ;; aget/-eq2 scan (~42ns); `%amap-get` does the scan natively, and gating on the
+  ;; type here skips the dispatch. Everything else keeps the protocol path.
+  ([c k] (get c k nil))
+  ([c k d]
+   (let [t (type-of c)]
+     (cond
+       (%num-eq t (quote PersistentArrayMap)) (%amap-get (field c 2) k d)
+       ;; hash-map: native trie lookup; the nil key lives outside the trie.
+       (%num-eq t (quote PersistentHashMap)) (if (nil? k)
+                                               (if (field c 3) (field c 4) d)
+                                               (%hamt-lookup (field c 2) k d))
+       :else (-lookup c k d)))))
 (defn dissoc [m k] (record 'Map (kv-without (field m 0) k)))
 (defn keys [m] (kv-keys (field m 0)))
 (defn vals [m] (kv-vals (field m 0)))

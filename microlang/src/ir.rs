@@ -222,6 +222,8 @@ pub enum Prim {
     Rand,
     /// `(%cpu-count)` — usable hardware parallelism (Runtime.availableProcessors).
     CpuCount,
+    /// `(%amap-get arr k nf)` — native array-map scan: value for `k`, else `nf`.
+    AmapGet,
     /// `(%method-types 'method)` -> a list of the type-name symbols that have a
     /// concrete impl registered for `method` in the dispatch registry (excluding
     /// the `-protocol-default` sentinel). Reflection over protocol extensions,

@@ -163,7 +163,7 @@ impl Compiler {
             // Split a (possibly qualified) symbol for var reflection (name/namespace).
             ("%sym-name", SymName), ("%sym-ns", SymNs),
             // Var/namespace registry reflection (metadata flags + ns enumeration).
-            ("%var-flags", VarFlags), ("%ns-interns", NsInterns), ("%ns-aliases", NsAliases), ("%resolve-in-ns", ResolveInNs), ("%rand", Rand), ("%cpu-count", CpuCount), ("%all-ns", AllNs),
+            ("%var-flags", VarFlags), ("%ns-interns", NsInterns), ("%ns-aliases", NsAliases), ("%resolve-in-ns", ResolveInNs), ("%rand", Rand), ("%cpu-count", CpuCount), ("%amap-get", AmapGet), ("%all-ns", AllNs),
             ("%symbol", SymbolOf), ("%var-arglists", VarArglists),
             // THE string-introspection primitive; clojure.string/regex build on it.
             ("%str->chars", StrChars), ("%method-types", MethodTypes),

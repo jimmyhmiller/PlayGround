@@ -2154,6 +2154,25 @@ impl<M: ValueModel> Runtime<M> {
                 Some(b) => b.ns_aliases(self, args[0]),
                 None => panic!("%ns-aliases: no eval bridge installed"),
             },
+            Prim::AmapGet => {
+                // Scan a key/value array pairwise for `k`, structural `equal` per
+                // key (interned keywords short-circuit to a pointer compare inside
+                // `equal`). One Rust call in place of the clojure-layer
+                // aget/-eq2/loop that array-map `-lookup` was built from.
+                let (arr, k, nf) = (args[0], args[1], args[2]);
+                let elems = self.arr_elems_pub(arr);
+                let n = elems.len();
+                let mut i = 0;
+                let mut found = nf;
+                while i + 1 < n {
+                    if self.equal(elems[i], k) {
+                        found = elems[i + 1];
+                        break;
+                    }
+                    i += 2;
+                }
+                found
+            }
             Prim::CpuCount => {
                 // What `Runtime.availableProcessors` answers: the parallelism this
                 // process may actually use (respects cgroup/affinity limits), not
