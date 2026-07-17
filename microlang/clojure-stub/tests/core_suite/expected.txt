@@ -671,3 +671,16 @@
 (.getName (type [1 2]))	"clojure.lang.PersistentVector"
 (.getName (type {:a 1}))	"clojure.lang.PersistentArrayMap"
 (.getName (type #{1}))	"clojure.lang.PersistentHashSet"
+(if-some [[_ v] (find {:k 9} :k)] v :none)	9
+(if-some [[_ v] (find {:k 9} :nope)] v :none)	:none
+(when-some [[_ v] (find {:k 9} :k)] v)	9
+(if-some [[a b] [1 2]] [a b] :none)	[1 2]
+(if-some [x false] [:then x] :else)	[:then false]
+(if-some [x nil] [:then x] :else)	:else
+(if-let [x false] [:then x] :else)	:else
+(if-some [{:keys [q]} {:q 7}] q :else)	7
+(if-some [{:keys [q]} nil] q :else)	:else
+(when-some [x false] [:body x])	[:body false]
+(when-some [x nil] [:body x])	nil
+(if-some [[a b] [false false]] [a b] :else)	[false false]
+(let [a (atom 0)] (if-some [x (do (swap! a inc) 1)] @a :else))	1

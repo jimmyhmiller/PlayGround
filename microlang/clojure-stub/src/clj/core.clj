@@ -2934,12 +2934,26 @@
 (defn println-str [& xs] (str (apply print-str xs) (%char-of 10)))
 
 ;; ─────────────── misc combinators + control ───────────────
+;; `if-some`/`when-some` test the INIT VALUE for nil and only then destructure it.
+;; They used to test `(nil? <binding-form>)` — the binding FORM, as an expression.
+;; For a plain name that happens to work; for a DESTRUCTURING binding it compiled
+;; `(if-some [[_ v] …] …)` into `(nil? [_ v])`, reading `_` and `v` as variables
+;; (an unresolved-symbol error — this is what stopped meander, whose map syntax is
+;; full of `(if-some [[_ pattern] (find node :pattern)] …)`). And where it did
+;; compile it was still wrong: a vector literal is never nil, so the test was
+;; always false. `if-let`/`when-let` above already bind a temp; these now match.
 (defmacro when-some (bv & body)
-  (list 'let [(first bv) (second bv)]
-        (list 'if (list 'nil? (first bv)) nil (%cons 'do body))))
+  (let [t (gensym "when-some")]
+    (list 'let (vector t (second bv))
+          (list 'if (list 'nil? t)
+                nil
+                (list 'let (vector (first bv) t) (%cons 'do body))))))
 (defmacro if-some (bv then & else)
-  (list 'let [(first bv) (second bv)]
-        (list 'if (list 'nil? (first bv)) (if (nil? else) nil (first else)) then)))
+  (let [t (gensym "if-some")]
+    (list 'let (vector t (second bv))
+          (list 'if (list 'nil? t)
+                (if (nil? else) nil (first else))
+                (list 'let (vector (first bv) t) then)))))
 (defmacro comment (& body) nil)
 (defn comparator [pred] (fn [a b] (cond (pred a b) -1 (pred b a) 1 :else 0)))
 (defn replicate [n x] (take n (repeat x)))
