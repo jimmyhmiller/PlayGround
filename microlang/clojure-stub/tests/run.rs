@@ -566,6 +566,27 @@ fn persistent_hash_map() {
     // small maps are array maps; they promote to a HAMT past 8 entries.
     assert_eq!(run("(type-of {:a 1})"), "PersistentArrayMap");
     assert_eq!(run("(type-of (into {} (map (fn [i] [i i]) (range 20))))"), "PersistentHashMap");
+    // `(assoc nil …)` builds a REAL map, and one that promotes — same as `{}`.
+    //
+    // core.clj defines nil's `-assoc` before the cljs types exist, so it built
+    // the bootstrap `'Map`: a plist, scanned linearly, that NEVER promotes to
+    // the HAMT however large it grows. cljs_types upgrades `hash-map`/`map?`
+    // when the real types load and simply missed this one, so
+    // `(loop [m nil] … (assoc m i i))` silently stayed O(n) per lookup forever
+    // (measured: 380ns to `get` one of 81 entries).
+    assert_eq!(run("(type-of (assoc nil :a 1))"), "PersistentArrayMap");
+    assert_eq!(run("(assoc nil :a 1 :b 2)"), "{:a 1, :b 2}");
+    assert_eq!(
+        run("(type-of (loop [i 0 m nil] (if (< i 30) (recur (inc i) (assoc m i i)) m)))"),
+        "PersistentHashMap"
+    );
+    assert_eq!(
+        run("(get (loop [i 0 m nil] (if (< i 30) (recur (inc i) (assoc m i i)) m)) 17)"),
+        "17"
+    );
+    assert_eq!(run("(assoc-in nil [:a :b] 1)"), "{:a {:b 1}}");
+    // …and nil is otherwise untouched: only `-assoc` was re-registered.
+    assert_eq!(run("[(get nil :a) (count nil) (contains? nil :a) (seq nil)]"), "[nil 0 false nil]");
     // correctness at scale (crosses BitmapIndexedNode -> ArrayNode)
     let big = "(into {} (map (fn [i] [i (* i i)]) (range 200)))";
     assert_eq!(run(&format!("(count {big})")), "200");
