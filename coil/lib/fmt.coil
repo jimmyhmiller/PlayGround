@@ -160,7 +160,10 @@
 (defn fmt--printer [(spec i64)] (-> Code)
   (if (icmp-eq spec 100) `fmt.print-i
   (if (icmp-eq spec 115) `io.print-str
-  (if (icmp-eq spec 120) `fmt.print-hex
+  (if (icmp-eq spec 120) `fmt.print-uhex   ; {x}: full-range hex. print-hex assumed
+                                           ; non-negative and emitted a garbage byte for
+                                           ; a negative i64 (a hash/mask/errno that went
+                                           ; negative — exactly what {x} is reached for).
   (if (icmp-eq spec 99)  `fmt.print-char
   (if (icmp-eq spec 98)  `fmt.print-bool
   (if (icmp-eq spec 117) `fmt.print-u

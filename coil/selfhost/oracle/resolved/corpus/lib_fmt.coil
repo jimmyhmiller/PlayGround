@@ -177,7 +177,7 @@
       (quasiquote io.print-str)
       (if
         (icmp-eq spec 120)
-        (quasiquote fmt.print-hex)
+        (quasiquote fmt.print-uhex)
         (if
           (icmp-eq spec 99)
           (quasiquote fmt.print-char)
