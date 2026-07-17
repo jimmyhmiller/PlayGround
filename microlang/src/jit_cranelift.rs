@@ -2206,7 +2206,13 @@ impl<M: ModelArithJit> JitCranelift<M> {
             call_ic: RefCell::new(std::array::from_fn(|_| None)),
             template_code: RefCell::new(Vec::with_capacity(TEMPLATE_CODE_CAP)),
             dispatch_ic: RefCell::new(Vec::with_capacity(DISPATCH_SITE_CAP)),
-            instance_ic: RefCell::new(Vec::new()),
+            // Pre-reserve to DISPATCH_SITE_CAP so `instance_ic_slot`'s `resize`
+            // NEVER reallocates: emitted InstanceCheck sites bake the address of
+            // their entry into the compiled code (like `dispatch_ic`), so a later
+            // reallocation would dangle every prior site's pointer — the compiled
+            // check would then read freed memory, miss forever (re-running
+            // `satisfies?` every call), and could even spuriously hit on garbage.
+            instance_ic: RefCell::new(Vec::with_capacity(DISPATCH_SITE_CAP)),
             counter: Cell::new(0),
             _pd: std::marker::PhantomData,
         }
