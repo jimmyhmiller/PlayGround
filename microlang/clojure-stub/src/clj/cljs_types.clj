@@ -270,6 +270,12 @@
 ;; growing — O(n), still correct); static .-EMPTY / iterator / transient dropped.
 (defprotocol IMap (-dissoc [coll k]))
 
+;; NB: do NOT add a bare `%eq` identity probe here to skip `-eq2`. It looks free
+;; (keywords are interned, so the common key hits it in one word compare) and it
+;; is WRONG: identity does not imply equality for NaN. `(let [n (/ 0.0 0.0)]
+;; (get {n 1} n))` must be nil, as in Clojure, and a `%eq` probe answers 1.
+;; `-eq2` already short-circuits on identity with the Double guard that case
+;; needs — go through it.
 (defn array-index-of [arr k]
   (let [len (alength arr)]
     (loop [i 0]

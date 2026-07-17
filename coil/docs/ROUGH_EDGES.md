@@ -129,7 +129,7 @@ call site**, not per call, so constructors that use it return the same object ev
 docs/COMPTIME.md promises "a fuel budget bounds runaway loops/recursion". The **loop** half is
 real; the **recursion** half does not exist, and neither does any depth guard on generated code.
 
-- [ ] **mac-5** No stack-depth guard anywhere: an 800-clause stdlib `cond` and a 900-field
+- [x] **mac-5** No stack-depth guard anywhere: an 800-clause stdlib `cond` and a 900-field
       `derive-eq` **segfault the compiler** with zero output. Cliff bisected to ~400-420 nodes.
       This caps the practical size of every generated construct — in a compiler whose purpose
       is generating code. Add a depth check in the recursive walks; long term move hot passes
@@ -137,8 +137,17 @@ real; the **recursion** half does not exist, and neither does any depth guard on
 - [ ] **diag-4** Non-terminating `comptime` → SIGBUS, zero bytes out. Add a call-depth counter
       next to the existing loop-fuel counter. (Same fix covers both engines.)
 - [ ] **gen-3** Infinitely-recursive monomorphization hangs forever, zero output, no limit.
-- [ ] **diag-3** Imported file missing `(module …)` → SIGABRT without naming the file.
+- [x] **diag-3** Imported file missing `(module …)` → SIGABRT without naming the file.
       The loader has the path in hand.
+
+- [ ] **NEW (found while fixing mac-5): the span renderer prints the ENTIRE source line.**
+      An error on a macro-generated line dumped 92 KB of output — the whole 40 KB line, twice
+      (source + caret rule). Truncate to a window around the span with ellipses. This makes
+      every diagnostic on generated or merely long lines unreadable, and it is why the new
+      depth-limit error, while correct, is unusable as printed.
+- [ ] **NEW: `expand` and the dump-* commands run on the MAIN thread (8 MiB)**, not the
+      512 MiB pipeline thread, so `coil expand` still segfaults on deeply nested input that
+      `coil build` now handles. Route them through run-on-big-stack too.
 
 ## Batch 5 — The good renderer exists; these call sites route around it
 

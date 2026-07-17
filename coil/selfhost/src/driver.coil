@@ -490,12 +490,17 @@
   (let [attr (alloc-stack (array i8 64))
         tid  (alloc-stack (ptr i8))]
     (pthread_attr_init (cast (ptr i8) attr))
-    ; 32 MiB: the recursive pipeline (parser/checker/codegen/comptime) compiles
-    ; the whole self-host source (coil.coil) with headroom to spare — the measured
-    ; floor is under 2 MiB now that compiler-internal spill/temp allocas live in
-    ; the entry block (see cg-entry-alloca) instead of growing the stack per loop
-    ; iteration. Was 512 MiB before that fix.
-    (pthread_attr_setstacksize (cast (ptr i8) attr) 33554432)   ; 32 MiB
+    ; 512 MiB. The 2 MiB floor that justified 32 MiB was measured on HAND-WRITTEN
+    ; source, where nesting is shallow because a human wrote it. Macro-generated code
+    ; is the case that measurement missed: `cond` expands to nested ifs, so an
+    ; 800-clause dispatch table is 800 levels deep, and the pipeline recurses per level
+    ; at ~75 KB a level (entry-block allocas — see cg-entry-alloca). At 32 MiB that
+    ; ran out at ~450 levels and died with a bare signal and zero output.
+    ; This is virtual reservation, not committed memory: pages fault in on use, so the
+    ; ceiling costs nothing until a deep program actually needs it. parse-depth-limit
+    ; (parser.coil) sits well under the cliff this buys, so a too-deep program gets a
+    ; located diagnostic rather than a crash.
+    (pthread_attr_setstacksize (cast (ptr i8) attr) 536870912)   ; 512 MiB
     ; COIL_META_MAIN=1: this (the MAIN) thread services metaprogram calls while
     ; the pipeline runs — AppKit metaprograms need the real main thread. The loop
     ; is a no-op when the service was never initialized.

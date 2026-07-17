@@ -555,7 +555,21 @@
   (let [a (seq a) b (seq b)]
     (cond (nil? a) (nil? b) (nil? b) false
           (-eq2 (%first a) (%first b)) (-seq-eq (%rest a) (%rest b)) true false)))
-(defn -eq2 [a b] (-equiv a b))
+;; `=` short-circuits on IDENTITY before dispatching `-equiv`, exactly as
+;; clojure.lang.Util.equiv does (`if(k1 == k2) return true;`). `%eq` is one
+;; inlined word compare; `-equiv` is a protocol dispatch, and it was costing
+;; ~43ns on EVERY `=` in the language — including `(= :a :a)`, which is now a
+;; pointer compare because keywords are interned.
+;;
+;; The Double guard is not paranoia: identity is the wrong answer for NaN.
+;; `(= n n)` on a NaN must be FALSE, and here `n` is ONE boxed float, so `%eq`
+;; says true. (Clojure reaches the same answer by accident — it boxes the
+;; primitive twice, so its own `k1 == k2` misses.) Everything else — keywords,
+;; strings, records, collections — means equal when it is the same object.
+(defn -eq2 [a b]
+  (if (%eq a b)
+    (if (%num-eq (type-of a) 'Double) (-equiv a b) true)
+    (-equiv a b)))
 
 ;; A 1-arg IFn protocol: a deftype implementing `clojure.lang.IFn`'s `(invoke
 ;; [this a])` becomes callable; the default throws.

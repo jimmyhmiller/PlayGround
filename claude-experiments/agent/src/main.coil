@@ -1594,14 +1594,27 @@
 
 (defn main [(argumentCount i32) (arguments (ptr (ptr i8)))] (-> i64)
   (if (and (> (cast i64 argumentCount) 1)
-           (workflow.strings-equal (load (index arguments 1)) c"--check-text-editor"))
-    (check-text-editor)
-    (if (and (> (cast i64 argumentCount) 2)
-             (workflow.strings-equal (load (index arguments 1)) c"--check-workflow"))
-      (let [runtime (workflow.load-runtime (load (index arguments 2)))]
-        (workflow.dump runtime))
+           (workflow.strings-equal (load (index arguments 1)) c"--native-catalog"))
+    (native.run-catalog)
+    (if (and (> (cast i64 argumentCount) 1)
+             (workflow.strings-equal (load (index arguments 1)) c"--render-native-catalog"))
+      (native.render-catalog-snapshot)
       (if (and (> (cast i64 argumentCount) 1)
-               (workflow.strings-equal (load (index arguments 1)) c"--check-catalog"))
-        (let [catalog (workflow.load-catalog)]
-          (workflow.dump-catalog catalog))
-        (run-interface)))))
+             (workflow.strings-equal (load (index arguments 1)) c"--check-native-controls"))
+        (let [valid (native.check-catalog-interactions)]
+          (do
+            (printf c"{\"button\":true,\"checkbox\":true,\"switch\":true,\"slider\":true,\"toggle\":true,\"radioGroup\":true,\"valid\":%s}\n"
+                    (if (= valid 1) c"true" c"false"))
+            (if (= valid 1) 0 1)))
+        (if (and (> (cast i64 argumentCount) 1)
+             (workflow.strings-equal (load (index arguments 1)) c"--check-text-editor"))
+          (check-text-editor)
+          (if (and (> (cast i64 argumentCount) 2)
+                   (workflow.strings-equal (load (index arguments 1)) c"--check-workflow"))
+            (let [runtime (workflow.load-runtime (load (index arguments 2)))]
+              (workflow.dump runtime))
+            (if (and (> (cast i64 argumentCount) 1)
+                     (workflow.strings-equal (load (index arguments 1)) c"--check-catalog"))
+              (let [catalog (workflow.load-catalog)]
+                (workflow.dump-catalog catalog))
+              (run-interface))))))))

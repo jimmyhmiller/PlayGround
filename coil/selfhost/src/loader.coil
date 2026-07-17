@@ -437,7 +437,17 @@
           (Ok [inc-forms]
             (let [modname (match (declared-module inc-forms)
                             (Some [m] m)
-                            (None []  (do (loader-abort "import: file has no (module …) declaration") "")))
+                            ; the one fact the user needs is WHICH file, and it was the one
+                            ; fact omitted — while the process killed itself with SIGABRT, so
+                            ; build tools saw a crashed compiler rather than a failed compile.
+                            ; `rp disp` is the imported file's path and `form` is the import
+                            ; that pulled it in: the same pair behind the excellent
+                            ; "import 'X': not found" error a few hundred lines up.
+                            (None []  (do (ls-set-err! (mut s)
+                                            (diag-at-form form
+                                              (sconcat3 a "import '" (load (field rp disp))
+                                                "': file has no (module …) declaration — add (module <name>) as its first form")))
+                                          "")))
                   importer (match cur (Some [m] m) (None [] ""))
                   imp (imp-entry (mut s) importer)
                   alias-name (match (load alias) (Some [al] al) (None [] modname))]

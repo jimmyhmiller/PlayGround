@@ -30,45 +30,62 @@ struct LoadedModule {
     diagnostics: Vec<String>,
 }
 
-#[derive(Clone, Eq, Hash, PartialEq)]
-struct ResolutionKey {
-    importer_directory: PathBuf,
-    specifier: String,
+struct ResolutionCache {
+    directories: [Mutex<HashMap<PathBuf, Arc<DirectoryResolutionCache>>>; 16],
 }
 
-struct ResolutionCache {
-    shards: [Mutex<HashMap<ResolutionKey, Result<SharedModuleId, String>>>; 64],
+struct DirectoryResolutionCache {
+    directory: PathBuf,
+    specifiers: [Mutex<HashMap<String, Result<SharedModuleId, String>>>; 64],
 }
 
 impl ResolutionCache {
     fn new() -> Self {
         Self {
-            shards: std::array::from_fn(|_| Mutex::new(HashMap::new())),
+            directories: std::array::from_fn(|_| Mutex::new(HashMap::new())),
         }
     }
 
+    fn directory(&self, importer: &Path) -> Arc<DirectoryResolutionCache> {
+        let importer_directory = importer.parent().unwrap_or_else(|| Path::new("."));
+        let hash = hash_value(importer_directory);
+        let mut shard = self.directories[hash as usize % self.directories.len()]
+            .lock()
+            .expect("resolution directory cache poisoned");
+        if let Some(cache) = shard.get(importer_directory) {
+            return Arc::clone(cache);
+        }
+        let cache = Arc::new(DirectoryResolutionCache {
+            directory: importer_directory.to_path_buf(),
+            specifiers: std::array::from_fn(|_| Mutex::new(HashMap::new())),
+        });
+        shard.insert(importer_directory.to_path_buf(), Arc::clone(&cache));
+        cache
+    }
+}
+
+impl DirectoryResolutionCache {
     fn resolve(
         &self,
         resolver: &Resolver,
         importer: &Path,
         specifier: &str,
     ) -> Result<SharedModuleId, String> {
-        let key = ResolutionKey {
-            importer_directory: importer
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf(),
-            specifier: specifier.to_owned(),
-        };
-        let shard = self.shard(&key);
-        if let Some(result) = shard.lock().expect("resolution cache poisoned").get(&key) {
-            return result.clone();
+        let hash = hash_value(specifier);
+        let shard = &self.specifiers[hash as usize % self.specifiers.len()];
+        if let Some(result) = shard
+            .lock()
+            .expect("resolution specifier cache poisoned")
+            .get(specifier)
+            .cloned()
+        {
+            return result;
         }
         // Most module graphs overwhelmingly use explicit relative files. Avoid
         // the general Node resolver on a cache miss when that exact file exists;
         // all ambiguous cases still take the standards-aware path.
         let exact_relative = specifier.strip_prefix("./").and_then(|relative| {
-            let candidate = key.importer_directory.join(relative);
+            let candidate = self.directory.join(relative);
             candidate.is_file().then(|| module_id(&candidate))
         });
         let result = if let Some(resolved) = exact_relative {
@@ -88,19 +105,16 @@ impl ResolutionCache {
         };
         shard
             .lock()
-            .expect("resolution cache poisoned")
-            .insert(key, result.clone());
+            .expect("resolution specifier cache poisoned")
+            .insert(specifier.to_owned(), result.clone());
         result
     }
+}
 
-    fn shard(
-        &self,
-        key: &ResolutionKey,
-    ) -> &Mutex<HashMap<ResolutionKey, Result<SharedModuleId, String>>> {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        &self.shards[hasher.finish() as usize % self.shards.len()]
-    }
+fn hash_value(value: impl Hash) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Debug)]
@@ -192,7 +206,7 @@ impl Bundler {
         }
         let mut diagnostics = Vec::new();
         let transformed_modules = bundler.discover_from(
-            vec![entry_path],
+            vec![entry_id],
             &mut delta,
             &mut diagnostics,
             record_initial_delta,
@@ -286,7 +300,7 @@ impl Bundler {
             .iter()
             .map(|(_, target)| target)
             .filter(|dependency| self.modules[**dependency].is_none())
-            .map(|dependency| PathBuf::from(self.ids[*dependency].as_ref()))
+            .map(|dependency| self.ids[*dependency].clone())
             .collect::<Vec<_>>();
         self.modules[index] = Some(new);
         let transformed_modules =
@@ -341,7 +355,7 @@ impl Bundler {
 
     fn discover_from(
         &mut self,
-        paths: Vec<PathBuf>,
+        paths: Vec<SharedModuleId>,
         delta: &mut DeltaRevision,
         diagnostics: &mut Vec<String>,
         record_delta: bool,
@@ -352,28 +366,29 @@ impl Bundler {
             let paths = frontier
                 .into_iter()
                 .filter(|path| {
-                    path.to_str()
-                        .and_then(|id| self.indices.get(id))
+                    self.indices
+                        .get(path.as_ref())
                         .is_none_or(|index| self.modules[*index].is_none())
                 })
                 .collect::<Vec<_>>();
-            let mut loaded = self.frontend_pool.install(|| {
+            let loaded = self.frontend_pool.install(|| {
                 paths
                     .into_par_iter()
                     .map(|path| {
-                        let result = load_uncached(&self.resolver, &self.resolution_cache, &path);
+                        let result = load_uncached(
+                            &self.resolver,
+                            &self.resolution_cache,
+                            Path::new(path.as_ref()),
+                        );
                         (path, result)
                     })
                     .collect::<Vec<_>>()
             });
-            loaded.sort_by(|left, right| left.0.cmp(&right.0));
             frontier = BTreeSet::new();
-
             for (path, result) in loaded {
-                let id = module_id(&path);
                 if self
                     .indices
-                    .get(id.as_ref())
+                    .get(path.as_ref())
                     .is_some_and(|index| self.modules[*index].is_some())
                 {
                     continue;
@@ -381,11 +396,11 @@ impl Bundler {
                 let loaded = result?;
                 diagnostics.extend(loaded.diagnostics);
                 transformed += 1;
-                let source = self.intern(id.clone());
+                let source = self.intern(path.clone());
                 if record_delta {
                     delta
                         .module_updates
-                        .push(((id.to_string(), loaded.hash), 1));
+                        .push(((path.to_string(), loaded.hash), 1));
                 }
                 let mut dependencies = Vec::with_capacity(loaded.dependencies.len());
                 for (specifier, target) in loaded.dependencies {
@@ -393,10 +408,10 @@ impl Bundler {
                     if record_delta {
                         delta
                             .edge_updates
-                            .push(((id.to_string(), target.to_string()), 1));
+                            .push(((path.to_string(), target.to_string()), 1));
                     }
                     if self.modules[target_index].is_none() {
-                        frontier.insert(PathBuf::from(target.as_ref()));
+                        frontier.insert(target.clone());
                     }
                     dependencies.push((specifier, target_index));
                 }
@@ -851,6 +866,7 @@ fn resolve_dependencies(
 ) -> Vec<(String, SharedModuleId)> {
     let resolve_started = frontend_profile::start();
     let mut dependencies = Vec::with_capacity(dependency_specifiers.len());
+    let directory_cache = resolution_cache.directory(path);
     for specifier in dependency_specifiers {
         if dependencies
             .iter()
@@ -858,7 +874,7 @@ fn resolve_dependencies(
         {
             continue;
         }
-        match resolution_cache.resolve(resolver, path, specifier) {
+        match directory_cache.resolve(resolver, path, specifier) {
             Ok(resolved) => {
                 dependencies.push((specifier.clone(), resolved));
             }

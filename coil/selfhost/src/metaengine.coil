@@ -388,7 +388,7 @@
                   (do (meta-host-onmain! 1) (main-svc-run (cast (ptr i8) c)) false)
                 (let [attr (alloc-stack (array i8 64)) tid (alloc-stack (ptr i8)) rv (alloc-stack (ptr i8))]
                   (pthread_attr_init (cast (ptr i8) attr))
-                  (pthread_attr_setstacksize (cast (ptr i8) attr) 33554432)   ; 32 MiB, like run-on-big-stack
+                  (pthread_attr_setstacksize (cast (ptr i8) attr) 536870912)   ; 512 MiB, like run-on-big-stack
                   (pthread_create (cast (ptr i8) tid) (cast (ptr i8) attr) (fnptr-of me-tramp) (cast (ptr i8) c))
                   (pthread_join (load tid) (cast (ptr i8) rv))
                   (icmp-ne (cast i64 (load rv)) 0)))]

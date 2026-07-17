@@ -59,6 +59,7 @@
 (extern GetClipboardText :cc c [] (-> (ptr i8)))
 (extern CheckCollisionPointRec :cc c [Vector2 Rectangle] (-> u8))
 (extern SetMouseCursor :cc c [i32] (-> void))
+(extern TakeScreenshot :cc c [(ptr i8)] (-> void))
 
 (export FLAG_WINDOW_RESIZABLE
         FLAG_MSAA_4X_HINT
@@ -110,6 +111,7 @@
         IsMouseButtonDown
         CheckCollisionPointRec
         SetMouseCursor
+        TakeScreenshot
         IsKeyPressed
         IsKeyPressedRepeat
         IsKeyDown

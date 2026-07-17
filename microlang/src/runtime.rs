@@ -2786,19 +2786,40 @@ impl<M: ValueModel> Runtime<M> {
     /// so protocol/method dispatch can target primitives and built-in containers —
     /// exactly what an in-language collection library needs.
     pub fn type_tag(&self, bits: u64) -> Sym {
-        // FAST PATH: a RECORD's type sym is ONE load off the object. This is the
-        // overwhelmingly common case — every deftype, and in this dialect that
-        // means every map, vector and set — and it is what protocol dispatch
-        // asks for per call.
+        // FAST PATH: the header's kind IS the answer for every reference shape,
+        // and a RECORD's type sym is one further load. No `ObjView`.
         //
-        // The general arm below reaches it through `view_gc`, which materializes
-        // a whole `ObjView` (field slice and all) and immediately drops it, just
-        // to read one word. Profiling predicate-heavy code (`(map? x)`,
-        // `(get x :k)` in a loop) put `view_gc` + `type_tag` +
-        // `ObjView::drop_in_place` at the very top — bigger than the dispatch it
-        // was serving. `raw_rec` keeps the same poison/corruption check.
-        if let Some((type_id, _)) = self.raw_rec(bits) {
-            return type_id;
+        // The general arm below goes through `view_gc`, which materializes a
+        // whole `ObjView` — field slices, `String`/`Vec` payloads and all — and
+        // immediately drops it, just to read one word. `type_tag` is what
+        // protocol dispatch asks for on EVERY call, so profiling
+        // predicate-heavy code (`(map? x)`, `(get x :k)` in a loop) put
+        // `view_gc` + `type_tag` + `ObjView::drop_in_place` at the very top of
+        // the profile — costing more than the dispatch they were serving.
+        //
+        // `raw_type_id` keeps the same poison/corruption check `view_gc` does.
+        if let Some(g) = self.raw_gc(bits) {
+            use crate::heap::kind;
+            let tid = self.raw_type_id(g);
+            let (idx, name) = match tid {
+                kind::RECORD => {
+                    let info = &self.shared.types[kind::RECORD as usize];
+                    return unsafe { g.raw_word(info, 0) as Sym };
+                }
+                kind::CONS => (TYPE_TAG_LIST, "List"),
+                kind::EMPTY_LIST => (TYPE_TAG_EMPTYLIST, "EmptyList"),
+                kind::ARRAY => (TYPE_TAG_VECTOR, "Vector"),
+                kind::STR => (TYPE_TAG_STRING, "String"),
+                kind::CHAR => (TYPE_TAG_CHAR, "Char"),
+                kind::CLOSURE | kind::MULTIFN => (TYPE_TAG_FN, "Fn"),
+                kind::BIGINT | kind::HUGEINT => (TYPE_TAG_LONG, "Long"),
+                kind::RATIO => (TYPE_TAG_RATIO, "Ratio"),
+                kind::BOXFLOAT => (TYPE_TAG_DOUBLE, "Double"),
+                kind::ATOM => (TYPE_TAG_ATOM, "Atom"),
+                kind::FUTURE => (TYPE_TAG_FUTURE, "Future"),
+                _ => (TYPE_TAG_OBJECT, "Object"),
+            };
+            return self.intern_cached(&self.shared.type_tag_cache[idx], name);
         }
         let (idx, name) = match self.decode(bits) {
             Val::Int(_) => (TYPE_TAG_LONG, "Long"),

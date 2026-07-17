@@ -443,10 +443,39 @@
   (try (let [(mut out) (al-new [Expr] a) n (sx-len items) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break) (do (al-push! (mut out) (try! (parse-expr a (sx-at items (load i))))) (store! i (iadd (load i) 1)))))
     (Ok (box-al [Expr] a (load out))))))
+; ---- recursion depth guard --------------------------------------------------
+; The parser recurses once per nesting LEVEL, and each level is expensive (~75 KB of
+; stack: parse-expr-inner is one big match whose per-branch allocas are all hoisted to
+; the entry block, so every call pays for every branch). Deeply nested input therefore
+; ran off the end of the stack and killed the compiler with a bare SIGBUS/SIGSEGV and
+; ZERO output — no message, no location, nothing naming the construct.
+;
+; Macros make this ordinary rather than exotic: `cond` expands to nested ifs, so an
+; 800-clause dispatch table is 800 levels deep, and a derive over a wide struct nests
+; the same way. This is a compiler whose whole purpose is generating code, so the depth
+; ceiling is a real limit and it must announce itself instead of crashing.
+;
+; The counter is process-global rather than threaded through every parse entry point:
+; the pipeline parses on one thread at a time. The limit sits well under the measured
+; stack cliff (see run-on-big-stack) so the diagnostic always wins the race.
+(defn parse-depth-cell [] (-> (ptr i64)) (alloc-static i64))
+(defn parse-depth-limit [] (-> i64) 2000)
+
 (defn parse-expr [(a (ptr Allocator)) (s Sexp)] (-> (Result Expr Diag))
-  (match (parse-expr-inner a s)
-    (Err [d] (Err (dwspan d (sx-source s) (sx-lo s) (sx-hi s) (sx-ctxt s))))
-    (Ok [kind] (Ok (mk-expr-nid kind (sx-lo s) (sx-hi s) (sx-source s) (sx-ctxt s) (sx-nid s))))))
+  (let [d (parse-depth-cell)]
+    (store! d (iadd (load d) 1))
+    (if (icmp-gt (load d) (parse-depth-limit))
+        (do (store! d (isub (load d) 1))
+            (Err (derr-at (sx-lo s) (sx-hi s)
+                   "expression nests more than 2000 levels deep — the parser recurses per level and would run out of stack. If this came from a macro, emit a flatter form (e.g. a jump table or a loop over a data table) instead of one deeply nested expression.")))
+      ; the decrement is repeated per arm rather than hoisted into a `let`: binding the
+      ; match result strands inference (gen-9 — a type arg can't flow out of a let, and
+      ; a local can't be annotated), so the type must come from return position.
+      (match (parse-expr-inner a s)
+        (Err [dg] (do (store! d (isub (load d) 1))
+                      (Err (dwspan dg (sx-source s) (sx-lo s) (sx-hi s) (sx-ctxt s)))))
+        (Ok [kind] (do (store! d (isub (load d) 1))
+                       (Ok (mk-expr-nid kind (sx-lo s) (sx-hi s) (sx-source s) (sx-ctxt s) (sx-nid s)))))))))
 (defn parse-expr-inner [(a (ptr Allocator)) (s Sexp)] (-> (Result ExprKind Diag))
   (let [tg (sx-tag s) slo (sx-lo s) shi (sx-hi s)]
     (if (icmp-eq tg 0) (Ok (EInt (sx-ival s)))

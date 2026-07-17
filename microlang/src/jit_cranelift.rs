@@ -4243,6 +4243,20 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // the runtime's promoting arithmetic on overflow / non-fixnum operands.
             // That gives the JIT the full numeric tower (bignum promotion, floats,
             // mixed) the tree-walker has. This is the emit half of codegen axis #2.
+            // `%eq` — object identity — is a bare word compare: no guard, no
+            // fast/slow split, nothing to promote. It only reached the generic
+            // prim shim (~45ns for `icmp eq`) because nobody had emitted it.
+            // `=` short-circuits on it (see `-eq2`), so it is now on the hot
+            // path of every equality in the language.
+            Ir::Prim(Prim::Identical, args) => {
+                let a = self.compile::<M>(&args[0], false);
+                let b = self.compile::<M>(&args[1], false);
+                let c = self.fb.ins().icmp(IntCC::Equal, a, b);
+                let cw = self.fb.ins().uextend(I64, c);
+                let t = self.iconst(M::R::enc_bool(true));
+                let f = self.iconst(M::R::enc_bool(false));
+                self.fb.ins().select(cw, t, f)
+            }
             // BitAnd/Or/Xor ride the same guard: `even?`/`odd?` are
             // `(zero? (bit-and n 1))` (as in clojure.core), so a bitwise op is a
             // PER-ELEMENT predicate in any filtered pipeline. Through the slow
