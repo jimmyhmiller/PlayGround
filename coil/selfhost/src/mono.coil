@@ -182,6 +182,65 @@
       (do (if (str-eq (al-get [(slice u8)] (load (field m io-mangled)) (load i)) mng) (do (store! r (load i)) (break)) 0)
           (store! i (iadd (load i) 1)))))
     (load r)))
+; ---- runaway instantiation guard --------------------------------------------
+; A generic that recurses on a WRAPPED version of its own argument (T -> (Box T) ->
+; (Box (Box T)) -> …) never reaches a fixpoint: every round mints a type the dedupe set
+; has never seen, so `drain` queues forever. It did so silently — no output, no progress,
+; no limit — turning a typo-shaped mistake into a build that never finishes and never
+; says why. In CI that eats the whole job.
+;
+; Type-term DEPTH is the exact signal. Every other way to diverge is already closed:
+; identical (name, args) is deduped by the queued-* sets, and there are no const generics
+; to diverge over — so an unbounded run must grow the term. Real code never nests types
+; anywhere near this deep, so the limit only ever fires on a genuine runaway.
+(defn ty-depth [(t (ptr Type))] (-> i64)
+  (match (load t)
+    (TPtr   [i]      (iadd 1 (ty-depth i)))
+    (TRef   [mu i]   (iadd 1 (ty-depth i)))
+    (TArray [e n]    (iadd 1 (ty-depth e)))
+    (TSlice [e]      (iadd 1 (ty-depth e)))
+    (TVec   [e n]    (iadd 1 (ty-depth e)))
+    (TApp   [nm as2] (iadd 1 (ty-list-depth as2)))
+    (TFn    [cc ps r] (iadd 1 (ty-depth r)))
+    (TInt [b s] 1) (TFloat [b] 1) (TBool [] 1) (TVoid [] 1)
+    (TStruct [n] 1) (TNever [] 1) (TCode [] 1) (TExternRef [] 1)))
+
+(defn ty-list-depth [(lst (ptr (ArrayList Type)))] (-> i64)
+  (let [n (al-len [Type] (load lst)) (mut i) 0 (mut mx) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [d (ty-depth (al-elem [Type] lst (load i)))]
+            (if (icmp-gt d (load mx)) (do (store! mx d) 0) 0))
+          (store! i (iadd (load i) 1)))))
+    (load mx)))
+
+(defn mono-depth-limit [] (-> i64) 64)
+(defn mono-name-limit  [] (-> i64) 512)
+
+; the deepest type argument in this instantiation request
+(defn pend-depth [(args (ptr (ArrayList Type)))] (-> i64) (ty-list-depth args))
+
+; Two views of the same thing — the type TERM got too big:
+;   depth: catches growth still shaped as a term, e.g. (Box (Box (Box …))) as a TApp.
+;   name:  catches growth AFTER substitution, which is the case that actually fires.
+;          Mono rewrites (Box T) to a TStruct whose mangled NAME carries the nesting
+;          (Box$i64 -> Box$Box$i64 -> …), so the term depth stays 1 while the term size
+;          grows without bound. Measuring depth alone silently misses the real runaway.
+(defn mono-runaway? [(args (ptr (ArrayList Type))) (mng (slice u8))] (-> bool)
+  (or (icmp-gt (pend-depth args) (mono-depth-limit))
+      (icmp-gt (slice-len [u8] mng) (mono-name-limit))))
+
+; Show the growth rather than just asserting it: the mangled name spells the nesting
+; out (Box$Box$Box$…), which is the one thing that makes the mistake obvious. Truncated
+; — at depth 64 it is thousands of characters.
+(defn mono-runaway-diag [(a (ptr Allocator)) (what (slice u8)) (nm (slice u8)) (mng (slice u8))] (-> Diag)
+  (let [shown (if (icmp-gt (slice-len [u8] mng) 100)
+                  (sconcat a (subslice mng 0 100) " …")
+                mng)]
+    (derr (sconcat3 a
+            (sconcat3 a "monomorphization: " what (sconcat3 a " '" nm "' is being instantiated with an ever-growing type, so it never reaches a fixpoint. A generic that recurses on a WRAPPED version of its own argument (T -> (Box T) -> (Box (Box T)) -> …) mints a type nobody has seen every round and instantiates forever. Last instantiation: "))
+            shown
+            ""))))
+
 (defn queue-struct [(m (ptr MonoCtx)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
   (let [a (load (field m a)) mng (mangle a nm args)]
     (io-record! m mng nm args)
@@ -499,33 +558,42 @@
                       nm (load (field pi name)) args (load (field pi args))
                       gs (al-elem [StructDef] (load (field m gstructs)) (find-struct-named (load (field m gstructs)) nm))
                       smap (subst-map a (load (field gs type_params)) args) mng (mangle a nm args)]
-                  (match (resolve-fields m (load (field gs fields)) smap)
-                    (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
-                    (Ok [nfs]
-                      (let [nd (alloc-stack StructDef)]
-                        (store! (field nd name) mng)
-                        (store! (field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
-                        (store! (field nd layout) (load (field gs layout)))
-                        (store! (field nd fields) nfs)
-                        (upsert-struct m (load nd))))))
+                  (if (mono-runaway? args mng)
+                      (do (store! err (mono-runaway-diag a "generic type" nm mng))
+                          (store! failed true) (store! done true) 0)
+                    (match (resolve-fields m (load (field gs fields)) smap)
+                      (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
+                      (Ok [nfs]
+                        (let [nd (alloc-stack StructDef)]
+                          (store! (field nd name) mng)
+                          (store! (field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+                          (store! (field nd layout) (load (field gs layout)))
+                          (store! (field nd fields) nfs)
+                          (upsert-struct m (load nd)))))))
                 (store! sc (iadd (load sc) 1)))
           (if (icmp-lt (load uc) (al-len [PendInst] (load (field m pending-sums))))
               (do (let [pi (al-elem [PendInst] (field m pending-sums) (load uc))
                         nm (load (field pi name)) args (load (field pi args))
                         gs (al-elem [SumDef] (load (field m gsums)) (find-sum-named (load (field m gsums)) nm))
                         smap (subst-map a (load (field gs type_params)) args) mng (mangle a nm args)]
-                    (match (resolve-sum m gs smap mng)
-                      (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
-                      (Ok [ns] (upsert-sum m ns))))
+                    (if (mono-runaway? args mng)
+                        (do (store! err (mono-runaway-diag a "generic sum" nm mng))
+                            (store! failed true) (store! done true) 0)
+                      (match (resolve-sum m gs smap mng)
+                        (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
+                        (Ok [ns] (upsert-sum m ns)))))
                   (store! uc (iadd (load uc) 1)))
             (if (icmp-lt (load fc) (al-len [PendInst] (load (field m pending-funcs))))
                 (do (let [pi (al-elem [PendInst] (field m pending-funcs) (load fc))
                           nm (load (field pi name)) args (load (field pi args))
                           gf (al-elem [Func] (load (field m gfuncs)) (find-func-named (load (field m gfuncs)) nm))
                           smap (subst-map a (load (field gf type_params)) args) mng (mangle a nm args)]
-                      (match (resolve-func m gf smap mng)
-                        (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
-                        (Ok [nf] (upsert-func m nf))))
+                      (if (mono-runaway? args mng)
+                          (do (store! err (mono-runaway-diag a "generic function" nm mng))
+                              (store! failed true) (store! done true) 0)
+                        (match (resolve-func m gf smap mng)
+                          (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
+                          (Ok [nf] (upsert-func m nf)))))
                     (store! fc (iadd (load fc) 1)))
               (do (store! done true) 0)))))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))

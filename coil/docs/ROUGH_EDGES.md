@@ -145,7 +145,7 @@ real; the **recursion** half does not exist, and neither does any depth guard on
       already is today. That is ONE problem ("a compile-time program diverges") needing ONE
       answer (watchdog / timeout / stack guard) that covers macros and `comptime` uniformly,
       not a special case inside a dying interpreter.
-- [ ] **gen-3** Infinitely-recursive monomorphization hangs forever, zero output, no limit.
+- [x] **gen-3** Infinitely-recursive monomorphization hangs forever, zero output, no limit.
 - [x] **diag-3** Imported file missing `(module …)` → SIGABRT without naming the file.
       The loader has the path in hand.
 

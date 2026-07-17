@@ -89,6 +89,31 @@ fi
 ( cd "$T/proj" && "$COIL" build --target not-a-real-triple >/dev/null 2>&1 )
 [ $? = 1 ] && ok "project bogus --target is rejected" || bad "project bogus --target" "want rc=1"
 
+echo "== a compile that cannot finish must SAY SO, not hang or crash =="
+# These all used to die with zero output: no message, no location, nothing naming the
+# construct — the worst possible failure for a mistake a typo can cause.
+cat > "$T/runaway.coil" <<'EOF'
+(module rw)
+(defstruct Box [T] [(v T)])
+(defn grow [T] [(x T)] (-> i64)
+  (let [b (alloc-stack (Box T))] (store! (field b v) x) (grow (load b))))
+(defn main [] (-> i64) (grow 1))
+EOF
+out=$(timeout 30 "$COIL" build "$T/runaway.coil" -o "$T/rw" 2>&1); rc=$?
+[ "$rc" = 1 ] && ok "runaway monomorphization errors (was: infinite hang)" \
+              || bad "runaway monomorphization" "rc=$rc (124=still hanging)"
+echo "$out" | grep -q "never reaches a fixpoint" && ok "…and explains the growth" \
+                                                 || bad "runaway message" "$(echo "$out" | head -1)"
+
+# deep macro-generated nesting: `cond` expands to nested ifs, so 800 clauses — an
+# ordinary bytecode dispatch table — is 800 levels deep, and used to segfault.
+{
+  printf '(module dp)\n(import "control.coil" :use *)\n(defn f [(x i64)] (-> i64) (cond '
+  i=0; while [ $i -lt 800 ]; do printf '(icmp-eq x %d) %d ' $i $i; i=$((i+1)); done
+  printf -- '-1))\n(defn main [] (-> i64) (f 5))\n'
+} > "$T/deep.coil"
+expect_rc 5 "an 800-clause cond builds and runs (was: SIGSEGV)" "$COIL" run "$T/deep.coil"
+
 echo "== object emission on the DEFAULT (LLVM) backend =="
 # Nothing else covers this: gate-full stops at emit-ir, and arm64/gate-run.sh only
 # exercises --backend arm64. So `:shim` — a naked trampoline, i.e. INLINE ASM, and the
