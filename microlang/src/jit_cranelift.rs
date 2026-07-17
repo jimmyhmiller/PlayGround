@@ -514,6 +514,18 @@ extern "C" fn shim_cons2<M: ModelArithJit>(ctx: *mut JitCtx<M>, h: u64, t: u64) 
     rt.cons(h, t)
 }
 
+// `=` (2-arg) via a register-arg, non-fenced shim. Eq2 never allocates and
+// never reaches a safepoint (the scalar branch compares scalars in place; the
+// collection / nil branches return `nil` BEFORE touching `equal`), so it can
+// ride the same non-fenced path as `first`/`rest` instead of the general
+// spill-args + fenced prim call. The answer is identical to
+// `rt.prim(Prim::Eq2, &[a, b])` — this literally delegates to it.
+extern "C" fn shim_eq2<M: ModelArithJit>(ctx: *mut JitCtx<M>, a: u64, b: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.prim(Prim::Eq2, &[a, b])
+}
+
 extern "C" fn shim_first1<M: ModelArithJit>(ctx: *mut JitCtx<M>, v: u64) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
@@ -1336,6 +1348,7 @@ struct Shims {
     cons2: FuncId,
     first1: FuncId,
     rest1: FuncId,
+    eq2: FuncId,
     tv_conj: FuncId,
     tam_assoc: FuncId,
     thm_assoc: FuncId,
@@ -1373,6 +1386,7 @@ struct ShimRefs {
     cons2: cranelift_codegen::ir::FuncRef,
     first1: cranelift_codegen::ir::FuncRef,
     rest1: cranelift_codegen::ir::FuncRef,
+    eq2: cranelift_codegen::ir::FuncRef,
     tv_conj: cranelift_codegen::ir::FuncRef,
     tam_assoc: cranelift_codegen::ir::FuncRef,
     thm_assoc: cranelift_codegen::ir::FuncRef,
@@ -2101,6 +2115,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let cn2: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_cons2::<M>;
         let fs1: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_first1::<M>;
         let rs1: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_rest1::<M>;
+        let eq2: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_eq2::<M>;
         let tvc: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_tv_conj::<M>;
         let tma: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_tam_assoc::<M>;
         let tha: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_thm_assoc::<M>;
@@ -2134,6 +2149,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         builder.symbol("ml_cons2", cn2 as *const u8);
         builder.symbol("ml_first1", fs1 as *const u8);
         builder.symbol("ml_rest1", rs1 as *const u8);
+        builder.symbol("ml_eq2", eq2 as *const u8);
         builder.symbol("ml_tv_conj", tvc as *const u8);
         builder.symbol("ml_tam_assoc", tma as *const u8);
         builder.symbol("ml_thm_assoc", tha as *const u8);
@@ -2210,6 +2226,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             cons2: decl(&mut module, "ml_cons2", &s_v2),
             first1: decl(&mut module, "ml_first1", &s_v1),
             rest1: decl(&mut module, "ml_rest1", &s_v1),
+            eq2: decl(&mut module, "ml_eq2", &s_v2),
             tv_conj: decl(&mut module, "ml_tv_conj", &s_v2),
             tam_assoc: decl(&mut module, "ml_tam_assoc", &s_v3),
             thm_assoc: decl(&mut module, "ml_thm_assoc", &s_v3),
@@ -2995,6 +3012,7 @@ fn build_body<M: ModelArithJit>(
         cons2: module.declare_func_in_func(shims.cons2, fb.func),
         first1: module.declare_func_in_func(shims.first1, fb.func),
         rest1: module.declare_func_in_func(shims.rest1, fb.func),
+        eq2: module.declare_func_in_func(shims.eq2, fb.func),
         tv_conj: module.declare_func_in_func(shims.tv_conj, fb.func),
         tam_assoc: module.declare_func_in_func(shims.tam_assoc, fb.func),
         thm_assoc: module.declare_func_in_func(shims.thm_assoc, fb.func),
@@ -4994,6 +5012,24 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let f = if matches!(p, Prim::First) { self.refs.first1 } else { self.refs.rest1 };
                 let ctx = self.ctx_val;
                 self.call_shim_checked(f, &[ctx, v])
+            }
+            // `=` (2-arg) via a monomorphic, register-arg, non-fenced shim.
+            // Eq2 is the single hottest op in predicate-heavy code (core.match):
+            // ~12M calls in the match bench, every one taking the general prim
+            // path (spill args to a stack slot + prim-tag + a GC-fenced call).
+            // Eq2 never allocates and never reaches a safepoint (the scalar
+            // branch compares in place; the collection / nil branches return
+            // `nil` BEFORE `equal`), so — exactly like First/Rest — it rides the
+            // non-fenced path with its two operands in registers. `shim_eq2`
+            // delegates to `rt.prim(Prim::Eq2, ..)`, so the answer is identical;
+            // only the calling convention changes. (A fuller inline fast-path
+            // was tried and REVERTED: its extra branches per site regressed the
+            // bench median even though the per-op min improved.)
+            Ir::Prim(Prim::Eq2, args) => {
+                let a = self.compile::<M>(&args[0], false);
+                let b = self.compile::<M>(&args[1], false);
+                let ctx = self.ctx_val;
+                self.call_shim_checked(self.refs.eq2, &[ctx, a, b])
             }
             // Every other prim: compute args, escape to the runtime (the native
             // analogue of the bytecode tier's `Slow`).
