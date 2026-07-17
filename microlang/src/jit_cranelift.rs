@@ -1908,6 +1908,12 @@ const MAX_REG_ARGS: usize = 8;
 /// strictly consumes budget).
 const INLINE_MAX_CALLEE_NODES: usize = 64;
 const INLINE_TOTAL_BUDGET: usize = 600;
+/// A caller body at or below this many Ir nodes is a thin forwarding wrapper;
+/// inlining ITS callee is what removes a call layer, so such callers get a
+/// larger per-callee cap (`INLINE_SMALL_CALLER_MAX_CALLEE`). Big callers keep
+/// the ordinary `INLINE_MAX_CALLEE_NODES` cap so they don't bloat.
+const INLINE_SMALL_CALLER_NODES: usize = 24;
+const INLINE_SMALL_CALLER_MAX_CALLEE: usize = 400;
 
 /// Count Ir nodes up to `limit`; `None` if the tree is bigger. (Not descending
 /// into nested `Lambda` bodies — they compile separately and only cost their
@@ -3000,6 +3006,13 @@ fn build_body<M: ModelArithJit>(
         rt_ptr: rt.map_or(std::ptr::null(), |r| r as *const Runtime<M> as *const ()),
         jit_ptr,
         inline_budget: Cell::new(INLINE_TOTAL_BUDGET),
+        // A thin forwarding caller (small body) gets a larger per-callee cap so
+        // the single big callee it wraps folds in; big callers keep the default.
+        inline_max_callee: if node_count_capped(ir, INLINE_SMALL_CALLER_NODES).is_some() {
+            INLINE_SMALL_CALLER_MAX_CALLEE
+        } else {
+            INLINE_MAX_CALLEE_NODES
+        },
         mem_mode: shape.mem_mode,
         // Stable byte offsets of `JitCtx` fields (repr(C)) for inline reads and for
         // building a callee context on the stack at a native call site.
@@ -3130,6 +3143,13 @@ pub struct Compiler<'a, 'b> {
     /// Remaining inlined-node allowance for THIS body (bounds code growth and
     /// terminates recursive inlining).
     inline_budget: Cell<usize>,
+    /// Per-callee node cap for speculative inlining INTO this body. Normally
+    /// `INLINE_MAX_CALLEE_NODES`, but a SMALL caller body (a thin wrapper such
+    /// as a `reduce` rf `(fn [a x] (+ a (classify x)))`) raises it so the one
+    /// larger callee it forwards to (`classify`) folds in — killing a whole
+    /// per-element call layer — without letting big callers bloat. The total
+    /// budget still bounds growth.
+    inline_max_callee: usize,
     /// Locals live in the heap frame (via `cur_slots`) instead of SSA variables.
     mem_mode: bool,
     off_cur_slots: i32,
@@ -3630,7 +3650,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         if body_mem_mode(&body) {
             return None;
         }
-        let cost = node_count_capped(&body, INLINE_MAX_CALLEE_NODES)?;
+        let cost = node_count_capped(&body, self.inline_max_callee)?;
         let budget = self.inline_budget.get();
         if budget < cost {
             return None;
@@ -3706,7 +3726,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         if body_mem_mode(&body) {
             return None;
         }
-        let cost = node_count_capped(&body, INLINE_MAX_CALLEE_NODES)?;
+        let cost = node_count_capped(&body, self.inline_max_callee)?;
         let budget = self.inline_budget.get();
         if budget < cost {
             return None;
