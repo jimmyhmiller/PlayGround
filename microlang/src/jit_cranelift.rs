@@ -63,7 +63,7 @@ use std::sync::Arc;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I128, I64, I8};
 use cranelift_codegen::ir::{
-    AbiParam, AtomicRmwOp, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Value,
+    AbiParam, AtomicRmwOp, Block, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Value,
 };
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -3995,40 +3995,23 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // Tail-transparent: the condition is not in tail position, but both
             // arms inherit it, so a tail call in either arm trampolines.
             Ir::If(cnd, then, els) => {
-                // Peephole: an optimizer-inserted fixnum guard
-                // `(if (%all-fixnum? a ..) t e)` lowers to a RAW combined tag
-                // test as the branch condition — no boolean is materialized and
-                // no truthiness is decoded, so the guard costs one bit test.
-                let t = if let Ir::Prim(Prim::AllFixnum, gargs) = cnd.as_ref() {
-                    let vs: Vec<Value> = gargs.iter().map(|a| self.compile::<M>(a, false)).collect();
-                    self.emit_all_fixnum_raw::<M>(&vs)
-                } else {
-                    let cv = self.compile::<M>(cnd, false);
-                    // Inline truthiness: only `nil` and `false` are falsey, and each
-                    // is a single value word, so `cv != nil && cv != false` — two
-                    // compares, no shim call. (Refs/ints/syms/floats/true are truthy.)
-                    let nil = self.iconst(M::R::enc_nil());
-                    let fal = self.iconst(M::R::enc_bool(false));
-                    let not_nil = self.fb.ins().icmp(IntCC::NotEqual, cv, nil);
-                    let not_fal = self.fb.ins().icmp(IntCC::NotEqual, cv, fal);
-                    self.fb.ins().band(not_nil, not_fal)
-                };
-
                 let result = self.declare_root_var();
                 let then_b = self.fb.create_block();
                 let else_b = self.fb.create_block();
                 let merge = self.fb.create_block();
 
-                self.fb.ins().brif(t, then_b, &[], else_b, &[]);
+                // Branch straight to the arms (see `emit_if_branch`). Both blocks
+                // can have SEVERAL predecessors now, so seal only once it is done.
+                self.emit_if_branch::<M>(cnd, then_b, else_b);
+                self.fb.seal_block(then_b);
+                self.fb.seal_block(else_b);
 
                 self.fb.switch_to_block(then_b);
-                self.fb.seal_block(then_b);
                 let tv = self.compile::<M>(then, tail);
                 self.fb.def_var(result, tv);
                 self.fb.ins().jump(merge, &[]);
 
                 self.fb.switch_to_block(else_b);
-                self.fb.seal_block(else_b);
                 let ev = self.compile::<M>(els, tail);
                 self.fb.def_var(result, ev);
                 self.fb.ins().jump(merge, &[]);
@@ -4910,6 +4893,80 @@ impl<'a, 'b> Compiler<'a, 'b> {
     /// are immediate integers and the result fits fixnum range, else a call to the
     /// runtime's promoting `prim` (bignum / float / mixed). The emit half of the
     /// numeric-overflow axis — what makes the JIT match the tree-walker's tower.
+    /// Emit an `if`'s test as a BRANCH to its arms, without ever building a
+    /// boolean value.
+    ///
+    /// `(if (< i n) …)` used to compile the comparison through the ordinary
+    /// arithmetic path, whose fast path materializes a TAGGED true/false with a
+    /// `select`, and then decoded that word back into a branch — `cmp #3; cset;
+    /// cmp #2; cset; and; tst; b.ne`. The disassembly of the hot loop in
+    /// `(loop [i 0] (if (< i n) (recur (inc i)) i))` is nine instructions where
+    /// the machine needs two, and it is the whole reason a three-operation loop
+    /// ran at ~0.4 IPC. Comparisons are the overwhelmingly common `if` test, so
+    /// they get the same treatment the fixnum guard already had.
+    ///
+    /// The slow path still goes through the runtime prim and decodes truthiness —
+    /// `<` on non-fixnums (bignums, ratios, floats) means what it always did.
+    fn emit_if_branch<M: ModelArithJit>(&mut self, cnd: &Ir, then_b: Block, else_b: Block) {
+        match cnd {
+            // An optimizer-inserted fixnum guard: one raw combined tag test.
+            Ir::Prim(Prim::AllFixnum, gargs) => {
+                let vs: Vec<Value> =
+                    gargs.iter().map(|a| self.compile::<M>(a, false)).collect();
+                let t = self.emit_all_fixnum_raw::<M>(&vs);
+                self.fb.ins().brif(t, then_b, &[], else_b, &[]);
+            }
+            // `(if (< a b) …)` / `(if (= a b) …)`: branch on the COMPARISON.
+            Ir::Prim(op @ (Prim::Lt | Prim::Eq), cargs) if cargs.len() == 2 => {
+                let a = self.compile::<M>(&cargs[0], false);
+                let b = self.compile::<M>(&cargs[1], false);
+                let both = if let Prim::Eq = op {
+                    M::emit_eq_immediates(self, a, b)
+                } else {
+                    M::emit_both_int(self, a, b)
+                };
+                let fastb = self.fb.create_block();
+                let slowb = self.fb.create_block();
+                self.fb.ins().brif(both, fastb, &[], slowb, &[]);
+
+                // fast: both immediates — compare and branch, nothing built.
+                self.fb.switch_to_block(fastb);
+                self.fb.seal_block(fastb);
+                let c = if let Prim::Eq = op {
+                    self.fb.ins().icmp(IntCC::Equal, a, b)
+                } else {
+                    let x = M::emit_untag(self, a);
+                    let y = M::emit_untag(self, b);
+                    self.fb.ins().icmp(IntCC::SignedLessThan, x, y)
+                };
+                self.fb.ins().brif(c, then_b, &[], else_b, &[]);
+
+                // slow: the promoting runtime prim, then ordinary truthiness.
+                self.fb.switch_to_block(slowb);
+                self.fb.seal_block(slowb);
+                let v = self.slow_prim(*op, &[a, b]);
+                let t = self.emit_truthy::<M>(v);
+                self.fb.ins().brif(t, then_b, &[], else_b, &[]);
+            }
+            _ => {
+                let cv = self.compile::<M>(cnd, false);
+                let t = self.emit_truthy::<M>(cv);
+                self.fb.ins().brif(t, then_b, &[], else_b, &[]);
+            }
+        }
+    }
+
+    /// Inline truthiness: only `nil` and `false` are falsey, and each is a single
+    /// value word, so `cv != nil && cv != false` — two compares, no shim call.
+    /// (Refs / ints / syms / floats / true are truthy.)
+    fn emit_truthy<M: ModelArithJit>(&mut self, cv: Value) -> Value {
+        let nil = self.iconst(M::R::enc_nil());
+        let fal = self.iconst(M::R::enc_bool(false));
+        let not_nil = self.fb.ins().icmp(IntCC::NotEqual, cv, nil);
+        let not_fal = self.fb.ins().icmp(IntCC::NotEqual, cv, fal);
+        self.fb.ins().band(not_nil, not_fal)
+    }
+
     fn emit_guarded_arith<M: ModelArithJit>(&mut self, op: Prim, a: Value, b: Value) -> Value {
         // `=`'s guard is wider than the arithmetic ops': ANY two non-ref
         // immediates compare by bits (Stage G1 — `(%num-eq (type-of x) 'Reduced)`
