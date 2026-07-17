@@ -65,15 +65,36 @@
        (load h))))
 
 ; ---- derive (generate a TRAIT impl) ----------------------------------------
+; ---- generic targets: (derive Eq (Box T)) ----------------------------------
+; `(Box T)` is a LIST whose head is the type and whose rest are its type params.
+; Deriving over one emits a generic impl carrying the derived trait as a bound on each
+; param — mechanically the hand-written `(impl [(T Eq)] Eq (Box T) …)`, which already
+; worked. Without the params the impl mentioned an unbound `T` and blew up with a
+; leaked mangled name ('coil.core.Eq$Box<T>$=' param 'a': unknown type 'T').
+(defn derive--tparams [(tname Code) (trait-name Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `()
+    `((~(code-nth tname i) ~trait-name) ~@(derive--tparams tname trait-name (iadd i 1) n))))
+
+; is this field's type one of the target's type params (the `v : T` in `(Box T)`)?
+; Such a field must compare through the trait — the bound we emit is what guarantees
+; it — not through icmp-eq, which would be nonsense for a T that turns out to be a struct.
+(defn derive--tparam-field? [(tname Code) (fty Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) false
+    (if (code-eq fty (code-nth tname i)) true
+      (derive--tparam-field? tname fty (iadd i 1) n))))
+(defn derive--generic-field? [(tname Code) (fty Code)] (-> bool)
+  (if (code-list? tname) (derive--tparam-field? tname fty 1 (code-count tname)) false))
+
 (defn derive--teq-field [(T Code) (a Code) (b Code) (i i64)] (-> Code)
   (let [fname (code-field-name T i)
         kind  (code-field-kind T i)
         pa    `(field ~a ~fname)
         pb    `(field ~b ~fname)]
-    (if (icmp-eq kind 3) `(= ~pa ~pb)                                           ; nested: trait =
-      (if (icmp-eq kind 4) (error "derive Eq: sum fields unsupported; impl by hand")
-        (if (icmp-eq kind 1) `(fcmp-eq (load ~pa) (load ~pb))
-          `(icmp-eq (load ~pa) (load ~pb)))))))
+    (if (derive--generic-field? T (code-field-type T i)) `(= ~pa ~pb)           ; T: Eq, via the bound
+      (if (icmp-eq kind 3) `(= ~pa ~pb)                                         ; nested: trait =
+        (if (icmp-eq kind 4) (error "derive Eq: sum fields unsupported; impl by hand")
+          (if (icmp-eq kind 1) `(fcmp-eq (load ~pa) (load ~pb))
+            `(icmp-eq (load ~pa) (load ~pb))))))))
 
 (defn derive--teq-and [(T Code) (a Code) (b Code) (i i64) (n i64)] (-> Code)
   (if (icmp-eq i n) `true
@@ -85,10 +106,11 @@
   (let [fname (code-field-name T i)
         kind  (code-field-kind T i)
         p     `(field ~x ~fname)]
-    (if (icmp-eq kind 3) `(hash ~p)                                             ; nested: trait hash
-      (if (icmp-eq kind 4) (error "derive Hash: sum fields unsupported; impl by hand")
-        (if (icmp-eq kind 1) (error "derive Hash: float fields unsupported (bit-hashing is lossy); impl by hand")
-          `(load ~p))))))
+    (if (derive--generic-field? T (code-field-type T i)) `(hash ~p)              ; T: Hash, via the bound
+      (if (icmp-eq kind 3) `(hash ~p)                                           ; nested: trait hash
+        (if (icmp-eq kind 4) (error "derive Hash: sum fields unsupported; impl by hand")
+          (if (icmp-eq kind 1) (error "derive Hash: float fields unsupported (bit-hashing is lossy); impl by hand")
+            `(load ~p)))))))
 
 (defn derive--thash-steps [(T Code) (x Code) (h Code) (i i64) (n i64)] (-> Code)
   (if (icmp-eq i n) `()
@@ -97,15 +119,25 @@
 
 (defn derive [(trait-name Code) (tname Code)] (-> Code)
   (if (code-eq trait-name `Eq)
-      `(impl Eq ~tname
-         (= [(a ~tname) (b ~tname)] (-> bool)
-           ~(derive--teq-and tname `a `b 0 (code-field-count tname))))
+      (if (code-list? tname)
+          `(impl [~@(derive--tparams tname trait-name 1 (code-count tname))] Eq ~tname
+             (= [(a ~tname) (b ~tname)] (-> bool)
+               ~(derive--teq-and tname `a `b 0 (code-field-count tname))))
+        `(impl Eq ~tname
+           (= [(a ~tname) (b ~tname)] (-> bool)
+             ~(derive--teq-and tname `a `b 0 (code-field-count tname)))))
     (if (code-eq trait-name `Hash)
+      (if (code-list? tname)
+          `(impl [~@(derive--tparams tname trait-name 1 (code-count tname))] Hash ~tname
+             (hash [(x ~tname)] (-> i64)
+               (let [(mut h) -3750763034362895579]
+                 ~@(derive--thash-steps tname `x `h 0 (code-field-count tname))
+                 (load h))))
         `(impl Hash ~tname
            (hash [(x ~tname)] (-> i64)
              (let [(mut h) -3750763034362895579]
                ~@(derive--thash-steps tname `x `h 0 (code-field-count tname))
-               (load h))))
+               (load h)))))
       (error "derive: only Eq and Hash are supported (impl other traits by hand)"))))
 
 ; ---- derive-keyops (a HashMap key from derived eq + hash) -------------------

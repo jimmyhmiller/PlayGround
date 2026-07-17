@@ -174,8 +174,8 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
       macros. The whole stdlib uses `error`. Give `error` the call-site span; document `report`.
 - [x] **mac-7** Macro arity errors unlocated and countless, while the *identical* ordinary-function
       error is perfect — directly contradicting "a macro is just a function".
-- [ ] **mac-9** Resolve errors in generated code get no expansion note; type errors get a great one.
-- [ ] **gen-11** `derive` over a generic type fails with a leaked mangled internal name, no span.
+- [x] **mac-9** Resolve errors in generated code get no expansion note; type errors get a great one.
+- [x] **gen-11** `derive` over a generic type fails with a leaked mangled internal name, no span.
 - [ ] **diag-8** One resolve error suppresses every typecheck error; the survivor is the unspanned one.
 
 ## Batch 6 — Bounds are parsed and thrown away
