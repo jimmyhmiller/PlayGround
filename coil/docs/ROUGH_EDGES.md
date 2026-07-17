@@ -134,8 +134,17 @@ real; the **recursion** half does not exist, and neither does any depth guard on
       This caps the practical size of every generated construct — in a compiler whose purpose
       is generating code. Add a depth check in the recursive walks; long term move hot passes
       to explicit worklists so size is bounded by heap, not the C stack.
-- [ ] **diag-4** Non-terminating `comptime` → SIGBUS, zero bytes out. Add a call-depth counter
-      next to the existing loop-fuel counter. (Same fix covers both engines.)
+- [~] **diag-4** Non-terminating `comptime` → SIGBUS, zero bytes out. **MOVED to the
+      interpreter project — do NOT patch here.** A call-depth counter beside the existing
+      `fuel` field would be work that exists to be deleted: `fuel` only exists *because*
+      `comptime` runs on the interpreter, and step 1 (route `comptime`/`const` through the
+      compiled engine) makes the whole mechanism dead code. Patching it also entrenches the
+      evaluator we intend to remove.
+      The fix is also *different* than it looks: once `comptime` is native code, a divergent
+      `comptime` is a hang or a native stack overflow — precisely what a runaway **macro**
+      already is today. That is ONE problem ("a compile-time program diverges") needing ONE
+      answer (watchdog / timeout / stack guard) that covers macros and `comptime` uniformly,
+      not a special case inside a dying interpreter.
 - [ ] **gen-3** Infinitely-recursive monomorphization hangs forever, zero output, no limit.
 - [x] **diag-3** Imported file missing `(module …)` → SIGABRT without naming the file.
       The loader has the path in hand.
