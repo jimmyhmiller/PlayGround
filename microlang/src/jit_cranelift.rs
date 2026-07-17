@@ -3963,9 +3963,25 @@ impl<'a, 'b> Compiler<'a, 'b> {
         match ir {
             // Inline load from the constant-pool base — no shim call.
             Ir::Const(id) | Ir::Quote(id) => {
+                // An IMMEDIATE constant is baked in as a literal. Immediates are not
+                // heap values — a collection can never rewrite them — so the pool
+                // read has nothing to tell us that the word itself does not.
+                //
+                // This matters more than it looks: the pool read is TWO dependent
+                // loads (the ctx's consts_base, then the slot), and the base load is
+                // not readonly, so nothing downstream hoists — the disassembly of
+                // `(loop [i 0 a 0] (if (< i n) (recur (inc i) (+ a 1)) a))` reloaded
+                // the literal `1` from memory on EVERY iteration.
+                if !self.rt_ptr.is_null() {
+                    let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                    let bits = rt.const_bits(*id);
+                    if M::R::tag_of(bits) != RawTag::Ref {
+                        return self.iconst(bits);
+                    }
+                }
                 let base = self.load_rc_field(self.off_consts_base);
-                // The constant pool is fixed during a run: readonly, so a constant
-                // used in a loop is hoisted out of it.
+                // The constant pool is fixed during a run: readonly. (A REF constant
+                // still reads the slot — a moving collection rewrites it in place.)
                 let ro = MemFlagsData::trusted().with_readonly();
                 self.fb.ins().load(I64, ro, base, (*id as i32) * 8)
             }

@@ -1292,6 +1292,17 @@ impl<M: ValueModel> Runtime<M> {
     /// Base pointer of the constant pool, for a native backend that loads
     /// constants inline instead of through a call. Valid until the pool grows
     /// (which only happens at analyze time, never during execution).
+    /// The raw word of constant `id`. The pool is append-only and fixed for a
+    /// run, so a compiler may bake an IMMEDIATE constant's word straight into
+    /// code; a REF's word must still be read from the slot, which a moving
+    /// collection rewrites.
+    pub fn const_bits(&self, id: u32) -> u64 {
+        // SAFETY: same reserved, never-reallocated buffer `consts_ptr` hands out.
+        // SAFETY: reserved buffer, never reallocated; read through the pointer
+        // without forming a reference to the Vec itself.
+        unsafe { *self.consts_ptr().add(id as usize) }
+    }
+
     pub fn consts_ptr(&self) -> *const u64 {
         // SAFETY: reserved buffer, never reallocated; base is stable for a run.
         unsafe { (*self.shared.consts.get()).as_ptr() }
