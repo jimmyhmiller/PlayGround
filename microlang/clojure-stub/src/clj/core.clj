@@ -492,7 +492,12 @@
 (defn cons [x c] (%cons x c))
 (defn empty? [c] (nil? (seq c)))
 (defn empty [c] (-empty c))
-(defn count [c] (cond (nil? c) 0 (string? c) (%str-len c) true (-count c)))
+(defn count [c]
+  (cond (nil? c) 0
+        ;; vector cnt is field 1 — skip the -count dispatch (the common counted coll)
+        (%num-eq (type-of c) 'PersistentVector) (field c 1)
+        (string? c) (%str-len c)
+        true (-count c)))
 ;; `subs` (clojure.core) — substring via the char list; end defaults to the length.
 (defn subs [s start & end]
   (let [cs (%str->chars s)
