@@ -4243,6 +4243,18 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // the runtime's promoting arithmetic on overflow / non-fixnum operands.
             // That gives the JIT the full numeric tower (bignum promotion, floats,
             // mixed) the tree-walker has. This is the emit half of codegen axis #2.
+            // `(nil? x)` is a compare against ONE constant. It was reaching the
+            // generic prim shim (~45ns) — 101 MILLION times in a predicate-heavy
+            // benchmark, because every `cond`/`if-let`/seq walk tests it.
+            Ir::Prim(Prim::IsNil, args) => {
+                let v = self.compile::<M>(&args[0], false);
+                let nil = self.iconst(M::R::enc_nil());
+                let c = self.fb.ins().icmp(IntCC::Equal, v, nil);
+                let cw = self.fb.ins().uextend(I64, c);
+                let t = self.iconst(M::R::enc_bool(true));
+                let f = self.iconst(M::R::enc_bool(false));
+                self.fb.ins().select(cw, t, f)
+            }
             // `%eq` — object identity — is a bare word compare: no guard, no
             // fast/slow split, nothing to promote. It only reached the generic
             // prim shim (~45ns for `icmp eq`) because nobody had emitted it.
@@ -4341,6 +4353,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let refchk = self.fb.create_block();
                 let hdrb = self.fb.create_block();
                 let recb = self.fb.create_block();
+                let kindb = self.fb.create_block();
                 let slowb = self.fb.create_block();
                 let merge = self.fb.create_block();
                 // immediate fixnum → 'Long (exactly `type_tag`'s Val::Int arm;
@@ -4363,13 +4376,60 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let hdr = self.fb.ins().load(I64, flags, addr, 0);
                 let tid = self.fb.ins().band_imm(hdr, 0xffff);
                 let is_rec = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::RECORD as i64);
-                self.fb.ins().brif(is_rec, recb, &[], slowb, &[]);
+                self.fb.ins().brif(is_rec, recb, &[], kindb, &[]);
                 self.fb.switch_to_block(recb);
                 self.fb.seal_block(recb);
                 let sym_w = self.fb.ins().load(I64, flags, addr, HEADER_SIZE as i32);
                 let enc = M::emit_enc_sym(self, sym_w);
                 self.fb.def_var(result, enc);
                 self.fb.ins().jump(merge, &[]);
+                // NOT a record, but still a reference: the header's kind IS the
+                // answer, and it is a compile-time constant sym. Only RECORD
+                // needs the object read, so this chain costs the common case
+                // nothing — it is reached only by the shapes that used to take
+                // the 45ns prim shim. `type-of` is the single most-called prim
+                // in predicate-heavy code (every `map?`/`seq?`/`vector?`), and
+                // it was hitting that shim 292 MILLION times in one benchmark
+                // run: every list and every string went the slow way.
+                //
+                // Kept to the hot kinds deliberately — each is one compare, and
+                // the rarities (ratio/atom/future/bigint/closure) are better off
+                // in the shim than lengthening this chain.
+                let konst = |c: &mut Self, name: &str| {
+                    let rt = unsafe { &*(c.rt_ptr as *const Runtime<M>) };
+                    let bits = M::R::enc_sym(rt.intern(name));
+                    c.iconst(bits)
+                };
+                // ATOM is first on purpose. It looks like it could never be hot
+                // — but `record?` derefs the `-record-types` registry atom, and
+                // `map?`/`vector?`/`seq?` all call `record?`, so `(atom? x)`
+                // runs `type-of` on an ATOM several times per element of any
+                // predicate-heavy loop. It measured 480 MILLION slow calls in a
+                // benchmark that does not mention atoms.
+                let mut next = kindb;
+                for (tid_k, name) in [
+                    (kind::ATOM, "Atom"),
+                    (kind::CONS, "List"),
+                    (kind::STR, "String"),
+                    (kind::EMPTY_LIST, "EmptyList"),
+                    (kind::CLOSURE, "Fn"),
+                ] {
+                    self.fb.switch_to_block(next);
+                    self.fb.seal_block(next);
+                    let hit = self.fb.create_block();
+                    let miss = self.fb.create_block();
+                    let is_k = self.fb.ins().icmp_imm(IntCC::Equal, tid, tid_k as i64);
+                    self.fb.ins().brif(is_k, hit, &[], miss, &[]);
+                    self.fb.switch_to_block(hit);
+                    self.fb.seal_block(hit);
+                    let c = konst(self, name);
+                    self.fb.def_var(result, c);
+                    self.fb.ins().jump(merge, &[]);
+                    next = miss;
+                }
+                self.fb.switch_to_block(next);
+                self.fb.seal_block(next);
+                self.fb.ins().jump(slowb, &[]);
                 self.fb.switch_to_block(slowb);
                 self.fb.seal_block(slowb);
                 let sp = self.slow_prim(Prim::TypeOf, &[v]);

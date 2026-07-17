@@ -2820,7 +2820,14 @@
 ;; assoc/count) is provided GENERICALLY via the field-name registry (see -rec-* and
 ;; the record branches in get/seq/count/assoc/contains?), so no per-record codegen.
 (def -record-types (atom #{}))
-(defn record? [x] (contains? (deref -record-types) (type-of x)))
+;; `%atom-get`, not `deref`: `-record-types` is an atom and we know it. `deref`
+;; is a seven-way cond that runs SIX `(type-of x)` tests (future?/var?/Volatile/
+;; Delay/Reduced/Promise) before it reaches the atom — and `record?` is not a
+;; cold reflective helper, it is the last clause of `map?`/`vector?`/`seq?`, so
+;; it runs on every element of any predicate loop for which those answer false.
+;; That chain alone was 480 MILLION `type-of` calls on an atom, in a benchmark
+;; that never mentions atoms.
+(defn record? [x] (contains? (%atom-get -record-types) (type-of x)))
 (defn -rec-get [r k nf]
   (loop [fs (%field-names r) i 0]
     (cond (nil? (seq fs)) nf
