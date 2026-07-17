@@ -23,9 +23,39 @@ use std::collections::HashMap;
 
 use crate::value::Sym;
 
+/// A fixed-multiplier hash for the `(Sym, Sym)` = two-`u32` method key. The
+/// default SipHash was ~20ns per probe — the whole cost of `%method-has-type?`
+/// once the per-call `intern` was cached — on a key that is just two 32-bit ids.
+/// This folds them with one multiply each. Keys are interned ids, so collisions
+/// are as rare as the id space; not adversarial (all keys are compiler-internal).
+#[derive(Default)]
+pub struct SymKeyHasher(u64);
+impl std::hash::Hasher for SymKeyHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        // A final avalanche so the low bits (which HashMap indexes on) mix.
+        let mut x = self.0;
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        x ^= x >> 33;
+        x
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (self.0.rotate_left(32) ^ i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+pub type SymKeyBuildHasher = std::hash::BuildHasherDefault<SymKeyHasher>;
+
 /// Maps `(method name, receiver type)` to an implementation closure ref. The
 /// single source of truth; a GC root.
-pub type MethodRegistry = HashMap<(Sym, Sym), u64>;
+pub type MethodRegistry = HashMap<(Sym, Sym), u64, SymKeyBuildHasher>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DispatchStats {

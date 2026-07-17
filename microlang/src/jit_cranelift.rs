@@ -700,7 +700,7 @@ extern "C" fn shim_dispatch<M: ModelArithJit>(
         let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
         let mut ics = jit.dispatch_ic.borrow_mut();
         if let Some(slot) = ics.get_mut(site as usize) {
-            if rt.shared.tables.lock().unwrap().dispatch.thread_cacheable() {
+            if rt.shared.tables.read().unwrap().dispatch.thread_cacheable() {
                 let reloc = rt.relocated();
                 let ver = rt.shared.dispatch_version.load(Ordering::Relaxed);
                 let way = (ty as usize) & (DISPATCH_IC_WAYS - 1);

@@ -42,7 +42,7 @@ impl std::hash::Hasher for SymHasher {
 pub type SymMap<V> = HashMap<Sym, V, BuildHasherDefault<SymHasher>>;
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::bigint::BigInt;
 use crate::dispatch::{Dispatch, Megamorphic, MethodRegistry};
@@ -303,7 +303,7 @@ pub struct Shared<M: ValueModel> {
     /// one relaxed load + a type-tag compare; a miss scans the field list and
     /// refills. `FIELD_IC_EMPTY` sentinel until first filled.
     field_ic: Vec<AtomicU64>,
-    pub(crate) tables: Mutex<Tables>,
+    pub(crate) tables: RwLock<Tables>,
     apply_fn: AtomicU64, // Sym+1, or 0 for None
     seq_fn: AtomicU64,   // Sym+1, or 0 for None — the frontend's `seq` (forces one lazy node)
     escape_tags: AtomicU64,
@@ -346,6 +346,7 @@ pub struct Shared<M: ValueModel> {
     sym_cache_persistent_vector: AtomicU32,
     sym_cache_chunked_cons: AtomicU32,
     sym_cache_transient_vector: AtomicU32,
+    sym_cache_protocol_default: AtomicU32,
     sym_cache_transient_array_map: AtomicU32,
     sym_cache_transient_hash_map: AtomicU32,
     sym_cache_persistent_hash_map: AtomicU32,
@@ -517,8 +518,8 @@ impl<M: ValueModel> Runtime<M> {
             global_slots: (0..0).map(|_| AtomicU64::new(GLOBAL_UNBOUND)).collect(),
             field_names: Vec::new(),
             field_ic: Vec::new(),
-            tables: Mutex::new(Tables {
-                methods: HashMap::new(),
+            tables: RwLock::new(Tables {
+                methods: MethodRegistry::default(),
                 method_names: HashSet::new(),
                 dispatch: Box::new(Megamorphic::new()),
             }),
@@ -539,6 +540,7 @@ impl<M: ValueModel> Runtime<M> {
             sym_cache_persistent_vector: AtomicU32::new(u32::MAX),
             sym_cache_chunked_cons: AtomicU32::new(u32::MAX),
             sym_cache_transient_vector: AtomicU32::new(u32::MAX),
+            sym_cache_protocol_default: AtomicU32::new(u32::MAX),
             sym_cache_transient_array_map: AtomicU32::new(u32::MAX),
             sym_cache_transient_hash_map: AtomicU32::new(u32::MAX),
             sym_cache_persistent_hash_map: AtomicU32::new(u32::MAX),
@@ -2405,7 +2407,7 @@ impl<M: ValueModel> Runtime<M> {
                 };
                 let sentinel = self.intern("-protocol-default");
                 let tys: Vec<Sym> = {
-                    let tables = self.shared.tables.lock().unwrap();
+                    let tables = self.shared.tables.read().unwrap();
                     tables
                         .methods
                         .keys()
@@ -2424,12 +2426,15 @@ impl<M: ValueModel> Runtime<M> {
                     panic!("%method-has-type?: type must be a symbol")
                 };
                 // The `-protocol-default` fallback entry is not a satisfying
-                // type — `MethodTypes` filters it out and so must this.
-                let sentinel = self.intern("-protocol-default");
+                // type — `MethodTypes` filters it out and so must this. Cached: an
+                // `intern` per call was ~4ns on a path core.match hits several
+                // times per match.
+                let sentinel = self
+                    .intern_cached(&self.shared.sym_cache_protocol_default, "-protocol-default");
                 let r = if ty == sentinel {
                     false
                 } else {
-                    self.shared.tables.lock().unwrap().methods.contains_key(&(method, ty))
+                    self.shared.tables.read().unwrap().methods.contains_key(&(method, ty))
                 };
                 self.encode(Val::Bool(r))
             }
@@ -2684,13 +2689,13 @@ impl<M: ValueModel> Runtime<M> {
     // ── dispatch axis ───────────────────────────────────────
     /// Swap the dispatch strategy. Nothing else changes — the axis is free.
     pub fn set_dispatch(&self, d: Box<dyn Dispatch>) {
-        self.shared.tables.lock().unwrap().dispatch = d;
+        self.shared.tables.write().unwrap().dispatch = d;
         // Swapping strategies invalidates every per-thread site cache (the new
         // strategy may resolve differently or need to observe every call).
         self.shared.dispatch_version.fetch_add(1, Ordering::Relaxed);
     }
     pub fn dispatch_stats(&self) -> crate::dispatch::DispatchStats {
-        self.shared.tables.lock().unwrap().dispatch.stats()
+        self.shared.tables.read().unwrap().dispatch.stats()
     }
     /// The receiver's type tag (a record's `type_id`). `None` for non-records.
     pub fn type_of(&self, bits: u64) -> Option<Sym> {
@@ -2923,7 +2928,7 @@ impl<M: ValueModel> Runtime<M> {
         self.intern_cached(&self.shared.type_tag_cache[idx], name)
     }
     pub fn register_method(&self, name: Sym, ty: Sym, imp: u64) {
-        let mut t = self.shared.tables.lock().unwrap();
+        let mut t = self.shared.tables.write().unwrap();
         t.method_names.insert(name);
         t.methods.insert((name, ty), imp);
         self.shared.dispatch_version.fetch_add(1, Ordering::Relaxed);
@@ -2931,7 +2936,7 @@ impl<M: ValueModel> Runtime<M> {
     /// Is `name` a registered method (so a frontend should compile `(name recv)`
     /// to a `Dispatch`)? The dispatch axis's compile-time query.
     pub fn is_method_name(&self, name: Sym) -> bool {
-        self.shared.tables.lock().unwrap().method_names.contains(&name)
+        self.shared.tables.read().unwrap().method_names.contains(&name)
     }
     /// Register the global fn a backend should invoke when a non-closure object
     /// is called (see `apply_fn`). The frontend sets this to a callable-object
@@ -3429,7 +3434,7 @@ impl<M: ValueModel> Runtime<M> {
     /// updates the strategy's per-site cache), then invoke happens in the backend.
     /// The impl is copied out and the lock dropped before the caller invokes it.
     pub fn resolve_method(&self, site: usize, method: Sym, ty: Sym) -> Option<u64> {
-        let t = self.shared.tables.lock().unwrap();
+        let t = self.shared.tables.read().unwrap();
         t.dispatch.resolve(&t.methods, site, method, ty)
     }
 
@@ -3461,7 +3466,7 @@ impl<M: ValueModel> Runtime<M> {
         // Fill the per-thread cache only when the installed strategy is a pure
         // registry lookup (see `Dispatch::thread_cacheable`) — an observing
         // strategy (ICs, speculation) must see every repeat call.
-        let cacheable = self.shared.tables.lock().unwrap().dispatch.thread_cacheable();
+        let cacheable = self.shared.tables.read().unwrap().dispatch.thread_cacheable();
         if cacheable {
             if let Some(imp) = resolved {
                 let mut ic = self.site_ic.borrow_mut();

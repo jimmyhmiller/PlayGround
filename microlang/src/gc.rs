@@ -351,7 +351,7 @@ impl<M: ValueModel> Runtime<M> {
                     visit(c as *mut u64);
                 }
                 // 5. Method impls (the dispatch registry is truth) + arglists.
-                for imp in shared.tables.lock().unwrap().methods.values_mut() {
+                for imp in shared.tables.write().unwrap().methods.values_mut() {
                     visit(imp as *mut u64);
                 }
                 for v in shared.var_arglists.lock().unwrap().values_mut() {
@@ -427,7 +427,7 @@ impl<M: ValueModel> Runtime<M> {
 
         // Dispatch caches hold impl pointers that just moved: invalidate them
         // (they refill on the next call). The registry, forwarded above, is truth.
-        shared.tables.lock().unwrap().dispatch.on_gc();
+        shared.tables.read().unwrap().dispatch.on_gc();
         // Epoch for per-site ICs: any cached heap pointer is now stale. A MINOR
         // moves objects too — promotion is a copy — so it must bump this exactly
         // like a major does, and one bump covers a minor+major pair because
