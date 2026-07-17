@@ -490,12 +490,24 @@
             (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+; `resolve` is deliberately lenient: a name it cannot find passes through UNQUALIFIED
+; (bare), because some names resolve later (builtins, coil.core methods). A real trait
+; always resolves to `module.Trait` — so a bound trait that comes back with no dot names
+; a trait that exists nowhere. That was accepted silently: `(defn f [(T NoSuchTrait)] …)`
+; compiled, and only failed at the CALL site as "i64 does not implement NoSuchTrait" —
+; which is nonsense, since no type could ever implement a trait that doesn't exist. Catch
+; it here, at the definition, where it belongs.
 (defn qualify-trait-names [(c (ptr Ctx)) (lst (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
-  (let [n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+  (let [a (load (field c a)) n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
-      (do (match (resolve c (al-get [(slice u8)] (load lst) (load i)) 2)
-            (Err [d] (do (store! err d) (store! failed true) (break)))
-            (Ok [nn] (store! (al-elem [(slice u8)] lst (load i)) nn)))
+      (do (let [raw (al-get [(slice u8)] (load lst) (load i))]
+            (match (resolve c raw 2)
+              (Err [d] (do (store! err d) (store! failed true) (break)))
+              (Ok [nn]
+                (if (has-dot nn)
+                    (store! (al-elem [(slice u8)] lst (load i)) nn)
+                  (do (store! err (derr (sconcat3 a "unknown trait '" raw "' in bound")))
+                      (store! failed true) (break))))))
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 (defn qualify-bound-list [(c (ptr Ctx)) (bounds (ptr (ArrayList Bound)))] (-> (Result i64 Diag))
