@@ -912,13 +912,25 @@ extern "C" fn shim_instance_fill<M: ModelArithJit>(
         return 0;
     }
     let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
-    let reloc = rt.relocated();
+    // InstanceCheck caches a BOOL keyed by the receiver's TYPE SYM (a stable
+    // interned immediate) in a NON-heap Vec — nothing here is a heap pointer, so
+    // GC relocation is irrelevant to its validity. Only the dispatch VERSION
+    // (extend-type / defprotocol / deftype registration) can change the answer,
+    // so the epoch omits `relocated()`. This matters because allocating workloads
+    // (e.g. core.match's per-element `(match [x] …)` builds a vector each call)
+    // bump `relocated()` constantly; mixing it in invalidated the cache every GC,
+    // so even a repeated record receiver never hit and took the `satisfies?` shim.
     let ver = rt.shared.dispatch_version.load(Ordering::Relaxed);
     let mut ics = jit.instance_ic.borrow_mut();
     if (site as usize) < ics.len() {
-        ics[site as usize] = DispatchIcEntry { epoch: dispatch_epoch(reloc, ver), ty, imp: result };
+        ics[site as usize] = DispatchIcEntry { epoch: instance_epoch(ver), ty, imp: result };
     }
     0
+}
+
+/// The InstanceCheck cache epoch — dispatch-version only (see `shim_instance_fill`).
+fn instance_epoch(ver: u64) -> u64 {
+    ver
 }
 
 extern "C" fn shim_safepoint<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
@@ -5023,12 +5035,14 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.seal_block(cacheb);
                 // The record's type sym IS its raw word at +8.
                 let ty = self.fb.ins().load(I64, flags, addr, 8);
-                let rp = self.load_rc_field(self.off_reloc_ptr);
-                let reloc = self.fb.ins().load(I64, flags, rp, 0);
+                // The cached bool depends only on the receiver type (`ty`) and the
+                // dispatch VERSION — never on GC relocation (see `instance_epoch` /
+                // `shim_instance_fill`). So the epoch is the dispatch version alone;
+                // omitting `relocated()` lets the cache survive the GC churn that an
+                // allocating caller (e.g. core.match) produces, so a repeated
+                // receiver type actually hits instead of re-running `satisfies?`.
                 let vp = self.load_rc_field(self.off_dispver_ptr);
-                let ver = self.fb.ins().load(I64, flags, vp, 0);
-                let mixed = self.fb.ins().imul_imm(reloc, DISPATCH_EPOCH_MIX as i64);
-                let epoch = self.fb.ins().bxor(mixed, ver);
+                let epoch = self.fb.ins().load(I64, flags, vp, 0);
                 let sitep = self.iconst(self.instance_ic_slot::<M>(*site) as u64);
                 let ce = self.fb.ins().load(I64, flags, sitep, 0); // entry.epoch
                 let ct = self.fb.ins().load(I64, flags, sitep, 8); // entry.ty
