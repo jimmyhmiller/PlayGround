@@ -1,5 +1,24 @@
 # The microclj performance suite
 
+> **Running the tests: use `--release`.** `cargo test` defaults to debug, and
+> this runtime is ~10x slower unoptimized — the correctness suites take **7
+> minutes** in debug and **26 seconds** in release:
+>
+>     cargo test --release -p clojure-stub --features jit \
+>         --test run --test jit --test seq_oracle
+>
+> The GC suites are deliberately not in that loop (they need the verify heap and
+> are slow by design). Run them for changes to GC rooting, the call convention,
+> or `apply`/frames:
+>
+>     MICROLANG_GC_VERIFY=1 cargo test --release -p clojure-stub --features jit --test gc_generational
+>     cargo test --release -p clojure-stub --features jit --test gc_stress_library -- --ignored
+>
+> And while iterating, prefer a smoke `.clj` run straight against
+> `target/release/microclj` (~0.5s) — it can also be diffed against real
+> Clojure with `clojure -M`.
+
+
     cargo build --release --features jit -p clojure-stub --bin microclj
     clojure-stub/bench/bench.sh              # the real thing (~3s warmup/workload)
     clojure-stub/bench/bench.sh --quick      # for iterating; NOT publishable
