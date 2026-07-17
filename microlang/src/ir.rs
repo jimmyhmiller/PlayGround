@@ -214,6 +214,12 @@ pub enum Prim {
     NsInterns,
     /// `(%all-ns)` -> a list of all registered namespace-name symbols.
     AllNs,
+    /// `(%ns-aliases ns)` — the ns's alias table, via the eval bridge.
+    NsAliases,
+    /// `(%resolve-in-ns ns sym)` — qualified var sym as seen from `ns`, or nil.
+    ResolveInNs,
+    /// `(%rand)` — a pseudorandom float in [0.0, 1.0).
+    Rand,
     /// `(%method-types 'method)` -> a list of the type-name symbols that have a
     /// concrete impl registered for `method` in the dispatch registry (excluding
     /// the `-protocol-default` sentinel). Reflection over protocol extensions,

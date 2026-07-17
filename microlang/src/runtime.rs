@@ -470,6 +470,18 @@ pub trait EvalBridge<M: ValueModel>: Send + Sync {
     fn current_ns(&self, rt: &mut Runtime<M>) -> u64 {
         rt.encode(Val::Nil)
     }
+    /// `(%ns-aliases ns)` — the alias table of the namespace named by the symbol
+    /// `ns`, as a flat list `(alias real alias real …)`. Aliases are frontend
+    /// policy and live in the compiler, not the runtime, so this has to come back
+    /// across the bridge; frontends without aliases return nil (no aliases).
+    fn ns_aliases(&self, rt: &mut Runtime<M>, _ns: u64) -> u64 {
+        rt.encode(Val::Nil)
+    }
+    /// `(%resolve-in-ns ns sym)` — the fully-qualified var symbol `sym` names when
+    /// read from namespace `ns`, or nil. Frontends without namespaces return nil.
+    fn resolve_in_ns(&self, rt: &mut Runtime<M>, _ns: u64, _sym: u64) -> u64 {
+        rt.encode(Val::Nil)
+    }
 }
 
 impl<M: ValueModel> Drop for Runtime<M> {
@@ -2124,6 +2136,42 @@ impl<M: ValueModel> Runtime<M> {
             Prim::CurrentNs => match self.eval_bridge.clone() {
                 Some(b) => b.current_ns(self),
                 None => panic!("%current-ns: no eval bridge installed"),
+            },
+            Prim::NsAliases => match self.eval_bridge.clone() {
+                Some(b) => b.ns_aliases(self, args[0]),
+                None => panic!("%ns-aliases: no eval bridge installed"),
+            },
+            Prim::Rand => {
+                // xorshift64*, seeded once per thread from the clock. `rand` only
+                // has to be unpredictable-ish and uniform in [0,1); it is not a
+                // security primitive, and callers that need reproducibility seed
+                // their own generator.
+                use std::cell::Cell;
+                thread_local! {
+                    static SEED: Cell<u64> = const { Cell::new(0) };
+                }
+                let x = SEED.with(|s| {
+                    let mut x = s.get();
+                    if x == 0 {
+                        x = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0x9E3779B97F4A7C15)
+                            | 1;
+                    }
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    s.set(x);
+                    x
+                });
+                // Top 53 bits -> an exactly-representable double in [0,1).
+                let f = (x >> 11) as f64 / (1u64 << 53) as f64;
+                self.encode(Val::Float(f))
+            }
+            Prim::ResolveInNs => match self.eval_bridge.clone() {
+                Some(b) => b.resolve_in_ns(self, args[0], args[1]),
+                None => panic!("%resolve-in-ns: no eval bridge installed"),
             },
             Prim::Pow => {
                 let f = |b: u64| -> f64 {

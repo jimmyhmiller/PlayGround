@@ -583,6 +583,11 @@
         (map? o) (get o (first args))
         (set? o) (get o (first args))
         (vector? o) (nth o (first args))
+        ;; A Var is IFn — calling it calls its ROOT, at whatever arity. Real code
+        ;; passes `#'f` wherever a fn goes (meander's `defmulti` dispatches on
+        ;; `#'unparse-dispatch`); without this every such call threw "not
+        ;; callable". Late in the cond: vars are rare and this is the call path.
+        (var? o) (apply (%global-get (-var-sym o)) args)
         true (-invoke o (first args))))
 
 ;; ─────────────── chunked sequences ───────────────
@@ -805,7 +810,14 @@
 ;; Chunk-aware, mirroring `filter`: map `f` over a chunk natively, collecting the
 ;; non-nil results into a buffer -> one output chunk (or skip to the next chunk
 ;; when none survive). So `(reduce g (keep f (range …)))` chunk-scans.
-(defn keep [f c]
+;; The 1-arg TRANSDUCER arity of these is not decoration: `(into [] (keep f) xs)`
+;; is ordinary Clojure that real libraries write (meander builds its pattern
+;; matrix with `(into [] (keep …) clauses)`), and without it the call was an
+;; arity error, not a slow path.
+(defn keep
+  ([f] (fn [rf] (fn ([] (rf)) ([a] (rf a))
+                    ([a x] (let [v (f x)] (if (nil? v) a (rf a v)))))))
+  ([f c]
   (lazy-seq
     (let [s (seq c)]
       (cond
@@ -823,7 +835,7 @@
                       (keep f (field s 3))
                       (record 'ChunkedCons buf 0 k (keep f (field s 3)))))))
         true (let [v (f (%first s))]
-               (if (nil? v) (keep f (%rest s)) (%cons v (keep f (%rest s)))))))))
+               (if (nil? v) (keep f (%rest s)) (%cons v (keep f (%rest s))))))))))
 ;; range produces CHUNKED seqs — a 32-element array per lazy step (each still a
 ;; normal seq via ChunkedCons), so `(reduce f (range n))` scans arrays, not conses.
 ;; `%range-fill` fills a whole chunk (up to 32 ints) in ONE native call instead of
@@ -917,7 +929,10 @@
 ;; (partial chunk) and stop. `(reduce/count (take-while pred (range …)))` then
 ;; chunk-scans instead of consing + calling `pred` through the seq abstraction
 ;; per element.
-(defn take-while [pred c]
+(defn take-while
+  ([pred] (fn [rf] (fn ([] (rf)) ([a] (rf a))
+                       ([a x] (if (pred x) (rf a x) (reduced a))))))
+  ([pred c]
   (lazy-seq
     (let [s (seq c)]
       (cond (nil? s) nil
@@ -929,14 +944,33 @@
                         (%num-eq i off) nil
                         true (record 'ChunkedCons arr off i nil))))
             (pred (%first s)) (%cons (%first s) (take-while pred (%rest s)))
-            true nil))))
-(defn drop-while [pred c]
-  (lazy-seq (let [s (seq c)]
-              (if (nil? s) nil (if (pred (%first s)) (drop-while pred (%rest s)) s)))))
+            true nil)))))
+;; Stateful transducer: once a single element fails `pred`, everything after it
+;; passes through — so the "still dropping" flag has to outlive each step.
+(defn drop-while
+  ([pred] (fn [rf] (let [dv (volatile! true)]
+                     (fn ([] (rf)) ([a] (rf a))
+                         ([a x] (if (if (deref dv) (pred x) false)
+                                  a
+                                  (do (vreset! dv false) (rf a x))))))))
+  ([pred c]
+   (lazy-seq (let [s (seq c)]
+               (if (nil? s) nil (if (pred (%first s)) (drop-while pred (%rest s)) s))))))
 ;; ─────────────── infinite / generator seqs ───────────────
 ;; x is the immediate head; `(f x)` is deferred INSIDE the inner lazy-seq (so
 ;; realizing element n applies f exactly n times, not n+1). Exactly cljs's form.
 (defn iterate [f x] (cons x (lazy-seq (iterate f (f x)))))
+
+;; A lazy seq over a STATEFUL java.util.Iterator, so it is single-pass: the
+;; cursor is consumed as the seq is realized. The leading .hasNext is EAGER, so
+;; an exhausted iterator yields nil rather than an empty seq — Clojure's
+;; chunkIteratorSeq does the same, and `(seq? (iterator-seq …))` on an empty
+;; iterator would otherwise disagree. Only the rest is deferred. (Clojure's is
+;; chunked; that is invisible except through chunk-first.)
+(defn iterator-seq [iter]
+  (if (.hasNext iter)
+    (lazy-seq (cons (.next iter) (iterator-seq iter)))
+    nil))
 ;; repeat produces CHUNKED seqs (a 32-wide run of `x` per lazy step), so
 ;; `(reduce f (take n (repeat x)))` / `(reduce f (repeat n x))` chunk-scan
 ;; instead of walking a cons per element.
@@ -951,7 +985,11 @@
           (record 'ChunkedCons (-repeat-chunk x k) 0 k (-repeat-n (%sub n k) x)))
         nil)))
 (defn repeat [& args] (if (nil? (next args)) (-repeat-inf (first args)) (-repeat-n (first args) (second args))))
-(defn repeatedly [f] (lazy-seq (%cons (f) (repeatedly f))))
+;; `(repeatedly f)` is infinite; `(repeatedly n f)` takes n — the bounded arity
+;; was missing entirely, so the common `(repeatedly 10 rand)` was an arity error.
+(defn repeatedly
+  ([f] (lazy-seq (%cons (f) (repeatedly f))))
+  ([n f] (take n (repeatedly f))))
 ;; Chunk-preserving: pass a chunk of the source straight through, restart from
 ;; `orig` when it empties — so `(reduce f (take n (cycle coll)))` chunk-scans.
 (defn -cycle [orig s]
@@ -1076,7 +1114,11 @@
                   (do (%cell-set! narr k (f idx (%aget arr j))) (recur (%add j 1) (%add k 1) (%add idx 1)))
                   (record 'ChunkedCons narr 0 k (map-indexed-h f idx (field s 3))))))
         true (%cons (f i (%first s)) (map-indexed-h f (%add i 1) (%rest s)))))))
-(defn map-indexed [f c] (map-indexed-h f 0 c))
+(defn map-indexed
+  ([f] (fn [rf] (let [iv (volatile! -1)]
+                  (fn ([] (rf)) ([a] (rf a))
+                      ([a x] (rf a (f (vswap! iv inc) x)))))))
+  ([f c] (map-indexed-h f 0 c)))
 
 ;; if-let / when-let are defined below, after `gensym` (they need a fresh temp so
 ;; a DESTRUCTURING binding form like `[k & ks]` is bound-and-tested via the temp,
@@ -1148,10 +1190,35 @@
        (when s# (let [~x (first s#)] ~@body)))))
 ;; `case`: constant dispatch, desugared to a `cond` of `=` tests (a trailing odd
 ;; clause is the default). Non-hygienic scratch symbol `-case-val`.
+;;
+;; Test constants are UNEVALUATED LITERALS — Clojure never resolves them — so
+;; each one is quoted on the way into the `=`. Leaving them bare made every
+;; SYMBOL constant a resolution error instead of a match: `(case x quote …)`
+;; (meander's syntax parser dispatches on exactly that) died with "Unable to
+;; resolve symbol: <ns>/quote" rather than testing for the symbol `quote`.
+;; Quoting is a no-op for the self-evaluating constants (keywords, numbers,
+;; strings), which is why this went unnoticed.
+;;
+;; A SEQ in test position is a GROUP — "any of these constants" — not a single
+;; list constant; to test for a list, nest it: `(case x ((1 2)) :yes)`. Vectors
+;; and maps are ordinary single constants.
+(defn -case-test [g c]
+  (if (seq? c)
+    (%cons 'or
+           (-rev (loop [ks (seq c) acc nil]
+                   (if (nil? ks)
+                     acc
+                     (recur (next ks)
+                            (%cons (list '= g (list 'quote (first ks))) acc))))))
+    (list '= g (list 'quote c))))
+;; Clojure throws IllegalArgumentException "No matching clause: <val>"; code in
+;; the wild catches it by type, so it must be a real exception object.
+(defn -case-no-match [v]
+  (record 'IllegalArgumentException (%str-cat "No matching clause: " (pr-str v))))
 (defn -case-cond [g clauses]
-  (cond (nil? clauses) (list true (list 'throw "no matching case clause"))
+  (cond (nil? clauses) (list true (list 'throw (list '-case-no-match g)))
         (nil? (next clauses)) (list true (first clauses))
-        true (%cons (list '= g (first clauses))
+        true (%cons (-case-test g (first clauses))
                     (%cons (second clauses)
                            (-case-cond g (next (next clauses)))))))
 (defmacro case (e & clauses)
@@ -1183,8 +1250,17 @@
 ;; the qualified sym (namespace resolution is compile-time); given an already-
 ;; qualified sym they are just `find-var`.
 (defn find-var [s] (if (%global-bound? s) (record 'Var s) nil))
-(defn resolve [s] (find-var s))
-(defn ns-resolve [n s] (find-var s))
+;; `ns-resolve` resolves a symbol as seen FROM `n` — own defs, then :refer, then
+;; clojure.core, with `alias/name` resolved through n's aliases. It must do this
+;; at RUNTIME (`%resolve-in-ns`), not lean on the compile-time literal rewrite:
+;; the symbol is usually a value, not a literal, and `(find-var 'inc)` on a bare
+;; name is nil. It answered nil for EVERY resolvable symbol before, which is
+;; silent and wrong in the worst way — callers read "no such var", so meander's
+;; resolve-symbol qualified every symbol into the current ns.
+(defn ns-resolve [n s]
+  (let [q (%resolve-in-ns (ns-name (the-ns n)) s)]
+    (if (nil? q) nil (find-var q))))
+(defn resolve [s] (ns-resolve (-ns-object) s))
 ;; Reflectively read/rebind the var's ROOT (throws if unbound; sets on rebind).
 (defn var-get [v] (%global-get (-var-sym v)))
 (defn var-set [v val] (%global-set (-var-sym v) val))
@@ -1265,8 +1341,19 @@
 (defn -mem? [s x] (cond (nil? (seq s)) false (-eq2 (first s) x) true true (-mem? (rest s) x)))
 
 ;; mapcat is variadic over collections (like map): concat the per-item results.
-(defn mapcat [f & colls] (apply concat (apply map f colls)))
-(defn interpose [sep coll] (drop 1 (mapcat (fn [x] (list sep x)) coll)))
+(defn mapcat
+  ([f] (comp (map f) cat))
+  ([f & colls] (apply concat (apply map f colls))))
+;; The transducer must not emit a leading separator, hence the "started" flag; and
+;; if the separator itself terminates the reduction, that `reduced` is returned
+;; rather than the element being stepped anyway.
+(defn interpose
+  ([sep] (fn [rf] (let [started (volatile! false)]
+                    (fn ([] (rf)) ([a] (rf a))
+                        ([a x] (if (deref started)
+                                 (let [r (rf a sep)] (if (reduced? r) r (rf r x)))
+                                 (do (vreset! started true) (rf a x))))))))
+  ([sep coll] (drop 1 (mapcat (fn [x] (list sep x)) coll))))
 ;; interleave is variadic, stopping at the shortest collection.
 ;; Direct two-collection interleave (the overwhelmingly common case): cons the
 ;; two heads and recurse on the two tails. The general n-ary path below rebuilt
@@ -1314,8 +1401,12 @@
            (let [ss (map seq colls)]
              (if (or (nil? (seq ss)) (-some-nil? ss)) nil
                (concat (map first ss) (apply interleave (map rest ss))))))))
-(defn take-nth [n coll]
-  (lazy-seq (let [s (seq coll)] (if (nil? s) nil (%cons (first s) (take-nth n (drop n s)))))))
+(defn take-nth
+  ([n] (fn [rf] (let [iv (volatile! -1)]
+                  (fn ([] (rf)) ([a] (rf a))
+                      ([a x] (let [i (vswap! iv inc)] (if (zero? (rem i n)) (rf a x) a)))))))
+  ([n coll]
+   (lazy-seq (let [s (seq coll)] (if (nil? s) nil (%cons (first s) (take-nth n (drop n s))))))))
 
 ;; `seen` is a HASH-SET (native `contains?`/`conj`, O(log32 n) — see the HAMT
 ;; prims), not a cons list with linear `-mem?` scanning: the old version's
@@ -1327,7 +1418,13 @@
                   (let [x (first s)]
                     (if (contains? seen x) (-distinct seen (rest s))
                         (%cons x (-distinct (conj seen x) (rest s)))))))))
-(defn distinct [coll] (-distinct #{} coll))
+(defn distinct
+  ([] (fn [rf] (let [seen (volatile! #{})]
+                 (fn ([] (rf)) ([a] (rf a))
+                     ([a x] (if (contains? (deref seen) x)
+                              a
+                              (do (vswap! seen conj x) (rf a x))))))))
+  ([coll] (-distinct #{} coll)))
 (def -none (record 'None nil))
 ;; Chunk-aware: scan a chunk natively, collecting elements that differ from the
 ;; immediately-preceding one into a buffer -> one output chunk, threading `prev`
@@ -1351,7 +1448,13 @@
                       (record 'ChunkedCons buf 0 k (-dedupe (%aget buf (%sub k 1)) (field s 3)))))))
         true (let [x (first s)]
                (if (-eq2 x prev) (-dedupe prev (rest s)) (%cons x (-dedupe x (rest s)))))))))
-(defn dedupe [coll] (-dedupe -none coll))
+(defn dedupe
+  ([] (fn [rf] (let [pv (volatile! -none)]
+                 (fn ([] (rf)) ([a] (rf a))
+                     ([a x] (let [p (deref pv)]
+                              (vreset! pv x)
+                              (if (-eq2 p x) a (rf a x))))))))
+  ([coll] (-dedupe -none coll)))
 
 (defn -seqable? [x] (cond (nil? x) true (list? x) true (vector? x) true (set? x) true (lazy-seq? x) true true false))
 (defn flatten [coll] (mapcat (fn [x] (if (-seqable? x) (flatten x) (list x))) coll))
@@ -1380,16 +1483,45 @@
 (defn -partition-all [n step s]
   (lazy-seq (let [s (seq s)]
               (if (nil? s) nil (%cons (-take-upto n s) (-partition-all n step (drop step s)))))))
-(defn partition-all [n & args]
-  (if (nil? (next args)) (-partition-all n n (first args)) (-partition-all n (first args) (second args))))
+;; `(partition-all n)` is a TRANSDUCER; with a coll it is the seq form. The
+;; completion arity must flush a partial final batch before completing `rf` —
+;; that batch is the whole difference between partition-all and partition.
+(defn partition-all
+  ([n] (fn [rf] (let [av (volatile! [])]
+                  (fn ([] (rf))
+                      ([a] (let [b (deref av)
+                                 a (if (zero? (count b)) a (do (vreset! av []) (unreduced (rf a b))))]
+                             (rf a)))
+                      ([a x] (let [b (conj (deref av) x)]
+                               (if (%num-eq (count b) n)
+                                 (do (vreset! av []) (rf a b))
+                                 (do (vreset! av b) a))))))))
+  ([n & args]
+   (if (nil? (next args)) (-partition-all n n (first args)) (-partition-all n (first args) (second args)))))
 (defn -part-by-run [f v s acc]
   (let [s (seq s)]
     (if (if (nil? s) true (not (-eq2 (f (first s)) v))) (vector (reverse acc) s)
         (-part-by-run f v (rest s) (%cons (first s) acc)))))
-(defn partition-by [f coll]
+;; Emits a batch whenever `(f x)` changes, and flushes the trailing batch on
+;; completion. `-none` (not nil) marks "no previous value" so that a first
+;; element whose `f` is nil still starts a run rather than being compared equal.
+(defn partition-by
+  ([f] (fn [rf] (let [av (volatile! []) pv (volatile! -none)]
+                  (fn ([] (rf))
+                      ([a] (let [b (deref av)
+                                 a (if (zero? (count b)) a (do (vreset! av []) (unreduced (rf a b))))]
+                             (rf a)))
+                      ([a x] (let [pval (deref pv) val (f x)]
+                               (vreset! pv val)
+                               (if (if (identical? pval -none) true (-eq2 val pval))
+                                 (do (vreset! av (conj (deref av) x)) a)
+                                 (let [b (deref av)]
+                                   (vreset! av [x])
+                                   (rf a b)))))))))
+  ([f coll]
   (lazy-seq (let [s (seq coll)]
               (if (nil? s) nil
-                  (let [r (-part-by-run f (f (first s)) s nil)] (%cons (nth r 0) (partition-by f (nth r 1))))))))
+                  (let [r (-part-by-run f (f (first s)) s nil)] (%cons (nth r 0) (partition-by f (nth r 1)))))))))
 
 ;; indexed / scanning
 (defn -keep-indexed [f i s]
@@ -1397,7 +1529,11 @@
               (if (nil? s) nil
                   (let [v (f i (first s))]
                     (if (nil? v) (-keep-indexed f (inc i) (rest s)) (%cons v (-keep-indexed f (inc i) (rest s)))))))))
-(defn keep-indexed [f coll] (-keep-indexed f 0 coll))
+(defn keep-indexed
+  ([f] (fn [rf] (let [iv (volatile! -1)]
+                  (fn ([] (rf)) ([a] (rf a))
+                      ([a x] (let [v (f (vswap! iv inc) x)] (if (nil? v) a (rf a v))))))))
+  ([f coll] (-keep-indexed f 0 coll)))
 ;; Chunk-aware: fold across an input chunk into an output chunk of running
 ;; accumulators (threading `acc` across chunks), so `(reduce/last (reductions
 ;; f init coll))` chunk-scans. -reductions emits `init` then the running folds
@@ -1717,7 +1853,9 @@
 ;; up, and applies the chosen method to the same args. Dispatch values compare by
 ;; structural equality (so keywords / numbers / vectors all work as keys).
 ;; MultiFn record: (record 'MultiFn dispatch-fn method-table-atom prefers-atom).
-(defn -make-multi [df nm] (record 'MultiFn df (atom (hash-map)) (atom (hash-map)) nm))
+;; field 4 = the DEFAULT dispatch value (`:default` unless defmulti overrides
+;; it with `:default other`) — the key an unmatched dispatch falls back to.
+(defn -make-multi [df nm dflt] (record 'MultiFn df (atom (hash-map)) (atom (hash-map)) nm dflt))
 (defn multi? [x] (%num-eq (type-of x) 'MultiFn))
 (defn -add-method [mf dval method]
   (let [a (field mf 1)] (reset! a (assoc (deref a) dval method))))
@@ -1729,12 +1867,13 @@
                  (some (fn [x] (-mf-prefers? mf x b)) pa)))))
 ;; Resolve the dispatch value to a method, honoring `isa?` and `prefer-method`.
 (defn -multi-lookup [mf dval]
-  (let [tbl (deref (field mf 1))]
+  (let [tbl (deref (field mf 1))
+        dk (field mf 4)]
     (if (contains? tbl dval)
       (get tbl dval)
-      (let [matches (filter (fn [k] (and (not= k :default) (isa? dval k))) (keys tbl))]
+      (let [matches (filter (fn [k] (and (not= k dk) (isa? dval k))) (keys tbl))]
         (cond
-          (empty? matches) (if (contains? tbl :default) (get tbl :default)
+          (empty? matches) (if (contains? tbl dk) (get tbl dk)
                              (throw (str "No method in multimethod '" (field mf 3) "' for dispatch value: " dval)))
           (= 1 (count matches)) (get tbl (first matches))
           :else (let [best (reduce (fn [a b] (cond (nil? a) b
@@ -1756,11 +1895,32 @@
 (defn remove-method [mf dval] (let [a (field mf 1)] (reset! a (dissoc (deref a) dval)) mf))
 (defn remove-all-methods [mf] (let [a (field mf 1)] (reset! a (hash-map)) mf))
 ;; (defmulti name docstring? attr-map? dispatch-fn & options) — skip an optional
-;; leading docstring and attr-map; the next form is the dispatch fn; ignore options.
+;; leading docstring and attr-map; the next form is the dispatch fn, and the rest
+;; are options.
+;;
+;; The options used to be DROPPED. `:default` renames the dispatch value that
+;; catches everything unmatched, so ignoring it meant a registered catch-all was
+;; never consulted and every unmatched call threw "No method in multimethod"
+;; instead — meander's `walk` (`:default ::default`) broke on exactly that.
+;; Option VALUES stay unevaluated here and are evaluated by the emitted
+;; `-make-multi` call, as Clojure evaluates them too.
+(defn -defmulti-opt [opts k dflt]
+  (loop [o (seq opts)]
+    (cond (nil? o) dflt
+          (= (first o) k) (second o)
+          true (recur (seq (next (next o)))))))
 (defmacro defmulti (name & more)
   (let [m1 (if (%num-eq (type-of (first more)) 'String) (rest more) more)
-        m2 (if (-attr-map? (first m1)) (rest m1) m1)]
-    (list 'def name (list '-make-multi (first m2) (list 'quote name)))))
+        m2 (if (-attr-map? (first m1)) (rest m1) m1)
+        opts (rest m2)]
+    ;; A custom hierarchy would change which method every dispatch selects;
+    ;; ignoring one silently would dispatch to the wrong method, so refuse it.
+    (if (nil? (-defmulti-opt opts :hierarchy nil))
+      nil
+      (throw (%str-cat "defmulti " (%sym-name name)
+                       ": the :hierarchy option is not supported (dispatch uses the global hierarchy)")))
+    (list 'def name (list '-make-multi (first m2) (list 'quote name)
+                          (-defmulti-opt opts :default :default)))))
 (defmacro defmethod (name dval params & body)
   (list '-add-method name dval (%cons 'fn (%cons params body))))
 
@@ -2319,6 +2479,33 @@
 (defn to-array [coll] (vec coll))
 ;; UUID: `(record 'UUID canonical-string)`; `#uuid "…"` reads as `(uuid "…")`.
 (defn uuid [s] (record 'UUID (str s)))
+;; ─────────────── randomness ───────────────
+;; `%rand` is a real generator (xorshift64*), not a counter: `rand` is ordinary
+;; clojure.core that libraries and app code both reach for, and the whole family
+;; was simply absent.
+(defn rand
+  ([] (%rand))
+  ([n] (* n (%rand))))
+;; Clojure floors toward zero into a long; `(rand-int n)` with n <= 0 is 0.
+(defn rand-int [n] (long (rand n)))
+(defn rand-nth [coll] (nth coll (rand-int (count coll))))
+;; Fisher-Yates over a mutable copy, then back to a vector — as Clojure does via
+;; java.util.Collections/shuffle. Returns a VECTOR whatever the input seq was.
+(defn shuffle [coll]
+  (let [v (vec coll) n (count v) arr (%make-array n)]
+    (loop [i 0] (if (%lt i n) (do (%cell-set! arr i (nth v i)) (recur (%add i 1))) nil))
+    (loop [i (%sub n 1)]
+      (if (%lt 0 i)
+        (let [j (rand-int (%add i 1)) tmp (%aget arr i)]
+          (%cell-set! arr i (%aget arr j))
+          (%cell-set! arr j tmp)
+          (recur (%sub i 1)))
+        nil))
+    (-array->vec arr)))
+(defn random-sample
+  ([prob] (filter (fn [_] (%lt (rand) prob))))
+  ([prob coll] (filter (fn [_] (%lt (rand) prob)) coll)))
+
 (defn uuid? [x] (%num-eq (type-of x) 'UUID))
 (def -uuid-counter (atom 0))
 ;; distinct (not cryptographically random) UUIDs — enough for `(not= (random-uuid) (random-uuid))`.
@@ -2350,7 +2537,11 @@
 (defn neg-int? [x] (and (int? x) (%lt x 0)))
 (defn nat-int? [x] (and (int? x) (not (%lt x 0))))
 (defn coll? [x] (or (vector? x) (map? x) (set? x) (list? x) (seq? x)))
-(defn ifn? [x] (or (fn? x) (keyword? x) (map? x) (set? x) (vector? x) (symbol? x)))
+;; Everything callable: fns, the collections/keywords/symbols that act as fns,
+;; multimethods, and Vars (a Var invokes its root — see -apply-obj).
+(defn ifn? [x]
+  (or (fn? x) (keyword? x) (map? x) (set? x) (vector? x) (symbol? x)
+      (var? x) (multi? x)))
 (defn distinct? [& xs] (%num-eq (count xs) (count (distinct xs))))
 ;; comparison: numbers and strings (char-code lexicographic).
 ;; Native comparison (Rust byte order == code-point order for valid UTF-8),
@@ -2368,9 +2559,11 @@
         (let [x (%char-code a) y (%char-code b)] (cond (%lt x y) -1 (%lt y x) 1 :else 0))
         (%lt a b) -1 (%lt b a) 1 :else 0))
 ;; replace preserves a vector input (returns a vector), else a seq.
-(defn replace [smap coll]
-  (let [f (fn [x] (if (contains? smap x) (get smap x) x))]
-    (if (vector? coll) (mapv f coll) (map f coll))))
+(defn replace
+  ([smap] (map (fn [x] (if (contains? smap x) (get smap x) x))))
+  ([smap coll]
+   (let [f (fn [x] (if (contains? smap x) (get smap x) x))]
+     (if (vector? coll) (mapv f coll) (map f coll)))))
 ;; seq tail ops
 (defn take-last [n coll] (loop [s (seq coll) len (count coll)] (if (%lt n (+ len 1)) (if (%num-eq len n) s (recur (rest s) (- len 1))) s)))
 (defn drop-last [a & more]

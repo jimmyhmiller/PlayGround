@@ -400,6 +400,36 @@ impl<M: ValueModel> EvalBridge<M> for FrontendBridge<M> {
         let s = rt.intern(comp.current_ns());
         rt.encode(Val::Sym(s))
     }
+    fn resolve_in_ns(&self, rt: &mut Runtime<M>, ns: u64, sym: u64) -> u64 {
+        let comp: &Compiler = unsafe { &*self.comp };
+        let name = |v: u64, what: &str| match rt.decode(v) {
+            Val::Sym(s) => rt.sym_name(s).to_string(),
+            other => panic!("%resolve-in-ns: {what} not a symbol: {other:?}"),
+        };
+        let (ns, sym) = (name(ns, "ns"), name(sym, "sym"));
+        match comp.resolve_var_in_ns(&ns, &sym) {
+            Some(q) => {
+                let q = rt.intern(&q);
+                rt.encode(Val::Sym(q))
+            }
+            None => rt.encode(Val::Nil),
+        }
+    }
+    fn ns_aliases(&self, rt: &mut Runtime<M>, ns: u64) -> u64 {
+        let comp: &Compiler = unsafe { &*self.comp };
+        let name = match rt.decode(ns) {
+            Val::Sym(s) => rt.sym_name(s).to_string(),
+            other => panic!("%ns-aliases: not a symbol: {other:?}"),
+        };
+        // Flat (alias real alias real …) — the clj side pairs it into a map.
+        let mut vals: Vec<u64> = Vec::new();
+        for (a, r) in comp.aliases_of(&name) {
+            let (a, r) = (rt.intern(&a), rt.intern(&r));
+            vals.push(rt.encode(Val::Sym(a)));
+            vals.push(rt.encode(Val::Sym(r)));
+        }
+        rt.vec_to_list(&vals)
+    }
 }
 
 /// Resolve `::foo` / `::alias/foo` markers (reader `KeywordAutoNs` records) to
@@ -731,14 +761,6 @@ fn expand<M: ValueModel>(
             let tag_q = quote_form(rt, vtag);
             let name_q = quote_form(rt, resolved);
             let g = rt.vec_to_list(&[rec, tag_q, name_q]);
-            expand(rt, cs, macros, comp, g)
-        } else if let Some(qualified) = resolve_rewrite(rt, comp, f) {
-            // `(resolve 'x)` / `(ns-resolve 'ns 'x)` with LITERAL symbols: namespace
-            // resolution is compile-time, so rewrite to `(find-var 'qualified)`.
-            let find = sym(rt, "find-var");
-            let qsym = rt.encode(Val::Sym(qualified));
-            let qform = quote_form(rt, qsym);
-            let g = rt.vec_to_list(&[find, qform]);
             expand(rt, cs, macros, comp, g)
         } else if is_sym(rt, head, "new") {
             // `(new Class args…)` is the same as `(Class. args…)` — rewrite to the
@@ -2109,6 +2131,16 @@ fn ns_directive<M: ValueModel>(rt: &Runtime<M>, k: u64, want: &str) -> Option<Op
 /// namespace — from the symbol itself (`{:keys [ns/x]}`) or, failing that, from
 /// the directive (`{:ns/keys [x]}`). A symbol's own namespace wins.
 fn split_ns_binding<M: ValueModel>(rt: &mut Runtime<M>, s: u64, dir_ns: Option<&str>) -> (u64, u64) {
+    // A `:keys` vector may hold KEYWORDS as well as symbols — `{:keys [:a]}`,
+    // and `{:keys [::x]}` after `::` resolves. The local is the keyword's NAME
+    // and the lookup key is the keyword itself, so unwrap it to its name symbol
+    // and let the symbol rules below do the rest. meander/epsilon writes
+    // `[{:keys [::context]}]`, which is what sent an unresolvable KEYWORD to
+    // `let` as a binding name.
+    let s = match record_field0(rt, s, reader::KEYWORD) {
+        Some(name_sym) => name_sym,
+        None => s,
+    };
     let Val::Sym(sy) = rt.decode(s) else { return (s, s) };
     let name = rt.sym_name(sy).to_string();
     match name.rsplit_once('/') {
@@ -2269,25 +2301,13 @@ fn unquote<M: ValueModel>(rt: &Runtime<M>, f: u64) -> u64 {
     f
 }
 
-/// If `f` is `(resolve 'x)` or `(ns-resolve 'ns 'x)` with LITERAL quoted symbols,
-/// return the fully-qualified sym it resolves to (namespace resolution is a
-/// compile-time operation over the current/ named namespace). Else `None`.
-fn resolve_rewrite<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, f: u64) -> Option<Sym> {
-    let (head, _) = rt.as_cons(f)?;
-    let items = rt.list_to_vec(f);
-    if is_sym(rt, head, "resolve") && items.len() == 2 {
-        // `(resolve 'x)` -> resolve `x` in the CURRENT namespace.
-        if let Val::Sym(s) = rt.decode(unquote(rt, items[1])) {
-            return Some(comp.resolve_ref(rt, s));
-        }
-    } else if is_sym(rt, head, "ns-resolve") && items.len() == 3 {
-        // `(ns-resolve 'ns 'x)` -> the qualified sym `ns/x` directly.
-        let ns = sym_name_of(rt, items[1])?;
-        let name = sym_name_of(rt, items[2])?;
-        return Some(rt.intern(&format!("{ns}/{name}")));
-    }
-    None
-}
+// `resolve` / `ns-resolve` used to be rewritten HERE, at compile time, into
+// `(find-var 'ns/x)`. That was wrong twice over: it string-concatenated `ns/x`
+// without checking a var by that name exists (so it never answered nil), and it
+// read its `ns` argument as a literal name even when it was an expression — for
+// the overwhelmingly common `(ns-resolve *ns* 'x)` it built the symbol `*ns*/x`.
+// Both now resolve at runtime through `%resolve-in-ns`, which walks the same
+// own-defs -> :refer -> clojure.core chain the compiler does. See core.clj.
 
 /// The name of a (possibly quoted) symbol form, e.g. `foo.bar` or `'foo.bar`.
 fn sym_name_of<M: ValueModel>(rt: &Runtime<M>, f: u64) -> Option<String> {

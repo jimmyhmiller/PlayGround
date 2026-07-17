@@ -304,6 +304,17 @@
 (extend-type Namespace
   IEquiv (-equiv [a b] (and (%num-eq (type-of b) 'Namespace) (= (field a 0) (field b 0)))))
 
+;; {alias-symbol -> Namespace} for a namespace's `:as` aliases. The prim hands
+;; back a flat (alias real alias real …) list from the COMPILER's alias table —
+;; aliases are a compile-time notion, so this crosses the eval bridge. Values are
+;; Namespace objects, not names: callers do `(ns-name (get (ns-aliases *ns*) 'a))`.
+(defn ns-aliases [n]
+  (loop [kvs (%ns-aliases (ns-name (the-ns n))) m (hash-map)]
+    (if (nil? kvs)
+      m
+      (recur (%rest (%rest kvs))
+             (assoc m (%first kvs) (record 'Namespace (%first (%rest kvs))))))))
+
 ;; `(class x)` — the Class record for x's registered class, or a Class wrapping
 ;; the bare runtime tag for dialect/deftype values (so .getName always answers).
 (defn class [x]
@@ -441,6 +452,34 @@
   (:kind :static)
   (:static-fn nanoTime [] (%nanos))
   (:static-fn gc [] (gc)))
+
+;; ─────────────── java.lang.Iterable / java.util.Iterator ───────────────
+;; Java's iteration protocol, reached for directly by real libraries: meander's
+;; substitute runtime walks a collection with .iterator/.hasNext/.next and wraps
+;; the cursor with clojure.core/iterator-seq. An Iterator is STATEFUL — it holds
+;; the not-yet-consumed seq in a cell and advances it on every .next.
+(deftype -SeqIterator [cell])
+(defn -seq-iterator [coll] (-SeqIterator. (%atom-new (seq coll))))
+
+(defclass java.util.Iterator
+  (:kind :interface) (:tag -SeqIterator)
+  (:method hasNext [it] (not (nil? (%atom-get (.-cell it)))))
+  (:method next [it]
+    (let [s (%atom-get (.-cell it))]
+      (if (nil? s)
+        (throw (record 'NoSuchElementException "iterator exhausted"))
+        (do (%atom-set (.-cell it) (next s)) (first s))))))
+(defclass java.util.NoSuchElementException
+  (:tag NoSuchElementException) (:extends java.lang.RuntimeException))
+
+;; `.iterator` lives on Object so it reaches every collection through the same
+;; fallback the other host methods use.
+(-proto-method .iterator Object (fn [o] (-seq-iterator o)))
+
+;; Iterable spans every native collection, so it answers by predicate rather
+;; than by tag. `coll?` is exactly Java's answer here: true for vectors, lists,
+;; maps, sets and seqs; false for strings (CharSequence is not Iterable) and nil.
+(defclass java.lang.Iterable (:kind :interface) (:tag PersistentVector) (:pred coll?))
 
 ;; value wrappers / interfaces mapping onto the dialect's native types
 (defclass java.lang.CharSequence (:kind :interface) (:tag String) (:pred string?))

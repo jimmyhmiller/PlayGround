@@ -162,7 +162,7 @@ impl Compiler {
             // Split a (possibly qualified) symbol for var reflection (name/namespace).
             ("%sym-name", SymName), ("%sym-ns", SymNs),
             // Var/namespace registry reflection (metadata flags + ns enumeration).
-            ("%var-flags", VarFlags), ("%ns-interns", NsInterns), ("%all-ns", AllNs),
+            ("%var-flags", VarFlags), ("%ns-interns", NsInterns), ("%ns-aliases", NsAliases), ("%resolve-in-ns", ResolveInNs), ("%rand", Rand), ("%all-ns", AllNs),
             ("%symbol", SymbolOf), ("%var-arglists", VarArglists),
             // THE string-introspection primitive; clojure.string/regex build on it.
             ("%str->chars", StrChars), ("%method-types", MethodTypes),
@@ -280,6 +280,38 @@ impl Compiler {
         q
     }
 
+    /// `(ns-resolve ns sym)` — resolve `name` to a fully-qualified var name AS
+    /// SEEN FROM the namespace `ns`, or None if no such var exists.
+    ///
+    /// This is the RUNTIME twin of the compile-time rewrite that `resolve` on a
+    /// literal gets. It cannot use that rewrite: the symbol here is a runtime
+    /// VALUE (meander hands `resolve-symbol` symbols it read out of a pattern),
+    /// so there is no literal to rewrite and every lookup answered nil.
+    /// Resolution order matches the compiler's: own defs -> :refer -> clojure.core.
+    /// A qualified `alias/name` resolves the alias against `ns` first.
+    pub fn resolve_var_in_ns(&self, ns: &str, name: &str) -> Option<String> {
+        let defines = |n: &str, v: &str| self.ns.ns_defs.get(n).is_some_and(|d| d.contains(v));
+        if name.len() > 1 && name.contains('/') {
+            let (pre, base) = name.split_once('/')?;
+            // `pre` may be an alias in `ns`, or already a real namespace name.
+            let real = self
+                .ns
+                .aliases
+                .get(ns)
+                .and_then(|m| m.get(pre))
+                .cloned()
+                .unwrap_or_else(|| pre.to_string());
+            return defines(&real, base).then(|| format!("{real}/{base}"));
+        }
+        if defines(ns, name) {
+            return Some(format!("{ns}/{name}"));
+        }
+        if let Some(fq) = self.ns.refers.get(ns).and_then(|r| r.get(name)) {
+            return Some(fq.clone());
+        }
+        defines("clojure.core", name).then(|| format!("clojure.core/{name}"))
+    }
+
     /// `(ns foo …)` / `(in-ns 'foo)` — switch the current namespace.
     pub fn set_ns(&mut self, name: &str) {
         self.ns.current = name.to_string();
@@ -313,6 +345,20 @@ impl Compiler {
     /// alias must win over class-name interpretation of `Alias/member`.)
     pub fn has_alias(&self, alias: &str) -> bool {
         self.ns.aliases.get(&self.ns.current).is_some_and(|m| m.contains_key(alias))
+    }
+
+    /// Every `alias -> real` pair registered in the namespace `ns`, sorted by
+    /// alias so the reflected table has a stable order. (`ns-aliases` reflects an
+    /// ARBITRARY namespace, so this cannot read `self.ns.current`.)
+    pub fn aliases_of(&self, ns: &str) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self
+            .ns
+            .aliases
+            .get(ns)
+            .map(|m| m.iter().map(|(a, r)| (a.clone(), r.clone())).collect())
+            .unwrap_or_default();
+        v.sort();
+        v
     }
 
     /// The namespace an alias points to in the current ns (for `::alias/kw`).
@@ -924,7 +970,13 @@ impl Compiler {
         let mut inits = Vec::new();
         let mut i = 0;
         while i + 1 < binds.len() {
-            let name = self.name(rt, binds[i]).expect("let: binding name must be a symbol");
+            // Name the offending form: by this point `destructure` has already
+            // rewritten every pattern it understands into plain symbols, so a
+            // non-symbol here means an UNSUPPORTED binding shape — and "must be
+            // a symbol" alone gives no way to find out which one.
+            let name = self.name(rt, binds[i]).unwrap_or_else(|| {
+                panic!("let: unsupported binding form (not a symbol): {}", rt.print(binds[i]))
+            });
             inits.push(self.compile(rt, binds[i + 1]));
             self.scope.last_mut().unwrap().push(name);
             i += 2;
