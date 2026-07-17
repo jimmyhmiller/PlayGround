@@ -2154,6 +2154,37 @@ impl<M: ValueModel> Runtime<M> {
                 Some(b) => b.ns_aliases(self, args[0]),
                 None => panic!("%ns-aliases: no eval bridge installed"),
             },
+            Prim::ProtoHasType => {
+                // The `satisfies?` inner loop, native: walk the protocol's method
+                // cons-list and ask the registry for an impl at `ty`. Replaces a
+                // clojure loop that called %method-has-type? + %first + %rest per
+                // method — ~24ns of wrapper over the ~18ns lookup for a one-method
+                // protocol like ILookup, which core.match's instance? tests hit
+                // several times per match.
+                let (methods, ty_bits) = (args[0], args[1]);
+                let ty = match self.decode(ty_bits) {
+                    Val::Sym(t) => t,
+                    _ => return self.encode(Val::Bool(false)),
+                };
+                let sentinel = self
+                    .intern_cached(&self.shared.sym_cache_protocol_default, "-protocol-default");
+                let found = {
+                    let tables = self.shared.tables.read().unwrap();
+                    let mut m = methods;
+                    let mut hit = false;
+                    while let Some((mb, rest)) = self.as_cons(m) {
+                        if let Val::Sym(method) = self.decode(mb) {
+                            if method != sentinel && tables.methods.contains_key(&(method, ty)) {
+                                hit = true;
+                                break;
+                            }
+                        }
+                        m = rest;
+                    }
+                    hit
+                };
+                self.encode(Val::Bool(found))
+            }
             Prim::AmapGet => {
                 // Scan a key/value array pairwise for `k`, structural `equal` per
                 // key (interned keywords short-circuit to a pointer compare inside

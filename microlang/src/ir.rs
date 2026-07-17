@@ -224,6 +224,9 @@ pub enum Prim {
     CpuCount,
     /// `(%amap-get arr k nf)` — native array-map scan: value for `k`, else `nf`.
     AmapGet,
+    /// `(%proto-has-type? methods ty)` — does any method sym in the cons list have
+    /// an impl for `ty`? The native `satisfies?` inner loop.
+    ProtoHasType,
     /// `(%method-types 'method)` -> a list of the type-name symbols that have a
     /// concrete impl registered for `method` in the dispatch registry (excluding
     /// the `-protocol-default` sentinel). Reflection over protocol extensions,

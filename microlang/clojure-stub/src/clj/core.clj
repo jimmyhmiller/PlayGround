@@ -2000,12 +2000,7 @@
 ;; `%first` answers nil for BOTH nil and `()`, and a method name is never nil,
 ;; so that single test terminates the loop for either shape — which matters
 ;; because `extends?` reaches here with a marker protocol's `()`.
-(defn -proto-has-type? [ms ty]
-  (loop [l ms]
-    (let [m (%first l)]
-      (if (nil? m)
-        false
-        (if (%method-has-type? m ty) true (recur (%rest l)))))))
+(defn -proto-has-type? [ms ty] (%proto-has-type? ms ty))
 (defn satisfies? [p x]
   (let [ms (-proto-methods p)]
     ;; A MARKER protocol has no methods — `()`, not nil. `%first` distinguishes
