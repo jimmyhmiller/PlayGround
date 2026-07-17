@@ -133,6 +133,7 @@
 (defstruct StructDef
   [(name (slice u8))
    (type_params (ptr (ArrayList (slice u8))))
+   (bounds (ptr (ArrayList Bound)))        ; trait bounds on the params (empty if none)
    (layout Layout)
    (fields (ptr (ArrayList Field)))])
 
@@ -140,6 +141,7 @@
 (defstruct SumDef
   [(name (slice u8))
    (type_params (ptr (ArrayList (slice u8))))
+   (bounds (ptr (ArrayList Bound)))        ; trait bounds on the params (empty if none)
    (variants (ptr (ArrayList Variant)))])
 
 (defstruct Extern

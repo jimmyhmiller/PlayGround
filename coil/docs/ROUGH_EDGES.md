@@ -180,9 +180,9 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
 
 ## Batch 6 — Bounds are parsed and thrown away
 
-- [ ] **gen-4** `defstruct` bounds silently ignored — **including bounds naming traits that don't
+- [x] **gen-4** `defstruct` bounds silently ignored — **including bounds naming traits that don't
       exist**. `defsum` rejects the same syntax; `defn` honours it. One spelling, three meanings.
-- [ ] **gen-12** A bound naming a nonexistent trait is diagnosed at the *call site* as
+- [x] **gen-12** A bound naming a nonexistent trait is diagnosed at the *call site* as
       "i64 does not implement NoSuchTrait" — no type could ever satisfy it.
 - [ ] Resolve trait names in **every** bound position (defn/defstruct/defsum/impl) via one shared
       helper. Per the repo's own "ONE definition per concept" rule: delegate, don't copy.

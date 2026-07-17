@@ -697,10 +697,23 @@
 
 (defn parse-defsum [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result SumDef Diag))
   (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "defsum: missing name")) "sum name"))
-             (mut i) 1 (mut tps) (al-new [(slice u8)] a)]
+             (mut i) 1 (mut tps) (al-new [(slice u8)] a) (mut sbounds) (al-new [Bound] a)]
+    ; type params may carry bounds — `(T Ord)` — via the SAME per-entry parser defn and
+    ; defstruct use, so the three forms cannot drift apart. (This used to require a bare
+    ; symbol and reject `(T Ord)` outright, the only form of the three that did.)
     (if (opt-is-vec (sx-get rest (load i)))
         (do (let [it (sx-items (opt-get (sx-get rest (load i)))) n (sx-len it) (mut k) 0]
-              (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut tps) (try! (sym-of a (sx-at it (load k)) "type parameter"))) (store! k (iadd (load k) 1))))))
+              (loop (if (icmp-ge (load k) n) (break)
+                (do (let [ep (alloc-stack TPEntry)]
+                      (store! ep (try! (parse-tparam-entry a (sx-at it (load k)))))
+                      (al-push! (mut tps) (load (field ep name)))
+                      (if (icmp-gt (al-len [(slice u8)] (load (load (field ep traits)))) 0)
+                          (let [bp (alloc-stack Bound)]
+                            (store! (field bp name) (load (field ep name)))
+                            (store! (field bp traits) (load (field ep traits)))
+                            (al-push! (mut sbounds) (load bp)) 0)
+                        0))
+                    (store! k (iadd (load k) 1))))))
             (store! i (iadd (load i) 1))) 0)
     (let [(mut variants) (al-new [Variant] a) nr (sx-len rest) (mut vi) (load i)]
       (loop (if (icmp-ge (load vi) nr) (break)
@@ -713,7 +726,7 @@
                            (Some [_] (return-from :try (Err [SumDef Diag] (derr-at (sx-lo v) (sx-hi v) (sconcat3 a "variant '" vname "': fields must be a vector")))))
                            (None [] (box-al [Field] a (al-new [Field] a)))))]
             (let [vp (alloc-stack Variant)] (store! (field vp name) vname) (store! (field vp fields) fields) (al-push! (mut variants) (load vp)))))))
-      (Ok (let [sd (alloc-stack SumDef)] (store! (field sd name) name) (store! (field sd type_params) (box-al [(slice u8)] a (load tps))) (store! (field sd variants) (box-al [Variant] a (load variants))) (load sd)))))))
+      (Ok (let [sd (alloc-stack SumDef)] (store! (field sd name) name) (store! (field sd type_params) (box-al [(slice u8)] a (load tps))) (store! (field sd bounds) (box-al [Bound] a (load sbounds))) (store! (field sd variants) (box-al [Variant] a (load variants))) (load sd)))))))
 
 (defn compute-backing [(a (ptr Allocator)) (name (slice u8)) (acc i64) (backing i64)] (-> (Result i64 Diag))
   (if (icmp-ge backing 0)
@@ -730,7 +743,7 @@
     (if (icmp-lt width 0) (Err [BitField Diag] (derr-at (sx-lo f) (sx-hi f) (sconcat3 a "field '" fname "' must be (name :bits N)")))
         (Ok (let [b (alloc-stack BitField)] (store! (field b fname) fname) (store! (field b width) width) (load b)))))))
 
-(defn finish-bits [(a (ptr Allocator)) (name (slice u8)) (tparams (ptr (ArrayList (slice u8)))) (backing i64) (fields-items (ptr (ArrayList Sexp)))] (-> (Result StructDef Diag))
+(defn finish-bits [(a (ptr Allocator)) (name (slice u8)) (tparams (ptr (ArrayList (slice u8)))) (bounds (ptr (ArrayList Bound))) (backing i64) (fields-items (ptr (ArrayList Sexp)))] (-> (Result StructDef Diag))
   (let [(mut fields) (al-new [Field] a) (mut offsets) (al-new [i64] a) (mut acc) 0 n (sx-len fields-items) (mut fi) 0
         (mut out) (zeroed (Result StructDef Diag)) (mut failed) false]
     (loop (if (icmp-ge (load fi) n) (break)
@@ -746,7 +759,7 @@
     (if (load failed) (load out)
         (match (compute-backing a name (load acc) backing)
           (Err [d] (Err d))
-          (Ok [bk] (Ok (let [sd (alloc-stack StructDef)] (store! (field sd name) name) (store! (field sd type_params) tparams) (store! (field sd layout) (LBits bk (box-al [i64] a (load offsets)))) (store! (field sd fields) (box-al [Field] a (load fields))) (load sd))))))))
+          (Ok [bk] (Ok (let [sd (alloc-stack StructDef)] (store! (field sd name) name) (store! (field sd type_params) tparams) (store! (field sd bounds) bounds) (store! (field sd layout) (LBits bk (box-al [i64] a (load offsets)))) (store! (field sd fields) (box-al [Field] a (load fields))) (load sd))))))))
 
 (defstruct NField [(fname (slice u8)) (fty Type) (at (Option i64))])
 (defn parse-normal-field [(a (ptr Allocator)) (f Sexp)] (-> (Result NField Diag))
@@ -774,7 +787,7 @@
               (Ok (LExplicit (box-al [i64] a (load offs)) (if has-size (Some exp-size) (None [i64])) exp-align))))
       (if packed (Ok (LPacked)) (Ok (LC))))))
 
-(defn finish-normal [(a (ptr Allocator)) (name (slice u8)) (tparams (ptr (ArrayList (slice u8)))) (packed bool) (explicit bool) (aligned i64) (exp-size i64) (has-size bool) (exp-align i64) (fields-items (ptr (ArrayList Sexp)))] (-> (Result StructDef Diag))
+(defn finish-normal [(a (ptr Allocator)) (name (slice u8)) (tparams (ptr (ArrayList (slice u8)))) (bounds (ptr (ArrayList Bound))) (packed bool) (explicit bool) (aligned i64) (exp-size i64) (has-size bool) (exp-align i64) (fields-items (ptr (ArrayList Sexp)))] (-> (Result StructDef Diag))
   (let [(mut fields) (al-new [Field] a) (mut ats) (al-new [(Option i64)] a) (mut anyat) false n (sx-len fields-items) (mut fi) 0
         (mut out) (zeroed (Result StructDef Diag)) (mut failed) false]
     (loop (if (icmp-ge (load fi) n) (break)
@@ -790,7 +803,7 @@
     (if (load failed) (load out)
         (match (compute-layout a name packed explicit aligned exp-size has-size exp-align (load anyat) (box-al [(Option i64)] a (load ats)))
           (Err [d] (Err d))
-          (Ok [layout] (Ok (let [sd (alloc-stack StructDef)] (store! (field sd name) name) (store! (field sd type_params) tparams) (store! (field sd layout) layout) (store! (field sd fields) (box-al [Field] a (load fields))) (load sd))))))))
+          (Ok [layout] (Ok (let [sd (alloc-stack StructDef)] (store! (field sd name) name) (store! (field sd type_params) tparams) (store! (field sd bounds) bounds) (store! (field sd layout) layout) (store! (field sd fields) (box-al [Field] a (load fields))) (load sd))))))))
 
 (defstruct StructOpts [(packed bool) (explicit bool) (bits bool) (aligned i64) (exp-size i64) (has-size bool) (exp-align i64) (backing i64) (next i64)])
 (defn parse-struct-opts [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp))) (start i64)] (-> (Result StructOpts Diag))
@@ -843,8 +856,8 @@
             fields-items (if (opt-is-vec (sx-get rest i)) (sx-items (opt-get (sx-get rest i))) (zeroed (ptr (ArrayList Sexp))))]
         (if (icmp-eq (cast i64 fields-items) 0) (Err [StructDef Diag] (derr (sconcat3 a "defstruct '" name "': expected a field vector")))
           (if (load (field opts bits))
-              (finish-bits a name (load (field tpr params)) (load (field opts backing)) fields-items)
-              (finish-normal a name (load (field tpr params)) (load (field opts packed)) (load (field opts explicit)) (load (field opts aligned)) (load (field opts exp-size)) (load (field opts has-size)) (load (field opts exp-align)) fields-items))))))))
+              (finish-bits a name (load (field tpr params)) (load (field tpr bounds)) (load (field opts backing)) fields-items)
+              (finish-normal a name (load (field tpr params)) (load (field tpr bounds)) (load (field opts packed)) (load (field opts explicit)) (load (field opts aligned)) (load (field opts exp-size)) (load (field opts has-size)) (load (field opts exp-align)) fields-items))))))))
 (defn parse-extern [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result Extern Diag))
   (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "extern: missing name")) "extern name")) (mut i) 1 (mut cc) "c"]
     (match (sx-get rest (load i))

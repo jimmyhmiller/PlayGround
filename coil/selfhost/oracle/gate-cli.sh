@@ -138,6 +138,21 @@ cat > "$T/resonly.coil" <<'EOF'
 EOF
 expect_rc 1 "a resolve-only error still fails the build" "$COIL" build "$T/resonly.coil" -o "$T/x"
 
+echo "== trait bounds on type params are resolved and enforced =="
+# unknown trait in a bound: error at the DEFINITION (was: accepted, or mis-blamed at the call)
+printf '(module m)\n(defn f [(T NoSuchTrait)] [(x T)] (-> i64) 0)\n(defn main [] (-> i64) 0)\n' > "$T/badtrait.coil"
+expect_rc 1 "unknown trait in a bound is rejected" "$COIL" build "$T/badtrait.coil" -o "$T/x"
+expect_out "unknown trait" "…and named" "$COIL" build "$T/badtrait.coil" -o "$T/x"
+# defstruct bound ENFORCED at instantiation (was: silently ignored)
+printf '(module m)\n(defstruct Box [(T Eq)] [(v T)])\n(defn u [] (-> i64) (let [b (alloc-stack (Box f64))] 0))\n(defn main [] (-> i64) (u))\n' > "$T/structbound.coil"
+expect_rc 1 "defstruct bound enforced ((Box f64), f64 has no Eq)" "$COIL" build "$T/structbound.coil" -o "$T/x"
+# defsum now PARSES a bound (was: 'expected symbol') and enforces it
+printf '(module m)\n(defsum Opt [(T Eq)] (Non) (Som [(v T)]))\n(defn u [] (-> i64) (let [o (alloc-stack (Opt f64))] 0))\n(defn main [] (-> i64) (u))\n' > "$T/sumbound.coil"
+expect_rc 1 "defsum bound parses + enforced" "$COIL" build "$T/sumbound.coil" -o "$T/x"
+# and the valid instantiations still compile
+printf '(module m)\n(defstruct Box [(T Eq)] [(v T)])\n(defn main [] (-> i64) (let [b (alloc-stack (Box i64))] (store! (field b v) 7) 0))\n' > "$T/okbound.coil"
+expect_rc 0 "a satisfied bound ((Box i64)) still compiles" "$COIL" build "$T/okbound.coil" -o "$T/x"
+
 echo "== object emission on the DEFAULT (LLVM) backend =="
 # Nothing else covers this: gate-full stops at emit-ir, and arm64/gate-run.sh only
 # exercises --backend arm64. So `:shim` — a naked trampoline, i.e. INLINE ASM, and the

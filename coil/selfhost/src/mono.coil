@@ -339,6 +339,7 @@
         (let [ns (alloc-stack SumDef)]
           (store! (field ns name) name)
           (store! (field ns type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+          (store! (field ns bounds) (box-al [Bound] a (al-new [Bound] a)))
           (store! (field ns variants) (box-al [Variant] a (load out)))
           (Ok (load ns))))))
 
@@ -567,6 +568,7 @@
                         (let [nd (alloc-stack StructDef)]
                           (store! (field nd name) mng)
                           (store! (field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+                          (store! (field nd bounds) (box-al [Bound] a (al-new [Bound] a)))
                           (store! (field nd layout) (load (field gs layout)))
                           (store! (field nd fields) nfs)
                           (upsert-struct m (load nd)))))))
@@ -644,6 +646,7 @@
                     (let [nd (alloc-stack StructDef)]
                       (store! (field nd name) (load (field sp name)))
                       (store! (field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+                      (store! (field nd bounds) (box-al [Bound] a (al-new [Bound] a)))
                       (store! (field nd layout) (load (field sp layout)))
                       (store! (field nd fields) nfs)
                       (upsert-struct m (load nd)) 0)))

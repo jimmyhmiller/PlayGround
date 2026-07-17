@@ -550,7 +550,10 @@
 (defn qualify-one-struct [(c (ptr Ctx)) (sp (ptr StructDef))] (-> (Result i64 Diag))
   (let [a (load (field c a)) m (load (field c m)) tps (load (field sp type_params))]
     (store! (field sp name) (sconcat3 a m "." (load (field sp name))))
-    (qualify-field-types c (load (field sp fields)) tps)))
+    (try
+      (do (try! (qualify-bound-list c (load (field sp bounds))))   ; resolve + reject unknown traits
+          (try! (qualify-field-types c (load (field sp fields)) tps))
+          (Ok 0)))))
 (defn qualify-variants [(c (ptr Ctx)) (vs (ptr (ArrayList Variant))) (m (slice u8)) (a (ptr Allocator)) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (let [n (al-len [Variant] (load vs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -563,7 +566,10 @@
 (defn qualify-one-sum [(c (ptr Ctx)) (sp (ptr SumDef))] (-> (Result i64 Diag))
   (let [a (load (field c a)) m (load (field c m)) tps (load (field sp type_params))]
     (store! (field sp name) (sconcat3 a m "." (load (field sp name))))
-    (qualify-variants c (load (field sp variants)) m a tps)))
+    (try
+      (do (try! (qualify-bound-list c (load (field sp bounds))))   ; resolve + reject unknown traits
+          (try! (qualify-variants c (load (field sp variants)) m a tps))
+          (Ok 0)))))
 (defn qualify-one-conv [(c (ptr Ctx)) (cp (ptr Convention))] (-> (Result i64 Diag))
   (let [a (load (field c a)) m (load (field c m))]
     (if (not (str-eq (load (field cp name)) "c"))

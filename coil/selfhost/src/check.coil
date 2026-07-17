@@ -39,11 +39,13 @@
 (defstruct StructInfo
   [(name (slice u8))
    (type_params (ptr (ArrayList (slice u8))))
+   (bounds (ptr (ArrayList Bound)))
    (fields (ptr (ArrayList Field)))
    (is_bits bool)])
 (defstruct SumInfo
   [(name (slice u8))
    (type_params (ptr (ArrayList (slice u8))))
+   (bounds (ptr (ArrayList Bound)))
    (variants (ptr (ArrayList Variant)))])
 (defstruct VtoS [(variant (slice u8)) (sum (slice u8))])
 (defstruct ConstEntry [(name (slice u8)) (value Expr) (ty Type)])
@@ -346,6 +348,42 @@
                   (if (icmp-eq np 0) (Ok [i64 Diag] 0)
                       (Err [i64 Diag] (derr (sconcat a (sconcat a (sconcat3 a "generic type '" name "' expects ") (i64->str a np)) " type arguments, got 0")))))
                 (Err [i64 Diag] (derr (sconcat3 a "unknown type '" name "'")))))))))
+; index of `nm` in a name list, or -1.
+(defn name-index [(lst (ptr (ArrayList (slice u8)))) (nm (slice u8))] (-> i64)
+  (let [n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (al-get [(slice u8)] (load lst) (load i)) nm) (do (store! r (load i)) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; Enforce the declared bounds of a generic struct/sum at a use site `(Box f64)`. The
+; bound `[(T Eq)]` means every instantiation's T must implement Eq. Checked only when
+; the argument is CONCRETE: inside a generic body `(Box T)` the argument is itself an
+; in-scope type param (abstract) and cannot be checked here — that instantiation is
+; verified when the enclosing generic is itself instantiated with a concrete type.
+(defn tapp-arg-abstract? [(t (ptr Type)) (tps (ptr (ArrayList (slice u8))))] (-> bool)
+  (match-else (load t) (TStruct [nm] (set-contains tps nm)) (_ false)))
+
+(defn check-app-bounds [(a (ptr Allocator)) (cx (ptr Cx)) (name (slice u8))
+                        (bounds (ptr (ArrayList Bound))) (params (ptr (ArrayList (slice u8))))
+                        (args (ptr (ArrayList Type))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [nb (al-len [Bound] (load bounds)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) nb) (break)
+      (do (let [bp (al-elem [Bound] bounds (load i)) idx (name-index params (load (field bp name)))]
+            (if (and (icmp-ge idx 0) (icmp-lt idx (al-len [Type] (load args))))
+                (let [arg (al-elem [Type] args idx)]
+                  (if (tapp-arg-abstract? arg tps) 0
+                    (let [trs (load (field bp traits)) nt (al-len [(slice u8)] (load trs)) (mut k) 0]
+                      (loop (if (icmp-ge (load k) nt) (break)
+                        (do (let [tr (al-get [(slice u8)] (load trs) (load k))]
+                              (if (impl-match a cx tr arg) 0
+                                (do (store! err (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "'" (ty-str a arg) "' does not implement '" (sconcat a (display-name tr) "' (required by '")) name) "' bound on '") (sconcat a (load (field bp name)) "')"))))
+                                    (store! failed true) 0)))
+                            (if (load failed) (break) (store! k (iadd (load k) 1)))))))) 0)
+              0))
+          (if (load failed) (break) (store! i (iadd (load i) 1))))))
+    (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
+
 (defn validate-app [(a (ptr Allocator)) (cx (ptr Cx)) (name (slice u8)) (args (ptr (ArrayList Type))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (match (validate-type-list args cx tps) (Err [d] (Err [i64 Diag] d))
     (Ok [_]
@@ -357,7 +395,12 @@
             (let [na (al-len [Type] (load args))]
               (if (icmp-ne (load arity) na)
                   (Err [i64 Diag] (derr (sconcat a (sconcat a (sconcat a (sconcat3 a "generic type '" name "' expects ") (i64->str a (load arity))) " type arguments, got ") (i64->str a na))))
-                  (Ok [i64 Diag] 0))))))))
+                  ; arity ok — now enforce the type's declared bounds on concrete args.
+                  (if (icmp-ne (cast i64 si) 0)
+                      (check-app-bounds a cx name (load (field si bounds)) (load (field si type_params)) args tps)
+                    (if (icmp-ne (cast i64 su) 0)
+                        (check-app-bounds a cx name (load (field su bounds)) (load (field su type_params)) args tps)
+                      (Ok [i64 Diag] 0))))))))))
 (defn validate-type [(t (ptr Type)) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (let [a (load (field cx a))]
     (match (load t)
@@ -423,6 +466,7 @@
                 (let [info (alloc-stack StructInfo)]
                   (store! (field info name) nm)
                   (store! (field info type_params) (load (field sp type_params)))
+                  (store! (field info bounds) (load (field sp bounds)))
                   (store! (field info fields) (load (field sp fields)))
                   (store! (field info is_bits) (layout-is-bits (field sp layout)))
                   (al-push! (mut (field cx structs)) (load info)))))
@@ -437,6 +481,7 @@
                 (do (let [info (alloc-stack SumInfo)]
                       (store! (field info name) nm)
                       (store! (field info type_params) (load (field sp type_params)))
+                      (store! (field info bounds) (load (field sp bounds)))
                       (store! (field info variants) (load (field sp variants)))
                       (al-push! (mut (field cx sums)) (load info)))
                     (let [vs (load (field sp variants)) vn (al-len [Variant] (load vs)) (mut j) 0]
