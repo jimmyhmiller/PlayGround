@@ -153,6 +153,19 @@ expect_rc 1 "defsum bound parses + enforced" "$COIL" build "$T/sumbound.coil" -o
 printf '(module m)\n(defstruct Box [(T Eq)] [(v T)])\n(defn main [] (-> i64) (let [b (alloc-stack (Box i64))] (store! (field b v) 7) 0))\n' > "$T/okbound.coil"
 expect_rc 0 "a satisfied bound ((Box i64)) still compiles" "$COIL" build "$T/okbound.coil" -o "$T/x"
 
+echo "== (target-arch) reflects --target, not a hardcoded host constant =="
+# was: the constant "aarch64" — so a macro branching on it baked the host branch into a
+# cross-compiled wasm build, silently.
+cat > "$T/tgt.coil" <<'EOF'
+(module t)
+(defn arch [] (-> Code)
+  (if (code-eq (target-arch) `wasm32) `1 (if (code-eq (target-arch) `aarch64) `2 `3)))
+(defn main [] (-> i64) (arch))
+EOF
+expect_out "i64\) 2" "target-arch = aarch64 on the host"          "$COIL" expand "$T/tgt.coil"
+expect_out "i64\) 1" "target-arch = wasm32 under --target wasm32" "$COIL" expand "$T/tgt.coil" --target wasm32-unknown-unknown
+expect_out "i64\) 3" "target-arch = x86_64 under --target x86_64" "$COIL" expand "$T/tgt.coil" --target x86_64-apple-macosx11.0.0
+
 echo "== object emission on the DEFAULT (LLVM) backend =="
 # Nothing else covers this: gate-full stops at emit-ir, and arm64/gate-run.sh only
 # exercises --backend arm64. So `:shim` — a naked trampoline, i.e. INLINE ASM, and the

@@ -189,7 +189,7 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
 
 ## Batch 7 — Silently wrong answers
 
-- [ ] **mac-1** `(target-arch)` is a hardcoded `"aarch64"` **string literal** (comptime.coil:681).
+- [x] **mac-1** `(target-arch)` is a hardcoded `"aarch64"` **string literal** (comptime.coil:681).
       The only reason it exists is to branch when target ≠ host, and that is exactly and only when
       it lies. Thread the resolved triple into CtCtx. Until then it must **hard-error**, not fabricate.
 - [ ] **tool-6** REPL truncates f64 to i64: `(/ 1.0 2.0)` prints `0`. The REPL is the thing you reach

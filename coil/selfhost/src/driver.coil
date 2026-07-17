@@ -655,6 +655,16 @@
             (do (store! r (load i)) (break)))))))
     (load r)))
 
+; the `--target <triple>` value anywhere in argv, or null (host default).
+(defn argv-triple [(argc i32) (argv (ptr (ptr i8)))] (-> (ptr i8))
+  (let [(mut i) 2 (mut r) (cast (ptr i8) 0)]
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (do (if (and (str-eq (cstr->slice (load (index argv (load i)))) "--target")
+                   (icmp-lt (iadd (load i) 1) (cast i64 argc)))
+              (do (store! r (load (index argv (iadd (load i) 1)))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
 ; reject an unrecognised flag instead of skipping it. `fidx` is the positional the
 ; caller already claimed as its file; anything else non-flag is a stray argument.
 (defn argv-reject-unknown [(argc i32) (argv (ptr (ptr i8))) (start i64) (fidx i64)] (-> i64)
@@ -740,7 +750,7 @@
         (store! (field ctx path) (cstr->slice file))
         (store! (field ctx mode) (load backend))
         (store! (field ctx obj)  obj-cstr)
-        (store! (field ctx triple) (load trip))
+        (store! (field ctx triple) (load trip))        (set-target-arch! (load trip))
         (store! (field ctx ok) 0)
         (store! (field ctx build-fn)  build-fn)
         (store! (field ctx emitir-fn) emitir-fn)
@@ -1280,7 +1290,7 @@
       (store! (field ctx path) (cstr->slice file))
       (store! (field ctx mode) (load backend))
       (store! (field ctx obj)  obj-cstr)
-      (store! (field ctx triple) (load trip))
+      (store! (field ctx triple) (load trip))      (set-target-arch! (load trip))
       (store! (field ctx ok) 0)
       (store! (field ctx build-fn)  build-fn)
       (store! (field ctx emitir-fn) emitir-fn)
@@ -1513,9 +1523,13 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
            (if (str-eq sub "dump-load")
                (let [path (need-file argc argv sub)] (dump-load-program a (read-src a path) (cwd-slice a)))
             (if (str-eq sub "expand")
-                (let [path (need-file argc argv sub)] (expand-src-program a (read-src a path) (cwd-slice a) (cstr->slice path)))
+                (let [path (need-file argc argv sub)]
+                  (set-target-arch! (argv-triple argc argv))   ; so (target-arch) reflects --target in the debug view too
+                  (expand-src-program a (read-src a path) (cwd-slice a) (cstr->slice path)))
             (if (str-eq sub "dump-expand")
-                (let [path (need-file argc argv sub)] (dump-expand-program a (read-src a path) (cwd-slice a)))
+                (let [path (need-file argc argv sub)]
+                  (set-target-arch! (argv-triple argc argv))
+                  (dump-expand-program a (read-src a path) (cwd-slice a)))
              (if (str-eq sub "dump-resolved")
                  (let [path (need-file argc argv sub)] (dump-resolved-program a (read-src a path) (cwd-slice a)))
               (if (str-eq sub "dump-checked")
@@ -1542,7 +1556,7 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
             (store! (field ctx path) (cstr->slice path))
             (store! (field ctx mode) 0)
             (store! (field ctx obj)  (cast (ptr i8) 0))
-            (store! (field ctx triple) (load trip))
+            (store! (field ctx triple) (load trip))            (set-target-arch! (load trip))
             (store! (field ctx ok) 0)
             (store! (field ctx build-fn)  build-fn)
             (store! (field ctx emitir-fn) emitir-fn)

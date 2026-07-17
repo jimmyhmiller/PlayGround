@@ -678,7 +678,31 @@
       (let [sid (sx-source node)]
         (if (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst)))) ""
           (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) sid)) (load (field sp name))))))))
-(defn target-arch-str [] (-> (slice u8)) "aarch64")
+; `(target-arch)` used to be the constant "aarch64" — so it was WRONG in exactly the
+; case it exists for: cross-compiling. A macro branching on it baked the host branch
+; into a wasm build, silently. The arch is one value per compile, set from the resolved
+; --target triple before expansion runs (like the nid/gensym counters, it is a
+; per-process global — the compiler builds one target per invocation).
+(defstruct TargetArchCell [(set i64) (arch (slice u8))])
+(defn target-arch-cell [] (-> (ptr TargetArchCell)) (alloc-static TargetArchCell))
+
+(defn arch-of-triple [(triple (ptr i8))] (-> (slice u8))
+  (if (icmp-eq (cast i64 triple) 0) "aarch64"          ; null = host default
+    (let [t (cstr->slice triple)]
+      (cond (starts-with t "wasm32")  "wasm32"
+            (starts-with t "x86_64")  "x86_64"
+            (starts-with t "aarch64") "aarch64"
+            (starts-with t "arm64")   "aarch64"
+            "aarch64"))))                               ; unknown → host default
+
+(defn set-target-arch! [(triple (ptr i8))] (-> i64)
+  (let [c (target-arch-cell)]
+    (store! (field c arch) (arch-of-triple triple))
+    (store! (field c set) 1) 0))
+
+(defn target-arch-str [] (-> (slice u8))
+  (let [c (target-arch-cell)]
+    (if (icmp-eq (load (field c set)) 0) "aarch64" (load (field c arch)))))
 
 ; ── S1 semantic layer for `(code-decl NODE)`: read the compiler's AUTHORITATIVE
 ; work. Checkers run AFTER resolve + typecheck (see expander.coil::run-registered-
