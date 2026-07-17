@@ -220,6 +220,30 @@ impl<M: ValueModel> ClosureComp<M> {
                     rt.encode(Val::Nil)
                 })
             }
+            Ir::InstanceCheck { iv, proto, arg, .. } => {
+                let iv = *iv;
+                let cp = self.compile(proto);
+                let cx = self.compile(arg);
+                Arc::new(move |rt, env, top| {
+                    let base = rt.root_depth();
+                    let p = cp(rt, env, top);
+                    if rt.pending() {
+                        return p;
+                    }
+                    rt.push_root(p);
+                    let x = cx(rt, env, top);
+                    if rt.pending() {
+                        rt.truncate_roots(base);
+                        return x;
+                    }
+                    rt.push_root(x);
+                    let p = rt.root_get(base);
+                    let x = rt.root_get(base + 1);
+                    rt.truncate_roots(base);
+                    let f = rt.global(iv).expect("-instance-val unbound");
+                    top.invoke(top, rt, f, &[p, x])
+                })
+            }
             Ir::Dispatch { site, method, args } => {
                 let (site, method) = (*site, *method);
                 let cargs: Vec<Compiled<M>> = args.iter().map(|a| self.compile(a)).collect();

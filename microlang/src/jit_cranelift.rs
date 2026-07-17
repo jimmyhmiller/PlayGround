@@ -898,6 +898,29 @@ extern "C" fn shim_take_signal<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
     rt.take_signal().value
 }
 
+/// Refill an instance-check site's monomorphic cache: {epoch, ty, result-bool}.
+extern "C" fn shim_instance_fill<M: ModelArithJit>(
+    ctx: *mut JitCtx<M>,
+    site: u32,
+    ty: u64,
+    result: u64,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let jitp = unsafe { (*ctx.rc).jit };
+    if jitp.is_null() {
+        return 0;
+    }
+    let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
+    let reloc = rt.relocated();
+    let ver = rt.shared.dispatch_version.load(Ordering::Relaxed);
+    let mut ics = jit.instance_ic.borrow_mut();
+    if (site as usize) < ics.len() {
+        ics[site as usize] = DispatchIcEntry { epoch: dispatch_epoch(reloc, ver), ty, imp: result };
+    }
+    0
+}
+
 extern "C" fn shim_safepoint<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
@@ -1286,6 +1309,7 @@ struct Shims {
     gc: FuncId,
     safepoint: FuncId,
     take_signal: FuncId,
+    instance_fill: FuncId,
     // Stage F2 monomorphic collection shims.
     pv_conj: FuncId,
     pv_nth: FuncId,
@@ -1323,6 +1347,7 @@ struct ShimRefs {
     gc: cranelift_codegen::ir::FuncRef,
     safepoint: cranelift_codegen::ir::FuncRef,
     take_signal: cranelift_codegen::ir::FuncRef,
+    instance_fill: cranelift_codegen::ir::FuncRef,
     pv_conj: cranelift_codegen::ir::FuncRef,
     pv_nth: cranelift_codegen::ir::FuncRef,
     pv_assoc: cranelift_codegen::ir::FuncRef,
@@ -1383,6 +1408,7 @@ fn body_pure_loop(ir: &Ir, tail: bool) -> bool {
                 && args.iter().all(|a| body_pure_loop(a, false))
         }
         Ir::Dispatch { .. } => false,
+        Ir::InstanceCheck { .. } => false,
         Ir::Prim(Prim::Apply | Prim::CallCc | Prim::CallEc | Prim::Reset | Prim::Shift, _) => false,
         // The Stage F2 monomorphic collection shims are PARKING-classified
         // (plain calls) — a loop around them demotes its live values there
@@ -1438,6 +1464,7 @@ fn body_mem_mode(ir: &Ir) -> bool {
         Ir::Def { init, .. } => body_mem_mode(init),
         Ir::DefMethod { imp, .. } => body_mem_mode(imp),
         Ir::Dispatch { args, .. } => args.iter().any(body_mem_mode),
+        Ir::InstanceCheck { proto, arg, .. } => body_mem_mode(proto) || body_mem_mode(arg),
         Ir::FieldGet { obj, .. } => body_mem_mode(obj),
         Ir::Let(..) => panic!("unflattened Ir reached the JIT: Let"),
     }
@@ -1706,6 +1733,9 @@ pub struct JitCranelift<M: ModelArithJit> {
     /// folds the relocation count and the dispatch version, so a moved impl or
     /// a redefinition never false-hits.
     dispatch_ic: RefCell<Vec<DispatchSiteIc>>,
+    /// Per instance-check site: a monomorphic (epoch, type -> bool) cache. A hit
+    /// is one type compare + one load; a miss calls the real `-instance-val`.
+    instance_ic: RefCell<Vec<DispatchIcEntry>>,
     _pd: std::marker::PhantomData<fn() -> M>,
 }
 
@@ -1877,6 +1907,7 @@ fn node_count_capped(ir: &Ir, limit: usize) -> Option<usize> {
             Ir::Call(f, args) => walk(f, left) && args.iter().all(|x| walk(x, left)),
             Ir::DefMethod { imp, .. } => walk(imp, left),
             Ir::Dispatch { args, .. } => args.iter().all(|x| walk(x, left)),
+            Ir::InstanceCheck { proto, arg, .. } => walk(proto, left) && walk(arg, left),
             Ir::FieldGet { obj, .. } => walk(obj, left),
             Ir::Try { body, catch, finally, .. } => {
                 walk(body, left)
@@ -2029,6 +2060,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let gcf: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_gc::<M>;
         let sfp: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_safepoint::<M>;
         let tsg: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_take_signal::<M>;
+        let ifl: extern "C" fn(*mut JitCtx<M>, u32, u64, u64) -> u64 = shim_instance_fill::<M>;
         let pvc: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_pv_conj::<M>;
         let pvn: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_pv_nth::<M>;
         let pva: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_pv_assoc::<M>;
@@ -2061,6 +2093,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         builder.symbol("ml_gc", gcf as *const u8);
         builder.symbol("ml_safepoint", sfp as *const u8);
         builder.symbol("ml_take_signal", tsg as *const u8);
+        builder.symbol("ml_instance_fill", ifl as *const u8);
         builder.symbol("ml_pv_conj", pvc as *const u8);
         builder.symbol("ml_pv_nth", pvn as *const u8);
         builder.symbol("ml_pv_assoc", pva as *const u8);
@@ -2105,6 +2138,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let s_spawn = sig(&[ptr, I64]);
         let s_await = sig(&[ptr, I64]);
         let s_gc = sig(&[ptr]);
+        let s_instfill = sig(&[ptr, i32t, I64, I64]);
         let s_v1 = sig(&[ptr, I64]);
         let s_v2 = sig(&[ptr, I64, I64]);
         let s_v3 = sig(&[ptr, I64, I64, I64]);
@@ -2135,6 +2169,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             gc: decl(&mut module, "ml_gc", &s_gc),
             safepoint: decl(&mut module, "ml_safepoint", &s_gc),
             take_signal: decl(&mut module, "ml_take_signal", &s_gc),
+            instance_fill: decl(&mut module, "ml_instance_fill", &s_instfill),
             pv_conj: decl(&mut module, "ml_pv_conj", &s_v2),
             pv_nth: decl(&mut module, "ml_pv_nth", &s_v2),
             pv_assoc: decl(&mut module, "ml_pv_assoc", &s_v3),
@@ -2159,6 +2194,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             call_ic: RefCell::new(std::array::from_fn(|_| None)),
             template_code: RefCell::new(Vec::with_capacity(TEMPLATE_CODE_CAP)),
             dispatch_ic: RefCell::new(Vec::with_capacity(DISPATCH_SITE_CAP)),
+            instance_ic: RefCell::new(Vec::new()),
             counter: Cell::new(0),
             _pd: std::marker::PhantomData,
         }
@@ -2912,6 +2948,7 @@ fn build_body<M: ModelArithJit>(
         gc: module.declare_func_in_func(shims.gc, fb.func),
         safepoint: module.declare_func_in_func(shims.safepoint, fb.func),
         take_signal: module.declare_func_in_func(shims.take_signal, fb.func),
+        instance_fill: module.declare_func_in_func(shims.instance_fill, fb.func),
         pv_conj: module.declare_func_in_func(shims.pv_conj, fb.func),
         pv_nth: module.declare_func_in_func(shims.pv_nth, fb.func),
         pv_assoc: module.declare_func_in_func(shims.pv_assoc, fb.func),
@@ -3497,6 +3534,16 @@ impl<'a, 'b> Compiler<'a, 'b> {
     /// The (stable) address of dispatch site `site`'s 2-way IC, sizing the
     /// reserved table so the slot exists. Baked as an immediate by
     /// `Ir::Dispatch` sites; `shim_dispatch` fills the ways on the slow path.
+    fn instance_ic_slot<M: ModelArithJit>(&self, site: usize) -> *const DispatchIcEntry {
+        let jit = unsafe { &*(self.jit_ptr as *const JitCranelift<M>) };
+        let mut ics = jit.instance_ic.borrow_mut();
+        if ics.len() <= site {
+            assert!(site < DISPATCH_SITE_CAP, "instance_ic overflow at site {site}");
+            ics.resize(site + 1, DISPATCH_IC_EMPTY);
+        }
+        (&ics[site]) as *const DispatchIcEntry
+    }
+
     fn dispatch_ic_slot<M: ModelArithJit>(&self, site: usize) -> *const DispatchIcEntry {
         let jit = unsafe { &*(self.jit_ptr as *const JitCranelift<M>) };
         let mut ics = jit.dispatch_ic.borrow_mut();
@@ -4939,6 +4986,91 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // object and probe this site's baked 2-way inline cache (filled by
             // the shim; epoch = relocation count ⊕ dispatch version, so a moved
             // impl or a redefinition never false-hits). A hit calls the impl
+            // `(instance? <proto> x)` — inline per-site (type -> bool) cache. A
+            // MISS or non-record receiver calls the real `-instance-val`, so the
+            // answer is always exactly the function's; the cache only avoids
+            // recomputing for a type already seen. (First cut: just the call.)
+            Ir::InstanceCheck { site, iv, proto, arg } => {
+                let pv = self.compile::<M>(proto, false);
+                let xv = self.compile::<M>(arg, false);
+                let flags = MemFlagsData::trusted();
+                let ro = MemFlagsData::trusted().with_readonly();
+                let result = self.declare_root_var();
+                let merge = self.fb.create_block();
+                // The authoritative slow path: call the real `-instance-val`.
+                // Reached on a non-record receiver, a cache miss, or a wrapped
+                // backend — so the answer is ALWAYS the function's.
+                let slowb = self.fb.create_block();
+
+                // Only a RECORD receiver (map / vector / defrecord — the common
+                // instance? targets) uses the cache; everything else is the shim.
+                let (is_ref, addr) = M::emit_ref_addr(self, xv);
+                let rc = self.rc_val;
+                let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
+                let g1 = self.fb.ins().band(is_ref, direct);
+                let recb = self.fb.create_block();
+                self.fb.ins().brif(g1, recb, &[], slowb, &[]);
+
+                self.fb.switch_to_block(recb);
+                self.fb.seal_block(recb);
+                let hdr = self.fb.ins().load(I64, flags, addr, 0);
+                let tid = self.fb.ins().band_imm(hdr, 0xffff);
+                let is_rec = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::RECORD as i64);
+                let cacheb = self.fb.create_block();
+                self.fb.ins().brif(is_rec, cacheb, &[], slowb, &[]);
+
+                self.fb.switch_to_block(cacheb);
+                self.fb.seal_block(cacheb);
+                // The record's type sym IS its raw word at +8.
+                let ty = self.fb.ins().load(I64, flags, addr, 8);
+                let rp = self.load_rc_field(self.off_reloc_ptr);
+                let reloc = self.fb.ins().load(I64, flags, rp, 0);
+                let vp = self.load_rc_field(self.off_dispver_ptr);
+                let ver = self.fb.ins().load(I64, flags, vp, 0);
+                let mixed = self.fb.ins().imul_imm(reloc, DISPATCH_EPOCH_MIX as i64);
+                let epoch = self.fb.ins().bxor(mixed, ver);
+                let sitep = self.iconst(self.instance_ic_slot::<M>(*site) as u64);
+                let ce = self.fb.ins().load(I64, flags, sitep, 0); // entry.epoch
+                let ct = self.fb.ins().load(I64, flags, sitep, 8); // entry.ty
+                let e_ok = self.fb.ins().icmp(IntCC::Equal, ce, epoch);
+                let t_ok = self.fb.ins().icmp(IntCC::Equal, ct, ty);
+                let hit = self.fb.ins().band(e_ok, t_ok);
+                let hitb = self.fb.create_block();
+                let missb = self.fb.create_block();
+                self.fb.ins().brif(hit, hitb, &[], missb, &[]);
+
+                // ── hit: the cached bool ──
+                self.fb.switch_to_block(hitb);
+                self.fb.seal_block(hitb);
+                let cached = self.fb.ins().load(I64, flags, sitep, 16); // entry.imp = bool
+                self.fb.def_var(result, cached);
+                self.fb.ins().jump(merge, &[]);
+
+                // ── miss: compute via -instance-val, then refill {epoch, ty, r} ──
+                self.fb.switch_to_block(missb);
+                self.fb.seal_block(missb);
+                let base = self.load_rc_field(self.off_global_base);
+                let f0 = self.fb.ins().load(I64, flags, base, (*iv as i32) * 8);
+                let r0 = self.emit_call::<M>(f0, &[pv, xv]);
+                let sv = self.i32const(*site as u32);
+                let ctx = self.ctx_val;
+                self.call_shim(self.refs.instance_fill, &[ctx, sv, ty, r0]);
+                self.fb.def_var(result, r0);
+                self.fb.ins().jump(merge, &[]);
+
+                // ── slow: non-record / non-direct — just call -instance-val ──
+                self.fb.switch_to_block(slowb);
+                self.fb.seal_block(slowb);
+                let base2 = self.load_rc_field(self.off_global_base);
+                let f1 = self.fb.ins().load(I64, flags, base2, (*iv as i32) * 8);
+                let r1 = self.emit_call::<M>(f1, &[pv, xv]);
+                self.fb.def_var(result, r1);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
             // through the ordinary native call sequence; every miss — non-record
             // receivers (built-in categories), wrapped backends, cold/invalidated
             // sites — takes the shim, which resolves AND refills.
@@ -5499,6 +5631,7 @@ pub fn jit_can_compile(ir: &Ir) -> bool {
     match ir {
         Ir::Prim(Prim::CallCc | Prim::Reset | Prim::Shift | Prim::CallEc | Prim::Gc, _) => false,
         Ir::Dispatch { args, .. } => args.iter().all(jit_can_compile),
+        Ir::InstanceCheck { proto, arg, .. } => jit_can_compile(proto) && jit_can_compile(arg),
         Ir::DefMethod { imp, .. } => jit_can_compile(imp),
         Ir::FieldGet { obj, .. } => jit_can_compile(obj),
         // try/catch is a shim call; the body/handlers run via `top`, so their

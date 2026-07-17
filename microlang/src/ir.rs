@@ -525,6 +525,17 @@ pub enum Ir {
         method: Sym,
         args: Vec<Ir>,
     },
+    /// `(instance? <const-protocol> x)` — a protocol/class membership test with a
+    /// per-site (type -> bool) inline cache. `iv` is the resolved `-instance-val`
+    /// global; a MISS (or any non-record receiver, or a non-JIT tier) calls it —
+    /// so the answer is always exactly `-instance-val`'s, and the cache only
+    /// avoids recomputing for a type it has already seen. proto/arg evaluate once.
+    InstanceCheck {
+        site: usize,
+        iv: Sym,
+        proto: Box<Ir>,
+        arg: Box<Ir>,
+    },
     /// `(.-field obj)` — read a record field BY NAME, with a per-site inline
     /// cache. `site` keys a `(type, index)` cache: a monomorphic access resolves
     /// the field name to a slot index once (a scan), then reuses it. A field

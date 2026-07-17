@@ -2627,9 +2627,14 @@ fn instance_rewrite<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u
         v
     };
     if let Some(&resolved) = candidates.iter().find(|&&r| rt.global_defined(r)) {
-        let iv = sym(rt, "-instance-val");
+        // A special form the compiler turns into `Ir::InstanceCheck` (a per-site
+        // cached membership test). Carries the `-instance-val` sym so a miss / a
+        // non-JIT tier calls the real function — the answer is always its answer.
+        let ic = sym(rt, "%instance-check");
+        let ivs = sym(rt, "-instance-val");
+        let ivq = quote_form(rt, ivs);
         let cref = rt.encode(Val::Sym(resolved));
-        return rt.vec_to_list(&[iv, cref, items[2]]);
+        return rt.vec_to_list(&[ic, ivq, cref, items[2]]);
     }
     let (fqn, simple) = class_fqn(rt, comp, cs);
     jvm_layer_call(rt, "-jvm-instance-of?", &[&fqn, &simple], &items[2..3])

@@ -258,7 +258,7 @@ impl<M: ModelEmit> BytecodeVm<M> {
             Ir::SetGlobal { .. } => {
                 panic!("bytecode tier: global `set!` not supported; run on the tree-walker")
             }
-            Ir::DefMethod { .. } | Ir::Dispatch { .. } | Ir::FieldGet { .. } => {
+            Ir::DefMethod { .. } | Ir::Dispatch { .. } | Ir::FieldGet { .. } | Ir::InstanceCheck { .. } => {
                 panic!("bytecode tier: dispatch not supported; run on the tree-walker")
             }
             Ir::Try { .. } => panic!("bytecode tier: try/catch not supported; run on the tree-walker"),

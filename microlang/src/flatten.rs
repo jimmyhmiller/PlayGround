@@ -124,6 +124,7 @@ impl Pre {
             Ir::Prim(_, args) => args.iter().for_each(|a| self.walk(a)),
             Ir::DefMethod { imp, .. } => self.walk(imp),
             Ir::Dispatch { args, .. } => args.iter().for_each(|a| self.walk(a)),
+            Ir::InstanceCheck { proto, arg, .. } => { self.walk(proto); self.walk(arg); }
             Ir::FieldGet { obj, .. } => self.walk(obj),
             Ir::Try { body, catch, finally, .. } => {
                 self.walk(body);
@@ -340,6 +341,12 @@ impl<'a> Flat<'a> {
                 site: *site,
                 method: *method,
                 args: args.iter().map(|a| self.walk(a)).collect(),
+            },
+            Ir::InstanceCheck { site, iv, proto, arg } => Ir::InstanceCheck {
+                site: *site,
+                iv: *iv,
+                proto: Box::new(self.walk(proto)),
+                arg: Box::new(self.walk(arg)),
             },
             Ir::FieldGet { site, field, obj } => Ir::FieldGet {
                 site: *site,

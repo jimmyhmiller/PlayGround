@@ -355,6 +355,27 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
                 rt.register_method(*name, *ty, c);
                 rt.encode(Val::Nil)
             }
+            // `(instance? <proto> x)` — evaluate both, then call `-instance-val`.
+            // No cache off the JIT; the answer is exactly the function's.
+            Ir::InstanceCheck { iv, proto, arg, .. } => {
+                let base = rt.root_depth();
+                let p = top.eval_ir(top, rt, proto, locals);
+                if rt.pending() {
+                    return p;
+                }
+                rt.push_root(p);
+                let x = top.eval_ir(top, rt, arg, locals);
+                if rt.pending() {
+                    rt.truncate_roots(base);
+                    return x;
+                }
+                rt.push_root(x);
+                let p = rt.root_get(base);
+                let x = rt.root_get(base + 1);
+                rt.truncate_roots(base);
+                let f = rt.global(*iv).expect("-instance-val unbound");
+                top.invoke(top, rt, f, &[p, x])
+            }
             Ir::Dispatch { site, method, args } => {
                 // Precise rooting of already-evaluated args (see the `Call` arm).
                 let base = rt.root_depth();

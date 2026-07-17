@@ -21,6 +21,7 @@ pub struct Compiler {
     site: usize,
     /// Monotonic `.-field` inline-cache site id.
     field_site: usize,
+    instance_site: usize,
     /// The names THIS frontend treats as primitives (its choice, not the
     /// toolkit's). User-facing `+`/`first`/… are ordinary globals in
     /// `clojure.core`; only these low-level names map to a `Prim`.
@@ -193,6 +194,7 @@ impl Compiler {
             methods: std::collections::HashSet::new(),
             site: 0,
             field_site: 0,
+            instance_site: 0,
             prims,
             // core.clj + the ported cljs types load into the `clojure.core` ns.
             ns: NsState { current: "clojure.core".to_string(), ..NsState::default() },
@@ -796,6 +798,18 @@ const SYNTAX_QUOTE_BARE: &[&str] = &[
                 // body is this form, so `(map prepend …)` / `(reduce val-at …)`
                 // work; a plain `(method …)` call may route through that var, and
                 // the wrapper must still dispatch rather than call itself.
+                "%instance-check" => {
+                    // items: [%instance-check (quote -instance-val) proto-ref arg]
+                    let ivq = rt.list_to_vec(items[1]);
+                    let iv = self
+                        .name(rt, ivq[1])
+                        .expect("%instance-check: -instance-val sym");
+                    let iv = self.resolve_global(rt, iv);
+                    let proto = Box::new(self.compile(rt, items[2]));
+                    let arg = Box::new(self.compile(rt, items[3]));
+                    let site = self.fresh_instance_site();
+                    return Ir::InstanceCheck { site, iv, proto, arg };
+                }
                 "%dispatch" => {
                     let m_raw = self.name(rt, items[1]).expect("%dispatch: method name");
                     // A DOT-name (`.charAt` — a host instance method) is its own
@@ -1026,6 +1040,12 @@ const SYNTAX_QUOTE_BARE: &[&str] = &[
     fn fresh_site(&mut self) -> usize {
         let s = self.site;
         self.site += 1;
+        s
+    }
+
+    fn fresh_instance_site(&mut self) -> usize {
+        let s = self.instance_site;
+        self.instance_site += 1;
         s
     }
 

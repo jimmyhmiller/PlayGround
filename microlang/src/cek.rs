@@ -155,6 +155,12 @@ fn eval_step<M: ValueModel>(rt: &mut Runtime<M>, ir: Ir, env: Locals, k: Arc<Kon
         Ir::Call(f, args) => {
             Step::Eval(*f, env.clone(), Arc::new(Kont::CallK { pending: args, done: Vec::new(), env, next: k }))
         }
+        Ir::InstanceCheck { iv, proto, arg, .. } => {
+            // Desugar to `(-instance-val proto arg)` — no cache off the JIT.
+            let f = Ir::Global(iv);
+            let args = vec![*proto, *arg];
+            Step::Eval(f, env.clone(), Arc::new(Kont::CallK { pending: args, done: Vec::new(), env, next: k }))
+        }
         Ir::Prim(Prim::CallCc, mut args) => {
             let f = args.remove(0);
             Step::Eval(f, env, Arc::new(Kont::CallCc { next: k }))
