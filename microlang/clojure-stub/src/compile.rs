@@ -92,6 +92,7 @@ const DEFAULT_IMPORTS: &[(&str, &str)] = &[
     ("ArithmeticException", "java.lang.ArithmeticException"),
     ("NullPointerException", "java.lang.NullPointerException"),
     ("ClassCastException", "java.lang.ClassCastException"),
+    ("ClassNotFoundException", "java.lang.ClassNotFoundException"),
     ("NumberFormatException", "java.lang.NumberFormatException"),
     ("Error", "java.lang.Error"),
     ("AssertionError", "java.lang.AssertionError"),
@@ -177,7 +178,7 @@ impl Compiler {
             // the current namespace's name symbol (frontend state, via the bridge).
             ("%current-ns", CurrentNs),
             // monotonic nanoseconds (System/nanoTime's shape) — benchmarking.
-            ("%nanos", Nanos),
+            ("%nanos", Nanos), ("%pow", Pow),
             // Existing low-level prims surfaced for the string library (char codes
             // for case mapping, raw length) — not new primitives.
             ("%char-code", CharToInt), ("%char-of", IntToChar), ("%str-len", StrLen),

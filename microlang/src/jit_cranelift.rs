@@ -1064,6 +1064,7 @@ fn prim_tag(p: Prim) -> u32 {
         Nanos => 104,
         Keyword => 105,
         MethodHasType => 106,
+        Pow => 107,
         PvConj => 89,
         PvNth => 90,
         PvAssoc => 91,
@@ -1201,6 +1202,7 @@ fn prim_from_tag(tag: u32) -> Prim {
         104 => Nanos,
         105 => Keyword,
         106 => MethodHasType,
+        107 => Pow,
         64 => Div,
         89 => PvConj,
         90 => PvNth,
@@ -5210,5 +5212,184 @@ impl<M: ModelArithJit> CodeSpace<M> for Tiered<M> {
         } else {
             self.cek.invoke(top, rt, callee, args)
         }
+    }
+}
+
+#[cfg(test)]
+mod prim_tag_tests {
+    use super::{prim_from_tag, prim_tag};
+    use crate::ir::Prim;
+
+    /// Every `Prim` must round-trip through its emitted tag.
+    ///
+    /// `prim_tag`/`prim_from_tag` are two hand-maintained tables, and nothing
+    /// checks they agree: give two prims the SAME tag and `prim_from_tag`
+    /// silently returns whichever arm is written first, so one prim quietly
+    /// executes as another. That is not hypothetical — `Pow` was added with
+    /// `MethodHasType`'s tag, and every `satisfies?` in the language started
+    /// running as `%pow` ("not a number"). The compiler cannot catch it:
+    /// `prim_tag`'s match is exhaustive over Prim, but its VALUES are free.
+    ///
+    /// The list is exhaustive by construction — `prim_tag` will not compile if
+    /// a variant is missing from it, and this test will not compile if a
+    /// variant is missing from here.
+    #[test]
+    fn every_prim_round_trips_through_its_tag() {
+        std::panic::set_hook(Box::new(|_| {})); // the by-design panics below are expected
+        let all = [
+        Prim::Add,
+        Prim::Sub,
+        Prim::Mul,
+        Prim::Lt,
+        Prim::Eq,
+        Prim::Quot,
+        Prim::Rem,
+        Prim::Mod,
+        Prim::Div,
+        Prim::StrCat,
+        Prim::StrOf,
+        Prim::MakeArray,
+        Prim::AClone,
+        Prim::ArrPush,
+        Prim::ArrShift,
+        Prim::ArrClear,
+        Prim::BitAnd,
+        Prim::BitOr,
+        Prim::BitXor,
+        Prim::BitShl,
+        Prim::BitShr,
+        Prim::BitCount,
+        Prim::RegisterFields,
+        Prim::FieldByName,
+        Prim::FieldNames,
+        Prim::MakeRecord,
+        Prim::Hash,
+        Prim::List,
+        Prim::Cons,
+        Prim::First,
+        Prim::Rest,
+        Prim::IsNil,
+        Prim::Println,
+        Prim::Print,
+        Prim::Gc,
+        Prim::TypeOf,
+        Prim::Record,
+        Prim::NFields,
+        Prim::Throw,
+        Prim::Spawn,
+        Prim::Await,
+        Prim::AtomNew,
+        Prim::AtomGet,
+        Prim::AtomSet,
+        Prim::AtomCas,
+        Prim::Field,
+        Prim::CallEc,
+        Prim::StrLen,
+        Prim::CharToInt,
+        Prim::IntToChar,
+        Prim::Vector,
+        Prim::VectorRef,
+        Prim::VectorSet,
+        Prim::VectorLen,
+        Prim::Values,
+        Prim::ValuesToList,
+        Prim::Apply,
+        Prim::Identical,
+        Prim::Keyword,
+        Prim::CallCc,
+        Prim::Reset,
+        Prim::Shift,
+        Prim::DynGet,
+        Prim::DynSet,
+        Prim::DynMark,
+        Prim::DynBind,
+        Prim::DynUnwind,
+        Prim::GlobalGet,
+        Prim::GlobalSet,
+        Prim::GlobalBound,
+        Prim::SymName,
+        Prim::SymNs,
+        Prim::VarFlags,
+        Prim::NsInterns,
+        Prim::AllNs,
+        Prim::MethodTypes,
+        Prim::MethodHasType,
+        Prim::ReadString,
+        Prim::Eval,
+        Prim::MacroExpand1,
+        Prim::Numerator,
+        Prim::Denominator,
+        Prim::BigIntP,
+        Prim::ToLong,
+        Prim::SymbolOf,
+        Prim::VarArglists,
+        Prim::StrChars,
+        Prim::StrToBytes,
+        Prim::BytesToStr,
+        Prim::TcpListen,
+        Prim::TcpAccept,
+        Prim::TcpRead,
+        Prim::TcpWrite,
+        Prim::TcpClose,
+        Prim::TcpLocalPort,
+        Prim::ErrPrint,
+        Prim::CurrentNs,
+        Prim::Nanos,
+        Prim::Pow,
+        Prim::FxAdd,
+        Prim::FxSub,
+        Prim::FxMul,
+        Prim::FxLt,
+        Prim::FxEq,
+        Prim::PvConj,
+        Prim::PvNth,
+        Prim::PvAssoc,
+        Prim::LazyRealize,
+        Prim::RangeFill,
+        Prim::HamtAssoc,
+        Prim::HamtLookup,
+        Prim::HamtWithout,
+        Prim::StrJoinArr,
+        Prim::StrCmp,
+        Prim::PvConjChunk,
+        Prim::PvFromArray,
+        Prim::ApushChunk,
+        Prim::TvNew,
+        Prim::TvConj,
+        Prim::TvAssoc,
+        Prim::TvNth,
+        Prim::TvPop,
+        Prim::TvPersistent,
+        Prim::TamNew,
+        Prim::TamAssoc,
+        Prim::TamDissoc,
+        Prim::TamPersistent,
+        Prim::ThmNew,
+        Prim::ThmAssoc,
+        Prim::ThmDissoc,
+        Prim::ThmPersistent,
+        Prim::SortArr,
+        Prim::MultiFnNew,
+        Prim::AllFixnum
+        ];
+        let mut seen: std::collections::HashMap<u32, Prim> = std::collections::HashMap::new();
+        let mut tagged = 0;
+        for p in all {
+            // Some prims are BACKEND-handled and deliberately have no tag (Gc,
+            // Apply, the continuations): `prim_tag` panics for those by design.
+            // They are not part of the tag space, so skip them — but count what
+            // is checked, so this cannot silently degrade to testing nothing.
+            let Ok(t) = std::panic::catch_unwind(|| prim_tag(p)) else { continue };
+            tagged += 1;
+            if let Some(other) = seen.insert(t, p) {
+                panic!("prim tag {t} is used by BOTH {other:?} and {p:?} — one of them will silently execute as the other");
+            }
+            let back = prim_from_tag(t);
+            assert_eq!(
+                back, p,
+                "{p:?} has tag {t}, but prim_from_tag({t}) is {back:?}"
+            );
+        }
+        assert!(tagged > 100, "only {tagged} prims carry a tag — is the list stale?");
     }
 }

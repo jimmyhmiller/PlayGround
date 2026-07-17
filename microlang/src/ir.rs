@@ -290,6 +290,13 @@ pub enum Prim {
     /// origin (the shape of `System/nanoTime`): elapsed-time measurement, not
     /// wall-clock time.
     Nanos,
+    /// `(%pow base exp)` -> `base ** exp` as an f64, IEEE-754 exactly as
+    /// `Math/pow` (and Rust's `powf`) define it: overflow gives ##Inf, and
+    /// `(%pow 9 0.5)` is 3.0. Real libraries need genuine floating-point pow —
+    /// meander compares an overflowing `(Math/pow m n)` against ##Inf to decide
+    /// whether a search space is finite — and it cannot be faked with repeated
+    /// multiplication (that has no answer for a fractional exponent).
+    Pow,
 
     // ── optimizer-introduced fixnum specializations ──────────────────────────
     // These are produced ONLY by the `optimize` nanopass (never by `analyze`).

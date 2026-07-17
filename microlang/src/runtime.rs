@@ -2125,6 +2125,17 @@ impl<M: ValueModel> Runtime<M> {
                 Some(b) => b.current_ns(self),
                 None => panic!("%current-ns: no eval bridge installed"),
             },
+            Prim::Pow => {
+                let f = |b: u64| -> f64 {
+                    match self.decode(b) {
+                        Val::Float(x) => x,
+                        Val::Int(i) => i as f64,
+                        other => panic!("%pow: not a number: {other:?}"),
+                    }
+                };
+                let (base, exp) = (f(args[0]), f(args[1]));
+                self.encode(Val::Float(base.powf(exp)))
+            }
             Prim::Nanos => {
                 // Monotonic, arbitrary origin (first use) — System/nanoTime's shape.
                 static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -5123,7 +5134,17 @@ impl<M: ValueModel> Runtime<M> {
         match self.decode(bits) {
             Val::Int(i) => i.to_string(),
             Val::Float(f) => {
-                if f.is_finite() && f == f.trunc() {
+                // The non-finite floats print as their READER LITERALS, as in
+                // Clojure — `##Inf`, not Rust's `inf`. They have to: this is
+                // `pr-str`'s output, so it must read back as the same value, and
+                // `inf`/`NaN` read back as symbols. (`(/ 1.0 0.0)` printed `inf`.)
+                if f.is_nan() {
+                    "##NaN".to_string()
+                } else if f == f64::INFINITY {
+                    "##Inf".to_string()
+                } else if f == f64::NEG_INFINITY {
+                    "##-Inf".to_string()
+                } else if f == f.trunc() {
                     format!("{f:.1}")
                 } else {
                     format!("{f}")

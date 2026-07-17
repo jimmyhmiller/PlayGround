@@ -215,9 +215,11 @@
 (defn -jvm-class-named [fqn]
   (if (-jvm-descriptor fqn) (record 'Class fqn) nil))
 
+;; Throws a REAL ClassNotFoundException object, not a string: the whole point of
+;; `Class/forName` for a library is that the miss is CATCHABLE BY TYPE.
 (defn -jvm-for-name [n]
   (let [c (-jvm-class-named (symbol n))]
-    (if (nil? c) (throw (str "ClassNotFoundException: " n)) c)))
+    (if (nil? c) (throw (record 'ClassNotFoundException (str n))) c)))
 
 ;; A dotted name in VALUE position: a registered class -> its Class record; a
 ;; js-style `pkg.Class.MEMBER` static ref -> the member; unknown -> the bare
@@ -423,6 +425,11 @@
   (:static PI 3.141592653589793)
   (:static E 2.718281828459045)
   (:static-fn abs [x] (if (neg? x) (- x) x))
+  ;; REAL IEEE-754 pow (the `%pow` prim), not repeated multiplication: it must
+  ;; answer for fractional exponents and overflow to ##Inf, both of which real
+  ;; libraries rely on.
+  (:static-fn pow [b e] (%pow b e))
+  (:static-fn sqrt [x] (%pow x 0.5))
   (:static-fn max [a b] (if (< a b) b a))
   (:static-fn min [a b] (if (< a b) a b)))
 
@@ -489,6 +496,14 @@
   (:tag NullPointerException) (:extends java.lang.RuntimeException))
 (defclass java.lang.ClassCastException
   (:tag ClassCastException) (:extends java.lang.RuntimeException))
+;; A CHECKED exception on the JVM — it extends Exception, not RuntimeException.
+;; Real libraries catch it BY NAME to probe for optional classes: meander does
+;; `(try (Class/forName "cljs.tagged_literals.JSValue") … (catch
+;; ClassNotFoundException _ …))` to decide whether it is running on
+;; ClojureScript. Without the class registered, that catch cannot match and the
+;; probe escapes as an uncaught throw.
+(defclass java.lang.ClassNotFoundException
+  (:tag ClassNotFoundException) (:extends java.lang.Exception))
 (defclass java.lang.NumberFormatException
   (:tag NumberFormatException) (:extends java.lang.RuntimeException))
 (defclass java.lang.AssertionError (:tag AssertionError) (:extends java.lang.Error))

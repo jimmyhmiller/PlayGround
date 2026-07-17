@@ -43,6 +43,7 @@ mod sources {
     pub const CLOJURE_STRING: &str = include_str!("clj/clojure/string.clj");
     pub const CLOJURE_SET: &str = include_str!("clj/clojure/set.clj");
     pub const CLOJURE_WALK: &str = include_str!("clj/clojure/walk.clj");
+    pub const CLOJURE_PPRINT: &str = include_str!("clj/clojure/pprint.clj");
     pub const CLOJURE_ZIP: &str = include_str!("clj/clojure/zip.clj");
     pub const CLOJURE_DATA_JSON: &str = include_str!("clj/clojure/data/json.clj");
     pub const CLOJURE_TEST: &str = include_str!("clj/clojure/test.clj");
@@ -212,6 +213,9 @@ impl Session {
         // language (loaded after clojure.string, which its writer uses for `join`).
         run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_SET);
         run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_WALK);
+        // `clojure.pprint` — print-table only; real libraries (meander) require
+        // the namespace for it. See the file for what is deliberately absent.
+        run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_PPRINT);
         run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_ZIP);
         run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_DATA_JSON);
         run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_TEST);
@@ -1133,13 +1137,20 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
         while k + 1 < kvs.len() {
             let key = kvs[k];
             let val = kvs[k + 1];
-            if is_keyword(rt, key, "keys") {
-                // {:keys [x y]} -> x (get t :x), y (get t :y)  (honoring :or)
+            if let Some(dir_ns) = keys_directive(rt, key) {
+                // {:keys [x y]}    -> x (get t :x), y (get t :y)   (honoring :or)
+                // {:keys [ns/x]}   -> x (get t :ns/x)      — the NAME is the local
+                // {:a/keys [x]}    -> x (get t :a/x)       — the directive's ns
+                // Both namespaced forms are Clojure 1.9+, and real libraries use
+                // them (meander/epsilon does; it is why this rejected its source
+                // with "let: binding name must be a symbol" — it tried to bind
+                // `ns/x` as a local).
                 if let Some(vl) = binding_items(rt, val) {
                     for s in vl {
-                        let kw = keyword_expr(rt, s);
-                        let ge = get_with_default(rt, s, kw);
-                        binds.push(s);
+                        let (local, full) = split_ns_binding(rt, s, dir_ns.as_deref());
+                        let kw = keyword_expr(rt, full);
+                        let ge = get_with_default(rt, local, kw);
+                        binds.push(local);
                         binds.push(ge);
                     }
                 }
@@ -1158,13 +1169,15 @@ fn destructure<M: ValueModel>(rt: &mut Runtime<M>, pat: u64, init: u64) -> Vec<u
                         binds.push(ge);
                     }
                 }
-            } else if is_keyword(rt, key, "syms") {
-                // {:syms [a b]} -> a (get t 'a), b (get t 'b)  (symbol keys)
+            } else if let Some(dir_ns) = syms_directive(rt, key) {
+                // {:syms [a b]}  -> a (get t 'a)     (symbol keys)
+                // {:a/syms [x]}  -> x (get t 'a/x)   — same ns rules as :keys
                 if let Some(vl) = binding_items(rt, val) {
                     for s in vl {
-                        let q = quote_form(rt, s);
-                        let ge = get_with_default(rt, s, q);
-                        binds.push(s);
+                        let (local, full) = split_ns_binding(rt, s, dir_ns.as_deref());
+                        let q = quote_form(rt, full);
+                        let ge = get_with_default(rt, local, q);
+                        binds.push(local);
                         binds.push(ge);
                     }
                 }
@@ -2069,6 +2082,50 @@ fn keyword_expr<M: ValueModel>(rt: &mut Runtime<M>, name_sym: u64) -> u64 {
 /// binding/param vectors are the same data the reader produces.
 fn make_vector<M: ValueModel>(rt: &mut Runtime<M>, elems: Vec<u64>) -> u64 {
     data::make_vector(rt, &elems)
+}
+
+/// Is `k` a `:keys`-style directive, and with what namespace? `:keys` -> the
+/// bare form (None); `:a/keys` -> Some("a"). Anything else -> not a directive.
+fn keys_directive<M: ValueModel>(rt: &Runtime<M>, k: u64) -> Option<Option<String>> {
+    ns_directive(rt, k, "keys")
+}
+/// The `:syms` counterpart of `keys_directive`.
+fn syms_directive<M: ValueModel>(rt: &Runtime<M>, k: u64) -> Option<Option<String>> {
+    ns_directive(rt, k, "syms")
+}
+fn ns_directive<M: ValueModel>(rt: &Runtime<M>, k: u64, want: &str) -> Option<Option<String>> {
+    let f0 = record_field0(rt, k, reader::KEYWORD)?;
+    let Val::Sym(sy) = rt.decode(f0) else { return None };
+    let name = rt.sym_name(sy);
+    match name.rsplit_once('/') {
+        Some((ns, last)) if last == want => Some(Some(ns.to_string())),
+        None if name == want => Some(None),
+        _ => None,
+    }
+}
+
+/// Split a destructuring binding symbol into (LOCAL name, FULL key name), per
+/// Clojure: the local is always the bare name, and the key carries the
+/// namespace — from the symbol itself (`{:keys [ns/x]}`) or, failing that, from
+/// the directive (`{:ns/keys [x]}`). A symbol's own namespace wins.
+fn split_ns_binding<M: ValueModel>(rt: &mut Runtime<M>, s: u64, dir_ns: Option<&str>) -> (u64, u64) {
+    let Val::Sym(sy) = rt.decode(s) else { return (s, s) };
+    let name = rt.sym_name(sy).to_string();
+    match name.rsplit_once('/') {
+        // `ns/x` — bind `x`, look up `:ns/x`
+        Some((_, local)) => {
+            let l = rt.intern(local);
+            (rt.encode(Val::Sym(l)), s)
+        }
+        None => match dir_ns {
+            // `{:ns/keys [x]}` — bind `x`, look up `:ns/x`
+            Some(ns) => {
+                let f = rt.intern(&format!("{ns}/{name}"));
+                (s, rt.encode(Val::Sym(f)))
+            }
+            None => (s, s),
+        },
+    }
 }
 
 fn is_keyword<M: ValueModel>(rt: &Runtime<M>, k: u64, name: &str) -> bool {

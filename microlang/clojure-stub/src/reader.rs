@@ -47,6 +47,7 @@ enum Tok {
     Discard,     // #_  discard the next form
     Regex(String), // #"pat"  regex literal -> (re-pattern "pat")
     UuidLit,     // #uuid "…"  -> (uuid "…")
+    SymbolicVal(f64), // ##Inf / ##-Inf / ##NaN
     VarQuote,    // #'  -> (var x)
     Quote,
     Backtick,      // `  syntax-quote
@@ -127,6 +128,28 @@ fn tokenize(src: &str) -> Vec<Tok> {
             '#' if i + 1 < cs.len() && cs[i + 1] == '\'' => {
                 out.push(Tok::VarQuote);
                 i += 2;
+            }
+            // `##Inf` / `##-Inf` / `##NaN` — the symbolic-value literals. Real
+            // libraries use them: meander compares an overflowing `Math/pow`
+            // against `##Inf` to decide whether a search space is finite.
+            '#' if i + 1 < cs.len() && cs[i + 1] == '#' => {
+                i += 2;
+                let start = i;
+                while i < cs.len()
+                    && !cs[i].is_whitespace()
+                    && !matches!(cs[i], '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';')
+                {
+                    i += 1;
+                }
+                let name: String = cs[start..i].iter().collect();
+                match name.as_str() {
+                    "Inf" => out.push(Tok::SymbolicVal(f64::INFINITY)),
+                    "-Inf" => out.push(Tok::SymbolicVal(f64::NEG_INFINITY)),
+                    "NaN" => out.push(Tok::SymbolicVal(f64::NAN)),
+                    // Clojure rejects any other `##name` outright; so do we,
+                    // rather than read it as some other value.
+                    other => panic!("reader: unknown symbolic value ##{other}"),
+                }
             }
             // `#?@(...)` splicing reader conditional — splice the chosen collection.
             '#' if i + 2 < cs.len() && cs[i + 1] == '?' && cs[i + 2] == '@' => {
@@ -335,6 +358,7 @@ impl Parser {
             // `#uuid "…"` -> `(uuid "…")`.
             Tok::UuidLit => self.wrap(rt, "uuid"),
             Tok::Char(c) => alloc(rt, Obj::Char(c)),
+            Tok::SymbolicVal(f) => rt.encode(Val::Float(f)),
             Tok::Atom(a) => self.atom(rt, &a),
             // `#?@` outside a collection is unusual; return the selected collection
             // as a value (it can only be meaningfully spliced inside `until`).
