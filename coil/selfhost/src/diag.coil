@@ -68,12 +68,26 @@
                 hic (let [h (if (icmp-gt hi lend) lend hi)] (if (icmp-lt h lo) lo h))
                 carets (let [c (isub hic lo)] (if (icmp-lt c 1) 1 c))
                 numlen (dec-len line) file (sm-src-name (mut s) source)]
-            (if (icmp-gt (slice-len msg) 0) (do (ps w msg) (wb w 10)) 0)
-            (wspaces w numlen) (wb w 32) (ps w arrow) (wb w 32) (ps w file) (wb w 58) (dump-dec w line) (wb w 58) (dump-dec w col) (wb w 10)
-            (wspaces w numlen) (ps w " |") (wb w 10)
-            (dump-dec w line) (ps w " | ") (print-str w (subslice src lstart lend)) (wb w 10)
-            (wspaces w numlen) (ps w " | ") (wspaces w (isub col 1)) (wrepeat w 94 carets)
-            true))))))
+            ; Window a very long line around the span. A macro-generated line can be tens
+            ; of KB (`cond` -> one line); printing it whole buried the caret and dumped
+            ; the entire expansion. Show at most maxw chars, with `...` (ASCII, so byte
+            ; width matches the caret math) marking either truncated end.
+            (let [maxw 120 ctx 32
+                  long (icmp-gt (isub lend lstart) maxw)
+                  wstart (if long (let [x (isub lo ctx)] (if (icmp-lt x lstart) lstart x)) lstart)
+                  wend   (if long (let [x (iadd wstart maxw)] (if (icmp-gt x lend) lend x)) lend)
+                  pre  (icmp-gt wstart lstart)
+                  post (icmp-lt wend lend)
+                  ; caret offset = span start within the window (+3 for a leading "...")
+                  pad  (iadd (isub lo wstart) (if pre 3 0))
+                  ; don't let carets run past the visible window
+                  shown (let [avail (isub wend lo) c (if (icmp-lt carets avail) carets avail)] (if (icmp-lt c 1) 1 c))]
+              (if (icmp-gt (slice-len msg) 0) (do (ps w msg) (wb w 10)) 0)
+              (wspaces w numlen) (wb w 32) (ps w arrow) (wb w 32) (ps w file) (wb w 58) (dump-dec w line) (wb w 58) (dump-dec w col) (wb w 10)
+              (wspaces w numlen) (ps w " |") (wb w 10)
+              (dump-dec w line) (ps w " | ") (if pre (ps w "...") 0) (print-str w (subslice src wstart wend)) (if post (ps w "...") 0) (wb w 10)
+              (wspaces w numlen) (ps w " | ") (wspaces w pad) (wrepeat w 94 shown)
+              true)))))))
 
 ; Render one diagnostic body (mirrors span::render). No leading `error:`.
 (defn render-diag [(w (ptr Writer)) (s (mut LS)) (d Diag)] (-> i64)
