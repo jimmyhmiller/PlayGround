@@ -44,6 +44,18 @@
 (defn -jvm-c-extend-tags [d] (field d 11))
 
 (def -jvm-registry (%atom-new nil))   ;; (fqn desc fqn desc …) plist
+;; …and an O(1) INDEX over the same data: fqn -> desc.
+;;
+;; The plist above is the load-path representation (see the header: registration
+;; must stay prim-style eager). Scanning it is O(registry), which the header
+;; called fine because "reflective ops are cold". core.match proved that false —
+;; its expansion tests `(instance? clojure.lang.ILookup x)` several times per
+;; `match`, and every one of those scanned all ~80 classes (~340ns each).
+;;
+;; Maintained INCREMENTALLY — one `assoc` per class at load, not a rebuild per
+;; lookup — so the load path pays ~80 assocs total and reads are a single map
+;; lookup. `cljs_types` (which defines the map types) loads before this file.
+(def -jvm-index (%atom-new nil))
 (def -jvm-tag-index (%atom-new nil))  ;; (tag fqn tag fqn …) plist
 (def -jvm-none (record 'JvmNone 0))
 
@@ -61,6 +73,9 @@
 
 (defn -jvm-register! [fqn desc]
   (%atom-set -jvm-registry (%cons fqn (%cons desc (%atom-get -jvm-registry))))
+  ;; Keep the index in step. A re-registration must WIN, exactly as the plist's
+  ;; cons-to-the-front makes it win for a scan.
+  (%atom-set -jvm-index (assoc (%atom-get -jvm-index) fqn desc))
   ;; The tag index answers `(class x)` — only a CONCRETE class may claim a
   ;; runtime tag (interfaces map many-to-one onto representative tags).
   (if (nil? (-jvm-c-tag desc))
@@ -73,7 +88,10 @@
         nil)))
   nil)
 
-(defn -jvm-descriptor [fqn] (-jvm-plist-get (%atom-get -jvm-registry) fqn))
+;; One map lookup, not a scan of the whole registry. (`-jvm-index` is nil until
+;; the first class registers; `get` on nil is nil, which is the same "no such
+;; class" answer the plist scan gave.)
+(defn -jvm-descriptor [fqn] (get (%atom-get -jvm-index) fqn))
 
 ;; "java.lang.String" -> "String" (prim loop — the string library isn't loaded yet).
 (defn -jvm-simple-str [s]

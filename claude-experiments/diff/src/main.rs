@@ -119,6 +119,13 @@ fn run() -> Result<(), String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("dist/bundle.js"));
             let (bundler, update) = Bundler::discover(Path::new(&entry))?;
+            if !update.diagnostics.is_empty() {
+                return Err(format!(
+                    "bundle produced {} diagnostic(s); first: {}",
+                    update.diagnostics.len(),
+                    update.diagnostics[0]
+                ));
+            }
             let result = run_delta_revisions(vec![update.delta])
                 .pop()
                 .ok_or_else(|| "dataflow returned no build result".to_string())?;
@@ -137,9 +144,6 @@ fn run() -> Result<(), String> {
                 output.display(),
                 update.transformed_modules
             );
-            for diagnostic in update.diagnostics {
-                eprintln!("diagnostic: {diagnostic}");
-            }
             Ok(())
         }
         Some("watch") => {
@@ -189,10 +193,10 @@ fn usage() -> String {
 
 fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mode: &str) {
     println!(
-        "mode,frontend_threads,dataflow_threads,modules,edges,initial_reachable,final_reachable,source_mb,bundle_mb,generate_ms,discover_transform_resolve_ms,initial_reachability_ms,initial_emit_ms,edit_transform_resolve_ms,edit_reachability_ms,edit_emit_ms,transformed_on_edit"
+        "mode,frontend_threads,dataflow_threads,modules,edges,initial_reachable,final_reachable,source_mb,bundle_mb,generate_ms,discover_transform_resolve_ms,initial_reachability_ms,initial_emit_ms,edit_transform_resolve_ms,edit_reachability_ms,edit_emit_ms,transformed_on_edit,read_cpu_ms,transform_cpu_ms,lower_cpu_ms,resolve_cpu_ms"
     );
     println!(
-        "{},{},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{}",
+        "{},{},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{:.3},{:.3},{:.3},{:.3}",
         mode,
         result.worker_threads,
         result.dataflow_threads,
@@ -210,6 +214,10 @@ fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mod
         result.edit_dataflow_ms,
         result.edit_emit_ms,
         result.transformed_on_edit,
+        result.frontend_read_cpu_ms,
+        result.frontend_transform_cpu_ms,
+        result.frontend_lower_cpu_ms,
+        result.frontend_resolve_cpu_ms,
     );
 }
 

@@ -118,6 +118,8 @@ impl Compiler {
             // Keywords are INTERNED: `(keyword "a")` must return the very same
             // object as the literal `:a`, never an equal-but-distinct record.
             ("%keyword", Keyword),
+            // ONE dispatch-table lookup, vs %method-types' lock+full-scan+alloc.
+            ("%method-has-type?", MethodHasType),
             ("%quot", Quot), ("%rem", Rem), ("%mod", Mod), ("%div", Div), ("%str-cat", StrCat), ("%str-of", StrOf),
             ("%apply", Apply),
             // Array substrate + bitwise ops for in-language persistent structures.

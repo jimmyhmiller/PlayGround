@@ -1764,13 +1764,26 @@
 (defn -proto-methods [p] (field p 1))
 ;; A MARKER protocol (no methods) is satisfied only through the explicit
 ;; -marker-reg registrations (see the registry defined before the protocols).
+;; `%method-has-type?` is ONE dispatch-table lookup. This used to be a nested
+;; lazy `some` over `(%method-types m)` — and `%method-types` locks the table,
+;; scans EVERY (method, type) pair in the whole registry, and allocates a list,
+;; once PER METHOD PER CALL. That cost ~2.4µs, which nothing noticed until
+;; core.match: its expansion tests `(instance? clojure.lang.ILookup x)` (an
+;; interface, so `satisfies?`) several times per `match`, making the "reflective
+;; ops are cold" assumption in host_jvm.clj false. A prim-style loop, no lazy
+;; seqs and no per-element closures, to keep it that way.
+(defn -proto-has-type? [ms ty]
+  (loop [l (seq ms)]
+    (if (nil? l)
+      false
+      (if (%method-has-type? (first l) ty) true (recur (next l))))))
 (defn satisfies? [p x]
-  (let [ty (type-of x)]
-    (if (nil? (seq (-proto-methods p)))
+  (let [ty (type-of x)
+        ms (-proto-methods p)]
+    (if (nil? (seq ms))
       (-marker-satisfied? p ty)
-      (boolean (some (fn [m] (some (fn [t] (= t ty)) (%method-types m))) (-proto-methods p))))))
-(defn extends? [p ty]
-  (boolean (some (fn [m] (some (fn [t] (= t ty)) (%method-types m))) (-proto-methods p))))
+      (-proto-has-type? ms ty))))
+(defn extends? [p ty] (-proto-has-type? (-proto-methods p) ty))
 (defn extenders [p]
   (-to-list (reduce (fn [acc m] (reduce conj acc (%method-types m))) #{} (-proto-methods p))))
 ;; `(instance? C x)` where C resolves to a bound var: a Protocol means "does x

@@ -1382,7 +1382,16 @@
     (LLVMInitializeWebAssemblyTargetInfo) (LLVMInitializeWebAssemblyTarget) (LLVMInitializeWebAssemblyTargetMC)
     (let [triple (if (icmp-ne (cast i64 triple-override) 0) triple-override (LLVMGetDefaultTargetTriple))
           targetout (alloc-stack (ptr i8)) errout (alloc-stack (ptr i8))]
-      (LLVMGetTargetFromTriple triple targetout errout)
+      ; LLVMGetTargetFromTriple RETURNS a status and writes an error string; discarding
+      ; both left `targetout` garbage and segfaulted LLVMCreateTargetMachine on it, so a
+      ; bogus --target crashed the compiler instead of naming the triple. LLVM already
+      ; wrote a perfectly good explanation into errout — print it.
+      (if (icmp-ne (LLVMGetTargetFromTriple triple targetout errout) 0)
+          (let [w (stderr)]
+            (ps w "error: unsupported --target '") (ps w (cstr->slice triple)) (ps w "': ")
+            (ps w (cstr->slice (load errout))) (wb w 10)
+            (exit 1) 0)
+        0)
       (let [tm (LLVMCreateTargetMachine (load targetout) triple c"generic" c"" 2 2 0)
             td (LLVMCreateTargetDataLayout tm)
             dl (LLVMCopyStringRepOfTargetData td)

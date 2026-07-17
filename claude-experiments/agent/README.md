@@ -32,6 +32,7 @@ Run commands from the repository root so the bundled fonts resolve from `assets/
 - `workflows/*.flow` are executable workflows discovered by the interface at startup and after creation.
 - `assets/fonts` contains IBM Plex Mono and IBM Plex Sans at high rasterization sizes for clean UI text.
 - `licenses/IBM-Plex-OFL.txt` contains the font license.
+- `THIRD_PARTY_NOTICES.md` and `licenses/native-sdk-Apache-2.0.txt` document the Native SDK text-widget adaptation.
 
 All durable application state lives in `AppState`. Raylib input is captured into an `InputFrame`, and `apply-input` is the single transition boundary.
 
@@ -86,4 +87,5 @@ Inspect the parsed graph without opening the UI or running agents:
 ```sh
 ./flowline --check-catalog
 ./flowline --check-workflow workflows/my-workflow.flow
+./flowline --check-text-editor
 ```

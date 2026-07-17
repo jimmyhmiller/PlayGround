@@ -1,13 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use oxc_resolver::{ResolveOptions, Resolver};
 use rayon::prelude::*;
 
 use crate::dataflow::DeltaRevision;
+use crate::frontend_profile::{self, Phase};
 use crate::graph::ModuleId;
-use crate::parser::parse_dependencies;
 use crate::transform::transform_module;
 
 #[derive(Debug, Clone)]
@@ -20,6 +22,79 @@ struct ModuleState {
 struct LoadedModule {
     state: ModuleState,
     diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct ResolutionKey {
+    importer_directory: PathBuf,
+    specifier: String,
+}
+
+struct ResolutionCache {
+    shards: [Mutex<HashMap<ResolutionKey, Result<ModuleId, String>>>; 64],
+}
+
+impl ResolutionCache {
+    fn new() -> Self {
+        Self {
+            shards: std::array::from_fn(|_| Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn resolve(
+        &self,
+        resolver: &Resolver,
+        importer: &Path,
+        specifier: &str,
+    ) -> Result<ModuleId, String> {
+        let key = ResolutionKey {
+            importer_directory: importer
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+            specifier: specifier.to_owned(),
+        };
+        let shard = self.shard(&key);
+        if let Some(result) = shard.lock().expect("resolution cache poisoned").get(&key) {
+            return result.clone();
+        }
+        // Most module graphs overwhelmingly use explicit relative files. Avoid
+        // the general Node resolver on a cache miss when that exact file exists;
+        // all ambiguous cases still take the standards-aware path.
+        let exact_relative = specifier.strip_prefix("./").and_then(|relative| {
+            let candidate = key.importer_directory.join(relative);
+            candidate.is_file().then(|| module_id(&candidate))
+        });
+        let result = if let Some(resolved) = exact_relative {
+            Ok(resolved)
+        } else {
+            resolver
+                .resolve_file(importer, specifier)
+                .map_err(|error| error.to_string())
+                .and_then(|resolution| {
+                    let resolved = resolution.full_path();
+                    if resolved.extension().and_then(|value| value.to_str()) == Some("node") {
+                        Err(format!("native module {specifier:?} is not supported"))
+                    } else {
+                        Ok(module_id(&resolved))
+                    }
+                })
+        };
+        shard
+            .lock()
+            .expect("resolution cache poisoned")
+            .insert(key, result.clone());
+        result
+    }
+
+    fn shard(
+        &self,
+        key: &ResolutionKey,
+    ) -> &Mutex<HashMap<ResolutionKey, Result<ModuleId, String>>> {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        &self.shards[hasher.finish() as usize % self.shards.len()]
+    }
 }
 
 #[derive(Debug)]
@@ -59,8 +134,8 @@ pub struct DirectReachability {
 pub struct Bundler {
     entry: ModuleId,
     resolver: Resolver,
-    modules: BTreeMap<ModuleId, ModuleState>,
-    artifact_cache: BTreeMap<(ModuleId, u64), (String, Vec<String>)>,
+    resolution_cache: ResolutionCache,
+    modules: HashMap<ModuleId, ModuleState>,
 }
 
 impl Bundler {
@@ -73,8 +148,8 @@ impl Bundler {
         let mut bundler = Self {
             entry: entry_id.clone(),
             resolver,
-            modules: BTreeMap::new(),
-            artifact_cache: BTreeMap::new(),
+            resolution_cache: ResolutionCache::new(),
+            modules: HashMap::new(),
         };
 
         let mut delta = DeltaRevision {
@@ -225,7 +300,7 @@ impl Bundler {
             let mut loaded = paths
                 .into_par_iter()
                 .map(|path| {
-                    let result = load_uncached(&self.resolver, &path);
+                    let result = load_uncached(&self.resolver, &self.resolution_cache, &path);
                     (path, result)
                 })
                 .collect::<Vec<_>>();
@@ -239,10 +314,6 @@ impl Bundler {
                 }
                 let loaded = result?;
                 diagnostics.extend(loaded.diagnostics.iter().cloned());
-                self.artifact_cache.insert(
-                    (id.clone(), loaded.state.hash),
-                    (loaded.state.code.clone(), loaded.diagnostics.clone()),
-                );
                 transformed += 1;
                 delta
                     .module_updates
@@ -264,32 +335,37 @@ impl Bundler {
         path: &Path,
         diagnostics: &mut Vec<String>,
     ) -> Result<ModuleState, String> {
+        let read_started = frontend_profile::start();
         let source = fs::read_to_string(path)
             .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        frontend_profile::finish(Phase::Read, read_started);
         let id = module_id(path);
         let hash = content_hash(source.as_bytes());
-        let (code, transform_diagnostics) =
-            if let Some(cached) = self.artifact_cache.get(&(id.clone(), hash)).cloned() {
-                cached
-            } else {
-                let transformed = transform_module(path, &source);
-                let artifact = (transformed.code, transformed.diagnostics);
-                self.artifact_cache
-                    .insert((id.clone(), hash), artifact.clone());
-                artifact
-            };
+        if let Some(current) = self.modules.get(&id)
+            && current.hash == hash
+        {
+            return Ok(current.clone());
+        }
+        let transformed = transform_module(path, &source);
         diagnostics.extend(
-            transform_diagnostics
+            transformed
+                .diagnostics
                 .iter()
                 .map(|diagnostic| format!("{}: {diagnostic}", path.display())),
         );
 
-        let dependencies = resolve_dependencies(&self.resolver, path, &code, diagnostics);
+        let dependencies = resolve_dependencies(
+            &self.resolver,
+            &self.resolution_cache,
+            path,
+            &transformed.dependencies,
+            diagnostics,
+        );
 
         Ok(ModuleState {
             hash,
             dependencies,
-            code,
+            code: transformed.code,
         })
     }
 
@@ -299,7 +375,7 @@ impl Bundler {
             .filter_map(|id| {
                 let module = self.modules.get(id)?;
                 let module_fragment = format!(
-                    "{}:function(module,exports,require,__toESM,__export,__reExport){{\n{}\n}},\n",
+                    "{}:function(module,exports,require,__toESM,__export,__reExport,__import,__esmNamespace,__seal){{\n{}\n}},\n",
                     quote(id),
                     module.code
                 );
@@ -325,16 +401,22 @@ impl Bundler {
 const __modules={{{modules}}};
 const __maps={{{maps}}};
 const __cache=Object.create(null);
-function __export(target,name,getter){{Object.defineProperty(target,name,{{enumerable:true,get:getter}});}}
-function __reExport(target,source){{for(const key of Object.keys(source))if(key!=="default"&&key!=="__esModule"&&!Object.prototype.hasOwnProperty.call(target,key))__export(target,key,()=>source[key]);}}
+const __exportStates=new WeakMap();
+function __esmNamespace(){{const namespace=Object.create(null);Object.defineProperty(namespace,Symbol.toStringTag,{{value:"Module"}});return namespace;}}
+function __seal(namespace){{for(const key of Reflect.ownKeys(namespace)){{const descriptor=Object.getOwnPropertyDescriptor(namespace,key);if(descriptor?.configurable)Object.defineProperty(namespace,key,{{configurable:false}});}}Object.preventExtensions(namespace);}}
+function __exportState(target){{let state=__exportStates.get(target);if(!state){{state={{explicit:new Set(),stars:new Map(),ambiguous:new Set()}};__exportStates.set(target,state);}}return state;}}
+function __export(target,name,getter){{const state=__exportState(target);const descriptor=Object.getOwnPropertyDescriptor(target,name);if(descriptor?.configurable)delete target[name];if(!Object.prototype.hasOwnProperty.call(target,name))Object.defineProperty(target,name,{{enumerable:true,configurable:true,get:getter}});state.explicit.add(name);state.stars.delete(name);state.ambiguous.delete(name);}}
+function __reExport(target,source){{const state=__exportState(target);for(const key of Object.keys(source)){{if(key==="default"||key==="__esModule"||state.explicit.has(key)||state.ambiguous.has(key))continue;const previous=state.stars.get(key);if(previous&&previous!==source){{delete target[key];state.stars.delete(key);state.ambiguous.add(key);continue;}}if(!previous){{Object.defineProperty(target,key,{{enumerable:true,configurable:true,get:()=>source[key]}});state.stars.set(key,source);}}}}}}
 function __toESM(value){{
   if(value&&value.__esModule)return value;
   const namespace=Object.create(null);
   Object.defineProperty(namespace,"__esModule",{{value:true}});
+  Object.defineProperty(namespace,"__diffpackCJS",{{value:true}});
   __export(namespace,"default",()=>value);
   if(value&&(typeof value==="object"||typeof value==="function"))for(const key of Object.keys(value))if(key!=="default")__export(namespace,key,()=>value[key]);
   return namespace;
 }}
+function __import(namespace,name){{if(Object.prototype.hasOwnProperty.call(namespace,name)||namespace.__diffpackCJS)return namespace[name];throw new SyntaxError("Module does not provide an export named "+name);}}
 function __require(id){{
   if(__cache[id])return __cache[id].exports;
   const factory=__modules[id];
@@ -342,7 +424,7 @@ function __require(id){{
   const module={{exports:{{}}}};
   __cache[id]=module;
   const require=specifier=>{{const target=__maps[id][specifier];if(target===undefined)throw new Error("Cannot resolve "+specifier+" from "+id);return __require(target);}};
-  factory(module,module.exports,require,__toESM,__export,__reExport);
+  factory(module,module.exports,require,__toESM,__export,__reExport,__import,__esmNamespace,__seal);
   return module.exports;
 }}
 return __require({entry});
@@ -621,9 +703,15 @@ impl DirectReachability {
     }
 }
 
-fn load_uncached(resolver: &Resolver, path: &Path) -> Result<LoadedModule, String> {
+fn load_uncached(
+    resolver: &Resolver,
+    resolution_cache: &ResolutionCache,
+    path: &Path,
+) -> Result<LoadedModule, String> {
+    let read_started = frontend_profile::start();
     let source = fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    frontend_profile::finish(Phase::Read, read_started);
     let hash = content_hash(source.as_bytes());
     let transformed = transform_module(path, &source);
     let mut diagnostics = transformed
@@ -631,7 +719,13 @@ fn load_uncached(resolver: &Resolver, path: &Path) -> Result<LoadedModule, Strin
         .iter()
         .map(|diagnostic| format!("{}: {diagnostic}", path.display()))
         .collect::<Vec<_>>();
-    let dependencies = resolve_dependencies(resolver, path, &transformed.code, &mut diagnostics);
+    let dependencies = resolve_dependencies(
+        resolver,
+        resolution_cache,
+        path,
+        &transformed.dependencies,
+        &mut diagnostics,
+    );
     Ok(LoadedModule {
         state: ModuleState {
             hash,
@@ -644,32 +738,17 @@ fn load_uncached(resolver: &Resolver, path: &Path) -> Result<LoadedModule, Strin
 
 fn resolve_dependencies(
     resolver: &Resolver,
+    resolution_cache: &ResolutionCache,
     path: &Path,
-    code: &str,
+    dependency_specifiers: &[String],
     diagnostics: &mut Vec<String>,
 ) -> BTreeMap<String, ModuleId> {
-    let parsed_dependencies = if path
-        .extension()
-        .is_some_and(|extension| extension == "json")
-    {
-        Vec::new()
-    } else {
-        parse_dependencies(path, code).dependencies
-    };
+    let resolve_started = frontend_profile::start();
     let mut dependencies = BTreeMap::new();
-    for specifier in parsed_dependencies {
-        match resolver.resolve_file(path, &specifier) {
-            Ok(resolution) => {
-                let resolved = resolution.full_path();
-                let extension = resolved.extension().and_then(|value| value.to_str());
-                if matches!(extension, Some("node")) {
-                    diagnostics.push(format!(
-                        "{}: native module {specifier:?} is not supported",
-                        path.display()
-                    ));
-                    continue;
-                }
-                dependencies.insert(specifier, module_id(&resolved));
+    for specifier in dependency_specifiers {
+        match resolution_cache.resolve(resolver, path, specifier) {
+            Ok(resolved) => {
+                dependencies.insert(specifier.clone(), resolved);
             }
             Err(error) => diagnostics.push(format!(
                 "{}: cannot resolve {specifier:?}: {error}",
@@ -677,6 +756,7 @@ fn resolve_dependencies(
             )),
         }
     }
+    frontend_profile::finish(Phase::Resolve, resolve_started);
     dependencies
 }
 
@@ -701,10 +781,7 @@ fn resolve_options() -> ResolveOptions {
 }
 
 fn module_id(path: &Path) -> ModuleId {
-    path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
+    path.to_string_lossy().into_owned()
 }
 
 fn content_hash(bytes: &[u8]) -> u64 {

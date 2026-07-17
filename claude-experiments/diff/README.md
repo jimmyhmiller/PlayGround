@@ -61,6 +61,17 @@ same reachable set, emitted bytes, and runtime behavior as a clean rebuild.
 The current compatibility target and oracle contract are documented in
 [docs/ORACLE.md](docs/ORACLE.md).
 
+Run the aligned Diffpack/Rolldown performance comparison with module count,
+imports per module, and fresh-build iterations:
+
+```console
+cd oracle
+npm run bench -- 10000 4 3
+```
+
+The comparison methodology and current measurements are in
+[docs/ROLLDOWN_COMPARISON.md](docs/ROLLDOWN_COMPARISON.md).
+
 Run a release-mode scale test with 100,000 modules, a fanout of eight, and four
 imports per module:
 
@@ -123,12 +134,12 @@ End-to-end results are in
 - Logical time is a monotonically increasing revision number. Inputs advance
   after each revision, allowing Differential's traces to compact old history.
 - Dynamic imports are currently folded into the single chunk rather than split.
-- Imported bindings are lowered to runtime property reads at module evaluation;
-  full ESM live-import semantics and top-level await are not implemented yet.
+- Imported bindings remain live through namespace property reads. Export setup,
+  namespace imports, ambiguous star exports, and representative ESM/CommonJS
+  cycles are covered by the behavioral oracle. Top-level await is not
+  implemented yet.
 - CSS, assets, source maps, tree shaking, minification, and production chunk
   splitting are not implemented.
 
-The next compatibility target is complete single-chunk ESM linking semantics.
-After that, the next architectural increment is symbol-level linking/tree
-shaking followed by a real chunk graph for dynamic imports and shared
-dependencies.
+The next compatibility target is symbol-level inclusion and tree shaking,
+followed by a real chunk graph for dynamic imports and shared dependencies.

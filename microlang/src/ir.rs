@@ -219,6 +219,16 @@ pub enum Prim {
     /// the `-protocol-default` sentinel). Reflection over protocol extensions,
     /// used by `satisfies?`/`extends?`/`extenders`.
     MethodTypes,
+    /// `(%method-has-type? method-sym ty-sym)` -> is `ty` registered for that
+    /// protocol method? ONE lookup in the dispatch table.
+    ///
+    /// `MethodTypes` answers the same question by locking the table, scanning
+    /// EVERY (method, type) pair in the whole registry, and allocating a list —
+    /// per call. `satisfies?` did that once per protocol method and then walked
+    /// the result with lazy-seq closures, which cost ~2.4µs and made every
+    /// `instance?` against a host interface (what core.match emits, several per
+    /// match) pathological. The table is keyed on exactly this pair.
+    MethodHasType,
     /// `(%read-string s)` -> read the FIRST datum from string `s` (the reader as a
     /// runtime op). Routes through the frontend eval-bridge.
     ReadString,

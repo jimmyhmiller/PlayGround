@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{
-    ExportDefaultDeclarationKind, ImportDeclarationSpecifier, ImportExpression, Statement,
+use oxc_ast::{
+    AstKind,
+    ast::{ExportDefaultDeclarationKind, ImportDeclarationSpecifier, ImportExpression, Statement},
 };
 use oxc_ast_visit::Visit;
 use oxc_codegen::Codegen;
@@ -12,11 +14,15 @@ use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::module_record::{ExportExportName, ExportLocalName, ModuleRecord};
 use oxc_transformer::{TransformOptions, Transformer};
 
+use crate::frontend_profile::{self, Phase};
+use crate::parser::collect_dependencies;
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TransformResult {
     pub code: String,
     pub diagnostics: Vec<String>,
     pub is_esm: bool,
+    pub dependencies: Vec<String>,
 }
 
 pub fn transform_module(path: &Path, source: &str) -> TransformResult {
@@ -28,9 +34,11 @@ pub fn transform_module(path: &Path, source: &str) -> TransformResult {
             code: format!("module.exports = {source};\n"),
             diagnostics: Vec::new(),
             is_esm: false,
+            dependencies: Vec::new(),
         };
     }
 
+    let transform_started = frontend_profile::start();
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path)
         .unwrap_or_default()
@@ -63,37 +71,130 @@ pub fn transform_module(path: &Path, source: &str) -> TransformResult {
     );
 
     let transformed_code = Codegen::new().build(&program).code;
-    let (code, lower_diagnostics, is_esm) = lower_module_syntax(path, &transformed_code);
+    frontend_profile::finish(Phase::Transform, transform_started);
+    let lower_started = frontend_profile::start();
+    let (code, lower_diagnostics, is_esm, dependencies) =
+        lower_module_syntax(path, &transformed_code);
+    frontend_profile::finish(Phase::Lower, lower_started);
     diagnostics.extend(lower_diagnostics);
     TransformResult {
         code,
         diagnostics,
         is_esm,
+        dependencies,
     }
 }
 
-fn lower_module_syntax(path: &Path, source: &str) -> (String, Vec<String>, bool) {
-    let source = lower_dynamic_imports(path, source);
+fn lower_module_syntax(path: &Path, source: &str) -> (String, Vec<String>, bool, Vec<String>) {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path)
         .unwrap_or_default()
         .with_typescript(false)
         .with_jsx(false)
         .with_module(true);
-    let parsed = Parser::new(&allocator, &source, source_type).parse();
-    let diagnostics = parsed
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    let mut diagnostics = parsed
         .diagnostics
         .into_iter()
         .map(|diagnostic| diagnostic.to_string())
         .collect::<Vec<_>>();
     let is_esm = parsed.module_record.has_module_syntax;
+    let dependencies = collect_dependencies(&parsed.program);
+    let mut dynamic_imports = DynamicImportCollector { edits: Vec::new() };
+    dynamic_imports.visit_program(&parsed.program);
     if !is_esm {
-        return (source, diagnostics, false);
+        return (
+            apply_edits(source.to_string(), dynamic_imports.edits),
+            diagnostics,
+            false,
+            dependencies,
+        );
     }
 
-    let mut edits = Vec::new();
+    let semantic = SemanticBuilder::new()
+        .with_build_nodes(true)
+        .build(&parsed.program);
+    diagnostics.extend(
+        semantic
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.to_string()),
+    );
+    let semantic = semantic.semantic;
+    let module_spans = parsed
+        .program
+        .body
+        .iter()
+        .filter_map(module_statement_span)
+        .collect::<Vec<_>>();
+
+    let mut edits = dynamic_imports.edits;
+    let mut preamble_declarations = String::new();
+    let mut preamble_exports = String::new();
+    let mut import_bindings = HashMap::<String, String>::new();
     let mut import_index = 0_usize;
     let mut default_index = 0_usize;
+
+    // First establish stable namespace slots and rewrite every use of an
+    // imported binding into a property read. This preserves live bindings and
+    // defers reads in cycles until the JavaScript expression is evaluated.
+    for statement in &parsed.program.body {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        let Some(specifiers) = &declaration.specifiers else {
+            continue;
+        };
+        if specifiers.is_empty() {
+            continue;
+        }
+        let dependency = format!("__diffpack_import_{import_index}");
+        import_index += 1;
+        preamble_declarations.push_str(&format!("let {dependency};\n"));
+        for specifier in specifiers {
+            let (local, expression, symbol_id) = match specifier {
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => (
+                    specifier.local.name.to_string(),
+                    format!("__import({dependency},\"default\")"),
+                    specifier.local.symbol_id(),
+                ),
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => (
+                    specifier.local.name.to_string(),
+                    dependency.clone(),
+                    specifier.local.symbol_id(),
+                ),
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => (
+                    specifier.local.name.to_string(),
+                    format!(
+                        "__import({dependency},{})",
+                        quote(&specifier.imported.name())
+                    ),
+                    specifier.local.symbol_id(),
+                ),
+            };
+            import_bindings.insert(local.clone(), expression.clone());
+            for reference in semantic.symbol_references(symbol_id) {
+                let node = semantic.nodes().get_node(reference.node_id());
+                let span = node.kind().span();
+                if module_spans.iter().any(|module| contains(*module, span)) {
+                    continue;
+                }
+                if let AstKind::ObjectProperty(property) =
+                    semantic.nodes().parent_kind(reference.node_id())
+                    && property.shorthand
+                {
+                    edits.push(Edit::replace(
+                        property.span,
+                        format!("{local}:{expression}"),
+                    ));
+                } else {
+                    edits.push(Edit::replace(span, expression.clone()));
+                }
+            }
+        }
+    }
+
+    import_index = 0;
     for statement in &parsed.program.body {
         match statement {
             Statement::ImportDeclaration(declaration) => {
@@ -101,94 +202,71 @@ fn lower_module_syntax(path: &Path, source: &str) -> (String, Vec<String>, bool)
                 let replacement = match &declaration.specifiers {
                     None => format!("require({request});"),
                     Some(specifiers) if specifiers.is_empty() => format!("require({request});"),
-                    Some(specifiers) => {
+                    Some(_) => {
                         let dependency = format!("__diffpack_import_{import_index}");
                         import_index += 1;
-                        let mut code = format!("const {dependency}=__toESM(require({request}));\n");
-                        for specifier in specifiers {
-                            match specifier {
-                                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                                    code.push_str(&format!(
-                                        "const {}={dependency}.default;\n",
-                                        specifier.local.name
-                                    ));
-                                }
-                                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                                    code.push_str(&format!(
-                                        "const {}={dependency};\n",
-                                        specifier.local.name
-                                    ));
-                                }
-                                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                                    code.push_str(&format!(
-                                        "const {}={dependency}[{}];\n",
-                                        specifier.local.name,
-                                        quote(&specifier.imported.name())
-                                    ));
-                                }
-                            }
-                        }
-                        code
+                        format!("{dependency}=__toESM(require({request}));")
                     }
                 };
                 edits.push(Edit::replace(declaration.span, replacement));
             }
             Statement::ExportNamedDeclaration(declaration) => {
                 let mut replacement = String::new();
+                let mut replacement_span = declaration.span;
                 if let Some(inner) = &declaration.declaration {
-                    replacement.push_str(slice(&source, inner.span()));
-                    replacement.push('\n');
-                    replacement.push_str(&local_exports_for_span(
+                    replacement_span = Span::new(declaration.span.start, inner.span().start);
+                    preamble_exports.push_str(&local_exports_for_span(
                         &parsed.module_record,
                         declaration.span,
                     ));
                 } else if let Some(request) = &declaration.source {
                     let dependency = format!("__diffpack_reexport_{import_index}");
                     import_index += 1;
+                    preamble_declarations.push_str(&format!("let {dependency};\n"));
+                    for specifier in &declaration.specifiers {
+                        preamble_exports.push_str(&export_getter(
+                            &specifier.exported.name(),
+                            &format!("__import({dependency},{})", quote(&specifier.local.name())),
+                        ));
+                    }
                     replacement.push_str(&format!(
-                        "const {dependency}=__toESM(require({}));\n",
+                        "{dependency}=__toESM(require({}));",
                         quote(&request.value)
                     ));
-                    for specifier in &declaration.specifiers {
-                        replacement.push_str(&export_getter(
-                            &specifier.exported.name(),
-                            &format!("{dependency}[{}]", quote(&specifier.local.name())),
-                        ));
-                    }
                 } else {
                     for specifier in &declaration.specifiers {
-                        replacement.push_str(&export_getter(
-                            &specifier.exported.name(),
-                            specifier.local.name().as_ref(),
-                        ));
+                        let local = specifier.local.name();
+                        let expression = import_bindings
+                            .get(local.as_ref())
+                            .map_or(local.as_ref(), String::as_str);
+                        preamble_exports
+                            .push_str(&export_getter(&specifier.exported.name(), expression));
                     }
                 }
-                edits.push(Edit::replace(declaration.span, replacement));
+                edits.push(Edit::replace(replacement_span, replacement));
             }
             Statement::ExportDefaultDeclaration(declaration) => {
-                let (body, local) = match &declaration.declaration {
+                let (prefix, local, body_start) = match &declaration.declaration {
                     ExportDefaultDeclarationKind::FunctionDeclaration(function)
                         if function.id.is_some() =>
                     {
                         let name = function.id.as_ref().unwrap().name.to_string();
-                        (slice(&source, function.span).to_string(), name)
+                        (String::new(), name, function.span.start)
                     }
                     ExportDefaultDeclarationKind::ClassDeclaration(class) if class.id.is_some() => {
                         let name = class.id.as_ref().unwrap().name.to_string();
-                        (slice(&source, class.span).to_string(), name)
+                        (String::new(), name, class.span.start)
                     }
                     other => {
                         let local = format!("__diffpack_default_{default_index}");
                         default_index += 1;
-                        (
-                            format!("const {local}=({});", slice(&source, other.span())),
-                            local,
-                        )
+                        (format!("const {local}="), local, other.span().start)
                     }
                 };
+                preamble_exports.push_str(&export_getter("default", &local));
                 edits.push(Edit::replace(
-                    declaration.span,
-                    format!("{body}\n{}", export_getter("default", &local)),
+                    Span::new(declaration.span.start, body_start),
+                    prefix,
                 ));
             }
             Statement::ExportAllDeclaration(declaration) => {
@@ -205,12 +283,37 @@ fn lower_module_syntax(path: &Path, source: &str) -> (String, Vec<String>, bool)
         }
     }
 
-    let body = apply_edits(source, edits);
+    let body = apply_edits(source.to_string(), edits);
     (
-        format!("Object.defineProperty(exports,\"__esModule\",{{value:true}});\n{body}"),
+        format!(
+            "exports=module.exports=__esmNamespace();\nObject.defineProperty(exports,\"__esModule\",{{value:true}});\n{preamble_declarations}{preamble_exports}{body}\n__seal(exports);"
+        ),
         diagnostics,
         true,
+        dependencies,
     )
+}
+
+fn module_statement_span(statement: &Statement<'_>) -> Option<Span> {
+    match statement {
+        Statement::ImportDeclaration(declaration) => Some(declaration.span),
+        Statement::ExportNamedDeclaration(declaration) => declaration
+            .declaration
+            .as_ref()
+            .map_or(Some(declaration.span), |inner| {
+                Some(Span::new(declaration.span.start, inner.span().start))
+            }),
+        Statement::ExportDefaultDeclaration(declaration) => Some(Span::new(
+            declaration.span.start,
+            declaration.declaration.span().start,
+        )),
+        Statement::ExportAllDeclaration(declaration) => Some(declaration.span),
+        _ => None,
+    }
+}
+
+fn contains(outer: Span, inner: Span) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
 }
 
 fn local_exports_for_span(module: &ModuleRecord<'_>, span: Span) -> String {
@@ -263,19 +366,6 @@ impl<'a> Visit<'a> for DynamicImportCollector {
     }
 }
 
-fn lower_dynamic_imports(path: &Path, source: &str) -> String {
-    let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path)
-        .unwrap_or_default()
-        .with_typescript(false)
-        .with_jsx(false)
-        .with_module(true);
-    let parsed = Parser::new(&allocator, source, source_type).parse();
-    let mut collector = DynamicImportCollector { edits: Vec::new() };
-    collector.visit_program(&parsed.program);
-    apply_edits(source.to_string(), collector.edits)
-}
-
 #[derive(Debug)]
 struct Edit {
     start: usize,
@@ -305,10 +395,6 @@ fn apply_edits(mut source: String, mut edits: Vec<Edit>) -> String {
         previous_start = edit.start;
     }
     source
-}
-
-fn slice(source: &str, span: Span) -> &str {
-    &source[span.start as usize..span.end as usize]
 }
 
 fn quote(value: &str) -> String {

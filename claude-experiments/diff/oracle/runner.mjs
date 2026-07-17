@@ -57,10 +57,14 @@ try {
       ? executeBundle(rolldownOutput)
       : referenceBuild.result;
 
-    const expected = { status: 0, stdout: testCase.stdout, stderr: "" };
-    const diffpackCorrect = sameResult(diffpackRun, expected);
-    const referenceCorrect = sameResult(referenceRun, expected);
-    const implementationsAgree = sameResult(diffpackRun, referenceRun);
+    const expected = testCase.failure
+      ? { failure: true }
+      : { status: 0, stdout: testCase.stdout, stderr: "" };
+    const diffpackCorrect = matchesExpected(diffpackRun, expected);
+    const referenceCorrect = matchesExpected(referenceRun, expected);
+    const implementationsAgree = testCase.failure
+      ? diffpackRun.status !== 0 && referenceRun.status !== 0
+      : sameResult(diffpackRun, referenceRun);
     const passed = diffpackCorrect && referenceCorrect && implementationsAgree;
 
     console.log(`${passed ? "PASS" : "FAIL"} ${testCase.name}`);
@@ -124,10 +128,17 @@ function sameResult(left, right) {
     && left.stderr === right.stderr;
 }
 
+function matchesExpected(result, expected) {
+  return expected.failure ? result.status !== 0 : sameResult(result, expected);
+}
+
 function printMismatch(label, result) {
   console.log(indent(label, result));
 }
 
 function indent(label, result) {
+  if (result.failure) {
+    return `  ${label}: non-zero build or runtime status`;
+  }
   return `  ${label}: status=${result.status} stdout=${JSON.stringify(result.stdout)} stderr=${JSON.stringify(result.stderr)}`;
 }

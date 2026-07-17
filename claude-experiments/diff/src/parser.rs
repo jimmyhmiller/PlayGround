@@ -3,7 +3,7 @@ use std::path::Path;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     CallExpression, ExportAllDeclaration, ExportNamedDeclaration, Expression, ImportDeclaration,
-    ImportExpression,
+    ImportExpression, Program,
 };
 use oxc_ast_visit::{Visit, walk::walk_call_expression};
 use oxc_parser::Parser;
@@ -56,19 +56,22 @@ pub fn parse_dependencies(path: &Path, source: &str) -> ParseResult {
         .with_module(true);
     let parsed = Parser::new(&allocator, source, source_type).parse();
 
-    let mut visitor = DependencyVisitor::default();
-    visitor.visit_program(&parsed.program);
-    visitor.dependencies.sort();
-    visitor.dependencies.dedup();
-
     ParseResult {
-        dependencies: visitor.dependencies,
+        dependencies: collect_dependencies(&parsed.program),
         errors: parsed
             .diagnostics
             .into_iter()
             .map(|error| error.to_string())
             .collect(),
     }
+}
+
+pub fn collect_dependencies(program: &Program<'_>) -> Vec<String> {
+    let mut visitor = DependencyVisitor::default();
+    visitor.visit_program(program);
+    visitor.dependencies.sort();
+    visitor.dependencies.dedup();
+    visitor.dependencies
 }
 
 #[cfg(test)]

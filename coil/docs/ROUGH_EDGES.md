@@ -25,12 +25,37 @@ root cause, and one small fix at the bottom of the stack makes the rest observab
 - **gen-1 / std-11** — do not patch `hm-for` in isolation. The real question is whether the
   iteration APIs (`hm-for`/`al-for`/`slice-for`/`for-in`) should exist at all, or collapse
   into a real iterator. Same design item as gen-1 (no Iterator trait). **Design first.**
-- **COIL_META=interp** — *answered:* it is **not** vestigial and must stay. `main_a64.coil`
-  (the LLVM-free bootstrap) registers no object builder, so the arm64 backend physically
-  cannot build a metaprogram dylib and the interpreter is its only engine; it is also the
-  parity oracle (`metaprog-poc/compile-and-run/parity.sh`). But Jimmy is right that it does
-  not belong in the guide: it is a bootstrap/internal detail, not a user knob.
-  → **guide.coil:426: remove. Document in BOOTSTRAP.md instead.**
+- **The interpreter — DELETE IT. Decided. Scheduled AFTER everything else on this list.**
+  Verdict: it is a second implementation of the language semantics that is silently weaker
+  than the first — the "ONE definition per concept" violation, sitting in the metaprogram layer.
+  It is *not* a backend; it is a tree-walking evaluator (`comptime.coil`). Backend and engine
+  are orthogonal: `--backend arm64` + the **compiled** engine works fine (verified: the
+  ArrayList/malloc macro returns 15), while either backend + interp fails.
+
+  Two things still depend on it, so it cannot simply be removed:
+  1. **The LLVM-free bootstrap.** `codegen_a64.coil:2896` — `export-c is not supported by the
+     arm64 backend yet` → `main_a64` registers no object builder → cannot build a metaprogram
+     dylib → interp is its only engine. Delete interp today and `rebootstrap-nollvm.sh` dies at
+     stage 2 unable to expand `cond`. (`seed/coil-seed-nollvm` is committed and gated — real path.)
+  2. **`(comptime E)` and `(const …)` folding — in EVERY build, including the default
+     compiled-engine one.** Verified: with `COIL_META=compiled` *forced*,
+     `(comptime (id [i64] 7))` still fails `comptime: generic call … isn't supported yet`, a
+     `comptime.coil` message. The compiled engine only ever took over **macro call sites**.
+     This is the true cause of **mac-8**: `comptime` and a macro body are not one phase run two
+     ways, they are two evaluators, and the weaker one owns `comptime`/`const`.
+
+  Order (each step green on its own; the deletion cannot come first):
+  1. Route `(comptime E)`/`(const …)` through the compiled engine → closes **mac-8**.
+  2. `export-c` in the arm64 backend → `main_a64` registers a builder → closes **mac-12**,
+     and the LLVM-free compiler stops being secretly weaker.
+  3. Delete `comptime.coil`'s evaluator, the `COIL_META` flag, `parity.sh`, and guide.coil:426.
+     mac-8, mac-12 and the diag-4 dual-engine problem all vanish rather than get documented.
+
+- **NEW (found while proving the above, worse than gen-7 reported):** `(const FIVE (fact 5))`
+  where `fact` is an ordinary **monomorphic** recursive function fails with
+  `call to undefined function 'ct.fact'`. Not a generics limitation — `const` appears unable to
+  call *any* user-defined function, which guts the compile-time-lookup-table idiom the docs sell.
+  Folded into step 1 above (the compiled engine can already do this).
 
 ---
 
@@ -60,15 +85,21 @@ exists and its comment already states this exact rationale** — these are call 
 argv[2] starting with `-`. Scan argv for the first non-flag positional; consume known flags
 as pairs; **reject unknown flags** instead of skipping them.
 
-- [ ] **tool-5** `coil build -o out in.coil` (universal Unix order) → "no Coil.toml", a message
+- [x] **tool-5** `coil build -o out in.coil` (universal Unix order) → "no Coil.toml", a message
       that never mentions the file the user passed and advises what they just did.
-- [ ] **tool-4** Project mode silently discards **every** flag: `--target wasm32-unknown-unknown`
+- [x] **tool-4** Project mode silently discards **every** flag: `--target wasm32-unknown-unknown`
       emits a native Mach-O and exits 0; `-o` is ignored; a bogus triple builds fine.
       Route project and single-file mode through **one** options struct and one entry point.
-- [ ] **tool-13** Unknown flags silently accepted; no per-subcommand `--help`; missing `-o`
+- [x] **tool-13** Unknown flags silently accepted; no per-subcommand `--help`; missing `-o`
       aborts with SIGABRT (134) instead of exit 1.
-- [ ] **tool-14** `coil fmt a.coil b.coil` silently formats only the first; a directory no-ops.
-- [ ] Add a `coil build --target wasm32` **project** test to the gate corpus.
+- [x] **tool-14** `coil fmt a.coil b.coil` silently formats only the first; a directory no-ops.
+- [x] Add a `coil build --target wasm32` **project** test to the gate corpus.
+
+- [ ] **NEW (found while fixing tool-4):** cross-compiling to a non-host *native* triple
+      (`--target x86_64-apple-macosx11.0.0`) emits a correct x86_64 object and then links it
+      with the **host arm64** `cc`, failing with "found architecture 'x86_64', required arm64".
+      Either reject a native cross-target we cannot link, or pass `-arch`/a cross linker.
+      (Pre-existing; it was masked in project mode because the flag was ignored entirely.)
 
 ## Batch 3 — `alloc-static` for per-instance state (one bug, three sites)
 

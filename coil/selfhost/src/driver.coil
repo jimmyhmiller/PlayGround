@@ -595,6 +595,79 @@
         (wb w 10)
         0))))
 
+; ---- argv scanning ----------------------------------------------------------
+; Every subcommand used to read the filename as literally argv[2], so
+; `coil build -o out in.coil` — the universal Unix order — missed the file entirely,
+; fell through to project mode, and reported "no Coil.toml" while never mentioning the
+; file the user had just passed. The parse loop's fallthrough silently skipped anything
+; it did not recognise, so a typo'd `--taget` was indistinguishable from success.
+; One table, one scanner: flags are position-independent and unknown ones are errors.
+(extern opendir  :cc c [(ptr i8)] (-> (ptr i8)))
+(extern closedir :cc c [(ptr i8)] (-> i32))
+
+(defn is-flag? [(arg (slice u8))] (-> bool)
+  (and (icmp-ge (slice-len [u8] arg) 1)
+       (icmp-eq (slice-get [u8] arg 0) (cast u8 45))))          ; '-'
+
+(defn dash-l? [(arg (slice u8))] (-> bool)                       ; -l<lib>
+  (and (icmp-ge (slice-len [u8] arg) 2)
+       (and (icmp-eq (slice-get [u8] arg 0) (cast u8 45))
+            (icmp-eq (slice-get [u8] arg 1) (cast u8 108)))))    ; 'l'
+
+; flags that consume the NEXT argv entry — the scanner must step over both.
+(defn flag-takes-value? [(arg (slice u8))] (-> bool)
+  (cond (str-eq arg "-o")            true
+        (str-eq arg "--link-flag")   true
+        (str-eq arg "--target")      true
+        (str-eq arg "--use")         true
+        (str-eq arg "--emit-header") true
+        (str-eq arg "--backend")     true
+        false))
+
+(defn flag-known? [(arg (slice u8))] (-> bool)
+  (cond (flag-takes-value? arg) true
+        (dash-l? arg)           true
+        (str-eq arg "--lib")    true
+        (str-eq arg "--shared") true
+        (str-eq arg "-g")       true
+        (str-eq arg "--debug")  true
+        false))
+
+; index of the first positional at/after `start`, or 0 if there is none.
+; Stops at `--` (run's program args are not our positionals).
+(defn argv-file-idx [(argc i32) (argv (ptr (ptr i8))) (start i64)] (-> i64)
+  (let [(mut i) start (mut r) 0]
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (let [arg (cstr->slice (load (index argv (load i))))]
+        (if (str-eq arg "--") (break)
+          (if (is-flag? arg)
+              (do (store! i (iadd (load i) (if (flag-takes-value? arg) 2 1))) 0)
+            (do (store! r (load i)) (break)))))))
+    (load r)))
+
+; reject an unrecognised flag instead of skipping it. `fidx` is the positional the
+; caller already claimed as its file; anything else non-flag is a stray argument.
+(defn argv-reject-unknown [(argc i32) (argv (ptr (ptr i8))) (start i64) (fidx i64)] (-> i64)
+  (let [(mut i) start]
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (let [arg (cstr->slice (load (index argv (load i))))]
+        (if (str-eq arg "--") (break)
+          (if (icmp-eq (load i) fidx) (do (store! i (iadd (load i) 1)) 0)
+            (if (is-flag? arg)
+                (if (flag-known? arg)
+                    (do (store! i (iadd (load i) (if (flag-takes-value? arg) 2 1))) 0)
+                  (let [w (stderr)]
+                    (ps w "error: unknown flag '") (ps w arg) (ps w "'") (wb w 10)
+                    (exit 1) 0))
+              (let [w (stderr)]
+                (ps w "error: unexpected argument '") (ps w arg) (ps w "'") (wb w 10)
+                (exit 1) 0))))))))
+  0)
+
+(defn dir? [(path (ptr i8))] (-> bool)
+  (let [d (opendir path)]
+    (if (icmp-eq (cast i64 d) 0) false (do (closedir d) true))))
+
 ; `build <file> -o <out> [--link-flag X]...` : emit `<out>.o` then link it into a
 ; native executable with `cc <out>.o -o <out> <link-flags...>`. Mirrors the Rust
 ; `coil build` argv handling (src/main.rs) + link step (src/lib.rs).
@@ -602,17 +675,19 @@
                  (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
                  (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
                  (default-backend i64)] (-> i64)
-  (let [file (load (index argv 2))
+  (let [fidx (argv-file-idx argc argv 2)
+        _rej (argv-reject-unknown argc argv 2 fidx)
+        file (load (index argv fidx))
         (mut outp)  (cast (ptr i8) 0)
         (mut flags) (al-new [(slice u8)] a)
         (mut backend) default-backend
         (mut trip)  (cast (ptr i8) 0)
         (mut libmode) 0        ; 0 = executable, 1 = --lib (.a), 2 = --shared (.dylib)
         (mut ehdr) (None [(slice u8)])
-        (mut i)     3]
+        (mut i)     2]
     ; second pass: --lib / --shared / --emit-header <h> / -g (DWARF via the arm64
     ; debug backend, which always emits DWARF).
-    (let [(mut j) 3]
+    (let [(mut j) 2]
       (loop (if (icmp-ge (load j) (cast i64 argc)) (break)
         (do (let [arg (cstr->slice (load (index argv (load j))))]
               (if (str-eq arg "--lib") (store! libmode 1)
@@ -640,8 +715,10 @@
                               (store! backend 1))
                             (store! i (iadd (load i) 2)) 0)
                       (do (store! i (iadd (load i) 1)) 0)))))))))))
+    ; a usage mistake is exit 1, not SIGABRT — abort here made `coil build f.coil`
+    ; look like the compiler had panicked, and any CI reporting on signals agreed.
     (if (icmp-eq (cast i64 (load outp)) 0)
-        (do (ps (stderr) "build: missing -o <out>\n") (abort) 0)
+        (do (ps (stderr) "error: build: missing -o <out>\n") (exit 1) 0)
       0)
     (let [out-slice (cstr->slice (load outp))
           obj-slice (obj-path a out-slice)]
@@ -984,6 +1061,19 @@
         (store! i (iadd (load i) 1))))))
   0)
 
+; Forward the user's own CLI flags into the sub-invocation. Project mode used to drop
+; every flag on the floor and report success: `coil build --target wasm32-unknown-unknown`
+; printed `wrote mp`, exited 0, and produced a native Mach-O. The manifest's own flags are
+; emitted first, so a flag the user typed lands later on the command line and wins
+; (build-cmd keeps the last -o/--target it sees).
+(defn m-forward-flags [(a (ptr Allocator)) (b (mut StrBuf)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [(mut i) 2]
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (let [arg (cstr->slice (load (index argv (load i))))]
+        (if (str-eq arg "--") (break)
+          (do (sb-push-str! (mut b) " ") (sb-push-str! (mut b) arg) (store! i (iadd (load i) 1)) 0))))))
+  0)
+
 (defn manifest-cmd [(a (ptr Allocator)) (sub (slice u8)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [self (cstr->slice (load (index argv 0)))
         text (read-file a (slice->cstr a "Coil.toml"))]
@@ -999,6 +1089,7 @@
         (m-emit-link a (mut b) m)
         (m-cc-sources a (mut b) m)
         (if (load (field m has-target)) (do (sb-push-str! (mut b) " --target ") (sb-push-str! (mut b) (load (field m target))) 0) 0)
+        (m-forward-flags a (mut b) argc argv)
         ; run: forward CLI args after `--`, else the manifest's [run] args.
         (if (str-eq sub "run")
             (let [(mut i) 2 (mut sawdd) false]
@@ -1017,10 +1108,10 @@
           (wait-report rc "program")
           (wait-code rc))))))
 
-; manifest mode = `build`/`run` with no file (argv[2] missing or a flag).
+; manifest mode = `build`/`run` with no file ANYWHERE in argv — not merely "argv[2]
+; starts with a dash", which made `coil build -o out in.coil` look like a project build.
 (defn manifest-mode? [(argc i32) (argv (ptr (ptr i8)))] (-> bool)
-  (if (icmp-lt (cast i64 argc) 3) true
-    (icmp-eq (slice-get [u8] (cstr->slice (load (index argv 2))) 0) (cast u8 45))))
+  (icmp-eq (argv-file-idx argc argv 2) 0))
 
 ; The CLI entry, parameterized by the backend hooks the top file injects:
 ;   build-fn     — LLVM `build` (mode 1); a64 build passes a hard-error stub
@@ -1091,23 +1182,51 @@
 ; `fmt [--check|--write] <file>` — the Coil source formatter (fmt/rules.coil). Prints
 ; the formatted source, or with --write rewrites the file, or with --check exits 1 if
 ; the file isn't already formatted. Width 120, Clojure indentation conventions.
+; exit codes follow gofmt/black: 0 clean, 1 unformatted (--check), 2 error. `--check`
+; must distinguish "your file is unformatted" from "your invocation is broken", or a CI
+; gate cannot tell a real violation from a typo'd path.
+(defn fmt-one [(a (ptr Allocator)) (pathc (ptr i8)) (check bool) (write bool)] (-> i64)
+  (if (dir? pathc)
+      (let [w (stderr)]
+        (ps w "error: '") (ps w (cstr->slice pathc)) (ps w "' is a directory") (wb w 10) 2)
+    (let [src  (read-src-rc a pathc 2)
+          out  (fmtr/format-src a src 120)
+          same (str-eq src out)]
+      (if check
+          (if same 0 (do (ps (stderr) "not formatted: ") (ps (stderr) (cstr->slice pathc)) (wb (stderr) 10) 1))
+        (if write
+            (if same 0 (d-write-file a (cstr->slice pathc) out))
+          (do (ps (stdout) out) 0))))))
+
+; Formats EVERY file given, not just argv[2]: `coil fmt --write src/*.coil` silently
+; formatted one file and reported success, and under --check silently gated a fraction
+; of what was asked. Flags may appear anywhere.
 (defn fmt-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
-  (if (icmp-lt (cast i64 argc) 3)
-      (do (ps (stderr) "usage: coil fmt [--check|--write] <file.coil>\n") 1)
-    (let [arg1  (cstr->slice (load (index argv 2)))
-          check (str-eq arg1 "--check")
-          write (str-eq arg1 "--write")]
-      (if (and (or check write) (icmp-lt (cast i64 argc) 4))
-          (do (ps (stderr) "usage: coil fmt [--check|--write] <file.coil>\n") 1)
-        (let [pathc (if (or check write) (load (index argv 3)) (load (index argv 2)))
-              src   (read-src-rc a pathc 2)
-              out   (fmtr/format-src a src 120)
-              same  (str-eq src out)]
-          (if check
-              (if same 0 (do (ps (stderr) "not formatted: ") (ps (stderr) (cstr->slice pathc)) (wb (stderr) 10) 1))
-            (if write
-                (if same 0 (d-write-file a (cstr->slice pathc) out))
-              (do (ps (stdout) out) 0))))))))
+  (let [(mut check) false (mut write) false
+        (mut nfiles) 0 (mut rc) 0 (mut i) 2]
+    ; pass 1: flags, wherever they sit
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (do (let [arg (cstr->slice (load (index argv (load i))))]
+            (if (is-flag? arg)
+                (cond (str-eq arg "--check") (do (store! check true) 0)
+                      (str-eq arg "--write") (do (store! write true) 0)
+                      (let [w (stderr)]
+                        (ps w "error: unknown flag '") (ps w arg) (ps w "'") (wb w 10)
+                        (exit 2) 0))
+              0))
+          (store! i (iadd (load i) 1)))))
+    ; pass 2: every positional, keeping the worst exit code
+    (store! i 2)
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (do (let [arg (cstr->slice (load (index argv (load i))))]
+            (if (is-flag? arg) 0
+              (do (store! nfiles (iadd (load nfiles) 1))
+                  (let [r (fmt-one a (load (index argv (load i))) (load check) (load write))]
+                    (if (icmp-gt r (load rc)) (do (store! rc r) 0) 0)))))
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-eq (load nfiles) 0)
+        (do (ps (stderr) "usage: coil fmt [--check|--write] <file.coil>...\n") 2)
+      (load rc))))
 
 ; `new <name>` — scaffold Coil.toml + src/main.coil (mirrors Rust cmd_new).
 (defn new-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
@@ -1270,14 +1389,72 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
   dump-mono      after monomorphization
 ")
 
+; ---- per-subcommand help ----------------------------------------------------
+; `coil fmt --help` printed one byte and exited 0; `coil run --help` tried to build a
+; project and complained about a missing Coil.toml. `<cmd> --help` is a reflex, and an
+; empty response reads as a broken binary.
+(defn common-flags-text [] (-> (slice u8))
+  "Flags (may appear before or after <file.coil>)
+  -o <out>              output path (required by `build`)
+  --target <triple>     cross-compile (e.g. wasm32-unknown-unknown)
+  --backend arm64       use the native arm64 backend instead of LLVM
+  -g, --debug           emit DWARF debug info (implies the arm64 backend)
+  -l<name>              link a library (e.g. -lm)
+  --link-flag <flag>    pass a raw flag to the linker
+  --lib / --shared      build a static (.a) / shared (.dylib) library
+  --emit-header <h>     also write a C header
+  --use <file.coil>     load a metaprogram
+")
+
+(defn wants-help? [(argc i32) (argv (ptr (ptr i8)))] (-> bool)
+  (let [(mut i) 2 (mut r) false]
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (let [arg (cstr->slice (load (index argv (load i))))]
+        (if (str-eq arg "--") (break)
+          (if (or (str-eq arg "--help") (str-eq arg "-h")) (do (store! r true) (break))
+            (do (store! i (iadd (load i) 1)) 0))))))
+    (load r)))
+
+(defn sub-usage [(sub (slice u8))] (-> i64)
+  (let [w (stdout)]
+    (cond
+      (str-eq sub "build")
+        (do (ps w "usage: coil build <file.coil> -o <out> [flags]\n")
+            (ps w "       coil build [flags]                    build the ./Coil.toml project\n\n")
+            (ps w (common-flags-text)) 0)
+      (str-eq sub "run")
+        (do (ps w "usage: coil run <file.coil> [flags] [-- args...]\n")
+            (ps w "       coil run [flags] [-- args...]         build+run the ./Coil.toml project\n\n")
+            (ps w "Builds to a temp exe, runs it, and propagates its exit code — 128+signo if it\ndies by a signal.\n\n")
+            (ps w (common-flags-text)) 0)
+      (str-eq sub "fmt")
+        (do (ps w "usage: coil fmt [--check|--write] <file.coil>...\n\n")
+            (ps w "  (default)   print formatted source to stdout\n")
+            (ps w "  --write     rewrite each file in place\n")
+            (ps w "  --check     exit 1 if any file is not formatted\n\n")
+            (ps w "Every file given is formatted. Exit: 0 clean, 1 unformatted, 2 error.\n") 0)
+      (str-eq sub "new")
+        (do (ps w "usage: coil new <name>\n\nScaffolds <name>/Coil.toml and <name>/src/main.coil.\n") 0)
+      (str-eq sub "emit-obj")
+        (do (ps w "usage: coil emit-obj <file.coil> [-o <out.o>]\n\nBuilds the object file without linking.\n\n")
+            (ps w (common-flags-text)) 0)
+      (str-eq sub "emit-ir")
+        (do (ps w "usage: coil emit-ir <file.coil>\n\nPrints normalized textual LLVM IR.\n") 0)
+      (str-eq sub "cheader")
+        (do (ps w "usage: coil cheader <file.coil>\n\nPrints a C header for (export-c ...) functions.\n") 0)
+      (str-eq sub "cimport")
+        (do (ps w "usage: coil cimport <header.h>\n\nGenerates Coil bindings from a C header.\n") 0)
+      (do (ps w (usage-text)) 0))))
+
 ; argv[2] for the commands that take a <file>. Missing => NULL, and every caller
 ; feeds it straight to read-file/cstr->slice, so guard once here rather than
 ; segfaulting on `coil dump-ast` with no argument.
 (defn need-file [(argc i32) (argv (ptr (ptr i8))) (sub (slice u8))] (-> (ptr i8))
-  (if (icmp-lt (cast i64 argc) 3)
-      (do (ps (stderr) "usage: coil ") (ps (stderr) sub) (ps (stderr) " <file.coil>\n")
-          (exit 1) (cast (ptr i8) 0))
-    (load (index argv 2))))
+  (let [fidx (argv-file-idx argc argv 2)]
+    (if (icmp-eq fidx 0)
+        (do (ps (stderr) "usage: coil ") (ps (stderr) sub) (ps (stderr) " <file.coil>\n")
+            (exit 1) (cast (ptr i8) 0))
+      (load (index argv fidx)))))
 
 (defn driver-main [(argc i32) (argv (ptr (ptr i8)))
                    (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
@@ -1291,6 +1468,10 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
         sub  (if (icmp-lt (cast i64 argc) 2) "" (cstr->slice (load (index argv 1))))]
     (if (or (str-eq sub "") (or (str-eq sub "--help") (or (str-eq sub "-h") (str-eq sub "help"))))
         (do (ps (stdout) (usage-text)) 0)
+    ; `<cmd> --help` before any dispatch, so it never reaches a parser that would
+    ; reject it as an unknown flag or try to build a project.
+    (if (wants-help? argc argv)
+        (sub-usage sub)
     (if (str-eq sub "__smoke")
         (smoke a)
       (if (str-eq sub "guide")
@@ -1356,5 +1537,5 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
             (store! (field ctx emitir-fn) emitir-fn)
             ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
             ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
-            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0))))))))))))))))))))))))
+            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))))))))))))))
   );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====

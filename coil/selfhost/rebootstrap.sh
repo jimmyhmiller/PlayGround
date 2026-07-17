@@ -48,6 +48,8 @@ echo "=== GATES ==="
 echo "  gate-full:      PASS (IR byte-exact vs reference)"
 ./selfhost/oracle/arm64/gate-run.sh /tmp/coil-rb2 >/dev/null || { echo "arm64 gate-run FAIL — runtime divergence"; exit 1; }
 echo "  arm64 gate-run: PASS (programs run identically)"
+./selfhost/oracle/gate-cli.sh /tmp/coil-rb2 >/dev/null      || { echo "gate-cli FAIL — the CLI contract regressed"; exit 1; }
+echo "  gate-cli:       PASS (argv, exit codes, fmt)"
 
 DEST="${1:-./coil}"
 cp /tmp/coil-rb2 "$DEST"

@@ -57,7 +57,13 @@
         errout    (alloc-stack (ptr i8))]
     ; AsmPrinter init (targets themselves were initialized inside codegen-module).
     (LLVMInitializeAArch64AsmPrinter) (LLVMInitializeX86AsmPrinter) (LLVMInitializeWebAssemblyAsmPrinter)
-    (LLVMGetTargetFromTriple triple targetout errout)
+    ; see codegen-module: the status and errout are load-bearing, not decoration.
+    (if (icmp-ne (LLVMGetTargetFromTriple triple targetout errout) 0)
+        (let [w (stderr)]
+          (ps w "error: unsupported --target '") (ps w (cstr->slice triple)) (ps w "': ")
+          (ps w (cstr->slice (load errout))) (wb w 10)
+          (exit 1) 0)
+      0)
     (let [tm  (LLVMCreateTargetMachine (load targetout) triple c"generic" c"" 3 2 0)
           pbo (LLVMCreatePassBuilderOptions)
           rp  (LLVMRunPasses m c"default<O3>" tm pbo)]

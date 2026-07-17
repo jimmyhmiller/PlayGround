@@ -2339,6 +2339,23 @@ impl<M: ValueModel> Runtime<M> {
                 let vals: Vec<u64> = tys.iter().map(|&t| self.encode(Val::Sym(t))).collect();
                 self.vec_to_list(&vals)
             }
+            Prim::MethodHasType => {
+                let Val::Sym(method) = self.decode(args[0]) else {
+                    panic!("%method-has-type?: method must be a symbol")
+                };
+                let Val::Sym(ty) = self.decode(args[1]) else {
+                    panic!("%method-has-type?: type must be a symbol")
+                };
+                // The `-protocol-default` fallback entry is not a satisfying
+                // type — `MethodTypes` filters it out and so must this.
+                let sentinel = self.intern("-protocol-default");
+                let r = if ty == sentinel {
+                    false
+                } else {
+                    self.shared.tables.lock().unwrap().methods.contains_key(&(method, ty))
+                };
+                self.encode(Val::Bool(r))
+            }
             // read-string / eval / macroexpand-1: re-enter the reader + compiler via
             // the frontend-installed bridge. Clone the Arc out first so `self` is free
             // to be borrowed mutably by the bridge call.

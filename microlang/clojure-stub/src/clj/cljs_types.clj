@@ -385,6 +385,23 @@
     (if (nil? s) m (recur (next (next s)) (-assoc m (first s) (second s))))))
 (defn hash-map [& kvs] (-kvs->map kvs))
 (defn array-map [& kvs] (-kvs->map kvs))
+;; `(assoc nil k v)` builds a REAL map — the same thing `{}` gives — not the
+;; bootstrap `'Map`.
+;;
+;; core.clj defines nil's `-assoc` before these types exist, so it could only
+;; build `(record 'Map …)`: a plist scanned linearly, which NEVER promotes to
+;; the HAMT however large it grows. `hash-map`/`map?` are upgraded here once the
+;; real types load; nil's `-assoc` was simply missed. So
+;; `(assoc nil :a 1)` answered `'Map` where Clojure answers PersistentArrayMap,
+;; and `(loop [m nil] … (assoc m i i))` stayed O(n) per lookup forever where
+;; Clojure promotes to PersistentHashMap. Measured: a 81-entry map built that
+;; way took 380ns to `get` — the same cost as the linear scan it was meant to
+;; replace.
+;;
+;; Only `-assoc` is re-registered; nil's other protocol impls (`-lookup`,
+;; `-contains-key?`, …) stay as core.clj defined them.
+(extend-type nil
+  IAssociative (-assoc [_ k v] (-assoc -EMPTY-PAM k v)))
 ;; variadic assoc/dissoc (clojure.core takes multiple keys); the 3-arg / 2-arg
 ;; forms in core.clj dispatched to -assoc/-dissoc are superseded here.
 (defn assoc [m k v & kvs]

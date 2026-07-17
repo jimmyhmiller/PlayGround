@@ -40,13 +40,23 @@
 (extern DrawRectangle :cc c [i32 i32 i32 i32 Color] (-> void))
 (extern DrawRectangleRec :cc c [Rectangle Color] (-> void))
 (extern DrawRectangleLinesEx :cc c [Rectangle f32 Color] (-> void))
+(extern DrawRectangleRounded :cc c [Rectangle f32 i32 Color] (-> void))
+(extern DrawRectangleRoundedLinesEx :cc c [Rectangle f32 i32 f32 Color] (-> void))
 (extern DrawLineEx :cc c [Vector2 Vector2 f32 Color] (-> void))
 (extern DrawCircle :cc c [i32 i32 f32 Color] (-> void))
 (extern DrawCircleLines :cc c [i32 i32 f32 Color] (-> void))
+(extern DrawCircleSector :cc c [Vector2 f32 f32 f32 i32 Color] (-> void))
+(extern DrawRing :cc c [Vector2 f32 f32 f32 f32 i32 Color] (-> void))
+(extern DrawTriangle :cc c [Vector2 Vector2 Vector2 Color] (-> void))
 (extern GetMousePosition :cc c [] (-> Vector2))
 (extern IsMouseButtonPressed :cc c [i32] (-> u8))
+(extern IsMouseButtonDown :cc c [i32] (-> u8))
 (extern IsKeyPressed :cc c [i32] (-> u8))
+(extern IsKeyPressedRepeat :cc c [i32] (-> u8))
+(extern IsKeyDown :cc c [i32] (-> u8))
 (extern GetCharPressed :cc c [] (-> i32))
+(extern SetClipboardText :cc c [(ptr i8)] (-> void))
+(extern GetClipboardText :cc c [] (-> (ptr i8)))
 (extern CheckCollisionPointRec :cc c [Vector2 Rectangle] (-> u8))
 (extern SetMouseCursor :cc c [i32] (-> void))
 
@@ -87,12 +97,22 @@
         DrawRectangle
         DrawRectangleRec
         DrawRectangleLinesEx
+        DrawRectangleRounded
+        DrawRectangleRoundedLinesEx
         DrawLineEx
         DrawCircle
         DrawCircleLines
+        DrawCircleSector
+        DrawRing
+        DrawTriangle
         GetMousePosition
         IsMouseButtonPressed
+        IsMouseButtonDown
         CheckCollisionPointRec
         SetMouseCursor
         IsKeyPressed
-        GetCharPressed)
+        IsKeyPressedRepeat
+        IsKeyDown
+        GetCharPressed
+        SetClipboardText
+        GetClipboardText)

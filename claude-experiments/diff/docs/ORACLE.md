@@ -73,9 +73,9 @@ plugins, tree shaking, top-level await, multiple output formats, and production
 code splitting. Those exclusions keep the next milestone small enough to finish
 without prematurely designing their incremental machinery.
 
-## Next target: ESM linking semantics
+## ESM linking target
 
-Once the baseline stays green, add fixtures for:
+The second target extends the baseline with:
 
 - live imported bindings;
 - namespace objects;
@@ -85,8 +85,21 @@ Once the baseline stays green, add fixtures for:
 - side-effect-only modules and package `sideEffects` metadata;
 - useful syntax and resolution errors.
 
-Only after that target is green should the oracle grow symbol-inclusion and
-chunk-structure assertions for tree shaking and code splitting.
+These cases are tagged `esm-linking`. Imported identifiers are lowered to live
+namespace property reads rather than copied values. Export getters are installed
+before module evaluation so cycles observe initialized bindings lazily and
+preserve temporal-dead-zone failures. Star re-exports track collisions and
+remove ambiguous names. Syntax and resolution diagnostics fail the bundle
+command instead of emitting a known-invalid artifact.
+
+The target is green only when all `baseline` and `esm-linking` cases pass.
+
+## Next target: symbol inclusion
+
+The next oracle increment should describe which exported symbols and
+side-effectful statements must remain. That enables a module-granular linker and
+tree shaker without committing to production chunk splitting at the same time.
+Chunk-structure assertions come afterward.
 
 ## Adding a case
 

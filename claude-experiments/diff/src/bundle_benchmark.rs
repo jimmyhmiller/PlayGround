@@ -6,6 +6,7 @@ use rayon::prelude::*;
 
 use crate::DeltaSession;
 use crate::bundler::Bundler;
+use crate::frontend_profile;
 
 #[derive(Debug)]
 pub struct BundleScaleResult {
@@ -26,6 +27,10 @@ pub struct BundleScaleResult {
     pub edit_dataflow_ms: f64,
     pub edit_emit_ms: f64,
     pub transformed_on_edit: usize,
+    pub frontend_read_cpu_ms: f64,
+    pub frontend_transform_cpu_ms: f64,
+    pub frontend_lower_cpu_ms: f64,
+    pub frontend_resolve_cpu_ms: f64,
 }
 
 pub fn run_bundle_scale(
@@ -84,9 +89,11 @@ fn run_bundle_scale_inner(
 
     let entry = workspace.path.join(module_name(0));
     let output = workspace.path.join("dist/bundle.js");
+    frontend_profile::reset();
     let discover_started = Instant::now();
     let (mut bundler, initial) = Bundler::discover(&entry)?;
     let discover_transform_resolve_ms = elapsed_ms(discover_started);
+    let frontend_profile = frontend_profile::snapshot();
     if !initial.diagnostics.is_empty() {
         return Err(format!(
             "initial build produced {} diagnostics; first: {}",
@@ -178,6 +185,10 @@ fn run_bundle_scale_inner(
         edit_dataflow_ms,
         edit_emit_ms,
         transformed_on_edit,
+        frontend_read_cpu_ms: frontend_profile.read_ms,
+        frontend_transform_cpu_ms: frontend_profile.transform_ms,
+        frontend_lower_cpu_ms: frontend_profile.lower_ms,
+        frontend_resolve_cpu_ms: frontend_profile.resolve_ms,
     })
 }
 

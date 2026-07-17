@@ -4,6 +4,7 @@
 
 (extern sin :cc c [f64] (-> f64))
 (extern fmod :cc c [f64 f64] (-> f64))
+(extern printf :cc c [(ptr i8) ...] (-> i32))
 
 (const WINDOW_FLAGS 8292)
 (const LEFT_WIDTH 244)
@@ -11,7 +12,25 @@
 (const HEADER_HEIGHT 64)
 (const KEY_ENTER 257)
 (const KEY_BACKSPACE 259)
+(const KEY_DELETE 261)
+(const KEY_RIGHT 262)
+(const KEY_LEFT 263)
+(const KEY_HOME 268)
+(const KEY_END 269)
+(const KEY_A 65)
+(const KEY_C 67)
+(const KEY_V 86)
+(const KEY_X 88)
+(const KEY_LEFT_SHIFT 340)
+(const KEY_LEFT_CONTROL 341)
+(const KEY_LEFT_ALT 342)
+(const KEY_LEFT_SUPER 343)
+(const KEY_RIGHT_SHIFT 344)
+(const KEY_RIGHT_CONTROL 345)
+(const KEY_RIGHT_ALT 346)
+(const KEY_RIGHT_SUPER 347)
 (const CREATION_CAPACITY 2048)
+(const INPUT_CHARACTER_CAPACITY 16)
 
 (defstruct AppState
   [(selectedProject i64)
@@ -27,6 +46,13 @@
    (creationState i64)
    (creationLength i64)
    (creationText (ptr i8))
+   (creationAnchor i64)
+   (creationFocus i64)
+   (creationFocused i64)
+   (creationDragging i64)
+   (creationTruncated i64)
+   (clipboardRequested i64)
+   (clipboardText (ptr i8))
    (designRequested i64)
    (designState i64)
    (designTurn i64)
@@ -39,9 +65,24 @@
   [(mouseHorizontal f64)
    (mouseVertical f64)
    (pressed i64)
-   (typedCharacter i64)
+   (down i64)
+   (typedCount i64)
+   (typedCharacters (array i64 16))
    (backspacePressed i64)
-   (enterPressed i64)])
+   (deletePressed i64)
+   (leftPressed i64)
+   (rightPressed i64)
+   (homePressed i64)
+   (endPressed i64)
+   (enterPressed i64)
+   (shiftDown i64)
+   (commandDown i64)
+   (wordDown i64)
+   (selectAllPressed i64)
+   (copyPressed i64)
+   (cutPressed i64)
+   (pastePressed i64)
+   (pasteText (ptr i8))])
 
 (defn color-alpha [(red i64) (green i64) (blue i64) (alpha i64)] (-> raylib.Color)
   (let [value (alloc-stack raylib.Color)]
@@ -227,26 +268,304 @@
         569.0 5
         704.0 839.0))
 
-(defn edit-creation-text [(state (mut AppState)) (input InputFrame)] (-> i64)
+;; Text editing behavior in this section is adapted from Vercel Labs Native SDK's
+;; text interaction engine, modified for Coil, Raylib, and Flowline's fixed state.
+;; See licenses/native-sdk-Apache-2.0.txt and THIRD_PARTY_NOTICES.md.
+(defn selection-start [(state AppState)] (-> i64)
+  (let [anchor (load (field state creationAnchor))
+        focus (load (field state creationFocus))]
+    (if (< anchor focus) anchor focus)))
+
+(defn selection-end [(state AppState)] (-> i64)
+  (let [anchor (load (field state creationAnchor))
+        focus (load (field state creationFocus))]
+    (if (> anchor focus) anchor focus)))
+
+(defn is-utf8-continuation [(byte i64)] (-> bool)
+  (= (iand byte 192) 128))
+
+(defn previous-text-offset [(text (ptr i8)) (offset i64)] (-> i64)
+  (if (<= offset 0)
+    0
+    (let [(mut cursor) (- offset 1)]
+      (do
+        (while (and (> (load cursor) 0)
+                    (is-utf8-continuation (cast i64 (cast u8 (load (index text (load cursor)))))))
+          (store! cursor (- (load cursor) 1)))
+        (load cursor)))))
+
+(defn next-text-offset [(text (ptr i8)) (length i64) (offset i64)] (-> i64)
+  (if (>= offset length)
+    length
+    (let [(mut cursor) (+ offset 1)]
+      (do
+        (while (and (< (load cursor) length)
+                    (is-utf8-continuation (cast i64 (cast u8 (load (index text (load cursor)))))))
+          (store! cursor (+ (load cursor) 1)))
+        (load cursor)))))
+
+(defn word-byte [(byte i64)] (-> bool)
+  (or (and (>= byte 48) (<= byte 57))
+      (or (and (>= byte 65) (<= byte 90))
+          (or (and (>= byte 97) (<= byte 122)) (or (= byte 95) (>= byte 128))))))
+
+(defn word-at [(text (ptr i8)) (offset i64)] (-> bool)
+  (word-byte (cast i64 (cast u8 (load (index text offset))))))
+
+(defn previous-word-offset [(text (ptr i8)) (offset i64)] (-> i64)
+  (let [(mut cursor) offset]
+    (do
+      (while (and (> (load cursor) 0) (= (word-at text (previous-text-offset text (load cursor))) false))
+        (store! cursor (previous-text-offset text (load cursor))))
+      (while (and (> (load cursor) 0) (word-at text (previous-text-offset text (load cursor))))
+        (store! cursor (previous-text-offset text (load cursor))))
+      (load cursor))))
+
+(defn next-word-offset [(text (ptr i8)) (length i64) (offset i64)] (-> i64)
+  (let [(mut cursor) offset]
+    (do
+      (while (and (< (load cursor) length) (= (word-at text (load cursor)) false))
+        (store! cursor (next-text-offset text length (load cursor))))
+      (while (and (< (load cursor) length) (word-at text (load cursor)))
+        (store! cursor (next-text-offset text length (load cursor))))
+      (load cursor))))
+
+(defn delete-text-range [(state (mut AppState)) (start i64) (end i64)] (-> i64)
   (let [text (load (field state creationText))
         length (load (field state creationLength))
-        typedCharacter (load (field input typedCharacter))]
+        removed (- end start)
+        (mut source) end]
     (do
-      (if (and (>= typedCharacter 32) (and (<= typedCharacter 126) (< length (- CREATION_CAPACITY 1))))
+      (while (<= (load source) length)
         (do
-          (store! (index text length) (cast i8 typedCharacter))
-          (store! (index text (+ length 1)) (cast i8 0))
-          (store! (field state creationLength) (+ length 1))
+          (store! (index text (- (load source) removed)) (load (index text (load source))))
+          (store! source (+ (load source) 1))))
+      (store! (field state creationLength) (- length removed))
+      (store! (field state creationAnchor) start)
+      (store! (field state creationFocus) start)
+      0)))
+
+(defn delete-selection [(state (mut AppState))] (-> i64)
+  (let [start (selection-start state)
+        end (selection-end state)]
+    (if (< start end) (delete-text-range (mut state) start end) 0)))
+
+(defn insert-codepoint [(state (mut AppState)) (codepoint i64)] (-> i64)
+  (let [byteCount (cond (<= codepoint 127) 1 (<= codepoint 2047) 2 (<= codepoint 65535) 3 4)]
+    (do
+      (delete-selection (mut state))
+      (let [text (load (field state creationText))
+            length (load (field state creationLength))
+            cursor (load (field state creationFocus))]
+        (if (> (+ length byteCount) (- CREATION_CAPACITY 1))
+          (do (store! (field state creationTruncated) 1) 0)
+          (let [(mut source) length]
+            (do
+              (while (>= (load source) cursor)
+                (do
+                  (store! (index text (+ (load source) byteCount)) (load (index text (load source))))
+                  (store! source (- (load source) 1))))
+              (cond (= byteCount 1) (store! (index text cursor) (cast i8 codepoint))
+                    (= byteCount 2)
+                      (do
+                        (store! (index text cursor) (cast i8 (ior 192 (ishr codepoint 6))))
+                        (store! (index text (+ cursor 1)) (cast i8 (ior 128 (iand codepoint 63))))
+                        0)
+                    (= byteCount 3)
+                      (do
+                        (store! (index text cursor) (cast i8 (ior 224 (ishr codepoint 12))))
+                        (store! (index text (+ cursor 1))
+                                (cast i8 (ior 128 (iand (ishr codepoint 6) 63))))
+                        (store! (index text (+ cursor 2)) (cast i8 (ior 128 (iand codepoint 63))))
+                        0)
+                    (do
+                      (store! (index text cursor) (cast i8 (ior 240 (ishr codepoint 18))))
+                      (store! (index text (+ cursor 1))
+                              (cast i8 (ior 128 (iand (ishr codepoint 12) 63))))
+                      (store! (index text (+ cursor 2))
+                              (cast i8 (ior 128 (iand (ishr codepoint 6) 63))))
+                      (store! (index text (+ cursor 3)) (cast i8 (ior 128 (iand codepoint 63))))
+                      0))
+              (store! (field state creationLength) (+ length byteCount))
+              (store! (field state creationAnchor) (+ cursor byteCount))
+              (store! (field state creationFocus) (+ cursor byteCount))
+              (store! (field state creationTruncated) 0)
+              0))))
+      0)))
+
+(defn byte-text-length [(text (ptr i8))] (-> i64)
+  (let [(mut length) 0]
+    (loop (if (icmp-eq (load (index text (load length))) (cast i8 0))
+            (break (load length))
+            (store! length (+ (load length) 1))))))
+
+(defn insert-text [(state (mut AppState)) (sourceText (ptr i8))] (-> i64)
+  (do
+    (delete-selection (mut state))
+    (let [text (load (field state creationText))
+          length (load (field state creationLength))
+          cursor (load (field state creationFocus))
+          requested (byte-text-length sourceText)
+          available (- (- CREATION_CAPACITY 1) length)
+          (mut insertLength) (if (< requested available) requested available)]
+      (do
+        (while (and (> (load insertLength) 0)
+                    (is-utf8-continuation (cast i64 (cast u8 (load (index sourceText (load insertLength)))))))
+          (store! insertLength (- (load insertLength) 1)))
+        (let [(mut source) length]
+          (do
+            (while (>= (load source) cursor)
+              (do
+                (store! (index text (+ (load source) (load insertLength))) (load (index text (load source))))
+                (store! source (- (load source) 1))))
+            (for [position 0
+                  2048]
+              (if (< position (load insertLength))
+                (store! (index text (+ cursor position)) (load (index sourceText position)))
+                0))
+            (store! (field state creationLength) (+ length (load insertLength)))
+            (store! (field state creationAnchor) (+ cursor (load insertLength)))
+            (store! (field state creationFocus) (+ cursor (load insertLength)))
+            (store! (field state creationTruncated) (if (< (load insertLength) requested) 1 0))
+            0))
+        0))))
+
+(defn copy-creation-selection [(state (mut AppState))] (-> i64)
+  (let [start (selection-start state)
+        end (selection-end state)
+        source (load (field state creationText))
+        destination (load (field state clipboardText))]
+    (if (= start end)
+      0
+      (do
+        (for [position 0
+              2048]
+          (if (< position (- end start))
+            (store! (index destination position) (load (index source (+ start position))))
+            0))
+        (store! (index destination (- end start)) (cast i8 0))
+        (store! (field state clipboardRequested) 1)
+        0))))
+
+(defn move-creation-caret [(state (mut AppState)) (direction i64) (extend i64)] (-> i64)
+  (let [text (load (field state creationText))
+        length (load (field state creationLength))
+        anchor (load (field state creationAnchor))
+        focus (load (field state creationFocus))
+        start (selection-start state)
+        end (selection-end state)
+        target
+          (cond (= direction 0) (if (and (= extend 0) (!= anchor focus)) start (previous-text-offset text focus))
+                (= direction 1) (if (and (= extend 0) (!= anchor focus)) end (next-text-offset text length focus))
+                (= direction 2) 0
+                (= direction 3) length
+                (= direction 4) (previous-word-offset text focus)
+                (next-word-offset text length focus))]
+    (do
+      (store! (field state creationFocus) target)
+      (if (= extend 0) (store! (field state creationAnchor) target) 0)
+      0)))
+
+(defn edit-creation-text [(state (mut AppState)) (input InputFrame)] (-> i64)
+  (if (or (= (load (field state creationFocused)) 0) (= (load (field state designState)) 1))
+    0
+    (do
+      (if (= (load (field input selectAllPressed)) 1)
+        (do
+          (store! (field state creationAnchor) 0)
+          (store! (field state creationFocus) (load (field state creationLength)))
           0)
         0)
-      (if (and (= (load (field input backspacePressed)) 1) (> (load (field state creationLength)) 0))
-        (let [nextLength (- (load (field state creationLength)) 1)]
-          (do
-            (store! (field state creationLength) nextLength)
-            (store! (index text nextLength) (cast i8 0))
-            0))
+      (if (= (load (field input copyPressed)) 1) (copy-creation-selection (mut state)) 0)
+      (if (= (load (field input cutPressed)) 1)
+        (do
+          (copy-creation-selection (mut state))
+          (delete-selection (mut state))
+          0)
         0)
+      (if (= (load (field input pastePressed)) 1)
+        (let [pasteText (load (field input pasteText))]
+          (if (!= (cast i64 pasteText) 0) (insert-text (mut state) pasteText) 0))
+        0)
+      (if (= (load (field input leftPressed)) 1)
+        (move-creation-caret (mut state)
+                             (if (= (load (field input commandDown)) 1)
+                               2
+                               (if (= (load (field input wordDown)) 1) 4 0))
+                             (load (field input shiftDown)))
+        0)
+      (if (= (load (field input rightPressed)) 1)
+        (move-creation-caret (mut state)
+                             (if (= (load (field input commandDown)) 1)
+                               3
+                               (if (= (load (field input wordDown)) 1) 5 1))
+                             (load (field input shiftDown)))
+        0)
+      (if (= (load (field input homePressed)) 1)
+        (move-creation-caret (mut state) 2 (load (field input shiftDown)))
+        0)
+      (if (= (load (field input endPressed)) 1)
+        (move-creation-caret (mut state) 3 (load (field input shiftDown)))
+        0)
+      (if (= (load (field input backspacePressed)) 1)
+        (let [start (selection-start state)
+              end (selection-end state)
+              focus (load (field state creationFocus))]
+          (if (< start end)
+            (delete-text-range (mut state) start end)
+            (if (> focus 0)
+              (delete-text-range (mut state) (previous-text-offset (load (field state creationText)) focus) focus)
+              0)))
+        0)
+      (if (= (load (field input deletePressed)) 1)
+        (let [start (selection-start state)
+              end (selection-end state)
+              focus (load (field state creationFocus))
+              length (load (field state creationLength))]
+          (if (< start end)
+            (delete-text-range (mut state) start end)
+            (if (< focus length)
+              (delete-text-range (mut state) focus (next-text-offset (load (field state creationText)) length focus))
+              0)))
+        0)
+      (for [characterIndex 0
+            16]
+        (if (< characterIndex (load (field input typedCount)))
+          (let [codepoint (load (index (field input typedCharacters) characterIndex))]
+            (if (>= codepoint 32) (insert-codepoint (mut state) codepoint) 0))
+          0))
       0)))
+
+(defn text-width-through [(font raylib.Font) (text (ptr i8)) (offset i64) (size f64)] (-> f64)
+  (let [saved (load (index text offset))]
+    (do
+      (store! (index text offset) (cast i8 0))
+      (let [measured (raylib.MeasureTextEx (load font) text (cast f32 (* size 1.16)) (cast f32 0.18))]
+        (do
+          (store! (index text offset) saved)
+          (cast f64 (load (field measured x))))))))
+
+(defn creation-text-scroll [(state AppState) (visibleWidth f64)] (-> f64)
+  (let [caretWidth
+          (text-width-through (field state sans)
+                              (load (field state creationText))
+                              (load (field state creationFocus))
+                              11.5)]
+    (if (> caretWidth (- visibleWidth 8.0)) (- caretWidth (- visibleWidth 8.0)) 0.0)))
+
+(defn creation-offset-at [(state AppState) (horizontal f64) (textLeft f64) (visibleWidth f64)] (-> i64)
+  (let [text (load (field state creationText))
+        length (load (field state creationLength))
+        target (+ (- horizontal textLeft) (creation-text-scroll state visibleWidth))
+        (mut offset) 0]
+    (loop (if (>= (load offset) length)
+            (break length)
+            (let [next (next-text-offset text length (load offset))
+                  leftWidth (text-width-through (field state sans) text (load offset) 11.5)
+                  rightWidth (text-width-through (field state sans) text next 11.5)]
+              (if (< target (/ (+ leftWidth rightWidth) 2.0))
+                (break (load offset))
+                (store! offset next)))))))
 
 (defn apply-input [(state (mut AppState)) (input InputFrame) (screenWidth i64) (screenHeight i64)] (-> i64)
   (let [mouseHorizontal (load (field input mouseHorizontal))
@@ -257,9 +576,32 @@
         catalogCount (workflow.catalog-count catalog)]
     (if (= (load (field state creationOpen)) 1)
       (do
+        (let [textLeft (cast f64 (+ rightStart 54))
+              textTop (cast f64 (- screenHeight 58))
+              textWidth (cast f64 (- RIGHT_WIDTH 102))]
+          (do
+            (if (= (load (field input pressed)) 1)
+              (if (in-bounds mouseHorizontal mouseVertical textLeft textTop textWidth 40.0)
+                (let [offset (creation-offset-at state mouseHorizontal textLeft textWidth)]
+                  (do
+                    (store! (field state creationFocused) 1)
+                    (store! (field state creationDragging) 1)
+                    (store! (field state creationAnchor) offset)
+                    (store! (field state creationFocus) offset)
+                    0))
+                (if (!= (load (field input enterPressed)) 1)
+                  (do (store! (field state creationFocused) 0) 0)
+                  0))
+              0)
+            (if (and (= (load (field input down)) 1) (= (load (field state creationDragging)) 1))
+              (store! (field state creationFocus) (creation-offset-at state mouseHorizontal textLeft textWidth))
+              0)
+            (if (= (load (field input down)) 0) (store! (field state creationDragging) 0) 0)
+            0))
         (edit-creation-text (mut state) input)
         (if (and (!= (load (field state designState)) 1)
-                 (or (= (load (field input enterPressed)) 1)
+                 (or (and (= (load (field state creationFocused)) 1)
+                          (= (load (field input enterPressed)) 1))
                      (and (= (load (field input pressed)) 1)
                           (in-bounds mouseHorizontal
                                      mouseVertical
@@ -303,6 +645,11 @@
               (store! (field state creationOpen) 1)
               (store! (field state creationState) 0)
               (store! (field state creationLength) 0)
+              (store! (field state creationAnchor) 0)
+              (store! (field state creationFocus) 0)
+              (store! (field state creationFocused) 1)
+              (store! (field state creationDragging) 0)
+              (store! (field state creationTruncated) 0)
               (store! (field state designState) 0)
               (store! (field state designTurn) 0)
               (store! (load (field state creationText)) (cast i8 0))
@@ -780,17 +1127,146 @@
       0)))
 
 (defn capture-input [(input (mut InputFrame))] (-> i64)
-  (let [mouse (raylib.GetMousePosition)]
+  (let [mouse (raylib.GetMousePosition)
+        (mut typedCount) 0
+        (mut typedCharacter) (cast i64 (raylib.GetCharPressed))
+        shiftDown
+          (if (or (icmp-ne (raylib.IsKeyDown (cast i32 KEY_LEFT_SHIFT)) (cast u8 0))
+                  (icmp-ne (raylib.IsKeyDown (cast i32 KEY_RIGHT_SHIFT)) (cast u8 0)))
+            1
+            0)
+        controlDown
+          (if (or (icmp-ne (raylib.IsKeyDown (cast i32 KEY_LEFT_CONTROL)) (cast u8 0))
+                  (icmp-ne (raylib.IsKeyDown (cast i32 KEY_RIGHT_CONTROL)) (cast u8 0)))
+            1
+            0)
+        altDown
+          (if (or (icmp-ne (raylib.IsKeyDown (cast i32 KEY_LEFT_ALT)) (cast u8 0))
+                  (icmp-ne (raylib.IsKeyDown (cast i32 KEY_RIGHT_ALT)) (cast u8 0)))
+            1
+            0)
+        superDown
+          (if (or (icmp-ne (raylib.IsKeyDown (cast i32 KEY_LEFT_SUPER)) (cast u8 0))
+                  (icmp-ne (raylib.IsKeyDown (cast i32 KEY_RIGHT_SUPER)) (cast u8 0)))
+            1
+            0)]
     (do
       (store! (field input mouseHorizontal) (cast f64 (load (field mouse x))))
       (store! (field input mouseVertical) (cast f64 (load (field mouse y))))
       (store! (field input pressed)
               (if (icmp-ne (raylib.IsMouseButtonPressed (cast i32 0)) (cast u8 0)) 1 0))
-      (store! (field input typedCharacter) (cast i64 (raylib.GetCharPressed)))
+      (store! (field input down) (if (icmp-ne (raylib.IsMouseButtonDown (cast i32 0)) (cast u8 0)) 1 0))
+      (while (and (> (load typedCharacter) 0) (< (load typedCount) INPUT_CHARACTER_CAPACITY))
+        (do
+          (store! (index (field input typedCharacters) (load typedCount)) (load typedCharacter))
+          (store! typedCount (+ (load typedCount) 1))
+          (store! typedCharacter (cast i64 (raylib.GetCharPressed)))))
+      (store! (field input typedCount) (load typedCount))
       (store! (field input backspacePressed)
-              (if (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_BACKSPACE)) (cast u8 0)) 1 0))
+              (if (or (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_BACKSPACE)) (cast u8 0))
+                      (icmp-ne (raylib.IsKeyPressedRepeat (cast i32 KEY_BACKSPACE)) (cast u8 0)))
+                1
+                0))
+      (store! (field input deletePressed)
+              (if (or (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_DELETE)) (cast u8 0))
+                      (icmp-ne (raylib.IsKeyPressedRepeat (cast i32 KEY_DELETE)) (cast u8 0)))
+                1
+                0))
+      (store! (field input leftPressed)
+              (if (or (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_LEFT)) (cast u8 0))
+                      (icmp-ne (raylib.IsKeyPressedRepeat (cast i32 KEY_LEFT)) (cast u8 0)))
+                1
+                0))
+      (store! (field input rightPressed)
+              (if (or (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_RIGHT)) (cast u8 0))
+                      (icmp-ne (raylib.IsKeyPressedRepeat (cast i32 KEY_RIGHT)) (cast u8 0)))
+                1
+                0))
+      (store! (field input homePressed)
+              (if (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_HOME)) (cast u8 0)) 1 0))
+      (store! (field input endPressed)
+              (if (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_END)) (cast u8 0)) 1 0))
       (store! (field input enterPressed)
               (if (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_ENTER)) (cast u8 0)) 1 0))
+      (store! (field input shiftDown) shiftDown)
+      (store! (field input commandDown) (if (or (= superDown 1) (= controlDown 1)) 1 0))
+      (store! (field input wordDown) (if (or (= altDown 1) (= controlDown 1)) 1 0))
+      (store! (field input selectAllPressed)
+              (if (and (or (= superDown 1) (= controlDown 1))
+                       (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_A)) (cast u8 0)))
+                1
+                0))
+      (store! (field input copyPressed)
+              (if (and (or (= superDown 1) (= controlDown 1))
+                       (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_C)) (cast u8 0)))
+                1
+                0))
+      (store! (field input cutPressed)
+              (if (and (or (= superDown 1) (= controlDown 1))
+                       (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_X)) (cast u8 0)))
+                1
+                0))
+      (store! (field input pastePressed)
+              (if (and (or (= superDown 1) (= controlDown 1))
+                       (icmp-ne (raylib.IsKeyPressed (cast i32 KEY_V)) (cast u8 0)))
+                1
+                0))
+      (store! (field input pasteText)
+              (if (= (load (field input pastePressed)) 1)
+                (raylib.GetClipboardText)
+                (cast (ptr i8) 0)))
+      0)))
+
+(defn draw-creation-editor [(state AppState) (left f64) (top f64) (width f64) (tint raylib.Color)] (-> i64)
+  (let [text (load (field state creationText))
+        length (load (field state creationLength))
+        focused (= (load (field state creationFocused)) 1)
+        sending (= (load (field state designState)) 1)
+        textLeft (+ left 34.0)
+        textWidth (- width 62.0)
+        scroll (creation-text-scroll state textWidth)
+        origin (- textLeft scroll)
+        start (selection-start state)
+        end (selection-end state)
+        startWidth (text-width-through (field state sans) text start 11.5)
+        endWidth (text-width-through (field state sans) text end 11.5)
+        caretWidth (text-width-through (field state sans) text (load (field state creationFocus)) 11.5)
+        border
+          (cond (= (load (field state creationTruncated)) 1) (color 211 91 85)
+                focused (load tint)
+                (color 35 44 56))
+        sendColor (if (or sending (= length 0)) (color 35 44 56) (load tint))]
+    (do
+      (fill-rectangle left top width 40.0 (if focused (color 11 16 23) (color 7 10 14)))
+      (stroke-rectangle left top width 40.0 (if focused 1.5 1.0) border)
+      (draw-text (field state monoMedium)
+                 c">"
+                 (+ left 12.0)
+                 (+ top 11.0)
+                 12.0
+                 (if focused (load tint) (color 76 85 97)))
+      (raylib.BeginScissorMode (cast i32 textLeft) (cast i32 (+ top 4.0)) (cast i32 textWidth) (cast i32 32))
+      (if (< start end)
+        (fill-rectangle (+ origin startWidth) (+ top 8.0) (- endWidth startWidth) 23.0 (color-alpha 74 121 178 110))
+        0)
+      (draw-text (field state sans)
+                 (if (= length 0) c"Describe the outcome or ask a question..." text)
+                 origin
+                 (+ top 11.0)
+                 11.5
+                 (if (= length 0) (color 69 78 90) (if sending (color 107 116 128) (color 220 226 233))))
+      (if (and focused
+               (and (= start end) (< (fmod (raylib.GetTime) 1.0) 0.55)))
+        (fill-rectangle (+ origin caretWidth) (+ top 8.0) 1.5 23.0 tint)
+        0)
+      (raylib.EndScissorMode)
+      (fill-rectangle (+ left (- width 28.0)) (+ top 12.0) 28.0 28.0 sendColor)
+      (draw-text (field state monoMedium)
+                 (if sending c"·" c">")
+                 (+ left (- width 19.0))
+                 (+ top 18.0)
+                 12.0
+                 (if (or sending (= length 0)) (color 76 85 97) (color 10 14 19)))
       0)))
 
 (defn draw-design-workspace [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
@@ -873,33 +1349,7 @@
             (cast f64 (- screenHeight 76))
             1.0
             (color 20 26 34))
-      (stroke-rectangle contentLeft
-                        (cast f64 (- screenHeight 58))
-                        (cast f64 (- RIGHT_WIDTH 40))
-                        40.0
-                        1.0
-                        (color 35 44 56))
-      (draw-text (field state monoMedium) c">" (+ contentLeft 12.0) (cast f64 (- screenHeight 47)) 12.0 tint)
-      (raylib.BeginScissorMode (cast i32 (+ contentLeft 34.0))
-                               (cast i32 (- screenHeight 52))
-                               (cast i32 (- RIGHT_WIDTH 102))
-                               (cast i32 30))
-      (draw-text (field state sans)
-                 (if (= (load (field state creationLength)) 0)
-                   c"Describe the outcome or ask a question..."
-                   (load (field state creationText)))
-                 (+ contentLeft 34.0)
-                 (cast f64 (- screenHeight 47))
-                 11.5
-                 (if (= (load (field state creationLength)) 0) (color 69 78 90) (color 207 214 222)))
-      (raylib.EndScissorMode)
-      (fill-rectangle (cast f64 (- screenWidth 48)) (cast f64 (- screenHeight 41)) 28.0 28.0 tint)
-      (draw-text (field state monoMedium)
-                 c">"
-                 (cast f64 (- screenWidth 39))
-                 (cast f64 (- screenHeight 35))
-                 12.0
-                 (color 10 14 19))
+      (draw-creation-editor state contentLeft (cast f64 (- screenHeight 58)) (cast f64 (- RIGHT_WIDTH 40)) tint)
       0)))
 
 (defn draw-empty-workspace [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
@@ -964,9 +1414,11 @@
           state (alloc-stack AppState)
           input (alloc-stack InputFrame)
           creationText (workflow.allocate-buffer CREATION_CAPACITY)
+          clipboardText (workflow.allocate-buffer CREATION_CAPACITY)
           designResponse (workflow.allocate-buffer 4096)]
       (store! catalog catalogValue)
       (store! creationText (cast i8 0))
+      (store! clipboardText (cast i8 0))
       (store! designResponse (cast i8 0))
       (store! (field state selectedProject) 0)
       (store! (field state selectedNode) 0)
@@ -981,6 +1433,13 @@
       (store! (field state creationState) 0)
       (store! (field state creationLength) 0)
       (store! (field state creationText) creationText)
+      (store! (field state creationAnchor) 0)
+      (store! (field state creationFocus) 0)
+      (store! (field state creationFocused) 0)
+      (store! (field state creationDragging) 0)
+      (store! (field state creationTruncated) 0)
+      (store! (field state clipboardRequested) 0)
+      (store! (field state clipboardText) clipboardText)
       (store! (field state designRequested) 0)
       (store! (field state designState) 0)
       (store! (field state designTurn) 0)
@@ -998,6 +1457,12 @@
                 (do
                   (capture-input (mut input))
                   (apply-input (mut state) input screenWidth screenHeight)
+                  (if (= (load (field state clipboardRequested)) 1)
+                    (do
+                      (raylib.SetClipboardText (load (field state clipboardText)))
+                      (store! (field state clipboardRequested) 0)
+                      0)
+                    0)
                   (if (= (load (field state runRequested)) 1)
                     (let [selectedRuntime (load (field state runtime))
                           activeRuntime (load (field state activeRuntime))]
@@ -1033,6 +1498,8 @@
                       (workflow.start-design-turn (load (field state creationText)) (load (field state designTurn)))
                       (store! (field state designRequested) 0)
                       (store! (field state creationLength) 0)
+                      (store! (field state creationAnchor) 0)
+                      (store! (field state creationFocus) 0)
                       (store! creationText (cast i8 0))
                       0)
                     0)
@@ -1063,6 +1530,8 @@
                           (store! (field state selectedNode) 0)
                           (store! (field state creationState) 2)
                           (store! (field state creationLength) 0)
+                          (store! (field state creationAnchor) 0)
+                          (store! (field state creationFocus) 0)
                           (store! creationText (cast i8 0))
                           0)
                         (if (= creationState 3)
@@ -1083,13 +1552,55 @@
     (raylib.CloseWindow)
     0))
 
+(defn check-text-editor [] (-> i64)
+  (let [state (alloc-stack AppState)
+        input (alloc-stack InputFrame)
+        text (workflow.allocate-buffer CREATION_CAPACITY)
+        clipboardText (workflow.allocate-buffer CREATION_CAPACITY)]
+    (do
+      (store! state (zeroed AppState))
+      (store! input (zeroed InputFrame))
+      (store! text (cast i8 0))
+      (store! clipboardText (cast i8 0))
+      (store! (field state creationText) text)
+      (store! (field state clipboardText) clipboardText)
+      (store! (field state creationFocused) 1)
+      (store! (field input typedCount) 3)
+      (store! (index (field input typedCharacters) 0) 65)
+      (store! (index (field input typedCharacters) 1) 233)
+      (store! (index (field input typedCharacters) 2) 128640)
+      (edit-creation-text (mut state) (load input))
+      (store! input (zeroed InputFrame))
+      (store! (field input backspacePressed) 1)
+      (edit-creation-text (mut state) (load input))
+      (store! input (zeroed InputFrame))
+      (store! (field input homePressed) 1)
+      (edit-creation-text (mut state) (load input))
+      (store! input (zeroed InputFrame))
+      (store! (field input typedCount) 1)
+      (store! (index (field input typedCharacters) 0) 90)
+      (edit-creation-text (mut state) (load input))
+      (printf c"{\"text\":\"%s\",\"bytes\":%lld,\"anchor\":%lld,\"focus\":%lld,\"valid\":%s}\n"
+              text
+              (load (field state creationLength))
+              (load (field state creationAnchor))
+              (load (field state creationFocus))
+              (if (and (= (load (field state creationLength)) 4)
+                       (and (= (load (field state creationAnchor)) 1) (= (load (field state creationFocus)) 1)))
+                c"true"
+                c"false"))
+      0)))
+
 (defn main [(argumentCount i32) (arguments (ptr (ptr i8)))] (-> i64)
-  (if (and (> (cast i64 argumentCount) 2)
-           (workflow.strings-equal (load (index arguments 1)) c"--check-workflow"))
-    (let [runtime (workflow.load-runtime (load (index arguments 2)))]
-      (workflow.dump runtime))
-    (if (and (> (cast i64 argumentCount) 1)
-             (workflow.strings-equal (load (index arguments 1)) c"--check-catalog"))
-      (let [catalog (workflow.load-catalog)]
-        (workflow.dump-catalog catalog))
-      (run-interface))))
+  (if (and (> (cast i64 argumentCount) 1)
+           (workflow.strings-equal (load (index arguments 1)) c"--check-text-editor"))
+    (check-text-editor)
+    (if (and (> (cast i64 argumentCount) 2)
+             (workflow.strings-equal (load (index arguments 1)) c"--check-workflow"))
+      (let [runtime (workflow.load-runtime (load (index arguments 2)))]
+        (workflow.dump runtime))
+      (if (and (> (cast i64 argumentCount) 1)
+               (workflow.strings-equal (load (index arguments 1)) c"--check-catalog"))
+        (let [catalog (workflow.load-catalog)]
+          (workflow.dump-catalog catalog))
+        (run-interface)))))
