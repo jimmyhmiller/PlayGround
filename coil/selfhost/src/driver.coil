@@ -532,6 +532,47 @@
   (if (icmp-eq (cast i64 triple) 0) false
     (starts-with (cstr->slice triple) "wasm32-")))
 
+; ---- child exit status ------------------------------------------------------
+; `system` returns a raw wait(2) status, NOT an exit code. The low 7 bits hold the
+; terminating signal (0 when the child exited normally); the exit code sits in the
+; high byte. Reading only the high byte — (st/256)&255 — yields 0 for EVERY signal
+; death, so a child that segfaulted reported success. These two are the one place
+; that decodes a wait status; every call site goes through them.
+(defn wait-signal [(st i64)] (-> i64)
+  (if (icmp-lt st 0) 0 (iand st 127)))
+
+(defn wait-code [(st i64)] (-> i64)
+  (if (icmp-lt st 0) 127                      ; system() itself failed (no shell / fork failed)
+    (let [sig (wait-signal st)]
+      (if (icmp-ne sig 0)
+          (iadd 128 sig)                       ; killed by a signal: 128+signo, as a shell reports
+        (iand (udiv st 256) 255)))))
+
+(defn signal-name [(sig i64)] (-> (slice u8))
+  (cond (icmp-eq sig 2)  "SIGINT"
+        (icmp-eq sig 3)  "SIGQUIT"
+        (icmp-eq sig 4)  "SIGILL"
+        (icmp-eq sig 5)  "SIGTRAP"
+        (icmp-eq sig 6)  "SIGABRT"
+        (icmp-eq sig 8)  "SIGFPE"
+        (icmp-eq sig 9)  "SIGKILL"
+        (icmp-eq sig 10) "SIGBUS"
+        (icmp-eq sig 11) "SIGSEGV"
+        (icmp-eq sig 13) "SIGPIPE"
+        (icmp-eq sig 15) "SIGTERM"
+        ""))
+
+; A signal death is otherwise invisible: the child prints nothing and the status is
+; just a number. Say it out loud, naming what died.
+(defn wait-report [(st i64) (what (slice u8))] (-> i64)
+  (let [sig (wait-signal st)]
+    (if (icmp-eq sig 0) 0
+      (let [w (stderr) nm (signal-name sig)]
+        (ps w what) (ps w " terminated by signal ") (dump-dec w sig)
+        (if (icmp-eq (slice-len [u8] nm) 0) 0 (do (ps w " (") (ps w nm) (ps w ")") 0))
+        (wb w 10)
+        0))))
+
 ; `build <file> -o <out> [--link-flag X]...` : emit `<out>.o` then link it into a
 ; native executable with `cc <out>.o -o <out> <link-flags...>`. Mirrors the Rust
 ; `coil build` argv handling (src/main.rs) + link step (src/lib.rs).
@@ -620,7 +661,8 @@
                           (wasm-link-object a obj-cstr out-slice)
                           (cast i64 (system (slice->cstr a (sb-str (load cmdsb))))))]
               (if (icmp-ne rc 0)
-                  (let [w (stderr) code (iand (udiv (cast i64 rc) 256) 255)]
+                  (let [w (stderr) code (wait-code rc)]
+                    (wait-report rc "linker")
                     (ps w "error: linker/ar failed with exit status: ") (dump-dec w code) (wb w 10) 1)
                 (do (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10))
                     (match ehdr
@@ -949,8 +991,9 @@
                       (do (sb-push-str! (mut b) " ") (sb-push-str! (mut b) (al-get [(slice u8)] ra (load k))) (store! k (iadd (load k) 1))))))
                 0))
           0)
-        (let [rc (system (slice->cstr a (sb-str (load b))))]
-          (iand (udiv (cast i64 rc) 256) 255))))))
+        (let [rc (cast i64 (system (slice->cstr a (sb-str (load b)))))]
+          (wait-report rc "program")
+          (wait-code rc))))))
 
 ; manifest mode = `build`/`run` with no file (argv[2] missing or a flag).
 (defn manifest-mode? [(argc i32) (argv (ptr (ptr i8)))] (-> bool)
@@ -988,12 +1031,17 @@
               (do (store! inargs true) (store! i (iadd (load i) 1)) 0)
             (do (sb-push-str! (mut b) " ") (sb-push-str! (mut b) arg) (store! i (iadd (load i) 1)) 0))))))
     (sb-push-str! (mut b) " >/dev/null")
-    (let [brc (system (slice->cstr a (sb-str (load b))))]
+    (let [brc (cast i64 (system (slice->cstr a (sb-str (load b)))))]
       (if (icmp-ne brc 0)
-          (iand (udiv (cast i64 brc) 256) 255)
+          ; the BUILD failed. A build that died by signal (a runaway comptime, a deep
+          ; macro expansion) also decoded to 0 here, so `run` reported success without
+          ; ever running anything.
+          (do (wait-report brc "compiler")
+              (let [c (wait-code brc)] (if (icmp-eq c 0) 1 c)))
         (let [runcmd (cat3-d a "/tmp/coil-run" (sb-str (load progargs)))
-              rrc (system (slice->cstr a runcmd))]
-          (iand (udiv (cast i64 rrc) 256) 255))))))
+              rrc (cast i64 (system (slice->cstr a runcmd)))]
+          (wait-report rrc "program")
+          (wait-code rrc))))))
 
 ; small local concat (avoid depending on cimport's cat3).
 (defn cat3-d [(a (ptr Allocator)) (x (slice u8)) (y (slice u8))] (-> (slice u8))
