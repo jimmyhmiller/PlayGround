@@ -52,7 +52,7 @@
 ; sets target + datalayout), create a host target machine (cpu "generic", no
 ; features, opt Aggressive=3, reloc PIC=2, codemodel Default=0), run the
 ; `default<O3>` pipeline through the new pass manager, then EmitToFile as an object.
-(defn build-object [(a (ptr Allocator)) (mp (ptr Program)) (obj-cstr (ptr i8)) (triple-override (ptr i8))] (-> i64)
+(defn build-object [(a (ptr Allocator)) (mp (ptr Program)) (obj-cstr (ptr i8)) (triple-override (ptr i8)) (sanitize bool)] (-> i64)
   (let [m         (codegen-module a mp triple-override)
         triple    (if (icmp-ne (cast i64 triple-override) 0) triple-override (LLVMGetDefaultTargetTriple))
         targetout (alloc-stack (ptr i8))
@@ -71,7 +71,12 @@
       0)
     (let [tm  (LLVMCreateTargetMachine (load targetout) triple c"generic" c"" 3 2 0)
           pbo (LLVMCreatePassBuilderOptions)
-          rp  (LLVMRunPasses m c"default<O3>" tm pbo)]
+          ; --sanitize=address (mem-7): append LLVM's AddressSanitizer module pass to
+          ; the O3 pipeline so the emitted object is instrumented. Only the PROGRAM
+          ; object takes this path — the metaprogram dylib passes sanitize=false, so
+          ; the compiler never dlopen's an ASan-instrumented object.
+          rp  (if sanitize (LLVMRunPasses m c"default<O3>,asan" tm pbo)
+                           (LLVMRunPasses m c"default<O3>" tm pbo))]
       (if (not (icmp-eq (cast i64 rp) 0))
           (do (ps (stderr) "codegen: LLVMRunPasses failed: ")
               (ps (stderr) (cstr->slice (LLVMGetErrorMessage rp)))
@@ -93,7 +98,7 @@
   (let [w (stderr)
         (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
     (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
-      (Some [mp] (do (build-object a mp obj-cstr triple) 1))
+      (Some [mp] (do (build-object a mp obj-cstr triple (sanitize-address?)) 1))
       (None []   0))))
 
 ; `__normalize` debug subcommand: print normalized textual LLVM IR of `src`.
@@ -109,7 +114,9 @@
 ; the compiled-metaprogram engine's object builder (metaengine.coil): a mono'd
 ; metaprogram Program -> object file, via the LLVM backend (host triple).
 (defn meta-build-obj-llvm [(a (ptr Allocator)) (mp (ptr Program)) (obj (ptr i8))] (-> i64)
-  (build-object a mp obj (cast (ptr i8) 0)))
+  ; NEVER sanitize the metaprogram dylib: it is dlopen'd into the compiler, and an
+  ; ASan-instrumented dylib loaded that late aborts the process (mem-7).
+  (build-object a mp obj (cast (ptr i8) 0) false))
 
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (set-meta-build-obj! (fnptr-of meta-build-obj-llvm))

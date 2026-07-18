@@ -10,10 +10,75 @@
 ;
 ; Slices ALIAS their backing storage: `slice-set!` writes through to the original,
 ; and a `subslice` shares the same memory. A slice is a small value (two words),
-; so it is passed/returned BY VALUE (like Rust's `&str`). Bounds are NOT checked
-; here (debug-mode bounds checking is Phase-2 safety work).
+; so it is passed/returned BY VALUE (like Rust's `&str`).
+;
+; Bounds checking is the `--debug-checks` build mode (mem-6): `slice-get`,
+; `slice-set!` and `subslice` verify their indices (and reject a `lo > hi`
+; subslice, which used to yield a slice reporting length -2) ONLY when the build
+; requested it. The check lives in a MACRO branched on `(debug-checks?)` at
+; expansion time, so with the flag off the op expands to the exact unchecked form
+; — genuinely zero-cost, byte-identical IR. `write`/`abort` are module-private (see
+; the `export` list) so they never collide with io/main's own decls via `:use *`.
+
+; Only the public API is exported — the debug panic's `write`/`abort` externs stay
+; private (they would otherwise be ambiguous where a `:use *` importer of slice also
+; declares them, e.g. io.coil's `write`, main.coil's `abort`).
+(export slice-new slice-len slice-data slice-empty? slice-get slice-set! subslice slice-of slice-for sort SliceIter)
 
 (import "control.coil" :use *)   ; `for` (and its loop/break lowering) for slice-for
+; `(debug-checks?)` is a comptime code op (the --debug-checks predicate, mem-6) — a
+; builtin like `target-arch`/`gensym`, so it needs no import.
+
+; ---- debug-mode bounds-check panic (mem-6), only emitted under --debug-checks ----
+; `write` is the libc write(2); it is ALREADY declared globally (io.coil), so slice
+; naming it adds no new declaration — the off-path stays byte-identical. `abort` is
+; NOT declared here on purpose: an unreferenced module-level extern decl leaks a
+; `declare` into programs that never trip a check, so we crash via a store through a
+; null pointer instead — that needs no symbol at all.
+(extern write :cc c [:i64 (ptr i8) :i64] (-> :i64))   ; ssize_t write(fd, buf, n)
+
+; Report an out-of-bounds slice access and hard-fail the process. The message is
+; flushed with `write` FIRST (an observable side effect the optimizer must keep),
+; then a store through null traps — LLVM lowers the trailing UB to an actual trap
+; rather than deleting the guard, precisely because the write before it is observable
+; (verified: SIGTRAP under -O3, SIGSEGV on the arm64 backend; `coil run` reports it).
+; GENERIC (T inferred from the offending slice): a generic function is emitted only
+; when instantiated, so with --debug-checks OFF nothing calls it, it is never
+; instantiated, and NOT one byte of it reaches the output — the guard is genuinely
+; zero-cost, and the off-path IR is byte-identical to the unchecked form.
+(defn slice-oob-fail! [T] [(s (slice T)) (msg (slice u8))] (-> i64)
+  (write 2 (cast (ptr i8) (slice-data msg)) (slice-len msg))
+  (store! (cast (ptr i64) 0) 0)
+  0)
+
+; The three guards are macros so `(debug-checks?)` is read at EXPANSION time: with the
+; flag off each expands to the ORIGINAL unchecked expression (byte-identical), with it
+; on it prefixes the bounds test. `s`/`i`/`lo`/`hi` arrive as already-evaluated param
+; symbols, so referencing them twice is side-effect-free; `~s` also fixes the panic's T.
+(defn dbg-slice-get [(s Code) (i Code)] (-> Code)
+  (if (debug-checks?)
+      `(do (if (or (icmp-lt ~i 0) (icmp-ge ~i (slice-len ~s)))
+               (do (slice-oob-fail! ~s "coil: slice-get index out of bounds (--debug-checks)\n") 0) 0)
+           (load (index (slice-data ~s) ~i)))
+      `(load (index (slice-data ~s) ~i))))
+
+(defn dbg-slice-set [(s Code) (i Code) (v Code)] (-> Code)
+  (if (debug-checks?)
+      `(do (if (or (icmp-lt ~i 0) (icmp-ge ~i (slice-len ~s)))
+               (do (slice-oob-fail! ~s "coil: slice-set! index out of bounds (--debug-checks)\n") 0) 0)
+           (store! (index (slice-data ~s) ~i) ~v)
+           0)
+      `(do (store! (index (slice-data ~s) ~i) ~v)
+           0)))
+
+; A subslice's lo/hi must satisfy 0 <= lo <= hi <= len — the `lo > hi` case is the
+; mem-6 invariant break (length hi-lo went negative). Checked here under the flag.
+(defn dbg-subslice [(s Code) (lo Code) (hi Code)] (-> Code)
+  (if (debug-checks?)
+      `(do (if (or (icmp-lt ~lo 0) (or (icmp-gt ~hi (slice-len ~s)) (icmp-gt ~lo ~hi)))
+               (do (slice-oob-fail! ~s "coil: subslice out of range or lo>hi (--debug-checks)\n") 0) 0)
+           (slice-new (index (slice-data ~s) ~lo) (isub ~hi ~lo)))
+      `(slice-new (index (slice-data ~s) ~lo) (isub ~hi ~lo))))
 
 ; Construct a slice from a base element pointer and a length — `{data, len}` built
 ; with two `insertvalue`s. T is inferred from `data` at the call site.
@@ -35,17 +100,18 @@ ret $ret %d"))
 
 (defn slice-empty? [T] [(s (slice T))] (-> bool) (icmp-eq (slice-len s) 0))
 
-; Read / write element i (no bounds check — Phase-2 adds debug checks).
+; Read / write element i. Bounds-checked only under --debug-checks (mem-6); off, the
+; guard macro expands to the exact unchecked load/store (zero-cost, byte-identical).
 (defn slice-get [T] [(s (slice T)) (i i64)] (-> T)
-  (load (index (slice-data s) i)))
+  (dbg-slice-get s i))
 
 (defn slice-set! [T] [(s (slice T)) (i i64) (v T)] (-> i64)
-  (store! (index (slice-data s) i) v)
-  0)
+  (dbg-slice-set s i v))
 
-; `subslice s lo hi` → the half-open view `[lo, hi)`, sharing storage.
+; `subslice s lo hi` → the half-open view `[lo, hi)`, sharing storage. Under
+; --debug-checks, rejects lo<0 / hi>len / lo>hi (the mem-6 length-(-2) invariant break).
 (defn subslice [T] [(s (slice T)) (lo i64) (hi i64)] (-> (slice T))
-  (slice-new (index (slice-data s) lo) (isub hi lo)))
+  (dbg-subslice s lo hi))
 
 ; `(slice-of ARR LEN)` — a slice over a fixed array `ARR` (a `(ptr (array T N))`
 ; or element pointer) of length LEN. T is inferred.

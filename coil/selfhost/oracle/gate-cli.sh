@@ -520,6 +520,67 @@ sed 's/(str-keyops)/(str-keyops-borrowed)/' "$T/std3.coil" > "$T/std3b.coil"
 expect_rc 22 "str-keyops-borrowed is the opt-in borrow path (alpha aliased away -> 22)" \
   "$COIL" run "$T/std3b.coil"
 
+echo "== --debug-checks: library bounds checks (mem-6), zero-cost when off =="
+# The build-mode predicate (debug-checks?) gates slice bounds checks inside macros, so
+# the check is emitted ONLY under --debug-checks and the off-path IR is byte-identical.
+cat > "$T/dbgget.coil" <<'EOF'
+(module m)
+(import "slice.coil" :use *)
+(defn main [] (-> i64)
+  (let [arr (alloc-stack (array i64 3))]
+    (store! (index arr 0) 10)
+    (let [s (slice-new (index arr 0) 3)] (slice-get s 7))))
+EOF
+# ON: a located OOB message before the crash. FAILS on the seed ('unknown flag --debug-checks').
+expect_out "slice-get index out of bounds" "--debug-checks catches a slice-get OOB" \
+  "$COIL" run "$T/dbgget.coil" --debug-checks
+# OFF (default): NO check emitted — the read runs past the end WITHOUT the debug message.
+out=$("$COIL" run "$T/dbgget.coil" 2>&1)
+echo "$out" | grep -q "out of bounds" && bad "off: the bounds check must NOT fire (zero-cost)" "$out" \
+                                      || ok "off: no bounds check emitted (zero-cost when off)"
+# the mem-6 headline: subslice lo>hi used to yield a slice reporting length -2.
+cat > "$T/dbgsub.coil" <<'EOF'
+(module m)
+(import "slice.coil" :use *)
+(defn main [] (-> i64)
+  (let [arr (alloc-stack (array i64 4))]
+    (let [s (slice-new (index arr 0) 4)] (slice-len (subslice s 3 1)))))
+EOF
+# OFF: the invariant break is unchanged (length hi-lo = -2 -> exit 254).
+"$COIL" run "$T/dbgsub.coil" >/dev/null 2>&1
+[ $? = 254 ] && ok "off: subslice(3,1) still yields length -2 (behavior unchanged)" \
+             || bad "off: subslice(3,1)" "want rc=254 (length -2)"
+# ON: rejected with the located message. FAILS on the seed ('unknown flag --debug-checks').
+expect_out "subslice out of range or lo>hi" "--debug-checks rejects a lo>hi subslice (mem-6)" \
+  "$COIL" run "$T/dbgsub.coil" --debug-checks
+
+echo "== --sanitize=address + a sanitizer --link-flag no longer aborts the compiler (mem-7) =="
+# was: a program's --link-flag reached the metaprogram dylib, which is dlopen'd into the
+# compiler — an ASan-instrumented dylib loaded that late ABORTED the compiler
+# ("interceptors are not working"). Now sanitizer flags are filtered off the dylib link.
+# FAILS on the seed (the compiler aborts), PASSES here (builds).
+"$COIL" build "$T/seven.coil" -o "$T/san1" --link-flag -fsanitize=address >/dev/null 2>&1
+[ $? = 0 ] && ok "--link-flag -fsanitize=address does not abort the compiler" \
+           || bad "--link-flag -fsanitize=address" "the compiler aborted (mem-7)"
+# --sanitize=address runs LLVM's AddressSanitizer pass: the object gains __asan symbols.
+# --lib keeps it off the exe link (whose ASan runtime version is a toolchain concern).
+# FAILS on the seed ('unknown flag --sanitize=address').
+rm -f "$T/sanobj.o"
+"$COIL" build "$T/seven.coil" --lib --sanitize=address -o "$T/sanobj.a" >/dev/null 2>&1
+nm "$T/sanobj.o" 2>/dev/null | grep -q asan \
+  && ok "--sanitize=address runs the ASan pass (object is instrumented)" \
+  || bad "--sanitize=address" "no __asan symbols in the emitted object"
+# and WITHOUT the flag the SAME object has no ASan — proving the flag is what adds it.
+rm -f "$T/plainobj.o"
+"$COIL" build "$T/seven.coil" --lib -o "$T/plainobj.a" >/dev/null 2>&1
+nm "$T/plainobj.o" 2>/dev/null | grep -q asan \
+  && bad "a plain build must not be instrumented" "found __asan without --sanitize" \
+  || ok "no ASan symbols without --sanitize=address"
+# ASan needs the LLVM backend — the native arm64 backend is a clear error, never a silent
+# uninstrumented binary. FAILS on the seed ('unknown flag').
+expect_out "requires the LLVM backend" "--sanitize=address --backend arm64 is rejected" \
+  "$COIL" build "$T/seven.coil" -o "$T/san2" --sanitize=address --backend arm64
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL

@@ -706,6 +706,17 @@
   (let [c (target-arch-cell)]
     (if (icmp-eq (load (field c set)) 0) "aarch64" (load (field c arch)))))
 
+; `(debug-checks?)` — the --debug-checks build-mode predicate (mem-2/6/7/8), a code op
+; (39) so it works in BOTH engines with no seed refresh: the interpreter answers it here
+; in `code-op`, and the compiled engine routes back through `code-op` via metahost. Set
+; from the driver before expansion (like the target arch); off (false) by default, so a
+; library's `(if (debug-checks?) …checked… …plain…)` guard MACRO expands to the plain
+; form and costs nothing. Per-process global — one build mode per compile.
+(defstruct DebugChecksCell [(on i64)])
+(defn debug-checks-cell [] (-> (ptr DebugChecksCell)) (alloc-static DebugChecksCell))
+(defn set-debug-checks! [(on i64)] (-> i64) (store! (field (debug-checks-cell) on) on) 0)
+(defn debug-checks-on? [] (-> bool) (icmp-ne (load (field (debug-checks-cell) on)) 0))
+
 ; ── S1 semantic layer for `(code-decl NODE)`: read the compiler's AUTHORITATIVE
 ; work. Checkers run AFTER resolve + typecheck (see expander.coil::run-registered-
 ; checkers and driver.coil::run-pipeline), so a checker reads the real checked
@@ -1482,6 +1493,7 @@
   (let [a (load (field cx a))]
     (if (icmp-eq op 8) (Ok [CtVal Diag] (CCode (sx-sym (sconcat a "$g" (dec->str a (next-gensym))))))
     (if (icmp-eq op 30) (Ok [CtVal Diag] (CCode (sx-sym (target-arch-str))))
+    (if (icmp-eq op 39) (Ok [CtVal Diag] (CBool (debug-checks-on?)))
     (if (icmp-eq op 9)
         (match (cv-get args 0) (Some [v] (if (is-cstr v) (Err [CtVal Diag] (derr (cstr-of v))) (Err [CtVal Diag] (derr "error: message must be a string")))) (None [] (Err [CtVal Diag] (derr "error: message must be a string"))))
     (if (icmp-eq op 31)
@@ -1533,7 +1545,7 @@
     (if (icmp-eq op 35) (cop-decl args cx)
     (if (icmp-eq op 36) (cop-type-of args cx)
     (if (icmp-eq op 37) (cop-binding-of args cx)
-        (cop-codearg op args cx))))))))))))))))))))
+        (cop-codearg op args cx)))))))))))))))))))))
 (defn module-fns-has [(cx (ptr CtCtx)) (q (slice u8))] (-> bool)
   (let [lst (load (field cx module_fns)) n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut r) false]
     (loop (if (or (load r) (icmp-ge (load i) n)) (break)

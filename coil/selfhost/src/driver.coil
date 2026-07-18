@@ -661,6 +661,42 @@
 (extern opendir  :cc c [(ptr i8)] (-> (ptr i8)))
 (extern closedir :cc c [(ptr i8)] (-> i32))
 
+; ---- the debug-checks / sanitizer build mode (mem-2 · mem-6 · mem-7 · mem-8) ----
+; `--debug-checks` turns on the library-level safety checks (slice bounds,
+; poison-on-free). The checks run inside MACROS that branch on `(debug-checks?)` —
+; a comptime code op (comptime.coil) read at expansion time — so the driver flips the
+; host-side cell here, BEFORE expansion runs, exactly like the target arch. Off by
+; default: the guard macro then expands to the plain unchecked op (zero cost).
+(defn enable-debug-checks! [] (-> i64) (set-debug-checks! 1))
+
+; `--sanitize=address` — run LLVM's AddressSanitizer pass and link its runtime
+; (mem-7). One value per process; the driver sets it, the LLVM backend reads it
+; (main.coil::build-object) so ONLY the program object is instrumented, never the
+; metaprogram dylib the compiler dlopen's (that is what made a bare
+; `--link-flag -fsanitize=address` abort the compiler).
+(defstruct SanitizeBox [(isset i64) (addr i64)])
+(defn sanitize-box [] (-> (ptr SanitizeBox)) (alloc-static SanitizeBox))
+(defn set-sanitize-address! [] (-> i64)
+  (let [b (sanitize-box)] (store! (field b addr) 1) (store! (field b isset) 1) 0))
+(defn sanitize-address? [] (-> bool) (icmp-ne (load (field (sanitize-box) addr)) 0))
+
+; A link flag we must NEVER pass to the metaprogram dylib link: an instrumentation
+; flag on the dylib gets dlopen'd into the compiler and aborts it ("interceptors are
+; not working … loaded too late"). Frameworks/libraries the program links are kept.
+(defn meta-unsafe-flag? [(f (slice u8))] (-> bool)
+  (or (starts-with f "-fsanitize")
+      (starts-with f "-fno-sanitize")))
+
+; The program's link flags, minus any that would poison the compiler when applied to
+; the metaprogram dylib it dlopen's (mem-7). Frameworks/-l libraries are preserved.
+(defn filter-meta-link-flags [(a (ptr Allocator)) (flags (ArrayList (slice u8)))] (-> (ptr (ArrayList (slice u8))))
+  (let [(mut out) (al-new [(slice u8)] a) (mut i) 0 n (al-len [(slice u8)] flags)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [f (al-get [(slice u8)] flags (load i))]
+            (if (meta-unsafe-flag? f) 0 (al-push! (mut out) f)))
+          (store! i (iadd (load i) 1)))))
+    (box-al [(slice u8)] a (load out))))
+
 (defn is-flag? [(arg (slice u8))] (-> bool)
   (and (icmp-ge (slice-len [u8] arg) 1)
        (icmp-eq (slice-get [u8] arg 0) (cast u8 45))))          ; '-'
@@ -687,6 +723,8 @@
         (str-eq arg "--shared") true
         (str-eq arg "-g")       true
         (str-eq arg "--debug")  true
+        (str-eq arg "--debug-checks")     true
+        (str-eq arg "--sanitize=address") true
         false))
 
 ; index of the first positional at/after `start`, or 0 if there is none.
@@ -779,8 +817,10 @@
               (if (str-eq arg "--lib") (store! libmode 1)
                 (if (str-eq arg "--shared") (store! libmode 2)
                   (if (or (str-eq arg "-g") (str-eq arg "--debug")) (store! backend 2)
-                    (if (and (icmp-lt (iadd (load j) 1) (cast i64 argc)) (str-eq arg "--emit-header"))
-                        (do (store! ehdr (Some (cstr->slice (load (index argv (iadd (load j) 1)))))) 0) 0)))))
+                    (if (str-eq arg "--debug-checks") (enable-debug-checks!)
+                      (if (str-eq arg "--sanitize=address") (set-sanitize-address!)
+                        (if (and (icmp-lt (iadd (load j) 1) (cast i64 argc)) (str-eq arg "--emit-header"))
+                            (do (store! ehdr (Some (cstr->slice (load (index argv (iadd (load j) 1)))))) 0) 0)))))))
             (store! j (iadd (load j) 1))))))
     ; parse -o / --link-flag / -l<lib> / --backend / --target from argv[3..].
     (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
@@ -806,6 +846,16 @@
     (if (icmp-eq (cast i64 (load outp)) 0)
         (do (ps (stderr) "error: build: missing -o <out>\n") (exit 1) 0)
       0)
+    ; --sanitize=address needs the LLVM backend (the native arm64 backend emits
+    ; Mach-O directly, with no instrumentation pass) — reject the combination loudly
+    ; rather than silently produce an UNinstrumented binary. When accepted, the
+    ; program is instrument-LINKED with -fsanitize=address; the meta-link filter keeps
+    ; that flag off the compiler's own metaprogram dylib (mem-7).
+    (if (sanitize-address?)
+        (if (icmp-ne (load backend) 1)
+            (do (ps (stderr) "error: --sanitize=address requires the LLVM backend (not --backend arm64, -g, or the LLVM-free compiler)\n") (exit 1) 0)
+          (al-push! (mut flags) "-fsanitize=address"))
+      0)
     ; A native cross-target's object won't link with the host cc (arm64). Reject it
     ; here with a message that names the flag and the cause, instead of letting the
     ; link step die with a bare `found architecture '<arch>', required arm64`.
@@ -830,8 +880,10 @@
         (store! (field ctx ok) 0)
         (store! (field ctx build-fn)  build-fn)
         (store! (field ctx emitir-fn) emitir-fn)
-        ; metaprogram dylibs link the SAME flags as the program (FFI frameworks)
-        (set-meta-link-flags! (box-al [(slice u8)] a (load flags)))
+        ; metaprogram dylibs link the SAME flags as the program (FFI frameworks) —
+        ; MINUS sanitizer flags, which would abort the compiler once the dylib is
+        ; dlopen'd into it ("interceptors … loaded too late"). (mem-7)
+        (set-meta-link-flags! (filter-meta-link-flags a (load flags)))
         ; HALT on a compile error: run-on-big-stack returns 0 when the pipeline
         ; reported a diagnostic. Mirror Rust — the diagnostic was already printed;
         ; return FAILURE (1) BEFORE the link step so no spurious `cc: no such
