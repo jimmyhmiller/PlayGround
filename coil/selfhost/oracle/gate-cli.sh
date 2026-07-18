@@ -581,6 +581,42 @@ nm "$T/plainobj.o" 2>/dev/null | grep -q asan \
 expect_out "requires the LLVM backend" "--sanitize=address --backend arm64 is rejected" \
   "$COIL" build "$T/seven.coil" -o "$T/san2" --sanitize=address --backend arm64
 
+echo "== poison-on-free debug-allocator: detects double-free (mem-2) =="
+# (debug-allocator a) from dbgalloc.coil — under --debug-checks it detects a double-free
+# with a located abort (was: a bare signal or silent reuse). FAILS on the seed
+# (dbgalloc.coil is not bundled there, so the build fails and prints no such message).
+cat > "$T/df.coil" <<'EOF'
+(module m)
+(import "alloc.coil" :use *)
+(import "dbgalloc.coil" :use *)
+(defn main [] (-> i64)
+  (let [a (debug-allocator (malloc-allocator))
+        p (unwrap-ptr [i64] (create [i64] a))]
+    (store! p 5)
+    (destroy [i64] a p)
+    (destroy [i64] a p)
+    0))
+EOF
+expect_out "double free in debug-allocator" "--debug-checks detects a double free (mem-2)" \
+  "$COIL" run "$T/df.coil" --debug-checks
+# OFF (default): (debug-allocator a) is exactly `a` — no wrapper, the double free is not
+# detected and the program exits 0 (zero-cost, behavior unchanged).
+"$COIL" run "$T/df.coil" >/dev/null 2>&1
+[ $? = 0 ] && ok "off: debug-allocator is a passthrough (no detection, zero cost)" \
+           || bad "off: debug-allocator passthrough" "want rc=0"
+# a use-after-free reads the 0xDE poison (222) rather than the freed value under the flag.
+cat > "$T/uaf.coil" <<'EOF'
+(module m)
+(import "alloc.coil" :use *)
+(import "dbgalloc.coil" :use *)
+(defn main [] (-> i64)
+  (let [a (debug-allocator (malloc-allocator))
+        p (unwrap-ptr [i64] (create [i64] a))]
+    (store! p 1234) (destroy [i64] a p) (iand (load p) 255)))
+EOF
+expect_rc 222 "--debug-checks poisons freed memory (use-after-free reads 0xDE)" \
+  "$COIL" run "$T/uaf.coil" --debug-checks
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL

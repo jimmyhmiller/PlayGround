@@ -126,6 +126,12 @@
   (store! (field a free)   (fnptr-of ar-free))
   (store! (field a ctx)    (cast (ptr i8) ar))
   a)
+; A poison-on-free DEBUG allocator (mem-2) lives in the sibling module dbgalloc.coil,
+; NOT here: its hooks are concrete C-ABI functions mono cannot dead-strip, so bundling
+; them into this always-loaded core would emit them into every allocating program. Wrap
+; any allocator with `(debug-allocator a)` from `(import "dbgalloc.coil")` — under
+; --debug-checks it detects double-free and poisons freed memory; off, it is just `a`.
+
 ; convenience: malloc the backing buffer AND the arena's own state, so each call yields
 ; an independent arena rather than a fresh view onto one shared static.
 (defn arena-allocator [(cap :i64)] (-> (ptr Allocator))
