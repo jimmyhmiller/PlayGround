@@ -351,8 +351,14 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
       need the module-mangled name — while DEBUGINFO_DWARF.md confidently documents all of it working.
       (Its tests cover the Rust/LLVM path, not the shipped self-hosted binary.) Symbolized backtraces
       *do* work well.
-- [ ] **tool-12** No test story for a user's own project: no `coil test`, no assert in any of the 21
-      bundled modules. Given macros + reflection, `deftest` could be a pure library.
+- [x] **tool-12** (test story) — ✅ DONE. `lib/assert.coil` is a bundled library: `(assert COND)` /
+      `(assert-eq A B)` bake the offending expression AND its `file:line` into the emitted code (the
+      span machinery, via new `code-src`/`code-line` comptime ops) then abort like C's assert();
+      `(deftest NAME body…)` is a macro, and a `(transform …)` discovers every test and synthesizes a
+      `main` that runs each in a FORKED child (one failure never stops the suite). `coil test FILE`
+      auto-loads it (no import needed). Pure library + macros + reflection, no compiler builtin. See
+      DECISIONS.md #10; teeth in `gate-cli.sh` (all FAIL on the seed). NOTE: the *other* tool-12 (strict
+      `Coil.toml` parsing / `[dependencies]`, Batch 9) is a separate finding, still open.
 
 ---
 

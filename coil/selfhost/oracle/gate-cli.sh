@@ -649,6 +649,64 @@ out=$("$COIL" build "$T/heapret.coil" -o "$T/hr" --debug-checks 2>&1)
 echo "$out" | grep -q "stack local" && bad "no false positive: heap return" "flagged a heap ptr" \
                                     || ok "no false positive: a heap-pointer return is not flagged"
 
+echo "== assert / assert-eq: located failures via the span machinery (tool-12) =="
+# lib/assert.coil (a bundled library) bakes the offending expression AND its file:line
+# into the emitted code via the new code-src / code-file / code-line comptime ops. ALL of
+# this FAILS on the seed: assert.coil is not bundled there, and code-line/code-src are
+# unknown ops.
+cat > "$T/assf.coil" <<'EOF'
+(module m)
+(import "assert.coil" :use *)
+(defn main [] (-> i64)
+  (assert (> 2 1))
+  (assert (< 9 3))
+  0)
+EOF
+expect_rc 134 "assert failure aborts (SIGABRT = 128+6)"                     "$COIL" run "$T/assf.coil"
+expect_out "assertion failed: \(< 9 3\)" "assert prints the offending expression (code-src)" "$COIL" run "$T/assf.coil"
+expect_out "assf\.coil:5"  "assert prints file:line (code-file/code-line)"  "$COIL" run "$T/assf.coil"
+cat > "$T/asseq.coil" <<'EOF'
+(module m)
+(import "assert.coil" :use *)
+(defn main [] (-> i64) (assert-eq (+ 40 1) 99))
+EOF
+expect_out "assertion failed: \(\+ 40 1\) == 99" "assert-eq prints BOTH expressions" "$COIL" run "$T/asseq.coil"
+
+echo "== deftest + the test transform: discovery, fork isolation, exit code (tool-12) =="
+# A file of (deftest …) with NO main: importing assert.coil registers a (transform …) that
+# DISCOVERS every coil-test$… and synthesizes a forking main. FAILS on the seed (assert.coil
+# not bundled -> the import errors).
+cat > "$T/suite.coil" <<'EOF'
+(module m)
+(import "assert.coil" :use *)
+(deftest passes (assert-eq (* 6 7) 42))
+(deftest fails  (assert-eq (+ 1 1) 3))
+(deftest tail   (assert (> 5 0)))
+EOF
+expect_out "running 3 tests"       "the transform discovers every test"                    "$COIL" run "$T/suite.coil"
+expect_out "test passes \.\.\. ok" "a passing test reports ok"                             "$COIL" run "$T/suite.coil"
+expect_out "test tail \.\.\. ok"   "the suite continues past a failing test (fork isolation)" "$COIL" run "$T/suite.coil"
+expect_out "1 failed"              "the summary counts the failure"                        "$COIL" run "$T/suite.coil"
+expect_rc 1  "a suite with a failing test exits 1"                                         "$COIL" run "$T/suite.coil"
+
+echo "== coil test: the project test runner (tool-12) =="
+# `coil test FILE` auto-loads assert.coil (--use), so a test file needs NO import at all,
+# then runs the synthesized suite. FAILS on the seed ('unknown command test').
+cat > "$T/noimp.coil" <<'EOF'
+(module m)
+(deftest a (assert-eq (* 3 3) 9))
+(deftest b (assert (> 7 0)))
+EOF
+expect_rc 0  "coil test: an all-passing suite (no import needed) exits 0" "$COIL" test "$T/noimp.coil"
+expect_out "2 passed; 0 failed" "coil test: reports the pass count"       "$COIL" test "$T/noimp.coil"
+cat > "$T/redf.coil" <<'EOF'
+(module m)
+(deftest willfail (assert-eq (+ 2 2) 5))
+EOF
+expect_rc 1  "coil test: a failing suite exits 1"                         "$COIL" test "$T/redf.coil"
+expect_out "0 passed; 1 failed" "coil test: reports the failure count"    "$COIL" test "$T/redf.coil"
+expect_out "discovers every \(deftest" "coil test --help documents itself" "$COIL" test --help
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL
