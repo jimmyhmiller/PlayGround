@@ -60,6 +60,8 @@
    (designTurn i64)
    (designResponse (ptr i8))
    (designRequest (ptr i8))
+   (designPreview (ptr workflow.Runtime))
+   (designPreviewValid i64)
    (selectionRegion i64)
    (selectionAnchor i64)
    (selectionFocus i64)
@@ -276,23 +278,48 @@
   (and (>= horizontal left)
        (and (< horizontal (+ left width)) (and (>= vertical top) (< vertical (+ top height))))))
 
-(defn node-horizontal [(node i64) (center f64)] (-> f64)
-  (case node 2
-        (- center 150.0) 3
-        (+ center 150.0) center))
+;; Layered DAG layout: a node's row is its longest dependency chain, and
+;; nodes sharing a row spread into columns around the center line.
+(defn compute-flow-layout [(runtime workflow.Runtime)
+                           (depths (ptr i64))
+                           (columns (ptr i64))
+                           (rowCounts (ptr i64))] (-> i64)
+  (let [(mut maxDepth) 0]
+    (do
+      (for [row 0
+            7]
+        (store! (index rowCounts row) 0))
+      (for [node 0
+            7]
+        (if (< node (workflow.node-count runtime))
+          (let [dependencyA (workflow.node-dependency runtime node 0)
+                dependencyB (workflow.node-dependency runtime node 1)
+                (mut depth) 0]
+            (do
+              (if (and (>= dependencyA 0) (> (+ (load (index depths dependencyA)) 1) (load depth)))
+                (store! depth (+ (load (index depths dependencyA)) 1))
+                0)
+              (if (and (>= dependencyB 0) (> (+ (load (index depths dependencyB)) 1) (load depth)))
+                (store! depth (+ (load (index depths dependencyB)) 1))
+                0)
+              (store! (index depths node) (load depth))
+              (store! (index columns node) (load (index rowCounts (load depth))))
+              (store! (index rowCounts (load depth)) (+ (load (index rowCounts (load depth))) 1))
+              (if (> (load depth) (load maxDepth)) (store! maxDepth (load depth)) 0)
+              0))
+          0))
+      (load maxDepth))))
 
-(defn node-vertical [(node i64) (height i64)] (-> f64)
-  (let [step
-          (let [raw (/ (- (cast f64 height) 205.0) 5.0)]
-            (if (< raw 100.0) 100.0 raw))
-        row (case node 0
-                  0.0 1
-                  1.0 2
-                  2.0 3
-                  2.0 4
-                  3.0 5
-                  4.0 5.0)]
-    (+ 144.0 (* row step))))
+(defn layout-horizontal [(column i64) (rowCount i64) (center f64)] (-> f64)
+  (+ center (* (- (cast f64 column) (/ (cast f64 (- rowCount 1)) 2.0)) 320.0)))
+
+(defn layout-vertical [(depth i64) (maxDepth i64) (height i64)] (-> f64)
+  (let [divisor (cast f64 (if (> maxDepth 5) maxDepth 5))
+        raw (/ (- (cast f64 height) 205.0) divisor)
+        step (cond (< raw 100.0) 100.0
+                   (> raw 139.0) 139.0
+                   raw)]
+    (+ 144.0 (* (cast f64 depth) step))))
 
 ;; Text editing behavior in this section is adapted from Vercel Labs Native SDK's
 ;; text interaction engine, modified for Coil, Raylib, and Flowline's fixed state.
@@ -893,6 +920,7 @@
               (store! (load (field state creationText)) (cast i8 0))
               (store! (load (field state designResponse)) (cast i8 0))
               (store! (load (field state designRequest)) (cast i8 0))
+              (store! (field state designPreviewValid) 0)
               0)
             0)
           (for [project 0
@@ -907,18 +935,27 @@
                 (store! (field state creationOpen) 0)
                 0)
               0))
-          (for [node 0
-                7]
-            (if (and (> catalogCount 0)
-                     (and (< node (workflow.node-count (load (field state runtime))))
-                          (in-bounds mouseHorizontal
-                                     mouseVertical
-                                     (- (node-horizontal node center) 20.0)
-                                     (- (node-vertical node screenHeight) 20.0)
-                                     40.0
-                                     40.0)))
-              (do (store! (field state selectedNode) node) 0)
-              0))
+          (if (> catalogCount 0)
+            (let [runtime (load (field state runtime))
+                  depths (cast (ptr i64) (cast i64 (alloc-stack (array i64 7))))
+                  columns (cast (ptr i64) (cast i64 (alloc-stack (array i64 7))))
+                  rowCounts (cast (ptr i64) (cast i64 (alloc-stack (array i64 7))))
+                  maxDepth (compute-flow-layout runtime depths columns rowCounts)]
+              (for [node 0
+                    7]
+                (if (and (< node (workflow.node-count runtime))
+                         (in-bounds mouseHorizontal
+                                    mouseVertical
+                                    (- (layout-horizontal (load (index columns node))
+                                                          (load (index rowCounts (load (index depths node))))
+                                                          center)
+                                       20.0)
+                                    (- (layout-vertical (load (index depths node)) maxDepth screenHeight) 20.0)
+                                    40.0
+                                    40.0))
+                  (do (store! (field state selectedNode) node) 0)
+                  0)))
+            0)
           (if (and (> catalogCount 0)
                    (and (= (workflow.node-status (load (field state runtime)) (load (field state selectedNode))) 4)
                         (in-bounds mouseHorizontal
@@ -1073,14 +1110,19 @@
             0)
         (stroke-rectangle (- horizontal 6.5) (- vertical 6.5) 13.0 13.0 1.5 (color 61 69 79))))
 
-(defn draw-flow [(state AppState) (rightStart i64) (screenHeight i64)] (-> i64)
-  (let [project (load (field state selectedProject))
-        selected (load (field state selectedNode))
-        center (/ (cast f64 (+ LEFT_WIDTH rightStart)) 2.0)
-        tint (accent project)
+(defn draw-flow [(state AppState)
+                 (runtime workflow.Runtime)
+                 (selected i64)
+                 (rightStart i64)
+                 (screenHeight i64)
+                 (tint raylib.Color)] (-> i64)
+  (let [center (/ (cast f64 (+ LEFT_WIDTH rightStart)) 2.0)
         time (raylib.GetTime)
         pulse (+ 1.0 (* 0.5 (sin (* time 4.0))))
-        runtime (load (field state runtime))]
+        depths (cast (ptr i64) (cast i64 (alloc-stack (array i64 7))))
+        columns (cast (ptr i64) (cast i64 (alloc-stack (array i64 7))))
+        rowCounts (cast (ptr i64) (cast i64 (alloc-stack (array i64 7))))
+        maxDepth (compute-flow-layout runtime depths columns rowCounts)]
     (do
       (for [node 0
             7]
@@ -1090,43 +1132,50 @@
                   2]
               (let [dependency (workflow.node-dependency runtime node dependencySlot)]
                 (if (>= dependency 0)
-                  (draw-edge (node-horizontal dependency center)
-                             (+ (node-vertical dependency screenHeight) 20.0)
-                             (node-horizontal node center)
-                             (- (node-vertical node screenHeight) 20.0)
+                  (draw-edge (layout-horizontal (load (index columns dependency))
+                                                (load (index rowCounts (load (index depths dependency))))
+                                                center)
+                             (+ (layout-vertical (load (index depths dependency)) maxDepth screenHeight) 20.0)
+                             (layout-horizontal (load (index columns node))
+                                                (load (index rowCounts (load (index depths node))))
+                                                center)
+                             (- (layout-vertical (load (index depths node)) maxDepth screenHeight) 20.0)
                              (or (= (workflow.node-status runtime node) 2)
                                  (= (workflow.node-status runtime node) 4))
                              tint)
                   0)))
             0)
           0))
-      (line center 68.0 center (- (node-vertical 0 screenHeight) 20.0) 1.0 (color-alpha 224 165 58 80))
-      (line center
-            (+ (node-vertical 6 screenHeight) 20.0)
-            center
-            (+ (node-vertical 6 screenHeight) 53.0)
-            1.0
-            (color-alpha 224 165 58 80))
+      (if (= (load (index rowCounts 0)) 1)
+        (line center 68.0 center (- (layout-vertical 0 maxDepth screenHeight) 20.0) 1.0 (color-alpha 224 165 58 80))
+        0)
+      (if (= (load (index rowCounts maxDepth)) 1)
+        (let [bottom (layout-vertical maxDepth maxDepth screenHeight)]
+          (line center (+ bottom 20.0) center (+ bottom 53.0) 1.0 (color-alpha 224 165 58 80)))
+        0)
       (for [node 0
             7]
         (if (< node (workflow.node-count runtime))
-          (let [horizontal (node-horizontal node center)
-                vertical (node-vertical node screenHeight)
+          (let [horizontal
+                  (layout-horizontal (load (index columns node))
+                                     (load (index rowCounts (load (index depths node))))
+                                     center)
+                vertical (layout-vertical (load (index depths node)) maxDepth screenHeight)
                 chosen (= node selected)
-                status (workflow.node-status runtime node)]
+                numberLabel (case node 0 c"[1]" 1 c"[2]" 2 c"[3]" 3 c"[4]" 4 c"[5]" 5 c"[6]" c"[7]")]
             (do
               (if chosen (stroke-rectangle (- horizontal 16.0) (- vertical 16.0) 32.0 32.0 1.0 tint) 0)
-              (draw-node-symbol horizontal vertical node status pulse tint)
-              (if (= node 2)
+              (draw-node-symbol horizontal vertical node (workflow.node-status runtime node) pulse tint)
+              (if (< horizontal center)
                 (do
                   (draw-text (field state mono)
-                             (display-node-title state project node)
+                             (workflow.node-title runtime node)
                              (- horizontal 175.0)
                              (- vertical 6.0)
                              10.5
                              (if chosen (load tint) (color 88 97 113)))
                   (draw-text (field state monoMedium)
-                             c"[3]"
+                             numberLabel
                              (- horizontal 62.0)
                              (- vertical 6.0)
                              10.0
@@ -1136,13 +1185,13 @@
                 (do
                   (line (+ horizontal 10.0) vertical (+ horizontal 34.0) vertical 1.0 (color-alpha 224 165 58 100))
                   (draw-text (field state monoMedium)
-                             (case node 0 c"[1]" 1 c"[2]" 3 c"[4]" 4 c"[5]" 5 c"[6]" c"[7]")
+                             numberLabel
                              (+ horizontal 42.0)
                              (- vertical 6.0)
                              10.0
                              (if chosen (load tint) (color 127 136 148)))
                   (draw-text (field state mono)
-                             (display-node-title state project node)
+                             (workflow.node-title runtime node)
                              (+ horizontal 70.0)
                              (- vertical 6.0)
                              10.5
@@ -1207,7 +1256,12 @@
                  tint)
       (fill-rectangle (cast f64 (- rightStart 76)) 23.0 7.0 7.0 tint)
       (draw-text (field state monoMedium) c"LIVE" (cast f64 (- rightStart 58)) 21.0 10.0 tint)
-      (draw-flow state rightStart screenHeight)
+      (draw-flow state
+                 (load (field state runtime))
+                 (load (field state selectedNode))
+                 rightStart
+                 screenHeight
+                 tint)
       0)))
 
 (defn draw-card-background [(left f64) (top f64) (width f64) (height f64) (leftAccent bool) (tint raylib.Color)] (-> i64)
@@ -1590,7 +1644,16 @@
       (draw-grid LEFT_WIDTH rightStart screenHeight)
       (fill-rectangle (cast f64 LEFT_WIDTH) 0.0 (cast f64 (- rightStart LEFT_WIDTH)) 64.0 (color 7 10 14))
       (line (cast f64 LEFT_WIDTH) 63.0 (cast f64 rightStart) 63.0 1.0 (color 20 26 34))
-      (draw-text (field state monoMedium) c"UNTITLED WORKFLOW" 268.0 14.0 15.0 (color 223 229 236))
+      (begin-scissor 268.0 10.0 (cast f64 (- rightStart 494)) 28.0)
+      (draw-text (field state monoMedium)
+                 (if (= (load (field state designPreviewValid)) 1)
+                   (workflow.program-name (load (field state designPreview)))
+                   c"UNTITLED WORKFLOW")
+                 268.0
+                 14.0
+                 15.0
+                 (color 223 229 236))
+      (raylib.EndScissorMode)
       (draw-text (field state mono) c"DRAFT / NOT SAVED" 268.0 39.0 9.5 (color 76 85 97))
       (if (> (load (field state designTurn)) 0)
         (do
@@ -1598,21 +1661,25 @@
           (draw-text (field state monoMedium) c"BUILD THIS WORKFLOW  >" (cast f64 (- rightStart 198)) 24.0 9.5 tint)
           0)
         0)
-      (stroke-rectangle (- center 28.0) 214.0 56.0 56.0 1.5 (color 42 51 63))
-      (fill-rectangle (- center 4.0) 238.0 8.0 8.0 tint)
-      (draw-text (field state monoMedium)
-                 c"YOUR WORKFLOW WILL TAKE SHAPE HERE"
-                 (- center 208.0)
-                 310.0
-                 16.0
-                 (color 207 214 222))
-      (draw-text (field state sans)
-                 c"Talk through the outcome, constraints, and unknowns. The designer can\ninspect this repository and recommend useful steps as you iterate."
-                 (- center 255.0)
-                 351.0
-                 13.0
-                 (color 127 136 148))
-      (draw-text (field state mono) c"NO NODES YET" (- center 53.0) 421.0 10.0 (color 61 69 79))
+      (if (= (load (field state designPreviewValid)) 1)
+        (draw-flow state (load (field state designPreview)) -1 rightStart screenHeight tint)
+        (do
+          (stroke-rectangle (- center 28.0) 214.0 56.0 56.0 1.5 (color 42 51 63))
+          (fill-rectangle (- center 4.0) 238.0 8.0 8.0 tint)
+          (draw-text (field state monoMedium)
+                     c"YOUR WORKFLOW WILL TAKE SHAPE HERE"
+                     (- center 208.0)
+                     310.0
+                     16.0
+                     (color 207 214 222))
+          (draw-text (field state sans)
+                     c"Talk through the outcome, constraints, and unknowns. The designer can\ninspect this repository and recommend useful steps as you iterate."
+                     (- center 255.0)
+                     351.0
+                     13.0
+                     (color 127 136 148))
+          (draw-text (field state mono) c"NO NODES YET" (- center 53.0) 421.0 10.0 (color 61 69 79))
+          0))
       (fill-rectangle (cast f64 rightStart) 0.0 (cast f64 RIGHT_WIDTH) (cast f64 screenHeight) (color 9 12 17))
       (line (cast f64 rightStart) 0.0 (cast f64 rightStart) (cast f64 screenHeight) 1.0 (color 23 30 39))
       (line (cast f64 rightStart) 78.0 (cast f64 screenWidth) 78.0 1.0 (color 20 26 34))
@@ -1808,7 +1875,8 @@
           clipboardText (workflow.allocate-buffer 4096)
           measureText (workflow.allocate-buffer 4096)
           designResponse (workflow.allocate-buffer 4096)
-          designRequest (workflow.allocate-buffer CREATION_CAPACITY)]
+          designRequest (workflow.allocate-buffer CREATION_CAPACITY)
+          designPreview (workflow.allocate-runtime)]
       (store! catalog catalogValue)
       (store! creationText (cast i8 0))
       (store! clipboardText (cast i8 0))
@@ -1839,6 +1907,8 @@
       (store! (field state designTurn) 0)
       (store! (field state designResponse) designResponse)
       (store! (field state designRequest) designRequest)
+      (store! (field state designPreview) designPreview)
+      (store! (field state designPreviewValid) 0)
       (store! (field state selectionRegion) 0)
       (store! (field state selectionAnchor) 0)
       (store! (field state selectionFocus) 0)
@@ -1894,9 +1964,25 @@
                     0)
                   (if (= (load (field state creationRequested)) 1)
                     (do
-                      (workflow.start-creation-from-design)
+                      (if (and (= (load (field state designPreviewValid)) 1)
+                               (= (workflow.install-draft-workflow) 1))
+                        (do
+                          (workflow.refresh-catalog (mut catalog))
+                          (let [createdWorkflowIndex (workflow.created-workflow-index catalog)]
+                            (store! (field state selectedProject)
+                                    (if (>= createdWorkflowIndex 0)
+                                      createdWorkflowIndex
+                                      (- (workflow.catalog-count catalog) 1))))
+                          (store! (field state runtime)
+                                  (workflow.catalog-runtime catalog (load (field state selectedProject))))
+                          (store! (field state selectedNode) 0)
+                          (store! (field state creationState) 2)
+                          0)
+                        (do
+                          (workflow.start-creation-from-design)
+                          (store! (field state creationState) 1)
+                          0))
                       (store! (field state creationRequested) 0)
-                      (store! (field state creationState) 1)
                       0)
                     0)
                   (if (= (load (field state designRequested)) 1)
@@ -1917,6 +2003,9 @@
                       (if (= designState 2)
                         (do
                           (workflow.finish-design-turn designResponse)
+                          (store! designPreview (workflow.load-runtime c".flowline/design.draft.flow"))
+                          (store! (field state designPreviewValid)
+                                  (if (> (workflow.node-count designPreview) 0) 1 0))
                           (store! (field state designTurn) (+ (load (field state designTurn)) 1))
                           (store! (field state designState) 2)
                           0)
@@ -1993,6 +2082,7 @@
           measureText (workflow.allocate-buffer 4096)
           designResponse (workflow.allocate-buffer 4096)
           designRequest (workflow.allocate-buffer CREATION_CAPACITY)
+          designPreview (workflow.allocate-runtime)
           response
             c"Recommended workflow: start with a repository inspection step, then\nfan out into build verification and a documentation pass. Both feed a\nfinal human approval before anything lands on the main branch."
           screenWidth (cast i64 (/ (cast f64 (raylib.GetScreenWidth)) (ui-scale)))
@@ -2017,6 +2107,12 @@
       (store! (field state measureText) measureText)
       (store! (field state designResponse) designResponse)
       (store! (field state designRequest) designRequest)
+      (workflow.write-text-file c".flowline/snapshot.draft.flow"
+                                c"workflow Draft Review Pipeline\nrunner deepseek\n\nagent inspect-repo\ntitle Inspect repository\nprompt Summarize the structure of src/main.coil.\nafter none\n\nagent review-ui\ntitle Review UI changes\nprompt Review src/main.coil for UI regressions.\nafter inspect-repo\n\napproval human-signoff\ntitle Human signoff\nafter review-ui\n")
+      (store! designPreview (workflow.load-runtime c".flowline/snapshot.draft.flow"))
+      (store! (field state designPreview) designPreview)
+      (store! (field state designPreviewValid)
+              (if (> (workflow.node-count designPreview) 0) 1 0))
       (store! (field state creationOpen) 1)
       (store! (field state designTurn) 1)
       (store! (field state designState) 2)

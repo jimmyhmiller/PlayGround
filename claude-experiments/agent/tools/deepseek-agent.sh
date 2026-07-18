@@ -14,6 +14,7 @@ REPO_MAP=0
 EXTRACT_FLOW=0
 WRAP=0
 INLINE_NAMED_FILES=0
+SPLIT_FLOW=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -24,6 +25,7 @@ while [ $# -gt 0 ]; do
     --extract-flow) EXTRACT_FLOW=1; shift ;;
     --wrap) WRAP=1; shift ;;
     --inline-named-files) INLINE_NAMED_FILES=1; shift ;;
+    --split-flow) SPLIT_FLOW="$2"; shift 2 ;;
     *) echo "deepseek-agent: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -112,6 +114,21 @@ if [ -z "$(tr -d '[:space:]' < "$WORK/content.md")" ]; then
   echo "deepseek-agent: response contained no message content (finish_reason: $(jq -r '.choices[0].finish_reason' "$WORK/response.json")) — if finish_reason is 'length', raise DEEPSEEK_MAX_TOKENS" >&2
   jq 'del(.choices[0].message.reasoning_content)' "$WORK/response.json" >&2 || cat "$WORK/response.json" >&2
   exit 1
+fi
+
+# --split-flow: the reply carries a workflow draft in its (single) fenced
+# block; route the block to the draft file and only the prose to --output.
+if [ -n "$SPLIT_FLOW" ]; then
+  awk 'insideFence && /^```/ {exit} insideFence {print} /^```/ && !insideFence {insideFence=1}' "$WORK/content.md" > "$WORK/draft.flow"
+  if [ -s "$WORK/draft.flow" ] && head -n 1 "$WORK/draft.flow" | grep -q '^workflow '; then
+    cp "$WORK/draft.flow" "$SPLIT_FLOW"
+    awk 'BEGIN {skip = 0; done = 0}
+         /^```/ { if (!done) { if (skip) {skip = 0; done = 1} else {skip = 1}; next } }
+         skip {next}
+         {print}' "$WORK/content.md" > "$WORK/prose.md"
+    mv "$WORK/prose.md" "$WORK/content.md"
+    echo "deepseek-agent: updated $SPLIT_FLOW"
+  fi
 fi
 
 cp "$WORK/content.md" "$OUTPUT_FILE"

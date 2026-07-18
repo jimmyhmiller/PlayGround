@@ -22,6 +22,7 @@
 (extern fclose :cc c [(ptr i8)] (-> i32))
 (extern system :cc c [(ptr i8)] (-> i32))
 (extern printf :cc c [(ptr i8) ...] (-> i32))
+(extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
 
 (defstruct WorkflowNode
   [(name (ptr i8))
@@ -297,11 +298,81 @@
   (do
     (system c"mkdir -p .flowline; rm -f .flowline/design.done .flowline/design.failed .flowline/design.output")
     (if (= turn 0)
-      (write-text-file c".flowline/design.transcript" c"")
+      (do
+        (write-text-file c".flowline/design.transcript" c"")
+        (system c"rm -f .flowline/design.draft.flow")
+        0)
       0)
     (write-text-file c".flowline/design.request" request)
-    (system c"(tools/deepseek-agent.sh --prompt prompts/design-workflow.md --output .flowline/design.output --context .flowline/design.transcript --context .flowline/design.request --inline-named-files --repo-map > .flowline/design.events 2>&1 && touch .flowline/design.done || touch .flowline/design.failed) &")
+    (system c"(tools/deepseek-agent.sh --prompt prompts/design-workflow.md --output .flowline/design.output --context .flowline/design.transcript --context .flowline/design.draft.flow --context .flowline/design.request --split-flow .flowline/design.draft.flow --inline-named-files --repo-map > .flowline/design.events 2>&1 && touch .flowline/design.done || touch .flowline/design.failed) &")
     0))
+
+(defn allocate-runtime [] (-> (ptr Runtime))
+  (cast (ptr Runtime) (malloc (sizeof Runtime))))
+
+(defn slugify-into [(destination (ptr i8)) (name (ptr i8)) (capacity i64)] (-> i64)
+  (let [(mut readPosition) 0
+        (mut writePosition) 0
+        (mut lastDash) 1]
+    (do
+      (while (and (icmp-ne (load (index name (load readPosition))) (cast i8 0))
+                  (< (load writePosition) (- capacity 1)))
+        (let [byte (cast i64 (load (index name (load readPosition))))]
+          (do
+            (cond (and (>= byte 65) (<= byte 90))
+                    (do
+                      (store! (index destination (load writePosition)) (cast i8 (+ byte 32)))
+                      (store! writePosition (+ (load writePosition) 1))
+                      (store! lastDash 0)
+                      0)
+                  (or (and (>= byte 97) (<= byte 122)) (and (>= byte 48) (<= byte 57)))
+                    (do
+                      (store! (index destination (load writePosition)) (cast i8 byte))
+                      (store! writePosition (+ (load writePosition) 1))
+                      (store! lastDash 0)
+                      0)
+                  (if (= (load lastDash) 0)
+                    (do
+                      (store! (index destination (load writePosition)) (cast i8 45))
+                      (store! writePosition (+ (load writePosition) 1))
+                      (store! lastDash 1)
+                      0)
+                    0))
+            (store! readPosition (+ (load readPosition) 1)))))
+      (if (and (> (load writePosition) 0)
+               (icmp-eq (load (index destination (- (load writePosition) 1))) (cast i8 45)))
+        (store! writePosition (- (load writePosition) 1))
+        0)
+      (store! (index destination (load writePosition)) (cast i8 0))
+      (if (= (load writePosition) 0)
+        (do (snprintf destination capacity c"workflow") 0)
+        0)
+      0)))
+
+;; Writes the designer's current draft straight into workflows/ — no agent
+;; involved, so BUILD THIS WORKFLOW completes instantly. Returns 1 on success.
+(defn install-draft-workflow [] (-> i64)
+  (let [program (parse-program c".flowline/design.draft.flow")]
+    (if (= (load (field program nodeCount)) 0)
+      0
+      (let [slug (cast (ptr i8) (cast i64 (alloc-stack (array i8 64))))
+            path (cast (ptr i8) (cast i64 (alloc-stack (array i8 96))))
+            content (read-source c".flowline/design.draft.flow")]
+        (do
+          (slugify-into slug (load (field program name)) 48)
+          (let [(mut attempt) 1]
+            (loop
+              (do
+                (if (= (load attempt) 1)
+                  (snprintf path 96 c"workflows/%s.flow" slug)
+                  (snprintf path 96 c"workflows/%s-%lld.flow" slug (load attempt)))
+                (if (and (file-exists path) (< (load attempt) 9))
+                  (store! attempt (+ (load attempt) 1))
+                  (break)))))
+          (system c"mkdir -p workflows")
+          (write-text-file path content)
+          (write-text-file c".flowline/created.path" path)
+          1)))))
 
 (defn design-state [] (-> i64)
   (cond (file-exists c".flowline/design.done") 2
