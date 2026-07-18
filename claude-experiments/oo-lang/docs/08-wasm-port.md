@@ -285,6 +285,52 @@ stub, green threads, VFS/mock-shell at the builtin boundary, `Env.get`→null).
 
 ---
 
+## 5b. Build configuration & module set (how the wasm build is selected)
+
+**Validated 2026-07-17.** Two facts settle this:
+1. **Undefined externs only become wasm imports if *referenced*.** An `extern` declaration in
+   `ioutil.coil` that no reachable code calls produces nothing. So the wasm build does **not**
+   need to fork `ioutil.coil` or delete the socket/curl/pthread externs — it only needs to keep
+   those *code paths* unreferenced from its exports (dead code is dropped).
+2. **Compile-time target branching works via a macro** (once Coil is current — see caveat).
+   The canonical primitive is `(code-eq (target-arch) `wasm32)`. A one-liner macro gives
+   `#ifdef`-style conditional compilation that *removes* a call on wasm rather than branching at
+   runtime (a runtime `if` would keep both branches → the curl/socket refs would survive):
+   ```coil
+   ; expands to BODY on native, STUB on wasm — the wasm branch never references BODY's callees
+   (defn when-native [(body Code) (stub Code)] (-> Code)
+     (if (code-eq (target-arch) `wasm32) stub body))
+   ```
+   Verified end-to-end: a program guarding a fake `curl_thing` call with `when-native` builds
+   natively (references it) and, on `--target wasm32`, drops the reference and finalizes with **no
+   import** for it.
+
+**So the module set stays shared — no file forking.** Apply `when-native`/`when-wasm` guards at
+exactly the host-boundary sites so the wasm build never references the browser-hostile externs:
+- **`http.coil` `http-request`** — wasm branch returns a transport-error `HttpResult` without
+  touching any `curl_*` extern (the whole libcurl block goes unreferenced → zero curl imports).
+- **`vm.coil` `vm-spawn` / OP_THREAD_SPAWN** — wasm branch enqueues a green-thread `VMThread`
+  instead of calling `thread-spawn` (`pthread_create`); native keeps real threads. (This is the
+  same edit as the P3 scheduler work.)
+- **entry (`main.coil`)** — wasm branch skips the socket accept loop and instead wires the
+  `scry_eval`/`scry_boot`/`scry_tick` exports; native keeps `server-accept-loop`. Because
+  `eval-core` (in `server.coil`) has no socket dependency, the socket-calling functions are simply
+  dead on wasm and dropped — `server.coil` need not be split.
+- `Env.get` (`getenv`) — provided by the JS bridge as always-null (fake model auto-selected); no
+  guard needed (getenv is harmless as an import).
+
+**⚠ Build-tooling dependency — Coil must be rebuilt from current HEAD.** The installed
+`~/.cargo/bin/coil` (dated Jul 17 00:36) is **stale**: it predates commit `d85202678`
+(*"(target-arch) reflects the real --target"*, dated Jul 17 19:09), so on it `(target-arch)`
+returns the **host** arch even under `--target wasm32` at macro-expansion time — the guards above
+would silently bake the *native* branch into the wasm module. The fix is already in HEAD;
+`coil/selfhost/rebootstrap.sh` produces a correct compiler. **Confirm `(code-eq (target-arch)
+`wasm32)` actually folds true under `--target wasm32` (the `expand` gate in
+`selfhost/oracle/gate-cli.sh`) before relying on the module-set guards.** This rebuild pairs
+naturally with landing C0/C1, which also live in the self-hosted compiler.
+
+---
+
 ## 6. Phased plan
 
 - **P0 — Compiler unblock (Jimmy).** Land **C0** (shadow stack — prerequisite) then **C1**
