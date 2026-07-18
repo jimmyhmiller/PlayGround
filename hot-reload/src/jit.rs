@@ -34,8 +34,9 @@ use inkwell::values::{FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, IntPredicate};
 use livetype_core::{
     DefId, Engine, Function, FunctionState, Instruction, OUT_CALL, OUT_CONDITION, OUT_RETURN,
-    OUT_TYPE_ERROR, OUT_YIELD, RawSlot, TAG_BOOL, TAG_I64, TAG_REF, TierSource, Version, World,
-    lt_call_foreign, lt_emit, lt_get_field, lt_load_global, lt_new,
+    OUT_TYPE_ERROR, OUT_YIELD, RawSlot, TAG_BOOL, TAG_I64, TAG_REF, TAG_STR, TierSource, Version,
+    World, lt_call_foreign, lt_case_variant, lt_concat_str, lt_emit, lt_get_field, lt_load_global,
+    lt_new, lt_new_variant,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -133,6 +134,27 @@ impl<'ctx> Codegen<'ctx> {
         self.module.add_function(
             "lt_load_global",
             i64t.fn_type(&[ptr.into(), i64t.into(), ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "lt_concat_str",
+            i64t.fn_type(&[i64t.into(), i64t.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "lt_new_variant",
+            i64t.fn_type(
+                &[ptr.into(), i64t.into(), i64t.into(), ptr.into(), i64t.into(), ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "lt_case_variant",
+            i64t.fn_type(
+                &[ptr.into(), i64t.into(), ptr.into(), i64t.into(), ptr.into()],
+                false,
+            ),
             Some(Linkage::External),
         );
     }
@@ -247,6 +269,121 @@ impl<'ctx> Codegen<'ctx> {
             .unwrap();
     }
 
+    /// The shared constructor lowering for `New` (variant `None`) and
+    /// `NewVariant` (variant `Some`): marshal supplied `(field_id, slot)`
+    /// triples into the entry-block scratch as `SuppliedField[n]`, call the
+    /// matching extern, branch on its status (a failed soundness check pauses),
+    /// and store the fresh object id. Leaves the builder wired to fall through.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_constructor(
+        &self,
+        step: FunctionValue<'ctx>,
+        frame: PointerValue<'ctx>,
+        rt: PointerValue<'ctx>,
+        scratch: Option<PointerValue<'ctx>>,
+        out_objid_slot: Option<PointerValue<'ctx>>,
+        blocks: &[inkwell::basic_block::BasicBlock<'ctx>],
+        pc: usize,
+        dst: usize,
+        type_id: DefId,
+        variant: Option<u64>,
+        fields: &[(livetype_core::FieldId, usize)],
+    ) {
+        let i64t = self.ctx.i64_type();
+        let n = fields.len();
+        let arr_ty = i64t.array_type((3 * n).max(1) as u32);
+        let arr = scratch.expect("a constructor implies scratch space");
+        for (k, (fid, reg)) in fields.iter().enumerate() {
+            let slot = self.slot_ptr(frame, *reg);
+            let tag = self.load_field(slot, 0, "s.tag");
+            let payload = self.load_field(slot, 1, "s.pay");
+            let store = |off: usize, v: IntValue<'ctx>| {
+                let elem = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            arr_ty,
+                            arr,
+                            &[i64t.const_zero(), i64t.const_int((3 * k + off) as u64, false)],
+                            "field",
+                        )
+                        .unwrap()
+                };
+                self.builder.build_store(elem, v).unwrap();
+            };
+            store(0, i64t.const_int(*fid, false));
+            store(1, tag);
+            store(2, payload);
+        }
+        let base = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    arr_ty,
+                    arr,
+                    &[i64t.const_zero(), i64t.const_zero()],
+                    "supplied.base",
+                )
+                .unwrap()
+        };
+        let out_objid = out_objid_slot.expect("a constructor implies an out slot");
+        let call = match variant {
+            None => {
+                let lt_new = self.module.get_function("lt_new").unwrap();
+                self.builder
+                    .build_call(
+                        lt_new,
+                        &[
+                            rt.into(),
+                            i64t.const_int(type_id, false).into(),
+                            base.into(),
+                            i64t.const_int(n as u64, false).into(),
+                            out_objid.into(),
+                        ],
+                        "status",
+                    )
+                    .unwrap()
+            }
+            Some(variant) => {
+                let lt_nv = self.module.get_function("lt_new_variant").unwrap();
+                self.builder
+                    .build_call(
+                        lt_nv,
+                        &[
+                            rt.into(),
+                            i64t.const_int(type_id, false).into(),
+                            i64t.const_int(variant, false).into(),
+                            base.into(),
+                            i64t.const_int(n as u64, false).into(),
+                            out_objid.into(),
+                        ],
+                        "status",
+                    )
+                    .unwrap()
+            }
+        };
+        let status = call_result(call).into_int_value();
+        // status != 0 → construction trapped the soundness check.
+        let ok = self.ctx.append_basic_block(step, &format!("pc{pc}.newok"));
+        let bad = self.ctx.append_basic_block(step, &format!("pc{pc}.newbad"));
+        let is_ok = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, status, i64t.const_zero(), "newisok")
+            .unwrap();
+        self.builder.build_conditional_branch(is_ok, ok, bad).unwrap();
+        self.builder.position_at_end(bad);
+        self.set_pc(frame, pc as u64);
+        self.ret_outcome(OUT_CONDITION);
+        self.builder.position_at_end(ok);
+        let objid = self
+            .builder
+            .build_load(i64t, out_objid, "objid")
+            .unwrap()
+            .into_int_value();
+        self.store_slot(frame, dst, i64t.const_int(TAG_REF as u64, false), objid);
+        if pc + 1 < blocks.len() {
+            self.builder.build_unconditional_branch(blocks[pc + 1]).unwrap();
+        }
+    }
+
     fn define_step(&self, func: &Function, step: FunctionValue<'ctx>) {
         let i64t = self.ctx.i64_type();
         let frame_ty = self.frame_type();
@@ -273,8 +410,11 @@ impl<'ctx> Codegen<'ctx> {
             .filter_map(|i| match i {
                 // At least one word even for a zero-arg site: the extern call
                 // still receives a (never-read) base pointer.
-                Instruction::New { fields, .. } => Some((3 * fields.len()).max(1)),
+                Instruction::New { fields, .. } | Instruction::NewVariant { fields, .. } => {
+                    Some((3 * fields.len()).max(1))
+                }
                 Instruction::CallForeign { args, .. } => Some((2 * args.len()).max(1)),
+                Instruction::CaseVariant { arms, .. } => Some(arms.len().max(1)),
                 _ => None,
             })
             .max();
@@ -283,9 +423,16 @@ impl<'ctx> Codegen<'ctx> {
                 .build_alloca(i64t.array_type(words as u32), "scratch")
                 .unwrap()
         });
-        let has_new = func.code.iter().any(|i| matches!(i, Instruction::New { .. }));
+        let has_out = func.code.iter().any(|i| {
+            matches!(
+                i,
+                Instruction::New { .. }
+                    | Instruction::NewVariant { .. }
+                    | Instruction::CaseVariant { .. }
+            )
+        });
         let out_objid_slot =
-            has_new.then(|| self.builder.build_alloca(i64t, "out.objid").unwrap());
+            has_out.then(|| self.builder.build_alloca(i64t, "out.objid").unwrap());
         let pc_f = self.builder.build_struct_gep(frame_ty, frame, 2, "pc.f").unwrap();
         let pc = self.builder.build_load(i64t, pc_f, "pc").unwrap().into_int_value();
         let cases: Vec<_> = blocks
@@ -381,37 +528,77 @@ impl<'ctx> Codegen<'ctx> {
                     self.store_slot(frame, *dst, i64t.const_int(TAG_BOOL as u64, false), r);
                     fallthrough();
                 }
+                Instruction::ConcatStr { dst, left, right } => {
+                    self.guard_tags(step, frame, pc, &[(*left, TAG_STR), (*right, TAG_STR)]);
+                    let a = self.payload_of(frame, *left);
+                    let b = self.payload_of(frame, *right);
+                    let lt_cs = self.module.get_function("lt_concat_str").unwrap();
+                    let call = self
+                        .builder
+                        .build_call(lt_cs, &[a.into(), b.into()], "concat")
+                        .unwrap();
+                    let r = call_result(call).into_int_value();
+                    self.store_slot(frame, *dst, i64t.const_int(TAG_STR as u64, false), r);
+                    fallthrough();
+                }
+                Instruction::EqStr { dst, left, right } => {
+                    // Interning dedups, so string equality is id equality —
+                    // fully native, no extern.
+                    self.guard_tags(step, frame, pc, &[(*left, TAG_STR), (*right, TAG_STR)]);
+                    let a = self.payload_of(frame, *left);
+                    let b = self.payload_of(frame, *right);
+                    let eq = self
+                        .builder
+                        .build_int_compare(IntPredicate::EQ, a, b, "eqstr")
+                        .unwrap();
+                    let r = self.builder.build_int_z_extend(eq, i64t, "eqstrz").unwrap();
+                    self.store_slot(frame, *dst, i64t.const_int(TAG_BOOL as u64, false), r);
+                    fallthrough();
+                }
                 Instruction::New {
                     dst,
                     type_id,
                     fields,
                 } => {
-                    // Marshal supplied (field_id, slot) triples into the shared
-                    // entry-block scratch, laid out as `SuppliedField[n]`, then
-                    // call lt_new.
-                    let n = fields.len();
-                    let arr_ty = i64t.array_type(3 * n as u32);
-                    let arr = scratch.expect("New implies scratch space");
-                    for (k, (fid, reg)) in fields.iter().enumerate() {
-                        let slot = self.slot_ptr(frame, *reg);
-                        let tag = self.load_field(slot, 0, "s.tag");
-                        let payload = self.load_field(slot, 1, "s.pay");
-                        let store = |off: usize, v: IntValue<'ctx>| {
-                            let elem = unsafe {
-                                self.builder
-                                    .build_in_bounds_gep(
-                                        arr_ty,
-                                        arr,
-                                        &[i64t.const_zero(), i64t.const_int((3 * k + off) as u64, false)],
-                                        "field",
-                                    )
-                                    .unwrap()
-                            };
-                            self.builder.build_store(elem, v).unwrap();
+                    self.emit_constructor(
+                        step, frame, rt, scratch, out_objid_slot, &blocks, pc, *dst, *type_id,
+                        None, fields,
+                    );
+                }
+                Instruction::NewVariant {
+                    dst,
+                    type_id,
+                    variant,
+                    fields,
+                } => {
+                    self.emit_constructor(
+                        step, frame, rt, scratch, out_objid_slot, &blocks, pc, *dst, *type_id,
+                        Some(*variant), fields,
+                    );
+                }
+                Instruction::CaseVariant { object, arms } => {
+                    // The match barrier: guard the operand tag, hand the arm
+                    // list (variant ids in the entry-block scratch) to
+                    // `lt_case_variant` (migrate + variant lookup + unhandled-
+                    // variant trap), then switch on the returned ARM INDEX.
+                    self.guard_tags(step, frame, pc, &[(*object, TAG_REF)]);
+                    let n = arms.len();
+                    let arr_ty = i64t.array_type(n.max(1) as u32);
+                    let arr = scratch.expect("CaseVariant implies scratch space");
+                    for (k, (variant, _)) in arms.iter().enumerate() {
+                        let elem = unsafe {
+                            self.builder
+                                .build_in_bounds_gep(
+                                    arr_ty,
+                                    arr,
+                                    &[i64t.const_zero(), i64t.const_int(k as u64, false)],
+                                    "arm",
+                                )
+                                .unwrap()
                         };
-                        store(0, i64t.const_int(*fid, false));
-                        store(1, tag);
-                        store(2, payload);
+                        self.builder
+                            .build_store(elem, i64t.const_int(*variant, false))
+                            .unwrap();
                     }
                     let base = unsafe {
                         self.builder
@@ -419,44 +606,56 @@ impl<'ctx> Codegen<'ctx> {
                                 arr_ty,
                                 arr,
                                 &[i64t.const_zero(), i64t.const_zero()],
-                                "supplied.base",
+                                "arms.base",
                             )
                             .unwrap()
                     };
-                    let out_objid = out_objid_slot.expect("New implies an out slot");
-                    let lt_new = self.module.get_function("lt_new").unwrap();
+                    let out_index = out_objid_slot.expect("CaseVariant implies an out slot");
+                    let objid = self.payload_of(frame, *object);
+                    let lt_cv = self.module.get_function("lt_case_variant").unwrap();
                     let call = self
                         .builder
                         .build_call(
-                            lt_new,
+                            lt_cv,
                             &[
                                 rt.into(),
-                                i64t.const_int(*type_id, false).into(),
+                                objid.into(),
                                 base.into(),
                                 i64t.const_int(n as u64, false).into(),
-                                out_objid.into(),
+                                out_index.into(),
                             ],
                             "status",
                         )
                         .unwrap();
                     let status = call_result(call).into_int_value();
-                    // status != 0 → construction trapped the soundness check.
-                    let ok = self.ctx.append_basic_block(step, &format!("pc{pc}.newok"));
-                    let bad = self.ctx.append_basic_block(step, &format!("pc{pc}.newbad"));
+                    let ok = self.ctx.append_basic_block(step, &format!("pc{pc}.caseok"));
+                    let bad = self.ctx.append_basic_block(step, &format!("pc{pc}.casebad"));
                     let is_ok = self
                         .builder
-                        .build_int_compare(IntPredicate::EQ, status, i64t.const_zero(), "newisok")
+                        .build_int_compare(IntPredicate::EQ, status, i64t.const_zero(), "caseisok")
                         .unwrap();
                     self.builder.build_conditional_branch(is_ok, ok, bad).unwrap();
                     self.builder.position_at_end(bad);
                     self.set_pc(frame, pc as u64);
                     self.ret_outcome(OUT_CONDITION);
                     self.builder.position_at_end(ok);
-                    let objid = self.builder.build_load(i64t, out_objid, "objid").unwrap().into_int_value();
-                    self.store_slot(frame, *dst, i64t.const_int(TAG_REF as u64, false), objid);
-                    if pc + 1 < blocks.len() {
-                        self.builder.build_unconditional_branch(blocks[pc + 1]).unwrap();
-                    }
+                    let index = self
+                        .builder
+                        .build_load(i64t, out_index, "arm.index")
+                        .unwrap()
+                        .into_int_value();
+                    // The extern's index is always in-bounds; the default block
+                    // is unreachable by construction.
+                    let unreachable_bb =
+                        self.ctx.append_basic_block(step, &format!("pc{pc}.casedead"));
+                    let cases: Vec<_> = arms
+                        .iter()
+                        .enumerate()
+                        .map(|(k, (_, target))| (i64t.const_int(k as u64, false), blocks[*target]))
+                        .collect();
+                    self.builder.build_switch(index, unreachable_bb, &cases).unwrap();
+                    self.builder.position_at_end(unreachable_bb);
+                    self.builder.build_unreachable().unwrap();
                 }
                 Instruction::GetField { dst, object, field } => {
                     let objid = self.payload_of(frame, *object);
@@ -700,6 +899,9 @@ pub(crate) fn compile<'ctx>(ctx: &'ctx Context, world: &World) -> Result<Compile
         ("lt_emit", lt_emit as *const () as usize),
         ("lt_call_foreign", lt_call_foreign as *const () as usize),
         ("lt_load_global", lt_load_global as *const () as usize),
+        ("lt_concat_str", lt_concat_str as *const () as usize),
+        ("lt_new_variant", lt_new_variant as *const () as usize),
+        ("lt_case_variant", lt_case_variant as *const () as usize),
     ] {
         if let Some(f) = cg.module.get_function(name) {
             engine.add_global_mapping(&f, addr);

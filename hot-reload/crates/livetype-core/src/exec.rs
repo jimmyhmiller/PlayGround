@@ -13,8 +13,8 @@
 //! the seam Phase 6 later removes.
 
 use crate::runtime::{
-    ERR_ADD_NON_I64, ERR_BRANCH_NON_BOOL, ERR_EQ_NON_I64, ERR_LT_NON_I64, ERR_MUL_NON_I64,
-    ERR_NOT_NON_BOOL, ERR_SUB_NON_I64,
+    ERR_ADD_NON_I64, ERR_BRANCH_NON_BOOL, ERR_CASE_NON_REF, ERR_CONCAT_NON_STR, ERR_EQ_NON_I64,
+    ERR_EQSTR_NON_STR, ERR_LT_NON_I64, ERR_MUL_NON_I64, ERR_NOT_NON_BOOL, ERR_SUB_NON_I64,
 };
 use crate::{Condition, DefId, ForeignFnId, Heap, Instruction, Value, Version, World};
 
@@ -133,6 +133,29 @@ pub fn step_instruction<M: Machine>(m: &mut M, instr: &Instruction) -> Result<Fl
             m.set_reg(*dst, value);
             m.advance();
         }
+        Instruction::NewVariant {
+            dst,
+            type_id,
+            variant,
+            fields,
+        } => {
+            let supplied: Vec<(crate::FieldId, Value)> = fields
+                .iter()
+                .map(|(id, reg)| Ok((*id, rd(m, *reg)?)))
+                .collect::<Result<_, Condition>>()?;
+            let id = m.heap().new_variant(*type_id, *variant, &supplied, m.world())?;
+            m.set_reg(*dst, Value::Ref(id));
+            m.advance();
+        }
+        Instruction::CaseVariant { object, arms } => {
+            let Value::Ref(id) = rd(m, *object)? else {
+                return Err(type_err(function, pc, ERR_CASE_NON_REF));
+            };
+            // The one match barrier (migrate + variant lookup + unhandled-variant
+            // trap), shared with the JIT's extern — see `Heap::variant_case`.
+            let index = m.heap().variant_case(id, arms, m.world())?;
+            m.set_pc(arms[index].1);
+        }
         Instruction::Copy { dst, src } => {
             let value = rd(m, *src)?;
             m.set_reg(*dst, value);
@@ -178,6 +201,21 @@ pub fn step_instruction<M: Machine>(m: &mut M, instr: &Instruction) -> Result<Fl
                 return Err(type_err(function, pc, ERR_NOT_NON_BOOL));
             };
             m.set_reg(*dst, Value::Bool(!b));
+            m.advance();
+        }
+        Instruction::ConcatStr { dst, left, right } => {
+            let (Value::Str(a), Value::Str(b)) = (rd(m, *left)?, rd(m, *right)?) else {
+                return Err(type_err(function, pc, ERR_CONCAT_NON_STR));
+            };
+            m.set_reg(*dst, Value::Str(crate::strings::concat(a, b)));
+            m.advance();
+        }
+        Instruction::EqStr { dst, left, right } => {
+            let (Value::Str(a), Value::Str(b)) = (rd(m, *left)?, rd(m, *right)?) else {
+                return Err(type_err(function, pc, ERR_EQSTR_NON_STR));
+            };
+            // Interning dedups, so string equality is id equality.
+            m.set_reg(*dst, Value::Bool(a == b));
             m.advance();
         }
         Instruction::Jump { target } => m.set_pc(*target),

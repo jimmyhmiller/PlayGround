@@ -82,6 +82,7 @@ fn setup(engine: &Engine, body: Function) -> ObjectId {
             version: Version(1),
             name: "Cell".into(),
             fields: vec![field(N, "n", Type::I64)],
+            variants: Vec::new(),
         })
         .unwrap();
     engine.install_function(body).unwrap();
@@ -97,6 +98,7 @@ fn migrate(engine: &Engine) {
             version: Version(1),
             name: "Wrap".into(),
             fields: vec![field(W, "w", Type::I64)],
+            variants: Vec::new(),
         })
         .unwrap();
     engine
@@ -105,6 +107,7 @@ fn migrate(engine: &Engine) {
             version: Version(2),
             name: "Cell".into(),
             fields: vec![field(N, "n", Type::Ref(WRAP))],
+            variants: Vec::new(),
         })
         .unwrap();
     engine
@@ -120,6 +123,7 @@ fn migrate(engine: &Engine) {
                     source: N,
                 },
             )]),
+            variants: std::collections::BTreeMap::new(),
         })
         .unwrap();
 }

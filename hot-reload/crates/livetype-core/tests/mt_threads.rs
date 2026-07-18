@@ -87,6 +87,7 @@ fn threads_share_reads_of_one_object() {
         version: Version(1),
         name: "Account".into(),
         fields: vec![field(BALANCE, "balance", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     engine.install_function(peek_int()).unwrap();
@@ -108,6 +109,7 @@ fn migratable_engine() -> (Arc<Engine>, ObjectId) {
         version: Version(1),
         name: "Account".into(),
         fields: vec![field(BALANCE, "balance", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     let obj = engine.shared().jit_new(ACCT, &[(BALANCE, Value::I64(100))]).unwrap();
@@ -116,6 +118,7 @@ fn migratable_engine() -> (Arc<Engine>, ObjectId) {
         version: Version(1),
         name: "Money".into(),
         fields: vec![field(CENTS, "cents", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     engine.install_schema(Schema {
@@ -123,6 +126,7 @@ fn migratable_engine() -> (Arc<Engine>, ObjectId) {
         version: Version(2),
         name: "Account".into(),
         fields: vec![field(BALANCE, "balance", Type::Ref(MONEY))],
+        variants: Vec::new(),
     })
     .unwrap();
     engine.install_migration(Migration {
@@ -137,6 +141,7 @@ fn migratable_engine() -> (Arc<Engine>, ObjectId) {
                 source: BALANCE,
             },
         )]),
+        variants: std::collections::BTreeMap::new(),
     })
     .unwrap();
     engine.install_function(peek_money()).unwrap();
@@ -263,6 +268,7 @@ fn preemptive_gc_runs_while_actors_churn() {
             version: Version(1),
             name: "Some".into(),
             fields: vec![field(F, "f", Type::I64)],
+            variants: Vec::new(),
         })
         .unwrap();
         engine.install_function(churn()).unwrap();
@@ -442,6 +448,7 @@ fn message_passing_shares_a_heap_reference() {
         version: Version(1),
         name: "Box".into(),
         fields: vec![field(VAL, "value", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     let boxid = engine.shared().jit_new(BOXT, &[(VAL, Value::I64(99))]).unwrap();
@@ -466,6 +473,7 @@ fn message_type_mismatch_traps_the_receiver() {
         version: Version(1),
         name: "Box".into(),
         fields: vec![field(VAL, "value", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     let boxid = engine.shared().jit_new(BOXT, &[(VAL, Value::I64(1))]).unwrap();

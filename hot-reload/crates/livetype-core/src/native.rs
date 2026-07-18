@@ -8,7 +8,7 @@
 //! exist) none of the extern entry points are ever reached.
 
 use crate::mt::Shared;
-use crate::{Condition, DefId, FieldId, ForeignFnId, ObjectId, Value};
+use crate::{Condition, DefId, FieldId, ForeignFnId, ObjectId, Value, VariantId};
 
 pub const TAG_EMPTY: i64 = 0;
 pub const TAG_UNIT: i64 = 1;
@@ -16,6 +16,9 @@ pub const TAG_I64: i64 = 2;
 pub const TAG_BOOL: i64 = 3;
 pub const TAG_REF: i64 = 4;
 pub const TAG_FOREIGN: i64 = 5;
+/// An interned string: the payload is its [`crate::StrId`]. A scalar — nothing
+/// to trace, and equal ids are equal strings (interning dedups).
+pub const TAG_STR: i64 = 6;
 /// Low-byte mask for the tag. A `Foreign` slot carries its (small `u32`) kind in
 /// the tag's high bits and its native pointer in the payload, so a two-word slot
 /// still represents every value — no wider frame layout needed. Only `Foreign`
@@ -54,6 +57,10 @@ impl RawSlot {
                 tag: TAG_BOOL,
                 payload: *b as i64,
             },
+            Value::Str(id) => RawSlot {
+                tag: TAG_STR,
+                payload: *id as i64,
+            },
             Value::Ref(id) => RawSlot {
                 tag: TAG_REF,
                 payload: *id as i64,
@@ -70,6 +77,7 @@ impl RawSlot {
             TAG_UNIT => Value::Unit,
             TAG_I64 => Value::I64(self.payload),
             TAG_BOOL => Value::Bool(self.payload != 0),
+            TAG_STR => Value::Str(self.payload as crate::StrId),
             TAG_REF => Value::Ref(self.payload as ObjectId),
             TAG_FOREIGN => Value::Foreign {
                 kind: (self.tag >> TAG_KIND_SHIFT) as u32,
@@ -258,6 +266,86 @@ pub unsafe extern "C" fn lt_load_global(
     match host.shared.jit_load_global(global as DefId) {
         Ok(value) => {
             unsafe { *out = RawSlot::from_value(&value) };
+            0
+        }
+        Err(condition) => {
+            host.pending = Some(condition);
+            1
+        }
+    }
+}
+
+/// Concatenate two interned strings (the `ConcatStr` fast op). Interning
+/// cannot fail, so this returns the result id directly — no host, no status.
+///
+/// # Safety
+/// Trivially safe (integer in, integer out); `extern "C"` for the JIT.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lt_concat_str(left: i64, right: i64) -> i64 {
+    crate::strings::concat(left as crate::StrId, right as crate::StrId) as i64
+}
+
+/// Construct an enum variant — the enum counterpart of [`lt_new`]. Returns 0
+/// on success (writes `*out_objid`), 1 when construction trips the soundness
+/// check (the condition is stashed in the host).
+///
+/// # Safety
+/// `host` is a live `*mut NativeHost`, `fields` points to `n` `SuppliedField`s,
+/// `out_objid` is a writable `*mut i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lt_new_variant(
+    host: *mut NativeHost,
+    type_id: i64,
+    variant: i64,
+    fields: *const SuppliedField,
+    n: i64,
+    out_objid: *mut i64,
+) -> i64 {
+    let host = unsafe { &mut *host };
+    let mut supplied = Vec::with_capacity(n as usize);
+    for i in 0..n as isize {
+        let f = unsafe { &*fields.offset(i) };
+        supplied.push((f.field_id as FieldId, f.value.to_value()));
+    }
+    match host
+        .shared
+        .jit_new_variant(type_id as DefId, variant as VariantId, &supplied)
+    {
+        Ok(id) => {
+            unsafe { *out_objid = id as i64 };
+            0
+        }
+        Err(condition) => {
+            host.pending = Some(condition);
+            1
+        }
+    }
+}
+
+/// The `match` barrier (migrate + variant lookup + unhandled-variant trap):
+/// returns 0 on success and writes the matching ARM INDEX to `*out_index`; 1
+/// when the barrier traps (missing migration, unhandled variant — condition
+/// stashed in the host). `arms` points to `n` variant ids in arm order.
+///
+/// # Safety
+/// `host` is a live `*mut NativeHost`, `arms` points to `n` `i64`s,
+/// `out_index` is a writable `*mut i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lt_case_variant(
+    host: *mut NativeHost,
+    objid: i64,
+    arms: *const i64,
+    n: i64,
+    out_index: *mut i64,
+) -> i64 {
+    let host = unsafe { &mut *host };
+    let mut arm_ids = Vec::with_capacity(n as usize);
+    for i in 0..n as isize {
+        arm_ids.push((unsafe { *arms.offset(i) } as VariantId, 0usize));
+    }
+    match host.shared.jit_case_variant(objid as ObjectId, &arm_ids) {
+        Ok(index) => {
+            unsafe { *out_index = index as i64 };
             0
         }
         Err(condition) => {

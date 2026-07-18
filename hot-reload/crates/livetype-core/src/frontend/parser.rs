@@ -62,6 +62,7 @@ impl Parser {
     fn item(&mut self) -> Result<Item, String> {
         match self.peek() {
             Tok::Struct => Ok(Item::Struct(self.struct_def()?)),
+            Tok::Enum => Ok(Item::Enum(self.enum_def()?)),
             Tok::Fn => Ok(Item::Fn(self.fn_def()?)),
             Tok::Foreign => self.foreign_item(),
             Tok::LetOnce => self.global_def(),
@@ -127,6 +128,7 @@ impl Parser {
         Ok(match self.ident()?.as_str() {
             "i64" => TypeExpr::I64,
             "bool" => TypeExpr::Bool,
+            "str" => TypeExpr::Str,
             name => TypeExpr::Ref(name.to_string()),
         })
     }
@@ -152,6 +154,42 @@ impl Parser {
         }
         self.expect(&Tok::RBrace)?;
         Ok(StructDef { name, fields })
+    }
+
+    /// `enum Name { V1 { f: T, … }, V2, … }` — a fieldless variant needs no
+    /// braces.
+    fn enum_def(&mut self) -> Result<EnumDef, String> {
+        self.expect(&Tok::Enum)?;
+        let name = self.ident()?;
+        self.expect(&Tok::LBrace)?;
+        let mut variants = Vec::new();
+        while !self.at(&Tok::RBrace) {
+            let vname = self.ident()?;
+            let mut fields = Vec::new();
+            if self.eat(&Tok::LBrace) {
+                while !self.at(&Tok::RBrace) {
+                    let fname = self.ident()?;
+                    self.expect(&Tok::Colon)?;
+                    let ty = self.type_expr()?;
+                    let default = if self.eat(&Tok::Eq) {
+                        Some(self.expr(true)?)
+                    } else {
+                        None
+                    };
+                    fields.push(FieldDef { name: fname, ty, default });
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&Tok::RBrace)?;
+            }
+            variants.push(VariantDef { name: vname, fields });
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(&Tok::RBrace)?;
+        Ok(EnumDef { name, variants })
     }
 
     fn fn_def(&mut self) -> Result<FnDef, String> {
@@ -187,7 +225,7 @@ impl Parser {
             // last thing in the block, a tail expression (implicit return).
             let is_keyword_stmt = matches!(
                 self.peek(),
-                Tok::Let | Tok::Return | Tok::Emit | Tok::Yield | Tok::If | Tok::While
+                Tok::Let | Tok::Return | Tok::Emit | Tok::Yield | Tok::If | Tok::While | Tok::Match
             );
             let is_assign = matches!(self.peek(), Tok::Ident(_))
                 && matches!(self.tokens[self.pos + 1].tok, Tok::Eq);
@@ -253,6 +291,31 @@ impl Parser {
                 let cond = self.expr(false)?;
                 let body = self.block()?;
                 Ok(Stmt::While { cond, body })
+            }
+            Tok::Match => {
+                self.bump();
+                let scrutinee = self.expr(false)?; // no struct literal as scrutinee
+                self.expect(&Tok::LBrace)?;
+                let mut arms = Vec::new();
+                while !self.at(&Tok::RBrace) {
+                    let variant = self.ident()?;
+                    let mut bindings = Vec::new();
+                    if self.eat(&Tok::LBrace) {
+                        while !self.at(&Tok::RBrace) {
+                            bindings.push(self.ident()?);
+                            if !self.eat(&Tok::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(&Tok::RBrace)?;
+                    }
+                    self.expect(&Tok::FatArrow)?;
+                    let body = self.block()?;
+                    arms.push(MatchArm { variant, bindings, body });
+                    self.eat(&Tok::Comma); // optional between arms
+                }
+                self.expect(&Tok::RBrace)?;
+                Ok(Stmt::Match { scrutinee, arms })
             }
             // assignment `name = expr;` or a bare expression statement
             Tok::Ident(_) if matches!(self.tokens[self.pos + 1].tok, Tok::Eq) => {
@@ -354,8 +417,31 @@ impl Parser {
                 self.expect(&Tok::RParen)?;
                 Ok(e)
             }
+            Tok::Str(text) => {
+                self.bump();
+                Ok(Expr::Str(text))
+            }
             Tok::Ident(name) => {
                 self.bump();
+                if self.eat(&Tok::ColonColon) {
+                    // `Enum::Variant` (optionally `{ field: expr, … }`).
+                    let variant = self.ident()?;
+                    let mut fields = Vec::new();
+                    if allow_struct && self.at(&Tok::LBrace) {
+                        self.bump();
+                        while !self.at(&Tok::RBrace) {
+                            let fname = self.ident()?;
+                            self.expect(&Tok::Colon)?;
+                            let value = self.expr(true)?;
+                            fields.push((fname, value));
+                            if !self.eat(&Tok::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(&Tok::RBrace)?;
+                    }
+                    return Ok(Expr::VariantLit { enum_name: name, variant, fields });
+                }
                 if self.at(&Tok::LParen) {
                     self.bump();
                     let mut args = Vec::new();

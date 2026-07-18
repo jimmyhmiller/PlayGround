@@ -1,19 +1,18 @@
 //! The frontend: a Rust-flavored surface syntax that compiles to the runtime's
-//! IR. `struct` → `Schema`, `fn` → `Function`; the body language has `let`,
-//! assignment, `if`/`else`, `while`, `return`, `emit`, struct literals, field
-//! access, calls, and `+ - < >` arithmetic.
+//! IR. `struct`/`enum` → `Schema`, `fn` → `Function`; the body language has
+//! `let`, assignment, `if`/`else`, `while`, `match`, `return`, `emit`,
+//! `yield`, struct/variant literals, field access, calls (incl. recursion),
+//! string literals, tail-expression returns, and the full operator set
+//! (`+ - * < > <= >= == != !`, with `+`/`==`/`!=` type-directed for strings).
+//! See `LANGUAGE.md` for the language reference.
 //!
 //! ```text
 //! struct Account { balance: i64, fee: i64 = 0 }
+//! enum Shape { Circle { r: i64 }, Point }
 //! fn charge(a: Account, amt: i64) -> i64 {   // structs are GC references, no `&`
-//!     let b = a.balance;
-//!     return b - amt;
+//!     a.balance - amt
 //! }
 //! ```
-//!
-//! Not yet: recursion (functions install in call-graph order, so cycles are a
-//! compile error — use a `while` loop), tail-expression returns (`return` is
-//! explicit), and `*` / `==` (only `+ - < >` are wired to IR ops so far).
 
 mod ast;
 mod lexer;
@@ -130,6 +129,7 @@ impl Session {
                 let deps = s
                     .fields
                     .iter()
+                    .chain(s.variants.iter().flat_map(|v| v.fields.iter()))
                     .filter_map(|f| match f.ty {
                         Type::Ref(t) if t != s.type_id => Some(t),
                         _ => None,

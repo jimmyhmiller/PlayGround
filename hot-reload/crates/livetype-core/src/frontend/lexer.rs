@@ -5,6 +5,8 @@
 pub enum Tok {
     // keywords
     Struct,
+    Enum,
+    Match,
     Fn,
     Let,
     LetOnce,
@@ -20,6 +22,7 @@ pub enum Tok {
     // literals & names
     Ident(String),
     Int(i64),
+    Str(String),
     // punctuation
     LBrace,
     RBrace,
@@ -40,7 +43,9 @@ pub enum Tok {
     Le,
     Gt,
     Ge,
-    Arrow, // ->
+    Arrow,      // ->
+    FatArrow,   // =>
+    ColonColon, // ::
     Eof,
 }
 
@@ -72,13 +77,68 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             '}' => push(&mut out, Tok::RBrace, line, &mut i),
             '(' => push(&mut out, Tok::LParen, line, &mut i),
             ')' => push(&mut out, Tok::RParen, line, &mut i),
-            ':' => push(&mut out, Tok::Colon, line, &mut i),
+            ':' => two(&mut out, bytes, &mut i, line, b':', Tok::ColonColon, Tok::Colon),
             ';' => push(&mut out, Tok::Semi, line, &mut i),
             ',' => push(&mut out, Tok::Comma, line, &mut i),
             '.' => push(&mut out, Tok::Dot, line, &mut i),
             '+' => push(&mut out, Tok::Plus, line, &mut i),
             '*' => push(&mut out, Tok::Star, line, &mut i),
-            '=' => two(&mut out, bytes, &mut i, line, b'=', Tok::EqEq, Tok::Eq),
+            '=' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
+                    out.push(Token { tok: Tok::EqEq, line });
+                    i += 2;
+                } else if i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                    out.push(Token { tok: Tok::FatArrow, line });
+                    i += 2;
+                } else {
+                    push(&mut out, Tok::Eq, line, &mut i);
+                }
+            }
+            '"' => {
+                i += 1;
+                let mut text = String::new();
+                loop {
+                    if i >= bytes.len() {
+                        return Err(format!("line {line}: unterminated string literal"));
+                    }
+                    match bytes[i] {
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        b'\\' => {
+                            i += 1;
+                            let esc = *bytes
+                                .get(i)
+                                .ok_or_else(|| format!("line {line}: unterminated escape"))?;
+                            text.push(match esc {
+                                b'n' => '\n',
+                                b't' => '\t',
+                                b'"' => '"',
+                                b'\\' => '\\',
+                                other => {
+                                    return Err(format!(
+                                        "line {line}: unknown escape '\\{}'",
+                                        other as char
+                                    ));
+                                }
+                            });
+                            i += 1;
+                        }
+                        b'\n' => return Err(format!("line {line}: unterminated string literal")),
+                        _ => {
+                            // Consume one UTF-8 character (the source is valid UTF-8).
+                            let start = i;
+                            i += 1;
+                            while i < bytes.len() && (bytes[i] & 0xC0) == 0x80 {
+                                i += 1;
+                            }
+                            text.push_str(&src[start..i]);
+                        }
+                    }
+                }
+                out.push(Token { tok: Tok::Str(text), line });
+            }
             '!' => two(&mut out, bytes, &mut i, line, b'=', Tok::BangEq, Tok::Bang),
             '<' => two(&mut out, bytes, &mut i, line, b'=', Tok::Le, Tok::Lt),
             '>' => two(&mut out, bytes, &mut i, line, b'=', Tok::Ge, Tok::Gt),
@@ -110,6 +170,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 let word = &src[start..i];
                 let tok = match word {
                     "struct" => Tok::Struct,
+                    "enum" => Tok::Enum,
+                    "match" => Tok::Match,
                     "fn" => Tok::Fn,
                     "let" => Tok::Let,
                     "letonce" => Tok::LetOnce,

@@ -260,12 +260,32 @@ fn show_defs(s: &Session) {
         for tid in structs {
             let v = w.current_schemas[&tid];
             let sc = &w.schemas[&(tid, v)];
-            let fields: Vec<String> = sc
-                .fields
-                .iter()
-                .map(|f| format!("{}: {}", f.name, ty_name_in(&f.ty, w)))
-                .collect();
-            lines.push(format!("  struct {} {{ {} }}  (v{})", sc.name, fields.join(", "), v.0));
+            if sc.is_enum() {
+                let variants: Vec<String> = sc
+                    .variants
+                    .iter()
+                    .map(|var| {
+                        if var.fields.is_empty() {
+                            var.name.clone()
+                        } else {
+                            let fields: Vec<String> = var
+                                .fields
+                                .iter()
+                                .map(|f| format!("{}: {}", f.name, ty_name_in(&f.ty, w)))
+                                .collect();
+                            format!("{} {{ {} }}", var.name, fields.join(", "))
+                        }
+                    })
+                    .collect();
+                lines.push(format!("  enum {} {{ {} }}  (v{})", sc.name, variants.join(", "), v.0));
+            } else {
+                let fields: Vec<String> = sc
+                    .fields
+                    .iter()
+                    .map(|f| format!("{}: {}", f.name, ty_name_in(&f.ty, w)))
+                    .collect();
+                lines.push(format!("  struct {} {{ {} }}  (v{})", sc.name, fields.join(", "), v.0));
+            }
         }
         let mut fns: Vec<_> = w.current_functions.keys().copied().collect();
         fns.sort_unstable();
@@ -441,7 +461,13 @@ fn migrate(s: &mut Session, arg: &str) {
             },
         }
     }
-    match s.engine.install_migration(Migration { type_id, from, to, fields }) {
+    match s.engine.install_migration(Migration {
+        type_id,
+        from,
+        to,
+        fields,
+        variants: std::collections::BTreeMap::new(),
+    }) {
         Ok(()) => println!("  ✎ migration installed for {ty_name} v{}→v{}", from.0, to.0),
         Err(e) => println!("  ✗ {e:?}"),
     }
@@ -494,6 +520,7 @@ fn show(v: &Value) -> String {
         Value::I64(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Unit => "()".into(),
+        Value::Str(id) => format!("{:?}", &*livetype_core::strings::text(*id)),
         Value::Ref(id) => format!("<ref #{id}>"),
         Value::Foreign { kind, ptr } => format!("<foreign k{kind} @{ptr:#x}>"),
     }
@@ -503,6 +530,7 @@ fn ty_name_in(t: &Type, w: &World) -> String {
     match t {
         Type::I64 => "i64".into(),
         Type::Bool => "bool".into(),
+        Type::Str => "str".into(),
         Type::Unit => "()".into(),
         Type::Ref(id) => struct_name_in(w, *id),
         Type::Foreign(kind) => format!("foreign#{kind}"),

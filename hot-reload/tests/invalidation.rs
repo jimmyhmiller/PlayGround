@@ -38,6 +38,7 @@ fn setup() -> std::sync::Arc<Engine> {
         version: Version(1),
         name: "A".into(),
         fields: vec![field(FA, "fa", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_schema(Schema {
@@ -45,6 +46,7 @@ fn setup() -> std::sync::Arc<Engine> {
         version: Version(1),
         name: "B".into(),
         fields: vec![field(FB, "fb", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     // g() constructs and reads an A — depends on TA, takes no arguments.
@@ -126,6 +128,7 @@ fn schema_change_reverifies_only_reachable_functions() {
         version: Version(2),
         name: "A".into(),
         fields: vec![field(FA, "fa", Type::Ref(TA))],
+        variants: Vec::new(),
     })
     .unwrap();
 
@@ -174,6 +177,7 @@ fn unrelated_schema_change_touches_nothing() {
                 default: Some(Value::I64(0)),
             },
         ],
+        variants: Vec::new(),
     })
     .unwrap();
 

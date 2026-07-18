@@ -84,6 +84,7 @@ fn scenario1_setup(rt: &Engine) {
         version: Version(1),
         name: "Box".into(),
         fields: vec![field(VALUE, "value", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_function(Function {
@@ -139,6 +140,7 @@ fn scenario1_break(rt: &Engine) {
         version: Version(1),
         name: "Wrapper".into(),
         fields: vec![field(INNER, "inner", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_schema(Schema {
@@ -146,6 +148,7 @@ fn scenario1_break(rt: &Engine) {
         version: Version(2),
         name: "Box".into(),
         fields: vec![field(VALUE, "value", Type::Ref(WRAPPER))],
+        variants: Vec::new(),
     })
     .unwrap();
 }
@@ -188,6 +191,7 @@ fn scenario1_migration(rt: &Engine) {
                 source: VALUE,
             },
         )]),
+        variants: std::collections::BTreeMap::new(),
     })
     .unwrap();
 }
@@ -256,6 +260,7 @@ fn scenario2_setup(rt: &Engine) {
         version: Version(1),
         name: "Account".into(),
         fields: vec![field(BALANCE, "balance", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_function(Function {
@@ -320,6 +325,7 @@ fn scenario2_break(rt: &Engine) {
         version: Version(1),
         name: "Money".into(),
         fields: vec![field(CENTS, "cents", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_schema(Schema {
@@ -327,6 +333,7 @@ fn scenario2_break(rt: &Engine) {
         version: Version(2),
         name: "Account".into(),
         fields: vec![field(BALANCE, "balance", Type::Ref(MONEY))],
+        variants: Vec::new(),
     })
     .unwrap();
 }
@@ -374,6 +381,7 @@ fn scenario2_migration(rt: &Engine) {
                 source: BALANCE,
             },
         )]),
+        variants: std::collections::BTreeMap::new(),
     })
     .unwrap();
 }
@@ -434,6 +442,7 @@ fn scenario3_setup(rt: &Engine) -> ObjectId {
         version: Version(1),
         name: "Account".into(),
         fields: vec![field(BALANCE, "balance", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_function(Function {
@@ -496,6 +505,7 @@ fn scenario3_add_fee(rt: &Engine) {
             field(BALANCE, "balance", Type::I64),
             field_with_default(FEE, "fee", Type::I64, Value::I64(0)),
         ],
+        variants: Vec::new(),
     })
     .unwrap();
 }
@@ -558,6 +568,7 @@ fn jit_gc_roots_from_frame_slots() {
         version: Version(1),
         name: "Box".into(),
         fields: vec![field(VALUE, "value", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_function(Function {
@@ -630,6 +641,7 @@ fn confree_setup(rt: &Engine, body: Function) -> ObjectId {
         version: Version(1),
         name: "Cell".into(),
         fields: vec![field(NF, "n", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_function(body).unwrap();
@@ -646,6 +658,7 @@ fn confree_migrate(rt: &Engine) {
         version: Version(1),
         name: "Wrap".into(),
         fields: vec![field(WF, "w", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_schema(Schema {
@@ -653,6 +666,7 @@ fn confree_migrate(rt: &Engine) {
         version: Version(2),
         name: "Cell".into(),
         fields: vec![field(NF, "n", Type::Ref(WRAPT))],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_migration(Migration {
@@ -667,6 +681,7 @@ fn confree_migrate(rt: &Engine) {
                 source: NF,
             },
         )]),
+        variants: std::collections::BTreeMap::new(),
     })
     .unwrap();
 }
@@ -783,6 +798,7 @@ fn auto_setup(rt: &Engine) -> ObjectId {
         version: Version(1),
         name: "Auto".into(),
         fields: vec![field(AF, "a", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_function(Function {
@@ -814,6 +830,7 @@ fn auto_add_field(rt: &Engine) {
             field(AF, "a", Type::I64),
             field_with_default(AF2, "b", Type::I64, Value::I64(99)),
         ],
+        variants: Vec::new(),
     })
     .unwrap();
 }
@@ -859,6 +876,7 @@ fn auto_derivation_abstains_on_representation_change() {
         version: Version(1),
         name: "Auto".into(),
         fields: vec![field(AF, "a", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_schema(Schema {
@@ -866,6 +884,7 @@ fn auto_derivation_abstains_on_representation_change() {
         version: Version(2),
         name: "Auto".into(),
         fields: vec![field(AF, "a", Type::Ref(AUTO))], // Int → Ref, no default
+        variants: Vec::new(),
     })
     .unwrap();
     assert!(

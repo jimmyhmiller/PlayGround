@@ -6,9 +6,29 @@ fn value_type(value: &Value) -> Result<Type, String> {
         Value::Unit => Ok(Type::Unit),
         Value::I64(_) => Ok(Type::I64),
         Value::Bool(_) => Ok(Type::Bool),
+        Value::Str(_) => Ok(Type::Str),
         Value::Ref(_) => Err("object literals are runtime values, not code constants".into()),
         Value::Foreign { .. } => Err("foreign handles are runtime values, not code constants".into()),
     }
+}
+
+/// The constructor rule shared by `New` and `NewVariant`: every declared field
+/// is supplied with the right type or has a default.
+fn check_supplied_fields(
+    declared: &[crate::Field],
+    supplied: &[(crate::FieldId, usize)],
+    regs: &[Option<Type>],
+) -> Result<(), String> {
+    let supplied: BTreeMap<_, _> = supplied.iter().copied().collect();
+    for field in declared {
+        match supplied.get(&field.id) {
+            Some(reg) if read(regs, *reg)? == field.ty => {}
+            Some(_) => return Err(format!("field '{}' has the wrong type", field.name)),
+            None if field.default.is_some() => {}
+            None => return Err(format!("missing field '{}'", field.name)),
+        }
+    }
+    Ok(())
 }
 
 fn read(regs: &[Option<Type>], register: usize) -> Result<Type, String> {
@@ -20,8 +40,11 @@ fn read(regs: &[Option<Type>], register: usize) -> Result<Type, String> {
 
 pub fn verify_schema(schema: &Schema, world: &World) -> Result<(), Vec<String>> {
     let mut errors = Vec::new();
+    if schema.is_enum() && !schema.fields.is_empty() {
+        errors.push("a schema is a struct (fields) or an enum (variants), not both".into());
+    }
     let mut ids = BTreeSet::new();
-    for field in &schema.fields {
+    let mut check_field = |field: &crate::Field, errors: &mut Vec<String>| {
         if !ids.insert(field.id) {
             errors.push(format!("duplicate field id {}", field.id));
         }
@@ -29,16 +52,27 @@ pub fn verify_schema(schema: &Schema, world: &World) -> Result<(), Vec<String>> 
             && !world.current_schemas.contains_key(&id)
             && id != schema.type_id
         {
-            errors.push(format!(
-                "field '{}' refers to unknown type {id}",
-                field.name
-            ));
+            errors.push(format!("field '{}' refers to unknown type {id}", field.name));
         }
         if let Some(default) = &field.default {
             match value_type(default) {
                 Ok(ty) if ty == field.ty => {}
                 _ => errors.push(format!("default for '{}' has the wrong type", field.name)),
             }
+        }
+    };
+    for field in &schema.fields {
+        check_field(field, &mut errors);
+    }
+    let mut variant_ids = BTreeSet::new();
+    for variant in &schema.variants {
+        if !variant_ids.insert(variant.id) {
+            errors.push(format!("duplicate variant id {}", variant.id));
+        }
+        // Field ids are unique across the WHOLE enum (the same `ids` set), so
+        // field reads and migrations name a field unambiguously.
+        for field in &variant.fields {
+            check_field(field, &mut errors);
         }
     }
     if errors.is_empty() {
@@ -74,18 +108,72 @@ fn check_instruction(
                     .schemas
                     .get(&(*type_id, *version))
                     .ok_or_else(|| "missing current schema".to_string())?;
-                let supplied: BTreeMap<_, _> = fields.iter().copied().collect();
-                for field in &schema.fields {
-                    match supplied.get(&field.id) {
-                        Some(reg) if read(regs, *reg)? == field.ty => {}
-                        Some(_) => {
-                            return Err(format!("field '{}' has the wrong type", field.name));
-                        }
-                        None if field.default.is_some() => {}
-                        None => return Err(format!("missing field '{}'", field.name)),
+                if schema.is_enum() {
+                    return Err(format!(
+                        "type {} is an enum — construct a variant",
+                        schema.name
+                    ));
+                }
+                check_supplied_fields(&schema.fields, fields, regs)?;
+                Ok(Some((*dst, Type::Ref(*type_id))))
+            }
+            Instruction::NewVariant {
+                dst,
+                type_id,
+                variant,
+                fields,
+            } => {
+                let version = world
+                    .current_schemas
+                    .get(type_id)
+                    .ok_or_else(|| format!("unknown type {type_id}"))?;
+                let schema = world
+                    .schemas
+                    .get(&(*type_id, *version))
+                    .ok_or_else(|| "missing current schema".to_string())?;
+                let v = schema
+                    .variant(*variant)
+                    .ok_or_else(|| format!("type {} has no variant {variant}", schema.name))?;
+                check_supplied_fields(&v.fields, fields, regs)?;
+                Ok(Some((*dst, Type::Ref(*type_id))))
+            }
+            Instruction::CaseVariant { object, arms } => {
+                let Type::Ref(type_id) = read(regs, *object)? else {
+                    return Err("match needs an enum reference".into());
+                };
+                let version = world
+                    .current_schemas
+                    .get(&type_id)
+                    .ok_or_else(|| "unknown object type".to_string())?;
+                let schema = &world.schemas[&(type_id, *version)];
+                if !schema.is_enum() {
+                    return Err(format!("type {} is not an enum", schema.name));
+                }
+                // EXACT coverage of the current variants: a missing arm is a
+                // verification error, so adding a variant statically breaks
+                // (invalidates, D7) every match that doesn't handle it — the
+                // developer repairs the match live instead of a runtime surprise.
+                let mut seen = BTreeSet::new();
+                for (variant, _) in arms {
+                    if schema.variant(*variant).is_none() {
+                        return Err(format!(
+                            "match arm names variant {variant}, which {} does not have",
+                            schema.name
+                        ));
+                    }
+                    if !seen.insert(*variant) {
+                        return Err(format!("duplicate match arm for variant {variant}"));
                     }
                 }
-                Ok(Some((*dst, Type::Ref(*type_id))))
+                for variant in &schema.variants {
+                    if !seen.contains(&variant.id) {
+                        return Err(format!(
+                            "non-exhaustive match: missing arm for variant '{}'",
+                            variant.name
+                        ));
+                    }
+                }
+                Ok(None)
             }
             Instruction::GetField { dst, object, field } => {
                 let Type::Ref(type_id) = read(regs, *object)? else {
@@ -131,6 +219,18 @@ fn check_instruction(
             Instruction::Not { dst, src } => {
                 if read(regs, *src)? != Type::Bool {
                     return Err("negation needs a bool operand".into());
+                }
+                Ok(Some((*dst, Type::Bool)))
+            }
+            Instruction::ConcatStr { dst, left, right } => {
+                if read(regs, *left)? != Type::Str || read(regs, *right)? != Type::Str {
+                    return Err("concatenation needs string operands".into());
+                }
+                Ok(Some((*dst, Type::Str)))
+            }
+            Instruction::EqStr { dst, left, right } => {
+                if read(regs, *left)? != Type::Str || read(regs, *right)? != Type::Str {
+                    return Err("string equality needs string operands".into());
                 }
                 Ok(Some((*dst, Type::Bool)))
             }
@@ -229,6 +329,7 @@ fn successors(instruction: &Instruction, pc: usize) -> Vec<usize> {
         Instruction::Branch {
             then_pc, else_pc, ..
         } => vec![*then_pc, *else_pc],
+        Instruction::CaseVariant { arms, .. } => arms.iter().map(|(_, pc)| *pc).collect(),
         _ => vec![pc + 1],
     }
 }
@@ -362,8 +463,11 @@ pub fn verify_function_with(
         env.iter().flatten().for_each(&mut add);
     }
     for instruction in &function.code {
-        if let Instruction::New { type_id, .. } = instruction {
-            deps.insert(*type_id);
+        match instruction {
+            Instruction::New { type_id, .. } | Instruction::NewVariant { type_id, .. } => {
+                deps.insert(*type_id);
+            }
+            _ => {}
         }
     }
     Ok(deps)

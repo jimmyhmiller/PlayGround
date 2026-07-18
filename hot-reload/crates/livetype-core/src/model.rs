@@ -1,9 +1,14 @@
+use crate::strings::StrId;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub type DefId = u64;
 pub type FieldId = u64;
 pub type ObjectId = u64;
 pub type ActorId = u64;
+/// The identity of one variant of an `enum` type. Stable by name across
+/// versions (the frontend's symbol table guarantees it), which is what lets a
+/// migration know "this is still the same variant".
+pub type VariantId = u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Version(pub u64);
@@ -21,6 +26,8 @@ pub enum Type {
     Unit,
     I64,
     Bool,
+    /// An interned, immutable string (see [`crate::strings`]).
+    Str,
     Ref(DefId),
     /// An opaque handle to a native resource. Matched nominally by kind; the GC
     /// never traces through it (native code owns the pointee's lifetime).
@@ -32,6 +39,9 @@ pub enum Value {
     Unit,
     I64(i64),
     Bool(bool),
+    /// An interned string — a plain scalar id (equal text ⇒ equal id), so it
+    /// needs no GC tracing and survives every tier boundary untouched.
+    Str(StrId),
     Ref(ObjectId),
     /// A native pointer behind a kind tag. Passed to and returned from foreign
     /// calls; stored in globals and object fields like any other value. Opaque
@@ -49,6 +59,7 @@ impl Value {
             Self::Unit => Some(Type::Unit),
             Self::I64(_) => Some(Type::I64),
             Self::Bool(_) => Some(Type::Bool),
+            Self::Str(_) => Some(Type::Str),
             Self::Foreign { kind, .. } => Some(Type::Foreign(*kind)),
             Self::Ref(_) => None,
         }
@@ -63,17 +74,43 @@ pub struct Field {
     pub default: Option<Value>,
 }
 
+/// One variant of an `enum` type: a named case with its own fields. Field ids
+/// are unique across the whole enum (not just within the variant), so field
+/// reads and migrations name them unambiguously.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Variant {
+    pub id: VariantId,
+    pub name: String,
+    pub fields: Vec<Field>,
+}
+
+/// The versioned layout of a nominal type. A **struct** has `fields` and no
+/// `variants`; an **enum** has `variants` and no top-level `fields`. Both
+/// evolve the same way: install a new version, and live objects cross the
+/// migration barrier lazily at their next use.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Schema {
     pub type_id: DefId,
     pub version: Version,
     pub name: String,
     pub fields: Vec<Field>,
+    pub variants: Vec<Variant>,
 }
 
 impl Schema {
+    pub fn is_enum(&self) -> bool {
+        !self.variants.is_empty()
+    }
+    /// A field by id — searching the struct fields and every variant's fields
+    /// (ids are unique across the whole schema).
     pub fn field(&self, id: FieldId) -> Option<&Field> {
-        self.fields.iter().find(|field| field.id == id)
+        self.fields
+            .iter()
+            .chain(self.variants.iter().flat_map(|v| v.fields.iter()))
+            .find(|field| field.id == id)
+    }
+    pub fn variant(&self, id: VariantId) -> Option<&Variant> {
+        self.variants.iter().find(|v| v.id == id)
     }
 }
 
@@ -86,6 +123,9 @@ impl Schema {
 pub struct Body {
     pub type_id: DefId,
     pub schema: Version,
+    /// `Some` iff this object is an enum value: which variant it currently is.
+    /// A migration may map it to a different variant of the new version.
+    pub variant: Option<VariantId>,
     pub fields: BTreeMap<FieldId, Value>,
 }
 
@@ -102,12 +142,27 @@ pub enum MigrationSource {
     },
 }
 
+/// How one *variant* of an enum migrates across a version step: which variant
+/// it becomes in the new version, and how each of that variant's fields is
+/// produced (sources read the OLD variant's fields).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariantMigration {
+    pub to_variant: VariantId,
+    pub fields: BTreeMap<FieldId, MigrationSource>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Migration {
     pub type_id: DefId,
     pub from: Version,
     pub to: Version,
+    /// Struct migration: how each field of the new version is produced.
     pub fields: BTreeMap<FieldId, MigrationSource>,
+    /// Enum migration: how each OLD variant maps forward. A variant with no
+    /// entry is a *gap* — objects currently of that variant trap
+    /// `MissingMigration` at their next use until a covering migration is
+    /// installed (the classic removed-variant repair story).
+    pub variants: BTreeMap<VariantId, VariantMigration>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +180,25 @@ pub enum Instruction {
         dst: usize,
         object: usize,
         field: FieldId,
+    },
+    /// Construct an enum value as `variant` of `type_id` at its current schema.
+    /// The enum counterpart of `New`.
+    NewVariant {
+        dst: usize,
+        type_id: DefId,
+        variant: VariantId,
+        fields: Vec<(FieldId, usize)>,
+    },
+    /// The verified multi-way branch of a `match`: migrate `object` to its
+    /// type's current schema, then jump to the arm for its variant. The
+    /// verifier requires the arms to cover the current schema's variants
+    /// EXACTLY — which is what makes adding a variant statically invalidate
+    /// every non-exhaustive match (D7), instead of misbehaving at runtime. A
+    /// *pinned old* frame whose object migrates to a variant it has no arm for
+    /// traps at this use — the con-freeness quarantine, same as a field read.
+    CaseVariant {
+        object: usize,
+        arms: Vec<(VariantId, usize)>,
     },
     /// Copy a value from one register to another (any type). The one op that
     /// isn't produced by a single source construct — the frontend emits it to
@@ -167,6 +241,19 @@ pub enum Instruction {
     Not {
         dst: usize,
         src: usize,
+    },
+    /// `dst := left ++ right` (on interned strings); the result is interned.
+    ConcatStr {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// `dst := left == right` (on interned strings). Interning dedups, so this
+    /// is id equality — identical in every tier.
+    EqStr {
+        dst: usize,
+        left: usize,
+        right: usize,
     },
     /// Unconditional transfer to another program counter. A back-edge (a target
     /// at or before this pc) forms a loop.

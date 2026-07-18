@@ -13,6 +13,9 @@ pub fn operand_type_error(function: DefId, pc: usize, instruction: &Instruction)
         Instruction::EqI64 { .. } => ERR_EQ_NON_I64,
         Instruction::Not { .. } => ERR_NOT_NON_BOOL,
         Instruction::Branch { .. } => ERR_BRANCH_NON_BOOL,
+        Instruction::ConcatStr { .. } => ERR_CONCAT_NON_STR,
+        Instruction::EqStr { .. } => ERR_EQSTR_NON_STR,
+        Instruction::CaseVariant { .. } => ERR_CASE_NON_REF,
         _ => "operand type mismatch",
     };
     Condition::RuntimeTypeError {
@@ -56,13 +59,17 @@ pub fn resume_shape(
         Instruction::AddI64 { dst, .. } | Instruction::SubI64 { dst, .. } | Instruction::MulI64 { dst, .. } => {
             (Type::I64, ResumePlan::SetAdvance(*dst))
         }
-        Instruction::LtI64 { dst, .. } | Instruction::EqI64 { dst, .. } | Instruction::Not { dst, .. } => {
+        Instruction::LtI64 { dst, .. } | Instruction::EqI64 { dst, .. } | Instruction::Not { dst, .. }
+        | Instruction::EqStr { dst, .. } => {
             (Type::Bool, ResumePlan::SetAdvance(*dst))
         }
+        Instruction::ConcatStr { dst, .. } => (Type::Str, ResumePlan::SetAdvance(*dst)),
         Instruction::Branch {
             then_pc, else_pc, ..
         } => (Type::Bool, ResumePlan::Branch(*then_pc, *else_pc)),
-        Instruction::New { dst, type_id, .. } => (Type::Ref(*type_id), ResumePlan::SetAdvance(*dst)),
+        Instruction::New { dst, type_id, .. } | Instruction::NewVariant { dst, type_id, .. } => {
+            (Type::Ref(*type_id), ResumePlan::SetAdvance(*dst))
+        }
         Instruction::Call { dst, function, .. } => {
             let version = *world
                 .current_functions
@@ -87,6 +94,9 @@ pub(crate) const ERR_LT_NON_I64: &str = "comparison on non-i64";
 pub(crate) const ERR_EQ_NON_I64: &str = "equality on non-i64";
 pub(crate) const ERR_NOT_NON_BOOL: &str = "negation on non-bool";
 pub(crate) const ERR_BRANCH_NON_BOOL: &str = "branch on non-bool";
+pub(crate) const ERR_CONCAT_NON_STR: &str = "concatenation on non-string";
+pub(crate) const ERR_EQSTR_NON_STR: &str = "string equality on non-string";
+pub(crate) const ERR_CASE_NON_REF: &str = "match on a non-reference";
 
 /// A registered native function: the implementation behind a `foreign fn`.
 /// `Send` so a runtime carrying foreign functions can still move to the driver
@@ -138,24 +148,70 @@ impl World {
         Ok(())
     }
 
-    /// Try to build the `from → to` migration mechanically. `None` on a gap.
+    /// Try to build the `from → to` migration mechanically. For a struct:
+    /// every new field copies a same-typed survivor or takes its default, or
+    /// derivation abandons (`None` — a gap the developer fills). For an enum:
+    /// derivation is *per variant* — an old variant still present (by id) whose
+    /// new fields are all copyable-or-defaulted gets an identity mapping;
+    /// removed or reshaped variants are simply left unmapped, so adding a
+    /// variant migrates every live object transparently while objects of a
+    /// removed variant gap individually.
     fn derive_migration(&self, type_id: DefId, from: Version, to: Version) -> Option<Migration> {
         let old = self.schemas.get(&(type_id, from))?;
         let new = self.schemas.get(&(type_id, to))?;
-        let mut fields = BTreeMap::new();
-        for field in &new.fields {
-            let source = match old.field(field.id) {
-                Some(old_field) if old_field.ty == field.ty => MigrationSource::Copy(field.id),
-                _ => MigrationSource::Value(field.default.clone()?),
-            };
-            fields.insert(field.id, source);
+        if old.is_enum() || new.is_enum() {
+            if !old.is_enum() || !new.is_enum() {
+                return None; // struct ⇄ enum is never mechanical
+            }
+            let mut variants = BTreeMap::new();
+            for old_variant in &old.variants {
+                let Some(new_variant) = new.variant(old_variant.id) else {
+                    continue; // removed: leave the gap
+                };
+                let Some(fields) = Self::derive_fields(&old_variant.fields, &new_variant.fields)
+                else {
+                    continue; // reshaped beyond derivation: leave the gap
+                };
+                variants.insert(
+                    old_variant.id,
+                    VariantMigration {
+                        to_variant: new_variant.id,
+                        fields,
+                    },
+                );
+            }
+            return Some(Migration {
+                type_id,
+                from,
+                to,
+                fields: BTreeMap::new(),
+                variants,
+            });
         }
+        let fields = Self::derive_fields(&old.fields, &new.fields)?;
         Some(Migration {
             type_id,
             from,
             to,
             fields,
+            variants: BTreeMap::new(),
         })
+    }
+
+    /// The copy-or-default rule shared by struct and per-variant derivation.
+    fn derive_fields(
+        old: &[crate::Field],
+        new: &[crate::Field],
+    ) -> Option<BTreeMap<FieldId, MigrationSource>> {
+        let mut fields = BTreeMap::new();
+        for field in new {
+            let source = match old.iter().find(|f| f.id == field.id) {
+                Some(old_field) if old_field.ty == field.ty => MigrationSource::Copy(field.id),
+                _ => MigrationSource::Value(field.default?),
+            };
+            fields.insert(field.id, source);
+        }
+        Some(fields)
     }
 
     pub fn install_migration(
@@ -175,20 +231,86 @@ impl World {
             .get(&(migration.type_id, migration.to))
             .ok_or(InstallError::BadVersion)?;
         let mut errors = Vec::new();
-        for field in &new.fields {
-            let Some(source) = migration.fields.get(&field.id) else {
+        if new.is_enum() || old.is_enum() {
+            // Enum migration: validate each provided variant mapping. Coverage
+            // may be PARTIAL — an unmapped old variant is a deliberate gap
+            // (its objects trap `MissingMigration` until a covering migration
+            // replaces this one).
+            if migration.fields.is_empty() {
+                for (from_variant, vm) in &migration.variants {
+                    let Some(old_variant) = old.variant(*from_variant) else {
+                        errors
+                            .push(format!("migration maps unknown source variant {from_variant}"));
+                        continue;
+                    };
+                    let Some(new_variant) = new.variant(vm.to_variant) else {
+                        errors.push(format!(
+                            "migration for variant '{}' targets unknown variant {}",
+                            old_variant.name, vm.to_variant
+                        ));
+                        continue;
+                    };
+                    self.check_field_plan(
+                        &vm.fields,
+                        &old_variant.fields,
+                        &new_variant.fields,
+                        heap,
+                        &mut errors,
+                    );
+                }
+            } else {
+                errors.push("an enum migration maps variants, not top-level fields".into());
+            }
+        } else {
+            if !migration.variants.is_empty() {
+                errors.push("a struct migration has no variants".into());
+            }
+            self.check_field_plan(&migration.fields, &old.fields, &new.fields, heap, &mut errors);
+        }
+        if !errors.is_empty() {
+            return Err(InstallError::Invalid(errors));
+        }
+        let key = (migration.type_id, migration.from);
+        if new.is_enum()
+            && let Some(existing) = self.migrations.get_mut(&key)
+        {
+            // Enum migrations MERGE per variant (new mappings win): the usual
+            // repair flow is "auto-derivation already mapped the surviving
+            // variants; the developer supplies just the gapped one" — replacing
+            // wholesale would silently un-migrate the survivors.
+            existing.variants.extend(migration.variants);
+            return Ok(());
+        }
+        self.migrations.insert(key, migration);
+        Ok(())
+    }
+
+    /// Validate one field plan: every target field produced, each with the
+    /// right type, with `Copy` sources resolved against `old_fields`. Shared by
+    /// struct migrations and each variant mapping of an enum migration.
+    fn check_field_plan(
+        &self,
+        plan: &BTreeMap<FieldId, MigrationSource>,
+        old_fields: &[crate::Field],
+        new_fields: &[crate::Field],
+        heap: &Heap,
+        errors: &mut Vec<String>,
+    ) {
+        let old_field = |id: FieldId| old_fields.iter().find(|f| f.id == id);
+        for field in new_fields {
+            let Some(source) = plan.get(&field.id) else {
                 errors.push(format!("missing output field '{}'", field.name));
                 continue;
             };
             let source_ty = match source {
-                MigrationSource::Copy(id) => old.field(*id).map(|f| f.ty.clone()),
+                MigrationSource::Copy(id) => old_field(*id).map(|f| f.ty.clone()),
                 MigrationSource::Value(value) => heap.shallow_type(value),
                 MigrationSource::Wrap {
                     type_id,
                     field: inner,
                     source,
                 } => {
-                    let input = old.field(*source).map(|f| &f.ty);
+                    let input = old_field(*source).map(|f| &f.ty);
                     let version = self.current_schemas.get(type_id);
                     let target = version
                         .and_then(|v| self.schemas.get(&(*type_id, *v)))
@@ -204,12 +326,6 @@ impl World {
                 errors.push(format!("migration for '{}' has the wrong type", field.name));
             }
         }
-        if !errors.is_empty() {
-            return Err(InstallError::Invalid(errors));
-        }
-        self.migrations
-            .insert((migration.type_id, migration.from), migration);
-        Ok(())
     }
 
     pub fn install_function(&mut self, function: Function) -> Result<(), InstallError> {

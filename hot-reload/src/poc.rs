@@ -174,6 +174,7 @@ fn supply_money_migration(s: &mut Session) {
                 bal,
                 MigrationSource::Wrap { type_id: money, field: cents, source: bal },
             )]),
+            variants: std::collections::BTreeMap::new(),
         })
         .unwrap();
     println!("     ✎ migration installed: wrap the old balance into Money{{cents}}");

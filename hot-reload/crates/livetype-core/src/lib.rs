@@ -16,6 +16,7 @@ mod model;
 mod mt;
 mod native;
 mod runtime;
+pub mod strings;
 mod verify;
 
 pub use engine::*;
@@ -26,4 +27,5 @@ pub use model::*;
 pub use mt::*;
 pub use native::*;
 pub use runtime::*;
+pub use strings::StrId;
 pub use verify::*;

@@ -46,7 +46,8 @@
 use crate::mt::{Outcome, Shared};
 use crate::native::{
     NativeHost, OUT_CALL, OUT_CONDITION, OUT_RETURN, OUT_TYPE_ERROR, OUT_YIELD, RawFrame, RawSlot,
-    TAG_BOOL, TAG_FOREIGN, TAG_I64, TAG_KIND_SHIFT, TAG_MASK, TAG_REF, TAG_UNIT, step_at,
+    TAG_BOOL, TAG_FOREIGN, TAG_I64, TAG_KIND_SHIFT, TAG_MASK, TAG_REF, TAG_STR, TAG_UNIT,
+    step_at,
 };
 use crate::runtime::{ForeignFn, InstallError, ResumePlan, operand_type_error, resume_shape};
 use crate::{
@@ -835,6 +836,7 @@ impl Engine {
             Type::I64 => slot.tag == TAG_I64,
             Type::Bool => slot.tag == TAG_BOOL,
             Type::Unit => slot.tag == TAG_UNIT,
+            Type::Str => slot.tag == TAG_STR,
             Type::Foreign(kind) => {
                 slot.tag & TAG_MASK == TAG_FOREIGN
                     && (slot.tag >> TAG_KIND_SHIFT) as u32 == *kind

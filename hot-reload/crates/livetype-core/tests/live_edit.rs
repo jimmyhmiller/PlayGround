@@ -115,6 +115,7 @@ fn a_breaking_edit_traps_and_a_fix_resumes() {
                 bal_field,
                 MigrationSource::Wrap { type_id: money, field: cents_field, source: bal_field },
             )]),
+            variants: std::collections::BTreeMap::new(),
         })
         .unwrap();
     assert_eq!(s.engine.resume(&mut actor), Outcome::Complete(Value::I64(95)));

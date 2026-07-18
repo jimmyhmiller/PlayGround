@@ -66,6 +66,7 @@ fn auto_derived_chain_v1_v2_v3() {
             version: Version(1),
             name: "Account".into(),
             fields: vec![field(BAL, "balance", Type::I64)],
+            variants: Vec::new(),
         })
         .unwrap();
         rt.install_function(Function {
@@ -95,6 +96,7 @@ fn auto_derived_chain_v1_v2_v3() {
                 field(BAL, "balance", Type::I64),
                 field_def(FEE, "fee", Type::I64, Value::I64(0)),
             ],
+            variants: Vec::new(),
         })
         .unwrap();
         rt.install_schema(Schema {
@@ -106,6 +108,7 @@ fn auto_derived_chain_v1_v2_v3() {
                 field_def(FEE, "fee", Type::I64, Value::I64(0)),
                 field_def(TAX, "tax", Type::I64, Value::I64(7)),
             ],
+            variants: Vec::new(),
         })
         .unwrap();
         obj
@@ -131,6 +134,7 @@ fn mixed_auto_and_explicit_chain() {
             version: Version(1),
             name: "Account".into(),
             fields: vec![field(BAL, "balance", Type::I64)],
+            variants: Vec::new(),
         })
         .unwrap();
         rt.install_schema(Schema {
@@ -138,6 +142,7 @@ fn mixed_auto_and_explicit_chain() {
             version: Version(1),
             name: "Money".into(),
             fields: vec![field(CENTS, "cents", Type::I64)],
+            variants: Vec::new(),
         })
         .unwrap();
         let obj = rt.shared().jit_new(ACCT, &[(BAL, Value::I64(100))]).unwrap();
@@ -150,6 +155,7 @@ fn mixed_auto_and_explicit_chain() {
                 field(BAL, "balance", Type::I64),
                 field_def(FEE, "fee", Type::I64, Value::I64(0)),
             ],
+            variants: Vec::new(),
         })
         .unwrap(); // auto-derives v1→v2
         rt.install_schema(Schema {
@@ -160,6 +166,7 @@ fn mixed_auto_and_explicit_chain() {
                 field(BAL, "balance", Type::Ref(MONEY)),
                 field_def(FEE, "fee", Type::I64, Value::I64(0)),
             ],
+            variants: Vec::new(),
         })
         .unwrap();
         // balance retyped Int→Money: not auto-derivable, supply it.
@@ -178,6 +185,7 @@ fn mixed_auto_and_explicit_chain() {
                 ),
                 (FEE, MigrationSource::Copy(FEE)),
             ]),
+            variants: std::collections::BTreeMap::new(),
         })
         .unwrap();
         // Reader installed against the final shape.

@@ -6,7 +6,7 @@
 use super::ast::*;
 use crate::{
     DefId, Field, FieldId, ForeignFnId, ForeignKind, Function, Instruction, Schema, Type, Value,
-    Version,
+    Variant, VariantId, Version, strings,
 };
 use std::collections::HashMap;
 
@@ -22,6 +22,11 @@ pub struct IdEnv {
     fn_ids: HashMap<String, DefId>,
     field_ids: HashMap<(DefId, String), FieldId>,
     struct_fields: HashMap<DefId, Vec<(String, FieldId, Type)>>,
+    // Enums share the type-id namespace with structs; a type id present here is
+    // an enum. Variant ids are stable by (enum, name) — the identity that lets
+    // an auto-derived migration know "this is still the same variant".
+    variant_ids: HashMap<(DefId, String), VariantId>,
+    enum_variants: HashMap<DefId, Vec<(String, VariantId, Vec<(String, FieldId, Type)>)>>,
     fn_sigs: HashMap<DefId, (Vec<Type>, Type)>,
     // Foreign world: opaque resource kinds, native fn ids, and their signatures.
     foreign_type_ids: HashMap<String, ForeignKind>,
@@ -33,6 +38,7 @@ pub struct IdEnv {
     next_struct: DefId,
     next_fn: DefId,
     next_field: FieldId,
+    next_variant: VariantId,
     next_foreign_type: ForeignKind,
     next_foreign_fn: ForeignFnId,
     next_global: DefId,
@@ -46,6 +52,7 @@ impl IdEnv {
             next_struct: 1,
             next_fn: 1_000_000,
             next_field: 1,
+            next_variant: 1,
             next_foreign_type: 1,
             next_foreign_fn: 1,
             next_global: 2_000_000,
@@ -126,6 +133,15 @@ impl IdEnv {
         self.fn_ids.insert(name.to_string(), id);
         id
     }
+    fn variant_id(&mut self, enum_id: DefId, name: &str) -> VariantId {
+        if let Some(id) = self.variant_ids.get(&(enum_id, name.to_string())) {
+            return *id;
+        }
+        let id = self.next_variant;
+        self.next_variant += 1;
+        self.variant_ids.insert((enum_id, name.to_string()), id);
+        id
+    }
     fn field_id(&mut self, struct_id: DefId, name: &str) -> FieldId {
         if let Some(id) = self.field_ids.get(&(struct_id, name.to_string())) {
             return *id;
@@ -153,6 +169,7 @@ fn resolve(te: &TypeExpr, ids: &IdEnv) -> Result<Type, String> {
     Ok(match te {
         TypeExpr::I64 => Type::I64,
         TypeExpr::Bool => Type::Bool,
+        TypeExpr::Str => Type::Str,
         TypeExpr::Unit => Type::Unit,
         TypeExpr::Ref(name) => {
             // A written name is a foreign resource type if declared as one,
@@ -187,6 +204,14 @@ pub fn lower(program: &Program, ids: &mut IdEnv) -> Result<Lowered, String> {
         .iter()
         .filter_map(|i| match i {
             Item::Struct(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let enums: Vec<&EnumDef> = program
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Enum(e) => Some(e),
             _ => None,
         })
         .collect();
@@ -228,10 +253,13 @@ pub fn lower(program: &Program, ids: &mut IdEnv) -> Result<Lowered, String> {
         }
     }
 
-    // Register every struct name first (so fields that reference each other
-    // resolve), then build each schema and record its current layout.
+    // Register every struct and enum name first (so fields that reference each
+    // other resolve), then build each schema and record its current layout.
     for s in &structs {
         ids.struct_id(&s.name);
+    }
+    for e in &enums {
+        ids.struct_id(&e.name);
     }
     let mut schemas = Vec::new();
     for s in &structs {
@@ -259,6 +287,49 @@ pub fn lower(program: &Program, ids: &mut IdEnv) -> Result<Lowered, String> {
             version: Version(1), // the session rewrites this to the next version
             name: s.name.clone(),
             fields,
+            variants: Vec::new(),
+        });
+    }
+    for e in &enums {
+        let eid = ids.struct_of(&e.name).unwrap();
+        let mut variants = Vec::new();
+        let mut layout = Vec::new();
+        for v in &e.variants {
+            let vid = ids.variant_id(eid, &v.name);
+            let mut fields = Vec::new();
+            let mut vfields = Vec::new();
+            for f in &v.fields {
+                // Field ids are namespaced per variant ("V::f"), so the same
+                // field name in two variants gets two ids — unique across the
+                // enum, stable across versions of the same variant.
+                let fid = ids.field_id(eid, &format!("{}::{}", v.name, f.name));
+                let ty = resolve(&f.ty, ids)?;
+                let default = match &f.default {
+                    None => None,
+                    Some(expr) => Some(const_value(expr, &ty)?),
+                };
+                fields.push(Field {
+                    id: fid,
+                    name: f.name.clone(),
+                    ty: ty.clone(),
+                    default,
+                });
+                vfields.push((f.name.clone(), fid, ty));
+            }
+            variants.push(Variant {
+                id: vid,
+                name: v.name.clone(),
+                fields,
+            });
+            layout.push((v.name.clone(), vid, vfields));
+        }
+        ids.enum_variants.insert(eid, layout);
+        schemas.push(Schema {
+            type_id: eid,
+            version: Version(1), // the session rewrites this to the next version
+            name: e.name.clone(),
+            fields: Vec::new(),
+            variants,
         });
     }
 
@@ -342,6 +413,7 @@ fn const_value(e: &Expr, ty: &Type) -> Result<Value, String> {
     let v = match e {
         Expr::Int(n) => Value::I64(*n),
         Expr::Bool(b) => Value::Bool(*b),
+        Expr::Str(text) => Value::Str(strings::intern(text)),
         Expr::Unit => Value::Unit,
         _ => return Err("field default must be a literal".into()),
     };
@@ -421,6 +493,11 @@ impl<'a> Lower<'a> {
                     *then_pc = self.labels[*then_pc];
                     *else_pc = self.labels[*else_pc];
                 }
+                Instruction::CaseVariant { arms, .. } => {
+                    for (_, pc) in arms {
+                        *pc = self.labels[*pc];
+                    }
+                }
                 _ => {}
             }
         }
@@ -466,6 +543,62 @@ impl<'a> Lower<'a> {
                 self.place(else_l);
                 self.scoped(|lo| lo.stmts(els))?;
                 self.code.push(Instruction::Jump { target: end_l });
+                self.place(end_l);
+            }
+            Stmt::Match { scrutinee, arms } => {
+                let (obj, ty) = self.expr(scrutinee)?;
+                let Type::Ref(enum_id) = ty else {
+                    return Err("match needs an enum value".into());
+                };
+                let layout = self
+                    .ids
+                    .enum_variants
+                    .get(&enum_id)
+                    .ok_or("match on a non-enum type")?
+                    .clone();
+                let end_l = self.new_label();
+                let mut case_arms = Vec::new();
+                let mut labelled = Vec::new();
+                for arm in arms {
+                    let (_, vid, vfields) = layout
+                        .iter()
+                        .find(|(n, _, _)| *n == arm.variant)
+                        .ok_or_else(|| {
+                            format!("enum has no variant `{}`", arm.variant)
+                        })?;
+                    let label = self.new_label();
+                    case_arms.push((*vid, label));
+                    labelled.push((arm, label, vfields.clone()));
+                }
+                self.code.push(Instruction::CaseVariant {
+                    object: obj,
+                    arms: case_arms,
+                });
+                for (arm, label, vfields) in labelled {
+                    self.place(label);
+                    self.scoped(|lo| -> Result<(), String> {
+                        for binding in &arm.bindings {
+                            let (_, fid, fty) = vfields
+                                .iter()
+                                .find(|(n, _, _)| n == binding)
+                                .ok_or_else(|| {
+                                    format!(
+                                        "variant `{}` has no field `{binding}`",
+                                        arm.variant
+                                    )
+                                })?;
+                            let dst = lo.fresh_reg();
+                            lo.code.push(Instruction::GetField {
+                                dst,
+                                object: obj,
+                                field: *fid,
+                            });
+                            lo.bind(binding, dst, fty.clone());
+                        }
+                        lo.stmts(&arm.body)
+                    })?;
+                    self.code.push(Instruction::Jump { target: end_l });
+                }
                 self.place(end_l);
             }
             Stmt::While { cond, body } => {
@@ -529,6 +662,13 @@ impl<'a> Lower<'a> {
                 self.code.push(Instruction::Const { dst, value: Value::I64(*n) });
                 Type::I64
             }
+            Expr::Str(text) => {
+                self.code.push(Instruction::Const {
+                    dst,
+                    value: Value::Str(strings::intern(text)),
+                });
+                Type::Str
+            }
             Expr::Bool(b) => {
                 self.code.push(Instruction::Const { dst, value: Value::Bool(*b) });
                 Type::Bool
@@ -549,9 +689,27 @@ impl<'a> Lower<'a> {
                 }
             }
             Expr::Binary { op, left, right } => {
-                let (lr, _) = self.expr(left)?;
+                let (lr, lty) = self.expr(left)?;
                 let (rr, _) = self.expr(right)?;
+                // `+`, `==`, and `!=` are type-directed: strings get the string
+                // ops, everything else the i64 ops (the verifier enforces the
+                // operand types either way).
+                let strings = lty == Type::Str;
                 match op {
+                    BinOp::Add if strings => {
+                        self.code.push(Instruction::ConcatStr { dst, left: lr, right: rr });
+                        Type::Str
+                    }
+                    BinOp::Eq if strings => {
+                        self.code.push(Instruction::EqStr { dst, left: lr, right: rr });
+                        Type::Bool
+                    }
+                    BinOp::Ne if strings => {
+                        let t = self.fresh_reg();
+                        self.code.push(Instruction::EqStr { dst: t, left: lr, right: rr });
+                        self.code.push(Instruction::Not { dst, src: t });
+                        Type::Bool
+                    }
                     BinOp::Add => {
                         self.code.push(Instruction::AddI64 { dst, left: lr, right: rr });
                         Type::I64
@@ -652,6 +810,39 @@ impl<'a> Lower<'a> {
                     fields: supplied,
                 });
                 Type::Ref(type_id)
+            }
+            Expr::VariantLit { enum_name, variant, fields } => {
+                let enum_id = self
+                    .ids
+                    .struct_of(enum_name)
+                    .ok_or_else(|| format!("unknown enum `{enum_name}`"))?;
+                let layout = self
+                    .ids
+                    .enum_variants
+                    .get(&enum_id)
+                    .ok_or_else(|| format!("`{enum_name}` is not an enum"))?;
+                let (_, vid, vfields) = layout
+                    .iter()
+                    .find(|(n, _, _)| n == variant)
+                    .ok_or_else(|| format!("`{enum_name}` has no variant `{variant}`"))?;
+                let field_ids: HashMap<&str, FieldId> =
+                    vfields.iter().map(|(n, id, _)| (n.as_str(), *id)).collect();
+                let (vid, variant_name) = (*vid, variant.clone());
+                let mut supplied = Vec::new();
+                for (fname, fexpr) in fields {
+                    let fid = *field_ids.get(fname.as_str()).ok_or_else(|| {
+                        format!("variant `{variant_name}` has no field `{fname}`")
+                    })?;
+                    let (r, _) = self.expr(fexpr)?;
+                    supplied.push((fid, r));
+                }
+                self.code.push(Instruction::NewVariant {
+                    dst,
+                    type_id: enum_id,
+                    variant: vid,
+                    fields: supplied,
+                });
+                Type::Ref(enum_id)
             }
             Expr::Call { name, args } => {
                 // A foreign fn lowers to a native call; anything else is a

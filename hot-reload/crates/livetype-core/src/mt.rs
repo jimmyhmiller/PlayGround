@@ -291,6 +291,27 @@ impl Shared {
         let world = self.world.read().unwrap();
         self.heap.get_field(id, field, &world)
     }
+    /// Construct an enum variant at the current schema — the JIT's
+    /// `lt_new_variant`.
+    pub fn jit_new_variant(
+        &self,
+        type_id: DefId,
+        variant: VariantId,
+        supplied: &[(FieldId, Value)],
+    ) -> Result<ObjectId, Condition> {
+        let world = self.world.read().unwrap();
+        self.heap.new_variant(type_id, variant, supplied, &world)
+    }
+    /// The `match` barrier — the JIT's `lt_case_variant` (see
+    /// [`Heap::variant_case`]).
+    pub fn jit_case_variant(
+        &self,
+        id: ObjectId,
+        arms: &[(VariantId, usize)],
+    ) -> Result<usize, Condition> {
+        let world = self.world.read().unwrap();
+        self.heap.variant_case(id, arms, &world)
+    }
     /// Commit an observation — the JIT's `lt_emit`.
     pub fn jit_emit(&self, value: Value) {
         self.emit(value);

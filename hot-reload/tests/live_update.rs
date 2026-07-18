@@ -25,6 +25,7 @@ fn initial_engine() -> std::sync::Arc<Engine> {
             version: Version(1),
             name: "Box".into(),
             fields: vec![field(VALUE, Type::I64)],
+            variants: Vec::new(),
         })
         .unwrap();
     runtime
@@ -91,6 +92,7 @@ fn repairs_resume_exactly_and_effects_are_not_replayed() {
             version: Version(1),
             name: "Wrapper".into(),
             fields: vec![field(INNER, Type::I64)],
+            variants: Vec::new(),
         })
         .unwrap();
     runtime
@@ -99,6 +101,7 @@ fn repairs_resume_exactly_and_effects_are_not_replayed() {
             version: Version(2),
             name: "Box".into(),
             fields: vec![field(VALUE, Type::Ref(WRAPPER))],
+            variants: Vec::new(),
         })
         .unwrap();
     runtime.run(&mut actor);
@@ -149,6 +152,7 @@ fn repairs_resume_exactly_and_effects_are_not_replayed() {
                     source: VALUE,
                 },
             )]),
+            variants: std::collections::BTreeMap::new(),
         })
         .unwrap();
     assert_eq!(

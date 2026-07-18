@@ -32,6 +32,7 @@ fn setup(rt: &Engine) {
         version: Version(1),
         name: "Account".into(),
         fields: vec![field(BALANCE, "balance", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_function(Function {
@@ -98,6 +99,7 @@ fn update_break(rt: &Engine) {
         version: Version(1),
         name: "Money".into(),
         fields: vec![field(CENTS, "cents", Type::I64)],
+        variants: Vec::new(),
     })
     .unwrap();
     rt.install_schema(Schema {
@@ -105,6 +107,7 @@ fn update_break(rt: &Engine) {
         version: Version(2),
         name: "Account".into(),
         fields: vec![field(BALANCE, "balance", Type::Ref(MONEY))],
+        variants: Vec::new(),
     })
     .unwrap();
 }
@@ -152,6 +155,7 @@ fn update_migrate(rt: &Engine) {
                 source: BALANCE,
             },
         )]),
+        variants: std::collections::BTreeMap::new(),
     })
     .unwrap();
 }

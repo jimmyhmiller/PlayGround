@@ -67,6 +67,7 @@ fn shared_heap_two_actors_both_complete() {
             version: Version(1),
             name: "Box".into(),
             fields: vec![field(VAL, "value", Type::I64)],
+            variants: Vec::new(),
         })
         .unwrap();
     // reader(x) yields once (so the scheduler interleaves), then reads x.value.
@@ -127,6 +128,7 @@ fn concurrent_migration_quarantines_the_pinned_reader() {
             version: Version(1),
             name: "Account".into(),
             fields: vec![field(BAL, "balance", Type::I64)],
+            variants: Vec::new(),
         })
         .unwrap();
     // The pinned reader: yields, then reads balance expecting an Int.
@@ -167,6 +169,7 @@ fn concurrent_migration_quarantines_the_pinned_reader() {
             version: Version(1),
             name: "Money".into(),
             fields: vec![field(CENTS, "cents", Type::I64)],
+            variants: Vec::new(),
         })
         .unwrap();
     engine
@@ -175,6 +178,7 @@ fn concurrent_migration_quarantines_the_pinned_reader() {
             version: Version(2),
             name: "Account".into(),
             fields: vec![field(BAL, "balance", Type::Ref(MONEY))],
+            variants: Vec::new(),
         })
         .unwrap();
     engine
@@ -190,6 +194,7 @@ fn concurrent_migration_quarantines_the_pinned_reader() {
                     source: BAL,
                 },
             )]),
+            variants: std::collections::BTreeMap::new(),
         })
         .unwrap();
     engine

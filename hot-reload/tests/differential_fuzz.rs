@@ -96,6 +96,7 @@ fn gen_program(seed: u64) -> Program {
             version: Version(t.version),
             name: format!("T{}", t.id),
             fields: t.fields.clone(),
+            variants: Vec::new(),
         })
         .collect();
 
@@ -291,6 +292,7 @@ fn gen_updates(rng: &mut Rng, types: &mut [TypeState]) -> Vec<Schema> {
             version: Version(t.version),
             name: format!("T{}", t.id),
             fields: t.fields.clone(),
+            variants: Vec::new(),
         });
     }
     updates

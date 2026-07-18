@@ -12,7 +12,8 @@
 //! optimize to an atomic `Arc` swap later; see `UNIFICATION.md`).
 
 use crate::{
-    Body, Condition, DefId, FieldId, MigrationSource, ObjectId, Type, Value, Version, World,
+    Body, Condition, DefId, FieldId, MigrationSource, ObjectId, Type, Value, VariantId,
+    Version, World,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,13 +70,18 @@ impl Heap {
         schema: Version,
         fields: BTreeMap<FieldId, Value>,
     ) -> ObjectId {
+        self.alloc_body(Body {
+            type_id,
+            schema,
+            variant: None,
+            fields,
+        })
+    }
+
+    pub fn alloc_body(&self, body: Body) -> ObjectId {
         let id = self.next_object.fetch_add(1, Ordering::Relaxed) + 1;
         let cell = Arc::new(ObjCell {
-            body: Mutex::new(Arc::new(Body {
-                type_id,
-                schema,
-                fields,
-            })),
+            body: Mutex::new(Arc::new(body)),
         });
         self.objects.lock().unwrap().insert(id, cell);
         id
@@ -159,8 +165,51 @@ impl Heap {
     ) -> Result<ObjectId, Condition> {
         let version = world.current_schemas[&type_id];
         let schema = &world.schemas[&(type_id, version)];
+        if schema.is_enum() {
+            return Err(type_error("an enum value is constructed as a variant"));
+        }
+        let values = Self::checked_fields(self, &schema.fields, supplied)?;
+        Ok(self.alloc(type_id, version, values))
+    }
+
+    /// Construct an enum value as `variant` of `type_id`'s current schema —
+    /// the enum counterpart of [`Heap::new_object`], with the same per-field
+    /// soundness checks. Shared by the interpreter's `NewVariant` arm and the
+    /// JIT's `lt_new_variant` extern.
+    pub fn new_variant(
+        &self,
+        type_id: DefId,
+        variant: VariantId,
+        supplied: &[(FieldId, Value)],
+        world: &World,
+    ) -> Result<ObjectId, Condition> {
+        let version = world.current_schemas[&type_id];
+        let schema = &world.schemas[&(type_id, version)];
+        let Some(v) = schema.variant(variant) else {
+            return Err(type_error(&format!(
+                "type {} has no variant {variant} at its current version",
+                schema.name
+            )));
+        };
+        let values = Self::checked_fields(self, &v.fields, supplied)?;
+        Ok(self.alloc_body(Body {
+            type_id,
+            schema: version,
+            variant: Some(variant),
+            fields: values,
+        }))
+    }
+
+    /// Fill a field list from supplied values + defaults, checking each value
+    /// against its declared type (the shared constructor half of `new_object`
+    /// and `new_variant`).
+    fn checked_fields(
+        &self,
+        fields: &[crate::Field],
+        supplied: &[(FieldId, Value)],
+    ) -> Result<BTreeMap<FieldId, Value>, Condition> {
         let mut values = BTreeMap::new();
-        for field in &schema.fields {
+        for field in fields {
             let value = supplied
                 .iter()
                 .find(|(id, _)| *id == field.id)
@@ -175,7 +224,35 @@ impl Heap {
             }
             values.insert(field.id, value);
         }
-        Ok(self.alloc(type_id, version, values))
+        Ok(values)
+    }
+
+    /// The `match` barrier: migrate `object` to its type's current schema, then
+    /// find its variant among `arms`, returning the matching arm's INDEX. An
+    /// object whose (possibly just-migrated) variant has no arm is a
+    /// con-freeness trap — pinned old code must not fall through some arm it
+    /// didn't mean. Shared by the interpreter's `CaseVariant` arm and the JIT's
+    /// `lt_case_variant` extern, so the trap condition is identical everywhere.
+    pub fn variant_case(
+        &self,
+        id: ObjectId,
+        arms: &[(VariantId, usize)],
+        world: &World,
+    ) -> Result<usize, Condition> {
+        self.migrate(id, world)?;
+        let body = self
+            .body(id)
+            .ok_or_else(|| type_error("match: unknown object"))?;
+        let Some(variant) = body.variant else {
+            return Err(type_error("match on a non-enum object"));
+        };
+        match arms.iter().position(|(v, _)| *v == variant) {
+            Some(index) => Ok(index),
+            None => Err(type_error(&format!(
+                "unhandled variant {variant} of type {} in match",
+                body.type_id
+            ))),
+        }
     }
 
     /// The migration barrier: migrate an object up to its type's current schema
@@ -202,11 +279,44 @@ impl Heap {
                     to: Version(body.schema.0 + 1),
                 });
             };
+            // Which field plan applies, and what the target shape is, depends
+            // on whether this is a struct or (which variant of) an enum. A
+            // variant with no mapping in the plan is a per-variant gap: THIS
+            // object stays stuck (MissingMigration) while sibling variants
+            // migrate freely — the removed-variant repair story.
+            let (field_plan, to_variant, target_fields): (
+                &BTreeMap<FieldId, MigrationSource>,
+                Option<VariantId>,
+                &[crate::Field],
+            ) = match body.variant {
+                None => {
+                    let target_schema = &world.schemas[&(body.type_id, plan.to)];
+                    (&plan.fields, None, &target_schema.fields)
+                }
+                Some(variant) => {
+                    let Some(vm) = plan.variants.get(&variant) else {
+                        return Err(Condition::MissingMigration {
+                            object: id,
+                            type_id: body.type_id,
+                            from: body.schema,
+                            to: plan.to,
+                        });
+                    };
+                    let target_schema = &world.schemas[&(body.type_id, plan.to)];
+                    let Some(tv) = target_schema.variant(vm.to_variant) else {
+                        return Err(type_error(&format!(
+                            "migration maps to unknown variant {} of {}",
+                            vm.to_variant, target_schema.name
+                        )));
+                    };
+                    (&vm.fields, Some(vm.to_variant), &tv.fields)
+                }
+            };
             let mut fields = BTreeMap::new();
-            for (target, source) in &plan.fields {
+            for (target, source) in field_plan {
                 let value = match source {
-                    MigrationSource::Copy(s) => body.fields[s].clone(),
-                    MigrationSource::Value(v) => v.clone(),
+                    MigrationSource::Copy(s) => body.fields[s],
+                    MigrationSource::Value(v) => *v,
                     MigrationSource::Wrap {
                         type_id,
                         field,
@@ -216,7 +326,7 @@ impl Heap {
                         let wid = self.alloc(
                             *type_id,
                             v,
-                            BTreeMap::from([(*field, body.fields[source].clone())]),
+                            BTreeMap::from([(*field, body.fields[source])]),
                         );
                         Value::Ref(wid)
                     }
@@ -225,19 +335,20 @@ impl Heap {
             }
             // Defense in depth: the migration plan is validated at install, so a
             // structurally ill-typed body should be impossible — but check it
-            // against the target schema before it ever becomes observable.
-            let target_schema = &world.schemas[&(body.type_id, plan.to)];
-            for field in &target_schema.fields {
+            // against the target shape before it ever becomes observable.
+            let target_name = &world.schemas[&(body.type_id, plan.to)].name;
+            for field in target_fields {
                 if !self.value_ok(&fields[&field.id], &field.ty) {
                     return Err(type_error(&format!(
                         "migration to {} v{} produced an ill-typed '{}'",
-                        target_schema.name, plan.to.0, field.name
+                        target_name, plan.to.0, field.name
                     )));
                 }
             }
             let next = Arc::new(Body {
                 type_id: body.type_id,
                 schema: plan.to,
+                variant: to_variant,
                 fields,
             });
             {

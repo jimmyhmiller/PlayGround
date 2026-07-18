@@ -6,6 +6,7 @@
 pub enum TypeExpr {
     I64,
     Bool,
+    Str,
     Unit,
     Ref(String),
 }
@@ -21,6 +22,20 @@ pub struct FieldDef {
 
 #[derive(Clone, Debug)]
 pub struct StructDef {
+    pub name: String,
+    pub fields: Vec<FieldDef>,
+}
+
+/// `enum Shape { Circle { r: i64 }, Point }` — a sum type; each variant has its
+/// own (possibly empty) fields.
+#[derive(Clone, Debug)]
+pub struct EnumDef {
+    pub name: String,
+    pub variants: Vec<VariantDef>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VariantDef {
     pub name: String,
     pub fields: Vec<FieldDef>,
 }
@@ -61,6 +76,7 @@ pub struct GlobalDef {
 #[derive(Clone, Debug)]
 pub enum Item {
     Struct(StructDef),
+    Enum(EnumDef),
     Fn(FnDef),
     /// `foreign type Window;` — declares an opaque native resource type.
     ForeignType(String),
@@ -95,19 +111,39 @@ pub enum Stmt {
     While { cond: Expr, body: Vec<Stmt> },
     Emit(Expr),
     Yield,
+    /// `match e { Circle { r } => { … } Point => { … } }` — arms bind the
+    /// variant's fields by name. Exhaustiveness is enforced by the verifier
+    /// against the enum's *current* version, so adding a variant invalidates
+    /// stale matches instead of surprising them at runtime.
+    Match {
+        scrutinee: Expr,
+        arms: Vec<MatchArm>,
+    },
     /// A bare expression evaluated for effect (e.g. a call).
     Expr(Expr),
+}
+
+#[derive(Clone, Debug)]
+pub struct MatchArm {
+    pub variant: String,
+    /// Field names bound as locals inside the arm body.
+    pub bindings: Vec<String>,
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Clone, Debug)]
 pub enum Expr {
     Int(i64),
     Bool(bool),
+    /// A string literal (interned at lowering).
+    Str(String),
     Unit,
     Var(String),
     Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
     Not(Box<Expr>),
     Field { object: Box<Expr>, field: String },
     StructLit { name: String, fields: Vec<(String, Expr)> },
+    /// `Shape::Circle { r: 5 }` (or a bare fieldless `Shape::Point`).
+    VariantLit { enum_name: String, variant: String, fields: Vec<(String, Expr)> },
     Call { name: String, args: Vec<Expr> },
 }
