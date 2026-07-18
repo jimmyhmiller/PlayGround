@@ -102,6 +102,34 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
+        Some("bundle-with-host") => {
+            let entry = arguments.next().ok_or_else(usage)?;
+            let project_root = arguments.next().ok_or_else(usage)?;
+            let environment = arguments
+                .next()
+                .and_then(|value| value.to_str().map(str::to_string))
+                .unwrap_or_else(|| "client".to_string());
+            let host = diffpack::host::resolve_config(Path::new(&project_root), &environment)?;
+            println!(
+                "host: environment={} ({} available), {} aliases ({} skipped)",
+                host.environment,
+                host.environments.join("/"),
+                host.build.aliases.len(),
+                host.skipped_aliases,
+            );
+            let (bundler, update) =
+                Bundler::discover_direct_with_config(Path::new(&entry), &host.build)?;
+            let reachable = bundler.reachable_modules_direct();
+            println!(
+                "reachable {} modules; {} diagnostic(s)",
+                reachable.len(),
+                update.diagnostics.len()
+            );
+            for diagnostic in update.diagnostics.iter().take(5) {
+                println!("  diagnostic: {diagnostic}");
+            }
+            Ok(())
+        }
         Some("bundle") => {
             let entry = arguments.next().ok_or_else(usage)?;
             let remaining = arguments.collect::<Vec<_>>();

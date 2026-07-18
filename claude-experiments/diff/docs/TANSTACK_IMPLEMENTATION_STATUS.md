@@ -136,3 +136,28 @@ a framework-plugin (host) concern; the generic global-CSS and (next) CSS-module
 loaders are core pipeline capabilities the checklist requires independently.
 Remaining CSS work: CSS Modules (scoped names + export map), `@import`/`url()`
 rewriting, and carrying CSS into route manifests.
+
+## Plugin host: config bridge (landed)
+
+The plugin-host phase has begun. A Node sidecar (`host/sidecar.mjs`, embedded via
+`include_str!` and run from a temp file) answers build-time questions that need
+the project's own JavaScript plugins. It does NOT run a Vite/Rollup build; it
+reports config. `src/host.rs::resolve_config(root, env)` runs
+`vite.resolveConfig`, extracts the environment's string->file resolver aliases
+(the entry aliases such as `#tanstack-router-entry` -> the app router;
+regex/function aliases are counted as skipped, never silently dropped), and
+returns a `BuildConfig`. Config is fetched once per build, off the per-edit
+incremental path, so the thesis guards (`docs/THESIS_GUARDS.md`) are unaffected
+and stay green.
+
+`diffpack bundle-with-host <entry> <project-root> [env]` builds through diffpack
+with the host config. With aliases applied, discovery of `src/router.tsx`
+advances from a handful of modules to **206 reachable modules** of the real app
+graph. Remaining diagnostics identify the next slices:
+
+- Node built-ins (`node:stream`, `node:async_hooks`, `node:stream/web`) must be
+  treated as externals, not resolved/bundled (generic capability).
+- Virtual modules the plugins generate (`tanstack-start-manifest:v`,
+  `virtual:...`) need the sidecar `load`/`resolveId` hooks (next host slice, a
+  long-lived request/response loop keyed by module id + source hash so
+  incrementality is preserved).
