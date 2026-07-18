@@ -5,6 +5,7 @@ eval channel — compiled to `wasm32-unknown-unknown` and running in a JS host. 
 foundation for the in-browser prototype (viewer + agent TUI, no server, no native process).
 
 Design + rationale: [`../docs/08-wasm-port.md`](../docs/08-wasm-port.md).
+Outstanding Coil-side asks: [`../docs/09-coil-asks.md`](../docs/09-coil-asks.md).
 
 ## Build
 
@@ -41,12 +42,9 @@ node test-swap.mjs   # hot body-swap: greet() 1 -> redefine -> 99
   Verified: 200 consecutive panics, 200 typed errors, 200/200 healthy evals in between,
   heap intact.
 
-  ⚠ **Needs `__stack_pointer` exported.** Coil defines the shadow-stack pointer as a
-  mutable global but does not export it, so the host cannot restore it after unwinding and
-  each panic leaks its frames (~111 bytes). The instance dies with *"memory access out of
-  bounds"* after ~9421 panics (1 MiB shadow stack ÷ 111 B). `evalRaw` already restores it
-  when present — exporting the global (as `__heap_base` already is) fixes the leak with no
-  further change here.
+  ⚠ **Needs `__stack_pointer` exported** — see [ask A1](../docs/09-coil-asks.md). Until then
+  each panic leaks ~111 bytes and the instance dies after ~9421 panics. `evalRaw` already
+  restores it when present, so the export alone closes the leak.
 
 ## The bridge (`scry-wasm.js`)
 
