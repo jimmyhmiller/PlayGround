@@ -5,6 +5,7 @@ pub mod dataflow;
 mod frontend_profile;
 pub mod graph;
 pub mod parser;
+pub mod resource_id;
 pub mod transform;
 
 pub use dataflow::{

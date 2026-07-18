@@ -4,13 +4,14 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use oxc_resolver::{ResolveOptions, Resolver};
+use oxc_resolver::{ResolveOptions, Resolver, TsconfigDiscovery};
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::dataflow::DeltaRevision;
 use crate::frontend_profile::{self, Phase};
 use crate::graph::ModuleId;
+use crate::resource_id::ResourceId;
 use crate::transform::transform_module;
 
 type DenseModuleId = usize;
@@ -81,25 +82,34 @@ impl DirectoryResolutionCache {
         {
             return result;
         }
+        // A specifier may carry a loader query and/or fragment
+        // (`app.css?url`, `route.tsx?tsr-split=component`). Only the path
+        // component is a filesystem concern; the query is re-attached to the
+        // resolved id and interpreted later, at load time. A query never causes
+        // a resolve-time error.
+        let resource = ResourceId::parse(specifier);
+        let path_specifier = resource.path.as_str();
         // Most module graphs overwhelmingly use explicit relative files. Avoid
         // the general Node resolver on a cache miss when that exact file exists;
         // all ambiguous cases still take the standards-aware path.
-        let exact_relative = specifier.strip_prefix("./").and_then(|relative| {
+        let exact_relative = path_specifier.strip_prefix("./").and_then(|relative| {
             let candidate = self.directory.join(relative);
-            candidate.is_file().then(|| module_id(&candidate))
+            candidate
+                .is_file()
+                .then(|| module_id_with_resource(&candidate, &resource))
         });
         let result = if let Some(resolved) = exact_relative {
             Ok(resolved)
         } else {
             resolver
-                .resolve_file(importer, specifier)
+                .resolve_file(importer, path_specifier)
                 .map_err(|error| error.to_string())
                 .and_then(|resolution| {
                     let resolved = resolution.full_path();
                     if resolved.extension().and_then(|value| value.to_str()) == Some("node") {
                         Err(format!("native module {specifier:?} is not supported"))
                     } else {
-                        Ok(module_id(&resolved))
+                        Ok(module_id_with_resource(&resolved, &resource))
                     }
                 })
         };
@@ -441,11 +451,20 @@ impl Bundler {
         path: &Path,
         diagnostics: &mut Vec<String>,
     ) -> Result<ModuleState, String> {
+        // Guard against a query-bearing id reaching a raw file read. A watched
+        // path is normally a bare file, but the id is the module identity and
+        // must not be fed to `fs::read_to_string` verbatim when it carries a
+        // loader query.
+        let id = module_id(path);
+        let resource = ResourceId::parse(&id);
+        if resource.query.is_some() {
+            return Err(resource.unimplemented_loader_error());
+        }
+        let path = Path::new(resource.path.as_str());
         let read_started = frontend_profile::start();
         let source = fs::read_to_string(path)
             .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
         frontend_profile::finish(Phase::Read, read_started);
-        let id = module_id(path);
         let hash = content_hash(source.as_bytes());
         if let Some(current) = self
             .indices
@@ -831,6 +850,15 @@ fn load_uncached(
     resolution_cache: &ResolutionCache,
     path: &Path,
 ) -> Result<LoadedModule, String> {
+    // The module id may carry a loader query. Split it off before touching the
+    // filesystem: only the path component is a real file. A query-bearing id is
+    // a loader concern, not a file read.
+    let id = path.to_string_lossy();
+    let resource = ResourceId::parse(&id);
+    if resource.query.is_some() {
+        return Err(resource.unimplemented_loader_error());
+    }
+    let path = Path::new(resource.path.as_str());
     let read_started = frontend_profile::start();
     let source = fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
@@ -904,12 +932,33 @@ fn resolve_options() -> ResolveOptions {
         ],
         condition_names: vec!["import".into(), "module".into(), "default".into()],
         main_fields: vec!["module".into(), "main".into()],
+        // Resolve TypeScript `paths` aliases (e.g. `~/*` -> `./src/*`) against
+        // the nearest `tsconfig.json` to each importing file. `Auto` walks up
+        // from the importer, so nested projects each get their own config with
+        // no project-root plumbing. Aliases match on the path component only:
+        // `DirectoryResolutionCache::resolve` passes the query-stripped
+        // `path_specifier` to the resolver and `module_id_with_resource`
+        // re-attaches any loader query to the resolved id.
+        tsconfig: Some(TsconfigDiscovery::Auto),
         ..ResolveOptions::default()
     }
 }
 
 fn module_id(path: &Path) -> SharedModuleId {
     SharedModuleId::from(path.to_string_lossy().into_owned())
+}
+
+/// Builds a module id from a resolved filesystem path, re-attaching the loader
+/// query and fragment carried by `resource`. When both are absent this is
+/// identical to [`module_id`], so a plain `app.css` import and an
+/// `app.css?url` import become distinct graph keys.
+fn module_id_with_resource(path: &Path, resource: &ResourceId) -> SharedModuleId {
+    let reattached = ResourceId {
+        path: path.to_string_lossy().into_owned(),
+        query: resource.query.clone(),
+        fragment: resource.fragment.clone(),
+    };
+    SharedModuleId::from(reattached.to_id())
 }
 
 fn content_hash(bytes: &[u8]) -> u64 {
@@ -1142,6 +1191,112 @@ mod tests {
             direct.reachable_modules(),
             bundler.reachable_modules_direct()
         );
+    }
+
+    #[test]
+    fn resolve_reattaches_the_query_to_the_module_id() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("app.css"), ".x {}").unwrap();
+        let importer = directory.path().join("entry.tsx");
+        fs::write(&importer, "").unwrap();
+
+        let resolver = Resolver::new(resolve_options());
+        let cache = ResolutionCache::new();
+        let dir_cache = cache.directory(&importer);
+
+        let resolved = dir_cache
+            .resolve(&resolver, &importer, "./app.css?url")
+            .unwrap();
+        let resource = ResourceId::parse(&resolved);
+        assert_eq!(resource.query.as_deref(), Some("url"));
+        assert!(resource.fragment.is_none());
+        assert!(resolved.ends_with("app.css?url"), "{resolved}");
+        // The path component (query stripped) points at the real file.
+        assert!(Path::new(resource.path.as_str()).is_file());
+
+        // A plain import of the same file is a distinct module id: same path,
+        // no query.
+        let plain = dir_cache
+            .resolve(&resolver, &importer, "./app.css")
+            .unwrap();
+        assert_ne!(plain, resolved);
+        assert!(ResourceId::parse(&plain).query.is_none());
+    }
+
+    #[test]
+    fn tsconfig_paths_alias_resolves_to_the_real_file() {
+        // A `~/*` -> `./src/*` alias declared in the nearest tsconfig.json must
+        // resolve on the current dataflow foundation via oxc_resolver's
+        // `TsconfigDiscovery::Auto`.
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::write(
+            root.join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "baseUrl": ".",
+                    "paths": { "~/*": ["./src/*"] }
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("src/lib")).unwrap();
+        let target = root.join("src/lib/thing.ts");
+        fs::write(&target, "export const thing = 1;").unwrap();
+        let importer = root.join("src/entry.ts");
+        fs::write(&importer, "import { thing } from \"~/lib/thing\";").unwrap();
+
+        let resolver = Resolver::new(resolve_options());
+        let cache = ResolutionCache::new();
+        let dir_cache = cache.directory(&importer);
+
+        let resolved = dir_cache
+            .resolve(&resolver, &importer, "~/lib/thing")
+            .expect("tsconfig `paths` alias `~/lib/thing` should resolve");
+        let resource = ResourceId::parse(&resolved);
+        assert!(resource.query.is_none());
+        assert_eq!(
+            Path::new(resource.path.as_str()).canonicalize().unwrap(),
+            target.canonicalize().unwrap(),
+            "resolved {resolved} should point at the real src/lib/thing.ts",
+        );
+    }
+
+    #[test]
+    fn loading_a_query_bearing_id_yields_the_specific_unimplemented_loader_error() {
+        let directory = tempdir().unwrap();
+        let css = directory.path().join("app.css");
+        fs::write(&css, ".x {}").unwrap();
+
+        let resolver = Resolver::new(resolve_options());
+        let cache = ResolutionCache::new();
+        let id = format!("{}?url", css.display());
+        let error = match load_uncached(&resolver, &cache, Path::new(&id)) {
+            Ok(_) => panic!("expected a query-bearing id to fail loading"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.contains("loader `?url` is not yet implemented"),
+            "{error}"
+        );
+        assert!(error.contains("requested for"), "{error}");
+        // Crucially, not the old misleading filesystem crash.
+        assert!(!error.contains("No such file or directory"), "{error}");
+        assert!(!error.contains("cannot read"), "{error}");
+    }
+
+    #[test]
+    fn loading_a_plain_id_reads_the_underlying_file() {
+        let directory = tempdir().unwrap();
+        let file = directory.path().join("mod.js");
+        fs::write(&file, "export const value = 1;").unwrap();
+
+        let resolver = Resolver::new(resolve_options());
+        let cache = ResolutionCache::new();
+        let loaded = load_uncached(&resolver, &cache, &file).unwrap();
+        assert!(!loaded.code.is_empty());
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
     }
 
     fn run_node(path: &Path) -> String {

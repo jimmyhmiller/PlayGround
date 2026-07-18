@@ -1,0 +1,40 @@
+{
+  "sourceCommit": "00d00b3155e6e8bdbdae806ff12de129c4915d86",
+  "referenceOutput": ".output",
+  "diffpackOutput": ".diffpack-output",
+  "minimumPublicJavaScriptFiles": 15,
+  "minimumPublicCssFiles": 1,
+  "minimumServerModuleFiles": 35,
+  "requiredPublicFiles": [
+    "favicon.ico",
+    "site.webmanifest"
+  ],
+  "requiredServerFiles": [
+    "index.mjs"
+  ],
+  "requiredServerFilenameFragments": [
+    "tanstack-start-manifest",
+    "ssr",
+    "router"
+  ],
+  "http": [
+    {
+      "path": "/",
+      "status": 200,
+      "contentType": "text/html",
+      "includes": ["Welcome Home!!!", "<script", "stylesheet"]
+    },
+    {
+      "path": "/customScript.js",
+      "status": 200,
+      "contentType": "application/javascript",
+      "includes": ["Hello from customScript.js!"]
+    },
+    {
+      "path": "/definitely-not-a-route",
+      "status": 404,
+      "contentType": "text/html",
+      "includes": ["The page you are looking for does not exist."]
+    }
+  ]
+}
