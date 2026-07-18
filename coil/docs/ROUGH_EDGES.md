@@ -192,7 +192,7 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
 - [x] **mac-1** `(target-arch)` is a hardcoded `"aarch64"` **string literal** (comptime.coil:681).
       The only reason it exists is to branch when target ≠ host, and that is exactly and only when
       it lies. Thread the resolved triple into CtCtx. Until then it must **hard-error**, not fabricate.
-- [ ] **tool-6** REPL truncates f64 to i64: `(/ 1.0 2.0)` prints `0`. The REPL is the thing you reach
+- [x] **tool-6** REPL truncates f64 to i64: `(/ 1.0 2.0)` prints `0`. The REPL is the thing you reach
       for when you're unsure; it is the one tool in the toolchain that gives wrong answers.
 - [ ] **tool-10** Colliding `:use *` names resolve first-import-wins, silently — reordering two
       import lines changes which function runs. NAMESPACING.md already specifies the strict rule
@@ -222,27 +222,27 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
 
 Not staleness: specific guarantees the docs state and the implementation never had.
 
-- [ ] **mem-5** LAYOUT.md's "Verification (checked total control)" — `:size` is padded-to but never
+- [x] **mem-5** LAYOUT.md's "Verification (checked total control)" — `:size` is padded-to but never
       asserted (`:size 8` silently yields 40), and overlap at unequal `:at` is accepted and clobbers.
       Its header says "tiers 1-3 done and tested". Implement both checks (`static-assert` already
       renders the error) or correct the doc.
 - [ ] **tool-1** `coil guide` states verbatim that imports resolve relative to the importing file.
       They resolve against the **CWD**, so the layout `coil new` itself scaffolds cannot import a
       sibling. Anchor to `dirname(importing file)` — the loader already prints that path in its error.
-- [ ] **mem-11** The guide's loudest memory warning (never `alloc-stack` in a loop → "eventually
+- [x] **mem-11** The guide's loudest memory warning (never `alloc-stack` in a loop → "eventually
       segfaults") does not reproduce on either backend; static-size allocas get hoisted. Hoist in
       Coil's own lowering and delete the warning, or show the shape that actually breaks.
-- [ ] **std-14** fmt.coil's header says the format-string front end isn't implemented — it's 190
+- [x] **std-14** fmt.coil's header says the format-string front end isn't implemented — it's 190
       lines below, working.
-- [ ] **std-9** control.coil's `case` doc names `(derive Eq …)`, which doesn't exist; the macro is
+- [x] **std-9** control.coil's `case` doc names `(derive Eq …)`, which doesn't exist; the macro is
       `derive-eq` and it emits a free function, not an impl.
 - [ ] **tool-12** `[dependencies]` is silently accepted and ignored — inviting the inference that
       deps resolve. Make the Coil.toml parser strict (it knows exactly five keys); `entrypoint` typos
       are swallowed too.
-- [ ] **mem-9** `(ref T)` is a working, undocumented third reference spelling — and the only way to
+- [x] **mem-9** `(ref T)` is a working, undocumented third reference spelling — and the only way to
       write a read-only reference to a scalar. Document it or reject it in source.
-- [ ] **mem-10** "Immutable reference" is C's `const T*`, not Rust's `&T` — say "read-only".
-- [ ] **mac-11** `bytes->str`/`str-bytes` are undocumented but are the only int→name path a generator
+- [x] **mem-10** "Immutable reference" is C's `const T*`, not Rust's `&T` — say "read-only".
+- [x] **mac-11** `bytes->str`/`str-bytes` are undocumented but are the only int→name path a generator
       has. Document; add `int->str`.
 - [ ] **mac-8** `(comptime E)` is a much weaker sublanguage than a macro body (no generics, no strings,
       no sizeof) while the docs present one unified phase. Route through the compiled engine, or say so.
@@ -268,50 +268,50 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
 
 ## Batch 11 — Stdlib gaps (a 15-line CSV program needed 36 lines of stdlib first)
 
-- [ ] **std-5** No file IO whatsoever — reading a file means hand-declaring libc `open` and hardcoding
+- [x] **std-5** No file IO whatsoever — reading a file means hand-declaring libc `open` and hardcoding
       `O_RDONLY=0`. Add `lib/fs.coil` (~60 lines; the difference between a demo and a usable language).
-- [ ] **std-7** `lib/result.coil` is a **one-line empty module** — zero Option/Result combinators,
+- [x] **std-7** `lib/result.coil` is a **one-line empty module** — zero Option/Result combinators,
       while every collection and allocation call returns Option. Fill it in.
-- [ ] **std-13** No sort anywhere; no `str-split`/`trim`/`parse-int`; no `al-clear!`/`hm-keys`;
+- [x] **std-13** No sort anywhere; no `str-split`/`trim`/`parse-int`; no `al-clear!`/`hm-keys`;
       `hm-put!` throws away the insert/update signal it already computes. Priority: sort first.
-- [ ] **std-8** Strings have no `Eq`/`Ord`/`Hash` impl, so `=`, `case`, `<` and sorting don't work on
+- [x] **std-8** Strings have no `Eq`/`Ord`/`Hash` impl, so `=`, `case`, `<` and sorting don't work on
       them — though `str-eq`/`str-hash` are sitting right there. Three impls.
-- [ ] **std-6** Reader has `read-some` but no `read-all` (Writer has both); no cstr↔slice bridge.
-- [ ] **std-15** `al-slice`/`sb-str` views become use-after-free on the next push, returning plausible
+- [x] **std-6** Reader has `read-some` but no `read-all` (Writer has both); no cstr↔slice bridge.
+- [x] **std-15** `al-slice`/`sb-str` views become use-after-free on the next push, returning plausible
       wrong data. Add an owning `sb-finish!`.
-- [ ] **std-9** `derive-eq` should also emit `(impl Eq T)` — lights up case/=/HashMap keys at once.
+- [x] **std-9** `derive-eq` should also emit `(impl Eq T)` — lights up case/=/HashMap keys at once.
 
 ## Batch 12 — Diagnostic quality (the typechecker is already the best part)
 
 - [x] **diag-7** Non-exhaustive match counts missing variants but never names them — the compiler
       computed the set to produce the count. Cheapest large win available.
-- [ ] **diag-6** No "did you mean", and no "you forgot to import" hint — *even though the stdlib is
+- [x] **diag-6** No "did you mean", and no "you forgot to import" hint — *even though the stdlib is
       bundled inside the compiler and its export tables are a static lookup*.
-- [ ] **diag-5** Shadowing a builtin (`call`, `block`) errors about a form the user never wrote.
+- [x] **diag-5** Shadowing a builtin (`call`, `block`) errors about a form the user never wrote.
       The guide ships a gotcha section for exactly this; check names at definition instead.
-- [ ] **diag-13** Argument type mismatches underline the whole call, not the offending argument.
+- [x] **diag-13** Argument type mismatches underline the whole call, not the offending argument.
 - [ ] **diag-12** `-o /dev/null` aborts with an opaque LLVM message; add a real `--check` mode.
-- [ ] **mac-3** `coil expand` — the only macro debugger — prints an internal `(error@D:D:D:0 …)`
+- [x] **mac-3** `coil expand` — the only macro debugger — prints an internal `(error@D:D:D:0 …)`
       node to **stdout** and **exits 0** on failure. The tool you reach for when a macro breaks is
       the tool that lies.
-- [ ] **mac-6** `code-symbol` rejects the generic instantiations `code-field-count` accepts, so
+- [x] **mac-6** `code-symbol` rejects the generic instantiations `code-field-count` accepts, so
       derive-over-a-generic is impossible — half the advertised generic-reflection feature.
-- [ ] **mac-10** Macro output can't feed a literal-consuming macro; the error names an undocumented
+- [x] **mac-10** Macro output can't feed a literal-consuming macro; the error names an undocumented
       internal (`str-bytes`). Add `code-expand`.
-- [ ] **mac-12** Engine parity violation: the same helper errors differently from a macro call site
+- [x] **mac-12** Engine parity violation: the same helper errors differently from a macro call site
       vs `(meta …)` — `meta` runs on the interpreter, macros on the compiled engine. Undocumented.
-- [ ] **gen-2** `dyn` + generic impl → `UNIMPLEMENTED` + Abort trap 6. A compiler abort is never OK.
-- [ ] **gen-7** A generic call in `(const …)` reports "undefined function" for a function defined
+- [x] **gen-2** `dyn` + generic impl → `UNIMPLEMENTED` + Abort trap 6. A compiler abort is never OK.
+- [x] **gen-7** A generic call in `(const …)` reports "undefined function" for a function defined
       three lines up.
 - [ ] **gen-10** Monomorphization is ~O(n^1.7) while its IR output is exactly linear — smells like a
       linear scan in the instantiation worklist. 600 instantiations = 14s before LLVM starts.
-- [ ] **gen-13** No const generics: an impl can't be generic over array length. Guide advertises
+- [x] **gen-13** No const generics: an impl can't be generic over array length. Guide advertises
       `(array T N)` as implementable without noting N must be literal.
-- [ ] **tool-7** REPL is i64-only, can't `println`, and leaks `/tmp/coil-repl-eval.coil` in every error.
-- [ ] **tool-8** `coil fmt` explodes `(defn f :cc c …)` into one token per line — and the mangled form
+- [x] **tool-7** REPL is i64-only, can't `println`, and leaks `/tmp/coil-repl-eval.coil` in every error.
+- [x] **tool-8** `coil fmt` explodes `(defn f :cc c …)` into one token per line — and the mangled form
       is a **stable fixpoint**, so fmt will never recover it. Mangles `examples/fib.coil`, the repo's
       own hello-world, and calling conventions are the headline feature.
-- [ ] **tool-9** `coil fmt` disagrees with 43 of 44 repo examples and would rewrite 91% of their lines.
+- [x] **tool-9** `coil fmt` disagrees with 43 of 44 repo examples and would rewrite 91% of their lines.
       Fix tool-8 **first**, or a mechanical reformat bakes in the mangled `:cc` signatures.
 - [ ] **tool-11** `-g` produces no dSYM, 0 line rows, "No source available" in lldb, and breakpoints
       need the module-mangled name — while DEBUGINFO_DWARF.md confidently documents all of it working.
