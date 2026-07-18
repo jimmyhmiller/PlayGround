@@ -90,6 +90,43 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
     })
 }
 
+/// Copies the app's static `public/` directory verbatim into the build's
+/// `public/` output (favicons, `site.webmanifest`, ...), the `publicDir`
+/// convention. Returns the number of files copied; zero when the app has no
+/// `public/` directory. Emitted chunks/assets are not disturbed.
+pub fn copy_static_public(root: &Path, output_public: &Path) -> Result<usize, String> {
+    let source = root.join("public");
+    if !source.is_dir() {
+        return Ok(0);
+    }
+    copy_dir_into(&source, output_public)
+}
+
+fn copy_dir_into(source: &Path, destination: &Path) -> Result<usize, String> {
+    std::fs::create_dir_all(destination)
+        .map_err(|error| format!("cannot create {}: {error}", destination.display()))?;
+    let mut copied = 0;
+    let entries = std::fs::read_dir(source)
+        .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("cannot stat {}: {error}", from.display()))?;
+        if file_type.is_dir() {
+            copied += copy_dir_into(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to).map_err(|error| {
+                format!("cannot copy {} to {}: {error}", from.display(), to.display())
+            })?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
+}
+
 /// Reads `srcDirectory` out of `vite.config.ts` if present, else defaults to
 /// `src`. This is a plain text read of a value, independent of Vite itself; a
 /// native Diffpack config format supersedes it later.

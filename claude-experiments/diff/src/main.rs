@@ -139,12 +139,17 @@ fn run() -> Result<(), String> {
                 let output_root = Path::new(&project_root).join(".diffpack-output");
                 let summary =
                     bundler.emit_public(&reachable, &output_root, EmitOptions::default())?;
+                let static_files = diffpack::config::copy_static_public(
+                    Path::new(&project_root),
+                    &summary.public_dir,
+                )?;
                 println!(
-                    "emitted {}: {} public .js, {} .css, {} asset(s)",
+                    "emitted {}: {} public .js, {} .css, {} asset(s), {} static file(s)",
                     summary.public_dir.display(),
                     summary.javascript_files,
                     summary.css_files,
                     summary.asset_files,
+                    static_files,
                 );
             } else {
                 println!(
