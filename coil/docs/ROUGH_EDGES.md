@@ -194,10 +194,10 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
       it lies. Thread the resolved triple into CtCtx. Until then it must **hard-error**, not fabricate.
 - [x] **tool-6** REPL truncates f64 to i64: `(/ 1.0 2.0)` prints `0`. The REPL is the thing you reach
       for when you're unsure; it is the one tool in the toolchain that gives wrong answers.
-- [ ] **tool-10** Colliding `:use *` names resolve first-import-wins, silently — reordering two
+- [x] **tool-10** Colliding `:use *` names resolve first-import-wins, silently — reordering two
       import lines changes which function runs. NAMESPACING.md already specifies the strict rule
       for trait methods; apply it to function refers and reuse the error text.
-- [ ] **mem-3** A bare `(mut x)` passes its **address** into a variadic C call while auto-dereffing
+- [x] **mem-3** A bare `(mut x)` passes its **address** into a variadic C call while auto-dereffing
       everywhere else. Reject it (the metal-op error is the right precedent).
 - [ ] **std-3** String-keyed HashMap never copies keys — produced a map with two keys both reading
       "gamma". Add owning `str-keyops-owned`/`hm-new-str`, or document the lifetime contract loudly.
@@ -208,7 +208,7 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
 - [x] **gen-5** Blanket `(impl [T] Show T)` accepted, silently does nothing. Reject it, or support it
       (a bare `T` is just the bottom of the specialization lattice that already exists).
 - [ ] **diag-10** `:use [name]` with a name the module doesn't export is silently accepted.
-- [ ] **mac-4** Binder hygiene: macros capture silently (200 instead of 105) while free identifiers
+- [x] **mac-4** Binder hygiene: macros capture silently (200 instead of 105) while free identifiers
       *are* hygienic. Half-hygiene is worse than none for the user's model. Audit `lib/derive.coil`
       and `lib/match.coil` templates for latent capture (`h`, `a`, `b`, `x`).
 
