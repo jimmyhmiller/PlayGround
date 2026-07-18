@@ -161,3 +161,28 @@ graph. Remaining diagnostics identify the next slices:
   `virtual:...`) need the sidecar `load`/`resolveId` hooks (next host slice, a
   long-lived request/response loop keyed by module id + source hash so
   incrementality is preserved).
+
+## Node built-in externals (landed)
+
+A specifier that is a Node built-in (`node:stream`, or a bare builtin like `fs`,
+`async_hooks`) is external: `is_external_specifier` recognizes it, resolution
+skips it (no diagnostic, not added to the graph), and its `require(...)` is left
+in the output for the runtime to resolve. The flat fast-path strips import
+bindings and cannot bind an external, so a module with externals renders through
+the runtime path; the runtime's `require` now falls back to the host's native
+`require` for any specifier not in the module map. Tests:
+`node_builtins_are_recognized_as_externals` and
+`node_builtin_imports_are_left_external_and_run` (runs under Node). The byte-parity
+oracle stays green, so the linker change did not disturb determinism.
+
+Effect on the app: `bundle-with-host router.tsx` drops from 14 diagnostics to
+**1** (206 modules reachable). The sole remaining blocker is a plugin-generated
+virtual module:
+
+```text
+cannot resolve "tanstack-start-manifest:v": Cannot find module 'tanstack-start-manifest:v'
+```
+
+That needs the sidecar `resolveId`/`load` hooks (the next host slice): a
+long-lived request/response loop keyed by module id + source hash so per-module
+invalidation and the incrementality guards are preserved across the boundary.

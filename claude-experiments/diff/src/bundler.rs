@@ -30,6 +30,10 @@ struct ModuleState {
     /// (`import "./app.css"`). Extracted and concatenated into the output
     /// stylesheet in module execution order; `None` for a normal JS module.
     css: Option<String>,
+    /// External specifiers (Node built-ins) this module imports. Left in the
+    /// output for the runtime to resolve; a module with externals renders through
+    /// the runtime path, since the flat path cannot bind an external.
+    externals: Vec<String>,
 }
 
 struct LoadedModule {
@@ -42,6 +46,7 @@ struct LoadedModule {
     diagnostics: Vec<String>,
     assets: Vec<AssetEmit>,
     css: Option<String>,
+    externals: Vec<String>,
 }
 
 /// A static asset (e.g. a `?url` import target) that must be content-hashed and
@@ -805,6 +810,7 @@ impl Bundler {
                     code: loaded.code,
                     assets: loaded.assets,
                     css: loaded.css,
+                    externals: loaded.externals,
                 });
             }
         }
@@ -841,6 +847,7 @@ impl Bundler {
                 code: special.code,
                 assets: special.assets,
                 css: special.css,
+                externals: Vec::new(),
             });
         }
         let read_started = frontend_profile::start();
@@ -887,6 +894,7 @@ impl Bundler {
             code: transformed.code,
             assets: Vec::new(),
             css: None,
+            externals: resolved_dependencies.externals,
         })
     }
 
@@ -913,7 +921,13 @@ impl Bundler {
     ) -> Option<RenderedBundle> {
         let reachable_set = reachable.iter().copied().collect::<HashSet<_>>();
         for &dense_index in reachable {
-            self.modules[dense_index].as_ref()?.flat_module.as_ref()?;
+            let module = self.modules[dense_index].as_ref()?;
+            module.flat_module.as_ref()?;
+            // The flat path strips import bindings and cannot bind an external's
+            // `require`. A module with externals renders through the runtime path.
+            if !module.externals.is_empty() {
+                return None;
+            }
         }
         let mut included = reachable
             .iter()
@@ -1157,7 +1171,7 @@ function __require(id){{
   if(!factory)throw new Error("Module is not loaded: "+id);
   const module={{exports:{{}}}};
   __cache[id]=module;
-  const require=specifier=>{{const target=__maps[id][specifier];if(target===undefined)throw new Error("Cannot resolve "+specifier+" from "+id);return __require(target);}};
+  const require=specifier=>{{const target=__maps[id][specifier];if(target===undefined){{if(requireNative)return requireNative(specifier);throw new Error("Cannot resolve "+specifier+" from "+id);}}return __require(target);}};
   require.dynamic=specifier=>{{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null){{if(typeof requireNative!=="function")throw new Error("Dynamic chunks require a CommonJS host");return requireNative(chunk[0]);}}return __require(chunk[1]);}};
   factory(module,module.exports,require,__toESM,__export,__reExport,__import,__dynamic,__esmNamespace,__seal);
   return module.exports;
@@ -1588,6 +1602,7 @@ fn load_uncached(
             diagnostics: Vec::new(),
             assets: special.assets,
             css: special.css,
+            externals: Vec::new(),
         });
     }
     let read_started = frontend_profile::start();
@@ -1619,6 +1634,7 @@ fn load_uncached(
         diagnostics,
         assets: Vec::new(),
         css: None,
+        externals: dependencies.externals,
     })
 }
 
@@ -1747,6 +1763,62 @@ fn asset_public_name(path: &Path, hash: u64) -> String {
     }
 }
 
+/// Whether a specifier is external (not bundled): a Node built-in, addressed
+/// either with the unambiguous `node:` prefix or as a bare builtin name. External
+/// imports are left in the output for the runtime to resolve.
+fn is_external_specifier(specifier: &str) -> bool {
+    if let Some(builtin) = specifier.strip_prefix("node:") {
+        // `node:test`, `node:fs/promises`, etc. The prefix alone is authoritative.
+        return !builtin.is_empty();
+    }
+    let root = specifier.split('/').next().unwrap_or(specifier);
+    matches!(
+        root,
+        "assert"
+            | "async_hooks"
+            | "buffer"
+            | "child_process"
+            | "cluster"
+            | "console"
+            | "constants"
+            | "crypto"
+            | "dgram"
+            | "diagnostics_channel"
+            | "dns"
+            | "domain"
+            | "events"
+            | "fs"
+            | "http"
+            | "http2"
+            | "https"
+            | "inspector"
+            | "module"
+            | "net"
+            | "os"
+            | "path"
+            | "perf_hooks"
+            | "process"
+            | "punycode"
+            | "querystring"
+            | "readline"
+            | "repl"
+            | "stream"
+            | "string_decoder"
+            | "sys"
+            | "timers"
+            | "tls"
+            | "trace_events"
+            | "tty"
+            | "url"
+            | "util"
+            | "v8"
+            | "vm"
+            | "wasi"
+            | "worker_threads"
+            | "zlib"
+    )
+}
+
 fn resolve_dependencies(
     resolver: &Resolver,
     resolution_cache: &ResolutionCache,
@@ -1758,12 +1830,22 @@ fn resolve_dependencies(
     let resolve_started = frontend_profile::start();
     let mut dependencies = Vec::with_capacity(dependency_specifiers.len());
     let mut pruned_imports = HashSet::new();
+    let mut externals = Vec::new();
     let directory_cache = resolution_cache.directory(path);
     for specifier in dependency_specifiers {
         if dependencies
             .iter()
             .any(|(existing, _, _)| existing == specifier)
         {
+            continue;
+        }
+        // An external (a Node built-in like `node:stream`) is not a graph module:
+        // it is neither resolved nor bundled, and its `require(...)` is left in
+        // place for the runtime to resolve. It is not a diagnostic.
+        if is_external_specifier(specifier) {
+            if !externals.iter().any(|existing| existing == specifier) {
+                externals.push(specifier.clone());
+            }
             continue;
         }
         match directory_cache.resolve(resolver, path, specifier) {
@@ -1798,12 +1880,14 @@ fn resolve_dependencies(
     ResolvedDependencies {
         dependencies,
         pruned_imports,
+        externals,
     }
 }
 
 struct ResolvedDependencies {
     dependencies: Vec<(String, SharedModuleId, DependencyDemand)>,
     pruned_imports: HashSet<String>,
+    externals: Vec<String>,
 }
 
 struct RenderedBundle {
@@ -2138,6 +2222,52 @@ mod tests {
             "{error}"
         );
         assert!(!error.contains("No such file or directory"), "{error}");
+    }
+
+    #[test]
+    fn node_builtins_are_recognized_as_externals() {
+        assert!(is_external_specifier("node:stream"));
+        assert!(is_external_specifier("node:fs/promises"));
+        assert!(is_external_specifier("fs"));
+        assert!(is_external_specifier("async_hooks"));
+        assert!(is_external_specifier("path/posix"));
+        assert!(!is_external_specifier("react"));
+        assert!(!is_external_specifier("./local"));
+        assert!(!is_external_specifier("node:")); // empty builtin is not external
+    }
+
+    #[test]
+    fn node_builtin_imports_are_left_external_and_run() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { basename } from 'node:path';\nimport { EOL } from 'node:os';\n\
+             console.log(basename('/a/b/c.txt') + (EOL === '\\n' ? ':nl' : ':other'));\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        // Externals are neither resolved nor diagnosed nor added to the graph.
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        assert_eq!(reachable.len(), 1, "only the entry is a graph module: {reachable:?}");
+        bundler.emit(&reachable, &output).unwrap();
+
+        // The external require survives for the runtime to resolve.
+        let bundle = fs::read_to_string(&output).unwrap();
+        assert!(bundle.contains("require(\"node:path\")"), "{bundle}");
+
+        if Command::new("node").arg("--version").output().is_ok() {
+            let executed = Command::new("node").arg(&output).output().unwrap();
+            assert!(
+                executed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&executed.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&executed.stdout), "c.txt:nl\n");
+        }
     }
 
     #[test]
