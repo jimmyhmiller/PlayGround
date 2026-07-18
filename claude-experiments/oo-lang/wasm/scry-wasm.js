@@ -51,6 +51,7 @@ export class ScryWasm {
     for (const [p, v] of Object.entries(opts.vfs || {})) {
       this.vfs.set(p, typeof v === "string" ? this.enc.encode(v) : v);
     }
+    this.stdin = new Uint8Array(0);  // pending terminal input, drained by the `read` import
     this.files = new Map();          // FILE* handle -> { bytes, pos, path, writable }
     this.nextFd = 3;
     this.env = this._buildEnv();
@@ -209,12 +210,25 @@ export class ScryWasm {
         "curl_multi_init","curl_multi_add_handle","curl_multi_remove_handle","curl_multi_perform",
         "curl_multi_poll","curl_multi_info_read","curl_multi_cleanup"].map(n => [n, () => 0])),
 
-      // read: no stdin in the browser. Returns 0 (EOF) until readLine is rewired to the
-      // terminal via a host callback that pumps the scheduler (docs §4).
-      read: (_fd, _p, _n) => 0,
+      // ---- stdin: a non-blocking line buffer fed by the terminal ----
+      // vm-readline polls fd 0 then read()s a byte at a time until '\n'. A browser can't
+      // block waiting for a keystroke (the JS event loop would never run to deliver it), so
+      // we make readLine NON-BLOCKING instead of blocking: poll always reports "ready", and
+      // read returns the next buffered byte, or 0 (EOF) when the buffer is drained — which
+      // makes Console.readLine() return None rather than spin. The host feeds a line with
+      // feedLine() and then drives the next turn through the normal eval op.
+      poll: (_fds, _nfds, _timeout) => 1,
+      read: (_fd, ptr, n) => {
+        const want = Number(n);
+        if (!self.stdin.length || want <= 0) return 0;      // drained -> EOF -> readLine None
+        const take = Math.min(want, self.stdin.length);
+        self.u8.set(self.stdin.subarray(0, take), Number(ptr));
+        self.stdin = self.stdin.subarray(take);
+        return take;                                         // isize = i32 on wasm32
+      },
 
       // ---- genuinely unavailable: trap loudly if the demo ever reaches them ----
-      ...Object.fromEntries(["socket","bind","listen","accept","setsockopt","poll","close",
+      ...Object.fromEntries(["socket","bind","listen","accept","setsockopt","close",
         "popen","pclose","pthread_create","pthread_join","pthread_detach"]
         .map(n => [n, (...a) => { throw new Error(`scry: ${n} unavailable in wasm (should be guarded/mocked)`); }])),
     };
@@ -308,6 +322,15 @@ export class ScryWasm {
     } finally {
       this._free(p);
     }
+  }
+
+  // feedLine(text): queue a line of terminal input for Console.readLine(). Appends a
+  // newline so readLine() sees a complete line.
+  feedLine(text) {
+    const add = this.enc.encode(text.endsWith("\n") ? text : text + "\n");
+    const merged = new Uint8Array(this.stdin.length + add.length);
+    merged.set(this.stdin); merged.set(add, this.stdin.length);
+    this.stdin = merged;
   }
 
   // ---- marshalling helpers for callers ----
