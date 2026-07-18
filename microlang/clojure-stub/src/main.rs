@@ -121,6 +121,10 @@ fn drive(cs: &dyn microlang::CodeSpace<LowBitModel>, mode: Mode) {
                 microlang::stats::DISPATCH_SHIM_CALLS.load(Relaxed),
                 microlang::stats::JIT_COMPILES.load(Relaxed),
             );
+            // Adaptive-tier counters (the "Always Fast" Phase 1 signal): hot-body
+            // recompiles with type feedback, dispatch speculations emitted, and
+            // guard deopts.
+            eprintln!("# STATS {}", microlang::stats::snapshot());
         }
     }
     let _stats_dump =

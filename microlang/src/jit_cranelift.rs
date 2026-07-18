@@ -729,6 +729,21 @@ extern "C" fn shim_dispatch<M: ModelArithJit>(
     let args: &[u64] =
         if argc == 0 { &[] } else { unsafe { std::slice::from_raw_parts(args, argc as usize) } };
     let ty = rt.type_tag(args[0]);
+    // Warmup feedback (Phase 1): record this cold JIT dispatch's receiver type
+    // directly at the shim entry — the emitted 2-way IC absorbs the hot
+    // monomorphic/bimorphic repeats, so whatever reaches HERE is precisely the
+    // cold-dispatch traffic a recompile wants to see. `resolve_or_default` also
+    // records on its own slow path; the overlap only inflates counts uniformly
+    // and never changes which type dominates. Populated UNCONDITIONALLY — not
+    // gated on `thread_cacheable`, unlike the emitted IC fill below.
+    {
+        let reloc = rt.relocated();
+        let ver = rt.shared.dispatch_version.load(Ordering::Relaxed);
+        let epoch = dispatch_epoch(reloc, ver);
+        // The impl is recorded advisory-only after resolution below; record the
+        // TYPE now with a 0 impl (revalidated by epoch at use, so 0 is inert).
+        rt.shared.feedback.record(site as usize, ty, 0, epoch);
+    }
     let imp = match rt.resolve_or_default(site as usize, method, ty) {
         Some(imp) => imp,
         None => {
@@ -768,6 +783,45 @@ extern "C" fn shim_dispatch<M: ModelArithJit>(
         }
     }
     top.invoke(top, rt, imp, args)
+}
+
+/// Adaptive tier: a feedback-speculated dispatch guard failed at `site` — the
+/// live receiver type or the dispatch version diverged from what the recompile
+/// baked, so the generic edge ran. Count the deopt (drives the blacklist +
+/// re-speculation policy). A pure counter bump — never allocates or throws, so
+/// it is safe on the JIT's nounwind edge.
+extern "C" fn shim_deopt<M: ValueModel>(ctx: *mut JitCtx<M>, site: u32) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.shared.feedback.record_deopt(site as usize);
+    crate::stats::bump(&crate::stats::SPEC_DISPATCH_DEOPTS);
+    0
+}
+
+/// Adaptive tier: the running body crossed its hotness threshold. Recompile it
+/// with type feedback and republish, so its NEXT call enters the optimized
+/// body (running frames finish on the current one — no on-stack replacement).
+/// `cell` is the body's hotness counter, reset here so the trigger re-arms
+/// rather than firing on every subsequent call. Reached from the emitted
+/// prologue / back-edge on the nounwind edge, so it must never panic — every
+/// failure mode just leaves the body as-is.
+extern "C" fn shim_reopt<M: ModelArithJit>(ctx: *mut JitCtx<M>, cell: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let self_closure = ctx.self_closure.get();
+    let jitp = unsafe { (*ctx.rc).jit };
+    if !jitp.is_null() {
+        let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
+        jit.reoptimize(rt, self_closure);
+    }
+    // Re-arm the trigger: zero the counter so it climbs again over another
+    // `REOPT_THRESHOLD` calls (a straggler upgrade / deopt re-check amortizes to
+    // one shim per threshold, not one per call). Racy across threads — a lost
+    // write only delays the next arming, never breaks anything.
+    if cell != 0 {
+        unsafe { *(cell as *mut u32) = 0 };
+    }
+    0
 }
 
 /// Register a `deftype`/protocol method impl (type-indexed dispatch table).
@@ -1438,6 +1492,10 @@ struct Shims {
     str_char_at: FuncId,
     char_to_int: FuncId,
     int_to_char: FuncId,
+    /// Adaptive tier: a hot body crossed its threshold — recompile with feedback.
+    reopt: FuncId,
+    /// Adaptive tier: a feedback-speculated dispatch guard failed — count it.
+    deopt: FuncId,
 }
 
 #[derive(Clone, Copy)]
@@ -1480,6 +1538,8 @@ struct ShimRefs {
     str_char_at: cranelift_codegen::ir::FuncRef,
     char_to_int: cranelift_codegen::ir::FuncRef,
     int_to_char: cranelift_codegen::ir::FuncRef,
+    reopt: cranelift_codegen::ir::FuncRef,
+    deopt: cranelift_codegen::ir::FuncRef,
 }
 
 /// A finished, runnable body.
@@ -1893,7 +1953,75 @@ pub struct JitCranelift<M: ModelArithJit> {
     /// sequentially. A hit is at most four type compares; a miss calls the
     /// real `-instance-val` and refills (see `INSTANCE_IC_WAYS`).
     instance_ic: RefCell<Vec<InstanceSiteIc>>,
+    /// Per-TEMPLATE reoptimization state (the "Always Fast" adaptive tier),
+    /// indexed by the same stable template id as `template_code`. A body that
+    /// crosses its hotness threshold recompiles ONCE with feedback-driven
+    /// dispatch speculation (v2), and re-speculates only when its speculated
+    /// sites accumulate NEW deopts — both capped by `REOPT_CAP`. Per-thread-JIT
+    /// like `cache`/`template_code` (workers build their own); the shared
+    /// signal is the `FeedbackTable`, not this.
+    reopt: RefCell<Vec<ReoptState>>,
     _pd: std::marker::PhantomData<fn() -> M>,
+}
+
+/// Per-template adaptive-tier state. `latest_code` is the newest compiled body
+/// for the template (null until the first reopt); a closure whose code word
+/// lags it is re-pointed cheaply. `deopt_snapshot` is the body's summed
+/// dispatch-site deopt count at the last recompile — re-speculation fires only
+/// when the live sum exceeds it (a speculated guard started failing).
+#[derive(Clone, Copy)]
+struct ReoptState {
+    recompiles: u32,
+    deopt_snapshot: u32,
+    latest_code: *const u8,
+    /// Decided NOT worth reopting (no dispatch site had a confident dominant
+    /// record type): keep the first-invoke compile and stop retriggering. This
+    /// is what keeps a value-inlined body (a transducer step, a reduce kernel)
+    /// on its already-good code instead of trading its arg/capture inlining for
+    /// a dispatch speculation that would never fire.
+    parked: bool,
+}
+impl Default for ReoptState {
+    fn default() -> Self {
+        ReoptState {
+            recompiles: 0,
+            deopt_snapshot: 0,
+            latest_code: std::ptr::null(),
+            parked: false,
+        }
+    }
+}
+
+/// Invocations (or weighted back-edge polls) a body accumulates before it is
+/// recompiled with type feedback. ~2000 keeps cold/one-shot code on the
+/// first-invoke compile while catching anything genuinely hot within a warmup
+/// window. Tuned on the bench corpus (a smaller value recompiled short-lived
+/// helpers for no gain; larger delayed the win on the hot bodies).
+const REOPT_THRESHOLD: u32 = 2000;
+/// One coarsened back-edge poll (every `BACKEDGE_POLL_INTERVAL` iterations) is
+/// worth this many invocations toward the hotness threshold, so a body that is
+/// hot through a LONG self-loop rather than many calls still reopts: ~20 polls
+/// (`REOPT_THRESHOLD / LOOP_POLL_WEIGHT`) arms it.
+const LOOP_POLL_WEIGHT: u32 = 100;
+/// Cap on recompiles per template — the first feedback compile plus a bounded
+/// number of deopt-driven re-speculations. Prevents thrash if a site oscillates.
+const REOPT_CAP: u32 = 3;
+/// Speculate a dispatch site only when one receiver type owns at least this
+/// fraction of the site's recorded dispatches: the emitted guard's deopt edge
+/// is the full generic path, so a low-confidence guess only adds a compare.
+const SPEC_MIN_FRACTION: f32 = 0.95;
+/// A speculated site that deopts this many times is blacklisted: the next
+/// recompile emits it generic and never re-speculates it (the `BlacklistAfter`
+/// policy from `speculation.rs`, applied at the emit tier).
+const SPEC_DEOPT_BLACKLIST: u32 = 8;
+
+/// Whole-feature kill switch: `MICROLANG_NO_ADAPTIVE=1` disables the adaptive
+/// tier (no hotness counters, no reopt, no feedback speculation) so a run uses
+/// only first-invoke compiles. A diagnostic escape hatch, evaluated once.
+fn adaptive_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MICROLANG_NO_ADAPTIVE").is_none())
 }
 
 /// One way of a dispatch-site IC: the folded epoch at fill time, the receiver
@@ -2160,6 +2288,28 @@ struct ValuePlan {
     caps: Vec<u64>,
 }
 
+/// A feedback-driven DISPATCH-site speculation (Phase 1): at a recompile, a
+/// dispatch site whose recorded receiver types are dominated by one RECORD type
+/// splices that type's resolved impl body inline behind a guard on the live
+/// receiver's type sym + the dispatch version. Both guard constants are
+/// GC-stable (a `Sym` and a version counter), and the inlined body is the
+/// impl's stable template `Ir` — nothing baked can dangle across a move. The
+/// deopt edge is the ordinary generic dispatch (IC probe + shim), so a wrong
+/// guess is only ever a compare + a counted `shim_deopt`, never a wrong answer.
+/// Restricted to CAPTURE-FREE impls this phase (a captured impl would need the
+/// live impl value in a register to read its captures — Phase 3).
+struct DispatchSpecPlan {
+    /// The dominant receiver type sym — the guard constant compared against the
+    /// record's own type sym (`type_tag(recv)`).
+    dom_ty: Sym,
+    /// The dispatch version baked at compile: a redefinition bumps it and the
+    /// guard deopts to a fresh resolution.
+    version: u64,
+    nparams: usize,
+    nslots: u16,
+    body: Arc<Ir>,
+}
+
 /// A resolved call target (the payload of the monomorphic inline cache).
 /// `epoch` is the collection count (`Runtime::relocated`) at fill time: a
 /// moving collection can relocate a closure AND recycle its old address for a
@@ -2268,6 +2418,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let sca: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_str_char_at::<M>;
         let cti: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_char_to_int::<M>;
         let itc: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_int_to_char::<M>;
+        let rop: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_reopt::<M>;
+        let dop: extern "C" fn(*mut JitCtx<M>, u32) -> u64 = shim_deopt::<M>;
         builder.symbol("ml_load_local", ll as *const u8);
         builder.symbol("ml_load_global", lg as *const u8);
         builder.symbol("ml_def_global", dg as *const u8);
@@ -2306,6 +2458,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
         builder.symbol("ml_str_char_at", sca as *const u8);
         builder.symbol("ml_char_to_int", cti as *const u8);
         builder.symbol("ml_int_to_char", itc as *const u8);
+        builder.symbol("ml_reopt", rop as *const u8);
+        builder.symbol("ml_deopt", dop as *const u8);
 
         let mut module = JITModule::new(builder);
 
@@ -2342,6 +2496,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let s_v1 = sig(&[ptr, I64]);
         let s_v2 = sig(&[ptr, I64, I64]);
         let s_v3 = sig(&[ptr, I64, I64, I64]);
+        let s_reopt = sig(&[ptr, I64]);
+        let s_deopt = sig(&[ptr, i32t]);
 
         let decl = |module: &mut JITModule, name: &str, sig: &cranelift_codegen::ir::Signature| {
             module
@@ -2387,6 +2543,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
             str_char_at: decl(&mut module, "ml_str_char_at", &s_v2),
             char_to_int: decl(&mut module, "ml_char_to_int", &s_v1),
             int_to_char: decl(&mut module, "ml_int_to_char", &s_v1),
+            reopt: decl(&mut module, "ml_reopt", &s_reopt),
+            deopt: decl(&mut module, "ml_deopt", &s_deopt),
         };
 
         JitCranelift {
@@ -2406,6 +2564,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             // check would then read freed memory, miss forever (re-running
             // `satisfies?` every call), and could even spuriously hit on garbage.
             instance_ic: RefCell::new(Vec::with_capacity(DISPATCH_SITE_CAP)),
+            reopt: RefCell::new(Vec::new()),
             counter: Cell::new(0),
             _pd: std::marker::PhantomData,
         }
@@ -2442,7 +2601,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         ctx.func.signature.returns.push(AbiParam::new(I64));
         {
             let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
-            let shape = BodyShape { entry_arity: None, nparams: 0, variadic: false, nslots: 0, mem_mode: true, tail_root: true };
+            let shape = BodyShape { entry_arity: None, nparams: 0, variadic: false, nslots: 0, mem_mode: true, tail_root: true, feedback: false, hot_cell: std::ptr::null() };
             build_body::<M>(&mut module, &mut fb, self.shims, None, self as *const Self as *const (), ir, shape, None);
             fb.finalize();
         }
@@ -2542,7 +2701,10 @@ impl<M: ModelArithJit> JitCranelift<M> {
         } else {
             None
         };
-        BodyShape { entry_arity, nparams, variadic, nslots, mem_mode, tail_root: true }
+        // Defaults: a first-invoke compile with no counter. `compiled_body`
+        // arms the counter (`hot_cell`); `reoptimize` sets `feedback` + a fresh
+        // counter for the recompile.
+        BodyShape { entry_arity, nparams, variadic, nslots, mem_mode, tail_root: true, feedback: false, hot_cell: std::ptr::null() }
     }
 
     fn compiled_body(
@@ -2558,7 +2720,17 @@ impl<M: ModelArithJit> JitCranelift<M> {
         if let Some(c) = self.cache.borrow().get(&key) {
             return c.clone();
         }
-        let c = self.compile_spec(Some(rt), body, Self::body_shape(body, nparams, variadic, nslots), spec);
+        // Arm the hotness counter (the adaptive tier) ONLY for bodies that
+        // contain a dispatch site: feedback-driven speculation is the sole Phase
+        // 1 payoff, so a dispatch-free body (pure arithmetic, a `try` wrapper,
+        // string munging) has nothing to gain from a recompile and is left on
+        // its first-invoke code — no counter, no wasted recompile. Nested/
+        // top-level bodies never get one either.
+        let mut shape = Self::body_shape(body, nparams, variadic, nslots);
+        if adaptive_enabled() && body_has_dispatch(body) {
+            shape.hot_cell = leak_hot_cell();
+        }
+        let c = self.compile_spec(Some(rt), body, shape, spec);
         self.cache.borrow_mut().insert(key, c.clone());
         c
     }
@@ -2594,6 +2766,8 @@ impl<M: ModelArithJit> JitCranelift<M> {
             nslots: 0,
             mem_mode: true,
             tail_root: false,
+            feedback: false,
+            hot_cell: std::ptr::null(),
         };
         // Keyed by the try's own site id. Keying by `ir as *const Ir` was
         // UNSOUND: an Ir tree is freed when its form finishes and the next tree
@@ -2892,6 +3066,155 @@ impl<M: ModelArithJit> JitCranelift<M> {
         }
     }
 
+    /// Summed deopt count over a body's dispatch sites — how many times a
+    /// feedback-speculated guard in this body has failed. Re-speculation fires
+    /// only when this grows past the last recompile's snapshot.
+    fn body_deopt_sum(&self, rt: &Runtime<M>, body: &Ir) -> u32 {
+        let mut sum = 0u32;
+        walk_dispatch_sites(body, &mut |site| {
+            sum = sum.saturating_add(rt.shared.feedback.deopts(site));
+        });
+        sum
+    }
+
+    /// Would a recompile of `body` actually SPECULATE anywhere — i.e. does some
+    /// dispatch site have a confident, non-blacklisted, record-typed dominant
+    /// receiver? Mirrors `dispatch_spec_plan`'s confidence gate (minus the
+    /// impl-shape checks). A body with none gains nothing from a feedback
+    /// recompile — and would LOSE its first-invoke value inlining — so it is
+    /// parked instead.
+    fn body_has_speculatable_site(&self, rt: &Runtime<M>, body: &Ir) -> bool {
+        let fb = &rt.shared.feedback;
+        let mut ok = false;
+        walk_dispatch_sites(body, &mut |site| {
+            if ok {
+                return;
+            }
+            if let Some((dom_ty, frac)) = fb.dominant_type(site) {
+                if frac >= SPEC_MIN_FRACTION
+                    && fb.deopts(site) < SPEC_DEOPT_BLACKLIST
+                    && rt.is_record_type(dom_ty)
+                {
+                    ok = true;
+                }
+            }
+        });
+        ok
+    }
+
+    /// Adaptive-tier recompile of a hot closure body with type feedback. Called
+    /// from the emitted hotness trigger (`shim_reopt`). Idempotent and bounded:
+    ///
+    ///   * a STRAGGLER (a closure of a template already reopted, still carrying
+    ///     the old code word) is just re-pointed to the newest body — no compile;
+    ///   * the FIRST crossing compiles a feedback-speculating v2 and republishes;
+    ///   * a v2 that RE-crosses re-speculates only if its sites accumulated new
+    ///     deopts since the last compile — otherwise it is already optimal.
+    ///
+    /// Running frames keep executing the body they entered on (no on-stack
+    /// replacement); only the NEXT call sees the new one, via the closure's
+    /// code word and the per-template code map.
+    fn reoptimize(&self, rt: &mut Runtime<M>, self_closure: u64) {
+        if M::R::tag_of(self_closure) != RawTag::Ref {
+            return;
+        }
+        let g = M::R::as_ref(self_closure);
+        if unsafe { g.type_id() } != kind::CLOSURE {
+            return;
+        }
+        let (nparams, variadic, nslots, template) = match rt.view(self_closure) {
+            ObjView::Closure { nparams, variadic, nslots, template, .. } => {
+                (nparams, variadic, nslots, template)
+            }
+            _ => return,
+        };
+        let cur_code = unsafe { *(g.0.add(CLOSURE_CODE_OFF) as *const u64) } as *const u8;
+
+        // Phase 1: decide, under the reopt-state borrow (NOT held across the
+        // Cranelift compile below, which borrows `module`/`cache`).
+        let (do_compile, live_deopts) = {
+            let mut states = self.reopt.borrow_mut();
+            if states.len() <= template as usize {
+                states.resize(template as usize + 1, ReoptState::default());
+            }
+            let st = states[template as usize];
+            if !st.latest_code.is_null() && cur_code != st.latest_code {
+                // Straggler: adopt the newest body, no recompile.
+                unsafe { *(g.0.add(CLOSURE_CODE_OFF) as *mut u64) = st.latest_code as u64 };
+                return;
+            }
+            if st.parked || st.recompiles >= REOPT_CAP {
+                return;
+            }
+            let live = self.body_deopt_sum(rt, rt.template(template));
+            if st.latest_code.is_null() {
+                // FIRST reopt: only worth it if some site will actually speculate.
+                // Otherwise park the template (keep the value-inlined first
+                // compile) so the trigger stops firing.
+                if !self.body_has_speculatable_site(rt, rt.template(template)) {
+                    states[template as usize].parked = true;
+                    return;
+                }
+                (true, live)
+            } else {
+                // A published v2 that re-crossed: re-speculate only if its
+                // speculated sites accumulated NEW deopts (a guard is failing).
+                (live > st.deopt_snapshot, live)
+            }
+        };
+        if !do_compile {
+            return;
+        }
+
+        // Value-inline at reopt uses the closure's LIVE captures only — safe to
+        // read here (Cranelift never reaches a GC safepoint) — never the stale
+        // first-invoke ARGS the original snapshot held. Dispatch speculation
+        // reads the shared `FeedbackTable` in the emit (`shape.feedback`).
+        let body = rt.template(template).clone();
+        let caps: Vec<u64> = {
+            let n = unsafe { g.aux() } as usize;
+            (0..n)
+                .map(|i| unsafe { *(g.0.add(CLOSURE_CAPS_OFF + i * 8) as *const u64) })
+                .collect()
+        };
+        let mut shape = Self::body_shape(&body, nparams, variadic, nslots);
+        shape.feedback = true;
+        shape.hot_cell = leak_hot_cell();
+        let compiled = self.compile_spec(Some(rt), &body, shape, Some(SpecEnv { args: Vec::new(), caps }));
+        crate::stats::bump(&crate::stats::REOPT_COMPILES);
+        let code = compiled.code;
+
+        // Publish: OVERWRITE the per-template code map (unlike `publish_fast_target`,
+        // which only sets-if-null so a straggler of this template picks up v2 at
+        // creation), the `Ir`-keyed cache (the Rust invoke path), and this hot
+        // closure's own code word. Drop the resolved-callee cache: entries may
+        // pin the superseded `Compiled`.
+        {
+            let mut tc = self.template_code.borrow_mut();
+            if tc.len() <= template as usize {
+                assert!(
+                    (template as usize) < TEMPLATE_CODE_CAP,
+                    "template_code overflow at reopt: template {template} exceeds TEMPLATE_CODE_CAP"
+                );
+                tc.resize(template as usize + 1, std::ptr::null());
+            }
+            tc[template as usize] = code;
+        }
+        self.cache.borrow_mut().insert(Arc::as_ptr(&body), compiled.clone());
+        if compiled.entry_arity.is_some() {
+            unsafe { *(g.0.add(CLOSURE_CODE_OFF) as *mut u64) = code as u64 };
+        }
+        for slot in self.call_ic.borrow_mut().iter_mut() {
+            *slot = None;
+        }
+
+        let mut states = self.reopt.borrow_mut();
+        let st = &mut states[template as usize];
+        st.recompiles += 1;
+        st.latest_code = code;
+        st.deopt_snapshot = live_deopts;
+    }
+
     /// The proper-tail-call trampoline: run a body; if it tail-calls, resolve the
     /// callee and loop — a bounded native stack for unbounded tail recursion.
     /// Non-tail calls still recurse (through `top` or native fast calls), so
@@ -3033,6 +3356,72 @@ fn is_record_ref<M: ValueModel>(bits: u64) -> bool {
     M::R::tag_of(bits) == RawTag::Ref && unsafe { M::R::as_ref(bits).type_id() } == kind::RECORD
 }
 
+/// A fresh, process-lifetime hotness counter for one compiled body. LEAKED on
+/// purpose: the emitted code bakes its address, and JIT code is never freed, so
+/// the cell must outlive any `Compiled` that might be replaced by a reopt.
+/// Bodies are bounded (one per compiled template + a capped number of
+/// recompiles), so this is a bounded leak, exactly like the code it counts.
+fn leak_hot_cell() -> *const u32 {
+    Box::into_raw(Box::new(0u32)) as *const u32
+}
+
+/// Does `ir` contain a dispatch site (not counting nested `Lambda` bodies)?
+/// Gates whether a compiled body arms a hotness counter — only dispatch-bearing
+/// bodies can profit from a feedback recompile.
+fn body_has_dispatch(ir: &Ir) -> bool {
+    let mut found = false;
+    walk_dispatch_sites(ir, &mut |_| found = true);
+    found
+}
+
+/// Visit every `Ir::Dispatch` site id reachable in `ir` WITHOUT descending into
+/// nested `Lambda` bodies (those compile — and reopt — separately). Used to sum
+/// a body's speculated-site deopts.
+fn walk_dispatch_sites(ir: &Ir, f: &mut impl FnMut(usize)) {
+    match ir {
+        Ir::Dispatch { site, args, .. } => {
+            f(*site);
+            for a in args {
+                walk_dispatch_sites(a, f);
+            }
+        }
+        Ir::Lambda { .. } => {} // separate body
+        Ir::Const(_) | Ir::Quote(_) | Ir::Global(_) | Ir::Local { .. } | Ir::Capture(_) => {}
+        Ir::If(a, b, c) => {
+            walk_dispatch_sites(a, f);
+            walk_dispatch_sites(b, f);
+            walk_dispatch_sites(c, f);
+        }
+        Ir::Do(xs) | Ir::Prim(_, xs) => xs.iter().for_each(|x| walk_dispatch_sites(x, f)),
+        Ir::Let(inits, body) => {
+            inits.iter().for_each(|x| walk_dispatch_sites(x, f));
+            walk_dispatch_sites(body, f);
+        }
+        Ir::Call(g, args) => {
+            walk_dispatch_sites(g, f);
+            args.iter().for_each(|a| walk_dispatch_sites(a, f));
+        }
+        Ir::SetLocal { val, .. } | Ir::SetGlobal { val, .. } | Ir::Def { init: val, .. } => {
+            walk_dispatch_sites(val, f)
+        }
+        Ir::DefMethod { imp, .. } => walk_dispatch_sites(imp, f),
+        Ir::FieldGet { obj, .. } => walk_dispatch_sites(obj, f),
+        Ir::InstanceCheck { proto, arg, .. } => {
+            walk_dispatch_sites(proto, f);
+            walk_dispatch_sites(arg, f);
+        }
+        Ir::Try { body, catch, finally, .. } => {
+            walk_dispatch_sites(body, f);
+            if let Some(c) = catch {
+                walk_dispatch_sites(c, f);
+            }
+            if let Some(fin) = finally {
+                walk_dispatch_sites(fin, f);
+            }
+        }
+    }
+}
+
 impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
     fn eval_ir(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, ir: &Ir, locals: &Locals) -> u64 {
         // A top-level expression: compile it as a standalone ctx-entry body and
@@ -3046,6 +3435,8 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
             nslots: 0,
             mem_mode: true,
             tail_root: false,
+            feedback: false,
+            hot_cell: std::ptr::null(),
         };
         let compiled = self.compile(Some(rt), ir, shape);
         // A top-level expr is not a closure body: no current callee (0), so the
@@ -3131,6 +3522,15 @@ struct BodyShape {
     /// Locals in the heap frame (try/(gc)/%await) instead of SSA registers.
     mem_mode: bool,
     tail_root: bool,
+    /// Adaptive tier: `true` for a feedback-driven RECOMPILE — dispatch sites
+    /// consult the `FeedbackTable` and speculate on a dominant receiver type.
+    /// `false` for a first-invoke compile (nothing to speculate from yet).
+    feedback: bool,
+    /// Adaptive tier: address of this body's leaked hotness counter (a plain
+    /// `u32`). The prologue and back-edge bump it and trigger a recompile when
+    /// it crosses `REOPT_THRESHOLD`. `null` for bodies that are never reopted
+    /// (top-level forms, `try` arms, `dump_ir`).
+    hot_cell: *const u32,
 }
 
 /// Compile `ir` as a whole function body into an already-prepared builder.
@@ -3197,6 +3597,8 @@ fn build_body<M: ModelArithJit>(
         str_char_at: module.declare_func_in_func(shims.str_char_at, fb.func),
         char_to_int: module.declare_func_in_func(shims.char_to_int, fb.func),
         int_to_char: module.declare_func_in_func(shims.int_to_char, fb.func),
+        reopt: module.declare_func_in_func(shims.reopt, fb.func),
+        deopt: module.declare_func_in_func(shims.deopt, fb.func),
     };
 
     let mut c = Compiler {
@@ -3246,6 +3648,8 @@ fn build_body<M: ModelArithJit>(
         self_var: cranelift_frontend::Variable::from_u32(0), // placeholder; set right below
         poll_counter: cranelift_frontend::Variable::from_u32(0), // placeholder; set with the loop header
         rc_val,
+        feedback: shape.feedback,
+        hot_cell: shape.hot_cell,
     };
 
     // The RUNNING CLOSURE's bits, read ONCE into a tracked variable (Stage
@@ -3301,6 +3705,13 @@ fn build_body<M: ModelArithJit>(
     // declared values get a stack map there). This is what bounds a native
     // thread's time-to-park.
     c.emit_poll();
+
+    // ADAPTIVE TIER: count this invocation. Once a body crosses `REOPT_THRESHOLD`
+    // it recompiles itself with type feedback (dispatch-site speculation). Placed
+    // in the entry block (before the loop header) so it fires once per CALL, not
+    // per loop iteration. `emit_hotness_bump` is a no-op unless a counter was
+    // armed (`compiled_body` / `reoptimize`).
+    c.emit_hotness_bump(1);
 
     // A self-tail-recursive SSA body gets a loop header: a tail call to the same
     // closure redefines the param variables in place and branches here (an
@@ -3416,6 +3827,13 @@ pub struct Compiler<'a, 'b> {
     /// every iteration — one register decrement + branch on the hot path.
     /// An untagged integer: deliberately NOT stack-mapped.
     poll_counter: cranelift_frontend::Variable,
+    /// Adaptive tier: `true` when compiling a feedback-driven RECOMPILE, so
+    /// dispatch sites consult the `FeedbackTable` and speculate on their
+    /// dominant receiver type. `false` on a first-invoke compile.
+    feedback: bool,
+    /// Adaptive tier: this body's leaked hotness counter address (baked into the
+    /// prologue + back-edge bumps), or `null` for a body that is never reopted.
+    hot_cell: *const u32,
 }
 
 /// Self-tail back-edges poll every N iterations. Time-to-safepoint for a
@@ -3546,6 +3964,43 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let n = self.fb.ins().iconst(I64, BACKEDGE_POLL_INTERVAL);
         self.fb.def_var(self.poll_counter, n);
         self.emit_poll();
+        // Adaptive tier: a body hot through a LONG self-loop (rather than many
+        // calls) arms here too — each coarsened poll is worth `LOOP_POLL_WEIGHT`
+        // toward the hotness threshold. Costs nothing on the hot loop path (this
+        // is the already-cold once-per-`BACKEDGE_POLL_INTERVAL` block).
+        self.emit_hotness_bump(LOOP_POLL_WEIGHT);
+        self.fb.ins().jump(cont, &[]);
+        self.fb.switch_to_block(cont);
+        self.fb.seal_block(cont);
+    }
+
+    /// Adaptive tier: bump this body's hotness counter by `weight` and, when it
+    /// crosses `REOPT_THRESHOLD`, take the cold edge that recompiles it with
+    /// type feedback (`shim_reopt`, which also re-arms the counter). A plain
+    /// non-atomic load/add/store — cross-thread races only cost an approximate
+    /// count, never correctness, since ROUTING never depends on the exact value.
+    /// No-op for bodies with no counter (top-level forms / `try` arms / dump_ir).
+    fn emit_hotness_bump(&mut self, weight: u32) {
+        if self.hot_cell.is_null() {
+            return;
+        }
+        let flags = MemFlagsData::trusted();
+        let cellp = self.iconst(self.hot_cell as u64);
+        let cnt = self.fb.ins().load(cranelift_codegen::ir::types::I32, flags, cellp, 0);
+        let cnt1 = self.fb.ins().iadd_imm(cnt, weight as i64);
+        self.fb.ins().store(flags, cnt1, cellp, 0);
+        let hot = self.fb.create_block();
+        let cont = self.fb.create_block();
+        self.fb.set_cold_block(hot);
+        let armed =
+            self.fb.ins().icmp_imm(IntCC::UnsignedGreaterThanOrEqual, cnt1, REOPT_THRESHOLD as i64);
+        self.fb.ins().brif(armed, hot, &[], cont, &[]);
+        self.fb.switch_to_block(hot);
+        self.fb.seal_block(hot);
+        // `shim_reopt` never allocates or reaches a safepoint (Cranelift compile
+        // only), so this call needs no stack map — nothing can move across it.
+        let ctx = self.ctx_val;
+        self.fb.ins().call(self.refs.reopt, &[ctx, cellp]);
         self.fb.ins().jump(cont, &[]);
         self.fb.switch_to_block(cont);
         self.fb.seal_block(cont);
@@ -3940,6 +4395,73 @@ impl<'a, 'b> Compiler<'a, 'b> {
             .map(|i| unsafe { *(tg.0.add(CLOSURE_CAPS_OFF + i * 8) as *const u64) })
             .collect();
         Some(ValuePlan { meta, multifn, nparams: argc, nslots, body, caps })
+    }
+
+    /// Phase 1 — plan a feedback-driven dispatch-site speculation for a RECOMPILE
+    /// (see `DispatchSpecPlan`). Consults the shared `FeedbackTable`: only when a
+    /// single RECORD receiver type owns >= `SPEC_MIN_FRACTION` of the site's
+    /// recorded dispatches, the site is not blacklisted (too many deopts), and
+    /// the resolved impl is a capture-free, non-variadic, arity-`argc` closure
+    /// whose body fits the inline budget. Consumes budget on success, exactly
+    /// like the value inliner. This is the ONLY new planning SOURCE — the splice
+    /// mechanism (`emit_inlined_body` behind a guard) is the existing one.
+    fn dispatch_spec_plan<M: ModelArithJit>(
+        &self,
+        site: usize,
+        method: Sym,
+        argc: usize,
+    ) -> Option<DispatchSpecPlan> {
+        if !self.feedback || self.mem_mode || self.rt_ptr.is_null() {
+            return None;
+        }
+        let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+        let fb = &rt.shared.feedback;
+        let (dom_ty, frac) = fb.dominant_type(site)?;
+        if frac < SPEC_MIN_FRACTION || fb.deopts(site) >= SPEC_DEOPT_BLACKLIST {
+            return None;
+        }
+        // The emitted guard reuses the record fast-path shape (`kind::RECORD`
+        // header + type-sym compare), so it can only match a receiver carried by
+        // a real record. A non-record-dominated site is left generic.
+        if !rt.is_record_type(dom_ty) {
+            return None;
+        }
+        let imp = rt.resolve_or_default(site, method, dom_ty)?;
+        if M::R::tag_of(imp) != RawTag::Ref {
+            return None;
+        }
+        let g = M::R::as_ref(imp);
+        if unsafe { g.type_id() } != kind::CLOSURE {
+            return None;
+        }
+        // Capture-free only this phase: the inlined body reads no captures, so it
+        // needs the live impl value in no register (Phase 3 lifts this).
+        if unsafe { g.aux() } != 0 {
+            return None;
+        }
+        let meta = unsafe { *(g.0.add(CLOSURE_META_OFF) as *const u64) };
+        if crate::heap::meta_variadic(meta) || crate::heap::meta_nparams(meta) != argc {
+            return None;
+        }
+        let nslots = crate::heap::meta_nslots(meta);
+        let body = rt.template(crate::heap::meta_template(meta)).clone();
+        if body_mem_mode(&body) {
+            return None;
+        }
+        let cost = node_count_capped(&body, self.inline_max_callee)?;
+        let budget = self.inline_budget.get();
+        if budget < cost {
+            return None;
+        }
+        self.inline_budget.set(budget - cost);
+        let version = rt.shared.dispatch_version.load(Ordering::Relaxed);
+        Some(DispatchSpecPlan {
+            dom_ty,
+            version,
+            nparams: crate::heap::meta_nparams(meta),
+            nslots,
+            body,
+        })
     }
 
     /// Splice an inlined callee body into the current function: fresh SSA vars
@@ -5596,6 +6118,47 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let mixed = self.fb.ins().imul_imm(reloc, DISPATCH_EPOCH_MIX as i64);
                 let epoch = self.fb.ins().bxor(mixed, ver);
                 let sitep = self.iconst(self.dispatch_ic_slot::<M>(*site) as u64);
+                // ADAPTIVE TIER (feedback-driven speculation, recompiles only):
+                // when this site's warmup histogram is dominated by ONE record
+                // type, splice that type's resolved impl body inline behind a
+                // guard on the live receiver type sym + the dispatch version.
+                // The guard's deopt edge is the ordinary IC probe + shim below
+                // (never a wrong answer), with the deopt COUNTED so a site that
+                // turns polymorphic is blacklisted at the next recompile. Only
+                // the PLANNING source is new (the `FeedbackTable`); the splice is
+                // the existing `emit_inlined_body`.
+                if let Some(plan) = self.dispatch_spec_plan::<M>(*site, *method, argvals.len()) {
+                    crate::stats::bump(&crate::stats::SPEC_DISPATCH_SITES);
+                    let dom = self.iconst(plan.dom_ty as u64);
+                    let ty_ok = self.fb.ins().icmp(IntCC::Equal, ty, dom);
+                    let verc = self.iconst(plan.version);
+                    let ver_ok = self.fb.ins().icmp(IntCC::Equal, ver, verc);
+                    let spec_ok = self.fb.ins().band(ty_ok, ver_ok);
+                    let specb = self.fb.create_block();
+                    let despec = self.fb.create_block();
+                    self.fb.ins().brif(spec_ok, specb, &[], despec, &[]);
+                    // FAST: inline the impl body (capture-free — no live-value reads).
+                    self.fb.switch_to_block(specb);
+                    self.fb.seal_block(specb);
+                    let iv = self.emit_inlined_body::<M>(
+                        plan.nparams,
+                        plan.nslots,
+                        &plan.body,
+                        &argvals,
+                        None,
+                        None,
+                    );
+                    self.fb.def_var(result, iv);
+                    self.fb.ins().jump(merge, &[]);
+                    // DEOPT: count it, then fall into the generic IC probes (this
+                    // block becomes the current one, so the probe sequence below
+                    // emits here).
+                    self.fb.switch_to_block(despec);
+                    self.fb.seal_block(despec);
+                    let sitev_d = self.i32const(*site as u32);
+                    let ctx_d = self.ctx_val;
+                    self.fb.ins().call(self.refs.deopt, &[ctx_d, sitev_d]);
+                }
                 let probe = |c: &mut Self, way: i32, miss: cranelift_codegen::ir::Block| {
                     let base = way * 24;
                     let e = c.fb.ins().load(I64, flags, sitep, base);

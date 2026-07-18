@@ -274,6 +274,11 @@ pub struct Shared<M: ValueModel> {
     /// Bumped on every `register_method`, so per-site dispatch caches see
     /// protocol (re)definitions immediately.
     pub(crate) dispatch_version: AtomicU64,
+    /// JIT warmup type-feedback, one histogram per dispatch `site` (see
+    /// `feedback.rs`). Populated on the dispatch SLOW paths, read when a hot
+    /// body is recompiled to decide which sites to speculate on. Shared across
+    /// worker threads (it lives in `Shared`, behind the runtime's `Arc`).
+    pub(crate) feedback: crate::feedback::FeedbackTable,
     pub(crate) freed: AtomicU64,
     /// Constant pool (reserved, stable base for the JIT's inline reads).
     pub(crate) consts: UnsafeCell<Vec<u64>>,
@@ -556,6 +561,7 @@ impl<M: ValueModel> Runtime<M> {
             allocs: AtomicU64::new(0),
             relocated: AtomicU64::new(0),
             dispatch_version: AtomicU64::new(0),
+            feedback: crate::feedback::FeedbackTable::new(),
             freed: AtomicU64::new(0),
             consts: UnsafeCell::new(Vec::with_capacity(TABLE_CAP)),
             consts_lock: Mutex::new(()),
@@ -3567,6 +3573,19 @@ impl<M: ValueModel> Runtime<M> {
     }
 
     /// Inline-cached `(.-field obj)`: read the field named `field` from record
+    /// Is `ty` a registered `deftype`/`defrecord` type (i.e. its instances are
+    /// heap RECORDs whose type sym is `ty`)? Used by the JIT's feedback-driven
+    /// dispatch speculation: its guard reuses the record fast-path shape (a
+    /// `kind::RECORD` header + type-sym compare), so it may only speculate on a
+    /// dominant type carried by an actual record. A registered type is the one
+    /// with a field-name list.
+    pub fn is_record_type(&self, ty: Sym) -> bool {
+        self.shared
+            .field_names
+            .get(ty as usize)
+            .is_some_and(|p| !p.load(Ordering::Acquire).is_null())
+    }
+
     /// `obj`, using the per-site cache to skip the field-name scan on a monomorphic
     /// access. The cache packs `(type << 32) | index`; a hit needs only a type-tag
     /// compare (a field layout is fixed per type). Lock-free (relaxed load/store —
@@ -4326,6 +4345,12 @@ impl<M: ValueModel> Runtime<M> {
         let resolved = self
             .resolve_method(site, method, ty)
             .or_else(|| self.resolve_method(site, method, self.intern("Object")));
+        // Warmup feedback: record the receiver type at this site on the SLOW
+        // path, UNCONDITIONALLY (unlike the `site_ic` fill below, which an
+        // observing dispatch strategy must decline). A recompile reads this to
+        // decide what to speculate on; the `epoch` folds in so the advisory
+        // impl hint can be revalidated, exactly as the `site_ic` entry is.
+        self.shared.feedback.record(site, ty, resolved.unwrap_or(0), epoch);
         // Fill the per-thread cache only when the installed strategy is a pure
         // registry lookup (see `Dispatch::thread_cacheable`) — an observing
         // strategy (ICs, speculation) must see every repeat call.
