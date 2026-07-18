@@ -6,6 +6,7 @@
 (const FLAG_WINDOW_HIGHDPI 8192)
 (const MOUSE_BUTTON_LEFT 0)
 (const MOUSE_CURSOR_DEFAULT 0)
+(const MOUSE_CURSOR_IBEAM 2)
 (const MOUSE_CURSOR_POINTING_HAND 4)
 (const TEXTURE_FILTER_BILINEAR 1)
 
@@ -17,6 +18,7 @@
 (defstruct GlyphInfo [(value i32) (offsetX i32) (offsetY i32) (advanceX i32) (image Image)])
 (defstruct Font
   [(baseSize i32) (glyphCount i32) (glyphPadding i32) (texture Texture) (recs (ptr Rectangle)) (glyphs (ptr GlyphInfo))])
+(defstruct Camera2D [(offset Vector2) (target Vector2) (rotation f32) (zoom f32)])
 
 (extern InitWindow :cc c [i32 i32 (ptr i8)] (-> void))
 (extern CloseWindow :cc c [] (-> void))
@@ -28,6 +30,9 @@
 (extern GetTime :cc c [] (-> f64))
 (extern BeginDrawing :cc c [] (-> void))
 (extern EndDrawing :cc c [] (-> void))
+(extern BeginMode2D :cc c [Camera2D] (-> void))
+(extern EndMode2D :cc c [] (-> void))
+(extern MaximizeWindow :cc c [] (-> void))
 (extern ClearBackground :cc c [Color] (-> void))
 (extern BeginScissorMode :cc c [i32 i32 i32 i32] (-> void))
 (extern EndScissorMode :cc c [] (-> void))
@@ -67,6 +72,7 @@
         FLAG_WINDOW_HIGHDPI
         MOUSE_BUTTON_LEFT
         MOUSE_CURSOR_DEFAULT
+        MOUSE_CURSOR_IBEAM
         MOUSE_CURSOR_POINTING_HAND
         TEXTURE_FILTER_BILINEAR
         Vector2
@@ -76,6 +82,7 @@
         Texture
         GlyphInfo
         Font
+        Camera2D
         InitWindow
         CloseWindow
         WindowShouldClose
@@ -86,6 +93,9 @@
         GetTime
         BeginDrawing
         EndDrawing
+        BeginMode2D
+        EndMode2D
+        MaximizeWindow
         ClearBackground
         BeginScissorMode
         EndScissorMode
