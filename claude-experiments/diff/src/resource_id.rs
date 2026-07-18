@@ -58,7 +58,11 @@ impl ResourceId {
     /// Never panics and never allocates beyond the component strings.
     pub fn parse(input: &str) -> Self {
         let question = input.find('?');
-        let hash = input.find('#');
+        // A leading `#` is a Node subpath-import specifier (`#tanstack-router-entry`),
+        // not a URL fragment; a fragment requires content before it. So only a
+        // `#` past position 0 (and, when a query is present, past the `?`) opens a
+        // fragment.
+        let hash = input.find('#').filter(|&index| index > 0);
         match (question, hash) {
             // `path?query#fragment`: query runs from `?` to the first `#`.
             (Some(q), Some(h)) if q < h => Self {
@@ -191,6 +195,20 @@ mod tests {
         assert_eq!(parsed.path, "mod.js");
         assert_eq!(parsed.query, None);
         assert_eq!(parsed.fragment.as_deref(), Some("a?b"));
+    }
+
+    #[test]
+    fn a_leading_hash_is_a_subpath_import_not_a_fragment() {
+        let parsed = round_trips("#tanstack-router-entry");
+        assert_eq!(parsed.path, "#tanstack-router-entry");
+        assert_eq!(parsed.query, None);
+        assert_eq!(parsed.fragment, None);
+
+        // A leading-hash specifier can still carry a query.
+        let queried = round_trips("#entry?url");
+        assert_eq!(queried.path, "#entry");
+        assert_eq!(queried.query.as_deref(), Some("url"));
+        assert_eq!(queried.fragment, None);
     }
 
     #[test]

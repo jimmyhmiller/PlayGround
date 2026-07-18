@@ -55,11 +55,16 @@ struct AssetEmit {
 
 struct ResolutionCache {
     directories: [Mutex<HashMap<PathBuf, Arc<DirectoryResolutionCache>>>; 16],
+    /// Plugin-host aliases: `(specifier, absolute_target)` applied as an exact-
+    /// match rewrite before the standards-aware resolver runs. Shared read-only,
+    /// so cheap to clone into each directory cache.
+    aliases: Arc<Vec<(String, PathBuf)>>,
 }
 
 struct DirectoryResolutionCache {
     directory: PathBuf,
     specifiers: [Mutex<HashMap<String, Result<ResolvedModule, String>>>; 64],
+    aliases: Arc<Vec<(String, PathBuf)>>,
 }
 
 #[derive(Clone)]
@@ -69,9 +74,10 @@ struct ResolvedModule {
 }
 
 impl ResolutionCache {
-    fn new() -> Self {
+    fn new(aliases: Vec<(String, PathBuf)>) -> Self {
         Self {
             directories: std::array::from_fn(|_| Mutex::new(HashMap::new())),
+            aliases: Arc::new(aliases),
         }
     }
 
@@ -87,6 +93,7 @@ impl ResolutionCache {
         let cache = Arc::new(DirectoryResolutionCache {
             directory: importer_directory.to_path_buf(),
             specifiers: std::array::from_fn(|_| Mutex::new(HashMap::new())),
+            aliases: Arc::clone(&self.aliases),
         });
         shard.insert(importer_directory.to_path_buf(), Arc::clone(&cache));
         cache
@@ -116,6 +123,31 @@ impl DirectoryResolutionCache {
         // interpreted later, at load time. A query never causes a resolve error.
         let resource = ResourceId::parse(specifier);
         let path_specifier = resource.path.as_str();
+        // Plugin-host aliases win as an exact-match rewrite before the
+        // standards-aware resolver (which would route a `#`-specifier through
+        // package `imports` and fail). The alias target is a real file.
+        if let Some((_, target)) = self
+            .aliases
+            .iter()
+            .find(|(from, _)| from == path_specifier)
+        {
+            let result = if target.is_file() {
+                Ok(ResolvedModule {
+                    id: module_id_with_resource(target, &resource),
+                    side_effect_free: false,
+                })
+            } else {
+                Err(format!(
+                    "alias {path_specifier:?} points to {}, which is not a file",
+                    target.display()
+                ))
+            };
+            shard
+                .lock()
+                .expect("resolution specifier cache poisoned")
+                .insert(specifier.to_owned(), result.clone());
+            return result;
+        }
         // Most module graphs overwhelmingly use explicit relative files. Avoid
         // the general Node resolver on a cache miss when that exact file exists;
         // all ambiguous cases still take the standards-aware path.
@@ -255,19 +287,30 @@ pub struct Bundler {
 
 impl Bundler {
     pub fn discover(entry: &Path) -> Result<(Self, BuildUpdate), String> {
-        Self::discover_inner(entry)
+        Self::discover_inner(entry, &BuildConfig::default())
     }
 
     pub fn discover_direct(entry: &Path) -> Result<(Self, BuildUpdate), String> {
-        Self::discover_inner(entry)
+        Self::discover_inner(entry, &BuildConfig::default())
     }
 
-    fn discover_inner(entry: &Path) -> Result<(Self, BuildUpdate), String> {
+    /// Like [`Self::discover_direct`] but with build configuration, currently the
+    /// resolver aliases a plugin host supplies (e.g. TanStack's
+    /// `#tanstack-router-entry` -> the app's router). Aliases are baked into the
+    /// resolver once, so incremental rebuilds pay no per-edit cost for them.
+    pub fn discover_direct_with_config(
+        entry: &Path,
+        config: &BuildConfig,
+    ) -> Result<(Self, BuildUpdate), String> {
+        Self::discover_inner(entry, config)
+    }
+
+    fn discover_inner(entry: &Path, config: &BuildConfig) -> Result<(Self, BuildUpdate), String> {
         let entry_path = entry
             .canonicalize()
             .map_err(|error| format!("cannot open entry {}: {error}", entry.display()))?;
         let entry_id = module_id(&entry_path);
-        let resolver = Resolver::new(resolve_options());
+        let resolver = Resolver::new(resolve_options(config));
         let frontend_threads = std::thread::available_parallelism()
             .map_or(1, usize::from)
             .min(4);
@@ -276,7 +319,13 @@ impl Bundler {
             ids: Vec::new(),
             indices: HashMap::new(),
             resolver,
-            resolution_cache: ResolutionCache::new(),
+            resolution_cache: ResolutionCache::new(
+                config
+                    .aliases
+                    .iter()
+                    .map(|(from, to)| (from.clone(), PathBuf::from(to)))
+                    .collect(),
+            ),
             frontend_pool: ThreadPoolBuilder::new()
                 .num_threads(frontend_threads)
                 .thread_name(|index| format!("diffpack-frontend-{index}"))
@@ -1832,7 +1881,17 @@ fn chunk_path(output: &Path, index: usize) -> Result<PathBuf, String> {
     Ok(parent.join(format!("{stem}.chunk-{index}{extension}")))
 }
 
-fn resolve_options() -> ResolveOptions {
+/// Build-time configuration a plugin host contributes. Currently the resolver
+/// aliases (specifier -> absolute target), such as TanStack's
+/// `#tanstack-router-entry` -> `<app>/src/router.tsx`. Kept small and owned by
+/// Rust; the host merely supplies the values.
+#[derive(Debug, Clone, Default)]
+pub struct BuildConfig {
+    /// Ordered `(specifier, absolute_target)` alias pairs.
+    pub aliases: Vec<(String, String)>,
+}
+
+fn resolve_options(_config: &BuildConfig) -> ResolveOptions {
     ResolveOptions {
         tsconfig: Some(TsconfigDiscovery::Auto),
         extensions: [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".json"]
@@ -2079,6 +2138,37 @@ mod tests {
             "{error}"
         );
         assert!(!error.contains("No such file or directory"), "{error}");
+    }
+
+    #[test]
+    fn a_configured_alias_resolves_to_its_target() {
+        // The shape of TanStack's `#tanstack-router-entry` -> app router: a bare
+        // `#`-specifier the plugin host aliases to a real file.
+        let directory = tempdir().unwrap();
+        let router = directory.path().join("router.tsx");
+        fs::write(&router, "export const router = 1;\n").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { router } from '#tanstack-router-entry';\nconsole.log(router);\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let config = BuildConfig {
+            aliases: vec![(
+                "#tanstack-router-entry".to_string(),
+                router.to_string_lossy().into_owned(),
+            )],
+        };
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+
+        let reachable = bundler.reachable_modules_direct();
+        assert_eq!(reachable.len(), 2, "{reachable:?}");
+        assert!(
+            reachable.iter().any(|id| id.contains("router.tsx")),
+            "aliased import must resolve to the real router file: {reachable:?}"
+        );
     }
 
     #[test]
