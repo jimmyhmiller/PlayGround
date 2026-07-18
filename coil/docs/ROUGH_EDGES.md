@@ -347,10 +347,16 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
       own hello-world, and calling conventions are the headline feature.
 - [x] **tool-9** `coil fmt` disagrees with 43 of 44 repo examples and would rewrite 91% of their lines.
       Fix tool-8 **first**, or a mechanical reformat bakes in the mangled `:cc` signatures.
-- [ ] **tool-11** `-g` produces no dSYM, 0 line rows, "No source available" in lldb, and breakpoints
-      need the module-mangled name — while DEBUGINFO_DWARF.md confidently documents all of it working.
-      (Its tests cover the Rust/LLVM path, not the shipped self-hosted binary.) Symbolized backtraces
-      *do* work well.
+- [x] **tool-11** — ✅ DONE (line info + .dSYM; the mangled-name half noted below). The arm64 `-g`
+      path now stamps `__text`-relative RELOCATIONS on every DWARF address (the CU + each subprogram
+      `low_pc`, and the line program's `set_address`), so `dsymutil` stops rejecting the object ("No
+      valid relocations found. Skipping." → an EMPTY `.dSYM`, 0 line rows, "No source available") and
+      produces a real line table; the driver runs `dsymutil` after a `-g` link (the `.o` is kept for
+      it). lldb now maps source from the `.dSYM` alone — line breakpoints resolve and hit at
+      `file:line`. Teeth in `gate-cli.sh` (`.dSYM` produced, line rows present, lldb maps source from
+      the `.dSYM` with the `.o` removed) — all FAIL on the seed. See DECISIONS.md #10. NOTE: a
+      **function-name** breakpoint still needs the module-qualified name (`dbg.add`) — the subprogram
+      `DW_AT_name` mirrors the mangled symbol; **line** breakpoints (the primary workflow) need no name.
 - [x] **tool-12** (test story) — ✅ DONE. `lib/assert.coil` is a bundled library: `(assert COND)` /
       `(assert-eq A B)` bake the offending expression AND its `file:line` into the emitted code (the
       span machinery, via new `code-src`/`code-line` comptime ops) then abort like C's assert();

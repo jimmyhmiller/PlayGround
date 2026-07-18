@@ -707,6 +707,41 @@ expect_rc 1  "coil test: a failing suite exits 1"                         "$COIL
 expect_out "0 passed; 1 failed" "coil test: reports the failure count"    "$COIL" test "$T/redf.coil"
 expect_out "discovers every \(deftest" "coil test --help documents itself" "$COIL" test --help
 
+echo "== -g: dsymutil runs, the .o is kept, lldb maps source (tool-11) =="
+# The arm64 backend now stamps __text-relative RELOCATIONS on every DWARF address (CU +
+# subprogram low_pc, the line program's set_address). WITHOUT them dsymutil printed "No
+# valid relocations found. Skipping." and produced an EMPTY dSYM — 0 line rows, "No source
+# available" in lldb. The driver also runs dsymutil after a -g link. FAILS on the seed
+# (it emits no relocations and never runs dsymutil -> no .dSYM, breakpoints don't resolve).
+if command -v dsymutil >/dev/null 2>&1; then
+  cat > "$T/dbg.coil" <<'EOF'
+(module dbg)
+(defn addup [(x i64) (y i64)] (-> i64) (iadd x y))
+(defn main [] (-> i64) (addup 3 4))
+EOF
+  "$COIL" build "$T/dbg.coil" -g -o "$T/dbgx" >/dev/null 2>&1
+  [ -d "$T/dbgx.dSYM" ] && ok "coil build -g gathers a .dSYM" \
+                        || bad "coil build -g gathers a .dSYM" "no .dSYM (dsymutil skipped or not run)"
+  [ -e "$T/dbgx.o" ]    && ok "coil build -g keeps the .o (dsymutil reads it)" \
+                        || bad "coil build -g keeps the .o" "the .o was removed"
+  if command -v dwarfdump >/dev/null 2>&1; then
+    n=$(dwarfdump --debug-line "$T/dbgx.dSYM/Contents/Resources/DWARF/dbgx" 2>/dev/null | grep -cE '^0x[0-9a-f]+ +[0-9]')
+    [ "${n:-0}" -gt 0 ] && ok "the .dSYM line table has rows (was 0 = 'No source available')" \
+                        || bad ".dSYM line rows" "0 rows — dsymutil skipped the object (no relocations)"
+  fi
+  # REMOVE the .o so lldb MUST use the .dSYM (the portable artifact) — the scenario the
+  # finding describes. On the seed there is no .dSYM and now no .o -> lldb has nothing.
+  rm -f "$T/dbgx.o"
+  if command -v lldb >/dev/null 2>&1; then
+    bp=$(lldb "$T/dbgx" -o "breakpoint set --file dbg.coil --line 3" -o quit 2>&1)
+    echo "$bp" | grep -qE 'Breakpoint 1: where = .*dbg\.coil:3' \
+      && ok "lldb maps source from the .dSYM alone (no .o)" \
+      || bad "lldb maps source from the .dSYM" "$(echo "$bp" | grep -iE 'breakpoint|pending' | head -1)"
+  fi
+else
+  echo "  skip — dsymutil not on PATH (not a macOS toolchain host)"
+fi
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL

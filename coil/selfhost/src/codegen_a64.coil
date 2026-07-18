@@ -2968,9 +2968,12 @@
       (let [rl (load (field dw relocs)) nr (al-len [DwReloc] (load rl)) (mut i) 0]
         (loop (if (icmp-ge (load i) nr) (break)
           (do (let [r (al-at [DwReloc] rl (load i))]
+                ; a SECTION reloc targeting __text (negative sym = -(section ordinal),
+                ; r_extern=0 in the writer) — clang's Mach-O DWARF scheme, the one dsymutil
+                ; relocates per-function via the debug map.
                 (mobj-add-reloc! (mut (field g obj))
                                  (if (icmp-eq (load (field r sect)) 1) sinfo sline)
-                                 (load (field r off)) (load (field r symidx))
+                                 (load (field r off)) (isub 0 (load (field g text)))
                                  (reloc-unsigned) false 3))
               (store! i (iadd (load i) 1))))))) 0)
     (let [bytes (macho-write (mut (field g obj)))

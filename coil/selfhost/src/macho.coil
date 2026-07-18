@@ -288,12 +288,19 @@
                           (do (let [rp (al-at [MReloc] (field o relocs) (load ri))]
                                 (if (icmp-eq (load (field rp sect)) (iadd (load si) 1))
                                     (do (b-u32! (mut out) (load (field rp off)))
-                                        (b-u32! (mut out)
-                                          (ior (iand (al-get [i64] (load perm) (load (field rp sym))) 16777215)
-                                            (ior (ishl (if (load (field rp pcrel)) 1 0) 24)
-                                              (ior (ishl (load (field rp len)) 25)
-                                                (ior (ishl 1 27)                       ; r_extern = 1
-                                                     (ishl (load (field rp rtype)) 28))))))
+                                        ; sym < 0 is a SECTION relocation (r_extern = 0):
+                                        ; symbolnum is the target SECTION ordinal (-sym), not
+                                        ; a symbol index — the DWARF-address scheme dsymutil
+                                        ; wants. sym >= 0 is the usual extern symbol reloc.
+                                        (let [secreloc (icmp-lt (load (field rp sym)) 0)
+                                              snum (if secreloc (isub 0 (load (field rp sym)))
+                                                     (al-get [i64] (load perm) (load (field rp sym))))]
+                                          (b-u32! (mut out)
+                                            (ior (iand snum 16777215)
+                                              (ior (ishl (if (load (field rp pcrel)) 1 0) 24)
+                                                (ior (ishl (load (field rp len)) 25)
+                                                  (ior (ishl (if secreloc 0 1) 27)      ; r_extern
+                                                       (ishl (load (field rp rtype)) 28)))))))
                                         0)
                                   0))
                               (store! ri (iadd (load ri) 1))))))

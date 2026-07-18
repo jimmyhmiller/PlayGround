@@ -207,6 +207,18 @@
             (iadd 8 (imul 11 (al-len [DwField] (load (field e fields)))))
           15)))))   ; array: 5 + subrange 9 + null 1
 
+; record a DWARF address relocation: an 8-byte UNSIGNED fixup at `off` bytes into
+; `sect` (1 = __debug_info, 2 = __debug_line). It targets the __text section (codegen_a64
+; supplies the ordinal); the value already written at `off` is the addend (offset within
+; __text). dsymutil / lldb read these to translate __text-relative → final address.
+(defn dw-reloc! [(relocs (mut (ArrayList DwReloc))) (sect i64) (off i64) (_addend i64)] (-> i64)
+  (let [r (alloc-stack DwReloc)]
+    (store! (field r sect) sect)
+    (store! (field r off) off)
+    (store! (field r symidx) 0)
+    (al-push! (mut relocs) (load r))
+    0))
+
 ; ============================ the builder ====================================
 (defn dw-build! [(a (ptr Allocator))
                  (mainpath (slice u8)) (compdir (slice u8))
@@ -223,6 +235,13 @@
         nty (al-len [DwTy] (load tys))
         nfn (al-len [DwFn] (load fns))
         nsrc (al-len [(slice u8)] (load paths))]
+    ; Every DWARF address (the CU low_pc, each subprogram low_pc, the line program's
+    ; set_address) carries an 8-byte UNSIGNED RELOCATION targeting the __text SECTION,
+    ; with the inline value the offset WITHIN __text (the addend) — exactly clang's
+    ; Mach-O scheme. Without these, dsymutil rejects the object ("No valid relocations
+    ; found. Skipping.") and the .dSYM comes out empty: 0 line rows / "No source
+    ; available". codegen_a64 turns each dw-reloc! into a section reloc (it knows the
+    ; __text ordinal); dsymutil / lldb translate __text-relative → final address.
     (store! strs (dwstrs-new a))
     ; ---- per-source line starts
     (let [(mut lstarts) (al-new [(ptr (ArrayList i64))] a)]
@@ -251,9 +270,9 @@
         (b-u32! (mut info) (dwstr! strs mainpath))
         (b-u32! (mut info) (dwstr! strs compdir))
         (b-u32! (mut info) 0)                       ; stmt_list -> line table 0
-        ; CU address range: [text start, text end). Mach-O convention: debug
-        ; sections carry NO relocations — addresses are final section-relative
-        ; values; the linker debug map translates them (dsymutil/lldb).
+        ; CU address range: [text start, text end). low_pc is a relocated address
+        ; (__text + 0); high_pc is a data8 LENGTH (no reloc).
+        (dw-reloc! (mut relocs) 1 (al-len [u8] (load info)) 0)
         (b-u64! (mut info) 0)
         (b-u64! (mut info) textlen)
         ; type DIEs
@@ -305,7 +324,9 @@
                   (b-u32! (mut info) (dwstr! strs (load (field f name))))
                   (uleb! (mut info) (iadd (load (field f source)) 1))
                   (b-u32! (mut info) (ishr lc 20))
-                  ; low_pc: the function's section-relative address (no reloc)
+                  ; low_pc: an 8-byte UNSIGNED reloc to __text with the function's offset
+                  ; as the addend; high_pc is its data8 length (no reloc).
+                  (dw-reloc! (mut relocs) 1 (al-len [u8] (load info)) 0)
                   (b-u64! (mut info) (load (field f textoff)))
                   (b-u64! (mut info) (load (field f len)))
                   ; frame_base: DW_OP_reg29
@@ -357,9 +378,10 @@
                   (store! i (iadd (load i) 1))))))
           (b-u8! (mut line) 0)     ; end file_names
           (b-patch-u32! (mut line) 6 (isub (al-len [u8] (load line)) hdrstart))
-          ; program: set_address (relocated to text start), then rows
+          ; program: set_address (relocated to __text + 0), then rows
           (b-u8! (mut line) 0) (uleb! (mut line) 9) (b-u8! (mut line) 2)
-          (b-u64! (mut line) 0)   ; text section base (section-relative, no reloc)
+          (dw-reloc! (mut relocs) 2 (al-len [u8] (load line)) 0)
+          (b-u64! (mut line) 0)   ; __text base (addend); the reloc above supplies the address
           (let [nev (al-len [DwLineEv] (load evs))
                 (mut curoff) 0 (mut curfile) 1 (mut curline) 1 (mut i) 0]
             (loop (if (icmp-ge (load i) nev) (break)

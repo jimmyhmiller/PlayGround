@@ -259,11 +259,39 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
      `cc -fsanitize=address`.)
    Teeth for all four in `gate-cli.sh` (all FAIL on the seed).
 
-10. **Testing & debugging story (tool-12 · tool-11).** `lib/assert.coil` (assert/assert-eq with
+10. **Testing & debugging story (tool-12 · tool-11).** ✅ DONE. `lib/assert.coil` (assert/assert-eq with
     file:line via the span machinery), a `coil test` runner that discovers + runs test mains,
     a `deftest` macro as a pure library (per the macro-power thesis), AND fix `-g`: run
     dsymutil, keep the .o, and fix the arm64 line-program so lldb maps source (currently 0 line
     rows / "No source available").
+    OUTCOME (two independently-green sub-steps):
+    (a) **Testing (tool-12).** `lib/assert.coil` is a bundled library, entirely macros + one
+        `(transform …)` — no compiler builtin. `(assert COND)` / `(assert-eq A B)` / `(assert-ne A B)`
+        check at runtime and, on failure, print the OFFENDING EXPRESSION and its `file:line` then
+        abort (SIGABRT) like C's assert(). To recover the expression + location at expansion time,
+        two new comptime code ops were added (the trivial `code-file` shape, in the parser +
+        `codeop-rty` + the interpreter's `code-op`, which the compiled engine reuses via metahost;
+        metalower is generic over ops): `code-line` (op 40 → i64) and `code-src` (op 41 → the source
+        substring of a node's span). `(deftest NAME body…)` expands to a zero-arg `coil-test$NAME` fn;
+        the `(transform …)` discovers every such fn and synthesizes a `main` that runs each in a
+        FORKED child (io is unbuffered, so an aborting test's message survives; a crash in one test
+        never stops the suite). `coil test FILE` (driver) auto-`--use`s assert.coil, so a test file
+        needs NO import; exit 0 iff all pass. Purely additive to the compiler (no corpus file uses the
+        ops) — fixpoint byte-identical, all 7 gates green, zero snapshot regen.
+    (b) **-g / DWARF (tool-11).** The arm64 backend emitted DWARF addresses with NO relocations, so
+        `dsymutil` rejected the object ("No valid relocations found. Skipping.") → an EMPTY `.dSYM`,
+        0 line rows, "No source available" in lldb; and the driver never ran `dsymutil` at all. Fixed
+        to clang's exact Mach-O scheme: every DWARF address (CU + each subprogram `low_pc`, the line
+        program's `set_address`) now carries an 8-byte UNSIGNED **section** relocation to `__text`
+        with the offset as the addend (`dwarf.coil::dw-reloc!` populating the reloc list; codegen_a64
+        emitting them; a new SECTION-reloc path in `macho.coil`'s writer, gated on a negative-sym
+        sentinel so every existing extern reloc is byte-identical). The driver runs `dsymutil` after a
+        `-g` link and keeps the `.o`. lldb now maps source from the `.dSYM` alone — line breakpoints
+        resolve and hit at `file:line`. The arm64 self-build (which emits DWARF) reproduced
+        byte-identical (fixpoint held) since the compiler is built without `-g`… the DWARF relocs it
+        does emit are deterministic. Teeth for both halves in `gate-cli.sh`; all FAIL on the seed.
+        FOLLOW-ON: a function-NAME breakpoint still needs the module-qualified name (`dbg.add`); line
+        breakpoints (the primary workflow) are unaffected.
 
 ## Notes carried from the session
 - The mechanical rough-edge fixes are DONE (~60 findings across many commits + two workflows).

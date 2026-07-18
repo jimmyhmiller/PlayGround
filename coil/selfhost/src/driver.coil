@@ -796,6 +796,21 @@
       (let [arch (triple-arch triple)]
         (not (or (str-eq arch "arm64") (str-eq arch "aarch64")))))))
 
+; `-g` packaging (Mach-O): the DWARF lives in the kept `<out>.o`; `ld` records a debug
+; map into the executable pointing at it. `dsymutil` gathers a `<out>.dSYM` next to the
+; exe from that map + the .o's DWARF, which is what lldb loads. Best-effort: a failure
+; (e.g. no dsymutil) is a warning — the DWARF is still in the .o. The arm64 backend now
+; emits the __text-relative address RELOCATIONS dsymutil needs (without them it printed
+; "No valid relocations found. Skipping." and produced an empty dSYM — tool-11).
+(defn run-dsymutil [(a (ptr Allocator)) (out (slice u8))] (-> i64)
+  (let [(mut db) (sb-new a)]
+    (sb-push-str! (mut db) "dsymutil ")
+    (sb-push-str! (mut db) out)
+    (let [drc (cast i64 (system (slice->cstr a (sb-str (load db)))))]
+      (if (icmp-ne drc 0)
+          (do (ps (stderr) "warning: dsymutil failed; debug info stays in ") (ps (stderr) out) (ps (stderr) ".o\n") 0)
+        0))))
+
 ; `build <file> -o <out> [--link-flag X]...` : emit `<out>.o` then link it into a
 ; native executable with `cc <out>.o -o <out> <link-flags...>`. Mirrors the Rust
 ; `coil build` argv handling (src/main.rs) + link step (src/lib.rs).
@@ -812,6 +827,7 @@
         (mut trip)  (cast (ptr i8) 0)
         (mut libmode) 0        ; 0 = executable, 1 = --lib (.a), 2 = --shared (.dylib)
         (mut ehdr) (None [(slice u8)])
+        (mut wantg) false      ; -g/--debug requested: gather a .dSYM after linking
         (mut i)     2]
     ; second pass: --lib / --shared / --emit-header <h> / -g (DWARF via the arm64
     ; debug backend, which always emits DWARF).
@@ -820,7 +836,7 @@
         (do (let [arg (cstr->slice (load (index argv (load j))))]
               (if (str-eq arg "--lib") (store! libmode 1)
                 (if (str-eq arg "--shared") (store! libmode 2)
-                  (if (or (str-eq arg "-g") (str-eq arg "--debug")) (store! backend 2)
+                  (if (or (str-eq arg "-g") (str-eq arg "--debug")) (do (store! backend 2) (store! wantg true) 0)
                     (if (str-eq arg "--debug-checks") (enable-debug-checks!)
                       (if (str-eq arg "--sanitize=address") (set-sanitize-address!)
                         (if (and (icmp-lt (iadd (load j) 1) (cast i64 argc)) (str-eq arg "--emit-header"))
@@ -916,6 +932,9 @@
                     (wait-report rc "linker")
                     (ps w "error: linker/ar failed with exit status: ") (dump-dec w code) (wb w 10) 1)
                 (do (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10))
+                    ; -g on a native executable: gather the .dSYM (the .o is kept).
+                    (if (and (load wantg) (and (not (wasm-target? (load trip))) (icmp-eq (load libmode) 0)))
+                        (run-dsymutil a out-slice) 0)
                     (match ehdr
                       (Some [h] (cheader-program a (read-src a file) (dirname (cstr->slice file)) (Some h)))
                       (None [] 0))))))))))))
