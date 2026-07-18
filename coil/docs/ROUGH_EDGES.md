@@ -233,7 +233,13 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
       `print-uhex` is unreachable from fmt. Point `x` at `print-uhex`.
 - [x] **gen-5** Blanket `(impl [T] Show T)` accepted, silently does nothing. Reject it, or support it
       (a bare `T` is just the bottom of the specialization lattice that already exists).
-- [ ] **diag-10** `:use [name]` with a name the module doesn't export is silently accepted.
+- [x] **diag-10** `:use [name]` with a name the module doesn't export is silently accepted.
+      ✅ DONE: `resolve-program` now runs `check-use-exports` eagerly at the import site (right
+      after the tool-10 dup check), consulting the SAME `exports-check` export table the resolver
+      itself uses. A `:use [name]` whose target module has an explicit `(export …)` that omits the
+      name is a located error — `in module 'app': :use names 'secret', which module 'util' does
+      not export` — instead of the old silent rc=0. Open modules (no export list) and exported
+      consts still resolve. Regression in gate-cli.sh (FAILS on the seed, PASSES on the build).
 - [x] **mac-4** Binder hygiene: macros capture silently (200 instead of 105) while free identifiers
       *are* hygienic. Half-hygiene is worse than none for the user's model. Audit `lib/derive.coil`
       and `lib/match.coil` templates for latent capture (`h`, `a`, `b`, `x`).

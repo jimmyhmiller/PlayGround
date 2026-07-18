@@ -119,6 +119,21 @@ printf '(module app)\n(defn main [] (-> i64) (println "hi") 7)\n' > "$T/dec/main
   && ok "the prelude reaches the BUNDLED stdlib despite same-named decoys in the entry dir" \
   || bad "bundled prelude self-contained" "want rc=7 (println from bundled print/io, not the decoy)"
 
+echo "== diag-10: (:use [name]) naming a symbol the module does NOT export is a located error =="
+# util exports only `good`; `secret` is private. `(import … :use [secret])` used to be
+# silently accepted (build succeeded, rc=0) — the bogus name evaporated instead of erroring.
+# Now it is a located import-site error naming the importer, the symbol, and the target module.
+# FAILS on the seed (which builds it clean, rc=0); PASSES here.
+mkdir -p "$T/use"
+printf '(module util)\n(export good)\n(defn good [] (-> i64) 42)\n(defn secret [] (-> i64) 99)\n' > "$T/use/util.coil"
+printf '(module app)\n(import "util.coil" :use [secret])\n(defn main [] (-> i64) 0)\n'              > "$T/use/nono.coil"
+expect_rc  1 "a non-exported :use name is rejected (was: silently accepted)" "$COIL" build "$T/use/nono.coil" -o "$T/use/x"
+expect_out "'secret', which module 'util' does not export" "…and the error names the symbol + module" \
+  "$COIL" build "$T/use/nono.coil" -o "$T/use/x"
+# and the legitimate exported name still builds
+printf '(module app)\n(import "util.coil" :use [good])\n(defn main [] (-> i64) (good))\n' > "$T/use/yes.coil"
+expect_rc 42 "an exported :use name still resolves" "$COIL" run "$T/use/yes.coil"
+
 echo "== a compile that cannot finish must SAY SO, not hang or crash =="
 # These all used to die with zero output: no message, no location, nothing naming the
 # construct — the worst possible failure for a mistake a typo can cause.

@@ -166,6 +166,13 @@
 (defn use-dup-msg [(a (ptr Allocator)) (m (slice u8)) (name (slice u8)) (m1 (slice u8)) (m2 (slice u8))] (-> (slice u8))
   (sconcat5 a (sconcat5 a "in module '" m "': '" name "' is explicitly :use'd from two modules '")
             m1 "' and '" m2 "' — :use it from only one"))
+; diag-10: a `:use [name]` naming a symbol the target module does not export. Uses the SAME
+; export table (`exports-check`) that resolution itself consults, so a name the resolver would
+; treat as private/absent is named at the import site instead of silently accepted. A module
+; with no (export …) exports everything, so only an explicit export list can trip this.
+(defn use-unexported-msg [(a (ptr Allocator)) (m (slice u8)) (name (slice u8)) (target (slice u8))] (-> (slice u8))
+  (let [p (sconcat5 a "in module '" m "': :use names '" name "', which module '")]
+    (sconcat3 a p target "' does not export")))
 
 ; ---- table / import / export queries --------------------------------------
 (defn defs-set [(d (ptr Defs)) (kind i64)] (-> (ptr (ArrayList (slice u8))))
@@ -1102,6 +1109,42 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 
+; diag-10: scan one `:use [names]` entry — the first name the target module does NOT export
+; is a located error (Some diag); otherwise None.
+(defn scan-use-exports [(a (ptr Allocator)) (importer (slice u8)) (expb (ptr (ArrayList ExpEntry))) (nms (ptr (ArrayList (slice u8)))) (tgt (slice u8))] (-> (Option Diag))
+  (let [nn (al-len [(slice u8)] (load nms)) (mut k) 0 (mut r) (None [Diag])]
+    (loop (if (icmp-ge (load k) nn) (break)
+      (do (let [nm (al-get [(slice u8)] (load nms) (load k))]
+            (if (not (exports-check expb tgt nm))
+                (do (store! r (Some (derr (use-unexported-msg a importer nm tgt)))) (break))
+                0))
+          (store! k (iadd (load k) 1)))))
+    (load r)))
+; One importer: every `:use [names]` entry must name only exports of its target module.
+(defn exports-in-importer [(a (ptr Allocator)) (expb (ptr (ArrayList ExpEntry))) (ie (ptr ImpEntry))] (-> (Result i64 Diag))
+  (let [importer (load (field ie name))
+        uses (field (field ie imp) uses) un (al-len [Use] (load uses)) (mut j) 0
+        (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (or (load failed) (icmp-ge (load j) un)) (break)
+      (do (let [up (alloc-stack Use)] (store! up (al-get [Use] (load uses) (load j)))
+            (match (load (field up spec))
+              (UAll [] 0)
+              (UNames [nms]
+                (match (scan-use-exports a importer expb nms (load (field up target)))
+                  (Some [d] (do (store! err d) (store! failed true) 0))
+                  (None [] 0)))))
+          (store! j (iadd (load j) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+; diag-10: reject `:use [name]` naming a non-exported symbol, eagerly at the import site.
+(defn check-use-exports [(a (ptr Allocator)) (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry)))] (-> (Result i64 Diag))
+  (let [n (al-len [ImpEntry] (load impb)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (or (load failed) (icmp-ge (load i) n)) (break)
+      (do (match (exports-in-importer a expb (al-elem [ImpEntry] impb (load i)))
+            (Err [d] (do (store! err d) (store! failed true) 0))
+            (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+
 ; ---- resolve-program (src/resolve.rs::resolve_program), strict=true --------
 ; `tolerant` = SKIP a top-level form that does not parse, instead of aborting. Only
 ; the macro-context build (expander.coil::expand-stage3) passes true: at that point
@@ -1124,6 +1167,11 @@
     (match (check-explicit-use-dups a impb)
       (Err [d] (do (store! dupd d) (store! dupfail true) 0))
       (Ok [_] 0))
+    ; diag-10: a `:use [name]` naming a non-exported symbol is a located error, not silence.
+    (if (load dupfail) 0
+        (match (check-use-exports a impb expb)
+          (Err [d] (do (store! dupd d) (store! dupfail true) 0))
+          (Ok [_] 0)))
     (store! (field pb items) (al-new [ParsedForm] a))
     (type-res-reset)   ; fresh type-reference resolution registry for this pass
     (src-mod-reset)    ; fresh source→module map
