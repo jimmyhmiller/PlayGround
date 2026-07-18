@@ -720,6 +720,9 @@ extern "C" fn shim_dispatch<M: ModelArithJit>(
     args: *const u64,
     argc: u32,
 ) -> u64 {
+    // Every entry here is the COLD dispatch path (an inline-IC hit never calls
+    // the shim), so the raw count localizes megamorphic sites.
+    crate::stats::DISPATCH_SHIM_CALLS.fetch_add(1, Ordering::Relaxed);
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
     let top = unsafe { (*ctx.rc).top };
@@ -1219,6 +1222,7 @@ fn prim_tag(p: Prim) -> u32 {
         Exp => 150,
         DoubleBits => 151,
         BitReverse => 152,
+        Stats => 153,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -1380,6 +1384,7 @@ fn prim_from_tag(tag: u32) -> Prim {
         150 => Exp,
         151 => DoubleBits,
         152 => BitReverse,
+        153 => Stats,
         other => panic!("bad prim tag {other}"),
     }
 }
@@ -2471,6 +2476,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
 
         let n = self.counter.get();
         self.counter.set(n + 1);
+        crate::stats::JIT_COMPILES.fetch_add(1, Ordering::Relaxed);
         if std::env::var_os("MICROLANG_JIT_TRACE").is_some() {
             eprintln!("[jit-compile] #{n} arity={:?} mem={} nparams={} var={} ir_ptr={:p}", shape.entry_arity, shape.mem_mode, shape.nparams, shape.variadic, ir as *const Ir);
         }
@@ -6250,8 +6256,10 @@ impl<M: ModelArithJit> CodeSpace<M> for Tiered<M> {
             true
         };
         if native {
+            crate::stats::NATIVE_INVOKES.fetch_add(1, Ordering::Relaxed);
             self.jit.invoke(top, rt, callee, args)
         } else {
+            crate::stats::INTERP_INVOKES.fetch_add(1, Ordering::Relaxed);
             self.cek.invoke(top, rt, callee, args)
         }
     }
@@ -6310,6 +6318,7 @@ mod prim_tag_tests {
         Prim::Exp,
         Prim::DoubleBits,
         Prim::BitReverse,
+        Prim::Stats,
         Prim::RegisterFields,
         Prim::FieldByName,
         Prim::FieldNames,

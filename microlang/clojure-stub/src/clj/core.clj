@@ -2925,6 +2925,20 @@
 (defn unchecked-remainder-int [a b] (%rem a b))
 (defn unchecked-divide-int [a b] (%quot a b))
 
+;; ─────────────── runtime performance counters ───────────────
+;; The %stats prim's fixed-order list as a map. The bench harness resolves
+;; this BY NAME at runtime (it must run byte-identically on the JVM, where
+;; neither the prim nor this fn exists), so keep the name stable.
+(defn -runtime-stats []
+  (let [[native interp dispatch compiles bytes minor major] (%stats)]
+    {:native-invokes native
+     :interp-invokes interp
+     :dispatch-shim-calls dispatch
+     :jit-compiles compiles
+     :bytes-allocated bytes
+     :minor-gcs minor
+     :major-gcs major}))
+
 ;; ─────────────── dynamic vars (bindable via `binding`) ───────────────
 ;; Declared `^:dynamic` so references compile to a dynamic-get and `binding`
 ;; rebinds them. `*out*` is defined earlier (needed by the print family).

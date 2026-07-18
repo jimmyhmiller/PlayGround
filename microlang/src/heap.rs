@@ -984,6 +984,8 @@ pub struct Heap {
     pub collections: AtomicU64,
     pub minor_collections: AtomicU64,
     pub major_collections: AtomicU64,
+    /// Eden bytes folded in at each nursery reset (see `bytes_allocated`).
+    pub bytes_reclaimed: AtomicU64,
     /// Bytes copied out of the nursery into the old gen, all time.
     pub promoted_bytes: AtomicU64,
     /// Live bytes copied by the last MAJOR collection.
@@ -1084,6 +1086,7 @@ impl Heap {
             collections: AtomicU64::new(0),
             minor_collections: AtomicU64::new(0),
             major_collections: AtomicU64::new(0),
+            bytes_reclaimed: AtomicU64::new(0),
             promoted_bytes: AtomicU64::new(0),
             last_live_bytes: AtomicUsize::new(0),
             window: AllocWindow::empty(),
@@ -1624,7 +1627,20 @@ impl Heap {
     /// `reset_nursery_space` for why poison would be unobservable here (and
     /// would cost a second full-nursery memset on the hottest GC path).
     fn reset_nursery(&self) {
+        // Fold the eden fill into the lifetime tally BEFORE the cursor resets —
+        // this is how `bytes_allocated` counts JIT inline-window allocations
+        // too (both paths bump this one cursor), at zero hot-path cost.
+        self.bytes_reclaimed
+            .fetch_add(self.nursery.used() as u64, Ordering::Relaxed);
         self.nursery.reset_nursery_space();
+    }
+
+    /// Total bytes ever allocated in eden (interpreter `alloc` AND the JIT's
+    /// inline window — one shared cursor): what was reclaimed at collections
+    /// plus what is live-or-dead in the nursery right now. Diagnostic
+    /// (MICROLANG_STATS / the gauntlet's per-workload deltas).
+    pub fn bytes_allocated(&self) -> u64 {
+        self.bytes_reclaimed.load(Ordering::Relaxed) + self.nursery.used() as u64
     }
 
     /// Empty a just-evacuated survivor space. Unlike the nursery, a survivor is

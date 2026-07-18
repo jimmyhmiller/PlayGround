@@ -396,3 +396,22 @@ fn real_core_match_on_jit() {
         "[:a :a2 :a1]"
     );
 }
+
+/// The `%stats` counters: `(clojure.core/-runtime-stats)` returns the counter
+/// map, and the counters MOVE — a JIT-heavy workload compiles bodies and
+/// allocates; a dispatch-heavy one enters the dispatch shim. (Counts are
+/// process-wide statics, so deltas within one `jit` run are what's asserted,
+/// not absolutes.)
+#[test]
+fn runtime_stats_counters_move() {
+    let out = jit(
+        "(def s0 (clojure.core/-runtime-stats))
+         (def v (reduce (fn [acc x] (conj acc (str x))) [] (range 2000)))
+         (def s1 (clojure.core/-runtime-stats))
+         [(count v)
+          (> (:jit-compiles s1) 0)
+          (> (- (:bytes-allocated s1) (:bytes-allocated s0)) 0)
+          (>= (:dispatch-shim-calls s1) (:dispatch-shim-calls s0))]",
+    );
+    assert_eq!(out, "[2000 true true true]");
+}

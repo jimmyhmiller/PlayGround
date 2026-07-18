@@ -30,6 +30,7 @@ pub mod jit_cranelift;
 pub mod model;
 pub mod optimize;
 pub mod runtime;
+pub mod stats;
 /// An OPTIONAL s-expression frontend (reader + a little-Lisp `Val`->`Ir`
 /// compiler). NOT part of the core axes — a convenience a frontend may use.
 pub mod sexpr;

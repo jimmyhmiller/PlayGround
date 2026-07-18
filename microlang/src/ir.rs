@@ -499,6 +499,11 @@ pub enum Prim {
     /// `(%bit-reverse x)` -> the 64-bit bit-reversal of a long — Long/reverse
     /// (test.check's fifty-two-bit-reverse runs per generated double).
     BitReverse,
+    /// `(%stats)` -> the performance counters as a list of longs, in the fixed
+    /// order [native-invokes interp-invokes dispatch-shim-calls jit-compiles
+    /// bytes-allocated minor-gcs major-gcs]. The prelude's `-runtime-stats`
+    /// wraps it in a map; the bench harness prints per-workload deltas.
+    Stats,
 }
 
 impl Prim {

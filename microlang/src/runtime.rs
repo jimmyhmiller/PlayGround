@@ -2890,6 +2890,21 @@ impl<M: ValueModel> Runtime<M> {
                 let Some(x) = self.bit_operand(args[0]) else { return self.enc_nil() };
                 self.encode(Val::Int(x.reverse_bits() as i128))
             }
+            Prim::Stats => {
+                use std::sync::atomic::Ordering::Relaxed;
+                let vals = [
+                    crate::stats::NATIVE_INVOKES.load(Relaxed),
+                    crate::stats::INTERP_INVOKES.load(Relaxed),
+                    crate::stats::DISPATCH_SHIM_CALLS.load(Relaxed),
+                    crate::stats::JIT_COMPILES.load(Relaxed),
+                    self.shared.heap.bytes_allocated(),
+                    self.shared.heap.minor_collections.load(Relaxed),
+                    self.shared.heap.major_collections.load(Relaxed),
+                ];
+                let enc: Vec<u64> =
+                    vals.iter().map(|&v| self.encode(Val::Int(v as i128))).collect();
+                self.vec_to_list(&enc)
+            }
             Prim::Gc => {
                 // The collector needs the live environment as a root, which
                 // only the backend holds (it is the safepoint). Backends

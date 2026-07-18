@@ -119,14 +119,35 @@
                 " batch-target-ms=" batch-target-ms))
   (println "# name\tchecksum\tmedian_ms\tmin_ms\tp95_ms\tspread_pct\tn\tbatch"))
 
+;; Runtime counter deltas (microclj only — on the JVM the resolve answers nil
+;; and no STATS line prints; compare.clj ignores `#` lines either way). The
+;; delta covers warmup+samples; iters normalizes it: bytes/op etc. name a slow
+;; workload's bottleneck category without a profiler.
+(defn- stats-now []
+  (when-let [v (resolve 'clojure.core/-runtime-stats)]
+    ((deref v))))
+
 (defn run-workload [nm f]
-  (let [[checksum med mn p95 spread n batch] (bench f)]
+  (let [s0 (stats-now)
+        [checksum med mn p95 spread n batch] (bench f)]
     (println (str "RESULT\t" nm "\t" checksum
                   "\t" (format "%.4f" med)
                   "\t" (format "%.4f" mn)
                   "\t" (format "%.4f" p95)
                   "\t" (format "%.1f" spread)
-                  "\t" n "\t" batch))))
+                  "\t" n "\t" batch))
+    (when s0
+      (let [s1 (stats-now)
+            d (fn [k] (- (get s1 k) (get s0 k)))]
+        (println (str "# STATS\t" nm
+                      "\tnative=" (d :native-invokes)
+                      "\tinterp=" (d :interp-invokes)
+                      "\tdispatch=" (d :dispatch-shim-calls)
+                      "\tcompiles=" (d :jit-compiles)
+                      "\tbytes=" (d :bytes-allocated)
+                      "\tminor=" (d :minor-gcs)
+                      "\tmajor=" (d :major-gcs)
+                      "\titers~=" (* n batch)))))))
 
 (defn run-workloads
   "workloads is a seq of [name thunk] pairs; prints the header then one RESULT

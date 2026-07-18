@@ -108,6 +108,24 @@ fn drive(cs: &dyn microlang::CodeSpace<LowBitModel>, mode: Mode) {
     }
     let mut session = clojure_stub::Session::new(&mut rt, cs, paths);
 
+    // MICROLANG_STATS=1: dump the process-wide performance counters at exit
+    // (the same numbers `(%stats)` reads — see microlang::stats).
+    struct StatsDump;
+    impl Drop for StatsDump {
+        fn drop(&mut self) {
+            use std::sync::atomic::Ordering::Relaxed;
+            eprintln!(
+                "[stats] native-invokes={} interp-invokes={} dispatch-shim-calls={} jit-compiles={}",
+                microlang::stats::NATIVE_INVOKES.load(Relaxed),
+                microlang::stats::INTERP_INVOKES.load(Relaxed),
+                microlang::stats::DISPATCH_SHIM_CALLS.load(Relaxed),
+                microlang::stats::JIT_COMPILES.load(Relaxed),
+            );
+        }
+    }
+    let _stats_dump =
+        std::env::var_os("MICROLANG_STATS").filter(|v| v != "0").map(|_| StatsDump);
+
     match mode {
         Mode::Eval(expr) => {
             let v = session.eval(&mut rt, cs, &expr);
