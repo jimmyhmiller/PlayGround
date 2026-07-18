@@ -113,6 +113,14 @@ fn run() -> Result<(), String> {
                 .iter()
                 .any(|value| value.to_str() == Some("--no-minify"));
             let minify = !no_minify;
+            // Production source maps, composed through the minify pass, are opt-in
+            // per build (`--sourcemap`) so the default acceptance/benchmark path is
+            // unchanged. When set, both the client `public/` and server `server/`
+            // emits ship a sibling `.map` per chunk resolving minified positions
+            // back to the original source.
+            let source_map = remaining
+                .iter()
+                .any(|value| value.to_str() == Some("--sourcemap"));
             let environment = remaining
                 .iter()
                 .find(|value| !value.to_string_lossy().starts_with("--"))
@@ -197,6 +205,7 @@ fn run() -> Result<(), String> {
             // modules) that boots the SSR handler and serves the `public/` assets.
             let emit_options = EmitOptions {
                 minify,
+                source_map,
                 ..EmitOptions::default()
             };
             if config.environment == "client" {
@@ -330,7 +339,7 @@ fn run() -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "usage: diffpack bundle <entry> [output] [--sourcemap] [--minify] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
+    "usage: diffpack build-app <project-root> [client|ssr|nitro] [--no-minify] [--sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
 }
 
 fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mode: &str) {

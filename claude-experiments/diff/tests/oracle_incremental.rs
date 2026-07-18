@@ -202,6 +202,100 @@ fn minified_incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_bu
     );
 }
 
+/// The incremental-emit byte-parity guarantee for the MINIFIED + SOURCE-MAPPED
+/// build: after a leaf edit, the incrementally-emitted output tree — every
+/// minified `.js` chunk AND its composed `.map` sibling — is byte-for-byte
+/// identical to a clean from-scratch build of the same final state, and exactly
+/// ONE chunk is re-rendered (re-minified and its map re-composed) while the rest,
+/// maps included, are reused verbatim from the render cache. This proves source
+/// maps compose deterministically and key correctly into the incremental cache.
+#[test]
+fn source_mapped_incremental_emit_reuses_every_unchanged_chunk_and_map() {
+    let workspace = tempdir().unwrap();
+    let root = workspace.path();
+    write(root, "entry.js", "import { a } from \"./a.js\";\nimport(\"./b.js\").then((m) => console.log(a, m.b));\n");
+    write(root, "a.js", "// module a\nexport const a = 10;\n");
+    write(root, "b.js", "// module b\nimport { l } from \"./bleaf.js\";\nexport const b = l + 1;\n");
+    write(root, "bleaf.js", "// leaf\nexport const l = 100;\n");
+
+    let entry = root.join("entry.js");
+    let bleaf = root.join("bleaf.js");
+    let incremental_dir = root.join("out-incremental");
+    let fresh_dir = root.join("out-fresh");
+    let options = EmitOptions {
+        minify: true,
+        source_map: true,
+        ..EmitOptions::default()
+    };
+
+    let (mut incremental, _) = Bundler::discover(&entry).unwrap();
+    let mut reachability = incremental.direct_reachability();
+    let mut reachable = reachability.reachable_modules();
+    let initial = incremental
+        .emit_with_options(&reachable, &incremental_dir.join("bundle.js"), options)
+        .unwrap();
+    assert!(
+        initial.rendered_chunks >= 2,
+        "the initial build must render every chunk (got {})",
+        initial.rendered_chunks
+    );
+    let main_before = fs::read(incremental_dir.join("bundle.js")).unwrap();
+    let main_map_before = fs::read(incremental_dir.join("bundle.js.map")).unwrap();
+    // The chunk references its map, and the map is real JSON with inlined sources.
+    assert!(
+        String::from_utf8_lossy(&main_before).contains("//# sourceMappingURL=bundle.js.map"),
+        "the emitted main chunk must reference its map"
+    );
+    assert!(
+        String::from_utf8_lossy(&main_map_before).contains("sourcesContent"),
+        "the emitted map must inline the original sources"
+    );
+
+    fs::write(&bleaf, "// leaf\nexport const l = 200;\n").unwrap();
+    let update = incremental.rebuild_path(&bleaf).unwrap();
+    assert_eq!(update.transformed_modules, 1, "a leaf edit re-transforms one module");
+    apply_update(&mut reachability, &mut reachable, &update);
+    let reemit = incremental
+        .emit_with_options(&reachable, &incremental_dir.join("bundle.js"), options)
+        .unwrap();
+    assert_eq!(
+        reemit.rendered_chunks, 1,
+        "a leaf edit must re-render exactly one source-mapped chunk, reusing the rest"
+    );
+    // The unchanged main chunk AND its map are reused byte-for-byte (served from
+    // the render cache, not re-composed).
+    assert_eq!(
+        main_before,
+        fs::read(incremental_dir.join("bundle.js")).unwrap(),
+        "the unchanged minified main chunk must be reused verbatim"
+    );
+    assert_eq!(
+        main_map_before,
+        fs::read(incremental_dir.join("bundle.js.map")).unwrap(),
+        "the unchanged main chunk's composed map must be reused verbatim"
+    );
+
+    let (fresh, _) = Bundler::discover(&entry).unwrap();
+    let fresh_reachable = fresh.reachable_modules_direct();
+    fresh
+        .emit_with_options(&fresh_reachable, &fresh_dir.join("bundle.js"), options)
+        .unwrap();
+
+    assert_eq!(reachable, fresh_reachable);
+    let incremental_tree = read_tree(&incremental_dir);
+    let fresh_tree = read_tree(&fresh_dir);
+    // The tree includes both `.js` chunks and their `.map` siblings.
+    assert!(
+        incremental_tree.keys().filter(|path| path.extension().is_some_and(|ext| ext == "map")).count() >= 2,
+        "expected a `.map` per chunk, got {:?}",
+        incremental_tree.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        incremental_tree, fresh_tree,
+        "incremental source-mapped emit must be byte-identical to a clean build (chunks and maps)"
+    );
+}
+
 fn write(root: &Path, name: &str, contents: &str) {
     fs::write(root.join(name), contents).unwrap();
 }

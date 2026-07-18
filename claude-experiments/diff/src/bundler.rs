@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use oxc_resolver::{ResolveOptions, Resolver, SideEffects, TsconfigDiscovery};
@@ -702,17 +702,6 @@ impl Bundler {
             .ok_or_else(|| format!("output has no parent: {}", output.display()))?;
         fs::create_dir_all(parent)
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
-        // Source maps must be composed THROUGH the minify pass (the readable-render
-        // mappings do not describe the minified bytes). That composition is a
-        // separate slice; until it lands, refuse to emit a map that would lie about
-        // positions rather than ship a silently-wrong one.
-        if options.minify && options.source_map {
-            return Err(
-                "minify + source maps is not yet implemented: the source map must be composed \
-                 through the minify pass; run the build with one of them at a time"
-                    .to_string(),
-            );
-        }
         let mut stats = EmitStats::default();
         // Keys of every chunk this emit renders or reuses; entries not among them
         // are evicted at the end so the cache stays bounded to the live chunk set.
@@ -766,6 +755,7 @@ impl Bundler {
                 false,
                 options.format,
                 options.minify,
+                options.source_map,
                 chunk_name,
                 &mut live_keys,
                 &mut stats.rendered_chunks,
@@ -785,6 +775,7 @@ impl Bundler {
             true,
             options.format,
             options.minify,
+            options.source_map,
             entry_name,
             &mut live_keys,
             &mut stats.rendered_chunks,
@@ -810,6 +801,7 @@ impl Bundler {
         is_main: bool,
         format: ModuleFormat,
         minify: bool,
+        source_map: bool,
         chunk_name: &str,
         live_keys: &mut HashSet<u64>,
         rendered: &mut usize,
@@ -823,6 +815,7 @@ impl Bundler {
             global_demands,
             format,
             minify,
+            source_map,
         );
         live_keys.insert(key);
         if let Some(hit) = self.render_cache.lock().unwrap().entries.get(&key) {
@@ -842,14 +835,34 @@ impl Bundler {
         // passes `node --check` and runs in-browser), so a final per-chunk Oxc
         // codegen-minify pass has a safe insertion point that never touches the
         // marker-based linker. Minified bytes are stored in the cache under a key
-        // that folds in `minify`, so a leaf edit re-minifies exactly this chunk.
+        // that folds in `minify` and `source_map`, so a leaf edit re-minifies (and
+        // re-composes the map for) exactly this chunk and reuses the rest verbatim.
         if minify {
-            bundle.code = minify_chunk_code(&bundle.code, chunk_name)?;
-            // The readable-render mappings no longer describe the minified bytes.
-            // `minify` + `source_map` is rejected up front (emit_with_options), so
-            // these mappings are unused here; clear them rather than ship a map
-            // that lies about positions.
-            bundle.mappings = Vec::new();
+            if source_map {
+                // Compose the two maps we can honestly obtain: the readable ->
+                // original module mappings (already on `bundle`) THROUGH the
+                // minified -> readable map Oxc codegen emits for the re-print. The
+                // result resolves a minified position back to the correct ORIGINAL
+                // source file+region. The readable `mappings` no longer describe
+                // the emitted bytes, so they are cleared in favour of `map_json`.
+                let (minified, minified_map) =
+                    minify_chunk_code_with_map(&bundle.code, chunk_name)?;
+                let composed = self.compose_source_map(
+                    &bundle.mappings,
+                    &minified_map,
+                    chunk_name,
+                    chunk_name,
+                )?;
+                bundle.code = minified;
+                bundle.mappings = Vec::new();
+                bundle.map_json = Some(composed);
+            } else {
+                bundle.code = minify_chunk_code(&bundle.code, chunk_name)?;
+                // The readable-render mappings no longer describe the minified
+                // bytes and no map was requested; clear them rather than ship a
+                // map that lies about positions.
+                bundle.mappings = Vec::new();
+            }
         }
         *rendered += 1;
         self.render_cache
@@ -893,6 +906,7 @@ impl Bundler {
         global_demands: &[ExportDemand],
         format: ModuleFormat,
         minify: bool,
+        source_map: bool,
     ) -> u64 {
         let mut hasher = DefaultHasher::new();
         (format as u8).hash(&mut hasher);
@@ -900,6 +914,10 @@ impl Bundler {
         // readable form), so it is part of the cache key: a leaf edit that changes
         // one chunk re-minifies exactly that chunk and reuses the rest byte-for-byte.
         minify.hash(&mut hasher);
+        // `source_map` decides whether the minify branch also composes and stores a
+        // `map_json` on the cached bundle, so a source-mapped chunk is a distinct
+        // cache entry from its plain-minified form (never a silent map mismatch).
+        source_map.hash(&mut hasher);
         is_main.hash(&mut hasher);
         root.hash(&mut hasher);
         modules.len().hash(&mut hasher);
@@ -1129,10 +1147,15 @@ impl Bundler {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| format!("output path is not UTF-8: {}", output.display()))?;
-            write_if_changed(
-                &map_path,
-                self.source_map(&rendered.mappings, output_name).as_bytes(),
-            )?;
+            // A minified chunk carries a pre-composed map (`map_json`, minified ->
+            // original); a readable chunk builds its map from the `ModuleMapping`
+            // list (readable-generated -> original) at write time. Both resolve a
+            // position in the emitted bytes to the correct original source.
+            let map_contents = match &rendered.map_json {
+                Some(json) => json.clone(),
+                None => self.source_map(&rendered.mappings, output_name),
+            };
+            write_if_changed(&map_path, map_contents.as_bytes())?;
             written.insert(map_path);
             code.push_str(&format!("\n//# sourceMappingURL={map_name}\n"));
         }
@@ -1540,6 +1563,7 @@ impl Bundler {
             return Some(RenderedBundle {
                 code: String::new(),
                 mappings: Vec::new(),
+                map_json: None,
             });
         }
         let order = self.static_execution_order(&included)?;
@@ -1638,7 +1662,11 @@ impl Bundler {
                 mapping.generated_line += 1;
             }
         }
-        Some(RenderedBundle { code, mappings })
+        Some(RenderedBundle {
+            code,
+            mappings,
+            map_json: None,
+        })
     }
 
     fn static_execution_order(
@@ -1884,18 +1912,33 @@ const __newChunks={{{chunks}}};
 "#
             )
         };
-        RenderedBundle { code, mappings }
+        RenderedBundle {
+            code,
+            mappings,
+            map_json: None,
+        }
     }
 
+    /// The source map for a READABLE (un-minified) chunk: each [`ModuleMapping`]
+    /// covers a contiguous run of generated lines that came from one module, and
+    /// every generated line is mapped (at column 0) to the corresponding original
+    /// source line. Sources are emitted as project-relative `diffpack://` labels
+    /// (never an absolute path leak or a `..` traversal) with the real source text
+    /// inlined as `sourcesContent`.
     fn source_map(&self, mappings: &[ModuleMapping], output_name: &str) -> String {
+        let root =
+            self.map_source_root(mappings.iter().map(|mapping| mapping.dense_index));
+        let labels = mappings
+            .iter()
+            .map(|mapping| self.source_label(mapping.dense_index, &root))
+            .collect::<Vec<_>>();
         let mut builder = SourceMapBuilder::default();
         builder.set_file(output_name);
-        for mapping in mappings {
+        for (mapping, label) in mappings.iter().zip(&labels) {
             let module = self.modules[mapping.dense_index]
                 .as_ref()
                 .expect("rendered module must exist");
-            let source_path = self.ids[mapping.dense_index].as_ref();
-            let source_id = builder.add_source_and_content(source_path, module.source.as_ref());
+            let source_id = builder.add_source_and_content(label.as_str(), module.source.as_ref());
             let source_lines = module.source.lines().count().max(1) as u32;
             for line in 0..mapping.generated_lines {
                 builder.add_token(
@@ -1909,6 +1952,186 @@ const __newChunks={{{chunks}}};
             }
         }
         builder.into_sourcemap().to_json_string()
+    }
+
+    /// Composes the two maps a minified chunk can honestly produce into one that
+    /// resolves a MINIFIED position back to the correct ORIGINAL source file+line:
+    ///
+    /// - `readable_mappings` — readable-generated line -> owning original module
+    ///   (the [`ModuleMapping`] runs [`Self::render_flat`]/[`Self::render_runtime`]
+    ///   already computed for the readable bytes; each module maps its generated
+    ///   lines to original source lines at column 0);
+    /// - `minified_map` — minified position -> readable-generated position (emitted
+    ///   by Oxc codegen when it re-prints the readable chunk minified).
+    ///
+    /// For each token in the minified map, its readable-generated line is resolved
+    /// (binary search over the sorted, non-overlapping readable ranges) to the
+    /// owning module and that module's original source line. A minified position
+    /// whose readable line falls in a synthetic bundler region (runtime wrapper,
+    /// export footer, browser prelude) with no owning module is left UNMAPPED — a
+    /// valid, honest gap — never given a fabricated wrong origin. Per-token
+    /// column/identifier fidelity is not claimed (the readable map is line-granular
+    /// at column 0), so the composed map stays honestly coarse rather than precise-
+    /// but-wrong.
+    ///
+    /// A chunk whose minified map resolves into no original module at all is a hard
+    /// error naming the chunk, never a silently empty map.
+    fn compose_source_map(
+        &self,
+        readable_mappings: &[ModuleMapping],
+        minified_map: &oxc_sourcemap::SourceMap,
+        output_name: &str,
+        chunk_name: &str,
+    ) -> Result<String, String> {
+        struct ReadableRange {
+            start: u32,
+            end: u32,
+            dense: DenseModuleId,
+            source_lines: u32,
+            label_index: usize,
+        }
+        let root =
+            self.map_source_root(readable_mappings.iter().map(|mapping| mapping.dense_index));
+        let labels = readable_mappings
+            .iter()
+            .map(|mapping| self.source_label(mapping.dense_index, &root))
+            .collect::<Vec<_>>();
+        // The readable ranges are emitted in increasing `generated_line` order and
+        // never overlap, so a binary search resolves a readable line to its module.
+        let mut ranges = readable_mappings
+            .iter()
+            .enumerate()
+            .map(|(label_index, mapping)| {
+                let source_lines = self.modules[mapping.dense_index]
+                    .as_ref()
+                    .map_or(1, |module| module.source.lines().count().max(1) as u32);
+                ReadableRange {
+                    start: mapping.generated_line,
+                    end: mapping.generated_line + mapping.generated_lines,
+                    dense: mapping.dense_index,
+                    source_lines,
+                    label_index,
+                }
+            })
+            .collect::<Vec<_>>();
+        ranges.sort_by_key(|range| range.start);
+
+        let mut builder = SourceMapBuilder::default();
+        builder.set_file(output_name);
+        // A module gets a source id (and is added to `sources`) lazily, the first
+        // time a minified token actually resolves into it, so `sources` lists only
+        // the original modules the emitted bytes really came from.
+        let mut source_ids: HashMap<DenseModuleId, u32> = HashMap::new();
+        let mut mapped_any = false;
+        for token in minified_map.get_tokens() {
+            let readable_line = token.get_src_line();
+            let candidate = ranges.partition_point(|range| range.start <= readable_line);
+            if candidate == 0 {
+                continue;
+            }
+            let range = &ranges[candidate - 1];
+            if readable_line >= range.end {
+                continue;
+            }
+            let original_line = (readable_line - range.start).min(range.source_lines - 1);
+            let source_id = match source_ids.get(&range.dense) {
+                Some(id) => *id,
+                None => {
+                    let module = self.modules[range.dense]
+                        .as_ref()
+                        .expect("a mapped readable module must exist");
+                    let id = builder.add_source_and_content(
+                        labels[range.label_index].as_str(),
+                        module.source.as_ref(),
+                    );
+                    source_ids.insert(range.dense, id);
+                    id
+                }
+            };
+            builder.add_token(
+                token.get_dst_line(),
+                token.get_dst_col(),
+                original_line,
+                0,
+                Some(source_id),
+                None,
+            );
+            mapped_any = true;
+        }
+        if !mapped_any {
+            return Err(format!(
+                "source-map composition produced no honest mapping for minified chunk \
+                 `{chunk_name}`: the minified->readable map resolved into no original module"
+            ));
+        }
+        Ok(builder.into_sourcemap().to_json_string())
+    }
+
+    /// The common ancestor directory of the on-disk modules in a source map, used
+    /// to emit project-relative source labels. Virtual/non-absolute module ids are
+    /// ignored here (they fall back to their bare name in [`Self::source_label`]).
+    fn map_source_root(&self, denses: impl Iterator<Item = DenseModuleId>) -> PathBuf {
+        let mut common: Option<PathBuf> = None;
+        for dense in denses {
+            let path = PathBuf::from(ResourceId::parse(self.ids[dense].as_ref()).path);
+            if !path.is_absolute() {
+                continue;
+            }
+            let directory = path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| path.clone());
+            common = Some(match common {
+                None => directory,
+                Some(existing) => common_ancestor(&existing, &directory),
+            });
+        }
+        common.unwrap_or_else(|| PathBuf::from("/"))
+    }
+
+    /// A stable, non-leaking `sources` label for a module. Emitted map paths must
+    /// be project-relative: never an absolute filesystem path (a privacy leak) and
+    /// never a `..` traversal. The module's on-disk path is made relative to `root`
+    /// (the common ancestor of the mapped modules) and served under a `diffpack://`
+    /// scheme so DevTools shows the real project-relative source without exposing
+    /// where the project lives on disk. A module not under `root` (a virtual/plugin
+    /// module, or one on another volume) falls back to its bare file name, which is
+    /// likewise absolute-free and traversal-free. Any query/fragment is preserved
+    /// so distinct graph keys (`app.css` vs `app.css?url`) stay distinct sources.
+    fn source_label(&self, dense: DenseModuleId, root: &Path) -> String {
+        let resource = ResourceId::parse(self.ids[dense].as_ref());
+        let path = PathBuf::from(&resource.path);
+        let relative = path
+            .strip_prefix(root)
+            .ok()
+            .filter(|relative| {
+                relative.components().all(|component| {
+                    !matches!(
+                        component,
+                        Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                    )
+                })
+            })
+            .map(Path::to_path_buf)
+            .or_else(|| path.file_name().map(PathBuf::from))
+            .unwrap_or(path);
+        let mut label = relative
+            .components()
+            .filter_map(|component| component.as_os_str().to_str())
+            .collect::<Vec<_>>()
+            .join("/");
+        if label.is_empty() {
+            label = "module".to_string();
+        }
+        if let Some(query) = &resource.query {
+            label.push('?');
+            label.push_str(query);
+        }
+        if let Some(fragment) = &resource.fragment {
+            label.push('#');
+            label.push_str(fragment);
+        }
+        format!("diffpack:///{label}")
     }
 
     /// Aggregates, for every module, the union of export demand placed on it by
@@ -2905,6 +3128,14 @@ fn resolve_special_dependencies(
 struct RenderedBundle {
     code: String,
     mappings: Vec<ModuleMapping>,
+    /// A fully-composed source-map JSON for this chunk, populated ONLY when the
+    /// chunk was minified WITH source maps: it is the composition of the
+    /// readable-generated -> original mappings (via [`ModuleMapping`]) through the
+    /// minified -> readable-generated map Oxc codegen emits, so a position in the
+    /// minified bytes resolves back to the correct ORIGINAL source file+region.
+    /// When `None`, [`Self::mappings`] describes the emitted bytes directly (the
+    /// readable, un-minified output) and the map is built from them at write time.
+    map_json: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2988,6 +3219,37 @@ fn format_javascript_number(value: f64) -> Option<String> {
 /// A parse failure on the generated chunk is a HARD error naming the chunk, never
 /// a silent passthrough of the unminified bytes.
 fn minify_chunk_code(code: &str, chunk_name: &str) -> Result<String, String> {
+    Ok(minify_chunk_code_inner(code, chunk_name, false)?.0)
+}
+
+/// Like [`minify_chunk_code`], but also returns the Oxc codegen source map from
+/// the MINIFIED bytes back to the readable-generated `code` it was handed. That
+/// map is later composed (`Bundler::compose_source_map`) with the readable ->
+/// original module mappings so a minified position resolves to the correct
+/// original source. Oxc returning no map despite source-map output being
+/// requested is a hard error naming the chunk, never a silently mapless minify.
+fn minify_chunk_code_with_map(
+    code: &str,
+    chunk_name: &str,
+) -> Result<(String, oxc_sourcemap::SourceMap<'static>), String> {
+    let (minified, map) = minify_chunk_code_inner(code, chunk_name, true)?;
+    let map = map.ok_or_else(|| {
+        format!(
+            "minify: Oxc codegen returned no source map for chunk `{chunk_name}` despite \
+             source-map output being requested"
+        )
+    })?;
+    Ok((minified, map))
+}
+
+/// The shared minify pass: re-parse the finished readable chunk and re-print it
+/// minified, optionally producing the minified -> readable source map. The map is
+/// converted to `'static` (`into_owned`) so it outlives the parse allocator.
+fn minify_chunk_code_inner(
+    code: &str,
+    chunk_name: &str,
+    want_map: bool,
+) -> Result<(String, Option<oxc_sourcemap::SourceMap<'static>>), String> {
     use oxc_allocator::Allocator;
     use oxc_codegen::{Codegen, CodegenOptions};
     use oxc_parser::Parser;
@@ -3008,10 +3270,30 @@ fn minify_chunk_code(code: &str, chunk_name: &str) -> Result<String, String> {
             "minify: cannot parse generated chunk `{chunk_name}` for minification: {detail}"
         ));
     }
-    let printed = Codegen::new()
-        .with_options(CodegenOptions::minify())
-        .build(&parsed.program);
-    Ok(printed.code)
+    // `CodegenOptions::minify()` already drops comments and collapses whitespace;
+    // set `source_map_path` only when a map is wanted (it enables the codegen map,
+    // whose `source` is this chunk's readable bytes — the composition re-attaches
+    // the real original sources, so the exact path here is immaterial).
+    let mut options = CodegenOptions::minify();
+    if want_map {
+        options.source_map_path = Some(PathBuf::from(chunk_name));
+    }
+    let printed = Codegen::new().with_options(options).build(&parsed.program);
+    let map = printed.map.map(|map| map.into_owned());
+    Ok((printed.code, map))
+}
+
+/// The longest shared leading directory of two absolute paths. Used to derive a
+/// project root for project-relative source-map labels.
+fn common_ancestor(left: &Path, right: &Path) -> PathBuf {
+    let mut result = PathBuf::new();
+    for (left_component, right_component) in left.components().zip(right.components()) {
+        if left_component != right_component {
+            break;
+        }
+        result.push(left_component.as_os_str());
+    }
+    result
 }
 
 fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -3687,26 +3969,92 @@ mod tests {
     }
 
     #[test]
-    fn minify_and_source_maps_together_is_a_hard_error() {
+    fn a_minified_chunk_emits_a_composed_source_map_resolving_to_the_original_source() {
+        use oxc_sourcemap::SourceMap;
+
         let directory = tempdir().unwrap();
         let entry = directory.path().join("entry.js");
-        fs::write(&entry, "console.log(1);\n").unwrap();
-        let (bundler, _update) = Bundler::discover_direct(&entry).unwrap();
+        let a = directory.path().join("a.js");
+        fs::write(
+            &entry,
+            "import { greeting } from './a.js';\nconsole.log(greeting);\n",
+        )
+        .unwrap();
+        fs::write(&a, "export const greeting = \"hello from a\";\n").unwrap();
+
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty());
         let reachable = bundler.reachable_modules_direct();
-        let error = bundler
+
+        let output = directory.path().join("out.js");
+        bundler
             .emit_with_options(
                 &reachable,
-                &directory.path().join("out.js"),
+                &output,
                 EmitOptions {
                     minify: true,
                     source_map: true,
                     ..EmitOptions::default()
                 },
             )
-            .unwrap_err();
+            .unwrap();
+
+        // The emitted (minified) chunk references its sibling map.
+        let code = fs::read_to_string(&output).unwrap();
         assert!(
-            error.contains("minify + source maps is not yet implemented"),
-            "expected a hard error naming the missing composition, got: {error}"
+            code.contains("//# sourceMappingURL=out.js.map"),
+            "minified chunk must reference its sibling map: {code}"
+        );
+        // It is genuinely minified (no source comments/newlines-per-statement).
+        assert!(
+            !code.contains("hello from a\";\n"),
+            "the chunk must be minified, got: {code}"
+        );
+
+        // The map is valid JSON listing the real original sources with their
+        // content inlined, under project-relative, traversal-free labels.
+        let map_path = directory.path().join("out.js.map");
+        let map_json = fs::read_to_string(&map_path).unwrap();
+        let map = SourceMap::from_json_string(&map_json).unwrap();
+        let sources = map.get_sources().collect::<Vec<_>>();
+        assert!(
+            sources.iter().any(|source| source.ends_with("a.js"))
+                && sources.iter().any(|source| source.ends_with("entry.js")),
+            "sources must list the real original modules, got {sources:?}"
+        );
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.starts_with("diffpack:///") && !source.contains("..")),
+            "source labels must be project-relative and traversal-free, got {sources:?}"
+        );
+        let a_index = sources
+            .iter()
+            .position(|source| source.ends_with("a.js"))
+            .expect("a.js must be a source");
+        let a_content = map.get_source_content(a_index as u32);
+        assert!(
+            a_content.is_some_and(|content| content.contains("hello from a")),
+            "sourcesContent must carry the real a.js source, got {a_content:?}"
+        );
+
+        // A sampled MINIFIED position (the string literal that came from a.js)
+        // decodes, through the composed map, back to a.js — the correct original.
+        let needle = "hello from a";
+        let byte = code
+            .find(needle)
+            .expect("the string literal survives minification");
+        let prefix = &code[..byte];
+        let line = prefix.matches('\n').count() as u32;
+        let column = (byte - prefix.rfind('\n').map_or(0, |newline| newline + 1)) as u32;
+        let table = map.generate_lookup_table();
+        let token = map
+            .lookup_token(&table, line, column)
+            .expect("the sampled minified position must be mapped");
+        let resolved = token.get_source_id().and_then(|id| map.get_source(id));
+        assert!(
+            resolved.is_some_and(|source| source.ends_with("a.js")),
+            "the minified position for `{needle}` must resolve to a.js, got {resolved:?}"
         );
     }
 

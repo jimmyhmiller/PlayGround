@@ -1,5 +1,85 @@
 # TanStack implementation status
 
+Updated: 2026-07-18 (production source maps composed through the minify pass landed)
+
+## Production source maps, composed through the minify pass (landed)
+
+`build-app` can now emit the pinned production client/SSR chunks MINIFIED **with**
+source maps (`--sourcemap`), so a browser stack trace or DevTools breakpoint in a
+minified chunk maps back to the original source file. The former hard error
+(`minify + source_map` rejected in `emit_with_options`) is removed and replaced by
+a real composition.
+
+- **Two honest maps, composed.** The linker already produced module-granularity
+  readable-generated -> original mappings (`ModuleMapping`). The minify pass
+  (`minify_chunk_code_with_map`) now enables Oxc codegen's own source map on the
+  re-print, giving a minified -> readable-generated map. `Bundler::compose_source_map`
+  walks every minified token, resolves its readable-generated line (binary search
+  over the sorted readable ranges) to the owning original module and source line,
+  and emits a combined minified -> ORIGINAL map. A minified position that lands in
+  a synthetic bundler region (runtime wrapper, export footer, browser prelude)
+  with no owning module is left UNMAPPED — an honest gap, never a fabricated wrong
+  origin. Per-token TS/JSX column fidelity is NOT claimed (the readable map is
+  line-granular at column 0); the map stays honestly coarse rather than
+  precise-but-wrong. A chunk whose minified map resolves into no original module at
+  all is a hard error naming the chunk.
+- **Project-relative, non-leaking sources.** `sources` are emitted as
+  `diffpack:///<project-relative>` labels (common-ancestor root stripped; no
+  absolute-path leak, no `..` traversal), with the real module text inlined as
+  `sourcesContent`. Queries/fragments are preserved so distinct graph keys
+  (`app.css` vs `app.css?url`) stay distinct sources.
+- **Keyed into the render cache.** `source_map` is folded into `chunk_render_key`
+  alongside `minify`, so a source-mapped chunk is a distinct cache entry and a leaf
+  edit re-composes exactly the one changed chunk's map, reusing every other chunk's
+  bytes AND its `.map` byte-for-byte (the emit thesis guard is preserved).
+- **Per-chunk `.map` emit.** `emit_with_options` writes a sibling `.map` + a
+  `//# sourceMappingURL` for EVERY chunk (entry + dynamic/route-split), records each
+  in `EmitStats.written`, and `prune_stale_files` protects live maps.
+- **Opt-in.** `build-app <root> client|ssr --sourcemap` sets `EmitOptions.source_map`
+  for both the client `emit_public` and server `emit_server` paths. The default
+  acceptance/benchmark invocation (no flag) is byte-identical to before.
+
+On the pinned app: `build-app . client --sourcemap` emits 27 `.js` + 27 `.map`;
+`build-app . ssr --sourcemap` emits 34 top-level `.mjs` + 33 `.map` (the four
+hand-authored server-runtime templates — `index.mjs` and `_ssr/*` — are static
+files, not rendered chunks, so they legitimately carry no composed map).
+
+Verified (all six gate groups, on the source-mapped build):
+
+1. `cargo test --release`: 84 lib + 4 `oracle_incremental` (1 `#[ignore]`d) + 2
+   tailwind + 1 thesis_memory — all pass, incl. the new positive
+   `a_minified_chunk_emits_a_composed_source_map_resolving_to_the_original_source`
+   (replacing the old hard-error test) and
+   `source_mapped_incremental_emit_reuses_every_unchanged_chunk_and_map`.
+2. `cargo clippy --release --all-targets -- -D warnings`: clean.
+3. `build-app . client` + `. ssr` (default, no maps), strict
+   `npm run acceptance:diffpack`: **13/13**.
+4. Thesis guards: `thesis_memory` PASS, both emit guards PASS, `oracle_incremental`
+   byte parity PASS — now including a source-mapped leaf edit re-rendering exactly
+   ONE chunk (and re-composing exactly its map) with the rest reused verbatim.
+5. Browser (real headless Chrome, `sourcemap-check.mjs`): 5/5 — 27/27 chunk maps
+   valid + project-relative + content-inlined, with a unique-token strong decode in
+   all 27; the app hydrates clean with maps present; and a GENUINE runtime error
+   thrown from a minified chunk has its stack frame decoded through the composed map
+   to `router-core/dist/esm/router.js:268`. Plus routes 60/60, hydration 7/7,
+   serverfn 7/7, tailwind 9/9; `grep -rl async_hooks .diffpack-output/public` empty
+   for BOTH the default and the sourcemapped build (27 `.map` for 27 chunks).
+6. Benchmark non-regression: `bundle-scale-memory 2000 4 200` → 3314.1 bytes/module
+   (baseline ~3313), `transformed_per_edit_max`=1, edit growth 0.2 KB.
+   `oracle/benchmark.mjs` diffpack incremental **7.5 ms** vs Rolldown **149 ms** —
+   no meaningful regression (source maps are off the default path, which stays
+   byte-identical to before).
+
+**Next remaining gap.** Per-token TS/JSX column fidelity: the composed map is
+line-granular at column 0 because the readable-generated map it composes through is
+line-granular, so a minified position resolves to the right original *line* but not
+the exact original *column*. Making the map column-precise needs the linker to
+carry token-level (not module-line-level) `ModuleMapping` spans. The dev-server/HMR
+slice that keeps a `Bundler` alive across edits is still the other open
+production-hardening surface.
+
+## Production minification of the emitted client/server chunks (landed)
+
 Updated: 2026-07-18 (production minification of emitted chunks landed)
 
 ## Production minification of the emitted client/server chunks (landed)
@@ -33,8 +113,9 @@ real multi-chunk app. Production minification is now real and on by default.
   default (`--no-minify` opts out for debugging). Client browser chunks and the
   server `.mjs` chunks are minified; the server `.mjs` still execute under Node
   ESM (13/13 acceptance boots the server and serves every route). `minify` +
-  `source_map` together is a hard error until the map is composed through the
-  minify pass — the natural next slice.
+  `source_map` together is now supported (`--sourcemap`): the map is composed
+  through the minify pass — see "Production source maps, composed through the
+  minify pass" at the top.
 
 Measured reduction on the pinned app (total client `.js` bytes): **11,438,413 →
 9,762,330 = 14.7% smaller** (entry `client.js` 43,468 lines collapse to 248).
@@ -66,8 +147,8 @@ Verified (all six gate groups, on the MINIFIED build):
    incremental edit **7.4 ms** (~20x faster than Rolldown's 148 ms), cold 161 ms
    — no regression.
 
-Next slice: source maps, composed through the minify pass (so `minify` +
-`source_map` stops being a hard error).
+Source maps composed through the minify pass have since landed (see the top
+section); `minify` + `source_map` is no longer a hard error.
 
 ## Incremental-emit history
 
