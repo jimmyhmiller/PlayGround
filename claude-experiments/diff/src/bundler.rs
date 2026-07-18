@@ -439,6 +439,10 @@ pub struct Bundler {
     frontend_pool: ThreadPool,
     modules: Vec<Option<ModuleState>>,
     target: Target,
+    /// Per-chunk render cache (interior-mutable so emit stays `&self`). Persists
+    /// across incremental re-emits within one bundler, so a leaf edit re-renders
+    /// only the chunk that changed and reuses every other chunk's bytes.
+    render_cache: Mutex<RenderCache>,
 }
 
 impl Bundler {
@@ -490,6 +494,7 @@ impl Bundler {
                 .map_err(|error| format!("cannot create frontend worker pool: {error}"))?,
             modules: Vec::new(),
             target: config.target,
+            render_cache: Mutex::new(RenderCache::default()),
         };
         bundler.entry = bundler.intern(entry_id.clone());
 
@@ -588,8 +593,15 @@ impl Bundler {
         })
     }
 
-    pub fn emit(&self, reachable: &BTreeSet<ModuleId>, output: &Path) -> Result<(), String> {
+    pub fn emit(&self, reachable: &BTreeSet<ModuleId>, output: &Path) -> Result<EmitStats, String> {
         self.emit_with_options(reachable, output, EmitOptions::default())
+    }
+
+    /// The number of chunk renders currently cached. Bounded to the live chunk
+    /// set by per-emit eviction, so it stays flat across a long edit sequence;
+    /// exposed for the memory guards in `docs/THESIS_GUARDS.md`.
+    pub fn render_cache_len(&self) -> usize {
+        self.render_cache.lock().unwrap().entries.len()
     }
 
     /// Emits the client browser build into `<output_root>/public/`: the entry
@@ -617,7 +629,10 @@ impl Bundler {
             format: ModuleFormat::BrowserEsm,
             ..options
         };
-        self.emit_environment(reachable, &output_root.join("public"), "client.js", options)
+        let public_dir = output_root.join("public");
+        let stats = self.emit_environment(reachable, &public_dir, "client.js", options)?;
+        prune_stale_files(&public_dir, &stats.written)?;
+        EmitSummary::of(&public_dir)
     }
 
     /// Emits the server (SSR) build into `<output_root>/server/` as Node ESM
@@ -645,11 +660,13 @@ impl Bundler {
             ..options
         };
         let server_dir = output_root.join("server");
-        self.emit_environment(reachable, &server_dir, "server.mjs", options)?;
+        let mut stats = self.emit_environment(reachable, &server_dir, "server.mjs", options)?;
         // Emit the Node HTTP runtime entry (`server/index.mjs`) and its sibling
-        // SSR/router runtime modules on top of the module graph. `EmitSummary`
+        // SSR/router runtime modules on top of the module graph. Their paths join
+        // the kept set so the stale-file prune never deletes them, and `EmitSummary`
         // is recomputed afterwards so it counts the runtime files too.
-        write_server_runtime_entry(&server_dir)?;
+        stats.written.extend(write_server_runtime_entry(&server_dir)?);
+        prune_stale_files(&server_dir, &stats.written)?;
         EmitSummary::of(&server_dir)
     }
 
@@ -2640,15 +2657,45 @@ fn resolve_special_dependencies(
     )
 }
 
+#[derive(Clone)]
 struct RenderedBundle {
     code: String,
     mappings: Vec<ModuleMapping>,
 }
 
+#[derive(Clone)]
 struct ModuleMapping {
     dense_index: DenseModuleId,
     generated_line: u32,
     generated_lines: u32,
+}
+
+/// A per-chunk render cache, keyed by a stable [`Bundler::chunk_render_key`]: the
+/// chunk's ordered dense-module ids, each member's transformed-content hash, and
+/// every render input that affects the emitted bytes (format, `is_entry`, and the
+/// `chunk_names`/`runtime_ids`/export-demand entries the chunk references). A hit
+/// is byte-identical to a fresh `render_best`, so a leaf edit re-renders only the
+/// one chunk whose key changed; every other chunk is reused verbatim.
+///
+/// The cache is bounded to the currently-live chunk set: each emit records the
+/// keys it used and evicts every entry not among them, so retained bytes stay
+/// flat across a long edit sequence (a chunk that stops being reachable, or whose
+/// content changes, drops its old entry). This upholds the memory guards in
+/// `docs/THESIS_GUARDS.md`.
+#[derive(Default)]
+struct RenderCache {
+    entries: HashMap<u64, RenderedBundle>,
+}
+
+/// What a single [`Bundler::emit_with_options`] wrote and re-rendered. The
+/// `rendered_chunks` count is the incrementality signal (a leaf edit re-renders
+/// exactly one chunk); `written` is the set of files kept on disk, so the
+/// environment emit can delete only files that are no longer part of the build
+/// instead of nuking the whole output tree.
+#[derive(Debug, Default)]
+pub struct EmitStats {
+    pub rendered_chunks: usize,
+    written: BTreeSet<PathBuf>,
 }
 
 fn evaluate_fold_expression(

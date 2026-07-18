@@ -9,6 +9,11 @@
     "acceptance:reference": "node acceptance.mjs reference --strict",
     "acceptance:status": "node acceptance.mjs diffpack",
     "acceptance:diffpack": "node acceptance.mjs diffpack --strict",
+    "browser:hydration": "node hydration-check.mjs",
+    "browser:serverfn": "node serverfn-check.mjs",
+    "browser:tailwind": "node tailwind-check.mjs",
+    "browser:routes": "node routes-check.mjs",
+    "browser:all": "node hydration-check.mjs && node serverfn-check.mjs && node tailwind-check.mjs && node routes-check.mjs",
     "preview": "vite preview",
     "start": "node .output/server/index.mjs"
   },
