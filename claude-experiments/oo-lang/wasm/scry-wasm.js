@@ -123,7 +123,29 @@ export class ScryWasm {
       strcmp: (a, b) => { const u = self.u8; let i = Number(a), j = Number(b); while (u[i] && u[i] === u[j]) { i++; j++; } return (u[i] - u[j]) | 0; },
       strncmp:(a, b, n) => { const u = self.u8; let i = Number(a), j = Number(b); n = Number(n); while (n-- && u[i] && u[i] === u[j]) { i++; j++; } return n < 0 ? 0 : ((u[i] - u[j]) | 0); },
       atoi:   (p) => { const v = parseInt(cstr(p).trim(), 10); return (Number.isNaN(v) ? 0 : v) | 0; },
-      strtod: (p, endp) => { const s = cstr(p); const v = parseFloat(s); return Number.isNaN(v) ? 0 : v; },
+      // Real C strtod, INCLUDING the endptr out-parameter. Callers use it to check the whole
+      // string was consumed — String.toFloat computes `*endp - nptr` and rejects a partial
+      // parse — so ignoring it silently breaks every numeric parse (std.json reported
+      // "invalid number '17'" while native parsed it fine). char** is i32 on wasm32.
+      strtod: (p, endp) => {
+        const u = self.u8;
+        const nptr = Number(p);
+        let i = nptr;
+        while (u[i] === 32 || (u[i] >= 9 && u[i] <= 13)) i++;          // leading space
+        const start = i;
+        if (u[i] === 43 || u[i] === 45) i++;                            // sign
+        while (u[i] >= 48 && u[i] <= 57) i++;                           // integer digits
+        if (u[i] === 46) { i++; while (u[i] >= 48 && u[i] <= 57) i++; } // fraction
+        if (u[i] === 101 || u[i] === 69) {                              // exponent (only if valid)
+          let j = i + 1;
+          if (u[j] === 43 || u[j] === 45) j++;
+          if (u[j] >= 48 && u[j] <= 57) { while (u[j] >= 48 && u[j] <= 57) j++; i = j; }
+        }
+        const v = i > start ? parseFloat(self.dec.decode(u.subarray(start, i))) : NaN;
+        const ok = i > start && !Number.isNaN(v);
+        if (Number(endp)) self.dv.setUint32(Number(endp), ok ? i : nptr, true);  // C: nptr on failure
+        return ok ? v : 0;
+      },
 
       // ---- host surface ----
       host_write: (fd, ptr, len) => { const t = rd(ptr, len); (Number(fd) === 2 ? self.opts.onStderr : self.opts.onStdout)?.(t); return Number(len) | 0; },

@@ -23,7 +23,7 @@
 <body>
 <div id="split">
   <div id="termPane">
-    <div id="termHead"><span>scry agent — wasm</span><span id="status">booting…</span></div>
+    <div id="termHead"><span>examples/assistant.scry — wasm</span><span id="status">booting…</span></div>
     <div id="term"></div>
   </div>
   <div id="viewPane"><div id="app"></div></div>
@@ -50,7 +50,7 @@
 
   // ---- boot the VM: the program, the agent core, and std.json all live in the VFS ----
   setStatus("loading VM…");
-  const files = ["agentdemo.scry", "../agent/core.scry", "../std/json.scry"];
+  const files = ["../examples/assistant.scry", "../agent/core.scry", "../std/json.scry"];
   const [wasmBytes, demoSrc, coreSrc, jsonSrc] = await Promise.all([
     fetch("./scry.wasm").then((r) => r.arrayBuffer()),
     ...files.map((f) => fetch(f).then((r) => r.text())),
@@ -60,11 +60,11 @@
     onStdout: write,
     // boot-time diagnostics go to the console, not the terminal, so the demo stays clean
     onStderr: (t) => console.warn("[scry]", t),
-    vfs: { "/agentdemo.scry": demoSrc, "/agent/core.scry": coreSrc, "/std/json.scry": jsonSrc },
+    vfs: { "/assistant.scry": demoSrc, "/agent/core.scry": coreSrc, "/std/json.scry": jsonSrc },
   });
 
   setStatus("booting program…");
-  const rc = scry.boot("/agentdemo.scry");
+  const rc = scry.boot("/assistant.scry");
   if (rc !== 0) { setStatus(`boot failed (rc=${rc})`); write(`\nboot failed: rc=${rc}\n`); throw new Error("boot failed"); }
 
   // The viewer's transport — same wire op, no server.
@@ -77,31 +77,20 @@
   // instances visibly climb while you keep typing.
   scry.startScheduler(30, () => globalThis.__scryRefresh?.());
 
-  // ---- REPL: each line is one agent turn, driven through the eval channel ----
-  const PROMPT = "\x1b[38;5;114m›\x1b[0m ";
+  // ---- REPL ----
+  // The program is examples/assistant.scry, UNMODIFIED: its main() is a blocking
+  // `while running { Console.readLine() … }` loop, exactly as on native. Console.readLine()
+  // suspends the green thread when no line is buffered, so the terminal just feeds lines and
+  // lets the scheduler resume it. The program prints its own prompt — we only echo keystrokes.
   let line = "";
-  const prompt = () => term.write("\r\n" + PROMPT);
-
-  function submit(text) {
-    const t = text.trim();
-    if (!t) return prompt();
-    // Session is a live arena instance — reach it exactly the way the viewer reaches
-    // anything: through eval. (DECISIONS #8: the only wire op is eval.)
-    const r = scry.eval(`Session.instances().get(0).ask(${JSON.stringify(t)})`);
-    if (r.error) write(`\n\x1b[31m${r.error.kind}: ${r.error.message}\x1b[0m\n`);
-    globalThis.__scryRefresh?.();          // nudge the viewer to re-poll immediately
-    prompt();
-  }
-
   term.onData((d) => {
     for (const ch of d) {
-      if (ch === "\r") { write("\n"); submit(line); line = ""; }
+      if (ch === "\r") { term.write("\r\n"); scry.feedLine(line); line = ""; }
       else if (ch === "\x7f" || ch === "\b") { if (line) { line = line.slice(0, -1); term.write("\b \b"); } }
-      else if (ch === "\x03") { line = ""; write("^C"); prompt(); }
+      else if (ch === "\x03") { line = ""; term.write("^C\r\n"); }
       else if (ch >= " ") { line += ch; term.write(ch); }
     }
   });
-  prompt();
   term.focus();
 
   // ---- load the unmodified viewer alongside ----

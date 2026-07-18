@@ -270,7 +270,13 @@
                       (store! len (+ (load len) 1))
                       (continue))))))))))
     (if (and (= (load iseof) 1) (= (load len) 0))
-      (enum-none)                                   ; EOF with nothing buffered -> None
+      ; Nothing buffered. Native: real EOF -> None. Wasm: there is no stdin to be "at the end
+      ; of" — input arrives later from the terminal — so SUSPEND instead and re-run this
+      ; instruction on a later tick (vm-blocked). Nothing was consumed, so the retry is exact:
+      ; the host only ever delivers whole newline-terminated lines, so a line is either fully
+      ; readable now or not started.
+      (when-wasm (do (store! (vm-blocked) 1) (cast (ptr i64) 0))
+                 (enum-none))
       (enum-some-r (cast i64 (str-make (load buf) (load len))) 1))))   ; Some(line) — String payload is a ref
 
 ; Mutex.lock: CAS-acquire, but back off through the safepoint so a waiter still parks for a
@@ -302,6 +308,11 @@
 ; concession (docs/08-wasm-port.md §1), and native codegen is untouched — the dispatch-loop
 ; hook below compiles to nothing off wasm32.
 (defn sched-budget [] (-> (ptr i64)) (alloc-static i64))     ; instructions left in this slice
+; Set by a builtin that cannot complete yet (readLine with no input buffered). The dispatch
+; loop rewinds ip to re-run that instruction and suspends the thread; nothing was popped or
+; pushed, so the retry is exact. This is what makes Console.readLine() BLOCK on wasm instead
+; of returning None — a suspended thread resumes on a later tick, once the host feeds a line.
+(defn vm-blocked [] (-> (ptr i64)) (alloc-static i64))
 (defn sched-yielded [] (-> (ptr i64)) (alloc-static i64))    ; 1 = last run-to stopped on budget
 (const SCHED_UNBOUNDED 1000000000)   ; main/eval run to completion: effectively no budget
 (const SCHED_SLICE 20000)            ; instructions per background-thread slice
@@ -332,9 +343,11 @@
   (let [n (atomic-load (vm-nthreads-cell)) (mut i) 0 (mut live) 0]
     (loop (if (< (load i) n)
             (let [avt (cast (ptr VMThread) (load (index (vm-threads-cell) (load i))))]
+              ; main IS scheduled here too: it runs unbounded during boot, but if it
+              ; suspends on Console.readLine (vm-blocked) it still has frames, and this is
+              ; what resumes it once the host has fed a line.
               (if (= (cast i64 avt) 0) 0
-                (if (= (cast i64 avt) (cast i64 (vm-thread-main))) 0     ; main isn't scheduled
-                  (store! live (+ (load live) (sched-run-slice avt)))))
+                (store! live (+ (load live) (sched-run-slice avt))))
               (store! i (+ (load i) 1)) 0)
             (break)))
     (load live)))
@@ -567,7 +580,12 @@
     (= blt BLT_PRINT_STR) (do (print-str (cast (ptr StringObj) (vpop vt))) (vpush vt 0))
     (= blt BLT_CONSOLE_LOG) (do (console-log (cast (ptr StringObj) (vpop vt))) (vpush vt 0))
     (= blt BLT_CONSOLE_PRINT) (do (console-print (cast (ptr StringObj) (vpop vt))) (vpush vt 0))
-    (= blt BLT_CONSOLE_READLINE) (vpush vt (cast i64 (vm-readline vt)))
+    (= blt BLT_CONSOLE_READLINE)
+      (let [r (vm-readline vt)]
+        ; on wasm a "would block" leaves the stack untouched: the dispatch loop re-runs this
+        ; instruction after the host supplies input (see vm-blocked).
+        (when-wasm (if (= (load (vm-blocked)) 1) 0 (vpush vt (cast i64 r)))
+                   (vpush vt (cast i64 r))))
     (= blt BLT_LIST_NEW) (let [er (vpop vt) l (list-new)] (list-set-elemref l er) (vpush vt (cast i64 l)))
     (= blt BLT_LIST_PUSH) (let [v (vpop vt) l (vpop vt)] (list-push (cast (ptr ListObj) l) v) (vpush vt 0))
     (= blt BLT_LIST_GET) (let [i (vpop vt) l (vpop vt)] (vpush vt (list-get (cast (ptr ListObj) l) i)))
@@ -727,7 +745,22 @@
                 (push-frame vt m argc)
                 (if (= (load (trace-flag)) 1) (trace-enter m argc (index (field vt stack) (load (field (index (field vt frames) (- (load (field vt frame-count)) 1)) base)))) 0)
                 (store! fr (index (field vt frames) (- (load (field vt frame-count)) 1))) 0)
-            OP_CALL_BUILTIN (do (do-builtin vt (read-byte (load fr))) 0)
+            OP_CALL_BUILTIN
+              (do (do-builtin vt (read-byte (load fr)))
+                  (when-wasm
+                    (if (= (load (vm-blocked)) 1)
+                      (do (store! (vm-blocked) 0)
+                          ; re-run this OP_CALL_BUILTIN (opcode byte + builtin id) next time
+                          (store! (field (load fr) ip) (- (load (field (load fr) ip)) 2))
+                          (store! (sched-budget) 0)        ; give up the rest of the slice
+                          ; mark it a YIELD, not a return: the thread is suspended waiting on
+                          ; input and is still runnable. Without this sched-run-slice would
+                          ; see a plain return and mark the thread done — it would resume
+                          ; exactly once and then never again.
+                          (store! (sched-yielded) 1)
+                          (store! done true) 0)
+                      0)
+                    0))
             OP_THREAD_SPAWN
               (let [iface (read-u16 (load fr)) slot (read-byte (load fr)) task (vpop vt)]
                 (vpush vt (vm-spawn vt task iface slot)))

@@ -144,18 +144,18 @@ async function main() {
 
     const termText = () => evalPage(`document.querySelector("#term .xterm-screen")?.innerText || document.getElementById("term")?.innerText || ""`);
     let banner = "";
-    for (let i = 0; i < 40 && !/WebAssembly/.test(banner); i++) { banner = await termText(); await sleep(200); }
-    if (!/WebAssembly/.test(banner)) fail("terminal never showed the program banner: " + JSON.stringify(banner.slice(0,200)));
-    console.log("  ok  xterm shows the program's stdout");
+    for (let i = 0; i < 40 && !/Scry assistant/.test(banner); i++) { banner = await termText(); await sleep(200); }
+    if (!/Scry assistant/.test(banner)) fail("terminal never showed the program banner: " + JSON.stringify(banner.slice(0,200)));
+    console.log("  ok  xterm shows the REAL assistant.scry banner + prompt");
 
     // type a real agent turn into the terminal, one keystroke at a time
-    for (const ch of "weather in Tokyo") await send("Input.dispatchKeyEvent", { type: "char", text: ch });
+    for (const ch of "what is 17 times 23?") await send("Input.dispatchKeyEvent", { type: "char", text: ch });
     await send("Input.dispatchKeyEvent", { type: "rawKeyDown", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
     await send("Input.dispatchKeyEvent", { type: "char", text: "\r" });
     let out = "";
-    for (let i = 0; i < 60 && !/Tokyo:/.test(out); i++) { out = await termText(); await sleep(200); }
-    if (!/tool_use|get_weather|Tokyo:/.test(out)) fail("agent turn produced no tool use / reply: " + JSON.stringify(out.slice(-300)));
-    console.log("  ok  typed a turn -> agent ran a REAL tool call in the terminal");
+    for (let i = 0; i < 60 && !/391/.test(out); i++) { out = await termText(); await sleep(200); }
+    if (!/391/.test(out)) fail("agent turn produced no tool use / reply: " + JSON.stringify(out.slice(-300)));
+    console.log("  ok  typed a turn -> real tool call computed 17 * 23 = 391 in the terminal");
 
     // the viewer must see the live agent state the turn just created
     const msgs = await evalPage(`JSON.stringify(globalThis.__scryWasm.eval("Message.instances().len()"))`);
