@@ -174,6 +174,33 @@ pub struct JitCtx<'a, M: ValueModel> {
     /// its evaluated args here (reusing the capacity), so a tail loop allocates
     /// nothing per bounce.
     tail_args: *mut Vec<u64>,
+    /// Phase 4 — DIRECT tail-chain depth. Non-self tail calls to a live closure
+    /// are made as REAL native calls (arguments in registers, no sentinel round
+    /// trip through the trampoline) instead of returning a bounce token — but a
+    /// native call grows the stack, so an unbounded mutual tail loop (`a`->`b`->
+    /// `a`->…) would overflow. This counter, shared across the whole call tree
+    /// via `rc`, caps the chain: at the limit the emitted site falls back to the
+    /// sentinel path, unwinding to the nearest bounce owner (a non-tail call site
+    /// or the trampoline) which continues in O(1) stack. Only the OUTERMOST ctx's
+    /// counter is ever read/written (emitted code reaches it through `rc`); child
+    /// stack contexts leave it 0.
+    direct_depth: Cell<u32>,
+}
+
+/// Cap on consecutive DIRECT (native, non-bounced) non-self tail calls before
+/// the chain unwinds to a trampoline bounce. Bounds the native stack a mutual
+/// tail loop can consume; real dispatch chains (JSON parse nesting, transducer
+/// step fns) are far shallower than this, so it is off the hot path. 64 frames
+/// is negligible stack yet amortizes the bounce across a long direct run.
+const DIRECT_TAIL_MAX_DEPTH: u32 = 64;
+
+/// Whole-feature kill switch: `MICROLANG_NO_DIRECT_TAIL=1` disables Phase 4's
+/// direct tail-chain calls, so every non-self tail call takes the sentinel +
+/// trampoline bounce path (Phases 1-3 behaviour). Evaluated once.
+fn direct_tail_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MICROLANG_NO_DIRECT_TAIL").is_none())
 }
 
 /// Raw base pointer of a frame's slot array (null for the empty environment).
@@ -688,6 +715,7 @@ fn shim_fast_invoke<M: ValueModel>(
         tail_pending: Cell::new(false),
         tail_callee: Cell::new(0),
         tail_args: rcr.tail_args,
+        direct_depth: Cell::new(0),
     };
     let cp = &mut ctx as *mut JitCtx<M> as u64;
     let a = args;
@@ -3023,6 +3051,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             tail_pending: Cell::new(false),
             tail_callee: Cell::new(0),
             tail_args: args_buf as *mut Vec<u64>,
+            direct_depth: Cell::new(0),
         }
     }
 
@@ -3770,6 +3799,8 @@ fn build_body<M: ModelArithJit>(
         off_self_closure: core::mem::offset_of!(JitCtx<'static, M>, self_closure) as i32,
         off_poll_ptr: core::mem::offset_of!(JitCtx<'static, M>, poll_ptr) as i32,
         off_tail_pending: core::mem::offset_of!(JitCtx<'static, M>, tail_pending) as i32,
+        off_tail_callee: core::mem::offset_of!(JitCtx<'static, M>, tail_callee) as i32,
+        off_direct_depth: core::mem::offset_of!(JitCtx<'static, M>, direct_depth) as i32,
         off_rc,
         off_rt: core::mem::offset_of!(JitCtx<'static, M>, rt) as i32,
         signal_kind_off: Runtime::<M>::signal_kind_offset() as i32,
@@ -3948,6 +3979,8 @@ pub struct Compiler<'a, 'b> {
     off_self_closure: i32,
     off_poll_ptr: i32,
     off_tail_pending: i32,
+    off_tail_callee: i32,
+    off_direct_depth: i32,
     off_rc: i32,
     /// Offset of the `rt` pointer within `JitCtx`, and of the throw/escape flag
     /// (`signal.kind`) within `Runtime` — for the per-call pending check.
@@ -4999,22 +5032,67 @@ impl<'a, 'b> Compiler<'a, 'b> {
     /// continuation / variadic / memory-mode / not-yet-compiled callees, whose
     /// code word stays 0, go through `top`).
     fn emit_call<M: ModelArithJit>(&mut self, callee: Value, argvals: &[Value]) -> Value {
+        self.emit_call_kind::<M>(callee, argvals, false)
+    }
+
+    /// Emit a NON-self tail call. With Phase 4 enabled this is a guarded DIRECT
+    /// native call (`emit_call_kind(tail=true)`) — skipping the sentinel round
+    /// trip + trampoline callee re-resolution that dominated the real-library
+    /// parser profile (data.json's `-read` dispatch tail-calls). The kill switch
+    /// restores the plain sentinel-token path (Phases 1-3): stash callee+args and
+    /// return, letting the bounce owner resolve and continue.
+    fn emit_nonself_tail<M: ModelArithJit>(&mut self, callee: Value, argvals: &[Value]) -> Value {
+        if direct_tail_enabled() {
+            return self.emit_call_kind::<M>(callee, argvals, true);
+        }
+        let ctx = self.ctx_val;
+        let (addr, count) = self.spill_args(argvals);
+        self.call_shim_fenced(self.refs.tail_call, &[ctx, callee, addr, count])
+    }
+
+    /// Emit a call, either NON-tail (`tail=false`, the result flows on into the
+    /// body) or as a Phase 4 DIRECT tail call (`tail=true`): the same guarded
+    /// fast path, but the callee is invoked as the body's tail — its value is
+    /// returned, and if the callee itself left a pending tail (`tail_pending`)
+    /// it is PROPAGATED to this frame's ctx rather than bounced here, so the
+    /// chain unwinds to the nearest bounce owner (a non-tail caller or the
+    /// trampoline). Bounded by `direct_depth` (see the field): at the cap the
+    /// fast guard fails and the sentinel slow path takes over, so an unbounded
+    /// mutual tail loop still runs in O(1) native stack.
+    fn emit_call_kind<M: ModelArithJit>(&mut self, callee: Value, argvals: &[Value], tail: bool) -> Value {
         let n = argvals.len();
         let ctx = self.ctx_val;
         let flags = MemFlagsData::trusted();
         if n > MAX_REG_ARGS {
-            // No register entry exists at this arity — always the shim path.
+            // No register entry exists at this arity — always the shim path. In
+            // tail position that is the sentinel (TCO-preserving) bounce.
             let (addr, count) = self.spill_args(argvals);
+            if tail {
+                return self.call_shim_fenced(self.refs.tail_call, &[ctx, callee, addr, count]);
+            }
             let sr = self.call_shim(self.refs.call, &[ctx, callee, addr, count]);
             return self.emit_pending_check(sr);
         }
 
-        // guard1 = value is a ref AND direct calls enabled.
+        // guard1 = value is a ref AND direct calls enabled (AND, for a tail
+        // call, the direct-chain depth is under the cap — else fall back to the
+        // sentinel path so the stack stays bounded).
         let (is_ref, addr) = M::emit_ref_addr(self, callee);
         let rc = self.rc_val;
         let ro = MemFlagsData::trusted().with_readonly();
         let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
-        let guard1 = self.fb.ins().band(is_ref, direct);
+        let mut guard1 = self.fb.ins().band(is_ref, direct);
+        // The depth is loaded here (entry block, dominates `fastb`) so the
+        // increment/restore around the direct call can reuse it.
+        let depth = if tail {
+            let d = self.fb.ins().load(cranelift_codegen::ir::types::I32, ro, rc, self.off_direct_depth);
+            let under = self.fb.ins().icmp_imm(IntCC::UnsignedLessThan, d, DIRECT_TAIL_MAX_DEPTH as i64);
+            let underx = self.fb.ins().uextend(I8, under);
+            guard1 = self.fb.ins().band(guard1, underx);
+            Some(d)
+        } else {
+            None
+        };
 
         let result = self.declare_root_var();
         let checkb = self.fb.create_block();
@@ -5100,33 +5178,70 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let zero8 = self.fb.ins().iconst(I8, 0);
         self.fb.ins().stack_store(zero8, ctx_ss, self.off_tail_pending);
         let new_ctx = self.fb.ins().stack_addr(I64, ctx_ss, 0);
+        // Direct tail chain: bump the shared depth so an unbounded mutual loop
+        // hits the cap and unwinds. Restored right after the call returns (the
+        // chain is strictly nested, so inc-before / dec-after = save / restore).
+        if let Some(d) = depth {
+            let d1 = self.fb.ins().iadd_imm(d, 1);
+            self.fb.ins().store(flags, d1, rc, self.off_direct_depth);
+        }
         let sig = self.entry_sig(n);
         let mut call_args = Vec::with_capacity(n + 1);
         call_args.push(new_ctx);
         call_args.extend_from_slice(argvals);
         let inst = self.fb.ins().call_indirect(sig, code, &call_args);
         let r0 = self.fb.inst_results(inst)[0];
-        // If the callee ended in a NON-self tail call, `tail_pending` is set and its
-        // frame is gone; finish that tail through `top` (bounded stack, composable).
-        // The common self-tail case looped in place and never sets this.
+        if let Some(d) = depth {
+            self.fb.ins().store(flags, d, rc, self.off_direct_depth);
+        }
+        // If the callee ended in a NON-self tail call, `tail_pending` is set and
+        // its frame is gone.
         let tp = self.fb.ins().load(I8, flags, new_ctx, self.off_tail_pending);
         let finb = self.fb.create_block();
         let doneb = self.fb.create_block();
         self.fb.ins().brif(tp, finb, &[], doneb, &[]);
         self.fb.switch_to_block(finb);
         self.fb.seal_block(finb);
-        let fr = self.call_shim(self.refs.finish_tail, &[new_ctx]);
-        self.fb.def_var(result, fr);
+        if tail {
+            // TAIL: we are ourselves a tail call, so do NOT bounce here (that
+            // would grow the stack at the top of a deep direct chain). PROPAGATE
+            // the pending tail up to this frame's ctx — the callee's args are
+            // already in the shared `tail_args` buffer; only the callee and the
+            // flag ride on the per-frame ctx (as `shim_tail_call` sets them).
+            // The nearest bounce owner up the chain finishes it in O(1) stack.
+            let tc = self.fb.ins().load(I64, flags, new_ctx, self.off_tail_callee);
+            self.fb.ins().store(flags, tc, ctx, self.off_tail_callee);
+            let one8 = self.fb.ins().iconst(I8, 1);
+            self.fb.ins().store(flags, one8, ctx, self.off_tail_pending);
+            self.fb.def_var(result, r0);
+        } else {
+            // NON-tail: finish the callee's tail through `top` (bounded, composable).
+            let fr = self.call_shim(self.refs.finish_tail, &[new_ctx]);
+            self.fb.def_var(result, fr);
+        }
         self.fb.ins().jump(merge, &[]);
         self.fb.switch_to_block(doneb);
         self.fb.seal_block(doneb);
         self.fb.def_var(result, r0);
         self.fb.ins().jump(merge, &[]);
 
-        // ── shim fallback: through `top`, preserving CEK routing / Traced / etc. ──
+        // ── shim fallback: through `top`, preserving CEK routing / Traced / etc.
+        // In tail position this is the sentinel (`tail_call`) so TCO is kept when
+        // the fast guard fails (non-closure/arity/observed wrapper/depth cap). ──
         self.fb.switch_to_block(slowb);
         self.fb.seal_block(slowb);
         let (saddr, count) = self.spill_args(argvals);
+        if tail {
+            let tr = self.call_shim_fenced(self.refs.tail_call, &[ctx, callee, saddr, count]);
+            self.fb.def_var(result, tr);
+            self.fb.ins().jump(merge, &[]);
+            self.fb.switch_to_block(merge);
+            self.fb.seal_block(merge);
+            // No pending check on the tail path: the value (real, propagated
+            // token, or sentinel dummy) is the body's return; the bounce owner /
+            // trampoline observes any raised signal.
+            return self.fb.use_var(result);
+        }
         let sr = self.call_shim(self.refs.call, &[ctx, callee, saddr, count]);
         self.fb.def_var(result, sr);
         self.fb.ins().jump(merge, &[]);
@@ -5534,19 +5649,13 @@ impl<'a, 'b> Compiler<'a, 'b> {
 
                             self.fb.switch_to_block(notself);
                             self.fb.seal_block(notself);
-                            let ctx = self.ctx_val;
-                            let (addr, count) = self.spill_args(&tagged_args);
-                            return self.call_shim_fenced(
-                                self.refs.tail_call,
-                                &[ctx, callee, addr, count],
-                            );
+                            return self.emit_nonself_tail::<M>(callee, &tagged_args);
                         }
                     }
                 }
                 let argvals: Vec<Value> =
                     args.iter().map(|a| self.compile::<M>(a, false)).collect();
                 if tail {
-                    let ctx = self.ctx_val;
                     // Self-tail-call becomes a native REGISTER loop: if the callee
                     // is THIS closure, redefine the param variables and branch to
                     // the header (no FFI, O(1) stack). Arity must match statically
@@ -5586,13 +5695,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
                             // `tail_pending`).
                             self.fb.switch_to_block(notself);
                             self.fb.seal_block(notself);
-                            let (addr, count) = self.spill_args(&argvals);
-                            self.call_shim_fenced(self.refs.tail_call, &[ctx, callee, addr, count])
+                            self.emit_nonself_tail::<M>(callee, &argvals)
                         }
-                        _ => {
-                            let (addr, count) = self.spill_args(&argvals);
-                            self.call_shim_fenced(self.refs.tail_call, &[ctx, callee, addr, count])
-                        }
+                        _ => self.emit_nonself_tail::<M>(callee, &argvals),
                     }
                 } else {
                     self.emit_call::<M>(callee, &argvals)
