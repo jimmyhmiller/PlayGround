@@ -503,19 +503,37 @@ fn rebuild_auto_keywords<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, fo
             let s = rt.intern(&full);
             rt.intern_keyword(s)
         }
+        // A node whose children are all UNCHANGED is returned as itself:
+        // unconditional copying minted duplicate objects for every datum in
+        // the form — including 'Keyword records, breaking `identical?`
+        // canonicality. (A keyword's name field is a Sym, which this pass
+        // never rewrites, so keywords now ride through untouched; the
+        // explicit skip below just avoids walking them at all.)
         Shape::Record(type_id, fields) => {
+            if rt.sym_name(type_id) == reader::KEYWORD {
+                return form;
+            }
             let nf: Vec<u64> = fields.iter().map(|&f| rebuild_auto_keywords(rt, comp, f)).collect();
+            if nf == fields {
+                return form;
+            }
             let rid = rt.alloc_record(type_id, &nf);
             <M::R as microlang::Repr>::enc_ref(rid)
         }
         Shape::Cons(head, tail) => {
             let h = rebuild_auto_keywords(rt, comp, head);
             let t = rebuild_auto_keywords(rt, comp, tail);
+            if h == head && t == tail {
+                return form;
+            }
             let rid = rt.alloc(Obj::Cons { head: h, tail: t });
             <M::R as microlang::Repr>::enc_ref(rid)
         }
         Shape::Vector(elems) => {
             let ne: Vec<u64> = elems.iter().map(|&e| rebuild_auto_keywords(rt, comp, e)).collect();
+            if ne == elems {
+                return form;
+            }
             let rid = rt.alloc_vector(&ne);
             <M::R as microlang::Repr>::enc_ref(rid)
         }

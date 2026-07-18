@@ -411,6 +411,19 @@ pub(crate) enum ApplyPlan {
     Signal,
 }
 
+/// `MICROLANG_KW_VERIFY=1` arms the keyword-canonicality tripwire in
+/// `alloc_record` (see there). Read once.
+fn kw_verify() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MICROLANG_KW_VERIFY").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
+thread_local! {
+    /// True while `intern_keyword` performs its ONE legitimate 'Keyword record
+    /// allocation — the tripwire's allowlist.
+    static KW_INTERNING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub struct Runtime<M: ValueModel> {
     /// State shared with sibling threads (heap, globals, interner, dispatch).
     pub(crate) shared: Arc<Shared<M>>,
@@ -897,6 +910,27 @@ impl<M: ValueModel> Runtime<M> {
     /// Allocate a Record over a copy of `fields`.
     pub fn alloc_record(&self, type_id: Sym, fields: &[u64]) -> Gc {
         use crate::heap::kind;
+        // Keyword-canonicality tripwire (`MICROLANG_KW_VERIFY=1`): every
+        // 'Keyword record must come from `intern_keyword` — a direct
+        // construction mints a duplicate same-named keyword, which breaks
+        // `identical?` conformance (JVM keywords are interned) and was exactly
+        // the `keyword_expr` destructuring bug. Panics loudly under verify so
+        // the corpus flushes out any remaining rogue path.
+        if kw_verify() && !KW_INTERNING.with(|c| c.get()) {
+            let kw = self.intern_cached(&self.shared.sym_cache_keyword, "Keyword");
+            if type_id == kw {
+                let name = match fields.first().map(|&f| M::R::tag_of(f)) {
+                    Some(RawTag::Sym) => self.sym_name(M::R::as_sym(fields[0])).to_string(),
+                    _ => "<non-sym name field>".to_string(),
+                };
+                panic!(
+                    "keyword-canonicality violation: a 'Keyword record for :{name} was \
+                     allocated OUTSIDE intern_keyword — this mints a duplicate keyword \
+                     object and breaks `identical?`. Route the construction through \
+                     `%keyword` / `intern_keyword`."
+                );
+            }
+        }
         self.shared.allocs.fetch_add(1, Ordering::Relaxed);
         let info = &self.shared.types[kind::RECORD as usize];
         let g = self.shared.heap.alloc(info, fields.len() as u32);
@@ -1348,7 +1382,9 @@ impl<M: ValueModel> Runtime<M> {
         // holding the keyword lock across them is a lock-order inversion.
         let ty = self.intern("Keyword");
         let namebits = self.encode(Val::Sym(name));
+        KW_INTERNING.with(|c| c.set(true));
         let bits = M::R::enc_ref(self.alloc_record(ty, &[namebits]));
+        KW_INTERNING.with(|c| c.set(false));
         let id = self.intern_const(bits);
         // Re-check under the lock: a sibling thread may have interned the same
         // name while we were building. First writer wins, so the canonical

@@ -649,7 +649,11 @@ fn scan_pct<M: ValueModel>(
 }
 
 /// Rebuild `form`, replacing every bare `%` symbol with `pct1` (the `%1` symbol).
-/// Cons/record/array structure is copied; leaves are returned unchanged.
+/// A node whose children are all UNCHANGED is returned as itself (structural
+/// sharing) — copying unconditionally minted duplicate objects for every datum
+/// in the body, including 'Keyword records, which broke keyword canonicality
+/// (`identical?`). Keyword records are never descended into at all: their one
+/// field is a name SYM, not code — a keyword literally named `:%` must survive.
 fn rewrite_bare_pct<M: ValueModel>(rt: &mut Runtime<M>, form: u64, pct1: u64) -> u64 {
     match rt.decode(form) {
         Val::Sym(s) if rt.sym_name(s) == "%" => pct1,
@@ -672,17 +676,30 @@ fn rewrite_bare_pct<M: ValueModel>(rt: &mut Runtime<M>, form: u64, pct1: u64) ->
                 Shape::Cons(head, tail) => {
                     let h = rewrite_bare_pct(rt, head, pct1);
                     let t = rewrite_bare_pct(rt, tail, pct1);
-                    alloc(rt, Obj::Cons { head: h, tail: t })
+                    if h == head && t == tail {
+                        form
+                    } else {
+                        alloc(rt, Obj::Cons { head: h, tail: t })
+                    }
                 }
                 Shape::Record(type_id, fields) => {
+                    if rt.sym_name(type_id) == KEYWORD {
+                        return form; // a keyword's field is its NAME, not code
+                    }
                     let nf: Vec<u64> =
                         fields.iter().map(|&f| rewrite_bare_pct(rt, f, pct1)).collect();
+                    if nf == fields {
+                        return form;
+                    }
                     let rid = rt.alloc_record(type_id, &nf);
                     <M::R as Repr>::enc_ref(rid)
                 }
                 Shape::Vector(elems) => {
                     let ne: Vec<u64> =
                         elems.iter().map(|&e| rewrite_bare_pct(rt, e, pct1)).collect();
+                    if ne == elems {
+                        return form;
+                    }
                     let rid = rt.alloc_vector(&ne);
                     <M::R as Repr>::enc_ref(rid)
                 }
