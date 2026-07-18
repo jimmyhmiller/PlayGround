@@ -482,6 +482,17 @@ extern "C" fn shim_hamt_lookup<M: ModelArithJit>(ctx: *mut JitCtx<M>, root: u64,
     rt.hamt_map_lookup(root, key, nf)
 }
 
+// Array-map lookup via a register-arg, non-fenced shim (like `first`/`rest`/`=`).
+// `amap_get` only scans the kv array and returns an existing value — it never
+// allocates and never reaches a safepoint — so it skips the general spill-args +
+// fenced prim call. `%amap-get` is the hottest op in a `core.match` classify
+// (every map pattern lookup routes through it).
+extern "C" fn shim_amap_get<M: ModelArithJit>(ctx: *mut JitCtx<M>, arr: u64, k: u64, nf: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.amap_get(arr, k, nf)
+}
+
 extern "C" fn shim_arr_push<M: ModelArithJit>(ctx: *mut JitCtx<M>, arr: u64, v: u64) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
@@ -1344,6 +1355,7 @@ struct Shims {
     pv_assoc: FuncId,
     hamt_assoc: FuncId,
     hamt_lookup: FuncId,
+    amap_get: FuncId,
     arr_push: FuncId,
     cons2: FuncId,
     first1: FuncId,
@@ -1382,6 +1394,7 @@ struct ShimRefs {
     pv_assoc: cranelift_codegen::ir::FuncRef,
     hamt_assoc: cranelift_codegen::ir::FuncRef,
     hamt_lookup: cranelift_codegen::ir::FuncRef,
+    amap_get: cranelift_codegen::ir::FuncRef,
     arr_push: cranelift_codegen::ir::FuncRef,
     cons2: cranelift_codegen::ir::FuncRef,
     first1: cranelift_codegen::ir::FuncRef,
@@ -2111,6 +2124,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let pva: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_pv_assoc::<M>;
         let hma: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_hamt_assoc::<M>;
         let hml: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_hamt_lookup::<M>;
+        let amg: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_amap_get::<M>;
         let apu: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_arr_push::<M>;
         let cn2: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_cons2::<M>;
         let fs1: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_first1::<M>;
@@ -2145,6 +2159,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
         builder.symbol("ml_pv_assoc", pva as *const u8);
         builder.symbol("ml_hamt_assoc", hma as *const u8);
         builder.symbol("ml_hamt_lookup", hml as *const u8);
+        builder.symbol("ml_amap_get", amg as *const u8);
         builder.symbol("ml_arr_push", apu as *const u8);
         builder.symbol("ml_cons2", cn2 as *const u8);
         builder.symbol("ml_first1", fs1 as *const u8);
@@ -2222,6 +2237,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
             pv_assoc: decl(&mut module, "ml_pv_assoc", &s_v3),
             hamt_assoc: decl(&mut module, "ml_hamt_assoc", &s_v3),
             hamt_lookup: decl(&mut module, "ml_hamt_lookup", &s_v3),
+            amap_get: decl(&mut module, "ml_amap_get", &s_v3),
             arr_push: decl(&mut module, "ml_arr_push", &s_v2),
             cons2: decl(&mut module, "ml_cons2", &s_v2),
             first1: decl(&mut module, "ml_first1", &s_v1),
@@ -3008,6 +3024,7 @@ fn build_body<M: ModelArithJit>(
         pv_assoc: module.declare_func_in_func(shims.pv_assoc, fb.func),
         hamt_assoc: module.declare_func_in_func(shims.hamt_assoc, fb.func),
         hamt_lookup: module.declare_func_in_func(shims.hamt_lookup, fb.func),
+        amap_get: module.declare_func_in_func(shims.amap_get, fb.func),
         arr_push: module.declare_func_in_func(shims.arr_push, fb.func),
         cons2: module.declare_func_in_func(shims.cons2, fb.func),
         first1: module.declare_func_in_func(shims.first1, fb.func),
@@ -4990,9 +5007,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             Ir::Prim(
                 p @ (Prim::PvAssoc | Prim::HamtAssoc | Prim::HamtLookup | Prim::TamAssoc
-                | Prim::ThmAssoc),
+                | Prim::ThmAssoc | Prim::AmapGet),
                 args,
-            ) => {
+            ) if args.len() == 3 => {
                 let a = self.compile::<M>(&args[0], false);
                 let b = self.compile::<M>(&args[1], false);
                 let c = self.compile::<M>(&args[2], false);
@@ -5002,6 +5019,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     Prim::HamtLookup => self.refs.hamt_lookup,
                     Prim::TamAssoc => self.refs.tam_assoc,
                     Prim::ThmAssoc => self.refs.thm_assoc,
+                    Prim::AmapGet => self.refs.amap_get,
                     _ => unreachable!(),
                 };
                 let ctx = self.ctx_val;

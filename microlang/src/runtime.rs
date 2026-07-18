@@ -2281,25 +2281,7 @@ impl<M: ValueModel> Runtime<M> {
                     }
                 }
             }
-            Prim::AmapGet => {
-                // Scan a key/value array pairwise for `k`, structural `equal` per
-                // key (interned keywords short-circuit to a pointer compare inside
-                // `equal`). One Rust call in place of the clojure-layer
-                // aget/-eq2/loop that array-map `-lookup` was built from.
-                let (arr, k, nf) = (args[0], args[1], args[2]);
-                let elems = self.arr_elems_pub(arr);
-                let n = elems.len();
-                let mut i = 0;
-                let mut found = nf;
-                while i + 1 < n {
-                    if self.equal(elems[i], k) {
-                        found = elems[i + 1];
-                        break;
-                    }
-                    i += 2;
-                }
-                found
-            }
+            Prim::AmapGet => self.amap_get(args[0], args[1], args[2]),
             Prim::CpuCount => {
                 // What `Runtime.availableProcessors` answers: the parallelism this
                 // process may actually use (respects cgroup/affinity limits), not
@@ -3914,6 +3896,24 @@ impl<M: ValueModel> Runtime<M> {
     /// A fresh one-element array.
     fn mk_array1(&mut self, x: u64) -> u64 {
         M::R::enc_ref(self.alloc_vector(&[x]))
+    }
+    /// Array-map lookup: scan a key/value array pairwise for `k`, structural
+    /// `equal` per key (interned keywords short-circuit to a pointer compare
+    /// inside `equal`), returning `nf` on a miss. One Rust scan in place of the
+    /// clojure-layer aget/-eq2/loop that array-map `-lookup` was built from.
+    /// Never allocates and never reaches a safepoint, so its JIT shim
+    /// (`shim_amap_get`) rides the non-fenced register-arg path.
+    pub(crate) fn amap_get(&self, arr: u64, k: u64, nf: u64) -> u64 {
+        let elems = self.arr_elems_pub(arr);
+        let n = elems.len();
+        let mut i = 0;
+        while i + 1 < n {
+            if self.equal(elems[i], k) {
+                return elems[i + 1];
+            }
+            i += 2;
+        }
+        nf
     }
     /// (arr, off, end, more) of a `'ChunkedCons` record, or None. Lets the cons
     /// prims (`%first`/`%rest`) treat a chunk transparently as a seq — only on the
