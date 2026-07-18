@@ -1,7 +1,7 @@
 (module app)
-(import "src/raylib.coil" :as raylib)
-(import "src/workflow.coil" :as workflow)
-(import "src/native.coil" :as native)
+(import "raylib.coil" :as raylib)
+(import "workflow.coil" :as workflow)
+(import "native.coil" :as native)
 
 (extern sin :cc c [f64] (-> f64))
 (extern fmod :cc c [f64 f64] (-> f64))
@@ -1428,12 +1428,34 @@
                  (color 127 136 148))
       (draw-card-background left 349.0 width 73.0 false tint)
       (draw-text (field state monoMedium) c"> workflow.inspect" (+ left 13.0) 362.0 11.0 (color 207 214 222))
-      (draw-text (field state mono)
-                 (workflow.status-label status)
-                 (+ left 13.0)
-                 393.0
-                 10.5
-                 (color 167 176 187))
+      (if (= status 2)
+        (let [statusBuffer (cast (ptr i8) (cast i64 (alloc-stack (array i8 48))))
+              time (raylib.GetTime)
+              elapsed
+                (let [raw (cast i64 (- time (workflow.node-started-at runtime node)))]
+                  (if (or (< raw 0) (> raw 359999)) 0 raw))]
+          (do
+            (snprintf statusBuffer 48 c"agent working - %llds" elapsed)
+            (draw-text (field state mono) statusBuffer (+ left 13.0) 393.0 10.5 (color 167 176 187))
+            (for [dot 0
+                  3]
+              (let [wave (sin (- (* time 6.0) (* (cast f64 dot) 1.1)))
+                    alpha (cast i64 (+ 90.0 (* 65.0 (+ 1.0 wave))))]
+                (fill-rectangle (+ left (+ (- width 58.0) (* (cast f64 dot) 14.0)))
+                                397.0
+                                5.0
+                                5.0
+                                (color-alpha (cast i64 (load (field tint r)))
+                                             (cast i64 (load (field tint g)))
+                                             (cast i64 (load (field tint b)))
+                                             alpha))))
+            0))
+        (draw-text (field state mono)
+                   (workflow.status-label status)
+                   (+ left 13.0)
+                   393.0
+                   10.5
+                   (color 167 176 187)))
       (if (icmp-ne (load output) (cast i8 0))
         (do
           (if (or (!= (load (field state wrappedOutput)) output)
@@ -2103,7 +2125,7 @@
                     0)
                   (let [activeRuntime (load (field state activeRuntime))]
                     (if (!= (cast i64 activeRuntime) 0)
-                      (workflow.tick (mut activeRuntime))
+                      (workflow.tick (mut activeRuntime) (raylib.GetTime))
                       0))
                   (store! (field state selectionPressHandled) 0)
                   (store! (field state hoverSelectableText) 0)

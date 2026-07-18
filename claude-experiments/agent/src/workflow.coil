@@ -45,6 +45,7 @@
 (defstruct Runtime
   [(program WorkflowProgram)
    (statuses (array i64 7))
+   (startedAt (array f64 7))
    (started i64)
    (outputs (ptr i8))])
 
@@ -545,6 +546,7 @@
           7]
       (do
         (store! (index (field runtime statuses) node) STATUS_PENDING)
+        (store! (index (field runtime startedAt) node) 0.0)
         (store! (output-buffer (mut runtime) node) (cast i8 0))
         0))
     (store! (field runtime started) 1)
@@ -555,7 +557,12 @@
     (do (store! (index (field runtime statuses) node) STATUS_DONE) 0)
     0))
 
-(defn tick [(runtime (mut Runtime))] (-> i64)
+(defn node-started-at [(runtime Runtime) (node i64)] (-> f64)
+  (if (and (>= node 0) (< node MAX_NODES))
+    (load (index (field runtime startedAt) node))
+    0.0))
+
+(defn tick [(runtime (mut Runtime)) (now f64)] (-> i64)
   (if (= (load (field runtime started)) 0)
     0
     (do
@@ -592,7 +599,10 @@
             (do
               (write-prompt node (load (field programNode prompt)))
               (if (= (cast i64 (system (launch-command node))) 0)
-                (store! (index (field runtime statuses) node) STATUS_RUNNING)
+                (do
+                  (store! (index (field runtime statuses) node) STATUS_RUNNING)
+                  (store! (index (field runtime startedAt) node) now)
+                  0)
                 (store! (index (field runtime statuses) node) STATUS_FAILED))
               0))
           0))

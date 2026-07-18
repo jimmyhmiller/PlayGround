@@ -41,7 +41,9 @@ MODEL="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
 # Reasoning models spend from the same budget on hidden reasoning before any
 # visible content, so this must stay generous or replies come back empty.
 MAX_TOKENS="${DEEPSEEK_MAX_TOKENS:-32768}"
-TIMEOUT="${DEEPSEEK_TIMEOUT:-300}"
+# Reasoning over a large inlined file can hold the (non-streaming) request
+# open for many minutes before the first byte arrives.
+TIMEOUT="${DEEPSEEK_TIMEOUT:-600}"
 
 command -v jq >/dev/null || { echo "deepseek-agent: jq is required" >&2; exit 2; }
 
