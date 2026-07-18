@@ -201,6 +201,36 @@ printf '(module m)\n(defn main [] (-> i64) (: true i64))\n' > "$T/gen9bad.coil"
 expect_rc 1 "ascription rejects a mismatched value (not a numeric cast)" "$COIL" build "$T/gen9bad.coil" -o "$T/x"
 expect_out "has type bool but expected i64" "…naming both the actual and ascribed type" "$COIL" build "$T/gen9bad.coil" -o "$T/x"
 
+echo "== qualified trait-method calls (A::go) recover a same-name collision (gen-6) =="
+# was: two traits declaring the same method name were an UNFIXABLE collision — `(go x)`
+# errored "ambiguous / none in scope" and there was no syntax to pick one. Now a
+# `Trait::method` head pins dispatch to the named trait. FAILS on the seed ('A::go' is a
+# call to an undefined function → rc=1), PASSES here (dispatches to A's impl → 111).
+cat > "$T/gen6.coil" <<'EOF'
+(deftrait A [Self] (go [(x Self)] (-> i64)))
+(deftrait B [Self] (go [(x Self)] (-> i64)))
+(impl A i64 (go [(x i64)] (-> i64) 111))
+(impl B i64 (go [(x i64)] (-> i64) 222))
+(defn main [] (-> i64) (A::go 5))
+EOF
+expect_rc 111 "A::go selects trait A's impl (was: undefined function 'A::go')" "$COIL" run "$T/gen6.coil"
+sed 's/(A::go 5)/(B::go 5)/' "$T/gen6.coil" > "$T/gen6b.coil"
+expect_rc 222 "B::go selects trait B's impl" "$COIL" run "$T/gen6b.coil"
+# an unknown qualifier/method is a located trait-method error, not a bare undefined-function
+printf '(deftrait A [Self] (go [(x Self)] (-> i64)))\n(impl A i64 (go [(x i64)] (-> i64) 1))\n(defn main [] (-> i64) (A::nope 5))\n' > "$T/gen6bad.coil"
+expect_out "names no trait method 'nope'" "A::nope is a located trait-method error" "$COIL" build "$T/gen6bad.coil" -o "$T/x"
+# the collision error stops recommending `:use` (useless when the traits are your own) and
+# points at the qualified escape hatch instead. FAILS on the seed (its message says `:use`).
+cat > "$T/gen6col.coil" <<'EOF'
+(module app)
+(deftrait A [Self] (go [(x Self)] (-> i64)))
+(deftrait B [Self] (go [(x Self)] (-> i64)))
+(impl A i64 (go [(x i64)] (-> i64) 111))
+(impl B i64 (go [(x i64)] (-> i64) 222))
+(defn main [] (-> i64) (go 5))
+EOF
+expect_out "call it qualified" "a collision error advertises Trait::method, not :use" "$COIL" build "$T/gen6col.coil" -o "$T/x"
+
 echo "== (target-arch) reflects --target, not a hardcoded host constant =="
 # was: the constant "aarch64" — so a macro branching on it baked the host branch into a
 # cross-compiled wasm build, silently.

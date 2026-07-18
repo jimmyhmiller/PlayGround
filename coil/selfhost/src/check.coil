@@ -1583,6 +1583,41 @@
           (store! i (isub (load i) 1)))))
     (load at)))
 
+; The recoverable-collision hint (gen-6): every trait declaring `func`, rendered as
+; the qualified call `Trait::func` (Trait by display-name), joined with " or ". So a
+; same-name collision is now fixable — `(A::go x)` names the trait explicitly — and the
+; error stops telling you to `:use` a module (useless when the traits are your own).
+(defn method-qual-suggestions [(a (ptr Allocator)) (cx (ptr Cx)) (func (slice u8))] (-> (slice u8))
+  (let [ms (field cx methods) n (al-len [MethodEntry] (load (field cx methods))) (mut i) 0 (mut out) "" (mut first) true]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [me (al-elem [MethodEntry] ms (load i))]
+            (if (str-eq (load (field me name)) func)
+                (let [q (sconcat4 a "`" (display-name (load (field me trait))) "::" (sconcat a func "`"))]
+                  (if (load first) (do (store! out q) (store! first false) 0)
+                      (do (store! out (sconcat3 a (load out) " or " q)) 0))) 0))
+          (store! i (iadd (load i) 1)))))
+    (load out)))
+
+; Qualified `Trait::method` resolution (gen-6): pin the method to the named trait,
+; bypassing in-scope ambiguity and module visibility (an explicit trait name IS the
+; disambiguation). `qual` matches a trait by its full name or its last-dotted
+; component, so both `A::go` and `app.A::go` select `app.A`. An empty `qual` delegates
+; to the ordinary in-scope resolution.
+(defn resolve-method-qual [(a (ptr Allocator)) (cx (ptr Cx)) (func (slice u8)) (qual (slice u8)) (fname (slice u8))] (-> (Result MethodEntry Diag))
+  (if (icmp-eq (slice-len [u8] qual) 0) (resolve-method a cx func fname)
+    (let [ms (field cx methods) n (al-len [MethodEntry] (load (field cx methods))) (mut i) 0 (mut cnt) 0 (mut only) (cast (ptr MethodEntry) 0)]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [me (al-elem [MethodEntry] ms (load i))]
+              (if (and (str-eq (load (field me name)) func)
+                       (or (str-eq (load (field me trait)) qual) (str-eq (after-last-dot (load (field me trait))) qual)))
+                  (do (store! cnt (iadd (load cnt) 1)) (store! only me) 0) 0))
+            (store! i (iadd (load i) 1)))))
+      (if (icmp-eq (load cnt) 1) (Ok (load (load only)))
+        (if (icmp-eq (load cnt) 0)
+            (Err [MethodEntry Diag] (derr (sconcat a (sconcat5 a "in '" fname "': no trait '" qual "' declares method '") (sconcat a func "'"))))
+            (let [head (sconcat a (sconcat5 a "in '" fname "': qualifier '" qual "' is ambiguous — ") (i64->str a (load cnt)))]
+              (Err [MethodEntry Diag] (derr (sconcat3 a head " traits named '" (sconcat a qual "' declare this method; qualify with the module-prefixed trait name"))))))))))
+
 ; resolve_method (src/check.rs:125) — returns a chosen MethodEntry.
 (defn resolve-method [(a (ptr Allocator)) (cx (ptr Cx)) (func (slice u8)) (fname (slice u8))] (-> (Result MethodEntry Diag))
   (let [ms (field cx methods) n (al-len [MethodEntry] (load (field cx methods))) (mut i) 0 (mut cnt) 0 (mut only) (cast (ptr MethodEntry) 0)]
@@ -1599,8 +1634,8 @@
               (store! j (iadd (load j) 1)))))
         (if (icmp-eq (load vcnt) 1) (Ok (load (load vonly)))
           (if (icmp-eq (load vcnt) 0)
-              (Err [MethodEntry Diag] (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': trait method '" (sconcat a func "' is declared in ")) (i64->str a (load cnt))) " traits, none in scope here ") "(`:use` the module whose trait you mean)")))
-              (Err [MethodEntry Diag] (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': trait method '" (sconcat a func "' is ambiguous — ")) (i64->str a (load vcnt))) " in-scope traits declare it; ") "rename one method to disambiguate")))))))))
+              (Err [MethodEntry Diag] (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': trait method '" (sconcat a func "' is declared in ")) (i64->str a (load cnt))) " traits, none in scope here — call it qualified: ") (method-qual-suggestions a cx func))))
+              (Err [MethodEntry Diag] (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': trait method '" (sconcat a func "' is ambiguous — ")) (i64->str a (load vcnt))) " in-scope traits declare it; call it qualified: ") (method-qual-suggestions a cx func))))))))))
 
 (defn bounds-has [(bounds (ptr (ArrayList Bound))) (tp (slice u8)) (tr (slice u8))] (-> bool)
   (let [n (al-len [Bound] (load bounds)) (mut i) 0 (mut r) false]
@@ -1996,33 +2031,39 @@
    (do
     (if (icmp-ne (cast i64 (vts-find cx func)) 0)
         (return-from :try (synth-construct a func type_args args expected env cx tps fname elo ehi esrc ectxt)) 0)
-    (let [(mut call_func) func]
-      (if (methods-has cx func)
-          (let [me0 (try! (resolve-method a cx func fname)) me (alloc-stack MethodEntry)] (store! me me0)
+    ; A `Trait::method` head (gen-6) splits into the qualifier and the bare method
+    ; name; `resolve-method-qual` then pins dispatch to the named trait. A plain call
+    ; has no `::`, so `qual` is "" and `mname` is `func` — the original path, unchanged.
+    (let [cc (find-coloncolon func)
+          qual  (if (icmp-ge cc 0) (subslice [u8] func 0 cc) "")
+          mname (if (icmp-ge cc 0) (subslice [u8] func (iadd cc 2) (slice-len [u8] func)) func)
+          (mut call_func) func]
+      (if (methods-has cx mname)
+          (let [me0 (try! (resolve-method-qual a cx mname qual fname)) me (alloc-stack MethodEntry)] (store! me me0)
             (let [trait_name (load (field me trait)) self_idx (load (field me self_idx))
-                  td (trait-find cx (load (field me trait))) tm (trait-method-find (trait-find cx (load (field me trait))) func)
+                  td (trait-find cx (load (field me trait))) tm (trait-method-find (trait-find cx (load (field me trait))) mname)
                   self_pname (load (field td self_param))]
               (if (not (icmp-eq (al-len [Expr] (load args)) (al-len [Param] (load (field tm params)))))
-                  (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': '" (sconcat a func "' expects ")) (i64->str a (al-len [Param] (load (field tm params))))) " args, got ") (i64->str a (al-len [Expr] (load args))))))) 0)
+                  (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': '" (sconcat a mname "' expects ")) (i64->str a (al-len [Param] (load (field tm params))))) " args, got ") (i64->str a (al-len [Expr] (load args))))))) 0)
               (let [selfsp (try! (do-synth a (al-elem [Expr] args self_idx) (null-type) env cx tps fname)) ssp (alloc-stack SynPair)] (store! ssp selfsp)
                 (let [self_ty (deref-to-impl a cx trait_name (load (field ssp t)) tps)]
                   (if (not (has-impl-name a self_ty))
-                      (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat4 a "in '" fname "': trait method '" (sconcat a func "' called on a type that can't carry an impl: ")) (ty-str a self_ty)) "")))) 0)
+                      (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat4 a "in '" fname "': trait method '" (sconcat a mname "' called on a type that can't carry an impl: ")) (ty-str a self_ty)) "")))) 0)
                   (let [self_name (type-impl-name a self_ty)]
                     (if (icmp-gt (slice-len [u8] (dyn-struct-trait cx self_name)) 0)
-                        (return-from :try (synth-dyn-dispatch a cx func self_name self_idx td tm args env tps fname elo ehi esrc ectxt)) 0)
+                        (return-from :try (synth-dyn-dispatch a cx mname self_name self_idx td tm args env tps fname elo ehi esrc ectxt)) 0)
                     (if (set-contains tps self_name)
                         (do
                           ; a parameterized trait's extra types are read off the
                           ; receiver's impl — unknown while Self is a type param
                           (if (icmp-gt (al-len [(slice u8)] (load (load (field td type_params)))) 0)
-                              (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': trait '" (sconcat a (display-name trait_name) "' takes type parameters — bounds over ")) "parameterized traits aren't supported yet; call '") func) "' on a concrete receiver instead")))) 0)
+                              (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': trait '" (sconcat a (display-name trait_name) "' takes type parameters — bounds over ")) "parameterized traits aren't supported yet; call '") mname) "' on a concrete receiver instead")))) 0)
                         (if (not (bounds-has (field cx cur_bounds) self_name trait_name))
-                            (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': type parameter '" (sconcat a self_name "' is not bounded by '")) (display-name trait_name)) "' (required to call '") (sconcat a func "')")))))
+                            (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': type parameter '" (sconcat a self_name "' is not bounded by '")) (display-name trait_name)) "' (required to call '") (sconcat a mname "')")))))
                           (let [self_as_ty (box-type a (TStruct self_name))
-                                new_args (try! (trait-tp-args a tm self_pname self_as_ty args env cx tps fname func))
+                                new_args (try! (trait-tp-args a tm self_pname self_as_ty args env cx tps fname mname))
                                 ret (subst-self a (field tm ret) self_pname self_as_ty)]
-                            (return-from :try (ok-ep (mk-expr (ETraitCall trait_name func self_name new_args) elo ehi esrc ectxt) ret)))))
+                            (return-from :try (ok-ep (mk-expr (ETraitCall trait_name mname self_name new_args) elo ehi esrc ectxt) ret)))))
                       ; Pick the most specific impl accepting this receiver, and call
                       ; THAT impl's function. Errors name the RECEIVER TYPE, not the
                       ; dispatch key: selection matches type arguments, so `(Pair u8 bool)`
@@ -2036,8 +2077,14 @@
                         (let [ipp (load (field sel ip))]
                           (store! call_func (tmfn a trait_name
                                               (impl-mangle-key a (field ipp self_type) (load (field ipp type_params)))
-                                              func)) 0))))))))
-          0)
+                                              mname)) 0))))))))
+          ; `mname` is not a trait method. A bare call falls through to the general
+          ; path (an ordinary function or a genuine undefined ref); a `Trait::method`
+          ; head, however, promised a method — say so, located, rather than reporting
+          ; the whole `Trait::method` string as an undefined function.
+          (if (icmp-ge cc 0)
+              (return-from :try (err-ep (derr (sconcat a (sconcat5 a "in '" fname "': '" func "' names no trait method '") (sconcat a mname "'")))))
+              0))
       (synth-call-general a func (load call_func) type_args args expected env cx tps fname elo ehi esrc ectxt)))))
 ; ELet (src/check.rs:1231)
 (defn mk-bind [(name (slice u8)) (mutable bool) (value Expr)] (-> Bind)

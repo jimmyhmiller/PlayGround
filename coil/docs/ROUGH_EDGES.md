@@ -15,9 +15,10 @@ root cause, and one small fix at the bottom of the stack makes the rest observab
 
 ## Decisions taken (Jimmy, on triage)
 
-- **gen-6** (trait methods are global; collision unfixable) — **DEFERRED.** Methods should
-  be scoped, and this case *should* error, but the qualified-call syntax (`A::go`) is TBD.
-  Do not touch until the syntax is decided.
+- **gen-6** (trait methods are global; collision unfixable) — ✅ DONE. A `Trait::method` call
+  head (`(A::go x)`) now pins dispatch to the named trait, so a same-name collision is
+  recoverable. The two collision errors name the candidate traits and suggest the qualified
+  form instead of a misleading `:use`. Teeth-tested in `gate-cli.sh`; see DECISIONS.md #3.
 - **gen-8** (supertrait syntax silently means something else) — **DEFERRED**, wants better
   syntax; follow-up alongside gen-6.
 - **gen-9** — ✅ DONE. Added type ascription `(: value type)` (a general checked-annotation
@@ -337,5 +338,6 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
   impls dead weight for generic code. Jimmy: reconsider the iteration APIs wholesale rather than
   patching `hm-for`. Note `Len [Self]` (no params) *does* work as a bound, which makes the gap look
   arbitrary rather than principled.
-- **gen-6** — scoped trait methods + qualified-call syntax (`A::go`). Syntax TBD.
+- **gen-6** — ✅ DONE. Qualified-call syntax (`A::go`) added — pins dispatch to the named trait;
+  same-name collisions are now recoverable. See DECISIONS.md #3.
 - **gen-8** — supertrait syntax; same conversation as gen-6.

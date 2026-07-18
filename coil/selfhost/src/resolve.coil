@@ -87,6 +87,19 @@
           (store! i (iadd (load i) 1)))))
     (load r)))
 
+; Index of the first `::` in a symbol, or -1 (byte 58 = ':'). A `Trait::method`
+; qualified trait-method call (gen-6) carries the qualifier this way — the checker
+; splits it in synth-call, so resolve leaves the head bare and exempts it from the
+; strict undefined-reference check below.
+(defn find-coloncolon [(s (slice u8))] (-> i64)
+  (let [n (slice-len s) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) (isub n 1)) (break)
+      (do (if (and (icmp-eq (cast i64 (slice-get s (load i))) 58)
+                   (icmp-eq (cast i64 (slice-get s (iadd (load i) 1))) 58))
+              (do (store! r (load i)) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
 (defn empty-strs [(a (ptr Allocator))] (-> (ptr (ArrayList (slice u8))))
   (let [bp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
     (store! bp (al-new [(slice u8)] a)) bp))
@@ -465,7 +478,10 @@
           (ECall [func type_args args]
             (do (let [nf (try! (resolve c func 0))]
                   (store! (field ep kind) (ECall nf type_args args))
-                  (if (and (load (field c strict)) (and (not (has-dot nf)) (not (set-contains (load (field c bareok)) nf))))
+                  ; A `Trait::method` qualified call (gen-6) is validated in the checker
+                  ; (synth-call splits it and pins the trait), so it is not an undefined
+                  ; reference here even though the whole head is not a def-table name.
+                  (if (and (load (field c strict)) (and (icmp-lt (find-coloncolon nf) 0) (and (not (has-dot nf)) (not (set-contains (load (field c bareok)) nf)))))
                       ; `ep` IS the call node — its span was right here and simply unused,
                       ; so the language's most common error lost its location the moment a
                       ; file declared a module (i.e. in every real multi-file project). The

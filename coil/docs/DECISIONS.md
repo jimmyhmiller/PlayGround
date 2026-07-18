@@ -44,9 +44,27 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    seed, which can't compile them) — the `parser.coil::parse-expr` workaround stays until the
    seed is refreshed past this commit; its comment now says so.
 
-3. **Qualified trait-method calls `(A::go x)` (gen-6).** Add `::`-qualified method calls that
-   resolve `Trait::method` through the receiver's impls table; a same-name collision becomes
+3. **Qualified trait-method calls `(A::go x)` (gen-6).** ✅ DONE. Add `::`-qualified method calls
+   that resolve `Trait::method` through the receiver's impls table; a same-name collision becomes
    recoverable. Fix the collision error to stop suggesting `:use` when both traits are local.
+   OUTCOME: a `Trait::method` call head now pins dispatch to the named trait. The reader already
+   tokenizes `A::go` as one symbol, so no lexer change; `resolve.coil` gains `find-coloncolon` and
+   exempts a `::`-head from the strict undefined-reference check (the method is validated in the
+   checker, not resolve). `check.coil::synth-call` splits the head into `qual`/`mname` and routes
+   through a new `resolve-method-qual`, which selects the MethodEntry whose trait matches `qual`
+   by full name OR last-dotted component — so `A::go`, `app.A::go`, and a `:use`'d trait's
+   `Show::show` all resolve, bypassing in-scope ambiguity/visibility (an explicit trait name IS
+   the disambiguation, like Rust's fully-qualified syntax). A plain call has no `::`, so `qual`
+   is "" and `mname` is `func`: byte-identical to the old path (gate-full/mono/checked stayed
+   green with zero snapshot regen). Both collision errors were reworked: they now name the
+   candidate traits and lead with `call it qualified: \`A::go\` or \`B::go\`` instead of the
+   misleading `:use` advice (which never helps when the colliding traits are your own — the exact
+   case that fired the `:use` message, since a bare-named caller like `main` defeats the module
+   visibility check). An unknown qualifier/method is a located trait-method error, never a bare
+   "undefined function". Teeth in `gate-cli.sh` (A::go→111, B::go→222, `A::nope` located,
+   collision message advertises the qualified form) — all FAIL on the pre-gen-6 seed. NOTE: a
+   cross-module trait reached through an `:as` alias (`(impl t.Show …)` / `t.Show::method`) is
+   still unsupported (cross-module impls are a separate gap) — `:use` the trait to reach it.
 
 4. **Supertrait `(deftrait Derived [Self] :requires [Base] …)` (gen-8).** A `:requires` clause,
    separate from the type-param vector, so associated-type params and supertraits stop sharing
