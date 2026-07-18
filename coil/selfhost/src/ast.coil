@@ -174,8 +174,12 @@
 (defstruct TraitMethod [(name (slice u8)) (params (ptr (ArrayList Param))) (ret Type)])
 ; `type_params` = the EXTRA trait type parameters beyond Self (src/ast.rs):
 ; `(deftrait Get [Self K E] …)` — Self determines them (one impl per type).
+; `requires` = the SUPERTRAITS from a `:requires [Base …]` clause (gen-8): every
+; impl of this trait must also impl each Base. This is a SEPARATE axis from the
+; type-param vector, so `[Self …]` (associated types) and supertraits stop sharing
+; one syntax; the names here are qualified by the resolver like any trait name.
 (defstruct TraitDef
-  [(name (slice u8)) (self_param (slice u8)) (type_params (ptr (ArrayList (slice u8)))) (methods (ptr (ArrayList TraitMethod)))])
+  [(name (slice u8)) (self_param (slice u8)) (type_params (ptr (ArrayList (slice u8)))) (requires (ptr (ArrayList (slice u8)))) (methods (ptr (ArrayList TraitMethod)))])
 ; A GENERIC impl `(impl [T] Push (ArrayList T) …)` carries its type params and
 ; the full implementing-type pattern in `self_type`; `for_type` is the dispatch
 ; BASE name derived from it (kept in sync by the resolver after qualification).

@@ -783,6 +783,27 @@
             (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+; gen-8 supertrait enforcement. A `(deftrait Derived [Self] :requires [Base …])` makes
+; `Base` a SUPERTRAIT: every `(impl Derived T)` must be accompanied by an `(impl Base T)`
+; for the same implementing type. Run this AFTER `setup-impls` has registered every impl,
+; so the required impl may appear anywhere in source order (impl-match sees the whole set).
+(defn check-supertraits [(a (ptr Allocator)) (cx (ptr Cx))] (-> (Result i64 Diag))
+  (let [is (field cx impls) n (al-len [ImplDef] (load is)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [im (al-elem [ImplDef] is (load i)) tr (load (field im trait_name)) td (trait-find cx tr)]
+            (if (icmp-ne (cast i64 td) 0)
+                (let [reqs (load (field td requires)) nr (al-len [(slice u8)] (load reqs)) (mut k) 0]
+                  (loop (if (icmp-ge (load k) nr) (break)
+                    (do (let [req (al-get [(slice u8)] (load reqs) (load k))]
+                          (if (not (impl-match a cx req (field im self_type)))
+                              (do (store! err (derr (sconcat a (impl-prefix a (display-name tr) (ty-str a (field im self_type)))
+                                                       (sconcat a "requires an impl of supertrait '" (sconcat a (display-name req) "' for the same type (declared by ':requires' on the trait)")))))
+                                  (store! failed true) (break))
+                              0))
+                        (if (load failed) (break) (store! k (iadd (load k) 1)))))))
+              0))
+          (if (load failed) (break) (store! i (iadd (load i) 1))))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 (defn setup-one-sig [(a (ptr Allocator)) (cx (ptr Cx)) (fp (ptr Func))] (-> i64)
   (let [cc (load (field fp cc)) tps (load (field fp type_params)) native (conv-is-native cx cc) sg (alloc-stack Sig)]
     (store! (field sg name) (load (field fp name)))
@@ -953,6 +974,7 @@
       (store! (field fb items) (al-new [Func] a))
       (copy-funcs a fb prog)
       (try! (setup-impls a cx prog fb))
+      (try! (check-supertraits a cx))
       (setup-sigs a cx (field fb items))
       (try! (setup-externs a cx prog))
       (try! (setup-consts a cx prog))

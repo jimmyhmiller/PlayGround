@@ -231,6 +231,51 @@ cat > "$T/gen6col.coil" <<'EOF'
 EOF
 expect_out "call it qualified" "a collision error advertises Trait::method, not :use" "$COIL" build "$T/gen6col.coil" -o "$T/x"
 
+echo "== supertraits: (deftrait D [Self] :requires [Base] …) (gen-8) =="
+# was: supertraits and associated-type params shared the ONE `[Self …]` vector, so a
+# supertrait written there was silently accepted as an extra type parameter, and there
+# was no way to say "every impl of D must also impl Base". Now `:requires [Base …]` is a
+# SEPARATE clause the checker ENFORCES. FAILS on the seed (`:requires` is unknown there,
+# so the keyword parses as a bad trait method → build error), PASSES here (runs → 11).
+cat > "$T/super_ok.coil" <<'EOF'
+(module app)
+(deftrait Animal [Self] (legs [(x Self)] (-> i64)))
+(deftrait Pet [Self] :requires [Animal] (name [(x Self)] (-> i64)))
+(defstruct Dog [(n i64)])
+(impl Animal Dog (legs [(x Dog)] (-> i64) 4))
+(impl Pet Dog (name [(x Dog)] (-> i64) 7))
+(defn main [] (-> i64) (let [d (alloc-stack Dog)] (iadd (Animal::legs (load d)) (Pet::name (load d)))))
+EOF
+expect_rc 11 "a :requires supertrait builds+runs when the base is impl'd (was: parse error)" "$COIL" run "$T/super_ok.coil"
+# the supertrait is ENFORCED: impl Pet without impl Animal is a located error naming the
+# base. Both the seed and this build exit 1 here, so the TEETH is the message: the seed
+# fails to PARSE `:requires` ("trait method must be…"), this build names the supertrait.
+cat > "$T/super_missing.coil" <<'EOF'
+(module app)
+(deftrait Animal [Self] (legs [(x Self)] (-> i64)))
+(deftrait Pet [Self] :requires [Animal] (name [(x Self)] (-> i64)))
+(defstruct Dog [(n i64)])
+(impl Pet Dog (name [(x Dog)] (-> i64) 7))
+(defn main [] (-> i64) 0)
+EOF
+expect_rc 1 "impl Pet without impl Animal is rejected" "$COIL" build "$T/super_missing.coil" -o "$T/x"
+expect_out "supertrait 'app.Animal'" "…and the error names the missing supertrait" "$COIL" build "$T/super_missing.coil" -o "$T/x"
+# the OLD ambiguous form — a supertrait smuggled into the `[Self …]` vector — is now a
+# located error pointing at `:requires` (was: silently an associated-type parameter, so
+# the seed builds it clean, rc=0). The extra param NAMES a trait, which is the tell.
+cat > "$T/super_ambig.coil" <<'EOF'
+(module app)
+(deftrait Animal [Self] (legs [(x Self)] (-> i64)))
+(deftrait Pet [Self Animal] (name [(x Self)] (-> i64)))
+(defn main [] (-> i64) 0)
+EOF
+expect_rc 1 "a trait name in the [Self …] vector is rejected" "$COIL" build "$T/super_ambig.coil" -o "$T/x"
+expect_out "if you meant a supertrait" "…and the error points at :requires" "$COIL" build "$T/super_ambig.coil" -o "$T/x"
+# a genuine associated-type parameter (NOT a trait name) is still fine — the guard only
+# fires on names that actually resolve to a trait, so `[Self K E]` (à la Get) still works.
+printf '(module app)\n(deftrait Grab [Self K E] (grab [(x Self) (k K)] (-> E)))\n(defn main [] (-> i64) 0)\n' > "$T/super_assoc.coil"
+expect_rc 0 "associated-type params [Self K E] still parse (not mistaken for supertraits)" "$COIL" build "$T/super_assoc.coil" -o "$T/x"
+
 echo "== (target-arch) reflects --target, not a hardcoded host constant =="
 # was: the constant "aarch64" — so a macro branching on it baked the host branch into a
 # cross-compiled wasm build, silently.

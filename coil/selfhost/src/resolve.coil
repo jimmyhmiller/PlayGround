@@ -666,17 +666,29 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 (defn qualify-one-trait [(c (ptr Ctx)) (tp (ptr TraitDef))] (-> (Result i64 Diag))
-  (let [a (load (field c a)) m (load (field c m)) (mut tl) (al-new [(slice u8)] a)]
+  (try (let [a (load (field c a)) m (load (field c m)) (mut tl) (al-new [(slice u8)] a)]
     (al-push! (mut tl) (load (field tp self_param)))
-    ; extra trait type parameters are in scope in method signatures too
+    ; extra trait type parameters are in scope in method signatures too. gen-8 guard:
+    ; an extra param that NAMES A KNOWN TRAIT was almost certainly meant as a supertrait
+    ; (the two used to share this vector), so reject it with a pointer at `:requires`
+    ; rather than silently accepting it as an associated-type parameter.
     (let [xs (load (field tp type_params)) nx (al-len [(slice u8)] (load xs)) (mut xi) 0]
       (loop (if (icmp-ge (load xi) nx) (break)
-        (do (al-push! (mut tl) (al-get [(slice u8)] (load xs) (load xi)))
+        (do (let [pn (al-get [(slice u8)] (load xs) (load xi))]
+              (if (has-dot (try! (resolve c pn 2)))
+                  (return-from :try (Err (derr (sconcat a (sconcat3 a "deftrait: type parameter '" pn "' names a trait — if you meant a supertrait, write ':requires [")
+                                                        (sconcat a pn "]'; if you meant an associated-type parameter, rename it")))))
+                  0)
+              (al-push! (mut tl) pn))
             (store! xi (iadd (load xi) 1))))))
+    ; qualify the `:requires` supertrait names exactly as trait bounds are qualified —
+    ; an unknown supertrait is a located "unknown trait" error, and the stored names
+    ; become the canonical qualified ones the checker matches impls against.
+    (try! (qualify-trait-names c (load (field tp requires))))
     (let [tlb (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
       (store! tlb (load tl))
       (store! (field tp name) (sconcat3 a m "." (load (field tp name))))
-      (qualify-trait-methods c (load (field tp methods)) tlb))))
+      (qualify-trait-methods c (load (field tp methods)) tlb)))))
 (defn qualify-impl-method [(c (ptr Ctx)) (fp (ptr Func)) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (try
     ; bounds too — an impl method now carries its impl's bounds (`(impl [(T Eq)] …)`),

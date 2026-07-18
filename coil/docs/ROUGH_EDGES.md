@@ -19,8 +19,11 @@ root cause, and one small fix at the bottom of the stack makes the rest observab
   head (`(A::go x)`) now pins dispatch to the named trait, so a same-name collision is
   recoverable. The two collision errors name the candidate traits and suggest the qualified
   form instead of a misleading `:use`. Teeth-tested in `gate-cli.sh`; see DECISIONS.md #3.
-- **gen-8** (supertrait syntax silently means something else) — **DEFERRED**, wants better
-  syntax; follow-up alongside gen-6.
+- **gen-8** (supertrait syntax silently means something else) — ✅ DONE. `deftrait` now takes a
+  separate `:requires [Base …]` clause; every impl of the trait must also impl each `Base` (a new
+  `check-supertraits` pass enforces it, order-independent). A trait name smuggled into the
+  `[Self …]` vector is now a located error pointing at `:requires`, instead of being silently
+  swallowed as an associated-type parameter. Teeth-tested in `gate-cli.sh`; see DECISIONS.md #4.
 - **gen-9** — ✅ DONE. Added type ascription `(: value type)` (a general checked-annotation
   expression that flows the expected type in, not a cast) **and** fixed the let-inference hole
   (a returned `let` binding now takes the return type, so `(let [r (Okk 5)] r)` infers without
@@ -340,4 +343,5 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
   arbitrary rather than principled.
 - **gen-6** — ✅ DONE. Qualified-call syntax (`A::go`) added — pins dispatch to the named trait;
   same-name collisions are now recoverable. See DECISIONS.md #3.
-- **gen-8** — supertrait syntax; same conversation as gen-6.
+- **gen-8** — ✅ DONE. Supertrait syntax `(deftrait D [Self] :requires [Base] …)` — separate from
+  the `[Self …]` associated-type axis, enforced at impl time. See DECISIONS.md #4.

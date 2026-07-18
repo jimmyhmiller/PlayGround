@@ -66,9 +66,34 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    cross-module trait reached through an `:as` alias (`(impl t.Show …)` / `t.Show::method`) is
    still unsupported (cross-module impls are a separate gap) — `:use` the trait to reach it.
 
-4. **Supertrait `(deftrait Derived [Self] :requires [Base] …)` (gen-8).** A `:requires` clause,
-   separate from the type-param vector, so associated-type params and supertraits stop sharing
-   one syntax. Warn (or error) on the old ambiguous form.
+4. **Supertrait `(deftrait Derived [Self] :requires [Base] …)` (gen-8).** ✅ DONE. A `:requires`
+   clause, separate from the type-param vector, so associated-type params and supertraits stop
+   sharing one syntax. Warn (or error) on the old ambiguous form.
+   OUTCOME: `deftrait` now takes an optional `:requires [Base …]` clause between the `[Self …]`
+   vector and the methods. `TraitDef` gains a `requires` field (`ast.coil`), the parser reads the
+   clause (`parser.coil::parse-deftrait`, keyword-detected like `extern`'s `:cc`; a non-vector
+   argument is a located error), the resolver qualifies each supertrait name with the SAME
+   `qualify-trait-names` used for bounds (`resolve.coil::qualify-one-trait`, now wrapped in a
+   `try`) — so an unknown supertrait is a located "unknown trait" error and the stored names are
+   canonical/qualified. ENFORCEMENT is a new `check.coil::check-supertraits` pass run right after
+   `setup-impls` (order-independent — the base impl may appear anywhere): for every registered
+   `(impl Derived T)` whose trait declares supertraits, each `Base` must have a matching impl for
+   the same `T`, checked with the existing `impl-match` (works for concrete AND generic
+   `(impl [T] … (Box T))` self-types); otherwise a located "impl Derived for T: requires an impl
+   of supertrait 'Base' …". The OLD AMBIGUOUS FORM — a supertrait smuggled into the `[Self …]`
+   vector — is caught in `qualify-one-trait`: an extra type-param that RESOLVES to a known trait
+   (`resolve … 2` returns a dotted name) is a located error pointing at `:requires`; a genuine
+   associated-type name like `K`/`E` (à la `Get [Self K E]`) resolves to nothing and is untouched.
+   The change is purely additive: fixpoint byte-identical and ALL gates (ast/resolved/checked/
+   mono/full/diag/cli + arm64 gate-run) green with ZERO snapshot regen — no corpus trait uses
+   `:requires`, and `d-trait` omits `requires` exactly as it already omits `type_params`. Six
+   teeth in `gate-cli.sh` (a `:requires` supertrait builds+runs → 11; a missing base impl is
+   rejected and NAMES the supertrait; the `[Self Trait]` form is rejected pointing at `:requires`;
+   `[Self K E]` still parses) — all FAIL on the pre-gen-8 seed (which parses `:requires` as a bad
+   trait method and silently accepts `[Self Animal]`). NOTE: this is the ENFORCEMENT + syntax
+   half. Using a supertrait through a bound — calling a `Base` method on a `T: Derived`-bounded
+   generic — is a natural follow-on (a transitive `bounds-has` over `requires`) not yet wired;
+   the guarantee exists, generic code that leans on it is the next step.
 
 5. **Iteration & generics over collections — BOTH (gen-1 · std-11 · std-4).** The biggest item.
    (a) Associated-type bounds: make parameterized traits (Get/Set/Push/Pop/Iter) usable as

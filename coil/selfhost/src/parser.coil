@@ -1025,11 +1025,29 @@
                           (return-from :try (Err [TraitDef Diag] (derr "deftrait: expected [Self …] after the name"))))
              self-param (try! (sym-of a (sx-at tp-items 0) "trait type parameter"))
              (mut type-params) (al-new [(slice u8)] a)
+             (mut requires) (al-new [(slice u8)] a)
              ntp (sx-len tp-items) (mut tpi) 1
              (mut methods) (al-new [TraitMethod] a) nr (sx-len rest) (mut mi) 2]
     (loop (if (icmp-ge (load tpi) ntp) (break)
       (do (al-push! (mut type-params) (try! (sym-of a (sx-at tp-items (load tpi)) "trait type parameter")))
           (store! tpi (iadd (load tpi) 1)))))
+    ; optional `:requires [Base …]` supertrait clause, sitting between the type-param
+    ; vector and the methods (gen-8). It keeps supertraits OFF the `[Self …]` axis, which
+    ; is for associated-type parameters — the two used to share one vector and silently
+    ; mean different things. When present, methods start after it (index 4).
+    (match (sx-get rest 2)
+      (Some [k] (if (and (icmp-eq (sx-tag k) 3) (str-eq (sx-sval k) "requires"))
+                    (let [rv (try! (need [Sexp] (sx-get rest 3) "deftrait: ':requires' needs a [Base …] vector"))]
+                      (if (not (icmp-eq (sx-tag rv) 7))
+                          (return-from :try (Err [TraitDef Diag] (derr-at (sx-lo rv) (sx-hi rv) "deftrait: ':requires' needs a [Base …] vector")))
+                          0)
+                      (let [ri (sx-items rv) nri (sx-len ri) (mut rj) 0]
+                        (loop (if (icmp-ge (load rj) nri) (break)
+                          (do (al-push! (mut requires) (try! (sym-of a (sx-at ri (load rj)) "supertrait name")))
+                              (store! rj (iadd (load rj) 1))))))
+                      (store! mi 4) 0)
+                  0))
+      (None [] 0))
     (loop (if (icmp-ge (load mi) nr) (break)
       (let [m (sx-at rest (load mi))]
         (store! mi (iadd (load mi) 1))
@@ -1048,7 +1066,7 @@
             (if (not (str-eq (try! (head-sym a ret-l)) "->")) (return-from :try (Err [TraitDef Diag] (derr-at (sx-lo m) (sx-hi m) (sconcat3 a "trait method '" mname "': expected (-> ret)")))) 0)
             (let [ret (try! (parse-type a (try! (need [Sexp] (sx-get ret-l 1) "(-> ) missing type"))))]
               (let [mp (alloc-stack TraitMethod)] (store! (field mp name) mname) (store! (field mp params) (box-al [Param] a (load params))) (store! (field mp ret) ret) (al-push! (mut methods) (load mp)))))))))
-    (Ok (let [t (alloc-stack TraitDef)] (store! (field t name) name) (store! (field t self_param) self-param) (store! (field t type_params) (box-al [(slice u8)] a (load type-params))) (store! (field t methods) (box-al [TraitMethod] a (load methods))) (load t))))))
+    (Ok (let [t (alloc-stack TraitDef)] (store! (field t name) name) (store! (field t self_param) self-param) (store! (field t type_params) (box-al [(slice u8)] a (load type-params))) (store! (field t requires) (box-al [(slice u8)] a (load requires))) (store! (field t methods) (box-al [TraitMethod] a (load methods))) (load t))))))
 
 ; `(impl Trait Type …)` or the GENERIC form `(impl [T] Trait (ArrayList T) …)`
 ; (src/parse.rs parse_impl): an optional leading type-parameter vector, then the
