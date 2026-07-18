@@ -1248,6 +1248,26 @@
   (match errf
     (Some [d] (Err [CtVal Diag] d))
     (None [] (Ok [CtVal Diag] (if (icmp-eq op 12) (CCode (sx-sym name)) (CStr name))))))
+; A type reference in Code — a bare type symbol `Point`, or a generic instantiation
+; `(Gen A B)` — mangled to ONE valid symbol so a macro can mint a name for a derived
+; helper over a generic instance (the same shape `code-field-count` accepts). Mirrors
+; the monomorphizer's naming scheme: base, then `__` and each argument's own mangle;
+; an int (an array size) is its decimal digits. Deterministic, valid symbol characters
+; only. Returns "" for a shape that is not a nameable type — the caller errors.
+(defn inst-node-mangle [(a (ptr Allocator)) (node Sexp)] (-> (slice u8))
+  (let [tg (sx-tag node)]
+    (if (or (icmp-eq tg 2) (icmp-eq tg 4)) (sx-sval node)
+    (if (icmp-eq tg 0) (dec->str a (sx-ival node))
+    (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+        (let [items (sx-items node) n (sx-len items)]
+          (if (or (icmp-eq n 0) (icmp-ne (sx-tag (sx-at items 0)) 2)) ""
+            (let [(mut s) (sx-sval (sx-at items 0)) (mut i) 1]
+              (loop (if (icmp-ge (load i) n) (break)
+                (let [part (inst-node-mangle a (sx-at items (load i)))]
+                  (if (str-eq part "") (do (store! s "") (break))
+                    (do (store! s (sconcat a (load s) (sconcat a "__" part))) (store! i (iadd (load i) 1)))))))
+              (load s))))
+      "")))))
 (defn concat-one! [(a (ptr Allocator)) (buf (mut (ArrayList u8))) (v CtVal) (tg i64)] (-> (Option Diag))
   (if (icmp-eq tg 3) (do (append-bytes! (mut buf) (cstr-of v)) (None [Diag]))
   (if (icmp-eq tg 0) (do (append-bytes! (mut buf) (dec->str a (cint-of v))) (None [Diag]))
@@ -1255,7 +1275,11 @@
       (let [c (ccode-of v) ctg (sx-tag c)]
         (if (or (icmp-eq ctg 2) (icmp-eq ctg 4)) (do (append-bytes! (mut buf) (sx-sval c)) (None [Diag]))
         (if (icmp-eq ctg 0) (do (append-bytes! (mut buf) (dec->str a (sx-ival c))) (None [Diag]))
-            (Some (derr "comptime: code-symbol/str part must be a symbol/string/int")))))
+        (if (or (icmp-eq ctg 6) (icmp-eq ctg 7))
+            (let [m (inst-node-mangle a c)]
+              (if (str-eq m "") (Some (derr "comptime: code-symbol/str part is not a nameable type (expected a symbol, string, int, or instantiation (Gen …))"))
+                (do (append-bytes! (mut buf) m) (None [Diag]))))
+            (Some (derr "comptime: code-symbol/str part must be a symbol/string/int"))))))
       (Some (derr "comptime: code-symbol/str part must be a string/int/code"))))))
 (defn concat-into! [(args (ptr (ArrayList CtVal))) (i i64) (n i64) (a (ptr Allocator)) (buf (mut (ArrayList u8)))] (-> (Option Diag))
   (if (icmp-ge i n) (None [Diag])
@@ -1407,6 +1431,16 @@
                     (store! i (iadd (load i) 1)))))
               (match (load errf) (Some [d] (Err [CtVal Diag] d))
                 (None [] (Ok [CtVal Diag] (CCode (sx-mkstr (al-slice [u8] (load buf))))))))))))))
+; op 38 — int->str: an integer (or int Code) to its decimal (slice u8), so name
+; generation from a counter/index is a one-liner instead of round-tripping bytes->str.
+(defn cop-inttostr [(args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  (let [a (load (field cx a))]
+    (match (cv-get args 0)
+      (None [] (Err [CtVal Diag] (derr "comptime: int->str expects an integer")))
+      (Some [v]
+        (if (icmp-eq (ct-tag v) 0) (Ok [CtVal Diag] (CStr (i64->str a (cint-of v))))
+        (if (and (is-ccode v) (icmp-eq (sx-tag (ccode-of v)) 0)) (Ok [CtVal Diag] (CStr (i64->str a (sx-ival (ccode-of v)))))
+            (Err [CtVal Diag] (derr "comptime: int->str expects an integer"))))))))
 (defn cop-codearg [(op i64) (args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
   (let [a (load (field cx a))]
     (match (cv-get args 0)
@@ -1493,10 +1527,11 @@
     (if (or (icmp-eq op 22) (or (icmp-eq op 23) (or (icmp-eq op 24) (or (icmp-eq op 25) (or (icmp-eq op 26) (icmp-eq op 27)))))) (cop-trait op args cx)
     (if (icmp-eq op 28) (cop-strbytes args cx)
     (if (icmp-eq op 29) (cop-bytestostr args cx)
+    (if (icmp-eq op 38) (cop-inttostr args cx)
     (if (icmp-eq op 35) (cop-decl args cx)
     (if (icmp-eq op 36) (cop-type-of args cx)
     (if (icmp-eq op 37) (cop-binding-of args cx)
-        (cop-codearg op args cx)))))))))))))))))))
+        (cop-codearg op args cx))))))))))))))))))))
 (defn module-fns-has [(cx (ptr CtCtx)) (q (slice u8))] (-> bool)
   (let [lst (load (field cx module_fns)) n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut r) false]
     (loop (if (or (load r) (icmp-ge (load i) n)) (break)

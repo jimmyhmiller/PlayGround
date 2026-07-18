@@ -104,12 +104,18 @@
 ; growing a second implementation of it.
 (defn code-eq [(x (ptr Sexp)) (y (ptr Sexp))] (-> bool) (sexp-eq (load x) (load y)))
 
-; op 12 — build a symbol by concatenating a symbol's name with a suffix.
+; op 12 — build a symbol by concatenating a symbol's name with a suffix. A generic
+; instantiation `(Gen A B)` — the same shape `code-field-count` accepts — is mangled
+; deterministically (inst-node-mangle), so `derive` can mint a name over a generic
+; instance instead of failing here.
 (defn code-symbol [(c (ptr Sexp)) (suffix (slice u8))] (-> (ptr Sexp))
   (let [a (malloc-allocator)
         base (if (icmp-eq (code-tag c) 2) (sx-sval (load c))
                (if (icmp-eq (code-tag c) 4) (sx-sval (load c))
-                 (do (code-die "code-symbol expects a symbol or string") "")))
+                 (if (or (icmp-eq (code-tag c) 6) (icmp-eq (code-tag c) 7))
+                     (let [m (inst-node-mangle a (load c))]
+                       (if (str-eq m "") (do (code-die "code-symbol expects a symbol, string, or type instantiation (Gen …)") "") m))
+                   (do (code-die "code-symbol expects a symbol, string, or type instantiation (Gen …)") ""))))
         p (unwrap-ptr [Sexp] (create [Sexp] a))]
     (store! p (mk-sexp (KSym (sconcat a base suffix)) -1 -1))
     p))

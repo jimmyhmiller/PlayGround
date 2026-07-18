@@ -42,7 +42,14 @@ Rust-like ownership dialect, a Scheme frontend).
 - **Take Code apart:** `code-count`, `code-nth`, `code-rest`, `code-sym`,
   `code-list?`, `code-sym?`, `code-int?`, `code-keyword?`, `code-str`, `code-eq`.
 - **Build Code:** quote `` ` ``, unquote `~`, splice `~@`, `code-symbol` (make a
-  name from a string), `gensym` (fresh hygienic name).
+  name from a symbol/string base plus suffix parts — an int part becomes its decimal
+  digits, and a **generic instantiation** base `(Gen A B)`, the same shape
+  `code-field-count` accepts, is mangled deterministically (`(Box i64)` → `Box__i64`)
+  so `derive` can name a helper over a generic instance), `code-str` (same, yielding a
+  string), `gensym` (fresh hygienic name).
+- **Bytes ↔ names:** `(int->str N)` → the integer's decimal as a `(slice u8)`, so a
+  name minted from a counter/index is one call; `(str-bytes S)` → a Code list of a
+  string's byte values; `(bytes->str LIST)` → the inverse (list of ints → string).
 - **Reflect on types:** `code-field-count/name/kind/type`, `code-variant-*`,
   `code-trait-*` (and value-form `field-count`, `struct?`, `field-name`, …).
   Kind tags: `0=int 1=float 2=bool 3=struct 4=sum 5=ptr 6=array 7=slice 8=other`.
@@ -144,6 +151,16 @@ Metaprograms run on one of two engines with **one semantics**:
   `comptime.coil` evaluates the checked metaprogram AST. Its long-standing gaps —
   no generics, no collection instantiation, no function pointers, no FFI, no raw
   memory — are why it is no longer the default. It remains the parity oracle.
+
+**Which kind runs on which engine.** The compiled engine took over exactly the
+call-site kinds: **macros, checkers and transforms** run compiled (native) by default.
+**`(meta …)` generators and `(comptime E)` / `(const …)` folding always run on the
+interpreter** — even in a compiled-engine build — so they still see its gaps (no
+generics/FFI/raw memory). This is why the *same* helper can succeed when called from a
+macro yet fail (or word its error differently) when reached from `(meta …)`: the two
+call sites are executed by two different engines. `COIL_META=interp` forces the
+call-site kinds onto the interpreter as well, restoring one engine for everything (the
+parity oracle).
 
 **Macro bodies can call macros** (the TOWER): `when`/`cond`/`try!`/`fmt` inside a
 metaprogram's own body expand at definition time, type-directedly — a call to a

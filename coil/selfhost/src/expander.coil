@@ -191,6 +191,21 @@
             (FVal [v] (if (is-ccode v) (Ok [Sexp Diag] (ccode-of v)) (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' did not return Code")))))
             (FBrk [vv ll] (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "': stray control flow"))))
             (FCont [ll]   (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "': stray control flow"))))))))))
+; A macro-BODY error comes back with a dummy span — the code-op derrs (`str-bytes
+; expects a string`, `error …`, arity mismatches) carry none, so it renders as a bare
+; internal message that names, e.g., `str-bytes`, with no source. Point it at the macro
+; CALL SITE `node` and name the calling macro, so it reads as a located `in expansion of
+; macro 'X': …` underlined at the call. A diag that ALREADY has a real span (e.g. a
+; located `(report …)`, or a typecheck error on the expanded output) is left untouched.
+(defn locate-macro-err [(a (ptr Allocator)) (d Diag) (node (ptr Sexp)) (fn-name (slice u8))] (-> Diag)
+  (let [dp (alloc-stack Diag)] (store! dp d)
+    (if (icmp-ge (load (field dp lo)) 0) (load dp)
+      (do (store! (field dp source) (sx-source (load node)))
+          (store! (field dp lo) (sx-lo (load node)))
+          (store! (field dp hi) (sx-hi (load node)))
+          (store! (field dp ctxt) (sx-ctxt (load node)))
+          (store! (field dp msg) (sconcat a (sconcat3 a "in expansion of macro '" fn-name "': ") (load (field dp msg))))
+          (load dp)))))
 (defstruct ExpEnv
   [(macros (ptr (ArrayList (slice u8)))) (comptime (ptr (ArrayList (slice u8))))
    (sub (ptr Program)) (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry))) (a (ptr Allocator))])
@@ -1085,12 +1100,17 @@
     (store! (field s loaderr_set) false)
     (store! (field s srccount) 1)
     (register-source! (mut s) path src)              ; real path -> code-from-user? true
+    ; A macro/expansion failure is a real error: route it through the SAME located
+    ; diagnostic printer build/run use (report-diag, on stderr) and exit non-zero.
+    ; Nothing goes to stdout on failure — `coil expand` is a debugger, not a liar.
     (match (read-all a src 0)
-      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Err [d] (do (report-diag (stderr) (mut s) d) 1))
       (Ok [forms]
         (do (load-program (mut s) forms cwd)
+          (if (ls-err? (mut s))
+              (do (report-diag (stderr) (mut s) (load (field s loaderr))) 1)
             (match (expand-stage3 (mut s))
-              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+              (Err [d] (do (report-diag (stderr) (mut s) d) 1))
               (Ok [_]
                 ; run the transform fixpoint (mutates s.out to the rewritten program);
                 ; print regardless of whether the final strict check passes.
@@ -1102,5 +1122,4 @@
                               (if (icmp-eq (sx-source (load fp)) 0)
                                   (do (sx-emit w a (load fp) 0) (wb w 10) (wb w 10) 0) 0))
                             (store! i (iadd (load i) 1)))))
-                      0))))))))
-  0)
+                      0))))))))))

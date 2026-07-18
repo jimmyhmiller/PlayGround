@@ -375,18 +375,36 @@ vtables). Take Code apart with `code-count`/`code-nth`/`code-rest`/`code-sym`
 /`code-list?`/`code-sym?`/`code-int?`. This makes `derive` (`derive.coil`:
 eq/hash/keyops) a pure library, not a compiler builtin.
 
+**Minting names.** `(code-symbol NAME SUFFIX…)` builds a fresh symbol by concatenating
+a symbol/string base with the given parts (ints become their decimal digits) — the
+usual way `derive` names a generated helper (`(code-symbol T \"-eq\")` → `T-eq`). A base
+may also be a **generic instantiation** `(Gen A B)` — the same shape `code-field-count`
+accepts — mangled deterministically (`(Box i64)` → `Box__i64`), so `derive` works over a
+generic instance. `(code-str …)` is the same but yields a string instead of a symbol.
+For raw byte↔name plumbing: `(int->str N)` → the integer's decimal as a `(slice u8)`
+(so name generation from a counter is one call); `(str-bytes S)` → a Code list of the
+string's byte values; `(bytes->str LIST)` → the inverse. These run in both engines.
+
 ## Metaprograms: whole-program checkers & transforms
 
 A **metaprogram** is an ordinary Coil function that runs at compile time and operates
 on the program. There is no metalanguage — it is Coil over Coil, and it is compiled
 and run as native code. Four kinds, told apart only by what they receive:
 
-| kind | signature | receives | does |
-|---|---|---|---|
-| macro | `[Code…] (-> Code)` | its own call site | expands inline |
-| generator | via `(meta …)` | nothing | adds top-level forms |
-| **checker** | `[(prog Code)] (-> Code)` | every module | reports / vetoes |
-| **transform** | `[(prog Code)] (-> Code)` | every module | rewrites the program |
+| kind | signature | receives | does | engine |
+|---|---|---|---|---|
+| macro | `[Code…] (-> Code)` | its own call site | expands inline | compiled |
+| generator | via `(meta …)` | nothing | adds top-level forms | interpreter |
+| **checker** | `[(prog Code)] (-> Code)` | every module | reports / vetoes | compiled |
+| **transform** | `[(prog Code)] (-> Code)` | every module | rewrites the program | compiled |
+
+⚠ **Two engines, and they are not the same.** Macros, checkers and transforms run on
+the **compiled** engine (native code — full language: generics, collections, FFI,
+allocation). `(meta …)` generators and `(comptime E)` / `(const …)` folding run on the
+**interpreter** (`comptime.coil`) — a weaker sublanguage (no generics, FFI or raw
+`sizeof`). So the *same* helper can succeed from a macro yet fail from `(meta …)`, and
+the two may word an error differently. `COIL_META=interp` forces macros onto the
+interpreter too (the parity oracle); `COIL_META=compiled` forces the engine on.
 
 Macros you *call*; checkers and transforms you **register** at top level:
 
