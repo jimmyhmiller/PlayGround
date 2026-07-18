@@ -4056,6 +4056,31 @@ impl<M: ValueModel> Runtime<M> {
         resolved
     }
 
+    /// The impl this dispatch SITE was last observed resolving to, from the
+    /// per-site cache `resolve_or_default` fills while the program runs
+    /// interpreted. A compiling backend reads it to SPECULATE: a site that was
+    /// monomorphic during warmup can inline the impl's body behind a guard
+    /// instead of paying a call (see `emit_value_specialized`). This is the only
+    /// compile-time window into a site's receiver type — the JIT's own per-site
+    /// IC is still empty the first time a body is compiled.
+    ///
+    /// The epoch is re-checked, so a hit means NO collection and NO redefinition
+    /// since the fill: the returned bits are a live, valid impl address that is
+    /// safe to inspect. (Speculation is still only a hint — the emitted guard
+    /// re-checks the live value, so a stale observation costs a failed guard,
+    /// never a wrong answer.)
+    pub fn observed_dispatch_impl(&self, site: usize) -> Option<u64> {
+        let reloc = self.shared.relocated.load(Ordering::Relaxed);
+        let ver = self.shared.dispatch_version.load(Ordering::Relaxed);
+        let epoch = reloc.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ver;
+        let ic = self.site_ic.borrow();
+        let &(e, t, imp) = ic.get(site)?;
+        if e != epoch || t == Sym::MAX || imp == 0 {
+            return None;
+        }
+        Some(imp)
+    }
+
     /// A fresh tag for an escape continuation.
     pub fn fresh_escape_tag(&self) -> u64 {
         self.shared.escape_tags.fetch_add(1, Ordering::Relaxed) + 1

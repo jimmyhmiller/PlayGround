@@ -1614,6 +1614,17 @@ pub trait ModelArithJit: ModelEmit {
     ) -> Option<(Value, Value)> {
         None
     }
+    /// Emit the tagged `rem` of two immediate-fixnum words. The generic
+    /// spelling untags, takes the remainder and retags; a model whose int
+    /// encoding is a pure left-shift can skip both, because `(x*k) % (y*k)` is
+    /// `(x % y)*k`. The caller has already proved both operands are fixnums and
+    /// that the divisor is nonzero.
+    fn emit_srem_tagged(c: &mut Compiler, a: Value, b: Value) -> Value {
+        let x = Self::emit_untag(c, a);
+        let y = Self::emit_untag(c, b);
+        let r = c.fb.ins().srem(x, y);
+        Self::emit_tag(c, r)
+    }
     /// Emit: the signed i64 VALUE of immediate int `v` (untagged).
     fn emit_untag(c: &mut Compiler, v: Value) -> Value;
     /// Emit: encode signed i64 `x` back into an immediate int word.
@@ -1705,6 +1716,12 @@ impl ModelArithJit for crate::model::LowBitModel {
             (v.0, v.1)
         };
         Some((r, ovf))
+    }
+    fn emit_srem_tagged(c: &mut Compiler, a: Value, b: Value) -> Value {
+        // LB_INT is 0b000, so a tagged fixnum IS `v << 3` and `(x<<3) % (y<<3)`
+        // is `(x % y) << 3` — already correctly tagged. Truncating remainder,
+        // so the sign follows the dividend on both sides of the identity.
+        c.fb.ins().srem(a, b)
     }
     fn emit_untag(c: &mut Compiler, v: Value) -> Value {
         c.fb.ins().sshr_imm(v, 3) // arithmetic shift drops the tag, keeps sign
@@ -2439,11 +2456,30 @@ impl<M: ModelArithJit> JitCranelift<M> {
         if std::env::var_os("MICROLANG_JIT_TRACE").is_some() {
             eprintln!("[jit-compile] #{n} arity={:?} mem={} nparams={} var={} ir_ptr={:p}", shape.entry_arity, shape.mem_mode, shape.nparams, shape.variadic, ir as *const Ir);
         }
+        // The Cranelift IR actually handed to the backend, for reading what a
+        // body's hot loop really costs. `dump_ir` can only show a synthetic
+        // top-level shape; this shows the REAL compile, entry arity and all.
+        if std::env::var_os("MICROLANG_JIT_CLIF").is_some() {
+            eprintln!("[jit-clif] #{n} arity={:?} nparams={}\n{}", shape.entry_arity, shape.nparams, ctx.func.display());
+        }
         let name = format!("ml_body_{n}");
         let id = module
             .declare_function(&name, Linkage::Local, &ctx.func.signature)
             .expect("declare body");
+        // The MACHINE CODE, block by block. The CLIF above says what we asked
+        // for; this says what the loop actually costs — how many instructions
+        // and, decisively for a hot loop, how many TAKEN branches an iteration
+        // retires. Disassembly has to be requested before `define_function`.
+        let want_asm = std::env::var_os("MICROLANG_JIT_ASM").is_some();
+        if want_asm {
+            ctx.set_disasm(true);
+        }
         module.define_function(id, &mut ctx).expect("define body");
+        if want_asm {
+            if let Some(vc) = ctx.compiled_code().and_then(|cc| cc.vcode.as_ref()) {
+                eprintln!("[jit-asm] #{n} arity={:?} nparams={}\n{vc}", shape.entry_arity, shape.nparams);
+            }
+        }
         // Stage E: lift this body's user stack maps out of the compile context
         // BEFORE it is cleared — (return-address offset, frame active size,
         // SP-relative root slot offsets) per safepoint.
@@ -4625,7 +4661,14 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 | Prim::Eq
                 | Prim::BitAnd
                 | Prim::BitOr
-                | Prim::BitXor),
+                | Prim::BitXor
+                // `quot`/`rem` had NO inline path at all: every one was a full
+                // shim call. Measured, a loop of `(+ a (rem i 128))` ran 4.9x
+                // faster once they were inlined — the single `rem` had been
+                // costing more than the whole rest of the iteration. They guard
+                // and promote exactly like the others.
+                | Prim::Quot
+                | Prim::Rem),
                 args,
             ) => {
                 let a = self.compile::<M>(&args[0], false);
@@ -5366,6 +5409,17 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     return self
                         .call_shim_checked(self.refs.dispatch, &[ctx, sitev, methodv, addr, count]);
                 }
+                // Plan the speculation BEFORE emitting: the impl this site was
+                // observed resolving to while interpreted, if its body is small
+                // enough to fit the inline budget (the same size policy the
+                // value inliner uses — no per-method special-casing anywhere).
+                let inline_plan: Option<ValuePlan> = if self.rt_ptr.is_null() {
+                    None
+                } else {
+                    let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                    rt.observed_dispatch_impl(*site)
+                        .and_then(|imp| self.try_value_inline_plan::<M>(imp, argvals.len()))
+                };
                 let flags = MemFlagsData::trusted();
                 let ro = MemFlagsData::trusted().with_readonly();
                 let result = self.declare_root_var();
@@ -5507,7 +5561,24 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 };
                 let way1b = self.fb.create_block();
                 let (imp0, _b0) = probe(self, 0, way1b);
-                let r0 = self.emit_call::<M>(imp0, &argvals);
+                // SPECULATIVE INLINING THROUGH THE DISPATCH SITE. An IC hit
+                // still paid a full call — and for the small bodies that host
+                // methods and protocol impls actually have (`.charAt` is one
+                // prim; `-write` a handful of nodes), that call IS the cost:
+                // measured 28x JVM on a `.charAt` loop where the JVM inlines the
+                // accessor outright. `dispatch_plan` reads the impl this site was
+                // observed resolving to while interpreted and splices its body in
+                // behind the same meta-word guard the value inliner uses, with
+                // the ordinary call as the deopt edge.
+                //
+                // Way 0 ONLY: a site we speculate on is monomorphic by
+                // construction (that is what made a plan), so way 0 is where it
+                // hits; inlining way 1 as well would double the emitted body to
+                // serve the case the speculation says does not happen.
+                let r0 = match &inline_plan {
+                    Some(p) => self.emit_value_specialized::<M>(imp0, &argvals, p),
+                    None => self.emit_call::<M>(imp0, &argvals),
+                };
                 self.fb.def_var(result, r0);
                 self.fb.ins().jump(merge, &[]);
                 self.fb.switch_to_block(way1b);
@@ -5854,7 +5925,36 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.def_var(result, tagged);
                 self.fb.ins().jump(merge, &[]);
             }
-            _ => unreachable!("emit_guarded_arith only handles +,-,*,<,=,and/or/xor"),
+            Prim::Quot | Prim::Rem => {
+                // Both operands are fixnums here. A ZERO divisor keeps the slow
+                // path: the runtime raises `quot/rem: divide by zero` with the
+                // right message, and it also keeps Cranelift's trapping `sdiv`/
+                // `srem` off a zero it would fault on.
+                let nz = self.fb.ins().icmp_imm(IntCC::NotEqual, b, 0);
+                let ok = self.fb.create_block();
+                self.fb.ins().brif(nz, ok, &[], slow, &[]);
+                self.fb.switch_to_block(ok);
+                self.fb.seal_block(ok);
+                if let Prim::Rem = op {
+                    // `rem` needs NO untag/retag under a scaled encoding: the
+                    // tag is a constant left-shift, and `(x*k) % (y*k)` is
+                    // `(x % y)*k`. The remainder's magnitude is below the
+                    // divisor's, so the result is always in fixnum range.
+                    let r = M::emit_srem_tagged(self, a, b);
+                    self.fb.def_var(result, r);
+                    self.fb.ins().jump(merge, &[]);
+                } else {
+                    // `quot` divides the scale out, so the quotient comes back
+                    // untagged and is retagged. It has exactly ONE out-of-range
+                    // case — `FIXNUM_MIN / -1` is `2^60`, one past FIXNUM_MAX —
+                    // so it range-checks like add/sub and promotes on overflow.
+                    let x = M::emit_untag(self, a);
+                    let y = M::emit_untag(self, b);
+                    let q = self.fb.ins().sdiv(x, y);
+                    self.emit_range_check_and_retag::<M>(q, result, slow, merge);
+                }
+            }
+            _ => unreachable!("emit_guarded_arith only handles +,-,*,quot,rem,<,=,and/or/xor"),
         }
 
         // ── slow path: promote / handle non-fixnum operands in the runtime ──

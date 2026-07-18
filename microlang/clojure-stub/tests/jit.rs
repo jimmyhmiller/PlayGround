@@ -159,6 +159,70 @@ fn bitwise_fast_path_on_jit() {
     assert_eq!(jit("(try (even? 1.5) (catch Exception e :caught))"), ":caught");
 }
 
+/// The INLINED `quot`/`rem` fast path. Both used to reach the generic prim
+/// shim on EVERY evaluation — a call per operation — which cost more than the
+/// rest of a loop iteration put together (a `(+ a (rem i 128))` loop ran 4.9x
+/// faster once they were inlined).
+///
+/// `rem` is emitted as a remainder on the TAGGED words, which is only valid
+/// because the int encoding is a pure left-shift: `(x*k) % (y*k) == (x % y)*k`.
+/// That identity is where a sign or scaling slip would hide, so every sign
+/// combination is pinned here, along with the two cases the fast path must
+/// REFUSE to handle itself: a zero divisor (the runtime raises), and the one
+/// quotient that leaves fixnum range (`FIXNUM_MIN / -1` is `2^60`, one past
+/// `FIXNUM_MAX`) and so has to promote rather than wrap.
+///
+/// Every expectation below was checked against real JVM Clojure.
+#[test]
+fn quot_rem_fast_path_on_jit() {
+    // truncating division: the remainder takes the DIVIDEND's sign, the
+    // quotient the sign of the pair — all four combinations.
+    assert_eq!(jit("[(quot 10 3) (quot -10 3) (quot 10 -3) (quot -10 -3)]"), "[3 -3 -3 3]");
+    assert_eq!(jit("[(rem 10 3) (rem -10 3) (rem 10 -3) (rem -10 -3)]"), "[1 -1 1 -1]");
+    // exact division and a zero dividend leave no remainder
+    assert_eq!(jit("[(quot 7 7) (rem 7 7) (quot 0 7) (rem 0 7)]"), "[1 0 0 0]");
+    // the fixnum boundaries survive the tagged remainder
+    assert_eq!(jit("(quot 1152921504606846975 1)"), "1152921504606846975");
+    assert_eq!(jit("(rem 1152921504606846975 1152921504606846975)"), "0");
+    assert_eq!(jit("(quot -1152921504606846976 1)"), "-1152921504606846976");
+    // the ONE quotient that overflows fixnum range: it must PROMOTE, not wrap.
+    assert_eq!(jit("(quot -1152921504606846976 -1)"), "1152921504606846976");
+    // a non-fixnum operand is not ours: the guard routes it to the runtime.
+    assert_eq!(jit("(quot 10000000000000000000000N 10000000000000000000000N)"), "1");
+    // A zero divisor must not reach the inlined divide — the guard hands it to
+    // the runtime, which is also what keeps a trapping `sdiv`/`srem` off a zero
+    // it would fault on. It is NOT asserted here because the runtime's
+    // `divide by zero` is a Rust panic that aborts the process rather than a
+    // catchable Clojure `ArithmeticException`. That divergence is pre-existing
+    // and tier-independent (the tree-walk tier aborts identically, from the same
+    // `int_div`), so it is out of scope for the fast path — but it means this
+    // case cannot be covered by an in-process test until the runtime raises.
+}
+
+/// Fixnum-range overflow INSIDE a native self-loop, where the loop-carried
+/// accumulator crosses `FIXNUM_MAX` mid-flight. The JIT's arithmetic fast paths
+/// are only sound because that case leaves them for the runtime's promoting
+/// path, so the loop has to keep answering exactly what the tree-walk tier does
+/// once the accumulator stops being a fixnum. Wrapping here would be silent.
+#[test]
+fn loop_accumulator_promotes_past_fixnum_max_on_jit() {
+    // +: steps over 2^60 while looping.
+    let add = "(loop [i 0 a 1152921504606846000] (if (< i 20) (recur (inc i) (+ a 1000000)) a))";
+    assert_eq!(jit(add), "1152921504626846000");
+    // *: blows well past the fixnum range and keeps multiplying as a bigint.
+    let mul = "(loop [i 0 a 1] (if (< i 80) (recur (inc i) (* a 3)) a))";
+    assert_eq!(jit(mul), "147808829414345923316083210206383297601");
+    // quot's overflow case, reached repeatedly from inside the loop.
+    let q = "(loop [i 0 a 0] (if (< i 5) (recur (inc i) (+ a (quot -1152921504606846976 -1))) a))";
+    assert_eq!(jit(q), "5764607523034234880");
+    // and the JIT must agree with the tree-walk tier on all three.
+    for src in [add, mul, q] {
+        let mut rt = Runtime::<LowBitModel>::new();
+        let r = clojure_stub::run(&mut rt, &microlang::code::TreeWalk, src);
+        assert_eq!(clojure_stub::clj_str(&rt, r), jit(src), "tier divergence on {src}");
+    }
+}
+
 #[test]
 fn persistent_vector_on_jit() {
     assert_eq!(jit("(conj [1 2] 3)"), "[1 2 3]");
