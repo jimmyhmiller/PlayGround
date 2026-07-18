@@ -1549,13 +1549,21 @@
       (line (cast f64 rightStart) 0.0 (cast f64 rightStart) (cast f64 screenHeight) 1.0 (color 23 30 39))
       (line (cast f64 rightStart) 78.0 (cast f64 screenWidth) 78.0 1.0 (color 20 26 34))
       (draw-text (field state monoMedium) c"WORKFLOW DESIGNER" contentLeft 18.0 14.0 (color 223 229 236))
-      (fill-rectangle contentLeft 49.0 6.0 6.0 (if (= (load (field state designState)) 1) tint (color 104 207 167)))
+      (fill-rectangle contentLeft
+                      49.0
+                      6.0
+                      6.0
+                      (cond (= (load (field state designState)) 1) (load tint)
+                            (= (load (field state designState)) 3) (color 211 91 85)
+                            (color 104 207 167)))
       (draw-text (field state mono)
-                 (if (= (load (field state designState)) 1) c"INSPECTING REPOSITORY..." c"READY TO DISCOVER")
+                 (cond (= (load (field state designState)) 1) c"INSPECTING REPOSITORY..."
+                       (= (load (field state designState)) 3) c"DESIGNER FAILED - SEE .flowline/design.events"
+                       c"READY TO DISCOVER")
                  (+ contentLeft 16.0)
                  43.0
                  9.0
-                 (color 76 85 97))
+                 (if (= (load (field state designState)) 3) (color 211 91 85) (color 76 85 97)))
       (draw-card-background contentLeft 104.0 (cast f64 (- RIGHT_WIDTH 40)) 116.0 true tint)
       (draw-text (field state monoMedium) c"DESIGNER" (+ contentLeft 14.0) 118.0 9.0 tint)
       (selectable-text (mut state)
