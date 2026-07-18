@@ -5,7 +5,7 @@ eval channel — compiled to `wasm32-unknown-unknown` and running in a JS host. 
 foundation for the in-browser prototype (viewer + agent TUI, no server, no native process).
 
 Design + rationale: [`../docs/08-wasm-port.md`](../docs/08-wasm-port.md).
-Outstanding Coil-side asks: [`../docs/09-coil-asks.md`](../docs/09-coil-asks.md).
+Coil-side asks (all landed): [`../docs/09-coil-asks.md`](../docs/09-coil-asks.md).
 
 ## Build
 
@@ -42,9 +42,9 @@ node test-swap.mjs   # hot body-swap: greet() 1 -> redefine -> 99
   Verified: 200 consecutive panics, 200 typed errors, 200/200 healthy evals in between,
   heap intact.
 
-  ⚠ **Needs `__stack_pointer` exported** — see [ask A1](../docs/09-coil-asks.md). Until then
-  each panic leaks ~111 bytes and the instance dies after ~9421 panics. `evalRaw` already
-  restores it when present, so the export alone closes the leak.
+  The unwind leaves **no** trace: the host restores the shadow stack via the exported
+  `__stack_pointer` global, so the pointer returns to exactly its post-boot value after
+  thousands of panics (`drift=0`). `test-panic.mjs` guards against any regression.
 
 ## The bridge (`scry-wasm.js`)
 

@@ -11,7 +11,7 @@ the unmodified `examples/assistant.scry` all run in the browser.
 
 ---
 
-## A1 — Export `__stack_pointer` ⭐ REQUIRED — ✅ LANDED
+## A1 — Export `__stack_pointer` ✅ DONE (2026-07-18) — ✅ LANDED
 
 **Landed.** `selfhost/src/wasm.coil`'s finalizer now exports the shadow-stack pointer global
 as `__stack_pointer` (kind-3 global export) whenever the object uses the shadow stack, right
@@ -19,8 +19,14 @@ beside the existing `__heap_base` export. `wasm-tools print` shows
 `(export "__stack_pointer" (global 0))` and the module validates; the JS bridge restores SP
 on unwind, closing the ~111 B/panic leak. Regression in `selfhost/oracle/gate-cli.sh`.
 
-**What breaks without it.** The uncrashable-eval invariant leaks, and the instance eventually
-dies. Measured: **~111 bytes leaked per eval panic, hard failure at ~9421 panics** with
+**Verified fixed.** The module now exports `(export "__stack_pointer" (global 0))`, and the
+host restores it after unwinding. Measured after the fix: the stack pointer returns to
+**exactly** its post-boot value after 1 / 10 / 100 / 1000 / 5000 / 12000 panics — `drift=0`,
+zero unrestorable cases, VM healthy and heap intact throughout (the old build died at ~9421).
+`wasm/test-panic.mjs` now guards this permanently.
+
+**What used to break.** The uncrashable-eval invariant leaked and the instance eventually
+died: **~111 bytes per eval panic, hard failure at ~9421 panics** with
 `RuntimeError: memory access out of bounds`.
 
 **Why.** wasm32 has no `setjmp`/`longjmp`, so Scry's eval landing pad is implemented by the
