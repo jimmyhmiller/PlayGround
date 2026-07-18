@@ -104,6 +104,27 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
     let split = crate::route_split::split_reference_route(path, source);
     let source = split.as_deref().unwrap_or(source);
 
+    // A module defining `createServerFn(...).handler(fn)` is rewritten per target:
+    // the client gets a thin RPC stub keyed by the function's deterministic id
+    // (dropping the server handler body), the server keeps the real handler and
+    // wraps an in-process runner. Gated on a cheap string check, so non-server-fn
+    // modules pay nothing; an unsupported server-fn shape is a hard error, never a
+    // silent miscompile.
+    let server_fn = match crate::server_fn::transform_server_fns(path, source, target) {
+        Ok(rewritten) => rewritten,
+        Err(error) => {
+            return TransformResult {
+                code: String::new(),
+                diagnostics: vec![error],
+                is_esm: true,
+                dependencies: Vec::new(),
+                dependency_demands: Vec::new(),
+                flat_module: None,
+            };
+        }
+    };
+    let source = server_fn.as_deref().unwrap_or(source);
+
     let transform_started = frontend_profile::start();
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path)

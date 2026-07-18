@@ -294,7 +294,7 @@ impl ModuleFormat {
 /// the entry (before any module code, and before any dynamically-imported chunk
 /// loads). This is a correct value for the production client build, not a
 /// fabricated stub.
-const BROWSER_GLOBALS_PRELUDE: &str = "globalThis.process=globalThis.process||{};globalThis.process.env=globalThis.process.env||{};globalThis.process.env.NODE_ENV=globalThis.process.env.NODE_ENV||\"production\";\n";
+const BROWSER_GLOBALS_PRELUDE: &str = "globalThis.process=globalThis.process||{};globalThis.process.env=globalThis.process.env||{};globalThis.process.env.NODE_ENV=globalThis.process.env.NODE_ENV||\"production\";globalThis.process.env.TSS_SERVER_FN_BASE=globalThis.process.env.TSS_SERVER_FN_BASE||\"/_serverFn/\";\n";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EmitOptions {
@@ -1150,16 +1150,28 @@ impl Bundler {
         // id first.
         if let Some(source) = self.resolution_cache.virtual_module_source(&id) {
             let special = synthesize_virtual_module(source)?;
+            let resolved = resolve_special_dependencies(
+                &self.resolver,
+                &self.resolution_cache,
+                &id,
+                &special,
+                diagnostics,
+            );
+            let dependencies = resolved
+                .dependencies
+                .into_iter()
+                .map(|(specifier, target, demand)| (specifier, self.intern(target), demand))
+                .collect();
             return Ok(ModuleState {
                 hash: special.hash,
-                dependencies: Vec::new(),
-                pruned_imports: HashSet::new(),
+                dependencies,
+                pruned_imports: resolved.pruned_imports,
                 source: id.clone(),
                 flat_module: special.flat_module,
                 code: special.code,
                 assets: special.assets,
                 css: special.css,
-                externals: Vec::new(),
+                externals: resolved.externals,
             });
         }
         // A loader (query, stylesheet, or asset) may claim this id before it is
@@ -1621,7 +1633,14 @@ return __runtime.require({entry_runtime_id});"#
         let code = if format.is_esm() {
             let prelude = match format {
                 ModuleFormat::Esm if is_main => {
-                    "import { createRequire as __diffpackCreateRequire } from \"node:module\";\n"
+                    // `createStartHandler` reads `process.env.TSS_SERVER_FN_BASE`
+                    // at module-init time and caches it as the prefix it matches
+                    // server-function requests against, so the default must be in
+                    // place before any bundled module evaluates. This runs at the
+                    // very top of the entry, before the module-graph IIFE. It is a
+                    // `??=` default (never clobbers a real value) and a harmless
+                    // no-op for a non-TanStack Node bundle.
+                    "import { createRequire as __diffpackCreateRequire } from \"node:module\";\nprocess.env.TSS_SERVER_FN_BASE ??= \"/_serverFn/\";\n"
                 }
                 ModuleFormat::BrowserEsm if is_main => BROWSER_GLOBALS_PRELUDE,
                 _ => "",
@@ -2093,17 +2112,25 @@ fn load_uncached(
     // first.
     if let Some(source) = resolution_cache.virtual_module_source(&id) {
         let special = synthesize_virtual_module(source)?;
+        let mut diagnostics = Vec::new();
+        let resolved = resolve_special_dependencies(
+            resolver,
+            resolution_cache,
+            &id,
+            &special,
+            &mut diagnostics,
+        );
         return Ok(LoadedModule {
             hash: special.hash,
-            dependencies: Vec::new(),
-            pruned_imports: HashSet::new(),
+            dependencies: resolved.dependencies,
+            pruned_imports: resolved.pruned_imports,
             source: Arc::from(id.as_ref()),
             flat_module: special.flat_module,
             code: special.code,
-            diagnostics: Vec::new(),
+            diagnostics,
             assets: special.assets,
             css: special.css,
-            externals: Vec::new(),
+            externals: resolved.externals,
         });
     }
     // A loader (query, stylesheet, or asset) may claim this id before it is ever
@@ -2270,8 +2297,14 @@ fn synthesize_virtual_module(source: &str) -> Result<SpecialModule, String> {
         flat_module: transformed.flat_module,
         assets: Vec::new(),
         css: None,
-        dependency_specifiers: Vec::new(),
-        dependency_demands: Vec::new(),
+        // A virtual module may itself import real modules — the native server-fn
+        // resolver dynamically `import()`s each server-fn module by absolute path.
+        // Those specifiers MUST become graph edges (like a `?tsr-split` module's),
+        // or their lowered `__dynamic(require, …)` calls have no runtime map entry
+        // and fall through to a raw Node import of the untransformed source. The
+        // start-manifest virtual module imports nothing, so this is empty for it.
+        dependency_specifiers: transformed.dependencies,
+        dependency_demands: transformed.dependency_demands,
     })
 }
 

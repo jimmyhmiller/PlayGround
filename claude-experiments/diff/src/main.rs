@@ -137,6 +137,26 @@ fn run() -> Result<(), String> {
                     client_manifest.routes.len(),
                     client_manifest_path.display(),
                 );
+
+                // Server functions: register the native server-fn resolver module
+                // (`#tanstack-start-server-fn-resolver`) that `getServerFnById`
+                // dispatches through. It is generated from a pre-scan of the app
+                // source for `createServerFn(...).handler(...)` declarations, keyed
+                // by the same deterministic function id the server transform bakes
+                // into each handler — so an HTTP server-fn request reaches exactly
+                // the registered handler. Registered before discovery so the
+                // subpath import resolves to it instead of the framework's fake
+                // (undefined-returning) resolver.
+                let server_fns =
+                    diffpack::server_fn::scan_project_server_fns(Path::new(&project_root))?;
+                config.build.virtual_modules.push((
+                    diffpack::server_fn::RESOLVER_SPECIFIER.to_string(),
+                    diffpack::server_fn::generate_resolver_module(&server_fns),
+                ));
+                println!(
+                    "registered {} server function(s) in the native server-fn resolver",
+                    server_fns.len(),
+                );
             }
 
             println!(
