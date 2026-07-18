@@ -113,16 +113,30 @@
   (let [p1 (sconcat3 a "in module '" m "': '")
         p2 (sconcat3 a p1 rest "' is private to module '")]
     (sconcat3 a p2 target "' (add it to that module's (export …))")))
-; `where` is the enclosing function when there is one, else the module. The checker
-; emits this exact error for the same mistake and names the function; resolve named the
-; module, so the message a user saw depended on which phase happened to catch it — i.e.
-; on whether the file had a (module …) declaration.
-(defn undef-msg [(a (ptr Allocator)) (m (slice u8)) (fname (slice u8)) (func (slice u8))] (-> (slice u8))
-  (let [where (if (icmp-gt (slice-len [u8] fname) 0)
+; Every callable name in the def table — the candidate pool for an undefined-call
+; "did you mean" hint.
+(defn all-callables [(a (ptr Allocator)) (table (ptr (ArrayList DefEntry)))] (-> (ptr (ArrayList (slice u8))))
+  (let [n (al-len [DefEntry] (load table)) (mut i) 0 (mut out) (al-new [(slice u8)] a)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [cs (field (field (al-elem [DefEntry] table (load i)) defs) callables) cn (al-len [(slice u8)] (load cs)) (mut j) 0]
+            (loop (if (icmp-ge (load j) cn) (break)
+              (do (al-push! (mut out) (al-get [(slice u8)] (load cs) (load j))) (store! j (iadd (load j) 1))))))
+          (store! i (iadd (load i) 1)))))
+    (box-al [(slice u8)] a (load out))))
+; `where` names the enclosing function when there is one, else the module — the checker
+; emits this exact error and names the function, and resolve named only the module, so
+; which one a user saw depended on whether the file had a (module …) declaration (diag-1).
+; A "did you mean 'X'?" suggestion (nearest def-table name by edit distance) is appended
+; when there's a near miss (diag-6).
+(defn undef-msg [(a (ptr Allocator)) (c (ptr Ctx)) (func (slice u8))] (-> (slice u8))
+  (let [fname (load (field c fname))
+        where (if (icmp-gt (slice-len [u8] fname) 0)
                   (sconcat3 a "in '" fname "'")
-                (sconcat3 a "in module '" m "'"))
-        p1 (sconcat3 a where ": call to undefined function '" "")]
-    (sconcat3 a p1 func "'")))
+                (sconcat3 a "in module '" (load (field c m)) "'"))
+        base (sconcat a (sconcat3 a where ": call to undefined function '" "") (sconcat a func "'"))]
+    (match (nearest-name a (all-callables a (load (field c table))) func)
+      (None [] base)
+      (Some [s] (sconcat3 a base "; did you mean '" (sconcat a s "'?"))))))
 (defn extern-conflict-msg [(a (ptr Allocator)) (nm (slice u8))] (-> (slice u8))
   (sconcat3 a "extern '" nm "' declared with conflicting signatures"))
 (defn const-dup-msg [(a (ptr Allocator)) (nm (slice u8))] (-> (slice u8))
@@ -426,9 +440,10 @@
                   (if (and (load (field c strict)) (and (not (has-dot nf)) (not (set-contains (load (field c bareok)) nf))))
                       ; `ep` IS the call node — its span was right here and simply unused,
                       ; so the language's most common error lost its location the moment a
-                      ; file declared a module (i.e. in every real multi-file project).
+                      ; file declared a module (i.e. in every real multi-file project). The
+                      ; message itself now also carries the did-you-mean suggestion (diag-6).
                       (return-from :try
-                        (Err (dwspan (derr (undef-msg a (load (field c m)) (load (field c fname)) nf))
+                        (Err (dwspan (derr (undef-msg a c nf))
                                      (load (field ep source)) (load (field ep lo))
                                      (load (field ep hi)) (load (field ep ctxt)))))
                       0))

@@ -95,6 +95,71 @@
               (do (store! r (al-elem [Sig] (field cx sigs) (load i))) 0) 0)
           (store! i (iadd (load i) 1)))))
     (load r)))
+; Levenshtein edit distance between two byte slices. Cold path (only computed
+; when a call is already known-undefined), so a straightforward two-rolling-rows
+; DP in scratch heap memory is fine.
+(defn edit-dist [(a (ptr Allocator)) (s (slice u8)) (t (slice u8))] (-> i64)
+  (let [m (slice-len s) n (slice-len t)]
+    (if (icmp-eq m 0) n
+    (if (icmp-eq n 0) m
+      (let [prev (unwrap-ptr [i64] (alloc-slice [i64] a (iadd n 1)))
+            cur  (unwrap-ptr [i64] (alloc-slice [i64] a (iadd n 1)))
+            (mut j) 0]
+        (loop (if (icmp-gt (load j) n) (break) (do (store! (index prev (load j)) (load j)) (store! j (iadd (load j) 1)))))
+        (let [(mut i) 1]
+          (loop (if (icmp-gt (load i) m) (break)
+            (do (store! (index cur 0) (load i))
+                (let [(mut jj) 1]
+                  (loop (if (icmp-gt (load jj) n) (break)
+                    (let [cost (if (icmp-eq (cast i64 (slice-get s (isub (load i) 1))) (cast i64 (slice-get t (isub (load jj) 1)))) 0 1)
+                          del (iadd (load (index prev (load jj))) 1)
+                          ins (iadd (load (index cur (isub (load jj) 1))) 1)
+                          sub (iadd (load (index prev (isub (load jj) 1))) cost)
+                          mn (if (icmp-lt del ins) del ins)
+                          best (if (icmp-lt mn sub) mn sub)]
+                      (do (store! (index cur (load jj)) best) (store! jj (iadd (load jj) 1)))))))
+                (let [(mut k) 0]
+                  (loop (if (icmp-gt (load k) n) (break) (do (store! (index prev (load k)) (load (index cur (load k)))) (store! k (iadd (load k) 1))))))
+                (store! i (iadd (load i) 1)))))
+          (load (index prev n))))))))
+
+; The closest name in `cands` to `name` within a length-scaled edit budget (short
+; names need a near-exact match, long names tolerate more), or None when even the
+; nearest is too far to be a plausible typo. THE one "did you mean" ranking — both
+; the check-time (`suggest-callable`) and resolve-time undefined-name hints route
+; through it, so there is a single definition of what counts as a suggestion.
+(defn nearest-name [(a (ptr Allocator)) (cands (ptr (ArrayList (slice u8)))) (name (slice u8))] (-> (Option (slice u8)))
+  (let [n (al-len [(slice u8)] (load cands)) (mut i) 0
+        (mut best) -1 (mut bestnm) name
+        budget (let [l (slice-len name) t (udiv l 3)] (if (icmp-lt t 1) 1 t))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [cand (last-component (al-get [(slice u8)] (load cands) (load i)))]
+            (if (or (icmp-eq (slice-len cand) 0) (str-eq cand name)) 0
+              (let [d (edit-dist a name cand)]
+                (if (or (icmp-lt (load best) 0) (icmp-lt d (load best)))
+                    (do (store! best d) (store! bestnm cand) 0) 0))))
+          (store! i (iadd (load i) 1)))))
+    (if (and (icmp-ge (load best) 0) (icmp-le (load best) budget)) (Some (load bestnm)) (None [(slice u8)]))))
+
+; A "did you mean" suggestion for an undefined call `name`: the closest surface
+; name among all known signatures — the auto-referred core/stdlib (`println`/
+; `print`/…) is always among them, so a typo of a bundled name gets a hint even
+; with no explicit import.
+(defn suggest-callable [(a (ptr Allocator)) (cx (ptr Cx)) (name (slice u8))] (-> (Option (slice u8)))
+  (let [sigs (field cx sigs) n (al-len [Sig] (load sigs)) (mut names) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut names) (load (field (al-elem [Sig] sigs (load i)) name)))
+          (store! i (iadd (load i) 1)))))
+    (nearest-name a (box-al [(slice u8)] a (load names)) name)))
+
+; The undefined-call message, plus a "; did you mean 'X'?" tail when a plausibly
+; intended name exists. One definition, used by every call-check site below.
+(defn undefined-call-msg [(a (ptr Allocator)) (cx (ptr Cx)) (fname (slice u8)) (func (slice u8))] (-> (slice u8))
+  (let [base (sconcat3 a (sconcat3 a "in '" fname "': call to undefined function '") func "'")]
+    (match (suggest-callable a cx func)
+      (None [] base)
+      (Some [s] (sconcat3 a base "; did you mean '" (sconcat a s "'?"))))))
+
 (defn struct-find [(cx (ptr Cx)) (name (slice u8))] (-> (ptr StructInfo))
   (let [n (al-len [StructInfo] (load (field cx structs))) (mut i) 0 (mut r) (cast (ptr StructInfo) 0)]
     (loop (if (icmp-ge (load i) n) (break)
@@ -1312,7 +1377,10 @@
           (if (load failed2) (Err [Type Diag] (load err2)) (Ok (load (load target)))))))))
 
 ; coerce_arg (src/check.rs:2485)
-(defn coerce-arg [(a (ptr Allocator)) (is_mut_borrow bool) (ae Expr) (at (ptr Type)) (want (ptr Type)) (is_extern bool) (fname (slice u8)) (what (slice u8))] (-> (Result Expr Diag))
+; The offending argument's own span, so an argument-type error underlines the
+; argument (`"hello"`) not the whole call. dwspan only fills an unset (lo<0)
+; span, so once attached here the enclosing call's synth won't overwrite it.
+(defn coerce-arg-inner [(a (ptr Allocator)) (is_mut_borrow bool) (ae Expr) (at (ptr Type)) (want (ptr Type)) (is_extern bool) (fname (slice u8)) (what (slice u8))] (-> (Result Expr Diag))
   (let [aep (alloc-stack Expr)] (store! aep ae)
     (let [wtg (type-tag want)]
       (if (icmp-eq wtg 5)
@@ -1341,6 +1409,11 @@
             (if (and (icmp-ne (cast i64 pp) 0) (and (type-eq pp wp) (is-writable at))) (Ok (load aep))
                 (coerce a (load aep) at want is_extern fname what)))
         (coerce a (load aep) at want is_extern fname what)))))))
+(defn coerce-arg [(a (ptr Allocator)) (is_mut_borrow bool) (ae Expr) (at (ptr Type)) (want (ptr Type)) (is_extern bool) (fname (slice u8)) (what (slice u8))] (-> (Result Expr Diag))
+  (let [aep (alloc-stack Expr)] (store! aep ae)
+    (match (coerce-arg-inner a is_mut_borrow ae at want is_extern fname what)
+      (Ok [e] (Ok [Expr Diag] e))
+      (Err [d] (Err [Expr Diag] (dwspan d (load (field aep source)) (load (field aep lo)) (load (field aep hi)) (load (field aep ctxt))))))))
 
 (defn check-to [(a (ptr Allocator)) (e (ptr Expr)) (want (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (what (slice u8))] (-> (Result Expr Diag))
   (match (do-synth a e want env cx tps fname)
@@ -1880,7 +1953,7 @@
    (do
     (let [sig (sig-find cx call_func)]
       (if (icmp-eq (cast i64 sig) 0)
-          (return-from :try (err-ep (derr (sconcat3 a (sconcat3 a "in '" fname "': call to undefined function '") func "'")))) 0)
+          (return-from :try (err-ep (derr (undefined-call-msg a cx fname func)))) 0)
       (let [nparams (al-len [Type] (load (field sig params))) nargs (al-len [Expr] (load args)) variadic (load (field sig variadic))
             arity_ok (if variadic (icmp-ge nargs nparams) (icmp-eq nargs nparams))]
         (if (not arity_ok)

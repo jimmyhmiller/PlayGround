@@ -900,8 +900,27 @@
     (let [lowering (if (icmp-ge (load native) 0) (LNative (load native)) (if (load shim) (LShim) (return-from :try (Err [Convention Diag] (derr (sconcat3 a "defcc '" name "': needs a lowering (:native <c|fast|cold> or :lower shim)"))))))]
       (Ok (let [c (alloc-stack Convention)] (store! (field c name) name) (store! (field c params) (load params)) (store! (field c ret) (load ret)) (store! (field c clobber) (load clobber)) (store! (field c preserve) (load preserve)) (store! (field c lowering) lowering) (load c)))))))
 
+; Would the parser intercept a call whose head is `name`? Uses the REAL dispatch
+; (parse-list-expr) as the single source of truth — no parallel keyword list to
+; drift out of sync: a plain user call `(name x)` parses to `ECall name …`, so any
+; other outcome (a special form's own ExprKind, or a parse error) means `name` is a
+; built-in form and a function of that name could never be *called* as `(name …)`.
+; This is why shadowing `call`/`index`/`if`/… must be rejected at the definition.
+(defn builtin-form-head? [(a (ptr Allocator)) (name (slice u8))] (-> bool)
+  (let [(mut items) (al-new [Sexp] a)]
+    (al-push! (mut items) (mk-sexp (KSym name) -1 -1))
+    (al-push! (mut items) (mk-sexp (KSym "__coil_shadow_probe__") -1 -1))
+    (match (parse-list-expr a (box-items a (load items)) -1 -1 -1 0)
+      (Err [_] true)
+      (Ok [k] (match-else k (ECall [f _ta _ar] (not (str-eq f name))) (_ true))))))
+
 (defn parse-defn [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result Func Diag))
-  (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "defn: missing name")) "defn name")) (mut i) 1 (mut cc) "c"]
+  (try (let [namef (try! (need [Sexp] (sx-get rest 0) "defn: missing name"))
+             name (try! (sym-of a namef "defn name")) (mut i) 1 (mut cc) "c"]
+    (if (builtin-form-head? a name)
+        (return-from :try (Err [Func Diag] (derr-at (sx-lo namef) (sx-hi namef)
+          (sconcat a (sconcat3 a "cannot define '" name "': it is a built-in form and can never be called as (")
+                     (sconcat a name " …); rename the function"))))) 0)
     (match (sx-get rest (load i))
       (Some [k] (if (and (icmp-eq (sx-tag k) 3) (str-eq (sx-sval k) "cc"))
                     (do (store! cc (try! (sym-of a (try! (need [Sexp] (sx-get rest (iadd (load i) 1)) "defn: ':cc' missing convention name")) "cc name"))) (store! i (iadd (load i) 2)) 0) 0))
