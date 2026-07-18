@@ -264,7 +264,11 @@ export class ScryWasm {
 
   // ---- the viewer wire op ----
   // boot(path): load+typecheck+compile+run a program already seeded into the VFS.
-  boot(path) { return Number(this.exports.scry_boot(this.writeStr(path))); }
+  // 0 = ok, 74 = can't open, 65 = typecheck failed, 70 = no main().
+  boot(path) {
+    this.booted = Number(this.exports.scry_boot(this.writeStr(path)));
+    return this.booted;
+  }
 
   // eval(src) -> parsed {value}|{error}. Uncrashable: a hard eval panic (stale ref,
   // arena-OOM, bad opcode, internal compiler invariant) longjmps, which on wasm means the
@@ -275,6 +279,14 @@ export class ScryWasm {
   eval(src) { return JSON.parse(this.evalRaw(src)); }
 
   evalRaw(src) {
+    // Evaluating with no live program (boot failed / never ran) has no program table to
+    // resolve against and faults inside the VM. Refuse it here with the same typed-error
+    // shape the caller already handles, rather than taking the instance down.
+    if (this.booted !== 0) {
+      const why = this.booted === undefined ? "no program has been booted"
+                : `the program failed to load (scry_boot rc=${this.booted})`;
+      return JSON.stringify({ error: { kind: "NoProgram", message: `cannot eval: ${why}` } });
+    }
     const bytes = this.enc.encode(src);
     // +1 and NUL-terminate: the lexer reads past `len` (it expects a terminated buffer).
     // Without this it runs into whatever follows — harmless while the allocator is handing
