@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scry — in-browser</title>
+<link rel="stylesheet" href="../viewer/style.css">
+</head>
+<body>
+<div id="app"></div>
+<div id="scry-boot-status" style="position:fixed;bottom:8px;right:10px;font:12px ui-monospace,monospace;opacity:.55"></div>
+
+<!-- Same vendored, no-build React the native viewer uses. -->
+<script src="../viewer/vendor/react.production.min.js"></script>
+<script src="../viewer/vendor/react-dom.production.min.js"></script>
+<script src="../viewer/vendor/htm.js"></script>
+
+<!-- Boot the Scry VM in this page, THEN load the unmodified viewer. There is no server:
+     evalSource() in viewer/app.js sees globalThis.__scryWasm and calls the wasm module
+     directly instead of POSTing /eval — the same wire op (DECISIONS #8). -->
+<script type="module">
+  import { ScryWasm } from "./scry-wasm.js";
+
+  const status = (t) => { document.getElementById("scry-boot-status").textContent = t; };
+  const programUrl = new URLSearchParams(location.search).get("program") || "./demo.scry";
+
+  try {
+    status("loading VM…");
+    const [wasmBytes, programSrc] = await Promise.all([
+      fetch("./scry.wasm").then((r) => r.arrayBuffer()),
+      fetch(programUrl).then((r) => r.text()),
+    ]);
+
+    const scry = await ScryWasm.instantiate(wasmBytes, {
+      // stdout/stderr go to the terminal once it exists (P5); buffered until then.
+      onStdout: (t) => (globalThis.__scryTerm ? globalThis.__scryTerm.write(t.replace(/\n/g, "\r\n")) : console.log(t)),
+      onStderr: (t) => (globalThis.__scryTerm ? globalThis.__scryTerm.write(t.replace(/\n/g, "\r\n")) : console.warn(t)),
+      vfs: { "/program.scry": programSrc },
+    });
+
+    status("booting program…");
+    const rc = scry.boot("/program.scry");
+    if (rc !== 0) throw new Error(`scry_boot failed (rc=${rc})`);
+
+    // The viewer's ONE dependency: a synchronous eval(source) -> {value|error}.
+    globalThis.__scryWasm = scry;
+    globalThis.scry = scry;                    // console affordance
+    status("live (in-browser)");
+  } catch (e) {
+    status(`boot failed: ${e.message}`);
+    throw e;
+  }
+
+  // app.js is a classic script (it expects React/htm as globals), so inject a plain tag
+  // rather than import() — and only after the transport exists.
+  const s = document.createElement("script");
+  s.src = "../viewer/app.js";
+  document.body.appendChild(s);
+</script>
+</body>
+</html>

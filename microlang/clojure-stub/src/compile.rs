@@ -621,6 +621,38 @@ const SYNTAX_QUOTE_BARE: &[&str] = &[
                 return wrap;
             }
         }
+        // A BARE capitalized name that is a KNOWN class (per-ns `:import` or the
+        // auto-import table) and not any known var is the class VALUE —
+        // Clojure's ns-map holds imported classes right beside vars, and real
+        // code uses them in value position (tools.analyzer writes `Symbol`
+        // under `(:import (clojure.lang Symbol))` in maps and case tables).
+        // A var of the same name wins, as a real ns-map would refuse the
+        // conflict — so this can never shadow anything resolvable.
+        {
+            let nm = rt.sym_name(s).to_string();
+            if !nm.contains('/')
+                && !nm.contains('.')
+                && nm.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            {
+                let cur = &self.ns.current;
+                let known_var = self.ns.ns_defs.get(cur).is_some_and(|d| d.contains(&nm))
+                    || self.ns.refers.get(cur).and_then(|r| r.get(&nm)).is_some()
+                    || self.ns.ns_defs.get("clojure.core").is_some_and(|d| d.contains(&nm));
+                if !known_var {
+                    if let Some(fqn) = self.resolve_class(&nm) {
+                        if fqn != nm {
+                            let parent =
+                                fqn[..fqn.len() - nm.len()].trim_end_matches('.').to_string();
+                            let fq = rt.intern(&fqn);
+                            let sim = rt.intern(&nm);
+                            let par = rt.intern(&parent);
+                            return self
+                                .jvm_call(rt, "clojure.core/-jvm-class-value", &[fq, sim, par]);
+                        }
+                    }
+                }
+            }
+        }
         let r = self.resolve_global(rt, s);
         // A `^:dynamic` var reads the thread-local binding stack (keyed by its
         // resolved, qualified sym), falling back to the root global if unbound.

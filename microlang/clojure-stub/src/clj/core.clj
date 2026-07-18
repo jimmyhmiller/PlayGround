@@ -2028,6 +2028,11 @@
 ;; without erroring; the registered methods are inert unless called explicitly.
 (defmulti print-method (fn [x writer] (type-of x)))
 (defmethod print-method :default [x writer] nil)
+;; `print-dup` — the serializing sibling of print-method. Same status: exists
+;; so libraries can register methods (tools.reader's default-data-readers
+;; defmethods it for its record types); the native printer doesn't consult it.
+(defmulti print-dup (fn [x writer] (type-of x)))
+(defmethod print-dup :default [x writer] nil)
 
 ;; ─────────────── protocol reflection (satisfies? / extends? / extenders) ───────────────
 ;; A protocol is (record 'Protocol 'Name (list 'm1 'm2 …)); its methods dispatch on
@@ -2163,10 +2168,14 @@
 ;; (possibly destructuring) form to it. Using the raw binding form as the `if`
 ;; condition would break for patterns like `[k & ks]` (a vector in expression
 ;; position → `&` leaks as a symbol). Binding vectors are built literally.
-(defmacro if-let [bv then else]
-  (let [form (first bv) tst (second bv) t (gensym "if-let")]
-    (list 'let (vector t tst)
-          (list 'if t (list 'let (vector form t) then) else))))
+;; The else arm is OPTIONAL, as in clojure.core (1-armed if-let answers nil) —
+;; tools.reader's read-unquote uses the 1-armed form.
+(defmacro if-let
+  ([bv then] `(if-let ~bv ~then nil))
+  ([bv then else]
+   (let [form (first bv) tst (second bv) t (gensym "if-let")]
+     (list 'let (vector t tst)
+           (list 'if t (list 'let (vector form t) then) else)))))
 (defmacro when-let [bv & body]
   (let [form (first bv) tst (second bv) t (gensym "when-let")]
     (list 'let (vector t tst)

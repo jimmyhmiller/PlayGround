@@ -59,6 +59,23 @@ async function evalSource(source) {
   const id = "e" + (++evalSeq);
   const t0 = performance.now();
   logReq(source);
+  // In-browser (wasm) mode: the VM is running in THIS page, so call it directly instead of
+  // POSTing to a server. The wire contract is identical ({value|error} for a source string —
+  // DECISIONS #8), so nothing below this function knows the difference. The call is
+  // synchronous; we keep evalSource async so every caller stays unchanged.
+  if (globalThis.__scryWasm) {
+    try {
+      const json = globalThis.__scryWasm.eval(source);
+      connStore.set(performance.now() - t0 < 1200 ? "live" : "slow");
+      logResp(source, json, json.error != null);
+      return json;
+    } catch (e) {
+      connStore.set("down");
+      const err = { error: { kind: "Transport", message: String(e) } };
+      logResp(source, err, true);
+      return err;
+    }
+  }
   try {
     const res = await fetch(evalBase + "/eval", {
       method: "POST",
@@ -2778,6 +2795,8 @@ function Root() {
   const [portalMode, setPortalMode] = useState(null);   // null=probing, true, false
   const [selected, setSelected] = useState(null);       // the opened program {id,name,mode}
   useEffect(() => {
+    // wasm mode is always standalone — there is no portal hub to probe (and no server at all).
+    if (globalThis.__scryWasm) { setPortalMode(false); return; }
     fetch("/api/programs")
       .then((r) => setPortalMode(r.status === 200))
       .catch(() => setPortalMode(false));

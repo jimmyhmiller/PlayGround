@@ -240,13 +240,23 @@ pub struct GraphDelta {
     pub changed: BTreeSet<ModuleId>,
 }
 
-/// The module system the emitted JavaScript targets. The browser `public/`
-/// build renders the shared registry runtime as a CommonJS-shaped IIFE
-/// (`module.exports=(()=>{…})()`, cross-chunk loading via `require`); the Node
-/// `server/` build renders genuinely executable ES modules (`export default`,
-/// `import { createRequire }` for Node built-ins, real dynamic `import()` of
-/// split chunks) so each emitted `.mjs` runs under Node's ESM goal, not merely
-/// passing `node --check`.
+/// The module system the emitted JavaScript targets.
+///
+/// - [`ModuleFormat::Cjs`] renders the shared registry runtime as a
+///   CommonJS-shaped IIFE (`module.exports=(()=>{…})()`, cross-chunk loading via
+///   `require`); it runs under `node bundle.js` as CommonJS.
+/// - [`ModuleFormat::Esm`] (the Node `server/` build) renders genuinely
+///   executable ES modules (`export default`, real dynamic `import()` of split
+///   chunks, `createRequire(import.meta.url)` for external Node built-ins) so
+///   each emitted `.mjs` runs under Node's ESM goal, not merely passing
+///   `node --check`.
+/// - [`ModuleFormat::BrowserEsm`] (the client `public/` build) is the same
+///   registry runtime and `export default` as [`ModuleFormat::Esm`] with real
+///   dynamic `import()`, but with NO `node:module`/`createRequire` import — a
+///   browser cannot resolve `node:module`. If dead server code that leaked into
+///   the client graph still references a Node built-in external, `requireNative`
+///   is bound to a throw-on-CALL stub so the module still LOADS (the static
+///   `import` never fails) and only throws if that dead code actually runs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ModuleFormat {
     /// CommonJS-shaped output: `module.exports`, `require`, `require.dynamic`.
@@ -255,6 +265,20 @@ pub enum ModuleFormat {
     /// Node ES module output: `export default`, real `import()` for split
     /// chunks, `createRequire(import.meta.url)` for external Node built-ins.
     Esm,
+    /// Browser ES module output: like [`ModuleFormat::Esm`] but without the
+    /// `node:module`/`createRequire` import, so the module loads in a browser.
+    /// Node built-in externals resolve to a throw-on-call stub.
+    BrowserEsm,
+}
+
+impl ModuleFormat {
+    /// Whether this format emits ES module syntax (`export default`, native
+    /// dynamic `import()` of split chunks). Both the Node and browser ESM
+    /// variants share the same module boundary and dynamic-import lowering; they
+    /// differ only in how the main chunk binds `requireNative`.
+    fn is_esm(self) -> bool {
+        matches!(self, ModuleFormat::Esm | ModuleFormat::BrowserEsm)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -559,6 +583,16 @@ impl Bundler {
         output_root: &Path,
         options: EmitOptions,
     ) -> Result<EmitSummary, String> {
+        // The client build is always browser-executable ESM, regardless of the
+        // caller's options. The SSR document injects `client.js` as
+        // `<script type="module">`, so a CJS `module.exports=…` entry would throw
+        // `module is not defined` on load and the app would never hydrate. Browser
+        // ESM emits `export default` with real dynamic `import()` and NO
+        // `node:module` import, so the entry loads and runs in the browser.
+        let options = EmitOptions {
+            format: ModuleFormat::BrowserEsm,
+            ..options
+        };
         self.emit_environment(reachable, &output_root.join("public"), "client.js", options)
     }
 
@@ -1293,11 +1327,10 @@ impl Bundler {
                 // dynamic `import()` of the chunk path loads it and resolves to
                 // its namespace. In CJS output the chunk is `module.exports`, so
                 // the load goes through the host `require`.
-                let replacement = match format {
-                    ModuleFormat::Esm => format!("import({})", quote(chunk)),
-                    ModuleFormat::Cjs => {
-                        format!("Promise.resolve().then(()=>require({}))", quote(chunk))
-                    }
+                let replacement = if format.is_esm() {
+                    format!("import({})", quote(chunk))
+                } else {
+                    format!("Promise.resolve().then(()=>require({}))", quote(chunk))
                 };
                 if module_code.contains(&import) {
                     module_code = module_code.replace(&import, &replacement);
@@ -1332,13 +1365,10 @@ impl Bundler {
             // bails to the runtime path on any `default`/re-export/`export *`),
             // so a bare `export{a,b}` of the in-scope bindings is always valid
             // ESM; the CJS chunk exposes the same names on `module.exports`.
-            match format {
-                ModuleFormat::Esm => {
-                    code.push_str(&format!("export{{{}}};\n", exports.join(",")))
-                }
-                ModuleFormat::Cjs => {
-                    code.push_str(&format!("module.exports={{{}}};\n", exports.join(",")))
-                }
+            if format.is_esm() {
+                code.push_str(&format!("export{{{}}};\n", exports.join(",")));
+            } else {
+                code.push_str(&format!("module.exports={{{}}};\n", exports.join(",")));
             }
         }
         Some(RenderedBundle { code, mappings })
@@ -1466,14 +1496,22 @@ impl Bundler {
         ));
         let entry_runtime_id =
             runtime_ids[entry].expect("a chunk entry must have a deterministic runtime ID");
-        // In ESM output a split chunk is a real `.mjs`, so its dynamic load is a
-        // native `import()` whose default export is the chunk's required target;
-        // external Node built-ins resolve through `createRequire`. In CJS output
-        // both go through the host `require`, exactly as before.
+        // In ESM output (Node or browser) a split chunk is a real module, so its
+        // dynamic load is a native `import()` whose default export is the chunk's
+        // required target. Node ESM resolves external Node built-ins through
+        // `createRequire`; browser ESM has no `node:module`, so `requireNative`
+        // is a throw-on-call stub — the chunk still LOADS and only throws if dead
+        // server code that leaked into the client graph actually calls it. In CJS
+        // output both go through the host `require`, exactly as before.
+        let require_dynamic_esm = r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null)return import(chunk[0]).then(namespace=>namespace.default);return __require(chunk[1]);};"#;
         let (require_dynamic, require_native) = match format {
             ModuleFormat::Esm => (
-                r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null)return import(chunk[0]).then(namespace=>namespace.default);return __require(chunk[1]);};"#,
+                require_dynamic_esm,
                 "const requireNative=__diffpackCreateRequire(import.meta.url);",
+            ),
+            ModuleFormat::BrowserEsm => (
+                require_dynamic_esm,
+                r#"const requireNative=specifier=>{throw new Error("node builtin "+specifier+" not available in the browser");};"#,
             ),
             ModuleFormat::Cjs => (
                 r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null){if(typeof requireNative!=="function")throw new Error("Dynamic chunks require a CommonJS host");return requireNative(chunk[0]);}return __require(chunk[1]);};"#,
@@ -1527,31 +1565,22 @@ __runtime.register(__newModules,__newMaps,__newChunks);
 return __runtime.require({entry_runtime_id});"#
             )
         };
-        // The registry runtime is identical in both formats; only the module
+        // The registry runtime is identical across formats; only the module
         // boundary differs. CJS assigns the entry's exports to `module.exports`.
-        // ESM binds them to a local and re-exports as the default, and the main
-        // chunk (which builds the runtime) imports `createRequire` so external
-        // Node built-ins resolve — each emitted `.mjs` then truly executes under
-        // Node's ESM goal, not merely passing `node --check`.
-        let code = match format {
-            ModuleFormat::Cjs => format!(
-                r#"module.exports=(()=>{{
-"use strict";
-const __newModules={{{modules}}};
-const __newMaps={{{maps}}};
-const __newChunks={{{chunks}}};
-{tail}
-}})();
-"#
-            ),
-            ModuleFormat::Esm => {
-                let prelude = if is_main {
-                    "import { createRequire as __diffpackCreateRequire } from \"node:module\";\n"
-                } else {
-                    ""
-                };
-                format!(
-                    r#"{prelude}const __diffpackEntry=(()=>{{
+        // Both ESM variants bind them to a local and re-export as the default. The
+        // Node ESM main chunk (which builds the runtime) imports `createRequire`
+        // so external Node built-ins resolve — each emitted `.mjs` then truly
+        // executes under Node's ESM goal, not merely passing `node --check`. The
+        // browser ESM main chunk omits that import (a browser cannot resolve
+        // `node:module`), so the entry loads and runs in the browser.
+        let code = if format.is_esm() {
+            let prelude = if is_main && format == ModuleFormat::Esm {
+                "import { createRequire as __diffpackCreateRequire } from \"node:module\";\n"
+            } else {
+                ""
+            };
+            format!(
+                r#"{prelude}const __diffpackEntry=(()=>{{
 "use strict";
 const __newModules={{{modules}}};
 const __newMaps={{{maps}}};
@@ -1560,8 +1589,18 @@ const __newChunks={{{chunks}}};
 }})();
 export default __diffpackEntry;
 "#
-                )
-            }
+            )
+        } else {
+            format!(
+                r#"module.exports=(()=>{{
+"use strict";
+const __newModules={{{modules}}};
+const __newMaps={{{maps}}};
+const __newChunks={{{chunks}}};
+{tail}
+}})();
+"#
+            )
         };
         RenderedBundle { code, mappings }
     }
