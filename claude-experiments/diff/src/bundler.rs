@@ -10,6 +10,7 @@ use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::frontend_profile::{self, Phase};
+use crate::resource_id::{LoaderKind, ResourceId};
 use crate::transform::{DependencyDemand, FlatModule, FoldExpression, transform_module};
 
 pub type ModuleId = String;
@@ -24,6 +25,7 @@ struct ModuleState {
     source: SharedModuleId,
     flat_module: Option<FlatModule>,
     code: String,
+    assets: Vec<AssetEmit>,
 }
 
 struct LoadedModule {
@@ -34,6 +36,16 @@ struct LoadedModule {
     flat_module: Option<FlatModule>,
     code: String,
     diagnostics: Vec<String>,
+    assets: Vec<AssetEmit>,
+}
+
+/// A static asset (e.g. a `?url` import target) that must be content-hashed and
+/// copied into the output `assets/` directory. The synthetic JavaScript module
+/// that references it exports the public URL `/assets/<public_name>`.
+#[derive(Debug, Clone)]
+struct AssetEmit {
+    source: PathBuf,
+    public_name: String,
 }
 
 struct ResolutionCache {
@@ -93,12 +105,20 @@ impl DirectoryResolutionCache {
         {
             return result;
         }
+        // A specifier may carry a loader query and/or fragment (`app.css?url`,
+        // `route.tsx?tsr-split=component`). Only the path component is a
+        // filesystem concern; the query is re-attached to the resolved id and
+        // interpreted later, at load time. A query never causes a resolve error.
+        let resource = ResourceId::parse(specifier);
+        let path_specifier = resource.path.as_str();
         // Most module graphs overwhelmingly use explicit relative files. Avoid
         // the general Node resolver on a cache miss when that exact file exists;
         // all ambiguous cases still take the standards-aware path.
-        let exact_relative = specifier.strip_prefix("./").and_then(|relative| {
+        let exact_relative = path_specifier.strip_prefix("./").and_then(|relative| {
             let candidate = self.directory.join(relative);
-            candidate.is_file().then(|| module_id(&candidate))
+            candidate
+                .is_file()
+                .then(|| module_id_with_resource(&candidate, &resource))
         });
         let result = if let Some(resolved) = exact_relative {
             Ok(ResolvedModule {
@@ -107,7 +127,7 @@ impl DirectoryResolutionCache {
             })
         } else {
             resolver
-                .resolve_file(importer, specifier)
+                .resolve_file(importer, path_specifier)
                 .map_err(|error| error.to_string())
                 .and_then(|resolution| {
                     let resolved = resolution.full_path();
@@ -118,7 +138,7 @@ impl DirectoryResolutionCache {
                             matches!(package.side_effects(), Some(SideEffects::Bool(false)))
                         });
                         Ok(ResolvedModule {
-                            id: module_id(&resolved),
+                            id: module_id_with_resource(&resolved, &resource),
                             side_effect_free,
                         })
                     }
@@ -376,6 +396,7 @@ impl Bundler {
             .filter_map(|id| self.indices.get(id.as_str()).copied())
             .collect::<Vec<_>>();
         let allowed = reachable_dense.iter().copied().collect::<HashSet<_>>();
+        self.emit_assets(&allowed, parent)?;
         let mut runtime_ids = vec![None; self.ids.len()];
         for (runtime_id, dense_id) in reachable_dense.into_iter().enumerate() {
             runtime_ids[dense_id] = Some(runtime_id);
@@ -419,6 +440,40 @@ impl Bundler {
         let rendered =
             self.render_best(&main_modules, self.entry, &chunk_names, &runtime_ids, true);
         self.write_rendered(rendered, output, options)
+    }
+
+    /// Copies every content-hashed asset referenced by a reachable module into
+    /// `<output_dir>/assets/`. Deduplicated by public name, so an asset imported
+    /// from several modules is written once.
+    fn emit_assets(&self, allowed: &HashSet<DenseModuleId>, parent: &Path) -> Result<(), String> {
+        let mut written = HashSet::new();
+        let mut assets_dir_ready = false;
+        for &dense in allowed {
+            let Some(module) = self.modules[dense].as_ref() else {
+                continue;
+            };
+            for asset in &module.assets {
+                if !written.insert(asset.public_name.clone()) {
+                    continue;
+                }
+                let assets_dir = parent.join("assets");
+                if !assets_dir_ready {
+                    fs::create_dir_all(&assets_dir).map_err(|error| {
+                        format!("cannot create {}: {error}", assets_dir.display())
+                    })?;
+                    assets_dir_ready = true;
+                }
+                let destination = assets_dir.join(&asset.public_name);
+                fs::copy(&asset.source, &destination).map_err(|error| {
+                    format!(
+                        "cannot copy asset {} to {}: {error}",
+                        asset.source.display(),
+                        destination.display()
+                    )
+                })?;
+            }
+        }
+        Ok(())
     }
 
     fn render_folded_constants(&self, modules: &[DenseModuleId]) -> Option<RenderedBundle> {
@@ -665,6 +720,7 @@ impl Bundler {
                     source: loaded.source,
                     flat_module: loaded.flat_module,
                     code: loaded.code,
+                    assets: loaded.assets,
                 });
             }
         }
@@ -687,11 +743,17 @@ impl Bundler {
         path: &Path,
         diagnostics: &mut Vec<String>,
     ) -> Result<ModuleState, String> {
+        let id = module_id(path);
+        // A query-bearing id (`app.css?url`) is a loader concern, not a raw file
+        // read. Dispatch it before touching the filesystem as a JavaScript module.
+        let resource = ResourceId::parse(&id);
+        if resource.query.is_some() {
+            return load_query_module(&id, &resource);
+        }
         let read_started = frontend_profile::start();
         let source = fs::read_to_string(path)
             .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
         frontend_profile::finish(Phase::Read, read_started);
-        let id = module_id(path);
         let hash = content_hash(source.as_bytes());
         if let Some(current) = self
             .indices
@@ -730,6 +792,7 @@ impl Bundler {
             source: Arc::from(source),
             flat_module: transformed.flat_module,
             code: transformed.code,
+            assets: Vec::new(),
         })
     }
 
@@ -1416,6 +1479,23 @@ fn load_uncached(
     resolution_cache: &ResolutionCache,
     path: &Path,
 ) -> Result<LoadedModule, String> {
+    let id = path.to_string_lossy();
+    // A query-bearing id (`app.css?url`) is a loader concern: split it off before
+    // touching the filesystem and synthesize a JavaScript module for it.
+    let resource = ResourceId::parse(&id);
+    if resource.query.is_some() {
+        let synthetic = synthesize_query_module(&resource)?;
+        return Ok(LoadedModule {
+            hash: content_hash(synthetic.code.as_bytes()),
+            dependencies: Vec::new(),
+            pruned_imports: HashSet::new(),
+            source: Arc::from(id.as_ref()),
+            flat_module: synthetic.flat_module,
+            code: synthetic.code,
+            diagnostics: Vec::new(),
+            assets: vec![synthetic.asset],
+        });
+    }
     let read_started = frontend_profile::start();
     let source = fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
@@ -1443,7 +1523,70 @@ fn load_uncached(
         flat_module: transformed.flat_module,
         code: transformed.code,
         diagnostics,
+        assets: Vec::new(),
     })
+}
+
+/// A synthetic JavaScript module produced for a query-bearing id (a loader like
+/// `?url`), plus the static asset it references.
+struct SyntheticModule {
+    code: String,
+    flat_module: Option<FlatModule>,
+    asset: AssetEmit,
+}
+
+/// Builds the synthetic module for a query-bearing id. Recognized-but-unimplemented
+/// loaders (`?raw`, `?tsr-split`) and unrecognized queries produce a specific,
+/// actionable error rather than a misleading filesystem read failure.
+fn synthesize_query_module(resource: &ResourceId) -> Result<SyntheticModule, String> {
+    match resource.loader_kind() {
+        Some(LoaderKind::Url) => {
+            let source_path = PathBuf::from(&resource.path);
+            let bytes = fs::read(&source_path)
+                .map_err(|error| format!("cannot read asset {}: {error}", source_path.display()))?;
+            let public_name = asset_public_name(&source_path, content_hash(&bytes));
+            // The `?url` module is a plain ES module exporting the asset's public
+            // URL. Running it through the real transformer yields flat-linker code
+            // and export metadata identical to any hand-written module.
+            let synthetic = format!("export default {};\n", quote(&format!("/assets/{public_name}")));
+            let transformed = transform_module(Path::new("diffpack-url-asset.js"), &synthetic);
+            Ok(SyntheticModule {
+                code: transformed.code,
+                flat_module: transformed.flat_module,
+                asset: AssetEmit {
+                    source: source_path,
+                    public_name,
+                },
+            })
+        }
+        Some(_) | None => Err(resource.unimplemented_loader_error()),
+    }
+}
+
+/// Method-side wrapper: the synthetic module as a `ModuleState` keyed by `id`.
+fn load_query_module(id: &SharedModuleId, resource: &ResourceId) -> Result<ModuleState, String> {
+    let synthetic = synthesize_query_module(resource)?;
+    Ok(ModuleState {
+        hash: content_hash(synthetic.code.as_bytes()),
+        dependencies: Vec::new(),
+        pruned_imports: HashSet::new(),
+        source: id.clone(),
+        flat_module: synthetic.flat_module,
+        code: synthetic.code,
+        assets: vec![synthetic.asset],
+    })
+}
+
+/// The content-hashed public filename for an asset, e.g. `app-1a2b3c4d5e6f7080.css`.
+fn asset_public_name(path: &Path, hash: u64) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("asset");
+    match path.extension().and_then(|value| value.to_str()) {
+        Some(extension) => format!("{stem}-{hash:016x}.{extension}"),
+        None => format!("{stem}-{hash:016x}"),
+    }
 }
 
 fn resolve_dependencies(
@@ -1605,6 +1748,22 @@ fn module_id(path: &Path) -> SharedModuleId {
     SharedModuleId::from(path.to_string_lossy().into_owned())
 }
 
+/// A module id built from a resolved filesystem path, re-attaching the loader
+/// query and fragment from `resource`. When both are absent this is identical to
+/// [`module_id`], so a plain `app.css` import and an `app.css?url` import become
+/// distinct graph keys.
+fn module_id_with_resource(path: &Path, resource: &ResourceId) -> SharedModuleId {
+    if resource.query.is_none() && resource.fragment.is_none() {
+        return module_id(path);
+    }
+    let reattached = ResourceId {
+        path: path.to_string_lossy().into_owned(),
+        query: resource.query.clone(),
+        fragment: resource.fragment.clone(),
+    };
+    SharedModuleId::from(reattached.to_id())
+}
+
 fn content_hash(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in bytes {
@@ -1680,6 +1839,76 @@ mod tests {
             String::from_utf8_lossy(&executed.stdout),
             "package-ok:5\nlazy-loaded\n"
         );
+    }
+
+    #[test]
+    fn url_asset_import_emits_a_content_hashed_file_and_exports_its_public_url() {
+        let directory = tempdir().unwrap();
+        let css = ".brand { color: red; }\n";
+        fs::write(directory.path().join("styles.css"), css).unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import url from './styles.css?url';\nconsole.log(url);\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        // The entry plus the distinct `styles.css?url` asset module.
+        let reachable = bundler.reachable_modules_direct();
+        assert_eq!(reachable.len(), 2, "{reachable:?}");
+        bundler.emit(&reachable, &output).unwrap();
+
+        // The bundle exports the asset's public URL, not the raw path.
+        let bundle = fs::read_to_string(&output).unwrap();
+        let url = bundle
+            .lines()
+            .find_map(|line| line.find("/assets/styles-").map(|start| &line[start..]))
+            .and_then(|rest| rest.split('"').next())
+            .expect("bundle should reference the hashed asset url");
+        assert!(url.ends_with(".css"), "{url}");
+
+        // The content-hashed asset file is copied next to the bundle with the
+        // exact original bytes.
+        let asset_name = url.trim_start_matches("/assets/");
+        let asset_path = directory.path().join("dist/assets").join(asset_name);
+        assert_eq!(fs::read_to_string(&asset_path).unwrap(), css);
+
+        // A second, identical asset would hash to the same name (determinism).
+        assert_eq!(asset_name, asset_public_name(Path::new("styles.css"), content_hash(css.as_bytes())));
+
+        if Command::new("node").arg("--version").output().is_ok() {
+            let executed = Command::new("node").arg(&output).output().unwrap();
+            assert!(
+                executed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&executed.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&executed.stdout), format!("{url}\n"));
+        }
+    }
+
+    #[test]
+    fn an_unimplemented_loader_query_reports_a_specific_error() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("data.txt"), "hello").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import raw from './data.txt?raw';\nconsole.log(raw);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let error = match Bundler::discover_direct(&entry) {
+            Ok(_) => panic!("an unimplemented loader must fail the build, not silently succeed"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("loader `?raw` is not yet implemented"),
+            "{error}"
+        );
+        assert!(!error.contains("No such file or directory"), "{error}");
     }
 
     #[test]
