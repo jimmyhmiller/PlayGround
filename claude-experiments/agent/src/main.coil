@@ -69,6 +69,7 @@
    (runLog (ptr workflow.RunLog))
    (activeRunEntry i64)
    (runFilter i64)
+   (scrollOffsets (array f64 8))
    (runtime (ptr workflow.Runtime))
    (activeRuntime (ptr workflow.Runtime))
    (creationRequested i64)
@@ -117,6 +118,7 @@
 (defstruct InputFrame
   [(mouseHorizontal f64)
    (mouseVertical f64)
+   (wheel f64)
    (pressed i64)
    (down i64)
    (typedCount i64)
@@ -1001,6 +1003,29 @@
                      (workflow.file-exists c".flowline/runs.log"))
     0))
 
+;; Starting a run is one transition: begin the runtime, make it the active one,
+;; and open its record in the log. Extracted from the frame loop so the harness
+;; can drive it — a run that never gets recorded is invisible everywhere else.
+(defn apply-run-request [(state (mut AppState))] (-> i64)
+  (if (!= (load (field state runRequested)) 1)
+    0
+    (let [selectedRuntime (load (field state runtime))
+          activeRuntime (load (field state activeRuntime))]
+      (do
+        (if (or (= (cast i64 activeRuntime) 0) (workflow.is-finished activeRuntime))
+          (do
+            (workflow.start (mut selectedRuntime))
+            (store! (field state activeRuntime) selectedRuntime)
+            (store! (field state activeRunEntry)
+                    (workflow.begin-run (load (field state runLog))
+                                        (workflow.program-name selectedRuntime)
+                                        (workflow.program-path selectedRuntime)
+                                        c"manual"))
+            0)
+          0)
+        (store! (field state runRequested) 0)
+        0))))
+
 ;; The run record for the in-flight runtime follows that runtime's collapsed
 ;; status. Writes only happen on an actual change, so a long run does not rewrite
 ;; the log every frame.
@@ -1076,11 +1101,48 @@
             0))
         0))))
 
-(defn runs-row-top [(row i64)] (-> f64)
-  (+ (cast f64 (+ VIEW_HEADER_HEIGHT 34)) (cast f64 (* row 40))))
+;; How tall a view's body is if nothing were clipped. Scrolling is clamped
+;; against this, and the same number tells each view whether to bother at all.
+(defn view-content-height [(state AppState) (view i64) (screenWidth i64)] (-> f64)
+  (let [catalog (load (field state catalog))]
+    (cond (= view VIEW_RUNS)
+            (cast f64 (* (run-log-tally state (cast (ptr i8) 0) (run-filter-status (load (field state runFilter)))) 40))
+          (= view VIEW_APPROVALS) (cast f64 (* (catalog-waiting-node-count catalog) 124))
+          (= view VIEW_TEMPLATES)
+            (cast f64 (* (/ (+ (workflow.catalog-count catalog) 2) 3) 190))
+          (= view VIEW_SETTINGS) (cast f64 (* INTEGRATION_COUNT 62))
+          0.0)))
 
-(defn approval-card-top [(card i64)] (-> f64)
-  (+ (cast f64 (+ VIEW_HEADER_HEIGHT 20)) (cast f64 (* card 124))))
+(defn view-scroll [(state AppState) (view i64)] (-> f64)
+  (if (or (< view 0) (>= view 8)) 0.0 (load (index (field state scrollOffsets) view))))
+
+;; Wheel input scrolls the active view, clamped so a list can never be pushed
+;; past its own end or above its start.
+(defn apply-scroll-input [(state (mut AppState)) (input InputFrame) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (let [view (load (field state view))
+        wheel (load (field input wheel))]
+    (if (or (fcmp-eq wheel 0.0) (or (< view 0) (>= view 8)))
+      0
+      (let [viewport (cast f64 (- screenHeight (+ VIEW_HEADER_HEIGHT 30)))
+            content (view-content-height state view screenWidth)
+            maximum (if (> content viewport) (- content viewport) 0.0)
+            proposed (- (view-scroll state view) (* wheel 42.0))]
+        (do
+          (store! (index (field state scrollOffsets) view)
+                  (if (< proposed 0.0) 0.0 (if (> proposed maximum) maximum proposed)))
+          0)))))
+
+(defn runs-row-top [(row i64) (scroll f64)] (-> f64)
+  (- (+ (cast f64 (+ VIEW_HEADER_HEIGHT 34)) (cast f64 (* row 40))) scroll))
+
+(defn approval-card-top [(card i64) (scroll f64)] (-> f64)
+  (- (+ (cast f64 (+ VIEW_HEADER_HEIGHT 20)) (cast f64 (* card 124))) scroll))
+
+;; A row is drawn only when it is actually inside the body. Culling per row keeps
+;; the lists correct without an enclosing scissor, which would be dropped by the
+;; per-cell text clipping inside each row.
+(defn row-visible [(top f64) (height f64) (screenHeight i64)] (-> bool)
+  (and (> (+ top height) (cast f64 VIEW_HEADER_HEIGHT)) (< top (cast f64 screenHeight))))
 
 ;; Which catalog entry a recorded run belongs to, or -1 when its program is no
 ;; longer in the catalog.
@@ -1143,13 +1205,12 @@
                 (let [entry (- (- (workflow.run-log-count log) 1) step)]
                   (if (>= entry 0)
                     (let [record (workflow.run-log-record log entry)]
-                      (if (and (or (< wanted 0) (= (load (field record status)) wanted))
-                               (< (load row) 18))
+                      (if (or (< wanted 0) (= (load (field record status)) wanted))
                         (do
                           (if (in-bounds mouseHorizontal
                                          mouseVertical
                                          (cast f64 LEFT_WIDTH)
-                                         (runs-row-top (load row))
+                                         (runs-row-top (load row) (view-scroll state VIEW_RUNS))
                                          (- (cast f64 screenWidth) (cast f64 LEFT_WIDTH))
                                          40.0)
                             (open-project-run (mut state)
@@ -1177,7 +1238,7 @@
                         7]
                     (if (and (< node (workflow.node-count runtime))
                              (= (workflow.node-status runtime node) STATUS_WAITING))
-                      (let [cardTop (approval-card-top (load card))]
+                      (let [cardTop (approval-card-top (load card) (view-scroll state VIEW_APPROVALS))]
                         (do
                           (if (in-bounds mouseHorizontal mouseVertical (+ left 18.0) (+ cardTop 78.0) 92.0 26.0)
                             (do
@@ -1207,6 +1268,7 @@
         catalogCount (workflow.catalog-count catalog)]
     (do
     (apply-sidebar-input (mut state) input screenHeight)
+    (apply-scroll-input (mut state) input screenWidth screenHeight)
     (apply-view-input (mut state) input screenWidth screenHeight)
     (if (= (load (field state view)) VIEW_CREATE)
       (do
@@ -1802,50 +1864,6 @@
     (if leftAccent (fill-rectangle left top 2.0 height tint) 0)
     0))
 
-(defn draw-refund-composition [(state AppState) (left f64) (width f64) (tint raylib.Color)] (-> i64)
-  (do
-    (line (+ left 3.0) 145.0 (+ left 3.0) 213.0 1.0 (color 35 44 56))
-    (draw-text (field state monoMedium) c"// REASONING" (+ left 15.0) 145.0 9.0 (color 76 85 97))
-    (draw-text (field state sans)
-               c"Both sub-agents returned: eligible and confirmed\nduplicate. Composing a $48.00 refund to the original\ncard plus a customer reply with an apology."
-               (+ left 15.0)
-               166.0
-               12.0
-               (color 107 116 128))
-    (draw-card-background left 232.0 width 99.0 false tint)
-    (fill-rectangle left 232.0 width 34.0 (color 13 18 25))
-    (line left 266.0 (+ left width) 266.0 1.0 (color 20 26 34))
-    (draw-text (field state monoMedium) c">" (+ left 12.0) 243.0 11.0 tint)
-    (draw-text (field state monoMedium) c"draft_reply" (+ left 31.0) 242.0 11.0 (color 207 214 222))
-    (draw-text (field state mono) c"TOOL" (+ left (- width 42.0)) 243.0 9.0 (color 61 69 79))
-    (draw-text (field state mono)
-               c"in   { amount: 48.00, tone: apologetic }"
-               (+ left 12.0)
-               276.0
-               10.5
-               (color 127 136 148))
-    (draw-text (field state mono) c"out  Draft generated." (+ left 12.0) 305.0 10.5 (color 167 176 187))
-    (draw-card-background left 347.0 width 82.0 true tint)
-    (fill-rectangle (+ left 13.0) 360.0 6.0 6.0 tint)
-    (draw-text (field state monoMedium) c"ORCHESTRATOR" (+ left 27.0) 356.0 9.0 (color 127 136 148))
-    (draw-text (field state sans)
-               c"Draft ready: refund $48.00 to the original card,\n5-7 business day ETA, with an apology."
-               (+ left 13.0)
-               381.0
-               12.5
-               (color 200 207 216))
-    (draw-card-background left 445.0 190.0 47.0 false tint)
-    (stroke-rectangle (+ left 11.0) 455.0 22.0 27.0 1.0 (color 42 51 63))
-    (draw-text (field state monoMedium) c"draft_reply.md" (+ left 45.0) 453.0 11.5 tint)
-    (draw-text (field state mono) c"1.2 KB / markdown" (+ left 45.0) 473.0 9.5 (color 76 85 97))
-    (draw-text (field state mono) c"tokens  2,481" left 511.0 9.5 (color 127 136 148))
-    (draw-text (field state mono) c"time  1.8s" (+ left 118.0) 511.0 9.5 (color 127 136 148))
-    (draw-text (field state mono) c"cost  $0.011" (+ left 222.0) 511.0 9.5 (color 127 136 148))
-    0))
-
-;; The approval card describes the step actually waiting: what upstream produced
-;; (its dependency's captured output) and what this node is asking you to sign
-;; off (its own title). Nothing here is written into the source.
 (defn draw-approval [(state (mut AppState))
                      (input InputFrame)
                      (left f64)
@@ -1910,18 +1928,26 @@
         status (workflow.node-status runtime node)
         output (workflow.node-output runtime node)]
     (do
+      ;; The instruction this step actually carries, straight off the parsed
+      ;; program - an approval node has none, so it says so rather than
+      ;; inventing narration.
       (draw-card-background left 148.0 width 84.0 true tint)
       (fill-rectangle (+ left 13.0) 161.0 6.0 6.0 tint)
-      (draw-text (field state monoMedium) c"ORCHESTRATOR" (+ left 27.0) 157.0 9.0 (color 127 136 148))
+      (draw-text (field state monoMedium) c"PROMPT" (+ left 27.0) 157.0 9.0 (color 127 136 148))
+      (begin-scissor (+ left 13.0) 176.0 (- width 26.0) 50.0)
       (selectable-text (mut state)
                        input
                        1
                        (field state sans)
-                       c"This step is backed by the loaded workflow program. Its\nstate changes only when dependencies and agents complete."
+                       (let [prompt (workflow.node-prompt runtime node)]
+                         (if (icmp-eq (load prompt) (cast i8 0))
+                           c"This step carries no prompt."
+                           prompt))
                        (+ left 13.0)
                        182.0
                        12.5
                        (color 200 207 216))
+      (raylib.EndScissorMode)
       (line (+ left 3.0) 258.0 (+ left 3.0) 326.0 1.0 (color 35 44 56))
       (draw-text (field state monoMedium) c"// STATE" (+ left 15.0) 258.0 9.0 (color 76 85 97))
       (draw-text (field state mono) (display-project-name state project) (+ left 15.0) 281.0 11.0 tint)
@@ -2048,6 +2074,7 @@
 
 (defn capture-input [(input (mut InputFrame))] (-> i64)
   (let [mouse (raylib.GetMousePosition)
+        wheel (cast f64 (raylib.GetMouseWheelMove))
         (mut typedCount) 0
         (mut typedCharacter) (cast i64 (raylib.GetCharPressed))
         shiftDown
@@ -2073,6 +2100,7 @@
     (do
       (store! (field input mouseHorizontal) (/ (cast f64 (load (field mouse x))) (ui-scale)))
       (store! (field input mouseVertical) (/ (cast f64 (load (field mouse y))) (ui-scale)))
+      (store! (field input wheel) wheel)
       (store! (field input pressed)
               (if (icmp-ne (raylib.IsMouseButtonPressed (cast i32 0)) (cast u8 0)) 1 0))
       (store! (field input down) (if (icmp-ne (raylib.IsMouseButtonDown (cast i32 0)) (cast u8 0)) 1 0))
@@ -2795,9 +2823,10 @@
                 (if (>= entry 0)
                   (let [record (workflow.run-log-record log entry)
                         status (load (field record status))]
-                    (if (and (or (< wanted 0) (= status wanted))
-                             (< (load drawn) 18))
-                      (let [rowTop (+ (cast f64 (+ VIEW_HEADER_HEIGHT 34)) (cast f64 (* (load drawn) 40)))]
+                    (if (or (< wanted 0) (= status wanted))
+                      (let [rowTop (runs-row-top (load drawn) (view-scroll state VIEW_RUNS))]
+                        (if (not (row-visible rowTop 40.0 screenHeight))
+                          (store! drawn (+ (load drawn) 1))
                         (do
                           (line (cast f64 LEFT_WIDTH)
                                 (+ rowTop 40.0)
@@ -2847,7 +2876,7 @@
                                            10.0
                                            (color 76 85 97))
                           (store! drawn (+ (load drawn) 1))
-                          0))
+                          0)))
                       0))
                   0)))
             (if (= (load drawn) 0)
@@ -2882,8 +2911,10 @@
                   7]
               (if (and (< node (workflow.node-count runtime))
                        (= (workflow.node-status runtime node) STATUS_WAITING))
-                (let [cardTop (+ (cast f64 (+ VIEW_HEADER_HEIGHT 20)) (cast f64 (* (load drawn) 124)))
+                (let [cardTop (approval-card-top (load drawn) (view-scroll state VIEW_APPROVALS))
                       width (- right left)]
+                  (if (not (row-visible cardTop 112.0 screenHeight))
+                    (store! drawn (+ (load drawn) 1))
                   (do
                     (draw-card left cardTop width 112.0)
                     (fill-rectangle left cardTop 2.0 112.0 tint)
@@ -2913,7 +2944,7 @@
                     (draw-text (field state monoMedium) c"REQUEST CHANGES" (+ left 130.0) (+ cardTop 85.0) 10.5 (color 136 146 160))
                     (draw-text-right (field state mono) c"open run >" (- right 18.0) (+ cardTop 86.0) 10.0 (color 92 102 114))
                     (store! drawn (+ (load drawn) 1))
-                    0))
+                    0)))
                 0)))
           0))
       (if (= (load drawn) 0)
@@ -3014,11 +3045,15 @@
       (for [project 0
             8]
         (if (< project (workflow.catalog-count catalog))
-          (draw-template-card state
-                              project
-                              (+ left (* (cast f64 (% project columns)) (+ cardWidth 14.0)))
-                              (+ (cast f64 (+ VIEW_HEADER_HEIGHT 22)) (cast f64 (* (/ project columns) 190)))
-                              cardWidth)
+          (let [cardTop (- (+ (cast f64 (+ VIEW_HEADER_HEIGHT 22)) (cast f64 (* (/ project columns) 190)))
+                           (view-scroll state VIEW_TEMPLATES))]
+            (if (row-visible cardTop 176.0 screenHeight)
+              (draw-template-card state
+                                  project
+                                  (+ left (* (cast f64 (% project columns)) (+ cardWidth 14.0)))
+                                  cardTop
+                                  cardWidth)
+              0))
           0))
       (if (= (workflow.catalog-count catalog) 0)
         (draw-text (field state mono)
@@ -3043,9 +3078,12 @@
             INTEGRATION_COUNT]
         (let [row (index (field state integrations) slot)
               connected (= (load (field row connected)) 1)
-              top (+ (cast f64 (+ VIEW_HEADER_HEIGHT 22)) (cast f64 (* slot 62)))
+              top (- (+ (cast f64 (+ VIEW_HEADER_HEIGHT 22)) (cast f64 (* slot 62)))
+                     (view-scroll state VIEW_SETTINGS))
               glyphTint (if connected (accent project) (color 76 85 97))
               statusTint (if connected (color 111 154 126) (color 76 85 97))]
+          (if (not (row-visible top 52.0 screenHeight))
+            0
           (do
             (draw-card left top rowWidth 52.0)
             (stroke-rectangle (+ left 16.0) (+ top 11.0) 30.0 30.0 1.0 (color 42 51 63))
@@ -3070,7 +3108,7 @@
                                 12.0
                                 (if connected (accent project) (color 61 69 79)))
                 0))
-            0)))
+            0))))
       0)))
 
 (defn draw-app [(state (mut AppState)) (input InputFrame) (screenWidth i64) (screenHeight i64)] (-> i64)
@@ -3190,24 +3228,7 @@
                       (store! (field state clipboardRequested) 0)
                       0)
                     0)
-                  (if (= (load (field state runRequested)) 1)
-                    (let [selectedRuntime (load (field state runtime))
-                          activeRuntime (load (field state activeRuntime))]
-                      (do
-                        (if (or (= (cast i64 activeRuntime) 0) (workflow.is-finished activeRuntime))
-                          (do
-                            (workflow.start (mut selectedRuntime))
-                            (store! (field state activeRuntime) selectedRuntime)
-                            (store! (field state activeRunEntry)
-                                    (workflow.begin-run (load (field state runLog))
-                                                        (workflow.program-name selectedRuntime)
-                                                        (workflow.program-path selectedRuntime)
-                                                        c"manual"))
-                            0)
-                          0)
-                        (store! (field state runRequested) 0)
-                        0))
-                    0)
+                  (apply-run-request (mut state))
                   (if (= (load (field state approvalRequested)) 1)
                     (let [selectedRuntime (load (field state runtime))]
                       (do
@@ -3532,6 +3553,16 @@
               6]
           (do
             (store! (field state view) (if (= slot 5) VIEW_RUN slot))
+            ;; The run shot uses an agent workflow so the step panel shows a real
+            ;; prompt rather than an approval gate.
+            (if (= slot 5)
+              (let [target (if (> (workflow.catalog-count catalog) 1) 1 0)]
+                (do
+                  (store! (field state selectedProject) target)
+                  (store! (field state runtime) (workflow.catalog-runtime catalog target))
+                  (store! (field state selectedNode) 0)
+                  0))
+              0)
             (raylib.BeginDrawing)
             (raylib.BeginMode2D (load camera))
             (draw-app (mut state) (load input) screenWidth screenHeight)
@@ -3597,6 +3628,271 @@
       (printf c"]}\n")
       0)))
 
+;; ---------------------------------------------------------------------------
+;; Interaction harness
+;;
+;; Drives apply-input with synthesized clicks at the same coordinates the views
+;; draw at, and asserts the state transition each one is supposed to cause. This
+;; is the only thing that proves a hit box actually lands where its control is
+;; drawn — rendering a button and hit-testing it are separate code paths.
+;; ---------------------------------------------------------------------------
+
+(defn expect-equal [(failures (ptr i64)) (label (ptr i8)) (actual i64) (expected i64)] (-> i64)
+  (if (= actual expected)
+    0
+    (do
+      (printf c"  FAIL %s: expected %lld, got %lld\n" label expected actual)
+      (store! failures (+ (load failures) 1))
+      0)))
+
+(defn synthesize-click [(state (mut AppState))
+                        (horizontal f64)
+                        (vertical f64)
+                        (screenWidth i64)
+                        (screenHeight i64)] (-> i64)
+  (let [input (alloc-stack InputFrame)]
+    (do
+      (store! input (zeroed InputFrame))
+      (store! (field input mouseHorizontal) horizontal)
+      (store! (field input mouseVertical) vertical)
+      (store! (field input pressed) 1)
+      (apply-input (mut state) (load input) screenWidth screenHeight)
+      0)))
+
+(defn synthesize-wheel [(state (mut AppState))
+                        (amount f64)
+                        (screenWidth i64)
+                        (screenHeight i64)] (-> i64)
+  (let [input (alloc-stack InputFrame)]
+    (do
+      (store! input (zeroed InputFrame))
+      (store! (field input wheel) amount)
+      (apply-input (mut state) (load input) screenWidth screenHeight)
+      0)))
+
+(defn check-interactions [] (-> i64)
+  (let [state (alloc-stack AppState)
+        catalogValue (workflow.load-catalog)
+        catalog (alloc-stack workflow.Catalog)
+        runLog (cast (ptr workflow.RunLog) (workflow.allocate-buffer (sizeof workflow.RunLog)))
+        creationText (workflow.allocate-buffer CREATION_CAPACITY)
+        clipboardText (workflow.allocate-buffer 4096)
+        measureText (workflow.allocate-buffer 4096)
+        designResponse (workflow.allocate-buffer 4096)
+        designRequest (workflow.allocate-buffer CREATION_CAPACITY)
+        screenWidth 1152
+        screenHeight 720
+        right (cast f64 (- screenWidth VIEW_PADDING))
+        left (cast f64 (+ LEFT_WIDTH VIEW_PADDING))
+        failures (alloc-stack i64)]
+    (do
+      (store! failures 0)
+      (store! state (zeroed AppState))
+      (store! catalog catalogValue)
+      (store! creationText (cast i8 0))
+      (store! clipboardText (cast i8 0))
+      (store! designResponse (cast i8 0))
+      (store! designRequest (cast i8 0))
+      (store! (field state catalog) catalog)
+      (workflow.load-run-log runLog)
+      (store! (field state runLog) runLog)
+      (store! (field state activeRunEntry) -1)
+      (store! (field state runtime) (workflow.catalog-runtime catalog 0))
+      (store! (field state creationText) creationText)
+      (store! (field state clipboardText) clipboardText)
+      (store! (field state measureText) measureText)
+      (store! (field state designResponse) designResponse)
+      (store! (field state designRequest) designRequest)
+      (prime-approval-only-runtimes catalog)
+
+      ;; Sidebar navigation: every nav row reaches its view.
+      (for [slot 0
+            SIDEBAR_NAV_COUNT]
+        (do
+          (synthesize-click (mut state) 100.0 (+ (nav-row-top slot) 16.0) screenWidth screenHeight)
+          (expect-equal failures
+                        c"nav row reaches its view"
+                        (load (field state view))
+                        (case slot 0
+                              VIEW_DASHBOARD 1
+                              VIEW_RUNS 2
+                              VIEW_APPROVALS 3
+                              VIEW_TEMPLATES
+                              VIEW_SETTINGS))
+          0))
+
+      ;; The projects list selects a project and lands on its dashboard.
+      (if (> (workflow.catalog-count catalog) 1)
+        (do
+          (synthesize-click (mut state) 100.0 (+ (project-row-top 1) 20.0) screenWidth screenHeight)
+          (expect-equal failures c"project row selects project" (load (field state selectedProject)) 1)
+          (expect-equal failures c"project row opens dashboard" (load (field state view)) VIEW_DASHBOARD)
+          0)
+        0)
+
+      ;; "+ new" enters the create view from a blank slate.
+      (synthesize-click (mut state) 198.0 (cast f64 (+ SIDEBAR_PROJECTS_LABEL_TOP 5)) screenWidth screenHeight)
+      (expect-equal failures c"+ new opens create" (load (field state view)) VIEW_CREATE)
+      (expect-equal failures c"+ new resets the draft" (load (field state designTurn)) 0)
+
+      ;; Dashboard header button also reaches create.
+      (store! (field state view) VIEW_DASHBOARD)
+      (synthesize-click (mut state) (cast f64 (- screenWidth 100)) 36.0 screenWidth screenHeight)
+      (expect-equal failures c"+ new workflow opens create" (load (field state view)) VIEW_CREATE)
+
+      ;; Dashboard "view all" reaches the runs list.
+      (store! (field state view) VIEW_DASHBOARD)
+      (synthesize-click (mut state) (- right 380.0) (cast f64 (+ VIEW_HEADER_HEIGHT 136)) screenWidth screenHeight)
+      (expect-equal failures c"view all opens runs" (load (field state view)) VIEW_RUNS)
+
+      ;; Run filters.
+      (for [slot 0
+            4]
+        (do
+          (store! (field state view) VIEW_RUNS)
+          (synthesize-click (mut state) (+ (run-filter-left slot screenWidth) 20.0) 34.0 screenWidth screenHeight)
+          (expect-equal failures c"run filter selects slot" (load (field state runFilter)) slot)
+          0))
+      (store! (field state runFilter) 0)
+
+      ;; A run row opens that run's workflow, when there is one recorded.
+      (if (> (workflow.run-log-count runLog) 0)
+        (let [newest (workflow.run-log-record runLog (- (workflow.run-log-count runLog) 1))
+              expected (project-for-path state (workflow.record-path newest))]
+          (if (>= expected 0)
+            (do
+              (store! (field state view) VIEW_RUNS)
+              (synthesize-click (mut state)
+                                (+ left 40.0)
+                                (+ (runs-row-top 0 0.0) 20.0)
+                                screenWidth
+                                screenHeight)
+              (expect-equal failures c"run row opens the run view" (load (field state view)) VIEW_RUN)
+              (expect-equal failures c"run row selects its workflow" (load (field state selectedProject)) expected)
+              0)
+            0))
+        0)
+
+      ;; The run view's breadcrumb goes back to the runs list.
+      (store! (field state view) VIEW_RUN)
+      (synthesize-click (mut state) (cast f64 (+ LEFT_WIDTH 40)) 24.0 screenWidth screenHeight)
+      (expect-equal failures c"run breadcrumb returns to runs" (load (field state view)) VIEW_RUNS)
+
+      ;; APPROVE on the first approvals card requests approval for that exact node.
+      (if (> (catalog-waiting-node-count catalog) 0)
+        (do
+          (store! (field state view) VIEW_APPROVALS)
+          (store! (field state approvalRequested) 0)
+          (synthesize-click (mut state)
+                            (+ left 40.0)
+                            (+ (approval-card-top 0 0.0) 90.0)
+                            screenWidth
+                            screenHeight)
+          (expect-equal failures c"approve requests approval" (load (field state approvalRequested)) 1)
+          (expect-equal failures
+                        c"approve targets a waiting node"
+                        (workflow.node-status (load (field state runtime)) (load (field state selectedNode)))
+                        STATUS_WAITING)
+          0)
+        0)
+
+      ;; A full run lifecycle against a real runtime. An approval-only workflow
+      ;; reaches its waiting state without launching an agent, so this exercises
+      ;; the live path — request, start, record, sync — for free.
+      (let [(mut approvalOnly) -1]
+        (do
+          (for [project 0
+                8]
+            (if (< project (workflow.catalog-count catalog))
+              (let [runtime (workflow.catalog-runtime catalog project)
+                    (mut allApprovals) 1]
+                (do
+                  (for [node 0
+                        7]
+                    (if (and (< node (workflow.node-count runtime))
+                             (!= (workflow.node-kind runtime node) KIND_APPROVAL))
+                      (store! allApprovals 0)
+                      0))
+                  (if (and (= (load allApprovals) 1)
+                           (and (> (workflow.node-count runtime) 0) (< (load approvalOnly) 0)))
+                    (store! approvalOnly project)
+                    0)
+                  0))
+              0))
+          (if (< (load approvalOnly) 0)
+            (printf c"  SKIP run lifecycle: no approval-only workflow in the catalog\n")
+            (let [runtime (workflow.catalog-runtime catalog (load approvalOnly))
+                  before (workflow.run-log-count runLog)]
+              (do
+                (store! (field state selectedProject) (load approvalOnly))
+                (store! (field state runtime) runtime)
+                (store! (field state activeRuntime) (cast (ptr workflow.Runtime) 0))
+                (store! (field state runRequested) 1)
+                (apply-run-request (mut state))
+                (expect-equal failures c"run request clears its flag" (load (field state runRequested)) 0)
+                (expect-equal failures
+                              c"run request opens a log record"
+                              (workflow.run-log-count runLog)
+                              (+ before 1))
+                (expect-equal failures
+                              c"run request tracks the new record"
+                              (load (field state activeRunEntry))
+                              before)
+                (let [record (workflow.run-log-record runLog before)]
+                  (do
+                    (expect-equal failures
+                                  c"record names the workflow it started"
+                                  (if (workflow.strings-equal (workflow.record-name record)
+                                                              (workflow.program-name runtime))
+                                    1
+                                    0)
+                                  1)
+                    (expect-equal failures
+                                  c"a new record starts as running"
+                                  (load (field record status))
+                                  RUN_RUNNING)
+                    ;; Tick to the waiting state, then let the sync write it back.
+                    (workflow.tick (mut runtime) 0.0)
+                    (sync-active-run (mut state) runtime)
+                    (expect-equal failures
+                                  c"sync writes the waiting status through"
+                                  (load (field record status))
+                                  RUN_WAITING)
+                    (let [reloaded (cast (ptr workflow.RunLog)
+                                         (workflow.allocate-buffer (sizeof workflow.RunLog)))]
+                      (do
+                        (workflow.load-run-log reloaded)
+                        (expect-equal failures
+                                      c"the run survives a reload from disk"
+                                      (load (field (workflow.run-log-record reloaded before) status))
+                                      RUN_WAITING)
+                        0))
+                    0))
+                0)))
+          0))
+
+      ;; Scrolling clamps at both ends.
+      (store! (field state view) VIEW_SETTINGS)
+      (store! (index (field state scrollOffsets) VIEW_SETTINGS) 0.0)
+      (synthesize-wheel (mut state) 5.0 screenWidth screenHeight)
+      (expect-equal failures
+                    c"scroll cannot go above the start"
+                    (cast i64 (view-scroll state VIEW_SETTINGS))
+                    0)
+      (synthesize-wheel (mut state) -500.0 screenWidth screenHeight)
+      (let [content (view-content-height state VIEW_SETTINGS screenWidth)
+            viewport (cast f64 (- screenHeight (+ VIEW_HEADER_HEIGHT 30)))
+            maximum (if (> content viewport) (- content viewport) 0.0)]
+        (expect-equal failures
+                      c"scroll clamps at the end"
+                      (cast i64 (view-scroll state VIEW_SETTINGS))
+                      (cast i64 maximum)))
+
+      (printf c"{\"failures\":%lld,\"valid\":%s}\n"
+              (load failures)
+              (if (= (load failures) 0) c"true" c"false"))
+      (if (= (load failures) 0) 0 1))))
+
 (defn check-text-editor [] (-> i64)
   (let [state (alloc-stack AppState)
         input (alloc-stack InputFrame)
@@ -3641,6 +3937,9 @@
            (workflow.strings-equal (load (index arguments 1)) c"--native-catalog"))
     (native.run-catalog)
     (if (and (> (cast i64 argumentCount) 1)
+             (workflow.strings-equal (load (index arguments 1)) c"--check-interactions"))
+      (check-interactions)
+    (if (and (> (cast i64 argumentCount) 1)
              (workflow.strings-equal (load (index arguments 1)) c"--check-run-log"))
       (check-run-log)
     (if (and (> (cast i64 argumentCount) 1)
@@ -3673,4 +3972,4 @@
                      (workflow.strings-equal (load (index arguments 1)) c"--check-catalog"))
               (let [catalog (workflow.load-catalog)]
                 (workflow.dump-catalog catalog))
-              (run-interface))))))))))))
+              (run-interface)))))))))))))

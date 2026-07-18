@@ -54,6 +54,7 @@
 (extern DrawRing :cc c [Vector2 f32 f32 f32 f32 i32 Color] (-> void))
 (extern DrawTriangle :cc c [Vector2 Vector2 Vector2 Color] (-> void))
 (extern GetMousePosition :cc c [] (-> Vector2))
+(extern GetMouseWheelMove :cc c [] (-> f32))
 (extern IsMouseButtonPressed :cc c [i32] (-> u8))
 (extern IsMouseButtonDown :cc c [i32] (-> u8))
 (extern IsKeyPressed :cc c [i32] (-> u8))
@@ -117,6 +118,7 @@
         DrawRing
         DrawTriangle
         GetMousePosition
+        GetMouseWheelMove
         IsMouseButtonPressed
         IsMouseButtonDown
         CheckCollisionPointRec

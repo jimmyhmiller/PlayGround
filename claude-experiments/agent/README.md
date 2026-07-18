@@ -52,15 +52,21 @@ runtimes, the run log, and capability probes. None of it is seeded.
 
 All durable application state lives in `AppState`. Raylib input is captured into an `InputFrame`, and `apply-input` is the single transition boundary.
 
-Run history persists to `.flowline/runs.log`, one line per run, rewritten whenever a
-run's status changes. Because node execution uses fixed `.flowline/nodeN.*` paths, one
-workflow runs at a time and the history is a plain append-ordered list.
+Run history persists to `.flowline/runs.log`: a monotonic id counter on the first line,
+then one line per run, rewritten whenever a run's status changes. Because node execution
+uses fixed `.flowline/nodeN.*` paths, one workflow runs at a time and the history is a
+plain append-ordered list. The log holds the newest 64 runs — when it is full the oldest
+record is evicted rather than a new run going unrecorded, and ids are never reused.
+
+The list views scroll with the mouse wheel, clamped to their own content. Each view keeps
+its own offset, so switching away and back does not lose your place.
 
 ## Inspecting it without clicking
 
 - `./flowline --render-views` writes one screenshot per view (`view-*.png`).
 - `./flowline --render-interface` writes the workflow-designer screenshots.
 - `./flowline --dump-runs` prints the run log as JSON.
+- `./flowline --check-interactions` drives synthesized clicks through `apply-input` and asserts every resulting state transition — nav, project rows, run filters, run rows, the run breadcrumb, APPROVE, and scroll clamping — plus a full run lifecycle against a real runtime. Exits nonzero on any failure.
 - `./flowline --check-run-log` round-trips a run record through disk and exits nonzero on mismatch.
 - `./flowline --check-catalog` / `--check-workflow <path>` dump the parsed programs.
 - `./flowline --check-text-editor` / `--check-native-controls` exercise the input and widget paths.

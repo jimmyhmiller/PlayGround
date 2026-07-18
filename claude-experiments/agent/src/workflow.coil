@@ -611,6 +611,9 @@
           0))
       0)))
 
+(defn node-prompt [(runtime Runtime) (node i64)] (-> (ptr i8))
+  (load (field (index (field (field runtime program) nodes) node) prompt)))
+
 (defn node-title [(runtime Runtime) (node i64)] (-> (ptr i8))
   (if (and (>= node 0) (< node (load (field (field runtime program) nodeCount))))
     (load (field (index (field (field runtime program) nodes) node) title))
@@ -734,7 +737,9 @@
    (startedAt i64)
    (duration i64)])
 
-(defstruct RunLog [(count i64) (records (array RunRecord 64))])
+;; `nextId` is monotonic and persisted, so ids stay unique even after the oldest
+;; records are evicted. It is the first field on the wire, on its own line.
+(defstruct RunLog [(count i64) (nextId i64) (records (array RunRecord 64))])
 
 (defn now-seconds [] (-> i64)
   (time (cast (ptr i64) 0)))
@@ -819,6 +824,13 @@
         scratch (cast (ptr i8) (cast i64 (alloc-stack (array i8 32))))]
     (do
       (store! log (zeroed RunLog))
+      (store! (field log nextId) 1)
+      (if (icmp-ne (load source) (cast i8 0))
+        (do
+          (store! position (scan-field source 0 scratch 32))
+          (store! (field log nextId) (parse-integer scratch))
+          0)
+        0)
       (loop (if (or (icmp-eq (load (index source (load position))) (cast i8 0))
                     (>= (load (field log count)) MAX_RUNS))
               (break)
@@ -846,6 +858,8 @@
     (if (icmp-eq (cast i64 file) 0)
       -1
       (do
+        (snprintf line 512 c"%lld\n" (load (field log nextId)))
+        (fwrite line 1 (string-length line) file)
         (for [entry 0
               MAX_RUNS]
           (if (< entry (load (field log count)))
@@ -867,18 +881,32 @@
         (fclose file)
         0))))
 
-;; Appends a running record and returns its index, or -1 when the log is full.
+;; Appends a running record and returns its index. The log holds the newest
+;; MAX_RUNS runs: when it is full the OLDEST record is evicted rather than the
+;; new run going unrecorded. Ids come from the persisted monotonic counter, so
+;; an evicted run's id is never reused.
+(defn evict-oldest-run [(log (ptr RunLog))] (-> i64)
+  (do
+    (for [entry 0
+          MAX_RUNS]
+      (if (< entry (- MAX_RUNS 1))
+        (store! (run-log-record log entry) (load (run-log-record log (+ entry 1))))
+        0))
+    (store! (field log count) (- MAX_RUNS 1))
+    0))
+
 (defn begin-run [(log (ptr RunLog))
                  (name (ptr i8))
                  (path (ptr i8))
                  (trigger (ptr i8))] (-> i64)
-  (if (>= (load (field log count)) MAX_RUNS)
-    -1
+  (do
+    (if (>= (load (field log count)) MAX_RUNS) (evict-oldest-run log) 0)
     (let [entry (load (field log count))
           record (run-log-record log entry)
           identifier (cast (ptr i8) (cast i64 (alloc-stack (array i8 16))))]
       (do
-        (snprintf identifier 16 c"RUN-%04lld" (+ entry 1))
+        (snprintf identifier 16 c"RUN-%04lld" (load (field log nextId)))
+        (store! (field log nextId) (+ (load (field log nextId)) 1))
         (copy-bounded (record-id record) identifier RUN_ID_CAPACITY)
         (copy-bounded (record-name record) name RUN_NAME_CAPACITY)
         (copy-bounded (record-path record) path RUN_PATH_CAPACITY)
