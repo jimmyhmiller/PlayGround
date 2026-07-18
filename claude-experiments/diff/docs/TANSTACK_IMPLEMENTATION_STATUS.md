@@ -60,69 +60,22 @@ npm run acceptance:status
 Once Diffpack has an application build command, CI should use the strict
 `npm run acceptance:diffpack` gate.
 
-## Foundation note (differential-dataflow pivot)
+## First core compatibility probe
 
-The bundler now sits on the `graph.rs` + `dataflow.rs` (differential-dataflow /
-timely) module-graph foundation, not the earlier flat-linker milestone build.
+Bundling the fixture's generated `src/router.tsx` initially failed on imports
+such as `~/components/DefaultCatchBoundary`. Diffpack now enables Oxc Resolver's
+nearest-`tsconfig.json` discovery and has a runtime test for TypeScript `paths`
+aliases.
 
-### tsconfig `paths` alias resolution (re-landed)
-
-TypeScript `paths` alias resolution (the `~/*` -> `./src/*` mapping in the
-fixture `tsconfig.json`) has been re-landed on the current dataflow foundation.
-`resolve_options()` in `src/bundler.rs` now sets
-`tsconfig: Some(TsconfigDiscovery::Auto)`, so oxc_resolver discovers the nearest
-`tsconfig.json` to each importing file and satisfies `paths` on the path
-component that the query-aware `ResourceId` split already isolates (aliases
-resolve on the path only; any loader query is re-attached to the resolved id by
-`module_id_with_resource`). No project-root plumbing and no change to the
-`DirectoryResolutionCache` path/query split.
-
-A Rust integration test
-(`bundler::tests::tsconfig_paths_alias_resolves_to_the_real_file`) builds a temp
-project with a `~/*` -> `./src/*` `paths` mapping and asserts the aliased
-specifier resolves to the real file; it fails without the change and passes
-with it.
-
-Bundling `src/router.tsx` no longer emits any `~/`-prefixed
-`Cannot find module` diagnostics (previously 25 diagnostics led by
-`~/components/DefaultCatchBoundary`; that count is now 0). The graph now
-traverses far enough to hit the next, different blocker — a loader gap rather
-than an alias failure:
-
-```text
-error: loader `?url` is not yet implemented (requested for <fixture>/src/styles/app.css)
-```
-
-So the next slice is the `?url` asset loader (step 2 below), which the
-query-aware module identity work already isolated.
-
-## Query-aware module identity (landed)
-
-Independent of the alias work, query-bearing module ids are now handled
-natively. Bundling would otherwise crash when a query-bearing id
-(`src/styles/app.css?url`) reached a raw file read:
+After that fix, discovery advances to the next real blocker:
 
 ```text
 cannot read src/styles/app.css?url: No such file or directory
 ```
 
-Step 1 below now lands. `src/resource_id.rs` introduces a native, query-aware
-`ResourceId` that splits a specifier/id into `(path, query, fragment)` at the
-resolution boundary and round-trips it back losslessly. The resolver
-(`DirectoryResolutionCache::resolve`) resolves only the path component through
-the filesystem and re-attaches the original query to form the module id, so an
-`app.css` import and an `app.css?url` import are distinct modules. The load
-frontier (`load_uncached`/`load_module`) splits the query off before touching
-disk; a query-bearing id no longer crashes with a misleading file-not-found and
-instead produces a specific, actionable error naming the loader and resource:
+This identifies the next implementation slice:
 
-```text
-loader `?url` is not yet implemented (requested for src/styles/app.css)
-```
-
-The remaining implementation slice:
-
-1. Treat query-bearing module IDs as a resource path plus loader query. (done)
+1. Treat query-bearing module IDs as a resource path plus loader query.
 2. Implement `?url` asset modules.
 3. Copy content-hashed assets and return their public URL from the synthetic
    JavaScript module.

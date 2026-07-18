@@ -4,14 +4,13 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
 
-use crate::DeltaSession;
-use crate::bundler::Bundler;
+use crate::bundler::{Bundler, EmitOptions};
 use crate::frontend_profile;
+use crate::visualizer::write_visualization;
 
 #[derive(Debug)]
 pub struct BundleScaleResult {
     pub worker_threads: usize,
-    pub dataflow_threads: usize,
     pub modules: usize,
     pub imports_per_module: usize,
     pub generated_edges: usize,
@@ -19,12 +18,13 @@ pub struct BundleScaleResult {
     pub final_reachable: usize,
     pub source_bytes: u64,
     pub bundle_bytes: u64,
+    pub runtime_value: Option<u64>,
     pub generate_ms: f64,
     pub discover_transform_resolve_ms: f64,
-    pub initial_dataflow_ms: f64,
+    pub initial_reachability_ms: f64,
     pub initial_emit_ms: f64,
     pub edit_transform_resolve_ms: f64,
-    pub edit_dataflow_ms: f64,
+    pub edit_reachability_ms: f64,
     pub edit_emit_ms: f64,
     pub transformed_on_edit: usize,
     pub frontend_read_cpu_ms: f64,
@@ -33,39 +33,131 @@ pub struct BundleScaleResult {
     pub frontend_resolve_cpu_ms: f64,
 }
 
-pub fn run_bundle_scale(
-    module_count: usize,
-    imports_per_module: usize,
-) -> Result<BundleScaleResult, String> {
-    run_bundle_scale_inner(module_count, imports_per_module, true, false)
-}
-
 pub fn run_bundle_scale_direct(
     module_count: usize,
     imports_per_module: usize,
 ) -> Result<BundleScaleResult, String> {
-    run_bundle_scale_inner(module_count, imports_per_module, false, false)
-}
-
-pub fn run_bundle_scale_dependency_edit(
-    module_count: usize,
-    imports_per_module: usize,
-) -> Result<BundleScaleResult, String> {
-    run_bundle_scale_inner(module_count, imports_per_module, true, true)
+    run_bundle_scale_inner_impl(module_count, imports_per_module, false, false, false)
 }
 
 pub fn run_bundle_scale_direct_dependency_edit(
     module_count: usize,
     imports_per_module: usize,
 ) -> Result<BundleScaleResult, String> {
-    run_bundle_scale_inner(module_count, imports_per_module, false, true)
+    run_bundle_scale_inner_impl(module_count, imports_per_module, true, false, false)
 }
 
-fn run_bundle_scale_inner(
+pub fn run_bundle_scale_direct_live(
     module_count: usize,
     imports_per_module: usize,
-    use_dataflow: bool,
+) -> Result<BundleScaleResult, String> {
+    run_bundle_scale_inner_with_live_output(module_count, imports_per_module, false)
+}
+
+pub fn run_bundle_scale_direct_live_dependency_edit(
+    module_count: usize,
+    imports_per_module: usize,
+) -> Result<BundleScaleResult, String> {
+    run_bundle_scale_inner_with_live_output(module_count, imports_per_module, true)
+}
+
+pub fn run_bundle_scale_direct_live_minified(
+    module_count: usize,
+    imports_per_module: usize,
+) -> Result<BundleScaleResult, String> {
+    run_bundle_scale_inner_with_live_output_and_minify(module_count, imports_per_module, false)
+}
+
+pub fn run_bundle_scale_direct_live_minified_dependency_edit(
+    module_count: usize,
+    imports_per_module: usize,
+) -> Result<BundleScaleResult, String> {
+    run_bundle_scale_inner_with_live_output_and_minify(module_count, imports_per_module, true)
+}
+
+pub fn write_live_scale_visualization(
+    module_count: usize,
+    imports_per_module: usize,
+    output: &std::path::Path,
+) -> Result<(usize, usize, usize), String> {
+    if module_count == 0 || imports_per_module == 0 {
+        return Err("module count and imports per module must be positive".into());
+    }
+    let workspace = TemporaryProject::new()?;
+    (0..module_count)
+        .into_par_iter()
+        .map(|index| {
+            fs::write(
+                workspace.path.join(module_name(index)),
+                live_module_source(index, module_count, imports_per_module, index),
+            )
+            .map_err(|error| format!("cannot generate visualization module {index}: {error}"))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let entry = workspace.path.join(module_name(0));
+    let (mut bundler, update) = Bundler::discover_direct(&entry)?;
+    if !update.diagnostics.is_empty() {
+        return Err(format!(
+            "visualization build produced {} diagnostics; first: {}",
+            update.diagnostics.len(),
+            update.diagnostics[0]
+        ));
+    }
+    let mut reachability = bundler.direct_reachability();
+    fs::write(
+        &entry,
+        live_module_source_after_dependency_removal(
+            0,
+            module_count,
+            imports_per_module,
+            module_count,
+        ),
+    )
+    .map_err(|error| format!("cannot edit visualization entry: {error}"))?;
+    let revision = bundler.rebuild_path(&entry)?;
+    reachability.apply(&revision.delta);
+    let reachable = reachability.reachable_modules();
+    let graph = bundler.visualization_graph(&reachable);
+    let edge_count = graph.edges.len();
+    write_visualization(&graph, output)?;
+    Ok((graph.nodes.len(), edge_count, reachable.len()))
+}
+
+fn run_bundle_scale_inner_with_live_output(
+    module_count: usize,
+    imports_per_module: usize,
     dependency_edit: bool,
+) -> Result<BundleScaleResult, String> {
+    run_bundle_scale_inner_impl(
+        module_count,
+        imports_per_module,
+        dependency_edit,
+        true,
+        false,
+    )
+}
+
+fn run_bundle_scale_inner_with_live_output_and_minify(
+    module_count: usize,
+    imports_per_module: usize,
+    dependency_edit: bool,
+) -> Result<BundleScaleResult, String> {
+    run_bundle_scale_inner_impl(
+        module_count,
+        imports_per_module,
+        dependency_edit,
+        true,
+        true,
+    )
+}
+
+fn run_bundle_scale_inner_impl(
+    module_count: usize,
+    imports_per_module: usize,
+    dependency_edit: bool,
+    live_output: bool,
+    minify: bool,
 ) -> Result<BundleScaleResult, String> {
     if module_count == 0 || imports_per_module == 0 {
         return Err("module count and imports per module must be positive".into());
@@ -75,8 +167,16 @@ fn run_bundle_scale_inner(
     let generated = (0..module_count)
         .into_par_iter()
         .map(|index| {
-            let source = module_source(index, module_count, imports_per_module, index);
-            let edges = dependency_indices(index, module_count, imports_per_module).len();
+            let source = if live_output {
+                live_module_source(index, module_count, imports_per_module, index)
+            } else {
+                module_source(index, module_count, imports_per_module, index)
+            };
+            let edges = if live_output {
+                live_dependency_indices(index, module_count, imports_per_module).len()
+            } else {
+                dependency_indices(index, module_count, imports_per_module).len()
+            };
             let bytes = source.len() as u64;
             fs::write(workspace.path.join(module_name(index)), source)
                 .map_err(|error| format!("cannot generate module {index}: {error}"))?;
@@ -91,11 +191,7 @@ fn run_bundle_scale_inner(
     let output = workspace.path.join("dist/bundle.js");
     frontend_profile::reset();
     let discover_started = Instant::now();
-    let (mut bundler, initial) = if use_dataflow {
-        Bundler::discover(&entry)?
-    } else {
-        Bundler::discover_direct(&entry)?
-    };
+    let (mut bundler, initial) = Bundler::discover_direct(&entry)?;
     let discover_transform_resolve_ms = elapsed_ms(discover_started);
     let frontend_profile = frontend_profile::snapshot();
     if !initial.diagnostics.is_empty() {
@@ -106,28 +202,36 @@ fn run_bundle_scale_inner(
         ));
     }
 
-    let session = use_dataflow.then(DeltaSession::new);
-    let dataflow_threads = session.as_ref().map_or(0, DeltaSession::worker_count);
-    let dataflow_started = Instant::now();
-    let mut direct_session = None;
-    let mut reachable = if let Some(session) = &session {
-        session.apply(initial.delta)?.added
-    } else {
-        let direct = bundler.direct_reachability();
-        let reachable = direct.reachable_modules();
-        direct_session = Some(direct);
-        reachable
-    };
+    let reachability_started = Instant::now();
+    let mut reachability = bundler.direct_reachability();
+    let mut reachable = reachability.reachable_modules();
     let initial_reachable = reachable.len();
-    let initial_dataflow_ms = elapsed_ms(dataflow_started);
+    let initial_reachability_ms = elapsed_ms(reachability_started);
 
     let emit_started = Instant::now();
-    bundler.emit(&reachable, &output)?;
+    bundler.emit_with_options(
+        &reachable,
+        &output,
+        EmitOptions {
+            source_map: false,
+            minify,
+        },
+    )?;
     let initial_emit_ms = elapsed_ms(emit_started);
 
     let edited_index = if dependency_edit { 0 } else { module_count / 2 };
     let edited_path = workspace.path.join(module_name(edited_index));
-    let edited_source = if dependency_edit {
+    let edited_value = module_count + edited_index;
+    let edited_source = if live_output && dependency_edit {
+        live_module_source_after_dependency_removal(
+            edited_index,
+            module_count,
+            imports_per_module,
+            edited_value,
+        )
+    } else if live_output {
+        live_module_source(edited_index, module_count, imports_per_module, edited_value)
+    } else if dependency_edit {
         module_source_after_dependency_removal(
             edited_index,
             module_count,
@@ -144,36 +248,53 @@ fn run_bundle_scale_inner(
     let edit_transform_resolve_ms = elapsed_ms(edit_started);
     let transformed_on_edit = update.transformed_modules;
 
-    let edit_dataflow_started = Instant::now();
-    if let Some(session) = &session {
-        let edit_result = session.apply(update.delta)?;
-        for removed in edit_result.removed {
-            reachable.remove(&removed);
-        }
-        reachable.extend(edit_result.added);
-    } else {
-        let edit_result = direct_session
-            .as_mut()
-            .expect("direct reachability session must exist")
-            .apply(&update.delta);
-        for removed in edit_result.removed {
-            reachable.remove(&removed);
-        }
-        reachable.extend(edit_result.added);
+    let edit_reachability_started = Instant::now();
+    let edit_result = reachability.apply(&update.delta);
+    for removed in edit_result.removed {
+        reachable.remove(&removed);
     }
-    let edit_dataflow_ms = elapsed_ms(edit_dataflow_started);
+    reachable.extend(edit_result.added);
+    let edit_reachability_ms = elapsed_ms(edit_reachability_started);
     let final_reachable = reachable.len();
 
     let edit_emit_started = Instant::now();
-    bundler.emit(&reachable, &output)?;
+    bundler.emit_with_options(
+        &reachable,
+        &output,
+        EmitOptions {
+            source_map: false,
+            minify,
+        },
+    )?;
     let edit_emit_ms = elapsed_ms(edit_emit_started);
     let bundle_bytes = fs::metadata(&output)
         .map_err(|error| format!("cannot inspect benchmark bundle: {error}"))?
         .len();
+    let runtime_value = if live_output {
+        let execution = std::process::Command::new("node")
+            .arg(&output)
+            .output()
+            .map_err(|error| format!("cannot execute benchmark bundle: {error}"))?;
+        if !execution.status.success() {
+            return Err(format!(
+                "benchmark bundle failed at runtime: {}",
+                String::from_utf8_lossy(&execution.stderr).trim()
+            ));
+        }
+        let stdout = String::from_utf8(execution.stdout)
+            .map_err(|error| format!("benchmark output is not UTF-8: {error}"))?;
+        Some(
+            stdout
+                .trim()
+                .parse::<u64>()
+                .map_err(|error| format!("benchmark output is not an integer: {error}"))?,
+        )
+    } else {
+        None
+    };
 
     Ok(BundleScaleResult {
         worker_threads: rayon::current_num_threads(),
-        dataflow_threads,
         modules: module_count,
         imports_per_module,
         generated_edges,
@@ -181,12 +302,13 @@ fn run_bundle_scale_inner(
         final_reachable,
         source_bytes,
         bundle_bytes,
+        runtime_value,
         generate_ms,
         discover_transform_resolve_ms,
-        initial_dataflow_ms,
+        initial_reachability_ms,
         initial_emit_ms,
         edit_transform_resolve_ms,
-        edit_dataflow_ms,
+        edit_reachability_ms,
         edit_emit_ms,
         transformed_on_edit,
         frontend_read_cpu_ms: frontend_profile.read_ms,
@@ -194,6 +316,84 @@ fn run_bundle_scale_inner(
         frontend_lower_cpu_ms: frontend_profile.lower_ms,
         frontend_resolve_cpu_ms: frontend_profile.resolve_ms,
     })
+}
+
+fn live_module_source(
+    index: usize,
+    module_count: usize,
+    imports_per_module: usize,
+    value: usize,
+) -> String {
+    let dependencies = live_dependency_indices(index, module_count, imports_per_module);
+    let mut source = String::new();
+    for dependency in &dependencies {
+        source.push_str(&format!(
+            "import {{ value_{dependency} }} from \"./{}\";\n",
+            module_name(*dependency)
+        ));
+    }
+    let terms = dependencies
+        .iter()
+        .map(|dependency| format!("value_{dependency}"))
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        source.push_str(&format!("export const value_{index}: number = {value};\n"));
+    } else {
+        source.push_str(&format!(
+            "export const value_{index}: number = {value} + {};\n",
+            terms.join(" + ")
+        ));
+    }
+    if index == 0 {
+        source.push_str("console.log(value_0);\n");
+    }
+    source
+}
+
+fn live_module_source_after_dependency_removal(
+    index: usize,
+    module_count: usize,
+    imports_per_module: usize,
+    value: usize,
+) -> String {
+    let mut dependencies = live_dependency_indices(index, module_count, imports_per_module);
+    if !dependencies.is_empty() {
+        dependencies.remove(0);
+    }
+    let mut source = String::new();
+    for dependency in &dependencies {
+        source.push_str(&format!(
+            "import {{ value_{dependency} }} from \"./{}\";\n",
+            module_name(*dependency)
+        ));
+    }
+    let terms = dependencies
+        .iter()
+        .map(|dependency| format!("value_{dependency}"))
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        source.push_str(&format!("export const value_{index}: number = {value};\n"));
+    } else {
+        source.push_str(&format!(
+            "export const value_{index}: number = {value} + {};\n",
+            terms.join(" + ")
+        ));
+    }
+    if index == 0 {
+        source.push_str("console.log(value_0);\n");
+    }
+    source
+}
+
+fn live_dependency_indices(
+    index: usize,
+    module_count: usize,
+    imports_per_module: usize,
+) -> Vec<usize> {
+    (1..=imports_per_module)
+        .map(|offset| index * imports_per_module + offset)
+        .take_while(|child| *child < module_count)
+        .collect()
 }
 
 fn module_source(

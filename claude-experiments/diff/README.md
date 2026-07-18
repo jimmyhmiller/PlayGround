@@ -1,145 +1,108 @@
 # diffpack
 
-`diffpack` is a proof of concept for maintaining a JavaScript module graph with
-[Oxc](https://github.com/oxc-project/oxc) and
-[Differential Dataflow](https://github.com/TimelyDataflow/differential-dataflow).
+`diffpack` is an experimental JavaScript bundler built with
+[Oxc](https://github.com/oxc-project/oxc). It maintains a persistent dense module
+graph and incrementally repairs entry reachability after edits.
 
-It is intentionally not a production bundler yet. Oxc parses JavaScript,
-TypeScript, JSX, and TSX and extracts static imports, re-exports, and literal
-dynamic imports. A small resolver turns relative imports into module edges.
-Differential Dataflow maintains the transitive reachability fixed point as
-entry, edge, and module-version facts are inserted and retracted.
+It is not a production bundler yet. The production checklist for a TanStack
+Start target is in
+[docs/TANSTACK_PRODUCTION_CHECKLIST.md](docs/TANSTACK_PRODUCTION_CHECKLIST.md).
+Current implementation progress is tracked in
+[docs/TANSTACK_IMPLEMENTATION_STATUS.md](docs/TANSTACK_IMPLEMENTATION_STATUS.md).
 
-Run the three-revision demonstration:
-
-```console
-cargo run -- demo
-```
-
-Or inspect one entry graph:
-
-```console
-cargo run -- build fixtures/incremental/01-initial/entry.js
-```
-
-Build and execute an actual single-chunk bundle:
+## Bundle
 
 ```console
 cargo run -- bundle fixtures/bundle/entry.ts dist/bundle.js
 node dist/bundle.js
 ```
 
-Keep the dataflow and module-fact store alive while watching for edits:
+Optional flags:
+
+```console
+cargo run -- bundle fixtures/bundle/entry.ts dist/bundle.js --sourcemap
+cargo run -- bundle fixtures/bundle/entry.ts dist/bundle.js --minify
+```
+
+## Watch
 
 ```console
 cargo run -- watch fixtures/bundle/entry.ts dist/bundle.js
 ```
 
-The watch path reparses and transforms only changed or newly discovered modules,
-sends weighted module/edge updates to a persistent Differential session, and
-rewrites the deterministic single output chunk after the revision frontier is
-complete.
+The watch path parses and transforms only changed or newly discovered modules,
+applies dependency-edge changes to the persistent dense reachability index, and
+emits the updated reachable graph.
 
-Run the test suite:
+## Visualize
+
+Generate a self-contained interactive linker visualization:
+
+```console
+cargo run -- visualize fixtures/bundle/entry.ts target/diffpack-graph.html
+open target/diffpack-graph.html
+```
+
+Generate the 10,000-module live scaling graph after its entry dependency is
+removed:
+
+```console
+cargo run --release -- visualize-scale 10000 4 target/diffpack-large-graph.html
+```
+
+The visualization shows dense module IDs, import demands, dynamic edges,
+reachability, direct effects, flat-link eligibility, declarations, exports,
+pruned imports, and the conservative constant-folding IR. It reads the actual
+cached linker records and does not parse the project again.
+
+## Correctness oracle
 
 ```console
 cargo test
-```
-
-Run the behavioral compatibility oracle. It executes the same tagged fixtures
-through Diffpack and a pinned Rolldown reference, then compares both with an
-explicit expected result:
-
-```console
 cd oracle
 npm ci
 npm test
+npm run parity:strict
 ```
 
-The Rust test suite separately verifies that an incremental edit produces the
-same reachable set, emitted bytes, and runtime behavior as a clean rebuild.
-The current compatibility target and oracle contract are documented in
-[docs/ORACLE.md](docs/ORACLE.md).
+The oracle executes tagged fixtures through Diffpack and pinned Rolldown,
+compares explicit runtime expectations, and checks clean versus incremental
+behavior. See [docs/ORACLE.md](docs/ORACLE.md).
 
-Run the aligned Diffpack/Rolldown performance comparison with module count,
-imports per module, and fresh-build iterations:
+## Performance comparison
 
 ```console
 cd oracle
-npm run bench -- 10000 4 3
+npm run bench -- 10000 4 5 --treeshake --live
+npm run bench -- 10000 4 5 --treeshake --live --minify
 ```
 
-The comparison methodology and current measurements are in
-[docs/ROLLDOWN_COMPARISON.md](docs/ROLLDOWN_COMPARISON.md).
+See [docs/ROLLDOWN_COMPARISON.md](docs/ROLLDOWN_COMPARISON.md) for methodology
+and current results.
 
-Run a release-mode scale test with 100,000 modules, a fanout of eight, and four
-imports per module:
+The standalone scaling commands are:
 
 ```console
 cargo build --release
-/usr/bin/time -l target/release/diffpack scale 100000 8 4
-```
-
-The CSV output separates weighted input updates, Differential propagation, and
-output-delta handling. Peak resident memory is reported by `/usr/bin/time` on
-macOS. The benchmark applies one initial fact batch, changes one module's
-content hash with two updates, then retracts one leaf module and its edges.
-
-Recorded results and methodology are in [docs/SCALING.md](docs/SCALING.md).
-
-Run the full on-disk bundler benchmark, including Oxc transformation, resolution,
-Differential loading, and chunk emission:
-
-```console
-cargo build --release
-/usr/bin/time -l target/release/diffpack bundle-scale 10000 4
-```
-
-Run the same build and edit without constructing a Differential dataflow. This
-mode uses a persistent dense integer graph and incrementally repairs a
-reachability spanning tree:
-
-```console
-/usr/bin/time -l target/release/diffpack bundle-scale-direct 10000 4
-```
-
-Compare both approaches on an edit that removes an entry import and makes part
-of the module graph unreachable:
-
-```console
+target/release/diffpack bundle-scale-direct 10000 4
 target/release/diffpack bundle-scale-direct-deps 10000 4
-target/release/diffpack bundle-scale-deps 10000 4
+target/release/diffpack bundle-scale-direct-live 10000 4
+target/release/diffpack bundle-scale-direct-live-deps 10000 4
 ```
 
-Module discovery, Oxc transformation, dependency resolution, benchmark corpus
-generation, and chunk rendering run on Rayon's worker pool. It defaults to the
-machine's available parallelism; set `RAYON_NUM_THREADS` to control it, including
-`RAYON_NUM_THREADS=1` for a single-thread baseline. The persistent Differential
-session supports multiple Timely workers via `DIFFPACK_DATAFLOW_THREADS`; it
-defaults to one because this recursive module-graph workload benchmarks faster
-without cross-worker coordination.
-
-End-to-end results are in
-[docs/BUNDLER_SCALING.md](docs/BUNDLER_SCALING.md).
+See [docs/BUNDLER_SCALING.md](docs/BUNDLER_SCALING.md).
 
 ## Current boundary
 
-- Relative imports and packages are resolved with `oxc_resolver`, including
-  package `exports`, extension aliases, and `node_modules` traversal.
-- Oxc strips TypeScript and lowers JSX before module linking.
-- Static ESM, CommonJS `require`, JSON, re-exports, and literal dynamic imports
-  are supported by the single-chunk runtime.
-- Source and AST payloads do not enter the dataflow; tuples contain owned module
-  IDs and content hashes.
-- Logical time is a monotonically increasing revision number. Inputs advance
-  after each revision, allowing Differential's traces to compact old history.
-- Dynamic imports are currently folded into the single chunk rather than split.
-- Imported bindings remain live through namespace property reads. Export setup,
-  namespace imports, ambiguous star exports, and representative ESM/CommonJS
-  cycles are covered by the behavioral oracle. Top-level await is not
-  implemented yet.
-- CSS, assets, source maps, tree shaking, minification, and production chunk
-  splitting are not implemented.
-
-The next compatibility target is symbol-level inclusion and tree shaking,
-followed by a real chunk graph for dynamic imports and shared dependencies.
+- Package resolution uses `oxc_resolver`, including package exports, extension
+  aliases, and `node_modules` traversal.
+- Oxc strips TypeScript and lowers JSX before linking.
+- Static ESM, basic CommonJS, JSON, re-exports, source maps, literal dynamic
+  imports, basic code splitting, conservative tree shaking, and package
+  `sideEffects: false` are implemented.
+- A conservative flat path scope-hoists safe modules and falls back to module
+  factories for unsupported cases.
+- The minifier currently performs a narrow linked-constant optimization; a
+  general combined-AST Oxc minification path is still required.
+- CSS, general assets, plugin hosting, multiple environments, SSR, and HMR are
+  not implemented.

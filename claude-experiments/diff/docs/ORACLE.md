@@ -69,8 +69,8 @@ The baseline is green only when every fixture tagged `baseline` passes and the
 incremental equivalence test passes.
 
 The current target explicitly excludes source maps, minification, CSS, assets,
-plugins, tree shaking, top-level await, multiple output formats, and production
-code splitting. Those exclusions keep the next milestone small enough to finish
+plugins, top-level await, multiple output formats, and production code
+splitting. Those exclusions keep the next milestone small enough to finish
 without prematurely designing their incremental machinery.
 
 ## ESM linking target
@@ -94,12 +94,28 @@ command instead of emitting a known-invalid artifact.
 
 The target is green only when all `baseline` and `esm-linking` cases pass.
 
-## Next target: symbol inclusion
+## Production-parity gates
 
-The next oracle increment should describe which exported symbols and
-side-effectful statements must remain. That enables a module-granular linker and
-tree shaker without committing to production chunk splitting at the same time.
-Chunk-structure assertions come afterward.
+`npm run parity` compares production behaviors separately from the behavioral
+baseline. `npm run parity:strict` makes any missing capability fail CI. The
+gates cover unused exported-symbol removal, package `sideEffects` metadata,
+source-map emission, and dynamic-import code splitting.
+
+All four gates currently pass. Import demand is collected from the semantic AST
+and stored on dependency edges; the renderer strips locally unused pure
+declarations and respects package `sideEffects: false`. Source maps contain
+mapped source paths and contents. Literal dynamic imports emit lazy CommonJS
+chunks that share one runtime registry and module cache.
+
+The gate compares observable runtime output, unused-symbol removal, source-map
+artifacts, and chunk counts. It does not require byte-identical JavaScript:
+Diffpack uses module factories while Rolldown scope-hoists, so emitted structure
+may differ. The matched benchmark additionally requires Diffpack's total
+artifact bytes to be no larger than Rolldown's. Tree shaking is deliberately
+conservative rather than a complete statement-level implementation.
+
+`npm run bench:capabilities` first runs these pairwise equivalence checks and
+only then records release-CLI build times and artifact sizes.
 
 ## Adding a case
 

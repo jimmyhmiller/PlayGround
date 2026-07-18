@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use oxc_allocator::Allocator;
@@ -18,6 +19,7 @@ pub struct ParseResult {
 #[derive(Default)]
 struct DependencyVisitor {
     dependencies: Vec<String>,
+    dynamic_dependencies: BTreeSet<String>,
 }
 
 impl<'a> Visit<'a> for DependencyVisitor {
@@ -28,6 +30,7 @@ impl<'a> Visit<'a> for DependencyVisitor {
     fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
         if let Expression::StringLiteral(literal) = &expression.source {
             self.dependencies.push(literal.value.to_string());
+            self.dynamic_dependencies.insert(literal.value.to_string());
         }
     }
 
@@ -72,6 +75,12 @@ pub fn collect_dependencies(program: &Program<'_>) -> Vec<String> {
     visitor.dependencies.sort();
     visitor.dependencies.dedup();
     visitor.dependencies
+}
+
+pub fn collect_dynamic_dependencies(program: &Program<'_>) -> BTreeSet<String> {
+    let mut visitor = DependencyVisitor::default();
+    visitor.visit_program(program);
+    visitor.dynamic_dependencies
 }
 
 #[cfg(test)]

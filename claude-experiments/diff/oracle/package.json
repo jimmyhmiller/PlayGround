@@ -4,7 +4,10 @@
   "type": "module",
   "scripts": {
     "test": "node runner.mjs",
-    "bench": "node benchmark.mjs"
+    "parity": "node parity.mjs",
+    "parity:strict": "node parity.mjs --strict",
+    "bench": "node benchmark.mjs",
+    "bench:capabilities": "node capability-benchmark.mjs"
   },
   "dependencies": {
     "rolldown": "1.2.0"
