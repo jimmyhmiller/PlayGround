@@ -467,7 +467,7 @@
     (let [(mut done) false]
       (loop
         (if (load done) (break)
-          (let [r (read (cast i32 cfd) (cast (ptr i8) (index buf (load total))) (- cap (load total)))]
+          (let [r (read (cast i64 cfd) (cast (ptr i8) (index buf (load total))) (- cap (load total)))]
             (if (<= r 0) (break)
               (do (store! total (+ (load total) r))
                   (let [bs (find-body-start buf (load total))]

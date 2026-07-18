@@ -256,7 +256,7 @@
         (safepoint-poll (field vt parked))
         (let [r (cast i64 (poll (cast (ptr i8) pfd) 1 20))]
           (if (<= r 0) (continue)   ; timeout / EINTR: re-poll after the next safepoint
-            (let [n (read (cast i32 0) (cast (ptr i8) chp) 1)]
+            (let [n (read (cast i64 0) (cast (ptr i8) chp) 1)]
               (if (= n 0) (do (store! iseof 1) (break))            ; EOF
                 (if (< n 0) (continue)                             ; EINTR mid-read
                   (if (= (cast i64 (load chp)) \newline) (break)   ; end of line
@@ -462,7 +462,7 @@
               (safepoint-poll (field vt parked))
               (let [r (cast i64 (poll (cast (ptr i8) pfd) 1 20))]
                 (if (<= r 0) (continue)                   ; timeout / EINTR: re-poll after the safepoint
-                  (let [n (read fd (cast (ptr i8) (index chunk 0)) 8192)]
+                  (let [n (read (cast i64 fd) (cast (ptr i8) (index chunk 0)) 8192)]
                     (if (= n 0) (break)                   ; EOF -> child done
                       (if (< n 0) (continue)
                         (do
