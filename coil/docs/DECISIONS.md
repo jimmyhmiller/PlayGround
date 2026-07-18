@@ -1,0 +1,71 @@
+# Coil — Design Decisions (Jimmy, from the questionnaire)
+
+These are the chosen directions for the rough-edge findings that were design calls, not
+bugs. Ordered here by a sensible execution sequence, not by decision number. Each is real
+work; do them one at a time, gated by the usual rebootstrap (fixpoint + gate-full +
+arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
+
+## Execution order (dependency-aware)
+
+1. **store! returns unit (std-12).** Do this FIRST and standalone — it touches every file
+   (each effect-only `(store! x v)` in a value position), so it must land when nothing else
+   is in flight or it conflicts with everything. Jimmy: "We have lint and fix stuff. Use it!"
+   → drive the ripple sweep with the `hivemind` test-gated swarm (gate = the real rebootstrap
+   / gate suite) and/or `verify`, not by hand. Make `store!` return unit (or canonical i64 0);
+   sweep lib/, selfhost/, examples; keep gates green.
+
+2. **Type ascription `(: value type)` (gen-9)** + fix the let-inference hole. Small, unblocks
+   ergonomics, and useful while doing the bigger type work below. General ascription
+   expression, works anywhere; also fix inference across a `let`.
+
+3. **Qualified trait-method calls `(A::go x)` (gen-6).** Add `::`-qualified method calls that
+   resolve `Trait::method` through the receiver's impls table; a same-name collision becomes
+   recoverable. Fix the collision error to stop suggesting `:use` when both traits are local.
+
+4. **Supertrait `(deftrait Derived [Self] :requires [Base] …)` (gen-8).** A `:requires` clause,
+   separate from the type-param vector, so associated-type params and supertraits stop sharing
+   one syntax. Warn (or error) on the old ambiguous form.
+
+5. **Iteration & generics over collections — BOTH (gen-1 · std-11 · std-4).** The biggest item.
+   (a) Associated-type bounds: make parameterized traits (Get/Set/Push/Pop/Iter) usable as
+   bounds by treating non-Self params as associated types determined by the impl. (b) An
+   Iterator/Iterable protocol collapsing hm-for/al-for/slice-for/for-in into one `(for x (iter
+   coll))`. Sequence: bounds FIRST (unblocks generic collection code), iterator SECOND. std-4
+   (`(for-in (in map))` iterates garbage) is folded in — it goes away with the real protocol.
+
+6. **File-relative imports + migrate the self-host source (tool-1).** Resolve a relative import
+   against `dirname(importing file)` (the documented, universal rule). The self-host source is
+   written CWD/root-relative, so rewrite its imports too. NOTE from the prior attempt: a
+   file-relative switch changed `emit-ir` output in a way I couldn't explain and broke the
+   bootstrap's own imports — run that down as part of this (it's why a naive switch failed).
+
+7. **Delete the comptime interpreter — 3 steps (mac-8 · mac-12 · diag-4).**
+   1) Route `(comptime E)`/`(const …)` through the compiled engine (closes mac-8; also fixes
+      the "const can't call a monomorphic fn" bug found while proving this).
+   2) `export-c` on the arm64 backend → `main_a64` registers a builder → the compiled engine
+      becomes the only engine (closes mac-12; the LLVM-free compiler stops being secretly weaker).
+   3) Delete `comptime.coil`'s evaluator, the `COIL_META` flag, parity.sh, and guide.coil:426.
+   The deletion CANNOT come first — steps 1–2 remove what still depends on it.
+
+8. **String HashMap keys own by default (std-3).** String-keyed maps copy keys into the map's
+   allocator on insert and free on remove; borrowing becomes the opt-in/unsafe path. Behavior
+   change — audit existing string-key users.
+
+9. **Debug-checks build mode — BOTH (mem-2 · mem-6 · mem-7 · mem-8).**
+   (a) `--debug-checks`: a comptime predicate exposed to library code so slice-get/subslice
+       bounds-check (and reject negative-length subslice), a poison-on-free debug-allocator in
+       lib/alloc.coil, and a stack-return lint, all zero-cost when off.
+   (b) `--sanitize=address`: wire LLVM's ASan pass + link the runtime; and stop
+       `--link-flag -fsanitize=address` aborting the compiler.
+
+10. **Testing & debugging story (tool-12 · tool-11).** `lib/assert.coil` (assert/assert-eq with
+    file:line via the span machinery), a `coil test` runner that discovers + runs test mains,
+    a `deftest` macro as a pure library (per the macro-power thesis), AND fix `-g`: run
+    dsymutil, keep the .o, and fix the arm64 line-program so lldb maps source (currently 0 line
+    rows / "No source available").
+
+## Notes carried from the session
+- The mechanical rough-edge fixes are DONE (~60 findings across many commits + two workflows).
+- diag-9 is half done (body/return spanned; param/field/return needs spans on AST type nodes).
+- gen-10 (mono O(n^1.7)→O(n)) is a deferred workflow item worth reviving as focused work.
+- The debug-checks mode (#9) is the landing spot lib/slice.coil's own "Phase-2" comment promises.
