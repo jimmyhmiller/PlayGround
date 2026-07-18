@@ -12,7 +12,6 @@
 (import "src/server.coil" :use *)
 (import "src/portal.coil" :use *)
 (import "arraylist.coil" :use *)
-(import "alloc.coil" :use *)
 
 (defn read-file [(path (ptr i8))] (-> (ptr u8))
   (let [file (fopen path c"rb")]

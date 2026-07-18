@@ -4,7 +4,7 @@
 (module lexer)
 (import "ioutil.coil" :use *)
 (import "arraylist.coil" :use *)
-(import "alloc.coil" :use *)
+(import "alloc.coil" :as alloc)   ; aliased: alloc also declares malloc/realloc externs; only ioutil's are unqualified in scope
 
 ; ---- token kinds ----------------------------------------------------------
 (const TK_EOF 0)
@@ -86,7 +86,7 @@
    (interp (array i64 32)) (interp-n i64)])
 
 (defn lx [] (-> (ptr Lexer)) (alloc-static Lexer))
-(defn alc-global [] (-> (ptr Allocator)) (malloc-allocator))
+(defn alc-global [] (-> (ptr alloc.Allocator)) (alloc.malloc-allocator))
 
 ; ---- low-level cursor ------------------------------------------------------
 (defn l-peek [] (-> i64) (cast i64 (load (load (field (lx) cur)))))
