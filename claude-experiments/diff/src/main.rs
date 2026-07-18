@@ -131,31 +131,47 @@ fn run() -> Result<(), String> {
                 println!("  known gap: {diagnostic}");
             }
 
-            // Emit the real client `public/` layout. The client is the only
-            // environment Diffpack chunks and emits natively today; the server
-            // (SSR) build is the next milestone, so a non-client environment
-            // stops after discovery rather than pretending to write a bundle.
+            // Emit the environment natively. The `client` environment writes the
+            // browser `public/` layout (`.js` chunks + CSS + copied static
+            // files); the server environments (`ssr`/`nitro`) write the Node ESM
+            // `server/` layout (`.mjs` chunks). The server build is the SSR
+            // foundation: it emits the server module graph but not yet the Node
+            // HTTP runtime entry (`server/index.mjs`) or the natively-generated
+            // TanStack manifests, which are the next slices.
+            let output_root = Path::new(&project_root).join(".diffpack-output");
             if config.environment == "client" {
-                let output_root = Path::new(&project_root).join(".diffpack-output");
                 let summary =
                     bundler.emit_public(&reachable, &output_root, EmitOptions::default())?;
                 let static_files = diffpack::config::copy_static_public(
                     Path::new(&project_root),
-                    &summary.public_dir,
+                    &summary.output_dir,
                 )?;
                 println!(
                     "emitted {}: {} public .js, {} .css, {} asset(s), {} static file(s)",
-                    summary.public_dir.display(),
+                    summary.output_dir.display(),
                     summary.javascript_files,
                     summary.css_files,
                     summary.asset_files,
                     static_files,
                 );
             } else {
+                let summary =
+                    bundler.emit_server(&reachable, &output_root, EmitOptions::default())?;
                 println!(
-                    "environment {:?} has no native emit yet (only the client build \
-                     emits today); discovery only",
-                    config.environment
+                    "emitted {}: {} server .mjs, {} .css, {} asset(s)",
+                    summary.output_dir.display(),
+                    summary.javascript_files,
+                    summary.css_files,
+                    summary.asset_files,
+                );
+                println!(
+                    "  server graph gate (>= 35 .mjs): {} .mjs emitted -> {}",
+                    summary.javascript_files,
+                    if summary.javascript_files >= 35 {
+                        "PASS"
+                    } else {
+                        "not yet"
+                    }
                 );
             }
             Ok(())

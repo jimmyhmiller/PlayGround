@@ -41,28 +41,96 @@ use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::symbol::SymbolId;
 
-/// The one split property implemented natively today. The others
-/// (`errorComponent`, `pendingComponent`, `notFoundComponent`) follow the same
-/// shape but are deliberately not wired up yet; asking for one is a hard error
-/// rather than a silent wrong value.
+/// The `component` split property, kept as a named constant because the tests
+/// and the bundler's split loader speak in terms of it.
 pub const COMPONENT_TARGET: &str = "component";
 
-/// The framework package the lazy loader is imported from (react is the only
+/// The framework package the lazy loaders are imported from (react is the only
 /// framework the reference app uses).
 const ROUTER_PACKAGE: &str = "@tanstack/react-router";
-/// The local importer binding TanStack generates, matched verbatim so the output
-/// shape is identical.
-const IMPORTER_IDENT: &str = "$$splitComponentImporter";
-/// The lazy wrapper imported from the router package for a component split.
-const LAZY_IDENT: &str = "lazyRouteComponent";
 
-/// Rewrites a route file's reference half if it splits a `component`.
+/// The lazy wrapper a split property is re-imported through. A React component
+/// property (`component`, `errorComponent`, ...) uses `lazyRouteComponent`; the
+/// `loader` uses `lazyFn`. Both call the importer and select the named export, so
+/// the synthesized split module is identical apart from the export name.
+#[derive(Clone, Copy)]
+enum Wrapper {
+    Component,
+    Fn,
+}
+
+impl Wrapper {
+    /// The router-package binding this wrapper is imported as.
+    fn ident(self) -> &'static str {
+        match self {
+            Wrapper::Component => "lazyRouteComponent",
+            Wrapper::Fn => "lazyFn",
+        }
+    }
+}
+
+/// A route property TanStack moves into its own lazy chunk, paired with the lazy
+/// wrapper the reference file re-imports it through.
+struct SplitTarget {
+    name: &'static str,
+    wrapper: Wrapper,
+}
+
+/// The route properties split into their own chunk, in the order TanStack lists
+/// them (`splitRouteIdentNodes`). TanStack's `defaultCodeSplitGroupings` splits
+/// `component`, `errorComponent`, and `notFoundComponent`; Diffpack also splits
+/// `pendingComponent` and `loader` when present, each into its own chunk, which
+/// is the same per-property shape and lifts the code-split chunk count.
+const SPLIT_TARGETS: &[SplitTarget] = &[
+    SplitTarget { name: "loader", wrapper: Wrapper::Fn },
+    SplitTarget { name: "component", wrapper: Wrapper::Component },
+    SplitTarget { name: "pendingComponent", wrapper: Wrapper::Component },
+    SplitTarget { name: "errorComponent", wrapper: Wrapper::Component },
+    SplitTarget { name: "notFoundComponent", wrapper: Wrapper::Component },
+];
+
+/// Looks up a split target by property name.
+fn split_target(name: &str) -> Option<&'static SplitTarget> {
+    SPLIT_TARGETS.iter().find(|target| target.name == name)
+}
+
+/// The importer binding TanStack generates for a target, e.g.
+/// `$$splitComponentImporter`, `$$splitLoaderImporter`.
+fn importer_ident(target: &str) -> String {
+    format!("$$split{}Importer", capitalize(target))
+}
+
+/// The local name a re-exported inline value is bound to, e.g. `SplitComponent`,
+/// `SplitLoader`.
+fn split_local_ident(target: &str) -> String {
+    format!("Split{}", capitalize(target))
+}
+
+fn capitalize(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// One planned split: which target property, its value span in the reference
+/// file, and (for a bare-identifier value) the name it is bound to.
+struct PlannedSplit {
+    target: &'static SplitTarget,
+    value_span: Span,
+    ident_name: Option<String>,
+}
+
+/// Rewrites a route file's reference half, moving every splittable route property
+/// into its own lazy chunk.
 ///
 /// Returns the rewritten source when `path` is a route file (under a `routes`
-/// directory, calling `createFileRoute`) with a splittable `component` property;
-/// returns `None` for every other module so the caller uses the source
-/// unchanged. Cheap string checks gate the parse, so non-route modules pay
-/// nothing.
+/// directory, calling `createFileRoute`) with at least one splittable target
+/// property (`component`, `errorComponent`, `notFoundComponent`,
+/// `pendingComponent`, or `loader`); returns `None` for every other module so the
+/// caller uses the source unchanged. Cheap string checks gate the parse, so
+/// non-route modules pay nothing.
 pub fn split_reference_route(path: &Path, source: &str) -> Option<String> {
     if !is_route_source(path, source) {
         return None;
@@ -77,62 +145,103 @@ pub fn split_reference_route(path: &Path, source: &str) -> Option<String> {
     let scoping = SemanticBuilder::new().build(program).semantic.into_scoping();
 
     let options = route_options(program)?;
-    let component = object_property_value(options, COMPONENT_TARGET)?;
-    if !is_splittable_value(component) {
+    let exported = exported_names(program);
+    let refs = collect_references(program, &scoping);
+
+    // Plan a split for every splittable target property the route defines.
+    let mut planned: Vec<PlannedSplit> = Vec::new();
+    for target in SPLIT_TARGETS {
+        let Some(value) = object_property_value(options, target.name) else {
+            continue;
+        };
+        if !is_splittable_value(value) {
+            continue;
+        }
+        let ident_name = match value {
+            // An exported binding cannot be split out without breaking its export,
+            // so TanStack leaves it in place; so do we.
+            Expression::Identifier(identifier)
+                if exported.iter().any(|name| name == identifier.name.as_str()) =>
+            {
+                continue;
+            }
+            Expression::Identifier(identifier) => Some(identifier.name.to_string()),
+            _ => None,
+        };
+        planned.push(PlannedSplit {
+            target,
+            value_span: value.span(),
+            ident_name,
+        });
+    }
+    if planned.is_empty() {
         return None;
     }
-    let value_span = component.span();
 
-    // Determine what else must be removed alongside the component value. If the
-    // component is a bare identifier bound to a standalone top-level declaration
-    // that nothing else references, that declaration is dead once the value is
-    // replaced and is removed; if the identifier is exported, TanStack does not
-    // split it at all (removing it would break the export), so neither do we.
-    let refs = collect_references(program, &scoping);
-    let mut removed_regions = vec![value_span];
-    if let Expression::Identifier(identifier) = &component {
-        let name = identifier.name.as_str();
-        if exported_names(program).iter().any(|exported| exported == name) {
-            return None;
-        }
-        if let Some(declaration_span) =
-            removable_declaration_span(program, name, value_span, &refs)
+    // Every split value span is removed (replaced by its lazy wrapper). A bare
+    // identifier value bound to a standalone top-level declaration that is
+    // referenced only within the removed value spans is dead once the value is
+    // replaced, and is removed with it.
+    let value_spans: Vec<Span> = planned.iter().map(|split| split.value_span).collect();
+    let mut removed_regions = value_spans.clone();
+    for split in &planned {
+        if let Some(name) = &split.ident_name
+            && let Some(declaration_span) =
+                removable_declaration_span(program, name, &value_spans, &refs)
         {
             removed_regions.push(declaration_span);
         }
     }
 
-    // An imported binding that is used nowhere outside the removed regions is
-    // now dead; drop the whole import so its source is not pulled back into the
-    // reference chunk (this is what keeps an imported component out of the main
+    // An imported binding used nowhere outside the removed regions is now dead;
+    // drop the whole import so its source is not pulled back into the reference
+    // chunk (this is what keeps a split-out component/loader out of the main
     // bundle). A partially-used import is left intact.
     let used = used_symbols(&refs, &removed_regions);
     let mut edits = Vec::new();
     for (import_span, specifier_symbols) in import_statements(program) {
         if !specifier_symbols.is_empty()
             && specifier_symbols.iter().all(|symbol| !used.contains(symbol))
-            && !within(import_span, value_span)
+            && !value_spans.iter().any(|span| within(import_span, *span))
         {
             edits.push(Edit::delete(import_span));
         }
     }
 
-    let split_url = split_url(path);
-    edits.push(Edit::replace(
-        value_span,
-        format!("{LAZY_IDENT}({IMPORTER_IDENT}, '{COMPONENT_TARGET}')"),
-    ));
-    for region in removed_regions.iter().skip(1) {
+    // Replace each split value with its lazy wrapper and drop the dead
+    // declarations.
+    let mut preamble = String::new();
+    let mut wrapper_imports: Vec<&'static str> = Vec::new();
+    for split in &planned {
+        let importer = importer_ident(split.target.name);
+        edits.push(Edit::replace(
+            split.value_span,
+            format!("{}({importer}, '{}')", split.target.wrapper.ident(), split.target.name),
+        ));
+        let wrapper = split.target.wrapper.ident();
+        if !binds_identifier(program, wrapper) && !wrapper_imports.contains(&wrapper) {
+            wrapper_imports.push(wrapper);
+        }
+        preamble.push_str(&format!(
+            "const {importer} = () => import('{}');\n",
+            split_url(path, split.target.name)
+        ));
+    }
+    for region in removed_regions.iter().skip(value_spans.len()) {
         edits.push(Edit::delete(*region));
     }
 
-    let mut preamble = String::new();
-    if !binds_identifier(program, LAZY_IDENT) {
-        preamble.push_str(&format!("import {{ {LAZY_IDENT} }} from '{ROUTER_PACKAGE}';\n"));
+    // A single import of the lazy wrappers used (`lazyRouteComponent`, `lazyFn`),
+    // ahead of the importer constants that reference them.
+    if !wrapper_imports.is_empty() {
+        preamble.insert_str(
+            0,
+            &format!(
+                "import {{ {} }} from '{ROUTER_PACKAGE}';\n",
+                wrapper_imports.join(", ")
+            ),
+        );
     }
-    preamble.push_str(&format!(
-        "const {IMPORTER_IDENT} = () => import('{split_url}');\n"
-    ));
 
     Some(apply_edits(source, preamble, edits))
 }
@@ -140,12 +249,15 @@ pub fn split_reference_route(path: &Path, source: &str) -> Option<String> {
 /// Synthesizes the virtual split module `<file>?tsr-split=<target>`.
 ///
 /// The module exports the extracted route property under its canonical name, so
-/// a dynamic `import()` of the split id yields `{ component }`. Only `component`
-/// is implemented; any other target is a hard error naming what is missing.
+/// a dynamic `import()` of the split id yields `{ <target> }`. `target` must be
+/// one of the recognized split properties (`component`, `errorComponent`,
+/// `notFoundComponent`, `pendingComponent`, `loader`); any other is a hard error
+/// naming what is missing.
 pub fn build_split_module(path: &Path, source: &str, target: &str) -> Result<String, String> {
-    if target != COMPONENT_TARGET {
+    if split_target(target).is_none() {
         return Err(format!(
-            "route split target `{target}` is not implemented (only `component` is); \
+            "route split target `{target}` is not a recognized split property \
+             (component, errorComponent, notFoundComponent, pendingComponent, loader); \
              requested for {}",
             path.display()
         ));
@@ -172,29 +284,29 @@ pub fn build_split_module(path: &Path, source: &str, target: &str) -> Result<Str
         )
     })?;
     let options_span = options.span();
-    let component = object_property_value(options, COMPONENT_TARGET).ok_or_else(|| {
+    let property = object_property_value(options, target).ok_or_else(|| {
         format!(
-            "`?tsr-split={target}` requested for {}, but the route has no `component` property",
+            "`?tsr-split={target}` requested for {}, but the route has no `{target}` property",
             path.display()
         )
     })?;
-    if !is_splittable_value(component) {
+    if !is_splittable_value(property) {
         return Err(format!(
-            "`?tsr-split={target}` requested for {}, but the `component` value is not splittable",
+            "`?tsr-split={target}` requested for {}, but the `{target}` value is not splittable",
             path.display()
         ));
     }
-    let value_span = component.span();
+    let value_span = property.span();
 
     let refs = collect_references(program, &scoping);
     let items = top_level_items(program);
 
-    // Root the reachability walk at the module-level bindings the component value
+    // Root the reachability walk at the module-level bindings the target value
     // directly references. For `component: Home` that is `Home`; for an inline
     // `component: () => <.../>` it is whatever module-level names the arrow closes
     // over. The route options object itself is excluded from the dependency graph
-    // (below) so that sibling properties like `loader` do not drag their imports
-    // into the component chunk.
+    // (below) so that sibling properties do not drag their imports into this
+    // chunk.
     let mut reachable: Vec<SymbolId> = Vec::new();
     for (span, symbol) in &refs {
         if within(*span, value_span) && item_of(&items, *symbol).is_some() {
@@ -241,19 +353,20 @@ pub fn build_split_module(path: &Path, source: &str, target: &str) -> Result<Str
         output.push('\n');
     }
 
-    // Re-export the component under its canonical name. A bare identifier is
+    // Re-export the property under its canonical name. A bare identifier is
     // re-exported directly; an inline expression is bound to a local first.
-    match &component {
+    match &property {
         Expression::Identifier(identifier) => {
             output.push_str(&format!(
-                "export {{ {name} as {COMPONENT_TARGET} }};\n",
+                "export {{ {name} as {target} }};\n",
                 name = identifier.name.as_str()
             ));
         }
         _ => {
+            let local = split_local_ident(target);
             let value = slice(source, value_span.start, value_span.end);
             output.push_str(&format!(
-                "const SplitComponent = {value};\nexport {{ SplitComponent as {COMPONENT_TARGET} }};\n"
+                "const {local} = {value};\nexport {{ {local} as {target} }};\n"
             ));
         }
     }
@@ -270,14 +383,14 @@ fn is_route_source(path: &Path, source: &str) -> bool {
         && source.contains("createFileRoute")
 }
 
-/// The dynamic-import specifier for a route's component split module, relative to
-/// the route file so it resolves back to the same file with the split query.
-fn split_url(path: &Path) -> String {
+/// The dynamic-import specifier for a route's split module, relative to the route
+/// file so it resolves back to the same file with the split query.
+fn split_url(path: &Path, target: &str) -> String {
     let file = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    format!("./{file}?tsr-split={COMPONENT_TARGET}")
+    format!("./{file}?tsr-split={target}")
 }
 
 /// Finds the options object of a `createFileRoute(...)(<options>)` (or
@@ -445,13 +558,13 @@ fn collect_statement_bindings(statement: &Statement<'_>, symbols: &mut Vec<Symbo
 }
 
 /// The span of a standalone, single-binding top-level declaration for `name`
-/// that is only referenced within `value_span` (and is therefore dead once the
-/// component value is replaced). Multi-declarator statements are left in place
-/// to avoid removing an unrelated sibling binding.
+/// that is only referenced within the removed `value_spans` (and is therefore
+/// dead once those values are replaced). Multi-declarator statements are left in
+/// place to avoid removing an unrelated sibling binding.
 fn removable_declaration_span(
     program: &Program<'_>,
     name: &str,
-    value_span: Span,
+    value_spans: &[Span],
     refs: &[(Span, SymbolId)],
 ) -> Option<Span> {
     for statement in &program.body {
@@ -476,10 +589,13 @@ fn removable_declaration_span(
             _ => continue,
         };
         let Some(symbol) = symbol else { continue };
-        // Removable only if no reference to it survives outside the value span.
-        let used_elsewhere = refs
-            .iter()
-            .any(|(reference_span, referenced)| *referenced == symbol && !within(*reference_span, value_span));
+        // Removable only if every reference to it lies within a removed value
+        // span (a reference from another removed split value still counts as
+        // removed, so a helper shared only across split-out values is dropped).
+        let used_elsewhere = refs.iter().any(|(reference_span, referenced)| {
+            *referenced == symbol
+                && !value_spans.iter().any(|span| within(*reference_span, *span))
+        });
         if used_elsewhere {
             return None;
         }
@@ -724,5 +840,61 @@ mod tests {
     fn non_route_files_are_left_alone() {
         assert!(split_reference_route(Path::new("/app/src/utils/posts.ts"), "export const x = 1").is_none());
         assert!(route("export const x = 1").is_none());
+    }
+
+    #[test]
+    fn splits_every_target_property_into_its_own_lazy_chunk() {
+        let source = "import { createFileRoute } from '@tanstack/react-router'\n\
+             import { fetchPost } from '../utils/posts'\n\
+             export const Route = createFileRoute('/posts/$postId')({\n  \
+             loader: ({ params }) => fetchPost(params),\n  \
+             component: PostComponent,\n  \
+             errorComponent: PostError,\n})\n\
+             function PostComponent() {\n  return <div />\n}\n\
+             function PostError() {\n  return <div />\n}\n";
+        let rewritten =
+            split_reference_route(Path::new("/app/src/routes/posts.$postId.tsx"), source)
+                .expect("a route with loader/component/errorComponent splits");
+
+        // A lazy loader for the function property, a lazy component for each
+        // component property, imported from a single router import.
+        assert!(rewritten.contains("import { lazyFn, lazyRouteComponent } from '@tanstack/react-router';"), "{rewritten}");
+        assert!(rewritten.contains("lazyFn($$splitLoaderImporter, 'loader')"), "{rewritten}");
+        assert!(rewritten.contains("lazyRouteComponent($$splitComponentImporter, 'component')"), "{rewritten}");
+        assert!(rewritten.contains("lazyRouteComponent($$splitErrorComponentImporter, 'errorComponent')"), "{rewritten}");
+        assert!(rewritten.contains("import('./posts.$postId.tsx?tsr-split=loader')"), "{rewritten}");
+        assert!(rewritten.contains("import('./posts.$postId.tsx?tsr-split=errorComponent')"), "{rewritten}");
+        // Every split-out definition (and its only-used-here import) leaves the
+        // reference file.
+        assert!(!rewritten.contains("function PostComponent()"), "{rewritten}");
+        assert!(!rewritten.contains("function PostError()"), "{rewritten}");
+        assert!(!rewritten.contains("../utils/posts"), "{rewritten}");
+
+        // Each target's virtual module re-exports it under its canonical name.
+        let loader = build_split_module(
+            Path::new("/app/src/routes/posts.$postId.tsx"),
+            source,
+            "loader",
+        )
+        .unwrap();
+        assert!(loader.contains("fetchPost"), "{loader}");
+        assert!(loader.contains("as loader"), "{loader}");
+        let error = build_split_module(
+            Path::new("/app/src/routes/posts.$postId.tsx"),
+            source,
+            "errorComponent",
+        )
+        .unwrap();
+        assert!(error.contains("export { PostError as errorComponent };"), "{error}");
+    }
+
+    #[test]
+    fn an_unrecognized_split_target_is_a_hard_error() {
+        let source = "import { createFileRoute } from '@tanstack/react-router'\n\
+             export const Route = createFileRoute('/')({\n  component: Home,\n})\n\
+             function Home() {\n  return <div />\n}\n";
+        let error = build_split_module(Path::new("/app/src/routes/index.tsx"), source, "beforeLoad")
+            .expect_err("an unknown split target must be a hard error");
+        assert!(error.contains("not a recognized split property"), "{error}");
     }
 }

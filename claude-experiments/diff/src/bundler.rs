@@ -219,30 +219,32 @@ pub struct EmitOptions {
     pub minify: bool,
 }
 
-/// A count of what a client `public/` build wrote to disk: JavaScript chunks,
-/// extracted stylesheets, and content-hashed assets. Counted from the emitted
-/// files, not predicted, so the summary always matches reality.
+/// A count of what an environment build wrote to disk: JavaScript modules
+/// (`.js` for the browser `public/` build, `.mjs` for the Node ESM `server/`
+/// build), extracted stylesheets, and content-hashed assets. Counted from the
+/// emitted files, not predicted, so the summary always matches reality.
 #[derive(Debug, Clone)]
-pub struct PublicBuildSummary {
-    pub public_dir: PathBuf,
+pub struct EmitSummary {
+    pub output_dir: PathBuf,
     pub javascript_files: usize,
     pub css_files: usize,
     pub asset_files: usize,
 }
 
-impl PublicBuildSummary {
-    /// Walks an emitted `public/` directory and classifies each file: anything
-    /// under `assets/` is a content-hashed asset; otherwise `.js`/`.css` by
-    /// extension. Files with any other extension are ignored (there are none
-    /// today, but the count stays honest if that changes).
-    fn of(public_dir: &Path) -> Result<Self, String> {
+impl EmitSummary {
+    /// Walks an emitted environment directory and classifies each file: anything
+    /// under `assets/` is a content-hashed asset; otherwise a `.js`/`.mjs`
+    /// module or a `.css` stylesheet by extension. Files with any other
+    /// extension are ignored (there are none today, but the count stays honest
+    /// if that changes).
+    fn of(output_dir: &Path) -> Result<Self, String> {
         let mut summary = Self {
-            public_dir: public_dir.to_path_buf(),
+            output_dir: output_dir.to_path_buf(),
             javascript_files: 0,
             css_files: 0,
             asset_files: 0,
         };
-        let mut stack = vec![public_dir.to_path_buf()];
+        let mut stack = vec![output_dir.to_path_buf()];
         while let Some(directory) = stack.pop() {
             let entries = fs::read_dir(&directory)
                 .map_err(|error| format!("cannot read {}: {error}", directory.display()))?;
@@ -263,7 +265,7 @@ impl PublicBuildSummary {
                     summary.asset_files += 1;
                 } else {
                     match path.extension().and_then(|value| value.to_str()) {
-                        Some("js") => summary.javascript_files += 1,
+                        Some("js" | "mjs") => summary.javascript_files += 1,
                         Some("css") => summary.css_files += 1,
                         _ => {}
                     }
@@ -498,7 +500,7 @@ impl Bundler {
     /// JavaScript chunk (`client.js`), its dynamic-import chunks, the extracted
     /// stylesheet, and every content-hashed asset under `public/assets/`. The
     /// `public/` directory is rebuilt from scratch so stale files never linger,
-    /// and the returned [`PublicBuildSummary`] counts exactly what landed on disk.
+    /// and the returned [`EmitSummary`] counts exactly what landed on disk.
     ///
     /// This drives the existing single-output emit at a `public/` layout; it is a
     /// build-time entry point (off the incremental hot path), so the thesis guards
@@ -508,16 +510,49 @@ impl Bundler {
         reachable: &BTreeSet<ModuleId>,
         output_root: &Path,
         options: EmitOptions,
-    ) -> Result<PublicBuildSummary, String> {
-        let public_dir = output_root.join("public");
-        if public_dir.exists() {
-            fs::remove_dir_all(&public_dir).map_err(|error| {
-                format!("cannot clear {}: {error}", public_dir.display())
-            })?;
+    ) -> Result<EmitSummary, String> {
+        self.emit_environment(reachable, &output_root.join("public"), "client.js", options)
+    }
+
+    /// Emits the server (SSR) build into `<output_root>/server/` as Node ESM
+    /// `.mjs` modules, mirroring [`Self::emit_public`]: the entry chunk
+    /// (`server/server.mjs`), its dynamic-import chunks
+    /// (`server/server.chunk-N.mjs`), the extracted stylesheet, and every
+    /// content-hashed asset under `server/assets/`. The `server/` directory is
+    /// rebuilt from scratch so stale files never linger.
+    ///
+    /// The output uses the `.mjs` extension so Node treats each chunk as an ES
+    /// module. This is the foundation slice: it produces the server module graph
+    /// but not yet the Node HTTP runtime entry (`server/index.mjs`) nor the
+    /// natively-generated TanStack manifests — those are the next slices and are
+    /// deliberately not faked here.
+    pub fn emit_server(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        output_root: &Path,
+        options: EmitOptions,
+    ) -> Result<EmitSummary, String> {
+        self.emit_environment(reachable, &output_root.join("server"), "server.mjs", options)
+    }
+
+    /// Rebuilds `output_dir` from scratch and emits the environment's entry chunk
+    /// (named `entry_file`, whose extension — `.js` or `.mjs` — flows onto every
+    /// dynamic-import chunk) plus its CSS and assets. The returned
+    /// [`EmitSummary`] counts exactly what landed on disk.
+    fn emit_environment(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        output_dir: &Path,
+        entry_file: &str,
+        options: EmitOptions,
+    ) -> Result<EmitSummary, String> {
+        if output_dir.exists() {
+            fs::remove_dir_all(output_dir)
+                .map_err(|error| format!("cannot clear {}: {error}", output_dir.display()))?;
         }
-        let entry_output = public_dir.join("client.js");
+        let entry_output = output_dir.join(entry_file);
         self.emit_with_options(reachable, &entry_output, options)?;
-        PublicBuildSummary::of(&public_dir)
+        EmitSummary::of(output_dir)
     }
 
     pub fn emit_with_options(
@@ -2766,7 +2801,7 @@ mod tests {
             "the svg asset is copied under assets/"
         );
         // The summary counts exactly the files on disk.
-        let on_disk = PublicBuildSummary::of(&public_dir).unwrap();
+        let on_disk = EmitSummary::of(&public_dir).unwrap();
         assert_eq!(on_disk.javascript_files, summary.javascript_files);
         assert_eq!(on_disk.css_files, summary.css_files);
         assert_eq!(on_disk.asset_files, summary.asset_files);
@@ -2789,5 +2824,79 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// Syntax-checks a file as JavaScript under the Node ESM goal. `node --check`
+    /// is a build oracle only, never in the build path.
+    fn node_check(path: &Path) {
+        let output = Command::new("node")
+            .arg("--check")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "node --check failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn emit_server_writes_an_mjs_layout_that_node_accepts() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("style.css"), ".a { color: red; }").unwrap();
+        fs::write(
+            directory.path().join("lazy.js"),
+            "export const lazy = 'lazy';",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("server.ts"),
+            "import './style.css';\n\
+             console.log('render');\n\
+             import('./lazy.js').then(({ lazy }) => console.log(lazy));\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("server.ts");
+        let output_root = directory.path().join(".diffpack-output");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let summary = bundler
+            .emit_server(&reachable, &output_root, EmitOptions::default())
+            .unwrap();
+
+        // The server entry plus its dynamically imported chunk, as `.mjs`.
+        assert!(
+            summary.javascript_files >= 2,
+            "expected the server entry and a dynamic chunk: {summary:?}"
+        );
+
+        let server_dir = output_root.join("server");
+        assert!(server_dir.join("server.mjs").is_file());
+        assert!(
+            server_dir.join("server.chunk-1.mjs").is_file(),
+            "the dynamic import lands in an `.mjs` chunk"
+        );
+        // No stray `.js` in the server build: everything is Node ESM.
+        assert_eq!(summary.output_dir, server_dir);
+
+        // Every emitted `.mjs` must be syntactically valid under Node's ESM goal.
+        for entry in fs::read_dir(&server_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|value| value.to_str()) == Some("mjs") {
+                node_check(&path);
+            }
+        }
+
+        // A re-emit rebuilds `server/` from scratch.
+        let stale = server_dir.join("stale.mjs");
+        fs::write(&stale, "// stale").unwrap();
+        bundler
+            .emit_server(&reachable, &output_root, EmitOptions::default())
+            .unwrap();
+        assert!(!stale.exists(), "re-emit must clear stale output");
     }
 }
