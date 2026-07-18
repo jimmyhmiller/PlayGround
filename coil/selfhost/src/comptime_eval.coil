@@ -151,6 +151,208 @@
                 (Err [d] (cte-box a (Err [Expr Diag] d)))
                 (Ok [lit] (cte-box a (Ok [Expr Diag] lit)))))))))))
 
+; ============================ AGGREGATE readback (interp deletion step 3a) =========
+; The scalar path above reads int/bool/f64 out of the return register. An AGGREGATE
+; comptime — a struct/array/string built with a capability the interpreter lacks
+; (sizeof, a generic call, a string op) — needs a NATIVE-MEMORY readback instead: a
+; write-through `(ptr T)` thunk stores E's result into a heap buffer, and we walk the
+; C layout by field offset to rebuild a CtVal (which build-value turns into a literal,
+; exactly like the interpreter's own aggregate fold). The layout walked here is the
+; NATURAL C ABI both backends emit (codegen_a64.coil::g-natural-layout! and codegen.coil
+; via LLVMOffsetOfElement); it is NOT a third private layout, it is that one contract.
+; Sums, raw pointers, f32, vecs, non-u8 slices and non-default struct layouts are
+; DECLINED (the reader returns None → the hook returns null → the interpreter's own
+; "isn't supported yet" error stands, so nothing that folds today regresses).
+
+; natural alignment of `t` (the C ABI: TInt 1/2/4/8, everything pointer-shaped 8, a
+; struct = its widest field). Only ever reached for a cte-readable? type.
+(defn cte-ty-align [(cx (ptr CtCtx)) (t (ptr Type))] (-> i64)
+  (match-else (load t)
+    (TInt   [b s]  (if (icmp-le b 8) 1 (if (icmp-le b 16) 2 (if (icmp-le b 32) 4 8))))
+    (TFloat [b]    (idiv b 8))
+    (TBool  []     1)
+    (TPtr   [i]    8) (TRef [m i] 8) (TFn [c p r] 8)
+    (TArray [el n] (cte-ty-align cx el))
+    (TSlice [el]   8)
+    (TStruct [nm]
+      (let [sd (ct-struct-find cx nm)]
+        (if (icmp-eq (cast i64 sd) 0) 8
+          (let [fs (load (field sd fields)) n (al-len [Field] (load fs)) (mut i) 0 (mut mx) 1]
+            (loop (if (icmp-ge (load i) n) (break)
+              (do (let [al (cte-ty-align cx (field (al-elem [Field] fs (load i)) ty))]
+                    (if (icmp-gt al (load mx)) (store! mx al) 0))
+                  (store! i (iadd (load i) 1)))))
+            (load mx)))))
+    (_ 8)))
+; natural byte size of `t`, and the struct-size rounding (align8-of-widest). Mirrors
+; g-natural-layout! / ty-size exactly.
+(defn cte-struct-size [(cx (ptr CtCtx)) (sd (ptr StructDef))] (-> i64)
+  (let [fs (load (field sd fields)) n (al-len [Field] (load fs)) (mut off) 0 (mut maxal) 1 (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [fty (field (al-elem [Field] fs (load i)) ty) al (cte-ty-align cx fty)]
+            (if (icmp-gt al (load maxal)) (store! maxal al) 0)
+            (store! off (imul (idiv (iadd (load off) (isub al 1)) al) al))
+            (store! off (iadd (load off) (cte-ty-size cx fty))))
+          (store! i (iadd (load i) 1)))))
+    (imul (idiv (iadd (load off) (isub (load maxal) 1)) (load maxal)) (load maxal))))
+(defn cte-ty-size [(cx (ptr CtCtx)) (t (ptr Type))] (-> i64)
+  (match-else (load t)
+    (TInt   [b s]  (if (icmp-le b 8) 1 (if (icmp-le b 16) 2 (if (icmp-le b 32) 4 8))))
+    (TFloat [b]    (idiv b 8))
+    (TBool  []     1)
+    (TPtr   [i]    8) (TRef [m i] 8) (TFn [c p r] 8)
+    (TArray [el n] (imul (cte-ty-size cx el) n))
+    (TSlice [el]   16)
+    (TStruct [nm]
+      (let [sd (ct-struct-find cx nm)]
+        (if (icmp-eq (cast i64 sd) 0) 8 (cte-struct-size cx sd))))
+    (_ 8)))
+; natural byte offset of field `fi` within struct `sd` (mirrors g-natural-off).
+(defn cte-field-off [(cx (ptr CtCtx)) (sd (ptr StructDef)) (fi i64)] (-> i64)
+  (let [fs (load (field sd fields)) (mut off) 0 (mut i) 0 (mut res) 0]
+    (loop (if (icmp-gt (load i) fi) (break)
+      (do (let [fty (field (al-elem [Field] fs (load i)) ty) al (cte-ty-align cx fty)]
+            (store! off (imul (idiv (iadd (load off) (isub al 1)) al) al))
+            (if (icmp-eq (load i) fi) (store! res (load off)) 0)
+            (store! off (iadd (load off) (cte-ty-size cx fty))))
+          (store! i (iadd (load i) 1)))))
+    (load res)))
+; is the struct laid out with the default C layout (the only one this reader walks)?
+(defn cte-lc-layout? [(sd (ptr StructDef))] (-> bool)
+  (match-else (load (field sd layout)) (LC [] true) (_ false)))
+; can a value of `t` be read back into a CtVal? (int/bool/f64/array-of/string/LC-struct-of).
+(defn cte-struct-readable? [(cx (ptr CtCtx)) (sd (ptr StructDef))] (-> bool)
+  (let [fs (load (field sd fields)) n (al-len [Field] (load fs)) (mut i) 0 (mut ok) true]
+    (loop (if (or (not (load ok)) (icmp-ge (load i) n)) (break)
+      (do (if (not (cte-readable? cx (field (al-elem [Field] fs (load i)) ty))) (store! ok false) 0)
+          (store! i (iadd (load i) 1)))))
+    (load ok)))
+(defn cte-readable? [(cx (ptr CtCtx)) (t (ptr Type))] (-> bool)
+  (match-else (load t)
+    (TInt   [b s]  true)
+    (TBool  []     true)
+    (TFloat [b]    (icmp-eq b 64))
+    (TArray [el n] (cte-readable? cx el))
+    (TSlice [el]   (match-else (load el) (TInt [b s] (icmp-eq b 8)) (_ false)))
+    (TStruct [nm]
+      (let [sd (ct-struct-find cx nm)]
+        (if (icmp-eq (cast i64 sd) 0) false
+          (if (not (cte-lc-layout? sd)) false (cte-struct-readable? cx sd)))))
+    (_ false)))
+
+; ---- native-memory readers -------------------------------------------------------
+; assemble `nbytes` little-endian bytes at buf+off into a zero-extended i64.
+(defn cte-load-raw [(buf (ptr i8)) (off i64) (nbytes i64)] (-> i64)
+  (let [(mut i) 0 (mut acc) 0]
+    (loop (if (icmp-ge (load i) nbytes) (break)
+      (do (let [byte (iand (cast i64 (load (cast (ptr i8) (iadd (cast i64 buf) (iadd off (load i)))))) 255)]
+            (store! acc (ior (load acc) (ishl byte (imul (load i) 8)))))
+          (store! i (iadd (load i) 1)))))
+    (load acc)))
+(defn cte-load-f64 [(buf (ptr i8)) (off i64)] (-> f64)
+  (load (cast (ptr f64) (iadd (cast i64 buf) off))))
+(defn cte-copy-bytes [(dst (ptr i8)) (src (ptr i8)) (n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! (cast (ptr i8) (iadd (cast i64 dst) (load i)))
+                  (load (cast (ptr i8) (iadd (cast i64 src) (load i)))))
+          (store! i (iadd (load i) 1))))))
+  0)
+; read a (slice u8) {ptr@off, len@off+8}: copy len bytes out of the still-mapped dylib.
+(defn cte-read-str [(buf (ptr i8)) (off i64) (a (ptr Allocator))] (-> (Option CtVal))
+  (let [p   (cast (ptr i8) (cte-load-raw buf off 8))
+        len (cte-load-raw buf (iadd off 8) 8)]
+    (if (or (icmp-eq (cast i64 p) 0) (icmp-le len 0))
+        (Some (CStr (slice-new [u8] (cast (ptr u8) 0) 0)))
+      (match (raw-alloc a len 1)
+        (None [] (None [CtVal]))
+        (Some [dst]
+          (do (cte-copy-bytes dst p len)
+              (Some (CStr (slice-new [u8] (cast (ptr u8) dst) len)))))))))
+(defn cte-read-struct [(cx (ptr CtCtx)) (sd (ptr StructDef)) (nm (slice u8)) (buf (ptr i8)) (off i64) (a (ptr Allocator))] (-> (Option CtVal))
+  (let [fs (load (field sd fields)) n (al-len [Field] (load fs))
+        (mut cells) (al-new [(ptr CtVal)] a) (mut i) 0 (mut bad) false]
+    (loop (if (or (load bad) (icmp-ge (load i) n)) (break)
+      (do (let [foff (iadd off (cte-field-off cx sd (load i)))
+                fty (field (al-elem [Field] fs (load i)) ty)]
+            (match (cte-read cx fty buf foff a)
+              (None [] (store! bad true))
+              (Some [cv] (al-push! (mut cells) (new-cell cv)))))
+          (store! i (iadd (load i) 1)))))
+    (if (load bad) (None [CtVal]) (Some (CStruct nm (box-al [(ptr CtVal)] a (load cells)))))))
+; read a value of type `t` at buf+off. None = a leaf this reader declines (no regression).
+(defn cte-read [(cx (ptr CtCtx)) (t (ptr Type)) (buf (ptr i8)) (off i64) (a (ptr Allocator))] (-> (Option CtVal))
+  (match-else (load t)
+    (TInt   [b s] (Some (CInt (trunc (cte-load-raw buf off (cte-ty-size cx t)) b s))))
+    (TBool  []    (Some (CBool (icmp-ne (cte-load-raw buf off 1) 0))))
+    (TFloat [b]   (if (icmp-eq b 64) (Some (CFloat (cte-load-f64 buf off))) (None [CtVal])))
+    (TArray [el n]
+      (let [es (cte-ty-size cx el) (mut cells) (al-new [(ptr CtVal)] a) (mut i) 0 (mut bad) false]
+        (loop (if (or (load bad) (icmp-ge (load i) n)) (break)
+          (do (match (cte-read cx el buf (iadd off (imul (load i) es)) a)
+                (None [] (store! bad true))
+                (Some [cv] (al-push! (mut cells) (new-cell cv))))
+              (store! i (iadd (load i) 1)))))
+        (if (load bad) (None [CtVal]) (Some (CArray (load el) (box-al [(ptr CtVal)] a (load cells)))))))
+    (TSlice [el]
+      (match-else (load el) (TInt [b s] (if (icmp-eq b 8) (cte-read-str buf off a) (None [CtVal]))) (_ (None [CtVal]))))
+    (TStruct [nm]
+      (let [sd (ct-struct-find cx nm)]
+        (if (icmp-eq (cast i64 sd) 0) (None [CtVal])
+          (if (not (cte-lc-layout? sd)) (None [CtVal]) (cte-read-struct cx sd nm buf off a)))))
+    (_ (None [CtVal]))))
+
+; append (defn coil.ct.thunk [($ct$out (ptr T))] (-> i64) (do (store! $ct$out E) 0)) —
+; a write-through entry (a pointer param needs no C-ABI thunk on either backend).
+(defn cte-add-entry-agg [(a (ptr Allocator)) (sub (ptr Program)) (inner (ptr Expr)) (rty Type)] (-> i64)
+  (let [f (alloc-stack Func) (mut params) (al-new [Param] a) pp (alloc-stack Param)]
+    (store! (field pp name) "$ct$out")
+    (store! (field pp ty) (TPtr (box-type a rty)))
+    (al-push! (mut params) (load pp))
+    (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))
+          (mut body) (al-new [Expr] a)]
+      (al-push! (mut body) (mk-expr (EStore (box-expr a (mk-expr (EVar "$ct$out") lo hi src ctxt)) (box-expr a (load inner))) lo hi src ctxt))
+      (al-push! (mut body) (mk-expr (EInt 0) lo hi src ctxt))
+      (store! (field f name) "coil.ct.thunk")
+      (store! (field f type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+      (store! (field f bounds) (box-al [Bound] a (al-new [Bound] a)))
+      (store! (field f cc) "c")
+      (store! (field f params) (box-al [Param] a (load params)))
+      (store! (field f ret) (TInt 64 true))
+      (store! (field f body) (box-al [Expr] a (load body)))
+      (store! (field f macro_variadic) false)
+      (store! (field f lo) -1) (store! (field f hi) -1) (store! (field f source) -1) (store! (field f ctxt) 0)
+      (al-push! [Func] (load (field sub funcs)) (load f))))
+  (let [e (alloc-stack ExportC) (mut eparams) (al-new [Type] a)]
+    (al-push! (mut eparams) (TPtr (box-type a rty)))
+    (store! (field e name) "coil.ct.thunk")
+    (store! (field e symbol) (Some "coil_ct_thunk"))
+    (store! (field e params) (box-al [Type] a (load eparams)))
+    (store! (field e lo) -1) (store! (field e hi) -1) (store! (field e source) -1) (store! (field e ctxt) 0)
+    (al-push! [ExportC] (load (field sub exports)) (load e)))
+  0)
+; build the dylib, dlsym the entry, run it write-through into a heap buffer, read back.
+(defn cte-run-agg [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (t0 Type)] (-> (ptr i8))
+  (match (cte-build-dylib a sub)
+    (Err [d] (cte-box a (Err [Expr Diag] d)))
+    (Ok [h]
+      (let [fp (dlsym h (slice->cstr a "coil_ct_thunk"))]
+        (if (icmp-eq (cast i64 fp) 0)
+            (cte-box a (Err [Expr Diag] (derr "comptime: compiled entry missing from the metaprogram dylib (compiler bug)")))
+          (let [tp (alloc-stack Type)] (store! tp t0)
+            (match (raw-alloc a (iadd (cte-ty-size cx tp) 64) 16)
+              (None [] (cte-box a (Err [Expr Diag] (derr "comptime: out of memory allocating the comptime readback buffer"))))
+              (Some [buf]
+                (do
+                  (call-ptr (cast (fnptr c [(ptr i8)] i64) fp) buf)
+                  (match (cte-read cx tp buf 0 a)
+                    (None [] (cast (ptr i8) 0))
+                    (Some [cv]
+                      (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))]
+                        (match (build-value a (new-cell cv) lo hi src ctxt cx)
+                          (Err [d] (cte-box a (Err [Expr Diag] d)))
+                          (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))))))))
+
 ; the registered hook (comptime.coil::ct-fold-hook). null = declined.
 (defn comptime-fold-one [(a (ptr Allocator)) (inner (ptr Expr)) (cx (ptr CtCtx))] (-> (ptr i8))
   (let [prog (load (field cx prog))]
@@ -159,23 +361,30 @@
         (None [] (cast (ptr i8) 0))
         (Some [t0]
           (let [tp (alloc-stack Type)] (store! tp t0)
-            (if (icmp-eq (cte-kind tp) 0) (cast (ptr i8) 0)
-              ; clear any nested comptime in E itself first (via interp/hook)
-              (match (fold-expr inner cx)
-                (Err [_] (cast (ptr i8) 0))
-                (Ok [_]
-                  (let [names (prog-fn-names prog a)
-                        stackb (unwrap-ptr [SBox] (create [SBox] a))]
-                    (store! (field stackb items) (al-new [(slice u8)] a))
-                    (collect-calls inner names stackb)
-                    (let [wanted (closure-funcs prog (field stackb items) a)
-                          sub (closure-subprogram prog wanted a)]
-                      (match (cte-fold-closure sub cx)
-                        (Err [_] (cast (ptr i8) 0))
-                        (Ok [_]
-                          (do (cte-add-entry a sub inner t0)
-                              (drop-code-funcs a sub)
-                              (cte-run a sub cx inner (cte-kind tp) tp)))))))))))))))
+            (let [kind (cte-kind tp)]
+              ; scalar (kind 1/2/3) → return-register path; else a readable aggregate
+              ; → write-through path; anything else declines (interp error stands).
+              (if (and (icmp-eq kind 0) (not (cte-readable? cx tp))) (cast (ptr i8) 0)
+                ; clear any nested comptime in E itself first (via interp/hook)
+                (match (fold-expr inner cx)
+                  (Err [_] (cast (ptr i8) 0))
+                  (Ok [_]
+                    (let [names (prog-fn-names prog a)
+                          stackb (unwrap-ptr [SBox] (create [SBox] a))]
+                      (store! (field stackb items) (al-new [(slice u8)] a))
+                      (collect-calls inner names stackb)
+                      (let [wanted (closure-funcs prog (field stackb items) a)
+                            sub (closure-subprogram prog wanted a)]
+                        (match (cte-fold-closure sub cx)
+                          (Err [_] (cast (ptr i8) 0))
+                          (Ok [_]
+                            (if (icmp-eq kind 0)
+                                (do (cte-add-entry-agg a sub inner t0)
+                                    (drop-code-funcs a sub)
+                                    (cte-run-agg a sub cx inner t0))
+                              (do (cte-add-entry a sub inner t0)
+                                  (drop-code-funcs a sub)
+                                  (cte-run a sub cx inner kind tp)))))))))))))))))
 
 ; wire the hook into the interpreter's fold pass (called by main / main_a64 at startup).
 (defn register-comptime-fold! [] (-> i64)

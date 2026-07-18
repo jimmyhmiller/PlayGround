@@ -858,10 +858,23 @@ printf '(const SZ (sizeof i64))\n(defn main [] (-> i64) SZ)\n'                  
 expect_rc 8 "(const NAME (sizeof …)) folds to 8 (interp can't)"      "$COIL" run "$T/ct_const.coil"
 printf '(defn main [] (-> i64) (comptime (do c"hi" 5)))\n'                                  > "$T/ct_str.coil"
 expect_rc 5 "comptime using a c-string folds to 5 (interp can't)"    "$COIL" run "$T/ct_str.coil"
-# NO REGRESSION: an aggregate comptime still folds (on the interpreter — the compiled
-# engine declines the readback and the interpreter's own capability is preserved).
+# NO REGRESSION: an aggregate comptime a MONOMORPHIC function builds still folds on the
+# interpreter (no capability gap → the compiled hook never fires).
 printf '(defstruct P [(x i64) (y i64)])\n(defn mk [] (-> P) (let [(mut p) (zeroed P)] (do (store! (field p x) 3) (store! (field p y) 4) (load p))))\n(defn main [] (-> i64) (let [q (comptime (mk))] (iadd (load (field q x)) (load (field q y)))))\n' > "$T/ct_agg.coil"
 expect_rc 7 "aggregate comptime still folds (interp path, no regression)" "$COIL" run "$T/ct_agg.coil"
+# interp deletion step 3a: an aggregate/string comptime the INTERPRETER can't evaluate
+# (a capability gap — sizeof, a generic call) but which returns a struct/string now folds
+# on the COMPILED engine too, via a write-through (ptr T) thunk + a C-layout readback (the
+# same natural layout both backends emit). On the seed (no aggregate readback) the interp
+# error stands and `run` never yields the folded exit code.
+printf '(defstruct L [(sz i64) (al i64)])\n(defn main [] (-> i64) (let [s (comptime (let [p (alloc-stack L)] (store! (field p sz) (sizeof i64)) (store! (field p al) (sizeof (ptr i8))) (load p)))] (+ (field s sz) (field s al))))\n' > "$T/ct_agg_sizeof.coil"
+expect_rc 16 "aggregate (struct) comptime via sizeof reads back on the compiled engine (interp can't)" "$COIL" run "$T/ct_agg_sizeof.coil"
+printf '(module app)\n(import "slice.coil" :use *)\n(defn pick [T] [(s (slice u8))] (-> (slice u8)) s)\n(defn main [] (-> i64) (let [s (comptime (pick [i64] "hello"))] (+ (slice-len s) (cast i64 (load (index (slice-data s) 0))))))\n' > "$T/ct_agg_str.coil"
+expect_rc 109 "string comptime via a generic call reads back on the compiled engine (interp can't)" "$COIL" run "$T/ct_agg_str.coil"
+# a SUM-returning comptime with a capability gap still DECLINES cleanly (the readback
+# refuses sums) — the interpreter's own error stands, never a silently-wrong fold.
+printf '(defsum Opt (Yes [(v i64)]) (No []))\n(defn main [] (-> i64) (let [o (comptime (Yes (sizeof i64)))] (match o (Yes [v] v) (No [] 0))))\n' > "$T/ct_agg_sum.coil"
+expect_rc 1 "sum comptime with a capability gap declines (no silently-wrong fold)" "$COIL" run "$T/ct_agg_sum.coil"
 
 echo "== C size types are target-width: the prelude's size_t/ssize_t are i32 on wasm32 =="
 # `usize`/`isize` (a C machine word: size_t/ssize_t/long) are i32 on wasm32 (ILP32) and

@@ -207,13 +207,33 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    diag build-fixtures 06/07 flipped from "error" to a folded literal (regenerated, exit 1→0). Five
    teeth in `gate-cli.sh` (sizeof→8, generic→7, `(const … (sizeof))`→8, c-string-in-comptime→5, and an
    aggregate-comptime no-regression check) — the four capability tests FAIL on the pre-mac-8 seed.
-   STEP 3 STILL OPEN (the actual deletion): needs (a) aggregate comptime ON the compiled engine — the
-   scalar readback here is register-only; an aggregate needs a native-memory readback (a write-through
-   `(ptr T)` entry + the C layout to walk field offsets) so deleting the interpreter doesn't regress
-   it; (b) re-routing `run-metas` (the `(meta …)` path still uses `eval`) and `finish-macro`'s
-   interpreter fallback off `eval`; (c) relocating `CtVal`/`CtCtx` (metaengine/metalower/metahost reuse
-   them) out of `comptime.coil` before its evaluator, the `COIL_META` flag, `parity.sh`, and
-   guide.coil:426 can be removed. mac-8 is closed; mac-12 + diag-4 wait on the deletion.
+   STEP 3 IN PROGRESS (the actual deletion). Sub-parts, IN ORDER:
+   3a) ✅ DONE — aggregate/string comptime ON the compiled engine (native-memory readback). The
+       scalar path reads int/bool/f64 out of the return register; an AGGREGATE now uses a
+       write-through `(ptr T)` thunk (`comptime_eval.coil::cte-add-entry-agg`) — the compiler's own
+       codegen stores E's result into a heap buffer — and `cte-read` walks the NATURAL C layout by
+       field offset (the SAME layout both backends emit: `g-natural-layout!` / LLVMOffsetOfElement,
+       reconstructed as `cte-ty-size`/`cte-ty-align`/`cte-field-off`, NOT a third private layout) to
+       rebuild a CtVal, which the existing `build-value` turns into a literal — exactly the CtVal the
+       interpreter would have produced, so deletion won't regress it. Handles struct (default LC
+       layout), array, string (`(slice u8)` — copied out of the still-mapped dylib), and int/bool/f64
+       leaves incl. nesting. DECLINES (reader returns None → hook returns null → the interpreter's own
+       "isn't supported yet" error stands, no silently-wrong fold) for sums, raw pointers, f32, vecs,
+       non-u8 slices and non-default struct layouts. Only fires on a capability-gap aggregate (a
+       generic call / sizeof that returns an aggregate); a monomorphic aggregate still folds on the
+       interpreter untouched. Purely additive: the compiler's own source has no comptime sites, so the
+       hook never fires during the self-build — fixpoint byte-identical on BOTH rebootstraps (LLVM +
+       nollvm), all 7 gates green with ZERO snapshot regen. Verified on BOTH engines (LLVM ./coil and
+       the arm64-engine ./coil-nollvm). Teeth in `gate-cli.sh` (struct-via-sizeof→16, string-via-
+       generic-call→109, sum-with-gap declines→exit 1) — the two capability teeth FAIL on the seed.
+       (NOTE: a PRE-EXISTING, engine-independent `build-content`/codegen bug mis-lowers a comptime
+       struct whose fields are all <8 bytes — the interpreter has it too — is orthogonal to interp-
+       delete and untouched here; the readback itself is byte-correct.)
+   3b) OPEN — re-route `run-metas` (the `(meta …)` generator path still uses `eval`) and `finish-macro`'s
+       interpreter fallback off `eval`.
+   3c) OPEN — relocate `CtVal`/`CtCtx` (metaengine/metalower/metahost reuse them) out of `comptime.coil`.
+   THEN the deletion: `comptime.coil`'s evaluator, the `COIL_META` flag, `parity.sh`, guide.coil:426.
+   mac-8 is closed; mac-12 + diag-4 wait on the full deletion (3b+3c+drop).
 
 8. **String HashMap keys own by default (std-3).** ✅ DONE. String-keyed maps copy keys into the
    map's allocator on insert and free on remove; borrowing becomes the opt-in/unsafe path.
