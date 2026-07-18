@@ -153,6 +153,21 @@ expect_rc 1 "defsum bound parses + enforced" "$COIL" build "$T/sumbound.coil" -o
 printf '(module m)\n(defstruct Box [(T Eq)] [(v T)])\n(defn main [] (-> i64) (let [b (alloc-stack (Box i64))] (store! (field b v) 7) 0))\n' > "$T/okbound.coil"
 expect_rc 0 "a satisfied bound ((Box i64)) still compiles" "$COIL" build "$T/okbound.coil" -o "$T/x"
 
+echo "== store! yields unit (std-12): effect-only stores type-check without a wrapping do =="
+# was: `store!` took the STORED VALUE's type, so `(if c (store! p ptr) 0)` was a type error
+# (then=(ptr i64) vs else=i64) and every non-i64 effect-only store needed `(do (store! …) 0)`.
+# Now store! is unit (canonical i64 0): the bare form checks, and the store still happens.
+# FAILS on the seed (branch-type error, build exits 1); PASSES here (runs, returns 7).
+cat > "$T/std12.coil" <<'EOF'
+(module m)
+(defn main [] (-> i64)
+  (let [n (alloc-stack i64) pp (alloc-stack (ptr i64))]
+    (store! n 7)
+    (if (icmp-eq 1 1) (store! pp n) 0)   ; stores a (ptr i64); store! yields unit i64 0
+    (load (load pp))))
+EOF
+expect_rc 7 "a bare effect-only (if c (store! p ptr) 0) builds+runs (was: branch-type error)" "$COIL" run "$T/std12.coil"
+
 echo "== (target-arch) reflects --target, not a hardcoded host constant =="
 # was: the constant "aarch64" — so a macro branching on it baked the host branch into a
 # cross-compiled wasm build, silently.

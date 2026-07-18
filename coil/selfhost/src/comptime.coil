@@ -510,7 +510,8 @@
           (let [r (vget! (eval p env cx)) v (vget! (eval val env cx))]
             (if (icmp-ne (ct-tag r) 8)
                 (Err [Flow Diag] (derr "comptime: `store!` target isn't a place"))
-                (do (store! (cref-cell r) (to-content-v v)) (Ok (FVal v))))))
+                ; std-12: store! yields unit (canonical i64 0), not the stored value.
+                (do (store! (cref-cell r) (to-content-v v)) (Ok (FVal (CInt 0)))))))
         (EField [p fname] (Ok (FVal (try! (place-ref e env cx)))))
         (EIndex [p idx]   (Ok (FVal (try! (place-ref e env cx)))))
         ; ---- construct / match / call ----

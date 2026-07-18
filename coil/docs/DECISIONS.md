@@ -7,12 +7,19 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
 
 ## Execution order (dependency-aware)
 
-1. **store! returns unit (std-12).** Do this FIRST and standalone — it touches every file
+1. **store! returns unit (std-12).** ✅ DONE. Do this FIRST and standalone — it touches every file
    (each effect-only `(store! x v)` in a value position), so it must land when nothing else
    is in flight or it conflicts with everything. Jimmy: "We have lint and fix stuff. Use it!"
    → drive the ripple sweep with the `hivemind` test-gated swarm (gate = the real rebootstrap
    / gate suite) and/or `verify`, not by hand. Make `store!` return unit (or canonical i64 0);
    sweep lib/, selfhost/, examples; keep gates green.
+   OUTCOME: `store!` now yields unit (canonical `i64` 0) — changed in `check.coil` (`synth-store`
+   type), both codegen backends (`codegen.coil` LLVM + `codegen_a64.coil` arm64), and the
+   `comptime.coil` evaluator; guide/LANGUAGE_GUIDE updated. The actual tree-wide ripple was 3
+   sites (a full emit-obj survey of lib/, examples/, apps/ found zero others — the codebase
+   already wrapped non-`i64` stores), so the swarm wasn't warranted; the 3 were fixed by hand
+   with the `(do (store! …) 0)` idiom. Full IR snapshot regenerated (82 store→0 phi/ret lines);
+   fixpoint + all 7 gates green; teeth-tested regression added to `gate-cli.sh`.
 
 2. **Type ascription `(: value type)` (gen-9)** + fix the let-inference hole. Small, unblocks
    ergonomics, and useful while doing the bigger type work below. General ascription

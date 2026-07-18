@@ -2377,7 +2377,9 @@
         (let [vsp (try! (do-synth a val pointee env cx tps fname)) vp (alloc-stack SynPair)] (store! vp vsp)
           (match (coerce a (load (load (field vp e))) (load (field vp t)) pointee false fname "store! value")
             (Err [d] (return-from :try (err-ep d)))
-            (Ok [ve] (ok-ep (mk-expr (EStore (load (field sp e)) (box-expr a ve)) elo ehi esrc ectxt) (load pointee))))))))))
+            ; std-12: store! is effect-only — it yields unit (canonical i64 0), not the
+            ; stored value's type, so an effect-only `if`/block no longer type-mismatches.
+            (Ok [ve] (ok-ep (mk-expr (EStore (load (field sp e)) (box-expr a ve)) elo ehi esrc ectxt) (TInt 64 true))))))))))
 
 (defn synth-index [(a (ptr Allocator)) (pp (ptr Expr)) (idx (ptr Expr)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
   (try (do

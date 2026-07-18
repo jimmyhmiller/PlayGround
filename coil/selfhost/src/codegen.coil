@@ -706,7 +706,8 @@
           (mk-tv (LLVMBuildLoad2 b (basic-ty cg (box-type a pointee)) (tv-val pv) (cg-bl cg "load")) pointee)))
       (EStore [pe val]
         (let [pv (emit-expr cg pe scp) vv (emit-expr cg val scp)]
-          (LLVMBuildStore b (tv-val vv) (tv-val pv)) (mk-tv (tv-val vv) (tv-ty vv))))
+          ; std-12: store! yields unit (canonical i64 0), matching its checked type.
+          (LLVMBuildStore b (tv-val vv) (tv-val pv)) (mk-tv (cg-zero-i64 cg) (TInt 64 true))))
       (EIndex [pe idx] (emit-index cg pe idx scp))
       (ECast [t inner] (emit-cast cg (box-type a t) inner scp))
       (ESizeOf [t] (mk-tv (cg-const-i64 cg (LLVMABISizeOfType (load (field cg td)) (basic-ty cg (box-type a t)))) (TInt 64 true)))

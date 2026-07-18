@@ -1435,7 +1435,8 @@
             (do (av-to-x! g pav 9)
                 (emit-copy-to-mem! g 9 (av-slot! g vav) sz)
                 0))
-          vav)))
+          ; std-12: store! yields unit (canonical i64 0), matching its checked type.
+          (mk-aval 0 0 (TInt 64 true)))))
     (EIndex [p idx]
       (let [pav (emit-expr g p)
             iav (emit-expr g idx)

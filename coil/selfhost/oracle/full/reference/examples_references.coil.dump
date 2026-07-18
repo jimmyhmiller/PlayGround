@@ -1306,7 +1306,7 @@ match.default:                                    ; preds = %else
   unreachable
 
 match.end:                                        ; preds = %else44
-  %match.val = phi i64 [ %add, %else44 ]
+  %match.val = phi i64 [ 0, %else44 ]
   br label %loop.body2
 
 then18:                                           ; preds = %arm8

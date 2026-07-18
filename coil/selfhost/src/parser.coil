@@ -804,7 +804,7 @@
           (Ok [nf]
             (let [np (alloc-stack NField)] (store! np nf)
               (let [fr (alloc-stack Field)] (store! (field fr name) (load (field np fname))) (store! (field fr ty) (load (field np fty))) (al-push! (mut fields) (load fr)))
-              (match (load (field np at)) (Some [_] (store! anyat true)) (None [] false))
+              (match (load (field np at)) (Some [_] (do (store! anyat true) 0)) (None [] 0))
               (al-push! (mut ats) (load (field np at)))))))))
     (if (load failed) (load out)
         (match (compute-layout a name packed explicit aligned exp-size has-size exp-align (load anyat) (box-al [(Option i64)] a (load ats)))

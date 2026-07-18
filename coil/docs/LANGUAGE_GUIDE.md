@@ -176,8 +176,8 @@ reexported from core): `when unless cond case case-by while for and or not`.
                                    ;   compiles to a JUMP TABLE
 
 ⚠ `if` needs matching branch types. For effect-only conditionals write
-`(if c (do …effects… 0) 0)` so both sides are `i64`. `store!` returns the stored
-value's type, so `(if c (store! p ptr) 0)` mismatches — wrap: `(do (store! p ptr) 0)`.
+`(if c (do …effects… 0) 0)` so both sides are `i64`. `store!` yields unit (canonical
+`i64` 0), so `(if c (store! p ptr) 0)` type-checks directly — no wrapping `do` needed.
 
 There is no `return`. Structure with `if`, or use `(block :b … (return-from :b v))`.
 Self-tail-recursion is constant-stack (guaranteed `musttail`).

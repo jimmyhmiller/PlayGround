@@ -624,7 +624,7 @@ arm6:                                             ; preds = %ifcont
   store ptr %p, ptr %field7, align 8
   %field8 = getelementptr inbounds nuw %app.Vec__i64, ptr %v, i32 0, i32 2
   store i64 %ifval, ptr %field8, align 8
-  ret i64 %ifval
+  ret i64 0
 
 match.default:                                    ; preds = %ifcont
   unreachable
@@ -671,7 +671,7 @@ ifcont:                                           ; preds = %else, %then
   %load9 = load i64, ptr %field8, align 8
   %add = add i64 %load9, 1
   store i64 %add, ptr %field7, align 8
-  ret i64 %add
+  ret i64 0
 }
 
 define internal %coil.core.Result__i64__io.IoError @fmt.f--abs(ptr %w, double %x) {
@@ -1705,7 +1705,7 @@ match.default:                                    ; preds = %else
   unreachable
 
 match.end:                                        ; preds = %else44
-  %match.val = phi i64 [ %add, %else44 ]
+  %match.val = phi i64 [ 0, %else44 ]
   br label %loop.body2
 
 then18:                                           ; preds = %arm8

@@ -672,7 +672,7 @@ else41:                                           ; preds = %then32
   br label %ifcont45
 
 ifcont45:                                         ; preds = %else41, %then40
-  %ifval46 = phi i64 [ %sub, %then40 ], [ 0, %else41 ]
+  %ifval46 = phi i64 [ 0, %then40 ], [ 0, %else41 ]
   br label %ifcont47
 
 ifcont47:                                         ; preds = %else33, %ifcont45
@@ -1458,7 +1458,7 @@ ifcont92:                                         ; preds = %ifcont90, %then53
   br label %ifcont97
 
 ifcont97:                                         ; preds = %ifcont92, %then41
-  %ifval98 = phi i64 [ %add50, %then41 ], [ %add96, %ifcont92 ]
+  %ifval98 = phi i64 [ 0, %then41 ], [ 0, %ifcont92 ]
   br label %ifcont99
 
 ifcont99:                                         ; preds = %ifcont97, %loop.after16
@@ -1466,7 +1466,7 @@ ifcont99:                                         ; preds = %ifcont97, %loop.aft
   br label %ifcont101
 
 ifcont101:                                        ; preds = %ifcont99, %then7
-  %ifval102 = phi i64 [ %add, %then7 ], [ %ifval100, %ifcont99 ]
+  %ifval102 = phi i64 [ 0, %then7 ], [ %ifval100, %ifcont99 ]
   br label %loop.body
 }
 
@@ -1538,7 +1538,7 @@ match.default:                                    ; preds = %loop.body
   unreachable
 
 match.end:                                        ; preds = %then12
-  %match.val = phi ptr [ %call22, %then12 ]
+  %match.val = phi i64 [ 0, %then12 ]
   br label %loop.body
 
 then:                                             ; preds = %arm
@@ -1883,7 +1883,7 @@ match.default:                                    ; preds = %loop.body
   unreachable
 
 match.end:                                        ; preds = %then12
-  %match.val = phi ptr [ %call22, %then12 ]
+  %match.val = phi i64 [ 0, %then12 ]
   br label %loop.body
 
 then:                                             ; preds = %arm
@@ -2881,7 +2881,7 @@ else37:                                           ; preds = %then31
   br label %ifcont42
 
 ifcont42:                                         ; preds = %else37, %then36
-  %ifval43 = phi i64 [ 1, %then36 ], [ %and41, %else37 ]
+  %ifval43 = phi i64 [ 0, %then36 ], [ 0, %else37 ]
   br label %ifcont56
 
 then47:                                           ; preds = %else32
@@ -2893,7 +2893,7 @@ else48:                                           ; preds = %else32
   br label %ifcont50
 
 ifcont50:                                         ; preds = %else48, %then47
-  %ifval51 = phi i64 [ %load49, %then47 ], [ 0, %else48 ]
+  %ifval51 = phi i64 [ 0, %then47 ], [ 0, %else48 ]
   %load52 = load i64, ptr %stack.slot, align 8
   %add53 = add i64 %load52, 1
   %sub54 = sub i64 %cap, 1
@@ -2902,11 +2902,11 @@ ifcont50:                                         ; preds = %else48, %then47
   br label %ifcont56
 
 ifcont56:                                         ; preds = %ifcont50, %ifcont42
-  %ifval57 = phi i64 [ %ifval43, %ifcont42 ], [ %and55, %ifcont50 ]
+  %ifval57 = phi i64 [ %ifval43, %ifcont42 ], [ 0, %ifcont50 ]
   br label %ifcont58
 
 ifcont58:                                         ; preds = %ifcont56, %ifcont27
-  %ifval59 = phi i64 [ 1, %ifcont27 ], [ %ifval57, %ifcont56 ]
+  %ifval59 = phi i64 [ 0, %ifcont27 ], [ %ifval57, %ifcont56 ]
   br label %loop.body
 }
 
@@ -3419,7 +3419,7 @@ match.default:                                    ; preds = %else
   unreachable
 
 match.end:                                        ; preds = %else44
-  %match.val = phi i64 [ %add, %else44 ]
+  %match.val = phi i64 [ 0, %else44 ]
   br label %loop.body2
 
 then18:                                           ; preds = %arm8

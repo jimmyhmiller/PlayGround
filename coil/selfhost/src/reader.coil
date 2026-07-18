@@ -102,7 +102,7 @@
                       (let [body (subslice s (load bstart) n)
                             has-us (do (let [(mut f) false (mut j) (load bstart)]
                                          (loop (if (icmp-ge (load j) n) (break)
-                                             (do (if (icmp-eq (cast i64 (slice-get s (load j))) 95) (store! f true) false)
+                                             (do (if (icmp-eq (cast i64 (slice-get s (load j))) 95) (do (store! f true) 0) 0)
                                                  (store! j (iadd (load j) 1)))))
                                          (load f)))]
                         (if (and has-us (looks-numeric body)) (do (store! radix 10) (store! dstart (load bstart))) 0))
@@ -138,7 +138,7 @@
                      (do (let [(mut f) false (mut j) 0]
                            (loop (if (icmp-ge (load j) n) (break)
                                (do (let [c (cast i64 (slice-get s (load j)))]
-                                     (if (or (icmp-eq c 46) (or (icmp-eq c 101) (icmp-eq c 69))) (store! f true) false))
+                                     (if (or (icmp-eq c 46) (or (icmp-eq c 101) (icmp-eq c 69))) (do (store! f true) 0) 0))
                                    (store! j (iadd (load j) 1)))))
                            (load f))))
                 (let [a (malloc-allocator) buf (slice->cstr a s) ep (alloc-stack (ptr i8))

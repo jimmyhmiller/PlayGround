@@ -214,9 +214,13 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
 
 ## Batch 8 — `store!` returns unit *(Jimmy: "probably should be unit")*
 
-- [ ] **std-12** `store!` yields the stored value's type, so effect-only `if` mismatches constantly.
+- [x] **std-12** `store!` yields the stored value's type, so effect-only `if` mismatches constantly.
       A documented gotcha is a gotcha that fires. Making it unit may ripple — expect churn in
-      `lib/` and examples.
+      `lib/` and examples. DONE: `store!` now yields unit (canonical `i64` 0) in check + both
+      codegen backends + the comptime evaluator. The tree-wide ripple was tiny (the codebase
+      already wrapped non-`i64` stores): only 3 self-host sites (`reader.coil` ×2, `parser.coil`
+      ×1) used the `(store! f true)`/`false` bool-flag shape and needed the `(do (store! …) 0)`
+      wrap; `lib/`, `examples/`, and `apps/` had zero ripple. Regression in `gate-cli.sh`.
 
 ## Batch 9 — Docs that promise what doesn't exist
 
