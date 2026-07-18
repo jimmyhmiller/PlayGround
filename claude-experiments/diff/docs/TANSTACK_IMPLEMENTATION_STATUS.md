@@ -186,3 +186,28 @@ cannot resolve "tanstack-start-manifest:v": Cannot find module 'tanstack-start-m
 That needs the sidecar `resolveId`/`load` hooks (the next host slice): a
 long-lived request/response loop keyed by module id + source hash so per-module
 invalidation and the incrementality guards are preserved across the boundary.
+
+## Plugin host: long-lived resolveId/load hooks (landed)
+
+The sidecar gained a long-lived `serve` mode: newline-delimited JSON
+request/response over stdin/stdout, running the framework plugins' `resolveId`
+and `load` hooks on demand (Vite/Rollup internals denied). `src/host.rs::Sidecar`
+is the Rust client (requests serialized behind a mutex; one process reused for the
+whole build, including incremental rebuilds), and `HostBridge` binds it to one
+environment. The bundler consults the host ONLY when native resolution/loading
+fails (`ResolutionCache.host`), so the common path stays native and the thesis
+guards are unaffected (all green). Virtual/plugin-generated modules resolve
+through `resolveId` and load through `load`, transformed like any module.
+
+Verified in isolation: `tests/host_sidecar.rs` starts the sidecar and
+resolves+loads the `tanstack-start-manifest:v` virtual module. Wired end to end,
+`bundle-with-host` now loads that virtual module and traverses its dependencies.
+
+Known limitation surfaced by loading it: the TanStack manifest is
+**build-output-dependent**. The content the dev-server plugin returns references
+dev-relative route imports (`./routes/__root`, ...) that do not map to a
+production static graph, so those imports do not resolve. Producing correct
+manifest content requires client/server build separation and ordering (the client
+build's real chunk outputs feed the server manifest). That build-graph work, not
+the host integration, is the next milestone; the `resolveId`/`load` bridge it
+needs is now in place.

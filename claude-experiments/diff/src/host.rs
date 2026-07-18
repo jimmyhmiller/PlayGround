@@ -13,8 +13,10 @@
 //! dependency, and the guest code still lives in a real `.mjs` file.
 
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
 
 use crate::bundler::BuildConfig;
 
@@ -90,6 +92,164 @@ pub fn resolve_config(project_root: &Path, environment: &str) -> Result<HostConf
         build: BuildConfig { aliases },
         skipped_aliases,
     })
+}
+
+/// A long-lived sidecar process that answers `resolveId`/`load` for framework
+/// virtual and plugin-generated modules. Diffpack calls it only for ids its own
+/// resolver/loader cannot handle, so the common path stays native. Requests are
+/// serialized (one in flight) behind a mutex; each is cheap relative to the JS
+/// hook it runs, and it is never on the per-module hot path for ordinary files.
+pub struct Sidecar {
+    inner: Mutex<SidecarProcess>,
+}
+
+struct SidecarProcess {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next_id: u64,
+}
+
+impl Sidecar {
+    /// Spawns `node sidecar.mjs serve <project_root>`.
+    pub fn start(project_root: &Path) -> Result<Self, String> {
+        let project_root = project_root.canonicalize().map_err(|error| {
+            format!("cannot open project root {}: {error}", project_root.display())
+        })?;
+        let sidecar = materialize_sidecar()?;
+        let mut child = Command::new("node")
+            .arg(&sidecar)
+            .arg("serve")
+            .arg(&project_root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("cannot start the plugin-host sidecar (is node installed?): {error}"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or("sidecar stdin was not captured")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("sidecar stdout was not captured")?;
+        Ok(Self {
+            inner: Mutex::new(SidecarProcess {
+                child,
+                stdin,
+                stdout: BufReader::new(stdout),
+                next_id: 1,
+            }),
+        })
+    }
+
+    fn request(&self, mut payload: serde_json::Value) -> Result<serde_json::Value, String> {
+        let mut process = self.inner.lock().map_err(|_| "sidecar mutex poisoned")?;
+        let id = process.next_id;
+        process.next_id += 1;
+        payload["id"] = serde_json::Value::from(id);
+        let mut line = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
+        line.push('\n');
+        process
+            .stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| process.stdin.flush())
+            .map_err(|error| format!("cannot write to sidecar: {error}"))?;
+
+        let mut response_line = String::new();
+        let read = process
+            .stdout
+            .read_line(&mut response_line)
+            .map_err(|error| format!("cannot read from sidecar: {error}"))?;
+        if read == 0 {
+            return Err("sidecar closed its output stream".to_string());
+        }
+        let response: serde_json::Value = serde_json::from_str(response_line.trim())
+            .map_err(|error| format!("sidecar returned invalid JSON: {error}"))?;
+        if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
+            return Err(format!("sidecar error: {error}"));
+        }
+        Ok(response)
+    }
+
+    /// Asks a framework plugin to resolve `specifier`. Returns the resolved
+    /// (possibly virtual) module id, or `None` if no plugin claims it.
+    pub fn resolve_id(
+        &self,
+        environment: &str,
+        specifier: &str,
+        importer: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let response = self.request(serde_json::json!({
+            "op": "resolveId",
+            "environment": environment,
+            "specifier": specifier,
+            "importer": importer,
+        }))?;
+        Ok(response
+            .get("resolved")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string))
+    }
+
+    /// Asks a framework plugin to load a (virtual) module id. Returns its source,
+    /// or `None` if no plugin provides it.
+    pub fn load(&self, environment: &str, module_id: &str) -> Result<Option<String>, String> {
+        let response = self.request(serde_json::json!({
+            "op": "load",
+            "environment": environment,
+            "moduleId": module_id,
+        }))?;
+        Ok(response
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string))
+    }
+
+    /// Asks the sidecar to shut down cleanly.
+    pub fn shutdown(&self) {
+        let _ = self.request(serde_json::json!({ "op": "shutdown" }));
+    }
+}
+
+impl Drop for Sidecar {
+    fn drop(&mut self) {
+        if let Ok(mut process) = self.inner.lock() {
+            let _ = process.child.kill();
+            let _ = process.child.wait();
+        }
+    }
+}
+
+/// A running sidecar bound to one build environment, handed to the bundler so it
+/// can fall back to framework `resolveId`/`load` for ids it cannot resolve or
+/// load itself (virtual and plugin-generated modules). The bundler holds it for
+/// the lifetime of the build, so incremental rebuilds reuse the same warm host.
+pub struct HostBridge {
+    sidecar: Sidecar,
+    environment: String,
+}
+
+impl HostBridge {
+    pub fn new(sidecar: Sidecar, environment: String) -> Self {
+        Self { sidecar, environment }
+    }
+
+    /// Resolves a specifier no native rule handled. Returns a (virtual) module id
+    /// or `None`.
+    pub fn resolve_id(&self, specifier: &str, importer: Option<&str>) -> Option<String> {
+        self.sidecar
+            .resolve_id(&self.environment, specifier, importer)
+            .ok()
+            .flatten()
+    }
+
+    /// Loads a (virtual) module id no native loader handled. Returns its source or
+    /// `None`.
+    pub fn load(&self, module_id: &str) -> Option<String> {
+        self.sidecar.load(&self.environment, module_id).ok().flatten()
+    }
 }
 
 fn string_array(value: &serde_json::Value, field: &str) -> Result<Vec<String>, String> {

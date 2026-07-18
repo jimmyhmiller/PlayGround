@@ -109,16 +109,21 @@ fn run() -> Result<(), String> {
                 .next()
                 .and_then(|value| value.to_str().map(str::to_string))
                 .unwrap_or_else(|| "client".to_string());
-            let host = diffpack::host::resolve_config(Path::new(&project_root), &environment)?;
+            let config = diffpack::host::resolve_config(Path::new(&project_root), &environment)?;
             println!(
                 "host: environment={} ({} available), {} aliases ({} skipped)",
-                host.environment,
-                host.environments.join("/"),
-                host.build.aliases.len(),
-                host.skipped_aliases,
+                config.environment,
+                config.environments.join("/"),
+                config.build.aliases.len(),
+                config.skipped_aliases,
             );
+            let sidecar = diffpack::host::Sidecar::start(Path::new(&project_root))?;
+            let bridge = std::sync::Arc::new(diffpack::host::HostBridge::new(
+                sidecar,
+                config.environment.clone(),
+            ));
             let (bundler, update) =
-                Bundler::discover_direct_with_config(Path::new(&entry), &host.build)?;
+                Bundler::discover_direct_with_host(Path::new(&entry), &config.build, bridge)?;
             let reachable = bundler.reachable_modules_direct();
             println!(
                 "reachable {} modules; {} diagnostic(s)",

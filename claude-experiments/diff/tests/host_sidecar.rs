@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use diffpack::host::resolve_config;
+use diffpack::host::{Sidecar, resolve_config};
 
 fn node_available() -> bool {
     Command::new("node")
@@ -42,4 +42,37 @@ fn resolve_config_reports_the_tanstack_router_alias() {
         "router alias should point at the app router, got {}",
         router.1
     );
+}
+
+#[test]
+fn the_long_lived_sidecar_resolves_and_loads_a_virtual_module() {
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("integration/tanstack-start-reference");
+    if !node_available() || !root.join("node_modules/vite").exists() {
+        eprintln!("skipping sidecar serve test: node or fixture node_modules unavailable");
+        return;
+    }
+
+    let sidecar = Sidecar::start(&root).unwrap();
+
+    // The TanStack manifest is a plugin-generated virtual module (no file).
+    let resolved = sidecar
+        .resolve_id("ssr", "tanstack-start-manifest:v", None)
+        .unwrap()
+        .expect("a framework plugin must resolve the manifest virtual id");
+    assert!(resolved.contains("tanstack-start-manifest"), "{resolved}");
+
+    let code = sidecar
+        .load("ssr", &resolved)
+        .unwrap()
+        .expect("a framework plugin must load the manifest virtual module");
+    assert!(code.contains("tsrStartManifest"), "{code}");
+
+    // Serialized requests keep working (the process is long-lived).
+    let again = sidecar
+        .resolve_id("ssr", "tanstack-start-manifest:v", None)
+        .unwrap();
+    assert_eq!(again.as_deref(), Some(resolved.as_str()));
+
+    sidecar.shutdown();
 }

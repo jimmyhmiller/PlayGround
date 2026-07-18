@@ -4,41 +4,51 @@
 // process answers the questions that require the project's own JavaScript build
 // plugins. It runs *inside the target project* (module resolution is anchored at
 // the project root via createRequire) but does NOT run a Vite/Rollup build; it
-// only reports config and, later, runs individual framework plugin hooks.
+// reports config and runs individual framework plugin hooks on demand.
 //
-// Protocol: one command per invocation, arguments on argv, a single JSON object
-// printed to stdout. Errors go to stderr with a non-zero exit. This one-shot
-// shape is enough for build-time config, which Diffpack fetches once per build;
-// per-module hooks (resolveId/load/transform) will move to a long-lived
-// newline-delimited request/response loop when they are needed.
+// Two commands:
 //
 //   node sidecar.mjs resolve-config <projectRoot> <environment>
-//     -> { "aliases": [[find, replacement], ...], "environments": [...] }
+//     One-shot. Prints one JSON object:
+//       { aliases: [[find, replacement], ...], environments: [...], ... }
 //
-// Only string->string aliases are reported (the entry aliases such as
-// `#tanstack-router-entry`); regex/function aliases are skipped and counted so a
-// silent drop is visible rather than mistaken for "none".
+//   node sidecar.mjs serve <projectRoot>
+//     Long-lived. Newline-delimited JSON request/response over stdin/stdout, one
+//     response object per request line. Diffpack calls this only for ids its own
+//     resolver/loader cannot handle (virtual and plugin-generated modules), so
+//     the common path stays native. Requests:
+//       { id, op: "resolveId", environment, specifier, importer }
+//         -> { id, resolved: string|null }
+//       { id, op: "load", environment, moduleId }
+//         -> { id, code: string|null }
+//       { id, op: "shutdown" } -> { id, ok: true } then exit
+//     Every response echoes the request `id`. Errors become
+//       { id, error: string }.
+//
+// Only *framework* plugins run; Vite/Rollup internals (vite:/builtin:/fullstack:/
+// alias/commonjs/nitro/rollup/_) are denied so their behavior stays Diffpack-
+// native.
 
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
+import { createInterface } from "node:readline";
 
-async function main() {
-  const [command, projectRoot, environment] = process.argv.slice(2);
-  if (command !== "resolve-config") {
-    throw new Error(`unknown sidecar command: ${command ?? "<none>"}`);
-  }
-  if (!projectRoot) {
-    throw new Error("resolve-config requires a project root");
-  }
+const DENY = /^(vite:|builtin:|fullstack:|alias$|commonjs$|nitro|rollup|_|@rollup)/;
 
-  const require = createRequire(`${projectRoot}/package.json`);
-  const { resolveConfig } = await import(pathToFileURL(require.resolve("vite")).href);
-  const config = await resolveConfig(
-    { root: projectRoot },
-    "build",
-    "production",
-    "production",
-  );
+function requireFrom(projectRoot) {
+  return createRequire(`${projectRoot}/package.json`);
+}
+
+async function importVite(projectRoot) {
+  const require = requireFrom(projectRoot);
+  return import(pathToFileURL(require.resolve("vite")).href);
+}
+
+// ---- resolve-config (one-shot) --------------------------------------------
+
+async function resolveConfigCommand(projectRoot, environment) {
+  const { resolveConfig } = await importVite(projectRoot);
+  const config = await resolveConfig({ root: projectRoot }, "build", "production", "production");
 
   const environments = Object.keys(config.environments ?? {});
   const selected = environment ?? "client";
@@ -67,6 +77,135 @@ async function main() {
   process.stdout.write(
     JSON.stringify({ environment: selected, environments, aliases, skippedAliases: skipped }),
   );
+}
+
+// ---- serve (long-lived hook host) -----------------------------------------
+
+async function serveCommand(projectRoot) {
+  const { createServer } = await importVite(projectRoot);
+  const server = await createServer({
+    root: projectRoot,
+    configFile: `${projectRoot}/vite.config.ts`,
+    server: { middlewareMode: true },
+    logLevel: "silent",
+  });
+
+  // Framework plugins per environment, computed lazily and cached.
+  const environmentPlugins = new Map();
+  function pluginsFor(environmentName) {
+    let cached = environmentPlugins.get(environmentName);
+    if (cached) return cached;
+    const env = server.environments[environmentName];
+    if (!env) throw new Error(`no such environment: ${environmentName}`);
+    cached = env.plugins.filter((plugin) => plugin.name && !DENY.test(plugin.name));
+    environmentPlugins.set(environmentName, { env, plugins: cached });
+    return environmentPlugins.get(environmentName);
+  }
+
+  function contextFor(env) {
+    return {
+      environment: env,
+      meta: { watchMode: false },
+      async resolve(source) {
+        return { id: source, external: false };
+      },
+      emitFile() {
+        return "ref";
+      },
+      getModuleInfo() {
+        return null;
+      },
+      addWatchFile() {},
+      warn() {},
+      error(message) {
+        throw new Error(typeof message === "string" ? message : message.message);
+      },
+      debug() {},
+      info() {},
+    };
+  }
+
+  function handler(hook) {
+    if (!hook) return null;
+    return typeof hook === "function" ? hook : hook.handler;
+  }
+
+  async function resolveId(environmentName, specifier, importer) {
+    const { env, plugins } = pluginsFor(environmentName);
+    const ctx = contextFor(env);
+    for (const plugin of plugins) {
+      const fn = handler(plugin.resolveId);
+      if (!fn) continue;
+      const result = await fn.call(ctx, specifier, importer ?? undefined, {});
+      const id = typeof result === "string" ? result : result?.id;
+      if (id) return id;
+    }
+    return null;
+  }
+
+  async function load(environmentName, moduleId) {
+    const { env, plugins } = pluginsFor(environmentName);
+    const ctx = contextFor(env);
+    for (const plugin of plugins) {
+      const fn = handler(plugin.load);
+      if (!fn) continue;
+      const result = await fn.call(ctx, moduleId, {});
+      const code = typeof result === "string" ? result : result?.code;
+      if (code != null) return code;
+    }
+    return null;
+  }
+
+  const readline = createInterface({ input: process.stdin });
+  for await (const line of readline) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let request;
+    try {
+      request = JSON.parse(trimmed);
+    } catch (error) {
+      process.stdout.write(`${JSON.stringify({ id: null, error: `bad request: ${error}` })}\n`);
+      continue;
+    }
+    const respond = (payload) =>
+      process.stdout.write(`${JSON.stringify({ id: request.id, ...payload })}\n`);
+    try {
+      switch (request.op) {
+        case "resolveId":
+          respond({ resolved: await resolveId(request.environment, request.specifier, request.importer) });
+          break;
+        case "load":
+          respond({ code: await load(request.environment, request.moduleId) });
+          break;
+        case "shutdown":
+          respond({ ok: true });
+          await server.close();
+          process.exit(0);
+          break;
+        default:
+          respond({ error: `unknown op: ${request.op}` });
+      }
+    } catch (error) {
+      respond({ error: String(error?.message ?? error) });
+    }
+  }
+  await server.close();
+}
+
+// ---- entry ----------------------------------------------------------------
+
+async function main() {
+  const [command, projectRoot, environment] = process.argv.slice(2);
+  if (!projectRoot) {
+    throw new Error(`${command ?? "<none>"} requires a project root`);
+  }
+  if (command === "resolve-config") {
+    await resolveConfigCommand(projectRoot, environment);
+  } else if (command === "serve") {
+    await serveCommand(projectRoot);
+  } else {
+    throw new Error(`unknown sidecar command: ${command ?? "<none>"}`);
+  }
 }
 
 main().catch((error) => {
