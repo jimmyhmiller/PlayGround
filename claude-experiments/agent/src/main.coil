@@ -58,6 +58,7 @@
    (designState i64)
    (designTurn i64)
    (designResponse (ptr i8))
+   (designRequest (ptr i8))
    (selectionRegion i64)
    (selectionAnchor i64)
    (selectionFocus i64)
@@ -415,6 +416,17 @@
               (store! (field state creationFocus) (+ cursor byteCount))
               (store! (field state creationTruncated) 0)
               0))))
+      0)))
+
+(defn copy-string [(destination (ptr i8)) (source (ptr i8)) (capacity i64)] (-> i64)
+  (let [(mut position) 0]
+    (do
+      (while (and (< (load position) (- capacity 1))
+                  (icmp-ne (load (index source (load position))) (cast i8 0)))
+        (do
+          (store! (index destination (load position)) (load (index source (load position))))
+          (store! position (+ (load position) 1))))
+      (store! (index destination (load position)) (cast i8 0))
       0)))
 
 (defn byte-text-length [(text (ptr i8))] (-> i64)
@@ -879,6 +891,7 @@
               (store! (field state designTurn) 0)
               (store! (load (field state creationText)) (cast i8 0))
               (store! (load (field state designResponse)) (cast i8 0))
+              (store! (load (field state designRequest)) (cast i8 0))
               0)
             0)
           (for [project 0
@@ -1500,12 +1513,31 @@
         0)
       (raylib.EndScissorMode)
       (fill-rectangle (+ left (- width 28.0)) (+ top 12.0) 28.0 28.0 sendColor)
+      ;; The font atlas only rasterizes ASCII, so the busy glyph must be ASCII.
       (draw-text (field state monoMedium)
-                 (if sending c"·" c">")
+                 (if sending c"." c">")
                  (+ left (- width 19.0))
                  (+ top 18.0)
                  12.0
                  (if (or sending (= length 0)) (color 76 85 97) (color 10 14 19)))
+      0)))
+
+(defn draw-typing-bubble [(left f64) (top f64) (tint raylib.Color)] (-> i64)
+  (let [time (raylib.GetTime)]
+    (do
+      (draw-card-background left top 84.0 40.0 true tint)
+      (for [dot 0
+            3]
+        (let [wave (sin (- (* time 6.0) (* (cast f64 dot) 1.1)))
+              alpha (cast i64 (+ 90.0 (* 65.0 (+ 1.0 wave))))]
+          (fill-rectangle (+ left (+ 16.0 (* (cast f64 dot) 20.0)))
+                          (+ top 17.0)
+                          6.0
+                          6.0
+                          (color-alpha (cast i64 (load (field tint r)))
+                                       (cast i64 (load (field tint g)))
+                                       (cast i64 (load (field tint b)))
+                                       alpha))))
       0)))
 
 (defn draw-design-workspace [(state (mut AppState)) (input InputFrame) (screenWidth i64) (screenHeight i64)] (-> i64)
@@ -1575,23 +1607,62 @@
                        145.0
                        12.0
                        (color 190 198 208))
-      (if (> (load (field state designTurn)) 0)
+      (let [requestText (load (field state designRequest))
+            haveRequest
+              (if (and (!= (cast i64 requestText) 0) (icmp-ne (load requestText) (cast i8 0))) 1 0)
+            responseTop (if (= haveRequest 1) 316.0 244.0)
+            responseBottom (cast f64 (- screenHeight 100))]
         (do
-          (draw-card-background contentLeft 244.0 (cast f64 (- RIGHT_WIDTH 40)) 292.0 true tint)
-          (draw-text (field state monoMedium) c"DESIGNER / RECOMMENDATION" (+ contentLeft 14.0) 258.0 9.0 tint)
-          (begin-scissor (+ contentLeft 14.0) 286.0 (cast f64 (- RIGHT_WIDTH 68)) 232.0)
-          (selectable-text (mut state)
-                           input
-                           6
-                           (field state sans)
-                           (load (field state designResponse))
+          (if (= haveRequest 1)
+            (do
+              (draw-card-background contentLeft 244.0 (cast f64 (- RIGHT_WIDTH 40)) 56.0 false tint)
+              (draw-text (field state monoMedium) c"YOU" (+ contentLeft 14.0) 256.0 9.0 tint)
+              (begin-scissor (+ contentLeft 14.0) 270.0 (cast f64 (- RIGHT_WIDTH 68)) 26.0)
+              (selectable-text (mut state)
+                               input
+                               7
+                               (field state sans)
+                               requestText
+                               (+ contentLeft 14.0)
+                               274.0
+                               11.5
+                               (color 220 226 233))
+              (raylib.EndScissorMode)
+              0)
+            0)
+          (if (= (load (field state designState)) 1)
+            (draw-typing-bubble contentLeft responseTop tint)
+            (if (> (load (field state designTurn)) 0)
+              (do
+                (draw-card-background contentLeft
+                                      responseTop
+                                      (cast f64 (- RIGHT_WIDTH 40))
+                                      (- responseBottom responseTop)
+                                      true
+                                      tint)
+                (draw-text (field state monoMedium)
+                           c"DESIGNER / RECOMMENDATION"
                            (+ contentLeft 14.0)
-                           286.0
-                           11.5
-                           (color 190 198 208))
-          (raylib.EndScissorMode)
-          0)
-        0)
+                           (+ responseTop 14.0)
+                           9.0
+                           tint)
+                (begin-scissor (+ contentLeft 14.0)
+                               (+ responseTop 42.0)
+                               (cast f64 (- RIGHT_WIDTH 68))
+                               (- responseBottom (+ responseTop 56.0)))
+                (selectable-text (mut state)
+                                 input
+                                 6
+                                 (field state sans)
+                                 (load (field state designResponse))
+                                 (+ contentLeft 14.0)
+                                 (+ responseTop 42.0)
+                                 11.5
+                                 (color 190 198 208))
+                (raylib.EndScissorMode)
+                0)
+              0))
+          0))
       (fill-rectangle (cast f64 rightStart) (cast f64 (- screenHeight 76)) (cast f64 RIGHT_WIDTH) 76.0 (color 9 12 17))
       (line (cast f64 rightStart)
             (cast f64 (- screenHeight 76))
@@ -1668,11 +1739,13 @@
           creationText (workflow.allocate-buffer CREATION_CAPACITY)
           clipboardText (workflow.allocate-buffer 4096)
           measureText (workflow.allocate-buffer 4096)
-          designResponse (workflow.allocate-buffer 4096)]
+          designResponse (workflow.allocate-buffer 4096)
+          designRequest (workflow.allocate-buffer CREATION_CAPACITY)]
       (store! catalog catalogValue)
       (store! creationText (cast i8 0))
       (store! clipboardText (cast i8 0))
       (store! designResponse (cast i8 0))
+      (store! designRequest (cast i8 0))
       (store! (field state selectedProject) 0)
       (store! (field state selectedNode) 0)
       (store! (field state approvalGranted) 0)
@@ -1697,6 +1770,7 @@
       (store! (field state designState) 0)
       (store! (field state designTurn) 0)
       (store! (field state designResponse) designResponse)
+      (store! (field state designRequest) designRequest)
       (store! (field state selectionRegion) 0)
       (store! (field state selectionAnchor) 0)
       (store! (field state selectionFocus) 0)
@@ -1759,6 +1833,9 @@
                     0)
                   (if (= (load (field state designRequested)) 1)
                     (do
+                      (copy-string (load (field state designRequest))
+                                   (load (field state creationText))
+                                   CREATION_CAPACITY)
                       (workflow.start-design-turn (load (field state creationText)) (load (field state designTurn)))
                       (store! (field state designRequested) 0)
                       (store! (field state creationLength) 0)
@@ -1847,6 +1924,7 @@
           clipboardText (workflow.allocate-buffer 4096)
           measureText (workflow.allocate-buffer 4096)
           designResponse (workflow.allocate-buffer 4096)
+          designRequest (workflow.allocate-buffer CREATION_CAPACITY)
           response
             c"Recommended workflow: start with a repository inspection step, then\nfan out into build verification and a documentation pass. Both feed a\nfinal human approval before anything lands on the main branch."
           screenWidth (cast i64 (/ (cast f64 (raylib.GetScreenWidth)) (ui-scale)))
@@ -1863,12 +1941,14 @@
               (store! (index designResponse (load position)) (load (index response (load position))))
               (store! position (+ (load position) 1))))
           (store! (index designResponse (load position)) (cast i8 0))))
+      (copy-string designRequest c"Help me design a review workflow for the flowline UI." CREATION_CAPACITY)
       (store! (field state catalog) catalog)
       (store! (field state runtime) (workflow.catalog-runtime catalog 0))
       (store! (field state creationText) creationText)
       (store! (field state clipboardText) clipboardText)
       (store! (field state measureText) measureText)
       (store! (field state designResponse) designResponse)
+      (store! (field state designRequest) designRequest)
       (store! (field state creationOpen) 1)
       (store! (field state designTurn) 1)
       (store! (field state designState) 2)
@@ -1894,6 +1974,14 @@
       (raylib.EndMode2D)
       (raylib.TakeScreenshot c"interface-design.png")
       (raylib.EndDrawing)
+      (store! (field state designState) 1)
+      (raylib.BeginDrawing)
+      (raylib.BeginMode2D (load camera))
+      (draw-app (mut state) input screenWidth screenHeight)
+      (raylib.EndMode2D)
+      (raylib.TakeScreenshot c"interface-pending.png")
+      (raylib.EndDrawing)
+      (store! (field state designState) 2)
       (store! (field state creationOpen) 0)
       (raylib.BeginDrawing)
       (raylib.BeginMode2D (load camera))
