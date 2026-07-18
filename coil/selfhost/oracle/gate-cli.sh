@@ -617,6 +617,38 @@ EOF
 expect_rc 222 "--debug-checks poisons freed memory (use-after-free reads 0xDE)" \
   "$COIL" run "$T/uaf.coil" --debug-checks
 
+echo "== stack-return lint under --debug-checks (mem-8) =="
+# A bundled (checker …) the driver auto-applies under --debug-checks warns when a
+# function returns a pointer to a stack local (clang warns on the identical C; Coil was
+# silent). FAILS on the seed ('unknown flag --debug-checks', no such warning).
+cat > "$T/dangle.coil" <<'EOF'
+(module m)
+(defn dangling [] (-> (ptr i64))
+  (let [x (alloc-stack i64)] (store! x 42) x))
+(defn main [] (-> i64) (load (dangling)))
+EOF
+expect_out "returns a pointer to a stack local" "--debug-checks warns on a stack-local pointer return (mem-8)" \
+  "$COIL" build "$T/dangle.coil" -o "$T/dl1" --debug-checks
+# it is a WARNING (like clang), not an error — the build still succeeds.
+"$COIL" build "$T/dangle.coil" -o "$T/dl2" --debug-checks >/dev/null 2>&1
+[ $? = 0 ] && ok "the stack-return lint is a warning (build still succeeds)" \
+           || bad "stack-return lint severity" "the build failed"
+# OFF (default): the checker is not even loaded — silent, zero cost.
+out=$("$COIL" build "$T/dangle.coil" -o "$T/dl3" 2>&1)
+echo "$out" | grep -q "stack local" && bad "off: the lint must not run" "$out" \
+                                    || ok "off: the stack-return lint is not loaded (zero cost)"
+# no false positive: a function returning a HEAP pointer is fine under the flag.
+cat > "$T/heapret.coil" <<'EOF'
+(module m)
+(import "alloc.coil" :use *)
+(defn mk [(a (ptr Allocator))] (-> (ptr i64))
+  (let [p (unwrap-ptr [i64] (create [i64] a))] (store! p 9) p))
+(defn main [] (-> i64) (load (mk (malloc-allocator))))
+EOF
+out=$("$COIL" build "$T/heapret.coil" -o "$T/hr" --debug-checks 2>&1)
+echo "$out" | grep -q "stack local" && bad "no false positive: heap return" "flagged a heap ptr" \
+                                    || ok "no false positive: a heap-pointer return is not flagged"
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL

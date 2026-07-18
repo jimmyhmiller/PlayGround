@@ -667,7 +667,11 @@
 ; a comptime code op (comptime.coil) read at expansion time — so the driver flips the
 ; host-side cell here, BEFORE expansion runs, exactly like the target arch. Off by
 ; default: the guard macro then expands to the plain unchecked op (zero cost).
-(defn enable-debug-checks! [] (-> i64) (set-debug-checks! 1))
+; --debug-checks also auto-applies the bundled stack-return lint (mem-8): the driver
+; --uses it, so its (checker …) runs over the program — no explicit import needed. Off,
+; the module is never loaded (zero cost). `cli-use-add` is idempotent-enough here (the
+; flag is scanned once), and prepend-uses turns it into (import "stacklint.coil" :use *).
+(defn enable-debug-checks! [] (-> i64) (set-debug-checks! 1) (cli-use-add "stacklint.coil") 0)
 
 ; `--sanitize=address` — run LLVM's AddressSanitizer pass and link its runtime
 ; (mem-7). One value per process; the driver sets it, the LLVM backend reads it
