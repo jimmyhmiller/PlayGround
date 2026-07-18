@@ -69,7 +69,8 @@
 (defn drop-slot! [(t (ptr Todo))] (-> i32)
   (remove! (deref (load (field t li))))
   (unretain (load (field t li)))
-  (store! (field t used) (cast i32 0)))
+  (store! (field t used) (cast i32 0))
+  (cast i32 0))    ; store! yields unit since std-12; return an explicit i32 (callers ignore it)
 
 ; ---- exported event handlers (userdata:i32, event:externref) ----
 (defn on-new [(userdata i32) (evt externref)] (-> i64)
