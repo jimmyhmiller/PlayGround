@@ -3789,6 +3789,8 @@ fn build_body<M: ModelArithJit>(
         feedback: shape.feedback,
         hot_cell: shape.hot_cell,
         unbox: None,
+        slot_type: Vec::new(),
+        guarded_version: None,
     };
 
     // The RUNNING CLOSURE's bits, read ONCE into a tracked variable (Stage
@@ -3837,6 +3839,10 @@ fn build_body<M: ModelArithJit>(
                 c.fb.def_var(c.vars[i], nil);
             }
         }
+        // Phase 3: parallel type-fact vector. A top-level/first-invoke body knows
+        // nothing about its params' types (all `None`); facts arrive only when
+        // this body is spliced as an inlinee behind a type-pinning guard.
+        c.slot_type = vec![None; shape.nslots as usize];
     }
 
     // ENTRY SAFEPOINT POLL (Stage E): with the locals in place, check the poll
@@ -4011,6 +4017,29 @@ pub struct Compiler<'a, 'b> {
     /// re-runs the iteration with the promoting numeric tower. `None` = the
     /// ordinary tagged codegen (the generic arm, and every non-loop body).
     unbox: Option<UnboxLoop>,
+    /// Phase 3 — SSA TYPE FACTS. `slot_type[i]` is the receiver TYPE SYM
+    /// (`type_tag`) PROVEN to inhabit activation slot `i` here, or `None`
+    /// (unknown). Facts are seeded when an inlined region's entry guard pins a
+    /// param's type (a dispatch-speculation guard proves the receiver is its
+    /// dominant type) and propagate through nested inlines (a proven-typed arg
+    /// seeds the callee param). They let `(type-of x)` / `(%num-eq (type-of x)
+    /// 'T)` fold to constants at compile time — collapsing the hand-written
+    /// type-dispatch `cond`s in core.clj into straight-line prim calls — and let
+    /// a nested `Dispatch` on a proven-typed value resolve at compile time (see
+    /// `guarded_version`). Parallel to `vars`; saved/restored across inline
+    /// levels. SSA mode only (memory-mode locals are frame slots, never facted).
+    slot_type: Vec<Option<Sym>>,
+    /// Phase 3 — while compiling INSIDE a dispatch-speculation guarded region,
+    /// the dispatch VERSION that region's entry guard baked. `Some(v)` means the
+    /// enclosing guard already proved `type_tag(recv) == dom_ty && version == v`,
+    /// so a nested `Dispatch` on a value of a compile-time-KNOWN type (via
+    /// `slot_type`) can be resolved NOW and spliced with NO guard of its own: the
+    /// enclosing version check deopts the ENTIRE region the instant ANY method is
+    /// (re)defined (`dispatch_version` is global and monotone), so the baked
+    /// resolution can never be stale while this region runs. `None` at top level
+    /// and in first-invoke compiles — where no such guard dominates, so a nested
+    /// dispatch must keep its runtime IC/guard.
+    guarded_version: Option<u64>,
 }
 
 /// The live state of the unboxed self-tail loop arm (see `Compiler::unbox`).
@@ -4645,13 +4674,47 @@ impl<'a, 'b> Compiler<'a, 'b> {
         if frac < SPEC_MIN_FRACTION || fb.deopts(site) >= SPEC_DEOPT_BLACKLIST {
             return None;
         }
-        // The emitted guard reuses the record fast-path shape (`kind::RECORD`
-        // header + type-sym compare), so it can only match a receiver carried by
-        // a real record. A non-record-dominated site is left generic.
-        if !rt.is_record_type(dom_ty) {
+        // The emitted guard compares the receiver's `type_tag` (`ty`, the probeb
+        // block param) to `dom_ty`. Phase 3 lifts the old RECORD-only restriction
+        // to ANY type the guard's `ty` edge actually produces — records (raw type
+        // word), the host String/Char kinds, and the immediate categories — since
+        // those are precisely the receivers that reach `probeb` with `ty` set.
+        // (A native container kind — Vector/List/… — never reaches `probeb`, so
+        // its guard could only ever deopt; leave those sites generic.)
+        if !self.probeb_guardable::<M>(rt, dom_ty) {
             return None;
         }
         let imp = rt.resolve_or_default(site, method, dom_ty)?;
+        let version = rt.shared.dispatch_version.load(Ordering::Relaxed);
+        self.impl_to_plan::<M>(rt, imp, argc, dom_ty, version)
+    }
+
+    /// Phase 3 — is `ty` a type whose `type_tag` sym the `Ir::Dispatch` guard's
+    /// `ty` block param actually computes (records, host String/Char, and the
+    /// immediate categories)? Only these can be speculated on with the emitted
+    /// `icmp(ty, dom_ty)` guard; anything else never reaches `probeb`.
+    fn probeb_guardable<M: ModelArithJit>(&self, rt: &Runtime<M>, ty: Sym) -> bool {
+        if rt.is_record_type(ty) {
+            return true;
+        }
+        ["String", "Char", "Long", "Double", "Boolean", "nil", "Symbol"]
+            .iter()
+            .any(|n| rt.intern(n) == ty)
+    }
+
+    /// Phase 3 — turn a RESOLVED impl value into an inline plan (capture-free,
+    /// non-variadic, matching arity, SSA-eligible body within budget), consuming
+    /// budget on success. Shared by the feedback speculation (`dispatch_spec_plan`)
+    /// and the compile-time nested resolution (`static_dispatch_plan`) so the
+    /// eligibility rules live in ONE place.
+    fn impl_to_plan<M: ModelArithJit>(
+        &self,
+        rt: &Runtime<M>,
+        imp: u64,
+        argc: usize,
+        dom_ty: Sym,
+        version: u64,
+    ) -> Option<DispatchSpecPlan> {
         if M::R::tag_of(imp) != RawTag::Ref {
             return None;
         }
@@ -4659,8 +4722,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
         if unsafe { g.type_id() } != kind::CLOSURE {
             return None;
         }
-        // Capture-free only this phase: the inlined body reads no captures, so it
-        // needs the live impl value in no register (Phase 3 lifts this).
+        // Capture-free only: the inlined body reads no captures, so it needs the
+        // live impl value in no register. (A captured impl would need the impl
+        // value threaded in — the enclosing guard doesn't hand it to us.)
         if unsafe { g.aux() } != 0 {
             return None;
         }
@@ -4679,14 +4743,29 @@ impl<'a, 'b> Compiler<'a, 'b> {
             return None;
         }
         self.inline_budget.set(budget - cost);
-        let version = rt.shared.dispatch_version.load(Ordering::Relaxed);
-        Some(DispatchSpecPlan {
-            dom_ty,
-            version,
-            nparams: crate::heap::meta_nparams(meta),
-            nslots,
-            body,
-        })
+        Some(DispatchSpecPlan { dom_ty, version, nparams: crate::heap::meta_nparams(meta), nslots, body })
+    }
+
+    /// Phase 3 — resolve a nested dispatch AT COMPILE TIME. The caller has PROVEN
+    /// (via `guarded_version` + a `slot_type` fact) that the receiver is `ty` and
+    /// that no method has been redefined since the enclosing region's version
+    /// guard, so `(method, ty)` resolves to a fixed impl that can be spliced with
+    /// NO guard of its own. Unlike `dispatch_spec_plan` this consults NO feedback
+    /// and emits NO guard — the invariant is already established.
+    fn static_dispatch_plan<M: ModelArithJit>(
+        &self,
+        site: usize,
+        method: Sym,
+        ty: Sym,
+        argc: usize,
+    ) -> Option<DispatchSpecPlan> {
+        if self.mem_mode || self.rt_ptr.is_null() {
+            return None;
+        }
+        let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+        let imp = rt.resolve_or_default(site, method, ty)?;
+        let version = self.guarded_version?;
+        self.impl_to_plan::<M>(rt, imp, argc, ty, version)
     }
 
     /// Splice an inlined callee body into the current function: fresh SSA vars
@@ -4707,12 +4786,26 @@ impl<'a, 'b> Compiler<'a, 'b> {
         argvals: &[Value],
         self_val: Option<Value>,
         caps: Option<Vec<u64>>,
+        arg_types: &[Option<Sym>],
     ) -> Value {
         let saved_vars = std::mem::take(&mut self.vars);
         self.inline_outer_vars.push(saved_vars.clone());
         self.inline_ctx.push((self_val, caps));
         let saved_header = self.loop_header.take();
         let saved_nparams = self.loop_nparams;
+        // Phase 3: swap in a fresh fact vector for the inlinee's own slots,
+        // seeded from any types PROVEN for its actual arguments (a proven-typed
+        // arg carries its fact into the callee param — this is how a receiver
+        // type pinned by a dispatch guard propagates down the inlined call
+        // chain). `guarded_version` is deliberately NOT touched: a nested inline
+        // stays inside whatever version-guarded region encloses this call.
+        let saved_slot_type = std::mem::take(&mut self.slot_type);
+        self.slot_type = vec![None; nslots as usize];
+        for i in 0..nparams {
+            if let Some(t) = arg_types.get(i).copied().flatten() {
+                self.slot_type[i] = Some(t);
+            }
+        }
         for i in 0..nslots as usize {
             let var = self.declare_root_var();
             if i < nparams {
@@ -4728,9 +4821,44 @@ impl<'a, 'b> Compiler<'a, 'b> {
         self.inline_ctx.pop();
         self.inline_outer_vars.pop();
         self.vars = saved_vars;
+        self.slot_type = saved_slot_type;
         self.loop_header = saved_header;
         self.loop_nparams = saved_nparams;
         v
+    }
+
+    /// Phase 3 — the compile-time-PROVEN `type_tag` of expression `ir` at this
+    /// point, or `None`. Currently: a slot read whose fact is set (SSA mode).
+    /// The fact is only ever set behind a guard that established it, so a `Some`
+    /// answer is a genuine invariant, never a guess.
+    fn static_type_of(&self, ir: &Ir) -> Option<Sym> {
+        if self.mem_mode {
+            return None;
+        }
+        match ir {
+            Ir::Local { up: 0, idx } => self.slot_type.get(*idx as usize).copied().flatten(),
+            _ => None,
+        }
+    }
+
+    /// Phase 3 — expression `ir`'s compile-time-known SYMBOL value, if any: a
+    /// `(type-of x)` on a proven-typed `x` folds to that type sym; a quoted /
+    /// constant symbol is itself. Used to constant-fold `(%num-eq (type-of x)
+    /// 'T)` — the exact shape of core.clj's hand-written type-dispatch `cond`s.
+    fn static_sym<M: ModelArithJit>(&self, ir: &Ir) -> Option<Sym> {
+        match ir {
+            Ir::Prim(Prim::TypeOf, args) if args.len() == 1 => self.static_type_of(&args[0]),
+            Ir::Quote(id) | Ir::Const(id) if !self.rt_ptr.is_null() => {
+                let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                let bits = rt.const_bits(*id);
+                if M::R::tag_of(bits) == RawTag::Sym {
+                    Some(M::R::as_sym(bits))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Stage G2 — emit a value-specialized call: the plan's clause body spliced
@@ -4746,6 +4874,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         fval: Value,
         argvals: &[Value],
         plan: &ValuePlan,
+        arg_types: &[Option<Sym>],
     ) -> Value {
         let flags = MemFlagsData::trusted();
         let ro = MemFlagsData::trusted().with_readonly();
@@ -4821,6 +4950,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             argvals,
             Some(target),
             Some(plan.caps.clone()),
+            arg_types,
         );
         self.fb.def_var(result, iv);
         self.fb.ins().jump(merge, &[]);
@@ -5278,6 +5408,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 if !tail {
                     if let Ir::Global(gsym) = f.as_ref() {
                         if let Some(plan) = self.try_inline_plan::<M>(*gsym, args.len()) {
+                            let arg_types: Vec<Option<Sym>> =
+                                args.iter().map(|a| self.static_type_of(a)).collect();
                             let argvals: Vec<Value> =
                                 args.iter().map(|a| self.compile::<M>(a, false)).collect();
                             let base = self.load_rc_field(self.off_global_base);
@@ -5311,6 +5443,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                                 &argvals,
                                 None,
                                 None,
+                                &arg_types,
                             );
                             self.fb.def_var(result, iv);
                             self.fb.ins().jump(merge, &[]);
@@ -5339,9 +5472,11 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     if let Some(vbits) = self.spec_value_of(f) {
                         if let Some(plan) = self.try_value_inline_plan::<M>(vbits, args.len()) {
                             let fval = self.compile::<M>(f, false);
+                            let arg_types: Vec<Option<Sym>> =
+                                args.iter().map(|a| self.static_type_of(a)).collect();
                             let argvals: Vec<Value> =
                                 args.iter().map(|a| self.compile::<M>(a, false)).collect();
-                            return self.emit_value_specialized::<M>(fval, &argvals, &plan);
+                            return self.emit_value_specialized::<M>(fval, &argvals, &plan, &arg_types);
                         }
                     }
                 }
@@ -5525,6 +5660,25 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // PER-ELEMENT predicate in any filtered pipeline. Through the slow
             // prim shim it measured ~10ns; the arithmetic ops beside it were
             // already inlined and it was not.
+            // Phase 3 — CONSTANT-FOLD a type-dispatch test. `(%num-eq (type-of x)
+            // 'T)` where `x`'s type is PROVEN (`static_type_of`) collapses to a
+            // compile-time boolean: this is exactly the shape of every hand-written
+            // `cond` gate in core.clj (`get`'s array-map check, the `map?`/`vector?`
+            // predicate chains). Folding it to a constant lets Cranelift's optimizer
+            // drop the dead `cond` arms, turning the type dispatch into the one
+            // straight-line prim call the taken arm holds — the whole point of
+            // inlining down to a proven-typed receiver. Both operands must resolve
+            // to compile-time syms (a folded `type-of` or a quoted sym); anything
+            // numeric or unknown falls through to the guarded arithmetic below.
+            Ir::Prim(Prim::Eq, args)
+                if args.len() == 2
+                    && self.static_sym::<M>(&args[0]).is_some()
+                    && self.static_sym::<M>(&args[1]).is_some() =>
+            {
+                let sa = self.static_sym::<M>(&args[0]).unwrap();
+                let sb = self.static_sym::<M>(&args[1]).unwrap();
+                self.iconst(M::R::enc_bool(sa == sb))
+            }
             Ir::Prim(
                 p @ (Prim::Add
                 | Prim::Sub
@@ -5599,6 +5753,15 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // 'Long (a compile-time constant sym), a RECORD ref's type sym is
             // one load off the object. Everything else (bignum refs, builtin
             // containers, bools, nil, …) keeps the runtime's `type_tag`.
+            // Phase 3 — `(type-of x)` on a PROVEN-typed `x` is a compile-time
+            // constant sym: no object read, no chain, no shim. Feeds the `%num-eq`
+            // fold above and any other consumer of the type sym.
+            Ir::Prim(Prim::TypeOf, args)
+                if args.len() == 1 && self.static_type_of(&args[0]).is_some() =>
+            {
+                let t = self.static_type_of(&args[0]).unwrap();
+                self.iconst(M::R::enc_sym(t))
+            }
             Ir::Prim(Prim::TypeOf, args) if M::INLINE_OBJECTS && !self.rt_ptr.is_null() => {
                 let v = self.compile::<M>(&args[0], false);
                 let long_bits = {
@@ -6098,11 +6261,19 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             Ir::SetLocal { up, idx, val } => {
                 assert_eq!(*up, 0, "unflattened Ir reached the JIT: SetLocal up={up}");
+                // Phase 3: the slot's value changes, so any type FACT about it is
+                // stale unless the new value is itself proven — re-establish from
+                // the RHS (a `(set! s (type-of …))`-shaped rebind keeps the fact),
+                // otherwise clear it.
+                let new_fact = self.static_type_of(val);
                 let v = self.compile::<M>(val, false);
                 if self.mem_mode {
                     self.emit_local0_store(*idx, v);
                 } else {
                     self.fb.def_var(self.vars[*idx as usize], v);
+                    if let Some(slot) = self.slot_type.get_mut(*idx as usize) {
+                        *slot = new_fact;
+                    }
                 }
                 v // `set!` evaluates to the assigned value
             }
@@ -6281,6 +6452,46 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     return self
                         .call_shim_checked(self.refs.dispatch, &[ctx, sitev, methodv, addr, count]);
                 }
+                // Phase 3 — COMPILE-TIME NESTED DISPATCH. Inside a
+                // dispatch-speculation guarded region (`guarded_version`), the
+                // enclosing guard already proved the receiver's type AND pinned
+                // the dispatch version. If this nested dispatch's receiver has a
+                // compile-time-KNOWN type (a fact propagated down the inlined
+                // chain), resolve (method, type) NOW and splice the impl with NO
+                // guard of its own — the region's version guard is what makes the
+                // baked resolution safe (any redefinition deopts the whole
+                // region). This is the kill shot for the call glue an IC hit
+                // still paid: the nested dispatch's guard, IC probe, and impl
+                // CALL all vanish into straight-line code. Not gated on feedback
+                // — the type is a proven invariant here, not a warmup guess.
+                if let Some(_v) = self.guarded_version {
+                    if let Some(recv_ty) = self.static_type_of(&args[0]) {
+                        if let Some(plan) =
+                            self.static_dispatch_plan::<M>(*site, *method, recv_ty, argvals.len())
+                        {
+                            crate::stats::bump(&crate::stats::SPEC_DISPATCH_SITES);
+                            let mut arg_types: Vec<Option<Sym>> =
+                                args.iter().map(|a| self.static_type_of(a)).collect();
+                            arg_types[0] = Some(recv_ty);
+                            let iv = self.emit_inlined_body::<M>(
+                                plan.nparams,
+                                plan.nslots,
+                                &plan.body,
+                                &argvals,
+                                None,
+                                None,
+                                &arg_types,
+                            );
+                            // A dispatch may itself raise inside the impl body;
+                            // the impl's own prim/call emissions already divert on
+                            // a pending signal, so `iv` is the normal-completion
+                            // value. The final `emit_pending_check` is a no-op when
+                            // nothing is pending — kept to match the shim-only and
+                            // guarded-splice emissions exactly (propagate identically).
+                            return self.emit_pending_check(iv);
+                        }
+                    }
+                }
                 // Plan the speculation BEFORE emitting: the impl this site was
                 // observed resolving to while interpreted, if its body is small
                 // enough to fit the inline budget (the same size policy the
@@ -6439,6 +6650,15 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     // FAST: inline the impl body (capture-free — no live-value reads).
                     self.fb.switch_to_block(specb);
                     self.fb.seal_block(specb);
+                    // Phase 3: this block runs only when `ty == dom_ty && ver ==
+                    // plan.version`, so the receiver's type IS `dom_ty` and no
+                    // method has been redefined since — establish BOTH facts for
+                    // the inlined impl so its own `type-of` checks fold and its
+                    // nested dispatches resolve at compile time (`guarded_version`).
+                    let mut arg_types: Vec<Option<Sym>> =
+                        args.iter().map(|a| self.static_type_of(a)).collect();
+                    arg_types[0] = Some(plan.dom_ty);
+                    let saved_gv = self.guarded_version.replace(plan.version);
                     let iv = self.emit_inlined_body::<M>(
                         plan.nparams,
                         plan.nslots,
@@ -6446,7 +6666,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         &argvals,
                         None,
                         None,
+                        &arg_types,
                     );
+                    self.guarded_version = saved_gv;
                     self.fb.def_var(result, iv);
                     self.fb.ins().jump(merge, &[]);
                     // DEOPT: count it, then fall into the generic IC probes (this
@@ -6489,7 +6711,11 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 // hits; inlining way 1 as well would double the emitted body to
                 // serve the case the speculation says does not happen.
                 let r0 = match &inline_plan {
-                    Some(p) => self.emit_value_specialized::<M>(imp0, &argvals, p),
+                    Some(p) => {
+                        let at: Vec<Option<Sym>> =
+                            args.iter().map(|a| self.static_type_of(a)).collect();
+                        self.emit_value_specialized::<M>(imp0, &argvals, p, &at)
+                    }
                     None => self.emit_call::<M>(imp0, &argvals),
                 };
                 self.fb.def_var(result, r0);
