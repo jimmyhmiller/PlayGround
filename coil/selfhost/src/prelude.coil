@@ -146,6 +146,20 @@
 (deftrait Pop [Self E]
   (pop! [(xs (mut Self))] (-> (Option E))))
 
+; ---- iteration, as traits (gen-1 · std-11 · std-4) --------------------------
+; The ONE iteration protocol, replacing the per-collection `slice-for`/`al-for`/
+; `hm-for` macros. `Item`/`It` are ASSOCIATED types (determined by the impl —
+; associated-type bounds, gen-1): `(next it)` yields the next `Item` or `(None)` at
+; the end; `(iter xs)` produces a fresh iterator `It` over a collection. `(for x
+; (iter coll))` (lib/control.coil) drives them uniformly. Impls live with their
+; types (lib/slice.coil covers slices+strings, lib/arraylist.coil, lib/hashmap.coil).
+; A generic can be bounded `(I Iterator)` and consume any iterator (its element type
+; stays abstract), exactly like `(C Len)` — the pattern user collection code copies.
+(deftrait Iterator [Self Item]
+  (next [(it (mut Self))] (-> (Option Item))))
+(deftrait Iterable [Self It]
+  (iter [(xs Self)] (-> It)))
+
 ; Emptiness, generically: any type with a Len impl gets `empty?` for free (a
 ; bounded generic over a trait — the pattern user code can copy).
 (defn empty? [(C Len)] [(xs C)] (-> bool)

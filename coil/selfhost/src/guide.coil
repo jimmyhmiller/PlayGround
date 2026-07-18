@@ -97,9 +97,20 @@ so they work on your own types the moment you write an `impl`.
 ## Traits & impls
 
 Rust-style, and the source of every clean operator: `Eq` (`=`), `Ord` (`< <= > >=`),
-`Add`/`Sub`/`Mul`/`Div`/`Rem`, `BitAnd`/…, `Hash`, and the collection traits `Len`
-(`len`), `Get` (`get`), `Set` (`set!`), `Push` (`push!`), `Pop` (`pop!`). The trait
-names are in scope with no import.
+`Add`/`Sub`/`Mul`/`Div`/`Rem`, `BitAnd`/…, `Hash`, the collection traits `Len`
+(`len`), `Get` (`get`), `Set` (`set!`), `Push` (`push!`), `Pop` (`pop!`), and the
+iteration traits `Iterator` (`next`) / `Iterable` (`iter`). The trait names are in
+scope with no import.
+
+**Parameterized traits & associated-type bounds.** A trait may take type params
+after `Self` — `(deftrait Get [Self K E] …)`, `(deftrait Iterator [Self Item] …)`.
+Those extra params are **associated types**: determined by the impl, one impl per
+type. Such a trait is usable as a **bound**, exactly like `Len`: `(defn f [(I
+Iterator)] [(it (mut I))] …)` — inside, the element type stays abstract (rendered
+`<I as Iterator>::Item` in diagnostics) and mono resolves it to the impl's concrete
+type at each call. An associated type in a plain **argument** position (a `Get` key)
+needs a value of that associated type; a bare literal is a located mismatch (you
+cannot literal-index a generic collection).
 
     (deftrait Show [Self] (show [(x Self)] (-> i64)))   ; Self = the implementing type
     (impl Show Point (show [(p Point)] (-> i64) 1))     ; concrete
@@ -289,6 +300,16 @@ operators are how you compare them. Ordering makes range checks direct — e.g.
 `(hm-get [K V] m k)` → `(Option V)`, `(hm-put! [K V] (mut m) k v)`,
 `(hm-remove! [K V] (mut m) k)`. For string keys use `(str-keyops)` from `str.coil`.
 Type args `[T]` come right after the name; usually inferable, so often omittable.
+
+**Iterating (one protocol).** `(for x (iter coll))` — or `(for-in [x (iter coll)])`
+— drives the `Iterator`/`Iterable` protocol over any collection: a `(slice T)` (so
+strings too), an `(ArrayList T)`, a `(HashMap K V)` (which yields its **keys** — get
+the value with `(hm-get m k)`), and any type you `(impl Iterable …)`. `(in coll)` is
+a synonym for `(iter coll)` in a `for`/`for-in` binding. This is the ONE iteration
+form; `slice-for`/`al-for` are thin aliases over it (`hm-for` remains the direct
+key+value walk). `(iter coll)` mints a fresh iterator; `(next it)` yields the next
+`(Option Item)`. `break`/`continue` work inside. `(range LO HI)` and `(over ARR LEN)`
+stay the non-collection `for-in` forms.
 
 ## Strings & bytes
 

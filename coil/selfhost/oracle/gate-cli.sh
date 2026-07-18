@@ -327,6 +327,70 @@ expect_out "'T' is not bounded by 'm.Box2'" "an unbounded param calling a parame
 printf '(module app)\n(import "arraylist.coil" :use *)\n(defn first-elem [(C Get)] [(xs C)] (-> i64) (get xs 0))\n(defn main [] (-> i64) 0)\n' > "$T/gen1assoc.coil"
 expect_out "expected <C as Get>::K" "an associated type renders as <C as Trait>::Param in diagnostics" "$COIL" build "$T/gen1assoc.coil" -o "$T/x"
 
+echo "== one Iterator/Iterable protocol: (for x (iter coll)); (in map) fixed (gen-1 · std-11 · std-4) =="
+# was: iteration was four unrelated per-collection macros (slice-for/al-for/hm-for/for-in
+# via len+get), there was NO Iterator trait, and `(for-in [k (in map)])` iterated GARBAGE —
+# a map's `get` takes a KEY, so `(get m i)` by slot index is nonsense (std-4). Now one
+# coil.core Iterator/Iterable protocol drives `(for x (iter coll))` uniformly over slices,
+# lists and maps; a map yields its keys, so `(in map)` is correct.
+# (for x (iter slice)) — the unified surface. FAILS on the seed (no protocol → rc≠20).
+cat > "$T/it-slice.coil" <<'EOF'
+(module app)
+(import "slice.coil" :use *)
+(import "control.coil" :use *)
+(defn main [] (-> i64)
+  (let [arr (alloc-stack (array i64 4)) (mut s) 0]
+    (store! (index arr 0) 2) (store! (index arr 1) 4) (store! (index arr 2) 6) (store! (index arr 3) 8)
+    (for x (iter (slice-new (index arr 0) 4)) (store! s (iadd (load s) x)))
+    (load s)))
+EOF
+expect_rc 20 "(for x (iter slice)) drives the Iterator protocol (was: no such protocol)" "$COIL" run "$T/it-slice.coil"
+# std-4: (for-in [k (in map)]) now iterates the map's KEYS correctly (was: get-by-index
+# garbage → 'arithmetic on different types i64 vs (Option i64)' on the seed).
+cat > "$T/it-map.coil" <<'EOF'
+(module app)
+(import "hashmap.coil" :use *)
+(import "alloc.coil" :use *)
+(import "control.coil" :use *)
+(defn main [] (-> i64)
+  (let [a (malloc-allocator) (mut hm) (hm-new-scalar [i64 i64] a) (mut ksum) 0]
+    (hm-put! (mut hm) 40 1) (hm-put! (mut hm) 60 2)
+    (for-in [k (in hm)] (store! ksum (iadd (load ksum) k)))
+    (load ksum)))
+EOF
+expect_rc 100 "(in map) iterates the map's keys (std-4: was get-by-index garbage)" "$COIL" run "$T/it-map.coil"
+# a generic bounded on the Iterator trait consumes ANY iterator (Item abstract) — the
+# associated-type bound (gen-1) composing with the protocol. FAILS on the seed (rc≠3).
+cat > "$T/it-generic.coil" <<'EOF'
+(module app)
+(import "arraylist.coil" :use *)
+(import "alloc.coil" :use *)
+(import "control.coil" :use *)
+(defn count-iter [(I Iterator)] [(it (mut I))] (-> i64)
+  (let [(mut n) 0]
+    (loop (match (next (mut it)) (None [] (break)) (Some [x] (store! n (iadd (load n) 1)))))
+    (load n)))
+(defn main [] (-> i64)
+  (let [a (malloc-allocator) (mut xs) (al-new [i64] a)]
+    (al-push! (mut xs) 7) (al-push! (mut xs) 8) (al-push! (mut xs) 9)
+    (let [(mut it) (iter xs)] (count-iter (mut it)))))
+EOF
+expect_rc 3 "a generic (I Iterator) consumes any iterator via the protocol" "$COIL" run "$T/it-generic.coil"
+# the collapsed per-collection macros still work: slice-for/al-for now expand through the
+# unified protocol (equivalent element iteration).
+cat > "$T/it-alfor.coil" <<'EOF'
+(module app)
+(import "arraylist.coil" :use *)
+(import "alloc.coil" :use *)
+(import "control.coil" :use *)
+(defn main [] (-> i64)
+  (let [a (malloc-allocator) (mut xs) (al-new [i64] a) (mut s) 0]
+    (al-push! (mut xs) 10) (al-push! (mut xs) 11) (al-push! (mut xs) 12)
+    (al-for [v xs] (store! s (iadd (load s) v)))
+    (load s)))
+EOF
+expect_rc 33 "al-for still iterates (now a thin alias over the Iterator protocol)" "$COIL" run "$T/it-alfor.coil"
+
 echo "== (target-arch) reflects --target, not a hardcoded host constant =="
 # was: the constant "aarch64" — so a macro branching on it baked the host branch into a
 # cross-compiled wasm build, silently.

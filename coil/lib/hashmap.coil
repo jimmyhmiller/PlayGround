@@ -273,3 +273,30 @@
   (get [(m (HashMap K V)) (k K)] (-> (Option V)) (hm-get m k)))
 (impl [K V] Set (HashMap K V)
   (set! [(m (mut (HashMap K V))) (k K) (v V)] (-> i64) (hm-put! (mut m) k v)))
+
+; ---- iteration (coil.core Iterator/Iterable) --------------------------------
+; A map iterates its KEYS (`Item = K`): `(for k (iter m))` visits each occupied
+; key in slot order; recover the value with `(hm-get m k)` / `(get m k)`. This is
+; what makes `(for-in [x (in map)])` correct — std-4 was `get`-by-index on a map
+; (garbage, since a map's `get` takes a KEY, not a slot index). A `(MapIter K V)`
+; holds a copy of the map header (its `slots` pointer is shared, so the walk sees
+; the live table) plus a slot cursor. `hm-for` remains the direct key+value walk.
+(defstruct MapIter [K V] [(m (HashMap K V)) (pos i64)])
+(impl [K V] Iterable (HashMap K V)
+  (iter [(m (HashMap K V))] (-> (MapIter K V))
+    (let [it (alloc-stack (MapIter K V))]
+      (store! (field it m) m)
+      (store! (field it pos) 0)
+      (load it))))
+(impl [K V] Iterator (MapIter K V)
+  (next [(it (mut (MapIter K V)))] (-> (Option K))
+    (let [cap (hm-cap (load (field it m)))]
+      (loop
+        (let [p (load (field it pos))]
+          (if (icmp-ge p cap)
+              (break (None))
+              (let [e (index (load (field (field it m) slots)) p)]
+                (store! (field it pos) (iadd p 1))
+                (if (icmp-eq (load (field e state)) 1)
+                    (break (Some (load (field e key))))
+                    0))))))))

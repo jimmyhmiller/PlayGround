@@ -53,17 +53,13 @@ ret $ret %d"))
   `(slice-new (index ~arr 0) ~len))
 
 ; `(slice-for [x s] body...)` — iterate a slice's elements, binding x to each.
-; A macro over `for` (hence over the loop primitive); break/continue work inside.
+; A thin alias for the unified iterator protocol `(for x (iter s))` (gen-1): it
+; expands to `(for-in [x (iter s)])`, driving the slice's `Iterator` impl. Kept as
+; a convenience spelling; break/continue work inside.
 (defn slice-for [(binding Code) & (body Code)] (-> Code)
   (if (not (icmp-eq (code-count binding) 2))
       (error "slice-for: binding must be [x slice]")
-      (let [x  (code-nth binding 0)
-            s  (code-nth binding 1)
-            sv (gensym)
-            i  (gensym)]
-        `(let [~sv ~s]
-           (for [~i 0 (slice-len ~sv)]
-             (let [~x (slice-get ~sv ~i)] ~@body))))))
+      `(for-in [~(code-nth binding 0) (iter ~(code-nth binding 1))] ~@body)))
 
 ; `(sort s cmp)` — sort the slice IN PLACE (writing through to its backing storage)
 ; using the comparator `cmp : (fnptr c [T T] i64)` (negative ⇒ a before b, 0 ⇒ equal,
@@ -100,3 +96,23 @@ ret $ret %d"))
   (get [(s (slice T)) (i i64)] (-> T) (slice-get s i)))
 (impl [T] Set (slice T)
   (set! [(s (mut (slice T))) (i i64) (v T)] (-> i64) (slice-set! (load s) i v)))
+
+; ---- iteration (coil.core Iterator/Iterable) --------------------------------
+; A slice's iterator is a `(SliceIter T)` — the slice plus a cursor. `iter` mints
+; one; `next` yields each element and advances the cursor (`Item = T`). This is the
+; iterator ArrayList reuses (over `al-slice`) and the one `(for x (iter s))` drives.
+; Option/Some/None are coil.core (auto-loaded), so no result.coil import is needed.
+(defstruct SliceIter [T] [(s (slice T)) (pos i64)])
+(impl [T] Iterable (slice T)
+  (iter [(s (slice T))] (-> (SliceIter T))
+    (let [it (alloc-stack (SliceIter T))]
+      (store! (field it s) s)
+      (store! (field it pos) 0)
+      (load it))))
+(impl [T] Iterator (SliceIter T)
+  (next [(it (mut (SliceIter T)))] (-> (Option T))
+    (let [p (load (field it pos))]
+      (if (icmp-lt p (slice-len (load (field it s))))
+          (do (store! (field it pos) (iadd p 1))
+              (Some (slice-get (load (field it s)) p)))
+          (None)))))

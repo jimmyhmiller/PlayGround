@@ -141,11 +141,14 @@
     (store! (field l cap) 0)
     (slice-new final n)))
 
-; `(al-for [x xs] body...)` — iterate the list's elements (over its slice view).
+; `(al-for [x xs] body...)` — iterate the list's elements. A thin alias for the
+; unified iterator protocol `(for x (iter xs))` (gen-1): it expands to
+; `(for-in [x (iter xs)])`, driving the list's `Iterator` impl (a `SliceIter` over
+; its `al-slice` view). Kept as a convenience spelling.
 (defn al-for [(binding Code) & (body Code)] (-> Code)
   (if (not (icmp-eq (code-count binding) 2))
       (error "al-for: binding must be [x arraylist]")
-      `(slice-for [~(code-nth binding 0) (al-slice ~(code-nth binding 1))] ~@body)))
+      `(for-in [~(code-nth binding 0) (iter ~(code-nth binding 1))] ~@body)))
 
 ; ---- the core collection traits (coil.core) ---------------------------------
 ; `(len xs)` / `(get xs i)` / `(set! (mut xs) i v)` / `(push! (mut xs) v)` /
@@ -161,3 +164,11 @@
   (push! [(xs (mut (ArrayList T))) (v T)] (-> i64) (al-push! (mut xs) v)))
 (impl [T] Pop (ArrayList T)
   (pop! [(xs (mut (ArrayList T)))] (-> (Option T)) (al-pop! (mut xs))))
+
+; ---- iteration (coil.core Iterable) -----------------------------------------
+; A list iterates through a `(SliceIter T)` over its `al-slice` view — the same
+; iterator slices use — so `(for x (iter xs))` and `(al-for [x xs] …)` walk the
+; elements identically. The view is valid for the duration of a read-only walk
+; (don't push/pop the list mid-iteration, exactly as `al-slice` already warns).
+(impl [T] Iterable (ArrayList T)
+  (iter [(xs (ArrayList T))] (-> (SliceIter T)) (iter (al-slice xs))))

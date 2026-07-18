@@ -70,8 +70,15 @@
 ; as an immutable value in body each iteration. The hidden counter is incremented
 ; at the TOP of the loop (starting LO-1), so a `continue` in body still advances
 ; the counter — matching C `for` semantics, no skipped increment.
+;
+; `(for x COLL body...)` — when the binding is a bare SYMBOL (not a `[i LO HI]`
+; vector), `for` iterates a collection: `COLL` is the collection form
+; (`(iter coll)` / `(in coll)` / `(range …)` / `(over …)`), delegating to `for-in`.
+; This is the ONE surface the decision asks for: `(for x (iter coll))`.
 (defn for [(binding Code) & (body Code)] (-> Code)
-  (if (not (icmp-eq (code-count binding) 3)) (error "for: binding must be [i LO HI]")
+  (if (code-sym? binding)
+      `(for-in [~binding ~(code-nth body 0)] ~@(code-rest body))
+  (if (not (icmp-eq (code-count binding) 3)) (error "for: binding must be [i LO HI], or (for x COLL …) for a collection")
   (let [i   (code-nth binding 0)
         lo  (code-nth binding 1)
         hi  (code-nth binding 2)
@@ -81,48 +88,44 @@
          (store! ~idx (iadd (load ~idx) 1))
          (if (icmp-lt (load ~idx) ~hi)
              (let [~i (load ~idx)] ~@body)
-             (break)))))))
+             (break))))))))
 
 ; `(for-in [x COLL] body...)` — iterate a collection, binding x to each element.
-; A macro over `for`, dispatching on the collection FORM (the expander has no
-; types): `(range LO HI)` yields the ints LO..HI-1; `(over ARR LEN)` yields the
-; elements of a fixed array ARR of length LEN; `(in COLL)` yields the elements
-; of ANY type with Len + Get impls (ArrayList, slice — including strings, …) via
-; the coil.core collection traits. User collection types ride the
-; iterator-value protocol (`for-each`, below) instead. No core support.
+; A macro over `for`/`loop`, dispatching on the collection FORM (the expander has
+; no types):
+;   (range LO HI)  — the ints LO..HI-1
+;   (over ARR LEN) — the elements of a fixed array ARR of length LEN
+;   (iter COLL) / (in COLL) — the coil.core Iterator protocol: `(iter COLL)` mints
+;     an iterator over any `Iterable` (slice/string, ArrayList, HashMap — and any
+;     type you `(impl Iterable …)`), and `(next it)` yields each element. This is
+;     the ONE protocol that replaces the old per-collection `slice-for`/`al-for`/
+;     `hm-for` macros; `(in map)` now iterates the map's KEYS correctly instead of
+;     `get`-by-index garbage (std-4). `iter` and `in` are synonyms here.
 (defn for-in [(binding Code) & (body Code)] (-> Code)
   (if (not (icmp-eq (code-count binding) 2)) (error "for-in: binding must be [x COLL]")
   (let [x    (code-nth binding 0)
         coll (code-nth binding 1)]
-    (if (not (code-list? coll)) (error "for-in: COLL must be a form, e.g. (range lo hi), (in coll), or (over arr len)")
+    (if (not (code-list? coll)) (error "for-in: COLL must be a form, e.g. (iter coll), (in coll), (range lo hi), or (over arr len)")
     (let [h (code-nth coll 0)]
       (if (code-eq h `range)
           `(for [~x ~(code-nth coll 1) ~(code-nth coll 2)] ~@body)
-          (if (code-eq h `in)
-              (let [c (gensym)
-                    i (gensym)]
-                `(let [~c ~(code-nth coll 1)]
-                   (for [~i 0 (len ~c)]
-                     (let [~x (get ~c ~i)] ~@body))))
-          (if (code-eq h `over)
-              (let [arr (code-nth coll 1)
-                    len (code-nth coll 2)
-                    i   (gensym)]
-                `(for [~i 0 ~len]
-                   (let [~x (load (index ~arr ~i))] ~@body)))
-              ; The extensible protocol: (iter NEXT STATE) where NEXT is a fnptr
-              ; (ptr S) -> (Option T) advancing STATE (a (ptr S)).
-              (if (code-eq h `iter)
-                  (let [nf  (code-nth coll 1)
-                        st  (code-nth coll 2)
-                        nfv (gensym)
-                        stv (gensym)]
-                    `(let [~nfv ~nf ~stv ~st]
-                       (loop
-                         (match (call-ptr ~nfv ~stv)
-                           (None [] (break))
-                           (Some [~x] ~@body)))))
-                  (error "for-in: unsupported collection; use (range lo hi), (in coll), (over arr len), or (iter next state)"))))))))))
+      (if (code-eq h `over)
+          (let [arr (code-nth coll 1)
+                len (code-nth coll 2)
+                i   (gensym)]
+            `(for [~i 0 ~len]
+               (let [~x (load (index ~arr ~i))] ~@body)))
+      ; (iter COLL) / (in COLL): drive the coil.core Iterator protocol. `(iter COLL)`
+      ; produces the iterator (Iterable::iter); `(next it)` (Iterator::next) yields
+      ; each Item, `(None)` ends the loop. Uniform across every Iterable type.
+      (if (or (code-eq h `iter) (code-eq h `in))
+          (let [it (gensym)]
+            `(let [(mut ~it) (iter ~(code-nth coll 1))]
+               (loop
+                 (match (next (mut ~it))
+                   (None [] (break))
+                   (Some [~x] ~@body)))))
+          (error "for-in: unsupported collection; use (iter coll), (in coll), (range lo hi), or (over arr len)")))))))))
 
 ; ---- threading ------------------------------------------------------------
 ; Spelled `|>`/`|>>` (F#/Elixir/OCaml) rather than Clojure's `->`/`->>`: `->`
