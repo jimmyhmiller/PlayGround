@@ -77,6 +77,31 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
+        Some("bundle-scale-memory") => {
+            let modules = parse_usize(arguments.next(), 10_000, "module count")?;
+            let imports = parse_usize(arguments.next(), 4, "imports per module")?;
+            let edits = parse_usize(arguments.next(), 100, "edit count")?;
+            let result = diffpack::bundle_benchmark::run_bundle_scale_memory(
+                modules, imports, edits,
+            )?;
+            println!(
+                "modules,reachable,source_mb,build_peak_mb,retained_mb,bytes_per_module,edits,transformed_per_edit_max,edit_growth_kb,retained_after_drop_kb"
+            );
+            println!(
+                "{},{},{:.3},{:.3},{:.3},{:.1},{},{},{:.1},{:.1}",
+                result.modules,
+                result.reachable,
+                result.source_bytes as f64 / 1_000_000.0,
+                result.build_peak_bytes as f64 / 1_000_000.0,
+                result.retained_after_build_bytes as f64 / 1_000_000.0,
+                result.bytes_per_module,
+                result.edits,
+                result.transformed_per_edit_max,
+                result.retained_growth_over_edits_bytes as f64 / 1_000.0,
+                result.retained_after_drop_bytes as f64 / 1_000.0,
+            );
+            Ok(())
+        }
         Some("bundle") => {
             let entry = arguments.next().ok_or_else(usage)?;
             let remaining = arguments.collect::<Vec<_>>();

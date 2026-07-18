@@ -318,6 +318,126 @@ fn run_bundle_scale_inner_impl(
     })
 }
 
+/// Deterministic memory accounting for a build plus a run of incremental edits.
+/// Every field is a byte delta against a pre-build baseline, so it is
+/// machine-independent and safe to assert on.
+#[derive(Debug)]
+pub struct MemoryScaleResult {
+    pub modules: usize,
+    pub reachable: usize,
+    pub source_bytes: u64,
+    /// Peak live bytes reached during the initial build, above baseline.
+    pub build_peak_bytes: usize,
+    /// Live bytes still held once the graph is built (the resident cost of the
+    /// module graph), above baseline.
+    pub retained_after_build_bytes: usize,
+    pub bytes_per_module: f64,
+    pub edits: usize,
+    /// The most modules re-transformed by any single edit. Incrementality holds
+    /// when a leaf edit re-transforms exactly one module.
+    pub transformed_per_edit_max: usize,
+    /// Growth in live bytes across all incremental edits. Bounded growth means
+    /// old revisions are released rather than accumulated.
+    pub retained_growth_over_edits_bytes: usize,
+    /// Live bytes still held after the bundler is dropped, above baseline (a
+    /// leak proxy; should be near zero).
+    pub retained_after_drop_bytes: usize,
+}
+
+/// Builds a synthetic graph, edits one leaf module `edits` times, and reports
+/// deterministic allocation deltas for the build, the edit run, and teardown.
+pub fn run_bundle_scale_memory(
+    module_count: usize,
+    imports_per_module: usize,
+    edits: usize,
+) -> Result<MemoryScaleResult, String> {
+    if module_count == 0 || imports_per_module == 0 {
+        return Err("module count and imports per module must be positive".into());
+    }
+    let workspace = TemporaryProject::new()?;
+    let source_bytes = (0..module_count)
+        .into_par_iter()
+        .map(|index| {
+            let source = module_source(index, module_count, imports_per_module, index);
+            let bytes = source.len() as u64;
+            fs::write(workspace.path.join(module_name(index)), source)
+                .map_err(|error| format!("cannot generate module {index}: {error}"))?;
+            Ok(bytes)
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .sum();
+
+    let entry = workspace.path.join(module_name(0));
+    let output = workspace.path.join("dist/bundle.js");
+
+    // Baseline after generation, before any graph exists.
+    let baseline = crate::memory::snapshot().live_bytes;
+    crate::memory::reset_peak();
+
+    let (mut bundler, initial) = Bundler::discover_direct(&entry)?;
+    if !initial.diagnostics.is_empty() {
+        return Err(format!(
+            "memory build produced {} diagnostics; first: {}",
+            initial.diagnostics.len(),
+            initial.diagnostics[0]
+        ));
+    }
+    let mut reachability = bundler.direct_reachability();
+    let mut reachable = reachability.reachable_modules();
+    bundler.emit(&reachable, &output)?;
+    let reachable_count = reachable.len();
+
+    let after_build = crate::memory::snapshot();
+    let build_peak_bytes = after_build.peak_bytes.saturating_sub(baseline);
+    let retained_after_build_bytes = after_build.live_bytes.saturating_sub(baseline);
+    let live_after_build = after_build.live_bytes;
+
+    // Edit one leaf module repeatedly. A correct incremental graph re-transforms
+    // only that module and releases the prior revision, so live memory must not
+    // grow with the number of edits.
+    let edited_index = module_count / 2;
+    let edited_path = workspace.path.join(module_name(edited_index));
+    let mut transformed_per_edit_max = 0;
+    for edit in 0..edits {
+        let value = module_count + edit + 1;
+        fs::write(
+            &edited_path,
+            module_source(edited_index, module_count, imports_per_module, value),
+        )
+        .map_err(|error| format!("cannot edit memory-benchmark module: {error}"))?;
+        let update = bundler.rebuild_path(&edited_path)?;
+        transformed_per_edit_max = transformed_per_edit_max.max(update.transformed_modules);
+        let result = reachability.apply(&update.delta);
+        for removed in result.removed {
+            reachable.remove(&removed);
+        }
+        reachable.extend(result.added);
+        bundler.emit(&reachable, &output)?;
+    }
+
+    let live_after_edits = crate::memory::snapshot().live_bytes;
+    let retained_growth_over_edits_bytes = live_after_edits.saturating_sub(live_after_build);
+
+    drop(reachable);
+    drop(reachability);
+    drop(bundler);
+    let retained_after_drop_bytes = crate::memory::snapshot().live_bytes.saturating_sub(baseline);
+
+    Ok(MemoryScaleResult {
+        modules: module_count,
+        reachable: reachable_count,
+        source_bytes,
+        build_peak_bytes,
+        retained_after_build_bytes,
+        bytes_per_module: retained_after_build_bytes as f64 / module_count as f64,
+        edits,
+        transformed_per_edit_max,
+        retained_growth_over_edits_bytes,
+        retained_after_drop_bytes,
+    })
+}
+
 fn live_module_source(
     index: usize,
     module_count: usize,
@@ -482,5 +602,24 @@ impl TemporaryProject {
 impl Drop for TemporaryProject {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod thesis_guards {
+    //! Parallelism-safe incrementality guard. The memory-delta guards live in
+    //! `tests/thesis_memory.rs` because they read process-wide allocation
+    //! counters and must run isolated from other tests' allocations.
+
+    use super::run_bundle_scale_direct;
+
+    #[test]
+    fn a_leaf_edit_retransforms_exactly_one_module() {
+        let result = run_bundle_scale_direct(600, 4).unwrap();
+        assert_eq!(
+            result.transformed_on_edit, 1,
+            "editing one leaf module must re-transform exactly that module, not {} of {}",
+            result.transformed_on_edit, result.modules
+        );
     }
 }
