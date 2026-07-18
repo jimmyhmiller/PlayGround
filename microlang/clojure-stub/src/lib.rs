@@ -605,19 +605,7 @@ fn eval_form<M: ValueModel>(
         if is_sym(rt, h, "definline") {
             let items = rt.list_to_vec(form);
             // the name may arrive wrapped by reader meta (`^:private read-byte`)
-            let mut name = items[1];
-            while let Some((mh, _)) = rt.as_cons(name) {
-                let parts = rt.list_to_vec(name);
-                if parts.len() == 2
-                    && (is_sym(rt, mh, "-private-meta")
-                        || is_sym(rt, mh, "-macro-meta")
-                        || is_sym(rt, mh, "-dynamic-meta"))
-                {
-                    name = parts[1];
-                } else {
-                    break;
-                }
-            }
+            let name = unwrap_reader_meta(rt, items[1]);
             let dm = sym(rt, "defmacro");
             let mut out = vec![dm, name];
             // skip an optional docstring before the param vector
@@ -2907,13 +2895,35 @@ fn setmacro_target<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Option<Sym> {
     None
 }
 
+/// Unwrap the reader's metadata wrappers — `(-private-meta x)` /
+/// `(-macro-meta x)` / `(-dynamic-meta x)` — down to the underlying form.
+/// `^:private` on a NAME arrives as such a wrapper, so every place that
+/// pattern-matches a name symbol must look through it.
+fn unwrap_reader_meta<M: ValueModel>(rt: &Runtime<M>, mut f: u64) -> u64 {
+    while let Some((mh, _)) = rt.as_cons(f) {
+        let parts = rt.list_to_vec(f);
+        if parts.len() == 2
+            && (is_sym(rt, mh, "-private-meta")
+                || is_sym(rt, mh, "-macro-meta")
+                || is_sym(rt, mh, "-dynamic-meta"))
+        {
+            f = parts[1];
+        } else {
+            break;
+        }
+    }
+    f
+}
+
 fn defmacro_name<M: ValueModel>(rt: &Runtime<M>, form: u64) -> Option<Sym> {
     let (h, _) = rt.as_cons(form)?;
     if !is_sym(rt, h, "defmacro") {
         return None;
     }
     let items = rt.list_to_vec(form);
-    match rt.decode(items[1]) {
+    // `(defmacro ^:private m …)`: the name arrives meta-wrapped
+    // (data.priority-map's `compile-if` is exactly this shape).
+    match rt.decode(unwrap_reader_meta(rt, items[1])) {
         Val::Sym(name) => Some(name),
         _ => None,
     }
