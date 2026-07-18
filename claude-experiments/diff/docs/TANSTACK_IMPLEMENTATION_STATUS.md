@@ -79,7 +79,7 @@ This identified the next implementation slice:
 2. Implement `?url` asset modules. (done)
 3. Copy content-hashed assets and return their public URL from the synthetic
    JavaScript module. (done)
-4. Add global CSS and CSS-module loaders. (next)
+4. Add global CSS and CSS-module loaders. (global CSS done; CSS modules next)
 5. Carry emitted CSS/assets into the client and SSR manifests.
 
 ## Query-aware module identity and the `?url` loader (landed)
@@ -110,5 +110,22 @@ cannot resolve "#tanstack-router-entry": The specifiers must be a non-empty stri
 ```
 
 That is a Node `package.json` `imports` (subpath `#…`) / TanStack plugin virtual
-entry concern, separate from the CSS/asset pipeline. The next asset-pipeline
-slice is global CSS and CSS-module loaders (step 4).
+entry concern, separate from the CSS/asset pipeline.
+
+## Global CSS extraction (landed)
+
+A bare stylesheet import (`import "./app.css"`) is a side effect with no
+bindings. The load frontier detects a `.css` path (no query) and produces an
+empty JavaScript module that carries the stylesheet text; `Bundler::emit_css`
+concatenates every reachable module's CSS in execution order and writes it beside
+the bundle as `<output_stem>.css`. The raw CSS never leaks into the JavaScript
+bundle. Test:
+`global_css_side_effect_imports_are_extracted_into_one_stylesheet`.
+
+Note: the pinned app imports its only stylesheet as `~/styles/app.css?url` (an
+asset URL, handled by the `?url` loader), and that CSS is Tailwind source that
+the reference build compiles via `@tailwindcss/vite`. So Tailwind compilation is
+a framework-plugin (host) concern; the generic global-CSS and (next) CSS-module
+loaders are core pipeline capabilities the checklist requires independently.
+Remaining CSS work: CSS Modules (scoped names + export map), `@import`/`url()`
+rewriting, and carrying CSS into route manifests.

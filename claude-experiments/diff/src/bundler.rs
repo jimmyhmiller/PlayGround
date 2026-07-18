@@ -26,6 +26,10 @@ struct ModuleState {
     flat_module: Option<FlatModule>,
     code: String,
     assets: Vec<AssetEmit>,
+    /// Stylesheet text contributed by a global CSS side-effect import
+    /// (`import "./app.css"`). Extracted and concatenated into the output
+    /// stylesheet in module execution order; `None` for a normal JS module.
+    css: Option<String>,
 }
 
 struct LoadedModule {
@@ -37,6 +41,7 @@ struct LoadedModule {
     code: String,
     diagnostics: Vec<String>,
     assets: Vec<AssetEmit>,
+    css: Option<String>,
 }
 
 /// A static asset (e.g. a `?url` import target) that must be content-hashed and
@@ -397,6 +402,7 @@ impl Bundler {
             .collect::<Vec<_>>();
         let allowed = reachable_dense.iter().copied().collect::<HashSet<_>>();
         self.emit_assets(&allowed, parent)?;
+        self.emit_css(&allowed, output)?;
         let mut runtime_ids = vec![None; self.ids.len()];
         for (runtime_id, dense_id) in reachable_dense.into_iter().enumerate() {
             runtime_ids[dense_id] = Some(runtime_id);
@@ -474,6 +480,34 @@ impl Bundler {
             }
         }
         Ok(())
+    }
+
+    /// Extracts the stylesheet: concatenates every reachable global CSS module's
+    /// text in module execution order and writes it beside the bundle as
+    /// `<output_stem>.css`. Nothing is written when no CSS is imported.
+    fn emit_css(&self, allowed: &HashSet<DenseModuleId>, output: &Path) -> Result<(), String> {
+        let order = self.static_execution_order(allowed).unwrap_or_else(|| {
+            let mut ids = allowed.iter().copied().collect::<Vec<_>>();
+            ids.sort_by(|left, right| self.ids[*left].cmp(&self.ids[*right]));
+            ids
+        });
+        let mut stylesheet = String::new();
+        for dense in order {
+            if let Some(module) = self.modules[dense].as_ref()
+                && let Some(css) = &module.css
+            {
+                if !stylesheet.is_empty() {
+                    stylesheet.push('\n');
+                }
+                stylesheet.push_str(css);
+            }
+        }
+        if stylesheet.is_empty() {
+            return Ok(());
+        }
+        let css_path = output.with_extension("css");
+        fs::write(&css_path, stylesheet)
+            .map_err(|error| format!("cannot write {}: {error}", css_path.display()))
     }
 
     fn render_folded_constants(&self, modules: &[DenseModuleId]) -> Option<RenderedBundle> {
@@ -721,6 +755,7 @@ impl Bundler {
                     flat_module: loaded.flat_module,
                     code: loaded.code,
                     assets: loaded.assets,
+                    css: loaded.css,
                 });
             }
         }
@@ -749,6 +784,9 @@ impl Bundler {
         let resource = ResourceId::parse(&id);
         if resource.query.is_some() {
             return load_query_module(&id, &resource);
+        }
+        if is_css_path(path) {
+            return load_css_module(&id, path);
         }
         let read_started = frontend_profile::start();
         let source = fs::read_to_string(path)
@@ -793,6 +831,7 @@ impl Bundler {
             flat_module: transformed.flat_module,
             code: transformed.code,
             assets: Vec::new(),
+            css: None,
         })
     }
 
@@ -1494,6 +1533,22 @@ fn load_uncached(
             code: synthetic.code,
             diagnostics: Vec::new(),
             assets: vec![synthetic.asset],
+            css: None,
+        });
+    }
+    if is_css_path(path) {
+        let text = fs::read_to_string(path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        return Ok(LoadedModule {
+            hash: content_hash(text.as_bytes()),
+            dependencies: Vec::new(),
+            pruned_imports: HashSet::new(),
+            source: Arc::from(id.as_ref()),
+            flat_module: None,
+            code: String::new(),
+            diagnostics: Vec::new(),
+            assets: Vec::new(),
+            css: Some(text),
         });
     }
     let read_started = frontend_profile::start();
@@ -1524,6 +1579,7 @@ fn load_uncached(
         code: transformed.code,
         diagnostics,
         assets: Vec::new(),
+        css: None,
     })
 }
 
@@ -1574,6 +1630,30 @@ fn load_query_module(id: &SharedModuleId, resource: &ResourceId) -> Result<Modul
         flat_module: synthetic.flat_module,
         code: synthetic.code,
         assets: vec![synthetic.asset],
+        css: None,
+    })
+}
+
+/// Whether a resolved path is a plain global stylesheet (`import "./app.css"`).
+fn is_css_path(path: &Path) -> bool {
+    matches!(path.extension().and_then(|value| value.to_str()), Some("css"))
+}
+
+/// A global CSS side-effect import as a `ModuleState`: an empty JavaScript module
+/// (the import has no bindings) that contributes its text to the extracted
+/// output stylesheet.
+fn load_css_module(id: &SharedModuleId, path: &Path) -> Result<ModuleState, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    Ok(ModuleState {
+        hash: content_hash(text.as_bytes()),
+        dependencies: Vec::new(),
+        pruned_imports: HashSet::new(),
+        source: id.clone(),
+        flat_module: None,
+        code: String::new(),
+        assets: Vec::new(),
+        css: Some(text),
     })
 }
 
@@ -1909,6 +1989,47 @@ mod tests {
             "{error}"
         );
         assert!(!error.contains("No such file or directory"), "{error}");
+    }
+
+    #[test]
+    fn global_css_side_effect_imports_are_extracted_into_one_stylesheet() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("a.css"), ".a { color: red; }").unwrap();
+        fs::write(directory.path().join("b.css"), ".b { color: blue; }").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import './a.css';\nimport './b.css';\nconsole.log('ok');\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        // entry plus the two extracted stylesheets.
+        let reachable = bundler.reachable_modules_direct();
+        assert_eq!(reachable.len(), 3, "{reachable:?}");
+        bundler.emit(&reachable, &output).unwrap();
+
+        // Both stylesheets land in one extracted file, in import order.
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        let a = css.find(".a { color: red; }").expect("a.css extracted");
+        let b = css.find(".b { color: blue; }").expect("b.css extracted");
+        assert!(a < b, "import order preserved: {css}");
+
+        // The CSS is not left in the JavaScript bundle.
+        let js = fs::read_to_string(&output).unwrap();
+        assert!(!js.contains("color: red"), "{js}");
+
+        if Command::new("node").arg("--version").output().is_ok() {
+            let executed = Command::new("node").arg(&output).output().unwrap();
+            assert!(
+                executed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&executed.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&executed.stdout), "ok\n");
+        }
     }
 
     #[test]
