@@ -384,6 +384,17 @@ variadic (soaks up the rest as one Code list). Calls expand inline, outside-in:
     (defn when [(c Code) (body Code)] (-> Code) `(if ~c (do ~@body) 0))
     (when (< x 10) (println \"small\"))     ; → (if (< x 10) (do (println …)) 0)
 
+**Target-conditional code.** `(target-arch)` reflects the real `--target` at
+macro-expansion time (`` `aarch64 ``, `` `wasm32 ``, …), so a macro can pick a branch
+per target and drop the other from the build entirely — keep a wasm-only yield hook out
+of the native dispatch loop, or a native syscall out of the wasm module:
+
+    (defn when-wasm [(a Code) (b Code)] (-> Code)
+      (if (code-eq (target-arch) `wasm32) a b))
+    (when-wasm `(host-yield) `0)          ; expands to (host-yield) on wasm32, to 0 elsewhere
+
+`code-eq` compares the two Code symbols; the losing branch never reaches codegen.
+
 **`(meta (gen …))`** runs a generator at compile time and splices its result as new
 top-level forms; later code may depend on what it generates.
 
@@ -489,6 +500,16 @@ value with the real C ABI. To call a Coil fn from C (e.g. `qsort` comparator) pa
 `(print-str w s)`, `(fmt w \"n={d} s={s} f={f}\\n\" a b c)`. ⚠ `{f}` is a fixed
 6-digit display, NOT C `%g`; for exact float formatting call libc `snprintf` with
 `c\"%g\"`. `coil cimport header.h` auto-generates bindings from a real C header.
+
+**Declaring C externs portably.** A C machine word is target-width — 64-bit on arm64,
+**32-bit on wasm32** — so pick the Coil type by the *C* type, not by the host you test on:
+`size_t`/`ssize_t`/`long`/`intptr_t` → `isize` (`usize` for the unsigned ones); `int` →
+`i32`; `off_t` → `i64`. `(extern read :cc c [i32 (ptr i8) isize] (-> isize))` matches
+`ssize_t read(int, void*, size_t)`. Redeclaring a libc symbol with a fixed `i64` where the
+prelude uses `isize` is *silently wrong on arm64 and an invalid module on wasm32* — a module
+holds ONE signature per C symbol, so **prefer the prelude's declaration** (`(import \"io.coil\"
+:use *)` etc.) over redeclaring your own. Coil now rejects two clashing declarations of one
+symbol outright, so a genuine mismatch is a located compile error rather than a miscompile.
 
 ## Reserved-name gotchas ⚠
 

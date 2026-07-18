@@ -5,13 +5,19 @@ _Last updated 2026-07-18. Companion to `08-wasm-port.md`. Everything here is a c
 in scry and are not listed. Each item says what breaks without it, exactly what to change,
 and how to know it works._
 
-**Status: one required change is outstanding (A1). Everything else here is optional.**
-The port is otherwise complete and working: the VM, GC, viewer, terminal and the unmodified
-`examples/assistant.scry` all run in the browser.
+**Status: DONE. A1 (required) landed in Coil; B1 and B2 landed as guide docs; B3 skipped
+(not needed by Scry).** The port is complete and working: the VM, GC, viewer, terminal and
+the unmodified `examples/assistant.scry` all run in the browser.
 
 ---
 
-## A1 — Export `__stack_pointer` ⭐ REQUIRED
+## A1 — Export `__stack_pointer` ⭐ REQUIRED — ✅ LANDED
+
+**Landed.** `selfhost/src/wasm.coil`'s finalizer now exports the shadow-stack pointer global
+as `__stack_pointer` (kind-3 global export) whenever the object uses the shadow stack, right
+beside the existing `__heap_base` export. `wasm-tools print` shows
+`(export "__stack_pointer" (global 0))` and the module validates; the JS bridge restores SP
+on unwind, closing the ~111 B/panic leak. Regression in `selfhost/oracle/gate-cli.sh`.
 
 **What breaks without it.** The uncrashable-eval invariant leaks, and the instance eventually
 dies. Measured: **~111 bytes leaked per eval panic, hard failure at ~9421 panics** with
@@ -61,7 +67,7 @@ restores when present and counts leaks when absent. The export alone closes it.
 
 ## Optional / nice-to-have
 
-### B1 — Document target-width extern types in the guide
+### B1 — Document target-width extern types in the guide — ✅ LANDED (guide.coil "Declaring C externs portably")
 
 This cost the most time of anything in the port, and nothing warns you. Coil's prelude
 declares libc with **target-width** `isize` (`lib/io.coil`, `lib/slice.coil`, `lib/alloc.coil`):
@@ -83,7 +89,7 @@ Suggested: a short "declaring C externs portably" note in the guide listing
 `size_t`/`ssize_t` → `isize`, `int` → `i32`, `off_t` → `i64`, plus "prefer the prelude's
 declaration over redeclaring".
 
-### B2 — A standard target-conditional macro
+### B2 — A standard target-conditional macro — ✅ LANDED (guide.coil "Target-conditional code", `when-wasm` snippet next to `(target-arch)`)
 
 The port needed compile-time target branching to keep wasm-only code out of the native build
 (the green-thread yield hook must cost the native dispatch loop *nothing*). Scry defines its

@@ -841,6 +841,25 @@ echo "$w_native" | grep -q 'i64 @write(i32, ptr, i64)' \
 echo "$w_wasm"   | grep -q 'i32 @write(i32, ptr, i32)' \
   && ok "write's fd stays i32 and size_t/ssize_t narrow to i32 on wasm32" || bad "wasm32 write width (fd/usize/isize)" "got: $w_wasm"
 
+echo "== A1: a wasm32 module exports __stack_pointer so a host longjmp can restore SP =="
+# When the object uses the shadow stack (an alloc-stack address escapes to a C extern),
+# the C0 finalizer defines the mutable i32 stack-pointer global. It must ALSO export it —
+# otherwise a host-implemented longjmp/panic landing pad (wasm32 has no setjmp) cannot
+# restore SP on unwind, and every panic strands the frames (measured ~111 B leaked/panic).
+# FAILS on the seed (it exports only main/memory/__heap_base); PASSES here. Needs wasm-tools.
+if command -v wasm-tools >/dev/null 2>&1; then
+  printf '(extern sink :cc c [(ptr i8)] (-> void))\n(defstruct Big [(a i64) (b i64) (c i64)])\n(defn use-stack [(n i64)] (-> i64) (let [p (alloc-stack Big)] (do (store! (field p a) n) (sink (cast (ptr i8) p)) (load (field p a)))))\n(defn main [] (-> i64) (use-stack 3))\n' > "$T/sp.coil"
+  if "$COIL" build "$T/sp.coil" --target wasm32-unknown-unknown -o "$T/sp.wasm" >/dev/null 2>&1; then
+    sp_line=$(wasm-tools print "$T/sp.wasm" 2>/dev/null | grep '(export "__stack_pointer"')
+    [ -n "$sp_line" ] && ok "wasm32 build exports __stack_pointer ($sp_line)" \
+      || bad "wasm32 __stack_pointer export" "absent — host longjmp cannot restore SP"
+  else
+    bad "wasm32 __stack_pointer export" "shadow-stack build failed"
+  fi
+else
+  echo "  (skip: wasm-tools not on PATH)"
+fi
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL
