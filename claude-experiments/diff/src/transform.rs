@@ -181,16 +181,24 @@ fn lower_module_ast<'a>(
     let mut import_index = 0_usize;
     let mut default_index = 0_usize;
 
+    // A single specifier can be imported by several `import` statements in one
+    // module — route splitting injects a second `import { lazyFn } from
+    // '@tanstack/react-router'` beside the original `import { createFileRoute }`.
+    // The recorded demand must be the UNION of every statement's named imports,
+    // so the initial `all: true` default is downgraded (and any stale names
+    // cleared) exactly once per specifier; later statements only accumulate.
+    let mut demand_downgraded = std::collections::HashSet::<String>::new();
     if is_esm {
         for statement in &program.body {
             match statement {
                 Statement::ImportDeclaration(declaration) => {
-                    let demand = dependency_demands
-                        .entry(declaration.source.value.to_string())
-                        .or_default();
-                    demand.specifier = declaration.source.value.to_string();
-                    demand.all = false;
-                    demand.names.clear();
+                    let source = declaration.source.value.to_string();
+                    let demand = dependency_demands.entry(source.clone()).or_default();
+                    demand.specifier = source.clone();
+                    if demand_downgraded.insert(source) {
+                        demand.all = false;
+                        demand.names.clear();
+                    }
                     let Some(specifiers) = &declaration.specifiers else {
                         continue;
                     };
@@ -256,11 +264,12 @@ fn lower_module_ast<'a>(
                 }
                 Statement::ExportNamedDeclaration(declaration) => {
                     if let Some(source) = &declaration.source {
-                        let demand = dependency_demands
-                            .entry(source.value.to_string())
-                            .or_default();
-                        demand.specifier = source.value.to_string();
-                        demand.all = false;
+                        let key = source.value.to_string();
+                        let demand = dependency_demands.entry(key.clone()).or_default();
+                        demand.specifier = key.clone();
+                        if demand_downgraded.insert(key) {
+                            demand.all = false;
+                        }
                         demand.names.extend(
                             declaration
                                 .specifiers

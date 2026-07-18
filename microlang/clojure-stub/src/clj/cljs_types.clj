@@ -32,10 +32,19 @@
 (defn bit-xor [a b] (%bit-xor a b))
 (defn bit-shift-left [a n] (%bit-shl a n))
 (defn bit-shift-right [a n] (%bit-shr a n))
-;; HOST: our ints are non-negative here (indices/counts/masked hashes), so a
-;; logical shift is an arithmetic shift.
-(defn bit-shift-right-zero-fill [a n] (%bit-shr a n))
-(defn unsigned-bit-shift-right [a n] (%bit-shr a n))
+;; Java's `long >>>`: the shift count masks to 6 bits and the high bits
+;; zero-fill regardless of sign. The mask is built as ~(-1 << (64-n)) rather
+;; than (1 << (64-n)) - 1 because -1 << k never leaves i64 range while
+;; 1 << 63 would. (An arithmetic shift here only LOOKS right on the
+;; non-negative ints the prelude happens to shift — test.check's splittable
+;; RNG shifts negative longs and gets garbage from it.)
+(defn unsigned-bit-shift-right [a n]
+  (let [n (%bit-and n 63)]
+    (if (%num-eq n 0)
+      a
+      (%bit-and (%bit-shr a n)
+                (%bit-xor -1 (%bit-shl -1 (%sub 64 n)))))))
+(defn bit-shift-right-zero-fill [a n] (unsigned-bit-shift-right a n))
 (defn bit-count [a] (%bit-count a))
 (defn hash [x] (%hash x))
 (defn == [a b] (%num-eq a b))

@@ -628,10 +628,14 @@ impl Bundler {
         self.emit_assets(&allowed, parent)?;
         self.emit_css(&allowed, output)?;
         let mut runtime_ids = vec![None; self.ids.len()];
-        for (runtime_id, dense_id) in reachable_dense.into_iter().enumerate() {
+        for (runtime_id, &dense_id) in reachable_dense.iter().enumerate() {
             runtime_ids[dense_id] = Some(runtime_id);
         }
         let main_modules = self.static_closure(self.entry, &allowed);
+        // Export demand is aggregated once over EVERY reachable module (not per
+        // chunk), so a module keeps the exports any chunk imports from it even
+        // when the consumer lands in a different chunk than the definition.
+        let global_demands = self.export_demands(&reachable_dense);
         let dynamic_roots = self.dynamic_roots(&allowed);
         // One chunk output path per dynamic root, computed once so the rewritten
         // `import()` reference and the file on disk always agree. Most roots are
@@ -652,8 +656,15 @@ impl Bundler {
         }
         for (root, chunk_path) in dynamic_roots.iter().copied().zip(&chunk_paths) {
             let modules = self.static_closure(root, &allowed);
-            let rendered =
-                self.render_best(&modules, root, &chunk_names, &runtime_ids, false, options.format);
+            let rendered = self.render_best(
+                &modules,
+                root,
+                &chunk_names,
+                &runtime_ids,
+                &global_demands,
+                false,
+                options.format,
+            );
             self.write_rendered(rendered, chunk_path, options)?;
         }
         if options.minify
@@ -668,6 +679,7 @@ impl Bundler {
             self.entry,
             &chunk_names,
             &runtime_ids,
+            &global_demands,
             true,
             options.format,
         );
@@ -1162,12 +1174,21 @@ impl Bundler {
         entry: DenseModuleId,
         chunk_names: &HashMap<DenseModuleId, String>,
         runtime_ids: &[Option<usize>],
+        global_demands: &[ExportDemand],
         is_main: bool,
         format: ModuleFormat,
     ) -> RenderedBundle {
-        self.render_flat(reachable, entry, chunk_names, is_main, format)
+        self.render_flat(reachable, entry, chunk_names, global_demands, is_main, format)
             .unwrap_or_else(|| {
-                self.render_runtime(reachable, entry, chunk_names, runtime_ids, is_main, format)
+                self.render_runtime(
+                    reachable,
+                    entry,
+                    chunk_names,
+                    runtime_ids,
+                    global_demands,
+                    is_main,
+                    format,
+                )
             })
     }
 
@@ -1176,6 +1197,7 @@ impl Bundler {
         reachable: &[DenseModuleId],
         entry: DenseModuleId,
         chunk_names: &HashMap<DenseModuleId, String>,
+        global_demands: &[ExportDemand],
         is_main: bool,
         format: ModuleFormat,
     ) -> Option<RenderedBundle> {
@@ -1234,9 +1256,16 @@ impl Bundler {
             }
         }
 
-        let mut demands = self.export_demands(reachable, entry);
+        // Start from the global (cross-chunk) demand so a module keeps every
+        // export any chunk imports from it. The chunk's own root is an entry
+        // point: for a dynamic chunk its full namespace can be read after
+        // `import()`, so it keeps all exports; the main entry's public surface
+        // is provided by the outer wrapper, so it demands nothing here.
+        let mut demands = global_demands.to_vec();
         if is_main {
             demands[entry] = ExportDemand::default();
+        } else {
+            demands[entry].all = true;
         }
         let mut code = String::new();
         let mut mappings = Vec::with_capacity(order.len());
@@ -1352,10 +1381,15 @@ impl Bundler {
         entry: DenseModuleId,
         chunk_names: &HashMap<DenseModuleId, String>,
         runtime_ids: &[Option<usize>],
+        global_demands: &[ExportDemand],
         is_main: bool,
         format: ModuleFormat,
     ) -> RenderedBundle {
-        let export_demands = self.export_demands(reachable, entry);
+        // See `render_flat`: demand is aggregated globally across chunks. The
+        // entry keeps its full namespace (the main entry is required by the outer
+        // wrapper; a chunk root is read as a namespace after `import()`).
+        let mut export_demands = global_demands.to_vec();
+        export_demands[entry].all = true;
         let fragments = reachable
             .par_iter()
             .filter_map(|&dense_index| {
@@ -1548,14 +1582,16 @@ export default __diffpackEntry;
         builder.into_sourcemap().to_json_string()
     }
 
-    fn export_demands(
-        &self,
-        reachable: &[DenseModuleId],
-        entry: DenseModuleId,
-    ) -> Vec<ExportDemand> {
+    /// Aggregates, for every module, the union of export demand placed on it by
+    /// all consumers in `sources`. An emitted module keeps only the exports its
+    /// consumers actually ask for, so this must be computed over the FULL set of
+    /// reachable modules — not a single chunk's closure. A module and one of its
+    /// consumers frequently land in different chunks (e.g. a shared package index
+    /// consumed by a route split), and a chunk-local demand would wrongly shake
+    /// away exports the other chunk imports at runtime.
+    fn export_demands(&self, sources: &[DenseModuleId]) -> Vec<ExportDemand> {
         let mut demands = vec![ExportDemand::default(); self.modules.len()];
-        demands[entry].all = true;
-        for &source in reachable {
+        for &source in sources {
             let Some(module) = &self.modules[source] else {
                 continue;
             };

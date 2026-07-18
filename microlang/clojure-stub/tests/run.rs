@@ -1387,11 +1387,13 @@ fn jvm_layer_system_nanotime_is_monotonic() {
     assert_eq!(run("(number? (System/nanoTime))"), "true");
     // monotonic and non-decreasing across two reads
     assert_eq!(run("(let [a (System/nanoTime) b (System/nanoTime)] (>= b a))"), "true");
-    // There is no wall-clock prim, so currentTimeMillis is deliberately NOT
-    // registered: a catchable miss, never a fabricated time.
+    // currentTimeMillis is the REAL wall clock (%wall-millis, Unix epoch) —
+    // test.check seeds its default RNG from it. Sanity: after 2020, monotonic
+    // enough to be non-decreasing across two reads.
+    assert_eq!(run("(> (System/currentTimeMillis) 1577836800000)"), "true");
     assert_eq!(
-        run("(try (System/currentTimeMillis) (catch Exception e :caught))"),
-        ":caught"
+        run("(let [a (System/currentTimeMillis) b (System/currentTimeMillis)] (>= b a))"),
+        "true"
     );
 }
 

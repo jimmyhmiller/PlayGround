@@ -530,13 +530,28 @@
   ;; libraries rely on.
   (:static-fn pow [b e] (%pow b e))
   (:static-fn sqrt [x] (%pow x 0.5))
+  (:static-fn floor [x] (%floor x))
+  (:static-fn ceil [x] (%ceil x))
+  (:static-fn log [x] (%log x))
+  (:static-fn exp [x] (%exp x))
+  ;; Math/round: floor(x + 0.5) as a long (Java's spec, incl. the .5-rounds-up rule)
+  (:static-fn round [x] (long (%floor (+ x 0.5))))
+  ;; Math/scalb: x * 2^n. %pow of 2.0 by an integer exponent is exact through
+  ;; the whole double range, so the multiply IS Java's scalb for these uses.
+  (:static-fn scalb [x n] (* x (%pow 2.0 n)))
+  ;; Math/getExponent: the UNBIASED exponent field, read from the actual IEEE
+  ;; bits — exact, including the Java answers for zero/subnormal (-1023) and
+  ;; inf/NaN (1024).
+  (:static-fn getExponent [x]
+    (let [e (%bit-and (unsigned-bit-shift-right (%double-bits x) 52) 2047)]
+      (if (%num-eq e 0) -1023 (if (%num-eq e 2047) 1024 (- e 1023)))))
   (:static-fn max [a b] (if (< a b) b a))
   (:static-fn min [a b] (if (< a b) a b)))
 
 ;; Only the members backed by a real primitive are registered: `nanoTime` is
-;; `%nanos` (monotonic, arbitrary origin — nanoTime's contract exactly). There
-;; is no wall-clock prim, so `currentTimeMillis` is deliberately ABSENT and a
-;; call to it throws "No such static method" rather than returning a lie.
+;; `%nanos` (monotonic, arbitrary origin — nanoTime's contract exactly),
+;; `currentTimeMillis` is `%wall-millis` (real wall clock, Unix epoch —
+;; test.check seeds its default RNG from it).
 ;; java.lang.Runtime — a SINGLETON, so `(= (Runtime/getRuntime) (Runtime/getRuntime))`
 ;; is true as on the JVM. core.async sizes its dispatch thread pool from
 ;; `(.availableProcessors (Runtime/getRuntime))`.
@@ -549,7 +564,58 @@
 (defclass java.lang.System
   (:kind :static)
   (:static-fn nanoTime [] (%nanos))
+  (:static-fn currentTimeMillis [] (%wall-millis))
   (:static-fn gc [] (gc)))
+
+;; ─────────────── java.lang.ThreadLocal + proxy ───────────────
+;; REAL per-thread storage: values key on `%thread-id`, so distinct OS threads
+;; see independent slots — the contract test.check's seedless-RNG path leans
+;; on. `initialValue` is the template-method hook: the base returns nil, a
+;; `proxy` override (carried in field 1) wins.
+(defclass java.lang.ThreadLocal
+  (:tag ThreadLocal)
+  (:ctor ([] (record 'ThreadLocal (atom {}) nil)))
+  (:static-fn -proxy [overrides]
+    (record 'ThreadLocal (atom {}) (-jvm-plist-get overrides 'initialValue)))
+  (:method initialValue [this]
+    (let [f (field this 1)] (if (nil? f) nil (f this))))
+  (:method get [this]
+    (let [tid (%thread-id)
+          m (%atom-get (field this 0))]
+      (if (contains? m tid)
+        (get m tid)
+        (let [v (.initialValue this)]
+          (swap! (field this 0) assoc tid v)
+          v))))
+  (:method set [this v] (do (swap! (field this 0) assoc (%thread-id) v) nil))
+  (:method remove [this] (do (swap! (field this 0) dissoc (%thread-id)) nil)))
+
+;; Real `proxy` compiles a JVM subclass; here a base class OPTS IN by
+;; registering a `-proxy` static fn (its instances carry the override table).
+;; Method bodies bind `this`, exactly like Clojure's proxy. A base without
+;; `-proxy` throws a clear error rather than pretending to subclass.
+(defn -jvm-proxy [base overrides]
+  (let [n (name base)
+        ;; the registry keys descriptors by fqn SYMBOL
+        fqn (cond (-jvm-descriptor base) base
+                  (-jvm-descriptor (symbol (%str-cat "java.lang." n))) (symbol (%str-cat "java.lang." n))
+                  (-jvm-descriptor (symbol (%str-cat "java.util." n))) (symbol (%str-cat "java.util." n))
+                  :else (throw (str "proxy: unknown class " n)))
+        d (-jvm-descriptor fqn)
+        f (-jvm-plist-get* (-jvm-c-static-fns d) '-proxy)]
+    (if (identical? f -jvm-none)
+      (throw (str "proxy: unsupported base class " fqn " (no -proxy ctor registered)"))
+      (f overrides))))
+(defmacro proxy [class-and-ifaces ctor-args & methods]
+  (let [base (first class-and-ifaces)
+        entries (mapcat (fn [m]
+                          (let [mname (first m)
+                                params (first (rest m))
+                                body (rest (rest m))]
+                            (list (list 'quote mname)
+                                  (%cons 'fn (%cons (vec (cons 'this (seq params))) body)))))
+                        methods)]
+    (list '-jvm-proxy (list 'quote base) (%cons 'list entries))))
 
 ;; ─────────────── java.lang.Iterable / java.util.Iterator ───────────────
 ;; Java's iteration protocol, reached for directly by real libraries: meander's
@@ -600,6 +666,12 @@
   (:static MIN_VALUE -9223372036854775808)
   (:static-fn valueOf [s] (-jvm-parse-long s))
   (:static-fn parseLong [s] (-jvm-parse-long s))
+  ;; population count of the 64-bit two's-complement pattern — %bit-count is
+  ;; Java-long semantic ((Long/bitCount -1) is 64). test.check's mix-gamma.
+  (:static-fn bitCount [n] (%bit-count n))
+  ;; 64-bit bit-reversal — test.check's fifty-two-bit-reverse runs it per
+  ;; generated double.
+  (:static-fn reverse [n] (%bit-reverse n))
   (:static-fn toString [n] (str n)))
 ;; Parse an integer written in `radix` (2..16), signed. Digits 0-9 then a-f/A-F,
 ;; matching java.lang.Integer/Long.parseInt with a radix — data.json reads a
@@ -635,17 +707,30 @@
   (:static MIN_SAFE_INTEGER -9007199254740991)
   (:static MAX_VALUE 1.7976931348623157e308)
   (:static MIN_VALUE 5e-324))
-(defclass java.lang.Short (:tag Long) (:extends java.lang.Number))
+;; The narrower integer boxes share Long's runtime tag (this dialect has ONE
+;; integer type); the MIN/MAX statics are what generator/serialization code
+;; reads (test.check's gen/byte chooses in [Byte/MIN_VALUE, Byte/MAX_VALUE]).
+(defclass java.lang.Short (:tag Long) (:extends java.lang.Number)
+  (:static MIN_VALUE -32768)
+  (:static MAX_VALUE 32767))
 (defclass java.lang.Byte (:tag Long) (:extends java.lang.Number)
   ;; Byte/TYPE — the byte primitive's class object (what a byte[]'s
   ;; getComponentType answers). Built directly: statics evaluate DURING this
   ;; class's own registration, so -jvm-class-named would still answer nil.
-  (:static TYPE (record 'Class 'java.lang.Byte)))
+  (:static TYPE (record 'Class 'java.lang.Byte))
+  (:static MIN_VALUE -128)
+  (:static MAX_VALUE 127))
 (defclass java.math.BigInteger (:tag Long) (:extends java.lang.Number))
 (defclass clojure.lang.BigInt (:tag Long) (:extends java.lang.Number))
 (defclass java.lang.Double (:tag Double) (:extends java.lang.Number)
+  (:static POSITIVE_INFINITY ##Inf)
+  (:static NEGATIVE_INFINITY ##-Inf)
+  (:static NaN ##NaN)
+  (:static MAX_VALUE 1.7976931348623157e308)
+  (:static MIN_VALUE 4.9e-324)
   (:static-fn valueOf [s] (-jvm-parse-double s))
   (:static-fn parseDouble [s] (-jvm-parse-double s))
+  (:static-fn doubleToLongBits [x] (%double-bits x))
   ;; NaN is the only value not equal to itself; ±Inf are the only values whose
   ;; magnitude exceeds the largest finite double. Both answers match the JVM
   ;; without needing an Inf/NaN literal or a divide-by-zero.

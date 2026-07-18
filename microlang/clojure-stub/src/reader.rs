@@ -504,6 +504,11 @@ impl Parser {
         if a == "false" {
             return rt.encode(Val::Bool(false));
         }
+        // Radix forms FIRST: `0123` is octal 83 on the JVM (and in tools.reader),
+        // and a plain decimal parse would silently read it as 123.
+        if let Some(v) = radix_int(rt, a) {
+            return v;
+        }
         if let Ok(i) = a.parse::<i128>() {
             return rt.encode(Val::Int(i));
         }
@@ -525,8 +530,20 @@ impl Parser {
                 }
             }
         }
-        if let Ok(f) = a.parse::<f64>() {
-            return rt.encode(Val::Float(f));
+        // Only tokens that LOOK numeric ([+-]?digit…) may parse as floats:
+        // Rust's f64 parser accepts "NaN"/"inf"/"Infinity", which are ordinary
+        // SYMBOLS in Clojure (test.check defs a private named NaN; reading it
+        // as a float made the def unresolvable — and NaN ≠ NaN, so it broke
+        // every lookup it touched). ##NaN/##Inf are separate reader literals.
+        let numericish = {
+            let b = a.as_bytes();
+            let d = if b.first().is_some_and(|c| matches!(c, b'+' | b'-')) { 1 } else { 0 };
+            b.get(d).is_some_and(|c| c.is_ascii_digit())
+        };
+        if numericish {
+            if let Ok(f) = a.parse::<f64>() {
+                return rt.encode(Val::Float(f));
+            }
         }
         // `::foo` / `::alias/foo` — an AUTO-NAMESPACED keyword. The reader can't
         // know the current namespace (forms are read before the preceding `ns`
@@ -553,6 +570,54 @@ impl Parser {
 fn sym<M: ValueModel>(rt: &mut Runtime<M>, n: &str) -> u64 {
     let s = rt.intern(n);
     rt.encode(Val::Sym(s))
+}
+
+/// The JVM reader's integer-literal grammar beyond plain decimal: `0x…` hex,
+/// leading-`0` octal, `NrDIGITS` arbitrary radix 2-36 (`2r1010`, `36rZZ`),
+/// each with an optional sign and optional `N` suffix. Returns None when `a`
+/// is not such a literal (it then falls through to decimal/float/symbol).
+/// A value past i128 accumulates into a big integer, matching the JVM, which
+/// promotes any out-of-long-range literal (`0xbf58476d1ce4e5b9` reads as
+/// 13791443137822795193N — test.check's `longify` depends on exactly that).
+fn radix_int<M: ValueModel>(rt: &mut Runtime<M>, a: &str) -> Option<u64> {
+    let (neg, body) = match a.as_bytes().first()? {
+        b'-' => (true, &a[1..]),
+        b'+' => (false, &a[1..]),
+        _ => (false, a),
+    };
+    let body = body.strip_suffix('N').unwrap_or(body);
+    let (radix, digits) = if let Some(h) =
+        body.strip_prefix("0x").or_else(|| body.strip_prefix("0X"))
+    {
+        (16u32, h)
+    } else if body.len() > 1 && body.starts_with('0') && body[1..].bytes().all(|b| b.is_ascii_digit())
+    {
+        (8u32, &body[1..])
+    } else if let Some((rp, dp)) = body.split_once(['r', 'R']) {
+        let r: u32 = rp.parse().ok()?;
+        if !(2..=36).contains(&r) {
+            return None;
+        }
+        (r, dp)
+    } else {
+        return None;
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return None;
+    }
+    if let Ok(v) = i128::from_str_radix(digits, radix) {
+        return Some(rt.encode(Val::Int(if neg { -v } else { v })));
+    }
+    let mut b = microlang::bigint::BigInt::from_i128(0);
+    let rad = microlang::bigint::BigInt::from_i128(radix as i128);
+    for c in digits.chars() {
+        let d = c.to_digit(radix).expect("digit validated above") as i128;
+        b = b.mul(&rad).add(&microlang::bigint::BigInt::from_i128(d));
+    }
+    if neg {
+        b = b.neg();
+    }
+    Some(rt.alloc_bigint(b))
 }
 
 fn field0<M: ValueModel>(rt: &Runtime<M>, v: u64, tag: &str) -> Option<u64> {

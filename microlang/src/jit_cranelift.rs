@@ -1210,6 +1210,15 @@ fn prim_tag(p: Prim) -> u32 {
         ThmDissoc => 128,
         ThmPersistent => 129,
         TvPop => 130,
+        Wrap64 => 144,
+        WallMillis => 145,
+        ThreadId => 146,
+        Floor => 147,
+        Ceil => 148,
+        Log => 149,
+        Exp => 150,
+        DoubleBits => 151,
+        BitReverse => 152,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -1362,6 +1371,15 @@ fn prim_from_tag(tag: u32) -> Prim {
         128 => ThmDissoc,
         129 => ThmPersistent,
         130 => TvPop,
+        144 => Wrap64,
+        145 => WallMillis,
+        146 => ThreadId,
+        147 => Floor,
+        148 => Ceil,
+        149 => Log,
+        150 => Exp,
+        151 => DoubleBits,
+        152 => BitReverse,
         other => panic!("bad prim tag {other}"),
     }
 }
@@ -4648,6 +4666,29 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let f = self.iconst(M::R::enc_bool(false));
                 self.fb.ins().select(cw, t, f)
             }
+            // `%wrap64` of an immediate fixnum is the IDENTITY — a fixnum is
+            // already well inside a long — and it sits on `even?`/`odd?`'s
+            // unchecked-cast path, a per-element predicate in any filtered
+            // pipeline (as a shim call it cost transduce ~25%). Only the boxed
+            // tail (i128 wraparound, HugeInt truncation, double pass-through)
+            // takes the shim.
+            Ir::Prim(Prim::Wrap64, args) if args.len() == 1 => {
+                let v = self.compile::<M>(&args[0], false);
+                let is_fix = self.emit_all_fixnum_raw::<M>(&[v]);
+                let result = self.declare_root_var();
+                self.fb.def_var(result, v);
+                let slow = self.fb.create_block();
+                let merge = self.fb.create_block();
+                self.fb.ins().brif(is_fix, merge, &[], slow, &[]);
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(Prim::Wrap64, &[v]);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
             // BitAnd/Or/Xor ride the same guard: `even?`/`odd?` are
             // `(zero? (bit-and n 1))` (as in clojure.core), so a bitwise op is a
             // PER-ELEMENT predicate in any filtered pipeline. Through the slow
@@ -6260,6 +6301,15 @@ mod prim_tag_tests {
         Prim::BitShl,
         Prim::BitShr,
         Prim::BitCount,
+        Prim::Wrap64,
+        Prim::WallMillis,
+        Prim::ThreadId,
+        Prim::Floor,
+        Prim::Ceil,
+        Prim::Log,
+        Prim::Exp,
+        Prim::DoubleBits,
+        Prim::BitReverse,
         Prim::RegisterFields,
         Prim::FieldByName,
         Prim::FieldNames,

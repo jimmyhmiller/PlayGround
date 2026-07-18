@@ -275,7 +275,11 @@
 ;; late; nothing on the bootstrap path calls `even?`/`odd?`.)
 (defn even? [n]
   (if (integer? n)
-      (%num-eq (%bit-and n 1) 0)
+      ;; cast through %wrap64 first — upstream even? does (bit-and
+      ;; (uncheckedLongCast n) 1) for exactly this reason: bit-and itself
+      ;; REJECTS BigInts (Java long-only bit ops), but parity mod 2^64 is
+      ;; parity, so even?/odd? work on the whole tower.
+      (%num-eq (%bit-and (%wrap64 n) 1) 0)
       (throw (str "Argument must be an integer: " n))))
 (defn odd? [n] (not (even? n)))
 
@@ -2900,18 +2904,24 @@
           (/ (read-string (str (subs s 0 di) (subs s (%add di 1)))) (-pow10 fraclen)))))
     x))
 (defn bit-and-not [x y] (%bit-and x (bit-not y)))
-(defn unchecked-add [a b] (%add a b))
-(defn unchecked-subtract [a b] (%sub a b))
-(defn unchecked-multiply [a b] (%mul a b))
-(defn unchecked-negate [a] (%sub 0 a))
-(defn unchecked-inc [a] (%add a 1))
-(defn unchecked-dec [a] (%sub a 1))
-(defn unchecked-add-int [a b] (%add a b))
-(defn unchecked-subtract-int [a b] (%sub a b))
-(defn unchecked-multiply-int [a b] (%mul a b))
-(defn unchecked-inc-int [a] (%add a 1))
-(defn unchecked-dec-int [a] (%sub a 1))
-(defn unchecked-negate-int [a] (%sub 0 a))
+;; The unchecked ops WRAP at 64 bits, exactly like Java's primitive long
+;; arithmetic — that wrap-around is their entire reason to exist (splittable
+;; RNGs, murmur-style hashes: test.check's mix-64 multiplies overflow on
+;; purpose). The tower computes exactly, %wrap64 takes the low 64 bits; an
+;; i64*i64 product always fits the tower's i128 fast path, so the exact
+;; intermediate is never a heap allocation.
+(defn unchecked-add [a b] (%wrap64 (%add a b)))
+(defn unchecked-subtract [a b] (%wrap64 (%sub a b)))
+(defn unchecked-multiply [a b] (%wrap64 (%mul a b)))
+(defn unchecked-negate [a] (%wrap64 (%sub 0 a)))
+(defn unchecked-inc [a] (%wrap64 (%add a 1)))
+(defn unchecked-dec [a] (%wrap64 (%sub a 1)))
+(defn unchecked-add-int [a b] (%wrap64 (%add a b)))
+(defn unchecked-subtract-int [a b] (%wrap64 (%sub a b)))
+(defn unchecked-multiply-int [a b] (%wrap64 (%mul a b)))
+(defn unchecked-inc-int [a] (%wrap64 (%add a 1)))
+(defn unchecked-dec-int [a] (%wrap64 (%sub a 1)))
+(defn unchecked-negate-int [a] (%wrap64 (%sub 0 a)))
 (defn unchecked-remainder-int [a b] (%rem a b))
 (defn unchecked-divide-int [a b] (%quot a b))
 
@@ -3230,18 +3240,22 @@
         :else true))
 
 ;; ─────────────── host-parity numerics + byte arrays ───────────────
-;; `unchecked-*`: this tower doesn't overflow (ints auto-promote), so the
-;; unchecked arithmetic ops are the checked ones. `unchecked-byte` is the one
-;; with real semantics: the JVM's signed 8-bit narrowing, which byte-level
-;; wire code (bencode) genuinely relies on.
-(defn unchecked-int [x] x)
-(defn unchecked-long [x] x)
-(defn unchecked-add [a b] (+ a b))
-(defn unchecked-subtract [a b] (- a b))
-(defn unchecked-multiply [a b] (* a b))
-(defn unchecked-inc [x] (+ x 1))
-(defn unchecked-dec [x] (- x 1))
+;; The wrapping `unchecked-add`/`-multiply`/… live with the other numeric
+;; aliases (search for %wrap64) — a second checked copy here silently
+;; shadowed them once. The narrowing coercions have the same Java semantics:
+;; signed truncation — `unchecked-byte` is 8-bit narrowing (bencode's byte
+;; wire code relies on it), `unchecked-int`/`unchecked-long` are the 32/64-bit
+;; ones.
+(defn unchecked-int [x] (- (mod (+ x 2147483648) 4294967296) 2147483648))
+(defn unchecked-long [x] (%wrap64 x))
 (defn unchecked-byte [x] (- (mod (+ x 128) 256) 128))
+;; the CHECKED cast: out of range THROWS, like RT.byteCast (gen/byte maps it
+;; over [-128,127] draws)
+(defn byte [x]
+  (let [l (long x)]
+    (if (or (%lt l -128) (%lt 127 l))
+      (throw (str "Value out of range for byte: " x))
+      l)))
 (defn -fill-array! [a v]
   (loop [i 0]
     (if (%lt i (%alength a)) (do (%cell-set! a i v) (recur (%add i 1))) a)))

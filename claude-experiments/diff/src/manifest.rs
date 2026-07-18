@@ -152,7 +152,12 @@ impl ClientRouteManifest {
             source.push_str(" },\n");
         }
         source.push_str("} });\n");
+        // Exposed two ways so both consumption paths resolve `tsrStartManifest`:
+        // a named export for a native ESM `import { tsrStartManifest }`, and a
+        // default export carrying it for Diffpack's runtime dynamic-import glue,
+        // whose `require.dynamic` resolves an internal chunk to its `.default`.
         source.push_str("export { tsrStartManifest };\n");
+        source.push_str("export default { tsrStartManifest };\n");
         source
     }
 }

@@ -2450,12 +2450,72 @@ impl<M: ValueModel> Runtime<M> {
                 unsafe { id.set_aux(0) };
                 args[0]
             }
-            Prim::BitAnd => self.encode(Val::Int(self.as_i128(args[0]) & self.as_i128(args[1]))),
-            Prim::BitOr => self.encode(Val::Int(self.as_i128(args[0]) | self.as_i128(args[1]))),
-            Prim::BitXor => self.encode(Val::Int(self.as_i128(args[0]) ^ self.as_i128(args[1]))),
-            Prim::BitShl => self.encode(Val::Int(self.as_i128(args[0]) << self.as_i128(args[1]))),
-            Prim::BitShr => self.encode(Val::Int(self.as_i128(args[0]) >> self.as_i128(args[1]))),
-            Prim::BitCount => self.encode(Val::Int(self.as_i128(args[0]).count_ones() as i128)),
+            // Bit ops are Java `long` ops: 64-bit two's complement, shift counts
+            // masked to 6 bits, and BigInt operands rejected (the JVM throws
+            // "bit operation not supported" there). They were i128 ops before,
+            // which silently diverged everywhere Java wraps — (bit-shift-left
+            // 1 63) is Long/MIN_VALUE on the JVM, and (bit-count -1) is 64,
+            // not 128. Splittable-RNG/hash code (test.check) leans on this.
+            Prim::BitAnd => {
+                let Some(a) = self.bit_operand(args[0]) else { return self.enc_nil() };
+                let Some(b) = self.bit_operand(args[1]) else { return self.enc_nil() };
+                self.encode(Val::Int((a & b) as i128))
+            }
+            Prim::BitOr => {
+                let Some(a) = self.bit_operand(args[0]) else { return self.enc_nil() };
+                let Some(b) = self.bit_operand(args[1]) else { return self.enc_nil() };
+                self.encode(Val::Int((a | b) as i128))
+            }
+            Prim::BitXor => {
+                let Some(a) = self.bit_operand(args[0]) else { return self.enc_nil() };
+                let Some(b) = self.bit_operand(args[1]) else { return self.enc_nil() };
+                self.encode(Val::Int((a ^ b) as i128))
+            }
+            Prim::BitShl => {
+                let Some(a) = self.bit_operand(args[0]) else { return self.enc_nil() };
+                let Some(n) = self.bit_operand(args[1]) else { return self.enc_nil() };
+                self.encode(Val::Int(a.wrapping_shl(n as u32) as i128))
+            }
+            Prim::BitShr => {
+                let Some(a) = self.bit_operand(args[0]) else { return self.enc_nil() };
+                let Some(n) = self.bit_operand(args[1]) else { return self.enc_nil() };
+                self.encode(Val::Int(a.wrapping_shr(n as u32) as i128))
+            }
+            Prim::BitCount => {
+                let Some(a) = self.bit_operand(args[0]) else { return self.enc_nil() };
+                self.encode(Val::Int(a.count_ones() as i128))
+            }
+            Prim::Wrap64 => {
+                // Java's implicit long truncation: the low 64 bits, two's
+                // complement — `RT.uncheckedLongCast`. `unchecked-add/-multiply/…`
+                // are exact-tower ops wrapped through this, which is EXACTLY what
+                // Java's unchecked long arithmetic computes; `even?`/`odd?` cast
+                // through it so parity works on BigInts, as on the JVM. A huge
+                // (limb) integer truncates like BigInteger.longValue(). Doubles
+                // and other non-integers pass through untouched: the JVM's
+                // unchecked ops on non-longs are the ordinary polymorphic ops —
+                // `(* double-unit long)` under `*unchecked-math*` is a double
+                // multiply, not a wrap.
+                match self.decode(args[0]) {
+                    Val::Int(i) => self.encode(Val::Int((i as i64) as i128)),
+                    Val::Ref(id) => {
+                        if let ObjView::HugeInt(b) = self.view_gc(id) {
+                            let limbs = b.limbs();
+                            let lo = (limbs.first().copied().unwrap_or(0) as u64)
+                                | ((limbs.get(1).copied().unwrap_or(0) as u64) << 32);
+                            let v = if b.is_negative() {
+                                (lo as i64).wrapping_neg()
+                            } else {
+                                lo as i64
+                            };
+                            self.encode(Val::Int(v as i128))
+                        } else {
+                            args[0]
+                        }
+                    }
+                    _ => args[0],
+                }
+            }
             Prim::RegisterFields => {
                 let Val::Sym(ty) = self.decode(args[0]) else {
                     panic!("register-fields: type must be a symbol");
@@ -2787,6 +2847,48 @@ impl<M: ValueModel> Runtime<M> {
                 static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
                 let e = EPOCH.get_or_init(std::time::Instant::now);
                 self.encode(Val::Int(e.elapsed().as_nanos() as i128))
+            }
+            Prim::WallMillis => {
+                // WALL clock, Unix epoch — System/currentTimeMillis's shape.
+                let ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock before the Unix epoch")
+                    .as_millis();
+                self.encode(Val::Int(ms as i128))
+            }
+            Prim::ThreadId => {
+                // Dense per-thread ids (first use assigns the next integer) —
+                // stable for the thread's lifetime, never reused within a run.
+                static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+                thread_local! {
+                    static TID: i64 = NEXT.fetch_add(1, Ordering::Relaxed);
+                }
+                let tid = TID.with(|t| *t);
+                self.encode(Val::Int(tid as i128))
+            }
+            Prim::Floor => {
+                let x = self.num_as_f64(args[0]).expect("floor: not a number");
+                self.encode(Val::Float(x.floor()))
+            }
+            Prim::Ceil => {
+                let x = self.num_as_f64(args[0]).expect("ceil: not a number");
+                self.encode(Val::Float(x.ceil()))
+            }
+            Prim::Log => {
+                let x = self.num_as_f64(args[0]).expect("log: not a number");
+                self.encode(Val::Float(x.ln()))
+            }
+            Prim::Exp => {
+                let x = self.num_as_f64(args[0]).expect("exp: not a number");
+                self.encode(Val::Float(x.exp()))
+            }
+            Prim::DoubleBits => {
+                let x = self.num_as_f64(args[0]).expect("double-bits: not a number");
+                self.encode(Val::Int((x.to_bits() as i64) as i128))
+            }
+            Prim::BitReverse => {
+                let Some(x) = self.bit_operand(args[0]) else { return self.enc_nil() };
+                self.encode(Val::Int(x.reverse_bits() as i128))
             }
             Prim::Gc => {
                 // The collector needs the live environment as a root, which
@@ -4149,15 +4251,32 @@ impl<M: ValueModel> Runtime<M> {
         M::R::enc_ref(id)
     }
 
-    /// An integer operand as `i128`, or a clear error. For the bitwise ops,
-    /// which operate on the (non-negative, bounded) indices/hashes/bitmaps the
-    /// persistent structures compute.
-    fn as_i128(&self, bits: u64) -> i128 {
+    /// A bitwise operand as a Java `long`, or `None` after SIGNALING a
+    /// catchable throw (never a Rust panic: a panic crossing the JIT's
+    /// nounwind shims aborts the whole process). The JVM defines bit ops ONLY
+    /// on long — a BigInt throws "bit operation not supported" — and an
+    /// in-tower integer outside i64 range is this tower's spelling of the
+    /// same condition.
+    fn bit_operand(&mut self, bits: u64) -> Option<i64> {
         match self.decode(bits) {
-            Val::Int(i) => i,
-            _ => panic!("bitwise op: argument is not an integer"),
+            Val::Int(i) => match i64::try_from(i) {
+                Ok(v) => Some(v),
+                Err(_) => {
+                    let id = self
+                        .alloc(Obj::Str("bit operation not supported: value out of long range".to_string()));
+                    self.signal_throw(M::R::enc_ref(id));
+                    None
+                }
+            },
+            _ => {
+                let id =
+                    self.alloc(Obj::Str("bit operation not supported: argument is not an integer".to_string()));
+                self.signal_throw(M::R::enc_ref(id));
+                None
+            }
         }
     }
+
 
     /// The `String` behind a string value, or a clear error if it is not one.
     pub fn as_str(&self, bits: u64, who: &str) -> String {

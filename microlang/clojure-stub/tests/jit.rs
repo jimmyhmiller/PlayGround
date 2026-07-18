@@ -150,9 +150,22 @@ fn bitwise_fast_path_on_jit() {
     // the fixnum boundaries stay in range (no retag overflow)
     assert_eq!(jit("(bit-and 4611686018427387903 -1)"), "4611686018427387903");
     assert_eq!(jit("(bit-and -4611686018427387904 -1)"), "-4611686018427387904");
-    // a promoted bigint is not a fixnum: the guard must route it to the runtime
-    assert_eq!(jit("(bit-and 10000000000000000000001N 1)"), "1");
+    // Bit ops are Java LONG ops: a promoted bigint is out of range and throws
+    // CATCHABLY (the JVM's "bit operation not supported"), it does not compute
+    // in i128. even?/odd? still answer for bigints — like upstream they cast
+    // through the unchecked long (parity mod 2^64 is parity).
+    assert_eq!(
+        jit("(try (bit-and 10000000000000000000001N 1) (catch Exception e :caught))"),
+        ":caught"
+    );
     assert_eq!(jit("(even? 10000000000000000000000N)"), "true");
+    assert_eq!(jit("(odd? 10000000000000000000001N)"), "true");
+    // 64-bit two's-complement semantics, exactly java.lang.Long's:
+    assert_eq!(jit("(bit-shift-left 1 63)"), "-9223372036854775808");
+    assert_eq!(jit("(bit-shift-left 1 64)"), "1"); // shift count masks to 6 bits
+    assert_eq!(jit("(bit-count -1)"), "64");
+    assert_eq!(jit("(unsigned-bit-shift-right -8 2)"), "4611686018427387902");
+    assert_eq!(jit("(unchecked-multiply 6364136223846793005 2685821657736338717)"), "7266313959890043161");
     // even?/odd? are `(zero? (bit-and n 1))`, and agree on negatives
     assert_eq!(jit("[(even? -4) (odd? -3) (even? 0) (odd? 7)]"), "[true true true true]");
     // and a non-integer is a CATCHABLE throw, not a process panic

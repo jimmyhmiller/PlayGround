@@ -41,6 +41,13 @@ pub struct Compiler {
     /// Namespaces already loaded (embedded or from a file), so `require` loads
     /// each at most once and cycles terminate.
     loaded: std::collections::HashSet<String>,
+    /// Compile-time mirror of `*unchecked-math*`: while truthy, call-position
+    /// `+`/`-`/`*`/`inc`/`dec` compile to their WRAPPING `unchecked-*`
+    /// variants, exactly like the JVM compiler's intrinsic remap (value-position
+    /// references stay the checked fns there too). Toggled by a top-level
+    /// `(set! *unchecked-math* …)`; saved/restored around each file load, as
+    /// Clojure's `load` binds it per file.
+    pub unchecked_math: bool,
 }
 
 /// Namespace resolution state. EVERY var is namespace-qualified: `clojure.core` +
@@ -147,6 +154,9 @@ impl Compiler {
             ("%numerator", Numerator), ("%denominator", Denominator), ("%bigint?", BigIntP), ("%to-long", ToLong),
             ("%bit-and", BitAnd), ("%bit-or", BitOr), ("%bit-xor", BitXor),
             ("%bit-shl", BitShl), ("%bit-shr", BitShr), ("%bit-count", BitCount),
+            ("%wrap64", Wrap64), ("%wall-millis", WallMillis), ("%thread-id", ThreadId),
+            ("%floor", Floor), ("%ceil", Ceil), ("%log", Log), ("%exp", Exp),
+            ("%double-bits", DoubleBits), ("%bit-reverse", BitReverse),
             ("%register-fields", RegisterFields), ("%field-by-name", FieldByName), ("%field-names", FieldNames), ("%make-record", MakeRecord), ("%hash", Hash),
             ("%first", First), ("%rest", Rest), ("%cons", Cons),
             ("record", Record), ("field", Field), ("type-of", TypeOf), ("nfields", NFields), ("throw", Throw),
@@ -204,6 +214,7 @@ impl Compiler {
             ns: NsState { current: "clojure.core".to_string(), ..NsState::default() },
             load_paths: Vec::new(),
             loaded: std::collections::HashSet::new(),
+            unchecked_math: false,
         }
     }
 
@@ -760,15 +771,19 @@ const SYNTAX_QUOTE_BARE: &[&str] = &[
                     // Record the var in the runtime registry (for ns enumeration and
                     // `(meta #'x)` flags).
                     rt.register_var(n, &self.ns.current, flags);
+                    // `(def name "docstring" init)` — the docstring is doc
+                    // metadata, NOT the value (it silently became the var's
+                    // value once: test.check's `(def ^{:added "0.9.0"} double
+                    // "Generates…" (double* {}))` defined a string).
+                    let init_idx =
+                        if items.len() == 4 && rt.str_view(items[2]).is_some() { 3 } else { 2 };
                     // Capture :arglists from a `(fn …)` init (compile-time, so it
                     // needs no bootstrap-order-sensitive emitted code).
-                    if items.len() > 2 {
-                        if let Some(al) = self.fn_arglists(rt, items[2]) {
+                    if items.len() > init_idx {
+                        if let Some(al) = self.fn_arglists(rt, items[init_idx]) {
                             rt.set_var_arglists(n, al);
                         }
-                    }
-                    if items.len() > 2 {
-                        let init = Box::new(self.compile(rt, items[2]));
+                        let init = Box::new(self.compile(rt, items[init_idx]));
                         return Ir::Def { name: n, init };
                     }
                     // value-less `(def x)` / `(declare x)`: the var is INTERNED

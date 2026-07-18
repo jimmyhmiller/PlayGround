@@ -476,6 +476,29 @@ pub enum Prim {
     /// tag test; on the interpreter tiers it is a normal predicate (and the
     /// result only picks between two equivalent bodies, so it can't be wrong).
     AllFixnum,
+    /// `(%wrap64 x)` -> the low 64 bits of an integer, two's complement — Java's
+    /// implicit long truncation. `unchecked-add/-multiply/…` are exact-tower ops
+    /// wrapped through this. (At the END of the enum: engines index dispatch
+    /// tables by variant order, so inserting mid-enum skews every prim after it.)
+    Wrap64,
+    /// `(%wall-millis)` -> milliseconds since the Unix epoch (WALL clock, unlike
+    /// `%nanos`' monotonic arbitrary origin) — `System/currentTimeMillis`.
+    WallMillis,
+    /// `(%thread-id)` -> a small integer unique to the calling OS thread for the
+    /// process lifetime. The keying primitive for `java.lang.ThreadLocal`.
+    ThreadId,
+    /// IEEE-754 double transcendentals/rounding the host must supply (java.lang.Math):
+    /// `(%floor x)` / `(%ceil x)` / `(%log x)` (natural) / `(%exp x)`.
+    Floor,
+    Ceil,
+    Log,
+    Exp,
+    /// `(%double-bits x)` -> the raw IEEE-754 bit pattern of a double, as a long —
+    /// Double/doubleToLongBits; the substrate for an EXACT Math/getExponent.
+    DoubleBits,
+    /// `(%bit-reverse x)` -> the 64-bit bit-reversal of a long — Long/reverse
+    /// (test.check's fifty-two-bit-reverse runs per generated double).
+    BitReverse,
 }
 
 impl Prim {

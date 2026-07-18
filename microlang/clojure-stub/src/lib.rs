@@ -311,6 +311,16 @@ fn eval1<M: ValueModel>(
     boundary: bool,
 ) -> u64 {
     let expanded = expand(rt, cs, macros, comp, form);
+    // Under `*unchecked-math*`, call-position arithmetic compiles to the
+    // wrapping `unchecked-*` variants — the JVM compiler's intrinsic remap.
+    // Applied AFTER full expansion so macro-generated arithmetic (test.check's
+    // mix-64) wraps too, exactly as it does when the JVM compiles the
+    // expansion.
+    let expanded = if comp.unchecked_math {
+        rewrite_unchecked_math(rt, expanded, false)
+    } else {
+        expanded
+    };
     let slot = rt.push_root(expanded);
     let ir = comp.compile(rt, rt.root_get(slot));
     rt.truncate_roots(slot);
@@ -678,6 +688,26 @@ fn eval_form<M: ValueModel>(
         rt.set_var_flags(q, microlang::runtime::VAR_MACRO);
         return r;
     }
+    // A top-level `(set! *unchecked-math* …)` also flips the COMPILE-time
+    // remap flag for the forms that follow (Clojure's compiler reads the same
+    // var at compile time). The set! itself still evaluates normally; the
+    // flag takes the value it produced.
+    if let Some((h, _)) = rt.as_cons(form) {
+        if is_sym(rt, h, "set!") {
+            let items = rt.list_to_vec(form);
+            if items.len() == 3 {
+                if let Val::Sym(target) = rt.decode(items[1]) {
+                    let n = rt.sym_name(target);
+                    if n == "*unchecked-math*" || n.ends_with("/*unchecked-math*") {
+                        let r = eval1(rt, cs, macros, comp, form, boundary);
+                        comp.unchecked_math =
+                            !matches!(rt.decode(r), Val::Nil | Val::Bool(false));
+                        return r;
+                    }
+                }
+            }
+        }
+    }
     eval1(rt, cs, macros, comp, form, boundary)
 }
 
@@ -716,6 +746,38 @@ fn expand<M: ValueModel>(
         margs.extend_from_slice(&args[1..]);
         let result = cs.invoke(cs, rt, mfn, &margs);
         slot.set(rt, 0, result);
+    }
+    // 1.5. A special form reached through a namespace alias (`core/let`,
+    // `clojure.core/loop`) is still the special form — generators.cljc shadows
+    // `let` with its own macro and reaches core's by alias, and the qualified
+    // head would otherwise fall through to a function CALL whose "arguments"
+    // (the binding vector) get evaluated. Normalize the head to its bare name.
+    {
+        const CORE_SPECIALS: &[&str] = &[
+            "if", "do", "def", "quote", "var", "set!", "let", "let*", "loop", "loop*", "fn",
+            "fn*", "recur", "throw", "try", "try*", "new", "ns", "in-ns", "defprotocol",
+            "definterface",
+        ];
+        let f = slot.get(rt, 0);
+        if let Some((head, _)) = rt.as_cons(f) {
+            if let Val::Sym(hs) = rt.decode(head) {
+                if rt.sym_name(hs).contains('/') {
+                    let q = comp.resolve_ref(rt, hs);
+                    let base = rt
+                        .sym_name(q)
+                        .strip_prefix("clojure.core/")
+                        .filter(|b| CORE_SPECIALS.contains(b))
+                        .map(str::to_string);
+                    if let Some(base) = base {
+                        let bare = sym(rt, &base);
+                        let mut items = rt.list_to_vec(f);
+                        items[0] = bare;
+                        let rebuilt = rt.vec_to_list(&items);
+                        slot.set(rt, 0, rebuilt);
+                    }
+                }
+            }
+        }
     }
     // 2. structural desugar / recurse
     let f = slot.get(rt, 0);
@@ -834,23 +896,27 @@ fn expand<M: ValueModel>(
         // `(fn [] [])` is true on the JVM).
         quote_form(rt, f)
     } else if let Some(elems) = binding_items(rt, f) {
-        // A vector in EXPRESSION position -> `(vector e0 e1 …)` so its elements
-        // evaluate. `binding_items` matches every vector representation (the
-        // reader's phase type and anything a macro/syntax-quote returned).
-        // Param/binding vectors are handled by fn/let/loop BEFORE reaching here,
-        // so they are safe.
+        // A vector in EXPRESSION position -> `(clojure.core/vector e0 e1 …)` so
+        // its elements evaluate. QUALIFIED, because the literal must build a
+        // vector even in a namespace whose own `vector` means something else —
+        // test.check's generators ns shadows vector/hash-map/list, and its
+        // `{:pre [(or …)]}` maps (a non-constant vector literal inside them)
+        // were calling the GENERATOR `vector`. `binding_items` matches every
+        // vector representation (the reader's phase type and anything a
+        // macro/syntax-quote returned). Param/binding vectors are handled by
+        // fn/let/loop BEFORE reaching here, so they are safe.
         let mut elems = RootVec::new(rt, &elems);
-        let r = build_call(rt, cs, macros, comp, "vector", &mut elems);
+        let r = build_call(rt, cs, macros, comp, "clojure.core/vector", &mut elems);
         elems.release(rt);
         r
     } else if let Some(kvs) = data::map_entries(rt, f) {
         let mut kvs = RootVec::new(rt, &kvs);
-        let r = build_call(rt, cs, macros, comp, "hash-map", &mut kvs);
+        let r = build_call(rt, cs, macros, comp, "clojure.core/hash-map", &mut kvs);
         kvs.release(rt);
         r
     } else if let Some(es) = data::set_items(rt, f) {
         let mut es = RootVec::new(rt, &es);
-        let r = build_call(rt, cs, macros, comp, "hash-set", &mut es);
+        let r = build_call(rt, cs, macros, comp, "clojure.core/hash-set", &mut es);
         es.release(rt);
         r
     } else {
@@ -1759,6 +1825,76 @@ fn rewrite_mut_sets<M: ValueModel>(rt: &mut Runtime<M>, form: u64, cells: &[(Sym
         .map(|&it| rewrite_mut_sets(rt, it, cells))
         .collect();
     rt.vec_to_list(&rewritten)
+}
+
+/// The `*unchecked-math*` remap over a fully-expanded form: CALL-position
+/// `+`/`-`/`*`/`inc`/`dec` (bare or `clojure.core/`-qualified) become their
+/// wrapping `unchecked-*` variants, n-ary spellings folding left. Value-position
+/// references are untouched — `(map + xs)` stays checked on the JVM too, where
+/// only inlined intrinsic call sites are remapped. `quote` subtrees are left
+/// alone. (A LOCAL binding shadowing `+` in call position would be remapped
+/// wrongly; the JVM resolves that case, but no real unchecked-math code
+/// rebinds core arithmetic names locally.)
+fn rewrite_unchecked_math<M: ValueModel>(rt: &mut Runtime<M>, form: u64, quoted: bool) -> u64 {
+    // Vector literals carry subforms too ([(+ a b)]).
+    if let Some(items) = data::vector_items(rt, form) {
+        let rewritten: Vec<u64> = items
+            .iter()
+            .map(|&it| rewrite_unchecked_math(rt, it, quoted))
+            .collect();
+        return make_vector(rt, rewritten);
+    }
+    let Some(_) = rt.as_cons(form) else { return form };
+    let items = rt.list_to_vec(form);
+    if items.is_empty() {
+        return form;
+    }
+    let head_name = match rt.decode(items[0]) {
+        Val::Sym(s) => {
+            let n = rt.sym_name(s);
+            n.strip_prefix("clojure.core/").unwrap_or(n).to_string()
+        }
+        _ => String::new(),
+    };
+    let quoted = quoted || head_name == "quote";
+    let rewritten: Vec<u64> = std::iter::once(items[0])
+        .chain(
+            items[1..]
+                .iter()
+                .map(|&it| rewrite_unchecked_math(rt, it, quoted)),
+        )
+        .collect();
+    if quoted {
+        return rt.vec_to_list(&rewritten);
+    }
+    let args = &rewritten[1..];
+    let fold = |rt: &mut Runtime<M>, op: &str, args: &[u64]| -> u64 {
+        let ops = sym(rt, op);
+        let mut acc = rt.vec_to_list(&[ops, args[0], args[1]]);
+        for &a in &args[2..] {
+            let ops = sym(rt, op);
+            acc = rt.vec_to_list(&[ops, acc, a]);
+        }
+        acc
+    };
+    match (head_name.as_str(), args.len()) {
+        ("+", n) if n >= 2 => fold(rt, "unchecked-add", args),
+        ("*", n) if n >= 2 => fold(rt, "unchecked-multiply", args),
+        ("-", 1) => {
+            let neg = sym(rt, "unchecked-negate");
+            rt.vec_to_list(&[neg, args[0]])
+        }
+        ("-", n) if n >= 2 => fold(rt, "unchecked-subtract", args),
+        ("inc", 1) => {
+            let f = sym(rt, "unchecked-inc");
+            rt.vec_to_list(&[f, args[0]])
+        }
+        ("dec", 1) => {
+            let f = sym(rt, "unchecked-dec");
+            rt.vec_to_list(&[f, args[0]])
+        }
+        _ => rt.vec_to_list(&rewritten),
+    }
 }
 
 fn mk_fn<M: ValueModel>(rt: &mut Runtime<M>, params: u64, body: Vec<u64>) -> u64 {
@@ -2742,9 +2878,14 @@ fn ensure_loaded<M: ValueModel>(
     // Mark loaded BEFORE running so a cyclic require terminates.
     comp.mark_loaded(name);
     let saved = comp.current_ns().to_string();
+    // Clojure's `load` binds `*unchecked-math*` around each file: a file's
+    // `(set! *unchecked-math* …)` (test.check's random.clj) must not leak
+    // into the code that required it.
+    let saved_unchecked = comp.unchecked_math;
     run_src(rt, cs, macros, comp, &src);
     // The loaded file's `(ns …)` moved us into it; restore the requiring ns.
     comp.set_ns(&saved);
+    comp.unchecked_math = saved_unchecked;
 }
 
 /// The fully-qualified class name for a class reference: dotted (or
