@@ -552,6 +552,39 @@ present, `window.__TSR_ROUTER__` set (client executed + hydrated), no
 `module is not defined`, zero uncaught page errors, client-side SPA navigation
 works. 13/13 acceptance still holds; thesis guards + oracle green.
 
+### Server-context / `async_hooks` client leak — FIXED
+
+Server-only code no longer leaks into the client bundle. `grep -rl async_hooks
+.diffpack-output/public` returns nothing (the reference client also has zero);
+the server build still legitimately carries `async_hooks`.
+
+**Root cause.** TanStack Start ships environment-neutral runtime stubs
+(`createServerOnlyFn`, `createClientOnlyFn`, `createIsomorphicFn`,
+`createMiddleware`) and expects the build tool to specialize them per
+environment (its `@tanstack/start-plugin-core` `handleEnvOnly` /
+`handleCreateIsomorphicFn` / `handleCreateMiddleware` compiler passes). Without
+that specialization the *server* branches stay live on the client and keep their
+references to `getStartContext` / `getRequestHeaders`, which pull
+`@tanstack/start-storage-context` and `@tanstack/start-server-core` (and thus
+`node:async_hooks`) into the client graph. `sideEffects:false` tree-shaking could
+not drop them because the references were real. Two client leak paths existed:
+(a) `start-client-core`'s `getGlobalStartContext` / `getRouterInstance` /
+`getStartOptions` / `getStartContextServerOnly` (isomorphic / server-only
+wrappers), and (b) the `/api/users` route's `createMiddleware().server(fn)` using
+`getRequestHeaders`, reached statically from `routeTree.gen`.
+
+**Fix.** A native, faithful client transform (`apply_env_transform` in
+`src/transform.rs`, gated by `Target::Client`, threaded through `BuildConfig` /
+`config.rs`): on the client it replaces `createServerOnlyFn(fn)` with a throwing
+stub, collapses `createIsomorphicFn().client(a).server(b)` to `a`, and strips
+`.server`/`.validator`/`.inputValidator` from `createMiddleware` chains. Deleting
+those references makes the server imports genuinely unused, so diffpack's
+existing `sideEffects:false` pruning drops them (and `node:async_hooks` with
+them). Server builds keep the neutral runtime stubs (no transform), so the server
+graph is byte-identical to before. Verified in headless Chrome: home hydrates,
+SPA nav to `/posts` runs with **no server-context / `async_hooks` console
+error**; 13/13 acceptance, thesis guards, and the incremental oracle stay green.
+
 ### Remaining gaps toward full production (documented, distinct from format)
 1. **Tailwind compilation** — `app.css` is raw Tailwind source (`@import 'tailwindcss'` / `@apply`); one `/assets/tailwindcss` 404 in the browser. Needs a native Tailwind pass (was `@tailwindcss/vite`).
-2. **Server-code tree-shaking** — server-only code leaks into the client via `sideEffects:false` barrel re-exports diffpack does not yet whole-program tree-shake; routes with server loaders (`/posts`) run server-context code on the client (caught by the error boundary; navigation still works). The reference client has zero `async_hooks`. This is a core bundler tree-shaking capability, and the direct fix for the leak.
+2. **Server-function RPC (`createServerFn`)** — surfaced by the async_hooks fix and orthogonal to it. `createServerFn(...).handler(fn)` is not yet rewritten to the client/SSR RPC form (`createClientRpc`/`createSsrRpc` + a server-fn dispatch manifest) the reference emits, so calling a server fn returns `undefined` (`result.result` is lost in the neutral middleware wrapper). This fails identically under SSR and client — pre-existing, unchanged by this work — and blocks `/posts` from rendering its data (`posts is not iterable`, caught by `DefaultCatchBoundary`). This is the next gap after Tailwind.

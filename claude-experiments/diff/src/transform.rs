@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use oxc_allocator::Allocator;
+use oxc_allocator::{Allocator, TakeIn};
 use oxc_ast::{
     ast::{
         BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression,
-        ImportDeclarationSpecifier, Statement, VariableDeclarationKind,
+        ImportDeclarationSpecifier, Program, Statement, VariableDeclarationKind,
     },
     builder::{AstBuilder, NONE},
 };
@@ -39,6 +39,26 @@ pub struct DependencyDemand {
     pub dynamic: bool,
 }
 
+/// The environment a module is being compiled for. TanStack Start ships
+/// environment-neutral runtime stubs (`createServerOnlyFn`, `createClientOnlyFn`,
+/// `createIsomorphicFn`) and relies on the build tool to specialize them per
+/// environment. On the client this specialization is what lets whole-program
+/// tree-shaking drop server-only code (see [`apply_env_transform`]); the
+/// `Server` build keeps the neutral runtime stubs (which already behave
+/// correctly under Node) and so applies no transform — it is the default.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum Target {
+    /// The browser build. Server-only functions are replaced with throwing
+    /// stubs and isomorphic functions collapse to their client implementation,
+    /// severing the references that would otherwise pull server modules
+    /// (e.g. `node:async_hooks`) into the client graph.
+    Client,
+    /// A server build (`ssr`/`nitro`). No transform: the neutral runtime stubs
+    /// resolve to the correct behavior under Node.
+    #[default]
+    Server,
+}
+
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct FlatModule {
     pub code: String,
@@ -62,7 +82,7 @@ pub enum FoldExpression {
     Add(Box<Self>, Box<Self>),
 }
 
-pub fn transform_module(path: &Path, source: &str) -> TransformResult {
+pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformResult {
     if path
         .extension()
         .is_some_and(|extension| extension == "json")
@@ -117,9 +137,28 @@ pub fn transform_module(path: &Path, source: &str) -> TransformResult {
     );
 
     frontend_profile::finish(Phase::Transform, transform_started);
+
+    // Specialize environment-neutral TanStack Start runtime stubs for the target
+    // BEFORE demand is computed. On the client this severs the references from
+    // isomorphic/server-only wrappers to their server implementations, so the
+    // now-unused server imports (e.g. `@tanstack/start-storage-context`, which
+    // pulls `node:async_hooks`) are pruned by the existing side-effect-free
+    // tree-shaking instead of leaking into the browser bundle. Because the
+    // transform deletes references, scoping must be rebuilt so the demand pass
+    // sees the imports as unreferenced.
+    let mut scoping = transformed.scoping;
+    if apply_env_transform(&allocator, &mut program, &scoping, target) {
+        scoping = SemanticBuilder::new()
+            .with_excess_capacity(2.0)
+            .with_enum_eval(true)
+            .build(&program)
+            .semantic
+            .into_scoping();
+    }
+
     let lower_started = frontend_profile::start();
     let (code, is_esm, dependencies, dependency_demands, flat_module) =
-        lower_module_ast(&allocator, &mut program, &transformed.scoping);
+        lower_module_ast(&allocator, &mut program, &scoping);
     frontend_profile::finish(Phase::Lower, lower_started);
     TransformResult {
         code,
@@ -708,6 +747,304 @@ fn expression_is_obviously_pure(expression: &oxc_ast::ast::Expression<'_>) -> bo
     )
 }
 
+/// Which TanStack Start environment-directive helper an imported binding refers
+/// to. These are `@tanstack/*` runtime stubs that a build tool is expected to
+/// specialize per environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvFn {
+    ServerOnly,
+    ClientOnly,
+    Isomorphic,
+    Middleware,
+}
+
+/// Specializes TanStack Start's environment-directive helpers for `target`,
+/// mirroring `@tanstack/start-plugin-core`'s `handleEnvOnly` /
+/// `handleCreateIsomorphicFn` compiler passes:
+///
+/// - `createServerOnlyFn(fn)` keeps `fn` on the server; on the client it becomes
+///   a throwing stub (the reference to `fn` is dropped).
+/// - `createClientOnlyFn(fn)` is the mirror image.
+/// - `createIsomorphicFn().client(a).server(b)` collapses to `a` on the client
+///   and `b` on the server (or `() => {}` when the chosen environment has no
+///   implementation).
+/// - `createMiddleware()...server(fn)` drops its `.server`/`.validator`/
+///   `.inputValidator` calls on the client, severing references to server-only
+///   code (e.g. an API route's `getRequestHeaders`).
+///
+/// Only helpers imported from a `@tanstack/` package are matched, resolved by
+/// symbol so a same-named local binding is never rewritten. Returns whether any
+/// rewrite happened, so the caller can rebuild scoping (the pass deletes
+/// references, which the demand computation must observe to prune the
+/// now-unused server imports). This is currently a no-op for `Target::Server`,
+/// whose neutral runtime stubs already behave correctly under Node.
+fn apply_env_transform<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    scoping: &Scoping,
+    target: Target,
+) -> bool {
+    if target != Target::Client {
+        return false;
+    }
+    let mut kinds: HashMap<SymbolId, EnvFn> = HashMap::new();
+    for statement in &program.body {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        if !declaration.source.value.starts_with("@tanstack/") {
+            continue;
+        }
+        let Some(specifiers) = &declaration.specifiers else {
+            continue;
+        };
+        for specifier in specifiers {
+            let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+                continue;
+            };
+            let kind = match specifier.imported.name().as_str() {
+                "createServerOnlyFn" => EnvFn::ServerOnly,
+                "createClientOnlyFn" => EnvFn::ClientOnly,
+                "createIsomorphicFn" => EnvFn::Isomorphic,
+                "createMiddleware" => EnvFn::Middleware,
+                _ => continue,
+            };
+            kinds.insert(specifier.local.symbol_id(), kind);
+        }
+    }
+    if kinds.is_empty() {
+        return false;
+    }
+    let mut transform = EnvTransform {
+        allocator,
+        scoping,
+        kinds,
+        target,
+        changed: false,
+    };
+    transform.visit_program(program);
+    transform.changed
+}
+
+struct EnvTransform<'a, 's> {
+    allocator: &'a Allocator,
+    scoping: &'s Scoping,
+    kinds: HashMap<SymbolId, EnvFn>,
+    target: Target,
+    changed: bool,
+}
+
+impl<'a> EnvTransform<'a, '_> {
+    /// The [`EnvFn`] an identifier reference resolves to, if it is one of the
+    /// tracked `@tanstack/*` imports.
+    fn env_fn(&self, identifier: &oxc_ast::ast::IdentifierReference<'a>) -> Option<EnvFn> {
+        let reference_id = identifier.reference_id.get()?;
+        let symbol_id = self.scoping.get_reference(reference_id).symbol_id()?;
+        self.kinds.get(&symbol_id).copied()
+    }
+
+    /// Parses a constant JavaScript expression into this module's arena. Used to
+    /// synthesize the throwing / empty-arrow replacements.
+    fn parse_expression(&self, source: &'static str) -> Expression<'a> {
+        let parsed = Parser::new(self.allocator, source, SourceType::default()).parse();
+        let mut program = parsed.program;
+        match program.body.first_mut() {
+            Some(Statement::ExpressionStatement(statement)) => {
+                statement.expression.take_in(&self.allocator)
+            }
+            _ => unreachable!("env-transform replacement source must be a single expression"),
+        }
+    }
+
+    fn throwing_stub(&self, function: &str, environment: &str) -> Expression<'a> {
+        // A distinct constant per (function, environment) so the parser sees a
+        // 'static string; the set is closed and tiny.
+        let source = match (function, environment) {
+            ("createServerOnlyFn", "server") => {
+                "(() => { throw new Error(\"createServerOnlyFn() functions can only be called on the server!\") })"
+            }
+            ("createClientOnlyFn", "client") => {
+                "(() => { throw new Error(\"createClientOnlyFn() functions can only be called on the client!\") })"
+            }
+            _ => unreachable!("no throwing stub for {function}/{environment}"),
+        };
+        self.parse_expression(source)
+    }
+
+    /// Rewrites `createServerOnlyFn(fn)` / `createClientOnlyFn(fn)`. Returns
+    /// `true` if `expression` was a matching call (and was replaced).
+    fn rewrite_env_only(&mut self, expression: &mut Expression<'a>) -> bool {
+        let Expression::CallExpression(call) = expression else {
+            return false;
+        };
+        let Expression::Identifier(callee) = &call.callee else {
+            return false;
+        };
+        let kind = match self.env_fn(callee) {
+            Some(kind @ (EnvFn::ServerOnly | EnvFn::ClientOnly)) => kind,
+            _ => return false,
+        };
+        let keep = matches!(
+            (kind, self.target),
+            (EnvFn::ServerOnly, Target::Server) | (EnvFn::ClientOnly, Target::Client)
+        );
+        if keep {
+            // Replace the whole call with its inner function argument.
+            let Some(inner) = call
+                .arguments
+                .first_mut()
+                .and_then(|argument| argument.as_expression_mut())
+            else {
+                return false;
+            };
+            *expression = inner.take_in(&self.allocator);
+        } else {
+            let (function, environment) = match kind {
+                EnvFn::ServerOnly => ("createServerOnlyFn", "server"),
+                EnvFn::ClientOnly => ("createClientOnlyFn", "client"),
+                EnvFn::Isomorphic | EnvFn::Middleware => unreachable!(),
+            };
+            *expression = self.throwing_stub(function, environment);
+        }
+        true
+    }
+
+    /// Validates that `expression` is a complete
+    /// `createIsomorphicFn()[.client(_)][.server(_)]` chain (read-only).
+    fn is_isomorphic_chain(&self, expression: &Expression<'a>) -> bool {
+        let Expression::CallExpression(call) = expression else {
+            return false;
+        };
+        match &call.callee {
+            Expression::Identifier(callee) => {
+                self.env_fn(callee) == Some(EnvFn::Isomorphic) && call.arguments.is_empty()
+            }
+            Expression::StaticMemberExpression(member) => {
+                matches!(member.property.name.as_str(), "client" | "server")
+                    && self.is_isomorphic_chain(&member.object)
+            }
+            _ => false,
+        }
+    }
+
+    /// Extracts the `.client` / `.server` implementation arguments from a
+    /// validated isomorphic chain, consuming the chain.
+    fn extract_isomorphic(
+        &self,
+        expression: &mut Expression<'a>,
+        client: &mut Option<Expression<'a>>,
+        server: &mut Option<Expression<'a>>,
+    ) {
+        let Expression::CallExpression(call) = expression else {
+            return;
+        };
+        // Take the method argument before borrowing `callee`, so the two
+        // disjoint field borrows never overlap.
+        let argument = call
+            .arguments
+            .first_mut()
+            .and_then(|argument| argument.as_expression_mut())
+            .map(|argument| argument.take_in(&self.allocator));
+        let Expression::StaticMemberExpression(member) = &mut call.callee else {
+            return;
+        };
+        self.extract_isomorphic(&mut member.object, client, server);
+        match member.property.name.as_str() {
+            "client" => *client = argument,
+            "server" => *server = argument,
+            _ => {}
+        }
+    }
+
+    /// Rewrites a full isomorphic chain to the target's implementation. Returns
+    /// `true` if `expression` was such a chain.
+    fn rewrite_isomorphic(&mut self, expression: &mut Expression<'a>) -> bool {
+        // Only the outermost chain node (its callee is a `.client`/`.server`
+        // member) is a rewrite point; the bare `createIsomorphicFn()` base is
+        // left for its enclosing member call to consume.
+        let is_chain_tail = matches!(
+            expression,
+            Expression::CallExpression(call)
+                if matches!(&call.callee, Expression::StaticMemberExpression(_))
+        );
+        if !is_chain_tail || !self.is_isomorphic_chain(expression) {
+            return false;
+        }
+        let mut client = None;
+        let mut server = None;
+        self.extract_isomorphic(expression, &mut client, &mut server);
+        let chosen = match self.target {
+            Target::Client => client,
+            Target::Server => server,
+        };
+        *expression = chosen.unwrap_or_else(|| self.parse_expression("(() => {})"));
+        true
+    }
+
+    /// Whether `expression` is a `createMiddleware()[.method(_)]*` chain.
+    fn is_middleware_chain(&self, expression: &Expression<'a>) -> bool {
+        let Expression::CallExpression(call) = expression else {
+            return false;
+        };
+        match &call.callee {
+            Expression::Identifier(callee) => {
+                self.env_fn(callee) == Some(EnvFn::Middleware) && call.arguments.is_empty()
+            }
+            Expression::StaticMemberExpression(member) => {
+                self.is_middleware_chain(&member.object)
+            }
+            _ => false,
+        }
+    }
+
+    /// Strips the environment-specific method calls from a validated
+    /// `createMiddleware` chain, mirroring `handleCreateMiddleware`: on the
+    /// client the `.server(...)`, `.validator(...)` and `.inputValidator(...)`
+    /// calls are removed (severing their references to server-only code), while
+    /// `.middleware(...)` and `.client(...)` are kept. Operates bottom-up so a
+    /// stripped level is spliced out cleanly.
+    fn strip_middleware(&mut self, expression: &mut Expression<'a>) {
+        let Expression::CallExpression(call) = expression else {
+            return;
+        };
+        let Expression::StaticMemberExpression(member) = &mut call.callee else {
+            return;
+        };
+        self.strip_middleware(&mut member.object);
+        let strip = matches!(
+            member.property.name.as_str(),
+            "server" | "validator" | "inputValidator"
+        );
+        if strip {
+            let object = member.object.take_in(&self.allocator);
+            *expression = object;
+            self.changed = true;
+        }
+    }
+}
+
+impl<'a> VisitMut<'a> for EnvTransform<'a, '_> {
+    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        if self.rewrite_env_only(expression) || self.rewrite_isomorphic(expression) {
+            self.changed = true;
+            // Descend into the replacement so a nested directive helper (e.g. an
+            // isomorphic impl that itself calls a server-only fn) is handled too.
+            self.visit_expression(expression);
+            return;
+        }
+        if self.is_middleware_chain(expression) {
+            // Strip the server-only method calls, then descend into what remains
+            // (kept `.client`/`.middleware` arguments may contain their own
+            // directive helpers). Re-visiting the whole node instead would loop,
+            // since a stripped chain is still a chain.
+            self.strip_middleware(expression);
+            walk_mut::walk_expression(self, expression);
+            return;
+        }
+        walk_mut::walk_expression(self, expression);
+    }
+}
+
 struct AstModuleRewriter<'a, 's> {
     builder: AstBuilder<'a>,
     scoping: &'s Scoping,
@@ -825,6 +1162,7 @@ mod tests {
                 export const answer: number = local;
                 export default function named() { return value + answer; }
             "#,
+            Target::Server,
         );
 
         assert!(
@@ -845,6 +1183,7 @@ mod tests {
         let transformed = transform_module(
             Path::new("entry.js"),
             "export const load = () => import('./lazy.js');",
+            Target::Server,
         );
         assert!(
             transformed
@@ -860,6 +1199,7 @@ mod tests {
         let transformed = transform_module(
             Path::new("component.jsx"),
             "export const Component = ({ name }) => <div>Hello {name}</div>;",
+            Target::Server,
         );
         assert!(
             transformed.diagnostics.is_empty(),
@@ -879,6 +1219,7 @@ mod tests {
                 import "./effects.js";
                 export const answer = used;
             "#,
+            Target::Server,
         );
 
         let values = transformed
@@ -898,5 +1239,105 @@ mod tests {
         assert!(!effects.all);
         assert!(effects.names.is_empty());
         assert!(!effects.dynamic);
+    }
+
+    fn demand_names<'a>(
+        transformed: &'a TransformResult,
+        specifier: &str,
+    ) -> Option<&'a DependencyDemand> {
+        transformed
+            .dependency_demands
+            .iter()
+            .find(|demand| demand.specifier == specifier)
+    }
+
+    #[test]
+    fn client_build_neutralizes_server_only_fn_and_drops_its_server_import() {
+        // Mirrors `@tanstack/start-client-core`'s getStartContextServerOnly.js:
+        // a server-only wrapper around a value imported from a server-only
+        // package. On the client the wrapper throws and the reference to
+        // `getStartContext` is severed, so the server import is no longer
+        // demanded and is pruned by the side-effect-free tree-shaking.
+        let source = r#"
+            import { createServerOnlyFn } from "@tanstack/start-fn-stubs";
+            import { getStartContext } from "@tanstack/start-storage-context";
+            export const getStartContextServerOnly = createServerOnlyFn(getStartContext);
+        "#;
+
+        let client = transform_module(Path::new("mod.js"), source, Target::Client);
+        assert!(client.diagnostics.is_empty(), "{:?}", client.diagnostics);
+        assert!(
+            client.code.contains("can only be called on the server"),
+            "client build must emit the throwing stub: {}",
+            client.code
+        );
+        // The server-only value's package is no longer demanded on the client.
+        let storage = demand_names(&client, "@tanstack/start-storage-context").unwrap();
+        assert!(
+            !storage.all && storage.names.is_empty(),
+            "client build must not demand the server storage package: {storage:?}"
+        );
+
+        // The server build keeps the neutral stub call and its import demand.
+        let server = transform_module(Path::new("mod.js"), source, Target::Server);
+        let storage = demand_names(&server, "@tanstack/start-storage-context").unwrap();
+        assert_eq!(
+            storage.names,
+            ["getStartContext"],
+            "server build must keep demanding getStartContext"
+        );
+    }
+
+    #[test]
+    fn client_build_collapses_isomorphic_fn_to_client_impl() {
+        // Mirrors getRouterInstance.js: an isomorphic fn whose server branch is
+        // the only user of a server import. On the client it collapses to the
+        // client impl, dropping the server import entirely.
+        let source = r#"
+            import { createIsomorphicFn } from "@tanstack/start-fn-stubs";
+            import { getStartContext } from "@tanstack/start-storage-context";
+            export const getRouterInstance = createIsomorphicFn()
+                .client(() => window.__TSR_ROUTER__)
+                .server(() => getStartContext().getRouter());
+        "#;
+
+        let client = transform_module(Path::new("mod.js"), source, Target::Client);
+        assert!(client.diagnostics.is_empty(), "{:?}", client.diagnostics);
+        assert!(
+            client.code.contains("__TSR_ROUTER__"),
+            "client impl must survive: {}",
+            client.code
+        );
+        assert!(
+            !client.code.contains("getStartContext"),
+            "the server impl's reference to getStartContext must be gone on the client: {}",
+            client.code
+        );
+        assert!(
+            demand_names(&client, "@tanstack/start-storage-context").is_none_or(
+                |demand| !demand.all && demand.names.is_empty()
+            ),
+            "client build must not pull the server storage package"
+        );
+
+        let server = transform_module(Path::new("mod.js"), source, Target::Server);
+        let storage = demand_names(&server, "@tanstack/start-storage-context").unwrap();
+        assert_eq!(storage.names, ["getStartContext"]);
+    }
+
+    #[test]
+    fn env_transform_ignores_same_named_local_binding() {
+        // A user's own `createServerOnlyFn` (not a @tanstack import) must never
+        // be rewritten.
+        let source = r#"
+            const createServerOnlyFn = (fn) => fn;
+            export const value = createServerOnlyFn(() => 1);
+        "#;
+        let client = transform_module(Path::new("mod.js"), source, Target::Client);
+        assert!(
+            !client.code.contains("can only be called on the server"),
+            "a local same-named binding must not be treated as the directive helper: {}",
+            client.code
+        );
     }
 }

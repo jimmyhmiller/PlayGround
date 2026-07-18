@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::bundler::BuildConfig;
+use crate::transform::Target;
 
 /// The build environments TanStack Start defines. `nitro` is the production
 /// server runtime; `ssr` renders; `client` is the browser build.
@@ -83,12 +84,22 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
         _ => server_entry,
     };
 
+    // The client build specializes TanStack Start's environment-directive
+    // helpers so server-only code (and its `node:async_hooks` dependency) is
+    // tree-shaken out of the browser bundle; server builds keep the neutral
+    // runtime stubs.
+    let target = match environment {
+        "client" => Target::Client,
+        _ => Target::Server,
+    };
+
     Ok(AppConfig {
         environment: environment.to_string(),
         build: BuildConfig {
             aliases,
             conditions,
             virtual_modules: Vec::new(),
+            target,
         },
         entry,
     })

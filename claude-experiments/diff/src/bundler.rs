@@ -11,7 +11,7 @@ use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::frontend_profile::{self, Phase};
 use crate::resource_id::{LoaderKind, ResourceId};
-use crate::transform::{DependencyDemand, FlatModule, FoldExpression, transform_module};
+use crate::transform::{DependencyDemand, FlatModule, FoldExpression, Target, transform_module};
 
 pub type ModuleId = String;
 type DenseModuleId = usize;
@@ -431,6 +431,7 @@ pub struct Bundler {
     resolution_cache: ResolutionCache,
     frontend_pool: ThreadPool,
     modules: Vec<Option<ModuleState>>,
+    target: Target,
 }
 
 impl Bundler {
@@ -481,6 +482,7 @@ impl Bundler {
                 .build()
                 .map_err(|error| format!("cannot create frontend worker pool: {error}"))?,
             modules: Vec::new(),
+            target: config.target,
         };
         bundler.entry = bundler.intern(entry_id.clone());
 
@@ -1079,6 +1081,7 @@ impl Bundler {
                             &self.resolver,
                             &self.resolution_cache,
                             Path::new(path.as_ref()),
+                            self.target,
                         );
                         (path, result)
                     })
@@ -1161,7 +1164,7 @@ impl Bundler {
         }
         // A loader (query, stylesheet, or asset) may claim this id before it is
         // ever read as JavaScript.
-        if let Some(special) = load_special_module(&id, path) {
+        if let Some(special) = load_special_module(&id, path, self.target) {
             let special = special?;
             let resolved = resolve_special_dependencies(
                 &self.resolver,
@@ -1200,7 +1203,7 @@ impl Bundler {
         {
             return Ok(current.clone());
         }
-        let transformed = transform_module(path, &source);
+        let transformed = transform_module(path, &source, self.target);
         diagnostics.extend(
             transformed
                 .diagnostics
@@ -2083,6 +2086,7 @@ fn load_uncached(
     resolver: &Resolver,
     resolution_cache: &ResolutionCache,
     path: &Path,
+    target: Target,
 ) -> Result<LoadedModule, String> {
     let id = path.to_string_lossy();
     // A build-generated virtual module (its source is not on disk) claims this id
@@ -2104,7 +2108,7 @@ fn load_uncached(
     }
     // A loader (query, stylesheet, or asset) may claim this id before it is ever
     // read as JavaScript.
-    if let Some(special) = load_special_module(&id, path) {
+    if let Some(special) = load_special_module(&id, path, target) {
         let special = special?;
         let mut diagnostics = Vec::new();
         let resolved = resolve_special_dependencies(
@@ -2132,7 +2136,7 @@ fn load_uncached(
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     frontend_profile::finish(Phase::Read, read_started);
     let hash = content_hash(source.as_bytes());
-    let transformed = transform_module(path, &source);
+    let transformed = transform_module(path, &source, target);
     let mut diagnostics = transformed
         .diagnostics
         .iter()
@@ -2187,10 +2191,14 @@ struct SpecialModule {
 /// loader (`?url`, `?raw`), a global stylesheet (`.css`), or a default asset
 /// import (image/font/SVG/...). Returns `None` for an ordinary JS/TS module,
 /// which the normal read-and-transform path then handles.
-fn load_special_module(id: &str, path: &Path) -> Option<Result<SpecialModule, String>> {
+fn load_special_module(
+    id: &str,
+    path: &Path,
+    target: Target,
+) -> Option<Result<SpecialModule, String>> {
     let resource = ResourceId::parse(id);
     if resource.query.is_some() {
-        return Some(synthesize_query_module(&resource));
+        return Some(synthesize_query_module(&resource, target));
     }
     if is_css_path(path) {
         return Some(load_stylesheet(path));
@@ -2206,11 +2214,14 @@ fn load_special_module(id: &str, path: &Path) -> Option<Result<SpecialModule, St
 /// Recognized-but-unimplemented loaders (`?tsr-split`) and unrecognized queries
 /// produce a specific, actionable error rather than a misleading filesystem read
 /// failure.
-fn synthesize_query_module(resource: &ResourceId) -> Result<SpecialModule, String> {
+fn synthesize_query_module(
+    resource: &ResourceId,
+    target: Target,
+) -> Result<SpecialModule, String> {
     match resource.loader_kind() {
         Some(LoaderKind::Url) => synthesize_asset_url(PathBuf::from(&resource.path)),
         Some(LoaderKind::Raw) => synthesize_raw(Path::new(&resource.path)),
-        Some(LoaderKind::TsrSplit) => synthesize_tsr_split(resource),
+        Some(LoaderKind::TsrSplit) => synthesize_tsr_split(resource, target),
         None => Err(resource.unimplemented_loader_error()),
     }
 }
@@ -2218,10 +2229,13 @@ fn synthesize_query_module(resource: &ResourceId) -> Result<SpecialModule, Strin
 /// A `?tsr-split=<target>` virtual module: the route property extracted from the
 /// original route file, re-exported under its canonical name. Loaded lazily via
 /// the reference file's `import()`, so it lands in its own chunk.
-fn synthesize_tsr_split(resource: &ResourceId) -> Result<SpecialModule, String> {
-    // The query is `tsr-split=<target>`; the target selects which property was
-    // split out (only `component` is implemented natively today).
-    let target = resource
+fn synthesize_tsr_split(
+    resource: &ResourceId,
+    target: Target,
+) -> Result<SpecialModule, String> {
+    // The query is `tsr-split=<property>`; it selects which property was split
+    // out (only `component` is implemented natively today).
+    let split_property = resource
         .query
         .as_deref()
         .and_then(|query| query.split_once('='))
@@ -2230,8 +2244,8 @@ fn synthesize_tsr_split(resource: &ResourceId) -> Result<SpecialModule, String> 
     let path = Path::new(&resource.path);
     let source = fs::read_to_string(path)
         .map_err(|error| format!("cannot read route file {}: {error}", path.display()))?;
-    let module_source = crate::route_split::build_split_module(path, &source, target)?;
-    let transformed = transform_module(path, &module_source);
+    let module_source = crate::route_split::build_split_module(path, &source, split_property)?;
+    let transformed = transform_module(path, &module_source, target);
     Ok(SpecialModule {
         hash: content_hash(transformed.code.as_bytes()),
         code: transformed.code,
@@ -2249,7 +2263,7 @@ fn synthesize_tsr_split(resource: &ResourceId) -> Result<SpecialModule, String> 
 /// transformer so it yields flat-linker code and export metadata like any
 /// hand-written module. Used for the natively generated `tanstack-start-manifest:v`.
 fn synthesize_virtual_module(source: &str) -> Result<SpecialModule, String> {
-    let transformed = transform_module(Path::new("diffpack-virtual-module.js"), source);
+    let transformed = transform_module(Path::new("diffpack-virtual-module.js"), source, Target::Server);
     Ok(SpecialModule {
         hash: content_hash(transformed.code.as_bytes()),
         code: transformed.code,
@@ -2272,7 +2286,7 @@ fn synthesize_asset_url(source_path: PathBuf) -> Result<SpecialModule, String> {
     // so it yields flat-linker code and export metadata like any hand-written
     // module.
     let synthetic = format!("export default {};\n", quote(&format!("/assets/{public_name}")));
-    let transformed = transform_module(Path::new("diffpack-url-asset.js"), &synthetic);
+    let transformed = transform_module(Path::new("diffpack-url-asset.js"), &synthetic, Target::Server);
     Ok(SpecialModule {
         hash: content_hash(transformed.code.as_bytes()),
         code: transformed.code,
@@ -2292,7 +2306,7 @@ fn synthesize_raw(source_path: &Path) -> Result<SpecialModule, String> {
     let text = fs::read_to_string(source_path)
         .map_err(|error| format!("cannot read {}: {error}", source_path.display()))?;
     let synthetic = format!("export default {};\n", quote(&text));
-    let transformed = transform_module(Path::new("diffpack-raw-asset.js"), &synthetic);
+    let transformed = transform_module(Path::new("diffpack-raw-asset.js"), &synthetic, Target::Server);
     Ok(SpecialModule {
         hash: content_hash(transformed.code.as_bytes()),
         code: transformed.code,
@@ -2661,6 +2675,10 @@ pub struct BuildConfig {
     /// `tanstack-start-manifest:v` module, whose contents depend on the client
     /// build's chunk graph and so cannot be read from a package.
     pub virtual_modules: Vec<(String, String)>,
+    /// The environment being compiled. Selects TanStack Start's per-environment
+    /// specialization of directive helpers (see [`Target`]); defaults to the
+    /// server (no transform).
+    pub target: Target,
 }
 
 fn resolve_options(config: &BuildConfig) -> ResolveOptions {
@@ -3716,8 +3734,95 @@ mod tests {
             )],
             conditions: Vec::new(),
             virtual_modules: Vec::new(),
+            target: Target::Server,
         };
         (directory, entry, config)
+    }
+
+    /// An app that imports ONE name (`publicValue`) from a `sideEffects:false`
+    /// package whose other export wraps a value from a second `sideEffects:false`
+    /// package in `createServerOnlyFn`. That second package (`@leaf/server`) is
+    /// reachable only through the wrapper's reference to it — exactly the shape of
+    /// the real `@tanstack/*` leak, where a bare-specifier `sideEffects:false`
+    /// package carries the server-only `node:async_hooks` code. Returns
+    /// `(directory, entry)`.
+    fn server_leak_fixture() -> (tempfile::TempDir, PathBuf) {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"leak-app","version":"0.0.0"}"#,
+        )
+        .unwrap();
+        let package = |name: &str, module_source: &str| {
+            let dir = root.join("node_modules").join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("package.json"),
+                format!(
+                    r#"{{"name":"{name}","version":"0.0.0","module":"index.js","sideEffects":false}}"#
+                ),
+            )
+            .unwrap();
+            fs::write(dir.join("index.js"), module_source).unwrap();
+        };
+        // The directive-helper stub.
+        package(
+            "@tanstack/start-fn-stubs",
+            "export const createServerOnlyFn = (fn) => fn;\n",
+        );
+        // The server-only leaf package (stands in for start-storage-context).
+        package("@leaf/server", "export const serverThing = \"SERVER_ONLY_MARKER_9271\";\n");
+        // The `sideEffects:false` barrel importing one name from each.
+        package(
+            "@tanstack/core",
+            "import { createServerOnlyFn } from \"@tanstack/start-fn-stubs\";\n\
+             import { serverThing } from \"@leaf/server\";\n\
+             export const getServerThing = createServerOnlyFn(() => serverThing);\n\
+             export const publicValue = 42;\n",
+        );
+        let entry = root.join("entry.js");
+        fs::write(
+            &entry,
+            "import { publicValue } from \"@tanstack/core\";\nconsole.log(publicValue);\n",
+        )
+        .unwrap();
+        (directory, entry)
+    }
+
+    #[test]
+    fn client_build_drops_server_only_package_reached_through_neutralized_wrapper() {
+        let (_directory, entry) = server_leak_fixture();
+        let config = |target| BuildConfig {
+            aliases: Vec::new(),
+            conditions: Vec::new(),
+            virtual_modules: Vec::new(),
+            target,
+        };
+
+        // Client: `createServerOnlyFn(() => serverThing)` is neutralized to a
+        // throwing stub, so `@leaf/server` is unreferenced and pruned by the
+        // `sideEffects:false` shaking — the leaf never enters the client graph.
+        let (client, _) =
+            Bundler::discover_direct_with_config(&entry, &config(Target::Client)).unwrap();
+        let client_reachable = client.reachable_modules_direct();
+        assert!(
+            !client_reachable
+                .iter()
+                .any(|module| module.contains("@leaf/server")),
+            "the server-only package must not be reachable in the client build: {client_reachable:?}"
+        );
+
+        // Server: no transform, the wrapper keeps its reference, so the leaf stays.
+        let (server, _) =
+            Bundler::discover_direct_with_config(&entry, &config(Target::Server)).unwrap();
+        let server_reachable = server.reachable_modules_direct();
+        assert!(
+            server_reachable
+                .iter()
+                .any(|module| module.contains("@leaf/server")),
+            "the server-only package must remain reachable in the server build: {server_reachable:?}"
+        );
     }
 
     #[test]
@@ -3767,6 +3872,7 @@ mod tests {
                 crate::manifest::START_MANIFEST_SPECIFIER.to_string(),
                 source.to_string(),
             )],
+            target: Target::Server,
         };
         let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
         // The previously-unresolvable specifier now resolves and loads: no gap.
