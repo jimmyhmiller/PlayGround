@@ -797,13 +797,13 @@
         (store! i (iadd (load i) 1)))))
     (subslice [u8] s 0 (load i))))
 
-; A `--target` we emit an object for but CANNOT link with the host `cc`. The linker
-; here is the host toolchain (arm64 Mach-O only); a wasm32 target never touches `cc`
-; (wasm-link-object finalizes it in-process), and a null triple is the host default.
-; Everything else is a native cross-target whose object arch won't match the host
-; linker — the case that used to surface as a raw `found architecture 'x86_64',
-; required arm64` link error naming neither the flag nor the real cause.
-(defn native-cross-unlinkable? [(triple (ptr i8))] (-> bool)
+; A `--target <triple>` whose object arch differs from the host's. The host `cc`
+; defaults to producing arm64 Mach-O, so linking such an object raw dies with
+; `found architecture 'x86_64', required arm64`. The fix is to pass `-arch <arch>`
+; to the link step (macOS `cc` cross-links every slice its SDK carries), which this
+; predicate gates. A wasm32 target never touches `cc` (wasm-link-object finalizes it
+; in-process) and a null triple is the host default — neither needs `-arch`.
+(defn native-cross-target? [(triple (ptr i8))] (-> bool)
   (if (icmp-eq (cast i64 triple) 0) false
     (if (wasm-target? triple) false
       (let [arch (triple-arch triple)]
@@ -901,16 +901,6 @@
             (do (ps (stderr) "error: --sanitize=address requires the LLVM backend (not --backend arm64, -g, or the LLVM-free compiler)\n") (exit 1) 0)
           (al-push! (mut flags) "-fsanitize=address"))
       0)
-    ; A native cross-target's object won't link with the host cc (arm64). Reject it
-    ; here with a message that names the flag and the cause, instead of letting the
-    ; link step die with a bare `found architecture '<arch>', required arm64`.
-    (if (native-cross-unlinkable? (load trip))
-        (let [w (stderr)]
-          (ps w "error: --target ") (ps w (cstr->slice (load trip)))
-          (ps w ": cannot cross-compile and link a non-host native target — the host linker (cc) produces arm64 Mach-O only.\n")
-          (ps w "  use `emit-obj --target ") (ps w (cstr->slice (load trip)))
-          (ps w "` to emit the object and link it on a matching host, or target `wasm32-unknown-unknown`.\n")
-          1)
     (let [out-slice (cstr->slice (load outp))
           obj-slice (obj-path a out-slice)]
       (let [obj-cstr  (slice->cstr a obj-slice)
@@ -941,6 +931,14 @@
                 (do (sb-push-str! (mut cmdsb) "ar rcs ") (sb-push-str! (mut cmdsb) out-slice)
                     (sb-push-str! (mut cmdsb) " ") (sb-push-str! (mut cmdsb) obj-slice) 0)
               (do (sb-push-str! (mut cmdsb) (if (icmp-eq (load libmode) 2) "cc -dynamiclib " "cc "))
+                  ; cross-target: the object's arch differs from the host cc's default
+                  ; (arm64), so pass `-arch <arch>` — otherwise ld dies with
+                  ; `found architecture '<arch>', required arm64` (xcompile). wasm never
+                  ; reaches here; a null/host triple is not a cross-target.
+                  (if (native-cross-target? (load trip))
+                      (do (sb-push-str! (mut cmdsb) "-arch ") (sb-push-str! (mut cmdsb) (triple-arch (load trip)))
+                          (sb-push-str! (mut cmdsb) " ") 0)
+                    0)
                   (sb-push-str! (mut cmdsb) obj-slice)
                   (sb-push-str! (mut cmdsb) " -o ")
                   (sb-push-str! (mut cmdsb) out-slice)
@@ -962,7 +960,7 @@
                         (run-dsymutil a out-slice) 0)
                     (match ehdr
                       (Some [h] (cheader-program a (read-src a file) (dirname (cstr->slice file)) (Some h)))
-                      (None [] 0))))))))))))
+                      (None [] 0)))))))))))
 
 ; ============================ cheader (export-c → C header) =================
 ; Port of src/cheader.rs — the inverse of cimport: emit a C header (prototypes +

@@ -114,11 +114,13 @@ as pairs; **reject unknown flags** instead of skipping them.
 - [x] **tool-14** `coil fmt a.coil b.coil` silently formats only the first; a directory no-ops.
 - [x] Add a `coil build --target wasm32` **project** test to the gate corpus.
 
-- [ ] **NEW (found while fixing tool-4):** cross-compiling to a non-host *native* triple
-      (`--target x86_64-apple-macosx11.0.0`) emits a correct x86_64 object and then links it
-      with the **host arm64** `cc`, failing with "found architecture 'x86_64', required arm64".
-      Either reject a native cross-target we cannot link, or pass `-arch`/a cross linker.
-      (Pre-existing; it was masked in project mode because the flag was ignored entirely.)
+- [x] **xcompile (NEW, found while fixing tool-4):** cross-compiling to a non-host *native*
+      triple (`--target x86_64-apple-macosx11.0.0`) emitted a correct x86_64 object and then
+      linked it with the **host arm64** `cc`, failing with "found architecture 'x86_64',
+      required arm64". Fixed by passing `-arch <arch>` to the link step (`build-cmd`), so macOS
+      `cc` cross-links every slice its SDK carries — the build now succeeds and produces a real
+      x86_64 executable (the seed's earlier stopgap merely rejected it). wasm/host builds are
+      untouched. Teeth in gate-cli ("cross-target build links an x86_64 Mach-O executable").
 
 ## Batch 3 — `alloc-static` for per-instance state (one bug, three sites)
 

@@ -523,6 +523,20 @@ expect_out "i64\) 2" "target-arch = aarch64 on the host"          "$COIL" expand
 expect_out "i64\) 1" "target-arch = wasm32 under --target wasm32" "$COIL" expand "$T/tgt.coil" --target wasm32-unknown-unknown
 expect_out "i64\) 3" "target-arch = x86_64 under --target x86_64" "$COIL" expand "$T/tgt.coil" --target x86_64-apple-macosx11.0.0
 
+echo "== cross-compiling a native non-host target LINKS (passes -arch), not rejected =="
+# Was: a native cross-target (`--target x86_64-apple-macosx11.0.0`) emitted a correct
+# x86_64 object then linked it with the host arm64 `cc`, dying with
+# `found architecture 'x86_64', required arm64`. The seed's stopgap merely REJECTED it.
+# Now build-cmd passes `-arch <arch>` to the link step, so macOS cc cross-links every
+# slice its SDK carries — the build succeeds and produces a real x86_64 executable.
+# (xcompile). This FAILS on the seed (rc 1, no output file) and PASSES here.
+out=$("$COIL" build "$T/seven.coil" -o "$T/xseven" --target x86_64-apple-macosx11.0.0 2>&1); rc=$?
+if [ "$rc" = 0 ] && file "$T/xseven" 2>/dev/null | grep -q "x86_64"; then
+  ok "cross-target build links an x86_64 Mach-O executable"
+else
+  bad "cross-target build" "rc=$rc, file=$(file "$T/xseven" 2>/dev/null): $(echo "$out" | head -1)"
+fi
+
 echo "== object emission on the DEFAULT (LLVM) backend =="
 # Nothing else covers this: gate-full stops at emit-ir, and arm64/gate-run.sh only
 # exercises --backend arm64. So `:shim` — a naked trampoline, i.e. INLINE ASM, and the
