@@ -7,10 +7,28 @@
 //! allocations we're about to read, rewriting pointers). So — like Redis BGSAVE
 //! and `gcore` — we `fork()` and build the dump in the **child**, whose memory is
 //! a copy-on-write *frozen* image: it can't change underneath us, and the parent
-//! (the program) is never paused. The heavy DWARF oracle is built in the parent
-//! *before* the fork so the child allocates as little as possible (the child
-//! can't safely `malloc` if a parent thread held the allocator lock at fork —
-//! the usual fork-in-a-threaded-program caveat).
+//! (the program) is never paused.
+//!
+//! **Everything expensive runs in the child.** We fork *immediately* after the
+//! (fast) live-set snapshot, then build the DWARF oracle, resolve types, and
+//! write the hprof entirely in the child. The reason is survival: when the Rust
+//! code lives in a dynamically-loaded module (a node `.node` addon, a Python
+//! extension) the host may `process.exit()` the instant its work finishes —
+//! killing the parent — while parsing a debug=2 DWARF (100+ MB) and resolving
+//! millions of sites can take longer than that. Building types in the parent
+//! *before* the fork (the old ordering) meant the host tore us down mid-resolve
+//! and no hprof was ever written. The forked child is an independent process on a
+//! frozen image: it survives the host exiting and can take minutes if it needs
+//! to. We `setsid()` it so a Ctrl-C / process-group signal to the host doesn't
+//! take it down with it.
+//!
+//! The tradeoff is that the child now does heavy allocation post-`fork()` — the
+//! classic fork-in-a-threaded-program hazard, where a parent thread holding the
+//! allocator lock at fork time would deadlock the child's first `malloc`. In
+//! practice the target here (turbopack/TurboMalloc) is mimalloc, whose per-thread
+//! heaps take no global lock on the fast path, so this is far safer than with
+//! glibc malloc — and `build_and_write` already allocated in the child, so the
+//! pattern was already in play; we've only made it do more.
 
 use std::collections::HashMap;
 use std::io::{self, BufWriter, Write};
@@ -93,44 +111,25 @@ pub fn heap_dump(path: &str) -> io::Result<HprofStats> {
     mem::set_mode(mem::Mode::Off);
     let _restore = ModeRestore(prev_mode);
 
-    // Snapshot the heap *first*, so the oracle's own (post-snapshot) allocations
-    // don't pollute the captured live set.
-    let mut snap = mem::snapshot();
+    // Snapshot the heap *first*, so the (post-snapshot) allocations of type
+    // recovery don't pollute the captured live set. This is the only expensive
+    // step we do before forking — it's fast (~0.1s for millions of allocations).
+    let snap = mem::snapshot();
     eprintln!(
-        "[memscope] heap dump: {} live allocations ({}) snapshotted in {:.1}s — recovering types…",
+        "[memscope] heap dump: {} live allocations ({}) snapshotted in {:.1}s — forking before type recovery…",
         snap.live.len(),
         human(snap.total_live_bytes),
         t0.elapsed().as_secs_f64()
     );
-
-    // Build the DWARF oracle in the PARENT (the heavy allocator), before the
-    // fork, so the child's frozen image needs as little allocation as possible.
-    let oracle = TypeOracle::for_current_process()
-        .map_err(|e| io::Error::other(format!("type resolution unavailable: {e}")))?;
-    oracle.resolve_snapshot(&mut snap);
-    eprintln!("[memscope] heap dump: types resolved in {:.1}s — forking a frozen snapshot…", t0.elapsed().as_secs_f64());
-
-    let type_name: HashMap<u32, String> =
-        snap.types.iter().map(|t| (t.id, t.name.clone())).collect();
-    let site: HashMap<u32, &SiteInfo> = snap.sites.iter().map(|s| (s.id, s)).collect();
-    let nodes: Vec<NodeInput> = snap
-        .live
-        .iter()
-        .map(|l| {
-            let (ty, shape) = site
-                .get(&l.site.0)
-                .map(|s| (type_name.get(&s.ty.0).cloned(), s.shape))
-                .unwrap_or((None, None));
-            NodeInput { addr: l.addr, size: l.size, type_name: ty, shape }
-        })
-        .collect();
 
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
-    // A pipe to carry the child's HprofStats back to the parent.
+    // A pipe to carry the child's HprofStats back to the parent — best-effort:
+    // if the host tears the parent down before the child finishes, the orphaned
+    // child still writes the hprof and logs its own completion.
     let mut fds = [0 as libc::c_int; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
@@ -144,17 +143,24 @@ pub fn heap_dump(path: &str) -> io::Result<HprofStats> {
                 libc::close(wr);
             }
             // Fork failed — fall back to an in-process (racy) dump so we still
-            // produce something rather than nothing.
+            // produce something rather than nothing. Type recovery runs inline.
             eprintln!("[memscope] heap dump: fork failed, falling back to in-process dump");
-            build_and_write(path, &nodes, oracle.layout(), now_ms)
+            resolve_and_write(path, snap, now_ms, t0)
         }
         0 => {
             // CHILD: our view of memory is now a frozen copy-on-write image.
-            // Build the graph + write the hprof against it, report stats up the
-            // pipe, and _exit WITHOUT running atexit handlers (which would
-            // re-trigger a dump or double-flush the parent's buffers).
-            unsafe { libc::close(rd) };
-            let code = match build_and_write(path, &nodes, oracle.layout(), now_ms) {
+            // Detach into our own session so a Ctrl-C / process-group signal to
+            // the host — or the host simply exiting — doesn't take us down while
+            // we're still parsing DWARF and writing the dump (which can outlast
+            // the host by minutes). Build the oracle, resolve types, build the
+            // graph, write the hprof, report stats up the pipe, and _exit WITHOUT
+            // running atexit handlers (which would re-trigger a dump or
+            // double-flush the parent's buffers).
+            unsafe {
+                libc::close(rd);
+                libc::setsid();
+            }
+            let code = match resolve_and_write(path, snap, now_ms, t0) {
                 Ok(s) => {
                     let mut buf = [0u8; 32];
                     buf[0..8].copy_from_slice(&s.objects.to_le_bytes());
@@ -172,7 +178,9 @@ pub fn heap_dump(path: &str) -> io::Result<HprofStats> {
             unsafe { libc::_exit(code) };
         }
         pid => {
-            // PARENT: read the child's stats, reap it, and keep running.
+            // PARENT: try to read the child's stats and reap it, then keep
+            // running. This blocks until the child finishes *or* the host tears
+            // us down — either is fine: the child writes the file regardless.
             unsafe { libc::close(wr) };
             let stats = read_stats(rd);
             unsafe { libc::close(rd) };
@@ -194,6 +202,87 @@ pub fn heap_dump(path: &str) -> io::Result<HprofStats> {
             }
         }
     }
+}
+
+/// Recover types from DWARF, project the snapshot into graph nodes, and write the
+/// hprof. This is the **expensive** half of a dump — parsing a large debug=2
+/// DWARF and resolving millions of sites — so it runs in the forked child (see
+/// the module docs), or in-process on fork failure.
+fn resolve_and_write(
+    path: &str,
+    mut snap: mem::Snapshot,
+    now_ms: u64,
+    t0: std::time::Instant,
+) -> io::Result<HprofStats> {
+    // Build the DWARF oracle. When the Rust code lives in a dynamically-loaded
+    // module (a node/.node addon, a Python extension, etc.) rather than the host
+    // exe, point at it via MEMSCOPE_BINARY so we resolve the addon's DWARF
+    // instead of the host's (`current_exe()` would be `node`, which has no Rust
+    // DWARF and makes dsymutil fail).
+    eprintln!(
+        "[memscope] heap dump: recovering types (pid {})…",
+        std::process::id()
+    );
+    let oracle = match std::env::var("MEMSCOPE_BINARY") {
+        Ok(p) if !p.is_empty() => TypeOracle::from_binary(std::path::Path::new(&p)),
+        _ => TypeOracle::for_current_process(),
+    }
+    .map_err(|e| io::Error::other(format!("type resolution unavailable: {e}")))?;
+    oracle.resolve_snapshot(&mut snap);
+    eprintln!(
+        "[memscope] heap dump: types resolved in {:.1}s — building graph…",
+        t0.elapsed().as_secs_f64()
+    );
+
+    let type_name: HashMap<u32, String> =
+        snap.types.iter().map(|t| (t.id, t.name.clone())).collect();
+    let site: HashMap<u32, &SiteInfo> = snap.sites.iter().map(|s| (s.id, s)).collect();
+    let nodes: Vec<NodeInput> = snap
+        .live
+        .iter()
+        .map(|l| {
+            let (ty, shape) = site
+                .get(&l.site.0)
+                .map(|s| (type_name.get(&s.ty.0).cloned(), s.shape))
+                .unwrap_or((None, None));
+            NodeInput { addr: l.addr, size: l.size, type_name: ty, shape }
+        })
+        .collect();
+
+    // MEMSCOPE_TYPE_BREAKDOWN=1: print the authoritative live-bytes-by-type using the REAL
+    // recorded allocation sizes (n.size). Unlike the hprof — which writes typed objects at their
+    // DWARF layout size and only untyped allocations at true size — this sums every allocation's
+    // actual bytes, so the total matches the tracked live set. Untyped raw buffers bucket as
+    // "<untyped>".
+    if std::env::var("MEMSCOPE_TYPE_BREAKDOWN").is_ok_and(|v| !v.is_empty() && v != "0") {
+        let mut by_type: HashMap<&str, (u64, u64)> = HashMap::new();
+        let mut total: u64 = 0;
+        for n in &nodes {
+            let name = n.type_name.as_deref().unwrap_or("<untyped raw buffer>");
+            let e = by_type.entry(name).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += n.size;
+            total += n.size;
+        }
+        let mut v: Vec<(&str, u64, u64)> =
+            by_type.iter().map(|(k, (c, b))| (*k, *c, *b)).collect();
+        v.sort_by(|a, b| b.2.cmp(&a.2));
+        eprintln!(
+            "[memscope] === live-bytes-by-type (real n.size) — total {:.1} MB across {} allocs ===",
+            total as f64 / 1_048_576.0,
+            nodes.len()
+        );
+        for (name, count, bytes) in v.iter().take(35) {
+            eprintln!(
+                "[memscope]  {:>9.1} MB  {:>9}  {}",
+                *bytes as f64 / 1_048_576.0,
+                count,
+                name
+            );
+        }
+    }
+
+    build_and_write(path, &nodes, oracle.layout(), now_ms)
 }
 
 /// Build the reference graph + write the hprof. Runs in the forked child (or, on

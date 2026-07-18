@@ -355,6 +355,19 @@ pub struct Shared<M: ValueModel> {
     /// type sym, so `%scalar-type?` uses it to recognize keywords (the one
     /// scalar shape that lives as a RECORD) without re-interning per call.
     sym_cache_keyword: AtomicU32,
+    /// Interned ASCII char objects (codepoints 0..128), held as `ConstId`s into
+    /// the GC-rooted const pool (same trick as `keywords`). A char-at-a-time
+    /// reader allocates a fresh `Obj::Char` per character otherwise — ~1 heap
+    /// object per source byte — which is pure GC pressure for an immutable
+    /// value. Matches the JVM, where `Character.valueOf` caches 0..127, so
+    /// `identical?` on ASCII chars agrees with Java semantics. `u32::MAX` =
+    /// "not yet interned".
+    char_consts: [AtomicU32; 128],
+    /// Interned single-char ASCII strings, same scheme as `char_consts`:
+    /// `(str c)` per character is the append idiom of every guest text
+    /// accumulator (StringBuilder), and a fresh 1-byte heap string per char
+    /// appended is pure GC pressure for an immutable value.
+    str1_consts: [AtomicU32; 128],
     /// Stage F3: the EDIT-SESSION counter for transients (see
     /// `Runtime::fresh_session`). Starts at 1 and never repeats.
     edit_sessions: AtomicU64,
@@ -464,6 +477,20 @@ pub struct Runtime<M: ValueModel> {
     /// mutex + hash lookup entirely. Epoch-invalidated: `relocated` advances on
     /// every moving collection, so an entry holding a moved impl never hits.
     site_ic: std::cell::RefCell<Vec<(u64, Sym, u64)>>,
+    /// Sequential-scan cursor for `%str-char-at`: the last (string, char index)
+    /// resolved, so codepoint indexing that walks a string forward (a JSON/text
+    /// reader, `data.json`'s StringPBR) is O(1) per char instead of O(i) — turning
+    /// an O(n^2) full scan into O(n). `(reloc_epoch, str_ptr, str_len, char_idx,
+    /// byte_off)`. A string only MOVES during a moving collection, which advances
+    /// `relocated`; a mismatched epoch/ptr/len falls back to a scan from 0, so a
+    /// stale or reused address can never mis-resolve — it just costs one rescan.
+    str_cursor: std::cell::Cell<Option<(u64, usize, usize, usize, usize)>>,
+    /// One-entry cache for `%str-len` (`chars().count()` is O(bytes)): the last
+    /// `(reloc_epoch, str_ptr, byte_len, char_count)` answered. `nth`/`count` on
+    /// the SAME long string in a loop (any char-at-a-time consumer that bounds-
+    /// checks) would otherwise rescan the whole string per element — O(n^2).
+    /// Same invalidation discipline as `str_cursor`.
+    str_len_cache: std::cell::Cell<Option<(u64, usize, usize, usize)>>,
     /// Frontend-installed bridge back into the reader + compiler, for the runtime
     /// ops `read-string`/`eval`/`macroexpand-1`. Set on the MAIN handle only (worker
     /// threads get `None` — they never re-enter the compiler).
@@ -563,6 +590,8 @@ impl<M: ValueModel> Runtime<M> {
             sym_cache_persistent_hash_map: AtomicU32::new(u32::MAX),
             sym_cache_persistent_array_map: AtomicU32::new(u32::MAX),
             sym_cache_keyword: AtomicU32::new(u32::MAX),
+            char_consts: std::array::from_fn(|_| AtomicU32::new(u32::MAX)),
+            str1_consts: std::array::from_fn(|_| AtomicU32::new(u32::MAX)),
             edit_sessions: AtomicU64::new(1),
             type_tag_cache: std::array::from_fn(|_| AtomicU32::new(u32::MAX)),
             _pd: PhantomData,
@@ -586,7 +615,7 @@ impl<M: ValueModel> Runtime<M> {
         // mirror pointing at a moved-from temporary.
         shared.heap.arm_window();
         let me = register_mutator(&shared);
-        Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), apply_rest_slot: None, me, signal: Signal::default(), dyn_stack: Vec::new(), site_ic: std::cell::RefCell::new(Vec::new()), eval_bridge: None, _pd: PhantomData }
+        Runtime { shared, shadow: Vec::new(), env_stack: Vec::new(), apply_rest_slot: None, me, signal: Signal::default(), dyn_stack: Vec::new(), site_ic: std::cell::RefCell::new(Vec::new()), str_cursor: std::cell::Cell::new(None), str_len_cache: std::cell::Cell::new(None), eval_bridge: None, _pd: PhantomData }
     }
 
     /// A fresh mutator handle for another OS thread, sharing this runtime's heap,
@@ -595,7 +624,7 @@ impl<M: ValueModel> Runtime<M> {
     /// a `std::thread`.
     pub fn thread_handle(&self) -> Self {
         let me = register_mutator(&self.shared);
-        Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), apply_rest_slot: None, me, signal: Signal::default(), dyn_stack: Vec::new(), site_ic: std::cell::RefCell::new(Vec::new()), eval_bridge: None, _pd: PhantomData }
+        Runtime { shared: self.shared.clone(), shadow: Vec::new(), env_stack: Vec::new(), apply_rest_slot: None, me, signal: Signal::default(), dyn_stack: Vec::new(), site_ic: std::cell::RefCell::new(Vec::new()), str_cursor: std::cell::Cell::new(None), str_len_cache: std::cell::Cell::new(None), eval_bridge: None, _pd: PhantomData }
     }
 
     // ── heap access ─────────────────────────────────────────
@@ -1507,10 +1536,47 @@ impl<M: ValueModel> Runtime<M> {
         let g = self.alloc(Obj::Str(s));
         M::R::enc_ref(g)
     }
-    /// Allocate a character value (used by the frontend reader for `#\c` literals).
+    /// Allocate a character value. ASCII chars (0..128) are INTERNED through
+    /// the GC-rooted const pool — the hot char-at-a-time read paths
+    /// (`%str-char-at`, `integer->char`, `%str->chars`) would otherwise mint a
+    /// fresh heap object per character read, and chars are immutable values.
+    /// Mirrors the JVM's `Character.valueOf` cache (0..127), so `identical?`
+    /// on ASCII chars agrees with Java.
     pub fn alloc_char(&mut self, c: char) -> u64 {
+        let cp = c as u32;
+        if cp < 128 {
+            let slot = &self.shared.char_consts[cp as usize];
+            let cached = slot.load(Ordering::Acquire);
+            if cached != u32::MAX {
+                return self.get_const(cached);
+            }
+            let g = self.alloc(Obj::Char(c));
+            let id = self.intern_const(M::R::enc_ref(g));
+            // Racing writers: first CAS wins and is the canonical char; a
+            // loser's object (and const slot) is just an extra rooted char.
+            let _ = slot.compare_exchange(u32::MAX, id, Ordering::AcqRel, Ordering::Acquire);
+            return self.get_const(slot.load(Ordering::Acquire));
+        }
         let g = self.alloc(Obj::Char(c));
         M::R::enc_ref(g)
+    }
+    /// The 1-char string for an ASCII char, interned through the const pool
+    /// (see `str1_consts`); non-ASCII allocates normally.
+    pub fn alloc_str1(&mut self, c: char) -> u64 {
+        let cp = c as u32;
+        if cp < 128 {
+            let cached = self.shared.str1_consts[cp as usize].load(Ordering::Acquire);
+            if cached != u32::MAX {
+                return self.get_const(cached);
+            }
+            let bits = self.alloc_str(c.to_string());
+            let id = self.intern_const(bits);
+            let slot = &self.shared.str1_consts[cp as usize];
+            let _ = slot.compare_exchange(u32::MAX, id, Ordering::AcqRel, Ordering::Acquire);
+            let winner = slot.load(Ordering::Acquire);
+            return self.get_const(winner);
+        }
+        self.alloc_str(c.to_string())
     }
     /// A string's bytes as `&str` (hot read path; `view` in one step).
     #[inline]
@@ -1762,16 +1828,25 @@ impl<M: ValueModel> Runtime<M> {
             }
             Prim::StrOf => {
                 // A string is its own raw content; anything else uses the neutral
-                // printer (correct for int/float/bool/nil/sym/char).
-                let s = match self.decode(args[0]) {
+                // printer (correct for int/float/bool/nil/sym/char). A string
+                // arg returns ITSELF (it is immutable — copying was pure alloc
+                // churn for the `(str s)` no-op coercion), and an ASCII char
+                // returns the interned 1-char string.
+                let ch = match self.decode(args[0]) {
                     Val::Ref(id) => match self.view_gc(id) {
-                        ObjView::Str(s) => s.to_string(),
-                        _ => self.print(args[0]),
+                        ObjView::Str(_) => return args[0],
+                        ObjView::Char(c) => Some(c),
+                        _ => None,
                     },
-                    _ => self.print(args[0]),
+                    _ => None,
                 };
-                let id = self.alloc(Obj::Str(s));
-                M::R::enc_ref(id)
+                match ch {
+                    Some(c) => self.alloc_str1(c),
+                    None => {
+                        let s = self.print(args[0]);
+                        self.alloc_str(s)
+                    }
+                }
             }
             Prim::Lt | Prim::FxLt => {
                 // Fast path: two immediate fixnums compare as raw i64 — no BigInt
@@ -1827,8 +1902,215 @@ impl<M: ValueModel> Runtime<M> {
                 let ObjView::Str(s) = self.view_gc(id) else {
                     panic!("string-length: not a string");
                 };
-                let n = s.chars().count() as i128;
-                self.encode(Val::Int(n))
+                let ptr = s.as_ptr() as usize;
+                let blen = s.len();
+                let epoch = self.relocated();
+                let n = match self.str_len_cache.get() {
+                    Some((e, p, l, cc)) if e == epoch && p == ptr && l == blen => cc,
+                    _ => {
+                        let cc = s.chars().count();
+                        self.str_len_cache.set(Some((epoch, ptr, blen, cc)));
+                        cc
+                    }
+                };
+                self.encode(Val::Int(n as i128))
+            }
+            Prim::StrCharAt => {
+                let Val::Ref(id) = self.decode(args[0]) else {
+                    panic!("%str-char-at: not a string");
+                };
+                let Val::Int(i) = self.decode(args[1]) else {
+                    panic!("%str-char-at: index must be an int");
+                };
+                let i = i as usize;
+                let ObjView::Str(s) = self.view_gc(id) else {
+                    panic!("%str-char-at: not a string");
+                };
+                let ptr = s.as_ptr() as usize;
+                let len = s.len();
+                let epoch = self.relocated();
+                // Resume from the cached cursor when it is on THIS string (same
+                // epoch/ptr/len), scanning forward OR backward from it — a text
+                // reader walks forward but also rewinds a short lookahead window
+                // (data.json's StringPBR reads a 64-char block then unreads the
+                // tail), so both directions must be cheap. Backward scan steps over
+                // UTF-8 char boundaries; forward scan uses char_indices.
+                let cursor = match self.str_cursor.get() {
+                    Some((e, p, l, ci, bo)) if e == epoch && p == ptr && l == len => Some((ci, bo)),
+                    _ => None,
+                };
+                let (c, byte_off) = match cursor {
+                    Some((ci, bo)) if i < ci => {
+                        // walk back (ci - i) chars from byte offset bo
+                        let mut b = bo;
+                        let mut cur = ci;
+                        while cur > i {
+                            b -= 1;
+                            while !s.is_char_boundary(b) {
+                                b -= 1;
+                            }
+                            cur -= 1;
+                        }
+                        let ch = s[b..].chars().next().expect("char boundary");
+                        (ch, b)
+                    }
+                    Some((ci, bo)) => {
+                        // forward from (ci, bo)
+                        let mut start_char = ci;
+                        let mut chars = s[bo..].char_indices();
+                        loop {
+                            match chars.next() {
+                                Some((rel, ch)) => {
+                                    if start_char == i {
+                                        break (ch, bo + rel);
+                                    }
+                                    start_char += 1;
+                                }
+                                None => panic!("%str-char-at: index {i} out of range"),
+                            }
+                        }
+                    }
+                    None => {
+                        // cold: scan from the start
+                        let mut start_char = 0usize;
+                        let mut chars = s.char_indices();
+                        loop {
+                            match chars.next() {
+                                Some((rel, ch)) => {
+                                    if start_char == i {
+                                        break (ch, rel);
+                                    }
+                                    start_char += 1;
+                                }
+                                None => panic!("%str-char-at: index {i} out of range"),
+                            }
+                        }
+                    }
+                };
+                self.str_cursor.set(Some((epoch, ptr, len, i, byte_off)));
+                self.alloc_char(c)
+            }
+            Prim::StrGetChars => {
+                // (%str-get-chars s src-begin src-end dst dst-begin): bulk
+                // String.getChars — ONE native call instead of a guest loop of
+                // %str-char-at + %cell-set! per character.
+                let Val::Ref(sid) = self.decode(args[0]) else {
+                    panic!("%str-get-chars: not a string");
+                };
+                let (Val::Int(b), Val::Int(e)) = (self.decode(args[1]), self.decode(args[2])) else {
+                    panic!("%str-get-chars: indices must be ints");
+                };
+                let Val::Int(db) = self.decode(args[4]) else {
+                    panic!("%str-get-chars: dst index must be an int");
+                };
+                let (b, e, db) = (b as usize, e as usize, db as usize);
+                if e <= b {
+                    return self.enc_nil();
+                }
+                let ObjView::Str(s) = self.view_gc(sid) else {
+                    panic!("%str-get-chars: not a string");
+                };
+                let ptr = s.as_ptr() as usize;
+                let len = s.len();
+                let epoch = self.relocated();
+                // Resume from the sequential cursor exactly like %str-char-at
+                // (forward only; a rewound cursor falls back to a scan from 0).
+                let start_byte = {
+                    let (mut ci, mut bo) = match self.str_cursor.get() {
+                        Some((ce, cp, cl, i, o)) if ce == epoch && cp == ptr && cl == len && i <= b => (i, o),
+                        _ => (0, 0),
+                    };
+                    while ci < b {
+                        match s[bo..].chars().next() {
+                            Some(c) => bo += c.len_utf8(),
+                            None => panic!("%str-get-chars: index {b} out of range"),
+                        }
+                        ci += 1;
+                    }
+                    bo
+                };
+                // Collect the run first (`s` borrows self; alloc_char is &mut).
+                let mut run: Vec<char> = Vec::with_capacity(e - b);
+                let mut last_byte = start_byte;
+                for (rel, c) in s[start_byte..].char_indices() {
+                    if run.len() == e - b {
+                        break;
+                    }
+                    last_byte = start_byte + rel;
+                    run.push(c);
+                }
+                if run.len() != e - b {
+                    panic!("%str-get-chars: range {b}..{e} out of bounds");
+                }
+                self.str_cursor.set(Some((epoch, ptr, len, e - 1, last_byte)));
+                let bits: Vec<u64> = run.into_iter().map(|c| self.alloc_char(c)).collect();
+                let Val::Ref(did) = self.decode(args[3]) else {
+                    panic!("%str-get-chars: dst is not an array");
+                };
+                assert_eq!(
+                    unsafe { did.type_id() },
+                    crate::heap::kind::ARRAY,
+                    "%str-get-chars: dst is not an array"
+                );
+                let dst = self.arr_slice_mut(did);
+                let end = db + bits.len();
+                let Some(slots) = dst.get_mut(db..end) else {
+                    panic!("%str-get-chars: dst range {db}..{end} out of bounds");
+                };
+                slots.copy_from_slice(&bits);
+                self.enc_nil()
+            }
+            Prim::StrToLong => {
+                let Some(s) = self.str_view(args[0]) else {
+                    panic!("%str->long: not a string");
+                };
+                match s.parse::<i64>() {
+                    Ok(n) => self.encode(Val::Int(n as i128)),
+                    Err(_) => self.enc_nil(),
+                }
+            }
+            Prim::StrToDouble => {
+                let Some(s) = self.str_view(args[0]) else {
+                    panic!("%str->double: not a string");
+                };
+                // Rust's f64 parser accepts "inf"/"NaN"/"infinity" spellings the
+                // JVM's Double.valueOf would reject; keep this prim to FINITE
+                // numeric literal shapes and let callers' fallback handle exotica.
+                let ok_shape = s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'));
+                if !ok_shape {
+                    return self.enc_nil();
+                }
+                match s.parse::<f64>() {
+                    Ok(f) => self.encode(Val::Float(f)),
+                    Err(_) => self.enc_nil(),
+                }
+            }
+            Prim::CharsToStr => {
+                let (Val::Int(off), Val::Int(len)) = (self.decode(args[1]), self.decode(args[2])) else {
+                    panic!("%chars->str: off/len must be ints");
+                };
+                let (off, len) = (off as usize, len as usize);
+                let Val::Ref(aid) = self.decode(args[0]) else {
+                    panic!("%chars->str: not an array");
+                };
+                let ObjView::Vector { elems, .. } = self.view_gc(aid) else {
+                    panic!("%chars->str: not an array");
+                };
+                let run: Vec<u64> = match elems.get(off..off + len) {
+                    Some(r) => r.to_vec(),
+                    None => panic!("%chars->str: range {off}..{} out of bounds", off + len),
+                };
+                let mut out = String::with_capacity(len);
+                for e in run {
+                    let Val::Ref(cid) = self.decode(e) else {
+                        panic!("%chars->str: element is not a char");
+                    };
+                    let ObjView::Char(c) = self.view_gc(cid) else {
+                        panic!("%chars->str: element is not a char");
+                    };
+                    out.push(c);
+                }
+                self.alloc_str(out)
             }
             Prim::CharToInt => {
                 let Val::Ref(id) = self.decode(args[0]) else {
@@ -1845,8 +2127,7 @@ impl<M: ValueModel> Runtime<M> {
                 };
                 let c = char::from_u32(n as u32)
                     .unwrap_or_else(|| panic!("integer->char: {n} is not a Unicode scalar value"));
-                let id = self.alloc(Obj::Char(c));
-                M::R::enc_ref(id)
+                self.alloc_char(c)
             }
             Prim::Vector => {
                 let id = self.alloc_vector(args);
@@ -2809,13 +3090,7 @@ impl<M: ValueModel> Runtime<M> {
                     },
                     _ => panic!("%str->chars: not a string"),
                 };
-                let vals: Vec<u64> = cs
-                    .into_iter()
-                    .map(|c| {
-                        let id = self.alloc(Obj::Char(c));
-                        M::R::enc_ref(id)
-                    })
-                    .collect();
+                let vals: Vec<u64> = cs.into_iter().map(|c| self.alloc_char(c)).collect();
                 self.vec_to_list(&vals)
             }
             Prim::StrToBytes => {

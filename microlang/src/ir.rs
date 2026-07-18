@@ -129,6 +129,32 @@ pub enum Prim {
     CallEc,
     /// `(string-length s)` -> the character count of a string.
     StrLen,
+    /// `(%str-char-at s i)` -> the char at codepoint index `i`, WITHOUT
+    /// materializing the whole char seq (what `(nth string i)`/`.charAt` need to
+    /// be non-allocating — data.json's writer indexes every char of every string).
+    StrCharAt,
+    /// `(%str-get-chars s src-begin src-end dst dst-begin)` -> copy chars
+    /// [src-begin, src-end) of string `s` into array `dst` starting at
+    /// `dst-begin`; returns nil. `String.getChars`' contract as ONE native
+    /// call — a guest loop of `%str-char-at` + `%cell-set!` pays two prim
+    /// round-trips per character copied, which dominates any bulk text reader
+    /// (data.json's StringPBR block-reads 64 chars at a time through this).
+    StrGetChars,
+    /// `(%str->long s)` -> the i64 the decimal string denotes, or nil when it
+    /// is not a valid long (malformed or overflow). The native fast path under
+    /// `parse-long`/`Long.valueOf`; callers decide what invalid means (throw,
+    /// nil, bigint fallback).
+    StrToLong,
+    /// `(%str->double s)` -> the f64 the string denotes (correctly rounded),
+    /// or nil when malformed. The native fast path under
+    /// `parse-double`/`Double.valueOf`.
+    StrToDouble,
+    /// `(%chars->str arr off len)` -> a string of the `len` chars starting at
+    /// `arr[off]`. `String(char[], int, int)`'s contract as ONE native call —
+    /// the inverse of `%str->chars`, and the finalize step of any buffer-based
+    /// text reader (a guest loop pays a `(str c)` alloc + an O(acc) `%str-cat`
+    /// copy per char: O(len^2)).
+    CharsToStr,
     /// `(char->integer c)` -> the Unicode scalar value of a char.
     CharToInt,
     /// `(integer->char n)` -> the char with Unicode scalar value `n`.

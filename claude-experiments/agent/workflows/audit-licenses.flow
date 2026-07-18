@@ -1,0 +1,11 @@
+workflow License Audit
+runner deepseek
+
+agent audit-licenses
+title Audit Licenses
+prompt Read THIRD_PARTY_NOTICES.md and licenses/native-sdk-Apache-2.0.txt and licenses/IBM-Plex-OFL.txt. Look for missing attributions, license incompatibilities, or outdated terms. Write a short compliance summary.
+after none
+
+approval review-audit
+title Review Audit
+after audit-licenses

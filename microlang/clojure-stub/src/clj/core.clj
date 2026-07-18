@@ -524,14 +524,14 @@
 ;; / a bounds test with the default, skipping the string?/seq?/count cond.
 (defn -nth3 [c i d]
   (cond
-    (string? c) (if (and (>= i 0) (< i (%str-len c))) (nth-seq (%str->chars c) i) d)
+    (string? c) (if (and (>= i 0) (< i (%str-len c))) (%str-char-at c i) d)
     (seq? c) (if (neg? i) d (-nth-seq-or c i (list d)))
     (or (neg? i) (not (< i (count c)))) d
     :else (-nth c i)))
 (defn -nth2 [c i]
   (cond
     (string? c) (if (and (>= i 0) (< i (%str-len c)))
-                  (nth-seq (%str->chars c) i)
+                  (%str-char-at c i)
                   (throw (str "String index out of bounds: " i)))
     (seq? c) (if (neg? i)
                 (throw (str "Index out of bounds: " i))
@@ -1876,6 +1876,9 @@
         (map? x) (%str-cat "{" (%str-cat (-str-entries (seq x)) "}"))
         (lazy-seq? x) (%str-cat "(" (%str-cat (-str-join " " x) ")"))
         (list? x) (%str-cat "(" (%str-cat (-str-join " " x) ")"))
+        ;; a java.lang.StringBuilder (host_jvm) stringifies to its contents, as
+        ;; `(str sb)` does on the JVM — its field 0 is the chunk array.
+        (%num-eq (type-of x) 'StringBuilder) (%str-join-arr (field x 0) "")
         true (%str-of x)))
 ;; Fast path for 0/1 args (the overwhelmingly common shape — `(str x)` is a
 ;; routine coercion, called per-element all over the stdlib, e.g.
@@ -2557,6 +2560,12 @@
 ;; the %apush/%ashift/%aclear prims. cljs library code uses this + .add/.push/
 ;; .shift/.slice/.toArray/.isEmpty/.clear/.-length as a local mutation optimization
 ;; (e.g. medley's partition/window transducers).
+;; A `deftype` `^:unsynchronized-mutable`/`^:volatile-mutable` field is stored as
+;; a one-slot array (this cell), so `set!` inside a method persists a real slot
+;; write for the next call — records themselves are immutable. `deftype` emits
+;; the wrapping in the constructor and the cell read/write in method bodies.
+(defn -mutable-cell [v] (let [a (%make-array 1)] (%cell-set! a 0 v) a))
+
 (defn array-list [] (%make-array 0))
 (defn -al-add! [al x] (%apush al x))
 (defn -al-clear! [al] (%aclear al))
@@ -3246,6 +3255,33 @@
      (loop [i 0 s (seq coll)]
        (if (nil? s) a (do (%cell-set! a i (first s)) (recur (%add i 1) (next s))))))))
 (defn object-array [n] (%make-array n))
+
+;; Typed primitive-array constructors. The runtime's arrays are untyped
+;; (elements are boxed values), so element type is a no-op here — what matters
+;; is the size + zero-fill, matching `byte-array`. Same dual arity: a count
+;; (zero-filled) or a seqable (copied).
+(defn -make-typed-array
+  ([n zero] (if (number? n)
+              (-fill-array! (%make-array n) zero)
+              (-make-typed-array (count n) zero n)))
+  ([n zero coll]
+   (let [a (-fill-array! (%make-array n) zero)]
+     (loop [i 0 s (seq coll)]
+       (if (nil? s) a (do (%cell-set! a i (first s)) (recur (%add i 1) (next s))))))))
+(defn char-array
+  ([n] (-make-typed-array n (%char-of 0)))
+  ([n coll] (-make-typed-array n (%char-of 0) coll)))
+(defn short-array
+  ([n] (-make-typed-array n 0))
+  ([n coll] (-make-typed-array n 0 coll)))
+(defn int-array
+  ([n] (-make-typed-array n 0))
+  ([n coll] (-make-typed-array n 0 coll)))
+(defn long-array
+  ([n] (-make-typed-array n 0))
+  ([n coll] (-make-typed-array n 0 coll)))
+;; scalar primitive coercions (identity on the boxed numeric value)
+(defn short [x] (%to-long x))
 
 ;; `(with-open [in (open…)] body…)` — close in reverse order, even on throw.
 (defmacro with-open [bindings & body]

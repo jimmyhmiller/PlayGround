@@ -45,7 +45,6 @@ mod sources {
     pub const CLOJURE_WALK: &str = include_str!("clj/clojure/walk.clj");
     pub const CLOJURE_PPRINT: &str = include_str!("clj/clojure/pprint.clj");
     pub const CLOJURE_ZIP: &str = include_str!("clj/clojure/zip.clj");
-    pub const CLOJURE_DATA_JSON: &str = include_str!("clj/clojure/data/json.clj");
     pub const CLOJURE_TEST: &str = include_str!("clj/clojure/test.clj");
 }
 
@@ -209,15 +208,16 @@ impl Session {
         // `(ns clojure.string)` form sets the ns + marks it loaded). Proof that the
         // string library is library code over one primitive, not builtins.
         run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_STRING);
-        // `clojure.data.json` — a real library, also written entirely in the
-        // language (loaded after clojure.string, which its writer uses for `join`).
         run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_SET);
         run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_WALK);
         // `clojure.pprint` — print-table only; real libraries (meander) require
         // the namespace for it. See the file for what is deliberately absent.
         run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_PPRINT);
         run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_ZIP);
-        run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_DATA_JSON);
+        // `clojure.data.json` is NOT embedded: the REAL data.json 2.5.1 (vendored
+        // under vendor/data.json/) is loaded on demand by `require`, over the host
+        // reader/writer/StringBuilder machinery in host_jvm/host_io. Nothing
+        // shadows the name in-process anymore.
         run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_TEST);
         comp.set_ns("user");
         // These are provided in-process; `require` must never look for them on disk.
@@ -746,6 +746,9 @@ fn expand<M: ValueModel>(
             expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "extend-type") {
             let d = desugar_extend_type(rt, comp, f);
+            expand(rt, cs, macros, comp, d)
+        } else if is_sym(rt, head, "extend") {
+            let d = desugar_extend(rt, comp, f);
             expand(rt, cs, macros, comp, d)
         } else if is_sym(rt, head, "deftype") {
             let d = desugar_deftype(rt, comp, f);
@@ -1319,25 +1322,17 @@ fn desugar_defprotocol<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form
 /// `(defmethod m T (fn [this ...] body))` per method. Protocol NAMES (bare
 /// symbols) group the methods; each that resolves to a defined protocol var is
 /// also registered as a (possibly marker) extension of T.
-fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
-    let items = rt.list_to_vec(form);
-    // `(extend-type nil …)`: `nil` reads as the value Nil, but `type-of nil`
-    // reports the tag symbol `nil` — so extend against that symbol.
-    let tys: Vec<u64> = if matches!(rt.decode(items[1]), Val::Nil) {
+/// Map an `extend-type`/`extend` target form to the runtime type tag(s) it
+/// installs impls for. `nil` -> the tag symbol `nil`; a Java class name (dotted,
+/// or a bare imported one) -> its JVM-registry tag(s) (`:extend-tags` when the
+/// interface spans several concrete types, else `:tag`); an unresolvable name
+/// stays a bare dialect tag (core's `(extend-type Vector …)`). Tags are needed
+/// at COMPILE time, so this reads the in-language registry atom from Rust.
+fn extend_target_tags<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, ty_form: u64) -> Vec<u64> {
+    if matches!(rt.decode(ty_form), Val::Nil) {
         vec![sym(rt, "nil")]
-    } else if let Val::Sym(s) = rt.decode(items[1]) {
-        // A qualified Java class name (`clojure.lang.IPersistentVector`,
-        // `java.lang.String`) maps to our runtime type tag(s) through the JVM
-        // layer's registry: `:extend-tags` when the interface covers several
-        // concrete types (Named = Symbol + Keyword; IPersistentCollection =
-        // every collection tag), else its `:tag`. Method registration needs
-        // tags at COMPILE time, so this reads the in-language registry atom
-        // from Rust (the policy stays in the data).
+    } else if let Val::Sym(s) = rt.decode(ty_form) {
         let name = rt.sym_name(s).to_string();
-        // A dotted name is host-class-like as-is; a BARE name may be an
-        // imported class (`(:import (clojure.lang IPersistentMap))` + bare
-        // `extend-protocol` targets — nrepl.bencode's shape). Unresolvable
-        // names stay bare dialect tags (core's `(extend-type Vector …)`).
         let fqn = if name.contains('.') {
             Some(name.replace('/', "."))
         } else {
@@ -1353,11 +1348,16 @@ fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form
                 tags.into_iter().map(|t| rt.encode(Val::Sym(t))).collect()
             }
         } else {
-            vec![items[1]]
+            vec![ty_form]
         }
     } else {
-        vec![items[1]]
-    };
+        vec![ty_form]
+    }
+}
+
+fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
+    let items = rt.list_to_vec(form);
+    let tys = extend_target_tags(rt, comp, items[1]);
     let dok = sym(rt, "do");
     let mut out = vec![dok];
     for &item in &items[2..] {
@@ -1377,6 +1377,49 @@ fn desugar_extend_type<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form
         for &ty in &tys {
             let fnf = mk_fn(rt, params, parts[2..].to_vec());
             out.push(mk_defmethod(rt, m, ty, fnf));
+        }
+    }
+    rt.vec_to_list(&out)
+}
+
+/// `(extend T P1 {:m1 f1 :m2 f2} P2 {…})` — the low-level function form of
+/// protocol extension (what `extend-protocol`/`extend-type` compile down to in
+/// Clojure). Each protocol is paired with a MAP of `:method -> fn`; the fn is
+/// installed DIRECTLY as the type-indexed impl (dispatch calls it with the same
+/// args the caller passed — exactly Clojure's semantics, no arity wrapper). The
+/// target's Java-class -> runtime-tag mapping and marker registration are shared
+/// with `extend-type` via `extend_target_tags`/`marker_registration`.
+fn desugar_extend<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u64) -> u64 {
+    let items = rt.list_to_vec(form);
+    let tys = extend_target_tags(rt, comp, items[1]);
+    let dok = sym(rt, "do");
+    let mut out = vec![dok];
+    // items[2..] are (protocol, impl-map) pairs.
+    let mut i = 2;
+    while i + 1 < items.len() {
+        let proto = items[i];
+        let impl_map = items[i + 1];
+        i += 2;
+        // Register the (possibly marker) extension so `satisfies?` sees it.
+        for &ty in &tys {
+            if let Some(reg) = marker_registration(rt, comp, proto, ty) {
+                out.push(reg);
+            }
+        }
+        // Each `:method fn` entry -> a `-proto-method` per target tag. The impl
+        // fn is used verbatim (it already takes `this` as its first parameter).
+        let entries = data::map_entries(rt, impl_map)
+            .expect("extend: each protocol must be followed by a {:method fn} map");
+        for kv in entries.chunks(2) {
+            if kv.len() < 2 {
+                break;
+            }
+            let mname = record_field0(rt, kv[0], reader::KEYWORD)
+                .expect("extend: impl-map keys must be method keywords (e.g. :-write)");
+            let fnexpr = kv[1];
+            for &ty in &tys {
+                out.push(mk_defmethod(rt, mname, ty, fnexpr));
+            }
         }
     }
     rt.vec_to_list(&out)
@@ -1419,13 +1462,33 @@ fn desugar_deftype<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u6
         Val::Sym(s) => rt.sym_name(s).to_string(),
         _ => panic!("deftype: name must be a symbol"),
     };
-    let fields = binding_items(rt, items[2]).unwrap_or_else(|| rt.list_to_vec(items[2]));
-
-    // constructor: (def ->T (fn [fields] (record 'T fields)))
+    let raw_fields = binding_items(rt, items[2]).unwrap_or_else(|| rt.list_to_vec(items[2]));
+    // A field may be wrapped `(-mutable-field name)` (a `^:*-mutable` field, from
+    // the reader). Split into the bare field symbols + a per-index mutable flag.
+    let mut fields = Vec::with_capacity(raw_fields.len());
+    let mut field_mut = Vec::with_capacity(raw_fields.len());
+    for &it in &raw_fields {
+        if let Some(inner) = unwrap_mutable_field(rt, it) {
+            fields.push(inner);
+            field_mut.push(true);
+        } else {
+            fields.push(it);
+            field_mut.push(false);
+        }
+    }
+    // constructor: (def ->T (fn [fields] (record 'T fields))). A mutable field is
+    // stored wrapped in a one-slot cell (`-mutable-cell`) so method `set!`s persist.
     let recsym = sym(rt, "record");
     let tag = quote_form(rt, tsym);
     let mut rec = vec![recsym, tag];
-    rec.extend_from_slice(&fields);
+    for (i, &f) in fields.iter().enumerate() {
+        if field_mut[i] {
+            let mk = sym(rt, "-mutable-cell");
+            rec.push(rt.vec_to_list(&[mk, f]));
+        } else {
+            rec.push(f);
+        }
+    }
     let reccall = rt.vec_to_list(&rec);
     let paramvec = make_vector(rt, fields.clone());
     let ctorfn = mk_fn(rt, paramvec, vec![reccall]);
@@ -1501,8 +1564,21 @@ fn desugar_deftype<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u6
             }
             None => (mname, arities),
         };
-        let mfn = build_method_fn(rt, &fields, &use_arities);
+        let mfn = build_method_fn(rt, &fields, &field_mut, &use_arities);
         out.push(mk_defmethod(rt, target, tsym, mfn));
+        // Also register the impl under the DOT name (`.readChar`), so an interop
+        // call `(.method inst)` reaches it — a `definterface` method is invoked
+        // exactly that way (data.json's InternalPBR: `(.readChar stream)`),
+        // whereas the bare registration above serves value-position/protocol
+        // dispatch. The dot key is un-namespaced (see `%dispatch`), matching how
+        // `defclass` registers host methods. Skipped for the `clojure.lang.*`
+        // interface methods we translate to cljs protocol names — those are only
+        // ever reached through the core collection API, never by `.name`.
+        if !mname_str.is_empty() && xlate_iface_method(&mname_str).is_none() {
+            let dot = sym(rt, &format!(".{mname_str}"));
+            let mfn2 = build_method_fn(rt, &fields, &field_mut, &use_arities);
+            out.push(mk_defmethod(rt, dot, tsym, mfn2));
+        }
     }
     rt.vec_to_list(&out)
 }
@@ -1533,32 +1609,60 @@ fn same_sym<M: ValueModel>(rt: &Runtime<M>, a: u64, b: u64) -> bool {
     matches!((rt.decode(a), rt.decode(b)), (Val::Sym(x), Val::Sym(y)) if x == y)
 }
 
+/// `(-mutable-field name)` -> `Some(name)`; anything else -> `None`. Marks a
+/// `deftype` field the reader saw carry `^:*-mutable`.
+fn unwrap_mutable_field<M: ValueModel>(rt: &Runtime<M>, item: u64) -> Option<u64> {
+    let v = rt.as_cons(item).map(|_| rt.list_to_vec(item))?;
+    if v.len() == 2 && is_sym(rt, v[0], "-mutable-field") {
+        Some(v[1])
+    } else {
+        None
+    }
+}
+
+/// The cell-binding symbol for a mutable field (`pos` -> `pos__mcell`), holding
+/// the one-slot array that backs it.
+fn mcell_sym<M: ValueModel>(rt: &mut Runtime<M>, field: u64) -> u64 {
+    match rt.decode(field) {
+        Val::Sym(s) => {
+            let n = format!("{}__mcell", rt.sym_name(s));
+            sym(rt, &n)
+        }
+        _ => field,
+    }
+}
+
 /// Build a method fn (single- or multi-arity) whose body has the deftype's fields
 /// bound from the instance (first param), except fields shadowed by a param name.
 fn build_method_fn<M: ValueModel>(
     rt: &mut Runtime<M>,
     fields: &[u64],
+    field_mut: &[bool],
     arities: &[(u64, Vec<u64>)],
 ) -> u64 {
     if arities.len() == 1 {
         let (params, body) = &arities[0];
-        let wrapped = wrap_field_let(rt, fields, *params, body);
+        let wrapped = wrap_field_let(rt, fields, field_mut, *params, body);
         return mk_fn(rt, *params, vec![wrapped]);
     }
     let fnk = sym(rt, "fn");
     let mut out = vec![fnk];
     for (params, body) in arities {
-        let wrapped = wrap_field_let(rt, fields, *params, body);
+        let wrapped = wrap_field_let(rt, fields, field_mut, *params, body);
         out.push(rt.vec_to_list(&[*params, wrapped]));
     }
     rt.vec_to_list(&out)
 }
 
 /// `(let [f0 (field inst 0) f1 (field inst 1) …] body…)` — binds each deftype
-/// field (that a param doesn't shadow) to its slot on the instance.
+/// field (that a param doesn't shadow) to its slot on the instance. A mutable
+/// field also binds `f__mcell` to its backing cell and every `(set! f v)` in the
+/// body is rewritten to write that cell (persisting the mutation) as well as the
+/// local snapshot (so a later read in the SAME call sees it).
 fn wrap_field_let<M: ValueModel>(
     rt: &mut Runtime<M>,
     fields: &[u64],
+    field_mut: &[bool],
     params: u64,
     body: &[u64],
 ) -> u64 {
@@ -1578,7 +1682,11 @@ fn wrap_field_let<M: ValueModel>(
         })
         .collect();
     let fieldk = sym(rt, "field");
+    let aget = sym(rt, "%aget");
+    let zero = rt.encode(Val::Int(0));
     let mut binds = Vec::new();
+    // (mutable field sym -> its cell sym), used to rewrite set! in the body.
+    let mut mut_cells: Vec<(Sym, u64)> = Vec::new();
     for (idx, &f) in fields.iter().enumerate() {
         if let Val::Sym(s) = rt.decode(f) {
             if param_syms.contains(&s) {
@@ -1587,20 +1695,70 @@ fn wrap_field_let<M: ValueModel>(
         }
         let idxv = rt.encode(Val::Int(idx as i128));
         let fieldcall = rt.vec_to_list(&[fieldk, inst, idxv]);
-        binds.push(f);
-        binds.push(fieldcall);
+        if field_mut.get(idx).copied().unwrap_or(false) {
+            // f__mcell = (field inst idx) ; f = (%aget f__mcell 0)
+            let cell = mcell_sym(rt, f);
+            binds.push(cell);
+            binds.push(fieldcall);
+            let cellref = rt.vec_to_list(&[aget, cell, zero]);
+            binds.push(f);
+            binds.push(cellref);
+            if let Val::Sym(s) = rt.decode(f) {
+                mut_cells.push((s, cell));
+            }
+        } else {
+            binds.push(f);
+            binds.push(fieldcall);
+        }
     }
+    // Rewrite `(set! mutfield v)` in the body BEFORE assembling the let.
+    let body: Vec<u64> = if mut_cells.is_empty() {
+        body.to_vec()
+    } else {
+        body.iter().map(|&b| rewrite_mut_sets(rt, b, &mut_cells)).collect()
+    };
     if binds.is_empty() {
         let dok = sym(rt, "do");
         let mut out = vec![dok];
-        out.extend_from_slice(body);
+        out.extend_from_slice(&body);
         return rt.vec_to_list(&out);
     }
     let bindvec = make_vector(rt, binds);
     let letk = sym(rt, "let");
     let mut out = vec![letk, bindvec];
-    out.extend_from_slice(body);
+    out.extend_from_slice(&body);
     rt.vec_to_list(&out)
+}
+
+/// Recursively rewrite `(set! f v)`, where `f` is a mutable deftype field, into
+/// `(let [t v] (%cell-set! f__mcell 0 t) (set! f t) t)` — the cell write persists
+/// past the call, the local `set!` keeps within-call reads correct, and `t`
+/// preserves `set!`'s value. Other forms are walked structurally.
+fn rewrite_mut_sets<M: ValueModel>(rt: &mut Runtime<M>, form: u64, cells: &[(Sym, u64)]) -> u64 {
+    let Some(_) = rt.as_cons(form) else { return form };
+    let items = rt.list_to_vec(form);
+    if items.len() == 3 && is_sym(rt, items[0], "set!") {
+        if let Val::Sym(target) = rt.decode(items[1]) {
+            if let Some(&(_, cell)) = cells.iter().find(|(s, _)| *s == target) {
+                let v = rewrite_mut_sets(rt, items[2], cells);
+                let t = gensym(rt, "mset");
+                let cellset = sym(rt, "%cell-set!");
+                let zero = rt.encode(Val::Int(0));
+                let setk = sym(rt, "set!");
+                let letk = sym(rt, "let");
+                let write = rt.vec_to_list(&[cellset, cell, zero, t]);
+                let setlocal = rt.vec_to_list(&[setk, items[1], t]);
+                let bindvec = make_vector(rt, vec![t, v]);
+                return rt.vec_to_list(&[letk, bindvec, write, setlocal, t]);
+            }
+        }
+    }
+    // Walk children (preserve the head as-is; it is never a `set!` target form).
+    let rewritten: Vec<u64> = items
+        .iter()
+        .map(|&it| rewrite_mut_sets(rt, it, cells))
+        .collect();
+    rt.vec_to_list(&rewritten)
 }
 
 fn mk_fn<M: ValueModel>(rt: &mut Runtime<M>, params: u64, body: Vec<u64>) -> u64 {

@@ -71,6 +71,7 @@ const DEFAULT_IMPORTS: &[(&str, &str)] = &[
     ("Object", "java.lang.Object"),
     ("Runtime", "java.lang.Runtime"),
     ("String", "java.lang.String"),
+    ("StringBuilder", "java.lang.StringBuilder"),
     ("CharSequence", "java.lang.CharSequence"),
     ("Character", "java.lang.Character"),
     ("Number", "java.lang.Number"),
@@ -184,6 +185,9 @@ impl Compiler {
             // Existing low-level prims surfaced for the string library (char codes
             // for case mapping, raw length) — not new primitives.
             ("%char-code", CharToInt), ("%char-of", IntToChar), ("%str-len", StrLen),
+            ("%str-char-at", StrCharAt), ("%str-get-chars", StrGetChars),
+            ("%str->long", StrToLong), ("%str->double", StrToDouble),
+            ("%chars->str", CharsToStr),
         ] {
             prims.insert(rt.intern(name), p);
         }
@@ -257,7 +261,7 @@ const SYNTAX_QUOTE_BARE: &[&str] = &[
     // compile.rs forms
     "def", "do", "if", "quote", "set!", "try*", "-proto-method",
     // lib.rs expander forms
-    "alias", "binding", "definterface", "defprotocol", "deftype", "extend-type", "fn", "fn*",
+    "alias", "binding", "definterface", "defprotocol", "deftype", "extend", "extend-type", "fn", "fn*",
     "import", "in-ns", "instance?", "let", "let*", "loop", "loop*", "new", "ns", "refer",
     "require", "syntax-quote", "try", "use", "var", "with-redefs",
     // control forms matched by name

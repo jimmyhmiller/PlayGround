@@ -234,6 +234,29 @@ fn tokenize(src: &str) -> Vec<Tok> {
                         "space" => ' ',
                         "tab" => '\t',
                         "return" => '\r',
+                        "backspace" => '\u{0008}',
+                        "formfeed" => '\u{000c}',
+                        // \uXXXX (4 hex) and \oNNN (up to 3 octal) numeric escapes,
+                        // exactly as Clojure's reader. A single leading `u`/`o` is
+                        // still the literal char (`\u`, `\o`).
+                        _ if name.len() > 1
+                            && name.starts_with('u')
+                            && name[1..].chars().all(|c| c.is_ascii_hexdigit()) =>
+                        {
+                            u32::from_str_radix(&name[1..], 16)
+                                .ok()
+                                .and_then(char::from_u32)
+                                .unwrap_or(' ')
+                        }
+                        _ if name.len() > 1
+                            && name.starts_with('o')
+                            && name[1..].chars().all(|c| ('0'..='7').contains(&c)) =>
+                        {
+                            u32::from_str_radix(&name[1..], 8)
+                                .ok()
+                                .and_then(char::from_u32)
+                                .unwrap_or(' ')
+                        }
                         _ => name.chars().next().unwrap_or(' '),
                     };
                     out.push(Tok::Char(ch));
@@ -336,6 +359,16 @@ impl Parser {
                     // `^:private name` -> `(-private-meta name)`; the compiler marks
                     // the var private (cross-namespace access errors).
                     let m = sym(rt, "-private-meta");
+                    rt.vec_to_list(&[m, target])
+                } else if meta_has_key(rt, meta, "unsynchronized-mutable")
+                    || meta_has_key(rt, meta, "volatile-mutable")
+                    || meta_has_key(rt, meta, "mutable")
+                {
+                    // `^:unsynchronized-mutable field` (a `deftype` mutable field) ->
+                    // `(-mutable-field field)`, so `deftype` compiles `set!` on it to
+                    // a real record-slot write (a stateful deftype — data.json's
+                    // StringPBR reader — depends on the mutation persisting).
+                    let m = sym(rt, "-mutable-field");
                     rt.vec_to_list(&[m, target])
                 } else {
                     target

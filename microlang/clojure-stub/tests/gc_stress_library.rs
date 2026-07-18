@@ -280,6 +280,13 @@ fn library_code_survives_gc_stress() {
     // only thread alive, so the set cannot race an env read.
     std::env::set_var("MICROLANG_GC_STRESS", "1");
     std::env::set_var("MICROLANG_GC_VERIFY", "1"); // armed even in release runs
+    // The `json-roundtrip` entry loads the REAL clojure.data.json 2.5.1, which is
+    // no longer embedded — it lives under vendor/data.json/ and `require` finds it
+    // on the load path (`.` keeps the other entries' cwd-relative behavior).
+    std::env::set_var(
+        "MICROLANG_PATH",
+        format!("{}/vendor/data.json:.", env!("CARGO_MANIFEST_DIR")),
+    );
 
     run_battery(false);
     #[cfg(feature = "jit")]

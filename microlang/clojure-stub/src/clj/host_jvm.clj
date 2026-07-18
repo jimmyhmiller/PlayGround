@@ -435,15 +435,52 @@
   ;; wire code expects; anything else stringifies.
   (:ctor ([] "")
          ([x] (if (%num-eq (type-of x) 'Vector) (%bytes->str x) (str x)))
-         ([b cs] (%bytes->str b)))
+         ([b cs] (%bytes->str b))
+         ;; (String. char-array offset count) — the char[] slice constructor
+         ;; data.json's read-quoted-string uses to finalize a parsed string.
+         ;; ONE bulk prim: the old per-char loop paid a `(str c)` alloc plus an
+         ;; O(acc) `%str-cat` copy per char — O(len^2) per constructed string.
+         ([arr off len] (%chars->str arr off len)))
   (:method length [s] (count s))
-  (:method charAt [s i] (nth s i))
+  ;; O(i) index without materializing the char seq (`(nth s i)` would alloc a
+  ;; whole seq PER call — quadratic + heavy garbage in data.json's char-by-char
+  ;; writer). `%str-char-at` is the same primitive `nth` on a string now uses.
+  (:method charAt [s i] (%str-char-at s i))
   (:method substring ([s b] (subs s b)) ([s b e] (subs s b e)))
+  (:method subSequence [s b e] (subs s b e))
   (:method replace [s t r] (clojure.string/replace s t r))
   (:method getBytes ([s] (%str->bytes s)) ([s charset] (%str->bytes s)))
+  ;; copy chars [srcBegin,srcEnd) of s into dst starting at dstBegin (the
+  ;; String.getChars contract; data.json's StringPBR bulk-reads through it).
+  ;; ONE bulk prim, not a per-char loop: a `%str-char-at` + `%cell-set!` pair
+  ;; per character is two prim round-trips per char copied, and (before that)
+  ;; `(nth s i)` bounds-checked with an O(n) `%str-len` of the WHOLE source per
+  ;; char — O(n^2) for any block reader. Range errors still hard-error inside
+  ;; the prim (Java throws IndexOutOfBounds here too).
+  (:method getChars [s src-begin src-end dst dst-begin]
+    (%str-get-chars s src-begin src-end dst dst-begin))
   (:method toString [s] s)
   (:method isEmpty [s] (= 0 (count s)))
   (:static-fn valueOf [x] (str x)))
+
+;; java.lang.StringBuilder — a genuinely MUTABLE character accumulator (Java's,
+;; and what data.json's reader/number parser build strings with). Field 0 is a
+;; growable array of already-stringified chunks, so each `.append` is O(1) and
+;; `.toString`/`(str sb)` is one O(total) join — never the O(n^2) concat chain a
+;; single mutable string would force. `-str1` (clojure.core) knows this tag, so
+;; `(str sb)` yields the built string too.
+(defclass java.lang.StringBuilder
+  (:tag StringBuilder)
+  (:ctor ([] (%make-record 'StringBuilder (list (%make-array 0))))
+         ([x] (let [a (%make-array 0)]
+                (if (%num-eq (type-of x) 'Long) nil (%apush a (str x)))
+                (%make-record 'StringBuilder (list a)))))
+  ;; `(if (string? x) x (str x))` — `str` is variadic (rest-seq alloc + walk
+  ;; per call), and a text accumulator appends per character/token.
+  (:method append [sb x] (%apush (field sb 0) (if (string? x) x (str x))) sb)
+  (:method toString [sb] (%str-join-arr (field sb 0) ""))
+  (:method length [sb] (count (%str-join-arr (field sb 0) "")))
+  (:method charAt [sb i] (nth (%str-join-arr (field sb 0) "") i)))
 
 (defn -jvm-array-sort! [arr cmp]
   ;; a Clojure comparator may return an int (-1/0/1) or a boolean less?
@@ -473,6 +510,15 @@
           (if (= (%aget a i) (%aget b i)) (recur (%add i 1)) false)
           true))
       false)))
+
+;; java.time — this runtime has no temporal VALUES (no Instant/Date is ever
+;; constructed), so the only member reachable is the ISO_INSTANT formatter that
+;; data.json names in its default write options map at load. It is a distinct
+;; tagged marker; the date/instant writers that would consume it are dead code
+;; here (nothing in the language produces a java.time.Instant to hand them).
+(defclass java.time.format.DateTimeFormatter
+  (:kind :static)
+  (:static ISO_INSTANT (record 'DateTimeFormatter :iso-instant)))
 
 (defclass java.lang.Math
   (:kind :static)
@@ -538,14 +584,50 @@
 (defclass java.lang.Character (:tag Char))
 (defclass java.lang.Number (:kind :interface) (:tag Long) (:pred number?)
   (:extend-tags Long Double Ratio))
+;; Long/Double parse: `%str->long`/`%str->double` are the native fast path
+;; (nil on malformed/overflow); the read-string fallback preserves the exact
+;; old behavior for anything the prim declines (bigint overflow, hex, exotica).
+(defn -jvm-parse-long [s]
+  (let [s (if (string? s) s (str s))
+        v (%str->long s)]
+    (if (nil? v) (read-string s) v)))
+(defn -jvm-parse-double [s]
+  (let [s (if (string? s) s (str s))
+        v (%str->double s)]
+    (if (nil? v) (read-string s) v)))
 (defclass java.lang.Long (:tag Long) (:extends java.lang.Number)
   (:static MAX_VALUE 9223372036854775807)
-  (:static MIN_VALUE -9223372036854775808))
+  (:static MIN_VALUE -9223372036854775808)
+  (:static-fn valueOf [s] (-jvm-parse-long s))
+  (:static-fn parseLong [s] (-jvm-parse-long s))
+  (:static-fn toString [n] (str n)))
+;; Parse an integer written in `radix` (2..16), signed. Digits 0-9 then a-f/A-F,
+;; matching java.lang.Integer/Long.parseInt with a radix — data.json reads a
+;; `\uXXXX` escape with `(Integer/parseInt hex 16)`.
+(defn -parse-int-radix [s radix]
+  (let [cs (%str->chars s)
+        neg (%num-eq (%first cs) \-)
+        cs (if neg (%rest cs) cs)]
+    (loop [cs (seq cs) acc 0]
+      (if (nil? cs)
+        (if neg (- acc) acc)
+        (let [c (%char-code (first cs))
+              d (cond (if (%lt c 48) false (not (%lt 57 c))) (- c 48)   ; 0-9
+                      (if (%lt c 97) false (not (%lt 102 c))) (- c 87)  ; a-f
+                      (if (%lt c 65) false (not (%lt 70 c))) (- c 55)   ; A-F
+                      true (throw (record 'NumberFormatException (str "For input string: \"" s "\""))))]
+          (if (not (%lt d radix))
+            (throw (record 'NumberFormatException (str "For input string: \"" s "\"")))
+            (recur (next cs) (%add (%mul acc radix) d))))))))
 (defclass java.lang.Integer (:tag Long) (:extends java.lang.Number)
   (:static MAX_VALUE 2147483647)
   (:static MIN_VALUE -2147483648)
-  (:static-fn parseInt [s] (read-string (str s)))
-  (:static-fn valueOf [s] (read-string (str s)))
+  (:static-fn parseInt
+    ([s] (-jvm-parse-long s))
+    ([s radix] (-parse-int-radix (str s) radix)))
+  (:static-fn valueOf [s] (-jvm-parse-long s))
+  ;; lowercase hex, as java.lang.Integer.toHexString (data.json's \uXXXX escapes)
+  (:static-fn toHexString [n] (-int->radix n 16))
   (:static-fn toString [n] (str n)))
 ;; the cljs host number type (`js/Number.MAX_SAFE_INTEGER` in .cljc branches)
 (defclass js.Number (:kind :static)
@@ -561,8 +643,19 @@
   (:static TYPE (record 'Class 'java.lang.Byte)))
 (defclass java.math.BigInteger (:tag Long) (:extends java.lang.Number))
 (defclass clojure.lang.BigInt (:tag Long) (:extends java.lang.Number))
-(defclass java.lang.Double (:tag Double) (:extends java.lang.Number))
-(defclass java.lang.Float (:tag Double) (:extends java.lang.Number))
+(defclass java.lang.Double (:tag Double) (:extends java.lang.Number)
+  (:static-fn valueOf [s] (-jvm-parse-double s))
+  (:static-fn parseDouble [s] (-jvm-parse-double s))
+  ;; NaN is the only value not equal to itself; ±Inf are the only values whose
+  ;; magnitude exceeds the largest finite double. Both answers match the JVM
+  ;; without needing an Inf/NaN literal or a divide-by-zero.
+  (:method isNaN [x] (not (%num-eq x x)))
+  (:method isInfinite [x]
+    (let [m 1.7976931348623157e308] (or (%lt m x) (%lt x (- m))))))
+(defclass java.lang.Float (:tag Double) (:extends java.lang.Number)
+  (:method isNaN [x] (not (%num-eq x x)))
+  (:method isInfinite [x]
+    (let [m 1.7976931348623157e308] (or (%lt m x) (%lt x (- m))))))
 (defclass java.math.BigDecimal (:tag Double) (:extends java.lang.Number))
 (defclass java.lang.Boolean (:tag Boolean))
 (defclass java.util.regex.Pattern (:tag Regex))
@@ -683,6 +776,26 @@
   (:static creator -list))
 (defclass clojure.lang.IFn (:kind :interface) (:tag Fn) (:pred ifn?))
 (defclass clojure.lang.ILookup (:kind :interface) (:protocol ILookup))
+
+;; The java.util collection interfaces, as the JVM's own hierarchy: Map is NOT a
+;; Collection, and both span every corresponding persistent tag. Real libraries
+;; extend protocols to these (data.json's JSONWriter dispatches a map to
+;; java.util.Map -> write-object and a vector/seq/set to java.util.Collection ->
+;; write-array), so the extend targets must resolve to the same tag sets our own
+;; clojure.lang.IPersistent* interfaces do.
+(defclass java.util.Map
+  (:kind :interface) (:tag PersistentArrayMap) (:pred map?)
+  (:extend-tags PersistentArrayMap PersistentHashMap Map SortedMap))
+(defclass java.util.Collection
+  (:kind :interface) (:tag PersistentVector) (:pred coll?)
+  (:extend-tags PersistentVector PVec Vector List EmptyList LazySeq
+                PersistentHashSet Set SortedSet PersistentQueue))
+(defclass java.util.List
+  (:kind :interface) (:tag PersistentVector) (:pred sequential?)
+  (:extend-tags PersistentVector PVec Vector List EmptyList LazySeq PersistentQueue))
+(defclass java.util.Set
+  (:kind :interface) (:tag PersistentHashSet) (:pred set?)
+  (:extend-tags PersistentHashSet Set SortedSet))
 
 ;; ─────────────── dialect-native host types (cljs heritage) ───────────────
 ;; a map entry IS a `[k v]` vector in this dialect

@@ -112,13 +112,19 @@
   (:tag StringWriter)
   (:ctor ([] (%make-record 'StringWriter (list (array)))))
   ;; field 0 = an array of string chunks, joined at .toString (O(1) appends)
-  (:method write [w s] (-al-add! (field w 0) (str s)) nil)
-  (:method append [w s] (-al-add! (field w 0) (str s)) w)
-  (:method toString [w]
-    (loop [i 0 acc ""]
-      (if (%lt i (%alength (field w 0)))
-        (recur (%add i 1) (%str-cat acc (%aget (field w 0) i)))
-        acc)))
+  ;; `(if (string? s) s (str s))`, not a bare `(str s)`: `str` is VARIADIC, so
+  ;; calling it allocates + walks a rest-seq per append — a writer appends tens
+  ;; of thousands of times per document, almost always with a string in hand.
+  (:method write [w s] (-al-add! (field w 0) (if (string? s) s (str s))) nil)
+  ;; Appendable: a whole char/CharSequence, or a [start,end) slice of one
+  ;; (data.json's write-string appends `(.append out s 0 i)` unescaped runs).
+  (:method append
+    ([w s] (-al-add! (field w 0) (if (string? s) s (str s))) w)
+    ([w s start end] (-al-add! (field w 0) (subs (if (string? s) s (str s)) start end)) w))
+  ;; ONE O(total) join of the chunk array — NOT a left-fold of `%str-cat`, which
+  ;; is O(n^2) (each concat copies the whole accumulator) and, on a large
+  ;; document, allocates tens of MB of intermediate strings for a few-KB result.
+  (:method toString [w] (%str-join-arr (field w 0) ""))
   (:method flush [w] nil)
   (:method close [w] nil))
 

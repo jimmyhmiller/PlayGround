@@ -537,6 +537,31 @@ extern "C" fn shim_eq2<M: ModelArithJit>(ctx: *mut JitCtx<M>, a: u64, b: u64) ->
     rt.prim(Prim::Eq2, &[a, b])
 }
 
+// `%str-char-at` / `char->integer` / `integer->char` via register-arg shims:
+// a char-at-a-time text reader (data.json's StringPBR) issues one of each per
+// character read, and the general spill-args + prim-tag + fenced path per
+// character is pure overhead. StrCharAt/IntToChar can ALLOCATE (a char beyond
+// the interned ASCII range), so like the F2 collection shims they are
+// PARKING-classified in `body_pure_loop`; CharToInt never allocates and rides
+// the same non-fenced treatment as `first`/`rest`/`=`.
+extern "C" fn shim_str_char_at<M: ModelArithJit>(ctx: *mut JitCtx<M>, s: u64, i: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.prim(Prim::StrCharAt, &[s, i])
+}
+
+extern "C" fn shim_char_to_int<M: ModelArithJit>(ctx: *mut JitCtx<M>, c: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.prim(Prim::CharToInt, &[c])
+}
+
+extern "C" fn shim_int_to_char<M: ModelArithJit>(ctx: *mut JitCtx<M>, n: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.prim(Prim::IntToChar, &[n])
+}
+
 extern "C" fn shim_first1<M: ModelArithJit>(ctx: *mut JitCtx<M>, v: u64) -> u64 {
     let ctx = unsafe { &*ctx };
     let rt = unsafe { &mut *(*ctx.rc).rt };
@@ -1067,6 +1092,11 @@ fn prim_tag(p: Prim) -> u32 {
         Field => 12,
         Identical => 13,
         StrLen => 14,
+        StrCharAt => 139,
+        StrGetChars => 140,
+        StrToLong => 141,
+        StrToDouble => 142,
+        CharsToStr => 143,
         CharToInt => 15,
         IntToChar => 16,
         Vector => 17,
@@ -1214,6 +1244,11 @@ fn prim_from_tag(tag: u32) -> Prim {
         12 => Field,
         13 => Identical,
         14 => StrLen,
+        139 => StrCharAt,
+        140 => StrGetChars,
+        141 => StrToLong,
+        142 => StrToDouble,
+        143 => CharsToStr,
         15 => CharToInt,
         16 => IntToChar,
         17 => Vector,
@@ -1373,6 +1408,9 @@ struct Shims {
     tv_conj: FuncId,
     tam_assoc: FuncId,
     thm_assoc: FuncId,
+    str_char_at: FuncId,
+    char_to_int: FuncId,
+    int_to_char: FuncId,
 }
 
 #[derive(Clone, Copy)]
@@ -1412,6 +1450,9 @@ struct ShimRefs {
     tv_conj: cranelift_codegen::ir::FuncRef,
     tam_assoc: cranelift_codegen::ir::FuncRef,
     thm_assoc: cranelift_codegen::ir::FuncRef,
+    str_char_at: cranelift_codegen::ir::FuncRef,
+    char_to_int: cranelift_codegen::ir::FuncRef,
+    int_to_char: cranelift_codegen::ir::FuncRef,
 }
 
 /// A finished, runnable body.
@@ -1467,7 +1508,8 @@ fn body_pure_loop(ir: &Ir, tail: bool) -> bool {
         // anyway, so fencing would only add churn.
         Ir::Prim(
             Prim::PvConj | Prim::PvNth | Prim::PvAssoc | Prim::HamtAssoc | Prim::HamtLookup
-            | Prim::ArrPush | Prim::TvConj | Prim::TamAssoc | Prim::ThmAssoc,
+            | Prim::ArrPush | Prim::TvConj | Prim::TamAssoc | Prim::ThmAssoc
+            | Prim::StrCharAt | Prim::IntToChar,
             _,
         ) => false,
         Ir::If(c, t, e) => {
@@ -2179,6 +2221,9 @@ impl<M: ModelArithJit> JitCranelift<M> {
         let tvc: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_tv_conj::<M>;
         let tma: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_tam_assoc::<M>;
         let tha: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_thm_assoc::<M>;
+        let sca: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_str_char_at::<M>;
+        let cti: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_char_to_int::<M>;
+        let itc: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_int_to_char::<M>;
         builder.symbol("ml_load_local", ll as *const u8);
         builder.symbol("ml_load_global", lg as *const u8);
         builder.symbol("ml_def_global", dg as *const u8);
@@ -2214,6 +2259,9 @@ impl<M: ModelArithJit> JitCranelift<M> {
         builder.symbol("ml_tv_conj", tvc as *const u8);
         builder.symbol("ml_tam_assoc", tma as *const u8);
         builder.symbol("ml_thm_assoc", tha as *const u8);
+        builder.symbol("ml_str_char_at", sca as *const u8);
+        builder.symbol("ml_char_to_int", cti as *const u8);
+        builder.symbol("ml_int_to_char", itc as *const u8);
 
         let mut module = JITModule::new(builder);
 
@@ -2292,6 +2340,9 @@ impl<M: ModelArithJit> JitCranelift<M> {
             tv_conj: decl(&mut module, "ml_tv_conj", &s_v2),
             tam_assoc: decl(&mut module, "ml_tam_assoc", &s_v3),
             thm_assoc: decl(&mut module, "ml_thm_assoc", &s_v3),
+            str_char_at: decl(&mut module, "ml_str_char_at", &s_v2),
+            char_to_int: decl(&mut module, "ml_char_to_int", &s_v1),
+            int_to_char: decl(&mut module, "ml_int_to_char", &s_v1),
         };
 
         JitCranelift {
@@ -3079,6 +3130,9 @@ fn build_body<M: ModelArithJit>(
         tv_conj: module.declare_func_in_func(shims.tv_conj, fb.func),
         tam_assoc: module.declare_func_in_func(shims.tam_assoc, fb.func),
         thm_assoc: module.declare_func_in_func(shims.thm_assoc, fb.func),
+        str_char_at: module.declare_func_in_func(shims.str_char_at, fb.func),
+        char_to_int: module.declare_func_in_func(shims.char_to_int, fb.func),
+        int_to_char: module.declare_func_in_func(shims.int_to_char, fb.func),
     };
 
     let mut c = Compiler {
@@ -5095,6 +5149,25 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let ctx = self.ctx_val;
                 self.call_shim_checked(self.refs.eq2, &[ctx, a, b])
             }
+            // Char-at-a-time text I/O (see the shim comments): register-arg
+            // shims for the per-character prims. StrCharAt/IntToChar allocate
+            // and are PARKING-classified; CharToInt is non-fenced like Eq2.
+            Ir::Prim(Prim::StrCharAt, args) if args.len() == 2 => {
+                let s = self.compile::<M>(&args[0], false);
+                let i = self.compile::<M>(&args[1], false);
+                let ctx = self.ctx_val;
+                self.call_shim_checked(self.refs.str_char_at, &[ctx, s, i])
+            }
+            Ir::Prim(p @ (Prim::CharToInt | Prim::IntToChar), args) if args.len() == 1 => {
+                let v = self.compile::<M>(&args[0], false);
+                let f = if matches!(p, Prim::CharToInt) {
+                    self.refs.char_to_int
+                } else {
+                    self.refs.int_to_char
+                };
+                let ctx = self.ctx_val;
+                self.call_shim_checked(f, &[ctx, v])
+            }
             // Every other prim: compute args, escape to the runtime (the native
             // analogue of the bytecode tier's `Slow`).
             Ir::Prim(p, args) => {
@@ -5369,21 +5442,45 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 // A record still costs exactly what it did (one load); the other
                 // kinds each add one compare against a compile-time constant
                 // sym, which is what `type_tag` would have computed anyway.
-                // NB: this deliberately requires a RECORD. Widening it to
-                // compute `type_tag` for every reference kind (so a list/string
-                // receiver could hit the IC too) was measured and changed
-                // NOTHING — the shim_dispatch count was identical to the digit
-                // (164727 both ways) on a workload that is 3/5 non-record. The
-                // misses are not coming from this guard, so the extra emitted
-                // compares bought nothing and are not here.
+                // NB: RECORD plus the STRING/CHAR kinds. Widening to EVERY
+                // reference kind was measured on a predicate workload and
+                // changed nothing there (shim_dispatch count identical), so the
+                // full kind chain is not emitted; but a char-at-a-time text
+                // reader (data.json's `.charAt`/`.subSequence` on a String
+                // receiver) dispatches on a STRING once per character, and
+                // those sites missed to the shim forever. String/Char cost two
+                // compares against constant syms — exactly what `type_tag`
+                // would have computed.
                 let chk2 = self.fb.create_block();
+                let nonrecb = self.fb.create_block();
                 let is_rec = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::RECORD as i64);
-                self.fb.ins().brif(is_rec, chk2, &[], slow, &[]);
+                self.fb.ins().brif(is_rec, chk2, &[], nonrecb, &[]);
                 self.fb.switch_to_block(chk2);
                 self.fb.seal_block(chk2);
                 // The record's type sym (its raw word) IS `type_tag(recv)`.
                 let tyr = self.fb.ins().load(I64, flags, addr, 8);
                 self.fb.ins().jump(probeb, &[tyr.into()]);
+
+                self.fb.switch_to_block(nonrecb);
+                self.fb.seal_block(nonrecb);
+                if self.rt_ptr.is_null() {
+                    self.fb.ins().jump(slow, &[]);
+                } else {
+                    let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                    // Must match `type_tag`'s kind arms exactly (interning is
+                    // idempotent — same syms `shim_dispatch` stores).
+                    let s_str = self.iconst(rt.intern("String") as u64);
+                    let s_char = self.iconst(rt.intern("Char") as u64);
+                    let is_str = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::STR as i64);
+                    let is_char = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::CHAR as i64);
+                    let known = self.fb.ins().bor(is_str, is_char);
+                    let tyn = self.fb.ins().select(is_str, s_str, s_char);
+                    let strb = self.fb.create_block();
+                    self.fb.ins().brif(known, strb, &[], slow, &[]);
+                    self.fb.switch_to_block(strb);
+                    self.fb.seal_block(strb);
+                    self.fb.ins().jump(probeb, &[tyn.into()]);
+                }
 
                 self.fb.switch_to_block(probeb);
                 self.fb.seal_block(probeb);
@@ -6089,6 +6186,11 @@ mod prim_tag_tests {
         Prim::Field,
         Prim::CallEc,
         Prim::StrLen,
+        Prim::StrCharAt,
+        Prim::StrGetChars,
+        Prim::StrToLong,
+        Prim::StrToDouble,
+        Prim::CharsToStr,
         Prim::CharToInt,
         Prim::IntToChar,
         Prim::Vector,

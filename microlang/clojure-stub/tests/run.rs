@@ -1189,23 +1189,44 @@ fn division_and_ex_info() {
     assert_eq!(run("(try (throw (ex-info \"e\" {:code 42})) (catch :default e (ex-data e)))"), "{:code 42}");
 }
 
+/// Load a program with the VENDORED real clojure.data.json 2.5.1 on the load
+/// path (over the host reader/writer/StringBuilder machinery in host_jvm/host_io).
+fn run_json(src: &str) -> String {
+    use std::path::PathBuf;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/data.json");
+    let full = format!("(ns app (:require [clojure.data.json :as json]))\n{src}");
+    let r = clojure_stub::run_with_paths(&mut rt, &TreeWalk, &full, vec![dir]);
+    clojure_stub::clj_str(&rt, r)
+}
+
 #[test]
-fn clojure_data_json_is_library_code() {
-    // A real, well-known library — implemented ENTIRELY in the language over the
-    // one string primitive (%str->chars) + `/` + ex-info.
-    let j = |body: &str| format!("(ns app (:require [clojure.data.json :as json])) {body}");
+fn clojure_data_json_real_library() {
+    // The REAL org.clojure/data.json 2.5.1 (vendored verbatim) loads AND runs on
+    // the host machinery — no embedded stand-in shadows the name anymore.
     // read-str
-    assert_eq!(run(&j("(json/read-str \"42\")")), "42");
-    assert_eq!(run(&j("(json/read-str \"3.14\")")), "3.14");
-    assert_eq!(run(&j("(json/read-str \"[true false null]\")")), "[true false nil]");
-    assert_eq!(run(&j("(json/read-str \"[1, [2, 3], 4]\")")), "[1 [2 3] 4]");
-    assert_eq!(run(&j("(json/read-str \"{\\\"a\\\": 1, \\\"b\\\": 2}\")")), "{\"a\" 1, \"b\" 2}");
-    assert_eq!(run(&j("(get (json/read-str \"{\\\"a\\\": 42}\") \"a\")")), "42");
-    // write-str: pr-str wraps the string in quotes and escapes inner ones, as in real Clojure.
-    assert_eq!(run(&j("(json/write-str [1 2 3])")), "\"[1,2,3]\"");
-    assert_eq!(run(&j("(json/write-str {:name \"Bob\" :age 25})")), "\"{\\\"name\\\":\\\"Bob\\\",\\\"age\\\":25}\"");
+    assert_eq!(run_json("(json/read-str \"42\")"), "42");
+    assert_eq!(run_json("(json/read-str \"3.14\")"), "3.14");
+    // Space-separated array elements are INVALID JSON: real 2.5.1 throws
+    // "JSON error (invalid array)" here (verified against the JVM). The old
+    // expectation ([true false nil]) was the embedded stand-in's laxness.
+    assert_eq!(
+        run_json("(try (json/read-str \"[true false null]\") (catch Exception e (.getMessage e)))"),
+        "\"JSON error (invalid array)\""
+    );
+    assert_eq!(run_json("(json/read-str \"[true, false, null]\")"), "[true false nil]");
+    assert_eq!(run_json("(json/read-str \"[1, [2, 3], 4]\")"), "[1 [2 3] 4]");
+    assert_eq!(run_json("(json/read-str \"{\\\"a\\\": 1, \\\"b\\\": 2}\")"), "{\"a\" 1, \"b\" 2}");
+    assert_eq!(run_json("(get (json/read-str \"{\\\"a\\\": 42}\") \"a\")"), "42");
+    // :key-fn keyword — the option the embedded stand-in never supported.
+    assert_eq!(run_json("(json/read-str \"{\\\"a\\\": 1}\" :key-fn keyword)"), "{:a 1}");
+    // write-str: default-write-key-fn calls `name` on keywords, as real 2.5.1.
+    assert_eq!(run_json("(json/write-str [1 2 3])"), "\"[1,2,3]\"");
+    assert_eq!(run_json("(json/write-str {:name \"Bob\" :age 25})"), "\"{\\\"name\\\":\\\"Bob\\\",\\\"age\\\":25}\"");
+    // escaping: a quote inside a string value is backslash-escaped.
+    assert_eq!(run_json("(json/write-str {\"k\" \"a\\\"b\"})"), "\"{\\\"k\\\":\\\"a\\\\\\\"b\\\"}\"");
     // round-trip
-    assert_eq!(run(&j("(json/read-str (json/write-str {\"a\" [1 2] \"b\" true}))")), "{\"a\" [1 2], \"b\" true}");
+    assert_eq!(run_json("(json/read-str (json/write-str {\"a\" [1 2] \"b\" true}))"), "{\"a\" [1 2], \"b\" true}");
 }
 
 /// The oracle-driven clojure.core conformance suite: every expression's expected

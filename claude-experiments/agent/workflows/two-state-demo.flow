@@ -1,0 +1,12 @@
+workflow Two-State Demo
+runner deepseek
+
+agent readme
+title Summarize README
+prompt Read README.md and summarize what Flowline is and how to use it.
+after none
+
+agent agents
+title Review AGENTS
+prompt Read AGENTS.md and list the rules or instructions about agent behaviour in this repository.
+after none
