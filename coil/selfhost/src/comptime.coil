@@ -113,7 +113,38 @@
    (qmodule  (Option (slice u8)))
    (module_fns      (ptr (ArrayList (slice u8))))
    (qimports (ptr ModImports))
-   (qexports (ptr (ArrayList ExpEntry)))])
+   (qexports (ptr (ArrayList ExpEntry)))
+   ; the whole checked Program (the fold pass sets it; null in the expander/macro
+   ; contexts). The compiled-comptime fold hook needs it to build a dylib of the
+   ; program + a synthetic `() -> T` entry per comptime site (interp deletion step 1).
+   (prog (ptr Program))])
+
+; ---- compiled-comptime fold hook (mac-8) ----------------------------------------
+; The tree-walk interpreter is a WEAKER sublanguage than a macro body: no generics,
+; no sizeof/alignof/offsetof, no strings. When `eval` rejects a `(comptime E)` / a
+; non-literal `(const …)` site for one of those reasons, we route THAT site through
+; the compiled metaprogram engine (real codegen) instead — the same engine macros
+; already use. The engine lives in a higher module (comptime_eval.coil, which imports
+; metaengine/mono), so it registers itself here as a fn pointer, exactly like the
+; metaengine's object builder (set-meta-build-obj!). Unset ⇒ the interpreter's own
+; error stands (the committed LLVM-free seed, which has no such engine, is unchanged).
+; The hook returns null = DECLINED (aggregate/string/f32 result, or no program) so the
+; interpreter's error is preserved, else a boxed (Result Expr Diag) with the literal.
+(defstruct CtFoldHook [(isset i64) (fp (fnptr c [(ptr Allocator) (ptr Expr) (ptr CtCtx)] (ptr i8)))])
+(defn ct-fold-hook [] (-> (ptr CtFoldHook)) (alloc-static CtFoldHook))
+(defn set-comptime-fold-hook! [(fp (fnptr c [(ptr Allocator) (ptr Expr) (ptr CtCtx)] (ptr i8)))] (-> i64)
+  (let [b (ct-fold-hook)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
+; A CAPABILITY gap — the interpreter says "isn't supported yet" for a construct real
+; codegen CAN do (sizeof/alignof/offsetof, a generic call, a string, a bitfield op, a
+; function pointer, an aggregate-const ref, a trait call, …). ONLY those are routed to
+; the compiled engine; a genuine SEMANTIC error (division by zero, an arithmetic type
+; mismatch, a non-place target) must stand exactly as the interpreter reported it — the
+; compiled engine would silently compute a target-specific value (arm64 idiv-by-0 = 0)
+; or crash, masking the bug. The "supported yet" wording is the interpreter's own
+; convention for "valid code I can't evaluate", so it is a reliable discriminator.
+(defn comptime-cap-gap? [(d Diag)] (-> bool)
+  (let [dp (alloc-stack Diag)] (store! dp d)
+    (match (str-find (load (field dp msg)) "supported yet") (Some [_] true) (None [] false))))
 (defn vget! [(fl Code)] (-> Code)
   (let [f (gensym) v (gensym)]
     `(let [~f (try! ~fl)]
@@ -1923,13 +1954,26 @@
           (EComptime [inner]
             ; Evaluate the inner directly (eval handles nested comptime/reflection
             ; with the proper environment) and splice the literal-back IN PLACE,
-            ; keeping this node's span (src/comptime.rs fold_expr Comptime arm).
-            (let [lo (load (field ep lo)) hi (load (field ep hi)) esrc (load (field ep source)) ectxt (load (field ep ctxt))
-                  fl (try! (eval inner (box-al [EnvBind] a (al-new [EnvBind] a)) cx))]
-              (match fl
-                (FVal [v] (let [nb (try! (build-value a (new-cell v) lo hi esrc ectxt cx))] (store! (field ep kind) (load (field (box-expr a nb) kind))) 0))
-                (FBrk [vv ll] (return-from :try (Err (derr "comptime: stray break/continue at top level"))))
-                (FCont [ll]   (return-from :try (Err (derr "comptime: stray break/continue at top level")))))))
+            ; keeping this node's span (src/comptime.rs fold_expr Comptime arm). When
+            ; the tree-walk interpreter REJECTS the site (a generic call, sizeof, a
+            ; string — the mac-8 weaknesses), route it through the compiled metaprogram
+            ; engine via the registered hook (interp deletion step 1); the hook returns
+            ; null (declined) for anything it can't read back, leaving the interp error.
+            (let [lo (load (field ep lo)) hi (load (field ep hi)) esrc (load (field ep source)) ectxt (load (field ep ctxt))]
+              (match (eval inner (box-al [EnvBind] a (al-new [EnvBind] a)) cx)
+                (Ok [fl]
+                  (match fl
+                    (FVal [v] (let [nb (try! (build-value a (new-cell v) lo hi esrc ectxt cx))] (store! (field ep kind) (load (field (box-expr a nb) kind))) 0))
+                    (FBrk [vv ll] (return-from :try (Err (derr "comptime: stray break/continue at top level"))))
+                    (FCont [ll]   (return-from :try (Err (derr "comptime: stray break/continue at top level"))))))
+                (Err [d]
+                  (let [hk (ct-fold-hook)]
+                    (if (or (not (comptime-cap-gap? d)) (icmp-eq (load (field hk isset)) 0)) (return-from :try (Err d))
+                      (let [r (call-ptr (load (field hk fp)) a inner cx)]
+                        (if (icmp-eq (cast i64 r) 0) (return-from :try (Err d))
+                          (match (load (cast (ptr (Result Expr Diag)) r))
+                            (Err [d2] (return-from :try (Err d2)))
+                            (Ok [lit] (do (store! (field ep kind) (load (field (box-expr a lit) kind))) 0)))))))))))
           (EInt   [_] 0) (EFloat [_] 0) (EBool [_] 0) (EStr [_] 0) (ECStr [_] 0) (EVar [_] 0)
           (EZeroed [_] 0) (ESizeOf [_] 0) (EAlignOf [_] 0) (EOffsetOf [_ _] 0) (EFnPtrOf [_] 0)
           (EAlloc [_ _] 0)
@@ -1983,6 +2027,7 @@
     (store! (field cx module_fns) (cast (ptr (ArrayList (slice u8))) 0))
     (store! (field cx qimports) (cast (ptr ModImports) 0))
     (store! (field cx qexports) (cast (ptr (ArrayList ExpEntry)) 0))
+    (store! (field cx prog) checked)
     cx))
 ; fold_program: fold every function body (in place) and every static-assert cond.
 (defn fold-program [(checked (ptr Program)) (asserts (ptr (ArrayList StaticAssert))) (a (ptr Allocator))] (-> (Result i64 Diag))
@@ -2015,6 +2060,7 @@
     (store! (field cx module_fns) (cast (ptr (ArrayList (slice u8))) 0))
     (store! (field cx qimports) (cast (ptr ModImports) 0))
     (store! (field cx qexports) (cast (ptr (ArrayList ExpEntry)) 0))
+    (store! (field cx prog) checked)
     (let [ms (load (field checked metas)) n (al-len [Expr] (load ms)) (mut out) (al-new [Sexp] a)
           (mut i) 0 (mut errf) (None [Diag])]
       (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) n)) (break)

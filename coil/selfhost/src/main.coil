@@ -33,6 +33,7 @@
 (import "comptime.coil" :use *)
 (import "metaengine.coil" :use *)
 (import "expander.coil" :use *)
+(import "comptime_eval.coil" :use *)   ; compiled comptime/const fold (interp deletion step 1)
 (import "codegen_a64.coil" :use *)
 (import "driver.coil" :use *)
 (import "cimport.coil" :as ci)   ; `coil cimport` — qualified, no name leak
@@ -120,6 +121,7 @@
 
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (set-meta-build-obj! (fnptr-of meta-build-obj-llvm))
+  (register-comptime-fold!)   ; route comptime/const sites the interpreter can't fold through the compiled engine (mac-8)
   (driver-main argc argv
                (fnptr-of build-ir-program)
                (fnptr-of dump-ir-program)

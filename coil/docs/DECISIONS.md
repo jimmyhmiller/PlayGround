@@ -164,8 +164,7 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
        (`examples/dyn_write.coil` → `../lib/dyn.coil`; a diag + a resolve fixture).
 
 7. **Delete the comptime interpreter — 3 steps (mac-8 · mac-12 · diag-4).**
-   1) Route `(comptime E)`/`(const …)` through the compiled engine (closes mac-8; also fixes
-      the "const can't call a monomorphic fn" bug found while proving this).
+   1) ✅ DONE. Route `(comptime E)`/`(const …)` through the compiled engine (closes mac-8).
    2) ✅ DONE. `export-c` on the arm64 backend → `main_a64` registers a builder → the compiled
       engine becomes available on the LLVM-free compiler too (the last dependency blocking the
       deletion; the LLVM-free compiler stops being secretly weaker).
@@ -184,18 +183,37 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    regen — the compiler has no exports, so its own object is unchanged. Teeth in `gate-cli.sh` (an
    arm64 export-c object built and called from C; a by-value struct param rejected by name) FAIL
    on the seed, PASS here.
-   STEP 1 + 3 STILL OPEN: routing comptime/const through the compiled engine is a SEPARATE
-   main-program execution engine (the existing engine is set up only for the macro sub-program at
-   expansion time — `expander.coil::stage3-round`; the `(comptime E)`/`(const …)` fold runs later in
-   `check-finish` → `comptime.coil::fold-program` via the interpreter's `eval`). It needs: recovering
-   each comptime expression's static type, building a dylib of the main program's functions with a
-   synthetic `() -> T` entry per site, native execution, and reconstructing a literal from the native
-   result (scalar is trivial; an aggregate must be read back from native memory — needed so the step-3
-   deletion doesn't regress the interpreter's aggregate-comptime capability). Then step 3 must also
-   re-route `run-metas` (the `(meta …)` path still uses `eval`) and `finish-macro`'s interpreter
-   fallback off the interpreter before `comptime.coil` can be removed. Whole-tree comptime/const usage
-   is scalar-only and absent from the IR corpus (only the two scalar diag fixtures 06/07 exercise it),
-   so gate-full is unaffected and 06/07 would flip from "error" to a folded literal.
+   STEP 1 OUTCOME: a `(comptime E)` / non-literal `(const …)` site is elaborated to ONE `EComptime`
+   node (a const REFERENCE elaborates to `(comptime value)`, see `check.coil::2610`), so the whole
+   fold has a single seam: `comptime.coil::fold-expr`'s `EComptime` arm. That arm now tries the
+   tree-walk interpreter FIRST (unchanged — monomorphic calls and AGGREGATES still fold on it, no
+   regression), and only when the interpreter reports a CAPABILITY gap (its "…isn't supported yet"
+   family: sizeof/alignof/offsetof, a generic call, a string, a bitfield op, a fn pointer, an
+   aggregate-const ref, a trait call) does it route THAT site through the compiled engine via a
+   registered hook (`ct-fold-hook`, wired by `main`/`main_a64`'s `register-comptime-fold!`, exactly
+   like `set-meta-build-obj!`). A genuine SEMANTIC error (division by zero, an arithmetic type
+   mismatch) is left to stand — the discriminator is the interpreter's own "supported yet" wording,
+   so the compiled engine never masks a real bug with a target-specific value. The engine
+   (`comptime_eval.coil`) recovers the site's checked type (type map by nid), builds a MINIMAL closure
+   sub-program of what E calls plus a synthetic `(defn coil.ct.thunk [] (-> T) E)` exported as C
+   symbol `coil_ct_thunk`, monomorphizes + builds + dlopens it (its OWN raw build, no metashim
+   handshake — comptime has no code ops), runs the entry, and reads the SCALAR result (int/bool/f64)
+   back out of the return register, rebuilding a literal via `build-value`. It DECLINES (→ interp
+   error stands) for an aggregate/string/f32 result, so aggregate comptime keeps folding on the
+   interpreter (no regression). Both compilers do this (the LLVM-free one via its arm64 engine — the
+   step-2 export-c is exactly what unblocks it, verified: sizeof/generic fold with NO libLLVM linked).
+   Fixpoint held on BOTH rebootstraps + all 7 gates green: the compiler's own source has no comptime
+   sites, so the hook never fires during the self-build and gate-full is byte-identical; only the two
+   diag build-fixtures 06/07 flipped from "error" to a folded literal (regenerated, exit 1→0). Five
+   teeth in `gate-cli.sh` (sizeof→8, generic→7, `(const … (sizeof))`→8, c-string-in-comptime→5, and an
+   aggregate-comptime no-regression check) — the four capability tests FAIL on the pre-mac-8 seed.
+   STEP 3 STILL OPEN (the actual deletion): needs (a) aggregate comptime ON the compiled engine — the
+   scalar readback here is register-only; an aggregate needs a native-memory readback (a write-through
+   `(ptr T)` entry + the C layout to walk field offsets) so deleting the interpreter doesn't regress
+   it; (b) re-routing `run-metas` (the `(meta …)` path still uses `eval`) and `finish-macro`'s
+   interpreter fallback off `eval`; (c) relocating `CtVal`/`CtCtx` (metaengine/metalower/metahost reuse
+   them) out of `comptime.coil` before its evaluator, the `COIL_META` flag, `parity.sh`, and
+   guide.coil:426 can be removed. mac-8 is closed; mac-12 + diag-4 wait on the deletion.
 
 8. **String HashMap keys own by default (std-3).** ✅ DONE. String-keyed maps copy keys into the
    map's allocator on insert and free on remove; borrowing becomes the opt-in/unsafe path.

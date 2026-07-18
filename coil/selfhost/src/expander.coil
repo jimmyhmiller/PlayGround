@@ -263,6 +263,7 @@
     (store! (field cx module_fns) allfns)
     (store! (field cx qimports) (match (module-of fn-name) (Some [m] (let [ie (imports-find impb m)] (if (icmp-eq (cast i64 ie) 0) (cast (ptr ModImports) 0) (field ie imp)))) (None [] (cast (ptr ModImports) 0))))
     (store! (field cx qexports) expb)
+    (store! (field cx prog) (cast (ptr Program) 0))   ; macro context: no comptime fold here
     (if (icmp-eq (cast i64 callee) 0) (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' not found")))
       (let [pparams (load (field callee params)) np (al-len [Param] (load pparams)) na (al-len [Sexp] (load margs)) (mut env) (al-new [EnvBind] a)]
         (if (load (field callee macro_variadic))

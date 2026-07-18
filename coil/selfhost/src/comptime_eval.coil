@@ -1,0 +1,182 @@
+; selfhost/src/comptime_eval.coil — the COMPILED comptime fold (interp deletion step 1,
+; mac-8). The tree-walk interpreter (comptime.coil) is a strictly WEAKER sublanguage than
+; a macro body: it rejects generic calls, sizeof/alignof/offsetof, and strings. When
+; `fold-expr` (the check-finish comptime/const fold) hits a `(comptime E)` / non-literal
+; `(const …)` site the interpreter cannot evaluate, it calls the hook registered here,
+; which compiles E through the SAME compiled metaprogram engine macros already use:
+;
+;   1. recover E's checked static type (only scalars — int/bool/f64 — are read back);
+;   2. build a MINIMAL closure sub-program of what E transitively calls, plus a synthetic
+;      `(defn coil.ct.thunk [] (-> T) E)` exported under the C symbol `coil_ct_thunk`;
+;   3. monomorphize + build + dlopen it (meta-build-dylib), dlsym the entry, run it, and
+;      read the scalar result back out of the return register;
+;   4. rebuild a literal from the value (comptime.coil::build-value) and hand it back.
+;
+; The hook DECLINES (returns null) for anything it can't read back — an aggregate/string/
+; f32 result, or a closure it can't clear — so the interpreter's own error stands (no
+; regression: aggregate comptime still folds on the interpreter). The LLVM-free seed,
+; which never registers the hook, is byte-identical.
+(module comptime_eval)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "match.coil" :use *)        ; match-else
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "ast.coil" :use *)
+(import "parser.coil" :use *)       ; box-al
+(import "resolve.coil" :use *)      ; SBox, set-contains
+(import "check.coil" :use *)        ; type-map-lookup, Diag, derr
+(import "comptime.coil" :use *)     ; CtCtx, fold-expr(-list), build-value, closure-*, CtVal, trunc, diag-some?, set-comptime-fold-hook!
+(import "mono.coil" :use *)         ; monomorphize, sort-mono-program, drop-code-funcs
+(import "metaengine.coil" :use *)   ; meta-build-box, me-unique, me-link-flags-str
+
+(extern dlopen :cc c [(ptr i8) i64] (-> (ptr i8)))
+(extern dlsym  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern system :cc c [(ptr i8)] (-> i32))
+(extern unlink :cc c [(ptr i8)] (-> i32))
+
+; box a (Result Expr Diag) on the heap so the hook can hand it back through (ptr i8).
+(defn cte-box [(a (ptr Allocator)) (r (Result Expr Diag))] (-> (ptr i8))
+  (let [p (unwrap-ptr [(Result Expr Diag)] (create [(Result Expr Diag)] a))] (store! p r) (cast (ptr i8) p)))
+
+; classify the comptime result type: 1=int, 2=bool, 3=f64, 0=not-readable (decline).
+(defn cte-kind [(t (ptr Type))] (-> i64)
+  (match-else (load t)
+    (TInt   [b s] 1)
+    (TBool  []    2)
+    (TFloat [b]   (if (icmp-eq b 64) 3 0))
+    (_ 0)))
+
+; the checked static type of the comptime inner expression: the type map by nid, with a
+; structural fallback for the intrinsic-typed leaves (sizeof/alignof/offsetof are i64).
+(defn cte-node-type [(e (ptr Expr))] (-> (Option Type))
+  (match (type-map-lookup (load (field e nid)))
+    (Some [t] (Some t))
+    (None []
+      (match-else (load (field e kind))
+        (EInt      [v]     (Some (TInt 64 true)))
+        (EBool     [b]     (Some (TBool)))
+        (EFloat    [bits]  (Some (TFloat 64)))
+        (ESizeOf   [ty]    (Some (TInt 64 true)))
+        (EAlignOf  [ty]    (Some (TInt 64 true)))
+        (EOffsetOf [ty f]  (Some (TInt 64 true)))
+        (_ (None [Type]))))))
+
+; fold every comptime site in the closure funcs' bodies (rare — a helper reached by E
+; that itself has a comptime), reusing the interp/hook fold. On failure the whole
+; compiled fold declines so the interpreter's original error stands.
+(defn cte-fold-closure [(sub (ptr Program)) (cx (ptr CtCtx))] (-> (Result i64 Diag))
+  (let [fs (load (field sub funcs)) n (al-len [Func] (load fs)) (mut i) 0 (mut err) (None [Diag])]
+    (loop (if (or (diag-some? (load err)) (icmp-ge (load i) n)) (break)
+      (do (match (fold-expr-list (load (field (al-elem [Func] fs (load i)) body)) cx)
+            (Err [d] (store! err (Some d)))
+            (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (match (load err) (Some [d] (Err [i64 Diag] d)) (None [] (Ok [i64 Diag] 0)))))
+
+; append (defn coil.ct.thunk [] (-> T) E) to the sub-program's funcs and export it as
+; the C symbol `coil_ct_thunk` (a zero-param scalar return needs no C-ABI thunk).
+(defn cte-add-entry [(a (ptr Allocator)) (sub (ptr Program)) (inner (ptr Expr)) (rty Type)] (-> i64)
+  (let [f (alloc-stack Func) (mut body) (al-new [Expr] a)]
+    (al-push! (mut body) (load inner))
+    (store! (field f name) "coil.ct.thunk")
+    (store! (field f type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+    (store! (field f bounds) (box-al [Bound] a (al-new [Bound] a)))
+    (store! (field f cc) "c")
+    (store! (field f params) (box-al [Param] a (al-new [Param] a)))
+    (store! (field f ret) rty)
+    (store! (field f body) (box-al [Expr] a (load body)))
+    (store! (field f macro_variadic) false)
+    (store! (field f lo) -1) (store! (field f hi) -1) (store! (field f source) -1) (store! (field f ctxt) 0)
+    (al-push! [Func] (load (field sub funcs)) (load f)))
+  (let [e (alloc-stack ExportC)]
+    (store! (field e name) "coil.ct.thunk")
+    (store! (field e symbol) (Some "coil_ct_thunk"))
+    (store! (field e params) (box-al [Type] a (al-new [Type] a)))
+    (store! (field e lo) -1) (store! (field e hi) -1) (store! (field e source) -1) (store! (field e ctxt) 0)
+    (al-push! [ExportC] (load (field sub exports)) (load e)))
+  0)
+
+; run the compiled entry and read the scalar out of the return register.
+(defn cte-invoke [(fp (ptr i8)) (kind i64) (tp (ptr Type))] (-> CtVal)
+  (if (icmp-eq kind 3)
+      (CFloat (call-ptr (cast (fnptr c [] f64) fp)))
+    (let [n (call-ptr (cast (fnptr c [] i64) fp))]
+      (if (icmp-eq kind 2) (CBool (icmp-ne n 0))
+        (match-else (load tp)
+          (TInt [b s] (CInt (trunc n b s)))
+          (_ (CInt n)))))))
+
+; mono + build-obj + link + dlopen a self-contained comptime dylib. Unlike the macro
+; engine's meta-build-dylib, a comptime program has NO code ops, so there is no metashim
+; vtable handshake (coil_mp_init) — a plain dlopen suffices.
+(defn cte-build-dylib [(a (ptr Allocator)) (sub (ptr Program))] (-> (Result (ptr i8) Diag))
+  (try (do
+    (let [bb (meta-build-box)]
+      (if (icmp-eq (load (field bb isset)) 0)
+          (return-from :try (Err [(ptr i8) Diag] (derr "comptime: this compiler build has no backend object builder to compile comptime expressions"))) 0)
+      (let [mp (try! (monomorphize a sub))]
+        (sort-mono-program a mp)
+        (let [id (me-unique a)
+              obj-s (sconcat3 a "/tmp/coil-ct-" id ".o")
+              tmp-s (sconcat3 a "/tmp/coil-ct-" id ".dylib")]
+          (call-ptr (load (field bb fp)) a mp (slice->cstr a obj-s))
+          (let [cmd (sconcat a (sconcat a (sconcat3 a "cc -dynamiclib " obj-s " -o ")
+                                        (sconcat a tmp-s " -Wl,-undefined,dynamic_lookup"))
+                               (me-link-flags-str a))]
+            (if (icmp-ne (cast i64 (system (slice->cstr a cmd))) 0)
+                (Err [(ptr i8) Diag] (derr "comptime: linking the compiled comptime dylib failed"))
+              (do (unlink (slice->cstr a obj-s))
+                  (let [h (dlopen (slice->cstr a tmp-s) 2)]
+                    (if (icmp-eq (cast i64 h) 0)
+                        (Err [(ptr i8) Diag] (derr "comptime: dlopen of the compiled comptime dylib failed"))
+                      (Ok [(ptr i8) Diag] h))))))))))))
+
+; build the dylib, dlsym the entry, run it, reconstruct a literal.
+(defn cte-run [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (kind i64) (tp (ptr Type))] (-> (ptr i8))
+  (do
+    (match (cte-build-dylib a sub)
+      (Err [d] (cte-box a (Err [Expr Diag] d)))
+      (Ok [h]
+        (let [fp (dlsym h (slice->cstr a "coil_ct_thunk"))]
+          (if (icmp-eq (cast i64 fp) 0)
+              (cte-box a (Err [Expr Diag] (derr "comptime: compiled entry missing from the metaprogram dylib (compiler bug)")))
+            (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))
+                  cv (cte-invoke fp kind tp)]
+              (match (build-value a (new-cell cv) lo hi src ctxt cx)
+                (Err [d] (cte-box a (Err [Expr Diag] d)))
+                (Ok [lit] (cte-box a (Ok [Expr Diag] lit)))))))))))
+
+; the registered hook (comptime.coil::ct-fold-hook). null = declined.
+(defn comptime-fold-one [(a (ptr Allocator)) (inner (ptr Expr)) (cx (ptr CtCtx))] (-> (ptr i8))
+  (let [prog (load (field cx prog))]
+    (if (icmp-eq (cast i64 prog) 0) (cast (ptr i8) 0)
+      (match (cte-node-type inner)
+        (None [] (cast (ptr i8) 0))
+        (Some [t0]
+          (let [tp (alloc-stack Type)] (store! tp t0)
+            (if (icmp-eq (cte-kind tp) 0) (cast (ptr i8) 0)
+              ; clear any nested comptime in E itself first (via interp/hook)
+              (match (fold-expr inner cx)
+                (Err [_] (cast (ptr i8) 0))
+                (Ok [_]
+                  (let [names (prog-fn-names prog a)
+                        stackb (unwrap-ptr [SBox] (create [SBox] a))]
+                    (store! (field stackb items) (al-new [(slice u8)] a))
+                    (collect-calls inner names stackb)
+                    (let [wanted (closure-funcs prog (field stackb items) a)
+                          sub (closure-subprogram prog wanted a)]
+                      (match (cte-fold-closure sub cx)
+                        (Err [_] (cast (ptr i8) 0))
+                        (Ok [_]
+                          (do (cte-add-entry a sub inner t0)
+                              (drop-code-funcs a sub)
+                              (cte-run a sub cx inner (cte-kind tp) tp)))))))))))))))
+
+; wire the hook into the interpreter's fold pass (called by main / main_a64 at startup).
+(defn register-comptime-fold! [] (-> i64)
+  (set-comptime-fold-hook! (fnptr-of comptime-fold-one)))

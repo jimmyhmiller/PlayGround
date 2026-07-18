@@ -56,7 +56,11 @@ root cause, and one small fix at the bottom of the stack makes the rest observab
      ways, they are two evaluators, and the weaker one owns `comptime`/`const`.
 
   Order (each step green on its own; the deletion cannot come first):
-  1. Route `(comptime E)`/`(const …)` through the compiled engine → closes **mac-8**. [OPEN]
+  1. Route `(comptime E)`/`(const …)` through the compiled engine → closes **mac-8**. ✅ DONE
+     (interp-first at `fold-expr`'s `EComptime` arm; a "…isn't supported yet" CAPABILITY gap —
+     sizeof/generics/strings — routes to a registered compiled-engine hook that builds a minimal
+     closure sub-program + a `() -> T` entry, runs it, and reads the scalar back; aggregates stay
+     on the interpreter — no regression. See DECISIONS.md #7 step 1.)
   2. ✅ DONE. `export-c` in the arm64 backend → `main_a64` registers a builder → the LLVM-free
      compiler builds metaprogram dylibs with the arm64 backend and defaults to the compiled
      engine (it stops being secretly weaker). AAPCS64-native, so no C-ABI thunk is needed
@@ -275,8 +279,13 @@ Not staleness: specific guarantees the docs state and the implementation never h
 - [x] **mem-10** "Immutable reference" is C's `const T*`, not Rust's `&T` — say "read-only".
 - [x] **mac-11** `bytes->str`/`str-bytes` are undocumented but are the only int→name path a generator
       has. Document; add `int->str`.
-- [ ] **mac-8** `(comptime E)` is a much weaker sublanguage than a macro body (no generics, no strings,
-      no sizeof) while the docs present one unified phase. Route through the compiled engine, or say so.
+- [x] **mac-8** — ✅ DONE. `(comptime E)` / non-literal `(const …)` sites the tree-walk interpreter
+      rejects for a CAPABILITY gap (generics, strings, sizeof/alignof/offsetof, bitfields, fn pointers,
+      aggregate-const refs, trait calls) now route through the COMPILED metaprogram engine (real
+      codegen), so they fold to a literal exactly like a macro body would evaluate them. Interp-first
+      keeps monomorphic + aggregate comptime unchanged (no regression); a semantic error (div by zero)
+      still stands. Both compilers (the LLVM-free one via its arm64 export-c engine). See DECISIONS.md
+      #7 step 1. (Deleting the interpreter — mac-12, diag-4 — is step 3, still open.)
 
 ## Batch 10 — No debug mode for a check to live in
 

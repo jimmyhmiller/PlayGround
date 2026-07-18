@@ -742,6 +742,24 @@ else
   echo "  skip — dsymutil not on PATH (not a macOS toolchain host)"
 fi
 
+echo "== comptime/const route through the compiled engine (mac-8; interp deletion step 1) =="
+# The tree-walk interpreter is a strictly WEAKER sublanguage than a macro body: no
+# generic calls, no sizeof/alignof/offsetof, no strings. Those sites now fold through
+# the COMPILED metaprogram engine (real codegen) and the program runs. On the pre-mac-8
+# seed the interpreter errors and `run` never yields the folded exit code — a tripwire.
+printf '(defn main [] (-> i64) (comptime (sizeof i64)))\n'                                  > "$T/ct_sizeof.coil"
+expect_rc 8 "comptime (sizeof i64) folds to 8 (interp can't)"        "$COIL" run "$T/ct_sizeof.coil"
+printf '(defn id [T] [(x T)] (-> T) x)\n(defn main [] (-> i64) (comptime (id [i64] 7)))\n' > "$T/ct_generic.coil"
+expect_rc 7 "comptime of a generic call folds to 7 (interp can't)"   "$COIL" run "$T/ct_generic.coil"
+printf '(const SZ (sizeof i64))\n(defn main [] (-> i64) SZ)\n'                              > "$T/ct_const.coil"
+expect_rc 8 "(const NAME (sizeof …)) folds to 8 (interp can't)"      "$COIL" run "$T/ct_const.coil"
+printf '(defn main [] (-> i64) (comptime (do c"hi" 5)))\n'                                  > "$T/ct_str.coil"
+expect_rc 5 "comptime using a c-string folds to 5 (interp can't)"    "$COIL" run "$T/ct_str.coil"
+# NO REGRESSION: an aggregate comptime still folds (on the interpreter — the compiled
+# engine declines the readback and the interpreter's own capability is preserved).
+printf '(defstruct P [(x i64) (y i64)])\n(defn mk [] (-> P) (let [(mut p) (zeroed P)] (do (store! (field p x) 3) (store! (field p y) 4) (load p))))\n(defn main [] (-> i64) (let [q (comptime (mk))] (iadd (load (field q x)) (load (field q y)))))\n' > "$T/ct_agg.coil"
+expect_rc 7 "aggregate comptime still folds (interp path, no regression)" "$COIL" run "$T/ct_agg.coil"
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL
