@@ -146,6 +146,11 @@
           (store! (field m tombs) 0)   ; rehash dropped all tombstones
           0)))))
 
+; Returns the insert/update SIGNAL that hm-insert-raw already computes:
+;   0 = updated an existing key   1 = inserted into an empty slot
+;   2 = inserted, reusing a tombstone
+; (so `(icmp-eq r 0)` = "key was already present". The old always-0 return threw this
+; away.)
 (defn hm-put! [K V] [(m (mut (HashMap K V))) (k K) (v V)] (-> :i64)
   ; Resize when occupied + tombstones would pass 0.75 — counting tombstones keeps a
   ; free slot (probe termination). Grow only if genuinely >half full; otherwise
@@ -164,8 +169,8 @@
               (if (icmp-eq r 2)                                    ; ...reusing a tombstone
                   (store! (field m tombs) (isub (load (field m tombs)) 1))
                   0))
-          0)))
-  0)
+          0)
+      r)))
 
 (defn hm-get [K V] [(m (HashMap K V)) (k K)] (-> (Option V))
   (let [cap (load (field m cap))]
@@ -225,6 +230,17 @@
       0)
   (store! (field m slots) (cast (ptr (Entry K V)) 0))
   (store! (field m cap) 0)
+  (store! (field m len) 0)
+  (store! (field m tombs) 0)
+  0)
+
+; Empty the map WITHOUT releasing its storage: mark every slot empty and reset the
+; counts, keeping the allocated slot array for reuse. (`hm-free!` also frees.) Zeroing
+; the slots restores state 0 = empty everywhere, dropping every key and tombstone.
+(defn hm-clear! [K V] [(m (mut (HashMap K V)))] (-> :i64)
+  (if (icmp-gt (load (field m cap)) 0)
+      (mem-zero (load (field m slots)) (load (field m cap)))
+      0)
   (store! (field m len) 0)
   (store! (field m tombs) 0)
   0)

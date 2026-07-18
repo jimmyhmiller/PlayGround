@@ -39,9 +39,18 @@
       (if (icmp-eq (iadd i 1) n) this
         `(and ~this ~(derive--eq-and T a b (iadd i 1) n))))))
 
+; Emits BOTH the standalone `T-eq` free function AND an `(impl Eq T)` that delegates to
+; it — so a `(derive-eq T)` struct immediately works with `=`, `case`, and as a HashMap
+; key (all of which dispatch through the `Eq` trait), not only the named `T-eq`. The
+; structural comparison is defined ONCE (in `T-eq`); the impl is a one-line delegate.
+; (Equivalent to also writing `(derive Eq T)` — do not write both, or the impl duplicates.)
 (defn derive-eq [(tname Code)] (-> Code)
-  `(defn ~(code-symbol tname "-eq") [(a ~tname) (b ~tname)] (-> bool)
-     ~(derive--eq-and tname `a `b 0 (code-field-count tname))))
+  `(do
+     (defn ~(code-symbol tname "-eq") [(a ~tname) (b ~tname)] (-> bool)
+       ~(derive--eq-and tname `a `b 0 (code-field-count tname)))
+     (impl Eq ~tname
+       (= [(a ~tname) (b ~tname)] (-> bool)
+         (~(code-symbol tname "-eq") a b)))))
 
 ; ---- derive-hash (FNV-1a over the fields) ----------------------------------
 (defn derive--field-hash [(T Code) (x Code) (i i64)] (-> Code)

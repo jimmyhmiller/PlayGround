@@ -127,6 +127,56 @@
 (defn read-some [(r (ptr Reader)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
   (call-ptr (load (field r read-fn)) (load (field r ctx)) buf len))
 
+; Fill `buf` by looping over short reads until it holds `len` bytes OR the stream ends;
+; returns the total read (which is `< len` only at EOF). The read mirror of `write-all`
+; — but where a short WRITE with no progress is an error, a short READ of 0 is EOF, a
+; normal stop, so this returns the partial count rather than erroring. (Named
+; `read-fill`, not `read-all`, so it never collides with the s-expression reader's
+; `read-all` in lib/sexp.coil when both are imported.)
+(defn read-fill [(r (ptr Reader)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
+  (if (icmp-le len 0)
+      (Ok 0)
+      (match (read-some r buf len)
+        (Err [e] (Err e))
+        (Ok [n]
+          (if (icmp-le n 0)
+              (Ok 0)                                    ; EOF — no more bytes
+              (match (read-fill r (index buf n) (isub len n))
+                (Err [e] (Err e))
+                (Ok [m] (Ok (iadd n m)))))))))
+
+; Read EXACTLY `len` bytes, or fail: `(Err (Eof))` if the stream ends first. For
+; fixed-size records/headers where a short read is a real error, not a normal stop.
+(defn read-exact [(r (ptr Reader)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
+  (match (read-fill r buf len)
+    (Err [e] (Err e))
+    (Ok [n] (if (icmp-eq n len) (Ok n) (Err (Eof))))))
+
+; Read one line into `buf` (up to `cap` bytes): stop after a newline (consumed, NOT
+; stored), at `cap`, or at EOF. Returns the number of content bytes stored. `(Err (Eof))`
+; iff the stream ended before ANY byte was read (so a caller can loop until Eof; a final
+; line with no trailing newline is returned once, then the next call reports Eof). Reads
+; a byte at a time — correct and unbuffered; wrap a buffered reader for bulk throughput.
+(defn read-line [(r (ptr Reader)) (buf (ptr i8)) (cap :i64)] (-> (Result :i64 IoError))
+  (let [(mut i) 0
+        one     (alloc-stack :u8)]
+    (block :done
+      (loop
+        (if (icmp-ge (load i) cap)
+            (return-from :done (Ok (load i)))
+            0)
+        (match (read-some r (cast (ptr i8) one) 1)
+          (Err [e] (return-from :done (Err e)))
+          (Ok [n]
+            (if (icmp-le n 0)
+                (return-from :done
+                  (if (icmp-eq (load i) 0) (Err (Eof)) (Ok (load i))))   ; EOF
+                (let [c (load one)]
+                  (if (icmp-eq (cast :i64 c) \newline)
+                      (return-from :done (Ok (load i)))
+                      (do (store! (index buf (load i)) (cast i8 c))
+                          (store! i (iadd (load i) 1))))))))))))
+
 (defn fd-read [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
   (let [n (read (cast :i64 ctx) buf len)]
     (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))

@@ -5,6 +5,31 @@
 (defn substr [(s (slice u8)) (lo :i64) (hi :i64)] (-> (slice u8)) (subslice s lo hi))
 
 (defn
+  cstr-len
+  [(p (ptr i8))]
+  (-> :i64)
+  (let
+    [(mut i) 0]
+    (loop
+      (if
+        (icmp-eq (cast :i64 (load (index p (load i)))) 0)
+        (break)
+        (store! i (iadd (load i) 1))))
+    (load i)))
+
+(defn cstr->str [(p (ptr i8))] (-> (slice u8)) (slice-new (cast (ptr u8) p) (cstr-len p)))
+
+(defn
+  str->cstr
+  [(a (ptr Allocator)) (s (slice u8))]
+  (-> (ptr i8))
+  (let
+    [n (slice-len s) p (unwrap-ptr [i8] (raw-alloc a (iadd n 1) 1))]
+    (mem-copy [u8] (cast (ptr u8) p) (slice-data s) n)
+    (store! (index p n) (cast i8 0))
+    p))
+
+(defn
   str-eq
   [(a (slice u8)) (b (slice u8))]
   (-> bool)
@@ -26,6 +51,24 @@
           (store! h (imul (ixor (load h) (cast :i64 (slice-get s (load i)))) 1099511628211))
           (store! i (iadd (load i) 1)))))
     (load h)))
+
+(defn
+  str-cmp
+  [(a (slice u8)) (b (slice u8))]
+  (-> :i64)
+  (let
+    [la (slice-len a) lb (slice-len b) n (if (icmp-lt la lb) la lb) (mut i) 0 (mut d) 0]
+    (loop
+      (if
+        (icmp-ge (load i) n)
+        (break)
+        (let
+          [ca (cast :i64 (slice-get a (load i))) cb (cast :i64 (slice-get b (load i)))]
+          (if
+            (icmp-ne ca cb)
+            (do (store! d (isub ca cb)) (break))
+            (store! i (iadd (load i) 1))))))
+    (if (icmp-ne (load d) 0) (load d) (isub la lb))))
 
 (defn
   starts-with
@@ -52,6 +95,91 @@
   [(hay (slice u8)) (needle (slice u8))]
   (-> (Option :i64))
   (str-find-from hay needle 0))
+
+(defn
+  str-ws?
+  [(b :u8)]
+  (-> bool)
+  (let
+    [c (cast :i64 b)]
+    (or
+      (icmp-eq c 32)
+      (or
+        (icmp-eq c 9)
+        (or (icmp-eq c 10) (or (icmp-eq c 13) (or (icmp-eq c 11) (icmp-eq c 12))))))))
+
+(defn
+  str-trim
+  [(s (slice u8))]
+  (-> (slice u8))
+  (let
+    [(mut lo) 0 (mut hi) (slice-len s)]
+    (loop
+      (if
+        (and (icmp-lt (load lo) (load hi)) (str-ws? (slice-get s (load lo))))
+        (store! lo (iadd (load lo) 1))
+        (break)))
+    (loop
+      (if
+        (and (icmp-lt (load lo) (load hi)) (str-ws? (slice-get s (isub (load hi) 1))))
+        (store! hi (isub (load hi) 1))
+        (break)))
+    (subslice s (load lo) (load hi))))
+
+(defn
+  str-parse-int
+  [(s (slice u8))]
+  (-> (Option :i64))
+  (let
+    [n (slice-len s)]
+    (if
+      (icmp-eq n 0)
+      (None)
+      (let
+        [neg
+          (icmp-eq (cast :i64 (slice-get s 0)) 45)
+          (mut i)
+          (if neg 1 0)
+          (mut acc)
+          0
+          (mut ok)
+          (icmp-lt (if neg 1 0) n)]
+        (loop
+          (if
+            (icmp-ge (load i) n)
+            (break)
+            (let
+              [c (cast :i64 (slice-get s (load i)))]
+              (if
+                (and (icmp-ge c 48) (icmp-le c 57))
+                (do
+                  (store! acc (iadd (imul (load acc) 10) (isub c 48)))
+                  (store! i (iadd (load i) 1)))
+                (do (store! ok false) (break))))))
+        (if (load ok) (Some (if neg (isub 0 (load acc)) (load acc))) (None))))))
+
+(defn
+  str-split
+  [(a (ptr Allocator)) (s (slice u8)) (sep (slice u8))]
+  (-> (ArrayList (slice u8)))
+  (let
+    [(mut out) (al-new [(slice u8)] a) sl (slice-len sep) n (slice-len s)]
+    (if
+      (icmp-eq sl 0)
+      (do (al-push! (mut out) s) 0)
+      (let
+        [(mut start) 0]
+        (loop
+          (match
+            (str-find (subslice s (load start) n) sep)
+            (None [] (do (al-push! (mut out) (subslice s (load start) n)) (break)))
+            (Some
+              [rel]
+              (let
+                [idx (iadd (load start) rel)]
+                (al-push! (mut out) (subslice s (load start) idx))
+                (store! start (iadd idx sl))))))))
+    (load out)))
 
 (defn
   str-concat
@@ -125,6 +253,20 @@
 (defn sb-str [(sb StrBuf)] (-> (slice u8)) (al-slice (field sb bytes)))
 
 (defn sb-free! [(sb (mut StrBuf))] (-> :i64) (al-free! (mut (field sb bytes))))
+
+(defn sb-finish! [(sb (mut StrBuf))] (-> (slice u8)) (al-into-slice (mut (field sb bytes))))
+
+(impl Eq (slice u8) (= [(a (slice u8)) (b (slice u8))] (-> bool) (str-eq a b)))
+
+(impl
+  Ord
+  (slice u8)
+  (< [(a (slice u8)) (b (slice u8))] (-> bool) (icmp-lt (str-cmp a b) 0))
+  (<= [(a (slice u8)) (b (slice u8))] (-> bool) (icmp-le (str-cmp a b) 0))
+  (> [(a (slice u8)) (b (slice u8))] (-> bool) (icmp-gt (str-cmp a b) 0))
+  (>= [(a (slice u8)) (b (slice u8))] (-> bool) (icmp-ge (str-cmp a b) 0)))
+
+(impl Hash (slice u8) (hash [(x (slice u8))] (-> i64) (str-hash x)))
 
 (impl Len StrBuf (len [(sb StrBuf)] (-> i64) (al-len (load (field sb bytes)))))
 

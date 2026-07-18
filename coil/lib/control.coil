@@ -36,9 +36,10 @@
 ; whose `(= x ki)` holds, using the `Eq` trait (auto-loaded prelude); a lone trailing
 ; clause is the default (0 if none). Flat `key body` pairs, Clojure-style. The keys'
 ; type must implement `Eq` — pass a non-`Eq` value and you get
-; "'T' does not implement 'Eq'". Primitives (i64/bool) and any `(derive Eq …)`
-; struct work out of the box; for a custom comparison (e.g. `sexp-sym-is` on a
-; non-`Eq` type) use `case-by`.
+; "'T' does not implement 'Eq'". Primitives (i64/bool), strings ((slice u8), via
+; lib/str.coil), and any struct given an `Eq` impl by `(derive Eq T)` or `(derive-eq T)`
+; (lib/derive.coil) work out of the box; for a custom comparison (e.g. `sexp-sym-is` on
+; a non-`Eq` type) use `case-by`.
 (defn case-arms [(v Code) (eq Code) (clauses Code)] (-> Code)
   (if (icmp-eq (code-count clauses) 0) `0
     (if (icmp-eq (code-count clauses) 1) (code-nth clauses 0)  ; lone trailing = default

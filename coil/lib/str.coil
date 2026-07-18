@@ -20,6 +20,30 @@
 (defn char-at [(s (slice u8)) (i :i64)] (-> :u8) (slice-get s i))
 (defn substr  [(s (slice u8)) (lo :i64) (hi :i64)] (-> (slice u8)) (subslice s lo hi))
 
+; ---- C-string bridge -------------------------------------------------------
+; FFI hands back NUL-terminated `(ptr i8)` strings; the everyday Coil string is a
+; length-carrying `(slice u8)`. These convert between the two. `cstr-len` scans to
+; the terminator (no libc `strlen` extern, so importing this module never collides
+; with io.coil's `strlen` declaration).
+(defn cstr-len [(p (ptr i8))] (-> :i64)
+  (let [(mut i) 0]
+    (loop (if (icmp-eq (cast :i64 (load (index p (load i)))) 0) (break)
+            (store! i (iadd (load i) 1))))
+    (load i)))
+; A `(slice u8)` VIEW over a C string's bytes (excludes the NUL) — no copy, aliases
+; the C storage.
+(defn cstr->str [(p (ptr i8))] (-> (slice u8))
+  (slice-new (cast (ptr u8) p) (cstr-len p)))
+; A freshly-allocated NUL-terminated copy of `s` (what a C API wants). The result
+; owns its `len+1` bytes; free it with the same allocator. Null on OOM (the same
+; descriptive-not-safe contract as `unwrap-ptr`/`box`).
+(defn str->cstr [(a (ptr Allocator)) (s (slice u8))] (-> (ptr i8))
+  (let [n (slice-len s)
+        p (unwrap-ptr [i8] (raw-alloc a (iadd n 1) 1))]
+    (mem-copy [u8] (cast (ptr u8) p) (slice-data s) n)
+    (store! (index p n) (cast i8 0))
+    p))
+
 ; Content equality: same length and same bytes.
 (defn str-eq [(a (slice u8)) (b (slice u8))] (-> bool)
   (let [la (slice-len a)]
@@ -40,6 +64,26 @@
               (store! i (iadd (load i) 1)))))
     (load h)))
 
+; Lexicographic byte comparison: negative if a<b, 0 if equal, positive if a>b.
+; Compares byte-by-byte over the shared prefix, then breaks the tie by length —
+; the ordering `str-eq`/`str-hash` are the equality/hash for, and what the `Ord`
+; impl below (so `<`/`sort` on strings) is built over.
+(defn str-cmp [(a (slice u8)) (b (slice u8))] (-> :i64)
+  (let [la (slice-len a)
+        lb (slice-len b)
+        n  (if (icmp-lt la lb) la lb)
+        (mut i) 0
+        (mut d) 0]
+    (loop
+      (if (icmp-ge (load i) n)
+          (break)
+          (let [ca (cast :i64 (slice-get a (load i)))
+                cb (cast :i64 (slice-get b (load i)))]
+            (if (icmp-ne ca cb)
+                (do (store! d (isub ca cb)) (break))
+                (store! i (iadd (load i) 1))))))
+    (if (icmp-ne (load d) 0) (load d) (isub la lb))))
+
 (defn starts-with [(s (slice u8)) (prefix (slice u8))] (-> bool)
   (let [lp (slice-len prefix)]
     (if (icmp-gt lp (slice-len s))
@@ -55,6 +99,66 @@
           (str-find-from hay needle (iadd i 1)))))
 (defn str-find [(hay (slice u8)) (needle (slice u8))] (-> (Option :i64))
   (str-find-from hay needle 0))
+
+; ---- trimming, parsing, splitting ------------------------------------------
+; ASCII whitespace test (space, tab, newline, carriage return, vertical tab, form feed).
+(defn str-ws? [(b :u8)] (-> bool)
+  (let [c (cast :i64 b)]
+    (any (icmp-eq c \space) (icmp-eq c \tab) (icmp-eq c \newline)
+         (icmp-eq c \return) (icmp-eq c 11) (icmp-eq c \formfeed))))
+
+; A VIEW with leading/trailing ASCII whitespace removed (no copy; shares storage).
+(defn str-trim [(s (slice u8))] (-> (slice u8))
+  (let [(mut lo) 0
+        (mut hi) (slice-len s)]
+    (loop (if (and (icmp-lt (load lo) (load hi)) (str-ws? (slice-get s (load lo))))
+              (store! lo (iadd (load lo) 1)) (break)))
+    (loop (if (and (icmp-lt (load lo) (load hi)) (str-ws? (slice-get s (isub (load hi) 1))))
+              (store! hi (isub (load hi) 1)) (break)))
+    (subslice s (load lo) (load hi))))
+
+; Parse a base-10 signed integer, `(Some n)` or `(None)` on any non-digit / empty /
+; lone-sign input. No allocation, no overflow check (wraps like the metal `imul`).
+(defn str-parse-int [(s (slice u8))] (-> (Option :i64))
+  (let [n (slice-len s)]
+    (if (icmp-eq n 0)
+        (None)
+        (let [neg (icmp-eq (cast :i64 (slice-get s 0)) 45)   ; 45 = '-'
+              (mut i) (if neg 1 0)
+              (mut acc) 0
+              (mut ok) (icmp-lt (if neg 1 0) n)]             ; a lone "-" is invalid
+          (loop
+            (if (icmp-ge (load i) n)
+                (break)
+                (let [c (cast :i64 (slice-get s (load i)))]
+                  (if (and (icmp-ge c \0) (icmp-le c \9))
+                      (do (store! acc (iadd (imul (load acc) 10) (isub c \0)))
+                          (store! i (iadd (load i) 1)))
+                      (do (store! ok false) (break))))))
+          (if (load ok)
+              (Some (if neg (isub 0 (load acc)) (load acc)))
+              (None))))))
+
+; Split `s` on every (non-overlapping) occurrence of `sep`, returning an
+; `(ArrayList (slice u8))` of the pieces (each a VIEW into `s`). An empty `sep`
+; yields the whole string as one piece. The caller owns the list — `al-free!` it
+; (the piece slices alias `s`, so `s` must outlive them). Allocator-aware.
+(defn str-split [(a (ptr Allocator)) (s (slice u8)) (sep (slice u8))] (-> (ArrayList (slice u8)))
+  (let [(mut out) (al-new [(slice u8)] a)
+        sl (slice-len sep)
+        n  (slice-len s)]
+    (if (icmp-eq sl 0)
+        (do (al-push! (mut out) s) 0)
+        (let [(mut start) 0]
+          (loop
+            (match (str-find (subslice s (load start) n) sep)
+              (None []
+                (do (al-push! (mut out) (subslice s (load start) n)) (break)))
+              (Some [rel]
+                (let [idx (iadd (load start) rel)]
+                  (al-push! (mut out) (subslice s (load start) idx))
+                  (store! start (iadd idx sl))))))))
+    (load out)))
 
 ; Concatenate into freshly-allocated bytes; `(None)` on OOM. The result owns its
 ; buffer (allocated from `a`); free it with the same allocator when done.
@@ -114,7 +218,27 @@
 (defn sb-free! [(sb (mut StrBuf))] (-> :i64)
   (al-free! (mut (field sb bytes))))
 
+; Finish building: hand back an OWNING `(slice u8)` shrunk to the exact length, and
+; reset the StrBuf to empty. Unlike `sb-str` (a borrowed view that a later push can
+; invalidate), the returned slice owns a right-sized buffer the caller frees with the
+; same allocator — no use-after-free, no dangling capacity. Over `al-into-slice`.
+(defn sb-finish! [(sb (mut StrBuf))] (-> (slice u8))
+  (al-into-slice (mut (field sb bytes))))
+
 ; ---- the core collection traits (coil.core) ---------------------------------
+; Strings are `(slice u8)` — so equality (`=`/`case`), ordering (`< <= > >=`, hence
+; `sort`), and hashing (a HashMap key) come from these impls over the byte content.
+; (The generic `Len`/`Get`/`Set` for any `(slice T)` live in lib/slice.coil.)
+(impl Eq (slice u8)
+  (= [(a (slice u8)) (b (slice u8))] (-> bool) (str-eq a b)))
+(impl Ord (slice u8)
+  (<  [(a (slice u8)) (b (slice u8))] (-> bool) (icmp-lt (str-cmp a b) 0))
+  (<= [(a (slice u8)) (b (slice u8))] (-> bool) (icmp-le (str-cmp a b) 0))
+  (>  [(a (slice u8)) (b (slice u8))] (-> bool) (icmp-gt (str-cmp a b) 0))
+  (>= [(a (slice u8)) (b (slice u8))] (-> bool) (icmp-ge (str-cmp a b) 0)))
+(impl Hash (slice u8)
+  (hash [(x (slice u8))] (-> i64) (str-hash x)))
+
 ; A StrBuf is a byte collection: `(len sb)` / `(get sb i)` / `(push! (mut sb) b)`.
 ; (Strings themselves are (slice u8) — their Len/Get impls are lib/slice.coil's.)
 (impl Len StrBuf

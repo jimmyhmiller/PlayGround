@@ -138,6 +138,65 @@
   (call-ptr (load (field r read-fn)) (load (field r ctx)) buf len))
 
 (defn
+  read-fill
+  [(r (ptr Reader)) (buf (ptr i8)) (len :i64)]
+  (-> (Result :i64 IoError))
+  (if
+    (icmp-le len 0)
+    (Ok 0)
+    (match
+      (read-some r buf len)
+      (Err [e] (Err e))
+      (Ok
+        [n]
+        (if
+          (icmp-le n 0)
+          (Ok 0)
+          (match
+            (read-fill r (index buf n) (isub len n))
+            (Err [e] (Err e))
+            (Ok [m] (Ok (iadd n m)))))))))
+
+(defn
+  read-exact
+  [(r (ptr Reader)) (buf (ptr i8)) (len :i64)]
+  (-> (Result :i64 IoError))
+  (match
+    (read-fill r buf len)
+    (Err [e] (Err e))
+    (Ok [n] (if (icmp-eq n len) (Ok n) (Err (Eof))))))
+
+(defn
+  read-line
+  [(r (ptr Reader)) (buf (ptr i8)) (cap :i64)]
+  (-> (Result :i64 IoError))
+  (let
+    [(mut i) 0 one (alloc-stack :u8)]
+    (loop
+      :done
+      (break
+        :done
+        (do
+          (loop
+            (if (icmp-ge (load i) cap) (break :done (Ok (load i))) 0)
+            (match
+              (read-some r (cast (ptr i8) one) 1)
+              (Err [e] (break :done (Err e)))
+              (Ok
+                [n]
+                (if
+                  (icmp-le n 0)
+                  (break :done (if (icmp-eq (load i) 0) (Err (Eof)) (Ok (load i))))
+                  (let
+                    [c (load one)]
+                    (if
+                      (icmp-eq (cast :i64 c) 10)
+                      (break :done (Ok (load i)))
+                      (do
+                        (store! (index buf (load i)) (cast i8 c))
+                        (store! i (iadd (load i) 1))))))))))))))
+
+(defn
   fd-read
   [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)]
   (-> (Result :i64 IoError))

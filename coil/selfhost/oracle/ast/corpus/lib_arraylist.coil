@@ -131,6 +131,40 @@
   (store! (field l cap) 0)
   0)
 
+(defn al-clear! [T] [(l (mut (ArrayList T)))] (-> i64) (store! (field l len) 0) 0)
+
+(defn
+  al-into-slice
+  [T]
+  [(l (mut (ArrayList T)))]
+  (-> (slice T))
+  (let
+    [a
+      (load (field l alc))
+      n
+      (load (field l len))
+      cap
+      (load (field l cap))
+      data
+      (load (field l data))
+      final
+      (if
+        (and (icmp-gt cap n) (icmp-gt n 0))
+        (match
+          (raw-resize
+            a
+            (cast (ptr i8) data)
+            (imul cap (sizeof T))
+            (imul n (sizeof T))
+            (alignof T))
+          (Some [p] (cast (ptr T) p))
+          (None [] data))
+        data)]
+    (store! (field l data) (cast (ptr T) 0))
+    (store! (field l len) 0)
+    (store! (field l cap) 0)
+    (slice-new final n)))
+
 (defn
   al-for
   [(binding Code) & (body Code)]

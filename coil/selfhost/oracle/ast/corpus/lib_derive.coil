@@ -42,12 +42,20 @@
   [(tname Code)]
   (-> Code)
   (quasiquote
-    (defn
-      (unquote (code-symbol tname "-eq"))
-      [(a (unquote tname)) (b (unquote tname))]
-      (-> bool)
-      (unquote
-        (derive--eq-and tname (quasiquote a) (quasiquote b) 0 (code-field-count tname))))))
+    (do
+      (defn
+        (unquote (code-symbol tname "-eq"))
+        [(a (unquote tname)) (b (unquote tname))]
+        (-> bool)
+        (unquote
+          (derive--eq-and tname (quasiquote a) (quasiquote b) 0 (code-field-count tname))))
+      (impl
+        Eq
+        (unquote tname)
+        (=
+          [(a (unquote tname)) (b (unquote tname))]
+          (-> bool)
+          ((unquote (code-symbol tname "-eq")) a b))))))
 
 (defn
   derive--field-hash

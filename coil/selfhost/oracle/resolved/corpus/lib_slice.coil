@@ -67,6 +67,32 @@ ret $ret %d"))
             [(unquote i) 0 (slice-len (unquote sv))]
             (let [(unquote x) (slice-get (unquote sv) (unquote i))] (unquote-splicing body))))))))
 
+(defn
+  sort
+  [T]
+  [(s (slice T)) (cmp (fnptr c [T T] i64))]
+  (-> i64)
+  (let
+    [n (slice-len s) (mut i) 1]
+    (loop
+      (if
+        (icmp-ge (load i) n)
+        (break)
+        (let
+          [key (slice-get s (load i)) (mut j) (isub (load i) 1)]
+          (loop
+            (if
+              (and
+                (icmp-ge (load j) 0)
+                (icmp-gt (call-ptr cmp (slice-get s (load j)) key) 0))
+              (do
+                (slice-set! s (iadd (load j) 1) (slice-get s (load j)))
+                (store! j (isub (load j) 1)))
+              (break)))
+          (slice-set! s (iadd (load j) 1) key)
+          (store! i (iadd (load i) 1)))))
+    0))
+
 (impl [T] Len (slice T) (len [(s (slice T))] (-> i64) (slice-len s)))
 
 (impl [T] Get (slice T) (get [(s (slice T)) (i i64)] (-> T) (slice-get s i)))

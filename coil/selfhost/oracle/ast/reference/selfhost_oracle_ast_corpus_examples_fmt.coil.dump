@@ -2,7 +2,7 @@
 (structs)
 (sums)
 (externs)
-(funcs (func "main" [] [] "c" [] (int 64 1) [(let@0:32:269:0 [(bind "w" 0 (call@0:44:52:0 "stdout" [] []))] [(do@0:58:262:0 [(call@0:68:89:0 "io.print-str" [] [(var@0:82:83:0 "w") (estr@0:84:88:0 "n=")]) (call@0:96:115:0 "fmt.print-i" [] [(var@0:109:110:0 "w") (eint@0:111:114:0 -42)]) (call@0:122:146:0 "io.print-str" [] [(var@0:136:137:0 "w") (estr@0:138:145:0 " hex=")]) (call@0:153:174:0 "fmt.print-hex" [] [(var@0:168:169:0 "w") (eint@0:170:173:0 255)]) (call@0:181:204:0 "io.print-str" [] [(var@0:195:196:0 "w") (estr@0:197:203:0 " ok=")]) (call@0:211:234:0 "fmt.print-bool" [] [(var@0:227:228:0 "w") (ebool@0:229:233:0 1)]) (call@0:241:261:0 "io.print-str" [] [(var@0:255:256:0 "w") (estr@0:257:260:0 "\n")])]) (eint@0:267:268:0 0)])] 0 @0:0:270:0))
+(funcs (func "main" [] [] "c" [] (int 64 1) [(let@0:32:270:0 [(bind "w" 0 (call@0:44:52:0 "stdout" [] []))] [(do@0:58:263:0 [(call@0:68:89:0 "io.print-str" [] [(var@0:82:83:0 "w") (estr@0:84:88:0 "n=")]) (call@0:96:115:0 "fmt.print-i" [] [(var@0:109:110:0 "w") (eint@0:111:114:0 -42)]) (call@0:122:146:0 "io.print-str" [] [(var@0:136:137:0 "w") (estr@0:138:145:0 " hex=")]) (call@0:153:175:0 "fmt.print-uhex" [] [(var@0:169:170:0 "w") (eint@0:171:174:0 255)]) (call@0:182:205:0 "io.print-str" [] [(var@0:196:197:0 "w") (estr@0:198:204:0 " ok=")]) (call@0:212:235:0 "fmt.print-bool" [] [(var@0:228:229:0 "w") (ebool@0:230:234:0 1)]) (call@0:242:262:0 "io.print-str" [] [(var@0:256:257:0 "w") (estr@0:258:261:0 "\n")])]) (eint@0:268:269:0 0)])] 0 @0:0:271:0))
 (asserts)
 (consts)
 (traits)

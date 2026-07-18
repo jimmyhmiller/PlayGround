@@ -1,0 +1,119 @@
+(extern open :cc c [(ptr i8) :i64 ...] (-> :i64))
+
+(extern close :cc c [:i64] (-> :i64))
+
+(const O_RDONLY 0)
+
+(const O_WRONLY 1)
+
+(const O_RDWR 2)
+
+(const O_APPEND 8)
+
+(const O_CREAT 512)
+
+(const O_TRUNC 1024)
+
+(const O_EXCL 2048)
+
+(const FILE_MODE_DEFAULT 420)
+
+(defstruct File [(fd :i64)])
+
+(defn
+  mk-file
+  [(fd :i64)]
+  (-> File)
+  (let [(mut f) (zeroed File)] (store! (field f fd) fd) (load f)))
+
+(defn file-fd [(f (ptr File))] (-> :i64) (load (field f fd)))
+
+(defn
+  file-open
+  [(path (ptr i8)) (flags :i64) (mode :i64)]
+  (-> (Result File IoError))
+  (let [fd (open path flags mode)] (if (icmp-lt fd 0) (Err (Errno fd)) (Ok (mk-file fd)))))
+
+(defn
+  file-close
+  [(f (ptr File))]
+  (-> (Result :i64 IoError))
+  (let [r (close (file-fd f))] (if (icmp-lt r 0) (Err (Errno r)) (Ok r))))
+
+(defn file-reader [(f (ptr File))] (-> (ptr Reader)) (fd-reader (file-fd f)))
+
+(defn file-writer [(f (ptr File))] (-> (ptr Writer)) (fd-writer (file-fd f)))
+
+(defn
+  read-file
+  [(a (ptr Allocator)) (path (slice u8))]
+  (-> (Result (slice u8) IoError))
+  (let
+    [cp (str->cstr a path)]
+    (if
+      (icmp-eq (cast :i64 cp) 0)
+      (Err (Errno 0))
+      (let
+        [fd (open cp O_RDONLY 0)]
+        (if
+          (icmp-lt fd 0)
+          (do (raw-free a (cast (ptr i8) cp) (iadd (slice-len path) 1) 1) (Err (Errno fd)))
+          (let
+            [(mut buf)
+              (al-new [u8] a)
+              tmp
+              (alloc-stack (array u8 4096))
+              res
+              (loop
+                :done
+                (break
+                  :done
+                  (do
+                    (loop
+                      (let
+                        [n (read fd (cast (ptr i8) (index tmp 0)) 4096)]
+                        (if
+                          (icmp-lt n 0)
+                          (do
+                            (al-free! (mut buf))
+                            (break :done (Err [(slice u8) IoError] (Errno n))))
+                          (if
+                            (icmp-eq n 0)
+                            (break)
+                            (let
+                              [(mut j) 0]
+                              (loop
+                                (if
+                                  (icmp-ge (load j) n)
+                                  (break)
+                                  (do
+                                    (al-push!
+                                      (mut buf)
+                                      (load (index (index tmp 0) (load j))))
+                                    (store! j (iadd (load j) 1))))))))))
+                    (Ok [(slice u8) IoError] (al-into-slice (mut buf))))))]
+            (close fd)
+            (raw-free a (cast (ptr i8) cp) (iadd (slice-len path) 1) 1)
+            res))))))
+
+(defn
+  write-file
+  [(a (ptr Allocator)) (path (slice u8)) (data (slice u8))]
+  (-> (Result :i64 IoError))
+  (let
+    [cp (str->cstr a path)]
+    (if
+      (icmp-eq (cast :i64 cp) 0)
+      (Err (Errno 0))
+      (let
+        [fd
+          (open cp (| O_WRONLY (| O_CREAT O_TRUNC)) FILE_MODE_DEFAULT)
+          res
+          (if
+            (icmp-lt fd 0)
+            (Err [:i64 IoError] (Errno fd))
+            (write-all (fd-writer fd) (cast (ptr i8) (slice-data data)) (slice-len data)))]
+        (if (icmp-ge fd 0) (close fd) 0)
+        (raw-free a (cast (ptr i8) cp) (iadd (slice-len path) 1) 1)
+        res))))
+

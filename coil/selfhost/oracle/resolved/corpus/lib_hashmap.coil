@@ -208,8 +208,8 @@
         (do
           (store! (field m len) (iadd (load (field m len)) 1))
           (if (icmp-eq r 2) (store! (field m tombs) (isub (load (field m tombs)) 1)) 0))
-        0)))
-  0)
+        0)
+      r)))
 
 (defn
   hm-get
@@ -301,6 +301,19 @@
     0)
   (store! (field m slots) (cast (ptr (Entry K V)) 0))
   (store! (field m cap) 0)
+  (store! (field m len) 0)
+  (store! (field m tombs) 0)
+  0)
+
+(defn
+  hm-clear!
+  [K V]
+  [(m (mut (HashMap K V)))]
+  (-> :i64)
+  (if
+    (icmp-gt (load (field m cap)) 0)
+    (mem-zero (load (field m slots)) (load (field m cap)))
+    0)
   (store! (field m len) 0)
   (store! (field m tombs) 0)
   0)

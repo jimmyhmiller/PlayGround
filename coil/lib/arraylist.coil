@@ -109,6 +109,38 @@
   (store! (field l cap) 0)
   0)
 
+; Reset to empty WITHOUT freeing the buffer — length becomes 0 but the capacity is
+; kept for reuse (the elements are logically gone; a later push overwrites them). Use
+; `al-free!` to also release the storage.
+(defn al-clear! [T] [(l (mut (ArrayList T)))] (-> i64)
+  (store! (field l len) 0)
+  0)
+
+; Hand over ownership of the elements as a right-sized `(slice T)`, resetting the list
+; to empty. The buffer is shrunk to exactly `len` (via the allocator's resize) so the
+; returned slice owns a freeable, dangling-capacity-free block — free it with
+; `(raw-free a (cast (ptr i8) (slice-data s)) (* (slice-len s) (sizeof T)) (alignof T))`.
+; This is the safe hand-off `al-slice` is NOT: `al-slice` returns a borrowed view that
+; the next `al-push!` can invalidate by moving the buffer, whereas this transfers the
+; storage out of the list entirely. On an empty list the result is an empty slice.
+(defn al-into-slice [T] [(l (mut (ArrayList T)))] (-> (slice T))
+  (let [a    (load (field l alc))
+        n    (load (field l len))
+        cap  (load (field l cap))
+        data (load (field l data))
+        final (if (and (icmp-gt cap n) (icmp-gt n 0))
+                  ; shrink to exactly n; if the allocator can't, keep the full block
+                  ; (the extra capacity is leaked, never a use-after-free).
+                  (match (raw-resize a (cast (ptr i8) data)
+                                     (imul cap (sizeof T)) (imul n (sizeof T)) (alignof T))
+                    (Some [p] (cast (ptr T) p))
+                    (None []  data))
+                  data)]
+    (store! (field l data) (cast (ptr T) 0))
+    (store! (field l len) 0)
+    (store! (field l cap) 0)
+    (slice-new final n)))
+
 ; `(al-for [x xs] body...)` — iterate the list's elements (over its slice view).
 (defn al-for [(binding Code) & (body Code)] (-> Code)
   (if (not (icmp-eq (code-count binding) 2))

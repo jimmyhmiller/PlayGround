@@ -1053,6 +1053,306 @@ entry:
   ret %coil.core.Result__i64__io.IoError %call2
 }
 
+define internal %coil.core.Result__i64__io.IoError @io.read-exact(ptr %r, ptr %buf, i64 %len) {
+entry:
+  %sum.tmp15 = alloca %io.IoError, align 8
+  %sum.tmp12 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp7 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %call = call %coil.core.Result__i64__io.IoError @io.read-fill(ptr %r, ptr %buf, i64 %len)
+  store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
+  %tag1 = load i32, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 1
+  switch i32 %tag1, label %match.default [
+    i32 1, label %arm
+    i32 0, label %arm2
+  ]
+
+arm:                                              ; preds = %entry
+  %vf = getelementptr inbounds nuw { %io.IoError }, ptr %payload, i32 0, i32 0
+  %e = load %io.IoError, ptr %vf, align 8
+  %tag3 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 1, ptr %tag3, align 4
+  %payload4 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf5 = getelementptr inbounds nuw { %io.IoError }, ptr %payload4, i32 0, i32 0
+  store %io.IoError %e, ptr %vf5, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+
+arm2:                                             ; preds = %entry
+  %vf6 = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  %n = load i64, ptr %vf6, align 8
+  %cmp = icmp eq i64 %n, %len
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+match.default:                                    ; preds = %entry
+  unreachable
+
+then:                                             ; preds = %arm2
+  %tag8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp7, i32 0, i32 0
+  store i32 0, ptr %tag8, align 4
+  %payload9 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp7, i32 0, i32 1
+  %vf10 = getelementptr inbounds nuw { i64 }, ptr %payload9, i32 0, i32 0
+  store i64 %n, ptr %vf10, align 8
+  %sum11 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp7, align 8
+  ret %coil.core.Result__i64__io.IoError %sum11
+
+else:                                             ; preds = %arm2
+  %tag13 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp12, i32 0, i32 0
+  store i32 1, ptr %tag13, align 4
+  %payload14 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp12, i32 0, i32 1
+  %tag16 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp15, i32 0, i32 0
+  store i32 0, ptr %tag16, align 4
+  %payload17 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp15, i32 0, i32 1
+  %sum18 = load %io.IoError, ptr %sum.tmp15, align 8
+  %vf19 = getelementptr inbounds nuw { %io.IoError }, ptr %payload14, i32 0, i32 0
+  store %io.IoError %sum18, ptr %vf19, align 8
+  %sum20 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp12, align 8
+  ret %coil.core.Result__i64__io.IoError %sum20
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.read-fill(ptr %r, ptr %buf, i64 %len) {
+entry:
+  %sum.tmp37 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp31 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp22 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp16 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %cmp = icmp sle i64 %len, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 0, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  store i64 0, ptr %vf, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+
+else:                                             ; preds = %entry
+  %call = call %coil.core.Result__i64__io.IoError @io.read-some(ptr %r, ptr %buf, i64 %len)
+  store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
+  %tag1 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
+  %tag2 = load i32, ptr %tag1, align 4
+  %payload3 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 1
+  switch i32 %tag2, label %match.default [
+    i32 1, label %arm
+    i32 0, label %arm4
+  ]
+
+arm:                                              ; preds = %else
+  %vf5 = getelementptr inbounds nuw { %io.IoError }, ptr %payload3, i32 0, i32 0
+  %e = load %io.IoError, ptr %vf5, align 8
+  %tag7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 0
+  store i32 1, ptr %tag7, align 4
+  %payload8 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, i32 0, i32 1
+  %vf9 = getelementptr inbounds nuw { %io.IoError }, ptr %payload8, i32 0, i32 0
+  store %io.IoError %e, ptr %vf9, align 8
+  %sum10 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp6, align 8
+  ret %coil.core.Result__i64__io.IoError %sum10
+
+arm4:                                             ; preds = %else
+  %vf11 = getelementptr inbounds nuw { i64 }, ptr %payload3, i32 0, i32 0
+  %n = load i64, ptr %vf11, align 8
+  %cmp12 = icmp sle i64 %n, 0
+  %ifc13 = icmp ne i1 %cmp12, false
+  br i1 %ifc13, label %then14, label %else15
+
+match.default:                                    ; preds = %else
+  unreachable
+
+then14:                                           ; preds = %arm4
+  %tag17 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp16, i32 0, i32 0
+  store i32 0, ptr %tag17, align 4
+  %payload18 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp16, i32 0, i32 1
+  %vf19 = getelementptr inbounds nuw { i64 }, ptr %payload18, i32 0, i32 0
+  store i64 0, ptr %vf19, align 8
+  %sum20 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp16, align 8
+  ret %coil.core.Result__i64__io.IoError %sum20
+
+else15:                                           ; preds = %arm4
+  %idx = getelementptr i8, ptr %buf, i64 %n
+  %sub = sub i64 %len, %n
+  %call21 = call %coil.core.Result__i64__io.IoError @io.read-fill(ptr %r, ptr %idx, i64 %sub)
+  store %coil.core.Result__i64__io.IoError %call21, ptr %match.tmp22, align 8
+  %tag23 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp22, i32 0, i32 0
+  %tag24 = load i32, ptr %tag23, align 4
+  %payload25 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp22, i32 0, i32 1
+  switch i32 %tag24, label %match.default28 [
+    i32 1, label %arm26
+    i32 0, label %arm27
+  ]
+
+arm26:                                            ; preds = %else15
+  %vf29 = getelementptr inbounds nuw { %io.IoError }, ptr %payload25, i32 0, i32 0
+  %e30 = load %io.IoError, ptr %vf29, align 8
+  %tag32 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp31, i32 0, i32 0
+  store i32 1, ptr %tag32, align 4
+  %payload33 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp31, i32 0, i32 1
+  %vf34 = getelementptr inbounds nuw { %io.IoError }, ptr %payload33, i32 0, i32 0
+  store %io.IoError %e30, ptr %vf34, align 8
+  %sum35 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp31, align 8
+  ret %coil.core.Result__i64__io.IoError %sum35
+
+arm27:                                            ; preds = %else15
+  %vf36 = getelementptr inbounds nuw { i64 }, ptr %payload25, i32 0, i32 0
+  %m = load i64, ptr %vf36, align 8
+  %tag38 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp37, i32 0, i32 0
+  store i32 0, ptr %tag38, align 4
+  %payload39 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp37, i32 0, i32 1
+  %add = add i64 %n, %m
+  %vf40 = getelementptr inbounds nuw { i64 }, ptr %payload39, i32 0, i32 0
+  store i64 %add, ptr %vf40, align 8
+  %sum41 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp37, align 8
+  ret %coil.core.Result__i64__io.IoError %sum41
+
+match.default28:                                  ; preds = %else15
+  unreachable
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.read-line(ptr %r, ptr %buf, i64 %cap) {
+entry:
+  %sum.tmp45 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp34 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp28 = alloca %io.IoError, align 8
+  %sum.tmp25 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp10 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %stack.slot = alloca i64, align 8
+  store i64 0, ptr %stack.slot, align 8
+  %stack.slot1 = alloca i8, align 1
+  br label %loop.body
+
+loop.body:                                        ; preds = %entry
+  br label %loop.body2
+
+loop.after:                                       ; preds = %then43, %ifcont, %arm, %then
+  %loop.val = phi %coil.core.Result__i64__io.IoError [ %sum, %then ], [ %sum14, %arm ], [ %ifval, %ifcont ], [ %sum50, %then43 ]
+  ret %coil.core.Result__i64__io.IoError %loop.val
+
+loop.body2:                                       ; preds = %match.end, %loop.body
+  %load = load i64, ptr %stack.slot, align 8
+  %cmp = icmp sge i64 %load, %cap
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+loop.after3:                                      ; No predecessors!
+  unreachable
+
+then:                                             ; preds = %loop.body2
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 0, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %load4 = load i64, ptr %stack.slot, align 8
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  store i64 %load4, ptr %vf, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  br label %loop.after
+
+else:                                             ; preds = %loop.body2
+  %call = call %coil.core.Result__i64__io.IoError @io.read-some(ptr %r, ptr %stack.slot1, i64 1)
+  store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
+  %tag5 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
+  %tag6 = load i32, ptr %tag5, align 4
+  %payload7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 1
+  switch i32 %tag6, label %match.default [
+    i32 1, label %arm
+    i32 0, label %arm8
+  ]
+
+arm:                                              ; preds = %else
+  %vf9 = getelementptr inbounds nuw { %io.IoError }, ptr %payload7, i32 0, i32 0
+  %e = load %io.IoError, ptr %vf9, align 8
+  %tag11 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp10, i32 0, i32 0
+  store i32 1, ptr %tag11, align 4
+  %payload12 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp10, i32 0, i32 1
+  %vf13 = getelementptr inbounds nuw { %io.IoError }, ptr %payload12, i32 0, i32 0
+  store %io.IoError %e, ptr %vf13, align 8
+  %sum14 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp10, align 8
+  br label %loop.after
+
+arm8:                                             ; preds = %else
+  %vf15 = getelementptr inbounds nuw { i64 }, ptr %payload7, i32 0, i32 0
+  %n = load i64, ptr %vf15, align 8
+  %cmp16 = icmp sle i64 %n, 0
+  %ifc17 = icmp ne i1 %cmp16, false
+  br i1 %ifc17, label %then18, label %else19
+
+match.default:                                    ; preds = %else
+  unreachable
+
+match.end:                                        ; preds = %else44
+  %match.val = phi i64 [ %add, %else44 ]
+  br label %loop.body2
+
+then18:                                           ; preds = %arm8
+  %load20 = load i64, ptr %stack.slot, align 8
+  %cmp21 = icmp eq i64 %load20, 0
+  %ifc22 = icmp ne i1 %cmp21, false
+  br i1 %ifc22, label %then23, label %else24
+
+else19:                                           ; preds = %arm8
+  %load40 = load i8, ptr %stack.slot1, align 1
+  %zext = zext i8 %load40 to i64
+  %cmp41 = icmp eq i64 %zext, 10
+  %ifc42 = icmp ne i1 %cmp41, false
+  br i1 %ifc42, label %then43, label %else44
+
+then23:                                           ; preds = %then18
+  %tag26 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp25, i32 0, i32 0
+  store i32 1, ptr %tag26, align 4
+  %payload27 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp25, i32 0, i32 1
+  %tag29 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp28, i32 0, i32 0
+  store i32 0, ptr %tag29, align 4
+  %payload30 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp28, i32 0, i32 1
+  %sum31 = load %io.IoError, ptr %sum.tmp28, align 8
+  %vf32 = getelementptr inbounds nuw { %io.IoError }, ptr %payload27, i32 0, i32 0
+  store %io.IoError %sum31, ptr %vf32, align 8
+  %sum33 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp25, align 8
+  br label %ifcont
+
+else24:                                           ; preds = %then18
+  %tag35 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp34, i32 0, i32 0
+  store i32 0, ptr %tag35, align 4
+  %payload36 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp34, i32 0, i32 1
+  %load37 = load i64, ptr %stack.slot, align 8
+  %vf38 = getelementptr inbounds nuw { i64 }, ptr %payload36, i32 0, i32 0
+  store i64 %load37, ptr %vf38, align 8
+  %sum39 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp34, align 8
+  br label %ifcont
+
+ifcont:                                           ; preds = %else24, %then23
+  %ifval = phi %coil.core.Result__i64__io.IoError [ %sum33, %then23 ], [ %sum39, %else24 ]
+  br label %loop.after
+
+then43:                                           ; preds = %else19
+  %tag46 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp45, i32 0, i32 0
+  store i32 0, ptr %tag46, align 4
+  %payload47 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp45, i32 0, i32 1
+  %load48 = load i64, ptr %stack.slot, align 8
+  %vf49 = getelementptr inbounds nuw { i64 }, ptr %payload47, i32 0, i32 0
+  store i64 %load48, ptr %vf49, align 8
+  %sum50 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp45, align 8
+  br label %loop.after
+
+else44:                                           ; preds = %else19
+  %load51 = load i64, ptr %stack.slot, align 8
+  %idx = getelementptr i8, ptr %buf, i64 %load51
+  store i8 %load40, ptr %idx, align 1
+  %load52 = load i64, ptr %stack.slot, align 8
+  %add = add i64 %load52, 1
+  store i64 %add, ptr %stack.slot, align 8
+  br label %match.end
+}
+
 define internal %coil.core.Result__i64__io.IoError @io.read-some(ptr %r, ptr %buf, i64 %len) {
 entry:
   %field = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 0
