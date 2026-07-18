@@ -371,8 +371,18 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
 - [x] **gen-2** `dyn` + generic impl → `UNIMPLEMENTED` + Abort trap 6. A compiler abort is never OK.
 - [x] **gen-7** A generic call in `(const …)` reports "undefined function" for a function defined
       three lines up.
-- [ ] **gen-10** Monomorphization is ~O(n^1.7) while its IR output is exactly linear — smells like a
-      linear scan in the instantiation worklist. 600 instantiations = 14s before LLVM starts.
+- [x] **gen-10** — ✅ DONE. The mono worklist's three per-instantiation lookups were LINEAR SCANS of
+      lists that grow with every instantiation: the dedupe sets (`queued-structs/sums/funcs` via
+      `set-contains`), the output insert-or-replace-by-name (`upsert-*` scanning `out-*`), and the
+      instantiation-origin map (`io-record!`/`io-find` scanning `io-mangled`) — so mono was ~O(n^2)
+      while its IR output is exactly linear. All three are now hash-indexed (`HashMap (slice u8) i64`
+      side-indexes: `queued-*` as sets, `out-*-idx` for upsert, `io-index` for origins) → O(1) each.
+      BEHAVIOUR IS BYTE-IDENTICAL: the out-* ArrayLists stay the source of truth for order (append on
+      first insert, in-place replace after), first-encounter pending order is preserved, and `io-find`
+      returns the same index — gate-full stays byte-exact, fixpoint held. Measured on an isolated
+      LLVM-backend build: 600→2400 instantiations went from 3.2×/doubling (≈O(n^1.9)) to ≈linear, a
+      33× speedup at N=2400 (7.26s → 0.22s). Teeth in `gate-cli.sh` (relative, load-invariant timing
+      probe: FAILS on the seed's O(n^2) mono, PASSES here).
 - [x] **gen-13** No const generics: an impl can't be generic over array length. Guide advertises
       `(array T N)` as implementable without noting N must be literal.
 - [x] **tool-7** REPL is i64-only, can't `println`, and leaks `/tmp/coil-repl-eval.coil` in every error.

@@ -896,6 +896,56 @@ else
   echo "  (skip: wasm-tools not on PATH)"
 fi
 
+echo "== gen-10: monomorphization instantiation lookup is O(1) (hash-indexed), not a linear scan =="
+# Mono's dedupe SETS (queued-structs/sums/funcs), the output insert-or-replace-by-name
+# (out-*-idx), and the instantiation-origin map (io-index) are all hash-indexed, so each is
+# an O(1) lookup. Before gen-10 they were linear scans of lists that grow with EVERY
+# instantiation, making mono ~O(n^1.7) while its IR output is exactly linear (a reported 600
+# instantiations = 14s before LLVM even starts). The fix is behaviour-preserving — gate-full
+# proves the emitted IR is byte-identical — so the ONLY observable is SPEED.
+#
+# TEETH (perf, so it must be a timing check): on a many-instantiation program, $COIL must be
+# MEASURABLY faster than the pre-gen-10 seed. This is a RELATIVE, load-invariant comparison —
+# both binaries are timed back-to-back under the same machine load, best-of-2 min (so a
+# transient scheduler spike can't false-fail it), and only the RATIO is asserted (a uniformly
+# slow/fast machine cancels out). It FAILS on the seed (seed-vs-seed is 1.00x, below the
+# threshold) and on any future regression that reintroduces a scan into the worklist.
+SEED_BIN=selfhost/seed/coil-seed
+if [ -x "$SEED_BIN" ] && [ -x /usr/bin/time ]; then
+  perf_src="$T/mono_perf.coil"
+  # One generic `hub` fans out to 250 generic structs; calling it at 12 distinct array types
+  # forces ~3000 DISTINCT struct instantiations (the O(n^2) regime) while keeping check/codegen
+  # cheap (structs have no bodies) so the mono cost is the dominant differ- between the two builds.
+  {
+    for j in $(seq 1 250); do printf '(defstruct S%s [T] [(v T)])\n' "$j"; done
+    printf '(defn hub [T] [] (-> i64) (do'
+    for j in $(seq 1 250); do printf ' (zeroed (S%s T))' "$j"; done
+    printf ' 0))\n(defn main [] (-> i64)\n'
+    for k in $(seq 1 12); do printf '  (hub [(array i8 %s)])\n' "$k"; done
+    printf '  0)\n'
+  } > "$perf_src"
+  # min wall-clock of 2 `emit-ir` runs; empty string on a compile failure (guarded below).
+  monotime() {
+    local best="" t
+    for _ in 1 2; do
+      t=$( { /usr/bin/time -p "$1" emit-ir "$perf_src" >/dev/null; } 2>&1 | awk '/^real/{print $2}')
+      [ -n "$t" ] || { best=""; break; }
+      best=$(awk -v a="$best" -v b="$t" 'BEGIN{ if (a=="" || b+0<a+0) print b; else print a }')
+    done
+    printf '%s' "$best"
+  }
+  t_coil=$(monotime "$COIL"); t_seed=$(monotime "$SEED_BIN")
+  if [ -z "$t_coil" ] || [ -z "$t_seed" ]; then
+    bad "gen-10 mono lookup is O(1) (faster than the pre-fix seed)" "emit-ir failed on the perf probe (coil='$t_coil' seed='$t_seed')"
+  elif awk -v c="$t_coil" -v s="$t_seed" 'BEGIN{ exit !(c*1.25 < s) }'; then
+    ok "gen-10 mono lookup is O(1) — $(awk -v c="$t_coil" -v s="$t_seed" 'BEGIN{printf "%.2fx", s/c}') faster than the seed (${t_coil}s vs ${t_seed}s)"
+  else
+    bad "gen-10 mono lookup is O(1) (faster than the pre-fix seed)" "want >=1.25x vs seed, got ${t_seed}s/${t_coil}s = $(awk -v c="$t_coil" -v s="$t_seed" 'BEGIN{printf "%.2fx", s/c}')"
+  fi
+else
+  echo "  (skip: no $SEED_BIN or /usr/bin/time for the gen-10 perf probe)"
+fi
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL
