@@ -1,8 +1,8 @@
 //! End-to-end demo: the Account/Money hot-update scenario driven by BOTH
-//! executors — the reference interpreter and the LLVM `step` backend — showing
-//! they produce identical effects, pauses, and results. This is
-//! `RUNTIME_DESIGN.md` made real: LLVM accelerates execution while the runtime
-//! keeps pause/repair/resume.
+//! configurations of the one engine — never-promote (interpreter) and
+//! always-JIT — showing they produce identical effects, pauses, and results.
+//! This is `RUNTIME_DESIGN.md` made real: LLVM accelerates execution while the
+//! engine keeps pause/repair/resume.
 
 use livetype::*;
 use std::collections::BTreeMap;
@@ -26,8 +26,7 @@ fn field(id: FieldId, name: &str, ty: Type) -> Field {
 /// Account.balance : Int, `charge` subtracts, `main` opens an account, emits its
 /// balance, hits a Yield safe point, then charges 5. The Yield lets both
 /// executors stop at the same place before the hot update lands.
-fn setup() -> Runtime {
-    let mut rt = Runtime::default();
+fn setup(rt: &Engine) {
     rt.install_schema(Schema {
         type_id: ACCOUNT,
         version: Version(1),
@@ -89,12 +88,11 @@ fn setup() -> Runtime {
         ],
     })
     .unwrap();
-    rt
 }
 
 // The hot update: balance becomes Money (breaks `charge`), then the fix, then
 // the migration.
-fn update_break(rt: &mut Runtime) {
+fn update_break(rt: &Engine) {
     rt.install_schema(Schema {
         type_id: MONEY,
         version: Version(1),
@@ -111,7 +109,7 @@ fn update_break(rt: &mut Runtime) {
     .unwrap();
 }
 
-fn update_fix(rt: &mut Runtime) {
+fn update_fix(rt: &Engine) {
     rt.install_function(Function {
         id: CHARGE,
         version: Version(3),
@@ -141,7 +139,7 @@ fn update_fix(rt: &mut Runtime) {
     .unwrap();
 }
 
-fn update_migrate(rt: &mut Runtime) {
+fn update_migrate(rt: &Engine) {
     rt.install_migration(Migration {
         type_id: ACCOUNT,
         from: Version(1),
@@ -158,51 +156,32 @@ fn update_migrate(rt: &mut Runtime) {
     .unwrap();
 }
 
-/// Drive the scenario on the interpreter, narrating each phase.
-fn run_interpreter() -> (ActorStatus, Vec<Value>) {
-    println!("── interpreter ──");
-    let mut rt = setup();
-    let actor = rt.spawn(MAIN, vec![]).unwrap();
+/// Drive the scenario on one engine configuration, narrating each phase.
+fn run_config(label: &str, rt: std::sync::Arc<Engine>) -> (ActorStatus, Vec<Value>) {
+    println!("── {label} ──");
+    setup(&rt);
+    let mut actor = rt.spawn(MAIN, vec![]).unwrap();
     // Run to the yield safe point (Const, New, Emit, Yield).
-    for _ in 0..4 {
-        rt.step(actor);
+    loop {
+        match rt.step(&mut actor) {
+            Turn::Progress => {}
+            _ => break,
+        }
     }
-    println!("  at yield, effects so far: {:?}", rt.output);
+    println!("  at yield, effects so far: {:?}", rt.output());
 
-    update_break(&mut rt);
-    rt.run();
-    println!("  after update:   {:?}", rt.actors[&actor].status);
-
-    update_fix(&mut rt);
-    rt.run();
-    println!("  after fix:      {:?}", rt.actors[&actor].status);
-
-    update_migrate(&mut rt);
-    rt.run();
-    println!("  after migrate:  {:?}", rt.actors[&actor].status);
-    (rt.actors[&actor].status.clone(), rt.output.clone())
-}
-
-/// Drive the same scenario on the LLVM `step` backend, narrating each phase.
-fn run_jit() -> (ActorStatus, Vec<Value>) {
-    println!("── llvm jit ──");
-    let mut rt = setup();
-    let mut actor = JitActor::spawn(&rt, 1, MAIN, vec![]).unwrap();
-    drive(&mut rt, &mut actor, true).unwrap();
-    println!("  at yield, effects so far: {:?}", rt.output);
-
-    update_break(&mut rt);
-    drive(&mut rt, &mut actor, false).unwrap();
+    update_break(&rt);
+    rt.run(&mut actor);
     println!("  after update:   {:?}", actor.status);
 
-    update_fix(&mut rt);
-    drive(&mut rt, &mut actor, false).unwrap();
+    update_fix(&rt);
+    rt.resume(&mut actor);
     println!("  after fix:      {:?}", actor.status);
 
-    update_migrate(&mut rt);
-    drive(&mut rt, &mut actor, false).unwrap();
+    update_migrate(&rt);
+    rt.resume(&mut actor);
     println!("  after migrate:  {:?}", actor.status);
-    (actor.status.clone(), rt.output.clone())
+    (actor.status.clone(), rt.output())
 }
 
 /// Compile a program written in the Rust-flavored surface syntax and run it.
@@ -213,7 +192,7 @@ fn run_frontend() {
             balance: i64,
             fee: i64 = 0,
         }
-        fn charge(a: &Account, amt: i64) -> i64 {
+        fn charge(a: Account, amt: i64) -> i64 {
             let b = a.balance;
             return b - amt;
         }
@@ -223,27 +202,27 @@ fn run_frontend() {
             return charge(acct, 5);
         }
     "#;
-    let mut compiled = livetype_core::compile(source).expect("compile");
+    let compiled = livetype_core::compile(source).expect("compile");
     let main_id = compiled.functions["main"];
-    let actor = compiled.runtime.spawn(main_id, vec![]).unwrap();
-    compiled.runtime.run();
+    let outcome = compiled.engine.run_call(main_id, vec![]);
     println!(
         "  result: {:?}; effects: {:?}",
-        compiled.runtime.actors[&actor].status, compiled.runtime.output
+        outcome,
+        compiled.engine.output()
     );
 }
 
 fn main() {
     run_frontend();
     println!();
-    let (interp_status, interp_out) = run_interpreter();
+    let (interp_status, interp_out) = run_config("interpreter", Engine::interp());
     println!();
-    let (jit_status, jit_out) = run_jit();
+    let (jit_status, jit_out) = run_config("llvm jit", jit_engine(0));
     println!();
     let matched = interp_status == jit_status && interp_out == jit_out;
     println!(
         "interpreter and jit agree: {matched}  (status {:?}, effects {:?})",
         jit_status, jit_out
     );
-    assert!(matched, "executors diverged");
+    assert!(matched, "configurations diverged");
 }

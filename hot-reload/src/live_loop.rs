@@ -86,7 +86,7 @@ fn driver(edits: Receiver<ToDriver>, events: Sender<FromDriver>) {
     .unwrap();
 
     let main = s.fn_id("main").unwrap();
-    let actor = s.runtime.spawn(main, vec![]).unwrap();
+    let mut actor = s.engine.spawn(main, vec![]).unwrap();
     let mut seen = 0;
 
     loop {
@@ -97,16 +97,17 @@ fn driver(edits: Receiver<ToDriver>, events: Sender<FromDriver>) {
                 Err(e) => events.send(FromDriver::Note(format!("edit rejected: {e}"))).ok(),
             };
         }
-        match &s.runtime.actors[&actor].status {
+        match &actor.status {
             ActorStatus::Complete(_) => {
                 let _ = events.send(FromDriver::Done);
                 break;
             }
             ActorStatus::Runnable => {
-                s.runtime.step(actor);
-                if s.runtime.output.len() > seen {
-                    seen = s.runtime.output.len();
-                    if let Value::I64(n) = s.runtime.output[seen - 1] {
+                s.engine.step(&mut actor);
+                let out = s.engine.output();
+                if out.len() > seen {
+                    seen = out.len();
+                    if let Value::I64(n) = out[seen - 1] {
                         let _ = events.send(FromDriver::Emit(n));
                     }
                     // Pace so it's watchable (and so an edit can land mid-run).
@@ -119,6 +120,7 @@ fn driver(edits: Receiver<ToDriver>, events: Sender<FromDriver>) {
                 match edits.recv() {
                     Ok(ToDriver::Edit(src)) => {
                         let _ = s.eval(&src);
+                        s.engine.thaw(&mut actor);
                     }
                     Err(_) => break,
                 }

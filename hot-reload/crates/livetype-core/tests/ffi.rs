@@ -82,9 +82,9 @@ fn a_global_reference_is_a_gc_root() {
          fn read() -> i64 { c.v }",
     )
     .unwrap();
-    let before = s.runtime.heap.len();
+    let before = s.engine.shared().object_count();
     assert_eq!(before, 1);
-    let freed = s.runtime.collect_garbage();
+    let freed = s.engine.collect(&[]);
     assert_eq!(freed, 0, "the global's object must be rooted");
     assert_eq!(s.call("read", vec![]).unwrap(), Value::I64(7));
 }

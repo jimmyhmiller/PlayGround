@@ -17,8 +17,8 @@ fn field(id: FieldId, ty: Type) -> Field {
     }
 }
 
-fn initial_runtime() -> Runtime {
-    let mut runtime = Runtime::default();
+fn initial_engine() -> std::sync::Arc<Engine> {
+    let runtime = Engine::interp();
     runtime
         .install_schema(Schema {
             type_id: BOX,
@@ -78,12 +78,12 @@ fn initial_runtime() -> Runtime {
 
 #[test]
 fn repairs_resume_exactly_and_effects_are_not_replayed() {
-    let mut runtime = initial_runtime();
-    let actor = runtime.spawn(MAIN, vec![]).unwrap();
+    let runtime = initial_engine();
+    let mut actor = runtime.spawn(MAIN, vec![]).unwrap();
     for _ in 0..3 {
-        runtime.step(actor);
+        runtime.step(&mut actor);
     }
-    assert_eq!(runtime.output, vec![Value::I64(42)]);
+    assert_eq!(runtime.output(), vec![Value::I64(42)]);
 
     runtime
         .install_schema(Schema {
@@ -101,9 +101,9 @@ fn repairs_resume_exactly_and_effects_are_not_replayed() {
             fields: vec![field(VALUE, Type::Ref(WRAPPER))],
         })
         .unwrap();
-    runtime.run();
+    runtime.run(&mut actor);
     assert!(matches!(
-        runtime.actors[&actor].status,
+        actor.status,
         ActorStatus::Paused(Condition::BrokenFunction { function: READ, .. })
     ));
 
@@ -130,9 +130,9 @@ fn repairs_resume_exactly_and_effects_are_not_replayed() {
             ],
         })
         .unwrap();
-    runtime.run();
+    runtime.resume(&mut actor);
     assert!(matches!(
-        runtime.actors[&actor].status,
+        actor.status,
         ActorStatus::Paused(Condition::MissingMigration { .. })
     ));
 
@@ -151,23 +151,22 @@ fn repairs_resume_exactly_and_effects_are_not_replayed() {
             )]),
         })
         .unwrap();
-    runtime.run();
     assert_eq!(
-        runtime.actors[&actor].status,
-        ActorStatus::Complete(Value::I64(42))
+        runtime.resume(&mut actor),
+        Outcome::Complete(Value::I64(42))
     );
-    assert_eq!(runtime.output, vec![Value::I64(42)]);
+    assert_eq!(runtime.output(), vec![Value::I64(42)]);
 }
 
 #[test]
 fn collection_traces_explicit_frame_roots() {
-    let mut runtime = initial_runtime();
-    let actor = runtime.spawn(MAIN, vec![]).unwrap();
-    runtime.step(actor);
-    runtime.step(actor);
-    assert_eq!(runtime.heap.len(), 1);
-    assert_eq!(runtime.collect_garbage(), 0);
-    runtime.run();
-    assert_eq!(runtime.collect_garbage(), 1);
-    assert!(runtime.heap.is_empty());
+    let runtime = initial_engine();
+    let mut actor = runtime.spawn(MAIN, vec![]).unwrap();
+    runtime.step(&mut actor);
+    runtime.step(&mut actor);
+    assert_eq!(runtime.shared().object_count(), 1);
+    assert_eq!(runtime.collect(&[&actor]), 0);
+    runtime.run(&mut actor);
+    assert_eq!(runtime.collect(&[&actor]), 1);
+    assert_eq!(runtime.shared().object_count(), 0);
 }

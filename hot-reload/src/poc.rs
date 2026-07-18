@@ -40,12 +40,12 @@ fn main() -> i64 {
     );
 
     let main = s.fn_id("main").unwrap();
-    let actor = s.runtime.spawn(main, vec![]).unwrap();
+    let mut actor = s.engine.spawn(main, vec![]).unwrap();
     let mut seen = 0;
 
     narrate("start the service; let two requests go by");
-    run_to_yield(&mut s, actor, &mut seen);
-    run_to_yield(&mut s, actor, &mut seen);
+    run_to_yield(&mut s, &mut actor, &mut seen);
+    run_to_yield(&mut s, &mut actor, &mut seen);
 
     // ── live edit 1: additive change, auto-migrated ────────────────────────
     edit(
@@ -61,8 +61,8 @@ fn charge(a: Account, amt: i64) -> i64 {
     );
     narrate("resume — the SAME running loop now charges the new way, and the");
     narrate("live account grew a `fee` field with no restart (auto-migrated)");
-    run_to_yield(&mut s, actor, &mut seen);
-    run_to_yield(&mut s, actor, &mut seen);
+    run_to_yield(&mut s, &mut actor, &mut seen);
+    run_to_yield(&mut s, &mut actor, &mut seen);
 
     // ── live edit 2: a breaking change ─────────────────────────────────────
     edit(
@@ -75,8 +75,8 @@ struct Account { balance: Money }
     );
     narrate("resume — `charge` now computes `Money - i64`, which is inconsistent.");
     narrate("the running loop does not crash: it FREEZES at the point of use.");
-    run_to_yield(&mut s, actor, &mut seen);
-    report_status(&s, actor);
+    run_to_yield(&mut s, &mut actor, &mut seen);
+    report_status(&actor);
 
     // ── repair, live ───────────────────────────────────────────────────────
     edit(
@@ -89,15 +89,15 @@ fn charge(a: Account, amt: i64) -> i64 {
 "#,
     );
     narrate("resume — the fixed `charge` type-checks, so the frozen frame thaws...");
-    run_to_yield(&mut s, actor, &mut seen);
-    report_status(&s, actor);
+    run_to_yield(&mut s, &mut actor, &mut seen);
+    report_status(&actor);
     narrate("...and now the live account still holds an old-shaped balance, so it");
     narrate("pauses for a migration. We supply the Int→Money transformer:");
     supply_money_migration(&mut s);
     narrate("resume — migrated, and the service runs on. Never restarted.");
-    run_to_yield(&mut s, actor, &mut seen);
-    run_to_yield(&mut s, actor, &mut seen);
-    report_status(&s, actor);
+    run_to_yield(&mut s, &mut actor, &mut seen);
+    run_to_yield(&mut s, &mut actor, &mut seen);
+    report_status(&actor);
 
     println!("\nAll of that — behavior change, data migration, a breaking edit, a");
     println!("trap, and a live repair — happened to ONE running program, from source.\n");
@@ -121,23 +121,18 @@ fn narrate(msg: &str) {
 }
 
 /// Step the running actor to its next `Yield` (or a stop), printing any newly
-/// emitted values.
-fn run_to_yield(s: &mut Session, actor: ActorId, seen: &mut usize) {
-    while matches!(s.runtime.actors[&actor].status, ActorStatus::Runnable) {
-        let (key, pc) = {
-            let f = s.runtime.actors[&actor].frames.last().unwrap();
-            (f.function, f.pc)
-        };
-        let was_yield = matches!(
-            &s.runtime.world.functions[&key],
-            FunctionState::Ready(f) if matches!(f.code[pc], Instruction::Yield)
-        );
-        s.runtime.step(actor);
-        if was_yield {
-            break;
+/// emitted values. A paused actor is thawed first — a repair may have landed;
+/// if not, it re-traps at the same spot.
+fn run_to_yield(s: &mut Session, actor: &mut Actor, seen: &mut usize) {
+    s.engine.thaw(actor);
+    loop {
+        match s.engine.step(actor) {
+            Turn::Progress => {}
+            Turn::Yielded | Turn::Done | Turn::Paused => break,
+            Turn::Blocked => unreachable!("this demo has no message passing"),
         }
     }
-    let out = &s.runtime.output;
+    let out = s.engine.output();
     for v in &out[*seen..] {
         if let Value::I64(n) = v {
             println!("     · charged down to {n}");
@@ -146,8 +141,8 @@ fn run_to_yield(s: &mut Session, actor: ActorId, seen: &mut usize) {
     *seen = out.len();
 }
 
-fn report_status(s: &Session, actor: ActorId) {
-    match &s.runtime.actors[&actor].status {
+fn report_status(actor: &Actor) {
+    match &actor.status {
         ActorStatus::Complete(v) => println!("     ⏹ finished: {v:?}"),
         ActorStatus::Runnable => {}
         ActorStatus::Paused(Condition::BrokenFunction { function, .. }) => {
@@ -169,8 +164,8 @@ fn supply_money_migration(s: &mut Session) {
     let money = s.struct_id("Money").unwrap();
     let bal = field_id(s, "Account", "balance");
     let cents = field_id(s, "Money", "cents");
-    let to = s.runtime.world.current_schemas[&account];
-    s.runtime
+    let to = s.engine.with_world(|w| w.current_schemas[&account]);
+    s.engine
         .install_migration(Migration {
             type_id: account,
             from: Version(to.0 - 1),
@@ -186,11 +181,13 @@ fn supply_money_migration(s: &mut Session) {
 
 fn field_id(s: &Session, struct_name: &str, field_name: &str) -> FieldId {
     let tid = s.struct_id(struct_name).unwrap();
-    let v = s.runtime.world.current_schemas[&tid];
-    s.runtime.world.schemas[&(tid, v)]
-        .fields
-        .iter()
-        .find(|f| f.name == field_name)
-        .unwrap()
-        .id
+    s.engine.with_world(|w| {
+        let v = w.current_schemas[&tid];
+        w.schemas[&(tid, v)]
+            .fields
+            .iter()
+            .find(|f| f.name == field_name)
+            .unwrap()
+            .id
+    })
 }

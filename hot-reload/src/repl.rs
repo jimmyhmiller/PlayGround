@@ -30,7 +30,7 @@ fn main() {
     // The session is owned by the main thread while idle, and moved to the
     // driver thread during a `:live` run (reclaimed on `:stop`).
     let mut s: Option<Session> = Some(Session::new());
-    let mut actor: Option<ActorId> = None;
+    let mut actor: Option<Actor> = None;
     let mut seen = 0usize;
     let mut live: Option<Live> = None;
 
@@ -89,7 +89,7 @@ fn main() {
             match s.as_mut().unwrap().eval(&buf) {
                 Ok(()) => {
                     println!("  ✓ installed");
-                    note_resumable(s.as_ref().unwrap(), actor);
+                    note_resumable(s.as_ref().unwrap(), actor.as_ref());
                 }
                 Err(e) => println!("  ✗ {e}"),
             }
@@ -128,7 +128,7 @@ fn start_live(s: &mut Option<Session>, name: &str) -> Option<Live> {
 /// edits between steps; block for input when it finishes or freezes.
 fn live_driver(s: &mut Session, name: &str, rx: Receiver<ToDriver>) {
     let id = s.fn_id(name).unwrap();
-    let actor = match s.runtime.spawn(id, vec![]) {
+    let mut actor = match s.engine.spawn(id, vec![]) {
         Ok(a) => a,
         Err(c) => {
             println!("\r  cannot start `{name}`: {c:?}");
@@ -148,12 +148,13 @@ fn live_driver(s: &mut Session, name: &str, rx: Receiver<ToDriver>) {
                 Err(_) => break,
             }
         }
-        match &s.runtime.actors[&actor].status {
+        match &actor.status {
             ActorStatus::Runnable => {
-                s.runtime.step(actor);
-                if s.runtime.output.len() > seen {
-                    seen = s.runtime.output.len();
-                    if let Value::I64(n) = s.runtime.output[seen - 1] {
+                s.engine.step(&mut actor);
+                let out = s.engine.output();
+                if out.len() > seen {
+                    seen = out.len();
+                    if let Value::I64(n) = out[seen - 1] {
                         println!("\r  → {n}");
                     }
                     thread::sleep(Duration::from_millis(350));
@@ -172,6 +173,9 @@ fn live_driver(s: &mut Session, name: &str, rx: Receiver<ToDriver>) {
                         if let Err(e) = s.eval(&src) {
                             println!("\r  ✗ {e}");
                         }
+                        // If that edit repaired the freeze, the next step
+                        // resumes; if not, it re-traps in place.
+                        s.engine.thaw(&mut actor);
                     }
                     _ => return,
                 }
@@ -218,7 +222,7 @@ fn braces_balanced(s: &str) -> bool {
 }
 
 /// Returns false to quit.
-fn command(cmd: &str, s: &mut Session, actor: &mut Option<ActorId>, seen: &mut usize) -> bool {
+fn command(cmd: &str, s: &mut Session, actor: &mut Option<Actor>, seen: &mut usize) -> bool {
     let mut parts = cmd.split_whitespace();
     let head = parts.next().unwrap_or("");
     let rest: Vec<&str> = parts.collect();
@@ -235,11 +239,11 @@ fn command(cmd: &str, s: &mut Session, actor: &mut Option<ActorId>, seen: &mut u
         ":run" => run_actor(s, actor, seen, &rest),
         ":go" => go(s, actor, seen),
         ":status" => match actor {
-            Some(a) => print_status(s, *a),
+            Some(a) => print_status(s, a),
             None => println!("  (no actor — `:run <fn>` first)"),
         },
         ":out" => match actor {
-            Some(_) => println!("  emitted: {:?}", s.runtime.output),
+            Some(_) => println!("  emitted: {:?}", s.engine.output()),
             None => println!("  (nothing running)"),
         },
         ":migrate" => migrate(s, &cmd[":migrate".len()..]),
@@ -249,30 +253,39 @@ fn command(cmd: &str, s: &mut Session, actor: &mut Option<ActorId>, seen: &mut u
 }
 
 fn show_defs(s: &Session) {
-    let mut structs: Vec<_> = s.runtime.world.current_schemas.keys().copied().collect();
-    structs.sort_unstable();
-    for tid in structs {
-        let v = s.runtime.world.current_schemas[&tid];
-        let sc = &s.runtime.world.schemas[&(tid, v)];
-        let fields: Vec<String> = sc
-            .fields
-            .iter()
-            .map(|f| format!("{}: {}", f.name, ty_name(&f.ty, s)))
-            .collect();
-        println!("  struct {} {{ {} }}  (v{})", sc.name, fields.join(", "), v.0);
-    }
-    let mut fns: Vec<_> = s.runtime.world.current_functions.keys().copied().collect();
-    fns.sort_unstable();
-    for fid in fns {
-        let v = s.runtime.world.current_functions[&fid];
-        match &s.runtime.world.functions[&(fid, v)] {
-            FunctionState::Ready(f) => println!("  fn {}  (v{}, ready)", f.name, v.0),
-            FunctionState::Broken { name, .. } => println!("  fn {}  (v{}, BROKEN)", name, v.0),
+    let lines = s.engine.with_world(|w| {
+        let mut lines = Vec::new();
+        let mut structs: Vec<_> = w.current_schemas.keys().copied().collect();
+        structs.sort_unstable();
+        for tid in structs {
+            let v = w.current_schemas[&tid];
+            let sc = &w.schemas[&(tid, v)];
+            let fields: Vec<String> = sc
+                .fields
+                .iter()
+                .map(|f| format!("{}: {}", f.name, ty_name_in(&f.ty, w)))
+                .collect();
+            lines.push(format!("  struct {} {{ {} }}  (v{})", sc.name, fields.join(", "), v.0));
         }
+        let mut fns: Vec<_> = w.current_functions.keys().copied().collect();
+        fns.sort_unstable();
+        for fid in fns {
+            let v = w.current_functions[&fid];
+            match &w.functions[&(fid, v)] {
+                FunctionState::Ready(f) => lines.push(format!("  fn {}  (v{}, ready)", f.name, v.0)),
+                FunctionState::Broken { name, .. } => {
+                    lines.push(format!("  fn {}  (v{}, BROKEN)", name, v.0))
+                }
+            }
+        }
+        lines
+    });
+    for line in lines {
+        println!("{line}");
     }
 }
 
-fn run_actor(s: &mut Session, actor: &mut Option<ActorId>, seen: &mut usize, rest: &[&str]) {
+fn run_actor(s: &mut Session, actor: &mut Option<Actor>, seen: &mut usize, rest: &[&str]) {
     let Some(&name) = rest.first() else {
         println!("  usage: :run <fn> [i64 args...]");
         return;
@@ -285,7 +298,7 @@ fn run_actor(s: &mut Session, actor: &mut Option<ActorId>, seen: &mut usize, res
         .iter()
         .filter_map(|a| a.parse::<i64>().ok().map(Value::I64))
         .collect();
-    match s.runtime.spawn(id, args) {
+    match s.engine.spawn(id, args) {
         Ok(a) => {
             *actor = Some(a);
             *seen = 0;
@@ -296,42 +309,39 @@ fn run_actor(s: &mut Session, actor: &mut Option<ActorId>, seen: &mut usize, res
     }
 }
 
-/// Advance the current actor to its next `Yield`, pause, or completion.
-fn go(s: &mut Session, actor: &mut Option<ActorId>, seen: &mut usize) {
-    let Some(a) = *actor else {
+/// Advance the current actor to its next `Yield`, pause, or completion. A
+/// paused actor is thawed first — if the last edit repaired it, it resumes; if
+/// not, it re-traps at the same spot.
+fn go(s: &mut Session, actor: &mut Option<Actor>, seen: &mut usize) {
+    let Some(a) = actor.as_mut() else {
         println!("  (no actor — `:run <fn>` first)");
         return;
     };
-    // A repairing edit (a fixed function, or an installed migration) already
-    // flipped a paused actor back to Runnable; if it's still paused, it hasn't
-    // been repaired yet.
-    if !matches!(s.runtime.actors[&a].status, ActorStatus::Runnable) {
+    if matches!(a.status, ActorStatus::Complete(_)) {
         print_status(s, a);
         return;
     }
-    while matches!(s.runtime.actors[&a].status, ActorStatus::Runnable) {
-        let (key, pc) = {
-            let f = s.runtime.actors[&a].frames.last().unwrap();
-            (f.function, f.pc)
-        };
-        let was_yield = matches!(
-            &s.runtime.world.functions[&key],
-            FunctionState::Ready(f) if matches!(f.code[pc], Instruction::Yield)
-        );
-        s.runtime.step(a);
-        if was_yield {
-            break;
+    s.engine.thaw(a);
+    loop {
+        match s.engine.step(a) {
+            Turn::Progress => {}
+            Turn::Yielded | Turn::Done | Turn::Paused => break,
+            Turn::Blocked => {
+                println!("  (blocked on a message no one will send)");
+                break;
+            }
         }
     }
-    for v in &s.runtime.output[*seen..] {
+    let out = s.engine.output();
+    for v in &out[*seen..] {
         println!("     → {}", show(v));
     }
-    *seen = s.runtime.output.len();
-    print_status(s, a);
+    *seen = out.len();
+    print_status(s, actor.as_ref().unwrap());
 }
 
-fn print_status(s: &Session, a: ActorId) {
-    match &s.runtime.actors[&a].status {
+fn print_status(s: &Session, a: &Actor) {
+    match &a.status {
         ActorStatus::Runnable => println!("  ⏵ at a yield (safe point) — edit, then `:go`"),
         ActorStatus::Complete(v) => println!("  ⏹ finished: {}", show(v)),
         ActorStatus::Paused(Condition::BrokenFunction { function, diagnostics }) => {
@@ -356,10 +366,10 @@ fn print_status(s: &Session, a: ActorId) {
     }
 }
 
-fn note_resumable(s: &Session, actor: Option<ActorId>) {
+fn note_resumable(_s: &Session, actor: Option<&Actor>) {
     if let Some(a) = actor {
-        if matches!(s.runtime.actors[&a].status, ActorStatus::Runnable) {
-            println!("  ↻ the running actor can resume — `:go`");
+        if matches!(a.status, ActorStatus::Paused(_)) {
+            println!("  ↻ if that repaired the freeze, `:go` resumes the actor");
         }
     }
 }
@@ -381,14 +391,18 @@ fn migrate(s: &mut Session, arg: &str) {
         println!("  no struct `{ty_name}`");
         return;
     };
-    let to = s.runtime.world.current_schemas[&type_id];
+    let to = s.engine.with_world(|w| w.current_schemas[&type_id]);
     if to.0 < 2 {
         println!("  `{ty_name}` has only one version — nothing to migrate");
         return;
     }
     let from = Version(to.0 - 1);
-    let old = s.runtime.world.schemas[&(type_id, from)].clone();
-    let new = s.runtime.world.schemas[&(type_id, to)].clone();
+    let (old, new) = s.engine.with_world(|w| {
+        (
+            w.schemas[&(type_id, from)].clone(),
+            w.schemas[&(type_id, to)].clone(),
+        )
+    });
 
     // Parse the user's source for the named field.
     let src_tokens: Vec<&str> = rhs.trim().split_whitespace().collect();
@@ -427,7 +441,7 @@ fn migrate(s: &mut Session, arg: &str) {
             },
         }
     }
-    match s.runtime.install_migration(Migration { type_id, from, to, fields }) {
+    match s.engine.install_migration(Migration { type_id, from, to, fields }) {
         Ok(()) => println!("  ✎ migration installed for {ty_name} v{}→v{}", from.0, to.0),
         Err(e) => println!("  ✗ {e:?}"),
     }
@@ -438,13 +452,15 @@ fn parse_source(s: &Session, old: &Schema, tokens: &[&str]) -> Result<MigrationS
         ["wrap", spec] => {
             let (wt, wf) = spec.split_once('.').ok_or("wrap needs `Type.field`")?;
             let wtid = s.struct_id(wt).ok_or_else(|| format!("no struct `{wt}`"))?;
-            let wv = s.runtime.world.current_schemas[&wtid];
-            let wfid = s.runtime.world.schemas[&(wtid, wv)]
-                .fields
-                .iter()
-                .find(|f| f.name == wf)
-                .ok_or_else(|| format!("`{wt}` has no field `{wf}`"))?
-                .id;
+            let wfid = s.engine.with_world(|w| {
+                let wv = w.current_schemas[&wtid];
+                w.schemas[&(wtid, wv)]
+                    .fields
+                    .iter()
+                    .find(|f| f.name == wf)
+                    .map(|f| f.id)
+            });
+            let wfid = wfid.ok_or_else(|| format!("`{wt}` has no field `{wf}`"))?;
             // Wrap the type's single old field that is being migrated: use the
             // old field of the same name as the target (its value carries over).
             let src = old
@@ -483,34 +499,36 @@ fn show(v: &Value) -> String {
     }
 }
 
-fn ty_name(t: &Type, s: &Session) -> String {
+fn ty_name_in(t: &Type, w: &World) -> String {
     match t {
         Type::I64 => "i64".into(),
         Type::Bool => "bool".into(),
         Type::Unit => "()".into(),
-        Type::Ref(id) => struct_name(s, *id),
+        Type::Ref(id) => struct_name_in(w, *id),
         Type::Foreign(kind) => format!("foreign#{kind}"),
     }
 }
 
-fn struct_name(s: &Session, id: DefId) -> String {
-    s.runtime
-        .world
-        .current_schemas
+fn struct_name_in(w: &World, id: DefId) -> String {
+    w.current_schemas
         .get(&id)
-        .and_then(|v| s.runtime.world.schemas.get(&(id, *v)))
+        .and_then(|v| w.schemas.get(&(id, *v)))
         .map(|sc| sc.name.clone())
         .unwrap_or_else(|| format!("#{id}"))
 }
 
+fn struct_name(s: &Session, id: DefId) -> String {
+    s.engine.with_world(|w| struct_name_in(w, id))
+}
+
 fn fn_name(s: &Session, id: DefId) -> String {
-    s.runtime
-        .world
-        .current_functions
-        .get(&id)
-        .map(|v| match &s.runtime.world.functions[&(id, *v)] {
-            FunctionState::Ready(f) => f.name.clone(),
-            FunctionState::Broken { name, .. } => name.clone(),
-        })
-        .unwrap_or_else(|| format!("#{id}"))
+    s.engine.with_world(|w| {
+        w.current_functions
+            .get(&id)
+            .map(|v| match &w.functions[&(id, *v)] {
+                FunctionState::Ready(f) => f.name.clone(),
+                FunctionState::Broken { name, .. } => name.clone(),
+            })
+            .unwrap_or_else(|| format!("#{id}"))
+    })
 }

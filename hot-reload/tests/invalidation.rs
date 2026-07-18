@@ -22,19 +22,17 @@ fn field(id: FieldId, name: &str, ty: Type) -> Field {
     }
 }
 
-fn current_version(rt: &Runtime, id: DefId) -> Version {
-    rt.world.current_functions[&id]
+fn current_version(engine: &Engine, id: DefId) -> Version {
+    engine.with_world(|w| w.current_functions[&id])
 }
 
-fn is_broken(rt: &Runtime, id: DefId) -> bool {
-    matches!(
-        rt.world.functions[&(id, current_version(rt, id))],
-        FunctionState::Broken { .. }
-    )
+fn is_broken(engine: &Engine, id: DefId) -> bool {
+    let v = current_version(engine, id);
+    engine.with_world(|w| matches!(w.functions[&(id, v)], FunctionState::Broken { .. }))
 }
 
-fn setup() -> Runtime {
-    let mut rt = Runtime::default();
+fn setup() -> std::sync::Arc<Engine> {
+    let rt = Engine::interp();
     rt.install_schema(Schema {
         type_id: TA,
         version: Version(1),
@@ -117,7 +115,7 @@ fn setup() -> Runtime {
 
 #[test]
 fn schema_change_reverifies_only_reachable_functions() {
-    let mut rt = setup();
+    let rt = setup();
     assert!(!is_broken(&rt, G));
     assert!(!is_broken(&rt, F));
     let touch_b_before = current_version(&rt, TOUCH_B);
@@ -148,16 +146,16 @@ fn schema_change_reverifies_only_reachable_functions() {
     );
     assert!(!is_broken(&rt, TOUCH_B));
     assert!(
-        !rt.world
+        rt.with_world(|w| !w
             .functions
-            .contains_key(&(TOUCH_B, Version(touch_b_before.0 + 1))),
+            .contains_key(&(TOUCH_B, Version(touch_b_before.0 + 1)))),
         "no work should have been done for the unrelated function"
     );
 }
 
 #[test]
 fn unrelated_schema_change_touches_nothing() {
-    let mut rt = setup();
+    let rt = setup();
     let g_before = current_version(&rt, G);
     let f_before = current_version(&rt, F);
 

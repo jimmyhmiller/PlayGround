@@ -5,6 +5,15 @@ JIT" and "single- vs multi-threaded" become configuration, not separate
 codebases; every feature works in every configuration; live editing is a
 safepoint operation, exactly like GC.
 
+**STATUS: DONE — including the endgame (Phase 8).** There is now exactly ONE
+executor in the codebase: `Engine` (`livetype-core/src/engine.rs`), a tiered
+actor loop over the one thread-safe runtime `Shared`. The interpreter is its
+cold tier; compiled code (behind the `TierSource` trait) is its hot tier; a
+worker thread is the same loop on another thread. `Runtime`, `InterpMachine`,
+`MtMachine`, `Shared::run_actor`, `JitActor`/`drive`/`run_interleaved`,
+`run_jit_threads`, and `Tiered` are all deleted. See "The final architecture"
+at the bottom.
+
 This doc tracks the refactor. See `RUNTIME_DESIGN.md` for the semantics.
 
 ## Semantics duplication map (the footguns)
@@ -106,24 +115,73 @@ between them; after Phase 4 the Shared comparison extends to the edit scenario.
   message passing has **no surface syntax** (reachable only by hand-built IR),
   so it stays concurrent-tier-only, documented, inert from source.
 
-## What actually remains, and the real constraints
+- [x] **Phase 8 — ONE executor (the endgame).** All the remaining top-level
+  drivers collapsed into a single `Engine` in `livetype-core`:
+  - `Shared` is THE runtime: world (RwLock), heap, globals, FFI registry,
+    mailboxes, preemptive STW GC. `Shared::new()` starts empty; there is no
+    "setup `Runtime` then freeze" step — installs are always live.
+  - `Engine` is THE executor: one actor loop over a mixed stack of interpreted
+    `Frame`s and native `JitFrame`s (`RawSlot` registers), promotion by a
+    per-`(func, version)` activation counter at the ONE frame-push site
+    (`push_callee` — spawn, interpreted calls, and native calls all land
+    there), marshaling at call/return boundaries, safepoints every turn.
+  - The LLVM/Miri boundary moved to the `TierSource` trait: "give me a native
+    step address for this function version, if you have one." The raw frame
+    representation and the runtime externs (`lt_new`, `lt_get_field`, `lt_emit`,
+    `lt_call_foreign`, `lt_load_global` over a `NativeHost(&Shared)`) live in
+    core (`native.rs`) — they are LLVM-free. The `livetype` crate is now ONLY
+    the compiler: codegen + `JitCode` (the epoch-cached compiled-address store),
+    which implements `TierSource`. `NoJit` is the oracle/Miri configuration.
+  - Trap-and-repair is engine-level: a paused actor keeps its mixed-tier stack;
+    `resume`/`resume_with`/`pause_expected`/`thaw` work whichever frame kind is
+    on top. There is no auto-resume on install anymore — hosts resume
+    explicitly, one code path for every tier.
+  - Deleted: `Runtime` (the struct and its executor), `InterpMachine`,
+    `MtMachine`, `Shared::run_actor`/`run_threads`, `JitActor`, `drive`,
+    `run_interleaved`, `resume_with` (JIT flavor), `handle_call*`,
+    `run_jit_threads`, `Tiered`, `TieredMachine`, `JitHost::Single` — every
+    parallel implementation of "run an actor" is gone. `exec::step_instruction`
+    now has exactly one `Machine` impl (`EngineMachine`).
+  - The **tier gap table above is now empty**: FFI, globals, live edit, STW GC,
+    and message passing all work on the one engine (message passing simply
+    means the frame stays on the cold tier — the codegen skips nothing today
+    because Send/Recv have no surface syntax, but a function containing them
+    would just never promote).
+  - The differential fuzzer compares *configurations* of the one engine
+    (never-promote oracle vs always-promote vs auto-tiering, plus a
+    worker-thread run) — 600 seeds each, plus the whole ported suite (61
+    tests). `cargo +nightly miri test -p livetype-core` is clean.
 
-All six phases are done. The unification: one heap, one step semantics, one
-managed frame, one install path; live-edit across threads; the JIT running on the
-concurrent tier's threads (LLVM/Miri boundary honored — core links no LLVM, the
-externs route through a `JitHost` enum, the threaded driver lives in `livetype`);
-version-cached recompile so a program can be live-edited *while it runs on the
-JIT threads*; and every surface-language feature (structs, migration, FFI,
-globals, live-edit) running on all three tiers.
+## The final architecture
 
-The single remaining trap is **message passing** (`Send`/`Recv`) on the
-interpreter and JIT. It has no surface syntax — only hand-built IR reaches it —
-so it's inert from source and stays concurrent-tier-only by design. Fully closing
-it would need a parked-actor scheduler + deadlock detection in the interpreter's
-`run()`, and mailbox externs + blocking in the JIT driver; not worth it until the
-language grows message-passing syntax. Two optimizations also remain: reclaiming
-leaked JIT engines once no frame pins an old version, and a fairer world lock so
-a tight-loop concurrent worker can't writer-starve a live edit.
+```
+livetype-core (LLVM-free, Miri-gated)
+  model/verify/heap        IR, CFG verifier, the one Heap (Mutex<Arc<Body>> cells)
+  runtime.rs               World installs (the one install path), ResumePlan
+  mt.rs        Shared      THE runtime: world lock, heap, globals, FFI, mailboxes, STW GC
+  native.rs                RawSlot/RawFrame/externs — the C-ABI contract, no LLVM
+  exec.rs                  step_instruction over Machine (ONE impl: EngineMachine)
+  engine.rs    Engine      THE executor: tiered actor loop + TierSource seam + NoJit
+  frontend/    Session     source → IR, evals onto an Engine
+
+livetype (links LLVM 21)
+  jit.rs       compile     codegen for step fns
+               JitCode     epoch-cached addresses; impl TierSource
+               jit_engine  Engine::new(JitCode, threshold) — the full system
+```
+
+Configurations of the one engine: `Engine::interp()` (oracle, Miri),
+`jit_engine(0)` (always native), `jit_engine(n)` (auto-tiering),
+`engine.run_threads(..)` (same loop, more threads).
+
+## What remains (optimizations, not architecture)
+
+- Reclaim leaked JIT engines once no frame pins an old version.
+- A fairer world lock so a tight-loop worker can't writer-starve a live edit.
+- Per-instruction world read-lock on the cold tier is the simple-correct
+  choice; a thread-local epoch cache would cut single-thread interp overhead.
+- OSR: promote a hot *loop* in a running frame (today promotion is at frame
+  push), and only then an interpreter-tier on-stack-replacement story.
 
 ## Hard problems to solve along the way
 

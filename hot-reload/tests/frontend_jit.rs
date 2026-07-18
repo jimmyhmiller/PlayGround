@@ -1,5 +1,6 @@
-//! A frontend-compiled program must run identically on the interpreter and the
-//! LLVM JIT — the surface syntax lowers to plain IR, which both executors run.
+//! A frontend-compiled program must run identically on the interpreter-only
+//! engine and the always-JIT engine — the surface syntax lowers to plain IR,
+//! and both configurations are the same loop.
 
 use livetype::*;
 
@@ -29,25 +30,18 @@ const SRC: &str = r#"
 "#;
 
 #[test]
-fn frontend_program_matches_on_both_executors() {
-    // Interpreter.
-    let mut ci = livetype_core::compile(SRC).expect("compile");
-    let main_i = ci.functions["main"];
-    let ai = ci.runtime.spawn(main_i, vec![]).unwrap();
-    ci.runtime.run();
+fn frontend_program_matches_on_both_configurations() {
+    // Interpreter-only engine.
+    let ci = livetype_core::compile(SRC).expect("compile");
+    let interp = ci.engine.run_call(ci.functions["main"], vec![]);
 
-    // JIT (fresh compile so heaps/effects don't collide).
-    let mut cj = livetype_core::compile(SRC).expect("compile");
-    let main_j = cj.functions["main"];
-    let mut aj = JitActor::spawn(&cj.runtime, 1, main_j, vec![]).unwrap();
-    drive(&mut cj.runtime, &mut aj, false).unwrap();
+    // Always-JIT engine (fresh compile so heaps/effects don't collide).
+    let cj = livetype_core::compile_on(SRC, jit_engine(0)).expect("compile");
+    let jit = cj.engine.run_call(cj.functions["main"], vec![]);
 
     // 3 * (100 - 5) = 285, and each run emits the balance once.
-    assert_eq!(
-        ci.runtime.actors[&ai].status,
-        ActorStatus::Complete(Value::I64(285))
-    );
-    assert_eq!(ci.runtime.actors[&ai].status, aj.status, "executors diverged");
-    assert_eq!(ci.runtime.output, cj.runtime.output);
-    assert_eq!(cj.runtime.output, vec![Value::I64(100)]);
+    assert_eq!(interp, Outcome::Complete(Value::I64(285)));
+    assert_eq!(interp, jit, "configurations diverged");
+    assert_eq!(ci.engine.output(), cj.engine.output());
+    assert_eq!(cj.engine.output(), vec![Value::I64(100)]);
 }

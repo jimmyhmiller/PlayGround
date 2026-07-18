@@ -6,7 +6,7 @@
 //! sleeps-and-hope).
 
 use livetype_core::{
-    DefId, Function, Instruction, Outcome, Runtime, Session, Shared, Type, Value, Version,
+    DefId, Engine, Function, Instruction, Outcome, Session, Shared, Type, Value, Version,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -68,23 +68,26 @@ fn wait_output(shared: &Shared, n: usize) {
 
 #[test]
 fn function_hot_swapped_while_a_worker_thread_runs() {
-    let mut rt = Runtime::default();
-    rt.install_function(tick(1, 1)).unwrap();
-    rt.install_function(worker()).unwrap();
+    let engine = Engine::interp();
+    engine.install_function(tick(1, 1)).unwrap();
+    engine.install_function(worker()).unwrap();
 
-    let shared = Shared::from_runtime(rt);
+    let shared = Arc::clone(engine.shared());
     shared.ensure_mailbox(0); // the worker's mailbox, before it can be sent to
 
     // Launch the worker on its own OS thread. It blocks on its first `Recv`.
-    let worker_shared = Arc::clone(&shared);
-    let handle = std::thread::spawn(move || worker_shared.run_actor(0, WORKER, vec![]));
+    let worker_engine = Arc::clone(&engine);
+    let handle = std::thread::spawn(move || {
+        let mut actor = worker_engine.spawn_with_tid(0, WORKER, vec![]).unwrap();
+        worker_engine.run(&mut actor)
+    });
 
     // Gate 1: the worker calls tick@v1 and emits 1.
     assert!(shared.send_to(0, Value::I64(0)));
     wait_output(&shared, 1);
 
     // Hot edit from THIS thread while the worker thread is alive: tick → v2.
-    shared.install_function(tick(2, 2)).unwrap();
+    engine.install_function(tick(2, 2)).unwrap();
 
     // Gate 2: the worker's next call re-resolves tick and now emits 2.
     assert!(shared.send_to(0, Value::I64(0)));
@@ -119,11 +122,11 @@ fn ffi_and_globals_run_on_the_concurrent_tier() {
         .unwrap();
     let compute = s.fn_id("compute").unwrap();
 
-    let shared = Shared::from_runtime(s.runtime);
     // Run the same FFI+global function on four worker threads at once — the
     // per-fn lock lets the concurrent calls to `dbl` proceed without spuriously
-    // reporting it unregistered.
-    let outcomes = shared.run_threads(vec![(compute, vec![]); 4]);
+    // reporting it unregistered. No freeze step: the session's engine IS the
+    // concurrent runtime.
+    let outcomes = s.engine.run_threads(vec![(compute, vec![]); 4]);
     for outcome in outcomes {
         assert_eq!(outcome, Outcome::Complete(Value::I64(42)));
     }

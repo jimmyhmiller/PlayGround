@@ -34,38 +34,33 @@ fn field_def(id: FieldId, name: &str, ty: Type, d: Value) -> Field {
     }
 }
 
-/// Run a build closure on a fresh interpreter and a fresh JIT runtime, then
-/// compare the object's migrated state and the actor result.
-fn both(build: impl Fn(&mut Runtime) -> ObjectId, entry: DefId) -> (ActorStatus, std::sync::Arc<Body>) {
-    // interpreter
-    let mut rt_i = Runtime::default();
-    let obj_i = build(&mut rt_i);
-    let a_i = rt_i.spawn(entry, vec![Value::Ref(obj_i)]).unwrap();
-    rt_i.run();
-    // jit
-    let mut rt_j = Runtime::default();
-    let obj_j = build(&mut rt_j);
-    let mut a_j = JitActor::spawn(&rt_j, 1, entry, vec![Value::Ref(obj_j)]).unwrap();
-    drive(&mut rt_j, &mut a_j, false).unwrap();
+/// Run a build closure on a fresh interpreter-only engine and a fresh
+/// always-JIT engine, then compare the object's migrated state and the result.
+fn both(build: impl Fn(&Engine) -> ObjectId, entry: DefId) -> (Outcome, std::sync::Arc<Body>) {
+    // interpreter configuration
+    let e_i = Engine::interp();
+    let obj_i = build(&e_i);
+    let o_i = e_i.run_call(entry, vec![Value::Ref(obj_i)]);
+    // always-JIT configuration
+    let e_j = jit_engine(0);
+    let obj_j = build(&e_j);
+    let o_j = e_j.run_call(entry, vec![Value::Ref(obj_j)]);
 
     assert_eq!(obj_i, obj_j);
+    assert_eq!(o_i, o_j, "configurations diverged on the migration chain");
     assert_eq!(
-        rt_i.actors[&a_i].status, a_j.status,
-        "executors diverged on the migration chain"
-    );
-    assert_eq!(
-        rt_i.heap.body(obj_i).unwrap(),
-        rt_j.heap.body(obj_j).unwrap(),
+        e_i.shared().object_body(obj_i).unwrap(),
+        e_j.shared().object_body(obj_j).unwrap(),
         "migrated object diverged"
     );
-    (a_j.status.clone(), rt_j.heap.body(obj_j).unwrap())
+    (o_j, e_j.shared().object_body(obj_j).unwrap())
 }
 
 #[test]
 fn auto_derived_chain_v1_v2_v3() {
     // v1{balance} → v2{+fee} → v3{+tax}, all auto-derived; balance stays Int so
     // read_int survives every version.
-    let build = |rt: &mut Runtime| {
+    let build = |rt: &Engine| {
         rt.install_schema(Schema {
             type_id: ACCT,
             version: Version(1),
@@ -90,7 +85,7 @@ fn auto_derived_chain_v1_v2_v3() {
             ],
         })
         .unwrap();
-        let obj = rt.jit_new(ACCT, &[(BAL, Value::I64(100))]).unwrap();
+        let obj = rt.shared().jit_new(ACCT, &[(BAL, Value::I64(100))]).unwrap();
         // Two further versions, each auto-derivable (additive + defaulted).
         rt.install_schema(Schema {
             type_id: ACCT,
@@ -117,7 +112,7 @@ fn auto_derived_chain_v1_v2_v3() {
     };
 
     let (status, obj) = both(build, READ_INT);
-    assert_eq!(status, ActorStatus::Complete(Value::I64(100)));
+    assert_eq!(status, Outcome::Complete(Value::I64(100)));
     // The single field access migrated the object across the whole chain.
     assert_eq!(obj.schema, Version(3));
     assert_eq!(obj.fields[&BAL], Value::I64(100));
@@ -130,7 +125,7 @@ fn mixed_auto_and_explicit_chain() {
     // v1{balance:Int} → v2{+fee} (auto) → v3{balance:Money} (explicit Wrap).
     // The object crosses an auto-derived step AND an explicit one in a single
     // migration, and a Money-aware reader reads through it.
-    let build = |rt: &mut Runtime| {
+    let build = |rt: &Engine| {
         rt.install_schema(Schema {
             type_id: ACCT,
             version: Version(1),
@@ -145,7 +140,7 @@ fn mixed_auto_and_explicit_chain() {
             fields: vec![field(CENTS, "cents", Type::I64)],
         })
         .unwrap();
-        let obj = rt.jit_new(ACCT, &[(BAL, Value::I64(100))]).unwrap();
+        let obj = rt.shared().jit_new(ACCT, &[(BAL, Value::I64(100))]).unwrap();
 
         rt.install_schema(Schema {
             type_id: ACCT,
@@ -212,7 +207,7 @@ fn mixed_auto_and_explicit_chain() {
     };
 
     let (status, obj) = both(build, READ_MONEY);
-    assert_eq!(status, ActorStatus::Complete(Value::I64(100)));
+    assert_eq!(status, Outcome::Complete(Value::I64(100)));
     assert_eq!(obj.schema, Version(3));
     // balance is now a Money reference; fee carried through the chain.
     assert!(matches!(obj.fields[&BAL], Value::Ref(_)));

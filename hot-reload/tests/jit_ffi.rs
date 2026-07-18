@@ -1,15 +1,14 @@
-//! The JIT runs FFI and globals — previously interpreter-only. `RawSlot` now
-//! tag-encodes a `Foreign` handle (kind in the tag's high bits, pointer in the
-//! payload), and the JIT lowers `CallForeign`/`LoadGlobal` to externs, so a
-//! foreign program runs identically on the interpreter and on the JIT, single-
-//! threaded or across worker threads.
+//! The JIT runs FFI and globals. `RawSlot` tag-encodes a `Foreign` handle
+//! (kind in the tag's high bits, pointer in the payload), and the JIT lowers
+//! `CallForeign`/`LoadGlobal` to externs, so a foreign program runs identically
+//! interpreted and compiled, single-threaded or across worker threads.
 
 use livetype::*;
 use std::sync::{Arc, Mutex};
 
-/// Build the `dbl` + `base` program on a fresh session with `dbl` bound.
+/// Build the `dbl` + `base` program with `dbl` bound, on an always-JIT engine.
 fn doubling_session() -> Session {
-    let mut s = Session::new();
+    let mut s = Session::with_engine(jit_engine(0));
     s.eval("foreign fn dbl(n: i64) -> i64;").unwrap();
     s.register_foreign(
         "dbl",
@@ -27,18 +26,14 @@ fn doubling_session() -> Session {
 #[test]
 fn jit_runs_ffi_and_globals_single_threaded() {
     let mut s = doubling_session();
-    let compute = s.fn_id("compute").unwrap();
-    let mut actor = JitActor::spawn(&s.runtime, 1, compute, vec![]).unwrap();
-    drive(&mut s.runtime, &mut actor, false).unwrap();
-    assert_eq!(actor.status, ActorStatus::Complete(Value::I64(42)));
+    assert_eq!(s.call("compute", vec![]).unwrap(), Value::I64(42));
 }
 
 #[test]
 fn jit_runs_ffi_and_globals_across_threads() {
     let s = doubling_session();
     let compute = s.fn_id("compute").unwrap();
-    let shared = Shared::from_runtime(s.runtime);
-    let outcomes = run_jit_threads(&shared, vec![(compute, vec![]); 4]).unwrap();
+    let outcomes = s.engine.run_threads(vec![(compute, vec![]); 4]);
     for outcome in outcomes {
         assert_eq!(outcome, Outcome::Complete(Value::I64(42)));
     }
@@ -51,7 +46,7 @@ fn foreign_handle_round_trips_through_jit_slots() {
     // tag-encoding surviving a LoadGlobal → CallForeign-argument round trip
     // through the JIT's two-word slots.
     let native = Arc::new(Mutex::new(Vec::<(u64, i64)>::new()));
-    let mut s = Session::new();
+    let mut s = Session::with_engine(jit_engine(0));
     s.eval(
         "foreign type Window;
          foreign fn open_window() -> Window;
@@ -80,11 +75,8 @@ fn foreign_handle_round_trips_through_jit_slots() {
     }
     s.eval("letonce win = open_window(); fn frame() -> i64 { draw(win, 99); 0 }")
         .unwrap();
-    let frame = s.fn_id("frame").unwrap();
 
-    let mut actor = JitActor::spawn(&s.runtime, 1, frame, vec![]).unwrap();
-    drive(&mut s.runtime, &mut actor, false).unwrap();
-    assert_eq!(actor.status, ActorStatus::Complete(Value::I64(0)));
+    assert_eq!(s.call("frame", vec![]).unwrap(), Value::I64(0));
     // The handle (ptr 7) and the value (99) arrived intact through the JIT.
     assert_eq!(*native.lock().unwrap(), vec![(7, 99)]);
 }

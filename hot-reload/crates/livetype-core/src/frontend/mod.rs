@@ -23,27 +23,26 @@ mod parser;
 pub use ast::*;
 
 use crate::{
-    ActorStatus, Condition, DefId, ForeignFn, Runtime, Schema, Type, Value, Version,
-    verify_function_with,
+    Condition, DefId, Engine, ForeignFn, Schema, Type, Value, Version, verify_function_with,
 };
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
-/// A compiled program: a runtime with every struct and function installed, plus
-/// the name → id maps so callers can spawn `main` (or any function).
-#[derive(Debug)]
+/// A compiled program: an engine with every struct and function installed, plus
+/// the name → id maps so callers can run `main` (or any function).
 pub struct Compiled {
-    pub runtime: Runtime,
+    pub engine: Arc<Engine>,
     pub functions: HashMap<String, DefId>,
     pub structs: HashMap<String, DefId>,
 }
 
-/// A live-programming session: a running [`Runtime`] plus the symbol table and
+/// A live-programming session: a running [`Engine`] plus the symbol table and
 /// version bookkeeping that let you `eval` more source *into it over time*. Each
 /// `eval` installs new versions of the definitions it names — driving migration,
-/// invalidation, and trap-and-repair on whatever is already running. This is the
-/// object behind the live-edit POC.
+/// invalidation, and trap-and-repair on whatever is already running (on this
+/// thread or any other; installs land through the engine's world lock).
 pub struct Session {
-    pub runtime: Runtime,
+    pub engine: Arc<Engine>,
     ids: lower::IdEnv,
 }
 
@@ -54,9 +53,15 @@ impl Default for Session {
 }
 
 impl Session {
+    /// A session on an interpreter-only engine (the LLVM-free configuration).
     pub fn new() -> Session {
+        Session::with_engine(Engine::interp())
+    }
+
+    /// A session on any engine — a compiling one auto-promotes hot functions.
+    pub fn with_engine(engine: Arc<Engine>) -> Session {
         Session {
-            runtime: Runtime::default(),
+            engine,
             ids: lower::IdEnv::new(),
         }
     }
@@ -73,11 +78,6 @@ impl Session {
         self.ids.foreign_kind_of(name)
     }
 
-    /// Compile `source` and install its definitions as the next versions of
-    /// whatever they name — the live edit. Structs install first (in
-    /// reference-dependency order) so the functions in the same edit verify
-    /// against the new layouts; functions install as a batch so recursion and
-    /// forward references work.
     /// Register (or replace) the native implementation of a `foreign fn` by
     /// name — the host binds the native layer before the code that uses it runs.
     /// The `foreign fn` must already have been declared (in this or a prior
@@ -87,7 +87,7 @@ impl Session {
             .ids
             .foreign_fn_id_of(name)
             .ok_or_else(|| format!("no foreign fn `{name}` has been declared"))?;
-        self.runtime.register_foreign(id, f);
+        self.engine.register_foreign(id, f);
         Ok(())
     }
 
@@ -102,19 +102,10 @@ impl Session {
             function: 0,
             diagnostics: vec![format!("no function `{name}`")],
         })?;
-        let actor = self.runtime.spawn(id, args)?;
-        let outcome = loop {
-            self.runtime.step(actor);
-            match &self.runtime.actors[&actor].status {
-                ActorStatus::Complete(v) => break Ok(v.clone()),
-                ActorStatus::Paused(c) => break Err(c.clone()),
-                ActorStatus::Runnable => {}
-            }
-        };
-        // The trampoline owns this actor for the duration of the call; drop it so
-        // repeated calls (one per frame) don't accumulate frames.
-        self.runtime.actors.remove(&actor);
-        outcome
+        match self.engine.run_call(id, args) {
+            crate::Outcome::Complete(v) => Ok(v),
+            crate::Outcome::Paused(c) => Err(c),
+        }
     }
 
     pub fn eval(&mut self, source: &str) -> Result<(), String> {
@@ -125,10 +116,10 @@ impl Session {
         // Publish the foreign signatures and global types this edit introduced
         // (accumulated in `ids`) into the world before verification, so a
         // `CallForeign`/`LoadGlobal` in any installed function type-checks.
-        self.runtime.world.foreign_sigs =
-            self.ids.foreign_sigs().into_iter().collect();
-        self.runtime.world.global_types =
-            self.ids.global_types().into_iter().collect();
+        self.engine.shared().set_declared_interface(
+            self.ids.foreign_sigs().into_iter().collect(),
+            self.ids.global_types().into_iter().collect(),
+        );
 
         let schema_by_id: BTreeMap<DefId, Schema> =
             lowered.schemas.iter().map(|s| (s.type_id, s.clone())).collect();
@@ -151,11 +142,13 @@ impl Session {
             .map_err(|_| "structs reference each other cyclically (not supported)".to_string())?
         {
             let mut schema = schema_by_id[&id].clone();
-            // Next version follows the runtime's current one — which may already
+            // Next version follows the world's current one — which may already
             // have advanced (e.g. a prior edit's `invalidate` bumped it).
-            let v = self.runtime.world.current_schemas.get(&id).map_or(1, |c| c.0 + 1);
+            let v = self
+                .engine
+                .with_world(|w| w.current_schemas.get(&id).map_or(1, |c| c.0 + 1));
             schema.version = Version(v);
-            self.runtime
+            self.engine
                 .install_schema(schema)
                 .map_err(|e| format!("installing a struct: {e:?}"))?;
         }
@@ -167,18 +160,19 @@ impl Session {
             .collect();
         for func in &lowered.functions {
             let mut func = func.clone();
-            // Next version follows the runtime's current one (which invalidation
-            // may have bumped to a Broken version behind our back).
-            let v = self
-                .runtime
-                .world
-                .current_functions
-                .get(&func.id)
-                .map_or(1, |c| c.0 + 1);
-            func.version = Version(v);
-            let deps = verify_function_with(&func, &self.runtime.world, &sigs)
-                .map_err(|diags| format!("in `{}`: {}", func.name, diags.join("; ")))?;
-            self.runtime
+            // Next version follows the world's current one (which invalidation
+            // may have bumped to a Broken version behind our back), and
+            // verification runs against the world as of this moment — the read
+            // guard is released before installing (the write lock is not
+            // reentrant with it).
+            let deps = self.engine.with_world(|w| {
+                let v = w.current_functions.get(&func.id).map_or(1, |c| c.0 + 1);
+                func.version = Version(v);
+                verify_function_with(&func, w, &sigs)
+            });
+            let deps =
+                deps.map_err(|diags| format!("in `{}`: {}", func.name, diags.join("; ")))?;
+            self.engine
                 .install_verified_function(func, deps)
                 .map_err(|e| format!("installing a function: {e:?}"))?;
         }
@@ -187,31 +181,18 @@ impl Session {
         // already set. A reload re-installs the init function but skips running
         // it, so a native resource created on the first load survives the edit.
         for init in &lowered.global_inits {
-            if self.runtime.globals.contains_key(&init.global_id) {
+            if self.engine.global(init.global_id).is_some() {
                 continue;
             }
-            let value = self
-                .run_to_value(init.init_fn)
-                .map_err(|c| format!("initializing a `letonce`: {c:?}"))?;
-            self.runtime.set_global(init.global_id, value);
+            let value = match self.engine.run_call(init.init_fn, Vec::new()) {
+                crate::Outcome::Complete(v) => v,
+                crate::Outcome::Paused(c) => {
+                    return Err(format!("initializing a `letonce`: {c:?}"));
+                }
+            };
+            self.engine.set_global(init.global_id, value);
         }
         Ok(())
-    }
-
-    /// Run a zero-argument function to completion and return its value — used to
-    /// evaluate `letonce` initializers. Shares the trampoline's run loop.
-    fn run_to_value(&mut self, id: DefId) -> Result<Value, Condition> {
-        let actor = self.runtime.spawn(id, Vec::new())?;
-        let outcome = loop {
-            self.runtime.step(actor);
-            match &self.runtime.actors[&actor].status {
-                ActorStatus::Complete(v) => break Ok(v.clone()),
-                ActorStatus::Paused(c) => break Err(c.clone()),
-                ActorStatus::Runnable => {}
-            }
-        };
-        self.runtime.actors.remove(&actor);
-        outcome
     }
 
     fn maps(&self) -> (HashMap<String, DefId>, HashMap<String, DefId>) {
@@ -219,13 +200,19 @@ impl Session {
     }
 }
 
-/// Compile source text into a ready-to-run [`Runtime`] (a one-shot [`Session`]).
+/// Compile source text into a ready-to-run [`Engine`] (a one-shot [`Session`]
+/// on the interpreter-only configuration).
 pub fn compile(source: &str) -> Result<Compiled, String> {
-    let mut session = Session::new();
+    compile_on(source, Engine::interp())
+}
+
+/// Compile source text onto a specific engine.
+pub fn compile_on(source: &str, engine: Arc<Engine>) -> Result<Compiled, String> {
+    let mut session = Session::with_engine(engine);
     session.eval(source)?;
     let (functions, structs) = session.maps();
     Ok(Compiled {
-        runtime: session.runtime,
+        engine: session.engine,
         functions,
         structs,
     })

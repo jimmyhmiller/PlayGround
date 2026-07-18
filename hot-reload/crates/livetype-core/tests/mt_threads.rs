@@ -81,19 +81,18 @@ fn peek_money() -> Function {
 
 #[test]
 fn threads_share_reads_of_one_object() {
-    let mut rt = Runtime::default();
-    rt.install_schema(Schema {
+    let engine = Engine::interp();
+    engine.install_schema(Schema {
         type_id: ACCT,
         version: Version(1),
         name: "Account".into(),
         fields: vec![field(BALANCE, "balance", Type::I64)],
     })
     .unwrap();
-    rt.install_function(peek_int()).unwrap();
-    let obj = rt.jit_new(ACCT, &[(BALANCE, Value::I64(100))]).unwrap();
+    engine.install_function(peek_int()).unwrap();
+    let obj = engine.shared().jit_new(ACCT, &[(BALANCE, Value::I64(100))]).unwrap();
 
-    let shared = Shared::from_runtime(rt);
-    let outcomes = shared.run_threads(vec![(PEEK_INT, vec![Value::Ref(obj)]); 8]);
+    let outcomes = engine.run_threads(vec![(PEEK_INT, vec![Value::Ref(obj)]); 8]);
     for o in &outcomes {
         assert_eq!(*o, Outcome::Complete(Value::I64(100)));
     }
@@ -102,31 +101,31 @@ fn threads_share_reads_of_one_object() {
 /// Set up a v1 account, allocate it, then move the world to v2 (balance becomes
 /// Money) with a migration — leaving the live object lazily at v1. Threads that
 /// read it will each trigger the v1→v2 migration concurrently.
-fn migratable_shared() -> (Arc<Shared>, ObjectId) {
-    let mut rt = Runtime::default();
-    rt.install_schema(Schema {
+fn migratable_engine() -> (Arc<Engine>, ObjectId) {
+    let engine = Engine::interp();
+    engine.install_schema(Schema {
         type_id: ACCT,
         version: Version(1),
         name: "Account".into(),
         fields: vec![field(BALANCE, "balance", Type::I64)],
     })
     .unwrap();
-    let obj = rt.jit_new(ACCT, &[(BALANCE, Value::I64(100))]).unwrap();
-    rt.install_schema(Schema {
+    let obj = engine.shared().jit_new(ACCT, &[(BALANCE, Value::I64(100))]).unwrap();
+    engine.install_schema(Schema {
         type_id: MONEY,
         version: Version(1),
         name: "Money".into(),
         fields: vec![field(CENTS, "cents", Type::I64)],
     })
     .unwrap();
-    rt.install_schema(Schema {
+    engine.install_schema(Schema {
         type_id: ACCT,
         version: Version(2),
         name: "Account".into(),
         fields: vec![field(BALANCE, "balance", Type::Ref(MONEY))],
     })
     .unwrap();
-    rt.install_migration(Migration {
+    engine.install_migration(Migration {
         type_id: ACCT,
         from: Version(1),
         to: Version(2),
@@ -140,8 +139,8 @@ fn migratable_shared() -> (Arc<Shared>, ObjectId) {
         )]),
     })
     .unwrap();
-    rt.install_function(peek_money()).unwrap();
-    (Shared::from_runtime(rt), obj)
+    engine.install_function(peek_money()).unwrap();
+    (engine, obj)
 }
 
 #[test]
@@ -150,10 +149,10 @@ fn concurrent_migration_of_a_shared_object_is_race_free() {
     // A torn read or a lost/duplicated migration would show up as a wrong
     // result or a panic on some interleaving.
     for _ in 0..MIGRATE_ITERS {
-        let (shared, obj) = migratable_shared();
-        assert_eq!(shared.object_schema(obj), Some(Version(1)));
+        let (engine, obj) = migratable_engine();
+        assert_eq!(engine.shared().object_schema(obj), Some(Version(1)));
 
-        let outcomes = shared.run_threads(vec![(PEEK_MONEY, vec![Value::Ref(obj)]); MIGRATE_THREADS]);
+        let outcomes = engine.run_threads(vec![(PEEK_MONEY, vec![Value::Ref(obj)]); MIGRATE_THREADS]);
         for o in &outcomes {
             assert_eq!(
                 *o,
@@ -162,27 +161,28 @@ fn concurrent_migration_of_a_shared_object_is_race_free() {
             );
         }
         // Exactly one migration won: the object is at v2 and holds a Money.
-        assert_eq!(shared.object_schema(obj), Some(Version(2)));
+        assert_eq!(engine.shared().object_schema(obj), Some(Version(2)));
     }
 }
 
 #[test]
 fn a_single_actor_runs_and_migrates() {
-    let (shared, obj) = migratable_shared();
-    let outcome = shared.run_actor(0, PEEK_MONEY, vec![Value::Ref(obj)]);
+    let (engine, obj) = migratable_engine();
+    let outcome = engine.run_call(PEEK_MONEY, vec![Value::Ref(obj)]);
     assert_eq!(outcome, Outcome::Complete(Value::I64(100)));
-    assert_eq!(shared.object_schema(obj), Some(Version(2)));
+    assert_eq!(engine.shared().object_schema(obj), Some(Version(2)));
 }
 
 #[test]
 fn stop_the_world_collect_reclaims_unreachable_objects() {
-    let (shared, obj) = migratable_shared();
+    let (engine, obj) = migratable_engine();
     // Run the migration (single actor) so the account now references a Money
     // wrapper; that wrapper is live only through the account.
     assert_eq!(
-        shared.run_actor(0, PEEK_MONEY, vec![Value::Ref(obj)]),
+        engine.run_call(PEEK_MONEY, vec![Value::Ref(obj)]),
         Outcome::Complete(Value::I64(100))
     );
+    let shared = engine.shared();
     let after_migration = shared.object_count();
     assert!(after_migration >= 2, "account + its Money wrapper exist");
 
@@ -257,21 +257,20 @@ fn churn() -> Function {
 #[test]
 fn preemptive_gc_runs_while_actors_churn() {
     for _ in 0..GC_ITERS {
-        let mut rt = Runtime::default();
-        rt.install_schema(Schema {
+        let engine = Engine::interp();
+        engine.install_schema(Schema {
             type_id: SOME,
             version: Version(1),
             name: "Some".into(),
             fields: vec![field(F, "f", Type::I64)],
         })
         .unwrap();
-        rt.install_function(churn()).unwrap();
-        let shared = Shared::from_runtime(rt);
+        engine.install_function(churn()).unwrap();
 
         // A collector thread hammering GC requests while the actors run.
         let done = Arc::new(AtomicBool::new(false));
         let collector = {
-            let shared = Arc::clone(&shared);
+            let shared = Arc::clone(engine.shared());
             let done = Arc::clone(&done);
             std::thread::spawn(move || {
                 while !done.load(Ordering::Acquire) {
@@ -282,7 +281,7 @@ fn preemptive_gc_runs_while_actors_churn() {
         };
 
         // Four actors, each churning 200 allocations, preempted throughout.
-        let outcomes = shared.run_threads(vec![(CHURN, vec![Value::I64(CHURN_N)]); GC_ACTORS]);
+        let outcomes = engine.run_threads(vec![(CHURN, vec![Value::I64(CHURN_N)]); GC_ACTORS]);
         done.store(true, Ordering::Release);
         collector.join().unwrap();
 
@@ -292,6 +291,7 @@ fn preemptive_gc_runs_while_actors_churn() {
             assert_eq!(*o, Outcome::Complete(Value::I64(0)));
         }
         // Collections actually happened, and nothing leaked once idle.
+        let shared = engine.shared();
         assert!(shared.collections() > 0, "no preemptive collection occurred");
         let remaining = shared.object_count();
         assert_eq!(shared.collect(&[]), remaining);
@@ -338,12 +338,11 @@ fn caller_fn() -> Function {
 
 #[test]
 fn multi_frame_call_in_the_concurrent_tier() {
-    let mut rt = Runtime::default();
-    rt.install_function(sub_fn()).unwrap();
-    rt.install_function(caller_fn()).unwrap();
-    let shared = Shared::from_runtime(rt);
+    let engine = Engine::interp();
+    engine.install_function(sub_fn()).unwrap();
+    engine.install_function(caller_fn()).unwrap();
     // Several threads each push a call frame and pop it — 10 - 3 = 7.
-    let outcomes = shared.run_threads(vec![(CALLER, vec![]); 4]);
+    let outcomes = engine.run_threads(vec![(CALLER, vec![]); 4]);
     for o in &outcomes {
         assert_eq!(*o, Outcome::Complete(Value::I64(7)));
     }
@@ -393,12 +392,11 @@ fn producer_int() -> Function {
 
 #[test]
 fn message_passing_between_actors() {
-    let mut rt = Runtime::default();
-    rt.install_function(consumer_int()).unwrap();
-    rt.install_function(producer_int()).unwrap();
-    let shared = Shared::from_runtime(rt);
+    let engine = Engine::interp();
+    engine.install_function(consumer_int()).unwrap();
+    engine.install_function(producer_int()).unwrap();
     // Actor 0 waits for a message; actor 1 sends it 42.
-    let outcomes = shared.run_threads(vec![(CONSUMER, vec![]), (PRODUCER, vec![Value::I64(0)])]);
+    let outcomes = engine.run_threads(vec![(CONSUMER, vec![]), (PRODUCER, vec![Value::I64(0)])]);
     assert_eq!(outcomes[0], Outcome::Complete(Value::I64(42)));
     assert_eq!(outcomes[1], Outcome::Complete(Value::I64(0)));
 }
@@ -438,20 +436,19 @@ fn producer_ref() -> Function {
 
 #[test]
 fn message_passing_shares_a_heap_reference() {
-    let mut rt = Runtime::default();
-    rt.install_schema(Schema {
+    let engine = Engine::interp();
+    engine.install_schema(Schema {
         type_id: BOXT,
         version: Version(1),
         name: "Box".into(),
         fields: vec![field(VAL, "value", Type::I64)],
     })
     .unwrap();
-    let boxid = rt.jit_new(BOXT, &[(VAL, Value::I64(99))]).unwrap();
-    rt.install_function(consumer_ref()).unwrap();
-    rt.install_function(producer_ref()).unwrap();
-    let shared = Shared::from_runtime(rt);
+    let boxid = engine.shared().jit_new(BOXT, &[(VAL, Value::I64(99))]).unwrap();
+    engine.install_function(consumer_ref()).unwrap();
+    engine.install_function(producer_ref()).unwrap();
     // Actor 1 sends the shared Box to actor 0, which reads its field.
-    let outcomes = shared.run_threads(vec![
+    let outcomes = engine.run_threads(vec![
         (CONSUMER_REF, vec![]),
         (PRODUCER_REF, vec![Value::Ref(boxid), Value::I64(0)]),
     ]);
@@ -463,19 +460,18 @@ fn message_passing_shares_a_heap_reference() {
 fn message_type_mismatch_traps_the_receiver() {
     // The consumer's mailbox contract says Int, but a Ref is sent: receiving it
     // traps, exactly like any other con-freeness violation.
-    let mut rt = Runtime::default();
-    rt.install_schema(Schema {
+    let engine = Engine::interp();
+    engine.install_schema(Schema {
         type_id: BOXT,
         version: Version(1),
         name: "Box".into(),
         fields: vec![field(VAL, "value", Type::I64)],
     })
     .unwrap();
-    let boxid = rt.jit_new(BOXT, &[(VAL, Value::I64(1))]).unwrap();
-    rt.install_function(consumer_int()).unwrap(); // expects an Int message
-    rt.install_function(producer_ref()).unwrap(); // sends a Ref
-    let shared = Shared::from_runtime(rt);
-    let outcomes = shared.run_threads(vec![
+    let boxid = engine.shared().jit_new(BOXT, &[(VAL, Value::I64(1))]).unwrap();
+    engine.install_function(consumer_int()).unwrap(); // expects an Int message
+    engine.install_function(producer_ref()).unwrap(); // sends a Ref
+    let outcomes = engine.run_threads(vec![
         (CONSUMER, vec![]),
         (PRODUCER_REF, vec![Value::Ref(boxid), Value::I64(0)]),
     ]);

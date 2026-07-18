@@ -316,13 +316,6 @@ pub fn frame_roots(frames: &[Frame]) -> Vec<ObjectId> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Actor {
-    pub id: ActorId,
-    pub frames: Vec<Frame>,
-    pub status: ActorStatus,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActorStatus {
     Runnable,
     Paused(Condition),

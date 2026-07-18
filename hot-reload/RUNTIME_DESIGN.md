@@ -1,5 +1,14 @@
 # Resumable native execution
 
+> **2026-07 — one executor.** The system now has exactly ONE executor:
+> `Engine` (core `engine.rs`), a tiered actor loop over the one thread-safe
+> runtime `Shared`. Interpreted execution is its cold tier, compiled `step`
+> functions (via the `TierSource` seam; the `livetype` crate is only the
+> compiler) are its hot tier, and worker threads run the same loop.
+> References below to "the interpreter", "the JIT driver", or "the
+> concurrent tier" describe *configurations* of that engine; see
+> `UNIFICATION.md` ("The final architecture") for the current shape.
+
 The production execution unit is not a conventional native stack frame. It is a
 heap-resident `Frame` containing a function-version ID, program counter, typed
 register slots, and return destination. This makes the exact paused computation
@@ -117,7 +126,7 @@ Both executors exist and are proven equivalent:
   per step, over heap-resident frames.
 - **LLVM `step` backend** (`src/jit.rs`) — each Ready function version is
   JIT-compiled (inkwell / LLVM 21) to a native
-  `step(RawFrame*, Runtime*) -> outcome` over a C-ABI frame. Native code runs
+  `step(RawFrame*, NativeHost*) -> outcome` over a C-ABI frame. Native code runs
   the pure ops (`Const`/`SubI64`/`LtI64`) and the non-pausing runtime calls
   (`New`/`GetField`/`Emit`, via the `lt_*` externs), and hands control back to
   the Rust driver for the boundaries that own continuation semantics —
@@ -126,7 +135,7 @@ Both executors exist and are proven equivalent:
   `switch(frame->pc)` dispatch. Crucially, **no SSA value crosses a basic
   block**: every register read/write goes through `frame->regs[i]`, so loops and
   branches need no phi nodes and every live reference is a typed frame slot the
-  GC roots from directly (`JitActor::roots`).
+  GC roots from directly (`Actor::roots`).
 
 The IR now includes control flow (`LtI64`, `Jump`, `Branch`, `Yield`), verified
 by a CFG-worklist type checker (`src/verify.rs`) that joins register
@@ -135,7 +144,7 @@ environments at merge points.
 ### The soundness invariant is enforced, not asserted
 
 The §4 invariant — *no running code ever observes an ill-typed value* — is now a
-runtime check (`Runtime::value_ok` / `expect_value`) applied at every boundary
+runtime check (`Heap::value_ok`) applied at every boundary
 where a value would be observed or published:
 
 - **Call arguments** vs the callee's parameter types,

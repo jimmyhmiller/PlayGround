@@ -1,25 +1,19 @@
-//! A thread-safe runtime tier: many actors on real OS threads over one shared
-//! heap. This is the "properly thread-safe runtime" direction — the object
-//! model is non-moving handles over atomically-swappable bodies, so a migration
-//! one thread performs is visible to the others without tearing, and old bodies
-//! are reclaimed by refcount (no hazard pointers).
+//! The one thread-safe runtime: the world (behind a lock live edits take), the
+//! shared [`Heap`], persistent globals, native `foreign fn` implementations,
+//! actor mailboxes, effects, and the preemptive stop-the-world GC rendezvous.
+//! The object model is non-moving handles over atomically-swappable bodies, so
+//! a migration one thread performs is visible to the others without tearing,
+//! and old bodies are reclaimed by refcount (no hazard pointers).
 //!
-//! Setup (schemas, functions, auto-derived migrations, verification) is done
-//! through the ordinary [`Runtime`] and then frozen via [`Runtime::into_parts`];
-//! only the *executor* is reimplemented here to be thread-safe. During a
-//! concurrent run the world is immutable (updates land at quiescent points), so
-//! it needs no lock; the heap and effects do. Actors are single-frame here — the
-//! shared-heap race the design asks about is about objects, not call stacks — so
-//! `Call` is intentionally unsupported in this tier.
-//!
-//! Not yet built (documented follow-ons): the JIT under threads, mid-run
-//! installs while threads run, and a *preemptive* stop-the-world GC (today
-//! [`Shared::collect`] runs at a quiescent point).
+//! [`Shared`] holds no execution loop — the [`crate::Engine`] drives actors
+//! (interpreted or native, one thread or many) over this state. It is
+//! thread-safe even when used from a single thread, so "single-threaded" is a
+//! deployment choice, not a separate runtime.
 
 use crate::*;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard};
 
 
 fn rt_type_error(message: &str) -> Condition {
@@ -83,25 +77,46 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// Freeze a set-up [`Runtime`] into a shareable runtime — the heap moves in
-    /// as-is (same `Heap`, now shared behind the `Arc`), no rebuild.
-    pub fn from_runtime(rt: Runtime) -> Arc<Shared> {
-        let (world, heap, globals, foreigns) = rt.into_parts();
-        let foreign_registry = foreigns
-            .into_iter()
-            .map(|(id, f)| (id, Arc::new(Mutex::new(f))))
-            .collect();
+    /// An empty runtime. Definitions arrive through the live install path —
+    /// there is no separate "setup" runtime to freeze.
+    pub fn new() -> Arc<Shared> {
         Arc::new(Shared {
-            world: RwLock::new(world),
-            heap,
-            globals: RwLock::new(globals),
-            foreign_registry: Mutex::new(foreign_registry),
+            world: RwLock::new(World::default()),
+            heap: Heap::default(),
+            globals: RwLock::new(BTreeMap::new()),
+            foreign_registry: Mutex::new(BTreeMap::new()),
             output: Mutex::new(Vec::new()),
             mailboxes: Mutex::new(BTreeMap::new()),
             gc_pending: AtomicBool::new(false),
             gc: Mutex::new(GcCoord::default()),
             gc_cv: Condvar::new(),
         })
+    }
+
+    /// A read guard on the world — the engine holds one per interpreted
+    /// instruction (and for native code/version lookups), so a live edit's
+    /// write lock waits out in-flight turns and lands between them.
+    pub(crate) fn world_read(&self) -> RwLockReadGuard<'_, World> {
+        self.world.read().unwrap()
+    }
+
+    /// The one heap — public for inspection/differential testing; mutation goes
+    /// through the engine and the install/extern paths.
+    pub fn heap(&self) -> &Heap {
+        &self.heap
+    }
+
+    /// Publish the frontend's declared `foreign fn` signatures and `letonce`
+    /// global types (accumulated across evals) so verification and the
+    /// `CallForeign`/`LoadGlobal` runtime checks see them.
+    pub fn set_declared_interface(
+        &self,
+        foreign_sigs: BTreeMap<ForeignFnId, (Vec<Type>, Type)>,
+        global_types: BTreeMap<DefId, Type>,
+    ) {
+        let mut world = self.world.write().unwrap();
+        world.foreign_sigs = foreign_sigs;
+        world.global_types = global_types;
     }
 
     pub fn output(&self) -> Vec<Value> {
@@ -111,6 +126,11 @@ impl Shared {
     /// Current schema version of an object (for tests/inspection).
     pub fn object_schema(&self, id: ObjectId) -> Option<Version> {
         self.heap.schema_version(id)
+    }
+
+    /// An object's current body snapshot (for tests/inspection).
+    pub fn object_body(&self, id: ObjectId) -> Option<Arc<Body>> {
+        self.heap.body(id)
     }
 
     pub fn object_count(&self) -> usize {
@@ -161,12 +181,12 @@ impl Shared {
 
     /// Invoke a registered foreign fn. The per-fn `Mutex` is held only for the
     /// call, so different foreign fns run concurrently; `None` = not registered.
-    fn call_foreign(&self, id: ForeignFnId, args: &[Value]) -> Option<Value> {
+    pub(crate) fn call_foreign(&self, id: ForeignFnId, args: &[Value]) -> Option<Value> {
         let cell = self.foreign_registry.lock().unwrap().get(&id).cloned()?;
         let mut f = cell.lock().unwrap();
         Some(f(args))
     }
-    fn global(&self, id: DefId) -> Option<Value> {
+    pub(crate) fn global(&self, id: DefId) -> Option<Value> {
         self.globals.read().unwrap().get(&id).cloned()
     }
 
@@ -180,11 +200,11 @@ impl Shared {
         self.deliver(tid, value)
     }
 
-    fn emit(&self, value: Value) {
+    pub(crate) fn emit(&self, value: Value) {
         self.output.lock().unwrap().push(value);
     }
 
-    fn mailbox(&self, tid: usize) -> Arc<Mutex<std::collections::VecDeque<Value>>> {
+    pub(crate) fn mailbox(&self, tid: usize) -> Arc<Mutex<std::collections::VecDeque<Value>>> {
         self.mailboxes
             .lock()
             .unwrap()
@@ -194,113 +214,12 @@ impl Shared {
     }
 
     /// Push a value into actor `target`'s mailbox. False if no such actor.
-    fn deliver(&self, target: usize, value: Value) -> bool {
+    pub(crate) fn deliver(&self, target: usize, value: Value) -> bool {
         let Some(mb) = self.mailboxes.lock().unwrap().get(&target).cloned() else {
             return false;
         };
         mb.lock().unwrap().push_back(value);
         true
-    }
-
-    /// Run one actor — a full call stack — to completion or a trap. `tid`
-    /// identifies it to the GC (its published-roots slot) and names its mailbox.
-    /// It counts as an active mutator and hits a safepoint every step, so a
-    /// preemptive collection can pause it; a blocked `Recv` keeps hitting
-    /// safepoints while it polls, so it stays collectable too.
-    pub fn run_actor(self: &Arc<Self>, tid: usize, function: DefId, args: Vec<Value>) -> Outcome {
-        struct Active<'a>(&'a Shared, usize);
-        impl Drop for Active<'_> {
-            fn drop(&mut self) {
-                self.0.unregister(self.1);
-            }
-        }
-        self.register();
-        let _active = Active(self, tid);
-        let mailbox = self.mailbox(tid);
-
-        let (version, registers) = {
-            let world = self.world.read().unwrap();
-            let version = world.current_functions[&function];
-            match &world.functions[&(function, version)] {
-                FunctionState::Ready(f) => (version, f.registers),
-                FunctionState::Broken { diagnostics, .. } => {
-                    return Outcome::Paused(Condition::BrokenFunction {
-                        function,
-                        diagnostics: diagnostics.clone(),
-                    });
-                }
-            }
-        };
-        let mut regs = vec![None; registers];
-        for (i, v) in args.into_iter().enumerate() {
-            regs[i] = Some(v);
-        }
-        let mut frames = vec![Frame {
-            function: (function, version),
-            pc: 0,
-            registers: regs,
-            return_to: None,
-        }];
-        let mut done: Option<Value> = None;
-
-        // Drive the *one* step semantics (shared with the interpreter) over a
-        // thread-local frame stack. A read guard on the world is taken per step:
-        // a running frame keeps its pinned version, while a live edit (which
-        // takes the write lock between steps) is picked up by the next `Call`
-        // that re-resolves the current version. A safepoint at the top of each
-        // turn keeps this actor parkable for a stop-the-world collection; a
-        // `Recv` with no message yet returns `Flow::Blocked`, so we spin (still
-        // releasing the guard and hitting the safepoint) until it arrives.
-        loop {
-            self.safepoint(tid, &frames);
-            let flow = {
-                let world = self.world.read().unwrap();
-                let ((func, version), pc) = {
-                    let t = frames.last().unwrap();
-                    (t.function, t.pc)
-                };
-                let instruction = match &world.functions[&(func, version)] {
-                    FunctionState::Ready(f) => f.code[pc].clone(),
-                    _ => unreachable!("a frame only pins ready code"),
-                };
-                let mut machine = MtMachine {
-                    shared: self,
-                    world: &world,
-                    mailbox: &mailbox,
-                    frames: &mut frames,
-                    done: &mut done,
-                };
-                step_instruction(&mut machine, &instruction)
-            };
-            match flow {
-                Ok(Flow::Stepped) => {
-                    if let Some(value) = done.take() {
-                        return Outcome::Complete(value);
-                    }
-                }
-                Ok(Flow::Blocked) => std::thread::yield_now(),
-                Err(condition) => return Outcome::Paused(condition),
-            }
-        }
-    }
-
-    /// Spawn one OS thread per actor over the shared runtime and join them,
-    /// returning outcomes in the actors' order. Mailboxes for every actor id
-    /// are created up front, so a `Send` can never race its recipient into
-    /// existence. All threads share this `Shared`'s heap.
-    pub fn run_threads(self: &Arc<Self>, actors: Vec<(DefId, Vec<Value>)>) -> Vec<Outcome> {
-        for tid in 0..actors.len() {
-            self.mailbox(tid);
-        }
-        let handles: Vec<_> = actors
-            .into_iter()
-            .enumerate()
-            .map(|(tid, (func, args))| {
-                let shared = Arc::clone(self);
-                std::thread::spawn(move || shared.run_actor(tid, func, args))
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
     }
 
     /// Enter as an active mutator (a thread that touches the shared heap). Also
@@ -317,16 +236,6 @@ impl Shared {
         // A collector may be waiting for `parked == active`; a finished thread
         // lowers `active`, so nudge it to re-check.
         self.gc_cv.notify_all();
-    }
-
-    /// A safepoint: if a collection is pending, publish this actor's live roots
-    /// and park until the collector releases us. Called every instruction, so
-    /// preemption latency is one step.
-    fn safepoint(&self, tid: usize, frames: &[Frame]) {
-        if !self.gc_pending.load(Ordering::Acquire) {
-            return;
-        }
-        self.safepoint_roots(tid, frame_roots(frames));
     }
 
     /// The root-carrying core of a safepoint, for callers that compute their own
@@ -458,105 +367,5 @@ impl Shared {
             }
         }
         self.heap.retain(&live)
-    }
-}
-
-/// A concurrent worker's [`Machine`]: the shared step semantics run over a
-/// thread-local frame stack layered on the shared runtime. Effects go to the
-/// shared heap/output/mailboxes (all internally synchronized). This tier has no
-/// FFI or globals (`Unsupported`); `Recv` polls the mailbox and reports
-/// `WouldBlock` so the driver can spin at a safepoint.
-struct MtMachine<'a> {
-    shared: &'a Arc<Shared>,
-    /// The world read guard for the current step (a live edit can't land while
-    /// this is held).
-    world: &'a World,
-    mailbox: &'a Arc<Mutex<std::collections::VecDeque<Value>>>,
-    /// The persistent frame stack, borrowed for the step.
-    frames: &'a mut Vec<Frame>,
-    /// Set when the top frame returns — the driver turns it into `Complete`.
-    done: &'a mut Option<Value>,
-}
-
-impl MtMachine<'_> {
-    fn top(&self) -> &Frame {
-        self.frames.last().unwrap()
-    }
-    fn top_mut(&mut self) -> &mut Frame {
-        self.frames.last_mut().unwrap()
-    }
-}
-
-impl Machine for MtMachine<'_> {
-    fn world(&self) -> &World {
-        self.world
-    }
-    fn heap(&self) -> &Heap {
-        &self.shared.heap
-    }
-    fn current(&self) -> (DefId, Version) {
-        self.top().function
-    }
-    fn pc(&self) -> usize {
-        self.top().pc
-    }
-    fn reg(&self, i: usize) -> Option<Value> {
-        self.top().registers.get(i).cloned().flatten()
-    }
-    fn set_reg(&mut self, dst: usize, value: Value) {
-        self.top_mut().registers[dst] = Some(value);
-    }
-    fn set_pc(&mut self, pc: usize) {
-        self.top_mut().pc = pc;
-    }
-    fn advance(&mut self) {
-        self.top_mut().pc += 1;
-    }
-    fn emit(&mut self, value: Value) {
-        self.shared.emit(value);
-    }
-    fn global(&self, id: DefId) -> GlobalRead {
-        match self.shared.global(id) {
-            Some(v) => GlobalRead::Value(v),
-            None => GlobalRead::Missing,
-        }
-    }
-    fn call_foreign(&mut self, id: ForeignFnId, args: &[Value]) -> ForeignCall {
-        match self.shared.call_foreign(id, args) {
-            Some(v) => ForeignCall::Done(Ok(v)),
-            None => ForeignCall::Done(Err(format!(
-                "foreign fn {id} has no registered implementation"
-            ))),
-        }
-    }
-    fn push_call(
-        &mut self,
-        callee: DefId,
-        version: Version,
-        registers: Vec<Option<Value>>,
-        return_reg: usize,
-    ) {
-        self.frames.push(Frame {
-            function: (callee, version),
-            pc: 0,
-            registers,
-            return_to: Some(return_reg),
-        });
-    }
-    fn do_return(&mut self, value: Value) {
-        let done = self.frames.pop().unwrap();
-        match done.return_to {
-            Some(dst) => self.top_mut().registers[dst] = Some(value),
-            None => *self.done = Some(value),
-        }
-    }
-    fn send(&mut self, target: usize, value: Value) -> Option<bool> {
-        Some(self.shared.deliver(target, value))
-    }
-    fn recv(&mut self) -> RecvResult {
-        match self.mailbox.lock().unwrap().pop_front() {
-            Some(v) => RecvResult::Got(v),
-            None => RecvResult::WouldBlock,
-        }
     }
 }

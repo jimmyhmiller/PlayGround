@@ -2,17 +2,13 @@
 
 use livetype_core::*;
 
-/// Compile `source`, run `entry` with no args on the interpreter, and return
-/// (final status, emitted effects).
-fn run(source: &str, entry: &str) -> (ActorStatus, Vec<Value>) {
-    let mut compiled = compile(source).expect("compile");
+/// Compile `source`, run `entry` with no args on the (interp-only) engine, and
+/// return (outcome, emitted effects).
+fn run(source: &str, entry: &str) -> (Outcome, Vec<Value>) {
+    let compiled = compile(source).unwrap_or_else(|e| panic!("compile: {e}"));
     let id = compiled.functions[entry];
-    let actor = compiled.runtime.spawn(id, vec![]).expect("spawn");
-    compiled.runtime.run();
-    (
-        compiled.runtime.actors[&actor].status.clone(),
-        compiled.runtime.output.clone(),
-    )
+    let outcome = compiled.engine.run_call(id, vec![]);
+    (outcome, compiled.engine.output())
 }
 
 #[test]
@@ -36,7 +32,7 @@ fn structs_fields_and_arithmetic() {
         }
     "#;
     let (status, out) = run(src, "main");
-    assert_eq!(status, ActorStatus::Complete(Value::I64(96)));
+    assert_eq!(status, Outcome::Complete(Value::I64(96)));
     assert_eq!(out, vec![Value::I64(100)]);
 }
 
@@ -56,7 +52,7 @@ fn while_loop_and_conditionals() {
         }
     "#;
     let (status, out) = run(src, "main");
-    assert_eq!(status, ActorStatus::Complete(Value::I64(6)));
+    assert_eq!(status, Outcome::Complete(Value::I64(6)));
     assert_eq!(out, vec![Value::I64(3), Value::I64(2), Value::I64(1)]);
 }
 
@@ -75,7 +71,7 @@ fn if_else_picks_a_branch() {
         }
     "#;
     let (status, _) = run(src, "main");
-    assert_eq!(status, ActorStatus::Complete(Value::I64(111)));
+    assert_eq!(status, Outcome::Complete(Value::I64(111)));
 }
 
 #[test]
@@ -91,7 +87,7 @@ fn nested_structs_by_reference() {
         }
     "#;
     let (status, _) = run(src, "main");
-    assert_eq!(status, ActorStatus::Complete(Value::I64(250)));
+    assert_eq!(status, Outcome::Complete(Value::I64(250)));
 }
 
 #[test]
@@ -104,7 +100,9 @@ fn a_type_error_is_a_compile_error() {
         }
         fn main() -> i64 { return 0; }
     "#;
-    let err = compile(src).unwrap_err();
+    let Err(err) = compile(src) else {
+        panic!("expected a compile error");
+    };
     assert!(err.contains("bad"), "expected an error mentioning `bad`, got: {err}");
 }
 
@@ -124,7 +122,7 @@ fn recursion_works() {
         }
     "#;
     let (status, out) = run(src, "main");
-    assert_eq!(status, ActorStatus::Complete(Value::I64(0)));
+    assert_eq!(status, Outcome::Complete(Value::I64(0)));
     assert_eq!(out, vec![Value::I64(3), Value::I64(2), Value::I64(1)]);
 }
 
@@ -144,7 +142,7 @@ fn mutual_recursion_works() {
         }
     "#;
     let (status, _) = run(src, "main");
-    assert_eq!(status, ActorStatus::Complete(Value::Bool(true)));
+    assert_eq!(status, Outcome::Complete(Value::Bool(true)));
 }
 
 #[test]
@@ -158,7 +156,7 @@ fn tail_expression_returns() {
         }
     "#;
     let (status, _) = run(src, "main");
-    assert_eq!(status, ActorStatus::Complete(Value::I64(18)));
+    assert_eq!(status, Outcome::Complete(Value::I64(18)));
 }
 
 #[test]
@@ -176,6 +174,6 @@ fn all_the_operators() {
         }
     "#;
     let (status, out) = run(src, "main");
-    assert_eq!(status, ActorStatus::Complete(Value::I64(27)));
+    assert_eq!(status, Outcome::Complete(Value::I64(27)));
     assert_eq!(out, vec![Value::I64(1), Value::I64(2), Value::I64(3), Value::I64(4), Value::I64(5)]);
 }

@@ -1,10 +1,16 @@
 //! Differential fuzzer: generate random *valid* programs and random schema
-//! evolutions, then run the same scenario on both executors and assert they
-//! agree on everything observable. Any divergence is a bug in the JIT backend,
-//! the verifier, migration, or the soundness checks. Deterministic (seeded), so
-//! a failing seed reproduces exactly.
+//! evolutions, then run the same scenario on several *configurations of the one
+//! engine* and assert they agree on everything observable. Any divergence is a
+//! bug in the JIT backend, the tiering seam, the verifier, migration, or the
+//! soundness checks. Deterministic (seeded), so a failing seed reproduces
+//! exactly.
+//!
+//! There are no separate executors left to compare — the configurations are
+//! never-promote (the oracle), always-promote, and auto-tiering, plus a
+//! worker-thread run of the same loop.
 
 use livetype::*;
+use std::sync::Arc;
 
 /// xorshift64 — a tiny deterministic PRNG (no external crates).
 struct Rng(u64);
@@ -290,44 +296,45 @@ fn gen_updates(rng: &mut Rng, types: &mut [TypeState]) -> Vec<Schema> {
     updates
 }
 
-fn install_program(program: &Program) -> Runtime {
-    let mut rt = Runtime::default();
+fn install_program(engine: &Engine, program: &Program) {
     for schema in &program.schemas {
-        rt.install_schema(schema.clone()).unwrap();
+        engine.install_schema(schema.clone()).unwrap();
     }
     // The entry may or may not verify against the initial schemas; either way it
-    // installs (Ready or Broken) and both executors treat it identically.
-    let _ = rt.install_function(program.entry.clone());
-    rt
+    // installs (Ready or Broken) and every configuration treats it identically.
+    let _ = engine.install_function(program.entry.clone());
 }
 
-/// Step the interpreter until the actor is no longer runnable or has executed a
-/// `Yield`.
-fn interp_to_yield(rt: &mut Runtime, actor: ActorId) {
-    while matches!(rt.actors[&actor].status, ActorStatus::Runnable) {
-        let (key, pc) = {
-            let f = rt.actors[&actor].frames.last().unwrap();
-            (f.function, f.pc)
-        };
-        let is_yield = matches!(
-            &rt.world.functions[&key],
-            FunctionState::Ready(func) if matches!(func.code[pc], Instruction::Yield)
-        );
-        rt.step(actor);
-        if is_yield {
-            break;
+/// Step the engine until the actor is no longer runnable or has crossed a
+/// `Yield` — identical code for every configuration, which is the point.
+fn to_yield(engine: &Engine, actor: &mut Actor) {
+    loop {
+        match engine.step(actor) {
+            Turn::Progress => {}
+            Turn::Yielded | Turn::Done | Turn::Paused => break,
+            Turn::Blocked => panic!("fuzzed programs have no message passing"),
         }
     }
 }
 
-/// Compare the two statuses by kind (and value/condition variant), which is what
-/// "observable" means here — the two runtimes allocate ids identically, so
-/// object references compare directly too.
-fn status_eq(a: &ActorStatus, b: &ActorStatus) -> bool {
+/// The full edit scenario on one engine configuration: run to the yield, apply
+/// the schema updates, run to a stop.
+fn run_scenario(engine: &Arc<Engine>, program: &Program) -> Result<Outcome, Condition> {
+    install_program(engine, program);
+    let mut actor = engine.spawn(ENTRY, vec![])?;
+    to_yield(engine, &mut actor);
+    for schema in &program.updates {
+        let _ = engine.install_schema(schema.clone());
+    }
+    Ok(engine.run(&mut actor))
+}
+
+/// Compare two outcomes by what "observable" means here: completion values
+/// exactly, pause conditions by variant.
+fn outcome_eq(a: &Outcome, b: &Outcome) -> bool {
     match (a, b) {
-        (ActorStatus::Complete(x), ActorStatus::Complete(y)) => x == y,
-        (ActorStatus::Runnable, ActorStatus::Runnable) => true,
-        (ActorStatus::Paused(x), ActorStatus::Paused(y)) => {
+        (Outcome::Complete(x), Outcome::Complete(y)) => x == y,
+        (Outcome::Paused(x), Outcome::Paused(y)) => {
             std::mem::discriminant(x) == std::mem::discriminant(y)
         }
         _ => false,
@@ -337,99 +344,87 @@ fn status_eq(a: &ActorStatus, b: &ActorStatus) -> bool {
 fn run_seed(seed: u64) {
     let program = gen_program(seed);
 
-    // Interpreter.
-    let mut rt_i = install_program(&program);
-    let spawn_i = rt_i.spawn(ENTRY, vec![]);
-    // JIT.
-    let mut rt_j = install_program(&program);
-    let spawn_j = JitActor::spawn(&rt_j, 1, ENTRY, vec![]);
+    let configs: Vec<(&str, Arc<Engine>)> = vec![
+        ("interp", Engine::interp()), // the oracle: never promotes
+        ("jit", jit_engine(0)),       // promotes everything on first entry
+        ("tiered", jit_engine(3)),    // auto-tiering mid-scenario
+    ];
+    let results: Vec<(&str, &Arc<Engine>, Result<Outcome, Condition>)> = configs
+        .iter()
+        .map(|(name, e)| (*name, e, run_scenario(e, &program)))
+        .collect();
 
-    // A broken entry cannot be spawned; both must agree on that.
-    match (spawn_i, spawn_j) {
-        (Ok(a_i), Ok(mut a_j)) => {
-            interp_to_yield(&mut rt_i, a_i);
-            drive(&mut rt_j, &mut a_j, true).unwrap();
-
-            for schema in &program.updates {
-                let _ = rt_i.install_schema(schema.clone());
-                let _ = rt_j.install_schema(schema.clone());
+    let (oracle_name, oracle_engine, oracle) = &results[0];
+    for (name, engine, result) in &results[1..] {
+        match (oracle, result) {
+            (Ok(a), Ok(b)) => {
+                assert!(
+                    outcome_eq(a, b),
+                    "seed {seed}: outcome diverged\n  {oracle_name}: {a:?}\n  {name}: {b:?}"
+                );
+                assert_eq!(
+                    oracle_engine.output(),
+                    engine.output(),
+                    "seed {seed}: effects diverged ({oracle_name} vs {name})"
+                );
+                assert_eq!(
+                    *oracle_engine.shared().heap(),
+                    *engine.shared().heap(),
+                    "seed {seed}: heap diverged ({oracle_name} vs {name})"
+                );
             }
-
-            rt_i.run();
-            drive(&mut rt_j, &mut a_j, false).unwrap();
-
-            let si = &rt_i.actors[&a_i].status;
-            assert!(
-                status_eq(si, &a_j.status),
-                "seed {seed}: status diverged\n  interp: {si:?}\n  jit:    {:?}",
-                a_j.status
-            );
-            assert_eq!(rt_i.output, rt_j.output, "seed {seed}: effects diverged");
-            assert_eq!(rt_i.heap, rt_j.heap, "seed {seed}: heap diverged");
+            (Err(_), Err(_)) => {} // both refused to spawn a broken entry
+            (a, b) => panic!(
+                "seed {seed}: spawn behavior diverged\n  {oracle_name}: {a:?}\n  {name}: {b:?}"
+            ),
         }
-        (Err(_), Err(_)) => {}
-        (Ok(_), Err(e)) => panic!("seed {seed}: interpreter spawned but JIT did not: {e:?}"),
-        (Err(e), Ok(_)) => panic!("seed {seed}: JIT spawned but interpreter did not: {e:?}"),
     }
 }
 
 #[test]
-fn jit_matches_interpreter_on_random_programs() {
+fn engine_configurations_agree_on_random_programs() {
     // Over 600 seeds this reaches completion, migration-gap traps, and
-    // con-freeness traps (roughly 526 / 22 / 52 by outcome) — the JIT and
-    // interpreter agree on every one.
+    // con-freeness traps — every configuration of the one engine agrees on
+    // every one.
     for seed in 1..=600u64 {
         run_seed(seed);
     }
 }
 
-/// Run the *base* program (no schema updates) to completion on the interpreter
-/// and on the `Shared` concurrent tier, and assert they agree. The Shared tier
-/// freezes the world and cannot take mid-run edits (that is what Phase 4 adds),
-/// so the three-way net compares the edit scenario on interp↔JIT and the
-/// steady-state run on interp↔Shared. Together they pin every executor's shared
-/// machinery (heap, migration, step semantics, soundness) during the
-/// unification refactor.
-fn run_seed_shared(seed: u64) {
+/// Run the *base* program (no schema updates) to completion on the calling
+/// thread (interp oracle) and on a worker thread running the always-JIT
+/// configuration, and assert they agree — pinning that "on a thread" is the
+/// same loop with the same observable behavior.
+fn run_seed_threaded(seed: u64) {
     let program = gen_program(seed);
 
-    let mut rt_i = install_program(&program);
-    let Ok(a_i) = rt_i.spawn(ENTRY, vec![]) else {
+    let oracle = Engine::interp();
+    install_program(&oracle, &program);
+    let Ok(mut actor) = oracle.spawn(ENTRY, vec![]) else {
         return; // a broken entry cannot spawn; nothing to compare
     };
-    rt_i.run();
-    let interp_status = rt_i.actors[&a_i].status.clone();
-    let interp_out = rt_i.output.clone();
-    let interp_objs = rt_i.heap.len();
+    let oracle_outcome = oracle.run(&mut actor);
 
-    let rt_s = install_program(&program);
-    let shared = Shared::from_runtime(rt_s);
-    let outcomes = shared.run_threads(vec![(ENTRY, vec![])]);
+    let jit = jit_engine(0);
+    install_program(&jit, &program);
+    let outcomes = jit.run_threads(vec![(ENTRY, vec![])]);
 
-    match (&interp_status, &outcomes[0]) {
-        (ActorStatus::Complete(x), Outcome::Complete(y)) => {
-            assert_eq!(x, y, "seed {seed}: shared completion value diverged");
-        }
-        (ActorStatus::Paused(x), Outcome::Paused(y)) => {
-            assert_eq!(
-                std::mem::discriminant(x),
-                std::mem::discriminant(y),
-                "seed {seed}: shared pause condition diverged"
-            );
-        }
-        (i, s) => panic!("seed {seed}: shared outcome diverged\n  interp: {i:?}\n  shared: {s:?}"),
-    }
-    assert_eq!(interp_out, shared.output(), "seed {seed}: shared effects diverged");
+    assert!(
+        outcome_eq(&oracle_outcome, &outcomes[0]),
+        "seed {seed}: threaded outcome diverged\n  oracle: {oracle_outcome:?}\n  thread: {:?}",
+        outcomes[0]
+    );
+    assert_eq!(oracle.output(), jit.output(), "seed {seed}: threaded effects diverged");
     assert_eq!(
-        interp_objs,
-        shared.object_count(),
-        "seed {seed}: shared object count diverged"
+        oracle.shared().object_count(),
+        jit.shared().object_count(),
+        "seed {seed}: threaded object count diverged"
     );
 }
 
 #[test]
-fn shared_matches_interpreter_on_random_programs() {
+fn worker_thread_matches_the_calling_thread() {
     for seed in 1..=600u64 {
-        run_seed_shared(seed);
+        run_seed_threaded(seed);
     }
 }

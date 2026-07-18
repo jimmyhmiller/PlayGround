@@ -1,13 +1,14 @@
-//! Differential tests: the native `step` backend must be observationally
-//! indistinguishable from the reference interpreter. Each scenario is set up in
-//! two identical `Runtime`s, driven by the two executors through the same hot
-//! updates at the same execution points, and compared at every observable
-//! boundary — emitted effects, pause conditions, completion value, and the
-//! whole heap. A final test proves the precise GC roots correctly from native
-//! frame slots.
+//! Differential tests: the always-JIT configuration must be observationally
+//! indistinguishable from the never-promote (interpreter) configuration of the
+//! one engine. Each scenario is set up on two identical engines, driven through
+//! the same hot updates at the same execution points, and compared at every
+//! observable boundary — emitted effects, pause conditions, completion value,
+//! and the whole heap. A final test proves the precise GC roots correctly from
+//! native frame slots.
 
 use livetype::*;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 fn field(id: FieldId, name: &str, ty: Type) -> Field {
     Field {
@@ -27,44 +28,47 @@ fn field_with_default(id: FieldId, name: &str, ty: Type, default: Value) -> Fiel
     }
 }
 
-/// The current instruction at an interpreter actor's top frame.
-fn top_instr(rt: &Runtime, actor: ActorId) -> Instruction {
-    let frame = rt.actors[&actor].frames.last().unwrap();
-    let FunctionState::Ready(func) = &rt.world.functions[&frame.function] else {
-        panic!("top frame pins non-ready code");
-    };
-    func.code[frame.pc].clone()
-}
-
-/// Step the interpreter until the actor stops being runnable OR has just
-/// executed a `Yield` — the interpreter analogue of `drive(.., stop_on_yield)`.
-fn interp_run_to_yield(rt: &mut Runtime, actor: ActorId) {
-    while matches!(rt.actors[&actor].status, ActorStatus::Runnable) {
-        let was_yield = matches!(top_instr(rt, actor), Instruction::Yield);
-        rt.step(actor);
-        if was_yield {
-            break;
+/// Step until the actor stops being runnable OR has just crossed a `Yield` —
+/// identical code for both configurations (that is the point of the engine).
+fn to_yield(engine: &Engine, actor: &mut Actor) {
+    loop {
+        match engine.step(actor) {
+            Turn::Progress => {}
+            Turn::Yielded | Turn::Done | Turn::Paused => break,
+            Turn::Blocked => panic!("these scenarios have no message passing"),
         }
     }
 }
 
-fn interp_runnable(rt: &Runtime, actor: ActorId) -> bool {
-    matches!(rt.actors[&actor].status, ActorStatus::Runnable)
+/// Continue a stopped-or-running actor to its next stop: re-drives a paused
+/// stack (post-repair) or just runs a runnable one.
+fn advance(engine: &Engine, actor: &mut Actor) {
+    if matches!(actor.status, ActorStatus::Paused(_)) {
+        engine.resume(actor);
+    } else {
+        engine.run(actor);
+    }
 }
 
-/// Assert the two executors agree on everything observable.
-fn assert_same(rt_i: &Runtime, a_i: ActorId, rt_j: &Runtime, a_j: &JitActor, label: &str) {
-    assert_eq!(rt_i.output, rt_j.output, "{label}: emitted effects diverged");
+/// Assert the two configurations agree on everything observable.
+fn assert_same(e_i: &Engine, a_i: &Actor, e_j: &Engine, a_j: &Actor, label: &str) {
+    assert_eq!(e_i.output(), e_j.output(), "{label}: emitted effects diverged");
+    assert_eq!(a_i.status, a_j.status, "{label}: actor status diverged");
     assert_eq!(
-        rt_i.actors[&a_i].status, a_j.status,
-        "{label}: actor status diverged"
+        *e_i.shared().heap(),
+        *e_j.shared().heap(),
+        "{label}: heap diverged"
     );
-    assert_eq!(rt_i.heap, rt_j.heap, "{label}: heap diverged");
+}
+
+/// The two configurations under comparison.
+fn both_engines() -> (Arc<Engine>, Arc<Engine>) {
+    (Engine::interp(), jit_engine(0))
 }
 
 // ===========================================================================
 // Scenario 1 — Box migrated to hold a Wrapper (the tests/live_update.rs story,
-// with a Yield safe point so both executors stop at the same place).
+// with a Yield safe point so both configurations stop at the same place).
 // ===========================================================================
 
 const BOX: DefId = 1;
@@ -74,8 +78,7 @@ const S1_MAIN: DefId = 11;
 const VALUE: FieldId = 100;
 const INNER: FieldId = 200;
 
-fn scenario1_setup() -> Runtime {
-    let mut rt = Runtime::default();
+fn scenario1_setup(rt: &Engine) {
     rt.install_schema(Schema {
         type_id: BOX,
         version: Version(1),
@@ -128,10 +131,9 @@ fn scenario1_setup() -> Runtime {
         ],
     })
     .unwrap();
-    rt
 }
 
-fn scenario1_break(rt: &mut Runtime) {
+fn scenario1_break(rt: &Engine) {
     rt.install_schema(Schema {
         type_id: WRAPPER,
         version: Version(1),
@@ -148,7 +150,7 @@ fn scenario1_break(rt: &mut Runtime) {
     .unwrap();
 }
 
-fn scenario1_fix_read(rt: &mut Runtime) {
+fn scenario1_fix_read(rt: &Engine) {
     rt.install_function(Function {
         id: READ,
         version: Version(3),
@@ -173,7 +175,7 @@ fn scenario1_fix_read(rt: &mut Runtime) {
     .unwrap();
 }
 
-fn scenario1_migration(rt: &mut Runtime) {
+fn scenario1_migration(rt: &Engine) {
     rt.install_migration(Migration {
         type_id: BOX,
         from: Version(1),
@@ -192,48 +194,49 @@ fn scenario1_migration(rt: &mut Runtime) {
 
 #[test]
 fn scenario1_box_wrapper_migration_matches() {
-    let mut rt_i = scenario1_setup();
-    let a_i = rt_i.spawn(S1_MAIN, vec![]).unwrap();
-    let mut rt_j = scenario1_setup();
-    let mut a_j = JitActor::spawn(&rt_j, 1, S1_MAIN, vec![]).unwrap();
+    let (e_i, e_j) = both_engines();
+    scenario1_setup(&e_i);
+    scenario1_setup(&e_j);
+    let mut a_i = e_i.spawn(S1_MAIN, vec![]).unwrap();
+    let mut a_j = e_j.spawn(S1_MAIN, vec![]).unwrap();
 
     // Phase A: run to the yield — Box allocated, effect emitted, before Call.
-    interp_run_to_yield(&mut rt_i, a_i);
-    drive(&mut rt_j, &mut a_j, true).unwrap();
-    assert_eq!(rt_i.output, vec![Value::I64(42)]);
-    assert_same(&rt_i, a_i, &rt_j, &a_j, "A: at yield");
+    to_yield(&e_i, &mut a_i);
+    to_yield(&e_j, &mut a_j);
+    assert_eq!(e_i.output(), vec![Value::I64(42)]);
+    assert_same(&e_i, &a_i, &e_j, &a_j, "A: at yield");
 
     // Update: Box now holds a Wrapper — this breaks `read`.
-    scenario1_break(&mut rt_i);
-    scenario1_break(&mut rt_j);
+    scenario1_break(&e_i);
+    scenario1_break(&e_j);
 
     // Phase B: reaching the broken `read` pauses.
-    rt_i.run();
-    drive(&mut rt_j, &mut a_j, false).unwrap();
+    advance(&e_i, &mut a_i);
+    advance(&e_j, &mut a_j);
     assert!(matches!(
         a_j.status,
         ActorStatus::Paused(Condition::BrokenFunction { function: READ, .. })
     ));
-    assert_same(&rt_i, a_i, &rt_j, &a_j, "B: broken function");
+    assert_same(&e_i, &a_i, &e_j, &a_j, "B: broken function");
 
     // Repair `read`, then hit the un-migratable value.
-    scenario1_fix_read(&mut rt_i);
-    scenario1_fix_read(&mut rt_j);
-    rt_i.run();
-    drive(&mut rt_j, &mut a_j, false).unwrap();
+    scenario1_fix_read(&e_i);
+    scenario1_fix_read(&e_j);
+    advance(&e_i, &mut a_i);
+    advance(&e_j, &mut a_j);
     assert!(matches!(
         a_j.status,
         ActorStatus::Paused(Condition::MissingMigration { .. })
     ));
-    assert_same(&rt_i, a_i, &rt_j, &a_j, "C: missing migration");
+    assert_same(&e_i, &a_i, &e_j, &a_j, "C: missing migration");
 
     // Supply the migration and resume to completion.
-    scenario1_migration(&mut rt_i);
-    scenario1_migration(&mut rt_j);
-    rt_i.run();
-    drive(&mut rt_j, &mut a_j, false).unwrap();
+    scenario1_migration(&e_i);
+    scenario1_migration(&e_j);
+    advance(&e_i, &mut a_i);
+    advance(&e_j, &mut a_j);
     assert_eq!(a_j.status, ActorStatus::Complete(Value::I64(42)));
-    assert_same(&rt_i, a_i, &rt_j, &a_j, "D: complete");
+    assert_same(&e_i, &a_i, &e_j, &a_j, "D: complete");
 }
 
 // ===========================================================================
@@ -247,8 +250,7 @@ const S2_MAIN: DefId = 11;
 const BALANCE: FieldId = 100;
 const CENTS: FieldId = 200;
 
-fn scenario2_setup() -> Runtime {
-    let mut rt = Runtime::default();
+fn scenario2_setup(rt: &Engine) {
     rt.install_schema(Schema {
         type_id: ACCOUNT,
         version: Version(1),
@@ -310,10 +312,9 @@ fn scenario2_setup() -> Runtime {
         ],
     })
     .unwrap();
-    rt
 }
 
-fn scenario2_break(rt: &mut Runtime) {
+fn scenario2_break(rt: &Engine) {
     rt.install_schema(Schema {
         type_id: MONEY,
         version: Version(1),
@@ -330,7 +331,7 @@ fn scenario2_break(rt: &mut Runtime) {
     .unwrap();
 }
 
-fn scenario2_fix_charge(rt: &mut Runtime) {
+fn scenario2_fix_charge(rt: &Engine) {
     rt.install_function(Function {
         id: CHARGE,
         version: Version(3),
@@ -360,7 +361,7 @@ fn scenario2_fix_charge(rt: &mut Runtime) {
     .unwrap();
 }
 
-fn scenario2_migration(rt: &mut Runtime) {
+fn scenario2_migration(rt: &Engine) {
     rt.install_migration(Migration {
         type_id: ACCOUNT,
         from: Version(1),
@@ -379,55 +380,55 @@ fn scenario2_migration(rt: &mut Runtime) {
 
 #[test]
 fn scenario2_account_money_matches() {
-    let mut rt_i = scenario2_setup();
-    let a_i = rt_i.spawn(S2_MAIN, vec![]).unwrap();
-    let mut rt_j = scenario2_setup();
-    let mut a_j = JitActor::spawn(&rt_j, 1, S2_MAIN, vec![]).unwrap();
+    let (e_i, e_j) = both_engines();
+    scenario2_setup(&e_i);
+    scenario2_setup(&e_j);
+    let mut a_i = e_i.spawn(S2_MAIN, vec![]).unwrap();
+    let mut a_j = e_j.spawn(S2_MAIN, vec![]).unwrap();
 
-    interp_run_to_yield(&mut rt_i, a_i);
-    drive(&mut rt_j, &mut a_j, true).unwrap();
-    assert_eq!(rt_i.output, vec![Value::I64(100)]);
-    assert_same(&rt_i, a_i, &rt_j, &a_j, "A: at yield");
+    to_yield(&e_i, &mut a_i);
+    to_yield(&e_j, &mut a_j);
+    assert_eq!(e_i.output(), vec![Value::I64(100)]);
+    assert_same(&e_i, &a_i, &e_j, &a_j, "A: at yield");
 
-    scenario2_break(&mut rt_i);
-    scenario2_break(&mut rt_j);
-    rt_i.run();
-    drive(&mut rt_j, &mut a_j, false).unwrap();
+    scenario2_break(&e_i);
+    scenario2_break(&e_j);
+    advance(&e_i, &mut a_i);
+    advance(&e_j, &mut a_j);
     assert!(matches!(
         a_j.status,
         ActorStatus::Paused(Condition::BrokenFunction { function: CHARGE, .. })
     ));
-    assert_same(&rt_i, a_i, &rt_j, &a_j, "B: broken charge");
+    assert_same(&e_i, &a_i, &e_j, &a_j, "B: broken charge");
 
-    scenario2_fix_charge(&mut rt_i);
-    scenario2_fix_charge(&mut rt_j);
-    rt_i.run();
-    drive(&mut rt_j, &mut a_j, false).unwrap();
+    scenario2_fix_charge(&e_i);
+    scenario2_fix_charge(&e_j);
+    advance(&e_i, &mut a_i);
+    advance(&e_j, &mut a_j);
     assert!(matches!(
         a_j.status,
         ActorStatus::Paused(Condition::MissingMigration { .. })
     ));
-    assert_same(&rt_i, a_i, &rt_j, &a_j, "C: missing migration");
+    assert_same(&e_i, &a_i, &e_j, &a_j, "C: missing migration");
 
-    scenario2_migration(&mut rt_i);
-    scenario2_migration(&mut rt_j);
-    rt_i.run();
-    drive(&mut rt_j, &mut a_j, false).unwrap();
+    scenario2_migration(&e_i);
+    scenario2_migration(&e_j);
+    advance(&e_i, &mut a_i);
+    advance(&e_j, &mut a_j);
     assert_eq!(a_j.status, ActorStatus::Complete(Value::I64(95)));
-    assert_same(&rt_i, a_i, &rt_j, &a_j, "D: complete");
+    assert_same(&e_i, &a_i, &e_j, &a_j, "D: complete");
 }
 
 // ===========================================================================
 // Scenario 3 — a loop with a Yield each iteration, hot-updated MID-LOOP.
 // Exercises back-edges, the recurring safe point (T5), and a lazy migration
-// landing between iterations, all identically on both executors.
+// landing between iterations, all identically on both configurations.
 // ===========================================================================
 
 const LOOP: DefId = 10;
 const FEE: FieldId = 101;
 
-fn scenario3_setup() -> (Runtime, ObjectId) {
-    let mut rt = Runtime::default();
+fn scenario3_setup(rt: &Engine) -> ObjectId {
     rt.install_schema(Schema {
         type_id: ACCOUNT,
         version: Version(1),
@@ -478,8 +479,7 @@ fn scenario3_setup() -> (Runtime, ObjectId) {
         ],
     })
     .unwrap();
-    let account = rt.jit_new(ACCOUNT, &[(BALANCE, Value::I64(100))]).unwrap();
-    (rt, account)
+    rt.shared().jit_new(ACCOUNT, &[(BALANCE, Value::I64(100))]).unwrap()
 }
 
 /// Additive change: `Account` gains a defaulted `fee`. No migration is
@@ -487,7 +487,7 @@ fn scenario3_setup() -> (Runtime, ObjectId) {
 /// because the change is trivial. This does NOT break `loop_balance` (it still
 /// reads `balance: Int`); the live account migrates lazily and transparently at
 /// the next field access — the hot update landing between loop iterations.
-fn scenario3_add_fee(rt: &mut Runtime) {
+fn scenario3_add_fee(rt: &Engine) {
     rt.install_schema(Schema {
         type_id: ACCOUNT,
         version: Version(2),
@@ -502,41 +502,46 @@ fn scenario3_add_fee(rt: &mut Runtime) {
 
 #[test]
 fn scenario3_loop_with_midloop_update_matches() {
-    let (mut rt_i, acct_i) = scenario3_setup();
-    let a_i = rt_i.spawn(LOOP, vec![Value::Ref(acct_i), Value::I64(3)]).unwrap();
-    let (mut rt_j, acct_j) = scenario3_setup();
-    let mut a_j = JitActor::spawn(&rt_j, 1, LOOP, vec![Value::Ref(acct_j), Value::I64(3)]).unwrap();
-    assert_eq!(acct_i, acct_j, "both runtimes allocate the account identically");
+    let (e_i, e_j) = both_engines();
+    let acct_i = scenario3_setup(&e_i);
+    let acct_j = scenario3_setup(&e_j);
+    assert_eq!(acct_i, acct_j, "both engines allocate the account identically");
+    let mut a_i = e_i.spawn(LOOP, vec![Value::Ref(acct_i), Value::I64(3)]).unwrap();
+    let mut a_j = e_j.spawn(LOOP, vec![Value::Ref(acct_j), Value::I64(3)]).unwrap();
 
     // First iteration.
-    interp_run_to_yield(&mut rt_i, a_i);
-    drive(&mut rt_j, &mut a_j, true).unwrap();
-    assert_eq!(rt_i.output, vec![Value::I64(100)]);
-    assert_same(&rt_i, a_i, &rt_j, &a_j, "iter 1");
+    to_yield(&e_i, &mut a_i);
+    to_yield(&e_j, &mut a_j);
+    assert_eq!(e_i.output(), vec![Value::I64(100)]);
+    assert_same(&e_i, &a_i, &e_j, &a_j, "iter 1");
 
     // Hot update lands between iterations at the yield safe point.
-    scenario3_add_fee(&mut rt_i);
-    scenario3_add_fee(&mut rt_j);
+    scenario3_add_fee(&e_i);
+    scenario3_add_fee(&e_j);
 
     // Remaining iterations to completion — the account migrates transparently.
     let mut guard = 0;
-    while interp_runnable(&rt_i, a_i) {
-        interp_run_to_yield(&mut rt_i, a_i);
-        drive(&mut rt_j, &mut a_j, true).unwrap();
-        assert_same(&rt_i, a_i, &rt_j, &a_j, "loop tail");
+    while matches!(a_i.status, ActorStatus::Runnable) {
+        to_yield(&e_i, &mut a_i);
+        to_yield(&e_j, &mut a_j);
+        assert_same(&e_i, &a_i, &e_j, &a_j, "loop tail");
         guard += 1;
         assert!(guard < 100, "loop did not terminate");
     }
 
     // Balance was unchanged, so every emitted effect is identical...
     assert_eq!(
-        rt_i.output,
+        e_i.output(),
         vec![Value::I64(100), Value::I64(100), Value::I64(100)]
     );
     assert_eq!(a_j.status, ActorStatus::Complete(Value::I64(0)));
     // ...and the mid-loop migration actually happened: the account is now v2.
-    assert_eq!(rt_j.heap.body(acct_j).unwrap().schema, Version(2), "account migrated mid-loop");
-    assert_same(&rt_i, a_i, &rt_j, &a_j, "loop complete");
+    assert_eq!(
+        e_j.shared().object_body(acct_j).unwrap().schema,
+        Version(2),
+        "account migrated mid-loop"
+    );
+    assert_same(&e_i, &a_i, &e_j, &a_j, "loop complete");
 }
 
 // ===========================================================================
@@ -547,7 +552,7 @@ const GC_MAIN: DefId = 20;
 
 #[test]
 fn jit_gc_roots_from_frame_slots() {
-    let mut rt = Runtime::default();
+    let rt = jit_engine(0);
     rt.install_schema(Schema {
         type_id: BOX,
         version: Version(1),
@@ -584,43 +589,42 @@ fn jit_gc_roots_from_frame_slots() {
     })
     .unwrap();
 
-    let mut actor = JitActor::spawn(&rt, 1, GC_MAIN, vec![]).unwrap();
-    drive(&mut rt, &mut actor, true).unwrap();
+    let mut actor = rt.spawn(GC_MAIN, vec![]).unwrap();
+    to_yield(&rt, &mut actor);
+    assert!(actor.top_is_native(), "the frame under GC must be a JIT frame");
 
     // The box is allocated and rooted only by the native frame slot r1.
-    assert_eq!(rt.heap.len(), 1);
+    assert_eq!(rt.shared().object_count(), 1);
     let roots = actor.roots();
     assert_eq!(roots.len(), 1, "the box is a frame-slot root");
-    assert_eq!(rt.collect_garbage_with_roots(&roots), 0, "rooted box survives");
-    assert_eq!(rt.heap.len(), 1);
+    assert_eq!(rt.collect(&[&actor]), 0, "rooted box survives");
+    assert_eq!(rt.shared().object_count(), 1);
 
     // Run to completion; the frame is popped, so the box is unreachable.
-    drive(&mut rt, &mut actor, false).unwrap();
+    rt.run(&mut actor);
     assert_eq!(actor.status, ActorStatus::Complete(Value::I64(7)));
-    assert!(actor.frames.is_empty());
-    assert_eq!(rt.collect_garbage_with_roots(&actor.roots()), 1, "box swept");
-    assert!(rt.heap.is_empty());
+    assert!(actor.stack.is_empty());
+    assert_eq!(rt.collect(&[&actor]), 1, "box swept");
+    assert_eq!(rt.shared().object_count(), 0);
 }
 
 // ===========================================================================
 // Con-freeness trap (soundness). A frame paused at a Yield inside an OLD pinned
 // function resumes AFTER a migration has changed a field's representation out
 // from under it. The pinned code must not silently use the wrong-typed value:
-// it traps, identically on both executors. Before the soundness work the JIT
-// read the migrated Ref's object id as an integer and diverged silently.
+// it traps, identically on both configurations. Before the soundness work the
+// JIT read the migrated Ref's object id as an integer and diverged silently.
 // ===========================================================================
 
 const CELL: DefId = 5;
 const WRAPT: DefId = 6;
 const USE_CELL: DefId = 40;
-const READ_CELL: DefId = 41;
 const NF: FieldId = 500;
 const WF: FieldId = 600;
 
 /// Install `Cell{n:Int}` plus the pinned function `body`, allocate a cell, and
-/// return the runtime + cell id.
-fn confree_setup(body: Function) -> (Runtime, ObjectId) {
-    let mut rt = Runtime::default();
+/// return the cell id.
+fn confree_setup(rt: &Engine, body: Function) -> ObjectId {
     rt.install_schema(Schema {
         type_id: CELL,
         version: Version(1),
@@ -629,15 +633,14 @@ fn confree_setup(body: Function) -> (Runtime, ObjectId) {
     })
     .unwrap();
     rt.install_function(body).unwrap();
-    let cell = rt.jit_new(CELL, &[(NF, Value::I64(41))]).unwrap();
-    (rt, cell)
+    rt.shared().jit_new(CELL, &[(NF, Value::I64(41))]).unwrap()
 }
 
 /// The hot update that pulls the representation out from under pinned code:
 /// `Cell.n` becomes `Ref(Wrap)`, with a migration that wraps the old int. This
 /// breaks the pinned function (re-verify fails) but its running frame keeps the
 /// old version and later reads the now-`Ref` field.
-fn confree_migrate(rt: &mut Runtime) {
+fn confree_migrate(rt: &Engine) {
     rt.install_schema(Schema {
         type_id: WRAPT,
         version: Version(1),
@@ -669,22 +672,23 @@ fn confree_migrate(rt: &mut Runtime) {
 }
 
 fn run_confree(body: Function) -> (ActorStatus, ActorStatus) {
-    let (mut rt_i, cell_i) = confree_setup(body.clone());
-    let a_i = rt_i.spawn(USE_CELL, vec![Value::Ref(cell_i)]).unwrap();
-    let (mut rt_j, cell_j) = confree_setup(body);
-    let mut a_j = JitActor::spawn(&rt_j, 1, USE_CELL, vec![Value::Ref(cell_j)]).unwrap();
+    let (e_i, e_j) = both_engines();
+    let cell_i = confree_setup(&e_i, body.clone());
+    let cell_j = confree_setup(&e_j, body);
+    let mut a_i = e_i.spawn(USE_CELL, vec![Value::Ref(cell_i)]).unwrap();
+    let mut a_j = e_j.spawn(USE_CELL, vec![Value::Ref(cell_j)]).unwrap();
 
     // Pause inside the pinned function at its Yield.
-    interp_run_to_yield(&mut rt_i, a_i);
-    drive(&mut rt_j, &mut a_j, true).unwrap();
-    assert_same(&rt_i, a_i, &rt_j, &a_j, "confree: at yield");
+    to_yield(&e_i, &mut a_i);
+    to_yield(&e_j, &mut a_j);
+    assert_same(&e_i, &a_i, &e_j, &a_j, "confree: at yield");
 
     // Migrate the field's representation, then resume the pinned frame.
-    confree_migrate(&mut rt_i);
-    confree_migrate(&mut rt_j);
-    rt_i.run();
-    drive(&mut rt_j, &mut a_j, false).unwrap();
-    (rt_i.actors[&a_i].status.clone(), a_j.status.clone())
+    confree_migrate(&e_i);
+    confree_migrate(&e_j);
+    advance(&e_i, &mut a_i);
+    advance(&e_j, &mut a_j);
+    (a_i.status.clone(), a_j.status.clone())
 }
 
 #[test]
@@ -718,8 +722,8 @@ fn confree_arithmetic_trap_matches() {
     };
     let (interp, jit) = run_confree(body);
     // The pinned v1 code reads a now-Ref field and feeds it to SubI64: both
-    // executors trap with the identical operand-type condition (at pc 3).
-    assert_eq!(interp, jit, "executors diverged on the con-freeness trap");
+    // configurations trap with the identical operand-type condition (at pc 3).
+    assert_eq!(interp, jit, "configurations diverged on the con-freeness trap");
     assert!(
         matches!(
             &jit,
@@ -751,7 +755,7 @@ fn confree_return_trap_matches() {
         ],
     };
     let (interp, jit) = run_confree(body);
-    assert_eq!(interp, jit, "executors diverged on the return-type trap");
+    assert_eq!(interp, jit, "configurations diverged on the return-type trap");
     assert!(
         matches!(
             &jit,
@@ -760,7 +764,6 @@ fn confree_return_trap_matches() {
         ),
         "expected a return-type trap, got {jit:?}"
     );
-    let _ = READ_CELL;
 }
 
 // ===========================================================================
@@ -774,8 +777,7 @@ const AF: FieldId = 700;
 const AF2: FieldId = 701;
 const READ_AUTO: DefId = 50;
 
-fn auto_setup() -> (Runtime, ObjectId) {
-    let mut rt = Runtime::default();
+fn auto_setup(rt: &Engine) -> ObjectId {
     rt.install_schema(Schema {
         type_id: AUTO,
         version: Version(1),
@@ -800,11 +802,10 @@ fn auto_setup() -> (Runtime, ObjectId) {
         ],
     })
     .unwrap();
-    let obj = rt.jit_new(AUTO, &[(AF, Value::I64(10))]).unwrap();
-    (rt, obj)
+    rt.shared().jit_new(AUTO, &[(AF, Value::I64(10))]).unwrap()
 }
 
-fn auto_add_field(rt: &mut Runtime) {
+fn auto_add_field(rt: &Engine) {
     rt.install_schema(Schema {
         type_id: AUTO,
         version: Version(2),
@@ -818,29 +819,33 @@ fn auto_add_field(rt: &mut Runtime) {
 }
 
 #[test]
-fn auto_derived_migration_is_transparent_on_both_executors() {
-    let mut rt_i = auto_setup();
-    let mut rt_j = auto_setup();
+fn auto_derived_migration_is_transparent_on_both_configurations() {
+    let (e_i, e_j) = both_engines();
+    let obj_i = auto_setup(&e_i);
+    let obj_j = auto_setup(&e_j);
 
-    auto_add_field(&mut rt_i.0);
-    auto_add_field(&mut rt_j.0);
+    auto_add_field(&e_i);
+    auto_add_field(&e_j);
     // Installing the schema auto-derived the v1→v2 migration — no explicit one.
     assert!(
-        rt_i.0.world.migrations.contains_key(&(AUTO, Version(1))),
+        e_i.with_world(|w| w.migrations.contains_key(&(AUTO, Version(1)))),
         "additive+defaulted change should auto-derive a migration"
     );
 
-    let a_i = rt_i.0.spawn(READ_AUTO, vec![Value::Ref(rt_i.1)]).unwrap();
-    rt_i.0.run();
-    let mut a_j = JitActor::spawn(&rt_j.0, 1, READ_AUTO, vec![Value::Ref(rt_j.1)]).unwrap();
-    drive(&mut rt_j.0, &mut a_j, false).unwrap();
+    let mut a_i = e_i.spawn(READ_AUTO, vec![Value::Ref(obj_i)]).unwrap();
+    e_i.run(&mut a_i);
+    let mut a_j = e_j.spawn(READ_AUTO, vec![Value::Ref(obj_j)]).unwrap();
+    e_j.run(&mut a_j);
 
     // The read migrated the object transparently (no pause) and saw the old
     // value; the defaulted field was filled in.
-    assert_same(&rt_i.0, a_i, &rt_j.0, &a_j, "auto-derived");
+    assert_same(&e_i, &a_i, &e_j, &a_j, "auto-derived");
     assert_eq!(a_j.status, ActorStatus::Complete(Value::I64(10)));
-    assert_eq!(rt_j.0.heap.body(rt_j.1).unwrap().schema, Version(2));
-    assert_eq!(rt_j.0.heap.body(rt_j.1).unwrap().fields[&AF2], Value::I64(99));
+    assert_eq!(e_j.shared().object_body(obj_j).unwrap().schema, Version(2));
+    assert_eq!(
+        e_j.shared().object_body(obj_j).unwrap().fields[&AF2],
+        Value::I64(99)
+    );
 }
 
 #[test]
@@ -848,7 +853,7 @@ fn auto_derivation_abstains_on_representation_change() {
     // Retyping a field with no default is a gap: no migration is auto-installed,
     // so a cross traps `MissingMigration` until a developer supplies one. (This
     // is why the Box/Wrapper and Account/Money scenarios still pause.)
-    let mut rt = Runtime::default();
+    let rt = Engine::interp();
     rt.install_schema(Schema {
         type_id: AUTO,
         version: Version(1),
@@ -864,7 +869,7 @@ fn auto_derivation_abstains_on_representation_change() {
     })
     .unwrap();
     assert!(
-        !rt.world.migrations.contains_key(&(AUTO, Version(1))),
+        rt.with_world(|w| !w.migrations.contains_key(&(AUTO, Version(1)))),
         "a representation change must NOT be auto-derived"
     );
 }
