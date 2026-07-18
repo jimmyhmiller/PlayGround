@@ -1,10 +1,10 @@
-(extern write :cc c [:i64 (ptr i8) :i64] (-> :i64))
+(extern write :cc c [:i64 (ptr i8) isize] (-> isize))
 
-(extern read :cc c [:i64 (ptr i8) :i64] (-> :i64))
+(extern read :cc c [:i64 (ptr i8) isize] (-> isize))
 
-(extern strlen :cc c [(ptr i8)] (-> :i64))
+(extern strlen :cc c [(ptr i8)] (-> isize))
 
-(extern memcpy :cc c [(ptr i8) (ptr i8) :i64] (-> (ptr i8)))
+(extern memcpy :cc c [(ptr i8) (ptr i8) isize] (-> (ptr i8)))
 
 (defsum IoError (Eof) (Errno [(code :i64)]))
 
@@ -54,7 +54,7 @@
   print-cstr
   [(w (ptr Writer)) (s (ptr i8))]
   (-> (Result :i64 IoError))
-  (write-all w s (strlen s)))
+  (write-all w s (cast :i64 (strlen s))))
 
 (defn
   print-int
@@ -69,7 +69,9 @@
   fd-write
   [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)]
   (-> (Result :i64 IoError))
-  (let [n (write (cast :i64 ctx) buf len)] (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
+  (let
+    [n (cast :i64 (write (cast :i64 ctx) buf (cast isize len)))]
+    (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
 
 (defn
   fd-writer
@@ -114,7 +116,7 @@
       (isub (load (field fb cap)) cur)
       n
       (if (icmp-lt len room) len room)]
-    (memcpy (index (load (field fb data)) cur) buf n)
+    (memcpy (index (load (field fb data)) cur) buf (cast isize n))
     (store! (field fb len) (iadd cur n))
     (if (icmp-lt n len) (Err (Errno 0)) (Ok n))))
 
@@ -200,7 +202,9 @@
   fd-read
   [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)]
   (-> (Result :i64 IoError))
-  (let [n (read (cast :i64 ctx) buf len)] (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
+  (let
+    [n (cast :i64 (read (cast :i64 ctx) buf (cast isize len)))]
+    (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
 
 (defn
   fd-reader

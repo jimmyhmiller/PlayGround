@@ -83,7 +83,7 @@
                     res
                     (block :done
                       (loop
-                        (let [n (read fd (cast (ptr i8) (index tmp 0)) 4096)]
+                        (let [n (cast :i64 (read fd (cast (ptr i8) (index tmp 0)) (cast isize 4096)))]
                           (if (icmp-lt n 0)
                               (do (al-free! (mut buf))
                                   (return-from :done (Err [(slice u8) IoError] (Errno n))))

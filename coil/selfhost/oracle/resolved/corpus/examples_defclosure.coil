@@ -13,11 +13,11 @@
   [(n :i64)]
   (-> (ptr adder))
   (let
-    [__e (alloc-heap adder-env) __c (alloc-heap adder)]
-    (store! (field __e n) n)
-    (store! (field __c code) (fnptr-of adder-code))
-    (store! (field __c env) __e)
-    __c))
+    [$hy0 (alloc-heap adder-env) $hy1 (alloc-heap adder)]
+    (store! (field $hy0 n) n)
+    (store! (field $hy1 code) (fnptr-of adder-code))
+    (store! (field $hy1 env) $hy0)
+    $hy1))
 
 (defn
   adder-call
@@ -42,11 +42,11 @@
   [(k :i64)]
   (-> (ptr scaler))
   (let
-    [__e (alloc-heap scaler-env) __c (alloc-heap scaler)]
-    (store! (field __e k) k)
-    (store! (field __c code) (fnptr-of scaler-code))
-    (store! (field __c env) __e)
-    __c))
+    [$hy2 (alloc-heap scaler-env) $hy3 (alloc-heap scaler)]
+    (store! (field $hy2 k) k)
+    (store! (field $hy3 code) (fnptr-of scaler-code))
+    (store! (field $hy3 env) $hy2)
+    $hy3))
 
 (defn
   scaler-call

@@ -12,17 +12,12 @@
     (let
       [(mut acc) 0]
       (let
-        [$g1 (arraylist.al-slice xs)]
-        (let
-          [(mut $g3) (isub 0 1)]
-          (loop
-            (store! $g3 (iadd (load $g3) 1))
-            (if
-              (icmp-lt (load $g3) (slice.slice-len $g1))
-              (let
-                [$g2 (load $g3)]
-                (let [v (slice.slice-get $g1 $g2)] (store! acc (iadd (load acc) v))))
-              (break)))))
+        [(mut $g1) (iter xs)]
+        (loop
+          (match
+            (next (mut $g1))
+            (None [] (break))
+            (Some [v] (store! acc (iadd (load acc) v))))))
       (al-free! (mut xs))
       (load acc))))
 

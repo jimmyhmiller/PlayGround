@@ -760,6 +760,20 @@ expect_rc 5 "comptime using a c-string folds to 5 (interp can't)"    "$COIL" run
 printf '(defstruct P [(x i64) (y i64)])\n(defn mk [] (-> P) (let [(mut p) (zeroed P)] (do (store! (field p x) 3) (store! (field p y) 4) (load p))))\n(defn main [] (-> i64) (let [q (comptime (mk))] (iadd (load (field q x)) (load (field q y)))))\n' > "$T/ct_agg.coil"
 expect_rc 7 "aggregate comptime still folds (interp path, no regression)" "$COIL" run "$T/ct_agg.coil"
 
+echo "== C size types are target-width: the prelude's size_t/ssize_t are i32 on wasm32 =="
+# `usize`/`isize` (a C machine word: size_t/ssize_t/long) are i32 on wasm32 (ILP32) and
+# i64 on LP64. The prelude's write/read/malloc size args use `isize`, so on wasm32 they
+# emit i32 — matching the real C ABI. On a pre-usize compiler (the seed) they are i64.
+# (Checked via emit-ir, not a full wasm build, because the C0/C1 wasm finalizer that lets
+# such a module link is not on this branch — the LLVM IR is what carries the width.)
+printf '(defn main [] (-> i64) (println "hi") 0)\n' > "$T/sizet.coil"
+w_native=$("$COIL" emit-ir "$T/sizet.coil" 2>/dev/null | grep -oE 'declare i(64|32) @write\([^)]*\)' | head -1)
+w_wasm=$("$COIL" emit-ir "$T/sizet.coil" --target wasm32-unknown-unknown 2>/dev/null | grep -oE 'declare i(64|32) @write\([^)]*\)' | head -1)
+echo "$w_native" | grep -q 'i64 @write(i64, ptr, i64)' \
+  && ok "write's ssize_t count/return are i64 on native"    || bad "native write width" "got: $w_native"
+echo "$w_wasm"   | grep -q 'i32 @write(i64, ptr, i32)' \
+  && ok "write's ssize_t count/return narrow to i32 on wasm32" || bad "wasm32 write width (usize/isize)" "got: $w_wasm (was i64 pre-usize)"
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL

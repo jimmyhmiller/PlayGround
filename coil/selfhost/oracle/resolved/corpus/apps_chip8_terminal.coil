@@ -1,0 +1,246 @@
+(extern read :cc c [:i64 (ptr i8) :i64] (-> :i64))
+
+(extern write :cc c [:i64 (ptr i8) :i64] (-> :i64))
+
+(extern usleep :cc c [:i64] (-> :i32))
+
+(extern exit :cc c [:i64] (-> :i32))
+
+(extern puts :cc c [(ptr i8)] (-> :i32))
+
+(extern putchar :cc c [:i64] (-> :i32))
+
+(extern tcgetattr :cc c [:i64 (ptr i8)] (-> :i32))
+
+(extern tcsetattr :cc c [:i64 :i64 (ptr i8)] (-> :i32))
+
+(extern cfmakeraw :cc c [(ptr i8)] (-> :i32))
+
+(extern memcpy :cc c [(ptr i8) (ptr i8) :i64] (-> (ptr i8)))
+
+(extern fcntl :cc c [:i64 :i64 :i64] (-> :i32))
+
+(defn
+  emit
+  [(buf (ptr u8)) (idx (ptr i64)) (b i64)]
+  (-> i64)
+  (let [i (load idx)] (do (store! (index buf i) (cast :u8 b)) (store! idx (iadd i 1)) 0)))
+
+(defn
+  glyph
+  [(buf (ptr u8)) (idx (ptr i64)) (top i64) (bot i64)]
+  (-> i64)
+  (if
+    (icmp-eq top 1)
+    (if
+      (icmp-eq bot 1)
+      (do (emit buf idx 226) (emit buf idx 150) (emit buf idx 136) 0)
+      (do (emit buf idx 226) (emit buf idx 150) (emit buf idx 128) 0))
+    (if
+      (icmp-eq bot 1)
+      (do (emit buf idx 226) (emit buf idx 150) (emit buf idx 132) 0)
+      (do (emit buf idx 32) 0))))
+
+(defn
+  render
+  [(c (ptr Chip8))]
+  (-> i64)
+  (let
+    [buf (alloc-stack (array u8 8192)) idx (alloc-stack i64) bp (index buf 0)]
+    (do
+      (store! idx 0)
+      (emit bp idx 27)
+      (emit bp idx 91)
+      (emit bp idx 72)
+      (let
+        [(mut $g7) (isub 0 1)]
+        (loop
+          (store! $g7 (iadd (load $g7) 1))
+          (if
+            (icmp-lt (load $g7) 16)
+            (let
+              [r (load $g7)]
+              (do
+                (let
+                  [(mut $g8) (isub 0 1)]
+                  (loop
+                    (store! $g8 (iadd (load $g8) 1))
+                    (if
+                      (icmp-lt (load $g8) 64)
+                      (let
+                        [col (load $g8)]
+                        (glyph
+                          bp
+                          idx
+                          (px c (iadd (imul (imul r 2) 64) col))
+                          (px c (iadd (imul (iadd (imul r 2) 1) 64) col))))
+                      (break))))
+                (emit bp idx 10)))
+            (break))))
+      (write 1 bp (load idx))
+      0)))
+
+(defn
+  map-key
+  [(ch i64)]
+  (-> i64)
+  (if
+    (icmp-eq ch 49)
+    1
+    (if
+      (icmp-eq ch 50)
+      2
+      (if
+        (icmp-eq ch 51)
+        3
+        (if
+          (icmp-eq ch 52)
+          12
+          (if
+            (icmp-eq ch 113)
+            4
+            (if
+              (icmp-eq ch 119)
+              5
+              (if
+                (icmp-eq ch 101)
+                6
+                (if
+                  (icmp-eq ch 114)
+                  13
+                  (if
+                    (icmp-eq ch 97)
+                    7
+                    (if
+                      (icmp-eq ch 115)
+                      8
+                      (if
+                        (icmp-eq ch 100)
+                        9
+                        (if
+                          (icmp-eq ch 102)
+                          14
+                          (if
+                            (icmp-eq ch 122)
+                            10
+                            (if
+                              (icmp-eq ch 120)
+                              0
+                              (if (icmp-eq ch 99) 11 (if (icmp-eq ch 118) 15 -1)))))))))))))))))
+
+(defn
+  poll-input
+  [(c (ptr Chip8)) (saved (ptr u8))]
+  (-> i64)
+  (let
+    [buf (alloc-stack (array u8 32)) n (read 0 (index buf 0) 32)]
+    (do
+      (decay-keys c)
+      (if
+        (icmp-gt n 0)
+        (let
+          [(mut $g9) (isub 0 1)]
+          (loop
+            (store! $g9 (iadd (load $g9) 1))
+            (if
+              (icmp-lt (load $g9) n)
+              (let
+                [bi (load $g9)]
+                (let
+                  [ch (cast :i64 (load (index buf bi)))]
+                  (if
+                    (icmp-eq ch 27)
+                    (do (tcsetattr 0 0 saved) (exit 0) 0)
+                    (let [k (map-key ch)] (if (icmp-ge k 0) (set-key c k 8) 0)))))
+              (break))))
+        0)
+      0)))
+
+(defn
+  term-raw
+  [(saved (ptr u8))]
+  (-> i64)
+  (let
+    [raw (alloc-stack (array u8 128))]
+    (do
+      (tcgetattr 0 saved)
+      (memcpy (index raw 0) saved 128)
+      (cfmakeraw (index raw 0))
+      (tcsetattr 0 0 (index raw 0))
+      (fcntl 0 4 4)
+      0)))
+
+(defn
+  dump
+  [(c (ptr Chip8))]
+  (-> i64)
+  (do
+    (let
+      [(mut $g10) (isub 0 1)]
+      (loop
+        (store! $g10 (iadd (load $g10) 1))
+        (if (icmp-lt (load $g10) 200) (let [s (load $g10)] (step c)) (break))))
+    (let
+      [(mut $g11) (isub 0 1)]
+      (loop
+        (store! $g11 (iadd (load $g11) 1))
+        (if
+          (icmp-lt (load $g11) 32)
+          (let
+            [r (load $g11)]
+            (do
+              (let
+                [(mut $g12) (isub 0 1)]
+                (loop
+                  (store! $g12 (iadd (load $g12) 1))
+                  (if
+                    (icmp-lt (load $g12) 64)
+                    (let
+                      [col (load $g12)]
+                      (putchar (if (icmp-eq (px c (iadd (imul r 64) col)) 1) 35 46)))
+                    (break))))
+              (putchar 10)))
+          (break))))
+    0))
+
+(defn
+  run
+  [(c (ptr Chip8)) (saved (ptr u8))]
+  (-> i64)
+  (loop
+    (if
+      1
+      (do
+        (do
+          (poll-input c saved)
+          (let
+            [(mut $g13) (isub 0 1)]
+            (loop
+              (store! $g13 (iadd (load $g13) 1))
+              (if (icmp-lt (load $g13) 12) (let [k (load $g13)] (step c)) (break))))
+          (tick c)
+          (if (icmp-eq (draw? c) 1) (do (render c) (clear-draw c) 0) 0)
+          (usleep 16000)))
+      (break))))
+
+(defn
+  main
+  [(argc :i32) (argv (ptr (ptr i8)))]
+  (-> :i64)
+  (let
+    [c (alloc-stack Chip8) saved (alloc-stack (array u8 128))]
+    (do
+      (init c)
+      (if
+        (icmp-lt (cast :i64 argc) 2)
+        (do (puts c"usage: chip8 <rom> [--dump]") 1)
+        (if
+          (icmp-lt (load-rom c (load (index argv 1))) 0)
+          (do (puts c"chip8: cannot open ROM") 1)
+          (do
+            (if
+              (icmp-ge (cast :i64 argc) 3)
+              (dump c)
+              (do (term-raw (index saved 0)) (run c (index saved 0))))
+            0))))))
+

@@ -15,10 +15,10 @@
 (import "result.coil" :use *)
 (import "slice.coil"  :use *)   ; (slice u8) strings: slice-data / slice-len
 
-(extern write  :cc c [:i64 (ptr i8) :i64] (-> :i64))   ; ssize_t write(fd, buf, n)
-(extern read   :cc c [:i64 (ptr i8) :i64] (-> :i64))   ; ssize_t read(fd, buf, n)
-(extern strlen :cc c [(ptr i8)] (-> :i64))             ; size_t strlen(const char*)
-(extern memcpy :cc c [(ptr i8) (ptr i8) :i64] (-> (ptr i8)))
+(extern write  :cc c [:i64 (ptr i8) isize] (-> isize))   ; ssize_t write(int fd, const void*, size_t)
+(extern read   :cc c [:i64 (ptr i8) isize] (-> isize))   ; ssize_t read(int fd, void*, size_t)
+(extern strlen :cc c [(ptr i8)] (-> isize))              ; size_t strlen(const char*)
+(extern memcpy :cc c [(ptr i8) (ptr i8) isize] (-> (ptr i8)))  ; void* memcpy(void*, const void*, size_t)
 
 (defsum IoError
   (Eof)
@@ -58,7 +58,7 @@
 
 ; Write a NUL-terminated C string (`c"…"` / a `(ptr i8)` from FFI).
 (defn print-cstr [(w (ptr Writer)) (s (ptr i8))] (-> (Result :i64 IoError))
-  (write-all w s (strlen s)))
+  (write-all w s (cast :i64 (strlen s))))
 
 ; Write a non-negative integer in decimal, most-significant digit first.
 (defn print-int [(w (ptr Writer)) (n :i64)] (-> (Result :i64 IoError))
@@ -70,7 +70,7 @@
 ; ---- backends ----
 ; fd-backed: the ctx pointer *is* the file descriptor (int<->ptr cast).
 (defn fd-write [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
-  (let [n (write (cast :i64 ctx) buf len)]
+  (let [n (cast :i64 (write (cast :i64 ctx) buf (cast isize len)))]
     (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
 ; The caller owns the Writer cell. `alloc-static` gives ONE cell per CALL SITE, not per
 ; call, so building the Writer in here handed every caller the SAME struct: two live
@@ -107,7 +107,7 @@
         cur  (load (field fb len))
         room (isub (load (field fb cap)) cur)
         n    (if (icmp-lt len room) len room)]
-    (memcpy (index (load (field fb data)) cur) buf n)
+    (memcpy (index (load (field fb data)) cur) buf (cast isize n))
     (store! (field fb len) (iadd cur n))
     (if (icmp-lt n len) (Err (Errno 0)) (Ok n))))
 ; Initialize a caller-owned Writer over an existing FixBuf (data/cap already set, len 0).
@@ -178,7 +178,7 @@
                           (store! i (iadd (load i) 1))))))))))))
 
 (defn fd-read [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
-  (let [n (read (cast :i64 ctx) buf len)]
+  (let [n (cast :i64 (read (cast :i64 ctx) buf (cast isize len)))]
     (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
 ; caller-owned, for the same reason as fd-writer.
 (defn fd-reader [(r (ptr Reader)) (fd :i64)] (-> (ptr Reader))

@@ -300,13 +300,22 @@
                   (if (or (icmp-eq (load bits) 0) (icmp-gt (load bits) 65535))
                       (Err (derr (sconcat3 a "int width out of range in '" name "' (1..=65535)")))
                       (Ok (TInt (load bits) (icmp-eq signed 1)))))))))))))
+; The C machine word: `size_t`/`ssize_t`/`long`/`intptr_t` — i32 on wasm32 (ILP32),
+; i64 on LP64 (arm64/x86-64). Resolved HERE, at parse, because the target is fixed and
+; already set (driver's set-target-arch! runs before the pipeline parses anything). So
+; `usize`/`isize` are plain `TInt`s downstream — visible to generic instantiation and
+; needing no backend/checker/mono change. On a 64-bit target `isize` == `:i64` exactly,
+; so migrating the prelude's `:i64` size args to `isize` is byte-identical on native.
+(defn target-word-bits [] (-> i64) (if (str-eq (target-arch-str) "wasm32") 32 64))
 (defn prim-type [(a (ptr Allocator)) (name (slice u8))] (-> (Result Type Diag))
   (if (str-eq name "f32") (Ok (TFloat 32))
   (if (str-eq name "f64") (Ok (TFloat 64))
   (if (str-eq name "bool") (Ok (TBool))
   (if (str-eq name "void") (Ok (TVoid))
   (if (str-eq name "externref") (Ok (TExternRef))
-    (int-type a name)))))))
+  (if (str-eq name "usize") (Ok (TInt (target-word-bits) false))
+  (if (str-eq name "isize") (Ok (TInt (target-word-bits) true))
+    (int-type a name)))))))))
 (defn parse-types [(a (ptr Allocator)) (items (ptr (ArrayList Sexp)))] (-> (Result (ptr (ArrayList Type)) Diag))
   (try (let [(mut out) (al-new [Type] a) n (sx-len items) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break) (do (al-push! (mut out) (try! (parse-type a (sx-at items (load i))))) (store! i (iadd (load i) 1)))))

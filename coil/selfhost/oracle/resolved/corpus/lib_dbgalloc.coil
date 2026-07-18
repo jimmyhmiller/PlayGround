@@ -1,0 +1,91 @@
+(extern write :cc c [:i64 (ptr i8) isize] (-> isize))
+
+(defn dbg-magic-live [] (-> i64) 3735928559)
+
+(defn dbg-magic-dead [] (-> i64) 3735936685)
+
+(defstruct DbgHdr [(magic i64) (size i64)])
+
+(defn dbg-hdr-bytes [] (-> i64) 16)
+
+(defn
+  dbg-report!
+  [(msg (slice u8))]
+  (-> i64)
+  (write 2 (cast (ptr i8) (slice-data msg)) (cast isize (slice-len msg)))
+  (abort)
+  0)
+
+(defn
+  dbg-poison!
+  [(p (ptr i8)) (n i64)]
+  (-> i64)
+  (let
+    [(mut i) 0]
+    (loop
+      (if
+        (icmp-ge (load i) n)
+        (break)
+        (do (store! (index p (load i)) (cast i8 222)) (store! i (iadd (load i) 1))))))
+  0)
+
+(defn
+  dbg-alloc
+  [(ctx (ptr i8)) (size :i64) (align :i64)]
+  (-> (Option (ptr i8)))
+  (let
+    [inner (cast (ptr Allocator) ctx)]
+    (match
+      (raw-alloc inner (iadd size (dbg-hdr-bytes)) align)
+      (None [] (None))
+      (Some
+        [p]
+        (let
+          [h (cast (ptr DbgHdr) p)]
+          (store! (field h magic) (dbg-magic-live))
+          (store! (field h size) size)
+          (Some (index p (dbg-hdr-bytes))))))))
+
+(defn
+  dbg-resize
+  [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
+  (-> (Option (ptr i8)))
+  (None))
+
+(defn
+  dbg-free
+  [(ctx (ptr i8)) (payload (ptr i8)) (size :i64) (align :i64)]
+  (-> :i64)
+  (let
+    [p (index payload (isub 0 (dbg-hdr-bytes))) h (cast (ptr DbgHdr) p)]
+    (if
+      (icmp-eq (load (field h magic)) (dbg-magic-dead))
+      (dbg-report! "coil: double free in debug-allocator (--debug-checks)
+")
+      (if
+        (icmp-ne (load (field h magic)) (dbg-magic-live))
+        (dbg-report! "coil: invalid free (bad header) in debug-allocator (--debug-checks)
+")
+        0))
+    (store! (field h magic) (dbg-magic-dead))
+    (dbg-poison! payload (load (field h size)))
+    0))
+
+(defn
+  debug-allocator-on
+  [(inner (ptr Allocator))]
+  (-> (ptr Allocator))
+  (let
+    [a (unwrap-ptr [Allocator] (create [Allocator] inner))]
+    (store! (field a alloc) (fnptr-of dbg-alloc))
+    (store! (field a resize) (fnptr-of dbg-resize))
+    (store! (field a free) (fnptr-of dbg-free))
+    (store! (field a ctx) (cast (ptr i8) inner))
+    a))
+
+(defn
+  debug-allocator
+  [(inner Code)]
+  (-> Code)
+  (if (debug-checks?) (quasiquote (debug-allocator-on (unquote inner))) inner))
+

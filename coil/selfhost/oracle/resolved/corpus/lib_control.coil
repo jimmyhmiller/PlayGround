@@ -72,19 +72,32 @@
   [(binding Code) & (body Code)]
   (-> Code)
   (if
-    (not (icmp-eq (code-count binding) 3))
-    (error "for: binding must be [i LO HI]")
-    (let
-      [i (code-nth binding 0) lo (code-nth binding 1) hi (code-nth binding 2) idx (gensym)]
-      (quasiquote
-        (let
-          [(mut (unquote idx)) (isub (unquote lo) 1)]
-          (loop
-            (store! (unquote idx) (iadd (load (unquote idx)) 1))
-            (if
-              (icmp-lt (load (unquote idx)) (unquote hi))
-              (let [(unquote i) (load (unquote idx))] (unquote-splicing body))
-              (break))))))))
+    (code-sym? binding)
+    (quasiquote
+      (for-in
+        [(unquote binding) (unquote (code-nth body 0))]
+        (unquote-splicing (code-rest body))))
+    (if
+      (not (icmp-eq (code-count binding) 3))
+      (error "for: binding must be [i LO HI], or (for x COLL …) for a collection")
+      (let
+        [i
+          (code-nth binding 0)
+          lo
+          (code-nth binding 1)
+          hi
+          (code-nth binding 2)
+          idx
+          (gensym)]
+        (quasiquote
+          (let
+            [(mut (unquote idx)) (isub (unquote lo) 1)]
+            (loop
+              (store! (unquote idx) (iadd (load (unquote idx)) 1))
+              (if
+                (icmp-lt (load (unquote idx)) (unquote hi))
+                (let [(unquote i) (load (unquote idx))] (unquote-splicing body))
+                (break)))))))))
 
 (defn
   for-in
@@ -98,7 +111,7 @@
       (if
         (not (code-list? coll))
         (error
-          "for-in: COLL must be a form, e.g. (range lo hi), (in coll), or (over arr len)")
+          "for-in: COLL must be a form, e.g. (iter coll), (in coll), (range lo hi), or (over arr len)")
         (let
           [h (code-nth coll 0)]
           (if
@@ -108,41 +121,29 @@
                 [(unquote x) (unquote (code-nth coll 1)) (unquote (code-nth coll 2))]
                 (unquote-splicing body)))
             (if
-              (code-eq h (quasiquote in))
+              (code-eq h (quasiquote over))
               (let
-                [c (gensym) i (gensym)]
+                [arr (code-nth coll 1) len (code-nth coll 2) i (gensym)]
                 (quasiquote
-                  (let
-                    [(unquote c) (unquote (code-nth coll 1))]
-                    (for
-                      [(unquote i) 0 (len (unquote c))]
-                      (let
-                        [(unquote x) (get (unquote c) (unquote i))]
-                        (unquote-splicing body))))))
+                  (for
+                    [(unquote i) 0 (unquote len)]
+                    (let
+                      [(unquote x) (load (index (unquote arr) (unquote i)))]
+                      (unquote-splicing body)))))
               (if
-                (code-eq h (quasiquote over))
+                (or (code-eq h (quasiquote iter)) (code-eq h (quasiquote in)))
                 (let
-                  [arr (code-nth coll 1) len (code-nth coll 2) i (gensym)]
+                  [it (gensym)]
                   (quasiquote
-                    (for
-                      [(unquote i) 0 (unquote len)]
-                      (let
-                        [(unquote x) (load (index (unquote arr) (unquote i)))]
-                        (unquote-splicing body)))))
-                (if
-                  (code-eq h (quasiquote iter))
-                  (let
-                    [nf (code-nth coll 1) st (code-nth coll 2) nfv (gensym) stv (gensym)]
-                    (quasiquote
-                      (let
-                        [(unquote nfv) (unquote nf) (unquote stv) (unquote st)]
-                        (loop
-                          (match
-                            (call-ptr (unquote nfv) (unquote stv))
-                            (None [] (break))
-                            (Some [(unquote x)] (unquote-splicing body)))))))
-                  (error
-                    "for-in: unsupported collection; use (range lo hi), (in coll), (over arr len), or (iter next state)"))))))))))
+                    (let
+                      [(mut (unquote it)) (iter (unquote (code-nth coll 1)))]
+                      (loop
+                        (match
+                          (next (mut (unquote it)))
+                          (None [] (break))
+                          (Some [(unquote x)] (unquote-splicing body)))))))
+                (error
+                  "for-in: unsupported collection; use (iter coll), (in coll), (range lo hi), or (over arr len)")))))))))
 
 (defn
   thread-first

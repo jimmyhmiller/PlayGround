@@ -1,0 +1,157 @@
+(defn half-frame [] (-> i64) 16667)
+
+(defstruct
+  Machine
+  [(shift0 i64) (shift1 i64) (shift-off i64) (in1 i64) (in2 i64) (out3 i64) (out5 i64)])
+
+(defn
+  minit
+  [(m (ptr Machine))]
+  (-> i64)
+  (do
+    (store! (field m shift0) 0)
+    (store! (field m shift1) 0)
+    (store! (field m shift-off) 0)
+    (store! (field m in1) 0)
+    (store! (field m in2) 0)
+    (store! (field m out3) 0)
+    (store! (field m out5) 0)
+    0))
+
+(defn
+  machine-in
+  [(m (ptr Machine)) (port i64)]
+  (-> i64)
+  (if
+    (= port 0)
+    15
+    (if
+      (= port 1)
+      (load (field m in1))
+      (if
+        (= port 2)
+        (load (field m in2))
+        (if
+          (= port 3)
+          (let
+            [v (| (<< (load (field m shift1)) 8) (load (field m shift0)))]
+            (& (>> v (- 8 (load (field m shift-off)))) 255))
+          0)))))
+
+(defn
+  machine-out
+  [(m (ptr Machine)) (port i64) (val i64)]
+  (-> i64)
+  (if
+    (= port 2)
+    (do (store! (field m shift-off) (& val 7)) 0)
+    (if
+      (= port 3)
+      (do (store! (field m out3) val) 0)
+      (if
+        (= port 4)
+        (do
+          (store! (field m shift0) (load (field m shift1)))
+          (store! (field m shift1) val)
+          0)
+        (if (= port 5) (do (store! (field m out5) val) 0) 0)))))
+
+(defn
+  run-cycles
+  [(s (ptr Cpu)) (m (ptr Machine)) (target i64)]
+  (-> i64)
+  (let
+    [count (alloc-stack i64)]
+    (do
+      (store! count 0)
+      (loop
+        (if
+          (< (load count) target)
+          (do
+            (let
+              [op (rb s (rpc s))]
+              (if
+                (= op 219)
+                (do
+                  (setr s 7 (machine-in m (rb s (+ (rpc s) 1))))
+                  (spc s (+ (rpc s) 2))
+                  (store! count (+ (load count) 3)))
+                (if
+                  (= op 211)
+                  (do
+                    (machine-out m (rb s (+ (rpc s) 1)) (reg s 7))
+                    (spc s (+ (rpc s) 2))
+                    (store! count (+ (load count) 3)))
+                  (store! count (+ (load count) (emulate s)))))))
+          (break)))
+      0)))
+
+(defn
+  step-frame
+  [(s (ptr Cpu)) (m (ptr Machine))]
+  (-> i64)
+  (do
+    (run-cycles s m (half-frame))
+    (if (> (ienabled s) 0) (gen-interrupt s 1) 0)
+    (run-cycles s m (half-frame))
+    (if (> (ienabled s) 0) (gen-interrupt s 2) 0)
+    0))
+
+(defn
+  set-in1
+  [(m (ptr Machine)) (bit i64)]
+  (-> i64)
+  (do (store! (field m in1) (| (load (field m in1)) bit)) 0))
+
+(defn
+  clr-in1
+  [(m (ptr Machine)) (bit i64)]
+  (-> i64)
+  (do (store! (field m in1) (& (load (field m in1)) (^ 255 bit))) 0))
+
+(defn
+  decode
+  [(s (ptr Cpu)) (out (ptr u8))]
+  (-> i64)
+  (do
+    (let
+      [(mut $g1) (isub 0 1)]
+      (loop
+        (store! $g1 (iadd (load $g1) 1))
+        (if
+          (icmp-lt (load $g1) 224)
+          (let
+            [col (load $g1)]
+            (let
+              [(mut $g2) (isub 0 1)]
+              (loop
+                (store! $g2 (iadd (load $g2) 1))
+                (if
+                  (icmp-lt (load $g2) 32)
+                  (let
+                    [byte (load $g2)]
+                    (let
+                      [v (rb s (+ 9216 (+ (* col 32) byte)))]
+                      (let
+                        [(mut $g3) (isub 0 1)]
+                        (loop
+                          (store! $g3 (iadd (load $g3) 1))
+                          (if
+                            (icmp-lt (load $g3) 8)
+                            (let
+                              [b (load $g3)]
+                              (let
+                                [j
+                                  (+ (* byte 8) b)
+                                  lit
+                                  (if (!= (& (>> v b) 1) 0) 255 0)
+                                  x
+                                  col
+                                  y
+                                  (- 255 j)]
+                                (store! (index out (+ (* y 224) x)) (cast :u8 lit))))
+                            (break))))))
+                  (break)))))
+          (break))))
+    0))
+

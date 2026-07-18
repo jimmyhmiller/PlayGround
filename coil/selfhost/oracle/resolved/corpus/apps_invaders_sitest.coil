@@ -1,0 +1,100 @@
+(extern fopen :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+
+(extern fwrite :cc c [(ptr i8) :i64 :i64 (ptr i8)] (-> :i64))
+
+(extern fclose :cc c [(ptr i8)] (-> :i32))
+
+(extern atoi :cc c [(ptr i8)] (-> :i32))
+
+(extern printf :cc c [(ptr i8) ...] (-> :i32))
+
+(defn
+  main
+  [(argc :i32) (argv (ptr (ptr i8)))]
+  (-> :i64)
+  (let
+    [s (alloc-stack Cpu) m (alloc-stack Machine) fb (alloc-stack (array u8 57344))]
+    (if
+      (< (cast :i64 argc) 2)
+      (do (printf c"usage: sitest <invaders.rom> [frames]
+") 1)
+      (do
+        (init s)
+        (minit m)
+        (if
+          (< (load-com s (load (index argv 1)) 0) 0)
+          (do (printf c"cannot open %s
+" (load (index argv 1))) 1)
+          (let
+            [frames
+              (if (>= (cast :i64 argc) 3) (cast :i64 (atoi (load (index argv 2)))) 500)]
+            (do
+              (if
+                (= frames 0)
+                (do
+                  (let
+                    [(mut $g4) (isub 0 1)]
+                    (loop
+                      (store! $g4 (iadd (load $g4) 1))
+                      (if
+                        (icmp-lt (load $g4) 250)
+                        (let [i (load $g4)] (step-frame s m))
+                        (break))))
+                  (set-in1 m 1)
+                  (let
+                    [(mut $g5) (isub 0 1)]
+                    (loop
+                      (store! $g5 (iadd (load $g5) 1))
+                      (if
+                        (icmp-lt (load $g5) 10)
+                        (let [i (load $g5)] (step-frame s m))
+                        (break))))
+                  (clr-in1 m 1)
+                  (let
+                    [(mut $g6) (isub 0 1)]
+                    (loop
+                      (store! $g6 (iadd (load $g6) 1))
+                      (if
+                        (icmp-lt (load $g6) 10)
+                        (let [i (load $g6)] (step-frame s m))
+                        (break))))
+                  (set-in1 m 4)
+                  (let
+                    [(mut $g7) (isub 0 1)]
+                    (loop
+                      (store! $g7 (iadd (load $g7) 1))
+                      (if
+                        (icmp-lt (load $g7) 10)
+                        (let [i (load $g7)] (step-frame s m))
+                        (break))))
+                  (clr-in1 m 4)
+                  (let
+                    [(mut $g8) (isub 0 1)]
+                    (loop
+                      (store! $g8 (iadd (load $g8) 1))
+                      (if
+                        (icmp-lt (load $g8) 220)
+                        (let [i (load $g8)] (step-frame s m))
+                        (break)))))
+                (let
+                  [(mut $g9) (isub 0 1)]
+                  (loop
+                    (store! $g9 (iadd (load $g9) 1))
+                    (if
+                      (icmp-lt (load $g9) frames)
+                      (let [i (load $g9)] (step-frame s m))
+                      (break)))))
+              (decode s (index fb 0))
+              (let
+                [f (fopen c"/tmp/si.pgm" c"wb")]
+                (do
+                  (fwrite c"P5
+224 256
+255
+" 1 15 f)
+                  (fwrite (index fb 0) 1 57344 f)
+                  (fclose f)))
+              (printf c"ran %ld frames -> /tmp/si.pgm
+" frames)
+              0)))))))
+

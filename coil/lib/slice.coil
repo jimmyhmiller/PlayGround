@@ -35,7 +35,7 @@
 ; NOT declared here on purpose: an unreferenced module-level extern decl leaks a
 ; `declare` into programs that never trip a check, so we crash via a store through a
 ; null pointer instead — that needs no symbol at all.
-(extern write :cc c [:i64 (ptr i8) :i64] (-> :i64))   ; ssize_t write(fd, buf, n)
+(extern write :cc c [:i64 (ptr i8) isize] (-> isize))   ; ssize_t write(int fd, const void*, size_t)
 
 ; Report an out-of-bounds slice access and hard-fail the process. The message is
 ; flushed with `write` FIRST (an observable side effect the optimizer must keep),
@@ -47,7 +47,7 @@
 ; instantiated, and NOT one byte of it reaches the output — the guard is genuinely
 ; zero-cost, and the off-path IR is byte-identical to the unchecked form.
 (defn slice-oob-fail! [T] [(s (slice T)) (msg (slice u8))] (-> i64)
-  (write 2 (cast (ptr i8) (slice-data msg)) (slice-len msg))
+  (write 2 (cast (ptr i8) (slice-data msg)) (cast isize (slice-len msg)))
   (store! (cast (ptr i64) 0) 0)
   0)
 

@@ -13,16 +13,11 @@
       [s (slice.slice-new (index arr 0) 5) mid (subslice s 1 4) (mut acc) 0]
       (slice-set! mid 0 20)
       (let
-        [$g0 mid]
-        (let
-          [(mut $g2) (isub 0 1)]
-          (loop
-            (store! $g2 (iadd (load $g2) 1))
-            (if
-              (icmp-lt (load $g2) (slice.slice-len $g0))
-              (let
-                [$g1 (load $g2)]
-                (let [x (slice.slice-get $g0 $g1)] (store! acc (iadd (load acc) x))))
-              (break)))))
+        [(mut $g0) (iter mid)]
+        (loop
+          (match
+            (next (mut $g0))
+            (None [] (break))
+            (Some [x] (store! acc (iadd (load acc) x))))))
       (iadd (load acc) (slice-len s)))))
 

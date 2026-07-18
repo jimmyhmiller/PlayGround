@@ -173,8 +173,8 @@
     (not (icmp-eq (code-count binding) 2))
     (error "al-for: binding must be [x arraylist]")
     (quasiquote
-      (slice-for
-        [(unquote (code-nth binding 0)) (al-slice (unquote (code-nth binding 1)))]
+      (for-in
+        [(unquote (code-nth binding 0)) (iter (unquote (code-nth binding 1)))]
         (unquote-splicing body)))))
 
 (impl [T] Len (ArrayList T) (len [(xs (ArrayList T))] (-> i64) (al-len xs)))
@@ -198,4 +198,10 @@
   Pop
   (ArrayList T)
   (pop! [(xs (mut (ArrayList T)))] (-> (Option T)) (al-pop! (mut xs))))
+
+(impl
+  [T]
+  Iterable
+  (ArrayList T)
+  (iter [(xs (ArrayList T))] (-> (SliceIter T)) (iter (al-slice xs))))
 
