@@ -2091,13 +2091,16 @@ fn call2<M: ValueModel>(rt: &mut Runtime<M>, f: &str, a: u64, b: u64) -> u64 {
     rt.vec_to_list(&[fs, a, b])
 }
 
-/// `(record 'Keyword 'name)` — a keyword-construction form for `:name`.
+/// `(%keyword 'name)` — a keyword-construction form for `:name`. MUST go
+/// through the interner prim, not raw `(record 'Keyword 'name)` construction:
+/// keywords are canonical on the JVM (`(identical? :a :a)` is always true),
+/// and the record spelling minted a FRESH object per evaluation — same-named
+/// keywords at distinct addresses, breaking `identical?` conformance and
+/// forcing every keyword `=` onto the structural slow path.
 fn keyword_expr<M: ValueModel>(rt: &mut Runtime<M>, name_sym: u64) -> u64 {
-    let rec = sym(rt, "record");
-    let kw = sym(rt, "Keyword");
-    let tag = quote_form(rt, kw);
+    let kwf = sym(rt, "%keyword");
     let nm = quote_form(rt, name_sym);
-    rt.vec_to_list(&[rec, tag, nm])
+    rt.vec_to_list(&[kwf, nm])
 }
 
 /// A REAL runtime vector (phase-appropriate) — the expander's synthesized

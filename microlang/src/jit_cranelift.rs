@@ -945,8 +945,17 @@ extern "C" fn shim_instance_fill<M: ModelArithJit>(
     // so even a repeated record receiver never hit and took the `satisfies?` shim.
     let ver = rt.shared.dispatch_version.load(Ordering::Relaxed);
     let mut ics = jit.instance_ic.borrow_mut();
-    if (site as usize) < ics.len() {
-        ics[site as usize] = DispatchIcEntry { epoch: instance_epoch(ver), ty, imp: result };
+    if let Some(ways) = ics.get_mut(site as usize) {
+        let epoch = instance_epoch(ver);
+        // Way choice: an existing entry for this ty, else a stale way, else a
+        // key-derived victim (eviction only happens when a site legitimately
+        // sees more than INSTANCE_IC_WAYS receiver types).
+        let way = ways
+            .iter()
+            .position(|w| w.ty == ty)
+            .or_else(|| ways.iter().position(|w| w.epoch != epoch))
+            .unwrap_or((ty as usize) & (INSTANCE_IC_WAYS - 1));
+        ways[way] = DispatchIcEntry { epoch, ty, imp: result };
     }
     0
 }
@@ -1583,6 +1592,18 @@ pub trait ModelArithJit: ModelEmit {
     /// bits on every model (Stage E).
     fn emit_ref_addr_unchecked(c: &mut Compiler, v: Value) -> Value;
 
+    /// Emit the `RawTag` discriminant (Int=0, Float=1, Bool=2, Nil=3, Sym=4)
+    /// of a word the caller has already PROVEN is NOT a ref — the
+    /// immediate-receiver cache key for the InstanceCheck / Dispatch inline
+    /// caches. `None` (the default) opts the model out: its immediates keep
+    /// taking the slow path, exactly as before. Only meaningful for models
+    /// whose `emit_ref_addr` produces a REAL `is_ref` (a constant-false
+    /// `is_ref` would route refs into the "immediate" branch and mis-key
+    /// them), so the opt-out and `emit_ref_addr`'s must travel together.
+    fn emit_imm_cat(_c: &mut Compiler, _v: Value) -> Option<Value> {
+        None
+    }
+
     /// May emitted code read, write, and ALLOCATE heap objects inline under
     /// this model (D5)? Requires a real `emit_ref_addr`, a working
     /// `emit_tag`/`emit_untag` (immediate ints), and `emit_enc_ref`. LowBit
@@ -1659,6 +1680,12 @@ impl ModelArithJit for crate::model::LowBitModel {
     }
     fn emit_ref_addr_unchecked(c: &mut Compiler, v: Value) -> Value {
         c.fb.ins().band_imm(v, !0b111i64)
+    }
+    fn emit_imm_cat(c: &mut Compiler, v: Value) -> Option<Value> {
+        // LowBit's tag values coincide with the RawTag discriminants for every
+        // non-ref category (INT=0, BOOL=2, NIL=3, SYM=4; no immediate float),
+        // so the low tag bits ARE the category.
+        Some(c.fb.ins().band_imm(v, 0b111))
     }
 
     const INLINE_OBJECTS: bool = true;
@@ -1776,9 +1803,10 @@ pub struct JitCranelift<M: ModelArithJit> {
     /// folds the relocation count and the dispatch version, so a moved impl or
     /// a redefinition never false-hits.
     dispatch_ic: RefCell<Vec<DispatchSiteIc>>,
-    /// Per instance-check site: a monomorphic (epoch, type -> bool) cache. A hit
-    /// is one type compare + one load; a miss calls the real `-instance-val`.
-    instance_ic: RefCell<Vec<DispatchIcEntry>>,
+    /// Per instance-check site: a 4-way (epoch, type -> bool) cache probed
+    /// sequentially. A hit is at most four type compares; a miss calls the
+    /// real `-instance-val` and refills (see `INSTANCE_IC_WAYS`).
+    instance_ic: RefCell<Vec<InstanceSiteIc>>,
     _pd: std::marker::PhantomData<fn() -> M>,
 }
 
@@ -1796,6 +1824,15 @@ struct DispatchIcEntry {
 const DISPATCH_IC_WAYS: usize = 2;
 type DispatchSiteIc = [DispatchIcEntry; DISPATCH_IC_WAYS];
 
+/// InstanceCheck sites are WIDER than dispatch sites: core.match's decision
+/// trees put one `(instance? ILookup x)` in front of heterogeneous data, so a
+/// single site legitimately sees record + vector + immediate receivers in
+/// rotation. A monomorphic entry thrashed (miss + `-instance-val` + refill per
+/// element); four sequentially-probed ways cover the shapes one match site
+/// realistically alternates through.
+const INSTANCE_IC_WAYS: usize = 4;
+type InstanceSiteIc = [DispatchIcEntry; INSTANCE_IC_WAYS];
+
 const DISPATCH_IC_EMPTY: DispatchIcEntry = DispatchIcEntry { epoch: 0, ty: u64::MAX, imp: 0 };
 
 /// Reserved capacities for the two JIT-owned, address-baked tables (see the
@@ -1812,6 +1849,15 @@ const DISPATCH_SITE_CAP: usize = 1 << 17;
 /// answer depends only on the receiver's type — so all values of one kind share
 /// one correct cached bool.
 const INSTANCE_NONREC_KEY_BIT: u64 = 1 << 40;
+
+/// InstanceCheck cache key tag for an IMMEDIATE receiver: the model's RawTag
+/// discriminant (bits 0..3) OR'd with this bit. Disjoint from record syms
+/// (u32), from `INSTANCE_NONREC_KEY_BIT` keys, and from the `u64::MAX` empty
+/// sentinel. Sound for the same reason the kind byte is: `instance?`'s answer
+/// depends only on the receiver's type, and every immediate of one category
+/// has the same type ('Long / 'Boolean / 'nil / 'Symbol — keywords are interned
+/// RECORDS, so they never reach this key space).
+const INSTANCE_IMM_KEY_BIT: u64 = 1 << 41;
 
 /// The dispatch-IC epoch: the same fold `Runtime::resolve_or_default` uses for
 /// its own per-site cache (relocation count mixed with the registry version).
@@ -3625,9 +3671,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let mut ics = jit.instance_ic.borrow_mut();
         if ics.len() <= site {
             assert!(site < DISPATCH_SITE_CAP, "instance_ic overflow at site {site}");
-            ics.resize(site + 1, DISPATCH_IC_EMPTY);
+            ics.resize(site + 1, [DISPATCH_IC_EMPTY; INSTANCE_IC_WAYS]);
         }
-        (&ics[site]) as *const DispatchIcEntry
+        ics[site].as_ptr()
     }
 
     fn dispatch_ic_slot<M: ModelArithJit>(&self, site: usize) -> *const DispatchIcEntry {
@@ -5109,27 +5155,47 @@ impl<'a, 'b> Compiler<'a, 'b> {
 
                 // ANY reference receiver uses the cache: a record keys on its
                 // type Sym (+8), every other kind keys on its header kind byte
-                // (see `INSTANCE_NONREC_KEY_BIT`). Only immediates (Long / nil /
-                // interned keyword — no header to read) and wrapped backends take
-                // the shim. This is what lets core.match's string / list / seq
-                // receivers hit the cache instead of re-running `satisfies?`.
+                // (see `INSTANCE_NONREC_KEY_BIT`). An IMMEDIATE receiver keys
+                // on its RawTag category (`INSTANCE_IMM_KEY_BIT`) when the
+                // model can emit it — measured 51ns/call through the slow
+                // `-instance-val` vs 5ns cached, and core.match's map-pattern
+                // rows run this per element on ints/symbols. Only wrapped
+                // backends (and opted-out models' immediates) take the shim.
                 let (is_ref, addr) = M::emit_ref_addr(self, xv);
                 let rc = self.rc_val;
                 let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
-                let g1 = self.fb.ins().band(is_ref, direct);
+                // `cacheb` takes the cache key `ty` as a block param, filled by
+                // the record / non-record / immediate edges below so it never
+                // reads +8 on an object that may be header-only.
+                let cacheb = self.fb.create_block();
+                let ty = self.fb.append_block_param(cacheb, I64);
                 let recb = self.fb.create_block();
-                self.fb.ins().brif(g1, recb, &[], slowb, &[]);
+                let dirb = self.fb.create_block();
+                self.fb.ins().brif(direct, dirb, &[], slowb, &[]);
+                self.fb.switch_to_block(dirb);
+                self.fb.seal_block(dirb);
+                let immb = self.fb.create_block();
+                self.fb.ins().brif(is_ref, recb, &[], immb, &[]);
+
+                // ── immediate: category key, or the slow path if the model
+                //    cannot classify immediates inline ──
+                self.fb.switch_to_block(immb);
+                self.fb.seal_block(immb);
+                match M::emit_imm_cat(self, xv) {
+                    Some(cat) => {
+                        let key = self.fb.ins().bor_imm(cat, INSTANCE_IMM_KEY_BIT as i64);
+                        self.fb.ins().jump(cacheb, &[key.into()]);
+                    }
+                    None => {
+                        self.fb.ins().jump(slowb, &[]);
+                    }
+                }
 
                 self.fb.switch_to_block(recb);
                 self.fb.seal_block(recb);
                 let hdr = self.fb.ins().load(I64, flags, addr, 0);
                 let tid = self.fb.ins().band_imm(hdr, 0xffff);
                 let is_rec = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::RECORD as i64);
-                // `cacheb` takes the cache key `ty` as a block param, filled by
-                // the record / non-record edges below so it never reads +8 on an
-                // object that may be header-only.
-                let cacheb = self.fb.create_block();
-                let ty = self.fb.append_block_param(cacheb, I64);
                 let recty = self.fb.create_block();
                 let nonrecty = self.fb.create_block();
                 self.fb.ins().brif(is_rec, recty, &[], nonrecty, &[]);
@@ -5157,21 +5223,36 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let vp = self.load_rc_field(self.off_dispver_ptr);
                 let epoch = self.fb.ins().load(I64, flags, vp, 0);
                 let sitep = self.iconst(self.instance_ic_slot::<M>(*site) as u64);
-                let ce = self.fb.ins().load(I64, flags, sitep, 0); // entry.epoch
-                let ct = self.fb.ins().load(I64, flags, sitep, 8); // entry.ty
-                let e_ok = self.fb.ins().icmp(IntCC::Equal, ce, epoch);
-                let t_ok = self.fb.ins().icmp(IntCC::Equal, ct, ty);
-                let hit = self.fb.ins().band(e_ok, t_ok);
-                let hitb = self.fb.create_block();
+                // Probe the ways in sequence; every way's miss edge chains to
+                // the next, the last to the true miss. Worst case (all ways
+                // miss) is INSTANCE_IC_WAYS compare-pairs — still far under one
+                // `-instance-val` call.
                 let missb = self.fb.create_block();
-                self.fb.ins().brif(hit, hitb, &[], missb, &[]);
-
-                // ── hit: the cached bool ──
-                self.fb.switch_to_block(hitb);
-                self.fb.seal_block(hitb);
-                let cached = self.fb.ins().load(I64, flags, sitep, 16); // entry.imp = bool
-                self.fb.def_var(result, cached);
-                self.fb.ins().jump(merge, &[]);
+                for way in 0..INSTANCE_IC_WAYS as i32 {
+                    let base = way * 24;
+                    let ce = self.fb.ins().load(I64, flags, sitep, base); // way.epoch
+                    let ct = self.fb.ins().load(I64, flags, sitep, base + 8); // way.ty
+                    let e_ok = self.fb.ins().icmp(IntCC::Equal, ce, epoch);
+                    let t_ok = self.fb.ins().icmp(IntCC::Equal, ct, ty);
+                    let hit = self.fb.ins().band(e_ok, t_ok);
+                    let hitb = self.fb.create_block();
+                    let nextb = if way + 1 == INSTANCE_IC_WAYS as i32 {
+                        missb
+                    } else {
+                        self.fb.create_block()
+                    };
+                    self.fb.ins().brif(hit, hitb, &[], nextb, &[]);
+                    // ── hit: the cached bool ──
+                    self.fb.switch_to_block(hitb);
+                    self.fb.seal_block(hitb);
+                    let cached = self.fb.ins().load(I64, flags, sitep, base + 16);
+                    self.fb.def_var(result, cached);
+                    self.fb.ins().jump(merge, &[]);
+                    if way + 1 != INSTANCE_IC_WAYS as i32 {
+                        self.fb.switch_to_block(nextb);
+                        self.fb.seal_block(nextb);
+                    }
+                }
 
                 // ── miss: compute via -instance-val, then refill {epoch, ty, r} ──
                 self.fb.switch_to_block(missb);
@@ -5222,9 +5303,55 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let (is_ref, addr) = M::emit_ref_addr(self, recv);
                 let rc = self.rc_val;
                 let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
-                let g1 = self.fb.ins().band(is_ref, direct);
+                // `probeb` runs the IC probes over a cache key delivered as a
+                // block param, so the record edge (raw type-sym word) and the
+                // immediate edge (the category's constant type-tag sym) share
+                // one probe emission.
+                let probeb = self.fb.create_block();
+                let ty = self.fb.append_block_param(probeb, I64);
                 let chk = self.fb.create_block();
-                self.fb.ins().brif(g1, chk, &[], slow, &[]);
+                let dirb = self.fb.create_block();
+                let immb = self.fb.create_block();
+                self.fb.ins().brif(direct, dirb, &[], slow, &[]);
+                self.fb.switch_to_block(dirb);
+                self.fb.seal_block(dirb);
+                self.fb.ins().brif(is_ref, chk, &[], immb, &[]);
+
+                // ── immediate receiver: `type_tag` is a per-category constant
+                //    sym, so compute it inline and probe the same IC the shim
+                //    refills (`entry.ty = type_tag(recv)`). core.match's
+                //    `val-at*` dispatches on Long/Symbol receivers per element;
+                //    these always missed to `shim_dispatch` before. Models that
+                //    can't classify immediates (and compiles with no runtime,
+                //    e.g. `dump_ir`) keep the slow path.
+                self.fb.switch_to_block(immb);
+                self.fb.seal_block(immb);
+                match (M::emit_imm_cat(self, recv), self.rt_ptr.is_null()) {
+                    (Some(cat), false) => {
+                        let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                        // The names must match `type_tag`'s immediate arm
+                        // exactly (interning is idempotent, so these are the
+                        // same syms `shim_dispatch` stores).
+                        let s_long = self.iconst(rt.intern("Long") as u64);
+                        let s_dbl = self.iconst(rt.intern("Double") as u64);
+                        let s_bool = self.iconst(rt.intern("Boolean") as u64);
+                        let s_nil = self.iconst(rt.intern("nil") as u64);
+                        let s_sym = self.iconst(rt.intern("Symbol") as u64);
+                        let c0 = self.fb.ins().icmp_imm(IntCC::Equal, cat, 0);
+                        let c1 = self.fb.ins().icmp_imm(IntCC::Equal, cat, 1);
+                        let c2 = self.fb.ins().icmp_imm(IntCC::Equal, cat, 2);
+                        let c3 = self.fb.ins().icmp_imm(IntCC::Equal, cat, 3);
+                        let t3 = self.fb.ins().select(c3, s_nil, s_sym);
+                        let t2 = self.fb.ins().select(c2, s_bool, t3);
+                        let t1 = self.fb.ins().select(c1, s_dbl, t2);
+                        let tyi = self.fb.ins().select(c0, s_long, t1);
+                        self.fb.ins().jump(probeb, &[tyi.into()]);
+                    }
+                    _ => {
+                        self.fb.ins().jump(slow, &[]);
+                    }
+                }
+
                 self.fb.switch_to_block(chk);
                 self.fb.seal_block(chk);
                 let hdr = self.fb.ins().load(I64, flags, addr, 0);
@@ -5255,7 +5382,11 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.fb.switch_to_block(chk2);
                 self.fb.seal_block(chk2);
                 // The record's type sym (its raw word) IS `type_tag(recv)`.
-                let ty = self.fb.ins().load(I64, flags, addr, 8);
+                let tyr = self.fb.ins().load(I64, flags, addr, 8);
+                self.fb.ins().jump(probeb, &[tyr.into()]);
+
+                self.fb.switch_to_block(probeb);
+                self.fb.seal_block(probeb);
                 let rp = self.load_rc_field(self.off_reloc_ptr);
                 let reloc = self.fb.ins().load(I64, flags, rp, 0);
                 let vp = self.load_rc_field(self.off_dispver_ptr);

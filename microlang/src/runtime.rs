@@ -1586,6 +1586,27 @@ impl<M: ValueModel> Runtime<M> {
                 _ => false, // bit-unequal immediates: unequal (or cross-category)
             };
         }
+        // KEYWORD fast path: a keyword's identity IS its name sym (one
+        // immediate field), so two keywords compare by that field alone, and a
+        // keyword never equals anything else. NOT an interning assumption —
+        // same-named keywords at distinct addresses exist (read-time data.rs
+        // objects vs the `%keyword` interner), which is exactly why the
+        // `a == b` fast path above misses and the compare otherwise pays the
+        // full structural walk (two `decode`s, two `ObjView`s, a field
+        // recursion) on every MISMATCHED map-pattern key test / amap probe.
+        {
+            let kw = self.intern_cached(&self.shared.sym_cache_keyword, "Keyword");
+            let ra = self.raw_rec(a);
+            let rb = self.raw_rec(b);
+            let a_kw = matches!(ra, Some((t, _)) if t == kw);
+            let b_kw = matches!(rb, Some((t, _)) if t == kw);
+            if a_kw || b_kw {
+                return match (ra, rb) {
+                    (Some((ta, fa)), Some((tb, fb))) if ta == kw && tb == kw => fa[0] == fb[0],
+                    _ => false,
+                };
+            }
+        }
         // Huge integers decode to opaque refs; compare them by value (two equal
         // huge results live at different heap addresses).
         if let (Some(x), Some(y)) = (self.as_huge(a), self.as_huge(b)) {
