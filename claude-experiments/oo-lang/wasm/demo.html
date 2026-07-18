@@ -72,6 +72,11 @@
   globalThis.scry = scry;
   setStatus("live", true);
 
+  // Background workers (Thread.spawn) have no OS thread on wasm — they advance only when we
+  // tick the green-thread scheduler. Pump it, and nudge the viewer whenever work landed so
+  // instances visibly climb while you keep typing.
+  scry.startScheduler(30, () => globalThis.__scryRefresh?.());
+
   // ---- REPL: each line is one agent turn, driven through the eval channel ----
   const PROMPT = "\x1b[38;5;114m›\x1b[0m ";
   let line = "";

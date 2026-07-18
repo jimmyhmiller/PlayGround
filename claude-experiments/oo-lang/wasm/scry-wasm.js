@@ -333,6 +333,23 @@ export class ScryWasm {
     this.stdin = merged;
   }
 
+  // tick(): advance the green-thread scheduler one pass. Returns how many spawned threads
+  // are still runnable. On wasm there are no OS threads — background workers only make
+  // progress when the host ticks, so a page must pump this (startScheduler).
+  tick() { return Number(this.exports.scry_tick()); }
+
+  // Pump the scheduler on a timer. onProgress fires only when work actually advanced, so a
+  // page can refresh its views without polling in the idle case.
+  startScheduler(intervalMs = 30, onProgress) {
+    if (this._sched) return;
+    this._sched = setInterval(() => {
+      let runnable = 0;
+      try { runnable = this.tick(); } catch (e) { console.error("scry scheduler:", e); this.stopScheduler(); return; }
+      if (runnable > 0) onProgress?.(runnable);
+    }, intervalMs);
+  }
+  stopScheduler() { if (this._sched) { clearInterval(this._sched); this._sched = null; } }
+
   // ---- marshalling helpers for callers ----
   readCstr(p) { const u = this.u8; let e = p; while (u[e]) e++; return this.dec.decode(u.subarray(p, e)); }
 

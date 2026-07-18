@@ -1313,6 +1313,13 @@
             (do (store! (srv-program) prog) (store! (srv-readonly) 0)
                 (vm-run prog) 0)))))))
 
+; scry_tick: advance the wasm green-thread scheduler by one pass — give every spawned,
+; unfinished language thread a slice. Returns the number still runnable, so the host knows
+; whether to keep ticking (it drives this from a timer/rAF). On native this is unused: real
+; OS threads run themselves.
+(export-c [scry-tick :as "scry_tick"])
+(defn scry-tick [] (-> i64) (sched-tick))
+
 ; scry_eval_recover: the wasm half of the uncrashable-eval invariant.
 ;
 ; Native uses setjmp/longjmp: eval-panic records the error into alloc-static globals and

@@ -237,7 +237,9 @@
     (loop
       (do (safepoint-poll (field vt parked))
           (if (>= (clock-now) deadline) (break)
-            (do (nanosleep (cast (ptr i8) (index ts 0)) (cast (ptr i8) 0)) (continue))))))
+            (do (when-wasm (store! (sched-budget) 0)                    ; end this slice; resume later
+                           (nanosleep (cast (ptr i8) (index ts 0)) (cast (ptr i8) 0)))
+                (continue))))))
   0)
 
 ; Console.readLine(): blocking FROM THE PROGRAM'S VIEW, but never parks the OS thread in a
@@ -287,6 +289,55 @@
 (defn vm-mutex-unlock [(vt (ptr VMThread)) (m (ptr MutexObj))] (-> i64)
   (if (= (safepoint-is-coordinator? (field vt parked)) 1) 0
     (do (atomic-store (field m lock) 0) 0)))
+
+; ============================ green threads (wasm only) ============================
+; wasm32 has no pthreads, so on that target Thread.spawn does NOT start an OS thread: the
+; VMThread is registered and its run() frame pushed exactly as on native, but it is then
+; driven cooperatively by this scheduler. That works because a language thread's ENTIRE
+; execution state (stack, frames, ip) lives in its heap-allocated VMThread — `run-to` never
+; recurses for a Scry call (OP_CALL push-frames and continues the loop), so "yield" is just
+; returning from run-to, and "resume" is calling it again with the same VMThread.
+;
+; DECISIONS #4b pins real OS threads for the native build; this is a wasm-target-only
+; concession (docs/08-wasm-port.md §1), and native codegen is untouched — the dispatch-loop
+; hook below compiles to nothing off wasm32.
+(defn sched-budget [] (-> (ptr i64)) (alloc-static i64))     ; instructions left in this slice
+(defn sched-yielded [] (-> (ptr i64)) (alloc-static i64))    ; 1 = last run-to stopped on budget
+(const SCHED_UNBOUNDED 1000000000)   ; main/eval run to completion: effectively no budget
+(const SCHED_SLICE 20000)            ; instructions per background-thread slice
+
+; Called at the dispatch-loop seam ON WASM ONLY. Returns 1 when this slice is spent, which
+; makes run-to return; the VMThread is left mid-execution and resumes on the next slice.
+(defn sched-should-yield [] (-> i64)
+  (let [b (load (sched-budget))]
+    (if (<= b 0) (do (store! (sched-yielded) 1) 1)
+      (do (store! (sched-budget) (- b 1)) 0))))
+
+; Give one registered, unfinished thread a slice. Returns 1 if it is still runnable.
+(defn sched-run-slice [(avt (ptr VMThread))] (-> i64)
+  (if (= (atomic-load (field avt done)) 1) 0
+    (if (<= (load (field avt frame-count)) 0)
+      (do (atomic-store (field avt done) 1) (atomic-store (field avt parked) 1) 0)
+      (do (store! (sched-budget) SCHED_SLICE)
+          (store! (sched-yielded) 0)
+          (run-to avt 0)
+          (store! (sched-budget) SCHED_UNBOUNDED)
+          (if (= (load (sched-yielded)) 1) 1                    ; slice expired — still runnable
+            (do (atomic-store (field avt done) 1)               ; ran to completion
+                (atomic-store (field avt parked) 1) 0))))))
+
+; One scheduler pass over every registered language thread. Returns the number still
+; runnable, so the host knows whether to keep ticking.
+(defn sched-tick [] (-> i64)
+  (let [n (atomic-load (vm-nthreads-cell)) (mut i) 0 (mut live) 0]
+    (loop (if (< (load i) n)
+            (let [avt (cast (ptr VMThread) (load (index (vm-threads-cell) (load i))))]
+              (if (= (cast i64 avt) 0) 0
+                (if (= (cast i64 avt) (cast i64 (vm-thread-main))) 0     ; main isn't scheduled
+                  (store! live (+ (load live) (sched-run-slice avt)))))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load live)))
 
 ; ---- the pthread body: run this thread's own dispatch loop, then mark dead-and-parked ----
 (defn interpreter-thread-main [(arg (ptr i8))] (-> (ptr i8))
@@ -573,7 +624,8 @@
     (store! (index (field avt stack) 0) task)          ; task is arg0 / self of run()
     (store! (field avt stack-top) 1)
     (push-frame avt m 1)
-    (thread-spawn (field avt os-thread) (fnptr-of interpreter-thread-main) (cast (ptr i8) avt))
+    (when-wasm 0                                     ; wasm: scheduled by sched-tick, no pthread
+      (thread-spawn (field avt os-thread) (fnptr-of interpreter-thread-main) (cast (ptr i8) avt)))
     (cast i64 avt)))
 
 ; cooperatively join a spawned thread: spin on its `done` flag while still polling MY own
@@ -581,8 +633,10 @@
 (defn vm-join [(vt (ptr VMThread)) (handle i64)] (-> i64)
   (let [avt (cast (ptr VMThread) handle)]
     (loop (if (= (atomic-load (field avt done)) 1) (break)
-            (do (safepoint-poll (field vt parked)) (usleep (cast i32 500)) (continue))))
-    (thread-join (field avt os-thread))
+            (do (safepoint-poll (field vt parked))
+                (when-wasm (sched-run-slice avt) (usleep (cast i32 500)))
+                (continue))))
+    (when-wasm 0 (thread-join (field avt os-thread)))
     0))
 
 ; ---- the dispatch loop ----
@@ -597,6 +651,10 @@
       (if (load done) (break)
         (do
           (safepoint-poll (field vt parked))
+          ; green-thread yield seam (wasm only — `when-wasm` emits NOTHING on native, so the
+          ; native dispatch loop is byte-for-byte unchanged). Budget is UNBOUNDED except while
+          ; the scheduler is running a background thread's slice, so main/eval never yield.
+          (if (when-wasm (sched-should-yield) 0) (do (store! done true) 0) 0)
           ; GC trigger (02 §6): at the dispatch loop top, fr.ip is exactly an instruction
           ; boundary, so every thread parked here for the stop has a valid stack map. Firing here
           ; (never mid-instruction) is what makes precise root scanning of THIS frame sound.
@@ -751,6 +809,10 @@
 ; post-main).
 (defn vm-run [(p (ptr Program))] (-> i64)
   (vm-bind-program p)
+  ; The scheduler budget is alloc-static (starts 0). main() and every eval must run to
+  ; COMPLETION, never yield, so seed it unbounded — sched-run-slice is the only thing that
+  ; ever narrows it, and it restores unbounded when its slice ends.
+  (store! (sched-budget) SCHED_UNBOUNDED)
   (http-init)   ; libcurl global init once, on the main thread, before any thread can race
 
   (let [vt (vm-thread-main)]

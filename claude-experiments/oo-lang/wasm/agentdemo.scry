@@ -9,12 +9,34 @@
 //
 // Every Session / Conversation / Message / ToolCall it creates is a live arena instance, so
 // the viewer browses the agent's state as it runs.
-import agent.core.{Conversation, Message, Model, Tool, ScriptedModel, CalcTool, WeatherTool, runAgentLoop}
+import agent.core.{Conversation, Message, Model, Tool, ScriptedModel, CalcTool, WeatherTool, runAgentLoop, mkTextMessage, strStartsWith, afterPrefix}
+
+// A background sub-agent. On native this is a real OS thread; on wasm there are no pthreads,
+// so Thread.spawn registers it and the green-thread scheduler drives it (one Clock.sleep-paced
+// step per host tick). Either way you keep typing while it works, and every Message it appends
+// shows up live in the viewer.
+class Researcher implements Runnable {
+  convo: Conversation
+  topic: String
+  steps: Int
+
+  fn run() {
+    var i = 0
+    while i < self.steps {
+      i = i + 1
+      self.convo.append(mkTextMessage("assistant",
+        "[research:${self.topic}] step ${i} of ${self.steps}"))
+      Clock.sleep(120)
+    }
+    self.convo.append(mkTextMessage("assistant", "[research:" + self.topic + "] done"))
+  }
+}
 
 class Session {
   convo: Conversation
   brain: ScriptedModel
   tools: List<Tool>
+  workers: List<ThreadHandle>
   turns: Int
 
   fn init() {
@@ -23,6 +45,7 @@ class Session {
     self.tools = List<Tool>()
     self.tools.push(CalcTool(label: "calc"))
     self.tools.push(WeatherTool(source: "demo"))
+    self.workers = List<ThreadHandle>()
     self.turns = 0
   }
 
@@ -30,6 +53,14 @@ class Session {
   // Console.log, and the resulting Messages show up live in the viewer.
   fn ask(text: String) -> String {
     self.turns = self.turns + 1
+    if strStartsWith(text, "research ") {
+      let topic = afterPrefix(text, "research ")
+      let h = Thread.spawn(Researcher(convo: self.convo, topic: topic, steps: 5))
+      self.workers.push(h)
+      let ack = "spawned a background researcher on \"" + topic + "\" — keep typing, watch the viewer"
+      Console.log(ack)
+      return ack
+    }
     let reply = runAgentLoop(self.convo, self.brain, self.tools, text, 4)
     Console.log(reply)
     reply
@@ -41,5 +72,5 @@ class Session {
 fn main() {
   let s = Session()
   Console.log("scry agent demo — the VM, the agent, and this terminal are all WebAssembly.")
-  Console.log("try:  hello  /  what is 6 * 7  /  weather in Tokyo")
+  Console.log("try:  hello  /  weather in Tokyo  /  research wasm")
 }

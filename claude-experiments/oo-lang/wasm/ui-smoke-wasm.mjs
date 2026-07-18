@@ -162,6 +162,32 @@ async function main() {
     if (!/"value"/.test(msgs)) fail("viewer-side eval of Message.instances() failed: " + msgs);
     console.log("  ok  live agent state visible through the viewer transport ->", msgs);
 
+    // ---- phase 3: a BACKGROUND worker advances while the page stays interactive ----
+    const msgCount = async () => {
+      const r = await evalPage(`JSON.stringify(globalThis.__scryWasm.eval("Message.instances().len()"))`);
+      return JSON.parse(r).value?.value ?? -1;
+    };
+    const before = await msgCount();
+    for (const ch of "research wasm") await send("Input.dispatchKeyEvent", { type: "char", text: ch });
+    await send("Input.dispatchKeyEvent", { type: "rawKeyDown", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+    await send("Input.dispatchKeyEvent", { type: "char", text: "\r" });
+
+    // the spawned Researcher has NO OS thread — it only advances because the page pumps
+    // scry_tick(). Messages must climb on their own, with no further input.
+    let grew = before, seen = [];
+    for (let i = 0; i < 60; i++) {
+      await sleep(250);
+      grew = await msgCount();
+      seen.push(grew);
+      if (grew >= before + 6) break;   // 5 steps + "done"
+    }
+    if (grew < before + 6) fail(`background worker never progressed: ${before} -> ${grew} (samples ${seen.slice(-8)})`);
+    console.log(`  ok  green thread ran in the background: Messages ${before} -> ${grew} with no further input`);
+
+    const stillLive = await evalPage(`JSON.stringify(globalThis.__scryWasm.eval("1 + 1"))`);
+    if (!/"value"/.test(stillLive)) fail("page not interactive after background work: " + stillLive);
+    console.log("  ok  page stayed interactive throughout");
+
     if (pageErrors.length) fail("page threw: " + pageErrors.join(" | "));
     console.log("PASS ui-smoke-wasm");
     cleanup();

@@ -103,6 +103,15 @@
 (defn xmemcpy  [(d (ptr i8)) (s (ptr i8)) (n i64)] (-> (ptr i8)) (memcpy d s (cast isize n)))
 (defn xmemset  [(d (ptr i8)) (c i64) (n i64)] (-> (ptr i8)) (memset d c (cast isize n)))
 
+; ---- compile-time target branch ----
+; `(when-wasm A B)` compiles to A on wasm32 and to B everywhere else — the branch not taken
+; is never emitted, so a wasm-only code path costs the native build NOTHING (not even a
+; predictable test). This is how the green-thread scheduler hooks the dispatch loop without
+; putting a per-instruction check in the native VM. Requires a coil new enough that
+; (target-arch) reflects --target at macro-expansion time (commit d85202678).
+(defn when-wasm [(a Code) (b Code)] (-> Code)
+  (if (code-eq (target-arch) `wasm32) a b))
+
 ; ---- diagnostic capture sink ----
 ; When capture is active, writes to fd 2 (stderr) append into this buffer instead of hitting
 ; the real stderr — so an eval can recover the typechecker's message with NO /tmp temp file and
