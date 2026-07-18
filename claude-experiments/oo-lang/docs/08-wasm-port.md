@@ -331,20 +331,71 @@ naturally with landing C0/C1, which also live in the self-hosted compiler.
 
 ---
 
+## 5c. Target-width libc types (`isize`) — the thing that actually bit
+
+**Learned the hard way 2026-07-18.** This was the single largest source of wasm breakage,
+and it is invisible on arm64.
+
+Coil's prelude declares the libc surface with **target-width** types:
+```coil
+(extern read   :cc c [i32 (ptr i8) isize] (-> isize))   ; ssize_t read(int, void*, size_t)
+(extern write  :cc c [i32 (ptr i8) isize] (-> isize))
+(extern malloc :cc c [isize] (-> (ptr i8)))
+(extern strlen :cc c [(ptr i8)] (-> isize))
+```
+`isize` is **64-bit on arm64 but 32-bit on wasm32** (`size_t`/`ssize_t` are 32-bit there), and
+fd is C `int` (i32). scry had redeclared these with fixed `i64`. Two consequences:
+
+1. **One C symbol admits one signature.** A module holds ONE function per C symbol, so scry's
+   disagreeing redeclaration was *silently dropped* and its calls built against the prelude's
+   type. On arm64 (`isize` = i64) that is indistinguishable from correct; on wasm32 it emits an
+   **invalid module** (`func N: type mismatch: expected i64, found i32`). Coil now rejects the
+   mismatch outright at compile time instead of miscompiling.
+2. **Fixing the declarations pushes the width outward.** Matching the prelude made 68 call
+   sites fail on wasm32 where `isize` (i32) met i64 code.
+
+**The pattern that worked** — don't cast at ~90 call sites. Keep the externs matching the
+prelude exactly, then wrap them once in `ioutil` with i64-facing helpers, so the rest of the
+codebase keeps speaking i64 and the width conversion lives at ONE boundary:
+```coil
+(defn s-len    [(s (ptr i8))] (-> i64) (cast i64 (strlen s)))
+(defn xrealloc [(p (ptr i8)) (n i64)] (-> (ptr i8)) (realloc p (cast isize n)))
+(defn xmemcpy  [(d (ptr i8)) (s (ptr i8)) (n i64)] (-> (ptr i8)) (memcpy d s (cast isize n)))
+(defn xmemset  [(d (ptr i8)) (c i64) (n i64)] (-> (ptr i8)) (memset d c (cast isize n)))
+```
+plus `xalloc` narrowing for `malloc`. Then rewrite call sites mechanically
+(`(strlen ` → `(s-len `, etc.), skipping the extern/wrapper lines themselves.
+
+Two gotchas: a Coil `defn` wrapper is **stricter about pointer types** than the C extern was
+(`(ptr u8)` vs `(ptr i8)` now needs an explicit cast), and an `if` whose branches straddle the
+boundary fails with *"if branches on mixed widths"* — make both branches i64.
+
+**JS-side mirror:** the bridge must return **plain numbers** (not `BigInt`) for `isize`-typed
+returns on wasm32 (`strlen`, `write`, `read`) — returning a BigInt where wasm wants i32 throws
+*"Cannot convert a BigInt value to a number"* on the return conversion, which is easy to
+misattribute to the callee. `snprintf` must also implement **star precision** (`%.*s`): scry
+uses it to print non-NUL-terminated slices, and each `*` consumes an int arg *before* the
+value. Without it, diagnostics render a literal `%.*s`.
+
+---
+
 ## 6. Phased plan
 
-- **P0 — Compiler unblock (Jimmy).** Land **C0** (shadow stack — prerequisite) then **C1**
-  (function table). _Gate: a Coil program using `alloc-stack`+`snprintf` finalizes and runs in
-  node (C0); a program using `call-ptr` finalizes and runs (C1)._ Fallback if C1 slips:
-  refactor the single `arena-for-each-live` fnptr site; C0 has **no** fallback — it's required.
-- **P1 — JS libc (S1) + headless VM.** Build a wasm target module set: `http.coil` stub,
-  `Env.get`→null, JS bridge implementing the libc imports (validated pattern). Get the VM to
-  **instantiate and run a trivial `.scry` program headless** (Console.log → `host_write` →
-  captured buffer). _Gate: `hello.scry` prints in node._ **Blocked on C0.**
-- **P2 — Eval waist.** Export `scry_eval`; rework diagnostic capture to a buffer
-  (`evalrt.coil`). Drive `types()`/`schema()`/`fields(...)`/an expression eval from JS and
-  get correct JSON. _Gate: reflection JSON byte-matches the native server for a fixture
-  program._
+- **P0 — Compiler unblock (Jimmy). ✅ DONE 2026-07-18.** C0 (shadow stack) + C1 (function
+  table) landed in `selfhost/src/wasm.coil`; coil rebuilt. All verified: `call_indirect`,
+  `__stack_pointer`, variadic `snprintf`, and `(target-arch)` under `--target`. (C1's real
+  shape differed from the spec below — LLVM emits an imported `__indirect_function_table` +
+  elem segment + `reloc.CODE` table-index placeholders the finalizer must patch, not
+  `GOT.func.*`.) The `arena-for-each-live` fallback was **not** needed.
+- **P1 — JS libc (S1) + headless VM. ✅ DONE.** The whole VM compiles to a **valid** wasm32
+  module and **boots headless in node**: `scry_boot` loads → typechecks → compiles → runs
+  `main()`, with `Console.log` reaching the host via `write`. Required aligning scry's libc
+  externs with the prelude's target-width (`isize`) signatures — see §5c.
+- **P2 — Eval waist. ✅ DONE.** `scry_eval(src,len) → JSON` works against the live heap:
+  `types()` reflection (with correct `liveCount`), `instances()`, allocating new objects via
+  eval, method invoke on a live instance, and **hot body-swap** (`greet()` 1 → redefine →
+  99). Diagnostic capture works through the in-memory sink (typed errors, no fd-2). The
+  `evalrt.coil` fd-2 rework landed earlier (commit `e96a94099`).
 - **P3 — Green-thread scheduler.** Convert `run-to` to yield; `scry_tick`; enqueue on
   spawn; cooperative `readLine`/`sleep`. _Gate: a 2-thread `.scry` interleaves under the
   scheduler; `assistant.scry`'s `research`/`loop` advance while the prompt waits._
