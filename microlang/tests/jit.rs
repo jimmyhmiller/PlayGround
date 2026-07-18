@@ -179,6 +179,30 @@ fn jit_mutual_tail_recursion_is_o1_stack() {
     assert_eq!(jit::<LowBitModel>(src), walk::<LowBitModel>(src));
 }
 
+/// Phase 4 direct tail chains must stay O(1) stack even 10M deep. A non-self
+/// tail call is now a REAL native call (no sentinel bounce) — which grows the
+/// stack — so the `direct_depth` cap (DIRECT_TAIL_MAX_DEPTH) must kick in and
+/// unwind to a trampoline bounce before the native stack overflows. A 3-cycle
+/// (a->b->c->a), none self-recursive, so every hop is the direct path; 10M
+/// deep would blow a ~8MB stack many times over without the cap. Runs under the
+/// DEFAULT (direct-tail ON): this is the guard for the new mechanism itself.
+#[test]
+fn jit_direct_tail_chain_is_depth_bounded() {
+    let src = "(def a (fn (n) (if (= n 0) 0 (b (- n 1)))))
+               (def b (fn (n) (if (= n 0) 1 (c (- n 1)))))
+               (def c (fn (n) (if (= n 0) 2 (a (- n 1)))))
+               (a 10000000)";
+    // step k runs fn (a,b,c)[k mod 3] at n=10_000_000-k; n hits 0 at k=10_000_000,
+    // and 10_000_000 mod 3 == 1 -> that step is `b`, which returns 1.
+    assert_eq!(jit::<LowBitModel>(src), "1");
+    // Parity with the tree-walk trampoline (also O(1) stack) on another length.
+    let src2 = "(def a (fn (n) (if (= n 0) 0 (b (- n 1)))))
+                (def b (fn (n) (if (= n 0) 1 (c (- n 1)))))
+                (def c (fn (n) (if (= n 0) 2 (a (- n 1)))))
+                (a 3500001)";
+    assert_eq!(jit::<LowBitModel>(src2), walk::<LowBitModel>(src2));
+}
+
 /// Composition holds: wrapping the JIT in `Traced` observes EVERY call, because
 /// the native `shim_call` recurses through `top` (open recursion), not `self`.
 /// `(fact 5)` performs 5 invocations — the same count the tree-walker produces.
