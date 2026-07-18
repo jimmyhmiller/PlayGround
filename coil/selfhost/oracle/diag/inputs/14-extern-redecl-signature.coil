@@ -1,0 +1,12 @@
+; Two declarations of the same C symbol with different signatures. LLVM keeps ONE
+; function per symbol, so the second is dropped and its calls are built against the
+; first one's type — invisible on arm64 (i32/i64 args share a register), an invalid
+; module on wasm32. Rejected at declaration instead.
+;
+; `read` is declared by the prelude as ssize_t read(i64 fd, ptr, i64); this one
+; narrows fd to i32.
+(extern read :cc c [i32 (ptr i8) i64] (-> i64))
+
+(defn go [(fd i32) (buf (ptr i8))] (-> i64) (read fd buf 8))
+
+(defn main [] (-> i64) 0)

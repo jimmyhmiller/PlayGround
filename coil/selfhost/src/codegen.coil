@@ -2001,6 +2001,36 @@
                 (mk-tv (LLVMBuildLoad2 b (load (field rd llvm_ty)) slot (cg-bl cg "abi.ret.val")) ret-ty))
             (if (ty-is-void (box-type a ret-ty)) (mk-tv (cg-zero-i64 cg) (TVoid)) (mk-tv cs ret-ty))))))))
 
+; Two `(extern …)` declarations that resolve to the same C symbol must agree on
+; their LLVM function type. A module holds ONE function per symbol, so the second
+; declaration is dropped and its calls are built with the second signature against
+; the first declaration's type. On arm64 that mismatch is invisible (i32 and i64
+; args share a register); on wasm32 the param types are distinct, so it emits an
+; import whose signature contradicts its call sites and the module fails to
+; validate ("type mismatch: expected i64, found i32"). Reject it at declaration:
+; the mismatch is a real conflict either way, the wasm backend just can't hide it.
+;
+; The conflict is usually with a declaration the program never wrote itself (the
+; prelude declares read/write/strlen/memcpy), so name the earlier extern. Scanning
+; for it is O(n) over the externs already walked, but only on the fatal path.
+(defn cg-extern-prior-decl [(p (ptr Program)) (csym (slice u8)) (upto i64)] (-> (slice u8))
+  (let [es (load (field p externs)) (mut i) 0 (mut r) ""]
+    (loop (if (icmp-ge (load i) upto) (break)
+      (do (let [nm (load (field (al-elem [Extern] es (load i)) name))]
+            (if (str-eq (last-component nm) csym) (do (store! r nm) (break)) 0))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn cg-extern-redecl-check [(cg (ptr Cg)) (existing (ptr i8)) (fnty (ptr i8)) (prior (slice u8)) (ename (slice u8)) (csym (slice u8))] (-> i64)
+  (let [a (load (field cg a)) have (LLVMGlobalGetValueType existing)]
+    (if (icmp-eq (cast i64 have) (cast i64 fnty)) 0
+      (cg-fail
+        (sconcat3 a
+          (sconcat3 a "C symbol '" csym "' is declared twice with different signatures: ")
+          (sconcat3 a (if (icmp-gt (slice-len prior) 0) (sconcat3 a "'" prior "'") "an earlier declaration")
+                      " is " (cstr->slice (LLVMPrintTypeToString have)))
+          (sconcat3 a (sconcat3 a ", '" ename "' is ") (cstr->slice (LLVMPrintTypeToString fnty))
+                      ". One C symbol, one signature: fix the types to match, or use a different symbol"))))))
+
 ; 1a: declare externs.
 (defn cg-declare-externs [(cg (ptr Cg)) (p (ptr Program))] (-> i64)
   (let [a (load (field cg a)) es (load (field p externs)) n (al-len [Extern] (load es)) (mut i) 0]
@@ -2020,7 +2050,8 @@
             (if (or (cg-abi-struct? cg (box-type a ret)) (ty-list-has-struct cg params))
                 (let [sig (c-signature cg params (box-type a ret) (load (field ep variadic)))
                           existing (LLVMGetNamedFunction (load (field cg module)) (slice->cstr a csym))
-                          fv (if (icmp-ne (cast i64 existing) 0) existing
+                          fv (if (icmp-ne (cast i64 existing) 0)
+                               (do (cg-extern-redecl-check cg existing (load (field sig fn_ty)) (cg-extern-prior-decl p csym (load i)) ename csym) existing)
                                (let [nf (LLVMAddFunction (load (field cg module)) (slice->cstr a csym) (load (field sig fn_ty)))]
                                  (cg-apply-csig-attrs cg sig nf false)
                                  (LLVMSetFunctionCallConv nf (cast i32 cc-id)) nf))]
@@ -2028,9 +2059,10 @@
                       (cg-add-func cg ename fv)
                       (cg-record-callable cg ename (load (field ep cc)) params ret))
               (let [existing (LLVMGetNamedFunction (load (field cg module)) (slice->cstr a csym))
-                    fv (if (icmp-ne (cast i64 existing) 0) existing
-                         (let [fnty (cg-fn-type-v cg params (box-type a ret) (load (field ep variadic)))
-                               nf (LLVMAddFunction (load (field cg module)) (slice->cstr a csym) fnty)]
+                    fnty (cg-fn-type-v cg params (box-type a ret) (load (field ep variadic)))
+                    fv (if (icmp-ne (cast i64 existing) 0)
+                         (do (cg-extern-redecl-check cg existing fnty (cg-extern-prior-decl p csym (load i)) ename csym) existing)
+                         (let [nf (LLVMAddFunction (load (field cg module)) (slice->cstr a csym) fnty)]
                            (LLVMSetFunctionCallConv nf (cast i32 cc-id)) nf))]
                 (cg-add-func cg ename fv)
                 (cg-record-callable cg ename (load (field ep cc)) params ret))))
