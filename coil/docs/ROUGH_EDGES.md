@@ -343,7 +343,7 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
 - [x] **diag-5** Shadowing a builtin (`call`, `block`) errors about a form the user never wrote.
       The guide ships a gotcha section for exactly this; check names at definition instead.
 - [x] **diag-13** Argument type mismatches underline the whole call, not the offending argument.
-- [ ] **diag-12** `-o /dev/null` aborts with an opaque LLVM message; add a real `--check` mode.
+- [x] **diag-12** `-o /dev/null` aborts with an opaque LLVM message; add a real `--check` mode.
 - [x] **mac-3** `coil expand` — the only macro debugger — prints an internal `(error@D:D:D:0 …)`
       node to **stdout** and **exits 0** on failure. The tool you reach for when a macro breaks is
       the tool that lies.

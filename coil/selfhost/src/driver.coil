@@ -445,6 +445,19 @@
                                             (store! i (iadd (load i) 1))))))
                                     (Some mp)))))))))))))))))
 
+; `check` / `build -o /dev/null`: run the SAME front-end `build` runs before codegen
+; (read -> load -> expand -> transforms -> typecheck -> monomorphize) but emit NO object.
+; Returns 1 when the program compiles cleanly through mono, 0 (with a located diagnostic
+; already reported to stderr) otherwise. Because this reuses run-pipeline verbatim, a
+; program that `check`s clean is one `build` would only ever fail to LINK, never to
+; compile. Signature is the mode-3 dump-fn shape so it runs on the big stack. (diag-12)
+(defn check-src-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64)
+  (let [w (stderr)
+        (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
+    (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
+      (Some [_] 1)
+      (None []   0))))
+
 ; The LLVM entry points (dump-ir-program / build-object / build-ir-program) live in
 ; selfhost/src/main.coil and are injected here as function pointers (see driver-main /
 ; DumpCtx), so this module carries no LLVM dependency.
@@ -865,6 +878,18 @@
     ; look like the compiler had panicked, and any CI reporting on signals agreed.
     (if (icmp-eq (cast i64 (load outp)) 0)
         (do (ps (stderr) "error: build: missing -o <out>\n") (exit 1) 0)
+      0)
+    ; `-o /dev/null` is the classic "just tell me if it compiles" idiom. There is no
+    ; writable object destination, and handing it to codegen abends with a bare
+    ; `LLVMTargetMachineEmitToFile ... Operation not permitted` (SIGABRT). Route it to the
+    ; compile-check path instead — the full front-end, no object, located errors, exit 0
+    ; on success — and `exit` before the pipeline/link machinery ever runs. (diag-12)
+    (if (str-eq (cstr->slice (load outp)) "/dev/null")
+        (do (ps (stderr) "note: -o /dev/null: compile-check only, no object written\n")
+            (set-target-arch! (load trip))
+            (set-meta-link-flags! (filter-meta-link-flags a (load flags)))
+            (exit (cast i32 (if (icmp-eq (run-dump-on-big-stack a (read-src a file) (cwd-slice a) (cstr->slice file) (fnptr-of check-src-program)) 0) 1 0)))
+            0)
       0)
     ; --sanitize=address needs the LLVM backend (the native arm64 backend emits
     ; Mach-O directly, with no instrumentation pass) — reject the combination loudly
@@ -1491,6 +1516,14 @@
             (if (str-eq arg "--backend")
                 (do (if (str-eq (cstr->slice (load (index argv (iadd (load i) 1)))) "arm64") (store! backend 2) (store! backend 1)) (store! i (iadd (load i) 2)) 0)
               (do (store! i (iadd (load i) 1)) 0)))))))
+    ; `emit-obj -o /dev/null`: no writable object destination — route to compile-check
+    ; rather than abending in codegen. (diag-12)
+    (if (and (icmp-ne (cast i64 (load outp)) 0) (str-eq (cstr->slice (load outp)) "/dev/null"))
+        (do (ps (stderr) "note: -o /dev/null: compile-check only, no object written\n")
+            (set-target-arch! (load trip))
+            (exit (cast i32 (if (icmp-eq (run-dump-on-big-stack a (read-src a file) (cwd-slice a) (cstr->slice file) (fnptr-of check-src-program)) 0) 1 0)))
+            0)
+      0)
     (let [out-slice (if (icmp-eq (cast i64 (load outp)) 0) (obj-path a (cstr->slice file)) (cstr->slice (load outp)))
           obj-cstr  (slice->cstr a out-slice)
           ctx       (alloc-stack DumpCtx)]
@@ -1767,6 +1800,7 @@ Build & run
   run                                      build+run the ./Coil.toml project
   build <file.coil> -o <out> [flags]       build a native executable
   build                                    build the ./Coil.toml project
+  check <file.coil> [flags]                typecheck/compile only — no object, exit 0 if it compiles
   test  <file.coil> [flags]                run every (deftest …) in a forked child
   new   <name>                             scaffold Coil.toml + src/main.coil
   repl                                     interactive session
@@ -1855,6 +1889,12 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
             (ps w "  --write     rewrite each file in place\n")
             (ps w "  --check     exit 1 if any file is not formatted\n\n")
             (ps w "Every file given is formatted. Exit: 0 clean, 1 unformatted, 2 error.\n") 0)
+      (str-eq sub "check")
+        (do (ps w "usage: coil check <file.coil> [flags]\n\n")
+            (ps w "Runs the full front-end (typecheck + monomorphize) WITHOUT emitting an object\n")
+            (ps w "or linking. Exit: 0 if it compiles, 1 with a located diagnostic if not.\n")
+            (ps w "`build -o /dev/null` routes here too.\n\n")
+            (ps w (common-flags-text)) 0)
       (str-eq sub "new")
         (do (ps w "usage: coil new <name>\n\nScaffolds <name>/Coil.toml and <name>/src/main.coil.\n") 0)
       (str-eq sub "emit-obj")
@@ -1919,6 +1959,12 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
             (cheader-cmd a argc argv)
         (if (str-eq sub "build")
             (if (manifest-mode? argc argv) (manifest-cmd a "build" argc argv) (build-cmd a argc argv build-fn emitir-fn default-backend))
+         ; `check <file>`: typecheck/compile through mono, emit NO object. Exit 0 on a
+         ; clean compile, 1 with a located diagnostic on failure. (diag-12)
+         (if (str-eq sub "check")
+             (let [path (need-file argc argv sub)]
+               (set-target-arch! (argv-triple argc argv))
+               (if (icmp-eq (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of check-src-program)) 0) 1 0))
          (if (str-eq sub "dump-read")
              (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-read-w)))
           (if (str-eq sub "dump-ast")
@@ -1961,5 +2007,5 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
             (store! (field ctx emitir-fn) emitir-fn)
             ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
             ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
-            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0))))))))))))))))))))))))))
+            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))))))))))))))))
   );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====

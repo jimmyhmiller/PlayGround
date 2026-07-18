@@ -58,6 +58,29 @@ expect_out "unknown flag" "unknown flag is named"        "$COIL" build "$T/seven
 expect_rc 1 "missing -o exits 1 (not SIGABRT)"           "$COIL" build "$T/seven.coil"
 expect_rc 1 "bogus --target is rejected"                 "$COIL" build "$T/seven.coil" -o "$T/c" --target not-a-real-triple
 
+echo "== check mode: typecheck/compile with no object (diag-12) =="
+# `build -o /dev/null` USED to SIGABRT with a bare 'LLVMTargetMachineEmitToFile ...
+# Operation not permitted' (exit 134) because /dev is unwritable. It now routes to the
+# compile-check path: full front-end, no object emitted, real exit codes. FAILS on the
+# seed (SIGABRT 134, and no `check` command at all).
+printf '(defn main [] (-> i64) (bad-fn 3))\n' > "$T/broken.coil"
+expect_rc 0 "build -o /dev/null on a good program exits 0 (was SIGABRT 134)"  "$COIL" build "$T/seven.coil"  -o /dev/null
+expect_rc 1 "build -o /dev/null on a broken program exits 1"                  "$COIL" build "$T/broken.coil" -o /dev/null
+expect_out "undefined function 'bad-fn'" "build -o /dev/null reports a LOCATED error, not an LLVM abort" \
+  "$COIL" build "$T/broken.coil" -o /dev/null
+expect_rc 0 "check: a good program exits 0"              "$COIL" check "$T/seven.coil"
+expect_rc 1 "check: a broken program exits 1"            "$COIL" check "$T/broken.coil"
+expect_out "undefined function 'bad-fn'" "check names the located error"      "$COIL" check "$T/broken.coil"
+# check emits NO object: the .o path must not appear.
+"$COIL" check "$T/seven.coil" >/dev/null 2>&1
+[ ! -e "$T/seven.o" ] && ok "check writes no object file" || bad "check writes no object" "$T/seven.o exists"
+# A genuinely non-writable -o is a CLEAR error + exit 1, not a SIGABRT.
+expect_rc 1 "build -o into a read-only location is a clear error, not SIGABRT" \
+  "$COIL" build "$T/seven.coil" -o /System/nope
+expect_out "could not write object file" "non-writable -o names the path + a remedy" \
+  "$COIL" build "$T/seven.coil" -o /System/nope
+expect_out "usage: coil check" "check --help documents itself"                "$COIL" check --help
+
 echo "== fmt formats EVERY file it is given =="
 out=$("$COIL" fmt --check "$T/messy1.coil" "$T/messy2.coil" 2>&1)
 n=$(echo "$out" | grep -c "not formatted")

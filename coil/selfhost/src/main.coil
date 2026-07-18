@@ -85,10 +85,17 @@
         0)
       (let [emiterr (alloc-stack (ptr i8))
             rc      (LLVMTargetMachineEmitToFile tm m obj-cstr 1 emiterr)]
+        ; A non-writable object destination (e.g. a read-only dir, or `-o /dev/null`
+        ; whose `.o` lands in unwritable `/dev`) used to SIGABRT here with a bare
+        ; `Operation not permitted`, naming neither the path nor a remedy. Report a clear
+        ; located error and exit 1 — a usage mistake, not a compiler panic. `-o /dev/null`
+        ; itself is intercepted earlier and routed to `check` (diag-12).
         (if (icmp-ne rc 0)
-            (do (ps (stderr) "codegen: LLVMTargetMachineEmitToFile failed: ")
-                (ps (stderr) (cstr->slice (load emiterr)))
-                (wb (stderr) 10) (abort) 0)
+            (let [w (stderr)]
+              (ps w "error: could not write object file '") (ps w (cstr->slice obj-cstr)) (ps w "': ")
+              (ps w (cstr->slice (load emiterr))) (wb w 10)
+              (ps w "  the output path is not writable — give `-o` a writable path, or use `coil check <file>` to typecheck without emitting an object\n")
+              (exit 1) 0)
           0))
       0)))
 
