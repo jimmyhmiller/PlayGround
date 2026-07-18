@@ -805,17 +805,24 @@
 (extend-type TransientArrayMap
   ITransientCollection
   (-conj! [c e]
-    ;; an entry is usually a [k v] vector; any 2-element seqable (a sorted
-    ;; map's entry records, a lazy pair) conjs the same way, as in Clojure
-    (if (vector? e) (%tam-assoc! c (%pv-nth e 0) (%pv-nth e 1))
-        (%tam-assoc! c (first e) (second e))))
+    ;; TransientMap.conj's real contract: a [k v] vector or entry adds one
+    ;; pair; a MAP merges every entry (tools.analyzer's merge' is
+    ;; (reduce conj! (transient m) maps)); any other 2-element seqable adds
+    ;; its pair. Each assoc! may PROMOTE (array-map → hash-map), so the
+    ;; merge threads the returned collection.
+    (cond
+      (vector? e) (%tam-assoc! c (%pv-nth e 0) (%pv-nth e 1))
+      (map? e) (reduce (fn [cc kv] (-assoc! cc (%pv-nth kv 0) (%pv-nth kv 1))) c (seq e))
+      :else (%tam-assoc! c (first e) (second e))))
   (-persistent! [c] (%tam-persistent! c))
   ITransientAssociative (-assoc! [c k v] (%tam-assoc! c k v)))
 (extend-type TransientHashMap
   ITransientCollection
   (-conj! [c e]
-    (if (vector? e) (%thm-assoc! c (%pv-nth e 0) (%pv-nth e 1))
-        (%thm-assoc! c (first e) (second e))))
+    (cond
+      (vector? e) (%thm-assoc! c (%pv-nth e 0) (%pv-nth e 1))
+      (map? e) (reduce (fn [cc kv] (-assoc! cc (%pv-nth kv 0) (%pv-nth kv 1))) c (seq e))
+      :else (%thm-assoc! c (first e) (second e))))
   (-persistent! [c] (%thm-persistent! c))
   ITransientAssociative (-assoc! [c k v] (%thm-assoc! c k v)))
 (extend-type TransientHashSet

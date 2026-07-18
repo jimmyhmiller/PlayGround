@@ -320,10 +320,16 @@
   (loop [ns (%all-ns) acc nil]
     (if (nil? ns) (-rev acc) (recur (%rest ns) (%cons (record 'Namespace (%first ns)) acc)))))
 (defn find-ns [s]
-  (loop [all (%all-ns)]
-    (if (nil? all)
-      nil
-      (if (= (%first all) s) (record 'Namespace s) (recur (%rest all))))))
+  ;; The CURRENT namespace exists even before anything is interned in it —
+  ;; %all-ns enumerates namespaces by their DEFS, and a fresh `user` (or a
+  ;; just-entered ns) has none. tools.analyzer does (the-ns (ns-name *ns*))
+  ;; from exactly such a namespace.
+  (if (= s (%current-ns))
+    (record 'Namespace s)
+    (loop [all (%all-ns)]
+      (if (nil? all)
+        nil
+        (if (= (%first all) s) (record 'Namespace s) (recur (%rest all)))))))
 (defn the-ns [x]
   (cond (%num-eq (type-of x) 'Namespace) x
         (symbol? x) (or (find-ns x) (throw (str "No namespace: " x " found")))

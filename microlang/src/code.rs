@@ -575,9 +575,13 @@ fn eval_tail<M: ValueModel>(
             let ty = rt.type_tag(argv[0]);
             let imp = rt.resolve_or_default(*site, *method, ty).unwrap_or_else(|| {
                 panic!(
-                    "no method '{}' for type '{}'",
+                    "no method '{}' for type '{}' (receiver: {})",
                     rt.sym_name(*method),
-                    rt.sym_name(ty)
+                    rt.sym_name(ty),
+                    {
+                        let s = rt.print(argv[0]);
+                        if s.len() > 300 { format!("{}…", &s[..300]) } else { s }
+                    }
                 )
             });
             Bounce::Tail(imp, argv)
