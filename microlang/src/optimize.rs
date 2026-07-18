@@ -41,9 +41,10 @@ fn const_is_fixnum<M: ValueModel>(rt: &Runtime<M>, id: u32) -> bool {
         && matches!(rt.decode(rt.get_const(id)), Val::Int(v) if (FIX_MIN..=FIX_MAX).contains(&v))
 }
 
-/// Debug-only child accessor (used by the JIT's `MICROLANG_DUMP_IR` fingerprint).
-#[doc(hidden)]
-pub fn dbg_children(ir: &Ir) -> Vec<&Ir> {
+/// Public re-export of the immediate-children spine, for the JIT's Ir analyses
+/// (unboxed-loop safety scan, `MICROLANG_DUMP_IR` fingerprint) so it does not
+/// duplicate the match. Does NOT descend — callers recurse.
+pub fn ir_children(ir: &Ir) -> Vec<&Ir> {
     children(ir)
 }
 

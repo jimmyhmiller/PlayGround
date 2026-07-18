@@ -1620,6 +1620,120 @@ fn body_pure_loop(ir: &Ir, tail: bool) -> bool {
     }
 }
 
+/// Can this self-tail loop carry its params UNTAGGED across the back-edge
+/// (Phase 2 — the untagged-loop-variable pass)? The caller has already checked
+/// the loop SHAPE (self-tail, non-variadic, SSA mode) and that there are no
+/// let/catch slots (`nslots == nparams`), so the only body forms are the params
+/// themselves and the recur. This is a PROFITABILITY + assignment-safety gate,
+/// not a per-use type proof: correctness of every USE is handled at emit time
+/// (`compile_int` retags an escaping read and DEOPTS a non-fixnum recur arg or
+/// an overflow to the tagged generic arm). We only need to know (a) no `set!`
+/// mutates a carried slot — the untagged copy is redefined solely at the recur
+/// — and (b) some param actually feeds arithmetic, else unboxing would add
+/// retag-on-read cost for no untag/spill saving. Nested `Lambda` bodies are
+/// ignored (they compile separately).
+fn loop_unboxable(ir: &Ir, nparams: usize) -> Vec<bool> {
+    if !pure_arith_loop(ir, true) {
+        return vec![false; nparams];
+    }
+    // A param is unboxed iff it feeds arithmetic AND is never used as a call
+    // callee. The second clause is what keeps the loop's self-param `g`
+    // (`(g g …)` — a ref, the recur target) tagged: it is the callee, so it is
+    // excluded even though it appears as a `Call` argument too.
+    let mut arith = vec![false; nparams];
+    let mut callee = vec![false; nparams];
+    scan_unbox(ir, nparams, &mut arith, &mut callee);
+    (0..nparams).map(|i| arith[i] && !callee[i]).collect()
+}
+
+/// Mark, for each of the loop's `nparams` params: `arith[i]` if `Local{0,i}` is
+/// a direct operand of an arithmetic/comparison prim; `callee[i]` if it is the
+/// callee `f` of a `Call` (the recur target). Does not descend into a nested
+/// `Lambda`. `up == 0` names our params throughout — a `pure_arith_loop` has no
+/// binding forms to shift the depth.
+fn scan_unbox(ir: &Ir, nparams: usize, arith: &mut [bool], callee: &mut [bool]) {
+    match ir {
+        Ir::Prim(op, args) if is_unbox_arith(*op) => {
+            for a in args {
+                if let Ir::Local { up: 0, idx } = a {
+                    if (*idx as usize) < nparams {
+                        arith[*idx as usize] = true;
+                    }
+                }
+                scan_unbox(a, nparams, arith, callee);
+            }
+        }
+        Ir::Call(f, args) => {
+            if let Ir::Local { up: 0, idx } = f.as_ref() {
+                if (*idx as usize) < nparams {
+                    callee[*idx as usize] = true;
+                }
+            }
+            scan_unbox(f, nparams, arith, callee);
+            for a in args {
+                scan_unbox(a, nparams, arith, callee);
+            }
+        }
+        Ir::Lambda { .. } => {}
+        _ => {
+            for c in crate::optimize::ir_children(ir) {
+                scan_unbox(c, nparams, arith, callee);
+            }
+        }
+    }
+}
+
+/// Is `ir` (in tail position `tail`) a PURE ARITHMETIC self-tail loop — built
+/// only from arithmetic/comparison prims, `if`/`do`, immediate reads, and the
+/// tail self-recur? This is the soundness gate for the untagged carry's DEOPT:
+/// a deopt re-runs the whole iteration on the generic arm, so the iteration
+/// must be free of OBSERVABLE side effects (no I/O, no mutation, no allocation
+/// whose identity matters) and re-executable. Everything here is a pure value
+/// computation, so re-running produces the identical result — the deopt is
+/// invisible. Deliberately narrow (no calls except the recur, no dispatch, no
+/// alloc/collection prims, no `set!`): a loop whose recur args are themselves
+/// calls (`(recur (inc i) (add3 acc i))`) is left to the tagged path until a
+/// deopt-without-re-execution scheme (Phase 3) makes side effects safe.
+fn pure_arith_loop(ir: &Ir, tail: bool) -> bool {
+    match ir {
+        Ir::Const(_) | Ir::Quote(_) | Ir::Local { up: 0, .. } | Ir::Capture(_) | Ir::Global(_) => {
+            true
+        }
+        // Arithmetic / comparison / bitwise / `nil?` — pure, re-runnable.
+        Ir::Prim(op, args) if is_unbox_arith(*op) || matches!(op, Prim::IsNil | Prim::Identical) => {
+            args.iter().all(|a| pure_arith_loop(a, false))
+        }
+        Ir::If(c, t, e) => {
+            pure_arith_loop(c, false) && pure_arith_loop(t, tail) && pure_arith_loop(e, tail)
+        }
+        Ir::Do(xs) => match xs.split_last() {
+            None => true,
+            Some((last, init)) => {
+                init.iter().all(|x| pure_arith_loop(x, false)) && pure_arith_loop(last, tail)
+            }
+        },
+        // The self-recur: a tail Call to a simple callee with pure args. A
+        // non-tail call, or any call outside this shape, is rejected below.
+        Ir::Call(f, args) => {
+            tail
+                && matches!(f.as_ref(), Ir::Global(_) | Ir::Local { .. } | Ir::Capture(_))
+                && args.iter().all(|a| pure_arith_loop(a, false))
+        }
+        _ => false,
+    }
+}
+
+/// The prims `compile_int` lowers to bare untagged machine ops (with an
+/// overflow / divide-by-zero deopt where the tower can promote). Anything else
+/// in an int position takes the retag-guard-deopt fallback.
+fn is_unbox_arith(op: Prim) -> bool {
+    matches!(
+        op,
+        Prim::Add | Prim::Sub | Prim::Mul | Prim::Lt | Prim::Eq
+            | Prim::Quot | Prim::Rem | Prim::BitAnd | Prim::BitOr | Prim::BitXor
+    )
+}
+
 /// MEMORY mode? True iff the body (not descending into nested `Lambda` bodies —
 /// those compile separately) contains a construct whose locals must be visible
 /// outside the compiled code: `try` (the interpreter runs the catch against the
@@ -2655,7 +2769,7 @@ impl<M: ModelArithJit> JitCranelift<M> {
                 if let Ir::Prim(p, _) = ir {
                     match p { Prim::Add => *add += 1, Prim::Lt => *lt += 1, _ => {} }
                 }
-                for c in crate::optimize::dbg_children(ir) { cnt(c, add, lt, tot); }
+                for c in crate::optimize::ir_children(ir) { cnt(c, add, lt, tot); }
             }
             let (mut a, mut l, mut t) = (0, 0, 0);
             cnt(ir, &mut a, &mut l, &mut t);
@@ -3662,6 +3776,7 @@ fn build_body<M: ModelArithJit>(
         rc_val,
         feedback: shape.feedback,
         hot_cell: shape.hot_cell,
+        unbox: None,
     };
 
     // The RUNNING CLOSURE's bits, read ONCE into a tracked variable (Stage
@@ -3724,6 +3839,32 @@ fn build_body<M: ModelArithJit>(
     // per loop iteration. `emit_hotness_bump` is a no-op unless a counter was
     // armed (`compiled_body` / `reoptimize`).
     c.emit_hotness_bump(1);
+
+    // UNTAGGED LOOP CARRY (Phase 2): a PURE-ARITHMETIC self-tail loop whose
+    // params are fixnums carries them in raw registers instead of tagged,
+    // stack-mapped words — killing the per-iteration untag/retag AND the spill
+    // that stack-mapping forces (the measured raw-loop cost). It compiles the
+    // body as a guarded pair of arms (see `build_unboxed_loop`), so it emits
+    // its own returns; nothing more to do here. `nslots == nparams` keeps the
+    // deopt simple (no let/catch slots to reconcile between the arms); the
+    // model must have immediate ints (NaN-boxing has none, so it never applies).
+    let unbox_mask = if !shape.mem_mode
+        && shape.tail_root
+        && !shape.variadic
+        && shape.nparams > 0
+        && shape.nslots as usize == shape.nparams
+        && has_tail_call(ir)
+        && M::R::is_immediate(crate::value::Cat::Int)
+        && std::env::var_os("MICROLANG_NO_UNBOX").is_none()
+    {
+        loop_unboxable(ir, shape.nparams)
+    } else {
+        vec![false; shape.nparams]
+    };
+    if unbox_mask.iter().any(|&b| b) {
+        c.build_unboxed_loop::<M>(ir, shape.nparams, shape.tail_root, unbox_mask);
+        return;
+    }
 
     // A self-tail-recursive SSA body gets a loop header: a tail call to the same
     // closure redefines the param variables in place and branches here (an
@@ -3846,6 +3987,40 @@ pub struct Compiler<'a, 'b> {
     /// Adaptive tier: this body's leaked hotness counter address (baked into the
     /// prologue + back-edge bumps), or `null` for a body that is never reopted.
     hot_cell: *const u32,
+    /// UNTAGGED LOOP CARRY (Phase 2). While compiling the UNBOXED arm of a
+    /// self-tail loop, this is `Some`: the loop's params are carried in
+    /// `raw_vars` as bare signed i64s (NOT stack-mapped — an int is never a GC
+    /// root, which is the whole reason this is sound across the back-edge poll),
+    /// so a pure-arithmetic loop keeps its counters in registers with no
+    /// per-iteration untag/retag and no spill/reload. Reads that ESCAPE (return,
+    /// call/dispatch arg, heap store) retag on demand; arithmetic reads take the
+    /// raw value straight (`compile_int`). An overflow or a non-fixnum recur arg
+    /// DEOPTS to `unbox_deopt`'s generic (tagged, stack-mapped) loop, which
+    /// re-runs the iteration with the promoting numeric tower. `None` = the
+    /// ordinary tagged codegen (the generic arm, and every non-loop body).
+    unbox: Option<UnboxLoop>,
+}
+
+/// The live state of the unboxed self-tail loop arm (see `Compiler::unbox`).
+struct UnboxLoop {
+    /// Per param slot: is this one carried UNTAGGED? A `loop` desugars to a
+    /// self-parameterized fn `(fn [g i acc] … (g g i' acc'))` — param 0 is the
+    /// loop fn `g` itself (a REF, the recur callee), never a fixnum — so only
+    /// the numeric params (used arithmetically, never as the callee) are
+    /// unboxed; `g` stays tagged in `gen_vars`. Getting this wrong (unboxing
+    /// `g`) makes the entry guard test a ref for fixnum-ness and the whole
+    /// unboxed arm becomes dead — the bug this mask exists to prevent.
+    unbox: Vec<bool>,
+    /// Per param slot: the raw (untagged, signed-i64, NOT stack-mapped)
+    /// Cranelift variable holding the counter — valid only where `unbox[i]`.
+    raw_vars: Vec<cranelift_frontend::Variable>,
+    /// The GENERIC arm's loop header and its tagged, stack-mapped param vars
+    /// (the same `Compiler::vars`, which also carry the non-unboxed params like
+    /// `g` in BOTH arms). A deopt retags every unboxed counter into `gen_vars`
+    /// and branches here, so the generic body restarts THIS iteration under the
+    /// full numeric tower.
+    deopt_header: cranelift_codegen::ir::Block,
+    gen_vars: Vec<cranelift_frontend::Variable>,
 }
 
 /// Self-tail back-edges poll every N iterations. Time-to-safepoint for a
@@ -3898,7 +4073,18 @@ impl<'a, 'b> Compiler<'a, 'b> {
     /// root into a fresh, declared SSA value (a real instruction, so the
     /// safepoint pass can demote the copy in isolation).
     fn spill_roots(&mut self) -> (Vec<cranelift_frontend::Variable>, Vec<Value>) {
-        let mut roots: Vec<cranelift_frontend::Variable> = self.vars.clone();
+        // In the UNBOXED loop arm the UNBOXED counters live in `raw_vars` —
+        // untagged ints, never GC roots — so they need no spilling at a
+        // safepoint, which is what keeps them in registers. The NON-unboxed
+        // params (the self-ref `g`, any ref counter) DO carry heap refs and
+        // must still be rooted, so those `vars` stay in the set.
+        let mut roots: Vec<cranelift_frontend::Variable> = match &self.unbox {
+            Some(ub) => (0..self.vars.len())
+                .filter(|&i| i >= ub.unbox.len() || !ub.unbox[i])
+                .map(|i| self.vars[i])
+                .collect(),
+            None => self.vars.clone(),
+        };
         for outer in &self.inline_outer_vars {
             roots.extend_from_slice(outer);
         }
@@ -4875,7 +5061,19 @@ impl<'a, 'b> Compiler<'a, 'b> {
             // reads the register variable; memory mode loads the frame slot.
             Ir::Local { up, idx } => {
                 assert_eq!(*up, 0, "unflattened Ir reached the JIT: Local up={up}");
-                if self.mem_mode {
+                if let Some(ub) = &self.unbox {
+                    if ub.unbox[*idx as usize] {
+                        // Unboxed slot: an ESCAPING read (return value, or a
+                        // call/heap arg) retags the counter's register to a
+                        // tagged fixnum. Arithmetic reads never land here — they
+                        // go through `compile_int` and take the raw value.
+                        let raw = self.fb.use_var(ub.raw_vars[*idx as usize]);
+                        M::emit_tag(self, raw)
+                    } else {
+                        // A non-unboxed param (`g`, refs): ordinary tagged read.
+                        self.fb.use_var(self.vars[*idx as usize])
+                    }
+                } else if self.mem_mode {
                     self.emit_local0_load(*idx)
                 } else {
                     self.fb.use_var(self.vars[*idx as usize])
@@ -5136,6 +5334,68 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     }
                 }
                 let callee = self.compile::<M>(f, false);
+                // Phase 2 — UNTAGGED self-tail recur: redefine the raw counter
+                // registers directly with bare `compile_int` args (no tagged
+                // intermediates, no untag/retag). Placed before the tagged
+                // `argvals` so the unboxed arm never emits the tagged arithmetic
+                // at all. The self-check + notself trampoline bounce mirror the
+                // tagged path below (a `loop` recur is always self, so the
+                // bounce is cold; it retags for the generic trampoline).
+                if tail {
+                    if let Some(header) = self.loop_header {
+                        if self.unbox.is_some() && args.len() == self.loop_nparams {
+                            // Each recur arg lands in an unboxed slot as a RAW
+                            // int (`compile_int`) or in a tagged slot (`g`, refs)
+                            // as ordinary bits. Both arg forms are computed once,
+                            // before the self-check, so the notself trampoline
+                            // bounce can reuse them (retagging the raw ones).
+                            let mask = self.unbox.as_ref().unwrap().unbox.clone();
+                            let mut raw_args: Vec<Option<Value>> = Vec::with_capacity(args.len());
+                            let mut tagged_args: Vec<Value> = Vec::with_capacity(args.len());
+                            for (i, a) in args.iter().enumerate() {
+                                if mask[i] {
+                                    let r = self.compile_int::<M>(a);
+                                    raw_args.push(Some(r));
+                                    tagged_args.push(M::emit_tag(self, r));
+                                } else {
+                                    let t = self.compile::<M>(a, false);
+                                    raw_args.push(None);
+                                    tagged_args.push(t);
+                                }
+                            }
+                            let sc = self.fb.use_var(self.self_var);
+                            self.fb.declare_value_needs_stack_map(sc);
+                            let is_self = self.fb.ins().icmp(IntCC::Equal, callee, sc);
+                            let selfloop = self.fb.create_block();
+                            let notself = self.cold_block();
+                            self.fb.ins().brif(is_self, selfloop, &[], notself, &[]);
+
+                            self.fb.switch_to_block(selfloop);
+                            self.fb.seal_block(selfloop);
+                            let (raw_vars, gen_vars) = {
+                                let ub = self.unbox.as_ref().unwrap();
+                                (ub.raw_vars.clone(), ub.gen_vars.clone())
+                            };
+                            for (i, r) in raw_args.iter().enumerate() {
+                                match r {
+                                    Some(rv) => self.fb.def_var(raw_vars[i], *rv),
+                                    None => self.fb.def_var(gen_vars[i], tagged_args[i]),
+                                }
+                            }
+                            self.emit_backedge_poll();
+                            self.fb.ins().jump(header, &[]);
+
+                            self.fb.switch_to_block(notself);
+                            self.fb.seal_block(notself);
+                            let ctx = self.ctx_val;
+                            let (addr, count) = self.spill_args(&tagged_args);
+                            return self.call_shim_fenced(
+                                self.refs.tail_call,
+                                &[ctx, callee, addr, count],
+                            );
+                        }
+                    }
+                }
                 let argvals: Vec<Value> =
                     args.iter().map(|a| self.compile::<M>(a, false)).collect();
                 if tail {
@@ -6411,6 +6671,20 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 };
                 self.fb.ins().brif(c, then_b, &[], else_b, &[]);
             }
+            // Phase 2 — inside the UNBOXED loop arm, `(< i n)` / `(= i n)` is a
+            // BARE untagged compare: both operands come from `compile_int`
+            // (raw registers / raw consts), so there is no fixnum guard, no
+            // untag, and no boolean — one `cmp` + branch, the theoretical
+            // minimum. A non-fixnum operand would already have deopted the loop.
+            Ir::Prim(op @ (Prim::Lt | Prim::Eq), cargs)
+                if cargs.len() == 2 && self.unbox.is_some() =>
+            {
+                let x = self.compile_int::<M>(&cargs[0]);
+                let y = self.compile_int::<M>(&cargs[1]);
+                let cc = if matches!(op, Prim::Eq) { IntCC::Equal } else { IntCC::SignedLessThan };
+                let c = self.fb.ins().icmp(cc, x, y);
+                self.fb.ins().brif(c, then_b, &[], else_b, &[]);
+            }
             // `(if (< a b) …)` / `(if (= a b) …)`: branch on the COMPARISON.
             Ir::Prim(op @ (Prim::Lt | Prim::Eq), cargs) if cargs.len() == 2 => {
                 let a = self.compile::<M>(&cargs[0], false);
@@ -6633,6 +6907,258 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let tagged = M::emit_tag(self, r);
         self.fb.def_var(result, tagged);
         self.fb.ins().jump(merge, &[]);
+    }
+
+    // ── Untagged loop carry (Phase 2) ────────────────────────────────────
+    // These run only inside the UNBOXED arm of a self-tail loop (`self.unbox`
+    // is `Some`); see the `UnboxLoop` doc and `build_body`'s loop orchestration.
+
+    /// Compile `ir` to a BARE untagged signed-i64 value (the dual of `compile`,
+    /// which yields tagged bits). Arithmetic stays in the raw domain end to
+    /// end, so a carried counter never untags/retags per op and never leaves a
+    /// register. Overflow past fixnum range, or a value that isn't a fixnum,
+    /// DEOPTS to the tagged generic arm (`emit_unbox_deopt`), which re-runs the
+    /// iteration under the promoting numeric tower. Sound because the loop was
+    /// gated `pure_arith_loop`, so re-running the iteration is side-effect-free.
+    fn compile_int<M: ModelArithJit>(&mut self, ir: &Ir) -> Value {
+        match ir {
+            // A carried param: if it is one of the UNBOXED slots its register
+            // already holds the untagged value; a non-unboxed param (the
+            // self-ref `g`, or any ref counter) takes the tagged fallback,
+            // which deopts unless it happens to be a fixnum.
+            Ir::Local { up: 0, idx } => {
+                let ub = self.unbox.as_ref().expect("compile_int outside unboxed loop");
+                if ub.unbox[*idx as usize] {
+                    let v = ub.raw_vars[*idx as usize];
+                    self.fb.use_var(v)
+                } else {
+                    self.compile_int_fallback::<M>(ir)
+                }
+            }
+            // A fixnum literal: bake its untagged value. (A non-fixnum constant
+            // falls through to the tagged fallback, which deopts — but the
+            // `pure_arith_loop` gate means that only happens for a numeric
+            // tower value the fast path genuinely cannot hold.)
+            Ir::Const(id) | Ir::Quote(id) if !self.rt_ptr.is_null() => {
+                let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                match rt.decode(rt.const_bits(*id)) {
+                    crate::value::Val::Int(v)
+                        if (FIXNUM_MIN as i128..=FIXNUM_MAX as i128).contains(&v) =>
+                    {
+                        self.iconst_signed(v as i64)
+                    }
+                    _ => self.compile_int_fallback::<M>(ir),
+                }
+            }
+            Ir::Prim(op @ (Prim::Add | Prim::Sub), args) if args.len() == 2 => {
+                let x = self.compile_int::<M>(&args[0]);
+                let y = self.compile_int::<M>(&args[1]);
+                // Operands are in fixnum range (≤ 2^60), so the i64 op cannot
+                // wrap i64; only the fixnum-range check can fail → deopt.
+                let r = if matches!(op, Prim::Add) {
+                    self.fb.ins().iadd(x, y)
+                } else {
+                    self.fb.ins().isub(x, y)
+                };
+                self.emit_int_range_or_deopt::<M>(r)
+            }
+            Ir::Prim(Prim::Mul, args) if args.len() == 2 => {
+                let x = self.compile_int::<M>(&args[0]);
+                let y = self.compile_int::<M>(&args[1]);
+                // The product of two 61-bit values can exceed i64 — widen, check
+                // fixnum range in i128, narrow (mirrors `emit_guarded_arith`).
+                let x128 = self.fb.ins().sextend(I128, x);
+                let y128 = self.fb.ins().sextend(I128, y);
+                let r128 = self.fb.ins().imul(x128, y128);
+                // Build the i128 range bounds by SIGN-EXTENDING i64 consts — a
+                // direct `iconst(I128, …)` trips Cranelift's egraph (`ty_smin`
+                // "unimplemented for > 64 bits"), which is why `emit_guarded_arith`
+                // uses this same shape.
+                let min64 = self.iconst_signed(FIXNUM_MIN);
+                let max64 = self.iconst_signed(FIXNUM_MAX);
+                let min = self.fb.ins().sextend(I128, min64);
+                let max = self.fb.ins().sextend(I128, max64);
+                let ge = self.fb.ins().icmp(IntCC::SignedGreaterThanOrEqual, r128, min);
+                let le = self.fb.ins().icmp(IntCC::SignedLessThanOrEqual, r128, max);
+                let fits = self.fb.ins().band(ge, le);
+                self.deopt_unless::<M>(fits);
+                self.fb.ins().ireduce(I64, r128)
+            }
+            Ir::Prim(op @ (Prim::BitAnd | Prim::BitOr | Prim::BitXor), args) if args.len() == 2 => {
+                // Fixnum range is closed under and/or/xor — no range check.
+                let x = self.compile_int::<M>(&args[0]);
+                let y = self.compile_int::<M>(&args[1]);
+                match op {
+                    Prim::BitAnd => self.fb.ins().band(x, y),
+                    Prim::BitOr => self.fb.ins().bor(x, y),
+                    _ => self.fb.ins().bxor(x, y),
+                }
+            }
+            Ir::Prim(op @ (Prim::Quot | Prim::Rem), args) if args.len() == 2 => {
+                let x = self.compile_int::<M>(&args[0]);
+                let y = self.compile_int::<M>(&args[1]);
+                // A zero divisor deopts (the generic arm raises the divide-by-
+                // zero); it also keeps a trapping sdiv/srem off a zero. `quot`'s
+                // only out-of-range case (`FIXNUM_MIN / -1`) range-checks.
+                let nz = self.fb.ins().icmp_imm(IntCC::NotEqual, y, 0);
+                self.deopt_unless::<M>(nz);
+                if matches!(op, Prim::Rem) {
+                    self.fb.ins().srem(x, y)
+                } else {
+                    let q = self.fb.ins().sdiv(x, y);
+                    self.emit_int_range_or_deopt::<M>(q)
+                }
+            }
+            // Anything else in an int position: compile it tagged, prove it is a
+            // fixnum (else deopt), untag. Reachable only for pure values under
+            // the `pure_arith_loop` gate, so the deopt is re-execution-safe.
+            _ => self.compile_int_fallback::<M>(ir),
+        }
+    }
+
+    fn compile_int_fallback<M: ModelArithJit>(&mut self, ir: &Ir) -> Value {
+        let v = self.compile::<M>(ir, false);
+        let is_fix = self.emit_all_fixnum_raw::<M>(&[v]);
+        self.deopt_unless::<M>(is_fix);
+        M::emit_untag(self, v)
+    }
+
+    /// `r` (a raw i64) must be in fixnum range; if not, DEOPT. Returns `r`
+    /// unchanged on the in-range (fallthrough) path.
+    fn emit_int_range_or_deopt<M: ModelArithJit>(&mut self, r: Value) -> Value {
+        let ge = self.fb.ins().icmp_imm(IntCC::SignedGreaterThanOrEqual, r, FIXNUM_MIN);
+        let le = self.fb.ins().icmp_imm(IntCC::SignedLessThanOrEqual, r, FIXNUM_MAX);
+        let fits = self.fb.ins().band(ge, le);
+        self.deopt_unless::<M>(fits);
+        r
+    }
+
+    /// Branch to a COLD deopt block when `cond` (an i8 bool) is false; continue
+    /// straight-line when true. The deopt retags every carried counter into the
+    /// generic arm's tagged vars and restarts the iteration there.
+    fn deopt_unless<M: ModelArithJit>(&mut self, cond: Value) {
+        let ok = self.fb.create_block();
+        let deopt = self.cold_block();
+        self.fb.ins().brif(cond, ok, &[], deopt, &[]);
+        self.fb.switch_to_block(deopt);
+        self.fb.seal_block(deopt);
+        self.emit_unbox_deopt::<M>();
+        self.fb.switch_to_block(ok);
+        self.fb.seal_block(ok);
+    }
+
+    /// Emit the deopt transfer: retag each carried counter (still holding this
+    /// iteration's START value — the recur redefines the raw vars only after
+    /// every arg is computed) into the generic arm's tagged var, then branch to
+    /// the generic loop header. The generic body re-runs the iteration with the
+    /// promoting tower. Terminates the current block.
+    fn emit_unbox_deopt<M: ModelArithJit>(&mut self) {
+        let (header, mask, raw, gen): (Block, Vec<bool>, Vec<_>, Vec<_>) = {
+            let ub = self.unbox.as_ref().expect("emit_unbox_deopt outside unboxed loop");
+            (ub.deopt_header, ub.unbox.clone(), ub.raw_vars.clone(), ub.gen_vars.clone())
+        };
+        // Retag each UNBOXED counter into the generic var; the non-unboxed
+        // params already live tagged in `gen_vars` (same variables), so they
+        // need no transfer — they carry their current value into the generic
+        // header unchanged.
+        for i in 0..mask.len() {
+            if mask[i] {
+                let x = self.fb.use_var(raw[i]);
+                let tagged = M::emit_tag(self, x);
+                self.fb.def_var(gen[i], tagged);
+            }
+        }
+        self.fb.ins().jump(header, &[]);
+    }
+
+    /// Emit a self-tail loop as an entry-guarded PAIR of arms (Phase 2). The
+    /// UNBOXED arm carries the fixnum params in raw registers (`compile_int` +
+    /// the unboxed `Local`/recur/compare paths); the GENERIC arm is the
+    /// ordinary tagged codegen and doubles as the overflow / non-fixnum DEOPT
+    /// landing. `ir` is compiled once per arm — safe because `pure_arith_loop`
+    /// admits no `Lambda`/`Dispatch` sites to double-register. Emits both
+    /// `return`s and seals both headers; the caller must emit neither.
+    ///
+    /// The entry guard tests the params' ENTRY values; a non-fixnum there takes
+    /// the generic arm from the start. The generic header is sealed LAST,
+    /// because the unboxed arm's deopts add predecessors to it.
+    fn build_unboxed_loop<M: ModelArithJit>(
+        &mut self,
+        ir: &Ir,
+        nparams: usize,
+        tail: bool,
+        mask: Vec<bool>,
+    ) {
+        self.fence_shims = true; // a pure loop ⇒ fence the arithmetic slow shims
+
+        // One shared back-edge poll countdown, seeded in the ENTRY block so it
+        // dominates BOTH headers — including the deopt edge into the generic
+        // header, which skips that arm's own setup block.
+        self.poll_counter = self.fb.declare_var(I64); // untagged: NOT stack-mapped
+        let interval = self.fb.ins().iconst(I64, BACKEDGE_POLL_INTERVAL);
+        self.fb.def_var(self.poll_counter, interval);
+
+        // ENTRY GUARD: are the params we intend to unbox immediate fixnums?
+        // (The non-unboxed params — the self-ref `g` — are excluded; testing
+        // that ref for fixnum-ness would fail the guard and kill the arm.)
+        // Snapshot the entry values (they dominate both arms).
+        let tagged_params: Vec<Value> =
+            (0..nparams).map(|i| self.fb.use_var(self.vars[i])).collect();
+        let guard_vals: Vec<Value> =
+            (0..nparams).filter(|&i| mask[i]).map(|i| tagged_params[i]).collect();
+        let guard = self.emit_all_fixnum_raw::<M>(&guard_vals);
+        let ub_arm = self.fb.create_block();
+        let gen_arm = self.fb.create_block();
+        self.fb.ins().brif(guard, ub_arm, &[], gen_arm, &[]);
+
+        // ── GENERIC arm (tagged) — also the deopt landing ──
+        self.fb.switch_to_block(gen_arm);
+        self.fb.seal_block(gen_arm);
+        let gen_header = self.fb.create_block();
+        self.fb.ins().jump(gen_header, &[]);
+        self.fb.switch_to_block(gen_header);
+        self.loop_header = Some(gen_header);
+        self.unbox = None;
+        let gres = self.compile::<M>(ir, tail);
+        self.fb.ins().return_(&[gres]);
+        // NB: gen_header is NOT sealed here — the unboxed arm's deopts below add
+        // more predecessors to it.
+
+        // ── UNBOXED arm ──
+        self.fb.switch_to_block(ub_arm);
+        self.fb.seal_block(ub_arm);
+        // A raw register per unboxed param (untagged at entry); non-unboxed
+        // slots keep their tagged `vars` entry and get a placeholder here (the
+        // `unbox` mask gates every raw access, so the placeholder is inert).
+        let mut raw_vars = Vec::with_capacity(nparams);
+        for (i, tp) in tagged_params.iter().enumerate().take(nparams) {
+            if mask[i] {
+                let rv = self.fb.declare_var(I64); // untagged int: deliberately NOT stack-mapped
+                let raw = M::emit_untag(self, *tp);
+                self.fb.def_var(rv, raw);
+                raw_vars.push(rv);
+            } else {
+                raw_vars.push(self.vars[i]); // inert: never read via the raw path
+            }
+        }
+        self.unbox = Some(UnboxLoop {
+            unbox: mask,
+            raw_vars,
+            deopt_header: gen_header,
+            gen_vars: self.vars.clone(),
+        });
+        let ub_header = self.fb.create_block();
+        self.fb.ins().jump(ub_header, &[]);
+        self.fb.switch_to_block(ub_header);
+        self.loop_header = Some(ub_header);
+        let ures = self.compile::<M>(ir, tail);
+        self.fb.ins().return_(&[ures]);
+        self.fb.seal_block(ub_header);
+        self.unbox = None;
+
+        // All predecessors of the generic header (its own back-edge + every
+        // unboxed-arm deopt) are now emitted — safe to seal.
+        self.fb.seal_block(gen_header);
     }
 
     /// Arithmetic on operands the optimizer PROVED are immediate fixnums: the
