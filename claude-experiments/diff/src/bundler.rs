@@ -670,24 +670,25 @@ impl Bundler {
         EmitSummary::of(&server_dir)
     }
 
-    /// Rebuilds `output_dir` from scratch and emits the environment's entry chunk
-    /// (named `entry_file`, whose extension — `.js` or `.mjs` — flows onto every
-    /// dynamic-import chunk) plus its CSS and assets. The returned
-    /// [`EmitSummary`] counts exactly what landed on disk.
+    /// Emits the environment's entry chunk (named `entry_file`, whose extension —
+    /// `.js` or `.mjs` — flows onto every dynamic-import chunk) plus its CSS and
+    /// assets, and returns the [`EmitStats`] describing what was re-rendered and
+    /// which files are kept. Unlike a from-scratch rebuild, this does NOT wipe the
+    /// output tree: [`Self::emit_with_options`] writes only the chunks whose bytes
+    /// changed, and the caller prunes files no longer in `stats.written`, so an
+    /// incremental re-emit touches only the chunk that changed while preserving the
+    /// "no stale files linger" guarantee.
     fn emit_environment(
         &self,
         reachable: &BTreeSet<ModuleId>,
         output_dir: &Path,
         entry_file: &str,
         options: EmitOptions,
-    ) -> Result<EmitSummary, String> {
-        if output_dir.exists() {
-            fs::remove_dir_all(output_dir)
-                .map_err(|error| format!("cannot clear {}: {error}", output_dir.display()))?;
-        }
+    ) -> Result<EmitStats, String> {
+        fs::create_dir_all(output_dir)
+            .map_err(|error| format!("cannot create {}: {error}", output_dir.display()))?;
         let entry_output = output_dir.join(entry_file);
-        self.emit_with_options(reachable, &entry_output, options)?;
-        EmitSummary::of(output_dir)
+        self.emit_with_options(reachable, &entry_output, options)
     }
 
     pub fn emit_with_options(
@@ -695,19 +696,23 @@ impl Bundler {
         reachable: &BTreeSet<ModuleId>,
         output: &Path,
         options: EmitOptions,
-    ) -> Result<(), String> {
+    ) -> Result<EmitStats, String> {
         let parent = output
             .parent()
             .ok_or_else(|| format!("output has no parent: {}", output.display()))?;
         fs::create_dir_all(parent)
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+        let mut stats = EmitStats::default();
+        // Keys of every chunk this emit renders or reuses; entries not among them
+        // are evicted at the end so the cache stays bounded to the live chunk set.
+        let mut live_keys = HashSet::new();
         let reachable_dense = reachable
             .iter()
             .filter_map(|id| self.indices.get(id.as_str()).copied())
             .collect::<Vec<_>>();
         let allowed = reachable_dense.iter().copied().collect::<HashSet<_>>();
-        self.emit_assets(&allowed, parent)?;
-        self.emit_css(&allowed, output)?;
+        self.emit_assets(&allowed, parent, &mut stats.written)?;
+        self.emit_css(&allowed, output, &mut stats.written)?;
         let mut runtime_ids = vec![None; self.ids.len()];
         for (runtime_id, &dense_id) in reachable_dense.iter().enumerate() {
             runtime_ids[dense_id] = Some(runtime_id);
@@ -737,7 +742,7 @@ impl Bundler {
         }
         for (root, chunk_path) in dynamic_roots.iter().copied().zip(&chunk_paths) {
             let modules = self.static_closure(root, &allowed);
-            let rendered = self.render_best(
+            let rendered = self.render_chunk_cached(
                 &modules,
                 root,
                 &chunk_names,
@@ -745,17 +750,26 @@ impl Bundler {
                 &global_demands,
                 false,
                 options.format,
+                &mut live_keys,
+                &mut stats.rendered_chunks,
             );
-            self.write_rendered(rendered, chunk_path, options)?;
+            self.write_rendered(rendered, chunk_path, options, &mut stats.written)?;
         }
         if options.minify
             && !options.source_map
             && dynamic_roots.is_empty()
             && let Some(rendered) = self.render_folded_constants(&main_modules)
         {
-            return self.write_rendered(rendered, output, options);
+            // The constant-folding minify path is a distinct render (it depends on
+            // `minify`, unlike `render_best`), so it is not cached; it still counts
+            // as a chunk actually rendered. No dynamic chunks exist here, so no
+            // cached entries are live and the eviction below clears the cache.
+            stats.rendered_chunks += 1;
+            self.write_rendered(rendered, output, options, &mut stats.written)?;
+            self.evict_render_cache(&live_keys);
+            return Ok(stats);
         }
-        let rendered = self.render_best(
+        let rendered = self.render_chunk_cached(
             &main_modules,
             self.entry,
             &chunk_names,
@@ -763,8 +777,133 @@ impl Bundler {
             &global_demands,
             true,
             options.format,
+            &mut live_keys,
+            &mut stats.rendered_chunks,
         );
-        self.write_rendered(rendered, output, options)
+        self.write_rendered(rendered, output, options, &mut stats.written)?;
+        self.evict_render_cache(&live_keys);
+        Ok(stats)
+    }
+
+    /// Renders one chunk, consulting the per-chunk render cache: on a hit the
+    /// cached bytes are returned verbatim (byte-identical to a fresh render) and
+    /// `render_best` is skipped; on a miss the chunk is rendered, cached, and
+    /// `rendered` is incremented. The chunk's key is recorded in `live_keys` so it
+    /// survives the post-emit eviction whether or not it was re-rendered.
+    #[allow(clippy::too_many_arguments)]
+    fn render_chunk_cached(
+        &self,
+        modules: &[DenseModuleId],
+        root: DenseModuleId,
+        chunk_names: &HashMap<DenseModuleId, String>,
+        runtime_ids: &[Option<usize>],
+        global_demands: &[ExportDemand],
+        is_main: bool,
+        format: ModuleFormat,
+        live_keys: &mut HashSet<u64>,
+        rendered: &mut usize,
+    ) -> RenderedBundle {
+        let key = self.chunk_render_key(
+            modules,
+            root,
+            is_main,
+            chunk_names,
+            runtime_ids,
+            global_demands,
+            format,
+        );
+        live_keys.insert(key);
+        if let Some(hit) = self.render_cache.lock().unwrap().entries.get(&key) {
+            return hit.clone();
+        }
+        let bundle = self.render_best(
+            modules,
+            root,
+            chunk_names,
+            runtime_ids,
+            global_demands,
+            is_main,
+            format,
+        );
+        *rendered += 1;
+        self.render_cache
+            .lock()
+            .unwrap()
+            .entries
+            .insert(key, bundle.clone());
+        bundle
+    }
+
+    /// Evicts every cached chunk render whose key was not used in the emit that
+    /// just finished, bounding the cache to the currently-live chunk set.
+    fn evict_render_cache(&self, live_keys: &HashSet<u64>) {
+        self.render_cache
+            .lock()
+            .unwrap()
+            .entries
+            .retain(|key, _| live_keys.contains(key));
+    }
+
+    /// A stable, collision-resistant key for one chunk's rendered bytes.
+    ///
+    /// It folds in everything `render_best` reads to produce this chunk: the
+    /// ordered dense-module ids, each member module's transformed-content hash and
+    /// its dependency structure, the render params that shape the bytes
+    /// (`format`, `is_main`, the chunk root), and — restricted to the chunk's own
+    /// members and the targets they reference — the `runtime_ids`, `chunk_names`,
+    /// and aggregated export demands. It deliberately does NOT fold in the whole
+    /// (graph-wide) `runtime_ids`/`global_demands` vectors: a leaf edit shifts
+    /// neither for any chunk that excludes the leaf, so those chunks keep their key
+    /// and are reused, while the one chunk containing the leaf sees its member
+    /// hash change and is re-rendered.
+    #[allow(clippy::too_many_arguments)]
+    fn chunk_render_key(
+        &self,
+        modules: &[DenseModuleId],
+        root: DenseModuleId,
+        is_main: bool,
+        chunk_names: &HashMap<DenseModuleId, String>,
+        runtime_ids: &[Option<usize>],
+        global_demands: &[ExportDemand],
+        format: ModuleFormat,
+    ) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        (format as u8).hash(&mut hasher);
+        is_main.hash(&mut hasher);
+        root.hash(&mut hasher);
+        modules.len().hash(&mut hasher);
+        for &dense in modules {
+            dense.hash(&mut hasher);
+            match self.modules[dense].as_ref() {
+                Some(module) => {
+                    module.hash.hash(&mut hasher);
+                    hash_optional_id(&mut hasher, runtime_ids[dense]);
+                    hash_export_demand(&mut hasher, &global_demands[dense]);
+                    for (specifier, target, demand) in &module.dependencies {
+                        specifier.hash(&mut hasher);
+                        demand.dynamic.hash(&mut hasher);
+                        demand.all.hash(&mut hasher);
+                        demand.names.hash(&mut hasher);
+                        target.hash(&mut hasher);
+                        hash_optional_id(&mut hasher, runtime_ids[*target]);
+                        if demand.dynamic {
+                            match chunk_names.get(target) {
+                                Some(name) => {
+                                    1u8.hash(&mut hasher);
+                                    name.hash(&mut hasher);
+                                }
+                                None => 0u8.hash(&mut hasher),
+                            }
+                        }
+                    }
+                }
+                // A chunk member is always present (it came from the reachable
+                // static closure); encode the absent case distinctly rather than
+                // panic, so a future caller cannot get a silent collision.
+                None => u64::MAX.hash(&mut hasher),
+            }
+        }
+        hasher.finish()
     }
 
     /// The dynamic-import roots that become their own chunks: every dynamically
@@ -840,15 +979,20 @@ impl Bundler {
     /// Copies every content-hashed asset referenced by a reachable module into
     /// `<output_dir>/assets/`. Deduplicated by public name, so an asset imported
     /// from several modules is written once.
-    fn emit_assets(&self, allowed: &HashSet<DenseModuleId>, parent: &Path) -> Result<(), String> {
-        let mut written = HashSet::new();
+    fn emit_assets(
+        &self,
+        allowed: &HashSet<DenseModuleId>,
+        parent: &Path,
+        written: &mut BTreeSet<PathBuf>,
+    ) -> Result<(), String> {
+        let mut seen = HashSet::new();
         let mut assets_dir_ready = false;
         for &dense in allowed {
             let Some(module) = self.modules[dense].as_ref() else {
                 continue;
             };
             for asset in &module.assets {
-                if !written.insert(asset.public_name.clone()) {
+                if !seen.insert(asset.public_name.clone()) {
                     continue;
                 }
                 let assets_dir = parent.join("assets");
@@ -866,10 +1010,10 @@ impl Bundler {
                     // build-emit step, off the incremental transform hot path.
                     let candidates = self.tailwind_candidates(&asset.source, source_css);
                     let compiled = crate::tailwind::compile(source_css, &candidates)?;
-                    fs::write(&destination, compiled).map_err(|error| {
-                        format!("cannot write {}: {error}", destination.display())
-                    })?;
-                } else {
+                    write_if_changed(&destination, compiled.as_bytes())?;
+                } else if !destination.exists() {
+                    // The public name is content-hashed, so a destination that
+                    // already exists holds identical bytes and needs no recopy.
                     fs::copy(&asset.source, &destination).map_err(|error| {
                         format!(
                             "cannot copy asset {} to {}: {error}",
@@ -878,6 +1022,7 @@ impl Bundler {
                         )
                     })?;
                 }
+                written.insert(destination);
             }
         }
         Ok(())
@@ -901,7 +1046,12 @@ impl Bundler {
     /// Extracts the stylesheet: concatenates every reachable global CSS module's
     /// text in module execution order and writes it beside the bundle as
     /// `<output_stem>.css`. Nothing is written when no CSS is imported.
-    fn emit_css(&self, allowed: &HashSet<DenseModuleId>, output: &Path) -> Result<(), String> {
+    fn emit_css(
+        &self,
+        allowed: &HashSet<DenseModuleId>,
+        output: &Path,
+        written: &mut BTreeSet<PathBuf>,
+    ) -> Result<(), String> {
         let order = self.static_execution_order(allowed).unwrap_or_else(|| {
             let mut ids = allowed.iter().copied().collect::<Vec<_>>();
             ids.sort_by(|left, right| self.ids[*left].cmp(&self.ids[*right]));
@@ -919,11 +1069,14 @@ impl Bundler {
             }
         }
         if stylesheet.is_empty() {
+            // No stylesheet this emit; leaving it out of `written` lets the caller
+            // prune a stale `.css` left by a previous build.
             return Ok(());
         }
         let css_path = output.with_extension("css");
-        fs::write(&css_path, stylesheet)
-            .map_err(|error| format!("cannot write {}: {error}", css_path.display()))
+        write_if_changed(&css_path, stylesheet.as_bytes())?;
+        written.insert(css_path);
+        Ok(())
     }
 
     fn render_folded_constants(&self, modules: &[DenseModuleId]) -> Option<RenderedBundle> {
@@ -959,6 +1112,7 @@ impl Bundler {
         rendered: RenderedBundle,
         output: &Path,
         options: EmitOptions,
+        written: &mut BTreeSet<PathBuf>,
     ) -> Result<(), String> {
         let mut code = rendered.code;
         if options.source_map {
@@ -966,17 +1120,25 @@ impl Bundler {
             let map_name = map_path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .ok_or_else(|| format!("source-map path is not UTF-8: {}", map_path.display()))?;
+                .ok_or_else(|| format!("source-map path is not UTF-8: {}", map_path.display()))?
+                .to_owned();
             let output_name = output
                 .file_name()
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| format!("output path is not UTF-8: {}", output.display()))?;
-            fs::write(&map_path, self.source_map(&rendered.mappings, output_name))
-                .map_err(|error| format!("cannot write {}: {error}", map_path.display()))?;
+            write_if_changed(
+                &map_path,
+                self.source_map(&rendered.mappings, output_name).as_bytes(),
+            )?;
+            written.insert(map_path);
             code.push_str(&format!("\n//# sourceMappingURL={map_name}\n"));
         }
-        fs::write(output, code)
-            .map_err(|error| format!("cannot write {}: {error}", output.display()))
+        // Skip the write when the on-disk bytes already match, so an unchanged,
+        // cache-reused chunk is not needlessly rewritten (atomic per-file, only
+        // the changed chunk touches disk).
+        write_if_changed(output, code.as_bytes())?;
+        written.insert(output.to_path_buf());
+        Ok(())
     }
 
     fn static_closure(
@@ -1823,17 +1985,96 @@ const SERVER_RUNTIME_FILES: &[(&str, &str)] = &[
 /// incremental hot path); each file is a static template that references its
 /// siblings (`server.mjs`, `_tanstack-start-manifest_v.mjs`, `../public`) by
 /// relative path, so no per-build interpolation is required.
-fn write_server_runtime_entry(server_dir: &Path) -> Result<(), String> {
+fn write_server_runtime_entry(server_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut written = Vec::with_capacity(SERVER_RUNTIME_FILES.len());
     for (relative, contents) in SERVER_RUNTIME_FILES {
         let path = server_dir.join(relative);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
         }
-        fs::write(&path, contents)
-            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        write_if_changed(&path, contents.as_bytes())?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
+/// Writes `bytes` to `path` only when the file's current contents differ, so an
+/// unchanged output (a cache-reused chunk, an already-copied asset) is never
+/// needlessly rewritten. Correctness is unchanged from an unconditional write:
+/// the file always ends holding exactly `bytes`.
+fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Ok(existing) = fs::read(path)
+        && existing == bytes
+    {
+        return Ok(());
+    }
+    fs::write(path, bytes).map_err(|error| format!("cannot write {}: {error}", path.display()))
+}
+
+/// Deletes every file under `root` that is not in `keep`, then removes any
+/// directory left empty. This replaces the old "wipe the whole output tree"
+/// step: unchanged chunks stay on disk (already written by this emit), while
+/// files that are no longer part of the build are removed, so no stale output
+/// ever lingers.
+fn prune_stale_files(root: &Path, keep: &BTreeSet<PathBuf>) -> Result<(), String> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut directories = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        directories.push(directory.clone());
+        let entries = fs::read_dir(&directory)
+            .map_err(|error| format!("cannot read {}: {error}", directory.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| format!("cannot read {}: {error}", directory.display()))?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if !keep.contains(&path) {
+                fs::remove_file(&path)
+                    .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+            }
+        }
+    }
+    // Remove now-empty directories deepest-first (never the root itself).
+    directories.sort_by_key(|directory| std::cmp::Reverse(directory.components().count()));
+    for directory in directories {
+        if directory == root {
+            continue;
+        }
+        if fs::read_dir(&directory)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false)
+        {
+            fs::remove_dir(&directory)
+                .map_err(|error| format!("cannot remove {}: {error}", directory.display()))?;
+        }
     }
     Ok(())
+}
+
+/// Folds an optional runtime id into a chunk render key, distinguishing `None`
+/// from `Some(0)`.
+fn hash_optional_id(hasher: &mut DefaultHasher, id: Option<usize>) {
+    match id {
+        Some(value) => {
+            1u8.hash(hasher);
+            value.hash(hasher);
+        }
+        None => 0u8.hash(hasher),
+    }
+}
+
+/// Folds an aggregated export demand into a chunk render key. Names are sorted so
+/// the key is order-independent (the demand is built from an unordered set).
+fn hash_export_demand(hasher: &mut DefaultHasher, demand: &ExportDemand) {
+    demand.all.hash(hasher);
+    let mut names = demand.names.iter().collect::<Vec<_>>();
+    names.sort();
+    names.hash(hasher);
 }
 
 fn shake_module_code(

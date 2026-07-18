@@ -36,6 +36,18 @@ fn the_incremental_graph_stays_low_memory() {
         edited.transformed_per_edit_max, 1,
         "each leaf edit must re-transform exactly one module"
     );
+    // Incremental emit: each leaf edit re-renders exactly one chunk, and the
+    // render cache stays bounded to the live chunk set (a per-edit revision leak
+    // would grow it with the edit count).
+    assert_eq!(
+        edited.rendered_chunks_per_edit_max, 1,
+        "each leaf edit must re-render exactly one chunk, not the whole bundle"
+    );
+    assert!(
+        edited.render_cache_entries <= 1,
+        "the render cache grew to {} entries over 200 edits; it must stay bounded to the live chunk set",
+        edited.render_cache_entries
+    );
     assert!(
         edited.retained_growth_over_edits_bytes < 256 * 1024,
         "200 edits grew retained memory by {} bytes; edits must not accumulate memory",

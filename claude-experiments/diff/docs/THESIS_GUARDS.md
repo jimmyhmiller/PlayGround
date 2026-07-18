@@ -22,9 +22,15 @@ allocation count; `reset_peak()` rebases the high-water mark.
 
 ## Asserted guards
 
-- **Incrementality** — `bundle_benchmark::thesis_guards::a_leaf_edit_retransforms_exactly_one_module`
+- **Incrementality (transform)** — `bundle_benchmark::thesis_guards::a_leaf_edit_retransforms_exactly_one_module`
   (unit test, parallelism-safe): editing one leaf of a 600-module graph must
   re-transform exactly **1** module.
+- **Incrementality (emit)** — `bundle_benchmark::thesis_guards::a_leaf_edit_rerenders_exactly_one_chunk_with_a_bounded_cache`
+  (unit test, parallelism-safe): editing one leaf must re-render exactly **1**
+  chunk (not the whole bundle), and the per-chunk render cache must stay bounded
+  to the live chunk set across 200 edits (no per-edit revision leak). The reused
+  chunks' byte-parity against a clean build is proven by `tests/oracle_incremental.rs`
+  (`incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_build`).
 - **Low memory** — `tests/thesis_memory.rs::the_incremental_graph_stays_low_memory`
   (isolated test binary, so process-wide counters are clean):
   - resident graph `< 16_000` bytes/module (measured ~3.5 KB);
@@ -35,7 +41,9 @@ allocation count; `reset_peak()` rebases the high-water mark.
   - after dropping the bundler, residual `<` 1/4 of the graph's resident cost
     (measured ~2-3% — teardown releases the graph).
 - **Determinism** — `tests/oracle_incremental.rs`: an incremental build after
-  structural edits is byte-identical to a clean rebuild.
+  structural edits is byte-identical to a clean rebuild — both the single-file
+  bundle after structural edits AND the full multi-chunk output tree after a leaf
+  edit (the one re-rendered chunk plus every cache-reused chunk).
 
 Thresholds carry 3-5x headroom over measured values: generous enough not to
 flake, tight enough to trip on an order-of-magnitude regression (e.g. starting to

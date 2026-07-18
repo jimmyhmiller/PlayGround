@@ -1,6 +1,6 @@
 # TanStack implementation status
 
-Updated: 2026-07-18
+Updated: 2026-07-18 (incremental-emit wiring completed)
 
 ## Native Tailwind v4 CSS compilation (landed)
 
@@ -705,7 +705,84 @@ target: builds, styles, SSRs, hydrates, navigates, and fetches data over server
 functions, all natively.
 
 Remaining production-readiness work is now dev-experience and hardening (not
-app-breaking): production minification, source maps, incremental emit (the graph
-is incremental but the final chunk still re-renders whole), a dev server + HMR, a
+app-breaking): production minification, source maps, a dev server + HMR, a
 second representative app for breadth, secret scanning, and the perf/soak program.
-These are driven by the `diffpack-production-hardening` workflow.
+These are driven by the `diffpack-production-hardening` workflow. Incremental emit
+(previously listed here) is now DONE — see "Incremental chunk emit" below.
+
+## Incremental chunk emit (landed)
+
+The module graph was already incremental (a leaf edit re-transforms exactly one
+module), but emit was not: `emit_environment` `fs::remove_dir_all`'d the whole
+output tree and `emit_with_options` re-ran `render_best` on every chunk from
+scratch on every build. Diffpack exists as a REPLACEMENT for Vite/Rolldown
+because of its incremental graph, so this closed the one place that promise was
+still unfulfilled — turning the already-incremental graph into already-incremental
+OUTPUT.
+
+- **Per-chunk render cache** (`Bundler::render_cache`, an interior-mutable
+  `Mutex` so emit stays `&self`). Each chunk is keyed by `chunk_render_key`: its
+  ordered dense-module ids, each member's transformed-content hash, and —
+  restricted to the chunk's own members and the targets they reference —
+  `format`, `is_main`, the root, `runtime_ids`, `chunk_names`, and aggregated
+  export demands. The key deliberately excludes the graph-wide
+  `runtime_ids`/export-demand vectors, so a leaf edit shifts neither for any
+  chunk that excludes the leaf: those chunks keep their key and are reused
+  byte-for-byte, while the one chunk containing the leaf is re-rendered. `emit_with_options`
+  routes every chunk through `render_chunk_cached` (was a direct `render_best`):
+  a hit returns the stored `RenderedBundle` verbatim, identical to a fresh
+  `render_best`; a miss renders and populates. A chunk whose key cannot be
+  formed hits a distinct `None` branch that renders rather than returning a
+  silent wrong value — the absent case is hard-encoded, not a placeholder.
+- **Incremental file sync, not a wipe.** `emit_environment` stopped
+  `fs::remove_dir_all`-ing the output tree. `emit_with_options` now writes only
+  the chunks/CSS/assets whose bytes changed (`write_if_changed`), records every
+  kept file, and returns `EmitStats { rendered_chunks, written }`. The
+  environment emit (`emit_public`/`emit_server`) deletes only files no longer in
+  that kept set (`prune_stale_files`) — preserving the "no stale files linger"
+  guarantee via atomic per-file writes instead of nuking unchanged chunks. Server
+  runtime files are protected from the prune.
+- **Bounded cache.** Each emit evicts every entry not in the live chunk set, so
+  retained bytes stay flat across a long edit sequence (guarded by the memory
+  thresholds in `docs/THESIS_GUARDS.md`).
+
+Verified (all six gate groups reproduced independently, green):
+
+1. `cargo test --release`: 82 lib + `oracle_incremental` (2 pass, 1 `#[ignore]`d)
+   + 2 tailwind + 1 thesis_memory, all pass. The new
+   `incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_build` and
+   `bundle_benchmark::thesis_guards::a_leaf_edit_rerenders_exactly_one_chunk_with_a_bounded_cache`
+   both execute and pass (verified by name).
+2. `cargo clippy --release --all-targets -D warnings`: exit 0, clean.
+3. Rebuilt `build-app` client (27 chunks) + ssr (37 `.mjs`); strict
+   `npm run acceptance:diffpack`: 13/13.
+4. Thesis guards: `thesis_memory` PASS (`rendered_chunks_per_edit_max == 1`,
+   `render_cache_entries <= 1` over 200 edits), the `bundle_benchmark` guard
+   PASS, and `oracle_incremental` proves full multi-chunk output-tree byte parity
+   AND the main chunk reused verbatim across a leaf edit. The pre-existing
+   "re-emit must clear stale output" tests confirm `prune_stale_files` genuinely
+   deletes stale files on a warm re-emit (no `remove_dir_all` regression).
+5. Browser (real headless Chrome): routes 60/60, hydration 7/7, serverfn 7/7,
+   tailwind 9/9; `grep -rl async_hooks .diffpack-output/public` empty.
+6. Benchmark non-regression: `bundle-scale-memory 2000 4 200` →
+   3312.4 bytes/module (< 16000 guard), `transformed_per_edit_max`=1, edit growth
+   0.2 KB. `oracle/benchmark.mjs` incremental edit **7.78 ms** vs **158 ms** cold
+   — ~19x faster than Rolldown on edits.
+
+No Node/Rolldown/spawn entered the `src` build path; no output was faked; no test
+was loosened or deleted (additions only, plus a benign stats-capture and import
+widening). HEAD was a partial baseline that already carried the
+struct/field/prune scaffolding; the working tree completes the wiring
+(`render_best` → `render_chunk_cached`, dropping `remove_dir_all` for
+`write_if_changed` + `prune_stale_files`).
+
+The incremental emit is on the future dev-server/HMR hot path; the `build-app`
+CLI is a cold process per invocation, so it still renders every chunk once (and
+prunes any stale output), but the byte-identical result is unchanged.
+
+**Next remaining gap.** Nothing exercises the incremental emit path from a
+long-lived process yet — the payoff (a leaf edit re-rendering one chunk in
+~7.78 ms) only lands once the dev server + HMR slice keeps a `Bundler` alive
+across edits and re-emits on file change. That, plus production minification and
+source maps, is the remaining production-hardening surface (driven by the
+`diffpack-production-hardening` workflow).

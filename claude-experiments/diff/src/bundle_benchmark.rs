@@ -338,6 +338,13 @@ pub struct MemoryScaleResult {
     /// The most modules re-transformed by any single edit. Incrementality holds
     /// when a leaf edit re-transforms exactly one module.
     pub transformed_per_edit_max: usize,
+    /// The most chunks re-rendered by any single edit's emit. Incremental emit
+    /// holds when a leaf edit re-renders exactly one chunk (the one that changed);
+    /// every other chunk is served byte-for-byte from the render cache.
+    pub rendered_chunks_per_edit_max: usize,
+    /// The render cache's size after the whole edit run. Bounded to the live chunk
+    /// set by per-emit eviction, so it must not grow with the number of edits.
+    pub render_cache_entries: usize,
     /// Growth in live bytes across all incremental edits. Bounded growth means
     /// old revisions are released rather than accumulated.
     pub retained_growth_over_edits_bytes: usize,
@@ -389,6 +396,7 @@ pub fn run_bundle_scale_memory(
     let mut reachable = reachability.reachable_modules();
     bundler.emit(&reachable, &output)?;
     let reachable_count = reachable.len();
+    let mut rendered_chunks_per_edit_max = 0;
 
     let after_build = crate::memory::snapshot();
     let build_peak_bytes = after_build.peak_bytes.saturating_sub(baseline);
@@ -415,9 +423,12 @@ pub fn run_bundle_scale_memory(
             reachable.remove(&removed);
         }
         reachable.extend(result.added);
-        bundler.emit(&reachable, &output)?;
+        let emit_stats = bundler.emit(&reachable, &output)?;
+        rendered_chunks_per_edit_max =
+            rendered_chunks_per_edit_max.max(emit_stats.rendered_chunks);
     }
 
+    let render_cache_entries = bundler.render_cache_len();
     let live_after_edits = crate::memory::snapshot().live_bytes;
     let retained_growth_over_edits_bytes = live_after_edits.saturating_sub(live_after_build);
 
@@ -435,6 +446,8 @@ pub fn run_bundle_scale_memory(
         bytes_per_module: retained_after_build_bytes as f64 / module_count as f64,
         edits,
         transformed_per_edit_max,
+        rendered_chunks_per_edit_max,
+        render_cache_entries,
         retained_growth_over_edits_bytes,
         retained_after_drop_bytes,
     })
@@ -613,7 +626,7 @@ mod thesis_guards {
     //! `tests/thesis_memory.rs` because they read process-wide allocation
     //! counters and must run isolated from other tests' allocations.
 
-    use super::run_bundle_scale_direct;
+    use super::{run_bundle_scale_direct, run_bundle_scale_memory};
 
     #[test]
     fn a_leaf_edit_retransforms_exactly_one_module() {
@@ -622,6 +635,28 @@ mod thesis_guards {
             result.transformed_on_edit, 1,
             "editing one leaf module must re-transform exactly that module, not {} of {}",
             result.transformed_on_edit, result.modules
+        );
+    }
+
+    #[test]
+    fn a_leaf_edit_rerenders_exactly_one_chunk_with_a_bounded_cache() {
+        // Mirrors the transform guard for the emit stage: a leaf edit must
+        // re-render exactly one chunk (not the whole bundle), and the render
+        // cache must stay bounded to the live chunk set across a long edit run
+        // rather than accumulating a revision per edit. (Byte-parity of the
+        // reused chunks against a clean build is proven by
+        // `tests/oracle_incremental.rs`; this only reads counters, so it is
+        // parallelism-safe.)
+        let result = run_bundle_scale_memory(400, 4, 200).unwrap();
+        assert_eq!(
+            result.rendered_chunks_per_edit_max, 1,
+            "each leaf edit must re-render exactly one chunk"
+        );
+        assert!(
+            result.render_cache_entries <= result.rendered_chunks_per_edit_max.max(1),
+            "the render cache grew to {} entries over {} edits; it must stay bounded to the live chunk set",
+            result.render_cache_entries,
+            result.edits
         );
     }
 }
