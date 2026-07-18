@@ -1,0 +1,10 @@
+workflow Approval Gate Demo
+runner deepseek
+
+approval release-signoff
+title Approve the drafted release notes before publishing
+after none
+
+approval payout-signoff
+title Approve the $48.00 refund to the original card
+after none

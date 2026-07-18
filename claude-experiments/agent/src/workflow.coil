@@ -419,6 +419,9 @@
 (defn program-name [(runtime Runtime)] (-> (ptr i8))
   (load (field (field runtime program) name)))
 
+(defn program-runner [(runtime Runtime)] (-> (ptr i8))
+  (load (field (field runtime program) runner)))
+
 (defn program-path [(runtime Runtime)] (-> (ptr i8))
   (load (field (field runtime program) path)))
 
@@ -697,3 +700,250 @@
         0))
     (printf c"]}\n")
     0))
+
+;; ---------------------------------------------------------------------------
+;; Run history
+;;
+;; Node execution uses fixed `.flowline/nodeN.*` paths, so exactly one workflow
+;; runs at a time. That makes the history a plain append-ordered list: one line
+;; per run in `.flowline/runs.log`, rewritten whenever a run's status changes.
+;; Every field is real — nothing here is derived from a placeholder.
+;;
+;;   RUN-0007|Audit Coil port bugs|workflows/x.flow|manual|1|1752900000|142
+;; ---------------------------------------------------------------------------
+
+(extern time :cc c [(ptr i64)] (-> i64))
+(extern getenv :cc c [(ptr i8)] (-> (ptr i8)))
+
+(const MAX_RUNS 64)
+(const RUN_RUNNING 0)
+(const RUN_DONE 1)
+(const RUN_WAITING 2)
+(const RUN_FAILED 3)
+(const RUN_ID_CAPACITY 16)
+(const RUN_NAME_CAPACITY 96)
+(const RUN_PATH_CAPACITY 160)
+(const RUN_TRIGGER_CAPACITY 32)
+
+(defstruct RunRecord
+  [(id (array i8 16))
+   (name (array i8 96))
+   (path (array i8 160))
+   (trigger (array i8 32))
+   (status i64)
+   (startedAt i64)
+   (duration i64)])
+
+(defstruct RunLog [(count i64) (records (array RunRecord 64))])
+
+(defn now-seconds [] (-> i64)
+  (time (cast (ptr i64) 0)))
+
+(defn copy-bounded [(destination (ptr i8)) (source (ptr i8)) (capacity i64)] (-> i64)
+  (let [(mut position) 0]
+    (do
+      (loop (if (>= (load position) (- capacity 1))
+              (break)
+              (let [byte (load (index source (load position)))]
+                (if (icmp-eq byte (cast i8 0))
+                  (break)
+                  (do
+                    (store! (index destination (load position)) byte)
+                    (store! position (+ (load position) 1))
+                    0)))))
+      (store! (index destination (load position)) (cast i8 0))
+      (load position))))
+
+;; Copies bytes from `source` at `start` up to the next `|` or newline into
+;; `destination`, and returns the offset just past that delimiter.
+(defn scan-field [(source (ptr i8))
+                  (start i64)
+                  (destination (ptr i8))
+                  (capacity i64)] (-> i64)
+  (let [(mut read) start
+        (mut written) 0]
+    (do
+      (loop (let [byte (load (index source (load read)))]
+              (if (or (icmp-eq byte (cast i8 0))
+                      (or (icmp-eq byte (cast i8 124)) (icmp-eq byte (cast i8 10))))
+                (break)
+                (do
+                  (if (< (load written) (- capacity 1))
+                    (do
+                      (store! (index destination (load written)) byte)
+                      (store! written (+ (load written) 1))
+                      0)
+                    0)
+                  (store! read (+ (load read) 1))
+                  0))))
+      (store! (index destination (load written)) (cast i8 0))
+      (if (icmp-eq (load (index source (load read))) (cast i8 0))
+        (load read)
+        (+ (load read) 1)))))
+
+(defn parse-integer [(text (ptr i8))] (-> i64
+  )
+  (let [(mut position) 0
+        (mut total) 0]
+    (do
+      (loop (let [byte (cast i64 (load (index text (load position))))]
+              (if (or (< byte \0) (> byte \9))
+                (break)
+                (do
+                  (store! total (+ (* (load total) 10) (- byte \0)))
+                  (store! position (+ (load position) 1))
+                  0))))
+      (load total))))
+
+(defn record-id [(record (ptr RunRecord))] (-> (ptr i8))
+  (cast (ptr i8) (field record id)))
+
+(defn record-name [(record (ptr RunRecord))] (-> (ptr i8))
+  (cast (ptr i8) (field record name)))
+
+(defn record-path [(record (ptr RunRecord))] (-> (ptr i8))
+  (cast (ptr i8) (field record path)))
+
+(defn record-trigger [(record (ptr RunRecord))] (-> (ptr i8))
+  (cast (ptr i8) (field record trigger)))
+
+(defn run-log-count [(log (ptr RunLog))] (-> i64)
+  (load (field log count)))
+
+(defn run-log-record [(log (ptr RunLog)) (entry i64)] (-> (ptr RunRecord))
+  (index (cast (ptr RunRecord) (field log records)) entry))
+
+(defn load-run-log [(log (ptr RunLog))] (-> i64)
+  (let [source (read-source c".flowline/runs.log")
+        (mut position) 0
+        scratch (cast (ptr i8) (cast i64 (alloc-stack (array i8 32))))]
+    (do
+      (store! log (zeroed RunLog))
+      (loop (if (or (icmp-eq (load (index source (load position))) (cast i8 0))
+                    (>= (load (field log count)) MAX_RUNS))
+              (break)
+              (let [record (run-log-record log (load (field log count)))]
+                (do
+                  (store! position (scan-field source (load position) (record-id record) RUN_ID_CAPACITY))
+                  (store! position (scan-field source (load position) (record-name record) RUN_NAME_CAPACITY))
+                  (store! position (scan-field source (load position) (record-path record) RUN_PATH_CAPACITY))
+                  (store! position (scan-field source (load position) (record-trigger record) RUN_TRIGGER_CAPACITY))
+                  (store! position (scan-field source (load position) scratch 32))
+                  (store! (field record status) (parse-integer scratch))
+                  (store! position (scan-field source (load position) scratch 32))
+                  (store! (field record startedAt) (parse-integer scratch))
+                  (store! position (scan-field source (load position) scratch 32))
+                  (store! (field record duration) (parse-integer scratch))
+                  (if (icmp-eq (load (record-id record)) (cast i8 0))
+                    (break)
+                    (store! (field log count) (+ (load (field log count)) 1)))
+                  0))))
+      0)))
+
+(defn save-run-log [(log (ptr RunLog))] (-> i64)
+  (let [file (fopen c".flowline/runs.log" c"wb")
+        line (cast (ptr i8) (cast i64 (alloc-stack (array i8 512))))]
+    (if (icmp-eq (cast i64 file) 0)
+      -1
+      (do
+        (for [entry 0
+              MAX_RUNS]
+          (if (< entry (load (field log count)))
+            (let [record (run-log-record log entry)]
+              (do
+                (snprintf line
+                          512
+                          c"%s|%s|%s|%s|%lld|%lld|%lld\n"
+                          (record-id record)
+                          (record-name record)
+                          (record-path record)
+                          (record-trigger record)
+                          (load (field record status))
+                          (load (field record startedAt))
+                          (load (field record duration)))
+                (fwrite line 1 (string-length line) file)
+                0))
+            0))
+        (fclose file)
+        0))))
+
+;; Appends a running record and returns its index, or -1 when the log is full.
+(defn begin-run [(log (ptr RunLog))
+                 (name (ptr i8))
+                 (path (ptr i8))
+                 (trigger (ptr i8))] (-> i64)
+  (if (>= (load (field log count)) MAX_RUNS)
+    -1
+    (let [entry (load (field log count))
+          record (run-log-record log entry)
+          identifier (cast (ptr i8) (cast i64 (alloc-stack (array i8 16))))]
+      (do
+        (snprintf identifier 16 c"RUN-%04lld" (+ entry 1))
+        (copy-bounded (record-id record) identifier RUN_ID_CAPACITY)
+        (copy-bounded (record-name record) name RUN_NAME_CAPACITY)
+        (copy-bounded (record-path record) path RUN_PATH_CAPACITY)
+        (copy-bounded (record-trigger record) trigger RUN_TRIGGER_CAPACITY)
+        (store! (field record status) RUN_RUNNING)
+        (store! (field record startedAt) (now-seconds))
+        (store! (field record duration) 0)
+        (store! (field log count) (+ entry 1))
+        (save-run-log log)
+        entry))))
+
+(defn update-run [(log (ptr RunLog)) (entry i64) (status i64)] (-> i64)
+  (if (or (< entry 0) (>= entry (load (field log count))))
+    -1
+    (let [record (run-log-record log entry)]
+      (do
+        (store! (field record status) status)
+        (store! (field record duration) (- (now-seconds) (load (field record startedAt))))
+        (save-run-log log)
+        0))))
+
+(defn runtime-run-status [(runtime (ptr Runtime))] (-> i64
+  )
+  (let [(mut anyFailed) 0
+        (mut anyWaiting) 0
+        (mut anyActive) 0
+        (mut doneCount) 0
+        total (node-count runtime)]
+    (do
+      (for [node 0
+            MAX_NODES]
+        (if (< node total)
+          (let [status (load (index (field runtime statuses) node))]
+            (do
+              (if (= status STATUS_FAILED) (store! anyFailed 1) 0)
+              (if (= status STATUS_WAITING) (store! anyWaiting 1) 0)
+              (if (or (= status STATUS_RUNNING) (= status STATUS_READY)) (store! anyActive 1) 0)
+              (if (= status STATUS_DONE) (store! doneCount (+ (load doneCount) 1)) 0)
+              0))
+          0))
+      (cond (= (load anyFailed) 1) RUN_FAILED
+            (= (load anyWaiting) 1) RUN_WAITING
+            (= (load anyActive) 1) RUN_RUNNING
+            (and (> total 0) (= (load doneCount) total)) RUN_DONE
+            RUN_RUNNING))))
+
+(defn run-status-label [(status i64)] (-> (ptr i8))
+  (case status RUN_RUNNING
+        c"running" RUN_DONE
+        c"done" RUN_WAITING
+        c"waiting" c"failed"))
+
+;; ---------------------------------------------------------------------------
+;; Integration detection
+;;
+;; Every row on the settings screen is a real capability check against this
+;; machine: an env var that is set, a binary on PATH, a file that exists.
+;; ---------------------------------------------------------------------------
+
+(defn environment-set [(name (ptr i8))] (-> bool)
+  (let [value (getenv name)]
+    (and (!= (cast i64 value) 0) (icmp-ne (load value) (cast i8 0)))))
+
+(defn command-available [(command (ptr i8))] (-> bool)
+  (let [line (cast (ptr i8) (cast i64 (alloc-stack (array i8 256))))]
+    (do
+      (snprintf line 256 c"command -v %s >/dev/null 2>&1" command)
+      (icmp-eq (system line) (cast i32 0)))))

@@ -1,6 +1,9 @@
 (module app)
 (import "raylib.coil" :as raylib)
 (import "workflow.coil" :as workflow)
+(import "workflow.coil" :use [RUN_RUNNING RUN_DONE RUN_WAITING RUN_FAILED
+                              STATUS_PENDING STATUS_READY STATUS_RUNNING STATUS_DONE
+                              STATUS_WAITING STATUS_FAILED KIND_AGENT KIND_APPROVAL])
 (import "native.coil" :as native)
 
 (extern sin :cc c [f64] (-> f64))
@@ -9,9 +12,30 @@
 (extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
 
 (const WINDOW_FLAGS 8292)
-(const LEFT_WIDTH 244)
+(const LEFT_WIDTH 236)
 (const RIGHT_WIDTH 476)
 (const HEADER_HEIGHT 64)
+
+;; The seven workspace views. `view` in AppState is the single source of truth for
+;; which one is on screen; nothing else gates visibility.
+(const VIEW_DASHBOARD 0)
+(const VIEW_RUNS 1)
+(const VIEW_APPROVALS 2)
+(const VIEW_TEMPLATES 3)
+(const VIEW_SETTINGS 4)
+(const VIEW_CREATE 5)
+(const VIEW_RUN 6)
+
+;; Sidebar vertical rhythm, top down. Derived once here so hit-testing and drawing
+;; cannot drift apart.
+(const SIDEBAR_HEADER_HEIGHT 50)
+(const SIDEBAR_NAV_TOP 79)
+(const SIDEBAR_NAV_ROW_HEIGHT 33)
+(const SIDEBAR_NAV_COUNT 5)
+(const SIDEBAR_PROJECTS_LABEL_TOP 259)
+(const SIDEBAR_PROJECTS_TOP 279)
+(const SIDEBAR_PROJECT_ROW_HEIGHT 46)
+(const SIDEBAR_FOOTER_HEIGHT 40)
 (const KEY_ENTER 257)
 (const KEY_BACKSPACE 259)
 (const KEY_DELETE 261)
@@ -35,15 +59,18 @@
 (const INPUT_CHARACTER_CAPACITY 16)
 
 (defstruct AppState
-  [(selectedProject i64)
+  [(view i64)
+   (selectedProject i64)
    (selectedNode i64)
    (approvalGranted i64)
    (runRequested i64)
    (approvalRequested i64)
    (catalog (ptr workflow.Catalog))
+   (runLog (ptr workflow.RunLog))
+   (activeRunEntry i64)
+   (runFilter i64)
    (runtime (ptr workflow.Runtime))
    (activeRuntime (ptr workflow.Runtime))
-   (creationOpen i64)
    (creationRequested i64)
    (creationState i64)
    (creationLength i64)
@@ -71,9 +98,21 @@
    (selectionPressHandled i64)
    (hoverSelectableText i64)
    (measureText (ptr i8))
+   (integrations (array Integration 8))
    (mono raylib.Font)
    (monoMedium raylib.Font)
    (sans raylib.Font)])
+
+(const INTEGRATION_COUNT 7)
+
+;; A settings row. `connected` is the result of a real check against this machine
+;; (env var set, binary on PATH, file present) run once at startup — never a
+;; hardcoded status, and never re-run inside a draw call.
+(defstruct Integration
+  [(name (ptr i8))
+   (glyph (ptr i8))
+   (detail (ptr i8))
+   (connected i64)])
 
 (defstruct InputFrame
   [(mouseHorizontal f64)
@@ -159,6 +198,18 @@
     (raylib.DrawLineEx (vector fromHorizontal fromVertical) (vector toHorizontal toVertical) (cast f32 thickness) tint)
     0))
 
+(defn text-width [(font raylib.Font) (text (ptr i8)) (size f64)] (-> f64)
+  (let [measured (raylib.MeasureTextEx (load font) text (cast f32 (* size 1.16)) (cast f32 0.18))]
+    (cast f64 (load (field measured x)))))
+
+(defn draw-text-right [(font raylib.Font)
+                       (text (ptr i8))
+                       (right f64)
+                       (top f64)
+                       (size f64)
+                       (tint raylib.Color)] (-> i64)
+  (draw-text font text (- right (text-width font text size)) top size tint))
+
 (defn project-name [(project i64)] (-> (ptr i8))
   (case project 0
         c"Refund Resolver" 1
@@ -195,6 +246,24 @@
         (color 191 135 223) 2
         (color 104 207 167) 3
         (color 102 158 229) (color 224 113 98)))
+
+(defn accent-alpha [(project i64) (alpha i64)] (-> raylib.Color)
+  (let [value (alloc-stack raylib.Color)]
+    (do
+      (store! value (accent project))
+      (store! (field value a) (cast u8 alpha))
+      (load value))))
+
+;; Mixes a colour toward the page background, standing in for the design's
+;; color-mix(... , #070a0e) fills.
+(defn accent-blend [(tint raylib.Color) (amount i64)] (-> raylib.Color)
+  (let [value (alloc-stack raylib.Color)]
+    (do
+      (store! value tint)
+      (store! (field value r) (cast u8 (/ (* (cast i64 (load (field value r))) amount) 255)))
+      (store! (field value g) (cast u8 (/ (* (cast i64 (load (field value g))) amount) 255)))
+      (store! (field value b) (cast u8 (/ (* (cast i64 (load (field value b))) amount) 255)))
+      (load value))))
 
 (defn refund-title [(node i64)] (-> (ptr i8))
   (case node 0
@@ -830,7 +899,7 @@
             mouseVertical (load (field input mouseVertical))
             hovering (in-bounds mouseHorizontal mouseVertical (- left 2.0) (- top 2.0) (+ width 4.0) (+ height 4.0))
             editing
-              (if (and (= (load (field state creationOpen)) 1) (= (load (field state creationFocused)) 1)) 1 0)]
+              (if (and (= (load (field state view)) VIEW_CREATE) (= (load (field state creationFocused)) 1)) 1 0)]
         (do
           (if hovering (store! (field state hoverSelectableText) 1) 0)
           (if (and hovering (= (load (field input pressed)) 1))
@@ -875,6 +944,260 @@
           (draw-text font text left top size tint)
           0)))))
 
+(defn set-integration [(state (mut AppState))
+                       (slot i64)
+                       (name (ptr i8))
+                       (glyph (ptr i8))
+                       (detail (ptr i8))
+                       (connected bool)] (-> i64)
+  (do
+    (store! (field (index (field state integrations) slot) name) name)
+    (store! (field (index (field state integrations) slot) glyph) glyph)
+    (store! (field (index (field state integrations) slot) detail) detail)
+    (store! (field (index (field state integrations) slot) connected) (if connected 1 0))
+    0))
+
+;; Probes the machine once at startup. `command-available` shells out, so this
+;; must never be called from a draw path.
+(defn detect-integrations [(state (mut AppState))] (-> i64)
+  (do
+    (set-integration (mut state)
+                     0
+                     c"DeepSeek API"
+                     c"ds"
+                     c"chat completions / runs every agent turn"
+                     (or (workflow.environment-set c"DEEPSEEK_KEY")
+                         (workflow.environment-set c"DEEPSEEK_API_KEY")))
+    (set-integration (mut state)
+                     1
+                     c"Agent adapter"
+                     c"ag"
+                     c"tools/deepseek-agent.sh / composes and sends turns"
+                     (workflow.file-exists c"tools/deepseek-agent.sh"))
+    (set-integration (mut state) 2 c"curl" c"cu" c"transport used to reach the API" (workflow.command-available c"curl"))
+    (set-integration (mut state)
+                     3
+                     c"jq"
+                     c"jq"
+                     c"builds request payloads and reads responses"
+                     (workflow.command-available c"jq"))
+    (set-integration (mut state)
+                     4
+                     c"Codex CLI"
+                     c"cx"
+                     c"alternate runner named by a workflow's runner line"
+                     (workflow.command-available c"codex"))
+    (set-integration (mut state)
+                     5
+                     c"Workflow catalog"
+                     c"wf"
+                     c"workflows/*.flow / discovered at startup"
+                     (> (workflow.catalog-count (load (field state catalog))) 0))
+    (set-integration (mut state)
+                     6
+                     c"Run state"
+                     c"rs"
+                     c".flowline/ / prompts, outputs and run history"
+                     (workflow.file-exists c".flowline/runs.log"))
+    0))
+
+;; The run record for the in-flight runtime follows that runtime's collapsed
+;; status. Writes only happen on an actual change, so a long run does not rewrite
+;; the log every frame.
+(defn sync-active-run [(state (mut AppState)) (runtime (ptr workflow.Runtime))] (-> i64)
+  (let [entry (load (field state activeRunEntry))
+        log (load (field state runLog))]
+    (if (< entry 0)
+      0
+      (let [record (workflow.run-log-record log entry)
+            status (workflow.runtime-run-status runtime)]
+        (do
+          (if (!= status (load (field record status)))
+            (workflow.update-run log entry status)
+            0)
+          (if (workflow.is-finished runtime)
+            (store! (field state activeRunEntry) -1)
+            0)
+          0)))))
+
+;; Clearing everything the create view accumulates. Entering `create` from anywhere
+;; always starts from a blank slate rather than a half-finished previous attempt.
+(defn reset-creation [(state (mut AppState))] (-> i64)
+  (do
+    (store! (field state view) VIEW_CREATE)
+    (store! (field state creationState) 0)
+    (store! (field state creationLength) 0)
+    (store! (field state creationAnchor) 0)
+    (store! (field state creationFocus) 0)
+    (store! (field state creationFocused) 1)
+    (store! (field state creationDragging) 0)
+    (store! (field state creationTruncated) 0)
+    (store! (field state designState) 0)
+    (store! (field state designTurn) 0)
+    (store! (load (field state creationText)) (cast i8 0))
+    (store! (load (field state designResponse)) (cast i8 0))
+    (store! (load (field state designRequest)) (cast i8 0))
+    (store! (field state designPreviewValid) 0)
+    0))
+
+;; The sidebar is live in every view, so its hit-testing runs before any view's own.
+(defn apply-sidebar-input [(state (mut AppState)) (input InputFrame) (screenHeight i64)] (-> i64)
+  (let [mouseHorizontal (load (field input mouseHorizontal))
+        mouseVertical (load (field input mouseVertical))
+        catalog (load (field state catalog))]
+    (if (= (load (field input pressed)) 0)
+      0
+      (do
+        (for [slot 0
+              SIDEBAR_NAV_COUNT]
+          (if (in-bounds mouseHorizontal mouseVertical 8.0 (nav-row-top slot) 220.0 32.0)
+            (store! (field state view)
+                    (case slot 0
+                          VIEW_DASHBOARD 1
+                          VIEW_RUNS 2
+                          VIEW_APPROVALS 3
+                          VIEW_TEMPLATES
+                          VIEW_SETTINGS))
+            0))
+        (if (in-bounds mouseHorizontal mouseVertical 176.0 (cast f64 (- SIDEBAR_PROJECTS_LABEL_TOP 4)) 44.0 18.0)
+          (reset-creation (mut state))
+          0)
+        (for [project 0
+              8]
+          (if (and (< project (workflow.catalog-count catalog))
+                   (in-bounds mouseHorizontal mouseVertical 8.0 (project-row-top project) 220.0 45.0))
+            (do
+              (store! (field state selectedProject) project)
+              (store! (field state runtime) (workflow.catalog-runtime catalog project))
+              (store! (field state selectedNode) 0)
+              (store! (field state approvalGranted) 0)
+              (store! (field state view) VIEW_DASHBOARD)
+              0)
+            0))
+        0))))
+
+(defn runs-row-top [(row i64)] (-> f64)
+  (+ (cast f64 (+ VIEW_HEADER_HEIGHT 34)) (cast f64 (* row 40))))
+
+(defn approval-card-top [(card i64)] (-> f64)
+  (+ (cast f64 (+ VIEW_HEADER_HEIGHT 20)) (cast f64 (* card 124))))
+
+;; Which catalog entry a recorded run belongs to, or -1 when its program is no
+;; longer in the catalog.
+(defn project-for-path [(state AppState) (path (ptr i8))] (-> i64)
+  (let [catalog (load (field state catalog))
+        (mut found) -1]
+    (do
+      (for [project 0
+            8]
+        (if (and (< project (workflow.catalog-count catalog))
+                 (workflow.strings-equal (workflow.program-path (workflow.catalog-runtime catalog project)) path))
+          (store! found project)
+          0))
+      (load found))))
+
+(defn open-project-run [(state (mut AppState)) (project i64) (node i64)] (-> i64)
+  (if (< project 0)
+    0
+    (do
+      (store! (field state selectedProject) project)
+      (store! (field state runtime) (workflow.catalog-runtime (load (field state catalog)) project))
+      (store! (field state selectedNode) node)
+      (store! (field state view) VIEW_RUN)
+      0)))
+
+;; Input for the five list-style views. Each block mirrors its view's own row
+;; geometry through the shared *-top helpers so the two cannot drift apart.
+(defn apply-view-input [(state (mut AppState)) (input InputFrame) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (let [mouseHorizontal (load (field input mouseHorizontal))
+        mouseVertical (load (field input mouseVertical))
+        view (load (field state view))
+        left (cast f64 (+ LEFT_WIDTH VIEW_PADDING))
+        right (cast f64 (- screenWidth VIEW_PADDING))
+        catalog (load (field state catalog))
+        log (load (field state runLog))]
+    (if (= (load (field input pressed)) 0)
+      0
+      (do
+        (if (= view VIEW_DASHBOARD)
+          (do
+            (if (in-bounds mouseHorizontal mouseVertical (- (+ (cast f64 LEFT_WIDTH) (- right (cast f64 LEFT_WIDTH))) 128.0) 22.0 128.0 30.0)
+              (reset-creation (mut state))
+              0)
+            (if (in-bounds mouseHorizontal mouseVertical (- right 400.0) (cast f64 (+ VIEW_HEADER_HEIGHT 128)) 92.0 20.0)
+              (store! (field state view) VIEW_RUNS)
+              0)
+            0)
+          0)
+        (if (= view VIEW_RUNS)
+          (do
+            (for [slot 0
+                  4]
+              (if (in-bounds mouseHorizontal mouseVertical (run-filter-left slot screenWidth) 24.0 62.0 26.0)
+                (store! (field state runFilter) slot)
+                0))
+            (let [wanted (run-filter-status (load (field state runFilter)))
+                  (mut row) 0]
+              (for [step 0
+                    64]
+                (let [entry (- (- (workflow.run-log-count log) 1) step)]
+                  (if (>= entry 0)
+                    (let [record (workflow.run-log-record log entry)]
+                      (if (and (or (< wanted 0) (= (load (field record status)) wanted))
+                               (< (load row) 18))
+                        (do
+                          (if (in-bounds mouseHorizontal
+                                         mouseVertical
+                                         (cast f64 LEFT_WIDTH)
+                                         (runs-row-top (load row))
+                                         (- (cast f64 screenWidth) (cast f64 LEFT_WIDTH))
+                                         40.0)
+                            (open-project-run (mut state)
+                                              (project-for-path state (workflow.record-path record))
+                                              0)
+                            0)
+                          (store! row (+ (load row) 1))
+                          0)
+                        0))
+                    0))))
+            0)
+          0)
+        (if (= view VIEW_RUN)
+          (if (in-bounds mouseHorizontal mouseVertical (cast f64 (+ LEFT_WIDTH 24)) 14.0 46.0 22.0)
+            (store! (field state view) VIEW_RUNS)
+            0)
+          0)
+        (if (= view VIEW_APPROVALS)
+          (let [(mut card) 0]
+            (for [project 0
+                  8]
+              (if (< project (workflow.catalog-count catalog))
+                (let [runtime (workflow.catalog-runtime catalog project)]
+                  (for [node 0
+                        7]
+                    (if (and (< node (workflow.node-count runtime))
+                             (= (workflow.node-status runtime node) STATUS_WAITING))
+                      (let [cardTop (approval-card-top (load card))]
+                        (do
+                          (if (in-bounds mouseHorizontal mouseVertical (+ left 18.0) (+ cardTop 78.0) 92.0 26.0)
+                            (do
+                              (store! (field state selectedProject) project)
+                              (store! (field state runtime) runtime)
+                              (store! (field state selectedNode) node)
+                              (store! (field state approvalRequested) 1)
+                              0)
+                            0)
+                          (if (in-bounds mouseHorizontal mouseVertical (- right 90.0) (+ cardTop 80.0) 90.0 22.0)
+                            (open-project-run (mut state) project node)
+                            0)
+                          (store! card (+ (load card) 1))
+                          0))
+                      0)))
+                0))
+            0)
+          0)
+        0))))
+
 (defn apply-input [(state (mut AppState)) (input InputFrame) (screenWidth i64) (screenHeight i64)] (-> i64)
   (let [mouseHorizontal (load (field input mouseHorizontal))
         mouseVertical (load (field input mouseVertical))
@@ -882,7 +1205,10 @@
         center (/ (cast f64 (+ LEFT_WIDTH rightStart)) 2.0)
         catalog (load (field state catalog))
         catalogCount (workflow.catalog-count catalog)]
-    (if (= (load (field state creationOpen)) 1)
+    (do
+    (apply-sidebar-input (mut state) input screenHeight)
+    (apply-view-input (mut state) input screenWidth screenHeight)
+    (if (= (load (field state view)) VIEW_CREATE)
       (do
         (let [textLeft (cast f64 (+ rightStart 54))
               textTop (cast f64 (- screenHeight 58))
@@ -934,50 +1260,22 @@
                                  34.0)))
           (do
             (store! (field state creationRequested) 1)
-            (store! (field state creationOpen) 0)
+            (store! (field state view) VIEW_DASHBOARD)
             0)
           0)
         0)
-      (if (= (load (field input pressed)) 0)
+      (if (or (= (load (field input pressed)) 0) (!= (load (field state view)) VIEW_RUN))
         0
         (do
-          (if (or (in-bounds mouseHorizontal mouseVertical 8.0 (cast f64 (- screenHeight 86)) 228.0 34.0)
-                  (and (= catalogCount 0)
-                       (in-bounds mouseHorizontal
-                                  mouseVertical
-                                  (- (/ (cast f64 (+ LEFT_WIDTH screenWidth)) 2.0) 116.0)
-                                  477.0
-                                  232.0
-                                  42.0)))
-            (do
-              (store! (field state creationOpen) 1)
-              (store! (field state creationState) 0)
-              (store! (field state creationLength) 0)
-              (store! (field state creationAnchor) 0)
-              (store! (field state creationFocus) 0)
-              (store! (field state creationFocused) 1)
-              (store! (field state creationDragging) 0)
-              (store! (field state creationTruncated) 0)
-              (store! (field state designState) 0)
-              (store! (field state designTurn) 0)
-              (store! (load (field state creationText)) (cast i8 0))
-              (store! (load (field state designResponse)) (cast i8 0))
-              (store! (load (field state designRequest)) (cast i8 0))
-              (store! (field state designPreviewValid) 0)
-              0)
+          (if (and (= catalogCount 0)
+                   (in-bounds mouseHorizontal
+                              mouseVertical
+                              (- (/ (cast f64 (+ LEFT_WIDTH screenWidth)) 2.0) 116.0)
+                              477.0
+                              232.0
+                              42.0))
+            (reset-creation (mut state))
             0)
-          (for [project 0
-                8]
-            (if (and (< project (workflow.catalog-count catalog))
-                     (in-bounds mouseHorizontal mouseVertical 8.0 (cast f64 (+ 76 (* project 58))) 228.0 51.0))
-              (do
-                (store! (field state selectedProject) project)
-                (store! (field state runtime) (workflow.catalog-runtime catalog project))
-                (store! (field state selectedNode) 0)
-                (store! (field state approvalGranted) 0)
-                (store! (field state creationOpen) 0)
-                0)
-              0))
           (if (> catalogCount 0)
             (let [runtime (load (field state runtime))
                   depths (cast (ptr i64) (cast i64 (alloc-stack (array i64 7))))
@@ -1010,10 +1308,10 @@
             (do (store! (field state approvalRequested) 1) 0)
             0)
           (if (and (> catalogCount 0)
-                   (in-bounds mouseHorizontal mouseVertical (cast f64 (- rightStart 214)) 14.0 116.0 34.0))
+                   (in-bounds mouseHorizontal mouseVertical (cast f64 (- rightStart 132)) 14.0 116.0 34.0))
             (do (store! (field state runRequested) 1) 0)
             0)
-          0)))))
+          0))))))
 
 (defn draw-grid [(left i64) (right i64) (height i64)] (-> i64)
   (let [gridHorizontal (alloc-stack i64)
@@ -1041,67 +1339,232 @@
           (store! gridVertical (+ (load gridVertical) 32))))
       0)))
 
-(defn draw-projects [(state AppState) (height i64)] (-> i64)
-  (let [selected (load (field state selectedProject))
-        catalog (load (field state catalog))]
+;; How many runtimes in the catalog currently have a node in the given status.
+;; Both counts the sidebar shows are derived from live runtime state, never stored.
+(defn runtime-has-status [(runtime (ptr workflow.Runtime)) (status i64)] (-> bool)
+  (let [(mut matched) 0]
     (do
-      (fill-rectangle 0.0 0.0 (cast f64 LEFT_WIDTH) (cast f64 height) (color 9 12 17))
-      (line (cast f64 (- LEFT_WIDTH 1)) 0.0 (cast f64 (- LEFT_WIDTH 1)) (cast f64 height) 1.0 (color 23 30 39))
-      (line 0.0 55.0 (cast f64 LEFT_WIDTH) 55.0 1.0 (color 20 26 34))
-      (stroke-rectangle 18.0 19.0 15.0 15.0 1.0 (accent selected))
-      (fill-rectangle 23.0 24.0 5.0 5.0 (accent selected))
-      (draw-text (field state monoMedium) c"flowline" 43.0 18.0 13.0 (color 223 229 236))
-      (draw-text (field state mono) c"v0.4" 198.0 21.0 9.0 (color 69 78 90))
-      (draw-text (field state monoMedium) c"PROJECTS" 16.0 64.0 9.0 (color 61 69 79))
+      (for [node 0
+            7]
+        (if (and (< node (workflow.node-count runtime))
+                 (= (workflow.node-status runtime node) status))
+          (store! matched 1)
+          0))
+      (= (load matched) 1))))
+
+;; Nodes, not workflows: one waiting node is one thing a human has to act on, and
+;; a workflow can hold several.
+(defn catalog-waiting-node-count [(catalog (ptr workflow.Catalog))] (-> i64)
+  (let [(mut total) 0]
+    (do
       (for [project 0
             8]
         (if (< project (workflow.catalog-count catalog))
-          (let [rowTop (+ 76 (* project 58))
-                active (= project selected)]
+          (let [runtime (workflow.catalog-runtime catalog project)]
+            (for [node 0
+                  7]
+              (if (and (< node (workflow.node-count runtime))
+                       (= (workflow.node-status runtime node) STATUS_WAITING))
+                (store! total (+ (load total) 1))
+                0)))
+          0))
+      (load total))))
+
+(defn catalog-status-count [(catalog (ptr workflow.Catalog)) (status i64)] (-> i64)
+  (let [(mut total) 0]
+    (do
+      (for [project 0
+            8]
+        (if (and (< project (workflow.catalog-count catalog))
+                 (runtime-has-status (workflow.catalog-runtime catalog project) status))
+          (store! total (+ (load total) 1))
+          0))
+      (load total))))
+
+(defn draw-icon-dashboard [(left f64) (top f64) (tint raylib.Color)] (-> i64)
+  (do
+    (stroke-rectangle (+ left 1.0) (+ top 1.0) 5.0 5.0 1.4 tint)
+    (stroke-rectangle (+ left 8.0) (+ top 1.0) 5.0 5.0 1.4 tint)
+    (stroke-rectangle (+ left 1.0) (+ top 8.0) 5.0 5.0 1.4 tint)
+    (stroke-rectangle (+ left 8.0) (+ top 8.0) 5.0 5.0 1.4 tint)
+    0))
+
+(defn draw-icon-runs [(left f64) (top f64) (tint raylib.Color)] (-> i64)
+  (do
+    (for [row 0
+          3]
+      (let [rowTop (+ top (+ 3.0 (* (cast f64 row) 4.0)))]
+        (do
+          (fill-rectangle (+ left 0.6) (- rowTop 0.7) 1.4 1.4 tint)
+          (line (+ left 4.0) rowTop (+ left 13.0) rowTop 1.4 tint)
+          0)))
+    0))
+
+(defn draw-icon-approvals [(left f64) (top f64) (tint raylib.Color)] (-> i64)
+  (do
+    (stroke-rectangle (+ left 1.0) (+ top 1.0) 12.0 12.0 1.4 tint)
+    (line (+ left 4.0) (+ top 7.0) (+ left 6.2) (+ top 9.2) 1.4 tint)
+    (line (+ left 6.2) (+ top 9.2) (+ left 10.0) (+ top 4.8) 1.4 tint)
+    0))
+
+(defn draw-icon-templates [(left f64) (top f64) (tint raylib.Color)] (-> i64)
+  (do
+    (line (+ left 7.0) (+ top 1.0) (+ left 13.0) (+ top 4.0) 1.4 tint)
+    (line (+ left 13.0) (+ top 4.0) (+ left 7.0) (+ top 7.0) 1.4 tint)
+    (line (+ left 7.0) (+ top 7.0) (+ left 1.0) (+ top 4.0) 1.4 tint)
+    (line (+ left 1.0) (+ top 4.0) (+ left 7.0) (+ top 1.0) 1.4 tint)
+    (line (+ left 1.0) (+ top 7.6) (+ left 7.0) (+ top 10.6) 1.4 tint)
+    (line (+ left 13.0) (+ top 7.6) (+ left 7.0) (+ top 10.6) 1.4 tint)
+    (line (+ left 1.0) (+ top 10.4) (+ left 7.0) (+ top 13.4) 1.4 tint)
+    (line (+ left 13.0) (+ top 10.4) (+ left 7.0) (+ top 13.4) 1.4 tint)
+    0))
+
+(defn draw-icon-settings [(left f64) (top f64) (tint raylib.Color)] (-> i64)
+  (do
+    (raylib.DrawCircleLines (cast i32 (+ left 7.0)) (cast i32 (+ top 7.0)) (cast f32 2.6) tint)
+    (line (+ left 7.0) (+ top 1.0) (+ left 7.0) (+ top 2.6) 1.4 tint)
+    (line (+ left 7.0) (+ top 11.4) (+ left 7.0) (+ top 13.0) 1.4 tint)
+    (line (+ left 1.0) (+ top 7.0) (+ left 2.6) (+ top 7.0) 1.4 tint)
+    (line (+ left 11.4) (+ top 7.0) (+ left 13.0) (+ top 7.0) 1.4 tint)
+    (line (+ left 2.8) (+ top 2.8) (+ left 3.9) (+ top 3.9) 1.4 tint)
+    (line (+ left 10.1) (+ top 10.1) (+ left 11.2) (+ top 11.2) 1.4 tint)
+    (line (+ left 11.2) (+ top 2.8) (+ left 10.1) (+ top 3.9) 1.4 tint)
+    (line (+ left 3.9) (+ top 10.1) (+ left 2.8) (+ top 11.2) 1.4 tint)
+    0))
+
+(defn nav-row-top [(slot i64)] (-> f64)
+  (cast f64 (+ SIDEBAR_NAV_TOP (* slot SIDEBAR_NAV_ROW_HEIGHT))))
+
+(defn project-row-top [(project i64)] (-> f64)
+  (cast f64 (+ SIDEBAR_PROJECTS_TOP (* project SIDEBAR_PROJECT_ROW_HEIGHT))))
+
+;; A nav row draws itself from its slot; `active` is true when `view` routes here.
+;; The trailing badge is optional — pass a null label to omit it.
+(defn draw-nav-row [(state AppState)
+                    (slot i64)
+                    (label (ptr i8))
+                    (active bool)
+                    (badge (ptr i8))
+                    (badgeBoxed bool)] (-> i64)
+  (let [selected (load (field state selectedProject))
+        top (nav-row-top slot)
+        foreground (if active (color 238 242 246) (color 107 116 128))
+        iconTint (if active (color 238 242 246) (color 107 116 128))
+        iconTop (+ top 9.0)]
+    (do
+      (if active (fill-rectangle 8.0 top 220.0 32.0 (accent-alpha selected 36)) 0)
+      (case slot 0
+            (draw-icon-dashboard 19.0 iconTop iconTint) 1
+            (draw-icon-runs 19.0 iconTop iconTint) 2
+            (draw-icon-approvals 19.0 iconTop iconTint) 3
+            (draw-icon-templates 19.0 iconTop iconTint)
+            (draw-icon-settings 19.0 iconTop iconTint))
+      (draw-text (field state monoMedium) label 44.0 (+ top 9.0) 12.0 foreground)
+      (if (= (cast i64 badge) 0)
+        0
+        (if badgeBoxed
+          (let [width (+ (text-width (field state monoMedium) badge 9.0) 10.0)]
+            (do
+              (fill-rectangle (- 220.0 width) (+ top 10.0) width 13.0 (color 74 58 26))
+              (draw-text (field state monoMedium) badge (- 220.0 (- width 5.0)) (+ top 11.0) 9.0 (color 224 165 58))
+              0))
+          (draw-text-right (field state monoMedium) badge 220.0 (+ top 11.0) 9.0 (accent selected))))
+      0)))
+
+(defn draw-sidebar [(state AppState) (height i64)] (-> i64)
+  (let [view (load (field state view))
+        selected (load (field state selectedProject))
+        catalog (load (field state catalog))
+        runningBuffer (cast (ptr i8) (cast i64 (alloc-stack (array i8 16))))
+        approvalBuffer (cast (ptr i8) (cast i64 (alloc-stack (array i8 16))))
+        runningCount (catalog-status-count catalog STATUS_RUNNING)
+        approvalCount (catalog-waiting-node-count catalog)
+        footerTop (cast f64 (- height SIDEBAR_FOOTER_HEIGHT))]
+    (do
+      (fill-rectangle 0.0 0.0 (cast f64 LEFT_WIDTH) (cast f64 height) (color 9 12 17))
+      (line (cast f64 (- LEFT_WIDTH 1)) 0.0 (cast f64 (- LEFT_WIDTH 1)) (cast f64 height) 1.0 (color 23 30 39))
+
+      ;; Header
+      (line 0.0 (cast f64 SIDEBAR_HEADER_HEIGHT) (cast f64 LEFT_WIDTH) (cast f64 SIDEBAR_HEADER_HEIGHT) 1.0 (color 20 26 34))
+      (stroke-rectangle 18.0 17.0 15.0 15.0 1.0 (accent selected))
+      (fill-rectangle 23.0 22.0 5.0 5.0 (accent selected))
+      (draw-text (field state monoMedium) c"flowline" 43.0 16.0 13.0 (color 223 229 236))
+      (draw-text-right (field state monoMedium) c"v0.4" 218.0 19.0 9.0 (color 69 78 90))
+
+      ;; Workspace navigation
+      (draw-text (field state monoMedium) c"WORKSPACE" 16.0 64.0 9.0 (color 61 69 79))
+      (snprintf runningBuffer 16 c"%lld" runningCount)
+      (snprintf approvalBuffer 16 c"%lld" approvalCount)
+      (draw-nav-row state 0 c"Dashboard" (= view VIEW_DASHBOARD) (cast (ptr i8) 0) false)
+      (draw-nav-row state
+                    1
+                    c"Runs"
+                    (or (= view VIEW_RUNS) (= view VIEW_RUN))
+                    (if (> runningCount 0) runningBuffer (cast (ptr i8) 0))
+                    false)
+      (draw-nav-row state
+                    2
+                    c"Approvals"
+                    (= view VIEW_APPROVALS)
+                    (if (> approvalCount 0) approvalBuffer (cast (ptr i8) 0))
+                    true)
+      (draw-nav-row state 3 c"Templates" (= view VIEW_TEMPLATES) (cast (ptr i8) 0) false)
+      (draw-nav-row state 4 c"Settings" (= view VIEW_SETTINGS) (cast (ptr i8) 0) false)
+
+      ;; Projects
+      (draw-text (field state monoMedium) c"PROJECTS" 16.0 (cast f64 SIDEBAR_PROJECTS_LABEL_TOP) 9.0 (color 61 69 79))
+      (let [newTop (cast f64 (- SIDEBAR_PROJECTS_LABEL_TOP 4))]
+        (do
+          (stroke-rectangle 176.0 newTop 44.0 18.0 1.0 (accent-alpha selected 102))
+          (if (= view VIEW_CREATE)
+            (fill-rectangle 176.0 newTop 44.0 18.0 (accent-alpha selected 51))
+            0)
+          (draw-text (field state monoMedium) c"+ new" 182.0 (+ newTop 3.0) 11.0 (accent selected))
+          0))
+      (for [project 0
+            8]
+        (if (< project (workflow.catalog-count catalog))
+          (let [rowTop (project-row-top project)
+                active (and (= project selected) (or (= view VIEW_DASHBOARD) (= view VIEW_RUN)))]
             (do
               (if active
                 (do
-                  (fill-rectangle 8.0 (cast f64 rowTop) 228.0 51.0 (color-alpha 224 165 58 17))
-                  (fill-rectangle 8.0 (cast f64 (+ rowTop 8)) 2.0 35.0 (accent project))
+                  (fill-rectangle 8.0 rowTop 220.0 45.0 (accent-alpha project 33))
+                  (fill-rectangle 8.0 (+ rowTop 8.0) 2.0 29.0 (accent project))
                   0)
                 0)
               (if active
-                (fill-rectangle 20.0 (cast f64 (+ rowTop 17)) 8.0 8.0 (accent project))
-                (stroke-rectangle 20.0 (cast f64 (+ rowTop 17)) 8.0 8.0 1.0 (accent project)))
+                (fill-rectangle 21.0 (+ rowTop 18.0) 8.0 8.0 (accent project))
+                (stroke-rectangle 21.0 (+ rowTop 18.0) 8.0 8.0 1.0 (accent project)))
+              (begin-scissor 40.0 rowTop 168.0 45.0)
               (draw-text (field state monoMedium)
                          (display-project-name state project)
-                         39.0
-                         (cast f64 (+ rowTop 10))
+                         40.0
+                         (+ rowTop 9.0)
                          12.0
                          (if active (color 238 242 246) (color 107 116 128)))
               (draw-text (field state mono)
                          (display-project-subtitle state project)
-                         39.0
-                         (cast f64 (+ rowTop 29))
+                         40.0
+                         (+ rowTop 26.0)
                          9.5
                          (color 76 85 97))
-              (if active
+              (raylib.EndScissorMode)
+              (if (runtime-has-status (workflow.catalog-runtime catalog project) STATUS_RUNNING)
                 (do
-                  (raylib.DrawCircle (cast i32 220) (cast i32 (+ rowTop 22)) (cast f32 3.0) (accent project))
+                  (raylib.DrawCircle (cast i32 216) (cast i32 (+ rowTop 22.0)) (cast f32 3.0) (accent project))
                   0)
                 (do
-                  (raylib.DrawCircleLines (cast i32 220) (cast i32 (+ rowTop 22)) (cast f32 3.0) (color 42 51 63))
+                  (raylib.DrawCircleLines (cast i32 216) (cast i32 (+ rowTop 22.0)) (cast f32 3.0) (color 42 51 63))
                   0))
               0))
           0))
-      (stroke-rectangle 8.0 (cast f64 (- height 86)) 228.0 34.0 1.0 (color 35 44 56))
-      (draw-text (field state monoMedium)
-                 (case (load (field state creationState)) 1
-                       c"... CREATING WORKFLOW" 2
-                       c"+  WORKFLOW CREATED" 3
-                       c"!  CREATION FAILED" c"+  NEW WORKFLOW")
-                 20.0
-                 (cast f64 (- height 76))
-                 10.0
-                 (accent selected))
-      (line 0.0 (cast f64 (- height 41)) (cast f64 LEFT_WIDTH) (cast f64 (- height 41)) 1.0 (color 20 26 34))
-      (fill-rectangle 16.0 (cast f64 (- height 22)) 6.0 6.0 (color 42 51 63))
-      (draw-text (field state mono) c"DISK-BACKED WORKFLOW CATALOG" 30.0 (cast f64 (- height 26)) 8.5 (color 61 69 79))
+
+      ;; Footer — the workspace this catalog was loaded from.
+      (line 0.0 footerTop (cast f64 LEFT_WIDTH) footerTop 1.0 (color 20 26 34))
+      (stroke-rectangle 16.0 (+ footerTop 11.0) 18.0 18.0 1.0 (color 42 51 63))
+      (draw-text (field state mono) c"f" 22.0 (+ footerTop 14.0) 10.0 (color 107 116 128))
+      (draw-text (field state mono) c"workflows / catalog" 42.0 (+ footerTop 15.0) 9.5 (color 61 69 79))
       0)))
 
 (defn draw-edge [(fromHorizontal f64)
@@ -1209,36 +1672,35 @@
             (do
               (if chosen (stroke-rectangle (- horizontal 16.0) (- vertical 16.0) 32.0 32.0 1.0 tint) 0)
               (draw-node-symbol horizontal vertical node (workflow.node-status runtime node) pulse tint)
-              (if (< horizontal center)
+              ;; Titles are full sentences and the column is narrow, so every label
+              ;; sits to the right of its node and is clipped at the column edge.
+              ;; A left-hand label would have almost no room to grow into.
+              (line (+ horizontal 10.0) vertical (+ horizontal 34.0) vertical 1.0 (color-alpha 224 165 58 100))
+              (draw-text (field state monoMedium)
+                         numberLabel
+                         (+ horizontal 42.0)
+                         (- vertical 6.0)
+                         10.0
+                         (if chosen (load tint) (color 127 136 148)))
+              ;; A label stops before its next sibling on the same row, so parallel
+              ;; branches never write over each other.
+              (let [rowCount (load (index rowCounts (load (index depths node))))
+                    nextColumn (+ (load (index columns node)) 1)
+                    labelEnd (if (< nextColumn rowCount)
+                               (- (layout-horizontal nextColumn rowCount center) 26.0)
+                               (cast f64 (- rightStart 10)))]
                 (do
-                  (draw-text (field state mono)
-                             (workflow.node-title runtime node)
-                             (- horizontal 175.0)
-                             (- vertical 6.0)
-                             10.5
-                             (if chosen (load tint) (color 88 97 113)))
-                  (draw-text (field state monoMedium)
-                             numberLabel
-                             (- horizontal 62.0)
-                             (- vertical 6.0)
-                             10.0
-                             (if chosen (load tint) (color 127 136 148)))
-                  (line (- horizontal 34.0) vertical (- horizontal 10.0) vertical 1.0 (color-alpha 224 165 58 100))
-                  0)
-                (do
-                  (line (+ horizontal 10.0) vertical (+ horizontal 34.0) vertical 1.0 (color-alpha 224 165 58 100))
-                  (draw-text (field state monoMedium)
-                             numberLabel
-                             (+ horizontal 42.0)
-                             (- vertical 6.0)
-                             10.0
-                             (if chosen (load tint) (color 127 136 148)))
+                  (begin-scissor (+ horizontal 70.0)
+                                 (- vertical 12.0)
+                                 (- labelEnd (+ horizontal 70.0))
+                                 24.0)
                   (draw-text (field state mono)
                              (workflow.node-title runtime node)
                              (+ horizontal 70.0)
                              (- vertical 6.0)
                              10.5
                              (if chosen (load tint) (color 88 97 113)))
+                  (raylib.EndScissorMode)
                   0))
               0))
           0))
@@ -1257,7 +1719,7 @@
       (let [runtime (load (field state runtime))
             nodeCount (workflow.node-count runtime)
             statusBuffer (cast (ptr i8) (cast i64 (alloc-stack (array i8 64))))
-            badgeLeft (cast f64 (- rightStart 318))
+            badgeLeft (cast f64 (- rightStart 232))
             (mut doneCount) 0
             (mut anyFailed) 0]
         (do
@@ -1274,31 +1736,57 @@
                     c"%lld/%lld / %s"
                     (load doneCount)
                     nodeCount
-                    (cond (= (load anyFailed) 1) c"failed"
-                          (= (load doneCount) nodeCount) c"done"
-                          (workflow.is-started runtime) c"running"
-                          c"idle"))
-          (begin-scissor 268.0 10.0 (- badgeLeft 280.0) 28.0)
-          (draw-text (field state monoMedium) (display-project-name state project) 268.0 14.0 15.0 (color 223 229 236))
-          (raylib.EndScissorMode)
-          (stroke-rectangle badgeLeft 13.0 88.0 20.0 1.0 (color-alpha 224 165 58 100))
-          (draw-text (field state monoMedium) statusBuffer (+ badgeLeft 7.0) 18.0 9.0 tint)
+                    (if (workflow.is-started runtime)
+                      (workflow.run-status-label (workflow.runtime-run-status runtime))
+                      c"idle"))
+          ;; Breadcrumb back to the runs list, then the program and its progress.
+          ;; The badge follows the measured title, but never crosses into the run
+          ;; button's space on the right.
+          (let [left (cast f64 (+ LEFT_WIDTH 24))
+                titleLeft (+ left 62.0)
+                titleWidth (text-width (field state monoMedium) (display-project-name state project) 15.0)
+                limit (cast f64 (- rightStart 240))
+                badgeAt (if (> (+ titleLeft (+ titleWidth 12.0)) limit) limit (+ titleLeft (+ titleWidth 12.0)))]
+            (do
+              (draw-text (field state mono) c"< runs" left 18.0 11.0 (color 76 85 97))
+              (draw-text (field state mono) c"/" (+ left 48.0) 18.0 11.0 (color 42 51 63))
+              (begin-scissor titleLeft 10.0 (- badgeAt (+ titleLeft 10.0)) 28.0)
+              (draw-text (field state monoMedium)
+                         (display-project-name state project)
+                         titleLeft
+                         14.0
+                         15.0
+                         (color 223 229 236))
+              (raylib.EndScissorMode)
+              (stroke-rectangle badgeAt 13.0 88.0 20.0 1.0 (color-alpha 224 165 58 100))
+              (draw-text (field state monoMedium) statusBuffer (+ badgeAt 7.0) 18.0 9.0 tint)
+              0))
           0))
-      (draw-text (field state mono) c"~/" 268.0 39.0 10.5 (color 76 85 97))
-      (begin-scissor 289.0 34.0 123.0 20.0)
-      (draw-text (field state mono) (display-project-path state project) 289.0 39.0 10.5 (color 76 85 97))
-      (raylib.EndScissorMode)
-      (draw-text (field state mono) c">" 420.0 39.0 10.5 tint)
-      (draw-text (field state mono) (display-project-subtitle state project) 436.0 39.0 10.5 (color 76 85 97))
-      (stroke-rectangle (cast f64 (- rightStart 214)) 14.0 116.0 34.0 1.0 (color-alpha 224 165 58 130))
+      (let [left (cast f64 (+ LEFT_WIDTH 24))]
+        (do
+          (draw-text (field state mono) c"~/" left 39.0 10.5 (color 76 85 97))
+          (begin-scissor (+ left 21.0) 34.0 (cast f64 (- (- rightStart 236) LEFT_WIDTH)) 20.0)
+          (draw-text (field state mono) (display-project-path state project) (+ left 21.0) 39.0 10.5 (color 76 85 97))
+          (raylib.EndScissorMode)
+          0))
+      (stroke-rectangle (cast f64 (- rightStart 132)) 14.0 116.0 34.0 1.0 (color-alpha 224 165 58 130))
       (draw-text (field state monoMedium)
                  (if (workflow.is-started (load (field state runtime))) c"RUN AGAIN" c"RUN WORKFLOW")
-                 (cast f64 (- rightStart 199))
+                 (cast f64 (- rightStart 117))
                  24.0
                  9.5
                  tint)
-      (fill-rectangle (cast f64 (- rightStart 76)) 23.0 7.0 7.0 tint)
-      (draw-text (field state monoMedium) c"LIVE" (cast f64 (- rightStart 58)) 21.0 10.0 tint)
+      ;; LIVE claims the run is moving right now, so it only appears when a node
+      ;; is genuinely running.
+      (if (runtime-has-status (load (field state runtime)) STATUS_RUNNING)
+        (do
+          (fill-rectangle (cast f64 (- rightStart 208)) 23.0 7.0 7.0 tint)
+          (draw-text (field state monoMedium) c"LIVE" (cast f64 (- rightStart 190)) 21.0 10.0 tint)
+          0)
+        0)
+      ;; draw-flow clips each node label individually, so no enclosing scissor is
+      ;; used here — raylib's scissor does not nest, and an inner EndScissorMode
+      ;; would silently drop an outer one.
       (draw-flow state
                  (load (field state runtime))
                  (load (field state selectedNode))
@@ -1355,22 +1843,37 @@
     (draw-text (field state mono) c"cost  $0.011" (+ left 222.0) 511.0 9.5 (color 127 136 148))
     0))
 
-(defn draw-approval [(state (mut AppState)) (input InputFrame) (left f64) (width f64) (height i64) (tint raylib.Color)] (-> i64)
+;; The approval card describes the step actually waiting: what upstream produced
+;; (its dependency's captured output) and what this node is asking you to sign
+;; off (its own title). Nothing here is written into the source.
+(defn draw-approval [(state (mut AppState))
+                     (input InputFrame)
+                     (left f64)
+                     (width f64)
+                     (height i64)
+                     (node i64)
+                     (tint raylib.Color)] (-> i64)
   (let [approved (load (field state approvalGranted))
+        runtime (load (field state runtime))
+        upstream (workflow.node-dependency runtime node 0)
         cardY (cast f64 (- height 244))]
     (do
       (draw-card-background left 148.0 width 82.0 true tint)
       (fill-rectangle (+ left 13.0) 161.0 6.0 6.0 tint)
-      (draw-text (field state monoMedium) c"ORCHESTRATOR" (+ left 27.0) 157.0 9.0 (color 127 136 148))
+      (draw-text (field state monoMedium) c"UPSTREAM OUTPUT" (+ left 27.0) 157.0 9.0 (color 127 136 148))
+      (begin-scissor (+ left 13.0) 176.0 (- width 26.0) 48.0)
       (selectable-text (mut state)
                        input
                        3
                        (field state sans)
-                       c"Refund is under threshold, but this account was flagged\nfor a billing spot-check before payout."
+                       (if (< upstream 0)
+                         c"This gate has no upstream step - it is waiting on you directly."
+                         (workflow.node-output runtime upstream))
                        (+ left 13.0)
                        182.0
                        12.5
                        (color 200 207 216))
+      (raylib.EndScissorMode)
       (fill-rectangle left cardY width 122.0 (color 20 16 10))
       (stroke-rectangle left cardY width 122.0 1.0 (color 74 58 26))
       (stroke-rectangle (+ left 13.0) (+ cardY 14.0) 9.0 9.0 1.5 tint)
@@ -1380,17 +1883,19 @@
                  (+ cardY 11.0)
                  9.0
                  tint)
+      (begin-scissor (+ left 13.0) (+ cardY 34.0) (- width 26.0) 44.0)
       (selectable-text (mut state)
                        input
                        4
                        (field state sans)
                        (if (= approved 1)
-                         c"Approved. The payout step is ready to continue."
-                         c"Issue a $48.00 refund to card ending 4821 and send\nthe drafted reply?")
+                         c"Approved. The dependent steps are free to continue."
+                         (workflow.node-title runtime node))
                        (+ left 13.0)
                        (+ cardY 40.0)
                        12.5
                        (color 185 172 147))
+      (raylib.EndScissorMode)
       (fill-rectangle left (cast f64 (- height 174)) 112.0 34.0 (if (= approved 1) (color 58 82 67) (load tint)))
       (draw-text (field state monoMedium)
                  (if (= approved 1) c"APPROVED" c"APPROVE  >")
@@ -1522,7 +2027,7 @@
                  9.5
                  (if (>= node 4) (load tint) (color 111 154 126)))
       (if (= (workflow.node-kind (load (field state runtime)) node) 1)
-        (draw-approval (mut state) input contentLeft width screenHeight tint)
+        (draw-approval (mut state) input contentLeft width screenHeight node tint)
         (draw-generic-feed (mut state) input contentLeft width project node tint))
       (fill-rectangle (cast f64 rightStart) (cast f64 (- screenHeight 49)) (cast f64 RIGHT_WIDTH) 49.0 (color 9 12 17))
       (line (cast f64 rightStart)
@@ -1917,23 +2422,683 @@
                  tint)
       0)))
 
-(defn draw-app [(state (mut AppState)) (input InputFrame) (screenWidth i64) (screenHeight i64)] (-> i64)
+(const VIEW_HEADER_HEIGHT 72)
+(const VIEW_PADDING 26)
+
+(defn format-duration [(seconds i64) (buffer (ptr i8))] (-> (ptr i8))
   (do
-    (raylib.ClearBackground (color 7 10 14))
-    (draw-projects state screenHeight)
-    (if (= (load (field state creationOpen)) 1)
-      (draw-design-workspace (mut state) input screenWidth screenHeight)
-      (if (= (workflow.catalog-count (load (field state catalog))) 0)
-        (draw-empty-workspace state screenWidth screenHeight)
-        (do
-          (draw-center state screenWidth screenHeight)
-          (draw-right (mut state) input screenWidth screenHeight)
-          0)))
-    (if (and (= (load (field state creationOpen)) 0)
-             (or (= (load (field state creationState)) 1) (= (load (field state creationState)) 3)))
-      (draw-creation-banner state screenWidth)
-      0)
+    (snprintf buffer 32 c"%lldm %02llds" (/ seconds 60) (% seconds 60))
+    buffer))
+
+;; Wall-clock age rendered the way the runs table reads it: coarse, and never
+;; more precise than the underlying second-granularity timestamp.
+(defn format-relative [(seconds i64) (buffer (ptr i8))] (-> (ptr i8))
+  (do
+    (cond (< seconds 45) (snprintf buffer 32 c"just now")
+          (< seconds 5400) (snprintf buffer 32 c"%lldm ago" (/ seconds 60))
+          (< seconds 86400) (snprintf buffer 32 c"%lldh ago" (/ seconds 3600))
+          (snprintf buffer 32 c"%lldd ago" (/ seconds 86400)))
+    buffer))
+
+(defn run-status-color [(status i64) (tint raylib.Color)] (-> raylib.Color)
+  (cond (= status RUN_RUNNING) tint
+        (= status RUN_DONE) (color 111 154 126)
+        (= status RUN_WAITING) (color 224 165 58)
+        (color 201 106 90)))
+
+(defn draw-card [(left f64) (top f64) (width f64) (height f64)] (-> i64)
+  (do
+    (fill-rectangle left top width height (color 11 15 21))
+    (stroke-rectangle left top width height 1.0 (color 23 30 39))
     0))
+
+(defn draw-label [(state AppState) (text (ptr i8)) (left f64) (top f64) (tint raylib.Color)] (-> i64)
+  (draw-text (field state monoMedium) text left top 9.0 tint))
+
+;; A status pill: a small filled square in the status colour followed by its label.
+(defn draw-status-chip [(state AppState)
+                        (status i64)
+                        (left f64)
+                        (top f64)
+                        (tint raylib.Color)] (-> i64)
+  (let [statusTint (run-status-color status tint)]
+    (do
+      (fill-rectangle left (+ top 3.0) 6.0 6.0 statusTint)
+      (draw-text (field state monoMedium) (workflow.run-status-label status) (+ left 12.0) top 9.5 statusTint)
+      0)))
+
+;; Counts over the whole run log, used by both the dashboard tiles and the runs
+;; header. `projectPath` narrows to one workflow; a null pointer counts everything.
+(defn run-log-tally [(state AppState) (projectPath (ptr i8)) (status i64)] (-> i64)
+  (let [log (load (field state runLog))
+        (mut total) 0]
+    (do
+      (for [entry 0
+            64]
+        (if (< entry (workflow.run-log-count log))
+          (let [record (workflow.run-log-record log entry)]
+            (if (and (or (= (cast i64 projectPath) 0)
+                         (workflow.strings-equal (workflow.record-path record) projectPath))
+                     (or (< status 0) (= (load (field record status)) status)))
+              (store! total (+ (load total) 1))
+              0))
+          0))
+      (load total))))
+
+;; How many nodes of each shape a program has. These drive the template cards and
+;; are read straight off the parsed program, never stored alongside it.
+(defn program-approval-count [(runtime (ptr workflow.Runtime))] (-> i64)
+  (let [(mut total) 0]
+    (do
+      (for [node 0
+            7]
+        (if (and (< node (workflow.node-count runtime))
+                 (= (workflow.node-kind runtime node) KIND_APPROVAL))
+          (store! total (+ (load total) 1))
+          0))
+      (load total))))
+
+;; A join is a node that waits on two dependencies, so it is also the point where
+;; one fanned-out branch reconverges.
+(defn program-join-count [(runtime (ptr workflow.Runtime))] (-> i64)
+  (let [(mut total) 0]
+    (do
+      (for [node 0
+            7]
+        (if (and (< node (workflow.node-count runtime))
+                 (>= (workflow.node-dependency runtime node 1) 0))
+          (store! total (+ (load total) 1))
+          0))
+      (load total))))
+
+;; Every workspace view shares one header: title over a dimmer subtitle, with a rule
+;; underneath. Returns the y the body content starts at.
+(defn draw-view-header [(state AppState)
+                        (screenWidth i64)
+                        (title (ptr i8))
+                        (subtitle (ptr i8))] (-> f64)
+  (let [left (cast f64 (+ LEFT_WIDTH VIEW_PADDING))]
+    (do
+      (draw-text (field state monoMedium) title left 16.0 16.0 (color 223 229 236))
+      (draw-text (field state mono) subtitle left 42.0 10.5 (color 76 85 97))
+      (line (cast f64 LEFT_WIDTH)
+            (cast f64 VIEW_HEADER_HEIGHT)
+            (cast f64 screenWidth)
+            (cast f64 VIEW_HEADER_HEIGHT)
+            1.0
+            (color 20 26 34))
+      (cast f64 VIEW_HEADER_HEIGHT))))
+
+(defn draw-stat-tile [(state AppState)
+                      (left f64)
+                      (top f64)
+                      (width f64)
+                      (label (ptr i8))
+                      (value (ptr i8))
+                      (sub (ptr i8))
+                      (valueTint raylib.Color)] (-> i64)
+  (do
+    (draw-card left top width 88.0)
+    (draw-label state label (+ left 16.0) (+ top 15.0) (color 76 85 97))
+    (draw-text (field state monoMedium) value (+ left 16.0) (+ top 32.0) 26.0 valueTint)
+    (draw-text (field state mono) sub (+ left 16.0) (+ top 67.0) 9.5 (color 76 85 97))
+    0))
+
+(defn draw-dashboard-view [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (let [project (load (field state selectedProject))
+        runtime (workflow.catalog-runtime (load (field state catalog)) project)
+        left (cast f64 (+ LEFT_WIDTH VIEW_PADDING))
+        contentWidth (- (cast f64 screenWidth) (cast f64 (+ LEFT_WIDTH (* VIEW_PADDING 2))))
+        tint (accent project)
+        projectPath (display-project-path state project)
+        scratch (cast (ptr i8) (cast i64 (alloc-stack (array i8 64))))
+        second (cast (ptr i8) (cast i64 (alloc-stack (array i8 64))))
+        doneTotal (run-log-tally state projectPath RUN_DONE)
+        failedTotal (run-log-tally state projectPath RUN_FAILED)
+        projectTotal (run-log-tally state projectPath -1)]
+    (do
+      ;; Header
+      (fill-rectangle left 20.0 10.0 10.0 tint)
+      (draw-text (field state monoMedium)
+                 (display-project-name state project)
+                 (+ left 21.0)
+                 16.0
+                 16.0
+                 (color 223 229 236))
+      (let [badgeLeft (+ (+ left 33.0) (text-width (field state monoMedium) (display-project-name state project) 16.0))
+            label (if (runtime-has-status runtime STATUS_RUNNING)
+                    c"running"
+                    (if (runtime-has-status runtime STATUS_WAITING) c"waiting" c"idle"))]
+        (do
+          (stroke-rectangle badgeLeft 19.0 (+ (text-width (field state monoMedium) label 9.5) 14.0) 17.0 1.0 (accent-alpha project 102))
+          (draw-text (field state monoMedium) label (+ badgeLeft 7.0) 22.0 9.5 tint)
+          0))
+      (draw-text (field state mono) c"~/" left 42.0 10.5 (color 76 85 97))
+      (draw-text (field state mono) projectPath (+ left 21.0) 42.0 10.5 (color 76 85 97))
+      (let [buttonWidth 128.0
+            buttonLeft (- (+ (cast f64 LEFT_WIDTH) (+ contentWidth (cast f64 VIEW_PADDING))) buttonWidth)]
+        (do
+          (fill-rectangle buttonLeft 22.0 buttonWidth 30.0 (accent-alpha project 31))
+          (stroke-rectangle buttonLeft 22.0 buttonWidth 30.0 1.0 (accent-alpha project 115))
+          (draw-text (field state monoMedium) c"+ new workflow" (+ buttonLeft 15.0) 31.0 11.0 tint)
+          0))
+      (line (cast f64 LEFT_WIDTH)
+            (cast f64 VIEW_HEADER_HEIGHT)
+            (cast f64 screenWidth)
+            (cast f64 VIEW_HEADER_HEIGHT)
+            1.0
+            (color 20 26 34))
+
+      ;; Stat tiles, all four counted off the run log and the live runtime.
+      (let [tileWidth (/ (- contentWidth 36.0) 4.0)
+            tileTop (cast f64 (+ VIEW_HEADER_HEIGHT 22))]
+        (do
+          (snprintf scratch 64 c"%lld" (run-log-tally state projectPath RUN_RUNNING))
+          (draw-stat-tile state left tileTop tileWidth c"ACTIVE RUNS" scratch c"in progress now" tint)
+          (snprintf second 64 c"%lld" (run-log-tally state projectPath RUN_WAITING))
+          (draw-stat-tile state
+                          (+ left (+ tileWidth 12.0))
+                          tileTop
+                          tileWidth
+                          c"AWAITING APPROVAL"
+                          second
+                          c"paused on humans"
+                          (color 224 165 58))
+          (let [completed (cast (ptr i8) (cast i64 (alloc-stack (array i8 32))))
+                rate (cast (ptr i8) (cast i64 (alloc-stack (array i8 32))))]
+            (do
+              (snprintf completed 32 c"%lld" doneTotal)
+              (draw-stat-tile state
+                              (+ left (* (+ tileWidth 12.0) 2.0))
+                              tileTop
+                              tileWidth
+                              c"COMPLETED"
+                              completed
+                              c"finished runs"
+                              (color 223 229 236))
+              (if (> (+ doneTotal failedTotal) 0)
+                (snprintf rate 32 c"%lld%%" (/ (* doneTotal 100) (+ doneTotal failedTotal)))
+                (snprintf rate 32 c"--"))
+              (draw-stat-tile state
+                              (+ left (* (+ tileWidth 12.0) 3.0))
+                              tileTop
+                              tileWidth
+                              c"SUCCESS RATE"
+                              rate
+                              c"across recorded runs"
+                              (color 111 154 126))
+              0))
+          0))
+
+      ;; Recent runs for this workflow, and the workflow's own shape.
+      (let [panelTop (cast f64 (+ VIEW_HEADER_HEIGHT 132))
+            sideWidth 320.0
+            listWidth (- contentWidth (+ sideWidth 22.0))
+            sideLeft (+ left (+ listWidth 22.0))]
+        (do
+          (draw-label state c"RECENT RUNS" left panelTop (color 107 116 128))
+          (draw-text-right (field state mono) c"view all >" (+ left listWidth) panelTop 10.0 tint)
+          (if (= projectTotal 0)
+            (do
+              (draw-card left (+ panelTop 19.0) listWidth 56.0)
+              (draw-text (field state mono)
+                         c"no runs recorded yet - start one from the run view"
+                         (+ left 14.0)
+                         (+ panelTop 39.0)
+                         10.5
+                         (color 76 85 97))
+              0)
+            (let [log (load (field state runLog))
+                  (mut drawn) 0]
+              (do
+                (draw-card left (+ panelTop 19.0) listWidth (cast f64 (* (if (> projectTotal 5) 5 projectTotal) 38)))
+                (for [step 0
+                      64]
+                  (let [entry (- (- (workflow.run-log-count log) 1) step)]
+                    (if (and (>= entry 0) (< (load drawn) 5))
+                      (let [record (workflow.run-log-record log entry)]
+                        (if (workflow.strings-equal (workflow.record-path record) projectPath)
+                          (let [rowTop (+ (+ panelTop 19.0) (cast f64 (* (load drawn) 38)))]
+                            (do
+                              (if (> (load drawn) 0)
+                                (line left rowTop (+ left listWidth) rowTop 1.0 (color 19 25 34))
+                                0)
+                              (draw-text (field state monoMedium)
+                                         (workflow.record-id record)
+                                         (+ left 14.0)
+                                         (+ rowTop 13.0)
+                                         11.0
+                                         (color 199 205 214))
+                              (begin-scissor (+ left 106.0) rowTop (- listWidth 300.0) 38.0)
+                              (draw-text (field state mono)
+                                         (workflow.record-name record)
+                                         (+ left 106.0)
+                                         (+ rowTop 13.0)
+                                         11.0
+                                         (color 107 116 128))
+                              (raylib.EndScissorMode)
+                              (draw-status-chip state
+                                                (load (field record status))
+                                                (- (+ left listWidth) 168.0)
+                                                (+ rowTop 14.0)
+                                                tint)
+                              (draw-text-right (field state mono)
+                                               (format-duration (load (field record duration)) scratch)
+                                               (- (+ left listWidth) 14.0)
+                                               (+ rowTop 14.0)
+                                               10.0
+                                               (color 76 85 97))
+                              (store! drawn (+ (load drawn) 1))
+                              0))
+                          0))
+                      0)))
+                0)))
+
+          (draw-label state c"WORKFLOW" sideLeft panelTop (color 107 116 128))
+          (draw-card sideLeft (+ panelTop 19.0) sideWidth 92.0)
+          (begin-scissor (+ sideLeft 14.0) (+ panelTop 19.0) (- sideWidth 100.0) 92.0)
+          (draw-text (field state monoMedium)
+                     (workflow.program-name runtime)
+                     (+ sideLeft 14.0)
+                     (+ panelTop 31.0)
+                     12.0
+                     (color 207 214 222))
+          (raylib.EndScissorMode)
+          (snprintf scratch 64 c"%lld steps" (workflow.node-count runtime))
+          (draw-text-right (field state mono) scratch (- (+ sideLeft sideWidth) 14.0) (+ panelTop 33.0) 9.0 (color 76 85 97))
+          (draw-text (field state mono) c"runner" (+ sideLeft 14.0) (+ panelTop 54.0) 9.5 (color 76 85 97))
+          (draw-text (field state mono)
+                     (workflow.program-runner runtime)
+                     (+ sideLeft 62.0)
+                     (+ panelTop 54.0)
+                     9.5
+                     tint)
+          (snprintf second
+                    64
+                    c"%lld runs / %lld approval steps"
+                    projectTotal
+                    (program-approval-count runtime))
+          (draw-text (field state mono) second (+ sideLeft 14.0) (+ panelTop 74.0) 9.5 (color 76 85 97))
+          0))
+      0)))
+
+;; Filter slots 0-3 map onto "everything" plus the three run statuses worth
+;; singling out. Slot 0 is the only one that does not correspond to a status.
+(defn run-filter-status [(slot i64)] (-> i64)
+  (case slot 0
+        -1 1
+        RUN_RUNNING 2
+        RUN_WAITING RUN_DONE))
+
+(defn run-filter-label [(slot i64)] (-> (ptr i8))
+  (case slot 0
+        c"all" 1
+        c"running" 2
+        c"waiting" c"done"))
+
+(defn run-filter-left [(slot i64) (screenWidth i64)] (-> f64)
+  (- (cast f64 (- screenWidth VIEW_PADDING)) (- 268.0 (cast f64 (* slot 68)))))
+
+(defn draw-runs-view [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (let [left (cast f64 (+ LEFT_WIDTH VIEW_PADDING))
+        right (cast f64 (- screenWidth VIEW_PADDING))
+        tint (accent (load (field state selectedProject)))
+        log (load (field state runLog))
+        filter (load (field state runFilter))
+        wanted (run-filter-status filter)
+        scratch (cast (ptr i8) (cast i64 (alloc-stack (array i8 64))))
+        subtitle (cast (ptr i8) (cast i64 (alloc-stack (array i8 96))))
+        now (workflow.now-seconds)]
+    (do
+      (snprintf subtitle 96 c"every recorded execution / %lld total" (workflow.run-log-count log))
+      (draw-view-header state screenWidth c"Runs" subtitle)
+      (for [slot 0
+            4]
+        (let [buttonLeft (run-filter-left slot screenWidth)
+              active (= slot filter)]
+          (do
+            (if active (fill-rectangle buttonLeft 24.0 62.0 26.0 (accent-alpha (load (field state selectedProject)) 36)) 0)
+            (stroke-rectangle buttonLeft 24.0 62.0 26.0 1.0 (if active (accent-alpha (load (field state selectedProject)) 128) (color 27 35 46)))
+            (draw-text (field state monoMedium)
+                       (run-filter-label slot)
+                       (+ buttonLeft 11.0)
+                       32.0
+                       10.0
+                       (if active tint (color 107 116 128)))
+            0)))
+
+      ;; Column rule
+      (let [top (cast f64 (+ VIEW_HEADER_HEIGHT 1))]
+        (do
+          (draw-label state c"RUN" left (+ top 11.0) (color 61 69 79))
+          (draw-label state c"WORKFLOW" (+ left 96.0) (+ top 11.0) (color 61 69 79))
+          (draw-label state c"PROGRAM" (+ left 300.0) (+ top 11.0) (color 61 69 79))
+          (draw-label state c"TRIGGER" (- right 300.0) (+ top 11.0) (color 61 69 79))
+          (draw-label state c"STATUS" (- right 210.0) (+ top 11.0) (color 61 69 79))
+          (draw-label state c"STARTED" (- right 130.0) (+ top 11.0) (color 61 69 79))
+          (draw-text-right (field state monoMedium) c"DURATION" right (+ top 11.0) 9.0 (color 61 69 79))
+          (line (cast f64 LEFT_WIDTH) (+ top 33.0) (cast f64 screenWidth) (+ top 33.0) 1.0 (color 23 30 39))
+          0))
+
+      (if (= (workflow.run-log-count log) 0)
+        (draw-text (field state mono)
+                   c"no runs recorded yet - every run you start from a workflow lands here"
+                   left
+                   (cast f64 (+ VIEW_HEADER_HEIGHT 60))
+                   11.0
+                   (color 76 85 97))
+        (let [(mut drawn) 0]
+          (do
+            (for [step 0
+                  64]
+              (let [entry (- (- (workflow.run-log-count log) 1) step)]
+                (if (>= entry 0)
+                  (let [record (workflow.run-log-record log entry)
+                        status (load (field record status))]
+                    (if (and (or (< wanted 0) (= status wanted))
+                             (< (load drawn) 18))
+                      (let [rowTop (+ (cast f64 (+ VIEW_HEADER_HEIGHT 34)) (cast f64 (* (load drawn) 40)))]
+                        (do
+                          (line (cast f64 LEFT_WIDTH)
+                                (+ rowTop 40.0)
+                                (cast f64 screenWidth)
+                                (+ rowTop 40.0)
+                                1.0
+                                (color 19 25 34))
+                          (draw-text (field state monoMedium)
+                                     (workflow.record-id record)
+                                     left
+                                     (+ rowTop 14.0)
+                                     11.0
+                                     (color 199 205 214))
+                          (begin-scissor (+ left 96.0) rowTop 196.0 40.0)
+                          (draw-text (field state mono)
+                                     (workflow.record-name record)
+                                     (+ left 96.0)
+                                     (+ rowTop 14.0)
+                                     11.0
+                                     (color 207 214 222))
+                          (raylib.EndScissorMode)
+                          (begin-scissor (+ left 300.0) rowTop (- (- right 300.0) (+ left 312.0)) 40.0)
+                          (draw-text (field state mono)
+                                     (workflow.record-path record)
+                                     (+ left 300.0)
+                                     (+ rowTop 14.0)
+                                     10.0
+                                     (color 92 102 114))
+                          (raylib.EndScissorMode)
+                          (draw-text (field state mono)
+                                     (workflow.record-trigger record)
+                                     (- right 300.0)
+                                     (+ rowTop 14.0)
+                                     10.0
+                                     (color 92 102 114))
+                          (draw-status-chip state status (- right 210.0) (+ rowTop 15.0) tint)
+                          (draw-text (field state mono)
+                                     (format-relative (- now (load (field record startedAt))) scratch)
+                                     (- right 130.0)
+                                     (+ rowTop 15.0)
+                                     10.0
+                                     (color 76 85 97))
+                          (draw-text-right (field state mono)
+                                           (format-duration (load (field record duration)) scratch)
+                                           right
+                                           (+ rowTop 15.0)
+                                           10.0
+                                           (color 76 85 97))
+                          (store! drawn (+ (load drawn) 1))
+                          0))
+                      0))
+                  0)))
+            (if (= (load drawn) 0)
+              (draw-text (field state mono)
+                         c"no runs match this filter"
+                         left
+                         (cast f64 (+ VIEW_HEADER_HEIGHT 60))
+                         11.0
+                         (color 76 85 97))
+              0)
+            0)))
+      0)))
+
+;; One card per node actually sitting in STATUS_WAITING. The list is derived from
+;; the live runtimes every frame — there is no separate approvals store to drift.
+(defn draw-approvals-view [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (let [left (cast f64 (+ LEFT_WIDTH VIEW_PADDING))
+        right (cast f64 (- screenWidth VIEW_PADDING))
+        catalog (load (field state catalog))
+        subtitle (cast (ptr i8) (cast i64 (alloc-stack (array i8 96))))
+        pending (catalog-waiting-node-count catalog)
+        (mut drawn) 0]
+    (do
+      (snprintf subtitle 96 c"%lld step(s) paused, waiting on a human" pending)
+      (draw-view-header state screenWidth c"Approvals" subtitle)
+      (for [project 0
+            8]
+        (if (< project (workflow.catalog-count catalog))
+          (let [runtime (workflow.catalog-runtime catalog project)
+                tint (accent project)]
+            (for [node 0
+                  7]
+              (if (and (< node (workflow.node-count runtime))
+                       (= (workflow.node-status runtime node) STATUS_WAITING))
+                (let [cardTop (+ (cast f64 (+ VIEW_HEADER_HEIGHT 20)) (cast f64 (* (load drawn) 124)))
+                      width (- right left)]
+                  (do
+                    (draw-card left cardTop width 112.0)
+                    (fill-rectangle left cardTop 2.0 112.0 tint)
+                    (fill-rectangle (+ left 18.0) (+ cardTop 18.0) 8.0 8.0 tint)
+                    (draw-text (field state monoMedium)
+                               (workflow.program-name runtime)
+                               (+ left 34.0)
+                               (+ cardTop 14.0)
+                               12.0
+                               (color 223 229 236))
+                    (draw-text (field state mono)
+                               (workflow.program-path runtime)
+                               (+ left 34.0)
+                               (+ cardTop 34.0)
+                               10.0
+                               (color 76 85 97))
+                    (draw-text-right (field state mono) c"awaiting approval" (- right 18.0) (+ cardTop 16.0) 10.0 (color 224 165 58))
+                    (draw-text (field state sans)
+                               (workflow.node-title runtime node)
+                               (+ left 18.0)
+                               (+ cardTop 54.0)
+                               12.5
+                               (color 185 192 202))
+                    (fill-rectangle (+ left 18.0) (+ cardTop 78.0) 92.0 26.0 tint)
+                    (draw-text (field state monoMedium) c"APPROVE" (+ left 34.0) (+ cardTop 85.0) 10.5 (color 10 14 19))
+                    (stroke-rectangle (+ left 118.0) (+ cardTop 78.0) 142.0 26.0 1.0 (color 42 51 63))
+                    (draw-text (field state monoMedium) c"REQUEST CHANGES" (+ left 130.0) (+ cardTop 85.0) 10.5 (color 136 146 160))
+                    (draw-text-right (field state mono) c"open run >" (- right 18.0) (+ cardTop 86.0) 10.0 (color 92 102 114))
+                    (store! drawn (+ (load drawn) 1))
+                    0))
+                0)))
+          0))
+      (if (= (load drawn) 0)
+        (draw-text (field state mono)
+                   c"nothing is waiting on you - approval steps appear here when a run reaches one"
+                   left
+                   (cast f64 (+ VIEW_HEADER_HEIGHT 30))
+                   11.0
+                   (color 76 85 97))
+        0)
+      0)))
+
+;; A step pip, shaded by what the step actually is: approvals read as an outline
+;; because they are the steps that stop and wait, agents as filled.
+(defn draw-step-pip [(left f64) (top f64) (kind i64) (tint raylib.Color)] (-> i64)
+  (if (= kind KIND_APPROVAL)
+    (stroke-rectangle left top 9.0 9.0 1.0 (color 224 165 58))
+    (do
+      (fill-rectangle left top 9.0 9.0 (accent-blend tint 150))
+      (stroke-rectangle left top 9.0 9.0 1.0 tint)
+      0)))
+
+;; Every card is one real .flow program in the catalog. Step, join and approval
+;; counts are read off the parsed program each frame.
+(defn draw-template-card [(state AppState)
+                          (project i64)
+                          (left f64)
+                          (top f64)
+                          (width f64)] (-> i64)
+  (let [runtime (workflow.catalog-runtime (load (field state catalog)) project)
+        tint (accent project)
+        steps (workflow.node-count runtime)
+        scratch (cast (ptr i8) (cast i64 (alloc-stack (array i8 96))))]
+    (do
+      (draw-card left top width 176.0)
+      (let [runner (workflow.program-runner runtime)
+            chipWidth (+ (text-width (field state monoMedium) runner 9.0) 14.0)]
+        (do
+          (stroke-rectangle (+ left 16.0) (+ top 16.0) chipWidth 16.0 1.0 (accent-alpha project 89))
+          (draw-text (field state monoMedium) runner (+ left 23.0) (+ top 19.0) 9.0 tint)
+          0))
+      (snprintf scratch 96 c"%lld runs" (run-log-tally state (workflow.program-path runtime) -1))
+      (draw-text-right (field state mono) scratch (- (+ left width) 16.0) (+ top 19.0) 9.0 (color 76 85 97))
+      (begin-scissor (+ left 16.0) (+ top 40.0) (- width 32.0) 24.0)
+      (draw-text (field state monoMedium)
+                 (workflow.program-name runtime)
+                 (+ left 16.0)
+                 (+ top 44.0)
+                 14.0
+                 (color 223 229 236))
+      (raylib.EndScissorMode)
+      (begin-scissor (+ left 16.0) (+ top 66.0) (- width 32.0) 20.0)
+      (draw-text (field state mono)
+                 (workflow.program-path runtime)
+                 (+ left 16.0)
+                 (+ top 68.0)
+                 11.0
+                 (color 107 116 128))
+      (raylib.EndScissorMode)
+
+      ;; The program's shape, one pip per step with a rule between them.
+      (for [node 0
+            7]
+        (if (< node steps)
+          (let [pipLeft (+ (+ left 16.0) (cast f64 (* node 22)))]
+            (do
+              (draw-step-pip pipLeft (+ top 96.0) (workflow.node-kind runtime node) tint)
+              (if (< node (- steps 1))
+                (line (+ pipLeft 11.0) (+ top 100.5) (+ pipLeft 20.0) (+ top 100.5) 1.0 (color 42 51 63))
+                0)
+              0))
+          0))
+      (snprintf scratch
+                96
+                c"%lld steps    %lld joins    %lld approvals"
+                steps
+                (program-join-count runtime)
+                (program-approval-count runtime))
+      (draw-text (field state mono) scratch (+ left 16.0) (+ top 120.0) 9.5 (color 76 85 97))
+      (fill-rectangle (+ left 16.0) (+ top 140.0) 96.0 24.0 (accent-alpha project 31))
+      (stroke-rectangle (+ left 16.0) (+ top 140.0) 96.0 24.0 1.0 (accent-alpha project 115))
+      (draw-text (field state monoMedium) c"open run" (+ left 30.0) (+ top 146.0) 10.5 tint)
+      (stroke-rectangle (+ left 120.0) (+ top 140.0) 88.0 24.0 1.0 (color 42 51 63))
+      (draw-text (field state monoMedium) c"view DSL" (+ left 133.0) (+ top 146.0) 10.5 (color 107 116 128))
+      0)))
+
+(defn draw-templates-view [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (let [catalog (load (field state catalog))
+        left (cast f64 (+ LEFT_WIDTH VIEW_PADDING))
+        contentWidth (- (cast f64 screenWidth) (cast f64 (+ LEFT_WIDTH (* VIEW_PADDING 2))))
+        columns 3
+        cardWidth (/ (- contentWidth (cast f64 (* (- columns 1) 14))) (cast f64 columns))]
+    (do
+      (draw-view-header state
+                        screenWidth
+                        c"Template library"
+                        c"every workflow program in the catalog, with the shape it compiles to")
+      (for [project 0
+            8]
+        (if (< project (workflow.catalog-count catalog))
+          (draw-template-card state
+                              project
+                              (+ left (* (cast f64 (% project columns)) (+ cardWidth 14.0)))
+                              (+ (cast f64 (+ VIEW_HEADER_HEIGHT 22)) (cast f64 (* (/ project columns) 190)))
+                              cardWidth)
+          0))
+      (if (= (workflow.catalog-count catalog) 0)
+        (draw-text (field state mono)
+                   c"no workflow programs found in workflows/"
+                   left
+                   (cast f64 (+ VIEW_HEADER_HEIGHT 30))
+                   11.0
+                   (color 76 85 97))
+        0)
+      0)))
+
+(defn draw-settings-view [(state AppState) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (let [left (cast f64 (+ LEFT_WIDTH VIEW_PADDING))
+        project (load (field state selectedProject))
+        rowWidth 780.0]
+    (do
+      (draw-view-header state
+                        screenWidth
+                        c"Settings / Integrations"
+                        c"what flowline detected on this machine - checked once at startup")
+      (for [slot 0
+            INTEGRATION_COUNT]
+        (let [row (index (field state integrations) slot)
+              connected (= (load (field row connected)) 1)
+              top (+ (cast f64 (+ VIEW_HEADER_HEIGHT 22)) (cast f64 (* slot 62)))
+              glyphTint (if connected (accent project) (color 76 85 97))
+              statusTint (if connected (color 111 154 126) (color 76 85 97))]
+          (do
+            (draw-card left top rowWidth 52.0)
+            (stroke-rectangle (+ left 16.0) (+ top 11.0) 30.0 30.0 1.0 (color 42 51 63))
+            (draw-text (field state monoMedium) (load (field row glyph)) (+ left 25.0) (+ top 19.0) 12.0 glyphTint)
+            (draw-text (field state monoMedium) (load (field row name)) (+ left 60.0) (+ top 13.0) 12.0 (color 223 229 236))
+            (draw-text (field state mono) (load (field row detail)) (+ left 60.0) (+ top 31.0) 9.5 (color 76 85 97))
+            (draw-text-right (field state mono)
+                             (if connected c"detected" c"not found")
+                             (+ left (- rowWidth 62.0))
+                             (+ top 21.0)
+                             9.5
+                             statusTint)
+            (let [switchLeft (+ left (- rowWidth 50.0))]
+              (do
+                (stroke-rectangle switchLeft (+ top 17.0) 34.0 18.0 1.0 (if connected (accent-alpha project 153) (color 42 51 63)))
+                (if connected
+                  (fill-rectangle switchLeft (+ top 17.0) 34.0 18.0 (accent-alpha project 28))
+                  0)
+                (fill-rectangle (if connected (+ switchLeft 20.0) (+ switchLeft 2.0))
+                                (+ top 19.0)
+                                12.0
+                                12.0
+                                (if connected (accent project) (color 61 69 79)))
+                0))
+            0)))
+      0)))
+
+(defn draw-app [(state (mut AppState)) (input InputFrame) (screenWidth i64) (screenHeight i64)] (-> i64)
+  (let [view (load (field state view))]
+    (do
+      (raylib.ClearBackground (color 7 10 14))
+      (draw-sidebar state screenHeight)
+      (cond
+        (= view VIEW_CREATE) (draw-design-workspace (mut state) input screenWidth screenHeight)
+        (= view VIEW_RUNS) (draw-runs-view state screenWidth screenHeight)
+        (= view VIEW_APPROVALS) (draw-approvals-view state screenWidth screenHeight)
+        (= view VIEW_TEMPLATES) (draw-templates-view state screenWidth screenHeight)
+        (= view VIEW_SETTINGS) (draw-settings-view state screenWidth screenHeight)
+        (= view VIEW_RUN)
+          (if (= (workflow.catalog-count (load (field state catalog))) 0)
+            (draw-empty-workspace state screenWidth screenHeight)
+            (do
+              (draw-center state screenWidth screenHeight)
+              (draw-right (mut state) input screenWidth screenHeight)
+              0))
+        (if (= (workflow.catalog-count (load (field state catalog))) 0)
+          (draw-empty-workspace state screenWidth screenHeight)
+          (draw-dashboard-view state screenWidth screenHeight)))
+      (if (and (!= view VIEW_CREATE)
+               (or (= (load (field state creationState)) 1) (= (load (field state creationState)) 3)))
+        (draw-creation-banner state screenWidth)
+        0)
+      0)))
 
 (defn run-interface [] (-> i64)
   (do
@@ -1955,8 +3120,10 @@
           measureText (workflow.allocate-buffer 4096)
           designResponse (workflow.allocate-buffer 4096)
           designRequest (workflow.allocate-buffer CREATION_CAPACITY)
-          designPreview (workflow.allocate-runtime)]
+          designPreview (workflow.allocate-runtime)
+          runLog (cast (ptr workflow.RunLog) (workflow.allocate-buffer (sizeof workflow.RunLog)))]
       (store! catalog catalogValue)
+      (workflow.load-run-log runLog)
       (store! creationText (cast i8 0))
       (store! clipboardText (cast i8 0))
       (store! designResponse (cast i8 0))
@@ -1967,9 +3134,12 @@
       (store! (field state runRequested) 0)
       (store! (field state approvalRequested) 0)
       (store! (field state catalog) catalog)
+      (store! (field state runLog) runLog)
+      (store! (field state activeRunEntry) -1)
+      (detect-integrations (mut state))
       (store! (field state runtime) (workflow.catalog-runtime catalog 0))
       (store! (field state activeRuntime) (cast (ptr workflow.Runtime) 0))
-      (store! (field state creationOpen) 0)
+      (store! (field state view) VIEW_DASHBOARD)
       (store! (field state creationRequested) 0)
       (store! (field state creationState) 0)
       (store! (field state creationLength) 0)
@@ -2028,6 +3198,11 @@
                           (do
                             (workflow.start (mut selectedRuntime))
                             (store! (field state activeRuntime) selectedRuntime)
+                            (store! (field state activeRunEntry)
+                                    (workflow.begin-run (load (field state runLog))
+                                                        (workflow.program-name selectedRuntime)
+                                                        (workflow.program-path selectedRuntime)
+                                                        c"manual"))
                             0)
                           0)
                         (store! (field state runRequested) 0)
@@ -2125,7 +3300,10 @@
                     0)
                   (let [activeRuntime (load (field state activeRuntime))]
                     (if (!= (cast i64 activeRuntime) 0)
-                      (workflow.tick (mut activeRuntime) (raylib.GetTime))
+                      (do
+                        (workflow.tick (mut activeRuntime) (raylib.GetTime))
+                        (sync-active-run (mut state) activeRuntime)
+                        0)
                       0))
                   (store! (field state selectionPressHandled) 0)
                   (store! (field state hoverSelectableText) 0)
@@ -2170,6 +3348,7 @@
           designResponse (workflow.allocate-buffer 4096)
           designRequest (workflow.allocate-buffer CREATION_CAPACITY)
           designPreview (workflow.allocate-runtime)
+          snapshotRunLog (cast (ptr workflow.RunLog) (workflow.allocate-buffer (sizeof workflow.RunLog)))
           response
             c"Recommended workflow: start with a repository inspection step, then\nfan out into build verification and a documentation pass. Both feed a\nfinal human approval before anything lands on the main branch."
           screenWidth (cast i64 (/ (cast f64 (raylib.GetScreenWidth)) (ui-scale)))
@@ -2190,6 +3369,10 @@
                    c"Help me design a review workflow for the flowline UI. It should check the renderer, the text selection code, and the deepseek adapter, then let me approve the final report before anything gets written."
                    CREATION_CAPACITY)
       (store! (field state catalog) catalog)
+      (workflow.load-run-log snapshotRunLog)
+      (store! (field state runLog) snapshotRunLog)
+      (store! (field state activeRunEntry) -1)
+      (detect-integrations (mut state))
       (store! (field state runtime) (workflow.catalog-runtime catalog 0))
       (store! (field state creationText) creationText)
       (store! (field state clipboardText) clipboardText)
@@ -2202,7 +3385,7 @@
       (store! (field state designPreview) designPreview)
       (store! (field state designPreviewValid)
               (if (> (workflow.node-count designPreview) 0) 1 0))
-      (store! (field state creationOpen) 1)
+      (store! (field state view) VIEW_CREATE)
       (store! (field state designTurn) 1)
       (store! (field state designState) 2)
       (store! (field state selectionRegion) 6)
@@ -2237,7 +3420,7 @@
       (raylib.TakeScreenshot c"interface-pending.png")
       (raylib.EndDrawing)
       (store! (field state designState) 2)
-      (store! (field state creationOpen) 0)
+      (store! (field state view) VIEW_RUN)
       (raylib.BeginDrawing)
       (raylib.BeginMode2D (load camera))
       (draw-app (mut state) input screenWidth screenHeight)
@@ -2257,6 +3440,162 @@
       (raylib.UnloadFont (load (field state sans))))
     (raylib.CloseWindow)
     0))
+
+;; An approval node reaches STATUS_WAITING purely from its dependencies, with no
+;; agent launched, so a workflow made only of approvals can be driven to its
+;; waiting state for free. The snapshot tool primes exactly those runtimes and
+;; leaves every other workflow untouched — it never spends an agent turn.
+(defn prime-approval-only-runtimes [(catalog (ptr workflow.Catalog))] (-> i64)
+  (do
+    (for [project 0
+          8]
+      (if (< project (workflow.catalog-count catalog))
+        (let [runtime (workflow.catalog-runtime catalog project)
+              (mut onlyApprovals) 1]
+          (do
+            (for [node 0
+                  7]
+              (if (and (< node (workflow.node-count runtime))
+                       (!= (workflow.node-kind runtime node) KIND_APPROVAL))
+                (store! onlyApprovals 0)
+                0))
+            (if (and (= (load onlyApprovals) 1) (> (workflow.node-count runtime) 0))
+              (do
+                (workflow.start (mut runtime))
+                (workflow.tick (mut runtime) 0.0)
+                0)
+              0)
+            0))
+        0))
+    0))
+
+;; One screenshot per workspace view, so every screen can be eyeballed without
+;; clicking through the running app.
+(defn render-view-snapshots [] (-> i64)
+  (do
+    (raylib.SetConfigFlags (cast u32 WINDOW_FLAGS))
+    (raylib.InitWindow (cast i32 1440) (cast i32 900) c"flowline - view snapshots")
+    (let [state (alloc-stack AppState)
+          input (alloc-stack InputFrame)
+          camera (alloc-stack raylib.Camera2D)
+          catalogValue (workflow.load-catalog)
+          catalog (alloc-stack workflow.Catalog)
+          creationText (workflow.allocate-buffer CREATION_CAPACITY)
+          clipboardText (workflow.allocate-buffer 4096)
+          measureText (workflow.allocate-buffer 4096)
+          designResponse (workflow.allocate-buffer 4096)
+          designRequest (workflow.allocate-buffer CREATION_CAPACITY)
+          screenWidth (cast i64 (/ (cast f64 (raylib.GetScreenWidth)) (ui-scale)))
+          screenHeight (cast i64 (/ (cast f64 (raylib.GetScreenHeight)) (ui-scale)))
+          runLog (cast (ptr workflow.RunLog) (workflow.allocate-buffer (sizeof workflow.RunLog)))
+          names (alloc-stack (array (ptr i8) 6))]
+      (do
+        (store! state (zeroed AppState))
+        (workflow.load-run-log runLog)
+        (store! (field state runLog) runLog)
+        (store! (field state activeRunEntry) -1)
+        (store! input (zeroed InputFrame))
+        (store! catalog catalogValue)
+        (store! creationText (cast i8 0))
+        (store! clipboardText (cast i8 0))
+        (store! designResponse (cast i8 0))
+        (store! designRequest (cast i8 0))
+        (store! (field state catalog) catalog)
+        (prime-approval-only-runtimes catalog)
+        (detect-integrations (mut state))
+        (store! (field state runtime) (workflow.catalog-runtime catalog 0))
+        (store! (field state creationText) creationText)
+        (store! (field state clipboardText) clipboardText)
+        (store! (field state measureText) measureText)
+        (store! (field state designResponse) designResponse)
+        (store! (field state designRequest) designRequest)
+        (store! (field state mono)
+                (raylib.LoadFontEx c"assets/fonts/IBMPlexMono-Regular.ttf" (cast i32 64) (cast (ptr i32) 0) (cast i32 0)))
+        (store! (field state monoMedium)
+                (raylib.LoadFontEx c"assets/fonts/IBMPlexMono-Medium.ttf" (cast i32 64) (cast (ptr i32) 0) (cast i32 0)))
+        (store! (field state sans)
+                (raylib.LoadFontEx c"assets/fonts/IBMPlexSans-Regular.ttf" (cast i32 64) (cast (ptr i32) 0) (cast i32 0)))
+        (configure-font (field state mono))
+        (configure-font (field state monoMedium))
+        (configure-font (field state sans))
+        (store! (field camera offset) (vector 0.0 0.0))
+        (store! (field camera target) (vector 0.0 0.0))
+        (store! (field camera rotation) (cast f32 0.0))
+        (store! (field camera zoom) (cast f32 (ui-scale)))
+        (store! (index names 0) c"view-dashboard.png")
+        (store! (index names 1) c"view-runs.png")
+        (store! (index names 2) c"view-approvals.png")
+        (store! (index names 3) c"view-templates.png")
+        (store! (index names 4) c"view-settings.png")
+        (store! (index names 5) c"view-run.png")
+        (for [slot 0
+              6]
+          (do
+            (store! (field state view) (if (= slot 5) VIEW_RUN slot))
+            (raylib.BeginDrawing)
+            (raylib.BeginMode2D (load camera))
+            (draw-app (mut state) (load input) screenWidth screenHeight)
+            (raylib.EndMode2D)
+            (raylib.TakeScreenshot (load (index names slot)))
+            (raylib.EndDrawing)
+            0))
+        (raylib.UnloadFont (load (field state mono)))
+        (raylib.UnloadFont (load (field state monoMedium)))
+        (raylib.UnloadFont (load (field state sans)))))
+    (raylib.CloseWindow)
+    0))
+
+;; Round-trips the run log through disk so the persistence path can be exercised
+;; without launching the interface.
+(defn check-run-log [] (-> i64)
+  (let [log (cast (ptr workflow.RunLog) (workflow.allocate-buffer (sizeof workflow.RunLog)))
+        reloaded (cast (ptr workflow.RunLog) (workflow.allocate-buffer (sizeof workflow.RunLog)))]
+    (do
+      (workflow.load-run-log log)
+      (let [before (workflow.run-log-count log)
+            entry (workflow.begin-run log c"Round Trip Check" c"workflows/check.flow" c"manual")]
+        (do
+          (workflow.update-run log entry RUN_DONE)
+          (workflow.load-run-log reloaded)
+          (let [record (workflow.run-log-record reloaded entry)
+                valid (and (= (workflow.run-log-count reloaded) (+ before 1))
+                           (and (= (load (field record status)) RUN_DONE)
+                                (workflow.strings-equal (workflow.record-name record) c"Round Trip Check")))]
+            (do
+              (printf c"{\"before\":%lld,\"after\":%lld,\"id\":\"%s\",\"name\":\"%s\",\"path\":\"%s\",\"trigger\":\"%s\",\"status\":\"%s\",\"valid\":%s}\n"
+                      before
+                      (workflow.run-log-count reloaded)
+                      (workflow.record-id record)
+                      (workflow.record-name record)
+                      (workflow.record-path record)
+                      (workflow.record-trigger record)
+                      (workflow.run-status-label (load (field record status)))
+                      (if valid c"true" c"false"))
+              (if valid 0 1))))))))
+
+(defn dump-runs [] (-> i64)
+  (let [log (cast (ptr workflow.RunLog) (workflow.allocate-buffer (sizeof workflow.RunLog)))]
+    (do
+      (workflow.load-run-log log)
+      (printf c"{\"count\":%lld,\"runs\":[" (workflow.run-log-count log))
+      (for [entry 0
+            64]
+        (if (< entry (workflow.run-log-count log))
+          (let [record (workflow.run-log-record log entry)]
+            (do
+              (if (> entry 0) (do (printf c",") 0) 0)
+              (printf c"{\"id\":\"%s\",\"workflow\":\"%s\",\"path\":\"%s\",\"trigger\":\"%s\",\"status\":\"%s\",\"started\":%lld,\"duration\":%lld}"
+                      (workflow.record-id record)
+                      (workflow.record-name record)
+                      (workflow.record-path record)
+                      (workflow.record-trigger record)
+                      (workflow.run-status-label (load (field record status)))
+                      (load (field record startedAt))
+                      (load (field record duration)))
+              0))
+          0))
+      (printf c"]}\n")
+      0)))
 
 (defn check-text-editor [] (-> i64)
   (let [state (alloc-stack AppState)
@@ -2302,6 +3641,15 @@
            (workflow.strings-equal (load (index arguments 1)) c"--native-catalog"))
     (native.run-catalog)
     (if (and (> (cast i64 argumentCount) 1)
+             (workflow.strings-equal (load (index arguments 1)) c"--check-run-log"))
+      (check-run-log)
+    (if (and (> (cast i64 argumentCount) 1)
+             (workflow.strings-equal (load (index arguments 1)) c"--dump-runs"))
+      (dump-runs)
+    (if (and (> (cast i64 argumentCount) 1)
+             (workflow.strings-equal (load (index arguments 1)) c"--render-views"))
+      (render-view-snapshots)
+    (if (and (> (cast i64 argumentCount) 1)
              (workflow.strings-equal (load (index arguments 1)) c"--render-interface"))
       (render-interface-snapshot)
     (if (and (> (cast i64 argumentCount) 1)
@@ -2325,4 +3673,4 @@
                      (workflow.strings-equal (load (index arguments 1)) c"--check-catalog"))
               (let [catalog (workflow.load-catalog)]
                 (workflow.dump-catalog catalog))
-              (run-interface)))))))))
+              (run-interface))))))))))))

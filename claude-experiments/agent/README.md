@@ -24,10 +24,26 @@ coil build
 
 Run commands from the repository root so the bundled fonts resolve from `assets/fonts`.
 
+## Views
+
+The workspace sidebar routes between seven views. `view` in `AppState` is the single
+source of truth for which one is on screen.
+
+- **Dashboard** — the selected workflow: run counters, its recent runs, and the shape of its program.
+- **Runs** — every recorded execution, filterable by running / waiting / done.
+- **Approvals** — one card per step currently sitting in `waiting`, derived live from the runtimes.
+- **Templates** — every `.flow` program in the catalog with its step, join, and approval counts.
+- **Settings** — the integrations flowline detected on this machine, probed once at startup.
+- **Create** — the workflow designer chat and its draft program.
+- **Run** — the dependency graph and the selected step's conversation.
+
+Every number on these screens is derived from real state: the parsed programs, the live
+runtimes, the run log, and capability probes. None of it is seeded.
+
 ## Structure
 
 - `src/main.coil` contains the application state, explicit state transitions, data, layout, and rendering.
-- `src/workflow.coil` parses workflow programs and interprets their dependency graph at runtime.
+- `src/workflow.coil` parses workflow programs, interprets their dependency graph at runtime, records run history, and probes integrations.
 - `src/raylib.coil` is the small audited C binding used by the application.
 - `workflows/*.flow` are executable workflows discovered by the interface at startup and after creation.
 - `assets/fonts` contains IBM Plex Mono and IBM Plex Sans at high rasterization sizes for clean UI text.
@@ -35,6 +51,19 @@ Run commands from the repository root so the bundled fonts resolve from `assets/
 - `THIRD_PARTY_NOTICES.md` and `licenses/native-sdk-Apache-2.0.txt` document the Native SDK text-widget adaptation.
 
 All durable application state lives in `AppState`. Raylib input is captured into an `InputFrame`, and `apply-input` is the single transition boundary.
+
+Run history persists to `.flowline/runs.log`, one line per run, rewritten whenever a
+run's status changes. Because node execution uses fixed `.flowline/nodeN.*` paths, one
+workflow runs at a time and the history is a plain append-ordered list.
+
+## Inspecting it without clicking
+
+- `./flowline --render-views` writes one screenshot per view (`view-*.png`).
+- `./flowline --render-interface` writes the workflow-designer screenshots.
+- `./flowline --dump-runs` prints the run log as JSON.
+- `./flowline --check-run-log` round-trips a run record through disk and exits nonzero on mismatch.
+- `./flowline --check-catalog` / `--check-workflow <path>` dump the parsed programs.
+- `./flowline --check-text-editor` / `--check-native-controls` exercise the input and widget paths.
 
 ## Create your first workflow
 
