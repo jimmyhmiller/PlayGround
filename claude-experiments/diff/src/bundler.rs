@@ -2024,9 +2024,28 @@ fn chunk_path(output: &Path, index: usize) -> Result<PathBuf, String> {
 pub struct BuildConfig {
     /// Ordered `(specifier, absolute_target)` alias pairs.
     pub aliases: Vec<(String, String)>,
+    /// Environment resolve conditions (e.g. client `["module","browser",
+    /// "production"]`, server `["node",...]`). This is what isolates client from
+    /// server: browser conditions select packages' browser exports and exclude
+    /// server-only code. Empty means the built-in default.
+    pub conditions: Vec<String>,
 }
 
-fn resolve_options(_config: &BuildConfig) -> ResolveOptions {
+fn resolve_options(config: &BuildConfig) -> ResolveOptions {
+    // Without host-supplied conditions, keep the built-in default. With them (the
+    // environment's browser/node conditions), keep `import`/`default` too so basic
+    // ESM resolution still works.
+    let condition_names = if config.conditions.is_empty() {
+        vec!["import".into(), "module".into(), "default".into()]
+    } else {
+        let mut names = config.conditions.clone();
+        for fallback in ["import", "default"] {
+            if !names.iter().any(|name| name == fallback) {
+                names.push(fallback.to_string());
+            }
+        }
+        names
+    };
     ResolveOptions {
         tsconfig: Some(TsconfigDiscovery::Auto),
         extensions: [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".json"]
@@ -2041,7 +2060,7 @@ fn resolve_options(_config: &BuildConfig) -> ResolveOptions {
             (".mjs".into(), vec![".mts".into(), ".mjs".into()]),
             (".cjs".into(), vec![".cts".into(), ".cjs".into()]),
         ],
-        condition_names: vec!["import".into(), "module".into(), "default".into()],
+        condition_names,
         main_fields: vec!["module".into(), "main".into()],
         ..ResolveOptions::default()
     }
@@ -2340,6 +2359,7 @@ mod tests {
                 "#tanstack-router-entry".to_string(),
                 router.to_string_lossy().into_owned(),
             )],
+            ..BuildConfig::default()
         };
         let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
         assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);

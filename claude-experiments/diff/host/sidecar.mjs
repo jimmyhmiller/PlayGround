@@ -74,8 +74,21 @@ async function resolveConfigCommand(projectRoot, environment) {
     }
   }
 
+  // Vite writes `development|production` as one condition entry it expands per
+  // mode; this is a production build, so resolve it to `production`.
+  const rawConditions = envConfig?.resolve?.conditions ?? config.resolve?.conditions ?? [];
+  const conditions = rawConditions.map((condition) =>
+    condition === "development|production" ? "production" : condition,
+  );
+
   process.stdout.write(
-    JSON.stringify({ environment: selected, environments, aliases, skippedAliases: skipped }),
+    JSON.stringify({
+      environment: selected,
+      environments,
+      aliases,
+      conditions,
+      skippedAliases: skipped,
+    }),
   );
 }
 

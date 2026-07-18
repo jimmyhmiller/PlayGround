@@ -86,10 +86,15 @@ pub fn resolve_config(project_root: &Path, environment: &str) -> Result<HostConf
         })
         .collect::<Result<Vec<_>, String>>()?;
 
+    let conditions = string_array(&response["conditions"], "conditions").unwrap_or_default();
+
     Ok(HostConfig {
         environment: resolved_environment,
         environments,
-        build: BuildConfig { aliases },
+        build: BuildConfig {
+            aliases,
+            conditions,
+        },
         skipped_aliases,
     })
 }
