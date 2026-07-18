@@ -100,7 +100,11 @@ pub enum ObjView<'h> {
     Cons { head: u64, tail: u64 },
     EmptyList,
     Str(&'h str),
-    Char(char),
+    /// A UTF-16 code unit VALUE: any scalar code point, or a lone surrogate
+    /// half (0xD800-0xDFFF) — `(nth s i)`/`charAt` on astral content yields
+    /// halves, exactly like Java's char. Rust `char` cannot hold a half, so
+    /// the view carries the raw u32.
+    Char(u32),
     /// A growable array: `elems` is the LIVE prefix (logical length) of the
     /// data blob; `gc` is the handle (identity, for mutation); `cap` the
     /// blob's capacity.
@@ -663,7 +667,7 @@ impl<M: ValueModel> Runtime<M> {
                 }
                 kind::CHAR => {
                     let info = &self.shared.types[kind::CHAR as usize];
-                    ObjView::Char(char::from_u32_unchecked(g.raw_word_u32(info)))
+                    ObjView::Char(g.raw_word_u32(info))
                 }
                 kind::ARRAY => {
                     let len = g.aux();
@@ -1258,7 +1262,7 @@ impl<M: ValueModel> Runtime<M> {
                 Obj::Char(c) => {
                     let info = t(kind::CHAR);
                     let g = heap.alloc(info, 0);
-                    g.set_raw_word_u32(info, c as u32);
+                    g.set_raw_word_u32(info, c);
                     g
                 }
                 Obj::Vector(xs) => {
@@ -1543,21 +1547,27 @@ impl<M: ValueModel> Runtime<M> {
     /// Mirrors the JVM's `Character.valueOf` cache (0..127), so `identical?`
     /// on ASCII chars agrees with Java.
     pub fn alloc_char(&mut self, c: char) -> u64 {
-        let cp = c as u32;
+        self.alloc_char_unit(c as u32)
+    }
+
+    /// A char from a raw UTF-16 unit VALUE — the general entry (`%str-char-at`
+    /// hands out lone surrogate halves on astral content, which Rust `char`
+    /// cannot spell).
+    pub fn alloc_char_unit(&mut self, cp: u32) -> u64 {
         if cp < 128 {
             let slot = &self.shared.char_consts[cp as usize];
             let cached = slot.load(Ordering::Acquire);
             if cached != u32::MAX {
                 return self.get_const(cached);
             }
-            let g = self.alloc(Obj::Char(c));
+            let g = self.alloc(Obj::Char(cp));
             let id = self.intern_const(M::R::enc_ref(g));
             // Racing writers: first CAS wins and is the canonical char; a
             // loser's object (and const slot) is just an extra rooted char.
             let _ = slot.compare_exchange(u32::MAX, id, Ordering::AcqRel, Ordering::Acquire);
             return self.get_const(slot.load(Ordering::Acquire));
         }
-        let g = self.alloc(Obj::Char(c));
+        let g = self.alloc(Obj::Char(cp));
         M::R::enc_ref(g)
     }
     /// The 1-char string for an ASCII char, interned through the const pool
@@ -1841,7 +1851,20 @@ impl<M: ValueModel> Runtime<M> {
                     _ => None,
                 };
                 match ch {
-                    Some(c) => self.alloc_str1(c),
+                    // A lone surrogate half has NO UTF-8 spelling: `(str half)`
+                    // throws (catchably) rather than emitting mojibake. Pairing
+                    // is a string-level operation — `%chars->str` combines
+                    // adjacent halves, like Java's new String(char[]).
+                    Some(c) => match char::from_u32(c) {
+                        Some(ch) => self.alloc_str1(ch),
+                        None => {
+                            let id = self.alloc(Obj::Str(format!(
+                                "str: cannot convert a lone surrogate char (\\u{c:04X}) to a string"
+                            )));
+                            self.signal_throw(M::R::enc_ref(id));
+                            self.enc_nil()
+                        }
+                    },
                     None => {
                         let s = self.print(args[0]);
                         self.alloc_str(s)
@@ -1908,7 +1931,12 @@ impl<M: ValueModel> Runtime<M> {
                 let n = match self.str_len_cache.get() {
                     Some((e, p, l, cc)) if e == epoch && p == ptr && l == blen => cc,
                     _ => {
-                        let cc = s.chars().count();
+                        // UTF-16 length, as on the JVM (and in JS): an astral
+                        // char counts 2. `(count "🙂")` is 2 on both real
+                        // Clojures; counting code points here made every
+                        // index/length exchange with real library code
+                        // (data.json's escape writer) off by the astral count.
+                        let cc = s.chars().map(char::len_utf16).sum();
                         self.str_len_cache.set(Some((epoch, ptr, blen, cc)));
                         cc
                     }
@@ -1929,19 +1957,24 @@ impl<M: ValueModel> Runtime<M> {
                 let ptr = s.as_ptr() as usize;
                 let len = s.len();
                 let epoch = self.relocated();
+                // The index space is UTF-16 units, as on the JVM: an astral
+                // char occupies TWO indices, and indexing either of them
+                // answers the corresponding surrogate HALF (Java's charAt).
                 // Resume from the cached cursor when it is on THIS string (same
                 // epoch/ptr/len), scanning forward OR backward from it — a text
                 // reader walks forward but also rewinds a short lookahead window
                 // (data.json's StringPBR reads a 64-char block then unreads the
-                // tail), so both directions must be cheap. Backward scan steps over
-                // UTF-8 char boundaries; forward scan uses char_indices.
+                // tail), so both directions must be cheap. The cursor stores the
+                // unit index of a CHAR START and its byte offset; a request
+                // landing on an astral char's second unit resolves within it.
                 let cursor = match self.str_cursor.get() {
                     Some((e, p, l, ci, bo)) if e == epoch && p == ptr && l == len => Some((ci, bo)),
                     _ => None,
                 };
-                let (c, byte_off) = match cursor {
-                    Some((ci, bo)) if i < ci => {
-                        // walk back (ci - i) chars from byte offset bo
+                // Walk backward until the cursor's unit index is <= i, stepping
+                // whole chars (a char's width in units is len_utf16).
+                let (start_unit, start_byte) = match cursor {
+                    Some((ci, bo)) if ci > i => {
                         let mut b = bo;
                         let mut cur = ci;
                         while cur > i {
@@ -1949,46 +1982,38 @@ impl<M: ValueModel> Runtime<M> {
                             while !s.is_char_boundary(b) {
                                 b -= 1;
                             }
-                            cur -= 1;
+                            let ch = s[b..].chars().next().expect("char boundary");
+                            cur -= ch.len_utf16();
                         }
-                        let ch = s[b..].chars().next().expect("char boundary");
-                        (ch, b)
+                        (cur, b)
                     }
-                    Some((ci, bo)) => {
-                        // forward from (ci, bo)
-                        let mut start_char = ci;
-                        let mut chars = s[bo..].char_indices();
-                        loop {
-                            match chars.next() {
-                                Some((rel, ch)) => {
-                                    if start_char == i {
-                                        break (ch, bo + rel);
-                                    }
-                                    start_char += 1;
-                                }
-                                None => panic!("%str-char-at: index {i} out of range"),
-                            }
-                        }
-                    }
-                    None => {
-                        // cold: scan from the start
-                        let mut start_char = 0usize;
-                        let mut chars = s.char_indices();
-                        loop {
-                            match chars.next() {
-                                Some((rel, ch)) => {
-                                    if start_char == i {
-                                        break (ch, rel);
-                                    }
-                                    start_char += 1;
-                                }
-                                None => panic!("%str-char-at: index {i} out of range"),
-                            }
-                        }
-                    }
+                    Some((ci, bo)) => (ci, bo),
+                    None => (0usize, 0usize),
                 };
-                self.str_cursor.set(Some((epoch, ptr, len, i, byte_off)));
-                self.alloc_char(c)
+                // Forward: find the char containing unit i.
+                let mut cur = start_unit;
+                let mut found: Option<(u32, usize)> = None; // (unit value, char-start byte)
+                for (rel, ch) in s[start_byte..].char_indices() {
+                    let w = ch.len_utf16();
+                    if i < cur + w {
+                        let unit = if w == 1 {
+                            ch as u32
+                        } else {
+                            let v = ch as u32 - 0x10000;
+                            if i == cur { 0xD800 + (v >> 10) } else { 0xDC00 + (v & 0x3FF) }
+                        };
+                        found = Some((unit, start_byte + rel));
+                        // cache the CHAR START (cur), not the requested unit,
+                        // so the next walk steps whole chars
+                        self.str_cursor.set(Some((epoch, ptr, len, cur, start_byte + rel)));
+                        break;
+                    }
+                    cur += w;
+                }
+                match found {
+                    Some((unit, _)) => self.alloc_char_unit(unit),
+                    None => panic!("%str-char-at: index {i} out of range"),
+                }
             }
             Prim::StrGetChars => {
                 // (%str-get-chars s src-begin src-end dst dst-begin): bulk
@@ -2013,37 +2038,57 @@ impl<M: ValueModel> Runtime<M> {
                 let ptr = s.as_ptr() as usize;
                 let len = s.len();
                 let epoch = self.relocated();
-                // Resume from the sequential cursor exactly like %str-char-at
-                // (forward only; a rewound cursor falls back to a scan from 0).
-                let start_byte = {
-                    let (mut ci, mut bo) = match self.str_cursor.get() {
-                        Some((ce, cp, cl, i, o)) if ce == epoch && cp == ptr && cl == len && i <= b => (i, o),
-                        _ => (0, 0),
-                    };
-                    while ci < b {
-                        match s[bo..].chars().next() {
-                            Some(c) => bo += c.len_utf8(),
-                            None => panic!("%str-get-chars: index {b} out of range"),
-                        }
-                        ci += 1;
+                // UNIT-indexed (UTF-16), exactly String.getChars: an astral char
+                // contributes both its halves, and a range may begin or end
+                // mid-char. Resume from the sequential cursor like %str-char-at
+                // (the cursor's unit index always names a CHAR START).
+                let (mut ci, mut bo) = match self.str_cursor.get() {
+                    Some((ce, cp, cl, i, o)) if ce == epoch && cp == ptr && cl == len && i <= b => {
+                        (i, o)
                     }
-                    bo
+                    _ => (0, 0),
                 };
-                // Collect the run first (`s` borrows self; alloc_char is &mut).
-                let mut run: Vec<char> = Vec::with_capacity(e - b);
-                let mut last_byte = start_byte;
-                for (rel, c) in s[start_byte..].char_indices() {
-                    if run.len() == e - b {
+                // Step whole chars until the char CONTAINING unit b.
+                loop {
+                    let Some(c) = s[bo..].chars().next() else {
+                        panic!("%str-get-chars: index {b} out of range");
+                    };
+                    let w = c.len_utf16();
+                    if b < ci + w {
                         break;
                     }
-                    last_byte = start_byte + rel;
-                    run.push(c);
+                    ci += w;
+                    bo += c.len_utf8();
                 }
-                if run.len() != e - b {
+                // Collect the unit run first (`s` borrows self; alloc is &mut).
+                let mut units: Vec<u32> = Vec::with_capacity(e - b);
+                let mut cur = ci;
+                'walk: for c in s[bo..].chars() {
+                    let w = c.len_utf16();
+                    for k in 0..w {
+                        let idx = cur + k;
+                        if idx >= e {
+                            break 'walk;
+                        }
+                        if idx >= b {
+                            units.push(if w == 1 {
+                                c as u32
+                            } else {
+                                let v = c as u32 - 0x10000;
+                                if k == 0 { 0xD800 + (v >> 10) } else { 0xDC00 + (v & 0x3FF) }
+                            });
+                        }
+                    }
+                    cur += w;
+                    if cur >= e {
+                        break;
+                    }
+                }
+                if units.len() != e - b {
                     panic!("%str-get-chars: range {b}..{e} out of bounds");
                 }
-                self.str_cursor.set(Some((epoch, ptr, len, e - 1, last_byte)));
-                let bits: Vec<u64> = run.into_iter().map(|c| self.alloc_char(c)).collect();
+                self.str_cursor.set(Some((epoch, ptr, len, ci, bo)));
+                let bits: Vec<u64> = units.into_iter().map(|u| self.alloc_char_unit(u)).collect();
                 let Val::Ref(did) = self.decode(args[3]) else {
                     panic!("%str-get-chars: dst is not an array");
                 };
@@ -2100,7 +2145,13 @@ impl<M: ValueModel> Runtime<M> {
                     Some(r) => r.to_vec(),
                     None => panic!("%chars->str: range {off}..{} out of bounds", off + len),
                 };
+                // Java's new String(char[]): ADJACENT surrogate halves combine
+                // into their code point — this is where astral content built
+                // char-by-char (subs pieces, StringBuilder flushes) becomes a
+                // real string again. A half with no partner has no UTF-8
+                // spelling: catchable throw, never mojibake.
                 let mut out = String::with_capacity(len);
+                let mut pending_high: Option<u32> = None;
                 for e in run {
                     let Val::Ref(cid) = self.decode(e) else {
                         panic!("%chars->str: element is not a char");
@@ -2108,7 +2159,38 @@ impl<M: ValueModel> Runtime<M> {
                     let ObjView::Char(c) = self.view_gc(cid) else {
                         panic!("%chars->str: element is not a char");
                     };
-                    out.push(c);
+                    match (pending_high, c) {
+                        (Some(hi), 0xDC00..=0xDFFF) => {
+                            let cp = 0x10000 + ((hi - 0xD800) << 10) + (c - 0xDC00);
+                            out.push(char::from_u32(cp).expect("valid supplementary code point"));
+                            pending_high = None;
+                        }
+                        (None, 0xD800..=0xDBFF) => pending_high = Some(c),
+                        (None, u) => match char::from_u32(u) {
+                            Some(ch) => out.push(ch),
+                            None => {
+                                let id = self.alloc(Obj::Str(format!(
+                                    "%chars->str: lone surrogate \\u{u:04X} (no preceding high half)"
+                                )));
+                                self.signal_throw(M::R::enc_ref(id));
+                                return self.enc_nil();
+                            }
+                        },
+                        (Some(hi), _) => {
+                            let id = self.alloc(Obj::Str(format!(
+                                "%chars->str: unpaired high surrogate \\u{hi:04X}"
+                            )));
+                            self.signal_throw(M::R::enc_ref(id));
+                            return self.enc_nil();
+                        }
+                    }
+                }
+                if let Some(hi) = pending_high {
+                    let id = self.alloc(Obj::Str(format!(
+                        "%chars->str: trailing unpaired high surrogate \\u{hi:04X}"
+                    )));
+                    self.signal_throw(M::R::enc_ref(id));
+                    return self.enc_nil();
                 }
                 self.alloc_str(out)
             }
@@ -2125,9 +2207,18 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Int(n) = self.decode(args[0]) else {
                     panic!("integer->char: not an integer");
                 };
-                let c = char::from_u32(n as u32)
-                    .unwrap_or_else(|| panic!("integer->char: {n} is not a Unicode scalar value"));
-                self.alloc_char(c)
+                // Any UTF-16 unit value in [0, 0xFFFF] is a valid char —
+                // INCLUDING a lone surrogate half — exactly RT.charCast:
+                // `(char (int c))` must round-trip the halves charAt hands out
+                // on astral text (data.json's escape writer does exactly this
+                // per unit), and `(char 0x1F642)` throws on the JVM too.
+                if !(0..=0xFFFF).contains(&n) {
+                    let id = self
+                        .alloc(Obj::Str(format!("integer->char: {n} is out of char range")));
+                    self.signal_throw(M::R::enc_ref(id));
+                    return self.enc_nil();
+                }
+                self.alloc_char_unit(n as u32)
             }
             Prim::Vector => {
                 let id = self.alloc_vector(args);
@@ -2890,6 +2981,56 @@ impl<M: ValueModel> Runtime<M> {
                 let Some(x) = self.bit_operand(args[0]) else { return self.enc_nil() };
                 self.encode(Val::Int(x.reverse_bits() as i128))
             }
+            Prim::Subs => {
+                // UTF-16 unit indices, like String.substring — and NATIVE: the
+                // in-language subs walked %str->chars and rebuilt through
+                // per-char str, O(n) allocations for what is one byte-range
+                // copy. A boundary INSIDE a surrogate pair throws catchably (a
+                // lone half has no UTF-8 spelling; Java would hand you one, and
+                // the first string op after that hands you mojibake).
+                let (Val::Int(b), Val::Int(e)) = (self.decode(args[1]), self.decode(args[2]))
+                else {
+                    panic!("%subs: indices must be ints");
+                };
+                let (b, e) = (b as usize, e as usize);
+                let Val::Ref(id) = self.decode(args[0]) else {
+                    panic!("%subs: not a string");
+                };
+                let ObjView::Str(s) = self.view_gc(id) else {
+                    panic!("%subs: not a string");
+                };
+                // unit index -> byte offset; None = out of range, Err = mid-pair
+                let locate = |target: usize| -> Result<usize, &'static str> {
+                    let mut cur = 0usize;
+                    for (bo, c) in s.char_indices() {
+                        if cur == target {
+                            return Ok(bo);
+                        }
+                        let w = c.len_utf16();
+                        if target < cur + w {
+                            return Err("inside a surrogate pair");
+                        }
+                        cur += w;
+                    }
+                    if cur == target { Ok(s.len()) } else { Err("out of range") }
+                };
+                match (locate(b), locate(e)) {
+                    (Ok(b0), Ok(b1)) if b0 <= b1 => {
+                        let sub = s[b0..b1].to_string();
+                        self.alloc_str(sub)
+                    }
+                    (lb, le) => {
+                        let why = match (&lb, &le) {
+                            (Err(w), _) => format!("start {b} {w}"),
+                            (_, Err(w)) => format!("end {e} {w}"),
+                            _ => format!("start {b} after end {e}"),
+                        };
+                        let id = self.alloc(Obj::Str(format!("subs: {why}")));
+                        self.signal_throw(M::R::enc_ref(id));
+                        self.enc_nil()
+                    }
+                }
+            }
             Prim::Stats => {
                 use std::sync::atomic::Ordering::Relaxed;
                 let vals = [
@@ -3200,14 +3341,26 @@ impl<M: ValueModel> Runtime<M> {
                 self.get_var_arglists(s).unwrap_or_else(|| self.enc_nil())
             }
             Prim::StrChars => {
-                let cs: Vec<char> = match self.decode(args[0]) {
+                // Per UTF-16 UNIT (String.toCharArray): an astral char yields
+                // both surrogate halves, so `(count (%str->chars s))` agrees
+                // with `(count s)` — as it does on the JVM.
+                let units: Vec<u32> = match self.decode(args[0]) {
                     Val::Ref(id) => match self.view_gc(id) {
-                        ObjView::Str(s) => s.chars().collect(),
+                        ObjView::Str(s) => {
+                            let mut out = Vec::with_capacity(s.len());
+                            let mut buf = [0u16; 2];
+                            for c in s.chars() {
+                                for u in c.encode_utf16(&mut buf).iter() {
+                                    out.push(*u as u32);
+                                }
+                            }
+                            out
+                        }
                         _ => panic!("%str->chars: not a string"),
                     },
                     _ => panic!("%str->chars: not a string"),
                 };
-                let vals: Vec<u64> = cs.into_iter().map(|c| self.alloc_char(c)).collect();
+                let vals: Vec<u64> = units.into_iter().map(|u| self.alloc_char_unit(u)).collect();
                 self.vec_to_list(&vals)
             }
             Prim::StrToBytes => {
@@ -6024,7 +6177,13 @@ impl<M: ValueModel> Runtime<M> {
                     out.push('"');
                     out
                 }
-                ObjView::Char(c) => c.to_string(),
+                // A char VALUE may be a lone surrogate half (UTF-16 unit): it
+                // displays as its \uXXXX spelling — u32's own Display would
+                // silently print the code as DIGITS.
+                ObjView::Char(c) => match char::from_u32(c) {
+                    Some(ch) => ch.to_string(),
+                    None => format!("\\u{c:04X}"),
+                },
                 ObjView::Vector { elems, .. } => {
                     let inner: Vec<String> = elems.iter().map(|&x| self.print(x)).collect();
                     format!("#({})", inner.join(" "))

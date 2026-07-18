@@ -503,10 +503,12 @@
         (string? c) (%str-len c)
         true (-count c)))
 ;; `subs` (clojure.core) — substring via the char list; end defaults to the length.
+;; Native, UTF-16-unit-indexed (String.substring). The old version walked
+;; %str->chars and rebuilt through per-char str — O(n) allocations for one
+;; byte-range copy, and it would choke on the surrogate halves char-at now
+;; correctly yields for astral content.
 (defn subs [s start & end]
-  (let [cs (%str->chars s)
-        e (if (nil? end) (%str-len s) (first end))]
-    (apply str (take (- e start) (drop start cs)))))
+  (%subs s start (if (nil? end) (%str-len s) (first end))))
 ;; Sequential-but-not-indexed `nth` with a default: walk up to `i` elements
 ;; and stop the moment the seq runs out — NEVER compute `(count s)` first.
 ;; `nth`'s generic default-bounds-check below (`(not (< i (count c)))`) is

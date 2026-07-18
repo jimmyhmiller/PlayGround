@@ -66,7 +66,7 @@ enum Tok {
     Deref,         // @  -> (deref x)
     Caret,         // ^  metadata (parsed, then discarded for now)
     Str(String),
-    Char(char),
+    Char(u32),
     Atom(String), // symbol / keyword / number / nil / true / false
 }
 
@@ -221,7 +221,7 @@ fn tokenize(src: &str) -> Vec<Tok> {
                 // delimiter chars \( \) \[ \] \{ \} (Clojure allows these).
                 i += 1;
                 if i < cs.len() && matches!(cs[i], '(' | ')' | '[' | ']' | '{' | '}') {
-                    out.push(Tok::Char(cs[i]));
+                    out.push(Tok::Char(cs[i] as u32));
                     i += 1;
                 } else {
                     let start = i;
@@ -229,35 +229,31 @@ fn tokenize(src: &str) -> Vec<Tok> {
                         i += 1;
                     }
                     let name: String = cs[start..i].iter().collect();
-                    let ch = match name.as_str() {
-                        "newline" => '\n',
-                        "space" => ' ',
-                        "tab" => '\t',
-                        "return" => '\r',
-                        "backspace" => '\u{0008}',
-                        "formfeed" => '\u{000c}',
+                    let ch: u32 = match name.as_str() {
+                        "newline" => '\n' as u32,
+                        "space" => ' ' as u32,
+                        "tab" => '\t' as u32,
+                        "return" => '\r' as u32,
+                        "backspace" => 0x0008,
+                        "formfeed" => 0x000c,
                         // \uXXXX (4 hex) and \oNNN (up to 3 octal) numeric escapes,
-                        // exactly as Clojure's reader. A single leading `u`/`o` is
-                        // still the literal char (`\u`, `\o`).
+                        // exactly as Clojure's reader. `\uD83D` — a lone
+                        // surrogate half — is a LEGAL char literal (chars are
+                        // UTF-16 units, as on the JVM). A single leading
+                        // `u`/`o` is still the literal char (`\u`, `\o`).
                         _ if name.len() > 1
                             && name.starts_with('u')
                             && name[1..].chars().all(|c| c.is_ascii_hexdigit()) =>
                         {
-                            u32::from_str_radix(&name[1..], 16)
-                                .ok()
-                                .and_then(char::from_u32)
-                                .unwrap_or(' ')
+                            u32::from_str_radix(&name[1..], 16).unwrap_or(' ' as u32)
                         }
                         _ if name.len() > 1
                             && name.starts_with('o')
                             && name[1..].chars().all(|c| ('0'..='7').contains(&c)) =>
                         {
-                            u32::from_str_radix(&name[1..], 8)
-                                .ok()
-                                .and_then(char::from_u32)
-                                .unwrap_or(' ')
+                            u32::from_str_radix(&name[1..], 8).unwrap_or(' ' as u32)
                         }
-                        _ => name.chars().next().unwrap_or(' '),
+                        _ => name.chars().next().map(|c| c as u32).unwrap_or(' ' as u32),
                     };
                     out.push(Tok::Char(ch));
                 }

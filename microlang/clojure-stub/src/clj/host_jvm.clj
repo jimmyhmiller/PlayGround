@@ -469,18 +469,52 @@
 ;; `.toString`/`(str sb)` is one O(total) join — never the O(n^2) concat chain a
 ;; single mutable string would force. `-str1` (clojure.core) knows this tag, so
 ;; `(str sb)` yields the built string too.
+;; Combine one surrogate pair (unit ints) into its astral character's string —
+;; the %chars->str pairing path, on a 2-element array.
+(defn -sb-pair->str [hi lo]
+  (let [a (%make-array 0)]
+    (%apush a (%char-of hi))
+    (%apush a (%char-of lo))
+    (%chars->str a 0 2)))
+
 (defclass java.lang.StringBuilder
   (:tag StringBuilder)
-  (:ctor ([] (%make-record 'StringBuilder (list (%make-array 0))))
+  ;; fields: [piece-array pending-high-cell]. Java's builder is a UTF-16
+  ;; buffer, so appending the two halves of an astral char SEPARATELY (what
+  ;; data.json's escape reader does: (char (Integer/parseInt "d83d" 16)) then
+  ;; the low) must reconstitute the character. A high half is HELD in the cell
+  ;; until its low arrives; any other append while one is pending is a lone
+  ;; surrogate — a clear throw, since a UTF-8-backed string cannot spell it.
+  (:ctor ([] (%make-record 'StringBuilder (list (%make-array 0) (%cell nil))))
          ([x] (let [a (%make-array 0)]
                 (if (%num-eq (type-of x) 'Long) nil (%apush a (str x)))
-                (%make-record 'StringBuilder (list a)))))
+                (%make-record 'StringBuilder (list a (%cell nil))))))
   ;; `(if (string? x) x (str x))` — `str` is variadic (rest-seq alloc + walk
   ;; per call), and a text accumulator appends per character/token.
-  (:method append [sb x] (%apush (field sb 0) (if (string? x) x (str x))) sb)
-  (:method toString [sb] (%str-join-arr (field sb 0) ""))
-  (:method length [sb] (count (%str-join-arr (field sb 0) "")))
-  (:method charAt [sb i] (nth (%str-join-arr (field sb 0) "") i)))
+  (:method append [sb x]
+    (let [arr (field sb 0) pend (field sb 1)]
+      (if (char? x)
+        (let [u (%char-code x) p (%cell-ref pend 0)]
+          (cond
+            (if (nil? p) false (if (%lt u 0xDC00) false (%lt u 0xE000)))
+            (do (%apush arr (-sb-pair->str p u)) (%cell-set! pend 0 nil))
+
+            (if (%lt u 0xD800) false (%lt u 0xDC00))
+            (do (if (nil? p) nil (throw "StringBuilder: unpaired high surrogate"))
+                (%cell-set! pend 0 u))
+
+            :else
+            (do (if (nil? p) nil (throw "StringBuilder: unpaired high surrogate"))
+                (%apush arr (str x)))))
+        (do (if (nil? (%cell-ref pend 0)) nil (throw "StringBuilder: unpaired high surrogate"))
+            (%apush arr (if (string? x) x (str x)))))
+      sb))
+  (:method toString [sb]
+    (do (if (nil? (%cell-ref (field sb 1) 0)) nil
+            (throw "StringBuilder: unpaired trailing high surrogate"))
+        (%str-join-arr (field sb 0) "")))
+  (:method length [sb] (count (.toString sb)))
+  (:method charAt [sb i] (nth (.toString sb) i)))
 
 (defn -jvm-array-sort! [arr cmp]
   ;; a Clojure comparator may return an int (-1/0/1) or a boolean less?

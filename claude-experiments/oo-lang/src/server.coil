@@ -1313,6 +1313,28 @@
             (do (store! (srv-program) prog) (store! (srv-readonly) 0)
                 (vm-run prog) 0)))))))
 
+; scry_eval_recover: the wasm half of the uncrashable-eval invariant.
+;
+; Native uses setjmp/longjmp: eval-panic records the error into alloc-static globals and
+; longjmps back into eval-core's landing pad, which finishes the response. wasm32 has no
+; setjmp/longjmp, so the host does the unwinding instead: the `longjmp` import throws a JS
+; exception (which unwinds the wasm frames), the host restores the shadow-stack pointer,
+; and then calls THIS to finish the eval exactly as eval-core's error branch would —
+; same globals, same write-error-inner, same JSON. An eval can therefore never kill the
+; instance on wasm either; it comes back as {"error":{kind,message,…}}.
+(export-c [scry-eval-recover :as "scry_eval_recover"])
+(defn scry-eval-recover [] (-> (ptr u8))
+  (store! (ev-outcome) 1)      ; longjmp'd: the EvalError is already recorded by eval-panic
+  (diag-capture-end)
+  (eval-set-active 0)
+  (trace-disable)              ; F1: disarm the recorder even if a traced expr panicked
+  (let [b (jb-new)]
+    (jb-byte b \{)
+    (write-error-inner b)
+    (jb-byte b \})
+    (jb-byte b 0)              ; NUL-terminate for the JS reader
+    (load (field b data))))
+
 ; scry_eval: evaluate one expression/definition against the live program; returns a pointer
 ; to NUL-terminated {…} JSON ({"value":…} or {"error":{…}}) — the ONE viewer wire op
 ; (DECISIONS #8). Buffer is freshly allocated per call (host allocator reclaims it).

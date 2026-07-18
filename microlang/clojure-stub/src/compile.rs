@@ -157,6 +157,7 @@ impl Compiler {
             ("%wrap64", Wrap64), ("%wall-millis", WallMillis), ("%thread-id", ThreadId),
             ("%floor", Floor), ("%ceil", Ceil), ("%log", Log), ("%exp", Exp),
             ("%double-bits", DoubleBits), ("%bit-reverse", BitReverse), ("%stats", Stats),
+            ("%subs", Subs),
             ("%register-fields", RegisterFields), ("%field-by-name", FieldByName), ("%field-names", FieldNames), ("%make-record", MakeRecord), ("%hash", Hash),
             ("%first", First), ("%rest", Rest), ("%cons", Cons),
             ("record", Record), ("field", Field), ("type-of", TypeOf), ("nfields", NFields), ("throw", Throw),

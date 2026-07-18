@@ -18,6 +18,12 @@ export class ScryExit extends Error {
   constructor(code) { super(`scry exit(${code})`); this.code = code; }
 }
 
+// Thrown by the `longjmp` import to unwind wasm frames back to the eval() call, standing in
+// for the native setjmp/longjmp landing pad. Never escapes eval().
+export class ScryLongjmp extends Error {
+  constructor() { super("scry: longjmp (eval panic) — recovered by the host"); }
+}
+
 export class ScryWasm {
   static async instantiate(bytes, opts = {}) {
     const s = new ScryWasm(opts);
@@ -185,9 +191,13 @@ export class ScryWasm {
       },
       nanosleep: () => 0, usleep: () => 0, getpid: () => 1,
 
-      // ---- non-local exit: happy-path only (setjmp returns 0; a real longjmp traps) ----
+      // ---- non-local exit (the uncrashable-eval invariant on wasm) ----
+      // wasm32 has no setjmp/longjmp, so the HOST unwinds: setjmp always returns 0 (the
+      // "try" path), and longjmp throws a sentinel whose JS exception unwinds the wasm
+      // frames. eval() below catches it, restores the shadow stack, and calls
+      // scry_eval_recover() to emit the same {"error":{…}} the native landing pad would.
       setjmp: (_buf) => 0,
-      longjmp: (_buf, _v) => { throw new Error("scry: longjmp (eval panic) — uncrashable-eval SjLj is post-P2 on wasm"); },
+      longjmp: (_buf, _v) => { throw new ScryLongjmp(); },
       abort: () => { throw new Error("scry: abort()"); },
       exit: (code) => { throw new ScryExit(Number(code)); },
 
@@ -252,7 +262,39 @@ export class ScryWasm {
     return bytes.length;             // C snprintf returns would-be length
   }
 
+  // ---- the viewer wire op ----
+  // boot(path): load+typecheck+compile+run a program already seeded into the VFS.
+  boot(path) { return Number(this.exports.scry_boot(this.writeStr(path))); }
+
+  // eval(src) -> parsed {value}|{error}. Uncrashable: a hard eval panic (stale ref,
+  // arena-OOM, bad opcode, internal compiler invariant) longjmps, which on wasm means the
+  // `longjmp` import throws and unwinds the wasm frames. We restore the shadow-stack
+  // pointer (native's longjmp would have restored it for us — without this every panic
+  // leaks the frames between eval-core and the panic site) and let scry_eval_recover()
+  // finish the response, so the caller always gets typed JSON and the instance stays live.
+  eval(src) { return JSON.parse(this.evalRaw(src)); }
+
+  evalRaw(src) {
+    const bytes = this.enc.encode(src);
+    const p = this._malloc(bytes.length);
+    this.u8.set(bytes, p);
+    const sp = this.instance.exports.__stack_pointer;   // exported mutable global
+    const savedSp = sp ? sp.value : null;
+    try {
+      return this.readCstr(Number(this.exports.scry_eval(p, BigInt(bytes.length))));
+    } catch (e) {
+      if (!(e instanceof ScryLongjmp)) throw e;
+      if (sp) sp.value = savedSp;                        // unwind the shadow stack
+      else this._spLeaked = (this._spLeaked || 0) + 1;   // no export → frames leak; see README
+      return this.readCstr(Number(this.exports.scry_eval_recover()));
+    } finally {
+      this._free(p);
+    }
+  }
+
   // ---- marshalling helpers for callers ----
+  readCstr(p) { const u = this.u8; let e = p; while (u[e]) e++; return this.dec.decode(u.subarray(p, e)); }
+
   writeStr(s) {                       // JS string -> NUL-terminated cstring in linear memory
     const bytes = this.enc.encode(s);
     const p = this._malloc(bytes.length + 1);

@@ -82,7 +82,9 @@ pub enum Obj {
     EmptyList,
     Str(String),
     /// A character (R7RS `char?`), disjoint from integers and strings.
-    Char(char),
+    /// A UTF-16 code unit VALUE (any scalar, or a lone surrogate half —
+    /// `charAt` on astral content yields halves, exactly like Java's char).
+    Char(u32),
     /// A growable, index-addressed sequence: lowered to a HANDLE object (the
     /// identity, carrying the logical length) plus a DATA blob (the elements,
     /// carrying the capacity) — the ArrayList shape. Growth allocates a new

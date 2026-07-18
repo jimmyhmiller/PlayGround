@@ -3252,13 +3252,16 @@ pub fn clj_str<M: ValueModel>(rt: &Runtime<M>, v: u64) -> String {
             }
             ObjView::Cons { .. } => format!("({})", list_items(rt, v, " ")),
             // A char prints readably as `\a` (like Clojure's pr), distinct from
-            // `(str \a)` -> "a".
-            ObjView::Char(c) => match c {
-                ' ' => "\\space".to_string(),
-                '\n' => "\\newline".to_string(),
-                '\t' => "\\tab".to_string(),
-                '\r' => "\\return".to_string(),
-                _ => format!("\\{c}"),
+            // `(str \a)` -> "a". The value is a UTF-16 unit: a lone surrogate
+            // half (which Rust `char` cannot hold) prints as its \uXXXX
+            // literal — the same spelling the reader accepts back.
+            ObjView::Char(c) => match char::from_u32(c) {
+                Some(' ') => "\\space".to_string(),
+                Some('\n') => "\\newline".to_string(),
+                Some('\t') => "\\tab".to_string(),
+                Some('\r') => "\\return".to_string(),
+                Some(ch) => format!("\\{ch}"),
+                None => format!("\\u{c:04X}"),
             },
             _ => rt.print(v),
         },

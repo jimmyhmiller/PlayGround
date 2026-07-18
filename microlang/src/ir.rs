@@ -504,6 +504,10 @@ pub enum Prim {
     /// bytes-allocated minor-gcs major-gcs]. The prelude's `-runtime-stats`
     /// wraps it in a map; the bench harness prints per-workload deltas.
     Stats,
+    /// `(%subs s start end)` -> the substring in UTF-16 unit indices
+    /// (String.substring). Splitting INSIDE a surrogate pair throws — a lone
+    /// half has no UTF-8 spelling.
+    Subs,
 }
 
 impl Prim {
