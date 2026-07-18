@@ -240,10 +240,30 @@ pub struct GraphDelta {
     pub changed: BTreeSet<ModuleId>,
 }
 
+/// The module system the emitted JavaScript targets. The browser `public/`
+/// build renders the shared registry runtime as a CommonJS-shaped IIFE
+/// (`module.exports=(()=>{…})()`, cross-chunk loading via `require`); the Node
+/// `server/` build renders genuinely executable ES modules (`export default`,
+/// `import { createRequire }` for Node built-ins, real dynamic `import()` of
+/// split chunks) so each emitted `.mjs` runs under Node's ESM goal, not merely
+/// passing `node --check`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ModuleFormat {
+    /// CommonJS-shaped output: `module.exports`, `require`, `require.dynamic`.
+    #[default]
+    Cjs,
+    /// Node ES module output: `export default`, real `import()` for split
+    /// chunks, `createRequire(import.meta.url)` for external Node built-ins.
+    Esm,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EmitOptions {
     pub source_map: bool,
     pub minify: bool,
+    /// The target module system. Defaults to [`ModuleFormat::Cjs`]; the server
+    /// build forces [`ModuleFormat::Esm`] so its `.mjs` output truly executes.
+    pub format: ModuleFormat,
 }
 
 /// A count of what an environment build wrote to disk: JavaScript modules
@@ -560,6 +580,12 @@ impl Bundler {
         output_root: &Path,
         options: EmitOptions,
     ) -> Result<EmitSummary, String> {
+        // The server build is always Node ESM, regardless of the caller's
+        // options, so every emitted `.mjs` executes under Node's ESM goal.
+        let options = EmitOptions {
+            format: ModuleFormat::Esm,
+            ..options
+        };
         self.emit_environment(reachable, &output_root.join("server"), "server.mjs", options)
     }
 
@@ -626,7 +652,8 @@ impl Bundler {
         }
         for (root, chunk_path) in dynamic_roots.iter().copied().zip(&chunk_paths) {
             let modules = self.static_closure(root, &allowed);
-            let rendered = self.render_best(&modules, root, &chunk_names, &runtime_ids, false);
+            let rendered =
+                self.render_best(&modules, root, &chunk_names, &runtime_ids, false, options.format);
             self.write_rendered(rendered, chunk_path, options)?;
         }
         if options.minify
@@ -636,8 +663,14 @@ impl Bundler {
         {
             return self.write_rendered(rendered, output, options);
         }
-        let rendered =
-            self.render_best(&main_modules, self.entry, &chunk_names, &runtime_ids, true);
+        let rendered = self.render_best(
+            &main_modules,
+            self.entry,
+            &chunk_names,
+            &runtime_ids,
+            true,
+            options.format,
+        );
         self.write_rendered(rendered, output, options)
     }
 
@@ -1130,10 +1163,11 @@ impl Bundler {
         chunk_names: &HashMap<DenseModuleId, String>,
         runtime_ids: &[Option<usize>],
         is_main: bool,
+        format: ModuleFormat,
     ) -> RenderedBundle {
-        self.render_flat(reachable, entry, chunk_names, is_main)
+        self.render_flat(reachable, entry, chunk_names, is_main, format)
             .unwrap_or_else(|| {
-                self.render_runtime(reachable, entry, chunk_names, runtime_ids, is_main)
+                self.render_runtime(reachable, entry, chunk_names, runtime_ids, is_main, format)
             })
     }
 
@@ -1143,6 +1177,7 @@ impl Bundler {
         entry: DenseModuleId,
         chunk_names: &HashMap<DenseModuleId, String>,
         is_main: bool,
+        format: ModuleFormat,
     ) -> Option<RenderedBundle> {
         let reachable_set = reachable.iter().copied().collect::<HashSet<_>>();
         for &dense_index in reachable {
@@ -1218,7 +1253,16 @@ impl Bundler {
                 let chunk = chunk_names.get(target)?;
                 let import = format!("import({})", quote(specifier));
                 let lowered_import = format!("__dynamic(require, {})", quote(specifier));
-                let replacement = format!("Promise.resolve().then(()=>require({}))", quote(chunk));
+                // In ESM output the split chunk is a real `.mjs`, so a native
+                // dynamic `import()` of the chunk path loads it and resolves to
+                // its namespace. In CJS output the chunk is `module.exports`, so
+                // the load goes through the host `require`.
+                let replacement = match format {
+                    ModuleFormat::Esm => format!("import({})", quote(chunk)),
+                    ModuleFormat::Cjs => {
+                        format!("Promise.resolve().then(()=>require({}))", quote(chunk))
+                    }
+                };
                 if module_code.contains(&import) {
                     module_code = module_code.replace(&import, &replacement);
                 } else if module_code.contains(&lowered_import) {
@@ -1248,7 +1292,18 @@ impl Bundler {
                 .filter(|name| demands[entry].includes(name))
                 .cloned()
                 .collect::<Vec<_>>();
-            code.push_str(&format!("module.exports={{{}}};\n", exports.join(",")));
+            // A flat chunk only ever has clean named exports (the flat builder
+            // bails to the runtime path on any `default`/re-export/`export *`),
+            // so a bare `export{a,b}` of the in-scope bindings is always valid
+            // ESM; the CJS chunk exposes the same names on `module.exports`.
+            match format {
+                ModuleFormat::Esm => {
+                    code.push_str(&format!("export{{{}}};\n", exports.join(",")))
+                }
+                ModuleFormat::Cjs => {
+                    code.push_str(&format!("module.exports={{{}}};\n", exports.join(",")))
+                }
+            }
         }
         Some(RenderedBundle { code, mappings })
     }
@@ -1298,6 +1353,7 @@ impl Bundler {
         chunk_names: &HashMap<DenseModuleId, String>,
         runtime_ids: &[Option<usize>],
         is_main: bool,
+        format: ModuleFormat,
     ) -> RenderedBundle {
         let export_demands = self.export_demands(reachable, entry);
         let fragments = reachable
@@ -1368,6 +1424,20 @@ impl Bundler {
         ));
         let entry_runtime_id =
             runtime_ids[entry].expect("a chunk entry must have a deterministic runtime ID");
+        // In ESM output a split chunk is a real `.mjs`, so its dynamic load is a
+        // native `import()` whose default export is the chunk's required target;
+        // external Node built-ins resolve through `createRequire`. In CJS output
+        // both go through the host `require`, exactly as before.
+        let (require_dynamic, require_native) = match format {
+            ModuleFormat::Esm => (
+                r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null)return import(chunk[0]).then(namespace=>namespace.default);return __require(chunk[1]);};"#,
+                "const requireNative=__diffpackCreateRequire(import.meta.url);",
+            ),
+            ModuleFormat::Cjs => (
+                r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null){if(typeof requireNative!=="function")throw new Error("Dynamic chunks require a CommonJS host");return requireNative(chunk[0]);}return __require(chunk[1]);};"#,
+                r#"const requireNative=typeof require==="function"?require:null;"#,
+            ),
+        };
         let tail = if is_main {
             format!(
                 r#"const __runtime=globalThis[{runtime_key}]??=(()=>{{
@@ -1397,11 +1467,11 @@ function __require(id){{
   const module={{exports:{{}}}};
   __cache[id]=module;
   const require=specifier=>{{const target=__maps[id][specifier];if(target===undefined){{if(requireNative)return requireNative(specifier);throw new Error("Cannot resolve "+specifier+" from "+id);}}return __require(target);}};
-  require.dynamic=specifier=>{{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null){{if(typeof requireNative!=="function")throw new Error("Dynamic chunks require a CommonJS host");return requireNative(chunk[0]);}}return __require(chunk[1]);}};
+  {require_dynamic}
   factory(module,module.exports,require,__toESM,__export,__reExport,__import,__dynamic,__esmNamespace,__seal);
   return module.exports;
 }}
-const requireNative=typeof require==="function"?require:null;
+{require_native}
 return {{register:__register,require:__require}};
 }})();
 __runtime.register(__newModules,__newMaps,__newChunks);
@@ -1415,8 +1485,15 @@ __runtime.register(__newModules,__newMaps,__newChunks);
 return __runtime.require({entry_runtime_id});"#
             )
         };
-        let code = format!(
-            r#"module.exports=(()=>{{
+        // The registry runtime is identical in both formats; only the module
+        // boundary differs. CJS assigns the entry's exports to `module.exports`.
+        // ESM binds them to a local and re-exports as the default, and the main
+        // chunk (which builds the runtime) imports `createRequire` so external
+        // Node built-ins resolve — each emitted `.mjs` then truly executes under
+        // Node's ESM goal, not merely passing `node --check`.
+        let code = match format {
+            ModuleFormat::Cjs => format!(
+                r#"module.exports=(()=>{{
 "use strict";
 const __newModules={{{modules}}};
 const __newMaps={{{maps}}};
@@ -1424,7 +1501,26 @@ const __newChunks={{{chunks}}};
 {tail}
 }})();
 "#
-        );
+            ),
+            ModuleFormat::Esm => {
+                let prelude = if is_main {
+                    "import { createRequire as __diffpackCreateRequire } from \"node:module\";\n"
+                } else {
+                    ""
+                };
+                format!(
+                    r#"{prelude}const __diffpackEntry=(()=>{{
+"use strict";
+const __newModules={{{modules}}};
+const __newMaps={{{maps}}};
+const __newChunks={{{chunks}}};
+{tail}
+}})();
+export default __diffpackEntry;
+"#
+                )
+            }
+        };
         RenderedBundle { code, mappings }
     }
 
@@ -2835,6 +2931,7 @@ mod tests {
                 EmitOptions {
                     source_map: false,
                     minify: true,
+                    format: crate::bundler::ModuleFormat::Cjs,
                 },
             )
             .unwrap();
@@ -2850,6 +2947,7 @@ mod tests {
                 EmitOptions {
                     source_map: false,
                     minify: true,
+                    format: crate::bundler::ModuleFormat::Cjs,
                 },
             )
             .unwrap();
@@ -3100,6 +3198,62 @@ mod tests {
             .emit_server(&reachable, &output_root, EmitOptions::default())
             .unwrap();
         assert!(!stale.exists(), "re-emit must clear stale output");
+    }
+
+    /// The server `.mjs` output must not merely pass `node --check`; it must
+    /// EXECUTE under Node's ESM goal. This builds a small multi-module app with a
+    /// static cross-module import, an external Node built-in (forcing the shared
+    /// registry runtime), and a dynamic `import()` of a split chunk, emits it via
+    /// the server path, then runs the entry under `node` and asserts both the
+    /// static value and the dynamically-loaded chunk's value reach stdout.
+    #[test]
+    fn emit_server_mjs_executes_the_entry_and_dynamic_chunk_under_node() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("util.js"),
+            "export const base = 10;\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("lazy.js"),
+            "import os from 'node:os';\n\
+             export const lazy = 'lazy-value';\n\
+             export function describe(){ return typeof os.platform === 'function' ? 'has-os' : 'no-os'; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("server.ts"),
+            "import path from 'node:path';\n\
+             import { base } from './util.js';\n\
+             console.log('base:' + base);\n\
+             console.log('sep:' + (path.sep.length === 1));\n\
+             import('./lazy.js').then((m) => { console.log('lazy:' + m.lazy + ':' + m.describe()); });\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("server.ts");
+        let output_root = directory.path().join(".diffpack-output");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler
+            .emit_server(&reachable, &output_root, EmitOptions::default())
+            .unwrap();
+
+        let server_entry = output_root.join("server/server.mjs");
+        assert!(
+            output_root.join("server/server.chunk-1.mjs").is_file(),
+            "the dynamic import lands in its own `.mjs` chunk"
+        );
+        // Actually run it: `module is not defined` would abort here, so a clean
+        // stdout proves the emitted ESM genuinely executes.
+        assert_eq!(
+            run_node(&server_entry),
+            "base:10\nsep:true\nlazy:lazy-value:has-os\n"
+        );
     }
 
     /// A minimal TanStack-style route app: a stub `@tanstack/react-router` (so no

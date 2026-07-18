@@ -215,6 +215,7 @@ fn run_bundle_scale_inner_impl(
         EmitOptions {
             source_map: false,
             minify,
+            ..Default::default()
         },
     )?;
     let initial_emit_ms = elapsed_ms(emit_started);
@@ -264,6 +265,7 @@ fn run_bundle_scale_inner_impl(
         EmitOptions {
             source_map: false,
             minify,
+            ..Default::default()
         },
     )?;
     let edit_emit_ms = elapsed_ms(edit_emit_started);

@@ -236,7 +236,7 @@ fn run() -> Result<(), String> {
                 ));
             }
             let reachable = bundler.reachable_modules_direct();
-            bundler.emit_with_options(&reachable, &output, EmitOptions { source_map, minify })?;
+            bundler.emit_with_options(&reachable, &output, EmitOptions { source_map, minify, ..Default::default() })?;
             println!(
                 "bundled {} modules to {} (transformed {})",
                 reachable.len(),
