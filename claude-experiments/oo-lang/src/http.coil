@@ -53,17 +53,17 @@
     (if (> (+ (load (field b len)) total) (load (field b cap)))
       (let [(mut nc) (load (field b cap))]
         (loop (if (< (load nc) (+ (load (field b len)) total)) (do (store! nc (* (load nc) 2)) 0) (break)))
-        (store! (field b data) (cast (ptr u8) (realloc (cast (ptr i8) (load (field b data))) (load nc))))
+        (store! (field b data) (cast (ptr u8) (xrealloc (cast (ptr i8) (load (field b data))) (load nc))))
         (store! (field b cap) (load nc)) 0)
       0)
-    (memcpy (cast (ptr i8) (index (load (field b data)) (load (field b len)))) ptr total)
+    (xmemcpy (cast (ptr i8) (index (load (field b data)) (load (field b len)))) ptr total)
     (store! (field b len) (+ (load (field b len)) total))
     total))
 
 ; copy a (NOT NUL-terminated) Scry String's bytes into a fresh malloc'd NUL-terminated C string.
 (defn str-to-cstr [(s (ptr StringObj))] (-> (ptr i8))
   (let [n (load (field s len)) buf (xalloc (+ n 1))]
-    (memcpy (cast (ptr i8) buf) (cast (ptr i8) (load (field s data))) n)
+    (xmemcpy (cast (ptr i8) buf) (cast (ptr i8) (load (field s data))) n)
     (store! (index buf n) (cast u8 0))
     (cast (ptr i8) buf)))
 
@@ -153,7 +153,7 @@
               ; transport failure: status 0 sentinel + curl's human-readable error text
               (store! (field res status) 0) (store! (field res err) 1)
               (let [msg (curl_easy_strerror (cast i32 rc))]
-                (store! (field res body) (str-copy (cast (ptr u8) msg) (strlen msg)))))
+                (store! (field res body) (str-copy (cast (ptr u8) msg) (s-len msg)))))
             (do
               (let [codep (alloc-stack i64)]
                 (store! codep 0)

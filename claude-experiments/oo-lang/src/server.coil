@@ -619,7 +619,7 @@
     (snprintf mb 512 c"%.*s redefined at generation %lld — next call uses the new code" (cast i32 nln) (cast (ptr i8) name) gen)
     (jb-cstr b c"{\"type\":\"defined\",\"defined\":") (jb-str b name nln)
     (jb-cstr b c",\"gen\":") (jb-int b gen)
-    (jb-cstr b c",\"message\":") (jb-str b (cast (ptr u8) mb) (strlen mb))
+    (jb-cstr b c",\"message\":") (jb-str b (cast (ptr u8) mb) (s-len mb))
     (jb-byte b \}))
   (store! (ev-outcome) 0) 0)
 
@@ -885,7 +885,7 @@
   (let [(mut s) 0 (mut e) len]
     (loop (if (and (< (load s) (load e)) (let [c (cast i64 (load (index src (load s))))] (or (= c \space) (or (= c \tab) (or (= c \newline) (= c \return)))))) (do (store! s (+ (load s) 1)) 0) (break)))
     (loop (if (and (< (load s) (load e)) (let [c (cast i64 (load (index src (- (load e) 1))))] (or (= c \space) (or (= c \tab) (or (= c \newline) (= c \return)))))) (do (store! e (- (load e) 1)) 0) (break)))
-    (let [tl (- (load e) (load s)) ll (strlen lit)]
+    (let [tl (- (load e) (load s)) ll (s-len lit)]
       (if (!= tl ll) false
         (let [(mut i) 0 (mut ok) true]
           (loop (if (and (load ok) (< (load i) tl)) (do (if (!= (cast i64 (load (index src (+ (load s) (load i))))) (cast i64 (load (index (cast (ptr u8) lit) (load i))))) (do (store! ok false) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
@@ -945,7 +945,7 @@
 
 ; ============================ HTTP (server thread) ============================
 (defn ends-with [(name (ptr i8)) (suf (ptr i8))] (-> bool)
-  (let [nl (strlen name) sl (strlen suf)]
+  (let [nl (s-len name) sl (s-len suf)]
     (if (< nl sl) false
       (let [(mut i) 0 (mut ok) true]
         (loop (if (and (load ok) (< (load i) sl)) (do (if (!= (cast i64 (load (index (cast (ptr u8) name) (+ (- nl sl) (load i))))) (cast i64 (load (index (cast (ptr u8) suf) (load i))))) (do (store! ok false) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
@@ -964,19 +964,19 @@
 
 ; join viewer-dir + name into a fresh path buffer
 (defn join-path [(dir (ptr i8)) (name (ptr i8))] (-> (ptr i8))
-  (let [dl (strlen dir) nl (strlen name) buf (cast (ptr i8) (xalloc (+ (+ dl nl) 2))) (mut k) 0]
+  (let [dl (s-len dir) nl (s-len name) buf (cast (ptr i8) (xalloc (+ (+ dl nl) 2))) (mut k) 0]
     (let [(mut i) 0] (loop (if (< (load i) dl) (do (store! (index (cast (ptr u8) buf) (load k)) (load (index (cast (ptr u8) dir) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
     (let [(mut i) 0] (loop (if (< (load i) nl) (do (store! (index (cast (ptr u8) buf) (load k)) (load (index (cast (ptr u8) name) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
     (store! (index (cast (ptr u8) buf) (load k)) (cast u8 0)) buf))
 
 (defn write-all [(fd i64) (p (ptr u8)) (n i64)] (-> i64)
   (let [(mut off) 0]
-    (loop (if (< (load off) n) (let [w (write fd (cast (ptr i8) (index p (load off))) (- n (load off)))] (if (<= w 0) (break) (do (store! off (+ (load off) w)) 0))) (break))))
+    (loop (if (< (load off) n) (let [w (cast i64 (write (cast i32 fd) (cast (ptr i8) (index p (load off))) (cast isize (- n (load off)))))] (if (<= w 0) (break) (do (store! off (+ (load off) w)) 0))) (break))))
   0)
 ; Coil's c"…" lexer decodes only \n \t \\ \" — NOT \r or \xHH — so HTTP CRLFs are
 ; written as explicit bytes (\return=13, \newline=10) rather than via an escape.
 (defn sr-str [(buf (ptr u8)) (k (ptr i64)) (s (ptr i8))] (-> i64)
-  (let [n (strlen s) (mut i) 0]
+  (let [n (s-len s) (mut i) 0]
     (loop (if (< (load i) n) (do (store! (index buf (load k)) (load (index (cast (ptr u8) s) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break)))) 0)
 (defn sr-crlf [(buf (ptr u8)) (k (ptr i64))] (-> i64)
   (store! (index buf (load k)) (cast u8 \return)) (store! (index buf (+ (load k) 1)) (cast u8 \newline)) (store! k (+ (load k) 2)) 0)
@@ -1038,7 +1038,7 @@
     (let [(mut done) false]
       (loop
         (if (load done) (break)
-          (let [r (read (cast i64 cfd) (cast (ptr i8) (index buf (load total))) (- cap (load total)))]
+          (let [r (cast i64 (read (cast i32 cfd) (cast (ptr i8) (index buf (load total))) (cast isize (- cap (load total)))))]
             (if (<= r 0) (break)
               (do (store! total (+ (load total) r))
                   (let [bs (find-body-start buf (load total))]
@@ -1061,13 +1061,13 @@
 (defn handle-eval [(cfd i64) (buf (ptr u8)) (n i64)] (-> i64)
   (let [bs (find-body-start buf n)]
     (if (< bs 0) (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"BadRequest\",\"message\":\"no body\"}}")]
-                   (send-response cfd c"400 Bad Request" c"application/json" m (strlen (cast (ptr i8) m))))
+                   (send-response cfd c"400 Bad Request" c"application/json" m (s-len (cast (ptr i8) m))))
       (let [srcbuf (xalloc 65537) srclen (cast (ptr i64) (xalloc 8))
             idbuf (xalloc 256) idlen (cast (ptr i64) (xalloc 8))
             spos (json-find-key (index buf bs) (- n bs) c"source" 6)
             ipos (json-find-key (index buf bs) (- n bs) c"id" 2)]
         (if (< spos 0) (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"BadRequest\",\"message\":\"missing source\"}}")]
-                         (send-response cfd c"400 Bad Request" c"application/json" m (strlen (cast (ptr i8) m))))
+                         (send-response cfd c"400 Bad Request" c"application/json" m (s-len (cast (ptr i8) m))))
           (do
             (json-decode-string (index buf bs) (- n bs) spos srcbuf srclen)
             ; NUL-terminate: lex-file scans srcbuf as a C string. The decoder writes only the
@@ -1105,7 +1105,7 @@
       (send-response cfd c"200 OK" (content-type-for full) body (load outlen)))))
 ; strip leading '/' and any query string
 (defn path-basename [(path (ptr i8))] (-> (ptr i8))
-  (let [n (strlen path) buf (cast (ptr i8) (xalloc (+ n 1))) (mut i) (if (= (cast i64 (load (index (cast (ptr u8) path) 0))) \/) 1 0) (mut k) 0]
+  (let [n (s-len path) buf (cast (ptr i8) (xalloc (+ n 1))) (mut i) (if (= (cast i64 (load (index (cast (ptr u8) path) 0))) \/) 1 0) (mut k) 0]
     (loop (if (< (load i) n) (let [c (cast i64 (load (index (cast (ptr u8) path) (load i))))] (if (= c \?) (break) (do (store! (index (cast (ptr u8) buf) (load k)) (cast u8 c)) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0))) (break)))
     (store! (index (cast (ptr u8) buf) (load k)) (cast u8 0)) buf))
 
@@ -1161,7 +1161,7 @@
 ; ============================ Phase 10: best-effort portal registration ============================
 ; the last '/'-separated component of a path (the display name shown on the portal card).
 (defn srv-basename [(path (ptr i8))] (-> (ptr i8))
-  (let [n (strlen path) (mut i) (- n 1) (mut start) 0]
+  (let [n (s-len path) (mut i) (- n 1) (mut start) 0]
     (loop (if (>= (load i) 0) (if (= (cast i64 (load (index (cast (ptr u8) path) (load i)))) \/) (do (store! start (+ (load i) 1)) (store! i -1) 0) (do (store! i (- (load i) 1)) 0)) (break)))
     (cast (ptr i8) (index (cast (ptr u8) path) (load start)))))
 ; Register {name,pid,port,mode} with the portal on 127.0.0.1:7357. Best-effort: if the portal
@@ -1286,7 +1286,7 @@
               (loop (if (< (load i) ne)
                       (let [expr (al-get exprs (load i)) b (jb-new)]
                         (jb-byte b \{)
-                        (eval-core b (cast (ptr u8) expr) (strlen expr) (if readonly 1 0))
+                        (eval-core b (cast (ptr u8) expr) (s-len expr) (if readonly 1 0))
                         (jb-byte b \})
                         (write-all 1 (load (field b data)) (load (field b len)))
                         (w-cstr 1 c"\n")

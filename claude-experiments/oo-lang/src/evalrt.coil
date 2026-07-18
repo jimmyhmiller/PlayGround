@@ -42,7 +42,7 @@
 (defn eval-set-active [(v i64)] (-> i64) (store! (ev-active) v) 0)
 
 (defn ev-set-msg [(s (ptr i8))] (-> i64)
-  (let [n (strlen s) m (if (> n 1023) 1023 n) (mut i) 0]
+  (let [n (s-len s) m (if (> n 1023) 1023 n) (mut i) 0]
     (loop (if (< (load i) m) (do (store! (index (ev-msgbuf) (load i)) (load (index (cast (ptr u8) s) (load i)))) (store! i (+ (load i) 1)) 0) (break)))
     (store! (ev-msglen) m) 0))
 (defn ev-set-msg-bytes [(p (ptr u8)) (n i64)] (-> i64)

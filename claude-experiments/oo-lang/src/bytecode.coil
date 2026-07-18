@@ -129,7 +129,7 @@
 (defn chunk-add-ann [(c (ptr Chunk)) (off i64) (ref i64)] (-> i64)
   (if (>= (load (field c ann-count)) (load (field c ann-cap)))
     (let [ncap (* (load (field c ann-cap)) 2)]
-      (store! (field c anns) (cast (ptr i64) (realloc (cast (ptr i8) (load (field c anns))) (* 8 ncap))))
+      (store! (field c anns) (cast (ptr i64) (xrealloc (cast (ptr i8) (load (field c anns))) (* 8 ncap))))
       (store! (field c ann-cap) ncap) 0)
     0)
   (store! (index (load (field c anns)) (load (field c ann-count))) (ior (ishl off 1) ref))
@@ -147,7 +147,7 @@
 (defn chunk-byte [(c (ptr Chunk)) (b i64)] (-> i64)
   (if (>= (load (field c count)) (load (field c cap)))
     (let [ncap (* (load (field c cap)) 2)]
-      (store! (field c code) (cast (ptr u8) (realloc (cast (ptr i8) (load (field c code))) ncap)))
+      (store! (field c code) (cast (ptr u8) (xrealloc (cast (ptr i8) (load (field c code))) ncap)))
       (store! (field c cap) ncap) 0)
     0)
   (store! (index (load (field c code)) (load (field c count))) (cast u8 (iand b 255)))
@@ -164,8 +164,8 @@
 (defn chunk-add-const-k [(c (ptr Chunk)) (v i64) (isref i64)] (-> i64)
   (if (>= (load (field c const-count)) (load (field c const-cap)))
     (let [ncap (* (load (field c const-cap)) 2)]
-      (store! (field c consts) (cast (ptr i64) (realloc (cast (ptr i8) (load (field c consts))) (* 8 ncap))))
-      (store! (field c const-ref) (cast (ptr u8) (realloc (cast (ptr i8) (load (field c const-ref))) ncap)))
+      (store! (field c consts) (cast (ptr i64) (xrealloc (cast (ptr i8) (load (field c consts))) (* 8 ncap))))
+      (store! (field c const-ref) (cast (ptr u8) (xrealloc (cast (ptr i8) (load (field c const-ref))) ncap)))
       (store! (field c const-cap) ncap) 0)
     0)
   (store! (index (load (field c consts)) (load (field c const-count))) v)

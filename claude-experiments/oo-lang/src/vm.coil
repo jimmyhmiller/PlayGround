@@ -256,14 +256,14 @@
         (safepoint-poll (field vt parked))
         (let [r (cast i64 (poll (cast (ptr i8) pfd) 1 20))]
           (if (<= r 0) (continue)   ; timeout / EINTR: re-poll after the next safepoint
-            (let [n (read (cast i64 0) (cast (ptr i8) chp) 1)]
+            (let [n (cast i64 (read (cast i32 0) (cast (ptr i8) chp) 1))]
               (if (= n 0) (do (store! iseof 1) (break))            ; EOF
                 (if (< n 0) (continue)                             ; EINTR mid-read
                   (if (= (cast i64 (load chp)) \newline) (break)   ; end of line
                     (do
                       (if (>= (load len) (load cap))
                         (do (store! cap (* (load cap) 2))
-                            (store! buf (cast (ptr u8) (realloc (cast (ptr i8) (load buf)) (load cap)))) 0) 0)
+                            (store! buf (cast (ptr u8) (xrealloc (cast (ptr i8) (load buf)) (load cap)))) 0) 0)
                       (store! (index (load buf) (load len)) (load chp))
                       (store! len (+ (load len) 1))
                       (continue))))))))))
@@ -368,7 +368,7 @@
 ; the bytes into a malloc'd buffer and append a NUL.
 (defn str-to-cstr-copy [(s (ptr StringObj))] (-> (ptr i8))
   (let [n (load (field s len)) buf (xalloc (+ n 1))]
-    (if (> n 0) (do (memcpy (cast (ptr i8) buf) (cast (ptr i8) (load (field s data))) n) 0) 0)
+    (if (> n 0) (do (xmemcpy (cast (ptr i8) buf) (cast (ptr i8) (load (field s data))) n) 0) 0)
     (store! (index buf n) (cast u8 0))
     (cast (ptr i8) buf)))
 
@@ -378,8 +378,8 @@
   (let [cn (str-to-cstr-copy name) v (getenv cn)]
     (if (= (cast i64 v) 0)
       (enum-none)
-      (let [vl (strlen v) buf (xalloc (+ vl 1))]
-        (if (> vl 0) (do (memcpy (cast (ptr i8) buf) v vl) 0) 0)
+      (let [vl (s-len v) buf (xalloc (+ vl 1))]
+        (if (> vl 0) (do (xmemcpy (cast (ptr i8) buf) v vl) 0) 0)
         (store! (index buf vl) (cast u8 0))
         (enum-some-r (cast i64 (str-make buf vl)) 1)))))   ; Some(value) — String payload is a ref
 
@@ -449,8 +449,8 @@
 ; never stalls a global stop: the viewer stays live and evals answer while a tool executes.
 (defn vm-proc-run [(vt (ptr VMThread)) (cmd (ptr StringObj))] (-> (ptr StringObj))
   (let [clen (load (field cmd len)) full (xalloc (+ clen 6))]
-    (if (> clen 0) (do (memcpy (cast (ptr i8) full) (cast (ptr i8) (load (field cmd data))) clen) 0) 0)
-    (memcpy (cast (ptr i8) (index full clen)) (cast (ptr i8) c" 2>&1") 5)
+    (if (> clen 0) (do (xmemcpy (cast (ptr i8) full) (cast (ptr i8) (load (field cmd data))) clen) 0) 0)
+    (xmemcpy (cast (ptr i8) (index full clen)) (cast (ptr i8) c" 2>&1") 5)
     (store! (index full (+ clen 5)) (cast u8 0))
     (let [f (popen (cast (ptr i8) full) c"r")]
       (if (= (cast i64 f) 0) (str-copy (cast (ptr u8) c"(command failed to start)") 25)
@@ -462,14 +462,14 @@
               (safepoint-poll (field vt parked))
               (let [r (cast i64 (poll (cast (ptr i8) pfd) 1 20))]
                 (if (<= r 0) (continue)                   ; timeout / EINTR: re-poll after the safepoint
-                  (let [n (read (cast i64 fd) (cast (ptr i8) (index chunk 0)) 8192)]
+                  (let [n (cast i64 (read (cast i32 fd) (cast (ptr i8) (index chunk 0)) 8192))]
                     (if (= n 0) (break)                   ; EOF -> child done
                       (if (< n 0) (continue)
                         (do
                           (if (> (+ (load len) n) (load cap))
                             (do (loop (if (< (load cap) (+ (load len) n)) (do (store! cap (* (load cap) 2)) 0) (break)))
-                                (store! buf (cast (ptr u8) (realloc (cast (ptr i8) (load buf)) (load cap)))) 0) 0)
-                          (memcpy (cast (ptr i8) (index (load buf) (load len))) (cast (ptr i8) (index chunk 0)) n)
+                                (store! buf (cast (ptr u8) (xrealloc (cast (ptr i8) (load buf)) (load cap)))) 0) 0)
+                          (xmemcpy (cast (ptr i8) (index (load buf) (load len))) (cast (ptr i8) (index chunk 0)) n)
                           (store! len (+ (load len) n)) (continue)))))))))
           (pclose f)
           (str-make (load buf) (load len)))))))
@@ -487,8 +487,8 @@
               (do
                 (if (> (+ (load len) n) (load cap))
                   (do (loop (if (< (load cap) (+ (load len) n)) (do (store! cap (* (load cap) 2)) 0) (break)))
-                      (store! buf (cast (ptr u8) (realloc (cast (ptr i8) (load buf)) (load cap)))) 0) 0)
-                (memcpy (cast (ptr i8) (index (load buf) (load len))) (cast (ptr i8) (index chunk 0)) n)
+                      (store! buf (cast (ptr u8) (xrealloc (cast (ptr i8) (load buf)) (load cap)))) 0) 0)
+                (xmemcpy (cast (ptr i8) (index (load buf) (load len))) (cast (ptr i8) (index chunk 0)) n)
                 (store! len (+ (load len) n)) (continue)))))
         (fclose (cast (ptr i8) f))
         (enum-some-r (cast i64 (str-make (load buf) (load len))) 1)))))

@@ -1135,7 +1135,7 @@
 ; ======================================================================
 ; Built-in types
 ; ======================================================================
-(defn scn [(n (ptr Node)) (s (ptr i8))] (-> i64) (set-name! n (cast (ptr u8) s) (strlen s)) 0)
+(defn scn [(n (ptr Node)) (s (ptr i8))] (-> i64) (set-name! n (cast (ptr u8) s) (s-len s)) 0)
 (defn bt-type [(s (ptr i8))] (-> (ptr Node)) (let [t (mk-node NK_TYPE 0 0)] (scn t s) t))
 (defn bt-type1 [(s (ptr i8)) (a1 (ptr Node))] (-> (ptr Node)) (let [t (bt-type s)] (add-kid! t a1) t))
 (defn bt-type2 [(s (ptr i8)) (a1 (ptr Node)) (a2 (ptr Node))] (-> (ptr Node)) (let [t (bt-type s)] (add-kid! t a1) (add-kid! t a2) t))
@@ -1154,7 +1154,7 @@
   (let [f (bt-fn0 s ret)] (add-kid! (load (field f b)) p1) (add-kid! (load (field f b)) p2) f))
 
 (defn mkbuiltin [(kind i64) (name-cstr (ptr i8))] (-> (ptr Decl))
-  (let [d (new-decl kind (cast (ptr u8) name-cstr) (strlen name-cstr) (cast (ptr Node) 0) (cast (ptr i8) c"<builtin>"))]
+  (let [d (new-decl kind (cast (ptr u8) name-cstr) (s-len name-cstr) (cast (ptr Node) 0) (cast (ptr i8) c"<builtin>"))]
     (register-decl d) d))
 (defn bdm [(d (ptr Decl)) (m (ptr Node))] (-> i64) (al-push! (mut (field d members)) m) 0)
 (defn bdtp [(d (ptr Decl)) (s (ptr i8))] (-> i64) (al-push! (mut (field d tparams)) (bt-tparam s)) 0)
@@ -1266,17 +1266,17 @@
   (let [f (fopen path c"rb")] (if (= (cast i64 f) 0) false (do (fclose f) true))))
 
 (defn dirname [(path (ptr i8))] (-> (ptr i8))
-  (let [n (strlen path) (mut last) -1 (mut i) 0]
+  (let [n (s-len path) (mut last) -1 (mut i) 0]
     (loop (if (< (load i) n) (do (if (= (cast i64 (load (index (cast (ptr u8) path) (load i)))) \/) (do (store! last (load i)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
     (if (< (load last) 0)
       (cast (ptr i8) c"./")
-      (let [buf (cast (ptr i8) (malloc (+ (load last) 2))) (mut j) 0]
+      (let [buf (cast (ptr i8) (malloc (cast isize (+ (load last) 2)))) (mut j) 0]
         (loop (if (<= (load j) (load last)) (do (store! (index (cast (ptr u8) buf) (load j)) (load (index (cast (ptr u8) path) (load j)))) (store! j (+ (load j) 1)) 0) (break)))
         (store! (index (cast (ptr u8) buf) (+ (load last) 1)) (cast u8 0)) buf))))
 
 ; build "dir + mod[start..mlen) (dots->sep) + .scry"
 (defn path-cand [(dir (ptr i8)) (mod (ptr u8)) (start i64) (mlen i64) (sep i64)] (-> (ptr i8))
-  (let [dl (strlen dir) buf (cast (ptr i8) (malloc (+ (+ dl mlen) 16))) (mut k) 0]
+  (let [dl (s-len dir) buf (cast (ptr i8) (malloc (cast isize (+ (+ dl mlen) 16)))) (mut k) 0]
     (let [(mut i) 0] (loop (if (< (load i) dl) (do (store! (index (cast (ptr u8) buf) (load k)) (load (index (cast (ptr u8) dir) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
     (let [(mut i) start] (loop (if (< (load i) mlen)
       (let [ch (cast i64 (load (index mod (load i))))]
@@ -1300,11 +1300,11 @@
 
 ; ---- project/std roots (07-modules.md §3) ----------------------------------
 (defn join-simple [(dir (ptr i8)) (name (ptr i8))] (-> (ptr i8))
-  (let [dl (strlen dir) nl (strlen name) buf (cast (ptr i8) (malloc (+ (+ dl nl) 1)))]
-    (memcpy buf dir dl) (memcpy (index (cast (ptr u8) buf) dl) name nl)
+  (let [dl (s-len dir) nl (s-len name) buf (cast (ptr i8) (malloc (cast isize (+ (+ dl nl) 1))))]
+    (xmemcpy buf dir dl) (xmemcpy (cast (ptr i8) (index (cast (ptr u8) buf) dl)) name nl)
     (store! (index (cast (ptr u8) buf) (+ dl nl)) (cast u8 0)) buf))
 (defn ensure-trailing-slash [(s (ptr i8))] (-> (ptr i8))
-  (let [n (strlen s)]
+  (let [n (s-len s)]
     (if (and (> n 0) (= (cast i64 (load (index (cast (ptr u8) s) (- n 1)))) \/)) s
       (join-simple s c"/"))))
 ; last '/' strictly before index `upto`
@@ -1315,12 +1315,12 @@
 ; strip one trailing path segment from a directory string that itself ends in '/'
 ; ("a/b/c/" -> "a/b/"); null once there's nowhere further up to go.
 (defn parent-of-dir [(dir (ptr i8))] (-> (ptr i8))
-  (let [n (strlen dir)]
+  (let [n (s-len dir)]
     (if (<= n 1) (cast (ptr i8) 0)
       (let [k (last-slash-before dir (- n 1))]
         (if (< k 0) (cast (ptr i8) 0)
-          (let [buf (cast (ptr i8) (malloc (+ k 2)))]
-            (memcpy buf dir (+ k 1)) (store! (index (cast (ptr u8) buf) (+ k 1)) (cast u8 0)) buf))))))
+          (let [buf (cast (ptr i8) (malloc (cast isize (+ k 2))))]
+            (xmemcpy buf dir (+ k 1)) (store! (index (cast (ptr u8) buf) (+ k 1)) (cast u8 0)) buf))))))
 (defn has-scry-toml [(dir (ptr i8))] (-> bool) (can-open (join-simple dir c"scry.toml")))
 ; nearest ancestor dir (of `startdir`, itself included) containing scry.toml, else null.
 (defn find-scry-toml-root [(startdir (ptr i8))] (-> (ptr i8))
@@ -1339,13 +1339,13 @@
     (store! (field (ctx) proj-root) (if (!= (cast i64 root) 0) root edir)))
   (let [envstd (getenv c"SCRY_STD")]
     (store! (field (ctx) std-root)
-      (if (and (!= (cast i64 envstd) 0) (> (strlen envstd) 0))
+      (if (and (!= (cast i64 envstd) 0) (> (s-len envstd) 0))
         (ensure-trailing-slash envstd)
         (let [a0 (load (field (ctx) argv0))]
           (if (!= (cast i64 a0) 0) (join-simple (dirname a0) c"std/") (cast (ptr i8) c"std/"))))))
   0)
 (defn starts-with [(path (ptr i8)) (prefix (ptr i8))] (-> bool)
-  (let [pl (strlen prefix) sl (strlen path)]
+  (let [pl (s-len prefix) sl (s-len path)]
     (if (> pl sl) false
       (let [(mut i) 0 (mut ok) true]
         (loop (if (and (load ok) (< (load i) pl))
@@ -1356,9 +1356,9 @@
 ; "a/b/c.scry" rooted at `root` -> "a.b.c"; null if not under root or too short.
 (defn derive-module-name [(root (ptr i8)) (path (ptr i8))] (-> (ptr i8))
   (if (not (starts-with path root)) (cast (ptr i8) 0)
-    (let [rl (strlen root) pl (strlen path)]
+    (let [rl (s-len root) pl (s-len path)]
       (if (< (- pl rl) 6) (cast (ptr i8) 0)
-        (let [rellen (- (- pl rl) 5) buf (cast (ptr i8) (malloc (+ rellen 1))) (mut i) 0]
+        (let [rellen (- (- pl rl) 5) buf (cast (ptr i8) (malloc (cast isize (+ rellen 1)))) (mut i) 0]
           (loop (if (< (load i) rellen)
                   (let [ch (cast i64 (load (index (cast (ptr u8) path) (+ rl (load i)))))]
                     (store! (index (cast (ptr u8) buf) (load i)) (cast u8 (if (= ch \/) \. ch)))
@@ -1461,7 +1461,7 @@
       (establish-roots path)
       (let [derived (derive-module-name (load (field (ctx) proj-root)) path)
             mod (if (!= (cast i64 derived) 0) (cast (ptr u8) derived) (cast (ptr u8) c"main"))
-            mlen (strlen (if (!= (cast i64 derived) 0) derived c"main"))]
+            mlen (s-len (if (!= (cast i64 derived) 0) derived c"main"))]
         (load-file-as path deep mod mlen)))
     (load-file-as path deep (cast (ptr u8) c"main") 4)))
 
@@ -1494,7 +1494,7 @@
 (defn path-is-single [(path (ptr Node)) (s (ptr i8))] (-> bool)
   (and (= (kid-count path) 1) (node-name-eq (kid-at path 0) s)))
 (defn repr-is [(item (ptr Node)) (s (ptr i8))] (-> bool)
-  (name-eq (load (field item s-name)) (load (field item s-len)) (cast (ptr u8) s) (strlen s)))
+  (name-eq (load (field item s-name)) (load (field item s-len)) (cast (ptr u8) s) (s-len s)))
 
 ; walk a dotted field-path from a starting entity decl, emitting a span'd diagnostic
 ; on the first bad hop; returns the resolved Type (or ty-error).

@@ -114,7 +114,7 @@
 (defn arena-add-slab [(a (ptr TypeArena))] (-> i64)
   (let [bytes (* (load (field a slab-cap)) (load (field a slot-size)))
         blk (xalloc bytes)]
-    (memset (cast (ptr i8) blk) (cast i32 0) bytes)
+    (xmemset (cast (ptr i8) blk) (cast i64 0) bytes)
     (store! (index (load (field a slabs)) (load (field a slab-count))) blk)
     (atomic-store (field a slab-count) (+ (load (field a slab-count)) 1))
     0))

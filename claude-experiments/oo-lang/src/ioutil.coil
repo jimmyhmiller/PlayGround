@@ -3,12 +3,16 @@
 ; modules, so every libc binding lives in exactly this module).
 (module ioutil)
 
-(extern write    :cc c [i64 (ptr i8) i64] (-> i64))
+; fd is i32 (POSIX `int fd`), matching coil's prelude declaration (lib/slice.coil). One C
+; symbol, one signature — a wider fd here is rejected outright (it silently built calls
+; against the prelude's type before, which is invisible on arm64 but invalid wasm). The
+; w-* helpers still take an i64 fd for their call sites and narrow it at the boundary.
+(extern write    :cc c [i32 (ptr i8) isize] (-> isize))   ; ssize_t write(int fd, const void*, size_t)
 (extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
-(extern strlen   :cc c [(ptr i8)] (-> i64))
+(extern strlen   :cc c [(ptr i8)] (-> isize))              ; size_t strlen(const char*)
 (extern strcmp   :cc c [(ptr i8) (ptr i8)] (-> i32))
 (extern strtod   :cc c [(ptr i8) (ptr (ptr i8))] (-> f64))
-(extern malloc   :cc c [i64] (-> (ptr i8)))
+(extern malloc   :cc c [isize] (-> (ptr i8)))            ; void* malloc(size_t)
 (extern exit     :cc c [i32] (-> void))
 (extern fopen    :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
 (extern fseek    :cc c [(ptr i8) i64 i32] (-> i32))
@@ -18,10 +22,10 @@
 (extern fwrite   :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
 (extern fclose   :cc c [(ptr i8)] (-> i32))
 ; Phase 3 runtime: memory + time (declared here, the one extern home)
-(extern realloc  :cc c [(ptr i8) i64] (-> (ptr i8)))
+(extern realloc  :cc c [(ptr i8) isize] (-> (ptr i8)))   ; void* realloc(void*, size_t)
 (extern free     :cc c [(ptr i8)] (-> void))
-(extern memcpy   :cc c [(ptr i8) (ptr i8) i64] (-> (ptr i8)))
-(extern memset   :cc c [(ptr i8) i32 i64] (-> (ptr i8)))
+(extern memcpy   :cc c [(ptr i8) (ptr i8) isize] (-> (ptr i8)))  ; void* memcpy(void*, const void*, size_t)
+(extern memset   :cc c [(ptr i8) :i64 isize]     (-> (ptr i8)))  ; void* memset(void*, int, size_t)
 (extern gettimeofday :cc c [(ptr i8) (ptr i8)] (-> i32))
 (extern nanosleep    :cc c [(ptr i8) (ptr i8)] (-> i32))
 ; Phase 4 server: BSD sockets, non-local exit (setjmp/longjmp), and fd redirection
@@ -32,17 +36,17 @@
 (extern listen     :cc c [i32 i32] (-> i32))
 (extern accept     :cc c [i32 (ptr i8) (ptr i8)] (-> i32))
 (extern setsockopt :cc c [i32 i32 i32 (ptr i8) i32] (-> i32))
-; fd is i64, not i32: coil's prelude already declares `read` (lib/io.coil) and a
-; module holds ONE function per C symbol, so a narrower fd here would be dropped
-; and its calls built against the prelude's type. That is invisible on arm64 but
-; emits an invalid wasm module; the compiler now rejects it outright.
-(extern read       :cc c [i64 (ptr i8) i64] (-> i64))
+; MUST match coil's prelude declaration (lib/io.coil) EXACTLY — a module holds ONE function
+; per C symbol, and a disagreeing redeclaration is rejected. Note `isize`/`i32`, not i64:
+; ssize_t/size_t are target-width (32-bit on wasm32, 64-bit on arm64) and fd is `int`.
+; Declaring these as fixed i64 is invisible on arm64 but emits an invalid wasm module.
+(extern read       :cc c [i32 (ptr i8) isize] (-> isize))  ; ssize_t read(int, void*, size_t)
 (extern poll       :cc c [(ptr i8) i32 i32] (-> i32))   ; struct pollfd*, nfds, timeout-ms
 (extern close      :cc c [i32] (-> i32))
 (extern usleep     :cc c [i32] (-> i32))
 (extern setjmp     :cc c [(ptr i8)] (-> i32))
 (extern longjmp    :cc c [(ptr i8) i32] (-> void))
-(extern open       :cc c [(ptr i8) i32 i32] (-> i32))
+(extern open       :cc c [(ptr i8) i32 ...] (-> i32))    ; int open(path, int flags, mode)
 (extern lseek      :cc c [i32 i64 i32] (-> i64))
 (extern unlink     :cc c [(ptr i8)] (-> i32))
 (extern dup        :cc c [i32] (-> i32))
@@ -89,6 +93,16 @@
 (extern curl_multi_cleanup    :cc c [(ptr i8)] (-> i32))
 (extern curl_multi_strerror   :cc c [i32] (-> (ptr i8)))
 
+; ---- i64-facing wrappers over the isize-typed libc calls ----
+; The prelude declares strlen/realloc/memcpy/memset with target-width `isize` (32-bit on
+; wasm32, 64-bit on arm64) and one C symbol admits one signature, so those externs must
+; match it exactly. Scry's own code speaks i64 throughout; these wrappers are the single
+; boundary where the width is converted, instead of casting at ~90 call sites.
+(defn s-len   [(s (ptr i8))] (-> i64) (cast i64 (strlen s)))
+(defn xrealloc [(p (ptr i8)) (n i64)] (-> (ptr i8)) (realloc p (cast isize n)))
+(defn xmemcpy  [(d (ptr i8)) (s (ptr i8)) (n i64)] (-> (ptr i8)) (memcpy d s (cast isize n)))
+(defn xmemset  [(d (ptr i8)) (c i64) (n i64)] (-> (ptr i8)) (memset d c (cast isize n)))
+
 ; ---- diagnostic capture sink ----
 ; When capture is active, writes to fd 2 (stderr) append into this buffer instead of hitting
 ; the real stderr — so an eval can recover the typechecker's message with NO /tmp temp file and
@@ -117,12 +131,12 @@
 (defn emit [(fd i64) (p (ptr i8)) (n i64)] (-> i64)
   (if (and (= fd 2) (= (load (diag-sink-on)) 1))
     (diag-sink-append p n)
-    (write fd p n))
+    (do (write (cast i32 fd) p (cast isize n)) 0))
   0)
 
 ; fd 1 = stdout, fd 2 = stderr
 (defn w-bytes [(fd i64) (p (ptr u8)) (n i64)] (-> i64) (emit fd (cast (ptr i8) p) n) 0)
-(defn w-cstr  [(fd i64) (s (ptr i8))] (-> i64) (emit fd s (strlen s)) 0)
+(defn w-cstr  [(fd i64) (s (ptr i8))] (-> i64) (emit fd s (cast i64 (s-len s))) 0)
 
 (defn w-int [(fd i64) (v i64)] (-> i64)
   (let [buf (alloc-stack (array u8 32))
@@ -136,4 +150,4 @@
     (emit fd (cast (ptr i8) (index buf 0)) (cast i64 n))
     0))
 
-(defn xalloc [(n i64)] (-> (ptr u8)) (cast (ptr u8) (malloc n)))
+(defn xalloc [(n i64)] (-> (ptr u8)) (cast (ptr u8) (malloc (cast isize n))))

@@ -44,10 +44,10 @@
       (let [e (cast (ptr ProgEntry) (xalloc (sizeof ProgEntry)))
             id (load (preg-nextid))
             nb (xalloc (+ namelen 1))
-            pl (if (= (cast i64 path) 0) 0 (strlen path))
+            pl (if (= (cast i64 path) 0) 0 (s-len path))
             pb (xalloc (+ pl 1))]
-        (memcpy (cast (ptr i8) nb) (cast (ptr i8) name) namelen) (store! (index nb namelen) (cast u8 0))
-        (if (> pl 0) (do (memcpy (cast (ptr i8) pb) path pl) 0) 0) (store! (index pb pl) (cast u8 0))
+        (xmemcpy (cast (ptr i8) nb) (cast (ptr i8) name) namelen) (store! (index nb namelen) (cast u8 0))
+        (if (> pl 0) (do (xmemcpy (cast (ptr i8) pb) path pl) 0) 0) (store! (index pb pl) (cast u8 0))
         (store! (field e id) id) (store! (field e name) nb) (store! (field e name-len) namelen)
         (store! (field e mode) mode) (store! (field e port) port) (store! (field e pid) pid)
         (store! (field e status) 0) (store! (field e start-time) (now-sec))
@@ -135,7 +135,7 @@
 
 ; join `a` + "/" + `b` (server.coil's join-path is a bare concat; discovery needs a separator).
 (defn path-cat [(a (ptr i8)) (b (ptr i8))] (-> (ptr i8))
-  (let [al (strlen a) bl (strlen b) buf (cast (ptr i8) (xalloc (+ (+ al bl) 2))) (mut k) 0]
+  (let [al (s-len a) bl (s-len b) buf (cast (ptr i8) (xalloc (+ (+ al bl) 2))) (mut k) 0]
     (let [(mut i) 0] (loop (if (< (load i) al) (do (store! (index (cast (ptr u8) buf) (load k)) (load (index (cast (ptr u8) a) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
     (store! (index (cast (ptr u8) buf) (load k)) (cast u8 \/)) (store! k (+ (load k) 1))
     (let [(mut i) 0] (loop (if (< (load i) bl) (do (store! (index (cast (ptr u8) buf) (load k)) (load (index (cast (ptr u8) b) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
@@ -150,14 +150,14 @@
 
 ; the basename (after the last '/') of an absolute path, as a fresh cstr.
 (defn proj-basename [(path (ptr i8))] (-> (ptr u8))
-  (let [n (strlen path) (mut start) 0 (mut i) 0]
+  (let [n (s-len path) (mut start) 0 (mut i) 0]
     (loop (if (< (load i) n) (do (if (= (cast i64 (load (index (cast (ptr u8) path) (load i)))) \/) (do (store! start (+ (load i) 1)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
     (let [bl (- n (load start)) b (xalloc (+ bl 1))]
-      (memcpy (cast (ptr i8) b) (cast (ptr i8) (index (cast (ptr u8) path) (load start))) bl) (store! (index b bl) (cast u8 0)) b)))
+      (xmemcpy (cast (ptr i8) b) (cast (ptr i8) (index (cast (ptr u8) path) (load start))) bl) (store! (index b bl) (cast u8 0)) b)))
 
 ; does `s` end in ".scry"?
 (defn ends-scry [(s (ptr i8))] (-> bool)
-  (let [n (strlen s)]
+  (let [n (s-len s)]
     (if (< n 5) false
       (and (= (cast i64 (load (index (cast (ptr u8) s) (- n 5)))) \.)
            (and (= (cast i64 (load (index (cast (ptr u8) s) (- n 4)))) \s)
@@ -179,10 +179,10 @@
         (if (>= n PROJ_MAX) -1
           (let [e (cast (ptr ProjEntry) (xalloc (sizeof ProjEntry)))
                 id (load (proj-nextid))
-                pl (strlen abspath) pb (xalloc (+ pl 1))]
-            (memcpy (cast (ptr i8) pb) abspath pl) (store! (index pb pl) (cast u8 0))
+                pl (s-len abspath) pb (xalloc (+ pl 1))]
+            (xmemcpy (cast (ptr i8) pb) abspath pl) (store! (index pb pl) (cast u8 0))
             (store! (field e id) id) (store! (field e path) (cast (ptr i8) pb))
-            (store! (field e name) (proj-basename abspath)) (store! (field e name-len) (strlen (cast (ptr i8) (proj-basename abspath))))
+            (store! (field e name) (proj-basename abspath)) (store! (field e name-len) (s-len (cast (ptr i8) (proj-basename abspath))))
             (store! (field e mtime) (file-mtime abspath))
             (store! (field e dump-mtime) -1) (store! (field e dump) (cast (ptr u8) 0)) (store! (field e dump-len) 0)
             (store! (index (proj-slots) n) e)
@@ -204,7 +204,7 @@
               (let [start (load j)]
                 (loop (if (and (< (load j) nr) (!= (cast i64 (load (index buf (load j)))) \")) (do (store! j (+ (load j) 1)) 0) (break)))
                 (let [elen (- (load j) start) eb (xalloc (+ elen 1))]
-                  (memcpy (cast (ptr i8) eb) (cast (ptr i8) (index buf start)) elen) (store! (index eb elen) (cast u8 0))
+                  (xmemcpy (cast (ptr i8) eb) (cast (ptr i8) (index buf start)) elen) (store! (index eb elen) (cast u8 0))
                   (if (ends-scry (cast (ptr i8) eb))
                     (do (proj-remember (proj-abspath (path-cat dir (cast (ptr i8) eb)))) 0) 0))))))))))
 
@@ -264,7 +264,7 @@
               (do (store! len (+ (load len) r))
                   (if (> (+ (load len) 8192) (load cap))
                     (do (store! cap (* (load cap) 2))
-                        (store! buf (cast (ptr u8) (realloc (cast (ptr i8) (load buf)) (load cap)))) 0)
+                        (store! buf (cast (ptr u8) (xrealloc (cast (ptr i8) (load buf)) (load cap)))) 0)
                     0)
                   0))))
         (pclose f)
@@ -327,7 +327,7 @@
               (if (> (load i) 0) (jb-byte b \,) 0)
               (jb-cstr b c"{\"id\":") (jb-int b (load (field e id)))
               (jb-cstr b c",\"name\":") (jb-str b (load (field e name)) (load (field e name-len)))
-              (jb-cstr b c",\"path\":") (jb-str b (cast (ptr u8) (load (field e path))) (strlen (load (field e path))))
+              (jb-cstr b c",\"path\":") (jb-str b (cast (ptr u8) (load (field e path))) (s-len (load (field e path))))
               (jb-cstr b c",\"mtime\":") (jb-int b (load (field e mtime)))
               (jb-cstr b c",\"alsoRunning\":") (if (< ar 0) (jb-cstr b c"null") (jb-int b ar))
               (jb-byte b \})
@@ -354,7 +354,7 @@
 (defn src-is-call [(src (ptr u8)) (slen i64) (kw (ptr i8))] (-> bool)
   (let [(mut i) 0]
     (loop (if (and (< (load i) slen) (let [c (cast i64 (load (index src (load i))))] (or (= c \space) (or (= c \tab) (or (= c \newline) (= c \return)))))) (do (store! i (+ (load i) 1)) 0) (break)))
-    (let [kl (strlen kw) (mut k) 0 (mut ok) true]
+    (let [kl (s-len kw) (mut k) 0 (mut ok) true]
       (loop (if (and (load ok) (< (load k) kl))
               (do (if (or (>= (+ (load i) (load k)) slen) (!= (cast i64 (load (index src (+ (load i) (load k))))) (cast i64 (load (index (cast (ptr u8) kw) (load k)))))) (do (store! ok false) 0) 0) (store! k (+ (load k) 1)) 0)
               (break)))
@@ -363,7 +363,7 @@
 ; serve one static reflection value ("schema"/"views"/"actions") from the cached dump into resp.
 (defn proj-emit-value [(resp (ptr JBuf)) (e (ptr ProjEntry)) (key (ptr i8))] (-> i64)
   (let [os (cast (ptr i64) (xalloc 8)) ol (cast (ptr i64) (xalloc 8))]
-    (if (= (json-value-span (load (field e dump)) (load (field e dump-len)) key (strlen key) os ol) 1)
+    (if (= (json-value-span (load (field e dump)) (load (field e dump-len)) key (s-len key) os ol) 1)
       (jb-bytes resp (index (load (field e dump)) (load os)) (load ol))
       (jb-cstr resp c"{\"error\":{\"kind\":\"StaticInspection\",\"message\":\"schema unavailable\"}}"))
     0))
@@ -372,10 +372,10 @@
   (let [e (proj-find-by-id id)]
     (if (= (cast i64 e) 0)
       (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"NoSuchProject\",\"message\":\"no such project\"}}")]
-        (send-response cfd c"404 Not Found" c"application/json" m (strlen (cast (ptr i8) m))))
+        (send-response cfd c"404 Not Found" c"application/json" m (s-len (cast (ptr i8) m))))
       (if (= (proj-ensure-dump e) 0)
         (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"StaticInspection\",\"message\":\"could not typecheck project for static inspection\"}}")]
-          (send-response cfd c"200 OK" c"application/json" m (strlen (cast (ptr i8) m))))
+          (send-response cfd c"200 OK" c"application/json" m (s-len (cast (ptr i8) m))))
         ; parse id + source out of the request body, classify, serve statically
         (let [srcbuf (xalloc 65536) srclen (cast (ptr i64) (xalloc 8))
               idbuf (xalloc 256) idlen (cast (ptr i64) (xalloc 8))
@@ -422,14 +422,14 @@
       ; length via strlen, NOT a hand-counted literal — a wrong Content-Length makes the browser
       ; read a stray trailing byte and fail JSON.parse with "unexpected data after JSON".
       (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"NoSuchProgram\",\"message\":\"no such program\"}}")]
-        (send-response cfd c"404 Not Found" c"application/json" m (strlen (cast (ptr i8) m))))
+        (send-response cfd c"404 Not Found" c"application/json" m (s-len (cast (ptr i8) m))))
       (let [url (cast (ptr i8) (xalloc 64)) out (pcbuf-new)]
         (snprintf url 64 c"http://127.0.0.1:%lld/eval" (load (field e port)))
         (let [status (pc-request c"POST" url body blen 30000 out)]
           (if (= status 0)
             (do (store! (field e status) 1)
                 (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"ProgramGone\",\"message\":\"program not responding\"}}")]
-                  (send-response cfd c"502 Bad Gateway" c"application/json" m (strlen (cast (ptr i8) m)))))
+                  (send-response cfd c"502 Bad Gateway" c"application/json" m (s-len (cast (ptr i8) m)))))
             (send-response cfd c"200 OK" c"application/json" (load (field out data)) (load (field out len)))))))))
 
 (defn portal-handle-register [(cfd i64) (body (ptr u8)) (blen i64)] (-> i64)
@@ -467,7 +467,7 @@
     (let [(mut done) false]
       (loop
         (if (load done) (break)
-          (let [r (read (cast i64 cfd) (cast (ptr i8) (index buf (load total))) (- cap (load total)))]
+          (let [r (cast i64 (read (cast i32 cfd) (cast (ptr i8) (index buf (load total))) (cast isize (- cap (load total)))))]
             (if (<= r 0) (break)
               (do (store! total (+ (load total) r))
                   (let [bs (find-body-start buf (load total))]

@@ -32,10 +32,10 @@
     (if (> (+ (load (field b len)) total) (load (field b cap)))
       (let [(mut nc) (load (field b cap))]
         (loop (if (< (load nc) (+ (load (field b len)) total)) (do (store! nc (* (load nc) 2)) 0) (break)))
-        (store! (field b data) (cast (ptr u8) (realloc (cast (ptr i8) (load (field b data))) (load nc))))
+        (store! (field b data) (cast (ptr u8) (xrealloc (cast (ptr i8) (load (field b data))) (load nc))))
         (store! (field b cap) (load nc)) 0)
       0)
-    (memcpy (cast (ptr i8) (index (load (field b data)) (load (field b len)))) ptr total)
+    (xmemcpy (cast (ptr i8) (index (load (field b data)) (load (field b len)))) ptr total)
     (store! (field b len) (+ (load (field b len)) total))
     total))
 

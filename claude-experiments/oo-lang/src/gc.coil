@@ -32,7 +32,7 @@
 (defn gc-wl-push [(p (ptr u8))] (-> i64)
   (if (>= (load (gc-wl-top-cell)) (load (gc-wl-cap-cell)))
     (let [ncap (* (load (gc-wl-cap-cell)) 2)]
-      (store! (gc-wl-arr-cell) (cast i64 (realloc (cast (ptr i8) (cast (ptr i64) (load (gc-wl-arr-cell)))) (* 8 ncap))))
+      (store! (gc-wl-arr-cell) (cast i64 (xrealloc (cast (ptr i8) (cast (ptr i64) (load (gc-wl-arr-cell)))) (* 8 ncap))))
       (store! (gc-wl-cap-cell) ncap) 0)
     0)
   (let [arr (cast (ptr i64) (load (gc-wl-arr-cell)))]

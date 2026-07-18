@@ -134,7 +134,7 @@
 ; aliased/literal sources.
 (defn str-copy [(data (ptr u8)) (len i64)] (-> (ptr StringObj))
   (let [buf (xalloc (+ len 1))]
-    (if (> len 0) (do (memcpy (cast (ptr i8) buf) (cast (ptr i8) data) len) 0) 0)
+    (if (> len 0) (do (xmemcpy (cast (ptr i8) buf) (cast (ptr i8) data) len) 0) 0)
     (store! (index buf len) (cast u8 0))
     (str-make buf len)))
 
@@ -143,7 +143,7 @@
 (defn str-make-perm [(data (ptr u8)) (len i64)] (-> (ptr StringObj))
   (let [s (cast (ptr StringObj) (obj-alloc-perm (sizeof StringObj) OBJ_STRING))
         buf (xalloc (+ len 1))]
-    (if (> len 0) (do (memcpy (cast (ptr i8) buf) (cast (ptr i8) data) len) 0) 0)
+    (if (> len 0) (do (xmemcpy (cast (ptr i8) buf) (cast (ptr i8) data) len) 0) 0)
     (store! (index buf len) (cast u8 0))
     (store! (field s len) len)
     (store! (field s data) buf)
@@ -153,8 +153,8 @@
   (let [la (load (field a len))
         lb (load (field b len))
         buf (xalloc (+ (+ la lb) 1))]
-    (memcpy (cast (ptr i8) buf) (cast (ptr i8) (load (field a data))) la)
-    (memcpy (cast (ptr i8) (index buf la)) (cast (ptr i8) (load (field b data))) lb)
+    (xmemcpy (cast (ptr i8) buf) (cast (ptr i8) (load (field a data))) la)
+    (xmemcpy (cast (ptr i8) (index buf la)) (cast (ptr i8) (load (field b data))) lb)
     (store! (index buf (+ la lb)) (cast u8 0))
     (str-make buf (+ la lb))))
 
@@ -236,7 +236,7 @@
 (defn list-push [(l (ptr ListObj)) (v i64)] (-> i64)
   (if (>= (load (field l len)) (load (field l cap)))
     (let [ncap (* (load (field l cap)) 2)]
-      (store! (field l items) (cast (ptr i64) (realloc (cast (ptr i8) (load (field l items))) (* 8 ncap))))
+      (store! (field l items) (cast (ptr i64) (xrealloc (cast (ptr i8) (load (field l items))) (* 8 ncap))))
       (store! (field l cap) ncap)
       0)
     0)
@@ -344,8 +344,8 @@
       (do
         (if (>= (load (field m len)) (load (field m cap)))
           (let [ncap (* (load (field m cap)) 2)]
-            (store! (field m keys) (cast (ptr i64) (realloc (cast (ptr i8) (load (field m keys))) (* 8 ncap))))
-            (store! (field m vals) (cast (ptr i64) (realloc (cast (ptr i8) (load (field m vals))) (* 8 ncap))))
+            (store! (field m keys) (cast (ptr i64) (xrealloc (cast (ptr i8) (load (field m keys))) (* 8 ncap))))
+            (store! (field m vals) (cast (ptr i64) (xrealloc (cast (ptr i8) (load (field m vals))) (* 8 ncap))))
             (store! (field m cap) ncap)
             0)
           0)

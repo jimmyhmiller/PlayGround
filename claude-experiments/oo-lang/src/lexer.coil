@@ -184,7 +184,7 @@
 
 ; ---- identifiers / keywords ------------------------------------------------
 (defn tok-eq [(start (ptr u8)) (len i64) (s (ptr i8))] (-> bool)
-  (if (!= len (strlen s))
+  (if (!= len (s-len s))
     false
     (let [(mut i) 0 (mut ok) true]
       (loop
@@ -290,7 +290,7 @@
 ; scan the literal-text portion of a string, decode escapes, push a CHUNK,
 ; then push the terminator (INTERP_BEGIN or STR_END) and set up state.
 (defn scan-string-continue [] (-> i64)
-  (let [cap (+ (strlen (cast (ptr i8) (load (field (lx) cur)))) 1)
+  (let [cap (+ (s-len (cast (ptr i8) (load (field (lx) cur)))) 1)
         buf (xalloc cap)
         (mut n) 0
         cl (load (field (lx) line))

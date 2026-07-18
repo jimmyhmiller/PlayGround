@@ -301,7 +301,7 @@
       (let [imp (find-import (effective-import-file) name len)]
         (if (!= (cast i64 imp) 0) imp
           (find-decl-builtin name len))))))
-(defn find-decl-c [(s (ptr i8))] (-> (ptr Decl)) (find-decl (cast (ptr u8) s) (strlen s)))
+(defn find-decl-c [(s (ptr i8))] (-> (ptr Decl)) (find-decl (cast (ptr u8) s) (s-len s)))
 
 ; unscoped, first-match lookup — ONLY for building "name exists elsewhere, add an
 ; import" diagnostics. Never use this to actually resolve a reference.
@@ -358,7 +358,7 @@
           (store! i (+ (load i) 1)) 0)
         (break)))
     (load found)))
-(defn decl-member-c [(d (ptr Decl)) (s (ptr i8))] (-> (ptr Node)) (decl-member d (cast (ptr u8) s) (strlen s)))
+(defn decl-member-c [(d (ptr Decl)) (s (ptr i8))] (-> (ptr Node)) (decl-member d (cast (ptr u8) s) (s-len s)))
 
 ; ======================================================================
 ; Variant index (unqualified enum variant lookup: None/Some/Ok/Err/Circle/...)
@@ -479,7 +479,7 @@
     (do (store! (index (load (field sb data)) (load (field sb len))) (cast u8 b))
         (store! (field sb len) (+ (load (field sb len)) 1)) 0)))
 (defn sb-push-str [(sb (ptr StrBuf)) (s (ptr i8))] (-> i64)
-  (let [n (strlen s) (mut i) 0]
+  (let [n (s-len s) (mut i) 0]
     (loop (if (< (load i) n) (do (sb-byte sb (cast i64 (load (index (cast (ptr u8) s) (load i))))) (store! i (+ (load i) 1)) 0) (break))))
   0)
 (defn sb-push-bytes [(sb (ptr StrBuf)) (p (ptr u8)) (n i64)] (-> i64)

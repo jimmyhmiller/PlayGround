@@ -74,7 +74,7 @@
 (defn cs-note-slot-ref [(cs (ptr CState)) (s i64) (ref i64)] (-> i64)
   (if (>= s (load (field cs slot-ref-cap)))
     (let [ncap (let [(mut c) (* (load (field cs slot-ref-cap)) 2)] (loop (if (<= (load c) s) (do (store! c (* (load c) 2)) 0) (break))) (load c))]
-      (store! (field cs slot-ref) (cast (ptr u8) (realloc (cast (ptr i8) (load (field cs slot-ref))) ncap)))
+      (store! (field cs slot-ref) (cast (ptr u8) (xrealloc (cast (ptr i8) (load (field cs slot-ref))) ncap)))
       (store! (field cs slot-ref-cap) ncap) 0)
     0)
   (store! (index (load (field cs slot-ref)) s) (cast u8 ref)) 0)
@@ -780,7 +780,7 @@
     (store! (field cs locals) (al-new [(ptr CLocal)] (alc-global)))
     (store! (field cs next-slot) start-slot) (store! (field cs max-slot) start-slot)
     (store! (field cs ctxt) ctxt)
-    (let [sr (xalloc 64)] (memset (cast (ptr i8) sr) (cast i32 0) 64) (store! (field cs slot-ref) sr))
+    (let [sr (xalloc 64)] (xmemset (cast (ptr i8) sr) (cast i64 0) 64) (store! (field cs slot-ref) sr))
     (store! (field cs slot-ref-cap) 64) cs))
 
 ; compile one FN node into method `mi`. self-ty null for top-level fns.
@@ -994,7 +994,7 @@
                 (if (= (cast i64 target) 0) 0
                   (let [synth (mk-node NK_FN (load (field an line)) (load (field an col)))
                         mname (action-mangled-name (load i))]
-                    (set-name! synth mname (strlen (cast (ptr i8) mname)))
+                    (set-name! synth mname (s-len (cast (ptr i8) mname)))
                     (store! (field synth b) (load (field an b)))   ; params (may be null)
                     (store! (field synth c) (load (field an c)))   ; return (null => Void)
                     (store! (field synth d) (load (field an d)))   ; body block
