@@ -514,6 +514,14 @@ pub enum Prim {
     /// stop-the-world collection is delayed, never deadlocked. Proper parking
     /// (the await_future recipe) is planned once the feedback-tier work lands.
     Sleep,
+    /// `(%dyn-frame)` -> a snapshot of this thread's dynamic-binding stack as a
+    /// vector — Var/getThreadBindingFrame. core.async's go conveys the caller's
+    /// bindings into its dispatch thread by capturing a frame and resetting it
+    /// around each state-machine step.
+    DynFrameGet,
+    /// `(%dyn-frame-set frame)` -> replace this thread's dynamic-binding stack
+    /// with a frame from `%dyn-frame` — Var/resetThreadBindingFrame.
+    DynFrameSet,
 }
 
 impl Prim {

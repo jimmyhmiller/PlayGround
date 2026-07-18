@@ -6,6 +6,7 @@
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
 (import "arraylist.coil" :use *)
+(import "hashmap.coil" :use *)
 (import "io.coil" :use *)
 (import "control.coil" :use *)
 (import "try.coil" :use *)
@@ -32,18 +33,33 @@
    (out-structs (ArrayList StructDef))
    (out-sums    (ArrayList SumDef))
    (out-funcs   (ArrayList Func))
+   ; O(1) name -> index side-index into the three out-* lists, so upsert (which
+   ; MUST insert-or-replace by name) is a map lookup, not a scan of an output list
+   ; that grows with every instantiation. The out-* ArrayLists stay the source of
+   ; truth for order; these maps only accelerate the lookup (gen-10).
+   (out-struct-idx (HashMap (slice u8) i64))
+   (out-sum-idx    (HashMap (slice u8) i64))
+   (out-func-idx   (HashMap (slice u8) i64))
    (pending-structs (ArrayList PendInst))
    (pending-sums    (ArrayList PendInst))
    (pending-funcs   (ArrayList PendInst))
-   (queued-structs (ArrayList (slice u8)))
-   (queued-sums    (ArrayList (slice u8)))
-   (queued-funcs   (ArrayList (slice u8)))
+   ; The dedupe SETS: membership decides whether an instantiation is already
+   ; queued. Hash sets (value unused) so the check is O(1), not a linear scan that
+   ; made the whole worklist ~O(n^2) (gen-10). First-encounter order is preserved
+   ; because a name is pushed to pending-* exactly once, on its first `queue-*`.
+   (queued-structs (HashMap (slice u8) i64))
+   (queued-sums    (HashMap (slice u8) i64))
+   (queued-funcs   (HashMap (slice u8) i64))
    ; the program's impls (for resolving a deferred TraitCall against a GENERIC
    ; impl), and the instantiation-origin map: mangled name -> (base, args), so
    ; a TraitCall receiver that resolved to a mangled struct recovers its base
    ; (the impl dispatch key) and args (the impl pattern's bindings).
    (impls (ptr (ArrayList ImplDef)))
-   (io-mangled (ArrayList (slice u8)))
+   ; instantiation-origin: mangled name -> its index in io-origin (the parallel
+   ; (base, args) record). A hash index so io-record!/io-find are O(1) instead of a
+   ; scan of a list that grows with every instantiation (gen-10). io-origin stays an
+   ; ArrayList (ETraitCall reads it by that index), appended in first-seen order.
+   (io-index   (HashMap (slice u8) i64))
    (io-origin  (ArrayList PendInst))])
 
 ; ---- small constructors -----------------------------------------------------
@@ -173,15 +189,17 @@
 
 ; ---- queues (src/mono.rs::queue_*) — dedup via the queued set ----------------
 (defn io-record! [(m (ptr MonoCtx)) (mng (slice u8)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
-  (if (set-contains (field m io-mangled) mng) 0
-      (do (al-push! (mut (field m io-mangled)) mng)
-          (al-push! (mut (field m io-origin)) (mk-pend (load (field m a)) nm args)) 0)))
+  (if (hm-contains? [(slice u8) i64] (load (field m io-index)) mng) 0
+      ; index the new record gets = current length (its slot after the push), so
+      ; io-index maps mng -> its position in io-origin, exactly the old parallel index.
+      (let [idx (al-len [PendInst] (load (field m io-origin)))]
+        (al-push! (mut (field m io-origin)) (mk-pend (load (field m a)) nm args))
+        (hm-put! [(slice u8) i64] (mut (field m io-index)) mng idx)
+        0)))
 (defn io-find [(m (ptr MonoCtx)) (mng (slice u8))] (-> i64)
-  (let [n (al-len [(slice u8)] (load (field m io-mangled))) (mut i) 0 (mut r) -1]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (if (str-eq (al-get [(slice u8)] (load (field m io-mangled)) (load i)) mng) (do (store! r (load i)) (break)) 0)
-          (store! i (iadd (load i) 1)))))
-    (load r)))
+  (match (hm-get [(slice u8) i64] (load (field m io-index)) mng)
+    (Some [i] i)
+    (None []  -1)))
 ; ---- runaway instantiation guard --------------------------------------------
 ; A generic that recurses on a WRAPPED version of its own argument (T -> (Box T) ->
 ; (Box (Box T)) -> …) never reaches a fixpoint: every round mints a type the dedupe set
@@ -244,17 +262,20 @@
 (defn queue-struct [(m (ptr MonoCtx)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
   (let [a (load (field m a)) mng (mangle a nm args)]
     (io-record! m mng nm args)
-    (if (set-contains (field m queued-structs) mng) 0
-        (do (al-push! (mut (field m queued-structs)) mng) (al-push! (mut (field m pending-structs)) (mk-pend a nm args)) 0))))
+    (if (hm-contains? [(slice u8) i64] (load (field m queued-structs)) mng) 0
+        (do (hm-put! [(slice u8) i64] (mut (field m queued-structs)) mng 0)
+            (al-push! (mut (field m pending-structs)) (mk-pend a nm args)) 0))))
 (defn queue-sum [(m (ptr MonoCtx)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
   (let [a (load (field m a)) mng (mangle a nm args)]
     (io-record! m mng nm args)
-    (if (set-contains (field m queued-sums) mng) 0
-        (do (al-push! (mut (field m queued-sums)) mng) (al-push! (mut (field m pending-sums)) (mk-pend a nm args)) 0))))
+    (if (hm-contains? [(slice u8) i64] (load (field m queued-sums)) mng) 0
+        (do (hm-put! [(slice u8) i64] (mut (field m queued-sums)) mng 0)
+            (al-push! (mut (field m pending-sums)) (mk-pend a nm args)) 0))))
 (defn queue-func [(m (ptr MonoCtx)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
   (let [a (load (field m a)) mng (mangle a nm args)]
-    (if (set-contains (field m queued-funcs) mng) 0
-        (do (al-push! (mut (field m queued-funcs)) mng) (al-push! (mut (field m pending-funcs)) (mk-pend a nm args)) 0))))
+    (if (hm-contains? [(slice u8) i64] (load (field m queued-funcs)) mng) 0
+        (do (hm-put! [(slice u8) i64] (mut (field m queued-funcs)) mng 0)
+            (al-push! (mut (field m pending-funcs)) (mk-pend a nm args)) 0))))
 
 ; "<prefix> expects N type arguments, got M" — the shared arity-error shape.
 (defn arity-err [(a (ptr Allocator)) (prefix (slice u8)) (n i64) (m i64)] (-> (slice u8))
@@ -703,30 +724,37 @@
 ; second insert with the same name OVERWRITES (last-writer-wins) — duplicate-named
 ; concrete definitions (e.g. a fn re-seen via two import paths) collapse to one.
 ; Our out lists are ArrayLists, so mirror that with insert-or-replace by name.
+; O(1) insert-or-replace by name via the out-*-idx side-index (gen-10). Same
+; last-writer-wins semantics as the old scan: a name already in the list is
+; replaced IN PLACE at its recorded index; a new name is appended and its index
+; recorded. The list never holds a duplicate name, so the index stays exact.
 (defn upsert-struct [(m (ptr MonoCtx)) (s StructDef)] (-> i64)
-  (let [n (al-len [StructDef] (load (field m out-structs))) (mut i) 0 (mut done) false]
-    (loop (if (or (load done) (icmp-ge (load i) n)) (break)
-      (do (if (str-eq (sdef-name (al-get [StructDef] (load (field m out-structs)) (load i))) (sdef-name s))
-              (do (al-set! [StructDef] (mut (field m out-structs)) (load i) s) (store! done true) 0) 0)
-          (store! i (iadd (load i) 1)))))
-    (if (load done) 0 (al-push! (mut (field m out-structs)) s))
-    0))
+  (let [nm (sdef-name s)]
+    (match (hm-get [(slice u8) i64] (load (field m out-struct-idx)) nm)
+      (Some [i] (do (al-set! [StructDef] (mut (field m out-structs)) i s) 0))
+      (None []
+        (let [idx (al-len [StructDef] (load (field m out-structs)))]
+          (al-push! (mut (field m out-structs)) s)
+          (hm-put! [(slice u8) i64] (mut (field m out-struct-idx)) nm idx)
+          0)))))
 (defn upsert-sum [(m (ptr MonoCtx)) (s SumDef)] (-> i64)
-  (let [n (al-len [SumDef] (load (field m out-sums))) (mut i) 0 (mut done) false]
-    (loop (if (or (load done) (icmp-ge (load i) n)) (break)
-      (do (if (str-eq (sumdef-name (al-get [SumDef] (load (field m out-sums)) (load i))) (sumdef-name s))
-              (do (al-set! [SumDef] (mut (field m out-sums)) (load i) s) (store! done true) 0) 0)
-          (store! i (iadd (load i) 1)))))
-    (if (load done) 0 (al-push! (mut (field m out-sums)) s))
-    0))
+  (let [nm (sumdef-name s)]
+    (match (hm-get [(slice u8) i64] (load (field m out-sum-idx)) nm)
+      (Some [i] (do (al-set! [SumDef] (mut (field m out-sums)) i s) 0))
+      (None []
+        (let [idx (al-len [SumDef] (load (field m out-sums)))]
+          (al-push! (mut (field m out-sums)) s)
+          (hm-put! [(slice u8) i64] (mut (field m out-sum-idx)) nm idx)
+          0)))))
 (defn upsert-func [(m (ptr MonoCtx)) (f Func)] (-> i64)
-  (let [n (al-len [Func] (load (field m out-funcs))) (mut i) 0 (mut done) false]
-    (loop (if (or (load done) (icmp-ge (load i) n)) (break)
-      (do (if (str-eq (func-name (al-get [Func] (load (field m out-funcs)) (load i))) (func-name f))
-              (do (al-set! [Func] (mut (field m out-funcs)) (load i) f) (store! done true) 0) 0)
-          (store! i (iadd (load i) 1)))))
-    (if (load done) 0 (al-push! (mut (field m out-funcs)) f))
-    0))
+  (let [nm (func-name f)]
+    (match (hm-get [(slice u8) i64] (load (field m out-func-idx)) nm)
+      (Some [i] (do (al-set! [Func] (mut (field m out-funcs)) i f) 0))
+      (None []
+        (let [idx (al-len [Func] (load (field m out-funcs)))]
+          (al-push! (mut (field m out-funcs)) f)
+          (hm-put! [(slice u8) i64] (mut (field m out-func-idx)) nm idx)
+          0)))))
 
 (defn monomorphize [(a (ptr Allocator)) (p (ptr Program))] (-> (Result (ptr Program) Diag))
   (let [m (unwrap-ptr [MonoCtx] (create [MonoCtx] a))]

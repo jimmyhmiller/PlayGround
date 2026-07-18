@@ -431,8 +431,37 @@ impl<M: ValueModel> CodeSpace<M> for TreeWalk {
         let mut callee = callee;
         let mut args: Vec<u64> = args.to_vec();
         loop {
+            // A SYMBOL callee is IFn like a keyword — `('sym m)` is a lookup —
+            // and routes through the same callable-object hook records use
+            // (`-apply-obj` has the symbol arm). core.async's ioc pass calls
+            // instruction gensyms against its index map.
+            if matches!(rt.decode(callee), Val::Sym(_)) {
+                if let Some(h) = rt.apply_handler() {
+                    let mut v = Vec::with_capacity(args.len() + 1);
+                    v.push(callee);
+                    v.extend_from_slice(&args);
+                    args = v;
+                    callee = h;
+                    continue;
+                }
+            }
             let Val::Ref(id) = rt.decode(callee) else {
-                panic!("value not callable: {}", rt.print(callee));
+                // The args often identify the CALL SITE better than the callee
+                // (a bare symbol says nothing; "called with a plan map" does).
+                let argstr: Vec<String> = args
+                    .iter()
+                    .take(3)
+                    .map(|&a| {
+                        let s = rt.print(a);
+                        if s.len() > 120 { format!("{}…", &s[..120]) } else { s }
+                    })
+                    .collect();
+                panic!(
+                    "value not callable: {} (applied to {} arg(s): [{}])",
+                    rt.print(callee),
+                    args.len(),
+                    argstr.join(", ")
+                );
             };
             // Callable-object hook: a non-closure record invoked with a registered
             // apply handler redirects to `(handler object args…)` (e.g. keywords).

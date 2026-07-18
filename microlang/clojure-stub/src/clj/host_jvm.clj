@@ -605,6 +605,12 @@
   (:kind :static)
   (:static-fn nanoTime [] (%nanos))
   (:static-fn currentTimeMillis [] (%wall-millis))
+  ;; No system-property store exists in this host, so an unset property's
+  ;; answers are the TRUE ones: nil, or the caller's default. core.async sizes
+  ;; its dispatch pool from these.
+  (:static-fn getProperty
+    ([n] nil)
+    ([n default] default))
   (:static-fn gc [] (gc)))
 
 ;; ─────────────── java.lang.ThreadLocal + proxy ───────────────
@@ -703,25 +709,53 @@
 ;; %thread-id where it matters); the stack trace is honestly EMPTY (there is no
 ;; Java stack), which callers already handle (test.check's file-and-line* answers
 ;; {:file nil :line nil} for an empty trace).
-(def -jvm-current-thread (record 'Thread nil "main"))
+(def -jvm-current-thread (record 'Thread nil (%cell "main")))
 (defclass java.lang.Thread
   (:tag Thread)
-  ;; fields: [runnable name]. `.start` runs the runnable on a REAL OS thread
-  ;; (%spawn); daemon-ness is inherent — spawned threads never block process
-  ;; exit here — so `.setDaemon` records nothing. core.async's timer daemon is
-  ;; exactly (doto (Thread. worker "…") (.setDaemon true) (.start)).
-  (:ctor ([runnable] (record 'Thread runnable "thread"))
-         ([runnable nm] (record 'Thread runnable nm)))
+  ;; fields: [runnable name-cell]. `.start` runs the runnable on a REAL OS
+  ;; thread (%spawn); daemon-ness is inherent — spawned threads never block
+  ;; process exit here — so `.setDaemon` records nothing. The name is a CELL so
+  ;; `.setName` (thread factories name their threads) genuinely sticks.
+  (:ctor ([runnable] (record 'Thread runnable (%cell "thread")))
+         ([runnable nm] (record 'Thread runnable (%cell nm))))
   (:static-fn currentThread [] -jvm-current-thread)
   (:static-fn sleep [ms] (%sleep ms))
   (:method setDaemon [t flag] t)
+  (:method setName [t nm] (do (%cell-set! (field t 1) 0 nm) t))
+  (:method run [t] ((field t 0)))
   (:method start [t]
     (let [r (field t 0)]
       (if (nil? r)
         (throw "Thread.start: no runnable")
         (do (%spawn r) t))))
   (:method getStackTrace [_] (list))
-  (:method getName [t] (field t 1)))
+  (:method getName [t] (%cell-ref (field t 1) 0)))
+
+;; ─────────────── java.util.concurrent executors (core.async dispatch) ──────
+;; `.execute` runs each task on a fresh %spawn thread created THROUGH the
+;; caller's ThreadFactory (init-fn and naming respected) — a cached pool with
+;; zero keep-alive, which is a legitimate ExecutorService: same concurrency
+;; semantics, no thread reuse.
+(defclass java.util.concurrent.ThreadFactory (:kind :interface))
+(defclass java.util.concurrent.ExecutorService (:kind :interface) (:tag ExecutorSvc))
+(defclass java.util.concurrent.AbstractExecutorService (:tag ExecutorSvc)
+  (:method execute [e r]
+    (let [f (field e 0)]
+      (if (nil? f)
+        (%spawn r)
+        (.start (.newThread f r)))
+      nil)))
+(defclass java.util.concurrent.Executors
+  (:kind :static)
+  (:static-fn newCachedThreadPool
+    ([] (record 'ExecutorSvc nil))
+    ([factory] (record 'ExecutorSvc factory)))
+  (:static-fn newFixedThreadPool
+    ([n] (record 'ExecutorSvc nil))
+    ([n factory] (record 'ExecutorSvc factory)))
+  (:static-fn newSingleThreadExecutor
+    ([] (record 'ExecutorSvc nil))
+    ([factory] (record 'ExecutorSvc factory))))
 ;; clojure.lang.ITransientSet — the transient set's host face. Real library
 ;; code reaches for the interface method directly: test.check's distinctness
 ;; machinery calls `(.contains ^clojure.lang.ITransientSet s k)` in its
@@ -886,6 +920,85 @@
 (defclass java.lang.InterruptedException
   (:tag InterruptedException) (:extends java.lang.Exception))
 
+;; ─────────────── java.util.concurrent.locks (core.async's channel mutex) ───
+;; A CAS spinlock over the native atom — mutex.clj's own alternative
+;; implementation is exactly this shape (their commented-out AtomicInteger
+;; variant), so the semantics are theirs: NON-reentrant, short critical
+;; sections. The spin loop is in-language, so its back-edge polls keep GC
+;; safepoints flowing; after a bounded spin it naps 1ms per retry.
+(defclass java.util.concurrent.locks.Lock (:kind :interface))
+(defclass java.util.concurrent.locks.ReentrantLock
+  (:tag ReentrantLock)
+  (:ctor ([] (record 'ReentrantLock (%atom-new 0))))
+  (:method lock [l]
+    (loop [n 0]
+      (if (%atom-cas (field l 0) 0 1)
+        nil
+        (do (if (%lt 1000 n) (%sleep 1) nil)
+            (recur (%add n 1))))))
+  (:method unlock [l] (do (%atom-set (field l 0) 0) nil)))
+
+;; ─────────────── java.util.LinkedList (core.async's channel queues) ────────
+;; A REAL mutable deque over the mutable-array prims: %apush appends and
+;; %ashift pops the head in place; the other edits (removeLast/addFirst/
+;; remove-at) rebuild in place — O(n) on queues core.async bounds at 1024
+;; pending ops. The channel sweep iterates with a MUTATING iterator
+;; (.iterator/.next/.remove), so the iterator holds a position cell and
+;; removal shifts it back.
+(defn -jvm-arr-remove-at! [a i]
+  (let [n (%alength a)
+        tmp (loop [j 0 acc nil]
+              (if (%lt j n) (recur (%add j 1) (%cons (%aget a j) acc)) (-rev acc)))]
+    (%aclear a)
+    (loop [j 0 s tmp]
+      (if (nil? s)
+        a
+        (do (if (%num-eq j i) nil (%apush a (%first s)))
+            (recur (%add j 1) (%rest s)))))))
+(defn -jvm-arr-push-front! [a x]
+  (let [n (%alength a)
+        tmp (loop [j 0 acc nil]
+              (if (%lt j n) (recur (%add j 1) (%cons (%aget a j) acc)) (-rev acc)))]
+    (%aclear a)
+    (%apush a x)
+    (loop [s tmp] (if (nil? s) a (do (%apush a (%first s)) (recur (%rest s)))))))
+(defn -jvm-arr-pop-last! [a]
+  (let [n (%alength a)]
+    (if (%num-eq n 0)
+      (throw "removeLast: empty list")
+      (let [last (%aget a (%sub n 1))]
+        (-jvm-arr-remove-at! a (%sub n 1))
+        last))))
+(defclass java.util.LinkedList
+  (:tag LinkedList)
+  (:ctor ([] (record 'LinkedList (%make-array 0))))
+  (:method add [l x] (do (%apush (field l 0) x) true))
+  (:method addLast [l x] (do (%apush (field l 0) x) nil))
+  (:method addFirst [l x] (do (-jvm-arr-push-front! (field l 0) x) nil))
+  (:method removeFirst [l] (%ashift (field l 0)))
+  (:method poll [l] (%ashift (field l 0)))
+  (:method removeLast [l] (-jvm-arr-pop-last! (field l 0)))
+  (:method peek [l] (if (%num-eq (%alength (field l 0)) 0) nil (%aget (field l 0) 0)))
+  (:method getFirst [l] (%aget (field l 0) 0))
+  (:method size [l] (%alength (field l 0)))
+  (:method isEmpty [l] (%num-eq (%alength (field l 0)) 0))
+  (:method clear [l] (do (%aclear (field l 0)) nil))
+  (:method iterator [l] (record 'MutIterator l (%cell 0))))
+(defclass java.util.LinkedList$Itr
+  (:tag MutIterator)
+  (:method hasNext [it]
+    (%lt (%cell-ref (field it 1) 0) (%alength (field (field it 0) 0))))
+  (:method next [it]
+    (let [c (field it 1) i (%cell-ref c 0)]
+      (%cell-set! c 0 (%add i 1))
+      (%aget (field (field it 0) 0) i)))
+  ;; remove the element `next` just returned, exactly Iterator.remove
+  (:method remove [it]
+    (let [c (field it 1) i (%sub (%cell-ref c 0) 1)]
+      (-jvm-arr-remove-at! (field (field it 0) 0) i)
+      (%cell-set! c 0 i)
+      nil)))
+
 ;; ─────────────── java.util.concurrent (core.async's timer machinery) ───────
 ;; The classes impl.timers imports. Real semantics over real threads:
 ;; DelayQueue.take BLOCKS (polling in ≤50ms slices — %sleep does not park for
@@ -939,6 +1052,16 @@
   (:method getKey [e] (field e 0))
   (:method getValue [e] (field e 1)))
 
+;; java.util.concurrent.atomic.AtomicReferenceArray — core.async's go state
+;; array (one per running state machine). A real mutable array: %cell-set!
+;; mutates under the heap lock, so element reads/writes are atomic exactly as
+;; ARA promises.
+(defclass java.util.concurrent.atomic.AtomicReferenceArray
+  (:tag AtomicRefArray)
+  (:ctor ([n] (record 'AtomicRefArray (%make-array n))))
+  (:method get [a i] (%aget (field a 0) i))
+  (:method set [a i v] (do (%cell-set! (field a 0) i v) nil))
+  (:method length [a] (%alength (field a 0))))
 ;; java.util.concurrent.atomic.AtomicLong — a real cross-thread counter over
 ;; the native atom (compare-and-set retry loops, like AtomicLong's own CAS).
 (defn -atomic-long-add! [al delta]
@@ -971,6 +1094,14 @@
     (%make-record 'AsmType (list (-jvm-type-descriptor (symbol (.getName c)))))))
 
 ;; ─────────────── clojure.lang ───────────────
+;; clojure.lang.Var statics — the thread-binding-frame surface core.async's go
+;; uses to CONVEY the caller's dynamic bindings onto its dispatch threads
+;; (capture a frame, reset it around each state-machine step, restore after).
+;; Frames are real snapshots of the per-thread binding stack (%dyn-frame).
+(defclass clojure.lang.Var (:tag Var)
+  (:static-fn getThreadBindingFrame [] (%dyn-frame))
+  (:static-fn cloneThreadBindingFrame [] (%dyn-frame))
+  (:static-fn resetThreadBindingFrame [f] (%dyn-frame-set f)))
 ;; clojure.lang.Compiler — the pieces analysis code BINDS (never invokes):
 ;; LOADER is a Var whose binding t.a.jvm pushes around macroexpansion; nothing
 ;; here reads it, but the push must have a real var to key on.

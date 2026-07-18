@@ -77,6 +77,8 @@ struct NsState {
 const DEFAULT_IMPORTS: &[(&str, &str)] = &[
     ("Object", "java.lang.Object"),
     ("Runtime", "java.lang.Runtime"),
+    ("Thread", "java.lang.Thread"),
+    ("ThreadLocal", "java.lang.ThreadLocal"),
     ("String", "java.lang.String"),
     ("StringBuilder", "java.lang.StringBuilder"),
     ("CharSequence", "java.lang.CharSequence"),
@@ -109,6 +111,7 @@ const DEFAULT_IMPORTS: &[(&str, &str)] = &[
     ("AssertionError", "java.lang.AssertionError"),
     ("StackOverflowError", "java.lang.StackOverflowError"),
     ("Symbol", "clojure.lang.Symbol"),
+    ("Var", "clojure.lang.Var"),
     ("Keyword", "clojure.lang.Keyword"),
     ("Pattern", "java.util.regex.Pattern"),
     // dialect-native host types (cljs heritage)
@@ -159,6 +162,7 @@ impl Compiler {
             ("%floor", Floor), ("%ceil", Ceil), ("%log", Log), ("%exp", Exp),
             ("%double-bits", DoubleBits), ("%bit-reverse", BitReverse), ("%stats", Stats),
             ("%subs", Subs), ("%sleep", Sleep),
+            ("%dyn-frame", DynFrameGet), ("%dyn-frame-set", DynFrameSet),
             ("%register-fields", RegisterFields), ("%field-by-name", FieldByName), ("%field-names", FieldNames), ("%make-record", MakeRecord), ("%hash", Hash),
             ("%first", First), ("%rest", Rest), ("%cons", Cons),
             ("record", Record), ("field", Field), ("type-of", TypeOf), ("nfields", NFields), ("throw", Throw),
@@ -304,13 +308,23 @@ const SYNTAX_QUOTE_BARE: &[&str] = &[
             rt.intern(fq)
         } else if self.ns.ns_defs.get("clojure.core").is_some_and(|d| d.contains(name)) {
             rt.intern(&format!("clojure.core/{name}"))
-        } else if Self::SYNTAX_QUOTE_BARE.contains(&name)
-            || name.starts_with('.')
-            || name.ends_with('.')
-        {
+        } else if Self::SYNTAX_QUOTE_BARE.contains(&name) || name.starts_with('.') {
             // A SPECIAL FORM (or interop syntax) — the compiler matches these by
             // bare name, so qualifying them would break dispatch. Clojure leaves
             // its specials bare here for the same reason.
+            return s;
+        } else if name.ends_with('.') && name.len() > 1 {
+            // A ctor head `Name.` resolves through the DEFINING ns's imports to
+            // its fully-qualified spelling, exactly as real syntax-quote
+            // qualifies class names — impl.go's template writes
+            // `(AtomicReferenceArray. …)`, and the expansion runs in the
+            // CALLER's ns, which has no such import.
+            let base = &name[..name.len() - 1];
+            if !base.contains('.') {
+                if let Some(fqn) = self.resolve_class(base) {
+                    return rt.intern(&format!("{fqn}."));
+                }
+            }
             return s;
         } else if let Some(fqn) = self.resolve_class(name) {
             // A class name resolves to the fully-qualified class, as in Clojure:

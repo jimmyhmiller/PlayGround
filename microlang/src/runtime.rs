@@ -3173,6 +3173,39 @@ impl<M: ValueModel> Runtime<M> {
                 self.dyn_stack.push((s, args[1]));
                 self.encode(Val::Nil)
             }
+            Prim::DynFrameGet => {
+                // Var/getThreadBindingFrame: this thread's binding stack as a
+                // flat [sym val …] vector (a GC-traced value — the frame rides
+                // core.async's state array between dispatch-thread hops).
+                let entries = self.dyn_stack.clone();
+                let mut flat = Vec::with_capacity(entries.len() * 2);
+                for (s, v) in entries {
+                    flat.push(self.encode(Val::Sym(s)));
+                    flat.push(v);
+                }
+                let id = self.alloc_vector(&flat);
+                M::R::enc_ref(id)
+            }
+            Prim::DynFrameSet => {
+                // Var/resetThreadBindingFrame: replace the stack wholesale.
+                let Val::Ref(id) = self.decode(args[0]) else {
+                    panic!("%dyn-frame-set: not a frame");
+                };
+                let ObjView::Vector { elems, .. } = self.view_gc(id) else {
+                    panic!("%dyn-frame-set: not a frame");
+                };
+                let flat: Vec<u64> = elems.to_vec();
+                self.dyn_stack.clear();
+                for pair in flat.chunks(2) {
+                    if let [sv, v] = pair {
+                        let Val::Sym(s) = self.decode(*sv) else {
+                            panic!("%dyn-frame-set: corrupt frame");
+                        };
+                        self.dyn_stack.push((s, *v));
+                    }
+                }
+                self.enc_nil()
+            }
             Prim::DynUnwind => {
                 while let Some((s, _)) = self.dyn_stack.pop() {
                     if s == DYN_MARK {
@@ -3540,7 +3573,14 @@ impl<M: ValueModel> Runtime<M> {
                     panic!("field: index must be an int");
                 };
                 match self.view_gc(id) {
-                    ObjView::Record { fields, .. } => fields[i as usize],
+                    ObjView::Record { type_id, fields } => match fields.get(i as usize) {
+                        Some(&f) => f,
+                        None => panic!(
+                            "field: index {i} out of bounds for {} ({} fields)",
+                            self.sym_name(type_id),
+                            fields.len()
+                        ),
+                    },
                     _ => panic!("field: not a record"),
                 }
             }

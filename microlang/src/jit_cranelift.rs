@@ -1279,6 +1279,8 @@ fn prim_tag(p: Prim) -> u32 {
         Stats => 153,
         Subs => 154,
         Sleep => 155,
+        DynFrameGet => 156,
+        DynFrameSet => 157,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -1443,6 +1445,8 @@ fn prim_from_tag(tag: u32) -> Prim {
         153 => Stats,
         154 => Subs,
         155 => Sleep,
+        156 => DynFrameGet,
+        157 => DynFrameSet,
         other => panic!("bad prim tag {other}"),
     }
 }
@@ -3301,9 +3305,13 @@ impl<M: ModelArithJit> JitCranelift<M> {
                         callee
                     };
                     // Callable-object hook in TAIL position too (keywords / maps /
-                    // callable deftype records): route `(obj args…)` to
-                    // `(handler obj args…)`, exactly as `invoke` does.
-                    let callee = if is_record_ref::<M>(callee) && rt.apply_handler().is_some() {
+                    // callable deftype records — and SYMBOLS, IFn-as-lookup like
+                    // keywords): route `(obj args…)` to `(handler obj args…)`,
+                    // exactly as `invoke` does.
+                    let callee = if (is_record_ref::<M>(callee)
+                        || matches!(rt.decode(callee), Val::Sym(_)))
+                        && rt.apply_handler().is_some()
+                    {
                         let h = rt.apply_handler().unwrap();
                         args_buf.insert(0, callee);
                         h
@@ -3445,11 +3453,15 @@ impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
     }
 
     fn invoke(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, callee: u64, args: &[u64]) -> u64 {
-        // Callable-object hook (keywords / maps / vectors / sets / multimethods): a
-        // non-closure record with a registered apply handler routes to
-        // `(handler object args…)`, exactly like the TreeWalk `invoke`.
+        // Callable-object hook (keywords / maps / vectors / sets / multimethods —
+        // and SYMBOLS, IFn-as-lookup like keywords): a non-closure callable with
+        // a registered apply handler routes to `(handler object args…)`, exactly
+        // like the TreeWalk `invoke`.
         let routed;
-        let (callee, args) = if is_record_ref::<M>(callee) && rt.apply_handler().is_some() {
+        let (callee, args) = if (is_record_ref::<M>(callee)
+            || matches!(rt.decode(callee), Val::Sym(_)))
+            && rt.apply_handler().is_some()
+        {
             let h = rt.apply_handler().unwrap();
             let mut v = Vec::with_capacity(args.len() + 1);
             v.push(callee);
@@ -6888,6 +6900,8 @@ mod prim_tag_tests {
         Prim::Stats,
         Prim::Subs,
         Prim::Sleep,
+        Prim::DynFrameGet,
+        Prim::DynFrameSet,
         Prim::RegisterFields,
         Prim::FieldByName,
         Prim::FieldNames,

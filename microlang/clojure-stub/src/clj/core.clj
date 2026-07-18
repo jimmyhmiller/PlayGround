@@ -648,6 +648,13 @@
         (map? o) (get o (first args))
         (set? o) (get o (first args))
         (vector? o) (nth o (first args))
+        ;; A SYMBOL is IFn exactly like a keyword: ('sym m) / ('sym m default)
+        ;; is a lookup. Real code leans on it — core.async's ioc pass writes
+        ;; (-> index value :read-in) where value is an instruction gensym, i.e.
+        ;; (value index).
+        (symbol? o) (if (nil? (rest args))
+                      (get (first args) o)
+                      (get (first args) o (first (rest args))))
         ;; A Var is IFn — calling it calls its ROOT, at whatever arity. Real code
         ;; passes `#'f` wherever a fn goes (meander's `defmulti` dispatches on
         ;; `#'unparse-dispatch`); without this every such call threw "not
@@ -3222,23 +3229,48 @@
 ;; That chain alone was 480 MILLION `type-of` calls on an atom, in a benchmark
 ;; that never mentions atoms.
 (defn record? [x] (contains? (%atom-get -record-types) (type-of x)))
+;; A record may carry ONE trailing slot beyond its named fields: the EXT-MAP
+;; holding assoc'd non-basis keys — Clojure's record __extmap. Assoc of an
+;; unknown key EXTENDS a record (type preserved, protocol impls intact); it
+;; silently DROPPED the key before, which lost core.async's ioc pass its
+;; instruction :ids. The slot exists only once needed — a plain record stays
+;; at exactly (count fields) slots.
+(defn -rec-ext [r]
+  (let [nf (count (%field-names r))]
+    (if (%lt nf (nfields r)) (field r nf) nil)))
 (defn -rec-get [r k nf]
   (loop [fs (%field-names r) i 0]
-    (cond (nil? (seq fs)) nf
+    (cond (nil? (seq fs)) (let [e (-rec-ext r)] (if (nil? e) nf (get e k nf)))
           (= (keyword (first fs)) k) (field r i)
           true (recur (rest fs) (inc i)))))
 (defn -rec-entries [r]
-  (loop [fs (%field-names r) i 0 acc nil]
-    (if (nil? (seq fs)) (reverse acc)
-        (recur (rest fs) (inc i) (%cons (vector (keyword (first fs)) (field r i)) acc)))))
-(defn -rec-assoc [r k v]
-  (let [fs (%field-names r)
-        vals (loop [fs fs i 0 acc nil]
+  (let [base (loop [fs (%field-names r) i 0 acc nil]
                (if (nil? (seq fs)) (reverse acc)
                    (recur (rest fs) (inc i)
-                          (%cons (if (= (keyword (first fs)) k) v (field r i)) acc))))]
+                          (%cons (vector (keyword (first fs)) (field r i)) acc))))
+        e (-rec-ext r)]
+    (if (nil? e) base (concat base (seq e)))))
+(defn -rec-count [r]
+  (+ (count (%field-names r)) (let [e (-rec-ext r)] (if (nil? e) 0 (count e)))))
+(defn -rec-assoc [r k v]
+  (let [fs (%field-names r)
+        known (some (fn [f] (= (keyword f) k)) fs)
+        ext (-rec-ext r)
+        ext2 (if known ext (assoc (if (nil? ext) {} ext) k v))
+        ;; build [f0 … fN ext?] as a proper list (eager — %make-record walks it)
+        tail (if (nil? ext2) nil (%cons ext2 nil))
+        vals (loop [i (dec (count fs)) acc tail]
+               (if (%lt i 0)
+                 acc
+                 (recur (dec i)
+                        (%cons (if (if known (= (keyword (nth fs i)) k) false)
+                                 v
+                                 (field r i))
+                               acc))))]
     (%make-record (type-of r) vals)))
-(defn -rec-has? [r k] (not (nil? (some (fn [f] (= (keyword f) k)) (%field-names r)))))
+(defn -rec-has? [r k]
+  (or (not (nil? (some (fn [f] (= (keyword f) k)) (%field-names r))))
+      (let [e (-rec-ext r)] (if (nil? e) false (contains? e k)))))
 (defmacro defrecord (name fields & specs)
   (let [ctor (symbol (str "->" name))]
     (list 'do
@@ -3246,7 +3278,7 @@
       (list 'swap! '-record-types 'conj (list 'quote name))
       (list 'extend-type name
         'ILookup (list '-lookup ['r 'k 'nf] (list '-rec-get 'r 'k 'nf))
-        'ICounted (list '-count ['r] (list 'nfields 'r))
+        'ICounted (list '-count ['r] (list '-rec-count 'r))
         'ISeqable (list '-seq ['r] (list '-rec-entries 'r))
         'IAssociative (list '-assoc ['r 'k 'v] (list '-rec-assoc 'r 'k 'v))
                       (list '-contains-key? ['r 'k] (list '-rec-has? 'r 'k)))
