@@ -653,6 +653,21 @@
   ;; (Java's full Unicode digit classes include non-ASCII digits; the reader's
   ;; symbol/keyword alphabet — what test.check generates against — is ASCII.)
   (:static-fn isDigit [c] (let [n (%char-code c)] (if (%lt n 48) false (%lt n 58)))))
+;; clojure.lang.MultiFn — multimethods' host face. Libraries feature-test it:
+;; test.check's clojure-test integration only registers its report methods
+;; after `(instance? clojure.lang.MultiFn clojure.test/report)`, because some
+;; tools rebind report to a plain fn.
+(defclass clojure.lang.MultiFn (:tag MultiFn))
+;; java.lang.Thread — currentThread is a singleton (thread identity comes from
+;; %thread-id where it matters); the stack trace is honestly EMPTY (there is no
+;; Java stack), which callers already handle (test.check's file-and-line* answers
+;; {:file nil :line nil} for an empty trace).
+(def -jvm-current-thread (record 'Thread 0))
+(defclass java.lang.Thread
+  (:tag Thread)
+  (:static-fn currentThread [] -jvm-current-thread)
+  (:method getStackTrace [_] (list))
+  (:method getName [_] "main"))
 ;; clojure.lang.ITransientSet — the transient set's host face. Real library
 ;; code reaches for the interface method directly: test.check's distinctness
 ;; machinery calls `(.contains ^clojure.lang.ITransientSet s k)` in its
