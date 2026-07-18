@@ -276,8 +276,14 @@ export class ScryWasm {
 
   evalRaw(src) {
     const bytes = this.enc.encode(src);
-    const p = this._malloc(bytes.length);
+    // +1 and NUL-terminate: the lexer reads past `len` (it expects a terminated buffer).
+    // Without this it runs into whatever follows — harmless while the allocator is handing
+    // out fresh zeroed pages, but it reads neighbouring garbage as soon as blocks are
+    // recycled, producing bogus "unknown identifier" errors from unrelated source text.
+    // server.coil documents the same hazard on the native path.
+    const p = this._malloc(bytes.length + 1);
     this.u8.set(bytes, p);
+    this.u8[p + bytes.length] = 0;
     const sp = this.instance.exports.__stack_pointer;   // exported mutable global
     const savedSp = sp ? sp.value : null;
     try {

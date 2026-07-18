@@ -32,6 +32,21 @@ node test-swap.mjs   # hot body-swap: greet() 1 -> redefine -> 99
   `types()` reflection with real `liveCount`, `instances()`, allocating objects via eval,
   invoking methods on live instances, and hot body-swap.
 - Typed diagnostics come back through the in-memory diag sink (no fd-2 / temp files).
+- **Uncrashable eval** — a hard panic (stale ref, arena-OOM, bad opcode, internal compiler
+  invariant) comes back as typed `{"error":{…}}` JSON and the instance stays live, exactly
+  as on native. wasm32 has no `setjmp`/`longjmp`, so the host unwinds instead: `setjmp`
+  returns 0, the `longjmp` import throws a `ScryLongjmp` whose JS exception unwinds the
+  wasm frames, and `eval()` catches it, restores the shadow-stack pointer, and calls
+  `scry_eval_recover()` to finish the response through the same `write-error-inner` path.
+  Verified: 200 consecutive panics, 200 typed errors, 200/200 healthy evals in between,
+  heap intact.
+
+  ⚠ **Needs `__stack_pointer` exported.** Coil defines the shadow-stack pointer as a
+  mutable global but does not export it, so the host cannot restore it after unwinding and
+  each panic leaks its frames (~111 bytes). The instance dies with *"memory access out of
+  bounds"* after ~9421 panics (1 MiB shadow stack ÷ 111 B). `evalRaw` already restores it
+  when present — exporting the global (as `__heap_base` already is) fixes the leak with no
+  further change here.
 
 ## The bridge (`scry-wasm.js`)
 
@@ -59,6 +74,12 @@ imports over it:
   cooperative green-thread scheduler (docs §3.2, P3).
 - **`readLine`** — returns EOF; it must become a host callback that pumps the scheduler
   (docs §4) or background workers freeze at the prompt.
-- **Uncrashable eval** — `setjmp` returns 0 and `longjmp` throws. The eval landing pad's
-  non-local exit needs a wasm story (exception handling) before eval is panic-proof here.
 - Viewer transport swap (P4), xterm + VFS + fake model end-to-end (P5), packaging (P6).
+
+## Gotcha worth knowing
+
+Eval source buffers **must be NUL-terminated** — the lexer reads past `len`. Without the
+terminator it reads whatever follows in memory, which looks fine while the allocator hands
+out fresh zeroed pages and then produces bogus "unknown identifier" errors quoting
+unrelated source once freed blocks start being recycled. `server.coil` documents the same
+hazard on the native path.

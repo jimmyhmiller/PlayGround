@@ -9,6 +9,11 @@ console.log("PANIC (oob)  :", JSON.stringify(scry.eval("Point.instances().get(99
 console.log("still alive  :", JSON.stringify(scry.eval("2 + 2")));
 console.log("heap intact  :", JSON.stringify(scry.eval("Point.instances().len()")));
 // hammer it: the instance must survive many panics
-let ok = 0;
-for (let i = 0; i < 50; i++) { scry.eval("Point.instances().get(99)"); if (scry.eval("1+1").value.value === 2) ok++; }
-console.log(`after 50 panics: ${ok}/50 healthy evals; sp-leaks=${scry._spLeaked || 0}`);
+let ok = 0, panics = 0;
+for (let i = 0; i < 200; i++) {
+  const e = scry.eval("Point.instances().get(99)");
+  if (e.error) panics++;
+  if (scry.eval("1+1").value?.value === 2) ok++;
+}
+console.log(`after 200 panics: ${panics} typed errors, ${ok}/200 healthy evals between them`);
+console.log("heap still intact:", JSON.stringify(scry.eval("Point.instances().len()")));
