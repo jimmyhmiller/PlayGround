@@ -46,8 +46,13 @@ Current status:
 
 ```text
 reference: 13/13 TanStack production gates passed
-diffpack:    0/13 TanStack production gates passed
+diffpack:    2/13 TanStack production gates passed
 ```
+
+Diffpack now emits the client `public/` layout (see "Native client `public/`
+emit" below), so the `output directory` and `extracted CSS` gates pass. The
+remaining eleven gates need more browser chunks (route splitting) and the whole
+server/SSR build, tracked below.
 
 The Diffpack result is deliberately not softened: it does not yet emit the
 required `.diffpack-output` client/server application layout. Run the
@@ -282,3 +287,56 @@ the rest.
 - CSS: Tailwind compilation for `app.css` (was `@tailwindcss/vite`).
 
 These are the native reimplementations that move the 13 acceptance gates.
+
+## Native client `public/` emit (landed)
+
+`diffpack build-app <root> client` now **emits a real client build** to
+`<root>/.diffpack-output/public/` instead of only printing diagnostics. It runs
+the existing linker/emit machinery over the real 220-module app graph:
+
+- `Bundler::emit_public(reachable, output_root, options)` rebuilds `public/` from
+  scratch (no stale files linger), emits the entry chunk `public/client.js` and
+  its dynamic-import chunks (`public/client.chunk-N.js`), extracts CSS beside the
+  entry (`public/client.css`), and copies content-hashed assets under
+  `public/assets/`. It returns a `PublicBuildSummary` whose counts are read back
+  from disk, so the printed summary always matches reality.
+- Only the `client` environment emits today; a non-client environment stops after
+  discovery rather than pretending to write a bundle (the server/SSR build is the
+  next milestone).
+- `emit_public` is a build-time entry point off the incremental hot path, so the
+  thesis guards (`docs/THESIS_GUARDS.md`) are unaffected and stay green.
+
+On the pinned reference the client build currently produces **4 public `.js`**
+(the entry chunk plus three dynamic-import chunks), **0 extracted `.css`**, and
+**1 asset** (`app-<hash>.css`, the Tailwind source imported as `~/styles/app.css?url`).
+Every emitted `.js` passes `node --check` (used only as a test oracle, never in
+the build path). Acceptance moves from `0/13` to `2/13` (`output directory` and
+`extracted CSS`; the CSS gate counts the `app.css` asset).
+
+Test: `bundler::tests::emit_public_writes_a_client_layout_with_chunks_css_and_assets`
+builds a small app (CSS side effect + asset import + dynamic import), emits to a
+temp `public/`, and asserts the chunk/CSS/asset files, the summary/disk match, and
+that a re-emit clears stale output.
+
+### The manifest gap, handled honestly
+
+The single remaining discovery diagnostic is still
+`tanstack-start-manifest:v` (unresolvable — it is build-output-dependent and must
+be generated natively). Its true cause is a **client/server isolation gap**: the
+generated route tree statically imports the server-only API route
+`src/routes/api/users.ts`, which imports `@tanstack/react-start/server`, pulling
+`react-start-server -> start-server-core -> createStartHandler -> router-manifest`
+into the client graph. `router-manifest.js` then `import()`s the virtual manifest.
+
+The correct fix is to strip the route module's `server: {...}` block (and server
+functions) in the client transform so those server-only imports never survive —
+but that is the route-splitting / server-function transform work listed above, too
+large for this slice. So per the honest-fallback policy, `build-app` **emits what
+builds** and reports the manifest as a clearly-labelled `known gap` rather than
+inventing a placeholder. The leaked server modules are dead code on the client;
+the dangling `import("tanstack-start-manifest:v")` lives only inside the unused
+`getStartManifest` path. No silent placeholder is emitted for the manifest.
+
+Next native step: the client route-module transform (strip `server`/`.server`
+blocks + server functions), which both eliminates this leak and — via `?tsr-split`
+route splitting — lifts the browser-chunk count toward the `>= 15` gate.

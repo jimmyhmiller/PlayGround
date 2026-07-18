@@ -219,6 +219,61 @@ pub struct EmitOptions {
     pub minify: bool,
 }
 
+/// A count of what a client `public/` build wrote to disk: JavaScript chunks,
+/// extracted stylesheets, and content-hashed assets. Counted from the emitted
+/// files, not predicted, so the summary always matches reality.
+#[derive(Debug, Clone)]
+pub struct PublicBuildSummary {
+    pub public_dir: PathBuf,
+    pub javascript_files: usize,
+    pub css_files: usize,
+    pub asset_files: usize,
+}
+
+impl PublicBuildSummary {
+    /// Walks an emitted `public/` directory and classifies each file: anything
+    /// under `assets/` is a content-hashed asset; otherwise `.js`/`.css` by
+    /// extension. Files with any other extension are ignored (there are none
+    /// today, but the count stays honest if that changes).
+    fn of(public_dir: &Path) -> Result<Self, String> {
+        let mut summary = Self {
+            public_dir: public_dir.to_path_buf(),
+            javascript_files: 0,
+            css_files: 0,
+            asset_files: 0,
+        };
+        let mut stack = vec![public_dir.to_path_buf()];
+        while let Some(directory) = stack.pop() {
+            let entries = fs::read_dir(&directory)
+                .map_err(|error| format!("cannot read {}: {error}", directory.display()))?;
+            for entry in entries {
+                let entry =
+                    entry.map_err(|error| format!("cannot read {}: {error}", directory.display()))?;
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let under_assets = path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    == Some("assets");
+                if under_assets {
+                    summary.asset_files += 1;
+                } else {
+                    match path.extension().and_then(|value| value.to_str()) {
+                        Some("js") => summary.javascript_files += 1,
+                        Some("css") => summary.css_files += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(summary)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VisualizationGraph {
     pub entry: String,
@@ -437,6 +492,32 @@ impl Bundler {
 
     pub fn emit(&self, reachable: &BTreeSet<ModuleId>, output: &Path) -> Result<(), String> {
         self.emit_with_options(reachable, output, EmitOptions::default())
+    }
+
+    /// Emits the client browser build into `<output_root>/public/`: the entry
+    /// JavaScript chunk (`client.js`), its dynamic-import chunks, the extracted
+    /// stylesheet, and every content-hashed asset under `public/assets/`. The
+    /// `public/` directory is rebuilt from scratch so stale files never linger,
+    /// and the returned [`PublicBuildSummary`] counts exactly what landed on disk.
+    ///
+    /// This drives the existing single-output emit at a `public/` layout; it is a
+    /// build-time entry point (off the incremental hot path), so the thesis guards
+    /// are unaffected.
+    pub fn emit_public(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        output_root: &Path,
+        options: EmitOptions,
+    ) -> Result<PublicBuildSummary, String> {
+        let public_dir = output_root.join("public");
+        if public_dir.exists() {
+            fs::remove_dir_all(&public_dir).map_err(|error| {
+                format!("cannot clear {}: {error}", public_dir.display())
+            })?;
+        }
+        let entry_output = public_dir.join("client.js");
+        self.emit_with_options(reachable, &entry_output, options)?;
+        PublicBuildSummary::of(&public_dir)
     }
 
     pub fn emit_with_options(
@@ -2590,6 +2671,63 @@ mod tests {
             direct.reachable_modules(),
             bundler.reachable_modules_direct()
         );
+    }
+
+    #[test]
+    fn emit_public_writes_a_client_layout_with_chunks_css_and_assets() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("style.css"), ".a { color: red; }").unwrap();
+        fs::write(directory.path().join("logo.svg"), "<svg></svg>").unwrap();
+        fs::write(
+            directory.path().join("lazy.js"),
+            "export const lazy = 'lazy';",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import './style.css';\nimport logo from './logo.svg';\n\
+             console.log(logo);\nimport('./lazy.js').then(({ lazy }) => console.log(lazy));\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output_root = directory.path().join(".diffpack-output");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let summary = bundler
+            .emit_public(&reachable, &output_root, EmitOptions::default())
+            .unwrap();
+
+        // A main chunk plus the dynamically imported chunk.
+        assert!(
+            summary.javascript_files >= 2,
+            "expected the entry chunk and a dynamic chunk: {summary:?}"
+        );
+        assert_eq!(summary.css_files, 1, "one extracted stylesheet: {summary:?}");
+        assert_eq!(summary.asset_files, 1, "one hashed asset: {summary:?}");
+
+        let public_dir = output_root.join("public");
+        assert!(public_dir.join("client.js").is_file());
+        assert!(public_dir.join("client.css").is_file());
+        assert!(
+            public_dir.join("assets").read_dir().unwrap().count() == 1,
+            "the svg asset is copied under assets/"
+        );
+        // The summary counts exactly the files on disk.
+        let on_disk = PublicBuildSummary::of(&public_dir).unwrap();
+        assert_eq!(on_disk.javascript_files, summary.javascript_files);
+        assert_eq!(on_disk.css_files, summary.css_files);
+        assert_eq!(on_disk.asset_files, summary.asset_files);
+
+        // A re-emit rebuilds `public/` from scratch: a file that would no longer
+        // be produced does not linger.
+        let stale = public_dir.join("stale.js");
+        fs::write(&stale, "// stale").unwrap();
+        bundler
+            .emit_public(&reachable, &output_root, EmitOptions::default())
+            .unwrap();
+        assert!(!stale.exists(), "re-emit must clear stale output");
     }
 
     fn run_node(path: &Path) -> String {

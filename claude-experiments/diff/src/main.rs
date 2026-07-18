@@ -127,8 +127,31 @@ fn run() -> Result<(), String> {
                 reachable.len(),
                 update.diagnostics.len()
             );
-            for diagnostic in update.diagnostics.iter().take(5) {
-                println!("  diagnostic: {diagnostic}");
+            for diagnostic in &update.diagnostics {
+                println!("  known gap: {diagnostic}");
+            }
+
+            // Emit the real client `public/` layout. The client is the only
+            // environment Diffpack chunks and emits natively today; the server
+            // (SSR) build is the next milestone, so a non-client environment
+            // stops after discovery rather than pretending to write a bundle.
+            if config.environment == "client" {
+                let output_root = Path::new(&project_root).join(".diffpack-output");
+                let summary =
+                    bundler.emit_public(&reachable, &output_root, EmitOptions::default())?;
+                println!(
+                    "emitted {}: {} public .js, {} .css, {} asset(s)",
+                    summary.public_dir.display(),
+                    summary.javascript_files,
+                    summary.css_files,
+                    summary.asset_files,
+                );
+            } else {
+                println!(
+                    "environment {:?} has no native emit yet (only the client build \
+                     emits today); discovery only",
+                    config.environment
+                );
             }
             Ok(())
         }
