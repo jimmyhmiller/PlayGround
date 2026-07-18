@@ -1191,6 +1191,14 @@
     (loop
       (if (< (load i) ni)
         (let [d (al-get is (load i)) ms (load (field d members)) nm2 (al-len ms) (mut j) 0 (mut nslot) 0]
+          ; Resolve this interface's return types in ITS OWN module scope. resolve-type below
+          ; goes through find-decl, which reads the global (ctx) cur-module/cur-file — by the
+          ; time build-program runs, those still point at whatever module was loaded LAST. An
+          ; interface whose method returns a type from its own module (e.g. agent.core's
+          ; `Model.respond(…) -> ModelResponse`) would otherwise fail to resolve and emit a
+          ; spurious "unknown type", misattributed to that last-loaded file. Same idiom as
+          ; compile-all-methods / inject-actions.
+          (set-cur-file (load (field d file)))
           ; count fn members
           (loop (if (< (load j) nm2) (do (if (is-fn-node (al-get ms (load j))) (store! nslot (+ (load nslot) 1)) 0) (store! j (+ (load j) 1)) 0) (break)))
           (let [arr (cast (ptr i64) (xalloc (* 8 (if (= (load nslot) 0) 1 (load nslot))))) (mut j2) 0 (mut sl) 0]
