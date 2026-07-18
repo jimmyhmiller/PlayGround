@@ -77,6 +77,13 @@ pub fn transform_module(path: &Path, source: &str) -> TransformResult {
         };
     }
 
+    // A route file's heavy properties are split into virtual `?tsr-split`
+    // modules and replaced with lazy imports before the module is lowered; this
+    // is what turns each route's component into its own code-split chunk. Non-
+    // route modules return `None` cheaply and take the source unchanged.
+    let split = crate::route_split::split_reference_route(path, source);
+    let source = split.as_deref().unwrap_or(source);
+
     let transform_started = frontend_profile::start();
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path)

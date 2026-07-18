@@ -5,6 +5,7 @@ mod frontend_profile;
 pub mod memory;
 pub mod parser;
 pub mod resource_id;
+pub mod route_split;
 pub mod transform;
 pub mod visualizer;
 

@@ -1757,8 +1757,35 @@ fn synthesize_query_module(resource: &ResourceId) -> Result<SpecialModule, Strin
     match resource.loader_kind() {
         Some(LoaderKind::Url) => synthesize_asset_url(PathBuf::from(&resource.path)),
         Some(LoaderKind::Raw) => synthesize_raw(Path::new(&resource.path)),
-        Some(LoaderKind::TsrSplit) | None => Err(resource.unimplemented_loader_error()),
+        Some(LoaderKind::TsrSplit) => synthesize_tsr_split(resource),
+        None => Err(resource.unimplemented_loader_error()),
     }
+}
+
+/// A `?tsr-split=<target>` virtual module: the route property extracted from the
+/// original route file, re-exported under its canonical name. Loaded lazily via
+/// the reference file's `import()`, so it lands in its own chunk.
+fn synthesize_tsr_split(resource: &ResourceId) -> Result<SpecialModule, String> {
+    // The query is `tsr-split=<target>`; the target selects which property was
+    // split out (only `component` is implemented natively today).
+    let target = resource
+        .query
+        .as_deref()
+        .and_then(|query| query.split_once('='))
+        .map(|(_, value)| value)
+        .unwrap_or("");
+    let path = Path::new(&resource.path);
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read route file {}: {error}", path.display()))?;
+    let module_source = crate::route_split::build_split_module(path, &source, target)?;
+    let transformed = transform_module(path, &module_source);
+    Ok(SpecialModule {
+        hash: content_hash(transformed.code.as_bytes()),
+        code: transformed.code,
+        flat_module: transformed.flat_module,
+        assets: Vec::new(),
+        css: None,
+    })
 }
 
 /// A content-hashed asset module: copies the file into `assets/` and exports its
@@ -2304,7 +2331,31 @@ mod tests {
     }
 
     #[test]
-    fn an_unimplemented_loader_query_reports_a_specific_error() {
+    fn an_unrecognized_loader_query_reports_a_specific_error() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("thing.js"), "export const x = 1;").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import c from './thing.js?mystery';\nconsole.log(c);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let error = match Bundler::discover_direct(&entry) {
+            Ok(_) => panic!("an unimplemented loader must fail the build, not silently succeed"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("unrecognized loader query `?mystery`"),
+            "{error}"
+        );
+        assert!(!error.contains("No such file or directory"), "{error}");
+    }
+
+    #[test]
+    fn a_tsr_split_query_on_a_non_route_file_reports_a_specific_error() {
+        // `?tsr-split` is implemented, but only for route files. Asking a plain
+        // module to produce a split module is a clear error, not a silent empty
+        // module or a filesystem crash.
         let directory = tempdir().unwrap();
         fs::write(directory.path().join("thing.js"), "export const x = 1;").unwrap();
         fs::write(
@@ -2314,11 +2365,11 @@ mod tests {
         .unwrap();
         let entry = directory.path().join("entry.js");
         let error = match Bundler::discover_direct(&entry) {
-            Ok(_) => panic!("an unimplemented loader must fail the build, not silently succeed"),
+            Ok(_) => panic!("a tsr-split on a non-route file must fail the build"),
             Err(error) => error,
         };
         assert!(
-            error.contains("loader `?tsr-split` is not yet implemented"),
+            error.contains("not a splittable route file"),
             "{error}"
         );
         assert!(!error.contains("No such file or directory"), "{error}");
