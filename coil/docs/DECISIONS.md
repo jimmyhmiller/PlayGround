@@ -224,12 +224,40 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    a reused-buffer overwrite; borrowed→22 reproducing the aliasing on purpose) — both FAIL on the
    pre-std-3 seed (borrow → 22; `str-keyops-borrowed` undefined). guide/LANGUAGE_GUIDE updated.
 
-9. **Debug-checks build mode — BOTH (mem-2 · mem-6 · mem-7 · mem-8).**
+9. **Debug-checks build mode — BOTH (mem-2 · mem-6 · mem-7 · mem-8).** ✅ DONE.
    (a) `--debug-checks`: a comptime predicate exposed to library code so slice-get/subslice
        bounds-check (and reject negative-length subslice), a poison-on-free debug-allocator in
        lib/alloc.coil, and a stack-return lint, all zero-cost when off.
    (b) `--sanitize=address`: wire LLVM's ASan pass + link the runtime; and stop
        `--link-flag -fsanitize=address` aborting the compiler.
+   OUTCOME: `(debug-checks?)` is a new comptime code op (39), answered in BOTH engines (the
+   interpreter's code-op + the compiled engine's metahost callback) from a host cell the driver
+   flips before expansion — like `(target-arch)`, so it needs NO seed refresh: the seed builds
+   stage1 against its OLD bundled libs and include-str bakes the new ones as opaque strings; from
+   stage1 on the op is known. Every check lives inside a MACRO branched on `(debug-checks?)` at
+   expansion time, so with the flag off it expands to the exact unchecked form — every off-path IR
+   is byte-identical (fixpoint held on BOTH rebootstraps, all 7 gates green, ZERO snapshot regen).
+   • **mem-6**: `slice-get`/`slice-set!`/`subslice` bounds-check (and `subslice` rejects `lo>hi`,
+     the length-(-2) invariant break). The panic helper is GENERIC (T inferred from the slice) so
+     it is emitted only when instantiated — off, nothing calls it and no byte reaches the output;
+     slice.coil gained an `(export …)` list so its private `write` extern can't collide with io's.
+   • **mem-2**: `(debug-allocator inner)` (a NEW bundled module lib/dbgalloc.coil — kept out of the
+     always-loaded alloc.coil, whose concrete hooks mono can't dead-strip) — a macro that is `inner`
+     when off, and when on wraps with a `{magic,size}`-header allocator that detects double-free
+     (located abort) and poisons freed payloads to 0xDE (quarantining blocks so detection is
+     reliable). Zero effect on existing dumps.
+   • **mem-8**: a bundled `(checker …)` (lib/stacklint.coil) the driver auto-`--use`s under
+     --debug-checks; it WARNS (like clang, non-fatal) when a user function returns a pointer to a
+     stack local (direct or let-bound alloc-stack). No false positives on heap/param returns or the
+     corpus. LESSON: the checker-dylib closure walk skips a user call nested in an expanded and/or.
+   • **mem-7**: `--sanitize=address` runs LLVM's AddressSanitizer pass (`default<O3>,asan`) on the
+     PROGRAM object only (`build-object` sanitize flag; false for the metaprogram dylib). Sanitizer
+     flags are filtered off the metaprogram-dylib link (`filter-meta-link-flags`), so a bare
+     `--link-flag -fsanitize=address` no longer aborts the compiler; `--sanitize=address` on a
+     non-LLVM backend is a clear located error. (The instrumented object is provably ASan-marked; the
+     final exe-link's runtime must match the instrumenting LLVM — a toolchain concern, delegated to
+     `cc -fsanitize=address`.)
+   Teeth for all four in `gate-cli.sh` (all FAIL on the seed).
 
 10. **Testing & debugging story (tool-12 · tool-11).** `lib/assert.coil` (assert/assert-eq with
     file:line via the span machinery), a `coil test` runner that discovers + runs test mains,

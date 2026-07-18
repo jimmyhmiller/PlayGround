@@ -284,18 +284,21 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
 `lib/slice.coil`'s own comment promises "debug-mode bounds checking is Phase-2 safety work", but
 **there is no debug flag for Phase-2 to land in.**
 
-- [ ] **mem-6** `subslice` with lo > hi yields a slice reporting length **-2**, violating the fat
-      pointer's own invariant. Check `lo > hi` unconditionally — one branch, cold path.
-- [ ] **mem-7** No sanitizer story: `--link-flag -fsanitize=address` **aborts the compiler itself**;
-      even a hand-linked ASan build can't catch OOB (Coil never runs the instrumentation pass).
-      Add `--sanitize=address` — Coil already owns the LLVM pipeline. Also: why does a `--link-flag`
-      reach the compiler's own process?
-- [ ] **mem-2** Use-after-free/double-free are bare signals with zero diagnostic — below C, which at
-      least prints libmalloc's line. Ship a `debug-allocator` wrapper; needs no compiler support.
-- [ ] **mem-8 / diag-11** Returning a pointer to a stack local: no diagnostic; **clang warns on the
-      identical C by default**. The local syntactic case needs no analysis — natural fit for a
-      bundled `(checker …)` metaprogram lint.
-- [ ] Introduce the debug-checks build mode these all depend on.
+- [x] **mem-6** — ✅ DONE. `slice-get`/`slice-set!`/`subslice` bounds-check under `--debug-checks`,
+      and `subslice` rejects `lo > hi` (the length-(-2) invariant break). The check is in a macro
+      gated on `(debug-checks?)`, so it is byte-identical zero-cost when off. See DECISIONS.md #9.
+- [x] **mem-7** — ✅ DONE. `--sanitize=address` runs LLVM's AddressSanitizer pass on the program
+      object; sanitizer flags are filtered off the metaprogram dylib, so `--link-flag
+      -fsanitize=address` no longer aborts the compiler. A non-LLVM backend is a clear error. See
+      DECISIONS.md #9.
+- [x] **mem-2** — ✅ DONE. `(debug-allocator inner)` (bundled lib/dbgalloc.coil) — a macro that is
+      `inner` when off; on, it detects double-free (located abort) and poisons freed memory to 0xDE
+      (quarantine so detection is reliable). See DECISIONS.md #9.
+- [x] **mem-8 / diag-11** — ✅ DONE. A bundled `(checker …)` (lib/stacklint.coil) the driver
+      auto-applies under `--debug-checks` warns (like clang, non-fatal) when a user function returns
+      a pointer to a stack local. No false positives on heap/param returns. See DECISIONS.md #9.
+- [x] Introduce the debug-checks build mode these all depend on. — ✅ DONE: `(debug-checks?)`, a
+      comptime code op set from the driver, gating each library check inside a macro (zero-cost off).
 
 ## Batch 11 — Stdlib gaps (a 15-line CSV program needed 36 lines of stdlib first)
 
