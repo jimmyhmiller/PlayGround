@@ -51,11 +51,11 @@ target triple = "arm64-apple-darwin25.5.0"
 
 declare ptr @memcpy(ptr, ptr, i64)
 
-declare i64 @read(i64, ptr, i64)
+declare i64 @read(i32, ptr, i64)
 
 declare i64 @strlen(ptr)
 
-declare i64 @write(i64, ptr, i64)
+declare i64 @write(i32, ptr, i64)
 
 define internal double @"coil.core.Add$f64$+"(double %a, double %b) {
 entry:
@@ -265,9 +265,10 @@ define internal i64 @"dyn_write.Write$dyn_write.File$emit"(ptr %self, { ptr, i64
 entry:
   %field = getelementptr inbounds nuw %dyn_write.File, ptr %self, i32 0, i32 0
   %load = load i64, ptr %field, align 8
+  %trunc = trunc i64 %load to i32
   %call = call ptr @slice.slice-data__u8({ ptr, i64 } %bytes)
   %call1 = call i64 @slice.slice-len__u8({ ptr, i64 } %bytes)
-  %call2 = call i64 @write(i64 %load, ptr %call, i64 %call1)
+  %call2 = call i64 @write(i32 %trunc, ptr %call, i64 %call1)
   ret i64 %call2
 }
 
@@ -972,8 +973,8 @@ entry:
   %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
   %sum.tmp1 = alloca %io.IoError, align 8
   %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
-  %ptrtoint = ptrtoint ptr %ctx to i64
-  %call = call i64 @read(i64 %ptrtoint, ptr %buf, i64 %len)
+  %ptrtoint = ptrtoint ptr %ctx to i32
+  %call = call i64 @read(i32 %ptrtoint, ptr %buf, i64 %len)
   %cmp = icmp slt i64 %call, 0
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
@@ -1018,8 +1019,8 @@ entry:
   %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
   %sum.tmp1 = alloca %io.IoError, align 8
   %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
-  %ptrtoint = ptrtoint ptr %ctx to i64
-  %call = call i64 @write(i64 %ptrtoint, ptr %buf, i64 %len)
+  %ptrtoint = ptrtoint ptr %ctx to i32
+  %call = call i64 @write(i32 %ptrtoint, ptr %buf, i64 %len)
   %cmp = icmp slt i64 %call, 0
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
@@ -1617,7 +1618,7 @@ entry:
   %idx12 = getelementptr [256 x i8], ptr %stack.slot1, i64 0, i64 0
   %field13 = getelementptr inbounds nuw %dyn_write.MemBuf, ptr %stack.slot2, i32 0, i32 1
   %load = load i64, ptr %field13, align 8
-  %call14 = call i64 @write(i64 1, ptr %idx12, i64 %load)
+  %call14 = call i64 @write(i32 1, ptr %idx12, i64 %load)
   ret i64 0
 }
 

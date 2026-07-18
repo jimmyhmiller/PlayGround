@@ -18,7 +18,7 @@
 (import "control.coil" :use *)   ; cond / for / while
 
 (extern open       :cc c [(ptr i8) :i64] (-> :i32))
-(extern read       :cc c [:i64 (ptr i8) :i64] (-> :i64))
+(extern read       :cc c [i32 (ptr i8) isize] (-> isize))
 (extern close      :cc c [:i64] (-> :i32))
 (extern memset     :cc c [(ptr i8) :i64 :i64] (-> (ptr i8)))
 (extern arc4random :cc c [] (-> :u32))
@@ -168,7 +168,7 @@
 (defn load-rom [(c (ptr Chip8)) (path (ptr i8))] (-> i64)
   (let [fd (cast :i64 (open path 0))]
     (if (icmp-lt fd 0) -1
-        (do (read fd (index (field c mem) 0x200) 3584) (close fd) 0))))
+        (do (read (cast i32 fd) (index (field c mem) 0x200) 3584) (close fd) 0))))
 
 (defn step [(c (ptr Chip8))] (-> i64)
   (let [pc (pc-get c) op (ior (ishl (mget c pc) 8) (mget c (iadd pc 1)))]

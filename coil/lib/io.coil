@@ -15,8 +15,8 @@
 (import "result.coil" :use *)
 (import "slice.coil"  :use *)   ; (slice u8) strings: slice-data / slice-len
 
-(extern write  :cc c [:i64 (ptr i8) isize] (-> isize))   ; ssize_t write(int fd, const void*, size_t)
-(extern read   :cc c [:i64 (ptr i8) isize] (-> isize))   ; ssize_t read(int fd, void*, size_t)
+(extern write  :cc c [i32 (ptr i8) isize] (-> isize))   ; ssize_t write(int fd, const void*, size_t)
+(extern read   :cc c [i32 (ptr i8) isize] (-> isize))   ; ssize_t read(int fd, void*, size_t)
 (extern strlen :cc c [(ptr i8)] (-> isize))              ; size_t strlen(const char*)
 (extern memcpy :cc c [(ptr i8) (ptr i8) isize] (-> (ptr i8)))  ; void* memcpy(void*, const void*, size_t)
 
@@ -70,7 +70,7 @@
 ; ---- backends ----
 ; fd-backed: the ctx pointer *is* the file descriptor (int<->ptr cast).
 (defn fd-write [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
-  (let [n (cast :i64 (write (cast :i64 ctx) buf (cast isize len)))]
+  (let [n (cast :i64 (write (cast i32 ctx) buf (cast isize len)))]
     (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
 ; The caller owns the Writer cell. `alloc-static` gives ONE cell per CALL SITE, not per
 ; call, so building the Writer in here handed every caller the SAME struct: two live
@@ -178,7 +178,7 @@
                           (store! i (iadd (load i) 1))))))))))))
 
 (defn fd-read [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)] (-> (Result :i64 IoError))
-  (let [n (cast :i64 (read (cast :i64 ctx) buf (cast isize len)))]
+  (let [n (cast :i64 (read (cast i32 ctx) buf (cast isize len)))]
     (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
 ; caller-owned, for the same reason as fd-writer.
 (defn fd-reader [(r (ptr Reader)) (fd :i64)] (-> (ptr Reader))

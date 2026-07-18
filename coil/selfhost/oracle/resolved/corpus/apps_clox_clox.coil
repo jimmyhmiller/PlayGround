@@ -1,4 +1,4 @@
-(extern write :cc c [i64 (ptr i8) i64] (-> i64))
+(extern write :cc c [i32 (ptr i8) isize] (-> isize))
 
 (extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
 
@@ -18,9 +18,14 @@
 
 (extern clock :cc c [] (-> i64))
 
-(defn w-bytes [(fd i64) (p (ptr u8)) (n i64)] (-> i64) (write fd (cast (ptr i8) p) n) 0)
+(defn
+  w-bytes
+  [(fd i64) (p (ptr u8)) (n i64)]
+  (-> i64)
+  (write (cast i32 fd) (cast (ptr i8) p) n)
+  0)
 
-(defn w-cstr [(fd i64) (s (ptr i8))] (-> i64) (write fd s (strlen s)) 0)
+(defn w-cstr [(fd i64) (s (ptr i8))] (-> i64) (write (cast i32 fd) s (strlen s)) 0)
 
 (defn
   w-num
@@ -28,7 +33,7 @@
   (-> i64)
   (let
     [buf (alloc-stack (array u8 32)) n (snprintf (cast (ptr i8) (index buf 0)) 32 c"%g" x)]
-    (write fd (cast (ptr i8) (index buf 0)) (cast i64 n))
+    (write (cast i32 fd) (cast (ptr i8) (index buf 0)) (cast i64 n))
     0))
 
 (defn
@@ -40,7 +45,7 @@
       (alloc-stack (array u8 32))
       n
       (snprintf (cast (ptr i8) (index buf 0)) 32 c"%d" (cast i32 v))]
-    (write fd (cast (ptr i8) (index buf 0)) (cast i64 n))
+    (write (cast i32 fd) (cast (ptr i8) (index buf 0)) (cast i64 n))
     0))
 
 (const OP_CONSTANT 0)

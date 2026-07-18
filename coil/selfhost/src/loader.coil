@@ -21,7 +21,7 @@
 (defn read-file [(a (ptr Allocator)) (path (ptr i8))] (-> (slice u8))
   (let [fd (open path 0) buf (unwrap-ptr [i8] (raw-alloc a 65536 1)) (mut bytes) (al-new [u8] a)]
     (loop
-      (let [n (read (cast i64 fd) buf 65536)]
+      (let [n (read (cast i32 fd) buf 65536)]
         (if (icmp-le n 0) (break)
           (let [(mut i) 0]
             (loop (if (icmp-ge (load i) n) (break)
@@ -38,7 +38,7 @@
     (if (icmp-lt (cast i64 fd) 0) (None [(slice u8)])
       (let [buf (unwrap-ptr [i8] (raw-alloc a 65536 1)) (mut bytes) (al-new [u8] a)]
         (loop
-          (let [n (read (cast i64 fd) buf 65536)]
+          (let [n (read (cast i32 fd) buf 65536)]
             (if (icmp-le n 0) (break)
               (let [(mut i) 0]
                 (loop (if (icmp-ge (load i) n) (break)

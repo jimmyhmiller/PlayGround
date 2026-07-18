@@ -2,7 +2,10 @@
   KeyOps
   [(hash (fnptr c [(ptr i8) :i64] :i64))
     (eq (fnptr c [(ptr i8) (ptr i8) :i64] bool))
-    (size :i64)])
+    (size :i64)
+    (copy (fnptr c [(ptr Allocator) (ptr i8)] :i64))
+    (free (fnptr c [(ptr Allocator) (ptr i8)] :i64))
+    (owns :i64)])
 
 (defn
   bytewise-hash
@@ -59,6 +62,20 @@
   (-> bool)
   (call-ptr (load (field opsp eq)) a b (load (field opsp size))))
 
+(defn ko-owns? [(opsp (ptr KeyOps))] (-> bool) (icmp-eq (load (field opsp owns)) 1))
+
+(defn
+  ko-keycopy
+  [(opsp (ptr KeyOps)) (a (ptr Allocator)) (slot (ptr i8))]
+  (-> :i64)
+  (call-ptr (load (field opsp copy)) a slot))
+
+(defn
+  ko-keyfree
+  [(opsp (ptr KeyOps)) (a (ptr Allocator)) (slot (ptr i8))]
+  (-> :i64)
+  (call-ptr (load (field opsp free)) a slot))
+
 (defn
   hm-new
   [K V]
@@ -84,7 +101,13 @@
 (defn
   hm-insert-raw
   [K V]
-  [(opsp (ptr KeyOps)) (slots (ptr (Entry K V))) (cap :i64) (kp (ptr K)) (v V)]
+  [(opsp (ptr KeyOps))
+    (slots (ptr (Entry K V)))
+    (cap :i64)
+    (kp (ptr K))
+    (v V)
+    (a (ptr Allocator))
+    (own :i64)]
   (-> :i64)
   (let
     [kpi
@@ -112,6 +135,10 @@
                 (index slots target)]
               (store! (field te state) 1)
               (store! (field te key) (load kp))
+              (if
+                (and (icmp-eq own 1) (ko-owns? opsp))
+                (ko-keycopy opsp a (cast (ptr i8) (field te key)))
+                0)
               (store! (field te val) v)
               (store! result (if (icmp-ge (load tomb) 0) 2 1))
               (store! done 1))
@@ -157,7 +184,9 @@
                         ns
                         newcap
                         (field e key)
-                        (load (field e val)))
+                        (load (field e val))
+                        a
+                        0)
                       0))
                   (store! j (iadd (load j) 1))))))
           (if
@@ -202,7 +231,9 @@
           (load (field m slots))
           (load (field m cap))
           kp
-          v)]
+          v
+          (load (field m alc))
+          1)]
       (if
         (icmp-ge r 1)
         (do
@@ -262,6 +293,8 @@
           (load (field m slots))
           opsp
           (load (field m ops))
+          a
+          (load (field m alc))
           kp
           (alloc-stack K)
           (mut res)
@@ -278,6 +311,7 @@
                 (if
                   (and (icmp-eq st 1) (ko-eq opsp (cast (ptr i8) (field e key)) kpi))
                   (do
+                    (if (ko-owns? opsp) (ko-keyfree opsp a (cast (ptr i8) (field e key))) 0)
                     (store! (field e state) 2)
                     (store! (field m len) (isub (load (field m len)) 1))
                     (store! (field m tombs) (iadd (load (field m tombs)) 1))
@@ -287,17 +321,49 @@
         (load res)))))
 
 (defn
+  hm-drop-keys!
+  [K V]
+  [(m (mut (HashMap K V)))]
+  (-> :i64)
+  (let
+    [opsp
+      (load (field m ops))
+      a
+      (load (field m alc))
+      slots
+      (load (field m slots))
+      cap
+      (load (field m cap))
+      (mut i)
+      0]
+    (loop
+      (if
+        (icmp-ge (load i) cap)
+        (break)
+        (do
+          (let
+            [e (index slots (load i))]
+            (if
+              (icmp-eq (load (field e state)) 1)
+              (ko-keyfree opsp a (cast (ptr i8) (field e key)))
+              0))
+          (store! i (iadd (load i) 1)))))
+    0))
+
+(defn
   hm-free!
   [K V]
   [(m (mut (HashMap K V)))]
   (-> :i64)
   (if
     (icmp-gt (load (field m cap)) 0)
-    (raw-free
-      (load (field m alc))
-      (cast (ptr i8) (load (field m slots)))
-      (imul (load (field m cap)) (sizeof (Entry K V)))
-      (alignof (Entry K V)))
+    (do
+      (if (ko-owns? (load (field m ops))) (hm-drop-keys! (mut m)) 0)
+      (raw-free
+        (load (field m alc))
+        (cast (ptr i8) (load (field m slots)))
+        (imul (load (field m cap)) (sizeof (Entry K V)))
+        (alignof (Entry K V))))
     0)
   (store! (field m slots) (cast (ptr (Entry K V)) 0))
   (store! (field m cap) 0)
@@ -312,7 +378,9 @@
   (-> :i64)
   (if
     (icmp-gt (load (field m cap)) 0)
-    (mem-zero (load (field m slots)) (load (field m cap)))
+    (do
+      (if (ko-owns? (load (field m ops))) (hm-drop-keys! (mut m)) 0)
+      (mem-zero (load (field m slots)) (load (field m cap))))
     0)
   (store! (field m len) 0)
   (store! (field m tombs) 0)
@@ -364,4 +432,39 @@
   Set
   (HashMap K V)
   (set! [(m (mut (HashMap K V))) (k K) (v V)] (-> i64) (hm-put! (mut m) k v)))
+
+(defstruct MapIter [K V] [(m (HashMap K V)) (pos i64)])
+
+(impl
+  [K V]
+  Iterable
+  (HashMap K V)
+  (iter
+    [(m (HashMap K V))]
+    (-> (MapIter K V))
+    (let
+      [it (alloc-stack (MapIter K V))]
+      (store! (field it m) m)
+      (store! (field it pos) 0)
+      (load it))))
+
+(impl
+  [K V]
+  Iterator
+  (MapIter K V)
+  (next
+    [(it (mut (MapIter K V)))]
+    (-> (Option K))
+    (let
+      [cap (hm-cap (load (field it m)))]
+      (loop
+        (let
+          [p (load (field it pos))]
+          (if
+            (icmp-ge p cap)
+            (break (None))
+            (let
+              [e (index (load (field (field it m) slots)) p)]
+              (store! (field it pos) (iadd p 1))
+              (if (icmp-eq (load (field e state)) 1) (break (Some (load (field e key)))) 0))))))))
 

@@ -65,13 +65,13 @@ declare ptr @memmove(ptr, ptr, i64)
 
 declare ptr @memset(ptr, i64, i64)
 
-declare i64 @read(i64, ptr, i64)
+declare i64 @read(i32, ptr, i64)
 
 declare ptr @realloc(ptr, i64)
 
 declare i64 @strlen(ptr)
 
-declare i64 @write(i64, ptr, i64)
+declare i64 @write(i32, ptr, i64)
 
 define internal double @"coil.core.Add$f64$+"(double %a, double %b) {
 entry:
@@ -1959,8 +1959,8 @@ entry:
   %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
   %sum.tmp1 = alloca %io.IoError, align 8
   %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
-  %ptrtoint = ptrtoint ptr %ctx to i64
-  %call = call i64 @read(i64 %ptrtoint, ptr %buf, i64 %len)
+  %ptrtoint = ptrtoint ptr %ctx to i32
+  %call = call i64 @read(i32 %ptrtoint, ptr %buf, i64 %len)
   %cmp = icmp slt i64 %call, 0
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
@@ -2005,8 +2005,8 @@ entry:
   %sum.tmp6 = alloca %coil.core.Result__i64__io.IoError, align 8
   %sum.tmp1 = alloca %io.IoError, align 8
   %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
-  %ptrtoint = ptrtoint ptr %ctx to i64
-  %call = call i64 @write(i64 %ptrtoint, ptr %buf, i64 %len)
+  %ptrtoint = ptrtoint ptr %ctx to i32
+  %call = call i64 @write(i32 %ptrtoint, ptr %buf, i64 %len)
   %cmp = icmp slt i64 %call, 0
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else

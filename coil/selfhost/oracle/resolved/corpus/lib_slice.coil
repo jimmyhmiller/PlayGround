@@ -1,4 +1,4 @@
-(extern write :cc c [:i64 (ptr i8) isize] (-> isize))
+(extern write :cc c [i32 (ptr i8) isize] (-> isize))
 
 (defn
   slice-oob-fail!

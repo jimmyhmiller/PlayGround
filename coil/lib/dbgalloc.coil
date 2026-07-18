@@ -23,7 +23,7 @@
 
 ; write(2) for the diagnostic. Kept module-private (only `debug-allocator` is exported)
 ; so it never collides with io.coil's `write` through a `:use *` re-export.
-(extern write :cc c [:i64 (ptr i8) isize] (-> isize))   ; ssize_t write(int fd, const void*, size_t)
+(extern write :cc c [i32 (ptr i8) isize] (-> isize))   ; ssize_t write(int fd, const void*, size_t)
 
 ; A live block's header magic (0xDEADBEEF) and a freed block's (0xDEADDEAD). Chosen to be
 ; wildly improbable as real leading payload words, and to make a freed block obvious.

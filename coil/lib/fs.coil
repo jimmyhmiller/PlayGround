@@ -25,8 +25,8 @@
 ; the Apple ABI variadic args pass on the stack, and a fixed-arity declaration would
 ; put `mode` in a register that open never reads — creating files with a garbage mode
 ; (then EACCES on the next open). The `...` makes the call pass it correctly.
-(extern open  :cc c [(ptr i8) :i64 ...] (-> :i64))    ; int open(path, flags, mode)
-(extern close :cc c [:i64]              (-> :i64))    ; int close(fd)
+(extern open  :cc c [(ptr i8) i32 ...] (-> i32))    ; int open(path, int flags, mode)
+(extern close :cc c [i32]              (-> i32))    ; int close(int fd)
 
 ; open() flags — the darwin/macOS values (the build+gate target). Combine with `|`.
 (const O_RDONLY 0)
@@ -50,11 +50,11 @@
 ; Open `path` (a C string) with `flags` (O_* above) and `mode` (used only when the
 ; open creates the file). `(Err (Errno …))` carries the negative return on failure.
 (defn file-open [(path (ptr i8)) (flags :i64) (mode :i64)] (-> (Result File IoError))
-  (let [fd (open path flags mode)]
+  (let [fd (cast :i64 (open path (cast i32 flags) mode))]
     (if (icmp-lt fd 0) (Err (Errno fd)) (Ok (mk-file fd)))))
 
 (defn file-close [(f (ptr File))] (-> (Result :i64 IoError))
-  (let [r (close (file-fd f))]
+  (let [r (cast :i64 (close (cast i32 (file-fd f))))]
     (if (icmp-lt r 0) (Err (Errno r)) (Ok r))))
 
 ; ---- streaming: a File as an io Reader / Writer ----------------------------
@@ -74,10 +74,10 @@
   (let [cp (str->cstr a path)]
     (if (icmp-eq (cast :i64 cp) 0)
         (Err (Errno 0))                                 ; OOM building the C path
-        (let [fd (open cp O_RDONLY 0)]
+        (let [fd (open cp (cast i32 O_RDONLY) 0)]
           (if (icmp-lt fd 0)
               (do (raw-free a (cast (ptr i8) cp) (iadd (slice-len path) 1) 1)
-                  (Err (Errno fd)))
+                  (Err (Errno (cast :i64 fd))))
               (let [(mut buf) (al-new [u8] a)
                     tmp       (alloc-stack (array u8 4096))
                     res
@@ -105,10 +105,10 @@
   (let [cp (str->cstr a path)]
     (if (icmp-eq (cast :i64 cp) 0)
         (Err (Errno 0))
-        (let [fd (open cp (| O_WRONLY (| O_CREAT O_TRUNC)) FILE_MODE_DEFAULT)
+        (let [fd (open cp (cast i32 (| O_WRONLY (| O_CREAT O_TRUNC))) FILE_MODE_DEFAULT)
               res (if (icmp-lt fd 0)
-                      (Err [:i64 IoError] (Errno fd))
-                      (write-all (fd-writer fd)
+                      (Err [:i64 IoError] (Errno (cast :i64 fd)))
+                      (write-all (fd-writer (cast :i64 fd))
                                  (cast (ptr i8) (slice-data data)) (slice-len data)))]
           (if (icmp-ge fd 0) (close fd) 0)
           (raw-free a (cast (ptr i8) cp) (iadd (slice-len path) 1) 1)

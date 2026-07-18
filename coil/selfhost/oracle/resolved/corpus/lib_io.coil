@@ -1,6 +1,6 @@
-(extern write :cc c [:i64 (ptr i8) isize] (-> isize))
+(extern write :cc c [i32 (ptr i8) isize] (-> isize))
 
-(extern read :cc c [:i64 (ptr i8) isize] (-> isize))
+(extern read :cc c [i32 (ptr i8) isize] (-> isize))
 
 (extern strlen :cc c [(ptr i8)] (-> isize))
 
@@ -70,7 +70,7 @@
   [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)]
   (-> (Result :i64 IoError))
   (let
-    [n (cast :i64 (write (cast :i64 ctx) buf (cast isize len)))]
+    [n (cast :i64 (write (cast i32 ctx) buf (cast isize len)))]
     (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
 
 (defn
@@ -203,7 +203,7 @@
   [(ctx (ptr i8)) (buf (ptr i8)) (len :i64)]
   (-> (Result :i64 IoError))
   (let
-    [n (cast :i64 (read (cast :i64 ctx) buf (cast isize len)))]
+    [n (cast :i64 (read (cast i32 ctx) buf (cast isize len)))]
     (if (icmp-lt n 0) (Err (Errno n)) (Ok n))))
 
 (defn

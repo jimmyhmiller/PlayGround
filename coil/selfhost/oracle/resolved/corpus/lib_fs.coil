@@ -1,6 +1,6 @@
-(extern open :cc c [(ptr i8) :i64 ...] (-> :i64))
+(extern open :cc c [(ptr i8) i32 ...] (-> i32))
 
-(extern close :cc c [:i64] (-> :i64))
+(extern close :cc c [i32] (-> i32))
 
 (const O_RDONLY 0)
 
@@ -32,13 +32,17 @@
   file-open
   [(path (ptr i8)) (flags :i64) (mode :i64)]
   (-> (Result File IoError))
-  (let [fd (open path flags mode)] (if (icmp-lt fd 0) (Err (Errno fd)) (Ok (mk-file fd)))))
+  (let
+    [fd (cast :i64 (open path (cast i32 flags) mode))]
+    (if (icmp-lt fd 0) (Err (Errno fd)) (Ok (mk-file fd)))))
 
 (defn
   file-close
   [(f (ptr File))]
   (-> (Result :i64 IoError))
-  (let [r (close (file-fd f))] (if (icmp-lt r 0) (Err (Errno r)) (Ok r))))
+  (let
+    [r (cast :i64 (close (cast i32 (file-fd f))))]
+    (if (icmp-lt r 0) (Err (Errno r)) (Ok r))))
 
 (defn file-reader [(f (ptr File))] (-> (ptr Reader)) (fd-reader (file-fd f)))
 
@@ -54,10 +58,12 @@
       (icmp-eq (cast :i64 cp) 0)
       (Err (Errno 0))
       (let
-        [fd (open cp O_RDONLY 0)]
+        [fd (open cp (cast i32 O_RDONLY) 0)]
         (if
           (icmp-lt fd 0)
-          (do (raw-free a (cast (ptr i8) cp) (iadd (slice-len path) 1) 1) (Err (Errno fd)))
+          (do
+            (raw-free a (cast (ptr i8) cp) (iadd (slice-len path) 1) 1)
+            (Err (Errno (cast :i64 fd))))
           (let
             [(mut buf)
               (al-new [u8] a)
@@ -110,12 +116,15 @@
       (Err (Errno 0))
       (let
         [fd
-          (open cp (| O_WRONLY (| O_CREAT O_TRUNC)) FILE_MODE_DEFAULT)
+          (open cp (cast i32 (| O_WRONLY (| O_CREAT O_TRUNC))) FILE_MODE_DEFAULT)
           res
           (if
             (icmp-lt fd 0)
-            (Err [:i64 IoError] (Errno fd))
-            (write-all (fd-writer fd) (cast (ptr i8) (slice-data data)) (slice-len data)))]
+            (Err [:i64 IoError] (Errno (cast :i64 fd)))
+            (write-all
+              (fd-writer (cast :i64 fd))
+              (cast (ptr i8) (slice-data data))
+              (slice-len data)))]
         (if (icmp-ge fd 0) (close fd) 0)
         (raw-free a (cast (ptr i8) cp) (iadd (slice-len path) 1) 1)
         res))))

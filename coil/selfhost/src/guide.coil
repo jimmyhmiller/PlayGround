@@ -478,8 +478,8 @@ instead (no generics/FFI/raw memory; it exists as the parity oracle).
 ## I/O & FFI
 
     (extern printf   :cc c [(ptr i8) ...] (-> i32))     ; ... = variadic
-    (extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
-    (extern write    :cc c [i64 (ptr i8) i64] (-> i64)) ; fd 1=stdout 2=stderr
+    (extern snprintf :cc c [(ptr i8) usize (ptr i8) ...] (-> i32))  ; usize/isize = target word (i32 wasm32 / i64 LP64)
+    (extern write    :cc c [i32 (ptr i8) isize] (-> isize)) ; int fd (1=stdout 2=stderr), size_t/ssize_t
     (extern exit     :cc c [i32] (-> void))
 
 `(printf c\"%d\\n\" 42)`. Floats cross the C ABI correctly; structs pass/return by

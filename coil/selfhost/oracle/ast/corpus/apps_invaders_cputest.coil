@@ -1,0 +1,48 @@
+(extern putchar :cc c [:i32] (-> :i32))
+
+(defn
+  bdos
+  [(s (ptr Cpu))]
+  (-> i64)
+  (let
+    [c (reg s 1)]
+    (if
+      (= c 9)
+      (let
+        [p (alloc-stack i64)]
+        (do
+          (store! p (| (<< (reg s 2) 8) (reg s 3)))
+          (loop
+            (if
+              (!= (rb s (load p)) 36)
+              (do (putchar (cast :i32 (rb s (load p)))) (store! p (+ (load p) 1)))
+              (break)))
+          0))
+      (if (= c 2) (do (putchar (cast :i32 (reg s 3))) 0) 0))))
+
+(defn
+  run
+  [(s (ptr Cpu))]
+  (-> i64)
+  (do
+    (loop
+      (if
+        (!= (rpc s) 0)
+        (do (if (= (rpc s) 5) (do (bdos s) (spc s (pop16 s))) (emulate s)))
+        (break)))
+    (putchar (cast :i32 10))
+    0))
+
+(defn
+  main
+  [(argc :i32) (argv (ptr (ptr i8)))]
+  (-> :i64)
+  (let
+    [s (alloc-stack Cpu)]
+    (if
+      (< (cast :i64 argc) 2)
+      1
+      (do
+        (init s)
+        (if (< (load-com s (load (index argv 1)) 256) 0) 1 (do (spc s 256) (run s) 0))))))
+

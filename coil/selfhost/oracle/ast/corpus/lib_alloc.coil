@@ -1,6 +1,6 @@
-(extern malloc :cc c [:i64] (-> (ptr i8)))
+(extern malloc :cc c [isize] (-> (ptr i8)))
 
-(extern realloc :cc c [(ptr i8) :i64] (-> (ptr i8)))
+(extern realloc :cc c [(ptr i8) isize] (-> (ptr i8)))
 
 (extern abort :cc c [] (-> :i64))
 
@@ -81,13 +81,13 @@
   ma-alloc
   [(ctx (ptr i8)) (size :i64) (align :i64)]
   (-> (Option (ptr i8)))
-  (let [p (malloc size)] (if (icmp-eq (cast :i64 p) 0) (None) (Some p))))
+  (let [p (malloc (cast isize size))] (if (icmp-eq (cast :i64 p) 0) (None) (Some p))))
 
 (defn
   ma-resize
   [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
   (-> (Option (ptr i8)))
-  (let [q (realloc p new)] (if (icmp-eq (cast :i64 q) 0) (None) (Some q))))
+  (let [q (realloc p (cast isize new))] (if (icmp-eq (cast :i64 q) 0) (None) (Some q))))
 
 (defn ma-free [(ctx (ptr i8)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64) (free p))
 
@@ -144,8 +144,8 @@
   [(cap :i64)]
   (-> (ptr Allocator))
   (arena-over-buffer
-    (cast (ptr Arena) (malloc (sizeof Arena)))
-    (cast (ptr Allocator) (malloc (sizeof Allocator)))
-    (malloc cap)
+    (cast (ptr Arena) (malloc (cast isize (sizeof Arena))))
+    (cast (ptr Allocator) (malloc (cast isize (sizeof Allocator))))
+    (malloc (cast isize cap))
     cap))
 

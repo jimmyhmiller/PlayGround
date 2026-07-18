@@ -35,7 +35,7 @@
 
 ; file-writing externs (creat is NOT variadic, unlike open-with-O_CREAT)
 (extern cga64.creat [(ptr i8) i64] (-> i64))
-(extern cga64.write [i64 (ptr i8) i64] (-> i64))
+(extern cga64.write [i32 (ptr i8) i64] (-> i64))   ; C write's fd is int (i32); matches io/cimport write
 (extern cga64.close [i32] (-> i32))   ; C `close(int)` returns int, not long — matches ffi.close/cimport.close (return is discarded)
 (extern cga64.exit  [i32] (-> i64))
 
@@ -2981,7 +2981,7 @@
       (if (icmp-lt fd 0) (cga-fail "cannot create object file") 0)
       (let [total (al-len [u8] (load bytes)) (mut off) 0]
         (loop (if (icmp-ge (load off) total) (break)
-          (do (let [wrote (cga64.write fd
+          (do (let [wrote (cga64.write (cast i32 fd)
                             (cast (ptr i8) (index (slice-data (al-slice [u8] (load bytes))) (load off)))
                             (isub total (load off)))]
                 (if (icmp-le wrote 0) (cga-fail "object write failed") 0)

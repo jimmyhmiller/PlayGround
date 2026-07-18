@@ -1,6 +1,6 @@
-(extern read :cc c [:i64 (ptr i8) :i64] (-> :i64))
+(extern read :cc c [i32 (ptr i8) isize] (-> isize))
 
-(extern write :cc c [:i64 (ptr i8) :i64] (-> :i64))
+(extern write :cc c [i32 (ptr i8) isize] (-> isize))
 
 (extern usleep :cc c [:i64] (-> :i32))
 

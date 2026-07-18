@@ -1,3 +1,84 @@
+(extern write :cc c [i32 (ptr i8) isize] (-> isize))
+
+(defn
+  slice-oob-fail!
+  [T]
+  [(s (slice T)) (msg (slice u8))]
+  (-> i64)
+  (write 2 (cast (ptr i8) (slice-data msg)) (cast isize (slice-len msg)))
+  (store! (cast (ptr i64) 0) 0)
+  0)
+
+(defn
+  dbg-slice-get
+  [(s Code) (i Code)]
+  (-> Code)
+  (if
+    (debug-checks?)
+    (quasiquote
+      (do
+        (if
+          (or (icmp-lt (unquote i) 0) (icmp-ge (unquote i) (slice-len (unquote s))))
+          (do
+            (slice-oob-fail!
+              (unquote s)
+              "coil: slice-get index out of bounds (--debug-checks)
+")
+            0)
+          0)
+        (load (index (slice-data (unquote s)) (unquote i)))))
+    (quasiquote (load (index (slice-data (unquote s)) (unquote i))))))
+
+(defn
+  dbg-slice-set
+  [(s Code) (i Code) (v Code)]
+  (-> Code)
+  (if
+    (debug-checks?)
+    (quasiquote
+      (do
+        (if
+          (or (icmp-lt (unquote i) 0) (icmp-ge (unquote i) (slice-len (unquote s))))
+          (do
+            (slice-oob-fail!
+              (unquote s)
+              "coil: slice-set! index out of bounds (--debug-checks)
+")
+            0)
+          0)
+        (store! (index (slice-data (unquote s)) (unquote i)) (unquote v))
+        0))
+    (quasiquote (do (store! (index (slice-data (unquote s)) (unquote i)) (unquote v)) 0))))
+
+(defn
+  dbg-subslice
+  [(s Code) (lo Code) (hi Code)]
+  (-> Code)
+  (if
+    (debug-checks?)
+    (quasiquote
+      (do
+        (if
+          (or
+            (icmp-lt (unquote lo) 0)
+            (or
+              (icmp-gt (unquote hi) (slice-len (unquote s)))
+              (icmp-gt (unquote lo) (unquote hi))))
+          (do
+            (slice-oob-fail!
+              (unquote s)
+              "coil: subslice out of range or lo>hi (--debug-checks)
+")
+            0)
+          0)
+        (slice-new
+          (index (slice-data (unquote s)) (unquote lo))
+          (isub (unquote hi) (unquote lo)))))
+    (quasiquote
+      (slice-new
+        (index (slice-data (unquote s)) (unquote lo))
+        (isub (unquote hi) (unquote lo))))))
+
 (defn
   slice-new
   [T]
@@ -28,22 +109,21 @@ ret $ret %d"))
 
 (defn slice-empty? [T] [(s (slice T))] (-> bool) (icmp-eq (slice-len s) 0))
 
-(defn slice-get [T] [(s (slice T)) (i i64)] (-> T) (load (index (slice-data s) i)))
+(defn slice-get [T] [(s (slice T)) (i i64)] (-> T) (load (index (slice.slice-data s) i)))
 
 (defn
   slice-set!
   [T]
   [(s (slice T)) (i i64) (v T)]
   (-> i64)
-  (store! (index (slice-data s) i) v)
-  0)
+  (do (store! (index (slice.slice-data s) i) v) 0))
 
 (defn
   subslice
   [T]
   [(s (slice T)) (lo i64) (hi i64)]
   (-> (slice T))
-  (slice-new (index (slice-data s) lo) (isub hi lo)))
+  (slice.slice-new (index (slice.slice-data s) lo) (isub hi lo)))
 
 (defn
   slice-of
@@ -58,14 +138,10 @@ ret $ret %d"))
   (if
     (not (icmp-eq (code-count binding) 2))
     (error "slice-for: binding must be [x slice]")
-    (let
-      [x (code-nth binding 0) s (code-nth binding 1) sv (gensym) i (gensym)]
-      (quasiquote
-        (let
-          [(unquote sv) (unquote s)]
-          (for
-            [(unquote i) 0 (slice-len (unquote sv))]
-            (let [(unquote x) (slice-get (unquote sv) (unquote i))] (unquote-splicing body))))))))
+    (quasiquote
+      (for-in
+        [(unquote (code-nth binding 0)) (iter (unquote (code-nth binding 1)))]
+        (unquote-splicing body)))))
 
 (defn
   sort
@@ -102,4 +178,33 @@ ret $ret %d"))
   Set
   (slice T)
   (set! [(s (mut (slice T))) (i i64) (v T)] (-> i64) (slice-set! (load s) i v)))
+
+(defstruct SliceIter [T] [(s (slice T)) (pos i64)])
+
+(impl
+  [T]
+  Iterable
+  (slice T)
+  (iter
+    [(s (slice T))]
+    (-> (SliceIter T))
+    (let
+      [it (alloc-stack (SliceIter T))]
+      (store! (field it s) s)
+      (store! (field it pos) 0)
+      (load it))))
+
+(impl
+  [T]
+  Iterator
+  (SliceIter T)
+  (next
+    [(it (mut (SliceIter T)))]
+    (-> (Option T))
+    (let
+      [p (load (field it pos))]
+      (if
+        (icmp-lt p (slice-len (load (field it s))))
+        (do (store! (field it pos) (iadd p 1)) (Some (slice-get (load (field it s)) p)))
+        (None)))))
 

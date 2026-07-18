@@ -36,9 +36,9 @@
 ; duplicate declarations coincide harmlessly when imported into the compiler. -----
 (extern system :cc c [(ptr i8)] (-> i32))
 (extern open   :cc c [(ptr i8) i32] (-> i32))
-(extern read   :cc c [i64 (ptr i8) i64] (-> i64))
+(extern read   :cc c [i32 (ptr i8) isize] (-> isize))
 (extern close  :cc c [i32] (-> i32))
-(extern write  :cc c [i64 (ptr i8) i64] (-> i64))
+(extern write  :cc c [i32 (ptr i8) isize] (-> isize))
 (extern getpid :cc c [] (-> i32))
 (extern fopen  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
 (extern fwrite :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
@@ -64,7 +64,7 @@
     (if (icmp-lt fd 0) (al-slice [u8] (al-new [u8] a))
       (let [buf (unwrap-ptr [i8] (raw-alloc a 65536 1)) (mut bytes) (al-new [u8] a)]
         (loop
-          (let [n (read (cast i64 fd) buf 65536)]
+          (let [n (read (cast i32 fd) buf 65536)]
             (if (icmp-le n 0) (break)
               (let [(mut i) 0]
                 (loop (if (icmp-ge (load i) n) (break)

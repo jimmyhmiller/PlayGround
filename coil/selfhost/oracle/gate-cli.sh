@@ -769,10 +769,10 @@ echo "== C size types are target-width: the prelude's size_t/ssize_t are i32 on 
 printf '(defn main [] (-> i64) (println "hi") 0)\n' > "$T/sizet.coil"
 w_native=$("$COIL" emit-ir "$T/sizet.coil" 2>/dev/null | grep -oE 'declare i(64|32) @write\([^)]*\)' | head -1)
 w_wasm=$("$COIL" emit-ir "$T/sizet.coil" --target wasm32-unknown-unknown 2>/dev/null | grep -oE 'declare i(64|32) @write\([^)]*\)' | head -1)
-echo "$w_native" | grep -q 'i64 @write(i64, ptr, i64)' \
-  && ok "write's ssize_t count/return are i64 on native"    || bad "native write width" "got: $w_native"
-echo "$w_wasm"   | grep -q 'i32 @write(i64, ptr, i32)' \
-  && ok "write's ssize_t count/return narrow to i32 on wasm32" || bad "wasm32 write width (usize/isize)" "got: $w_wasm (was i64 pre-usize)"
+echo "$w_native" | grep -q 'i64 @write(i32, ptr, i64)' \
+  && ok "write is (int fd=i32, ptr, size_t=i64) -> ssize_t=i64 on native"    || bad "native write width" "got: $w_native"
+echo "$w_wasm"   | grep -q 'i32 @write(i32, ptr, i32)' \
+  && ok "write's fd stays i32 and size_t/ssize_t narrow to i32 on wasm32" || bad "wasm32 write width (fd/usize/isize)" "got: $w_wasm"
 
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"

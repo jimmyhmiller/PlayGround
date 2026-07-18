@@ -1,17 +1,17 @@
-(extern memcpy :cc c [(ptr i8) (ptr i8) :i64] (-> (ptr i8)))
+(extern memcpy :cc c [(ptr i8) (ptr i8) isize] (-> (ptr i8)))
 
-(extern memmove :cc c [(ptr i8) (ptr i8) :i64] (-> (ptr i8)))
+(extern memmove :cc c [(ptr i8) (ptr i8) isize] (-> (ptr i8)))
 
-(extern memset :cc c [(ptr i8) :i64 :i64] (-> (ptr i8)))
+(extern memset :cc c [(ptr i8) :i64 isize] (-> (ptr i8)))
 
-(extern memcmp :cc c [(ptr i8) (ptr i8) :i64] (-> :i64))
+(extern memcmp :cc c [(ptr i8) (ptr i8) isize] (-> :i64))
 
 (defn
   mem-copy
   [T]
   [(dst (ptr T)) (src (ptr T)) (n :i64)]
   (-> :i64)
-  (memcpy (cast (ptr i8) dst) (cast (ptr i8) src) (imul n (sizeof T)))
+  (memcpy (cast (ptr i8) dst) (cast (ptr i8) src) (cast isize (imul n (sizeof T))))
   0)
 
 (defn
@@ -19,7 +19,7 @@
   [T]
   [(dst (ptr T)) (src (ptr T)) (n :i64)]
   (-> :i64)
-  (memmove (cast (ptr i8) dst) (cast (ptr i8) src) (imul n (sizeof T)))
+  (memmove (cast (ptr i8) dst) (cast (ptr i8) src) (cast isize (imul n (sizeof T))))
   0)
 
 (defn
@@ -27,7 +27,7 @@
   [T]
   [(dst (ptr T)) (n :i64)]
   (-> :i64)
-  (memset (cast (ptr i8) dst) 0 (imul n (sizeof T)))
+  (memset (cast (ptr i8) dst) 0 (cast isize (imul n (sizeof T))))
   0)
 
 (defn
@@ -49,5 +49,5 @@
   [T]
   [(a (ptr T)) (b (ptr T)) (n :i64)]
   (-> bool)
-  (icmp-eq (memcmp (cast (ptr i8) a) (cast (ptr i8) b) (imul n (sizeof T))) 0))
+  (icmp-eq (memcmp (cast (ptr i8) a) (cast (ptr i8) b) (cast isize (imul n (sizeof T)))) 0))
 
