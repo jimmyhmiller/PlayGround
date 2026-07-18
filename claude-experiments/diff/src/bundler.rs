@@ -779,14 +779,20 @@ impl Bundler {
         diagnostics: &mut Vec<String>,
     ) -> Result<ModuleState, String> {
         let id = module_id(path);
-        // A query-bearing id (`app.css?url`) is a loader concern, not a raw file
-        // read. Dispatch it before touching the filesystem as a JavaScript module.
-        let resource = ResourceId::parse(&id);
-        if resource.query.is_some() {
-            return load_query_module(&id, &resource);
-        }
-        if is_css_path(path) {
-            return load_css_module(&id, path);
+        // A loader (query, stylesheet, or asset) may claim this id before it is
+        // ever read as JavaScript.
+        if let Some(special) = load_special_module(&id, path) {
+            let special = special?;
+            return Ok(ModuleState {
+                hash: special.hash,
+                dependencies: Vec::new(),
+                pruned_imports: HashSet::new(),
+                source: id.clone(),
+                flat_module: special.flat_module,
+                code: special.code,
+                assets: special.assets,
+                css: special.css,
+            });
         }
         let read_started = frontend_profile::start();
         let source = fs::read_to_string(path)
@@ -1519,36 +1525,20 @@ fn load_uncached(
     path: &Path,
 ) -> Result<LoadedModule, String> {
     let id = path.to_string_lossy();
-    // A query-bearing id (`app.css?url`) is a loader concern: split it off before
-    // touching the filesystem and synthesize a JavaScript module for it.
-    let resource = ResourceId::parse(&id);
-    if resource.query.is_some() {
-        let synthetic = synthesize_query_module(&resource)?;
+    // A loader (query, stylesheet, or asset) may claim this id before it is ever
+    // read as JavaScript.
+    if let Some(special) = load_special_module(&id, path) {
+        let special = special?;
         return Ok(LoadedModule {
-            hash: content_hash(synthetic.code.as_bytes()),
+            hash: special.hash,
             dependencies: Vec::new(),
             pruned_imports: HashSet::new(),
             source: Arc::from(id.as_ref()),
-            flat_module: synthetic.flat_module,
-            code: synthetic.code,
+            flat_module: special.flat_module,
+            code: special.code,
             diagnostics: Vec::new(),
-            assets: vec![synthetic.asset],
-            css: None,
-        });
-    }
-    if is_css_path(path) {
-        let text = fs::read_to_string(path)
-            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-        return Ok(LoadedModule {
-            hash: content_hash(text.as_bytes()),
-            dependencies: Vec::new(),
-            pruned_imports: HashSet::new(),
-            source: Arc::from(id.as_ref()),
-            flat_module: None,
-            code: String::new(),
-            diagnostics: Vec::new(),
-            assets: Vec::new(),
-            css: Some(text),
+            assets: special.assets,
+            css: special.css,
         });
     }
     let read_started = frontend_profile::start();
@@ -1583,54 +1573,98 @@ fn load_uncached(
     })
 }
 
-/// A synthetic JavaScript module produced for a query-bearing id (a loader like
-/// `?url`), plus the static asset it references.
-struct SyntheticModule {
+/// A non-JavaScript module produced by a loader: a query loader (`?url`, `?raw`),
+/// a global stylesheet, or a default asset import. Callers wrap it into whichever
+/// record they build (`ModuleState` or `LoadedModule`).
+struct SpecialModule {
+    hash: u64,
     code: String,
     flat_module: Option<FlatModule>,
-    asset: AssetEmit,
+    assets: Vec<AssetEmit>,
+    css: Option<String>,
 }
 
-/// Builds the synthetic module for a query-bearing id. Recognized-but-unimplemented
-/// loaders (`?raw`, `?tsr-split`) and unrecognized queries produce a specific,
-/// actionable error rather than a misleading filesystem read failure.
-fn synthesize_query_module(resource: &ResourceId) -> Result<SyntheticModule, String> {
+/// Loads a non-JavaScript module when a loader applies to `path`/`id`: a query
+/// loader (`?url`, `?raw`), a global stylesheet (`.css`), or a default asset
+/// import (image/font/SVG/...). Returns `None` for an ordinary JS/TS module,
+/// which the normal read-and-transform path then handles.
+fn load_special_module(id: &str, path: &Path) -> Option<Result<SpecialModule, String>> {
+    let resource = ResourceId::parse(id);
+    if resource.query.is_some() {
+        return Some(synthesize_query_module(&resource));
+    }
+    if is_css_path(path) {
+        return Some(load_stylesheet(path));
+    }
+    if is_asset_path(path) {
+        return Some(synthesize_asset_url(path.to_path_buf()));
+    }
+    None
+}
+
+/// Builds the module for a query-bearing id. `?url` emits a content-hashed asset
+/// and exports its URL; `?raw` inlines the file contents as a string.
+/// Recognized-but-unimplemented loaders (`?tsr-split`) and unrecognized queries
+/// produce a specific, actionable error rather than a misleading filesystem read
+/// failure.
+fn synthesize_query_module(resource: &ResourceId) -> Result<SpecialModule, String> {
     match resource.loader_kind() {
-        Some(LoaderKind::Url) => {
-            let source_path = PathBuf::from(&resource.path);
-            let bytes = fs::read(&source_path)
-                .map_err(|error| format!("cannot read asset {}: {error}", source_path.display()))?;
-            let public_name = asset_public_name(&source_path, content_hash(&bytes));
-            // The `?url` module is a plain ES module exporting the asset's public
-            // URL. Running it through the real transformer yields flat-linker code
-            // and export metadata identical to any hand-written module.
-            let synthetic = format!("export default {};\n", quote(&format!("/assets/{public_name}")));
-            let transformed = transform_module(Path::new("diffpack-url-asset.js"), &synthetic);
-            Ok(SyntheticModule {
-                code: transformed.code,
-                flat_module: transformed.flat_module,
-                asset: AssetEmit {
-                    source: source_path,
-                    public_name,
-                },
-            })
-        }
-        Some(_) | None => Err(resource.unimplemented_loader_error()),
+        Some(LoaderKind::Url) => synthesize_asset_url(PathBuf::from(&resource.path)),
+        Some(LoaderKind::Raw) => synthesize_raw(Path::new(&resource.path)),
+        Some(LoaderKind::TsrSplit) | None => Err(resource.unimplemented_loader_error()),
     }
 }
 
-/// Method-side wrapper: the synthetic module as a `ModuleState` keyed by `id`.
-fn load_query_module(id: &SharedModuleId, resource: &ResourceId) -> Result<ModuleState, String> {
-    let synthetic = synthesize_query_module(resource)?;
-    Ok(ModuleState {
-        hash: content_hash(synthetic.code.as_bytes()),
-        dependencies: Vec::new(),
-        pruned_imports: HashSet::new(),
-        source: id.clone(),
-        flat_module: synthetic.flat_module,
-        code: synthetic.code,
-        assets: vec![synthetic.asset],
+/// A content-hashed asset module: copies the file into `assets/` and exports its
+/// public URL as the default export. Used for both `?url` and default asset
+/// imports (images, fonts, SVG, ...).
+fn synthesize_asset_url(source_path: PathBuf) -> Result<SpecialModule, String> {
+    let bytes = fs::read(&source_path)
+        .map_err(|error| format!("cannot read asset {}: {error}", source_path.display()))?;
+    let public_name = asset_public_name(&source_path, content_hash(&bytes));
+    // A plain ES module exporting the asset URL, run through the real transformer
+    // so it yields flat-linker code and export metadata like any hand-written
+    // module.
+    let synthetic = format!("export default {};\n", quote(&format!("/assets/{public_name}")));
+    let transformed = transform_module(Path::new("diffpack-url-asset.js"), &synthetic);
+    Ok(SpecialModule {
+        hash: content_hash(transformed.code.as_bytes()),
+        code: transformed.code,
+        flat_module: transformed.flat_module,
+        assets: vec![AssetEmit {
+            source: source_path,
+            public_name,
+        }],
         css: None,
+    })
+}
+
+/// A `?raw` module: the file's contents inlined as the default string export.
+fn synthesize_raw(source_path: &Path) -> Result<SpecialModule, String> {
+    let text = fs::read_to_string(source_path)
+        .map_err(|error| format!("cannot read {}: {error}", source_path.display()))?;
+    let synthetic = format!("export default {};\n", quote(&text));
+    let transformed = transform_module(Path::new("diffpack-raw-asset.js"), &synthetic);
+    Ok(SpecialModule {
+        hash: content_hash(transformed.code.as_bytes()),
+        code: transformed.code,
+        flat_module: transformed.flat_module,
+        assets: Vec::new(),
+        css: None,
+    })
+}
+
+/// A global stylesheet import: an empty JavaScript module (the import has no
+/// bindings) whose text is extracted into the output stylesheet.
+fn load_stylesheet(path: &Path) -> Result<SpecialModule, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    Ok(SpecialModule {
+        hash: content_hash(text.as_bytes()),
+        code: String::new(),
+        flat_module: None,
+        assets: Vec::new(),
+        css: Some(text),
     })
 }
 
@@ -1639,22 +1673,17 @@ fn is_css_path(path: &Path) -> bool {
     matches!(path.extension().and_then(|value| value.to_str()), Some("css"))
 }
 
-/// A global CSS side-effect import as a `ModuleState`: an empty JavaScript module
-/// (the import has no bindings) that contributes its text to the extracted
-/// output stylesheet.
-fn load_css_module(id: &SharedModuleId, path: &Path) -> Result<ModuleState, String> {
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    Ok(ModuleState {
-        hash: content_hash(text.as_bytes()),
-        dependencies: Vec::new(),
-        pruned_imports: HashSet::new(),
-        source: id.clone(),
-        flat_module: None,
-        code: String::new(),
-        assets: Vec::new(),
-        css: Some(text),
-    })
+/// Whether a resolved path is a static asset imported for its URL by default
+/// (images, fonts, SVG, media, and similar opaque files).
+fn is_asset_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some(
+            "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "avif" | "ico" | "bmp" | "woff"
+                | "woff2" | "ttf" | "otf" | "eot" | "mp4" | "webm" | "mp3" | "wav" | "ogg"
+                | "pdf" | "wasm"
+        )
+    )
 }
 
 /// The content-hashed public filename for an asset, e.g. `app-1a2b3c4d5e6f7080.css`.
@@ -1971,12 +2000,73 @@ mod tests {
     }
 
     #[test]
-    fn an_unimplemented_loader_query_reports_a_specific_error() {
+    fn raw_import_inlines_the_file_contents_as_a_string() {
         let directory = tempdir().unwrap();
-        fs::write(directory.path().join("data.txt"), "hello").unwrap();
+        fs::write(directory.path().join("note.txt"), "hello from raw").unwrap();
         fs::write(
             directory.path().join("entry.js"),
-            "import raw from './data.txt?raw';\nconsole.log(raw);\n",
+            "import raw from './note.txt?raw';\nconsole.log(raw);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+        if Command::new("node").arg("--version").output().is_ok() {
+            let executed = Command::new("node").arg(&output).output().unwrap();
+            assert!(
+                executed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&executed.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&executed.stdout),
+                "hello from raw\n"
+            );
+        }
+    }
+
+    #[test]
+    fn default_asset_import_emits_a_hashed_file_and_exports_its_url() {
+        let directory = tempdir().unwrap();
+        let svg = "<svg></svg>";
+        fs::write(directory.path().join("logo.svg"), svg).unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import logo from './logo.svg';\nconsole.log(logo);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        assert_eq!(reachable.len(), 2, "{reachable:?}");
+        bundler.emit(&reachable, &output).unwrap();
+
+        let bundle = fs::read_to_string(&output).unwrap();
+        let url = bundle
+            .lines()
+            .find_map(|line| line.find("/assets/logo-").map(|start| &line[start..]))
+            .and_then(|rest| rest.split('"').next())
+            .expect("bundle should reference the hashed asset url");
+        assert!(url.ends_with(".svg"), "{url}");
+        let asset_path = directory
+            .path()
+            .join("dist/assets")
+            .join(url.trim_start_matches("/assets/"));
+        assert_eq!(fs::read_to_string(&asset_path).unwrap(), svg);
+    }
+
+    #[test]
+    fn an_unimplemented_loader_query_reports_a_specific_error() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("thing.js"), "export const x = 1;").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import c from './thing.js?tsr-split=component';\nconsole.log(c);\n",
         )
         .unwrap();
         let entry = directory.path().join("entry.js");
@@ -1985,7 +2075,7 @@ mod tests {
             Err(error) => error,
         };
         assert!(
-            error.contains("loader `?raw` is not yet implemented"),
+            error.contains("loader `?tsr-split` is not yet implemented"),
             "{error}"
         );
         assert!(!error.contains("No such file or directory"), "{error}");

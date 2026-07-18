@@ -95,8 +95,15 @@ query-bearing id before touching disk:
   (`export default "/assets/..."`) run through the real transformer so it links
   like any other module. Asset copy happens in `Bundler::emit_assets`, deduped
   by public name.
-- `?raw`, `?tsr-split`, and unrecognized queries fail with a specific,
-  actionable error (never a misleading filesystem read failure).
+- `?raw` inlines the file's contents as a default string export.
+- A default asset import by extension (`import logo from "./logo.svg"` for
+  images/fonts/SVG/media) emits a content-hashed file and exports its URL, just
+  like `?url`.
+- `?tsr-split` and unrecognized queries fail with a specific, actionable error
+  (never a misleading filesystem read failure).
+
+All loaders route through one `load_special_module` dispatch (query loader,
+stylesheet, or asset) shared by the parallel and incremental load paths.
 
 Tests: `url_asset_import_emits_a_content_hashed_file_and_exports_its_public_url`
 (asserts the emitted asset bytes, the exported URL, and Node execution) and
