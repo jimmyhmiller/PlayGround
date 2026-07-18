@@ -591,17 +591,26 @@
 ; compiled, and only failed at the CALL site as "i64 does not implement NoSuchTrait" —
 ; which is nonsense, since no type could ever implement a trait that doesn't exist. Catch
 ; it here, at the definition, where it belongs.
+; THE single trait-name resolver for every bound position (defn/defstruct/defsum/impl
+; trait, and `:requires` supertraits). `resolve` is lenient — an unknown name passes
+; through bare — but a real trait (kind 2) always comes back as `module.Trait`, so a
+; result with no dot names a trait that exists nowhere. Every bound position delegates
+; here, so an unknown trait produces the identical located "unknown trait '…' in bound".
+(defn qualify-trait-name [(c (ptr Ctx)) (raw (slice u8))] (-> (Result (slice u8) Diag))
+  (let [a (load (field c a))]
+    (match (resolve c raw 2)
+      (Err [d] (Err [(slice u8) Diag] d))
+      (Ok [nn]
+        (if (has-dot nn)
+            (Ok [(slice u8) Diag] nn)
+          (Err [(slice u8) Diag] (derr (sconcat3 a "unknown trait '" raw "' in bound"))))))))
 (defn qualify-trait-names [(c (ptr Ctx)) (lst (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
-  (let [a (load (field c a)) n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+  (let [n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
       (do (let [raw (al-get [(slice u8)] (load lst) (load i))]
-            (match (resolve c raw 2)
+            (match (qualify-trait-name c raw)
               (Err [d] (do (store! err d) (store! failed true) (break)))
-              (Ok [nn]
-                (if (has-dot nn)
-                    (store! (al-elem [(slice u8)] lst (load i)) nn)
-                  (do (store! err (derr (sconcat3 a "unknown trait '" raw "' in bound")))
-                      (store! failed true) (break))))))
+              (Ok [nn] (store! (al-elem [(slice u8)] lst (load i)) nn))))
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 (defn qualify-bound-list [(c (ptr Ctx)) (bounds (ptr (ArrayList Bound)))] (-> (Result i64 Diag))
@@ -743,7 +752,11 @@
 (defn qualify-one-impl [(c (ptr Ctx)) (ip (ptr ImplDef)) (empty (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (let [a (load (field c a))]
     (try
-      (do (store! (field ip trait_name) (try! (resolve c (load (field ip trait_name)) 2)))
+      ; The trait being implemented is a bound position too — resolve it through the
+      ; ONE shared helper so an unknown trait errors identically to a defn/struct/sum
+      ; bound (was: lenient `resolve`, so an unknown impl trait slipped past here and was
+      ; caught late in the checker with a divergent "impl: unknown trait" message).
+      (do (store! (field ip trait_name) (try! (qualify-trait-name c (load (field ip trait_name)))))
           ; A blanket impl — `(impl [T] Show T)`, the implementing type IS a bare type
           ; param — was accepted and then never matched any receiver, so it was dead code
           ; that looked live: the user got no error at the impl and "does not implement" at

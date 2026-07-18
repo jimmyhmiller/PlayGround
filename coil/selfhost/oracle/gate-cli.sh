@@ -249,6 +249,16 @@ expect_rc 1 "defsum bound parses + enforced" "$COIL" build "$T/sumbound.coil" -o
 # and the valid instantiations still compile
 printf '(module m)\n(defstruct Box [(T Eq)] [(v T)])\n(defn main [] (-> i64) (let [b (alloc-stack (Box i64))] (store! (field b v) 7) 0))\n' > "$T/okbound.coil"
 expect_rc 0 "a satisfied bound ((Box i64)) still compiles" "$COIL" build "$T/okbound.coil" -o "$T/x"
+# trait-names: EVERY bound position (defn/defstruct/defsum/impl) resolves the trait name
+# through ONE shared helper, so an unknown trait errors IDENTICALLY. The impl trait was the
+# odd one out — resolved leniently, then caught late in the checker as "impl: unknown trait"
+# (no "in bound"). The seed emits that divergent message → FAILS the shared-text assertion.
+printf '(module m)\n(deftrait A [Self] (go [(x Self)] (-> i64)))\n(impl NoSuchTrait i64 (go [(x i64)] (-> i64) 1))\n(defn main [] (-> i64) 0)\n' > "$T/impltrait.coil"
+expect_rc 1 "impl over an unknown trait is rejected" "$COIL" build "$T/impltrait.coil" -o "$T/x"
+expect_out "unknown trait 'NoSuchTrait' in bound" "impl trait resolves through the shared bound helper (was: 'impl: unknown trait')" "$COIL" build "$T/impltrait.coil" -o "$T/x"
+# and impling a name that IS declared but ISN'T a trait (a plain fn) errors the SAME way
+printf '(module m)\n(defn Helper [] (-> i64) 0)\n(impl Helper i64 (go [(x i64)] (-> i64) 1))\n(defn main [] (-> i64) 0)\n' > "$T/implnonfn.coil"
+expect_out "unknown trait 'Helper' in bound" "impl over a non-trait name errors identically" "$COIL" build "$T/implnonfn.coil" -o "$T/x"
 
 echo "== store! yields unit (std-12): effect-only stores type-check without a wrapping do =="
 # was: `store!` took the STORED VALUE's type, so `(if c (store! p ptr) 0)` was a type error

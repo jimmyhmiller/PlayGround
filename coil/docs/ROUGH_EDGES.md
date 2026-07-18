@@ -203,8 +203,17 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
       exist**. `defsum` rejects the same syntax; `defn` honours it. One spelling, three meanings.
 - [x] **gen-12** A bound naming a nonexistent trait is diagnosed at the *call site* as
       "i64 does not implement NoSuchTrait" — no type could ever satisfy it.
-- [ ] Resolve trait names in **every** bound position (defn/defstruct/defsum/impl) via one shared
+- [x] Resolve trait names in **every** bound position (defn/defstruct/defsum/impl) via one shared
       helper. Per the repo's own "ONE definition per concept" rule: delegate, don't copy.
+      ✅ DONE. Extracted `qualify-trait-name` (singular) in resolve.coil as THE resolver for a
+      bound-position trait: `resolve … 2` then reject a dotless result as `unknown trait '…' in
+      bound`. `qualify-trait-names` (plural, used by defn/defstruct/defsum bounds and `:requires`)
+      now loops over it, and `qualify-one-impl` routes the impl's `trait_name` through it too —
+      previously the impl trait resolved leniently and an unknown one was caught late in the
+      checker (`setup-one-impl`) with a divergent, unspanned `impl: unknown trait '…'`. All four
+      positions (plus impling a declared non-trait) now emit the identical located error. Teeth in
+      `gate-cli.sh` (impl over an unknown trait / a non-trait name — both FAIL on the seed's old
+      message). Behaviour-only: gate-full stays byte-identical.
 
 ## Batch 7 — Silently wrong answers
 
