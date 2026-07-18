@@ -81,8 +81,9 @@ fn run() -> Result<(), String> {
             let modules = parse_usize(arguments.next(), 10_000, "module count")?;
             let imports = parse_usize(arguments.next(), 4, "imports per module")?;
             let edits = parse_usize(arguments.next(), 100, "edit count")?;
+            let minify = arguments.any(|value| value.to_str() == Some("--minify"));
             let result = diffpack::bundle_benchmark::run_bundle_scale_memory(
-                modules, imports, edits,
+                modules, imports, edits, minify,
             )?;
             println!(
                 "modules,reachable,source_mb,build_peak_mb,retained_mb,bytes_per_module,edits,transformed_per_edit_max,edit_growth_kb,retained_after_drop_kb"
@@ -104,8 +105,17 @@ fn run() -> Result<(), String> {
         }
         Some("build-app") => {
             let project_root = arguments.next().ok_or_else(usage)?;
-            let environment = arguments
-                .next()
+            let remaining = arguments.collect::<Vec<_>>();
+            // Production minification is the default for `build-app` (the real
+            // emitted client/server chunks should ship minified); `--no-minify`
+            // opts out for debugging the readable output.
+            let no_minify = remaining
+                .iter()
+                .any(|value| value.to_str() == Some("--no-minify"));
+            let minify = !no_minify;
+            let environment = remaining
+                .iter()
+                .find(|value| !value.to_string_lossy().starts_with("--"))
                 .and_then(|value| value.to_str().map(str::to_string))
                 .unwrap_or_else(|| "client".to_string());
             let mut config =
@@ -185,9 +195,12 @@ fn run() -> Result<(), String> {
             // `tanstack-start-manifest` chunk and the Node HTTP runtime entry
             // (`server/index.mjs` plus its `_ssr/` adapter, SSR, and router
             // modules) that boots the SSR handler and serves the `public/` assets.
+            let emit_options = EmitOptions {
+                minify,
+                ..EmitOptions::default()
+            };
             if config.environment == "client" {
-                let summary =
-                    bundler.emit_public(&reachable, &output_root, EmitOptions::default())?;
+                let summary = bundler.emit_public(&reachable, &output_root, emit_options)?;
                 let static_files = diffpack::config::copy_static_public(
                     Path::new(&project_root),
                     &summary.output_dir,
@@ -213,8 +226,7 @@ fn run() -> Result<(), String> {
                     client_manifest.routes.len(),
                 );
             } else {
-                let summary =
-                    bundler.emit_server(&reachable, &output_root, EmitOptions::default())?;
+                let summary = bundler.emit_server(&reachable, &output_root, emit_options)?;
                 println!(
                     "emitted {}: {} server .mjs, {} .css, {} asset(s)",
                     summary.output_dir.display(),

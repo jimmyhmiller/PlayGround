@@ -359,7 +359,12 @@ pub fn run_bundle_scale_memory(
     module_count: usize,
     imports_per_module: usize,
     edits: usize,
+    minify: bool,
 ) -> Result<MemoryScaleResult, String> {
+    let emit_options = EmitOptions {
+        minify,
+        ..EmitOptions::default()
+    };
     if module_count == 0 || imports_per_module == 0 {
         return Err("module count and imports per module must be positive".into());
     }
@@ -394,7 +399,7 @@ pub fn run_bundle_scale_memory(
     }
     let mut reachability = bundler.direct_reachability();
     let mut reachable = reachability.reachable_modules();
-    bundler.emit(&reachable, &output)?;
+    bundler.emit_with_options(&reachable, &output, emit_options)?;
     let reachable_count = reachable.len();
     let mut rendered_chunks_per_edit_max = 0;
 
@@ -423,7 +428,7 @@ pub fn run_bundle_scale_memory(
             reachable.remove(&removed);
         }
         reachable.extend(result.added);
-        let emit_stats = bundler.emit(&reachable, &output)?;
+        let emit_stats = bundler.emit_with_options(&reachable, &output, emit_options)?;
         rendered_chunks_per_edit_max =
             rendered_chunks_per_edit_max.max(emit_stats.rendered_chunks);
     }
@@ -647,7 +652,7 @@ mod thesis_guards {
         // reused chunks against a clean build is proven by
         // `tests/oracle_incremental.rs`; this only reads counters, so it is
         // parallelism-safe.)
-        let result = run_bundle_scale_memory(400, 4, 200).unwrap();
+        let result = run_bundle_scale_memory(400, 4, 200, false).unwrap();
         assert_eq!(
             result.rendered_chunks_per_edit_max, 1,
             "each leaf edit must re-render exactly one chunk"
@@ -655,6 +660,27 @@ mod thesis_guards {
         assert!(
             result.render_cache_entries <= result.rendered_chunks_per_edit_max.max(1),
             "the render cache grew to {} entries over {} edits; it must stay bounded to the live chunk set",
+            result.render_cache_entries,
+            result.edits
+        );
+    }
+
+    #[test]
+    fn a_leaf_edit_reminifies_exactly_one_chunk_with_a_bounded_cache() {
+        // Same emit-incrementality guard, but with `minify: true`: production
+        // minification is keyed into the per-chunk render cache, so a leaf edit
+        // must re-minify exactly one chunk (not the whole bundle) and the cache
+        // must stay bounded to the live chunk set across a long edit run. This is
+        // the guard that production minification does not silently defeat the emit
+        // thesis.
+        let result = run_bundle_scale_memory(400, 4, 200, true).unwrap();
+        assert_eq!(
+            result.rendered_chunks_per_edit_max, 1,
+            "each leaf edit must re-minify exactly one chunk"
+        );
+        assert!(
+            result.render_cache_entries <= result.rendered_chunks_per_edit_max.max(1),
+            "the minified render cache grew to {} entries over {} edits; it must stay bounded to the live chunk set",
             result.render_cache_entries,
             result.edits
         );

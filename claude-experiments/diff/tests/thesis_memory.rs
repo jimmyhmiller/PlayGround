@@ -16,7 +16,7 @@ use diffpack::bundle_benchmark::run_bundle_scale_memory;
 #[test]
 fn the_incremental_graph_stays_low_memory() {
     // Resident graph is compact and the build does not hoard transient ASTs.
-    let build = run_bundle_scale_memory(800, 4, 1).unwrap();
+    let build = run_bundle_scale_memory(800, 4, 1, false).unwrap();
     assert!(
         build.bytes_per_module < 16_000.0,
         "resident cost is {:.0} bytes/module (measured ~3.5 KB); the graph must stay compact",
@@ -31,7 +31,7 @@ fn the_incremental_graph_stays_low_memory() {
     // 200 edits to one leaf module must re-transform only that module and must
     // not accumulate memory (measured growth ~0.2 KB; a per-revision leak would
     // be hundreds of KB).
-    let edited = run_bundle_scale_memory(400, 4, 200).unwrap();
+    let edited = run_bundle_scale_memory(400, 4, 200, false).unwrap();
     assert_eq!(
         edited.transformed_per_edit_max, 1,
         "each leaf edit must re-transform exactly one module"

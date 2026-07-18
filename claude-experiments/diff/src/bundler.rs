@@ -702,6 +702,17 @@ impl Bundler {
             .ok_or_else(|| format!("output has no parent: {}", output.display()))?;
         fs::create_dir_all(parent)
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+        // Source maps must be composed THROUGH the minify pass (the readable-render
+        // mappings do not describe the minified bytes). That composition is a
+        // separate slice; until it lands, refuse to emit a map that would lie about
+        // positions rather than ship a silently-wrong one.
+        if options.minify && options.source_map {
+            return Err(
+                "minify + source maps is not yet implemented: the source map must be composed \
+                 through the minify pass; run the build with one of them at a time"
+                    .to_string(),
+            );
+        }
         let mut stats = EmitStats::default();
         // Keys of every chunk this emit renders or reuses; entries not among them
         // are evicted at the end so the cache stays bounded to the live chunk set.
@@ -742,6 +753,10 @@ impl Bundler {
         }
         for (root, chunk_path) in dynamic_roots.iter().copied().zip(&chunk_paths) {
             let modules = self.static_closure(root, &allowed);
+            let chunk_name = chunk_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<chunk>");
             let rendered = self.render_chunk_cached(
                 &modules,
                 root,
@@ -750,25 +765,17 @@ impl Bundler {
                 &global_demands,
                 false,
                 options.format,
+                options.minify,
+                chunk_name,
                 &mut live_keys,
                 &mut stats.rendered_chunks,
-            );
+            )?;
             self.write_rendered(rendered, chunk_path, options, &mut stats.written)?;
         }
-        if options.minify
-            && !options.source_map
-            && dynamic_roots.is_empty()
-            && let Some(rendered) = self.render_folded_constants(&main_modules)
-        {
-            // The constant-folding minify path is a distinct render (it depends on
-            // `minify`, unlike `render_best`), so it is not cached; it still counts
-            // as a chunk actually rendered. No dynamic chunks exist here, so no
-            // cached entries are live and the eviction below clears the cache.
-            stats.rendered_chunks += 1;
-            self.write_rendered(rendered, output, options, &mut stats.written)?;
-            self.evict_render_cache(&live_keys);
-            return Ok(stats);
-        }
+        let entry_name = output
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("<entry>");
         let rendered = self.render_chunk_cached(
             &main_modules,
             self.entry,
@@ -777,9 +784,11 @@ impl Bundler {
             &global_demands,
             true,
             options.format,
+            options.minify,
+            entry_name,
             &mut live_keys,
             &mut stats.rendered_chunks,
-        );
+        )?;
         self.write_rendered(rendered, output, options, &mut stats.written)?;
         self.evict_render_cache(&live_keys);
         Ok(stats)
@@ -800,9 +809,11 @@ impl Bundler {
         global_demands: &[ExportDemand],
         is_main: bool,
         format: ModuleFormat,
+        minify: bool,
+        chunk_name: &str,
         live_keys: &mut HashSet<u64>,
         rendered: &mut usize,
-    ) -> RenderedBundle {
+    ) -> Result<RenderedBundle, String> {
         let key = self.chunk_render_key(
             modules,
             root,
@@ -811,12 +822,13 @@ impl Bundler {
             runtime_ids,
             global_demands,
             format,
+            minify,
         );
         live_keys.insert(key);
         if let Some(hit) = self.render_cache.lock().unwrap().entries.get(&key) {
-            return hit.clone();
+            return Ok(hit.clone());
         }
-        let bundle = self.render_best(
+        let mut bundle = self.render_best(
             modules,
             root,
             chunk_names,
@@ -825,13 +837,27 @@ impl Bundler {
             is_main,
             format,
         );
+        // Whitespace/syntax minification of the FINISHED chunk. The chunk's `code`
+        // is already clean, valid JS (markers were consumed during render; it
+        // passes `node --check` and runs in-browser), so a final per-chunk Oxc
+        // codegen-minify pass has a safe insertion point that never touches the
+        // marker-based linker. Minified bytes are stored in the cache under a key
+        // that folds in `minify`, so a leaf edit re-minifies exactly this chunk.
+        if minify {
+            bundle.code = minify_chunk_code(&bundle.code, chunk_name)?;
+            // The readable-render mappings no longer describe the minified bytes.
+            // `minify` + `source_map` is rejected up front (emit_with_options), so
+            // these mappings are unused here; clear them rather than ship a map
+            // that lies about positions.
+            bundle.mappings = Vec::new();
+        }
         *rendered += 1;
         self.render_cache
             .lock()
             .unwrap()
             .entries
             .insert(key, bundle.clone());
-        bundle
+        Ok(bundle)
     }
 
     /// Evicts every cached chunk render whose key was not used in the emit that
@@ -866,9 +892,14 @@ impl Bundler {
         runtime_ids: &[Option<usize>],
         global_demands: &[ExportDemand],
         format: ModuleFormat,
+        minify: bool,
     ) -> u64 {
         let mut hasher = DefaultHasher::new();
         (format as u8).hash(&mut hasher);
+        // `minify` shapes the emitted bytes (a minified chunk differs from its
+        // readable form), so it is part of the cache key: a leaf edit that changes
+        // one chunk re-minifies exactly that chunk and reuses the rest byte-for-byte.
+        minify.hash(&mut hasher);
         is_main.hash(&mut hasher);
         root.hash(&mut hasher);
         modules.len().hash(&mut hasher);
@@ -1077,34 +1108,6 @@ impl Bundler {
         write_if_changed(&css_path, stylesheet.as_bytes())?;
         written.insert(css_path);
         Ok(())
-    }
-
-    fn render_folded_constants(&self, modules: &[DenseModuleId]) -> Option<RenderedBundle> {
-        let included = modules.iter().copied().collect::<HashSet<_>>();
-        let order = self.static_execution_order(&included)?;
-        let mut values = HashMap::<String, f64>::new();
-        let mut output = String::new();
-        for dense_index in order {
-            let foldable = self.modules[dense_index]
-                .as_ref()?
-                .flat_module
-                .as_ref()?
-                .foldable
-                .as_ref()?;
-            for (name, expression) in &foldable.constants {
-                values.insert(name.clone(), evaluate_fold_expression(expression, &values)?);
-            }
-            for expression in &foldable.console_logs {
-                let value = evaluate_fold_expression(expression, &values)?;
-                output.push_str("console.log(");
-                output.push_str(&format_javascript_number(value)?);
-                output.push_str(");");
-            }
-        }
-        Some(RenderedBundle {
-            code: output,
-            mappings: Vec::new(),
-        })
     }
 
     fn write_rendered(
@@ -2939,19 +2942,6 @@ pub struct EmitStats {
     written: BTreeSet<PathBuf>,
 }
 
-fn evaluate_fold_expression(
-    expression: &FoldExpression,
-    values: &HashMap<String, f64>,
-) -> Option<f64> {
-    match expression {
-        FoldExpression::Number(bits) => Some(f64::from_bits(*bits)),
-        FoldExpression::Reference(name) => values.get(name).copied(),
-        FoldExpression::Add(left, right) => {
-            Some(evaluate_fold_expression(left, values)? + evaluate_fold_expression(right, values)?)
-        }
-    }
-}
-
 fn display_fold_expression(expression: &FoldExpression) -> String {
     match expression {
         FoldExpression::Number(bits) => {
@@ -2980,6 +2970,48 @@ fn format_javascript_number(value: f64) -> Option<String> {
         return Some("-0".into());
     }
     value.is_finite().then(|| value.to_string())
+}
+
+/// Whitespace/syntax minification of one FINISHED chunk's JavaScript.
+///
+/// The chunk `code` handed in is already clean, valid JS (the marker-based linker
+/// consumed its markers during render; it passes `node --check` and runs
+/// in-browser), so this is a self-contained final pass: re-parse the emitted bytes
+/// and re-print them with Oxc codegen configured for minified output (comments and
+/// whitespace dropped, literals shortened). It never touches the linker.
+///
+/// SCOPE: this is Oxc codegen whitespace/syntax minification only. Cross-module
+/// identifier mangling and dead-code compression (oxc_minifier over a combined
+/// AST) is deliberately NOT done here — any construct that would need it is left
+/// readable, never half-mangled.
+///
+/// A parse failure on the generated chunk is a HARD error naming the chunk, never
+/// a silent passthrough of the unminified bytes.
+fn minify_chunk_code(code: &str, chunk_name: &str) -> Result<String, String> {
+    use oxc_allocator::Allocator;
+    use oxc_codegen::{Codegen, CodegenOptions};
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    // Every emitted chunk (browser ESM entry/chunks and Node `.mjs`) is module
+    // JavaScript; parse it as such so top-level `import`/`export` are accepted.
+    let source_type = SourceType::default().with_module(true);
+    let parsed = Parser::new(&allocator, code, source_type).parse();
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
+        let detail = parsed
+            .diagnostics
+            .first()
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "parser panicked".to_string());
+        return Err(format!(
+            "minify: cannot parse generated chunk `{chunk_name}` for minification: {detail}"
+        ));
+    }
+    let printed = Codegen::new()
+        .with_options(CodegenOptions::minify())
+        .build(&parsed.program);
+    Ok(printed.code)
 }
 
 fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -3568,54 +3600,114 @@ mod tests {
     }
 
     #[test]
-    fn minifies_foldable_values_across_modules_without_reparsing_output() {
+    fn a_minified_chunk_runs_identically_to_its_readable_form_and_is_smaller() {
         if Command::new("node").arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
         let entry = directory.path().join("entry.js");
         let a = directory.path().join("a.js");
-        let output = directory.path().join("bundle.js");
+        // Multi-line source with comments and whitespace, so a real whitespace/
+        // syntax minification pass has something to collapse and drop.
         fs::write(
             &entry,
-            "import { a } from './a.js'; import { b } from './b.js'; console.log(a + b);",
+            concat!(
+                "// entry comment\n",
+                "import { a } from './a.js';\n",
+                "import { b } from './b.js';\n",
+                "\n",
+                "function total(left, right) {\n",
+                "    /* add the two operands */\n",
+                "    const sum = left + right;\n",
+                "    return sum;\n",
+                "}\n",
+                "\n",
+                "console.log(total(a, b));\n",
+            ),
         )
         .unwrap();
-        fs::write(&a, "export const a = 1 + 2;").unwrap();
-        fs::write(directory.path().join("b.js"), "export const b = 3;").unwrap();
+        fs::write(&a, "// module a\nexport const a = 1 + 2;\n").unwrap();
+        fs::write(
+            directory.path().join("b.js"),
+            "// module b\nexport const b = 3;\n",
+        )
+        .unwrap();
 
-        let (mut bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
         assert!(update.diagnostics.is_empty());
         let reachable = bundler.reachable_modules_direct();
-        bundler
-            .emit_with_options(
-                &reachable,
-                &output,
-                EmitOptions {
-                    source_map: false,
-                    minify: true,
-                    format: crate::bundler::ModuleFormat::Cjs,
-                },
-            )
-            .unwrap();
-        assert_eq!(fs::read_to_string(&output).unwrap(), "console.log(6);");
-        assert_eq!(run_node(&output), "6\n");
 
-        fs::write(&a, "export const a = Number('2');").unwrap();
-        bundler.rebuild_path(&a).unwrap();
+        // Emit the readable form.
+        let readable = directory.path().join("readable.js");
+        bundler
+            .emit_with_options(&reachable, &readable, EmitOptions::default())
+            .unwrap();
+        let readable_code = fs::read_to_string(&readable).unwrap();
+
+        // Emit the minified form (same graph, `minify: true`).
+        let minified = directory.path().join("minified.js");
         bundler
             .emit_with_options(
                 &reachable,
-                &output,
+                &minified,
                 EmitOptions {
-                    source_map: false,
                     minify: true,
-                    format: crate::bundler::ModuleFormat::Cjs,
+                    ..EmitOptions::default()
                 },
             )
             .unwrap();
-        assert_eq!(run_node(&output), "5\n");
-        assert_ne!(fs::read_to_string(&output).unwrap(), "console.log(5);");
+        let minified_code = fs::read_to_string(&minified).unwrap();
+
+        // Behavior is identical: both run under node and print the same value.
+        assert_eq!(run_node(&readable), "6\n");
+        assert_eq!(
+            run_node(&minified),
+            run_node(&readable),
+            "minified output must behave identically to the readable output"
+        );
+
+        // The minified bytes are genuinely smaller, have no comments, and are not
+        // just the readable bytes passed through.
+        assert!(
+            minified_code.len() < readable_code.len(),
+            "minified ({} bytes) must be smaller than readable ({} bytes)",
+            minified_code.len(),
+            readable_code.len(),
+        );
+        assert!(
+            !minified_code.contains("entry comment")
+                && !minified_code.contains("add the two operands")
+                && !minified_code.contains("module a"),
+            "minified output still carries comments: {minified_code}"
+        );
+        assert_ne!(
+            minified_code, readable_code,
+            "minify must actually transform the bytes"
+        );
+    }
+
+    #[test]
+    fn minify_and_source_maps_together_is_a_hard_error() {
+        let directory = tempdir().unwrap();
+        let entry = directory.path().join("entry.js");
+        fs::write(&entry, "console.log(1);\n").unwrap();
+        let (bundler, _update) = Bundler::discover_direct(&entry).unwrap();
+        let reachable = bundler.reachable_modules_direct();
+        let error = bundler
+            .emit_with_options(
+                &reachable,
+                &directory.path().join("out.js"),
+                EmitOptions {
+                    minify: true,
+                    source_map: true,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("minify + source maps is not yet implemented"),
+            "expected a hard error naming the missing composition, got: {error}"
+        );
     }
 
     #[test]

@@ -1,5 +1,76 @@
 # TanStack implementation status
 
+Updated: 2026-07-18 (production minification of emitted chunks landed)
+
+## Production minification of the emitted client/server chunks (landed)
+
+`build-app` previously emitted the real 27-chunk TanStack production bundles
+UNMINIFIED (`EmitOptions::default()`); the only `minify` code was a
+constant-fold toy gated on `dynamic_roots.is_empty()` that never ran for the
+real multi-chunk app. Production minification is now real and on by default.
+
+- **A real per-chunk minify pass.** After a chunk's clean, valid JS `code` is
+  produced (`render_chunk_cached`), when `EmitOptions.minify` is set the finished
+  bytes are re-parsed with `oxc_parser` and re-emitted with
+  `oxc_codegen::Codegen` under `CodegenOptions::minify()` (comments dropped,
+  whitespace collapsed, literals shortened). This is a final, self-contained pass
+  on already-clean JS, so it never touches the marker-based linker. A parse
+  failure on the generated chunk is a HARD, chunk-naming error
+  (`minify_chunk_code`), never a silent passthrough of the unminified bytes.
+- **SCOPE (explicit):** whitespace/syntax minification only. Cross-module
+  identifier mangling + dead-code compression (oxc_minifier over a combined AST)
+  is DEFERRED to the P0 linker-IR evolution and is NOT attempted here — any case
+  that would need it is left readable, never half-mangled.
+- **Keyed into the render cache.** `minify` is folded into `chunk_render_key`, so
+  a leaf edit re-minifies exactly the one changed chunk and reuses every other
+  chunk byte-for-byte (the emit thesis guard is preserved — see the new
+  `a_leaf_edit_reminifies_exactly_one_chunk_with_a_bounded_cache` guard).
+- **Retired the dead constant-fold special-case.** `render_folded_constants` and
+  its `dynamic_roots.is_empty()` gate are gone; minify now applies uniformly to
+  the entry chunk AND every dynamic/route-split chunk, so it actually runs on the
+  real app.
+- **Wired into the acceptance path.** `build-app <root> client|ssr` minifies by
+  default (`--no-minify` opts out for debugging). Client browser chunks and the
+  server `.mjs` chunks are minified; the server `.mjs` still execute under Node
+  ESM (13/13 acceptance boots the server and serves every route). `minify` +
+  `source_map` together is a hard error until the map is composed through the
+  minify pass — the natural next slice.
+
+Measured reduction on the pinned app (total client `.js` bytes): **11,438,413 →
+9,762,330 = 14.7% smaller** (entry `client.js` 43,468 lines collapse to 248).
+The reduction is whitespace/syntax-only because ~20% of the client bytes are
+already-minified vendored React production builds and this pass does no mangling
+or DCE (the reference's larger reduction comes from exactly the mangling/DCE +
+shared-vendor chunking deferred above). Server minifies analogously.
+
+Verified (all six gate groups, on the MINIFIED build):
+
+1. `cargo test --release`: 84 lib + 3 `oracle_incremental` (1 `#[ignore]`d) + 2
+   tailwind + 1 thesis_memory — all pass, incl. the new
+   `a_minified_chunk_runs_identically_to_its_readable_form_and_is_smaller`,
+   `minify_and_source_maps_together_is_a_hard_error`, and
+   `minified_incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_build`.
+2. `cargo clippy --release --all-targets -- -D warnings`: clean.
+3. `build-app . client` + `build-app . ssr` (minified), strict
+   `npm run acceptance:diffpack`: **13/13**.
+4. Thesis guards: `thesis_memory` PASS, both emit guards
+   (`a_leaf_edit_rerenders...` and the new `a_leaf_edit_reminifies...`) PASS, and
+   `oracle_incremental` proves minified clean-vs-incremental byte parity (1 chunk
+   re-minified, the rest reused verbatim).
+5. Browser (real headless Chrome, minified output): routes **60/60**, hydration
+   **7/7**, serverfn **7/7**, tailwind **9/9**;
+   `grep -rl async_hooks .diffpack-output/public` empty.
+6. Benchmark non-regression: `bundle-scale-memory 2000 4 200` → 3313.0
+   bytes/module (baseline ~3312.4; `--minify` 3314.3 — no regression),
+   `transformed_per_edit_max`=1, edit growth 0.2 KB. `oracle/benchmark.mjs`
+   incremental edit **7.4 ms** (~20x faster than Rolldown's 148 ms), cold 161 ms
+   — no regression.
+
+Next slice: source maps, composed through the minify pass (so `minify` +
+`source_map` stops being a hard error).
+
+## Incremental-emit history
+
 Updated: 2026-07-18 (incremental-emit wiring completed)
 
 ## Native Tailwind v4 CSS compilation (landed)

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use diffpack::bundler::{BuildUpdate, Bundler, DirectReachability};
+use diffpack::bundler::{BuildUpdate, Bundler, DirectReachability, EmitOptions};
 use tempfile::tempdir;
 
 #[test]
@@ -120,6 +120,85 @@ fn incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_build() {
     assert_eq!(
         incremental_tree, fresh_tree,
         "incremental emit must be byte-identical to a clean build of the final state"
+    );
+}
+
+/// The same incremental-emit byte-parity guarantee, but for the MINIFIED build:
+/// after a leaf edit, the incrementally-emitted MINIFIED output tree is
+/// byte-for-byte identical to a clean from-scratch minified build of the same
+/// final filesystem state, and exactly ONE chunk is re-minified while the others
+/// are reused verbatim from the render cache. This proves production minification
+/// keys correctly into the render cache and does not defeat determinism.
+#[test]
+fn minified_incremental_emit_reuses_every_unchanged_chunk_and_matches_a_clean_build() {
+    let workspace = tempdir().unwrap();
+    let root = workspace.path();
+    write(root, "entry.js", "import { a } from \"./a.js\";\nimport(\"./b.js\").then((m) => console.log(a, m.b));\n");
+    write(root, "a.js", "// module a\nexport const a = 10;\n");
+    write(root, "b.js", "// module b\nimport { l } from \"./bleaf.js\";\nexport const b = l + 1;\n");
+    write(root, "bleaf.js", "// leaf\nexport const l = 100;\n");
+
+    let entry = root.join("entry.js");
+    let bleaf = root.join("bleaf.js");
+    let incremental_dir = root.join("out-incremental");
+    let fresh_dir = root.join("out-fresh");
+    let minify = EmitOptions {
+        minify: true,
+        ..EmitOptions::default()
+    };
+
+    let (mut incremental, _) = Bundler::discover(&entry).unwrap();
+    let mut reachability = incremental.direct_reachability();
+    let mut reachable = reachability.reachable_modules();
+    let initial = incremental
+        .emit_with_options(&reachable, &incremental_dir.join("bundle.js"), minify)
+        .unwrap();
+    assert!(
+        initial.rendered_chunks >= 2,
+        "the initial minified build must render every chunk (got {})",
+        initial.rendered_chunks
+    );
+    let main_before = fs::read(incremental_dir.join("bundle.js")).unwrap();
+    // The emitted bytes are actually minified: the source comments are gone.
+    assert!(
+        !String::from_utf8_lossy(&main_before).contains("module a"),
+        "the emitted main chunk must be minified (no source comments)"
+    );
+
+    fs::write(&bleaf, "// leaf\nexport const l = 200;\n").unwrap();
+    let update = incremental.rebuild_path(&bleaf).unwrap();
+    assert_eq!(update.transformed_modules, 1, "a leaf edit re-transforms one module");
+    apply_update(&mut reachability, &mut reachable, &update);
+    let reemit = incremental
+        .emit_with_options(&reachable, &incremental_dir.join("bundle.js"), minify)
+        .unwrap();
+    assert_eq!(
+        reemit.rendered_chunks, 1,
+        "a leaf edit must re-minify exactly one chunk, reusing the rest"
+    );
+    let main_after = fs::read(incremental_dir.join("bundle.js")).unwrap();
+    assert_eq!(
+        main_before, main_after,
+        "the unchanged minified main chunk must be reused verbatim"
+    );
+
+    let (fresh, _) = Bundler::discover(&entry).unwrap();
+    let fresh_reachable = fresh.reachable_modules_direct();
+    fresh
+        .emit_with_options(&fresh_reachable, &fresh_dir.join("bundle.js"), minify)
+        .unwrap();
+
+    assert_eq!(reachable, fresh_reachable);
+    let incremental_tree = read_tree(&incremental_dir);
+    let fresh_tree = read_tree(&fresh_dir);
+    assert!(
+        incremental_tree.len() >= 2,
+        "expected a multi-chunk output, got {} files",
+        incremental_tree.len()
+    );
+    assert_eq!(
+        incremental_tree, fresh_tree,
+        "incremental minified emit must be byte-identical to a clean minified build of the final state"
     );
 }
 
