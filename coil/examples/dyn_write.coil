@@ -4,8 +4,8 @@
 ; object. No hand-written vtables: `defdyn`/`dyn-impl` generate them by reflecting
 ; the trait. See lib/dyn.coil.
 
-(import "lib/dyn.coil"   :use *)
-(import "lib/slice.coil" :use *)   ; slice-data / slice-len for (slice u8)
+(import "../lib/dyn.coil"   :use *)   ; file-relative (tool-1): dyn.coil is NOT bundled
+(import "../lib/slice.coil" :use *)   ; slice-data / slice-len for (slice u8)
 
 (extern write :cc c [:i64 (ptr i8) :i64] (-> :i64))   ; ssize_t write(fd, buf, n)
 (extern memcpy :cc c [(ptr i8) (ptr i8) :i64] (-> (ptr i8)))

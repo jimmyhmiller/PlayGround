@@ -4,7 +4,9 @@
 ; no LLVM at build or run time (only `cc` to link the native object). Its only
 ; supported build path is the native arm64 backend; the LLVM entry points are
 ; injected into the shared driver as hard-error stubs. Use main.coil for the full
-; (LLVM + arm64) compiler. ALWAYS build from repo root.
+; (LLVM + arm64) compiler. Imports are FILE-RELATIVE (tool-1): sibling compiler
+; modules resolve against THIS file's directory (selfhost/src), so it builds from
+; any CWD; bare stdlib names resolve to the bundled library from anywhere.
 (module maina64)
 
 (import "alloc.coil" :use *)
@@ -16,22 +18,22 @@
 (import "control.coil" :use *)
 (import "try.coil" :use *)
 (import "match.coil" :use *)
-(import "selfhost/src/ffi.coil" :use *)
-(import "selfhost/src/reader.coil" :use *)
-(import "selfhost/src/ast.coil" :use *)
-(import "selfhost/src/astdump.coil" :use *)
-(import "selfhost/src/parser.coil" :use *)
-(import "selfhost/src/loader.coil" :use *)
-(import "selfhost/src/resolve.coil" :use *)
-(import "selfhost/src/check.coil" :use *)
-(import "selfhost/src/mono.coil" :use *)
-(import "selfhost/src/diag.coil" :use *)
-(import "selfhost/src/comptime.coil" :use *)
-(import "selfhost/src/metaengine.coil" :use *)
-(import "selfhost/src/expander.coil" :use *)
-(import "selfhost/src/codegen_a64.coil" :use *)
-(import "selfhost/src/driver.coil" :use *)
-(import "selfhost/src/cimport.coil" :as ci)   ; `coil cimport` — qualified, no name leak
+(import "ffi.coil" :use *)
+(import "reader.coil" :use *)
+(import "ast.coil" :use *)
+(import "astdump.coil" :use *)
+(import "parser.coil" :use *)
+(import "loader.coil" :use *)
+(import "resolve.coil" :use *)
+(import "check.coil" :use *)
+(import "mono.coil" :use *)
+(import "diag.coil" :use *)
+(import "comptime.coil" :use *)
+(import "metaengine.coil" :use *)
+(import "expander.coil" :use *)
+(import "codegen_a64.coil" :use *)
+(import "driver.coil" :use *)
+(import "cimport.coil" :as ci)   ; `coil cimport` — qualified, no name leak
 
 ; ---- hard-error stubs for the (excluded) LLVM backend ----
 ; This build has no LLVM backend; these fail loudly rather than silently no-op, so

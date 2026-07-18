@@ -415,7 +415,10 @@
     (match (read-all a src 0)
       (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
       (Ok [forms]
-        (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
+        ; file-relative imports (tool-1): the entry file's own relative imports
+        ; resolve against ITS directory, not the process CWD (nested imports already
+        ; use each imported file's incdir). `cwd` stays for DWARF comp_dir only.
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) (dirname path))
           (if (ls-err? (mut s))
               (do (report-diag w (mut s) (load (field s loaderr))) (None [(ptr Program)]))
             (match (expand-stage3 (mut s))
@@ -535,12 +538,14 @@
 ; returns 0 and prints its own diagnostics, so this exit code is 0 on success.
 (defn dump-read-w     [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-read-program a src))
 (defn dump-ast-w      [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-ast-program a src))
-(defn dump-load-w     [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-load-program a src cwd))
-(defn expand-src-w    [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (expand-src-program a src cwd path))
-(defn dump-expand-w   [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-expand-program a src cwd))
-(defn dump-resolved-w [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-resolved-program a src cwd))
-(defn dump-checked-w  [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-checked-program a src cwd))
-(defn dump-mono-w     [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-mono-program a src cwd))
+; file-relative imports (tool-1): the base for the entry file's own relative
+; imports is ITS directory (dirname path), not the process CWD.
+(defn dump-load-w     [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-load-program a src (dirname path)))
+(defn expand-src-w    [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (expand-src-program a src (dirname path) path))
+(defn dump-expand-w   [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-expand-program a src (dirname path)))
+(defn dump-resolved-w [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-resolved-program a src (dirname path)))
+(defn dump-checked-w  [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-checked-program a src (dirname path)))
+(defn dump-mono-w     [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-mono-program a src (dirname path)))
 
 ; Populate a mode-3 DumpCtx and run the chosen dump wrapper on the big-stack pthread.
 (defn run-dump-on-big-stack [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))
@@ -855,7 +860,7 @@
                     (ps w "error: linker/ar failed with exit status: ") (dump-dec w code) (wb w 10) 1)
                 (do (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10))
                     (match ehdr
-                      (Some [h] (cheader-program a (read-src a file) (cwd-slice a) (Some h)))
+                      (Some [h] (cheader-program a (read-src a file) (dirname (cstr->slice file)) (Some h)))
                       (None [] 0))))))))))))
 
 ; ============================ cheader (export-c → C header) =================
@@ -1613,7 +1618,7 @@ line is a value expression: it is type-checked and its result is printed.
         (do (if (and (icmp-lt (iadd (load i) 1) (cast i64 argc)) (str-eq (cstr->slice (load (index argv (load i)))) "-o"))
                 (do (store! outp (Some (cstr->slice (load (index argv (iadd (load i) 1)))))) (store! i (iadd (load i) 2)) 0)
               (do (store! i (iadd (load i) 1)) 0)))))
-      (cheader-program a (read-src a file) (cwd-slice a) (load outp)))))
+      (cheader-program a (read-src a file) (dirname (cstr->slice file)) (load outp)))))
 
 ; `coil` (no args) / `coil --help` / `-h` / `help`. Lists only what driver-main
 ; actually dispatches — an unimplemented command in here is a lie the CLI tells.

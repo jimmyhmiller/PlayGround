@@ -89,6 +89,36 @@ fi
 ( cd "$T/proj" && "$COIL" build --target not-a-real-triple >/dev/null 2>&1 )
 [ $? = 1 ] && ok "project bogus --target is rejected" || bad "project bogus --target" "want rc=1"
 
+echo "== tool-1: a relative import resolves against the IMPORTING FILE's directory, not the CWD =="
+# The layout `coil new` scaffolds (src/main.coil) must be able to import a sibling
+# (src/util.coil). Under the old CWD-relative rule this failed with
+# `import 'util.coil': not found` — a scaffolded project could not split into files.
+# FAILS on a pre-tool-1 compiler (import not found → build fails, rc≠42); PASSES here.
+mkdir -p "$T/sib/src"
+printf '[package]\nname  = "sib"\nentry = "src/main.coil"\n'                             > "$T/sib/Coil.toml"
+printf '(module util)\n(defn forty-two [] (-> i64) 42)\n'                                > "$T/sib/src/util.coil"
+printf '(module app)\n(import "util.coil" :use *)\n(defn main [] (-> i64) (forty-two))\n' > "$T/sib/src/main.coil"
+( cd "$T/sib" && "$COIL" run >/dev/null 2>&1 ); [ $? = 42 ] \
+  && ok "project src/main.coil imports sibling src/util.coil" \
+  || bad "sibling import (project mode)" "want rc=42 (was: import 'util.coil' not found)"
+# The base is the FILE's directory, NOT the CWD: build the entry from an unrelated CWD.
+( cd "$T" && "$COIL" run "$T/sib/src/main.coil" >/dev/null 2>&1 ); [ $? = 42 ] \
+  && ok "sibling import resolves from ANY cwd (file-relative, not cwd-relative)" \
+  || bad "sibling import (arbitrary cwd)" "want rc=42"
+# The PRELUDE + bundled libs are self-contained: their imports resolve to the BUNDLED
+# stdlib, never to same-named decoys sitting in the entry file's directory. A naive
+# file-relative switch made the prelude's control.coil->print->io chain resolve to
+# examples/io.coil (a demo), silently dropping the io library from every build — the
+# emit-ir change the prior attempt could not explain. `println` here comes only from
+# the prelude, so it breaks if the chain loads the decoy instead of bundled io.
+mkdir -p "$T/dec"
+printf '(module control)\n(defn decoy [] (-> i64) 0)\n'           > "$T/dec/control.coil"
+printf '(module io)\n(defn decoy [] (-> i64) 0)\n'                > "$T/dec/io.coil"
+printf '(module app)\n(defn main [] (-> i64) (println "hi") 7)\n' > "$T/dec/main.coil"
+( cd "$T/dec" && "$COIL" run "$T/dec/main.coil" >/dev/null 2>&1 ); [ $? = 7 ] \
+  && ok "the prelude reaches the BUNDLED stdlib despite same-named decoys in the entry dir" \
+  || bad "bundled prelude self-contained" "want rc=7 (println from bundled print/io, not the decoy)"
+
 echo "== a compile that cannot finish must SAY SO, not hang or crash =="
 # These all used to die with zero output: no message, no location, nothing naming the
 # construct — the worst possible failure for a mistake a typo can cause.

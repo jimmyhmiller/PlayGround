@@ -243,9 +243,14 @@ Not staleness: specific guarantees the docs state and the implementation never h
       asserted (`:size 8` silently yields 40), and overlap at unequal `:at` is accepted and clobbers.
       Its header says "tiers 1-3 done and tested". Implement both checks (`static-assert` already
       renders the error) or correct the doc.
-- [ ] **tool-1** `coil guide` states verbatim that imports resolve relative to the importing file.
-      They resolve against the **CWD**, so the layout `coil new` itself scaffolds cannot import a
-      sibling. Anchor to `dirname(importing file)` — the loader already prints that path in its error.
+- [x] **tool-1** — ✅ DONE. Relative imports now resolve against `dirname(importing file)` (the
+      documented rule) instead of the CWD, so the `src/main.coil` layout `coil new` scaffolds can
+      import a sibling and multi-file apps (chip8/invaders) build from any directory. The prelude and
+      bundled libs resolve their OWN imports against a `<bundled>` sentinel so a demo like
+      `examples/io.coil` can't shadow the library (the cause of the prior attempt's "unexplained
+      emit-ir change"); the self-host entry files were migrated to bare-name imports and both seeds
+      refreshed so the bootstrap understands the new rule. Teeth-tested in `gate-cli.sh`; see
+      DECISIONS.md #6.
 - [x] **mem-11** The guide's loudest memory warning (never `alloc-stack` in a loop → "eventually
       segfaults") does not reproduce on either backend; static-size allocas get hoisted. Hoist in
       Coil's own lowering and delete the warning, or show the shape that actually breaks.

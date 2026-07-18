@@ -182,6 +182,15 @@
 (defn bundled? [(name (slice u8))] (-> bool)
   (icmp-gt (slice-len (embedded-lib name)) 0))
 
+; The import base for BUNDLED stdlib files (and the prelude): a sentinel that is NOT
+; a real directory, so a bundled lib's OWN relative imports (`(import "slice.coil")`)
+; resolve to the bundled sibling — never to a same-named file that happens to sit in
+; the entry file's directory. With file-relative imports (tool-1), compiling
+; `examples/foo.coil` resolves the entry's imports against `examples/`, where a demo
+; like `examples/io.coil` shadows the io LIBRARY; the bundled stdlib is a
+; self-contained unit and must keep resolving its own siblings from the bundle.
+(defn bundled-base [] (-> (slice u8)) "<bundled>")
+
 ; The explicit stdlib source root (`COIL_STDLIB_DIR`), or None. When set, the loader
 ; prefers live source files under it over the embedded copies — for developing the
 ; compiler (edit a lib, rebuild a program, no compiler rebuild). When UNSET the
@@ -218,7 +227,10 @@
           (if (bundled? bn)
               (let [text (bundled-text a bn)
                     rp (alloc-stack Resolved)]
-                (store! (field rp text) text) (store! (field rp incdir) base)
+                ; incdir = the bundled sentinel, NOT `base`: a bundled lib's nested
+                ; imports must resolve to bundled siblings, not to files in whatever
+                ; directory pulled it in (tool-1: file-relative bases are real dirs).
+                (store! (field rp text) text) (store! (field rp incdir) (bundled-base))
                 (store! (field rp disp) (sconcat3 a "<bundled " bn ">"))
                 (load rp))
               (do (ls-set-err! (mut s) (diag-at-form form (sconcat a (sconcat3 a "import '" path "': not found (no such file, and not a bundled stdlib module)") "")))
@@ -680,9 +692,13 @@
     (match (declared-module forms)
       (Some [main-mod] (do (loaded-insert! (mut s) main-mod) 0))
       (None [] 0))
+    ; The prelude is bundled stdlib: resolve ITS imports (control.coil, print.coil,
+    ; …) against the bundled sentinel, not the entry file's directory — otherwise a
+    ; demo like examples/io.coil would shadow the io library (tool-1). The MAIN file's
+    ; imports use `base` = its own directory (file-relative).
     (match (read-all a prelude-text prelude-id)
       (Err [d] (do (loader-abort "read error in prelude") 0))
-      (Ok [pf]  (process-forms (mut s) pf base (None [(slice u8)]))))
+      (Ok [pf]  (process-forms (mut s) pf (bundled-base) (None [(slice u8)]))))
     (process-forms (mut s) forms base (None [(slice u8)]))
     0))
 

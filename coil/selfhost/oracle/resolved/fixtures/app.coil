@@ -6,10 +6,11 @@
 ;   * coil.core auto-refer — `+` (Add method) stays bare via the trait-method allow
 ;   * (export …)      — restrict this module's public names
 ;   * (impl Eq Pt …)  — trait name → coil.core.Eq, for-type → rmod.app.Pt
-; The import path is repo-root relative because the main file's base_dir is CWD.
+; The import path is FILE-RELATIVE (tool-1): the entry file's base_dir is its own
+; directory, so a sibling fixture is imported by bare name.
 (module rmod.app)
 
-(import "selfhost/oracle/resolved/fixtures/helper2.coil" :as h :use [inc])
+(import "helper2.coil" :as h :use [inc])
 (import "lib/str.coil" :use *)
 
 (export run cmp)

@@ -131,11 +131,37 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
        (stale-missing). Teeth for BOTH halves in `gate-cli.sh` (Pop/custom bounds; iter-slice,
        in-map, generic `(I Iterator)`, al-for alias) — all FAIL on the pre-gen-1 seed.
 
-6. **File-relative imports + migrate the self-host source (tool-1).** Resolve a relative import
-   against `dirname(importing file)` (the documented, universal rule). The self-host source is
-   written CWD/root-relative, so rewrite its imports too. NOTE from the prior attempt: a
-   file-relative switch changed `emit-ir` output in a way I couldn't explain and broke the
-   bootstrap's own imports — run that down as part of this (it's why a naive switch failed).
+6. **File-relative imports + migrate the self-host source (tool-1).** ✅ DONE. Resolve a relative
+   import against `dirname(importing file)` (the documented, universal rule).
+   OUTCOME: a relative `(import "x.coil")` now resolves against the IMPORTING FILE's directory,
+   not the process CWD — so the `src/main.coil` layout `coil new` scaffolds can finally import a
+   sibling `src/util.coil`, and multi-file apps (chip8, invaders — bare-name sibling imports) build
+   from any directory (they were broken from repo root). The base for the entry file is
+   `(dirname path)` — changed at the one shared front-end seam (`run-pipeline`) plus the dump/expand
+   wrappers and the two `cheader` call sites in `driver.coil`; nested imports already used each
+   imported file's `incdir`, so no other site needed touching. `cwd` still flows for DWARF comp_dir.
+   The self-host ENTRY files (`main.coil`, `main_a64.coil`) were the only source written root-relative
+   (`"selfhost/src/driver.coil"`); every sub-module already imported siblings by bare name, so the
+   migration was just those two files' import blocks → bare names.
+   THE TWO THINGS THE PRIOR ATTEMPT HIT, run down:
+   (a) *"broke the bootstrap's own imports"* — a naive base switch made the OLD seed unable to build
+       the migrated `main.coil` (its `(import "driver.coil")` no longer resolves under the old
+       CWD rule). Inherent: the seed must understand the new rule. Both seeds were REFRESHED (built
+       via an intermediate compiler that has the new resolution) — see `selfhost/seed/SEED_VERSION*`.
+   (b) *"emit-ir change I couldn't explain"* — under a file-relative base, a BUNDLED lib's imports
+       (and the prelude's `control.coil`→`print`→`io` chain) were resolving against the entry file's
+       directory, where demos like `examples/io.coil` / `examples/control.coil` SHADOW the real
+       library — so the io/fmt half of the prelude silently vanished from every `examples/*` build.
+       Fixed: the prelude and any bundled lib resolve their own imports against a `<bundled>` sentinel
+       (`loader.coil::bundled-base`), never a real directory — the bundled stdlib is self-contained.
+       With that, emit-ir is byte-IDENTICAL to the reference (disk lib == bundled lib, so which copy
+       loads doesn't matter). Fixpoint + all 7 gates (ast/resolved/checked/mono/full/diag/cli) +
+       arm64 gate-run + the nollvm bootstrap all green; the expander gate GAINED coverage (chip8 /
+       invaders now resolve their siblings, so their expansions include the sibling modules). Three
+       teeth in `gate-cli.sh` (sibling import in project mode; from an arbitrary CWD; and the prelude
+       reaching bundled io despite a same-named decoy in the entry dir) — all FAIL on the pre-tool-1
+       seed. The three gated fixtures that imported non-bundled/root-relative paths were migrated too
+       (`examples/dyn_write.coil` → `../lib/dyn.coil`; a diag + a resolve fixture).
 
 7. **Delete the comptime interpreter — 3 steps (mac-8 · mac-12 · diag-4).**
    1) Route `(comptime E)`/`(const …)` through the compiled engine (closes mac-8; also fixes
