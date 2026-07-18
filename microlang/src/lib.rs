@@ -21,6 +21,7 @@ pub mod cek;
 pub mod code;
 pub mod compiled;
 pub mod dispatch;
+pub mod feedback;
 pub mod flatten;
 pub mod gc;
 pub mod heap;
@@ -46,6 +47,7 @@ pub use compiled::ClosureComp;
 #[cfg(feature = "jit")]
 pub use jit_cranelift::{jit_can_compile, JitCranelift, ModelArithJit, Tiered};
 pub use dispatch::{Dispatch, DispatchStats, Megamorphic, MonomorphicIc, PolymorphicIc};
+pub use feedback::FeedbackTable;
 pub use speculation::{
     AlwaysMonomorphic, BlacklistAfter, Decision, NeverSpeculate, SpecCounters, SpecStats,
     Speculative, SpeculationPolicy,
