@@ -465,6 +465,7 @@
         (EFloat [bits] (Ok (FVal (CFloat (bits->f64 bits)))))
         (EStr   [s] (Ok (FVal (CStr s))))
         (EComptime [inner] (eval inner env cx))
+        (EAscribe [ty inner] (eval inner env cx))
         (EVar [name]
           (match (env-find env name)
             (Some [v] (Ok (FVal v)))
@@ -1659,6 +1660,7 @@
     (EMakeDyn [ds vs ms inner] (collect-calls inner names out))
     (EDynDispatch [ds vs mi cc ps r recv args] (do (collect-calls recv names out) (cc-list args names out)))
     (ECast    [ty x] (collect-calls x names out))
+    (EAscribe [ty x] (collect-calls x names out))
     (EBin     [op l r] (do (collect-calls l names out) (collect-calls r names out)))
     (ECmp     [op l r] (do (collect-calls l names out) (collect-calls r names out)))
     (EIf      [c t el] (do (collect-calls c names out) (collect-calls t names out) (collect-calls el names out)))
@@ -1893,6 +1895,7 @@
           (EMakeDyn [ds vt ms inner] (do (try! (fold-expr inner cx)) 0))
           (EDynDispatch [ds vt mi cc ps rt recv args] (do (try! (fold-expr recv cx)) (try! (fold-expr-list args cx)) 0))
           (ECast [t x] (do (try! (fold-expr x cx)) 0))
+          (EAscribe [t x] (do (try! (fold-expr x cx)) 0))
           (EBin [op l r] (do (try! (fold-expr l cx)) (try! (fold-expr r cx)) 0))
           (ECmp [op l r] (do (try! (fold-expr l cx)) (try! (fold-expr r cx)) 0))
           (EIf [c t e] (do (try! (fold-expr c cx)) (try! (fold-expr t cx)) (try! (fold-expr e cx)) 0))

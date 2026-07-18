@@ -195,6 +195,7 @@
       (ECodeOp[op args] (do (ps w "codeop") (dump-span w src lo hi ctxt) (wb w 32) (d-codeop w op) (wb w 32) (d-exprs w args)))
       (EQuasi [q] (do (ps w "quasi") (dump-span w src lo hi ctxt) (wb w 32) (let [qp (alloc-stack Quasi)] (store! qp q) (d-quasi w qp))))
       (EComptime[inner] (do (ps w "comptime") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
+      (EAscribe [ty inner] (do (ps w "ascribe") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w inner)))
       ; ---- the 6 check-introduced variants (mirror src/dump_ast.rs) ----
       (ESpillRef[inner] (do (ps w "spillref") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
       (EConstruct[sum variant args] (do (ps w "construct") (dump-span w src lo hi ctxt) (wb w 32) (dstr w sum) (wb w 32) (dstr w variant) (wb w 32) (d-exprs w args)))

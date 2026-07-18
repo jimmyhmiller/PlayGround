@@ -536,6 +536,7 @@
                         (Ok (ECall basefn (box-items-type a) rargs))))))))))
         ; comptime-only / unresolved nodes: a compiler bug if they reach mono.
         (EComptime  [inner] (Err [ExprKind Diag] (derr "mono: unresolved comptime node (compiler bug)")))
+        (EAscribe   [t inner] (Err [ExprKind Diag] (derr "mono: unlowered ascription node — the checker should have replaced (: v t) with its coerced value (compiler bug)")))
         (ETypeQuery [q t] (Err [ExprKind Diag] (derr "mono: unresolved type-query (compiler bug)")))
         (EFieldMeta [meta t idx] (Err [ExprKind Diag] (derr "mono: unresolved field-reflection (compiler bug)")))
         (EFieldIndex [t nm] (Err [ExprKind Diag] (derr "mono: unresolved field-reflection (compiler bug)")))

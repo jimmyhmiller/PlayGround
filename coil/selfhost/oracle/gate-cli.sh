@@ -168,6 +168,27 @@ cat > "$T/std12.coil" <<'EOF'
 EOF
 expect_rc 7 "a bare effect-only (if c (store! p ptr) 0) builds+runs (was: branch-type error)" "$COIL" run "$T/std12.coil"
 
+echo "== type ascription (: value type) supplies a stranded type arg + enforces it (gen-9) =="
+# was: a local could not be annotated, so a generic value whose type argument only the
+# RETURN position could fix — e.g. (Okk 5), where the error type E is undetermined —
+# could not be bound in a let ("cannot infer type argument 'E'"), and `(: …)` itself was
+# a parse error ("expected a symbol head, got :"). Now `(: value type)` checks `value`
+# against `type`, flowing the expected type IN. FAILS on the seed (parse error → run ≠ 5);
+# PASSES here (runs, returns 5 — the payload of (Okk 5)).
+cat > "$T/gen9.coil" <<'EOF'
+(module m)
+(defsum Res [T E] (Okk [(v T)]) (Errr [(e E)]))
+(defn via-let [] (-> (Res i64 bool))
+  (let [r (: (Okk 5) (Res i64 bool))] r))
+(defn main [] (-> i64) (match (via-let) (Okk [v] v) (Errr [e] 0)))
+EOF
+expect_rc 5 "ascription supplies a let binding's stranded type arg (was: parse error)" "$COIL" run "$T/gen9.coil"
+# and it TYPE-CHECKS, it is NOT a silent cast: a value whose type is not the ascribed one
+# is rejected with a located error naming both types.
+printf '(module m)\n(defn main [] (-> i64) (: true i64))\n' > "$T/gen9bad.coil"
+expect_rc 1 "ascription rejects a mismatched value (not a numeric cast)" "$COIL" build "$T/gen9bad.coil" -o "$T/x"
+expect_out "has type bool but expected i64" "…naming both the actual and ascribed type" "$COIL" build "$T/gen9bad.coil" -o "$T/x"
+
 echo "== (target-arch) reflects --target, not a hardcoded host constant =="
 # was: the constant "aarch64" — so a macro branching on it baked the host branch into a
 # cross-compiled wasm build, silently.

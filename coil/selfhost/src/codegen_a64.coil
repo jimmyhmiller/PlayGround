@@ -1502,6 +1502,7 @@
     (EErase [_t _i] (do (cga-fail "EErase reached codegen (checker bug)") (mk-aval 0 0 (TInt 64 true))))
     (ETraitCall [_a _b _c _d] (do (cga-fail "ETraitCall reached codegen (mono bug)") (mk-aval 0 0 (TInt 64 true))))
     (EComptime [_] (do (cga-fail "EComptime reached codegen") (mk-aval 0 0 (TInt 64 true))))
+    (EAscribe [_t _i] (do (cga-fail "EAscribe reached codegen (checker should have lowered (: v t) to its coerced value)") (mk-aval 0 0 (TInt 64 true))))
     (ETypeQuery [_q _t] (do (cga-fail "ETypeQuery reached codegen") (mk-aval 0 0 (TInt 64 true))))
     (EFieldMeta [_m _t _i] (do (cga-fail "EFieldMeta reached codegen") (mk-aval 0 0 (TInt 64 true))))
     (EFieldIndex [_t _n] (do (cga-fail "EFieldIndex reached codegen") (mk-aval 0 0 (TInt 64 true))))

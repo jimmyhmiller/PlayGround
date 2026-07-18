@@ -587,8 +587,19 @@
       (sconcat a what " is a top-level definition, but it appears inside an expression — an enclosing form is missing a ')'"))))
 
 ; the big head dispatch (src/parse.rs parse_list_expr).
+; A bare `:` reads as an empty keyword (KKw ""), so a list whose head is one is the
+; type-ascription form `(: value type)` — checked here BEFORE head-sym, which would
+; otherwise reject the non-symbol head.
+(defn ascribe-head? [(items (ptr (ArrayList Sexp)))] (-> bool)
+  (and (icmp-gt (sx-len items) 0)
+       (and (icmp-eq (sx-tag (sx-at items 0)) 3) (icmp-eq (slice-len (sx-sval (sx-at items 0))) 0))))
 (defn parse-list-expr [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (slo i64) (shi i64) (ssrc i64) (sctxt i64)] (-> (Result ExprKind Diag))
-  (try (let [head (try! (head-sym a items)) args (rest-from a items 1) nargs (sx-len args)]
+  (try
+   (if (ascribe-head? items)
+       (if (icmp-ne (sx-len items) 3)
+           (Err [ExprKind Diag] (derr-at slo shi "type ascription: expects (: value type)"))
+           (Ok (EAscribe (try! (parse-type a (sx-at items 2))) (box-expr a (try! (parse-expr a (sx-at items 1)))))))
+   (let [head (try! (head-sym a items)) args (rest-from a items 1) nargs (sx-len args)]
     (if (toplevel-only-head? head) (return-from :try (Err [ExprKind Diag] (nested-toplevel-diag a head args slo shi))) 0)
     (let [bop (binop-of head)]
     (if (icmp-ge bop 0) (mk-bin a args head bop)
@@ -674,7 +685,7 @@
       (let [fv (sx-get args 0)]
         (if (opt-is-vec fv)
             (Ok (ECall head (try! (parse-types a (sx-items (opt-get fv)))) (try! (parse-exprs a (rest-from a args 1)))))
-            (Ok (ECall head (box-al [Type] a (al-new [Type] a)) (try! (parse-exprs a args))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+            (Ok (ECall head (box-al [Type] a (al-new [Type] a)) (try! (parse-exprs a args)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
 )
 ; ---- declaration parsers (src/parse.rs) ----
 (defn func-name [(f Func)] (-> (slice u8)) (let [p (alloc-stack Func)] (store! p f) (load (field p name))))

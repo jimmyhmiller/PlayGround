@@ -484,6 +484,7 @@
           (EStore [p val] (do (try! (qualify-expr c p tps)) (try! (qualify-expr c val tps)) 0))
           (EIndex [p idx] (do (try! (qualify-expr c p tps)) (try! (qualify-expr c idx tps)) 0))
           (ECast [t inner] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (ECast (load tp) inner))) (try! (qualify-expr c inner tps)) 0))
+          (EAscribe [t inner] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (EAscribe (load tp) inner))) (try! (qualify-expr c inner tps)) 0))
           (ESizeOf [t] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (ESizeOf (load tp)))) 0))
           (EAlignOf [t] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (EAlignOf (load tp)))) 0))
           (EOffsetOf [t fname] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (EOffsetOf (load tp) fname))) 0))

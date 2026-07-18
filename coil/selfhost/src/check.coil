@@ -2467,6 +2467,17 @@
         (err-ep (derr (sconcat a (sconcat4 a "in '" fname "': internal: unresolved trait call '" method) "' in input"))))
       (EComptime [inner]
         (match (do-synth a inner expected env cx tps fname) (Err [d] (err-ep d)) (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0) (ok-ep (mk-expr (EComptime (load (field sp e))) elo ehi esrc ectxt) (load (load (field sp t))))))))
+      ; Type ascription `(: value type)`: check `inner` against `ty` (so a stranded type
+      ; arg can be supplied and any legal coercion applies), then LOWER it away — the
+      ; result is the coerced inner value at `ty`, so no EAscribe node reaches mono/codegen.
+      (EAscribe [ty inner]
+        (let [tp (box-type a ty)]
+          (match (validate-type tp cx tps)
+            (Err [d] (err-ep (prefix-diag a d (sconcat3 a "in '" fname "': type ascription: "))))
+            (Ok [_]
+              (match (check-to a inner tp env cx tps fname "ascribed value")
+                (Err [d] (err-ep d))
+                (Ok [ce] (ok-ep ce (load tp))))))))
       (EStaticRef [name]
         (err-ep (derr (sconcat a (sconcat4 a "in '" fname "': internal: unexpected static-ref '" name) "' in input"))))
       (ETypeQuery [q ty]

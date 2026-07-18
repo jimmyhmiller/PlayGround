@@ -727,6 +727,7 @@
       (EErase [tn inner] (cg-bug "codegen: unlowered Erase (checker should have made it a MakeDyn)"))
       (ETraitCall [tn m s args] (cg-bug "codegen: unresolved trait call (compiler bug)"))
       (EComptime [inner] (cg-bug "codegen: unresolved comptime node (compiler bug)"))
+      (EAscribe [ty inner] (cg-bug "codegen: unlowered ascription node — the checker should have replaced (: v t) with its coerced value (compiler bug)"))
       (EQuote [form] (cg-bug "codegen: a Code value has no runtime representation"))
       (ECodeOp [op args] (cg-bug "codegen: a Code value has no runtime representation"))
       (EQuasi [q] (cg-bug "codegen: a Code value has no runtime representation"))

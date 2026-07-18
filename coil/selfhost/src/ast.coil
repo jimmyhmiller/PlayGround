@@ -34,7 +34,7 @@
 ; A struct/variant field (name + type).
 (defstruct Field [(name (slice u8)) (ty Type)])
 
-; ExprKind — the 42 variants `parse_program` can PRODUCE (the 6 checker/mono-only
+; ExprKind — the 43 variants `parse_program` can PRODUCE (the 6 checker/mono-only
 ; variants — SpillRef, DynDispatch, MakeDyn, Construct, StaticRef, TraitCall —
 ; are never produced by the parser, so they are intentionally absent here).
 ; Numeric op tags: BinOp/CmpOp/Storage/TypeQuery/FieldMeta/CodeOp are stored as
@@ -82,6 +82,12 @@
   (ECodeOp    [(op i64) (args (ptr (ArrayList Expr)))])
   (EQuasi     [(q Quasi)])
   (EComptime  [(inner (ptr Expr))])
+  ; Type ascription `(: value type)` — a general expression that synthesizes `value`
+  ; with `type` as the expected type (so an otherwise-stranded type argument can be
+  ; supplied) and yields it at `type`. The checker LOWERS it away (to the coerced
+  ; inner value), so it never survives into mono/codegen. Same field shape as ECast,
+  ; but it type-CHECKS rather than numeric-converts.
+  (EAscribe   [(ty Type) (inner (ptr Expr))])
   ; ---- the 6 check-introduced variants (parser/resolver never emit these;
   ; the type-checker LOWERS calls/borrows/etc. into them). Mirror src/ast.rs.
   (ESpillRef  [(inner (ptr Expr))])
