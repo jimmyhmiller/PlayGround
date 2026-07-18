@@ -358,6 +358,33 @@
           (store! i (iadd (load i) 1)))))
     (load out)))
 
+; A synthetic associated type minted for an associated-type bound
+; (check.coil::assoc-tp-name) is spelled `C$assoc$Get$K`. Render it readably as
+; `<C as Get>::K` in diagnostics. No ordinary type name contains `$assoc$`, so
+; `assoc-marker-at` returns -1 for every real type and this is a no-op there —
+; existing ty-str output is byte-for-byte unchanged.
+(defn assoc-marker-at [(s (slice u8))] (-> i64)
+  (let [n (slice-len s) mk "$assoc$" mn (slice-len mk) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-gt (iadd (load i) mn) n) (break)
+      (do (if (str-eq (subslice [u8] s (load i) (iadd (load i) mn)) mk) (do (store! r (load i)) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn last-dollar [(s (slice u8))] (-> i64)
+  (let [n (slice-len s) (mut i) (isub n 1) (mut r) -1]
+    (loop (if (icmp-lt (load i) 0) (break)
+      (do (if (icmp-eq (cast i64 (slice-get s (load i))) 36) (do (store! r (load i)) (break)) 0)
+          (store! i (isub (load i) 1)))))
+    (load r)))
+(defn assoc-render [(a (ptr Allocator)) (s (slice u8))] (-> (slice u8))
+  (let [mi (assoc-marker-at s)]
+    (if (icmp-lt mi 0) s
+      (let [base (subslice [u8] s 0 mi)
+            rest (subslice [u8] s (iadd mi 7) (slice-len s))
+            di (last-dollar rest)]
+        (if (icmp-lt di 0) s
+          (let [tr (subslice [u8] rest 0 di) p (subslice [u8] rest (iadd di 1) (slice-len rest))]
+            (sconcat a "<" (sconcat a base (sconcat a " as " (sconcat3 a tr ">::" p))))))))))
+
 (defn ty-str [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
   (let [tg (type-tag t)]
     (if (icmp-eq tg 12) "!"
@@ -369,7 +396,7 @@
     (if (icmp-eq tg 2) "bool"
     (if (icmp-eq tg 4) (sconcat3 a "(ptr " (ty-str a (t-inner t)) ")")
     (if (icmp-eq tg 5) (if (t-ref-mut t) (sconcat3 a "(mut " (ty-str a (t-inner t)) ")") (sconcat3 a "(ref " (ty-str a (t-inner t)) ")"))
-    (if (icmp-eq tg 6) (type-struct-name t)
+    (if (icmp-eq tg 6) (assoc-render a (type-struct-name t))
     (if (icmp-eq tg 7) (sconcat3 a (sconcat3 a "(array " (ty-str a (t-inner t)) " ") (i64->str a (t-arrn t)) ")")
     (if (icmp-eq tg 8) (sconcat3 a "(slice " (ty-str a (t-inner t)) ")")
     (if (icmp-eq tg 9) (sconcat3 a (sconcat3 a "(vec " (ty-str a (t-inner t)) " ") (i64->str a (t-arrn t)) ")")

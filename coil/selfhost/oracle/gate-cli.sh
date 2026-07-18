@@ -276,6 +276,57 @@ expect_out "if you meant a supertrait" "…and the error points at :requires" "$
 printf '(module app)\n(deftrait Grab [Self K E] (grab [(x Self) (k K)] (-> E)))\n(defn main [] (-> i64) 0)\n' > "$T/super_assoc.coil"
 expect_rc 0 "associated-type params [Self K E] still parse (not mistaken for supertraits)" "$COIL" build "$T/super_assoc.coil" -o "$T/x"
 
+echo "== parameterized traits are usable as bounds; extra params are associated types (gen-1) =="
+# was: a bound over a PARAMETERIZED trait (Get/Set/Push/Pop or any [Self …] trait) was a
+# hard error — "trait 'Pop' takes type parameters — bounds over parameterized traits aren't
+# supported yet" — so there was NO generic code over any collection. Now the non-Self params
+# are ASSOCIATED TYPES determined by the impl (one impl per type): the bounded body checks
+# against them, and mono resolves each to the impl's concrete type. FAILS on the seed (build
+# exits 1, "aren't supported yet"), PASSES here.
+# Pop is (deftrait Pop [Self E] (pop! [(xs (mut Self))] (-> (Option E)))); E is return-only.
+cat > "$T/gen1pop.coil" <<'EOF'
+(module app)
+(import "arraylist.coil" :use *)
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(defn drain-count [(C Pop)] [(xs (mut C))] (-> i64)
+  (let [(mut n) 0]
+    (loop (match (pop! (mut xs)) (None [] (break)) (Some [v] (store! n (+ (load n) 1)))))
+    (load n)))
+(defn main [] (-> i64)
+  (let [a (malloc-allocator) (mut xs) (al-new [i64] a)]
+    (al-push! (mut xs) 10) (al-push! (mut xs) 20) (al-push! (mut xs) 30)
+    (drain-count (mut xs))))
+EOF
+expect_rc 3 "Pop used as a bound drains a concrete ArrayList (was: 'aren't supported yet')" "$COIL" run "$T/gen1pop.coil"
+# a user's own parameterized trait, two impls, associated element type read off each impl
+cat > "$T/gen1custom.coil" <<'EOF'
+(module app)
+(import "result.coil" :use *)
+(deftrait Container [Self Elem]
+  (head [(c Self)] (-> (Option Elem)))
+  (size [(c Self)] (-> i64)))
+(defstruct IntBox [(v i64)])
+(impl Container IntBox (head [(c IntBox)] (-> (Option i64)) (Some (load (field c v)))) (size [(c IntBox)] (-> i64) 1))
+(defstruct Empty [(x i64)])
+(impl Container Empty (head [(c Empty)] (-> (Option i64)) (None)) (size [(c Empty)] (-> i64) 0))
+(defn describe [(C Container)] [(c C)] (-> i64)
+  (match (head c) (Some [v] (+ 100 (size c))) (None [] (size c))))
+(defn main [] (-> i64)
+  (let [b (alloc-stack IntBox) e (alloc-stack Empty)]
+    (store! (field b v) 7) (store! (field e x) 0)
+    (+ (describe (load b)) (describe (load e)))))
+EOF
+expect_rc 101 "a user parameterized trait as a bound dispatches per-impl (IntBox=101, Empty=0)" "$COIL" run "$T/gen1custom.coil"
+# calling a parameterized method on an UNBOUNDED type param is a located definition-time error
+printf '(module m)\n(import "result.coil" :use *)\n(deftrait Box2 [Self E] (peek [(c Self)] (-> (Option E))))\n(defn bad [T] [(x T)] (-> i64) (match (peek x) (Some [v] 1) (None [] 0)))\n(defn main [] (-> i64) 0)\n' > "$T/gen1unb.coil"
+expect_out "'T' is not bounded by 'm.Box2'" "an unbounded param calling a parameterized method is located" "$COIL" build "$T/gen1unb.coil" -o "$T/x"
+# an associated type in ARGUMENT position (a Get key, not return) renders readably in the
+# mismatch — `<C as Get>::K`, not the internal mangling. The seed can't reach this message
+# (it errors "aren't supported yet" first), so this is the teeth.
+printf '(module app)\n(import "arraylist.coil" :use *)\n(defn first-elem [(C Get)] [(xs C)] (-> i64) (get xs 0))\n(defn main [] (-> i64) 0)\n' > "$T/gen1assoc.coil"
+expect_out "expected <C as Get>::K" "an associated type renders as <C as Trait>::Param in diagnostics" "$COIL" build "$T/gen1assoc.coil" -o "$T/x"
+
 echo "== (target-arch) reflects --target, not a hardcoded host constant =="
 # was: the constant "aarch64" — so a macro branching on it baked the host branch into a
 # cross-compiled wasm build, silently.

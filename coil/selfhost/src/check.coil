@@ -1062,7 +1062,7 @@
             (if (and (not (type-eq (field fp ret) (box-type a (TInt 64 true)))) (not (type-is-void (field fp ret))))
                 (return-from :try (Err [Func Diag] (derr (sconcat a (sconcat3 a "function '" fnm "': body has type i64 but the declared return type is ") (ty-str a (field fp ret)))))) 0)
             0)
-        (let [out-body (try! (check-body a cx fp env tps fnm)) outf (alloc-stack Func)]
+        (let [out-body (try! (check-body a cx fp env (assoc-body-tps a cx (load (field fp bounds)) tps) fnm)) outf (alloc-stack Func)]
           (store! (field outf name) fnm)
           (store! (field outf type_params) tps)
           (store! (field outf bounds) (load (field fp bounds)))
@@ -1876,11 +1876,62 @@
           (if (or (icmp-eq tg 4) (icmp-eq tg 5)) (do (store! r (t-inner (load r))) 0) (break)))))
     (if (load found) (load r) (peel-ref-ptr t0))))
 
-; trait type-parameter Self deferred args (check.rs:1424)
-(defn trait-tp-args [(a (ptr Allocator)) (tm (ptr TraitMethod)) (self_pname (slice u8)) (self_as_ty (ptr Type)) (args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (func (slice u8))] (-> (Result (ptr (ArrayList Expr)) Diag))
+; ---- associated-type bounds (gen-1) ----------------------------------------
+; A PARAMETERIZED trait `(deftrait Get [Self K E] …)` can be used as a bound
+; `(C Get)`: its non-Self params (K, E) are ASSOCIATED TYPES — determined by C's
+; impl, one impl per type. Inside the bounded generic they are unknown, so each is
+; represented as a synthetic abstract type param `<C>$assoc$<Trait>$<K>` — a spelling
+; no user identifier can produce (`$` isn't an identifier char), so it never collides
+; with a real type. These names are added to the body's tps (so a call whose
+; result/arg mentions one type-checks) and resolved to the impl's concrete type at
+; monomorphization (mono reads them off the receiver's impl, exactly as it already
+; reads a generic impl's own type params).
+(defn assoc-tp-name [(a (ptr Allocator)) (base (slice u8)) (tr (slice u8)) (p (slice u8))] (-> (slice u8))
+  (sconcat3 a base "$assoc$" (sconcat3 a (display-name tr) "$" p)))
+
+; The deferred-call substitution: the trait method's `Self` -> the bounded type
+; param `C`, and each extra trait param -> its associated type. `subst-apply` over
+; this turns the trait method signature into the concrete-in-C signature the body
+; is checked against.
+(defn build-trait-subst [(a (ptr Allocator)) (self_pname (slice u8)) (self_name (slice u8)) (trait_name (slice u8)) (td (ptr TraitDef))] (-> (ptr (ArrayList SubstEntry)))
+  (let [s (subst-new a)]
+    (subst-insert! s self_pname (box-type a (TStruct self_name)))
+    (let [tps2 (load (field td type_params)) np (al-len [(slice u8)] (load tps2)) (mut i) 0]
+      (loop (if (icmp-ge (load i) np) (break)
+        (do (let [p (al-get [(slice u8)] (load tps2) (load i))]
+              (subst-insert! s p (box-type a (TStruct (assoc-tp-name a self_name trait_name p)))))
+            (store! i (iadd (load i) 1))))))
+    s))
+
+; `base` (the function's declared type params) extended with the associated-type
+; names of every bound over a parameterized trait — the tps the BODY is checked
+; against. The stored func `type_params` are unchanged: associated types are
+; internal, never named by a caller.
+(defn assoc-body-tps [(a (ptr Allocator)) (cx (ptr Cx)) (bounds (ptr (ArrayList Bound))) (base (ptr (ArrayList (slice u8))))] (-> (ptr (ArrayList (slice u8))))
+  (let [(mut out) (al-new [(slice u8)] a) nb (al-len [(slice u8)] (load base)) (mut i) 0]
+    (loop (if (icmp-ge (load i) nb) (break)
+      (do (al-push! (mut out) (al-get [(slice u8)] (load base) (load i))) (store! i (iadd (load i) 1)))))
+    (let [nbd (al-len [Bound] (load bounds)) (mut j) 0]
+      (loop (if (icmp-ge (load j) nbd) (break)
+        (do (let [bp (al-elem [Bound] bounds (load j)) trs (load (field bp traits)) m (al-len [(slice u8)] (load trs)) (mut k) 0]
+              (loop (if (icmp-ge (load k) m) (break)
+                (do (let [tr (al-get [(slice u8)] (load trs) (load k)) td (trait-find cx tr)]
+                      (if (icmp-ne (cast i64 td) 0)
+                          (let [tps2 (load (field td type_params)) np (al-len [(slice u8)] (load tps2)) (mut p) 0]
+                            (loop (if (icmp-ge (load p) np) (break)
+                              (do (al-push! (mut out) (assoc-tp-name a (load (field bp name)) tr (al-get [(slice u8)] (load tps2) (load p))))
+                                  (store! p (iadd (load p) 1))))))
+                          0))
+                    (store! k (iadd (load k) 1))))))
+            (store! j (iadd (load j) 1))))))
+    (box-al [(slice u8)] a (load out))))
+
+; trait type-parameter Self deferred args (check.rs:1424). `subst` maps Self -> the
+; bounded param and every associated type -> its synthetic name (build-trait-subst).
+(defn trait-tp-args [(a (ptr Allocator)) (tm (ptr TraitMethod)) (subst (ptr (ArrayList SubstEntry))) (args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (func (slice u8))] (-> (Result (ptr (ArrayList Expr)) Diag))
   (let [ps (load (field tm params)) n (al-len [Expr] (load args)) (mut out) (al-new [Expr] a) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
-      (do (let [want (subst-self a (field (al-elem [Param] ps (load i)) ty) self_pname self_as_ty) wp (box-type a want)
+      (do (let [want (subst-apply a (field (al-elem [Param] ps (load i)) ty) subst) wp (box-type a want)
                 ismut (is-mut-borrow (al-elem [Expr] args (load i)))
                 exp (if (icmp-eq (type-tag wp) 5) (t-inner wp) wp)
                 what (sconcat a (sconcat a (sconcat3 a "argument " (i64->str a (iadd (load i) 1)) " to '") func) "'")]
@@ -2075,17 +2126,17 @@
                     (if (icmp-gt (slice-len [u8] (dyn-struct-trait cx self_name)) 0)
                         (return-from :try (synth-dyn-dispatch a cx mname self_name self_idx td tm args env tps fname elo ehi esrc ectxt)) 0)
                     (if (set-contains tps self_name)
-                        (do
-                          ; a parameterized trait's extra types are read off the
-                          ; receiver's impl — unknown while Self is a type param
-                          (if (icmp-gt (al-len [(slice u8)] (load (load (field td type_params)))) 0)
-                              (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': trait '" (sconcat a (display-name trait_name) "' takes type parameters — bounds over ")) "parameterized traits aren't supported yet; call '") mname) "' on a concrete receiver instead")))) 0)
+                        ; Self is a type parameter: a DEFERRED trait call. The bound must
+                        ; carry the trait (definition-time check). A parameterized trait's
+                        ; extra params become associated types (build-trait-subst); the
+                        ; method sig, substituted, types the call — mono resolves it to the
+                        ; impl once Self is concrete.
                         (if (not (bounds-has (field cx cur_bounds) self_name trait_name))
                             (return-from :try (err-ep (derr (sconcat a (sconcat a (sconcat a (sconcat4 a "in '" fname "': type parameter '" (sconcat a self_name "' is not bounded by '")) (display-name trait_name)) "' (required to call '") (sconcat a mname "')")))))
-                          (let [self_as_ty (box-type a (TStruct self_name))
-                                new_args (try! (trait-tp-args a tm self_pname self_as_ty args env cx tps fname mname))
-                                ret (subst-self a (field tm ret) self_pname self_as_ty)]
-                            (return-from :try (ok-ep (mk-expr (ETraitCall trait_name mname self_name new_args) elo ehi esrc ectxt) ret)))))
+                          (let [subst (build-trait-subst a self_pname self_name trait_name td)
+                                new_args (try! (trait-tp-args a tm subst args env cx tps fname mname))
+                                ret (subst-apply a (field tm ret) subst)]
+                            (return-from :try (ok-ep (mk-expr (ETraitCall trait_name mname self_name new_args) elo ehi esrc ectxt) ret))))
                       ; Pick the most specific impl accepting this receiver, and call
                       ; THAT impl's function. Errors name the RECEIVER TYPE, not the
                       ; dispatch key: selection matches type arguments, so `(Pair u8 bool)`
