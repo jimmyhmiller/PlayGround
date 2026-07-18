@@ -1,6 +1,6 @@
 # flowline
 
-A native agent-workflow runner built in Coil with Raylib. It loads a workflow program, derives node readiness from its dependency graph, launches real Codex agents, captures their final responses, and pauses at explicit human-approval nodes.
+A native agent-workflow runner built in Coil with Raylib. It loads a workflow program, derives node readiness from its dependency graph, launches real DeepSeek agent turns, captures their final responses, and pauses at explicit human-approval nodes.
 
 ## Run
 
@@ -53,7 +53,7 @@ The catalog intentionally starts empty.
 4. Wait for the creator status to change to `WORKFLOW CREATED`. The new workflow is selected automatically and appears in the sidebar.
 5. Click `RUN WORKFLOW`. Select nodes to inspect their status and output, and approve explicit human-approval nodes when they pause.
 
-Design and creation require the `codex` CLI to be installed and authenticated. The design conversation is recorded beneath `.flowline/`, and the creator turns that conversation into one project-specific program beneath `workflows/` only after you ask it to build.
+Design, creation, and node agents call the DeepSeek API through `tools/deepseek-agent.sh`; set `DEEPSEEK_KEY` (or `DEEPSEEK_API_KEY`) in the environment. `DEEPSEEK_MODEL` (default `deepseek-v4-pro`), `DEEPSEEK_BASE`, `DEEPSEEK_MAX_TOKENS`, and `DEEPSEEK_TIMEOUT` are also honored. The design conversation is recorded beneath `.flowline/`, and the creator turns that conversation into one project-specific program beneath `workflows/` only after you ask it to build.
 
 ## Workflow DSL
 
@@ -61,7 +61,7 @@ Generated programs use a line-oriented DSL supporting sequential nodes, parallel
 
 ```text
 workflow Release Readiness
-runner codex
+runner deepseek
 
 agent build
 title Build project
@@ -80,7 +80,7 @@ after review
 
 `after none` creates a root. Two dependency names separated by a comma create a join. Nodes that become ready together are launched concurrently.
 
-Click `RUN WORKFLOW` to execute the selected program. Agent processes use `codex exec --ephemeral --sandbox workspace-write`. Prompts, event logs, completion sentinels, and final messages are written beneath `.flowline/`.
+Click `RUN WORKFLOW` to execute the selected program. Agent turns are single DeepSeek completions given the node prompt, a repository file map, and the contents of repository files the prompt names; they return text only and cannot edit files. Prompts, event logs, completion sentinels, and final messages are written beneath `.flowline/`.
 
 Inspect the parsed graph without opening the UI or running agents:
 

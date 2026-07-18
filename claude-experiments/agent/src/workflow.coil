@@ -186,7 +186,7 @@
         (mut current) -1]
     (do
       (store! (field program name) c"invalid-workflow")
-      (store! (field program runner) c"codex")
+      (store! (field program runner) c"deepseek")
       (store! (field program path) path)
       (store! (field program source) source)
       (loop (let [byte (load (load cursor))]
@@ -290,7 +290,7 @@
   (do
     (system c"mkdir -p .flowline workflows; rm -f .flowline/create.done .flowline/create.failed .flowline/create.output .flowline/created.path")
     (write-text-file c".flowline/create.request" request)
-    (system c"(codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/create.output - < prompts/create-workflow.md > .flowline/create.events 2>&1 && find workflows -maxdepth 1 -type f -name '*.flow' -newer .flowline/create.request -print | sort | head -n 1 > .flowline/created.path && test -s .flowline/created.path && touch .flowline/create.done || touch .flowline/create.failed) &")
+    (system c"(tools/deepseek-agent.sh --prompt prompts/create-workflow.md --output .flowline/create.output --context .flowline/create.request --inline-named-files --repo-map --extract-flow > .flowline/create.events 2>&1 && find workflows -maxdepth 1 -type f -name '*.flow' -newer .flowline/create.request -print | sort | head -n 1 > .flowline/created.path && test -s .flowline/created.path && touch .flowline/create.done || touch .flowline/create.failed) &")
     0))
 
 (defn start-design-turn [(request (ptr i8)) (turn i64)] (-> i64)
@@ -300,7 +300,7 @@
       (write-text-file c".flowline/design.transcript" c"")
       0)
     (write-text-file c".flowline/design.request" request)
-    (system c"(codex exec --ephemeral --sandbox read-only --skip-git-repo-check -o .flowline/design.output - < prompts/design-workflow.md > .flowline/design.events 2>&1 && touch .flowline/design.done || touch .flowline/design.failed) &")
+    (system c"(tools/deepseek-agent.sh --prompt prompts/design-workflow.md --output .flowline/design.output --context .flowline/design.transcript --context .flowline/design.request --inline-named-files --repo-map > .flowline/design.events 2>&1 && touch .flowline/design.done || touch .flowline/design.failed) &")
     0))
 
 (defn design-state [] (-> i64)
@@ -409,18 +409,18 @@
 
 (defn launch-command [(node i64)] (-> (ptr i8))
   (case node 0
-        c"rm -f .flowline/node0.done .flowline/node0.failed .flowline/node0.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node0.output - < .flowline/node0.prompt > .flowline/node0.events 2>&1 && touch .flowline/node0.done || touch .flowline/node0.failed) &"
+        c"rm -f .flowline/node0.done .flowline/node0.failed .flowline/node0.output; (tools/deepseek-agent.sh --prompt .flowline/node0.prompt --output .flowline/node0.output --inline-named-files --repo-map --wrap > .flowline/node0.events 2>&1 && touch .flowline/node0.done || touch .flowline/node0.failed) &"
           1
-        c"rm -f .flowline/node1.done .flowline/node1.failed .flowline/node1.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node1.output - < .flowline/node1.prompt > .flowline/node1.events 2>&1 && touch .flowline/node1.done || touch .flowline/node1.failed) &"
+        c"rm -f .flowline/node1.done .flowline/node1.failed .flowline/node1.output; (tools/deepseek-agent.sh --prompt .flowline/node1.prompt --output .flowline/node1.output --inline-named-files --repo-map --wrap > .flowline/node1.events 2>&1 && touch .flowline/node1.done || touch .flowline/node1.failed) &"
           2
-        c"rm -f .flowline/node2.done .flowline/node2.failed .flowline/node2.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node2.output - < .flowline/node2.prompt > .flowline/node2.events 2>&1 && touch .flowline/node2.done || touch .flowline/node2.failed) &"
+        c"rm -f .flowline/node2.done .flowline/node2.failed .flowline/node2.output; (tools/deepseek-agent.sh --prompt .flowline/node2.prompt --output .flowline/node2.output --inline-named-files --repo-map --wrap > .flowline/node2.events 2>&1 && touch .flowline/node2.done || touch .flowline/node2.failed) &"
           3
-        c"rm -f .flowline/node3.done .flowline/node3.failed .flowline/node3.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node3.output - < .flowline/node3.prompt > .flowline/node3.events 2>&1 && touch .flowline/node3.done || touch .flowline/node3.failed) &"
+        c"rm -f .flowline/node3.done .flowline/node3.failed .flowline/node3.output; (tools/deepseek-agent.sh --prompt .flowline/node3.prompt --output .flowline/node3.output --inline-named-files --repo-map --wrap > .flowline/node3.events 2>&1 && touch .flowline/node3.done || touch .flowline/node3.failed) &"
           4
-        c"rm -f .flowline/node4.done .flowline/node4.failed .flowline/node4.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node4.output - < .flowline/node4.prompt > .flowline/node4.events 2>&1 && touch .flowline/node4.done || touch .flowline/node4.failed) &"
+        c"rm -f .flowline/node4.done .flowline/node4.failed .flowline/node4.output; (tools/deepseek-agent.sh --prompt .flowline/node4.prompt --output .flowline/node4.output --inline-named-files --repo-map --wrap > .flowline/node4.events 2>&1 && touch .flowline/node4.done || touch .flowline/node4.failed) &"
           5
-        c"rm -f .flowline/node5.done .flowline/node5.failed .flowline/node5.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node5.output - < .flowline/node5.prompt > .flowline/node5.events 2>&1 && touch .flowline/node5.done || touch .flowline/node5.failed) &"
-          c"rm -f .flowline/node6.done .flowline/node6.failed .flowline/node6.output; (codex exec --ephemeral --sandbox workspace-write --skip-git-repo-check -o .flowline/node6.output - < .flowline/node6.prompt > .flowline/node6.events 2>&1 && touch .flowline/node6.done || touch .flowline/node6.failed) &"))
+        c"rm -f .flowline/node5.done .flowline/node5.failed .flowline/node5.output; (tools/deepseek-agent.sh --prompt .flowline/node5.prompt --output .flowline/node5.output --inline-named-files --repo-map --wrap > .flowline/node5.events 2>&1 && touch .flowline/node5.done || touch .flowline/node5.failed) &"
+          c"rm -f .flowline/node6.done .flowline/node6.failed .flowline/node6.output; (tools/deepseek-agent.sh --prompt .flowline/node6.prompt --output .flowline/node6.output --inline-named-files --repo-map --wrap > .flowline/node6.events 2>&1 && touch .flowline/node6.done || touch .flowline/node6.failed) &"))
 
 (defn file-exists [(path (ptr i8))] (-> bool)
   (let [file (fopen path c"rb")]

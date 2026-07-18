@@ -1,14 +1,14 @@
 You are creating one executable Flowline workflow for this repository.
 
-Read `.flowline/create.request` for the user's goal. Inspect the repository to understand the project before designing the workflow.
+The user's goal (`.flowline/create.request`) and a map of the repository are included below as labeled sections. Design the workflow for this actual repository and that stated goal, not generic filler.
 
-Create exactly one new file under `workflows/` with a unique descriptive kebab-case filename ending in `.flow`. Do not modify any other file.
+Reply with a line `file: workflows/<unique-descriptive-kebab-name>.flow` followed by exactly one fenced code block containing the complete workflow file. No other prose.
 
 The grammar is line-oriented:
 
 ```text
 workflow Human Readable Name
-runner codex
+runner deepseek
 
 agent unique-node-name
 title Human readable node title
@@ -30,5 +30,5 @@ Rules:
 - Dependencies must refer to earlier nodes.
 - Use independent sibling agents when work can happen concurrently.
 - Use an approval node before consequential or irreversible work.
-- Prompts must name the repository files or project areas agents should inspect when useful.
-- The workflow must be useful for this actual repository and the user's stated goal, not generic filler.
+- Agents run as single language-model calls; they cannot execute commands or edit files. Write prompts that ask for analysis, review, plans, or drafted content returned as text.
+- Each agent receives a repository file map, and the full contents of repository files its prompt names. Name the exact files the agent should work from in its prompt.
