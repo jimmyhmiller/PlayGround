@@ -446,6 +446,45 @@ for e in examples/shim.coil examples/everything.coil; do
                  || bad "$e on the LLVM backend" "rc=$rc: $(echo "$out" | head -1)"
 done
 
+echo "== export-c on the arm64 backend (unblocks the LLVM-free compiled metaprogram engine) =="
+# Was: the arm64 backend hard-errored "export-c is not supported by the arm64 backend yet"
+# for ANY (export-c …), so main_a64 could register no metaprogram object builder and the
+# LLVM-free compiler was stuck on the interpreter (mac-12). It is AAPCS64-native, so
+# scalar/pointer params and struct RETURNS are emitted directly under the C symbol with
+# external linkage — no thunk. A by-value STRUCT param is the one case that still needs a
+# marshaling thunk: a clear hard error, never a silently-wrong symbol.
+cat > "$T/expc.coil" <<'EOF'
+(module shapes)
+(defstruct Point [(x i64) (y i64)])
+(defn clamp0 [(n i64)] (-> i64) (if (icmp-lt n 0) 0 n))
+(defn make-point [(x i64) (y i64)] (-> Point)
+  (let [p (alloc-stack Point)] (store! (field p x) (clamp0 x)) (store! (field p y) (clamp0 y)) (load p)))
+(defn add3 [(x i64) (y i64) (z i64)] (-> i64) (iadd (iadd x y) z))
+(export-c [make-point :as "shapes_make_point"] [add3 :as "shapes_add3"])
+EOF
+if "$COIL" emit-obj "$T/expc.coil" -o "$T/expc.o" --backend arm64 >/dev/null 2>&1; then
+  cat > "$T/expc_drv.c" <<'EOF'
+#include <stdint.h>
+typedef struct { int64_t x, y; } Point;
+extern Point   shapes_make_point(int64_t, int64_t);
+extern int64_t shapes_add3(int64_t, int64_t, int64_t);
+int main(void){ Point p = shapes_make_point(3, -4);          /* (3,0) */
+  return (int)(p.x + p.y + shapes_add3(10,20,30) - 63); }    /* 3 + 60 - 63 = 0 */
+EOF
+  if cc "$T/expc_drv.c" "$T/expc.o" -o "$T/expc_test" 2>/dev/null && "$T/expc_test"; then
+    ok "export-c --backend arm64: scalar + struct-return callable from C (AAPCS64, no thunk)"
+  else
+    bad "export-c --backend arm64: C call" "the linked object did not return the expected value"
+  fi
+else
+  bad "export-c --backend arm64: emit-obj rejected a thunk-free export" "seed hard-errors on all exports"
+fi
+# a by-value struct param is a clear located hard error (SIGABRT), naming the reason
+printf '(module s)\n(defstruct P [(x i64)(y i64)])\n(defn d [(p P)] (-> i64) (load (field p x)))\n(export-c [d :as "s_d"])\n' > "$T/expc_bad.coil"
+expect_out "by-value struct parameter isn't supported" \
+  "export-c arm64: by-value struct param is a clear error, not a bad symbol" \
+  "$COIL" emit-obj "$T/expc_bad.coil" -o "$T/expc_bad.o" --backend arm64
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL

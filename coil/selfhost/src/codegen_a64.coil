@@ -433,6 +433,32 @@
 (defn g-mangle [(g (ptr Cga)) (nm (slice u8))] (-> (slice u8))
   (sconcat (load (field g a)) "_" nm))
 
+; the C symbol a function is exported under, or None. Mirrors codegen.coil's
+; cg-export-find: an (export-c …) entry pins the function's public symbol. On this
+; AAPCS64-native backend no thunk is needed — the function itself is emitted under
+; this symbol with external linkage (see g-register-sigs!). ExportC.symbol is always
+; Some by codegen time (check.coil fills the default bare-name symbol when :as is
+; omitted).
+(defn g-export-c-sym [(mp (ptr Program)) (name (slice u8))] (-> (Option (slice u8)))
+  (let [es (load (field mp exports)) n (al-len [ExportC] (load es)) (mut i) 0 (mut r) (None [(slice u8)])]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-at [ExportC] es (load i)) name)) name)
+              (do (store! r (load (field (al-at [ExportC] es (load i)) symbol))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+; a by-value STRUCT param (type-tag 6) is the one C-export case this reference-model
+; backend passes differently from C (by pointer, not in registers) — it would need a
+; C-ABI marshaling thunk. Mirrors codegen.coil::cg-export-needs-thunk. Scalar/pointer
+; params, struct RETURNS (sret / x0-x1, which already match C), and the metaprogram
+; entries (Code = pointer args, empty ExportC params) are all thunk-free.
+(defn g-export-needs-thunk [(e (ptr ExportC))] (-> bool)
+  (let [ps (load (field e params)) n (al-len [Type] (load ps)) (mut i) 0 (mut r) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match-else (load (al-at [Type] ps (load i)))
+            (TStruct [nm] (do (store! r true) 0))
+            (_ 0))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
 ; register every extern + func as a GSig with a Mach-O symbol.
 (defn g-register-sigs! [(g (ptr Cga)) (mp (ptr Program))] (-> i64)
   (let [es (load (field mp externs)) n (al-len [Extern] (load es)) (mut i) 0]
@@ -458,9 +484,14 @@
   (let [fs (load (field mp funcs)) n (al-len [Func] (load fs)) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
       (do (let [fd (al-at [Func] fs (load i))
-                ext (str-eq (load (field fd name)) "main")
+                expsym (g-export-c-sym mp (load (field fd name)))
+                ; an exported function is emitted directly under its C symbol with
+                ; external linkage; otherwise the mangled Coil name, external only for main.
+                ext (or (str-eq (load (field fd name)) "main")
+                        (match expsym (Some [s] true) (None [] false)))
+                symname (match expsym (Some [s] s) (None [] (load (field fd name))))
                 sym (mobj-add-sym! (mut (field g obj))
-                       (g-mangle g (load (field fd name))) (load (field g text)) 0 ext)
+                       (g-mangle g symname) (load (field g text)) 0 ext)
                 (mut ptys) (al-new [Type] (load (field g a)))
                 e (alloc-stack GSig)]
             (let [ps (load (field fd params)) np (al-len [Param] (load ps)) (mut j) 0]
@@ -2863,7 +2894,8 @@
 ; ============================ driver =========================================
 (defn cga64-build-object [(a (ptr Allocator)) (mp (ptr Program)) (objpath (ptr i8))
                           (mainpath (slice u8)) (compdir (slice u8))
-                          (paths (ptr (ArrayList (slice u8)))) (texts (ptr (ArrayList (slice u8))))] (-> i64)
+                          (paths (ptr (ArrayList (slice u8)))) (texts (ptr (ArrayList (slice u8))))
+                          (emit-dwarf bool)] (-> i64)
   (let [g (alloc-stack Cga)]
     (store! (field g a) a)
     (store! (field g structs) (al-new [GStruct] a))
@@ -2893,10 +2925,18 @@
     (store! (field g text)     (mobj-add-sect! (mut (field g obj)) "__TEXT" "__text" 2 2147484672))
     (store! (field g constsec) (mobj-add-sect! (mut (field g obj)) "__TEXT" "__const" 3 0))
     (store! (field g datasec)  (mobj-add-sect! (mut (field g obj)) "__DATA" "__data" 3 0))
-    ; exports need C-ABI thunks — not supported yet (hard error, no silent skip)
-    (if (icmp-gt (al-len [ExportC] (load (load (field mp exports)))) 0)
-        (cga-fail "export-c is not supported by the arm64 backend yet")
-      0)
+    ; (export-c …): an exported function is emitted directly under its C symbol with
+    ; external linkage (g-register-sigs! below) — no thunk needed for scalar/pointer
+    ; params or struct returns. A by-value STRUCT param is the sole exception (this
+    ; backend passes aggregates by pointer), and would need a C-ABI marshaling thunk;
+    ; reject it with a clear error rather than emit a silently-wrong symbol.
+    (let [es (load (field mp exports)) ne (al-len [ExportC] (load es)) (mut ei) 0]
+      (loop (if (icmp-ge (load ei) ne) (break)
+        (do (if (g-export-needs-thunk (al-at [ExportC] es (load ei)))
+                (cga-fail2 "export-c with a by-value struct parameter isn't supported by the arm64 backend yet (it needs a C-ABI marshaling thunk); scalar/pointer params and struct returns work: "
+                           (load (field (al-at [ExportC] es (load ei)) name)))
+              0)
+            (store! ei (iadd (load ei) 1))))))
     (g-register-types! g mp)
     (g-eval-asserts! g mp)
     (g-register-sigs! g mp)
@@ -2908,7 +2948,9 @@
     ; move the code into the __text section and serialize
     (b-bytes! (mut (mobj-sect-buf (mut (field g obj)) (load (field g text))))
               (al-slice [u8] (load (field (field g asm) buf))))
-    ; ---- DWARF (always on: this is the debug backend)
+    ; ---- DWARF (on for a normal build; a metaprogram dylib passes emit-dwarf=false —
+    ; it needs no debug info and has no registered source paths/texts to describe).
+    (if emit-dwarf
     (let [ltmp (mobj-add-sym! (mut (field g obj)) "ltmp0" (load (field g text)) 0 false)
           dw (dw-build! a mainpath compdir paths texts
                         (mut (field g dwtys)) (mut (field g dwfns))
@@ -2930,7 +2972,7 @@
                                  (if (icmp-eq (load (field r sect)) 1) sinfo sline)
                                  (load (field r off)) (load (field r symidx))
                                  (reloc-unsigned) false 3))
-              (store! i (iadd (load i) 1)))))))
+              (store! i (iadd (load i) 1))))))) 0)
     (let [bytes (macho-write (mut (field g obj)))
           fd (cga64.creat objpath 420)]
       (if (icmp-lt fd 0) (cga-fail "cannot create object file") 0)

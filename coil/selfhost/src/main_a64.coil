@@ -57,12 +57,21 @@
 (defn do-cimport [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (ci/cimport-cli a argc argv 2))
 
-; NO metaprogram object builder is registered here: the native arm64 backend has
-; no export-c yet, so a metaprogram dylib cannot be built by this compiler. With
-; no builder registered, metaengine's default stays the INTERPRETER (identical
-; semantics, see parity.sh) and an explicit COIL_META=compiled fails loudly at
-; engine setup rather than degrading silently.
+; the compiled-metaprogram engine's object builder (metaengine.coil): a mono'd
+; metaprogram Program -> object file, via the native arm64 backend. The arm64
+; backend is AAPCS64-native and now supports (export-c …) (the coil_mp_<k> entry
+; symbols the dylib exposes), so this LLVM-free compiler can build metaprogram
+; dylibs too — the compiled engine is the DEFAULT here, exactly as in the LLVM
+; build. No DWARF for the dylib (a metaprogram needs no debug info, and there are
+; no registered source paths to describe).
+(defn meta-build-obj-a64 [(a (ptr Allocator)) (mp (ptr Program)) (obj (ptr i8))] (-> i64)
+  (cga64-build-object a mp obj "" ""
+                      (box-al [(slice u8)] a (al-new [(slice u8)] a))
+                      (box-al [(slice u8)] a (al-new [(slice u8)] a))
+                      false))
+
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (set-meta-build-obj! (fnptr-of meta-build-obj-a64))
   (driver-main argc argv
                (fnptr-of no-llvm-build)
                (fnptr-of no-llvm-emitir)

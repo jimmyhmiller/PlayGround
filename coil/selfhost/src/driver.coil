@@ -456,7 +456,8 @@
     (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
       (Some [mp] (do (cga64-build-object a mp obj-cstr path cwd
                                          (box-al [(slice u8)] a (load sp0))
-                                         (box-al [(slice u8)] a (load st0)))
+                                         (box-al [(slice u8)] a (load st0))
+                                         true)
                      1))
       (None []   0))))
 
