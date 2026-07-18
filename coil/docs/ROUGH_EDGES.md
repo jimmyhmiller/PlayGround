@@ -20,7 +20,10 @@ root cause, and one small fix at the bottom of the stack makes the rest observab
   Do not touch until the syntax is decided.
 - **gen-8** (supertrait syntax silently means something else) — **DEFERRED**, wants better
   syntax; follow-up alongside gen-6.
-- **gen-9** — fix the inference hole **and** add type ascription, likely `(: value type)`.
+- **gen-9** — ✅ DONE. Added type ascription `(: value type)` (a general checked-annotation
+  expression that flows the expected type in, not a cast) **and** fixed the let-inference hole
+  (a returned `let` binding now takes the return type, so `(let [r (Okk 5)] r)` infers without
+  ceremony). Both teeth-tested in `gate-cli.sh`.
 - **std-12** — `store!` should return **unit**.
 - **gen-1 / std-11** — do not patch `hm-for` in isolation. The real question is whether the
   iteration APIs (`hm-for`/`al-for`/`slice-for`/`for-in`) should exist at all, or collapse

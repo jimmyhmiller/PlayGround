@@ -21,9 +21,28 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    with the `(do (store! …) 0)` idiom. Full IR snapshot regenerated (82 store→0 phi/ret lines);
    fixpoint + all 7 gates green; teeth-tested regression added to `gate-cli.sh`.
 
-2. **Type ascription `(: value type)` (gen-9)** + fix the let-inference hole. Small, unblocks
+2. **Type ascription `(: value type)` (gen-9)** ✅ DONE + fix the let-inference hole. Small, unblocks
    ergonomics, and useful while doing the bigger type work below. General ascription
    expression, works anywhere; also fix inference across a `let`.
+   OUTCOME (two independently-green sub-steps):
+   (a) `(: value type)` is a new general expression (`EAscribe`, parser-produced, same field
+       shape as `ECast` so the sum size is unchanged). It CHECKS `value` against `type`
+       (flowing the expected type in, any legal coercion; a mismatch is a located "has type X
+       but expected Y") — NOT a numeric cast — and the checker LOWERS it to the coerced inner
+       value, so no node reaches mono/codegen. Ripple: parser, resolve (qualify type),
+       astdump, check (consume/strip), the comptime interpreter (eval/fold/collect), and a
+       clear compiler-bug guard in mono/codegen/codegen_a64 for the node that can never reach
+       them. A bare `:` reads as an empty keyword, so the parser intercepts it before head-sym.
+   (b) Inference now flows across a `let`: when the body tail is a bare `(EVar nm)` and the let
+       has an expected type, that returned binding's value is checked against it — so
+       `(let [r (Okk 5)] r)` returned as `(Res i64 bool)` type-checks with NO annotation. The
+       flow is failure-gated (`synth-bind-value` tries no-expectation first, only retrying with
+       the expected type if inference strands), so the success path is untouched — gate-full
+       stayed byte-identical and the fixpoint held; zero snapshot regen.
+   Both halves are teeth-tested in `gate-cli.sh` (fail on the seed, pass here). NOTE: the
+   self-host source can't yet USE either feature (rebootstrap stage0 is the committed pre-gen-9
+   seed, which can't compile them) — the `parser.coil::parse-expr` workaround stays until the
+   seed is refreshed past this commit; its comment now says so.
 
 3. **Qualified trait-method calls `(A::go x)` (gen-6).** Add `::`-qualified method calls that
    resolve `Trait::method` through the receiver's impls table; a same-name collision becomes

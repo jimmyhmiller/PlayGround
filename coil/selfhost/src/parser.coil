@@ -474,9 +474,12 @@
         (do (store! d (isub (load d) 1))
             (Err (derr-at (sx-lo s) (sx-hi s)
                    "expression nests more than 2000 levels deep — the parser recurses per level and would run out of stack. If this came from a macro, emit a flatter form (e.g. a jump table or a loop over a data table) instead of one deeply nested expression.")))
-      ; the decrement is repeated per arm rather than hoisted into a `let`: binding the
-      ; match result strands inference (gen-9 — a type arg can't flow out of a let, and
-      ; a local can't be annotated), so the type must come from return position.
+      ; the decrement is repeated per arm rather than hoisted into a `let`. gen-9 fixed
+      ; the underlying inference hole — a returned let binding now takes the function's
+      ; return type `(Result Expr Diag)`, so `(let [r (match …)] (store! d …) r)` would
+      ; type-check under THIS compiler — but the self-host source must stay buildable by
+      ; the committed pre-gen-9 seed (rebootstrap stage0), which cannot infer it. Keep the
+      ; per-arm form until the seed is refreshed past this commit.
       (match (parse-expr-inner a s)
         (Err [dg] (do (store! d (isub (load d) 1))
                       (Err (dwspan dg (sx-source s) (sx-lo s) (sx-hi s) (sx-ctxt s)))))
