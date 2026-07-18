@@ -46,16 +46,19 @@ Current status:
 
 ```text
 reference: 13/13 TanStack production gates passed
-diffpack:    5/13 TanStack production gates passed
+diffpack:    6/13 TanStack production gates passed
 ```
 
 Diffpack now emits the client `public/` layout (route-split browser chunks +
 extracted CSS + static assets) and the server `server/` layout (Node ESM `.mjs`
-chunks); see "Native client `public/` emit" and "Native server (SSR) `.mjs`
-emit" below. The passing gates are `output directory`, `browser chunks`
-(28 chunks), `extracted CSS`, and the two required static assets. The remaining
-eight gates need the server graph to reach `>= 35` modules and the whole SSR
-runtime (`server/index.mjs`, native manifests, HTTP serving), tracked below.
+chunks) including the **natively generated `tanstack-start-manifest` chunk**;
+see "Native client `public/` emit", "Native server (SSR) `.mjs` emit", and
+"Native manifest generation" below. The passing gates are `output directory`,
+`browser chunks` (28 chunks), `extracted CSS`, the two required static assets,
+and `server artifact: tanstack-start-manifest`. The remaining seven gates need
+the server graph to reach `>= 35` modules and the whole SSR runtime
+(`server/index.mjs`, `ssr`/`router` runtime artifacts, HTTP serving), tracked
+below.
 
 The Diffpack result is deliberately not softened: it does not yet emit the
 required `.diffpack-output` client/server application layout. Run the
@@ -314,9 +317,10 @@ chunk plus dynamic-import chunks; the count rose from 4 to 17 to 28 as `?tsr-spl
 route splitting was implemented and then generalized to all targets), **0
 extracted `.css`**, and **1 asset** (`app-<hash>.css`, the Tailwind source
 imported as `~/styles/app.css?url`). Every emitted `.js` passes `node --check`
-(used only as a test oracle, never in the build path). With the server emit added,
-acceptance is now `5/13` (`output directory`, `browser chunks`, `extracted CSS`,
-and the two required static assets).
+(used only as a test oracle, never in the build path). With the server emit added
+this slice reached `5/13`; native manifest generation (below) then took it to
+`6/13` (`output directory`, `browser chunks`, `extracted CSS`, the two required
+static assets, and `server artifact: tanstack-start-manifest`).
 
 Note: `EmitSummary` (formerly `PublicBuildSummary`) is now shared by the client
 and server emits and counts `.js` and `.mjs` modules; its `output_dir` field was
@@ -329,7 +333,13 @@ that a re-emit clears stale output.
 
 ### The manifest gap, handled honestly
 
-The single remaining discovery diagnostic is still
+(Historical: this diagnostic is now resolved for the server build — see "Native
+manifest generation". The client build still surfaces it, because
+`client_route_manifest` cannot exist before the client build finishes, and the
+client does not consume the manifest anyway; the note below records the original
+leak analysis.)
+
+The single remaining discovery diagnostic was
 `tanstack-start-manifest:v` (unresolvable — it is build-output-dependent and must
 be generated natively). Its true cause is a **client/server isolation gap**: the
 generated route tree statically imports the server-only API route
@@ -400,23 +410,91 @@ Test: `emit_server_writes_an_mjs_layout_that_node_accepts` builds a small app,
 emits to a temp `server/`, asserts the `.mjs` entry + dynamic chunk and stale-file
 clearing, and runs `node --check` on every emitted `.mjs`.
 
-### The `>= 35` server-graph gate: 30 of 35, and what the last 5 need
+## Native manifest generation (landed)
+
+`tanstack-start-manifest:v` — the virtual module TanStack Start's
+`@tanstack/start-server-core/dist/esm/router-manifest.js` imports to map each
+route to the client asset URLs it must preload/script-inject — is now
+**generated natively from Diffpack's own client chunk graph**. It was the single
+remaining discovery diagnostic; the SSR build now reports **0 diagnostics**.
+
+The module is build-output-dependent (a route's preloads are the *client* build's
+emitted chunk URLs), so it is a cross-environment coordination between the two
+builds:
+
+- **Client build persists a route → chunk map.** `Bundler::client_route_manifest`
+  derives it from the same dynamic-import roots the emit assigns to chunks (the
+  single source of truth is a shared `Bundler::dynamic_roots` helper, so the
+  recorded chunk file names are exactly the files on disk). Each `?tsr-split=*`
+  chunk is attributed to its route's TanStack id (the `createFileRoute` string
+  argument, extracted by `route_split::route_id`); a route with several split
+  properties lists all its chunks; `__root__` maps to the entry chunk `client.js`,
+  which statically bundles the root route and all shared code. `build-app <root>
+  client` writes it as `.diffpack-output/client-manifest.json`.
+- **Server build reads that map and generates the module natively.**
+  `manifest::ClientRouteManifest::to_start_manifest_source` emits the exact
+  `const tsrStartManifest = () => ({ routes: { … } });` / `export { tsrStartManifest }`
+  contract `getStartManifest` consumes (`preloads` per route, plus the entry
+  `scripts` tag on `__root__`). `build-app <root> ssr` reads
+  `client-manifest.json`, generates the source, and registers it in
+  `BuildConfig.virtual_modules`. The bundler resolves the specifier to a virtual
+  id and loads it from that source (new `synthesize_virtual_module` path, shared
+  by the parallel and incremental loaders). It is dynamically imported, so it
+  becomes its own chunk, emitted with a descriptive name
+  (`server/_tanstack-start-manifest_v.mjs`) that satisfies the
+  `server artifact: tanstack-start-manifest` gate.
+
+Honesty guarantees, not gamed: a **missing `client-manifest.json` is a hard,
+specific error** (`run \`diffpack build-app <root> client\` before the server
+build`), never a silent empty manifest; a `?tsr-split` chunk whose route id
+cannot be derived is a hard error, never a silently dropped preload. This imposes
+a build order — **client before server** — which is the correct dependency
+direction (the server manifest needs the finished client chunk URLs).
+
+Difference from the reference, by design: Diffpack's preload URLs are its own
+emitted client chunk URLs (`/client.js`, `/client.chunk-N.js`), not the
+reference's shared-vendor `/assets/*` layout. The manifest reflects Diffpack's
+actual chunking model (each route's split chunks are self-contained), which is the
+correct, honest mapping for the files Diffpack emits — not a transliteration of
+Vite/Rollup's chunk graph.
+
+Manifest generation is a build-emit step off the per-edit incremental hot path
+(`client_route_manifest` runs only from `build-app`, never from `rebuild_path`),
+so the thesis guards stay green (verified:
+`a_leaf_edit_retransforms_exactly_one_module`,
+`the_incremental_graph_stays_low_memory`).
+
+Tests: `manifest::tests` (JSON round-trip, missing-file error, the exact
+`tsrStartManifest` source contract), `route_split::tests::
+extracts_the_route_id_from_the_factory_argument`, and two bundler end-to-end
+tests — `client_route_manifest_attributes_split_chunks_to_route_ids` (a route
+app's split chunks map to their route ids) and
+`a_registered_virtual_module_resolves_loads_and_names_its_chunk` (the specifier
+resolves with no diagnostic, lands in the graph, and emits a `node --check`-valid
+`_tanstack-start-manifest_v.mjs` chunk).
+
+Known limitation carried forward: the emitted server chunks (the manifest chunk
+included) still render the shared CJS-semantics runtime
+(`module.exports`/`require`) as syntactically-valid ESM — it passes `node --check`
+but does not *execute* under Node's ESM goal. Making the server chunks run is the
+SSR-runtime slice below.
+
+### The `>= 35` server-graph gate: 31 of 35, and what the last 4 need
 
 The `server graph` acceptance gate wants `>= 35` `.mjs` under `server/`; Diffpack
-emits 30. This is deliberately reported as a partial, not gamed. The remaining
-modules come from work outside this foundation slice, each of which the reference
-build produces and Diffpack does not yet:
+emits 31 (the manifest chunk added one). This is deliberately reported as a
+partial, not gamed. The remaining modules come from work outside this foundation
+slice, each of which the reference build produces and Diffpack does not yet:
 
 - **`tsr-shared` shared-chunk extraction.** The reference hoists sub-components
   referenced across split boundaries into their own shared chunks (e.g.
   `NotFound`, `PostError`). Diffpack currently inlines those into the split chunk
   that uses them. This is the next route-splitting increment.
-- **The SSR runtime + native manifests.** `server/index.mjs` (the Node HTTP
-  entry), `ssr`/`router`/`start` runtime chunks, and the
-  `tanstack-start-manifest:v` chunk are all still gaps (the manifest remains the
-  single labelled discovery diagnostic — it is build-output-dependent and must be
-  generated natively, never faked). These are the `server/index.mjs`, server
-  artifact (`ssr`/`router`/`tanstack-start-manifest`), and HTTP gates.
+- **The SSR runtime.** `server/index.mjs` (the Node HTTP entry) and the
+  `ssr`/`router` runtime chunks are still gaps. These are the `server/index.mjs`,
+  server artifact (`ssr`/`router`), and HTTP gates. The
+  `tanstack-start-manifest` artifact is now produced (see "Native manifest
+  generation" above).
 
 The runtime the server chunks use is still the shared CJS-semantics runtime
 (`module.exports`/`require`) rendered as syntactically-valid ESM: it passes
@@ -426,13 +504,20 @@ part of the SSR-runtime slice, not this foundation.
 
 ### Precise next native step
 
-1. **Native manifest generation** — build `tanstack-start-manifest:v` from
-   Diffpack's own chunk graph (route → chunk file mapping), which resolves the
-   last discovery diagnostic and adds the `tanstack-start-manifest` server
-   artifact.
+1. **Native manifest generation** — DONE (see "Native manifest generation"
+   above): `tanstack-start-manifest:v` is generated from Diffpack's own chunk
+   graph, resolving the last discovery diagnostic and adding the
+   `tanstack-start-manifest` server artifact.
 2. **The SSR `server/index.mjs` runtime** — a native Node ESM server entry that
    renders documents, serves the hashed assets, runs server routes, and 404s,
-   producing the `ssr`/`router` artifacts and flipping the three HTTP gates.
+   producing the `ssr`/`router` artifacts and flipping the three HTTP gates. The
+   prerequisite the runtime must fix first: the server chunks (manifest included)
+   currently render the shared **CJS-semantics runtime** (`module.exports` /
+   `require`) as valid-syntax ESM that passes `node --check` but does **not
+   execute** under Node's ESM goal. The SSR slice must make them real ESM (genuine
+   `import`/`export` linkage, or a `package.json` `type` marker + host `require`)
+   so `server/index.mjs` can actually import the manifest and route chunks at
+   runtime.
 
 `tsr-shared` extraction can land alongside these to carry the server graph past
 `>= 35`.

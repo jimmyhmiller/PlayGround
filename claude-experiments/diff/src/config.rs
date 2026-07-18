@@ -85,7 +85,11 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
 
     Ok(AppConfig {
         environment: environment.to_string(),
-        build: BuildConfig { aliases, conditions },
+        build: BuildConfig {
+            aliases,
+            conditions,
+            virtual_modules: Vec::new(),
+        },
         entry,
     })
 }

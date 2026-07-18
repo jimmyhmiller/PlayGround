@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -64,12 +64,17 @@ struct ResolutionCache {
     /// match rewrite before the standards-aware resolver runs. Shared read-only,
     /// so cheap to clone into each directory cache.
     aliases: Arc<Vec<(String, PathBuf)>>,
+    /// Build-generated virtual modules keyed by specifier. A matching specifier
+    /// resolves to itself and loads from the recorded source rather than the
+    /// filesystem.
+    virtual_modules: Arc<HashMap<String, String>>,
 }
 
 struct DirectoryResolutionCache {
     directory: PathBuf,
     specifiers: [Mutex<HashMap<String, Result<ResolvedModule, String>>>; 64],
     aliases: Arc<Vec<(String, PathBuf)>>,
+    virtual_modules: Arc<HashMap<String, String>>,
 }
 
 #[derive(Clone)]
@@ -79,11 +84,18 @@ struct ResolvedModule {
 }
 
 impl ResolutionCache {
-    fn new(aliases: Vec<(String, PathBuf)>) -> Self {
+    fn new(aliases: Vec<(String, PathBuf)>, virtual_modules: Vec<(String, String)>) -> Self {
         Self {
             directories: std::array::from_fn(|_| Mutex::new(HashMap::new())),
             aliases: Arc::new(aliases),
+            virtual_modules: Arc::new(virtual_modules.into_iter().collect()),
         }
+    }
+
+    /// The source of a build-generated virtual module for this id, if one is
+    /// registered.
+    fn virtual_module_source(&self, id: &str) -> Option<&str> {
+        self.virtual_modules.get(id).map(String::as_str)
     }
 
     fn directory(&self, importer: &Path) -> Arc<DirectoryResolutionCache> {
@@ -99,6 +111,7 @@ impl ResolutionCache {
             directory: importer_directory.to_path_buf(),
             specifiers: std::array::from_fn(|_| Mutex::new(HashMap::new())),
             aliases: Arc::clone(&self.aliases),
+            virtual_modules: Arc::clone(&self.virtual_modules),
         });
         shard.insert(importer_directory.to_path_buf(), Arc::clone(&cache));
         cache
@@ -126,6 +139,20 @@ impl DirectoryResolutionCache {
         // `route.tsx?tsr-split=component`). Only the path component is a
         // filesystem concern; the query is re-attached to the resolved id and
         // interpreted later, at load time. A query never causes a resolve error.
+        // A build-generated virtual module (e.g. `tanstack-start-manifest:v`)
+        // resolves to itself: its id is the specifier, and the loader synthesizes
+        // it from the recorded source instead of touching the filesystem.
+        if self.virtual_modules.contains_key(specifier) {
+            let result = Ok(ResolvedModule {
+                id: SharedModuleId::from(specifier),
+                side_effect_free: false,
+            });
+            shard
+                .lock()
+                .expect("resolution specifier cache poisoned")
+                .insert(specifier.to_owned(), result.clone());
+            return result;
+        }
         let resource = ResourceId::parse(specifier);
         let path_specifier = resource.path.as_str();
         // Plugin-host aliases win as an exact-match rewrite before the
@@ -387,6 +414,7 @@ impl Bundler {
                     .iter()
                     .map(|(from, to)| (from.clone(), PathBuf::from(to)))
                     .collect(),
+                config.virtual_modules.clone(),
             ),
             frontend_pool: ThreadPoolBuilder::new()
                 .num_threads(frontend_threads)
@@ -578,33 +606,28 @@ impl Bundler {
             runtime_ids[dense_id] = Some(runtime_id);
         }
         let main_modules = self.static_closure(self.entry, &allowed);
-        let main_set = main_modules.iter().copied().collect::<HashSet<_>>();
-        let mut dynamic_roots = allowed
+        let dynamic_roots = self.dynamic_roots(&allowed);
+        // One chunk output path per dynamic root, computed once so the rewritten
+        // `import()` reference and the file on disk always agree. Most roots are
+        // `<stem>.chunk-<n>`; a build-generated virtual chunk (the manifest) keeps
+        // its own descriptive name.
+        let chunk_paths = dynamic_roots
             .iter()
-            .flat_map(|source| {
-                self.modules[*source]
-                    .iter()
-                    .flat_map(|module| module.dependencies.iter())
-                    .filter(|(_, _, demand)| demand.dynamic)
-                    .map(|(_, target, _)| *target)
-            })
-            .filter(|target| !main_set.contains(target))
-            .collect::<Vec<_>>();
-        dynamic_roots.sort_by(|left, right| self.ids[*left].cmp(&self.ids[*right]));
-        dynamic_roots.dedup();
+            .enumerate()
+            .map(|(index, &root)| chunk_output_path(output, index + 1, self.ids[root].as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut chunk_names = HashMap::with_capacity(dynamic_roots.len());
-        for (index, root) in dynamic_roots.iter().copied().enumerate() {
-            let chunk_path = chunk_path(output, index + 1)?;
+        for (root, chunk_path) in dynamic_roots.iter().copied().zip(&chunk_paths) {
             let chunk_file = chunk_path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| format!("chunk path is not UTF-8: {}", chunk_path.display()))?;
             chunk_names.insert(root, format!("./{chunk_file}"));
         }
-        for (index, root) in dynamic_roots.iter().copied().enumerate() {
+        for (root, chunk_path) in dynamic_roots.iter().copied().zip(&chunk_paths) {
             let modules = self.static_closure(root, &allowed);
             let rendered = self.render_best(&modules, root, &chunk_names, &runtime_ids, false);
-            self.write_rendered(rendered, &chunk_path(output, index + 1)?, options)?;
+            self.write_rendered(rendered, chunk_path, options)?;
         }
         if options.minify
             && !options.source_map
@@ -616,6 +639,76 @@ impl Bundler {
         let rendered =
             self.render_best(&main_modules, self.entry, &chunk_names, &runtime_ids, true);
         self.write_rendered(rendered, output, options)
+    }
+
+    /// The dynamic-import roots that become their own chunks: every dynamically
+    /// imported target not already in the entry's static closure, sorted by id and
+    /// deduplicated. This is the single source of truth for chunk assignment, so
+    /// [`Self::emit_with_options`] and [`Self::client_route_manifest`] agree on the
+    /// order — and therefore the `<stem>.chunk-<n>` names — of every chunk.
+    fn dynamic_roots(&self, allowed: &HashSet<DenseModuleId>) -> Vec<DenseModuleId> {
+        let main_set = self
+            .static_closure(self.entry, allowed)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let mut roots = allowed
+            .iter()
+            .flat_map(|source| {
+                self.modules[*source]
+                    .iter()
+                    .flat_map(|module| module.dependencies.iter())
+                    .filter(|(_, _, demand)| demand.dynamic)
+                    .map(|(_, target, _)| *target)
+            })
+            .filter(|target| !main_set.contains(target))
+            .collect::<Vec<_>>();
+        roots.sort_by(|left, right| self.ids[*left].cmp(&self.ids[*right]));
+        roots.dedup();
+        roots
+    }
+
+    /// Derives the client build's route -> chunk mapping for the manifest.
+    ///
+    /// `entry_file` is the entry chunk name (`client.js`); `base` is the URL base
+    /// the chunks are served from (`/`). Each dynamic-import chunk that is a
+    /// route's `?tsr-split=*` split is attributed to that route's TanStack id (the
+    /// `createFileRoute` argument), so a route with several split properties lists
+    /// all of its chunks. `__root__` maps to the entry chunk, which statically
+    /// bundles the root route and all shared code.
+    ///
+    /// Chunk names are computed with the identical ordering
+    /// [`Self::emit_with_options`] uses, so the recorded URLs are exactly the files
+    /// emitted to disk. A non-route dynamic chunk (not a `?tsr-split`) is emitted
+    /// as a chunk but is not a route preload, so it is not attributed here.
+    pub fn client_route_manifest(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        entry_file: &str,
+        base: &str,
+    ) -> Result<crate::manifest::ClientRouteManifest, String> {
+        let (stem, extension) = split_file_name(entry_file)?;
+        let allowed = reachable
+            .iter()
+            .filter_map(|id| self.indices.get(id.as_str()).copied())
+            .collect::<HashSet<_>>();
+        let dynamic_roots = self.dynamic_roots(&allowed);
+        let mut routes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        routes.insert(
+            crate::manifest::ROOT_ROUTE_ID.to_string(),
+            vec![entry_file.to_string()],
+        );
+        for (index, root) in dynamic_roots.iter().copied().enumerate() {
+            let chunk_file = format!("{stem}.chunk-{}{extension}", index + 1);
+            let id = self.ids[root].as_ref();
+            if let Some(route_id) = split_chunk_route_id(id)? {
+                routes.entry(route_id).or_default().push(chunk_file);
+            }
+        }
+        Ok(crate::manifest::ClientRouteManifest {
+            base: base.to_string(),
+            entry: entry_file.to_string(),
+            routes,
+        })
     }
 
     /// Copies every content-hashed asset referenced by a reachable module into
@@ -950,6 +1043,22 @@ impl Bundler {
         diagnostics: &mut Vec<String>,
     ) -> Result<ModuleState, String> {
         let id = module_id(path);
+        // A build-generated virtual module (its source is not on disk) claims this
+        // id first.
+        if let Some(source) = self.resolution_cache.virtual_module_source(&id) {
+            let special = synthesize_virtual_module(source)?;
+            return Ok(ModuleState {
+                hash: special.hash,
+                dependencies: Vec::new(),
+                pruned_imports: HashSet::new(),
+                source: id.clone(),
+                flat_module: special.flat_module,
+                code: special.code,
+                assets: special.assets,
+                css: special.css,
+                externals: Vec::new(),
+            });
+        }
         // A loader (query, stylesheet, or asset) may claim this id before it is
         // ever read as JavaScript.
         if let Some(special) = load_special_module(&id, path) {
@@ -1704,6 +1813,23 @@ fn load_uncached(
     path: &Path,
 ) -> Result<LoadedModule, String> {
     let id = path.to_string_lossy();
+    // A build-generated virtual module (its source is not on disk) claims this id
+    // first.
+    if let Some(source) = resolution_cache.virtual_module_source(&id) {
+        let special = synthesize_virtual_module(source)?;
+        return Ok(LoadedModule {
+            hash: special.hash,
+            dependencies: Vec::new(),
+            pruned_imports: HashSet::new(),
+            source: Arc::from(id.as_ref()),
+            flat_module: special.flat_module,
+            code: special.code,
+            diagnostics: Vec::new(),
+            assets: special.assets,
+            css: special.css,
+            externals: Vec::new(),
+        });
+    }
     // A loader (query, stylesheet, or asset) may claim this id before it is ever
     // read as JavaScript.
     if let Some(special) = load_special_module(&id, path) {
@@ -1814,6 +1940,20 @@ fn synthesize_tsr_split(resource: &ResourceId) -> Result<SpecialModule, String> 
         .map_err(|error| format!("cannot read route file {}: {error}", path.display()))?;
     let module_source = crate::route_split::build_split_module(path, &source, target)?;
     let transformed = transform_module(path, &module_source);
+    Ok(SpecialModule {
+        hash: content_hash(transformed.code.as_bytes()),
+        code: transformed.code,
+        flat_module: transformed.flat_module,
+        assets: Vec::new(),
+        css: None,
+    })
+}
+
+/// A build-generated virtual module: the given source, run through the real
+/// transformer so it yields flat-linker code and export metadata like any
+/// hand-written module. Used for the natively generated `tanstack-start-manifest:v`.
+fn synthesize_virtual_module(source: &str) -> Result<SpecialModule, String> {
+    let transformed = transform_module(Path::new("diffpack-virtual-module.js"), source);
     Ok(SpecialModule {
         hash: content_hash(transformed.code.as_bytes()),
         code: transformed.code,
@@ -2108,6 +2248,62 @@ fn chunk_path(output: &Path, index: usize) -> Result<PathBuf, String> {
     Ok(parent.join(format!("{stem}.chunk-{index}{extension}")))
 }
 
+/// The on-disk path for the chunk of a dynamic root. Most roots use the numbered
+/// `<stem>.chunk-<index>` name; the build-generated `tanstack-start-manifest:v`
+/// virtual module keeps a descriptive `_tanstack-start-manifest_v` name so the
+/// emitted artifact is identifiable (and matches TanStack's own manifest chunk
+/// naming convention).
+fn chunk_output_path(output: &Path, index: usize, id: &str) -> Result<PathBuf, String> {
+    if id == crate::manifest::START_MANIFEST_SPECIFIER {
+        let parent = output
+            .parent()
+            .ok_or_else(|| format!("output has no parent: {}", output.display()))?;
+        let extension = output
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map_or(String::new(), |extension| format!(".{extension}"));
+        return Ok(parent.join(format!("_tanstack-start-manifest_v{extension}")));
+    }
+    chunk_path(output, index)
+}
+
+/// Splits an entry file name (`client.js`) into its stem (`client`) and
+/// dotted extension (`.js`), mirroring how [`chunk_path`] names dynamic chunks so
+/// the manifest can reconstruct each chunk's file name.
+fn split_file_name(file: &str) -> Result<(String, String), String> {
+    let path = Path::new(file);
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| format!("entry file has no stem: {file}"))?;
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map_or(String::new(), |extension| format!(".{extension}"));
+    Ok((stem.to_string(), extension))
+}
+
+/// The TanStack route id a dynamic chunk belongs to, when the chunk is a route's
+/// `?tsr-split=*` split module. Returns `Ok(None)` for a non-route-split chunk
+/// (which is a real chunk but not a route preload). A route-split chunk whose
+/// route id cannot be derived is a hard error, never a silently dropped preload.
+fn split_chunk_route_id(id: &str) -> Result<Option<String>, String> {
+    let resource = ResourceId::parse(id);
+    if resource.loader_kind() != Some(LoaderKind::TsrSplit) {
+        return Ok(None);
+    }
+    let path = Path::new(&resource.path);
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read route file {}: {error}", path.display()))?;
+    match crate::route_split::route_id(path, &source) {
+        Some(route_id) => Ok(Some(route_id)),
+        None => Err(format!(
+            "route split chunk {id} has no derivable TanStack route id \
+             (the createFileRoute string argument); cannot attribute its preload to a route"
+        )),
+    }
+}
+
 /// Build-time configuration a plugin host contributes. Currently the resolver
 /// aliases (specifier -> absolute target), such as TanStack's
 /// `#tanstack-router-entry` -> `<app>/src/router.tsx`. Kept small and owned by
@@ -2121,6 +2317,12 @@ pub struct BuildConfig {
     /// server: browser conditions select packages' browser exports and exclude
     /// server-only code. Empty means the built-in default.
     pub conditions: Vec<String>,
+    /// Build-generated virtual modules, `(specifier, module_source)`. A specifier
+    /// listed here resolves to itself (a virtual id) and loads from the given
+    /// source instead of the filesystem. Used for the natively generated
+    /// `tanstack-start-manifest:v` module, whose contents depend on the client
+    /// build's chunk graph and so cannot be read from a package.
+    pub virtual_modules: Vec<(String, String)>,
 }
 
 fn resolve_options(config: &BuildConfig) -> ResolveOptions {
@@ -2898,5 +3100,113 @@ mod tests {
             .emit_server(&reachable, &output_root, EmitOptions::default())
             .unwrap();
         assert!(!stale.exists(), "re-emit must clear stale output");
+    }
+
+    /// A minimal TanStack-style route app: a stub `@tanstack/react-router` (so no
+    /// node_modules is needed), one route file with a split component, and an
+    /// entry that imports it. Returns `(directory, entry, config)`.
+    fn route_app_fixture() -> (tempfile::TempDir, PathBuf, BuildConfig) {
+        let directory = tempdir().unwrap();
+        let router_stub = directory.path().join("react-router.js");
+        fs::write(
+            &router_stub,
+            "export const createFileRoute = () => (options) => options;\n\
+             export const lazyRouteComponent = () => {};\n",
+        )
+        .unwrap();
+        let routes = directory.path().join("routes");
+        fs::create_dir(&routes).unwrap();
+        fs::write(
+            routes.join("foo.tsx"),
+            "import { createFileRoute } from '@tanstack/react-router'\n\
+             export const Route = createFileRoute('/foo')({\n  component: Foo,\n})\n\
+             function Foo() {\n  return null\n}\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        fs::write(&entry, "import './routes/foo.tsx';\n").unwrap();
+
+        let config = BuildConfig {
+            aliases: vec![(
+                "@tanstack/react-router".to_string(),
+                router_stub.to_string_lossy().into_owned(),
+            )],
+            conditions: Vec::new(),
+            virtual_modules: Vec::new(),
+        };
+        (directory, entry, config)
+    }
+
+    #[test]
+    fn client_route_manifest_attributes_split_chunks_to_route_ids() {
+        let (_directory, entry, config) = route_app_fixture();
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+
+        let manifest = bundler
+            .client_route_manifest(&reachable, "client.js", "/")
+            .unwrap();
+        // The root route maps to the entry chunk (which statically bundles it).
+        assert_eq!(
+            manifest.routes.get(crate::manifest::ROOT_ROUTE_ID),
+            Some(&vec!["client.js".to_string()])
+        );
+        // The route's split component becomes a dynamic chunk attributed to its
+        // TanStack route id.
+        let foo = manifest.routes.get("/foo").expect("route /foo is mapped");
+        assert_eq!(foo.len(), 1, "one split chunk for /foo: {foo:?}");
+        assert!(foo[0].starts_with("client.chunk-"), "{foo:?}");
+
+        // The generated manifest source is the exact contract the server consumes.
+        let source = manifest.to_start_manifest_source();
+        assert!(source.contains("const tsrStartManifest = () => ({ routes: {"), "{source}");
+        assert!(source.contains(&format!("\"/foo\": {{ preloads: [\"/{}\"] }}", foo[0])), "{source}");
+    }
+
+    #[test]
+    fn a_registered_virtual_module_resolves_loads_and_names_its_chunk() {
+        let directory = tempdir().unwrap();
+        let entry = directory.path().join("server.ts");
+        fs::write(
+            &entry,
+            "import('tanstack-start-manifest:v').then(({ tsrStartManifest }) => \
+             console.log(tsrStartManifest()));\n",
+        )
+        .unwrap();
+
+        let source =
+            "const tsrStartManifest = () => ({ routes: {} });\nexport { tsrStartManifest };\n";
+        let config = BuildConfig {
+            aliases: Vec::new(),
+            conditions: Vec::new(),
+            virtual_modules: vec![(
+                crate::manifest::START_MANIFEST_SPECIFIER.to_string(),
+                source.to_string(),
+            )],
+        };
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+        // The previously-unresolvable specifier now resolves and loads: no gap.
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        assert!(
+            bundler
+                .all_modules()
+                .contains(crate::manifest::START_MANIFEST_SPECIFIER),
+            "the virtual module is in the graph"
+        );
+
+        let reachable = bundler.reachable_modules_direct();
+        let output_root = directory.path().join(".diffpack-output");
+        bundler
+            .emit_server(&reachable, &output_root, EmitOptions::default())
+            .unwrap();
+
+        // The manifest lands in its own descriptively named server chunk (the
+        // acceptance gate matches server files containing `tanstack-start-manifest`).
+        let manifest_chunk = output_root.join("server/_tanstack-start-manifest_v.mjs");
+        assert!(manifest_chunk.is_file(), "manifest chunk is emitted");
+        let emitted = fs::read_to_string(&manifest_chunk).unwrap();
+        assert!(emitted.contains("tsrStartManifest"), "{emitted}");
+        node_check(&manifest_chunk);
     }
 }

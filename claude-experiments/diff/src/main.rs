@@ -108,11 +108,37 @@ fn run() -> Result<(), String> {
                 .next()
                 .and_then(|value| value.to_str().map(str::to_string))
                 .unwrap_or_else(|| "client".to_string());
-            let config = diffpack::config::derive_config(Path::new(&project_root), &environment)?;
+            let mut config =
+                diffpack::config::derive_config(Path::new(&project_root), &environment)?;
             let entry = config
                 .entry
                 .clone()
                 .ok_or_else(|| format!("no {environment} entry found for the app"))?;
+            let output_root = Path::new(&project_root).join(".diffpack-output");
+
+            // A server build's TanStack manifest module (`tanstack-start-manifest:v`)
+            // maps each route to the CLIENT build's emitted chunk URLs, so it is
+            // generated natively from the client build's persisted route/chunk
+            // manifest. Register it as a virtual module before discovery, so the
+            // server's `router-manifest.js` import resolves and loads it. A missing
+            // client manifest is a hard, specific error (run the client build first)
+            // rather than a silent empty manifest.
+            if config.environment != "client" {
+                let client_manifest_path =
+                    output_root.join(diffpack::manifest::CLIENT_MANIFEST_FILE);
+                let client_manifest =
+                    diffpack::manifest::ClientRouteManifest::read(&client_manifest_path)?;
+                config.build.virtual_modules.push((
+                    diffpack::manifest::START_MANIFEST_SPECIFIER.to_string(),
+                    client_manifest.to_start_manifest_source(),
+                ));
+                println!(
+                    "loaded client route manifest ({} routes) from {}",
+                    client_manifest.routes.len(),
+                    client_manifest_path.display(),
+                );
+            }
+
             println!(
                 "app: environment={} ({} aliases), entry={}",
                 config.environment,
@@ -133,12 +159,12 @@ fn run() -> Result<(), String> {
 
             // Emit the environment natively. The `client` environment writes the
             // browser `public/` layout (`.js` chunks + CSS + copied static
-            // files); the server environments (`ssr`/`nitro`) write the Node ESM
-            // `server/` layout (`.mjs` chunks). The server build is the SSR
-            // foundation: it emits the server module graph but not yet the Node
-            // HTTP runtime entry (`server/index.mjs`) or the natively-generated
-            // TanStack manifests, which are the next slices.
-            let output_root = Path::new(&project_root).join(".diffpack-output");
+            // files) plus the route/chunk manifest the server build consumes; the
+            // server environments (`ssr`/`nitro`) write the Node ESM `server/`
+            // layout (`.mjs` chunks) including the natively generated
+            // `tanstack-start-manifest` chunk. The server build is still the SSR
+            // foundation: it does not yet emit the Node HTTP runtime entry
+            // (`server/index.mjs`), which is the next slice.
             if config.environment == "client" {
                 let summary =
                     bundler.emit_public(&reachable, &output_root, EmitOptions::default())?;
@@ -146,6 +172,13 @@ fn run() -> Result<(), String> {
                     Path::new(&project_root),
                     &summary.output_dir,
                 )?;
+                // Persist the route -> client chunk mapping so the server build can
+                // generate the TanStack manifest from real emitted chunk URLs.
+                let client_manifest =
+                    bundler.client_route_manifest(&reachable, "client.js", "/")?;
+                let client_manifest_path =
+                    output_root.join(diffpack::manifest::CLIENT_MANIFEST_FILE);
+                client_manifest.write(&client_manifest_path)?;
                 println!(
                     "emitted {}: {} public .js, {} .css, {} asset(s), {} static file(s)",
                     summary.output_dir.display(),
@@ -153,6 +186,11 @@ fn run() -> Result<(), String> {
                     summary.css_files,
                     summary.asset_files,
                     static_files,
+                );
+                println!(
+                    "wrote {} ({} routes mapped to client chunks)",
+                    client_manifest_path.display(),
+                    client_manifest.routes.len(),
                 );
             } else {
                 let summary =

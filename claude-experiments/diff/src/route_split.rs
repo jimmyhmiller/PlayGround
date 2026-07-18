@@ -374,6 +374,65 @@ pub fn build_split_module(path: &Path, source: &str, target: &str) -> Result<Str
     Ok(output)
 }
 
+/// The TanStack route id of a `createFileRoute('<id>')(...)` route file: the
+/// string argument to `createFileRoute`, which is exactly the key TanStack's
+/// route manifest is keyed by (`/`, `/posts/$postId`, ...).
+///
+/// Returns `None` for a non-route file, a `createRootRoute` file (which has no
+/// id argument — the manifest keys it `__root__` separately), or a route whose
+/// factory argument is not a plain string literal. Cheap string checks gate the
+/// parse, matching the rest of this module.
+pub fn route_id(path: &Path, source: &str) -> Option<String> {
+    if !is_route_source(path, source) {
+        return None;
+    }
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path)
+        .unwrap_or_default()
+        .with_module(true);
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    for statement in &parsed.program.body {
+        let declaration = match statement {
+            Statement::VariableDeclaration(declaration) => Some(declaration.as_ref()),
+            Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                Some(Declaration::VariableDeclaration(declaration)) => Some(declaration.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(declaration) = declaration else {
+            continue;
+        };
+        for declarator in &declaration.declarations {
+            if let Some(Expression::CallExpression(call)) = &declarator.init
+                && let Some(id) = create_file_route_id(call)
+            {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// The route id from a `createFileRoute('<id>')({ ... })` call: the string
+/// literal passed to the inner `createFileRoute(...)` factory.
+fn create_file_route_id(call: &oxc_ast::ast::CallExpression<'_>) -> Option<String> {
+    let Expression::CallExpression(inner) = &call.callee else {
+        return None;
+    };
+    let is_factory = matches!(
+        &inner.callee,
+        Expression::Identifier(identifier) if identifier.name == "createFileRoute"
+    );
+    if !is_factory {
+        return None;
+    }
+    match inner.arguments.first().and_then(|argument| argument.as_expression()) {
+        Some(Expression::StringLiteral(literal)) => Some(literal.value.to_string()),
+        _ => None,
+    }
+}
+
 /// Whether `path` sits under a `routes` directory and its source calls
 /// `createFileRoute` (the only splittable route factory; `createRootRoute` is
 /// intentionally excluded, matching TanStack).
@@ -886,6 +945,19 @@ mod tests {
         )
         .unwrap();
         assert!(error.contains("export { PostError as errorComponent };"), "{error}");
+    }
+
+    #[test]
+    fn extracts_the_route_id_from_the_factory_argument() {
+        let source = "import { createFileRoute } from '@tanstack/react-router'\n\
+             export const Route = createFileRoute('/posts/$postId')({\n  component: Post,\n})\n\
+             function Post() {\n  return <div />\n}\n";
+        assert_eq!(
+            route_id(Path::new("/app/src/routes/posts.$postId.tsx"), source).as_deref(),
+            Some("/posts/$postId")
+        );
+        // A non-route file has no route id.
+        assert_eq!(route_id(Path::new("/app/src/utils/x.ts"), "export const x = 1"), None);
     }
 
     #[test]
