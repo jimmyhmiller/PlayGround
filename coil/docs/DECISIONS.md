@@ -95,12 +95,41 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    generic — is a natural follow-on (a transitive `bounds-has` over `requires`) not yet wired;
    the guarantee exists, generic code that leans on it is the next step.
 
-5. **Iteration & generics over collections — BOTH (gen-1 · std-11 · std-4).** The biggest item.
+5. **Iteration & generics over collections — BOTH (gen-1 · std-11 · std-4).** ✅ DONE. The biggest item.
    (a) Associated-type bounds: make parameterized traits (Get/Set/Push/Pop/Iter) usable as
    bounds by treating non-Self params as associated types determined by the impl. (b) An
    Iterator/Iterable protocol collapsing hm-for/al-for/slice-for/for-in into one `(for x (iter
    coll))`. Sequence: bounds FIRST (unblocks generic collection code), iterator SECOND. std-4
    (`(for-in (in map))` iterates garbage) is folded in — it goes away with the real protocol.
+   OUTCOME (two independently-green sub-steps):
+   (a) **Associated-type bounds.** The old hard guard ("trait 'Get' takes type parameters —
+       bounds over parameterized traits aren't supported yet") is gone. The deferred
+       (type-param `Self`) trait-call path in `check.coil` now substitutes the trait method
+       signature `Self -> the bounded param` AND `each extra param -> a synthetic associated
+       type` (`build-trait-subst` + the existing `subst-apply`), so the bounded body
+       type-checks against the associated types; those names (`C$assoc$Get$K`, a spelling no
+       user identifier can produce) are added to the body's tps (`assoc-body-tps`), while the
+       stored func type_params are unchanged (associated types are impl-determined, never named
+       by a caller). Mono already resolves an `ETraitCall` by selecting the receiver's impl and
+       reading its type params off the receiver, so a deferred parameterized-trait call lowers
+       to the concrete impl method with NO new mono code — the associated types never reach a
+       stored position, and codegen re-derives concrete types (gate-full stayed byte-identical,
+       zero regen). `resolve.coil::ty-str` renders a synthetic associated type as `<C as Get>::K`.
+       Return-position associated types (Iterator's Item, Pop's E) are fully generic; an
+       associated type in argument position (a Get key) needs a value of that type — a literal
+       is a located "expected <C as Get>::K" (the honest limit: no literal-indexing a generic).
+   (b) **Iterator/Iterable protocol.** `(deftrait Iterator [Self Item] (next … (-> (Option
+       Item))))` + `(deftrait Iterable [Self It] (iter … (-> It)))` in the prelude (Item/It are
+       associated types, so `(I Iterator)` is a usable bound). `(SliceIter T)` in slice.coil
+       (covers strings) + Iterable(slice)/Iterator(SliceIter); ArrayList's Iterable reuses it
+       over `al-slice`; `(MapIter K V)` in hashmap.coil iterates the map's KEYS (so `(in map)`
+       is correct — std-4 fixed). `for-in`'s `(iter COLL)`/`(in COLL)` drive the protocol
+       uniformly, and `(for x COLL …)` (bare-symbol binding) is the `(for x (iter coll))`
+       surface. `slice-for`/`al-for` collapse to thin aliases over it; `hm-for` stays the
+       direct key+value walk. gate-full IR byte-identical (dead-stripped when unused); the only
+       churn is gate-expand (pre-codegen loaded forms) + `lib/fs.coil` joining that corpus
+       (stale-missing). Teeth for BOTH halves in `gate-cli.sh` (Pop/custom bounds; iter-slice,
+       in-map, generic `(I Iterator)`, al-for alias) — all FAIL on the pre-gen-1 seed.
 
 6. **File-relative imports + migrate the self-host source (tool-1).** Resolve a relative import
    against `dirname(importing file)` (the documented, universal rule). The self-host source is

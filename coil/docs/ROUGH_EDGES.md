@@ -29,9 +29,13 @@ root cause, and one small fix at the bottom of the stack makes the rest observab
   (a returned `let` binding now takes the return type, so `(let [r (Okk 5)] r)` infers without
   ceremony). Both teeth-tested in `gate-cli.sh`.
 - **std-12** — `store!` should return **unit**.
-- **gen-1 / std-11** — do not patch `hm-for` in isolation. The real question is whether the
-  iteration APIs (`hm-for`/`al-for`/`slice-for`/`for-in`) should exist at all, or collapse
-  into a real iterator. Same design item as gen-1 (no Iterator trait). **Design first.**
+- **gen-1 / std-11 / std-4** — ✅ DONE. Two green sub-steps: (a) parameterized traits are now
+  usable as bounds — their non-Self params are associated types determined by the impl (the
+  deferred trait-call path substitutes synthetic associated types the body checks against; mono
+  resolves them off the receiver's impl). (b) One `Iterator`/`Iterable` protocol (prelude
+  traits + SliceIter/MapIter impls) drives `(for x (iter coll))` over slice/list/map;
+  `slice-for`/`al-for` collapse to aliases over it, and `(in map)` now iterates keys correctly
+  (std-4). Teeth in `gate-cli.sh`; see DECISIONS.md #5.
 - **The interpreter — DELETE IT. Decided. Scheduled AFTER everything else on this list.**
   Verdict: it is a second implementation of the language semantics that is silently weaker
   than the first — the "ONE definition per concept" violation, sitting in the metaprogram layer.
@@ -208,8 +212,10 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
       everywhere else. Reject it (the metal-op error is the right precedent).
 - [ ] **std-3** String-keyed HashMap never copies keys — produced a map with two keys both reading
       "gamma". Add owning `str-keyops-owned`/`hm-new-str`, or document the lifetime contract loudly.
-- [ ] **std-4** `(for-in [x (in map)])` compiles and iterates garbage. *(Folded into the iteration
-      redesign — see Deferred.)*
+- [x] **std-4** `(for-in [x (in map)])` compiled and iterated garbage (`get`-by-slot-index on a
+      map, whose `get` takes a KEY). ✅ DONE via the real iterator protocol: `(in map)` / `(iter
+      map)` now iterate the map's KEYS through `MapIter` (recover the value with `hm-get`). See
+      DECISIONS.md #5.
 - [x] **std-10** fmt `{x}` routes to signed `print-hex` and emits a garbage byte for negatives;
       `print-uhex` is unreachable from fmt. Point `x` at `print-uhex`.
 - [x] **gen-5** Blanket `(impl [T] Show T)` accepted, silently does nothing. Reject it, or support it
@@ -335,12 +341,12 @@ Coil is unsafe by design — legitimate. The finding is that the design's own es
 
 ## Deferred — design required, do not patch piecemeal
 
-- **gen-1 + std-11 + std-4** — *the biggest hole in the language.* Parameterized traits can't be used
-  as bounds, so there is **no generic code over any collection and no Iterator trait at all** — and
-  the prelude's own `Get`/`Set`/`Push`/`Pop` are spelled that way, making `lib/arraylist.coil`'s trait
-  impls dead weight for generic code. Jimmy: reconsider the iteration APIs wholesale rather than
-  patching `hm-for`. Note `Len [Self]` (no params) *does* work as a bound, which makes the gap look
-  arbitrary rather than principled.
+- **gen-1 + std-11 + std-4** — ✅ DONE (was *the biggest hole in the language*). Parameterized traits
+  are now usable as bounds — their non-Self params are associated types determined by the impl — so
+  generic code over any collection works, and there is a real `Iterator`/`Iterable` protocol: one
+  `(for x (iter coll))` over slice/list/map, with `slice-for`/`al-for` collapsed to aliases and
+  `(in map)` iterating keys correctly (std-4). `lib/arraylist.coil`'s trait impls are no longer dead
+  weight — `(C Pop)`, `(I Iterator)`, etc. are real bounds. See DECISIONS.md #5.
 - **gen-6** — ✅ DONE. Qualified-call syntax (`A::go`) added — pins dispatch to the named trait;
   same-name collisions are now recoverable. See DECISIONS.md #3.
 - **gen-8** — ✅ DONE. Supertrait syntax `(deftrait D [Self] :requires [Base] …)` — separate from
