@@ -34,9 +34,10 @@ use inkwell::values::{FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, IntPredicate};
 use livetype_core::{
     DefId, Engine, Function, FunctionState, Instruction, OUT_CALL, OUT_CONDITION, OUT_RETURN,
-    OUT_TYPE_ERROR, OUT_YIELD, RawSlot, TAG_BOOL, TAG_I64, TAG_REF, TAG_STR, TierSource, Version,
-    World, lt_call_foreign, lt_case_variant, lt_concat_str, lt_emit, lt_get_field, lt_load_global,
-    lt_new, lt_new_variant,
+    OUT_TYPE_ERROR, OUT_YIELD, RawSlot, TAG_BOOL, TAG_F64, TAG_I64, TAG_REF, TAG_STR, TierSource,
+    Version, World, lt_array_len, lt_array_push, lt_call_foreign, lt_case_variant, lt_concat_str,
+    lt_emit, lt_get_field, lt_index_get, lt_index_set, lt_load_global, lt_new, lt_new_array,
+    lt_new_variant, lt_trap_div_zero,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -153,6 +154,45 @@ impl<'ctx> Codegen<'ctx> {
             "lt_case_variant",
             i64t.fn_type(
                 &[ptr.into(), i64t.into(), ptr.into(), i64t.into(), ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "lt_trap_div_zero",
+            void.fn_type(&[ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "lt_new_array",
+            i64t.fn_type(
+                &[ptr.into(), i64t.into(), ptr.into(), i64t.into(), ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "lt_index_get",
+            i64t.fn_type(&[ptr.into(), i64t.into(), i64t.into(), ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "lt_index_set",
+            i64t.fn_type(
+                &[ptr.into(), i64t.into(), i64t.into(), i64t.into(), i64t.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "lt_array_len",
+            i64t.fn_type(&[ptr.into(), i64t.into(), ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "lt_array_push",
+            i64t.fn_type(
+                &[ptr.into(), i64t.into(), i64t.into(), i64t.into()],
                 false,
             ),
             Some(Linkage::External),
@@ -384,6 +424,30 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// Branch on an extern's status: 0 falls through, nonzero parks the pc and
+    /// returns `OUT_CONDITION` (the extern stashed the condition in the host).
+    fn status_or_pause(
+        &self,
+        step: FunctionValue<'ctx>,
+        frame: PointerValue<'ctx>,
+        pc: usize,
+        status: IntValue<'ctx>,
+        label: &str,
+    ) {
+        let i64t = self.ctx.i64_type();
+        let ok = self.ctx.append_basic_block(step, &format!("pc{pc}.{label}ok"));
+        let bad = self.ctx.append_basic_block(step, &format!("pc{pc}.{label}bad"));
+        let is_ok = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, status, i64t.const_zero(), "isok")
+            .unwrap();
+        self.builder.build_conditional_branch(is_ok, ok, bad).unwrap();
+        self.builder.position_at_end(bad);
+        self.set_pc(frame, pc as u64);
+        self.ret_outcome(OUT_CONDITION);
+        self.builder.position_at_end(ok);
+    }
+
     fn define_step(&self, func: &Function, step: FunctionValue<'ctx>) {
         let i64t = self.ctx.i64_type();
         let frame_ty = self.frame_type();
@@ -415,6 +479,7 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 Instruction::CallForeign { args, .. } => Some((2 * args.len()).max(1)),
                 Instruction::CaseVariant { arms, .. } => Some(arms.len().max(1)),
+                Instruction::NewArray { items, .. } => Some((2 * items.len()).max(1)),
                 _ => None,
             })
             .max();
@@ -429,6 +494,8 @@ impl<'ctx> Codegen<'ctx> {
                 Instruction::New { .. }
                     | Instruction::NewVariant { .. }
                     | Instruction::CaseVariant { .. }
+                    | Instruction::NewArray { .. }
+                    | Instruction::ArrayLen { .. }
             )
         });
         let out_objid_slot =
@@ -493,6 +560,68 @@ impl<'ctx> Codegen<'ctx> {
                     let b = self.payload_of(frame, *right);
                     let r = self.builder.build_int_mul(a, b, "mul").unwrap();
                     self.store_slot(frame, *dst, i64t.const_int(TAG_I64 as u64, false), r);
+                    fallthrough();
+                }
+                Instruction::DivI64 { dst, left, right } => {
+                    self.guard_tags(step, frame, pc, &[(*left, TAG_I64), (*right, TAG_I64)]);
+                    let a = self.payload_of(frame, *left);
+                    let b = self.payload_of(frame, *right);
+                    // Zero divisor: stash the shared division-by-zero condition
+                    // and pause — identical to the interpreter's trap.
+                    let ok = self.ctx.append_basic_block(step, &format!("pc{pc}.divok"));
+                    let zero_bb = self.ctx.append_basic_block(step, &format!("pc{pc}.divzero"));
+                    let nonzero = self
+                        .builder
+                        .build_int_compare(IntPredicate::NE, b, i64t.const_zero(), "nonzero")
+                        .unwrap();
+                    self.builder.build_conditional_branch(nonzero, ok, zero_bb).unwrap();
+                    self.builder.position_at_end(zero_bb);
+                    let trap_fn = self.module.get_function("lt_trap_div_zero").unwrap();
+                    self.builder.build_call(trap_fn, &[rt.into()], "").unwrap();
+                    self.set_pc(frame, pc as u64);
+                    self.ret_outcome(OUT_CONDITION);
+                    self.builder.position_at_end(ok);
+                    let r = self.builder.build_int_signed_div(a, b, "div").unwrap();
+                    self.store_slot(frame, *dst, i64t.const_int(TAG_I64 as u64, false), r);
+                    fallthrough();
+                }
+                Instruction::AddF64 { dst, left, right }
+                | Instruction::SubF64 { dst, left, right }
+                | Instruction::MulF64 { dst, left, right }
+                | Instruction::DivF64 { dst, left, right } => {
+                    self.guard_tags(step, frame, pc, &[(*left, TAG_F64), (*right, TAG_F64)]);
+                    let f64t = self.ctx.f64_type();
+                    let a = self.payload_of(frame, *left);
+                    let b = self.payload_of(frame, *right);
+                    let af = self.builder.build_bit_cast(a, f64t, "af").unwrap().into_float_value();
+                    let bf = self.builder.build_bit_cast(b, f64t, "bf").unwrap().into_float_value();
+                    let rf = match instruction {
+                        Instruction::AddF64 { .. } => self.builder.build_float_add(af, bf, "fadd").unwrap(),
+                        Instruction::SubF64 { .. } => self.builder.build_float_sub(af, bf, "fsub").unwrap(),
+                        Instruction::MulF64 { .. } => self.builder.build_float_mul(af, bf, "fmul").unwrap(),
+                        _ => self.builder.build_float_div(af, bf, "fdiv").unwrap(),
+                    };
+                    let r = self.builder.build_bit_cast(rf, i64t, "fbits").unwrap().into_int_value();
+                    self.store_slot(frame, *dst, i64t.const_int(TAG_F64 as u64, false), r);
+                    fallthrough();
+                }
+                Instruction::LtF64 { dst, left, right }
+                | Instruction::LeF64 { dst, left, right }
+                | Instruction::EqF64 { dst, left, right } => {
+                    self.guard_tags(step, frame, pc, &[(*left, TAG_F64), (*right, TAG_F64)]);
+                    let f64t = self.ctx.f64_type();
+                    let a = self.payload_of(frame, *left);
+                    let b = self.payload_of(frame, *right);
+                    let af = self.builder.build_bit_cast(a, f64t, "af").unwrap().into_float_value();
+                    let bf = self.builder.build_bit_cast(b, f64t, "bf").unwrap().into_float_value();
+                    let pred = match instruction {
+                        Instruction::LtF64 { .. } => inkwell::FloatPredicate::OLT,
+                        Instruction::LeF64 { .. } => inkwell::FloatPredicate::OLE,
+                        _ => inkwell::FloatPredicate::OEQ,
+                    };
+                    let cmp = self.builder.build_float_compare(pred, af, bf, "fcmp").unwrap();
+                    let r = self.builder.build_int_z_extend(cmp, i64t, "fcmpz").unwrap();
+                    self.store_slot(frame, *dst, i64t.const_int(TAG_BOOL as u64, false), r);
                     fallthrough();
                 }
                 Instruction::LtI64 { dst, left, right } => {
@@ -820,6 +949,134 @@ impl<'ctx> Codegen<'ctx> {
                     self.set_pc(frame, (pc + 1) as u64);
                     self.ret_outcome(OUT_YIELD);
                 }
+                Instruction::NewArray { dst, elem, items } => {
+                    // Marshal items into the entry-block scratch as RawSlot
+                    // pairs; the element type crosses the C ABI as its interned
+                    // TypeId (see core `types`).
+                    let n = items.len();
+                    let arr_ty = i64t.array_type((2 * n).max(1) as u32);
+                    let arr = scratch.expect("NewArray implies scratch space");
+                    for (k, reg) in items.iter().enumerate() {
+                        let slot = self.slot_ptr(frame, *reg);
+                        let tag = self.load_field(slot, 0, "it.tag");
+                        let payload = self.load_field(slot, 1, "it.pay");
+                        for (off, v) in [(0usize, tag), (1usize, payload)] {
+                            let elem_ptr = unsafe {
+                                self.builder
+                                    .build_in_bounds_gep(
+                                        arr_ty,
+                                        arr,
+                                        &[i64t.const_zero(), i64t.const_int((2 * k + off) as u64, false)],
+                                        "item",
+                                    )
+                                    .unwrap()
+                            };
+                            self.builder.build_store(elem_ptr, v).unwrap();
+                        }
+                    }
+                    let base = unsafe {
+                        self.builder
+                            .build_in_bounds_gep(
+                                arr_ty,
+                                arr,
+                                &[i64t.const_zero(), i64t.const_zero()],
+                                "items.base",
+                            )
+                            .unwrap()
+                    };
+                    let out = out_objid_slot.expect("NewArray implies an out slot");
+                    let type_id = livetype_core::types::intern(elem);
+                    let lt_na = self.module.get_function("lt_new_array").unwrap();
+                    let call = self
+                        .builder
+                        .build_call(
+                            lt_na,
+                            &[
+                                rt.into(),
+                                i64t.const_int(type_id, false).into(),
+                                base.into(),
+                                i64t.const_int(n as u64, false).into(),
+                                out.into(),
+                            ],
+                            "status",
+                        )
+                        .unwrap();
+                    self.status_or_pause(step, frame, pc, call_result(call).into_int_value(), "newarr");
+                    let objid = self.builder.build_load(i64t, out, "arrid").unwrap().into_int_value();
+                    self.store_slot(frame, *dst, i64t.const_int(TAG_REF as u64, false), objid);
+                    fallthrough();
+                }
+                Instruction::IndexGet { dst, array, index } => {
+                    self.guard_tags(step, frame, pc, &[(*array, TAG_REF), (*index, TAG_I64)]);
+                    let arr = self.payload_of(frame, *array);
+                    let idx = self.payload_of(frame, *index);
+                    let out = self.slot_ptr(frame, *dst);
+                    let lt_ig = self.module.get_function("lt_index_get").unwrap();
+                    let call = self
+                        .builder
+                        .build_call(lt_ig, &[rt.into(), arr.into(), idx.into(), out.into()], "status")
+                        .unwrap();
+                    self.status_or_pause(step, frame, pc, call_result(call).into_int_value(), "ixget");
+                    fallthrough();
+                }
+                Instruction::IndexSet { array, index, value } => {
+                    self.guard_tags(step, frame, pc, &[(*array, TAG_REF), (*index, TAG_I64)]);
+                    let arr = self.payload_of(frame, *array);
+                    let idx = self.payload_of(frame, *index);
+                    let vslot = self.slot_ptr(frame, *value);
+                    let vtag = self.load_field(vslot, 0, "v.tag");
+                    let vpay = self.load_field(vslot, 1, "v.pay");
+                    let lt_is = self.module.get_function("lt_index_set").unwrap();
+                    let call = self
+                        .builder
+                        .build_call(
+                            lt_is,
+                            &[rt.into(), arr.into(), idx.into(), vtag.into(), vpay.into()],
+                            "status",
+                        )
+                        .unwrap();
+                    self.status_or_pause(step, frame, pc, call_result(call).into_int_value(), "ixset");
+                    fallthrough();
+                }
+                Instruction::ArrayLen { dst, array } => {
+                    self.guard_tags(step, frame, pc, &[(*array, TAG_REF)]);
+                    let arr = self.payload_of(frame, *array);
+                    let out = out_objid_slot.expect("ArrayLen implies an out slot");
+                    let lt_al = self.module.get_function("lt_array_len").unwrap();
+                    let call = self
+                        .builder
+                        .build_call(lt_al, &[rt.into(), arr.into(), out.into()], "status")
+                        .unwrap();
+                    self.status_or_pause(step, frame, pc, call_result(call).into_int_value(), "arrlen");
+                    let len = self.builder.build_load(i64t, out, "len").unwrap().into_int_value();
+                    self.store_slot(frame, *dst, i64t.const_int(TAG_I64 as u64, false), len);
+                    fallthrough();
+                }
+                Instruction::ArrayPush { array, value } => {
+                    self.guard_tags(step, frame, pc, &[(*array, TAG_REF)]);
+                    let arr = self.payload_of(frame, *array);
+                    let vslot = self.slot_ptr(frame, *value);
+                    let vtag = self.load_field(vslot, 0, "v.tag");
+                    let vpay = self.load_field(vslot, 1, "v.pay");
+                    let lt_ap = self.module.get_function("lt_array_push").unwrap();
+                    let call = self
+                        .builder
+                        .build_call(
+                            lt_ap,
+                            &[rt.into(), arr.into(), vtag.into(), vpay.into()],
+                            "status",
+                        )
+                        .unwrap();
+                    self.status_or_pause(step, frame, pc, call_result(call).into_int_value(), "arrpush");
+                    fallthrough();
+                }
+                Instruction::IndirectCall { .. } => {
+                    // Hand back like a direct Call: the engine reads the callee
+                    // register, resolves the current version, and pushes the
+                    // frame. pc parks here for broken-callee pause/resume.
+                    self.set_pc(frame, pc as u64);
+                    self.ret_outcome(OUT_CALL);
+                }
                 Instruction::Call { .. } => {
                     // Hand back so the driver pushes the frame; leave pc here so
                     // it re-reads this Call (needed if the callee is broken and
@@ -902,6 +1159,12 @@ pub(crate) fn compile<'ctx>(ctx: &'ctx Context, world: &World) -> Result<Compile
         ("lt_concat_str", lt_concat_str as *const () as usize),
         ("lt_new_variant", lt_new_variant as *const () as usize),
         ("lt_case_variant", lt_case_variant as *const () as usize),
+        ("lt_trap_div_zero", lt_trap_div_zero as *const () as usize),
+        ("lt_new_array", lt_new_array as *const () as usize),
+        ("lt_index_get", lt_index_get as *const () as usize),
+        ("lt_index_set", lt_index_set as *const () as usize),
+        ("lt_array_len", lt_array_len as *const () as usize),
+        ("lt_array_push", lt_array_push as *const () as usize),
     ] {
         if let Some(f) = cg.module.get_function(name) {
             engine.add_global_mapping(&f, addr);

@@ -22,12 +22,15 @@ pub enum Tok {
     // literals & names
     Ident(String),
     Int(i64),
+    Float(f64),
     Str(String),
     // punctuation
     LBrace,
     RBrace,
     LParen,
     RParen,
+    LBracket,
+    RBracket,
     Colon,
     Semi,
     Comma,
@@ -39,6 +42,7 @@ pub enum Tok {
     Plus,
     Minus,
     Star,
+    Slash,
     Lt,
     Le,
     Gt,
@@ -68,13 +72,19 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 i += 1;
             }
             c if c.is_whitespace() => i += 1,
-            '/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
+            '/' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                } else {
+                    push(&mut out, Tok::Slash, line, &mut i);
                 }
             }
             '{' => push(&mut out, Tok::LBrace, line, &mut i),
             '}' => push(&mut out, Tok::RBrace, line, &mut i),
+            '[' => push(&mut out, Tok::LBracket, line, &mut i),
+            ']' => push(&mut out, Tok::RBracket, line, &mut i),
             '(' => push(&mut out, Tok::LParen, line, &mut i),
             ')' => push(&mut out, Tok::RParen, line, &mut i),
             ':' => two(&mut out, bytes, &mut i, line, b':', Tok::ColonColon, Tok::Colon),
@@ -155,10 +165,25 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
                     i += 1;
                 }
-                let n: i64 = src[start..i]
-                    .parse()
-                    .map_err(|_| format!("line {line}: integer literal out of range"))?;
-                out.push(Token { tok: Tok::Int(n), line });
+                // `1.5` is a float; `1.foo` stays Int + Dot + Ident.
+                if i + 1 < bytes.len()
+                    && bytes[i] == b'.'
+                    && (bytes[i + 1] as char).is_ascii_digit()
+                {
+                    i += 1;
+                    while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
+                        i += 1;
+                    }
+                    let x: f64 = src[start..i]
+                        .parse()
+                        .map_err(|_| format!("line {line}: bad float literal"))?;
+                    out.push(Token { tok: Tok::Float(x), line });
+                } else {
+                    let n: i64 = src[start..i]
+                        .parse()
+                        .map_err(|_| format!("line {line}: integer literal out of range"))?;
+                    out.push(Token { tok: Tok::Int(n), line });
+                }
             }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let start = i;

@@ -46,10 +46,12 @@
 use crate::mt::{Outcome, Shared};
 use crate::native::{
     NativeHost, OUT_CALL, OUT_CONDITION, OUT_RETURN, OUT_TYPE_ERROR, OUT_YIELD, RawFrame, RawSlot,
-    TAG_BOOL, TAG_FOREIGN, TAG_I64, TAG_KIND_SHIFT, TAG_MASK, TAG_REF, TAG_STR, TAG_UNIT,
-    step_at,
+    TAG_BOOL, TAG_F64, TAG_FNREF, TAG_FOREIGN, TAG_I64, TAG_KIND_SHIFT, TAG_MASK, TAG_REF,
+    TAG_STR, TAG_UNIT, step_at,
 };
-use crate::runtime::{ForeignFn, InstallError, ResumePlan, operand_type_error, resume_shape};
+use crate::runtime::{
+    ERR_INDIRECT_NON_FN, ForeignFn, InstallError, ResumePlan, operand_type_error, resume_shape,
+};
 use crate::{
     ActorStatus, Condition, DefId, Flow, ForeignCall, ForeignFnId, Frame, Function, FunctionState,
     GlobalRead, Heap, Instruction, Machine, Migration, ObjectId, RecvResult, Schema, Type, Value,
@@ -708,20 +710,41 @@ impl Engine {
         let FunctionState::Ready(caller) = &world.functions[&caller_key] else {
             unreachable!("a frame only pins ready code");
         };
-        let Instruction::Call {
-            dst,
-            function: callee,
-            args,
-        } = &caller.code[call_pc]
-        else {
-            actor.status = ActorStatus::Paused(Condition::RuntimeTypeError {
-                function: caller_key.0,
-                pc: call_pc,
-                message: "CALL outcome at a non-call pc".into(),
-            });
-            return Turn::Paused;
+        // Both call forms hand back here: a direct `Call` names its callee; an
+        // `IndirectCall` reads a function VALUE out of a register and
+        // late-binds it, with the interpreter-identical checks.
+        let (dst, callee, args, indirect) = match &caller.code[call_pc] {
+            Instruction::Call {
+                dst,
+                function: callee,
+                args,
+            } => (*dst, *callee, args, false),
+            Instruction::IndirectCall { dst, callee, args } => {
+                let slot = {
+                    let TierFrame::Jit(frame) = actor.stack.last().unwrap() else {
+                        unreachable!()
+                    };
+                    frame.regs[*callee]
+                };
+                let Value::FnRef(target) = slot.to_value() else {
+                    actor.status = ActorStatus::Paused(Condition::RuntimeTypeError {
+                        function: caller_key.0,
+                        pc: call_pc,
+                        message: ERR_INDIRECT_NON_FN.into(),
+                    });
+                    return Turn::Paused;
+                };
+                (*dst, target, args, true)
+            }
+            _ => {
+                actor.status = ActorStatus::Paused(Condition::RuntimeTypeError {
+                    function: caller_key.0,
+                    pc: call_pc,
+                    message: "CALL outcome at a non-call pc".into(),
+                });
+                return Turn::Paused;
+            }
         };
-        let (dst, callee) = (*dst, *callee);
 
         // Resolve the callee's *current* version — late binding is what makes
         // a live edit take effect at the next call.
@@ -744,6 +767,14 @@ impl Engine {
             }
         };
 
+        if indirect && args.len() != function.params.len() {
+            actor.status = ActorStatus::Paused(Condition::RuntimeTypeError {
+                function: caller_key.0,
+                pc: call_pc,
+                message: "indirect call: wrong argument count for the current signature".into(),
+            });
+            return Turn::Paused;
+        }
         // Decide the callee's tier first, then marshal in the representation
         // the callee will actually run in. Argument type checks happen either
         // way — a pinned old caller passing a since-migrated value traps here,
@@ -834,9 +865,16 @@ impl Engine {
     fn slot_ok(&self, slot: RawSlot, expected: &Type) -> bool {
         match expected {
             Type::I64 => slot.tag == TAG_I64,
+            Type::F64 => slot.tag == TAG_F64,
             Type::Bool => slot.tag == TAG_BOOL,
             Type::Unit => slot.tag == TAG_UNIT,
             Type::Str => slot.tag == TAG_STR,
+            // A function value matches any fn type at a data boundary (the
+            // call itself re-checks against the current signature).
+            Type::Fn(..) => slot.tag == TAG_FNREF,
+            Type::Array(_) => {
+                slot.tag == TAG_REF && self.shared.value_ok(&slot.to_value(), expected)
+            }
             Type::Foreign(kind) => {
                 slot.tag & TAG_MASK == TAG_FOREIGN
                     && (slot.tag >> TAG_KIND_SHIFT) as u32 == *kind

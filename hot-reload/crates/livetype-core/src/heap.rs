@@ -29,9 +29,22 @@ struct ObjCell {
 
 /// The shared object store. Cheap to move (single-threaded callers own it
 /// directly); safe to share behind an `Arc` (the concurrent tier).
+/// A mutable array cell: element type + items, mutated in place under its own
+/// lock. Arrays are STRUCTURAL — no schema version, no migration barrier; the
+/// element type is fixed at creation and every write is checked against it
+/// (the container's con-freeness boundary).
+struct ArrayCell {
+    elem: Type,
+    items: Mutex<Vec<Value>>,
+}
+
 #[derive(Default)]
 pub struct Heap {
     objects: Mutex<HashMap<ObjectId, Arc<ObjCell>>>,
+    /// Arrays share the [`ObjectId`] space (one counter) but live in their own
+    /// table: a versioned nominal record and a mutable structural container
+    /// are different kinds of cell, not two flavors of one.
+    arrays: Mutex<HashMap<ObjectId, Arc<ArrayCell>>>,
     next_object: AtomicU64,
 }
 
@@ -54,6 +67,7 @@ impl Heap {
     pub fn with_seed(seed: ObjectId) -> Heap {
         Heap {
             objects: Mutex::new(HashMap::new()),
+            arrays: Mutex::new(HashMap::new()),
             next_object: AtomicU64::new(seed),
         }
     }
@@ -87,6 +101,90 @@ impl Heap {
         id
     }
 
+    fn array(&self, id: ObjectId) -> Option<Arc<ArrayCell>> {
+        self.arrays.lock().unwrap().get(&id).cloned()
+    }
+
+    /// Allocate a mutable array, checking each initial item against `elem`.
+    pub fn new_array(
+        &self,
+        elem: Type,
+        items: Vec<Value>,
+    ) -> Result<ObjectId, Condition> {
+        for item in &items {
+            if !self.value_ok(item, &elem) {
+                return Err(type_error(&format!(
+                    "array item: expected {elem:?}, found a value of another type"
+                )));
+            }
+        }
+        let id = self.next_object.fetch_add(1, Ordering::Relaxed) + 1;
+        self.arrays.lock().unwrap().insert(
+            id,
+            Arc::new(ArrayCell {
+                elem,
+                items: Mutex::new(items),
+            }),
+        );
+        Ok(id)
+    }
+
+    fn array_cell(&self, id: ObjectId) -> Result<Arc<ArrayCell>, Condition> {
+        self.array(id)
+            .ok_or_else(|| type_error("array operation on a non-array value"))
+    }
+
+    pub fn array_get(&self, id: ObjectId, index: i64) -> Result<Value, Condition> {
+        let cell = self.array_cell(id)?;
+        let items = cell.items.lock().unwrap();
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| items.get(i).copied())
+            .ok_or_else(|| {
+                type_error(&format!(
+                    "index {index} out of bounds (len {})",
+                    items.len()
+                ))
+            })
+    }
+
+    /// Write one element — checked against the array's element type, so pinned
+    /// old code can never publish an ill-typed element (it traps here).
+    pub fn array_set(&self, id: ObjectId, index: i64, value: Value) -> Result<(), Condition> {
+        let cell = self.array_cell(id)?;
+        if !self.value_ok(&value, &cell.elem) {
+            return Err(type_error(&format!(
+                "array write: expected {:?}, found a value of another type",
+                cell.elem
+            )));
+        }
+        let mut items = cell.items.lock().unwrap();
+        let len = items.len();
+        let slot = usize::try_from(index)
+            .ok()
+            .and_then(|i| items.get_mut(i))
+            .ok_or_else(|| type_error(&format!("index {index} out of bounds (len {len})")))?;
+        *slot = value;
+        Ok(())
+    }
+
+    pub fn array_len(&self, id: ObjectId) -> Result<i64, Condition> {
+        Ok(self.array_cell(id)?.items.lock().unwrap().len() as i64)
+    }
+
+    /// Append one element (checked like [`Heap::array_set`]).
+    pub fn array_push(&self, id: ObjectId, value: Value) -> Result<(), Condition> {
+        let cell = self.array_cell(id)?;
+        if !self.value_ok(&value, &cell.elem) {
+            return Err(type_error(&format!(
+                "array write: expected {:?}, found a value of another type",
+                cell.elem
+            )));
+        }
+        cell.items.lock().unwrap().push(value);
+        Ok(())
+    }
+
     /// A consistent snapshot of one object's body (the `Arc` is cloned, so it
     /// stays valid even if the object migrates immediately after).
     pub fn body(&self, id: ObjectId) -> Option<Arc<Body>> {
@@ -103,10 +201,11 @@ impl Heap {
 
     pub fn contains(&self, id: ObjectId) -> bool {
         self.objects.lock().unwrap().contains_key(&id)
+            || self.arrays.lock().unwrap().contains_key(&id)
     }
 
     pub fn len(&self) -> usize {
-        self.objects.lock().unwrap().len()
+        self.objects.lock().unwrap().len() + self.arrays.lock().unwrap().len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -117,7 +216,12 @@ impl Heap {
     /// object's current `type_id`. This is the one place references are typed.
     pub fn shallow_type(&self, value: &Value) -> Option<Type> {
         match value {
-            Value::Ref(id) => Some(Type::Ref(self.type_id(*id)?)),
+            Value::Ref(id) => {
+                if let Some(cell) = self.array(*id) {
+                    return Some(Type::Array(Box::new(cell.elem.clone())));
+                }
+                Some(Type::Ref(self.type_id(*id)?))
+            }
             other => other.scalar_type(),
         }
     }
@@ -126,11 +230,31 @@ impl Heap {
     /// what a definition says it should be? References match at the nominal type,
     /// not the schema version, so a migrated object still matches `Ref(T)`.
     pub fn value_ok(&self, value: &Value, expected: &Type) -> bool {
+        // A function value matches any fn type at a data boundary; its actual
+        // signature is enforced where it matters — at the call (`IndirectCall`
+        // re-resolves the current version and checks arguments/result exactly
+        // like a direct call). This is the same late-binding contract as
+        // calling a named function whose signature changed.
+        if let (Value::FnRef(_), Type::Fn(..)) = (value, expected) {
+            return true;
+        }
         self.shallow_type(value).as_ref() == Some(expected)
     }
 
-    /// The reference children of an object, for GC tracing.
+    /// The reference children of an object or array, for GC tracing.
     pub fn child_refs(&self, id: ObjectId) -> Vec<ObjectId> {
+        if let Some(cell) = self.array(id) {
+            return cell
+                .items
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|v| match v {
+                    Value::Ref(child) => Some(*child),
+                    _ => None,
+                })
+                .collect();
+        }
         match self.body(id) {
             Some(body) => body
                 .fields
@@ -144,12 +268,14 @@ impl Heap {
         }
     }
 
-    /// Sweep: keep only the objects in `live`; return how many were reclaimed.
+    /// Sweep: keep only the cells in `live`; return how many were reclaimed.
     pub fn retain(&self, live: &BTreeSet<ObjectId>) -> usize {
         let mut objects = self.objects.lock().unwrap();
-        let before = objects.len();
+        let mut arrays = self.arrays.lock().unwrap();
+        let before = objects.len() + arrays.len();
         objects.retain(|id, _| live.contains(id));
-        before - objects.len()
+        arrays.retain(|id, _| live.contains(id));
+        before - objects.len() - arrays.len()
     }
 
     /// Construct an object at the type's current schema. Supplied fields override
@@ -388,13 +514,25 @@ impl Heap {
 
     /// A by-value snapshot of the whole heap — for equality and inspection in
     /// tests and diagnostics (never on a hot path).
-    pub fn snapshot(&self) -> BTreeMap<ObjectId, Body> {
-        self.objects
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, cell)| (*id, (**cell.body.lock().unwrap()).clone()))
-            .collect()
+    pub fn snapshot(&self) -> HeapSnapshot {
+        HeapSnapshot {
+            objects: self
+                .objects
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(id, cell)| (*id, (**cell.body.lock().unwrap()).clone()))
+                .collect(),
+            arrays: self
+                .arrays
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(id, cell)| {
+                    (*id, (cell.elem.clone(), cell.items.lock().unwrap().clone()))
+                })
+                .collect(),
+        }
     }
 
     /// The next object id that will be allocated — used to seed the concurrent
@@ -402,6 +540,13 @@ impl Heap {
     pub fn next_seed(&self) -> ObjectId {
         self.next_object.load(Ordering::Relaxed)
     }
+}
+
+/// The by-value form of a whole heap (objects + arrays), for equality/debug.
+#[derive(Debug, PartialEq, Eq)]
+pub struct HeapSnapshot {
+    pub objects: BTreeMap<ObjectId, Body>,
+    pub arrays: BTreeMap<ObjectId, (Type, Vec<Value>)>,
 }
 
 impl PartialEq for Heap {

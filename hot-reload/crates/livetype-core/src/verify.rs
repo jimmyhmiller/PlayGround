@@ -5,10 +5,31 @@ fn value_type(value: &Value) -> Result<Type, String> {
     match value {
         Value::Unit => Ok(Type::Unit),
         Value::I64(_) => Ok(Type::I64),
+        Value::F64(_) => Ok(Type::F64),
         Value::Bool(_) => Ok(Type::Bool),
         Value::Str(_) => Ok(Type::Str),
+        // Typed against the world (its current signature) in the Const arm.
+        Value::FnRef(_) => Err("a function reference is typed by the world".into()),
         Value::Ref(_) => Err("object literals are runtime values, not code constants".into()),
         Value::Foreign { .. } => Err("foreign handles are runtime values, not code constants".into()),
+    }
+}
+
+/// Collect every nominal type mentioned anywhere inside `ty` (arrays and fn
+/// types recurse) — the dependency-set walk.
+fn add_type_deps(ty: &Type, deps: &mut BTreeSet<DefId>) {
+    match ty {
+        Type::Ref(t) => {
+            deps.insert(*t);
+        }
+        Type::Array(elem) => add_type_deps(elem, deps),
+        Type::Fn(params, result) => {
+            for p in params {
+                add_type_deps(p, deps);
+            }
+            add_type_deps(result, deps);
+        }
+        Type::Unit | Type::I64 | Type::F64 | Type::Bool | Type::Str | Type::Foreign(_) => {}
     }
 }
 
@@ -48,11 +69,12 @@ pub fn verify_schema(schema: &Schema, world: &World) -> Result<(), Vec<String>> 
         if !ids.insert(field.id) {
             errors.push(format!("duplicate field id {}", field.id));
         }
-        if let Type::Ref(id) = field.ty
-            && !world.current_schemas.contains_key(&id)
-            && id != schema.type_id
-        {
-            errors.push(format!("field '{}' refers to unknown type {id}", field.name));
+        let mut referenced = BTreeSet::new();
+        add_type_deps(&field.ty, &mut referenced);
+        for id in referenced {
+            if !world.current_schemas.contains_key(&id) && id != schema.type_id {
+                errors.push(format!("field '{}' refers to unknown type {id}", field.name));
+            }
         }
         if let Some(default) = &field.default {
             match value_type(default) {
@@ -94,7 +116,22 @@ fn check_instruction(
     regs: &[Option<Type>],
 ) -> Result<Option<(usize, Type)>, String> {
     match instruction {
-        Instruction::Const { dst, value } => Ok(Some((*dst, value_type(value)?))),
+        Instruction::Const { dst, value } => {
+            if let Value::FnRef(id) = value {
+                let sig = if let Some(version) = world.current_functions.get(id) {
+                    match &world.functions[&(*id, *version)] {
+                        crate::FunctionState::Ready(f) => (f.params.clone(), f.result.clone()),
+                        _ => return Err(format!("function reference to broken function {id}")),
+                    }
+                } else if let Some(sig) = extra.get(id) {
+                    sig.clone()
+                } else {
+                    return Err(format!("function reference to unknown function {id}"));
+                };
+                return Ok(Some((*dst, Type::Fn(sig.0, Box::new(sig.1)))));
+            }
+            Ok(Some((*dst, value_type(value)?)))
+        }
         Instruction::New {
             dst,
             type_id,
@@ -209,6 +246,87 @@ fn check_instruction(
                     return Err("multiplication needs i64 operands".into());
                 }
                 Ok(Some((*dst, Type::I64)))
+            }
+            Instruction::DivI64 { dst, left, right } => {
+                if read(regs, *left)? != Type::I64 || read(regs, *right)? != Type::I64 {
+                    return Err("division needs i64 operands".into());
+                }
+                Ok(Some((*dst, Type::I64)))
+            }
+            Instruction::AddF64 { dst, left, right }
+            | Instruction::SubF64 { dst, left, right }
+            | Instruction::MulF64 { dst, left, right }
+            | Instruction::DivF64 { dst, left, right } => {
+                if read(regs, *left)? != Type::F64 || read(regs, *right)? != Type::F64 {
+                    return Err("float arithmetic needs f64 operands".into());
+                }
+                Ok(Some((*dst, Type::F64)))
+            }
+            Instruction::LtF64 { dst, left, right }
+            | Instruction::LeF64 { dst, left, right }
+            | Instruction::EqF64 { dst, left, right } => {
+                if read(regs, *left)? != Type::F64 || read(regs, *right)? != Type::F64 {
+                    return Err("float comparison needs f64 operands".into());
+                }
+                Ok(Some((*dst, Type::Bool)))
+            }
+            Instruction::NewArray { dst, elem, items } => {
+                for (n, item) in items.iter().enumerate() {
+                    if read(regs, *item)? != *elem {
+                        return Err(format!("array item {n} has the wrong type"));
+                    }
+                }
+                Ok(Some((*dst, Type::Array(Box::new(elem.clone())))))
+            }
+            Instruction::IndexGet { dst, array, index } => {
+                let Type::Array(elem) = read(regs, *array)? else {
+                    return Err("indexing needs an array".into());
+                };
+                if read(regs, *index)? != Type::I64 {
+                    return Err("an index must be an i64".into());
+                }
+                Ok(Some((*dst, *elem)))
+            }
+            Instruction::IndexSet { array, index, value } => {
+                let Type::Array(elem) = read(regs, *array)? else {
+                    return Err("indexing needs an array".into());
+                };
+                if read(regs, *index)? != Type::I64 {
+                    return Err("an index must be an i64".into());
+                }
+                if read(regs, *value)? != *elem {
+                    return Err("array write has the wrong element type".into());
+                }
+                Ok(None)
+            }
+            Instruction::ArrayLen { dst, array } => {
+                let Type::Array(_) = read(regs, *array)? else {
+                    return Err("len needs an array".into());
+                };
+                Ok(Some((*dst, Type::I64)))
+            }
+            Instruction::ArrayPush { array, value } => {
+                let Type::Array(elem) = read(regs, *array)? else {
+                    return Err("push needs an array".into());
+                };
+                if read(regs, *value)? != *elem {
+                    return Err("array push has the wrong element type".into());
+                }
+                Ok(None)
+            }
+            Instruction::IndirectCall { dst, callee, args } => {
+                let Type::Fn(params, result) = read(regs, *callee)? else {
+                    return Err("indirect call needs a function value".into());
+                };
+                if args.len() != params.len() {
+                    return Err("wrong argument count".into());
+                }
+                for (arg, expected) in args.iter().zip(&params) {
+                    if read(regs, *arg)? != *expected {
+                        return Err(format!("argument r{arg} has the wrong type"));
+                    }
+                }
+                Ok(Some((*dst, *result)))
             }
             Instruction::EqI64 { dst, left, right } => {
                 if read(regs, *left)? != Type::I64 || read(regs, *right)? != Type::I64 {
@@ -452,15 +570,13 @@ pub fn verify_function_with(
     // field types), and its `New` sites. A superset is fine — it only re-checks
     // a few extra functions on a schema change, never too few.
     let mut deps = BTreeSet::new();
-    let mut add = |ty: &Type| {
-        if let Type::Ref(t) = ty {
-            deps.insert(*t);
-        }
-    };
-    function.params.iter().for_each(&mut add);
-    add(&function.result);
+    for ty in function.params.iter().chain([&function.result]) {
+        add_type_deps(ty, &mut deps);
+    }
     for env in envs.iter().flatten() {
-        env.iter().flatten().for_each(&mut add);
+        for ty in env.iter().flatten() {
+            add_type_deps(ty, &mut deps);
+        }
     }
     for instruction in &function.code {
         match instruction {

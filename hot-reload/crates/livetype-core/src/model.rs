@@ -21,33 +21,72 @@ pub type ForeignKind = u32;
 /// The id of a `foreign fn` — a native function registered on the [`Runtime`].
 pub type ForeignFnId = u32;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
     Unit,
     I64,
+    /// IEEE-754 double. Runtime `==`/`<` use IEEE semantics; structural
+    /// equality of *values* (tests, heap comparison) is bitwise.
+    F64,
     Bool,
     /// An interned, immutable string (see [`crate::strings`]).
     Str,
+    /// A mutable, growable array of `elem`. Structural (no version, no
+    /// migration): only nominal types evolve; an array's identity is its
+    /// element type, checked at every write.
+    Array(Box<Type>),
+    /// A first-class function value. Structural; the *value* is a function
+    /// NAME (a `DefId`), so calling it late-binds to the current version —
+    /// redefining a function updates every stored reference to it.
+    Fn(Vec<Type>, Box<Type>),
     Ref(DefId),
     /// An opaque handle to a native resource. Matched nominally by kind; the GC
     /// never traces through it (native code owns the pointee's lifetime).
     Foreign(ForeignKind),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub enum Value {
     Unit,
     I64(i64),
+    /// Structural equality (`PartialEq`, used by tests and heap comparison) is
+    /// BITWISE — an equivalence, so `Eq` holds. The runtime's `==` operator
+    /// (`EqF64`) uses IEEE semantics (`NaN != NaN`).
+    F64(f64),
     Bool(bool),
     /// An interned string — a plain scalar id (equal text ⇒ equal id), so it
     /// needs no GC tracing and survives every tier boundary untouched.
     Str(StrId),
+    /// A first-class function value: the NAME of a function. Calling it
+    /// resolves the current version at call time (late binding), so a live
+    /// edit updates the behavior of every stored reference.
+    FnRef(DefId),
     Ref(ObjectId),
     /// A native pointer behind a kind tag. Passed to and returned from foreign
     /// calls; stored in globals and object fields like any other value. Opaque
     /// to the GC — `ptr` is never dereferenced or traced by the runtime.
     Foreign { kind: ForeignKind, ptr: u64 },
 }
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Unit, Value::Unit) => true,
+            (Value::I64(a), Value::I64(b)) => a == b,
+            (Value::F64(a), Value::F64(b)) => a.to_bits() == b.to_bits(),
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::FnRef(a), Value::FnRef(b)) => a == b,
+            (Value::Ref(a), Value::Ref(b)) => a == b,
+            (
+                Value::Foreign { kind: ak, ptr: ap },
+                Value::Foreign { kind: bk, ptr: bp },
+            ) => ak == bk && ap == bp,
+            _ => false,
+        }
+    }
+}
+impl Eq for Value {}
 
 impl Value {
     /// The nominal type of a *scalar* value — everything except a reference,
@@ -58,8 +97,13 @@ impl Value {
         match self {
             Self::Unit => Some(Type::Unit),
             Self::I64(_) => Some(Type::I64),
+            Self::F64(_) => Some(Type::F64),
             Self::Bool(_) => Some(Type::Bool),
             Self::Str(_) => Some(Type::Str),
+            // A function value's type (its signature) and a reference's type
+            // (its object's schema) both depend on live state — the heap/world
+            // resolve them, not this shallow view.
+            Self::FnRef(_) => None,
             Self::Foreign { kind, .. } => Some(Type::Foreign(*kind)),
             Self::Ref(_) => None,
         }
@@ -200,6 +244,35 @@ pub enum Instruction {
         object: usize,
         arms: Vec<(VariantId, usize)>,
     },
+    /// Allocate a mutable array of `elem` from the item registers.
+    NewArray {
+        dst: usize,
+        elem: Type,
+        items: Vec<usize>,
+    },
+    /// `dst := array[index]`; out of bounds is a (resumable) trap.
+    IndexGet {
+        dst: usize,
+        array: usize,
+        index: usize,
+    },
+    /// `array[index] := value`; the value is checked against the array's
+    /// element type at the write (the con-freeness boundary for containers).
+    IndexSet {
+        array: usize,
+        index: usize,
+        value: usize,
+    },
+    /// `dst := length of array`.
+    ArrayLen {
+        dst: usize,
+        array: usize,
+    },
+    /// Append `value` (checked against the element type).
+    ArrayPush {
+        array: usize,
+        value: usize,
+    },
     /// Copy a value from one register to another (any type). The one op that
     /// isn't produced by a single source construct — the frontend emits it to
     /// bind a local to another local's value and to land branch results in a
@@ -219,6 +292,53 @@ pub enum Instruction {
         right: usize,
     },
     MulI64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// Signed division; a zero divisor is a (resumable) con-freeness-style
+    /// trap, never UB or a wrapped sentinel.
+    DivI64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    AddF64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    SubF64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    MulF64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// IEEE division — never traps (inf/NaN follow the standard).
+    DivF64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// `dst := left < right` (IEEE ordered). Produces a `Bool`.
+    LtF64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// `dst := left <= right` (IEEE ordered — NOT `!(right < left)`, which
+    /// would be wrong for NaN). Produces a `Bool`.
+    LeF64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// `dst := left == right` (IEEE: `NaN != NaN`). Produces a `Bool`.
+    EqF64 {
         dst: usize,
         left: usize,
         right: usize,
@@ -274,6 +394,15 @@ pub enum Instruction {
     Call {
         dst: usize,
         function: DefId,
+        args: Vec<usize>,
+    },
+    /// Call through a function VALUE (`Value::FnRef` in `callee`): resolve the
+    /// named function's *current* version at call time — late binding, so a
+    /// stored function value picks up live edits — with the same argument /
+    /// broken-callee checks as a direct `Call`.
+    IndirectCall {
+        dst: usize,
+        callee: usize,
         args: Vec<usize>,
     },
     /// Call a registered native function (managed → native). Atomic and

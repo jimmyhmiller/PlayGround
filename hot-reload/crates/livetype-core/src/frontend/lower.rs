@@ -168,9 +168,15 @@ impl IdEnv {
 fn resolve(te: &TypeExpr, ids: &IdEnv) -> Result<Type, String> {
     Ok(match te {
         TypeExpr::I64 => Type::I64,
+        TypeExpr::F64 => Type::F64,
         TypeExpr::Bool => Type::Bool,
         TypeExpr::Str => Type::Str,
         TypeExpr::Unit => Type::Unit,
+        TypeExpr::Array(elem) => Type::Array(Box::new(resolve(elem, ids)?)),
+        TypeExpr::Fn(params, ret) => Type::Fn(
+            params.iter().map(|p| resolve(p, ids)).collect::<Result<_, _>>()?,
+            Box::new(resolve(ret, ids)?),
+        ),
         TypeExpr::Ref(name) => {
             // A written name is a foreign resource type if declared as one,
             // otherwise a struct reference.
@@ -412,6 +418,7 @@ fn lower_init_fn(name: &str, init: &Expr, ids: &mut IdEnv) -> Result<(Function, 
 fn const_value(e: &Expr, ty: &Type) -> Result<Value, String> {
     let v = match e {
         Expr::Int(n) => Value::I64(*n),
+        Expr::Float(x) => Value::F64(*x),
         Expr::Bool(b) => Value::Bool(*b),
         Expr::Str(text) => Value::Str(strings::intern(text)),
         Expr::Unit => Value::Unit,
@@ -506,10 +513,35 @@ impl<'a> Lower<'a> {
 
     fn stmt(&mut self, s: &Stmt) -> Result<(), String> {
         match s {
-            Stmt::Let { name, value } => {
+            Stmt::Let { name, ty, value } => {
                 let dst = self.fresh_reg();
-                let ty = self.expr_into(value, dst)?;
-                self.bind(name, dst, ty);
+                let annotated = match ty {
+                    Some(te) => Some(resolve(te, self.ids)?),
+                    None => None,
+                };
+                // An empty array literal is the one expression whose type only
+                // an annotation can pin.
+                let inferred = if let (Expr::ArrayLit(items), Some(Type::Array(elem))) =
+                    (value, &annotated)
+                    && items.is_empty()
+                {
+                    self.code.push(Instruction::NewArray {
+                        dst,
+                        elem: (**elem).clone(),
+                        items: Vec::new(),
+                    });
+                    annotated.clone().unwrap()
+                } else {
+                    self.expr_into(value, dst)?
+                };
+                if let Some(annotated) = &annotated
+                    && *annotated != inferred
+                {
+                    return Err(format!(
+                        "`{name}` is annotated {annotated:?} but its value is {inferred:?}"
+                    ));
+                }
+                self.bind(name, dst, inferred);
             }
             Stmt::Assign { name, value } => {
                 let (dst, _) = self.lookup(name)?;
@@ -544,6 +576,15 @@ impl<'a> Lower<'a> {
                 self.scoped(|lo| lo.stmts(els))?;
                 self.code.push(Instruction::Jump { target: end_l });
                 self.place(end_l);
+            }
+            Stmt::IndexAssign { array, index, value } => {
+                let (a, aty) = self.expr(array)?;
+                let Type::Array(_) = aty else {
+                    return Err("indexed assignment needs an array".into());
+                };
+                let (i, _) = self.expr(index)?;
+                let (v, _) = self.expr(value)?;
+                self.code.push(Instruction::IndexSet { array: a, index: i, value: v });
             }
             Stmt::Match { scrutinee, arms } => {
                 let (obj, ty) = self.expr(scrutinee)?;
@@ -649,6 +690,14 @@ impl<'a> Lower<'a> {
                 self.code.push(Instruction::LoadGlobal { dst, global: gid });
                 return Ok((dst, ty));
             }
+            if let Some(fid) = self.ids.fn_of(name) {
+                // A bare function name is a first-class function VALUE — the
+                // name itself, so it late-binds to the current version.
+                let (params, result) = self.ids.fn_sigs[&fid].clone();
+                let dst = self.fresh_reg();
+                self.code.push(Instruction::Const { dst, value: Value::FnRef(fid) });
+                return Ok((dst, Type::Fn(params, Box::new(result))));
+            }
             return Err(format!("unknown variable `{name}`"));
         }
         let dst = self.fresh_reg();
@@ -662,12 +711,129 @@ impl<'a> Lower<'a> {
                 self.code.push(Instruction::Const { dst, value: Value::I64(*n) });
                 Type::I64
             }
+            Expr::Float(x) => {
+                self.code.push(Instruction::Const { dst, value: Value::F64(*x) });
+                Type::F64
+            }
             Expr::Str(text) => {
                 self.code.push(Instruction::Const {
                     dst,
                     value: Value::Str(strings::intern(text)),
                 });
                 Type::Str
+            }
+            Expr::Neg(inner) => {
+                // `-x` is `0 - x`, typed by the operand.
+                let (r, ty) = self.expr(inner)?;
+                let zero = self.fresh_reg();
+                match ty {
+                    Type::F64 => {
+                        self.code.push(Instruction::Const { dst: zero, value: Value::F64(0.0) });
+                        self.code.push(Instruction::SubF64 { dst, left: zero, right: r });
+                        Type::F64
+                    }
+                    _ => {
+                        self.code.push(Instruction::Const { dst: zero, value: Value::I64(0) });
+                        self.code.push(Instruction::SubI64 { dst, left: zero, right: r });
+                        Type::I64
+                    }
+                }
+            }
+            Expr::ArrayLit(items) => {
+                if items.is_empty() {
+                    return Err(
+                        "cannot infer the element type of `[]` — annotate the let (`let xs: [T] = [];`)"
+                            .into(),
+                    );
+                }
+                let mut regs = Vec::new();
+                let mut elem: Option<Type> = None;
+                for item in items {
+                    let (r, ty) = self.expr(item)?;
+                    if let Some(elem) = &elem
+                        && *elem != ty
+                    {
+                        return Err(format!(
+                            "array items disagree: {elem:?} vs {ty:?}"
+                        ));
+                    }
+                    elem.get_or_insert(ty);
+                    regs.push(r);
+                }
+                let elem = elem.unwrap();
+                self.code.push(Instruction::NewArray {
+                    dst,
+                    elem: elem.clone(),
+                    items: regs,
+                });
+                Type::Array(Box::new(elem))
+            }
+            Expr::Index { array, index } => {
+                let (a, aty) = self.expr(array)?;
+                let Type::Array(elem) = aty else {
+                    return Err("indexing needs an array".into());
+                };
+                let (i, _) = self.expr(index)?;
+                self.code.push(Instruction::IndexGet { dst, array: a, index: i });
+                *elem
+            }
+            Expr::Match { scrutinee, arms } => {
+                let (obj, ty) = self.expr(scrutinee)?;
+                let Type::Ref(enum_id) = ty else {
+                    return Err("match needs an enum value".into());
+                };
+                let layout = self
+                    .ids
+                    .enum_variants
+                    .get(&enum_id)
+                    .ok_or("match on a non-enum type")?
+                    .clone();
+                let end_l = self.new_label();
+                let mut case_arms = Vec::new();
+                let mut labelled = Vec::new();
+                for arm in arms {
+                    let (_, vid, vfields) = layout
+                        .iter()
+                        .find(|(n, _, _)| *n == arm.variant)
+                        .ok_or_else(|| format!("enum has no variant `{}`", arm.variant))?;
+                    let label = self.new_label();
+                    case_arms.push((*vid, label));
+                    labelled.push((arm, label, vfields.clone()));
+                }
+                self.code.push(Instruction::CaseVariant { object: obj, arms: case_arms });
+                let mut result: Option<Type> = None;
+                for (arm, label, vfields) in labelled {
+                    self.place(label);
+                    let arm_ty = self.scoped(|lo| -> Result<Type, String> {
+                        for binding in &arm.bindings {
+                            let (_, fid, fty) = vfields
+                                .iter()
+                                .find(|(n, _, _)| n == binding)
+                                .ok_or_else(|| {
+                                    format!("variant `{}` has no field `{binding}`", arm.variant)
+                                })?;
+                            let breg = lo.fresh_reg();
+                            lo.code.push(Instruction::GetField {
+                                dst: breg,
+                                object: obj,
+                                field: *fid,
+                            });
+                            lo.bind(binding, breg, fty.clone());
+                        }
+                        lo.expr_into(&arm.value, dst)
+                    })?;
+                    if let Some(result) = &result
+                        && *result != arm_ty
+                    {
+                        return Err(format!(
+                            "match arms disagree: {result:?} vs {arm_ty:?}"
+                        ));
+                    }
+                    result.get_or_insert(arm_ty);
+                    self.code.push(Instruction::Jump { target: end_l });
+                }
+                self.place(end_l);
+                result.ok_or("a match expression needs at least one arm")?
             }
             Expr::Bool(b) => {
                 self.code.push(Instruction::Const { dst, value: Value::Bool(*b) });
@@ -684,6 +850,10 @@ impl<'a> Lower<'a> {
                 } else if let Some((gid, ty)) = self.ids.global_of(name) {
                     self.code.push(Instruction::LoadGlobal { dst, global: gid });
                     ty
+                } else if let Some(fid) = self.ids.fn_of(name) {
+                    let (params, result) = self.ids.fn_sigs[&fid].clone();
+                    self.code.push(Instruction::Const { dst, value: Value::FnRef(fid) });
+                    Type::Fn(params, Box::new(result))
                 } else {
                     return Err(format!("unknown variable `{name}`"));
                 }
@@ -691,11 +861,58 @@ impl<'a> Lower<'a> {
             Expr::Binary { op, left, right } => {
                 let (lr, lty) = self.expr(left)?;
                 let (rr, _) = self.expr(right)?;
-                // `+`, `==`, and `!=` are type-directed: strings get the string
-                // ops, everything else the i64 ops (the verifier enforces the
-                // operand types either way).
+                // Operators are type-directed by the left operand: strings get
+                // the string ops, f64 the float ops, everything else the i64
+                // ops (the verifier enforces the operand types either way).
                 let strings = lty == Type::Str;
+                let floats = lty == Type::F64;
                 match op {
+                    BinOp::Add if floats => {
+                        self.code.push(Instruction::AddF64 { dst, left: lr, right: rr });
+                        Type::F64
+                    }
+                    BinOp::Sub if floats => {
+                        self.code.push(Instruction::SubF64 { dst, left: lr, right: rr });
+                        Type::F64
+                    }
+                    BinOp::Mul if floats => {
+                        self.code.push(Instruction::MulF64 { dst, left: lr, right: rr });
+                        Type::F64
+                    }
+                    BinOp::Div if floats => {
+                        self.code.push(Instruction::DivF64 { dst, left: lr, right: rr });
+                        Type::F64
+                    }
+                    BinOp::Div => {
+                        self.code.push(Instruction::DivI64 { dst, left: lr, right: rr });
+                        Type::I64
+                    }
+                    BinOp::Lt if floats => {
+                        self.code.push(Instruction::LtF64 { dst, left: lr, right: rr });
+                        Type::Bool
+                    }
+                    BinOp::Gt if floats => {
+                        self.code.push(Instruction::LtF64 { dst, left: rr, right: lr });
+                        Type::Bool
+                    }
+                    BinOp::Le if floats => {
+                        self.code.push(Instruction::LeF64 { dst, left: lr, right: rr });
+                        Type::Bool
+                    }
+                    BinOp::Ge if floats => {
+                        self.code.push(Instruction::LeF64 { dst, left: rr, right: lr });
+                        Type::Bool
+                    }
+                    BinOp::Eq if floats => {
+                        self.code.push(Instruction::EqF64 { dst, left: lr, right: rr });
+                        Type::Bool
+                    }
+                    BinOp::Ne if floats => {
+                        let t = self.fresh_reg();
+                        self.code.push(Instruction::EqF64 { dst: t, left: lr, right: rr });
+                        self.code.push(Instruction::Not { dst, src: t });
+                        Type::Bool
+                    }
                     BinOp::Add if strings => {
                         self.code.push(Instruction::ConcatStr { dst, left: lr, right: rr });
                         Type::Str
@@ -845,6 +1062,42 @@ impl<'a> Lower<'a> {
                 Type::Ref(enum_id)
             }
             Expr::Call { name, args } => {
+                // Resolution order: a local holding a function value (locals
+                // shadow), then array builtins, then foreign fns, then managed
+                // fns.
+                if let Ok((callee_reg, Type::Fn(_, result))) = self.lookup(name) {
+                    let mut arg_regs = Vec::new();
+                    for a in args {
+                        let (r, _) = self.expr(a)?;
+                        arg_regs.push(r);
+                    }
+                    self.code.push(Instruction::IndirectCall {
+                        dst,
+                        callee: callee_reg,
+                        args: arg_regs,
+                    });
+                    return Ok(*result);
+                }
+                let user_defined = self.ids.fn_of(name).is_some()
+                    || self.ids.foreign_fn_of(name).is_some();
+                if name == "len" && !user_defined {
+                    let [array] = args.as_slice() else {
+                        return Err("len takes exactly one argument".into());
+                    };
+                    let (a, _) = self.expr(array)?;
+                    self.code.push(Instruction::ArrayLen { dst, array: a });
+                    return Ok(Type::I64);
+                }
+                if name == "push" && !user_defined {
+                    let [array, value] = args.as_slice() else {
+                        return Err("push takes exactly two arguments".into());
+                    };
+                    let (a, _) = self.expr(array)?;
+                    let (v, _) = self.expr(value)?;
+                    self.code.push(Instruction::ArrayPush { array: a, value: v });
+                    self.code.push(Instruction::Const { dst, value: Value::Unit });
+                    return Ok(Type::Unit);
+                }
                 // A foreign fn lowers to a native call; anything else is a
                 // managed call. Foreign names are checked first so a `foreign fn`
                 // and a managed `fn` can't be confused.

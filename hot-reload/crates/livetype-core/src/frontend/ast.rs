@@ -5,9 +5,14 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeExpr {
     I64,
+    F64,
     Bool,
     Str,
     Unit,
+    /// `[T]` — a mutable, growable array.
+    Array(Box<TypeExpr>),
+    /// `fn(T, U) -> R` — a first-class function value.
+    Fn(Vec<TypeExpr>, Box<TypeExpr>),
     Ref(String),
 }
 
@@ -94,6 +99,7 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    Div,
     Lt,
     Gt,
     Le,
@@ -104,7 +110,9 @@ pub enum BinOp {
 
 #[derive(Clone, Debug)]
 pub enum Stmt {
-    Let { name: String, value: Expr },
+    /// `let x = e;` or `let x: T = e;` — the annotation is optional and only
+    /// *required* where nothing else pins the type (an empty array literal).
+    Let { name: String, ty: Option<TypeExpr>, value: Expr },
     Assign { name: String, value: Expr },
     Return(Expr),
     If { cond: Expr, then: Vec<Stmt>, els: Vec<Stmt> },
@@ -119,6 +127,8 @@ pub enum Stmt {
         scrutinee: Expr,
         arms: Vec<MatchArm>,
     },
+    /// `a[i] = e;` — element assignment (checked against the element type).
+    IndexAssign { array: Expr, index: Expr, value: Expr },
     /// A bare expression evaluated for effect (e.g. a call).
     Expr(Expr),
 }
@@ -131,9 +141,18 @@ pub struct MatchArm {
     pub body: Vec<Stmt>,
 }
 
+/// One arm of an expression `match`: `Variant { a, b } => expr`.
+#[derive(Clone, Debug)]
+pub struct ExprArm {
+    pub variant: String,
+    pub bindings: Vec<String>,
+    pub value: Expr,
+}
+
 #[derive(Clone, Debug)]
 pub enum Expr {
     Int(i64),
+    Float(f64),
     Bool(bool),
     /// A string literal (interned at lowering).
     Str(String),
@@ -141,6 +160,15 @@ pub enum Expr {
     Var(String),
     Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
     Not(Box<Expr>),
+    /// Unary minus — type-directed sugar for `0 - x` / `0.0 - x`.
+    Neg(Box<Expr>),
+    /// `[e1, e2, …]`; the element type is the first item's. `[]` needs a
+    /// `let` annotation.
+    ArrayLit(Vec<Expr>),
+    /// `a[i]`.
+    Index { array: Box<Expr>, index: Box<Expr> },
+    /// `match` in expression position: every arm yields a value of one type.
+    Match { scrutinee: Box<Expr>, arms: Vec<ExprArm> },
     Field { object: Box<Expr>, field: String },
     StructLit { name: String, fields: Vec<(String, Expr)> },
     /// `Shape::Circle { r: 5 }` (or a bare fieldless `Shape::Point`).

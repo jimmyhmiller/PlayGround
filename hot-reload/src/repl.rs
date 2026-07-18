@@ -520,7 +520,9 @@ fn show(v: &Value) -> String {
         Value::I64(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Unit => "()".into(),
+        Value::F64(x) => x.to_string(),
         Value::Str(id) => format!("{:?}", &*livetype_core::strings::text(*id)),
+        Value::FnRef(id) => format!("<fn #{id}>"),
         Value::Ref(id) => format!("<ref #{id}>"),
         Value::Foreign { kind, ptr } => format!("<foreign k{kind} @{ptr:#x}>"),
     }
@@ -529,9 +531,16 @@ fn show(v: &Value) -> String {
 fn ty_name_in(t: &Type, w: &World) -> String {
     match t {
         Type::I64 => "i64".into(),
+        Type::F64 => "f64".into(),
         Type::Bool => "bool".into(),
         Type::Str => "str".into(),
         Type::Unit => "()".into(),
+        Type::Array(elem) => format!("[{}]", ty_name_in(elem, w)),
+        Type::Fn(params, ret) => format!(
+            "fn({}) -> {}",
+            params.iter().map(|p| ty_name_in(p, w)).collect::<Vec<_>>().join(", "),
+            ty_name_in(ret, w)
+        ),
         Type::Ref(id) => struct_name_in(w, *id),
         Type::Foreign(kind) => format!("foreign#{kind}"),
     }

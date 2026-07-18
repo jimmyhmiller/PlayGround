@@ -13,8 +13,10 @@
 //! the seam Phase 6 later removes.
 
 use crate::runtime::{
-    ERR_ADD_NON_I64, ERR_BRANCH_NON_BOOL, ERR_CASE_NON_REF, ERR_CONCAT_NON_STR, ERR_EQ_NON_I64,
-    ERR_EQSTR_NON_STR, ERR_LT_NON_I64, ERR_MUL_NON_I64, ERR_NOT_NON_BOOL, ERR_SUB_NON_I64,
+    ERR_ADD_NON_I64, ERR_ARRAY_OPERANDS, ERR_BRANCH_NON_BOOL, ERR_CASE_NON_REF,
+    ERR_CONCAT_NON_STR, ERR_DIV_NON_I64, ERR_EQ_NON_I64, ERR_EQSTR_NON_STR, ERR_FLOAT_NON_F64,
+    ERR_INDIRECT_NON_FN, ERR_LT_NON_I64, ERR_MUL_NON_I64, ERR_NOT_NON_BOOL, ERR_SUB_NON_I64,
+    div_by_zero,
 };
 use crate::{Condition, DefId, ForeignFnId, Heap, Instruction, Value, Version, World};
 
@@ -147,6 +149,44 @@ pub fn step_instruction<M: Machine>(m: &mut M, instr: &Instruction) -> Result<Fl
             m.set_reg(*dst, Value::Ref(id));
             m.advance();
         }
+        Instruction::NewArray { dst, elem, items } => {
+            let values: Vec<Value> = items.iter().map(|r| rd(m, *r)).collect::<Result<_, _>>()?;
+            let id = m.heap().new_array(elem.clone(), values)?;
+            m.set_reg(*dst, Value::Ref(id));
+            m.advance();
+        }
+        Instruction::IndexGet { dst, array, index } => {
+            let (Value::Ref(id), Value::I64(i)) = (rd(m, *array)?, rd(m, *index)?) else {
+                return Err(type_err(function, pc, ERR_ARRAY_OPERANDS));
+            };
+            let value = m.heap().array_get(id, i)?;
+            m.set_reg(*dst, value);
+            m.advance();
+        }
+        Instruction::IndexSet { array, index, value } => {
+            let (Value::Ref(id), Value::I64(i)) = (rd(m, *array)?, rd(m, *index)?) else {
+                return Err(type_err(function, pc, ERR_ARRAY_OPERANDS));
+            };
+            let v = rd(m, *value)?;
+            m.heap().array_set(id, i, v)?;
+            m.advance();
+        }
+        Instruction::ArrayLen { dst, array } => {
+            let Value::Ref(id) = rd(m, *array)? else {
+                return Err(type_err(function, pc, ERR_ARRAY_OPERANDS));
+            };
+            let len = m.heap().array_len(id)?;
+            m.set_reg(*dst, Value::I64(len));
+            m.advance();
+        }
+        Instruction::ArrayPush { array, value } => {
+            let Value::Ref(id) = rd(m, *array)? else {
+                return Err(type_err(function, pc, ERR_ARRAY_OPERANDS));
+            };
+            let v = rd(m, *value)?;
+            m.heap().array_push(id, v)?;
+            m.advance();
+        }
         Instruction::CaseVariant { object, arms } => {
             let Value::Ref(id) = rd(m, *object)? else {
                 return Err(type_err(function, pc, ERR_CASE_NON_REF));
@@ -180,6 +220,66 @@ pub fn step_instruction<M: Machine>(m: &mut M, instr: &Instruction) -> Result<Fl
                 return Err(type_err(function, pc, ERR_MUL_NON_I64));
             };
             m.set_reg(*dst, Value::I64(a * b));
+            m.advance();
+        }
+        Instruction::DivI64 { dst, left, right } => {
+            let (Value::I64(a), Value::I64(b)) = (rd(m, *left)?, rd(m, *right)?) else {
+                return Err(type_err(function, pc, ERR_DIV_NON_I64));
+            };
+            if b == 0 {
+                return Err(div_by_zero());
+            }
+            m.set_reg(*dst, Value::I64(a.wrapping_div(b)));
+            m.advance();
+        }
+        Instruction::AddF64 { dst, left, right } => {
+            let (Value::F64(a), Value::F64(b)) = (rd(m, *left)?, rd(m, *right)?) else {
+                return Err(type_err(function, pc, ERR_FLOAT_NON_F64));
+            };
+            m.set_reg(*dst, Value::F64(a + b));
+            m.advance();
+        }
+        Instruction::SubF64 { dst, left, right } => {
+            let (Value::F64(a), Value::F64(b)) = (rd(m, *left)?, rd(m, *right)?) else {
+                return Err(type_err(function, pc, ERR_FLOAT_NON_F64));
+            };
+            m.set_reg(*dst, Value::F64(a - b));
+            m.advance();
+        }
+        Instruction::MulF64 { dst, left, right } => {
+            let (Value::F64(a), Value::F64(b)) = (rd(m, *left)?, rd(m, *right)?) else {
+                return Err(type_err(function, pc, ERR_FLOAT_NON_F64));
+            };
+            m.set_reg(*dst, Value::F64(a * b));
+            m.advance();
+        }
+        Instruction::DivF64 { dst, left, right } => {
+            let (Value::F64(a), Value::F64(b)) = (rd(m, *left)?, rd(m, *right)?) else {
+                return Err(type_err(function, pc, ERR_FLOAT_NON_F64));
+            };
+            // IEEE division: inf/NaN, never a trap.
+            m.set_reg(*dst, Value::F64(a / b));
+            m.advance();
+        }
+        Instruction::LtF64 { dst, left, right } => {
+            let (Value::F64(a), Value::F64(b)) = (rd(m, *left)?, rd(m, *right)?) else {
+                return Err(type_err(function, pc, ERR_FLOAT_NON_F64));
+            };
+            m.set_reg(*dst, Value::Bool(a < b));
+            m.advance();
+        }
+        Instruction::LeF64 { dst, left, right } => {
+            let (Value::F64(a), Value::F64(b)) = (rd(m, *left)?, rd(m, *right)?) else {
+                return Err(type_err(function, pc, ERR_FLOAT_NON_F64));
+            };
+            m.set_reg(*dst, Value::Bool(a <= b));
+            m.advance();
+        }
+        Instruction::EqF64 { dst, left, right } => {
+            let (Value::F64(a), Value::F64(b)) = (rd(m, *left)?, rd(m, *right)?) else {
+                return Err(type_err(function, pc, ERR_FLOAT_NON_F64));
+            };
+            m.set_reg(*dst, Value::Bool(a == b));
             m.advance();
         }
         Instruction::LtI64 { dst, left, right } => {
@@ -261,6 +361,51 @@ pub fn step_instruction<M: Machine>(m: &mut M, instr: &Instruction) -> Result<Fl
             }
             m.advance();
             m.push_call(*callee, version, registers, *dst);
+        }
+        Instruction::IndirectCall { dst, callee, args } => {
+            let Value::FnRef(target) = rd(m, *callee)? else {
+                return Err(type_err(function, pc, ERR_INDIRECT_NON_FN));
+            };
+            // Late binding: resolve the named function's CURRENT version — the
+            // whole point of a function value being a name, not a code pointer.
+            let Some(version) = m.world().current_functions.get(&target).copied() else {
+                return Err(Condition::BrokenFunction {
+                    function: target,
+                    diagnostics: vec!["unknown function".into()],
+                });
+            };
+            let (params, registers_len) = match &m.world().functions[&(target, version)] {
+                crate::FunctionState::Ready(f) => (f.params.clone(), f.registers),
+                crate::FunctionState::Broken { diagnostics, .. } => {
+                    return Err(Condition::BrokenFunction {
+                        function: target,
+                        diagnostics: diagnostics.clone(),
+                    });
+                }
+            };
+            let values: Vec<Value> = args.iter().map(|r| rd(m, *r)).collect::<Result<_, _>>()?;
+            if values.len() != params.len() {
+                return Err(type_err(
+                    function,
+                    pc,
+                    "indirect call: wrong argument count for the current signature",
+                ));
+            }
+            for (value, expected) in values.iter().zip(&params) {
+                if !m.heap().value_ok(value, expected) {
+                    return Err(type_err(
+                        function,
+                        pc,
+                        &format!("call argument: expected {expected:?}, found a value of another type"),
+                    ));
+                }
+            }
+            let mut registers = vec![None; registers_len];
+            for (slot, value) in values.into_iter().enumerate() {
+                registers[slot] = Some(value);
+            }
+            m.advance();
+            m.push_call(target, version, registers, *dst);
         }
         Instruction::CallForeign { dst, foreign, args } => {
             let result_ty = match m.world().foreign_sigs.get(foreign) {

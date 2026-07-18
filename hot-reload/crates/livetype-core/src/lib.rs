@@ -17,6 +17,7 @@ mod mt;
 mod native;
 mod runtime;
 pub mod strings;
+pub mod types;
 mod verify;
 
 pub use engine::*;

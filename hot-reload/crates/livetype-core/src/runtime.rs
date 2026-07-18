@@ -16,6 +16,19 @@ pub fn operand_type_error(function: DefId, pc: usize, instruction: &Instruction)
         Instruction::ConcatStr { .. } => ERR_CONCAT_NON_STR,
         Instruction::EqStr { .. } => ERR_EQSTR_NON_STR,
         Instruction::CaseVariant { .. } => ERR_CASE_NON_REF,
+        Instruction::DivI64 { .. } => ERR_DIV_NON_I64,
+        Instruction::AddF64 { .. }
+        | Instruction::SubF64 { .. }
+        | Instruction::MulF64 { .. }
+        | Instruction::DivF64 { .. }
+        | Instruction::LtF64 { .. }
+        | Instruction::LeF64 { .. }
+        | Instruction::EqF64 { .. } => ERR_FLOAT_NON_F64,
+        Instruction::NewArray { .. }
+        | Instruction::IndexGet { .. }
+        | Instruction::IndexSet { .. }
+        | Instruction::ArrayLen { .. }
+        | Instruction::ArrayPush { .. } => ERR_ARRAY_OPERANDS,
         _ => "operand type mismatch",
     };
     Condition::RuntimeTypeError {
@@ -56,8 +69,20 @@ pub fn resume_shape(
     world: &World,
 ) -> Result<(Type, ResumePlan), String> {
     Ok(match instruction {
-        Instruction::AddI64 { dst, .. } | Instruction::SubI64 { dst, .. } | Instruction::MulI64 { dst, .. } => {
-            (Type::I64, ResumePlan::SetAdvance(*dst))
+        Instruction::AddI64 { dst, .. }
+        | Instruction::SubI64 { dst, .. }
+        | Instruction::MulI64 { dst, .. }
+        | Instruction::DivI64 { dst, .. }
+        | Instruction::ArrayLen { dst, .. } => (Type::I64, ResumePlan::SetAdvance(*dst)),
+        Instruction::AddF64 { dst, .. }
+        | Instruction::SubF64 { dst, .. }
+        | Instruction::MulF64 { dst, .. }
+        | Instruction::DivF64 { dst, .. } => (Type::F64, ResumePlan::SetAdvance(*dst)),
+        Instruction::LtF64 { dst, .. }
+        | Instruction::LeF64 { dst, .. }
+        | Instruction::EqF64 { dst, .. } => (Type::Bool, ResumePlan::SetAdvance(*dst)),
+        Instruction::NewArray { dst, elem, .. } => {
+            (Type::Array(Box::new(elem.clone())), ResumePlan::SetAdvance(*dst))
         }
         Instruction::LtI64 { dst, .. } | Instruction::EqI64 { dst, .. } | Instruction::Not { dst, .. }
         | Instruction::EqStr { dst, .. } => {
@@ -97,6 +122,21 @@ pub(crate) const ERR_BRANCH_NON_BOOL: &str = "branch on non-bool";
 pub(crate) const ERR_CONCAT_NON_STR: &str = "concatenation on non-string";
 pub(crate) const ERR_EQSTR_NON_STR: &str = "string equality on non-string";
 pub(crate) const ERR_CASE_NON_REF: &str = "match on a non-reference";
+pub(crate) const ERR_DIV_NON_I64: &str = "division on non-i64";
+pub(crate) const ERR_FLOAT_NON_F64: &str = "float arithmetic on non-f64";
+pub(crate) const ERR_ARRAY_OPERANDS: &str = "array operation on wrong-typed operands";
+pub(crate) const ERR_INDIRECT_NON_FN: &str = "indirect call on a non-function value";
+
+/// The one division-by-zero condition, built identically by the interpreter
+/// arm and the JIT's `lt_trap_div_zero` extern (which has no function/pc in
+/// scope — parity wins over pinpointing).
+pub(crate) fn div_by_zero() -> Condition {
+    Condition::RuntimeTypeError {
+        function: 0,
+        pc: 0,
+        message: "division by zero".into(),
+    }
+}
 
 /// A registered native function: the implementation behind a `foreign fn`.
 /// `Send` so a runtime carrying foreign functions can still move to the driver

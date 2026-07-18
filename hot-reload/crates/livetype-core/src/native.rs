@@ -19,6 +19,10 @@ pub const TAG_FOREIGN: i64 = 5;
 /// An interned string: the payload is its [`crate::StrId`]. A scalar — nothing
 /// to trace, and equal ids are equal strings (interning dedups).
 pub const TAG_STR: i64 = 6;
+/// An f64: the payload is the IEEE-754 bit pattern.
+pub const TAG_F64: i64 = 7;
+/// A function value: the payload is the function's `DefId` (late-bound name).
+pub const TAG_FNREF: i64 = 8;
 /// Low-byte mask for the tag. A `Foreign` slot carries its (small `u32`) kind in
 /// the tag's high bits and its native pointer in the payload, so a two-word slot
 /// still represents every value — no wider frame layout needed. Only `Foreign`
@@ -61,6 +65,14 @@ impl RawSlot {
                 tag: TAG_STR,
                 payload: *id as i64,
             },
+            Value::F64(x) => RawSlot {
+                tag: TAG_F64,
+                payload: x.to_bits() as i64,
+            },
+            Value::FnRef(id) => RawSlot {
+                tag: TAG_FNREF,
+                payload: *id as i64,
+            },
             Value::Ref(id) => RawSlot {
                 tag: TAG_REF,
                 payload: *id as i64,
@@ -78,6 +90,8 @@ impl RawSlot {
             TAG_I64 => Value::I64(self.payload),
             TAG_BOOL => Value::Bool(self.payload != 0),
             TAG_STR => Value::Str(self.payload as crate::StrId),
+            TAG_F64 => Value::F64(f64::from_bits(self.payload as u64)),
+            TAG_FNREF => Value::FnRef(self.payload as DefId),
             TAG_REF => Value::Ref(self.payload as ObjectId),
             TAG_FOREIGN => Value::Foreign {
                 kind: (self.tag >> TAG_KIND_SHIFT) as u32,
@@ -348,6 +362,138 @@ pub unsafe extern "C" fn lt_case_variant(
             unsafe { *out_index = index as i64 };
             0
         }
+        Err(condition) => {
+            host.pending = Some(condition);
+            1
+        }
+    }
+}
+
+/// Stash the (shared, interpreter-identical) division-by-zero condition — the
+/// codegen calls this from its zero-divisor branch, then returns
+/// `OUT_CONDITION`.
+///
+/// # Safety
+/// `host` is a live `*mut NativeHost`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lt_trap_div_zero(host: *mut NativeHost) {
+    let host = unsafe { &mut *host };
+    host.pending = Some(crate::runtime::div_by_zero());
+}
+
+/// Allocate an array of the (interned) element type from `n` `RawSlot` items.
+/// Returns 0 on success (writes `*out_objid`), 1 on an ill-typed item.
+///
+/// # Safety
+/// `host` is a live `*mut NativeHost`, `items` points to `n` `RawSlot`s,
+/// `out_objid` is a writable `*mut i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lt_new_array(
+    host: *mut NativeHost,
+    elem_type: i64,
+    items: *const RawSlot,
+    n: i64,
+    out_objid: *mut i64,
+) -> i64 {
+    let host = unsafe { &mut *host };
+    let mut values = Vec::with_capacity(n as usize);
+    for i in 0..n as isize {
+        values.push(unsafe { *items.offset(i) }.to_value());
+    }
+    let elem = crate::types::get(elem_type as crate::types::TypeId);
+    match host.shared.heap().new_array(elem, values) {
+        Ok(id) => {
+            unsafe { *out_objid = id as i64 };
+            0
+        }
+        Err(condition) => {
+            host.pending = Some(condition);
+            1
+        }
+    }
+}
+
+/// `*out = array[index]`; 1 on bounds/kind trap (condition stashed).
+///
+/// # Safety
+/// `host` is a live `*mut NativeHost`, `out` a writable `*mut RawSlot`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lt_index_get(
+    host: *mut NativeHost,
+    array: i64,
+    index: i64,
+    out: *mut RawSlot,
+) -> i64 {
+    let host = unsafe { &mut *host };
+    match host.shared.heap().array_get(array as ObjectId, index) {
+        Ok(value) => {
+            unsafe { *out = RawSlot::from_value(&value) };
+            0
+        }
+        Err(condition) => {
+            host.pending = Some(condition);
+            1
+        }
+    }
+}
+
+/// `array[index] = {tag, payload}`; 1 on bounds/kind/element-type trap.
+///
+/// # Safety
+/// `host` is a live `*mut NativeHost`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lt_index_set(
+    host: *mut NativeHost,
+    array: i64,
+    index: i64,
+    tag: i64,
+    payload: i64,
+) -> i64 {
+    let host = unsafe { &mut *host };
+    let value = RawSlot { tag, payload }.to_value();
+    match host.shared.heap().array_set(array as ObjectId, index, value) {
+        Ok(()) => 0,
+        Err(condition) => {
+            host.pending = Some(condition);
+            1
+        }
+    }
+}
+
+/// `*out = len(array)`; 1 on a kind trap.
+///
+/// # Safety
+/// `host` is a live `*mut NativeHost`, `out` a writable `*mut i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lt_array_len(host: *mut NativeHost, array: i64, out: *mut i64) -> i64 {
+    let host = unsafe { &mut *host };
+    match host.shared.heap().array_len(array as ObjectId) {
+        Ok(len) => {
+            unsafe { *out = len };
+            0
+        }
+        Err(condition) => {
+            host.pending = Some(condition);
+            1
+        }
+    }
+}
+
+/// Append `{tag, payload}`; 1 on a kind/element-type trap.
+///
+/// # Safety
+/// `host` is a live `*mut NativeHost`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lt_array_push(
+    host: *mut NativeHost,
+    array: i64,
+    tag: i64,
+    payload: i64,
+) -> i64 {
+    let host = unsafe { &mut *host };
+    let value = RawSlot { tag, payload }.to_value();
+    match host.shared.heap().array_push(array as ObjectId, value) {
+        Ok(()) => 0,
         Err(condition) => {
             host.pending = Some(condition);
             1

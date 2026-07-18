@@ -418,3 +418,272 @@ fn variant_field_addition_is_transparent_to_a_hot_match() {
     .unwrap();
     assert_eq!(s.call("main", vec![]).unwrap(), Value::I64(46));
 }
+
+// ───────────────────── floats, division, unary minus ─────────────────────
+
+#[test]
+fn floats_division_and_negation_run_identically() {
+    let src = r#"
+        fn norm(x: f64, y: f64) -> f64 { (x * x + y * y) / 2.0 }
+        fn main() -> i64 {
+            let a = norm(3.0, 4.0);       // 12.5
+            emit(a);
+            if a > 12.0 { emit(1); }
+            if a <= 12.5 { emit(2); }
+            if -a < 0.0 { emit(3); }
+            let q = 17 / 5;               // integer division
+            emit(q);
+            emit(-q);
+            0
+        }
+    "#;
+    let mut results = Vec::new();
+    for (name, engine) in both_engines() {
+        let (outcome, output) = run_program(&engine, src);
+        assert_eq!(outcome, Outcome::Complete(Value::I64(0)), "{name}");
+        assert_eq!(
+            output,
+            vec![
+                Value::F64(12.5),
+                Value::I64(1),
+                Value::I64(2),
+                Value::I64(3),
+                Value::I64(3),
+                Value::I64(-3),
+            ],
+            "{name}"
+        );
+        results.push(output);
+    }
+    assert_eq!(results[0], results[1]);
+}
+
+#[test]
+fn division_by_zero_traps_and_resumes_identically() {
+    let src = r#"
+        fn main(d: i64) -> i64 { 10 / d }
+    "#;
+    for (name, engine) in both_engines() {
+        let compiled = livetype_core::compile_on(src, Arc::clone(&engine)).unwrap();
+        let main = compiled.functions["main"];
+        let mut actor = engine.spawn(main, vec![Value::I64(0)]).unwrap();
+        let outcome = engine.run(&mut actor);
+        assert!(
+            matches!(
+                &outcome,
+                Outcome::Paused(Condition::RuntimeTypeError { message, .. })
+                    if message == "division by zero"
+            ),
+            "{name}: expected a division-by-zero trap, got {outcome:?}"
+        );
+        // The trap is a one-shot continuation: supply the quotient, resume.
+        engine.resume_with(&mut actor, Value::I64(99)).unwrap();
+        assert_eq!(engine.run(&mut actor), Outcome::Complete(Value::I64(99)), "{name}");
+    }
+}
+
+// ───────────────────────────── arrays ─────────────────────────────
+
+#[test]
+fn arrays_build_index_mutate_grow_identically() {
+    let src = r#"
+        fn sum(xs: [i64]) -> i64 {
+            let total = 0;
+            let i = 0;
+            while i < len(xs) {
+                total = total + xs[i];
+                i = i + 1;
+            }
+            total
+        }
+        fn main() -> i64 {
+            let xs = [10, 20, 30];
+            emit(sum(xs));            // 60
+            xs[1] = 25;
+            emit(sum(xs));            // 65
+            push(xs, 5);
+            emit(sum(xs));            // 70
+            emit(len(xs));            // 4
+            let empty: [i64] = [];
+            emit(len(empty));         // 0
+            let names = ["a", "b"];
+            emit(names[0] + names[1]);
+            sum(xs)
+        }
+    "#;
+    let mut results = Vec::new();
+    for (name, engine) in both_engines() {
+        let (outcome, output) = run_program(&engine, src);
+        assert_eq!(outcome, Outcome::Complete(Value::I64(70)), "{name}");
+        assert_eq!(&output[..5], &[
+            Value::I64(60),
+            Value::I64(65),
+            Value::I64(70),
+            Value::I64(4),
+            Value::I64(0),
+        ], "{name}");
+        assert_eq!(
+            livetype_core::strings::text(match output[5] {
+                Value::Str(id) => id,
+                other => panic!("{name}: expected str, got {other:?}"),
+            })
+            .as_ref(),
+            "ab"
+        );
+        results.push(output);
+    }
+    assert_eq!(results[0], results[1]);
+}
+
+#[test]
+fn array_out_of_bounds_traps_and_resumes() {
+    let src = "fn main(i: i64) -> i64 { let xs = [1, 2]; xs[i] }";
+    for (name, engine) in both_engines() {
+        let compiled = livetype_core::compile_on(src, Arc::clone(&engine)).unwrap();
+        let main = compiled.functions["main"];
+        let mut actor = engine.spawn(main, vec![Value::I64(7)]).unwrap();
+        let outcome = engine.run(&mut actor);
+        assert!(
+            matches!(
+                &outcome,
+                Outcome::Paused(Condition::RuntimeTypeError { message, .. })
+                    if message.contains("out of bounds")
+            ),
+            "{name}: expected a bounds trap, got {outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn arrays_of_structs_ride_the_migration_barrier() {
+    // Array elements are references; the ARRAY never migrates, but the structs
+    // it holds do — lazily, at their next field access, even from a compiled
+    // frame.
+    let mut s = Session::with_engine(jit_engine(0));
+    s.eval(
+        r#"
+        struct Point { x: i64 }
+        letonce points = [Point { x: 1 }, Point { x: 2 }];
+        fn total() -> i64 {
+            let t = 0;
+            let i = 0;
+            while i < len(points) {
+                t = t + points[i].x;
+                i = i + 1;
+            }
+            t
+        }
+        fn main() -> i64 { total() }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(s.call("main", vec![]).unwrap(), Value::I64(3));
+
+    // Evolve Point (defaulted field) and use it — the live elements migrate.
+    s.eval(
+        r#"
+        struct Point { x: i64, weight: i64 = 10 }
+        fn total() -> i64 {
+            let t = 0;
+            let i = 0;
+            while i < len(points) {
+                t = t + points[i].x * points[i].weight;
+                i = i + 1;
+            }
+            t
+        }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(s.call("main", vec![]).unwrap(), Value::I64(30));
+}
+
+// ───────────────────────── match as an expression ─────────────────────────
+
+#[test]
+fn match_expression_yields_values_identically() {
+    let src = r#"
+        enum Shape { Circle { r: i64 }, Rect { w: i64, h: i64 }, Point }
+        fn area(s: Shape) -> i64 {
+            match s {
+                Circle { r } => 3 * r * r,
+                Rect { w, h } => w * h,
+                Point => 0,
+            }
+        }
+        fn main() -> i64 {
+            let total = area(Shape::Circle { r: 2 }) + area(Shape::Rect { w: 2, h: 5 });
+            emit(total);
+            total
+        }
+    "#;
+    for (name, engine) in both_engines() {
+        let (outcome, output) = run_program(&engine, src);
+        assert_eq!(outcome, Outcome::Complete(Value::I64(22)), "{name}");
+        assert_eq!(output, vec![Value::I64(22)], "{name}");
+    }
+}
+
+// ─────────────────────── first-class function values ───────────────────────
+
+#[test]
+fn function_values_call_indirectly_identically() {
+    let src = r#"
+        fn double(x: i64) -> i64 { x * 2 }
+        fn triple(x: i64) -> i64 { x * 3 }
+        fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }
+        fn main() -> i64 {
+            let ops = [double, triple];
+            let t = apply(ops[0], 10) + apply(ops[1], 10);
+            emit(t);
+            t
+        }
+    "#;
+    for (name, engine) in both_engines() {
+        let (outcome, output) = run_program(&engine, src);
+        assert_eq!(outcome, Outcome::Complete(Value::I64(50)), "{name}");
+        assert_eq!(output, vec![Value::I64(50)], "{name}");
+    }
+}
+
+/// THE function-value hot-reload story: a function value is a NAME, not a code
+/// pointer. A stored reference (here: living in a letonce array across edits)
+/// picks up a live redefinition at its next call — no re-registration, no
+/// stale code.
+#[test]
+fn stored_function_values_late_bind_to_live_edits() {
+    for (name, engine) in both_engines() {
+        let mut s = Session::with_engine(engine);
+        s.eval(
+            r#"
+            fn handler(x: i64) -> i64 { x + 1 }
+            letonce handlers = [handler];
+            fn dispatch(x: i64) -> i64 {
+                let f = handlers[0];
+                f(x)
+            }
+            fn main() -> i64 { dispatch(10) }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(s.call("main", vec![]).unwrap(), Value::I64(11), "{name}");
+
+        // LIVE EDIT: redefine handler. The value stored in the letonce array
+        // was never touched — but it names the function, so the next dispatch
+        // runs the new version.
+        s.eval("fn handler(x: i64) -> i64 { x + 100 }").unwrap();
+        assert_eq!(s.call("main", vec![]).unwrap(), Value::I64(110), "{name}");
+
+        // A BREAKING edit to the referenced function traps the indirect call
+        // exactly like a direct one (late binding, same checks)...
+        s.eval("fn handler(x: i64) -> bool { x == 0 }").unwrap();
+        let err = s.call("main", vec![]).unwrap_err();
+        assert!(
+            matches!(err, Condition::RuntimeTypeError { .. } | Condition::BrokenFunction { .. }),
+            "{name}: expected the indirect call to trap, got {err:?}"
+        );
+        // ...and repairing it repairs every stored reference at once.
+        s.eval("fn handler(x: i64) -> i64 { x * 2 }").unwrap();
+        assert_eq!(s.call("main", vec![]).unwrap(), Value::I64(20), "{name}");
+    }
+}
