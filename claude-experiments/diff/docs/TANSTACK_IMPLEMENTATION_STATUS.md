@@ -46,8 +46,21 @@ Current status:
 
 ```text
 reference: 13/13 TanStack production gates passed
-diffpack:    6/13 TanStack production gates passed
+diffpack:  13/13 TanStack production gates passed
 ```
+
+**MILESTONE (2026-07-18): diffpack passes all 13 gates, matching the reference
+Vite/Nitro build gate-for-gate — fully native, with NO Vite, Rolldown, or Node in
+the build path.** `build-app <root> client` then `build-app <root> ssr` emits a
+`.diffpack-output/` whose `server/index.mjs` boots under Node and serves the real
+app: `GET /` returns SSR'd `Welcome Home!!!` (+ hydration `<script>` + stylesheet
+link), `GET /customScript.js` runs the server route, `GET /<missing>` renders the
+404. Verified by booting the server and fetching each route (React SSR through the
+app's own handler, not hardcoded). The whole pipeline — resolution, tsconfig
+paths, loaders (`?url`/`?raw`/assets/CSS), Node externals, route splitting
+(`?tsr-split`), native manifest generation, executable ESM server output, and the
+`node:http`↔fetch runtime entry — is native Rust on Oxc, under the incremental +
+low-memory thesis guards (all green).
 
 Diffpack now emits the client `public/` layout (route-split browser chunks +
 extracted CSS + static assets) and the server `server/` layout (Node ESM `.mjs`
