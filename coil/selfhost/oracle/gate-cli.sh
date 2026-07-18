@@ -183,6 +183,18 @@ cat > "$T/gen9.coil" <<'EOF'
 (defn main [] (-> i64) (match (via-let) (Okk [v] v) (Errr [e] 0)))
 EOF
 expect_rc 5 "ascription supplies a let binding's stranded type arg (was: parse error)" "$COIL" run "$T/gen9.coil"
+# and inference now flows across the let on its OWN: when the let's tail is the binding
+# and the let has an expected type, the binding's value is checked against it — so the
+# bare `(let [r (Okk 5)] r)` needs no annotation. FAILS on the seed ("cannot infer type
+# argument 'E'"), PASSES here (returns 5).
+cat > "$T/gen9auto.coil" <<'EOF'
+(module m)
+(defsum Res [T E] (Okk [(v T)]) (Errr [(e E)]))
+(defn via-let [] (-> (Res i64 bool))
+  (let [r (Okk 5)] r))
+(defn main [] (-> i64) (match (via-let) (Okk [v] v) (Errr [e] 0)))
+EOF
+expect_rc 5 "inference flows the return type into a returned let binding (was: 'cannot infer E')" "$COIL" run "$T/gen9auto.coil"
 # and it TYPE-CHECKS, it is NOT a silent cast: a value whose type is not the ascribed one
 # is rejected with a located error naming both types.
 printf '(module m)\n(defn main [] (-> i64) (: true i64))\n' > "$T/gen9bad.coil"

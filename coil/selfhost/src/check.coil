@@ -2059,9 +2059,34 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [Type Diag] (load err)) (Ok (load last)))))
 
-(defn process-let-bind [(a (ptr Allocator)) (bp (ptr Bind)) (nbinds (ptr (ArrayList Bind))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result i64 Diag))
+; The let body's tail variable — if the body's last expression is a bare `(EVar nm)`
+; and the let has an expected type, that binding IS the let's result, so its value can
+; be checked against the expected type. "" when there is no such tail or no expectation.
+(defn let-tail-var [(body (ptr (ArrayList Expr))) (expected (ptr Type))] (-> (slice u8))
+  (if (not (expected-some? expected)) ""
+    (let [l (al-last-expr body)]
+      (if (icmp-eq (cast i64 l) 0) ""
+        (match-else (load (field l kind)) (EVar [nm] nm) (_ ""))))))
+
+; Synthesize a let binding's value. Try WITHOUT an expectation first — every value that
+; already infers is checked exactly as before, so nothing that compiled changes. Only if
+; that STRANDS inference (an Err) and this binding is the let's returned tail (`bexp` is
+; the let's expected type, else null) do we retry with the expected type, letting a type
+; argument flow BACK from the return position (gen-9: `(let [r (Okk 5)] r)` returned as a
+; `(Result i64 E)` — E is undetermined at the binding but fixed by the return).
+(defn synth-bind-value [(a (ptr Allocator)) (bp (ptr Bind)) (bexp (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result SynPair Diag))
+  (match (do-synth a (field bp value) (null-type) env cx tps fname)
+    (Ok [vsp] (Ok [SynPair Diag] vsp))
+    (Err [d0]
+      (if (expected-some? bexp)
+          (match (do-synth a (field bp value) bexp env cx tps fname)
+            (Ok [vsp] (Ok [SynPair Diag] vsp))
+            (Err [_] (Err [SynPair Diag] d0)))
+        (Err [SynPair Diag] d0)))))
+
+(defn process-let-bind [(a (ptr Allocator)) (bp (ptr Bind)) (bexp (ptr Type)) (nbinds (ptr (ArrayList Bind))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result i64 Diag))
   (let [name (load (field bp name)) mutable (load (field bp mutable))]
-    (match (do-synth a (field bp value) (null-type) env cx tps fname)
+    (match (synth-bind-value a bp bexp env cx tps fname)
       (Err [d] (Err [i64 Diag] d))
       (Ok [vsp] (let [sp (alloc-stack SynPair)] (store! sp vsp)
         (let [ve (load (load (field sp e))) vt (load (field sp t))]
@@ -2084,18 +2109,23 @@
                 (do (env-insert! env name (box-type a (load vt)))
                     (al-push! [Bind] nbinds (mk-bind name false ve)) (Ok [i64 Diag] 0))))))))) ))
 
-(defn process-let-binds [(a (ptr Allocator)) (binds (ptr (ArrayList Bind))) (nbinds (ptr (ArrayList Bind))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result i64 Diag))
+(defn process-let-binds [(a (ptr Allocator)) (binds (ptr (ArrayList Bind))) (nbinds (ptr (ArrayList Bind))) (tailvar (slice u8)) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result i64 Diag))
   (let [nb (al-len [Bind] (load binds)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) nb) (break)
-      (do (match (process-let-bind a (al-elem [Bind] binds (load i)) nbinds env cx tps fname elo ehi esrc ectxt)
-            (Err [d] (do (store! err d) (store! failed true) (break)))
-            (Ok [_] 0))
+      (do (let [bp (al-elem [Bind] binds (load i))
+                ; the let's returned tail binding gets the let's expected type as a
+                ; fallback (only used if it fails to infer on its own — see synth-bind-value)
+                bexp (if (and (icmp-gt (slice-len tailvar) 0) (str-eq (load (field bp name)) tailvar)) expected (null-type))]
+            (match (process-let-bind a bp bexp nbinds env cx tps fname elo ehi esrc ectxt)
+              (Err [d] (do (store! err d) (store! failed true) (break)))
+              (Ok [_] 0)))
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
 
 (defn synth-let [(a (ptr Allocator)) (binds (ptr (ArrayList Bind))) (body (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
-  (let [saved (al-len [EnvEntry] (load env)) nbinds (box-al [Bind] a (al-new [Bind] a))]
-    (match (process-let-binds a binds nbinds env cx tps fname elo ehi esrc ectxt)
+  (let [saved (al-len [EnvEntry] (load env)) nbinds (box-al [Bind] a (al-new [Bind] a))
+        tailvar (let-tail-var body expected)]
+    (match (process-let-binds a binds nbinds tailvar expected env cx tps fname elo ehi esrc ectxt)
       (Err [d] (err-ep d))
       (Ok [_]
         (let [outl (box-al [Expr] a (al-new [Expr] a))]
