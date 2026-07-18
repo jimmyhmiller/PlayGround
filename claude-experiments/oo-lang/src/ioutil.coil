@@ -85,20 +85,51 @@
 (extern curl_multi_cleanup    :cc c [(ptr i8)] (-> i32))
 (extern curl_multi_strerror   :cc c [i32] (-> (ptr i8)))
 
+; ---- diagnostic capture sink ----
+; When capture is active, writes to fd 2 (stderr) append into this buffer instead of hitting
+; the real stderr — so an eval can recover the typechecker's message with NO /tmp temp file and
+; NO dup2/fd redirection. This is the choke point that makes diagnostic capture work identically
+; on native and on wasm (where there is no fd 2, no open/dup2/lseek). Toggled by evalrt's
+; diag-capture-begin/end; the captured bytes are read back via diag-sink-buf/diag-sink-len.
+(defn diag-sink-on  [] (-> (ptr i64)) (alloc-static i64))
+(defn diag-sink-buf [] (-> (ptr u8)) (cast (ptr u8) (alloc-static (array u8 4096))))
+(defn diag-sink-len [] (-> (ptr i64)) (alloc-static i64))
+
+(defn diag-sink-append [(p (ptr i8)) (n i64)] (-> i64)
+  (let [cur (load (diag-sink-len)) room (- 4095 cur)
+        m (if (< n room) n room) (mut i) 0]
+    (if (> m 0)
+      (loop (if (< (load i) m)
+              (do (store! (index (diag-sink-buf) (+ cur (load i)))
+                          (load (index (cast (ptr u8) p) (load i))))
+                  (store! i (+ (load i) 1)) 0)
+              (break)))
+      0)
+    (store! (diag-sink-len) (+ cur (if (> m 0) m 0)))
+    (store! (index (diag-sink-buf) (load (diag-sink-len))) (cast u8 0))
+    0))
+
+; the single fd-write choke point: a capturable fd 2, everything else straight to write().
+(defn emit [(fd i64) (p (ptr i8)) (n i64)] (-> i64)
+  (if (and (= fd 2) (= (load (diag-sink-on)) 1))
+    (diag-sink-append p n)
+    (write fd p n))
+  0)
+
 ; fd 1 = stdout, fd 2 = stderr
-(defn w-bytes [(fd i64) (p (ptr u8)) (n i64)] (-> i64) (write fd (cast (ptr i8) p) n) 0)
-(defn w-cstr  [(fd i64) (s (ptr i8))] (-> i64) (write fd s (strlen s)) 0)
+(defn w-bytes [(fd i64) (p (ptr u8)) (n i64)] (-> i64) (emit fd (cast (ptr i8) p) n) 0)
+(defn w-cstr  [(fd i64) (s (ptr i8))] (-> i64) (emit fd s (strlen s)) 0)
 
 (defn w-int [(fd i64) (v i64)] (-> i64)
   (let [buf (alloc-stack (array u8 32))
         n (snprintf (cast (ptr i8) (index buf 0)) 32 c"%lld" v)]
-    (write fd (cast (ptr i8) (index buf 0)) (cast i64 n))
+    (emit fd (cast (ptr i8) (index buf 0)) (cast i64 n))
     0))
 
 (defn w-num [(fd i64) (x f64)] (-> i64)
   (let [buf (alloc-stack (array u8 64))
         n (snprintf (cast (ptr i8) (index buf 0)) 64 c"%g" x)]
-    (write fd (cast (ptr i8) (index buf 0)) (cast i64 n))
+    (emit fd (cast (ptr i8) (index buf 0)) (cast i64 n))
     0))
 
 (defn xalloc [(n i64)] (-> (ptr u8)) (cast (ptr u8) (malloc n)))

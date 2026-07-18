@@ -10,8 +10,10 @@
 ;    the error into globals and `longjmp`s back to the landing pad (all surviving state
 ;    is in alloc-static globals, so this is safe regardless of optimizer aggressiveness);
 ;  - typecheck errors are non-fatal already (they only bump a counter + write to stderr),
-;    so we capture stderr into a temp file for the duration of the eval and read the
-;    real compiler message back out of it.
+;    so for the duration of the eval we turn on ioutil's fd-2 capture sink and read the
+;    real compiler message back out of that in-memory buffer (no temp file, no fd
+;    redirection — so this works identically on native and on wasm, where fd 2 / open /
+;    dup2 do not exist).
 ;
 ; Leaf module (imports only ioutil). Imported by parser/compile/vm (for eval-panic) and
 ; by the server (for the landing pad + capture).
@@ -71,35 +73,21 @@
   (exit (cast i32 code))
   0)
 
-; ---- stderr capture (temp file) ----
-(defn ev-capfd [] (-> (ptr i64)) (alloc-static i64))
-(defn ev-savefd [] (-> (ptr i64)) (alloc-static i64))
-(defn ev-cap-path [] (-> (ptr i8)) (cast (ptr i8) (alloc-static (array u8 64))))
-(defn ev-capbuf [] (-> (ptr u8)) (cast (ptr u8) (alloc-static (array u8 4096))))
-(defn ev-caplen [] (-> (ptr i64)) (alloc-static i64))
+; ---- stderr capture (in-memory diag sink; no temp file, no fd redirection) ----
+; The capture buffer lives in ioutil's diag sink (the fd-2 write choke point), so this works
+; identically on native and wasm (where open/dup2/lseek/fd-2 do not exist). The server reads the
+; captured text via ev-capbuf/ev-caplen exactly as before — they now delegate to the sink.
+(defn ev-capbuf [] (-> (ptr u8)) (diag-sink-buf))
+(defn ev-caplen [] (-> (ptr i64)) (diag-sink-len))
 
-; redirect fd 2 into a fresh temp file; remember the original.
+; turn on the fd-2 capture sink; reset it empty.
 (defn diag-capture-begin [] (-> i64)
-  (let [p (ev-cap-path)]
-    (snprintf p 64 c"/tmp/scry-eval-%d.diag" (cast i64 (getpid)))
-    (let [fd (open p (cast i32 1538) (cast i32 420))]   ; O_RDWR|O_CREAT|O_TRUNC, 0644
-      (if (< (cast i64 fd) 0) 0
-        (do (store! (ev-savefd) (cast i64 (dup (cast i32 2))))
-            (dup2 fd (cast i32 2))
-            (store! (ev-capfd) (cast i64 fd)) 0)))
-    0))
+  (store! (diag-sink-len) 0)
+  (store! (index (diag-sink-buf) 0) (cast u8 0))
+  (store! (diag-sink-on) 1)
+  0)
 
-; restore fd 2 and slurp what was written.  Result available via ev-capbuf/ev-caplen.
+; turn the sink off; the captured bytes remain in diag-sink-buf/len for ev-capbuf/ev-caplen.
 (defn diag-capture-end [] (-> i64)
-  (let [fd (cast i32 (load (ev-capfd))) saved (cast i32 (load (ev-savefd)))]
-    (if (< (cast i64 fd) 0) (do (store! (ev-caplen) 0) 0)
-      (do
-        (dup2 saved (cast i32 2)) (close saved)
-        (lseek fd 0 (cast i32 0))
-        (let [n (read fd (cast (ptr i8) (ev-capbuf)) 4095)]
-          (store! (ev-caplen) (if (< n 0) 0 n))
-          (store! (index (ev-capbuf) (if (< n 0) 0 n)) (cast u8 0)))
-        (close fd)
-        (unlink (ev-cap-path))
-        (store! (ev-capfd) -1)
-        0))))
+  (store! (diag-sink-on) 0)
+  0)
