@@ -40,7 +40,10 @@ Verified (all 6 gate groups reproduced independently):
    colors match theme tokens via probe in light AND dark, `font-black`=900,
    `gap`=24px, stylesheet 200 `text/css`, no `@import` survives, zero
    `/assets/tailwindcss` 404s); `hydration-check.mjs` 7/7;
-   `grep -rl async_hooks .diffpack-output/public` empty.
+   `serverfn-check.mjs` 7/7; `routes-check.mjs` 60/60 (every route direct-loads
+   with the expected SSR content and hydrates clean — see "All-routes
+   direct-load + hydration" below); `grep -rl async_hooks .diffpack-output/public`
+   empty.
 6. `bundle-scale-memory`: 3450.9 bytes/module (baseline 3449.7),
    `transformed_per_edit_max`=1, edit growth 0.2KB — no regression.
 
@@ -636,11 +639,73 @@ error**; 13/13 acceptance, thesis guards, and the incremental oracle stay green.
 1. **Tailwind compilation** — DONE (see "Native Tailwind v4 CSS compilation" at
    the top): `app.css` compiles natively, the `/assets/tailwindcss` 404 is gone,
    and the app renders fully styled (`tailwind-check.mjs` 9/9 in light and dark).
-2. **Server-function RPC (`createServerFn`)** — the next remaining gap. Surfaced
-   by the async_hooks fix and orthogonal to it. `createServerFn(...).handler(fn)`
-   is not yet rewritten to the client/SSR RPC form (`createClientRpc`/
+2. **Server-function RPC (`createServerFn`)** — DONE (commit `b97462617`,
+   "native server functions (createServerFn RPC)"). `createServerFn(...).handler(fn)`
+   is rewritten natively to the client/SSR RPC form (`createClientRpc`/
    `createSsrRpc` + a server-fn dispatch manifest) the reference emits, so calling
-   a server fn returns `undefined` (`result.result` is lost in the neutral
-   middleware wrapper). This fails identically under SSR and client —
-   pre-existing, unchanged by this work — and blocks `/posts` from rendering its
-   data (`posts is not iterable`, caught by `DefaultCatchBoundary`).
+   a server fn resolves its real value on both the SSR and the client-navigation
+   path. `serverfn-check.mjs` is 7/7: `/posts` and `/users` render their fetched
+   data on direct load AND on client-side SPA navigation (the server-fn HTTP RPC
+   path). The doc entry that called this "the next remaining gap" was stale.
+
+## All-routes direct-load + hydration (verified 2026-07-18)
+
+Every route of the pinned app now direct-loads with the expected server-rendered
+content AND hydrates cleanly in real headless Chrome. The oracle is
+`integration/tanstack-start-reference/routes-check.mjs` (puppeteer-core + system
+Chrome, test-only, NEVER referenced by the build): it boots the emitted
+`.diffpack-output/server/index.mjs` once and DIRECT-LOADS each route URL, asserting
+the four invariants used by the existing checks for every one:
+
+1. the expected SSR text is present in the INITIAL server HTML (a raw `fetch`
+   before any client JS runs — proving the content is truly server-rendered);
+2. `window.__TSR_ROUTER__` is set after load (the client bundle executed and
+   hydrated);
+3. zero uncaught page/JS errors;
+4. no server-only leak in the console (`async_hooks` / `No Start context` /
+   `module is not defined`).
+
+Routes covered (60/60 gates): `/` (home), `/posts` and `/users` (layout-loader
+lists, ≥10 items), `/posts/1` and `/posts/1/deep` (dynamic-param `fetchPost`
+server-fn loaders + the `posts_` layout opt-out), `/users/1` (dynamic-param
+loader through the nested `/api/users/$userId` server route), `/deferred` (React
+streaming: the awaited `person` in the initial HTML, then both `Await`/`Suspense`
+boundaries — `deferred-person` "Tanner Linsley", `deferred-stuff` "Hello
+deferred!" — resolve via the stream), `/redirect` (a `beforeLoad`-thrown
+`redirect({ to: '/posts' })` returns a 307 with `Location: /posts` and a direct
+browser load lands on `/posts` with the list rendered), `/route-a` and `/route-b`
+(the pathless nested layout chain `_pathlessLayout` "I'm a layout" >
+`_nested-layout` "I'm a nested layout" > leaf "I'm A!"/"I'm B!"), and a
+known-missing path (the app's `NotFound` 404 renders and still hydrates).
+
+Triage found **no native bug**: every route already server-renders correct
+content and hydrates through the native SSR runtime, route-split client chunks,
+dynamic-param loaders, server-fn RPC, streamed Suspense, and the SSR redirect
+Response path. The oracle reads rendered text via `textContent` (not `innerText`)
+so CSS transforms like `uppercase` (the `NotFound` buttons) don't mutate the
+asserted text.
+
+Wired into the browser gate group via `package.json` scripts
+(`browser:hydration`, `browser:serverfn`, `browser:tailwind`, `browser:routes`,
+and `browser:all` running all four). Verified alongside the unchanged
+`hydration-check.mjs` (7/7), `serverfn-check.mjs` (7/7), `tailwind-check.mjs`
+(9/9), and `grep -rl async_hooks .diffpack-output/public` empty. All six gate
+groups stay green with no regression; no Rust/build-path code was changed by this
+slice (build output is byte-identical to the baseline — the fix surface was the
+oracle coverage itself, which now proves the whole route surface).
+
+## All routes hydrate cleanly (verified 2026-07-18)
+
+With Tailwind and server functions landed, every route of the pinned app was
+browser-verified (headless Chrome). Direct-load of `/`, `/posts`, `/posts/1`,
+`/users`, `/users/1`, `/deferred`, `/route-a`, `/route-b`, `/posts/1/deep`: all
+return HTTP 200, hydrate (`window.__TSR_ROUTER__` set), and produce ZERO
+JavaScript console/page errors. The app is functionally complete on the pinned
+target: builds, styles, SSRs, hydrates, navigates, and fetches data over server
+functions, all natively.
+
+Remaining production-readiness work is now dev-experience and hardening (not
+app-breaking): production minification, source maps, incremental emit (the graph
+is incremental but the final chunk still re-renders whole), a dev server + HMR, a
+second representative app for breadth, secret scanning, and the perf/soak program.
+These are driven by the `diffpack-production-hardening` workflow.
