@@ -211,3 +211,39 @@ manifest content requires client/server build separation and ordering (the clien
 build's real chunk outputs feed the server manifest). That build-graph work, not
 the host integration, is the next milestone; the `resolveId`/`load` bridge it
 needs is now in place.
+
+## Architectural boundary: build-output-dependent modules
+
+Applying environment-specific resolve conditions (client `browser`, server `node`)
+is correct and landed, but it did not remove the manifest from the client graph,
+and investigation reached a real boundary worth recording before more slices.
+
+The sidecar runs a Vite **dev** server and calls `resolveId`/`load` manually. This
+is perfect for per-module, mode-agnostic transforms (JSX, route splitting,
+server-fn rewrites). It is NOT sufficient for **build-output-dependent** modules
+such as `tanstack-start-manifest:v`: the manifest's correct content is derived
+from the *finished client build* (real chunk file names/hashes and route->chunk
+mapping). A dev server returns dev-mode content whose route references
+(`./routes/__root`, ...) do not exist in a production static graph, so they cannot
+resolve. Producing correct content this way would require driving the plugins
+through a full production build lifecycle (buildStart -> transform -> render ->
+generateBundle) -- i.e. running Rollup -- which puts the build tool back in the
+execution path and breaks the incremental-graph thesis.
+
+The fork (needs a decision):
+
+- **A / native generation (recommended):** Diffpack owns discovery, chunking, and
+  emit for both environments, and **natively generates** the few build-output-
+  dependent artifacts (the manifests) from its own chunk graph. The host stays for
+  per-module transforms only. Preserves incrementality and keeps the build tool
+  out of the path; costs a native implementation of the manifest format and
+  route->chunk mapping.
+- **B / build lifecycle in the sidecar:** run the real Rollup/Vite production build
+  in the sidecar for these artifacts. Correct output for free, but embeds the
+  build tool and forfeits the incremental thesis for that work.
+
+Recommendation: A. Concretely, the next slices are: build and chunk the client
+environment natively and emit `public/` (client chunks + CSS + assets); do the
+same for the server environment; then generate the client/SSR/router/start
+manifests natively from those outputs. The `resolveId`/`load` host bridge (for
+transforms) and the environment conditions are the pieces already in place.
