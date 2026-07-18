@@ -211,6 +211,18 @@ echo "$out" | grep -q "never reaches a fixpoint" && ok "…and explains the grow
 } > "$T/deep.coil"
 expect_rc 5 "an 800-clause cond builds and runs (was: SIGSEGV)" "$COIL" run "$T/deep.coil"
 
+# `expand` and the debug dump-* commands run the SAME recursive front-end as `build`
+# (reader/parser/loader), so they must share build's 512 MiB pipeline thread — running
+# them on the 8 MiB MAIN thread segfaults on deeply nested input that `build` survives.
+# Route: driver-main -> run-dump-on-big-stack -> run-on-big-stack (see driver.coil).
+# 40000-deep raw nesting overflows an 8 MiB stack in the reader/parser but fits 512 MiB.
+{
+  printf '(module dp)\n(defn main [] (-> i64)\n  '
+  printf '(+ 1 %.0s' $(seq 40000); printf '0'; printf ')%.0s' $(seq 40000); printf ')\n'
+} > "$T/deepnest.coil"
+expect_rc 0 "dump-read on 40000-deep nesting (was: 8 MiB main-stack SIGSEGV)"  "$COIL" dump-read "$T/deepnest.coil"
+expect_rc 0 "dump-ast  on 40000-deep nesting (was: 8 MiB main-stack SIGSEGV)"  "$COIL" dump-ast  "$T/deepnest.coil"
+
 echo "== independent mistakes are reported in ONE pass, across phases =="
 # resolve used to abort on its first error, so a batch of mistakes surfaced one
 # recompile at a time — and the one that survived was the span-less resolve error.

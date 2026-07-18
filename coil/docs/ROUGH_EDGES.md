@@ -173,9 +173,13 @@ real; the **recursion** half does not exist, and neither does any depth guard on
       (source + caret rule). Truncate to a window around the span with ellipses. This makes
       every diagnostic on generated or merely long lines unreadable, and it is why the new
       depth-limit error, while correct, is unusable as printed.
-- [ ] **NEW: `expand` and the dump-* commands run on the MAIN thread (8 MiB)**, not the
+- [x] **NEW: `expand` and the dump-* commands run on the MAIN thread (8 MiB)**, not the
       512 MiB pipeline thread, so `coil expand` still segfaults on deeply nested input that
       `coil build` now handles. Route them through run-on-big-stack too.
+      FIXED (b4d497018): `driver-main` routes `expand` and every `dump-*` (plus `check`)
+      through `run-dump-on-big-stack` -> `run-on-big-stack`, the identical 512 MiB pthread
+      `build` uses (driver.coil). Regression guard in gate-cli.sh runs `dump-read`/`dump-ast`
+      on 40000-deep nesting that overflows an 8 MiB stack but fits 512 MiB.
 
 ## Batch 5 — The good renderer exists; these call sites route around it
 
