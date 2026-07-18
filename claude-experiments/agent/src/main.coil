@@ -62,6 +62,8 @@
    (designRequest (ptr i8))
    (designPreview (ptr workflow.Runtime))
    (designPreviewValid i64)
+   (wrappedOutput (ptr i8))
+   (wrappedOutputLength i64)
    (selectionRegion i64)
    (selectionAnchor i64)
    (selectionFocus i64)
@@ -674,6 +676,47 @@
       (store! (index buffer count) (cast i8 0))
       (let [measured (raylib.MeasureTextEx (load font) buffer (cast f32 (* size 1.16)) (cast f32 0.18))]
         (cast f64 (load (field measured x)))))))
+
+;; Greedy word wrap, in place: spaces become newlines where the measured line
+;; would overflow, so text length and selection offsets stay stable.
+(defn wrap-text-in-place [(state AppState)
+                          (text (ptr i8))
+                          (font raylib.Font)
+                          (size f64)
+                          (maxWidth f64)] (-> i64)
+  (let [(mut lineStart) 0
+        (mut lastSpace) -1
+        (mut position) 0]
+    (do
+      (loop
+        (let [byte (cast i64 (load (index text (load position))))]
+          (if (= byte 0)
+            (break 0)
+            (do
+              (cond (= byte 10)
+                      (do
+                        (store! lineStart (+ (load position) 1))
+                        (store! lastSpace -1)
+                        0)
+                    (= byte 32)
+                      (do
+                        (if (and (>= (load lastSpace) 0)
+                                 (> (segment-width state font text (load lineStart) (load position) size)
+                                    maxWidth))
+                          (do
+                            (store! (index text (load lastSpace)) (cast i8 10))
+                            (store! lineStart (+ (load lastSpace) 1))
+                            0)
+                          0)
+                        (store! lastSpace (load position))
+                        0)
+                    0)
+              (store! position (+ (load position) 1))))))
+      (if (and (>= (load lastSpace) 0)
+               (> (segment-width state font text (load lineStart) (load position) size) maxWidth))
+        (do (store! (index text (load lastSpace)) (cast i8 10)) 0)
+        0)
+      0)))
 
 (defn region-offset-at [(state AppState)
                         (font raylib.Font)
@@ -1393,6 +1436,14 @@
                  (color 167 176 187))
       (if (icmp-ne (load output) (cast i8 0))
         (do
+          (if (or (!= (load (field state wrappedOutput)) output)
+                  (!= (load (field state wrappedOutputLength)) (byte-text-length output)))
+            (do
+              (wrap-text-in-place state output (field state sans) 11.0 432.0)
+              (store! (field state wrappedOutput) output)
+              (store! (field state wrappedOutputLength) (byte-text-length output))
+              0)
+            0)
           (draw-text (field state monoMedium) c"// AGENT OUTPUT" left 453.0 9.0 (color 76 85 97))
           (selectable-text (mut state) input 2 (field state sans) output left 478.0 11.0 (color 184 193 204))
           0)
@@ -1713,14 +1764,20 @@
       (let [requestText (load (field state designRequest))
             haveRequest
               (if (and (!= (cast i64 requestText) 0) (icmp-ne (load requestText) (cast i8 0))) 1 0)
-            responseTop (if (= haveRequest 1) 316.0 244.0)
+            requestLines
+              (if (= haveRequest 1)
+                (let [lines (count-text-lines requestText (byte-text-length requestText))]
+                  (if (> lines 6) 6 lines))
+                0)
+            requestCardHeight (+ 42.0 (* (cast f64 requestLines) (text-line-advance 11.5)))
+            responseTop (if (= haveRequest 1) (+ 260.0 requestCardHeight) 244.0)
             responseBottom (cast f64 (- screenHeight 100))]
         (do
           (if (= haveRequest 1)
             (do
-              (draw-card-background contentLeft 244.0 (cast f64 (- RIGHT_WIDTH 40)) 56.0 false tint)
+              (draw-card-background contentLeft 244.0 (cast f64 (- RIGHT_WIDTH 40)) requestCardHeight false tint)
               (draw-text (field state monoMedium) c"YOU" (+ contentLeft 14.0) 256.0 9.0 tint)
-              (begin-scissor (+ contentLeft 14.0) 270.0 (cast f64 (- RIGHT_WIDTH 68)) 26.0)
+              (begin-scissor (+ contentLeft 14.0) 270.0 (cast f64 (- RIGHT_WIDTH 68)) (- requestCardHeight 32.0))
               (selectable-text (mut state)
                                input
                                7
@@ -1909,6 +1966,8 @@
       (store! (field state designRequest) designRequest)
       (store! (field state designPreview) designPreview)
       (store! (field state designPreviewValid) 0)
+      (store! (field state wrappedOutput) (cast (ptr i8) 0))
+      (store! (field state wrappedOutputLength) 0)
       (store! (field state selectionRegion) 0)
       (store! (field state selectionAnchor) 0)
       (store! (field state selectionFocus) 0)
@@ -1990,6 +2049,11 @@
                       (copy-string (load (field state designRequest))
                                    (load (field state creationText))
                                    CREATION_CAPACITY)
+                      (wrap-text-in-place state
+                                          (load (field state designRequest))
+                                          (field state sans)
+                                          11.5
+                                          404.0)
                       (workflow.start-design-turn (load (field state creationText)) (load (field state designTurn)))
                       (store! (field state designRequested) 0)
                       (store! (field state creationLength) 0)
@@ -2003,6 +2067,7 @@
                       (if (= designState 2)
                         (do
                           (workflow.finish-design-turn designResponse)
+                          (wrap-text-in-place state designResponse (field state sans) 11.5 404.0)
                           (store! designPreview (workflow.load-runtime c".flowline/design.draft.flow"))
                           (store! (field state designPreviewValid)
                                   (if (> (workflow.node-count designPreview) 0) 1 0))
@@ -2099,7 +2164,9 @@
               (store! (index designResponse (load position)) (load (index response (load position))))
               (store! position (+ (load position) 1))))
           (store! (index designResponse (load position)) (cast i8 0))))
-      (copy-string designRequest c"Help me design a review workflow for the flowline UI." CREATION_CAPACITY)
+      (copy-string designRequest
+                   c"Help me design a review workflow for the flowline UI. It should check the renderer, the text selection code, and the deepseek adapter, then let me approve the final report before anything gets written."
+                   CREATION_CAPACITY)
       (store! (field state catalog) catalog)
       (store! (field state runtime) (workflow.catalog-runtime catalog 0))
       (store! (field state creationText) creationText)
@@ -2128,6 +2195,8 @@
       (configure-font (field state mono))
       (configure-font (field state monoMedium))
       (configure-font (field state sans))
+      (wrap-text-in-place state designRequest (field state sans) 11.5 404.0)
+      (wrap-text-in-place state designResponse (field state sans) 11.5 404.0)
       (store! (field camera offset) (vector 0.0 0.0))
       (store! (field camera target) (vector 0.0 0.0))
       (store! (field camera rotation) (cast f32 0.0))
