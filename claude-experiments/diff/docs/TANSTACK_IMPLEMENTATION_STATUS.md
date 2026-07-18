@@ -247,3 +247,38 @@ environment natively and emit `public/` (client chunks + CSS + assets); do the
 same for the server environment; then generate the client/SSR/router/start
 manifests natively from those outputs. The `resolveId`/`load` host bridge (for
 transforms) and the environment conditions are the pieces already in place.
+
+## NATIVE PIVOT: no Vite, no Rolldown, ever (decided)
+
+Decision (hard requirement): Diffpack is a **replacement** for Vite/Rolldown, not
+a host for them. The Node/Vite sidecar (dev server + resolveConfig) is **removed**
+entirely (`src/host.rs`, `host/sidecar.mjs`, `tests/host_sidecar.rs` deleted).
+Everything is implemented natively in Rust.
+
+Native config replaces `resolveConfig`: `src/config.rs::derive_config(root, env)`
+derives the entry aliases (`#tanstack-router-entry` -> `src/router.tsx`;
+`#tanstack-start-entry`/`virtual:tanstack-start-{client,server}-entry` ->
+user file or the framework default-entry) and per-environment resolve conditions
+(client `[module,browser,production]`, server `[node,production,...]`) from
+convention + the filesystem. Reading `srcDirectory` out of `vite.config.ts` is a
+plain text read of one value, not a dependency on Vite; a native Diffpack config
+format supersedes it later.
+
+`diffpack build-app <root> [env]` builds an environment natively. The client
+build reaches **220 modules** of the real app with **1** remaining diagnostic:
+`tanstack-start-manifest:v`, which must be **generated natively** from Diffpack's
+own chunk graph (it cannot be loaded — it is build-output-dependent). All thesis
+guards stay green; the native resolver + tsconfig `paths` + externals + loaders do
+the rest.
+
+### Remaining native work (the framework transforms/generation)
+
+- Route splitting (`?tsr-split`): split route components into lazy chunks (was
+  `@tanstack/router-plugin`).
+- Server functions: client stub + server registry (was `tanstack-start-core`).
+- Manifest generation: client/SSR/router/start manifests from the chunk graph.
+- Server (SSR) build + a Node server entry that renders documents, serves hashed
+  assets, runs server routes, and 404s.
+- CSS: Tailwind compilation for `app.css` (was `@tailwindcss/vite`).
+
+These are the native reimplementations that move the 13 acceptance gates.

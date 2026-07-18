@@ -10,7 +10,6 @@ use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::frontend_profile::{self, Phase};
-use crate::host::HostBridge;
 use crate::resource_id::{LoaderKind, ResourceId};
 use crate::transform::{DependencyDemand, FlatModule, FoldExpression, transform_module};
 
@@ -65,16 +64,12 @@ struct ResolutionCache {
     /// match rewrite before the standards-aware resolver runs. Shared read-only,
     /// so cheap to clone into each directory cache.
     aliases: Arc<Vec<(String, PathBuf)>>,
-    /// Optional plugin host: consulted only when native resolution fails, for
-    /// framework virtual/plugin-generated modules.
-    host: Option<Arc<HostBridge>>,
 }
 
 struct DirectoryResolutionCache {
     directory: PathBuf,
     specifiers: [Mutex<HashMap<String, Result<ResolvedModule, String>>>; 64],
     aliases: Arc<Vec<(String, PathBuf)>>,
-    host: Option<Arc<HostBridge>>,
 }
 
 #[derive(Clone)]
@@ -84,11 +79,10 @@ struct ResolvedModule {
 }
 
 impl ResolutionCache {
-    fn new(aliases: Vec<(String, PathBuf)>, host: Option<Arc<HostBridge>>) -> Self {
+    fn new(aliases: Vec<(String, PathBuf)>) -> Self {
         Self {
             directories: std::array::from_fn(|_| Mutex::new(HashMap::new())),
             aliases: Arc::new(aliases),
-            host,
         }
     }
 
@@ -105,7 +99,6 @@ impl ResolutionCache {
             directory: importer_directory.to_path_buf(),
             specifiers: std::array::from_fn(|_| Mutex::new(HashMap::new())),
             aliases: Arc::clone(&self.aliases),
-            host: self.host.clone(),
         });
         shard.insert(importer_directory.to_path_buf(), Arc::clone(&cache));
         cache
@@ -192,22 +185,6 @@ impl DirectoryResolutionCache {
                         })
                     }
                 })
-        };
-        // If native resolution failed, a framework plugin may still claim the
-        // specifier as a virtual/plugin-generated module. Consult the host only
-        // on failure, so the common path never pays for it.
-        let result = match result {
-            Err(error) => match &self.host {
-                Some(host) => match host.resolve_id(specifier, importer.to_str()) {
-                    Some(virtual_id) => Ok(ResolvedModule {
-                        id: SharedModuleId::from(virtual_id),
-                        side_effect_free: false,
-                    }),
-                    None => Err(error),
-                },
-                None => Err(error),
-            },
-            ok => ok,
         };
         shard
             .lock()
@@ -315,11 +292,11 @@ pub struct Bundler {
 
 impl Bundler {
     pub fn discover(entry: &Path) -> Result<(Self, BuildUpdate), String> {
-        Self::discover_inner(entry, &BuildConfig::default(), None)
+        Self::discover_inner(entry, &BuildConfig::default())
     }
 
     pub fn discover_direct(entry: &Path) -> Result<(Self, BuildUpdate), String> {
-        Self::discover_inner(entry, &BuildConfig::default(), None)
+        Self::discover_inner(entry, &BuildConfig::default())
     }
 
     /// Like [`Self::discover_direct`] but with build configuration, currently the
@@ -330,26 +307,10 @@ impl Bundler {
         entry: &Path,
         config: &BuildConfig,
     ) -> Result<(Self, BuildUpdate), String> {
-        Self::discover_inner(entry, config, None)
+        Self::discover_inner(entry, config)
     }
 
-    /// Like [`Self::discover_direct_with_config`] but also given a plugin host,
-    /// consulted only when native resolution/loading fails (virtual and
-    /// plugin-generated modules). The bundler owns the host for its lifetime, so
-    /// incremental rebuilds reuse the same warm process.
-    pub fn discover_direct_with_host(
-        entry: &Path,
-        config: &BuildConfig,
-        host: Arc<HostBridge>,
-    ) -> Result<(Self, BuildUpdate), String> {
-        Self::discover_inner(entry, config, Some(host))
-    }
-
-    fn discover_inner(
-        entry: &Path,
-        config: &BuildConfig,
-        host: Option<Arc<HostBridge>>,
-    ) -> Result<(Self, BuildUpdate), String> {
+    fn discover_inner(entry: &Path, config: &BuildConfig) -> Result<(Self, BuildUpdate), String> {
         let entry_path = entry
             .canonicalize()
             .map_err(|error| format!("cannot open entry {}: {error}", entry.display()))?;
@@ -369,7 +330,6 @@ impl Bundler {
                     .iter()
                     .map(|(from, to)| (from.clone(), PathBuf::from(to)))
                     .collect(),
-                host,
             ),
             frontend_pool: ThreadPoolBuilder::new()
                 .num_threads(frontend_threads)
@@ -1645,23 +1605,12 @@ fn load_uncached(
             externals: Vec::new(),
         });
     }
-    // A virtual/plugin-generated id has no file on disk; a framework plugin loads
-    // it through the host. The graph id stays the virtual id; the transformer is
-    // given a JSX/TS-capable extension so generated TSX lowers correctly.
-    let (source, transform_path) = if !path.is_file()
-        && let Some(host) = &resolution_cache.host
-        && let Some(code) = host.load(&id)
-    {
-        (code, PathBuf::from(format!("{id}.tsx")))
-    } else {
-        let read_started = frontend_profile::start();
-        let source = fs::read_to_string(path)
-            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-        frontend_profile::finish(Phase::Read, read_started);
-        (source, path.to_path_buf())
-    };
+    let read_started = frontend_profile::start();
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    frontend_profile::finish(Phase::Read, read_started);
     let hash = content_hash(source.as_bytes());
-    let transformed = transform_module(&transform_path, &source);
+    let transformed = transform_module(path, &source);
     let mut diagnostics = transformed
         .diagnostics
         .iter()

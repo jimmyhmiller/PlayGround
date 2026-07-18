@@ -102,28 +102,25 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
-        Some("bundle-with-host") => {
-            let entry = arguments.next().ok_or_else(usage)?;
+        Some("build-app") => {
             let project_root = arguments.next().ok_or_else(usage)?;
             let environment = arguments
                 .next()
                 .and_then(|value| value.to_str().map(str::to_string))
                 .unwrap_or_else(|| "client".to_string());
-            let config = diffpack::host::resolve_config(Path::new(&project_root), &environment)?;
+            let config = diffpack::config::derive_config(Path::new(&project_root), &environment)?;
+            let entry = config
+                .entry
+                .clone()
+                .ok_or_else(|| format!("no {environment} entry found for the app"))?;
             println!(
-                "host: environment={} ({} available), {} aliases ({} skipped)",
+                "app: environment={} ({} aliases), entry={}",
                 config.environment,
-                config.environments.join("/"),
                 config.build.aliases.len(),
-                config.skipped_aliases,
+                entry.display(),
             );
-            let sidecar = diffpack::host::Sidecar::start(Path::new(&project_root))?;
-            let bridge = std::sync::Arc::new(diffpack::host::HostBridge::new(
-                sidecar,
-                config.environment.clone(),
-            ));
             let (bundler, update) =
-                Bundler::discover_direct_with_host(Path::new(&entry), &config.build, bridge)?;
+                Bundler::discover_direct_with_config(&entry, &config.build)?;
             let reachable = bundler.reachable_modules_direct();
             println!(
                 "reachable {} modules; {} diagnostic(s)",
