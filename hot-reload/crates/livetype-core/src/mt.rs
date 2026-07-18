@@ -12,7 +12,7 @@
 
 use crate::*;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard};
 
 
@@ -69,6 +69,12 @@ pub struct Shared {
     /// races the recipient into existence. A `Recv` polls its own mailbox,
     /// hitting a GC safepoint each spin so a waiting actor stays collectable.
     mailboxes: Mutex<BTreeMap<usize, Arc<Mutex<std::collections::VecDeque<Value>>>>>,
+    /// Mirror of `world.epoch`, readable without the world lock. The engine
+    /// uses it to cheaply detect that installed code changed (per-actor code
+    /// caches, native-frame address reuse) without taking a read guard per
+    /// turn. Updated under the world write lock, so it never runs ahead of
+    /// what a subsequent read guard will observe.
+    code_epoch: AtomicU64,
     /// Fast-path poll flag: threads check this at every safepoint and only take
     /// the coordination lock when a collection is actually pending.
     gc_pending: AtomicBool,
@@ -87,6 +93,7 @@ impl Shared {
             foreign_registry: Mutex::new(BTreeMap::new()),
             output: Mutex::new(Vec::new()),
             mailboxes: Mutex::new(BTreeMap::new()),
+            code_epoch: AtomicU64::new(0),
             gc_pending: AtomicBool::new(false),
             gc: Mutex::new(GcCoord::default()),
             gc_cv: Condvar::new(),
@@ -144,26 +151,38 @@ impl Shared {
     // one. These take `&self` because the editor holds an `Arc<Shared>` clone.
 
     pub fn install_schema(&self, schema: Schema) -> Result<(), InstallError> {
-        self.world.write().unwrap().install_schema(schema)
+        let mut world = self.world.write().unwrap();
+        let result = world.install_schema(schema);
+        self.code_epoch.store(world.epoch, Ordering::Release);
+        result
     }
     pub fn install_function(&self, function: Function) -> Result<(), InstallError> {
-        self.world.write().unwrap().install_function(function)
+        let mut world = self.world.write().unwrap();
+        let result = world.install_function(function);
+        self.code_epoch.store(world.epoch, Ordering::Release);
+        result
     }
     pub fn install_verified_function(
         &self,
         function: Function,
         deps: std::collections::BTreeSet<DefId>,
     ) -> Result<(), InstallError> {
-        self.world
-            .write()
-            .unwrap()
-            .install_verified_function(function, deps)
+        let mut world = self.world.write().unwrap();
+        let result = world.install_verified_function(function, deps);
+        self.code_epoch.store(world.epoch, Ordering::Release);
+        result
     }
     pub fn install_migration(&self, migration: Migration) -> Result<(), InstallError> {
         self.world
             .write()
             .unwrap()
             .install_migration(migration, &self.heap)
+    }
+
+    /// The current code epoch (mirrors `world.epoch`) without taking the world
+    /// lock — the cheap staleness check for cached compiled-code lookups.
+    pub fn code_epoch(&self) -> u64 {
+        self.code_epoch.load(Ordering::Acquire)
     }
 
     /// Register (or replace) a native `foreign fn` on the running tier — the

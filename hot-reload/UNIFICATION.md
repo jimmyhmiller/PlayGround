@@ -174,14 +174,54 @@ Configurations of the one engine: `Engine::interp()` (oracle, Miri),
 `jit_engine(0)` (always native), `jit_engine(n)` (auto-tiering),
 `engine.run_threads(..)` (same loop, more threads).
 
+## Performance (2026-07, `livetype-bench`, release, per work unit)
+
+| bench | interp | jit(0) | native Rust |
+|---|---|---|---|
+| loop_sum (arith iter) | 38 ns | **3 ns** | 0.3 ns |
+| call_add (call) | 144 ns | **65 ns** | 1.3 ns |
+| fib_25 (rec call) | 135 ns | **69 ns** | 0.9 ns |
+| alloc_read (alloc+field) | 343 ns | **227 ns** | — |
+| yield_loop (safe point) | 47 ns | **7 ns** | 0.3 ns |
+
+How (`engine.rs` module docs have the details):
+- **Interp batching**: up to `INTERP_BATCH` (64) instructions under ONE world
+  read guard with the current function resolved once per frame change (no
+  per-instruction lock/lookup/clone). A batch ends at a `Yield`, block, stop,
+  or tier switch, so edits + STW GC stay at most one bounded batch away;
+  host-driven `Engine::step` keeps exact per-instruction granularity.
+- **Lock-free native turns**: a `JitFrame` caches its compiled entry address
+  and declared result type at push. Sound because a function *version* is
+  immutable and compiled engines are never torn down — an address never goes
+  stale. `Shared::code_epoch` (an atomic mirror of `world.epoch`) invalidates
+  the per-actor `TierSource` map snapshot only when an edit actually lands.
+- **Slot-level boundaries**: native→native calls/returns copy `RawSlot`s
+  directly with the soundness check done at the slot level (`slot_ok` mirrors
+  `value_ok`; a reference still asks the heap for its nominal type) — no
+  `Value` round trip, no intermediate register vec.
+- **Tier decision fast paths**: thresholds 0/`u64::MAX` skip the counter lock;
+  a per-actor `hot_local` set (hotness is monotonic per version) skips it once
+  promoted.
+- **Heap**: object table is a `HashMap`; `new_object` no longer clones the
+  schema (it was cloning every field name String per allocation!);
+  `get_field`'s current-schema fast path reads under the body lock with one
+  table lookup, entering the migration barrier only when actually stale.
+- **Codegen**: extern-call marshaling allocas are hoisted to the entry block —
+  per-site allocas in a loop grew the native stack every iteration (a
+  200k-iteration allocating loop overflowed the stack before this).
+
 ## What remains (optimizations, not architecture)
 
 - Reclaim leaked JIT engines once no frame pins an old version.
-- A fairer world lock so a tight-loop worker can't writer-starve a live edit.
-- Per-instruction world read-lock on the cold tier is the simple-correct
-  choice; a thread-local epoch cache would cut single-thread interp overhead.
+- A fairer world lock so a tight-loop worker can't writer-starve a live edit
+  (batching already bounds reader hold times).
+- Allocation is ~227 ns: every object is two `Arc`s + a per-body `BTreeMap`
+  under the table lock. Going much lower means an arena/bump heap under the
+  same non-moving-handle semantics — a real project.
 - OSR: promote a hot *loop* in a running frame (today promotion is at frame
-  push), and only then an interpreter-tier on-stack-replacement story.
+  push). This is also why a mixed interp-caller→native-callee boundary
+  (`tiered` call_add: 177 ns) can't collapse further — the caller never
+  promotes mid-run.
 
 ## Hard problems to solve along the way
 

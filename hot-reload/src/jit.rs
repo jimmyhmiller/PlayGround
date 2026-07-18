@@ -262,6 +262,30 @@ impl<'ctx> Codegen<'ctx> {
         let trap = self.ctx.append_basic_block(step, "trap");
 
         self.builder.position_at_end(entry);
+        // Stack scratch for extern-call marshaling (`lt_new` supplied-fields,
+        // `lt_call_foreign` args), hoisted to the entry block and shared by
+        // every site. An alloca inside a loop body is never reclaimed until the
+        // function returns, so per-site allocas made an allocating loop grow
+        // the native stack every iteration — 200k iterations overflowed it.
+        let max_words = func
+            .code
+            .iter()
+            .filter_map(|i| match i {
+                // At least one word even for a zero-arg site: the extern call
+                // still receives a (never-read) base pointer.
+                Instruction::New { fields, .. } => Some((3 * fields.len()).max(1)),
+                Instruction::CallForeign { args, .. } => Some((2 * args.len()).max(1)),
+                _ => None,
+            })
+            .max();
+        let scratch = max_words.map(|words| {
+            self.builder
+                .build_alloca(i64t.array_type(words as u32), "scratch")
+                .unwrap()
+        });
+        let has_new = func.code.iter().any(|i| matches!(i, Instruction::New { .. }));
+        let out_objid_slot =
+            has_new.then(|| self.builder.build_alloca(i64t, "out.objid").unwrap());
         let pc_f = self.builder.build_struct_gep(frame_ty, frame, 2, "pc.f").unwrap();
         let pc = self.builder.build_load(i64t, pc_f, "pc").unwrap().into_int_value();
         let cases: Vec<_> = blocks
@@ -362,11 +386,12 @@ impl<'ctx> Codegen<'ctx> {
                     type_id,
                     fields,
                 } => {
-                    // Marshal supplied (field_id, slot) triples into a stack
-                    // array laid out as `SuppliedField[n]`, then call lt_new.
+                    // Marshal supplied (field_id, slot) triples into the shared
+                    // entry-block scratch, laid out as `SuppliedField[n]`, then
+                    // call lt_new.
                     let n = fields.len();
                     let arr_ty = i64t.array_type(3 * n as u32);
-                    let arr = self.builder.build_alloca(arr_ty, "supplied").unwrap();
+                    let arr = scratch.expect("New implies scratch space");
                     for (k, (fid, reg)) in fields.iter().enumerate() {
                         let slot = self.slot_ptr(frame, *reg);
                         let tag = self.load_field(slot, 0, "s.tag");
@@ -398,7 +423,7 @@ impl<'ctx> Codegen<'ctx> {
                             )
                             .unwrap()
                     };
-                    let out_objid = self.builder.build_alloca(i64t, "out.objid").unwrap();
+                    let out_objid = out_objid_slot.expect("New implies an out slot");
                     let lt_new = self.module.get_function("lt_new").unwrap();
                     let call = self
                         .builder
@@ -482,12 +507,13 @@ impl<'ctx> Codegen<'ctx> {
                     self.ret_outcome(OUT_TYPE_ERROR);
                 }
                 Instruction::CallForeign { dst, foreign, args } => {
-                    // Marshal argument slots into a stack `RawSlot[n]` (flat
-                    // `i64[2n]`), then call the foreign extern, which writes the
-                    // result into `dst`'s slot or stashes a trap condition.
+                    // Marshal argument slots into the shared entry-block scratch
+                    // as `RawSlot[n]` (flat `i64[2n]`), then call the foreign
+                    // extern, which writes the result into `dst`'s slot or
+                    // stashes a trap condition.
                     let n = args.len();
                     let arr_ty = i64t.array_type(2 * n as u32);
-                    let arr = self.builder.build_alloca(arr_ty, "cf.args").unwrap();
+                    let arr = scratch.expect("CallForeign implies scratch space");
                     for (k, reg) in args.iter().enumerate() {
                         let slot = self.slot_ptr(frame, *reg);
                         let tag = self.load_field(slot, 0, "a.tag");
@@ -773,16 +799,17 @@ impl Default for JitCode {
     }
 }
 
-/// [`JitCode`] IS the tier source: the engine asks for a native step address,
-/// and the answer is "whatever the current world compiles to", cached by
-/// epoch. A function the codegen skips (it contains message-passing ops) has
-/// no address and therefore stays interpreted — same loop, cold tier.
+/// [`JitCode`] IS the tier source: the engine asks for the compiled-address
+/// map, and the answer is "whatever the current world compiles to", cached by
+/// epoch (the engine additionally snapshots it per actor, so this lock is
+/// entered only after an edit). A function the codegen skips has no address
+/// and therefore stays interpreted — same loop, cold tier.
 impl TierSource for JitCode {
-    fn native_step(&self, world: &World, key: (DefId, Version)) -> Option<usize> {
-        let addrs = self
-            .addrs(world)
-            .unwrap_or_else(|e| panic!("JIT compilation failed: {}", e.0));
-        addrs.get(&key).copied()
+    fn native_map(&self, world: &World) -> Option<livetype_core::NativeMap> {
+        Some(
+            self.addrs(world)
+                .unwrap_or_else(|e| panic!("JIT compilation failed: {}", e.0)),
+        )
     }
 }
 

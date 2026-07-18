@@ -34,6 +34,10 @@ path = "src/live_loop.rs"
 name = "livetype-ffi-gui"
 path = "src/ffi_gui.rs"
 
+[[bin]]
+name = "livetype-bench"
+path = "src/bench.rs"
+
 [workspace]
 members = ["crates/livetype-core"]
 

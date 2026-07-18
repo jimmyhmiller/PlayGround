@@ -14,7 +14,7 @@
 use crate::{
     Body, Condition, DefId, FieldId, MigrationSource, ObjectId, Type, Value, Version, World,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -30,7 +30,7 @@ struct ObjCell {
 /// directly); safe to share behind an `Arc` (the concurrent tier).
 #[derive(Default)]
 pub struct Heap {
-    objects: Mutex<BTreeMap<ObjectId, Arc<ObjCell>>>,
+    objects: Mutex<HashMap<ObjectId, Arc<ObjCell>>>,
     next_object: AtomicU64,
 }
 
@@ -52,7 +52,7 @@ impl Heap {
     /// existing ids.
     pub fn with_seed(seed: ObjectId) -> Heap {
         Heap {
-            objects: Mutex::new(BTreeMap::new()),
+            objects: Mutex::new(HashMap::new()),
             next_object: AtomicU64::new(seed),
         }
     }
@@ -158,14 +158,14 @@ impl Heap {
         world: &World,
     ) -> Result<ObjectId, Condition> {
         let version = world.current_schemas[&type_id];
-        let schema = world.schemas[&(type_id, version)].clone();
+        let schema = &world.schemas[&(type_id, version)];
         let mut values = BTreeMap::new();
         for field in &schema.fields {
             let value = supplied
                 .iter()
                 .find(|(id, _)| *id == field.id)
-                .map(|(_, v)| v.clone())
-                .or_else(|| field.default.clone())
+                .map(|(_, v)| *v)
+                .or(field.default)
                 .expect("verified constructor");
             if !self.value_ok(&value, &field.ty) {
                 return Err(type_error(&format!(
@@ -252,10 +252,26 @@ impl Heap {
 
     /// Migrate to current then read one field. Shared by the interpreter's
     /// `GetField` arm, the JIT's `lt_get_field` extern, and the concurrent tier.
+    /// The common case — the object already at its type's current schema —
+    /// reads the field under the body lock with one table lookup and no
+    /// snapshot; only a stale object takes the migration barrier.
     pub fn get_field(&self, id: ObjectId, field: FieldId, world: &World) -> Result<Value, Condition> {
+        let Some(cell) = self.cell(id) else {
+            return Err(type_error("migrate: unknown object"));
+        };
+        {
+            let body = cell.body.lock().unwrap();
+            if world.current_schemas[&body.type_id] == body.schema {
+                return body
+                    .fields
+                    .get(&field)
+                    .copied()
+                    .ok_or_else(|| type_error("field is absent after migration"));
+            }
+        }
         self.migrate(id, world)?;
         self.body(id)
-            .and_then(|b| b.fields.get(&field).cloned())
+            .and_then(|b| b.fields.get(&field).copied())
             .ok_or_else(|| type_error("field is absent after migration"))
     }
 

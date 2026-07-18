@@ -19,17 +19,34 @@
 //! - concurrency      = the same [`Engine::run`] loop on more threads
 //!   ([`Engine::run_threads`]), with the same live-edit and STW-GC behavior.
 //!
-//! Live edits land through [`Shared`]'s world lock between any two turns of any
-//! actor; a running frame keeps its pinned version, the next call re-resolves
-//! the current one, and a version that gets hot recompiles on demand (the
-//! source re-answers per epoch). Trap-and-repair holds across tiers: a paused
-//! actor keeps its mixed stack, and [`Engine::resume`] /
+//! Live edits land through [`Shared`]'s world lock; a running frame keeps its
+//! pinned version, the next call re-resolves the current one, and a version
+//! that gets hot recompiles on demand. Trap-and-repair holds across tiers: a
+//! paused actor keeps its mixed stack, and [`Engine::resume`] /
 //! [`Engine::resume_with`] continue it whichever kind of frame is on top.
+//!
+//! ## The fast paths (what keeps this loop cheap)
+//!
+//! - The interpreter runs *batches* of instructions under one world read guard
+//!   with the current function resolved once per frame change, instead of a
+//!   lock + map lookup + instruction clone per instruction. A batch ends at a
+//!   `Yield`, a block, a stop, a tier switch, or [`INTERP_BATCH`] instructions
+//!   — so a pending edit or stop-the-world GC still gets in within a bounded
+//!   window (and immediately at every explicit safe point).
+//! - A native frame caches its compiled entry address and declared result type
+//!   at push time, so a steady-state native turn (a loop iteration hitting its
+//!   `Yield`, a call, a return) takes **no locks at all**. This is sound
+//!   because a function *version* is immutable and compiled engines are never
+//!   deallocated: an address, once resolved, stays valid forever.
+//! - Compiled-address lookups go through a per-actor cache of the
+//!   [`TierSource`]'s map, invalidated by [`Shared::code_epoch`] (an atomic
+//!   mirror of the world epoch) — resolving a callee's tier at call time
+//!   doesn't re-enter the compiler's lock unless an edit actually landed.
 
 use crate::mt::{Outcome, Shared};
 use crate::native::{
     NativeHost, OUT_CALL, OUT_CONDITION, OUT_RETURN, OUT_TYPE_ERROR, OUT_YIELD, RawFrame, RawSlot,
-    TAG_REF, step_at,
+    TAG_BOOL, TAG_FOREIGN, TAG_I64, TAG_KIND_SHIFT, TAG_MASK, TAG_REF, TAG_UNIT, step_at,
 };
 use crate::runtime::{ForeignFn, InstallError, ResumePlan, operand_type_error, resume_shape};
 use crate::{
@@ -41,20 +58,24 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Where compiled `step` code comes from. The engine asks at frame-push time
-/// (to decide a hot callee's tier) and per native turn (so a live edit's new
-/// epoch is picked up by recompile-on-demand). `None` means "run interpreted" —
-/// either nothing is compiled, or this function can't be (e.g. it contains
-/// message-passing ops the codegen doesn't cover).
+/// The compiled-address map a [`TierSource`] hands out: every Ready function
+/// version's native `step` entry, for one world epoch.
+pub type NativeMap = Arc<HashMap<(DefId, Version), usize>>;
+
+/// Where compiled `step` code comes from. The engine asks for the whole map
+/// (and caches it per actor, keyed by [`Shared::code_epoch`]) so steady-state
+/// execution never re-enters the source's locks; implementations compile on
+/// demand and cache by world epoch. `None` means "nothing ever compiles" —
+/// the interpreter-only configuration.
 pub trait TierSource: Send + Sync {
-    fn native_step(&self, world: &World, key: (DefId, Version)) -> Option<usize>;
+    fn native_map(&self, world: &World) -> Option<NativeMap>;
 }
 
 /// The no-compiler source: every function runs interpreted, forever. This is
 /// the Miri-safe configuration and the differential-testing oracle.
 pub struct NoJit;
 impl TierSource for NoJit {
-    fn native_step(&self, _world: &World, _key: (DefId, Version)) -> Option<usize> {
+    fn native_map(&self, _world: &World) -> Option<NativeMap> {
         None
     }
 }
@@ -68,6 +89,13 @@ pub struct JitFrame {
     pub regs: Box<[RawSlot]>,
     /// Caller register to receive the result, or `None` for the entry frame.
     pub return_to: Option<usize>,
+    /// The compiled `step` entry for this frame's pinned version, resolved at
+    /// push time. A version's code is immutable and compiled engines are never
+    /// torn down, so this never goes stale — native turns take no locks.
+    addr: usize,
+    /// The pinned version's declared result type, so the return-boundary
+    /// soundness check needs no world lookup.
+    result_ty: Type,
 }
 
 /// A frame in an actor's stack: interpreted or native. Both carry the caller
@@ -108,7 +136,18 @@ pub struct Actor {
     pub tid: usize,
     pub stack: Vec<TierFrame>,
     pub status: ActorStatus,
-    mailbox: Arc<Mutex<VecDeque<Value>>>,
+    /// Created lazily on the first `Recv` (or up front by
+    /// [`Engine::run_threads`]) so short-lived actors — trampoline calls,
+    /// `letonce` initializers — don't grow the mailbox table.
+    mailbox: Option<Arc<Mutex<VecDeque<Value>>>>,
+    /// This actor's snapshot of the compiled-address map: `(code epoch, map)`.
+    /// Refreshed from the [`TierSource`] only when [`Shared::code_epoch`]
+    /// advances past it.
+    code: Option<(u64, Option<NativeMap>)>,
+    /// Function versions this actor already knows are promoted. Hotness is
+    /// monotonic per version, so this local cache lets the steady-state call
+    /// path skip the global promotion counter's lock entirely.
+    hot_local: HashSet<(DefId, Version)>,
 }
 
 impl Actor {
@@ -167,6 +206,11 @@ pub enum Turn {
 /// targets).
 const AUTO_TID_BASE: usize = 1 << 32;
 
+/// How many interpreted instructions may run under one world read guard before
+/// the engine lets pending edits and stop-the-world GC in. Explicit safe points
+/// (`Yield`), calls into native frames, blocks, and stops end a batch early.
+const INTERP_BATCH: usize = 64;
+
 #[derive(Default)]
 struct Tiering {
     counts: HashMap<(DefId, Version), u64>,
@@ -206,10 +250,12 @@ impl Engine {
     }
 
     /// How many function versions have been promoted to native code so far.
+    /// (With `threshold` 0 everything is native from first entry and nothing is
+    /// counted; this reports promotions the counter performed.)
     pub fn promoted(&self) -> usize {
         self.tiering.lock().unwrap().hot.len()
     }
-    /// Was `(func, version)` promoted?
+    /// Was `(func, version)` promoted by the activation counter?
     pub fn is_hot(&self, func: DefId, version: Version) -> bool {
         self.tiering.lock().unwrap().hot.contains(&(func, version))
     }
@@ -290,17 +336,19 @@ impl Engine {
             tid,
             stack: Vec::new(),
             status: ActorStatus::Runnable,
-            mailbox: self.shared.mailbox(tid),
+            mailbox: None,
+            code: None,
+            hot_local: HashSet::new(),
         };
         self.push_callee(&world, &mut actor, func, version, registers, None);
         Ok(actor)
     }
 
     /// Run an actor to completion or a trap on the calling thread. Registers as
-    /// a GC mutator and hits a safepoint every turn, so a preemptive
+    /// a GC mutator and hits a safepoint between turns, so a preemptive
     /// stop-the-world collection (from any thread) can pause it; a blocked
     /// `Recv` keeps hitting safepoints while it polls, so it stays collectable.
-    /// Live edits land between turns through the world lock.
+    /// Live edits land between turns/batches through the world lock.
     pub fn run(&self, actor: &mut Actor) -> Outcome {
         struct Active<'a>(&'a Shared, usize);
         impl Drop for Active<'_> {
@@ -312,16 +360,19 @@ impl Engine {
         let _active = Active(&self.shared, actor.tid);
         loop {
             match &actor.status {
-                ActorStatus::Complete(v) => return Outcome::Complete(v.clone()),
+                ActorStatus::Complete(v) => return Outcome::Complete(*v),
                 ActorStatus::Paused(c) => return Outcome::Paused(c.clone()),
                 ActorStatus::Runnable => {}
             }
             if self.shared.gc_pending() {
                 self.shared.safepoint_roots(actor.tid, actor.roots());
             }
-            match self.step(actor) {
-                Turn::Progress | Turn::Yielded | Turn::Done | Turn::Paused => {}
-                Turn::Blocked => std::thread::yield_now(),
+            let turn = match actor.stack.last() {
+                Some(TierFrame::Interp(_)) => self.interp_batch(actor, INTERP_BATCH),
+                _ => self.step(actor),
+            };
+            if matches!(turn, Turn::Blocked) {
+                std::thread::yield_now();
             }
         }
     }
@@ -483,76 +534,76 @@ impl Engine {
                 actor.status = ActorStatus::Complete(Value::Unit);
                 Turn::Done
             }
-            Some(TierFrame::Interp(_)) => self.interp_turn(actor),
+            Some(TierFrame::Interp(_)) => self.interp_batch(actor, 1),
             Some(TierFrame::Jit(_)) => self.jit_turn(actor),
         }
     }
 
-    fn interp_turn(&self, actor: &mut Actor) -> Turn {
-        // A read guard is held for exactly one instruction: a live edit takes
-        // the write lock between turns, and the next `Call` re-resolves.
+    /// Execute up to `budget` interpreted instructions under ONE world read
+    /// guard, with the current function resolved once per frame change. Ends
+    /// early at a `Yield` (the explicit safe point), a block, a stop, or when
+    /// the top frame becomes native. This is the cold tier's fast path: the
+    /// per-instruction cost is the dispatch itself, not lock/lookup overhead —
+    /// while the bounded budget keeps live edits and stop-the-world GC at most
+    /// one batch away.
+    fn interp_batch(&self, actor: &mut Actor, budget: usize) -> Turn {
         let world = self.shared.world_read();
-        let (key, pc) = {
-            let TierFrame::Interp(f) = actor.stack.last().unwrap() else {
-                unreachable!()
+        let mut cached: Option<((DefId, Version), &Function)> = None;
+        for _ in 0..budget {
+            let (key, pc) = match actor.stack.last() {
+                None => {
+                    actor.status = ActorStatus::Complete(Value::Unit);
+                    return Turn::Done;
+                }
+                Some(TierFrame::Jit(_)) => return Turn::Progress, // tier switch
+                Some(TierFrame::Interp(f)) => (f.function, f.pc),
             };
-            (f.function, f.pc)
-        };
-        let instruction = match &world.functions[&key] {
-            FunctionState::Ready(f) => f.code[pc].clone(),
-            _ => unreachable!("a frame only pins ready code"),
-        };
-        let yielded = matches!(instruction, Instruction::Yield);
-        let mailbox = Arc::clone(&actor.mailbox);
-        let mut machine = EngineMachine {
-            engine: self,
-            world: &world,
-            mailbox: &mailbox,
-            actor,
-        };
-        match step_instruction(&mut machine, &instruction) {
-            Ok(Flow::Stepped) => match actor.status {
-                ActorStatus::Complete(_) => Turn::Done,
-                _ if yielded => Turn::Yielded,
-                _ => Turn::Progress,
-            },
-            Ok(Flow::Blocked) => Turn::Blocked,
-            Err(condition) => {
-                actor.status = ActorStatus::Paused(condition);
-                Turn::Paused
+            let function = match cached {
+                Some((k, f)) if k == key => f,
+                _ => {
+                    let FunctionState::Ready(f) = &world.functions[&key] else {
+                        unreachable!("a frame only pins ready code");
+                    };
+                    cached = Some((key, f));
+                    f
+                }
+            };
+            let instruction = &function.code[pc];
+            let yielded = matches!(instruction, Instruction::Yield);
+            let mut machine = EngineMachine {
+                engine: self,
+                world: &world,
+                actor,
+            };
+            match step_instruction(&mut machine, instruction) {
+                Ok(Flow::Stepped) => {
+                    if matches!(actor.status, ActorStatus::Complete(_)) {
+                        return Turn::Done;
+                    }
+                    if yielded {
+                        return Turn::Yielded;
+                    }
+                }
+                Ok(Flow::Blocked) => return Turn::Blocked,
+                Err(condition) => {
+                    actor.status = ActorStatus::Paused(condition);
+                    return Turn::Paused;
+                }
             }
         }
+        Turn::Progress
     }
 
     fn jit_turn(&self, actor: &mut Actor) -> Turn {
-        let key = {
-            let TierFrame::Jit(f) = actor.stack.last().unwrap() else {
-                unreachable!()
-            };
-            (f.func_id, f.version)
-        };
-        // Resolve compiled code for this frame's pinned version. A live edit
-        // bumps the world epoch; the source recompiles on demand, so the
-        // pinned (still-Ready) version stays executable across edits.
-        let addr = {
-            let world = self.shared.world_read();
-            self.source.native_step(&world, key)
-        };
-        let Some(addr) = addr else {
-            actor.status = ActorStatus::Paused(Condition::RuntimeTypeError {
-                function: key.0,
-                pc: 0,
-                message: format!("no compiled step for {}@{}", key.0, key.1.0),
-            });
-            return Turn::Paused;
-        };
-        let step = step_at(addr);
-        // No world guard is held across the native call: compiled code reaches
-        // the runtime only through the externs, which lock what they need.
-        let (outcome, pending, scratch) = {
+        // The frame's compiled address was resolved at push time and stays
+        // valid forever (immutable version, never-torn-down code) — a native
+        // turn starts with no locks. Compiled code reaches the runtime only
+        // through the externs, which lock what they need.
+        let (outcome, pending, scratch, key) = {
             let TierFrame::Jit(frame) = actor.stack.last_mut().unwrap() else {
                 unreachable!()
             };
+            let step = step_at(frame.addr);
             let mut raw = RawFrame {
                 func_id: frame.func_id as i64,
                 version: frame.version.0 as i64,
@@ -565,27 +616,29 @@ impl Engine {
             let mut host = NativeHost::new(&self.shared);
             let out = unsafe { step(&mut raw, &mut host as *mut NativeHost) };
             frame.pc = raw.pc as usize;
-            (out, host.take_pending(), raw.scratch)
+            (
+                out,
+                host.take_pending(),
+                raw.scratch,
+                (frame.func_id, frame.version),
+            )
         };
 
         match outcome {
             OUT_RETURN => {
-                let result = scratch.to_value();
-                let (fid, ret_pc) = {
+                // Check the result against the returning frame's declared type
+                // (cached at push) before it leaves the frame — the
+                // con-freeness trap for a pinned old function returning a
+                // since-migrated value. Done at the slot level, so a native →
+                // native return never materializes a `Value` and takes no
+                // locks (a reference still consults the heap for its nominal
+                // type, exactly like `value_ok`).
+                {
                     let TierFrame::Jit(f) = actor.stack.last().unwrap() else {
                         unreachable!()
                     };
-                    (f.func_id, f.pc)
-                };
-                // Check the result against the returning frame's declared type
-                // before it leaves the frame — the con-freeness trap for a
-                // pinned old function returning a since-migrated value.
-                let result_ty = self.shared.with_world(|w| match &w.functions[&key] {
-                    FunctionState::Ready(f) => Some(f.result.clone()),
-                    _ => None,
-                });
-                if let Some(ty) = result_ty {
-                    if !self.shared.value_ok(&result, &ty) {
+                    if !self.slot_ok(scratch, &f.result_ty) {
+                        let (fid, ret_pc, ty) = (f.func_id, f.pc, f.result_ty.clone());
                         actor.status = ActorStatus::Paused(Condition::RuntimeTypeError {
                             function: fid,
                             pc: ret_pc,
@@ -596,7 +649,7 @@ impl Engine {
                         return Turn::Paused;
                     }
                 }
-                self.deliver_return(actor, result);
+                self.deliver_return_slot(actor, scratch);
                 match actor.status {
                     ActorStatus::Complete(_) => Turn::Done,
                     _ => Turn::Progress,
@@ -618,7 +671,8 @@ impl Engine {
                     f.pc
                 };
                 // Rebuild the exact condition from the trapping instruction so
-                // it matches the interpreter's byte for byte.
+                // it matches the interpreter's byte for byte (rare path — the
+                // world lookup is fine here).
                 let instruction = self.shared.with_world(|w| match &w.functions[&key] {
                     FunctionState::Ready(f) => f.code[trap_pc].clone(),
                     _ => unreachable!("a frame only pins ready code"),
@@ -640,24 +694,24 @@ impl Engine {
 
     /// A `Call` hand-back from a native frame: read the call site from the IR,
     /// gather + type-check arguments from its slots, and push the callee
-    /// through the same tiering decision as every other call.
+    /// through the same tiering decision as every other call. One world read
+    /// guard, no clones of code or types.
     fn jit_handle_call(&self, actor: &mut Actor) -> Turn {
+        let world = self.shared.world_read();
         let (caller_key, call_pc) = {
             let TierFrame::Jit(f) = actor.stack.last().unwrap() else {
                 unreachable!()
             };
             ((f.func_id, f.version), f.pc)
         };
-        let world = self.shared.world_read();
-        let call = match &world.functions[&caller_key] {
-            FunctionState::Ready(f) => f.code[call_pc].clone(),
-            _ => unreachable!("a frame only pins ready code"),
+        let FunctionState::Ready(caller) = &world.functions[&caller_key] else {
+            unreachable!("a frame only pins ready code");
         };
         let Instruction::Call {
             dst,
             function: callee,
             args,
-        } = call
+        } = &caller.code[call_pc]
         else {
             actor.status = ActorStatus::Paused(Condition::RuntimeTypeError {
                 function: caller_key.0,
@@ -666,49 +720,96 @@ impl Engine {
             });
             return Turn::Paused;
         };
+        let (dst, callee) = (*dst, *callee);
 
         // Resolve the callee's *current* version — late binding is what makes
         // a live edit take effect at the next call.
-        let resolved = match world.current_functions.get(&callee) {
-            None => Err(vec!["unknown function".to_string()]),
-            Some(v) => match &world.functions[&(callee, *v)] {
-                FunctionState::Ready(f) => Ok((*v, f.params.clone(), f.registers)),
-                FunctionState::Broken { diagnostics, .. } => Err(diagnostics.clone()),
-            },
+        let Some(&version) = world.current_functions.get(&callee) else {
+            actor.status = ActorStatus::Paused(Condition::BrokenFunction {
+                function: callee,
+                diagnostics: vec!["unknown function".to_string()],
+            });
+            return Turn::Paused;
         };
-        let (version, params, registers_len) = match resolved {
-            Ok(x) => x,
-            Err(diagnostics) => {
+        let key = (callee, version);
+        let function = match &world.functions[&key] {
+            FunctionState::Ready(f) => f,
+            FunctionState::Broken { diagnostics, .. } => {
                 actor.status = ActorStatus::Paused(Condition::BrokenFunction {
                     function: callee,
-                    diagnostics,
+                    diagnostics: diagnostics.clone(),
                 });
                 return Turn::Paused;
             }
         };
 
-        let arg_values: Vec<Value> = {
+        // Decide the callee's tier first, then marshal in the representation
+        // the callee will actually run in. Argument type checks happen either
+        // way — a pinned old caller passing a since-migrated value traps here,
+        // exactly as the interpreter's Call arm does.
+        let native = if self.decide_hot(actor, key) {
+            self.resolve_native(&world, actor, key)
+        } else {
+            None
+        };
+        if let Some(addr) = native {
+            // Native → native: slots copy straight across, checked at the slot
+            // level — no `Value` materialization, no intermediate vec.
+            let mut regs = vec![RawSlot::EMPTY; function.registers].into_boxed_slice();
+            {
+                let TierFrame::Jit(frame) = actor.stack.last().unwrap() else {
+                    unreachable!()
+                };
+                for (slot, (reg, expected)) in args.iter().zip(&function.params).enumerate() {
+                    let s = frame.regs[*reg];
+                    if !self.slot_ok(s, expected) {
+                        actor.status = ActorStatus::Paused(Condition::RuntimeTypeError {
+                            function: callee,
+                            pc: call_pc,
+                            message: "call argument: expected a value of another type".into(),
+                        });
+                        return Turn::Paused;
+                    }
+                    regs[slot] = s;
+                }
+            }
+            let result_ty = function.result.clone();
+            {
+                let TierFrame::Jit(frame) = actor.stack.last_mut().unwrap() else {
+                    unreachable!()
+                };
+                frame.pc = call_pc + 1;
+            }
+            actor.stack.push(TierFrame::Jit(JitFrame {
+                func_id: callee,
+                version,
+                pc: 0,
+                regs,
+                return_to: Some(dst),
+                addr,
+                result_ty,
+            }));
+            return Turn::Progress;
+        }
+
+        // Native → interpreted: marshal to `Value` registers.
+        let mut registers = vec![None; function.registers];
+        {
             let TierFrame::Jit(frame) = actor.stack.last().unwrap() else {
                 unreachable!()
             };
-            args.iter().map(|r| frame.regs[*r].to_value()).collect()
-        };
-        // Check each argument against the callee's parameter type before the
-        // frame is pushed — a pinned old caller passing a since-migrated value
-        // traps here, exactly as the interpreter's Call arm does.
-        for (value, expected) in arg_values.iter().zip(&params) {
-            if !self.shared.value_ok(value, expected) {
-                actor.status = ActorStatus::Paused(Condition::RuntimeTypeError {
-                    function: callee,
-                    pc: call_pc,
-                    message: "call argument: expected a value of another type".into(),
-                });
-                return Turn::Paused;
+            for (slot, (reg, expected)) in args.iter().zip(&function.params).enumerate() {
+                let value = frame.regs[*reg].to_value();
+                if !self.shared.value_ok(&value, expected) {
+                    actor.status = ActorStatus::Paused(Condition::RuntimeTypeError {
+                        function: callee,
+                        pc: call_pc,
+                        message: "call argument: expected a value of another type".into(),
+                    });
+                    return Turn::Paused;
+                }
+                registers[slot] = Some(value);
             }
-        }
-        let mut registers = vec![None; registers_len];
-        for (slot, value) in arg_values.into_iter().enumerate() {
-            registers[slot] = Some(value);
         }
         {
             let TierFrame::Jit(frame) = actor.stack.last_mut().unwrap() else {
@@ -716,8 +817,72 @@ impl Engine {
             };
             frame.pc = call_pc + 1;
         }
-        self.push_callee(&world, actor, callee, version, registers, Some(dst));
+        actor.stack.push(TierFrame::Interp(Frame {
+            function: key,
+            pc: 0,
+            registers,
+            return_to: Some(dst),
+        }));
         Turn::Progress
+    }
+
+    /// Does a raw slot satisfy `expected`? Mirrors [`Heap::value_ok`]
+    /// (`shallow_type(value) == expected`) without building the `Value`:
+    /// scalars are decided by tag alone; a reference still asks the heap for
+    /// its nominal type. An empty slot satisfies nothing.
+    fn slot_ok(&self, slot: RawSlot, expected: &Type) -> bool {
+        match expected {
+            Type::I64 => slot.tag == TAG_I64,
+            Type::Bool => slot.tag == TAG_BOOL,
+            Type::Unit => slot.tag == TAG_UNIT,
+            Type::Foreign(kind) => {
+                slot.tag & TAG_MASK == TAG_FOREIGN
+                    && (slot.tag >> TAG_KIND_SHIFT) as u32 == *kind
+            }
+            Type::Ref(_) => {
+                slot.tag == TAG_REF && self.shared.value_ok(&slot.to_value(), expected)
+            }
+        }
+    }
+
+    /// The tier decision: count this activation and report whether `key` is
+    /// (now) promoted. Thresholds 0 (always) and `u64::MAX` (never) skip the
+    /// counter lock entirely; a version this actor already saw promoted skips
+    /// it too (hotness is monotonic per version, so the local cache is sound).
+    fn decide_hot(&self, actor: &mut Actor, key: (DefId, Version)) -> bool {
+        match self.threshold {
+            0 => true,
+            u64::MAX => false,
+            threshold => {
+                if actor.hot_local.contains(&key) {
+                    return true;
+                }
+                let hot = {
+                    let mut t = self.tiering.lock().unwrap();
+                    let count = t.counts.entry(key).or_insert(0);
+                    *count += 1;
+                    if *count >= threshold {
+                        t.hot.insert(key);
+                    }
+                    t.hot.contains(&key)
+                };
+                if hot {
+                    actor.hot_local.insert(key);
+                }
+                hot
+            }
+        }
+    }
+
+    /// This actor's compiled-step address for `key`, through its epoch-keyed
+    /// snapshot of the source's map — the compiler's own lock is entered only
+    /// when an edit has actually landed since the snapshot.
+    fn resolve_native(&self, world: &World, actor: &mut Actor, key: (DefId, Version)) -> Option<usize> {
+        let epoch = self.shared.code_epoch();
+        if actor.code.as_ref().map(|(e, _)| *e) != Some(epoch) {
+            actor.code = Some((epoch, self.source.native_map(world)));
+        }
+        actor.code.as_ref().unwrap().1.as_ref()?.get(&key).copied()
     }
 
     /// Push a frame for `(callee, version)`, deciding its tier: count the
@@ -725,7 +890,9 @@ impl Engine {
     /// source has it compiled (a source that can't compile this function —
     /// or a [`NoJit`] source — keeps it interpreted). This is the ONE place a
     /// tier is chosen; spawn, interpreted calls, and native calls all land
-    /// here.
+    /// here (the native caller's fast path inlines the same decision through
+    /// [`Engine::is_hot`] + [`Engine::resolve_native`] to marshal slots
+    /// directly).
     fn push_callee(
         &self,
         world: &World,
@@ -736,34 +903,53 @@ impl Engine {
         return_to: Option<usize>,
     ) {
         let key = (callee, version);
-        let hot = {
-            let mut t = self.tiering.lock().unwrap();
-            let count = t.counts.entry(key).or_insert(0);
-            *count += 1;
-            if *count >= self.threshold {
-                t.hot.insert(key);
+        if self.decide_hot(actor, key) {
+            if let Some(addr) = self.resolve_native(world, actor, key) {
+                let FunctionState::Ready(f) = &world.functions[&key] else {
+                    unreachable!("callers resolve Ready code under this guard");
+                };
+                let regs: Vec<RawSlot> = registers
+                    .iter()
+                    .map(|o| o.as_ref().map_or(RawSlot::EMPTY, RawSlot::from_value))
+                    .collect();
+                actor.stack.push(TierFrame::Jit(JitFrame {
+                    func_id: callee,
+                    version,
+                    pc: 0,
+                    regs: regs.into_boxed_slice(),
+                    return_to,
+                    addr,
+                    result_ty: f.result.clone(),
+                }));
+                return;
             }
-            t.hot.contains(&key)
-        };
-        if hot && self.source.native_step(world, key).is_some() {
-            let regs: Vec<RawSlot> = registers
-                .iter()
-                .map(|o| o.as_ref().map_or(RawSlot::EMPTY, RawSlot::from_value))
-                .collect();
-            actor.stack.push(TierFrame::Jit(JitFrame {
-                func_id: callee,
-                version,
-                pc: 0,
-                regs: regs.into_boxed_slice(),
-                return_to,
-            }));
-        } else {
-            actor.stack.push(TierFrame::Interp(Frame {
-                function: key,
-                pc: 0,
-                registers,
-                return_to,
-            }));
+        }
+        actor.stack.push(TierFrame::Interp(Frame {
+            function: key,
+            pc: 0,
+            registers,
+            return_to,
+        }));
+    }
+
+    /// [`Engine::deliver_return`], starting from a raw slot: a native caller
+    /// receives the slot verbatim; only an interpreted caller (or completion)
+    /// materializes the `Value`.
+    fn deliver_return_slot(&self, actor: &mut Actor, slot: RawSlot) {
+        let done = actor.stack.pop().unwrap();
+        let return_to = done.return_to();
+        match actor.stack.last_mut() {
+            None => actor.status = ActorStatus::Complete(slot.to_value()),
+            Some(TierFrame::Interp(f)) => {
+                if let Some(r) = return_to {
+                    f.registers[r] = Some(slot.to_value());
+                }
+            }
+            Some(TierFrame::Jit(f)) => {
+                if let Some(r) = return_to {
+                    f.regs[r] = slot;
+                }
+            }
         }
     }
 
@@ -798,7 +984,6 @@ impl Engine {
 struct EngineMachine<'a> {
     engine: &'a Engine,
     world: &'a World,
-    mailbox: &'a Arc<Mutex<VecDeque<Value>>>,
     actor: &'a mut Actor,
 }
 
@@ -831,7 +1016,7 @@ impl Machine for EngineMachine<'_> {
         self.top().pc
     }
     fn reg(&self, i: usize) -> Option<Value> {
-        self.top().registers.get(i).cloned().flatten()
+        self.top().registers.get(i).copied().flatten()
     }
     fn set_reg(&mut self, dst: usize, value: Value) {
         self.top_mut().registers[dst] = Some(value);
@@ -876,7 +1061,13 @@ impl Machine for EngineMachine<'_> {
         Some(self.engine.shared.deliver(target, value))
     }
     fn recv(&mut self) -> RecvResult {
-        match self.mailbox.lock().unwrap().pop_front() {
+        // The mailbox is created on first use so short-lived actors never
+        // touch the mailbox table.
+        let mailbox = self
+            .actor
+            .mailbox
+            .get_or_insert_with(|| self.engine.shared.mailbox(self.actor.tid));
+        match mailbox.lock().unwrap().pop_front() {
             Some(v) => RecvResult::Got(v),
             None => RecvResult::WouldBlock,
         }

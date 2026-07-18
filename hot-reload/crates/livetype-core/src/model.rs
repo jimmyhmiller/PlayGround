@@ -27,7 +27,7 @@ pub enum Type {
     Foreign(ForeignKind),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Value {
     Unit,
     I64(i64),
