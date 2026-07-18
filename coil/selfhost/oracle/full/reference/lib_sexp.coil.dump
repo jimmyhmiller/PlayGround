@@ -31,7 +31,7 @@ target triple = "arm64-apple-darwin25.5.0"
 
 %coil.core.Result__i64__io.IoError = type { i32, [2 x i64] }
 
-%hashmap.KeyOps = type { ptr, ptr, i64 }
+%hashmap.KeyOps = type { ptr, ptr, i64, ptr, ptr, i64 }
 
 %io.FixBuf = type { ptr, i64, i64 }
 
@@ -58,6 +58,8 @@ target triple = "arm64-apple-darwin25.5.0"
 @g.4 = global %io.Writer zeroinitializer
 
 @g.5 = global %hashmap.KeyOps zeroinitializer
+
+@g.6 = global %hashmap.KeyOps zeroinitializer
 
 @str.0 = private constant [4 x i8] c"inf\00"
 
@@ -888,6 +890,14 @@ define i64 @"coil.core.Sub$i64$-"(i64 %a, i64 %b) {
 entry:
   %sub = sub i64 %a, %b
   ret i64 %sub
+}
+
+define i1 @"hashmap.ko-owns?"(ptr %opsp) {
+entry:
+  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 5
+  %load = load i64, ptr %field, align 8
+  %cmp = icmp eq i64 %load, 1
+  ret i1 %cmp
 }
 
 define i1 @"sexp.delim?"(i64 %c) {
@@ -2497,6 +2507,22 @@ entry:
   ret i64 %callptr
 }
 
+define i64 @hashmap.ko-keycopy(ptr %opsp, ptr %a, ptr %slot) {
+entry:
+  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 3
+  %load = load ptr, ptr %field, align 8
+  %callptr = call i64 %load(ptr %a, ptr %slot)
+  ret i64 %callptr
+}
+
+define i64 @hashmap.ko-keyfree(ptr %opsp, ptr %a, ptr %slot) {
+entry:
+  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 4
+  %load = load ptr, ptr %field, align 8
+  %callptr = call i64 %load(ptr %a, ptr %slot)
+  ret i64 %callptr
+}
+
 define %coil.core.Result__i64__io.IoError @io.fb-write(ptr %ctx, ptr %buf, i64 %len) {
 entry:
   %sum.tmp15 = alloca %coil.core.Result__i64__io.IoError, align 8
@@ -3980,12 +4006,70 @@ else:                                             ; preds = %loop.body
   br label %loop.body
 }
 
+define i64 @str.str-key-copy(ptr %a, ptr %slot) {
+entry:
+  %spill = alloca %coil.core.Option__ptr_i8, align 8
+  %load = load { ptr, i64 }, ptr %slot, align 8
+  %call = call i64 @slice.slice-len__u8({ ptr, i64 } %load)
+  %cmp = icmp sgt i64 %call, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %call1 = call %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 %call, i64 1)
+  store %coil.core.Option__ptr_i8 %call1, ptr %spill, align 8
+  %call2 = call ptr @alloc.unwrap-ptr__i8(ptr %spill)
+  %ptrtoint = ptrtoint ptr %call2 to i64
+  %cmp3 = icmp eq i64 %ptrtoint, 0
+  %ifc4 = icmp ne i1 %cmp3, false
+  br i1 %ifc4, label %then5, label %else6
+
+else:                                             ; preds = %entry
+  br label %ifcont11
+
+then5:                                            ; preds = %then
+  %call7 = call i64 @alloc.oom()
+  br label %ifcont
+
+else6:                                            ; preds = %then
+  %call8 = call ptr @slice.slice-data__u8({ ptr, i64 } %load)
+  %call9 = call i64 @mem.mem-copy__u8(ptr %call2, ptr %call8, i64 %call)
+  %call10 = call { ptr, i64 } @slice.slice-new__u8(ptr %call2, i64 %call)
+  store { ptr, i64 } %call10, ptr %slot, align 8
+  br label %ifcont
+
+ifcont:                                           ; preds = %else6, %then5
+  %ifval = phi i64 [ %call7, %then5 ], [ 0, %else6 ]
+  br label %ifcont11
+
+ifcont11:                                         ; preds = %else, %ifcont
+  %ifval12 = phi i64 [ %ifval, %ifcont ], [ 0, %else ]
+  ret i64 0
+}
+
 define i1 @str.str-key-eq(ptr %a, ptr %b, i64 %n) {
 entry:
   %load = load { ptr, i64 }, ptr %a, align 8
   %load1 = load { ptr, i64 }, ptr %b, align 8
   %call = call i1 @str.str-eq({ ptr, i64 } %load, { ptr, i64 } %load1)
   ret i1 %call
+}
+
+define i64 @str.str-key-free(ptr %a, ptr %slot) {
+entry:
+  %load = load { ptr, i64 }, ptr %slot, align 8
+  %call = call i64 @slice.slice-len__u8({ ptr, i64 } %load)
+  %cmp = icmp sgt i64 %call, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %call1 = call ptr @slice.slice-data__u8({ ptr, i64 } %load)
+  %call2 = call i64 @alloc.raw-free(ptr %a, ptr %call1, i64 %call, i64 1)
+  ret i64 %call2
+
+else:                                             ; preds = %entry
+  ret i64 0
 }
 
 define i64 @str.str-key-hash(ptr %slot, i64 %n) {
@@ -4000,7 +4084,18 @@ entry:
   store ptr @str.str-key-hash, ptr @g.5, align 8
   store ptr @str.str-key-eq, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.5, i32 0, i32 1), align 8
   store i64 16, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.5, i32 0, i32 2), align 8
+  store ptr @str.str-key-copy, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.5, i32 0, i32 3), align 8
+  store ptr @str.str-key-free, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.5, i32 0, i32 4), align 8
+  store i64 1, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.5, i32 0, i32 5), align 8
   ret ptr @g.5
+}
+
+define ptr @str.str-keyops-borrowed() {
+entry:
+  store ptr @str.str-key-hash, ptr @g.6, align 8
+  store ptr @str.str-key-eq, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.6, i32 0, i32 1), align 8
+  store i64 16, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.6, i32 0, i32 2), align 8
+  ret ptr @g.6
 }
 
 define i64 @str.str-len({ ptr, i64 } %s) {

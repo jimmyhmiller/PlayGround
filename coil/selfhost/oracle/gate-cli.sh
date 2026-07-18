@@ -485,6 +485,41 @@ expect_out "by-value struct parameter isn't supported" \
   "export-c arm64: by-value struct param is a clear error, not a bad symbol" \
   "$COIL" emit-obj "$T/expc_bad.coil" -o "$T/expc_bad.o" --backend arm64
 
+echo "== std-3: string HashMap keys are OWNED by default (copied on insert/freed on remove) =="
+# Was: str-keyops stored the caller's (slice u8) fat pointer VERBATIM, so two keys built
+# over one reused buffer aliased it. Overwrite the buffer between inserts and the map ends
+# up holding two keys BOTH reading the buffer's latest bytes ("gamma"), the earlier key
+# ("alpha") unreachable. Now str-keyops deep-copies each inserted key into the map's own
+# allocator (and frees it on remove/clear/free), so a key never aliases caller storage.
+# The program returns alpha*100 + gamma*10 + len : owning => 1*100+2*10+2 = 122 ;
+# the old borrow bug => 0*100+2*10+2 = 22 (alpha lost, two entries both "gamma").
+cat > "$T/std3.coil" <<'EOF'
+(module app)
+(import "lib/hashmap.coil" :use *) (import "lib/str.coil"    :use *)
+(import "lib/slice.coil"   :use *) (import "lib/mem.coil"    :use *)
+(import "lib/alloc.coil"   :use *) (import "lib/result.coil" :use *)
+(import "lib/control.coil" :use *)
+(defn probe [(ops (ptr KeyOps))] (-> i64)
+  (let [a (malloc-allocator) (mut m) (hm-new [(slice u8) i64] a ops)
+        buf (alloc-stack (array u8 8))]
+    (mem-copy [u8] (cast (ptr u8) buf) (slice-data "alpha") 5)
+    (hm-put! (mut m) (slice-new (cast (ptr u8) buf) 5) 1)       ; key "alpha" -> 1
+    (mem-copy [u8] (cast (ptr u8) buf) (slice-data "gamma") 5)  ; OVERWRITE the buffer
+    (hm-put! (mut m) (slice-new (cast (ptr u8) buf) 5) 2)       ; key "gamma" -> 2
+    (iadd (imul (match (hm-get [(slice u8) i64] m "alpha") (Some [v] v) (None [] 0)) 100)
+          (iadd (imul (match (hm-get [(slice u8) i64] m "gamma") (Some [v] v) (None [] 0)) 10)
+                (hm-len m)))))
+(defn main [] (-> i64) (probe (str-keyops)))
+EOF
+# FAILS on the seed (borrow: alpha aliased away -> 22), PASSES here (owning -> 122).
+expect_rc 122 "str-keyops OWNS keys: alpha survives a reused-buffer overwrite" \
+  "$COIL" run "$T/std3.coil"
+# The opt-in escape hatch str-keyops-borrowed keeps the old (unsafe) borrow behavior,
+# reproducing the aliasing on purpose (-> 22). FAILS on the seed (no such function).
+sed 's/(str-keyops)/(str-keyops-borrowed)/' "$T/std3.coil" > "$T/std3b.coil"
+expect_rc 22 "str-keyops-borrowed is the opt-in borrow path (alpha aliased away -> 22)" \
+  "$COIL" run "$T/std3b.coil"
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL

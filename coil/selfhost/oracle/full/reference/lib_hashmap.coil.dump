@@ -11,7 +11,7 @@ target triple = "arm64-apple-darwin25.5.0"
 
 %coil.core.Result__i64__io.IoError = type { i32, [2 x i64] }
 
-%hashmap.KeyOps = type { ptr, ptr, i64 }
+%hashmap.KeyOps = type { ptr, ptr, i64, ptr, ptr, i64 }
 
 %io.FixBuf = type { ptr, i64, i64 }
 
@@ -263,6 +263,14 @@ define i64 @"coil.core.Sub$i64$-"(i64 %a, i64 %b) {
 entry:
   %sub = sub i64 %a, %b
   ret i64 %sub
+}
+
+define i1 @"hashmap.ko-owns?"(ptr %opsp) {
+entry:
+  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 5
+  %load = load i64, ptr %field, align 8
+  %cmp = icmp eq i64 %load, 1
+  ret i1 %cmp
 }
 
 define internal ptr @__coil_llvm_ir_0({ ptr, i64 } %0) #0 {
@@ -1106,6 +1114,22 @@ entry:
   %field1 = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 2
   %load2 = load i64, ptr %field1, align 8
   %callptr = call i64 %load(ptr %kp, i64 %load2)
+  ret i64 %callptr
+}
+
+define i64 @hashmap.ko-keycopy(ptr %opsp, ptr %a, ptr %slot) {
+entry:
+  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 3
+  %load = load ptr, ptr %field, align 8
+  %callptr = call i64 %load(ptr %a, ptr %slot)
+  ret i64 %callptr
+}
+
+define i64 @hashmap.ko-keyfree(ptr %opsp, ptr %a, ptr %slot) {
+entry:
+  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 4
+  %load = load ptr, ptr %field, align 8
+  %callptr = call i64 %load(ptr %a, ptr %slot)
   ret i64 %callptr
 }
 

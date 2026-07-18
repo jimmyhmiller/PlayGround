@@ -180,7 +180,54 @@
   (str-hash (load (cast (ptr (slice u8)) slot))))
 (defn str-key-eq [(a (ptr i8)) (b (ptr i8)) (n :i64)] (-> bool)
   (str-eq (load (cast (ptr (slice u8)) a)) (load (cast (ptr (slice u8)) b))))
+
+; std-3 — take ownership of a string key IN PLACE: read the (borrowed) slice at
+; `slot`, allocate a private copy of its bytes from `a`, and overwrite the slot with
+; a slice VIEW onto that owned copy. An empty key needs no storage (its data pointer
+; is never dereferenced — str-eq/str-hash short-circuit on length 0), so it is left
+; as-is. OOM aborts (the same descriptive-not-safe contract as the rest of lib/str).
+(defn str-key-copy [(a (ptr Allocator)) (slot (ptr i8))] (-> :i64)
+  (let [s (load (cast (ptr (slice u8)) slot))
+        n (slice-len s)]
+    (if (icmp-gt n 0)
+        (let [p (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a n 1)))]
+          (if (icmp-eq (cast :i64 p) 0)
+              (oom)
+              (do (mem-copy [u8] p (slice-data s) n)
+                  (store! (cast (ptr (slice u8)) slot) (slice-new p n))
+                  0)))
+        0)
+    0))
+; Release an owned string key's bytes. Mirrors str-key-copy: an empty key owns no
+; storage, so it is skipped (never frees the borrowed pointer of a length-0 slice).
+(defn str-key-free [(a (ptr Allocator)) (slot (ptr i8))] (-> :i64)
+  (let [s (load (cast (ptr (slice u8)) slot))
+        n (slice-len s)]
+    (if (icmp-gt n 0)
+        (raw-free a (cast (ptr i8) (slice-data s)) n 1)
+        0)))
+
+; The default string KeyOps now OWNS its keys (std-3): every inserted key is copied
+; into the map's allocator and freed on remove/clear/free, so a key never aliases
+; caller storage. This is the safe default — reach for `str-keyops-borrowed` only
+; when you can guarantee the key bytes outlive the map (e.g. static literals).
 (defn str-keyops [] (-> (ptr KeyOps))
+  (let [o (alloc-static KeyOps)]
+    (store! (field o hash) (fnptr-of str-key-hash))
+    (store! (field o eq)   (fnptr-of str-key-eq))
+    (store! (field o size) (sizeof (slice u8)))
+    (store! (field o copy) (fnptr-of str-key-copy))
+    (store! (field o free) (fnptr-of str-key-free))
+    (store! (field o owns) 1)
+    o))
+
+; OPT-IN, UNSAFE: keys are BORROWED — the map stores the (slice u8) view verbatim
+; and never copies or frees the pointed-to bytes. The caller MUST guarantee every
+; key's storage outlives the map and is not mutated for the map's lifetime; two keys
+; built over one reused buffer will alias (the std-3 footgun). Correct for keys that
+; are static literals or otherwise pinned. `copy`/`free`/`owns` are left zero (the
+; alloc-static zero-init), so `ko-owns?` is false and no ownership hook ever runs.
+(defn str-keyops-borrowed [] (-> (ptr KeyOps))
   (let [o (alloc-static KeyOps)]
     (store! (field o hash) (fnptr-of str-key-hash))
     (store! (field o eq)   (fnptr-of str-key-eq))

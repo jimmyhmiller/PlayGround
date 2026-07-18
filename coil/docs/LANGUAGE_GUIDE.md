@@ -274,7 +274,9 @@ operators are how you compare them. Ordering makes range checks direct — e.g.
 `(al-pop! [T] (mut l))`, `(al-free! [T] (mut l))`. Mutators take `(mut …)`.
 **HashMap** (`hashmap.coil`): `(hm-new [K V] a ops)`, `(hm-new-scalar [K V] a)`,
 `(hm-get [K V] m k)` → `(Option V)`, `(hm-put! [K V] (mut m) k v)`,
-`(hm-remove! [K V] (mut m) k)`. For string keys use `(str-keyops)` from `str.coil`.
+`(hm-remove! [K V] (mut m) k)`. String keys: `(str-keyops)` from `str.coil` OWNS keys
+(each is copied into the map's allocator on insert and freed on remove/clear/free);
+`(str-keyops-borrowed)` opts into borrowing (the key bytes must outlive the map).
 Type args `[T]` come right after the name; usually inferable, so often omittable.
 
 ## Strings & bytes

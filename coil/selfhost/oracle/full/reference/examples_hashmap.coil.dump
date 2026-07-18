@@ -19,7 +19,7 @@ target triple = "arm64-apple-darwin25.5.0"
 
 %hashmap.HashMap__i64__i64 = type { ptr, i64, i64, i64, ptr, ptr }
 
-%hashmap.KeyOps = type { ptr, ptr, i64 }
+%hashmap.KeyOps = type { ptr, ptr, i64, ptr, ptr, i64 }
 
 %io.FixBuf = type { ptr, i64, i64 }
 
@@ -277,6 +277,58 @@ entry:
   ret i64 %sub
 }
 
+define internal i64 @"hashmap.hm-drop-keys!__i64__i64"(ptr %m) {
+entry:
+  %field = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 5
+  %load = load ptr, ptr %field, align 8
+  %field1 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 4
+  %load2 = load ptr, ptr %field1, align 8
+  %field3 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 0
+  %load4 = load ptr, ptr %field3, align 8
+  %field5 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 1
+  %load6 = load i64, ptr %field5, align 8
+  %stack.slot = alloca i64, align 8
+  store i64 0, ptr %stack.slot, align 8
+  br label %loop.body
+
+loop.body:                                        ; preds = %ifcont, %entry
+  %load7 = load i64, ptr %stack.slot, align 8
+  %cmp = icmp sge i64 %load7, %load6
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+loop.after:                                       ; preds = %then
+  %loop.val = phi i64 [ 0, %then ]
+  ret i64 0
+
+then:                                             ; preds = %loop.body
+  br label %loop.after
+
+else:                                             ; preds = %loop.body
+  %load8 = load i64, ptr %stack.slot, align 8
+  %idx = getelementptr %hashmap.Entry__i64__i64, ptr %load4, i64 %load8
+  %field9 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 0
+  %load10 = load i64, ptr %field9, align 8
+  %cmp11 = icmp eq i64 %load10, 1
+  %ifc12 = icmp ne i1 %cmp11, false
+  br i1 %ifc12, label %then13, label %else14
+
+then13:                                           ; preds = %else
+  %field15 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 1
+  %call = call i64 @hashmap.ko-keyfree(ptr %load, ptr %load2, ptr %field15)
+  br label %ifcont
+
+else14:                                           ; preds = %else
+  br label %ifcont
+
+ifcont:                                           ; preds = %else14, %then13
+  %ifval = phi i64 [ %call, %then13 ], [ 0, %else14 ]
+  %load16 = load i64, ptr %stack.slot, align 8
+  %add = add i64 %load16, 1
+  store i64 %add, ptr %stack.slot, align 8
+  br label %loop.body
+}
+
 define internal i64 @"hashmap.hm-free!__i64__i64"(ptr %m) {
 entry:
   %field = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 1
@@ -286,29 +338,44 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %field1 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 4
+  %field1 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 5
   %load2 = load ptr, ptr %field1, align 8
-  %field3 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 0
-  %load4 = load ptr, ptr %field3, align 8
-  %field5 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 1
-  %load6 = load i64, ptr %field5, align 8
-  %mul = mul i64 %load6, 24
-  %call = call i64 @alloc.raw-free(ptr %load2, ptr %load4, i64 %mul, i64 8)
-  br label %ifcont
+  %call = call i1 @"hashmap.ko-owns?"(ptr %load2)
+  %ifc3 = icmp ne i1 %call, false
+  br i1 %ifc3, label %then4, label %else5
 
 else:                                             ; preds = %entry
+  br label %ifcont14
+
+then4:                                            ; preds = %then
+  %call6 = call i64 @"hashmap.hm-drop-keys!__i64__i64"(ptr %m)
   br label %ifcont
 
-ifcont:                                           ; preds = %else, %then
-  %ifval = phi i64 [ %call, %then ], [ 0, %else ]
-  %field7 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 0
-  store ptr null, ptr %field7, align 8
-  %field8 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 1
-  store i64 0, ptr %field8, align 8
-  %field9 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 2
-  store i64 0, ptr %field9, align 8
-  %field10 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 3
-  store i64 0, ptr %field10, align 8
+else5:                                            ; preds = %then
+  br label %ifcont
+
+ifcont:                                           ; preds = %else5, %then4
+  %ifval = phi i64 [ %call6, %then4 ], [ 0, %else5 ]
+  %field7 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 4
+  %load8 = load ptr, ptr %field7, align 8
+  %field9 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 0
+  %load10 = load ptr, ptr %field9, align 8
+  %field11 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 1
+  %load12 = load i64, ptr %field11, align 8
+  %mul = mul i64 %load12, 24
+  %call13 = call i64 @alloc.raw-free(ptr %load8, ptr %load10, i64 %mul, i64 8)
+  br label %ifcont14
+
+ifcont14:                                         ; preds = %else, %ifcont
+  %ifval15 = phi i64 [ %call13, %ifcont ], [ 0, %else ]
+  %field16 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 0
+  store ptr null, ptr %field16, align 8
+  %field17 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 1
+  store i64 0, ptr %field17, align 8
+  %field18 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 2
+  store i64 0, ptr %field18, align 8
+  %field19 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 3
+  store i64 0, ptr %field19, align 8
   ret i64 0
 }
 
@@ -376,7 +443,7 @@ then15:                                           ; preds = %else
   %field19 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 1
   %field20 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 2
   %load21 = load i64, ptr %field20, align 8
-  %call22 = call i64 @hashmap.hm-insert-raw__i64__i64(ptr %load18, ptr %ns, i64 %newcap, ptr %field19, i64 %load21)
+  %call22 = call i64 @hashmap.hm-insert-raw__i64__i64(ptr %load18, ptr %ns, i64 %newcap, ptr %field19, i64 %load21, ptr %load, i64 0)
   br label %ifcont
 
 else16:                                           ; preds = %else
@@ -469,42 +536,44 @@ ifcont21:                                         ; preds = %else, %ifcont19
   %load26 = load ptr, ptr %field25, align 8
   %field27 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 1
   %load28 = load i64, ptr %field27, align 8
-  %call29 = call i64 @hashmap.hm-insert-raw__i64__i64(ptr %load24, ptr %load26, i64 %load28, ptr %stack.slot, i64 %v)
-  %cmp30 = icmp sge i64 %call29, 1
-  %ifc31 = icmp ne i1 %cmp30, false
-  br i1 %ifc31, label %then32, label %else33
+  %field29 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 4
+  %load30 = load ptr, ptr %field29, align 8
+  %call31 = call i64 @hashmap.hm-insert-raw__i64__i64(ptr %load24, ptr %load26, i64 %load28, ptr %stack.slot, i64 %v, ptr %load30, i64 1)
+  %cmp32 = icmp sge i64 %call31, 1
+  %ifc33 = icmp ne i1 %cmp32, false
+  br i1 %ifc33, label %then34, label %else35
 
-then32:                                           ; preds = %ifcont21
-  %field34 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 2
-  %field35 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 2
-  %load36 = load i64, ptr %field35, align 8
-  %add37 = add i64 %load36, 1
-  store i64 %add37, ptr %field34, align 8
-  %cmp38 = icmp eq i64 %call29, 2
-  %ifc39 = icmp ne i1 %cmp38, false
-  br i1 %ifc39, label %then40, label %else41
+then34:                                           ; preds = %ifcont21
+  %field36 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 2
+  %field37 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 2
+  %load38 = load i64, ptr %field37, align 8
+  %add39 = add i64 %load38, 1
+  store i64 %add39, ptr %field36, align 8
+  %cmp40 = icmp eq i64 %call31, 2
+  %ifc41 = icmp ne i1 %cmp40, false
+  br i1 %ifc41, label %then42, label %else43
 
-else33:                                           ; preds = %ifcont21
+else35:                                           ; preds = %ifcont21
+  br label %ifcont49
+
+then42:                                           ; preds = %then34
+  %field44 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 3
+  %field45 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 3
+  %load46 = load i64, ptr %field45, align 8
+  %sub = sub i64 %load46, 1
+  store i64 %sub, ptr %field44, align 8
   br label %ifcont47
 
-then40:                                           ; preds = %then32
-  %field42 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 3
-  %field43 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 3
-  %load44 = load i64, ptr %field43, align 8
-  %sub = sub i64 %load44, 1
-  store i64 %sub, ptr %field42, align 8
-  br label %ifcont45
-
-else41:                                           ; preds = %then32
-  br label %ifcont45
-
-ifcont45:                                         ; preds = %else41, %then40
-  %ifval46 = phi i64 [ 0, %then40 ], [ 0, %else41 ]
+else43:                                           ; preds = %then34
   br label %ifcont47
 
-ifcont47:                                         ; preds = %else33, %ifcont45
-  %ifval48 = phi i64 [ %ifval46, %ifcont45 ], [ 0, %else33 ]
-  ret i64 %call29
+ifcont47:                                         ; preds = %else43, %then42
+  %ifval48 = phi i64 [ 0, %then42 ], [ 0, %else43 ]
+  br label %ifcont49
+
+ifcont49:                                         ; preds = %else35, %ifcont47
+  %ifval50 = phi i64 [ %ifval48, %ifcont47 ], [ 0, %else35 ]
+  ret i64 %call31
 }
 
 define internal i64 @"hashmap.hm-remove!__i64__i64"(ptr %m, i64 %k) {
@@ -523,75 +592,99 @@ else:                                             ; preds = %entry
   %load2 = load ptr, ptr %field1, align 8
   %field3 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 5
   %load4 = load ptr, ptr %field3, align 8
+  %field5 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 4
+  %load6 = load ptr, ptr %field5, align 8
   %stack.slot = alloca i64, align 8
-  %stack.slot5 = alloca i64, align 8
-  store i64 0, ptr %stack.slot5, align 8
+  %stack.slot7 = alloca i64, align 8
+  store i64 0, ptr %stack.slot7, align 8
   store i64 %k, ptr %stack.slot, align 8
-  %stack.slot6 = alloca i64, align 8
+  %stack.slot8 = alloca i64, align 8
   %call = call i64 @hashmap.ko-hash(ptr %load4, ptr %stack.slot)
   %sub = sub i64 %load, 1
   %and = and i64 %call, %sub
-  store i64 %and, ptr %stack.slot6, align 8
+  store i64 %and, ptr %stack.slot8, align 8
   br label %loop.body
 
-loop.body:                                        ; preds = %else22, %else
-  %load7 = load i64, ptr %stack.slot6, align 8
-  %idx = getelementptr %hashmap.Entry__i64__i64, ptr %load2, i64 %load7
-  %field8 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 0
-  %load9 = load i64, ptr %field8, align 8
-  %cmp10 = icmp eq i64 %load9, 0
-  %ifc11 = icmp ne i1 %cmp10, false
-  br i1 %ifc11, label %then12, label %else13
+loop.body:                                        ; preds = %else24, %else
+  %load9 = load i64, ptr %stack.slot8, align 8
+  %idx = getelementptr %hashmap.Entry__i64__i64, ptr %load2, i64 %load9
+  %field10 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 0
+  %load11 = load i64, ptr %field10, align 8
+  %cmp12 = icmp eq i64 %load11, 0
+  %ifc13 = icmp ne i1 %cmp12, false
+  br i1 %ifc13, label %then14, label %else15
 
-loop.after:                                       ; preds = %then21, %then12
-  %loop.val = phi i64 [ 0, %then12 ], [ 0, %then21 ]
-  %load35 = load i64, ptr %stack.slot5, align 8
-  ret i64 %load35
+loop.after:                                       ; preds = %ifcont31, %then14
+  %loop.val = phi i64 [ 0, %then14 ], [ 0, %ifcont31 ]
+  %load45 = load i64, ptr %stack.slot7, align 8
+  ret i64 %load45
 
-then12:                                           ; preds = %loop.body
+then14:                                           ; preds = %loop.body
   br label %loop.after
 
-else13:                                           ; preds = %loop.body
-  %cmp14 = icmp eq i64 %load9, 1
-  %ifc15 = icmp ne i1 %cmp14, false
-  br i1 %ifc15, label %then16, label %else17
+else15:                                           ; preds = %loop.body
+  %cmp16 = icmp eq i64 %load11, 1
+  %ifc17 = icmp ne i1 %cmp16, false
+  br i1 %ifc17, label %then18, label %else19
 
-then16:                                           ; preds = %else13
-  %field18 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 1
-  %call19 = call i1 @hashmap.ko-eq(ptr %load4, ptr %field18, ptr %stack.slot)
+then18:                                           ; preds = %else15
+  %field20 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 1
+  %call21 = call i1 @hashmap.ko-eq(ptr %load4, ptr %field20, ptr %stack.slot)
   br label %ifcont
 
-else17:                                           ; preds = %else13
+else19:                                           ; preds = %else15
   br label %ifcont
 
-ifcont:                                           ; preds = %else17, %then16
-  %ifval = phi i1 [ %call19, %then16 ], [ false, %else17 ]
-  %ifc20 = icmp ne i1 %ifval, false
-  br i1 %ifc20, label %then21, label %else22
+ifcont:                                           ; preds = %else19, %then18
+  %ifval = phi i1 [ %call21, %then18 ], [ false, %else19 ]
+  %ifc22 = icmp ne i1 %ifval, false
+  br i1 %ifc22, label %then23, label %else24
 
-then21:                                           ; preds = %ifcont
-  %field23 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 0
-  store i64 2, ptr %field23, align 8
-  %field24 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 2
-  %field25 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 2
-  %load26 = load i64, ptr %field25, align 8
-  %sub27 = sub i64 %load26, 1
-  store i64 %sub27, ptr %field24, align 8
-  %field28 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 3
-  %field29 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 3
-  %load30 = load i64, ptr %field29, align 8
-  %add = add i64 %load30, 1
-  store i64 %add, ptr %field28, align 8
-  store i64 1, ptr %stack.slot5, align 8
-  br label %loop.after
+then23:                                           ; preds = %ifcont
+  %call25 = call i1 @"hashmap.ko-owns?"(ptr %load4)
+  %ifc26 = icmp ne i1 %call25, false
+  br i1 %ifc26, label %then27, label %else28
 
-else22:                                           ; preds = %ifcont
-  %load31 = load i64, ptr %stack.slot6, align 8
-  %add32 = add i64 %load31, 1
-  %sub33 = sub i64 %load, 1
-  %and34 = and i64 %add32, %sub33
-  store i64 %and34, ptr %stack.slot6, align 8
+else24:                                           ; preds = %ifcont
+  %load41 = load i64, ptr %stack.slot8, align 8
+  %add42 = add i64 %load41, 1
+  %sub43 = sub i64 %load, 1
+  %and44 = and i64 %add42, %sub43
+  store i64 %and44, ptr %stack.slot8, align 8
   br label %loop.body
+
+then27:                                           ; preds = %then23
+  %field29 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 1
+  %call30 = call i64 @hashmap.ko-keyfree(ptr %load4, ptr %load6, ptr %field29)
+  br label %ifcont31
+
+else28:                                           ; preds = %then23
+  br label %ifcont31
+
+ifcont31:                                         ; preds = %else28, %then27
+  %ifval32 = phi i64 [ %call30, %then27 ], [ 0, %else28 ]
+  %field33 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 0
+  store i64 2, ptr %field33, align 8
+  %field34 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 2
+  %field35 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 2
+  %load36 = load i64, ptr %field35, align 8
+  %sub37 = sub i64 %load36, 1
+  store i64 %sub37, ptr %field34, align 8
+  %field38 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 3
+  %field39 = getelementptr inbounds nuw %hashmap.HashMap__i64__i64, ptr %m, i32 0, i32 3
+  %load40 = load i64, ptr %field39, align 8
+  %add = add i64 %load40, 1
+  store i64 %add, ptr %field38, align 8
+  store i64 1, ptr %stack.slot7, align 8
+  br label %loop.after
+}
+
+define internal i1 @"hashmap.ko-owns?"(ptr %opsp) {
+entry:
+  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 5
+  %load = load i64, ptr %field, align 8
+  %cmp = icmp eq i64 %load, 1
+  ret i1 %cmp
 }
 
 define internal ptr @__coil_llvm_ir_0({ ptr, i64 } %0) #0 {
@@ -1558,7 +1651,7 @@ else32:                                           ; preds = %loop.after
   ret %coil.core.Option__i64 %sum42
 }
 
-define internal i64 @hashmap.hm-insert-raw__i64__i64(ptr %opsp, ptr %slots, i64 %cap, ptr %kp, i64 %v) {
+define internal i64 @hashmap.hm-insert-raw__i64__i64(ptr %opsp, ptr %slots, i64 %cap, ptr %kp, i64 %v, ptr %a, i64 %own) {
 entry:
   %stack.slot = alloca i64, align 8
   %call = call i64 @hashmap.ko-hash(ptr %opsp, ptr %kp)
@@ -1573,7 +1666,7 @@ entry:
   store i64 0, ptr %stack.slot3, align 8
   br label %loop.body
 
-loop.body:                                        ; preds = %ifcont58, %entry
+loop.body:                                        ; preds = %ifcont72, %entry
   %load = load i64, ptr %stack.slot3, align 8
   %cmp = icmp eq i64 %load, 1
   %ifc = icmp ne i1 %cmp, false
@@ -1581,8 +1674,8 @@ loop.body:                                        ; preds = %ifcont58, %entry
 
 loop.after:                                       ; preds = %then
   %loop.val = phi i64 [ 0, %then ]
-  %load60 = load i64, ptr %stack.slot2, align 8
-  ret i64 %load60
+  %load74 = load i64, ptr %stack.slot2, align 8
+  ret i64 %load74
 
 then:                                             ; preds = %loop.body
   br label %loop.after
@@ -1603,9 +1696,9 @@ then8:                                            ; preds = %else
   br i1 %ifc12, label %then13, label %else14
 
 else9:                                            ; preds = %else
-  %cmp29 = icmp eq i64 %load5, 1
-  %ifc30 = icmp ne i1 %cmp29, false
-  br i1 %ifc30, label %then31, label %else32
+  %cmp43 = icmp eq i64 %load5, 1
+  %ifc44 = icmp ne i1 %cmp43, false
+  br i1 %ifc44, label %then45, label %else46
 
 then13:                                           ; preds = %then8
   %load15 = load i64, ptr %stack.slot1, align 8
@@ -1623,79 +1716,105 @@ ifcont:                                           ; preds = %else14, %then13
   %field19 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx17, i32 0, i32 1
   %load20 = load i64, ptr %kp, align 8
   store i64 %load20, ptr %field19, align 8
-  %field21 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx17, i32 0, i32 2
-  store i64 %v, ptr %field21, align 8
-  %load22 = load i64, ptr %stack.slot1, align 8
-  %cmp23 = icmp sge i64 %load22, 0
-  %ifc24 = icmp ne i1 %cmp23, false
-  br i1 %ifc24, label %then25, label %else26
+  %cmp21 = icmp eq i64 %own, 1
+  %ifc22 = icmp ne i1 %cmp21, false
+  br i1 %ifc22, label %then23, label %else24
 
-then25:                                           ; preds = %ifcont
-  br label %ifcont27
+then23:                                           ; preds = %ifcont
+  %call25 = call i1 @"hashmap.ko-owns?"(ptr %opsp)
+  br label %ifcont26
 
-else26:                                           ; preds = %ifcont
-  br label %ifcont27
+else24:                                           ; preds = %ifcont
+  br label %ifcont26
 
-ifcont27:                                         ; preds = %else26, %then25
-  %ifval28 = phi i64 [ 2, %then25 ], [ 1, %else26 ]
-  store i64 %ifval28, ptr %stack.slot2, align 8
+ifcont26:                                         ; preds = %else24, %then23
+  %ifval27 = phi i1 [ %call25, %then23 ], [ false, %else24 ]
+  %ifc28 = icmp ne i1 %ifval27, false
+  br i1 %ifc28, label %then29, label %else30
+
+then29:                                           ; preds = %ifcont26
+  %field31 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx17, i32 0, i32 1
+  %call32 = call i64 @hashmap.ko-keycopy(ptr %opsp, ptr %a, ptr %field31)
+  br label %ifcont33
+
+else30:                                           ; preds = %ifcont26
+  br label %ifcont33
+
+ifcont33:                                         ; preds = %else30, %then29
+  %ifval34 = phi i64 [ %call32, %then29 ], [ 0, %else30 ]
+  %field35 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx17, i32 0, i32 2
+  store i64 %v, ptr %field35, align 8
+  %load36 = load i64, ptr %stack.slot1, align 8
+  %cmp37 = icmp sge i64 %load36, 0
+  %ifc38 = icmp ne i1 %cmp37, false
+  br i1 %ifc38, label %then39, label %else40
+
+then39:                                           ; preds = %ifcont33
+  br label %ifcont41
+
+else40:                                           ; preds = %ifcont33
+  br label %ifcont41
+
+ifcont41:                                         ; preds = %else40, %then39
+  %ifval42 = phi i64 [ 2, %then39 ], [ 1, %else40 ]
+  store i64 %ifval42, ptr %stack.slot2, align 8
   store i64 1, ptr %stack.slot3, align 8
-  br label %ifcont58
+  br label %ifcont72
 
-then31:                                           ; preds = %else9
-  %field33 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 1
-  %call34 = call i1 @hashmap.ko-eq(ptr %opsp, ptr %field33, ptr %kp)
-  %ifc35 = icmp ne i1 %call34, false
-  br i1 %ifc35, label %then36, label %else37
+then45:                                           ; preds = %else9
+  %field47 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 1
+  %call48 = call i1 @hashmap.ko-eq(ptr %opsp, ptr %field47, ptr %kp)
+  %ifc49 = icmp ne i1 %call48, false
+  br i1 %ifc49, label %then50, label %else51
 
-else32:                                           ; preds = %else9
-  %load44 = load i64, ptr %stack.slot1, align 8
-  %cmp45 = icmp slt i64 %load44, 0
-  %ifc46 = icmp ne i1 %cmp45, false
-  br i1 %ifc46, label %then47, label %else48
+else46:                                           ; preds = %else9
+  %load58 = load i64, ptr %stack.slot1, align 8
+  %cmp59 = icmp slt i64 %load58, 0
+  %ifc60 = icmp ne i1 %cmp59, false
+  br i1 %ifc60, label %then61, label %else62
 
-then36:                                           ; preds = %then31
-  %field38 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 2
-  store i64 %v, ptr %field38, align 8
+then50:                                           ; preds = %then45
+  %field52 = getelementptr inbounds nuw %hashmap.Entry__i64__i64, ptr %idx, i32 0, i32 2
+  store i64 %v, ptr %field52, align 8
   store i64 0, ptr %stack.slot2, align 8
   store i64 1, ptr %stack.slot3, align 8
-  br label %ifcont42
-
-else37:                                           ; preds = %then31
-  %load39 = load i64, ptr %stack.slot, align 8
-  %add = add i64 %load39, 1
-  %sub40 = sub i64 %cap, 1
-  %and41 = and i64 %add, %sub40
-  store i64 %and41, ptr %stack.slot, align 8
-  br label %ifcont42
-
-ifcont42:                                         ; preds = %else37, %then36
-  %ifval43 = phi i64 [ 0, %then36 ], [ 0, %else37 ]
   br label %ifcont56
 
-then47:                                           ; preds = %else32
-  %load49 = load i64, ptr %stack.slot, align 8
-  store i64 %load49, ptr %stack.slot1, align 8
-  br label %ifcont50
-
-else48:                                           ; preds = %else32
-  br label %ifcont50
-
-ifcont50:                                         ; preds = %else48, %then47
-  %ifval51 = phi i64 [ 0, %then47 ], [ 0, %else48 ]
-  %load52 = load i64, ptr %stack.slot, align 8
-  %add53 = add i64 %load52, 1
+else51:                                           ; preds = %then45
+  %load53 = load i64, ptr %stack.slot, align 8
+  %add = add i64 %load53, 1
   %sub54 = sub i64 %cap, 1
-  %and55 = and i64 %add53, %sub54
+  %and55 = and i64 %add, %sub54
   store i64 %and55, ptr %stack.slot, align 8
   br label %ifcont56
 
-ifcont56:                                         ; preds = %ifcont50, %ifcont42
-  %ifval57 = phi i64 [ %ifval43, %ifcont42 ], [ 0, %ifcont50 ]
-  br label %ifcont58
+ifcont56:                                         ; preds = %else51, %then50
+  %ifval57 = phi i64 [ 0, %then50 ], [ 0, %else51 ]
+  br label %ifcont70
 
-ifcont58:                                         ; preds = %ifcont56, %ifcont27
-  %ifval59 = phi i64 [ 0, %ifcont27 ], [ %ifval57, %ifcont56 ]
+then61:                                           ; preds = %else46
+  %load63 = load i64, ptr %stack.slot, align 8
+  store i64 %load63, ptr %stack.slot1, align 8
+  br label %ifcont64
+
+else62:                                           ; preds = %else46
+  br label %ifcont64
+
+ifcont64:                                         ; preds = %else62, %then61
+  %ifval65 = phi i64 [ 0, %then61 ], [ 0, %else62 ]
+  %load66 = load i64, ptr %stack.slot, align 8
+  %add67 = add i64 %load66, 1
+  %sub68 = sub i64 %cap, 1
+  %and69 = and i64 %add67, %sub68
+  store i64 %and69, ptr %stack.slot, align 8
+  br label %ifcont70
+
+ifcont70:                                         ; preds = %ifcont64, %ifcont56
+  %ifval71 = phi i64 [ %ifval57, %ifcont56 ], [ 0, %ifcont64 ]
+  br label %ifcont72
+
+ifcont72:                                         ; preds = %ifcont70, %ifcont41
+  %ifval73 = phi i64 [ 0, %ifcont41 ], [ %ifval71, %ifcont70 ]
   br label %loop.body
 }
 
@@ -1750,6 +1869,22 @@ entry:
   %field1 = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 2
   %load2 = load i64, ptr %field1, align 8
   %callptr = call i64 %load(ptr %kp, i64 %load2)
+  ret i64 %callptr
+}
+
+define internal i64 @hashmap.ko-keycopy(ptr %opsp, ptr %a, ptr %slot) {
+entry:
+  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 3
+  %load = load ptr, ptr %field, align 8
+  %callptr = call i64 %load(ptr %a, ptr %slot)
+  ret i64 %callptr
+}
+
+define internal i64 @hashmap.ko-keyfree(ptr %opsp, ptr %a, ptr %slot) {
+entry:
+  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 4
+  %load = load ptr, ptr %field, align 8
+  %callptr = call i64 %load(ptr %a, ptr %slot)
   ret i64 %callptr
 }
 

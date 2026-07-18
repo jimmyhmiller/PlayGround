@@ -25,10 +25,24 @@
 ; The key capability: hash a key, compare two keys; `size` is sizeof K (handed to
 ; the byte-wise helpers; a custom hash/eq may ignore it). Type-erased over (ptr i8)
 ; so one KeyOps shape serves any K. NOT generic — the map stores it by value.
+;
+; std-3 — OWNING keys. When `owns` is 1 the map treats stored keys as OWNED: on a
+; genuine insert it deep-copies the key into the map's own allocator (`copy`), and
+; on remove/clear/free it releases that storage (`free`). So a string key never
+; aliases caller memory (the footgun a `(slice u8)` key otherwise is: two keys built
+; over one reused buffer both read the buffer's *latest* bytes). When `owns` is 0 —
+; the zero-init default, since `alloc-static` zeroes the vtable and only owning ops
+; fill these in — keys are stored purely by value and never copied or freed. That is
+; the old borrow behavior, and it is correct for scalar/pointer keys (whose value
+; carries no external storage) and for the deliberate opt-in `str-keyops-borrowed`.
+; `copy`/`free` both take (allocator, key-slot) and act IN PLACE on the slot.
 (defstruct KeyOps
   [(hash (fnptr c [(ptr i8) :i64] :i64))
    (eq   (fnptr c [(ptr i8) (ptr i8) :i64] bool))
-   (size :i64)])
+   (size :i64)
+   (copy (fnptr c [(ptr Allocator) (ptr i8)] :i64))
+   (free (fnptr c [(ptr Allocator) (ptr i8)] :i64))
+   (owns :i64)])
 
 ; Safe byte-wise ops — sound ONLY where byte-equality == value-equality.
 (defn bytewise-hash [(p (ptr i8)) (n :i64)] (-> :i64)
@@ -66,6 +80,16 @@
 (defn ko-eq [(opsp (ptr KeyOps)) (a (ptr i8)) (b (ptr i8))] (-> bool)
   (call-ptr (load (field opsp eq)) a b (load (field opsp size))))
 
+; std-3 owning-key hooks. `ko-owns?` gates every copy/free at the call sites (so a
+; borrowed/scalar map pays nothing). `ko-keycopy` replaces the borrowed key at
+; `slot` with an allocator-owned deep copy; `ko-keyfree` releases that storage.
+(defn ko-owns? [(opsp (ptr KeyOps))] (-> bool)
+  (icmp-eq (load (field opsp owns)) 1))
+(defn ko-keycopy [(opsp (ptr KeyOps)) (a (ptr Allocator)) (slot (ptr i8))] (-> :i64)
+  (call-ptr (load (field opsp copy)) a slot))
+(defn ko-keyfree [(opsp (ptr KeyOps)) (a (ptr Allocator)) (slot (ptr i8))] (-> :i64)
+  (call-ptr (load (field opsp free)) a slot))
+
 (defn hm-new [K V] [(a (ptr Allocator)) (ops (ptr KeyOps))] (-> (HashMap K V))
   (let [(mut m) (zeroed (HashMap K V))]
     (store! (field m alc) a)
@@ -86,8 +110,12 @@
 ;   0 = updated an existing key   1 = filled an empty slot   2 = reused a tombstone
 ; (1 and 2 both add a key; 2 additionally consumes a tombstone). Terminates because
 ; the caller keeps at least one empty slot (tombstones counted toward resize).
+; `own` = 1 for a genuine caller insert (copy the key if the map owns keys); 0 for a
+; rehash MOVE (hm-grow!), where the key is already owned and only its fat pointer is
+; relocated — copying again would leak, freeing the old array must not free the key.
 (defn hm-insert-raw [K V]
-    [(opsp (ptr KeyOps)) (slots (ptr (Entry K V))) (cap :i64) (kp (ptr K)) (v V)] (-> :i64)
+    [(opsp (ptr KeyOps)) (slots (ptr (Entry K V))) (cap :i64) (kp (ptr K)) (v V)
+     (a (ptr Allocator)) (own :i64)] (-> :i64)
   (let [kpi (cast (ptr i8) kp)
         (mut i) (iand (ko-hash opsp kpi) (isub cap 1))
         (mut tomb) -1        ; index of the first tombstone seen, -1 = none yet
@@ -105,6 +133,11 @@
                       te     (index slots target)]
                   (store! (field te state) 1)
                   (store! (field te key) (load kp))
+                  ; a new key entered the map — take ownership (deep-copy in place)
+                  ; iff this is a genuine insert into an owning map (never a rehash).
+                  (if (and (icmp-eq own 1) (ko-owns? opsp))
+                      (ko-keycopy opsp a (cast (ptr i8) (field te key)))
+                      0)
                   (store! (field te val) v)
                   (store! result (if (icmp-ge (load tomb) 0) 2 1))
                   (store! done 1))
@@ -134,7 +167,7 @@
                     (let [e (index oldslots (load j))]
                       (if (icmp-eq (load (field e state)) 1)
                           (hm-insert-raw [K V] (load (field m ops)) ns newcap
-                                         (field e key) (load (field e val)))
+                                         (field e key) (load (field e val)) a 0)  ; MOVE
                           0))
                     (store! j (iadd (load j) 1))))))
           (if (icmp-gt oldcap 0)
@@ -163,7 +196,8 @@
         0))
   (let [kp (alloc-stack K)]
     (store! kp k)
-    (let [r (hm-insert-raw [K V] (load (field m ops)) (load (field m slots)) (load (field m cap)) kp v)]
+    (let [r (hm-insert-raw [K V] (load (field m ops)) (load (field m slots)) (load (field m cap)) kp v
+                           (load (field m alc)) 1)]
       (if (icmp-ge r 1)                                            ; added a new key
           (do (store! (field m len) (iadd (load (field m len)) 1))
               (if (icmp-eq r 2)                                    ; ...reusing a tombstone
@@ -204,6 +238,7 @@
         0
         (let [slots (load (field m slots))
               opsp  (load (field m ops))
+              a     (load (field m alc))
               kp    (alloc-stack K)
               (mut res) 0]
           (store! kp k)
@@ -215,7 +250,9 @@
                 (if (icmp-eq st 0)
                     (break)
                     (if (and (icmp-eq st 1) (ko-eq opsp (cast (ptr i8) (field e key)) kpi))
-                        (do (store! (field e state) 2)                        ; tombstone
+                        (do (if (ko-owns? opsp)                               ; free the owned key
+                                (ko-keyfree opsp a (cast (ptr i8) (field e key))) 0)
+                            (store! (field e state) 2)                        ; tombstone
                             (store! (field m len) (isub (load (field m len)) 1))
                             (store! (field m tombs) (iadd (load (field m tombs)) 1))
                             (store! res 1)
@@ -223,10 +260,33 @@
                         (store! i (iand (iadd (load i) 1) (isub cap 1))))))))
           (load res)))))
 
+; std-3: free every OWNED key still occupying a slot (state 1). Tombstones (state 2)
+; already had their key freed by hm-remove!, and empty slots (state 0) hold nothing —
+; so only state-1 keys are dropped (freeing a tombstone's key would double-free).
+; Callers gate this on `ko-owns?`, so a borrowed/scalar map never runs the walk.
+(defn hm-drop-keys! [K V] [(m (mut (HashMap K V)))] (-> :i64)
+  (let [opsp  (load (field m ops))
+        a     (load (field m alc))
+        slots (load (field m slots))
+        cap   (load (field m cap))
+        (mut i) 0]
+    (loop
+      (if (icmp-ge (load i) cap)
+          (break)
+          (do
+            (let [e (index slots (load i))]
+              (if (icmp-eq (load (field e state)) 1)
+                  (ko-keyfree opsp a (cast (ptr i8) (field e key)))
+                  0))
+            (store! i (iadd (load i) 1)))))
+    0))
+
 (defn hm-free! [K V] [(m (mut (HashMap K V)))] (-> :i64)
   (if (icmp-gt (load (field m cap)) 0)
-      (raw-free (load (field m alc)) (cast (ptr i8) (load (field m slots)))
-                (imul (load (field m cap)) (sizeof (Entry K V))) (alignof (Entry K V)))
+      (do
+        (if (ko-owns? (load (field m ops))) (hm-drop-keys! (mut m)) 0)   ; std-3: free owned keys
+        (raw-free (load (field m alc)) (cast (ptr i8) (load (field m slots)))
+                  (imul (load (field m cap)) (sizeof (Entry K V))) (alignof (Entry K V))))
       0)
   (store! (field m slots) (cast (ptr (Entry K V)) 0))
   (store! (field m cap) 0)
@@ -239,7 +299,9 @@
 ; the slots restores state 0 = empty everywhere, dropping every key and tombstone.
 (defn hm-clear! [K V] [(m (mut (HashMap K V)))] (-> :i64)
   (if (icmp-gt (load (field m cap)) 0)
-      (mem-zero (load (field m slots)) (load (field m cap)))
+      (do
+        (if (ko-owns? (load (field m ops))) (hm-drop-keys! (mut m)) 0)   ; std-3: free owned keys
+        (mem-zero (load (field m slots)) (load (field m cap))))
       0)
   (store! (field m len) 0)
   (store! (field m tombs) 0)

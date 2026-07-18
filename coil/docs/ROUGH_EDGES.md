@@ -214,8 +214,13 @@ Coil's span renderer is genuinely excellent. Every finding here is a site bypass
       for trait methods; apply it to function refers and reuse the error text.
 - [x] **mem-3** A bare `(mut x)` passes its **address** into a variadic C call while auto-dereffing
       everywhere else. Reject it (the metal-op error is the right precedent).
-- [ ] **std-3** String-keyed HashMap never copies keys — produced a map with two keys both reading
-      "gamma". Add owning `str-keyops-owned`/`hm-new-str`, or document the lifetime contract loudly.
+- [x] **std-3** String-keyed HashMap never copies keys — produced a map with two keys both reading
+      "gamma". ✅ DONE: string keys now OWN by default. `KeyOps` gained `copy`/`free`/`owns`; a map
+      with `owns=1` deep-copies each inserted key into its own allocator (`str-key-copy`) and frees
+      it on remove/clear/free (`str-key-free`, `hm-drop-keys!`) — a key never aliases caller memory.
+      Rehash MOVES keys (no re-copy/free). `str-keyops` is owning; `str-keyops-borrowed` is the
+      opt-in unsafe borrow. Scalar/derive/struct ops leave the hooks zero (borrow) — no cost. See
+      DECISIONS.md #8; teeth in gate-cli.sh (owning→122, borrowed→22, both FAIL on the seed).
 - [x] **std-4** `(for-in [x (in map)])` compiled and iterated garbage (`get`-by-slot-index on a
       map, whose `get` takes a KEY). ✅ DONE via the real iterator protocol: `(in map)` / `(iter
       map)` now iterate the map's KEYS through `MapIter` (recover the value with `hm-get`). See

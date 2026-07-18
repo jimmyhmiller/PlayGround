@@ -197,9 +197,32 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    is scalar-only and absent from the IR corpus (only the two scalar diag fixtures 06/07 exercise it),
    so gate-full is unaffected and 06/07 would flip from "error" to a folded literal.
 
-8. **String HashMap keys own by default (std-3).** String-keyed maps copy keys into the map's
-   allocator on insert and free on remove; borrowing becomes the opt-in/unsafe path. Behavior
-   change — audit existing string-key users.
+8. **String HashMap keys own by default (std-3).** ✅ DONE. String-keyed maps copy keys into the
+   map's allocator on insert and free on remove; borrowing becomes the opt-in/unsafe path.
+   OUTCOME: ownership is a capability on the `KeyOps` vtable, not a compiler concept. `KeyOps` gained
+   three fields — `copy`/`free` (both `(ptr Allocator) (ptr i8) -> i64`, acting IN PLACE on the key
+   slot) and an `owns` flag. When `owns=1` the map deep-copies each genuinely-inserted key into its
+   own allocator and frees it on remove/clear/free, so a `(slice u8)` key never aliases caller
+   storage (the footgun: two keys built over one reused buffer both read its latest bytes). The
+   copy is gated at the ONE place a key enters a slot (`hm-insert-raw`, new `own`/`alloc` params) by
+   `own AND ko-owns?`: a rehash MOVE (`hm-grow!`, `own=0`) relocates the owned fat pointer without
+   re-copying or freeing, and `hm-remove!`/`hm-drop-keys!` (walked by `hm-free!`/`hm-clear!`, only
+   when `ko-owns?`) free exactly the state-1 keys — no double-free of a tombstone, no leak.
+   `str-keyops` (lib/str.coil) is now the owning default (`str-key-copy` = raw-alloc+mem-copy+
+   slice-new; `str-key-free` = raw-free; empty keys own nothing and are skipped); `str-keyops-
+   borrowed` is the deliberate opt-in that leaves the hooks zero. Scalar/derive/struct keyops leave
+   `owns` at the `alloc-static` zero-init default (borrow — correct, since their value carries no
+   external storage) and pay nothing: the guards are dead branches. AUDIT of existing string-key
+   users (self-host `driver.cheader`/`cimport`, examples/json·lisp·calc, lib/sexp): all key off
+   freshly-allocated bytes or static literals and only put/get, so owning is a pure superset — every
+   corpus program's stdout+exit is byte-identical (owning changes memory ownership, not results),
+   and none of them run during the self-build (cimport/cheader are CLI subcommands), so the fixpoint
+   is untouched. Only the `full` IR stage regenerated (7 hashmap/str/KeyOps-touching refs; the KeyOps
+   struct type grew `{ptr,ptr,i64}` → `{ptr,ptr,i64,ptr,ptr,i64}` and the owning hooks thread
+   through the monomorphized maps); ast/resolved/checked/mono/diag stayed byte-identical. Fixpoint +
+   all 7 mandated gates + arm64 gate-run green. Teeth in gate-cli.sh (owning→122 as "alpha" survives
+   a reused-buffer overwrite; borrowed→22 reproducing the aliasing on purpose) — both FAIL on the
+   pre-std-3 seed (borrow → 22; `str-keyops-borrowed` undefined). guide/LANGUAGE_GUIDE updated.
 
 9. **Debug-checks build mode — BOTH (mem-2 · mem-6 · mem-7 · mem-8).**
    (a) `--debug-checks`: a comptime predicate exposed to library code so slice-get/subslice
