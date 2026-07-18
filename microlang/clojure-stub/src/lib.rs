@@ -46,6 +46,7 @@ mod sources {
     pub const CLOJURE_PPRINT: &str = include_str!("clj/clojure/pprint.clj");
     pub const CLOJURE_ZIP: &str = include_str!("clj/clojure/zip.clj");
     pub const CLOJURE_TEST: &str = include_str!("clj/clojure/test.clj");
+    pub const CLOJURE_REFLECT: &str = include_str!("clj/clojure/reflect.clj");
 }
 
 /// Read a `deps.edn` and produce the load-path directories it implies, the way
@@ -219,6 +220,8 @@ impl Session {
         // reader/writer/StringBuilder machinery in host_jvm/host_io. Nothing
         // shadows the name in-process anymore.
         run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_TEST);
+        // `clojure.reflect` — the registry-backed subset tools.analyzer.jvm reads.
+        run_src(rt, cs, &mut macros, &mut comp, sources::CLOJURE_REFLECT);
         comp.set_ns("user");
         // These are provided in-process; `require` must never look for them on disk.
         comp.mark_loaded("clojure.core");
@@ -1580,11 +1583,24 @@ fn desugar_deftype<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u6
     // lists are method impls, and consecutive same-name impls are one multi-arity fn.
     let mut i = 3;
     let mut in_object = false;
+    // The namespace the CURRENT protocol group's methods belong to. A method
+    // name in a deftype resolves against its group's protocol, not the
+    // deftype's own ns — core.memoize implements clojure.core.cache's
+    // CacheProtocol under an ALIAS (no refer), and bare `seed` resolved into
+    // core.memoize's ns while callers dispatch on clojure.core.cache/seed.
+    let mut proto_ns: Option<String> = None;
     while i < items.len() {
         let it = items[i];
         if matches!(rt.decode(it), Val::Sym(_)) {
             in_object = is_sym(rt, it, "Object");
+            proto_ns = None;
             if !in_object {
+                if let Val::Sym(gs) = rt.decode(it) {
+                    let q = comp.resolve_ref(rt, gs);
+                    if let Some((nspart, _)) = rt.sym_name(q).rsplit_once('/') {
+                        proto_ns = Some(nspart.to_string());
+                    }
+                }
                 // Register T as extending this protocol — markers (method-less
                 // interfaces like core.match's IPseudoPattern) are only
                 // satisfiable through this record.
@@ -1628,7 +1644,24 @@ fn desugar_deftype<M: ValueModel>(rt: &mut Runtime<M>, comp: &Compiler, form: u6
                     .collect();
                 (sym(rt, tgt), if filtered.is_empty() { arities } else { filtered })
             }
-            None => (mname, arities),
+            None => {
+                // The group's protocol ns owns the method IF a var of that name
+                // exists there (a defprotocol interned it). Host-interface
+                // groups (dotted class names) define no such var and keep the
+                // bare name for the dot/xlate paths.
+                let target = match &proto_ns {
+                    Some(pns) if !mname_str.is_empty() => {
+                        let cand = rt.intern(&format!("{pns}/{mname_str}"));
+                        if rt.global_defined(cand) {
+                            rt.encode(Val::Sym(cand))
+                        } else {
+                            mname
+                        }
+                    }
+                    _ => mname,
+                };
+                (target, arities)
+            }
         };
         let mfn = build_method_fn(rt, &fields, &field_mut, &use_arities);
         out.push(mk_defmethod(rt, target, tsym, mfn));
@@ -1935,6 +1968,23 @@ fn expand_loop<M: ValueModel>(
         i += 2;
     }
     let g = gensym(rt, "loop");
+    // A DESTRUCTURING loop binding (`(loop [[cur & rest :as state] state] …)`,
+    // tools.analyzer's scheduler) cannot be a fn param — the pattern's `&`
+    // would read as the fn's own variadic marker. Clojure's own expansion
+    // shape: the loop carries a GENSYM per pattern slot, the body re-binds the
+    // pattern from it each iteration, and `recur` passes the gensym's new
+    // value. Plain symbol bindings stay direct params.
+    let mut param_names = Vec::with_capacity(names.len());
+    let mut patterns: Vec<(u64, u64)> = Vec::new(); // (pattern, carrying gensym)
+    for &n in &names {
+        if matches!(rt.decode(n), Val::Sym(_)) {
+            param_names.push(n);
+        } else {
+            let pg = gensym(rt, "lp");
+            param_names.push(pg);
+            patterns.push((n, pg));
+        }
+    }
     // Self-parameterized loop: the loop fn takes ITSELF as its first param, so
     // `recur` becomes `(g g …)` where the callee `g` is a param (up:0), not an
     // outer local. That keeps the fn body from referencing any parent frame,
@@ -1943,32 +1993,51 @@ fn expand_loop<M: ValueModel>(
     // `defn` gets (~3× faster than the old outer-local closure). It also lets us
     // drop the `set!`/nil self-box entirely (the fn no longer forward-references
     // its own binding).
-    let body: Vec<u64> = items[2..].iter().map(|&b| replace_recur(rt, b, g)).collect();
+    let letk = sym(rt, "let");
+    let raw_body: Vec<u64> = items[2..].to_vec();
+    let body: Vec<u64> = if patterns.is_empty() {
+        raw_body.iter().map(|&b| replace_recur(rt, b, g)).collect()
+    } else {
+        // (let [pat1 g1 pat2 g2 …] body…) — re-destructured per iteration.
+        let mut pbinds = Vec::new();
+        for &(pat, pg) in &patterns {
+            pbinds.push(pat);
+            pbinds.push(pg);
+        }
+        let pbindvec = make_vector(rt, pbinds);
+        let mut wrapped = vec![letk, pbindvec];
+        wrapped.extend(raw_body.iter().copied());
+        let wrapped = rt.vec_to_list(&wrapped);
+        vec![replace_recur(rt, wrapped, g)]
+    };
 
-    // (fn [g name0 name1 …] body) — `g` (self) is the first param.
+    // (fn [g p0 p1 …] body) — `g` (self) is the first param.
     let fnk = sym(rt, "fn");
     let mut params = vec![g];
-    params.extend(names.iter().copied());
+    params.extend(param_names.iter().copied());
     let paramvec = make_vector(rt, params);
     let mut fnform = vec![fnk, paramvec];
     fnform.extend(body);
     let fnform = rt.vec_to_list(&fnform);
 
     // (let [g fnform]
-    //   (let [name0 init0 name1 init1 …] (g g name0 name1 …)))
-    // The inner `let` binds the loop names to their inits SEQUENTIALLY (so a later
-    // init can see an earlier binding, matching `let`/Clojure), then kicks off the
-    // loop by calling `g` with ITSELF followed by the initial values.
-    let letk = sym(rt, "let");
+    //   (let [p0 init0 pat0 p0 … ] (g g p0 p1 …)))
+    // The kickoff `let` binds each carrying param to its init SEQUENTIALLY and
+    // destructures each pattern right after its slot, so a LATER init can see
+    // an EARLIER binding's destructured names (matching Clojure).
     let gbindvec = make_vector(rt, vec![g, fnform]);
     let mut initbinds = Vec::new();
-    for (n, ini) in names.iter().zip(inits.iter()) {
-        initbinds.push(*n);
+    for (i, ini) in inits.iter().enumerate() {
+        initbinds.push(param_names[i]);
         initbinds.push(*ini);
+        if let Some(&(pat, _)) = patterns.iter().find(|&&(_, pg)| pg == param_names[i]) {
+            initbinds.push(pat);
+            initbinds.push(param_names[i]);
+        }
     }
     let initbindvec = make_vector(rt, initbinds);
     let mut gcall = vec![g, g];
-    gcall.extend(names.iter().copied());
+    gcall.extend(param_names.iter().copied());
     let gcallform = rt.vec_to_list(&gcall);
     let initlet = rt.vec_to_list(&[letk, initbindvec, gcallform]);
     let letform = rt.vec_to_list(&[letk, gbindvec, initlet]);
@@ -2771,6 +2840,32 @@ fn process_require_spec<M: ValueModel>(
     let Some(elems) = binding_items(rt, spec) else { return };
     let Some(real) = elems.first().and_then(|&f| sym_name_of(rt, f)) else { return };
     let real = normalize_ns(&real);
+    // PREFIX LIST — `[clojure.tools.analyzer [utils :refer …] [ast :as ast] env]`:
+    // the second element is itself a SPEC (symbol or vector), not an option
+    // keyword, and every sub-spec's namespace is `prefix.sub`. tools.analyzer.jvm's
+    // ns form is built entirely of these.
+    if elems.len() > 1
+        && record_field0(rt, elems[1], reader::KEYWORD).is_none()
+        && !matches!(rt.decode(elems[1]), Val::Nil)
+    {
+        let subs = RootVec::new(rt, &elems[1..]);
+        for k in 0..subs.len() {
+            let sub = subs.get(rt, k);
+            if let Some(short) = sym_name_of(rt, sub) {
+                let full = sym(rt, &format!("{real}.{short}"));
+                process_require_spec(rt, cs, macros, comp, refer_all, full);
+            } else if let Some(sv) = binding_items(rt, sub) {
+                if let Some(short) = sv.first().and_then(|&f| sym_name_of(rt, f)) {
+                    let mut rebuilt = vec![sym(rt, &format!("{real}.{short}"))];
+                    rebuilt.extend_from_slice(&sv[1..]);
+                    let rebuilt = make_vector(rt, rebuilt);
+                    process_require_spec(rt, cs, macros, comp, refer_all, rebuilt);
+                }
+            }
+        }
+        subs.release(rt);
+        return;
+    }
     // `ensure_loaded` READS AND RUNS the required file — a safepoint that
     // relocates every element of this spec, which the `:as`/`:refer` walk below
     // still reads.
@@ -2793,7 +2888,30 @@ fn process_require_spec<M: ValueModel>(
             && k + 1 < elems.len()
         {
             let list = elems.get(rt, k + 1);
-            refer_names(rt, comp, &[list], &real, "");
+            // `:refer :all` refers the whole namespace. (`:exclude` alongside it
+            // is not tracked: an own `def` of an excluded name already WINS over
+            // a refer in resolution order, which is all the exclusion protects.)
+            if is_keyword(rt, list, "all") {
+                comp.refer_all(rt, &real);
+            } else {
+                refer_names(rt, comp, &[list], &real, "");
+            }
+            k += 2;
+        // `:rename {orig new}` — refer orig's var under the new short name
+        // (tools.analyzer.jvm renames analyze to -analyze).
+        } else if is_keyword(rt, elems.get(rt, k), "rename") && k + 1 < elems.len() {
+            let m = elems.get(rt, k + 1);
+            if let Some(kvs) = data::map_entries(rt, m) {
+                for pair in kvs.chunks(2) {
+                    if let [ok, nk] = pair {
+                        if let (Some(orig), Some(newn)) =
+                            (sym_name_of(rt, *ok), sym_name_of(rt, *nk))
+                        {
+                            comp.add_refer(&newn, &format!("{real}/{orig}"));
+                        }
+                    }
+                }
+            }
             k += 2;
         } else {
             k += 1;

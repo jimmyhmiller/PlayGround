@@ -783,9 +783,13 @@ impl<M: ValueModel> Runtime<M> {
     pub fn alloc_vector(&self, xs: &[u64]) -> Gc {
         self.alloc_vector_cap(xs, xs.len())
     }
-    /// Allocate an ARRAY with logical contents `xs` and capacity `cap >= xs.len()`.
+    /// Allocate an ARRAY with logical contents `xs` and capacity hint `cap`
+    /// (clamped up to `xs.len()` — a hint can never truncate the contents; a
+    /// 17-pair map literal's transient once tried to copy 34 elements into a
+    /// 16-slot blob).
     pub fn alloc_vector_cap(&self, xs: &[u64], cap: usize) -> Gc {
         use crate::heap::kind;
+        let cap = cap.max(xs.len());
         self.shared.allocs.fetch_add(1, Ordering::Relaxed);
         let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
         let data = self.shared.heap.alloc(dinfo, cap as u32);
@@ -3030,6 +3034,19 @@ impl<M: ValueModel> Runtime<M> {
                         self.enc_nil()
                     }
                 }
+            }
+            Prim::Sleep => {
+                let Val::Int(ms) = self.decode(args[0]) else {
+                    panic!("%sleep: not an integer");
+                };
+                if ms > 0 {
+                    // Blocks WITHOUT parking (see the Prim doc): a concurrent
+                    // stop-the-world collection waits for this thread's next
+                    // safepoint, so callers keep individual sleeps short (the
+                    // DelayQueue poll slices at ≤50ms).
+                    std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+                }
+                self.enc_nil()
             }
             Prim::Stats => {
                 use std::sync::atomic::Ordering::Relaxed;
@@ -5637,7 +5654,7 @@ impl<M: ValueModel> Runtime<M> {
         let (meta, cnt, arr) = (f[0], f[1], f[2]);
         let session = self.fresh_session();
         let elems = self.arr_slice(self.arr_handle(arr)).to_vec();
-        let narr = M::R::enc_ref(self.alloc_vector_cap(&elems, 16));
+        let narr = M::R::enc_ref(self.alloc_vector_cap(&elems, 16)); // cap self-clamps for >8-pair maps
         let ty = self.intern_cached(&self.shared.sym_cache_transient_array_map, "TransientArrayMap");
         M::R::enc_ref(self.alloc_record(ty, &[session, narr, cnt, meta]))
     }

@@ -89,6 +89,7 @@ const DEFAULT_IMPORTS: &[(&str, &str)] = &[
     ("Double", "java.lang.Double"),
     ("Float", "java.lang.Float"),
     ("Boolean", "java.lang.Boolean"),
+    ("Void", "java.lang.Void"),
     ("Math", "java.lang.Math"),
     ("System", "java.lang.System"),
     ("Class", "java.lang.Class"),
@@ -157,7 +158,7 @@ impl Compiler {
             ("%wrap64", Wrap64), ("%wall-millis", WallMillis), ("%thread-id", ThreadId),
             ("%floor", Floor), ("%ceil", Ceil), ("%log", Log), ("%exp", Exp),
             ("%double-bits", DoubleBits), ("%bit-reverse", BitReverse), ("%stats", Stats),
-            ("%subs", Subs),
+            ("%subs", Subs), ("%sleep", Sleep),
             ("%register-fields", RegisterFields), ("%field-by-name", FieldByName), ("%field-names", FieldNames), ("%make-record", MakeRecord), ("%hash", Hash),
             ("%first", First), ("%rest", Rest), ("%cons", Cons),
             ("record", Record), ("field", Field), ("type-of", TypeOf), ("nfields", NFields), ("throw", Throw),
@@ -316,6 +317,18 @@ const SYNTAX_QUOTE_BARE: &[&str] = &[
             // `` `Exception `` is java.lang.Exception, so a macro's catch clause
             // means the same class at the expansion site.
             rt.intern(&fqn)
+        } else if name.contains('.')
+            && name
+                .rsplit('.')
+                .next()
+                .and_then(|seg| seg.chars().next())
+                .is_some_and(|c| c.is_ascii_uppercase())
+        {
+            // A DOTTED class name is already fully qualified — syntax-quote
+            // leaves it alone (core.memoize writes `` `clojure.lang.AFn `` in
+            // an assertion template; ns-qualifying it minted the nonsense
+            // symbol clojure.core.memoize/clojure.lang.AFn).
+            return s;
         } else {
             // Genuinely unknown: qualify with the CURRENT namespace. This is
             // Clojure's rule and it is not cosmetic — it is what makes a

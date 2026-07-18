@@ -2085,7 +2085,13 @@
   ([tag] (parents (deref -global-hierarchy) tag))
   ([h tag] (get (:parents h) tag)))
 (defn ancestors
-  ([tag] (ancestors (deref -global-hierarchy) tag))
+  ;; A CLASS argument answers from the registry's supertype closure (the JVM's
+  ;; class hierarchy), a keyword/symbol from the derive hierarchy — exactly
+  ;; clojure.core's split (-class-ancestors loads later in host_jvm;
+  ;; late-bound, and nothing calls ancestors during bootstrap).
+  ([tag] (if (class? tag)
+           (-class-ancestors tag)
+           (ancestors (deref -global-hierarchy) tag)))
   ([h tag] (get (:ancestors h) tag)))
 (defn descendants
   ([tag] (descendants (deref -global-hierarchy) tag))
@@ -2810,17 +2816,20 @@
 ;; the name symbol) — defined in host_jvm.clj beside *ns*. Here only the raw
 ;; registry enumeration they build on:
 (defn -all-ns-names [] (%all-ns))
+;; A namespace argument may be the name symbol OR a Namespace object
+;; (`(ns-map *ns*)` — tools.analyzer.jvm resolves names that way).
+(defn -ns-sym [n] (if (%num-eq (type-of n) 'Namespace) (field n 0) n))
 ;; {unqualified-name-symbol -> Var} for a namespace's interned vars.
 (defn ns-interns [n]
   (reduce (fn [m qs] (assoc m (symbol (%sym-name qs)) (record 'Var qs)))
-          (hash-map) (%ns-interns n)))
+          (hash-map) (%ns-interns (-ns-sym n))))
 ;; ns-interns minus the private vars.
 (defn ns-publics [n]
   (reduce (fn [m qs]
             (if (%num-eq 2 (%bit-and (%var-flags qs) 2))
               m
               (assoc m (symbol (%sym-name qs)) (record 'Var qs))))
-          (hash-map) (%ns-interns n)))
+          (hash-map) (%ns-interns (-ns-sym n))))
 (def ns-map ns-interns)
 
 ;; ─────────────── clojure.core burn-down: predicates ───────────────
@@ -2935,6 +2944,23 @@
 (defn unchecked-negate-int [a] (%wrap64 (%sub 0 a)))
 (defn unchecked-remainder-int [a b] (%rem a b))
 (defn unchecked-divide-int [a b] (%quot a b))
+
+;; ─────────────── runtime-map dynamic binding ───────────────
+;; The runtime-map siblings of `binding` (tools.analyzer.jvm pushes its
+;; analyzer config through them): push each Var→value, run the thunk, unwind —
+;; the same %dyn-mark/%dyn-bind/%dyn-unwind protocol `binding` compiles to,
+;; with the var set decided at RUNTIME (a Var record's field 0 is its
+;; qualified symbol, which is exactly %dyn-get's key).
+(defn with-bindings* [binding-map f & args]
+  (%dyn-mark)
+  (try
+    (do
+      (doseq [[v val] binding-map]
+        (%dyn-bind (field v 0) val))
+      (apply f args))
+    (finally (%dyn-unwind))))
+(defmacro with-bindings [binding-map & body]
+  `(with-bindings* ~binding-map (fn [] ~@body)))
 
 ;; ─────────────── runtime performance counters ───────────────
 ;; The %stats prim's fixed-order list as a map. The bench harness resolves

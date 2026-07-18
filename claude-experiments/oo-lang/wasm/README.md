@@ -68,13 +68,37 @@ imports over it:
 ⚠ **`isize` is 32-bit on wasm32.** Bridge functions backing `isize`-typed signatures
 (`strlen`, `write`, `read`) must return plain **numbers**, not `BigInt` — see docs §5c.
 
+## Run the demo
+
+```sh
+./build.sh && ./serve.sh      # then open the printed URL
+```
+
+- `demo.html` — the prototype: an xterm.js terminal beside the live viewer, both driven by
+  the VM in the page. Try `hello`, `weather in Tokyo`, `research wasm`.
+- `index.html` — just the viewer, over `demo.scry`.
+- `node ui-smoke-wasm.mjs` — drives the whole thing in real headless Chrome.
+
+## Green threads
+
+`Thread.spawn` works, without pthreads. The VMThread is registered with its `run()` frame
+pushed exactly as on native, then driven cooperatively: `scry_tick()` gives each unfinished
+thread an instruction-budget slice, and `Clock.sleep` ends the slice so a paced worker
+advances one step per tick. A page pumps this with `scry.startScheduler()`. This is sound
+because a thread's whole execution state lives in its heap-allocated VMThread and `run-to`
+never recurses for a Scry call — yielding is just returning from `run-to`.
+
+**The native build is untouched**: the dispatch-loop hook is `(when-wasm (sched-should-yield) 0)`,
+a compile-time macro that emits *nothing* off wasm32. Native keeps real OS threads
+(DECISIONS #4b); cooperative scheduling is a wasm-target-only concession.
+
 ## Not yet
 
-- **Threads** — `Thread.spawn` still references pthreads; the wasm build needs the
-  cooperative green-thread scheduler (docs §3.2, P3).
-- **`readLine`** — returns EOF; it must become a host callback that pumps the scheduler
-  (docs §4) or background workers freeze at the prompt.
-- Viewer transport swap (P4), xterm + VFS + fake model end-to-end (P5), packaging (P6).
+- **`readLine` is non-blocking** (returns `None` when no input is buffered) rather than
+  suspending, so a program written as a blocking REPL loop exits at EOF instead of waiting.
+  The browser demo therefore drives turns through the eval channel. Making a blocking
+  `readLine` suspend and resume would need the same yield seam the scheduler already has.
+- Packaging as a single self-contained file (P6) — today it is a directory of static assets.
 
 ## Gotcha worth knowing
 

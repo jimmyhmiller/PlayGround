@@ -396,13 +396,13 @@ value. Without it, diagnostics render a literal `%.*s`.
   eval, method invoke on a live instance, and **hot body-swap** (`greet()` 1 → redefine →
   99). Diagnostic capture works through the in-memory sink (typed errors, no fd-2). The
   `evalrt.coil` fd-2 rework landed earlier (commit `e96a94099`).
-- **P3 — Green-thread scheduler.** Convert `run-to` to yield; `scry_tick`; enqueue on
+- **P3 — Green-thread scheduler. ✅ DONE.** Convert `run-to` to yield; `scry_tick`; enqueue on
   spawn; cooperative `readLine`/`sleep`. _Gate: a 2-thread `.scry` interleaves under the
   scheduler; `assistant.scry`'s `research`/`loop` advance while the prompt waits._
-- **P4 — Viewer transport swap.** Rewrite `evalSource`→`scry_eval`; delete portal fetch
+- **P4 — Viewer transport swap. ✅ DONE.** Rewrite `evalSource`→`scry_eval`; delete portal fetch
   sites. Serve the existing React app + the wasm module as static files. _Gate: every pane
   works against the in-page VM._
-- **P5 — Terminal + fake model.** Wire xterm.js ↔ `host_write`/`scry_feed_stdin`; VFS +
+- **P5 — Terminal + fake model. ✅ DONE.** Wire xterm.js ↔ `host_write`/`scry_feed_stdin`; VFS +
   mock shell; run `assistant.scry` end-to-end with `ScriptedModel`. _Gate: the full demo
   moment — type in the terminal, watch the viewer update live._
 - **P6 — Package.** One embeddable page (inlined/self-contained), a scripted demo path,

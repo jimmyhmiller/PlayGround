@@ -1147,6 +1147,19 @@
         (store! j (iadd (load j) 1)))))
     0))
 
+; Strict manifest validation (tool-12): the reader knows exactly five sections
+; and a fixed key set per section. An unknown section (e.g. `[dependencies]`,
+; which invites the false inference that deps resolve) or a typo'd key (e.g.
+; `entrypoint` for `entry`) is a LOCATED hard error, not a silent no-op.
+(defn m-known-section? [(s (slice u8))] (-> bool)
+  (or (str-eq s "package") (or (str-eq s "build") (or (str-eq s "link") (or (str-eq s "cc") (str-eq s "run"))))))
+(defn m-err [(a (ptr Allocator)) (lineno i64) (msg (slice u8))] (-> i64)
+  (let [w (stderr)]
+    (ps w "error: Coil.toml:") (ps w (i64->str a lineno)) (ps w ": ") (ps w msg) (wb w 10)
+    (exit 1) 0))
+(defn m-bad-key [(a (ptr Allocator)) (lineno i64) (section (slice u8)) (key (slice u8))] (-> i64)
+  (m-err a lineno (cat3-d a "unknown key '" (cat3-d a key (cat3-d a "' in [" (cat3-d a section "] section"))))))
+
 (defstruct Manifest
   [(name (slice u8)) (entry (slice u8)) (out (slice u8)) (target (slice u8)) (has-target bool) (debug bool)
    (frameworks (ptr (ArrayList (slice u8)))) (libs (ptr (ArrayList (slice u8))))
@@ -1168,28 +1181,38 @@
         (let [line (m-trim (al-get [(slice u8)] (load lines) (load i)))]
           (if (or (icmp-eq (slice-len [u8] line) 0) (icmp-eq (slice-get [u8] line 0) (cast u8 35))) 0   ; blank/#
             (if (icmp-eq (slice-get [u8] line 0) (cast u8 91))                                          ; [section]
-                (do (store! section (m-trim (subslice [u8] line 1 (isub (slice-len [u8] line) 1)))) 0)
+                (let [sec (m-trim (subslice [u8] line 1 (isub (slice-len [u8] line) 1)))]
+                  (if (m-known-section? sec) 0
+                    (m-err a (iadd (load i) 1)
+                      (cat3-d a "unknown section [" (cat3-d a sec "] (known: package, build, link, cc, run)"))))
+                  (store! section sec) 0)
               (let [eq (m-index line (cast u8 61))]                                                     ; key = value
                 (if (icmp-lt eq 0) 0
                   (let [key (m-trim (subslice [u8] line 0 eq))
-                        val (m-trim (subslice [u8] line (iadd eq 1) (slice-len [u8] line)))]
+                        val (m-trim (subslice [u8] line (iadd eq 1) (slice-len [u8] line)))
+                        ln (iadd (load i) 1)]
                     (if (str-eq (load section) "package")
                         (if (str-eq key "name") (do (store! (field m name) (m-unquote val)) 0)
-                          (if (str-eq key "entry") (do (store! (field m entry) (m-unquote val)) 0) 0))
+                          (if (str-eq key "entry") (do (store! (field m entry) (m-unquote val)) 0)
+                            (m-bad-key a ln (load section) key)))
                       (if (str-eq (load section) "build")
                           (if (str-eq key "out") (do (store! (field m out) (m-unquote val)) 0)
                             (if (str-eq key "target") (do (store! (field m target) (m-unquote val)) (store! (field m has-target) true) 0)
-                              (if (str-eq key "debug") (do (store! (field m debug) (str-eq val "true")) 0) 0)))
+                              (if (str-eq key "debug") (do (store! (field m debug) (str-eq val "true")) 0)
+                                (m-bad-key a ln (load section) key))))
                         (if (str-eq (load section) "link")
                             (if (str-eq key "frameworks") (do (m-parse-array a val (load (field m frameworks))) 0)
                               (if (str-eq key "libs") (do (m-parse-array a val (load (field m libs))) 0)
-                                (if (str-eq key "flags") (do (m-parse-array a val (load (field m flags))) 0) 0)))
+                                (if (str-eq key "flags") (do (m-parse-array a val (load (field m flags))) 0)
+                                  (m-bad-key a ln (load section) key))))
                           (if (str-eq (load section) "cc")
                               (if (str-eq key "sources") (do (m-parse-array a val (load (field m sources))) 0)
-                                (if (str-eq key "flags") (do (m-parse-array a val (load (field m ccflags))) 0) 0))
+                                (if (str-eq key "flags") (do (m-parse-array a val (load (field m ccflags))) 0)
+                                  (m-bad-key a ln (load section) key)))
                             (if (str-eq (load section) "run")
-                                (if (str-eq key "args") (do (m-parse-array a val (load (field m rargs))) 0) 0)
-                              0))))))))))
+                                (if (str-eq key "args") (do (m-parse-array a val (load (field m rargs))) 0)
+                                  (m-bad-key a ln (load section) key))
+                              (m-err a ln (cat3-d a "key '" (cat3-d a key "' appears before any [section] header")))))))))))))
           (store! i (iadd (load i) 1)))))
       m)))
 

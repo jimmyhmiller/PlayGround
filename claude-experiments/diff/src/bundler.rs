@@ -255,8 +255,10 @@ pub struct GraphDelta {
 ///   dynamic `import()`, but with NO `node:module`/`createRequire` import — a
 ///   browser cannot resolve `node:module`. If dead server code that leaked into
 ///   the client graph still references a Node built-in external, `requireNative`
-///   is bound to a throw-on-CALL stub so the module still LOADS (the static
-///   `import` never fails) and only throws if that dead code actually runs.
+///   is bound to a load-safe throw-on-USE stub: property reads and construction
+///   succeed (so the module LOADS and hydration proceeds), but any actual CALL
+///   into the built-in throws a clear, specifically-named error — it never
+///   fabricates a value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ModuleFormat {
     /// CommonJS-shaped output: `module.exports`, `require`, `require.dynamic`.
@@ -280,6 +282,19 @@ impl ModuleFormat {
         matches!(self, ModuleFormat::Esm | ModuleFormat::BrowserEsm)
     }
 }
+
+/// A minimal browser globals shim prepended to the browser-ESM entry chunk.
+///
+/// A browser has no Node `process` global, but React and TanStack (live client
+/// code, not the leaked dead server code) read `process.env.NODE_ENV` to pick
+/// their production paths. Every browser bundler defines this — Vite/webpack
+/// replace `process.env.NODE_ENV` with a literal; Diffpack provides the real
+/// production value as a runtime global instead. It is idempotent and never
+/// clobbers a `process` the host already supplies, so it is safe to run first in
+/// the entry (before any module code, and before any dynamically-imported chunk
+/// loads). This is a correct value for the production client build, not a
+/// fabricated stub.
+const BROWSER_GLOBALS_PRELUDE: &str = "globalThis.process=globalThis.process||{};globalThis.process.env=globalThis.process.env||{};globalThis.process.env.NODE_ENV=globalThis.process.env.NODE_ENV||\"production\";\n";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EmitOptions {
@@ -1148,16 +1163,28 @@ impl Bundler {
         // ever read as JavaScript.
         if let Some(special) = load_special_module(&id, path) {
             let special = special?;
+            let resolved = resolve_special_dependencies(
+                &self.resolver,
+                &self.resolution_cache,
+                &id,
+                &special,
+                diagnostics,
+            );
+            let dependencies = resolved
+                .dependencies
+                .into_iter()
+                .map(|(specifier, target, demand)| (specifier, self.intern(target), demand))
+                .collect();
             return Ok(ModuleState {
                 hash: special.hash,
-                dependencies: Vec::new(),
-                pruned_imports: HashSet::new(),
+                dependencies,
+                pruned_imports: resolved.pruned_imports,
                 source: id.clone(),
                 flat_module: special.flat_module,
                 code: special.code,
                 assets: special.assets,
                 css: special.css,
-                externals: Vec::new(),
+                externals: resolved.externals,
             });
         }
         let read_started = frontend_profile::start();
@@ -1371,6 +1398,15 @@ impl Bundler {
                 code.push_str(&format!("module.exports={{{}}};\n", exports.join(",")));
             }
         }
+        // The browser entry runs first, so its process/NODE_ENV shim must precede
+        // any module code (and any later dynamically-imported chunk). The runtime
+        // path injects this via the entry prelude; the flat path prepends it here.
+        if is_main && format == ModuleFormat::BrowserEsm {
+            code.insert_str(0, BROWSER_GLOBALS_PRELUDE);
+            for mapping in &mut mappings {
+                mapping.generated_line += 1;
+            }
+        }
         Some(RenderedBundle { code, mappings })
     }
 
@@ -1499,10 +1535,16 @@ impl Bundler {
         // In ESM output (Node or browser) a split chunk is a real module, so its
         // dynamic load is a native `import()` whose default export is the chunk's
         // required target. Node ESM resolves external Node built-ins through
-        // `createRequire`; browser ESM has no `node:module`, so `requireNative`
-        // is a throw-on-call stub — the chunk still LOADS and only throws if dead
-        // server code that leaked into the client graph actually calls it. In CJS
-        // output both go through the host `require`, exactly as before.
+        // `createRequire`. Browser ESM has no `node:module`; `requireNative`
+        // returns a load-safe throw-on-USE stub instead: dead server code that
+        // leaked into the client graph via isomorphic imports may still `require`
+        // a Node built-in and read a shape off it (or `new` it) at module init,
+        // so the stub lets property reads and construction succeed (the module
+        // LOADS), but throws a clear, specifically-named error the moment that
+        // dead code actually CALLS into the built-in — it never fabricates a
+        // value. Protocol probes (`then`/`Symbol.toPrimitive`/iterators) return
+        // `undefined` so the stub is neither mistaken for a thenable nor silently
+        // coerced. In CJS output both go through the host `require`, as before.
         let require_dynamic_esm = r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null)return import(chunk[0]).then(namespace=>namespace.default);return __require(chunk[1]);};"#;
         let (require_dynamic, require_native) = match format {
             ModuleFormat::Esm => (
@@ -1511,7 +1553,7 @@ impl Bundler {
             ),
             ModuleFormat::BrowserEsm => (
                 require_dynamic_esm,
-                r#"const requireNative=specifier=>{throw new Error("node builtin "+specifier+" not available in the browser");};"#,
+                r#"const requireNative=specifier=>{const fail=()=>{throw new Error("node builtin "+specifier+" is not available in the browser");};const stub=new Proxy(function(){fail();},{get:(_,p)=>(p==="then"||p===Symbol.toPrimitive||p===Symbol.iterator||p===Symbol.asyncIterator)?undefined:stub,construct:()=>stub,apply:()=>fail()});return stub;};"#,
             ),
             ModuleFormat::Cjs => (
                 r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null){if(typeof requireNative!=="function")throw new Error("Dynamic chunks require a CommonJS host");return requireNative(chunk[0]);}return __require(chunk[1]);};"#,
@@ -1574,10 +1616,12 @@ return __runtime.require({entry_runtime_id});"#
         // browser ESM main chunk omits that import (a browser cannot resolve
         // `node:module`), so the entry loads and runs in the browser.
         let code = if format.is_esm() {
-            let prelude = if is_main && format == ModuleFormat::Esm {
-                "import { createRequire as __diffpackCreateRequire } from \"node:module\";\n"
-            } else {
-                ""
+            let prelude = match format {
+                ModuleFormat::Esm if is_main => {
+                    "import { createRequire as __diffpackCreateRequire } from \"node:module\";\n"
+                }
+                ModuleFormat::BrowserEsm if is_main => BROWSER_GLOBALS_PRELUDE,
+                _ => "",
             };
             format!(
                 r#"{prelude}const __diffpackEntry=(()=>{{
@@ -2062,17 +2106,25 @@ fn load_uncached(
     // read as JavaScript.
     if let Some(special) = load_special_module(&id, path) {
         let special = special?;
+        let mut diagnostics = Vec::new();
+        let resolved = resolve_special_dependencies(
+            resolver,
+            resolution_cache,
+            &id,
+            &special,
+            &mut diagnostics,
+        );
         return Ok(LoadedModule {
             hash: special.hash,
-            dependencies: Vec::new(),
-            pruned_imports: HashSet::new(),
+            dependencies: resolved.dependencies,
+            pruned_imports: resolved.pruned_imports,
             source: Arc::from(id.as_ref()),
             flat_module: special.flat_module,
             code: special.code,
-            diagnostics: Vec::new(),
+            diagnostics,
             assets: special.assets,
             css: special.css,
-            externals: Vec::new(),
+            externals: resolved.externals,
         });
     }
     let read_started = frontend_profile::start();
@@ -2117,6 +2169,18 @@ struct SpecialModule {
     flat_module: Option<FlatModule>,
     assets: Vec<AssetEmit>,
     css: Option<String>,
+    /// Import specifiers and per-specifier demand the synthesized code carries.
+    /// Empty for a leaf synthetic module (an asset URL, a `?raw` string, an
+    /// extracted stylesheet). A route-split (`?tsr-split`) module, by contrast, is
+    /// real JavaScript with `import`s (React, the route's own module-level deps),
+    /// so its dependencies MUST become graph edges: otherwise its lowered
+    /// `require(...)` calls have no runtime map entry and fall through to
+    /// `requireNative`. That is invisible on the server (Node's `createRequire`
+    /// resolves them from `node_modules`) but fatal in the browser, which has no
+    /// `node_modules`. These are resolved by the load paths relative to the real
+    /// source file (the route file), exactly like a normal module's imports.
+    dependency_specifiers: Vec<String>,
+    dependency_demands: Vec<DependencyDemand>,
 }
 
 /// Loads a non-JavaScript module when a loader applies to `path`/`id`: a query
@@ -2174,6 +2238,10 @@ fn synthesize_tsr_split(resource: &ResourceId) -> Result<SpecialModule, String> 
         flat_module: transformed.flat_module,
         assets: Vec::new(),
         css: None,
+        // The split module imports React and the route's own module-level deps;
+        // carry them so the load paths resolve them into real graph edges.
+        dependency_specifiers: transformed.dependencies,
+        dependency_demands: transformed.dependency_demands,
     })
 }
 
@@ -2188,6 +2256,8 @@ fn synthesize_virtual_module(source: &str) -> Result<SpecialModule, String> {
         flat_module: transformed.flat_module,
         assets: Vec::new(),
         css: None,
+        dependency_specifiers: Vec::new(),
+        dependency_demands: Vec::new(),
     })
 }
 
@@ -2212,6 +2282,8 @@ fn synthesize_asset_url(source_path: PathBuf) -> Result<SpecialModule, String> {
             public_name,
         }],
         css: None,
+        dependency_specifiers: Vec::new(),
+        dependency_demands: Vec::new(),
     })
 }
 
@@ -2227,6 +2299,8 @@ fn synthesize_raw(source_path: &Path) -> Result<SpecialModule, String> {
         flat_module: transformed.flat_module,
         assets: Vec::new(),
         css: None,
+        dependency_specifiers: Vec::new(),
+        dependency_demands: Vec::new(),
     })
 }
 
@@ -2241,6 +2315,8 @@ fn load_stylesheet(path: &Path) -> Result<SpecialModule, String> {
         flat_module: None,
         assets: Vec::new(),
         css: Some(text),
+        dependency_specifiers: Vec::new(),
+        dependency_demands: Vec::new(),
     })
 }
 
@@ -2399,6 +2475,40 @@ struct ResolvedDependencies {
     dependencies: Vec<(String, SharedModuleId, DependencyDemand)>,
     pruned_imports: HashSet<String>,
     externals: Vec<String>,
+}
+
+/// Resolves a synthesized module's carried import specifiers into real graph
+/// edges. A leaf synthetic module (asset URL, `?raw`, stylesheet) carries none
+/// and resolves to nothing. A route-split (`?tsr-split`) module carries the
+/// imports of the extracted route property, which must be resolved relative to
+/// the REAL source file (the route file), not the virtual `id` that still bears
+/// the `?tsr-split=…` query — so the split module links to the same React and
+/// route-level modules every other importer sees, and its lowered `require(...)`
+/// calls get real runtime map entries instead of falling through to
+/// `requireNative`.
+fn resolve_special_dependencies(
+    resolver: &Resolver,
+    resolution_cache: &ResolutionCache,
+    id: &str,
+    special: &SpecialModule,
+    diagnostics: &mut Vec<String>,
+) -> ResolvedDependencies {
+    if special.dependency_specifiers.is_empty() {
+        return ResolvedDependencies {
+            dependencies: Vec::new(),
+            pruned_imports: HashSet::new(),
+            externals: Vec::new(),
+        };
+    }
+    let source_file = PathBuf::from(ResourceId::parse(id).path);
+    resolve_dependencies(
+        resolver,
+        resolution_cache,
+        &source_file,
+        &special.dependency_specifiers,
+        &special.dependency_demands,
+        diagnostics,
+    )
 }
 
 struct RenderedBundle {
@@ -3246,6 +3356,93 @@ mod tests {
             .emit_public(&reachable, &output_root, EmitOptions::default())
             .unwrap();
         assert!(!stale.exists(), "re-emit must clear stale output");
+    }
+
+    /// The client `public/` build must emit BROWSER-executable ESM: the entry
+    /// `client.js` is injected by the SSR document as
+    /// `<script type="module" src="/client.js">`, so a CommonJS `module.exports=…`
+    /// entry throws `module is not defined` under the ESM goal and the app never
+    /// hydrates. This builds a small app with a Node built-in external (forcing
+    /// the shared registry runtime and thus the browser `requireNative` stub) and
+    /// a dynamic import (a split chunk), emits it via `emit_public`, then LOADS
+    /// the entry with `import()` under `node` (as an ESM oracle) and asserts the
+    /// entry's top-level code ran — proving there is no `module is not defined`
+    /// and no `node:module` import a browser could not resolve.
+    #[test]
+    fn emit_public_entry_loads_as_a_browser_es_module_under_node() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("lazy.js"),
+            "export const lazy = 'lazy-value';\n",
+        )
+        .unwrap();
+        // `import os from 'node:os'` forces the runtime path (the flat path cannot
+        // bind an external); it is used only inside a function, so module init
+        // never calls the browser stub. The dynamic import forces a split chunk.
+        fs::write(
+            directory.path().join("entry.js"),
+            "import os from 'node:os';\n\
+             export function platform(){ return os.platform(); }\n\
+             globalThis.__diffpack_client_ran = true;\n\
+             import('./lazy.js').then((m) => { globalThis.__diffpack_lazy = m.lazy; });\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output_root = directory.path().join(".diffpack-output");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler
+            .emit_public(&reachable, &output_root, EmitOptions::default())
+            .unwrap();
+
+        let public_dir = output_root.join("public");
+        let client = public_dir.join("client.js");
+        // Every emitted client `.js` passes `node --check` under the ESM goal.
+        for entry in fs::read_dir(&public_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|value| value.to_str()) == Some("js") {
+                node_check(&path);
+            }
+        }
+        // The browser entry has NO `node:module` import and DOES `export default`.
+        let code = fs::read_to_string(&client).unwrap();
+        assert!(
+            !code.contains("node:module"),
+            "browser ESM entry must not import node:module"
+        );
+        assert!(
+            code.contains("export default"),
+            "browser ESM entry must export a default"
+        );
+
+        // Load the entry as a real ES module. A CJS entry would throw
+        // `module is not defined`; a `node:module` import would fail to resolve.
+        let harness = public_dir.join("harness.mjs");
+        fs::write(
+            &harness,
+            "import(process.argv[2]).then(() => { if (globalThis.__diffpack_client_ran !== true) { console.error('entry top-level did not run'); process.exit(3); } console.log('LOADED'); }).catch((e) => { console.error('LOAD_ERROR:' + e.message); process.exit(4); });\n",
+        )
+        .unwrap();
+        let output = Command::new("node")
+            .arg(&harness)
+            .arg(&client)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("LOADED"),
+            "client.js did not load as an ES module: stdout={stdout} stderr={stderr}"
+        );
+        assert!(
+            !stderr.contains("module is not defined"),
+            "`module is not defined` leaked: {stderr}"
+        );
     }
 
     fn run_node(path: &Path) -> String {

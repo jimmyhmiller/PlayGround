@@ -682,6 +682,7 @@
 ;; value wrappers / interfaces mapping onto the dialect's native types
 (defclass java.lang.CharSequence (:kind :interface) (:tag String) (:pred string?))
 (defclass java.lang.Character (:tag Char)
+  (:static TYPE (record 'Class 'java.lang.Character))
   ;; ASCII range only would be a lie for astral input, but Character/isDigit on
   ;; a char is defined over the BMP code point — %char-code gives exactly that.
   ;; (Java's full Unicode digit classes include non-ASCII digits; the reader's
@@ -696,12 +697,25 @@
 ;; %thread-id where it matters); the stack trace is honestly EMPTY (there is no
 ;; Java stack), which callers already handle (test.check's file-and-line* answers
 ;; {:file nil :line nil} for an empty trace).
-(def -jvm-current-thread (record 'Thread 0))
+(def -jvm-current-thread (record 'Thread nil "main"))
 (defclass java.lang.Thread
   (:tag Thread)
+  ;; fields: [runnable name]. `.start` runs the runnable on a REAL OS thread
+  ;; (%spawn); daemon-ness is inherent — spawned threads never block process
+  ;; exit here — so `.setDaemon` records nothing. core.async's timer daemon is
+  ;; exactly (doto (Thread. worker "…") (.setDaemon true) (.start)).
+  (:ctor ([runnable] (record 'Thread runnable "thread"))
+         ([runnable nm] (record 'Thread runnable nm)))
   (:static-fn currentThread [] -jvm-current-thread)
+  (:static-fn sleep [ms] (%sleep ms))
+  (:method setDaemon [t flag] t)
+  (:method start [t]
+    (let [r (field t 0)]
+      (if (nil? r)
+        (throw "Thread.start: no runnable")
+        (do (%spawn r) t))))
   (:method getStackTrace [_] (list))
-  (:method getName [_] "main"))
+  (:method getName [t] (field t 1)))
 ;; clojure.lang.ITransientSet — the transient set's host face. Real library
 ;; code reaches for the interface method directly: test.check's distinctness
 ;; machinery calls `(.contains ^clojure.lang.ITransientSet s k)` in its
@@ -724,6 +738,7 @@
         v (%str->double s)]
     (if (nil? v) (read-string s) v)))
 (defclass java.lang.Long (:tag Long) (:extends java.lang.Number)
+  (:static TYPE (record 'Class 'java.lang.Long))
   (:static MAX_VALUE 9223372036854775807)
   (:static MIN_VALUE -9223372036854775808)
   (:static-fn valueOf [s] (-jvm-parse-long s))
@@ -754,6 +769,7 @@
             (throw (record 'NumberFormatException (str "For input string: \"" s "\"")))
             (recur (next cs) (%add (%mul acc radix) d))))))))
 (defclass java.lang.Integer (:tag Long) (:extends java.lang.Number)
+  (:static TYPE (record 'Class 'java.lang.Integer))
   (:static MAX_VALUE 2147483647)
   (:static MIN_VALUE -2147483648)
   (:static-fn parseInt
@@ -773,6 +789,7 @@
 ;; integer type); the MIN/MAX statics are what generator/serialization code
 ;; reads (test.check's gen/byte chooses in [Byte/MIN_VALUE, Byte/MAX_VALUE]).
 (defclass java.lang.Short (:tag Long) (:extends java.lang.Number)
+  (:static TYPE (record 'Class 'java.lang.Short))
   (:static MIN_VALUE -32768)
   (:static MAX_VALUE 32767))
 (defclass java.lang.Byte (:tag Long) (:extends java.lang.Number)
@@ -785,6 +802,7 @@
 (defclass java.math.BigInteger (:tag Long) (:extends java.lang.Number))
 (defclass clojure.lang.BigInt (:tag Long) (:extends java.lang.Number))
 (defclass java.lang.Double (:tag Double) (:extends java.lang.Number)
+  (:static TYPE (record 'Class 'java.lang.Double))
   (:static POSITIVE_INFINITY ##Inf)
   (:static NEGATIVE_INFINITY ##-Inf)
   (:static NaN ##NaN)
@@ -800,11 +818,21 @@
   (:method isInfinite [x]
     (let [m 1.7976931348623157e308] (or (%lt m x) (%lt x (- m))))))
 (defclass java.lang.Float (:tag Double) (:extends java.lang.Number)
+  (:static TYPE (record 'Class 'java.lang.Float))
   (:method isNaN [x] (not (%num-eq x x)))
   (:method isInfinite [x]
     (let [m 1.7976931348623157e308] (or (%lt m x) (%lt x (- m))))))
 (defclass java.math.BigDecimal (:tag Double) (:extends java.lang.Number))
-(defclass java.lang.Boolean (:tag Boolean))
+(defclass java.lang.Boolean (:tag Boolean)
+  (:static TYPE (record 'Class 'java.lang.Boolean))
+  ;; "is the named SYSTEM PROPERTY set to true" — no properties exist in this
+  ;; host, so false is the true answer (Java's for an unset property), not a
+  ;; stub. core.async probes go-checking/pool-size flags through it.
+  (:static-fn getBoolean [n] false)
+  (:static-fn parseBoolean [s] (= "true" s)))
+;; the void pseudo-class: only its TYPE marker exists (method return-type talk)
+(defclass java.lang.Void (:kind :static)
+  (:static TYPE (record 'Class 'java.lang.Void)))
 (defclass java.util.regex.Pattern (:tag Regex))
 (defclass js.RegExp (:tag Regex))
 
@@ -852,7 +880,97 @@
 (defclass java.lang.InterruptedException
   (:tag InterruptedException) (:extends java.lang.Exception))
 
+;; ─────────────── java.util.concurrent (core.async's timer machinery) ───────
+;; The classes impl.timers imports. Real semantics over real threads:
+;; DelayQueue.take BLOCKS (polling in ≤50ms slices — %sleep does not park for
+;; GC, so a slice bounds how long a collection can wait; timers.clj's own
+;; resolution is 10ms), items answer `.getDelay` in the given unit, and the
+;; skip-list map is a sorted map in an atom (timer traffic is cold).
+(def -tu-millis (record 'TimeUnit 'MILLISECONDS))
+(defclass java.util.concurrent.TimeUnit
+  (:tag TimeUnit)
+  ;; Only MILLISECONDS exists, so unit→unit conversion is exact identity for
+  ;; every constructible value.
+  (:static MILLISECONDS -tu-millis)
+  (:method convert [tu amount unit] amount))
+(defclass java.util.concurrent.DelayQueue
+  (:tag DelayQueue)
+  (:ctor ([] (record 'DelayQueue (atom ()))))
+  (:method put [q item] (do (swap! (field q 0) conj item) nil))
+  (:method take [q]
+    (loop []
+      (let [items (deref (field q 0))]
+        (if (nil? (seq items))
+          (do (%sleep 10) (recur))
+          (let [item (reduce (fn [a b] (if (< (.getDelay a -tu-millis)
+                                             (.getDelay b -tu-millis)) a b))
+                             items)
+                d (.getDelay item -tu-millis)]
+            (if (pos? d)
+              (do (%sleep (min d 50)) (recur))
+              (do (swap! (field q 0) (fn [l] (remove (fn [x] (identical? x item)) l)))
+                  item))))))))
+(defclass java.util.concurrent.ConcurrentSkipListMap
+  (:tag CSLMap)
+  (:ctor ([] (record 'CSLMap (atom {}))))
+  (:method put [m k v] (do (swap! (field m 0) assoc k v) nil))
+  (:method remove
+    ([m k] (do (swap! (field m 0) dissoc k) nil))
+    ;; 2-arg remove: only when still mapped to exactly this value
+    ([m k v] (do (swap! (field m 0)
+                        (fn [mm] (if (identical? (get mm k) v) (dissoc mm k) mm)))
+                 nil)))
+  (:method ceilingEntry [m k]
+    (let [mm (deref (field m 0))
+          ks (filter (fn [x] (not (< x k))) (keys mm))]
+      (if (nil? (seq ks))
+        nil
+        (let [mk (reduce (fn [a b] (if (< a b) a b)) ks)]
+          (record 'CSLMEntry mk (get mm mk)))))))
+;; the entry view ceilingEntry answers (java.util.Map.Entry's surface)
+(defclass java.util.AbstractMap$SimpleEntry
+  (:tag CSLMEntry)
+  (:method getKey [e] (field e 0))
+  (:method getValue [e] (field e 1)))
+
+;; java.util.concurrent.atomic.AtomicLong — a real cross-thread counter over
+;; the native atom (compare-and-set retry loops, like AtomicLong's own CAS).
+(defn -atomic-long-add! [al delta]
+  (loop []
+    (let [cur (%atom-get (field al 0))
+          nxt (+ cur delta)]
+      (if (%atom-cas (field al 0) cur nxt) nxt (recur)))))
+(defclass java.util.concurrent.atomic.AtomicLong
+  (:tag AtomicLong)
+  (:ctor ([] (record 'AtomicLong (%atom-new 0)))
+         ([init] (record 'AtomicLong (%atom-new init))))
+  (:method get [al] (%atom-get (field al 0)))
+  (:method set [al v] (do (%atom-set (field al 0) v) nil))
+  (:method incrementAndGet [al] (-atomic-long-add! al 1))
+  (:method decrementAndGet [al] (-atomic-long-add! al -1))
+  (:method getAndIncrement [al] (- (-atomic-long-add! al 1) 1))
+  (:method getAndDecrement [al] (+ (-atomic-long-add! al -1) 1))
+  (:method addAndGet [al d] (-atomic-long-add! al d)))
+
+;; ─────────────── org.objectweb.asm (descriptor strings only) ───────────────
+;; tools.analyzer.jvm's ONE use of ASM is Type/getType → .getDescriptor to
+;; spell an array-class name ("[Ljava.lang.Object;"). A Type value is just the
+;; descriptor string in a record; nothing emits bytecode here.
+(defn -jvm-type-descriptor [fqn]
+  (%str-cat (%str-cat "L" (clojure.string/replace (name fqn) "." "/")) ";"))
+(defclass org.objectweb.asm.Type
+  (:tag AsmType)
+  (:method getDescriptor [t] (field t 0))
+  (:static-fn getType [c]
+    (%make-record 'AsmType (list (-jvm-type-descriptor (symbol (.getName c)))))))
+
 ;; ─────────────── clojure.lang ───────────────
+;; clojure.lang.Compiler — the pieces analysis code BINDS (never invokes):
+;; LOADER is a Var whose binding t.a.jvm pushes around macroexpansion; nothing
+;; here reads it, but the push must have a real var to key on.
+(defclass clojure.lang.Compiler
+  (:kind :static)
+  (:static LOADER (record 'Var 'clojure.lang.Compiler/LOADER)))
 (defclass clojure.lang.RT
   (:kind :static)
   (:static-fn cons [x s] (%cons x s))
@@ -861,7 +979,14 @@
   (:static-fn more [s] (-rt-rest s))
   (:static-fn seq [s] (-rt-seq s))
   (:static-fn conj [c x] (-rt-conj c x))
-  (:static-fn assoc [m k v] (-rt-assoc m k v)))
+  (:static-fn assoc [m k v] (-rt-assoc m k v))
+  ;; There is ONE "class loader" — the registry; a marker suffices (its only
+  ;; consumer is tools.analyzer.jvm passing it back into clojure.reflect).
+  (:static-fn baseLoader [] :clojure.lang.RT/base-loader)
+  (:static-fn makeClassLoader [] :clojure.lang.RT/base-loader)
+  (:static-fn classForName
+    ([n] (-jvm-for-name n))
+    ([n _initialize? _loader] (-jvm-for-name n))))
 
 (defclass clojure.lang.Symbol (:tag Symbol))
 (defclass clojure.lang.Keyword (:tag Keyword)
@@ -922,6 +1047,33 @@
                clojure.lang.Sequential clojure.lang.Counted)
   (:static creator -list))
 (defclass clojure.lang.IFn (:kind :interface) (:tag Fn) (:pred ifn?))
+;; The CONCRETE class behind closures — what `(class (fn …))` answers, and the
+;; supertype chain `(ancestors (class f))` walks (core.memoize asserts its
+;; argument's ancestry reaches IFn/Runnable/Callable before caching it).
+(defclass java.lang.Runnable (:kind :interface))
+(defclass java.util.concurrent.Callable (:kind :interface))
+(defclass clojure.lang.AFn (:tag Fn)
+  (:implements clojure.lang.IFn java.lang.Runnable java.util.concurrent.Callable))
+;; The registry's answer to JVM `(ancestors SomeClass)`: the transitive
+;; :extends + :implements closure, as Class values. Consulted by core's
+;; `ancestors` when its argument is a class rather than a hierarchy tag.
+(defn -class-ancestors [c]
+  (loop [work (list (field c 0)) seen #{} acc #{}]
+    (if (nil? (seq work))
+      acc
+      (let [fqn (first work)
+            work (rest work)]
+        (if (contains? seen fqn)
+          (recur work seen acc)
+          (let [d (-jvm-descriptor fqn)
+                sup (if d (-jvm-c-extends d) nil)
+                impls (if d (-jvm-c-implements d) nil)
+                nexts (concat (if sup (list sup) nil) impls)]
+            (recur (concat nexts work)
+                   (conj seen fqn)
+                   (if (%num-eq fqn (field c 0))
+                     acc  ;; ancestors excludes the class itself
+                     (conj acc (record 'Class fqn))))))))))
 (defclass clojure.lang.ILookup (:kind :interface) (:protocol ILookup))
 
 ;; The java.util collection interfaces, as the JVM's own hierarchy: Map is NOT a

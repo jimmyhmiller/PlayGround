@@ -89,6 +89,35 @@ fi
 ( cd "$T/proj" && "$COIL" build --target not-a-real-triple >/dev/null 2>&1 )
 [ $? = 1 ] && ok "project bogus --target is rejected" || bad "project bogus --target" "want rc=1"
 
+echo "== tool-12: the Coil.toml reader is STRICT — unknown sections/keys are LOCATED errors =="
+# The reader knows exactly five sections (package/build/link/cc/run) and a fixed key
+# set. `[dependencies]` used to be silently accepted (inviting the false inference that
+# deps resolve) and `entrypoint` typos were swallowed. Now each is a located hard error
+# naming the offending line. FAILS on the seed (which builds clean, rc=0); PASSES here.
+mkdir -p "$T/strict/src"
+printf '(module app)\n(defn main [] (-> i64) 3)\n' > "$T/strict/src/main.coil"
+# unknown section [dependencies]
+printf '[package]\nname  = "s"\nentry = "src/main.coil"\n\n[dependencies]\nfoo = "1.0"\n' > "$T/strict/Coil.toml"
+( cd "$T/strict" && "$COIL" build >/dev/null 2>&1 ); [ $? = 1 ] \
+  && ok "[dependencies] is rejected (was: silently ignored)" \
+  || bad "strict [dependencies]" "want rc=1"
+out=$( cd "$T/strict" && "$COIL" build 2>&1 )
+echo "$out" | grep -qE "Coil.toml:5: unknown section \[dependencies\]" \
+  && ok "…and the error is located at the section line" \
+  || bad "strict [dependencies] location" "got: $out"
+# typo'd key `entrypoint`
+printf '[package]\nname  = "s"\nentrypoint = "src/main.coil"\n' > "$T/strict/Coil.toml"
+out=$( cd "$T/strict" && "$COIL" build 2>&1 ); rc=$?
+[ "$rc" = 1 ] && ok "a typo'd key (entrypoint) is rejected (was: swallowed)" \
+              || bad "strict typo key" "want rc=1 got rc=$rc: $out"
+echo "$out" | grep -qE "Coil.toml:3: unknown key 'entrypoint' in \[package\]" \
+  && ok "…and the error names the key + section + line" \
+  || bad "strict typo key location" "got: $out"
+# a valid manifest still builds
+printf '[package]\nname  = "s"\nentry = "src/main.coil"\n' > "$T/strict/Coil.toml"
+( cd "$T/strict" && rm -f s && "$COIL" build >/dev/null 2>&1 )
+[ -x "$T/strict/s" ] && ok "a valid manifest still builds" || bad "strict valid manifest" "no ./s"
+
 echo "== tool-1: a relative import resolves against the IMPORTING FILE's directory, not the CWD =="
 # The layout `coil new` scaffolds (src/main.coil) must be able to import a sibling
 # (src/util.coil). Under the old CWD-relative rule this failed with

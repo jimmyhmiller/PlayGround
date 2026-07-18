@@ -805,15 +805,17 @@
 (extend-type TransientArrayMap
   ITransientCollection
   (-conj! [c e]
+    ;; an entry is usually a [k v] vector; any 2-element seqable (a sorted
+    ;; map's entry records, a lazy pair) conjs the same way, as in Clojure
     (if (vector? e) (%tam-assoc! c (%pv-nth e 0) (%pv-nth e 1))
-        (throw "conj! on a transient map takes a map entry")))
+        (%tam-assoc! c (first e) (second e))))
   (-persistent! [c] (%tam-persistent! c))
   ITransientAssociative (-assoc! [c k v] (%tam-assoc! c k v)))
 (extend-type TransientHashMap
   ITransientCollection
   (-conj! [c e]
     (if (vector? e) (%thm-assoc! c (%pv-nth e 0) (%pv-nth e 1))
-        (throw "conj! on a transient map takes a map entry")))
+        (%thm-assoc! c (first e) (second e))))
   (-persistent! [c] (%thm-persistent! c))
   ITransientAssociative (-assoc! [c k v] (%thm-assoc! c k v)))
 (extend-type TransientHashSet

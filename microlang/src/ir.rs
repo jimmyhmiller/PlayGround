@@ -508,6 +508,12 @@ pub enum Prim {
     /// (String.substring). Splitting INSIDE a surrogate pair throws — a lone
     /// half has no UTF-8 spelling.
     Subs,
+    /// `(%sleep ms)` -> block this OS thread for `ms` milliseconds (Thread/sleep,
+    /// the timer queue's poll). NOTE: sleeps WITHOUT parking for GC — callers
+    /// must cap individual sleeps (the DelayQueue poll uses ≤50ms slices) so a
+    /// stop-the-world collection is delayed, never deadlocked. Proper parking
+    /// (the await_future recipe) is planned once the feedback-tier work lands.
+    Sleep,
 }
 
 impl Prim {

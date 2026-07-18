@@ -1224,6 +1224,7 @@ fn prim_tag(p: Prim) -> u32 {
         BitReverse => 152,
         Stats => 153,
         Subs => 154,
+        Sleep => 155,
         // These require a backend the JIT tier does not model; rejected at
         // compile time, so they never reach a tag. Listed for totality.
         Gc | CallEc | Apply | CallCc | Reset | Shift => {
@@ -1387,6 +1388,7 @@ fn prim_from_tag(tag: u32) -> Prim {
         152 => BitReverse,
         153 => Stats,
         154 => Subs,
+        155 => Sleep,
         other => panic!("bad prim tag {other}"),
     }
 }
@@ -6322,6 +6324,7 @@ mod prim_tag_tests {
         Prim::BitReverse,
         Prim::Stats,
         Prim::Subs,
+        Prim::Sleep,
         Prim::RegisterFields,
         Prim::FieldByName,
         Prim::FieldNames,
