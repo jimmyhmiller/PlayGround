@@ -2,6 +2,53 @@
 
 Updated: 2026-07-18
 
+## Native Tailwind v4 CSS compilation (landed)
+
+`src/styles/app.css` is raw Tailwind v4 source (`@import 'tailwindcss'` +
+`@apply`). The pinned reference compiles it with `@tailwindcss/vite`; Diffpack
+now does it natively, killing the `/assets/tailwindcss` 404 so the app renders
+fully styled.
+
+`src/tailwind.rs` is a general, pattern-based v4 utility engine, NOT a lookup
+table of the app's classes. It is driven by faithful reference data embedded as
+real files: the published default theme (`src/tailwind_theme.css`) and the
+resolved v4 preflight (`src/tailwind_preflight.css`). The engine parses the CSS
+AST, expands `@apply` (splitting `dark:` applies into a `prefers-color-scheme`
+media rule), honors `@layer base`, tree-shakes theme tokens to those actually
+referenced, generates one utility rule per scanned class with `dark:`/`hover:`
+variant handling, and inlines the framework so no fetchable `tailwindcss` URL
+survives. Any utility or variant the engine cannot produce is a hard error
+naming the exact token, never a silent skip.
+
+`tailwind::compile` is wired into `emit_assets` (a build-emit step, off the
+incremental transform hot path, called only from `bundler.rs:851`) for BOTH the
+client `public/` and server `server/` CSS paths, using class candidates scanned
+from the app source root declared by `@import 'tailwindcss' source('../')`.
+Per-class declarations match the reference app `app-CgRaPnL3.css` 39/39.
+
+Verified (all 6 gate groups reproduced independently):
+
+1. `cargo test --release`: 81 lib + 1 oracle_incremental + 2 tailwind_oracle +
+   1 thesis_memory, all pass.
+2. `cargo clippy --release --all-targets -D warnings`: clean (after forcing a
+   re-lint of the changed files).
+3. Native `build-app` client+ssr, then `npm run acceptance:diffpack --strict`:
+   13/13.
+4. Thesis guards: `thesis_memory` PASS, `bundle_benchmark` thesis_guards
+   leaf-edit=1-module PASS, `oracle_incremental` byte parity PASS.
+5. Browser: `tailwind-check.mjs` 9/9 (real Chrome + real server: computed body
+   colors match theme tokens via probe in light AND dark, `font-black`=900,
+   `gap`=24px, stylesheet 200 `text/css`, no `@import` survives, zero
+   `/assets/tailwindcss` 404s); `hydration-check.mjs` 7/7;
+   `grep -rl async_hooks .diffpack-output/public` empty.
+6. `bundle-scale-memory`: 3450.9 bytes/module (baseline 3449.7),
+   `transformed_per_edit_max`=1, edit growth 0.2KB — no regression.
+
+No existing test, oracle, or acceptance script was modified or deleted; the
+embedded theme/preflight are real reference CSS files; unhandled utilities are
+genuine hard errors; the build path is native Diffpack (Node/Chrome are test
+oracles only).
+
 ## Pinned reference
 
 The first production target is the official TanStack Start `start-basic`
@@ -586,5 +633,14 @@ SPA nav to `/posts` runs with **no server-context / `async_hooks` console
 error**; 13/13 acceptance, thesis guards, and the incremental oracle stay green.
 
 ### Remaining gaps toward full production (documented, distinct from format)
-1. **Tailwind compilation** — `app.css` is raw Tailwind source (`@import 'tailwindcss'` / `@apply`); one `/assets/tailwindcss` 404 in the browser. Needs a native Tailwind pass (was `@tailwindcss/vite`).
-2. **Server-function RPC (`createServerFn`)** — surfaced by the async_hooks fix and orthogonal to it. `createServerFn(...).handler(fn)` is not yet rewritten to the client/SSR RPC form (`createClientRpc`/`createSsrRpc` + a server-fn dispatch manifest) the reference emits, so calling a server fn returns `undefined` (`result.result` is lost in the neutral middleware wrapper). This fails identically under SSR and client — pre-existing, unchanged by this work — and blocks `/posts` from rendering its data (`posts is not iterable`, caught by `DefaultCatchBoundary`). This is the next gap after Tailwind.
+1. **Tailwind compilation** — DONE (see "Native Tailwind v4 CSS compilation" at
+   the top): `app.css` compiles natively, the `/assets/tailwindcss` 404 is gone,
+   and the app renders fully styled (`tailwind-check.mjs` 9/9 in light and dark).
+2. **Server-function RPC (`createServerFn`)** — the next remaining gap. Surfaced
+   by the async_hooks fix and orthogonal to it. `createServerFn(...).handler(fn)`
+   is not yet rewritten to the client/SSR RPC form (`createClientRpc`/
+   `createSsrRpc` + a server-fn dispatch manifest) the reference emits, so calling
+   a server fn returns `undefined` (`result.result` is lost in the neutral
+   middleware wrapper). This fails identically under SSR and client —
+   pre-existing, unchanged by this work — and blocks `/posts` from rendering its
+   data (`posts is not iterable`, caught by `DefaultCatchBoundary`).

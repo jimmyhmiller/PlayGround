@@ -56,6 +56,13 @@ struct LoadedModule {
 struct AssetEmit {
     source: PathBuf,
     public_name: String,
+    /// A Tailwind v4 CSS entry (`@import 'tailwindcss'`) imported for its URL.
+    /// Rather than copying the raw source (which would leave the browser fetching
+    /// `@import 'tailwindcss'` and 404ing), the emit step compiles it natively
+    /// against the class candidates scanned from the reachable source graph. The
+    /// stored string is the raw CSS source (captured at load); `None` for an
+    /// ordinary asset that is copied verbatim.
+    tailwind_source: Option<String>,
 }
 
 struct ResolutionCache {
@@ -835,16 +842,43 @@ impl Bundler {
                     assets_dir_ready = true;
                 }
                 let destination = assets_dir.join(&asset.public_name);
-                fs::copy(&asset.source, &destination).map_err(|error| {
-                    format!(
-                        "cannot copy asset {} to {}: {error}",
-                        asset.source.display(),
-                        destination.display()
-                    )
-                })?;
+                if let Some(source_css) = &asset.tailwind_source {
+                    // Compile the Tailwind v4 entry natively against the class
+                    // candidates scanned from the app's source tree (the scan
+                    // root the entry declares via `source(...)`). This is a
+                    // build-emit step, off the incremental transform hot path.
+                    let candidates = self.tailwind_candidates(&asset.source, source_css);
+                    let compiled = crate::tailwind::compile(source_css, &candidates)?;
+                    fs::write(&destination, compiled).map_err(|error| {
+                        format!("cannot write {}: {error}", destination.display())
+                    })?;
+                } else {
+                    fs::copy(&asset.source, &destination).map_err(|error| {
+                        format!(
+                            "cannot copy asset {} to {}: {error}",
+                            asset.source.display(),
+                            destination.display()
+                        )
+                    })?;
+                }
             }
         }
         Ok(())
+    }
+
+    /// Scans the class candidates a Tailwind entry compiles against. Tailwind v4
+    /// scans a source root (declared via `@import 'tailwindcss' source('..')`,
+    /// resolved relative to the entry file); every JS/TS/JSX file under it
+    /// contributes its `className`/`class` tokens. Falls back to the entry's own
+    /// directory when no `source(...)` is given.
+    fn tailwind_candidates(&self, css_path: &Path, source_css: &str) -> BTreeSet<String> {
+        let css_dir = css_path.parent().unwrap_or_else(|| Path::new("."));
+        let scan_root = tailwind_source_root(source_css)
+            .map(|rel| css_dir.join(rel))
+            .unwrap_or_else(|| css_dir.to_path_buf());
+        let mut candidates = BTreeSet::new();
+        scan_directory_for_classes(&scan_root, &mut candidates);
+        candidates
     }
 
     /// Extracts the stylesheet: concatenates every reachable global CSS module's
@@ -2315,6 +2349,17 @@ fn synthesize_asset_url(source_path: PathBuf) -> Result<SpecialModule, String> {
     let bytes = fs::read(&source_path)
         .map_err(|error| format!("cannot read asset {}: {error}", source_path.display()))?;
     let public_name = asset_public_name(&source_path, content_hash(&bytes));
+    // A Tailwind v4 CSS entry imported for its URL must be compiled natively at
+    // emit time, not copied verbatim: a raw copy leaves `@import 'tailwindcss'`
+    // in the served file, which the browser fetches and 404s on. Capture the
+    // source here (the class candidates it compiles against are only known once
+    // the reachable graph is built) and mark it for the emit step.
+    let tailwind_source = if is_css_path(&source_path) {
+        let text = String::from_utf8_lossy(&bytes);
+        crate::tailwind::is_tailwind_entry(&text).then(|| text.into_owned())
+    } else {
+        None
+    };
     // A plain ES module exporting the asset URL, run through the real transformer
     // so it yields flat-linker code and export metadata like any hand-written
     // module.
@@ -2327,6 +2372,7 @@ fn synthesize_asset_url(source_path: PathBuf) -> Result<SpecialModule, String> {
         assets: vec![AssetEmit {
             source: source_path,
             public_name,
+            tailwind_source,
         }],
         css: None,
         dependency_specifiers: Vec::new(),
@@ -2370,6 +2416,42 @@ fn load_stylesheet(path: &Path) -> Result<SpecialModule, String> {
 /// Whether a resolved path is a plain global stylesheet (`import "./app.css"`).
 fn is_css_path(path: &Path) -> bool {
     matches!(path.extension().and_then(|value| value.to_str()), Some("css"))
+}
+
+/// Parses the `source('...')` argument of a Tailwind v4 `@import 'tailwindcss'`
+/// entry: the (entry-relative) directory the compiler scans for classes.
+fn tailwind_source_root(source_css: &str) -> Option<String> {
+    let start = source_css.find("source(")? + "source(".len();
+    let rest = &source_css[start..];
+    let end = rest.find(')')?;
+    Some(rest[..end].trim().trim_matches(['\'', '"']).to_string())
+}
+
+/// Recursively scans a directory for utility-class candidates, reading every
+/// JS/TS/JSX/HTML source and collecting its `className`/`class` tokens. Skips
+/// `node_modules` and dot-directories (as Tailwind does), so only the app's own
+/// classes are generated.
+fn scan_directory_for_classes(root: &Path, out: &mut BTreeSet<String>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        if path.is_dir() {
+            scan_directory_for_classes(&path, out);
+        } else if matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "html")
+        ) && let Ok(source) = fs::read_to_string(&path)
+        {
+            crate::tailwind::scan_class_candidates(&source, out);
+        }
+    }
 }
 
 /// Whether a resolved path is a static asset imported for its URL by default

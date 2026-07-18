@@ -8,6 +8,7 @@ pub mod parser;
 pub mod resource_id;
 pub mod route_split;
 pub mod server_fn;
+pub mod tailwind;
 pub mod transform;
 pub mod visualizer;
 
