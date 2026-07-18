@@ -39,7 +39,7 @@
     (if (is h "do")                                            (mk-rule 1 0)
       (if (or (is h "let") (or (is h "loop") (or (is h "binding") (is h "let*")))) (mk-rule 1 1)
         (if (or (is h "when") (or (is h "when-not") (or (is h "unless") (or (is h "while") (is h "when-let"))))) (mk-rule 1 1)
-          (if (is h "if")                                      (mk-rule 1 1)
+          (if (is h "if")                                      (mk-rule 0 0)   ; align then/else under the condition
             (if (is h "fn")                                    (mk-rule 1 1)
               (if (or (is h "cond") (or (is h "case") (is h "condp"))) (mk-rule 3 0)
               (if (is h "match")                                 (mk-rule 1 1)
@@ -238,31 +238,56 @@
         (dl-push! dl (d-text a "("))
         (dl-push! dl (node->doc a (node-nth n 0)))       ; head (let/loop/…)
         (dl-push! dl (d-text a " "))
-        (dl-push! dl (layout-binding-vec a bv))          ; PAIR-laid binding vector
+        ; `for` binds a numeric range [var lo hi] — NOT key/value pairs — so lay it
+        ; out as a plain vector; every other binding form (let/loop/doseq/…) pairs.
+        (dl-push! dl (if (is (head-sym n) "for")
+                         (node->doc a bv)
+                         (layout-binding-vec a bv)))
         (dl-push! dl (body-doc a n 2 2))                 ; body +2
         (dl-push! dl (d-text a ")"))
         (seal a dl forced)))))
 
+; A keyword atom: an NAtom whose text begins with ':' (58). defn signature options
+; like `:cc c` are written as such a keyword followed by its value.
+(defn kw-atom? [(n (ptr Node))] (-> bool)
+  (and (node-atom? n)
+       (let [s (node-raw n)]
+         (and (icmp-gt (slice-len s) 0) (icmp-eq (cast i64 (slice-get s 0)) 58)))))
+
 ; The inline element count for a defn signature: how many children after the
-; head (the name) stay on the head line. A defn signature is the name's leading
-; parameter vector(s) — a *generic* defn writes a [type-params] vector before the
-; [params] vector — plus an optional (-> ret). The body starts after that.
+; head (the name) stay on the head line. A defn signature is the name, any leading
+; keyword-option pairs (e.g. `:cc c`), the parameter vector(s) — a *generic* defn
+; writes a [type-params] vector before the [params] vector — plus an optional
+; (-> ret). The body starts after that.
 ; Returns 0 when there is no leading vector at all (def / defmulti / multi-arity
 ; defn), which the caller treats as "name inline, don't force the body".
 (defn defn-sig-end [(n (ptr Node))] (-> i64)
-  ; index 0 is the head (defn), index 1 is the name; the parameter vector(s)
-  ; start at index 2. Consume the contiguous leading [...] vectors from there.
-  (let [cnt (node-count n) (mut i) 2]
-    (loop (if (icmp-ge (load i) cnt) (break)
-      (let [ch (node-nth n (load i))]
-        (if (and (node-list? ch) (icmp-eq (node-open ch) 91))
-            (store! i (iadd (load i) 1))
-            (break)))))
-    (if (icmp-le (load i) 2) 0                                   ; no param vector
-      ; include a trailing (-> ret); else stop at the last vector
-      (if (and (icmp-lt (load i) cnt) (list-head-is n (load i) "->"))
-          (load i)
-          (isub (load i) 1)))))
+  ; index 0 is the head (defn), index 1 is the name; signature options and the
+  ; parameter vector(s) start at index 2. First skip leading `:kw value` option
+  ; pairs (like `:cc c`), then consume the contiguous leading [...] vectors.
+  (let [cnt (node-count n) (mut base) 2]
+    (loop (if (and (icmp-lt (iadd (load base) 1) cnt) (kw-atom? (node-nth n (load base))))
+              (store! base (iadd (load base) 2))
+              (break)))
+    (let [(mut i) (load base)]
+      (loop (if (icmp-ge (load i) cnt) (break)
+        (let [ch (node-nth n (load i))]
+          (if (and (node-list? ch) (icmp-eq (node-open ch) 91))
+              (store! i (iadd (load i) 1))
+              (break)))))
+      (if (icmp-le (load i) (load base)) 0                       ; no param vector
+        ; include a trailing (-> ret); else stop at the last vector
+        (if (and (icmp-lt (load i) cnt) (list-head-is n (load i) "->"))
+            (load i)
+            (isub (load i) 1))))))
+
+; A defstruct's signature — name, optional [type-params], and any :layout/:size/…
+; keyword options — all stay on the head line; only the final field vector is the
+; (breakable) body. So keep every child inline except the last one. Returns the
+; inline count (elements after the head), never below 1.
+(defn defstruct-inline-n [(n (ptr Node))] (-> i64)
+  (let [cnt (node-count n)]
+    (if (icmp-lt (isub cnt 2) 1) 1 (isub cnt 2))))
 
 ; ---- list dispatch ---------------------------------------------------------
 (defn list->doc [(a (ptr Allocator)) (n (ptr Node))] (-> (ptr Doc))
@@ -275,6 +300,9 @@
           (let [style (load (field rp style)) rn (load (field rp n))]
           (if (is-binding-form h)
               (layout-binding-form a n)
+          (if (is h "defstruct")
+              ; name + [type-params] + :layout/:size/… options inline; field vector body.
+              (layout a n 40 41 (defstruct-inline-n n) 2 false)
           (if (icmp-eq style 3)
               (layout-clauses a n)
           (if (icmp-eq style 0)
@@ -292,7 +320,7 @@
                     ; never joined with its body, even when it would fit flat.
                     (layout a n 40 41 sig-end 2 true)))
               ; BLOCK n
-              (layout a n 40 41 rn 2 false)))))))))))
+              (layout a n 40 41 rn 2 false))))))))))))
 
 ; true if child `i` is a list whose head symbol equals `lit`.
 (defn list-head-is [(n (ptr Node)) (i i64) (lit (slice u8))] (-> bool)

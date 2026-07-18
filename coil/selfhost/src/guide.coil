@@ -198,9 +198,15 @@ Self-tail-recursion is constant-stack (guaranteed `musttail`).
 - `(load place)` reads, `(store! place v)` writes.
 - `(zeroed T)` = a zero value; `(sizeof T)`, `(alignof T)`, `(offsetof S f)` are
   compile-time.
-- Passing: `(p Point)` = **immutable ref** (a `store!` through it won't type-check);
+- Passing: `(p Point)` = **read-only ref** (a `store!` through it won't type-check);
   `(mut Point)` = **mutable ref**, pass a place with `(mut place)`; `(ptr Point)` =
-  raw pointer (metal / FFI / allocators). A `let` of struct/array type is a stack place.
+  raw pointer (metal / FFI / allocators). `(ref T)` is the explicit read-only-ref
+  spelling — for an aggregate it is exactly what `(p Point)` already gives you, but for
+  a **scalar** it is the only way to pass by read-only reference (`(p i64)` is
+  by-value); pass a place with `(mut place)`, same as `(mut T)`. A `let` of
+  struct/array type is a stack place. ⚠ A read-only ref is C's `const T*`, not Rust's
+  `&T`: it only forbids writing *through that reference* — aliasing is unchecked, so
+  another `(mut …)` to the same place may mutate it underneath you.
 - ⚠ `(field rvalue name)` fails — `field` needs a place (a pointer), not a value.
   Load into a place first, or take its address.
 
@@ -243,10 +249,12 @@ fields and does not make new cases visible to the type checker.
 
 Three allocation *operations*, each yields `(ptr T)`:
 
-- `(alloc-stack T)` → `alloca`, this frame. ⚠ **NEVER call `alloc-stack` inside a
-  loop that runs many times** — alloca isn't freed until the function returns, so
-  it leaks the C stack per iteration and eventually segfaults. Hoist it into a
-  `let` outside the loop and reuse the slot.
+- `(alloc-stack T)` → `alloca`, this frame. A static-size slot inside a loop is
+  reused, not re-grown per iteration — both the `default<O3>` LLVM pipeline and the
+  arm64 backend keep it to one frame slot, so it will **not** overflow the stack.
+  Still, for clarity prefer hoisting it into a `let` outside the loop and reusing
+  the slot explicitly. (`alloc-stack` only takes a *static* type; a genuinely
+  per-iteration, runtime-sized buffer belongs on the heap, not the stack.)
 - `(alloc-static T)` → one global cell per call site (see Globals).
 - `(alloc-heap T)` → `malloc` (pair with `free`).
 

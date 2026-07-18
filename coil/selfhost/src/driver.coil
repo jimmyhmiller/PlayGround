@@ -1298,10 +1298,18 @@
         (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10) 0)))))
 
 ; ============================ repl ==========================================
-; A subprocess REPL: accumulate top-level definitions as SOURCE, and compile+run
-; each expression as a tiny program (like the Rust repl's model, minus its dlopen
-; live-state and typed value printing). An expression's value is cast to i64 and
-; printed; a build/type error is shown. `(def …)`/`(defn …)`/imports persist.
+; A subprocess REPL. Top-level definitions accumulate as SOURCE; a value
+; expression is TYPE-CHECKED in-process (a throwaway `(defn __repl_probe [] (-> i64)
+; (do EXPR 0))` probe reusing the real front-end pipeline) so the printer is dispatched on the
+; expression's actual inferred type — %ld/%lu for an int, %g for a float,
+; true/false for a bool, the raw bytes for a (slice u8), an address for a
+; pointer — instead of the old blanket `(cast i64 EXPR)`, which silently
+; TRUNCATED floats (`(/ 1.0 2.0)` printed 0) and could not print bools or
+; strings at all. A well-typed expr is compiled and run as a tiny program via
+; `self run`, and the temp file is REMOVED afterward (it used to leak on every
+; call). A type error is rendered against the user's OWN input line via the same
+; span renderer the compiler uses, and nothing is written to /tmp. `:help`,
+; `:type EXPR`, and `:quit` meta-commands are handled ahead of the reader.
 
 (defn repl-head? [(s (slice u8)) (h (slice u8))] (-> bool) (starts-with s h))
 (defn repl-is-def? [(s (slice u8))] (-> bool)
@@ -1322,19 +1330,191 @@
                 (sb-push-byte! (mut out) (cast u8 (load buf))))))))
     (if (load got) (Some (sb-str (load out))) (None [(slice u8)]))))
 
-; compile+run `<defs> (defn main [] (-> i64) (printf "%ld\n" (cast i64 <expr>)))`.
-(defn repl-eval [(a (ptr Allocator)) (self (slice u8)) (defs (slice u8)) (expr (slice u8))] (-> i64)
-  (let [prog (cat3-d a (cat3-d a "(module replsession)\n(extern printf :cc c [(ptr i8) ...] (-> i32))\n" defs)
-                       (cat3-d a "\n(defn main [] (-> i64) (do (printf c\"%ld\\n\" (cast i64 " (cat3-d a expr ")) 0))\n")))]
+; The front-end preamble every REPL probe/run program shares.
+(defn repl-preamble [] (-> (slice u8))
+  "(module replsession)\n(extern printf :cc c [(ptr i8) ...] (-> i32))\n")
+
+; Local fat-pointer accessors so the string printer needs no stdlib import (the
+; run program is otherwise self-contained). Byte-identical to lib/slice.coil's
+; slice-len / slice-data llvm-ir, and accepted by BOTH backends.
+(defn repl-str-helpers [] (-> (slice u8))
+  "(defn __repl_slen [(s (slice u8))] (-> i64) (llvm-ir i64 [s] \"%l = extractvalue $t0 $0, 1\nret $ret %l\"))\n(defn __repl_sdat [(s (slice u8))] (-> (ptr u8)) (llvm-ir (ptr u8) [s] \"%d = extractvalue $t0 $0, 0\nret $ret %d\"))\n")
+
+; name == nm, or a module-qualified name ending in ".<nm>" (the resolver prefixes
+; every function with its module, so `__repl_probe` becomes `replsession.__repl_probe`).
+(defn repl-name-eq? [(name (slice u8)) (nm (slice u8))] (-> bool)
+  (if (str-eq name nm) true
+    (let [nl (slice-len [u8] name) ml (slice-len [u8] nm)]
+      (if (icmp-le nl ml) false
+        (and (icmp-eq (cast i64 (slice-get [u8] name (isub (isub nl ml) 1))) 46)   ; the '.'
+             (str-eq (subslice [u8] name (isub nl ml) nl) nm))))))
+(defn repl-func-find [(prog (ptr Program)) (nm (slice u8))] (-> (ptr Func))
+  (let [fs (load (field prog funcs)) n (al-len [Func] (load fs)) (mut i) 0 (mut r) (cast (ptr Func) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (repl-name-eq? (load (field (al-elem [Func] fs (load i)) name)) nm)
+              (do (store! r (al-elem [Func] fs (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; nid of the user's expression node inside the `(defn __repl_probe [] (-> i64)
+; (do <EXPR> 0))` probe, so its checker-recorded type can be read back from the S2
+; type map. A do-block (unlike a let-bind or const) checks <EXPR> in RUNTIME context
+; through do-synth — so user defns resolve and a void statement is allowed — and
+; never rewrites the node, so its parse-time nid is preserved. 0 = not found.
+(defn repl-probe-nid [(cp (ptr Program))] (-> i64)
+  (let [fp (repl-func-find cp "__repl_probe")]
+    (if (icmp-eq (cast i64 fp) 0) 0
+      (let [body (load (field fp body))]
+        (if (icmp-eq (al-len [Expr] (load body)) 0) 0
+          (match-else (load (field (al-elem [Expr] body 0) kind))
+            (EDo [dbody] (if (icmp-eq (al-len [Expr] (load dbody)) 0) 0
+                           (load (field (al-elem [Expr] dbody 0) nid))))
+            (_ 0)))))))
+
+; Strip the internal probe function's context prefix ("in '…__repl_probe': " /
+; "function '…__repl_probe': ") so a REPL error names only the user's expression.
+(defn repl-clean-msg [(m (slice u8))] (-> (slice u8))
+  (let [p1 "in 'replsession.__repl_probe': " p2 "function 'replsession.__repl_probe': "]
+    (if (starts-with m p1) (subslice [u8] m (slice-len [u8] p1) (slice-len [u8] m))
+      (if (starts-with m p2) (subslice [u8] m (slice-len [u8] p2) (slice-len [u8] m))
+        m))))
+
+; Render a check/parse diagnostic against the user's INPUT line: when the span
+; lands inside the embedded expr (offset >= base), re-anchor it to a source that
+; is only the user's line, so the frame shows exactly what they typed (mirrors
+; report-diag's `error: <msg>` + framed `-->`). Otherwise fall back to the probe.
+(defn repl-report [(a (ptr Allocator)) (s (mut LS)) (d Diag) (base i64) (uinput (slice u8))] (-> i64)
+  (let [w (stderr) dp (alloc-stack Diag)] (store! dp d)
+    (let [src (load (field dp source)) lo (load (field dp lo)) hi (load (field dp hi))
+          ctxt (load (field dp ctxt)) ulen (slice-len [u8] uinput) msg (repl-clean-msg (load (field dp msg)))]
+      (if (and (icmp-eq src 0) (and (icmp-eq ctxt 0) (and (icmp-ge lo base) (icmp-le lo (iadd base ulen)))))
+          (let [uid (al-len [Source] (load (field s sources)))
+                _r (register-source! (mut s) "<repl>" uinput)
+                nlo (isub lo base)
+                nhi (isub (if (icmp-gt hi (iadd base ulen)) (iadd base ulen) hi) base)]
+            (ps w "error: ")
+            (if (render-frame w (mut s) uid nlo nhi msg "-->") 0 (ps w msg))
+            (wb w 10) 0)
+        (report-diag w (mut s) d)))))
+
+; Read back the probe expr's checker-recorded type from the S2 type map. (Factored
+; out of repl-infer-type to keep every function's paren nesting shallow — the
+; bootstrap seed's recursive-descent reader has a bounded parse stack.)
+(defn repl-typemap-lookup [(cp (ptr Program))] (-> (Option Type))
+  (match (type-map-lookup (repl-probe-nid cp))
+    (Some [ty] (Some ty))
+    (None [] (do (ps (stderr) "error: the REPL could not infer the expression's type\n") (None [Type])))))
+
+; Macro-expand + transform + resolve/check an already-LOADED probe (s), then read
+; back the inferred type. Errors render mapped to the user's line.
+(defn repl-check-loaded [(a (ptr Allocator)) (s (mut LS)) (base i64) (uinput (slice u8))] (-> (Option Type))
+  (match (expand-stage3 (mut s))
+    (Err [d] (do (repl-report a (mut s) d base uinput) (None [Type])))
+    (Ok [_]
+      (match (run-transforms-and-check a (mut s))
+        (Err [d] (do (repl-report a (mut s) d base uinput) (None [Type])))
+        (Ok [cp] (repl-typemap-lookup cp))))))
+
+; Type-check `<defs> (defn __repl_probe [] (-> i64) (do <uinput> 0))` in-process
+; through the SAME front-end run-pipeline uses (read -> load -> macro-expand ->
+; transforms -> resolve+check), so macros/derives/the prelude behave exactly as in
+; a real build AND the expr is checked in RUNTIME context (user defns resolve; a
+; do-block admits a void statement), and return the checker-inferred type of
+; <uinput> (read back from the S2 type map by the expr's node id). On ANY pipeline
+; error, render it mapped to the user's line and return None — the caller then
+; writes nothing to disk.
+(defn repl-infer-type [(a (ptr Allocator)) (defs (slice u8)) (uinput (slice u8))] (-> (Option Type))
+  (let [prefix (sconcat a (repl-preamble) (sconcat a defs "(defn __repl_probe [] (-> i64) (do\n"))
+        probe  (sconcat a prefix (sconcat a uinput "\n0))\n"))
+        base   (slice-len [u8] prefix)
+        s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<repl>" probe)
+    (match (read-all a probe 0)
+      (Err [d] (do (repl-report a (mut s) d base uinput) (None [Type])))
+      (Ok [forms]
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) (cwd-slice a))
+          (if (ls-err? (mut s))
+              (do (repl-report a (mut s) (load (field s loaderr)) base uinput) (None [Type]))
+            (repl-check-loaded a (mut s) base uinput)))))))
+
+; (slice u8)? — the string type, so it prints as raw bytes.
+(defn repl-slice-u8? [(tp (ptr Type))] (-> bool)
+  (if (icmp-eq (type-tag tp) 8)
+      (let [el (t-inner tp)] (and (icmp-eq (type-tag el) 0) (and (icmp-eq (t-int-bits el) 8) (not (t-int-signed el)))))
+      false))
+
+; Write `<preamble><helpers><defs>(defn main [] (-> i64) <body>)`, run it via
+; `self run`, then REMOVE the temp file (the old REPL leaked it every call).
+(defn repl-emit-run [(a (ptr Allocator)) (self (slice u8)) (defs (slice u8)) (helpers (slice u8)) (body (slice u8))] (-> i64)
+  (let [prog (sconcat a (repl-preamble) (sconcat a helpers (sconcat a defs (sconcat a "(defn main [] (-> i64) " (sconcat a body ")\n")))))]
     (d-write-file a "/tmp/coil-repl-eval.coil" prog)
     (system (slice->cstr a (cat3-d a self " run /tmp/coil-repl-eval.coil")))
+    (unlink (slice->cstr a "/tmp/coil-repl-eval.coil"))
     0))
+
+(defn repl-unsupported [(a (ptr Allocator)) (tp (ptr Type))] (-> i64)
+  (let [w (stderr)]
+    (ps w "; the REPL has no printer for a value of type ") (ps w (ty-str a tp))
+    (ps w " — bind it with (def name …) or wrap it in your own printf.\n") 0))
+
+; Build the printer around the user's expr text, dispatched on the inferred type,
+; and run it. Never fabricate an answer: a type with no faithful printer says so.
+(defn repl-run [(a (ptr Allocator)) (self (slice u8)) (defs (slice u8)) (uinput (slice u8)) (ty Type)] (-> i64)
+  (let [tp (alloc-stack Type)] (store! tp ty)
+    (let [tag (type-tag tp)]
+      (if (icmp-eq tag 0)                        ; any int
+          (repl-emit-run a self defs ""
+            (sconcat a (if (t-int-signed tp) "(do (printf c\"%ld\\n\" (cast i64 " "(do (printf c\"%lu\\n\" (cast u64 ")
+                       (sconcat a uinput ")) 0)")))
+        (if (icmp-eq tag 1)                      ; float
+            (repl-emit-run a self defs "" (sconcat a "(do (printf c\"%g\\n\" (cast f64 " (sconcat a uinput ")) 0)")))
+          (if (icmp-eq tag 2)                    ; bool
+              (repl-emit-run a self defs "" (sconcat a "(do (if " (sconcat a uinput " (printf c\"true\\n\") (printf c\"false\\n\")) 0)")))
+            (if (icmp-eq tag 4)                  ; pointer -> address
+                (repl-emit-run a self defs "" (sconcat a "(do (printf c\"0x%lx\\n\" (cast i64 " (sconcat a uinput ")) 0)")))
+              (if (or (icmp-eq tag 3) (icmp-eq tag 12))   ; void / never -> statement (no print)
+                  (repl-emit-run a self defs "" (sconcat a "(do " (sconcat a uinput " 0)")))
+                (if (and (icmp-eq tag 8) (repl-slice-u8? tp))   ; (slice u8) -> the bytes
+                    (repl-emit-run a self defs (repl-str-helpers)
+                      (sconcat a "(let [__v " (sconcat a uinput "] (do (printf c\"%.*s\\n\" (cast i32 (__repl_slen __v)) (__repl_sdat __v)) 0))")))
+                  (repl-unsupported a tp))))))))))
+
+; Evaluate a value expression: infer its type, then print it faithfully.
+(defn repl-eval [(a (ptr Allocator)) (self (slice u8)) (defs (slice u8)) (expr (slice u8))] (-> i64)
+  (match (repl-infer-type a defs expr)
+    (None [] 0)                              ; error already rendered; nothing written to /tmp
+    (Some [ty] (repl-run a self defs expr ty))))
+
+; `:type EXPR` — print the inferred type without running anything.
+(defn repl-type-cmd [(a (ptr Allocator)) (defs (slice u8)) (expr (slice u8))] (-> i64)
+  (match (repl-infer-type a defs expr)
+    (None [] 0)
+    (Some [ty] (let [tp (alloc-stack Type) w (stdout)] (store! tp ty) (ps w (ty-str a tp)) (wb w 10) 0))))
+
+(defn repl-help-text [] (-> (slice u8))
+  "commands:
+  :help, :h          this message
+  :type EXPR         print the inferred type of EXPR (does not run it)
+  :quit, :q          exit (Ctrl-D also works)
+define with (defn …)/(def …)/(defstruct …)/(import …); they persist. Any other
+line is a value expression: it is type-checked and its result is printed.
+")
 
 (defn repl-cmd [(a (ptr Allocator)) (argv (ptr (ptr i8)))] (-> i64)
   (let [self (cstr->slice (load (index argv 0)))
         (mut defs) (sb-new a)
         buf (unwrap-ptr [i8] (raw-alloc a 4 1))]
-    (ps (stdout) "coil repl — define with (defn …)/(def …); evaluate an expr (i64). Ctrl-D to exit.\n")
+    (ps (stdout) "coil repl — evaluate an expr (printed by type), or (defn …)/(def …) to define. :help, Ctrl-D to exit.\n")
     (loop
       (ps (stdout) "coil> ")
       (match (repl-read-line a buf)
@@ -1342,12 +1522,16 @@
         (Some [line]
           (let [t (m-trim line)]
             (if (icmp-eq (slice-len [u8] t) 0) 0
-              (if (and (repl-is-def? t) (not (repl-head? t "(module")))
-                  (do (if (repl-head? t "(def ")   ; (def name v) is repl sugar for a coil (const …)
-                          (do (sb-push-str! (mut defs) "(const ") (sb-push-str! (mut defs) (subslice [u8] t 5 (slice-len [u8] t))) 0)
-                        (sb-push-str! (mut defs) t))
-                      (sb-push-byte! (mut defs) (cast u8 10)) (ps (stdout) "; ok\n") 0)
-                (repl-eval a self (sb-str (load defs)) t)))))))
+              (if (or (str-eq t ":quit") (str-eq t ":q")) (break)
+                (if (or (str-eq t ":help") (str-eq t ":h")) (do (ps (stdout) (repl-help-text)) 0)
+                  (if (repl-head? t ":type ") (repl-type-cmd a (sb-str (load defs)) (m-trim (subslice [u8] t 6 (slice-len [u8] t))))
+                    (if (repl-head? t ":") (do (ps (stderr) "; unknown command; :help for help\n") 0)
+                      (if (and (repl-is-def? t) (not (repl-head? t "(module")))
+                          (do (if (repl-head? t "(def ")   ; (def name v) is repl sugar for a coil (const …)
+                                  (do (sb-push-str! (mut defs) "(const ") (sb-push-str! (mut defs) (subslice [u8] t 5 (slice-len [u8] t))) 0)
+                                (sb-push-str! (mut defs) t))
+                              (sb-push-byte! (mut defs) (cast u8 10)) (ps (stdout) "; ok\n") 0)
+                        (repl-eval a self (sb-str (load defs)) t)))))))))))
     (ps (stdout) "\n") 0))
 
 ; `cheader <file.coil> [-o out.h]` — generate the C header for export-c.

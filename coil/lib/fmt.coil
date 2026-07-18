@@ -2,10 +2,9 @@
 ; Formatting helpers over the IO Writer capability (lib/io.coil) — all explicit:
 ; every printer TAKES a `(ptr Writer)`, there is no ambient stdout. Builds on io's
 ; print-str / print-int (non-negative) / write-byte, adding the everyday pieces:
-; signed decimal, hex, bool, char, and newline/line convenience.
-;
-; The positional FORMAT-STRING front end (`(fmt w "x={d} y={s}" a b)`) needs
-; compile-time string access in the macro evaluator and is a separate increment.
+; signed decimal, hex, bool, char, and newline/line convenience. The positional
+; FORMAT-STRING front end (`(fmt w "x={d} y={s}" a b)`) is implemented below as a
+; macro over these printers plus the str-bytes compile-time builtin.
 ;
 ;   (import "lib/fmt.coil" :use *) (import "lib/io.coil" :use *) (import "lib/result.coil" :use *)
 

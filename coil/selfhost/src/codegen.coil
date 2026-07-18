@@ -1475,12 +1475,45 @@
     (match-else (load (field sd layout))
       (LBits [backing offs] (let [(mut bs) (al-new [(ptr i8)] a)] (al-push! (mut bs) (int-width ctx backing)) (LLVMStructSetBody ty (carr a (load bs)) 1 0) 0))
       (LExplicit [offs sz al]
-        (let [(mut computed) 0 (mut i) 0]
+        (let [(mut computed) 0 (mut sizes) (al-new [i64] a) (mut i) 0]
+          ; Gather each field's ABI size, track the minimum total, and — when the
+          ; struct declares an explicit :size — reject any field that spills past it
+          ; (LAYOUT.md's "each field fits within :size"). Same error surface as a
+          ; failed static-assert: a plain `error: …` on stderr + exit(1), no object.
           (loop (if (icmp-ge (load i) nf) (break)
             (do (let [off (al-get [i64] (load offs) (load i))
-                      fsz (LLVMABISizeOfType (load (field cg td)) (basic-ty cg (field (al-elem [Field] fs (load i)) ty)))]
-                  (if (icmp-gt (iadd off fsz) (load computed)) (store! computed (iadd off fsz)) 0))
+                      fsz (LLVMABISizeOfType (load (field cg td)) (basic-ty cg (field (al-elem [Field] fs (load i)) ty)))
+                      end (iadd off fsz)]
+                  (al-push! (mut sizes) fsz)
+                  (match sz
+                    (Some [s] (if (icmp-gt end s)
+                                  (cg-fail (sconcat3 a "defstruct '" (load (field sd name))
+                                             (sconcat3 a "': field '" (load (field (al-elem [Field] fs (load i)) name))
+                                               (sconcat3 a "' at :at " (i64->str a off)
+                                                 (sconcat3 a " occupies " (i64->str a fsz)
+                                                   (sconcat3 a " byte(s), past the declared :size " (i64->str a s) ""))))))
+                                  0))
+                    (None [] 0))
+                  (if (icmp-gt end (load computed)) (store! computed end) 0))
                 (store! i (iadd (load i) 1)))))
+          ; Overlap at UNEQUAL :at is an error (equal :at is an intentional union);
+          ; name both colliding fields.
+          (let [(mut p) 0]
+            (loop (if (icmp-ge (load p) nf) (break)
+              (do (let [(mut q) (iadd (load p) 1)]
+                    (loop (if (icmp-ge (load q) nf) (break)
+                      (do (let [op (al-get [i64] (load offs) (load p)) oq (al-get [i64] (load offs) (load q))
+                                ep (iadd op (al-get [i64] (load sizes) (load p))) eq (iadd oq (al-get [i64] (load sizes) (load q)))]
+                            (if (and (icmp-ne op oq) (and (icmp-lt op eq) (icmp-lt oq ep)))
+                                (cg-fail (sconcat3 a "defstruct '" (load (field sd name))
+                                           (sconcat3 a "': fields '" (load (field (al-elem [Field] fs (load p)) name))
+                                             (sconcat3 a "' (:at " (i64->str a op)
+                                               (sconcat3 a ") and '" (load (field (al-elem [Field] fs (load q)) name))
+                                                 (sconcat3 a "' (:at " (i64->str a oq)
+                                                   ") overlap at unequal offsets (equal :at = union)"))))))
+                                0))
+                          (store! q (iadd (load q) 1))))))
+                  (store! p (iadd (load p) 1))))))
           (let [size (match sz (Some [s] (if (icmp-gt s (load computed)) s (load computed))) (None [] (load computed)))
                 (mut bs) (al-new [(ptr i8)] a)]
             (al-push! (mut bs) (LLVMArrayType2 (LLVMInt8TypeInContext ctx) size))
