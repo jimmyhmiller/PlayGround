@@ -2649,6 +2649,18 @@ impl<M: ModelArithJit> JitCranelift<M> {
         if std::env::var_os("MICROLANG_JIT_CLIF").is_some() {
             eprintln!("[jit-clif] #{n} arity={:?} nparams={}\n{}", shape.entry_arity, shape.nparams, ctx.func.display());
         }
+        if std::env::var_os("MICROLANG_DUMP_IR").is_some() {
+            fn cnt(ir: &Ir, add: &mut u32, lt: &mut u32, tot: &mut u32) {
+                *tot += 1;
+                if let Ir::Prim(p, _) = ir {
+                    match p { Prim::Add => *add += 1, Prim::Lt => *lt += 1, _ => {} }
+                }
+                for c in crate::optimize::dbg_children(ir) { cnt(c, add, lt, tot); }
+            }
+            let (mut a, mut l, mut t) = (0, 0, 0);
+            cnt(ir, &mut a, &mut l, &mut t);
+            eprintln!("[jit-ir] #{n} arity={:?} nparams={} nslots={} tail_root={} nodes={t} add={a} lt={l}", shape.entry_arity, shape.nparams, shape.nslots, shape.tail_root);
+        }
         let name = format!("ml_body_{n}");
         let id = module
             .declare_function(&name, Linkage::Local, &ctx.func.signature)
@@ -3923,6 +3935,21 @@ impl<'a, 'b> Compiler<'a, 'b> {
         var
     }
 
+    /// Create a block already marked COLD — a guard's slow / deopt / re-box
+    /// target (type-guard miss, bounds-check fail, overflow→promote, dispatch
+    /// IC miss). Cranelift lays cold blocks out-of-line, so the fast path
+    /// stays straight-line fallthrough instead of paying an unconditional `b`
+    /// per hot block to jump OVER the inlined slow code. Measured: the raw-loop
+    /// body's slow paths were interleaved with its hot blocks (`bench.sh`
+    /// dump), forcing ~13 taken branches/iter where the layout needs far fewer.
+    /// (This is a pure LAYOUT hint — always correct regardless of which edge is
+    /// actually hot — so it can never change results, only code placement.)
+    fn cold_block(&mut self) -> Block {
+        let b = self.fb.create_block();
+        self.fb.set_cold_block(b);
+        b
+    }
+
     /// The SAFEPOINT POLL (Stage E): one load of the heap's poll byte and a
     /// branch to a cold `shim_safepoint` call when it is nonzero (a sibling
     /// requested a collection, or allocation pressure crossed the threshold).
@@ -4528,7 +4555,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let inlb = self.fb.create_block();
         // The inlined body's capture reads go through the guarded CLAUSE value.
         self.fb.append_block_param(inlb, I64);
-        let slowb = self.fb.create_block();
+        let slowb = self.cold_block();
         let merge = self.fb.create_block();
 
         let (is_ref, addr) = M::emit_ref_addr(self, fval);
@@ -4672,7 +4699,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let mfload = self.fb.create_block();
         let clprep = self.fb.create_block();
         let fastb = self.fb.create_block();
-        let slowb = self.fb.create_block();
+        let slowb = self.cold_block();
         let merge = self.fb.create_block();
         self.fb.ins().brif(guard1, checkb, &[], slowb, &[]);
 
@@ -4874,7 +4901,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let is_unbound = self.fb.ins().icmp(IntCC::Equal, raw, unbound);
 
                 let result = self.declare_root_var();
-                let slow = self.fb.create_block();
+                let slow = self.cold_block();
                 let ok = self.fb.create_block();
                 let merge = self.fb.create_block();
                 self.fb.ins().brif(is_unbound, slow, &[], ok, &[]);
@@ -4981,7 +5008,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     let flags = MemFlagsData::trusted();
                     let ncaps = vals.len();
                     let result = self.declare_root_var();
-                    let slow = self.fb.create_block();
+                    let slow = self.cold_block();
                     let merge = self.fb.create_block();
                     let size = (CLOSURE_CAPS_OFF + ncaps * 8) as i64;
                     let header = crate::heap::make_header(kind::CLOSURE, 0, ncaps as u32);
@@ -5061,7 +5088,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                             let same = self.fb.ins().band(bits_ok, direct);
                             let result = self.declare_root_var();
                             let inlb = self.fb.create_block();
-                            let slowb = self.fb.create_block();
+                            let slowb = self.cold_block();
                             let merge = self.fb.create_block();
                             self.fb.ins().brif(same, inlb, &[], slowb, &[]);
 
@@ -5209,7 +5236,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let is_fix = self.emit_all_fixnum_raw::<M>(&[v]);
                 let result = self.declare_root_var();
                 self.fb.def_var(result, v);
-                let slow = self.fb.create_block();
+                let slow = self.cold_block();
                 let merge = self.fb.create_block();
                 self.fb.ins().brif(is_fix, merge, &[], slow, &[]);
                 self.fb.switch_to_block(slow);
@@ -5313,7 +5340,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let hdrb = self.fb.create_block();
                 let recb = self.fb.create_block();
                 let kindb = self.fb.create_block();
-                let slowb = self.fb.create_block();
+                let slowb = self.cold_block();
                 let merge = self.fb.create_block();
                 // immediate fixnum → 'Long (exactly `type_tag`'s Val::Int arm;
                 // promoted bignums are refs and take the slow path).
@@ -5465,7 +5492,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let flags = MemFlagsData::trusted();
                 let nfields = vals.len();
                 let result = self.declare_root_var();
-                let slow = self.fb.create_block();
+                let slow = self.cold_block();
                 let merge = self.fb.create_block();
                 let header = crate::heap::make_header(kind::RECORD, 0, nfields as u32);
                 let size = (crate::heap::RECORD_FIELDS_OFF + nfields * 8) as i64;
@@ -5525,7 +5552,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let tail2 = self.fb.use_var(tailv);
 
                 let result = self.declare_root_var();
-                let slow = self.fb.create_block();
+                let slow = self.cold_block();
                 let merge = self.fb.create_block();
                 let header = crate::heap::make_header(kind::CONS, 0, 0);
                 let addr = self.emit_alloc(24, header, slow);
@@ -5551,7 +5578,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             Ir::Prim(p @ (Prim::First | Prim::Rest), args) if M::INLINE_OBJECTS => {
                 let v = self.compile::<M>(&args[0], false);
                 let result = self.declare_root_var();
-                let slow = self.fb.create_block();
+                let slow = self.cold_block();
                 let merge = self.fb.create_block();
                 let (addr, _hdr) = self.emit_typed_addr::<M>(v, kind::CONS, slow);
                 let off = if matches!(p, Prim::First) { 8 } else { 16 };
@@ -5582,7 +5609,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     args.iter().map(|a| self.compile::<M>(a, false)).collect();
                 let flags = MemFlagsData::trusted();
                 let result = self.declare_root_var();
-                let slow = self.fb.create_block();
+                let slow = self.cold_block();
                 let merge = self.fb.create_block();
                 let (addr, hdr) = self.emit_typed_addr::<M>(argvals[0], kind::RECORD, slow);
                 let is_int = M::emit_both_int(self, argvals[1], argvals[1]);
@@ -5622,7 +5649,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             Ir::Prim(Prim::VectorLen, args) if M::INLINE_OBJECTS => {
                 let v = self.compile::<M>(&args[0], false);
                 let result = self.declare_root_var();
-                let slow = self.fb.create_block();
+                let slow = self.cold_block();
                 let merge = self.fb.create_block();
                 let (_addr, hdr) = self.emit_typed_addr::<M>(v, kind::ARRAY, slow);
                 let len = self.fb.ins().ushr_imm(hdr, 32);
@@ -5660,7 +5687,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     args.iter().map(|a| self.compile::<M>(a, false)).collect();
                 let flags = MemFlagsData::trusted();
                 let result = self.declare_root_var();
-                let slow = self.fb.create_block();
+                let slow = self.cold_block();
                 let merge = self.fb.create_block();
                 let (addr, hdr) = self.emit_typed_addr::<M>(argvals[0], kind::ARRAY, slow);
                 let is_int = M::emit_both_int(self, argvals[1], argvals[1]);
@@ -5840,7 +5867,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 // The authoritative slow path: call the real `-instance-val`.
                 // Reached on a non-ref (immediate) receiver, a cache miss, or a
                 // wrapped backend — so the answer is ALWAYS the function's.
-                let slowb = self.fb.create_block();
+                let slowb = self.cold_block();
 
                 // ANY reference receiver uses the cache: a record keys on its
                 // type Sym (+8), every other kind keys on its header kind byte
@@ -5916,7 +5943,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 // the next, the last to the true miss. Worst case (all ways
                 // miss) is INSTANCE_IC_WAYS compare-pairs — still far under one
                 // `-instance-val` call.
-                let missb = self.fb.create_block();
+                let missb = self.cold_block(); // IC all-ways miss: resolve shim
                 for way in 0..INSTANCE_IC_WAYS as i32 {
                     let base = way * 24;
                     let ce = self.fb.ins().load(I64, flags, sitep, base); // way.epoch
@@ -5996,7 +6023,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let flags = MemFlagsData::trusted();
                 let ro = MemFlagsData::trusted().with_readonly();
                 let result = self.declare_root_var();
-                let slow = self.fb.create_block();
+                let slow = self.cold_block();
                 let merge = self.fb.create_block();
 
                 let recv = argvals[0];
@@ -6135,7 +6162,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     let ver_ok = self.fb.ins().icmp(IntCC::Equal, ver, verc);
                     let spec_ok = self.fb.ins().band(ty_ok, ver_ok);
                     let specb = self.fb.create_block();
-                    let despec = self.fb.create_block();
+                    let despec = self.cold_block(); // deopt edge: counted + generic
                     self.fb.ins().brif(spec_ok, specb, &[], despec, &[]);
                     // FAST: inline the impl body (capture-free — no live-value reads).
                     self.fb.switch_to_block(specb);
@@ -6394,7 +6421,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     M::emit_both_int(self, a, b)
                 };
                 let fastb = self.fb.create_block();
-                let slowb = self.fb.create_block();
+                let slowb = self.cold_block();
                 self.fb.ins().brif(both, fastb, &[], slowb, &[]);
 
                 // fast: both immediates — compare and branch, nothing built.
@@ -6447,7 +6474,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
 
         let result = self.declare_root_var();
         let fast = self.fb.create_block();
-        let slow = self.fb.create_block();
+        // The promote/non-fixnum path is the rare one on hot arithmetic (a loop
+        // of fixnums never reaches it) — `cold_block` lays it out-of-line.
+        let slow = self.cold_block();
         let merge = self.fb.create_block();
         self.fb.ins().brif(both, fast, &[], slow, &[]);
 
@@ -6625,7 +6654,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             Prim::Add | Prim::Sub => {
                 let result = self.declare_root_var();
-                let slow = self.fb.create_block();
+                let slow = self.cold_block();
                 let merge = self.fb.create_block();
                 // Prefer the model's tagged add + ONE overflow-flag test (the
                 // same recipe the guarded fast path uses): the untag/add/
@@ -6660,7 +6689,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             Prim::Mul => {
                 let result = self.declare_root_var();
-                let slow = self.fb.create_block();
+                let slow = self.cold_block();
                 let merge = self.fb.create_block();
                 let x128 = self.fb.ins().sextend(I128, x);
                 let y128 = self.fb.ins().sextend(I128, y);
