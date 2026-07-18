@@ -56,11 +56,15 @@ root cause, and one small fix at the bottom of the stack makes the rest observab
      ways, they are two evaluators, and the weaker one owns `comptime`/`const`.
 
   Order (each step green on its own; the deletion cannot come first):
-  1. Route `(comptime E)`/`(const …)` through the compiled engine → closes **mac-8**.
-  2. `export-c` in the arm64 backend → `main_a64` registers a builder → closes **mac-12**,
-     and the LLVM-free compiler stops being secretly weaker.
+  1. Route `(comptime E)`/`(const …)` through the compiled engine → closes **mac-8**. [OPEN]
+  2. ✅ DONE. `export-c` in the arm64 backend → `main_a64` registers a builder → the LLVM-free
+     compiler builds metaprogram dylibs with the arm64 backend and defaults to the compiled
+     engine (it stops being secretly weaker). AAPCS64-native, so no C-ABI thunk is needed
+     except for a by-value struct param, which is a clear error. See DECISIONS.md #7 step 2.
   3. Delete `comptime.coil`'s evaluator, the `COIL_META` flag, `parity.sh`, and guide.coil:426.
      mac-8, mac-12 and the diag-4 dual-engine problem all vanish rather than get documented.
+     [OPEN — needs step 1 first; note metaengine/metalower/metahost REUSE comptime's CtVal/CtCtx
+     types, so the deletion must relocate those, not just drop the file.]
 
 - **NEW (found while proving the above, worse than gen-7 reported):** `(const FIVE (fact 5))`
   where `fact` is an ordinary **monomorphic** recursive function fails with

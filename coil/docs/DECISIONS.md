@@ -166,10 +166,36 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
 7. **Delete the comptime interpreter — 3 steps (mac-8 · mac-12 · diag-4).**
    1) Route `(comptime E)`/`(const …)` through the compiled engine (closes mac-8; also fixes
       the "const can't call a monomorphic fn" bug found while proving this).
-   2) `export-c` on the arm64 backend → `main_a64` registers a builder → the compiled engine
-      becomes the only engine (closes mac-12; the LLVM-free compiler stops being secretly weaker).
+   2) ✅ DONE. `export-c` on the arm64 backend → `main_a64` registers a builder → the compiled
+      engine becomes available on the LLVM-free compiler too (the last dependency blocking the
+      deletion; the LLVM-free compiler stops being secretly weaker).
    3) Delete `comptime.coil`'s evaluator, the `COIL_META` flag, parity.sh, and guide.coil:426.
    The deletion CANNOT come first — steps 1–2 remove what still depends on it.
+   STEP 2 OUTCOME: the arm64 backend is AAPCS64-native, so `(export-c …)` needs no C-ABI thunk —
+   an exported function is emitted directly under its C symbol with external linkage
+   (`codegen_a64.coil::g-register-sigs!` + `g-export-c-sym`); the sole exception, a by-value
+   STRUCT param (this backend passes aggregates by pointer), is a clear located error, never a
+   silently-wrong symbol (`g-export-needs-thunk`). `cga64-build-object` gained an `emit-dwarf`
+   flag (true for a normal build, byte-identical; false for a metaprogram dylib). `main_a64`
+   registers `meta-build-obj-a64`, so the LLVM-free compiler now builds metaprogram dylibs with
+   the arm64 backend and the compiled engine is its DEFAULT (verified: a `(meta …)` program runs
+   to 42 with NO libLLVM linked; the seed still fails loudly on `COIL_META=compiled`). Both
+   rebootstraps (LLVM fixpoint + all 7 gates; nollvm fixpoint + gate-run) green with ZERO snapshot
+   regen — the compiler has no exports, so its own object is unchanged. Teeth in `gate-cli.sh` (an
+   arm64 export-c object built and called from C; a by-value struct param rejected by name) FAIL
+   on the seed, PASS here.
+   STEP 1 + 3 STILL OPEN: routing comptime/const through the compiled engine is a SEPARATE
+   main-program execution engine (the existing engine is set up only for the macro sub-program at
+   expansion time — `expander.coil::stage3-round`; the `(comptime E)`/`(const …)` fold runs later in
+   `check-finish` → `comptime.coil::fold-program` via the interpreter's `eval`). It needs: recovering
+   each comptime expression's static type, building a dylib of the main program's functions with a
+   synthetic `() -> T` entry per site, native execution, and reconstructing a literal from the native
+   result (scalar is trivial; an aggregate must be read back from native memory — needed so the step-3
+   deletion doesn't regress the interpreter's aggregate-comptime capability). Then step 3 must also
+   re-route `run-metas` (the `(meta …)` path still uses `eval`) and `finish-macro`'s interpreter
+   fallback off the interpreter before `comptime.coil` can be removed. Whole-tree comptime/const usage
+   is scalar-only and absent from the IR corpus (only the two scalar diag fixtures 06/07 exercise it),
+   so gate-full is unaffected and 06/07 would flip from "error" to a folded literal.
 
 8. **String HashMap keys own by default (std-3).** String-keyed maps copy keys into the map's
    allocator on insert and free on remove; borrowing becomes the opt-in/unsafe path. Behavior
