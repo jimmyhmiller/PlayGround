@@ -792,6 +792,85 @@ impl<M: ValueModel> Runtime<M> {
             h
         }
     }
+    /// Allocate an ARRAY holding `xs` with indices `i` and `j` replaced — the
+    /// two-slot trie edit (`[..., nil, sub, ...]` in one copy, same fusion as
+    /// `alloc_vector_set1`).
+    pub fn alloc_vector_set2(&self, xs: &[u64], i: usize, x: u64, j: usize, y: u64) -> Gc {
+        use crate::heap::kind;
+        let n = xs.len();
+        assert!(i < n && j < n, "alloc_vector_set2: index out of bounds (len {n})");
+        self.shared.allocs.fetch_add(1, Ordering::Relaxed);
+        let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
+        let data = self.shared.heap.alloc(dinfo, n as u32);
+        unsafe {
+            let slots = data.values_mut(dinfo);
+            slots[..n].copy_from_slice(xs);
+            slots[i] = x;
+            slots[j] = y;
+            let ainfo = &self.shared.types[kind::ARRAY as usize];
+            let h = self.shared.heap.alloc(ainfo, n as u32);
+            h.set_field(0, M::R::enc_ref(data));
+            h
+        }
+    }
+    /// Allocate an ARRAY holding `xs` with `a, b` INSERTED at position `at` —
+    /// the bitmap-node pair insertion, without the Vec round-trip.
+    pub fn alloc_vector_ins2(&self, xs: &[u64], at: usize, a: u64, b: u64) -> Gc {
+        use crate::heap::kind;
+        let n = xs.len();
+        assert!(at <= n, "alloc_vector_ins2: position {at} out of bounds (len {n})");
+        self.shared.allocs.fetch_add(1, Ordering::Relaxed);
+        let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
+        let data = self.shared.heap.alloc(dinfo, (n + 2) as u32);
+        unsafe {
+            let slots = data.values_mut(dinfo);
+            slots[..at].copy_from_slice(&xs[..at]);
+            slots[at] = a;
+            slots[at + 1] = b;
+            slots[at + 2..n + 2].copy_from_slice(&xs[at..]);
+            let ainfo = &self.shared.types[kind::ARRAY as usize];
+            let h = self.shared.heap.alloc(ainfo, (n + 2) as u32);
+            h.set_field(0, M::R::enc_ref(data));
+            h
+        }
+    }
+    /// Allocate an ARRAY holding `xs ++ [a, b]` — the collision-node pair push.
+    pub fn alloc_vector_append2(&self, xs: &[u64], a: u64, b: u64) -> Gc {
+        use crate::heap::kind;
+        let n = xs.len();
+        self.shared.allocs.fetch_add(1, Ordering::Relaxed);
+        let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
+        let data = self.shared.heap.alloc(dinfo, (n + 2) as u32);
+        unsafe {
+            let slots = data.values_mut(dinfo);
+            slots[..n].copy_from_slice(xs);
+            slots[n] = a;
+            slots[n + 1] = b;
+            let ainfo = &self.shared.types[kind::ARRAY as usize];
+            let h = self.shared.heap.alloc(ainfo, (n + 2) as u32);
+            h.set_field(0, M::R::enc_ref(data));
+            h
+        }
+    }
+    /// Allocate an ARRAY holding `xs` with the two elements at `at, at+1`
+    /// REMOVED — the without/dissoc pair removal.
+    pub fn alloc_vector_rm2(&self, xs: &[u64], at: usize) -> Gc {
+        use crate::heap::kind;
+        let n = xs.len();
+        assert!(at + 2 <= n, "alloc_vector_rm2: pair at {at} out of bounds (len {n})");
+        self.shared.allocs.fetch_add(1, Ordering::Relaxed);
+        let dinfo = &self.shared.types[kind::ARRAY_DATA as usize];
+        let data = self.shared.heap.alloc(dinfo, (n - 2) as u32);
+        unsafe {
+            let slots = data.values_mut(dinfo);
+            slots[..at].copy_from_slice(&xs[..at]);
+            slots[at..n - 2].copy_from_slice(&xs[at + 2..]);
+            let ainfo = &self.shared.types[kind::ARRAY as usize];
+            let h = self.shared.heap.alloc(ainfo, (n - 2) as u32);
+            h.set_field(0, M::R::enc_ref(data));
+            h
+        }
+    }
     /// Allocate an ARRAY of `n` `nil` slots.
     pub fn alloc_vector_nil(&self, n: usize, nil: u64) -> Gc {
         use crate::heap::kind;
@@ -1767,11 +1846,25 @@ impl<M: ValueModel> Runtime<M> {
             // Conj a whole chunk's run onto a PV in one native call (a pv_conj
             // loop in Rust), avoiding a %pv-conj FFI per element.
             Prim::PvConjChunk => {
-                let arr = self.arr_clone(args[1]);
                 let off = match self.decode(args[2]) { Val::Int(i) => i as usize, _ => panic!("pv-conj-chunk: off") };
                 let end = match self.decode(args[3]) { Val::Int(i) => i as usize, _ => panic!("pv-conj-chunk: end") };
+                // Chunks are at most 32 wide: snapshot the run into a stack
+                // buffer (pv_conj is `&mut self`, so the source borrow can't
+                // live across it), falling back to a Vec for oversized inputs.
+                let mut buf = [0u64; 32];
+                let mut spill: Vec<u64> = Vec::new();
+                let run: &[u64] = {
+                    let src = &self.arr_elems_pub(args[1])[off..end];
+                    if src.len() <= 32 {
+                        buf[..src.len()].copy_from_slice(src);
+                        &buf[..end - off]
+                    } else {
+                        spill.extend_from_slice(src);
+                        &spill
+                    }
+                };
                 let mut pv = args[0];
-                for &e in &arr[off..end] {
+                for &e in run {
                     pv = self.pv_conj(pv, e);
                 }
                 pv
@@ -1845,11 +1938,24 @@ impl<M: ValueModel> Runtime<M> {
                 M::R::enc_ref(id)
             }
             Prim::ApushChunk => {
-                let src = self.arr_clone(args[1]);
                 let off = match self.decode(args[2]) { Val::Int(i) => i as usize, _ => panic!("apush-chunk: off") };
                 let end = match self.decode(args[3]) { Val::Int(i) => i as usize, _ => panic!("apush-chunk: end") };
                 let Val::Ref(id) = self.decode(args[0]) else { panic!("apush-chunk: not an array"); };
-                self.arr_extend(id, &src[off..end]);
+                // Stack-snapshot the run (arr_extend may reallocate the
+                // DESTINATION blob; the source borrow can't cross it).
+                let mut buf = [0u64; 32];
+                let mut spill: Vec<u64> = Vec::new();
+                let run: &[u64] = {
+                    let src = &self.arr_elems_pub(args[1])[off..end];
+                    if src.len() <= 32 {
+                        buf[..src.len()].copy_from_slice(src);
+                        &buf[..end - off]
+                    } else {
+                        spill.extend_from_slice(src);
+                        &spill
+                    }
+                };
+                self.arr_extend(id, run);
                 args[0]
             }
             Prim::PvNth => {
@@ -1877,20 +1983,26 @@ impl<M: ValueModel> Runtime<M> {
                 let Val::Int(start) = self.decode(args[0]) else { panic!("range-fill: start must be an int"); };
                 let Val::Int(end) = self.decode(args[1]) else { panic!("range-fill: end must be an int"); };
                 let Val::Int(step) = self.decode(args[2]) else { panic!("range-fill: step must be an int"); };
-                let mut v = Vec::with_capacity(32);
+                // Stack buffer, not a Vec: this runs once per 32-element chunk
+                // of every `range` traversal — the malloc/free pair showed in
+                // the reduce-map profile.
+                let mut buf = [0u64; 32];
+                let mut n = 0usize;
                 let mut j = start;
                 if step > 0 {
-                    while j < end && v.len() < 32 {
-                        v.push(self.encode(Val::Int(j)));
+                    while j < end && n < 32 {
+                        buf[n] = self.encode(Val::Int(j));
+                        n += 1;
                         j += step;
                     }
                 } else {
-                    while j > end && v.len() < 32 {
-                        v.push(self.encode(Val::Int(j)));
+                    while j > end && n < 32 {
+                        buf[n] = self.encode(Val::Int(j));
+                        n += 1;
                         j += step;
                     }
                 }
-                self.mk_array(v)
+                M::R::enc_ref(self.alloc_vector(&buf[..n]))
             }
             // Native HAMT trie ops — see the `hamt_*` methods below for the
             // full port of PersistentHashMap's -inode-assoc/-lookup/-without.
@@ -3863,9 +3975,6 @@ impl<M: ValueModel> Runtime<M> {
         assert_eq!(self.raw_type_id(g), crate::heap::kind::ARRAY, "pvec: not an array");
         g
     }
-    fn arr_clone(&self, arr: u64) -> Vec<u64> {
-        self.arr_slice(self.arr_handle(arr)).to_vec()
-    }
     fn arr_at(&self, arr: u64, i: usize) -> u64 {
         self.arr_slice(self.arr_handle(arr))[i]
     }
@@ -3892,6 +4001,33 @@ impl<M: ValueModel> Runtime<M> {
     fn mk_array_set1(&mut self, arr: u64, i: usize, x: u64) -> u64 {
         let src = self.arr_slice(self.arr_handle(arr));
         M::R::enc_ref(self.alloc_vector_set1(src, i, x))
+    }
+    /// A fresh array = `arr` with indices `i` and `j` replaced (one copy).
+    fn mk_array_set2(&mut self, arr: u64, i: usize, x: u64, j: usize, y: u64) -> u64 {
+        let src = self.arr_slice(self.arr_handle(arr));
+        M::R::enc_ref(self.alloc_vector_set2(src, i, x, j, y))
+    }
+    /// A fresh array = `arr` with `a, b` inserted at `at` (one copy).
+    fn mk_array_ins2(&mut self, arr: u64, at: usize, a: u64, b: u64) -> u64 {
+        let src = self.arr_slice(self.arr_handle(arr));
+        M::R::enc_ref(self.alloc_vector_ins2(src, at, a, b))
+    }
+    /// A fresh array = `arr` ++ [a, b] (one copy).
+    fn mk_array_append2(&mut self, arr: u64, a: u64, b: u64) -> u64 {
+        let src = self.arr_slice(self.arr_handle(arr));
+        M::R::enc_ref(self.alloc_vector_append2(src, a, b))
+    }
+    /// A fresh array = `arr` with the pair at `at, at+1` removed (one copy).
+    fn mk_array_rm2(&mut self, arr: u64, at: usize) -> u64 {
+        let src = self.arr_slice(self.arr_handle(arr));
+        M::R::enc_ref(self.alloc_vector_rm2(src, at))
+    }
+    /// A fresh array = a copy of `arr[from..to]` (one heap→heap copy — the
+    /// bulk-build leaf slicer; the `to_vec` + `mk_array` spelling paid a
+    /// malloc/copy/free per leaf).
+    fn mk_array_slice(&mut self, arr: u64, from: usize, to: usize) -> u64 {
+        let src = &self.arr_slice(self.arr_handle(arr))[from..to];
+        M::R::enc_ref(self.alloc_vector(src))
     }
     /// A fresh one-element array.
     fn mk_array1(&mut self, x: u64) -> u64 {
@@ -3977,9 +4113,8 @@ impl<M: ValueModel> Runtime<M> {
         let mut ll = level;
         while ll != 0 {
             let nil = self.enc_nil();
-            let mut a = vec![nil; 32];
-            a[0] = ret;
-            let arr = self.mk_array(a);
+            let arr = M::R::enc_ref(self.alloc_vector_nil(32, nil));
+            self.arr_set(arr, 0, ret);
             ret = self.mk_node(arr);
             ll -= 5;
         }
@@ -4016,10 +4151,9 @@ impl<M: ValueModel> Runtime<M> {
         let (new_shift, new_root) = if root_overflow {
             let path = self.pv_new_path(shift, tail_node);
             let nil = self.enc_nil();
-            let mut a = vec![nil; 32];
-            a[0] = root;
-            a[1] = path;
-            let arr = self.mk_array(a);
+            let arr = M::R::enc_ref(self.alloc_vector_nil(32, nil));
+            self.arr_set(arr, 0, root);
+            self.arr_set(arr, 1, path);
             let nr = self.mk_node(arr);
             (shift + 5, nr)
         } else {
@@ -4034,15 +4168,15 @@ impl<M: ValueModel> Runtime<M> {
     /// depth so nth/seq/pop stay consistent (the exact tree need not match what
     /// incremental conj builds — both are valid tries over the same elements).
     fn pv_from_array(&mut self, arr_bits: u64) -> u64 {
-        let elems = self.arr_clone(arr_bits);
-        let n = elems.len() as i64;
+        let n = self.arr_elems_pub(arr_bits).len() as i64;
         let nil = self.enc_nil();
         let tailoff = Self::tail_off(n);
-        let tail_vec: Vec<u64> = elems[tailoff as usize..].to_vec();
-        let tail = self.mk_array(tail_vec);
+        // Leaves and tail are copied heap→heap straight out of the source
+        // array (`mk_array_slice`) — no per-leaf Vec round-trip.
+        let tail = self.mk_array_slice(arr_bits, tailoff as usize, n as usize);
         if tailoff == 0 {
             // All elements (0..32) live in the tail; root is an empty leaf level.
-            let en = self.mk_array(vec![nil; 32]);
+            let en = M::R::enc_ref(self.alloc_vector_nil(32, nil));
             let root = self.mk_node(en);
             return self.mk_pv(nil, n, 5, root, tail);
         }
@@ -4050,8 +4184,7 @@ impl<M: ValueModel> Runtime<M> {
         let mut level: Vec<u64> = Vec::new();
         let mut i = 0i64;
         while i < tailoff {
-            let leaf_vec: Vec<u64> = elems[i as usize..(i + 32) as usize].to_vec();
-            let la = self.mk_array(leaf_vec);
+            let la = self.mk_array_slice(arr_bits, i as usize, (i + 32) as usize);
             level.push(self.mk_node(la));
             i += 32;
         }
@@ -4161,24 +4294,31 @@ impl<M: ValueModel> Runtime<M> {
         b == M::R::enc_nil()
     }
     fn mk_bitmap_node(&mut self, bitmap: u32, arr: Vec<u64>) -> u64 {
+        let arrb = self.mk_array(arr);
+        self.mk_bitmap_node_arr(bitmap, arrb)
+    }
+    /// `mk_bitmap_node` over an ALREADY-BUILT element array (bits) — the fused
+    /// callers build the array heap→heap and never materialize a Vec.
+    fn mk_bitmap_node_arr(&mut self, bitmap: u32, arrb: u64) -> u64 {
         let nil = self.enc_nil();
         let bm = self.encode(Val::Int(bitmap as i128));
-        let arrb = self.mk_array(arr);
         let ty = self.intern_cached(&self.shared.sym_cache_bitmap_node, "BitmapIndexedNode");
         M::R::enc_ref(self.alloc_record(ty, &[nil, bm, arrb]))
     }
-    fn mk_array_node(&mut self, cnt: i64, arr: Vec<u64>) -> u64 {
+    fn mk_array_node_arr(&mut self, cnt: i64, arrb: u64) -> u64 {
         let nil = self.enc_nil();
         let cb = self.encode(Val::Int(cnt as i128));
-        let arrb = self.mk_array(arr);
         let ty = self.intern_cached(&self.shared.sym_cache_array_node, "ArrayNode");
         M::R::enc_ref(self.alloc_record(ty, &[nil, cb, arrb]))
     }
     fn mk_collision_node(&mut self, chash: u32, cnt: i64, arr: Vec<u64>) -> u64 {
+        let arrb = self.mk_array(arr);
+        self.mk_collision_node_arr(chash, cnt, arrb)
+    }
+    fn mk_collision_node_arr(&mut self, chash: u32, cnt: i64, arrb: u64) -> u64 {
         let nil = self.enc_nil();
         let hb = self.encode(Val::Int(chash as i128));
         let cb = self.encode(Val::Int(cnt as i128));
-        let arrb = self.mk_array(arr);
         let ty = self.intern_cached(&self.shared.sym_cache_collision_node, "HashCollisionNode");
         M::R::enc_ref(self.alloc_record(ty, &[nil, hb, cb, arrb]))
     }
@@ -4217,14 +4357,18 @@ impl<M: ValueModel> Runtime<M> {
         match kind {
             HamtKind::Bitmap => {
                 let bitmap = self.raw_i64(fields[1], "hamt bitmap") as u32;
-                let arr = self.arr_clone(fields[2]);
+                // No `arr_clone`: values are read through `arr_at` and every
+                // new node's array is built heap→heap by a fused allocator
+                // (the per-level clone + Vec-clone + `mk_array` copy was ~1/3
+                // of the assoc-build profile, all in malloc/memmove/free).
+                let arrb = fields[2];
                 let bit = 1u32 << ((hash >> shift) & 31);
                 let idx = (bitmap & bit.wrapping_sub(1)).count_ones() as usize;
                 if bitmap & bit == 0 {
                     let n = bitmap.count_ones();
                     if n >= 16 {
                         let nil = self.enc_nil();
-                        let mut nodes = vec![nil; 32];
+                        let mut nodes = [nil; 32];
                         let jdx = ((hash >> shift) & 31) as usize;
                         nodes[jdx] = self.hamt_single(hash, shift + 5, key, val);
                         let mut j = 0usize;
@@ -4232,8 +4376,8 @@ impl<M: ValueModel> Runtime<M> {
                             if (bitmap >> i) & 1 == 0 {
                                 continue;
                             }
-                            let key_or_nil = arr[j];
-                            let val_or_node = arr[j + 1];
+                            let key_or_nil = self.arr_at(arrb, j);
+                            let val_or_node = self.arr_at(arrb, j + 1);
                             nodes[i as usize] = if !self.is_nil_bits(key_or_nil) {
                                 let h2 = self.hash_masked(key_or_nil);
                                 self.hamt_single(h2, shift + 5, key_or_nil, val_or_node)
@@ -4242,74 +4386,67 @@ impl<M: ValueModel> Runtime<M> {
                             };
                             j += 2;
                         }
-                        (self.mk_array_node((n + 1) as i64, nodes), true)
+                        let na = M::R::enc_ref(self.alloc_vector(&nodes));
+                        (self.mk_array_node_arr((n + 1) as i64, na), true)
                     } else {
-                        let mut new_arr = Vec::with_capacity(arr.len() + 2);
-                        new_arr.extend_from_slice(&arr[0..2 * idx]);
-                        new_arr.push(key);
-                        new_arr.push(val);
-                        new_arr.extend_from_slice(&arr[2 * idx..]);
-                        (self.mk_bitmap_node(bitmap | bit, new_arr), true)
+                        let na = self.mk_array_ins2(arrb, 2 * idx, key, val);
+                        (self.mk_bitmap_node_arr(bitmap | bit, na), true)
                     }
                 } else {
-                    let key_or_nil = arr[2 * idx];
-                    let val_or_node = arr[2 * idx + 1];
+                    let key_or_nil = self.arr_at(arrb, 2 * idx);
+                    let val_or_node = self.arr_at(arrb, 2 * idx + 1);
                     if self.is_nil_bits(key_or_nil) {
                         let (n, added) = self.hamt_assoc(val_or_node, shift + 5, hash, key, val);
                         if n == val_or_node {
                             (node, false)
                         } else {
-                            let mut na = arr.clone();
-                            na[2 * idx + 1] = n;
-                            (self.mk_bitmap_node(bitmap, na), added)
+                            let na = self.mk_array_set1(arrb, 2 * idx + 1, n);
+                            (self.mk_bitmap_node_arr(bitmap, na), added)
                         }
                     } else if self.equal(key, key_or_nil) {
                         if val == val_or_node {
                             (node, false)
                         } else {
-                            let mut na = arr.clone();
-                            na[2 * idx + 1] = val;
-                            (self.mk_bitmap_node(bitmap, na), false)
+                            let na = self.mk_array_set1(arrb, 2 * idx + 1, val);
+                            (self.mk_bitmap_node_arr(bitmap, na), false)
                         }
                     } else {
                         let sub = self.hamt_create_node(shift + 5, key_or_nil, val_or_node, hash, key, val);
-                        let mut na = arr.clone();
-                        na[2 * idx] = self.enc_nil();
-                        na[2 * idx + 1] = sub;
-                        (self.mk_bitmap_node(bitmap, na), true)
+                        let nil = self.enc_nil();
+                        let na = self.mk_array_set2(arrb, 2 * idx, nil, 2 * idx + 1, sub);
+                        (self.mk_bitmap_node_arr(bitmap, na), true)
                     }
                 }
             }
             HamtKind::Array => {
                 let cnt = self.raw_i64(fields[1], "hamt cnt");
-                let arr = self.arr_clone(fields[2]);
+                let arrb = fields[2];
                 let idx = ((hash >> shift) & 31) as usize;
-                let child = arr[idx];
+                let child = self.arr_at(arrb, idx);
                 if self.is_nil_bits(child) {
                     let sub = self.hamt_single(hash, shift + 5, key, val);
-                    let mut na = arr.clone();
-                    na[idx] = sub;
-                    (self.mk_array_node(cnt + 1, na), true)
+                    let na = self.mk_array_set1(arrb, idx, sub);
+                    (self.mk_array_node_arr(cnt + 1, na), true)
                 } else {
                     let (n, added) = self.hamt_assoc(child, shift + 5, hash, key, val);
                     if n == child {
                         (node, false)
                     } else {
-                        let mut na = arr.clone();
-                        na[idx] = n;
-                        (self.mk_array_node(cnt, na), added)
+                        let na = self.mk_array_set1(arrb, idx, n);
+                        (self.mk_array_node_arr(cnt, na), added)
                     }
                 }
             }
             HamtKind::Collision => {
                 let chash = self.raw_i64(fields[1], "hamt chash") as u32;
                 let cnt = self.raw_i64(fields[2], "hamt cnt");
-                let arr = self.arr_clone(fields[3]);
+                let arrb = fields[3];
                 if hash == chash {
+                    let alen = unsafe { self.arr_handle(arrb).aux() } as usize;
                     let mut found = None;
                     let mut i = 0usize;
-                    while i < arr.len() {
-                        if self.equal(key, arr[i]) {
+                    while i < alen {
+                        if self.equal(key, self.arr_at(arrb, i)) {
                             found = Some(i);
                             break;
                         }
@@ -4317,18 +4454,16 @@ impl<M: ValueModel> Runtime<M> {
                     }
                     match found {
                         None => {
-                            let mut na = arr.clone();
-                            na.push(key);
-                            na.push(val);
-                            (self.mk_collision_node(chash, cnt + 1, na), true)
+                            let na = self.mk_array_append2(arrb, key, val);
+                            (self.mk_collision_node_arr(chash, cnt + 1, na), true)
                         }
                         Some(i) => {
-                            if self.equal(arr[i + 1], val) {
+                            let cur = self.arr_at(arrb, i + 1);
+                            if self.equal(cur, val) {
                                 (node, false)
                             } else {
-                                let mut na = arr.clone();
-                                na[i + 1] = val;
-                                (self.mk_collision_node(chash, cnt, na), false)
+                                let na = self.mk_array_set1(arrb, i + 1, val);
+                                (self.mk_collision_node_arr(chash, cnt, na), false)
                             }
                         }
                     }
@@ -4387,11 +4522,13 @@ impl<M: ValueModel> Runtime<M> {
             _ => not_found,
         }
     }
-    fn hamt_pack_array_node(&mut self, arr: &[u64], cnt: i64, skip_idx: usize) -> u64 {
+    fn hamt_pack_array_node(&mut self, arrb: u64, cnt: i64, skip_idx: usize) -> u64 {
         let mut new_arr = vec![self.enc_nil(); 2 * (cnt as usize - 1)];
         let mut j = 1usize;
         let mut bitmap = 0u32;
-        for (i, &child) in arr.iter().enumerate() {
+        let alen = unsafe { self.arr_handle(arrb).aux() } as usize;
+        for i in 0..alen {
+            let child = self.arr_at(arrb, i);
             if i == skip_idx || self.is_nil_bits(child) {
                 continue;
             }
@@ -4414,29 +4551,28 @@ impl<M: ValueModel> Runtime<M> {
                     return node;
                 }
                 let idx = (bitmap & bit.wrapping_sub(1)).count_ones() as usize;
-                let arr = self.arr_clone(fields[2]);
-                let key_or_nil = arr[2 * idx];
-                let val_or_node = arr[2 * idx + 1];
+                let arrb = fields[2];
+                let key_or_nil = self.arr_at(arrb, 2 * idx);
+                let val_or_node = self.arr_at(arrb, 2 * idx + 1);
                 if self.is_nil_bits(key_or_nil) {
                     let n = self.hamt_without(val_or_node, shift + 5, hash, key);
                     if n == val_or_node {
                         node
                     } else if !self.is_nil_bits(n) {
-                        let mut na = arr.clone();
-                        na[2 * idx + 1] = n;
-                        self.mk_bitmap_node(bitmap, na)
+                        let na = self.mk_array_set1(arrb, 2 * idx + 1, n);
+                        self.mk_bitmap_node_arr(bitmap, na)
                     } else if bitmap == bit {
                         self.enc_nil()
                     } else {
-                        let na = self.hamt_remove_pair(&arr, idx);
-                        self.mk_bitmap_node(bitmap ^ bit, na)
+                        let na = self.mk_array_rm2(arrb, 2 * idx);
+                        self.mk_bitmap_node_arr(bitmap ^ bit, na)
                     }
                 } else if self.equal(key, key_or_nil) {
                     if bitmap == bit {
                         self.enc_nil()
                     } else {
-                        let na = self.hamt_remove_pair(&arr, idx);
-                        self.mk_bitmap_node(bitmap ^ bit, na)
+                        let na = self.mk_array_rm2(arrb, 2 * idx);
+                        self.mk_bitmap_node_arr(bitmap ^ bit, na)
                     }
                 } else {
                     node
@@ -4445,8 +4581,8 @@ impl<M: ValueModel> Runtime<M> {
             HamtKind::Array => {
                 let cnt = self.raw_i64(fields[1], "hamt cnt");
                 let idx = ((hash >> shift) & 31) as usize;
-                let arr = self.arr_clone(fields[2]);
-                let child = arr[idx];
+                let arrb = fields[2];
+                let child = self.arr_at(arrb, idx);
                 if self.is_nil_bits(child) {
                     return node;
                 }
@@ -4455,26 +4591,25 @@ impl<M: ValueModel> Runtime<M> {
                     node
                 } else if self.is_nil_bits(n) {
                     if cnt <= 8 {
-                        self.hamt_pack_array_node(&arr, cnt, idx)
+                        self.hamt_pack_array_node(arrb, cnt, idx)
                     } else {
-                        let mut na = arr.clone();
-                        na[idx] = n;
-                        self.mk_array_node(cnt - 1, na)
+                        let na = self.mk_array_set1(arrb, idx, n);
+                        self.mk_array_node_arr(cnt - 1, na)
                     }
                 } else {
-                    let mut na = arr.clone();
-                    na[idx] = n;
-                    self.mk_array_node(cnt, na)
+                    let na = self.mk_array_set1(arrb, idx, n);
+                    self.mk_array_node_arr(cnt, na)
                 }
             }
             HamtKind::Collision => {
                 let chash = self.raw_i64(fields[1], "hamt chash") as u32;
                 let cnt = self.raw_i64(fields[2], "hamt cnt");
-                let arr = self.arr_clone(fields[3]);
+                let arrb = fields[3];
+                let alen = unsafe { self.arr_handle(arrb).aux() } as usize;
                 let mut found = None;
                 let mut i = 0usize;
-                while i < arr.len() {
-                    if self.equal(key, arr[i]) {
+                while i < alen {
+                    if self.equal(key, self.arr_at(arrb, i)) {
                         found = Some(i);
                         break;
                     }
@@ -4484,19 +4619,13 @@ impl<M: ValueModel> Runtime<M> {
                     None => node,
                     Some(_) if cnt == 1 => self.enc_nil(),
                     Some(i) => {
-                        let na = self.hamt_remove_pair(&arr, i / 2);
-                        self.mk_collision_node(chash, cnt - 1, na)
+                        let na = self.mk_array_rm2(arrb, 2 * (i / 2));
+                        self.mk_collision_node_arr(chash, cnt - 1, na)
                     }
                 }
             }
             _ => node,
         }
-    }
-    fn hamt_remove_pair(&self, arr: &[u64], i: usize) -> Vec<u64> {
-        let mut na = Vec::with_capacity(arr.len() - 2);
-        na.extend_from_slice(&arr[0..2 * i]);
-        na.extend_from_slice(&arr[2 * (i + 1)..]);
-        na
     }
     /// Map-level entry points (`root` may be `nil`, the empty-map case the
     /// per-node functions above don't handle on their own): compute the key's
@@ -4569,21 +4698,22 @@ impl<M: ValueModel> Runtime<M> {
         M::R::enc_ref(self.alloc_record(ty, &[session, arr]))
     }
     fn mk_bitmap_node_edited(&mut self, session: u64, bitmap: u32, arr: Vec<u64>) -> u64 {
-        let bm = self.encode(Val::Int(bitmap as i128));
         let arrb = self.mk_array(arr);
+        self.mk_bitmap_node_edited_arr(session, bitmap, arrb)
+    }
+    fn mk_bitmap_node_edited_arr(&mut self, session: u64, bitmap: u32, arrb: u64) -> u64 {
+        let bm = self.encode(Val::Int(bitmap as i128));
         let ty = self.intern_cached(&self.shared.sym_cache_bitmap_node, "BitmapIndexedNode");
         M::R::enc_ref(self.alloc_record(ty, &[session, bm, arrb]))
     }
-    fn mk_array_node_edited(&mut self, session: u64, cnt: i64, arr: Vec<u64>) -> u64 {
+    fn mk_array_node_edited_arr(&mut self, session: u64, cnt: i64, arrb: u64) -> u64 {
         let cb = self.encode(Val::Int(cnt as i128));
-        let arrb = self.mk_array(arr);
         let ty = self.intern_cached(&self.shared.sym_cache_array_node, "ArrayNode");
         M::R::enc_ref(self.alloc_record(ty, &[session, cb, arrb]))
     }
-    fn mk_collision_node_edited(&mut self, session: u64, chash: u32, cnt: i64, arr: Vec<u64>) -> u64 {
+    fn mk_collision_node_edited_arr(&mut self, session: u64, chash: u32, cnt: i64, arrb: u64) -> u64 {
         let hb = self.encode(Val::Int(chash as i128));
         let cb = self.encode(Val::Int(cnt as i128));
-        let arrb = self.mk_array(arr);
         let ty = self.intern_cached(&self.shared.sym_cache_collision_node, "HashCollisionNode");
         M::R::enc_ref(self.alloc_record(ty, &[session, hb, cb, arrb]))
     }
@@ -4615,8 +4745,10 @@ impl<M: ValueModel> Runtime<M> {
         // The tail is OWNED from birth: a copy at full 32 capacity, so conj!
         // appends in place (this is the "real 32-wide tail" — 31 of 32 conj!s
         // are one in-place array push).
-        let telems = self.arr_slice(self.arr_handle(tail)).to_vec();
-        let ntail = M::R::enc_ref(self.alloc_vector_cap(&telems, 32));
+        let ntail = {
+            let telems = self.arr_slice(self.arr_handle(tail));
+            M::R::enc_ref(self.alloc_vector_cap(telems, 32))
+        };
         let cntb = self.encode(Val::Int(cnt as i128));
         let shiftb = self.encode(Val::Int(shift as i128));
         let ty = self.intern_cached(&self.shared.sym_cache_transient_vector, "TransientVector");
@@ -4645,10 +4777,9 @@ impl<M: ValueModel> Runtime<M> {
         let (new_shift, new_root) = if root_overflow {
             let path = self.tv_new_path(session, shift, tail_node);
             let nil = self.enc_nil();
-            let mut a = vec![nil; 32];
-            a[0] = root;
-            a[1] = path;
-            let arr = self.mk_array(a);
+            let arr = M::R::enc_ref(self.alloc_vector_nil(32, nil));
+            self.arr_set(arr, 0, root);
+            self.arr_set(arr, 1, path);
             let nr = self.mk_node_edited(session, arr);
             (shift + 5, nr)
         } else {
@@ -4670,9 +4801,8 @@ impl<M: ValueModel> Runtime<M> {
         let mut ll = level;
         while ll != 0 {
             let nil = self.enc_nil();
-            let mut a = vec![nil; 32];
-            a[0] = ret;
-            let arr = self.mk_array(a);
+            let arr = M::R::enc_ref(self.alloc_vector_nil(32, nil));
+            self.arr_set(arr, 0, ret);
             ret = self.mk_node_edited(session, arr);
             ll -= 5;
         }
@@ -4698,9 +4828,7 @@ impl<M: ValueModel> Runtime<M> {
             self.arr_set(parr, subidx, newchild);
             parent
         } else {
-            let mut ret = self.arr_clone(parr);
-            ret[subidx] = newchild;
-            let arr = self.mk_array(ret);
+            let arr = self.mk_array_set1(parr, subidx, newchild);
             self.mk_node_edited(session, arr)
         }
     }
@@ -4745,9 +4873,7 @@ impl<M: ValueModel> Runtime<M> {
             self.arr_set(arr, subidx, newchild);
             node
         } else {
-            let mut na = self.arr_clone(arr);
-            na[subidx] = newchild;
-            let a = self.mk_array(na);
+            let a = self.mk_array_set1(arr, subidx, newchild);
             self.mk_node_edited(session, a)
         }
     }
@@ -4794,8 +4920,10 @@ impl<M: ValueModel> Runtime<M> {
             }
             self.node_arr(node)
         };
-        let lelems = self.arr_slice(self.arr_handle(leaf)).to_vec();
-        let ntail = M::R::enc_ref(self.alloc_vector_cap(&lelems, 32));
+        let ntail = {
+            let lelems = self.arr_slice(self.arr_handle(leaf));
+            M::R::enc_ref(self.alloc_vector_cap(lelems, 32))
+        };
         let nr = self.tv_pop_tail(session, cnt, shift, root);
         let (new_shift, new_root) = if self.is_nil_bits(nr) {
             let nil = self.enc_nil();
@@ -4830,9 +4958,8 @@ impl<M: ValueModel> Runtime<M> {
                 self.arr_set(self.node_arr(node), subidx, nchild);
                 node
             } else {
-                let mut na = self.arr_clone(self.node_arr(node));
-                na[subidx] = nchild;
-                let a = self.mk_array(na);
+                let parr = self.node_arr(node);
+                let a = self.mk_array_set1(parr, subidx, nchild);
                 self.mk_node_edited(session, a)
             }
         } else if subidx == 0 {
@@ -4841,9 +4968,8 @@ impl<M: ValueModel> Runtime<M> {
             self.arr_set(self.node_arr(node), subidx, nil);
             node
         } else {
-            let mut na = self.arr_clone(self.node_arr(node));
-            na[subidx] = nil;
-            let a = self.mk_array(na);
+            let parr = self.node_arr(node);
+            let a = self.mk_array_set1(parr, subidx, nil);
             self.mk_node_edited(session, a)
         }
     }
@@ -5061,9 +5187,8 @@ impl<M: ValueModel> Runtime<M> {
                     let n = bitmap.count_ones();
                     if n >= 16 {
                         // Promote to an (edited) ArrayNode — always fresh.
-                        let arr = self.arr_clone(arrb);
                         let nil = self.enc_nil();
-                        let mut nodes = vec![nil; 32];
+                        let mut nodes = [nil; 32];
                         let jdx = ((hash >> shift) & 31) as usize;
                         nodes[jdx] = {
                             let bit2 = 1u32 << ((hash >> (shift + 5)) & 31);
@@ -5074,8 +5199,8 @@ impl<M: ValueModel> Runtime<M> {
                             if (bitmap >> i) & 1 == 0 {
                                 continue;
                             }
-                            let key_or_nil = arr[j];
-                            let val_or_node = arr[j + 1];
+                            let key_or_nil = self.arr_at(arrb, j);
+                            let val_or_node = self.arr_at(arrb, j + 1);
                             nodes[i as usize] = if !self.is_nil_bits(key_or_nil) {
                                 let h2 = self.hash_masked(key_or_nil);
                                 let (sub, _) = self.hamt_assoc_t(
@@ -5092,7 +5217,8 @@ impl<M: ValueModel> Runtime<M> {
                             };
                             j += 2;
                         }
-                        (self.mk_array_node_edited(session, (n + 1) as i64, nodes), true)
+                        let na = M::R::enc_ref(self.alloc_vector(&nodes));
+                        (self.mk_array_node_edited_arr(session, (n + 1) as i64, na), true)
                     } else if editable {
                         // In-place pair insertion: grow by 2, shift right.
                         let h = self.arr_handle(arrb);
@@ -5106,13 +5232,8 @@ impl<M: ValueModel> Runtime<M> {
                         self.rec_set(node, 1, bm);
                         (node, true)
                     } else {
-                        let arr = self.arr_clone(arrb);
-                        let mut new_arr = Vec::with_capacity(arr.len() + 2);
-                        new_arr.extend_from_slice(&arr[0..2 * idx]);
-                        new_arr.push(key);
-                        new_arr.push(val);
-                        new_arr.extend_from_slice(&arr[2 * idx..]);
-                        (self.mk_bitmap_node_edited(session, bitmap | bit, new_arr), true)
+                        let na = self.mk_array_ins2(arrb, 2 * idx, key, val);
+                        (self.mk_bitmap_node_edited_arr(session, bitmap | bit, na), true)
                     }
                 } else {
                     let key_or_nil = self.arr_at(arrb, 2 * idx);
@@ -5125,9 +5246,8 @@ impl<M: ValueModel> Runtime<M> {
                             self.arr_set(arrb, 2 * idx + 1, nsub);
                             (node, added)
                         } else {
-                            let mut na = self.arr_clone(arrb);
-                            na[2 * idx + 1] = nsub;
-                            (self.mk_bitmap_node_edited(session, bitmap, na), added)
+                            let na = self.mk_array_set1(arrb, 2 * idx + 1, nsub);
+                            (self.mk_bitmap_node_edited_arr(session, bitmap, na), added)
                         }
                     } else if self.equal(key, key_or_nil) {
                         if val == val_or_node {
@@ -5136,9 +5256,8 @@ impl<M: ValueModel> Runtime<M> {
                             self.arr_set(arrb, 2 * idx + 1, val);
                             (node, false)
                         } else {
-                            let mut na = self.arr_clone(arrb);
-                            na[2 * idx + 1] = val;
-                            (self.mk_bitmap_node_edited(session, bitmap, na), false)
+                            let na = self.mk_array_set1(arrb, 2 * idx + 1, val);
+                            (self.mk_bitmap_node_edited_arr(session, bitmap, na), false)
                         }
                     } else {
                         let sub = self.hamt_create_node_t(session, shift + 5, key_or_nil, val_or_node, hash, key, val);
@@ -5148,10 +5267,8 @@ impl<M: ValueModel> Runtime<M> {
                             self.arr_set(arrb, 2 * idx + 1, sub);
                             (node, true)
                         } else {
-                            let mut na = self.arr_clone(arrb);
-                            na[2 * idx] = nil;
-                            na[2 * idx + 1] = sub;
-                            (self.mk_bitmap_node_edited(session, bitmap, na), true)
+                            let na = self.mk_array_set2(arrb, 2 * idx, nil, 2 * idx + 1, sub);
+                            (self.mk_bitmap_node_edited_arr(session, bitmap, na), true)
                         }
                     }
                 }
@@ -5169,9 +5286,8 @@ impl<M: ValueModel> Runtime<M> {
                         self.rec_set(node, 1, cb);
                         (node, true)
                     } else {
-                        let mut na = self.arr_clone(arrb);
-                        na[idx] = sub;
-                        (self.mk_array_node_edited(session, cnt + 1, na), true)
+                        let na = self.mk_array_set1(arrb, idx, sub);
+                        (self.mk_array_node_edited_arr(session, cnt + 1, na), true)
                     }
                 } else {
                     let (nsub, added) = self.hamt_assoc_t(session, child, shift + 5, hash, key, val);
@@ -5181,9 +5297,8 @@ impl<M: ValueModel> Runtime<M> {
                         self.arr_set(arrb, idx, nsub);
                         (node, added)
                     } else {
-                        let mut na = self.arr_clone(arrb);
-                        na[idx] = nsub;
-                        (self.mk_array_node_edited(session, cnt, na), added)
+                        let na = self.mk_array_set1(arrb, idx, nsub);
+                        (self.mk_array_node_edited_arr(session, cnt, na), added)
                     }
                 }
             }
@@ -5212,10 +5327,8 @@ impl<M: ValueModel> Runtime<M> {
                                 self.rec_set(node, 2, cb);
                                 (node, true)
                             } else {
-                                let mut na = self.arr_clone(arrb);
-                                na.push(key);
-                                na.push(val);
-                                (self.mk_collision_node_edited(session, chash, cnt + 1, na), true)
+                                let na = self.mk_array_append2(arrb, key, val);
+                                (self.mk_collision_node_edited_arr(session, chash, cnt + 1, na), true)
                             }
                         }
                         Some(i) => {
@@ -5225,9 +5338,8 @@ impl<M: ValueModel> Runtime<M> {
                                 self.arr_set(arrb, i + 1, val);
                                 (node, false)
                             } else {
-                                let mut na = self.arr_clone(arrb);
-                                na[i + 1] = val;
-                                (self.mk_collision_node_edited(session, chash, cnt, na), false)
+                                let na = self.mk_array_set1(arrb, i + 1, val);
+                                (self.mk_collision_node_edited_arr(session, chash, cnt, na), false)
                             }
                         }
                     }
@@ -5248,7 +5360,8 @@ impl<M: ValueModel> Runtime<M> {
     fn hamt_create_node_t(&mut self, session: u64, shift: u32, key1: u64, val1: u64, key2hash: u32, key2: u64, val2: u64) -> u64 {
         let key1hash = self.hash_masked(key1);
         if key1hash == key2hash {
-            self.mk_collision_node_edited(session, key1hash, 2, vec![key1, val1, key2, val2])
+            let arrb = M::R::enc_ref(self.alloc_vector(&[key1, val1, key2, val2]));
+            self.mk_collision_node_edited_arr(session, key1hash, 2, arrb)
         } else {
             let nil = self.enc_nil();
             let (n1, _) = self.hamt_assoc_t(session, nil, shift, key1hash, key1, val1);

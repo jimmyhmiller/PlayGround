@@ -5454,6 +5454,23 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let t = self.emit_all_fixnum_raw::<M>(&vs);
                 self.fb.ins().brif(t, then_b, &[], else_b, &[]);
             }
+            // Fixnum-specialized comparisons (a dominating `AllFixnum` proved
+            // the operands immediate): branch on the raw compare — no guard,
+            // no boolean. Without this arm the specializer made loop tests
+            // SLOWER than unspecialized ones (`FxLt` fell to the generic path,
+            // which materializes a tagged bool and re-decodes it).
+            Ir::Prim(op @ (Prim::FxLt | Prim::FxEq), cargs) if cargs.len() == 2 => {
+                let a = self.compile::<M>(&cargs[0], false);
+                let b = self.compile::<M>(&cargs[1], false);
+                let c = if let Prim::FxEq = op {
+                    self.fb.ins().icmp(IntCC::Equal, a, b)
+                } else {
+                    let x = M::emit_untag(self, a);
+                    let y = M::emit_untag(self, b);
+                    self.fb.ins().icmp(IntCC::SignedLessThan, x, y)
+                };
+                self.fb.ins().brif(c, then_b, &[], else_b, &[]);
+            }
             // `(if (< a b) …)` / `(if (= a b) …)`: branch on the COMPARISON.
             Ir::Prim(op @ (Prim::Lt | Prim::Eq), cargs) if cargs.len() == 2 => {
                 let a = self.compile::<M>(&cargs[0], false);
@@ -5668,12 +5685,28 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let result = self.declare_root_var();
                 let slow = self.fb.create_block();
                 let merge = self.fb.create_block();
-                let r = if let Prim::Add = op {
-                    self.fb.ins().iadd(x, y)
+                // Prefer the model's tagged add + ONE overflow-flag test (the
+                // same recipe the guarded fast path uses): the untag/add/
+                // two-sided-range-compare spelling materialized two 64-bit
+                // range constants per op and made specialized (`Fx*`) loops
+                // SLOWER than unspecialized ones.
+                if let Some((r, ovf)) =
+                    M::emit_tagged_addsub_checked(self, a, b, matches!(op, Prim::Sub))
+                {
+                    let ok = self.fb.create_block();
+                    self.fb.ins().brif(ovf, slow, &[], ok, &[]);
+                    self.fb.switch_to_block(ok);
+                    self.fb.seal_block(ok);
+                    self.fb.def_var(result, r);
+                    self.fb.ins().jump(merge, &[]);
                 } else {
-                    self.fb.ins().isub(x, y)
-                };
-                self.emit_range_check_and_retag::<M>(r, result, slow, merge);
+                    let r = if let Prim::Add = op {
+                        self.fb.ins().iadd(x, y)
+                    } else {
+                        self.fb.ins().isub(x, y)
+                    };
+                    self.emit_range_check_and_retag::<M>(r, result, slow, merge);
+                }
                 self.fb.switch_to_block(slow);
                 self.fb.seal_block(slow);
                 let sp = self.slow_prim(op, &[a, b]);

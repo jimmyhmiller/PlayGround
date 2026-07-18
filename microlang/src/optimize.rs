@@ -638,11 +638,14 @@ fn call_census(ir: &Ir, tail: bool) -> (bool, bool) {
 /// benefit — Cranelift already makes the per-op checks nearly free — so we leave
 /// those alone. (Measured: loops +~8%, tree recursion neutral-to-negative.)
 fn guard_lambda<M: ValueModel>(rt: &Runtime<M>, nparams: usize, variadic: bool, body: &Ir) -> Ir {
+    let dbg = std::env::var("MICROLANG_DEBUG_SPEC").is_ok();
     if variadic || nparams == 0 || !M::R::is_immediate(Cat::Int) || already_guarded(body) {
+        if dbg { eprintln!("spec: bail early nparams={nparams} variadic={variadic} guarded={}", already_guarded(body)); }
         return body.clone();
     }
     let (has_tail, has_nontail) = call_census(body, true);
     if !has_tail || has_nontail {
+        if dbg { eprintln!("spec: census bail nparams={nparams} has_tail={has_tail} has_nontail={has_nontail}"); }
         return body.clone();
     }
     // Params used as a direct operand of a depth-0 arithmetic op, minus any that
@@ -653,9 +656,11 @@ fn guard_lambda<M: ValueModel>(rt: &Runtime<M>, nparams: usize, variadic: bool, 
     let guarded: Vec<usize> =
         (0..nparams).filter(|&i| candidate[i] && !reassigned[i]).collect();
     if guarded.is_empty() {
+        if dbg { eprintln!("spec: no candidates nparams={nparams}"); }
         return body.clone();
     }
 
+    if dbg { eprintln!("spec: WRAPPING nparams={nparams} guarded={guarded:?}"); }
     let fast = mark_fast::<M>(rt, body, &guarded);
     let guard_args: Vec<Ir> =
         guarded.iter().map(|&i| Ir::Local { up: 0, idx: i as u16 }).collect();
