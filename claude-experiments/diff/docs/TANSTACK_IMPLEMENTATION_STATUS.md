@@ -534,3 +534,24 @@ part of the SSR-runtime slice, not this foundation.
 
 `tsr-shared` extraction can land alongside these to carry the server graph past
 `>= 35`.
+
+## Browser hydration verified (2026-07-18)
+
+Beyond the 13 acceptance gates (which only check server HTML/HTTP), the client
+now genuinely hydrates in a real browser. A real bug the gates missed: the client
+emitted CJS (`module.exports=...`) but the SSR loads it as
+`<script type="module">`, so it threw `module is not defined` at load and never
+hydrated. Fixed with a native `ModuleFormat::BrowserEsm` (no `node:module`/
+`createRequire`; a throw-on-USE Proxy for any dead leaked externals so the module
+still loads; a `globalThis.process.env.NODE_ENV ||= "production"` prelude for React).
+Also fixed a latent browser-fatal bug: `?tsr-split` modules had dropped their
+dependency edges, so their `require("react/jsx-runtime")` had no runtime map entry.
+
+Verified in headless Chrome (puppeteer-core, test oracle only): `Welcome Home!!!`
+present, `window.__TSR_ROUTER__` set (client executed + hydrated), no
+`module is not defined`, zero uncaught page errors, client-side SPA navigation
+works. 13/13 acceptance still holds; thesis guards + oracle green.
+
+### Remaining gaps toward full production (documented, distinct from format)
+1. **Tailwind compilation** — `app.css` is raw Tailwind source (`@import 'tailwindcss'` / `@apply`); one `/assets/tailwindcss` 404 in the browser. Needs a native Tailwind pass (was `@tailwindcss/vite`).
+2. **Server-code tree-shaking** — server-only code leaks into the client via `sideEffects:false` barrel re-exports diffpack does not yet whole-program tree-shake; routes with server loaders (`/posts`) run server-context code on the client (caught by the error boundary; navigation still works). The reference client has zero `async_hooks`. This is a core bundler tree-shaking capability, and the direct fix for the leak.
