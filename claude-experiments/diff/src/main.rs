@@ -162,9 +162,9 @@ fn run() -> Result<(), String> {
             // files) plus the route/chunk manifest the server build consumes; the
             // server environments (`ssr`/`nitro`) write the Node ESM `server/`
             // layout (`.mjs` chunks) including the natively generated
-            // `tanstack-start-manifest` chunk. The server build is still the SSR
-            // foundation: it does not yet emit the Node HTTP runtime entry
-            // (`server/index.mjs`), which is the next slice.
+            // `tanstack-start-manifest` chunk and the Node HTTP runtime entry
+            // (`server/index.mjs` plus its `_ssr/` adapter, SSR, and router
+            // modules) that boots the SSR handler and serves the `public/` assets.
             if config.environment == "client" {
                 let summary =
                     bundler.emit_public(&reachable, &output_root, EmitOptions::default())?;

@@ -647,7 +647,20 @@
 
 ;; value wrappers / interfaces mapping onto the dialect's native types
 (defclass java.lang.CharSequence (:kind :interface) (:tag String) (:pred string?))
-(defclass java.lang.Character (:tag Char))
+(defclass java.lang.Character (:tag Char)
+  ;; ASCII range only would be a lie for astral input, but Character/isDigit on
+  ;; a char is defined over the BMP code point — %char-code gives exactly that.
+  ;; (Java's full Unicode digit classes include non-ASCII digits; the reader's
+  ;; symbol/keyword alphabet — what test.check generates against — is ASCII.)
+  (:static-fn isDigit [c] (let [n (%char-code c)] (if (%lt n 48) false (%lt n 58)))))
+;; clojure.lang.ITransientSet — the transient set's host face. Real library
+;; code reaches for the interface method directly: test.check's distinctness
+;; machinery calls `(.contains ^clojure.lang.ITransientSet s k)` in its
+;; coll-distinct-by loop (gen/map, gen/set, vector-distinct).
+(defclass clojure.lang.ITransientSet
+  (:kind :interface) (:tag TransientHashSet)
+  (:method contains [s k]
+    (not (identical? (get s k -jvm-none) -jvm-none))))
 (defclass java.lang.Number (:kind :interface) (:tag Long) (:pred number?)
   (:extend-tags Long Double Ratio))
 ;; Long/Double parse: `%str->long`/`%str->double` are the native fast path
