@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."   # repo root
 ROOT="$PWD"
 MICROCLJ="$ROOT/target/release/microclj"
-SUITE="$ROOT/clojure-stub/bench/suite.clj"
+BENCH="$ROOT/clojure-stub/bench"
 
 QUICK=0
 OUT="$(mktemp -d)"
@@ -31,32 +31,39 @@ if [ ! -x "$MICROCLJ" ]; then
   exit 2
 fi
 
-RUN_SUITE="$SUITE"
+# The suite requires the shared harness namespace (harness.clj). Both runtimes
+# resolve it from the same directory: microclj via MICROLANG_PATH, the JVM via
+# the deps.edn there (:paths ["."]).
+RUN_DIR="$BENCH"
 if [ "$QUICK" = 1 ]; then
   # Same code path, smaller budgets — a quick run must never be a DIFFERENT
-  # harness, only a less patient one.
-  RUN_SUITE="$OUT/suite_quick.clj"
+  # harness, only a less patient one. The knobs live in harness.clj, so quick
+  # mode runs from a COPY of the bench dir with a patched harness.
+  RUN_DIR="$OUT/bench_quick"
+  mkdir -p "$RUN_DIR"
+  cp "$BENCH/suite.clj" "$BENCH/deps.edn" "$RUN_DIR/"
   sed -e 's/^(def warmup-ms 3000)/(def warmup-ms 300)/' \
-      -e 's/^(def samples 25)/(def samples 5)/' "$SUITE" > "$RUN_SUITE"
-  # If suite.clj's knobs are ever renamed the sed above would silently no-op
+      -e 's/^(def samples 25)/(def samples 5)/' "$BENCH/harness.clj" > "$RUN_DIR/harness.clj"
+  # If harness.clj's knobs are ever renamed the sed above would silently no-op
   # and "--quick" would quietly run the FULL budget while claiming otherwise.
   # A benchmark harness that lies about its own settings is worse than none.
-  grep -q '^(def warmup-ms 300)' "$RUN_SUITE" && grep -q '^(def samples 5)' "$RUN_SUITE" || {
-    echo "--quick could not patch suite.clj's knobs (were they renamed?). Refusing to run." >&2
+  grep -q '^(def warmup-ms 300)' "$RUN_DIR/harness.clj" && grep -q '^(def samples 5)' "$RUN_DIR/harness.clj" || {
+    echo "--quick could not patch harness.clj's knobs (were they renamed?). Refusing to run." >&2
     exit 3
   }
   echo "QUICK run — reduced warmup/samples. Indicative only, do not publish." >&2
 fi
 
 echo "==> microclj --jit" >&2
-"$MICROCLJ" --jit "$RUN_SUITE" > "$OUT/microclj.tsv"
+MICROLANG_PATH="$RUN_DIR" "$MICROCLJ" --jit "$RUN_DIR/suite.clj" > "$OUT/microclj.tsv"
 
-# `clojure` must run from a directory that does not shadow core.clj.
+# The JVM runs from the bench dir itself: its deps.edn pins the classpath to
+# exactly that dir, so nothing in the repo can shadow clojure.core.
 echo "==> JVM Clojure" >&2
-(cd /tmp && clojure -M "$RUN_SUITE") > "$OUT/jvm.tsv"
+(cd "$RUN_DIR" && clojure -M suite.clj) > "$OUT/jvm.tsv"
 
 echo >&2
-(cd /tmp && clojure -M "$ROOT/clojure-stub/bench/compare.clj" "$OUT/microclj.tsv" "$OUT/jvm.tsv")
+(cd /tmp && clojure -M "$BENCH/compare.clj" "$OUT/microclj.tsv" "$OUT/jvm.tsv")
 
 if [ "$KEEP" = 1 ]; then
   echo >&2

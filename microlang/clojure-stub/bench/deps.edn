@@ -1,0 +1,8 @@
+;; Classpath for running the bench files on JVM Clojure FROM THIS DIRECTORY —
+;; puts harness.clj on the classpath so (:require [harness]) resolves, exactly
+;; mirroring MICROLANG_PATH pointing here for microclj. Library benches merge
+;; their real deps via aliases (same versions the vendored sources pin).
+{:paths ["."]
+ :aliases
+ {:json  {:extra-deps {org.clojure/data.json  {:mvn/version "2.5.1"}}}
+  :match {:extra-deps {org.clojure/core.match {:mvn/version "1.1.0"}}}}}

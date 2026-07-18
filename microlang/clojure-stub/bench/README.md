@@ -40,6 +40,14 @@ comparing two different programs. This is also why `System/nanoTime` exists in
 the dialect (see `host_jvm.clj`) — it is `%nanos`, which the runtime always
 had and the host layer had simply never exposed.
 
+**One harness, every bench file.** The measurement code (warmup, batching,
+median/spread, RESULT lines) lives in `harness.clj`, `require`d by
+`suite.clj`, `json.clj`, `match.clj`, and every corpus workload — microclj
+resolves it via `MICROLANG_PATH` pointing at this directory, the JVM via this
+directory's `deps.edn` (`:paths ["."]`, run `clojure` from here). It used to
+be copy-pasted into each file, which is the "two copies drift" failure one
+level up.
+
 **Every workload returns a checksum, and both runtimes must agree.** This is
 the load-bearing rule. A recorded predecessor run has microclj doing
 `vecbuild` in 0.16ms against Clojure's 27ms — not a 170x win, but a workload

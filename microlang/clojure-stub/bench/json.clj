@@ -1,80 +1,24 @@
 ;; clojure.data.json benchmark — ONE file, run byte-identically by BOTH
-;; runtimes (same rules as suite.clj/match.clj: checksummed, time-budgeted
-;; warmup, median of many samples):
+;; runtimes (measurement discipline lives in harness.clj):
 ;;
-;;   MICROLANG_PATH=clojure-stub/vendor/data.json:. \
+;;   MICROLANG_PATH=clojure-stub/bench:clojure-stub/vendor/data.json \
 ;;     ./target/release/microclj --jit clojure-stub/bench/json.clj
+;;   cd clojure-stub/bench && clojure -M:json json.clj
 ;;
-;;   cd /tmp && clojure -Sdeps '{:deps {org.clojure/data.json {:mvn/version "2.5.1"}}}' \
-;;     -M .../clojure-stub/bench/json.clj
+;; Both runtimes execute the REAL clojure.data.json 2.5.1: the JVM fetches it
+;; from Maven (deps.edn :json alias), microclj `require`s the vendored
+;; unmodified source under vendor/data.json/ (the prelude does NOT embed a
+;; json shim — see the note in clojure-stub/src/lib.rs near "data.json").
 ;;
 ;; The document is generated DETERMINISTICALLY here (no RNG, no external
 ;; file), so both runtimes construct the same ~100KB doc from the same code.
 ;; Checksums sample content, not just sizes, so a runtime cannot skip work
-;; and still agree.
-;;
-;; STATUS: microclj's prelude currently EMBEDS a mini clojure.data.json that
-;; SHADOWS the vendored real 2.5.1 (require is served in-process, the vendor
-;; path is never consulted). Against that embedded impl this bench measured
-;; write ~5100x JVM (string-concat writer), parse 133x, `:key-fn` unsupported,
-;; and an 11-byte serialization divergence (unicode escaping + astral count).
-;; The bench is written against REAL data.json semantics and is the gate for
-;; making the vendored 2.5.1 the implementation behind the name. The emoji in
-;; `cursor` is deliberate: it pins JVM UTF-16 `count`/`nth`/escape semantics.
+;; and still agree. The emoji in `cursor` is deliberate: it pins JVM UTF-16
+;; `count`/`nth`/escape semantics.
 
 (ns bench-json
-  (:require [clojure.data.json :as json]))
-
-(def warmup-ms 3000)
-(def min-warmup-iters 5)
-(def samples 25)
-(def batch-target-ms 50)
-
-(defn- pctl [sorted p]
-  (let [n (count sorted)
-        i (long (* (/ p 100.0) (dec n)))]
-    (nth sorted (if (< i 0) 0 (if (>= i n) (dec n) i)))))
-
-(defn- median [sorted]
-  (let [n (count sorted)
-        h (quot n 2)]
-    (if (odd? n)
-      (nth sorted h)
-      (/ (+ (nth sorted (dec h)) (nth sorted h)) 2.0))))
-
-(defn- time-once [f batch]
-  (let [t0 (System/nanoTime)
-        r (loop [i 0 last nil]
-            (if (< i batch) (recur (inc i) (f)) last))
-        t1 (System/nanoTime)]
-    [(- t1 t0) r]))
-
-(defn- warm [f]
-  (let [budget (* warmup-ms 1000000)
-        t0 (System/nanoTime)]
-    (loop [iters 0 est nil]
-      (if (and (>= iters min-warmup-iters)
-               (>= (- (System/nanoTime) t0) budget))
-        est
-        (let [[ns _] (time-once f 1)]
-          (recur (inc iters) ns))))))
-
-(defn bench [f]
-  (let [est (warm f)
-        batch (let [b (quot (* batch-target-ms 1000000) (if (< est 1) 1 est))]
-                (if (< b 1) 1 b))
-        results (loop [i 0 acc [] chk nil]
-                  (if (>= i samples)
-                    [acc chk]
-                    (let [[ns r] (time-once f batch)]
-                      (recur (inc i)
-                             (conj acc (/ (/ ns (double batch)) 1000000.0))
-                             r))))
-        ms (sort (first results))
-        checksum (second results)]
-    [checksum (median ms) (first ms) (pctl ms 95)
-     (* 100.0 (/ (- (pctl ms 95) (first ms)) (median ms)))
-     samples batch]))
+  (:require [harness :as h]
+            [clojure.data.json :as json]))
 
 ;; ── the document ──────────────────────────────────────────────
 
@@ -141,19 +85,5 @@
 
 ;; ── main ──────────────────────────────────────────────────────
 
-(defn -run []
-  (println (str "# json doc bytes=" (count json-str)))
-  (println "# name\tchecksum\tmedian_ms\tmin_ms\tp95_ms\tspread_pct\tn\tbatch")
-  (loop [ws workloads]
-    (when (seq ws)
-      (let [[nm f] (first ws)
-            [checksum med mn p95 spread n batch] (bench f)]
-        (println (str "RESULT\t" nm "\t" checksum
-                      "\t" (format "%.4f" med)
-                      "\t" (format "%.4f" mn)
-                      "\t" (format "%.4f" p95)
-                      "\t" (format "%.1f" spread)
-                      "\t" n "\t" batch)))
-      (recur (rest ws)))))
-
-(-run)
+(println (str "# json doc bytes=" (count json-str)))
+(h/run-workloads workloads)
