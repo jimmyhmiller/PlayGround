@@ -1673,6 +1673,14 @@
                 (do (cc-list (load (field (al-elem [Func] ms (load mi)) body)) names stackb)
                     (store! mi (iadd (load mi) 1))))))
             (store! ii (iadd (load ii) 1))))))
+    ; The sub-program keeps EVERY const (closure-subprogram), and a const's value is a
+    ; compile-time computation that check/finish folds. A const that calls an ordinary
+    ; function would otherwise report that callee "undefined" here — exactly like an
+    ; impl method's callees above — so seed the const-value callees too.
+    (let [cs (load (field p consts)) nc (al-len [Const] (load cs)) (mut ci) 0]
+      (loop (if (icmp-ge (load ci) nc) (break)
+        (do (collect-calls (field (al-elem [Const] cs (load ci)) value) names stackb)
+            (store! ci (iadd (load ci) 1))))))
     (loop (if (icmp-eq (al-len [(slice u8)] (load (field stackb items))) 0) (break)
       (do (let [sl (load (field stackb items)) top (al-len [(slice u8)] sl) nm (al-get [(slice u8)] sl (isub top 1))]
             ; pop

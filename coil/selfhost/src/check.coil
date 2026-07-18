@@ -1643,10 +1643,19 @@
                   (let [dyn_struct (sconcat a tr "-dyn") vtable_struct (sconcat a tr "-vtable")]
                     (if (icmp-eq (cast i64 (struct-find cx dyn_struct)) 0)
                         (Err [SynPair Diag] (derr-at-src src lo hi (sconcat a (sconcat a (sconcat5 a "in '" fname "': trait '" (display-name tr) "' has no trait object — call (defdyn ") (display-name tr)) ") after the trait")))
-                      (let [ipp (load (field sel ip))
-                            td (trait-find cx tr)
-                            methods (dyn-method-names a td tr (impl-mangle-key a (field ipp self_type) (load (field ipp type_params))))]
-                        (Ok (mk-synpair a (box-expr a (mk-expr (EMakeDyn dyn_struct vtable_struct methods inner) lo hi src ctxt)) (box-type a (TStruct dyn_struct))))))))))))))))
+                      (let [ipp (load (field sel ip))]
+                        ; A GENERIC impl's methods are generic functions: the vtable would
+                        ; have to reference a per-instantiation mangled name (e.g. Box__i64),
+                        ; but the trait object erases the concrete type and mono only
+                        ; instantiates via direct trait calls — so the vtable ends up naming
+                        ; the un-instantiated `Trait$Box$method`, which codegen can't resolve
+                        ; (it used to SIGABRT there). Reject it here, located, until dyn
+                        ; coercion learns to monomorphize the vtable.
+                        (if (icmp-gt (al-len [(slice u8)] (load (field ipp type_params))) 0)
+                            (Err [SynPair Diag] (derr-at-src src lo hi (sconcat a (sconcat a (sconcat5 a "in '" fname "': cannot make a trait object of '" (ty-str a pointee) "': its impl of '") (display-name tr)) "' is generic, and a (dyn Trait) vtable needs a concrete impl; erase a fully-concrete type instead")))
+                          (let [td (trait-find cx tr)
+                                methods (dyn-method-names a td tr (impl-mangle-key a (field ipp self_type) (load (field ipp type_params))))]
+                            (Ok (mk-synpair a (box-expr a (mk-expr (EMakeDyn dyn_struct vtable_struct methods inner) lo hi src ctxt)) (box-type a (TStruct dyn_struct))))))))))))))))))
 (defn maybe-coerce-dyn [(a (ptr Allocator)) (cx (ptr Cx)) (ae (ptr Expr)) (at (ptr Type)) (want (ptr Type)) (lo i64) (hi i64) (src i64) (ctxt i64) (fname (slice u8))] (-> (Result SynPair Diag))
   (let [wtg (type-tag want)
         wdname (if (icmp-eq wtg 6) (type-struct-name want) (if (and (icmp-eq wtg 5) (icmp-eq (type-tag (t-inner want)) 6)) (type-struct-name (t-inner want)) ""))]

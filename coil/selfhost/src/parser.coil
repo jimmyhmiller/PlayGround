@@ -330,9 +330,15 @@
     (if (str-eq head "ptr")
         (Ok (TPtr (box-type a (match (sx-get items 1) (Some [t] (try! (parse-type a t))) (None [] (TInt 64 true))))))
     (if (str-eq head "array")
-        (let [elem (box-type a (try! (parse-type a (try! (need [Sexp] (sx-get items 1) "array type: missing element type")))))
-              nn (if (opt-is-pos-int (sx-get items 2)) (opt-int (sx-get items 2)) -1)]
-          (if (icmp-lt nn 0) (Err [Type Diag] (derr "array type: expected a positive length")) (Ok (TArray elem nn))))
+        (let [elem (box-type a (try! (parse-type a (try! (need [Sexp] (sx-get items 1) "array type: missing element type")))))]
+          (match (sx-get items 2)
+            (None [] (Err [Type Diag] (derr "array type: missing length; write (array T N) with N a literal integer")))
+            (Some [ls]
+              (if (icmp-ne (sx-tag ls) 0)
+                  (Err [Type Diag] (derr "array length must be a literal integer (const generics are not supported)"))
+              (if (icmp-le (sx-ival ls) 0)
+                  (Err [Type Diag] (derr "array type: expected a positive length"))
+                  (Ok (TArray elem (sx-ival ls))))))))
     (if (str-eq head "slice")
         (Ok (TSlice (box-type a (try! (parse-type a (try! (need [Sexp] (sx-get items 1) "slice type: missing element type")))))))
     (if (str-eq head "vec")
