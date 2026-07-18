@@ -277,9 +277,13 @@ Not staleness: specific guarantees the docs state and the implementation never h
       lines below, working.
 - [x] **std-9** control.coil's `case` doc names `(derive Eq …)`, which doesn't exist; the macro is
       `derive-eq` and it emits a free function, not an impl.
-- [ ] **tool-12** `[dependencies]` is silently accepted and ignored — inviting the inference that
-      deps resolve. Make the Coil.toml parser strict (it knows exactly five keys); `entrypoint` typos
-      are swallowed too.
+- [x] **tool-12** — ✅ DONE. The Coil.toml reader is now STRICT: it knows exactly five sections
+      (`package`/`build`/`link`/`cc`/`run`) and a fixed key set per section. An unknown section
+      (e.g. `[dependencies]`, which used to be silently accepted, inviting the false inference that
+      deps resolve) or a typo'd key (e.g. `entrypoint` for `entry`, previously swallowed) is a
+      LOCATED hard error naming the offending Coil.toml line, section, and key — not a silent no-op.
+      See `parse-manifest` in `driver.coil` (`m-known-section?` / `m-bad-key` / `m-err`); teeth in
+      `gate-cli.sh` (all FAIL on the seed, PASS on the build).
 - [x] **mem-9** `(ref T)` is a working, undocumented third reference spelling — and the only way to
       write a read-only reference to a scalar. Document it or reject it in source.
 - [x] **mem-10** "Immutable reference" is C's `const T*`, not Rust's `&T` — say "read-only".
