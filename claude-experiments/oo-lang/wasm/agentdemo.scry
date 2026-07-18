@@ -1,0 +1,45 @@
+// agent-demo.scry — the browser demo program.
+//
+// Reuses the REAL agent core (agent/core.scry): the same Conversation/Message entity types,
+// the same Tool interface, and the offline ScriptedModel that examples/assistant.scry falls
+// back to when no API key is present. Nothing here is a stub — the only difference from the
+// native TUI is who drives the turns: in the browser the terminal calls
+// `Session.instances().get(0).ask("…")` through the eval channel, instead of a blocking
+// readLine loop (a synchronous wasm call cannot wait on browser input).
+//
+// Every Session / Conversation / Message / ToolCall it creates is a live arena instance, so
+// the viewer browses the agent's state as it runs.
+import agent.core.{Conversation, Message, Model, Tool, ScriptedModel, CalcTool, WeatherTool, runAgentLoop}
+
+class Session {
+  convo: Conversation
+  brain: ScriptedModel
+  tools: List<Tool>
+  turns: Int
+
+  fn init() {
+    self.convo = Conversation()
+    self.brain = ScriptedModel(persona: "scry")
+    self.tools = List<Tool>()
+    self.tools.push(CalcTool(label: "calc"))
+    self.tools.push(WeatherTool(source: "demo"))
+    self.turns = 0
+  }
+
+  // One agent turn. The terminal calls this through eval; output goes to the terminal via
+  // Console.log, and the resulting Messages show up live in the viewer.
+  fn ask(text: String) -> String {
+    self.turns = self.turns + 1
+    let reply = runAgentLoop(self.convo, self.brain, self.tools, text, 4)
+    Console.log(reply)
+    reply
+  }
+
+  fn messageCount() -> Int { self.convo.count }
+}
+
+fn main() {
+  let s = Session()
+  Console.log("scry agent demo — the VM, the agent, and this terminal are all WebAssembly.")
+  Console.log("try:  hello  /  what is 6 * 7  /  weather in Tokyo")
+}
