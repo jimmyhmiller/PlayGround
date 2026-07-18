@@ -1847,7 +1847,13 @@
                 (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
                             (if (type-is-void (load (field sp t)))
                                 (do (store! err (derr (sconcat3 a "in '" fname "': variadic argument uses a void value (a (-> void) call yields nothing)"))) (store! failed true) (break))
-                                (al-push! (mut out) (load (load (field sp e))))))))
+                              (if (icmp-eq (type-tag (load (field sp t))) 5)
+                                  (let [ae (al-elem [Expr] args (load i))
+                                        nm (match-else (load (field ae kind)) (EVar [n] n) (_ "…"))]
+                                    (do (store! err (derr-at (load (field ae lo)) (load (field ae hi))
+                                          (sconcat3 a (sconcat5 a "in '" fname "': cannot pass " (ty-str a (load (field sp t))) " to a variadic parameter — it would pass the address; write (load ") nm ") for the value")))
+                                        (store! failed true) (break)))
+                                (al-push! (mut out) (load (load (field sp e)))))))))
               (let [want (al-elem [Type] params (load i)) ismut (is-mut-borrow (al-elem [Expr] args (load i)))
                     exp (if (icmp-eq (type-tag want) 5) (t-inner want) want)
                     what (sconcat a (sconcat a (sconcat3 a "argument " (i64->str a (iadd (load i) 1)) " to '") func) "'")]

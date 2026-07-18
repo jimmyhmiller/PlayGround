@@ -89,6 +89,109 @@
     (if (or (icmp-eq tg 6) (icmp-eq tg 7))
         (let [items (sx-items (load s)) n (sx-len items) (mut i) 0]
           (loop (if (icmp-ge (load i) n) (break) (do (stamp-expansion (al-elem [Sexp] items (load i)) source lo hi ctxt) (store! i (iadd (load i) 1)))))) 0)) 0)
+; ── macro binder hygiene ─────────────────────────────────────────────────────
+; A macro template that introduces a `let` binder with a plain (non-gensym) name
+; used to CAPTURE a same-named symbol the caller spliced in: under `(let [t 5] …)`
+; the call `(addhundred t)` — whose template was ``(let [t 100] (+ t ~x))`` — saw
+; the TEMPLATE's `t`, yielding 200 instead of 105, silently. Free identifiers are
+; already referentially hygienic (qualify-head rewrites a template's call heads to
+; the macro's own module); this closes the remaining BINDER hole.
+; After a macro expands, every template-introduced `let` binder is alpha-renamed to
+; a globally-fresh `$hy…`, and every template reference to it is renamed to match,
+; scope-locally so inner `let`s shadow. The discriminator template-vs-spliced is a
+; SPAN test, not the symbol name: an atom is TEMPLATE if it shares the macro's def
+; source AND lies OUTSIDE the macro CALL's byte span; the caller's spliced args
+; (`~x`) all lie lexically INSIDE the call span, so they are left untouched even
+; when macro and caller live in the same file (where source alone can't tell them
+; apart). This is why the core control macros (while/for/case — their binders are
+; gensym'd, span -1, or the user's own loop var spliced from inside the call) don't
+; move, and the derive templates keep working (binder `h`/`o` AND all their refs —
+; whether literal or spliced from a same-file helper via ``\`h`` — share the derive
+; source and sit outside the derive call, so they rename together).
+(defstruct HygBox [(items (ArrayList HygEnt)) (dsrc i64) (csrc i64) (clo i64) (chi i64)])
+(defstruct HygEnt [(name (slice u8)) (gen (slice u8))])
+(defn hyg-lookup [(env (ptr HygBox)) (name (slice u8))] (-> (Option (slice u8)))
+  (let [n (al-len [HygEnt] (load (field env items))) (mut i) (isub n 1) (mut r) (None [(slice u8)])]
+    (loop (if (icmp-lt (load i) 0) (break)
+      (do (let [e (al-elem [HygEnt] (field env items) (load i))]
+            (if (str-eq (load (field e name)) name) (do (store! r (Some (load (field e gen)))) (break)) 0))
+          (store! i (isub (load i) 1)))))
+    (load r)))
+(defn hyg-fresh [(a (ptr Allocator))] (-> (slice u8)) (sconcat a "$hy" (i64->str a (next-gensym))))
+; template-introduced? — same source as the macro def, but NOT lexically inside the
+; macro call (that is where the caller's spliced arguments come from).
+(defn hyg-renameable [(sp (ptr Sexp)) (env (ptr HygBox))] (-> bool)
+  (if (icmp-ne (sx-source (load sp)) (load (field env dsrc))) false
+    (not (and (icmp-eq (sx-source (load sp)) (load (field env csrc)))
+         (and (icmp-ge (sx-lo (load sp)) 0)
+         (and (icmp-ge (sx-lo (load sp)) (load (field env clo)))
+              (icmp-le (sx-hi (load sp)) (load (field env chi)))))))))
+; rename a symbol node in place iff it is template-introduced and its name is a live binder
+(defn hyg-sym! [(sp (ptr Sexp)) (env (ptr HygBox))] (-> i64)
+  (if (hyg-renameable sp env)
+      (match (hyg-lookup env (sx-sval (load sp)))
+        (Some [g] (do (store! (field sp kind) (KSym g)) 0))
+        (None [] 0))
+    0))
+(defn hyg-is-let [(items (ptr (ArrayList Sexp)))] (-> bool)
+  (if (icmp-lt (sx-len items) 2) false
+    (if (icmp-ne (sx-tag (sx-at items 0)) 2) false
+      (if (not (str-eq (sx-sval (sx-at items 0)) "let")) false
+        (icmp-eq (sx-tag (sx-at items 1)) 7)))))
+; the plain symbol pointer of a binder: `x` -> that node; `(mut x)` -> the `x` node;
+; null for anything else (a destructure/mut-of-non-symbol we conservatively skip).
+(defn hyg-binder-sym [(bp (ptr Sexp))] (-> (ptr Sexp))
+  (let [tg (sx-tag (load bp))]
+    (if (icmp-eq tg 2) bp
+      (if (icmp-eq tg 6)
+          (let [it (sx-items (load bp))]
+            (if (and (icmp-eq (sx-len it) 2) (and (icmp-eq (sx-tag (sx-at it 0)) 2) (and (str-eq (sx-sval (sx-at it 0)) "mut") (icmp-eq (sx-tag (sx-at it 1)) 2))))
+                (al-elem [Sexp] it 1)
+              (cast (ptr Sexp) 0)))
+        (cast (ptr Sexp) 0)))))
+(defn hyg-let! [(items (ptr (ArrayList Sexp))) (env (ptr HygBox)) (a (ptr Allocator))] (-> i64)
+  (let [base (al-len [HygEnt] (load (field env items)))
+        binds (sx-items (load (al-elem [Sexp] items 1)))
+        nb (sx-len binds) (mut k) 0]
+    ; bindings are SEQUENTIAL: a value sees the binders before it, not its own —
+    ; so walk value k with the env as-is, THEN introduce binder k.
+    (loop (if (icmp-ge (iadd (imul (load k) 2) 1) nb) (break)
+      (do (hyg-walk! (al-elem [Sexp] binds (iadd (imul (load k) 2) 1)) env a)
+          (let [bsym (hyg-binder-sym (al-elem [Sexp] binds (imul (load k) 2)))]
+            (if (icmp-eq (cast i64 bsym) 0) 0
+              (if (hyg-renameable bsym env)
+                  (let [g (hyg-fresh a) e (alloc-stack HygEnt)]
+                    (store! (field e name) (sx-sval (load bsym))) (store! (field e gen) g)
+                    (store! (field bsym kind) (KSym g))
+                    (al-push! (mut (field env items)) (load e)) 0)
+                0)))
+          (store! k (iadd (load k) 1)))))
+    (let [n (sx-len items) (mut j) 2]
+      (loop (if (icmp-ge (load j) n) (break) (do (hyg-walk! (al-elem [Sexp] items (load j)) env a) (store! j (iadd (load j) 1))))))
+    ; pop this scope's binders so siblings after the `let` do not see them
+    (store! (field (field env items) len) base)
+    0))
+(defn hyg-walk-items! [(items (ptr (ArrayList Sexp))) (env (ptr HygBox)) (a (ptr Allocator))] (-> i64)
+  (let [n (sx-len items) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break) (do (hyg-walk! (al-elem [Sexp] items (load i)) env a) (store! i (iadd (load i) 1)))))) 0)
+(defn hyg-walk! [(sp (ptr Sexp)) (env (ptr HygBox)) (a (ptr Allocator))] (-> i64)
+  (let [tg (sx-tag (load sp))]
+    (if (icmp-eq tg 2) (hyg-sym! sp env)
+      (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+          (let [items (sx-items (load sp))]
+            (if (hyg-is-let items) (hyg-let! items env a)
+              (hyg-walk-items! items env a)))
+        0))))
+; Alpha-rename template-introduced `let` binders in a freshly expanded macro output
+; `op`. `dsrc` is the macro's def source; `csrc/clo/chi` are the macro CALL's span
+; (its spliced args live inside it). A dsrc < 0 (macro def not found) is a no-op.
+(defn hygienize-expansion! [(op (ptr Sexp)) (dsrc i64) (csrc i64) (clo i64) (chi i64) (a (ptr Allocator))] (-> i64)
+  (if (icmp-lt dsrc 0) 0
+    (let [env (unwrap-ptr [HygBox] (create [HygBox] a))]
+      (store! (field env items) (al-new [HygEnt] a))
+      (store! (field env dsrc) dsrc) (store! (field env csrc) csrc)
+      (store! (field env clo) clo) (store! (field env chi) chi)
+      (hyg-walk! op env a) 0)))
 ; Find a function by name in `p` (for a macro's def-site span). Null if absent.
 (defn find-func-ptr [(p (ptr Program)) (name (slice u8))] (-> (ptr Func))
   (let [fs (load (field p funcs)) n (al-len [Func] (load fs)) (mut i) 0 (mut r) (cast (ptr Func) 0)]
@@ -245,6 +348,7 @@
                                   exp (mk-expansion q (sx-source (load (load cur))) (sx-lo (load (load cur))) (sx-hi (load (load cur))) (sx-ctxt (load (load cur)))
                                                     def-src def-lo def-hi def-ctxt (sx-ctxt (load (load cur))))
                                   ctxt (add-expansion! (mut ls) exp)]
+                              (hygienize-expansion! op def-src (sx-source (load (load cur))) (sx-lo (load (load cur))) (sx-hi (load (load cur))) a)
                               (stamp-expansion op (sx-source (load (load cur))) (sx-lo (load (load cur))) (sx-hi (load (load cur))) ctxt)
                               (store! cur op)
                               0))))))
@@ -354,6 +458,7 @@
               exp (mk-expansion q (sx-source (load node)) (sx-lo (load node)) (sx-hi (load node)) (sx-ctxt (load node))
                                 def-src def-lo def-hi def-ctxt (sx-ctxt (load node)))
               ctxt (add-expansion! (mut s) exp)]
+          (hygienize-expansion! op def-src (sx-source (load node)) (sx-lo (load node)) (sx-hi (load node)) a)
           (stamp-expansion op (sx-source (load node)) (sx-lo (load node)) (sx-hi (load node)) ctxt)
           (store! (field tc hit) 1)
           (Ok [Sexp Diag] (load op)))))))

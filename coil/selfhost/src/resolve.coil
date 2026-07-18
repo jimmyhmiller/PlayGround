@@ -141,6 +141,18 @@
   (sconcat3 a "extern '" nm "' declared with conflicting signatures"))
 (defn const-dup-msg [(a (ptr Allocator)) (nm (slice u8))] (-> (slice u8))
   (sconcat3 a "const '" nm "' defined more than once"))
+; A bare name is exported by more than one `:use`d module. Resolving it first-import-wins
+; would SILENTLY pick whichever import came first (reorder two import lines, run a different
+; function). Same shape as the checker's trait-method ambiguity ("… is ambiguous — …"):
+; name the competing modules and tell the user to disambiguate (NAMESPACING.md).
+(defn use-ambig-msg [(a (ptr Allocator)) (m (slice u8)) (name (slice u8)) (m1 (slice u8)) (m2 (slice u8))] (-> (slice u8))
+  (sconcat5 a (sconcat5 a "in module '" m "': '" name "' is ambiguous — exported by :use'd modules '")
+            m1 "' and '" m2 "'; :use only one, or reach it qualified via an :as alias"))
+; The SAME name is explicitly `:use [name]`'d from two different modules in one importer —
+; the same silent collision, caught eagerly at the import instead of at a later use site.
+(defn use-dup-msg [(a (ptr Allocator)) (m (slice u8)) (name (slice u8)) (m1 (slice u8)) (m2 (slice u8))] (-> (slice u8))
+  (sconcat5 a (sconcat5 a "in module '" m "': '" name "' is explicitly :use'd from two modules '")
+            m1 "' and '" m2 "' — :use it from only one"))
 
 ; ---- table / import / export queries --------------------------------------
 (defn defs-set [(d (ptr Defs)) (kind i64)] (-> (ptr (ArrayList (slice u8))))
@@ -192,20 +204,32 @@
     (load r)))
 
 ; the `:use`d-modules branch of resolve (extracted so no try!/return runs in a loop).
-(defn resolve-use [(c (ptr Ctx)) (imp (ptr ImpEntry)) (name (slice u8)) (kind i64)] (-> (Option (slice u8)))
+; Now collision-aware: it scans ALL `:use`d modules rather than stopping at the first
+; match, so a name exported by two distinct `:use`d modules is a hard ambiguity error
+; instead of the old first-import-wins silent pick (tool-10). Distinct modules only —
+; the same target reached via two `:use` entries is one module, not a collision.
+(defn resolve-use [(c (ptr Ctx)) (imp (ptr ImpEntry)) (name (slice u8)) (kind i64)] (-> (Result (Option (slice u8)) Diag))
   (let [a (load (field c a)) table (load (field c table)) exp (load (field c exp))
-        uses (field (field imp imp) uses) n (al-len [Use] (load uses)) (mut i) 0 (mut r) (None [(slice u8)])]
-    (loop (if (icmp-ge (load i) n) (break)
+        uses (field (field imp imp) uses) n (al-len [Use] (load uses)) (mut i) 0
+        (mut r) (None [(slice u8)]) (mut m1) "" (mut m2) "" (mut cnt) 0]
+    (loop (if (or (icmp-ge (load cnt) 2) (icmp-ge (load i) n)) (break)
       (do (let [up (alloc-stack Use)] (store! up (al-get [Use] (load uses) (load i)))
             (let [target (load (field up target))
                   used (match (load (field up spec)) (UAll [] true) (UNames [names] (set-contains names name)))]
               (if (and used (exports-check exp target name))
                   (let [td (table-find table target)]
                     (if (and (icmp-ne (cast i64 td) 0) (set-contains (defs-set (field td defs) kind) name))
-                        (do (store! r (Some (sconcat3 a target "." name))) (break)) 0))
+                        (if (icmp-eq (load cnt) 0)
+                            (do (store! r (Some (sconcat3 a target "." name)))
+                                (store! m1 target) (store! cnt 1) 0)
+                            (if (str-eq (load m1) target) 0
+                                (do (store! m2 target) (store! cnt 2) 0)))
+                        0))
                   0)))
           (store! i (iadd (load i) 1)))))
-    (load r)))
+    (if (icmp-ge (load cnt) 2)
+        (Err [(Option (slice u8)) Diag] (derr (use-ambig-msg a (load (field c m)) name (load m1) (load m2))))
+        (Ok [(Option (slice u8)) Diag] (load r)))))
 
 ; src/resolve.rs::resolve — kind: 0 callables, 1 types, 2 traits, 3 convs.
 (defn resolve [(c (ptr Ctx)) (name (slice u8)) (kind i64)] (-> (Result (slice u8) Diag))
@@ -224,16 +248,20 @@
         (let [tf (table-find table m)]
           (if (and (icmp-ne (cast i64 tf) 0) (set-contains (defs-set (field tf defs) kind) name))
               (Ok [(slice u8) Diag] (sconcat3 a m "." name))
-              (match (if (icmp-ne (cast i64 imp) 0) (resolve-use c imp name kind) (None [(slice u8)]))
-                (Some [q] (Ok [(slice u8) Diag] q))
-                (None []
-                  (if (not (str-eq m "coil.core"))
-                      (let [ct (table-find table "coil.core")]
-                        (if (and (and (icmp-ne (cast i64 ct) 0) (set-contains (defs-set (field ct defs) kind) name))
-                                 (exports-check exp "coil.core" name))
-                            (Ok [(slice u8) Diag] (sconcat3 a "coil.core" "." name))
-                            (Ok [(slice u8) Diag] name)))
-                      (Ok [(slice u8) Diag] name)))))))))
+              (match (if (icmp-ne (cast i64 imp) 0) (resolve-use c imp name kind)
+                         (Ok [(Option (slice u8)) Diag] (None [(slice u8)])))
+                (Err [d] (Err [(slice u8) Diag] d))
+                (Ok [used-opt]
+                  (match used-opt
+                    (Some [q] (Ok [(slice u8) Diag] q))
+                    (None []
+                      (if (not (str-eq m "coil.core"))
+                          (let [ct (table-find table "coil.core")]
+                            (if (and (and (icmp-ne (cast i64 ct) 0) (set-contains (defs-set (field ct defs) kind) name))
+                                     (exports-check exp "coil.core" name))
+                                (Ok [(slice u8) Diag] (sconcat3 a "coil.core" "." name))
+                                (Ok [(slice u8) Diag] name)))
+                          (Ok [(slice u8) Diag] name)))))))))))
 
 ; ---- type-equality (for extern dedup in merge) ----------------------------
 ; All take/recurse on `(ptr Type)` — passing a `Type` sum BY VALUE into a recursive
@@ -966,6 +994,58 @@
   (store! (field c diags) diags) (store! (field c poisoned) poisoned)
   0)
 
+; tool-10 (import-site collision). The two parallel `(ptr SBox)`s hold, for one importer,
+; the names already explicitly `:use [name]`'d and the module each came from — a box so the
+; push survives across the per-`:use` scan (a bare ArrayList can't be grown through a ptr).
+; partner-of returns the module a name was first seen from, or "" if this is the first.
+(defn partner-of [(nbox (ptr SBox)) (tbox (ptr SBox)) (nm (slice u8))] (-> (slice u8))
+  (let [names (field nbox items) tgts (field tbox items)
+        n (al-len [(slice u8)] (load names)) (mut i) 0 (mut r) ""]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (al-get [(slice u8)] (load names) (load i)) nm)
+              (do (store! r (al-get [(slice u8)] (load tgts) (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+; Scan one `:use [names]` entry: the first name already seen from a DIFFERENT module is the
+; collision (Some diag); otherwise every name is recorded and None is returned.
+(defn scan-use-names [(a (ptr Allocator)) (importer (slice u8)) (nbox (ptr SBox)) (tbox (ptr SBox)) (nms (ptr (ArrayList (slice u8)))) (tgt (slice u8))] (-> (Option Diag))
+  (let [nn (al-len [(slice u8)] (load nms)) (mut k) 0 (mut r) (None [Diag])]
+    (loop (if (icmp-ge (load k) nn) (break)
+      (do (let [nm (al-get [(slice u8)] (load nms) (load k)) prev (partner-of nbox tbox nm)]
+            (if (and (icmp-gt (slice-len [u8] prev) 0) (not (str-eq prev tgt)))
+                (do (store! r (Some (derr (use-dup-msg a importer nm prev tgt)))) (break))
+                (do (al-push! (mut (field nbox items)) nm) (al-push! (mut (field tbox items)) tgt) 0)))
+          (store! k (iadd (load k) 1)))))
+    (load r)))
+; One importer: scan every `:use [names]` entry, sharing the seen-name boxes across them.
+(defn dup-in-importer [(a (ptr Allocator)) (ie (ptr ImpEntry))] (-> (Result i64 Diag))
+  (let [importer (load (field ie name))
+        uses (field (field ie imp) uses) un (al-len [Use] (load uses)) (mut j) 0
+        nbox (unwrap-ptr [SBox] (create [SBox] a)) tbox (unwrap-ptr [SBox] (create [SBox] a))
+        (mut err) (zeroed Diag) (mut failed) false]
+    (store! (field nbox items) (al-new [(slice u8)] a))
+    (store! (field tbox items) (al-new [(slice u8)] a))
+    (loop (if (or (load failed) (icmp-ge (load j) un)) (break)
+      (do (let [up (alloc-stack Use)] (store! up (al-get [Use] (load uses) (load j)))
+            (match (load (field up spec))
+              (UAll [] 0)
+              (UNames [nms]
+                (match (scan-use-names a importer nbox tbox nms (load (field up target)))
+                  (Some [d] (do (store! err d) (store! failed true) 0))
+                  (None [] 0)))))
+          (store! j (iadd (load j) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+; tool-10: reject the SAME name explicitly `:use [name]`'d from two DIFFERENT modules in one
+; importer, eagerly at the import site (before any use site is even reached).
+(defn check-explicit-use-dups [(a (ptr Allocator)) (impb (ptr (ArrayList ImpEntry)))] (-> (Result i64 Diag))
+  (let [n (al-len [ImpEntry] (load impb)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (or (load failed) (icmp-ge (load i) n)) (break)
+      (do (match (dup-in-importer a (al-elem [ImpEntry] impb (load i)))
+            (Err [d] (do (store! err d) (store! failed true) 0))
+            (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+
 ; ---- resolve-program (src/resolve.rs::resolve_program), strict=true --------
 ; `tolerant` = SKIP a top-level form that does not parse, instead of aborting. Only
 ; the macro-context build (expander.coil::expand-stage3) passes true: at that point
@@ -981,9 +1061,13 @@
         expb (unwrap-ptr [(ArrayList ExpEntry)] (create [(ArrayList ExpEntry)] a))
         out-forms (field s out) nforms (al-len [TaggedForm] (load out-forms))
         pb (unwrap-ptr [PBox] (create [PBox] a)) parsed (field pb items)
-        (mut perr) (zeroed Diag) (mut pfailed) false (mut fi) 0]
+        (mut perr) (zeroed Diag) (mut pfailed) false (mut fi) 0
+        (mut dupd) (zeroed Diag) (mut dupfail) false]
     (store! impb (load (field s imports)))
     (store! expb (load (field s exports)))
+    (match (check-explicit-use-dups a impb)
+      (Err [d] (do (store! dupd d) (store! dupfail true) 0))
+      (Ok [_] 0))
     (store! (field pb items) (al-new [ParsedForm] a))
     (type-res-reset)   ; fresh type-reference resolution registry for this pass
     (src-mod-reset)    ; fresh source→module map
@@ -1003,6 +1087,7 @@
                     (store! (field pf prog) pp) (store! (field pf module) (load (field tfp module)))
                     (al-push! (mut (field pb items)) (load pf)))))))
           (store! fi (iadd (load fi) 1)))))
+    (if (load dupfail) (Err (load dupd))
     (if (load pfailed) (Err (load perr))
         (let [table (build-deftable a parsed) bareok (build-bareok a parsed)
               o (alloc-stack Out) np (al-len [ParsedForm] (load parsed))
@@ -1030,7 +1115,7 @@
                         (Err [d] (do (store! qerr d) (store! qfailed true) (break)))
                         (Ok [_] 0))))
                 (store! qi (iadd (load qi) 1)))))
-          (if (load qfailed) (Err (load qerr)) (Ok (out->program o a)))))))
+          (if (load qfailed) (Err (load qerr)) (Ok (out->program o a))))))))
 
 ; ============================ check.rs: tables (Cx) ==========================
 ; Mirror src/check.rs's Sig/StructInfo/SumInfo/Cx. The Rust HashMaps become

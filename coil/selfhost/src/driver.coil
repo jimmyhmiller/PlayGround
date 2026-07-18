@@ -472,18 +472,26 @@
 ; and dump-ir-program.
 (defstruct DumpCtx [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (mode i64) (obj (ptr i8)) (triple (ptr i8)) (path (slice u8)) (ok i64)
                     (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
-                    (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))])
+                    (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
+                    ; mode 3 (a debug dump: dump-read/ast/load/expand/resolved/checked/mono).
+                    ; The dump functions differ in arity, so each is adapted to this one
+                    ; (a src cwd path) -> i64 shape by a `-w` wrapper (see below); the thread
+                    ; calls whichever wrapper was stored. Dumps run the SAME recursive passes
+                    ; as build, so they must share the big stack, not overflow the 8 MiB main.
+                    (dump-fn   (fnptr c [(ptr Allocator) (slice u8) (slice u8) (slice u8)] i64))])
 
 ; pthread start_routine: unpack the context and run the real pipeline on the
 ; big-stack thread so the recursive passes (parser/checker/codegen/comptime) don't
 ; overflow the default ~8MB stack.
 (defn dump-thread-entry [(arg (ptr i8))] (-> (ptr i8))
   (let [ctx (cast (ptr DumpCtx) arg)
-        r   (if (icmp-eq (load (field ctx mode)) 2)
+        r   (if (icmp-eq (load (field ctx mode)) 3)
+                (call-ptr (load (field ctx dump-fn)) (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx path)))
+              (if (icmp-eq (load (field ctx mode)) 2)
                 (build-arm64-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)) (load (field ctx path)))
               (if (icmp-eq (load (field ctx mode)) 1)
                 (call-ptr (load (field ctx build-fn))  (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)) (load (field ctx triple)) (load (field ctx path)))
-              (call-ptr (load (field ctx emitir-fn)) (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx triple)) (load (field ctx path)))))]
+              (call-ptr (load (field ctx emitir-fn)) (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx triple)) (load (field ctx path))))))]
     (store! (field ctx ok) r)
     ; release the main thread if it is servicing metaprogram calls (COIL_META_MAIN=1)
     (main-svc-finish!)
@@ -516,6 +524,38 @@
     (pthread_join (load tid) (cast (ptr i8) 0))
     ; the thread wrote its pipeline result (1 ok / 0 failed) into ctx.ok.
     (load (field ctx ok))))
+
+; ---- debug dumps on the big stack -------------------------------------------
+; `coil expand` / the `dump-*` debug commands run the SAME recursive front-end
+; (reader/parser/loader/resolve/check/mono/expand) as `build`, so they overflow the
+; default ~8 MiB MAIN thread on deeply-nested (macro-generated) input that `build`
+; compiles fine on the big stack. Route them through the identical run-on-big-stack /
+; DumpCtx mechanism. The dump functions differ in arity; each `-w` wrapper adapts one
+; to the uniform (a src cwd path) -> i64 shape the thread invokes (mode 3). Every dump
+; returns 0 and prints its own diagnostics, so this exit code is 0 on success.
+(defn dump-read-w     [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-read-program a src))
+(defn dump-ast-w      [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-ast-program a src))
+(defn dump-load-w     [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-load-program a src cwd))
+(defn expand-src-w    [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (expand-src-program a src cwd path))
+(defn dump-expand-w   [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-expand-program a src cwd))
+(defn dump-resolved-w [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-resolved-program a src cwd))
+(defn dump-checked-w  [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-checked-program a src cwd))
+(defn dump-mono-w     [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-mono-program a src cwd))
+
+; Populate a mode-3 DumpCtx and run the chosen dump wrapper on the big-stack pthread.
+(defn run-dump-on-big-stack [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))
+                             (dfn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (slice u8)] i64))] (-> i64)
+  (let [ctx (alloc-stack DumpCtx)]
+    (store! (field ctx a)       a)
+    (store! (field ctx src)     src)
+    (store! (field ctx cwd)     cwd)
+    (store! (field ctx path)    path)
+    (store! (field ctx mode)    3)
+    (store! (field ctx obj)     (cast (ptr i8) 0))
+    (store! (field ctx triple)  (cast (ptr i8) 0))
+    (store! (field ctx ok)      0)
+    (store! (field ctx dump-fn) dfn)
+    (run-on-big-stack ctx)))
 
 ; The intermediate object path for output `out`, mirroring Rust's
 ; `out_path.with_extension("o")`: REPLACE the final path-component extension with
@@ -687,6 +727,26 @@
 (defn dir? [(path (ptr i8))] (-> bool)
   (let [d (opendir path)]
     (if (icmp-eq (cast i64 d) 0) false (do (closedir d) true))))
+; The arch component of a triple = the text before the first '-' (`x86_64` of
+; `x86_64-apple-macosx11.0.0`). Empty triple would be caught by the null guard first.
+(defn triple-arch [(triple (ptr i8))] (-> (slice u8))
+  (let [s (cstr->slice triple) n (slice-len [u8] s) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (if (icmp-eq (cast i64 (slice-get [u8] s (load i))) 45) (break)
+        (store! i (iadd (load i) 1)))))
+    (subslice [u8] s 0 (load i))))
+
+; A `--target` we emit an object for but CANNOT link with the host `cc`. The linker
+; here is the host toolchain (arm64 Mach-O only); a wasm32 target never touches `cc`
+; (wasm-link-object finalizes it in-process), and a null triple is the host default.
+; Everything else is a native cross-target whose object arch won't match the host
+; linker — the case that used to surface as a raw `found architecture 'x86_64',
+; required arm64` link error naming neither the flag nor the real cause.
+(defn native-cross-unlinkable? [(triple (ptr i8))] (-> bool)
+  (if (icmp-eq (cast i64 triple) 0) false
+    (if (wasm-target? triple) false
+      (let [arch (triple-arch triple)]
+        (not (or (str-eq arch "arm64") (str-eq arch "aarch64")))))))
 
 ; `build <file> -o <out> [--link-flag X]...` : emit `<out>.o` then link it into a
 ; native executable with `cc <out>.o -o <out> <link-flags...>`. Mirrors the Rust
@@ -740,6 +800,16 @@
     (if (icmp-eq (cast i64 (load outp)) 0)
         (do (ps (stderr) "error: build: missing -o <out>\n") (exit 1) 0)
       0)
+    ; A native cross-target's object won't link with the host cc (arm64). Reject it
+    ; here with a message that names the flag and the cause, instead of letting the
+    ; link step die with a bare `found architecture '<arch>', required arm64`.
+    (if (native-cross-unlinkable? (load trip))
+        (let [w (stderr)]
+          (ps w "error: --target ") (ps w (cstr->slice (load trip)))
+          (ps w ": cannot cross-compile and link a non-host native target — the host linker (cc) produces arm64 Mach-O only.\n")
+          (ps w "  use `emit-obj --target ") (ps w (cstr->slice (load trip)))
+          (ps w "` to emit the object and link it on a matching host, or target `wasm32-unknown-unknown`.\n")
+          1)
     (let [out-slice (cstr->slice (load outp))
           obj-slice (obj-path a out-slice)]
       (let [obj-cstr  (slice->cstr a obj-slice)
@@ -786,7 +856,7 @@
                 (do (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10))
                     (match ehdr
                       (Some [h] (cheader-program a (read-src a file) (cwd-slice a) (Some h)))
-                      (None [] 0)))))))))))
+                      (None [] 0))))))))))))
 
 ; ============================ cheader (export-c → C header) =================
 ; Port of src/cheader.rs — the inverse of cimport: emit a C header (prototypes +
@@ -1701,25 +1771,21 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
         (if (str-eq sub "build")
             (if (manifest-mode? argc argv) (manifest-cmd a "build" argc argv) (build-cmd a argc argv build-fn emitir-fn default-backend))
          (if (str-eq sub "dump-read")
-             (let [path (need-file argc argv sub)] (dump-read-program a (read-src a path)))
+             (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-read-w)))
           (if (str-eq sub "dump-ast")
-              (let [path (need-file argc argv sub)] (dump-ast-program a (read-src a path)))
+              (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-ast-w)))
            (if (str-eq sub "dump-load")
-               (let [path (need-file argc argv sub)] (dump-load-program a (read-src a path) (cwd-slice a)))
+               (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-load-w)))
             (if (str-eq sub "expand")
-                (let [path (need-file argc argv sub)]
-                  (set-target-arch! (argv-triple argc argv))   ; so (target-arch) reflects --target in the debug view too
-                  (expand-src-program a (read-src a path) (cwd-slice a) (cstr->slice path)))
+                (let [path (need-file argc argv sub)] (set-target-arch! (argv-triple argc argv)) (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of expand-src-w)))
             (if (str-eq sub "dump-expand")
-                (let [path (need-file argc argv sub)]
-                  (set-target-arch! (argv-triple argc argv))
-                  (dump-expand-program a (read-src a path) (cwd-slice a)))
+                (let [path (need-file argc argv sub)] (set-target-arch! (argv-triple argc argv)) (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-expand-w)))
              (if (str-eq sub "dump-resolved")
-                 (let [path (need-file argc argv sub)] (dump-resolved-program a (read-src a path) (cwd-slice a)))
+                 (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-resolved-w)))
               (if (str-eq sub "dump-checked")
-                  (let [path (need-file argc argv sub)] (dump-checked-program a (read-src a path) (cwd-slice a)))
+                  (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-checked-w)))
                (if (str-eq sub "dump-mono")
-                   (let [path (need-file argc argv sub)] (dump-mono-program a (read-src a path) (cwd-slice a)))
+                   (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-mono-w)))
           ; fallthrough = emit-ir / dump-ir. Anything else is a typo, not an
           ; alias for emit-ir — report it instead of compiling argv[2] (NULL).
           (if (not (or (str-eq sub "emit-ir") (str-eq sub "dump-ir")))
