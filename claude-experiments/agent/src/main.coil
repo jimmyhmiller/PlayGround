@@ -6,6 +6,7 @@
 (extern sin :cc c [f64] (-> f64))
 (extern fmod :cc c [f64 f64] (-> f64))
 (extern printf :cc c [(ptr i8) ...] (-> i32))
+(extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
 
 (const WINDOW_FLAGS 8292)
 (const LEFT_WIDTH 244)
@@ -1161,11 +1162,40 @@
       (draw-grid LEFT_WIDTH rightStart screenHeight)
       (fill-rectangle (cast f64 LEFT_WIDTH) 0.0 (cast f64 centerWidth) (cast f64 HEADER_HEIGHT) (color 7 10 14))
       (line (cast f64 LEFT_WIDTH) 63.0 (cast f64 rightStart) 63.0 1.0 (color 20 26 34))
-      (draw-text (field state monoMedium) (display-project-name state project) 268.0 14.0 15.0 (color 223 229 236))
-      (stroke-rectangle 421.0 13.0 88.0 20.0 1.0 (color-alpha 224 165 58 100))
-      (draw-text (field state monoMedium) c"4/7 / running" 428.0 18.0 9.0 tint)
+      (let [runtime (load (field state runtime))
+            nodeCount (workflow.node-count runtime)
+            statusBuffer (cast (ptr i8) (cast i64 (alloc-stack (array i8 64))))
+            badgeLeft (cast f64 (- rightStart 318))
+            (mut doneCount) 0
+            (mut anyFailed) 0]
+        (do
+          (for [node 0
+                7]
+            (if (< node nodeCount)
+              (do
+                (if (= (workflow.node-status runtime node) 3) (store! doneCount (+ (load doneCount) 1)) 0)
+                (if (= (workflow.node-status runtime node) 5) (store! anyFailed 1) 0)
+                0)
+              0))
+          (snprintf statusBuffer
+                    64
+                    c"%lld/%lld / %s"
+                    (load doneCount)
+                    nodeCount
+                    (cond (= (load anyFailed) 1) c"failed"
+                          (= (load doneCount) nodeCount) c"done"
+                          (workflow.is-started runtime) c"running"
+                          c"idle"))
+          (begin-scissor 268.0 10.0 (- badgeLeft 280.0) 28.0)
+          (draw-text (field state monoMedium) (display-project-name state project) 268.0 14.0 15.0 (color 223 229 236))
+          (raylib.EndScissorMode)
+          (stroke-rectangle badgeLeft 13.0 88.0 20.0 1.0 (color-alpha 224 165 58 100))
+          (draw-text (field state monoMedium) statusBuffer (+ badgeLeft 7.0) 18.0 9.0 tint)
+          0))
       (draw-text (field state mono) c"~/" 268.0 39.0 10.5 (color 76 85 97))
+      (begin-scissor 289.0 34.0 123.0 20.0)
       (draw-text (field state mono) (display-project-path state project) 289.0 39.0 10.5 (color 76 85 97))
+      (raylib.EndScissorMode)
       (draw-text (field state mono) c">" 420.0 39.0 10.5 tint)
       (draw-text (field state mono) (display-project-subtitle state project) 436.0 39.0 10.5 (color 76 85 97))
       (stroke-rectangle (cast f64 (- rightStart 214)) 14.0 116.0 34.0 1.0 (color-alpha 224 165 58 130))
@@ -1326,26 +1356,32 @@
       (fill-rectangle (cast f64 rightStart) 0.0 (cast f64 RIGHT_WIDTH) (cast f64 screenHeight) (color 9 12 17))
       (line (cast f64 rightStart) 0.0 (cast f64 rightStart) (cast f64 screenHeight) 1.0 (color 23 30 39))
       (line (cast f64 rightStart) 112.0 (cast f64 screenWidth) 112.0 1.0 (color 20 26 34))
+      (begin-scissor contentLeft 11.0 126.0 18.0)
       (draw-text (field state mono) (display-project-path state project) contentLeft 15.0 9.5 (color 61 69 79))
+      (raylib.EndScissorMode)
       (draw-text (field state mono) c"/" (+ contentLeft 132.0) 15.0 9.5 tint)
+      (begin-scissor (+ contentLeft 146.0) 11.0 (- (cast f64 screenWidth) (+ contentLeft 166.0)) 18.0)
       (draw-text (field state mono)
                  (display-node-title state project node)
                  (+ contentLeft 146.0)
                  15.0
                  9.5
                  (color 107 116 128))
+      (raylib.EndScissorMode)
       (draw-text (field state monoMedium)
                  (case node 0 c"[1]" 1 c"[2]" 2 c"[3]" 3 c"[4]" 4 c"[5]" 5 c"[6]" c"[7]")
                  contentLeft
                  50.0
                  15.0
                  tint)
+      (begin-scissor (+ contentLeft 38.0) 44.0 (- (cast f64 (- screenWidth 129)) (+ contentLeft 38.0)) 28.0)
       (draw-text (field state monoMedium)
                  (display-node-title state project node)
                  (+ contentLeft 38.0)
                  50.0
                  15.0
                  (color 223 229 236))
+      (raylib.EndScissorMode)
       (stroke-rectangle (cast f64 (- screenWidth 117))
                         45.0
                         97.0
@@ -1707,6 +1743,34 @@
                  (color 61 69 79))
       0)))
 
+(defn draw-creation-banner [(state AppState) (screenWidth i64)] (-> i64)
+  (let [failed (= (load (field state creationState)) 3)
+        center (/ (cast f64 (+ LEFT_WIDTH screenWidth)) 2.0)
+        width 420.0
+        left (- center (/ width 2.0))
+        pulse (+ 0.5 (* 0.5 (sin (* (raylib.GetTime) 5.0))))
+        tint (if failed (color 211 91 85) (color 224 165 58))]
+    (do
+      (fill-rectangle left 76.0 width 38.0 (if failed (color 26 12 12) (color 20 16 10)))
+      (stroke-rectangle left 76.0 width 38.0 1.0 tint)
+      (fill-rectangle (+ left 14.0)
+                      90.0
+                      8.0
+                      8.0
+                      (color-alpha (if failed 211 224)
+                                   (if failed 91 165)
+                                   (if failed 85 58)
+                                   (+ 80 (cast i64 (* 175.0 pulse)))))
+      (draw-text (field state monoMedium)
+                 (if failed
+                   c"WORKFLOW CREATION FAILED - SEE .flowline/create.events"
+                   c"CREATING WORKFLOW - THE CREATOR AGENT IS WORKING...")
+                 (+ left 32.0)
+                 88.0
+                 9.5
+                 tint)
+      0)))
+
 (defn draw-app [(state (mut AppState)) (input InputFrame) (screenWidth i64) (screenHeight i64)] (-> i64)
   (do
     (raylib.ClearBackground (color 7 10 14))
@@ -1719,6 +1783,10 @@
           (draw-center state screenWidth screenHeight)
           (draw-right (mut state) input screenWidth screenHeight)
           0)))
+    (if (and (= (load (field state creationOpen)) 0)
+             (or (= (load (field state creationState)) 1) (= (load (field state creationState)) 3)))
+      (draw-creation-banner state screenWidth)
+      0)
     0))
 
 (defn run-interface [] (-> i64)
@@ -1989,6 +2057,14 @@
       (raylib.EndMode2D)
       (raylib.TakeScreenshot c"interface-empty.png")
       (raylib.EndDrawing)
+      (store! (field state creationState) 1)
+      (raylib.BeginDrawing)
+      (raylib.BeginMode2D (load camera))
+      (draw-app (mut state) input screenWidth screenHeight)
+      (raylib.EndMode2D)
+      (raylib.TakeScreenshot c"interface-creating.png")
+      (raylib.EndDrawing)
+      (store! (field state creationState) 0)
       (raylib.UnloadFont (load (field state mono)))
       (raylib.UnloadFont (load (field state monoMedium)))
       (raylib.UnloadFont (load (field state sans))))
