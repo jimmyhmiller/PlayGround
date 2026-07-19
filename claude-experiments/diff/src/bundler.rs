@@ -19,7 +19,18 @@ type SharedModuleId = Arc<str>;
 
 #[derive(Debug, Clone)]
 struct ModuleState {
+    /// Identity of the module's SOURCE input: for a regular module the hash of the
+    /// file bytes (drives the "skip re-transform if unchanged" fast path and the
+    /// rebuild source-change check); for a virtual/special module the hash of its
+    /// synthesized code. NOT the render-cache key — see `code_hash`.
     hash: u64,
+    /// Identity of the module's TRANSFORMED output — the bytes that actually land
+    /// in a rendered chunk. The per-chunk render cache keys on this, so a source
+    /// edit that leaves the transformed output unchanged (e.g. editing a route
+    /// component whose body was already split into its own chunk, leaving the
+    /// reference module byte-identical) reuses the chunk instead of needlessly
+    /// re-rendering it.
+    code_hash: u64,
     dependencies: Vec<(String, DenseModuleId, DependencyDemand)>,
     pruned_imports: HashSet<String>,
     source: SharedModuleId,
@@ -38,6 +49,7 @@ struct ModuleState {
 
 struct LoadedModule {
     hash: u64,
+    code_hash: u64,
     dependencies: Vec<(String, SharedModuleId, DependencyDemand)>,
     pruned_imports: HashSet<String>,
     source: SharedModuleId,
@@ -322,6 +334,12 @@ pub struct EmitSummary {
     pub javascript_files: usize,
     pub css_files: usize,
     pub asset_files: usize,
+    /// How many chunks this emit actually re-rendered (vs. reused byte-for-byte
+    /// from the per-chunk render cache). Zero for a from-scratch `EmitSummary::of`
+    /// walk; set by [`Bundler::emit_public`]/[`Bundler::emit_server`] from the
+    /// underlying [`EmitStats`]. This is the incrementality signal a long-lived
+    /// dev server reports per edit (a leaf edit re-renders exactly one chunk).
+    pub rendered_chunks: usize,
 }
 
 impl EmitSummary {
@@ -336,6 +354,7 @@ impl EmitSummary {
             javascript_files: 0,
             css_files: 0,
             asset_files: 0,
+            rendered_chunks: 0,
         };
         let mut stack = vec![output_dir.to_path_buf()];
         while let Some(directory) = stack.pop() {
@@ -512,6 +531,20 @@ impl Bundler {
         ))
     }
 
+    /// Whether `path` is already a loaded module in this environment's graph.
+    /// A long-lived dev server uses this to distinguish an EDIT to an existing
+    /// module (supported: incremental rebuild) from a NEW file appearing
+    /// (unsupported by the full-page-reload slice — it needs route-tree
+    /// regeneration), so the latter can hard-error instead of silently no-op'ing.
+    pub fn is_known_module(&self, path: &Path) -> bool {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let id = module_id(&path);
+        self.indices
+            .get(id.as_ref())
+            .and_then(|&index| self.modules[index].as_ref())
+            .is_some()
+    }
+
     pub fn rebuild_path(&mut self, path: &Path) -> Result<BuildUpdate, String> {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let id = module_id(&path);
@@ -547,8 +580,56 @@ impl Bundler {
             });
         }
 
-        let new = self.load_module(&path, &mut diagnostics)?;
-        if old.hash != new.hash {
+        let mut transformed_modules =
+            self.reload_known_module(index, id.as_ref(), &path, &mut delta, &mut diagnostics)?;
+
+        // Derived virtual modules read their source from this same physical file —
+        // notably the route `?tsr-split=<target>` chunks, whose actual component /
+        // loader bodies live in the file that just changed. A physical-file edit
+        // must therefore re-derive every such sibling, or the split chunk on disk
+        // would keep the pre-edit body while the reference module (which does NOT
+        // contain the body) reports "unchanged". Each sibling is loaded from its
+        // full id string (which carries the loader query).
+        for (sibling_index, sibling_id) in self.derived_virtual_siblings(id.as_ref()) {
+            transformed_modules += self.reload_known_module(
+                sibling_index,
+                &sibling_id,
+                Path::new(&sibling_id),
+                &mut delta,
+                &mut diagnostics,
+            )?;
+        }
+
+        Ok(BuildUpdate {
+            delta,
+            transformed_modules,
+            diagnostics,
+        })
+    }
+
+    /// Reload one already-known module (dense `index`, string `id`, and the
+    /// `load_path` the loader reads — for a query-bearing virtual module this is
+    /// its full id string). Diffs the reloaded hash and dependency edges into
+    /// `delta` and discovers any newly-referenced modules. Returns the count of
+    /// modules (re)transformed (this one plus any newly discovered dependency).
+    fn reload_known_module(
+        &mut self,
+        index: usize,
+        id: &str,
+        load_path: &Path,
+        delta: &mut GraphDelta,
+        diagnostics: &mut Vec<String>,
+    ) -> Result<usize, String> {
+        let Some(old) = self.modules[index].clone() else {
+            return Ok(0);
+        };
+        let new = self.load_module(load_path, diagnostics)?;
+        // "Changed" means the module's EMITTED output changed (so its chunk must be
+        // re-rendered) — not merely that its source text moved. A route edit whose
+        // body was split into another chunk leaves the reference module's output
+        // byte-identical, so it is correctly not marked changed and its (large)
+        // entry chunk is reused.
+        if old.code_hash != new.code_hash {
             delta.changed.insert(id.to_string());
         }
         let old_edges = old
@@ -583,14 +664,27 @@ impl Bundler {
             .map(|dependency| self.ids[*dependency].clone())
             .collect::<Vec<_>>();
         self.modules[index] = Some(new);
-        let transformed_modules =
-            1 + self.discover_from(new_paths, &mut delta, &mut diagnostics, true)?;
+        Ok(1 + self.discover_from(new_paths, delta, diagnostics, true)?)
+    }
 
-        Ok(BuildUpdate {
-            delta,
-            transformed_modules,
-            diagnostics,
-        })
+    /// Every currently-loaded module whose loader id has the same filesystem path
+    /// as `path_id` but carries a query or fragment — i.e. a virtual module
+    /// derived from that physical file (a `?tsr-split=*` route chunk, a `?url`
+    /// asset, a `?raw` inline). These must be re-derived when the physical file
+    /// changes. Returns `(dense index, full id string)` pairs.
+    fn derived_virtual_siblings(&self, path_id: &str) -> Vec<(DenseModuleId, String)> {
+        self.ids
+            .iter()
+            .enumerate()
+            .filter(|(index, id)| {
+                self.modules[*index].is_some() && {
+                    let resource = ResourceId::parse(id.as_ref());
+                    (resource.query.is_some() || resource.fragment.is_some())
+                        && resource.path == path_id
+                }
+            })
+            .map(|(index, id)| (index, id.to_string()))
+            .collect()
     }
 
     pub fn emit(&self, reachable: &BTreeSet<ModuleId>, output: &Path) -> Result<EmitStats, String> {
@@ -632,7 +726,9 @@ impl Bundler {
         let public_dir = output_root.join("public");
         let stats = self.emit_environment(reachable, &public_dir, "client.js", options)?;
         prune_stale_files(&public_dir, &stats.written)?;
-        EmitSummary::of(&public_dir)
+        let mut summary = EmitSummary::of(&public_dir)?;
+        summary.rendered_chunks = stats.rendered_chunks;
+        Ok(summary)
     }
 
     /// Emits the server (SSR) build into `<output_root>/server/` as Node ESM
@@ -667,7 +763,9 @@ impl Bundler {
         // is recomputed afterwards so it counts the runtime files too.
         stats.written.extend(write_server_runtime_entry(&server_dir)?);
         prune_stale_files(&server_dir, &stats.written)?;
-        EmitSummary::of(&server_dir)
+        let mut summary = EmitSummary::of(&server_dir)?;
+        summary.rendered_chunks = stats.rendered_chunks;
+        Ok(summary)
     }
 
     /// Emits the environment's entry chunk (named `entry_file`, whose extension —
@@ -925,7 +1023,12 @@ impl Bundler {
             dense.hash(&mut hasher);
             match self.modules[dense].as_ref() {
                 Some(module) => {
-                    module.hash.hash(&mut hasher);
+                    // Key on the TRANSFORMED-output identity, not the source hash:
+                    // a chunk whose members emit byte-identical output is reused
+                    // even if a member's source text changed (e.g. a route edit
+                    // whose body lives in a split chunk leaves the reference module
+                    // byte-identical).
+                    module.code_hash.hash(&mut hasher);
                     hash_optional_id(&mut hasher, runtime_ids[dense]);
                     hash_export_demand(&mut hasher, &global_demands[dense]);
                     for (specifier, target, demand) in &module.dependencies {
@@ -1354,6 +1457,7 @@ impl Bundler {
                 }
                 self.modules[source] = Some(ModuleState {
                     hash: loaded.hash,
+                    code_hash: loaded.code_hash,
                     dependencies,
                     pruned_imports: loaded.pruned_imports,
                     source: loaded.source,
@@ -1403,6 +1507,7 @@ impl Bundler {
                 .collect();
             return Ok(ModuleState {
                 hash: special.hash,
+                code_hash: special.hash,
                 dependencies,
                 pruned_imports: resolved.pruned_imports,
                 source: id.clone(),
@@ -1431,6 +1536,7 @@ impl Bundler {
                 .collect();
             return Ok(ModuleState {
                 hash: special.hash,
+                code_hash: special.hash,
                 dependencies,
                 pruned_imports: resolved.pruned_imports,
                 source: id.clone(),
@@ -1476,8 +1582,10 @@ impl Bundler {
             .map(|(specifier, target, demand)| (specifier, self.intern(target), demand))
             .collect();
 
+        let code_hash = content_hash(transformed.code.as_bytes());
         Ok(ModuleState {
             hash,
+            code_hash,
             dependencies,
             pruned_imports: resolved_dependencies.pruned_imports,
             source: Arc::from(source),
@@ -2640,6 +2748,7 @@ fn load_uncached(
         );
         return Ok(LoadedModule {
             hash: special.hash,
+            code_hash: special.hash,
             dependencies: resolved.dependencies,
             pruned_imports: resolved.pruned_imports,
             source: Arc::from(id.as_ref()),
@@ -2665,6 +2774,7 @@ fn load_uncached(
         );
         return Ok(LoadedModule {
             hash: special.hash,
+            code_hash: special.hash,
             dependencies: resolved.dependencies,
             pruned_imports: resolved.pruned_imports,
             source: Arc::from(id.as_ref()),
@@ -2682,6 +2792,7 @@ fn load_uncached(
     frontend_profile::finish(Phase::Read, read_started);
     let hash = content_hash(source.as_bytes());
     let transformed = transform_module(path, &source, target);
+    let code_hash = content_hash(transformed.code.as_bytes());
     let mut diagnostics = transformed
         .diagnostics
         .iter()
@@ -2697,6 +2808,7 @@ fn load_uncached(
     );
     Ok(LoadedModule {
         hash,
+        code_hash,
         dependencies: dependencies.dependencies,
         pruned_imports: dependencies.pruned_imports,
         source: Arc::from(source),

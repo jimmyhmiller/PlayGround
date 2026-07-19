@@ -1,6 +1,106 @@
 # TanStack implementation status
 
-Updated: 2026-07-18 (production source maps composed through the minify pass landed)
+Updated: 2026-07-18 (dev server: long-lived live-rebuild + full-page browser reload landed)
+
+## Dev server: long-lived live-rebuild + full-page browser reload (landed)
+
+`diffpack dev <project-root> [port]` is a long-lived development server that keeps
+a `Bundler` (plus its reachability session) alive PER ENVIRONMENT and re-emits on
+file change. This is where the already-landed incremental emit (per-chunk render
+cache, incremental `emit_public`/`emit_server`) is finally exercised across edits
+from a single process — the payoff the incremental-emit note said "only lands once
+the dev server + HMR slice keeps a `Bundler` alive across edits and re-emits on
+file change." Scope is **full-page live reload only** (see deferred list below).
+
+- **Long-lived, client-before-server builds.** On startup it runs the client build
+  (`emit_public` + persist `client-manifest.json`) then the server build (register
+  the `tanstack-start-manifest:v` and `#tanstack-start-server-fn-resolver` virtual
+  modules, `emit_server`) exactly as `build-app` does, but retains BOTH bundlers.
+  The mandatory client-before-server order is preserved (the server manifest needs
+  the finished client chunk URLs).
+- **Node runs the app; the reload channel is diffpack's.** The emitted
+  `server/index.mjs` (the app's own SSR runtime, NOT the build path) boots as a
+  child Node process on an internal loopback port. A diffpack-native reverse proxy
+  (`src/dev_server.rs`, std-only HTTP: no new dependency) sits on the public dev
+  port, forwards every request to the Node child, and injects a tiny SSE
+  live-reload client into served HTML. The injected `<script>` self-removes
+  synchronously (like TanStack Start's own inline bootstrap scripts) so it leaves
+  no foreign DOM node for React to reconcile — hydration stays clean.
+- **Incremental rebuild loop.** `notify` watches `src/`, coalescing atomic-save
+  bursts. On a module edit: incrementally `rebuild_path` the client bundler ->
+  incremental `emit_public` -> re-persist `client-manifest.json` -> incrementally
+  `rebuild_path` the server bundler -> `emit_server` -> restart the Node SSR child
+  -> push a full-page reload over the SSE channel.
+- **Derived-virtual-module invalidation (correctness fix).** A route file's actual
+  component/loader bodies live in its `?tsr-split=<target>` virtual chunks, which
+  are separate graph nodes. `rebuild_path` now re-derives every virtual sibling of
+  an edited physical file (same path, query-bearing id), so a route-component edit
+  actually updates the split chunk on disk instead of leaving it stale. Without
+  this the reference module (which no longer holds the body) reported "unchanged"
+  and the served output never changed — a real incremental-correctness bug the dev
+  oracle caught.
+- **Render cache keyed on EMITTED output, not source (incrementality fix).** Each
+  module now carries a `code_hash` (hash of its transformed output) distinct from
+  its source `hash`; the per-chunk render cache and the "changed" signal key on
+  `code_hash`. So a route-component edit — whose body is split into its own chunk,
+  leaving the large entry (`client.js`) reference module byte-identical — reuses
+  the entry chunk and re-renders ONLY the one split chunk. Before this fix the
+  source-hash key needlessly re-rendered the 43k-line entry on every route edit.
+- **Live incremental instrumentation.** Each edit prints a parseable line —
+  `client transformed=N changed=M rendered_chunks=K | server ...` — where `changed`
+  is the sharp incremental-transform signal and `rendered_chunks` the
+  incremental-emit signal. For a leaf/route-component edit it is `changed=1`,
+  `rendered_chunks=1`: the incremental-emit thesis guard exercised LIVE from a
+  long-lived process for the first time.
+- **Unsupported edit classes are hard errors, not silent/partial rebuilds.** A
+  config change (`vite.config.ts`/`tsconfig*`/`package.json`), a route-tree change
+  (`routeTree.gen.ts`), or a new/deleted file (a module in neither graph) is a
+  clear hard error naming exactly what is unsupported. Deferred as documented
+  follow-ons: React Fast Refresh / state-preserving HMR, CSS hot-swap without
+  reload, route-tree regeneration on add/rename, WebSocket-driven partial updates,
+  error overlays. This slice is full-page live reload only.
+
+Verified (all six gate groups, green):
+
+1. `cargo test --release`: 89 lib (incl. 5 new `dev_server::tests` — HTML reload
+   injection, chunked decode, response parse) + 4 `oracle_incremental` (1
+   `#[ignore]`d) + 2 tailwind + 1 thesis_memory — all pass.
+2. `cargo clippy --release --all-targets -- -D warnings`: clean (exit 0).
+3. Fresh `build-app . client` (27 chunks, `client-manifest.json` with 14 routes) +
+   `. ssr` (37 server `.mjs`), strict `npm run acceptance:diffpack --strict`:
+   **13/13** (dev server is additive; cold `build-app` output is byte-identical — a
+   cold process starts with an empty render cache, so the `code_hash` key change
+   never alters emitted bytes).
+4. Thesis guards: `thesis_memory` PASS, all three `bundle_benchmark::thesis_guards`
+   PASS, `oracle_incremental` byte parity PASS.
+5. Browser (real headless Chrome via puppeteer-core + system Chrome): the new
+   `dev-check.mjs` (`npm run browser:dev`) is **10/10** — it starts `diffpack dev`,
+   asserts `Welcome Home!!!` SSR + hydration + injected reload client, EDITS
+   `src/routes/index.tsx`'s greeting, awaits the automatic full-page reload (the
+   in-page window probe is cleared, proving a real document reload not a partial
+   swap), and asserts the NEW greeting is server-rendered AND still hydrates clean
+   with zero JS errors and zero server leaks. In the same run the live dev-loop
+   instrumentation from the long-lived process reads
+   `client transformed=2 changed=1 rendered_chunks=1`: the edit re-transformed the
+   edited module plus its derived `?tsr-split` sibling (transformed=2), changed
+   exactly one module's emitted output (`changed=1`), and re-rendered exactly one
+   client chunk (`rendered_chunks=1`) — the incremental-emit thesis exercised LIVE.
+   On the clean-rebuilt output the existing browser gates are unchanged: hydration
+   7/7, serverfn 7/7, tailwind 9/9, routes 60/60;
+   `grep -rl async_hooks .diffpack-output/public` empty; `index.tsx` restored.
+6. Benchmark non-regression: `bundle-scale-memory 2000 4 200` -> 3322.3
+   bytes/module (baseline ~3313; the +~9 bytes is the new per-module `code_hash`
+   field — well under the 16000 guard), `transformed_per_edit_max`=1, edit growth
+   0.2 KB. `oracle/benchmark.mjs` diffpack incremental **8 ms** vs Rolldown
+   incremental **150 ms** (~19x), diffpack cold 167 ms vs Rolldown cold 144 ms —
+   no regression.
+
+**Next remaining gap.** This slice is full-page live reload only. The next dev-
+experience increments are React Fast Refresh / state-preserving HMR (swap a module
+without a document reload), CSS hot-swap without reload, route-tree regeneration on
+file add/rename/delete (today a hard error), WebSocket-driven partial updates, and
+an in-browser error overlay. Each is a currently-hard-errored edit class becoming a
+real incremental path.
 
 ## Production source maps, composed through the minify pass (landed)
 
@@ -932,9 +1032,9 @@ The incremental emit is on the future dev-server/HMR hot path; the `build-app`
 CLI is a cold process per invocation, so it still renders every chunk once (and
 prunes any stale output), but the byte-identical result is unchanged.
 
-**Next remaining gap.** Nothing exercises the incremental emit path from a
-long-lived process yet — the payoff (a leaf edit re-rendering one chunk in
-~7.78 ms) only lands once the dev server + HMR slice keeps a `Bundler` alive
-across edits and re-emits on file change. That, plus production minification and
-source maps, is the remaining production-hardening surface (driven by the
-`diffpack-production-hardening` workflow).
+**Next remaining gap.** RESOLVED. The payoff (a leaf edit re-rendering one chunk
+in single-digit ms) now lands from a long-lived process: the `diffpack dev` server
+keeps client and server `Bundler`s alive across edits and re-emits on file change,
+verified LIVE (`client transformed=2 changed=1 rendered_chunks=1`). See "Dev
+server: long-lived live-rebuild + full-page browser reload" at the top. Production
+minification and source maps have also landed (see their sections above).

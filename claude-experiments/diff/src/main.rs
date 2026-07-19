@@ -334,12 +334,40 @@ fn run() -> Result<(), String> {
                 .unwrap_or_else(|| PathBuf::from("dist/bundle.js"));
             watch_bundle(Path::new(&entry), &output)
         }
+        Some("dev") => {
+            let project_root = arguments.next().ok_or_else(usage)?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let no_minify = remaining
+                .iter()
+                .any(|value| value.to_str() == Some("--no-minify"));
+            let source_map = remaining
+                .iter()
+                .any(|value| value.to_str() == Some("--sourcemap"));
+            // Optional explicit port; positional non-flag argument, default 3000.
+            let port = remaining
+                .iter()
+                .find(|value| !value.to_string_lossy().starts_with("--"))
+                .and_then(|value| value.to_str())
+                .map(|value| {
+                    value
+                        .parse::<u16>()
+                        .map_err(|error| format!("invalid dev port: {error}"))
+                })
+                .transpose()?
+                .unwrap_or(3000);
+            diffpack::dev_server::run(diffpack::dev_server::DevOptions {
+                project_root: PathBuf::from(&project_root),
+                port,
+                minify: !no_minify,
+                source_map,
+            })
+        }
         _ => Err(usage()),
     }
 }
 
 fn usage() -> String {
-    "usage: diffpack build-app <project-root> [client|ssr|nitro] [--no-minify] [--sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
+    "usage: diffpack build-app <project-root> [client|ssr|nitro] [--no-minify] [--sourcemap] | diffpack dev <project-root> [port] [--no-minify] [--sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
 }
 
 fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mode: &str) {

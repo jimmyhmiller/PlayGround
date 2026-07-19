@@ -1,6 +1,7 @@
 pub mod bundle_benchmark;
 pub mod bundler;
 pub mod config;
+pub mod dev_server;
 mod frontend_profile;
 pub mod manifest;
 pub mod memory;

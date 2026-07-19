@@ -13,6 +13,8 @@
     "browser:serverfn": "node serverfn-check.mjs",
     "browser:tailwind": "node tailwind-check.mjs",
     "browser:routes": "node routes-check.mjs",
+    "browser:sourcemap": "node sourcemap-check.mjs",
+    "browser:dev": "node dev-check.mjs",
     "browser:all": "node hydration-check.mjs && node serverfn-check.mjs && node tailwind-check.mjs && node routes-check.mjs",
     "preview": "vite preview",
     "start": "node .output/server/index.mjs"
