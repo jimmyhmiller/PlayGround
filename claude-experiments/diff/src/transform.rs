@@ -9,7 +9,7 @@ use oxc_ast::{
     },
     builder::{AstBuilder, NONE},
 };
-use oxc_ast_visit::{VisitMut, walk_mut};
+use oxc_ast_visit::{Visit, VisitMut, walk_mut};
 use oxc_codegen::{Codegen, Context, Gen};
 use oxc_ecmascript::BoundNames;
 use oxc_parser::Parser;
@@ -29,6 +29,52 @@ pub struct TransformResult {
     pub dependencies: Vec<String>,
     pub dependency_demands: Vec<DependencyDemand>,
     pub flat_module: Option<FlatModule>,
+    pub liveness: ModuleLiveness,
+}
+
+/// The export/import structure of a module, at the granularity the generic
+/// dead-module elimination pass ([`crate::bundler`]) needs to compute
+/// export-level liveness across the graph.
+///
+/// The distinction that makes barrel tree-shaking possible is between a **body
+/// use** (an imported binding referenced in real module code — a demand that
+/// applies unconditionally once the module runs) and a **re-export** (an
+/// imported binding merely forwarded as one of this module's own exports — a
+/// demand that applies only if that export is itself used). A module reached
+/// only through a barrel whose re-exported binding no live module uses places no
+/// body-use demand on its source, so a `sideEffects:false` source becomes
+/// droppable.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct ModuleLiveness {
+    /// Every explicit export name of this module (locally-defined exports,
+    /// `default`, named re-exports, and `export * as ns`). Bare `export *` adds
+    /// no name here — it is tracked in [`Self::star_reexports`].
+    pub exports: Vec<String>,
+    /// Specifiers of bare `export * from S` — this module re-exports all of S's
+    /// names.
+    pub star_reexports: Vec<String>,
+    /// Re-export edges: this module's export `exported` forwards the target's
+    /// `imported` binding. `imported == "*"` is a namespace re-export
+    /// (`export * as ns from S`).
+    pub reexports: Vec<ReExport>,
+    /// Genuine body-level demand per dependency specifier (names referenced in
+    /// real code, plus `all` for a namespace binding used in the body). Applies
+    /// unconditionally once this module is live.
+    pub body_uses: Vec<BodyUse>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ReExport {
+    pub specifier: String,
+    pub imported: String,
+    pub exported: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct BodyUse {
+    pub specifier: String,
+    pub all: bool,
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
@@ -94,6 +140,7 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
             dependencies: Vec::new(),
             dependency_demands: Vec::new(),
             flat_module: None,
+            liveness: ModuleLiveness::default(),
         };
     }
 
@@ -120,6 +167,7 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
                 dependencies: Vec::new(),
                 dependency_demands: Vec::new(),
                 flat_module: None,
+                liveness: ModuleLiveness::default(),
             };
         }
     };
@@ -168,7 +216,7 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
     // transform deletes references, scoping must be rebuilt so the demand pass
     // sees the imports as unreferenced.
     let mut scoping = transformed.scoping;
-    if apply_env_transform(&allocator, &mut program, &scoping, target) {
+    if apply_env_transform(&allocator, &mut program, &scoping, target, path) {
         scoping = SemanticBuilder::new()
             .with_excess_capacity(2.0)
             .with_enum_eval(true)
@@ -176,6 +224,11 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
             .semantic
             .into_scoping();
     }
+
+    // Capture the module's export/import structure BEFORE `lower_module_ast`
+    // rewrites import references, so re-export edges and body uses are read from
+    // the original ESM shape.
+    let liveness = collect_liveness(&program, &scoping);
 
     let lower_started = frontend_profile::start();
     let (code, is_esm, dependencies, dependency_demands, flat_module) =
@@ -188,6 +241,209 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
         dependencies,
         dependency_demands,
         flat_module,
+        liveness,
+    }
+}
+
+/// Collects the [`ModuleLiveness`] structure the cross-module dead-module
+/// elimination pass needs: which of this module's own exports forward an
+/// imported binding (a re-export, conditional on that export being used) versus
+/// which imported names are referenced in real module code (a body use, applied
+/// unconditionally once the module runs).
+fn collect_liveness(program: &Program<'_>, scoping: &Scoping) -> ModuleLiveness {
+    // Map each imported *local* binding to where it came from, so a bare
+    // `export { local }` (no source) can be recognised as a re-export.
+    let mut named_imports: HashMap<String, (String, String)> = HashMap::new();
+    let mut namespace_imports: HashMap<String, String> = HashMap::new();
+    let mut default_imports: HashMap<String, String> = HashMap::new();
+    let mut import_symbols: HashMap<String, SymbolId> = HashMap::new();
+    for statement in &program.body {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        let specifier = declaration.source.value.to_string();
+        let Some(specifiers) = &declaration.specifiers else {
+            continue;
+        };
+        for import in specifiers {
+            let local = import.local().name.to_string();
+            import_symbols.insert(local.clone(), import.local().symbol_id());
+            match import {
+                ImportDeclarationSpecifier::ImportSpecifier(import) => {
+                    named_imports
+                        .insert(local, (specifier.clone(), import.imported.name().to_string()));
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {
+                    namespace_imports.insert(local, specifier.clone());
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => {
+                    default_imports.insert(local, specifier.clone());
+                }
+            }
+        }
+    }
+
+    // Symbols referenced in real module code — everything except the local names
+    // inside a bare (no-source) `export { ... }` specifier list, which are pure
+    // forwarding and must not be treated as a body use.
+    let mut body = BodyUseCollector {
+        scoping,
+        used: std::collections::HashSet::new(),
+    };
+    body.visit_program(program);
+
+    let mut liveness = ModuleLiveness::default();
+    // Accumulate body-use demand per specifier.
+    let mut body_all: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut body_names: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for (local, symbol) in &import_symbols {
+        if !body.used.contains(symbol) {
+            continue;
+        }
+        if let Some((specifier, imported)) = named_imports.get(local) {
+            body_names
+                .entry(specifier.clone())
+                .or_default()
+                .insert(imported.clone());
+        } else if let Some(specifier) = namespace_imports.get(local) {
+            body_all.insert(specifier.clone());
+        } else if let Some(specifier) = default_imports.get(local) {
+            body_names
+                .entry(specifier.clone())
+                .or_default()
+                .insert("default".to_string());
+        }
+    }
+
+    for statement in &program.body {
+        match statement {
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(source) = &export.source {
+                    // `export { imported as exported } from S` — a direct
+                    // re-export edge for each specifier.
+                    let specifier = source.value.to_string();
+                    for export_specifier in &export.specifiers {
+                        let exported = export_specifier.exported.name().to_string();
+                        liveness.exports.push(exported.clone());
+                        liveness.reexports.push(ReExport {
+                            specifier: specifier.clone(),
+                            imported: export_specifier.local.name().to_string(),
+                            exported,
+                        });
+                    }
+                } else if let Some(declaration) = &export.declaration {
+                    declaration.bound_names(&mut |identifier| {
+                        liveness.exports.push(identifier.name.to_string());
+                    });
+                } else {
+                    // `export { local as exported }` (no source): a re-export when
+                    // `local` is an imported binding, otherwise a local export.
+                    for export_specifier in &export.specifiers {
+                        let local = export_specifier.local.name().to_string();
+                        let exported = export_specifier.exported.name().to_string();
+                        liveness.exports.push(exported.clone());
+                        if let Some((specifier, imported)) = named_imports.get(&local) {
+                            liveness.reexports.push(ReExport {
+                                specifier: specifier.clone(),
+                                imported: imported.clone(),
+                                exported,
+                            });
+                        } else if let Some(specifier) = namespace_imports.get(&local) {
+                            liveness.reexports.push(ReExport {
+                                specifier: specifier.clone(),
+                                imported: "*".to_string(),
+                                exported,
+                            });
+                        } else if let Some(specifier) = default_imports.get(&local) {
+                            liveness.reexports.push(ReExport {
+                                specifier: specifier.clone(),
+                                imported: "default".to_string(),
+                                exported,
+                            });
+                        }
+                    }
+                }
+            }
+            Statement::ExportDefaultDeclaration(_) => {
+                liveness.exports.push("default".to_string());
+            }
+            Statement::ExportAllDeclaration(export) => {
+                let specifier = export.source.value.to_string();
+                if let Some(exported) = &export.exported {
+                    // `export * as ns from S` — the whole namespace of S under one
+                    // export name.
+                    let name = exported.name().to_string();
+                    liveness.exports.push(name.clone());
+                    liveness.reexports.push(ReExport {
+                        specifier,
+                        imported: "*".to_string(),
+                        exported: name,
+                    });
+                } else {
+                    liveness.star_reexports.push(specifier);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    liveness.body_uses = body_all
+        .iter()
+        .map(|specifier| BodyUse {
+            specifier: specifier.clone(),
+            all: true,
+            names: body_names
+                .get(specifier)
+                .map(|names| names.iter().cloned().collect())
+                .unwrap_or_default(),
+        })
+        .chain(
+            body_names
+                .iter()
+                .filter(|(specifier, _)| !body_all.contains(*specifier))
+                .map(|(specifier, names)| BodyUse {
+                    specifier: specifier.clone(),
+                    all: false,
+                    names: names.iter().cloned().collect(),
+                }),
+        )
+        .collect();
+    liveness.exports.sort();
+    liveness.exports.dedup();
+    liveness
+}
+
+/// Collects the symbols referenced in real module code, deliberately skipping
+/// the `local` names inside a bare `export { ... }` specifier list (those are
+/// pure forwarding, tracked as re-exports, not body uses). An inline
+/// `export const x = expr` IS body code, so its initializer is still visited.
+struct BodyUseCollector<'s> {
+    scoping: &'s Scoping,
+    used: std::collections::HashSet<SymbolId>,
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for BodyUseCollector<'_> {
+    fn visit_export_named_declaration(
+        &mut self,
+        declaration: &oxc_ast::ast::ExportNamedDeclaration<'a>,
+    ) {
+        // Only the inline declaration (if any) is body code; the `specifiers`
+        // list is export forwarding and must not count as a body use.
+        if let Some(inner) = &declaration.declaration {
+            self.visit_declaration(inner);
+        }
+    }
+
+    fn visit_identifier_reference(
+        &mut self,
+        identifier: &oxc_ast::ast::IdentifierReference<'a>,
+    ) {
+        if let Some(reference_id) = identifier.reference_id.get()
+            && let Some(symbol) = self.scoping.get_reference(reference_id).symbol_id()
+        {
+            self.used.insert(symbol);
+        }
     }
 }
 
@@ -804,16 +1060,30 @@ fn apply_env_transform<'a>(
     program: &mut Program<'a>,
     scoping: &Scoping,
     target: Target,
+    path: &Path,
 ) -> bool {
     if target != Target::Client {
         return false;
     }
+    // A `@tanstack/*` package bundles these environment-directive helpers as
+    // *local* modules (`createServerOnlyFn` from `./envOnly.js`,
+    // `createIsomorphicFn` from `./createIsomorphicFn.js`), and its own modules
+    // import them by relative specifier rather than through the package name. The
+    // reference TanStack plugin matches these helpers by their well-known names
+    // regardless of import source; mirror that, but only inside a `@tanstack`
+    // package so a same-named helper in the user's own app is never rewritten.
+    let in_tanstack_package = path
+        .components()
+        .any(|component| component.as_os_str() == "@tanstack");
     let mut kinds: HashMap<SymbolId, EnvFn> = HashMap::new();
     for statement in &program.body {
         let Statement::ImportDeclaration(declaration) = statement else {
             continue;
         };
-        if !declaration.source.value.starts_with("@tanstack/") {
+        let specifier = declaration.source.value.as_str();
+        let is_directive_source = specifier.starts_with("@tanstack/")
+            || (in_tanstack_package && (specifier.starts_with("./") || specifier.starts_with("../")));
+        if !is_directive_source {
             continue;
         }
         let Some(specifiers) = &declaration.specifiers else {

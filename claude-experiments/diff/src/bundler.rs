@@ -11,7 +11,9 @@ use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::frontend_profile::{self, Phase};
 use crate::resource_id::{LoaderKind, ResourceId};
-use crate::transform::{DependencyDemand, FlatModule, FoldExpression, Target, transform_module};
+use crate::transform::{
+    DependencyDemand, FlatModule, FoldExpression, ModuleLiveness, Target, transform_module,
+};
 
 pub type ModuleId = String;
 type DenseModuleId = usize;
@@ -45,6 +47,19 @@ struct ModuleState {
     /// output for the runtime to resolve; a module with externals renders through
     /// the runtime path, since the flat path cannot bind an external.
     externals: Vec<String>,
+    /// Whether this module's nearest `package.json` authorizes dropping it when
+    /// none of its exports are used (`sideEffects:false`, or a `sideEffects` glob
+    /// list it does not match). `false` — the conservative default for the app's
+    /// own code, any package without the flag, and every synthesized module — means
+    /// the module is always kept when reachable. Consulted only by the export-level
+    /// dead-module elimination pass ([`Bundler::live_modules`]); never affects the
+    /// incremental reachability index.
+    droppable: bool,
+    /// The module's export/import structure for export-level liveness (which of
+    /// its exports forward an imported binding vs which imports are used in real
+    /// code). Empty for synthesized modules, which fall back to treating every
+    /// dependency as a body use.
+    liveness: ModuleLiveness,
 }
 
 struct LoadedModule {
@@ -59,6 +74,8 @@ struct LoadedModule {
     assets: Vec<AssetEmit>,
     css: Option<String>,
     externals: Vec<String>,
+    droppable: bool,
+    liveness: ModuleLiveness,
 }
 
 /// A static asset (e.g. a `?url` import target) that must be content-hashed and
@@ -804,6 +821,12 @@ impl Bundler {
         // Keys of every chunk this emit renders or reuses; entries not among them
         // are evicted at the end so the cache stays bounded to the live chunk set.
         let mut live_keys = HashSet::new();
+        // Generic, `sideEffects`-aware dead-module elimination: refine the
+        // module-level reachable set down to the export-level LIVE set before
+        // emit, so a reachable-but-unused `sideEffects:false` module (and its
+        // now-orphaned `node:` requires) never reaches the output. Deterministic,
+        // so incremental and full builds emit byte-identical bytes.
+        let reachable = self.live_modules(reachable);
         let reachable_dense = reachable
             .iter()
             .filter_map(|id| self.indices.get(id.as_str()).copied())
@@ -1104,6 +1127,10 @@ impl Bundler {
         base: &str,
     ) -> Result<crate::manifest::ClientRouteManifest, String> {
         let (stem, extension) = split_file_name(entry_file)?;
+        // The manifest must describe the SAME chunk set emit produces, so refine
+        // the reachable set through the identical dead-module elimination pass
+        // before deriving dynamic-import chunk roots.
+        let reachable = self.live_modules(reachable);
         let allowed = reachable
             .iter()
             .filter_map(|id| self.indices.get(id.as_str()).copied())
@@ -1466,6 +1493,8 @@ impl Bundler {
                     assets: loaded.assets,
                     css: loaded.css,
                     externals: loaded.externals,
+                    droppable: loaded.droppable,
+                    liveness: loaded.liveness,
                 });
             }
         }
@@ -1516,6 +1545,8 @@ impl Bundler {
                 assets: special.assets,
                 css: special.css,
                 externals: resolved.externals,
+                droppable: false,
+                liveness: ModuleLiveness::default(),
             });
         }
         // A loader (query, stylesheet, or asset) may claim this id before it is
@@ -1545,6 +1576,8 @@ impl Bundler {
                 assets: special.assets,
                 css: special.css,
                 externals: resolved.externals,
+                droppable: false,
+                liveness: ModuleLiveness::default(),
             });
         }
         let read_started = frontend_profile::start();
@@ -1583,6 +1616,7 @@ impl Bundler {
             .collect();
 
         let code_hash = content_hash(transformed.code.as_bytes());
+        let droppable = module_droppable(path, diagnostics);
         Ok(ModuleState {
             hash,
             code_hash,
@@ -1594,6 +1628,8 @@ impl Bundler {
             assets: Vec::new(),
             css: None,
             externals: resolved_dependencies.externals,
+            droppable,
+            liveness: transformed.liveness,
         })
     }
 
@@ -1837,10 +1873,24 @@ impl Bundler {
                 let module = self.modules[dense_index].as_ref()?;
                 let runtime_id = runtime_ids[dense_index]
                     .expect("a rendered module must have a deterministic runtime ID");
+                // A dependency the dead-module elimination pass dropped is no
+                // longer in the emitted set (no runtime id). This module was kept
+                // only because OTHER exports of it are live; it places no body-use
+                // demand on the dropped target, so every reference to it is a
+                // re-export getter the export demand already shakes away. Strip its
+                // `require(...)` line too (as a pruned import) and omit it from the
+                // require map, so the emitted module never references a module that
+                // was dropped from the graph.
+                let mut pruned_imports = module.pruned_imports.clone();
+                for (specifier, target, _) in &module.dependencies {
+                    if runtime_ids[*target].is_none() {
+                        pruned_imports.insert(specifier.clone());
+                    }
+                }
                 let code = shake_module_code(
                     &module.code,
                     &export_demands[dense_index],
-                    &module.pruned_imports,
+                    &pruned_imports,
                 );
                 let module_fragment = format!(
                     "{runtime_id}:function(module,exports,require,__toESM,__export,__reExport,__import,__dynamic,__esmNamespace,__seal){{\n{}\n}},\n",
@@ -1849,8 +1899,10 @@ impl Bundler {
                 let mut map_fragment = format!("{runtime_id}:{{");
                 let mut chunk_fragment = format!("{runtime_id}:{{");
                 for (specifier, target, demand) in &module.dependencies {
-                    let target_runtime_id = runtime_ids[*target]
-                        .expect("a reachable dependency must have a deterministic runtime ID");
+                    let Some(target_runtime_id) = runtime_ids[*target] else {
+                        // Dropped by dead-module elimination — not emitted.
+                        continue;
+                    };
                     map_fragment.push_str(&format!(
                         "{}:{target_runtime_id},",
                         quote(specifier)
@@ -2249,6 +2301,221 @@ const __newChunks={{{chunks}}};
     /// consumers frequently land in different chunks (e.g. a shared package index
     /// consumed by a route split), and a chunk-local demand would wrongly shake
     /// away exports the other chunk imports at runtime.
+    /// Computes the export-level LIVE subset of a module-level reachable set:
+    /// generic, `sideEffects`-aware dead-module elimination that matches
+    /// Rollup/esbuild semantics.
+    ///
+    /// A reachable module is live when it is the entry, a dynamic-import chunk
+    /// root reached from live code, a module whose `package.json` does NOT
+    /// authorize dropping it (so its side effects must run whenever a live module
+    /// imports it), or a module at least one of whose exports is used — directly
+    /// or transitively through re-export barrels — by another live module. The
+    /// pass iterates to a fixpoint; dropping a module can make its own
+    /// dependencies unused, which the worklist re-propagates.
+    ///
+    /// The distinction that makes barrel tree-shaking work is body use vs
+    /// re-export: an imported binding referenced in real module code
+    /// ([`ModuleLiveness::body_uses`]) places demand on its source
+    /// unconditionally once the module runs, whereas a binding merely forwarded
+    /// as one of this module's exports ([`ModuleLiveness::reexports`]) places
+    /// demand only when that export is itself used. A `sideEffects:false` module
+    /// reached ONLY through a barrel whose forwarded binding no live module uses
+    /// therefore receives no demand and is dropped.
+    ///
+    /// The result is a deterministic function of the graph, independent of
+    /// worklist order (all state grows monotonically), so a full build and an
+    /// incremental build of the same graph drop exactly the same modules — the
+    /// output stays byte-identical. This pass reads, and never mutates, the
+    /// incremental reachability index.
+    pub fn live_modules(&self, reachable: &BTreeSet<ModuleId>) -> BTreeSet<ModuleId> {
+        let module_count = self.modules.len();
+        let reachable: HashSet<DenseModuleId> = reachable
+            .iter()
+            .filter_map(|id| self.indices.get(id.as_str()).copied())
+            .filter(|&index| self.modules[index].is_some())
+            .collect();
+
+        let mut live = vec![false; module_count];
+        let mut used = vec![ExportDemand::default(); module_count];
+        let mut queue: VecDeque<DenseModuleId> = VecDeque::new();
+
+        fn mark_live(
+            index: DenseModuleId,
+            reachable: &HashSet<DenseModuleId>,
+            live: &mut [bool],
+            queue: &mut VecDeque<DenseModuleId>,
+        ) {
+            if reachable.contains(&index) && !live[index] {
+                live[index] = true;
+                queue.push_back(index);
+            }
+        }
+
+        fn add_used(
+            index: DenseModuleId,
+            all: bool,
+            names: &[String],
+            reachable: &HashSet<DenseModuleId>,
+            live: &mut [bool],
+            used: &mut [ExportDemand],
+            queue: &mut VecDeque<DenseModuleId>,
+        ) {
+            if !reachable.contains(&index) {
+                return;
+            }
+            let mut changed = false;
+            if all && !used[index].all {
+                used[index].all = true;
+                changed = true;
+            }
+            for name in names {
+                changed |= used[index].names.insert(name.clone());
+            }
+            if changed {
+                // A used export means the module's body must run to define it.
+                live[index] = true;
+                queue.push_back(index);
+            }
+        }
+
+        // Seed: the entry always runs, and keeps whatever it re-exports (an app
+        // entry is not a barrel, but this is the conservative, never-over-shake
+        // choice).
+        if reachable.contains(&self.entry) {
+            live[self.entry] = true;
+            used[self.entry].all = true;
+            queue.push_back(self.entry);
+        }
+
+        while let Some(source) = queue.pop_front() {
+            let Some(module) = self.modules[source].as_ref() else {
+                continue;
+            };
+            let targets: HashMap<&str, DenseModuleId> = module
+                .dependencies
+                .iter()
+                .map(|(specifier, target, _)| (specifier.as_str(), *target))
+                .collect();
+
+            // A dynamic import from live code roots its own chunk, which keeps
+            // its full namespace.
+            for (_, target, demand) in &module.dependencies {
+                if demand.dynamic {
+                    mark_live(*target, &reachable, &mut live, &mut queue);
+                    add_used(*target, true, &[], &reachable, &mut live, &mut used, &mut queue);
+                }
+            }
+
+            // Every static edge evaluates a module the flag does not authorize
+            // dropping, so its side effects run (this covers bare side-effect
+            // imports and re-exports of side-effectful modules alike).
+            for (_, target, demand) in &module.dependencies {
+                if !demand.dynamic
+                    && self.modules[*target].as_ref().is_some_and(|state| !state.droppable)
+                {
+                    mark_live(*target, &reachable, &mut live, &mut queue);
+                }
+            }
+
+            let liveness = &module.liveness;
+            let empty_liveness = liveness.exports.is_empty()
+                && liveness.reexports.is_empty()
+                && liveness.star_reexports.is_empty()
+                && liveness.body_uses.is_empty();
+            if empty_liveness {
+                // A synthesized module (route split, manifest, resolver) or any
+                // module without captured export structure keeps every static
+                // dependency it names — conservative, never over-shaking.
+                for (specifier, target, demand) in &module.dependencies {
+                    if !demand.dynamic {
+                        let _ = specifier;
+                        add_used(
+                            *target,
+                            demand.all,
+                            &demand.names,
+                            &reachable,
+                            &mut live,
+                            &mut used,
+                            &mut queue,
+                        );
+                    }
+                }
+                continue;
+            }
+
+            // Body uses apply unconditionally now that the module is live.
+            for body_use in &liveness.body_uses {
+                if let Some(&target) = targets.get(body_use.specifier.as_str()) {
+                    add_used(
+                        target,
+                        body_use.all,
+                        &body_use.names,
+                        &reachable,
+                        &mut live,
+                        &mut used,
+                        &mut queue,
+                    );
+                }
+            }
+
+            // Snapshot this module's used exports; `add_used` on other modules
+            // never shrinks it, and a self-update re-enqueues `source`.
+            let source_all = used[source].all;
+            let source_names = used[source].names.clone();
+
+            // A re-export forwards demand to its source only when the forwarded
+            // export is itself used.
+            for reexport in &liveness.reexports {
+                if (source_all || source_names.contains(&reexport.exported))
+                    && let Some(&target) = targets.get(reexport.specifier.as_str())
+                {
+                    if reexport.imported == "*" {
+                        add_used(target, true, &[], &reachable, &mut live, &mut used, &mut queue);
+                    } else {
+                        add_used(
+                            target,
+                            false,
+                            std::slice::from_ref(&reexport.imported),
+                            &reachable,
+                            &mut live,
+                            &mut used,
+                            &mut queue,
+                        );
+                    }
+                }
+            }
+
+            // A bare `export * from S` forwards a used name to S only when the
+            // name is not one this module defines or explicitly re-exports (those
+            // are already accounted for), i.e. it must have come from a star.
+            for specifier in &liveness.star_reexports {
+                let Some(&target) = targets.get(specifier.as_str()) else {
+                    continue;
+                };
+                if source_all {
+                    add_used(target, true, &[], &reachable, &mut live, &mut used, &mut queue);
+                } else {
+                    let names: Vec<String> = source_names
+                        .iter()
+                        .filter(|name| {
+                            name.as_str() != "default" && !liveness.exports.contains(name)
+                        })
+                        .cloned()
+                        .collect();
+                    if !names.is_empty() {
+                        add_used(target, false, &names, &reachable, &mut live, &mut used, &mut queue);
+                    }
+                }
+            }
+        }
+
+        live.iter()
+            .enumerate()
+            .filter(|(_, is_live)| **is_live)
+            .map(|(index, _)| self.ids[index].to_string())
+            .collect()
+    }
+
     fn export_demands(&self, sources: &[DenseModuleId]) -> Vec<ExportDemand> {
         let mut demands = vec![ExportDemand::default(); self.modules.len()];
         for &source in sources {
@@ -2758,6 +3025,8 @@ fn load_uncached(
             assets: special.assets,
             css: special.css,
             externals: resolved.externals,
+            droppable: false,
+            liveness: ModuleLiveness::default(),
         });
     }
     // A loader (query, stylesheet, or asset) may claim this id before it is ever
@@ -2784,6 +3053,8 @@ fn load_uncached(
             assets: special.assets,
             css: special.css,
             externals: resolved.externals,
+            droppable: false,
+            liveness: ModuleLiveness::default(),
         });
     }
     let read_started = frontend_profile::start();
@@ -2806,6 +3077,7 @@ fn load_uncached(
         &transformed.dependency_demands,
         &mut diagnostics,
     );
+    let droppable = module_droppable(path, &mut diagnostics);
     Ok(LoadedModule {
         hash,
         code_hash,
@@ -2818,7 +3090,23 @@ fn load_uncached(
         assets: Vec::new(),
         css: None,
         externals: dependencies.externals,
+        droppable,
+        liveness: transformed.liveness,
     })
+}
+
+/// Whether the module at `path` may be dropped when unused, per its nearest
+/// `package.json`'s `sideEffects` field. An unsupported `sideEffects` glob is a
+/// hard, specific error, surfaced as a build diagnostic; the module is then kept
+/// (treated as non-droppable), never silently mis-classified.
+fn module_droppable(path: &Path, diagnostics: &mut Vec<String>) -> bool {
+    match crate::side_effects::is_droppable(path) {
+        Ok(droppable) => droppable,
+        Err(error) => {
+            diagnostics.push(format!("{}: {error}", path.display()));
+            false
+        }
+    }
 }
 
 /// A non-JavaScript module produced by a loader: a query loader (`?url`, `?raw`),
@@ -4852,5 +5140,183 @@ mod tests {
         let emitted = fs::read_to_string(&manifest_chunk).unwrap();
         assert!(emitted.contains("tsrStartManifest"), "{emitted}");
         node_check(&manifest_chunk);
+    }
+
+    /// Writes a `sideEffects`-annotated package under `<root>/node_modules/<name>`.
+    /// `files` is `(relative path, source)`; `side_effects` is the raw JSON value
+    /// of the `package.json` `sideEffects` field (e.g. `"false"`, `"true"`,
+    /// `r#"["*.css"]"#`).
+    fn write_package(root: &Path, name: &str, side_effects: &str, files: &[(&str, &str)]) {
+        let package = root.join("node_modules").join(name);
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("package.json"),
+            format!(
+                "{{ \"name\": \"{name}\", \"version\": \"1.0.0\", \"main\": \"index.js\", \
+                 \"sideEffects\": {side_effects} }}"
+            ),
+        )
+        .unwrap();
+        for (relative, source) in files {
+            let path = package.join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(path, source).unwrap();
+        }
+    }
+
+    #[test]
+    fn dce_drops_a_barrel_reexported_module_no_live_module_uses() {
+        // A `sideEffects:false` package whose barrel re-exports two modules; the
+        // app uses only one. The unused re-exported module — and the
+        // side-effectful module it pulls (which imports a Node built-in) — must be
+        // dropped, exactly as Rollup/esbuild would.
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        write_package(
+            root,
+            "lib",
+            "false",
+            &[
+                (
+                    "index.js",
+                    "export { used } from './used.js';\nexport { unused } from './unused.js';\n",
+                ),
+                ("used.js", "export const used = 'USED';\n"),
+                (
+                    "unused.js",
+                    "import { AsyncLocalStorage } from 'node:async_hooks';\n\
+                     const store = new AsyncLocalStorage();\n\
+                     export const unused = store;\n",
+                ),
+            ],
+        );
+        fs::write(root.join("package.json"), r#"{ "name": "app" }"#).unwrap();
+        let entry = root.join("entry.js");
+        fs::write(
+            &entry,
+            "import { used } from 'lib';\nconsole.log(used);\n",
+        )
+        .unwrap();
+
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let live = bundler.live_modules(&reachable);
+
+        let contains = |set: &BTreeSet<String>, suffix: &str| {
+            set.iter().any(|id| id.ends_with(suffix))
+        };
+        // The barrel is reachable AND remains reachable, but `unused.js` is dead.
+        assert!(contains(&reachable, "lib/unused.js"), "reachable set: {reachable:?}");
+        assert!(
+            !contains(&live, "lib/unused.js"),
+            "the barrel-only, unused re-export must be dropped: {live:?}"
+        );
+        assert!(contains(&live, "lib/used.js"), "the used export must be kept: {live:?}");
+        assert!(contains(&live, "lib/index.js"), "the live barrel is kept: {live:?}");
+
+        // Emit and confirm the Node built-in the dead module pulled never ships.
+        let output = root.join("dist/bundle.js");
+        bundler.emit(&reachable, &output).unwrap();
+        let bundle = fs::read_to_string(&output).unwrap();
+        assert!(
+            !bundle.contains("node:async_hooks"),
+            "the dropped module's Node built-in must not ship: {bundle}"
+        );
+        assert!(bundle.contains("USED"), "the used export must ship: {bundle}");
+        node_check(&output);
+    }
+
+    #[test]
+    fn dce_keeps_a_side_effectful_module_and_a_used_module() {
+        // Two packages: one `sideEffects:true` (its module runs for effect even if
+        // nothing is imported from it) and one `sideEffects:false` whose export IS
+        // used. Both must be kept.
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        write_package(
+            root,
+            "effectful",
+            "true",
+            &[("index.js", "globalThis.__EFFECT__ = true;\n")],
+        );
+        write_package(
+            root,
+            "pure",
+            "false",
+            &[("index.js", "export const value = 'PURE';\n")],
+        );
+        fs::write(root.join("package.json"), r#"{ "name": "app" }"#).unwrap();
+        let entry = root.join("entry.js");
+        fs::write(
+            &entry,
+            "import 'effectful';\nimport { value } from 'pure';\nconsole.log(value);\n",
+        )
+        .unwrap();
+
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let live = bundler.live_modules(&reachable);
+
+        let contains = |set: &BTreeSet<String>, suffix: &str| {
+            set.iter().any(|id| id.ends_with(suffix))
+        };
+        assert!(
+            contains(&live, "effectful/index.js"),
+            "a bare `import 'effectful'` of a sideEffects:true module must be kept: {live:?}"
+        );
+        assert!(
+            contains(&live, "pure/index.js"),
+            "a used sideEffects:false module must be kept: {live:?}"
+        );
+    }
+
+    #[test]
+    fn dce_drops_a_bare_side_effect_import_of_a_side_effect_free_module() {
+        // `import './noop.js'` for effect, but `./noop.js`'s package declares
+        // `sideEffects:false`, so the flag authorizes dropping the module (and its
+        // Node-built-in import) entirely — matching Rollup/esbuild.
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        write_package(
+            root,
+            "quiet",
+            "false",
+            &[
+                ("index.js", "export const marker = 'QUIET';\n"),
+                (
+                    "noop.js",
+                    "import { readFileSync } from 'node:fs';\nexport const noop = readFileSync;\n",
+                ),
+            ],
+        );
+        fs::write(root.join("package.json"), r#"{ "name": "app" }"#).unwrap();
+        let entry = root.join("entry.js");
+        // Import the package's `noop.js` purely for side effect.
+        fs::write(&entry, "import 'quiet/noop.js';\nconsole.log('app');\n").unwrap();
+
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let live = bundler.live_modules(&reachable);
+        let contains = |set: &BTreeSet<String>, suffix: &str| {
+            set.iter().any(|id| id.ends_with(suffix))
+        };
+        assert!(
+            !contains(&live, "quiet/noop.js"),
+            "a bare side-effect import of a sideEffects:false module must be droppable: {live:?}"
+        );
+
+        let output = root.join("dist/bundle.js");
+        bundler.emit(&reachable, &output).unwrap();
+        let bundle = fs::read_to_string(&output).unwrap();
+        assert!(
+            !bundle.contains("node:fs"),
+            "the dropped side-effect module's Node built-in must not ship: {bundle}"
+        );
+        node_check(&output);
     }
 }

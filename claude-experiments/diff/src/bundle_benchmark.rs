@@ -605,12 +605,19 @@ struct TemporaryProject {
 
 impl TemporaryProject {
     fn new() -> Result<Self, String> {
+        // The nonce must be unique even for two projects created in the same
+        // nanosecond on different threads (the system clock is not guaranteed to
+        // advance between two near-simultaneous reads), so a process-global
+        // monotonic counter is folded in — otherwise parallel tests could collide
+        // on one temp directory and delete each other's generated modules.
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| format!("system clock error: {error}"))?
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "diffpack-bundle-scale-{}-{nonce}",
+            "diffpack-bundle-scale-{}-{nonce}-{sequence}",
             std::process::id()
         ));
         fs::create_dir_all(&path)

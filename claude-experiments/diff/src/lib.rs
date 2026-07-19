@@ -11,6 +11,7 @@ pub mod resource_id;
 pub mod route_split;
 pub mod route_tree;
 pub mod server_fn;
+pub mod side_effects;
 pub mod tailwind;
 pub mod transform;
 pub mod visualizer;
